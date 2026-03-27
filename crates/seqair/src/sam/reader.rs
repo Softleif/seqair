@@ -98,6 +98,7 @@ pub enum SamError {
     #[error("tabix index not found for {sam_path} (tried .tbi and .bai)")]
     IndexNotFound { sam_path: PathBuf },
 
+    // r[depends sam.index.csi+2]
     #[error(
         "found CSI index at {path} but CSI indexes are not yet supported. \
          Re-index with `tabix -p sam` to create a .tbi index instead.",
@@ -656,6 +657,7 @@ fn find_tabix_index(sam_path: &Path) -> Result<BamIndex, SamError> {
     }
 
     // Check if a CSI index exists — not yet supported
+    // r[depends sam.index.csi+2]
     let csi_path = sam_path.with_extension("gz.csi");
     if csi_path.exists() {
         return Err(SamError::CsiNotSupported { path: csi_path });
@@ -1020,7 +1022,7 @@ mod tests {
         );
     }
 
-    // r[verify sam.index.csi+2]
+    // r[depends sam.index.csi+2]
     #[test]
     fn csi_index_returns_clear_error() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");

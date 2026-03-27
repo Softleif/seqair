@@ -78,7 +78,7 @@ Each slice header contains:
 - optional tags (BAM-format aux bytes)
 
 r[cram.slice.multi_ref]
-When `reference_sequence_id == -2`, the slice contains records from multiple references. The `RI` (reference ID) data series MUST be decoded per-record to determine which reference each record aligns to. Multi-ref slices are common in coordinate-sorted CRAM files at chromosome boundaries and for reads with unmapped mates. They MUST be supported from phase 2 (see `r[cram.impl.phased]`).
+When `reference_sequence_id == -2`, the slice contains records from multiple references. The `RI` (reference ID) data series MUST be decoded per-record to determine which reference each record aligns to. Multi-ref slices are common in coordinate-sorted CRAM files at chromosome boundaries and for reads with unmapped mates.
 
 r[cram.slice.embedded_ref]
 When `embedded_reference >= 0`, the corresponding external data block contains the reference bases for this slice. The reader MUST use these instead of the FASTA reader. This enables CRAM files to be self-contained (produced by `samtools view --output-fmt-option embed_ref` or cramtools).
@@ -515,6 +515,8 @@ The `name_count` field in tok3 headers comes from untrusted data. Allocation bas
 
 ## Performance considerations
 
+CRAM decoding is expected to be 2-4× slower than BAM due to codec complexity and reference reconstruction. The I/O savings (40-60% smaller files) often compensate on network filesystems.
+
 r[cram.perf.slice_granularity]
 CRAM random access is slice-granular, not record-granular. A region query may decompress an entire slice (typically 10,000 records) to extract a few records at the edges. This is inherently coarser than BAM's record-level seeking.
 
@@ -523,15 +525,3 @@ Reference sequence lookups happen per-slice (to reconstruct all records in the s
 
 r[cram.perf.codec_overhead]
 rANS and arithmetic decoders have higher per-byte CPU cost than zlib. The reader SHOULD pre-allocate decode buffers and reuse them across blocks within a slice.
-
-CRAM decoding is expected to be 2-4× slower than BAM due to codec complexity and reference reconstruction. The I/O savings (40-60% smaller files) often compensate on network filesystems.
-
-## Implementation ordering
-
-CRAM support was implemented in phases:
-1. **Phase 1** (done): File/container/slice structure, ITF8/LTF8, bit stream reader, CRAI index, gzip+raw+rANS 4×8 codecs, all encoding types (Huffman, External, Beta, Subexp, Gamma, ByteArrayLen, ByteArrayStop). Record decoding with strict field order. Sequence + CIGAR reconstruction from reference + read features. Single-reference slices only. Covers CRAM v3.0 files. Verified against htslib (positions, flags, mapq match for all records).
-2. **Phase 2** (done): Multi-ref slices (`r[cram.slice.multi_ref]`), bzip2 + lzma codecs, unified reader integration. Embedded reference (`r[cram.slice.embedded_ref]`) deferred — rare in practice. This covers all real-world Illumina CRAM v3.0 files.
-3. **Phase 3** (done): v3.1 codecs — rANS Nx16 (`r[cram.codec.rans_nx16]`) and tok3 (`r[cram.codec.tok3]`) implemented. Arithmetic (`r[cram.codec.arith]`) and fqzcomp (`r[cram.codec.fqzcomp]`) deferred — rarely encountered in practice.
-4. **Phase 4**: Remaining edge cases, performance optimization, long-read CRAM testing.
-
-Each phase MUST be tested against htslib output for the same CRAM file to verify decoding correctness.
