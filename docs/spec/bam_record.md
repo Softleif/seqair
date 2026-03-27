@@ -13,6 +13,12 @@ The record's binary layout starts with 32 fixed bytes (position, flags, lengths,
 r[bam.record.decode]
 A BAM record MUST be decoded from its binary representation: 32 fixed bytes followed by variable-length qname, CIGAR, sequence, quality, and auxiliary data. The 4-byte block_size prefix is read by the caller.
 
+r[bam.record.max_size]
+BAM records have a 2 MiB size cap. The reader MUST reject records whose block_size exceeds this limit rather than allocating an unbounded buffer from untrusted input.
+
+r[bam.record.checked_offsets]
+Variable-length field offset calculations (var_start, cigar_end, seq_end, qual_end) MUST use checked arithmetic to prevent wrapping on malformed input. Overflow MUST return a decode error.
+
 r[bam.record.fields]
 The decoder MUST extract: tid (i32), pos (i32→i64), mapq (u8), flags (u16), seq_len (u32), n_cigar_ops (u16), qname (NUL-terminated, stored without NUL), packed sequence (4-bit), quality scores, CIGAR operations (packed u32), and raw auxiliary data.
 
@@ -63,6 +69,9 @@ BAM records can carry optional key-value tags (e.g. `XR:Z:CT` for bismark strand
 
 r[bam.record.aux_parse]
 The record MUST support looking up auxiliary tags by their 2-byte name. Tag types A, c, C, s, S, i, I, f, d, Z, H, and B (typed array) MUST be supported.
+
+r[bam.record.aux_array_unsupported]
+B-type (array) auxiliary tags are not yet parsed into `AuxValue`. `find_tag` returns `None` for array tags. The tag bytes MUST be correctly skipped so that all subsequent tags in the record remain accessible.
 
 r[bam.record.raw_aux]
 The record MUST provide access to raw auxiliary data bytes for efficient filtering without full tag parsing.

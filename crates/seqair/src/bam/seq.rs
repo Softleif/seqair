@@ -106,6 +106,7 @@ pub fn decode_seq(encoded: &[u8], len: usize) -> Vec<u8> {
 /// Maps A(1), C(2), G(4), T(8) to their ASCII/Base values;
 /// all other nibbles (=, IUPAC ambiguity, N) → Unknown(78).
 // r[impl base_decode.table]
+// r[impl base_decode.table_invariant]
 // Indexed by the 4-bit BAM nibble value (0–15):
 // 0:= 1:A 2:C 3:M 4:G 5:R 6:S 7:V 8:T 9:W 10:Y 11:H 12:K 13:D 14:B 15:N
 #[allow(clippy::byte_char_slices, reason = "per-index comments explain the IUPAC nibble mapping")]
@@ -129,6 +130,7 @@ static DECODE_BASE_TYPED: &[u8; 16] = &[
 ];
 
 /// Pre-computed pair table for Base-typed decoding.
+// r[depends base_decode.table_invariant]
 #[allow(clippy::indexing_slicing, reason = "i < 256, nibbles < 16")]
 static DECODE_PAIR_TYPED: [[u8; 2]; 256] = {
     const B: [u8; 16] = [
@@ -150,10 +152,12 @@ pub fn decode_bases(encoded: &[u8], len: usize) -> Vec<seqair_types::Base> {
     let bytes = decode_bases_raw(encoded, len);
     // Safety: DECODE_BASE_TYPED/DECODE_PAIR_TYPED only produce valid Base
     // discriminants (A=65, C=67, G=71, T=84, Unknown=78) in every byte.
+    // r[depends base_decode.table_invariant]
     unsafe { seqair_types::Base::vec_u8_into_vec_base(bytes) }
 }
 
 /// Raw byte decode using the Base-typed lookup table.
+// r[depends seq.simd_scalar_equivalence]
 fn decode_bases_raw(encoded: &[u8], len: usize) -> Vec<u8> {
     #[cfg(target_arch = "x86_64")]
     {
@@ -447,4 +451,77 @@ unsafe fn decode_seq_neon(encoded: &[u8], len: usize) -> Vec<u8> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Valid `Base` discriminants, derived from the enum so the test stays correct
+    /// if discriminant values ever change.
+    const VALID_DISCRIMINANTS: [u8; 5] = [
+        seqair_types::Base::A as u8,
+        seqair_types::Base::C as u8,
+        seqair_types::Base::G as u8,
+        seqair_types::Base::T as u8,
+        seqair_types::Base::Unknown as u8,
+    ];
+
+    fn is_valid_base_discriminant(byte: u8) -> bool {
+        VALID_DISCRIMINANTS.contains(&byte)
+    }
+
+    // r[verify base_decode.table_invariant]
+    #[test]
+    fn decode_base_typed_entries_are_valid_base_discriminants() {
+        for (i, &byte) in DECODE_BASE_TYPED.iter().enumerate() {
+            assert!(
+                is_valid_base_discriminant(byte),
+                "DECODE_BASE_TYPED[{i}] = {byte} (0x{byte:02x}) is not a valid Base discriminant"
+            );
+        }
+    }
+
+    // r[verify base_decode.table_invariant]
+    #[test]
+    fn decode_pair_typed_entries_are_valid_base_discriminants() {
+        for (i, pair) in DECODE_PAIR_TYPED.iter().enumerate() {
+            assert!(
+                is_valid_base_discriminant(pair[0]),
+                "DECODE_PAIR_TYPED[{i}][0] = {} (0x{:02x}) is not a valid Base discriminant",
+                pair[0],
+                pair[0]
+            );
+            assert!(
+                is_valid_base_discriminant(pair[1]),
+                "DECODE_PAIR_TYPED[{i}][1] = {} (0x{:02x}) is not a valid Base discriminant",
+                pair[1],
+                pair[1]
+            );
+        }
+    }
+
+    // r[verify seq.simd_scalar_equivalence]
+    #[test]
+    fn decode_bases_raw_matches_scalar_for_all_byte_values() {
+        // Build an input containing all 256 byte values
+        let input: Vec<u8> = (0u16..=255).map(|b| b as u8).collect();
+        // Decode with scalar path as the reference
+        let expected = decode_bases_scalar(&input, 512);
+        // Decode with the dispatched path (SIMD on supported platforms)
+        let actual = decode_bases_raw(&input, 512);
+        assert_eq!(actual, expected, "SIMD and scalar paths diverge for all-byte-values input");
+    }
+
+    // r[verify seq.simd_scalar_equivalence]
+    #[test]
+    fn decode_bases_raw_matches_scalar_at_simd_boundaries() {
+        for seq_len in [0usize, 1, 2, 15, 16, 17, 31, 32, 33, 63, 64, 65, 128] {
+            let encoded_len = seq_len.div_ceil(2);
+            let input: Vec<u8> = (0..encoded_len).map(|i| (i & 0xFF) as u8).collect();
+            let expected = decode_bases_scalar(&input, seq_len);
+            let actual = decode_bases_raw(&input, seq_len);
+            assert_eq!(actual, expected, "mismatch at seq_len={seq_len}");
+        }
+    }
 }

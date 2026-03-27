@@ -123,3 +123,7 @@ r[unified.readers_accessors]
 
 r[unified.readers_backward_compat]
 `IndexedReader::open(path)` MUST continue to work for BAM and SAM files without a FASTA path. CRAM detection in `IndexedReader::open()` MUST return an error explaining that CRAM requires a reference and suggesting `Readers::open()` instead. This preserves backward compatibility for code that only needs BAM/SAM.
+
+## API surface
+
+See `r[io.non_exhaustive_enums]` and `r[io.minimal_public_api]` in `general.md` for the general rules. For this module, `IndexedReader`, `FormatDetectionError`, and `ReaderError` are the primary enums subject to `r[io.non_exhaustive_enums]`.

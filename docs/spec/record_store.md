@@ -34,6 +34,9 @@ On construction, the store MUST pre-allocate all three vectors with estimated ca
 r[record_store.push_raw+2]
 `push_raw(raw_bytes)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `Base` enum values in the bases slab.
 
+r[record_store.checked_offsets]
+Slab offsets (name_off, bases_off, data_off) MUST be checked for u32 overflow before storing. If any slab exceeds `u32::MAX` bytes, the store MUST return an error rather than silently truncating the offset.
+
 r[record_store.push_fields]
 `push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as packed BAM-format u32 ops, sequence as `&[Base]`, quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing.
 

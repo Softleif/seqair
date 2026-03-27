@@ -291,6 +291,7 @@ impl Iterator for PileupEngine {
             }
 
             // r[impl pileup.qpos_none]
+            // r[related record_store.field_access]
             let mut alignments = Vec::with_capacity(self.active.len());
             for active in &self.active {
                 if let Some(qpos) = active.cigar.qpos_at(pos) {
@@ -343,7 +344,7 @@ impl Drop for PileupEngine {
     fn drop(&mut self) {
         if self.columns_produced > 0 {
             tracing::debug!(
-                target: crate::PROFILE_TARGET,
+                target: super::region_buf::PROFILE_TARGET,
                 columns = self.columns_produced,
                 max_depth = self.max_active_depth,
                 active_cap = self.active.capacity(),

@@ -56,7 +56,7 @@ impl std::str::FromStr for RegionString {
         if !s.is_ascii() {
             return Err(RegionStringError::InvalidAscii);
         }
-        let res = parser.parse(s).map_err(|e| RegionStringError::Malformed(e.to_string()))?;
+        let res = parser.parse(s).map_err(|_| RegionStringError::Malformed)?;
         if let RegionString { start: Some(start), end: Some(end), .. } = res
             && start > end
         {
@@ -104,15 +104,20 @@ fn parser(input: &mut &str) -> winnow::Result<RegionString> {
         .parse_next(input)
 }
 
+/// Errors that can occur when parsing a [`RegionString`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RegionStringError {
+    /// The input string was empty.
     #[error("Empty region string")]
     EmptyInput,
+    /// The input string contained non-ASCII characters.
     #[error("Invalid ASCII string")]
     InvalidAscii,
-    #[error("Invalid region string:\n{0}")]
-    Malformed(String),
+    /// The input could not be parsed as a valid region string.
+    #[error("Malformed region string")]
+    Malformed,
+    /// The start position was greater than the end position.
     #[error("Start position cannot be greater than end position")]
     StartGreaterThanEnd,
 }
@@ -186,29 +191,15 @@ mod tests {
 
         // invalid chromosome
         let err = RegionString::from_str(":100").unwrap_err();
-        insta::assert_snapshot!(err, @r"
-        Invalid region string:
-        :100
-        ^
-        invalid range
-        expected chromosome name
-        ");
+        assert!(matches!(err, RegionStringError::Malformed));
 
         // invalid start position
         let err = RegionString::from_str("chr1:invalid").unwrap_err();
-        insta::assert_snapshot!(err, @r"
-        Invalid region string:
-        chr1:invalid
-            ^
-        ");
+        assert!(matches!(err, RegionStringError::Malformed));
 
         // invalid end position
         let err = RegionString::from_str("chr1:100-invalid").unwrap_err();
-        insta::assert_snapshot!(err, @r"
-        Invalid region string:
-        chr1:100-invalid
-                ^
-        ");
+        assert!(matches!(err, RegionStringError::Malformed));
 
         // start greater than end
         let err = RegionString::from_str("chr1:200-100").unwrap_err();
@@ -230,37 +221,19 @@ mod tests {
 
         // only whitespace in chromosome part
         let err = RegionString::from_str("  :100").unwrap_err();
-        insta::assert_snapshot!(err, @r"
-        Invalid region string:
-        :100
-        ^
-        invalid range
-        expected chromosome name
-        ");
+        assert!(matches!(err, RegionStringError::Malformed));
 
         // empty range part
         let err = RegionString::from_str("chr1:  ").unwrap_err();
-        insta::assert_snapshot!(err, @r"
-        Invalid region string:
-        chr1:
-            ^
-        ");
+        assert!(matches!(err, RegionStringError::Malformed));
 
         // invalid characters in start
         let err = RegionString::from_str("chr1:xxx").unwrap_err();
-        insta::assert_snapshot!(err, @r"
-        Invalid region string:
-        chr1:xxx
-            ^
-        ");
+        assert!(matches!(err, RegionStringError::Malformed));
 
         // invalid characters in end
         let err = RegionString::from_str("chr1:100-xxx").unwrap_err();
-        insta::assert_snapshot!(err, @r"
-        Invalid region string:
-        chr1:100-xxx
-                ^
-        ");
+        assert!(matches!(err, RegionStringError::Malformed));
 
         // non-ascii characters
         let err = RegionString::from_str("chrü1:100-200").unwrap_err();
@@ -369,5 +342,22 @@ mod tests {
                 end: Some(NonZeroU32::new(48502).unwrap())
             }
         );
+    }
+
+    // r[verify types.region_string.r22_no_string_in_error]
+    #[test]
+    fn test_malformed_is_unit_variant() {
+        let err = RegionString::from_str(":100").unwrap_err();
+        assert!(matches!(err, RegionStringError::Malformed));
+        // Display output has no dynamic content
+        assert_eq!(err.to_string(), "Malformed region string");
+    }
+
+    // r[verify types.region_string.r24_error_reexport]
+    #[test]
+    fn test_error_accessible_from_crate_root() {
+        // Verify the error type is accessible via the crate re-export
+        let err: crate::RegionStringError = RegionStringError::Malformed;
+        assert!(matches!(err, crate::RegionStringError::Malformed));
     }
 }

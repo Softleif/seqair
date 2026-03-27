@@ -16,6 +16,9 @@ A BAI file MUST begin with the magic bytes `BAI\1` (0x42, 0x41, 0x49, 0x01). The
 r[bam.index.bai_parse]
 The reader MUST parse the BAI binary format: n_ref references, each containing bins with chunks (pairs of virtual offsets) and a linear index of 16 KiB window offsets.
 
+r[bam.index.bgzf_block_validation]
+When decompressing BGZF blocks (e.g. for tabix), the reader MUST validate that bsize is large enough for the block header and footer before indexing into the block. A bsize that is too small MUST return an error rather than panicking.
+
 r[bam.index.region_query]
 Given a region (tid, start, end), the index MUST return a list of BGZF chunk pairs `(begin, end)` that contain all reads overlapping the region. The query MUST use the binning scheme to identify candidate bins and the linear index to skip chunks that cannot contain reads starting before the query start.
 

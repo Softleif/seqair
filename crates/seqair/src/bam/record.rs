@@ -36,73 +36,47 @@ pub struct BamRecord {
 impl BamRecord {
     /// Decode from raw BAM bytes (after the 4-byte block_size prefix).
     pub fn decode(raw: &[u8]) -> Result<Self, DecodeError> {
-        if raw.len() < 32 {
-            return Err(DecodeError::TooShort { len: raw.len() });
-        }
-
-        debug_assert!(raw.len() >= 32, "raw record too short for fixed fields: {}", raw.len());
-        let tid = i32::from_le_bytes(read4(raw, 0));
-        let pos = i64::from(i32::from_le_bytes(read4(raw, 4)));
-        // raw.len() >= 32, so raw[8] and raw[9] are in bounds
-        #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-        let name_len = raw[8] as usize;
-        #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-        let mapq = raw[9];
-        let n_cigar_ops = u16::from_le_bytes(read2(raw, 12));
-        let flags = u16::from_le_bytes(read2(raw, 14));
-        let seq_len = u32::from_le_bytes(read4(raw, 16));
-        let seq_len_usize = seq_len as usize;
-
-        let cigar_bytes = usize::from(n_cigar_ops) * 4;
-        let seq_bytes = seq_len_usize.div_ceil(2);
-
-        let var_start = 32 + name_len;
-        let cigar_end = var_start + cigar_bytes;
-        let seq_end = cigar_end + seq_bytes;
-        let qual_end = seq_end + seq_len_usize;
-
-        if raw.len() < qual_end {
-            return Err(DecodeError::TooShort { len: raw.len() });
-        }
+        let h = parse_header(raw)?;
+        let seq_len_usize = h.seq_len as usize;
 
         // All slice bounds (32..var_start, var_start..cigar_end, etc.) are ≤ qual_end ≤ raw.len()
-        debug_assert!(qual_end <= raw.len(), "qual_end overrun: {qual_end} > {}", raw.len());
+        debug_assert!(h.qual_end <= raw.len(), "qual_end overrun: {} > {}", h.qual_end, raw.len());
         #[allow(
             clippy::indexing_slicing,
-            reason = "all bounds ≤ qual_end ≤ raw.len() checked above"
+            reason = "all bounds ≤ qual_end ≤ raw.len() checked by parse_header"
         )]
-        let qname_raw = &raw[32..var_start];
+        let qname_raw = &raw[32..h.var_start];
         let qname_actual_len = qname_raw.iter().position(|&b| b == 0).unwrap_or(qname_raw.len());
 
         #[allow(
             clippy::indexing_slicing,
-            reason = "all bounds ≤ qual_end ≤ raw.len() checked above"
+            reason = "all bounds ≤ qual_end ≤ raw.len() checked by parse_header"
         )]
-        let cigar_slice = &raw[var_start..cigar_end];
-        let end_pos = compute_end_pos(pos, cigar_slice);
+        let cigar_slice = &raw[h.var_start..h.cigar_end];
+        let end_pos = compute_end_pos(h.pos, cigar_slice);
         let (matching_bases, indel_bases) = super::cigar::calc_matches_indels(cigar_slice);
 
         #[allow(
             clippy::indexing_slicing,
-            reason = "all bounds ≤ qual_end ≤ raw.len() checked above"
+            reason = "all bounds ≤ qual_end ≤ raw.len() checked by parse_header"
         )]
         Ok(BamRecord {
-            pos,
+            pos: h.pos,
             end_pos,
-            tid,
-            seq_len,
-            flags,
-            n_cigar_ops,
-            mapq,
+            tid: h.tid,
+            seq_len: h.seq_len,
+            flags: h.flags,
+            n_cigar_ops: h.n_cigar_ops,
+            mapq: h.mapq,
             matching_bases,
             indel_bases,
             qname: qname_raw[..qname_actual_len].into(),
             cigar: cigar_slice.into(),
             // r[impl bam.record.seq_4bit]
             // r[impl bam.record.seq_at_simd+2]
-            seq: seq::decode_seq(&raw[cigar_end..seq_end], seq_len_usize).into_boxed_slice(),
-            qual: raw[seq_end..qual_end].into(),
-            aux: raw[qual_end..].into(),
+            seq: seq::decode_seq(&raw[h.cigar_end..h.seq_end], seq_len_usize).into_boxed_slice(),
+            qual: raw[h.seq_end..h.qual_end].into(),
+            aux: raw[h.qual_end..].into(),
         })
     }
 
@@ -145,24 +119,11 @@ impl BamRecord {
 
 /// Compute end_pos from raw BAM record bytes (before full decode).
 pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<i64> {
-    if raw.len() < 32 {
-        return None;
-    }
-    debug_assert!(raw.len() >= 32, "raw record too short for fixed fields: {}", raw.len());
-    let pos = i64::from(i32::from_le_bytes(read4(raw, 4)));
-    // raw.len() >= 32, so raw[8] is in bounds
-    #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-    let name_len = raw[8] as usize;
-    let n_cigar_ops = u16::from_le_bytes(read2(raw, 12)) as usize;
-    let cigar_start = 32 + name_len;
-    let cigar_end = cigar_start + n_cigar_ops * 4;
-    if raw.len() < cigar_end {
-        return None;
-    }
-    // cigar_end ≤ raw.len() checked above
-    debug_assert!(cigar_end <= raw.len(), "cigar overrun: {cigar_end} > {}", raw.len());
-    #[allow(clippy::indexing_slicing, reason = "cigar_end ≤ raw.len() checked above")]
-    Some(compute_end_pos(pos, &raw[cigar_start..cigar_end]))
+    let h = parse_header(raw).ok()?;
+    // All bounds ≤ qual_end ≤ raw.len() checked by parse_header
+    debug_assert!(h.cigar_end <= raw.len(), "cigar overrun: {} > {}", h.cigar_end, raw.len());
+    #[allow(clippy::indexing_slicing, reason = "cigar_end ≤ raw.len() checked by parse_header")]
+    Some(compute_end_pos(h.pos, &raw[h.var_start..h.cigar_end]))
 }
 
 // r[impl bam.record.end_pos]
@@ -189,7 +150,7 @@ pub(crate) fn compute_end_pos(pos: i64, cigar_bytes: &[u8]) -> i64 {
     clippy::indexing_slicing,
     reason = "offset + 1 < raw.len() ensured by caller's length check"
 )]
-fn read2(buf: &[u8], offset: usize) -> [u8; 2] {
+pub(crate) fn read2(buf: &[u8], offset: usize) -> [u8; 2] {
     debug_assert!(
         offset + 1 < buf.len(),
         "read2 out of bounds: offset={offset}, len={}",
@@ -202,7 +163,7 @@ fn read2(buf: &[u8], offset: usize) -> [u8; 2] {
     clippy::indexing_slicing,
     reason = "offset + 3 < raw.len() ensured by caller's length check"
 )]
-fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
+pub(crate) fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
     debug_assert!(
         offset + 3 < buf.len(),
         "read4 out of bounds: offset={offset}, len={}",
@@ -211,10 +172,88 @@ fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
     [buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]
 }
 
+/// Parsed BAM fixed header fields and computed variable-length offsets.
+///
+/// Shared between `BamRecord::decode` and `RecordStore::push_raw` to avoid
+/// duplicating the 36-byte header parsing and checked offset arithmetic.
+pub(crate) struct ParsedHeader {
+    pub tid: i32,
+    pub pos: i64,
+    pub mapq: u8,
+    pub flags: u16,
+    pub n_cigar_ops: u16,
+    pub seq_len: u32,
+    /// Start of variable-length data (32 + name_len).
+    pub var_start: usize,
+    /// End of CIGAR bytes.
+    pub cigar_end: usize,
+    /// End of packed sequence bytes.
+    pub seq_end: usize,
+    /// End of quality scores.
+    pub qual_end: usize,
+}
+
+/// Parse the fixed 36-byte BAM header and compute checked offsets for
+/// variable-length fields.
+///
+/// # Errors
+/// Returns `DecodeError::TooShort` if `raw` is shorter than 32 bytes or
+/// shorter than `qual_end`, and `DecodeError::OffsetOverflow` if any offset
+/// arithmetic overflows.
+// r[impl bam.record.checked_offsets]
+pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
+    if raw.len() < 32 {
+        return Err(DecodeError::TooShort { len: raw.len() });
+    }
+
+    debug_assert!(raw.len() >= 32, "raw record too short for fixed fields: {}", raw.len());
+    let tid = i32::from_le_bytes(read4(raw, 0));
+    let pos = i64::from(i32::from_le_bytes(read4(raw, 4)));
+    // raw.len() >= 32, so raw[8] and raw[9] are in bounds
+    #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
+    let name_len = raw[8] as usize;
+    #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
+    let mapq = raw[9];
+    let n_cigar_ops = u16::from_le_bytes(read2(raw, 12));
+    let flags = u16::from_le_bytes(read2(raw, 14));
+    let seq_len = u32::from_le_bytes(read4(raw, 16));
+
+    let cigar_bytes = usize::from(n_cigar_ops) * 4;
+    let seq_bytes = (seq_len as usize).div_ceil(2);
+
+    let var_start = 32usize.checked_add(name_len).ok_or(DecodeError::OffsetOverflow)?;
+    let cigar_end = var_start.checked_add(cigar_bytes).ok_or(DecodeError::OffsetOverflow)?;
+    let seq_end = cigar_end.checked_add(seq_bytes).ok_or(DecodeError::OffsetOverflow)?;
+    let qual_end = seq_end.checked_add(seq_len as usize).ok_or(DecodeError::OffsetOverflow)?;
+
+    if raw.len() < qual_end {
+        return Err(DecodeError::TooShort { len: raw.len() });
+    }
+
+    Ok(ParsedHeader {
+        tid,
+        pos,
+        mapq,
+        flags,
+        n_cigar_ops,
+        seq_len,
+        var_start,
+        cigar_end,
+        seq_end,
+        qual_end,
+    })
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     #[error("BAM record too short: {len} bytes")]
     TooShort { len: usize },
+
+    #[error("arithmetic overflow computing BAM record field offsets")]
+    OffsetOverflow,
+
+    #[error("slab offset exceeds u32::MAX")]
+    SlabOverflow,
 }
 
 // r[impl bam.record.raw_aux]
@@ -349,6 +388,29 @@ mod tests {
     fn test_compute_end_pos() {
         let op = 50u32 << 4;
         assert_eq!(compute_end_pos(100, &op.to_le_bytes()), 149);
+    }
+
+    // r[verify bam.record.checked_offsets]
+    #[test]
+    fn decode_rejects_overflow_in_offset_calc() {
+        // Craft a 32-byte record with fields that would overflow if added unchecked:
+        // name_len = 255, n_cigar_ops = 65535, seq_len = u32::MAX
+        let mut raw = [0u8; 32];
+        raw[0..4].copy_from_slice(&0i32.to_le_bytes()); // tid
+        raw[4..8].copy_from_slice(&0i32.to_le_bytes()); // pos
+        raw[8] = 255; // name_len (l_read_name)
+        raw[9] = 0; // mapq
+        raw[12..14].copy_from_slice(&u16::MAX.to_le_bytes()); // n_cigar_ops
+        raw[14..16].copy_from_slice(&0u16.to_le_bytes()); // flags
+        raw[16..20].copy_from_slice(&u32::MAX.to_le_bytes()); // seq_len
+
+        let result = BamRecord::decode(&raw);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DecodeError::OffsetOverflow | DecodeError::TooShort { .. }),
+            "expected OffsetOverflow or TooShort, got {err:?}"
+        );
     }
 
     #[test]

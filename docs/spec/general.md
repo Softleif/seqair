@@ -27,6 +27,19 @@ BAM flags MUST have a `BamFlags` newtype wrapping `u16` with named predicate met
 r[io.typed_cigar_ops]
 CIGAR operations MUST have a `CigarOpType` enum with variants for all 9 SAM-spec operations (M, I, D, N, S, H, P, =, X). The enum MUST provide `consumes_ref()` and `consumes_query()` methods. Invalid operation codes MUST be represented as `None` via `from_bam(u8) -> Option<CigarOpType>`.
 
+## API design
+
+r[io.non_exhaustive_enums]
+All public enums (including error types) that may gain variants in future versions MUST be annotated with `#[non_exhaustive]`. Adding a variant to a non-exhaustive enum is not a semver-breaking change, allowing new variants and error conditions to be introduced in minor releases.
+
+r[io.minimal_public_api]
+Only intentionally public types should be exported. Internal implementation modules (compression codecs, container parsers, encoding details) MUST be `pub(crate)` or `#[doc(hidden)]` so that downstream crates do not depend on internal structure. The public API contract is defined by explicit `pub use` re-exports in each top-level module file.
+
+## Arithmetic safety
+
+r[io.checked_arithmetic]
+All integer arithmetic on values derived from untrusted input (file data, parsed fields) MUST use checked or saturating operations. Default wrapping arithmetic (`+`, `-`, `*`) MUST NOT be used on untrusted values. The `clippy::arithmetic_side_effects` lint should be enabled.
+
 ## Platform portability
 
 r[io.platform_optimizations]

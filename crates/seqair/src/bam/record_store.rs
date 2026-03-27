@@ -7,7 +7,11 @@
 
 use seqair_types::Base;
 
-use super::{cigar, record::DecodeError, seq};
+use super::{
+    cigar,
+    record::{self, DecodeError},
+    seq,
+};
 
 /// Compact BAM record with offsets into the store's slabs.
 // r[impl record_store.push_raw+2]
@@ -57,6 +61,7 @@ impl SlimRecord {
 // r[impl record_store.capacity]
 // r[impl record_store.no_rc]
 // r[impl base_decode.slab]
+// r[related pileup.qpos]
 /// Slab-based storage for BAM records.
 ///
 /// Four contiguous buffers hold all data for a region:
@@ -94,82 +99,58 @@ impl RecordStore {
     ///
     /// Variable-length data is written directly into the slabs.
     pub fn push_raw(&mut self, raw: &[u8]) -> Result<u32, DecodeError> {
-        if raw.len() < 32 {
-            return Err(DecodeError::TooShort { len: raw.len() });
-        }
+        let h = record::parse_header(raw)?;
 
         let idx = self.records.len() as u32;
 
-        // Parse fixed header (same layout as BamRecord::decode)
-        debug_assert!(raw.len() >= 32, "raw record too short for fixed fields: {}", raw.len());
-        let tid = i32::from_le_bytes(read4(raw, 0));
-        let pos = i64::from(i32::from_le_bytes(read4(raw, 4)));
-        #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-        let name_len = raw[8] as usize;
-        #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-        let mapq = raw[9];
-        let n_cigar_ops = u16::from_le_bytes(read2(raw, 12));
-        let flags = u16::from_le_bytes(read2(raw, 14));
-        let seq_len = u32::from_le_bytes(read4(raw, 16));
-        let _ = tid; // stored for filtering, but SlimRecord doesn't need it (filtered before push)
-
-        let cigar_bytes = usize::from(n_cigar_ops) * 4;
-        let seq_bytes = (seq_len as usize).div_ceil(2);
-
-        let var_start = 32 + name_len;
-        let cigar_end = var_start + cigar_bytes;
-        let seq_end = cigar_end + seq_bytes;
-        let qual_end = seq_end + seq_len as usize;
-
-        if raw.len() < qual_end {
-            return Err(DecodeError::TooShort { len: raw.len() });
-        }
-
-        // All slice bounds ≤ qual_end ≤ raw.len()
-        debug_assert!(qual_end <= raw.len(), "qual_end overrun: {qual_end} > {}", raw.len());
+        // All slice bounds ≤ qual_end ≤ raw.len() (checked by parse_header)
+        debug_assert!(h.qual_end <= raw.len(), "qual_end overrun: {} > {}", h.qual_end, raw.len());
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
-        let qname_raw = &raw[32..var_start];
+        let qname_raw = &raw[32..h.var_start];
         let qname_actual_len = qname_raw.iter().position(|&b| b == 0).unwrap_or(qname_raw.len());
 
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
-        let cigar_slice = &raw[var_start..cigar_end];
-        let end_pos = super::record::compute_end_pos(pos, cigar_slice);
+        let cigar_slice = &raw[h.var_start..h.cigar_end];
+        let end_pos = record::compute_end_pos(h.pos, cigar_slice);
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_slice);
 
         // --- Write into name slab ---
-        let name_off = self.names.len() as u32;
+        // r[impl record_store.checked_offsets]
+        let name_off = u32::try_from(self.names.len()).map_err(|_| DecodeError::SlabOverflow)?;
         #[allow(clippy::indexing_slicing, reason = "qname_actual_len ≤ qname_raw.len()")]
         self.names.extend_from_slice(&qname_raw[..qname_actual_len]);
 
         // --- Write into bases slab (4-bit → Base via SIMD) ---
-        let bases_off = self.bases.len() as u32;
+        // r[impl record_store.checked_offsets]
+        let bases_off = u32::try_from(self.bases.len()).map_err(|_| DecodeError::SlabOverflow)?;
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
-        let packed_seq = &raw[cigar_end..seq_end];
-        let decoded_bases = seq::decode_bases(packed_seq, seq_len as usize);
+        let packed_seq = &raw[h.cigar_end..h.seq_end];
+        let decoded_bases = seq::decode_bases(packed_seq, h.seq_len as usize);
         self.bases.extend_from_slice(&decoded_bases);
 
         // --- Write into data slab [cigar|qual|aux] ---
-        let data_off = self.data.len() as u32;
+        // r[impl record_store.checked_offsets]
+        let data_off = u32::try_from(self.data.len()).map_err(|_| DecodeError::SlabOverflow)?;
 
         // Cigar bytes (raw packed u32s)
         self.data.extend_from_slice(cigar_slice);
 
         // Quality scores
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
-        self.data.extend_from_slice(&raw[seq_end..qual_end]);
+        self.data.extend_from_slice(&raw[h.seq_end..h.qual_end]);
 
         // Aux data (everything after qual)
         #[allow(clippy::indexing_slicing, reason = "qual_end ≤ raw.len()")]
-        let aux_slice = &raw[qual_end..];
+        let aux_slice = &raw[h.qual_end..];
         self.data.extend_from_slice(aux_slice);
 
         self.records.push(SlimRecord {
-            pos,
+            pos: h.pos,
             end_pos,
-            flags,
-            n_cigar_ops,
-            mapq,
-            seq_len,
+            flags: h.flags,
+            n_cigar_ops: h.n_cigar_ops,
+            mapq: h.mapq,
+            seq_len: h.seq_len,
             matching_bases,
             indel_bases,
             name_off,
@@ -338,23 +319,65 @@ impl Default for RecordStore {
     }
 }
 
-// offset + 3 < buf.len() ensured by the caller's bounds checks (raw.len() >= 32).
-#[allow(clippy::indexing_slicing, reason = "offset + 3 < buf.len() ensured by caller")]
-fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
-    debug_assert!(
-        offset + 3 < buf.len(),
-        "read4 out of bounds: offset={offset}, len={}",
-        buf.len()
-    );
-    [buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[allow(clippy::indexing_slicing, reason = "offset + 1 < buf.len() ensured by caller")]
-fn read2(buf: &[u8], offset: usize) -> [u8; 2] {
-    debug_assert!(
-        offset + 1 < buf.len(),
-        "read2 out of bounds: offset={offset}, len={}",
-        buf.len()
-    );
-    [buf[offset], buf[offset + 1]]
+    /// Build a minimal valid BAM record raw bytes.
+    fn make_raw_record(qname: &[u8], seq_len: u32, n_cigar_ops: u16) -> Vec<u8> {
+        let name_len = qname.len() as u8 + 1; // includes NUL
+        let cigar_bytes = n_cigar_ops as usize * 4;
+        let seq_bytes = (seq_len as usize).div_ceil(2);
+        let total = 32 + name_len as usize + cigar_bytes + seq_bytes + seq_len as usize;
+
+        let mut raw = vec![0u8; total];
+        raw[0..4].copy_from_slice(&0i32.to_le_bytes()); // tid
+        raw[4..8].copy_from_slice(&0i32.to_le_bytes()); // pos
+        raw[8] = name_len;
+        raw[9] = 0; // mapq
+        raw[12..14].copy_from_slice(&n_cigar_ops.to_le_bytes());
+        raw[14..16].copy_from_slice(&0u16.to_le_bytes()); // flags
+        raw[16..20].copy_from_slice(&seq_len.to_le_bytes());
+
+        // Write qname + NUL
+        let var_start = 32;
+        raw[var_start..var_start + qname.len()].copy_from_slice(qname);
+        raw[var_start + qname.len()] = 0; // NUL
+
+        // Write cigar: M ops
+        let cigar_start = var_start + name_len as usize;
+        for i in 0..n_cigar_ops as usize {
+            let op = seq_len << 4; // M op
+            let off = cigar_start + i * 4;
+            if off + 4 <= raw.len() {
+                raw[off..off + 4].copy_from_slice(&op.to_le_bytes());
+            }
+        }
+
+        raw
+    }
+
+    // r[verify bam.record.checked_offsets]
+    #[test]
+    fn push_raw_rejects_offset_overflow() {
+        let mut store = RecordStore::new();
+        // Craft a record with fields that would cause overflow.
+        let mut raw = [0u8; 32];
+        raw[8] = 255; // name_len
+        raw[12..14].copy_from_slice(&u16::MAX.to_le_bytes()); // n_cigar_ops
+        raw[16..20].copy_from_slice(&u32::MAX.to_le_bytes()); // seq_len
+
+        let result = store.push_raw(&raw);
+        assert!(result.is_err());
+    }
+
+    // r[verify record_store.checked_offsets]
+    #[test]
+    fn push_raw_normal_record_succeeds() {
+        let mut store = RecordStore::new();
+        let raw = make_raw_record(b"read1", 4, 1);
+        let result = store.push_raw(&raw);
+        assert!(result.is_ok());
+        assert_eq!(store.len(), 1);
+    }
 }

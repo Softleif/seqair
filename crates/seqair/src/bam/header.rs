@@ -59,6 +59,9 @@ pub enum BamHeaderError {
     #[error("contig `{name}` (tid={tid}) has no length in BAM header")]
     ContigNoLength { name: SmolStr, tid: u32 },
 
+    #[error("BAM header field `{field}` has negative value {value}")]
+    NegativeLength { field: &'static str, value: i32 },
+
     #[error("BGZF error reading BAM header")]
     Bgzf {
         #[from]
@@ -80,8 +83,13 @@ impl BamHeader {
             return Err(BamHeaderError::InvalidMagic);
         }
 
+        // r[impl bam.header.non_negative_lengths]
         // Header text
-        let l_text = bgzf.read_i32()? as usize;
+        let l_text_raw = bgzf.read_i32()?;
+        if l_text_raw < 0 {
+            return Err(BamHeaderError::NegativeLength { field: "l_text", value: l_text_raw });
+        }
+        let l_text = l_text_raw as usize;
         let mut text_buf = vec![0u8; l_text];
         bgzf.read_exact_into(&mut text_buf)?;
         let header_text = std::str::from_utf8(&text_buf)
@@ -89,12 +97,20 @@ impl BamHeader {
             .to_owned();
 
         // Reference sequences
-        let n_ref = bgzf.read_i32()? as usize;
+        let n_ref_raw = bgzf.read_i32()?;
+        if n_ref_raw < 0 {
+            return Err(BamHeaderError::NegativeLength { field: "n_ref", value: n_ref_raw });
+        }
+        let n_ref = n_ref_raw as usize;
         let mut targets = Vec::with_capacity(n_ref);
         let mut name_to_tid = HashMap::with_capacity(n_ref);
 
         for tid in 0..n_ref {
-            let l_name = bgzf.read_i32()? as usize;
+            let l_name_raw = bgzf.read_i32()?;
+            if l_name_raw < 0 {
+                return Err(BamHeaderError::NegativeLength { field: "l_name", value: l_name_raw });
+            }
+            let l_name = l_name_raw as usize;
             let mut name_buf = vec![0u8; l_name];
             bgzf.read_exact_into(&mut name_buf)?;
             // Remove trailing NUL
@@ -229,6 +245,39 @@ impl BamHeader {
 mod tests {
     use super::*;
 
+    fn make_bgzf_block(data: &[u8]) -> Vec<u8> {
+        let mut compressor =
+            libdeflater::Compressor::new(libdeflater::CompressionLvl::new(1).unwrap());
+        let bound = compressor.deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let compressed_len = compressor.deflate_compress(data, &mut compressed).unwrap();
+        compressed.truncate(compressed_len);
+
+        let mut crc = libdeflater::Crc::new();
+        crc.update(data);
+
+        let bsize = (18 + compressed_len + 8 - 1) as u16;
+        let mut block = Vec::with_capacity(18 + compressed_len + 8);
+        block.extend_from_slice(&[0x1f, 0x8b, 0x08, 0x04]);
+        block.extend_from_slice(&[0; 4]);
+        block.push(0);
+        block.push(0xff);
+        block.extend_from_slice(&6u16.to_le_bytes());
+        block.extend_from_slice(&[b'B', b'C', 2, 0]);
+        block.extend_from_slice(&bsize.to_le_bytes());
+        block.extend_from_slice(&compressed);
+        block.extend_from_slice(&crc.sum().to_le_bytes());
+        block.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        block
+    }
+
+    fn make_bgzf_eof() -> Vec<u8> {
+        vec![
+            0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43,
+            0x02, 0x00, 0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]
+    }
+
     // r[verify unified.header_from_sam_text]
     #[test]
     fn from_sam_text_parses_sq_lines() {
@@ -350,6 +399,36 @@ mod tests {
         let err = header.resolve_contig("chrX").unwrap_err();
         assert!(matches!(err, BamHeaderError::ContigNotFound { .. }));
         assert!(err.to_string().contains("chrX"));
+    }
+
+    // r[verify bam.header.non_negative_lengths]
+    #[test]
+    fn parse_rejects_negative_l_text() {
+        use std::io::Write;
+
+        // Build a minimal BGZF file with BAM magic followed by l_text = -1.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"BAM\x01"); // magic
+        payload.extend_from_slice(&(-1i32).to_le_bytes()); // l_text = -1
+
+        let block = make_bgzf_block(&payload);
+        let eof = make_bgzf_eof();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("neg_ltext.bam");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&block).unwrap();
+        f.write_all(&eof).unwrap();
+        drop(f);
+
+        let mut bgzf = BgzfReader::open(&path).unwrap();
+        let result = BamHeader::parse(&mut bgzf);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, BamHeaderError::NegativeLength { field: "l_text", value: -1 }),
+            "expected NegativeLength for l_text, got {err:?}"
+        );
     }
 
     #[test]

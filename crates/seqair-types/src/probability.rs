@@ -1,20 +1,29 @@
-use color_eyre::eyre::{Context, Report};
-use std::{ops::Deref, str::FromStr};
+use std::{num::ParseFloatError, ops::Deref, str::FromStr};
 
 /// A probability value guaranteed to be in the range [0, 1]
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 #[must_use]
 pub struct Probability(f64);
 
+/// Errors that can occur when creating or parsing a [`Probability`].
 #[derive(Debug, thiserror::Error)]
-#[error("Probability value `{0}` is outside the valid range [0, 1]")]
-pub struct ProbabilityError(f64);
+pub enum ProbabilityError {
+    /// The value is outside the valid range [0, 1]
+    #[error("Probability value `{value}` is outside the valid range [0, 1]")]
+    OutOfRange {
+        /// The invalid value
+        value: f64,
+    },
+    /// Failed to parse a float from a string
+    #[error("Failed to parse probability float")]
+    ParseFloat(#[from] ParseFloatError),
+}
 
 impl Probability {
     /// Creates a new Probability, returning an error if the value is outside [0, 1]
     pub const fn new(value: f64) -> Result<Self, ProbabilityError> {
         if value < 0.0 || value > 1.0 || !value.is_finite() {
-            Err(ProbabilityError(value))
+            Err(ProbabilityError::OutOfRange { value })
         } else {
             Ok(Self(value))
         }
@@ -55,13 +64,11 @@ impl std::fmt::Display for Probability {
 }
 
 impl FromStr for Probability {
-    type Err = Report;
+    type Err = ProbabilityError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.parse::<f64>()
-            .wrap_err("Failed to parse probability value")
-            .and_then(|v| Self::new(v).wrap_err("Probability value must be in the range [0, 1]"))
-            .wrap_err_with(|| format!("Invalid probability: {s}"))
+        let v = s.parse::<f64>()?;
+        Self::new(v)
     }
 }
 
@@ -106,11 +113,96 @@ impl<'de> serde::Deserialize<'de> for Probability {
     }
 }
 
-#[test]
-fn fails_outside_range() {
-    assert!(Probability::new(-0.1).is_err());
-    assert!(Probability::new(1.1).is_err());
-    assert!(Probability::new(f64::NAN).is_err());
-    assert!(Probability::new(f64::INFINITY).is_err());
-    assert!(Probability::new(f64::NEG_INFINITY).is_err());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Phred;
+
+    #[test]
+    fn fails_outside_range() {
+        assert!(Probability::new(-0.1).is_err());
+        assert!(Probability::new(1.1).is_err());
+        assert!(Probability::new(f64::NAN).is_err());
+        assert!(Probability::new(f64::INFINITY).is_err());
+        assert!(Probability::new(f64::NEG_INFINITY).is_err());
+    }
+
+    // r[verify types.probability.r23_from_str_typed_error]
+    #[test]
+    fn from_str_returns_typed_error() {
+        // Valid parse
+        let p: Probability = "0.5".parse().expect("valid probability");
+        assert_eq!(*p, 0.5);
+
+        // ParseFloat variant for non-numeric input
+        let err = "not_a_number".parse::<Probability>().unwrap_err();
+        assert!(matches!(err, ProbabilityError::ParseFloat(_)));
+
+        // OutOfRange variant for out-of-range value
+        let err = "1.5".parse::<Probability>().unwrap_err();
+        assert!(matches!(err, ProbabilityError::OutOfRange { value } if value == 1.5));
+    }
+
+    // r[verify types.probability.r23_new_returns_out_of_range]
+    #[test]
+    fn new_returns_out_of_range_variant() {
+        let err = Probability::new(2.0).unwrap_err();
+        assert!(matches!(err, ProbabilityError::OutOfRange { value } if value == 2.0));
+    }
+
+    // r[verify types.probability.r24_error_reexport]
+    #[test]
+    fn error_accessible_from_crate_root() {
+        let err: crate::ProbabilityError = ProbabilityError::OutOfRange { value: 2.0 };
+        assert!(matches!(err, crate::ProbabilityError::OutOfRange { .. }));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn proptest_valid_range_accepted(v in 0.0f64..=1.0) {
+            proptest::prop_assert!(Probability::new(v).is_ok());
+        }
+
+        #[test]
+        fn proptest_above_range_rejected(v in 1.001f64..1e10) {
+            proptest::prop_assert!(Probability::new(v).is_err());
+        }
+
+        #[test]
+        fn proptest_below_range_rejected(v in -1e10f64..-0.001) {
+            proptest::prop_assert!(Probability::new(v).is_err());
+        }
+
+        #[test]
+        fn proptest_inverted_stays_in_range(v in 0.0f64..=1.0) {
+            let p = Probability::new(v).expect("valid");
+            let inv = p.inverted();
+            proptest::prop_assert!(*inv >= 0.0 && *inv <= 1.0,
+                "inverted({v}) = {} out of range", *inv);
+        }
+
+        #[test]
+        fn proptest_probability_phred_roundtrip(v in 0.001f64..=1.0) {
+            // Probability -> Phred -> Probability roundtrip
+            let p1 = Probability::new(v).expect("valid");
+            let phred = Phred::from(p1);
+            // Reconstruct probability from phred: P = 10^(-Q/10)
+            let reconstructed = 10f64.powf(-*phred / 10.0);
+            let p2 = Probability::new(reconstructed).expect("reconstructed valid");
+            // Allow small epsilon for floating-point
+            let diff = (*p1 - *p2).abs();
+            proptest::prop_assert!(diff < 0.01,
+                "roundtrip error too large: {v} -> phred {} -> {}, diff={diff}", *phred, *p2);
+        }
+
+        #[test]
+        fn proptest_from_str_roundtrip(v in 0.0f64..=1.0) {
+            let p = Probability::new(v).expect("valid");
+            let s = format!("{p:.10}");
+            let p2: Probability = s.parse().expect("roundtrip parse");
+            let diff = (*p - *p2).abs();
+            proptest::prop_assert!(diff < 1e-9,
+                "FromStr roundtrip error: {v} -> \"{s}\" -> {}, diff={diff}", *p2);
+        }
+    }
 }

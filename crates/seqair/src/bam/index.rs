@@ -320,9 +320,14 @@ fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
             return Err(BaiError::Bgzf { source: BgzfError::TruncatedBlock });
         }
 
+        // r[impl bam.index.bgzf_block_validation]
         // ISIZE (uncompressed size) from the last 4 bytes of the block
-        debug_assert!(bsize >= 18, "bsize too small for BGZF block: {bsize}");
-        #[allow(clippy::indexing_slicing, reason = "bsize >= 18 from BGZF format")]
+        if bsize < 18 {
+            return Err(BaiError::Bgzf {
+                source: BgzfError::BlockSizeTooSmall { bsize: (bsize - 1) as u16 },
+            });
+        }
+        #[allow(clippy::indexing_slicing, reason = "bsize >= 18 checked above")]
         let isize_bytes = &block[bsize - 4..bsize];
         let isize = u32::from_le_bytes(
             isize_bytes.try_into().unwrap_or_else(|_| unreachable!("bsize >= 18")),
@@ -334,8 +339,12 @@ fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
         }
 
         // Compressed data starts at offset 18, ends at bsize - 8 (before CRC32 + ISIZE)
-        debug_assert!(bsize >= 26, "bsize too small for compressed data + footer: {bsize}");
-        #[allow(clippy::indexing_slicing, reason = "block layout verified above")]
+        if bsize < 26 {
+            return Err(BaiError::Bgzf {
+                source: BgzfError::BlockSizeTooSmall { bsize: (bsize - 1) as u16 },
+            });
+        }
+        #[allow(clippy::indexing_slicing, reason = "bsize >= 26 checked above")]
         let cdata = &block[18..bsize - 8];
 
         let start = result.len();
@@ -395,11 +404,11 @@ fn reg2bins(beg: u64, end: u64) -> Vec<u32> {
     bins.push(0); // bin 0 always included
 
     let levels: [(u32, u32); 5] = [
-        (1, 26),    // level 1: 16 Mbp bins
-        (9, 23),    // level 2: 2 Mbp bins
-        (73, 20),   // level 3: 256 kbp bins
-        (585, 17),  // level 4: 32 kbp bins
-        (4681, 14), // level 5: 4 kbp bins (leaf)
+        (1, 26),    // level 1: 64 Mbp bins
+        (9, 23),    // level 2: 8 Mbp bins
+        (73, 20),   // level 3: 1 Mbp bins
+        (585, 17),  // level 4: 128 Kbp bins
+        (4681, 14), // level 5: 16 Kbp bins (leaf)
     ];
 
     for &(offset, shift) in &levels {
@@ -639,5 +648,30 @@ mod tests {
             }
             other => panic!("expected InvalidTabixMagic, got {other:?}"),
         }
+    }
+
+    // r[verify bam.index.bgzf_block_validation]
+    #[test]
+    fn decompress_bgzf_rejects_bsize_too_small() {
+        // Build a malformed BGZF block with bsize = 17 (< 18 minimum).
+        // Valid gzip magic, but BSIZE field claiming a very small block.
+        let mut block = vec![0x1f, 0x8b, 0x08, 0x04]; // gzip magic
+        block.extend_from_slice(&[0; 4]); // MTIME
+        block.push(0); // XFL
+        block.push(0xff); // OS
+        block.extend_from_slice(&6u16.to_le_bytes()); // XLEN = 6
+        block.extend_from_slice(&[b'B', b'C', 2, 0]); // BC subfield
+        // BSIZE = 16 means total block size = 17, which is < 18
+        block.extend_from_slice(&16u16.to_le_bytes());
+        // Pad to make the block at least 18 bytes for the outer remaining check
+        block.resize(18, 0);
+
+        let result = decompress_bgzf_file(&block);
+        assert!(result.is_err(), "should reject bsize < 18");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, BaiError::Bgzf { source: BgzfError::BlockSizeTooSmall { .. } }),
+            "expected BlockSizeTooSmall, got {err:?}"
+        );
     }
 }

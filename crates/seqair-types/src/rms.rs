@@ -145,12 +145,31 @@ mod tests {
     use super::*;
     use proptest::{collection::vec, prelude::*};
 
+    #[test]
+    fn test_empty_accumulator_gives_zero() {
+        let acc = RmsAccumulator::new();
+        let rms = acc.finish();
+        assert_eq!(*rms, 0.0);
+    }
+
     proptest! {
         #[test]
         fn test_rms_constant_value(value: u8) {
             let data = vec![value; 100];
             let rms = RootMeanSquare::from_iter(data);
             prop_assert_eq!(*rms, f64::from(value));
+        }
+
+        #[test]
+        fn test_rms_accumulator_identical_values(value in 0u8..=255, count in 1usize..200) {
+            let mut acc = RmsAccumulator::new();
+            for _ in 0..count {
+                acc.add(f64::from(value));
+            }
+            let rms = acc.finish();
+            // RMS of N identical values v is v
+            let diff = (*rms - f64::from(value)).abs();
+            prop_assert!(diff < 1e-10, "RMS of {} identical {value} = {}, expected {value}", count, *rms);
         }
 
         #[test]

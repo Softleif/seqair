@@ -390,15 +390,27 @@ impl std::fmt::Debug for Base {
     }
 }
 
+// r[impl types.base.from_str_validation+2]
 impl std::str::FromStr for Base {
     type Err = BaseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
-        let Some(first) = s.as_bytes().first() else {
+        let bytes = s.as_bytes();
+        let Some(&first) = bytes.first() else {
             return Err(BaseError::Empty);
         };
-        Ok(Base::from(*first))
+        if bytes.len() > 1 {
+            return Err(BaseError::MultipleChars);
+        }
+        match first | 0x20 {
+            b'a' => Ok(Base::A),
+            b'c' => Ok(Base::C),
+            b'g' => Ok(Base::G),
+            b't' => Ok(Base::T),
+            b'n' => Ok(Base::Unknown),
+            _ => Err(BaseError::InvalidBase(first)),
+        }
     }
 }
 
@@ -468,12 +480,19 @@ impl From<Base> for &'static str {
     }
 }
 
+// r[impl types.base.error_display]
+/// Errors that can occur when parsing a [`Base`] from a string.
 #[derive(Debug, Error)]
 pub enum BaseError {
+    /// Input string was empty.
     #[error("Empty")]
     Empty,
-    #[error("Invalid base {base}", base=(0 as char))]
-    InvalidBaseError(u8),
+    /// Input string contained more than one character after trimming.
+    #[error("Multiple characters in base string")]
+    MultipleChars,
+    /// First byte is not a valid base (A/C/G/T/N, case-insensitive).
+    #[error("Invalid base: 0x{0:02x}")]
+    InvalidBase(u8),
 }
 
 #[cfg(test)]
@@ -483,22 +502,35 @@ mod tests {
 
     proptest::proptest! {
         #[test]
-        fn proptest_roundtrip(input: u8) {
-            let base = match Base::from(input) {
-                Base::Unknown => return Ok(()), // We don't panic on unknown bases
-                base => base
-            };
-            assert_eq!(*base, (input as char).to_ascii_uppercase() as u8);
+        fn proptest_from_u8_roundtrip(input: u8) {
+            let base = Base::from(input);
+            match base {
+                Base::Unknown => {} // many bytes map to Unknown, no roundtrip guarantee
+                known => {
+                    assert_eq!(*known, (input as char).to_ascii_uppercase() as u8);
+                    // as_u8 roundtrip: from_u8(discriminant) recovers the same base
+                    let discriminant = *known;
+                    proptest::prop_assert_eq!(Base::from(discriminant), known);
+                }
+            }
         }
 
         #[test]
-        fn proptest_roundtrip_str(input in r"\PC{0,10}" ) {
-            let base = match Base::from_str(&input) {
-                Err(_) => return Ok(()), // We don't panic on invalid bases
-                Ok(Base::Unknown) => return Ok(()), // We don't panic on unknown bases
-                Ok(base) => base,
-            };
-            assert_eq!(*base, input.trim().to_ascii_uppercase().as_bytes()[0]);
+        fn proptest_from_str_roundtrip(input in "[ACGTNacgtn]") {
+            let base = Base::from_str(&input).expect("valid single base char");
+            assert_eq!(*base, input.to_ascii_uppercase().as_bytes()[0]);
+        }
+
+        #[test]
+        fn proptest_from_str_rejects_multi_char(a in "[ACGTNacgtn]", b in "[ACGTNacgtn]") {
+            let multi = format!("{a}{b}");
+            proptest::prop_assert!(Base::from_str(&multi).is_err());
+        }
+
+        #[test]
+        fn proptest_from_str_never_panics(input in r"\PC{0,10}") {
+            // Just ensure no panic; errors are fine
+            let _ = Base::from_str(&input);
         }
 
         // r[verify base_decode.ascii_simd]
@@ -592,6 +624,53 @@ mod tests {
         for (i, (&byte, &base)) in buf.iter().zip(expected.iter()).enumerate() {
             assert_eq!(byte, base as u8, "mismatch at index {i}: byte={byte:#x}, base={base:?}");
         }
+    }
+
+    // r[verify types.base.from_str_validation+2]
+    #[test]
+    fn test_from_str_rejects_invalid_base() {
+        assert!("Z".parse::<Base>().is_err());
+        assert!("1".parse::<Base>().is_err());
+        assert!("M".parse::<Base>().is_err());
+        assert!("".parse::<Base>().is_err());
+    }
+
+    // r[verify types.base.from_str_validation+2]
+    #[test]
+    fn test_from_str_rejects_multi_char() {
+        assert!(matches!("AT".parse::<Base>(), Err(BaseError::MultipleChars)));
+        assert!(matches!("AC".parse::<Base>(), Err(BaseError::MultipleChars)));
+        assert!(matches!("NN".parse::<Base>(), Err(BaseError::MultipleChars)));
+        // Trimmed single char still works
+        assert_eq!(" A ".parse::<Base>().unwrap(), Base::A);
+    }
+
+    // r[verify types.base.from_str_validation+2]
+    #[test]
+    fn test_from_str_accepts_valid_bases() {
+        assert_eq!("A".parse::<Base>().unwrap(), Base::A);
+        assert_eq!("a".parse::<Base>().unwrap(), Base::A);
+        assert_eq!("C".parse::<Base>().unwrap(), Base::C);
+        assert_eq!("c".parse::<Base>().unwrap(), Base::C);
+        assert_eq!("G".parse::<Base>().unwrap(), Base::G);
+        assert_eq!("g".parse::<Base>().unwrap(), Base::G);
+        assert_eq!("T".parse::<Base>().unwrap(), Base::T);
+        assert_eq!("t".parse::<Base>().unwrap(), Base::T);
+        assert_eq!("N".parse::<Base>().unwrap(), Base::Unknown);
+        assert_eq!("n".parse::<Base>().unwrap(), Base::Unknown);
+    }
+
+    // r[verify types.base.error_display]
+    #[test]
+    fn test_base_error_display_shows_actual_byte() {
+        let err = "Z".parse::<Base>().unwrap_err();
+        assert_eq!(err.to_string(), "Invalid base: 0x5a");
+
+        let err = "".parse::<Base>().unwrap_err();
+        assert_eq!(err.to_string(), "Empty");
+
+        let err = "AT".parse::<Base>().unwrap_err();
+        assert_eq!(err.to_string(), "Multiple characters in base string");
     }
 
     // r[verify base_decode.ascii_batch]
