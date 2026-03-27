@@ -59,7 +59,7 @@ fn snapshot_store(store: &RecordStore) -> Vec<RecordSnapshot> {
 
 // r[verify sam.reader.open]
 // r[verify sam.reader.fetch_into]
-// r[verify sam.reader.overlap_filter]
+// r[verify sam.reader.overlap_filter+2]
 // r[verify sam.perf.bulk_read]
 #[test]
 fn sam_gz_record_count_matches_bam() {

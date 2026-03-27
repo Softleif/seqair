@@ -390,7 +390,7 @@ impl std::fmt::Debug for Base {
     }
 }
 
-// r[impl types.base.from_str_validation]
+// r[impl types.base.from_str_validation+2]
 impl std::str::FromStr for Base {
     type Err = BaseError;
 
@@ -626,7 +626,7 @@ mod tests {
         }
     }
 
-    // r[verify types.base.from_str_validation]
+    // r[verify types.base.from_str_validation+2]
     #[test]
     fn test_from_str_rejects_invalid_base() {
         assert!("Z".parse::<Base>().is_err());
@@ -635,7 +635,7 @@ mod tests {
         assert!("".parse::<Base>().is_err());
     }
 
-    // r[verify types.base.from_str_validation]
+    // r[verify types.base.from_str_validation+2]
     #[test]
     fn test_from_str_rejects_multi_char() {
         assert!(matches!("AT".parse::<Base>(), Err(BaseError::MultipleChars)));
@@ -645,7 +645,7 @@ mod tests {
         assert_eq!(" A ".parse::<Base>().unwrap(), Base::A);
     }
 
-    // r[verify types.base.from_str_validation]
+    // r[verify types.base.from_str_validation+2]
     #[test]
     fn test_from_str_accepts_valid_bases() {
         assert_eq!("A".parse::<Base>().unwrap(), Base::A);

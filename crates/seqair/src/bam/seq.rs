@@ -107,7 +107,6 @@ pub fn decode_seq(encoded: &[u8], len: usize) -> Vec<u8> {
 /// all other nibbles (=, IUPAC ambiguity, N) → Unknown(78).
 // r[impl base_decode.table]
 // r[impl base_decode.table_invariant]
-// r[depends base_decode.table_invariant]
 // Indexed by the 4-bit BAM nibble value (0–15):
 // 0:= 1:A 2:C 3:M 4:G 5:R 6:S 7:V 8:T 9:W 10:Y 11:H 12:K 13:D 14:B 15:N
 #[allow(clippy::byte_char_slices, reason = "per-index comments explain the IUPAC nibble mapping")]

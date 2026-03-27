@@ -16,14 +16,16 @@ use tracing::instrument;
 /// Format a byte slice for error display: printable ASCII shown as-is, other bytes as `\xNN`.
 /// Output is capped to `max_len` bytes of input, with "..." appended if truncated.
 fn format_aux_field(bytes: &[u8], max_len: usize) -> String {
+    use std::fmt::Write;
     let truncated = bytes.len() > max_len;
-    let slice = if truncated { &bytes[..max_len] } else { bytes };
+    let slice = bytes.get(..max_len).unwrap_or(bytes);
+    let slice = if truncated { slice } else { bytes };
     let mut out = String::with_capacity(slice.len() + 4);
     for &b in slice {
         if b.is_ascii_graphic() || b == b' ' {
             out.push(b as char);
         } else {
-            out.push_str(&format!("\\x{b:02x}"));
+            let _ = write!(out, "\\x{b:02x}");
         }
     }
     if truncated {
@@ -34,11 +36,12 @@ fn format_aux_field(bytes: &[u8], max_len: usize) -> String {
 
 /// Format a 2-byte tag as ASCII if both bytes are printable, otherwise as hex.
 fn format_tag(tag: &[u8]) -> String {
-    if tag.len() == 2 && tag[0].is_ascii_graphic() && tag[1].is_ascii_graphic() {
-        format!("{}{}", tag[0] as char, tag[1] as char)
-    } else {
-        format_aux_field(tag, 32)
+    if let [a, b] = tag {
+        if a.is_ascii_graphic() && b.is_ascii_graphic() {
+            return format!("{}{}", *a as char, *b as char);
+        }
     }
+    format_aux_field(tag, 32)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -362,7 +365,7 @@ fn parse_sam_line(
     // Compute end_pos from packed CIGAR
     let end_pos = if cigar_available { compute_end_pos(pos, cigar_buf) } else { pos };
 
-    // r[impl sam.reader.overlap_filter]
+    // r[impl sam.reader.overlap_filter+2]
     // r[impl sam.reader.overlap_halfopen]
     if pos >= end || end_pos <= start {
         return Ok(None);
@@ -562,7 +565,7 @@ fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
     Ok(())
 }
 
-// r[impl sam.record.aux_int_range]
+// r[impl sam.record.aux_int_range+2]
 /// Serialize an integer value using the smallest BAM integer type.
 /// Returns an error if the value does not fit any BAM integer type (i8/u8/i16/u16/i32/u32).
 fn serialize_bam_int(buf: &mut Vec<u8>, val: i64) -> Result<(), SamRecordError> {
@@ -971,7 +974,7 @@ mod tests {
         assert_eq!(parse_u32(b""), None, "parse_u32 should reject empty input");
     }
 
-    // r[verify sam.record.aux_int_range]
+    // r[verify sam.record.aux_int_range+2]
     #[test]
     fn serialize_bam_int_rejects_out_of_range() {
         // Values outside [-2147483648, 4294967295] cannot fit any BAM integer type
@@ -1000,7 +1003,7 @@ mod tests {
         assert_eq!(buf[0], b'i');
     }
 
-    // r[verify sam.record.aux_int_range]
+    // r[verify sam.record.aux_int_range+2]
     #[test]
     fn aux_tag_with_huge_int_returns_error() {
         let header = make_header();

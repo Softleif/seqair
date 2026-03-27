@@ -20,7 +20,7 @@ use std::{
 };
 use tracing::instrument;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoordinateField {
     Tid,
     Start,

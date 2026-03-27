@@ -103,6 +103,15 @@ mod tests {
 
     // r[verify types.phred.as_int_clamp]
     #[test]
+    fn as_int_boundary_values() {
+        assert_eq!(Phred::from_phred(99).as_int(), 99);
+        assert_eq!(Phred::from_phred(100).as_int(), 99);
+        assert_eq!(Phred::from_phred(0).as_int(), 0);
+        assert_eq!(Phred::from_phred(1).as_int(), 1);
+    }
+
+    // r[verify types.phred.as_int_clamp]
+    #[test]
     fn as_int_handles_nan() {
         // Construct a Phred with NaN inner value (via From<Probability> edge case
         // is impossible since Probability rejects NaN, so we test the raw struct)

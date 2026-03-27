@@ -493,7 +493,7 @@ r[cram.edge.rans_sym_overflow]
 The rANS 4x8 frequency table uses run-length encoding where a symbol counter `sym: u8` is incremented for each run element. When `sym == 255`, `sym += 1` overflows. The reader MUST use wrapping arithmetic (`wrapping_add(1)`) for this counter — the overflow is harmless because the loop terminates before using the overflowed value.
 
 r[cram.codec.rans_sym_bounded+2]
-Symbol variables in rANS frequency table run-length reading MUST use `u8` type, making overflow past 255 impossible by construction. After a run-length loop, `sym` may have been incremented past 255 via `wrapping_add`. The code MUST NOT use the post-loop `sym` value as a table index if it has wrapped past 255. The run-length loop MUST break when `sym` would exceed 255.
+Symbol variables in rANS frequency table run-length reading MUST use `u8` type, making overflow past 255 impossible by construction. After a run-length loop, `sym` may have wrapped to 0 via `wrapping_add(1)` when the previous value was 255. The code MUST NOT use the post-loop `sym` value as a table index if it has wrapped to 0. The run-length loop MUST break when `sym` would exceed 255.
 
 r[cram.codec.state_step_safety]
 The rANS `state_step` function computes `f * (s >> bits) + (s & mask) - g`. For valid frequency tables produced by conforming CRAM writers, `g <= f * (s >> bits) + (s & mask)` always holds, so the subtraction does not underflow. The implementation MUST use `wrapping_sub` for robustness against malformed data in release mode, with a `debug_assert!` to catch violations during development.

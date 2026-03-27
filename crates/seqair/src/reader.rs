@@ -286,7 +286,7 @@ impl Readers {
         &mut self.fasta
     }
 
-    // r[impl fasta.fetch.buffer_reuse+2]
+    // r[impl fasta.fetch.buffer_reuse]
     /// Fetch a reference sequence region and return it as `Rc<[Base]>`.
     ///
     /// Uses an internal buffer whose capacity is retained across calls,
