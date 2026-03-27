@@ -61,6 +61,30 @@ pub enum BamError {
         #[from]
         source: DecodeError,
     },
+
+    // r[impl bam.reader.coordinate_overflow]
+    #[error("coordinate overflow: {field} value {value} exceeds {max}")]
+    CoordinateOverflow { field: &'static str, value: u64, max: u64 },
+}
+
+// r[impl bam.reader.coordinate_overflow]
+fn validate_fetch_coordinates(tid: u32, start: u64, end: u64) -> Result<(i32, i64, i64), BamError> {
+    let tid_i32 = i32::try_from(tid).map_err(|_| BamError::CoordinateOverflow {
+        field: "tid",
+        value: u64::from(tid),
+        max: i32::MAX as u64,
+    })?;
+    let start_i64 = i64::try_from(start).map_err(|_| BamError::CoordinateOverflow {
+        field: "start",
+        value: start,
+        max: i64::MAX as u64,
+    })?;
+    let end_i64 = i64::try_from(end).map_err(|_| BamError::CoordinateOverflow {
+        field: "end",
+        value: end,
+        max: i64::MAX as u64,
+    })?;
+    Ok((tid_i32, start_i64, end_i64))
 }
 
 // r[impl bam.reader.shared_state]
@@ -174,9 +198,7 @@ impl IndexedBamReader {
         // TODO: The remaining regular chunks still span ~2 GB due to higher-level
         // bins (levels 1-2). Consider applying the same caching strategy to those,
         // or using more aggressive chunk merging to reduce seek count on NFS.
-        let start_i64 = start as i64;
-        let end_i64 = end as i64;
-        let tid_i32 = tid as i32;
+        let (tid_i32, start_i64, end_i64) = validate_fetch_coordinates(tid, start, end)?;
 
         let mut skipped_tid: u32 = 0;
         let mut skipped_unmapped: u32 = 0;
@@ -199,9 +221,11 @@ impl IndexedBamReader {
                         break;
                     }
 
+                    // r[impl bam.reader.propagate_errors]
                     let raw = match region.read_record(&mut scratch) {
                         Ok(s) => s,
-                        Err(_) => break,
+                        Err(BgzfError::UnexpectedEof) => break,
+                        Err(e) => return Err(BamError::from(e)),
                     };
 
                     if raw.len() < 32 {
@@ -244,7 +268,7 @@ impl IndexedBamReader {
         accepted += cache_injected;
 
         tracing::debug!(
-            target: crate::PROFILE_TARGET,
+            target: super::region_buf::PROFILE_TARGET,
             accepted,
             cache_injected,
             skipped_tid,
@@ -254,7 +278,7 @@ impl IndexedBamReader {
         );
 
         tracing::debug!(
-            target: crate::PROFILE_TARGET,
+            target: super::region_buf::PROFILE_TARGET,
             records = store.len(),
             records_cap = store.records_capacity(),
             names_bytes = store.names_capacity(),
@@ -305,6 +329,7 @@ impl ChunkCache {
             debug_assert!(raw.len() >= 32, "cached record too short: {}", raw.len());
             #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
             let rec_tid = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            // Safety: tid was validated by validate_fetch_coordinates before calling this method
             if rec_tid != tid as i32 {
                 continue;
             }
@@ -351,16 +376,18 @@ impl ChunkCache {
                 if current_voff >= chunk_ref.end {
                     break;
                 }
+                // r[impl bam.reader.propagate_errors]
                 let raw = match region.read_record(&mut scratch) {
                     Ok(s) => s,
-                    Err(_) => break,
+                    Err(BgzfError::UnexpectedEof) => break,
+                    Err(e) => return Err(BamError::from(e)),
                 };
                 self.records.push(raw.to_vec());
             }
         }
 
         tracing::debug!(
-            target: crate::PROFILE_TARGET,
+            target: super::region_buf::PROFILE_TARGET,
             tid,
             cached_records = self.records.len(),
             "chunk_cache::load",
@@ -443,5 +470,52 @@ mod tests {
         let mut store = RecordStore::new();
         let count = cache.inject_overlapping(0, 0, 1000, &mut store).unwrap();
         assert_eq!(count, 0);
+    }
+
+    // r[verify bam.reader.coordinate_overflow]
+    #[test]
+    fn fetch_into_rejects_tid_exceeding_i32_max() {
+        // tid that exceeds i32::MAX should return CoordinateOverflow
+        let tid: u32 = u32::try_from(i32::MAX as u64 + 1).unwrap(); // 2_147_483_648
+        let result = validate_fetch_coordinates(tid, 0, 1000);
+        assert!(result.is_err(), "tid > i32::MAX must error");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, BamError::CoordinateOverflow { field: "tid", .. }),
+            "expected CoordinateOverflow for tid, got: {err}"
+        );
+    }
+
+    // r[verify bam.reader.coordinate_overflow]
+    #[test]
+    fn fetch_into_rejects_start_exceeding_i64_max() {
+        let start: u64 = i64::MAX as u64 + 1;
+        let result = validate_fetch_coordinates(0, start, start + 100);
+        assert!(result.is_err(), "start > i64::MAX must error");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, BamError::CoordinateOverflow { field: "start", .. }),
+            "expected CoordinateOverflow for start, got: {err}"
+        );
+    }
+
+    // r[verify bam.reader.coordinate_overflow]
+    #[test]
+    fn fetch_into_rejects_end_exceeding_i64_max() {
+        let end: u64 = i64::MAX as u64 + 1;
+        let result = validate_fetch_coordinates(0, 0, end);
+        assert!(result.is_err(), "end > i64::MAX must error");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, BamError::CoordinateOverflow { field: "end", .. }),
+            "expected CoordinateOverflow for end, got: {err}"
+        );
+    }
+
+    // r[verify bam.reader.coordinate_overflow]
+    #[test]
+    fn fetch_into_accepts_max_valid_coordinates() {
+        let result = validate_fetch_coordinates(i32::MAX as u32, i64::MAX as u64, i64::MAX as u64);
+        assert!(result.is_ok(), "max valid coordinates must succeed");
     }
 }

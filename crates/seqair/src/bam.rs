@@ -37,6 +37,7 @@
 // push_raw() is not a significant bottleneck and that slab access patterns
 // are indeed cache-friendly.
 
+// r[impl unified.minimal_public_api]
 pub mod aux;
 pub mod bgzf;
 pub mod cigar;

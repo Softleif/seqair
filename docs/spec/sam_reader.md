@@ -89,6 +89,12 @@ Optional fields after the 11th column follow the format `TAG:TYPE:VALUE`. They M
 
 Note: the integer type selected here may differ from the type used by the original BAM writer, since SAM text loses the specific width information. This is an inherent limitation — see `r[unified.push_fields_equivalence]`.
 
+r[sam.record.aux_parse_strict]
+Malformed aux tag values MUST return an error, not silently default to zero. For integer (`i`) typed tags, if the value cannot be parsed as an integer, the reader MUST return a `SamRecordError::InvalidAuxValue` error.
+
+r[sam.record.aux_int_range]
+Integer aux values MUST fit within one of the BAM integer types: i8 [-128, 127], u8 [0, 255], i16 [-32768, 32767], u16 [0, 65535], i32 [-2147483648, 2147483647], or u32 [0, 4294967295]. Values outside this range (i.e., `val > u32::MAX` or `val < i32::MIN` as i64) MUST return a `SamRecordError::AuxIntOutOfRange` error instead of silently truncating.
+
 ## Region fetching
 
 r[sam.reader.fetch_into]
@@ -103,7 +109,10 @@ r[sam.reader.fetch_into]
 8. Push passing records into the RecordStore.
 
 r[sam.reader.overlap_filter]
-The overlap filter MUST be identical to BAM: `record.pos <= end AND record.end_pos >= start` (0-based). `end_pos` MUST be computed from the parsed CIGAR. When CIGAR is `*` (unavailable), `end_pos = pos` (point record).
+The overlap filter uses half-open intervals (0-based). `end_pos` MUST be computed from the parsed CIGAR. When CIGAR is `*` (unavailable), `end_pos = pos` (point record).
+
+r[sam.reader.overlap_halfopen]
+A record overlaps `[start, end)` iff `pos < end && end_pos > start`. Records where `pos == end` or `end_pos == start` do NOT overlap and MUST be filtered out.
 
 r[sam.reader.sorted_order]
 Records MUST be added to the store in coordinate-sorted order. Since bgzf-compressed indexed SAM files are coordinate-sorted by construction (indexing requires it), the natural parse order is correct.
@@ -143,6 +152,11 @@ RNAME of `*` means unmapped. Combined with FLAG 0x4, these records MUST be filte
 
 r[sam.edge.line_spanning_blocks]
 A single SAM alignment line may span multiple BGZF blocks. The reader MUST buffer partial lines across block boundaries and only parse complete lines (terminated by `\n`). The parser MUST also strip `\r` at line boundaries to handle `\r\n` (Windows-style) line endings that may appear in files from mixed-platform pipelines.
+
+## Integer parsing
+
+r[sam.record.parse_int_nonempty]
+Integer parsing functions (`parse_u8`, `parse_u16`, `parse_u32`) MUST reject empty input by returning `None`. An empty byte slice is not a valid integer representation and MUST NOT silently produce zero.
 
 ## Performance considerations
 

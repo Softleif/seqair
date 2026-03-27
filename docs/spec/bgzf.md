@@ -19,6 +19,9 @@ The extra field MUST contain a `BC` subfield (SI1=0x42, SI2=0x43) with SLEN=2 wh
 r[bgzf.decompression]
 Each block's DEFLATE payload MUST be decompressed independently. The last 8 bytes of the block are the gzip footer: a CRC32 checksum (4 bytes) followed by the uncompressed size ISIZE (4 bytes), both little-endian. Decompression MUST produce exactly ISIZE bytes.
 
+r[bgzf.max_block_size]
+BGZF blocks MUST NOT exceed 65536 bytes uncompressed. If the ISIZE footer field claims a larger value, the reader MUST return an error rather than allocating an unbounded buffer.
+
 r[bgzf.eof]
 An EOF marker block has ISIZE=0. When encountered, the reader MUST signal end-of-stream.
 

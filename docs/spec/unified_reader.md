@@ -123,3 +123,11 @@ r[unified.readers_accessors]
 
 r[unified.readers_backward_compat]
 `IndexedReader::open(path)` MUST continue to work for BAM and SAM files without a FASTA path. CRAM detection in `IndexedReader::open()` MUST return an error explaining that CRAM requires a reference and suggesting `Readers::open()` instead. This preserves backward compatibility for code that only needs BAM/SAM.
+
+## API surface
+
+r[unified.non_exhaustive_enums]
+Public enums that may gain variants MUST be annotated with `#[non_exhaustive]`. This includes `IndexedReader`, `FormatDetectionError`, and `ReaderError`. Adding a variant to a non-exhaustive enum is not a semver-breaking change, allowing new formats and error conditions to be introduced in minor releases.
+
+r[unified.minimal_public_api]
+Only intentionally public types SHOULD be exported from each codec module. Internal sub-modules (compression codecs, container parsers, encoding details) SHOULD be `pub(crate)` or `#[doc(hidden)]` so that downstream crates do not depend on internal structure. The public API contract is defined by explicit `pub use` re-exports in each top-level module file.

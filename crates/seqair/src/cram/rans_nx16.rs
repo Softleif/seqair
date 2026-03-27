@@ -93,9 +93,15 @@ fn read_u32_le(src: &mut &[u8]) -> Result<u32, CramError> {
     Ok(val)
 }
 
+// r[impl cram.codec.uint7_bounded]
 fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
     let mut n: u32 = 0;
+    let mut count: u8 = 0;
     loop {
+        if count >= 5 {
+            return Err(CramError::Uint7Overflow);
+        }
+        count += 1;
         let b = read_u8(src)? as u32;
         n = (n << 7) | (b & 0x7f);
         if b & 0x80 == 0 {
@@ -135,8 +141,13 @@ fn cumulative_frequencies_symbol(
     sym
 }
 
+// r[impl cram.codec.state_step_safety]
+// SAFETY: spec guarantees g <= f * (s >> bits) + (s & mask) for valid frequency tables.
+// Use wrapping_sub for release-mode robustness against malformed data.
 fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
-    f * (s >> bits) + (s & ((1 << bits) - 1)) - g
+    let result = f * (s >> bits) + (s & ((1 << bits) - 1));
+    debug_assert!(result >= g, "state_step underflow: {result} < {g}");
+    result.wrapping_sub(g)
 }
 
 fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Result<u32, CramError> {
@@ -219,26 +230,39 @@ fn read_frequencies_0(src: &mut &[u8]) -> Result<[u32; ALPHABET_SIZE], CramError
         }
     }
 
-    normalize_frequencies(&mut frequencies, ORDER_0_BITS);
+    normalize_frequencies(&mut frequencies, ORDER_0_BITS)?;
     Ok(frequencies)
 }
 
-fn normalize_frequencies(frequencies: &mut [u32; ALPHABET_SIZE], bits: u32) {
-    let mut sum: u32 = frequencies.iter().sum();
+// r[impl cram.codec.normalize_checked]
+fn normalize_frequencies(
+    frequencies: &mut [u32; ALPHABET_SIZE],
+    bits: u32,
+) -> Result<(), CramError> {
+    let sum: u32 = frequencies.iter().copied().try_fold(0u32, |acc, f| acc.checked_add(f)).ok_or(
+        CramError::FrequencyNormalizationOverflow {
+            sum: frequencies.iter().copied().map(u64::from).sum(),
+        },
+    )?;
 
     if sum == 0 || sum == (1 << bits) {
-        return;
+        return Ok(());
     }
 
-    let mut shift = 0;
-    while sum < (1 << bits) {
-        sum *= 2;
+    let mut running = sum;
+    let mut shift = 0u32;
+    while running < (1 << bits) {
+        running = running
+            .checked_mul(2)
+            .ok_or(CramError::FrequencyNormalizationOverflow { sum: u64::from(sum) << shift })?;
         shift += 1;
     }
 
     for f in frequencies {
         *f <<= shift;
     }
+
+    Ok(())
 }
 
 fn build_cumulative_frequencies(frequencies: &[u32; ALPHABET_SIZE]) -> [u32; ALPHABET_SIZE] {
@@ -368,7 +392,7 @@ fn read_frequencies_1_inner(
             }
         }
 
-        normalize_frequencies(fs, bits);
+        normalize_frequencies(fs, bits)?;
     }
 
     Ok(())
@@ -705,5 +729,36 @@ mod tests {
             0x02, 0x00, 0x00, 0x04, 0x02, 0x00,
         ];
         assert_eq!(decode(&src, 0).unwrap(), b"noodles");
+    }
+
+    // r[verify cram.codec.uint7_bounded]
+    #[test]
+    fn read_uint7_overflow_returns_error() {
+        // 6 continuation bytes (all with high bit set) exceed the 5-iteration limit.
+        let mut src: &[u8] = &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00];
+        let err = read_uint7(&mut src).unwrap_err();
+        assert!(matches!(err, CramError::Uint7Overflow));
+    }
+
+    #[test]
+    fn read_uint7_five_bytes_ok() {
+        // Exactly 5 continuation bytes is the maximum valid sequence.
+        let mut src: &[u8] = &[0x80, 0x80, 0x80, 0x80, 0x01];
+        let result = read_uint7(&mut src);
+        assert!(result.is_ok());
+    }
+
+    // r[verify cram.codec.normalize_checked]
+    #[test]
+    fn normalize_frequencies_overflow_returns_error() {
+        // Fill frequencies so sum overflows u32.
+        let mut frequencies = [0u32; ALPHABET_SIZE];
+        // 256 * 0x01_000_000 = 0x1_0000_0000 which overflows u32.
+        frequencies.fill(0x0100_0000);
+        let result = normalize_frequencies(&mut frequencies, ORDER_0_BITS);
+        assert!(
+            matches!(result, Err(CramError::FrequencyNormalizationOverflow { .. })),
+            "expected overflow error, got: {result:?}"
+        );
     }
 }

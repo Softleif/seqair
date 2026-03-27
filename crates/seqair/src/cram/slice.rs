@@ -39,8 +39,11 @@ impl SliceHeader {
         let record_counter = read_ltf8(&mut cursor)? as i64;
         let num_blocks = read_itf8(&mut cursor)? as i32;
 
-        let num_content_ids = read_itf8(&mut cursor)?;
-        let mut block_content_ids = Vec::with_capacity(num_content_ids as usize);
+        // r[impl cram.slice.validated_lengths]
+        let num_content_ids_raw = read_itf8(&mut cursor)?;
+        let num_content_ids = usize::try_from(num_content_ids_raw as i32)
+            .map_err(|_| CramError::InvalidLength { value: num_content_ids_raw as i32 })?;
+        let mut block_content_ids = Vec::with_capacity(num_content_ids);
         for _ in 0..num_content_ids {
             block_content_ids.push(read_itf8(&mut cursor)? as i32);
         }
@@ -115,7 +118,10 @@ pub fn decode_slice(
     // r[impl cram.edge.reference_mismatch]
     if !is_multi_ref && sh.reference_md5 != [0u8; 16] && !reference_seq.is_empty() {
         let slice_ref_start = (sh.alignment_start.max(1) as i64 - 1 - ref_start_0based) as usize;
-        let slice_ref_end = slice_ref_start + sh.alignment_span as usize;
+        // r[impl cram.slice.validated_lengths]
+        let span = usize::try_from(sh.alignment_span)
+            .map_err(|_| CramError::InvalidLength { value: sh.alignment_span })?;
+        let slice_ref_end = slice_ref_start + span;
         if let Some(slice_ref) = reference_seq.get(slice_ref_start..slice_ref_end) {
             let computed =
                 md5::compute(slice_ref.iter().map(|b| b.to_ascii_uppercase()).collect::<Vec<u8>>());
@@ -424,6 +430,27 @@ struct ReconstructResult {
 // r[impl cram.record.features]
 // r[impl cram.record.sequence]
 // r[impl cram.record.cigar_reconstruction]
+// r[impl cram.slice.ref_bounds_warning]
+/// Look up a reference base by index, logging a warning on the first out-of-bounds access
+/// per slice and falling back to `b'N'`.
+fn ref_base_at(reference_seq: &[u8], index: usize, warned: &mut bool) -> u8 {
+    match reference_seq.get(index) {
+        Some(&b) => b,
+        None => {
+            if !*warned {
+                warn!(
+                    index,
+                    ref_len = reference_seq.len(),
+                    "reference shorter than expected during CRAM sequence reconstruction; \
+                     substituting N (may indicate reference/CRAM mismatch)"
+                );
+                *warned = true;
+            }
+            b'N'
+        }
+    }
+}
+
 /// Decode features and reconstruct sequence + CIGAR.
 #[allow(clippy::too_many_arguments)]
 fn decode_features_and_reconstruct(
@@ -533,6 +560,7 @@ fn decode_features_and_reconstruct(
     let ref_offset = (pos_0based - slice_start_0based) as usize;
     let mut read_pos = 0usize; // 0-based position in the read
     let mut ref_pos = 0usize; // 0-based position relative to alignment start on reference
+    let mut ref_warned = false; // log at most one warning per reconstruction
     let mut matching_bases = 0u32;
     let mut indel_bases = 0u32;
 
@@ -566,7 +594,8 @@ fn decode_features_and_reconstruct(
 
             match &feature.data {
                 FeatureData::Substitution(code) => {
-                    let ref_base = reference_seq.get(ref_offset + ref_pos).copied().unwrap_or(b'N');
+                    let ref_base =
+                        ref_base_at(reference_seq, ref_offset + ref_pos, &mut ref_warned);
                     let read_base = ch.preservation.substitution_matrix.substitute(ref_base, *code);
                     bases_buf.push(Base::from(read_base));
                     push_cigar_op(&mut cigar_ops, 1, 0); // M
@@ -632,7 +661,8 @@ fn decode_features_and_reconstruct(
                 FeatureData::Qualities | FeatureData::Quality => {
                     // Quality features don't affect sequence or CIGAR
                     // Copy ref base as matching
-                    let ref_base = reference_seq.get(ref_offset + ref_pos).copied().unwrap_or(b'N');
+                    let ref_base =
+                        ref_base_at(reference_seq, ref_offset + ref_pos, &mut ref_warned);
                     bases_buf.push(Base::from(ref_base));
                     push_cigar_op(&mut cigar_ops, 1, 0); // M
                     matching_bases += 1;
@@ -642,7 +672,7 @@ fn decode_features_and_reconstruct(
             }
         } else {
             // No feature at this position — copy from reference (match)
-            let ref_base = reference_seq.get(ref_offset + ref_pos).copied().unwrap_or(b'N');
+            let ref_base = ref_base_at(reference_seq, ref_offset + ref_pos, &mut ref_warned);
             bases_buf.push(Base::from(ref_base));
             push_cigar_op(&mut cigar_ops, 1, 0); // M
             matching_bases += 1;
@@ -813,6 +843,59 @@ mod tests {
         assert!(
             msg.contains("ff") || msg.contains("0xff") || msg.contains("255"),
             "error message should contain the code: {msg}"
+        );
+    }
+
+    // r[verify cram.slice.ref_bounds_warning]
+    #[test]
+    fn ref_base_at_warns_on_out_of_bounds() {
+        // When requesting a base beyond the reference length, ref_base_at should
+        // return b'N' and log a warning.
+        let reference = b"ACGT";
+        let mut warned = false;
+
+        // In-bounds access should return the actual base
+        let base = ref_base_at(reference, 0, &mut warned);
+        assert_eq!(base, b'A');
+        assert!(!warned, "should not warn for in-bounds access");
+
+        // Out-of-bounds access should return b'N' and set warned flag
+        let base = ref_base_at(reference, 10, &mut warned);
+        assert_eq!(base, b'N');
+        assert!(warned, "should warn for out-of-bounds access");
+
+        // Second out-of-bounds access should still return b'N' but not re-warn
+        // (warned is already true, so the warn! is skipped)
+        let base = ref_base_at(reference, 20, &mut warned);
+        assert_eq!(base, b'N');
+    }
+
+    // r[verify cram.slice.validated_lengths]
+    #[test]
+    fn negative_itf8_num_content_ids_rejected() {
+        // Build a slice header where num_content_ids encodes -1 (0xFFFFFFFF as ITF8).
+        // Fields before num_content_ids: ref_seq_id, alignment_start, alignment_span,
+        // num_records, record_counter (ltf8), num_blocks — all as ITF8/LTF8.
+        let mut data = Vec::new();
+        // ref_seq_id = 0 (1 byte ITF8)
+        data.push(0x00);
+        // alignment_start = 1 (1 byte ITF8)
+        data.push(0x01);
+        // alignment_span = 1 (1 byte ITF8)
+        data.push(0x01);
+        // num_records = 0 (1 byte ITF8)
+        data.push(0x00);
+        // record_counter = 0 (1 byte LTF8)
+        data.push(0x00);
+        // num_blocks = 0 (1 byte ITF8)
+        data.push(0x00);
+        // num_content_ids = -1 (5 byte ITF8: 0xFF 0xFF 0xFF 0xFF 0xFF)
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+
+        let result = SliceHeader::parse(&data);
+        assert!(
+            matches!(result, Err(CramError::InvalidLength { value: -1 })),
+            "expected InvalidLength error for negative num_content_ids, got: {result:?}"
         );
     }
 }

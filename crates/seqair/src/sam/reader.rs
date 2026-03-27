@@ -36,8 +36,14 @@ pub enum SamRecordError {
     #[error("unknown CIGAR operation: {op}")]
     UnknownCigarOp { op: char },
 
+    #[error("invalid aux tag value for {tag:?}: {value:?}")]
+    InvalidAuxValue { tag: Box<[u8]>, value: Box<[u8]> },
+
     #[error("SAM header is not valid UTF-8")]
     HeaderNotUtf8 { source: std::string::FromUtf8Error },
+
+    #[error("aux integer value {value} does not fit any BAM integer type (i8/u8/i16/u16/i32/u32)")]
+    AuxIntOutOfRange { value: i64 },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -329,7 +335,8 @@ fn parse_sam_line(
     let end_pos = if cigar_available { compute_end_pos(pos, cigar_buf) } else { pos };
 
     // r[impl sam.reader.overlap_filter]
-    if pos > end || end_pos < start {
+    // r[impl sam.reader.overlap_halfopen]
+    if pos >= end || end_pos <= start {
         return Ok(None);
     }
 
@@ -426,6 +433,7 @@ fn parse_cigar(cigar_str: &[u8], buf: &mut Vec<u8>) -> Result<bool, SamError> {
 }
 
 // r[impl sam.record.aux_tags]
+// r[impl sam.record.aux_parse_strict]
 fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
     for field in text.split(|&b| b == b'\t') {
         if field.len() < 5 {
@@ -446,13 +454,18 @@ fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
                 buf.push(value.first().copied().unwrap_or(b' '));
             }
             b'i' => {
-                let val = parse_i64(value).unwrap_or(0);
-                serialize_bam_int(buf, val);
+                let val = parse_i64(value).ok_or_else(|| SamRecordError::InvalidAuxValue {
+                    tag: tag.into(),
+                    value: value.into(),
+                })?;
+                serialize_bam_int(buf, val)?;
             }
             b'f' => {
                 buf.push(b'f');
                 let f: f32 =
-                    std::str::from_utf8(value).ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    std::str::from_utf8(value).ok().and_then(|s| s.parse().ok()).ok_or_else(
+                        || SamRecordError::InvalidAuxValue { tag: tag.into(), value: value.into() },
+                    )?;
                 buf.extend_from_slice(&f.to_le_bytes());
             }
             b'Z' => {
@@ -476,22 +489,34 @@ fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
                 for v in &values {
                     match subtype {
                         b'c' | b'C' => {
-                            let n = parse_i64(v).unwrap_or(0) as u8;
+                            let n = parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
+                                tag: tag.into(),
+                                value: (*v).into(),
+                            })? as u8;
                             buf.push(n);
                         }
                         b's' | b'S' => {
-                            let n = parse_i64(v).unwrap_or(0) as u16;
+                            let n = parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
+                                tag: tag.into(),
+                                value: (*v).into(),
+                            })? as u16;
                             buf.extend_from_slice(&n.to_le_bytes());
                         }
                         b'i' | b'I' => {
-                            let n = parse_i64(v).unwrap_or(0) as u32;
+                            let n = parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
+                                tag: tag.into(),
+                                value: (*v).into(),
+                            })? as u32;
                             buf.extend_from_slice(&n.to_le_bytes());
                         }
                         b'f' => {
                             let f: f32 = std::str::from_utf8(v)
                                 .ok()
                                 .and_then(|s| s.parse().ok())
-                                .unwrap_or(0.0);
+                                .ok_or_else(|| SamRecordError::InvalidAuxValue {
+                                tag: tag.into(),
+                                value: (*v).into(),
+                            })?;
                             buf.extend_from_slice(&f.to_le_bytes());
                         }
                         _ => {}
@@ -509,8 +534,10 @@ fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
     Ok(())
 }
 
+// r[impl sam.record.aux_int_range]
 /// Serialize an integer value using the smallest BAM integer type.
-fn serialize_bam_int(buf: &mut Vec<u8>, val: i64) {
+/// Returns an error if the value does not fit any BAM integer type (i8/u8/i16/u16/i32/u32).
+fn serialize_bam_int(buf: &mut Vec<u8>, val: i64) -> Result<(), SamRecordError> {
     if (-128..=127).contains(&val) {
         buf.push(b'c');
         buf.push(val as u8);
@@ -526,10 +553,13 @@ fn serialize_bam_int(buf: &mut Vec<u8>, val: i64) {
     } else if (-2_147_483_648..=2_147_483_647).contains(&val) {
         buf.push(b'i');
         buf.extend_from_slice(&(val as i32).to_le_bytes());
-    } else {
+    } else if (0..=4_294_967_295).contains(&val) {
         buf.push(b'I');
         buf.extend_from_slice(&(val as u32).to_le_bytes());
+    } else {
+        return Err(SamRecordError::AuxIntOutOfRange { value: val });
     }
+    Ok(())
 }
 
 // r[impl sam.header.parse]
@@ -612,7 +642,11 @@ fn find_tabix_index(sam_path: &Path) -> Result<BamIndex, SamError> {
 
 // --- Integer parsing from byte slices (no String allocation) ---
 
+// r[impl sam.record.parse_int_nonempty]
 fn parse_u8(bytes: &[u8]) -> Option<u8> {
+    if bytes.is_empty() {
+        return None;
+    }
     let mut val = 0u16;
     for &b in bytes {
         if !b.is_ascii_digit() {
@@ -624,6 +658,9 @@ fn parse_u8(bytes: &[u8]) -> Option<u8> {
 }
 
 fn parse_u16(bytes: &[u8]) -> Option<u16> {
+    if bytes.is_empty() {
+        return None;
+    }
     let mut val = 0u32;
     for &b in bytes {
         if !b.is_ascii_digit() {
@@ -635,6 +672,9 @@ fn parse_u16(bytes: &[u8]) -> Option<u16> {
 }
 
 fn parse_u32(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() {
+        return None;
+    }
     let mut val = 0u64;
     for &b in bytes {
         if !b.is_ascii_digit() {
@@ -806,6 +846,146 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("bgzip"), "error message should mention bgzip: {msg}");
         assert!(msg.contains("test.sam"), "error message should contain file name: {msg}");
+    }
+
+    fn call_parse_with_region(
+        line: &[u8],
+        header: &BamHeader,
+        start: i64,
+        end: i64,
+    ) -> Result<(Option<()>, RecordStore), SamError> {
+        let (mut store, mut cigar_buf, mut bases_buf, mut qual_buf, mut aux_buf) =
+            make_store_and_bufs();
+        let result = parse_sam_line(
+            line,
+            header,
+            0,
+            start,
+            end,
+            &mut store,
+            &mut cigar_buf,
+            &mut bases_buf,
+            &mut qual_buf,
+            &mut aux_buf,
+        )?;
+        Ok((result, store))
+    }
+
+    // r[verify sam.reader.overlap_halfopen]
+    #[test]
+    fn overlap_filter_halfopen_pos_equals_end() {
+        let header = make_header();
+        // Record at pos=100 (1-based), 4M cigar -> 0-based pos=99, end_pos=103
+        // Query region [0, 99) — pos == end, should be filtered out
+        let line = b"r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~";
+        let (result, store) =
+            call_parse_with_region(line, &header, 0, 99).expect("parse should succeed");
+        assert!(result.is_none(), "record at pos=99 should be filtered when end=99");
+        assert_eq!(store.len(), 0);
+    }
+
+    // r[verify sam.reader.overlap_halfopen]
+    #[test]
+    fn overlap_filter_halfopen_end_pos_equals_start() {
+        let header = make_header();
+        // Record at pos=100 (1-based), 4M cigar -> 0-based pos=99, end_pos=103
+        // Query region [103, 200) — end_pos == start, should be filtered out
+        let line = b"r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~";
+        let (result, store) =
+            call_parse_with_region(line, &header, 103, 200).expect("parse should succeed");
+        assert!(result.is_none(), "record with end_pos=103 should be filtered when start=103");
+        assert_eq!(store.len(), 0);
+    }
+
+    // r[verify sam.reader.overlap_halfopen]
+    #[test]
+    fn overlap_filter_halfopen_overlapping() {
+        let header = make_header();
+        // Record at pos=100 (1-based), 4M cigar -> 0-based pos=99, end_pos=103
+        // Query region [100, 103) — should overlap
+        let line = b"r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~";
+        let (result, store) =
+            call_parse_with_region(line, &header, 100, 103).expect("parse should succeed");
+        assert!(result.is_some(), "record should overlap region [100, 103)");
+        assert_eq!(store.len(), 1);
+    }
+
+    // r[verify sam.record.aux_parse_strict]
+    #[test]
+    fn error_malformed_aux_int_tag() {
+        let header = make_header();
+        let line = b"r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~\tNH:i:NOTANUMBER";
+        let err = call_parse(line, &header).expect_err("expected InvalidAuxValue error");
+        assert!(
+            matches!(
+                err,
+                SamError::MalformedRecord { source: SamRecordError::InvalidAuxValue { .. } }
+            ),
+            "expected InvalidAuxValue, got: {err}"
+        );
+    }
+
+    // r[verify sam.record.parse_int_nonempty]
+    #[test]
+    fn parse_u8_rejects_empty() {
+        assert_eq!(parse_u8(b""), None, "parse_u8 should reject empty input");
+    }
+
+    // r[verify sam.record.parse_int_nonempty]
+    #[test]
+    fn parse_u16_rejects_empty() {
+        assert_eq!(parse_u16(b""), None, "parse_u16 should reject empty input");
+    }
+
+    // r[verify sam.record.parse_int_nonempty]
+    #[test]
+    fn parse_u32_rejects_empty() {
+        assert_eq!(parse_u32(b""), None, "parse_u32 should reject empty input");
+    }
+
+    // r[verify sam.record.aux_int_range]
+    #[test]
+    fn serialize_bam_int_rejects_out_of_range() {
+        // Values outside [-2147483648, 4294967295] cannot fit any BAM integer type
+        let mut buf = Vec::new();
+        let err = serialize_bam_int(&mut buf, i64::MAX).expect_err("should reject i64::MAX");
+        assert!(
+            matches!(err, SamRecordError::AuxIntOutOfRange { value } if value == i64::MAX),
+            "expected AuxIntOutOfRange, got: {err}"
+        );
+
+        buf.clear();
+        let err = serialize_bam_int(&mut buf, i64::MIN).expect_err("should reject i64::MIN");
+        assert!(
+            matches!(err, SamRecordError::AuxIntOutOfRange { value } if value == i64::MIN),
+            "expected AuxIntOutOfRange, got: {err}"
+        );
+
+        // u32::MAX should still work
+        buf.clear();
+        serialize_bam_int(&mut buf, u32::MAX as i64).expect("u32::MAX should be valid");
+        assert_eq!(buf[0], b'I');
+
+        // i32::MIN should still work
+        buf.clear();
+        serialize_bam_int(&mut buf, i32::MIN as i64).expect("i32::MIN should be valid");
+        assert_eq!(buf[0], b'i');
+    }
+
+    // r[verify sam.record.aux_int_range]
+    #[test]
+    fn aux_tag_with_huge_int_returns_error() {
+        let header = make_header();
+        // 9999999999999 exceeds u32::MAX
+        let line = b"r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~\tNH:i:9999999999999";
+        let err = call_parse(line, &header).expect_err("expected AuxIntOutOfRange error");
+        assert!(
+            matches!(
+                err,
+                SamError::MalformedRecord { source: SamRecordError::AuxIntOutOfRange { .. } }
+            ),
+            "expected AuxIntOutOfRange, got: {err}"
+        );
     }
 
     // r[verify sam.index.csi+2]

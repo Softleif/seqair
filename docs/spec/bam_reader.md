@@ -65,3 +65,13 @@ r[bam.reader.fork_arc_identity]
 
 r[bam.reader.fork_concurrent]
 Multiple forks from the same prototype MUST be safe to use concurrently from different threads. Since the shared state is immutable and each fork owns its file handles, no synchronization is needed beyond the `Arc` reference count.
+
+## Coordinate validation
+
+r[bam.reader.coordinate_overflow]
+`fetch_into` MUST validate that `tid` fits in `i32` and that `start`/`end` fit in `i64` before using them. If any value exceeds the signed maximum, `fetch_into` MUST return a `BamError::CoordinateOverflow` rather than silently truncating via `as` casts.
+
+## Error propagation
+
+r[bam.reader.propagate_errors]
+`fetch_into` (and `ChunkCache::load`) MUST propagate I/O and decompression errors from the BGZF layer. Only `BgzfError::UnexpectedEof` (signalling the end of a chunk's data) should silently break the read loop. All other errors — CRC failures, truncated blocks, decompression failures, invalid magic, et.c — MUST be returned to the caller.

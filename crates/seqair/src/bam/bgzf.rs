@@ -61,6 +61,12 @@ pub enum BgzfError {
 
     #[error("virtual offset {offset:#x} is not within any loaded BGZF range")]
     VirtualOffsetOutOfRange { offset: u64 },
+
+    #[error("BGZF ISIZE ({isize_value}) exceeds maximum block size (65536)")]
+    UncompressedSizeTooLarge { isize_value: usize },
+
+    #[error("BAM record block_size ({block_size}) exceeds maximum ({max_size})")]
+    RecordTooLarge { block_size: usize, max_size: usize },
 }
 
 // r[impl bgzf.libdeflate]
@@ -254,6 +260,11 @@ impl BgzfReader {
             .ok_or(BgzfError::TruncatedBlock)?;
         let uncompressed_size = u32::from_le_bytes(isize_bytes) as usize;
 
+        // r[impl bgzf.max_block_size]
+        if uncompressed_size > MAX_BLOCK_SIZE {
+            return Err(BgzfError::UncompressedSizeTooLarge { isize_value: uncompressed_size });
+        }
+
         // EOF marker: zero-length uncompressed data
         if uncompressed_size == 0 {
             self.eof = true;
@@ -430,6 +441,53 @@ mod tests {
     fn find_bsize_missing() {
         let extra = vec![b'X', b'X', 2, 0, 0, 0];
         assert_eq!(find_bsize(&extra), None);
+    }
+
+    // r[verify bgzf.max_block_size]
+    #[test]
+    fn rejects_uncompressed_size_exceeding_max_block_size() {
+        use std::io::Write;
+
+        // Build a BGZF block with a valid header but ISIZE claiming > 65536.
+        let data = b"hello";
+        let mut compressor =
+            libdeflater::Compressor::new(libdeflater::CompressionLvl::new(1).unwrap());
+        let bound = compressor.deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let compressed_len = compressor.deflate_compress(data, &mut compressed).unwrap();
+        compressed.truncate(compressed_len);
+
+        let mut crc = libdeflater::Crc::new();
+        crc.update(data);
+
+        let bsize = (18 + compressed_len + 8 - 1) as u16;
+        let mut block = Vec::new();
+        block.extend_from_slice(&[0x1f, 0x8b, 0x08, 0x04]);
+        block.extend_from_slice(&[0; 4]); // MTIME
+        block.push(0); // XFL
+        block.push(0xff); // OS
+        block.extend_from_slice(&6u16.to_le_bytes()); // XLEN = 6
+        block.extend_from_slice(&[b'B', b'C', 2, 0]); // BC subfield
+        block.extend_from_slice(&bsize.to_le_bytes()); // BSIZE
+        block.extend_from_slice(&compressed);
+        block.extend_from_slice(&crc.sum().to_le_bytes());
+        // Tamper: write ISIZE = 65537 (> MAX_BLOCK_SIZE)
+        block.extend_from_slice(&65537u32.to_le_bytes());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_isize.bgzf");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&block).unwrap();
+        drop(f);
+
+        let mut reader = BgzfReader::open(&path).unwrap();
+        let result = reader.read_block();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, BgzfError::UncompressedSizeTooLarge { isize_value: 65537 }),
+            "expected UncompressedSizeTooLarge, got {err:?}"
+        );
     }
 
     #[test]

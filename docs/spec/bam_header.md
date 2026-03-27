@@ -14,6 +14,9 @@ A BAM file MUST begin with the magic bytes `BAM\1` (0x42, 0x41, 0x4d, 0x01) afte
 r[bam.header.text]
 After the magic, a 4-byte little-endian `l_text` gives the length of the SAM header text. The reader MUST parse this text to extract `@HD`, `@SQ`, `@RG`, and `@PG` header lines.
 
+r[bam.header.non_negative_lengths]
+Header length fields (`l_text`, `n_ref`, `l_name`) are stored as `i32` in the BAM format. The reader MUST validate that these values are non-negative before using them as sizes. Negative values from corrupt files MUST return a `BamHeaderError` rather than causing a massive allocation via `i32 as usize` wrapping.
+
 r[bam.header.references]
 After the header text, a 4-byte little-endian `n_ref` gives the number of reference sequences. Each reference is encoded as a 4-byte `l_name` (including NUL), the name bytes, and a 4-byte `l_ref` (sequence length). The reader MUST parse all reference sequences.
 

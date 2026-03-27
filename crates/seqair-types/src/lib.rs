@@ -25,10 +25,10 @@ pub use smallvec;
 pub use smallvec::SmallVec;
 
 pub use {
-    base::Base,
+    base::{Base, BaseError},
     phred::Phred,
-    probability::Probability,
-    region_string::RegionString,
+    probability::{Probability, ProbabilityError},
+    region_string::{RegionString, RegionStringError},
     rms::{RmsAccumulator, RootMeanSquare, RootMeanSquareExt},
     strand::{Strand, StrandFromRecord, strand_from_flags},
 };

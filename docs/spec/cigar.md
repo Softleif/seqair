@@ -45,5 +45,11 @@ A `CigarIndex` MUST be constructable from a record's CIGAR and start position. I
 r[cigar.qpos_at]
 `CigarIndex::qpos_at(ref_pos)` MUST return `Some(query_pos)` when the reference position falls within a query-consuming operation (M, =, X, I at the boundary), or `None` when the position falls within a deletion, reference skip, or outside the alignment.
 
+r[cigar.qpos_bounds]
+`qpos_at` MUST return `None` for positions outside the alignment's reference span. This applies to all mapping variants, including the linear fast-path. Positions before the alignment start or at/after the alignment end MUST return `None`.
+
+r[cigar.compact_op_position_invariant]
+`CompactOp::ref_start` is stored as `i32`. Since BAM positions are defined as `i32` values (max 2^31 - 1), this is sufficient. The construction of `CompactOp` MUST assert (via `debug_assert!`) that the computed reference position fits in `i32`.
+
 r[cigar.qpos_accuracy]
 `qpos_at` MUST produce identical results to htslib's `Alignment::qpos()` for every reference position within the alignment span. This is verified by comparison tests.

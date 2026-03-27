@@ -9,16 +9,27 @@ use std::io::{BufRead, Cursor, Read, Write};
 
 use super::reader::CramError;
 
+/// Maximum number of names allowed in a tok3 block.
+const TOK3_NAME_COUNT_LIMIT: usize = 10_000_000;
+
 /// Decode a tok3 compressed block.
 pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
 
     let (uncompressed_size, name_count, use_arith) = read_header(&mut cur)?;
 
+    // r[impl cram.tok3.name_count_limit]
+    if name_count > TOK3_NAME_COUNT_LIMIT {
+        return Err(CramError::Tok3NameCountExceedsLimit {
+            count: name_count,
+            limit: TOK3_NAME_COUNT_LIMIT,
+        });
+    }
+
     let mut b = decode_token_byte_streams(&mut cur, use_arith, name_count)?;
 
     let mut names: Vec<Vec<u8>> = vec![Vec::new(); name_count];
-    let mut tokens: Vec<Vec<Option<Token>>> = vec![vec![None; 128]; name_count];
+    let mut tokens: Vec<Vec<Option<Token>>> = vec![Vec::new(); name_count];
 
     let mut dst = Vec::with_capacity(uncompressed_size);
 
@@ -100,6 +111,18 @@ enum Token {
     Nop,
 }
 
+/// Return a u8 discriminant for error reporting (avoids String in error variants).
+fn token_discriminant(token: Option<&Token>) -> u8 {
+    match token {
+        None => 0,
+        Some(Token::Char(_)) => 1,
+        Some(Token::String(_)) => 2,
+        Some(Token::Digits(_)) => 3,
+        Some(Token::PaddedDigits(_, _)) => 4,
+        Some(Token::Nop) => 5,
+    }
+}
+
 // ── Per-position token reader ────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
@@ -117,12 +140,14 @@ struct TokenReader {
 }
 
 impl TokenReader {
+    // r[impl cram.tok3.dz_len_reader]
     fn get(&self, ty: TokenType) -> &Cursor<Vec<u8>> {
         match ty {
             TokenType::Type => &self.type_reader,
             TokenType::String => &self.string_reader,
             TokenType::Char => &self.char_reader,
             TokenType::Digits0 => &self.digits0_reader,
+            TokenType::DZLen => &self.dz_len_reader,
             TokenType::Dup => &self.dup_reader,
             TokenType::Diff => &self.diff_reader,
             TokenType::Digits => &self.digits_reader,
@@ -214,9 +239,9 @@ impl TokenReader {
                 let delta = u32::from(buf[0]);
                 match prev_token {
                     Some(Token::Digits(n)) => Ok(Some(Token::Digits(n + delta))),
-                    _ => {
-                        Err(CramError::Tok3DeltaRequiresDigits { found: format!("{prev_token:?}") })
-                    }
+                    _ => Err(CramError::Tok3DeltaRequiresDigits {
+                        found: token_discriminant(prev_token),
+                    }),
                 }
             }
             TokenType::Delta0 => {
@@ -230,7 +255,7 @@ impl TokenReader {
                         Ok(Some(Token::PaddedDigits(n + delta, *width)))
                     }
                     _ => Err(CramError::Tok3Delta0RequiresPaddedDigits {
-                        found: format!("{prev_token:?}"),
+                        found: token_discriminant(prev_token),
                     }),
                 }
             }
@@ -374,10 +399,13 @@ fn decode_single_name(
                 Token::Nop => {}
             }
 
-            if let Some(ts) = tokens.get_mut(n)
-                && let Some(slot) = ts.get_mut(t)
-            {
-                *slot = Some(token);
+            if let Some(ts) = tokens.get_mut(n) {
+                if t >= ts.len() {
+                    ts.resize(t + 1, None);
+                }
+                if let Some(slot) = ts.get_mut(t) {
+                    *slot = Some(token);
+                }
             }
         } else {
             break;
@@ -404,9 +432,15 @@ fn read_u32_le(src: &mut &[u8]) -> Result<u32, CramError> {
     Ok(val)
 }
 
+// r[impl cram.codec.uint7_bounded]
 fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
     let mut n: u32 = 0;
+    let mut count: u8 = 0;
     loop {
+        if count >= 5 {
+            return Err(CramError::Uint7Overflow);
+        }
+        count += 1;
         let b = read_u8(src)? as u32;
         n = (n << 7) | (b & 0x7f);
         if b & 0x80 == 0 {
@@ -516,7 +550,7 @@ mod tests {
         // TODO: requires crafting a full multi-name tok3 stream where the second name
         // has a Delta token at a position that had a non-Digits token in the previous name.
         // Testing via constructor for now.
-        let err = CramError::Tok3DeltaRequiresDigits { found: "None".to_string() };
+        let err = CramError::Tok3DeltaRequiresDigits { found: 0 };
         assert!(matches!(err, CramError::Tok3DeltaRequiresDigits { .. }));
     }
 
@@ -524,7 +558,7 @@ mod tests {
     fn tok3_delta0_requires_padded_digits_error_variant() {
         // Tok3Delta0RequiresPaddedDigits is similar but for Delta0 needing PaddedDigits.
         // TODO: requires crafting a multi-name tok3 stream.
-        let err = CramError::Tok3Delta0RequiresPaddedDigits { found: "None".to_string() };
+        let err = CramError::Tok3Delta0RequiresPaddedDigits { found: 0 };
         assert!(matches!(err, CramError::Tok3Delta0RequiresPaddedDigits { .. }));
     }
 
@@ -601,5 +635,35 @@ I17_08765:2:124:45613:16161#9\0\
 ";
 
         assert_eq!(result, expected);
+    }
+
+    // r[verify cram.tok3.dz_len_reader]
+    #[test]
+    fn token_reader_get_dz_len_matches_get_mut() {
+        let mut reader = TokenReader::default();
+        let test_data = vec![42u8, 99];
+        reader.set(TokenType::DZLen, test_data.clone());
+
+        // get() must return the dz_len_reader, not type_reader
+        let immutable = reader.get(TokenType::DZLen);
+        assert_eq!(immutable.get_ref(), &test_data);
+
+        let mutable = reader.get_mut(TokenType::DZLen);
+        assert_eq!(mutable.get_ref(), &test_data);
+    }
+
+    // r[verify cram.tok3.name_count_limit]
+    #[test]
+    fn tok3_name_count_exceeds_limit() {
+        let mut src = Vec::new();
+        src.extend_from_slice(&0u32.to_le_bytes()); // uncompressed_size
+        src.extend_from_slice(&20_000_000u32.to_le_bytes()); // name_count > limit
+        src.push(0u8); // method = 0 (rANS)
+
+        let err = decode(&src).unwrap_err();
+        assert!(
+            matches!(err, CramError::Tok3NameCountExceedsLimit { count: 20_000_000, .. }),
+            "expected Tok3NameCountExceedsLimit, got: {err:?}"
+        );
     }
 }

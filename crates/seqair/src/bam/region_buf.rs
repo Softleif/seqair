@@ -431,6 +431,12 @@ impl RegionBuf {
             u32::from_le_bytes(len_buf) as usize
         };
 
+        // r[impl bam.record.max_size]
+        const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
+        if block_size > MAX_RECORD_SIZE {
+            return Err(BgzfError::RecordTooLarge { block_size, max_size: MAX_RECORD_SIZE });
+        }
+
         // Fast path: the entire record body is already in the decompressed buffer.
         if self.buf_pos + block_size <= self.buf.len() {
             let slice = self
@@ -450,13 +456,18 @@ impl RegionBuf {
     }
 }
 
+// r[impl region_buf.drop_no_panic]
 impl Drop for RegionBuf {
     fn drop(&mut self) {
         if self.blocks_decompressed > 0 {
             let max_gap = self
                 .ranges
                 .windows(2)
-                .map(|w| w.get(1).map_or(0, |r| r.file_start) - w.first().map_or(0, |r| r.file_end))
+                .map(|w| {
+                    w.get(1)
+                        .map_or(0, |r| r.file_start)
+                        .saturating_sub(w.first().map_or(0, |r| r.file_end))
+                })
                 .max()
                 .unwrap_or(0);
 
@@ -525,6 +536,64 @@ fn merge_chunks(chunks: &[Chunk]) -> Vec<MergedRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // r[verify region_buf.drop_no_panic]
+    #[test]
+    fn drop_does_not_panic_with_overlapping_ranges() {
+        // Simulate a RegionBuf with overlapping ranges where file_start < prev file_end
+        // (which would cause subtraction underflow without saturating_sub).
+        let buf = RegionBuf {
+            data: vec![0; 100],
+            ranges: vec![
+                RangeMapping { file_start: 100, file_end: 300, buf_start: 0 },
+                RangeMapping { file_start: 200, file_end: 400, buf_start: 50 },
+            ],
+            cursor: 0,
+            buf: Vec::new(),
+            buf_pos: 0,
+            block_offset: 0,
+            eof: false,
+            blocks_decompressed: 1,
+            decompressed_bytes: 100,
+            decompressor: libdeflater::Decompressor::new(),
+        };
+        // If Drop panics, the test will fail.
+        drop(buf);
+    }
+
+    // r[verify bam.record.max_size]
+    #[test]
+    fn read_record_rejects_huge_block_size() {
+        // Build a BGZF file with a single block whose decompressed content
+        // starts with a u32 block_size = 0xFFFF_FFFF (4 GB), which should be rejected.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::MAX.to_le_bytes()); // block_size = 4GB
+        payload.extend_from_slice(&[0u8; 28]); // some padding
+
+        let block = make_bgzf_block(&payload);
+        let mut file = Vec::new();
+        file.extend_from_slice(&block);
+        file.extend_from_slice(&make_bgzf_eof());
+
+        let offsets = vec![0u64];
+        let chunks = vec![Chunk {
+            begin: VirtualOffset::new(offsets[0], 0),
+            end: VirtualOffset::new(offsets[0] + 1, 0),
+        }];
+
+        let mut cursor = std::io::Cursor::new(file);
+        let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        buf.seek_virtual(VirtualOffset::new(0, 0)).unwrap();
+
+        let mut scratch = Vec::new();
+        let result = buf.read_record(&mut scratch);
+        assert!(result.is_err(), "read_record should reject block_size > 2MB");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, BgzfError::RecordTooLarge { .. }),
+            "expected RecordTooLarge, got {err:?}"
+        );
+    }
 
     #[test]
     fn merge_overlapping_chunks() {

@@ -148,17 +148,30 @@ pub enum CramError {
     #[error("tok3 dup position {dup_pos} out of range")]
     Tok3DupPositionOutOfRange { dup_pos: usize },
 
-    #[error("tok3 Delta token requires Digits predecessor, got {found:?}")]
-    Tok3DeltaRequiresDigits { found: String },
+    #[error("tok3 Delta token requires Digits predecessor, got token discriminant {found}")]
+    Tok3DeltaRequiresDigits { found: u8 },
 
-    #[error("tok3 Delta0 token requires PaddedDigits predecessor, got {found:?}")]
-    Tok3Delta0RequiresPaddedDigits { found: String },
+    #[error("tok3 Delta0 token requires PaddedDigits predecessor, got token discriminant {found}")]
+    Tok3Delta0RequiresPaddedDigits { found: u8 },
 
     #[error("tok3 distance {distance} exceeds name index {name_index}")]
     Tok3DistanceExceedsIndex { distance: usize, name_index: usize },
 
     #[error("tok3 dup reference index {index} out of range")]
     Tok3DupRefOutOfRange { index: usize },
+
+    #[error("tok3 name_count {count} exceeds limit {limit}")]
+    Tok3NameCountExceedsLimit { count: usize, limit: usize },
+
+    // ── Codec safety ─────────────────────────────────────────────────────────
+    #[error("uint7 overflow: more than 5 continuation bytes")]
+    Uint7Overflow,
+
+    #[error("frequency normalization overflow: sum {sum} cannot be represented in u32")]
+    FrequencyNormalizationOverflow { sum: u64 },
+
+    #[error("invalid length from ITF8: {value} is negative")]
+    InvalidLength { value: i32 },
 
     #[error("BGZF error")]
     Bgzf {

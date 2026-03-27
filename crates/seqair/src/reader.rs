@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::instrument;
 
+// r[impl unified.non_exhaustive_enums]
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FormatDetectionError {
     #[error(
         "CRAM format detected but no FASTA reference provided. \
@@ -56,6 +58,7 @@ pub enum FormatDetectionError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ReaderError {
     #[error("BAM reader error")]
     Bam {
@@ -99,6 +102,7 @@ pub enum ReaderError {
 /// Auto-detects BAM, bgzf-compressed SAM, or CRAM by inspecting magic bytes.
 /// All formats populate the same `RecordStore` via `fetch_into()`.
 // r[impl unified.reader_enum]
+#[non_exhaustive]
 pub enum IndexedReader {
     Bam(IndexedBamReader),
     Sam(IndexedSamReader),
@@ -295,12 +299,11 @@ impl Readers {
         stop: u64,
     ) -> Result<Rc<[Base]>, FastaError> {
         self.fasta.fetch_seq_into(name, start, stop, &mut self.fasta_buf)?;
-        Base::convert_ascii_in_place(&mut self.fasta_buf);
-        // Safety: convert_ascii_in_place wrote only valid Base discriminants
-        // (A=65, C=67, G=71, T=84, Unknown=78) into every byte of fasta_buf.
-        let bases: &[Base] = unsafe {
-            std::slice::from_raw_parts(self.fasta_buf.as_ptr() as *const Base, self.fasta_buf.len())
-        };
+        // Take the buffer so from_ascii_vec can reinterpret it in-place (safe),
+        // then create the Rc (which copies). The buffer capacity is lost but
+        // fasta_buf re-grows on the next call.
+        let buf = std::mem::take(&mut self.fasta_buf);
+        let bases = Base::from_ascii_vec(buf);
         Ok(Rc::from(bases))
     }
 

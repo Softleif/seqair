@@ -343,7 +343,7 @@ impl Drop for PileupEngine {
     fn drop(&mut self) {
         if self.columns_produced > 0 {
             tracing::debug!(
-                target: crate::PROFILE_TARGET,
+                target: super::region_buf::PROFILE_TARGET,
                 columns = self.columns_produced,
                 max_depth = self.max_active_depth,
                 active_cap = self.active.capacity(),

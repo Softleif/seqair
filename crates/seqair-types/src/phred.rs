@@ -30,21 +30,24 @@ use std::{fmt, ops::Deref};
 pub struct Phred(f64);
 
 impl Phred {
-    /// Get the Phred quality score as an integer
+    /// Get the Phred quality score as an integer, clamped to [0, 99].
+    // r[impl types.phred.as_int_clamp]
     pub fn as_int(self) -> i32 {
         let phred = self.0;
+        // NaN and values <= 0 clamp to 0
+        if !(phred > 0.0) {
+            return 0;
+        }
         if phred >= 99.0 {
             return 99;
-        }
-        if phred <= f64::MIN_POSITIVE {
-            return 0;
         }
         phred.round() as i32
     }
 
-    /// Create a Phred quality score from an integer
-    pub fn from_phred(phred: i32) -> Self {
-        Self(phred as f64)
+    /// Create a Phred quality score from an integer.
+    // r[impl types.phred.non_negative]
+    pub fn from_phred(phred: u8) -> Self {
+        Self(f64::from(phred))
     }
 }
 
@@ -95,5 +98,43 @@ mod tests {
     fn test_phred_zero() {
         // A probability of 1 (100% certainty) should yield a Phred score of 0
         assert_eq!(0., *Phred::from(Probability::new_panicky(1.)));
+    }
+
+    // r[verify types.phred.non_negative]
+    #[test]
+    fn from_phred_accepts_u8() {
+        // from_phred takes u8, so negative values are unrepresentable
+        let p = Phred::from_phred(0);
+        assert_eq!(p.as_int(), 0);
+        let p = Phred::from_phred(42);
+        assert_eq!(p.as_int(), 42);
+        let p = Phred::from_phred(255);
+        assert_eq!(p.as_int(), 99); // clamped
+    }
+
+    // r[verify types.phred.as_int_clamp]
+    #[test]
+    fn as_int_clamps_low_to_zero() {
+        // A probability of 1.0 yields Phred 0.0; as_int must return 0
+        let p = Phred::from(Probability::new_panicky(1.0));
+        assert_eq!(p.as_int(), 0);
+    }
+
+    // r[verify types.phred.as_int_clamp]
+    #[test]
+    fn as_int_clamps_high_to_99() {
+        let p = Phred::from_phred(99);
+        assert_eq!(p.as_int(), 99);
+        let p = Phred::from_phred(100);
+        assert_eq!(p.as_int(), 99);
+    }
+
+    // r[verify types.phred.as_int_clamp]
+    #[test]
+    fn as_int_handles_nan() {
+        // Construct a Phred with NaN inner value (via From<Probability> edge case
+        // is impossible since Probability rejects NaN, so we test the raw struct)
+        let p = Phred(f64::NAN);
+        assert_eq!(p.as_int(), 0);
     }
 }

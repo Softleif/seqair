@@ -208,7 +208,8 @@ impl CigarIndex {
 /// Complex CIGARs use a `SmallVec` of compact ops that stays inline for ≤6 ops.
 pub(crate) enum CigarMapping {
     /// `qpos = (pos - rec_pos) as usize + query_offset as usize`
-    Linear { rec_pos: i64, query_offset: u32 },
+    // r[impl cigar.qpos_bounds]
+    Linear { rec_pos: i64, query_offset: u32, match_len: u32 },
     /// Pre-computed compact ops for linear/binary search.
     Complex(SmallVec<CompactOp, 6>),
 }
@@ -225,15 +226,19 @@ pub(crate) struct CompactOp {
 impl CigarMapping {
     pub(crate) fn new(rec_pos: i64, cigar_bytes: &[u8]) -> Self {
         match try_linear(cigar_bytes) {
-            Some(query_offset) => Self::Linear { rec_pos, query_offset },
+            Some((query_offset, match_len)) => Self::Linear { rec_pos, query_offset, match_len },
             None => Self::Complex(build_compact_ops(rec_pos, cigar_bytes)),
         }
     }
 
     pub(crate) fn qpos_at(&self, pos: i64) -> Option<usize> {
         match self {
-            Self::Linear { rec_pos, query_offset } => {
-                Some((pos - rec_pos) as usize + *query_offset as usize)
+            Self::Linear { rec_pos, query_offset, match_len } => {
+                let offset = pos - rec_pos;
+                if offset < 0 || offset >= i64::from(*match_len) {
+                    return None;
+                }
+                Some(offset as usize + *query_offset as usize)
             }
             Self::Complex(ops) => {
                 if ops.len() <= 4 {
@@ -248,9 +253,10 @@ impl CigarMapping {
 
 /// Check if the CIGAR is a simple clips-match-clips pattern.
 /// Returns the query offset (leading soft-clip length) if linear, None otherwise.
-fn try_linear(cigar_bytes: &[u8]) -> Option<u32> {
+fn try_linear(cigar_bytes: &[u8]) -> Option<(u32, u32)> {
     let n_ops = cigar_bytes.len() / 4;
     let mut query_offset = 0u32;
+    let mut match_len = 0u32;
     // 0 = leading clips, 1 = match block, 2 = trailing clips
     let mut phase = 0u8;
 
@@ -262,8 +268,11 @@ fn try_linear(cigar_bytes: &[u8]) -> Option<u32> {
         match (phase, op_type) {
             (0, CIGAR_S) => query_offset += len,
             (0, CIGAR_H) => {}
-            (0, CIGAR_M | CIGAR_EQ | CIGAR_X) => phase = 1,
-            (1, CIGAR_M | CIGAR_EQ | CIGAR_X) => {}
+            (0, CIGAR_M | CIGAR_EQ | CIGAR_X) => {
+                match_len += len;
+                phase = 1;
+            }
+            (1, CIGAR_M | CIGAR_EQ | CIGAR_X) => match_len += len,
             (1 | 2, CIGAR_S | CIGAR_H) => phase = 2,
             _ => return None,
         }
@@ -271,7 +280,11 @@ fn try_linear(cigar_bytes: &[u8]) -> Option<u32> {
 
     // Only succeed if we reached the match phase (phase >= 1).
     // Pure soft/hard clips (phase == 0) should use the complex path.
-    if phase >= 1 { Some(query_offset) } else { None }
+    if phase >= 1 {
+        Some((query_offset, match_len))
+    } else {
+        None
+    }
 }
 
 fn build_compact_ops(rec_pos: i64, cigar_bytes: &[u8]) -> SmallVec<CompactOp, 6> {
@@ -285,8 +298,13 @@ fn build_compact_ops(rec_pos: i64, cigar_bytes: &[u8]) -> SmallVec<CompactOp, 6>
         let len = packed >> 4;
         let op_type = (packed & 0xF) as u8;
 
+        let ref_start_i64 = rec_pos + ref_off;
+        debug_assert!(
+            ref_start_i64 >= i64::from(i32::MIN) && ref_start_i64 <= i64::from(i32::MAX),
+            "ref_start {ref_start_i64} exceeds i32 range — BAM positions must fit in i32"
+        );
         ops.push(CompactOp {
-            ref_start: (rec_pos + ref_off) as i32,
+            ref_start: ref_start_i64 as i32,
             query_start: query_off,
             len,
             op_type,
@@ -356,4 +374,55 @@ fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
         buf.len()
     );
     [buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pack a single CIGAR op into 4 LE bytes: upper 28 bits = len, lower 4 = op.
+    fn pack_cigar_op(op: u8, len: u32) -> [u8; 4] {
+        ((len << 4) | u32::from(op)).to_le_bytes()
+    }
+
+    // r[verify cigar.compact_op_position_invariant]
+    #[test]
+    fn compact_op_ref_start_fits_i32_for_bam_positions() {
+        // BAM positions are i32 (max 2^31-1 = 2_147_483_647).
+        // CompactOp stores ref_start as i32. Verify it works at the maximum BAM position.
+        let mut cigar = Vec::new();
+        cigar.extend_from_slice(&pack_cigar_op(CIGAR_M, 100));
+        let rec_pos = i64::from(i32::MAX) - 100; // near max BAM position
+        let mapping = CigarMapping::new(rec_pos, &cigar);
+        // Should work fine — position fits in i32
+        assert!(matches!(mapping, CigarMapping::Linear { .. }));
+        assert_eq!(mapping.qpos_at(rec_pos), Some(0));
+    }
+
+    // r[verify cigar.qpos_bounds]
+    #[test]
+    fn linear_cigar_mapping_bounds_check() {
+        // 5S + 100M: rec_pos=1000, query_offset=5, match_len=100
+        let mut cigar = Vec::new();
+        cigar.extend_from_slice(&pack_cigar_op(CIGAR_S, 5));
+        cigar.extend_from_slice(&pack_cigar_op(CIGAR_M, 100));
+
+        let mapping = CigarMapping::new(1000, &cigar);
+        assert!(matches!(mapping, CigarMapping::Linear { .. }));
+
+        // Valid positions: 1000..1100
+        assert_eq!(mapping.qpos_at(1000), Some(5));
+        assert_eq!(mapping.qpos_at(1050), Some(55));
+        assert_eq!(mapping.qpos_at(1099), Some(104));
+
+        // Out-of-range: before alignment start
+        assert_eq!(mapping.qpos_at(999), None, "pos before rec_pos must return None");
+
+        // Out-of-range: at/past alignment end
+        assert_eq!(mapping.qpos_at(1100), None, "pos at rec_pos + match_len must return None");
+        assert_eq!(mapping.qpos_at(1200), None, "pos past alignment end must return None");
+
+        // Far out-of-range (would wrap with unsigned subtraction)
+        assert_eq!(mapping.qpos_at(0), None, "pos far before alignment must return None");
+    }
 }

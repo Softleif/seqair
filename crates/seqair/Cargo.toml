@@ -2,11 +2,12 @@
 name = "seqair"
 version = "0.1.0"
 edition = "2024"
+description = "Pure-Rust BAM/SAM/CRAM/FASTA reader and pileup engine"
+repository = "https://github.com/Softleif/seqair"
 license = "MIT OR Apache-2.0"
 rust-version = "1.92.0"
 
 [dependencies]
-color-eyre = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 libdeflater = "1.25.2"

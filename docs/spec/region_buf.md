@@ -60,6 +60,9 @@ The fast-path header parsing (XLEN=6, BC at fixed offset) MUST be used when appl
 r[region_buf.read_exact]
 The region buffer MUST support reading an exact number of bytes, transparently crossing block boundaries, with the same API as `BgzfReader::read_exact_into`.
 
+r[region_buf.drop_no_panic]
+The `Drop` implementation MUST never panic. Gap-size calculations between ranges MUST use saturating arithmetic to handle overlapping or malformed range boundaries safely.
+
 r[region_buf.virtual_offset]
 The region buffer MUST track virtual offsets correctly: the block offset corresponds to the file position of the current block (not the buffer position), so that virtual offset comparisons with the BAM index chunk boundaries work correctly.
 

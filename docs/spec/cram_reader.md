@@ -486,8 +486,32 @@ PacBio and ONT CRAM files contain reads of 10,000-1,000,000+ bases. Read feature
 r[cram.edge.coordinate_clamp]
 Query coordinates passed to `fetch_into` are u64, but internal CRAM positions are i32/i64. When converting `u64::MAX` to i64 for overlap filtering, the cast wraps to -1, which silently filters out all records. The reader MUST clamp coordinates: `end.min(i64::MAX as u64) as i64`.
 
+r[cram.slice.ref_bounds_warning]
+During sequence reconstruction, if the reference sequence is shorter than the positions accessed (i.e., `ref_offset + ref_pos >= reference_seq.len()`), the reader MUST log a `tracing::warn!` on the first occurrence per reconstruction and fall back to `b'N'`. This may indicate a reference/CRAM mismatch but can legitimately occur near chromosome ends. The warning MUST be emitted at most once per record to avoid flooding logs.
+
 r[cram.edge.rans_sym_overflow]
 The rANS 4x8 frequency table uses run-length encoding where a symbol counter `sym: u8` is incremented for each run element. When `sym == 255`, `sym += 1` overflows. The reader MUST use wrapping arithmetic (`wrapping_add(1)`) for this counter — the overflow is harmless because the loop terminates before using the overflowed value.
+
+r[cram.codec.rans_sym_bounded]
+Symbol indices in rANS frequency table run-length reading MUST be bounded to 255. After a run-length loop, `sym` may have been incremented past 255 via `wrapping_add`. The code MUST NOT use the post-loop `sym` value as a table index if it has wrapped past 255. The run-length loop MUST break when `sym` would exceed 255.
+
+r[cram.codec.state_step_safety]
+The rANS `state_step` function computes `f * (s >> bits) + (s & mask) - g`. For valid frequency tables produced by conforming CRAM writers, `g <= f * (s >> bits) + (s & mask)` always holds, so the subtraction does not underflow. The implementation MUST use `wrapping_sub` for robustness against malformed data in release mode, with a `debug_assert!` to catch violations during development.
+
+r[cram.codec.normalize_checked]
+Frequency normalization (`normalize_frequencies`) sums all 256 frequency entries and doubles the sum in a loop. Both the sum and the doubling MUST use checked arithmetic to detect overflow from malformed frequency tables. Overflow MUST produce an error, not silent wraparound.
+
+r[cram.codec.uint7_bounded]
+The uint7 variable-length integer decoding loop MUST be bounded to at most 5 iterations. A u32 can hold at most 32 bits; 5 iterations of 7-bit groups produce 35 bits, which is the maximum meaningful input. More than 5 continuation bytes indicate malformed data and MUST produce an error.
+
+r[cram.slice.validated_lengths]
+Length fields decoded from ITF8 (e.g., `num_content_ids`, `num_blocks`, `alignment_span`) may be negative when interpreted as i32. Before using such values as `usize` for allocation or iteration, the reader MUST validate they are non-negative via `i32::try_from` or equivalent. Negative values MUST produce an error, not wrap to huge `usize` values causing OOM.
+
+r[cram.tok3.dz_len_reader]
+The `TokenReader::get()` and `get_mut()` methods MUST return the same reader for every `TokenType` variant. In particular, `DZLen` MUST map to `dz_len_reader` in both methods. A mismatch causes the dup-copy path (which uses `get()`) to read from the wrong stream.
+
+r[cram.tok3.name_count_limit]
+The `name_count` field in tok3 headers comes from untrusted data. Allocation based on `name_count` MUST be bounded to a reasonable limit (e.g., 10,000,000 names). The per-name token vector MUST be grown dynamically rather than pre-allocated to a fixed size, since the number of token positions varies per name.
 
 ## Performance considerations
 

@@ -16,6 +16,11 @@ By decoding directly into `Base` values at record construction time, we:
 r[base_decode.table]
 A 16-entry lookup table MUST map 4-bit BAM nibble codes directly to `Base` discriminant values: 1→A(65), 2→C(67), 4→G(71), 8→T(84), and all other codes (0, 3, 5, 6, 7, 9–14, 15) → Unknown(78).
 
+## Table invariant
+
+r[base_decode.table_invariant]
+Every entry in `DECODE_BASE_TYPED` (16 entries) and `DECODE_PAIR_TYPED` (256 × 2 = 512 bytes) MUST be a valid `Base` discriminant: A(65), C(67), G(71), T(84), or Unknown(78). This MUST be verified by an exhaustive test covering all entries.
+
 ## Decoding function
 
 r[base_decode.decode]
@@ -43,3 +48,15 @@ The ASCII batch converter MUST use SIMD acceleration (SSSE3 on x86_64, NEON on a
 
 r[base_decode.ascii_scalar_equivalence]
 The SIMD ASCII converter MUST produce identical output to applying `Base::from(u8)` element-wise. This MUST be verified by property-based tests covering arbitrary byte values and lengths including SIMD boundary lengths (0, 1, 15, 16, 31, 32, 33, 63, 64, 65, 128).
+
+## FromStr validation
+
+r[types.base.from_str_validation]
+`FromStr for Base` MUST accept only the characters A, C, G, T, and N (case-insensitive). Any other non-empty input MUST return `Err(BaseError::InvalidBase(byte))` where `byte` is the first byte of the trimmed input. Empty input MUST return `Err(BaseError::Empty)`.
+
+## Error display
+
+r[types.base.error_display]
+`BaseError` variants MUST display the actual invalid value.
+`InvalidBase(byte)` SHOULD format as `"Invalid base: 0x{byte:02x}"`.
+`Empty` SHOULD format as `"Empty"`.

@@ -141,10 +141,14 @@ fn read_frequencies_0(src: &mut &[u8]) -> Result<[u16; ALPHABET_SIZE], CramError
         if sym == prev_sym.wrapping_add(1) {
             let run_len = read_u8(src)?;
             // r[impl cram.edge.rans_sym_overflow]
-            // sym can reach 255; wrapping_add prevents overflow while the run terminates
-            // before the overflowed value is used as a table index.
+            // r[impl cram.codec.rans_sym_bounded]
+            // sym can reach 255; break after writing freq[255] to avoid
+            // wrapping to 0 and corrupting freq[0].
             for _ in 0..run_len {
                 freq[sym as usize] = read_itf8_u16(src)?;
+                if sym == 255 {
+                    break;
+                }
                 sym = sym.wrapping_add(1);
             }
         }

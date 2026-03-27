@@ -55,6 +55,10 @@ impl<'a> AuxValue<'a> {
 /// Find a tag in raw BAM auxiliary data and return its typed value.
 ///
 /// Returns `None` if the tag is not found or the data is truncated.
+///
+/// B-type (array) tags are not yet supported and will return `None`, even when
+/// the tag is present. The bytes are skipped correctly so that subsequent tags
+/// in the same record remain reachable.
 pub fn find_tag<'a>(aux: &'a [u8], tag: [u8; 2]) -> Option<AuxValue<'a>> {
     for (t, value) in iter_tags(aux) {
         if t == tag {
