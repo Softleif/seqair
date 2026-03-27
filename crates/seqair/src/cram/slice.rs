@@ -877,19 +877,14 @@ mod tests {
         // Build a slice header where num_content_ids encodes -1 (0xFFFFFFFF as ITF8).
         // Fields before num_content_ids: ref_seq_id, alignment_start, alignment_span,
         // num_records, record_counter (ltf8), num_blocks — all as ITF8/LTF8.
-        let mut data = Vec::new();
-        // ref_seq_id = 0 (1 byte ITF8)
-        data.push(0x00);
-        // alignment_start = 1 (1 byte ITF8)
-        data.push(0x01);
-        // alignment_span = 1 (1 byte ITF8)
-        data.push(0x01);
-        // num_records = 0 (1 byte ITF8)
-        data.push(0x00);
-        // record_counter = 0 (1 byte LTF8)
-        data.push(0x00);
-        // num_blocks = 0 (1 byte ITF8)
-        data.push(0x00);
+        let mut data = vec![
+            0x00, // ref_seq_id = 0 (1 byte ITF8)
+            0x01, // alignment_start = 1 (1 byte ITF8)
+            0x01, // alignment_span = 1 (1 byte ITF8)
+            0x00, // num_records = 0 (1 byte ITF8)
+            0x00, // record_counter = 0 (1 byte LTF8)
+            0x00, // num_blocks = 0 (1 byte ITF8)
+        ];
         // num_content_ids = -1 (5 byte ITF8: 0xFF 0xFF 0xFF 0xFF 0xFF)
         data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
 

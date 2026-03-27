@@ -347,7 +347,7 @@ mod tests {
         // Write cigar: M ops
         let cigar_start = var_start + name_len as usize;
         for i in 0..n_cigar_ops as usize {
-            let op = (seq_len as u32) << 4; // M op
+            let op = seq_len << 4; // M op
             let off = cigar_start + i * 4;
             if off + 4 <= raw.len() {
                 raw[off..off + 4].copy_from_slice(&op.to_le_bytes());

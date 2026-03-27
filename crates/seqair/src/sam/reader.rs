@@ -36,10 +36,11 @@ fn format_aux_field(bytes: &[u8], max_len: usize) -> String {
 
 /// Format a 2-byte tag as ASCII if both bytes are printable, otherwise as hex.
 fn format_tag(tag: &[u8]) -> String {
-    if let [a, b] = tag {
-        if a.is_ascii_graphic() && b.is_ascii_graphic() {
-            return format!("{}{}", *a as char, *b as char);
-        }
+    if let [a, b] = tag
+        && a.is_ascii_graphic()
+        && b.is_ascii_graphic()
+    {
+        return format!("{}{}", *a as char, *b as char);
     }
     format_aux_field(tag, 32)
 }

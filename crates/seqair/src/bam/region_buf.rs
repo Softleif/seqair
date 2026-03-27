@@ -576,7 +576,7 @@ mod tests {
         file.extend_from_slice(&block);
         file.extend_from_slice(&make_bgzf_eof());
 
-        let offsets = vec![0u64];
+        let offsets = [0u64];
         let chunks = vec![Chunk {
             begin: VirtualOffset::new(offsets[0], 0),
             end: VirtualOffset::new(offsets[0] + 1, 0),
