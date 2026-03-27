@@ -36,7 +36,7 @@ impl Phred {
     pub fn as_int(self) -> i32 {
         let phred = self.0;
         // NaN and values <= 0 clamp to 0
-        if !(phred > 0.0) {
+        if phred.partial_cmp(&0.0).is_none_or(|o| o.is_le()) {
             return 0;
         }
         if phred >= 99.0 {
@@ -125,7 +125,7 @@ mod tests {
         fn proptest_from_phred_produces_valid(q: u8) {
             let p = Phred::from_phred(q);
             let i = p.as_int();
-            proptest::prop_assert!(i >= 0 && i <= 99, "as_int out of range: {i}");
+            proptest::prop_assert!((0..=99).contains(&i), "as_int out of range: {i}");
         }
 
         // r[verify types.phred.non_negative]
