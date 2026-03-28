@@ -37,14 +37,6 @@ If the format is detected but no matching index is found, the error MUST name th
 r[unified.reader_enum]
 The unified reader MUST be an enum dispatching to format-specific readers, not a trait object. This avoids dynamic dispatch overhead in the hot path and keeps the type concrete for `fork()`.
 
-```
-enum IndexedReader {
-    Bam(IndexedBamReader),
-    Sam(IndexedSamReader),
-    Cram(IndexedCramReader),
-}
-```
-
 r[unified.reader_api]
 The unified reader MUST expose:
 - `header() -> &BamHeader` — all formats produce the same header type (target names, lengths, tid lookup). The SAM and CRAM parsers convert their native header representations to `BamHeader`.
@@ -88,7 +80,7 @@ Indexed random access assumes coordinate-sorted data. If the `@HD` header line c
 ## Fork semantics per format
 
 r[unified.fork_bam]
-BAM fork: shares `Arc<BamShared>` (index + header), opens fresh `File` handle. (Already implemented.)
+BAM fork: shares `Arc<BamShared>` (index + header), opens fresh `File` handle.
 
 r[unified.fork_sam]
 SAM fork: shares `Arc` holding parsed tabix/CSI index + header, opens fresh `File` handle for BGZF reading.
@@ -100,13 +92,6 @@ CRAM fork: shares `Arc` holding CRAI index + header, opens fresh `File` handle f
 
 r[unified.readers_struct]
 The `Readers` struct bundles an `IndexedReader` (alignment) with an `IndexedFastaReader` (reference) in a single type. This eliminates the need for separate FASTA path passing — CRAM can access the reference it needs for sequence reconstruction, and all formats have uniform open/fork semantics.
-
-```
-pub struct Readers {
-    alignment: IndexedReader,
-    fasta: IndexedFastaReader,
-}
-```
 
 r[unified.readers_open]
 `Readers::open(alignment_path, fasta_path)` MUST auto-detect the alignment format (via `r[unified.detect_format]`), open the appropriate reader, and open the FASTA reader. For CRAM, the fasta_path is passed to `IndexedCramReader::open()` for sequence reconstruction. For BAM/SAM, the FASTA reader is opened but not used by the alignment reader.
