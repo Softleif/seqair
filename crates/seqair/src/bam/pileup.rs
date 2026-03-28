@@ -224,7 +224,6 @@ impl Iterator for PileupEngine {
         (0, Some(self.remaining_positions()))
     }
 
-    #[instrument(level = "trace", skip_all, fields(current_pos = self.current_pos, next_entry = self.next_entry, active_len = self.active.len()))]
     fn next(&mut self) -> Option<PileupColumn> {
         loop {
             if self.current_pos > self.region_end {
@@ -238,9 +237,6 @@ impl Iterator for PileupEngine {
 
             while self.next_entry < self.store.len() {
                 let idx = self.next_entry as u32;
-
-                let span = tracing::span!(tracing::Level::TRACE, "check_next_entry", %idx);
-                let _enter = span.enter();
 
                 let rec = self.store.record(idx);
                 if rec.pos > pos {
@@ -359,7 +355,6 @@ impl Drop for PileupEngine {
 
 // r[impl dedup.resolution_same_base]
 // r[impl dedup.resolution_different_base]
-#[instrument(level = "trace", skip_all)]
 fn dedup_overlapping_pairs(
     alignments: &mut Vec<PileupAlignment>,
     mate_of: &[Option<u32>],
