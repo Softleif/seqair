@@ -43,6 +43,10 @@ pub struct PileupEngine {
     current_pos: i64,
     region_end: i64,
     next_entry: usize,
+    /// Hot field: checked every column during retain. Stored separately so the
+    /// retain loop strides 8 bytes instead of the full ActiveRecord size (~144 bytes).
+    active_end_pos: Vec<i64>,
+    /// Cold fields: only accessed for records that survive retain.
     active: Vec<ActiveRecord>,
     max_depth: Option<u32>,
     filter: Option<RecordFilter>,
@@ -59,7 +63,6 @@ pub struct PileupEngine {
 
 struct ActiveRecord {
     record_idx: u32,
-    end_pos: i64,
     cigar: CigarMapping,
     // Cached from SlimRecord to avoid store lookups in the hot loop
     flags: u16,
@@ -129,6 +132,7 @@ impl PileupEngine {
             current_pos: region_start,
             region_end,
             next_entry: 0,
+            active_end_pos: Vec::new(),
             active: Vec::new(),
             max_depth: None,
             filter: None,
@@ -233,7 +237,24 @@ impl Iterator for PileupEngine {
             let pos = self.current_pos;
             self.current_pos += 1;
 
-            self.active.retain(|a| a.end_pos >= pos);
+            // Evict expired records. Iterate the compact end_pos vec (8-byte stride)
+            // and swap-remove from both vecs in lockstep.
+            {
+                let mut i = 0;
+                while i < self.active_end_pos.len() {
+                    debug_assert!(i < self.active.len());
+                    #[allow(
+                        clippy::indexing_slicing,
+                        reason = "i < active_end_pos.len() == active.len()"
+                    )]
+                    if self.active_end_pos[i] < pos {
+                        self.active_end_pos.swap_remove(i);
+                        self.active.swap_remove(i);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
 
             while self.next_entry < self.store.len() {
                 let idx = self.next_entry as u32;
@@ -261,9 +282,9 @@ impl Iterator for PileupEngine {
 
                 let cigar = CigarMapping::new(rec.pos, self.store.cigar(idx));
 
+                self.active_end_pos.push(rec.end_pos);
                 self.active.push(ActiveRecord {
                     record_idx: idx,
-                    end_pos: rec.end_pos,
                     cigar,
                     flags: rec.flags,
                     strand: strand_from_flags(rec.flags),
@@ -343,7 +364,7 @@ impl Drop for PileupEngine {
                 target: super::region_buf::PROFILE_TARGET,
                 columns = self.columns_produced,
                 max_depth = self.max_active_depth,
-                active_cap = self.active.capacity(),
+                active_cap = self.active.capacity() + self.active_end_pos.capacity(),
                 dedup = self.mate_of.is_some(),
                 dedup_remove_cap = self.dedup_to_remove.capacity(),
                 dedup_seen_cap = self.dedup_seen.capacity(),
