@@ -1,6 +1,7 @@
 //! Compares seqair against htslib across the entire test BAM file
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-use rust_htslib::bam::{self, FetchDefinition, Read as _};
+use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
+use seqair::bam::record::{AuxValue, find_aux_tag};
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -265,3 +266,118 @@ fn all_contigs_pileup_bases_match() {
         }
     }
 }
+
+// ---- Aux tag comparison ----
+
+struct HtsAuxRecord {
+    rg: Option<String>,
+    nm: Option<i64>,
+    md: Option<String>,
+}
+
+fn fetch_hts_aux_records(contig: &str, start: u64, end: u64) -> Vec<HtsAuxRecord> {
+    let mut reader = bam::IndexedReader::from_path(test_bam_path()).expect("htslib open");
+    let tid = reader.header().tid(contig.as_bytes()).expect("tid");
+    reader.fetch(FetchDefinition::Region(tid as i32, start as i64, end as i64)).expect("fetch");
+
+    let mut records = Vec::new();
+    let mut record = bam::Record::new();
+    while let Some(Ok(())) = reader.read(&mut record) {
+        if record.flags() & 0x4 != 0 {
+            continue;
+        }
+
+        let rg = match record.aux(b"RG") {
+            Ok(Aux::String(s)) => Some(s.to_owned()),
+            _ => None,
+        };
+        let nm = match record.aux(b"NM") {
+            Ok(Aux::I8(v)) => Some(v as i64),
+            Ok(Aux::U8(v)) => Some(v as i64),
+            Ok(Aux::I16(v)) => Some(v as i64),
+            Ok(Aux::U16(v)) => Some(v as i64),
+            Ok(Aux::I32(v)) => Some(v as i64),
+            Ok(Aux::U32(v)) => Some(v as i64),
+            _ => None,
+        };
+        let md = match record.aux(b"MD") {
+            Ok(Aux::String(s)) => Some(s.to_owned()),
+            _ => None,
+        };
+
+        records.push(HtsAuxRecord { rg, nm, md });
+    }
+    records
+}
+
+/// Extract a Z-type (string) aux tag from raw BAM aux bytes.
+fn aux_z_tag<'a>(aux: &'a [u8], tag: &[u8; 2]) -> Option<&'a str> {
+    match find_aux_tag(aux, tag)? {
+        AuxValue::String(bytes) => std::str::from_utf8(bytes).ok(),
+        _ => None,
+    }
+}
+
+/// Extract an integer aux tag (any integer sub-type) from raw BAM aux bytes.
+fn aux_int_tag(aux: &[u8], tag: &[u8; 2]) -> Option<i64> {
+    match find_aux_tag(aux, tag)? {
+        AuxValue::I8(v) => Some(v as i64),
+        AuxValue::U8(v) => Some(v as i64),
+        AuxValue::I16(v) => Some(v as i64),
+        AuxValue::U16(v) => Some(v as i64),
+        AuxValue::I32(v) => Some(v as i64),
+        AuxValue::U32(v) => Some(v as i64),
+        _ => None,
+    }
+}
+
+// r[verify bam.record.fields]
+#[test]
+fn all_contigs_aux_tags_match() {
+    for &(contig, start, end) in CONTIGS {
+        let hts = fetch_hts_aux_records(contig, start, end);
+
+        let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
+        let mut store = seqair::bam::RecordStore::new();
+        let tid = reader.header().tid(contig).expect("tid");
+        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+
+        assert_eq!(
+            store.len(),
+            hts.len(),
+            "{contig}: record count mismatch store={} hts={}",
+            store.len(),
+            hts.len(),
+        );
+
+        for (i, h) in hts.iter().enumerate() {
+            let idx = i as u32;
+            let aux = store.aux(idx);
+
+            // RG (read group) — Z-type string
+            let rio_rg = aux_z_tag(aux, b"RG");
+            assert_eq!(
+                rio_rg,
+                h.rg.as_deref(),
+                "{contig} rec {i}: RG mismatch rio={rio_rg:?} hts={:?}",
+                h.rg,
+            );
+
+            // NM (edit distance) — integer
+            let rio_nm = aux_int_tag(aux, b"NM");
+            assert_eq!(rio_nm, h.nm, "{contig} rec {i}: NM mismatch rio={rio_nm:?} hts={:?}", h.nm,);
+
+            // MD (mismatching positions) — Z-type string
+            let rio_md = aux_z_tag(aux, b"MD");
+            assert_eq!(
+                rio_md,
+                h.md.as_deref(),
+                "{contig} rec {i}: MD mismatch rio={rio_md:?} hts={:?}",
+                h.md,
+            );
+        }
+    }
+}
+
+// TODO (nice-to-have): Compare @PG and @RG header lines, not just target names/lengths.
+// TODO (nice-to-have): Compare additional aux tag types beyond RG (MD, NM, XS, etc.).

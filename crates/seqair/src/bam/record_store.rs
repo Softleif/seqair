@@ -120,13 +120,25 @@ impl RecordStore {
         #[allow(clippy::indexing_slicing, reason = "qname_actual_len ≤ qname_raw.len()")]
         self.names.extend_from_slice(&qname_raw[..qname_actual_len]);
 
-        // --- Write into bases slab (4-bit → Base via SIMD) ---
+        // --- Write into bases slab (4-bit → Base via SIMD, direct-to-slab) ---
         // r[impl record_store.checked_offsets]
         let bases_off = u32::try_from(self.bases.len()).map_err(|_| DecodeError::SlabOverflow)?;
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let packed_seq = &raw[h.cigar_end..h.seq_end];
-        let decoded_bases = seq::decode_bases(packed_seq, h.seq_len as usize);
-        self.bases.extend_from_slice(&decoded_bases);
+        let seq_len = h.seq_len as usize;
+
+        // Reserve space and decode directly into the slab's spare capacity.
+        self.bases.reserve(seq_len);
+        let bases_spare = self.bases.spare_capacity_mut();
+        // Safety: spare_capacity_mut returns at least seq_len bytes after reserve().
+        // decode_bases_into writes only valid Base discriminants (A=65,C=67,G=71,T=84,Unknown=78)
+        // as guaranteed by the DECODE_BASE_TYPED table invariant. Base is repr(u8).
+        // r[depends base_decode.table_invariant]
+        unsafe {
+            let out = std::slice::from_raw_parts_mut(bases_spare.as_mut_ptr() as *mut u8, seq_len);
+            seq::decode_bases_into(packed_seq, seq_len, out);
+            self.bases.set_len(self.bases.len() + seq_len);
+        }
 
         // --- Write into data slab [cigar|qual|aux] ---
         // r[impl record_store.checked_offsets]

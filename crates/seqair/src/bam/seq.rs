@@ -146,6 +146,161 @@ static DECODE_PAIR_TYPED: [[u8; 2]; 256] = {
     table
 };
 
+/// Decode 4-bit packed bases directly into a pre-allocated buffer.
+///
+/// `out` must have length >= `len`. Writes exactly `len` bytes.
+/// All written bytes are valid `Base` discriminants per `DECODE_BASE_TYPED`.
+pub fn decode_bases_into(encoded: &[u8], len: usize, out: &mut [u8]) {
+    debug_assert!(out.len() >= len, "output buffer too small: {} < {}", out.len(), len);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("ssse3") {
+            // Safety: SSSE3 verified.
+            unsafe {
+                decode_bases_into_ssse3(encoded, len, out);
+            }
+            return;
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Safety: NEON always available on aarch64.
+        unsafe {
+            decode_bases_into_neon(encoded, len, out);
+        }
+        return;
+    }
+
+    #[allow(unreachable_code)]
+    decode_bases_into_scalar(encoded, len, out);
+}
+
+fn decode_bases_into_scalar(encoded: &[u8], len: usize, out: &mut [u8]) {
+    let full_bytes = len / 2;
+
+    #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + chunks_exact")]
+    for (chunk, &byte) in out[..full_bytes * 2].chunks_exact_mut(2).zip(&encoded[..full_bytes]) {
+        let pair = DECODE_PAIR_TYPED[byte as usize];
+        chunk[0] = pair[0];
+        chunk[1] = pair[1];
+    }
+
+    if len % 2 == 1
+        && let Some(byte) = encoded.get(full_bytes)
+        && let Some(slot) = out.get_mut(len - 1)
+    {
+        #[allow(clippy::indexing_slicing, reason = "byte < 256")]
+        {
+            *slot = DECODE_PAIR_TYPED[*byte as usize][0];
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "scalar tail bounds guaranteed by loop invariants; debug_asserts verify"
+)]
+unsafe fn decode_bases_into_ssse3(encoded: &[u8], len: usize, out: &mut [u8]) {
+    use std::arch::x86_64::*;
+
+    let full_bytes = len / 2;
+
+    // Safety: SSSE3 availability is guaranteed by #[target_feature(enable = "ssse3")].
+    // Pointer offsets stay within bounds: i + 16 <= full_bytes <= encoded.len(),
+    // and o + 32 <= len <= out.len() (guaranteed by debug_assert in decode_bases_into).
+    let (lut, mask_lo) = unsafe {
+        (_mm_loadu_si128(DECODE_BASE_TYPED.as_ptr() as *const __m128i), _mm_set1_epi8(0x0F))
+    };
+
+    let mut i = 0;
+    let mut o = 0;
+
+    while i + 16 <= full_bytes {
+        // Safety: see above; i + 16 <= full_bytes and o + 32 <= len are loop invariants.
+        unsafe {
+            let packed = _mm_loadu_si128(encoded.as_ptr().add(i) as *const __m128i);
+            let hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask_lo);
+            let lo = _mm_and_si128(packed, mask_lo);
+            let decoded_hi = _mm_shuffle_epi8(lut, hi);
+            let decoded_lo = _mm_shuffle_epi8(lut, lo);
+            let out_a = _mm_unpacklo_epi8(decoded_hi, decoded_lo);
+            let out_b = _mm_unpackhi_epi8(decoded_hi, decoded_lo);
+            _mm_storeu_si128(out.as_mut_ptr().add(o) as *mut __m128i, out_a);
+            _mm_storeu_si128(out.as_mut_ptr().add(o + 16) as *mut __m128i, out_b);
+        }
+        i += 16;
+        o += 32;
+    }
+
+    debug_assert!(i <= full_bytes, "SSSE3 base loop overshot: i={i}, full_bytes={full_bytes}");
+    debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+
+    while i < full_bytes {
+        let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
+        out[o] = pair[0];
+        out[o + 1] = pair[1];
+        i += 1;
+        o += 2;
+    }
+
+    if len % 2 == 1 {
+        out[o] = DECODE_PAIR_TYPED[encoded[i] as usize][0];
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn decode_bases_into_neon(encoded: &[u8], len: usize, out: &mut [u8]) {
+    use std::arch::aarch64::*;
+
+    let full_bytes = len / 2;
+
+    // Safety: DECODE_BASE_TYPED is a &[u8; 16] static; out has at least len bytes
+    // (guaranteed by debug_assert in decode_bases_into).
+    // Pointer offsets stay within the allocated ranges enforced by the loop bounds.
+    unsafe {
+        let lut = vld1q_u8(DECODE_BASE_TYPED.as_ptr());
+        let mask_lo = vdupq_n_u8(0x0F);
+
+        let mut i = 0;
+        let mut o = 0;
+
+        while i + 16 <= full_bytes {
+            let packed = vld1q_u8(encoded.as_ptr().add(i));
+            let hi = vshrq_n_u8(packed, 4);
+            let lo = vandq_u8(packed, mask_lo);
+            let decoded_hi = vqtbl1q_u8(lut, hi);
+            let decoded_lo = vqtbl1q_u8(lut, lo);
+            let out_a = vzip1q_u8(decoded_hi, decoded_lo);
+            let out_b = vzip2q_u8(decoded_hi, decoded_lo);
+            vst1q_u8(out.as_mut_ptr().add(o), out_a);
+            vst1q_u8(out.as_mut_ptr().add(o + 16), out_b);
+            i += 16;
+            o += 32;
+        }
+
+        debug_assert!(i <= full_bytes, "NEON base loop overshot: i={i}, full_bytes={full_bytes}");
+        debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+
+        #[allow(clippy::indexing_slicing, reason = "bounds ensured by loop")]
+        {
+            while i < full_bytes {
+                let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
+                out[o] = pair[0];
+                out[o + 1] = pair[1];
+                i += 1;
+                o += 2;
+            }
+            if len % 2 == 1 {
+                out[o] = DECODE_PAIR_TYPED[encoded[i] as usize][0];
+            }
+        }
+    }
+}
+
 /// Decode a 4-bit packed BAM sequence directly into `Base` values.
 // r[impl base_decode.decode]
 pub fn decode_bases(encoded: &[u8], len: usize) -> Vec<seqair_types::Base> {
@@ -511,6 +666,20 @@ mod tests {
         // Decode with the dispatched path (SIMD on supported platforms)
         let actual = decode_bases_raw(&input, 512);
         assert_eq!(actual, expected, "SIMD and scalar paths diverge for all-byte-values input");
+    }
+
+    // r[verify base_decode.decode]
+    #[test]
+    fn decode_bases_into_matches_decode_bases() {
+        for seq_len in [0usize, 1, 2, 15, 16, 17, 31, 32, 33, 63, 64, 65, 128, 150] {
+            let encoded_len = seq_len.div_ceil(2);
+            let input: Vec<u8> = (0..encoded_len).map(|i| (i & 0xFF) as u8).collect();
+            let expected = decode_bases(&input, seq_len);
+            let mut out = vec![0u8; seq_len];
+            decode_bases_into(&input, seq_len, &mut out);
+            let actual = unsafe { seqair_types::Base::vec_u8_into_vec_base(out) };
+            assert_eq!(actual, expected, "mismatch at seq_len={seq_len}");
+        }
     }
 
     // r[verify seq.simd_scalar_equivalence]

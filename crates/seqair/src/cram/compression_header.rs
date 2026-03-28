@@ -517,7 +517,19 @@ mod tests {
                 0 => b'A', 1 => b'C', 2 => b'G', 3 => b'T', _ => b'N',
             };
             let result = sm.substitute(ref_base, code);
-            proptest::prop_assert!(result.is_ascii_alphabetic(), "result should be a base letter");
+            proptest::prop_assert!(
+                matches!(result, b'A' | b'C' | b'G' | b'T' | b'N'),
+                "substitute(ref={}, code={}) = 0x{:02x} '{}', must be in {{A,C,G,T,N}}",
+                ref_base as char, code, result, result as char
+            );
+            // A substitution must differ from the reference base.
+            // For ref A/C/G/T, READ_BASES excludes the ref itself.
+            // For ref N, READ_BASES is [A,C,G,T], so N is never returned.
+            proptest::prop_assert_ne!(
+                result, ref_base,
+                "substitute(ref={}, code={}) returned ref base itself",
+                ref_base as char, code
+            );
         }
     }
 }

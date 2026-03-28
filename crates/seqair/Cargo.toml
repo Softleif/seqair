@@ -22,6 +22,7 @@ md5 = "0.8.0"
 insta = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3.27.0"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # to compare with:
 bgzf = "0.3.0"
@@ -31,9 +32,13 @@ rust-htslib = { workspace = true, default-features = false, features = [
     "lzma",
     "static",
 ] }
-noodles-cram = "0.91.0"
-noodles-fasta = "0.60.0"
-noodles-sam = "0.83.0"
+noodles = { version = "0.109.0", features = ["bam", "bgzf", "core", "cram", "fasta", "sam"] }
+noodles-bgzf = { version = "0.46.0", features = ["libdeflate"] }
+noodles-util = { version = "0.78.0", features = ["alignment"] }
+
+[[bench]]
+name = "comparison"
+harness = false
 
 [lints]
 workspace = true

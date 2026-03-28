@@ -349,6 +349,11 @@ proptest! {
         rio.fetch_seq_into("bacteriophage_lambda_CpG", start, stop, &mut buf)
             .expect("fetch_seq_into");
 
-        prop_assert_eq!(alloc, buf, "fetch vs fetch_into mismatch at {}-{}", start, stop);
+        prop_assert_eq!(alloc.clone(), buf, "fetch vs fetch_into mismatch at {}-{}", start, stop);
+        let hts = htslib_fetch("bacteriophage_lambda_CpG", start, stop);
+        prop_assert_eq!(
+            alloc, hts,
+            "seqair vs htslib mismatch at {}-{}", start, stop
+        );
     }
 }

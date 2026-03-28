@@ -98,3 +98,5 @@ fn tabix_rejects_non_bgzf() {
     let result = BamIndex::from_tabix_path(&fake_tbi);
     assert!(result.is_err());
 }
+
+// TODO (nice-to-have): Compare tabix query results against samtools CLI output.

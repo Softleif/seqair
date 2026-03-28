@@ -141,7 +141,7 @@ proptest! {
         // Exclude quality 9: Phred+33 encodes it as ASCII '*' (42), which SAM
         // treats as "quality unavailable" when it is the entire QUAL field.
         quals in prop::collection::vec(
-            (0u8..=40).prop_filter("not SAM unknown-qual sentinel", |&q| q + 33 != b'*'),
+            (0u8..=93).prop_filter("not SAM unknown-qual sentinel", |&q| q + 33 != b'*'),
             1..200,
         ),
     ) {

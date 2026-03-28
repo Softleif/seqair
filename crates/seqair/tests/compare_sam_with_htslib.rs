@@ -209,6 +209,9 @@ fn sam_aux_rg_tag_matches_htslib() {
     }
 }
 
+// TODO (nice-to-have): Systematically compare all aux tags, not just RG.
+// TODO (nice-to-have): Compare with noodles-sam as second oracle.
+
 /// Find a Z-type tag in BAM binary aux data, return its string value.
 fn find_z_tag<'a>(aux: &'a [u8], tag: &[u8; 2]) -> Option<&'a str> {
     let mut pos = 0;
