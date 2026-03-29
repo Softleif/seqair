@@ -1,6 +1,6 @@
-//! Parse and query CIGAR strings. `CigarMapping` maps reference positions to query positions
+//! Parse and query CIGAR strings. [`CigarMapping`] maps reference positions to query positions
 //! (linear fast-path for clip+match CIGARs, `SmallVec` fallback for complex ones);
-//! [`CigarIndex`] supports binary-search qpos lookups.
+//! [`CigarPosInfo`] describes what occupies a given reference position.
 
 use seqair_types::SmallVec;
 
@@ -93,117 +93,9 @@ pub fn calc_matches_indels(cigar_bytes: &[u8]) -> (u32, u32) {
     (matches, indels)
 }
 
-// r[impl cigar.index]
-/// Pre-computed CIGAR index for O(log n) qpos lookup at any reference position.
-// Note: CigarOpType enum is available for typed access (see above).
-// Internal CigarOp uses raw u8 for performance in the hot path.
-// r[impl perf.cigar_binary_search]
-#[derive(Debug)]
-pub struct CigarIndex {
-    ops: Vec<CigarOp>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CigarOp {
-    ref_start: i64,
-    query_start: i64,
-    len: i64,
-    op_type: u8,
-}
-
-impl CigarIndex {
-    pub fn new(ref_pos: i64, cigar_bytes: &[u8]) -> Self {
-        let n_ops = cigar_bytes.len() / 4;
-        let mut ops = Vec::with_capacity(n_ops);
-        let mut ref_off: i64 = 0;
-        let mut query_off: i64 = 0;
-
-        for i in 0..n_ops {
-            let packed = u32::from_le_bytes(read4(cigar_bytes, i * 4));
-            let len = i64::from(packed >> 4);
-            let op_type = (packed & 0xF) as u8;
-
-            ops.push(CigarOp {
-                ref_start: ref_pos + ref_off,
-                query_start: query_off,
-                len,
-                op_type,
-            });
-
-            if consumes_ref(op_type) {
-                ref_off += len;
-            }
-            if consumes_query(op_type) {
-                query_off += len;
-            }
-        }
-
-        Self { ops }
-    }
-
-    // r[impl cigar.qpos_at]
-    // r[impl cigar.qpos_accuracy]
-    pub fn qpos_at(&self, ref_pos: i64) -> Option<usize> {
-        if self.ops.len() <= 4 {
-            self.qpos_at_linear(ref_pos)
-        } else {
-            self.qpos_at_bsearch(ref_pos)
-        }
-    }
-
-    fn qpos_at_linear(&self, ref_pos: i64) -> Option<usize> {
-        for op in &self.ops {
-            if !consumes_ref(op.op_type) {
-                continue;
-            }
-            let ref_end = op.ref_start + op.len;
-            if ref_pos < op.ref_start || ref_pos >= ref_end {
-                continue;
-            }
-            return if consumes_query(op.op_type) {
-                let offset = ref_pos - op.ref_start;
-                Some((op.query_start + offset) as usize)
-            } else {
-                None
-            };
-        }
-        None
-    }
-
-    fn qpos_at_bsearch(&self, ref_pos: i64) -> Option<usize> {
-        // Binary search for the op whose ref range contains ref_pos.
-        // Only ref-consuming ops have meaningful ref_start ranges, but all
-        // ops are sorted by ref_start, so we search the full array.
-        let idx = self.ops.partition_point(|op| op.ref_start <= ref_pos);
-        // partition_point returns the first op with ref_start > ref_pos.
-        // The candidate is the op before that.
-        if idx == 0 {
-            return None;
-        }
-        // Check the candidate and its neighbors (non-ref-consuming ops may
-        // share the same ref_start as the next ref-consuming op).
-        for i in idx.saturating_sub(2)..self.ops.len().min(idx + 1) {
-            let Some(op) = self.ops.get(i) else { continue };
-            if !consumes_ref(op.op_type) {
-                continue;
-            }
-            let ref_end = op.ref_start + op.len;
-            if ref_pos >= op.ref_start && ref_pos < ref_end {
-                return if consumes_query(op.op_type) {
-                    let offset = ref_pos - op.ref_start;
-                    Some((op.query_start + offset) as usize)
-                } else {
-                    None
-                };
-            }
-        }
-        None
-    }
-}
-
 /// Position information returned by CigarMapping for the pileup engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CigarPosInfo {
+pub enum CigarPosInfo {
     /// M/=/X op: read has a base aligned here.
     Match { qpos: u32 },
     /// M/=/X op at the last position before an I op follows.
@@ -219,7 +111,8 @@ pub(crate) enum CigarPosInfo {
 /// For the ~90% of reads with simple CIGARs (clips + one match block),
 /// `Linear` avoids any allocation and computes qpos with a single subtraction.
 /// Complex CIGARs use a `SmallVec` of compact ops that stays inline for ≤6 ops.
-pub(crate) enum CigarMapping {
+#[allow(private_interfaces)]
+pub enum CigarMapping {
     /// `qpos = (pos - rec_pos) as usize + query_offset as usize`
     Linear { rec_pos: i64, query_offset: u32, match_len: u32 },
     /// Pre-computed compact ops for linear/binary search.
@@ -251,7 +144,7 @@ pub(crate) struct CompactOp {
 
 impl CigarMapping {
     #[inline]
-    pub(crate) fn new(rec_pos: i64, cigar_bytes: &[u8]) -> Self {
+    pub fn new(rec_pos: i64, cigar_bytes: &[u8]) -> Self {
         match try_linear(cigar_bytes) {
             Some((query_offset, match_len)) => Self::Linear { rec_pos, query_offset, match_len },
             None => Self::Complex(build_compact_ops(rec_pos, cigar_bytes)),
@@ -259,7 +152,7 @@ impl CigarMapping {
     }
 
     #[inline]
-    pub(crate) fn pos_info_at(&self, pos: i64) -> Option<CigarPosInfo> {
+    pub fn pos_info_at(&self, pos: i64) -> Option<CigarPosInfo> {
         match self {
             Self::Linear { rec_pos, query_offset, match_len } => {
                 let offset = pos - rec_pos;

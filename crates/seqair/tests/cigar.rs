@@ -1,10 +1,10 @@
-//! Tests for CIGAR operations, CigarIndex, and qpos computation.
+//! Tests for CIGAR operations, CigarMapping, and pos_info_at computation.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 mod helpers;
 
 use helpers::{cigar_bytes, cigar_op};
 use proptest::prelude::*;
-use seqair::bam::cigar::{CigarIndex, calc_matches_indels};
+use seqair::bam::cigar::{CigarMapping, CigarPosInfo, calc_matches_indels};
 
 // ---- cigar.matches_indels ----
 
@@ -49,73 +49,76 @@ fn matches_indels_soft_clip_ignored() {
 // r[verify cigar.index]
 // r[verify cigar.qpos_at]
 #[test]
-fn cigar_index_simple_match() {
+fn cigar_mapping_simple_match() {
     let ops = cigar_bytes(&[cigar_op(100, 0)]);
-    let idx = CigarIndex::new(200, &ops);
-    assert_eq!(idx.qpos_at(200), Some(0));
-    assert_eq!(idx.qpos_at(250), Some(50));
-    assert_eq!(idx.qpos_at(299), Some(99));
-    assert_eq!(idx.qpos_at(199), None);
-    assert_eq!(idx.qpos_at(300), None);
+    let mapping = CigarMapping::new(200, &ops);
+    assert_eq!(mapping.pos_info_at(200), Some(CigarPosInfo::Match { qpos: 0 }));
+    assert_eq!(mapping.pos_info_at(250), Some(CigarPosInfo::Match { qpos: 50 }));
+    assert_eq!(mapping.pos_info_at(299), Some(CigarPosInfo::Match { qpos: 99 }));
+    assert_eq!(mapping.pos_info_at(199), None);
+    assert_eq!(mapping.pos_info_at(300), None);
 }
 
 // r[verify cigar.qpos_at]
 #[test]
-fn cigar_index_with_soft_clip() {
+fn cigar_mapping_with_soft_clip() {
     let ops = cigar_bytes(&[cigar_op(5, 4), cigar_op(90, 0), cigar_op(5, 4)]);
-    let idx = CigarIndex::new(100, &ops);
-    assert_eq!(idx.qpos_at(100), Some(5));
-    assert_eq!(idx.qpos_at(189), Some(94));
-    assert_eq!(idx.qpos_at(99), None);
-    assert_eq!(idx.qpos_at(190), None);
+    let mapping = CigarMapping::new(100, &ops);
+    assert_eq!(mapping.pos_info_at(100), Some(CigarPosInfo::Match { qpos: 5 }));
+    assert_eq!(mapping.pos_info_at(189), Some(CigarPosInfo::Match { qpos: 94 }));
+    assert_eq!(mapping.pos_info_at(99), None);
+    assert_eq!(mapping.pos_info_at(190), None);
 }
 
 // r[verify cigar.qpos_at]
 #[test]
-fn cigar_index_with_deletion() {
+fn cigar_mapping_with_deletion() {
     let ops = cigar_bytes(&[cigar_op(30, 0), cigar_op(5, 2), cigar_op(20, 0)]);
-    let idx = CigarIndex::new(100, &ops);
-    assert_eq!(idx.qpos_at(129), Some(29));
-    assert_eq!(idx.qpos_at(130), None); // inside deletion
-    assert_eq!(idx.qpos_at(134), None);
-    assert_eq!(idx.qpos_at(135), Some(30)); // after deletion
+    let mapping = CigarMapping::new(100, &ops);
+    assert_eq!(mapping.pos_info_at(129), Some(CigarPosInfo::Match { qpos: 29 }));
+    assert_eq!(mapping.pos_info_at(130), Some(CigarPosInfo::Deletion)); // inside deletion
+    assert_eq!(mapping.pos_info_at(134), Some(CigarPosInfo::Deletion));
+    assert_eq!(mapping.pos_info_at(135), Some(CigarPosInfo::Match { qpos: 30 }));
+    // after deletion
 }
 
 // r[verify cigar.qpos_at]
 #[test]
-fn cigar_index_with_insertion() {
+fn cigar_mapping_with_insertion() {
     let ops = cigar_bytes(&[cigar_op(30, 0), cigar_op(5, 1), cigar_op(20, 0)]);
-    let idx = CigarIndex::new(100, &ops);
-    assert_eq!(idx.qpos_at(129), Some(29));
-    assert_eq!(idx.qpos_at(130), Some(35)); // insertion skips query 30-34
+    let mapping = CigarMapping::new(100, &ops);
+    // pos 129 is the last base of the 30M block, and the next op is 5I — yields Insertion
+    assert_eq!(mapping.pos_info_at(129), Some(CigarPosInfo::Insertion { qpos: 29, insert_len: 5 }));
+    // pos 130 starts the 20M block; insertion skips query positions 30-34
+    assert_eq!(mapping.pos_info_at(130), Some(CigarPosInfo::Match { qpos: 35 }));
 }
 
 // r[verify cigar.qpos_at]
 #[test]
-fn cigar_index_with_ref_skip() {
+fn cigar_mapping_with_ref_skip() {
     let ops = cigar_bytes(&[cigar_op(30, 0), cigar_op(1000, 3), cigar_op(20, 0)]);
-    let idx = CigarIndex::new(100, &ops);
-    assert_eq!(idx.qpos_at(130), None); // inside N skip
-    assert_eq!(idx.qpos_at(1130), Some(30));
+    let mapping = CigarMapping::new(100, &ops);
+    assert_eq!(mapping.pos_info_at(130), Some(CigarPosInfo::RefSkip)); // inside N skip
+    assert_eq!(mapping.pos_info_at(1130), Some(CigarPosInfo::Match { qpos: 30 }));
 }
 
 // r[verify cigar.qpos_at]
 #[test]
-fn cigar_index_seq_match_and_mismatch() {
+fn cigar_mapping_seq_match_and_mismatch() {
     let ops = cigar_bytes(&[cigar_op(50, 7), cigar_op(10, 8), cigar_op(40, 7)]);
-    let idx = CigarIndex::new(0, &ops);
-    assert_eq!(idx.qpos_at(50), Some(50)); // X op
-    assert_eq!(idx.qpos_at(60), Some(60)); // back to =
-    assert_eq!(idx.qpos_at(100), None);
+    let mapping = CigarMapping::new(0, &ops);
+    assert_eq!(mapping.pos_info_at(50), Some(CigarPosInfo::Match { qpos: 50 })); // X op
+    assert_eq!(mapping.pos_info_at(60), Some(CigarPosInfo::Match { qpos: 60 })); // back to =
+    assert_eq!(mapping.pos_info_at(100), None);
 }
 
 // r[verify cigar.operations]
 #[test]
-fn cigar_index_hard_clip_ignored() {
+fn cigar_mapping_hard_clip_ignored() {
     let ops = cigar_bytes(&[cigar_op(5, 5), cigar_op(90, 0), cigar_op(5, 5)]);
-    let idx = CigarIndex::new(100, &ops);
-    assert_eq!(idx.qpos_at(100), Some(0));
-    assert_eq!(idx.qpos_at(190), None);
+    let mapping = CigarMapping::new(100, &ops);
+    assert_eq!(mapping.pos_info_at(100), Some(CigarPosInfo::Match { qpos: 0 }));
+    assert_eq!(mapping.pos_info_at(190), None);
 }
 
 // r[verify io.named_constants]
@@ -222,20 +225,25 @@ proptest! {
     fn qpos_monotonically_increasing(ops in arb_cigar(), start in 0i64..1_000_000) {
         let packed: Vec<u32> = ops.iter().map(|&(len, op)| cigar_op(len, op)).collect();
         let bytes = cigar_bytes(&packed);
-        let idx = CigarIndex::new(start, &bytes);
+        let mapping = CigarMapping::new(start, &bytes);
 
         let ref_span: i64 = ops.iter().map(|&(len, op)| match op {
             0 | 2 | 3 | 7 | 8 => i64::from(len),
             _ => 0,
         }).sum();
 
-        let mut last_qpos: Option<usize> = None;
+        let mut last_qpos: Option<u32> = None;
         for ref_pos in start..start + ref_span {
-            if let Some(qpos) = idx.qpos_at(ref_pos) {
+            let qpos = match mapping.pos_info_at(ref_pos) {
+                Some(CigarPosInfo::Match { qpos }) => Some(qpos),
+                Some(CigarPosInfo::Insertion { qpos, .. }) => Some(qpos),
+                _ => None,
+            };
+            if let Some(q) = qpos {
                 if let Some(prev) = last_qpos {
-                    prop_assert!(qpos > prev, "not monotonic at ref {ref_pos}");
+                    prop_assert!(q > prev, "not monotonic at ref {ref_pos}");
                 }
-                last_qpos = Some(qpos);
+                last_qpos = Some(q);
             }
         }
     }
@@ -246,11 +254,14 @@ proptest! {
     #[test]
     fn pure_match_qpos_is_offset(len in 1u32..=500, start in 0i64..1_000_000) {
         let bytes = cigar_bytes(&[cigar_op(len, 0)]);
-        let idx = CigarIndex::new(start, &bytes);
+        let mapping = CigarMapping::new(start, &bytes);
         for offset in 0..i64::from(len) {
-            prop_assert_eq!(idx.qpos_at(start + offset), Some(offset as usize));
+            prop_assert_eq!(
+                mapping.pos_info_at(start + offset),
+                Some(CigarPosInfo::Match { qpos: offset as u32 })
+            );
         }
-        prop_assert_eq!(idx.qpos_at(start + i64::from(len)), None);
+        prop_assert_eq!(mapping.pos_info_at(start + i64::from(len)), None);
     }
 }
 
@@ -281,8 +292,6 @@ proptest! {
     ) {
         // Build the byte representation from the human-readable string.
         let cigar_str: String = parts.iter().map(|(len, op)| format!("{len}{op}")).collect();
-        // Parse the string back into packed ops via the helpers, driving
-        // CigarIndex from the same string that we reason about below.
         let op_char_to_code = |c: char| -> u8 {
             match c {
                 'M' => 0, 'I' => 1, 'D' => 2, 'N' => 3, 'S' => 4,
@@ -293,33 +302,51 @@ proptest! {
             .map(|&(len, op)| cigar_op(len, op_char_to_code(op)))
             .collect();
         let bytes = cigar_bytes(&packed);
-        let idx = CigarIndex::new(start, &bytes);
+        let mapping = CigarMapping::new(start, &bytes);
 
         // Walk the string-form parts to derive expectations independently.
         let mut ref_pos = start;
         for &(len, op) in &parts {
             match op {
                 // M / = / X consume ref+query → every covered ref position must
-                // return Some.
+                // return Some(Match) or Some(Insertion).
                 'M' | '=' | 'X' => {
                     for i in 0..i64::from(len) {
                         let pos = ref_pos + i;
+                        let result = mapping.pos_info_at(pos);
                         prop_assert!(
-                            idx.qpos_at(pos).is_some(),
-                            "cigar={}: ref {} under {} op should be Some",
-                            cigar_str, pos, op
+                            matches!(
+                                result,
+                                Some(CigarPosInfo::Match { .. }) | Some(CigarPosInfo::Insertion { .. })
+                            ),
+                            "cigar={}: ref {} under {} op should be Match or Insertion, got {:?}",
+                            cigar_str, pos, op, result
                         );
                     }
                     ref_pos += i64::from(len);
                 }
-                // D / N consume ref only → no query position exists.
-                'D' | 'N' => {
+                // D consumes ref only → Deletion at every covered position.
+                'D' => {
                     for i in 0..i64::from(len) {
                         let pos = ref_pos + i;
-                        prop_assert!(
-                            idx.qpos_at(pos).is_none(),
-                            "cigar={}: ref {} under {} op should be None",
-                            cigar_str, pos, op
+                        prop_assert_eq!(
+                            mapping.pos_info_at(pos),
+                            Some(CigarPosInfo::Deletion),
+                            "cigar={}: ref {} under D op should be Deletion",
+                            cigar_str, pos
+                        );
+                    }
+                    ref_pos += i64::from(len);
+                }
+                // N consumes ref only → RefSkip at every covered position.
+                'N' => {
+                    for i in 0..i64::from(len) {
+                        let pos = ref_pos + i;
+                        prop_assert_eq!(
+                            mapping.pos_info_at(pos),
+                            Some(CigarPosInfo::RefSkip),
+                            "cigar={}: ref {} under N op should be RefSkip",
+                            cigar_str, pos
                         );
                     }
                     ref_pos += i64::from(len);

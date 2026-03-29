@@ -5,7 +5,8 @@ mod helpers;
 
 use helpers::{cigar_bytes, cigar_op, make_record, make_record_with_cigar};
 use proptest::prelude::*;
-use seqair::bam::{RecordStore, cigar::CigarIndex, pileup::PileupEngine};
+use seqair::bam::cigar::{CigarMapping, CigarPosInfo};
+use seqair::bam::{RecordStore, pileup::PileupEngine};
 
 // ---- perf.reuse_alignment_vec ----
 // Verified indirectly: if the engine reuses the vec internally, output must
@@ -106,7 +107,7 @@ fn single_arena_get_per_record_entry_still_correct() {
 }
 
 // ---- perf.cigar_no_to_vec ----
-// After removing .to_vec(), CigarIndex must still produce correct qpos.
+// After removing .to_vec(), CigarMapping must still produce correct qpos.
 
 // r[verify perf.cigar_no_to_vec]
 #[test]
@@ -232,8 +233,6 @@ proptest! {
 // r[verify perf.cigar_binary_search]
 #[test]
 fn binary_search_correct_for_many_ops() {
-    use seqair::bam::cigar::CigarIndex;
-
     // Simulate RNA-seq: 30M 5000N 30M 3000N 40M (5 ops, triggers binary search)
     let ops = cigar_bytes(&[
         cigar_op(30, 0),
@@ -242,38 +241,38 @@ fn binary_search_correct_for_many_ops() {
         cigar_op(3000, 3),
         cigar_op(40, 0),
     ]);
-    let idx = CigarIndex::new(1000, &ops);
+    let mapping = CigarMapping::new(1000, &ops);
 
     // First M block: 1000-1029
-    assert_eq!(idx.qpos_at(1000), Some(0));
-    assert_eq!(idx.qpos_at(1029), Some(29));
+    assert_eq!(mapping.pos_info_at(1000), Some(CigarPosInfo::Match { qpos: 0 }));
+    assert_eq!(mapping.pos_info_at(1029), Some(CigarPosInfo::Match { qpos: 29 }));
 
-    // N skip: 1030-6029 → None
-    assert_eq!(idx.qpos_at(1030), None);
-    assert_eq!(idx.qpos_at(5000), None);
+    // N skip: 1030-6029 → RefSkip
+    assert_eq!(mapping.pos_info_at(1030), Some(CigarPosInfo::RefSkip));
+    assert_eq!(mapping.pos_info_at(5000), Some(CigarPosInfo::RefSkip));
 
     // Second M block: 6030-6059
-    assert_eq!(idx.qpos_at(6030), Some(30));
-    assert_eq!(idx.qpos_at(6059), Some(59));
+    assert_eq!(mapping.pos_info_at(6030), Some(CigarPosInfo::Match { qpos: 30 }));
+    assert_eq!(mapping.pos_info_at(6059), Some(CigarPosInfo::Match { qpos: 59 }));
 
-    // Second N skip: 6060-9059 → None
-    assert_eq!(idx.qpos_at(6060), None);
+    // Second N skip: 6060-9059 → RefSkip
+    assert_eq!(mapping.pos_info_at(6060), Some(CigarPosInfo::RefSkip));
 
     // Third M block: 9060-9099
-    assert_eq!(idx.qpos_at(9060), Some(60));
-    assert_eq!(idx.qpos_at(9099), Some(99));
-    assert_eq!(idx.qpos_at(9100), None);
+    assert_eq!(mapping.pos_info_at(9060), Some(CigarPosInfo::Match { qpos: 60 }));
+    assert_eq!(mapping.pos_info_at(9099), Some(CigarPosInfo::Match { qpos: 99 }));
+    assert_eq!(mapping.pos_info_at(9100), None);
 }
 
 // r[verify perf.cigar_binary_search]
 proptest! {
     #[test]
-    fn binary_search_matches_linear_for_many_ops(
+    fn binary_search_correct_for_rna_seq_pattern(
         n_exons in 3usize..=8,
         exon_len in 20u32..=100,
         intron_len in 100u32..=5000,
     ) {
-        // Build alternating M/N CIGAR (RNA-seq pattern)
+        // Build alternating M/N CIGAR (RNA-seq pattern, triggers bsearch path for ≥5 ops)
         let mut ops = Vec::new();
         let mut total_query = 0u32;
         for i in 0..n_exons {
@@ -284,7 +283,7 @@ proptest! {
             }
         }
         let bytes = cigar_bytes(&ops);
-        let idx = CigarIndex::new(0, &bytes);
+        let mapping = CigarMapping::new(0, &bytes);
 
         // Compute total ref span
         let total_ref: i64 = ops.iter().map(|&op| {
@@ -293,20 +292,24 @@ proptest! {
             if matches!(op_type, 0 | 2 | 3 | 7 | 8) { len } else { 0 }
         }).sum();
 
-        // Check every position — result must be consistent
-        let mut last_some: Option<usize> = None;
+        // Check every position — qpos must be in range and monotonically increasing
+        let mut last_qpos: Option<u32> = None;
         for pos in 0..total_ref {
-            let result = idx.qpos_at(pos);
-            if let Some(qpos) = result {
-                prop_assert!(qpos < total_query as usize);
-                if let Some(prev) = last_some {
-                    prop_assert!(qpos > prev, "qpos not monotonic at ref {pos}");
+            match mapping.pos_info_at(pos) {
+                Some(CigarPosInfo::Match { qpos }) => {
+                    prop_assert!((qpos as usize) < total_query as usize,
+                        "qpos {qpos} out of range at ref {pos}");
+                    if let Some(prev) = last_qpos {
+                        prop_assert!(qpos > prev, "qpos not monotonic at ref {pos}");
+                    }
+                    last_qpos = Some(qpos);
                 }
-                last_some = Some(qpos);
+                Some(CigarPosInfo::RefSkip) => {}
+                other => prop_assert!(false, "unexpected result at ref {pos}: {other:?}"),
             }
         }
         // Out of range
-        prop_assert_eq!(idx.qpos_at(total_ref), None);
+        prop_assert_eq!(mapping.pos_info_at(total_ref), None);
     }
 }
 
