@@ -209,7 +209,7 @@ proptest! {
 
         for col in engine {
             for aln in col.alignments() {
-                prop_assert_eq!(aln.qpos(), (col.pos() - start_i64) as usize);
+                prop_assert_eq!(aln.qpos().unwrap(), (col.pos() - start_i64) as usize);
             }
         }
     }
@@ -281,7 +281,7 @@ fn leading_softclip_does_not_extend_ref_range() {
 
     assert_eq!(positions.first(), Some(&100), "should start at first ref-consuming pos");
     assert_eq!(positions.last(), Some(&119));
-    assert_eq!(columns[0].alignments().next().unwrap().qpos(), 5);
+    assert_eq!(columns[0].alignments().next().unwrap().qpos().unwrap(), 5);
 }
 
 // ---- bam.reader edge cases ----
@@ -349,6 +349,7 @@ proptest! {
         len in 10u32..=100,
     ) {
         let mut arena = RecordStore::new();
+        // make_record uses a simple NxM CIGAR — no deletions, so all alignments have qpos.
         arena.push_raw(&make_record(0, start, 99, 60, len)).unwrap();
 
         let start_i64 = i64::from(start);
@@ -357,8 +358,10 @@ proptest! {
 
         for col in engine {
             for aln in col.alignments() {
-                prop_assert!(aln.qpos() < len as usize,
-                    "qpos {} must be < seq_len {} at pos {}", aln.qpos(), len, col.pos());
+                if let Some(qpos) = aln.qpos() {
+                    prop_assert!(qpos < len as usize,
+                        "qpos {} must be < seq_len {} at pos {}", qpos, len, col.pos());
+                }
             }
         }
     }
@@ -374,6 +377,7 @@ proptest! {
         len in 10u32..=50,
     ) {
         let mut arena = RecordStore::new();
+        // make_record uses simple NxM CIGAR — all alignments are Match, so all have base/qual.
         for _ in 0..n {
             arena.push_raw(&make_record(0, 0, 99, 60, len)).unwrap();
         }
@@ -382,14 +386,17 @@ proptest! {
         for col in engine {
             prop_assert!(col.depth() > 0);
             for aln in col.alignments() {
-                // Base must be a valid Base discriminant (A/C/G/T/Unknown)
-                let base_byte = aln.base as u8;
-                prop_assert!(
-                    matches!(base_byte, 65 | 67 | 71 | 84 | 78),
-                    "invalid base byte {} at pos {}", base_byte, col.pos()
-                );
-                // Qual was set to 30 in make_record
-                prop_assert_eq!(aln.qual, 30, "qual should be 30");
+                // Simple M CIGAR — only Match ops, so base and qual are always present.
+                if let (Some(base), Some(qual)) = (aln.base(), aln.qual()) {
+                    // Base must be a valid Base discriminant (A/C/G/T/Unknown)
+                    let base_byte = base as u8;
+                    prop_assert!(
+                        matches!(base_byte, 65 | 67 | 71 | 84 | 78),
+                        "invalid base byte {} at pos {}", base_byte, col.pos()
+                    );
+                    // Qual was set to 30 in make_record
+                    prop_assert_eq!(qual, 30, "qual should be 30");
+                }
             }
         }
     }
@@ -625,8 +632,8 @@ use helpers::{arb_read, arb_read_set};
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
-    /// Every column's depth must match the number of reads whose covered
-    /// ref positions include that column's position.
+    /// Every column's match-depth must match the number of reads with M/=/X at that position.
+    /// Deletions/RefSkips are now included in the pileup but not in covered_ref_positions.
     #[test]
     fn depth_matches_cigar_derived_coverage(reads in arb_read_set(15)) {
         let mut arena = RecordStore::new();
@@ -642,11 +649,14 @@ proptest! {
 
         let engine = PileupEngine::new(arena, region_start, region_end);
         for col in engine {
-            let expected_depth = reads.iter()
+            // Only count M/=/X alignments (those with a qpos) — D/N are now included
+            // in depth too, so compare match-depth against the oracle's M/=/X count.
+            let match_depth = col.alignments().filter(|a| a.qpos().is_some()).count();
+            let expected_match_depth = reads.iter()
                 .filter(|r| r.covered_ref_positions().contains(&col.pos()))
                 .count();
-            prop_assert_eq!(col.depth(), expected_depth,
-                "depth mismatch at pos {} (expected from CIGAR analysis)", col.pos());
+            prop_assert_eq!(match_depth, expected_match_depth,
+                "match-depth mismatch at pos {} (expected from CIGAR analysis)", col.pos());
         }
     }
 
@@ -669,15 +679,15 @@ proptest! {
             for aln in col.alignments() {
                 let read = &reads[aln.record_idx() as usize];
                 let expected_qpos = read.qpos_at(col.pos());
-                prop_assert_eq!(Some(aln.qpos()), expected_qpos,
+                prop_assert_eq!(aln.qpos(), expected_qpos,
                     "qpos mismatch at pos {} for read at pos {} with cigar {:?}",
                     col.pos(), read.pos, read.cigar_ops);
             }
         }
     }
 
-    /// Deletions and ref-skips must cause the read to be absent from columns
-    /// at those positions (qpos_none behavior).
+    /// Deletions and ref-skips are now included in pileup columns.
+    /// D/N positions have depth 1 with a Deletion or RefSkip op (no qpos).
     #[test]
     fn deletions_cause_absent_alignment(read in arb_read()) {
         let has_deletion = read.cigar_ops.iter().any(|&(_, op)| op == 2 || op == 3);
@@ -694,12 +704,19 @@ proptest! {
 
         let covered = read.covered_ref_positions();
         for col in engine {
+            // Every ref position now yields depth 1 — M/=/X positions have qpos,
+            // D/N positions have Deletion or RefSkip op without qpos.
+            prop_assert_eq!(col.depth(), 1,
+                "position {} should have depth 1 (all ref-consuming ops contribute)", col.pos());
+            let aln = col.alignments().next().unwrap();
             if covered.contains(&col.pos()) {
-                prop_assert_eq!(col.depth(), 1,
-                    "position {} should have depth 1 (M/=/X)", col.pos());
+                prop_assert!(aln.qpos().is_some(),
+                    "position {} is M/=/X, should have qpos", col.pos());
             } else {
-                prop_assert_eq!(col.depth(), 0,
-                    "position {} falls in D/N gap, should have depth 0", col.pos());
+                prop_assert!(aln.is_del() || aln.is_refskip(),
+                    "position {} is D/N, should be Deletion or RefSkip, got {:?}", col.pos(), aln.op);
+                prop_assert!(aln.qpos().is_none(),
+                    "position {} is D/N, should have no qpos", col.pos());
             }
         }
     }
@@ -724,7 +741,7 @@ proptest! {
             if let Some(expected) = expected_qpos {
                 prop_assert_eq!(col.depth(), 1);
                 let aln = col.alignments().next().unwrap();
-                prop_assert_eq!(aln.qpos(), expected,
+                prop_assert_eq!(aln.qpos(), Some(expected),
                     "qpos wrong at pos {} — insertion should shift query offset", col.pos());
             }
         }
@@ -752,7 +769,8 @@ proptest! {
         }
     }
 
-    /// qpos must always be within [0, seq_len) for every alignment.
+    /// qpos must always be within [0, seq_len) for every alignment that has one.
+    /// Deletion and RefSkip alignments have no qpos — that is correct behavior.
     #[test]
     fn qpos_always_within_seq_bounds(reads in arb_read_set(10)) {
         let mut arena = RecordStore::new();
@@ -769,10 +787,12 @@ proptest! {
         let engine = PileupEngine::new(arena, region_start, region_end);
         for col in engine {
             for aln in col.alignments() {
-                prop_assert!(aln.qpos() < aln.seq_len as usize,
-                    "qpos {} >= seq_len {} at pos {} for read with cigar {:?}",
-                    aln.qpos(), aln.seq_len, col.pos(),
-                    reads[aln.record_idx() as usize].cigar_ops);
+                if let Some(qpos) = aln.qpos() {
+                    prop_assert!(qpos < aln.seq_len as usize,
+                        "qpos {} >= seq_len {} at pos {} for read with cigar {:?}",
+                        qpos, aln.seq_len, col.pos(),
+                        reads[aln.record_idx() as usize].cigar_ops);
+                }
             }
         }
     }

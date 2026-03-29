@@ -154,7 +154,7 @@ fn different_base_keeps_first_in_template() {
     assert_eq!(columns[0].depth(), 1);
     let kept = columns[0].alignments().next().unwrap();
     assert!(kept.flags & 0x40 != 0);
-    assert_eq!(kept.base, b'A');
+    assert_eq!(kept.base().unwrap() as u8, b'A');
 }
 
 // r[verify dedup.resolution_different_base]

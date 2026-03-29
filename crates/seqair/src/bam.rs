@@ -54,7 +54,7 @@ pub mod seq;
 pub use bgzf::BgzfError;
 pub use header::{BamHeader, BamHeaderError, ContigInfo};
 pub use index::{BaiError, BamIndex};
-pub use pileup::{PileupColumn, PileupEngine, RefSeq};
+pub use pileup::{PileupColumn, PileupEngine, PileupOp, RefSeq};
 pub use reader::{BamError, BamShared, CoordinateField, IndexedBamReader};
 pub use record::BamRecord;
 pub use record_store::RecordStore;
