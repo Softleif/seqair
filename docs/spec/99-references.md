@@ -13,6 +13,12 @@ The seqair spec is based on the following upstream specifications and reference 
 - **[CRAMcodecs]** *CRAM codec specification (version 3.1)*, samtools-devel@lists.sourceforge.net, last modified 2025-03-24. <https://samtools.github.io/hts-specs/CRAMcodecs.pdf>
   Covers: rANS 4×8 codec with order-0 and order-1 frequency tables and interleaving (§2), rANS Nx16 codec with transforms (RLE, PACK, STRIPE, CAT, N32) (§3), range/arithmetic coder (§4), name tokeniser tok3 (§5), fqzcomp quality codec (§6).
 
+- **[VCF43]** *Variant Call Format Specification (version 4.3)*, The SAM/BAM Format Specification Working Group. <https://samtools.github.io/hts-specs/VCFv4.3.pdf>
+  Covers: meta-information lines (§1.1 "Meta-information lines"): fileformat, INFO field format (§1.1.2), FILTER field format (§1.1.3), FORMAT field format (§1.1.4), ALT field format (§1.1.5), contig field format (§1.1.7), sample field format (§1.1.8); header line syntax (§1.2); data lines (§1.3): fixed fields CHROM/POS/ID/REF/ALT/QUAL/FILTER/INFO (§1.3.1), genotype fields and FORMAT column (§1.3.2), Number values (A/R/G/.), Type values (Integer/Float/Flag/Character/String), genotype ordering for GL/PL/GP/PP, reserved INFO keys, reserved FORMAT keys; character encoding and percent-escaping (§1.0.2 "Character encoding").
+
+- **[BCF2]** *BCF2 Quick Reference (r198)*, The SAM/BAM Format Specification Working Group. <https://samtools.github.io/hts-specs/BCFv2_qref.pdf>
+  Covers: BCF magic (`BCF\2\1`), header encoding (l_text + NUL-terminated VCF header text), typed value encoding (type byte layout: count << 4 | type_code, type codes 0–7), missing and end-of-vector sentinel values per type, record binary layout (l_shared/l_indiv, 24-byte fixed fields CHROM/POS/rlen/QUAL/n_info_allele/n_fmt_sample, variable shared and individual sections), allele encoding, FILTER encoding, INFO key-value encoding, FORMAT field-major sample encoding, genotype (GT) binary encoding ((allele+1) << 1 | phased), string dictionary mapping.
+
 - **[TABIX]** *The Tabix index file format*, Heng Li. <https://samtools.github.io/hts-specs/tabix.pdf>
   Covers: TBI magic, header fields (n_ref, format, col_seq, col_beg, col_end, meta, skip, l_nm, names), bin/chunk/linear-index structure identical to BAI, `n_no_coor` trailing field, `reg2bin`/`reg2bins` C functions.
 

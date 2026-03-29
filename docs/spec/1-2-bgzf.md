@@ -69,3 +69,25 @@ When resizing buffers that will be immediately and fully overwritten (by `read_e
 
 r[bgzf.block_offset_tracking]
 The reader MUST track the current block's compressed file offset for virtual offset calculation. The offset MUST be queried from the stream position before reading each new block, and set directly on seeks.
+
+## Writing
+
+> *[SAM1] §4.1 "The BGZF compression format" — block structure, gzip member format, BC extra field, EOF marker block*
+
+r[bgzf.writer]
+The writer MUST accept arbitrary byte sequences and emit valid BGZF blocks. Each block MUST contain a complete gzip member with the `BC` extra subfield, DEFLATE-compressed payload, CRC32 checksum, and ISIZE footer.
+
+r[bgzf.writer.buffer]
+The writer MUST accumulate uncompressed data in an internal buffer (up to 64 KB). When the buffer is full or `flush()` is called, the buffer MUST be compressed into a BGZF block and written to the underlying stream.
+
+r[bgzf.writer.compression]
+Compression MUST use the `libdeflater` crate (matching the reader's decompression backend) with configurable compression level. The default compression level SHOULD be 6 (matching htslib's default).
+
+r[bgzf.writer.eof_marker]
+`finish()` MUST write the standard 28-byte BGZF EOF marker block after flushing any remaining buffered data. The EOF marker is a valid gzip member with ISIZE=0.
+
+r[bgzf.writer.virtual_offset]
+The writer MUST track virtual offsets. After each block is written, the writer MUST record the compressed file offset of that block. A `virtual_offset()` method MUST return the current write position as a `VirtualOffset` (block offset + within-block offset).
+
+r[bgzf.writer.finish]
+`finish()` MUST consume the writer and return the inner `io::Write` stream, allowing the caller to perform additional operations (e.g., syncing, closing). Dropping the writer without calling `finish()` SHOULD NOT silently discard buffered data; the writer SHOULD flush on drop (best-effort, ignoring errors).
