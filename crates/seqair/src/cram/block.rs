@@ -495,7 +495,7 @@ mod tests {
         buf.extend_from_slice(&crc.sum().to_le_bytes());
 
         // Verify hand-crafted header bytes before parsing
-        assert_eq!(buf.get(0), Some(&0u8), "method byte must be 0 (raw)");
+        assert_eq!(buf.first(), Some(&0u8), "method byte must be 0 (raw)");
         assert_eq!(buf.get(1), Some(&4u8), "content_type byte must be 4 (ExternalData)");
         assert_eq!(buf.get(2), Some(&7u8), "content_id ITF8: single byte for val < 0x80");
         assert_eq!(buf.get(3), Some(&5u8), "compressed_size ITF8: single byte for val < 0x80");

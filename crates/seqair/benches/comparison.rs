@@ -1,7 +1,7 @@
 //! Criterion benchmarks comparing seqair against htslib, noodles, and the bgzf crate.
 //!
 //! All libraries use libdeflate for BGZF decompression (fair comparison).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -275,7 +275,7 @@ fn pileup_e2e(c: &mut Criterion) {
             for p in reader.pileup() {
                 let p = p.unwrap();
                 let pos = p.pos() as u64;
-                if pos < START || pos > END {
+                if !(START..=END).contains(&pos) {
                     continue;
                 }
                 total_depth += p.depth() as u64;
@@ -307,7 +307,7 @@ fn pileup_e2e(c: &mut Criterion) {
                     }
                     let aln_start = record.alignment_start().and_then(|r| r.ok())?;
                     let pos = usize::from(aln_start) as u64 - 1;
-                    if pos >= START && pos < END {
+                    if (START..END).contains(&pos) {
                         Some(Ok(Box::new(record) as Box<dyn sam::alignment::Record>))
                     } else {
                         None

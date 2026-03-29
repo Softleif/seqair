@@ -183,11 +183,11 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
     use std::path::Path;
 
     let bam_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam"));
-    let mut reader = IndexedBamReader::open(bam_path).expect("open BAM");
-    let tid = reader.header().tid("chr19").expect("tid");
+    let mut reader = IndexedBamReader::open(bam_path)?;
+    let tid = reader.header().tid("chr19").ok_or("chr19 not found")?;
 
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, 6_105_700, 6_105_800, &mut store).expect("fetch");
+    reader.fetch_into(tid, 6_105_700, 6_105_800, &mut store)?;
     assert!(!store.is_empty());
 
     // Re-push every record via push_fields and compare

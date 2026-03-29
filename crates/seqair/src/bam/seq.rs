@@ -677,6 +677,8 @@ mod tests {
             let expected = decode_bases(&input, seq_len);
             let mut out = vec![0u8; seq_len];
             decode_bases_into(&input, seq_len, &mut out);
+            // Safety: decode_bases_into writes only valid Base discriminants (A=65, C=67, G=71, T=84, Unknown=78)
+            // as guaranteed by the DECODE_BASE_TYPED table. Base is repr(u8), so reinterpreting Vec<u8> as Vec<Base> is sound.
             let actual = unsafe { seqair_types::Base::vec_u8_into_vec_base(out) };
             assert_eq!(actual, expected, "mismatch at seq_len={seq_len}");
         }
