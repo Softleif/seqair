@@ -4,14 +4,29 @@
 
 use rustc_hash::FxHashMap;
 use seqair_types::{Base, Strand, strand_from_flags};
+// Rc is used only for RefSeq (reference sequence), not for BAM records.
+// PileupEngine is intentionally !Send due to RecordFilter: Box<dyn Fn(...)>.
 use std::rc::Rc;
 use tracing::instrument;
 
-use super::{cigar::CigarMapping, flags::FLAG_UNMAPPED, record_store::RecordStore};
+use super::{
+    cigar::CigarMapping,
+    flags::{FLAG_SECOND_IN_TEMPLATE, FLAG_UNMAPPED},
+    record_store::RecordStore,
+};
 
 pub struct RefSeq {
     bases: Rc<[Base]>,
     start_pos: i64,
+}
+
+impl std::fmt::Debug for RefSeq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefSeq")
+            .field("start_pos", &self.start_pos)
+            .field("len", &self.bases.len())
+            .finish()
+    }
 }
 
 impl RefSeq {
@@ -56,11 +71,13 @@ pub struct PileupEngine {
     /// Reusable scratch buffers for dedup (avoids per-position allocation).
     dedup_to_remove: Vec<usize>,
     dedup_seen: FxHashMap<u32, usize>,
-    // Profiling counters
+    // Profiling counters — u32 is sufficient for single-region pileups (max ~250M positions).
+    // For whole-genome streaming, these saturate at u32::MAX which is acceptable for debug output.
     columns_produced: u32,
     max_active_depth: u32,
 }
 
+#[derive(Debug)]
 struct ActiveRecord {
     record_idx: u32,
     cigar: CigarMapping,
@@ -75,9 +92,10 @@ struct ActiveRecord {
 
 // r[impl pileup.column_contents]
 // r[impl pileup.htslib_compat]
+#[derive(Debug)]
 pub struct PileupColumn {
     pos: i64,
-    pub reference_base: Base,
+    reference_base: Base,
     alignments: Vec<PileupAlignment>,
 }
 
@@ -93,11 +111,15 @@ impl PileupColumn {
     pub fn alignments(&self) -> impl Iterator<Item = &PileupAlignment> {
         self.alignments.iter()
     }
+
+    pub fn reference_base(&self) -> Base {
+        self.reference_base
+    }
 }
 
 // r[impl pileup.qpos]
 // r[impl base_decode.alignment]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PileupAlignment {
     record_idx: u32,
     qpos: usize,
@@ -121,8 +143,6 @@ impl PileupAlignment {
         self.record_idx
     }
 }
-
-pub type OwnedPileupColumn = PileupColumn;
 
 impl PileupEngine {
     /// Create a pileup engine that owns the record store.
@@ -168,7 +188,8 @@ impl PileupEngine {
     pub fn set_dedup_overlapping(&mut self) {
         use std::collections::hash_map::Entry;
         let n = self.store.len();
-        let mut name_to_idx: FxHashMap<&[u8], u32> = FxHashMap::default();
+        let mut name_to_idx: FxHashMap<&[u8], u32> =
+            FxHashMap::with_capacity_and_hasher(n / 2, Default::default());
         let mut mate_of = vec![None; n];
 
         for i in 0..n {
@@ -221,6 +242,20 @@ impl PileupEngine {
     }
 }
 
+impl std::fmt::Debug for PileupEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PileupEngine")
+            .field("current_pos", &self.current_pos)
+            .field("region_end", &self.region_end)
+            .field("next_entry", &self.next_entry)
+            .field("active_count", &self.active.len())
+            .field("max_depth", &self.max_depth)
+            .field("dedup_enabled", &self.mate_of.is_some())
+            .field("columns_produced", &self.columns_produced)
+            .finish_non_exhaustive()
+    }
+}
+
 // r[impl pileup.position_iteration]
 impl Iterator for PileupEngine {
     type Item = PileupColumn;
@@ -259,6 +294,7 @@ impl Iterator for PileupEngine {
 
             while self.next_entry < self.store.len() {
                 let idx = self.next_entry as u32;
+                debug_assert_eq!(idx as usize, self.next_entry, "next_entry exceeds u32::MAX");
 
                 let rec = self.store.record(idx);
                 if rec.pos > pos {
@@ -302,7 +338,12 @@ impl Iterator for PileupEngine {
                 if self.next_entry >= self.store.len() {
                     return None;
                 }
-                let next_pos = self.store.record(self.next_entry as u32).pos;
+                let next_entry_u32 = self.next_entry as u32;
+                debug_assert_eq!(
+                    next_entry_u32 as usize, self.next_entry,
+                    "next_entry exceeds u32::MAX"
+                );
+                let next_pos = self.store.record(next_entry_u32).pos;
                 if next_pos > self.current_pos {
                     self.current_pos = next_pos;
                 }
@@ -350,7 +391,7 @@ impl Iterator for PileupEngine {
             }
 
             if !alignments.is_empty() {
-                self.columns_produced += 1;
+                self.columns_produced = self.columns_produced.saturating_add(1);
                 self.max_active_depth = self.max_active_depth.max(alignments.len() as u32);
                 let reference_base =
                     self.ref_seq.as_ref().map_or(Base::Unknown, |r| r.base_at(pos));
@@ -416,7 +457,7 @@ fn dedup_overlapping_pairs(
             let this_base = alignments[aln_idx].base;
             let mate_base = alignments[mate_aln_idx].base;
 
-            if this_base == mate_base || alignments[aln_idx].flags & 0x80 != 0 {
+            if this_base == mate_base || alignments[aln_idx].flags & FLAG_SECOND_IN_TEMPLATE != 0 {
                 to_remove.push(aln_idx);
             } else {
                 to_remove.push(mate_aln_idx);
@@ -427,6 +468,11 @@ fn dedup_overlapping_pairs(
         seen_record_idx.insert(rec_idx, aln_idx);
     }
 
+    // Reverse-order swap_remove is correct because:
+    // - to_remove is sorted+deduped, so indices are unique and ascending
+    // - swap_remove(i) moves the last element to position i
+    // - iterating in reverse means we only swap_remove from positions >= current,
+    //   so previously-removed indices are never invalidated
     to_remove.sort_unstable();
     to_remove.dedup();
     for &idx in to_remove.iter().rev() {

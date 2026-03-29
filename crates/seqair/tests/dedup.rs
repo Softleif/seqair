@@ -321,3 +321,57 @@ proptest! {
         }
     }
 }
+
+// ---- cram.edge.unknown_read_names ----
+
+// r[verify cram.edge.unknown_read_names]
+#[test]
+fn star_qname_records_not_paired() {
+    let mut arena = RecordStore::new();
+    push_named(&mut arena, b"*", 0, FIRST, 20);
+    push_named(&mut arena, b"*", 0, SECOND, 20);
+
+    let mut engine = PileupEngine::new(arena, 0, 19);
+    engine.set_dedup_overlapping();
+    let columns: Vec<_> = engine.collect();
+    let col = columns.first().unwrap();
+    assert_eq!(col.depth(), 2, "records with qname '*' should not be treated as mates");
+}
+
+// r[verify cram.edge.unknown_read_names]
+#[test]
+fn empty_qname_records_not_paired() {
+    let mut arena = RecordStore::new();
+    push_named(&mut arena, b"", 0, FIRST, 20);
+    push_named(&mut arena, b"", 0, SECOND, 20);
+
+    let mut engine = PileupEngine::new(arena, 0, 19);
+    engine.set_dedup_overlapping();
+    let columns: Vec<_> = engine.collect();
+    let col = columns.first().unwrap();
+    assert_eq!(col.depth(), 2, "records with empty qname should not be treated as mates");
+}
+
+// r[verify cram.edge.unknown_read_names]
+proptest! {
+    #[test]
+    fn star_qnames_mixed_with_named_reads(n_named in 1usize..=5, n_star in 1usize..=5) {
+        let mut arena = RecordStore::new();
+        for i in 0..n_named {
+            let name = format!("read{i}");
+            push_named(&mut arena, name.as_bytes(), 0, FIRST, 20);
+            push_named(&mut arena, name.as_bytes(), 0, SECOND, 20);
+        }
+        for _ in 0..n_star {
+            push_named(&mut arena, b"*", 0, FIRST, 20);
+        }
+
+        let mut engine = PileupEngine::new(arena, 0, 19);
+        engine.set_dedup_overlapping();
+        let columns: Vec<_> = engine.collect();
+        let col = columns.first().unwrap();
+        // n_named pairs dedup to n_named, plus n_star unpaired star records
+        prop_assert_eq!(col.depth(), n_named + n_star,
+            "expected {} named + {} star = {}", n_named, n_star, n_named + n_star);
+    }
+}

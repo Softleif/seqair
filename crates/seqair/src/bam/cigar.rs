@@ -213,6 +213,20 @@ pub(crate) enum CigarMapping {
     Complex(SmallVec<CompactOp, 6>),
 }
 
+impl std::fmt::Debug for CigarMapping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Linear { rec_pos, query_offset, match_len } => f
+                .debug_struct("Linear")
+                .field("rec_pos", rec_pos)
+                .field("query_offset", query_offset)
+                .field("match_len", match_len)
+                .finish(),
+            Self::Complex(ops) => write!(f, "Complex({} ops)", ops.len()),
+        }
+    }
+}
+
 /// 16-byte CIGAR op for the compact index.
 #[derive(Clone, Copy)]
 pub(crate) struct CompactOp {
