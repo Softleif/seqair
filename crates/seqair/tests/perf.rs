@@ -128,17 +128,16 @@ fn cigar_index_from_arena_slab_correct() {
 
     // Before deletion: qpos = pos - 100
     let col = columns.iter().find(|c| c.pos() == 110).unwrap();
-    assert_eq!(col.alignments().next().unwrap().qpos(), 10);
+    assert_eq!(col.alignments().next().unwrap().qpos(), Some(10));
 
-    // Inside deletion: no alignment
-    assert!(
-        columns.iter().find(|c| c.pos() == 132).is_none()
-            || columns.iter().find(|c| c.pos() == 132).unwrap().depth() == 0
-    );
+    // Inside deletion: alignment present with Deletion op (no qpos)
+    let del_col = columns.iter().find(|c| c.pos() == 132).unwrap();
+    assert_eq!(del_col.depth(), 1);
+    assert!(del_col.alignments().next().unwrap().is_del());
 
     // After deletion: qpos = pos - 100 - 5 (deletion consumes 5 ref but 0 query)
     let col = columns.iter().find(|c| c.pos() == 140).unwrap();
-    assert_eq!(col.alignments().next().unwrap().qpos(), 35);
+    assert_eq!(col.alignments().next().unwrap().qpos(), Some(35));
 }
 
 // ---- perf.precompute_matches_indels ----

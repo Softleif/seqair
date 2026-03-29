@@ -10,7 +10,7 @@ use std::rc::Rc;
 use tracing::instrument;
 
 use super::{
-    cigar::CigarMapping,
+    cigar::{CigarMapping, CigarPosInfo},
     flags::{FLAG_SECOND_IN_TEMPLATE, FLAG_UNMAPPED},
     record_store::RecordStore,
 };
@@ -100,10 +100,12 @@ pub struct PileupColumn {
 }
 
 impl PileupColumn {
+    #[must_use]
     pub fn pos(&self) -> i64 {
         self.pos
     }
 
+    #[must_use]
     pub fn depth(&self) -> usize {
         self.alignments.len()
     }
@@ -115,17 +117,41 @@ impl PileupColumn {
     pub fn reference_base(&self) -> Base {
         self.reference_base
     }
+
+    /// Count of alignments with a base at this position (excludes deletions and ref-skips).
+    #[must_use]
+    pub fn match_depth(&self) -> usize {
+        self.alignments.iter().filter(|a| a.qpos().is_some()).count()
+    }
+}
+
+/// What a read shows at a specific reference position in the pileup.
+///
+/// `base`, `qual`, and `qpos` are only available for `Match` and `Insertion`
+/// variants — the type system prevents reading a base from a deletion.
+// r[impl pileup_indel.op_enum]
+// r[impl pileup_indel.type_safety]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PileupOp {
+    /// Read has a base aligned at this position (M, =, or X CIGAR op).
+    Match { qpos: u32, base: Base, qual: u8 },
+    /// Read has a base aligned at this position AND an insertion of
+    /// `insert_len` query bases follows before the next reference position.
+    /// Access inserted bases via the read's sequence at `qpos + 1 .. qpos + 1 + insert_len`.
+    Insertion { qpos: u32, base: Base, qual: u8, insert_len: u32 },
+    /// Read has a deletion spanning this position (D CIGAR op). No query base.
+    Deletion,
+    /// Read has a reference skip at this position (N CIGAR op, e.g. intron). No query base.
+    RefSkip,
 }
 
 // r[impl pileup.qpos]
 // r[impl base_decode.alignment]
+// r[impl pileup_indel.op_enum]
 #[derive(Clone, Debug)]
 pub struct PileupAlignment {
     record_idx: u32,
-    qpos: usize,
-    /// Pre-extracted fields for the hot loop — no store lookup needed.
-    pub base: Base,
-    pub qual: u8,
+    pub op: PileupOp,
     pub mapq: u8,
     pub flags: u16,
     pub strand: Strand,
@@ -134,13 +160,58 @@ pub struct PileupAlignment {
     pub indel_bases: u32,
 }
 
+// r[impl pileup_indel.accessors]
 impl PileupAlignment {
-    pub fn qpos(&self) -> usize {
-        self.qpos
-    }
-
+    #[must_use]
     pub fn record_idx(&self) -> u32 {
         self.record_idx
+    }
+
+    #[must_use]
+    pub fn op(&self) -> &PileupOp {
+        &self.op
+    }
+
+    #[must_use]
+    pub fn qpos(&self) -> Option<usize> {
+        match self.op {
+            PileupOp::Match { qpos, .. } | PileupOp::Insertion { qpos, .. } => Some(qpos as usize),
+            PileupOp::Deletion | PileupOp::RefSkip => None,
+        }
+    }
+
+    #[must_use]
+    pub fn base(&self) -> Option<Base> {
+        match self.op {
+            PileupOp::Match { base, .. } | PileupOp::Insertion { base, .. } => Some(base),
+            PileupOp::Deletion | PileupOp::RefSkip => None,
+        }
+    }
+
+    #[must_use]
+    pub fn qual(&self) -> Option<u8> {
+        match self.op {
+            PileupOp::Match { qual, .. } | PileupOp::Insertion { qual, .. } => Some(qual),
+            PileupOp::Deletion | PileupOp::RefSkip => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_del(&self) -> bool {
+        matches!(self.op, PileupOp::Deletion)
+    }
+
+    #[must_use]
+    pub fn is_refskip(&self) -> bool {
+        matches!(self.op, PileupOp::RefSkip)
+    }
+
+    #[must_use]
+    pub fn insert_len(&self) -> u32 {
+        match self.op {
+            PileupOp::Insertion { insert_len, .. } => insert_len,
+            _ => 0,
+        }
     }
 }
 
@@ -350,27 +421,49 @@ impl Iterator for PileupEngine {
                 continue;
             }
 
-            // r[impl pileup.qpos_none]
+            // r[impl pileup_indel.op_enum]
+            // r[impl pileup_indel.deletions_included]
+            // r[impl pileup_indel.refskips_included]
             // r[related record_store.field_access]
             // r[impl perf.reuse_alignment_vec+2]
             let mut alignments = Vec::with_capacity(self.active.len());
             for active in &self.active {
-                if let Some(qpos) = active.cigar.qpos_at(pos) {
-                    let qual = self.store.qual(active.record_idx);
-                    let Some(&q) = qual.get(qpos) else { continue };
-                    alignments.push(PileupAlignment {
-                        base: self.store.seq_at(active.record_idx, qpos),
-                        qual: q,
-                        mapq: active.mapq,
-                        flags: active.flags,
-                        strand: active.strand,
-                        seq_len: active.seq_len,
-                        matching_bases: active.matching_bases,
-                        indel_bases: active.indel_bases,
-                        record_idx: active.record_idx,
-                        qpos,
-                    });
-                }
+                let Some(info) = active.cigar.pos_info_at(pos) else { continue };
+
+                let op = match info {
+                    CigarPosInfo::Match { qpos } => {
+                        let qual = self.store.qual(active.record_idx);
+                        let Some(&q) = qual.get(qpos as usize) else { continue };
+                        PileupOp::Match {
+                            qpos,
+                            base: self.store.seq_at(active.record_idx, qpos as usize),
+                            qual: q,
+                        }
+                    }
+                    CigarPosInfo::Insertion { qpos, insert_len } => {
+                        let qual = self.store.qual(active.record_idx);
+                        let Some(&q) = qual.get(qpos as usize) else { continue };
+                        PileupOp::Insertion {
+                            qpos,
+                            base: self.store.seq_at(active.record_idx, qpos as usize),
+                            qual: q,
+                            insert_len,
+                        }
+                    }
+                    CigarPosInfo::Deletion => PileupOp::Deletion,
+                    CigarPosInfo::RefSkip => PileupOp::RefSkip,
+                };
+
+                alignments.push(PileupAlignment {
+                    op,
+                    mapq: active.mapq,
+                    flags: active.flags,
+                    strand: active.strand,
+                    seq_len: active.seq_len,
+                    matching_bases: active.matching_bases,
+                    indel_bases: active.indel_bases,
+                    record_idx: active.record_idx,
+                });
             }
 
             // r[impl dedup.per_position]
@@ -454,10 +547,39 @@ fn dedup_overlapping_pairs(
                 "mate_aln_idx out of bounds: {mate_aln_idx} >= {}",
                 alignments.len()
             );
-            let this_base = alignments[aln_idx].base;
-            let mate_base = alignments[mate_aln_idx].base;
+            // r[impl pileup_indel.dedup_with_deletions]
+            let this_base = alignments[aln_idx].base();
+            let mate_base = alignments[mate_aln_idx].base();
 
-            if this_base == mate_base || alignments[aln_idx].flags & FLAG_SECOND_IN_TEMPLATE != 0 {
+            let remove_this = match (this_base, mate_base) {
+                (Some(tb), Some(mb)) => {
+                    if tb != mb {
+                        // Different bases: keep first-in-template
+                        alignments[aln_idx].flags & FLAG_SECOND_IN_TEMPLATE != 0
+                    } else if alignments[mate_aln_idx].insert_len() > 0
+                        && alignments[aln_idx].insert_len() == 0
+                    {
+                        // Same base, mate has insertion info: keep mate
+                        true
+                    } else if alignments[aln_idx].insert_len() > 0
+                        && alignments[mate_aln_idx].insert_len() == 0
+                    {
+                        // Same base, this has insertion info: keep this
+                        false
+                    } else {
+                        // Same base, same insertion status: keep first encountered
+                        true
+                    }
+                }
+                // This has no base (deletion/refskip), mate has base → remove this
+                (None, Some(_)) => true,
+                // This has base, mate has no base → keep this
+                (Some(_), None) => false,
+                // Both no base → keep first encountered
+                (None, None) => true,
+            };
+
+            if remove_this {
                 to_remove.push(aln_idx);
             } else {
                 to_remove.push(mate_aln_idx);

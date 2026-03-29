@@ -72,8 +72,8 @@ fn pileup_alignment_has_base_type() {
     let col = engine.next().expect("should have a column");
     let aln = col.alignments().next().expect("should have an alignment");
 
-    // aln.base is Base, not u8 — this is a compile-time check
-    let base: Base = aln.base;
+    // aln.base() returns Option<Base> — this verifies the type via the convenience method
+    let base: Base = aln.base().unwrap();
     assert!(matches!(base, Base::A | Base::C | Base::G | Base::T | Base::Unknown));
 }
 

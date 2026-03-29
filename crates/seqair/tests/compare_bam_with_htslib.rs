@@ -185,10 +185,12 @@ fn all_contigs_pileup_positions_and_depth_match() {
 
         for (col_idx, (r, h)) in rio.iter().zip(&hts).enumerate() {
             assert_eq!(r.pos(), h.pos, "{contig} col {col_idx}: position mismatch");
+            // Compare match-depth only (htslib's qpos_flags excludes deletions/refskips)
+            let match_depth = r.alignments().filter(|a| a.qpos().is_some()).count();
             assert_eq!(
-                r.depth(),
+                match_depth,
                 h.qpos_flags.len(),
-                "{contig} col {col_idx} (pos {}): depth mismatch",
+                "{contig} col {col_idx} (pos {}): match-depth mismatch",
                 h.pos,
             );
         }
@@ -214,7 +216,8 @@ fn all_contigs_pileup_qpos_and_flags_match() {
         let rio: Vec<_> = engine.collect();
 
         for (col_idx, (r, h)) in rio.iter().zip(&hts).enumerate() {
-            let mut qf: Vec<(usize, u16)> = r.alignments().map(|a| (a.qpos(), a.flags)).collect();
+            let mut qf: Vec<(usize, u16)> =
+                r.alignments().filter_map(|a| a.qpos().map(|q| (q, a.flags))).collect();
             qf.sort();
 
             assert_eq!(
@@ -259,7 +262,8 @@ fn all_contigs_pileup_bases_match() {
         let rio: Vec<_> = engine.collect();
 
         for (col_idx, (r, h)) in rio.iter().zip(&hts).enumerate() {
-            let mut bases: Vec<u8> = r.alignments().map(|a| a.base as u8).collect();
+            let mut bases: Vec<u8> =
+                r.alignments().filter_map(|a| a.base().map(|b| b as u8)).collect();
             bases.sort();
 
             assert_eq!(bases, h.bases, "{contig} col {col_idx} (pos {}): bases mismatch", h.pos,);

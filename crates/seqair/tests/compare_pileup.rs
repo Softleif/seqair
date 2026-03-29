@@ -134,7 +134,8 @@ fn pileup_qpos_matches() {
     let columns: Vec<_> = engine.collect();
 
     for (col_idx, (rio, hts)) in columns.iter().zip(hts_columns.iter()).enumerate() {
-        let mut alns: Vec<(usize, u16)> = rio.alignments().map(|a| (a.qpos(), a.flags)).collect();
+        let mut alns: Vec<(usize, u16)> =
+            rio.alignments().filter_map(|a| a.qpos().map(|q| (q, a.flags))).collect();
         alns.sort();
 
         assert_eq!(
