@@ -4,6 +4,7 @@
 
 mod base;
 mod phred;
+pub mod pos;
 mod probability;
 mod region_string;
 mod rms;
@@ -23,6 +24,8 @@ pub mod smallvec {
 pub use smallvec;
 
 pub use smallvec::SmallVec;
+
+pub use pos::{Offset, One, Pos, Zero};
 
 pub use {
     base::{Base, BaseError},
