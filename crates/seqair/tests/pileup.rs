@@ -310,3 +310,271 @@ fn zero_refspan_endpos_equals_pos() {
     let r = arena.record(0);
     assert_eq!(r.end_pos, 100, "zero-refspan should have end_pos == pos");
 }
+
+// ---- pileup.position_iteration (monotonic) ----
+
+// r[verify pileup.position_iteration]
+proptest! {
+    #[test]
+    fn column_positions_are_strictly_increasing(
+        records in prop::collection::vec((0i32..200, 10u32..=50), 1..=15),
+    ) {
+        let mut sorted = records.clone();
+        sorted.sort_by_key(|&(offset, _)| offset);
+
+        let mut arena = RecordStore::new();
+        for &(offset, read_len) in &sorted {
+            arena.push_raw(&make_record(0, offset, 99, 60, read_len)).unwrap();
+        }
+
+        let engine = PileupEngine::new(arena, 0, 300);
+        let mut prev_pos = -1i64;
+        for col in engine {
+            prop_assert!(col.pos() > prev_pos,
+                "positions must be strictly increasing: {} not > {}", col.pos(), prev_pos);
+            prev_pos = col.pos();
+        }
+    }
+}
+
+// ---- pileup.qpos (bounds check) ----
+
+// r[verify pileup.qpos]
+proptest! {
+    #[test]
+    fn qpos_within_read_length(
+        start in 0i32..100,
+        len in 10u32..=100,
+    ) {
+        let mut arena = RecordStore::new();
+        arena.push_raw(&make_record(0, start, 99, 60, len)).unwrap();
+
+        let start_i64 = i64::from(start);
+        let end_i64 = start_i64 + i64::from(len) - 1;
+        let engine = PileupEngine::new(arena, start_i64, end_i64);
+
+        for col in engine {
+            for aln in col.alignments() {
+                prop_assert!(aln.qpos() < len as usize,
+                    "qpos {} must be < seq_len {} at pos {}", aln.qpos(), len, col.pos());
+            }
+        }
+    }
+}
+
+// ---- pileup.column_contents (base and qual present) ----
+
+// r[verify pileup.column_contents]
+proptest! {
+    #[test]
+    fn all_alignments_have_valid_base_and_qual(
+        n in 1usize..=10,
+        len in 10u32..=50,
+    ) {
+        let mut arena = RecordStore::new();
+        for _ in 0..n {
+            arena.push_raw(&make_record(0, 0, 99, 60, len)).unwrap();
+        }
+
+        let engine = PileupEngine::new(arena, 0, i64::from(len) - 1);
+        for col in engine {
+            prop_assert!(col.depth() > 0);
+            for aln in col.alignments() {
+                // Base must be a valid Base discriminant (A/C/G/T/Unknown)
+                let base_byte = aln.base as u8;
+                prop_assert!(
+                    matches!(base_byte, 65 | 67 | 71 | 84 | 78),
+                    "invalid base byte {} at pos {}", base_byte, col.pos()
+                );
+                // Qual was set to 30 in make_record
+                prop_assert_eq!(aln.qual, 30, "qual should be 30");
+            }
+        }
+    }
+}
+
+// ---- pileup.trailing_empty_termination ----
+
+// r[verify pileup.trailing_empty_termination]
+proptest! {
+    #[test]
+    fn trailing_empty_positions_terminate_early(
+        start in 0i32..100,
+        len in 10u32..=30,
+        trailing in 100i64..=500,
+    ) {
+        let mut arena = RecordStore::new();
+        arena.push_raw(&make_record(0, start, 99, 60, len)).unwrap();
+
+        let start_i64 = i64::from(start);
+        let region_end = start_i64 + i64::from(len) + trailing;
+        let engine = PileupEngine::new(arena, start_i64, region_end);
+        let columns: Vec<_> = engine.collect();
+
+        // Should produce exactly `len` columns, not `len + trailing`
+        prop_assert_eq!(columns.len(), len as usize,
+            "should terminate after last record, not iterate {} trailing positions", trailing);
+    }
+}
+
+// ---- Complex CIGAR pileup tests using synthetic read strategy ----
+
+use helpers::{arb_read, arb_read_set};
+
+// r[verify pileup.active_set]
+// r[verify pileup.qpos]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// Every column's depth must match the number of reads whose covered
+    /// ref positions include that column's position.
+    #[test]
+    fn depth_matches_cigar_derived_coverage(reads in arb_read_set(15)) {
+        let mut arena = RecordStore::new();
+        for read in &reads {
+            arena.push_raw(&read.raw).unwrap();
+        }
+
+        let region_start = reads.iter().map(|r| i64::from(r.pos)).min().unwrap();
+        let region_end = reads.iter()
+            .map(|r| i64::from(r.pos) + i64::from(r.ref_span) + 10)
+            .max()
+            .unwrap();
+
+        let engine = PileupEngine::new(arena, region_start, region_end);
+        for col in engine {
+            let expected_depth = reads.iter()
+                .filter(|r| r.covered_ref_positions().contains(&col.pos()))
+                .count();
+            prop_assert_eq!(col.depth(), expected_depth,
+                "depth mismatch at pos {} (expected from CIGAR analysis)", col.pos());
+        }
+    }
+
+    /// qpos values from the pileup engine must match our independent CIGAR walk.
+    #[test]
+    fn qpos_matches_independent_cigar_walk(reads in arb_read_set(10)) {
+        let mut arena = RecordStore::new();
+        for read in &reads {
+            arena.push_raw(&read.raw).unwrap();
+        }
+
+        let region_start = reads.iter().map(|r| i64::from(r.pos)).min().unwrap();
+        let region_end = reads.iter()
+            .map(|r| i64::from(r.pos) + i64::from(r.ref_span) + 10)
+            .max()
+            .unwrap();
+
+        let engine = PileupEngine::new(arena, region_start, region_end);
+        for col in engine {
+            for aln in col.alignments() {
+                let read = &reads[aln.record_idx() as usize];
+                let expected_qpos = read.qpos_at(col.pos());
+                prop_assert_eq!(Some(aln.qpos()), expected_qpos,
+                    "qpos mismatch at pos {} for read at pos {} with cigar {:?}",
+                    col.pos(), read.pos, read.cigar_ops);
+            }
+        }
+    }
+
+    /// Deletions and ref-skips must cause the read to be absent from columns
+    /// at those positions (qpos_none behavior).
+    #[test]
+    fn deletions_cause_absent_alignment(read in arb_read()) {
+        let has_deletion = read.cigar_ops.iter().any(|&(_, op)| op == 2 || op == 3);
+        if !has_deletion {
+            return Ok(());
+        }
+
+        let mut arena = RecordStore::new();
+        arena.push_raw(&read.raw).unwrap();
+
+        let region_start = i64::from(read.pos);
+        let region_end = region_start + i64::from(read.ref_span);
+        let engine = PileupEngine::new(arena, region_start, region_end);
+
+        let covered = read.covered_ref_positions();
+        for col in engine {
+            if covered.contains(&col.pos()) {
+                prop_assert_eq!(col.depth(), 1,
+                    "position {} should have depth 1 (M/=/X)", col.pos());
+            } else {
+                prop_assert_eq!(col.depth(), 0,
+                    "position {} falls in D/N gap, should have depth 0", col.pos());
+            }
+        }
+    }
+
+    /// Insertions don't affect depth or ref positions — they only shift qpos.
+    #[test]
+    fn insertions_shift_qpos_but_not_depth(read in arb_read()) {
+        let has_insertion = read.cigar_ops.iter().any(|&(_, op)| op == 1);
+        if !has_insertion {
+            return Ok(());
+        }
+
+        let mut arena = RecordStore::new();
+        arena.push_raw(&read.raw).unwrap();
+
+        let region_start = i64::from(read.pos);
+        let region_end = region_start + i64::from(read.ref_span);
+        let engine = PileupEngine::new(arena, region_start, region_end);
+
+        for col in engine {
+            let expected_qpos = read.qpos_at(col.pos());
+            if let Some(expected) = expected_qpos {
+                prop_assert_eq!(col.depth(), 1);
+                let aln = col.alignments().next().unwrap();
+                prop_assert_eq!(aln.qpos(), expected,
+                    "qpos wrong at pos {} — insertion should shift query offset", col.pos());
+            }
+        }
+    }
+
+    /// With multiple complex-CIGAR reads, no column should ever appear with
+    /// zero depth (the engine skips empty positions).
+    #[test]
+    fn no_zero_depth_columns_with_complex_cigars(reads in arb_read_set(8)) {
+        let mut arena = RecordStore::new();
+        for read in &reads {
+            arena.push_raw(&read.raw).unwrap();
+        }
+
+        let region_start = reads.iter().map(|r| i64::from(r.pos)).min().unwrap();
+        let region_end = reads.iter()
+            .map(|r| i64::from(r.pos) + i64::from(r.ref_span) + 100)
+            .max()
+            .unwrap();
+
+        let engine = PileupEngine::new(arena, region_start, region_end);
+        for col in engine {
+            prop_assert!(col.depth() > 0,
+                "empty column at pos {} with complex CIGARs", col.pos());
+        }
+    }
+
+    /// qpos must always be within [0, seq_len) for every alignment.
+    #[test]
+    fn qpos_always_within_seq_bounds(reads in arb_read_set(10)) {
+        let mut arena = RecordStore::new();
+        for read in &reads {
+            arena.push_raw(&read.raw).unwrap();
+        }
+
+        let region_start = reads.iter().map(|r| i64::from(r.pos)).min().unwrap();
+        let region_end = reads.iter()
+            .map(|r| i64::from(r.pos) + i64::from(r.ref_span) + 10)
+            .max()
+            .unwrap();
+
+        let engine = PileupEngine::new(arena, region_start, region_end);
+        for col in engine {
+            for aln in col.alignments() {
+                prop_assert!(aln.qpos() < aln.seq_len as usize,
+                    "qpos {} >= seq_len {} at pos {} for read with cigar {:?}",
+                    aln.qpos(), aln.seq_len, col.pos(),
+                    reads[aln.record_idx() as usize].cigar_ops);
+            }
+        }
+    }
+}
