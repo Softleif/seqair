@@ -393,7 +393,7 @@ fn decode_record(
             bases_buf,
             qual_buf,
             aux_buf,
-        );
+        )?;
 
         return Ok(1);
     }

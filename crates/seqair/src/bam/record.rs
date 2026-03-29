@@ -112,8 +112,8 @@ impl BamRecord {
     }
 
     // r[impl bam.record.aux_parse]
-    pub fn aux(&self, tag: &[u8; 2]) -> Option<AuxValue<'_>> {
-        find_aux_tag(&self.aux, tag)
+    pub fn aux(&self, tag: &[u8; 2]) -> Option<super::aux::AuxValue<'_>> {
+        super::aux::find_tag(&self.aux, *tag)
     }
 }
 
@@ -254,130 +254,6 @@ pub enum DecodeError {
 
     #[error("slab offset exceeds u32::MAX")]
     SlabOverflow,
-}
-
-// r[impl bam.record.raw_aux]
-/// Parsed auxiliary tag value.
-#[derive(Debug, Clone, PartialEq)]
-pub enum AuxValue<'a> {
-    Char(u8),
-    I8(i8),
-    U8(u8),
-    I16(i16),
-    U16(u16),
-    I32(i32),
-    U32(u32),
-    Float(f32),
-    Double(f64),
-    String(&'a [u8]),
-    Hex(&'a [u8]),
-    ArrayI8(&'a [u8]),
-    ArrayU8(&'a [u8]),
-    ArrayI16(&'a [u8]),
-    ArrayU16(&'a [u8]),
-    ArrayI32(&'a [u8]),
-    ArrayU32(&'a [u8]),
-    ArrayFloat(&'a [u8]),
-}
-
-// aux[0..2] valid since while loop checks aux.len() >= 3; aux[3..] valid for same reason.
-#[allow(clippy::indexing_slicing, reason = "aux.len() >= 3 enforced by while condition")]
-pub fn find_aux_tag<'a>(mut aux: &'a [u8], tag: &[u8; 2]) -> Option<AuxValue<'a>> {
-    while aux.len() >= 3 {
-        debug_assert!(aux.len() >= 3, "aux too short for tag+type: {}", aux.len());
-        let t = [aux[0], aux[1]];
-        let type_byte = aux[2];
-        aux = &aux[3..];
-        let (value, consumed) = parse_aux_value(type_byte, aux)?;
-        if t == *tag {
-            return Some(value);
-        }
-        aux = aux.get(consumed..)?;
-    }
-    None
-}
-
-// Indexing is guarded by explicit length checks within each match arm.
-#[allow(clippy::indexing_slicing, reason = "each arm validates data.len() before indexing")]
-fn parse_aux_value(type_byte: u8, data: &[u8]) -> Option<(AuxValue<'_>, usize)> {
-    match type_byte {
-        b'A' => Some((AuxValue::Char(*data.first()?), 1)),
-        b'c' => Some((AuxValue::I8(*data.first()? as i8), 1)),
-        b'C' => Some((AuxValue::U8(*data.first()?), 1)),
-        b's' => {
-            let v = i16::from_le_bytes([*data.first()?, *data.get(1)?]);
-            Some((AuxValue::I16(v), 2))
-        }
-        b'S' => {
-            let v = u16::from_le_bytes([*data.first()?, *data.get(1)?]);
-            Some((AuxValue::U16(v), 2))
-        }
-        b'i' => {
-            let v = i32::from_le_bytes(read4_checked(data)?);
-            Some((AuxValue::I32(v), 4))
-        }
-        b'I' => {
-            let v = u32::from_le_bytes(read4_checked(data)?);
-            Some((AuxValue::U32(v), 4))
-        }
-        b'f' => {
-            let v = f32::from_le_bytes(read4_checked(data)?);
-            Some((AuxValue::Float(v), 4))
-        }
-        b'd' => {
-            if data.len() < 8 {
-                return None;
-            }
-            debug_assert!(data.len() >= 8, "double aux data too short: {}", data.len());
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&data[..8]);
-            Some((AuxValue::Double(f64::from_le_bytes(bytes)), 8))
-        }
-        b'Z' => {
-            let end = data.iter().position(|&b| b == 0)?;
-            Some((AuxValue::String(&data[..end]), end + 1))
-        }
-        b'H' => {
-            let end = data.iter().position(|&b| b == 0)?;
-            Some((AuxValue::Hex(&data[..end]), end + 1))
-        }
-        b'B' => {
-            if data.len() < 5 {
-                return None;
-            }
-            debug_assert!(data.len() >= 5, "array aux data too short: {}", data.len());
-            let sub_type = data[0];
-            let count = u32::from_le_bytes(read4_checked(&data[1..])?) as usize;
-            let elem_size = match sub_type {
-                b'c' | b'C' => 1,
-                b's' | b'S' => 2,
-                b'i' | b'I' | b'f' => 4,
-                _ => return None,
-            };
-            let total = 5 + count * elem_size;
-            if data.len() < total {
-                return None;
-            }
-            debug_assert!(total <= data.len(), "array data overrun: {total} > {}", data.len());
-            let array_data = &data[5..total];
-            let value = match sub_type {
-                b'c' => AuxValue::ArrayI8(array_data),
-                b'C' => AuxValue::ArrayU8(array_data),
-                b's' => AuxValue::ArrayI16(array_data),
-                b'S' => AuxValue::ArrayU16(array_data),
-                b'i' => AuxValue::ArrayI32(array_data),
-                b'I' => AuxValue::ArrayU32(array_data),
-                b'f' => AuxValue::ArrayFloat(array_data),
-                _ => return None,
-            };
-            Some((value, total))
-        }
-        _ => None,
-    }
-}
-
-fn read4_checked(data: &[u8]) -> Option<[u8; 4]> {
-    Some([*data.first()?, *data.get(1)?, *data.get(2)?, *data.get(3)?])
 }
 
 #[cfg(test)]

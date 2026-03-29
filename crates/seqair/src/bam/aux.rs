@@ -27,6 +27,20 @@ pub enum AuxValue<'a> {
     String(&'a [u8]),
     /// Hex string (`H` type code), without the null terminator.
     Hex(&'a [u8]),
+    /// Array of signed 8-bit integers (`B`/`c` subtype). Raw little-endian bytes.
+    ArrayI8(&'a [u8]),
+    /// Array of unsigned 8-bit integers (`B`/`C` subtype). Raw bytes.
+    ArrayU8(&'a [u8]),
+    /// Array of signed 16-bit integers (`B`/`s` subtype). Raw little-endian bytes.
+    ArrayI16(&'a [u8]),
+    /// Array of unsigned 16-bit integers (`B`/`S` subtype). Raw little-endian bytes.
+    ArrayU16(&'a [u8]),
+    /// Array of signed 32-bit integers (`B`/`i` subtype). Raw little-endian bytes.
+    ArrayI32(&'a [u8]),
+    /// Array of unsigned 32-bit integers (`B`/`I` subtype). Raw little-endian bytes.
+    ArrayU32(&'a [u8]),
+    /// Array of single-precision floats (`B`/`f` subtype). Raw little-endian bytes.
+    ArrayFloat(&'a [u8]),
 }
 
 impl<'a> AuxValue<'a> {
@@ -55,10 +69,6 @@ impl<'a> AuxValue<'a> {
 /// Find a tag in raw BAM auxiliary data and return its typed value.
 ///
 /// Returns `None` if the tag is not found or the data is truncated.
-///
-/// B-type (array) tags are not yet supported and will return `None`, even when
-/// the tag is present. The bytes are skipped correctly so that subsequent tags
-/// in the same record remain reachable.
 pub fn find_tag<'a>(aux: &'a [u8], tag: [u8; 2]) -> Option<AuxValue<'a>> {
     for (t, value) in iter_tags(aux) {
         if t == tag {
@@ -97,7 +107,7 @@ impl<'a> Iterator for AuxIter<'a> {
 
             match self.parse_value(typ) {
                 Some(Some(value)) => return Some((tag, value)),
-                Some(None) => continue, // skippable tag (e.g. array)
+                Some(None) => continue, // skippable tag
                 None => return None,    // malformed data
             }
         }
@@ -106,7 +116,7 @@ impl<'a> Iterator for AuxIter<'a> {
 
 impl<'a> AuxIter<'a> {
     /// Returns `Some(Some(value))` for a successfully parsed tag,
-    /// `Some(None)` for a tag that was skipped (e.g. arrays),
+    /// `Some(None)` for a tag that was intentionally skipped,
     /// or `None` for malformed/truncated data.
     fn parse_value(&mut self, typ: u8) -> Option<Option<AuxValue<'a>>> {
         match typ {
@@ -178,12 +188,24 @@ impl<'a> AuxIter<'a> {
                 };
 
                 let total = count.checked_mul(elem_size)?;
+                let array_start = self.pos;
                 let end = self.pos.checked_add(total)?;
                 if end > self.data.len() {
                     return None;
                 }
                 self.pos = end;
-                Some(None) // arrays not yet represented in AuxValue
+                let array_data = self.data.get(array_start..end)?;
+                let value = match elem_type {
+                    b'c' => AuxValue::ArrayI8(array_data),
+                    b'C' => AuxValue::ArrayU8(array_data),
+                    b's' => AuxValue::ArrayI16(array_data),
+                    b'S' => AuxValue::ArrayU16(array_data),
+                    b'i' => AuxValue::ArrayI32(array_data),
+                    b'I' => AuxValue::ArrayU32(array_data),
+                    b'f' => AuxValue::ArrayFloat(array_data),
+                    _ => return None,
+                };
+                Some(Some(value))
             }
             _ => None,
         }
@@ -343,17 +365,44 @@ mod tests {
     }
 
     #[test]
-    fn skip_array_tag() {
+    fn array_tag_u32() {
         let mut arr = vec![b'B', b'I'];
         arr.extend_from_slice(&2u32.to_le_bytes());
         arr.extend_from_slice(&100u32.to_le_bytes());
         arr.extend_from_slice(&200u32.to_le_bytes());
 
+        let expected: Vec<u8> =
+            [100u32.to_le_bytes(), 200u32.to_le_bytes()].into_iter().flatten().collect();
+
         let target = z_tag(b"found");
         let aux = build_aux(&[(b"AR", &arr), (b"ZZ", &target)]);
 
+        assert_eq!(find_tag(&aux, *b"AR"), Some(AuxValue::ArrayU32(&expected)));
         assert_eq!(find_tag(&aux, *b"ZZ"), Some(AuxValue::String(b"found")));
-        assert_eq!(find_tag(&aux, *b"AR"), None);
+    }
+
+    #[test]
+    fn array_tag_i8() {
+        let mut arr = vec![b'B', b'c'];
+        arr.extend_from_slice(&3u32.to_le_bytes());
+        arr.extend_from_slice(&[1u8, 0xfeu8, 0x7fu8]); // 1, -2, 127
+
+        let aux = build_aux(&[(b"XB", &arr)]);
+        assert_eq!(find_tag(&aux, *b"XB"), Some(AuxValue::ArrayI8(&[1, 0xfe, 0x7f])));
+    }
+
+    #[test]
+    fn array_tag_float() {
+        let v1 = 1.5f32.to_le_bytes();
+        let v2 = (-0.5f32).to_le_bytes();
+        let mut arr = vec![b'B', b'f'];
+        arr.extend_from_slice(&2u32.to_le_bytes());
+        arr.extend_from_slice(&v1);
+        arr.extend_from_slice(&v2);
+
+        let expected: Vec<u8> = [v1, v2].into_iter().flatten().collect();
+        let aux = build_aux(&[(b"XF", &arr)]);
+        assert_eq!(find_tag(&aux, *b"XF"), Some(AuxValue::ArrayFloat(&expected)));
     }
 
     #[test]

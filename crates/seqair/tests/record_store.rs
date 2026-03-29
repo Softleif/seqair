@@ -125,7 +125,7 @@ fn integration_with_real_bam() {
 // r[verify unified.push_fields_equivalence]
 // r[verify unified.record_store_push]
 #[test]
-fn push_fields_matches_push_raw() {
+fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
     let cigar_ops: &[u32] = &[(4 << 4)]; // 4M
     let packed_seq = &[0x12, 0x48]; // ACGT in 4-bit packed
     let qual = &[30u8; 4];
@@ -134,7 +134,7 @@ fn push_fields_matches_push_raw() {
     let raw = make_test_record(0, 100, 0x63, 60, b"read1", cigar_ops, packed_seq, qual, aux);
 
     let mut store_raw = RecordStore::new();
-    let idx_raw = store_raw.push_raw(&raw).unwrap();
+    let idx_raw = store_raw.push_raw(&raw)?;
 
     // Build the same record from pre-parsed fields
     let cigar_packed: Vec<u8> = cigar_ops.iter().flat_map(|op| op.to_le_bytes()).collect();
@@ -153,7 +153,7 @@ fn push_fields_matches_push_raw() {
         &bases,
         qual,
         aux,
-    );
+    )?;
 
     // Compare fixed fields
     let r = store_raw.record(idx_raw);
@@ -173,11 +173,12 @@ fn push_fields_matches_push_raw() {
     assert_eq!(store_raw.qual(idx_raw), store_fields.qual(idx_fields));
     assert_eq!(store_raw.cigar(idx_raw), store_fields.cigar(idx_fields));
     assert_eq!(store_raw.aux(idx_raw), store_fields.aux(idx_fields));
+    Ok(())
 }
 
 // r[verify unified.push_fields_equivalence]
 #[test]
-fn push_fields_with_real_bam_records() {
+fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>> {
     use seqair::bam::reader::IndexedBamReader;
     use std::path::Path;
 
@@ -205,7 +206,7 @@ fn push_fields_with_real_bam_records() {
             store.seq(i),
             store.qual(i),
             store.aux(i),
-        );
+        )?;
     }
 
     assert_eq!(store.len(), store2.len());
@@ -219,6 +220,7 @@ fn push_fields_with_real_bam_records() {
         assert_eq!(store.cigar(i), store2.cigar(i), "rec {i}: cigar");
         assert_eq!(store.aux(i), store2.aux(i), "rec {i}: aux");
     }
+    Ok(())
 }
 
 /// Build a minimal raw BAM record for testing.

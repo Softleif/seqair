@@ -2,8 +2,11 @@
 //! records for a region into a [`RecordStore`], with the same API as [`crate::bam::reader::IndexedBamReader`].
 
 use crate::bam::{
-    BaiError, BamHeader, BamHeaderError, BamIndex, cigar, flags::FLAG_UNMAPPED,
-    record::compute_end_pos, record_store::RecordStore, region_buf::RegionBuf,
+    BaiError, BamHeader, BamHeaderError, BamIndex, cigar,
+    flags::FLAG_UNMAPPED,
+    record::{DecodeError, compute_end_pos},
+    record_store::RecordStore,
+    region_buf::RegionBuf,
 };
 use seqair_types::Base;
 use std::{
@@ -124,6 +127,12 @@ pub enum SamError {
         path = path.display()
     )]
     UncompressedSam { path: PathBuf },
+
+    #[error("record decode error: {source}")]
+    RecordDecode {
+        #[from]
+        source: DecodeError,
+    },
 }
 
 pub struct SamShared {
@@ -420,7 +429,7 @@ fn parse_sam_line(
         bases_buf,
         qual_buf,
         aux_buf,
-    );
+    )?;
 
     Ok(Some(()))
 }

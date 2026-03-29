@@ -166,6 +166,7 @@ impl PileupEngine {
     // r[impl dedup.mate_pairs_only]
     #[instrument(level = "debug", skip_all, fields(store_len = self.store.len()))]
     pub fn set_dedup_overlapping(&mut self) {
+        use std::collections::hash_map::Entry;
         let n = self.store.len();
         let mut name_to_idx: FxHashMap<&[u8], u32> = FxHashMap::default();
         let mut mate_of = vec![None; n];
@@ -178,10 +179,10 @@ impl PileupEngine {
                 continue;
             }
             match name_to_idx.entry(qname) {
-                std::collections::hash_map::Entry::Vacant(e) => {
+                Entry::Vacant(e) => {
                     e.insert(idx);
                 }
-                std::collections::hash_map::Entry::Occupied(e) => {
+                Entry::Occupied(e) => {
                     let mate_idx = *e.get();
                     debug_assert!(
                         (mate_idx as usize) < mate_of.len(),
@@ -297,6 +298,7 @@ impl Iterator for PileupEngine {
 
             // r[impl pileup.empty_positions_skipped]
             if self.active.is_empty() {
+                // r[impl pileup.trailing_empty_termination]
                 if self.next_entry >= self.store.len() {
                     return None;
                 }
@@ -309,6 +311,7 @@ impl Iterator for PileupEngine {
 
             // r[impl pileup.qpos_none]
             // r[related record_store.field_access]
+            // r[impl perf.reuse_alignment_vec+2]
             let mut alignments = Vec::with_capacity(self.active.len());
             for active in &self.active {
                 if let Some(qpos) = active.cigar.qpos_at(pos) {

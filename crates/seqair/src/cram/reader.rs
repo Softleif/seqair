@@ -9,6 +9,7 @@ use super::{
     index::{self, CramIndex, CramIndexError},
     slice,
 };
+use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
@@ -181,6 +182,12 @@ pub enum CramError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("record decode error: {source}")]
+    RecordDecode {
+        #[from]
+        source: DecodeError,
+    },
 }
 
 pub struct CramShared {

@@ -1,7 +1,7 @@
 //! Compares seqair against htslib across the entire test BAM file
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
-use seqair::bam::record::{AuxValue, find_aux_tag};
+use seqair::bam::aux::{AuxValue, find_tag as find_aux_tag};
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -312,7 +312,7 @@ fn fetch_hts_aux_records(contig: &str, start: u64, end: u64) -> Vec<HtsAuxRecord
 
 /// Extract a Z-type (string) aux tag from raw BAM aux bytes.
 fn aux_z_tag<'a>(aux: &'a [u8], tag: &[u8; 2]) -> Option<&'a str> {
-    match find_aux_tag(aux, tag)? {
+    match find_aux_tag(aux, *tag)? {
         AuxValue::String(bytes) => std::str::from_utf8(bytes).ok(),
         _ => None,
     }
@@ -320,7 +320,7 @@ fn aux_z_tag<'a>(aux: &'a [u8], tag: &[u8; 2]) -> Option<&'a str> {
 
 /// Extract an integer aux tag (any integer sub-type) from raw BAM aux bytes.
 fn aux_int_tag(aux: &[u8], tag: &[u8; 2]) -> Option<i64> {
-    match find_aux_tag(aux, tag)? {
+    match find_aux_tag(aux, *tag)? {
         AuxValue::I8(v) => Some(v as i64),
         AuxValue::U8(v) => Some(v as i64),
         AuxValue::I16(v) => Some(v as i64),

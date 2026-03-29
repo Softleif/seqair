@@ -46,6 +46,9 @@ When the current reference position falls within a deletion or reference skip in
 r[pileup.empty_positions_skipped]
 Positions with zero active reads MUST be skipped (no column yielded). When there is a gap between reads, the engine MUST jump to the next read's start position rather than iterating through empty positions one by one.
 
+r[pileup.trailing_empty_termination]
+When the active set is empty and all records in the store have been consumed (no more records ahead), the engine MUST terminate iteration immediately rather than continuing through remaining empty positions to the region end. Callers that need zero-depth columns for trailing positions MUST generate them externally.
+
 r[pileup.unmapped_excluded]
 Reads with the unmapped flag (0x4) MUST be excluded from the pileup. htslib's `bam_plp_push` rejects unmapped reads before they enter the buffer.
 
