@@ -13,7 +13,7 @@ use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
-use seqair_types::{Base, SmolStr};
+use seqair_types::{Base, Pos, SmolStr, Zero};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -302,13 +302,16 @@ impl IndexedCramReader {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: u64,
-        end: u64,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
         store: &mut RecordStore,
     ) -> Result<usize, CramError> {
         store.clear();
 
-        let entries = self.shared.index.query(tid as i32, start, end);
+        let start_u64 = u64::from(start.get());
+        let end_u64 = u64::from(end.get());
+
+        let entries = self.shared.index.query(tid as i32, start_u64, end_u64);
         if entries.is_empty() {
             return Ok(0);
         }
@@ -371,7 +374,7 @@ impl IndexedCramReader {
                     _ => {
                         // No CRAI span info — fetch the full contig
                         let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
-                        (start.min(ref_len), end.min(ref_len))
+                        (start_u64.min(ref_len), end_u64.min(ref_len))
                     }
                 }
             } else {
@@ -407,8 +410,8 @@ impl IndexedCramReader {
                     ref_start as i64,
                     &self.shared.header,
                     tid,
-                    start.min(i64::MAX as u64) as i64,
-                    end.min(i64::MAX as u64) as i64,
+                    start,
+                    end,
                     store,
                     &mut self.cigar_buf,
                     &mut self.bases_buf,
@@ -499,7 +502,9 @@ mod tests {
 
         // Fetch from first reference
         let tid = 0;
-        let count = reader.fetch_into(tid, 0, u64::MAX, &mut store).unwrap();
+        let count = reader
+            .fetch_into(tid, Pos::<Zero>::new(0), Pos::<Zero>::new(u32::MAX), &mut store)
+            .unwrap();
         assert!(count > 0, "should fetch records from tid={tid}");
     }
 

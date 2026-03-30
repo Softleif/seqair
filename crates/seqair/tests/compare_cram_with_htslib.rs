@@ -9,7 +9,7 @@
     clippy::type_complexity
 )]
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
-use seqair::bam::RecordStore;
+use seqair::bam::{Pos, RecordStore, Zero};
 use seqair::reader::Readers;
 use std::path::Path;
 
@@ -122,7 +122,14 @@ fn cram_records_match_htslib_for_chr19() {
         let mut readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
         let mut store = RecordStore::new();
         let tid = readers.header().tid(contig).unwrap();
-        let cram_count = readers.fetch_into(tid, start, end, &mut store).unwrap();
+        let cram_count = readers
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .unwrap();
 
         assert_eq!(
             cram_count,
@@ -133,11 +140,11 @@ fn cram_records_match_htslib_for_chr19() {
 
         for (i, hts) in hts_records.iter().enumerate() {
             let cram = store.record(i as u32);
-            assert_eq!(cram.pos, hts.pos, "{version} rec {i}: pos");
+            assert_eq!(cram.pos.as_i64(), hts.pos, "{version} rec {i}: pos");
             assert_eq!(cram.flags, hts.flags, "{version} rec {i}: flags");
             assert_eq!(cram.mapq, hts.mapq, "{version} rec {i}: mapq");
             assert_eq!(cram.seq_len as usize, hts.seq_len, "{version} rec {i}: seq_len");
-            assert_eq!(cram.end_pos, hts.end_pos, "{version} rec {i}: end_pos");
+            assert_eq!(cram.end_pos.as_i64(), hts.end_pos, "{version} rec {i}: end_pos");
         }
     }
 }
@@ -155,7 +162,14 @@ fn cram_quality_scores_match_htslib() {
         let mut readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
         let mut store = RecordStore::new();
         let tid = readers.header().tid(contig).unwrap();
-        readers.fetch_into(tid, start, end, &mut store).unwrap();
+        readers
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .unwrap();
 
         assert_eq!(store.len(), hts_quals.len(), "{version}: record count");
 
@@ -185,7 +199,14 @@ fn cram_sequences_match_htslib() {
         let mut readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
         let mut store = RecordStore::new();
         let tid = readers.header().tid(contig).unwrap();
-        readers.fetch_into(tid, start, end, &mut store).unwrap();
+        readers
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .unwrap();
 
         assert_eq!(store.len(), hts_seqs.len(), "{version}: record count");
 
@@ -233,8 +254,22 @@ fn cram_fork_produces_same_records() {
         let mut store1 = RecordStore::new();
         let mut store2 = RecordStore::new();
 
-        fork1.fetch_into(tid, start, end, &mut store1).unwrap();
-        fork2.fetch_into(tid, start, end, &mut store2).unwrap();
+        fork1
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store1,
+            )
+            .unwrap();
+        fork2
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store2,
+            )
+            .unwrap();
 
         assert_eq!(store1.len(), store2.len(), "{version}: forked count mismatch");
         for i in 0..store1.len() as u32 {

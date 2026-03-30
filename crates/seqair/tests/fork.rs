@@ -1,6 +1,6 @@
 //! Tests for `IndexedBamReader::fork()` — the thread-safe shared-state pattern.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-use seqair::bam::{IndexedBamReader, RecordStore};
+use seqair::bam::{IndexedBamReader, Pos, RecordStore, Zero};
 use std::{path::Path, sync::Arc, thread};
 
 fn test_bam_path() -> &'static Path {
@@ -21,8 +21,12 @@ fn fetch_record_positions(
 ) -> Vec<(i64, i64)> {
     let mut store = RecordStore::new();
     let tid = reader.header().tid(contig).expect("tid lookup");
-    reader.fetch_into(tid, start, end, &mut store).expect("fetch_into");
-    (0..store.len() as u32).map(|i| (store.record(i).pos, store.record(i).end_pos)).collect()
+    reader
+        .fetch_into(tid, Pos::<Zero>::new(start as u32), Pos::<Zero>::new(end as u32), &mut store)
+        .expect("fetch_into");
+    (0..store.len() as u32)
+        .map(|i| (store.record(i).pos.as_i64(), store.record(i).end_pos.as_i64()))
+        .collect()
 }
 
 // r[verify bam.reader.fork]
@@ -114,16 +118,27 @@ fn fork_fetches_are_independent() {
     let tid = fork_a.header().tid(contig).expect("tid");
 
     let mut store_a = RecordStore::new();
-    fork_a.fetch_into(tid, start, end, &mut store_a).expect("fetch_a");
+    fork_a
+        .fetch_into(tid, Pos::<Zero>::new(start as u32), Pos::<Zero>::new(end as u32), &mut store_a)
+        .expect("fetch_a");
 
     // Fetch a different region on fork_b, then the same region
     let &(contig2, start2, end2) = &CONTIGS[1];
     let tid2 = fork_b.header().tid(contig2).expect("tid2");
     let mut store_b = RecordStore::new();
-    fork_b.fetch_into(tid2, start2, end2, &mut store_b).expect("fetch_b different region");
+    fork_b
+        .fetch_into(
+            tid2,
+            Pos::<Zero>::new(start2 as u32),
+            Pos::<Zero>::new(end2 as u32),
+            &mut store_b,
+        )
+        .expect("fetch_b different region");
 
     // Now fetch the original region on fork_b
-    fork_b.fetch_into(tid, start, end, &mut store_b).expect("fetch_b same region");
+    fork_b
+        .fetch_into(tid, Pos::<Zero>::new(start as u32), Pos::<Zero>::new(end as u32), &mut store_b)
+        .expect("fetch_b same region");
 
     assert_eq!(store_a.len(), store_b.len(), "independent forks should produce same count");
 

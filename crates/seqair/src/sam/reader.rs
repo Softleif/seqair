@@ -8,7 +8,7 @@ use crate::bam::{
     record_store::RecordStore,
     region_buf::RegionBuf,
 };
-use seqair_types::Base;
+use seqair_types::{Base, Pos, Zero};
 use std::{
     fs::File,
     path::{Path, PathBuf},
@@ -208,21 +208,24 @@ impl IndexedSamReader {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: u64,
-        end: u64,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
         store: &mut RecordStore,
     ) -> Result<usize, SamError> {
         store.clear();
 
-        let chunks = self.shared.index.query(tid, start, end);
+        let start_u64 = u64::from(start.get());
+        let end_u64 = u64::from(end.get());
+
+        let chunks = self.shared.index.query(tid, start_u64, end_u64);
         if chunks.is_empty() {
             return Ok(0);
         }
 
         let mut region = RegionBuf::load(&mut self.bulk_reader, &chunks)?;
 
-        let start_i64 = start as i64;
-        let end_i64 = end as i64;
+        let start_i64 = start.as_i64();
+        let end_i64 = end.as_i64();
         let tid_i32 = tid as i32;
 
         // Buffer for accumulating lines that span BGZF block boundaries
@@ -361,7 +364,8 @@ fn parse_sam_line(
     let pos_field = fields.get(3).copied().unwrap_or(b"0");
     let pos_1based = parse_i64(pos_field)
         .ok_or_else(|| SamRecordError::InvalidPos { value: pos_field.into() })?;
-    let pos = pos_1based - 1;
+    // SAM POS is 1-based; convert to 0-based Pos<Zero>
+    let pos = Pos::<Zero>::try_from_i64(pos_1based - 1).unwrap_or(Pos::<Zero>::new(0));
 
     // Field 5: MAPQ
     let mapq_field = fields.get(4).copied().unwrap_or(b"0");
@@ -378,7 +382,7 @@ fn parse_sam_line(
 
     // r[impl sam.reader.overlap_filter+2]
     // r[impl sam.reader.overlap_halfopen]
-    if pos >= end || end_pos <= start {
+    if pos.as_i64() >= end || end_pos.as_i64() <= start {
         return Ok(None);
     }
 

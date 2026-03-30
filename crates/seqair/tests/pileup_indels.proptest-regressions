@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a86465408591296536d9d8f1fcb0874af7f3965414f6d4517edbb2fdbe5caa19 # shrinks to read = SyntheticRead { pos: 0, flags: 99, mapq: 0, cigar_ops: [(10, 0), (100, 3), (10, 0)], seq_len: 20, ref_span: 120, raw: [0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 3, 0, 99, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 114, 101, 97, 100, 0, 160, 0, 0, 0, 67, 6, 0, 0, 160, 0, 0, 0, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30] }

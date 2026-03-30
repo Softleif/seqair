@@ -3,7 +3,7 @@
 //! opt-in overlapping-pair deduplication via [`PileupEngine::set_dedup_overlapping`].
 
 use rustc_hash::FxHashMap;
-use seqair_types::{Base, Strand, strand_from_flags};
+use seqair_types::{Base, Offset, Pos, Strand, Zero, strand_from_flags};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 // PileupEngine is intentionally !Send due to RecordFilter: Box<dyn Fn(...)>.
 use std::rc::Rc;
@@ -17,7 +17,7 @@ use super::{
 
 pub struct RefSeq {
     bases: Rc<[Base]>,
-    start_pos: i64,
+    start_pos: Pos<Zero>,
 }
 
 impl std::fmt::Debug for RefSeq {
@@ -30,12 +30,12 @@ impl std::fmt::Debug for RefSeq {
 }
 
 impl RefSeq {
-    pub fn new(bases: Rc<[Base]>, start_pos: i64) -> Self {
+    pub fn new(bases: Rc<[Base]>, start_pos: Pos<Zero>) -> Self {
         Self { bases, start_pos }
     }
 
-    pub fn base_at(&self, pos: i64) -> Base {
-        let offset = pos.wrapping_sub(self.start_pos);
+    pub fn base_at(&self, pos: Pos<Zero>) -> Base {
+        let offset = pos.as_i64() - self.start_pos.as_i64();
         if offset < 0 {
             return Base::Unknown;
         }
@@ -55,12 +55,12 @@ type RecordFilter = Box<dyn Fn(u16, &[u8]) -> bool>;
 // r[impl perf.reuse_alignment_vec+2]
 pub struct PileupEngine {
     store: RecordStore,
-    current_pos: i64,
-    region_end: i64,
+    current_pos: Pos<Zero>,
+    region_end: Pos<Zero>,
     next_entry: usize,
     /// Hot field: checked every column during retain. Stored separately so the
-    /// retain loop strides 8 bytes instead of the full ActiveRecord size (~144 bytes).
-    active_end_pos: Vec<i64>,
+    /// retain loop strides 4 bytes instead of the full ActiveRecord size (~144 bytes).
+    active_end_pos: Vec<Pos<Zero>>,
     /// Cold fields: only accessed for records that survive retain.
     active: Vec<ActiveRecord>,
     max_depth: Option<u32>,
@@ -94,14 +94,14 @@ struct ActiveRecord {
 // r[impl pileup.htslib_compat]
 #[derive(Debug)]
 pub struct PileupColumn {
-    pos: i64,
+    pos: Pos<Zero>,
     reference_base: Base,
     alignments: Vec<PileupAlignment>,
 }
 
 impl PileupColumn {
     #[must_use]
-    pub fn pos(&self) -> i64 {
+    pub fn pos(&self) -> Pos<Zero> {
         self.pos
     }
 
@@ -217,7 +217,7 @@ impl PileupAlignment {
 
 impl PileupEngine {
     /// Create a pileup engine that owns the record store.
-    pub fn new(store: RecordStore, region_start: i64, region_end: i64) -> Self {
+    pub fn new(store: RecordStore, region_start: Pos<Zero>, region_end: Pos<Zero>) -> Self {
         PileupEngine {
             store,
             current_pos: region_start,
@@ -296,7 +296,8 @@ impl PileupEngine {
     }
 
     pub fn remaining_positions(&self) -> usize {
-        (self.region_end - self.current_pos + 1).max(0) as usize
+        let diff = self.region_end.as_i64() - self.current_pos.as_i64() + 1;
+        diff.max(0) as usize
     }
 
     /// Take the `RecordStore` out for reuse. Returns `None` if already taken.
@@ -342,9 +343,9 @@ impl Iterator for PileupEngine {
             }
 
             let pos = self.current_pos;
-            self.current_pos += 1;
+            self.current_pos += Offset(1);
 
-            // Evict expired records. Iterate the compact end_pos vec (8-byte stride)
+            // Evict expired records. Iterate the compact end_pos vec (4-byte stride)
             // and swap-remove from both vecs in lockstep.
             {
                 let mut i = 0;
@@ -608,31 +609,31 @@ mod tests {
 
     #[test]
     fn ref_seq_base_at_within_range() {
-        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C, Base::G, Base::T]), 100);
-        assert_eq!(ref_seq.base_at(100), Base::A);
-        assert_eq!(ref_seq.base_at(101), Base::C);
-        assert_eq!(ref_seq.base_at(102), Base::G);
-        assert_eq!(ref_seq.base_at(103), Base::T);
+        let ref_seq =
+            RefSeq::new(Rc::from([Base::A, Base::C, Base::G, Base::T]), Pos::<Zero>::new(100));
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(100)), Base::A);
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(101)), Base::C);
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(102)), Base::G);
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(103)), Base::T);
     }
 
     #[test]
     fn ref_seq_base_at_before_start() {
-        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), 100);
-        assert_eq!(ref_seq.base_at(99), Base::Unknown);
-        assert_eq!(ref_seq.base_at(0), Base::Unknown);
-        assert_eq!(ref_seq.base_at(-1), Base::Unknown);
+        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), Pos::<Zero>::new(100));
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(99)), Base::Unknown);
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(0)), Base::Unknown);
     }
 
     #[test]
     fn ref_seq_base_at_after_end() {
-        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), 100);
-        assert_eq!(ref_seq.base_at(102), Base::Unknown);
-        assert_eq!(ref_seq.base_at(1000), Base::Unknown);
+        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), Pos::<Zero>::new(100));
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(102)), Base::Unknown);
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(1000)), Base::Unknown);
     }
 
     #[test]
     fn ref_seq_base_at_empty() {
-        let ref_seq = RefSeq::new(Rc::from([]), 100);
-        assert_eq!(ref_seq.base_at(100), Base::Unknown);
+        let ref_seq = RefSeq::new(Rc::from([]), Pos::<Zero>::new(100));
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(100)), Base::Unknown);
     }
 }

@@ -3,6 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
+use seqair::bam::{Pos, Zero};
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -59,13 +60,24 @@ fn pileup_positions_match() {
     let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("seqair open");
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid(TEST_REGION).expect("tid");
-    reader.fetch_into(tid, TEST_START, TEST_END, &mut store).expect("seqair fetch");
+    reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(TEST_START as u32),
+            Pos::<Zero>::new(TEST_END as u32),
+            &mut store,
+        )
+        .expect("seqair fetch");
 
-    let engine = seqair::bam::PileupEngine::new(store, TEST_START as i64, TEST_END as i64);
+    let engine = seqair::bam::PileupEngine::new(
+        store,
+        Pos::<Zero>::new(TEST_START as u32),
+        Pos::<Zero>::new(TEST_END as u32),
+    );
     let columns: Vec<_> = engine.collect();
 
     let hts_positions: Vec<u32> = hts_columns.iter().map(|c| c.pos).collect();
-    let positions: Vec<i64> = columns.iter().map(|c| c.pos()).collect();
+    let positions: Vec<u32> = columns.iter().map(|c| c.pos().get()).collect();
 
     assert_eq!(
         positions.len(),
@@ -76,7 +88,7 @@ fn pileup_positions_match() {
     );
 
     for (i, (pos, hts_pos)) in positions.iter().zip(hts_positions.iter()).enumerate() {
-        assert_eq!(*pos, i64::from(*hts_pos), "position mismatch at column {i}");
+        assert_eq!(*pos, *hts_pos, "position mismatch at column {i}");
     }
 }
 
@@ -90,9 +102,20 @@ fn pileup_depth_matches() {
     let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("seqair open");
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid(TEST_REGION).expect("tid");
-    reader.fetch_into(tid, TEST_START, TEST_END, &mut store).expect("seqair fetch");
+    reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(TEST_START as u32),
+            Pos::<Zero>::new(TEST_END as u32),
+            &mut store,
+        )
+        .expect("seqair fetch");
 
-    let engine = seqair::bam::PileupEngine::new(store, TEST_START as i64, TEST_END as i64);
+    let engine = seqair::bam::PileupEngine::new(
+        store,
+        Pos::<Zero>::new(TEST_START as u32),
+        Pos::<Zero>::new(TEST_END as u32),
+    );
     let columns: Vec<_> = engine.collect();
 
     for (i, (rio, hts)) in columns.iter().zip(hts_columns.iter()).enumerate() {
@@ -128,9 +151,20 @@ fn pileup_qpos_matches() {
     let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("seqair open");
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid(TEST_REGION).expect("tid");
-    reader.fetch_into(tid, TEST_START, TEST_END, &mut store).expect("seqair fetch");
+    reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(TEST_START as u32),
+            Pos::<Zero>::new(TEST_END as u32),
+            &mut store,
+        )
+        .expect("seqair fetch");
 
-    let engine = seqair::bam::PileupEngine::new(store, TEST_START as i64, TEST_END as i64);
+    let engine = seqair::bam::PileupEngine::new(
+        store,
+        Pos::<Zero>::new(TEST_START as u32),
+        Pos::<Zero>::new(TEST_END as u32),
+    );
     let columns: Vec<_> = engine.collect();
 
     for (col_idx, (rio, hts)) in columns.iter().zip(hts_columns.iter()).enumerate() {

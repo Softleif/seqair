@@ -1,6 +1,7 @@
 //! Property-based tests for SAM parsing internals.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use proptest::prelude::*;
+use seqair::bam::{Pos, Zero};
 use seqair_types::Base;
 
 // We can't directly call the private parse functions, but we can test the
@@ -59,7 +60,7 @@ proptest! {
         let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz)?;
         let tid = reader.header().tid("chr1").unwrap();
         let mut store = seqair::bam::RecordStore::new();
-        reader.fetch_into(tid, 1, 100_000_000, &mut store)?;
+        reader.fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(100_000_000), &mut store)?;
 
         prop_assert!(!store.is_empty(), "should fetch at least 1 record");
         let rec = store.record(0);
@@ -70,7 +71,7 @@ proptest! {
         // Invariant 2: the ref span equals the sum of reference-consuming ops.
         // Special case: zero-refspan reads (pure insertion/soft-clip) have
         // end_pos == pos per r[pileup.zero_refspan_reads], so span is 1.
-        let span = rec.end_pos - rec.pos + 1;
+        let span = rec.end_pos.as_i64() - rec.pos.as_i64() + 1;
         let expected_span = if ref_consuming == 0 { 1 } else { i64::from(ref_consuming) };
         prop_assert_eq!(
             span,
@@ -113,7 +114,7 @@ proptest! {
         let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz)?;
         let tid = reader.header().tid("chr1").unwrap();
         let mut store = seqair::bam::RecordStore::new();
-        reader.fetch_into(tid, 1, 100_000_000, &mut store)?;
+        reader.fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(100_000_000), &mut store)?;
 
         prop_assert_eq!(store.len(), 1);
         let seq = store.seq(0);
@@ -158,7 +159,7 @@ proptest! {
         let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz)?;
         let tid = reader.header().tid("chr1").unwrap();
         let mut store = seqair::bam::RecordStore::new();
-        reader.fetch_into(tid, 1, 100_000_000, &mut store)?;
+        reader.fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(100_000_000), &mut store)?;
 
         prop_assert_eq!(store.len(), 1);
         let stored_qual = store.qual(0);

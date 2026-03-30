@@ -5,7 +5,7 @@
 //! - **Bases slab**: decoded `Base` values per record, accessed per-position in pileup
 //! - **Data slab**: cigar + qual + aux per record, accessed during pileup construction
 
-use seqair_types::Base;
+use seqair_types::{Base, Pos, Zero};
 
 use super::{
     cigar,
@@ -16,8 +16,8 @@ use super::{
 /// Compact BAM record with offsets into the store's slabs.
 // r[impl record_store.push_raw+2]
 pub struct SlimRecord {
-    pub pos: i64,
-    pub end_pos: i64,
+    pub pos: Pos<Zero>,
+    pub end_pos: Pos<Zero>,
     pub flags: u16,
     pub n_cigar_ops: u16,
     pub mapq: u8,
@@ -186,8 +186,8 @@ impl RecordStore {
     #[allow(clippy::too_many_arguments)]
     pub fn push_fields(
         &mut self,
-        pos: i64,
-        end_pos: i64,
+        pos: Pos<Zero>,
+        end_pos: Pos<Zero>,
         flags: u16,
         mapq: u8,
         matching_bases: u32,
@@ -395,8 +395,19 @@ mod tests {
         // Directly inflate the names slab past u32::MAX to trigger overflow
         // We can't actually allocate 4GB in a test, so we test the check path
         // by verifying the function returns Result (compile-time check)
-        let result: Result<u32, _> =
-            store.push_fields(0, 0, 0, 0, 0, 0, b"read1", &[], &[Base::A], &[30], &[]);
+        let result: Result<u32, _> = store.push_fields(
+            Pos::<Zero>::new(0),
+            Pos::<Zero>::new(0),
+            0,
+            0,
+            0,
+            0,
+            b"read1",
+            &[],
+            &[Base::A],
+            &[30],
+            &[],
+        );
         assert!(result.is_ok());
     }
 

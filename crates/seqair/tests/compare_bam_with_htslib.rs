@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
 use seqair::bam::aux::{AuxValue, find_tag as find_aux_tag};
+use seqair::bam::{Pos, Zero};
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -68,7 +69,14 @@ fn all_contigs_record_count_matches() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
         assert_eq!(
             store.len(),
@@ -93,14 +101,21 @@ fn all_contigs_record_fields_match() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
         for (i, h) in hts.iter().enumerate() {
             let idx = i as u32;
             let r = store.record(idx);
 
-            assert_eq!(r.pos, h.pos, "{contig} rec {i}: pos");
-            assert_eq!(r.end_pos, h.end_pos - 1, "{contig} rec {i}: end_pos");
+            assert_eq!(r.pos.as_i64(), h.pos, "{contig} rec {i}: pos");
+            assert_eq!(r.end_pos.as_i64(), h.end_pos - 1, "{contig} rec {i}: end_pos");
             assert_eq!(r.flags, h.flags, "{contig} rec {i}: flags");
             assert_eq!(r.mapq, h.mapq, "{contig} rec {i}: mapq");
             assert_eq!(store.qname(idx), h.qname.as_slice(), "{contig} rec {i}: qname");
@@ -170,9 +185,20 @@ fn all_contigs_pileup_positions_and_depth_match() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
-        let engine = seqair::bam::PileupEngine::new(store, start as i64, end as i64);
+        let engine = seqair::bam::PileupEngine::new(
+            store,
+            Pos::<Zero>::new(start as u32),
+            Pos::<Zero>::new(end as u32),
+        );
         let rio: Vec<_> = engine.collect();
 
         assert_eq!(
@@ -184,7 +210,7 @@ fn all_contigs_pileup_positions_and_depth_match() {
         );
 
         for (col_idx, (r, h)) in rio.iter().zip(&hts).enumerate() {
-            assert_eq!(r.pos(), h.pos, "{contig} col {col_idx}: position mismatch");
+            assert_eq!(r.pos().as_i64(), h.pos, "{contig} col {col_idx}: position mismatch");
             // Compare match-depth only (htslib's qpos_flags excludes deletions/refskips)
             let match_depth = r.alignments().filter(|a| a.qpos().is_some()).count();
             assert_eq!(
@@ -210,9 +236,20 @@ fn all_contigs_pileup_qpos_and_flags_match() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
-        let engine = seqair::bam::PileupEngine::new(store, start as i64, end as i64);
+        let engine = seqair::bam::PileupEngine::new(
+            store,
+            Pos::<Zero>::new(start as u32),
+            Pos::<Zero>::new(end as u32),
+        );
         let rio: Vec<_> = engine.collect();
 
         for (col_idx, (r, h)) in rio.iter().zip(&hts).enumerate() {
@@ -256,9 +293,20 @@ fn all_contigs_pileup_bases_match() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
-        let engine = seqair::bam::PileupEngine::new(store, start as i64, end as i64);
+        let engine = seqair::bam::PileupEngine::new(
+            store,
+            Pos::<Zero>::new(start as u32),
+            Pos::<Zero>::new(end as u32),
+        );
         let rio: Vec<_> = engine.collect();
 
         for (col_idx, (r, h)) in rio.iter().zip(&hts).enumerate() {
@@ -344,7 +392,14 @@ fn all_contigs_aux_tags_match() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
         assert_eq!(
             store.len(),

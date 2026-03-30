@@ -12,7 +12,7 @@ use crate::{
     fasta::{FastaError, IndexedFastaReader},
     sam::reader::{IndexedSamReader, SamError},
 };
-use seqair_types::Base;
+use seqair_types::{Base, Pos, Zero};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::instrument;
@@ -92,9 +92,6 @@ pub enum ReaderError {
 
     #[error("failed to fork FASTA reader")]
     FastaFork { source: FastaError },
-
-    #[error("region coordinate {value} overflows i64")]
-    RegionOverflow { value: u64 },
 }
 
 /// Format-agnostic indexed alignment reader.
@@ -172,8 +169,8 @@ impl IndexedReader {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: u64,
-        end: u64,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
         match self {
@@ -244,8 +241,8 @@ impl Readers {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: u64,
-        end: u64,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
         self.alignment.fetch_into(tid, start, end, store)
@@ -257,15 +254,16 @@ impl Readers {
     /// After iterating the engine, call [`recover_store`](Self::recover_store) to
     /// return the store for reuse. If not called, the next `pileup()` call
     /// allocates a fresh store (small perf hit, not a correctness issue).
-    pub fn pileup(&mut self, tid: u32, start: u64, end: u64) -> Result<PileupEngine, ReaderError> {
-        let start_i64 =
-            i64::try_from(start).map_err(|_| ReaderError::RegionOverflow { value: start })?;
-        let end_i64 = i64::try_from(end).map_err(|_| ReaderError::RegionOverflow { value: end })?;
-
+    pub fn pileup(
+        &mut self,
+        tid: u32,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
+    ) -> Result<PileupEngine, ReaderError> {
         self.alignment.fetch_into(tid, start, end, &mut self.store)?;
 
         let store = std::mem::take(&mut self.store);
-        Ok(PileupEngine::new(store, start_i64, end_i64))
+        Ok(PileupEngine::new(store, start, end))
     }
 
     /// Recover the [`RecordStore`] from a consumed [`PileupEngine`] for reuse.
@@ -295,10 +293,15 @@ impl Readers {
     pub fn fetch_base_seq(
         &mut self,
         name: &str,
-        start: u64,
-        stop: u64,
+        start: Pos<Zero>,
+        stop: Pos<Zero>,
     ) -> Result<Rc<[Base]>, FastaError> {
-        self.fasta.fetch_seq_into(name, start, stop, &mut self.fasta_buf)?;
+        self.fasta.fetch_seq_into(
+            name,
+            u64::from(start.get()),
+            u64::from(stop.get()),
+            &mut self.fasta_buf,
+        )?;
         // Take the buffer so from_ascii_vec can reinterpret it in-place (safe),
         // then create the Rc (which copies). The buffer capacity is lost but
         // fasta_buf re-grows on the next call.

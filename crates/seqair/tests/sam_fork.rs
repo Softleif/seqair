@@ -1,6 +1,6 @@
 //! Thread-safety tests for SAM reader forking.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-use seqair::bam::RecordStore;
+use seqair::bam::{Pos, RecordStore, Zero};
 use seqair::sam::reader::IndexedSamReader;
 use std::path::Path;
 use std::process::Command;
@@ -40,8 +40,12 @@ fn fetch_record_positions(
 ) -> Vec<(i64, i64)> {
     let mut store = RecordStore::new();
     let tid = reader.header().tid(contig).expect("tid lookup");
-    reader.fetch_into(tid, start, end, &mut store).expect("fetch_into");
-    (0..store.len() as u32).map(|i| (store.record(i).pos, store.record(i).end_pos)).collect()
+    reader
+        .fetch_into(tid, Pos::<Zero>::new(start as u32), Pos::<Zero>::new(end as u32), &mut store)
+        .expect("fetch_into");
+    (0..store.len() as u32)
+        .map(|i| (store.record(i).pos.as_i64(), store.record(i).end_pos.as_i64()))
+        .collect()
 }
 
 // r[verify sam.reader.fetch_into]

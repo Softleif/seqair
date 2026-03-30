@@ -13,7 +13,7 @@ use noodles::cram;
 use noodles::fasta;
 use noodles::sam;
 use noodles::sam::alignment::record::Sequence as _;
-use seqair::bam::RecordStore;
+use seqair::bam::{Pos, RecordStore, Zero};
 use seqair::reader::Readers;
 use std::path::Path;
 
@@ -112,10 +112,18 @@ fn cram_chr19_count_matches_noodles() {
         let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
-        readers.fetch_into(chr19_tid, start, end, &mut store).unwrap();
+        readers
+            .fetch_into(
+                chr19_tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .unwrap();
 
-        let our_in_range =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos >= start as i64).count();
+        let our_in_range = (0..store.len() as u32)
+            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
+            .count();
 
         assert_eq!(
             our_in_range, noodles_in_range,
@@ -143,16 +151,23 @@ fn cram_chr19_records_match_noodles_field_by_field() {
         let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
-        readers.fetch_into(chr19_tid, start as u64, end as u64, &mut store).unwrap();
+        readers
+            .fetch_into(
+                chr19_tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .unwrap();
 
         let our_records: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos >= start).collect();
+            (0..store.len() as u32).filter(|&i| store.record(i).pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
         for (i, noodles_rec) in noodles_chr19.iter().enumerate() {
             let our_rec = store.record(our_records[i]);
-            assert_eq!(our_rec.pos, noodles_rec.pos, "{version} rec {i}: pos");
+            assert_eq!(our_rec.pos.as_i64(), noodles_rec.pos, "{version} rec {i}: pos");
             assert_eq!(our_rec.flags, noodles_rec.flags, "{version} rec {i}: flags");
             assert_eq!(our_rec.mapq, noodles_rec.mapq, "{version} rec {i}: mapq");
         }
@@ -177,10 +192,17 @@ fn cram_chr19_sequences_match_noodles() {
         let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
-        readers.fetch_into(chr19_tid, start as u64, end as u64, &mut store).unwrap();
+        readers
+            .fetch_into(
+                chr19_tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .unwrap();
 
         let our_records: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos >= start).collect();
+            (0..store.len() as u32).filter(|&i| store.record(i).pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
@@ -228,10 +250,17 @@ fn cram_chr19_quality_scores_match_noodles() {
         let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
-        readers.fetch_into(chr19_tid, start as u64, end as u64, &mut store).unwrap();
+        readers
+            .fetch_into(
+                chr19_tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .unwrap();
 
         let our_records: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos >= start).collect();
+            (0..store.len() as u32).filter(|&i| store.record(i).pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
@@ -265,10 +294,17 @@ fn cram_chr19_qnames_match_noodles() {
         let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
-        readers.fetch_into(chr19_tid, start as u64, end as u64, &mut store).unwrap();
+        readers
+            .fetch_into(
+                chr19_tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .unwrap();
 
         let our_records: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos >= start).collect();
+            (0..store.len() as u32).filter(|&i| store.record(i).pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 

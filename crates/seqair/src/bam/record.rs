@@ -7,6 +7,7 @@ use super::{
     },
     seq,
 };
+use seqair_types::{Offset, Pos, Zero};
 
 /// A decoded BAM record with owned variable-length data.
 ///
@@ -16,8 +17,8 @@ use super::{
 // r[impl bam.record.decode]
 #[derive(Debug, Clone)]
 pub struct BamRecord {
-    pub pos: i64,
-    pub end_pos: i64,
+    pub pos: Pos<Zero>,
+    pub end_pos: Pos<Zero>,
     pub tid: i32,
     pub seq_len: u32,
     pub flags: u16,
@@ -118,7 +119,7 @@ impl BamRecord {
 }
 
 /// Compute end_pos from raw BAM record bytes (before full decode).
-pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<i64> {
+pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos<Zero>> {
     let h = parse_header(raw).ok()?;
     // All bounds ≤ qual_end ≤ raw.len() checked by parse_header
     debug_assert!(h.cigar_end <= raw.len(), "cigar overrun: {} > {}", h.cigar_end, raw.len());
@@ -128,7 +129,7 @@ pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<i64> {
 
 // r[impl bam.record.end_pos]
 // r[impl bam.record.zero_refspan]
-pub(crate) fn compute_end_pos(pos: i64, cigar_bytes: &[u8]) -> i64 {
+pub(crate) fn compute_end_pos(pos: Pos<Zero>, cigar_bytes: &[u8]) -> Pos<Zero> {
     use super::cigar::{CIGAR_D, CIGAR_EQ, CIGAR_M, CIGAR_N, CIGAR_X};
 
     let mut ref_len: i64 = 0;
@@ -142,7 +143,7 @@ pub(crate) fn compute_end_pos(pos: i64, cigar_bytes: &[u8]) -> i64 {
             _ => {}
         }
     }
-    if ref_len == 0 { pos } else { pos + ref_len - 1 }
+    if ref_len == 0 { pos } else { pos + Offset(ref_len - 1) }
 }
 
 // Callers only invoke read2/read4 after validating raw.len() >= 32 or equivalent.
@@ -178,7 +179,7 @@ pub(crate) fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
 /// duplicating the 36-byte header parsing and checked offset arithmetic.
 pub(crate) struct ParsedHeader {
     pub tid: i32,
-    pub pos: i64,
+    pub pos: Pos<Zero>,
     pub mapq: u8,
     pub flags: u16,
     pub n_cigar_ops: u16,
@@ -208,7 +209,8 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
 
     debug_assert!(raw.len() >= 32, "raw record too short for fixed fields: {}", raw.len());
     let tid = i32::from_le_bytes(read4(raw, 0));
-    let pos = i64::from(i32::from_le_bytes(read4(raw, 4)));
+    let pos_i32 = i32::from_le_bytes(read4(raw, 4));
+    let pos = Pos::<Zero>::try_from_i64(i64::from(pos_i32)).unwrap_or(Pos::<Zero>::new(0));
     // raw.len() >= 32, so raw[8] and raw[9] are in bounds
     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
     let name_len = raw[8] as usize;
@@ -263,7 +265,10 @@ mod tests {
     #[test]
     fn test_compute_end_pos() {
         let op = 50u32 << 4;
-        assert_eq!(compute_end_pos(100, &op.to_le_bytes()), 149);
+        assert_eq!(
+            compute_end_pos(Pos::<Zero>::new(100), &op.to_le_bytes()),
+            Pos::<Zero>::new(149)
+        );
     }
 
     // r[verify bam.record.checked_offsets]
@@ -308,8 +313,8 @@ mod tests {
         raw[43..47].copy_from_slice(&[30, 30, 30, 30]);
 
         let rec = BamRecord::decode(&raw[..47]).unwrap();
-        assert_eq!(rec.pos, 100);
-        assert_eq!(rec.end_pos, 103);
+        assert_eq!(rec.pos, Pos::<Zero>::new(100));
+        assert_eq!(rec.end_pos, Pos::<Zero>::new(103));
         assert_eq!(rec.flags, 99);
         assert_eq!(rec.mapq, 60);
         assert_eq!(&*rec.qname, b"read");

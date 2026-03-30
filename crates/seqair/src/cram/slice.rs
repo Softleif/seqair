@@ -10,7 +10,7 @@ use super::{
 };
 use crate::bam::{BamHeader, record_store::RecordStore};
 use rustc_hash::FxHashMap;
-use seqair_types::Base;
+use seqair_types::{Base, Pos, Zero};
 use tracing::warn;
 
 /// Parsed CRAM slice header.
@@ -82,8 +82,8 @@ pub fn decode_slice(
     ref_start_0based: i64,
     header: &BamHeader,
     tid: u32,
-    query_start: i64,
-    query_end: i64,
+    query_start: Pos<Zero>,
+    query_end: Pos<Zero>,
     store: &mut RecordStore,
     cigar_buf: &mut Vec<u8>,
     bases_buf: &mut Vec<Base>,
@@ -225,8 +225,8 @@ fn decode_record(
     ref_start_0based: i64,
     header: &BamHeader,
     tid: u32,
-    query_start: i64,
-    query_end: i64,
+    query_start: Pos<Zero>,
+    query_end: Pos<Zero>,
     store: &mut RecordStore,
     cigar_buf: &mut Vec<u8>,
     bases_buf: &mut Vec<Base>,
@@ -266,7 +266,8 @@ fn decode_record(
     };
     // r[impl cram.edge.position_overflow]
     // Convert from 1-based to 0-based
-    let pos_0based = alignment_pos - 1;
+    let pos_0based_raw = alignment_pos - 1;
+    let pos_0based = Pos::<Zero>::try_from_i64(pos_0based_raw).unwrap_or(Pos::<Zero>::new(0));
 
     // r[impl cram.record.read_group]
     // 6. RG (read group)
@@ -346,7 +347,7 @@ fn decode_record(
             ctx,
             feature_count as usize,
             read_length,
-            pos_0based,
+            pos_0based.as_i64(),
             ref_start_0based,
             reference_seq,
             cigar_buf,
@@ -366,7 +367,8 @@ fn decode_record(
             qual_buf.resize(read_length, 0xFF);
         }
 
-        let end_pos = pos_0based + result.ref_consumed as i64;
+        let end_pos_raw = pos_0based.as_i64() + result.ref_consumed as i64;
+        let end_pos = Pos::<Zero>::try_from_i64(end_pos_raw).unwrap_or(Pos::<Zero>::new(0));
 
         // r[impl cram.index.multi_ref_slices]
         // Skip records from different references in multi-ref slices
@@ -794,8 +796,8 @@ mod tests {
             ref_start,
             &bam_header,
             0,
-            0,
-            i64::MAX,
+            Pos::<Zero>::new(0),
+            Pos::<Zero>::new(u32::MAX),
             &mut crate::bam::record_store::RecordStore::new(),
             &mut Vec::new(),
             &mut Vec::new(),

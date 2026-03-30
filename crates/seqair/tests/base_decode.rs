@@ -1,6 +1,7 @@
 //! Tests for Base-typed sequence decoding.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use seqair::bam::record_store::RecordStore;
+use seqair::bam::{Pos, Zero};
 use seqair_types::Base;
 
 // r[verify base_decode.table]
@@ -66,7 +67,7 @@ fn pileup_alignment_has_base_type() {
     let mut store = RecordStore::new();
     store.push_raw(&raw).unwrap();
 
-    let mut engine = PileupEngine::new(store, 100, 103);
+    let mut engine = PileupEngine::new(store, Pos::<Zero>::new(100), Pos::<Zero>::new(103));
     engine.set_max_depth(1000);
 
     let col = engine.next().expect("should have a column");

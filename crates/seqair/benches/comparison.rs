@@ -14,6 +14,13 @@ const CHROM: &str = "chr19";
 const START: u64 = 6_105_000;
 const END: u64 = 6_140_000;
 
+fn start_pos() -> seqair::bam::Pos<seqair::bam::Zero> {
+    seqair::bam::Pos::<seqair::bam::Zero>::new(START as u32)
+}
+fn end_pos() -> seqair::bam::Pos<seqair::bam::Zero> {
+    seqair::bam::Pos::<seqair::bam::Zero>::new(END as u32)
+}
+
 // ---------------------------------------------------------------------------
 // Group 1: BGZF decompression throughput
 // Raw decompression comparison — all using libdeflate.
@@ -106,7 +113,7 @@ fn bam_record_decode(c: &mut Criterion) {
             let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
             let mut store = seqair::bam::RecordStore::new();
             let tid = reader.header().tid(CHROM).unwrap();
-            reader.fetch_into(tid, START, END, &mut store).unwrap();
+            reader.fetch_into(tid, start_pos(), end_pos(), &mut store).unwrap();
             black_box(store.len())
         });
     });
@@ -250,9 +257,9 @@ fn pileup_e2e(c: &mut Criterion) {
             let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
             let mut store = seqair::bam::RecordStore::new();
             let tid = reader.header().tid(CHROM).unwrap();
-            reader.fetch_into(tid, START, END, &mut store).unwrap();
+            reader.fetch_into(tid, start_pos(), end_pos(), &mut store).unwrap();
 
-            let engine = seqair::bam::PileupEngine::new(store, START as i64, END as i64);
+            let engine = seqair::bam::PileupEngine::new(store, start_pos(), end_pos());
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
             for col in engine {

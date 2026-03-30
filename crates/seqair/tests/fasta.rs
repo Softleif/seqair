@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use proptest::prelude::*;
 use rust_htslib::faidx;
+use seqair::bam::{Pos, Zero};
 use seqair::fasta::{FaiEntry, IndexedFastaReader};
 use std::{io::Write, path::Path};
 use tempfile::TempDir;
@@ -301,7 +302,9 @@ fn fetch_base_seq_reuses_buffer() {
     .unwrap();
 
     // First call: buffer starts empty, gets allocated
-    let seq1 = readers.fetch_base_seq("bacteriophage_lambda_CpG", 0, 100).unwrap();
+    let seq1 = readers
+        .fetch_base_seq("bacteriophage_lambda_CpG", Pos::<Zero>::new(0), Pos::<Zero>::new(100))
+        .unwrap();
     assert_eq!(seq1.len(), 100);
     // Every element must be a valid Base
     for &b in seq1.iter() {
@@ -310,11 +313,15 @@ fn fetch_base_seq_reuses_buffer() {
 
     // Second call: should reuse the internal buffer (no way to observe capacity
     // directly, but we can verify correctness across calls)
-    let seq2 = readers.fetch_base_seq("bacteriophage_lambda_CpG", 100, 300).unwrap();
+    let seq2 = readers
+        .fetch_base_seq("bacteriophage_lambda_CpG", Pos::<Zero>::new(100), Pos::<Zero>::new(300))
+        .unwrap();
     assert_eq!(seq2.len(), 200);
 
     // Third call: same region as first, must produce identical result
-    let seq3 = readers.fetch_base_seq("bacteriophage_lambda_CpG", 0, 100).unwrap();
+    let seq3 = readers
+        .fetch_base_seq("bacteriophage_lambda_CpG", Pos::<Zero>::new(0), Pos::<Zero>::new(100))
+        .unwrap();
     assert_eq!(seq1, seq3, "repeated fetch must produce identical results");
 
     // Verify against raw fetch + manual conversion

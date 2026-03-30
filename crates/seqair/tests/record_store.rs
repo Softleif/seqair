@@ -1,6 +1,7 @@
 //! Tests for RecordStore: slab-based BAM record storage.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use seqair::bam::record_store::RecordStore;
+use seqair::bam::{Pos, Zero};
 use seqair_types::Base;
 
 // r[verify record_store.push_raw+2]
@@ -16,7 +17,7 @@ fn decode_record_into_slabs() {
 
     assert_eq!(store.len(), 1);
     let rec = store.record(idx);
-    assert_eq!(rec.pos, 100);
+    assert_eq!(rec.pos, Pos::<Zero>::new(100));
     assert_eq!(rec.mapq, 60);
     assert_eq!(rec.flags, 0x63);
     assert_eq!(rec.seq_len, 4);
@@ -43,8 +44,8 @@ fn multiple_records_share_slabs() {
     let idx2 = store.push_raw(&raw2).unwrap();
 
     assert_eq!(store.len(), 2);
-    assert_eq!(store.record(idx1).pos, 100);
-    assert_eq!(store.record(idx2).pos, 200);
+    assert_eq!(store.record(idx1).pos, Pos::<Zero>::new(100));
+    assert_eq!(store.record(idx2).pos, Pos::<Zero>::new(200));
     assert_eq!(store.qname(idx1), b"read1");
     assert_eq!(store.qname(idx2), b"read2");
     assert_eq!(store.qual(idx1)[0], 30);
@@ -110,12 +111,13 @@ fn integration_with_real_bam() {
     let tid = reader.header().tid("chr19").expect("tid");
 
     let mut store = RecordStore::new();
-    let count = reader.fetch_into(tid, 6_105_700, 6_105_800, &mut store).expect("fetch");
+    let count = reader
+        .fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .expect("fetch");
 
     assert!(count > 0);
     for i in 0..store.len() as u32 {
         let rec = store.record(i);
-        assert!(rec.pos >= 0);
         assert!(rec.seq_len > 0);
         assert_eq!(store.qual(i).len(), rec.seq_len as usize);
     }
@@ -142,8 +144,8 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut store_fields = RecordStore::new();
     let idx_fields = store_fields.push_fields(
-        100, // pos
-        103, // end_pos (pos + 4M - 1)
+        Pos::<Zero>::new(100), // pos
+        Pos::<Zero>::new(103), // end_pos (pos + 4M - 1)
         0x63,
         60,
         store_raw.record(idx_raw).matching_bases,
@@ -187,7 +189,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
     let tid = reader.header().tid("chr19").ok_or("chr19 not found")?;
 
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, 6_105_700, 6_105_800, &mut store)?;
+    reader.fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)?;
     assert!(!store.is_empty());
 
     // Re-push every record via push_fields and compare

@@ -1,6 +1,6 @@
 //! Tests for SAM reader edge cases.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-use seqair::bam::RecordStore;
+use seqair::bam::{Pos, RecordStore, Zero};
 use seqair::sam::reader::IndexedSamReader;
 use std::path::Path;
 use std::process::Command;
@@ -57,7 +57,9 @@ fn empty_line_handling_is_defensive() {
     let mut reader = IndexedSamReader::open(&sam_gz).expect("open");
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, 1, 1_000_000, &mut store).expect("fetch");
+    reader
+        .fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(1_000_000), &mut store)
+        .expect("fetch");
 
     assert_eq!(store.len(), 2);
 }
@@ -86,7 +88,9 @@ fn unmapped_reads_are_filtered() {
     let mut reader = IndexedSamReader::open(&sam_gz).expect("open");
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, 6_105_700, 6_105_800, &mut store).expect("fetch");
+    reader
+        .fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .expect("fetch");
 
     assert!(!store.is_empty());
     // All returned records should NOT have the unmapped flag
@@ -115,7 +119,9 @@ fn missing_seq_produces_zero_length() {
     let mut reader = IndexedSamReader::open(&sam_gz).expect("open");
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, 1, 1_000_000, &mut store).expect("fetch");
+    reader
+        .fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(1_000_000), &mut store)
+        .expect("fetch");
 
     assert_eq!(store.len(), 3);
     // The secondary alignment (index 1) should have seq_len = 0
@@ -137,7 +143,9 @@ fn missing_qual_produces_0xff() {
     let mut reader = IndexedSamReader::open(&sam_gz).expect("open");
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, 1, 1_000_000, &mut store).expect("fetch");
+    reader
+        .fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(1_000_000), &mut store)
+        .expect("fetch");
 
     assert_eq!(store.len(), 1);
     let qual = store.qual(0);
@@ -202,7 +210,9 @@ fn records_are_in_sorted_order() {
     let mut reader = IndexedSamReader::open(&sam_gz).expect("open");
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, 6_103_076, 6_143_229, &mut store).expect("fetch");
+    reader
+        .fetch_into(tid, Pos::<Zero>::new(6_103_076), Pos::<Zero>::new(6_143_229), &mut store)
+        .expect("fetch");
 
     // Verify records are sorted by position
     for i in 1..store.len() as u32 {
@@ -212,9 +222,9 @@ fn records_are_in_sorted_order() {
             curr.pos >= prev.pos,
             "records out of order: rec {} pos {} < rec {} pos {}",
             i,
-            curr.pos,
+            curr.pos.as_i64(),
             i - 1,
-            prev.pos
+            prev.pos.as_i64()
         );
     }
 }
@@ -263,11 +273,15 @@ fn handles_lines_spanning_bgzf_blocks() {
     // Fetch a large region that spans multiple BGZF blocks
     let tid = sam_reader.header().tid("bacteriophage_lambda_CpG").expect("tid");
     let mut sam_store = RecordStore::new();
-    sam_reader.fetch_into(tid, 1, 48_502, &mut sam_store).expect("sam fetch");
+    sam_reader
+        .fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(48_502), &mut sam_store)
+        .expect("sam fetch");
 
     let bam_tid = bam_reader.header().tid("bacteriophage_lambda_CpG").expect("tid");
     let mut bam_store = RecordStore::new();
-    bam_reader.fetch_into(bam_tid, 1, 48_502, &mut bam_store).expect("bam fetch");
+    bam_reader
+        .fetch_into(bam_tid, Pos::<Zero>::new(1), Pos::<Zero>::new(48_502), &mut bam_store)
+        .expect("bam fetch");
 
     assert_eq!(
         sam_store.len(),

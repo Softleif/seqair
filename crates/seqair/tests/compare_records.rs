@@ -3,6 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
 use rust_htslib::bam::{self, Read as _};
+use seqair::bam::{Pos, Zero};
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -81,7 +82,14 @@ fn record_count_matches() {
     let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("seqair open");
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid(TEST_REGION).expect("tid");
-    reader.fetch_into(tid, TEST_START, TEST_END, &mut store).expect("seqair fetch");
+    reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(TEST_START as u32),
+            Pos::<Zero>::new(TEST_END as u32),
+            &mut store,
+        )
+        .expect("seqair fetch");
 
     assert_eq!(
         store.len(),
@@ -103,12 +111,19 @@ fn record_fields_match() {
     let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("seqair open");
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid(TEST_REGION).expect("tid");
-    reader.fetch_into(tid, TEST_START, TEST_END, &mut store).expect("seqair fetch");
+    reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(TEST_START as u32),
+            Pos::<Zero>::new(TEST_END as u32),
+            &mut store,
+        )
+        .expect("seqair fetch");
 
     for (i, hts) in hts_records.iter().enumerate() {
         let rio = store.record(i as u32);
 
-        assert_eq!(rio.pos, hts.pos, "pos mismatch at record {i}");
+        assert_eq!(rio.pos.as_i64(), hts.pos, "pos mismatch at record {i}");
         assert_eq!(rio.flags, hts.flags, "flags mismatch at record {i}");
         assert_eq!(rio.mapq, hts.mapq, "mapq mismatch at record {i}");
         assert_eq!(store.qname(i as u32), hts.qname.as_slice(), "qname mismatch at record {i}");
@@ -117,10 +132,10 @@ fn record_fields_match() {
         // htslib's CigarStringView::end_pos() returns pos + ref_consumed (exclusive)
         // Our end_pos = pos + ref_consumed - 1 (inclusive)
         assert_eq!(
-            rio.end_pos,
+            rio.end_pos.as_i64(),
             hts.end_pos - 1,
             "end_pos mismatch at record {i}: rio={} hts_exclusive={}",
-            rio.end_pos,
+            rio.end_pos.as_i64(),
             hts.end_pos
         );
     }
@@ -137,7 +152,14 @@ fn sequence_matches() {
     let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("seqair open");
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid(TEST_REGION).expect("tid");
-    reader.fetch_into(tid, TEST_START, TEST_END, &mut store).expect("seqair fetch");
+    reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(TEST_START as u32),
+            Pos::<Zero>::new(TEST_END as u32),
+            &mut store,
+        )
+        .expect("seqair fetch");
 
     for (i, hts) in hts_records.iter().enumerate() {
         let rio = store.record(i as u32);
@@ -166,7 +188,14 @@ fn flag_helpers_match() {
     let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("seqair open");
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid(TEST_REGION).expect("tid");
-    reader.fetch_into(tid, TEST_START, TEST_END, &mut store).expect("seqair fetch");
+    reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(TEST_START as u32),
+            Pos::<Zero>::new(TEST_END as u32),
+            &mut store,
+        )
+        .expect("seqair fetch");
 
     for (i, hts) in hts_records.iter().enumerate() {
         let rio = store.record(i as u32);
@@ -197,7 +226,14 @@ fn aux_tags_accessible() {
     let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("seqair open");
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid(TEST_REGION).expect("tid");
-    reader.fetch_into(tid, TEST_START, TEST_END, &mut store).expect("seqair fetch");
+    reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(TEST_START as u32),
+            Pos::<Zero>::new(TEST_END as u32),
+            &mut store,
+        )
+        .expect("seqair fetch");
 
     let mut found_any_tag = false;
     for i in 0..store.len() {

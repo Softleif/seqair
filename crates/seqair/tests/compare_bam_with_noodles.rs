@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use noodles::bam;
 use noodles::sam;
+use seqair::bam::{Pos, Zero};
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -121,13 +122,21 @@ fn bam_record_count_matches_noodles() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
         // seqair's index-based fetch may include records starting before
         // `start` whose alignment span overlaps the region. Filter to match
         // the noodles sequential-read filter (pos >= start).
-        let seqair_count =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos >= start as i64).count();
+        let seqair_count = (0..store.len() as u32)
+            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
+            .count();
         assert_eq!(
             seqair_count,
             noodles.len(),
@@ -147,18 +156,26 @@ fn bam_record_fields_match_noodles() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
         // Filter seqair records to match noodles' sequential filter (pos >= start).
-        let seqair_indices: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos >= start as i64).collect();
+        let seqair_indices: Vec<u32> = (0..store.len() as u32)
+            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
+            .collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {
             let idx = seqair_indices[i];
             let r = store.record(idx);
 
-            assert_eq!(r.pos, n.pos, "{contig} rec {i}: pos");
+            assert_eq!(r.pos.as_i64(), n.pos, "{contig} rec {i}: pos");
             assert_eq!(r.flags, n.flags, "{contig} rec {i}: flags");
             assert_eq!(r.mapq, n.mapq, "{contig} rec {i}: mapq");
             assert_eq!(store.qname(idx), n.qname.as_slice(), "{contig} rec {i}: qname");
@@ -176,10 +193,18 @@ fn bam_sequence_matches_noodles() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
-        let seqair_indices: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos >= start as i64).collect();
+        let seqair_indices: Vec<u32> = (0..store.len() as u32)
+            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
+            .collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {
@@ -219,10 +244,18 @@ fn bam_quality_scores_match_noodles() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
-        let seqair_indices: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos >= start as i64).collect();
+        let seqair_indices: Vec<u32> = (0..store.len() as u32)
+            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
+            .collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {
@@ -245,10 +278,18 @@ fn bam_cigar_matches_noodles() {
         let mut reader = seqair::bam::IndexedBamReader::open(test_bam_path()).expect("open");
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
-        reader.fetch_into(tid, start, end, &mut store).expect("fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("fetch");
 
-        let seqair_indices: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos >= start as i64).collect();
+        let seqair_indices: Vec<u32> = (0..store.len() as u32)
+            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
+            .collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {

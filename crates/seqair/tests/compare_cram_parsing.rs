@@ -2,6 +2,7 @@
 //! Tests verify that our CRAM container/block/header parsing produces
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
+use seqair::bam::{Pos, Zero};
 use std::path::Path;
 
 fn test_cram_path() -> &'static Path {
@@ -228,7 +229,14 @@ fn cram_records_match_bam_records() {
     let start = 6_103_076u64;
     let end = 6_143_229u64;
 
-    let cram_count = cram_reader.fetch_into(tid, start, end, &mut cram_store).unwrap();
+    let cram_count = cram_reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(start as u32),
+            Pos::<Zero>::new(end as u32),
+            &mut cram_store,
+        )
+        .unwrap();
 
     hts.fetch(FetchDefinition::Region(tid as i32, start as i64, end as i64)).unwrap();
     let mut hts_records = Vec::new();
@@ -249,7 +257,7 @@ fn cram_records_match_bam_records() {
 
     // Compare positions and flags
     for (i, (hts_pos, hts_flags, hts_mapq)) in hts_records.iter().enumerate() {
-        let cram_pos = cram_store.record(i as u32).pos;
+        let cram_pos = cram_store.record(i as u32).pos.as_i64();
         let cram_flags = cram_store.record(i as u32).flags;
         let cram_mapq = cram_store.record(i as u32).mapq;
 

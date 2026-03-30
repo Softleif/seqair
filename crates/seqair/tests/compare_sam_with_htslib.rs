@@ -2,7 +2,7 @@
 //! This catches bugs that SAM-vs-BAM tests would miss (if both our readers had the same bug).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
-use seqair::bam::RecordStore;
+use seqair::bam::{Pos, RecordStore, Zero};
 use seqair::sam::reader::IndexedSamReader;
 use std::path::Path;
 use std::process::Command;
@@ -94,7 +94,14 @@ fn sam_record_count_matches_htslib() {
 
         let tid = reader.header().tid(contig).expect("tid");
         let mut store = RecordStore::new();
-        reader.fetch_into(tid, start, end, &mut store).expect("rio fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("rio fetch");
 
         assert_eq!(
             store.len(),
@@ -121,15 +128,22 @@ fn sam_record_fields_match_htslib() {
 
         let tid = reader.header().tid(contig).expect("tid");
         let mut store = RecordStore::new();
-        reader.fetch_into(tid, start, end, &mut store).expect("rio fetch");
+        reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut store,
+            )
+            .expect("rio fetch");
 
         for (i, h) in hts.iter().enumerate() {
             let idx = i as u32;
             let r = store.record(idx);
 
-            assert_eq!(r.pos, h.pos, "{contig} rec {i}: pos");
+            assert_eq!(r.pos.as_i64(), h.pos, "{contig} rec {i}: pos");
             // htslib end_pos is exclusive (past-the-end), ours is inclusive
-            assert_eq!(r.end_pos, h.end_pos - 1, "{contig} rec {i}: end_pos");
+            assert_eq!(r.end_pos.as_i64(), h.end_pos - 1, "{contig} rec {i}: end_pos");
             assert_eq!(r.flags, h.flags, "{contig} rec {i}: flags");
             assert_eq!(r.mapq, h.mapq, "{contig} rec {i}: mapq");
             assert_eq!(store.qname(idx), h.qname.as_slice(), "{contig} rec {i}: qname");
@@ -158,7 +172,9 @@ fn sam_aux_tags_present() {
 
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, 6_105_700, 6_105_800, &mut store).expect("fetch");
+    reader
+        .fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .expect("fetch");
 
     // Every record in the test data should have aux tags (at least RG)
     let mut has_aux = 0;
@@ -186,7 +202,9 @@ fn sam_aux_rg_tag_matches_htslib() {
 
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, 6_105_700, 6_105_800, &mut store).expect("fetch");
+    reader
+        .fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .expect("fetch");
 
     assert_eq!(store.len(), hts.len());
 

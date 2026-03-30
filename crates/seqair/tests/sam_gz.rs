@@ -1,6 +1,6 @@
 //! Tests for reading bgzf-compressed indexed SAM files (.sam.gz).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-use seqair::bam::RecordStore;
+use seqair::bam::{Pos, RecordStore, Zero};
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -46,8 +46,8 @@ fn snapshot_store(store: &RecordStore) -> Vec<RecordSnapshot> {
         .map(|i| {
             let r = store.record(i);
             RecordSnapshot {
-                pos: r.pos,
-                end_pos: r.end_pos,
+                pos: r.pos.as_i64(),
+                end_pos: r.end_pos.as_i64(),
                 flags: r.flags,
                 mapq: r.mapq,
                 qname: store.qname(i).to_vec(),
@@ -73,11 +73,25 @@ fn sam_gz_record_count_matches_bam() {
         let tid = bam_reader.header().tid(contig).expect("tid");
 
         let mut bam_store = RecordStore::new();
-        bam_reader.fetch_into(tid, start, end, &mut bam_store).expect("bam fetch");
+        bam_reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut bam_store,
+            )
+            .expect("bam fetch");
 
         let sam_tid = sam_reader.header().tid(contig).expect("sam tid");
         let mut sam_store = RecordStore::new();
-        sam_reader.fetch_into(sam_tid, start, end, &mut sam_store).expect("sam fetch");
+        sam_reader
+            .fetch_into(
+                sam_tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut sam_store,
+            )
+            .expect("sam fetch");
 
         assert_eq!(
             sam_store.len(),
@@ -106,11 +120,25 @@ fn sam_gz_record_fields_match_bam() {
         let tid = bam_reader.header().tid(contig).expect("tid");
 
         let mut bam_store = RecordStore::new();
-        bam_reader.fetch_into(tid, start, end, &mut bam_store).expect("bam fetch");
+        bam_reader
+            .fetch_into(
+                tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut bam_store,
+            )
+            .expect("bam fetch");
 
         let sam_tid = sam_reader.header().tid(contig).expect("sam tid");
         let mut sam_store = RecordStore::new();
-        sam_reader.fetch_into(sam_tid, start, end, &mut sam_store).expect("sam fetch");
+        sam_reader
+            .fetch_into(
+                sam_tid,
+                Pos::<Zero>::new(start as u32),
+                Pos::<Zero>::new(end as u32),
+                &mut sam_store,
+            )
+            .expect("sam fetch");
 
         let bam_recs = snapshot_store(&bam_store);
         let sam_recs = snapshot_store(&sam_store);
@@ -144,11 +172,25 @@ fn sam_gz_sequence_and_quality_match_bam() {
 
     let tid = bam_reader.header().tid(contig).expect("tid");
     let mut bam_store = RecordStore::new();
-    bam_reader.fetch_into(tid, start, end, &mut bam_store).expect("bam fetch");
+    bam_reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(start as u32),
+            Pos::<Zero>::new(end as u32),
+            &mut bam_store,
+        )
+        .expect("bam fetch");
 
     let sam_tid = sam_reader.header().tid(contig).expect("sam tid");
     let mut sam_store = RecordStore::new();
-    sam_reader.fetch_into(sam_tid, start, end, &mut sam_store).expect("sam fetch");
+    sam_reader
+        .fetch_into(
+            sam_tid,
+            Pos::<Zero>::new(start as u32),
+            Pos::<Zero>::new(end as u32),
+            &mut sam_store,
+        )
+        .expect("sam fetch");
 
     assert_eq!(sam_store.len(), bam_store.len());
 

@@ -12,30 +12,13 @@ use super::{
     record_store::RecordStore,
     region_buf::RegionBuf,
 };
-use seqair_types::SmolStr;
+use seqair_types::{Pos, SmolStr, Zero};
 use std::{
     fs::File,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tracing::instrument;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoordinateField {
-    Tid,
-    Start,
-    End,
-}
-
-impl std::fmt::Display for CoordinateField {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tid => write!(f, "tid"),
-            Self::Start => write!(f, "start"),
-            Self::End => write!(f, "end"),
-        }
-    }
-}
 
 // r[impl io.errors]
 #[derive(Debug, thiserror::Error)]
@@ -80,28 +63,14 @@ pub enum BamError {
     },
 
     // r[impl bam.reader.coordinate_overflow]
-    #[error("coordinate overflow: {field} value {value} exceeds {max}")]
-    CoordinateOverflow { field: CoordinateField, value: u64, max: u64 },
+    #[error("coordinate overflow: tid value {value} exceeds {max}")]
+    TidOverflow { value: u64, max: u64 },
 }
 
 // r[impl bam.reader.coordinate_overflow]
-fn validate_fetch_coordinates(tid: u32, start: u64, end: u64) -> Result<(i32, i64, i64), BamError> {
-    let tid_i32 = i32::try_from(tid).map_err(|_| BamError::CoordinateOverflow {
-        field: CoordinateField::Tid,
-        value: u64::from(tid),
-        max: i32::MAX as u64,
-    })?;
-    let start_i64 = i64::try_from(start).map_err(|_| BamError::CoordinateOverflow {
-        field: CoordinateField::Start,
-        value: start,
-        max: i64::MAX as u64,
-    })?;
-    let end_i64 = i64::try_from(end).map_err(|_| BamError::CoordinateOverflow {
-        field: CoordinateField::End,
-        value: end,
-        max: i64::MAX as u64,
-    })?;
-    Ok((tid_i32, start_i64, end_i64))
+fn validate_tid(tid: u32) -> Result<i32, BamError> {
+    i32::try_from(tid)
+        .map_err(|_| BamError::TidOverflow { value: u64::from(tid), max: i32::MAX as u64 })
 }
 
 // r[impl bam.reader.shared_state]
@@ -189,33 +158,27 @@ impl IndexedBamReader {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: u64,
-        end: u64,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
         store: &mut RecordStore,
     ) -> Result<usize, BamError> {
         store.clear();
 
-        let query = self.shared.index.query_split(tid, start, end);
+        let start_u64 = u64::from(start.get());
+        let end_u64 = u64::from(end.get());
+
+        let query = self.shared.index.query_split(tid, start_u64, end_u64);
         if query.nearby.is_empty() && query.distant.is_empty() {
             return Ok(0);
         }
 
         // Lazily load ALL bin 0 records for this tid (once per chromosome).
-        // We use distant_chunks() (all level 0–2 chunks for this tid) instead
-        // of the per-query distant chunks because the linear index filter in
-        // query_split may exclude chunks relevant to other regions on the same tid.
         if !query.distant.is_empty() && self.chunk_cache.tid != Some(tid) {
             let all_distant = self.shared.index.distant_chunks(tid);
             self.chunk_cache.load(&mut self.bulk_reader, tid, &all_distant)?;
         }
 
-        // Bulk-read regular (non-bin-0) chunks into RAM.
-        // Bin 0 chunks are at distant file offsets; reading them here would
-        // cause an expensive extra seek per region.
-        // TODO: The remaining regular chunks still span ~2 GB due to higher-level
-        // bins (levels 1-2). Consider applying the same caching strategy to those,
-        // or using more aggressive chunk merging to reduce seek count on NFS.
-        let (tid_i32, start_i64, end_i64) = validate_fetch_coordinates(tid, start, end)?;
+        let tid_i32 = validate_tid(tid)?;
 
         let mut skipped_tid: u32 = 0;
         let mut skipped_unmapped: u32 = 0;
@@ -254,7 +217,9 @@ impl IndexedBamReader {
                     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
                     let rec_tid = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
                     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-                    let rec_pos = i64::from(i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]));
+                    let rec_pos_raw = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+                    let rec_pos = Pos::<Zero>::try_from_i64(i64::from(rec_pos_raw))
+                        .unwrap_or(Pos::<Zero>::new(0));
                     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
                     let rec_flags = u16::from_le_bytes([raw[14], raw[15]]);
 
@@ -269,7 +234,7 @@ impl IndexedBamReader {
                     }
 
                     let rec_end = compute_end_pos_from_raw(raw).unwrap_or(rec_pos);
-                    if rec_pos > end_i64 || rec_end < start_i64 {
+                    if rec_pos > end || rec_end < start {
                         skipped_out_of_range += 1;
                         continue;
                     }
@@ -281,7 +246,7 @@ impl IndexedBamReader {
         }
 
         // Inject matching records from the distant-bin cache.
-        let cache_injected = self.chunk_cache.inject_overlapping(tid, start_i64, end_i64, store)?;
+        let cache_injected = self.chunk_cache.inject_overlapping(tid, start, end, store)?;
         accepted += cache_injected;
 
         tracing::debug!(
@@ -332,8 +297,8 @@ impl ChunkCache {
     pub fn inject_overlapping(
         &self,
         tid: u32,
-        start: i64,
-        end: i64,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
         store: &mut RecordStore,
     ) -> Result<u32, BamError> {
         if self.tid != Some(tid) {
@@ -347,7 +312,7 @@ impl ChunkCache {
             debug_assert!(raw.len() >= 32, "cached record too short: {}", raw.len());
             #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
             let rec_tid = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-            // Safety: tid was validated by validate_fetch_coordinates before calling this method
+            // Safety: tid was validated by validate_tid before calling this method
             if rec_tid != tid as i32 {
                 continue;
             }
@@ -357,7 +322,9 @@ impl ChunkCache {
                 continue;
             }
             #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-            let rec_pos = i64::from(i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]));
+            let rec_pos_raw = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+            let rec_pos =
+                Pos::<Zero>::try_from_i64(i64::from(rec_pos_raw)).unwrap_or(Pos::<Zero>::new(0));
             let rec_end = compute_end_pos_from_raw(raw).unwrap_or(rec_pos);
             if rec_pos > end || rec_end < start {
                 continue;
@@ -468,7 +435,9 @@ mod tests {
         };
 
         let mut store = RecordStore::new();
-        let count = cache.inject_overlapping(0, 50, 200, &mut store).unwrap();
+        let count = cache
+            .inject_overlapping(0, Pos::<Zero>::new(50), Pos::<Zero>::new(200), &mut store)
+            .unwrap();
 
         assert_eq!(count, 1, "only the record at pos=100 on tid=0 should match");
         assert_eq!(store.len(), 1);
@@ -478,7 +447,9 @@ mod tests {
     fn chunk_cache_empty_for_wrong_tid() {
         let cache = ChunkCache { tid: Some(5), records: vec![] };
         let mut store = RecordStore::new();
-        let count = cache.inject_overlapping(3, 0, 1000, &mut store).unwrap();
+        let count = cache
+            .inject_overlapping(3, Pos::<Zero>::new(0), Pos::<Zero>::new(1000), &mut store)
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -486,54 +457,30 @@ mod tests {
     fn chunk_cache_empty_when_uninitialized() {
         let cache = ChunkCache::default();
         let mut store = RecordStore::new();
-        let count = cache.inject_overlapping(0, 0, 1000, &mut store).unwrap();
+        let count = cache
+            .inject_overlapping(0, Pos::<Zero>::new(0), Pos::<Zero>::new(1000), &mut store)
+            .unwrap();
         assert_eq!(count, 0);
     }
 
     // r[verify bam.reader.coordinate_overflow]
     #[test]
     fn fetch_into_rejects_tid_exceeding_i32_max() {
-        // tid that exceeds i32::MAX should return CoordinateOverflow
+        // tid that exceeds i32::MAX should return TidOverflow
         let tid: u32 = u32::try_from(i32::MAX as u64 + 1).unwrap(); // 2_147_483_648
-        let result = validate_fetch_coordinates(tid, 0, 1000);
+        let result = validate_tid(tid);
         assert!(result.is_err(), "tid > i32::MAX must error");
         let err = result.unwrap_err();
         assert!(
-            matches!(err, BamError::CoordinateOverflow { field: CoordinateField::Tid, .. }),
-            "expected CoordinateOverflow for tid, got: {err}"
+            matches!(err, BamError::TidOverflow { .. }),
+            "expected TidOverflow for tid, got: {err}"
         );
     }
 
     // r[verify bam.reader.coordinate_overflow]
     #[test]
-    fn fetch_into_rejects_start_exceeding_i64_max() {
-        let start: u64 = i64::MAX as u64 + 1;
-        let result = validate_fetch_coordinates(0, start, start + 100);
-        assert!(result.is_err(), "start > i64::MAX must error");
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, BamError::CoordinateOverflow { field: CoordinateField::Start, .. }),
-            "expected CoordinateOverflow for start, got: {err}"
-        );
-    }
-
-    // r[verify bam.reader.coordinate_overflow]
-    #[test]
-    fn fetch_into_rejects_end_exceeding_i64_max() {
-        let end: u64 = i64::MAX as u64 + 1;
-        let result = validate_fetch_coordinates(0, 0, end);
-        assert!(result.is_err(), "end > i64::MAX must error");
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, BamError::CoordinateOverflow { field: CoordinateField::End, .. }),
-            "expected CoordinateOverflow for end, got: {err}"
-        );
-    }
-
-    // r[verify bam.reader.coordinate_overflow]
-    #[test]
-    fn fetch_into_accepts_max_valid_coordinates() {
-        let result = validate_fetch_coordinates(i32::MAX as u32, i64::MAX as u64, i64::MAX as u64);
-        assert!(result.is_ok(), "max valid coordinates must succeed");
+    fn fetch_into_accepts_max_valid_tid() {
+        let result = validate_tid(i32::MAX as u32);
+        assert!(result.is_ok(), "max valid tid must succeed");
     }
 }
