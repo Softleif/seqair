@@ -182,6 +182,7 @@ impl BamIndex {
         let mut all = result.nearby;
         all.extend(result.distant);
         all.sort_by_key(|c| c.begin);
+        merge_overlapping_chunks(&mut all);
         all
     }
 
@@ -256,9 +257,36 @@ impl BamIndex {
         }
 
         nearby.sort_by_key(|c| c.begin);
+        merge_overlapping_chunks(&mut nearby);
         distant.sort_by_key(|c| c.begin);
+        merge_overlapping_chunks(&mut distant);
         QueryChunks { nearby, distant }
     }
+}
+
+/// Merge sorted chunks whose byte ranges overlap or are adjacent.
+///
+/// Chunks from different bins can cover overlapping file regions. Without
+/// merging, `fetch_into` would read records in the overlap zone twice.
+/// Input must be sorted by `begin`; output preserves that invariant.
+fn merge_overlapping_chunks(chunks: &mut Vec<Chunk>) {
+    if chunks.len() <= 1 {
+        return;
+    }
+    let mut write = 0;
+    for read in 1..chunks.len() {
+        #[allow(clippy::indexing_slicing, reason = "read < chunks.len() and write < read")]
+        if chunks[read].begin <= chunks[write].end {
+            // Overlapping or adjacent — extend the current merged chunk
+            if chunks[read].end > chunks[write].end {
+                chunks[write].end = chunks[read].end;
+            }
+        } else {
+            write += 1;
+            chunks[write] = chunks[read];
+        }
+    }
+    chunks.truncate(write + 1);
 }
 
 /// Parse the reference index data (shared between BAI and tabix).
@@ -688,5 +716,149 @@ mod tests {
             matches!(err, BaiError::Bgzf { source: BgzfError::BlockSizeTooSmall { .. } }),
             "expected BlockSizeTooSmall, got {err:?}"
         );
+    }
+
+    /// Chunks from different nearby bins (e.g. level 3 and level 5) can have
+    /// overlapping byte ranges in the BAM file. `query_split` must merge these
+    /// so that `fetch_into` never reads the same file region twice.
+    #[test]
+    fn query_split_merges_overlapping_nearby_chunks() {
+        // bin 73 (level 3) and bin 4685 (level 5) both match region [65500, 65700].
+        // Their chunks overlap in file space: bin 73 ends at 800, bin 4685 starts at 700.
+        let idx = index_with_bins(vec![
+            (73, vec![chunk(500, 800)]),    // level 3 nearby
+            (4685, vec![chunk(700, 1000)]), // level 5 nearby — overlaps with bin 73
+        ]);
+
+        let result =
+            idx.query_split(0, Pos::<Zero>::new(65500).unwrap(), Pos::<Zero>::new(65700).unwrap());
+
+        // After merging, there should be a single chunk [500, 1000]
+        assert_eq!(
+            result.nearby.len(),
+            1,
+            "overlapping nearby chunks must be merged, got: {:?}",
+            result.nearby.iter().map(|c| (c.begin.0, c.end.0)).collect::<Vec<_>>()
+        );
+        assert_eq!(result.nearby[0].begin.0, 500);
+        assert_eq!(result.nearby[0].end.0, 1000);
+    }
+
+    #[test]
+    fn query_split_merges_adjacent_nearby_chunks() {
+        // Two chunks that are exactly adjacent (no gap, no overlap)
+        let idx =
+            index_with_bins(vec![(73, vec![chunk(500, 700)]), (4685, vec![chunk(700, 1000)])]);
+
+        let result =
+            idx.query_split(0, Pos::<Zero>::new(65500).unwrap(), Pos::<Zero>::new(65700).unwrap());
+
+        assert_eq!(
+            result.nearby.len(),
+            1,
+            "adjacent chunks must be merged, got: {:?}",
+            result.nearby.iter().map(|c| (c.begin.0, c.end.0)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn query_split_keeps_non_overlapping_nearby_chunks_separate() {
+        let idx =
+            index_with_bins(vec![(73, vec![chunk(500, 700)]), (4685, vec![chunk(900, 1200)])]);
+
+        let result =
+            idx.query_split(0, Pos::<Zero>::new(65500).unwrap(), Pos::<Zero>::new(65700).unwrap());
+
+        assert_eq!(
+            result.nearby.len(),
+            2,
+            "non-overlapping chunks must stay separate, got: {:?}",
+            result.nearby.iter().map(|c| (c.begin.0, c.end.0)).collect::<Vec<_>>()
+        );
+    }
+
+    // --- merge_overlapping_chunks unit tests ---
+
+    fn merge(pairs: &[(u64, u64)]) -> Vec<(u64, u64)> {
+        let mut chunks: Vec<Chunk> = pairs.iter().map(|&(b, e)| chunk(b, e)).collect();
+        chunks.sort_by_key(|c| c.begin);
+        merge_overlapping_chunks(&mut chunks);
+        chunks.iter().map(|c| (c.begin.0, c.end.0)).collect()
+    }
+
+    #[test]
+    fn merge_empty() {
+        assert_eq!(merge(&[]), Vec::<(u64, u64)>::new());
+    }
+
+    #[test]
+    fn merge_single() {
+        assert_eq!(merge(&[(10, 20)]), vec![(10, 20)]);
+    }
+
+    #[test]
+    fn merge_subset_chunk() {
+        // B is entirely inside A
+        assert_eq!(merge(&[(10, 100), (30, 50)]), vec![(10, 100)]);
+    }
+
+    #[test]
+    fn merge_chain_of_three() {
+        // A overlaps B, B overlaps C → all merge into one
+        assert_eq!(merge(&[(10, 30), (20, 50), (40, 70)]), vec![(10, 70)]);
+    }
+
+    #[test]
+    fn merge_mixed_overlap_and_gap() {
+        assert_eq!(
+            merge(&[(10, 30), (20, 50), (100, 200), (150, 250)]),
+            vec![(10, 50), (100, 250)]
+        );
+    }
+
+    #[test]
+    fn merge_identical_chunks() {
+        assert_eq!(merge(&[(10, 20), (10, 20), (10, 20)]), vec![(10, 20)]);
+    }
+
+    // --- proptest: merge output is non-overlapping and covers the same range ---
+
+    use proptest::prelude::*;
+
+    fn chunk_strategy() -> impl Strategy<Value = (u64, u64)> {
+        (0u64..10_000).prop_flat_map(|begin| (Just(begin), begin + 1..begin + 5_000))
+    }
+
+    proptest! {
+        #[test]
+        fn merge_output_is_sorted_and_non_overlapping(
+            chunks in prop::collection::vec(chunk_strategy(), 0..20)
+        ) {
+            let merged = merge(&chunks);
+            // Sorted
+            for w in merged.windows(2) {
+                prop_assert!(w[0].0 < w[1].0, "not sorted: {:?}", merged);
+            }
+            // Non-overlapping: each chunk's begin is strictly after the previous end
+            for w in merged.windows(2) {
+                prop_assert!(w[1].0 > w[0].1, "overlapping after merge: {:?}", merged);
+            }
+        }
+
+        #[test]
+        fn merge_covers_same_positions(
+            chunks in prop::collection::vec(chunk_strategy(), 1..20)
+        ) {
+            let merged = merge(&chunks);
+            // Every point in any input chunk must be in some merged chunk
+            for &(b, e) in &chunks {
+                let mid = b + (e - b) / 2;
+                prop_assert!(
+                    merged.iter().any(|&(mb, me)| mb <= mid && mid <= me),
+                    "midpoint {} of [{}, {}] not covered by merged {:?}",
+                    mid, b, e, merged
+                );
+            }
+        }
     }
 }

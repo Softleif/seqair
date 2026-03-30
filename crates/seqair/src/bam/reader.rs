@@ -245,6 +245,8 @@ impl IndexedBamReader {
             }
         }
 
+        let nearby_count = accepted;
+
         // Inject matching records from the distant-bin cache.
         let cache_injected = self.chunk_cache.inject_overlapping(tid, start, end, store)?;
         accepted += cache_injected;
@@ -252,11 +254,17 @@ impl IndexedBamReader {
         tracing::debug!(
             target: super::region_buf::PROFILE_TARGET,
             accepted,
+            nearby_count,
             cache_injected,
             skipped_tid,
             skipped_unmapped,
             skipped_out_of_range,
             "fetch_into",
+        );
+
+        eprintln!(
+            "[DIAG] fetch_into tid={tid} [{start},{end}]: nearby={nearby_count} cache_injected={cache_injected} total={accepted} store_len={}",
+            store.len()
         );
 
         tracing::debug!(
