@@ -12,7 +12,7 @@
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::{Add, AddAssign, Sub, SubAssign};
+use std::ops::Sub;
 
 use nonmax::NonMaxU32;
 
@@ -84,7 +84,9 @@ impl Pos<Zero> {
 
     /// Convert to 1-based. Returns `None` if the result would be `u32::MAX` (reserved niche).
     ///
-    /// Only fails when `self` holds `u32::MAX - 1`, which is beyond any real chromosome length.
+    /// Only fails when `self` holds `u32::MAX - 1` (the maximum valid `Pos<Zero>`,
+    /// since `u32::MAX` itself is the niche). Adding 1 would produce `u32::MAX`,
+    /// which is reserved. This value is far beyond any real chromosome length.
     #[inline]
     pub fn to_one_based(self) -> Option<Pos<One>> {
         let new_val = self.value.get().checked_add(1)?;
@@ -206,72 +208,12 @@ impl<S> Pos<S> {
 
 // ---- Arithmetic ----
 
-// Pos + Offset = Pos (same system)
-// Panics on overflow; use `checked_add_offset` when overflow is not a programming error.
-impl<S> Add<Offset> for Pos<S> {
-    type Output = Self;
-    #[inline]
-    fn add(self, rhs: Offset) -> Self {
-        let result = self.value.get() as i64 + rhs.0;
-        let result_u32 = u32::try_from(result).expect("position + offset out of u32 range");
-        Pos {
-            value: NonMaxU32::new(result_u32).expect("position + offset hit niche (u32::MAX)"),
-            _system: PhantomData,
-        }
-    }
-}
-
-impl<S: Copy> AddAssign<Offset> for Pos<S> {
-    #[inline]
-    fn add_assign(&mut self, rhs: Offset) {
-        *self = *self + rhs;
-    }
-}
-
-// Pos - Offset = Pos (same system)
-// Panics on overflow; use `checked_sub_offset` when overflow is not a programming error.
-impl<S> Sub<Offset> for Pos<S> {
-    type Output = Self;
-    #[inline]
-    fn sub(self, rhs: Offset) -> Self {
-        self + Offset(-rhs.0)
-    }
-}
-
-impl<S: Copy> SubAssign<Offset> for Pos<S> {
-    #[inline]
-    fn sub_assign(&mut self, rhs: Offset) {
-        *self = *self - rhs;
-    }
-}
-
 // Pos - Pos = Offset (same system only)
 impl<S> Sub for Pos<S> {
     type Output = Offset;
     #[inline]
     fn sub(self, rhs: Self) -> Offset {
         Offset(self.value.get() as i64 - rhs.value.get() as i64)
-    }
-}
-
-// Offset arithmetic
-impl Add for Offset {
-    type Output = Self;
-    #[inline]
-    fn add(self, rhs: Self) -> Self {
-        let result = self.0.checked_add(rhs.0);
-        debug_assert!(result.is_some(), "offset addition overflow");
-        Offset(self.0.wrapping_add(rhs.0))
-    }
-}
-
-impl Sub for Offset {
-    type Output = Self;
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        let result = self.0.checked_sub(rhs.0);
-        debug_assert!(result.is_some(), "offset subtraction overflow");
-        Offset(self.0.wrapping_sub(rhs.0))
     }
 }
 
@@ -411,7 +353,7 @@ mod tests {
         let b = Pos::<Zero>::new(50).unwrap();
         let off = a - b;
         assert_eq!(off.get(), 50);
-        assert_eq!(b + off, a);
+        assert_eq!(b.checked_add_offset(off).unwrap(), a);
     }
 
     #[test]
@@ -425,14 +367,14 @@ mod tests {
     #[test]
     fn pos_plus_offset() {
         let p = Pos::<Zero>::new(10).unwrap();
-        let q = p + Offset::new(5);
+        let q = p.checked_add_offset(Offset::new(5)).unwrap();
         assert_eq!(q.get(), 15);
     }
 
     #[test]
     fn pos_minus_offset() {
         let p = Pos::<Zero>::new(10).unwrap();
-        let q = p - Offset::new(3);
+        let q = p.checked_sub_offset(Offset::new(3)).unwrap();
         assert_eq!(q.get(), 7);
     }
 
@@ -599,8 +541,8 @@ mod tests {
             let result = v as i64 + off;
             if result >= 0 && result < u32::MAX as i64 {
                 let p = Pos::<Zero>::new(v).unwrap();
-                let q = p + Offset::new(off);
-                let r = q - Offset::new(off);
+                let q = p.checked_add_offset(Offset::new(off)).unwrap();
+                let r = q.checked_sub_offset(Offset::new(off)).unwrap();
                 prop_assert_eq!(r, p);
             }
         }

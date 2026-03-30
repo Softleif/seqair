@@ -11,12 +11,14 @@ A phantom-typed newtype `Pos<S>` solves both: the type system distinguishes coor
 
 ### Why `u32` and not `i64`?
 
-BAM spec defines POS as `int32_t` (max ~2.1 billion). No reference sequence in any organism exceeds `u32::MAX` (~4.3 billion) bases. Using `u32`:
+The SAM spec caps reference sequence length (`@SQ LN`) at `[1, 2^31-1]` (~2.1 billion) [SAM1 §1.3], and the BAM binary `l_ref` field is `uint32_t` with the same `< 2^31` constraint [SAM1 §4.2]. BAM binary `pos` is `int32_t`, giving a valid position range of `[0, 2^31-1]`. All current SAM/BAM positions therefore fit in `u32` (max ~4.3 billion) with room to spare. Using `u32`:
 - Halves position storage (4 bytes vs 8), improving cache density in hot structs (`SlimRecord`, `PileupAlignment`, `CompactOp`)
 - Eliminates the i64↔i32 casts currently scattered through cigar.rs
 - `Offset` (distance between positions) uses `i64` for safe intermediate arithmetic
 
-> **Sources:** Seqair-specific design. Coordinate conventions follow [SAM1] §1.4 (1-based POS), §4.2 (0-based BAM binary POS). See [references.md](99-references.md).
+> **Note:** The CSI index format [CSI] uses `int64_t` for positions to support sequences larger than `2^29` bases. If seqair ever needs CSI-indexed files with sequences > `2^31-1` bases, `Pos<S>` would need to widen to `u64`. For now, SAM/BAM's `2^31-1` cap makes `u32` sufficient.
+
+> **Sources:** Coordinate conventions follow [SAM1] §1.4 (1-based POS), §4.2 (0-based BAM binary POS). Reference length limit from [SAM1] §1.3 (`@SQ LN` range `[1, 2^31-1]`) and §4.2 (`l_ref: uint32_t < 2^31`). CSI position width from [CSI]. See [references.md](99-references.md).
 
 ## Position type
 
@@ -100,4 +102,4 @@ All accessor methods and conversion methods MUST be `#[must_use]`.
 ## Niche optimization
 
 r[pos.niche]
-`Pos<S>` SHOULD use a niche-optimized inner type (e.g., via the `nonmax` crate's `NonMaxU32`) so that `Option<Pos<S>>` has the same size as `Pos<S>` (4 bytes). The value `u32::MAX` is reserved as the niche and MUST NOT be a valid position. This is acceptable because no reference sequence has `u32::MAX` bases and BAM positions are capped at `i32::MAX` (~2.1B).
+`Pos<S>` SHOULD use a niche-optimized inner type (e.g., via the `nonmax` crate's `NonMaxU32`) so that `Option<Pos<S>>` has the same size as `Pos<S>` (4 bytes). The value `u32::MAX` is reserved as the niche and MUST NOT be a valid position. This is acceptable because the SAM/BAM spec caps reference sequence length at `2^31-1` (~2.1B) [SAM1 §1.3, §4.2], well below `u32::MAX` (~4.3B).
