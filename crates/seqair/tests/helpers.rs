@@ -228,6 +228,9 @@ fn arb_cigar_class() -> impl Strategy<Value = Vec<(u32, u8)>> {
         // Deletion: M + D + M
         (5u32..=50, 1u32..=20, 5u32..=50)
             .prop_map(|(m1, d, m2)| { vec![(m1, 0u8), (d, 2u8), (m2, 0u8)] }),
+        // Deletion then insertion: M + D + I + M (orphan insertion, tests no_orphan_insertions rule)
+        (5u32..=50, 1u32..=20, 1u32..=10, 5u32..=50)
+            .prop_map(|(m1, d, i, m2)| { vec![(m1, 0u8), (d, 2u8), (i, 1u8), (m2, 0u8)] }),
         // Insertion: M + I + M
         (5u32..=50, 1u32..=20, 5u32..=50)
             .prop_map(|(m1, i, m2)| { vec![(m1, 0u8), (i, 1u8), (m2, 0u8)] }),

@@ -170,6 +170,7 @@ fn pileup_positions_match() {
 
 // r[verify pileup.column_contents]
 // r[verify pileup.active_set]
+// Note: this test validates match_depth() specifically (qpos-bearing alignments only).
 #[test]
 fn pileup_depth_matches() {
     let hts_columns = fetch_htslib_pileup();
@@ -196,7 +197,7 @@ fn pileup_depth_matches() {
 
     for (i, (rio, hts)) in columns.iter().zip(hts_columns.iter()).enumerate() {
         // htslib depth includes deletions; alignments.len() only counts bases with qpos.
-        // seqair depth should match the non-deletion count.
+        // The non-deletion alignment count (match_depth) must match htslib's qpos-bearing count.
         assert!(
             hts.depth as usize >= hts.alignments.len(),
             "htslib depth < non-del count at position {} (column {i}): depth={} non_del={}",
@@ -205,11 +206,11 @@ fn pileup_depth_matches() {
             hts.alignments.len()
         );
         assert_eq!(
-            rio.depth(),
+            rio.match_depth(),
             hts.alignments.len(),
-            "depth mismatch at position {} (column {i}): seqair={} htslib={}",
+            "match_depth mismatch at position {} (column {i}): seqair={} htslib={}",
             hts.pos,
-            rio.depth(),
+            rio.match_depth(),
             hts.alignments.len()
         );
     }
@@ -332,23 +333,29 @@ fn deletion_ops_match_htslib() {
 
         // Cross-validate del_len against htslib anchor positions:
         // htslib reports Indel::Del(len) at the last M position before the deletion starts.
-        // At position P+1, seqair should have Deletion { del_len: len }.
-        for hts_aln in &hts.alignments {
-            if let Indel::Del(hts_del_len) = hts_aln.indel {
-                let next_pos = hts.pos + 1;
-                if let Some(next_col) = seq_by_pos.get(&next_pos) {
-                    let seq_dels_at_next: Vec<u32> = next_col
-                        .alignments()
-                        .filter(|a| a.is_del() && a.del_len() == hts_del_len)
-                        .map(|a| a.del_len())
-                        .collect();
-                    assert!(
-                        !seq_dels_at_next.is_empty(),
-                        "htslib reports Del({hts_del_len}) at pos {}, but seqair has no matching \
-                         del_len at pos {next_pos} (column {i})",
-                        hts.pos,
-                    );
+        // At position P+1, seqair must have at least as many Deletion{del_len: len} as htslib
+        // anchor reads reporting Del(len) at pos P.
+        let next_pos = hts.pos + 1;
+        if let Some(next_col) = seq_by_pos.get(&next_pos) {
+            // Group htslib Del(len) anchors by length.
+            let mut hts_del_counts: std::collections::HashMap<u32, usize> =
+                std::collections::HashMap::new();
+            for hts_aln in &hts.alignments {
+                if let Indel::Del(hts_del_len) = hts_aln.indel {
+                    *hts_del_counts.entry(hts_del_len).or_insert(0) += 1;
                 }
+            }
+            for (hts_del_len, hts_count) in &hts_del_counts {
+                let seq_count = next_col
+                    .alignments()
+                    .filter(|a| a.is_del() && a.del_len() == *hts_del_len)
+                    .count();
+                assert!(
+                    seq_count >= *hts_count,
+                    "htslib reports {hts_count} Del({hts_del_len}) anchor(s) at pos {}, but seqair \
+                     has only {seq_count} matching del_len at pos {next_pos} (column {i})",
+                    hts.pos,
+                );
             }
         }
 

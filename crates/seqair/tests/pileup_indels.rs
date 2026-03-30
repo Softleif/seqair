@@ -314,6 +314,56 @@ fn insertion_before_deletion() {
     );
 }
 
+// r[verify pileup_indel.insertion_at_last_match]
+// r[verify pileup_indel.no_orphan_insertions]
+#[test]
+fn insertion_with_anchor_and_orphan_insertion_after_deletion() {
+    // CIGAR: 10M 2I 5D 3I 10M at pos 0
+    // First I (len=2) has anchor at pos 9 → reported as Insertion
+    // Second I (len=3) follows D → orphaned, not reported
+    let raw = make_record_with_cigar(
+        0,
+        0,
+        99,
+        60,
+        &[cigar_op(10, 0), cigar_op(2, 1), cigar_op(5, 2), cigar_op(3, 1), cigar_op(10, 0)],
+        25,
+    );
+    let mut arena = RecordStore::new();
+    arena.push_raw(&raw).unwrap();
+
+    let engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(24).unwrap());
+    let columns: Vec<_> = engine.collect();
+
+    // pos 9: last M before first I → Insertion with insert_len=2
+    let col9 = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(9).unwrap()).unwrap();
+    let aln = col9.alignments().next().unwrap();
+    assert!(
+        matches!(aln.op, PileupOp::Insertion { insert_len: 2, .. }),
+        "pos 9 should be Insertion with len=2 (anchored), got {:?}",
+        aln.op
+    );
+
+    // pos 10-14: Deletion (the second I after D is orphaned, not visible)
+    for pos in 10..15u32 {
+        let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(pos).unwrap()).unwrap();
+        let aln = col.alignments().next().unwrap();
+        assert!(aln.is_del(), "pos {} should be Deletion, got {:?}", pos, aln.op);
+    }
+
+    // pos 15: Match (not Insertion — the I after D is orphaned)
+    let col15 = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(15).unwrap()).unwrap();
+    let aln15 = col15.alignments().next().unwrap();
+    assert!(
+        matches!(aln15.op, PileupOp::Match { .. }),
+        "pos 15 should be Match (orphan insertion not reported), got {:?}",
+        aln15.op
+    );
+    // qpos at pos 15 should account for both insertions: 10 (first M) + 2 (first I) + 3 (second I) = 15
+    assert_eq!(aln15.qpos(), Some(15), "qpos should skip both insertions' query bases");
+}
+
 // ---- minimal insertion ----
 
 // r[verify pileup_indel.insertion_at_last_match]

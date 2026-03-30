@@ -252,7 +252,7 @@ fn next_insertion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
         if next.op_type != CIGAR_I {
             break;
         }
-        total += next.len;
+        total = total.saturating_add(next.len);
         idx += 1;
     }
     if total > 0 { Some(total) } else { None }
@@ -267,6 +267,11 @@ fn classify_op(
     ref_end: i32,
 ) -> Option<CigarPosInfo> {
     if consumes_query(op.op_type) {
+        debug_assert!(
+            matches!(op.op_type, CIGAR_M | CIGAR_EQ | CIGAR_X),
+            "classify_op reached query-consuming branch with unexpected op type {}",
+            op.op_type
+        );
         let offset = (pos32 - op.ref_start) as u32;
         let qpos = op.query_start + offset;
         if pos32 == ref_end - 1

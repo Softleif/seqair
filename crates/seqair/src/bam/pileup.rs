@@ -146,6 +146,8 @@ pub enum PileupOp {
     RefSkip,
 }
 
+const _: () = assert!(std::mem::size_of::<PileupOp>() <= 16, "PileupOp grew unexpectedly large");
+
 // r[impl pileup.qpos]
 // r[impl base_decode.alignment]
 // r[impl pileup_indel.op_enum]
@@ -216,6 +218,8 @@ impl PileupAlignment {
     }
 
     /// Returns the deletion length for a `Deletion` op, or 0 for all other ops.
+    /// All positions within the same D CIGAR op report the same `del_len` (the total
+    /// D op length, not the remaining bases in the deletion).
     // r[impl pileup_indel.accessors]
     #[must_use]
     pub fn del_len(&self) -> u32 {
@@ -619,6 +623,10 @@ fn dedup_overlapping_pairs(
     // - iterating in reverse means we only swap_remove from positions >= current,
     //   so previously-removed indices are never invalidated
     to_remove.sort_unstable();
+    debug_assert!(
+        to_remove.windows(2).all(|w| w[0] != w[1]),
+        "dedup_overlapping_pairs produced duplicate removal indices"
+    );
     to_remove.dedup();
     for &idx in to_remove.iter().rev() {
         alignments.swap_remove(idx);
