@@ -805,7 +805,7 @@ mod tests {
             &bam_header,
             0,
             Pos::<Zero>::new(0),
-            Pos::<Zero>::new(u32::MAX - 1),
+            Pos::<Zero>::max_value(),
             &mut crate::bam::record_store::RecordStore::new(),
             &mut Vec::new(),
             &mut Vec::new(),
