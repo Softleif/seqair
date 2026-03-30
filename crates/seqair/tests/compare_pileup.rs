@@ -298,6 +298,7 @@ fn total_depth_with_deletions_matches_htslib() {
 
 // r[verify pileup_indel.deletions_included]
 // r[verify pileup_indel.refskips_included]
+// r[verify pileup_indel.accessors]
 #[test]
 fn deletion_ops_match_htslib() {
     let hts_cols = fetch_htslib_pileup_region("bacteriophage_lambda_CpG", 73, 200);
@@ -310,6 +311,50 @@ fn deletion_ops_match_htslib() {
         assert_eq!(
             hts_del, seq_del,
             "deletion alignment count mismatch at pos {} (column {i}): htslib={hts_del} seqair={seq_del}",
+            hts.pos,
+        );
+
+        // Cross-validate del_len values against htslib's Indel::Del(u32)
+        let mut hts_del_lens: Vec<u32> = hts
+            .alignments
+            .iter()
+            .filter_map(|a| if let Indel::Del(len) = a.indel { Some(len) } else { None })
+            .collect();
+        hts_del_lens.sort_unstable();
+        let mut seq_del_lens: Vec<u32> =
+            seq.alignments().filter(|a| a.is_del()).map(|a| a.del_len()).collect();
+        seq_del_lens.sort_unstable();
+
+        // Debug: Check if htslib alignments with is_del=true all have Indel::Del
+        if hts.pos == 134 {
+            eprintln!(
+                "DEBUG pos {}: hts_del count={}, hts_del_lens={:?}",
+                hts.pos, hts_del, hts_del_lens
+            );
+            eprintln!("  Alignments with is_del=true:");
+            for a in &hts.alignments {
+                if a.is_del {
+                    eprintln!("    is_del=true, indel={:?}, qpos={:?}", a.indel, a.qpos);
+                }
+            }
+            eprintln!("  Alignments with Indel::Del:");
+            for a in &hts.alignments {
+                if let Indel::Del(_) = a.indel {
+                    eprintln!("    Indel::Del, is_del={}, qpos={:?}", a.is_del, a.qpos);
+                }
+            }
+            eprintln!("DEBUG seq_del_lens={:?}", seq_del_lens);
+            eprintln!("  Alignments with is_del()=true:");
+            for a in seq.alignments() {
+                if a.is_del() {
+                    eprintln!("    is_del()=true, op={:?}, del_len()={}", a.op(), a.del_len());
+                }
+            }
+        }
+
+        assert_eq!(
+            hts_del_lens, seq_del_lens,
+            "del_len values mismatch at pos {} (column {i}): htslib={hts_del_lens:?} seqair={seq_del_lens:?}",
             hts.pos,
         );
 

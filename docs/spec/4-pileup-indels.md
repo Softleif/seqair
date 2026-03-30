@@ -27,7 +27,7 @@ Each alignment in a pileup column MUST carry a `PileupOp` that describes the CIG
 
 - **`Match`**: the read has a base aligned at this position (M, =, or X CIGAR op). Carries `qpos`, `base`, and `qual`.
 - **`Insertion`**: same as Match, but an insertion of `insert_len` query bases follows before the next reference position. Carries `qpos`, `base`, `qual`, and `insert_len`.
-- **`Deletion`**: the read spans this position via a deletion (D op). Carries `del_len` — the total number of reference bases deleted by this D CIGAR op. Does not carry `qpos`, `base`, or `qual`.
+- **`Deletion`**: the read spans this position via a deletion (D op). Carries `del_len` — the total number of reference bases deleted by this D CIGAR op. `del_len` is the same at every position within the deletion (it is the total D op length, not the remaining bases). Does not carry `qpos`, `base`, or `qual`.
 - **`RefSkip`**: the read spans this position via a reference skip (N op, e.g., intron). No query base exists. Does not carry `qpos`, `base`, or `qual`.
 
 r[pileup_indel.type_safety]

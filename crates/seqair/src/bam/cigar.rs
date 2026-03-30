@@ -276,6 +276,7 @@ fn classify_op(
         }
         Some(CigarPosInfo::Match { qpos })
     } else if op.op_type == CIGAR_D {
+        // r[impl pileup_indel.op_enum]
         Some(CigarPosInfo::Deletion { del_len: op.len })
     } else if op.op_type == CIGAR_N {
         Some(CigarPosInfo::RefSkip)

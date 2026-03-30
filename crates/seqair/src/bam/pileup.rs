@@ -216,6 +216,7 @@ impl PileupAlignment {
     }
 
     /// Returns the deletion length for a `Deletion` op, or 0 for all other ops.
+    // r[impl pileup_indel.accessors]
     #[must_use]
     pub fn del_len(&self) -> u32 {
         match self.op {
