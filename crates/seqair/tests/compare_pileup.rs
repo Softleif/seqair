@@ -1,7 +1,14 @@
 //! Comparison tests: Pileup engine.
 //! Builds pileups over the same region using both htslib and seqair,
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    dead_code
+)]
 
+use rust_htslib::bam::pileup::Indel;
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos, Zero};
 use std::path::Path;
@@ -47,6 +54,75 @@ fn fetch_htslib_pileup() -> Vec<HtsPileupColumn> {
         columns.push(HtsPileupColumn { pos, depth: p.depth(), alignments });
     }
     columns
+}
+
+struct HtsFullAlignment {
+    qpos: Option<usize>,
+    flags: u16,
+    is_del: bool,
+    is_refskip: bool,
+    indel: Indel,
+}
+
+struct HtsFullColumn {
+    pos: u32,
+    depth: u32,
+    alignments: Vec<HtsFullAlignment>,
+}
+
+fn fetch_htslib_pileup_region(region: &str, start: u64, end: u64) -> Vec<HtsFullColumn> {
+    let bam_path = test_bam_path();
+    let mut reader = bam::IndexedReader::from_path(bam_path).expect("htslib open");
+    let tid = reader.header().tid(region.as_bytes()).expect("tid");
+    reader
+        .fetch(FetchDefinition::Region(tid as i32, start as i64, end as i64))
+        .expect("htslib fetch");
+    let mut columns = Vec::new();
+    let pileup = reader.pileup();
+    for p in pileup {
+        let p = p.expect("htslib pileup");
+        let pos = p.pos();
+        if (pos as u64) < start || (pos as u64) > end {
+            continue;
+        }
+        let alignments = p
+            .alignments()
+            .map(|a| HtsFullAlignment {
+                qpos: a.qpos(),
+                flags: a.record().flags(),
+                is_del: a.is_del(),
+                is_refskip: a.is_refskip(),
+                indel: a.indel(),
+            })
+            .collect();
+        columns.push(HtsFullColumn { pos, depth: p.depth(), alignments });
+    }
+    columns
+}
+
+fn fetch_seqair_pileup_region(
+    region: &str,
+    start: u64,
+    end: u64,
+) -> Vec<seqair::bam::PileupColumn> {
+    let bam_path = test_bam_path();
+    let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("seqair open");
+    let mut store = seqair::bam::RecordStore::new();
+    let tid = reader.header().tid(region).expect("tid");
+    reader
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(start as u32).unwrap(),
+            Pos::<Zero>::new(end as u32).unwrap(),
+            &mut store,
+        )
+        .expect("seqair fetch");
+    seqair::bam::PileupEngine::new(
+        store,
+        Pos::<Zero>::new(start as u32).unwrap(),
+        Pos::<Zero>::new(end as u32).unwrap(),
+    )
+    .collect()
 }
 
 // r[verify pileup.htslib_compat]
@@ -189,6 +265,116 @@ fn pileup_qpos_matches() {
                 aln.1, hts_aln.1,
                 "flags mismatch at position {} alignment {aln_idx}",
                 hts.pos,
+            );
+        }
+    }
+}
+
+// r[verify pileup_indel.depth_includes_all]
+// r[verify pileup_indel.htslib_compat_update]
+#[test]
+fn total_depth_with_deletions_matches_htslib() {
+    let hts_cols = fetch_htslib_pileup_region("bacteriophage_lambda_CpG", 73, 200);
+    let seq_cols = fetch_seqair_pileup_region("bacteriophage_lambda_CpG", 73, 200);
+
+    assert!(!hts_cols.is_empty(), "htslib produced no columns — check test data");
+    let total_del_alns: usize =
+        hts_cols.iter().flat_map(|c| c.alignments.iter()).filter(|a| a.is_del).count();
+    assert!(total_del_alns > 0, "test region has no deletion alignments — test data problem");
+
+    assert_eq!(hts_cols.len(), seq_cols.len(), "column count mismatch");
+    for (i, (hts, seq)) in hts_cols.iter().zip(seq_cols.iter()).enumerate() {
+        assert_eq!(hts.pos, seq.pos().get(), "pos mismatch at column {i}");
+        assert_eq!(
+            hts.depth as usize,
+            seq.depth(),
+            "total depth (including deletions) mismatch at pos {} (column {i}): htslib={} seqair={}",
+            hts.pos,
+            hts.depth,
+            seq.depth()
+        );
+    }
+}
+
+// r[verify pileup_indel.deletions_included]
+// r[verify pileup_indel.refskips_included]
+#[test]
+fn deletion_ops_match_htslib() {
+    let hts_cols = fetch_htslib_pileup_region("bacteriophage_lambda_CpG", 73, 200);
+    let seq_cols = fetch_seqair_pileup_region("bacteriophage_lambda_CpG", 73, 200);
+
+    assert_eq!(hts_cols.len(), seq_cols.len(), "column count mismatch");
+    for (i, (hts, seq)) in hts_cols.iter().zip(seq_cols.iter()).enumerate() {
+        let hts_del = hts.alignments.iter().filter(|a| a.is_del).count();
+        let seq_del = seq.alignments().filter(|a| a.is_del()).count();
+        assert_eq!(
+            hts_del, seq_del,
+            "deletion alignment count mismatch at pos {} (column {i}): htslib={hts_del} seqair={seq_del}",
+            hts.pos,
+        );
+
+        let hts_refskip = hts.alignments.iter().filter(|a| a.is_refskip).count();
+        let seq_refskip = seq.alignments().filter(|a| a.is_refskip()).count();
+        assert_eq!(
+            hts_refskip, seq_refskip,
+            "refskip alignment count mismatch at pos {} (column {i}): htslib={hts_refskip} seqair={seq_refskip}",
+            hts.pos,
+        );
+    }
+}
+
+// r[verify pileup_indel.insertion_at_last_match]
+// r[verify pileup_indel.insertion_len]
+#[test]
+fn insertion_ops_match_htslib() {
+    let hts_cols = fetch_htslib_pileup_region("chr19", 6_110_698, 6_111_300);
+    let seq_cols = fetch_seqair_pileup_region("chr19", 6_110_698, 6_111_300);
+
+    let total_ins_alns: usize = hts_cols
+        .iter()
+        .flat_map(|c| c.alignments.iter())
+        .filter(|a| matches!(a.indel, Indel::Ins(_)))
+        .count();
+    assert!(total_ins_alns > 0, "test region has no insertion alignments — test data problem");
+
+    assert_eq!(hts_cols.len(), seq_cols.len(), "column count mismatch");
+    for (i, (hts, seq)) in hts_cols.iter().zip(seq_cols.iter()).enumerate() {
+        // Collect (qpos, insert_len) for insertion alignments from both engines.
+        let mut hts_ins: Vec<(usize, u32)> =
+            hts.alignments
+                .iter()
+                .filter_map(|a| {
+                    if let Indel::Ins(len) = a.indel { a.qpos.map(|q| (q, len)) } else { None }
+                })
+                .collect();
+        hts_ins.sort_unstable();
+
+        let mut seq_ins: Vec<(usize, u32)> = seq
+            .alignments()
+            .filter(|a| a.insert_len() > 0)
+            .filter_map(|a| a.qpos().map(|q| (q, a.insert_len())))
+            .collect();
+        seq_ins.sort_unstable();
+
+        assert_eq!(
+            hts_ins.len(),
+            seq_ins.len(),
+            "insertion count mismatch at pos {} (column {i}): htslib={} seqair={}",
+            hts.pos,
+            hts_ins.len(),
+            seq_ins.len()
+        );
+        for (ins_idx, (hts_ins_aln, seq_ins_aln)) in hts_ins.iter().zip(seq_ins.iter()).enumerate()
+        {
+            assert_eq!(
+                hts_ins_aln.0, seq_ins_aln.0,
+                "insertion qpos mismatch at pos {} (column {i}, ins {ins_idx}): htslib={} seqair={}",
+                hts.pos, hts_ins_aln.0, seq_ins_aln.0
+            );
+            assert_eq!(
+                hts_ins_aln.1, seq_ins_aln.1,
+                "insertion length mismatch at pos {} (column {i}, ins {ins_idx}): htslib={} seqair={}",
+                hts.pos, hts_ins_aln.1, seq_ins_aln.1
             );
         }
     }
