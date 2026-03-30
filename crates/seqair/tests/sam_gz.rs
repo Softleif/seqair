@@ -76,8 +76,8 @@ fn sam_gz_record_count_matches_bam() {
         bam_reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut bam_store,
             )
             .expect("bam fetch");
@@ -87,8 +87,8 @@ fn sam_gz_record_count_matches_bam() {
         sam_reader
             .fetch_into(
                 sam_tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut sam_store,
             )
             .expect("sam fetch");
@@ -123,8 +123,8 @@ fn sam_gz_record_fields_match_bam() {
         bam_reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut bam_store,
             )
             .expect("bam fetch");
@@ -134,8 +134,8 @@ fn sam_gz_record_fields_match_bam() {
         sam_reader
             .fetch_into(
                 sam_tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut sam_store,
             )
             .expect("sam fetch");
@@ -175,8 +175,8 @@ fn sam_gz_sequence_and_quality_match_bam() {
     bam_reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(start as u32),
-            Pos::<Zero>::new(end as u32),
+            Pos::<Zero>::new(start as u32).unwrap(),
+            Pos::<Zero>::new(end as u32).unwrap(),
             &mut bam_store,
         )
         .expect("bam fetch");
@@ -186,8 +186,8 @@ fn sam_gz_sequence_and_quality_match_bam() {
     sam_reader
         .fetch_into(
             sam_tid,
-            Pos::<Zero>::new(start as u32),
-            Pos::<Zero>::new(end as u32),
+            Pos::<Zero>::new(start as u32).unwrap(),
+            Pos::<Zero>::new(end as u32).unwrap(),
             &mut sam_store,
         )
         .expect("sam fetch");

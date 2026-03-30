@@ -65,6 +65,9 @@ pub enum BamError {
     // r[impl bam.reader.coordinate_overflow]
     #[error("coordinate overflow: tid value {value} exceeds {max}")]
     TidOverflow { value: u64, max: u64 },
+
+    #[error("invalid BAM position value {value}: negative positions are reserved")]
+    InvalidPosition { value: i32 },
 }
 
 // r[impl bam.reader.coordinate_overflow]
@@ -216,7 +219,7 @@ impl IndexedBamReader {
                     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
                     let rec_pos_raw = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
                     let rec_pos = Pos::<Zero>::try_from_i64(i64::from(rec_pos_raw))
-                        .unwrap_or(Pos::<Zero>::new(0));
+                        .ok_or(BamError::InvalidPosition { value: rec_pos_raw })?;
                     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
                     let rec_flags = u16::from_le_bytes([raw[14], raw[15]]);
 
@@ -320,8 +323,8 @@ impl ChunkCache {
             }
             #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
             let rec_pos_raw = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-            let rec_pos =
-                Pos::<Zero>::try_from_i64(i64::from(rec_pos_raw)).unwrap_or(Pos::<Zero>::new(0));
+            let rec_pos = Pos::<Zero>::try_from_i64(i64::from(rec_pos_raw))
+                .ok_or(BamError::InvalidPosition { value: rec_pos_raw })?;
             let rec_end = compute_end_pos_from_raw(raw).unwrap_or(rec_pos);
             if rec_pos > end || rec_end < start {
                 continue;
@@ -433,7 +436,12 @@ mod tests {
 
         let mut store = RecordStore::new();
         let count = cache
-            .inject_overlapping(0, Pos::<Zero>::new(50), Pos::<Zero>::new(200), &mut store)
+            .inject_overlapping(
+                0,
+                Pos::<Zero>::new(50).unwrap(),
+                Pos::<Zero>::new(200).unwrap(),
+                &mut store,
+            )
             .unwrap();
 
         assert_eq!(count, 1, "only the record at pos=100 on tid=0 should match");
@@ -445,7 +453,12 @@ mod tests {
         let cache = ChunkCache { tid: Some(5), records: vec![] };
         let mut store = RecordStore::new();
         let count = cache
-            .inject_overlapping(3, Pos::<Zero>::new(0), Pos::<Zero>::new(1000), &mut store)
+            .inject_overlapping(
+                3,
+                Pos::<Zero>::new(0).unwrap(),
+                Pos::<Zero>::new(1000).unwrap(),
+                &mut store,
+            )
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -455,7 +468,12 @@ mod tests {
         let cache = ChunkCache::default();
         let mut store = RecordStore::new();
         let count = cache
-            .inject_overlapping(0, Pos::<Zero>::new(0), Pos::<Zero>::new(1000), &mut store)
+            .inject_overlapping(
+                0,
+                Pos::<Zero>::new(0).unwrap(),
+                Pos::<Zero>::new(1000).unwrap(),
+                &mut store,
+            )
             .unwrap();
         assert_eq!(count, 0);
     }

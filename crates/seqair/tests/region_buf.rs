@@ -37,8 +37,8 @@ fn overlapping_chunks_are_merged() {
     let count = reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32),
-            Pos::<Zero>::new(TEST_END as u32),
+            Pos::<Zero>::new(TEST_START as u32).unwrap(),
+            Pos::<Zero>::new(TEST_END as u32).unwrap(),
             &mut arena,
         )
         .expect("fetch");
@@ -62,8 +62,8 @@ fn region_buf_reads_same_records_as_direct_bgzf() {
     let count = reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32),
-            Pos::<Zero>::new(TEST_END as u32),
+            Pos::<Zero>::new(TEST_START as u32).unwrap(),
+            Pos::<Zero>::new(TEST_END as u32).unwrap(),
             &mut arena,
         )
         .expect("fetch");
@@ -89,8 +89,8 @@ fn seek_within_loaded_region() {
     let count1 = reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32),
-            Pos::<Zero>::new(TEST_END as u32),
+            Pos::<Zero>::new(TEST_START as u32).unwrap(),
+            Pos::<Zero>::new(TEST_END as u32).unwrap(),
             &mut arena1,
         )
         .expect("fetch 1");
@@ -100,8 +100,8 @@ fn seek_within_loaded_region() {
     let count2 = reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32),
-            Pos::<Zero>::new(TEST_END as u32),
+            Pos::<Zero>::new(TEST_START as u32).unwrap(),
+            Pos::<Zero>::new(TEST_END as u32).unwrap(),
             &mut arena2,
         )
         .expect("fetch 2");
@@ -129,8 +129,8 @@ fn fetch_into_uses_region_buf_and_matches_htslib() {
     let count = reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32),
-            Pos::<Zero>::new(TEST_END as u32),
+            Pos::<Zero>::new(TEST_START as u32).unwrap(),
+            Pos::<Zero>::new(TEST_END as u32).unwrap(),
             &mut arena,
         )
         .expect("fetch");

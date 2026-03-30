@@ -97,8 +97,8 @@ fn sam_record_count_matches_htslib() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("rio fetch");
@@ -131,8 +131,8 @@ fn sam_record_fields_match_htslib() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("rio fetch");
@@ -173,7 +173,12 @@ fn sam_aux_tags_present() {
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(6_105_700).unwrap(),
+            Pos::<Zero>::new(6_105_800).unwrap(),
+            &mut store,
+        )
         .expect("fetch");
 
     // Every record in the test data should have aux tags (at least RG)
@@ -203,7 +208,12 @@ fn sam_aux_rg_tag_matches_htslib() {
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(6_105_700).unwrap(),
+            Pos::<Zero>::new(6_105_800).unwrap(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert_eq!(store.len(), hts.len());

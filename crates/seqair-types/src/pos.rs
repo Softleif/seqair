@@ -38,8 +38,8 @@ pub struct One;
 /// ```
 /// use seqair_types::pos::{Pos, Zero, One};
 ///
-/// let bam_pos = Pos::<Zero>::new(100);       // 0-based position 100
-/// let sam_pos = Pos::<One>::new(101);         // 1-based position 101
+/// let bam_pos = Pos::<Zero>::new(100).unwrap();  // 0-based position 100
+/// let sam_pos = Pos::<One>::new(101).unwrap();    // 1-based position 101
 /// assert_eq!(bam_pos, sam_pos.to_zero_based()); // same genomic location
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -54,21 +54,16 @@ pub struct Pos<S> {
 /// `Pos - Pos = Offset` and `Pos + Offset = Pos`. You cannot add two positions.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct Offset(pub i64);
+pub struct Offset(i64);
 
 // ---- Pos<Zero> construction ----
 
 impl Pos<Zero> {
-    /// Create a 0-based position from a `u32`.
-    ///
-    /// Panics if `value == u32::MAX` (reserved niche).
-    /// BAM positions are capped at i32::MAX (~2.1B), well below the limit.
+    /// Create a 0-based position from a `u32`. Returns `None` if `value == u32::MAX`
+    /// (reserved as the `Option<Pos>` niche).
     #[inline]
-    pub fn new(value: u32) -> Self {
-        Self {
-            value: NonMaxU32::new(value).expect("position u32::MAX is reserved (niche)"),
-            _system: PhantomData,
-        }
+    pub fn new(value: u32) -> Option<Self> {
+        NonMaxU32::new(value).map(|v| Self { value: v, _system: PhantomData })
     }
 
     /// Create a 0-based position from an `i64`. Returns `None` if negative,
@@ -76,10 +71,7 @@ impl Pos<Zero> {
     #[inline]
     pub fn try_from_i64(value: i64) -> Option<Self> {
         let v = u32::try_from(value).ok()?;
-        if v == u32::MAX {
-            return None;
-        }
-        Some(Self::new(v))
+        NonMaxU32::new(v).map(|v| Self { value: v, _system: PhantomData })
     }
 
     /// Create a 0-based position from a `u64`. Returns `None` if > `u32::MAX - 1`
@@ -87,51 +79,45 @@ impl Pos<Zero> {
     #[inline]
     pub fn try_from_u64(value: u64) -> Option<Self> {
         let v = u32::try_from(value).ok()?;
-        if v == u32::MAX {
-            return None;
-        }
-        Some(Self::new(v))
+        NonMaxU32::new(v).map(|v| Self { value: v, _system: PhantomData })
     }
 
-    /// Convert to 1-based. Infallible: 0-based 0 → 1-based 1.
+    /// Convert to 1-based. Returns `None` if the result would be `u32::MAX` (reserved niche).
     ///
-    /// Panics if the input is `u32::MAX - 1` (result would be `u32::MAX`, the reserved niche).
+    /// Only fails when `self` holds `u32::MAX - 1`, which is beyond any real chromosome length.
     #[inline]
-    pub fn to_one_based(self) -> Pos<One> {
-        let new_val = self.value.get() + 1;
-        Pos {
-            value: NonMaxU32::new(new_val).expect("to_one_based overflow (input was u32::MAX - 1)"),
-            _system: PhantomData,
+    pub fn to_one_based(self) -> Option<Pos<One>> {
+        let new_val = self.value.get().checked_add(1)?;
+        NonMaxU32::new(new_val).map(|v| Pos { value: v, _system: PhantomData })
+    }
+
+    /// Create a 0-based position from an `i32`. Returns `None` if negative.
+    #[inline]
+    pub fn try_from_i32(value: i32) -> Option<Self> {
+        if value < 0 {
+            return None;
         }
+        Self::new(value as u32)
     }
 
     /// Maximum valid 0-based position (u32::MAX - 1).
     /// Used as "end of contig" sentinel in queries.
     pub fn max_value() -> Self {
-        Self::new(u32::MAX - 1)
+        // u32::MAX - 1 is always valid for NonMaxU32
+        Self::new(u32::MAX - 1).expect("BUG: u32::MAX - 1 is a valid NonMaxU32 value")
     }
 }
 
 // ---- Pos<One> construction ----
 
 impl Pos<One> {
-    /// Create a 1-based position. Panics if value is 0 or `u32::MAX`.
-    #[inline]
-    pub fn new(value: u32) -> Self {
-        assert!(value > 0, "1-based position must be >= 1");
-        Self {
-            value: NonMaxU32::new(value).expect("position u32::MAX is reserved (niche)"),
-            _system: PhantomData,
-        }
-    }
-
     /// Create a 1-based position from a `u32`. Returns `None` if value is 0 or `u32::MAX`.
     #[inline]
-    pub fn try_new(value: u32) -> Option<Self> {
-        if value == 0 || value == u32::MAX {
+    pub fn new(value: u32) -> Option<Self> {
+        if value == 0 {
             return None;
         }
-        Some(Self::new(value))
+        NonMaxU32::new(value).map(|v| Self { value: v, _system: PhantomData })
     }
 
     /// Create a 1-based position from an `i64`. Returns `None` if < 1, > `u32::MAX - 1`,
@@ -141,7 +127,7 @@ impl Pos<One> {
         if value < 1 {
             return None;
         }
-        u32::try_from(value).ok().and_then(Self::try_new)
+        u32::try_from(value).ok().and_then(Self::new)
     }
 
     /// Create a 1-based position from an `i32`. Returns `None` if < 1.
@@ -150,7 +136,7 @@ impl Pos<One> {
         if value < 1 {
             return None;
         }
-        Self::try_new(value as u32)
+        Self::new(value as u32)
     }
 
     /// Convert to 0-based. Infallible: 1-based 1 → 0-based 0.
@@ -159,16 +145,16 @@ impl Pos<One> {
     /// 0..(u32::MAX-1), which is always a valid NonMaxU32.
     #[inline]
     pub fn to_zero_based(self) -> Pos<Zero> {
-        Pos {
-            // 1-based min is 1, so result is >= 0 and < u32::MAX
-            value: NonMaxU32::new(self.value.get() - 1).expect("to_zero_based underflow"),
-            _system: PhantomData,
-        }
+        // 1-based min is 1, so result is >= 0 and < u32::MAX — NonMaxU32 invariant always holds.
+        NonMaxU32::new(self.value.get() - 1)
+            .map(|v| Pos { value: v, _system: PhantomData })
+            .expect("BUG: to_zero_based produced u32::MAX (impossible for valid Pos<One>)")
     }
 
     /// Maximum valid 1-based position (u32::MAX - 1).
     pub fn max_value() -> Self {
-        Self::new(u32::MAX - 1)
+        // u32::MAX - 1 is non-zero and < u32::MAX, always valid
+        Self::new(u32::MAX - 1).expect("BUG: u32::MAX - 1 is a valid Pos<One> value")
     }
 }
 
@@ -195,11 +181,33 @@ impl<S> Pos<S> {
     pub fn as_i64(self) -> i64 {
         self.value.get() as i64
     }
+
+    /// Convenience for 64-bit arithmetic: returns the raw value as u64.
+    #[inline]
+    #[must_use]
+    pub fn as_u64(self) -> u64 {
+        u64::from(self.value.get())
+    }
+
+    /// Checked position + offset. Returns `None` if result is negative, exceeds u32 range, or hits the niche.
+    #[inline]
+    pub fn checked_add_offset(self, offset: Offset) -> Option<Self> {
+        let result = self.value.get() as i64 + offset.0;
+        let result_u32 = u32::try_from(result).ok()?;
+        NonMaxU32::new(result_u32).map(|v| Self { value: v, _system: PhantomData })
+    }
+
+    /// Checked position - offset. Returns `None` if result is negative, exceeds u32 range, or hits the niche.
+    #[inline]
+    pub fn checked_sub_offset(self, offset: Offset) -> Option<Self> {
+        self.checked_add_offset(Offset(-offset.0))
+    }
 }
 
 // ---- Arithmetic ----
 
 // Pos + Offset = Pos (same system)
+// Panics on overflow; use `checked_add_offset` when overflow is not a programming error.
 impl<S> Add<Offset> for Pos<S> {
     type Output = Self;
     #[inline]
@@ -221,6 +229,7 @@ impl<S: Copy> AddAssign<Offset> for Pos<S> {
 }
 
 // Pos - Offset = Pos (same system)
+// Panics on overflow; use `checked_sub_offset` when overflow is not a programming error.
 impl<S> Sub<Offset> for Pos<S> {
     type Output = Self;
     #[inline]
@@ -250,7 +259,9 @@ impl Add for Offset {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Self) -> Self {
-        Offset(self.0 + rhs.0)
+        let result = self.0.checked_add(rhs.0);
+        debug_assert!(result.is_some(), "offset addition overflow");
+        Offset(self.0.wrapping_add(rhs.0))
     }
 }
 
@@ -258,11 +269,19 @@ impl Sub for Offset {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self {
-        Offset(self.0 - rhs.0)
+        let result = self.0.checked_sub(rhs.0);
+        debug_assert!(result.is_some(), "offset subtraction overflow");
+        Offset(self.0.wrapping_sub(rhs.0))
     }
 }
 
 impl Offset {
+    /// Construct an `Offset` from a signed 64-bit integer.
+    #[inline]
+    pub const fn new(value: i64) -> Self {
+        Self(value)
+    }
+
     /// Absolute value as usize (for lengths, capacities).
     #[inline]
     #[must_use]
@@ -275,6 +294,44 @@ impl Offset {
     #[must_use]
     pub const fn get(self) -> i64 {
         self.0
+    }
+
+    /// Checked addition. Returns `None` on overflow.
+    #[inline]
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        self.0.checked_add(rhs.0).map(Offset)
+    }
+
+    /// Checked subtraction. Returns `None` on overflow.
+    #[inline]
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        self.0.checked_sub(rhs.0).map(Offset)
+    }
+}
+
+// ---- From impls ----
+
+impl<S> From<Pos<S>> for u32 {
+    fn from(pos: Pos<S>) -> u32 {
+        pos.value.get()
+    }
+}
+
+impl<S> From<Pos<S>> for u64 {
+    fn from(pos: Pos<S>) -> u64 {
+        u64::from(pos.value.get())
+    }
+}
+
+impl<S> From<Pos<S>> for i64 {
+    fn from(pos: Pos<S>) -> i64 {
+        i64::from(pos.value.get())
+    }
+}
+
+impl<S> From<Pos<S>> for usize {
+    fn from(pos: Pos<S>) -> usize {
+        pos.value.get() as usize
     }
 }
 
@@ -311,6 +368,22 @@ impl fmt::Display for Offset {
 }
 
 #[cfg(test)]
+impl Pos<Zero> {
+    /// Test-only convenience: panics if value is u32::MAX.
+    pub fn at(value: u32) -> Self {
+        Self::new(value).expect("test position must not be u32::MAX")
+    }
+}
+
+#[cfg(test)]
+impl Pos<One> {
+    /// Test-only convenience: panics if value is 0 or u32::MAX.
+    pub fn at(value: u32) -> Self {
+        Self::new(value).expect("test position must be 1..u32::MAX")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use proptest::prelude::*;
 
@@ -318,24 +391,24 @@ mod tests {
 
     #[test]
     fn zero_based_roundtrip() {
-        let z = Pos::<Zero>::new(100);
-        let o = z.to_one_based();
+        let z = Pos::<Zero>::new(100).unwrap();
+        let o = z.to_one_based().unwrap();
         assert_eq!(o.get(), 101);
         assert_eq!(o.to_zero_based(), z);
     }
 
     #[test]
     fn one_based_roundtrip() {
-        let o = Pos::<One>::new(1);
+        let o = Pos::<One>::new(1).unwrap();
         let z = o.to_zero_based();
         assert_eq!(z.get(), 0);
-        assert_eq!(z.to_one_based(), o);
+        assert_eq!(z.to_one_based().unwrap(), o);
     }
 
     #[test]
     fn pos_minus_pos_is_offset() {
-        let a = Pos::<Zero>::new(100);
-        let b = Pos::<Zero>::new(50);
+        let a = Pos::<Zero>::new(100).unwrap();
+        let b = Pos::<Zero>::new(50).unwrap();
         let off = a - b;
         assert_eq!(off.get(), 50);
         assert_eq!(b + off, a);
@@ -343,23 +416,23 @@ mod tests {
 
     #[test]
     fn pos_minus_pos_negative_offset() {
-        let a = Pos::<Zero>::new(10);
-        let b = Pos::<Zero>::new(50);
+        let a = Pos::<Zero>::new(10).unwrap();
+        let b = Pos::<Zero>::new(50).unwrap();
         let off = a - b;
         assert_eq!(off.get(), -40);
     }
 
     #[test]
     fn pos_plus_offset() {
-        let p = Pos::<Zero>::new(10);
-        let q = p + Offset(5);
+        let p = Pos::<Zero>::new(10).unwrap();
+        let q = p + Offset::new(5);
         assert_eq!(q.get(), 15);
     }
 
     #[test]
     fn pos_minus_offset() {
-        let p = Pos::<Zero>::new(10);
-        let q = p - Offset(3);
+        let p = Pos::<Zero>::new(10).unwrap();
+        let q = p - Offset::new(3);
         assert_eq!(q.get(), 7);
     }
 
@@ -395,21 +468,21 @@ mod tests {
 
     #[test]
     fn ordering() {
-        let a = Pos::<Zero>::new(10);
-        let b = Pos::<Zero>::new(20);
+        let a = Pos::<Zero>::new(10).unwrap();
+        let b = Pos::<Zero>::new(20).unwrap();
         assert!(a < b);
         assert!(b > a);
     }
 
     #[test]
     fn as_usize() {
-        let p = Pos::<Zero>::new(42);
+        let p = Pos::<Zero>::new(42).unwrap();
         assert_eq!(p.as_usize(), 42);
     }
 
     #[test]
     fn as_i64() {
-        let p = Pos::<Zero>::new(100);
+        let p = Pos::<Zero>::new(100).unwrap();
         assert_eq!(p.as_i64(), 100);
     }
 
@@ -427,8 +500,8 @@ mod tests {
 
     #[test]
     fn debug_shows_coordinate_system() {
-        let z = Pos::<Zero>::new(42);
-        let o = Pos::<One>::new(43);
+        let z = Pos::<Zero>::new(42).unwrap();
+        let o = Pos::<One>::new(43).unwrap();
         assert_eq!(format!("{z:?}"), "Pos0(42)");
         assert_eq!(format!("{o:?}"), "Pos1(43)");
     }
@@ -448,18 +521,18 @@ mod tests {
     proptest! {
         #[test]
         fn roundtrip_zero_to_one_and_back(v in 0u32..=u32::MAX - 2) {
-            // u32::MAX - 1 is max valid, but to_one_based would make it u32::MAX which panics
-            // So limit to u32::MAX - 2 for the roundtrip test
-            let z = Pos::<Zero>::new(v);
-            let o = z.to_one_based();
+            // u32::MAX - 1 maps to u32::MAX which is the niche, so to_one_based returns None.
+            // Limit to u32::MAX - 2 for the roundtrip test.
+            let z = Pos::<Zero>::new(v).unwrap();
+            let o = z.to_one_based().unwrap();
             prop_assert_eq!(o.to_zero_based(), z);
         }
 
         #[test]
         fn roundtrip_one_to_zero_and_back(v in 1u32..=u32::MAX - 1) {
-            let o = Pos::<One>::new(v);
+            let o = Pos::<One>::new(v).unwrap();
             let z = o.to_zero_based();
-            prop_assert_eq!(z.to_one_based(), o);
+            prop_assert_eq!(z.to_one_based().unwrap(), o);
         }
 
         #[test]
@@ -469,24 +542,24 @@ mod tests {
         ) {
             let result = v as i64 + off;
             if result >= 0 && result < u32::MAX as i64 {
-                let p = Pos::<Zero>::new(v);
-                let q = p + Offset(off);
-                let r = q - Offset(off);
+                let p = Pos::<Zero>::new(v).unwrap();
+                let q = p + Offset::new(off);
+                let r = q - Offset::new(off);
                 prop_assert_eq!(r, p);
             }
         }
 
         #[test]
         fn pos_sub_pos_is_offset(a in 0u32..1_000_000, b in 0u32..1_000_000) {
-            let pa = Pos::<Zero>::new(a);
-            let pb = Pos::<Zero>::new(b);
+            let pa = Pos::<Zero>::new(a).unwrap();
+            let pb = Pos::<Zero>::new(b).unwrap();
             let off = pa - pb;
             prop_assert_eq!(off.get(), a as i64 - b as i64);
         }
 
         #[test]
         fn option_pos_niche_always_4_bytes(v in 0u32..u32::MAX - 1) {
-            let p = Some(Pos::<Zero>::new(v));
+            let p = Pos::<Zero>::new(v);
             assert_eq!(std::mem::size_of_val(&p), 4);
         }
     }

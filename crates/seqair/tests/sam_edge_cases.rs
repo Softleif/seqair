@@ -58,7 +58,12 @@ fn empty_line_handling_is_defensive() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(1_000_000), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(1).unwrap(),
+            Pos::<Zero>::new(1_000_000).unwrap(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert_eq!(store.len(), 2);
@@ -89,7 +94,12 @@ fn unmapped_reads_are_filtered() {
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(6_105_700).unwrap(),
+            Pos::<Zero>::new(6_105_800).unwrap(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert!(!store.is_empty());
@@ -120,7 +130,12 @@ fn missing_seq_produces_zero_length() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(1_000_000), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(1).unwrap(),
+            Pos::<Zero>::new(1_000_000).unwrap(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert_eq!(store.len(), 3);
@@ -144,7 +159,12 @@ fn missing_qual_produces_0xff() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(1_000_000), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(1).unwrap(),
+            Pos::<Zero>::new(1_000_000).unwrap(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert_eq!(store.len(), 1);
@@ -211,7 +231,12 @@ fn records_are_in_sorted_order() {
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos::<Zero>::new(6_103_076), Pos::<Zero>::new(6_143_229), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(6_103_076).unwrap(),
+            Pos::<Zero>::new(6_143_229).unwrap(),
+            &mut store,
+        )
         .expect("fetch");
 
     // Verify records are sorted by position
@@ -274,13 +299,23 @@ fn handles_lines_spanning_bgzf_blocks() {
     let tid = sam_reader.header().tid("bacteriophage_lambda_CpG").expect("tid");
     let mut sam_store = RecordStore::new();
     sam_reader
-        .fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(48_502), &mut sam_store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(1).unwrap(),
+            Pos::<Zero>::new(48_502).unwrap(),
+            &mut sam_store,
+        )
         .expect("sam fetch");
 
     let bam_tid = bam_reader.header().tid("bacteriophage_lambda_CpG").expect("tid");
     let mut bam_store = RecordStore::new();
     bam_reader
-        .fetch_into(bam_tid, Pos::<Zero>::new(1), Pos::<Zero>::new(48_502), &mut bam_store)
+        .fetch_into(
+            bam_tid,
+            Pos::<Zero>::new(1).unwrap(),
+            Pos::<Zero>::new(48_502).unwrap(),
+            &mut bam_store,
+        )
         .expect("bam fetch");
 
     assert_eq!(

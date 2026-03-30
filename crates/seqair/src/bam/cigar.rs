@@ -359,7 +359,7 @@ mod tests {
         // CompactOp stores ref_start as i32. Verify it works at the maximum BAM position.
         let mut cigar = Vec::new();
         cigar.extend_from_slice(&pack_cigar_op(CIGAR_M, 100));
-        let rec_pos = Pos::<Zero>::new((i32::MAX as u32) - 100); // near max BAM position
+        let rec_pos = Pos::<Zero>::new((i32::MAX as u32) - 100).unwrap(); // near max BAM position
         let mapping = CigarMapping::new(rec_pos, &cigar);
         // Should work fine — position fits in i32
         assert!(matches!(mapping, CigarMapping::Linear { .. }));
@@ -374,45 +374,45 @@ mod tests {
         cigar.extend_from_slice(&pack_cigar_op(CIGAR_S, 5));
         cigar.extend_from_slice(&pack_cigar_op(CIGAR_M, 100));
 
-        let mapping = CigarMapping::new(Pos::<Zero>::new(1000), &cigar);
+        let mapping = CigarMapping::new(Pos::<Zero>::new(1000).unwrap(), &cigar);
         assert!(matches!(mapping, CigarMapping::Linear { .. }));
 
         // Valid positions: 1000..1100
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(1000)),
+            mapping.pos_info_at(Pos::<Zero>::new(1000).unwrap()),
             Some(CigarPosInfo::Match { qpos: 5 })
         );
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(1050)),
+            mapping.pos_info_at(Pos::<Zero>::new(1050).unwrap()),
             Some(CigarPosInfo::Match { qpos: 55 })
         );
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(1099)),
+            mapping.pos_info_at(Pos::<Zero>::new(1099).unwrap()),
             Some(CigarPosInfo::Match { qpos: 104 })
         );
 
         // Out-of-range: before alignment start
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(999)),
+            mapping.pos_info_at(Pos::<Zero>::new(999).unwrap()),
             None,
             "pos before rec_pos must return None"
         );
 
         // Out-of-range: at/past alignment end
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(1100)),
+            mapping.pos_info_at(Pos::<Zero>::new(1100).unwrap()),
             None,
             "pos at rec_pos + match_len must return None"
         );
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(1200)),
+            mapping.pos_info_at(Pos::<Zero>::new(1200).unwrap()),
             None,
             "pos past alignment end must return None"
         );
 
         // Far out-of-range (would wrap with unsigned subtraction)
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(0)),
+            mapping.pos_info_at(Pos::<Zero>::new(0).unwrap()),
             None,
             "pos far before alignment must return None"
         );

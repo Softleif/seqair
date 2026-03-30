@@ -41,7 +41,12 @@ fn fetch_record_positions(
     let mut store = RecordStore::new();
     let tid = reader.header().tid(contig).expect("tid lookup");
     reader
-        .fetch_into(tid, Pos::<Zero>::new(start as u32), Pos::<Zero>::new(end as u32), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(start as u32).unwrap(),
+            Pos::<Zero>::new(end as u32).unwrap(),
+            &mut store,
+        )
         .expect("fetch_into");
     (0..store.len() as u32)
         .map(|i| (store.record(i).pos.as_i64(), store.record(i).end_pos.as_i64()))

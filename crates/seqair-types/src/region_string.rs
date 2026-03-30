@@ -77,8 +77,8 @@ fn parser(input: &mut &str) -> winnow::Result<RegionString> {
 
     fn index(input: &mut &str) -> winnow::Result<Pos<One>> {
         dec_uint::<&str, u32, _>
-            .verify(|v| *v > 0)
-            .map(Pos::<One>::new)
+            .verify(|v| *v > 0 && *v != u32::MAX)
+            .map(|v| Pos::<One>::new(v).expect("BUG: verified v > 0 && v != u32::MAX"))
             .context(StrContext::Expected(StrContextValue::Description("number greater than 0")))
             .parse_next(input)
     }
@@ -170,11 +170,7 @@ mod tests {
         let region = RegionString::from_str("chr2:100").unwrap();
         assert_eq!(
             region,
-            RegionString {
-                chromosome: "chr2".into(),
-                start: Some(Pos::<One>::new(100)),
-                end: None
-            }
+            RegionString { chromosome: "chr2".into(), start: Pos::<One>::new(100), end: None }
         );
 
         // chromosome with start and end positions
@@ -183,8 +179,8 @@ mod tests {
             region,
             RegionString {
                 chromosome: "chr3".into(),
-                start: Some(Pos::<One>::new(100)),
-                end: Some(Pos::<One>::new(200))
+                start: Pos::<One>::new(100),
+                end: Pos::<One>::new(200)
             }
         );
     }
@@ -220,8 +216,8 @@ mod tests {
             region,
             RegionString {
                 chromosome: "chr4".into(),
-                start: Some(Pos::<One>::new(150)),
-                end: Some(Pos::<One>::new(250))
+                start: Pos::<One>::new(150),
+                end: Pos::<One>::new(250)
             }
         );
 
@@ -260,18 +256,15 @@ mod tests {
         insta::assert_snapshot!(region, @"chr1");
 
         // Test chromosome with start position
-        let region = RegionString {
-            chromosome: "chr2".into(),
-            start: Some(Pos::<One>::new(100)),
-            end: None,
-        };
+        let region =
+            RegionString { chromosome: "chr2".into(), start: Pos::<One>::new(100), end: None };
         insta::assert_snapshot!(region, @"chr2:100");
 
         // Test chromosome with start and end positions
         let region = RegionString {
             chromosome: "chr3".into(),
-            start: Some(Pos::<One>::new(100)),
-            end: Some(Pos::<One>::new(200)),
+            start: Pos::<One>::new(100),
+            end: Pos::<One>::new(200),
         };
         insta::assert_snapshot!(region, @"chr3:100-200");
     }
@@ -301,7 +294,7 @@ mod tests {
             let region_str = format!("{chrom}:{start}");
             let parsed = RegionString::from_str(&region_str)?;
             assert_eq!(parsed.chromosome, chrom);
-            assert_eq!(parsed.start, Pos::<One>::try_new(start));
+            assert_eq!(parsed.start, Pos::<One>::new(start));
             assert_eq!(parsed.end, None);
             #[cfg(feature = "hts-compat")]
             let _ = FetchDefinition::from(&parsed);
@@ -310,8 +303,8 @@ mod tests {
             let region_str = format!("{chrom}:{start}-{end}");
             let parsed = RegionString::from_str(&region_str)?;
             assert_eq!(parsed.chromosome, chrom);
-            assert_eq!(parsed.start, Pos::<One>::try_new(start));
-            assert_eq!(parsed.end, Pos::<One>::try_new(end));
+            assert_eq!(parsed.start, Pos::<One>::new(start));
+            assert_eq!(parsed.end, Pos::<One>::new(end));
             #[cfg(feature = "hts-compat")]
             let _ = FetchDefinition::from(&parsed);
         }
@@ -353,8 +346,8 @@ mod tests {
             region,
             RegionString {
                 chromosome: "bacteriophage_lambda_CpG".into(),
-                start: Some(Pos::<One>::new(1)),
-                end: Some(Pos::<One>::new(48502))
+                start: Pos::<One>::new(1),
+                end: Pos::<One>::new(48502)
             }
         );
     }

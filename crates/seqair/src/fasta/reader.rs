@@ -198,8 +198,8 @@ impl IndexedFastaReader {
     ) -> Result<(), FastaError> {
         out.clear();
 
-        let start = u64::from(start.get());
-        let stop = u64::from(stop.get());
+        let start = start.as_u64();
+        let stop = stop.as_u64();
 
         // r[impl fasta.fetch.unknown_sequence]
         let entry = self
@@ -325,7 +325,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn p(v: u32) -> Pos<Zero> {
-        Pos::<Zero>::new(v)
+        Pos::<Zero>::new(v).unwrap()
     }
 
     fn make_plain_fasta(dir: &TempDir) -> (PathBuf, PathBuf) {

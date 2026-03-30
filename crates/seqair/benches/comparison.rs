@@ -15,10 +15,10 @@ const START: u64 = 6_105_000;
 const END: u64 = 6_140_000;
 
 fn start_pos() -> seqair::bam::Pos<seqair::bam::Zero> {
-    seqair::bam::Pos::<seqair::bam::Zero>::new(START as u32)
+    seqair::bam::Pos::<seqair::bam::Zero>::new(START as u32).unwrap()
 }
 fn end_pos() -> seqair::bam::Pos<seqair::bam::Zero> {
-    seqair::bam::Pos::<seqair::bam::Zero>::new(END as u32)
+    seqair::bam::Pos::<seqair::bam::Zero>::new(END as u32).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -207,8 +207,8 @@ fn fasta_fetch(c: &mut Criterion) {
             let seq = reader
                 .fetch_seq(
                     CHROM,
-                    seqair::bam::Pos::<seqair::bam::Zero>::new(FASTA_START as u32),
-                    seqair::bam::Pos::<seqair::bam::Zero>::new(FASTA_END as u32),
+                    seqair::bam::Pos::<seqair::bam::Zero>::new(FASTA_START as u32).unwrap(),
+                    seqair::bam::Pos::<seqair::bam::Zero>::new(FASTA_END as u32).unwrap(),
                 )
                 .unwrap();
             black_box(seq.len())

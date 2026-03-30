@@ -343,7 +343,7 @@ impl Iterator for PileupEngine {
             }
 
             let pos = self.current_pos;
-            self.current_pos += Offset(1);
+            self.current_pos += Offset::new(1);
 
             // Evict expired records. Iterate the compact end_pos vec (4-byte stride)
             // and swap-remove from both vecs in lockstep.
@@ -609,31 +609,33 @@ mod tests {
 
     #[test]
     fn ref_seq_base_at_within_range() {
-        let ref_seq =
-            RefSeq::new(Rc::from([Base::A, Base::C, Base::G, Base::T]), Pos::<Zero>::new(100));
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(100)), Base::A);
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(101)), Base::C);
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(102)), Base::G);
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(103)), Base::T);
+        let ref_seq = RefSeq::new(
+            Rc::from([Base::A, Base::C, Base::G, Base::T]),
+            Pos::<Zero>::new(100).unwrap(),
+        );
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(100).unwrap()), Base::A);
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(101).unwrap()), Base::C);
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(102).unwrap()), Base::G);
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(103).unwrap()), Base::T);
     }
 
     #[test]
     fn ref_seq_base_at_before_start() {
-        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), Pos::<Zero>::new(100));
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(99)), Base::Unknown);
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(0)), Base::Unknown);
+        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), Pos::<Zero>::new(100).unwrap());
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(99).unwrap()), Base::Unknown);
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(0).unwrap()), Base::Unknown);
     }
 
     #[test]
     fn ref_seq_base_at_after_end() {
-        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), Pos::<Zero>::new(100));
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(102)), Base::Unknown);
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(1000)), Base::Unknown);
+        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), Pos::<Zero>::new(100).unwrap());
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(102).unwrap()), Base::Unknown);
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(1000).unwrap()), Base::Unknown);
     }
 
     #[test]
     fn ref_seq_base_at_empty() {
-        let ref_seq = RefSeq::new(Rc::from([]), Pos::<Zero>::new(100));
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(100)), Base::Unknown);
+        let ref_seq = RefSeq::new(Rc::from([]), Pos::<Zero>::new(100).unwrap());
+        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(100).unwrap()), Base::Unknown);
     }
 }

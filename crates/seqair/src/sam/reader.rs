@@ -361,10 +361,10 @@ fn parse_sam_line(
     let pos_field = fields.get(3).copied().unwrap_or(b"0");
     let pos_1based = parse_i64(pos_field)
         .ok_or_else(|| SamRecordError::InvalidPos { value: pos_field.into() })?;
-    // SAM POS is 1-based; convert to 0-based Pos<Zero>
+    // SAM POS is 1-based; convert to 0-based Pos<Zero>. POS=0 means unmapped — skip.
     let pos = Pos::<One>::try_from_i64(pos_1based)
         .map(|p| p.to_zero_based())
-        .unwrap_or(Pos::<Zero>::new(0));
+        .ok_or_else(|| SamRecordError::InvalidPos { value: pos_field.into() })?;
 
     // Field 5: MAPQ
     let mapq_field = fields.get(4).copied().unwrap_or(b"0");
@@ -377,7 +377,10 @@ fn parse_sam_line(
     let cigar_available = parse_cigar(cigar_str, cigar_buf)?;
 
     // Compute end_pos from packed CIGAR
-    let end_pos = if cigar_available { compute_end_pos(pos, cigar_buf) } else { pos };
+    // compute_end_pos returns None only if the CIGAR ref span overflows u32 range;
+    // fall back to pos (zero-span) to avoid panicking on malformed input.
+    let end_pos =
+        if cigar_available { compute_end_pos(pos, cigar_buf).unwrap_or(pos) } else { pos };
 
     // r[impl sam.reader.overlap_filter+2]
     // r[impl sam.reader.overlap_halfopen]

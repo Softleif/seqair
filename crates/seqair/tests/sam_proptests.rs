@@ -60,7 +60,7 @@ proptest! {
         let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz)?;
         let tid = reader.header().tid("chr1").unwrap();
         let mut store = seqair::bam::RecordStore::new();
-        reader.fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(100_000_000), &mut store)?;
+        reader.fetch_into(tid, Pos::<Zero>::new(1).unwrap(), Pos::<Zero>::new(100_000_000).unwrap(), &mut store)?;
 
         prop_assert!(!store.is_empty(), "should fetch at least 1 record");
         let rec = store.record(0);
@@ -114,7 +114,7 @@ proptest! {
         let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz)?;
         let tid = reader.header().tid("chr1").unwrap();
         let mut store = seqair::bam::RecordStore::new();
-        reader.fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(100_000_000), &mut store)?;
+        reader.fetch_into(tid, Pos::<Zero>::new(1).unwrap(), Pos::<Zero>::new(100_000_000).unwrap(), &mut store)?;
 
         prop_assert_eq!(store.len(), 1);
         let seq = store.seq(0);
@@ -159,7 +159,7 @@ proptest! {
         let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz)?;
         let tid = reader.header().tid("chr1").unwrap();
         let mut store = seqair::bam::RecordStore::new();
-        reader.fetch_into(tid, Pos::<Zero>::new(1), Pos::<Zero>::new(100_000_000), &mut store)?;
+        reader.fetch_into(tid, Pos::<Zero>::new(1).unwrap(), Pos::<Zero>::new(100_000_000).unwrap(), &mut store)?;
 
         prop_assert_eq!(store.len(), 1);
         let stored_qual = store.qual(0);

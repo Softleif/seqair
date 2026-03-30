@@ -63,16 +63,16 @@ fn pileup_positions_match() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32),
-            Pos::<Zero>::new(TEST_END as u32),
+            Pos::<Zero>::new(TEST_START as u32).unwrap(),
+            Pos::<Zero>::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
 
     let engine = seqair::bam::PileupEngine::new(
         store,
-        Pos::<Zero>::new(TEST_START as u32),
-        Pos::<Zero>::new(TEST_END as u32),
+        Pos::<Zero>::new(TEST_START as u32).unwrap(),
+        Pos::<Zero>::new(TEST_END as u32).unwrap(),
     );
     let columns: Vec<_> = engine.collect();
 
@@ -105,16 +105,16 @@ fn pileup_depth_matches() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32),
-            Pos::<Zero>::new(TEST_END as u32),
+            Pos::<Zero>::new(TEST_START as u32).unwrap(),
+            Pos::<Zero>::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
 
     let engine = seqair::bam::PileupEngine::new(
         store,
-        Pos::<Zero>::new(TEST_START as u32),
-        Pos::<Zero>::new(TEST_END as u32),
+        Pos::<Zero>::new(TEST_START as u32).unwrap(),
+        Pos::<Zero>::new(TEST_END as u32).unwrap(),
     );
     let columns: Vec<_> = engine.collect();
 
@@ -154,16 +154,16 @@ fn pileup_qpos_matches() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32),
-            Pos::<Zero>::new(TEST_END as u32),
+            Pos::<Zero>::new(TEST_START as u32).unwrap(),
+            Pos::<Zero>::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
 
     let engine = seqair::bam::PileupEngine::new(
         store,
-        Pos::<Zero>::new(TEST_START as u32),
-        Pos::<Zero>::new(TEST_END as u32),
+        Pos::<Zero>::new(TEST_START as u32).unwrap(),
+        Pos::<Zero>::new(TEST_END as u32).unwrap(),
     );
     let columns: Vec<_> = engine.collect();
 

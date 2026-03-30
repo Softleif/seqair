@@ -51,7 +51,11 @@ fn tabix_parses_without_error() {
     // Verify we can query — the index should have references
     let header = seqair::bam::BamHeader::from_bam_path(test_bam_path()).unwrap();
     let tid = header.tid("chr19").unwrap();
-    let chunks = index.query(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800));
+    let chunks = index.query(
+        tid,
+        Pos::<Zero>::new(6_105_700).unwrap(),
+        Pos::<Zero>::new(6_105_800).unwrap(),
+    );
     assert!(!chunks.is_empty(), "tabix query should return chunks for chr19");
 }
 

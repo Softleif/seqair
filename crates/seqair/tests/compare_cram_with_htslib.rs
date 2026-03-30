@@ -125,8 +125,8 @@ fn cram_records_match_htslib_for_chr19() {
         let cram_count = readers
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store,
             )
             .unwrap();
@@ -165,8 +165,8 @@ fn cram_quality_scores_match_htslib() {
         readers
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store,
             )
             .unwrap();
@@ -202,8 +202,8 @@ fn cram_sequences_match_htslib() {
         readers
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store,
             )
             .unwrap();
@@ -257,16 +257,16 @@ fn cram_fork_produces_same_records() {
         fork1
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store1,
             )
             .unwrap();
         fork2
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store2,
             )
             .unwrap();

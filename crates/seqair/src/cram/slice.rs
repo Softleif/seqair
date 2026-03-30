@@ -118,8 +118,9 @@ pub fn decode_slice(
     // r[impl cram.edge.reference_mismatch]
     if !is_multi_ref && sh.reference_md5 != [0u8; 16] && !reference_seq.is_empty() {
         let slice_start_0based = Pos::<One>::try_from_i32(sh.alignment_start.max(1))
-            .map(|p| p.to_zero_based().as_i64())
-            .unwrap_or(0);
+            .ok_or(CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
+            .to_zero_based()
+            .as_i64();
         let slice_ref_start = (slice_start_0based - ref_start_0based) as usize;
         // r[impl cram.slice.validated_lengths]
         let span = usize::try_from(sh.alignment_span)
@@ -185,8 +186,9 @@ pub fn decode_slice(
         // For embedded reference, ref_start is the slice's alignment_start
         let effective_ref_start = if sh.embedded_reference >= 0 {
             Pos::<One>::try_from_i32(sh.alignment_start.max(1))
-                .map(|p| p.to_zero_based().as_i64())
-                .unwrap_or(0)
+                .ok_or(CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
+                .to_zero_based()
+                .as_i64()
         } else {
             ref_start_0based
         };
@@ -273,7 +275,7 @@ fn decode_record(
     // Convert from 1-based to 0-based
     let pos_0based = Pos::<One>::try_from_i64(alignment_pos)
         .map(|p| p.to_zero_based())
-        .unwrap_or(Pos::<Zero>::new(0));
+        .ok_or(super::reader::CramError::InvalidPosition { value: alignment_pos })?;
 
     // r[impl cram.record.read_group]
     // 6. RG (read group)
@@ -374,7 +376,8 @@ fn decode_record(
         }
 
         let end_pos_raw = pos_0based.as_i64() + result.ref_consumed as i64;
-        let end_pos = Pos::<Zero>::try_from_i64(end_pos_raw).unwrap_or(Pos::<Zero>::new(0));
+        let end_pos = Pos::<Zero>::try_from_i64(end_pos_raw)
+            .ok_or(super::reader::CramError::InvalidPosition { value: end_pos_raw })?;
 
         // r[impl cram.index.multi_ref_slices]
         // Skip records from different references in multi-ref slices
@@ -804,7 +807,7 @@ mod tests {
             ref_start,
             &bam_header,
             0,
-            Pos::<Zero>::new(0),
+            Pos::<Zero>::new(0).unwrap(),
             Pos::<Zero>::max_value(),
             &mut crate::bam::record_store::RecordStore::new(),
             &mut Vec::new(),

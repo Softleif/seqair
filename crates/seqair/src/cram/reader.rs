@@ -109,6 +109,9 @@ pub enum CramError {
     #[error("unknown target ID {tid}")]
     UnknownTid { tid: u32 },
 
+    #[error("invalid CRAM alignment position {value}: out of valid range")]
+    InvalidPosition { value: i64 },
+
     #[error("file header text is not valid UTF-8")]
     HeaderNotUtf8 { source: std::str::Utf8Error },
 
@@ -308,8 +311,8 @@ impl IndexedCramReader {
     ) -> Result<usize, CramError> {
         store.clear();
 
-        let start_u64 = u64::from(start.get());
-        let end_u64 = u64::from(end.get());
+        let start_u64 = start.as_u64();
+        let end_u64 = end.as_u64();
 
         let entries = self.shared.index.query(tid as i32, start_u64, end_u64);
         if entries.is_empty() {
@@ -367,8 +370,9 @@ impl IndexedCramReader {
                 match crai_entry {
                     Some(e) if e.alignment_span > 0 => {
                         let s = Pos::<One>::try_from_i64(e.alignment_start.max(1))
-                            .map(|p| u64::from(p.to_zero_based().get()))
-                            .unwrap_or(0);
+                            .ok_or(CramError::InvalidPosition { value: e.alignment_start })?
+                            .to_zero_based()
+                            .as_u64();
                         let e_end = s + e.alignment_span as u64;
                         let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
                         (s, e_end.min(ref_len))
@@ -381,8 +385,11 @@ impl IndexedCramReader {
                 }
             } else {
                 let ref_start = Pos::<One>::try_from_i32(container_header.alignment_start.max(1))
-                    .map(|p| u64::from(p.to_zero_based().get()))
-                    .unwrap_or(0);
+                    .ok_or(CramError::InvalidPosition {
+                        value: i64::from(container_header.alignment_start),
+                    })?
+                    .to_zero_based()
+                    .as_u64();
                 let ref_end = ref_start + container_header.alignment_span as u64;
                 let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
                 (ref_start, ref_end.min(ref_len))
@@ -394,9 +401,10 @@ impl IndexedCramReader {
                 self.fasta
                     .fetch_seq_into(
                         &ref_name,
-                        Pos::<Zero>::try_from_u64(ref_start).unwrap_or(Pos::<Zero>::new(0)),
+                        Pos::<Zero>::try_from_u64(ref_start)
+                            .ok_or(CramError::InvalidPosition { value: ref_start as i64 })?,
                         Pos::<Zero>::try_from_u64(ref_end_clamped)
-                            .unwrap_or(Pos::<Zero>::max_value()),
+                            .unwrap_or_else(Pos::<Zero>::max_value),
                         &mut self.ref_seq_buf,
                     )
                     .map_err(|e| match &e {
@@ -513,7 +521,7 @@ mod tests {
         // Fetch from first reference
         let tid = 0;
         let count = reader
-            .fetch_into(tid, Pos::<Zero>::new(0), Pos::<Zero>::max_value(), &mut store)
+            .fetch_into(tid, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::max_value(), &mut store)
             .unwrap();
         assert!(count > 0, "should fetch records from tid={tid}");
     }

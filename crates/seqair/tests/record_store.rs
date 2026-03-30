@@ -17,7 +17,7 @@ fn decode_record_into_slabs() {
 
     assert_eq!(store.len(), 1);
     let rec = store.record(idx);
-    assert_eq!(rec.pos, Pos::<Zero>::new(100));
+    assert_eq!(rec.pos, Pos::<Zero>::new(100).unwrap());
     assert_eq!(rec.mapq, 60);
     assert_eq!(rec.flags, 0x63);
     assert_eq!(rec.seq_len, 4);
@@ -44,8 +44,8 @@ fn multiple_records_share_slabs() {
     let idx2 = store.push_raw(&raw2).unwrap();
 
     assert_eq!(store.len(), 2);
-    assert_eq!(store.record(idx1).pos, Pos::<Zero>::new(100));
-    assert_eq!(store.record(idx2).pos, Pos::<Zero>::new(200));
+    assert_eq!(store.record(idx1).pos, Pos::<Zero>::new(100).unwrap());
+    assert_eq!(store.record(idx2).pos, Pos::<Zero>::new(200).unwrap());
     assert_eq!(store.qname(idx1), b"read1");
     assert_eq!(store.qname(idx2), b"read2");
     assert_eq!(store.qual(idx1)[0], 30);
@@ -112,7 +112,12 @@ fn integration_with_real_bam() {
 
     let mut store = RecordStore::new();
     let count = reader
-        .fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(6_105_700).unwrap(),
+            Pos::<Zero>::new(6_105_800).unwrap(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert!(count > 0);
@@ -144,8 +149,8 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut store_fields = RecordStore::new();
     let idx_fields = store_fields.push_fields(
-        Pos::<Zero>::new(100), // pos
-        Pos::<Zero>::new(103), // end_pos (pos + 4M - 1)
+        Pos::<Zero>::new(100).unwrap(), // pos
+        Pos::<Zero>::new(103).unwrap(), // end_pos (pos + 4M - 1)
         0x63,
         60,
         store_raw.record(idx_raw).matching_bases,
@@ -189,7 +194,12 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
     let tid = reader.header().tid("chr19").ok_or("chr19 not found")?;
 
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)?;
+    reader.fetch_into(
+        tid,
+        Pos::<Zero>::new(6_105_700).unwrap(),
+        Pos::<Zero>::new(6_105_800).unwrap(),
+        &mut store,
+    )?;
     assert!(!store.is_empty());
 
     // Re-push every record via push_fields and compare

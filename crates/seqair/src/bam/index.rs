@@ -196,8 +196,8 @@ impl BamIndex {
         let Some(ref_idx) = self.references.get(tid as usize) else {
             return Vec::new();
         };
-        let start_u64 = u64::from(start.get());
-        let end_u64 = u64::from(end.get());
+        let start_u64 = start.as_u64();
+        let end_u64 = end.as_u64();
         let candidate_bins = reg2bins(start_u64, end_u64 + 1);
         let linear_min = linear_index_min(ref_idx, start_u64);
         let mut result = Vec::new();
@@ -227,8 +227,8 @@ impl BamIndex {
             return QueryChunks { nearby: Vec::new(), distant: Vec::new() };
         };
 
-        let start_u64 = u64::from(start.get());
-        let end_u64 = u64::from(end.get());
+        let start_u64 = start.as_u64();
+        let end_u64 = end.as_u64();
         let candidate_bins = reg2bins(start_u64, end_u64 + 1); // reg2bins uses half-open
 
         // Linear index: minimum virtual offset for reads starting at or after `start`
@@ -498,7 +498,8 @@ mod tests {
             (4681, vec![chunk(100, 500)]), // leaf bin: main data
         ]);
 
-        let result = idx.query_split(0, Pos::<Zero>::new(0), Pos::<Zero>::new(100));
+        let result =
+            idx.query_split(0, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(100).unwrap());
 
         assert_eq!(result.distant.len(), 1, "bin 0 should have 1 chunk");
         assert_eq!(result.distant[0].begin.0, 9000);
@@ -518,8 +519,9 @@ mod tests {
             (4682, vec![chunk(500, 900)]),
         ]);
 
-        let split = idx.query_split(0, Pos::<Zero>::new(0), Pos::<Zero>::new(200));
-        let flat = idx.query(0, Pos::<Zero>::new(0), Pos::<Zero>::new(200));
+        let split =
+            idx.query_split(0, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(200).unwrap());
+        let flat = idx.query(0, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(200).unwrap());
 
         let mut combined: Vec<u64> =
             split.nearby.iter().chain(&split.distant).map(|c| c.begin.0).collect();
@@ -535,7 +537,8 @@ mod tests {
     fn query_split_no_bin0_in_index() {
         let idx = index_with_bins(vec![(4681, vec![chunk(100, 500)])]);
 
-        let result = idx.query_split(0, Pos::<Zero>::new(0), Pos::<Zero>::new(100));
+        let result =
+            idx.query_split(0, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(100).unwrap());
         assert!(result.distant.is_empty(), "no bin 0 in index → empty bin0");
         assert!(!result.nearby.is_empty());
     }
@@ -544,7 +547,8 @@ mod tests {
     #[test]
     fn query_split_empty_reference() {
         let idx = BamIndex { references: Vec::new() };
-        let result = idx.query_split(0, Pos::<Zero>::new(0), Pos::<Zero>::new(100));
+        let result =
+            idx.query_split(0, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(100).unwrap());
         assert!(result.nearby.is_empty());
         assert!(result.distant.is_empty());
     }

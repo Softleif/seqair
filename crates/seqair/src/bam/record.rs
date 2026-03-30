@@ -54,7 +54,8 @@ impl BamRecord {
             reason = "all bounds ≤ qual_end ≤ raw.len() checked by parse_header"
         )]
         let cigar_slice = &raw[h.var_start..h.cigar_end];
-        let end_pos = compute_end_pos(h.pos, cigar_slice);
+        let end_pos = compute_end_pos(h.pos, cigar_slice)
+            .ok_or(DecodeError::InvalidPosition { value: h.pos.get() as i32 })?;
         let (matching_bases, indel_bases) = super::cigar::calc_matches_indels(cigar_slice);
 
         #[allow(
@@ -124,12 +125,12 @@ pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos<Zero>> {
     // All bounds ≤ qual_end ≤ raw.len() checked by parse_header
     debug_assert!(h.cigar_end <= raw.len(), "cigar overrun: {} > {}", h.cigar_end, raw.len());
     #[allow(clippy::indexing_slicing, reason = "cigar_end ≤ raw.len() checked by parse_header")]
-    Some(compute_end_pos(h.pos, &raw[h.var_start..h.cigar_end]))
+    compute_end_pos(h.pos, &raw[h.var_start..h.cigar_end])
 }
 
 // r[impl bam.record.end_pos]
 // r[impl bam.record.zero_refspan]
-pub(crate) fn compute_end_pos(pos: Pos<Zero>, cigar_bytes: &[u8]) -> Pos<Zero> {
+pub(crate) fn compute_end_pos(pos: Pos<Zero>, cigar_bytes: &[u8]) -> Option<Pos<Zero>> {
     use super::cigar::{CIGAR_D, CIGAR_EQ, CIGAR_M, CIGAR_N, CIGAR_X};
 
     let mut ref_len: i64 = 0;
@@ -143,7 +144,7 @@ pub(crate) fn compute_end_pos(pos: Pos<Zero>, cigar_bytes: &[u8]) -> Pos<Zero> {
             _ => {}
         }
     }
-    if ref_len == 0 { pos } else { pos + Offset(ref_len - 1) }
+    if ref_len == 0 { Some(pos) } else { pos.checked_add_offset(Offset::new(ref_len - 1)) }
 }
 
 // Callers only invoke read2/read4 after validating raw.len() >= 32 or equivalent.
@@ -210,7 +211,8 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     debug_assert!(raw.len() >= 32, "raw record too short for fixed fields: {}", raw.len());
     let tid = i32::from_le_bytes(read4(raw, 0));
     let pos_i32 = i32::from_le_bytes(read4(raw, 4));
-    let pos = Pos::<Zero>::try_from_i64(i64::from(pos_i32)).unwrap_or(Pos::<Zero>::new(0));
+    let pos = Pos::<Zero>::try_from_i64(i64::from(pos_i32))
+        .ok_or(DecodeError::InvalidPosition { value: pos_i32 })?;
     // raw.len() >= 32, so raw[8] and raw[9] are in bounds
     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
     let name_len = raw[8] as usize;
@@ -256,6 +258,9 @@ pub enum DecodeError {
 
     #[error("slab offset exceeds u32::MAX")]
     SlabOverflow,
+
+    #[error("invalid BAM position value {value}: negative positions are reserved")]
+    InvalidPosition { value: i32 },
 }
 
 #[cfg(test)]
@@ -266,8 +271,8 @@ mod tests {
     fn test_compute_end_pos() {
         let op = 50u32 << 4;
         assert_eq!(
-            compute_end_pos(Pos::<Zero>::new(100), &op.to_le_bytes()),
-            Pos::<Zero>::new(149)
+            compute_end_pos(Pos::<Zero>::new(100).unwrap(), &op.to_le_bytes()),
+            Some(Pos::<Zero>::new(149).unwrap())
         );
     }
 
@@ -313,8 +318,8 @@ mod tests {
         raw[43..47].copy_from_slice(&[30, 30, 30, 30]);
 
         let rec = BamRecord::decode(&raw[..47]).unwrap();
-        assert_eq!(rec.pos, Pos::<Zero>::new(100));
-        assert_eq!(rec.end_pos, Pos::<Zero>::new(103));
+        assert_eq!(rec.pos, Pos::<Zero>::new(100).unwrap());
+        assert_eq!(rec.end_pos, Pos::<Zero>::new(103).unwrap());
         assert_eq!(rec.flags, 99);
         assert_eq!(rec.mapq, 60);
         assert_eq!(&*rec.qname, b"read");

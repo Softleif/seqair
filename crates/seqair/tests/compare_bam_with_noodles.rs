@@ -125,8 +125,8 @@ fn bam_record_count_matches_noodles() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");
@@ -159,8 +159,8 @@ fn bam_record_fields_match_noodles() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");
@@ -196,8 +196,8 @@ fn bam_sequence_matches_noodles() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");
@@ -247,8 +247,8 @@ fn bam_quality_scores_match_noodles() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");
@@ -281,8 +281,8 @@ fn bam_cigar_matches_noodles() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");

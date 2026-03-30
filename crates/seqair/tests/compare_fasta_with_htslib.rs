@@ -142,7 +142,7 @@ fn fetch_into_matches_fetch() {
 
     for &(name, length) in SEQUENCES {
         let stop = Pos::<Zero>::try_from_u64(length.min(500)).expect("stop fits in u32");
-        let zero = Pos::<Zero>::new(0);
+        let zero = Pos::<Zero>::new(0).unwrap();
         let alloc = rio.fetch_seq(name, zero, stop).expect("fetch_seq");
         rio.fetch_seq_into(name, zero, stop, &mut buf).expect("fetch_seq_into");
         assert_eq!(alloc, buf, "fetch_seq vs fetch_seq_into mismatch for {name}");
@@ -156,7 +156,9 @@ fn fetch_into_matches_fetch() {
 #[test]
 fn unknown_sequence_error() {
     let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-    let err = rio.fetch_seq("nonexistent", Pos::<Zero>::new(0), Pos::<Zero>::new(100)).unwrap_err();
+    let err = rio
+        .fetch_seq("nonexistent", Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(100).unwrap())
+        .unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("nonexistent"), "error should name the sequence: {msg}");
     assert!(msg.contains("chr19"), "error should list available: {msg}");
@@ -168,7 +170,11 @@ fn unknown_sequence_error() {
 fn out_of_bounds_error() {
     let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
     let err = rio
-        .fetch_seq("2kb_3_Unmodified", Pos::<Zero>::new(0), Pos::<Zero>::new(999999))
+        .fetch_seq(
+            "2kb_3_Unmodified",
+            Pos::<Zero>::new(0).unwrap(),
+            Pos::<Zero>::new(999999).unwrap(),
+        )
         .unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("out of bounds"), "error: {msg}");
@@ -177,7 +183,9 @@ fn out_of_bounds_error() {
 #[test]
 fn empty_range_error() {
     let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-    let err = rio.fetch_seq("chr19", Pos::<Zero>::new(100), Pos::<Zero>::new(100)).unwrap_err();
+    let err = rio
+        .fetch_seq("chr19", Pos::<Zero>::new(100).unwrap(), Pos::<Zero>::new(100).unwrap())
+        .unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("out of bounds"), "error: {msg}");
 }

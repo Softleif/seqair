@@ -67,7 +67,8 @@ fn pileup_alignment_has_base_type() {
     let mut store = RecordStore::new();
     store.push_raw(&raw).unwrap();
 
-    let mut engine = PileupEngine::new(store, Pos::<Zero>::new(100), Pos::<Zero>::new(103));
+    let mut engine =
+        PileupEngine::new(store, Pos::<Zero>::new(100).unwrap(), Pos::<Zero>::new(103).unwrap());
     engine.set_max_depth(1000);
 
     let col = engine.next().expect("should have a column");

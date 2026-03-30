@@ -45,9 +45,10 @@ fn dedup_disabled_by_default() {
     push_named(&mut arena, b"read1", 5, SECOND, 20);
 
     // Without dedup — both reads at overlapping positions
-    let engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(24));
+    let engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(24).unwrap());
     let columns: Vec<_> = engine.collect();
-    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(10)).unwrap();
+    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(10).unwrap()).unwrap();
     assert_eq!(col.depth(), 2, "without dedup, both mates should appear");
 }
 
@@ -58,10 +59,11 @@ fn dedup_enabled_reduces_depth() {
     push_named(&mut arena, b"read1", 0, FIRST, 20);
     push_named(&mut arena, b"read1", 5, SECOND, 20);
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(24));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(24).unwrap());
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
-    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(10)).unwrap();
+    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(10).unwrap()).unwrap();
     assert_eq!(col.depth(), 1, "with dedup, only one mate at overlapping position");
 }
 
@@ -76,12 +78,13 @@ fn mates_detected_by_qname() {
     push_named(&mut arena, b"readB", 0, FIRST, 20);
     push_named(&mut arena, b"readB", 5, SECOND, 20);
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(24));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(24).unwrap());
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
 
     // At pos 10: 4 reads active, but 2 pairs → 2 after dedup
-    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(10)).unwrap();
+    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(10).unwrap()).unwrap();
     assert_eq!(col.depth(), 2, "two pairs should each keep one mate");
 }
 
@@ -93,7 +96,8 @@ fn unpaired_reads_unaffected() {
     push_named(&mut arena, b"solo2", 0, FIRST, 20);
     push_named(&mut arena, b"solo3", 0, SECOND, 20);
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(19));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(19).unwrap());
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
     let col = columns.first().unwrap();
@@ -110,7 +114,8 @@ fn third_record_with_same_name_not_deduped() {
     push_named(&mut arena, b"read1", 0, SECOND, 20);
     push_named(&mut arena, b"read1", 0, 0x800 | FIRST, 20); // supplementary
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(19));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(19).unwrap());
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
     let col = columns.first().unwrap();
@@ -128,7 +133,8 @@ fn same_base_keeps_first_encountered() {
     push_named_with_base(&mut arena, b"read1", 0, FIRST, 10, BASE_A);
     push_named_with_base(&mut arena, b"read1", 0, SECOND, 10, BASE_A);
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(0));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(0).unwrap());
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
     assert_eq!(columns.len(), 1);
@@ -148,7 +154,8 @@ fn different_base_keeps_first_in_template() {
     push_named_with_base(&mut arena, b"read1", 0, FIRST, 10, BASE_A);
     push_named_with_base(&mut arena, b"read1", 0, SECOND, 10, BASE_T);
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(0));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(0).unwrap());
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
     assert_eq!(columns[0].depth(), 1);
@@ -165,7 +172,8 @@ fn different_base_second_first_in_arena_order() {
     push_named_with_base(&mut arena, b"read1", 0, SECOND, 10, BASE_T);
     push_named_with_base(&mut arena, b"read1", 0, FIRST, 10, BASE_A);
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(0));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(0).unwrap());
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
     assert_eq!(columns[0].depth(), 1);
@@ -184,20 +192,21 @@ fn both_mates_contribute_outside_overlap() {
     push_named(&mut arena, b"read1", 0, FIRST, 20);
     push_named(&mut arena, b"read1", 10, SECOND, 20);
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(29));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(29).unwrap());
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
 
     // pos 0-9: only mate1 → depth 1
-    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(5)).unwrap();
+    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(5).unwrap()).unwrap();
     assert_eq!(col.depth(), 1, "only mate1 at non-overlapping position");
 
     // pos 10-19: both mates overlap → depth 1 (deduped)
-    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(15)).unwrap();
+    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(15).unwrap()).unwrap();
     assert_eq!(col.depth(), 1, "deduped at overlapping position");
 
     // pos 20-29: only mate2 → depth 1
-    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(25)).unwrap();
+    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(25).unwrap()).unwrap();
     assert_eq!(col.depth(), 1, "only mate2 at non-overlapping position");
 
     // Total columns should be 30 (0-29, all covered)
@@ -208,15 +217,15 @@ fn both_mates_contribute_outside_overlap() {
 proptest! {
     #[test]
     fn dedup_never_removes_both_mates(
-        overlap in 1i32..=30,
         len in 20u32..=50,
+        overlap in 1i32..=19,
     ) {
         let mut arena = RecordStore::new();
-        let mate2_start = i32::from(len as u16) - overlap;
+        let mate2_start = len as i32 - overlap;
         push_named(&mut arena, b"readX", 0, FIRST, len);
         push_named(&mut arena, b"readX", mate2_start, SECOND, len);
 
-        let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new((mate2_start + len as i32 - 1) as u32));
+        let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new((mate2_start + len as i32 - 1) as u32).unwrap());
         engine.set_dedup_overlapping();
         let columns: Vec<_> = engine.collect();
 
@@ -240,7 +249,8 @@ fn filtered_mate_does_not_trigger_dedup() {
     let raw = make_named_record(b"read1", 0, 0, SECOND | 0x400, 60, 20, &packed);
     arena.push_raw(&raw).unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(19));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(19).unwrap());
     engine.set_filter(|flags, _aux| flags & 0x400 == 0);
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
@@ -263,7 +273,8 @@ fn dedup_applied_before_max_depth() {
         push_named(&mut arena, name.as_bytes(), 0, SECOND, 10);
     }
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(9));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(9).unwrap());
     engine.set_dedup_overlapping();
     engine.set_max_depth(5);
     let columns: Vec<_> = engine.collect();
@@ -287,7 +298,7 @@ proptest! {
         let build_store = |store: &mut RecordStore| {
             for i in 0..n_pairs {
                 let name = format!("r{i}");
-                let mate2_start = i32::from(len as u16) - overlap;
+                let mate2_start = len as i32 - overlap;
                 push_named(store, name.as_bytes(), 0, FIRST, len);
                 push_named(store, name.as_bytes(), mate2_start, SECOND, len);
             }
@@ -298,13 +309,13 @@ proptest! {
         // Without dedup
         let mut arena_raw = RecordStore::new();
         build_store(&mut arena_raw);
-        let engine_raw = PileupEngine::new(arena_raw, Pos::<Zero>::new(0), Pos::<Zero>::new(end));
+        let engine_raw = PileupEngine::new(arena_raw, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(end).unwrap());
         let raw_columns: Vec<_> = engine_raw.collect();
 
         // With dedup
         let mut arena_dedup = RecordStore::new();
         build_store(&mut arena_dedup);
-        let mut engine_dedup = PileupEngine::new(arena_dedup, Pos::<Zero>::new(0), Pos::<Zero>::new(end));
+        let mut engine_dedup = PileupEngine::new(arena_dedup, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(end).unwrap());
         engine_dedup.set_dedup_overlapping();
         let dedup_columns: Vec<_> = engine_dedup.collect();
 
@@ -331,7 +342,8 @@ fn star_qname_records_not_paired() {
     push_named(&mut arena, b"*", 0, FIRST, 20);
     push_named(&mut arena, b"*", 0, SECOND, 20);
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(19));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(19).unwrap());
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
     let col = columns.first().unwrap();
@@ -345,7 +357,8 @@ fn empty_qname_records_not_paired() {
     push_named(&mut arena, b"", 0, FIRST, 20);
     push_named(&mut arena, b"", 0, SECOND, 20);
 
-    let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(19));
+    let mut engine =
+        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(19).unwrap());
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
     let col = columns.first().unwrap();
@@ -366,7 +379,7 @@ proptest! {
             push_named(&mut arena, b"*", 0, FIRST, 20);
         }
 
-        let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0), Pos::<Zero>::new(19));
+        let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(19).unwrap());
         engine.set_dedup_overlapping();
         let columns: Vec<_> = engine.collect();
         let col = columns.first().unwrap();

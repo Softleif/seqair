@@ -111,7 +111,8 @@ impl RecordStore {
 
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let cigar_slice = &raw[h.var_start..h.cigar_end];
-        let end_pos = record::compute_end_pos(h.pos, cigar_slice);
+        let end_pos = record::compute_end_pos(h.pos, cigar_slice)
+            .ok_or(DecodeError::InvalidPosition { value: h.pos.get() as i32 })?;
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_slice);
 
         // --- Write into name slab ---
@@ -396,8 +397,8 @@ mod tests {
         // We can't actually allocate 4GB in a test, so we test the check path
         // by verifying the function returns Result (compile-time check)
         let result: Result<u32, _> = store.push_fields(
-            Pos::<Zero>::new(0),
-            Pos::<Zero>::new(0),
+            Pos::<Zero>::new(0).unwrap(),
+            Pos::<Zero>::new(0).unwrap(),
             0,
             0,
             0,

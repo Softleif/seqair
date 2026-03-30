@@ -22,7 +22,12 @@ fn fetch_record_positions(
     let mut store = RecordStore::new();
     let tid = reader.header().tid(contig).expect("tid lookup");
     reader
-        .fetch_into(tid, Pos::<Zero>::new(start as u32), Pos::<Zero>::new(end as u32), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(start as u32).unwrap(),
+            Pos::<Zero>::new(end as u32).unwrap(),
+            &mut store,
+        )
         .expect("fetch_into");
     (0..store.len() as u32)
         .map(|i| (store.record(i).pos.as_i64(), store.record(i).end_pos.as_i64()))
@@ -119,7 +124,12 @@ fn fork_fetches_are_independent() {
 
     let mut store_a = RecordStore::new();
     fork_a
-        .fetch_into(tid, Pos::<Zero>::new(start as u32), Pos::<Zero>::new(end as u32), &mut store_a)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(start as u32).unwrap(),
+            Pos::<Zero>::new(end as u32).unwrap(),
+            &mut store_a,
+        )
         .expect("fetch_a");
 
     // Fetch a different region on fork_b, then the same region
@@ -129,15 +139,20 @@ fn fork_fetches_are_independent() {
     fork_b
         .fetch_into(
             tid2,
-            Pos::<Zero>::new(start2 as u32),
-            Pos::<Zero>::new(end2 as u32),
+            Pos::<Zero>::new(start2 as u32).unwrap(),
+            Pos::<Zero>::new(end2 as u32).unwrap(),
             &mut store_b,
         )
         .expect("fetch_b different region");
 
     // Now fetch the original region on fork_b
     fork_b
-        .fetch_into(tid, Pos::<Zero>::new(start as u32), Pos::<Zero>::new(end as u32), &mut store_b)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(start as u32).unwrap(),
+            Pos::<Zero>::new(end as u32).unwrap(),
+            &mut store_b,
+        )
         .expect("fetch_b same region");
 
     assert_eq!(store_a.len(), store_b.len(), "independent forks should produce same count");

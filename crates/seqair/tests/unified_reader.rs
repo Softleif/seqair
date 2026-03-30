@@ -102,8 +102,8 @@ fn bam_and_sam_produce_same_records() {
         bam_reader
             .fetch_into(
                 bam_tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut bam_store,
             )
             .unwrap();
@@ -112,8 +112,8 @@ fn bam_and_sam_produce_same_records() {
         sam_reader
             .fetch_into(
                 sam_tid,
-                Pos::<Zero>::new(start as u32),
-                Pos::<Zero>::new(end as u32),
+                Pos::<Zero>::new(start as u32).unwrap(),
+                Pos::<Zero>::new(end as u32).unwrap(),
                 &mut sam_store,
             )
             .unwrap();
@@ -155,13 +155,23 @@ fn fork_works_for_both_formats() {
     let tid = bam_fork.header().tid("chr19").unwrap();
     let mut store = RecordStore::new();
     bam_fork
-        .fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(6_105_700).unwrap(),
+            Pos::<Zero>::new(6_105_800).unwrap(),
+            &mut store,
+        )
         .unwrap();
     assert!(!store.is_empty(), "bam fork should fetch records");
 
     let sam_tid = sam_fork.header().tid("chr19").unwrap();
     sam_fork
-        .fetch_into(sam_tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .fetch_into(
+            sam_tid,
+            Pos::<Zero>::new(6_105_700).unwrap(),
+            Pos::<Zero>::new(6_105_800).unwrap(),
+            &mut store,
+        )
         .unwrap();
     assert!(!store.is_empty(), "sam fork should fetch records");
 }
@@ -219,7 +229,12 @@ fn readers_fork_cram() {
     let tid = forked.header().tid("chr19").unwrap();
     let mut store = RecordStore::new();
     forked
-        .fetch_into(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800), &mut store)
+        .fetch_into(
+            tid,
+            Pos::<Zero>::new(6_105_700).unwrap(),
+            Pos::<Zero>::new(6_105_800).unwrap(),
+            &mut store,
+        )
         .unwrap();
     assert!(!store.is_empty(), "cram fork should fetch records");
 }
@@ -237,8 +252,8 @@ fn bam_and_cram_produce_same_records() {
         let mut bam_store = RecordStore::new();
         bam.fetch_into(
             bam_tid,
-            Pos::<Zero>::new(start as u32),
-            Pos::<Zero>::new(end as u32),
+            Pos::<Zero>::new(start as u32).unwrap(),
+            Pos::<Zero>::new(end as u32).unwrap(),
             &mut bam_store,
         )
         .unwrap();
@@ -246,8 +261,8 @@ fn bam_and_cram_produce_same_records() {
         let mut cram_store = RecordStore::new();
         cram.fetch_into(
             cram_tid,
-            Pos::<Zero>::new(start as u32),
-            Pos::<Zero>::new(end as u32),
+            Pos::<Zero>::new(start as u32).unwrap(),
+            Pos::<Zero>::new(end as u32).unwrap(),
             &mut cram_store,
         )
         .unwrap();
@@ -300,22 +315,22 @@ fn all_three_formats_produce_same_records() {
 
     bam.fetch_into(
         bam_tid,
-        Pos::<Zero>::new(start as u32),
-        Pos::<Zero>::new(end as u32),
+        Pos::<Zero>::new(start as u32).unwrap(),
+        Pos::<Zero>::new(end as u32).unwrap(),
         &mut bam_store,
     )
     .unwrap();
     sam.fetch_into(
         sam_tid,
-        Pos::<Zero>::new(start as u32),
-        Pos::<Zero>::new(end as u32),
+        Pos::<Zero>::new(start as u32).unwrap(),
+        Pos::<Zero>::new(end as u32).unwrap(),
         &mut sam_store,
     )
     .unwrap();
     cram.fetch_into(
         cram_tid,
-        Pos::<Zero>::new(start as u32),
-        Pos::<Zero>::new(end as u32),
+        Pos::<Zero>::new(start as u32).unwrap(),
+        Pos::<Zero>::new(end as u32).unwrap(),
         &mut cram_store,
     )
     .unwrap();
