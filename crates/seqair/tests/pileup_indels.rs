@@ -184,8 +184,8 @@ fn type_safety_deletion_has_no_base() {
     // This test verifies at compile time that you can't access base/qual/qpos
     // from a Deletion without matching. The fact that the convenience methods
     // return Option proves the API is safe.
-    let op = PileupOp::Deletion { del_len: 0 };
-    let _ = op; // Deletion has no fields to access — that's the point
+    let op = PileupOp::Deletion { del_len: 1 };
+    let _ = op; // Deletion carries del_len but no base/qual/qpos — that's the point
     // If someone tried: op.base — compile error. Must use match or convenience method.
 }
 
@@ -441,6 +441,100 @@ proptest! {
                     "pos {} is not covered (D/N) but has qpos {:?}", col.pos().get(), aln.qpos());
                 prop_assert!(aln.is_del() || aln.is_refskip(),
                     "pos {} is not covered but op is {:?}", col.pos().get(), aln.op);
+            }
+        }
+    }
+}
+
+// r[verify pileup_indel.accessors]
+// r[verify pileup_indel.op_enum]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// del_len() must equal the D CIGAR op length at deletion positions, and 0 elsewhere.
+    #[test]
+    fn del_len_matches_cigar_d_op_length(read in arb_read()) {
+        let mut arena = RecordStore::new();
+        arena.push_raw(&read.raw).unwrap();
+
+        let region_start = read.pos as u32;
+        let region_end = region_start + read.ref_span - 1;
+        let engine = PileupEngine::new(arena, Pos::<Zero>::new(region_start).unwrap(), Pos::<Zero>::new(region_end).unwrap());
+
+        for col in engine {
+            let aln = col.alignments().next().unwrap();
+            let rpos = col.pos().as_i64();
+            match read.del_len_at(rpos) {
+                Some(expected_len) => {
+                    prop_assert!(aln.is_del(),
+                        "pos {} should be Deletion but got {:?}", rpos, aln.op);
+                    prop_assert_eq!(aln.del_len(), expected_len,
+                        "pos {} del_len mismatch: expected {}, got {}", rpos, expected_len, aln.del_len());
+                }
+                None => {
+                    prop_assert_eq!(aln.del_len(), 0,
+                        "pos {} is not a deletion but del_len() returned {}", rpos, aln.del_len());
+                }
+            }
+        }
+    }
+
+    /// Deletion ops must carry del_len > 0; non-deletion ops must have del_len == 0.
+    #[test]
+    fn del_len_nonzero_iff_deletion(read in arb_read()) {
+        let mut arena = RecordStore::new();
+        arena.push_raw(&read.raw).unwrap();
+
+        let region_start = read.pos as u32;
+        let region_end = region_start + read.ref_span - 1;
+        let engine = PileupEngine::new(arena, Pos::<Zero>::new(region_start).unwrap(), Pos::<Zero>::new(region_end).unwrap());
+
+        for col in engine {
+            let aln = col.alignments().next().unwrap();
+            if aln.is_del() {
+                prop_assert!(aln.del_len() > 0,
+                    "pos {}: Deletion op must have del_len > 0", col.pos().get());
+            } else {
+                prop_assert_eq!(aln.del_len(), 0,
+                    "pos {}: non-Deletion op {:?} must have del_len == 0, got {}",
+                    col.pos().get(), aln.op, aln.del_len());
+            }
+        }
+    }
+
+    /// All positions within the same D op must report the same del_len.
+    #[test]
+    fn del_len_consistent_across_deletion_span(read in arb_read()) {
+        let mut arena = RecordStore::new();
+        arena.push_raw(&read.raw).unwrap();
+
+        let region_start = read.pos as u32;
+        let region_end = region_start + read.ref_span - 1;
+        let engine = PileupEngine::new(arena, Pos::<Zero>::new(region_start).unwrap(), Pos::<Zero>::new(region_end).unwrap());
+        let columns: Vec<_> = engine.collect();
+
+        // Group consecutive deletion columns and verify they all have the same del_len
+        let mut i = 0;
+        while i < columns.len() {
+            let aln = columns[i].alignments().next().unwrap();
+            if aln.is_del() {
+                let expected_del_len = aln.del_len();
+                let start = i;
+                while i < columns.len() {
+                    let a = columns[i].alignments().next().unwrap();
+                    if !a.is_del() { break; }
+                    prop_assert_eq!(a.del_len(), expected_del_len,
+                        "pos {}: del_len {} differs from first deletion pos {} del_len {}",
+                        columns[i].pos().get(), a.del_len(),
+                        columns[start].pos().get(), expected_del_len);
+                    i += 1;
+                }
+                // The number of consecutive deletion columns must equal del_len
+                let span = i - start;
+                prop_assert_eq!(span as u32, expected_del_len,
+                    "deletion span {} does not match del_len {}", span, expected_del_len);
+            } else {
+                i += 1;
             }
         }
     }

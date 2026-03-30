@@ -162,6 +162,25 @@ impl SyntheticRead {
         positions
     }
 
+    /// If the given reference position falls inside a D op, returns the D op's length.
+    /// Otherwise returns None.
+    pub fn del_len_at(&self, ref_pos: i64) -> Option<u32> {
+        let mut ref_off = 0i64;
+        let pos = i64::from(self.pos);
+        for &(len, op) in &self.cigar_ops {
+            let consumes_ref = matches!(op, 0 | 2 | 3 | 7 | 8);
+            if consumes_ref {
+                let ref_start = pos + ref_off;
+                let ref_end = ref_start + i64::from(len);
+                if ref_pos >= ref_start && ref_pos < ref_end {
+                    return if op == 2 { Some(len) } else { None };
+                }
+                ref_off += i64::from(len);
+            }
+        }
+        None
+    }
+
     /// Expected qpos at a given reference position, or None.
     pub fn qpos_at(&self, ref_pos: i64) -> Option<usize> {
         let mut ref_off = 0i64;
