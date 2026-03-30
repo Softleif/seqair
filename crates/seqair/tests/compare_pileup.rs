@@ -305,6 +305,11 @@ fn deletion_ops_match_htslib() {
     let seq_cols = fetch_seqair_pileup_region("bacteriophage_lambda_CpG", 73, 200);
 
     assert_eq!(hts_cols.len(), seq_cols.len(), "column count mismatch");
+
+    // Build position lookup for seqair columns to enable anchor→deletion cross-validation.
+    let seq_by_pos: std::collections::HashMap<u32, &seqair::bam::PileupColumn> =
+        seq_cols.iter().map(|c| (c.pos().get(), c)).collect();
+
     for (i, (hts, seq)) in hts_cols.iter().zip(seq_cols.iter()).enumerate() {
         let hts_del = hts.alignments.iter().filter(|a| a.is_del).count();
         let seq_del = seq.alignments().filter(|a| a.is_del()).count();
@@ -314,49 +319,38 @@ fn deletion_ops_match_htslib() {
             hts.pos,
         );
 
-        // Cross-validate del_len values against htslib's Indel::Del(u32)
-        let mut hts_del_lens: Vec<u32> = hts
-            .alignments
-            .iter()
-            .filter_map(|a| if let Indel::Del(len) = a.indel { Some(len) } else { None })
-            .collect();
-        hts_del_lens.sort_unstable();
-        let mut seq_del_lens: Vec<u32> =
-            seq.alignments().filter(|a| a.is_del()).map(|a| a.del_len()).collect();
-        seq_del_lens.sort_unstable();
-
-        // Debug: Check if htslib alignments with is_del=true all have Indel::Del
-        if hts.pos == 134 {
-            eprintln!(
-                "DEBUG pos {}: hts_del count={}, hts_del_lens={:?}",
-                hts.pos, hts_del, hts_del_lens
+        // Verify seqair del_len > 0 for all deletion alignments.
+        if seq_del > 0 {
+            let seq_del_lens: Vec<u32> =
+                seq.alignments().filter(|a| a.is_del()).map(|a| a.del_len()).collect();
+            assert!(
+                seq_del_lens.iter().all(|&len| len > 0),
+                "deletion alignments must have nonzero del_len at pos {} (column {i})",
+                hts.pos,
             );
-            eprintln!("  Alignments with is_del=true:");
-            for a in &hts.alignments {
-                if a.is_del {
-                    eprintln!("    is_del=true, indel={:?}, qpos={:?}", a.indel, a.qpos);
-                }
-            }
-            eprintln!("  Alignments with Indel::Del:");
-            for a in &hts.alignments {
-                if let Indel::Del(_) = a.indel {
-                    eprintln!("    Indel::Del, is_del={}, qpos={:?}", a.is_del, a.qpos);
-                }
-            }
-            eprintln!("DEBUG seq_del_lens={:?}", seq_del_lens);
-            eprintln!("  Alignments with is_del()=true:");
-            for a in seq.alignments() {
-                if a.is_del() {
-                    eprintln!("    is_del()=true, op={:?}, del_len()={}", a.op(), a.del_len());
+        }
+
+        // Cross-validate del_len against htslib anchor positions:
+        // htslib reports Indel::Del(len) at the last M position before the deletion starts.
+        // At position P+1, seqair should have Deletion { del_len: len }.
+        for hts_aln in &hts.alignments {
+            if let Indel::Del(hts_del_len) = hts_aln.indel {
+                let next_pos = hts.pos + 1;
+                if let Some(next_col) = seq_by_pos.get(&next_pos) {
+                    let seq_dels_at_next: Vec<u32> = next_col
+                        .alignments()
+                        .filter(|a| a.is_del() && a.del_len() == hts_del_len)
+                        .map(|a| a.del_len())
+                        .collect();
+                    assert!(
+                        !seq_dels_at_next.is_empty(),
+                        "htslib reports Del({hts_del_len}) at pos {}, but seqair has no matching \
+                         del_len at pos {next_pos} (column {i})",
+                        hts.pos,
+                    );
                 }
             }
         }
-
-        assert_eq!(
-            hts_del_lens, seq_del_lens,
-            "del_len values mismatch at pos {} (column {i}): htslib={hts_del_lens:?} seqair={seq_del_lens:?}",
-            hts.pos,
-        );
 
         let hts_refskip = hts.alignments.iter().filter(|a| a.is_refskip).count();
         let seq_refskip = seq.alignments().filter(|a| a.is_refskip()).count();
