@@ -61,14 +61,14 @@ pub struct Offset(pub i64);
 impl Pos<Zero> {
     /// Create a 0-based position from a `u32`.
     ///
-    /// Panics in debug builds if `value == u32::MAX` (reserved niche).
+    /// Panics if `value == u32::MAX` (reserved niche).
     /// BAM positions are capped at i32::MAX (~2.1B), well below the limit.
     #[inline]
     pub fn new(value: u32) -> Self {
-        debug_assert!(value != u32::MAX, "position u32::MAX is reserved as niche");
-        // Safety: debug_assert above ensures value != u32::MAX. In practice BAM
-        // positions never approach this limit.
-        Self { value: unsafe { NonMaxU32::new_unchecked(value) }, _system: PhantomData }
+        Self {
+            value: NonMaxU32::new(value).expect("position u32::MAX is reserved (niche)"),
+            _system: PhantomData,
+        }
     }
 
     /// Create a 0-based position from an `i64`. Returns `None` if negative,
@@ -95,27 +95,34 @@ impl Pos<Zero> {
 
     /// Convert to 1-based. Infallible: 0-based 0 → 1-based 1.
     ///
-    /// BAM positions cap at i32::MAX (~2.1B), so +1 stays far below `u32::MAX - 1`.
+    /// Panics if the input is `u32::MAX - 1` (result would be `u32::MAX`, the reserved niche).
     #[inline]
     pub fn to_one_based(self) -> Pos<One> {
         let new_val = self.value.get() + 1;
-        debug_assert!(new_val != u32::MAX, "to_one_based would produce reserved niche value");
-        // Safety: BAM positions are at most i32::MAX; +1 gives at most ~2.1B+1,
-        // far below u32::MAX.
-        Pos { value: unsafe { NonMaxU32::new_unchecked(new_val) }, _system: PhantomData }
+        Pos {
+            value: NonMaxU32::new(new_val).expect("to_one_based overflow (input was u32::MAX - 1)"),
+            _system: PhantomData,
+        }
+    }
+
+    /// Maximum valid 0-based position (u32::MAX - 1).
+    /// Used as "end of contig" sentinel in queries.
+    pub fn max_value() -> Self {
+        Self::new(u32::MAX - 1)
     }
 }
 
 // ---- Pos<One> construction ----
 
 impl Pos<One> {
-    /// Create a 1-based position. Panics in debug mode if value is 0 or `u32::MAX`.
+    /// Create a 1-based position. Panics if value is 0 or `u32::MAX`.
     #[inline]
     pub fn new(value: u32) -> Self {
-        debug_assert!(value > 0, "1-based position must be >= 1");
-        debug_assert!(value != u32::MAX, "position u32::MAX is reserved as niche");
-        // Safety: debug_asserts above ensure value is in 1..u32::MAX.
-        Self { value: unsafe { NonMaxU32::new_unchecked(value) }, _system: PhantomData }
+        assert!(value > 0, "1-based position must be >= 1");
+        Self {
+            value: NonMaxU32::new(value).expect("position u32::MAX is reserved (niche)"),
+            _system: PhantomData,
+        }
     }
 
     /// Create a 1-based position from a `u32`. Returns `None` if value is 0 or `u32::MAX`.
@@ -152,10 +159,16 @@ impl Pos<One> {
     /// 0..(u32::MAX-1), which is always a valid NonMaxU32.
     #[inline]
     pub fn to_zero_based(self) -> Pos<Zero> {
-        let new_val = self.value.get() - 1;
-        // Safety: self.value >= 1 (enforced by construction), so new_val >= 0
-        // and new_val <= u32::MAX - 2, which is always != u32::MAX.
-        Pos { value: unsafe { NonMaxU32::new_unchecked(new_val) }, _system: PhantomData }
+        Pos {
+            // 1-based min is 1, so result is >= 0 and < u32::MAX
+            value: NonMaxU32::new(self.value.get() - 1).expect("to_zero_based underflow"),
+            _system: PhantomData,
+        }
+    }
+
+    /// Maximum valid 1-based position (u32::MAX - 1).
+    pub fn max_value() -> Self {
+        Self::new(u32::MAX - 1)
     }
 }
 
@@ -192,9 +205,11 @@ impl<S> Add<Offset> for Pos<S> {
     #[inline]
     fn add(self, rhs: Offset) -> Self {
         let result = self.value.get() as i64 + rhs.0;
-        debug_assert!(result >= 0 && result < u32::MAX as i64, "position overflow");
-        // Safety: debug_assert ensures result is in 0..(u32::MAX-1).
-        Pos { value: unsafe { NonMaxU32::new_unchecked(result as u32) }, _system: PhantomData }
+        let result_u32 = u32::try_from(result).expect("position + offset out of u32 range");
+        Pos {
+            value: NonMaxU32::new(result_u32).expect("position + offset hit niche (u32::MAX)"),
+            _system: PhantomData,
+        }
     }
 }
 
@@ -265,9 +280,15 @@ impl Offset {
 
 // ---- Display / Debug ----
 
-impl<S> fmt::Debug for Pos<S> {
+impl fmt::Debug for Pos<Zero> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Pos({})", self.value)
+        write!(f, "Pos0({})", self.value.get())
+    }
+}
+
+impl fmt::Debug for Pos<One> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Pos1({})", self.value.get())
     }
 }
 
@@ -291,6 +312,8 @@ impl fmt::Display for Offset {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -400,5 +423,71 @@ mod tests {
     fn option_pos_same_size_as_pos() {
         assert_eq!(std::mem::size_of::<Option<Pos<Zero>>>(), std::mem::size_of::<Pos<Zero>>(),);
         assert_eq!(std::mem::size_of::<Option<Pos<Zero>>>(), 4);
+    }
+
+    #[test]
+    fn debug_shows_coordinate_system() {
+        let z = Pos::<Zero>::new(42);
+        let o = Pos::<One>::new(43);
+        assert_eq!(format!("{z:?}"), "Pos0(42)");
+        assert_eq!(format!("{o:?}"), "Pos1(43)");
+    }
+
+    #[test]
+    fn max_value_zero() {
+        let m = Pos::<Zero>::max_value();
+        assert_eq!(m.get(), u32::MAX - 1);
+    }
+
+    #[test]
+    fn max_value_one() {
+        let m = Pos::<One>::max_value();
+        assert_eq!(m.get(), u32::MAX - 1);
+    }
+
+    proptest! {
+        #[test]
+        fn roundtrip_zero_to_one_and_back(v in 0u32..=u32::MAX - 2) {
+            // u32::MAX - 1 is max valid, but to_one_based would make it u32::MAX which panics
+            // So limit to u32::MAX - 2 for the roundtrip test
+            let z = Pos::<Zero>::new(v);
+            let o = z.to_one_based();
+            prop_assert_eq!(o.to_zero_based(), z);
+        }
+
+        #[test]
+        fn roundtrip_one_to_zero_and_back(v in 1u32..=u32::MAX - 1) {
+            let o = Pos::<One>::new(v);
+            let z = o.to_zero_based();
+            prop_assert_eq!(z.to_one_based(), o);
+        }
+
+        #[test]
+        fn pos_plus_minus_offset_roundtrip(
+            v in 0u32..1_000_000,
+            off in -500_000i64..=500_000,
+        ) {
+            let result = v as i64 + off;
+            if result >= 0 && result < u32::MAX as i64 {
+                let p = Pos::<Zero>::new(v);
+                let q = p + Offset(off);
+                let r = q - Offset(off);
+                prop_assert_eq!(r, p);
+            }
+        }
+
+        #[test]
+        fn pos_sub_pos_is_offset(a in 0u32..1_000_000, b in 0u32..1_000_000) {
+            let pa = Pos::<Zero>::new(a);
+            let pb = Pos::<Zero>::new(b);
+            let off = pa - pb;
+            prop_assert_eq!(off.get(), a as i64 - b as i64);
+        }
+
+        #[test]
+        fn option_pos_niche_always_4_bytes(v in 0u32..u32::MAX - 1) {
+            let p = Some(Pos::<Zero>::new(v));
+            assert_eq!(std::mem::size_of_val(&p), 4);
+        }
     }
 }

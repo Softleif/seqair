@@ -396,7 +396,7 @@ impl IndexedCramReader {
                         &ref_name,
                         Pos::<Zero>::try_from_u64(ref_start).unwrap_or(Pos::<Zero>::new(0)),
                         Pos::<Zero>::try_from_u64(ref_end_clamped)
-                            .unwrap_or(Pos::<Zero>::new(u32::MAX - 1)),
+                            .unwrap_or(Pos::<Zero>::max_value()),
                         &mut self.ref_seq_buf,
                     )
                     .map_err(|e| match &e {
@@ -513,7 +513,7 @@ mod tests {
         // Fetch from first reference
         let tid = 0;
         let count = reader
-            .fetch_into(tid, Pos::<Zero>::new(0), Pos::<Zero>::new(u32::MAX - 1), &mut store)
+            .fetch_into(tid, Pos::<Zero>::new(0), Pos::<Zero>::max_value(), &mut store)
             .unwrap();
         assert!(count > 0, "should fetch records from tid={tid}");
     }
