@@ -1,5 +1,5 @@
-use crate::SmolStr;
-use std::{fmt, num::NonZeroU32};
+use crate::{One, Pos, SmolStr};
+use std::fmt;
 use winnow::{
     Parser,
     ascii::dec_uint,
@@ -25,10 +25,10 @@ use winnow::{
 pub struct RegionString {
     /// The chromosome name, includes the "chr" prefix.
     pub chromosome: SmolStr,
-    /// The start position of the region, inclusive.
-    pub start: Option<NonZeroU32>,
-    /// The end position of the region, inclusive.
-    pub end: Option<NonZeroU32>,
+    /// The start position of the region, inclusive (1-based).
+    pub start: Option<Pos<One>>,
+    /// The end position of the region, inclusive (1-based).
+    pub end: Option<Pos<One>>,
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -36,10 +36,10 @@ impl fmt::Display for RegionString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.chromosome)?;
         if let Some(start) = self.start {
-            write!(f, ":{start}")?;
+            write!(f, ":{}", start.get())?;
         }
         if let Some(end) = self.end {
-            write!(f, "-{end}")?;
+            write!(f, "-{}", end.get())?;
         }
         Ok(())
     }
@@ -67,6 +67,7 @@ impl std::str::FromStr for RegionString {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn parser(input: &mut &str) -> winnow::Result<RegionString> {
     fn chromosome_name<'d>(input: &mut &'d str) -> winnow::Result<&'d str> {
         take_till(1.., |c| c == ':')
@@ -74,9 +75,10 @@ fn parser(input: &mut &str) -> winnow::Result<RegionString> {
             .parse_next(input)
     }
 
-    fn index(input: &mut &str) -> winnow::Result<NonZeroU32> {
+    fn index(input: &mut &str) -> winnow::Result<Pos<One>> {
         dec_uint::<&str, u32, _>
-            .try_map(NonZeroU32::try_from)
+            .verify(|v| *v > 0)
+            .map(Pos::<One>::new)
             .context(StrContext::Expected(StrContextValue::Description("number greater than 0")))
             .parse_next(input)
     }
@@ -92,7 +94,7 @@ fn parser(input: &mut &str) -> winnow::Result<RegionString> {
             .context(StrContext::Label("range"))),
     )
         .context(StrContext::Label("range"))
-        .map(|(token, slice): (&str, Option<(NonZeroU32, Option<NonZeroU32>)>)| match slice {
+        .map(|(token, slice): (&str, Option<(Pos<One>, Option<Pos<One>>)>)| match slice {
             None => RegionString { chromosome: token.into(), start: None, end: None },
             Some((start, None)) => {
                 RegionString { chromosome: token.into(), start: Some(start), end: None }
@@ -131,12 +133,16 @@ mod hts {
         fn from(region: &'a RegionString) -> Self {
             let chromosome = region.chromosome.as_bytes();
             match (region.start, region.end) {
-                (Some(start), Some(end)) => {
-                    FetchDefinition::from((chromosome, start.get() - 1, end.get()))
-                }
-                (Some(start), None) => {
-                    FetchDefinition::from((chromosome, start.get() - 1, i64::MAX))
-                }
+                (Some(start), Some(end)) => FetchDefinition::from((
+                    chromosome,
+                    start.to_zero_based().get() as i64,
+                    end.get() as i64,
+                )),
+                (Some(start), None) => FetchDefinition::from((
+                    chromosome,
+                    start.to_zero_based().get() as i64,
+                    i64::MAX,
+                )),
                 (None, None) => FetchDefinition::from(chromosome),
                 (None, Some(_)) => {
                     unreachable!("End position cannot be specified without a start position")
@@ -166,7 +172,7 @@ mod tests {
             region,
             RegionString {
                 chromosome: "chr2".into(),
-                start: Some(NonZeroU32::new(100).unwrap()),
+                start: Some(Pos::<One>::new(100)),
                 end: None
             }
         );
@@ -177,8 +183,8 @@ mod tests {
             region,
             RegionString {
                 chromosome: "chr3".into(),
-                start: Some(NonZeroU32::new(100).unwrap()),
-                end: Some(NonZeroU32::new(200).unwrap())
+                start: Some(Pos::<One>::new(100)),
+                end: Some(Pos::<One>::new(200))
             }
         );
     }
@@ -214,8 +220,8 @@ mod tests {
             region,
             RegionString {
                 chromosome: "chr4".into(),
-                start: Some(NonZeroU32::new(150).unwrap()),
-                end: Some(NonZeroU32::new(250).unwrap())
+                start: Some(Pos::<One>::new(150)),
+                end: Some(Pos::<One>::new(250))
             }
         );
 
@@ -256,7 +262,7 @@ mod tests {
         // Test chromosome with start position
         let region = RegionString {
             chromosome: "chr2".into(),
-            start: Some(NonZeroU32::new(100).unwrap()),
+            start: Some(Pos::<One>::new(100)),
             end: None,
         };
         insta::assert_snapshot!(region, @"chr2:100");
@@ -264,8 +270,8 @@ mod tests {
         // Test chromosome with start and end positions
         let region = RegionString {
             chromosome: "chr3".into(),
-            start: Some(NonZeroU32::new(100).unwrap()),
-            end: Some(NonZeroU32::new(200).unwrap()),
+            start: Some(Pos::<One>::new(100)),
+            end: Some(Pos::<One>::new(200)),
         };
         insta::assert_snapshot!(region, @"chr3:100-200");
     }
@@ -295,7 +301,7 @@ mod tests {
             let region_str = format!("{chrom}:{start}");
             let parsed = RegionString::from_str(&region_str)?;
             assert_eq!(parsed.chromosome, chrom);
-            assert_eq!(parsed.start, NonZeroU32::new(start));
+            assert_eq!(parsed.start, Pos::<One>::try_new(start));
             assert_eq!(parsed.end, None);
             #[cfg(feature = "hts-compat")]
             let _ = FetchDefinition::from(&parsed);
@@ -304,8 +310,8 @@ mod tests {
             let region_str = format!("{chrom}:{start}-{end}");
             let parsed = RegionString::from_str(&region_str)?;
             assert_eq!(parsed.chromosome, chrom);
-            assert_eq!(parsed.start, NonZeroU32::new(start));
-            assert_eq!(parsed.end, NonZeroU32::new(end));
+            assert_eq!(parsed.start, Pos::<One>::try_new(start));
+            assert_eq!(parsed.end, Pos::<One>::try_new(end));
             #[cfg(feature = "hts-compat")]
             let _ = FetchDefinition::from(&parsed);
         }
@@ -347,8 +353,8 @@ mod tests {
             region,
             RegionString {
                 chromosome: "bacteriophage_lambda_CpG".into(),
-                start: Some(NonZeroU32::new(1).unwrap()),
-                end: Some(NonZeroU32::new(48502).unwrap())
+                start: Some(Pos::<One>::new(1)),
+                end: Some(Pos::<One>::new(48502))
             }
         );
     }

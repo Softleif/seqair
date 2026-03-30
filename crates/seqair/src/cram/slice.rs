@@ -10,7 +10,7 @@ use super::{
 };
 use crate::bam::{BamHeader, record_store::RecordStore};
 use rustc_hash::FxHashMap;
-use seqair_types::{Base, Pos, Zero};
+use seqair_types::{Base, One, Pos, Zero};
 use tracing::warn;
 
 /// Parsed CRAM slice header.
@@ -117,7 +117,10 @@ pub fn decode_slice(
 
     // r[impl cram.edge.reference_mismatch]
     if !is_multi_ref && sh.reference_md5 != [0u8; 16] && !reference_seq.is_empty() {
-        let slice_ref_start = (sh.alignment_start.max(1) as i64 - 1 - ref_start_0based) as usize;
+        let slice_start_0based = Pos::<One>::try_from_i32(sh.alignment_start.max(1))
+            .map(|p| p.to_zero_based().as_i64())
+            .unwrap_or(0);
+        let slice_ref_start = (slice_start_0based - ref_start_0based) as usize;
         // r[impl cram.slice.validated_lengths]
         let span = usize::try_from(sh.alignment_span)
             .map_err(|_| CramError::InvalidLength { value: sh.alignment_span })?;
@@ -181,7 +184,9 @@ pub fn decode_slice(
     for _ in 0..sh.num_records {
         // For embedded reference, ref_start is the slice's alignment_start
         let effective_ref_start = if sh.embedded_reference >= 0 {
-            sh.alignment_start.max(1) as i64 - 1
+            Pos::<One>::try_from_i32(sh.alignment_start.max(1))
+                .map(|p| p.to_zero_based().as_i64())
+                .unwrap_or(0)
         } else {
             ref_start_0based
         };
@@ -266,8 +271,9 @@ fn decode_record(
     };
     // r[impl cram.edge.position_overflow]
     // Convert from 1-based to 0-based
-    let pos_0based_raw = alignment_pos - 1;
-    let pos_0based = Pos::<Zero>::try_from_i64(pos_0based_raw).unwrap_or(Pos::<Zero>::new(0));
+    let pos_0based = Pos::<One>::try_from_i64(alignment_pos)
+        .map(|p| p.to_zero_based())
+        .unwrap_or(Pos::<Zero>::new(0));
 
     // r[impl cram.record.read_group]
     // 6. RG (read group)
@@ -785,7 +791,9 @@ mod tests {
 
         // Create a fake reference full of N's — MD5 will not match
         let fake_ref = vec![b'N'; 100_000];
-        let ref_start = dc.alignment_start.max(1) as i64 - 1;
+        let ref_start = Pos::<One>::try_from_i32(dc.alignment_start.max(1))
+            .map(|p| p.to_zero_based().as_i64())
+            .unwrap_or(0);
 
         let first_landmark = *dc.landmarks.first().unwrap();
         let result = decode_slice(
@@ -797,7 +805,7 @@ mod tests {
             &bam_header,
             0,
             Pos::<Zero>::new(0),
-            Pos::<Zero>::new(u32::MAX),
+            Pos::<Zero>::new(u32::MAX - 1),
             &mut crate::bam::record_store::RecordStore::new(),
             &mut Vec::new(),
             &mut Vec::new(),

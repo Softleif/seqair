@@ -2,6 +2,7 @@
 //! from distant chunks; the internal chunk cache loads wide-spanning chunks once per chromosome per thread.
 
 use super::bgzf::{BgzfError, VirtualOffset};
+use seqair_types::{Pos, Zero};
 use std::path::Path;
 use tracing::instrument;
 
@@ -176,7 +177,7 @@ impl BamIndex {
     /// Query the index for chunks overlapping a region [start, end] (0-based inclusive).
     // r[impl tabix.query]
     // r[impl tabix.pseudo_bin]
-    pub fn query(&self, tid: u32, start: u64, end: u64) -> Vec<Chunk> {
+    pub fn query(&self, tid: u32, start: Pos<Zero>, end: Pos<Zero>) -> Vec<Chunk> {
         let result = self.query_split(tid, start, end);
         let mut all = result.nearby;
         all.extend(result.distant);
@@ -186,12 +187,19 @@ impl BamIndex {
 
     /// Query the index, returning chunks annotated with their source bin ID.
     /// For diagnostics only — use `query_split` for production code.
-    pub fn query_annotated(&self, tid: u32, start: u64, end: u64) -> Vec<AnnotatedChunk> {
+    pub fn query_annotated(
+        &self,
+        tid: u32,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
+    ) -> Vec<AnnotatedChunk> {
         let Some(ref_idx) = self.references.get(tid as usize) else {
             return Vec::new();
         };
-        let candidate_bins = reg2bins(start, end + 1);
-        let linear_min = linear_index_min(ref_idx, start);
+        let start_u64 = u64::from(start.get());
+        let end_u64 = u64::from(end.get());
+        let candidate_bins = reg2bins(start_u64, end_u64 + 1);
+        let linear_min = linear_index_min(ref_idx, start_u64);
         let mut result = Vec::new();
         for bin in &ref_idx.bins {
             if bin.bin_id == PSEUDO_BIN {
@@ -214,15 +222,17 @@ impl BamIndex {
     // r[impl bam.index.chunk_separation+2]
     // r[impl index.edge.no_records]
     /// Query the index, separating distant (level 0–2) from nearby (level 3–5) chunks.
-    pub fn query_split(&self, tid: u32, start: u64, end: u64) -> QueryChunks {
+    pub fn query_split(&self, tid: u32, start: Pos<Zero>, end: Pos<Zero>) -> QueryChunks {
         let Some(ref_idx) = self.references.get(tid as usize) else {
             return QueryChunks { nearby: Vec::new(), distant: Vec::new() };
         };
 
-        let candidate_bins = reg2bins(start, end + 1); // reg2bins uses half-open
+        let start_u64 = u64::from(start.get());
+        let end_u64 = u64::from(end.get());
+        let candidate_bins = reg2bins(start_u64, end_u64 + 1); // reg2bins uses half-open
 
         // Linear index: minimum virtual offset for reads starting at or after `start`
-        let linear_min = linear_index_min(ref_idx, start);
+        let linear_min = linear_index_min(ref_idx, start_u64);
 
         let mut nearby = Vec::new();
         let mut distant = Vec::new();
@@ -447,6 +457,7 @@ fn read_u64(data: &[u8], pos: &mut usize) -> Result<u64, BaiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seqair_types::Pos;
 
     #[test]
     fn reg2bins_includes_bin0() {
@@ -487,7 +498,7 @@ mod tests {
             (4681, vec![chunk(100, 500)]), // leaf bin: main data
         ]);
 
-        let result = idx.query_split(0, 0, 100);
+        let result = idx.query_split(0, Pos::<Zero>::new(0), Pos::<Zero>::new(100));
 
         assert_eq!(result.distant.len(), 1, "bin 0 should have 1 chunk");
         assert_eq!(result.distant[0].begin.0, 9000);
@@ -507,8 +518,8 @@ mod tests {
             (4682, vec![chunk(500, 900)]),
         ]);
 
-        let split = idx.query_split(0, 0, 200);
-        let flat = idx.query(0, 0, 200);
+        let split = idx.query_split(0, Pos::<Zero>::new(0), Pos::<Zero>::new(200));
+        let flat = idx.query(0, Pos::<Zero>::new(0), Pos::<Zero>::new(200));
 
         let mut combined: Vec<u64> =
             split.nearby.iter().chain(&split.distant).map(|c| c.begin.0).collect();
@@ -524,7 +535,7 @@ mod tests {
     fn query_split_no_bin0_in_index() {
         let idx = index_with_bins(vec![(4681, vec![chunk(100, 500)])]);
 
-        let result = idx.query_split(0, 0, 100);
+        let result = idx.query_split(0, Pos::<Zero>::new(0), Pos::<Zero>::new(100));
         assert!(result.distant.is_empty(), "no bin 0 in index → empty bin0");
         assert!(!result.nearby.is_empty());
     }
@@ -533,7 +544,7 @@ mod tests {
     #[test]
     fn query_split_empty_reference() {
         let idx = BamIndex { references: Vec::new() };
-        let result = idx.query_split(0, 0, 100);
+        let result = idx.query_split(0, Pos::<Zero>::new(0), Pos::<Zero>::new(100));
         assert!(result.nearby.is_empty());
         assert!(result.distant.is_empty());
     }

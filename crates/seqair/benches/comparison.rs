@@ -204,7 +204,13 @@ fn fasta_fetch(c: &mut Criterion) {
         b.iter(|| {
             let path = std::path::Path::new(FASTA_PATH);
             let mut reader = seqair::fasta::IndexedFastaReader::open(path).unwrap();
-            let seq = reader.fetch_seq(CHROM, FASTA_START, FASTA_END).unwrap();
+            let seq = reader
+                .fetch_seq(
+                    CHROM,
+                    seqair::bam::Pos::<seqair::bam::Zero>::new(FASTA_START as u32),
+                    seqair::bam::Pos::<seqair::bam::Zero>::new(FASTA_END as u32),
+                )
+                .unwrap();
             black_box(seq.len())
         });
     });

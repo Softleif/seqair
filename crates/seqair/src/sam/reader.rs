@@ -8,7 +8,7 @@ use crate::bam::{
     record_store::RecordStore,
     region_buf::RegionBuf,
 };
-use seqair_types::{Base, Pos, Zero};
+use seqair_types::{Base, One, Pos, Zero};
 use std::{
     fs::File,
     path::{Path, PathBuf},
@@ -214,10 +214,7 @@ impl IndexedSamReader {
     ) -> Result<usize, SamError> {
         store.clear();
 
-        let start_u64 = u64::from(start.get());
-        let end_u64 = u64::from(end.get());
-
-        let chunks = self.shared.index.query(tid, start_u64, end_u64);
+        let chunks = self.shared.index.query(tid, start, end);
         if chunks.is_empty() {
             return Ok(0);
         }
@@ -365,7 +362,9 @@ fn parse_sam_line(
     let pos_1based = parse_i64(pos_field)
         .ok_or_else(|| SamRecordError::InvalidPos { value: pos_field.into() })?;
     // SAM POS is 1-based; convert to 0-based Pos<Zero>
-    let pos = Pos::<Zero>::try_from_i64(pos_1based - 1).unwrap_or(Pos::<Zero>::new(0));
+    let pos = Pos::<One>::try_from_i64(pos_1based)
+        .map(|p| p.to_zero_based())
+        .unwrap_or(Pos::<Zero>::new(0));
 
     // Field 5: MAPQ
     let mapq_field = fields.get(4).copied().unwrap_or(b"0");
