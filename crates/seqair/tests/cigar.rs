@@ -95,8 +95,14 @@ fn cigar_mapping_with_deletion() {
         mapping.pos_info_at(Pos::<Zero>::new(129).unwrap()),
         Some(CigarPosInfo::Match { qpos: 29 })
     );
-    assert_eq!(mapping.pos_info_at(Pos::<Zero>::new(130).unwrap()), Some(CigarPosInfo::Deletion)); // inside deletion
-    assert_eq!(mapping.pos_info_at(Pos::<Zero>::new(134).unwrap()), Some(CigarPosInfo::Deletion));
+    assert_eq!(
+        mapping.pos_info_at(Pos::<Zero>::new(130).unwrap()),
+        Some(CigarPosInfo::Deletion { del_len: 5 })
+    ); // inside deletion
+    assert_eq!(
+        mapping.pos_info_at(Pos::<Zero>::new(134).unwrap()),
+        Some(CigarPosInfo::Deletion { del_len: 5 })
+    );
     assert_eq!(
         mapping.pos_info_at(Pos::<Zero>::new(135).unwrap()),
         Some(CigarPosInfo::Match { qpos: 30 })
@@ -371,7 +377,7 @@ proptest! {
                         let pos = ref_pos + i;
                         prop_assert_eq!(
                             mapping.pos_info_at(Pos::<Zero>::new(pos).unwrap()),
-                            Some(CigarPosInfo::Deletion),
+                            Some(CigarPosInfo::Deletion { del_len: len }),
                             "cigar={}: ref {} under D op should be Deletion",
                             cigar_str, pos
                         );

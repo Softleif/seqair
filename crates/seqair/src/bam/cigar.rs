@@ -100,8 +100,8 @@ pub enum CigarPosInfo {
     Match { qpos: u32 },
     /// M/=/X op at the last position before an I op follows.
     Insertion { qpos: u32, insert_len: u32 },
-    /// D op: deletion spanning this position.
-    Deletion,
+    /// D op: deletion spanning this position. `del_len` is the total length of the D CIGAR op.
+    Deletion { del_len: u32 },
     /// N op: reference skip spanning this position.
     RefSkip,
 }
@@ -276,7 +276,7 @@ fn classify_op(
         }
         Some(CigarPosInfo::Match { qpos })
     } else if op.op_type == CIGAR_D {
-        Some(CigarPosInfo::Deletion)
+        Some(CigarPosInfo::Deletion { del_len: op.len })
     } else if op.op_type == CIGAR_N {
         Some(CigarPosInfo::RefSkip)
     } else {

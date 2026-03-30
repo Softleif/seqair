@@ -184,7 +184,7 @@ fn type_safety_deletion_has_no_base() {
     // This test verifies at compile time that you can't access base/qual/qpos
     // from a Deletion without matching. The fact that the convenience methods
     // return Option proves the API is safe.
-    let op = PileupOp::Deletion;
+    let op = PileupOp::Deletion { del_len: 0 };
     let _ = op; // Deletion has no fields to access — that's the point
     // If someone tried: op.base — compile error. Must use match or convenience method.
 }

@@ -139,8 +139,9 @@ pub enum PileupOp {
     /// `insert_len` query bases follows before the next reference position.
     /// Access inserted bases via the read's sequence at `qpos + 1 .. qpos + 1 + insert_len`.
     Insertion { qpos: u32, base: Base, qual: u8, insert_len: u32 },
-    /// Read has a deletion spanning this position (D CIGAR op). No query base.
-    Deletion,
+    /// Read has a deletion spanning this position (D CIGAR op). `del_len` is the total length
+    /// of the D CIGAR op — how many reference bases are deleted. No query base.
+    Deletion { del_len: u32 },
     /// Read has a reference skip at this position (N CIGAR op, e.g. intron). No query base.
     RefSkip,
 }
@@ -176,7 +177,7 @@ impl PileupAlignment {
     pub fn qpos(&self) -> Option<usize> {
         match self.op {
             PileupOp::Match { qpos, .. } | PileupOp::Insertion { qpos, .. } => Some(qpos as usize),
-            PileupOp::Deletion | PileupOp::RefSkip => None,
+            PileupOp::Deletion { .. } | PileupOp::RefSkip => None,
         }
     }
 
@@ -184,7 +185,7 @@ impl PileupAlignment {
     pub fn base(&self) -> Option<Base> {
         match self.op {
             PileupOp::Match { base, .. } | PileupOp::Insertion { base, .. } => Some(base),
-            PileupOp::Deletion | PileupOp::RefSkip => None,
+            PileupOp::Deletion { .. } | PileupOp::RefSkip => None,
         }
     }
 
@@ -192,13 +193,13 @@ impl PileupAlignment {
     pub fn qual(&self) -> Option<u8> {
         match self.op {
             PileupOp::Match { qual, .. } | PileupOp::Insertion { qual, .. } => Some(qual),
-            PileupOp::Deletion | PileupOp::RefSkip => None,
+            PileupOp::Deletion { .. } | PileupOp::RefSkip => None,
         }
     }
 
     #[must_use]
     pub fn is_del(&self) -> bool {
-        matches!(self.op, PileupOp::Deletion)
+        matches!(self.op, PileupOp::Deletion { .. })
     }
 
     #[must_use]
@@ -210,6 +211,15 @@ impl PileupAlignment {
     pub fn insert_len(&self) -> u32 {
         match self.op {
             PileupOp::Insertion { insert_len, .. } => insert_len,
+            _ => 0,
+        }
+    }
+
+    /// Returns the deletion length for a `Deletion` op, or 0 for all other ops.
+    #[must_use]
+    pub fn del_len(&self) -> u32 {
+        match self.op {
+            PileupOp::Deletion { del_len } => del_len,
             _ => 0,
         }
     }
@@ -462,7 +472,7 @@ impl Iterator for PileupEngine {
                             insert_len,
                         }
                     }
-                    CigarPosInfo::Deletion => PileupOp::Deletion,
+                    CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
                     CigarPosInfo::RefSkip => PileupOp::RefSkip,
                 };
 
