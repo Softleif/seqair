@@ -4,6 +4,7 @@ use noodles::core::{Position, Region};
 use noodles::fasta;
 use proptest::prelude::*;
 use seqair::fasta::IndexedFastaReader;
+use seqair_types::{Pos, Zero};
 use std::path::Path;
 
 fn test_fasta_path() -> &'static Path {
@@ -29,6 +30,8 @@ fn noodles_fetch(name: &str, start: u64, stop: u64) -> Vec<u8> {
 }
 
 fn seqair_fetch(reader: &mut IndexedFastaReader, name: &str, start: u64, stop: u64) -> Vec<u8> {
+    let start = Pos::<Zero>::try_from_u64(start).expect("start fits in u32");
+    let stop = Pos::<Zero>::try_from_u64(stop).expect("stop fits in u32");
     reader.fetch_seq(name, start, stop).expect("seqair fetch_seq")
 }
 

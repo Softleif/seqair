@@ -3,10 +3,18 @@
 //! `Pos<Zero>` is 0-based (BAM, BED, internal engine). `Pos<One>` is 1-based
 //! (SAM, VCF, CRAM, user-facing). The type system prevents mixing coordinate
 //! systems at compile time. `Offset` represents a signed distance between positions.
+//!
+//! # Niche optimization
+//!
+//! The internal storage is `NonMaxU32`, so `u32::MAX` is reserved as the niche.
+//! This makes `Option<Pos<S>>` the same size as `Pos<S>` (4 bytes).
+//! The maximum valid position value is `u32::MAX - 1`.
 
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
+
+use nonmax::NonMaxU32;
 
 /// 0-based coordinate system (BAM binary, BED, internal engine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -22,6 +30,9 @@ pub struct One;
 /// The phantom type parameter prevents mixing 0-based and 1-based positions
 /// at compile time.
 ///
+/// `u32::MAX` is reserved as the niche so that `Option<Pos<S>>` costs no extra
+/// space. The maximum valid position value is `u32::MAX - 1`.
+///
 /// # Construction
 ///
 /// ```
@@ -34,7 +45,7 @@ pub struct One;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Pos<S> {
-    value: u32,
+    value: NonMaxU32,
     _system: PhantomData<S>,
 }
 
@@ -48,51 +59,76 @@ pub struct Offset(pub i64);
 // ---- Pos<Zero> construction ----
 
 impl Pos<Zero> {
-    /// Create a 0-based position from a `u32`. All u32 values are valid.
+    /// Create a 0-based position from a `u32`.
+    ///
+    /// Panics in debug builds if `value == u32::MAX` (reserved niche).
+    /// BAM positions are capped at i32::MAX (~2.1B), well below the limit.
     #[inline]
-    pub const fn new(value: u32) -> Self {
-        Self { value, _system: PhantomData }
+    pub fn new(value: u32) -> Self {
+        debug_assert!(value != u32::MAX, "position u32::MAX is reserved as niche");
+        // Safety: debug_assert above ensures value != u32::MAX. In practice BAM
+        // positions never approach this limit.
+        Self { value: unsafe { NonMaxU32::new_unchecked(value) }, _system: PhantomData }
     }
 
-    /// Create a 0-based position from an `i64`. Returns `None` if negative or > u32::MAX.
+    /// Create a 0-based position from an `i64`. Returns `None` if negative,
+    /// > `u32::MAX - 1`, or exactly `u32::MAX`.
     #[inline]
     pub fn try_from_i64(value: i64) -> Option<Self> {
-        u32::try_from(value).ok().map(Self::new)
+        let v = u32::try_from(value).ok()?;
+        if v == u32::MAX {
+            return None;
+        }
+        Some(Self::new(v))
     }
 
-    /// Create a 0-based position from a `u64`. Returns `None` if > u32::MAX.
+    /// Create a 0-based position from a `u64`. Returns `None` if > `u32::MAX - 1`
+    /// or exactly `u32::MAX`.
     #[inline]
     pub fn try_from_u64(value: u64) -> Option<Self> {
-        u32::try_from(value).ok().map(Self::new)
+        let v = u32::try_from(value).ok()?;
+        if v == u32::MAX {
+            return None;
+        }
+        Some(Self::new(v))
     }
 
     /// Convert to 1-based. Infallible: 0-based 0 → 1-based 1.
     ///
-    /// This is safe because the maximum 0-based BAM position (i32::MAX ≈ 2.1B)
-    /// plus 1 still fits in u32 (max ≈ 4.3B).
+    /// BAM positions cap at i32::MAX (~2.1B), so +1 stays far below `u32::MAX - 1`.
     #[inline]
-    pub const fn to_one_based(self) -> Pos<One> {
-        Pos { value: self.value + 1, _system: PhantomData }
+    pub fn to_one_based(self) -> Pos<One> {
+        let new_val = self.value.get() + 1;
+        debug_assert!(new_val != u32::MAX, "to_one_based would produce reserved niche value");
+        // Safety: BAM positions are at most i32::MAX; +1 gives at most ~2.1B+1,
+        // far below u32::MAX.
+        Pos { value: unsafe { NonMaxU32::new_unchecked(new_val) }, _system: PhantomData }
     }
 }
 
 // ---- Pos<One> construction ----
 
 impl Pos<One> {
-    /// Create a 1-based position. Panics in debug mode if value is 0.
+    /// Create a 1-based position. Panics in debug mode if value is 0 or `u32::MAX`.
     #[inline]
-    pub const fn new(value: u32) -> Self {
+    pub fn new(value: u32) -> Self {
         debug_assert!(value > 0, "1-based position must be >= 1");
-        Self { value, _system: PhantomData }
+        debug_assert!(value != u32::MAX, "position u32::MAX is reserved as niche");
+        // Safety: debug_asserts above ensure value is in 1..u32::MAX.
+        Self { value: unsafe { NonMaxU32::new_unchecked(value) }, _system: PhantomData }
     }
 
-    /// Create a 1-based position from a `u32`. Returns `None` if value is 0.
+    /// Create a 1-based position from a `u32`. Returns `None` if value is 0 or `u32::MAX`.
     #[inline]
     pub fn try_new(value: u32) -> Option<Self> {
-        if value > 0 { Some(Self { value, _system: PhantomData }) } else { None }
+        if value == 0 || value == u32::MAX {
+            return None;
+        }
+        Some(Self::new(value))
     }
 
-    /// Create a 1-based position from an `i64`. Returns `None` if < 1 or > u32::MAX.
+    /// Create a 1-based position from an `i64`. Returns `None` if < 1, > `u32::MAX - 1`,
+    /// or exactly `u32::MAX`.
     #[inline]
     pub fn try_from_i64(value: i64) -> Option<Self> {
         if value < 1 {
@@ -107,13 +143,19 @@ impl Pos<One> {
         if value < 1 {
             return None;
         }
-        Some(Self::new(value as u32))
+        Self::try_new(value as u32)
     }
 
     /// Convert to 0-based. Infallible: 1-based 1 → 0-based 0.
+    ///
+    /// The result of subtracting 1 from a value in 1..u32::MAX is always in
+    /// 0..(u32::MAX-1), which is always a valid NonMaxU32.
     #[inline]
-    pub const fn to_zero_based(self) -> Pos<Zero> {
-        Pos { value: self.value - 1, _system: PhantomData }
+    pub fn to_zero_based(self) -> Pos<Zero> {
+        let new_val = self.value.get() - 1;
+        // Safety: self.value >= 1 (enforced by construction), so new_val >= 0
+        // and new_val <= u32::MAX - 2, which is always != u32::MAX.
+        Pos { value: unsafe { NonMaxU32::new_unchecked(new_val) }, _system: PhantomData }
     }
 }
 
@@ -123,22 +165,22 @@ impl<S> Pos<S> {
     /// Raw u32 value in the position's native coordinate system.
     #[inline]
     #[must_use]
-    pub const fn get(self) -> u32 {
-        self.value
+    pub fn get(self) -> u32 {
+        self.value.get()
     }
 
     /// Convenience for indexing: returns the raw value as usize.
     #[inline]
     #[must_use]
-    pub const fn as_usize(self) -> usize {
-        self.value as usize
+    pub fn as_usize(self) -> usize {
+        self.value.get() as usize
     }
 
     /// Convenience for wider arithmetic: returns the raw value as i64.
     #[inline]
     #[must_use]
-    pub const fn as_i64(self) -> i64 {
-        self.value as i64
+    pub fn as_i64(self) -> i64 {
+        self.value.get() as i64
     }
 }
 
@@ -149,9 +191,10 @@ impl<S> Add<Offset> for Pos<S> {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Offset) -> Self {
-        let result = self.value as i64 + rhs.0;
-        debug_assert!(result >= 0 && result <= u32::MAX as i64, "position overflow");
-        Pos { value: result as u32, _system: PhantomData }
+        let result = self.value.get() as i64 + rhs.0;
+        debug_assert!(result >= 0 && result < u32::MAX as i64, "position overflow");
+        // Safety: debug_assert ensures result is in 0..(u32::MAX-1).
+        Pos { value: unsafe { NonMaxU32::new_unchecked(result as u32) }, _system: PhantomData }
     }
 }
 
@@ -183,7 +226,7 @@ impl<S> Sub for Pos<S> {
     type Output = Offset;
     #[inline]
     fn sub(self, rhs: Self) -> Offset {
-        Offset(self.value as i64 - rhs.value as i64)
+        Offset(self.value.get() as i64 - rhs.value.get() as i64)
     }
 }
 
@@ -305,6 +348,12 @@ mod tests {
     }
 
     #[test]
+    fn try_from_i64_rejects_u32_max() {
+        assert!(Pos::<Zero>::try_from_i64(u32::MAX as i64).is_none());
+        assert!(Pos::<One>::try_from_i64(u32::MAX as i64).is_none());
+    }
+
+    #[test]
     fn try_from_i64_accepts_valid() {
         assert_eq!(Pos::<Zero>::try_from_i64(0).unwrap().get(), 0);
         assert_eq!(Pos::<One>::try_from_i64(1).unwrap().get(), 1);
@@ -314,6 +363,11 @@ mod tests {
     #[test]
     fn try_from_u64_rejects_overflow() {
         assert!(Pos::<Zero>::try_from_u64(u64::from(u32::MAX) + 1).is_none());
+    }
+
+    #[test]
+    fn try_from_u64_rejects_u32_max() {
+        assert!(Pos::<Zero>::try_from_u64(u32::MAX as u64).is_none());
     }
 
     #[test]
@@ -340,5 +394,11 @@ mod tests {
     fn size_is_u32() {
         assert_eq!(std::mem::size_of::<Pos<Zero>>(), std::mem::size_of::<u32>());
         assert_eq!(std::mem::size_of::<Pos<One>>(), std::mem::size_of::<u32>());
+    }
+
+    #[test]
+    fn option_pos_same_size_as_pos() {
+        assert_eq!(std::mem::size_of::<Option<Pos<Zero>>>(), std::mem::size_of::<Pos<Zero>>(),);
+        assert_eq!(std::mem::size_of::<Option<Pos<Zero>>>(), 4);
     }
 }

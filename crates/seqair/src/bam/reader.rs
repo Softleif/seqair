@@ -164,10 +164,7 @@ impl IndexedBamReader {
     ) -> Result<usize, BamError> {
         store.clear();
 
-        let start_u64 = u64::from(start.get());
-        let end_u64 = u64::from(end.get());
-
-        let query = self.shared.index.query_split(tid, start_u64, end_u64);
+        let query = self.shared.index.query_split(tid, start, end);
         if query.nearby.is_empty() && query.distant.is_empty() {
             return Ok(0);
         }

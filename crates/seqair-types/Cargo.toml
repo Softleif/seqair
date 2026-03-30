@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 winnow = "1.0.0"
 smallvec = { version = "2.0.0-alpha.12", features = ["serde", "std"] }
 smol_str = { version = "0.3.6", features = ["serde"] }
+nonmax = "0.5"
 
 rust-htslib = { workspace = true, optional = true, default-features = false }
 

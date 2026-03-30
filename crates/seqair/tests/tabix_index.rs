@@ -3,6 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
 use seqair::bam::index::BamIndex;
+use seqair_types::{Pos, Zero};
 use std::path::Path;
 use std::process::Command;
 
@@ -50,7 +51,7 @@ fn tabix_parses_without_error() {
     // Verify we can query — the index should have references
     let header = seqair::bam::BamHeader::from_bam_path(test_bam_path()).unwrap();
     let tid = header.tid("chr19").unwrap();
-    let chunks = index.query(tid, 6_105_700, 6_105_800);
+    let chunks = index.query(tid, Pos::<Zero>::new(6_105_700), Pos::<Zero>::new(6_105_800));
     assert!(!chunks.is_empty(), "tabix query should return chunks for chr19");
 }
 
@@ -70,8 +71,10 @@ fn tabix_query_matches_bai_query() {
 
     for &(contig, start, end) in CONTIGS {
         let tid = header.tid(contig).unwrap();
-        let bai_chunks = bai_index.query(tid, start, end);
-        let tabix_chunks = tabix_index.query(tid, start, end);
+        let start_pos = Pos::<Zero>::try_from_u64(start).expect("start fits in u32");
+        let end_pos = Pos::<Zero>::try_from_u64(end).expect("end fits in u32");
+        let bai_chunks = bai_index.query(tid, start_pos, end_pos);
+        let tabix_chunks = tabix_index.query(tid, start_pos, end_pos);
 
         // Both should return non-empty results (the test data has reads in all contigs)
         assert!(!bai_chunks.is_empty(), "{contig}: BAI query returned no chunks");

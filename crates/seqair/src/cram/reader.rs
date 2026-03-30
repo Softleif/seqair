@@ -13,7 +13,7 @@ use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
-use seqair_types::{Base, Pos, SmolStr, Zero};
+use seqair_types::{Base, One, Pos, SmolStr, Zero};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -366,7 +366,9 @@ impl IndexedCramReader {
                 let crai_entry = entries.iter().find(|e| e.container_offset == container_offset);
                 match crai_entry {
                     Some(e) if e.alignment_span > 0 => {
-                        let s = e.alignment_start.max(1) as u64 - 1;
+                        let s = Pos::<One>::try_from_i64(e.alignment_start.max(1))
+                            .map(|p| u64::from(p.to_zero_based().get()))
+                            .unwrap_or(0);
                         let e_end = s + e.alignment_span as u64;
                         let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
                         (s, e_end.min(ref_len))
@@ -378,7 +380,9 @@ impl IndexedCramReader {
                     }
                 }
             } else {
-                let ref_start = container_header.alignment_start.max(1) as u64 - 1;
+                let ref_start = Pos::<One>::try_from_i32(container_header.alignment_start.max(1))
+                    .map(|p| u64::from(p.to_zero_based().get()))
+                    .unwrap_or(0);
                 let ref_end = ref_start + container_header.alignment_span as u64;
                 let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
                 (ref_start, ref_end.min(ref_len))
@@ -388,7 +392,13 @@ impl IndexedCramReader {
             if ref_start < ref_end_clamped {
                 // r[impl cram.edge.missing_reference]
                 self.fasta
-                    .fetch_seq_into(&ref_name, ref_start, ref_end_clamped, &mut self.ref_seq_buf)
+                    .fetch_seq_into(
+                        &ref_name,
+                        Pos::<Zero>::try_from_u64(ref_start).unwrap_or(Pos::<Zero>::new(0)),
+                        Pos::<Zero>::try_from_u64(ref_end_clamped)
+                            .unwrap_or(Pos::<Zero>::new(u32::MAX - 1)),
+                        &mut self.ref_seq_buf,
+                    )
                     .map_err(|e| match &e {
                         FastaError::SequenceNotFound { .. } => {
                             CramError::MissingReference { contig: SmolStr::new(&ref_name) }
@@ -503,7 +513,7 @@ mod tests {
         // Fetch from first reference
         let tid = 0;
         let count = reader
-            .fetch_into(tid, Pos::<Zero>::new(0), Pos::<Zero>::new(u32::MAX), &mut store)
+            .fetch_into(tid, Pos::<Zero>::new(0), Pos::<Zero>::new(u32::MAX - 1), &mut store)
             .unwrap();
         assert!(count > 0, "should fetch records from tid={tid}");
     }

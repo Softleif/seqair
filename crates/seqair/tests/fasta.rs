@@ -205,7 +205,9 @@ proptest! {
         writeln!(fai, "seq1\t{}\t{}\t{}\t{}", seq_len, offset, linebases, linewidth).unwrap();
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let fetched = reader.fetch_seq("seq1", start, stop).unwrap();
+        let start_pos = Pos::<Zero>::try_from_u64(start).unwrap();
+        let stop_pos = Pos::<Zero>::try_from_u64(stop).unwrap();
+        let fetched = reader.fetch_seq("seq1", start_pos, stop_pos).unwrap();
 
         let expected: Vec<u8> = bases[start as usize..stop as usize]
             .iter()
@@ -254,7 +256,9 @@ proptest! {
         let stop = start + fetch_len;
 
         let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-        let seq = rio.fetch_seq(name, start, stop).expect("rio fetch");
+        let start_pos = Pos::<Zero>::try_from_u64(start).unwrap();
+        let stop_pos = Pos::<Zero>::try_from_u64(stop).unwrap();
+        let seq = rio.fetch_seq(name, start_pos, stop_pos).expect("rio fetch");
         let hts_seq = htslib_fetch(name, start, stop);
 
         prop_assert!(
@@ -278,8 +282,10 @@ proptest! {
         let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
         let mut forked = rio.fork().expect("fork");
 
-        let orig = rio.fetch_seq("chr19", start, stop).expect("orig fetch");
-        let fork_result = forked.fetch_seq("chr19", start, stop).expect("fork fetch");
+        let start_pos = Pos::<Zero>::try_from_u64(start).unwrap();
+        let stop_pos = Pos::<Zero>::try_from_u64(stop).unwrap();
+        let orig = rio.fetch_seq("chr19", start_pos, stop_pos).expect("orig fetch");
+        let fork_result = forked.fetch_seq("chr19", start_pos, stop_pos).expect("fork fetch");
 
         prop_assert_eq!(orig, fork_result,
             "fork mismatch at chr19:{}-{}", start, stop);
@@ -326,7 +332,9 @@ fn fetch_base_seq_reuses_buffer() {
 
     // Verify against raw fetch + manual conversion
     let mut raw_reader = IndexedFastaReader::open(test_fasta_path()).unwrap();
-    let raw = raw_reader.fetch_seq("bacteriophage_lambda_CpG", 0, 100).unwrap();
+    let raw = raw_reader
+        .fetch_seq("bacteriophage_lambda_CpG", Pos::<Zero>::new(0), Pos::<Zero>::new(100))
+        .unwrap();
     let expected: Vec<Base> = Base::from_ascii_vec(raw);
     assert_eq!(&*seq1, &expected[..], "fetch_base_seq must match from_ascii_vec on raw fetch");
 }
@@ -352,8 +360,10 @@ proptest! {
         let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
         let mut buf = Vec::new();
 
-        let alloc = rio.fetch_seq("bacteriophage_lambda_CpG", start, stop).expect("fetch_seq");
-        rio.fetch_seq_into("bacteriophage_lambda_CpG", start, stop, &mut buf)
+        let start_pos = Pos::<Zero>::try_from_u64(start).unwrap();
+        let stop_pos = Pos::<Zero>::try_from_u64(stop).unwrap();
+        let alloc = rio.fetch_seq("bacteriophage_lambda_CpG", start_pos, stop_pos).expect("fetch_seq");
+        rio.fetch_seq_into("bacteriophage_lambda_CpG", start_pos, stop_pos, &mut buf)
             .expect("fetch_seq_into");
 
         prop_assert_eq!(alloc.clone(), buf, "fetch vs fetch_into mismatch at {}-{}", start, stop);

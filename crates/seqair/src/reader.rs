@@ -296,12 +296,7 @@ impl Readers {
         start: Pos<Zero>,
         stop: Pos<Zero>,
     ) -> Result<Rc<[Base]>, FastaError> {
-        self.fasta.fetch_seq_into(
-            name,
-            u64::from(start.get()),
-            u64::from(stop.get()),
-            &mut self.fasta_buf,
-        )?;
+        self.fasta.fetch_seq_into(name, start, stop, &mut self.fasta_buf)?;
         // Take the buffer so from_ascii_vec can reinterpret it in-place (safe),
         // then create the Rc (which copies). The buffer capacity is lost but
         // fasta_buf re-grows on the next call.
