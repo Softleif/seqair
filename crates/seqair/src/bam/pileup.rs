@@ -343,7 +343,18 @@ impl Iterator for PileupEngine {
             }
 
             let pos = self.current_pos;
-            self.current_pos += Offset::new(1);
+            // current_pos <= region_end (checked above), and region_end < u32::MAX (niche),
+            // so current_pos + 1 always fits.
+            #[allow(
+                clippy::unwrap_in_result,
+                reason = "infallible: current_pos <= region_end < u32::MAX - 1"
+            )]
+            {
+                self.current_pos = self
+                    .current_pos
+                    .checked_add_offset(Offset::new(1))
+                    .expect("BUG: current_pos + 1 overflowed despite being <= region_end");
+            }
 
             // Evict expired records. Iterate the compact end_pos vec (4-byte stride)
             // and swap-remove from both vecs in lockstep.
