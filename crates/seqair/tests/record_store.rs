@@ -235,6 +235,25 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+// r[verify pos.try_from]
+#[test]
+fn push_raw_rejects_negative_position() {
+    let mut store = RecordStore::new();
+    let raw = make_test_record(0, -1, 0x4, 0, b"read1", &[(4 << 4)], &[0x11, 0x11], &[30; 4], &[]);
+    let result = store.push_raw(&raw);
+    assert!(result.is_err(), "negative position should be rejected");
+}
+
+// r[verify pos.try_from]
+#[test]
+fn push_raw_rejects_very_negative_position() {
+    let mut store = RecordStore::new();
+    let raw =
+        make_test_record(0, i32::MIN, 0x4, 0, b"read1", &[(4 << 4)], &[0x11, 0x11], &[30; 4], &[]);
+    let result = store.push_raw(&raw);
+    assert!(result.is_err(), "i32::MIN position should be rejected");
+}
+
 /// Build a minimal raw BAM record for testing.
 #[allow(clippy::too_many_arguments)]
 fn make_test_record(

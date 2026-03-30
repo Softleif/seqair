@@ -518,6 +518,62 @@ mod tests {
         assert_eq!(m.get(), u32::MAX - 1);
     }
 
+    // r[verify pos.new.niche]
+    #[test]
+    fn zero_based_new_rejects_niche() {
+        assert!(Pos::<Zero>::new(u32::MAX).is_none(), "u32::MAX should be rejected (niche)");
+    }
+
+    // r[verify pos.new.niche]
+    #[test]
+    fn zero_based_new_accepts_max_minus_one() {
+        assert!(Pos::<Zero>::new(u32::MAX - 1).is_some(), "u32::MAX - 1 should be accepted");
+    }
+
+    // r[verify pos.new.one_rejects_zero]
+    #[test]
+    fn one_based_new_rejects_zero() {
+        assert!(Pos::<One>::new(0).is_none(), "0 should be rejected for 1-based");
+    }
+
+    // r[verify pos.new.niche]
+    #[test]
+    fn one_based_new_rejects_niche() {
+        assert!(Pos::<One>::new(u32::MAX).is_none(), "u32::MAX should be rejected (niche)");
+    }
+
+    // r[verify pos.to_one_based.boundary]
+    #[test]
+    fn to_one_based_returns_none_at_boundary() {
+        // u32::MAX - 1 is the max valid Pos<Zero>. to_one_based would give u32::MAX (niche).
+        let p = Pos::<Zero>::new(u32::MAX - 1).unwrap();
+        assert!(p.to_one_based().is_none(), "to_one_based at niche boundary should return None");
+    }
+
+    // r[verify pos.checked_add_offset.overflow]
+    #[test]
+    fn checked_add_offset_rejects_overflow() {
+        // p = u32::MAX - 2. p + 1 = u32::MAX - 1 (valid). p + 2 = u32::MAX (niche, invalid).
+        let p = Pos::<Zero>::new(u32::MAX - 2).unwrap();
+        assert!(p.checked_add_offset(Offset::new(1)).is_some());
+        assert!(p.checked_add_offset(Offset::new(2)).is_none(), "result would be u32::MAX (niche)");
+    }
+
+    // r[verify pos.checked_add_offset.negative]
+    #[test]
+    fn checked_add_offset_rejects_negative_result() {
+        let p = Pos::<Zero>::new(5).unwrap();
+        assert!(p.checked_add_offset(Offset::new(-10)).is_none(), "result would be negative");
+    }
+
+    // r[verify pos.checked_sub_offset]
+    #[test]
+    fn checked_sub_offset_works() {
+        let p = Pos::<Zero>::new(10).unwrap();
+        assert_eq!(p.checked_sub_offset(Offset::new(3)).unwrap().get(), 7);
+        assert!(p.checked_sub_offset(Offset::new(11)).is_none());
+    }
+
     proptest! {
         #[test]
         fn roundtrip_zero_to_one_and_back(v in 0u32..=u32::MAX - 2) {
@@ -561,6 +617,25 @@ mod tests {
         fn option_pos_niche_always_4_bytes(v in 0u32..u32::MAX - 1) {
             let p = Pos::<Zero>::new(v);
             assert_eq!(std::mem::size_of_val(&p), 4);
+        }
+
+        // r[verify pos.new.niche]
+        #[test]
+        fn new_never_accepts_u32_max(v in u32::MAX..=u32::MAX) {
+            prop_assert!(Pos::<Zero>::new(v).is_none());
+            prop_assert!(Pos::<One>::new(v).is_none());
+        }
+
+        // r[verify pos.checked_add_offset.overflow]
+        #[test]
+        fn checked_add_never_produces_u32_max(
+            v in 0u32..u32::MAX - 1,
+            off in 0i64..=100,
+        ) {
+            let p = Pos::<Zero>::new(v).unwrap();
+            if let Some(result) = p.checked_add_offset(Offset::new(off)) {
+                prop_assert_ne!(result.get(), u32::MAX, "checked_add must never produce u32::MAX");
+            }
         }
     }
 }
