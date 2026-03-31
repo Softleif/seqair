@@ -39,15 +39,14 @@ The query MUST always include bin 0 in the candidate bins for any region query. 
 r[bam.index.bin0_separate+2]
 The index SHOULD provide a `query_split` method that separates distant (level 0–2) chunks from nearby (level 3–5) chunks in the result, returning a `QueryChunks` struct with `nearby` and `distant` fields. This allows callers to handle them differently (e.g. caching, separate I/O). The original `query` method MUST remain available for callers that don't need the separation.
 
-## Higher-level bins and ChunkCache
+## Higher-level bins
 
 The same distant-chunk problem affects bins at levels 1 (64 Mbp) and 2 (8 Mbp). For a query in chr5:100K–200K, the index includes bin 1 (covering chr5:0–64M) whose chunks span ~2 GB of the BAM file, and bin 9 (covering chr5:0–8M) whose chunks span ~0.27 GB. These chunks are **identical for every region query within the same reference** and contain many records that are outside the query region (~15% of decoded records are discarded by the position filter).
 
 r[bam.index.chunk_separation+2]
 The `query_split` method MUST separate chunks into `nearby` (levels 3–5, loaded via RegionBuf per query) and `distant` (levels 0–2, suitable for caching). The threshold (level ≤ 2) is based on profiling data showing that levels 0–2 contribute >90% of the file span in typical region queries.
 
-r[bam.index.chunk_cache]
-The reader SHOULD maintain a `ChunkCache` that loads ALL records from bins at levels 0–2 (covering ≥8 Mbp) once per reference sequence (tid) per thread. The `BamIndex::distant_chunks` method returns all level 0–2 chunks for a tid, unfiltered by region, for use when populating the cache. Per query, matching records (overlapping the query region) are injected from the cache into the `RecordStore` without any additional I/O. The cache MUST be invalidated when switching to a different reference (tid). This eliminates expensive seeks for distant-bin chunks on every region query.
+The reader uses the unified `query()` path, which merges nearby and distant chunks and feeds them all to `RegionBuf` in a single pass. A per-tid `ChunkCache` was previously used to pre-load distant-bin records once per chromosome, but profiling showed the unified path is simpler and sufficient.
 
 ## CSI format
 

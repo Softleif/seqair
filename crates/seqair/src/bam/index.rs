@@ -1,5 +1,5 @@
-//! Parse BAI indexes and query them for regions. [`BamIndex::query_split`] separates nearby
-//! from distant chunks; the internal chunk cache loads wide-spanning chunks once per chromosome per thread.
+//! Parse BAI indexes and query them for regions. [`BamIndex::query`] returns merged chunks for a
+//! region; [`BamIndex::query_split`] separates nearby (levels 3–5) from distant (levels 0–2) chunks.
 
 use super::bgzf::{BgzfError, VirtualOffset};
 use seqair_types::{Pos, Zero};
@@ -79,7 +79,7 @@ pub struct QueryChunks {
 }
 
 /// Bin level threshold: bins at this level or lower (covering ≥8 Mbp)
-/// are considered "distant" and should be cached.
+/// are classified as "distant" by `query_split`.
 const CACHE_LEVEL_THRESHOLD: u8 = 2;
 
 impl BamIndex {
@@ -151,26 +151,6 @@ impl BamIndex {
         // The remaining data is identical to BAI format (bins, chunks, linear index)
         // but we already read n_ref from the tabix header
         parse_refs_with_count(&data, &mut pos, n_ref as usize)
-    }
-
-    // r[impl bam.index.chunk_cache]
-    /// Return all chunks from distant bins (levels 0–2) for a reference,
-    /// unfiltered by region. Used for the chunk cache loaded once per tid.
-    pub fn distant_chunks(&self, tid: u32) -> Vec<Chunk> {
-        let Some(ref_idx) = self.references.get(tid as usize) else {
-            return Vec::new();
-        };
-        let mut chunks = Vec::new();
-        for bin in &ref_idx.bins {
-            if bin.bin_id == PSEUDO_BIN {
-                continue;
-            }
-            if bin_level(bin.bin_id) <= CACHE_LEVEL_THRESHOLD {
-                chunks.extend_from_slice(&bin.chunks);
-            }
-        }
-        chunks.sort_by_key(|c| c.begin);
-        chunks
     }
 
     // r[impl bam.index.region_query]

@@ -195,11 +195,17 @@ impl RecordStore {
     pub fn dedup(&mut self) {
         let names = &self.names;
         self.records.dedup_by(|a, b| {
-            a.pos == b.pos
-                && a.flags == b.flags
-                && a.name_len == b.name_len
-                && names[a.name_off as usize..a.name_off as usize + a.name_len as usize]
-                    == names[b.name_off as usize..b.name_off as usize + b.name_len as usize]
+            a.pos == b.pos && a.flags == b.flags && a.name_len == b.name_len && {
+                let a_start = a.name_off as usize;
+                let b_start = b.name_off as usize;
+                let len = a.name_len as usize;
+                debug_assert!(a_start + len <= names.len(), "name slice OOB");
+                debug_assert!(b_start + len <= names.len(), "name slice OOB");
+                #[allow(clippy::indexing_slicing, reason = "offsets validated at push time")]
+                {
+                    names[a_start..a_start + len] == names[b_start..b_start + len]
+                }
+            }
         });
     }
 

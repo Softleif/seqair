@@ -7,8 +7,7 @@ use super::{
     flags::FLAG_UNMAPPED,
     header::{BamHeader, BamHeaderError},
     index::{BaiError, BamIndex},
-    record::DecodeError,
-    record::compute_end_pos_from_raw,
+    record::{DecodeError, compute_end_pos_from_raw},
     record_store::RecordStore,
     region_buf::RegionBuf,
 };
@@ -96,8 +95,6 @@ pub struct IndexedBamReader {
     /// large sequential reads that don't benefit from BufReader).
     bulk_reader: File,
     shared: Arc<BamShared>,
-    /// Per-tid cache for records from distant bins (levels 0–2, ≥8 Mbp).
-    _chunk_cache: ChunkCache,
 }
 
 impl std::fmt::Debug for IndexedBamReader {
@@ -121,7 +118,6 @@ impl IndexedBamReader {
         Ok(IndexedBamReader {
             bulk_reader: bulk_file,
             shared: Arc::new(BamShared { index, header, bam_path: path.to_path_buf() }),
-            _chunk_cache: ChunkCache::default(),
         })
     }
 
@@ -134,11 +130,7 @@ impl IndexedBamReader {
         let bulk_file = File::open(&self.shared.bam_path)
             .map_err(|source| BamError::Open { path: self.shared.bam_path.clone(), source })?;
 
-        Ok(IndexedBamReader {
-            bulk_reader: bulk_file,
-            shared: Arc::clone(&self.shared),
-            _chunk_cache: ChunkCache::default(),
-        })
+        Ok(IndexedBamReader { bulk_reader: bulk_file, shared: Arc::clone(&self.shared) })
     }
 
     // r[impl bam.reader.fork_arc_identity]
@@ -156,7 +148,6 @@ impl IndexedBamReader {
     // r[impl bam.reader.secondary_supplementary_included+2]
     // r[impl region_buf.fetch_into+2]
     // r[impl region_buf.no_bin0]
-    // r[impl bam.index.chunk_cache]
     #[instrument(level = "debug", skip(self, store), fields(tid, start, end), err)]
     pub fn fetch_into(
         &mut self,
@@ -262,115 +253,6 @@ impl IndexedBamReader {
     }
 }
 
-// r[impl bam.index.chunk_cache]
-// r[related bam.index.chunk_separation+2]
-/// Caches records from distant bins (levels 0–2, covering ≥8 Mbp) for a
-/// single reference sequence.
-///
-/// These bins contain reads near higher-level bin boundaries. Their chunks are
-/// scattered across the BAM file (often GB away from the query's main data).
-/// Loading them once per tid and scanning per-query is much cheaper than
-/// seeking to their distant file offsets on every region fetch.
-#[derive(Debug, Default)]
-pub(crate) struct ChunkCache {
-    /// The reference id these records belong to, or `None` if empty.
-    tid: Option<u32>,
-    /// Raw BAM record bodies (the bytes after the 4-byte block_size prefix).
-    /// Stored as raw bytes so they can be `push_raw`'d into any RecordStore.
-    records: Vec<Vec<u8>>,
-}
-
-impl ChunkCache {
-    /// Inject all cached records that overlap [start, end] and match `tid`
-    /// into the given store.
-    pub fn inject_overlapping(
-        &self,
-        tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
-        store: &mut RecordStore,
-    ) -> Result<u32, BamError> {
-        if self.tid != Some(tid) {
-            return Ok(0);
-        }
-        let mut count = 0u32;
-        for raw in &self.records {
-            if raw.len() < 32 {
-                continue;
-            }
-            debug_assert!(raw.len() >= 32, "cached record too short: {}", raw.len());
-            #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-            let rec_tid = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-            // Safety: tid was validated by validate_tid before calling this method
-            if rec_tid != tid as i32 {
-                continue;
-            }
-            #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-            let rec_flags = u16::from_le_bytes([raw[14], raw[15]]);
-            if rec_flags & FLAG_UNMAPPED != 0 {
-                continue;
-            }
-            #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-            let rec_pos_raw = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-            let rec_pos = Pos::<Zero>::try_from_i64(i64::from(rec_pos_raw))
-                .ok_or(BamError::InvalidPosition { value: rec_pos_raw })?;
-            let rec_end = compute_end_pos_from_raw(raw).unwrap_or(rec_pos);
-            if rec_pos > end || rec_end < start {
-                continue;
-            }
-            store.push_raw(raw).map_err(|source| BamError::RecordDecode { source })?;
-            count += 1;
-        }
-        Ok(count)
-    }
-
-    /// Load bin 0 chunks for a given tid. Replaces any previously cached data.
-    pub fn load<R: std::io::Read + std::io::Seek>(
-        &mut self,
-        reader: &mut R,
-        tid: u32,
-        chunks: &[super::index::Chunk],
-    ) -> Result<(), BamError> {
-        self.tid = Some(tid);
-        self.records.clear();
-
-        if chunks.is_empty() {
-            return Ok(());
-        }
-
-        let mut region = RegionBuf::load(reader, chunks)?;
-        let mut scratch: Vec<u8> = Vec::new();
-
-        for chunk_ref in chunks {
-            if region.seek_virtual(chunk_ref.begin).is_err() {
-                continue;
-            }
-            loop {
-                let current_voff = region.virtual_offset();
-                if current_voff >= chunk_ref.end {
-                    break;
-                }
-                // r[impl bam.reader.propagate_errors]
-                let raw = match region.read_record(&mut scratch) {
-                    Ok(s) => s,
-                    Err(BgzfError::UnexpectedEof) => break,
-                    Err(e) => return Err(BamError::from(e)),
-                };
-                self.records.push(raw.to_vec());
-            }
-        }
-
-        tracing::debug!(
-            target: super::region_buf::PROFILE_TARGET,
-            tid,
-            cached_records = self.records.len(),
-            "chunk_cache::load",
-        );
-
-        Ok(())
-    }
-}
-
 // r[impl unified.detect_index]
 // r[impl unified.detect_error]
 fn find_and_open_index(bam_path: &Path) -> Result<BamIndex, BamError> {
@@ -393,79 +275,6 @@ fn find_and_open_index(bam_path: &Path) -> Result<BamIndex, BamError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // r[verify bam.index.chunk_cache]
-    #[test]
-    fn chunk_cache_inject_filters_by_region() {
-        // Construct minimal raw BAM records (32 bytes minimum).
-        // Layout: tid(4) pos(4) name_len(1) mapq(1) bin(2) n_cigar(2) flags(2) seq_len(4) ...
-        fn make_raw_record(tid: i32, pos: i32, flags: u16) -> Vec<u8> {
-            let mut raw = vec![0u8; 36];
-            // tid at offset 0
-            raw[..4].copy_from_slice(&tid.to_le_bytes());
-            // pos at offset 4
-            raw[4..8].copy_from_slice(&pos.to_le_bytes());
-            // name_len at offset 8 (must be >= 1 for qname)
-            raw[8] = 1;
-            // flags at offset 14
-            raw[14..16].copy_from_slice(&flags.to_le_bytes());
-            // n_cigar_op at offset 12 = 0 (no cigar → end_pos = pos)
-            raw
-        }
-
-        let cache = ChunkCache {
-            tid: Some(0),
-            records: vec![
-                make_raw_record(0, 100, 0),   // overlaps [50, 200]
-                make_raw_record(0, 300, 0),   // outside [50, 200]
-                make_raw_record(0, 150, 0x4), // unmapped, should be skipped
-                make_raw_record(1, 100, 0),   // wrong tid
-            ],
-        };
-
-        let mut store = RecordStore::new();
-        let count = cache
-            .inject_overlapping(
-                0,
-                Pos::<Zero>::new(50).unwrap(),
-                Pos::<Zero>::new(200).unwrap(),
-                &mut store,
-            )
-            .unwrap();
-
-        assert_eq!(count, 1, "only the record at pos=100 on tid=0 should match");
-        assert_eq!(store.len(), 1);
-    }
-
-    #[test]
-    fn chunk_cache_empty_for_wrong_tid() {
-        let cache = ChunkCache { tid: Some(5), records: vec![] };
-        let mut store = RecordStore::new();
-        let count = cache
-            .inject_overlapping(
-                3,
-                Pos::<Zero>::new(0).unwrap(),
-                Pos::<Zero>::new(1000).unwrap(),
-                &mut store,
-            )
-            .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn chunk_cache_empty_when_uninitialized() {
-        let cache = ChunkCache::default();
-        let mut store = RecordStore::new();
-        let count = cache
-            .inject_overlapping(
-                0,
-                Pos::<Zero>::new(0).unwrap(),
-                Pos::<Zero>::new(1000).unwrap(),
-                &mut store,
-            )
-            .unwrap();
-        assert_eq!(count, 0);
-    }
 
     // r[verify bam.reader.coordinate_overflow]
     #[test]
