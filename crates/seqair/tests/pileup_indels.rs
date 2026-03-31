@@ -228,49 +228,6 @@ fn insertion_after_deletion_not_reported() {
     }
 }
 
-// ---- pileup_indel.dedup_with_deletions (insertion preference) ----
-
-// r[verify pileup_indel.dedup_with_deletions]
-#[test]
-fn dedup_prefers_insertion_over_match() {
-    // Mate 1: 10M (Match at pos 9), qname "read"
-    // Mate 2: 10M 3I 10M (Insertion at pos 9 with insert_len=3), qname "read"
-    // Both map base A at pos 9. Dedup should keep the Insertion mate.
-    let first: u16 = 0x41; // paired + first_in_template
-    let second: u16 = 0x81; // paired + second_in_template
-
-    let mut arena = RecordStore::new();
-    // Mate 1: 10M
-    arena.push_raw(&make_record_with_cigar(0, 0, first, 60, &[cigar_op(10, 0)], 10)).unwrap();
-    // Mate 2: 10M 3I 10M
-    arena
-        .push_raw(&make_record_with_cigar(
-            0,
-            0,
-            second,
-            60,
-            &[cigar_op(10, 0), cigar_op(3, 1), cigar_op(10, 0)],
-            23,
-        ))
-        .unwrap();
-
-    let mut engine =
-        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(19).unwrap());
-    engine.set_dedup_overlapping();
-    let columns: Vec<_> = engine.collect();
-
-    // At pos 9: both mates have same base → keep first encountered (mate 1, Match).
-    // This matches htslib's resolve_pair which does not consider insertion info.
-    let col9 = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(9).unwrap()).unwrap();
-    assert_eq!(col9.depth(), 1, "dedup should reduce to 1 alignment");
-    let kept = col9.alignments().next().unwrap();
-    assert_eq!(
-        kept.insert_len(),
-        0,
-        "should keep first-encountered (match), not the insertion mate"
-    );
-}
-
 // ---- insertion before deletion ----
 
 // r[verify pileup_indel.insertion_at_last_match]
@@ -399,52 +356,6 @@ fn minimal_insertion_1m_1i_1m() {
     let aln1 = col1.alignments().next().unwrap();
     assert!(matches!(aln1.op, PileupOp::Match { .. }));
     assert_eq!(aln1.qpos(), Some(2)); // qpos 0 (M) + 1 (I) + 0 offset = 2
-}
-
-// ---- dedup: insertion vs deletion ----
-
-// r[verify pileup_indel.dedup_with_deletions]
-#[test]
-fn dedup_prefers_insertion_over_deletion() {
-    // One mate has Deletion at pos 5-9, the other has Match/Insertion covering those positions.
-    // At pos 7: (None, Some(_)) → keep the mate with a base.
-    let first: u16 = 0x41;
-    let second: u16 = 0x81;
-
-    let mut arena = RecordStore::new();
-    // Mate 1: 5M 5D 10M (Deletion at pos 5-9)
-    arena
-        .push_raw(&make_record_with_cigar(
-            0,
-            0,
-            first,
-            60,
-            &[cigar_op(5, 0), cigar_op(5, 2), cigar_op(10, 0)],
-            15,
-        ))
-        .unwrap();
-    // Mate 2: 10M 3I 10M (Insertion at pos 9, Match at pos 0-9)
-    arena
-        .push_raw(&make_record_with_cigar(
-            0,
-            0,
-            second,
-            60,
-            &[cigar_op(10, 0), cigar_op(3, 1), cigar_op(10, 0)],
-            23,
-        ))
-        .unwrap();
-
-    let mut engine =
-        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(19).unwrap());
-    engine.set_dedup_overlapping();
-    let columns: Vec<_> = engine.collect();
-
-    // At pos 7 (inside mate1's deletion, inside mate2's match): keep mate2
-    let col7 = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(7).unwrap()).unwrap();
-    assert_eq!(col7.depth(), 1);
-    let kept = col7.alignments().next().unwrap();
-    assert!(kept.qpos().is_some(), "should keep the mate with a base (Match), not the Deletion");
 }
 
 // ---- proptest: complex CIGARs with indels ----

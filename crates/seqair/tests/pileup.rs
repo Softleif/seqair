@@ -492,47 +492,6 @@ fn reference_base_unknown_without_ref_seq() {
     }
 }
 
-// ---- combined filter + dedup + max_depth ----
-
-// r[verify pileup.read_filter]
-// r[verify dedup.per_position]
-// r[verify pileup.max_depth]
-#[test]
-fn filter_dedup_max_depth_combined() {
-    use helpers::{BASE_A, make_named_record, pack_bases};
-
-    let mut arena = RecordStore::new();
-    let first: u16 = 0x41; // paired + first_in_template
-    let second: u16 = 0x81; // paired + second_in_template
-
-    let push = |arena: &mut RecordStore, name: &[u8], flags: u16| {
-        let packed = vec![pack_bases(BASE_A, BASE_A); 10];
-        let raw = make_named_record(name, 0, 0, flags, 60, 20, &packed);
-        arena.push_raw(&raw).unwrap();
-    };
-
-    // 3 proper pairs (6 reads)
-    for i in 0..3u8 {
-        let name = [b'r', b'0' + i];
-        push(&mut arena, &name, first);
-        push(&mut arena, &name, second);
-    }
-    // 2 reads that will be filtered (secondary flag 0x100)
-    arena.push_raw(&make_record(0, 0, 0x100 | 99, 60, 20)).unwrap();
-    arena.push_raw(&make_record(0, 0, 0x100 | 99, 60, 20)).unwrap();
-
-    let mut engine =
-        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(19).unwrap());
-    engine.set_filter(|flags, _| flags & 0x100 == 0); // exclude secondary
-    engine.set_dedup_overlapping();
-    engine.set_max_depth(2);
-
-    let columns: Vec<_> = engine.collect();
-    let col = columns.first().unwrap();
-    // 8 total → filter removes 2 secondary → 6 remain → dedup 3 pairs → 3 → max_depth caps to 2
-    assert_eq!(col.depth(), 2, "filter→dedup→max_depth should yield 2");
-}
-
 // ---- take_store reuse ----
 
 #[test]

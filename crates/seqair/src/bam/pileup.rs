@@ -1,17 +1,14 @@
 //! Iterate over pileup columns. [`PileupEngine`] yields [`PileupColumn`]s with pre-extracted
-//! flat fields per active read. Supports read filtering, per-position max-depth, and
-//! opt-in overlapping-pair deduplication via [`PileupEngine::set_dedup_overlapping`].
+//! flat fields per active read. Supports read filtering and per-position max-depth.
 
-use rustc_hash::FxHashMap;
 use seqair_types::{Base, Offset, Pos, Strand, Zero, strand_from_flags};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 // PileupEngine is intentionally !Send due to RecordFilter: Box<dyn Fn(...)>.
 use std::rc::Rc;
-use tracing::instrument;
 
 use super::{
     cigar::{CigarMapping, CigarPosInfo},
-    flags::{FLAG_SECOND_IN_TEMPLATE, FLAG_UNMAPPED},
+    flags::FLAG_UNMAPPED,
     record_store::RecordStore,
 };
 
@@ -66,11 +63,6 @@ pub struct PileupEngine {
     max_depth: Option<u32>,
     filter: Option<RecordFilter>,
     ref_seq: Option<RefSeq>,
-    /// Map from record index to its mate's record index (if paired and both in store).
-    mate_of: Option<Vec<Option<u32>>>,
-    /// Reusable scratch buffers for dedup (avoids per-position allocation).
-    dedup_to_remove: Vec<usize>,
-    dedup_seen: FxHashMap<u32, usize>,
     // Profiling counters — u32 is sufficient for single-region pileups (max ~250M positions).
     // For whole-genome streaming, these saturate at u32::MAX which is acceptable for debug output.
     columns_produced: u32,
@@ -243,9 +235,6 @@ impl PileupEngine {
             max_depth: None,
             filter: None,
             ref_seq: None,
-            mate_of: None,
-            dedup_to_remove: Vec::new(),
-            dedup_seen: FxHashMap::default(),
             columns_produced: 0,
             max_active_depth: 0,
         }
@@ -265,49 +254,6 @@ impl PileupEngine {
     /// Set a filter that receives `(flags, aux_bytes)` for each record entering the active set.
     pub fn set_filter(&mut self, f: impl Fn(u16, &[u8]) -> bool + 'static) {
         self.filter = Some(Box::new(f));
-    }
-
-    // r[impl dedup.opt_in]
-    // r[impl dedup.mate_detection]
-    // r[impl dedup.mate_pairs_only]
-    #[instrument(level = "debug", skip_all, fields(store_len = self.store.len()))]
-    pub fn set_dedup_overlapping(&mut self) {
-        use std::collections::hash_map::Entry;
-        let n = self.store.len();
-        let mut name_to_idx: FxHashMap<&[u8], u32> =
-            FxHashMap::with_capacity_and_hasher(n / 2, Default::default());
-        let mut mate_of = vec![None; n];
-
-        for i in 0..n {
-            let idx = i as u32;
-            let qname = self.store.qname(idx);
-            // r[impl cram.edge.unknown_read_names]
-            if qname.is_empty() || qname == b"*" {
-                continue;
-            }
-            match name_to_idx.entry(qname) {
-                Entry::Vacant(e) => {
-                    e.insert(idx);
-                }
-                Entry::Occupied(e) => {
-                    let mate_idx = *e.get();
-                    debug_assert!(
-                        (mate_idx as usize) < mate_of.len(),
-                        "mate_idx out of bounds: {} >= {}",
-                        mate_idx,
-                        mate_of.len()
-                    );
-                    debug_assert!(i < mate_of.len(), "i out of bounds: {i} >= {}", mate_of.len());
-                    #[allow(clippy::indexing_slicing, reason = "both indices < n == mate_of.len()")]
-                    if mate_of[mate_idx as usize].is_none() {
-                        mate_of[i] = Some(mate_idx);
-                        mate_of[mate_idx as usize] = Some(idx);
-                    }
-                }
-            }
-        }
-
-        self.mate_of = Some(mate_of);
     }
 
     pub fn remaining_positions(&self) -> usize {
@@ -342,7 +288,6 @@ impl std::fmt::Debug for PileupEngine {
             .field("next_entry", &self.next_entry)
             .field("active_count", &self.active.len())
             .field("max_depth", &self.max_depth)
-            .field("dedup_enabled", &self.mate_of.is_some())
             .field("columns_produced", &self.columns_produced)
             .finish_non_exhaustive()
     }
@@ -498,18 +443,6 @@ impl Iterator for PileupEngine {
                 });
             }
 
-            // r[impl dedup.per_position]
-            // r[impl dedup.filter_independent]
-            // r[impl dedup.max_depth_independent]
-            if let Some(ref mate_of) = self.mate_of {
-                dedup_overlapping_pairs(
-                    &mut alignments,
-                    mate_of,
-                    &mut self.dedup_to_remove,
-                    &mut self.dedup_seen,
-                );
-            }
-
             // r[impl pileup.max_depth_per_position]
             if let Some(max) = self.max_depth {
                 alignments.truncate(max as usize);
@@ -534,113 +467,9 @@ impl Drop for PileupEngine {
                 columns = self.columns_produced,
                 max_depth = self.max_active_depth,
                 active_cap = self.active.capacity() + self.active_end_pos.capacity(),
-                dedup = self.mate_of.is_some(),
-                dedup_remove_cap = self.dedup_to_remove.capacity(),
-                dedup_seen_cap = self.dedup_seen.capacity(),
                 "pileup_engine",
             );
         }
-    }
-}
-
-// r[impl dedup.resolution_same_base]
-// r[impl dedup.resolution_different_base]
-fn dedup_overlapping_pairs(
-    alignments: &mut Vec<PileupAlignment>,
-    mate_of: &[Option<u32>],
-    to_remove: &mut Vec<usize>,
-    seen_record_idx: &mut FxHashMap<u32, usize>,
-) {
-    if alignments.len() <= 1 {
-        return;
-    }
-
-    to_remove.clear();
-    seen_record_idx.clear();
-
-    for aln_idx in 0..alignments.len() {
-        debug_assert!(
-            aln_idx < alignments.len(),
-            "aln_idx out of bounds: {aln_idx} >= {}",
-            alignments.len()
-        );
-        #[allow(clippy::indexing_slicing, reason = "aln_idx < alignments.len() by loop bound")]
-        let rec_idx = alignments[aln_idx].record_idx;
-
-        #[allow(
-            clippy::indexing_slicing,
-            reason = "aln_idx/mate_aln_idx < alignments.len() by construction"
-        )]
-        if let Some(Some(mate_idx)) = mate_of.get(rec_idx as usize)
-            && let Some(&mate_aln_idx) = seen_record_idx.get(mate_idx)
-        {
-            debug_assert!(
-                mate_aln_idx < alignments.len(),
-                "mate_aln_idx out of bounds: {mate_aln_idx} >= {}",
-                alignments.len()
-            );
-            // r[impl pileup_indel.dedup_with_deletions]
-            let this_base = alignments[aln_idx].base();
-            let mate_base = alignments[mate_aln_idx].base();
-
-            // Overlap resolution policy — matches rastair's resolve_pair():
-            //
-            // All cases: keep first-in-template (remove second-in-template).
-            // This is deterministic regardless of iteration order, ensuring
-            // the htslib and seqair pileup engines produce identical output.
-            //
-            // When mates disagree on the base, first-in-template is trusted.
-            // When mates agree, either would be correct; first-in-template is
-            // the deterministic tie-breaker.
-            //
-            // Special cases:
-            // - No-base vs base: the read with a base is always kept.
-            // - Both no-base: keep first-in-template.
-            // - Both same template position (rare): keep first-encountered.
-            let this_is_second = alignments[aln_idx].flags & FLAG_SECOND_IN_TEMPLATE != 0;
-            let mate_is_second = alignments[mate_aln_idx].flags & FLAG_SECOND_IN_TEMPLATE != 0;
-            let remove_this = match (this_base, mate_base) {
-                // This has no base, mate has base → remove this
-                (None, Some(_)) => true,
-                // This has base, mate has no base → keep this
-                (Some(_), None) => false,
-                // Both have base (same or different) or both no base:
-                // keep first-in-template
-                _ => {
-                    if this_is_second && !mate_is_second {
-                        true // this is second → remove this
-                    } else if !this_is_second && mate_is_second {
-                        false // mate is second → remove mate
-                    } else {
-                        true // both same flag → remove later-encountered
-                    }
-                }
-            };
-
-            if remove_this {
-                to_remove.push(aln_idx);
-            } else {
-                to_remove.push(mate_aln_idx);
-            }
-            continue;
-        }
-
-        seen_record_idx.insert(rec_idx, aln_idx);
-    }
-
-    // Reverse-order swap_remove is correct because:
-    // - to_remove is sorted+deduped, so indices are unique and ascending
-    // - swap_remove(i) moves the last element to position i
-    // - iterating in reverse means we only swap_remove from positions >= current,
-    //   so previously-removed indices are never invalidated
-    to_remove.sort_unstable();
-    debug_assert!(
-        to_remove.windows(2).all(|w| w[0] != w[1]),
-        "dedup_overlapping_pairs produced duplicate removal indices"
-    );
-    to_remove.dedup();
-    for &idx in to_remove.iter().rev() {
-        alignments.swap_remove(idx);
     }
 }
 
