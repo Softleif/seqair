@@ -259,12 +259,16 @@ fn dedup_prefers_insertion_over_match() {
     engine.set_dedup_overlapping();
     let columns: Vec<_> = engine.collect();
 
-    // At pos 9: both mates active, dedup should keep the one with Insertion
+    // At pos 9: both mates have same base → keep first encountered (mate 1, Match).
+    // This matches htslib's resolve_pair which does not consider insertion info.
     let col9 = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(9).unwrap()).unwrap();
     assert_eq!(col9.depth(), 1, "dedup should reduce to 1 alignment");
     let kept = col9.alignments().next().unwrap();
-    assert!(kept.insert_len() > 0, "should keep the mate with insertion info, got {:?}", kept.op);
-    assert_eq!(kept.insert_len(), 3);
+    assert_eq!(
+        kept.insert_len(),
+        0,
+        "should keep first-encountered (match), not the insertion mate"
+    );
 }
 
 // ---- insertion before deletion ----

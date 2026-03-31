@@ -578,27 +578,30 @@ fn dedup_overlapping_pairs(
             let this_base = alignments[aln_idx].base();
             let mate_base = alignments[mate_aln_idx].base();
 
+            // Overlap resolution policy — matches htslib's resolve_pair():
+            //
+            // Same base (or both no-base): remove later-encountered read.
+            // Since mates with the same base at a position are interchangeable,
+            // we just keep whichever was seen first in the alignments list.
+            //
+            // Different base: keep first-in-template (FLAG 0x40).
+            // When mates disagree, we trust the primary read. htslib uses
+            // "is second in pair" to decide; the logic is equivalent.
+            //
+            // No-base vs base: the read with a base is always kept.
+            // The no-base read (deletion/refskip) doesn't contribute to
+            // the pileup at this position, so it's the natural choice to remove.
             let remove_this = match (this_base, mate_base) {
                 (Some(tb), Some(mb)) => {
                     if tb != mb {
-                        // Different bases: keep first-in-template
+                        // Different bases: keep first-in-template (remove second)
                         alignments[aln_idx].flags & FLAG_SECOND_IN_TEMPLATE != 0
-                    } else if alignments[mate_aln_idx].insert_len() > 0
-                        && alignments[aln_idx].insert_len() == 0
-                    {
-                        // Same base, mate has insertion info: keep mate
-                        true
-                    } else if alignments[aln_idx].insert_len() > 0
-                        && alignments[mate_aln_idx].insert_len() == 0
-                    {
-                        // Same base, this has insertion info: keep this
-                        false
                     } else {
-                        // Same base, same insertion status: keep first encountered
+                        // Same base: keep first encountered (remove this, the later one)
                         true
                     }
                 }
-                // This has no base (deletion/refskip), mate has base → remove this
+                // This has no base, mate has base → remove this
                 (None, Some(_)) => true,
                 // This has base, mate has no base → keep this
                 (Some(_), None) => false,
