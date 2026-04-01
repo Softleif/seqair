@@ -1,0 +1,89 @@
+[package]
+name = "seqair-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.seqair]
+path = ".."
+features = ["fuzz"]
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+# BAM record parsing
+[[bin]]
+name = "fuzz_bam_record"
+path = "fuzz_targets/fuzz_bam_record.rs"
+doc = false
+
+# BAM index (BAI) parsing
+[[bin]]
+name = "fuzz_bam_index"
+path = "fuzz_targets/fuzz_bam_index.rs"
+doc = false
+
+# BAM CIGAR, sequence, and aux tag parsing
+[[bin]]
+name = "fuzz_bam_fields"
+path = "fuzz_targets/fuzz_bam_fields.rs"
+doc = false
+
+# SAM header text parsing
+[[bin]]
+name = "fuzz_sam_header"
+path = "fuzz_targets/fuzz_sam_header.rs"
+doc = false
+
+# CRAM block parsing and decompression
+[[bin]]
+name = "fuzz_cram_block"
+path = "fuzz_targets/fuzz_cram_block.rs"
+doc = false
+
+# CRAM container header parsing
+[[bin]]
+name = "fuzz_cram_container"
+path = "fuzz_targets/fuzz_cram_container.rs"
+doc = false
+
+# CRAM compression codecs (rANS 4x8, Nx16, tok3)
+[[bin]]
+name = "fuzz_cram_codecs"
+path = "fuzz_targets/fuzz_cram_codecs.rs"
+doc = false
+
+# CRAM variable-length integer decoding
+[[bin]]
+name = "fuzz_cram_varint"
+path = "fuzz_targets/fuzz_cram_varint.rs"
+doc = false
+
+# CRAM compression header + slice header + encodings
+[[bin]]
+name = "fuzz_cram_header"
+path = "fuzz_targets/fuzz_cram_header.rs"
+doc = false
+
+# FASTA index (FAI) parsing
+[[bin]]
+name = "fuzz_fasta_index"
+path = "fuzz_targets/fuzz_fasta_index.rs"
+doc = false
+
+# GZI index parsing
+[[bin]]
+name = "fuzz_gzi"
+path = "fuzz_targets/fuzz_gzi.rs"
+doc = false

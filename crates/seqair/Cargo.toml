@@ -7,6 +7,9 @@ repository = "https://github.com/Softleif/seqair"
 license = "MIT OR Apache-2.0"
 rust-version = "1.92.0"
 
+[features]
+fuzz = []
+
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }

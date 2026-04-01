@@ -101,6 +101,19 @@ impl BamIndex {
         parse_refs(&data, &mut pos)
     }
 
+    /// Parse BAI index data from raw bytes (includes magic prefix).
+    #[cfg(feature = "fuzz")]
+    pub fn from_bytes(data: &[u8]) -> Result<Self, BaiError> {
+        if data.len() < 8 {
+            return Err(BaiError::InvalidMagic);
+        }
+        if !data.starts_with(b"BAI\x01") {
+            return Err(BaiError::InvalidMagic);
+        }
+        let mut pos = 4;
+        parse_refs(data, &mut pos)
+    }
+
     // r[impl tabix.magic]
     // r[impl tabix.header]
     // r[impl tabix.bai_reuse]

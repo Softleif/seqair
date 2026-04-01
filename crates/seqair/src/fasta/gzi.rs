@@ -117,6 +117,12 @@ impl GziIndex {
         Self::parse(data, Path::new("<test>")).expect("test GZI data should be valid")
     }
 
+    /// Parse GZI index from raw bytes.
+    #[cfg(feature = "fuzz")]
+    pub fn from_bytes(data: &[u8]) -> Result<Self, GziError> {
+        Self::parse(data, Path::new("<fuzz>"))
+    }
+
     // r[impl fasta.gzi.translate]
     pub fn translate(&self, uncompressed_offset: u64) -> Result<BlockLocation, GziError> {
         // The GZI entries are sorted by uncompressed_offset. We want the last entry

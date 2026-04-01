@@ -77,6 +77,12 @@ impl FastaIndex {
         Self::parse(&contents, path)
     }
 
+    /// Parse FAI index from string contents.
+    #[cfg(feature = "fuzz")]
+    pub fn from_contents(contents: &str) -> Result<Self, FaiError> {
+        Self::parse(contents, Path::new("<fuzz>"))
+    }
+
     fn parse(contents: &str, path: &Path) -> Result<Self, FaiError> {
         let mut entries = Vec::new();
         let mut name_to_idx = FxHashMap::default();
