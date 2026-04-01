@@ -47,7 +47,9 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
             *d = sym;
             let i = sym as usize;
             // r[depends cram.codec.state_step_safety]
-            *state = (u32::from(freq[i]) * (*state >> 12) + (*state & 0x0FFF))
+            *state = u32::from(freq[i])
+                .wrapping_mul(*state >> 12)
+                .wrapping_add(*state & 0x0FFF)
                 .wrapping_sub(u32::from(cum_freq[i]));
             renormalize(state, src)?;
         }
@@ -85,8 +87,9 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
             let sym = sym_tables[ctx][f as usize];
             dst[out_idx] = sym;
             let sym_idx = sym as usize;
-            states[si] = (u32::from(freq[ctx][sym_idx]) * (states[si] >> 12)
-                + (states[si] & 0x0FFF))
+            states[si] = u32::from(freq[ctx][sym_idx])
+                .wrapping_mul(states[si] >> 12)
+                .wrapping_add(states[si] & 0x0FFF)
                 .wrapping_sub(u32::from(cum_freq[ctx][sym_idx]));
             renormalize(&mut states[si], src)?;
             prev_syms[si] = sym;
@@ -100,7 +103,9 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
         let sym = sym_tables[ctx][f as usize];
         dst[pos] = sym;
         let sym_idx = sym as usize;
-        states[3] = (u32::from(freq[ctx][sym_idx]) * (states[3] >> 12) + (states[3] & 0x0FFF))
+        states[3] = u32::from(freq[ctx][sym_idx])
+            .wrapping_mul(states[3] >> 12)
+            .wrapping_add(states[3] & 0x0FFF)
             .wrapping_sub(u32::from(cum_freq[ctx][sym_idx]));
         if pos + 1 < dst.len() {
             renormalize(&mut states[3], src)?;
