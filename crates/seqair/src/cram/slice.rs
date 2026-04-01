@@ -586,7 +586,7 @@ fn decode_features_and_reconstruct(
         if let Some(last) = ops.last_mut()
             && last.1 == op
         {
-            last.0 += len;
+            last.0 = last.0.saturating_add(len);
             return;
         }
         ops.push((len, op));
@@ -612,7 +612,7 @@ fn decode_features_and_reconstruct(
                     let read_base = ch.preservation.substitution_matrix.substitute(ref_base, *code);
                     bases_buf.push(Base::from(read_base));
                     push_cigar_op(&mut cigar_ops, 1, 0); // M
-                    matching_bases += 1; // substitutions count as alignment match
+                    matching_bases = matching_bases.saturating_add(1); // substitutions count as alignment match
                     read_pos += 1;
                     ref_pos += 1;
                 }
@@ -622,18 +622,18 @@ fn decode_features_and_reconstruct(
                         bases_buf.push(Base::from(b));
                     }
                     push_cigar_op(&mut cigar_ops, len as u32, 1); // I
-                    indel_bases += len as u32;
+                    indel_bases = indel_bases.saturating_add(len as u32);
                     read_pos += len;
                 }
                 FeatureData::SingleInsertion(base) => {
                     bases_buf.push(Base::from(*base));
                     push_cigar_op(&mut cigar_ops, 1, 1); // I
-                    indel_bases += 1;
+                    indel_bases = indel_bases.saturating_add(1);
                     read_pos += 1;
                 }
                 FeatureData::Deletion(len) => {
                     push_cigar_op(&mut cigar_ops, *len, 2); // D
-                    indel_bases += len;
+                    indel_bases = indel_bases.saturating_add(*len);
                     ref_pos += *len as usize;
                 }
                 FeatureData::SoftClip(bases) => {
@@ -657,7 +657,7 @@ fn decode_features_and_reconstruct(
                 FeatureData::BaseQuality(base, _qual) => {
                     bases_buf.push(Base::from(*base));
                     push_cigar_op(&mut cigar_ops, 1, 0); // M
-                    matching_bases += 1;
+                    matching_bases = matching_bases.saturating_add(1);
                     read_pos += 1;
                     ref_pos += 1;
                 }
@@ -667,7 +667,7 @@ fn decode_features_and_reconstruct(
                         bases_buf.push(Base::from(b));
                     }
                     push_cigar_op(&mut cigar_ops, len as u32, 0); // M
-                    matching_bases += len as u32;
+                    matching_bases = matching_bases.saturating_add(len as u32);
                     read_pos += len;
                     ref_pos += len;
                 }
@@ -678,7 +678,7 @@ fn decode_features_and_reconstruct(
                         ref_base_at(reference_seq, ref_offset + ref_pos, &mut ref_warned);
                     bases_buf.push(Base::from(ref_base));
                     push_cigar_op(&mut cigar_ops, 1, 0); // M
-                    matching_bases += 1;
+                    matching_bases = matching_bases.saturating_add(1);
                     read_pos += 1;
                     ref_pos += 1;
                 }
@@ -688,7 +688,7 @@ fn decode_features_and_reconstruct(
             let ref_base = ref_base_at(reference_seq, ref_offset + ref_pos, &mut ref_warned);
             bases_buf.push(Base::from(ref_base));
             push_cigar_op(&mut cigar_ops, 1, 0); // M
-            matching_bases += 1;
+            matching_bases = matching_bases.saturating_add(1);
             read_pos += 1;
             ref_pos += 1;
         }
