@@ -58,6 +58,10 @@ static ENCODE_BASE: [u8; 256] = {
 
 /// Decode a 4-bit packed BAM sequence to ASCII bases (scalar fallback).
 pub fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
+    let required = (len + 1) / 2;
+    if encoded.len() < required {
+        return vec![b'N'; len];
+    }
     let full_bytes = len / 2;
     let mut result = vec![0u8; len];
 
@@ -84,6 +88,11 @@ pub fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
 
 /// Decode a 4-bit packed BAM sequence using the best available implementation.
 pub fn decode_seq(encoded: &[u8], len: usize) -> Vec<u8> {
+    let required = (len + 1) / 2;
+    if encoded.len() < required {
+        return vec![b'N'; len];
+    }
+
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("ssse3") {
@@ -152,6 +161,11 @@ static DECODE_PAIR_TYPED: [[u8; 2]; 256] = {
 /// All written bytes are valid `Base` discriminants per `DECODE_BASE_TYPED`.
 pub fn decode_bases_into(encoded: &[u8], len: usize, out: &mut [u8]) {
     debug_assert!(out.len() >= len, "output buffer too small: {} < {}", out.len(), len);
+    let required = (len + 1) / 2;
+    if encoded.len() < required || out.len() < len {
+        out.get_mut(..len).map(|s| s.fill(b'N'));
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("ssse3") {
@@ -314,6 +328,11 @@ pub fn decode_bases(encoded: &[u8], len: usize) -> Vec<seqair_types::Base> {
 /// Raw byte decode using the Base-typed lookup table.
 // r[depends seq.simd_scalar_equivalence]
 fn decode_bases_raw(encoded: &[u8], len: usize) -> Vec<u8> {
+    let required = (len + 1) / 2;
+    if encoded.len() < required {
+        return vec![b'N'; len];
+    }
+
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("ssse3") {
