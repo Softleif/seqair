@@ -85,8 +85,8 @@ pub fn calc_matches_indels(cigar_bytes: &[u8]) -> (u32, u32) {
         let len = op >> 4;
         let op_type = (op & 0xF) as u8;
         match op_type {
-            CIGAR_M => matches += len,
-            CIGAR_I | CIGAR_D => indels += len,
+            CIGAR_M => matches = matches.saturating_add(len),
+            CIGAR_I | CIGAR_D => indels = indels.saturating_add(len),
             _ => {}
         }
     }
@@ -192,13 +192,13 @@ fn try_linear(cigar_bytes: &[u8]) -> Option<(u32, u32)> {
         let op_type = (packed & 0xF) as u8;
 
         match (phase, op_type) {
-            (0, CIGAR_S) => query_offset += len,
+            (0, CIGAR_S) => query_offset = query_offset.saturating_add(len),
             (0, CIGAR_H) => {}
             (0, CIGAR_M | CIGAR_EQ | CIGAR_X) => {
-                match_len += len;
+                match_len = match_len.saturating_add(len);
                 phase = 1;
             }
-            (1, CIGAR_M | CIGAR_EQ | CIGAR_X) => match_len += len,
+            (1, CIGAR_M | CIGAR_EQ | CIGAR_X) => match_len = match_len.saturating_add(len),
             (1 | 2, CIGAR_S | CIGAR_H) => phase = 2,
             _ => return None,
         }
@@ -236,7 +236,7 @@ fn build_compact_ops(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> SmallVec<Compact
             ref_off += i64::from(len);
         }
         if consumes_query(op_type) {
-            query_off += len;
+            query_off = query_off.saturating_add(len);
         }
     }
 
@@ -303,7 +303,7 @@ fn pos_info_linear(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
         if !consumes_ref(op.op_type) {
             continue;
         }
-        let ref_end = op.ref_start + op.len as i32;
+        let ref_end = op.ref_start.saturating_add(op.len as i32);
         if pos32 < op.ref_start || pos32 >= ref_end {
             continue;
         }
@@ -330,7 +330,7 @@ fn pos_info_bsearch(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
         if !consumes_ref(op.op_type) {
             continue;
         }
-        let ref_end = op.ref_start + op.len as i32;
+        let ref_end = op.ref_start.saturating_add(op.len as i32);
         if pos32 >= op.ref_start && pos32 < ref_end {
             return classify_op(ops, i, op, pos32, ref_end);
         }
