@@ -99,10 +99,13 @@ pub fn parse_block(buf: &[u8]) -> Result<(Block, usize), CramError> {
 
     pos += 4;
 
+    let uncompressed_size = uncompressed_size as usize;
+    super::reader::check_alloc_size(uncompressed_size, "block uncompressed size")?;
+
     let data = decompress_block(
         method,
         compressed_data,
-        uncompressed_size as usize,
+        uncompressed_size,
         content_type_byte,
         content_id,
     )?;

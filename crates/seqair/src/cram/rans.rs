@@ -18,6 +18,7 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
     let _compressed_size = read_u32_le(&mut cur)?;
     let uncompressed_size = read_u32_le(&mut cur)? as usize;
 
+    super::reader::check_alloc_size(uncompressed_size, "rANS 4x8 output")?;
     let mut dst = vec![0u8; uncompressed_size];
 
     match order {

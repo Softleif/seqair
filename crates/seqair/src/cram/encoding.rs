@@ -369,6 +369,7 @@ impl ByteArrayEncoding {
             // r[impl cram.encoding.byte_array_len]
             Self::ByteArrayLen { len_encoding, val_encoding } => {
                 let len = len_encoding.decode(ctx)?;
+                super::reader::check_alloc_size(len as usize, "byte array length")?;
                 let mut result = Vec::with_capacity(len as usize);
                 for _ in 0..len {
                     result.push(val_encoding.decode(ctx)?);
@@ -436,6 +437,7 @@ impl ByteArrayEncoding {
 fn parse_huffman_params(cursor: &mut &[u8]) -> Result<(Vec<i32>, Vec<u32>), CramError> {
     let alpha_count = varint::read_itf8_from(cursor)
         .ok_or(CramError::Truncated { context: "huffman alphabet count" })?;
+    super::reader::check_alloc_size((alpha_count as usize).saturating_mul(4), "huffman alphabet")?;
     let mut alphabet = Vec::with_capacity(alpha_count as usize);
     for _ in 0..alpha_count {
         let sym = varint::read_itf8_from(cursor)
@@ -445,6 +447,7 @@ fn parse_huffman_params(cursor: &mut &[u8]) -> Result<(Vec<i32>, Vec<u32>), Cram
 
     let bl_count = varint::read_itf8_from(cursor)
         .ok_or(CramError::Truncated { context: "huffman bit length count" })?;
+    super::reader::check_alloc_size((bl_count as usize).saturating_mul(4), "huffman bit lengths")?;
     let mut bit_lengths = Vec::with_capacity(bl_count as usize);
     for _ in 0..bl_count {
         let bl = varint::read_itf8_from(cursor)

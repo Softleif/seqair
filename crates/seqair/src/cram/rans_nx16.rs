@@ -26,6 +26,7 @@ pub fn decode(src: &[u8], mut uncompressed_size: usize) -> Result<Vec<u8>, CramE
     if flags & FLAG_NO_SIZE == 0 {
         uncompressed_size = read_uint7(&mut cur)? as usize;
     }
+    super::reader::check_alloc_size(uncompressed_size, "rANS Nx16 output")?;
 
     if flags & FLAG_STRIPE != 0 {
         return decode_stripe(&mut cur, uncompressed_size);

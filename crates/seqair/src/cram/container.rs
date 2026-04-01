@@ -74,7 +74,12 @@ impl ContainerHeader {
         let (landmark_count, n) = read_itf8_at(buf, pos, "container landmark count")?;
         pos += n;
 
-        let mut landmarks = Vec::with_capacity(landmark_count as usize);
+        let landmark_count_usize = landmark_count as usize;
+        super::reader::check_alloc_size(
+            landmark_count_usize.saturating_mul(4),
+            "container landmark array",
+        )?;
+        let mut landmarks = Vec::with_capacity(landmark_count_usize);
         for i in 0..landmark_count {
             let (landmark, n) = read_itf8_at(buf, pos, "container landmark")?;
             let _ = i; // suppress unused warning

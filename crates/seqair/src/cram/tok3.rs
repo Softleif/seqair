@@ -26,6 +26,12 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
         });
     }
 
+    // Each name slot needs ~48 bytes (two Vecs), plus the output buffer.
+    super::reader::check_alloc_size(
+        name_count.saturating_mul(48).saturating_add(uncompressed_size),
+        "tok3 output",
+    )?;
+
     let mut b = decode_token_byte_streams(&mut cur, use_arith, name_count)?;
 
     let mut names: Vec<Vec<u8>> = vec![Vec::new(); name_count];

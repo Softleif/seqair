@@ -191,6 +191,23 @@ pub enum CramError {
         #[from]
         source: DecodeError,
     },
+
+    #[error(
+        "claimed size {size} exceeds allocation limit ({limit}) in {context} — data may be corrupt"
+    )]
+    AllocationTooLarge { size: usize, limit: usize, context: &'static str },
+}
+
+/// Maximum allocation size (256 MiB) for a single decompressed block or parsed structure.
+/// Real CRAM data stays well under this; exceeding it indicates corrupt/malicious input.
+pub const MAX_ALLOC_SIZE: usize = 256 * 1024 * 1024;
+
+/// Check that a size is within the allocation limit.
+pub(crate) fn check_alloc_size(size: usize, context: &'static str) -> Result<(), CramError> {
+    if size > MAX_ALLOC_SIZE {
+        return Err(CramError::AllocationTooLarge { size, limit: MAX_ALLOC_SIZE, context });
+    }
+    Ok(())
 }
 
 pub struct CramShared {

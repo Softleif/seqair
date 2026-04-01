@@ -43,6 +43,7 @@ impl SliceHeader {
         let num_content_ids_raw = read_itf8(&mut cursor)?;
         let num_content_ids = usize::try_from(num_content_ids_raw as i32)
             .map_err(|_| CramError::InvalidLength { value: num_content_ids_raw as i32 })?;
+        super::reader::check_alloc_size(num_content_ids.saturating_mul(4), "slice content IDs")?;
         let mut block_content_ids = Vec::with_capacity(num_content_ids);
         for _ in 0..num_content_ids {
             block_content_ids.push(read_itf8(&mut cursor)? as i32);
