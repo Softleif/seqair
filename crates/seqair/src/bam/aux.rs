@@ -97,13 +97,13 @@ impl<'a> Iterator for AuxIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let data = self.data;
-            if self.pos + 3 > data.len() {
+            if self.pos.saturating_add(3) > data.len() {
                 return None;
             }
 
-            let tag = [*data.get(self.pos)?, *data.get(self.pos + 1)?];
-            let typ = *data.get(self.pos + 2)?;
-            self.pos += 3;
+            let tag = [*data.get(self.pos)?, *data.get(self.pos.saturating_add(1))?];
+            let typ = *data.get(self.pos.saturating_add(2))?;
+            self.pos = self.pos.checked_add(3)?;
 
             match self.parse_value(typ) {
                 Some(Some(value)) => return Some((tag, value)),
@@ -122,17 +122,17 @@ impl<'a> AuxIter<'a> {
         match typ {
             b'A' => {
                 let v = *self.data.get(self.pos)?;
-                self.pos += 1;
+                self.pos = self.pos.checked_add(1)?;
                 Some(Some(AuxValue::Char(v)))
             }
             b'c' => {
                 let v = *self.data.get(self.pos)?;
-                self.pos += 1;
+                self.pos = self.pos.checked_add(1)?;
                 Some(Some(AuxValue::I8(v as i8)))
             }
             b'C' => {
                 let v = *self.data.get(self.pos)?;
-                self.pos += 1;
+                self.pos = self.pos.checked_add(1)?;
                 Some(Some(AuxValue::U8(v)))
             }
             b's' => {
@@ -162,23 +162,24 @@ impl<'a> AuxIter<'a> {
             b'Z' | b'H' => {
                 let start = self.pos;
                 while self.pos < self.data.len() && *self.data.get(self.pos)? != 0 {
-                    self.pos += 1;
+                    self.pos = self.pos.checked_add(1)?;
                 }
                 let slice = self.data.get(start..self.pos)?;
-                self.pos += 1; // skip null terminator
+                self.pos = self.pos.checked_add(1)?; // skip null terminator
                 let v = if typ == b'Z' { AuxValue::String(slice) } else { AuxValue::Hex(slice) };
                 Some(Some(v))
             }
             b'B' => {
                 let elem_type = *self.data.get(self.pos)?;
-                let count_bytes = self.data.get(self.pos + 1..self.pos + 5)?;
+                let count_bytes =
+                    self.data.get(self.pos.checked_add(1)?..self.pos.checked_add(5)?)?;
                 let count = u32::from_le_bytes([
                     *count_bytes.first()?,
                     *count_bytes.get(1)?,
                     *count_bytes.get(2)?,
                     *count_bytes.get(3)?,
                 ]) as usize;
-                self.pos += 5;
+                self.pos = self.pos.checked_add(5)?;
 
                 let elem_size = match elem_type {
                     b'c' | b'C' => 1,
@@ -212,10 +213,10 @@ impl<'a> AuxIter<'a> {
     }
 
     fn read_bytes<const N: usize>(&mut self) -> Option<[u8; N]> {
-        let slice = self.data.get(self.pos..self.pos + N)?;
+        let slice = self.data.get(self.pos..self.pos.checked_add(N)?)?;
         let mut arr = [0u8; N];
         arr.copy_from_slice(slice);
-        self.pos += N;
+        self.pos = self.pos.checked_add(N)?;
         Some(arr)
     }
 }

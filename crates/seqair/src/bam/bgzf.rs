@@ -50,6 +50,9 @@ pub enum BgzfError {
     #[error("BGZF block data is truncated")]
     TruncatedBlock,
 
+    #[error("BGZF header arithmetic overflow (corrupt data)")]
+    CorruptHeader,
+
     #[error("BGZF decompression failed")]
     DecompressionFailed { source: libdeflater::DecompressionError },
 
@@ -250,9 +253,9 @@ impl<R: Read + Seek> BgzfReader<R> {
         };
 
         // Total block size = BSIZE + 1; remaining = total - header - extra
-        let total_block_size = bsize as usize + 1;
+        let total_block_size = (bsize as usize).checked_add(1).ok_or(BgzfError::CorruptHeader)?;
         let remaining_data = total_block_size
-            .checked_sub(12 + xlen) // gzip header (12) + extra fields (xlen)
+            .checked_sub(12usize.checked_add(xlen).ok_or(BgzfError::CorruptHeader)?) // gzip header (12) + extra fields (xlen)
             .ok_or(BgzfError::BlockSizeTooSmall { bsize })?;
 
         // Safety: all bytes will be written by read_exact before any read.
@@ -264,17 +267,24 @@ impl<R: Read + Seek> BgzfReader<R> {
         }
 
         // Extract CRC32 and ISIZE from footer
-        let footer_start = self.compressed_buf.len() - BGZF_FOOTER_SIZE;
+        let footer_start = self
+            .compressed_buf
+            .len()
+            .checked_sub(BGZF_FOOTER_SIZE)
+            .ok_or(BgzfError::TruncatedBlock)?;
         let crc32_bytes: [u8; 4] = self
             .compressed_buf
-            .get(footer_start..footer_start + 4)
+            .get(footer_start..footer_start.checked_add(4).ok_or(BgzfError::TruncatedBlock)?)
             .and_then(|s| s.try_into().ok())
             .ok_or(BgzfError::TruncatedBlock)?;
         let expected_crc = u32::from_le_bytes(crc32_bytes);
 
         let isize_bytes: [u8; 4] = self
             .compressed_buf
-            .get(footer_start + 4..footer_start + 8)
+            .get(
+                footer_start.checked_add(4).ok_or(BgzfError::TruncatedBlock)?
+                    ..footer_start.checked_add(8).ok_or(BgzfError::TruncatedBlock)?,
+            )
             .and_then(|s| s.try_into().ok())
             .ok_or(BgzfError::TruncatedBlock)?;
         let uncompressed_size = u32::from_le_bytes(isize_bytes) as usize;
@@ -327,7 +337,7 @@ impl<R: Read + Seek> BgzfReader<R> {
             }
         }
         let b = self.buf.get(self.buf_pos).copied().ok_or(BgzfError::TruncatedBlock)?;
-        self.buf_pos += 1;
+        self.buf_pos = self.buf_pos.checked_add(1).ok_or(BgzfError::TruncatedBlock)?;
         Ok(b)
     }
 
@@ -343,16 +353,21 @@ impl<R: Read + Seek> BgzfReader<R> {
                     return Err(BgzfError::UnexpectedEof);
                 }
             }
-            let avail = self.buf.len() - self.buf_pos;
-            let need = out.len() - written;
+            let avail =
+                self.buf.len().checked_sub(self.buf_pos).ok_or(BgzfError::TruncatedBlock)?;
+            let need = out.len().checked_sub(written).ok_or(BgzfError::TruncatedBlock)?;
             let n = avail.min(need);
             // n ≤ avail = buf.len() - buf_pos and n ≤ need = out.len() - written
-            let dst = out.get_mut(written..written + n).ok_or(BgzfError::TruncatedBlock)?;
-            let src =
-                self.buf.get(self.buf_pos..self.buf_pos + n).ok_or(BgzfError::TruncatedBlock)?;
+            let dst = out
+                .get_mut(written..written.checked_add(n).ok_or(BgzfError::TruncatedBlock)?)
+                .ok_or(BgzfError::TruncatedBlock)?;
+            let src = self
+                .buf
+                .get(self.buf_pos..self.buf_pos.checked_add(n).ok_or(BgzfError::TruncatedBlock)?)
+                .ok_or(BgzfError::TruncatedBlock)?;
             dst.copy_from_slice(src);
-            self.buf_pos += n;
-            written += n;
+            self.buf_pos = self.buf_pos.checked_add(n).ok_or(BgzfError::TruncatedBlock)?;
+            written = written.checked_add(n).ok_or(BgzfError::TruncatedBlock)?;
         }
         Ok(())
     }
@@ -368,13 +383,16 @@ impl<R: Read + Seek> BgzfReader<R> {
                 return Ok(0);
             }
         }
-        let avail = self.buf.len() - self.buf_pos;
+        let avail = self.buf.len().checked_sub(self.buf_pos).ok_or(BgzfError::TruncatedBlock)?;
         let n = avail.min(out.len());
         // n ≤ avail = buf.len() - buf_pos and n ≤ out.len()
         let dst = out.get_mut(..n).ok_or(BgzfError::TruncatedBlock)?;
-        let src = self.buf.get(self.buf_pos..self.buf_pos + n).ok_or(BgzfError::TruncatedBlock)?;
+        let src = self
+            .buf
+            .get(self.buf_pos..self.buf_pos.checked_add(n).ok_or(BgzfError::TruncatedBlock)?)
+            .ok_or(BgzfError::TruncatedBlock)?;
         dst.copy_from_slice(src);
-        self.buf_pos += n;
+        self.buf_pos = self.buf_pos.checked_add(n).ok_or(BgzfError::TruncatedBlock)?;
         Ok(n)
     }
 
@@ -425,16 +443,16 @@ pub fn decode_bgzf_block(data: &[u8]) -> Result<Vec<u8>, BgzfError> {
     ]) as usize;
 
     // Parse extra fields to find BSIZE
-    let extra_end = 12 + xlen;
+    let extra_end = 12usize.checked_add(xlen).ok_or(BgzfError::CorruptHeader)?;
     let extra = data.get(12..extra_end.min(data.len())).ok_or(BgzfError::TruncatedBlock)?;
     let bsize = find_bsize(extra).ok_or(BgzfError::MissingBsize)?;
 
-    let total_block_size = bsize as usize + 1;
+    let total_block_size = (bsize as usize).checked_add(1).ok_or(BgzfError::CorruptHeader)?;
     if data.len() < total_block_size {
         return Err(BgzfError::TruncatedBlock);
     }
 
-    let remaining_start = 12 + xlen;
+    let remaining_start = 12usize.checked_add(xlen).ok_or(BgzfError::CorruptHeader)?;
     let remaining_data = data
         .get(remaining_start..total_block_size)
         .ok_or(BgzfError::BlockSizeTooSmall { bsize })?;
@@ -443,15 +461,19 @@ pub fn decode_bgzf_block(data: &[u8]) -> Result<Vec<u8>, BgzfError> {
         return Err(BgzfError::TruncatedBlock);
     }
 
-    let footer_start = remaining_data.len() - BGZF_FOOTER_SIZE;
+    let footer_start =
+        remaining_data.len().checked_sub(BGZF_FOOTER_SIZE).ok_or(BgzfError::TruncatedBlock)?;
     let crc32_bytes: [u8; 4] = remaining_data
-        .get(footer_start..footer_start + 4)
+        .get(footer_start..footer_start.checked_add(4).ok_or(BgzfError::TruncatedBlock)?)
         .and_then(|s| s.try_into().ok())
         .ok_or(BgzfError::TruncatedBlock)?;
     let expected_crc = u32::from_le_bytes(crc32_bytes);
 
     let isize_bytes: [u8; 4] = remaining_data
-        .get(footer_start + 4..footer_start + 8)
+        .get(
+            footer_start.checked_add(4).ok_or(BgzfError::TruncatedBlock)?
+                ..footer_start.checked_add(8).ok_or(BgzfError::TruncatedBlock)?,
+        )
         .and_then(|s| s.try_into().ok())
         .ok_or(BgzfError::TruncatedBlock)?;
     let uncompressed_size = u32::from_le_bytes(isize_bytes) as usize;
@@ -484,15 +506,16 @@ pub fn decode_bgzf_block(data: &[u8]) -> Result<Vec<u8>, BgzfError> {
 
 /// Find the BSIZE subfield (ID=BC) in the BGZF extra data.
 pub(crate) fn find_bsize(extra: &[u8]) -> Option<u16> {
-    let mut pos = 0;
-    while pos + 4 <= extra.len() {
+    let mut pos: usize = 0;
+    while pos.saturating_add(4) <= extra.len() {
         let &[si1, si2, slen_lo, slen_hi, ..] = extra.get(pos..)? else { break };
         let slen = u16::from_le_bytes([slen_lo, slen_hi]) as usize;
         if si1 == b'B' && si2 == b'C' && slen == 2 {
-            let bsize_bytes: [u8; 2] = extra.get(pos + 4..pos + 6)?.try_into().ok()?;
+            let bsize_bytes: [u8; 2] =
+                extra.get(pos.checked_add(4)?..pos.checked_add(6)?)?.try_into().ok()?;
             return Some(u16::from_le_bytes(bsize_bytes));
         }
-        pos += 4 + slen;
+        pos = pos.checked_add(4)?.checked_add(slen)?;
     }
     None
 }

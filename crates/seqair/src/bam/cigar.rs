@@ -155,11 +155,13 @@ impl CigarMapping {
     pub fn pos_info_at(&self, pos: Pos<Zero>) -> Option<CigarPosInfo> {
         match self {
             Self::Linear { rec_pos, query_offset, match_len } => {
-                let offset = pos.as_i64() - rec_pos.as_i64();
+                let offset = pos.as_i64().wrapping_sub(rec_pos.as_i64());
                 if offset < 0 || offset >= i64::from(*match_len) {
                     return None;
                 }
-                Some(CigarPosInfo::Match { qpos: offset as u32 + *query_offset })
+                Some(CigarPosInfo::Match {
+                    qpos: (offset as u32).checked_add(*query_offset).expect("qpos overflow"),
+                })
                 // Linear path never has insertions/deletions (try_linear rejects them)
             }
             Self::Complex(ops) => {
@@ -187,7 +189,8 @@ fn try_linear(cigar_bytes: &[u8]) -> Option<(u32, u32)> {
     let mut phase = 0u8;
 
     for i in 0..n_ops {
-        let packed = u32::from_le_bytes(read4(cigar_bytes, i * 4));
+        let packed =
+            u32::from_le_bytes(read4(cigar_bytes, i.checked_mul(4).expect("cigar loop overflow")));
         let len = packed >> 4;
         let op_type = (packed & 0xF) as u8;
 
@@ -216,11 +219,12 @@ fn build_compact_ops(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> SmallVec<Compact
     let mut query_off: u32 = 0;
 
     for i in 0..n_ops {
-        let packed = u32::from_le_bytes(read4(cigar_bytes, i * 4));
+        let packed =
+            u32::from_le_bytes(read4(cigar_bytes, i.checked_mul(4).expect("cigar loop overflow")));
         let len = packed >> 4;
         let op_type = (packed & 0xF) as u8;
 
-        let ref_start_i64 = rec_pos.as_i64() + ref_off;
+        let ref_start_i64 = rec_pos.as_i64().wrapping_add(ref_off);
         debug_assert!(
             ref_start_i64 >= i64::from(i32::MIN) && ref_start_i64 <= i64::from(i32::MAX),
             "ref_start {ref_start_i64} exceeds i32 range — BAM positions must fit in i32"
@@ -233,7 +237,7 @@ fn build_compact_ops(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> SmallVec<Compact
         });
 
         if consumes_ref(op_type) {
-            ref_off += i64::from(len);
+            ref_off = ref_off.checked_add(i64::from(len)).expect("ref offset overflow");
         }
         if consumes_query(op_type) {
             query_off = query_off.saturating_add(len);
@@ -247,13 +251,13 @@ fn build_compact_ops(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> SmallVec<Compact
 #[inline]
 fn next_insertion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
     let mut total = 0u32;
-    let mut idx = op_idx + 1;
+    let mut idx = op_idx.checked_add(1)?;
     while let Some(next) = ops.get(idx) {
         if next.op_type != CIGAR_I {
             break;
         }
         total = total.saturating_add(next.len);
-        idx += 1;
+        idx = idx.checked_add(1)?;
     }
     if total > 0 { Some(total) } else { None }
 }
@@ -272,9 +276,9 @@ fn classify_op(
             "classify_op reached query-consuming branch with unexpected op type {}",
             op.op_type
         );
-        let offset = (pos32 - op.ref_start) as u32;
-        let qpos = op.query_start + offset;
-        if pos32 == ref_end - 1
+        let offset = pos32.wrapping_sub(op.ref_start) as u32;
+        let qpos = op.query_start.checked_add(offset).expect("qpos overflow");
+        if pos32 == ref_end.wrapping_sub(1)
             && let Some(insert_len) = next_insertion_len(ops, i)
         {
             return Some(CigarPosInfo::Insertion { qpos, insert_len });
@@ -342,11 +346,16 @@ fn pos_info_bsearch(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
 #[allow(clippy::indexing_slicing, reason = "offset + 3 < buf.len() ensured by caller's loop bound")]
 fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
     debug_assert!(
-        offset + 3 < buf.len(),
+        offset.saturating_add(3) < buf.len(),
         "read4 out of bounds: offset={offset}, len={}",
         buf.len()
     );
-    [buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]
+    [
+        buf[offset],
+        buf[offset.saturating_add(1)],
+        buf[offset.saturating_add(2)],
+        buf[offset.saturating_add(3)],
+    ]
 }
 
 #[cfg(test)]
