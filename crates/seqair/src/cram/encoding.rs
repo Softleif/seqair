@@ -89,11 +89,15 @@ impl HuffmanTable {
 
         for &(_sym, bit_len) in &self.symbols {
             if bit_len > prev_len {
-                code <<= bit_len - prev_len;
+                let shift = bit_len - prev_len;
+                if shift >= 32 {
+                    return None;
+                }
+                code <<= shift;
                 prev_len = bit_len;
             }
             codes.push(code);
-            code += 1;
+            code = code.wrapping_add(1);
         }
 
         // Read bits incrementally, checking codes at each length level
