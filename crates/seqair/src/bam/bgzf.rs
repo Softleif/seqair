@@ -385,6 +385,84 @@ impl BgzfReader {
     }
 }
 
+/// Decode a single BGZF block from raw bytes (header + compressed data + footer).
+///
+/// Returns the decompressed data. The input must start at the gzip magic bytes.
+#[cfg(feature = "fuzz")]
+pub fn decode_bgzf_block(data: &[u8]) -> Result<Vec<u8>, BgzfError> {
+    if data.len() < BGZF_HEADER_SIZE + BGZF_FOOTER_SIZE {
+        return Err(BgzfError::TruncatedBlock);
+    }
+
+    let header: &[u8] = data.get(..BGZF_HEADER_SIZE).ok_or(BgzfError::TruncatedBlock)?;
+
+    if header.get(..4) != Some(&BGZF_MAGIC[..]) {
+        return Err(BgzfError::InvalidMagic);
+    }
+
+    let xlen = u16::from_le_bytes([
+        *header.get(10).ok_or(BgzfError::TruncatedBlock)?,
+        *header.get(11).ok_or(BgzfError::TruncatedBlock)?,
+    ]) as usize;
+
+    // Parse extra fields to find BSIZE
+    let extra_end = 12 + xlen;
+    let extra = data.get(12..extra_end.min(data.len())).ok_or(BgzfError::TruncatedBlock)?;
+    let bsize = find_bsize(extra).ok_or(BgzfError::MissingBsize)?;
+
+    let total_block_size = bsize as usize + 1;
+    if data.len() < total_block_size {
+        return Err(BgzfError::TruncatedBlock);
+    }
+
+    let remaining_start = 12 + xlen;
+    let remaining_data = data
+        .get(remaining_start..total_block_size)
+        .ok_or(BgzfError::BlockSizeTooSmall { bsize })?;
+
+    if remaining_data.len() < BGZF_FOOTER_SIZE {
+        return Err(BgzfError::TruncatedBlock);
+    }
+
+    let footer_start = remaining_data.len() - BGZF_FOOTER_SIZE;
+    let crc32_bytes: [u8; 4] = remaining_data
+        .get(footer_start..footer_start + 4)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(BgzfError::TruncatedBlock)?;
+    let expected_crc = u32::from_le_bytes(crc32_bytes);
+
+    let isize_bytes: [u8; 4] = remaining_data
+        .get(footer_start + 4..footer_start + 8)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(BgzfError::TruncatedBlock)?;
+    let uncompressed_size = u32::from_le_bytes(isize_bytes) as usize;
+
+    if uncompressed_size > MAX_BLOCK_SIZE {
+        return Err(BgzfError::UncompressedSizeTooLarge { isize_value: uncompressed_size });
+    }
+
+    if uncompressed_size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let deflate_data = remaining_data.get(..footer_start).ok_or(BgzfError::TruncatedBlock)?;
+
+    let mut buf = vec![0u8; uncompressed_size];
+    let mut decompressor = libdeflater::Decompressor::new();
+    let actual = decompressor
+        .deflate_decompress(deflate_data, &mut buf)
+        .map_err(|source| BgzfError::DecompressionFailed { source })?;
+    buf.truncate(actual);
+
+    let mut crc = libdeflater::Crc::new();
+    crc.update(&buf);
+    if crc.sum() != expected_crc {
+        return Err(BgzfError::ChecksumMismatch { expected: expected_crc, found: crc.sum() });
+    }
+
+    Ok(buf)
+}
+
 /// Find the BSIZE subfield (ID=BC) in the BGZF extra data.
 pub(crate) fn find_bsize(extra: &[u8]) -> Option<u16> {
     let mut pos = 0;
