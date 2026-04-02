@@ -1,0 +1,14 @@
+FROM --platform=linux/amd64 rust:latest
+
+RUN rustup default nightly && \
+    rustup component add llvm-tools-preview && \
+    cargo install cargo-fuzz
+
+WORKDIR /seqair
+COPY . .
+
+# Pre-build fuzz targets
+RUN cd crates/seqair && cargo +nightly fuzz build
+
+ENTRYPOINT ["bash", "-c"]
+CMD ["cd crates/seqair && cargo +nightly fuzz list"]
