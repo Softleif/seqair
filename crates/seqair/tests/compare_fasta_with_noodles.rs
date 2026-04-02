@@ -1,5 +1,6 @@
 //! Compares seqair FASTA reader against noodles-fasta across the test data.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(clippy::arithmetic_side_effects)]
 use noodles::core::{Position, Region};
 use noodles::fasta;
 use proptest::prelude::*;

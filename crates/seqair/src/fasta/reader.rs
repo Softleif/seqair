@@ -346,6 +346,7 @@ fn detect_bgzf(path: &Path) -> Result<bool, FastaError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic is not safety-critical")]
 mod tests {
     use super::*;
     use seqair_types::Pos;

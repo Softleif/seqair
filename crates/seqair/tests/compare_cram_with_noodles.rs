@@ -7,6 +7,7 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::type_complexity,
+    clippy::arithmetic_side_effects,
     dead_code
 )]
 use noodles::cram;

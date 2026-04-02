@@ -1,6 +1,7 @@
 //! Tests for performance-related spec rules.
 //! after refactoring) rather than measuring wall-clock time.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(clippy::arithmetic_side_effects)]
 mod helpers;
 
 use helpers::{cigar_bytes, cigar_op, make_record, make_record_with_cigar};

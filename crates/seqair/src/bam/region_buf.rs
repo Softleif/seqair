@@ -97,7 +97,8 @@ impl RegionBuf {
         }
 
         let merged = merge_chunks(chunks);
-        let total_bytes: usize = merged.iter().map(|r| (r.file_end - r.file_start) as usize).sum();
+        let total_bytes: usize =
+            merged.iter().map(|r| r.file_end.wrapping_sub(r.file_start) as usize).sum();
 
         // Reject obviously corrupt chunk ranges that would cause OOM
         const MAX_REGION_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
@@ -114,17 +115,17 @@ impl RegionBuf {
             let range_start = std::time::Instant::now();
             reader.seek(SeekFrom::Start(range.file_start)).map_err(|_| BgzfError::SeekFailed)?;
 
-            let len = (range.file_end - range.file_start) as usize;
+            let len = range.file_end.wrapping_sub(range.file_start) as usize;
             let buf_start = data.len();
-            data.resize(buf_start + len, 0);
+            data.resize(buf_start.wrapping_add(len), 0);
             // Read as much as available — the last range may extend past EOF
             #[allow(
                 clippy::indexing_slicing,
                 reason = "buf_start = pre-resize len, within bounds after resize"
             )]
             let actually_read = read_all(reader, &mut data[buf_start..]);
-            let actual_file_end = range.file_start + actually_read as u64;
-            data.truncate(buf_start + actually_read);
+            let actual_file_end = range.file_start.wrapping_add(actually_read as u64);
+            data.truncate(buf_start.wrapping_add(actually_read));
 
             max_range_us = max_range_us.max(range_start.elapsed().as_micros() as u64);
 
@@ -195,7 +196,9 @@ impl RegionBuf {
     fn file_offset_to_cursor(&self, file_off: u64) -> Result<usize, BgzfError> {
         for rm in &self.ranges {
             if file_off >= rm.file_start && file_off < rm.file_end {
-                return Ok(rm.buf_start + (file_off - rm.file_start) as usize);
+                return Ok(rm
+                    .buf_start
+                    .wrapping_add(file_off.wrapping_sub(rm.file_start) as usize));
             }
         }
         Err(BgzfError::VirtualOffsetOutOfRange { offset: file_off })
@@ -204,15 +207,17 @@ impl RegionBuf {
     /// Translate a buffer cursor position back to a file offset.
     fn cursor_to_file_offset(&self) -> u64 {
         for rm in &self.ranges {
-            let buf_end = rm.buf_start + (rm.file_end - rm.file_start) as usize;
+            let buf_end =
+                rm.buf_start.wrapping_add(rm.file_end.wrapping_sub(rm.file_start) as usize);
             if self.cursor >= rm.buf_start && self.cursor < buf_end {
-                return rm.file_start + (self.cursor - rm.buf_start) as u64;
+                return rm.file_start.wrapping_add(self.cursor.wrapping_sub(rm.buf_start) as u64);
             }
         }
         // Past all ranges — return best estimate from the last range
         if let Some(last) = self.ranges.last() {
-            let buf_end = last.buf_start + (last.file_end - last.file_start) as usize;
-            last.file_end + (self.cursor.saturating_sub(buf_end)) as u64
+            let buf_end =
+                last.buf_start.wrapping_add(last.file_end.wrapping_sub(last.file_start) as usize);
+            last.file_end.wrapping_add(self.cursor.saturating_sub(buf_end) as u64)
         } else {
             self.cursor as u64
         }
@@ -228,7 +233,7 @@ impl RegionBuf {
     fn read_block(&mut self) -> Result<bool, BgzfError> {
         self.block_offset = self.cursor_to_file_offset();
 
-        if self.cursor + BGZF_HEADER_SIZE > self.data.len() {
+        if self.cursor.wrapping_add(BGZF_HEADER_SIZE) > self.data.len() {
             self.eof = true;
             self.buf.clear();
             self.buf_pos = 0;
@@ -237,16 +242,16 @@ impl RegionBuf {
 
         // header is always BGZF_HEADER_SIZE=18 bytes (bounds checked above).
         debug_assert!(
-            self.cursor + BGZF_HEADER_SIZE <= self.data.len(),
+            self.cursor.wrapping_add(BGZF_HEADER_SIZE) <= self.data.len(),
             "header overrun: {} > {}",
-            self.cursor + BGZF_HEADER_SIZE,
+            self.cursor.wrapping_add(BGZF_HEADER_SIZE),
             self.data.len()
         );
         #[allow(
             clippy::indexing_slicing,
             reason = "header length = BGZF_HEADER_SIZE = 18; all indices < 18"
         )]
-        let header = &self.data[self.cursor..self.cursor + BGZF_HEADER_SIZE];
+        let header = &self.data[self.cursor..self.cursor.wrapping_add(BGZF_HEADER_SIZE)];
 
         #[allow(clippy::indexing_slicing, reason = "header.len() = 18; indices < 18")]
         if header[..4] != BGZF_MAGIC {
@@ -266,8 +271,8 @@ impl RegionBuf {
         {
             u16::from_le_bytes([header[16], header[17]])
         } else {
-            let extra_start = self.cursor + 12;
-            let extra_end = extra_start + xlen;
+            let extra_start = self.cursor.wrapping_add(12);
+            let extra_end = extra_start.wrapping_add(xlen);
             if extra_end > self.data.len() {
                 return Err(BgzfError::TruncatedBlock);
             }
@@ -280,8 +285,8 @@ impl RegionBuf {
             bgzf::find_bsize(&self.data[extra_start..extra_end]).ok_or(BgzfError::MissingBsize)?
         };
 
-        let total_block_size = bsize as usize + 1;
-        let block_end = self.cursor + total_block_size;
+        let total_block_size = (bsize as usize).wrapping_add(1);
+        let block_end = self.cursor.wrapping_add(total_block_size);
 
         if block_end > self.data.len() {
             // Partial block at end of loaded data — treat as EOF
@@ -291,7 +296,7 @@ impl RegionBuf {
             return Ok(false);
         }
 
-        let data_start = self.cursor + 12 + xlen;
+        let data_start = self.cursor.wrapping_add(12).wrapping_add(xlen);
         // block_end ≤ data.len() verified above; data_start ≤ block_end by construction.
         debug_assert!(
             data_start <= block_end,
@@ -309,22 +314,23 @@ impl RegionBuf {
             return Err(BgzfError::TruncatedBlock);
         }
 
-        let footer_start = remaining.len() - BGZF_FOOTER_SIZE;
+        let footer_start = remaining.len().wrapping_sub(BGZF_FOOTER_SIZE);
         // footer_start + 8 = remaining.len() ≤ remaining.len() is trivially true.
         debug_assert!(
-            footer_start + 8 <= remaining.len(),
+            footer_start.wrapping_add(8) <= remaining.len(),
             "footer overrun: {} > {}",
-            footer_start + 8,
+            footer_start.wrapping_add(8),
             remaining.len()
         );
         #[allow(clippy::indexing_slicing, reason = "footer_start + 8 = remaining.len()")]
-        let crc32_bytes: [u8; 4] = remaining[footer_start..footer_start + 4]
+        let crc32_bytes: [u8; 4] = remaining[footer_start..footer_start.wrapping_add(4)]
             .try_into()
             .map_err(|_| BgzfError::TruncatedBlock)?;
         let expected_crc = u32::from_le_bytes(crc32_bytes);
 
         #[allow(clippy::indexing_slicing, reason = "footer_start + 8 = remaining.len()")]
-        let isize_bytes: [u8; 4] = remaining[footer_start + 4..footer_start + 8]
+        let isize_bytes: [u8; 4] = remaining
+            [footer_start.wrapping_add(4)..footer_start.wrapping_add(8)]
             .try_into()
             .map_err(|_| BgzfError::TruncatedBlock)?;
         let uncompressed_size = u32::from_le_bytes(isize_bytes) as usize;
@@ -362,8 +368,8 @@ impl RegionBuf {
         }
 
         self.buf_pos = 0;
-        self.blocks_decompressed += 1;
-        self.decompressed_bytes += actual as u64;
+        self.blocks_decompressed = self.blocks_decompressed.wrapping_add(1);
+        self.decompressed_bytes = self.decompressed_bytes.wrapping_add(actual as u64);
         Ok(true)
     }
 
@@ -375,15 +381,18 @@ impl RegionBuf {
             if self.buf_pos >= self.buf.len() && !self.read_block()? {
                 return Err(BgzfError::UnexpectedEof);
             }
-            let avail = self.buf.len() - self.buf_pos;
-            let need = out.len() - written;
+            let avail = self.buf.len().wrapping_sub(self.buf_pos);
+            let need = out.len().wrapping_sub(written);
             let n = avail.min(need);
-            let dst = out.get_mut(written..written + n).ok_or(BgzfError::TruncatedBlock)?;
-            let src =
-                self.buf.get(self.buf_pos..self.buf_pos + n).ok_or(BgzfError::TruncatedBlock)?;
+            let dst =
+                out.get_mut(written..written.wrapping_add(n)).ok_or(BgzfError::TruncatedBlock)?;
+            let src = self
+                .buf
+                .get(self.buf_pos..self.buf_pos.wrapping_add(n))
+                .ok_or(BgzfError::TruncatedBlock)?;
             dst.copy_from_slice(src);
-            self.buf_pos += n;
-            written += n;
+            self.buf_pos = self.buf_pos.wrapping_add(n);
+            written = written.wrapping_add(n);
         }
         Ok(())
     }
@@ -394,7 +403,7 @@ impl RegionBuf {
             return Err(BgzfError::UnexpectedEof);
         }
         let b = self.buf.get(self.buf_pos).copied().ok_or(BgzfError::TruncatedBlock)?;
-        self.buf_pos += 1;
+        self.buf_pos = self.buf_pos.wrapping_add(1);
         Ok(b)
     }
 
@@ -425,12 +434,14 @@ impl RegionBuf {
         }
 
         // Fast-path u32 read: all 4 bytes in the current block.
-        let block_size = if self.buf_pos + 4 <= self.buf.len() {
-            let bytes =
-                self.buf.get(self.buf_pos..self.buf_pos + 4).ok_or(BgzfError::TruncatedBlock)?;
+        let block_size = if self.buf_pos.wrapping_add(4) <= self.buf.len() {
+            let bytes = self
+                .buf
+                .get(self.buf_pos..self.buf_pos.wrapping_add(4))
+                .ok_or(BgzfError::TruncatedBlock)?;
             let val = u32::from_le_bytes(bytes.try_into().map_err(|_| BgzfError::TruncatedBlock)?)
                 as usize;
-            self.buf_pos += 4;
+            self.buf_pos = self.buf_pos.wrapping_add(4);
             val
         } else {
             let mut len_buf = [0u8; 4];
@@ -445,12 +456,12 @@ impl RegionBuf {
         }
 
         // Fast path: the entire record body is already in the decompressed buffer.
-        if self.buf_pos + block_size <= self.buf.len() {
+        if self.buf_pos.wrapping_add(block_size) <= self.buf.len() {
             let slice = self
                 .buf
-                .get(self.buf_pos..self.buf_pos + block_size)
+                .get(self.buf_pos..self.buf_pos.wrapping_add(block_size))
                 .ok_or(BgzfError::TruncatedBlock)?;
-            self.buf_pos += block_size;
+            self.buf_pos = self.buf_pos.wrapping_add(block_size);
             return Ok(slice);
         }
 
@@ -503,7 +514,7 @@ fn read_all<R: Read>(reader: &mut R, buf: &mut [u8]) -> usize {
         #[allow(clippy::indexing_slicing, reason = "total < buf.len() by loop condition")]
         match reader.read(&mut buf[total..]) {
             Ok(0) => break,
-            Ok(n) => total += n,
+            Ok(n) => total = total.wrapping_add(n),
             Err(_) => break,
         }
     }
@@ -519,7 +530,7 @@ fn merge_chunks(chunks: &[Chunk]) -> Vec<MergedRange> {
             let start = c.begin.block_offset();
             // end's block_offset points to the block containing the last byte;
             // extend by max block size to ensure we capture the full final block.
-            let end = c.end.block_offset() + MAX_BLOCK_SIZE as u64;
+            let end = c.end.block_offset().saturating_add(MAX_BLOCK_SIZE as u64);
             (start, end)
         })
         .collect();
@@ -541,6 +552,7 @@ fn merge_chunks(chunks: &[Chunk]) -> Vec<MergedRange> {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic is not safety-critical")]
 mod tests {
     use super::*;
 

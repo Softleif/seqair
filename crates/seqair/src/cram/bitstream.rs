@@ -57,6 +57,10 @@ impl<'a> BitReader<'a> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "test-only arithmetic on bounded constants and small test values"
+)]
 mod tests {
     use super::*;
     use proptest::prelude::*;

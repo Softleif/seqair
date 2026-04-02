@@ -376,6 +376,10 @@ fn parse_tag_encoding_map(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "test-only arithmetic on known-valid CRAM file data"
+)]
 mod tests {
     use super::*;
 

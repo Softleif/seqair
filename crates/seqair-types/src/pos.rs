@@ -167,7 +167,7 @@ impl Pos<One> {
     #[inline]
     pub fn to_zero_based(self) -> Pos<Zero> {
         // 1-based min is 1, so result is >= 0 and < u32::MAX — NonMaxU32 invariant always holds.
-        NonMaxU32::new(self.value.get() - 1)
+        NonMaxU32::new(self.value.get().wrapping_sub(1))
             .map(|v| Pos { value: v, _system: PhantomData })
             .expect("BUG: to_zero_based produced u32::MAX (impossible for valid Pos<One>)")
     }
@@ -218,7 +218,7 @@ impl<S> Pos<S> {
     /// Checked position + offset. Returns `None` if result is negative, exceeds u32 range, or hits the niche.
     #[inline]
     pub fn checked_add_offset(self, offset: Offset) -> Option<Self> {
-        let result = self.value.get() as i64 + offset.0;
+        let result = (self.value.get() as i64).wrapping_add(offset.0);
         let result_u32 = u32::try_from(result).ok()?;
         NonMaxU32::new(result_u32).map(|v| Self { value: v, _system: PhantomData })
     }
@@ -227,7 +227,7 @@ impl<S> Pos<S> {
     /// Checked position - offset. Returns `None` if result is negative, exceeds u32 range, or hits the niche.
     #[inline]
     pub fn checked_sub_offset(self, offset: Offset) -> Option<Self> {
-        self.checked_add_offset(Offset(-offset.0))
+        self.checked_add_offset(Offset(offset.0.wrapping_neg()))
     }
 }
 
@@ -240,7 +240,7 @@ impl<S> Sub for Pos<S> {
     type Output = Offset;
     #[inline]
     fn sub(self, rhs: Self) -> Offset {
-        Offset(self.value.get() as i64 - rhs.value.get() as i64)
+        Offset((self.value.get() as i64).wrapping_sub(rhs.value.get() as i64))
     }
 }
 
@@ -353,6 +353,7 @@ impl Pos<One> {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 mod tests {
     use proptest::prelude::*;
 

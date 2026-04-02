@@ -2,6 +2,7 @@
 //!
 //! All libraries use libdeflate for BGZF decompression (fair comparison).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#![allow(clippy::arithmetic_side_effects)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;

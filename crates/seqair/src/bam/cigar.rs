@@ -81,7 +81,7 @@ pub fn calc_matches_indels(cigar_bytes: &[u8]) -> (u32, u32) {
     let mut indels = 0u32;
     let n_ops = cigar_bytes.len() / 4;
     for i in 0..n_ops {
-        let op = u32::from_le_bytes(read4(cigar_bytes, i * 4));
+        let op = u32::from_le_bytes(read4(cigar_bytes, i.wrapping_mul(4)));
         let len = op >> 4;
         let op_type = (op & 0xF) as u8;
         match op_type {
@@ -350,6 +350,7 @@ fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
 mod tests {
     use super::*;
 

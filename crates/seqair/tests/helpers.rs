@@ -1,5 +1,6 @@
 //! Shared test helpers for building synthetic BAM records.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(clippy::arithmetic_side_effects)]
 #![allow(dead_code)]
 
 pub fn cigar_op(len: u32, op: u8) -> u32 {

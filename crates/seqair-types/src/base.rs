@@ -274,9 +274,9 @@ unsafe fn from_ascii_neon(bytes: &mut [u8]) {
 
     let len = bytes.len();
     let ptr = bytes.as_mut_ptr();
-    let mut i = 0;
+    let mut i: usize = 0;
 
-    while i + 16 <= len {
+    while i.wrapping_add(16) <= len {
         // Safety: pointer ops below are valid because `i + 16 <= len` guarantees
         // we never read/write past the end of the slice.
         unsafe {
@@ -293,7 +293,7 @@ unsafe fn from_ascii_neon(bytes: &mut [u8]) {
 
             vst1q_u8(ptr.add(i), result);
         }
-        i += 16;
+        i = i.wrapping_add(16);
     }
 
     debug_assert!(i <= bytes.len(), "NEON loop overshot: i={i}, len={}", bytes.len());

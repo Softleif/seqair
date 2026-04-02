@@ -57,7 +57,9 @@ pub struct FaiEntry {
 impl FaiEntry {
     // r[impl fasta.index.offset_calculation]
     pub fn byte_offset(&self, pos: u64) -> u64 {
-        self.offset + (pos / self.linebases) * self.linewidth + (pos % self.linebases)
+        self.offset
+            .wrapping_add((pos / self.linebases).wrapping_mul(self.linewidth))
+            .wrapping_add(pos % self.linebases)
     }
 }
 
@@ -100,7 +102,7 @@ impl FastaIndex {
                 let found = line.split('\t').count();
                 return Err(FaiError::InvalidEntry {
                     path: path.to_path_buf(),
-                    line_number: line_num + 1,
+                    line_number: line_num.wrapping_add(1),
                     kind: FaiEntryError::TooFewFields { found },
                 });
             };
@@ -108,7 +110,7 @@ impl FastaIndex {
                 let found = line.split('\t').count();
                 return Err(FaiError::InvalidEntry {
                     path: path.to_path_buf(),
-                    line_number: line_num + 1,
+                    line_number: line_num.wrapping_add(1),
                     kind: FaiEntryError::TooManyFields { found },
                 });
             }
@@ -123,21 +125,21 @@ impl FastaIndex {
             if linebases == 0 {
                 return Err(FaiError::InvalidEntry {
                     path: path.to_path_buf(),
-                    line_number: line_num + 1,
+                    line_number: line_num.wrapping_add(1),
                     kind: FaiEntryError::ZeroLinebases { name },
                 });
             }
             if linewidth < linebases {
                 return Err(FaiError::InvalidEntry {
                     path: path.to_path_buf(),
-                    line_number: line_num + 1,
+                    line_number: line_num.wrapping_add(1),
                     kind: FaiEntryError::LinewidthTooSmall { name, linebases, linewidth },
                 });
             }
             if length == 0 {
                 return Err(FaiError::InvalidEntry {
                     path: path.to_path_buf(),
-                    line_number: line_num + 1,
+                    line_number: line_num.wrapping_add(1),
                     kind: FaiEntryError::ZeroLength { name },
                 });
             }
@@ -145,7 +147,7 @@ impl FastaIndex {
             if name_to_idx.contains_key(&name) {
                 return Err(FaiError::InvalidEntry {
                     path: path.to_path_buf(),
-                    line_number: line_num + 1,
+                    line_number: line_num.wrapping_add(1),
                     kind: FaiEntryError::DuplicateName { name },
                 });
             }
@@ -186,12 +188,13 @@ fn parse_fai_field(
 ) -> Result<u64, FaiError> {
     s.parse().map_err(|_| FaiError::InvalidEntry {
         path: path.to_path_buf(),
-        line_number: line_num + 1,
+        line_number: line_num.wrapping_add(1),
         kind: FaiEntryError::InvalidField { field: field_name, raw_value: s.to_string() },
     })
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic is not safety-critical")]
 mod tests {
     use super::*;
     use std::path::PathBuf;

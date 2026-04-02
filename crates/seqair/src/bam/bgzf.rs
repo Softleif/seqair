@@ -226,14 +226,16 @@ impl<R: Read + Seek> BgzfReader<R> {
             // We already consumed 6 bytes of extra data (bytes 12-17 in header).
             // If xlen > 6, read the rest. Then search all extra data for BC.
             let already_read = 6usize.min(xlen);
-            let remaining = xlen - already_read;
+            let remaining = xlen.wrapping_sub(already_read);
 
             let mut extra_data = Vec::with_capacity(xlen);
-            extra_data.extend_from_slice(header.get(12..12 + already_read).unwrap_or(&[]));
+            extra_data.extend_from_slice(
+                header.get(12..12usize.wrapping_add(already_read)).unwrap_or(&[]),
+            );
 
             if remaining > 0 {
                 let start = extra_data.len();
-                extra_data.resize(start + remaining, 0);
+                extra_data.resize(start.wrapping_add(remaining), 0);
                 #[allow(
                     clippy::indexing_slicing,
                     reason = "start = pre-resize len, within bounds after resize"
@@ -496,6 +498,7 @@ pub(crate) fn find_bsize(extra: &[u8]) -> Option<u16> {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test code with controlled values")]
 mod tests {
     use super::*;
 

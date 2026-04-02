@@ -165,6 +165,7 @@ pub struct BlockLocation {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic is not safety-critical")]
 mod tests {
     use super::*;
     use std::path::PathBuf;

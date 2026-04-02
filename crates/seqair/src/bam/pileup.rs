@@ -474,6 +474,7 @@ impl Drop for PileupEngine {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
 mod tests {
     use super::*;
 

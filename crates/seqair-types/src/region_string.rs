@@ -153,6 +153,7 @@ mod hts {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
 mod tests {
     use super::*;
     use std::str::FromStr;

@@ -155,11 +155,11 @@ impl BamIndex {
         let l_nm = read_i32(&data, &mut pos)? as usize;
 
         // Skip concatenated sequence names
-        if data.len() < pos + l_nm {
+        if data.len() < pos.wrapping_add(l_nm) {
             return Err(BaiError::TruncatedTabixHeader { reason: "names extend past end of data" });
         }
         // TODO: r[index.edge.name_mismatch] — compare tabix names against SAM header @SQ names
-        pos += l_nm;
+        pos = pos.wrapping_add(l_nm);
 
         // The remaining data is identical to BAI format (bins, chunks, linear index)
         // but we already read n_ref from the tabix header
@@ -192,7 +192,7 @@ impl BamIndex {
         };
         let start_u64 = start.as_u64();
         let end_u64 = end.as_u64();
-        let candidate_bins = reg2bins(start_u64, end_u64 + 1);
+        let candidate_bins = reg2bins(start_u64, end_u64.wrapping_add(1));
         let linear_min = linear_index_min(ref_idx, start_u64);
         let mut result = Vec::new();
         for bin in &ref_idx.bins {
@@ -223,7 +223,7 @@ impl BamIndex {
 
         let start_u64 = start.as_u64();
         let end_u64 = end.as_u64();
-        let candidate_bins = reg2bins(start_u64, end_u64 + 1); // reg2bins uses half-open
+        let candidate_bins = reg2bins(start_u64, end_u64.wrapping_add(1)); // reg2bins uses half-open
 
         // Linear index: minimum virtual offset for reads starting at or after `start`
         let linear_min = linear_index_min(ref_idx, start_u64);
@@ -275,11 +275,11 @@ fn merge_overlapping_chunks(chunks: &mut Vec<Chunk>) {
                 chunks[write].end = chunks[read].end;
             }
         } else {
-            write += 1;
+            write = write.wrapping_add(1);
             chunks[write] = chunks[read];
         }
     }
-    chunks.truncate(write + 1);
+    chunks.truncate(write.wrapping_add(1));
 }
 
 /// Parse the reference index data (shared between BAI and tabix).
@@ -322,13 +322,13 @@ fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<B
 
 /// Decompress all BGZF blocks from a BGZF-compressed file into a single buffer.
 fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
-    let mut result = Vec::with_capacity(compressed.len() * 3);
+    let mut result = Vec::with_capacity(compressed.len().wrapping_mul(3));
     let mut offset = 0;
     let mut decompressor = libdeflater::Decompressor::new();
 
     while offset < compressed.len() {
         // Check for BGZF header
-        let remaining = compressed.len() - offset;
+        let remaining = compressed.len().wrapping_sub(offset);
         if remaining < 18 {
             break; // EOF or truncated block
         }
@@ -345,9 +345,9 @@ fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
         // BSIZE from the BGZF extra field at offset 16-17 (after standard 12-byte gzip
         // header + 6-byte extra field header)
         #[allow(clippy::indexing_slicing, reason = "remaining >= 18 checked above")]
-        let bsize = u16::from_le_bytes([block[16], block[17]]) as usize + 1;
+        let bsize = (u16::from_le_bytes([block[16], block[17]]) as usize).wrapping_add(1);
 
-        if offset + bsize > compressed.len() {
+        if offset.wrapping_add(bsize) > compressed.len() {
             return Err(BaiError::Bgzf { source: BgzfError::TruncatedBlock });
         }
 
@@ -355,43 +355,45 @@ fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
         // ISIZE (uncompressed size) from the last 4 bytes of the block
         if bsize < 18 {
             return Err(BaiError::Bgzf {
-                source: BgzfError::BlockSizeTooSmall { bsize: (bsize - 1) as u16 },
+                source: BgzfError::BlockSizeTooSmall { bsize: bsize.wrapping_sub(1) as u16 },
             });
         }
         #[allow(clippy::indexing_slicing, reason = "bsize >= 18 checked above")]
-        let isize_bytes = &block[bsize - 4..bsize];
+        let isize_bytes = &block[bsize.wrapping_sub(4)..bsize];
         let isize = u32::from_le_bytes(
             isize_bytes.try_into().unwrap_or_else(|_| unreachable!("bsize >= 18")),
         ) as usize;
 
         if isize == 0 {
-            offset += bsize;
+            offset = offset.wrapping_add(bsize);
             continue; // EOF block
         }
 
         // Compressed data starts at offset 18, ends at bsize - 8 (before CRC32 + ISIZE)
         if bsize < 26 {
             return Err(BaiError::Bgzf {
-                source: BgzfError::BlockSizeTooSmall { bsize: (bsize - 1) as u16 },
+                source: BgzfError::BlockSizeTooSmall { bsize: bsize.wrapping_sub(1) as u16 },
             });
         }
         #[allow(clippy::indexing_slicing, reason = "bsize >= 26 checked above")]
-        let cdata = &block[18..bsize - 8];
+        let cdata = &block[18..bsize.wrapping_sub(8)];
 
         let start = result.len();
-        result.resize(start + isize, 0);
+        result.resize(start.wrapping_add(isize), 0);
         debug_assert!(
-            start + isize <= result.len(),
+            start.wrapping_add(isize) <= result.len(),
             "result overrun: {} > {}",
-            start + isize,
+            start.wrapping_add(isize),
             result.len()
         );
         #[allow(clippy::indexing_slicing, reason = "just resized to start + isize")]
-        decompressor.deflate_decompress(cdata, &mut result[start..start + isize]).map_err(
-            |source| BaiError::Bgzf { source: BgzfError::DecompressionFailed { source } },
-        )?;
+        decompressor
+            .deflate_decompress(cdata, &mut result[start..start.wrapping_add(isize)])
+            .map_err(|source| BaiError::Bgzf {
+                source: BgzfError::DecompressionFailed { source },
+            })?;
 
-        offset += bsize;
+        offset = offset.wrapping_add(bsize);
     }
 
     Ok(result)
@@ -443,11 +445,11 @@ fn reg2bins(beg: u64, end: u64) -> Vec<u32> {
     ];
 
     for &(offset, shift) in &levels {
-        let mut k = offset + (beg >> shift) as u32;
-        let end_k = offset + (end.saturating_sub(1) >> shift) as u32;
+        let mut k = offset.wrapping_add((beg >> shift) as u32);
+        let end_k = offset.wrapping_add((end.saturating_sub(1) >> shift) as u32);
         while k <= end_k {
             bins.push(k);
-            k += 1;
+            k = k.wrapping_add(1);
         }
     }
 
@@ -455,27 +457,34 @@ fn reg2bins(beg: u64, end: u64) -> Vec<u32> {
 }
 
 fn read_i32(data: &[u8], pos: &mut usize) -> Result<i32, BaiError> {
-    let bytes: [u8; 4] =
-        data.get(*pos..*pos + 4).and_then(|s| s.try_into().ok()).ok_or(BaiError::Truncated)?;
-    *pos += 4;
+    let bytes: [u8; 4] = data
+        .get(*pos..pos.wrapping_add(4))
+        .and_then(|s| s.try_into().ok())
+        .ok_or(BaiError::Truncated)?;
+    *pos = pos.wrapping_add(4);
     Ok(i32::from_le_bytes(bytes))
 }
 
 fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, BaiError> {
-    let bytes: [u8; 4] =
-        data.get(*pos..*pos + 4).and_then(|s| s.try_into().ok()).ok_or(BaiError::Truncated)?;
-    *pos += 4;
+    let bytes: [u8; 4] = data
+        .get(*pos..pos.wrapping_add(4))
+        .and_then(|s| s.try_into().ok())
+        .ok_or(BaiError::Truncated)?;
+    *pos = pos.wrapping_add(4);
     Ok(u32::from_le_bytes(bytes))
 }
 
 fn read_u64(data: &[u8], pos: &mut usize) -> Result<u64, BaiError> {
-    let bytes: [u8; 8] =
-        data.get(*pos..*pos + 8).and_then(|s| s.try_into().ok()).ok_or(BaiError::Truncated)?;
-    *pos += 8;
+    let bytes: [u8; 8] = data
+        .get(*pos..pos.wrapping_add(8))
+        .and_then(|s| s.try_into().ok())
+        .ok_or(BaiError::Truncated)?;
+    *pos = pos.wrapping_add(8);
     Ok(u64::from_le_bytes(bytes))
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test code with controlled values")]
 mod tests {
     use super::*;
     use seqair_types::Pos;

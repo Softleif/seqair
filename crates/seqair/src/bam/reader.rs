@@ -227,22 +227,22 @@ impl<R: Read + Seek> IndexedBamReader<R> {
                     let rec_flags = u16::from_le_bytes([raw[14], raw[15]]);
 
                     if rec_tid != tid_i32 {
-                        skipped_tid += 1;
+                        skipped_tid = skipped_tid.saturating_add(1);
                         continue;
                     }
 
                     if rec_flags & FLAG_UNMAPPED != 0 {
-                        skipped_unmapped += 1;
+                        skipped_unmapped = skipped_unmapped.saturating_add(1);
                         continue;
                     }
 
                     let rec_end = compute_end_pos_from_raw(raw).unwrap_or(rec_pos);
                     if rec_pos > end || rec_end < start {
-                        skipped_out_of_range += 1;
+                        skipped_out_of_range = skipped_out_of_range.saturating_add(1);
                         continue;
                     }
 
-                    accepted += 1;
+                    accepted = accepted.saturating_add(1);
                     store.push_raw(raw).map_err(|source| BamError::RecordDecode { source })?;
                 }
             }
@@ -291,6 +291,7 @@ fn find_and_open_index(bam_path: &Path) -> Result<BamIndex, BamError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test code with controlled values")]
 mod tests {
     use super::*;
 

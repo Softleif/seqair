@@ -1,5 +1,6 @@
 //! Tests for BAM sequence encoding/decoding, including SIMD equivalence.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(clippy::arithmetic_side_effects)]
 use proptest::prelude::*;
 use seqair::bam::seq::{decode_seq, decode_seq_scalar, encode_seq};
 

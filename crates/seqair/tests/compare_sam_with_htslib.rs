@@ -1,6 +1,7 @@
 //! Cross-validates seqair's SAM reader against htslib reading the same .sam.gz file.
 //! This catches bugs that SAM-vs-BAM tests would miss (if both our readers had the same bug).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(clippy::arithmetic_side_effects)]
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos, RecordStore, Zero};
 use seqair::sam::reader::IndexedSamReader;

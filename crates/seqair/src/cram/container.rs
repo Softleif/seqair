@@ -156,6 +156,10 @@ fn read_ltf8_at(buf: &[u8], pos: usize, context: &'static str) -> Result<(u64, u
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "test-only arithmetic on known-valid CRAM file data"
+)]
 mod tests {
     use super::*;
 

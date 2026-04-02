@@ -755,6 +755,7 @@ fn parse_i64(bytes: &[u8]) -> Option<i64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic is not safety-critical")]
 mod tests {
     use super::*;
     use crate::bam::record_store::RecordStore;

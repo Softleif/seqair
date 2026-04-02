@@ -122,11 +122,11 @@ pub fn decode_slice(
             .ok_or(CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
             .to_zero_based()
             .as_i64();
-        let slice_ref_start = (slice_start_0based - ref_start_0based) as usize;
+        let slice_ref_start = slice_start_0based.wrapping_sub(ref_start_0based) as usize;
         // r[impl cram.slice.validated_lengths]
         let span = usize::try_from(sh.alignment_span)
             .map_err(|_| CramError::InvalidLength { value: sh.alignment_span })?;
-        let slice_ref_end = slice_ref_start + span;
+        let slice_ref_end = slice_ref_start.wrapping_add(span);
         if let Some(slice_ref) = reference_seq.get(slice_ref_start..slice_ref_end) {
             let computed =
                 md5::compute(slice_ref.iter().map(|b| b.to_ascii_uppercase()).collect::<Vec<u8>>());
@@ -134,7 +134,7 @@ pub fn decode_slice(
                 return Err(CramError::ReferenceMd5Mismatch {
                     contig: header.target_name(tid).unwrap_or("?").into(),
                     start: sh.alignment_start as u64,
-                    end: (sh.alignment_start + sh.alignment_span) as u64,
+                    end: sh.alignment_start.wrapping_add(sh.alignment_span) as u64,
                 });
             }
         }
@@ -148,7 +148,7 @@ pub fn decode_slice(
         let remaining =
             slice_data.get(pos..).ok_or(CramError::Truncated { context: "slice block" })?;
         let (blk, consumed) = block::parse_block(remaining)?;
-        pos += consumed;
+        pos = pos.wrapping_add(consumed);
 
         match blk.content_type {
             ContentType::CoreData => {
@@ -212,7 +212,7 @@ pub fn decode_slice(
             qual_buf,
             aux_buf,
         )?;
-        records_pushed += count;
+        records_pushed = records_pushed.wrapping_add(count);
     }
 
     Ok(records_pushed)
@@ -266,7 +266,7 @@ fn decode_record(
     // 5. AP (alignment position)
     let ap = ds.alignment_pos.decode(ctx)? as i64;
     let alignment_pos = if ch.preservation.ap_delta {
-        *prev_alignment_pos += ap;
+        *prev_alignment_pos = prev_alignment_pos.wrapping_add(ap);
         *prev_alignment_pos
     } else {
         *prev_alignment_pos = ap;
@@ -376,7 +376,7 @@ fn decode_record(
             qual_buf.resize(read_length, 0xFF);
         }
 
-        let end_pos_raw = pos_0based.as_i64() + result.ref_consumed as i64;
+        let end_pos_raw = pos_0based.as_i64().wrapping_add(result.ref_consumed as i64);
         let end_pos = Pos::<Zero>::try_from_i64(end_pos_raw)
             .ok_or(super::reader::CramError::InvalidPosition { value: end_pos_raw })?;
 
@@ -507,7 +507,7 @@ fn decode_features_and_reconstruct(
     for _ in 0..feature_count {
         let fc = ds.feature_code.decode(ctx)?;
         let fp = ds.feature_pos.decode(ctx)? as u32;
-        prev_read_pos += fp;
+        prev_read_pos = prev_read_pos.wrapping_add(fp);
         let read_pos = prev_read_pos;
 
         let data = match fc {
@@ -569,7 +569,7 @@ fn decode_features_and_reconstruct(
     }
 
     // Reconstruct sequence and CIGAR from reference + features
-    let ref_offset = (pos_0based - slice_start_0based) as usize;
+    let ref_offset = (pos_0based.wrapping_sub(slice_start_0based)) as usize;
     let mut read_pos = 0usize; // 0-based position in the read
     let mut ref_pos = 0usize; // 0-based position relative to alignment start on reference
     let mut ref_warned = false; // log at most one warning per reconstruction
@@ -597,24 +597,28 @@ fn decode_features_and_reconstruct(
     while read_pos < read_length {
         // Check for feature at current read position (1-based in features)
         if feature_idx < features.len()
-            && features.get(feature_idx).map(|f| f.read_pos as usize) == Some(read_pos + 1)
+            && features.get(feature_idx).map(|f| f.read_pos as usize)
+                == Some(read_pos.wrapping_add(1))
         {
             let feature = features
                 .get(feature_idx)
                 .ok_or(CramError::Truncated { context: "feature index" })?;
-            feature_idx += 1;
+            feature_idx = feature_idx.wrapping_add(1);
 
             match &feature.data {
                 // r[related cram.slice.ref_bounds_warning]
                 FeatureData::Substitution(code) => {
-                    let ref_base =
-                        ref_base_at(reference_seq, ref_offset + ref_pos, &mut ref_warned);
+                    let ref_base = ref_base_at(
+                        reference_seq,
+                        ref_offset.wrapping_add(ref_pos),
+                        &mut ref_warned,
+                    );
                     let read_base = ch.preservation.substitution_matrix.substitute(ref_base, *code);
                     bases_buf.push(Base::from(read_base));
                     push_cigar_op(&mut cigar_ops, 1, 0); // M
                     matching_bases = matching_bases.saturating_add(1); // substitutions count as alignment match
-                    read_pos += 1;
-                    ref_pos += 1;
+                    read_pos = read_pos.wrapping_add(1);
+                    ref_pos = ref_pos.wrapping_add(1);
                 }
                 FeatureData::Insertion(bases) => {
                     let len = bases.len();
@@ -623,18 +627,18 @@ fn decode_features_and_reconstruct(
                     }
                     push_cigar_op(&mut cigar_ops, len as u32, 1); // I
                     indel_bases = indel_bases.saturating_add(len as u32);
-                    read_pos += len;
+                    read_pos = read_pos.wrapping_add(len);
                 }
                 FeatureData::SingleInsertion(base) => {
                     bases_buf.push(Base::from(*base));
                     push_cigar_op(&mut cigar_ops, 1, 1); // I
                     indel_bases = indel_bases.saturating_add(1);
-                    read_pos += 1;
+                    read_pos = read_pos.wrapping_add(1);
                 }
                 FeatureData::Deletion(len) => {
                     push_cigar_op(&mut cigar_ops, *len, 2); // D
                     indel_bases = indel_bases.saturating_add(*len);
-                    ref_pos += *len as usize;
+                    ref_pos = ref_pos.wrapping_add(*len as usize);
                 }
                 FeatureData::SoftClip(bases) => {
                     let len = bases.len();
@@ -642,14 +646,14 @@ fn decode_features_and_reconstruct(
                         bases_buf.push(Base::from(b));
                     }
                     push_cigar_op(&mut cigar_ops, len as u32, 4); // S
-                    read_pos += len;
+                    read_pos = read_pos.wrapping_add(len);
                 }
                 FeatureData::HardClip(len) => {
                     push_cigar_op(&mut cigar_ops, *len, 5); // H
                 }
                 FeatureData::RefSkip(len) => {
                     push_cigar_op(&mut cigar_ops, *len, 3); // N
-                    ref_pos += *len as usize;
+                    ref_pos = ref_pos.wrapping_add(*len as usize);
                 }
                 FeatureData::Padding(len) => {
                     push_cigar_op(&mut cigar_ops, *len, 6); // P
@@ -658,8 +662,8 @@ fn decode_features_and_reconstruct(
                     bases_buf.push(Base::from(*base));
                     push_cigar_op(&mut cigar_ops, 1, 0); // M
                     matching_bases = matching_bases.saturating_add(1);
-                    read_pos += 1;
-                    ref_pos += 1;
+                    read_pos = read_pos.wrapping_add(1);
+                    ref_pos = ref_pos.wrapping_add(1);
                 }
                 FeatureData::Bases(bases) => {
                     let len = bases.len();
@@ -668,29 +672,33 @@ fn decode_features_and_reconstruct(
                     }
                     push_cigar_op(&mut cigar_ops, len as u32, 0); // M
                     matching_bases = matching_bases.saturating_add(len as u32);
-                    read_pos += len;
-                    ref_pos += len;
+                    read_pos = read_pos.wrapping_add(len);
+                    ref_pos = ref_pos.wrapping_add(len);
                 }
                 FeatureData::Qualities | FeatureData::Quality => {
                     // Quality features don't affect sequence or CIGAR
                     // Copy ref base as matching
-                    let ref_base =
-                        ref_base_at(reference_seq, ref_offset + ref_pos, &mut ref_warned);
+                    let ref_base = ref_base_at(
+                        reference_seq,
+                        ref_offset.wrapping_add(ref_pos),
+                        &mut ref_warned,
+                    );
                     bases_buf.push(Base::from(ref_base));
                     push_cigar_op(&mut cigar_ops, 1, 0); // M
                     matching_bases = matching_bases.saturating_add(1);
-                    read_pos += 1;
-                    ref_pos += 1;
+                    read_pos = read_pos.wrapping_add(1);
+                    ref_pos = ref_pos.wrapping_add(1);
                 }
             }
         } else {
             // No feature at this position — copy from reference (match)
-            let ref_base = ref_base_at(reference_seq, ref_offset + ref_pos, &mut ref_warned);
+            let ref_base =
+                ref_base_at(reference_seq, ref_offset.wrapping_add(ref_pos), &mut ref_warned);
             bases_buf.push(Base::from(ref_base));
             push_cigar_op(&mut cigar_ops, 1, 0); // M
             matching_bases = matching_bases.saturating_add(1);
-            read_pos += 1;
-            ref_pos += 1;
+            read_pos = read_pos.wrapping_add(1);
+            ref_pos = ref_pos.wrapping_add(1);
         }
     }
 
@@ -718,7 +726,7 @@ fn get_read_group_id(header: &BamHeader, rg_index: usize) -> Option<String> {
                     }
                 }
             }
-            idx += 1;
+            idx = idx.wrapping_add(1);
         }
     }
     None

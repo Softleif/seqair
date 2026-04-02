@@ -1,5 +1,6 @@
 //! Property-based tests for the FASTA reader.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(clippy::arithmetic_side_effects)]
 use proptest::prelude::*;
 use rust_htslib::faidx;
 use seqair::bam::{Pos, Zero};

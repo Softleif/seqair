@@ -1,5 +1,6 @@
 //! Tests for RecordStore: slab-based BAM record storage.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(clippy::arithmetic_side_effects)]
 use seqair::bam::record_store::RecordStore;
 use seqair::bam::{Pos, Zero};
 use seqair_types::Base;

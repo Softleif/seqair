@@ -492,6 +492,10 @@ fn decode_subexp(reader: &mut BitReader<'_>, k: u32) -> Option<i32> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "test-only arithmetic on bounded/proptest-generated values"
+)]
 mod tests {
     use super::*;
 
