@@ -163,7 +163,9 @@ pub fn decode_bases_into(encoded: &[u8], len: usize, out: &mut [u8]) {
     debug_assert!(out.len() >= len, "output buffer too small: {} < {}", out.len(), len);
     let required = len.div_ceil(2);
     if encoded.len() < required || out.len() < len {
-        if let Some(s) = out.get_mut(..len) { s.fill(b'N') }
+        if let Some(s) = out.get_mut(..len) {
+            s.fill(b'N')
+        }
         return;
     }
     #[cfg(target_arch = "x86_64")]
