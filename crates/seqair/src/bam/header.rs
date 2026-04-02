@@ -66,6 +66,9 @@ pub enum BamHeaderError {
     #[error("BAM header field `{field}` has negative value {value}")]
     NegativeLength { field: &'static str, value: i32 },
 
+    #[error("BAM header field `{field}` value {value} exceeds limit {limit} — data may be corrupt")]
+    FieldTooLarge { field: &'static str, value: usize, limit: usize },
+
     #[error("BGZF error reading BAM header")]
     Bgzf {
         #[from]
@@ -107,6 +110,13 @@ impl BamHeader {
             return Err(BamHeaderError::NegativeLength { field: "l_text", value: l_text_raw });
         }
         let l_text = l_text_raw as usize;
+        if l_text > 256 * 1024 * 1024 {
+            return Err(BamHeaderError::FieldTooLarge {
+                field: "l_text",
+                value: l_text,
+                limit: 256 * 1024 * 1024,
+            });
+        }
         let mut text_buf = vec![0u8; l_text];
         bgzf.read_exact_into(&mut text_buf)?;
         let header_text = std::str::from_utf8(&text_buf)
@@ -119,6 +129,13 @@ impl BamHeader {
             return Err(BamHeaderError::NegativeLength { field: "n_ref", value: n_ref_raw });
         }
         let n_ref = n_ref_raw as usize;
+        if n_ref > 1_000_000 {
+            return Err(BamHeaderError::FieldTooLarge {
+                field: "n_ref",
+                value: n_ref,
+                limit: 1_000_000,
+            });
+        }
         let mut targets = Vec::with_capacity(n_ref);
         let mut name_to_tid = HashMap::with_capacity(n_ref);
 
@@ -128,6 +145,13 @@ impl BamHeader {
                 return Err(BamHeaderError::NegativeLength { field: "l_name", value: l_name_raw });
             }
             let l_name = l_name_raw as usize;
+            if l_name > 256 * 1024 {
+                return Err(BamHeaderError::FieldTooLarge {
+                    field: "l_name",
+                    value: l_name,
+                    limit: 256 * 1024,
+                });
+            }
             let mut name_buf = vec![0u8; l_name];
             bgzf.read_exact_into(&mut name_buf)?;
             // Remove trailing NUL
