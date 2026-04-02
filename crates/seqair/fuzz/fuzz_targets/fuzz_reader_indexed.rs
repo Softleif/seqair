@@ -1,50 +1,72 @@
-//! Full-stack IndexedBamReader fuzz: BAM bytes → Cursor → from_bytes → fetch_into → pileup.
+//! Full-stack fuzz through IndexedReader<Cursor>: BAM+BAI bytes → IndexedReader →
+//! header access → fetch_into → pileup.
 //!
-//! Uses in-memory Cursor via IndexedBamReader::from_bytes (no tmpfiles needed).
-//! Seeded with real test.bam + test.bam.bai via symlinks for high coverage.
-//! Input: raw bytes split into BAM content + BAI content.
+//! Exercises the unified reader enum with cursor-backed I/O — the same dispatch
+//! path production code uses, just without file I/O.
 #![no_main]
 
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use seqair::bam::pileup::PileupEngine;
-use seqair::bam::reader::IndexedBamReader;
-use seqair::bam::record_store::RecordStore;
+use seqair::{
+    bam::{pileup::PileupEngine, record_store::RecordStore},
+    reader::FuzzReaders,
+};
 use seqair_types::{Offset, Pos, Zero};
 
-fuzz_target!(|data: &[u8]| {
-    // Need at least 8 bytes: 4 for split point, 4 minimum content
-    if data.len() < 8 || data.len() > 256 * 1024 {
+#[derive(Arbitrary, Debug)]
+struct Input {
+    readers: ReadersInput,
+    alignment: FastaInput,
+}
+
+#[derive(Arbitrary, Debug)]
+enum ReadersInput {
+    Bam { bam: Vec<u8>, bai: Vec<u8> },
+    Sam { sam: Vec<u8>, sai: Vec<u8> },
+    Cram { cram: Vec<u8>, crai: Vec<u8> },
+}
+
+#[derive(Arbitrary, Debug)]
+struct FastaInput {
+    fasta_gz: Vec<u8>,
+    fai: String,
+    gzi: Vec<u8>,
+}
+
+fuzz_target!(|data: Input| {
+    run(data);
+});
+
+fn run(data: Input) {
+    let FastaInput { fasta_gz, fai, gzi } = data.alignment;
+    let reader = match data.readers {
+        ReadersInput::Bam { bam, bai } => {
+            FuzzReaders::from_bam_bytes(bam, &bai, fasta_gz, &fai, &gzi)
+        }
+        ReadersInput::Sam { sam, sai } => return,
+        ReadersInput::Cram { cram, crai } => {
+            FuzzReaders::from_cram_bytes(cram, &crai, fasta_gz, &fai, &gzi)
+        }
+    };
+    let Ok(mut reader) = reader else {
         return;
-    }
-
-    // First 4 bytes encode the split point between BAM and BAI data
-    let split = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    let split = split % (data.len() - 4); // Ensure split is within bounds
-    let bam_data = &data[4..4 + split];
-    let bai_data = &data[4 + split..];
-
-    // Need minimum sizes for both
-    if bam_data.len() < 4 || bai_data.len() < 8 {
-        return;
-    }
-
-    let mut reader = match IndexedBamReader::from_bytes(bam_data.to_vec(), bai_data) {
-        Ok(r) => r,
-        Err(_) => return,
     };
 
+    // Exercise header through the IndexedReader dispatch
     let header = reader.header();
     let target_count = header.target_count();
-
-    // Try fetching from first contig
     if target_count == 0 {
         return;
     }
+    for i in 0..target_count.min(50) {
+        let _ = header.target_name(i as u32);
+        let _ = header.target_len(i as u32);
+    }
 
+    // fetch_into through IndexedReader dispatch
     let start = Pos::<Zero>::new(0).unwrap();
-    let end = match start.checked_add_offset(Offset::new(10_000)) {
-        Some(p) => p,
-        None => return,
+    let Some(end) = start.checked_add_offset(Offset::new(10_000)) else {
+        return;
     };
 
     let mut store = RecordStore::new();
@@ -54,14 +76,16 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // Run pileup over fetched records
+    // Pileup
     let mut engine = PileupEngine::new(store, start, end);
     engine.set_max_depth(50);
     for col in engine.by_ref().take(1000) {
         let _depth = col.depth();
+        let _mdepth = col.match_depth();
         for aln in col.alignments() {
             let _op = aln.op();
             let _base = aln.base();
+            let _qual = aln.qual();
         }
     }
-});
+}
