@@ -61,7 +61,7 @@ impl RmsAccumulator {
     #[inline]
     pub fn add_squared(&mut self, x_sq: f64) {
         self.sum_of_squares += x_sq;
-        self.count += 1;
+        self.count = self.count.saturating_add(1);
     }
 
     /// Computes the final RMS from accumulated values.

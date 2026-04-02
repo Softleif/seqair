@@ -23,6 +23,7 @@ indexing_slicing = "warn"
 undocumented_unsafe_blocks = "deny"
 unwrap_used = "warn"
 unwrap_in_result = "warn"
+arithmetic_side_effects = "warn"
 
 [profile.dev.package]
 rand_chacha.opt-level = 3
