@@ -17,13 +17,11 @@ fuzz_target!(|data: &[u8]| {
     let Some(input) = Input::parse(data) else {
         return;
     };
-
-    let fai_str = match std::str::from_utf8(input.fai) {
-        Ok(s) => s,
-        Err(_) => return,
+    let Ok(fai_str) = std::str::from_utf8(input.fai) else {
+        return;
     };
 
-    let mut readers = match input.format {
+    let readers = match input.format {
         Format::Bam => FuzzReaders::from_bam_bytes(
             input.data1.to_vec(),
             input.data2,
