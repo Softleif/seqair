@@ -253,6 +253,12 @@ unsafe fn decode_bases_into_ssse3(encoded: &[u8], len: usize, out: &mut [u8]) {
 
     debug_assert!(i <= full_bytes, "SSSE3 base loop overshot: i={i}, full_bytes={full_bytes}");
     debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+    debug_assert!(
+        full_bytes <= encoded.len(),
+        "full_bytes={full_bytes} > encoded.len()={}",
+        encoded.len()
+    );
+    debug_assert!(len <= out.len(), "len={len} > out.len()={}", out.len());
 
     while i < full_bytes {
         let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
@@ -300,6 +306,12 @@ unsafe fn decode_bases_into_neon(encoded: &[u8], len: usize, out: &mut [u8]) {
 
         debug_assert!(i <= full_bytes, "NEON base loop overshot: i={i}, full_bytes={full_bytes}");
         debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+        debug_assert!(
+            full_bytes <= encoded.len(),
+            "full_bytes={full_bytes} > encoded.len()={}",
+            encoded.len()
+        );
+        debug_assert!(len <= out.len(), "len={len} > out.len()={}", out.len());
 
         #[allow(clippy::indexing_slicing, reason = "bounds ensured by loop")]
         {
@@ -418,6 +430,12 @@ unsafe fn decode_bases_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
 
     debug_assert!(i <= full_bytes, "SSSE3 base loop overshot: i={i}, full_bytes={full_bytes}");
     debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+    debug_assert!(
+        full_bytes <= encoded.len(),
+        "full_bytes={full_bytes} > encoded.len()={}",
+        encoded.len()
+    );
+    debug_assert!(len <= result.len(), "len={len} > result.len()={}", result.len());
 
     while i < full_bytes {
         let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
@@ -467,6 +485,12 @@ unsafe fn decode_bases_neon(encoded: &[u8], len: usize) -> Vec<u8> {
 
         debug_assert!(i <= full_bytes, "NEON base loop overshot: i={i}, full_bytes={full_bytes}");
         debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+        debug_assert!(
+            full_bytes <= encoded.len(),
+            "full_bytes={full_bytes} > encoded.len()={}",
+            encoded.len()
+        );
+        debug_assert!(len <= result.len(), "len={len} > result.len()={}", result.len());
 
         #[allow(clippy::indexing_slicing, reason = "bounds ensured by loop")]
         {
@@ -493,6 +517,12 @@ pub fn encode_seq(bases: &[u8]) -> Vec<u8> {
 
     #[allow(clippy::indexing_slicing, reason = "bounds ensured by step_by loop")]
     for j in (0..bases.len()).step_by(2) {
+        debug_assert!(j < bases.len(), "step_by loop: j={j} out of bounds len={}", bases.len());
+        debug_assert!(
+            j / 2 < n_bytes,
+            "encoded index j/2={} out of bounds n_bytes={n_bytes}",
+            j / 2
+        );
         let hi = ENCODE_BASE[bases[j] as usize];
         let lo = if j + 1 < bases.len() { ENCODE_BASE[bases[j + 1] as usize] } else { 0 };
         encoded[j / 2] = (hi << 4) | lo;
@@ -548,6 +578,12 @@ unsafe fn decode_seq_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
 
     debug_assert!(i <= full_bytes, "SSSE3 seq loop overshot: i={i}, full_bytes={full_bytes}");
     debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+    debug_assert!(
+        full_bytes <= encoded.len(),
+        "full_bytes={full_bytes} > encoded.len()={}",
+        encoded.len()
+    );
+    debug_assert!(len <= result.len(), "len={len} > result.len()={}", result.len());
 
     // Scalar tail
     while i < full_bytes {
@@ -606,6 +642,12 @@ unsafe fn decode_seq_neon(encoded: &[u8], len: usize) -> Vec<u8> {
 
         debug_assert!(i <= full_bytes, "NEON seq loop overshot: i={i}, full_bytes={full_bytes}");
         debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+        debug_assert!(
+            full_bytes <= encoded.len(),
+            "full_bytes={full_bytes} > encoded.len()={}",
+            encoded.len()
+        );
+        debug_assert!(len <= result.len(), "len={len} > result.len()={}", result.len());
 
         #[allow(
             clippy::indexing_slicing,

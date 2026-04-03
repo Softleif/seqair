@@ -271,6 +271,8 @@ fn merge_overlapping_chunks(chunks: &mut Vec<Chunk>) {
     }
     let mut write = 0;
     for read in 1..chunks.len() {
+        debug_assert!(read < chunks.len(), "read index OOB: read={read}, len={}", chunks.len());
+        debug_assert!(write < read, "write must lag behind read: write={write}, read={read}");
         #[allow(clippy::indexing_slicing, reason = "read < chunks.len() and write < read")]
         if chunks[read].begin <= chunks[write].end {
             // Overlapping or adjacent — extend the current merged chunk
@@ -361,6 +363,7 @@ fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
                 source: BgzfError::BlockSizeTooSmall { bsize: bsize.wrapping_sub(1) as u16 },
             });
         }
+        debug_assert!(bsize >= 18, "bsize should be >= 18 at this point: bsize={bsize}");
         #[allow(clippy::indexing_slicing, reason = "bsize >= 18 checked above")]
         let isize_bytes = &block[bsize.wrapping_sub(4)..bsize];
         let isize = u32::from_le_bytes(
@@ -378,6 +381,7 @@ fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
                 source: BgzfError::BlockSizeTooSmall { bsize: bsize.wrapping_sub(1) as u16 },
             });
         }
+        debug_assert!(bsize >= 26, "bsize should be >= 26 at this point: bsize={bsize}");
         #[allow(clippy::indexing_slicing, reason = "bsize >= 26 checked above")]
         let cdata = &block[18..bsize.wrapping_sub(8)];
 
