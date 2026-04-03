@@ -97,8 +97,10 @@ impl RegionBuf {
         }
 
         let merged = merge_chunks(chunks);
-        let total_bytes: usize =
-            merged.iter().map(|r| r.file_end.wrapping_sub(r.file_start) as usize).sum();
+        let total_bytes: usize = merged
+            .iter()
+            .map(|r| r.file_end.saturating_sub(r.file_start) as usize)
+            .fold(0usize, usize::saturating_add);
 
         // Reject obviously corrupt chunk ranges that would cause OOM
         const MAX_REGION_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
@@ -115,9 +117,12 @@ impl RegionBuf {
             let range_start = std::time::Instant::now();
             reader.seek(SeekFrom::Start(range.file_start)).map_err(|_| BgzfError::SeekFailed)?;
 
-            let len = range.file_end.wrapping_sub(range.file_start) as usize;
+            let len = range.file_end.saturating_sub(range.file_start) as usize;
+            if len > MAX_REGION_BYTES {
+                return Err(BgzfError::RecordTooLarge { block_size: len });
+            }
             let buf_start = data.len();
-            data.resize(buf_start.wrapping_add(len), 0);
+            data.resize(buf_start.saturating_add(len), 0);
             // Read as much as available — the last range may extend past EOF
             #[allow(
                 clippy::indexing_slicing,
