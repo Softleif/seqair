@@ -20,11 +20,11 @@ impl<'a> BitReader<'a> {
     /// Read a single bit, returning 0 or 1.
     pub fn read_bit(&mut self) -> Option<u8> {
         let byte = self.data.get(self.byte_pos)?;
-        let bit = (byte >> (7 - self.bit_pos)) & 1;
-        self.bit_pos += 1;
+        let bit = (byte >> (7u8.checked_sub(self.bit_pos)?)) & 1;
+        self.bit_pos = self.bit_pos.checked_add(1)?;
         if self.bit_pos == 8 {
             self.bit_pos = 0;
-            self.byte_pos += 1;
+            self.byte_pos = self.byte_pos.checked_add(1)?;
         }
         Some(bit)
     }
@@ -50,8 +50,8 @@ impl<'a> BitReader<'a> {
 
     /// Returns the number of bits remaining.
     pub fn remaining_bits(&self) -> usize {
-        let total_bits = self.data.len() * 8;
-        let consumed = self.byte_pos * 8 + self.bit_pos as usize;
+        let total_bits = self.data.len().saturating_mul(8);
+        let consumed = self.byte_pos.saturating_mul(8).saturating_add(self.bit_pos as usize);
         total_bits.saturating_sub(consumed)
     }
 }

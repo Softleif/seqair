@@ -42,15 +42,15 @@ impl SlimRecord {
     }
 
     fn cigar_len(&self) -> usize {
-        self.n_cigar_ops as usize * 4
+        (self.n_cigar_ops as usize).checked_mul(4).expect("cigar_len overflow")
     }
 
     fn qual_off(&self) -> usize {
-        self.cigar_off() + self.cigar_len()
+        self.cigar_off().checked_add(self.cigar_len()).expect("qual_off overflow")
     }
 
     fn aux_off(&self) -> usize {
-        self.qual_off() + self.seq_len as usize
+        self.qual_off().checked_add(self.seq_len as usize).expect("aux_off overflow")
     }
 }
 
@@ -89,8 +89,8 @@ impl RecordStore {
         let record_count_est = (uncompressed_est / 400).max(64);
         Self {
             records: Vec::with_capacity(record_count_est),
-            names: Vec::with_capacity(record_count_est * 25),
-            bases: Vec::with_capacity(record_count_est * 150),
+            names: Vec::with_capacity(record_count_est.saturating_mul(25)),
+            bases: Vec::with_capacity(record_count_est.saturating_mul(150)),
             data: Vec::with_capacity(uncompressed_est),
         }
     }

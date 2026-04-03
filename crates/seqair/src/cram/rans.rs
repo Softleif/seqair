@@ -80,8 +80,11 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     let chunk_size = dst.len() / 4;
 
     for pos in 0..chunk_size {
-        for si in 0..4 {
-            let out_idx = si * chunk_size + pos;
+        for si in 0usize..4 {
+            let out_idx = si
+                .checked_mul(chunk_size)
+                .and_then(|base| base.checked_add(pos))
+                .ok_or(CramError::Truncated { context: "rans order-1 out_idx overflow" })?;
             let ctx = prev_syms[si] as usize;
             let f = (states[si] & 0x0FFF) as u16;
             let sym = sym_tables[ctx][f as usize];

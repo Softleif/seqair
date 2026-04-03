@@ -24,7 +24,9 @@ fn format_aux_field(bytes: &[u8], max_len: usize) -> String {
     let truncated = bytes.len() > max_len;
     let slice = bytes.get(..max_len).unwrap_or(bytes);
     let slice = if truncated { slice } else { bytes };
-    let mut out = String::with_capacity(slice.len() + 4);
+    let mut out = String::with_capacity(
+        slice.len().checked_add(4).expect("string capacity cannot overflow usize"),
+    );
     for &b in slice {
         if b.is_ascii_graphic() || b == b' ' {
             out.push(b as char);

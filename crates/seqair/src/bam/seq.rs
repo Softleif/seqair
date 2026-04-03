@@ -66,7 +66,9 @@ pub fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
     let mut result = vec![0u8; len];
 
     #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + chunks_exact")]
-    for (chunk, &byte) in result[..full_bytes * 2].chunks_exact_mut(2).zip(&encoded[..full_bytes]) {
+    for (chunk, &byte) in
+        result[..full_bytes.saturating_mul(2)].chunks_exact_mut(2).zip(&encoded[..full_bytes])
+    {
         let pair = DECODE_PAIR[byte as usize];
         chunk[0] = pair[0];
         chunk[1] = pair[1];
@@ -74,7 +76,7 @@ pub fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
 
     if len % 2 == 1
         && let Some(byte) = encoded.get(full_bytes)
-        && let Some(slot) = result.get_mut(len - 1)
+        && let Some(slot) = result.get_mut(len.checked_sub(1).expect("len - 1 underflow"))
     {
         // byte is u8 so byte < 256 = DECODE_PAIR.len(); [0] is always valid on [u8; 2]
         #[allow(clippy::indexing_slicing, reason = "byte < 256 = DECODE_PAIR.len()")]
@@ -233,10 +235,12 @@ unsafe fn decode_bases_into_ssse3(encoded: &[u8], len: usize, out: &mut [u8]) {
         (_mm_loadu_si128(DECODE_BASE_TYPED.as_ptr() as *const __m128i), _mm_set1_epi8(0x0F))
     };
 
-    let mut i = 0;
-    let mut o = 0;
+    let mut i: usize = 0;
+    let mut o: usize = 0;
 
-    while i + 16 <= full_bytes {
+    while let Some(next) = i.checked_add(16)
+        && next <= full_bytes
+    {
         // Safety: see above; i + 16 <= full_bytes and o + 32 <= len are loop invariants.
         unsafe {
             let packed = _mm_loadu_si128(encoded.as_ptr().add(i) as *const __m128i);
@@ -247,14 +251,18 @@ unsafe fn decode_bases_into_ssse3(encoded: &[u8], len: usize, out: &mut [u8]) {
             let out_a = _mm_unpacklo_epi8(decoded_hi, decoded_lo);
             let out_b = _mm_unpackhi_epi8(decoded_hi, decoded_lo);
             _mm_storeu_si128(out.as_mut_ptr().add(o) as *mut __m128i, out_a);
-            _mm_storeu_si128(out.as_mut_ptr().add(o + 16) as *mut __m128i, out_b);
+            _mm_storeu_si128(out.as_mut_ptr().add(o.wrapping_add(16)) as *mut __m128i, out_b);
         }
-        i += 16;
-        o += 32;
+        i = i.wrapping_add(16); // already verified above
+        o = o.wrapping_add(32); // already verified above
     }
 
     debug_assert!(i <= full_bytes, "SSSE3 base loop overshot: i={i}, full_bytes={full_bytes}");
-    debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+    debug_assert!(
+        Some(o) == i.checked_mul(2),
+        "cursor invariant broken: o={o}, i*2={:?}",
+        i.checked_mul(2)
+    );
     debug_assert!(
         full_bytes <= encoded.len(),
         "full_bytes={full_bytes} > encoded.len()={}",
@@ -265,9 +273,9 @@ unsafe fn decode_bases_into_ssse3(encoded: &[u8], len: usize, out: &mut [u8]) {
     while i < full_bytes {
         let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
         out[o] = pair[0];
-        out[o + 1] = pair[1];
-        i += 1;
-        o += 2;
+        out[o.wrapping_add(1)] = pair[1];
+        i = i.wrapping_add(1);
+        o = o.wrapping_add(2);
     }
 
     if len % 2 == 1 {
@@ -416,10 +424,12 @@ unsafe fn decode_bases_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
         (_mm_loadu_si128(DECODE_BASE_TYPED.as_ptr() as *const __m128i), _mm_set1_epi8(0x0F))
     };
 
-    let mut i = 0;
-    let mut o = 0;
+    let mut i: usize = 0;
+    let mut o: usize = 0;
 
-    while i + 16 <= full_bytes {
+    while let Some(next) = i.checked_add(16)
+        && next <= full_bytes
+    {
         // Safety: see above; i + 16 <= full_bytes and o + 32 <= len are loop invariants.
         unsafe {
             let packed = _mm_loadu_si128(encoded.as_ptr().add(i) as *const __m128i);
@@ -430,14 +440,18 @@ unsafe fn decode_bases_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
             let out_a = _mm_unpacklo_epi8(decoded_hi, decoded_lo);
             let out_b = _mm_unpackhi_epi8(decoded_hi, decoded_lo);
             _mm_storeu_si128(result.as_mut_ptr().add(o) as *mut __m128i, out_a);
-            _mm_storeu_si128(result.as_mut_ptr().add(o + 16) as *mut __m128i, out_b);
+            _mm_storeu_si128(result.as_mut_ptr().add(o.wrapping_add(16)) as *mut __m128i, out_b);
         }
-        i += 16;
-        o += 32;
+        i = i.wrapping_add(16);
+        o = o.wrapping_add(32);
     }
 
     debug_assert!(i <= full_bytes, "SSSE3 base loop overshot: i={i}, full_bytes={full_bytes}");
-    debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+    debug_assert!(
+        Some(o) == i.checked_mul(2),
+        "cursor invariant broken: o={o}, i*2={:?}",
+        i.checked_mul(2)
+    );
     debug_assert!(
         full_bytes <= encoded.len(),
         "full_bytes={full_bytes} > encoded.len()={}",
@@ -448,9 +462,9 @@ unsafe fn decode_bases_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
     while i < full_bytes {
         let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
         result[o] = pair[0];
-        result[o + 1] = pair[1];
-        i += 1;
-        o += 2;
+        result[o.wrapping_add(1)] = pair[1];
+        i = i.wrapping_add(1);
+        o = o.wrapping_add(2);
     }
 
     if len % 2 == 1 {
@@ -567,11 +581,13 @@ unsafe fn decode_seq_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
     let (lut, mask_lo) =
         unsafe { (_mm_loadu_si128(DECODE_BASE.as_ptr() as *const __m128i), _mm_set1_epi8(0x0F)) };
 
-    let mut i = 0;
-    let mut o = 0;
+    let mut i: usize = 0;
+    let mut o: usize = 0;
 
     // 16 packed bytes → 32 decoded bases per iteration
-    while i + 16 <= full_bytes {
+    while let Some(next) = i.checked_add(16)
+        && next <= full_bytes
+    {
         // Safety: see above; i + 16 <= full_bytes and o + 32 <= len are loop invariants.
         unsafe {
             let packed = _mm_loadu_si128(encoded.as_ptr().add(i) as *const __m128i);
@@ -586,14 +602,18 @@ unsafe fn decode_seq_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
             let out_b = _mm_unpackhi_epi8(decoded_hi, decoded_lo);
 
             _mm_storeu_si128(result.as_mut_ptr().add(o) as *mut __m128i, out_a);
-            _mm_storeu_si128(result.as_mut_ptr().add(o + 16) as *mut __m128i, out_b);
+            _mm_storeu_si128(result.as_mut_ptr().add(o.wrapping_add(16)) as *mut __m128i, out_b);
         }
-        i += 16;
-        o += 32;
+        i = i.wrapping_add(16); // already verified above
+        o = o.wrapping_add(32); // already verified above
     }
 
     debug_assert!(i <= full_bytes, "SSSE3 seq loop overshot: i={i}, full_bytes={full_bytes}");
-    debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+    debug_assert!(
+        Some(o) == i.checked_mul(2),
+        "cursor invariant broken: o={o}, i*2={:?}",
+        i.checked_mul(2)
+    );
     debug_assert!(
         full_bytes <= encoded.len(),
         "full_bytes={full_bytes} > encoded.len()={}",
@@ -605,9 +625,9 @@ unsafe fn decode_seq_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
     while i < full_bytes {
         let pair = DECODE_PAIR[encoded[i] as usize];
         result[o] = pair[0];
-        result[o + 1] = pair[1];
-        i += 1;
-        o += 2;
+        result[o.wrapping_add(1)] = pair[1];
+        i = i.wrapping_add(1);
+        o = o.wrapping_add(2);
     }
 
     if len % 2 == 1 {

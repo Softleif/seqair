@@ -57,9 +57,11 @@ pub struct FaiEntry {
 impl FaiEntry {
     // r[impl fasta.index.offset_calculation]
     pub fn byte_offset(&self, pos: u64) -> u64 {
-        self.offset
-            .wrapping_add((pos / self.linebases).wrapping_mul(self.linewidth))
-            .wrapping_add(pos % self.linebases)
+        let line =
+            pos.checked_div(self.linebases).expect("linebases is non-zero, enforced by FAI parser");
+        let col =
+            pos.checked_rem(self.linebases).expect("linebases is non-zero, enforced by FAI parser");
+        self.offset.wrapping_add(line.wrapping_mul(self.linewidth)).wrapping_add(col)
     }
 }
 

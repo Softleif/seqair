@@ -43,42 +43,49 @@ pub fn parse_block(buf: &[u8]) -> Result<(Block, usize), CramError> {
     let mut pos = 0;
 
     let &method = buf.get(pos).ok_or(CramError::Truncated { context: "block method" })?;
-    pos += 1;
+    pos = pos.checked_add(1).ok_or(CramError::Truncated { context: "block method pos" })?;
 
     let &content_type_byte =
         buf.get(pos).ok_or(CramError::Truncated { context: "block content type" })?;
     let content_type = ContentType::from_byte(content_type_byte)?;
-    pos += 1;
+    pos = pos.checked_add(1).ok_or(CramError::Truncated { context: "block content type pos" })?;
 
     let (content_id_u32, n) = varint::decode_itf8(
         buf.get(pos..).ok_or(CramError::Truncated { context: "block content id" })?,
     )
     .ok_or(CramError::Truncated { context: "block content id" })?;
     let content_id = content_id_u32 as i32;
-    pos += n;
+    pos = pos.checked_add(n).ok_or(CramError::Truncated { context: "block content id pos" })?;
 
     let (compressed_size, n) = varint::decode_itf8(
         buf.get(pos..).ok_or(CramError::Truncated { context: "block compressed size" })?,
     )
     .ok_or(CramError::Truncated { context: "block compressed size" })?;
-    pos += n;
+    pos =
+        pos.checked_add(n).ok_or(CramError::Truncated { context: "block compressed size pos" })?;
 
     let (uncompressed_size, n) = varint::decode_itf8(
         buf.get(pos..).ok_or(CramError::Truncated { context: "block uncompressed size" })?,
     )
     .ok_or(CramError::Truncated { context: "block uncompressed size" })?;
-    pos += n;
+    pos = pos
+        .checked_add(n)
+        .ok_or(CramError::Truncated { context: "block uncompressed size pos" })?;
 
     // CRC32 covers everything from the method byte through the end of compressed data
     let crc_start = 0;
 
-    let compressed_end = pos + compressed_size as usize;
+    let compressed_end = pos
+        .checked_add(compressed_size as usize)
+        .ok_or(CramError::Truncated { context: "block compressed end overflow" })?;
     let compressed_data =
         buf.get(pos..compressed_end).ok_or(CramError::Truncated { context: "block data" })?;
     pos = compressed_end;
 
     // CRC32 is 4 bytes after the compressed data
-    let crc_bytes = buf.get(pos..pos + 4).ok_or(CramError::Truncated { context: "block CRC32" })?;
+    let crc_end =
+        pos.checked_add(4).ok_or(CramError::Truncated { context: "block CRC32 pos overflow" })?;
+    let crc_bytes = buf.get(pos..crc_end).ok_or(CramError::Truncated { context: "block CRC32" })?;
     let expected_crc = u32::from_le_bytes(
         crc_bytes.try_into().map_err(|_| CramError::Truncated { context: "block CRC32" })?,
     );

@@ -83,16 +83,32 @@ impl GziIndex {
 
         let mut entries: Vec<GziEntry> = Vec::with_capacity(count as usize);
         for i in 0..count as usize {
-            let base = 8 + i * 16;
+            let base = i
+                .checked_mul(16)
+                .and_then(|n| n.checked_add(8))
+                .ok_or_else(|| GziError::TruncatedEntry { path: path.to_path_buf(), index: i })?;
             let compressed_offset = u64::from_le_bytes(
-                data.get(base..base + 8).and_then(|s| s.try_into().ok()).ok_or_else(|| {
-                    GziError::TruncatedEntry { path: path.to_path_buf(), index: i }
-                })?,
+                data.get(
+                    base..base.checked_add(8).ok_or_else(|| GziError::TruncatedEntry {
+                        path: path.to_path_buf(),
+                        index: i,
+                    })?,
+                )
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| GziError::TruncatedEntry { path: path.to_path_buf(), index: i })?,
             );
+            let base8 = base
+                .checked_add(8)
+                .ok_or_else(|| GziError::TruncatedEntry { path: path.to_path_buf(), index: i })?;
             let uncompressed_offset = u64::from_le_bytes(
-                data.get(base + 8..base + 16).and_then(|s| s.try_into().ok()).ok_or_else(|| {
-                    GziError::TruncatedEntry { path: path.to_path_buf(), index: i }
-                })?,
+                data.get(
+                    base8..base8.checked_add(8).ok_or_else(|| GziError::TruncatedEntry {
+                        path: path.to_path_buf(),
+                        index: i,
+                    })?,
+                )
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| GziError::TruncatedEntry { path: path.to_path_buf(), index: i })?,
             );
             // r[impl fasta.gzi.sorted]
             if let Some(prev) = entries.last()

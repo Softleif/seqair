@@ -34,45 +34,62 @@ impl ContainerHeader {
     // r[impl cram.container.header]
     /// Returns the header and the number of bytes consumed.
     pub fn parse(buf: &[u8]) -> Result<Self, CramError> {
-        let mut pos = 0;
+        let mut pos: usize = 0;
 
         // length: fixed-width i32 LE
+        let length_end = pos
+            .checked_add(4)
+            .ok_or(CramError::Truncated { context: "container header length pos" })?;
         let length_bytes = buf
-            .get(pos..pos + 4)
+            .get(pos..length_end)
             .ok_or(CramError::Truncated { context: "container header length" })?;
         let length = i32::from_le_bytes(
             length_bytes
                 .try_into()
                 .map_err(|_| CramError::Truncated { context: "container header length" })?,
         );
-        pos += 4;
+        pos = length_end;
 
         let (ref_seq_id, n) = read_itf8_at(buf, pos, "container ref_seq_id")?;
-        pos += n;
+        pos = pos
+            .checked_add(n)
+            .ok_or(CramError::Truncated { context: "container ref_seq_id pos" })?;
 
         let (alignment_start, n) = read_itf8_at(buf, pos, "container alignment_start")?;
-        pos += n;
+        pos = pos
+            .checked_add(n)
+            .ok_or(CramError::Truncated { context: "container alignment_start pos" })?;
 
         let (alignment_span, n) = read_itf8_at(buf, pos, "container alignment_span")?;
-        pos += n;
+        pos = pos
+            .checked_add(n)
+            .ok_or(CramError::Truncated { context: "container alignment_span pos" })?;
 
         let (num_records, n) = read_itf8_at(buf, pos, "container num_records")?;
-        pos += n;
+        pos = pos
+            .checked_add(n)
+            .ok_or(CramError::Truncated { context: "container num_records pos" })?;
 
         let (record_counter_raw, n) = read_ltf8_at(buf, pos, "container record_counter")?;
         let record_counter = record_counter_raw as i64;
-        pos += n;
+        pos = pos
+            .checked_add(n)
+            .ok_or(CramError::Truncated { context: "container record_counter pos" })?;
 
         let (bases_raw, n) = read_ltf8_at(buf, pos, "container bases")?;
         let bases = bases_raw as i64;
-        pos += n;
+        pos = pos.checked_add(n).ok_or(CramError::Truncated { context: "container bases pos" })?;
 
         let (num_blocks, n) = read_itf8_at(buf, pos, "container num_blocks")?;
-        pos += n;
+        pos = pos
+            .checked_add(n)
+            .ok_or(CramError::Truncated { context: "container num_blocks pos" })?;
 
         // landmarks: ITF8 array (count followed by values)
         let (landmark_count, n) = read_itf8_at(buf, pos, "container landmark count")?;
-        pos += n;
+        pos = pos
+            .checked_add(n)
+            .ok_or(CramError::Truncated { context: "container landmark count pos" })?;
 
         let landmark_count_usize = landmark_count as usize;
         super::reader::check_alloc_size(
@@ -84,12 +101,17 @@ impl ContainerHeader {
             let (landmark, n) = read_itf8_at(buf, pos, "container landmark")?;
             let _ = i; // suppress unused warning
             landmarks.push(landmark as i32);
-            pos += n;
+            pos = pos
+                .checked_add(n)
+                .ok_or(CramError::Truncated { context: "container landmark pos" })?;
         }
 
         // CRC32: 4 bytes over the entire header up to this point
+        let crc_end = pos
+            .checked_add(4)
+            .ok_or(CramError::Truncated { context: "container header CRC32 pos" })?;
         let crc_bytes = buf
-            .get(pos..pos + 4)
+            .get(pos..crc_end)
             .ok_or(CramError::Truncated { context: "container header CRC32" })?;
         let expected_crc = u32::from_le_bytes(
             crc_bytes

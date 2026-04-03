@@ -89,7 +89,7 @@ impl HuffmanTable {
 
         for &(_sym, bit_len) in &self.symbols {
             if bit_len > prev_len {
-                let shift = bit_len - prev_len;
+                let shift = bit_len.checked_sub(prev_len)?;
                 if shift >= 32 {
                     return None;
                 }
