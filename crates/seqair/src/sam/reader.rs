@@ -476,7 +476,7 @@ fn parse_cigar(cigar_str: &[u8], buf: &mut Vec<u8>) -> Result<bool, SamError> {
 
         let packed = (len << 4) | op;
         buf.extend_from_slice(&packed.to_le_bytes());
-        num_start = i + 1;
+        num_start = i.checked_add(1).expect("CIGAR byte index cannot overflow usize");
     }
 
     Ok(true)
@@ -705,7 +705,7 @@ fn parse_u8(bytes: &[u8]) -> Option<u8> {
         if !b.is_ascii_digit() {
             return None;
         }
-        val = val.checked_mul(10)?.checked_add(u16::from(b - b'0'))?;
+        val = val.checked_mul(10)?.checked_add(u16::from(b.checked_sub(b'0')?))?;
     }
     u8::try_from(val).ok()
 }
@@ -719,7 +719,7 @@ fn parse_u16(bytes: &[u8]) -> Option<u16> {
         if !b.is_ascii_digit() {
             return None;
         }
-        val = val.checked_mul(10)?.checked_add(u32::from(b - b'0'))?;
+        val = val.checked_mul(10)?.checked_add(u32::from(b.checked_sub(b'0')?))?;
     }
     u16::try_from(val).ok()
 }
@@ -733,7 +733,7 @@ fn parse_u32(bytes: &[u8]) -> Option<u32> {
         if !b.is_ascii_digit() {
             return None;
         }
-        val = val.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
+        val = val.checked_mul(10)?.checked_add(u64::from(b.checked_sub(b'0')?))?;
     }
     u32::try_from(val).ok()
 }
@@ -749,9 +749,9 @@ fn parse_i64(bytes: &[u8]) -> Option<i64> {
         if !b.is_ascii_digit() {
             return None;
         }
-        val = val.checked_mul(10)?.checked_add(i64::from(b - b'0'))?;
+        val = val.checked_mul(10)?.checked_add(i64::from(b.checked_sub(b'0')?))?;
     }
-    if negative { Some(-val) } else { Some(val) }
+    if negative { Some(val.checked_neg()?) } else { Some(val) }
 }
 
 #[cfg(test)]

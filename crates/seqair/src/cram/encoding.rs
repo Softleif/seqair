@@ -108,7 +108,7 @@ impl HuffmanTable {
         for target_len in 1..=max_len {
             while bits_read < target_len {
                 value = (value << 1) | u32::from(reader.read_bit()?);
-                bits_read += 1;
+                bits_read = bits_read.checked_add(1)?;
             }
             for (i, &(sym, bl)) in self.symbols.iter().enumerate() {
                 if bl == target_len && *codes.get(i)? == value {
@@ -135,14 +135,14 @@ impl ExternalCursor {
 
     pub fn read_byte(&mut self) -> Option<u8> {
         let b = self.data.get(self.pos).copied()?;
-        self.pos += 1;
+        self.pos = self.pos.checked_add(1)?;
         Some(b)
     }
 
     pub fn read_itf8(&mut self) -> Option<u32> {
         let remaining = self.data.get(self.pos..)?;
         let (val, n) = varint::decode_itf8(remaining)?;
-        self.pos += n;
+        self.pos = self.pos.checked_add(n)?;
         Some(val)
     }
 
@@ -169,16 +169,16 @@ impl ExternalCursor {
         while self.pos < self.data.len() {
             if *self.data.get(self.pos)? == stop {
                 let result = self.data.get(start..self.pos)?.to_vec();
-                self.pos += 1; // skip stop byte
+                self.pos = self.pos.checked_add(1)?; // skip stop byte
                 return Some(result);
             }
-            self.pos += 1;
+            self.pos = self.pos.checked_add(1)?;
         }
         None
     }
 
     pub fn read_bytes(&mut self, n: usize) -> Option<Vec<u8>> {
-        let end = self.pos + n;
+        let end = self.pos.checked_add(n)?;
         let result = self.data.get(self.pos..end)?.to_vec();
         self.pos = end;
         Some(result)
@@ -232,19 +232,23 @@ impl IntEncoding {
                     .core
                     .read_bits(*bits)
                     .ok_or(CramError::Truncated { context: "beta int" })?;
-                Ok(raw as i32 - offset)
+                (raw as i32)
+                    .checked_sub(*offset)
+                    .ok_or(CramError::Truncated { context: "beta int offset overflow" })
             }
             // r[impl cram.encoding.subexp]
             Self::Subexp { offset, k } => {
                 let val = decode_subexp(&mut ctx.core, *k)
                     .ok_or(CramError::Truncated { context: "subexp int" })?;
-                Ok(val - offset)
+                val.checked_sub(*offset)
+                    .ok_or(CramError::Truncated { context: "subexp int offset overflow" })
             }
             // r[impl cram.encoding.gamma]
             Self::Gamma { offset } => {
                 let val = decode_gamma(&mut ctx.core)
                     .ok_or(CramError::Truncated { context: "gamma int" })?;
-                Ok(val - offset)
+                val.checked_sub(*offset)
+                    .ok_or(CramError::Truncated { context: "gamma int offset overflow" })
             }
         }
     }
@@ -468,29 +472,30 @@ fn parse_huffman_params(cursor: &mut &[u8]) -> Result<(Vec<i32>, Vec<u32>), Cram
 fn decode_gamma(reader: &mut BitReader<'_>) -> Option<i32> {
     let mut n = 0u32;
     while reader.read_bit()? == 0 {
-        n += 1;
+        n = n.checked_add(1)?;
     }
     if n == 0 {
         return Some(0);
     }
     let val = reader.read_bits(n)?;
-    Some(((1 << n) | val) as i32 - 1)
+    let combined = (1u32.checked_shl(n)? | val) as i32;
+    combined.checked_sub(1)
 }
 
 /// Decode sub-exponential code from a bit stream.
 fn decode_subexp(reader: &mut BitReader<'_>, k: u32) -> Option<i32> {
     let mut n = 0u32;
     while reader.read_bit()? == 1 {
-        n += 1;
+        n = n.checked_add(1)?;
     }
     if n == 0 {
         let val = reader.read_bits(k)?;
         return Some(val as i32);
     }
-    let bits = n + k - 1;
+    let bits = n.checked_add(k)?.checked_sub(1)?;
     let val = reader.read_bits(bits)?;
-    let base = (1u32 << (n + k - 1)) - (1u32 << k);
-    Some((base + val) as i32)
+    let base = 1u32.checked_shl(bits)?.checked_sub(1u32.checked_shl(k)?)?;
+    Some(base.checked_add(val)? as i32)
 }
 
 #[cfg(test)]

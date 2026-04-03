@@ -258,10 +258,20 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
             });
         }
 
-        let num_bases = (stop - start) as usize;
+        let num_bases =
+            stop.checked_sub(start).expect("stop > start is guaranteed by bounds check above")
+                as usize;
         let start_byte = entry.byte_offset(start);
-        let end_byte = entry.byte_offset(start + num_bases as u64 - 1) + 1;
-        let raw_len = (end_byte - start_byte) as usize;
+        let end_byte = entry.byte_offset(
+            (num_bases as u64)
+                .checked_sub(1)
+                .and_then(|n| start.checked_add(n))
+                .expect("num_bases >= 1 is guaranteed by stop > start"),
+        ) + 1;
+        let raw_len = end_byte
+            .checked_sub(start_byte)
+            .expect("end_byte >= start_byte for any valid FAI entry")
+            as usize;
 
         // r[impl fasta.plain.read]
         // r[impl fasta.plain.read_size]

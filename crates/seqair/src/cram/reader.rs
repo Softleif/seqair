@@ -431,8 +431,11 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             check_alloc_size(data_len, "container data")?;
             self.container_buf.clear();
             self.container_buf.resize(data_len, 0);
-            self.file
-                .seek(SeekFrom::Start(container_offset + container_header.header_size as u64))?;
+            self.file.seek(SeekFrom::Start(
+                container_offset
+                    .checked_add(container_header.header_size as u64)
+                    .ok_or(CramError::Truncated { context: "container seek offset overflow" })?,
+            ))?;
             self.file.read_exact(&mut self.container_buf)?;
 
             // Parse compression header (first block)
@@ -456,7 +459,10 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                             .ok_or(CramError::InvalidPosition { value: e.alignment_start })?
                             .to_zero_based()
                             .as_u64();
-                        let e_end = s + e.alignment_span as u64;
+                        let e_end =
+                            s.checked_add(e.alignment_span as u64).ok_or(CramError::Truncated {
+                                context: "crai alignment end overflow",
+                            })?;
                         let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
                         (s, e_end.min(ref_len))
                     }
@@ -473,7 +479,9 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     })?
                     .to_zero_based()
                     .as_u64();
-                let ref_end = ref_start + container_header.alignment_span as u64;
+                let ref_end = ref_start
+                    .checked_add(container_header.alignment_span as u64)
+                    .ok_or(CramError::Truncated { context: "container alignment end overflow" })?;
                 let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
                 (ref_start, ref_end.min(ref_len))
             };
@@ -544,7 +552,10 @@ fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, Cram
         .map_err(|_| CramError::Truncated { context: "header container negative length" })?;
     check_alloc_size(data_len, "header container data")?;
     let mut data = vec![0u8; data_len];
-    file.seek(SeekFrom::Start(pos + container_header.header_size as u64))?;
+    file.seek(SeekFrom::Start(
+        pos.checked_add(container_header.header_size as u64)
+            .ok_or(CramError::Truncated { context: "header container seek offset overflow" })?,
+    ))?;
     file.read_exact(&mut data)?;
 
     // Parse the file header block
@@ -566,10 +577,11 @@ fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, Cram
     );
     let text_len = usize::try_from(text_len_i32)
         .map_err(|_| CramError::InvalidLength { value: text_len_i32 })?;
-    let text_bytes = blk
-        .data
-        .get(4..4 + text_len)
-        .ok_or(CramError::Truncated { context: "file header text" })?;
+    let text_end = 4usize
+        .checked_add(text_len)
+        .ok_or(CramError::Truncated { context: "file header text length overflow" })?;
+    let text_bytes =
+        blk.data.get(4..text_end).ok_or(CramError::Truncated { context: "file header text" })?;
     let header_text =
         std::str::from_utf8(text_bytes).map_err(|source| CramError::HeaderNotUtf8 { source })?;
 

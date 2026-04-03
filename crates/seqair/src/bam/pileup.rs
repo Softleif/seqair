@@ -261,7 +261,12 @@ impl PileupEngine {
     }
 
     pub fn remaining_positions(&self) -> usize {
-        let diff = self.region_end.as_i64() - self.current_pos.as_i64() + 1;
+        let diff = self
+            .region_end
+            .as_i64()
+            .checked_sub(self.current_pos.as_i64())
+            .and_then(|d| d.checked_add(1))
+            .unwrap_or(0);
         diff.max(0) as usize
     }
 
@@ -472,7 +477,7 @@ impl Drop for PileupEngine {
                 target: super::region_buf::PROFILE_TARGET,
                 columns = self.columns_produced,
                 max_depth = self.max_active_depth,
-                active_cap = self.active.capacity() + self.active_end_pos.capacity(),
+                active_cap = self.active.capacity().saturating_add(self.active_end_pos.capacity()),
                 "pileup_engine",
             );
         }

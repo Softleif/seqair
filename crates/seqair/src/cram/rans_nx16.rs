@@ -131,7 +131,11 @@ fn read_states(src: &mut &[u8], state_count: usize) -> Result<Vec<u32>, CramErro
 // ── Core rANS step functions ─────────────────────────────────────────
 
 fn state_cumulative_frequency(s: u32, bits: u32) -> u32 {
-    s & ((1 << bits) - 1)
+    let mask = 1u32
+        .checked_shl(bits)
+        .and_then(|v| v.checked_sub(1))
+        .expect("bits < 32 for valid rANS state");
+    s & mask
 }
 
 fn cumulative_frequencies_symbol(
@@ -151,7 +155,8 @@ fn cumulative_frequencies_symbol(
 // SAFETY: spec guarantees g <= f * (s >> bits) + (s & mask) for valid frequency tables.
 // Use wrapping_sub for release-mode robustness against malformed data.
 fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
-    let result = f.wrapping_mul(s >> bits).wrapping_add(s & ((1 << bits) - 1));
+    let result =
+        f.wrapping_mul(s >> bits).wrapping_add(s & (1u32.wrapping_shl(bits).wrapping_sub(1)));
     debug_assert!(result >= g, "state_step underflow: {result} < {g}");
     // r[depends cram.codec.state_step_safety]
     result.wrapping_sub(g)
@@ -159,7 +164,11 @@ fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
 
 fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Result<u32, CramError> {
     if s < (1 << 15) {
-        s = (s << 16) + u32::from(read_u16_le(src)?);
+        let lo = u32::from(read_u16_le(src)?);
+        s = s
+            .checked_shl(16)
+            .and_then(|hi| hi.checked_add(lo))
+            .ok_or(CramError::Truncated { context: "rans_nx16 state renormalize overflow" })?;
     }
     Ok(s)
 }
@@ -262,7 +271,9 @@ fn normalize_frequencies(
         running = running
             .checked_mul(2)
             .ok_or(CramError::FrequencyNormalizationOverflow { sum: u64::from(sum) << shift })?;
-        shift += 1;
+        shift = shift
+            .checked_add(1)
+            .ok_or(CramError::FrequencyNormalizationOverflow { sum: u64::from(sum) })?;
     }
 
     for f in frequencies {
@@ -277,7 +288,8 @@ fn build_cumulative_frequencies(frequencies: &[u32; ALPHABET_SIZE]) -> [u32; ALP
     let mut f = 0u32;
 
     for (i, cf) in cumulative_frequencies.iter_mut().enumerate().skip(1) {
-        f += *frequencies.get(i - 1).unwrap_or(&0);
+        let prev = i.checked_sub(1).expect("skip(1) guarantees i ≥ 1");
+        f = f.saturating_add(*frequencies.get(prev).unwrap_or(&0));
         *cf = f;
     }
 
@@ -301,7 +313,10 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
     let mut states = read_states(src, state_count)?;
     let mut prev_syms = vec![0u8; state_count];
 
-    let chunk_size = dst.len() / state_count;
+    let chunk_size = dst
+        .len()
+        .checked_div(state_count)
+        .ok_or(CramError::Truncated { context: "rans_nx16 order-1 zero state count" })?;
 
     for i in 0..chunk_size {
         for (j, (state, prev_sym)) in states.iter_mut().zip(&mut prev_syms).enumerate() {
@@ -314,7 +329,10 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
                 f,
             );
 
-            let out_idx = j * chunk_size + i;
+            let out_idx = j
+                .checked_mul(chunk_size)
+                .and_then(|v| v.checked_add(i))
+                .ok_or(CramError::Truncated { context: "rans_nx16 order-1 index overflow" })?;
             *dst.get_mut(out_idx)
                 .ok_or(CramError::Truncated { context: "rans_nx16 order-1 output" })? = sym;
 
@@ -325,7 +343,10 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
         }
     }
 
-    let last_chunk = &mut dst[chunk_size * state_count..];
+    let last_chunk_start = chunk_size
+        .checked_mul(state_count)
+        .ok_or(CramError::Truncated { context: "rans_nx16 order-1 last chunk offset overflow" })?;
+    let last_chunk = &mut dst[last_chunk_start..];
     if !last_chunk.is_empty() {
         let mut state = *states
             .last()
@@ -424,12 +445,11 @@ fn decode_stripe(src: &mut &[u8], uncompressed_size: usize) -> Result<Vec<u8>, C
     let compressed_sizes: Vec<usize> =
         (0..chunk_count).map(|_| read_uint7(src).map(|n| n as usize)).collect::<Result<_, _>>()?;
 
-    let uncompressed_sizes: Vec<usize> = (0..chunk_count)
-        .map(|i| {
-            let (q, r) = (uncompressed_size / chunk_count, uncompressed_size % chunk_count);
-            if r > i { q + 1 } else { q }
-        })
-        .collect();
+    // chunk_count > 0 is checked above; checked_div is still used to satisfy the lint.
+    let q = uncompressed_size.checked_div(chunk_count).ok_or(CramError::RansStripeZeroChunks)?;
+    let r = uncompressed_size.checked_rem(chunk_count).ok_or(CramError::RansStripeZeroChunks)?;
+    let uncompressed_sizes: Vec<usize> =
+        (0..chunk_count).map(|i| if r > i { q.saturating_add(1) } else { q }).collect();
 
     let chunks: Vec<Vec<u8>> = compressed_sizes
         .iter()
@@ -443,7 +463,10 @@ fn decode_stripe(src: &mut &[u8], uncompressed_size: usize) -> Result<Vec<u8>, C
     let mut dst = vec![0u8; uncompressed_size];
     for (i, chunk) in chunks.iter().enumerate() {
         for (j, &s) in chunk.iter().enumerate() {
-            let idx = j * chunk_count + i;
+            let idx = j
+                .checked_mul(chunk_count)
+                .and_then(|v| v.checked_add(i))
+                .ok_or(CramError::Truncated { context: "rans_nx16 stripe index overflow" })?;
             if let Some(d) = dst.get_mut(idx) {
                 *d = s;
             }
@@ -499,7 +522,9 @@ fn apply_bit_unpack(src: &[u8], ctx: &BitPackContext) -> Result<Vec<u8>, CramErr
 
 fn unpack(src: &[u8], mapping_table: &[u8], chunk_size: usize, dst: &mut [u8]) {
     let bits = u8::BITS as usize;
-    let shift = bits / chunk_size;
+    let shift = bits
+        .checked_div(chunk_size)
+        .expect("chunk_size is always 2, 4, or 8 from the match in apply_bit_unpack");
     let mask: u8 = (1u8 << shift).wrapping_sub(1);
 
     for (mut s, chunk) in src.iter().copied().zip(dst.chunks_mut(chunk_size)) {

@@ -138,7 +138,9 @@ impl RecordStore {
         unsafe {
             let out = std::slice::from_raw_parts_mut(bases_spare.as_mut_ptr() as *mut u8, seq_len);
             seq::decode_bases_into(packed_seq, seq_len, out);
-            self.bases.set_len(self.bases.len() + seq_len);
+            self.bases.set_len(
+                self.bases.len().checked_add(seq_len).expect("bases slab length overflow"),
+            );
         }
 
         // --- Write into data slab [cigar|qual|aux] ---
@@ -199,11 +201,12 @@ impl RecordStore {
                 let a_start = a.name_off as usize;
                 let b_start = b.name_off as usize;
                 let len = a.name_len as usize;
-                debug_assert!(a_start + len <= names.len(), "name slice OOB");
-                debug_assert!(b_start + len <= names.len(), "name slice OOB");
+                debug_assert!(a_start.saturating_add(len) <= names.len(), "name slice OOB");
+                debug_assert!(b_start.saturating_add(len) <= names.len(), "name slice OOB");
                 #[allow(clippy::indexing_slicing, reason = "offsets validated at push time")]
                 {
-                    names[a_start..a_start + len] == names[b_start..b_start + len]
+                    names[a_start..a_start.saturating_add(len)]
+                        == names[b_start..b_start.saturating_add(len)]
                 }
             }
         });
@@ -296,7 +299,7 @@ impl RecordStore {
     pub fn qname(&self, idx: u32) -> &[u8] {
         let rec = self.record(idx);
         let start = rec.name_off as usize;
-        let end = start + rec.name_len as usize;
+        let end = start.checked_add(rec.name_len as usize).expect("qname end overflow");
         debug_assert!(end <= self.names.len(), "qname slab overrun: {end} > {}", self.names.len());
         &self.names[start..end]
     }
@@ -304,7 +307,7 @@ impl RecordStore {
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
     pub fn cigar(&self, idx: u32) -> &[u8] {
         let rec = self.record(idx);
-        let end = rec.cigar_off() + rec.cigar_len();
+        let end = rec.cigar_off().checked_add(rec.cigar_len()).expect("cigar end overflow");
         debug_assert!(end <= self.data.len(), "cigar slab overrun: {end} > {}", self.data.len());
         &self.data[rec.cigar_off()..end]
     }
@@ -313,20 +316,23 @@ impl RecordStore {
     pub fn seq(&self, idx: u32) -> &[Base] {
         let rec = self.record(idx);
         let start = rec.bases_off as usize;
-        let end = start + rec.seq_len as usize;
+        let end = start.checked_add(rec.seq_len as usize).expect("seq end overflow");
         debug_assert!(end <= self.bases.len(), "bases slab overrun: {end} > {}", self.bases.len());
         &self.bases[start..end]
     }
 
     pub fn seq_at(&self, idx: u32, pos: usize) -> Base {
         let rec = self.record(idx);
-        self.bases.get(rec.bases_off as usize + pos).copied().unwrap_or(Base::Unknown)
+        self.bases
+            .get((rec.bases_off as usize).checked_add(pos).expect("seq_at offset overflow"))
+            .copied()
+            .unwrap_or(Base::Unknown)
     }
 
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
     pub fn qual(&self, idx: u32) -> &[u8] {
         let rec = self.record(idx);
-        let end = rec.qual_off() + rec.seq_len as usize;
+        let end = rec.qual_off().checked_add(rec.seq_len as usize).expect("qual end overflow");
         debug_assert!(end <= self.data.len(), "qual slab overrun: {end} > {}", self.data.len());
         &self.data[rec.qual_off()..end]
     }
@@ -334,7 +340,7 @@ impl RecordStore {
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
     pub fn aux(&self, idx: u32) -> &[u8] {
         let rec = self.record(idx);
-        let end = rec.aux_off() + rec.aux_len as usize;
+        let end = rec.aux_off().checked_add(rec.aux_len as usize).expect("aux end overflow");
         debug_assert!(end <= self.data.len(), "aux slab overrun: {end} > {}", self.data.len());
         &self.data[rec.aux_off()..end]
     }

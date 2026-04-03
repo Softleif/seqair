@@ -136,15 +136,21 @@ pub(crate) fn compute_end_pos(pos: Pos<Zero>, cigar_bytes: &[u8]) -> Option<Pos<
     let mut ref_len: i64 = 0;
     let n_ops = cigar_bytes.len() / 4;
     for i in 0..n_ops {
-        let op = u32::from_le_bytes(read4(cigar_bytes, i * 4));
+        let op = u32::from_le_bytes(read4(cigar_bytes, i.checked_mul(4)?));
         let op_len = i64::from(op >> 4);
         let op_type = (op & 0xF) as u8;
         match op_type {
-            CIGAR_M | CIGAR_D | CIGAR_N | CIGAR_EQ | CIGAR_X => ref_len += op_len,
+            CIGAR_M | CIGAR_D | CIGAR_N | CIGAR_EQ | CIGAR_X => {
+                ref_len = ref_len.checked_add(op_len)?;
+            }
             _ => {}
         }
     }
-    if ref_len == 0 { Some(pos) } else { pos.checked_add_offset(Offset::new(ref_len - 1)) }
+    if ref_len == 0 {
+        Some(pos)
+    } else {
+        pos.checked_add_offset(Offset::new(ref_len.checked_sub(1)?))
+    }
 }
 
 // Callers only invoke read2/read4 after validating raw.len() >= 32 or equivalent.
@@ -154,11 +160,11 @@ pub(crate) fn compute_end_pos(pos: Pos<Zero>, cigar_bytes: &[u8]) -> Option<Pos<
 )]
 pub(crate) fn read2(buf: &[u8], offset: usize) -> [u8; 2] {
     debug_assert!(
-        offset + 1 < buf.len(),
+        offset.saturating_add(1) < buf.len(),
         "read2 out of bounds: offset={offset}, len={}",
         buf.len()
     );
-    [buf[offset], buf[offset + 1]]
+    [buf[offset], buf[offset.wrapping_add(1)]]
 }
 
 #[allow(
@@ -167,11 +173,16 @@ pub(crate) fn read2(buf: &[u8], offset: usize) -> [u8; 2] {
 )]
 pub(crate) fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
     debug_assert!(
-        offset + 3 < buf.len(),
+        offset.saturating_add(3) < buf.len(),
         "read4 out of bounds: offset={offset}, len={}",
         buf.len()
     );
-    [buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]
+    [
+        buf[offset],
+        buf[offset.wrapping_add(1)],
+        buf[offset.wrapping_add(2)],
+        buf[offset.wrapping_add(3)],
+    ]
 }
 
 /// Parsed BAM fixed header fields and computed variable-length offsets.

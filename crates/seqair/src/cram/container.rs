@@ -109,7 +109,9 @@ impl ContainerHeader {
                 found: crc.sum(),
             });
         }
-        pos += 4;
+        pos = pos
+            .checked_add(4)
+            .ok_or(CramError::Truncated { context: "container pos after CRC" })?;
 
         Ok(ContainerHeader {
             length,
@@ -140,7 +142,7 @@ impl ContainerHeader {
             return self.ref_seq_id == -2;
         }
         let container_start = self.alignment_start as i64;
-        let container_end = container_start + self.alignment_span as i64;
+        let container_end = container_start.saturating_add(self.alignment_span as i64);
         container_start < query_end && container_end > query_start
     }
 }

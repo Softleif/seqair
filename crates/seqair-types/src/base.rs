@@ -170,9 +170,11 @@ unsafe fn from_ascii_avx2(bytes: &mut [u8]) {
 
     let len = bytes.len();
     let ptr = bytes.as_mut_ptr();
-    let mut i = 0;
+    let mut i: usize = 0;
 
-    while i + 32 <= len {
+    while let Some(next) = i.checked_add(32)
+        && next <= len
+    {
         // Safety: pointer ops below are valid because `i + 32 <= len` guarantees
         // we never read/write past the end of the slice.
         unsafe {
@@ -190,7 +192,7 @@ unsafe fn from_ascii_avx2(bytes: &mut [u8]) {
 
             _mm256_storeu_si256(ptr.add(i) as *mut __m256i, result);
         }
-        i += 32;
+        i = i.saturating_add(32); // already verified above
     }
 
     debug_assert!(i <= bytes.len(), "AVX2 loop overshot: i={i}, len={}", bytes.len());
@@ -227,9 +229,11 @@ unsafe fn from_ascii_ssse3(bytes: &mut [u8]) {
 
     let len = bytes.len();
     let ptr = bytes.as_mut_ptr();
-    let mut i = 0;
+    let mut i: usize = 0;
 
-    while i + 16 <= len {
+    while let Some(next) = i.checked_add(16)
+        && next <= len
+    {
         // Safety: pointer ops below are valid because `i + 16 <= len` guarantees
         // we never read/write past the end of the slice.
         unsafe {
@@ -246,7 +250,7 @@ unsafe fn from_ascii_ssse3(bytes: &mut [u8]) {
 
             _mm_storeu_si128(ptr.add(i) as *mut __m128i, result);
         }
-        i += 16;
+        i = i.saturating_add(16); // already verified above
     }
 
     debug_assert!(i <= bytes.len(), "SSSE3 loop overshot: i={i}, len={}", bytes.len());

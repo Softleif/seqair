@@ -222,12 +222,13 @@ fn parse_tag_dictionary(data: &[u8]) -> Vec<Vec<TagDictEntry>> {
         if data.get(i).copied() == Some(0) {
             // Null separator: end of this tag set
             result.push(std::mem::take(&mut current_set));
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
-        if let Some(&[a, b, t]) = data.get(i..i + 3) {
+        let i3 = i.saturating_add(3);
+        if let Some(&[a, b, t]) = data.get(i..i3) {
             current_set.push(TagDictEntry { tag: [a, b], bam_type: t });
-            i += 3;
+            i = i3;
         } else {
             break;
         }

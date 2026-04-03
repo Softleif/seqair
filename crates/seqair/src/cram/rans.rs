@@ -97,7 +97,10 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     }
 
     // Remainder: state 3 handles trailing bytes
-    for pos in (4 * chunk_size)..dst.len() {
+    let remainder_start = 4usize
+        .checked_mul(chunk_size)
+        .ok_or(CramError::Truncated { context: "rans order-1 remainder offset overflow" })?;
+    for pos in remainder_start..dst.len() {
         let ctx = prev_syms[3] as usize;
         let f = (states[3] & 0x0FFF) as u16;
         let sym = sym_tables[ctx][f as usize];
@@ -107,7 +110,7 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
             .wrapping_mul(states[3] >> 12)
             .wrapping_add(states[3] & 0x0FFF)
             .wrapping_sub(u32::from(cum_freq[ctx][sym_idx]));
-        if pos + 1 < dst.len() {
+        if pos.checked_add(1).is_some_and(|next| next < dst.len()) {
             renormalize(&mut states[3], src)?;
         }
         prev_syms[3] = sym;
@@ -221,8 +224,11 @@ fn build_symbol_table(cum_freq: &[u16; ALPHABET_SIZE]) -> [u8; 4096] {
     let mut sym = 0u8;
 
     for (f, g) in (0u16..).zip(&mut table) {
-        while sym < 255 && f >= cum_freq[(sym as usize) + 1] {
-            sym += 1;
+        while sym < 255
+            && f >= cum_freq
+                [(sym as usize).checked_add(1).expect("sym < 255 guarantees sym+1 ≤ 255")]
+        {
+            sym = sym.checked_add(1).expect("sym < 255 guarantees sym+1 ≤ 255");
         }
         *g = sym;
     }

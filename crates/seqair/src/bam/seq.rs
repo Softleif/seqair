@@ -196,7 +196,9 @@ fn decode_bases_into_scalar(encoded: &[u8], len: usize, out: &mut [u8]) {
     let full_bytes = len / 2;
 
     #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + chunks_exact")]
-    for (chunk, &byte) in out[..full_bytes * 2].chunks_exact_mut(2).zip(&encoded[..full_bytes]) {
+    for (chunk, &byte) in
+        out[..full_bytes.saturating_mul(2)].chunks_exact_mut(2).zip(&encoded[..full_bytes])
+    {
         let pair = DECODE_PAIR_TYPED[byte as usize];
         chunk[0] = pair[0];
         chunk[1] = pair[1];
@@ -204,7 +206,7 @@ fn decode_bases_into_scalar(encoded: &[u8], len: usize, out: &mut [u8]) {
 
     if len % 2 == 1
         && let Some(byte) = encoded.get(full_bytes)
-        && let Some(slot) = out.get_mut(len - 1)
+        && let Some(slot) = out.get_mut(len.saturating_sub(1))
     {
         #[allow(clippy::indexing_slicing, reason = "byte < 256")]
         {
@@ -287,10 +289,10 @@ unsafe fn decode_bases_into_neon(encoded: &[u8], len: usize, out: &mut [u8]) {
         let lut = vld1q_u8(DECODE_BASE_TYPED.as_ptr());
         let mask_lo = vdupq_n_u8(0x0F);
 
-        let mut i = 0;
-        let mut o = 0;
+        let mut i: usize = 0;
+        let mut o: usize = 0;
 
-        while i + 16 <= full_bytes {
+        while i.saturating_add(16) <= full_bytes {
             let packed = vld1q_u8(encoded.as_ptr().add(i));
             let hi = vshrq_n_u8(packed, 4);
             let lo = vandq_u8(packed, mask_lo);
@@ -299,13 +301,17 @@ unsafe fn decode_bases_into_neon(encoded: &[u8], len: usize, out: &mut [u8]) {
             let out_a = vzip1q_u8(decoded_hi, decoded_lo);
             let out_b = vzip2q_u8(decoded_hi, decoded_lo);
             vst1q_u8(out.as_mut_ptr().add(o), out_a);
-            vst1q_u8(out.as_mut_ptr().add(o + 16), out_b);
-            i += 16;
-            o += 32;
+            vst1q_u8(out.as_mut_ptr().add(o.wrapping_add(16)), out_b);
+            i = i.wrapping_add(16);
+            o = o.wrapping_add(32);
         }
 
         debug_assert!(i <= full_bytes, "NEON base loop overshot: i={i}, full_bytes={full_bytes}");
-        debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+        debug_assert!(
+            o == i.saturating_mul(2),
+            "cursor invariant broken: o={o}, i*2={}",
+            i.saturating_mul(2)
+        );
         debug_assert!(
             full_bytes <= encoded.len(),
             "full_bytes={full_bytes} > encoded.len()={}",
@@ -318,9 +324,9 @@ unsafe fn decode_bases_into_neon(encoded: &[u8], len: usize, out: &mut [u8]) {
             while i < full_bytes {
                 let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
                 out[o] = pair[0];
-                out[o + 1] = pair[1];
-                i += 1;
-                o += 2;
+                out[o.wrapping_add(1)] = pair[1];
+                i = i.wrapping_add(1);
+                o = o.wrapping_add(2);
             }
             if len % 2 == 1 {
                 out[o] = DECODE_PAIR_TYPED[encoded[i] as usize][0];
@@ -370,7 +376,9 @@ fn decode_bases_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
     let mut result = vec![0u8; len];
 
     #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + chunks_exact")]
-    for (chunk, &byte) in result[..full_bytes * 2].chunks_exact_mut(2).zip(&encoded[..full_bytes]) {
+    for (chunk, &byte) in
+        result[..full_bytes.saturating_mul(2)].chunks_exact_mut(2).zip(&encoded[..full_bytes])
+    {
         let pair = DECODE_PAIR_TYPED[byte as usize];
         chunk[0] = pair[0];
         chunk[1] = pair[1];
@@ -378,7 +386,7 @@ fn decode_bases_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
 
     if len % 2 == 1
         && let Some(byte) = encoded.get(full_bytes)
-        && let Some(slot) = result.get_mut(len - 1)
+        && let Some(slot) = result.get_mut(len.saturating_sub(1))
     {
         #[allow(clippy::indexing_slicing, reason = "byte < 256")]
         {
@@ -466,10 +474,10 @@ unsafe fn decode_bases_neon(encoded: &[u8], len: usize) -> Vec<u8> {
         let lut = vld1q_u8(DECODE_BASE_TYPED.as_ptr());
         let mask_lo = vdupq_n_u8(0x0F);
 
-        let mut i = 0;
-        let mut o = 0;
+        let mut i: usize = 0;
+        let mut o: usize = 0;
 
-        while i + 16 <= full_bytes {
+        while i.saturating_add(16) <= full_bytes {
             let packed = vld1q_u8(encoded.as_ptr().add(i));
             let hi = vshrq_n_u8(packed, 4);
             let lo = vandq_u8(packed, mask_lo);
@@ -478,13 +486,17 @@ unsafe fn decode_bases_neon(encoded: &[u8], len: usize) -> Vec<u8> {
             let out_a = vzip1q_u8(decoded_hi, decoded_lo);
             let out_b = vzip2q_u8(decoded_hi, decoded_lo);
             vst1q_u8(result.as_mut_ptr().add(o), out_a);
-            vst1q_u8(result.as_mut_ptr().add(o + 16), out_b);
-            i += 16;
-            o += 32;
+            vst1q_u8(result.as_mut_ptr().add(o.wrapping_add(16)), out_b);
+            i = i.wrapping_add(16);
+            o = o.wrapping_add(32);
         }
 
         debug_assert!(i <= full_bytes, "NEON base loop overshot: i={i}, full_bytes={full_bytes}");
-        debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+        debug_assert!(
+            o == i.saturating_mul(2),
+            "cursor invariant broken: o={o}, i*2={}",
+            i.saturating_mul(2)
+        );
         debug_assert!(
             full_bytes <= encoded.len(),
             "full_bytes={full_bytes} > encoded.len()={}",
@@ -497,9 +509,9 @@ unsafe fn decode_bases_neon(encoded: &[u8], len: usize) -> Vec<u8> {
             while i < full_bytes {
                 let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
                 result[o] = pair[0];
-                result[o + 1] = pair[1];
-                i += 1;
-                o += 2;
+                result[o.wrapping_add(1)] = pair[1];
+                i = i.wrapping_add(1);
+                o = o.wrapping_add(2);
             }
             if len % 2 == 1 {
                 result[o] = DECODE_PAIR_TYPED[encoded[i] as usize][0];
@@ -524,7 +536,11 @@ pub fn encode_seq(bases: &[u8]) -> Vec<u8> {
             j / 2
         );
         let hi = ENCODE_BASE[bases[j] as usize];
-        let lo = if j + 1 < bases.len() { ENCODE_BASE[bases[j + 1] as usize] } else { 0 };
+        let lo = if j.saturating_add(1) < bases.len() {
+            ENCODE_BASE[bases[j.saturating_add(1)] as usize]
+        } else {
+            0
+        };
         encoded[j / 2] = (hi << 4) | lo;
     }
 
@@ -617,11 +633,11 @@ unsafe fn decode_seq_neon(encoded: &[u8], len: usize) -> Vec<u8> {
         let lut = vld1q_u8(DECODE_BASE.as_ptr());
         let mask_lo = vdupq_n_u8(0x0F);
 
-        let mut i = 0;
-        let mut o = 0;
+        let mut i: usize = 0;
+        let mut o: usize = 0;
 
         // 16 packed bytes → 32 decoded bases per iteration
-        while i + 16 <= full_bytes {
+        while i.saturating_add(16) <= full_bytes {
             let packed = vld1q_u8(encoded.as_ptr().add(i));
 
             let hi = vshrq_n_u8(packed, 4);
@@ -634,14 +650,18 @@ unsafe fn decode_seq_neon(encoded: &[u8], len: usize) -> Vec<u8> {
             let out_b = vzip2q_u8(decoded_hi, decoded_lo);
 
             vst1q_u8(result.as_mut_ptr().add(o), out_a);
-            vst1q_u8(result.as_mut_ptr().add(o + 16), out_b);
+            vst1q_u8(result.as_mut_ptr().add(o.wrapping_add(16)), out_b);
 
-            i += 16;
-            o += 32;
+            i = i.wrapping_add(16);
+            o = o.wrapping_add(32);
         }
 
         debug_assert!(i <= full_bytes, "NEON seq loop overshot: i={i}, full_bytes={full_bytes}");
-        debug_assert!(o == i * 2, "cursor invariant broken: o={o}, i*2={}", i * 2);
+        debug_assert!(
+            o == i.saturating_mul(2),
+            "cursor invariant broken: o={o}, i*2={}",
+            i.saturating_mul(2)
+        );
         debug_assert!(
             full_bytes <= encoded.len(),
             "full_bytes={full_bytes} > encoded.len()={}",
@@ -657,9 +677,9 @@ unsafe fn decode_seq_neon(encoded: &[u8], len: usize) -> Vec<u8> {
             while i < full_bytes {
                 let pair = DECODE_PAIR[encoded[i] as usize];
                 result[o] = pair[0];
-                result[o + 1] = pair[1];
-                i += 1;
-                o += 2;
+                result[o.wrapping_add(1)] = pair[1];
+                i = i.wrapping_add(1);
+                o = o.wrapping_add(2);
             }
 
             if len % 2 == 1 {

@@ -139,11 +139,13 @@ impl GziIndex {
             }
             Err(0) => (0, uncompressed_offset),
             Err(i) => {
-                let e = self
-                    .entries
-                    .get(i - 1)
-                    .ok_or(GziError::InternalBoundsError { index: i - 1 })?;
-                (e.compressed_offset, uncompressed_offset - e.uncompressed_offset)
+                let prev = i.checked_sub(1).ok_or(GziError::InternalBoundsError { index: i })?;
+                let e =
+                    self.entries.get(prev).ok_or(GziError::InternalBoundsError { index: prev })?;
+                let within = uncompressed_offset
+                    .checked_sub(e.uncompressed_offset)
+                    .ok_or(GziError::InternalBoundsError { index: prev })?;
+                (e.compressed_offset, within)
             }
         };
 

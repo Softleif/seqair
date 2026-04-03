@@ -97,7 +97,7 @@ pub fn parse_block(buf: &[u8]) -> Result<(Block, usize), CramError> {
         });
     }
 
-    pos += 4;
+    pos = pos.checked_add(4).ok_or(CramError::Truncated { context: "block pos after CRC" })?;
 
     let uncompressed_size = uncompressed_size as usize;
     super::reader::check_alloc_size(uncompressed_size, "block uncompressed size")?;

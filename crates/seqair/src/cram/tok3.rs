@@ -244,7 +244,10 @@ impl TokenReader {
                     .map_err(|_| CramError::Truncated { context: "tok3 delta" })?;
                 let delta = u32::from(buf[0]);
                 match prev_token {
-                    Some(Token::Digits(n)) => Ok(Some(Token::Digits(n + delta))),
+                    Some(Token::Digits(n)) => Ok(Some(Token::Digits(
+                        n.checked_add(delta)
+                            .ok_or(CramError::Truncated { context: "tok3 delta overflow" })?,
+                    ))),
                     _ => Err(CramError::Tok3DeltaRequiresDigits {
                         found: token_discriminant(prev_token),
                     }),
@@ -257,9 +260,11 @@ impl TokenReader {
                     .map_err(|_| CramError::Truncated { context: "tok3 delta0" })?;
                 let delta = u32::from(buf[0]);
                 match prev_token {
-                    Some(Token::PaddedDigits(n, width)) => {
-                        Ok(Some(Token::PaddedDigits(n + delta, *width)))
-                    }
+                    Some(Token::PaddedDigits(n, width)) => Ok(Some(Token::PaddedDigits(
+                        n.checked_add(delta)
+                            .ok_or(CramError::Truncated { context: "tok3 delta0 overflow" })?,
+                        *width,
+                    ))),
                     _ => Err(CramError::Tok3Delta0RequiresPaddedDigits {
                         found: token_discriminant(prev_token),
                     }),
@@ -409,7 +414,10 @@ fn decode_single_name(
 
             if let Some(ts) = tokens.get_mut(n) {
                 if t >= ts.len() {
-                    ts.resize(t + 1, None);
+                    let new_len = t
+                        .checked_add(1)
+                        .ok_or(CramError::Truncated { context: "tok3 token index overflow" })?;
+                    ts.resize(new_len, None);
                 }
                 if let Some(slot) = ts.get_mut(t) {
                     *slot = Some(token);
@@ -419,7 +427,9 @@ fn decode_single_name(
             break;
         }
 
-        t += 1;
+        t = t
+            .checked_add(1)
+            .ok_or(CramError::Truncated { context: "tok3 token index overflow" })?;
     }
 
     Ok(names.get(n).ok_or(CramError::Truncated { context: "tok3 final name" })?.clone())
@@ -448,7 +458,7 @@ fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
         if count >= 5 {
             return Err(CramError::Uint7Overflow);
         }
-        count += 1;
+        count = count.checked_add(1).ok_or(CramError::Uint7Overflow)?;
         let b = read_u8(src)? as u32;
         n = (n << 7) | (b & 0x7f);
         if b & 0x80 == 0 {

@@ -230,7 +230,13 @@ pub fn read_ltf8<R: Read>(r: &mut R) -> std::io::Result<u64> {
 
     let mut val = u64::from(b0 & mask) << shift;
     for (i, &byte) in extra.iter().take(n_extra).enumerate() {
-        val |= u64::from(byte) << ((n_extra - 1 - i) * 8);
+        // i < n_extra ≤ 8, so n_extra-1-i ≥ 0 and the product ≤ 56
+        let bit_shift = n_extra
+            .checked_sub(1)
+            .and_then(|v| v.checked_sub(i))
+            .and_then(|v| v.checked_mul(8))
+            .expect("n_extra ≤ 8 and i < n_extra, so (n_extra-1-i)*8 ≤ 56");
+        val |= u64::from(byte) << bit_shift;
     }
     Ok(val)
 }

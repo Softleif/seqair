@@ -336,7 +336,7 @@ fn pos_info_bsearch(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
     if idx == 0 {
         return None;
     }
-    for i in idx.saturating_sub(2)..ops.len().min(idx + 1) {
+    for i in idx.saturating_sub(2)..ops.len().min(idx.saturating_add(1)) {
         let Some(op) = ops.get(i) else { continue };
         if !consumes_ref(op.op_type) {
             continue;
