@@ -85,7 +85,7 @@ python3 fuzz/generate_seeds.py           # for all other targets
 
 ## Bugs found
 
-14 bugs found and fixed by fuzzing:
+15 bugs found and fixed by fuzzing:
 
 | # | Bug | Severity | File | Found by |
 |---|-----|----------|------|----------|
@@ -103,6 +103,7 @@ python3 fuzz/generate_seeds.py           # for all other targets
 | 12 | RegionBuf `.sum()` overflow on merged ranges | panic | `bam/region_buf.rs` | `fuzz_reader_indexed` |
 | 13 | RegionBuf per-range alloc overflow | panic | `bam/region_buf.rs` | `fuzz_reader_indexed` |
 | 14 | RegionBuf `debug_assert` panic on corrupt BGZF bsize | panic | `bam/region_buf.rs` | `fuzz_reader_indexed` |
+| 15 | CRAI index query add overflow on large alignment_start + span | panic | `cram/index.rs` | `fuzz_reader_indexed` |
 
 ### Proactive fixes (applied based on patterns found)
 
