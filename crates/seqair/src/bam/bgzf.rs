@@ -70,6 +70,13 @@ pub enum BgzfError {
 
     #[error("BAM record block_size ({block_size}) exceeds maximum (2 MiB)")]
     RecordTooLarge { block_size: usize },
+
+    // r[impl bgzf.writer]
+    #[error("BGZF compression failed")]
+    CompressionFailed { source: libdeflater::CompressionError },
+
+    #[error("BGZF write failed")]
+    WriteFailed { source: std::io::Error },
 }
 
 // r[impl bgzf.libdeflate]
@@ -138,6 +145,35 @@ impl BgzfReader<std::fs::File> {
             compressed_buf: Vec::with_capacity(MAX_BLOCK_SIZE),
             decompressor: libdeflater::Decompressor::new(),
         })
+    }
+}
+
+impl<R: Read + Seek> BgzfReader<R> {
+    /// Create a BGZF reader from any `Read + Seek` source.
+    pub fn from_reader(inner: R) -> Self {
+        Self {
+            inner: BufReader::with_capacity(128 * 1024, inner),
+            buf: Vec::with_capacity(MAX_BLOCK_SIZE),
+            buf_pos: 0,
+            block_offset: 0,
+            eof: false,
+            compressed_buf: Vec::with_capacity(MAX_BLOCK_SIZE),
+            decompressor: libdeflater::Decompressor::new(),
+        }
+    }
+
+    /// Read all remaining data into a Vec.
+    pub fn read_to_end(&mut self, out: &mut Vec<u8>) -> Result<(), BgzfError> {
+        let mut tmp = [0u8; 8192];
+        loop {
+            let n = self.read_up_to(&mut tmp)?;
+            if n == 0 {
+                break;
+            }
+            #[allow(clippy::indexing_slicing)]
+            out.extend_from_slice(&tmp[..n]);
+        }
+        Ok(())
     }
 }
 

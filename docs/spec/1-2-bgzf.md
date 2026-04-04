@@ -89,5 +89,8 @@ r[bgzf.writer.eof_marker]
 r[bgzf.writer.virtual_offset]
 The writer MUST track virtual offsets. After each block is written, the writer MUST record the compressed file offset of that block. A `virtual_offset()` method MUST return the current write position as a `VirtualOffset` (block offset + within-block offset).
 
+r[bgzf.writer.flush_if_needed]
+The writer MUST provide a `flush_if_needed(upcoming_bytes)` method that flushes the current block if the upcoming data would exceed the 64 KB uncompressed block limit. This allows callers (e.g., VCF/BCF writers) to keep records from spanning block boundaries when possible, improving seek granularity for index-based random access.
+
 r[bgzf.writer.finish]
 `finish()` MUST consume the writer and return the inner `io::Write` stream, allowing the caller to perform additional operations (e.g., syncing, closing). Dropping the writer without calling `finish()` SHOULD NOT silently discard buffered data; the writer SHOULD flush on drop (best-effort, ignoring errors).
