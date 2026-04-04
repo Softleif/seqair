@@ -21,8 +21,12 @@ jobs:
       - run: cargo fmt --all --check
 
   test:
-    name: test
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
