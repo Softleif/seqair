@@ -83,7 +83,11 @@ impl<W: Write> BgzfWriter<W> {
     /// Upper 48 bits = compressed offset of the current block.
     /// Lower 16 bits = bytes written into the current (unflushed) block.
     pub fn virtual_offset(&self) -> VirtualOffset {
-        VirtualOffset::new(self.block_offset, self.buf.len() as u16)
+        // Buffer can be at most MAX_UNCOMPRESSED_SIZE (65536) which doesn't fit u16.
+        // When buffer is exactly full, flush_block hasn't run yet — cap at 65535.
+        // This is safe: a full buffer will be flushed on the next write_all/flush_if_needed.
+        let within = self.buf.len().min(u16::MAX as usize) as u16;
+        VirtualOffset::new(self.block_offset, within)
     }
 
     // r[impl bgzf.writer.flush_if_needed]

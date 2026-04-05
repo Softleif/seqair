@@ -17,10 +17,8 @@ const BCF_BT_INT32: u8 = 3;
 const BCF_BT_FLOAT: u8 = 5;
 const BCF_BT_CHAR: u8 = 7;
 
-// Sentinel values (INT8/INT16 used when smallest_int_type selects them)
-#[allow(dead_code)]
+// Sentinel values
 const INT8_MISSING: u8 = 0x80;
-#[allow(dead_code)]
 const INT16_MISSING: u16 = 0x8000;
 const INT32_MISSING: u32 = 0x80000000;
 const FLOAT_MISSING: u32 = 0x7F800001;
@@ -28,6 +26,7 @@ const FLOAT_MISSING: u32 = 0x7F800001;
 const INT8_END_OF_VECTOR: u8 = 0x81;
 const INT16_END_OF_VECTOR: u16 = 0x8001;
 const INT32_END_OF_VECTOR: u32 = 0x80000001;
+const FLOAT_END_OF_VECTOR: u32 = 0x7F800002;
 
 // Int ranges (excluding sentinel values)
 const INT8_MIN: i32 = -120;
@@ -185,10 +184,16 @@ impl<W: Write> BcfWriter<W> {
                 buf.push(0);
             }
             Filters::Failed(ids) => {
-                let indices: Vec<i32> = ids
-                    .iter()
-                    .filter_map(|id| self.header.string_map().get(id).map(|i| i as i32))
-                    .collect();
+                // r[impl vcf_writer.validation]
+                let mut indices = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let idx = self.header.string_map().get(id).ok_or_else(|| {
+                        VcfError::Header(super::error::VcfHeaderError::MissingFilter {
+                            id: id.clone(),
+                        })
+                    })?;
+                    indices.push(idx as i32);
+                }
                 encode_typed_int_vec(buf, &indices);
             }
             Filters::NotApplied => {
@@ -198,9 +203,11 @@ impl<W: Write> BcfWriter<W> {
         }
 
         // INFO key-value pairs
+        // r[impl vcf_writer.validation]
         for (key, value) in record.info.iter() {
-            let dict_idx = self.header.string_map().get(key).unwrap_or(0) as i32;
-            // Key as typed int
+            let dict_idx = self.header.string_map().get(key).ok_or_else(|| {
+                VcfError::Header(super::error::VcfHeaderError::MissingInfo { id: key.clone() })
+            })? as i32;
             encode_typed_int_vec(buf, &[dict_idx]);
             // Value
             encode_info_value(buf, value);
@@ -219,8 +226,10 @@ impl<W: Write> BcfWriter<W> {
         }
 
         for (field_idx, key) in record.samples.format_keys.iter().enumerate() {
-            // Key (dictionary index)
-            let dict_idx = self.header.string_map().get(key).unwrap_or(0) as i32;
+            // r[impl vcf_writer.validation]
+            let dict_idx = self.header.string_map().get(key).ok_or_else(|| {
+                VcfError::Header(super::error::VcfHeaderError::MissingFormat { id: key.clone() })
+            })? as i32;
             encode_typed_int_vec(buf, &[dict_idx]);
 
             // Collect values for this field across all samples
@@ -326,10 +335,7 @@ fn encode_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
         }
         InfoValue::String(s) => encode_typed_string(buf, s.as_bytes()),
         InfoValue::IntegerArray(arr) => {
-            let concrete: Vec<i32> = arr
-                .iter()
-                .map(|v| v.unwrap_or(i32::from_le_bytes(INT32_MISSING.to_le_bytes())))
-                .collect();
+            let concrete: Vec<i32> = arr.iter().map(|v| v.unwrap_or(i32::MIN)).collect();
             encode_typed_int_vec(buf, &concrete);
         }
         InfoValue::FloatArray(arr) => {
@@ -451,14 +457,29 @@ fn encode_format_field(
 
     match first_val {
         Some(SampleValue::Integer(_)) | None => {
-            // Encode as int
-            encode_type_byte(buf, 1, BCF_BT_INT32);
+            // r[impl bcf_writer.smallest_int_type]
+            // Scan all values to pick smallest fitting type
+            let all_vals: Vec<i32> = samples
+                .iter()
+                .filter_map(|s| match s.get(field_idx) {
+                    Some(SampleValue::Integer(v)) => Some(*v),
+                    _ => None,
+                })
+                .collect();
+            let typ = if all_vals.is_empty() { BCF_BT_INT8 } else { smallest_int_type(&all_vals) };
+            encode_type_byte(buf, 1, typ);
             for sample in samples {
                 match sample.get(field_idx) {
-                    Some(SampleValue::Integer(v)) => {
-                        buf.extend_from_slice(&v.to_le_bytes());
-                    }
-                    _ => buf.extend_from_slice(&INT32_MISSING.to_le_bytes()),
+                    Some(SampleValue::Integer(v)) => match typ {
+                        BCF_BT_INT8 => buf.push(*v as u8),
+                        BCF_BT_INT16 => buf.extend_from_slice(&(*v as i16).to_le_bytes()),
+                        _ => buf.extend_from_slice(&v.to_le_bytes()),
+                    },
+                    _ => match typ {
+                        BCF_BT_INT8 => buf.push(INT8_MISSING),
+                        BCF_BT_INT16 => buf.extend_from_slice(&INT16_MISSING.to_le_bytes()),
+                        _ => buf.extend_from_slice(&INT32_MISSING.to_le_bytes()),
+                    },
                 }
             }
         }
@@ -558,14 +579,14 @@ fn encode_format_field(
                             }
                         }
                         for _ in a.len()..max_len {
-                            buf.extend_from_slice(&(0x7F800002u32).to_le_bytes());
+                            buf.extend_from_slice(&FLOAT_END_OF_VECTOR.to_le_bytes());
                             // float EOV
                         }
                     }
                     _ => {
                         buf.extend_from_slice(&FLOAT_MISSING.to_le_bytes());
                         for _ in 1..max_len {
-                            buf.extend_from_slice(&(0x7F800002u32).to_le_bytes());
+                            buf.extend_from_slice(&FLOAT_END_OF_VECTOR.to_le_bytes());
                         }
                     }
                 }

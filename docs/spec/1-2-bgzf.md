@@ -87,7 +87,7 @@ r[bgzf.writer.eof_marker]
 `finish()` MUST write the standard 28-byte BGZF EOF marker block after flushing any remaining buffered data. The EOF marker is a valid gzip member with ISIZE=0.
 
 r[bgzf.writer.virtual_offset]
-The writer MUST track virtual offsets. After each block is written, the writer MUST record the compressed file offset of that block. A `virtual_offset()` method MUST return the current write position as a `VirtualOffset` (block offset + within-block offset).
+The writer MUST track virtual offsets. After each block is written, the writer MUST record the compressed file offset of that block. A `virtual_offset()` method MUST return the current write position as a `VirtualOffset` (block offset + within-block offset). The within-block offset MUST be strictly less than 65536; converting buffer length to u16 MUST use checked conversion to prevent silent truncation when the buffer is exactly full.
 
 r[bgzf.writer.flush_if_needed]
 The writer MUST provide a `flush_if_needed(upcoming_bytes)` method that flushes the current block if the upcoming data would exceed the 64 KB uncompressed block limit. This allows callers (e.g., VCF/BCF writers) to keep records from spanning block boundaries when possible, improving seek granularity for index-based random access.

@@ -216,17 +216,22 @@ impl VcfRecordBuilder {
     /// Build the record, validating against the header.
     pub fn build(self, header: &VcfHeader) -> Result<VcfRecord, VcfHeaderError> {
         // r[impl vcf_record.fields]
-        // Validate contig exists
         header.contig_id(&self.contig)?;
 
         // r[impl vcf_record.sample_count]
         let expected_samples = header.samples().len();
         let actual_samples = self.samples.values.len();
-        if actual_samples != expected_samples && actual_samples != 0 {
-            // Allow 0 samples (sites-only) even when header has samples
-            if expected_samples > 0 && actual_samples > 0 {
-                // Mismatch — but we don't have a specific error variant for this yet.
-                // For now, this is checked at write time.
+        if actual_samples != 0 && actual_samples != expected_samples {
+            return Err(VcfHeaderError::SampleCountMismatch {
+                expected: expected_samples,
+                actual: actual_samples,
+            });
+        }
+
+        // r[impl vcf_record.format_gt_first]
+        if let Some(pos) = self.samples.format_keys.iter().position(|k| k == "GT") {
+            if pos != 0 {
+                return Err(VcfHeaderError::GtNotFirst { index: pos });
             }
         }
 
@@ -366,5 +371,39 @@ mod tests {
                 .build_unchecked();
 
         assert_eq!(record.info.fields.len(), 3);
+    }
+
+    // r[verify vcf_record.sample_count]
+    #[test]
+    fn rejects_sample_count_mismatch() {
+        let header = test_header(); // has 1 sample
+        let result =
+            VcfRecordBuilder::new("chr1", Pos::<One>::new(1).unwrap(), Alleles::reference(Base::A))
+                .format_keys(&["GT"])
+                .add_sample(vec![SampleValue::Genotype(Genotype::unphased(0, 0))])
+                .add_sample(vec![SampleValue::Genotype(Genotype::unphased(0, 0))])
+                .build(&header);
+        assert!(result.is_err());
+    }
+
+    // r[verify vcf_record.sample_count]
+    #[test]
+    fn allows_zero_samples_sites_only() {
+        let header = test_header(); // has 1 sample
+        let result =
+            VcfRecordBuilder::new("chr1", Pos::<One>::new(1).unwrap(), Alleles::reference(Base::A))
+                .build(&header);
+        assert!(result.is_ok());
+    }
+
+    // r[verify vcf_record.format_gt_first]
+    #[test]
+    fn rejects_gt_not_first() {
+        let header = test_header();
+        let result =
+            VcfRecordBuilder::new("chr1", Pos::<One>::new(1).unwrap(), Alleles::reference(Base::A))
+                .format_keys(&["DP", "GT"])
+                .build(&header);
+        assert!(result.is_err());
     }
 }

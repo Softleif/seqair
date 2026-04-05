@@ -56,7 +56,10 @@ impl<W: Write> VcfWriter<W> {
     /// Write the VCF header. Must be called exactly once before any `write_record`.
     pub fn write_header(&mut self) -> Result<(), VcfError> {
         let text = self.header.to_vcf_text();
-        self.write_bytes(text.as_bytes())?;
+        match &mut self.output {
+            Output::Plain(w) => w.write_all(text.as_bytes()).map_err(VcfError::Io)?,
+            Output::Bgzf { bgzf, .. } => bgzf.write_all(text.as_bytes())?,
+        }
         self.header_written = true;
 
         // Update index with header end offset for BGZF mode
@@ -186,29 +189,25 @@ impl<W: Write> VcfWriter<W> {
 
         self.buf.push(b'\n');
 
-        // For BGZF: flush block if record won't fit, then write + push to index
-        if let Output::Bgzf { bgzf, index } = &mut self.output {
-            bgzf.flush_if_needed(self.buf.len())?;
-            bgzf.write_all(&self.buf)?;
+        // Write the serialized record to the output
+        match &mut self.output {
+            Output::Plain(w) => {
+                w.write_all(&self.buf).map_err(VcfError::Io)?;
+            }
+            Output::Bgzf { bgzf, index } => {
+                bgzf.flush_if_needed(self.buf.len())?;
+                bgzf.write_all(&self.buf)?;
 
-            let tid = self.header.contig_id(&record.contig)? as i32;
-            let beg = record.pos.to_zero_based().get() as u64;
-            let end = beg.saturating_add(record.alleles.rlen() as u64);
-            index.push(tid, beg, end, bgzf.virtual_offset()).map_err(|e| {
-                VcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-            })?;
-        } else {
-            self.write_bytes(&self.buf.clone())?;
+                let tid = self.header.contig_id(&record.contig)? as i32;
+                let beg = record.pos.to_zero_based().get() as u64;
+                let end = beg.saturating_add(record.alleles.rlen() as u64);
+                index.push(tid, beg, end, bgzf.virtual_offset()).map_err(|e| {
+                    VcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                })?;
+            }
         }
 
         Ok(())
-    }
-
-    fn write_bytes(&mut self, data: &[u8]) -> Result<(), VcfError> {
-        match &mut self.output {
-            Output::Plain(w) => w.write_all(data).map_err(VcfError::Io),
-            Output::Bgzf { bgzf, .. } => bgzf.write_all(data).map_err(VcfError::from),
-        }
     }
 
     // r[impl vcf_writer.finish]
@@ -240,7 +239,7 @@ fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
         InfoValue::Integer(v) => buf.extend_from_slice(itoa_buf.format(*v).as_bytes()),
         InfoValue::Float(v) => buf.extend_from_slice(ryu_buf.format(*v).as_bytes()),
         InfoValue::Flag => {} // handled at call site
-        InfoValue::String(s) => buf.extend_from_slice(s.as_bytes()),
+        InfoValue::String(s) => percent_encode_into(buf, s.as_bytes()),
         InfoValue::IntegerArray(arr) => {
             for (i, v) in arr.iter().enumerate() {
                 if i > 0 {
@@ -269,10 +268,28 @@ fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
                     buf.push(b',');
                 }
                 match v {
-                    Some(s) => buf.extend_from_slice(s.as_bytes()),
+                    Some(s) => percent_encode_into(buf, s.as_bytes()),
                     None => buf.push(b'.'),
                 }
             }
+        }
+    }
+}
+
+// r[impl vcf_writer.percent_encoding]
+/// Percent-encode special characters in VCF field values.
+fn percent_encode_into(buf: &mut Vec<u8>, data: &[u8]) {
+    for &b in data {
+        match b {
+            b':' => buf.extend_from_slice(b"%3A"),
+            b';' => buf.extend_from_slice(b"%3B"),
+            b'=' => buf.extend_from_slice(b"%3D"),
+            b'%' => buf.extend_from_slice(b"%25"),
+            b',' => buf.extend_from_slice(b"%2C"),
+            b'\t' => buf.extend_from_slice(b"%09"),
+            b'\n' => buf.extend_from_slice(b"%0A"),
+            b'\r' => buf.extend_from_slice(b"%0D"),
+            _ => buf.push(b),
         }
     }
 }
@@ -285,7 +302,7 @@ fn write_sample_value(buf: &mut Vec<u8>, value: &SampleValue) {
         SampleValue::Missing => buf.push(b'.'),
         SampleValue::Integer(v) => buf.extend_from_slice(itoa_buf.format(*v).as_bytes()),
         SampleValue::Float(v) => buf.extend_from_slice(ryu_buf.format(*v).as_bytes()),
-        SampleValue::String(s) => buf.extend_from_slice(s.as_bytes()),
+        SampleValue::String(s) => percent_encode_into(buf, s.as_bytes()),
         SampleValue::Genotype(gt) => {
             for (i, allele) in gt.alleles.iter().enumerate() {
                 if i > 0 {
@@ -536,5 +553,44 @@ mod tests {
 
         // Should have an index
         assert!(index.is_some());
+    }
+
+    // r[verify vcf_writer.percent_encoding]
+    #[test]
+    fn percent_encoding_special_chars() {
+        let mut buf = Vec::new();
+        percent_encode_into(&mut buf, b"hello:world;key=val%done,x\ty\nz\rend");
+        let result = String::from_utf8(buf).unwrap();
+        assert_eq!(result, "hello%3Aworld%3Bkey%3Dval%25done%2Cx%09y%0Az%0Dend");
+    }
+
+    // r[verify vcf_writer.percent_encoding]
+    #[test]
+    fn info_string_value_is_percent_encoded() {
+        let header = Arc::new(
+            VcfHeader::builder()
+                .add_contig("chr1", ContigDef { length: Some(1000) })
+                .unwrap()
+                .add_info(
+                    "ANN",
+                    InfoDef {
+                        number: Number::Count(1),
+                        typ: ValueType::String,
+                        description: SmolStr::from("Annotation"),
+                    },
+                )
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        let record =
+            VcfRecordBuilder::new("chr1", Pos::<One>::new(1).unwrap(), Alleles::reference(Base::A))
+                .info_string("ANN", "val:with;special=chars")
+                .build(&header)
+                .unwrap();
+
+        let text = write_vcf(&header, &[record]);
+        let f = last_line_fields(&text);
+        assert_eq!(f[7], "ANN=val%3Awith%3Bspecial%3Dchars");
     }
 }

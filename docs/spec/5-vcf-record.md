@@ -32,10 +32,10 @@ r[vcf_record.genotype_encoding]
 Genotypes MUST store per-allele indices (0=REF, 1+=ALT, None=missing) and per-separator phasing (true=phased `|`, false=unphased `/`). The phase bit on the first allele separator is ignored by convention but MUST be written as unphased.
 
 r[vcf_record.sample_count]
-The number of sample value sets MUST equal the number of samples declared in the header. Writers MUST return an error on mismatch.
+The number of sample value sets MUST equal the number of samples declared in the header. The builder MUST return a typed error on mismatch (zero samples is always permitted for sites-only output).
 
 r[vcf_record.builder]
-Records MUST support construction via a builder pattern with required fields (contig, pos, ref_allele) and optional fields. The builder MUST validate field consistency at build time.
+Records MUST support construction via a builder pattern with required fields (contig, pos, ref_allele) and optional fields. The builder MUST validate field consistency at build time, including: contig declared in header, sample count matches header (or zero), GT is first FORMAT key when present.
 
 r[vcf_record.rlen]
 The reference length (rlen, used in BCF) MUST be computed as `ref_allele.len()` for concrete alleles. For symbolic alleles with an END INFO field, rlen MUST be `END - POS + 1`.

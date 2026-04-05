@@ -3,7 +3,7 @@
 
 use crate::bam::bgzf::VirtualOffset;
 use seqair_types::SmolStr;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A chunk: contiguous range of virtual offsets in the compressed file.
 #[derive(Debug, Clone, Copy)]
@@ -27,7 +27,7 @@ pub enum IndexError {
 /// Per-reference accumulated index data.
 #[derive(Debug)]
 struct RefIndexBuilder {
-    bins: HashMap<u32, Vec<IndexChunk>>,
+    bins: BTreeMap<u32, Vec<IndexChunk>>,
     linear_index: Vec<VirtualOffset>,
     // Pseudo-bin metadata
     off_beg: VirtualOffset,
@@ -39,7 +39,7 @@ struct RefIndexBuilder {
 impl RefIndexBuilder {
     fn new() -> Self {
         Self {
-            bins: HashMap::new(),
+            bins: BTreeMap::new(),
             linear_index: Vec::new(),
             off_beg: VirtualOffset(u64::MAX),
             off_end: VirtualOffset(0),

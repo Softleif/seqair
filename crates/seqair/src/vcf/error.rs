@@ -39,6 +39,14 @@ pub enum VcfHeaderError {
 
     #[error("FORMAT field {id} must not be Flag type")]
     FormatFlagNotAllowed { id: SmolStr },
+
+    // r[impl vcf_record.sample_count]
+    #[error("sample count mismatch: header declares {expected}, record has {actual}")]
+    SampleCountMismatch { expected: usize, actual: usize },
+
+    // r[impl vcf_record.format_gt_first]
+    #[error("GT must be the first FORMAT key, but found at index {index}")]
+    GtNotFirst { index: usize },
 }
 
 // r[impl vcf_record.alleles_typed]
