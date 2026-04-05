@@ -130,6 +130,64 @@ impl Alleles {
         }
     }
 
+    /// Write the REF column directly into a byte buffer (zero-alloc for common cases).
+    pub fn write_ref_into(&self, buf: &mut Vec<u8>) {
+        match self {
+            Self::Reference { ref_base } | Self::Snv { ref_base, .. } => {
+                buf.push(ref_base.as_char() as u8);
+            }
+            Self::Insertion { anchor, .. } => {
+                buf.push(anchor.as_char() as u8);
+            }
+            Self::Deletion { anchor, deleted } => {
+                buf.push(anchor.as_char() as u8);
+                for b in deleted {
+                    buf.push(b.as_char() as u8);
+                }
+            }
+            Self::Complex { ref_allele, .. } => {
+                buf.extend_from_slice(ref_allele.as_bytes());
+            }
+        }
+    }
+
+    /// Write comma-separated ALT column directly into a byte buffer.
+    /// Returns the number of alt alleles written.
+    pub fn write_alts_into(&self, buf: &mut Vec<u8>) -> usize {
+        match self {
+            Self::Reference { .. } => 0,
+            Self::Snv { alt_bases, .. } => {
+                for (i, b) in alt_bases.iter().enumerate() {
+                    if i > 0 {
+                        buf.push(b',');
+                    }
+                    buf.push(b.as_char() as u8);
+                }
+                alt_bases.len()
+            }
+            Self::Insertion { anchor, inserted } => {
+                buf.push(anchor.as_char() as u8);
+                for b in inserted {
+                    buf.push(b.as_char() as u8);
+                }
+                1
+            }
+            Self::Deletion { anchor, .. } => {
+                buf.push(anchor.as_char() as u8);
+                1
+            }
+            Self::Complex { alt_alleles, .. } => {
+                for (i, alt) in alt_alleles.iter().enumerate() {
+                    if i > 0 {
+                        buf.push(b',');
+                    }
+                    buf.extend_from_slice(alt.as_bytes());
+                }
+                alt_alleles.len()
+            }
+        }
+    }
+
     // r[impl vcf_record.alleles_rlen]
     /// Reference length for BCF rlen field.
     pub fn rlen(&self) -> usize {
@@ -258,5 +316,106 @@ mod tests {
         assert_eq!(Alleles::insertion(Base::A, &[Base::C, Base::G]).unwrap().rlen(), 1);
         assert_eq!(Alleles::deletion(Base::A, &[Base::C, Base::G]).unwrap().rlen(), 3);
         assert_eq!(Alleles::complex(SmolStr::from("ACGT"), vec![]).rlen(), 4);
+    }
+
+    // r[verify vcf_record.alleles_serialization]
+    #[test]
+    fn write_into_matches_text_methods() {
+        // Verify the zero-alloc write_*_into methods produce identical output to ref_text/alt_texts
+        let cases: Vec<Alleles> = vec![
+            Alleles::reference(Base::A),
+            Alleles::snv(Base::C, Base::T).unwrap(),
+            Alleles::snv_multi(Base::G, &[Base::A, Base::T]).unwrap(),
+            Alleles::insertion(Base::A, &[Base::C, Base::G, Base::T]).unwrap(),
+            Alleles::deletion(Base::T, &[Base::A, Base::C]).unwrap(),
+            Alleles::complex(SmolStr::from("ACG"), vec![SmolStr::from("T"), SmolStr::from("GG")]),
+        ];
+        for alleles in &cases {
+            let mut ref_buf = Vec::new();
+            alleles.write_ref_into(&mut ref_buf);
+            assert_eq!(
+                String::from_utf8(ref_buf).unwrap(),
+                alleles.ref_text().as_str(),
+                "ref mismatch for {alleles:?}"
+            );
+
+            let mut alt_buf = Vec::new();
+            let n = alleles.write_alts_into(&mut alt_buf);
+            let alt_texts = alleles.alt_texts();
+            assert_eq!(n, alt_texts.len(), "alt count mismatch for {alleles:?}");
+            if !alt_texts.is_empty() {
+                let expected: String =
+                    alt_texts.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",");
+                assert_eq!(
+                    String::from_utf8(alt_buf).unwrap(),
+                    expected,
+                    "alt text mismatch for {alleles:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_base() -> impl Strategy<Value = Base> {
+        prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T),]
+    }
+
+    fn arb_alleles() -> impl Strategy<Value = Alleles> {
+        prop_oneof![
+            // Reference
+            arb_base().prop_map(Alleles::reference),
+            // SNV — pick ref and alt that differ
+            (arb_base(), arb_base())
+                .prop_filter("ref != alt", |(r, a)| r != a)
+                .prop_map(|(r, a)| Alleles::snv(r, a).unwrap()),
+            // Insertion — 1-8 inserted bases
+            (arb_base(), proptest::collection::vec(arb_base(), 1..8))
+                .prop_map(|(anchor, ins)| Alleles::insertion(anchor, &ins).unwrap()),
+            // Deletion — 1-8 deleted bases
+            (arb_base(), proptest::collection::vec(arb_base(), 1..8))
+                .prop_map(|(anchor, del)| Alleles::deletion(anchor, &del).unwrap()),
+        ]
+    }
+
+    // r[verify vcf_record.alleles_serialization]
+    proptest! {
+        #[test]
+        fn write_into_consistent_with_text_methods(alleles in arb_alleles()) {
+            let mut ref_buf = Vec::new();
+            alleles.write_ref_into(&mut ref_buf);
+            let ref_str = String::from_utf8(ref_buf).unwrap();
+            let ref_text = alleles.ref_text();
+            prop_assert_eq!(ref_str.as_str(), ref_text.as_str());
+
+            let mut alt_buf = Vec::new();
+            let n = alleles.write_alts_into(&mut alt_buf);
+            let alt_texts = alleles.alt_texts();
+            prop_assert_eq!(n, alt_texts.len());
+            if !alt_texts.is_empty() {
+                let expected: String = alt_texts.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",");
+                let alt_str = String::from_utf8(alt_buf).unwrap();
+                prop_assert_eq!(alt_str, expected);
+            }
+        }
+
+        // r[verify vcf_record.alleles_rlen]
+        #[test]
+        fn rlen_matches_ref_text_length(alleles in arb_alleles()) {
+            let ref_text = alleles.ref_text();
+            prop_assert_eq!(alleles.rlen(), ref_text.len());
+        }
+
+        // r[verify vcf_record.allele_count]
+        #[test]
+        fn n_allele_equals_one_plus_alts(alleles in arb_alleles()) {
+            let alts = alleles.alt_texts();
+            let expected = 1 + alts.len();
+            prop_assert_eq!(alleles.n_allele(), expected);
+        }
     }
 }

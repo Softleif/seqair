@@ -63,8 +63,7 @@ impl<W: Write> BgzfWriter<W> {
             buf: Vec::with_capacity(MAX_UNCOMPRESSED_SIZE),
             compressed_buf: Vec::with_capacity(MAX_UNCOMPRESSED_SIZE),
             compressor: libdeflater::Compressor::new(
-                libdeflater::CompressionLvl::new(level)
-                    .unwrap_or(libdeflater::CompressionLvl::default()),
+                libdeflater::CompressionLvl::new(level).unwrap_or_default(),
             ),
             block_offset: 0,
         }
@@ -73,7 +72,7 @@ impl<W: Write> BgzfWriter<W> {
     /// Get a mutable reference to the inner writer.
     fn writer(&mut self) -> Result<&mut W, BgzfError> {
         self.inner.as_mut().ok_or(BgzfError::WriteFailed {
-            source: std::io::Error::new(std::io::ErrorKind::Other, "BgzfWriter already finished"),
+            source: std::io::Error::other("BgzfWriter already finished"),
         })
     }
 
@@ -165,7 +164,7 @@ impl<W: Write> BgzfWriter<W> {
 
         // Borrow inner writer directly to avoid conflicting borrow with self.compressed_buf/buf
         let w = self.inner.as_mut().ok_or(BgzfError::WriteFailed {
-            source: std::io::Error::new(std::io::ErrorKind::Other, "BgzfWriter already finished"),
+            source: std::io::Error::other("BgzfWriter already finished"),
         })?;
         w.write_all(&header).map_err(|source| BgzfError::WriteFailed { source })?;
         w.write_all(&self.compressed_buf).map_err(|source| BgzfError::WriteFailed { source })?;
@@ -193,7 +192,7 @@ impl<W: Write> BgzfWriter<W> {
         w.flush().map_err(|source| BgzfError::WriteFailed { source })?;
         // Take the inner writer so Drop doesn't try to flush again
         self.inner.take().ok_or_else(|| BgzfError::WriteFailed {
-            source: std::io::Error::new(std::io::ErrorKind::Other, "BgzfWriter already finished"),
+            source: std::io::Error::other("BgzfWriter already finished"),
         })
     }
 }

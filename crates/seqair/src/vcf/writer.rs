@@ -75,8 +75,7 @@ impl<W: Write> VcfWriter<W> {
     /// Write a single VCF record.
     pub fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
         if !self.header_written {
-            return Err(VcfError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(VcfError::Io(std::io::Error::other(
                 "write_header() must be called before write_record()",
             )));
         }
@@ -100,21 +99,14 @@ impl<W: Write> VcfWriter<W> {
         }
         self.buf.push(b'\t');
 
-        // REF
-        self.buf.extend_from_slice(record.alleles.ref_text().as_bytes());
+        // REF — zero-alloc, writes directly into buffer
+        record.alleles.write_ref_into(&mut self.buf);
         self.buf.push(b'\t');
 
-        // ALT
-        let alts = record.alleles.alt_texts();
-        if alts.is_empty() {
+        // ALT — zero-alloc, writes directly into buffer
+        let n_alts = record.alleles.write_alts_into(&mut self.buf);
+        if n_alts == 0 {
             self.buf.push(b'.');
-        } else {
-            for (i, alt) in alts.iter().enumerate() {
-                if i > 0 {
-                    self.buf.push(b',');
-                }
-                self.buf.extend_from_slice(alt.as_bytes());
-            }
         }
         self.buf.push(b'\t');
 
@@ -201,9 +193,9 @@ impl<W: Write> VcfWriter<W> {
                 let tid = self.header.contig_id(&record.contig)? as i32;
                 let beg = record.pos.to_zero_based().get() as u64;
                 let end = beg.saturating_add(record.alleles.rlen() as u64);
-                index.push(tid, beg, end, bgzf.virtual_offset()).map_err(|e| {
-                    VcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-                })?;
+                index
+                    .push(tid, beg, end, bgzf.virtual_offset())
+                    .map_err(|e| VcfError::Io(std::io::Error::other(e.to_string())))?;
             }
         }
 
@@ -221,9 +213,9 @@ impl<W: Write> VcfWriter<W> {
             }
             Output::Bgzf { bgzf, mut index } => {
                 let voff = bgzf.virtual_offset();
-                index.finish(voff).map_err(|e| {
-                    VcfError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-                })?;
+                index
+                    .finish(voff)
+                    .map_err(|e| VcfError::Io(std::io::Error::other(e.to_string())))?;
                 bgzf.finish()?;
                 Ok(Some(index))
             }

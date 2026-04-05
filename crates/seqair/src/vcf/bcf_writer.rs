@@ -292,10 +292,15 @@ fn encode_typed_string(buf: &mut Vec<u8>, s: &[u8]) {
 
 // r[impl bcf_writer.smallest_int_type]
 fn smallest_int_type(values: &[i32]) -> u8 {
+    smallest_int_type_iter(values.iter().copied())
+}
+
+/// Like `smallest_int_type` but takes an iterator — avoids collecting into a Vec.
+fn smallest_int_type_iter(values: impl Iterator<Item = i32>) -> u8 {
     let mut needs_16 = false;
-    for &v in values {
-        if v < INT8_MIN || v > INT8_MAX {
-            if v < INT16_MIN || v > INT16_MAX {
+    for v in values {
+        if !(INT8_MIN..=INT8_MAX).contains(&v) {
+            if !(INT16_MIN..=INT16_MAX).contains(&v) {
                 return BCF_BT_INT32;
             }
             needs_16 = true;
@@ -378,10 +383,8 @@ fn encode_gt_field(
     let mut max_allele: i32 = 0;
     for sample in samples {
         if let Some(SampleValue::Genotype(gt)) = sample.get(field_idx) {
-            for allele in &gt.alleles {
-                if let Some(idx) = allele {
-                    max_allele = max_allele.max(i32::from(*idx));
-                }
+            for idx in gt.alleles.iter().flatten() {
+                max_allele = max_allele.max(i32::from(*idx));
             }
         }
     }
@@ -458,15 +461,12 @@ fn encode_format_field(
     match first_val {
         Some(SampleValue::Integer(_)) | None => {
             // r[impl bcf_writer.smallest_int_type]
-            // Scan all values to pick smallest fitting type
-            let all_vals: Vec<i32> = samples
-                .iter()
-                .filter_map(|s| match s.get(field_idx) {
+            // Scan all values to pick smallest fitting type (no allocation)
+            let typ =
+                smallest_int_type_iter(samples.iter().filter_map(|s| match s.get(field_idx) {
                     Some(SampleValue::Integer(v)) => Some(*v),
                     _ => None,
-                })
-                .collect();
-            let typ = if all_vals.is_empty() { BCF_BT_INT8 } else { smallest_int_type(&all_vals) };
+                }));
             encode_type_byte(buf, 1, typ);
             for sample in samples {
                 match sample.get(field_idx) {
@@ -823,5 +823,56 @@ mod tests {
 
         assert!(index.is_some());
         assert!(output.len() > 28);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // r[verify bcf_writer.smallest_int_type]
+    proptest! {
+        #[test]
+        fn smallest_int_type_fits_all_values(values in proptest::collection::vec(-100_000i32..100_000, 1..20)) {
+            let typ = smallest_int_type(&values);
+            for &v in &values {
+                match typ {
+                    BCF_BT_INT8 => {
+                        prop_assert!(v >= INT8_MIN && v <= INT8_MAX,
+                            "value {v} doesn't fit int8 [{INT8_MIN}, {INT8_MAX}]");
+                    }
+                    BCF_BT_INT16 => {
+                        prop_assert!(v >= INT16_MIN && v <= INT16_MAX,
+                            "value {v} doesn't fit int16 [{INT16_MIN}, {INT16_MAX}]");
+                    }
+                    BCF_BT_INT32 => {} // always fits
+                    _ => prop_assert!(false, "unexpected type code {typ}"),
+                }
+            }
+        }
+
+        #[test]
+        fn smallest_int_type_is_minimal(values in proptest::collection::vec(-100_000i32..100_000, 1..20)) {
+            let typ = smallest_int_type(&values);
+            // If we got INT16, at least one value must not fit INT8
+            if typ == BCF_BT_INT16 {
+                prop_assert!(values.iter().any(|&v| v < INT8_MIN || v > INT8_MAX),
+                    "selected INT16 but all values fit INT8");
+            }
+            // If we got INT32, at least one value must not fit INT16
+            if typ == BCF_BT_INT32 {
+                prop_assert!(values.iter().any(|&v| v < INT16_MIN || v > INT16_MAX),
+                    "selected INT32 but all values fit INT16");
+            }
+        }
+
+        /// Iter version must return same result as slice version.
+        #[test]
+        fn smallest_int_type_iter_matches_slice(values in proptest::collection::vec(-100_000i32..100_000, 0..20)) {
+            let from_slice = smallest_int_type(&values);
+            let from_iter = smallest_int_type_iter(values.iter().copied());
+            prop_assert_eq!(from_slice, from_iter);
+        }
     }
 }
