@@ -40,7 +40,7 @@ r[bcf_encoder.bcf_value]
 The `BcfValue` trait MUST define: `bcf_type_code() -> u8` (BCF type code for this Rust type), `encode_bcf(&self, buf: &mut Vec<u8>)` (write value bytes), `encode_missing(buf: &mut Vec<u8>)` (write missing sentinel), `encode_end_of_vector(buf: &mut Vec<u8>)` (write EOV sentinel).
 
 r[bcf_encoder.bcf_value_int]
-`i32` values MUST select the smallest BCF integer type that fits, matching `r[bcf_writer.smallest_int_type]`. For arrays, the type is determined by scanning all values first.
+Scalar `i32` values MUST select the smallest BCF integer type that fits, matching `r[bcf_writer.smallest_int_type]`. For arrays, the type is determined by scanning all concrete (non-missing) values first. Missing values within integer arrays MUST use the per-type sentinel (int8=0x80, int16=0x8000, int32=0x80000000) matching the selected type, not a fixed i32::MIN.
 
 r[bcf_encoder.bcf_value_float]
 `f32` values MUST be encoded as IEEE 754 single-precision LE bytes. Missing sentinel `0x7F800001` and EOV sentinel `0x7F800002` MUST be written as raw bytes (never through float arithmetic) per `r[bcf_writer.missing_sentinels]`.

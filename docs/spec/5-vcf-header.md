@@ -40,7 +40,7 @@ r[vcf_header.string_map]
 For BCF output, the header MUST provide a string-to-index dictionary mapping all FILTER, INFO, and FORMAT IDs to integer indices. Contig names use a separate index namespace matching insertion order.
 
 r[vcf_header.serialization]
-`to_vcf_text()` MUST emit all meta-information lines (`##`) followed by the `#CHROM` header line. Lines MUST be ordered: fileformat first, then INFO, FORMAT, FILTER, contig, other lines, then the #CHROM line.
+`to_vcf_text()` MUST emit all meta-information lines (`##`) followed by the `#CHROM` header line. Lines MUST be ordered: fileformat first, then FILTER (PASS first), INFO, FORMAT, contig, other lines, then the #CHROM line. This ordering ensures the BCF string dictionary (built by scanning header lines in order) assigns PASS to index 0 and matches the dictionary indices used during encoding.
 
 r[vcf_header.from_bam_header]
 A `from_bam_header(&BamHeader)` constructor MUST copy contig names and lengths from the BAM header's @SQ lines, preserving order (and thus tid mapping).

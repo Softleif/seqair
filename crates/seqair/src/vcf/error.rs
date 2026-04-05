@@ -93,4 +93,7 @@ pub enum VcfError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    #[error("write_header() must be called before write_record()")]
+    HeaderNotWritten,
 }

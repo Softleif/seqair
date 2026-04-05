@@ -229,10 +229,10 @@ impl VcfRecordBuilder {
         }
 
         // r[impl vcf_record.format_gt_first]
-        if let Some(pos) = self.samples.format_keys.iter().position(|k| k == "GT") {
-            if pos != 0 {
-                return Err(VcfHeaderError::GtNotFirst { index: pos });
-            }
+        if let Some(pos) = self.samples.format_keys.iter().position(|k| k == "GT")
+            && pos != 0
+        {
+            return Err(VcfHeaderError::GtNotFirst { index: pos });
         }
 
         Ok(VcfRecord {

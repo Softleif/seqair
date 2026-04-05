@@ -170,14 +170,30 @@ proptest! {
         pos in 1u32..1_000_000,
         filter_state in 0u8..3,
     ) {
-        let header = test_header();
+        // Header with a custom filter so we can test the Failed path
+        use seqair::vcf::header::FilterDef;
+        use seqair::vcf::record::Filters;
+        let header = Arc::new(
+            VcfHeader::builder()
+                .add_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap()
+                .add_info("DP", InfoDef {
+                    number: Number::Count(1), typ: ValueType::Integer,
+                    description: SmolStr::from("Depth"),
+                }).unwrap()
+                .add_filter("q20", FilterDef { description: SmolStr::from("Quality below 20") }).unwrap()
+                .build().unwrap(),
+        );
         let pos = Pos::<One>::new(pos).unwrap();
         let mut builder = VcfRecordBuilder::new("chr1", pos, Alleles::reference(Base::A));
 
         let expected_filter = match filter_state {
             0 => { builder = builder.filter_pass(); "PASS" },
             1 => ".",  // NotApplied (default)
-            _ => { builder = builder.filter_pass(); "PASS" }, // Can't easily test Failed without declared filters
+            _ => {
+                // r[verify vcf_record.filters] — test Failed with declared filter
+                builder = builder.filter_failed(vec![SmolStr::from("q20")]);
+                "q20"
+            },
         };
 
         let record = builder.build(&header).unwrap();

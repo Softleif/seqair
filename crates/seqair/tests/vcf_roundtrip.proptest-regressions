@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 009edf601f2ce6aef3d7bbaf8b288de50ec4cab11bdfe8c256531238b4a00de0 # shrinks to input = TestRecord { pos: 1, alleles: Deletion { anchor: A, deleted: [G] }, qual: Some(0.1), filter_pass: true, dp: 8998, mq: 10.860052, has_db_flag: true, gt: Genotype { alleles: [Some(1), Some(0)], phased: [false] }, sample_dp: 14, sample_gq: 61 }
+cc 8055eeac728ff9506ce44c9f952b351dec4ef62deaa2eb1d9af7bb23c3043e02 # shrinks to input = TestRecord { pos: 1, alleles: Deletion { anchor: A, deleted: [A] }, qual: None, filter_pass: false, dp: 17, mq: 43.465805, has_db_flag: false, gt: Genotype { alleles: [Some(1), Some(0)], phased: [true] }, sample_dp: 51, sample_gq: 61 }

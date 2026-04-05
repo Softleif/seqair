@@ -75,9 +75,7 @@ impl<W: Write> VcfWriter<W> {
     /// Write a single VCF record.
     pub fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
         if !self.header_written {
-            return Err(VcfError::Io(std::io::Error::other(
-                "write_header() must be called before write_record()",
-            )));
+            return Err(VcfError::HeaderNotWritten);
         }
 
         // r[impl vcf_writer.buffer_reuse]

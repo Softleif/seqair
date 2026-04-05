@@ -96,9 +96,7 @@ impl<W: Write> BcfWriter<W> {
     /// Write a single BCF record.
     pub fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
         if !self.header_written {
-            return Err(VcfError::Io(std::io::Error::other(
-                "write_header() must be called before write_record()",
-            )));
+            return Err(VcfError::HeaderNotWritten);
         }
 
         // r[impl bcf_writer.buffer_reuse]
@@ -345,6 +343,36 @@ fn encode_typed_int_vec(buf: &mut Vec<u8>, values: &[i32]) {
     }
 }
 
+/// Encode an integer value or missing sentinel, using the given BCF type.
+fn encode_int_value_or_missing(buf: &mut Vec<u8>, value: Option<i32>, typ: u8) {
+    match value {
+        Some(n) => match typ {
+            BCF_BT_INT8 => buf.push(n as u8),
+            BCF_BT_INT16 => buf.extend_from_slice(&(n as i16).to_le_bytes()),
+            _ => buf.extend_from_slice(&n.to_le_bytes()),
+        },
+        None => encode_int_missing(buf, typ),
+    }
+}
+
+/// Write the missing sentinel for the given int type.
+fn encode_int_missing(buf: &mut Vec<u8>, typ: u8) {
+    match typ {
+        BCF_BT_INT8 => buf.push(INT8_MISSING),
+        BCF_BT_INT16 => buf.extend_from_slice(&INT16_MISSING.to_le_bytes()),
+        _ => buf.extend_from_slice(&INT32_MISSING.to_le_bytes()),
+    }
+}
+
+/// Write the end-of-vector sentinel for the given int type.
+fn encode_int_eov(buf: &mut Vec<u8>, typ: u8) {
+    match typ {
+        BCF_BT_INT8 => buf.push(INT8_END_OF_VECTOR),
+        BCF_BT_INT16 => buf.extend_from_slice(&INT16_END_OF_VECTOR.to_le_bytes()),
+        _ => buf.extend_from_slice(&INT32_END_OF_VECTOR.to_le_bytes()),
+    }
+}
+
 // r[impl bcf_writer.flag_encoding]
 fn encode_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
     match value {
@@ -359,8 +387,26 @@ fn encode_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
         }
         InfoValue::String(s) => encode_typed_string(buf, s.as_bytes()),
         InfoValue::IntegerArray(arr) => {
-            let concrete: Vec<i32> = arr.iter().map(|v| v.unwrap_or(i32::MIN)).collect();
-            encode_typed_int_vec(buf, &concrete);
+            // r[impl bcf_writer.smallest_int_type]
+            // Scan only concrete (non-missing) values to pick smallest type.
+            // Missing values get the per-type sentinel, not a fixed i32::MIN.
+            let typ = smallest_int_type_iter(arr.iter().filter_map(|v| *v));
+            encode_type_byte(buf, arr.len(), typ);
+            for v in arr {
+                match v {
+                    Some(n) => match typ {
+                        BCF_BT_INT8 => buf.push(*n as u8),
+                        BCF_BT_INT16 => buf.extend_from_slice(&(*n as i16).to_le_bytes()),
+                        _ => buf.extend_from_slice(&n.to_le_bytes()),
+                    },
+                    // r[impl bcf_writer.missing_sentinels]
+                    None => match typ {
+                        BCF_BT_INT8 => buf.push(INT8_MISSING),
+                        BCF_BT_INT16 => buf.extend_from_slice(&INT16_MISSING.to_le_bytes()),
+                        _ => buf.extend_from_slice(&INT32_MISSING.to_le_bytes()),
+                    },
+                }
+            }
         }
         InfoValue::FloatArray(arr) => {
             encode_type_byte(buf, arr.len(), BCF_BT_FLOAT);
@@ -552,26 +598,31 @@ fn encode_format_field(
                 .max()
                 .unwrap_or(arr.len());
 
-            encode_type_byte(buf, max_len, BCF_BT_INT32);
+            // r[impl bcf_writer.smallest_int_type]
+            // Scan all concrete values across all samples to pick smallest type
+            let typ = smallest_int_type_iter(samples.iter().flat_map(|s| {
+                match s.get(field_idx) {
+                    Some(SampleValue::IntegerArray(a)) => a.iter().filter_map(|v| *v).collect(),
+                    _ => Vec::new(),
+                }
+                .into_iter()
+            }));
+            encode_type_byte(buf, max_len, typ);
             for sample in samples {
                 match sample.get(field_idx) {
                     Some(SampleValue::IntegerArray(a)) => {
-                        for (i, v) in a.iter().enumerate().take(max_len) {
-                            match v {
-                                Some(n) => buf.extend_from_slice(&n.to_le_bytes()),
-                                None => buf.extend_from_slice(&INT32_MISSING.to_le_bytes()),
-                            }
-                            let _ = i; // used by enumerate
+                        for v in a.iter().take(max_len) {
+                            encode_int_value_or_missing(buf, *v, typ);
                         }
                         // r[impl bcf_writer.end_of_vector]
                         for _ in a.len()..max_len {
-                            buf.extend_from_slice(&INT32_END_OF_VECTOR.to_le_bytes());
+                            encode_int_eov(buf, typ);
                         }
                     }
                     _ => {
-                        buf.extend_from_slice(&INT32_MISSING.to_le_bytes());
+                        encode_int_missing(buf, typ);
                         for _ in 1..max_len {
-                            buf.extend_from_slice(&INT32_END_OF_VECTOR.to_le_bytes());
+                            encode_int_eov(buf, typ);
                         }
                     }
                 }

@@ -60,8 +60,17 @@ const INT16_MAX: i32 = 32767;
 pub trait BcfValue: Copy {
     /// The BCF type code used for scalar encoding.
     const TYPE_CODE: u8;
-    /// Write this value's bytes into the buffer.
-    fn encode_bcf(self, buf: &mut Vec<u8>);
+    /// BCF type code for a specific scalar value. Defaults to TYPE_CODE.
+    /// Overridden by i32 to select the smallest fitting type per r[bcf_writer.smallest_int_type].
+    fn scalar_type_code(self) -> u8 {
+        Self::TYPE_CODE
+    }
+    /// Write this value's bytes into the buffer using the given type code.
+    fn encode_bcf_as(self, buf: &mut Vec<u8>, type_code: u8);
+    /// Write this value's bytes using the default type code.
+    fn encode_bcf(self, buf: &mut Vec<u8>) {
+        self.encode_bcf_as(buf, Self::TYPE_CODE)
+    }
     /// Write the missing sentinel for this value type.
     fn encode_missing(buf: &mut Vec<u8>);
     /// Write the end-of-vector sentinel for this value type.
@@ -72,7 +81,7 @@ pub trait BcfValue: Copy {
 impl BcfValue for f32 {
     const TYPE_CODE: u8 = BCF_BT_FLOAT;
 
-    fn encode_bcf(self, buf: &mut Vec<u8>) {
+    fn encode_bcf_as(self, buf: &mut Vec<u8>, _type_code: u8) {
         buf.extend_from_slice(&self.to_le_bytes());
     }
 
@@ -87,10 +96,30 @@ impl BcfValue for f32 {
 
 // r[impl bcf_encoder.bcf_value_int]
 impl BcfValue for i32 {
-    const TYPE_CODE: u8 = BCF_BT_INT32; // default; arrays use smallest_int_type
+    const TYPE_CODE: u8 = BCF_BT_INT32;
+
+    /// Select smallest BCF int type for this value per r[bcf_writer.smallest_int_type].
+    fn scalar_type_code(self) -> u8 {
+        if (INT8_MIN..=INT8_MAX).contains(&self) {
+            BCF_BT_INT8
+        } else if (INT16_MIN..=INT16_MAX).contains(&self) {
+            BCF_BT_INT16
+        } else {
+            BCF_BT_INT32
+        }
+    }
+
+    fn encode_bcf_as(self, buf: &mut Vec<u8>, type_code: u8) {
+        match type_code {
+            BCF_BT_INT8 => buf.push(self as u8),
+            BCF_BT_INT16 => buf.extend_from_slice(&(self as i16).to_le_bytes()),
+            _ => buf.extend_from_slice(&self.to_le_bytes()),
+        }
+    }
 
     fn encode_bcf(self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&self.to_le_bytes());
+        // Use smallest type for scalars
+        self.encode_bcf_as(buf, self.scalar_type_code());
     }
 
     fn encode_missing(buf: &mut Vec<u8>) {
@@ -194,10 +223,12 @@ pub struct GtFormatHandle {
 // r[impl bcf_encoder.handle_encode]
 
 impl<T: BcfValue> ScalarInfoHandle<T> {
+    // r[impl bcf_encoder.bcf_value_int] — uses scalar_type_code for smallest-int selection
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>, value: T) {
+        let type_code = value.scalar_type_code();
         encode_typed_int_key(enc.shared_buf, self.dict_idx);
-        encode_type_byte(enc.shared_buf, 1, T::TYPE_CODE);
-        value.encode_bcf(enc.shared_buf);
+        encode_type_byte(enc.shared_buf, 1, type_code);
+        value.encode_bcf_as(enc.shared_buf, type_code);
         enc.n_info = enc.n_info.saturating_add(1);
     }
 }
@@ -221,10 +252,7 @@ impl<T: BcfValue> PerAltInfoHandle<T> {
             values.len()
         );
         encode_typed_int_key(enc.shared_buf, self.dict_idx);
-        encode_type_byte(enc.shared_buf, values.len(), T::TYPE_CODE);
-        for v in values {
-            v.encode_bcf(enc.shared_buf);
-        }
+        encode_array_values(enc.shared_buf, values);
         enc.n_info = enc.n_info.saturating_add(1);
     }
 }
@@ -239,20 +267,19 @@ impl<T: BcfValue> PerAlleleInfoHandle<T> {
             values.len()
         );
         encode_typed_int_key(enc.shared_buf, self.dict_idx);
-        encode_type_byte(enc.shared_buf, values.len(), T::TYPE_CODE);
-        for v in values {
-            v.encode_bcf(enc.shared_buf);
-        }
+        encode_array_values(enc.shared_buf, values);
         enc.n_info = enc.n_info.saturating_add(1);
     }
 }
 
 impl<T: BcfValue> ScalarFormatHandle<T> {
     /// Encode a single-sample scalar FORMAT field.
+    // r[impl bcf_encoder.bcf_value_int] — uses scalar_type_code for smallest-int selection
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>, value: T) {
+        let type_code = value.scalar_type_code();
         encode_typed_int_key(enc.indiv_buf, self.dict_idx);
-        encode_type_byte(enc.indiv_buf, 1, T::TYPE_CODE);
-        value.encode_bcf(enc.indiv_buf);
+        encode_type_byte(enc.indiv_buf, 1, type_code);
+        value.encode_bcf_as(enc.indiv_buf, type_code);
         enc.n_fmt = enc.n_fmt.saturating_add(1);
     }
 }
@@ -262,10 +289,7 @@ impl<T: BcfValue> PerAltFormatHandle<T> {
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>, values: &[T]) {
         debug_assert_eq!(values.len(), enc.n_alt as usize);
         encode_typed_int_key(enc.indiv_buf, self.dict_idx);
-        encode_type_byte(enc.indiv_buf, values.len(), T::TYPE_CODE);
-        for v in values {
-            v.encode_bcf(enc.indiv_buf);
-        }
+        encode_array_values(enc.indiv_buf, values);
         enc.n_fmt = enc.n_fmt.saturating_add(1);
     }
 }
@@ -275,10 +299,7 @@ impl<T: BcfValue> PerAlleleFormatHandle<T> {
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>, values: &[T]) {
         debug_assert_eq!(values.len(), enc.n_allele as usize);
         encode_typed_int_key(enc.indiv_buf, self.dict_idx);
-        encode_type_byte(enc.indiv_buf, values.len(), T::TYPE_CODE);
-        for v in values {
-            v.encode_bcf(enc.indiv_buf);
-        }
+        encode_array_values(enc.indiv_buf, values);
         enc.n_fmt = enc.n_fmt.saturating_add(1);
     }
 }
@@ -512,6 +533,35 @@ fn encode_type_byte(buf: &mut Vec<u8>, count: usize, type_code: u8) {
             buf.push((1 << 4) | BCF_BT_INT32);
             buf.extend_from_slice(&(count as u32).to_le_bytes());
         }
+    }
+}
+
+/// Encode an array of BcfValue items. For i32, scans all values to select
+/// the smallest BCF int type per r[bcf_writer.smallest_int_type].
+/// For f32, uses BCF_BT_FLOAT directly (no type selection needed).
+/// Encode an array of BcfValue items. For i32, scans all values to select
+/// the smallest BCF int type that fits ALL values per r[bcf_writer.smallest_int_type].
+fn encode_array_values<T: BcfValue>(buf: &mut Vec<u8>, values: &[T]) {
+    if values.is_empty() {
+        encode_type_byte(buf, 0, T::TYPE_CODE);
+        return;
+    }
+    // Find the widest type needed across all values.
+    // Start from 0 (narrowest) and widen as needed.
+    let mut type_code: u8 = 0;
+    for v in values {
+        let vtc = v.scalar_type_code();
+        if vtc > type_code {
+            type_code = vtc;
+        }
+    }
+    // If no values contributed (shouldn't happen since !is_empty), fall back to TYPE_CODE
+    if type_code == 0 {
+        type_code = T::TYPE_CODE;
+    }
+    encode_type_byte(buf, values.len(), type_code);
+    for v in values {
+        v.encode_bcf_as(buf, type_code);
     }
 }
 

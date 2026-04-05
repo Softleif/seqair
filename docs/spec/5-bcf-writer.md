@@ -24,7 +24,7 @@ r[bcf_writer.typed_values]
 All variable-length fields MUST use BCF typed value encoding. The type byte encodes `(count << 4) | type_code`. Type codes: 0=missing, 1=int8, 2=int16, 3=int32, 5=float, 7=char. For count >= 15, the type byte uses count=15 followed by a typed integer with the actual count.
 
 r[bcf_writer.smallest_int_type]
-Integer values MUST be encoded using the smallest type that fits all values: int8 for [-120, 127], int16 for [-32760, 32767], int32 otherwise. The 8 most-negative values of each type are reserved for sentinels.
+Integer values MUST be encoded using the smallest type that fits all concrete (non-missing) values: int8 for [-120, 127], int16 for [-32760, 32767], int32 otherwise. The 8 most-negative values of each type are reserved for sentinels. Missing values within integer arrays MUST use the per-type sentinel matching the selected type (int8=0x80, int16=0x8000, int32=0x80000000), NOT a fixed i32::MIN.
 
 > *[BCF2] — missing and end-of-vector sentinel values table. See also [hts-specs issue #145](https://github.com/samtools/hts-specs/issues/145) on signaling NaN handling*
 

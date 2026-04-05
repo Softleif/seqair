@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e1ace20dc3bcafb959e8b02a2c7df12117dabf56392fc92fb5afbc7c80dc8b0a # shrinks to pos = 1, alleles = Reference { ref_base: A }, dp = 0
+cc c3f7317e7acc2b9f0ade7f0aa378dd40c835dc801c64ff254c181b9b1792567c # shrinks to pos = 1, alleles = Reference { ref_base: A }, qual = None, dp = 0
