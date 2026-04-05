@@ -18,10 +18,11 @@ Expert Rust. Modern idioms. Types are the primary abstraction.
 * No indexing — use `.get()`. If indexing is unavoidable, `#[allow(clippy::indexing_slicing)]` + `debug_assert!`.
 * No `let _ =` on fallible ops — propagate, log with `warn!`, or handle.
 * No `from_utf8_lossy` — use `from_utf8()?` with typed errors.
-* Error enums: one per module, typed fields only (never `String`), `#[from]` for wrapping. Hierarchy: `BgzfError` → `BamHeaderError`/`BaiError` → `BamError`; `FaiError`/`GziError` → `FastaError`; `FormatDetectionError` → `ReaderError`.
+* Error enums: one per module, typed fields only (never `String`), `#[from]` for wrapping. Never use `io::Error::other("message")` — add a typed variant instead. Hierarchy: `BgzfError` → `BamHeaderError`/`BaiError` → `BamError`; `FaiError`/`GziError` → `FastaError`; `FormatDetectionError` → `ReaderError`; `VcfHeaderError`/`VcfEncodeError`/`AllelesError` → `VcfError`.
 * `color_eyre` for errors, `tracing` for logging.
 * Sequence names are `SmolStr`.
-* Tests: `cargo test`. Prefer `proptest` where applicable.
+* Tests: `cargo test`. Prefer `proptest` where applicable. Round-trip tests against noodles and bcftools are the strongest validation — always add them for new output formats.
+* `SmallVec` in this project uses 2-arg form `SmallVec<T, N>` (not `SmallVec<[T; N]>`) due to debug-mode Vec alias in seqair-types. Use `vec![]` and `.to_vec()` instead of `SmallVec::from_buf`/`from_slice`.
 
 ## Architecture notes
 
@@ -53,6 +54,22 @@ Expert Rust. Modern idioms. Types are the primary abstraction.
 2. `RegionBuf` (hot path): raw File → `data: Vec<u8>` (all compressed) → 64KB decompressed blocks
 3. BAI: `fs::read()` into memory at open
 4. `RecordStore`: ~900KB total for typical 30x region
+
+## VCF/BCF writing
+
+**Two encoding paths**: `BcfWriter::write_record(&VcfRecord)` (generic, allocates per record) and `BcfRecordEncoder` with typed handles (zero-alloc, pre-resolved dict indices). Both must produce BCF that noodles and bcftools parse identically.
+
+**Type-safe Alleles**: `Reference`/`Snv`/`Insertion`/`Deletion`/`Complex` — enforces VCF structural invariants at construction. `write_ref_into`/`write_alts_into` for zero-alloc serialization. `begin_record()` on the encoder writes the BCF fixed header + alleles directly.
+
+**Typed field handles**: `ScalarInfoHandle<T>`, `PerAlleleInfoHandle<T>`, `FlagInfoHandle`, `GtFormatHandle`, etc. Pre-resolved from header at setup. `handle.encode(&mut enc, value)` writes directly into BCF buffers. `BcfValue` trait: `scalar_type_code()` selects smallest int type for i32; arrays scan all values for uniform type.
+
+**BCF format pitfalls** (caught by tests):
+- BCF magic is `BCF\x02\x02` (v2.2), NOT `\x02\x01` (v2.1). bcftools rejects v2.1.
+- BCF string dictionary order MUST match VCF header text emission order. Emit FILTER (PASS first) → INFO → FORMAT. If these don't match, noodles/htslib compute different dict indices and fields decode wrong.
+- Integer arrays with missing values: scan only concrete values for `smallest_int_type`, then use per-type sentinel (int8=0x80, int16=0x8000, int32=0x80000000). Never use `i32::MIN` as a universal missing marker.
+- `BgzfWriter::virtual_offset()`: cap `buf.len()` at `u16::MAX` to prevent truncation when buffer is exactly 65536 bytes.
+
+**IndexBuilder**: single-pass TBI/CSI co-production during writing. Mirrors htslib's `hts_idx_push` state machine. Uses `BTreeMap` (not `HashMap`) for deterministic bin order.
 
 ## Profiling
 
