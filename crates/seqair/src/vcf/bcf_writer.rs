@@ -245,6 +245,25 @@ impl<W: Write> BcfWriter<W> {
         Ok(())
     }
 
+    /// Get a direct record encoder that writes into this writer's buffers.
+    /// Use this for zero-alloc encoding instead of `write_record(&VcfRecord)`.
+    pub fn record_encoder(&mut self) -> super::encoder::BcfRecordEncoder<'_> {
+        super::encoder::BcfRecordEncoder {
+            shared_buf: &mut self.shared_buf,
+            indiv_buf: &mut self.indiv_buf,
+            bgzf: &mut self.bgzf,
+            index: self.index.as_mut(),
+            n_allele: 0,
+            n_alt: 0,
+            n_info: 0,
+            n_fmt: 0,
+            n_sample: 0,
+            tid: 0,
+            pos_0based: 0,
+            rlen: 0,
+        }
+    }
+
     // r[impl bcf_writer.finish]
     /// Finalize the writer. Returns the index builder if one was used.
     pub fn finish(self) -> Result<Option<IndexBuilder>, VcfError> {
