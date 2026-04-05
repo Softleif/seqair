@@ -45,8 +45,11 @@ const INT16_END_OF_VECTOR: u16 = 0x8001;
 const INT32_END_OF_VECTOR: u32 = 0x80000001;
 const FLOAT_END_OF_VECTOR: u32 = 0x7F800002;
 
+// Int ranges for BCF type selection — MIN values reserved for multi-sample smallest_int_type
+#[allow(dead_code)]
 const INT8_MIN: i32 = -120;
 const INT8_MAX: i32 = 127;
+#[allow(dead_code)]
 const INT16_MIN: i32 = -32760;
 const INT16_MAX: i32 = 32767;
 
@@ -105,7 +108,7 @@ impl BcfValue for i32 {
 
 /// Pre-resolved contig (chromosome) handle. Carries the tid.
 #[derive(Debug, Clone, Copy)]
-pub struct ContigHandle(pub(crate) u32);
+pub struct ContigHandle(pub u32);
 
 impl ContigHandle {
     pub fn tid(self) -> u32 {
@@ -115,7 +118,7 @@ impl ContigHandle {
 
 /// Pre-resolved filter handle. PASS is always index 0.
 #[derive(Debug, Clone, Copy)]
-pub struct FilterHandle(pub(crate) u32);
+pub struct FilterHandle(pub u32);
 
 impl FilterHandle {
     /// The PASS filter (always BCF dictionary index 0).
@@ -124,7 +127,7 @@ impl FilterHandle {
     // r[impl bcf_encoder.handle_encode]
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>) {
         // Single int8 vector containing the filter index
-        encode_type_byte(&mut enc.shared_buf, 1, BCF_BT_INT8);
+        encode_type_byte(enc.shared_buf, 1, BCF_BT_INT8);
         enc.shared_buf.push(self.0 as u8);
     }
 }
@@ -135,55 +138,55 @@ impl FilterHandle {
 /// INFO field handle for `Number::Count(1)` — encodes exactly 1 value.
 #[derive(Debug, Clone, Copy)]
 pub struct ScalarInfoHandle<T: BcfValue> {
-    dict_idx: u32,
-    _marker: PhantomData<T>,
+    pub dict_idx: u32,
+    pub _marker: PhantomData<T>,
 }
 
 /// INFO field handle for `Number::Count(0)` (Flag) — encodes no value.
 #[derive(Debug, Clone, Copy)]
 pub struct FlagInfoHandle {
-    dict_idx: u32,
+    pub dict_idx: u32,
 }
 
 /// INFO field handle for `Number::A` — encodes `n_alt` values.
 #[derive(Debug, Clone, Copy)]
 pub struct PerAltInfoHandle<T: BcfValue> {
-    dict_idx: u32,
-    _marker: PhantomData<T>,
+    pub dict_idx: u32,
+    pub _marker: PhantomData<T>,
 }
 
 /// INFO field handle for `Number::R` — encodes `n_allele` values.
 #[derive(Debug, Clone, Copy)]
 pub struct PerAlleleInfoHandle<T: BcfValue> {
-    dict_idx: u32,
-    _marker: PhantomData<T>,
+    pub dict_idx: u32,
+    pub _marker: PhantomData<T>,
 }
 
 /// FORMAT field handle for `Number::Count(1)` — encodes 1 value per sample.
 #[derive(Debug, Clone, Copy)]
 pub struct ScalarFormatHandle<T: BcfValue> {
-    dict_idx: u32,
-    _marker: PhantomData<T>,
+    pub dict_idx: u32,
+    pub _marker: PhantomData<T>,
 }
 
 /// FORMAT field handle for `Number::A` — encodes `n_alt` values per sample.
 #[derive(Debug, Clone, Copy)]
 pub struct PerAltFormatHandle<T: BcfValue> {
-    dict_idx: u32,
-    _marker: PhantomData<T>,
+    pub dict_idx: u32,
+    pub _marker: PhantomData<T>,
 }
 
 /// FORMAT field handle for `Number::R` — encodes `n_allele` values per sample.
 #[derive(Debug, Clone, Copy)]
 pub struct PerAlleleFormatHandle<T: BcfValue> {
-    dict_idx: u32,
-    _marker: PhantomData<T>,
+    pub dict_idx: u32,
+    pub _marker: PhantomData<T>,
 }
 
 /// FORMAT field handle for GT (genotype) — special encoding.
 #[derive(Debug, Clone, Copy)]
 pub struct GtFormatHandle {
-    dict_idx: u32,
+    pub dict_idx: u32,
 }
 
 // ── Handle encode implementations ──────────────────────────────────────
@@ -192,18 +195,18 @@ pub struct GtFormatHandle {
 
 impl<T: BcfValue> ScalarInfoHandle<T> {
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>, value: T) {
-        encode_typed_int_key(&mut enc.shared_buf, self.dict_idx);
-        encode_type_byte(&mut enc.shared_buf, 1, T::TYPE_CODE);
-        value.encode_bcf(&mut enc.shared_buf);
+        encode_typed_int_key(enc.shared_buf, self.dict_idx);
+        encode_type_byte(enc.shared_buf, 1, T::TYPE_CODE);
+        value.encode_bcf(enc.shared_buf);
         enc.n_info = enc.n_info.saturating_add(1);
     }
 }
 
 impl FlagInfoHandle {
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>) {
-        encode_typed_int_key(&mut enc.shared_buf, self.dict_idx);
+        encode_typed_int_key(enc.shared_buf, self.dict_idx);
         // Flag: type=0, count=0
-        encode_type_byte(&mut enc.shared_buf, 0, BCF_BT_NULL);
+        encode_type_byte(enc.shared_buf, 0, BCF_BT_NULL);
         enc.n_info = enc.n_info.saturating_add(1);
     }
 }
@@ -217,10 +220,10 @@ impl<T: BcfValue> PerAltInfoHandle<T> {
             enc.n_alt,
             values.len()
         );
-        encode_typed_int_key(&mut enc.shared_buf, self.dict_idx);
-        encode_type_byte(&mut enc.shared_buf, values.len(), T::TYPE_CODE);
+        encode_typed_int_key(enc.shared_buf, self.dict_idx);
+        encode_type_byte(enc.shared_buf, values.len(), T::TYPE_CODE);
         for v in values {
-            v.encode_bcf(&mut enc.shared_buf);
+            v.encode_bcf(enc.shared_buf);
         }
         enc.n_info = enc.n_info.saturating_add(1);
     }
@@ -235,10 +238,10 @@ impl<T: BcfValue> PerAlleleInfoHandle<T> {
             enc.n_allele,
             values.len()
         );
-        encode_typed_int_key(&mut enc.shared_buf, self.dict_idx);
-        encode_type_byte(&mut enc.shared_buf, values.len(), T::TYPE_CODE);
+        encode_typed_int_key(enc.shared_buf, self.dict_idx);
+        encode_type_byte(enc.shared_buf, values.len(), T::TYPE_CODE);
         for v in values {
-            v.encode_bcf(&mut enc.shared_buf);
+            v.encode_bcf(enc.shared_buf);
         }
         enc.n_info = enc.n_info.saturating_add(1);
     }
@@ -247,9 +250,9 @@ impl<T: BcfValue> PerAlleleInfoHandle<T> {
 impl<T: BcfValue> ScalarFormatHandle<T> {
     /// Encode a single-sample scalar FORMAT field.
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>, value: T) {
-        encode_typed_int_key(&mut enc.indiv_buf, self.dict_idx);
-        encode_type_byte(&mut enc.indiv_buf, 1, T::TYPE_CODE);
-        value.encode_bcf(&mut enc.indiv_buf);
+        encode_typed_int_key(enc.indiv_buf, self.dict_idx);
+        encode_type_byte(enc.indiv_buf, 1, T::TYPE_CODE);
+        value.encode_bcf(enc.indiv_buf);
         enc.n_fmt = enc.n_fmt.saturating_add(1);
     }
 }
@@ -258,10 +261,10 @@ impl<T: BcfValue> PerAltFormatHandle<T> {
     /// Encode a single-sample per-alt FORMAT field.
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>, values: &[T]) {
         debug_assert_eq!(values.len(), enc.n_alt as usize);
-        encode_typed_int_key(&mut enc.indiv_buf, self.dict_idx);
-        encode_type_byte(&mut enc.indiv_buf, values.len(), T::TYPE_CODE);
+        encode_typed_int_key(enc.indiv_buf, self.dict_idx);
+        encode_type_byte(enc.indiv_buf, values.len(), T::TYPE_CODE);
         for v in values {
-            v.encode_bcf(&mut enc.indiv_buf);
+            v.encode_bcf(enc.indiv_buf);
         }
         enc.n_fmt = enc.n_fmt.saturating_add(1);
     }
@@ -271,10 +274,10 @@ impl<T: BcfValue> PerAlleleFormatHandle<T> {
     /// Encode a single-sample per-allele FORMAT field.
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>, values: &[T]) {
         debug_assert_eq!(values.len(), enc.n_allele as usize);
-        encode_typed_int_key(&mut enc.indiv_buf, self.dict_idx);
-        encode_type_byte(&mut enc.indiv_buf, values.len(), T::TYPE_CODE);
+        encode_typed_int_key(enc.indiv_buf, self.dict_idx);
+        encode_type_byte(enc.indiv_buf, values.len(), T::TYPE_CODE);
         for v in values {
-            v.encode_bcf(&mut enc.indiv_buf);
+            v.encode_bcf(enc.indiv_buf);
         }
         enc.n_fmt = enc.n_fmt.saturating_add(1);
     }
@@ -284,11 +287,11 @@ impl<T: BcfValue> PerAlleleFormatHandle<T> {
 impl GtFormatHandle {
     /// Encode a single-sample GT FORMAT field.
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>, gt: &Genotype) {
-        encode_typed_int_key(&mut enc.indiv_buf, self.dict_idx);
+        encode_typed_int_key(enc.indiv_buf, self.dict_idx);
 
         let ploidy = gt.alleles.len();
         // GT values fit int8 for allele indices < 63
-        encode_type_byte(&mut enc.indiv_buf, ploidy, BCF_BT_INT8);
+        encode_type_byte(enc.indiv_buf, ploidy, BCF_BT_INT8);
 
         for (i, allele_opt) in gt.alleles.iter().enumerate() {
             let encoded: u8 = match allele_opt {
@@ -316,17 +319,17 @@ impl GtFormatHandle {
 pub struct BcfRecordEncoder<'a> {
     pub(crate) shared_buf: &'a mut Vec<u8>,
     pub(crate) indiv_buf: &'a mut Vec<u8>,
-    bgzf: &'a mut dyn BgzfWrite,
-    index: Option<&'a mut IndexBuilder>,
+    pub(crate) bgzf: &'a mut dyn BgzfWrite,
+    pub(crate) index: Option<&'a mut IndexBuilder>,
     // Record state
     pub(crate) n_allele: u16,
     pub(crate) n_alt: u16,
     pub(crate) n_info: u16,
     pub(crate) n_fmt: u8,
-    n_sample: u32,
-    tid: i32,
-    pos_0based: i32,
-    rlen: i32,
+    pub(crate) n_sample: u32,
+    pub(crate) tid: i32,
+    pub(crate) pos_0based: i32,
+    pub(crate) rlen: i32,
 }
 
 /// Trait to abstract over BgzfWriter<W> for different W types.
@@ -448,14 +451,14 @@ impl Alleles {
         enc.shared_buf.extend_from_slice(&0u32.to_le_bytes());
 
         // ID = "."
-        encode_type_byte(&mut enc.shared_buf, 1, BCF_BT_CHAR);
+        encode_type_byte(enc.shared_buf, 1, BCF_BT_CHAR);
         enc.shared_buf.push(b'.');
 
         // REF allele (zero-alloc)
         let ref_start = enc.shared_buf.len();
         // Reserve space for type byte, fill in after
         enc.shared_buf.push(0); // placeholder type byte
-        self.write_ref_into(&mut enc.shared_buf);
+        self.write_ref_into(enc.shared_buf);
         let ref_len = enc.shared_buf.len().saturating_sub(ref_start).saturating_sub(1);
         // Patch the type byte
         if let Some(b) = enc.shared_buf.get_mut(ref_start) {
@@ -467,25 +470,25 @@ impl Alleles {
             Alleles::Reference { .. } => {} // no ALT
             Alleles::Snv { alt_bases, .. } => {
                 for b in alt_bases {
-                    encode_type_byte(&mut enc.shared_buf, 1, BCF_BT_CHAR);
+                    encode_type_byte(enc.shared_buf, 1, BCF_BT_CHAR);
                     enc.shared_buf.push(b.as_char() as u8);
                 }
             }
             Alleles::Insertion { anchor, inserted } => {
                 let alt_len = 1usize.saturating_add(inserted.len());
-                encode_type_byte(&mut enc.shared_buf, alt_len, BCF_BT_CHAR);
+                encode_type_byte(enc.shared_buf, alt_len, BCF_BT_CHAR);
                 enc.shared_buf.push(anchor.as_char() as u8);
                 for b in inserted {
                     enc.shared_buf.push(b.as_char() as u8);
                 }
             }
             Alleles::Deletion { anchor, .. } => {
-                encode_type_byte(&mut enc.shared_buf, 1, BCF_BT_CHAR);
+                encode_type_byte(enc.shared_buf, 1, BCF_BT_CHAR);
                 enc.shared_buf.push(anchor.as_char() as u8);
             }
             Alleles::Complex { alt_alleles, .. } => {
                 for alt in alt_alleles {
-                    encode_typed_string(&mut enc.shared_buf, alt.as_bytes());
+                    encode_typed_string(enc.shared_buf, alt.as_bytes());
                 }
             }
         }
