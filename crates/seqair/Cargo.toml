@@ -38,7 +38,7 @@ rust-htslib = { workspace = true, default-features = false, features = [
     "lzma",
     "static",
 ] }
-noodles = { version = "0.109.0", features = ["bam", "bgzf", "core", "cram", "fasta", "sam"] }
+noodles = { version = "0.109.0", features = ["bam", "bcf", "bgzf", "core", "cram", "fasta", "sam", "vcf"] }
 noodles-bgzf = { version = "0.46.0", features = ["libdeflate"] }
 noodles-util = { version = "0.78.0", features = ["alignment"] }
 
