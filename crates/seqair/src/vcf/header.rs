@@ -177,6 +177,17 @@ impl VcfHeader {
         out.push_str(&self.file_format);
         out.push('\n');
 
+        // FILTER first — PASS is always first in the IndexMap, giving it dict index 0.
+        // This ordering ensures the BCF string dictionary matches the header text order.
+        // r[impl vcf_header.serialization]
+        for (id, def) in &self.filters {
+            out.push_str("##FILTER=<ID=");
+            out.push_str(id);
+            out.push_str(",Description=\"");
+            out.push_str(&def.description);
+            out.push_str("\">\n");
+        }
+
         // INFO
         for (id, def) in &self.infos {
             out.push_str("##INFO=<ID=");
@@ -198,15 +209,6 @@ impl VcfHeader {
             out.push_str(&def.number.as_str());
             out.push_str(",Type=");
             out.push_str(def.typ.as_str());
-            out.push_str(",Description=\"");
-            out.push_str(&def.description);
-            out.push_str("\">\n");
-        }
-
-        // FILTER
-        for (id, def) in &self.filters {
-            out.push_str("##FILTER=<ID=");
-            out.push_str(id);
             out.push_str(",Description=\"");
             out.push_str(&def.description);
             out.push_str("\">\n");
@@ -370,8 +372,10 @@ impl VcfHeaderBuilder {
             self.filters = new_filters;
         }
 
-        // Build BCF string map: FILTER, INFO, FORMAT IDs in order
-        // PASS must be index 0
+        // Build BCF string map in the same order as to_vcf_text() emits header lines.
+        // This ensures dict indices match what noodles/htslib compute from the header text.
+        // Order: FILTER (PASS first), then INFO, then FORMAT.
+        // r[impl vcf_header.string_map]
         let mut string_map = StringMap::new();
         for id in self.filters.keys() {
             string_map.insert(id.clone());
