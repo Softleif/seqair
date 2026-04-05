@@ -45,3 +45,16 @@ r[vcf_record.allele_count]
 
 r[vcf_record.smallvec]
 Alt alleles, INFO fields, FORMAT keys, and per-sample values MUST use `SmallVec` with inline capacity tuned for common cases (2 alt alleles, 8 INFO fields, 6 FORMAT keys) to avoid heap allocation for typical records.
+
+## Type-safe alleles
+
+> *[VCF43] §1.3.1 — REF: reference base(s). ALT: comma-separated list of alternate non-reference alleles. Rules for representing SNVs, insertions, deletions, and complex events via REF/ALT padding conventions.*
+
+r[vcf_record.alleles_typed]
+Alleles MUST be represented via a type-safe enum with variants for common VCF allele patterns: reference-only (REF with no ALT), SNV (single-base REF and ALT), insertion (anchor base + inserted bases), deletion (anchor base + deleted bases), and complex (arbitrary REF/ALT strings for MNVs, symbolic alleles, or mixed multi-allelic sites). Construction MUST validate structural invariants: SNV alts must differ from ref, insertion/deletion sequences must be non-empty.
+
+r[vcf_record.alleles_rlen]
+The reference length (rlen) MUST be derived from the alleles variant: 1 for Reference, SNV, and Insertion; `1 + deleted.len()` for Deletion; `ref_allele.len()` for Complex. This replaces manual rlen computation.
+
+r[vcf_record.alleles_serialization]
+VCF REF/ALT text serialization MUST be handled by the alleles type. Each variant produces the correct VCF encoding: Insertion emits `anchor` as REF and `anchor+inserted` as ALT; Deletion emits `anchor+deleted` as REF and `anchor` as ALT; Reference emits the ref base with `.` as ALT.
