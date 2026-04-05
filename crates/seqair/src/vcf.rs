@@ -4,6 +4,7 @@
 pub mod alleles;
 pub mod error;
 pub mod header;
+pub mod record;
 
 pub use alleles::Alleles;
 pub use error::{AllelesError, VcfEncodeError, VcfError, VcfHeaderError};
