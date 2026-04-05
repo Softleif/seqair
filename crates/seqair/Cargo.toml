@@ -13,6 +13,7 @@ fuzz = []
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
+indexmap = "2"
 libdeflater = "1.25.2"
 seqair-types = { path = "../seqair-types" }
 rustc-hash = "2.1.1"
