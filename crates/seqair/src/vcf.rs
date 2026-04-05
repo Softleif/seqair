@@ -6,6 +6,7 @@
 
 pub mod alleles;
 pub mod bcf_writer;
+pub mod encoder;
 pub mod error;
 pub mod header;
 pub mod index_builder;
