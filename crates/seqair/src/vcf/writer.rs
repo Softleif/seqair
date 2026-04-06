@@ -188,7 +188,12 @@ impl<W: Write> VcfWriter<W> {
                 bgzf.flush_if_needed(self.buf.len())?;
                 bgzf.write_all(&self.buf)?;
 
-                let tid = self.header.contig_id(&record.contig)? as i32;
+                let tid_usize = self.header.contig_id(&record.contig)?;
+                let tid = i32::try_from(tid_usize).map_err(|_| VcfError::ValueOverflow {
+                    field: "contig_tid",
+                    value: tid_usize as u64,
+                    target_type: "i32",
+                })?;
                 let beg = record.pos.to_zero_based().get() as u64;
                 let end = beg.saturating_add(record.alleles.rlen() as u64);
                 index.push(tid, beg, end, bgzf.virtual_offset())?;

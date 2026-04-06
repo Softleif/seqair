@@ -125,9 +125,7 @@ impl FilterHandle {
 
     // r[impl bcf_encoder.handle_encode]
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>) {
-        // Single int8 vector containing the filter index
-        encode_type_byte(enc.shared_buf, 1, BCF_BT_INT8);
-        enc.shared_buf.push(self.0 as u8);
+        encode_typed_int_vec(enc.shared_buf, &[self.0 as i32]);
     }
 }
 
@@ -281,23 +279,27 @@ impl GtFormatHandle {
         encode_typed_int_key(enc.indiv_buf, self.dict_idx);
 
         let ploidy = gt.alleles.len();
-        // GT values fit int8 for allele indices < 63
-        encode_type_byte(enc.indiv_buf, ploidy, BCF_BT_INT8);
+
+        // Compute max encoded value to select smallest int type
+        let max_allele: i32 =
+            gt.alleles.iter().flatten().map(|idx| i32::from(*idx)).max().unwrap_or(0);
+        let max_val = (max_allele.saturating_add(1)).saturating_mul(2).saturating_add(1);
+        let typ = smallest_int_type(&[max_val]);
+        encode_type_byte(enc.indiv_buf, ploidy, typ);
 
         for (i, allele_opt) in gt.alleles.iter().enumerate() {
-            let encoded: u8 = match allele_opt {
+            let encoded: i32 = match allele_opt {
                 Some(idx) => {
                     let phased = if i == 0 {
                         false
                     } else {
                         gt.phased.get(i.saturating_sub(1)).copied().unwrap_or(false)
                     };
-                    let val = (i32::from(*idx).saturating_add(1) << 1) | (phased as i32);
-                    val as u8
+                    (i32::from(*idx).saturating_add(1) << 1) | (phased as i32)
                 }
                 None => 0, // missing allele
             };
-            enc.indiv_buf.push(encoded);
+            encode_int_as(enc.indiv_buf, encoded, typ);
         }
         enc.n_fmt = enc.n_fmt.saturating_add(1);
     }
@@ -374,8 +376,13 @@ impl<'a> BcfRecordEncoder<'a> {
             dest.copy_from_slice(&n_fmt_sample.to_le_bytes());
         }
 
-        let l_shared = self.shared_buf.len() as u32;
-        let l_indiv = self.indiv_buf.len() as u32;
+        // r[impl bcf_writer.record_layout]
+        let l_shared = u32::try_from(self.shared_buf.len()).map_err(|_| {
+            VcfError::RecordTooLarge { section: "shared", size: self.shared_buf.len() }
+        })?;
+        let l_indiv = u32::try_from(self.indiv_buf.len()).map_err(|_| {
+            VcfError::RecordTooLarge { section: "individual", size: self.indiv_buf.len() }
+        })?;
         let total =
             8usize.saturating_add(self.shared_buf.len()).saturating_add(self.indiv_buf.len());
 
@@ -403,6 +410,7 @@ use seqair_types::{One, Pos};
 
 impl Alleles {
     // r[impl bcf_encoder.begin_record]
+    // r[impl bcf_encoder.checked_casts]
     /// Begin a BCF record: write the 24-byte fixed header, ID, and alleles.
     /// Sets n_allele/n_alt on the encoder for downstream field validation.
     pub fn begin_record(
@@ -411,18 +419,41 @@ impl Alleles {
         contig: ContigHandle,
         pos: Pos<One>,
         qual: Option<f32>,
-    ) {
+    ) -> Result<(), VcfError> {
         enc.shared_buf.clear();
         enc.indiv_buf.clear();
         enc.n_info = 0;
         enc.n_fmt = 0;
         enc.n_sample = 0;
 
-        enc.tid = contig.0 as i32;
-        enc.pos_0based = pos.to_zero_based().get() as i32;
-        enc.rlen = self.rlen() as i32;
-        enc.n_allele = self.n_allele() as u16;
-        enc.n_alt = self.n_allele().saturating_sub(1) as u16;
+        enc.tid = i32::try_from(contig.0).map_err(|_| VcfError::ValueOverflow {
+            field: "contig_tid",
+            value: u64::from(contig.0),
+            target_type: "i32",
+        })?;
+        enc.pos_0based =
+            i32::try_from(pos.to_zero_based().get()).map_err(|_| VcfError::ValueOverflow {
+                field: "pos",
+                value: pos.to_zero_based().get() as u64,
+                target_type: "i32",
+            })?;
+        enc.rlen = i32::try_from(self.rlen()).map_err(|_| VcfError::ValueOverflow {
+            field: "rlen",
+            value: self.rlen() as u64,
+            target_type: "i32",
+        })?;
+        enc.n_allele = u16::try_from(self.n_allele()).map_err(|_| VcfError::ValueOverflow {
+            field: "n_allele",
+            value: self.n_allele() as u64,
+            target_type: "u16",
+        })?;
+        enc.n_alt = u16::try_from(self.n_allele().saturating_sub(1)).map_err(|_| {
+            VcfError::ValueOverflow {
+                field: "n_alt",
+                value: self.n_allele().saturating_sub(1) as u64,
+                target_type: "u16",
+            }
+        })?;
 
         let qual_bits = match qual {
             Some(q) => q.to_bits(),
@@ -443,17 +474,10 @@ impl Alleles {
         encode_type_byte(enc.shared_buf, 1, BCF_BT_CHAR);
         enc.shared_buf.push(b'.');
 
-        // REF allele (zero-alloc): write type header, then data.
-        // For short alleles (< 15 bases), the type byte encodes the count directly.
-        // For long alleles (>= 15 bases, e.g. long deletions), we need the overflow
-        // encoding: type byte with count=15 + typed int with actual count.
-        let ref_data_start = enc.shared_buf.len();
-        self.write_ref_into(enc.shared_buf);
-        let ref_len = enc.shared_buf.len().saturating_sub(ref_data_start);
-        // Move data aside, write type header, put data back
-        let ref_data: Vec<u8> = enc.shared_buf.drain(ref_data_start..).collect();
+        // REF allele (zero-alloc): compute length, write type header, then data.
+        let ref_len = self.ref_byte_len();
         encode_type_byte(enc.shared_buf, ref_len, BCF_BT_CHAR);
-        enc.shared_buf.extend_from_slice(&ref_data);
+        self.write_ref_into(enc.shared_buf);
 
         // ALT alleles (zero-alloc, one typed string each)
         match self {
@@ -482,6 +506,8 @@ impl Alleles {
                 }
             }
         }
+
+        Ok(())
     }
 }
 
@@ -495,7 +521,12 @@ impl<'a> BcfRecordEncoder<'a> {
         header: &VcfHeader,
     ) -> Result<(), VcfError> {
         let tid = header.contig_id(&record.contig)?;
-        record.alleles.begin_record(self, ContigHandle(tid as u32), record.pos, record.qual);
+        let tid_u32 = u32::try_from(tid).map_err(|_| VcfError::ValueOverflow {
+            field: "contig_tid",
+            value: tid as u64,
+            target_type: "u32",
+        })?;
+        record.alleles.begin_record(self, ContigHandle(tid_u32), record.pos, record.qual)?;
 
         // Filter
         match &record.filters {
@@ -532,7 +563,11 @@ impl<'a> BcfRecordEncoder<'a> {
         // FORMAT / individual fields
         let n_sample = record.samples.values.len();
         if n_sample > 0 && !record.samples.format_keys.is_empty() {
-            self.n_sample = n_sample as u32;
+            self.n_sample = u32::try_from(n_sample).map_err(|_| VcfError::ValueOverflow {
+                field: "n_sample",
+                value: n_sample as u64,
+                target_type: "u32",
+            })?;
             for (field_idx, key) in record.samples.format_keys.iter().enumerate() {
                 let dict_idx = header.string_map().get(key).ok_or_else(|| {
                     VcfError::Header(VcfHeaderError::MissingFormat { id: key.clone() })
@@ -764,13 +799,15 @@ pub(crate) fn encode_format_field(
                 .unwrap_or(arr.len());
 
             // r[impl bcf_writer.smallest_int_type]
-            let typ = smallest_int_type_iter(samples.iter().flat_map(|s| {
-                match s.get(field_idx) {
-                    Some(SampleValue::IntegerArray(a)) => a.iter().filter_map(|v| *v).collect(),
-                    _ => Vec::new(),
-                }
-                .into_iter()
-            }));
+            let typ = smallest_int_type_iter(
+                samples
+                    .iter()
+                    .filter_map(|s| match s.get(field_idx) {
+                        Some(SampleValue::IntegerArray(a)) => Some(a),
+                        _ => None,
+                    })
+                    .flat_map(|a| a.iter().filter_map(|v| *v)),
+            );
             encode_type_byte(buf, max_len, typ);
             for sample in samples {
                 match sample.get(field_idx) {
@@ -859,77 +896,8 @@ fn encode_array_values<T: BcfValue>(buf: &mut Vec<u8>, values: &[T]) {
 mod tests {
     use super::*;
     use crate::vcf::alleles::Alleles;
-    use crate::vcf::header::{ContigDef, FormatDef, InfoDef, Number, ValueType, VcfHeader};
     use crate::vcf::record::Genotype;
-    use seqair_types::{Base, SmolStr};
-    use std::sync::Arc;
-
-    #[allow(dead_code)]
-    fn test_header() -> Arc<VcfHeader> {
-        Arc::new(
-            VcfHeader::builder()
-                .add_contig("chr1", ContigDef { length: Some(1000) })
-                .unwrap()
-                .add_info(
-                    "DP",
-                    InfoDef {
-                        number: Number::Count(1),
-                        typ: ValueType::Integer,
-                        description: SmolStr::from("Depth"),
-                    },
-                )
-                .unwrap()
-                .add_info(
-                    "AF",
-                    InfoDef {
-                        number: Number::AlternateBases,
-                        typ: ValueType::Float,
-                        description: SmolStr::from("Allele Frequency"),
-                    },
-                )
-                .unwrap()
-                .add_info(
-                    "AD",
-                    InfoDef {
-                        number: Number::ReferenceAlternateBases,
-                        typ: ValueType::Integer,
-                        description: SmolStr::from("Allele Depth"),
-                    },
-                )
-                .unwrap()
-                .add_info(
-                    "DB",
-                    InfoDef {
-                        number: Number::Count(0),
-                        typ: ValueType::Flag,
-                        description: SmolStr::from("dbSNP"),
-                    },
-                )
-                .unwrap()
-                .add_format(
-                    "GT",
-                    FormatDef {
-                        number: Number::Count(1),
-                        typ: ValueType::String,
-                        description: SmolStr::from("Genotype"),
-                    },
-                )
-                .unwrap()
-                .add_format(
-                    "DP",
-                    FormatDef {
-                        number: Number::Count(1),
-                        typ: ValueType::Integer,
-                        description: SmolStr::from("Read Depth"),
-                    },
-                )
-                .unwrap()
-                .add_sample("S1")
-                .unwrap()
-                .build()
-                .unwrap(),
-        )
-    }
+    use seqair_types::Base;
 
     /// Create encoder with in-memory buffers for testing (no BGZF).
     fn test_encoder<'a>(
@@ -987,7 +955,7 @@ mod tests {
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let pos = Pos::<One>::new(100).unwrap();
-        alleles.begin_record(&mut enc, ContigHandle(0), pos, Some(30.0));
+        alleles.begin_record(&mut enc, ContigHandle(0), pos, Some(30.0)).unwrap();
 
         assert_eq!(enc.n_allele, 2);
         assert_eq!(enc.n_alt, 1);
@@ -1006,7 +974,7 @@ mod tests {
         let mut enc = test_encoder(&mut shared, &mut indiv, &mut bgzf);
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None);
+        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None).unwrap();
 
         let dp = ScalarInfoHandle::<i32> { dict_idx: 1, _marker: PhantomData };
         dp.encode(&mut enc, 50);
@@ -1022,7 +990,7 @@ mod tests {
         let mut enc = test_encoder(&mut shared, &mut indiv, &mut bgzf);
 
         let alleles = Alleles::reference(Base::A);
-        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None);
+        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None).unwrap();
 
         let db = FlagInfoHandle { dict_idx: 4 };
         db.encode(&mut enc);
@@ -1038,7 +1006,7 @@ mod tests {
         let mut enc = test_encoder(&mut shared, &mut indiv, &mut bgzf);
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None);
+        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None).unwrap();
 
         let ad = PerAlleleInfoHandle::<i32> { dict_idx: 3, _marker: PhantomData };
         ad.encode(&mut enc, &[30, 20]); // n_allele = 2
@@ -1054,7 +1022,7 @@ mod tests {
         let mut enc = test_encoder(&mut shared, &mut indiv, &mut bgzf);
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None);
+        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None).unwrap();
         enc.begin_samples(1);
 
         let gt_handle = GtFormatHandle { dict_idx: 0 };
@@ -1076,7 +1044,9 @@ mod tests {
         let mut enc = test_encoder(&mut shared, &mut indiv, &mut bgzf);
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(100).unwrap(), Some(30.0));
+        alleles
+            .begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(100).unwrap(), Some(30.0))
+            .unwrap();
         FilterHandle::PASS.encode(&mut enc);
 
         let dp = ScalarInfoHandle::<i32> { dict_idx: 1, _marker: PhantomData };
@@ -1103,6 +1073,39 @@ mod tests {
         assert!(!bgzf.data.is_empty());
     }
 
+    // r[verify bcf_encoder.handle_encode]
+    #[test]
+    fn filter_handle_encodes_large_dict_index() {
+        let mut shared = Vec::new();
+        let mut indiv = Vec::new();
+        let mut bgzf = TestBgzf::new();
+        let mut enc = test_encoder(&mut shared, &mut indiv, &mut bgzf);
+
+        let alleles = Alleles::reference(Base::A);
+        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None).unwrap();
+
+        // Dict index 200 exceeds int8 range [-120, 127] — must use int16
+        let filter = FilterHandle(200);
+        filter.encode(&mut enc);
+
+        // The encoded filter should contain 200 as int16, not truncated to u8
+        // Find the filter bytes after the 24-byte header + ID + alleles
+        // The filter is encoded as a typed int vec: type_byte + value
+        let filter_region = &shared[24..]; // after fixed header
+        // Skip ID (type_byte + '.') and REF allele (type_byte + 'A')
+        // ID: 1 byte type + 1 byte '.' = 2 bytes
+        // REF: 1 byte type + 1 byte 'A' = 2 bytes
+        // Filter starts at offset 4 from end of header
+        let filter_start = 4; // 2 (ID) + 2 (REF allele)
+        let type_byte = filter_region[filter_start];
+        let type_code = type_byte & 0x0F;
+        assert_eq!(type_code, BCF_BT_INT16, "filter dict index 200 must use int16, not int8");
+        // Read the int16 value
+        let val =
+            i16::from_le_bytes([filter_region[filter_start + 1], filter_region[filter_start + 2]]);
+        assert_eq!(val, 200, "filter dict index must be 200");
+    }
+
     // r[verify bcf_encoder.info_counting]
     #[test]
     fn info_counting_increments() {
@@ -1112,7 +1115,7 @@ mod tests {
         let mut enc = test_encoder(&mut shared, &mut indiv, &mut bgzf);
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None);
+        alleles.begin_record(&mut enc, ContigHandle(0), Pos::<One>::new(1).unwrap(), None).unwrap();
 
         assert_eq!(enc.n_info, 0);
         ScalarInfoHandle::<i32> { dict_idx: 1, _marker: PhantomData }.encode(&mut enc, 10);

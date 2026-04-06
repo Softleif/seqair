@@ -17,7 +17,7 @@ Handle types MUST encode the VCF Number semantics at the type level:
 - `FlagInfoHandle` — `Number::Count(0)`, encodes no value (presence = set)
 - `PerAltInfoHandle<T>` / `PerAltFormatHandle<T>` — `Number::A`, encodes `n_alt` values
 - `PerAlleleInfoHandle<T>` / `PerAlleleFormatHandle<T>` — `Number::R`, encodes `n_allele` values
-- `GtFormatHandle` — genotype encoding with `(allele+1)<<1|phased` scheme
+- `GtFormatHandle` — genotype encoding with `(allele+1)<<1|phased` scheme; MUST select smallest int type (int8/int16/int32) based on maximum allele index
 - `ContigHandle` — pre-resolved chromosome tid
 - `FilterHandle` — pre-resolved filter dictionary index; PASS is always index 0
 
@@ -31,7 +31,7 @@ Each handle type MUST provide an `encode(&self, enc: &mut BcfRecordEncoder, ...)
 - PerAlt: `encode(&self, enc, values: &[T])` — debug-asserts `values.len() == enc.n_alt()`
 - PerAllele: `encode(&self, enc, values: &[T])` — debug-asserts `values.len() == enc.n_allele()`
 - GT: `encode(&self, enc, gt: &Genotype)`
-- Filter: `encode(&self, enc)`
+- Filter: `encode(&self, enc)` — MUST encode the dictionary index using typed int encoding (int8/int16/int32 per `r[bcf_writer.smallest_int_type]`), NOT hardcoded int8
 - Contig: used as argument to `Alleles::begin_record()`
 
 ## BcfValue trait
@@ -52,6 +52,9 @@ r[bcf_encoder.encoder]
 
 r[bcf_encoder.begin_record]
 `Alleles::begin_record(&self, enc, contig, pos, qual)` MUST write the 24-byte fixed header (with placeholder n_info/n_fmt), ID as `.`, and REF/ALT allele strings using zero-alloc `write_ref_into`/`write_alts_into`. It MUST set `enc.n_allele` and `enc.n_alt` for downstream validation.
+
+r[bcf_encoder.checked_casts]
+All conversions from `usize`/`u32` to narrower integer types (`i32`, `u16`, `u8`) for user-controlled values (contig tid, position, allele count, sample count) MUST use checked conversion (`try_from`) and return a typed error on overflow rather than silently truncating via `as`.
 
 r[bcf_encoder.emit]
 `emit()` MUST patch the n_info, n_fmt, n_sample fields in the 24-byte fixed header, then flush the record to BGZF (with `flush_if_needed`), then push to the index builder if present.

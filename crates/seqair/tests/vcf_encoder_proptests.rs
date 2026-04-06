@@ -136,7 +136,7 @@ fn write_via_encoder(
     writer.write_header().unwrap();
 
     let mut enc = writer.record_encoder();
-    alleles.begin_record(&mut enc, contig, Pos::<One>::new(pos).unwrap(), Some(qual));
+    alleles.begin_record(&mut enc, contig, Pos::<One>::new(pos).unwrap(), Some(qual)).unwrap();
     FilterHandle::PASS.encode(&mut enc);
     dp_info.encode(&mut enc, depth);
     ad_info.encode(&mut enc, &[ref_ad, alt_ad]);

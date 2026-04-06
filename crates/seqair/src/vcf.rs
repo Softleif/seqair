@@ -106,15 +106,19 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
+    // r[impl vcf_writer.output_formats]
     /// Detect format from a file path extension.
-    pub fn from_path(path: &std::path::Path) -> Self {
+    /// Returns an error for unrecognized extensions.
+    pub fn from_path(path: &std::path::Path) -> Result<Self, VcfError> {
         let name = path.to_str().unwrap_or("");
         if name.ends_with(".bcf") {
-            Self::Bcf
+            Ok(Self::Bcf)
         } else if name.ends_with(".vcf.gz") || name.ends_with(".gz") {
-            Self::VcfGz
+            Ok(Self::VcfGz)
+        } else if name.ends_with(".vcf") {
+            Ok(Self::Vcf)
         } else {
-            Self::Vcf
+            Err(VcfError::UnrecognizedFormat { path: name.to_string() })
         }
     }
 }

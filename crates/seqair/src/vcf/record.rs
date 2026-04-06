@@ -4,6 +4,7 @@
 use super::alleles::Alleles;
 use super::error::VcfHeaderError;
 use super::header::VcfHeader;
+use indexmap::IndexMap;
 use seqair_types::{One, Pos, SmallVec, SmolStr};
 
 // r[impl vcf_record.filters]
@@ -31,10 +32,12 @@ pub enum InfoValue {
     StringArray(Vec<Option<SmolStr>>),
 }
 
-/// Collection of INFO key-value pairs.
+// r[impl vcf_record.info_fields]
+/// Collection of INFO key-value pairs. Duplicate keys are replaced (last value wins).
+/// Iteration order matches insertion order.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct InfoFields {
-    fields: Vec<(SmolStr, InfoValue)>,
+    fields: IndexMap<SmolStr, InfoValue>,
 }
 
 impl InfoFields {
@@ -42,16 +45,21 @@ impl InfoFields {
         Self::default()
     }
 
+    /// Insert or replace an INFO field. Duplicate keys are silently replaced.
     pub fn push(&mut self, key: SmolStr, value: InfoValue) {
-        self.fields.push((key, value));
+        self.fields.insert(key, value);
     }
 
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &(SmolStr, InfoValue)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&SmolStr, &InfoValue)> {
         self.fields.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.fields.len()
     }
 }
 
@@ -211,8 +219,8 @@ impl VcfRecordBuilder {
         self
     }
 
-    pub fn add_sample(mut self, values: SmallVec<SampleValue, 6>) -> Self {
-        self.samples.values.push(values);
+    pub fn add_sample(mut self, values: impl Into<SmallVec<SampleValue, 6>>) -> Self {
+        self.samples.values.push(values.into());
         self
     }
 
@@ -238,6 +246,20 @@ impl VcfRecordBuilder {
             && pos != 0
         {
             return Err(VcfHeaderError::GtNotFirst { index: pos });
+        }
+
+        // r[impl vcf_record.info_fields]
+        for (key, _) in self.info.iter() {
+            if !header.infos().contains_key(key) {
+                return Err(VcfHeaderError::MissingInfo { id: key.clone() });
+            }
+        }
+
+        // r[impl vcf_record.format_gt_first]
+        for key in &self.samples.format_keys {
+            if !header.formats().contains_key(key) {
+                return Err(VcfHeaderError::MissingFormat { id: key.clone() });
+            }
         }
 
         Ok(VcfRecord {
@@ -367,6 +389,21 @@ mod tests {
 
     // r[verify vcf_record.info_fields]
     #[test]
+    fn info_fields_dedup() {
+        let record =
+            VcfRecordBuilder::new("chr1", Pos::<One>::new(1).unwrap(), Alleles::reference(Base::A))
+                .info_integer("DP", 50)
+                .info_integer("DP", 100) // duplicate — last wins
+                .build_unchecked();
+
+        assert_eq!(record.info.len(), 1);
+        let (key, val) = record.info.iter().next().unwrap();
+        assert_eq!(key.as_str(), "DP");
+        assert_eq!(*val, InfoValue::Integer(100));
+    }
+
+    // r[verify vcf_record.info_fields]
+    #[test]
     fn info_fields_builder() {
         let record =
             VcfRecordBuilder::new("chr1", Pos::<One>::new(1).unwrap(), Alleles::reference(Base::A))
@@ -375,7 +412,7 @@ mod tests {
                 .info_float("AF", 0.5)
                 .build_unchecked();
 
-        assert_eq!(record.info.fields.len(), 3);
+        assert_eq!(record.info.len(), 3);
     }
 
     // r[verify vcf_record.sample_count]
@@ -389,6 +426,17 @@ mod tests {
                 .add_sample(vec![SampleValue::Genotype(Genotype::unphased(0, 0))])
                 .build(&header);
         assert!(result.is_err());
+    }
+
+    // r[verify vcf_record.info_fields]
+    #[test]
+    fn rejects_undeclared_info_key() {
+        let header = test_header();
+        let result =
+            VcfRecordBuilder::new("chr1", Pos::<One>::new(1).unwrap(), Alleles::reference(Base::A))
+                .info_integer("BOGUS", 42)
+                .build(&header);
+        assert!(matches!(result, Err(VcfHeaderError::MissingInfo { .. })));
     }
 
     // r[verify vcf_record.sample_count]

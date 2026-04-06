@@ -3,6 +3,7 @@
 
 use super::bgzf::{BgzfError, VirtualOffset};
 use std::io::Write;
+use tracing::warn;
 
 /// Maximum uncompressed data per BGZF block (64 KiB).
 const MAX_UNCOMPRESSED_SIZE: usize = 65536;
@@ -71,9 +72,7 @@ impl<W: Write> BgzfWriter<W> {
 
     /// Get a mutable reference to the inner writer.
     fn writer(&mut self) -> Result<&mut W, BgzfError> {
-        self.inner.as_mut().ok_or(BgzfError::WriteFailed {
-            source: std::io::Error::other("BgzfWriter already finished"),
-        })
+        self.inner.as_mut().ok_or(BgzfError::AlreadyFinished)
     }
 
     // r[impl bgzf.writer.virtual_offset]
@@ -163,9 +162,7 @@ impl<W: Write> BgzfWriter<W> {
         let isize_val = u32::try_from(self.buf.len()).map_err(|_| BgzfError::CorruptHeader)?;
 
         // Borrow inner writer directly to avoid conflicting borrow with self.compressed_buf/buf
-        let w = self.inner.as_mut().ok_or(BgzfError::WriteFailed {
-            source: std::io::Error::other("BgzfWriter already finished"),
-        })?;
+        let w = self.inner.as_mut().ok_or(BgzfError::AlreadyFinished)?;
         w.write_all(&header).map_err(|source| BgzfError::WriteFailed { source })?;
         w.write_all(&self.compressed_buf).map_err(|source| BgzfError::WriteFailed { source })?;
         w.write_all(&crc32.to_le_bytes()).map_err(|source| BgzfError::WriteFailed { source })?;
@@ -191,17 +188,18 @@ impl<W: Write> BgzfWriter<W> {
         w.write_all(&EOF_BLOCK).map_err(|source| BgzfError::WriteFailed { source })?;
         w.flush().map_err(|source| BgzfError::WriteFailed { source })?;
         // Take the inner writer so Drop doesn't try to flush again
-        self.inner.take().ok_or_else(|| BgzfError::WriteFailed {
-            source: std::io::Error::other("BgzfWriter already finished"),
-        })
+        self.inner.take().ok_or(BgzfError::AlreadyFinished)
     }
 }
 
 impl<W: Write> Drop for BgzfWriter<W> {
     fn drop(&mut self) {
-        // Best-effort flush on drop — ignore errors.
-        if !self.buf.is_empty() && self.inner.is_some() {
-            let _ = self.flush_block();
+        // Best-effort flush on drop — log errors since we can't propagate from Drop.
+        if !self.buf.is_empty()
+            && self.inner.is_some()
+            && let Err(e) = self.flush_block()
+        {
+            warn!("BgzfWriter::drop: failed to flush {} buffered bytes: {e}", self.buf.len());
         }
     }
 }

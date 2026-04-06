@@ -21,7 +21,7 @@ r[vcf_record.filters]
 Filters MUST be one of three states: Pass (all filters passed), Failed (list of filter IDs), or NotApplied (filters not run). Writers MUST serialize Pass as `PASS`, Failed as semicolon-separated IDs, and NotApplied as `.`.
 
 r[vcf_record.info_fields]
-INFO fields MUST be stored as key-value pairs where the key matches a declared INFO ID in the header. Flag-type INFO fields carry no value. Writers MUST validate that values match the declared Number and Type.
+INFO fields MUST be stored as key-value pairs where the key matches a declared INFO ID in the header. Flag-type INFO fields carry no value. Writers MUST validate that values match the declared Number and Type. Duplicate INFO keys within a single record MUST be rejected — the last value silently wins if duplicates are inserted.
 
 r[vcf_record.format_gt_first]
 If GT is present in the FORMAT keys, it MUST be the first key. The writer MUST enforce this ordering.

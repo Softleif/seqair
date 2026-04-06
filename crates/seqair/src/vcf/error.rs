@@ -102,4 +102,15 @@ pub enum VcfError {
 
     #[error("header text too large for BCF (exceeds u32::MAX)")]
     HeaderTooLarge,
+
+    #[error("BCF record too large: {section} is {size} bytes (exceeds u32::MAX)")]
+    RecordTooLarge { section: &'static str, size: usize },
+
+    // r[impl bcf_encoder.checked_casts]
+    #[error("value overflow: {field} value {value} exceeds {target_type} range")]
+    ValueOverflow { field: &'static str, value: u64, target_type: &'static str },
+
+    // r[impl vcf_writer.output_formats]
+    #[error("unrecognized output format for path: {path}")]
+    UnrecognizedFormat { path: String },
 }

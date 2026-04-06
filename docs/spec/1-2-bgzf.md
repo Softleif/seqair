@@ -93,4 +93,4 @@ r[bgzf.writer.flush_if_needed]
 The writer MUST provide a `flush_if_needed(upcoming_bytes)` method that flushes the current block if the upcoming data would exceed the 64 KB uncompressed block limit. This allows callers (e.g., VCF/BCF writers) to keep records from spanning block boundaries when possible, improving seek granularity for index-based random access.
 
 r[bgzf.writer.finish]
-`finish()` MUST consume the writer and return the inner `io::Write` stream, allowing the caller to perform additional operations (e.g., syncing, closing). Dropping the writer without calling `finish()` SHOULD NOT silently discard buffered data; the writer SHOULD flush on drop (best-effort, ignoring errors).
+`finish()` MUST consume the writer and return the inner `io::Write` stream, allowing the caller to perform additional operations (e.g., syncing, closing). Calling `finish()` or writing to a writer that has already been finished MUST return `BgzfError::AlreadyFinished` (a typed error variant, never `io::Error::other`). Dropping the writer without calling `finish()` SHOULD flush on drop (best-effort, logging failures with `warn!`).
