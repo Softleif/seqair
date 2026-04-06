@@ -71,36 +71,42 @@ impl AuxData {
     /// - Non-negative: C (u8), S (u16), I (u32)
     /// - Negative: c (i8), s (i16), i (i32)
     pub fn set_int(&mut self, tag: [u8; 2], value: i64) -> Result<(), AuxDataError> {
+        // Validate range before modifying data to avoid orphaned bytes on error
+        if value >= 0 {
+            if u64::try_from(value).map_or(true, |v| v > u64::from(u32::MAX)) {
+                return Err(AuxDataError::IntegerOutOfRange { value });
+            }
+        } else if value < i64::from(i32::MIN) {
+            return Err(AuxDataError::IntegerOutOfRange { value });
+        }
+
         self.remove(tag);
         self.data.extend_from_slice(&tag);
 
         if value >= 0 {
-            let v = u64::try_from(value).map_err(|_| AuxDataError::IntegerOutOfRange { value })?;
+            #[allow(clippy::cast_sign_loss, reason = "validated non-negative above")]
+            let v = value as u64;
             if v <= u64::from(u8::MAX) {
                 self.data.push(b'C');
                 self.data.push(v as u8);
             } else if v <= u64::from(u16::MAX) {
                 self.data.push(b'S');
                 self.data.extend_from_slice(&(v as u16).to_le_bytes());
-            } else if v <= u64::from(u32::MAX) {
+            } else {
                 self.data.push(b'I');
                 self.data.extend_from_slice(&(v as u32).to_le_bytes());
-            } else {
-                return Err(AuxDataError::IntegerOutOfRange { value });
             }
         } else {
-            // Negative values
+            // Negative values — range already validated above
             if value >= i64::from(i8::MIN) {
                 self.data.push(b'c');
                 self.data.push(value as u8);
             } else if value >= i64::from(i16::MIN) {
                 self.data.push(b's');
                 self.data.extend_from_slice(&(value as i16).to_le_bytes());
-            } else if value >= i64::from(i32::MIN) {
+            } else {
                 self.data.push(b'i');
                 self.data.extend_from_slice(&(value as i32).to_le_bytes());
-            } else {
-                return Err(AuxDataError::IntegerOutOfRange { value });
             }
         }
 

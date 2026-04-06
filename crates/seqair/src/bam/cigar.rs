@@ -90,7 +90,9 @@ pub struct CigarOp {
 }
 
 impl CigarOp {
+    /// BAM packs length into the upper 28 bits, so max length is 2^28-1 = 268_435_455.
     pub const fn new(op: CigarOpType, len: u32) -> Self {
+        debug_assert!(len < (1 << 28), "CIGAR op length exceeds 28-bit BAM limit");
         Self { op, len }
     }
 

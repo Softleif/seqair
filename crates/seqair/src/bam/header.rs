@@ -31,6 +31,7 @@ pub struct ContigInfo {
 
 // r[impl bam_writer.header_add_pg]
 /// Fields for a `@PG` header record.
+#[derive(Debug, Clone)]
 pub struct PgRecord {
     pub id: SmolStr,
     pub pn: Option<SmolStr>,

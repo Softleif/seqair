@@ -167,6 +167,16 @@ impl<W: Write> BamWriter<W> {
             return Err(BamWriteError::RecordTooLarge { size: self.buf.len() });
         }
 
+        // r[impl bam_writer.index_record_dispatch]
+        // Validate indexability BEFORE writing to BGZF — a failed validation after writing
+        // would leave the record in the stream but poison the writer.
+        if self.index.is_some() {
+            let is_unmapped = record.flags & 0x4 != 0;
+            if record.ref_id == -1 && !is_unmapped {
+                return Err(BamWriteError::MappedWithoutReference);
+            }
+        }
+
         let block_size = self.buf.len() as i32;
         let total = 4usize.saturating_add(self.buf.len());
 
@@ -178,19 +188,11 @@ impl<W: Write> BamWriter<W> {
         self.bgzf.write_all(&block_size.to_le_bytes())?;
         self.bgzf.write_all(&self.buf)?;
 
-        // r[impl bam_writer.index_record_dispatch]
+        // Push to index after writing (offset convention: offset AFTER the record)
         if let Some(ref mut index) = self.index {
-            let flags = record.flags;
-            let ref_id = record.ref_id;
-            let is_unmapped = flags & 0x4 != 0;
+            let is_unmapped = record.flags & 0x4 != 0;
 
-            if ref_id == -1 {
-                // Case 3: fully unmapped — do not index
-                if !is_unmapped {
-                    // Mapped but no reference — structurally invalid
-                    return Err(BamWriteError::MappedWithoutReference);
-                }
-            } else {
+            if record.ref_id != -1 {
                 // r[impl bam_writer.index_sort_order]
                 // Sort validation is delegated to IndexBuilder::push()
                 let voff = self.bgzf.virtual_offset();
@@ -200,11 +202,13 @@ impl<W: Write> BamWriter<W> {
                     beg
                 } else {
                     // Case 1: mapped — use end_pos from CIGAR
-                    record.end_pos() as u64
+                    let ep = record.end_pos();
+                    if ep < 0 { beg } else { ep as u64 }
                 };
                 let end = end.max(beg.saturating_add(1));
-                index.push(ref_id, beg, end, voff)?;
+                index.push(record.ref_id, beg, end, voff)?;
             }
+            // Case 3: fully unmapped (ref_id == -1) — not pushed to index
         }
 
         Ok(())

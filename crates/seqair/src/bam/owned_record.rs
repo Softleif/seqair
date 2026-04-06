@@ -343,14 +343,12 @@ impl OwnedBamRecord {
         }
 
         // Sequence: encode Base values to 4-bit packed
-        // Base is #[repr(u8)] with ASCII values, so &[Base] can be viewed as &[u8]
         if !self.seq.is_empty() {
-            // SAFETY: Base is #[repr(u8)] and its variants have ASCII byte values.
-            // The memory layout of &[Base] is identical to &[u8].
-            let seq_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(self.seq.as_ptr().cast::<u8>(), self.seq.len())
-            };
-            let encoded = seq::encode_seq(seq_bytes);
+            // Base is #[repr(u8)] with ASCII discriminants (A=0x41, C=0x43, G=0x47, T=0x54, N=0x4E).
+            // The compile-time assert in seqair-types guarantees size_of::<Base>() == 1.
+            // We collect to a byte vec rather than using unsafe transmute.
+            let seq_bytes: Vec<u8> = self.seq.iter().map(|b| *b as u8).collect();
+            let encoded = seq::encode_seq(&seq_bytes);
             buf.extend_from_slice(&encoded);
         }
 
