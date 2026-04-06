@@ -45,7 +45,13 @@ impl Alleles {
         if ref_base == alt_base {
             return Err(AllelesError::SnvAltEqualsRef);
         }
-        Ok(Self::Snv { ref_base, alt_bases: vec![alt_base] })
+        Ok(Self::Snv {
+            ref_base,
+            alt_bases: {
+                use seqair_types::smallvec::smallvec;
+                smallvec![alt_base]
+            },
+        })
     }
 
     /// Multi-allelic SNV. Returns error if empty, any alt equals ref, or duplicates.
@@ -66,7 +72,7 @@ impl Alleles {
                 }
             }
         }
-        Ok(Self::Snv { ref_base, alt_bases: alt_bases.to_vec() })
+        Ok(Self::Snv { ref_base, alt_bases: SmallVec::from(alt_bases) })
     }
 
     /// Insertion after anchor base. `inserted` is the bases inserted after the anchor.
@@ -74,7 +80,7 @@ impl Alleles {
         if inserted.is_empty() {
             return Err(AllelesError::InsertionEmpty);
         }
-        Ok(Self::Insertion { anchor, inserted: inserted.to_vec() })
+        Ok(Self::Insertion { anchor, inserted: SmallVec::from(inserted) })
     }
 
     /// Deletion after anchor base. `deleted` is the bases being deleted.
@@ -82,7 +88,7 @@ impl Alleles {
         if deleted.is_empty() {
             return Err(AllelesError::DeletionEmpty);
         }
-        Ok(Self::Deletion { anchor, deleted: deleted.to_vec() })
+        Ok(Self::Deletion { anchor, deleted: SmallVec::from(deleted) })
     }
 
     /// Complex / symbolic / MNV (no structural validation).
@@ -123,9 +129,15 @@ impl Alleles {
                 for b in inserted {
                     s.push(b.as_char());
                 }
-                vec![SmolStr::from(s)]
+                {
+                    use seqair_types::smallvec::smallvec;
+                    smallvec![SmolStr::from(s)]
+                }
             }
-            Self::Deletion { anchor, .. } => vec![SmolStr::from(anchor.as_str())],
+            Self::Deletion { anchor, .. } => {
+                use seqair_types::smallvec::smallvec;
+                smallvec![SmolStr::from(anchor.as_str())]
+            }
             Self::Complex { alt_alleles, .. } => alt_alleles.clone(),
         }
     }
