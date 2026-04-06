@@ -27,9 +27,9 @@ pub enum InfoValue {
     Float(f32),
     Flag,
     String(SmolStr),
-    IntegerArray(Vec<Option<i32>>),
-    FloatArray(Vec<Option<f32>>),
-    StringArray(Vec<Option<SmolStr>>),
+    IntegerArray(SmallVec<Option<i32>, 4>),
+    FloatArray(SmallVec<Option<f32>, 4>),
+    StringArray(SmallVec<Option<SmolStr>, 4>),
 }
 
 // r[impl vcf_record.info_fields]
@@ -108,8 +108,8 @@ pub enum SampleValue {
     Float(f32),
     String(SmolStr),
     Genotype(Genotype),
-    IntegerArray(Vec<Option<i32>>),
-    FloatArray(Vec<Option<f32>>),
+    IntegerArray(SmallVec<Option<i32>, 4>),
+    FloatArray(SmallVec<Option<f32>, 4>),
 }
 
 /// Per-sample FORMAT data.
@@ -199,37 +199,40 @@ impl VcfRecordBuilder {
         self
     }
 
-    pub fn info_string(mut self, key: impl Into<SmolStr>, value: impl Into<SmolStr>) -> Self {
-        self.info.push(key.into(), InfoValue::String(value.into()));
+    pub fn info_string(mut self, key: impl Into<SmolStr>, value: impl std::fmt::Display) -> Self {
+        self.info.push(key.into(), InfoValue::String(SmolStr::from(value.to_string())));
         self
     }
 
-    pub fn info_integer_array(mut self, key: impl Into<SmolStr>, values: Vec<Option<i32>>) -> Self {
-        self.info.push(key.into(), InfoValue::IntegerArray(values));
+    pub fn info_integer_array(
+        mut self,
+        key: impl Into<SmolStr>,
+        values: impl Into<SmallVec<Option<i32>, 4>>,
+    ) -> Self {
+        self.info.push(key.into(), InfoValue::IntegerArray(values.into()));
         self
     }
 
     /// INFO integer array where all values are present (no missing).
-    /// Avoids the `Vec<Option<i32>>` allocation — wraps each value in `Some` internally.
     pub fn info_integers(mut self, key: impl Into<SmolStr>, values: &[i32]) -> Self {
-        self.info.push(
-            key.into(),
-            InfoValue::IntegerArray(values.iter().map(|&v| Some(v)).collect()),
-        );
+        self.info
+            .push(key.into(), InfoValue::IntegerArray(values.iter().map(|&v| Some(v)).collect()));
         self
     }
 
-    pub fn info_float_array(mut self, key: impl Into<SmolStr>, values: Vec<Option<f32>>) -> Self {
-        self.info.push(key.into(), InfoValue::FloatArray(values));
+    pub fn info_float_array(
+        mut self,
+        key: impl Into<SmolStr>,
+        values: impl Into<SmallVec<Option<f32>, 4>>,
+    ) -> Self {
+        self.info.push(key.into(), InfoValue::FloatArray(values.into()));
         self
     }
 
     /// INFO float array where all values are present (no missing).
     pub fn info_floats(mut self, key: impl Into<SmolStr>, values: &[f32]) -> Self {
-        self.info.push(
-            key.into(),
-            InfoValue::FloatArray(values.iter().map(|&v| Some(v)).collect()),
-        );
+        self.info
+            .push(key.into(), InfoValue::FloatArray(values.iter().map(|&v| Some(v)).collect()));
         self
     }
 
