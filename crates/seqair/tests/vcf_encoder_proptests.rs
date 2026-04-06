@@ -98,7 +98,7 @@ fn write_via_record(
     let mut output = Vec::new();
     let mut writer = BcfWriter::new(&mut output, header.clone(), false);
     writer.write_header().unwrap();
-    writer.write_record(&record).unwrap();
+    writer.write_vcf_record(&record).unwrap();
     writer.finish().unwrap();
     output
 }

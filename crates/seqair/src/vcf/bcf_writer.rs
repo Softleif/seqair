@@ -1,11 +1,10 @@
 //! BCF binary writer. Encodes [`VcfRecord`]s in BCF2 format with BGZF
 //! compression and optional CSI index co-production.
 
-use super::bcf_encoding::*;
 use super::error::VcfError;
 use super::header::VcfHeader;
 use super::index_builder::IndexBuilder;
-use super::record::{Filters, InfoValue, SampleValue, VcfRecord};
+use super::record::VcfRecord;
 use crate::bam::bgzf_writer::BgzfWriter;
 use std::io::Write;
 use std::sync::Arc;
@@ -66,159 +65,18 @@ impl<W: Write> BcfWriter<W> {
     }
 
     // r[impl bcf_writer.record_layout]
-    // r[impl bcf_writer.bgzf_blocks]
-    /// Write a single BCF record.
-    pub fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
+    /// Write a single BCF record using `VcfRecord` as input.
+    pub fn write_vcf_record(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
         if !self.header_written {
             return Err(VcfError::HeaderNotWritten);
         }
-
-        // Resolve contig once — used by both encode_shared and index push
-        let tid = self.header.contig_id(&record.contig)?;
-
-        // r[impl bcf_writer.buffer_reuse]
-        self.shared_buf.clear();
-        self.indiv_buf.clear();
-
-        self.encode_shared(record, tid)?;
-        self.encode_individual(record)?;
-
-        let l_shared = self.shared_buf.len() as u32;
-        let l_indiv = self.indiv_buf.len() as u32;
-        let total =
-            8usize.saturating_add(self.shared_buf.len()).saturating_add(self.indiv_buf.len());
-
-        // r[impl bcf_writer.bgzf_blocks]
-        self.bgzf.flush_if_needed(total)?;
-
-        self.bgzf.write_all(&l_shared.to_le_bytes())?;
-        self.bgzf.write_all(&l_indiv.to_le_bytes())?;
-        self.bgzf.write_all(&self.shared_buf)?;
-        self.bgzf.write_all(&self.indiv_buf)?;
-
-        // Index co-production — reuse tid from above
-        if let Some(ref mut index) = self.index {
-            let beg = record.pos.to_zero_based().get() as u64;
-            let end = beg.saturating_add(record.alleles.rlen() as u64);
-            index.push(tid as i32, beg, end, self.bgzf.virtual_offset())?;
-        }
-
-        Ok(())
-    }
-
-    // r[impl bcf_writer.fixed_fields]
-    // r[impl bcf_writer.shared_variable]
-    fn encode_shared(&mut self, record: &VcfRecord, tid: usize) -> Result<(), VcfError> {
-        let buf = &mut self.shared_buf;
-
-        // r[impl bcf_writer.coordinate_system]
-        let chrom = tid as i32;
-        let pos = record.pos.to_zero_based().get() as i32;
-        let rlen = record.alleles.rlen() as i32;
-
-        // r[impl bcf_writer.qual_missing]
-        let qual_bits = match record.qual {
-            Some(q) => q.to_bits(),
-            None => FLOAT_MISSING,
-        };
-
-        let n_info = record.info.iter().count() as u32;
-        let n_allele = record.alleles.n_allele() as u32;
-        let n_fmt = record.samples.format_keys.len() as u32;
-        let n_sample = record.samples.values.len() as u32;
-
-        // 24 fixed bytes
-        buf.extend_from_slice(&chrom.to_le_bytes());
-        buf.extend_from_slice(&pos.to_le_bytes());
-        buf.extend_from_slice(&rlen.to_le_bytes());
-        buf.extend_from_slice(&qual_bits.to_le_bytes());
-        buf.extend_from_slice(&((n_allele << 16) | n_info).to_le_bytes());
-        buf.extend_from_slice(&((n_fmt << 24) | n_sample).to_le_bytes());
-
-        // ID (typed string)
-        match &record.id {
-            Some(id) => encode_typed_string(buf, id.as_bytes()),
-            None => encode_typed_string(buf, b"."),
-        }
-
-        // Alleles (n_allele typed strings, REF first)
-        let ref_text = record.alleles.ref_text();
-        encode_typed_string(buf, ref_text.as_bytes());
-        for alt in &record.alleles.alt_texts() {
-            encode_typed_string(buf, alt.as_bytes());
-        }
-
-        // r[impl bcf_writer.filter_pass]
-        match &record.filters {
-            Filters::Pass => {
-                // Single int8 vector containing 0
-                encode_type_byte(buf, 1, BCF_BT_INT8);
-                buf.push(0);
-            }
-            Filters::Failed(ids) => {
-                // r[impl vcf_writer.validation]
-                let mut indices = Vec::with_capacity(ids.len());
-                for id in ids {
-                    let idx = self.header.string_map().get(id).ok_or_else(|| {
-                        VcfError::Header(super::error::VcfHeaderError::MissingFilter {
-                            id: id.clone(),
-                        })
-                    })?;
-                    indices.push(idx as i32);
-                }
-                encode_typed_int_vec(buf, &indices);
-            }
-            Filters::NotApplied => {
-                // type=0, count=0
-                encode_type_byte(buf, 0, BCF_BT_NULL);
-            }
-        }
-
-        // INFO key-value pairs
-        // r[impl vcf_writer.validation]
-        for (key, value) in record.info.iter() {
-            let dict_idx = self.header.string_map().get(key).ok_or_else(|| {
-                VcfError::Header(super::error::VcfHeaderError::MissingInfo { id: key.clone() })
-            })? as i32;
-            encode_typed_int_vec(buf, &[dict_idx]);
-            // Value
-            encode_info_value(buf, value);
-        }
-
-        Ok(())
-    }
-
-    // r[impl bcf_writer.indiv_field_major]
-    fn encode_individual(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
-        let buf = &mut self.indiv_buf;
-        let n_sample = record.samples.values.len();
-
-        if n_sample == 0 || record.samples.format_keys.is_empty() {
-            return Ok(());
-        }
-
-        for (field_idx, key) in record.samples.format_keys.iter().enumerate() {
-            // r[impl vcf_writer.validation]
-            let dict_idx = self.header.string_map().get(key).ok_or_else(|| {
-                VcfError::Header(super::error::VcfHeaderError::MissingFormat { id: key.clone() })
-            })? as i32;
-            encode_typed_int_vec(buf, &[dict_idx]);
-
-            // Collect values for this field across all samples
-            let is_gt = key == "GT";
-
-            if is_gt {
-                encode_gt_field(buf, &record.samples.values, field_idx);
-            } else {
-                encode_format_field(buf, &record.samples.values, field_idx);
-            }
-        }
-
-        Ok(())
+        let header = self.header.clone();
+        let mut enc = self.record_encoder();
+        enc.write_vcf_record(record, &header)
     }
 
     /// Get a direct record encoder that writes into this writer's buffers.
-    /// Use this for zero-alloc encoding instead of `write_record(&VcfRecord)`.
+    /// Use this for zero-alloc encoding instead of `write_vcf_record(&VcfRecord)`.
     pub fn record_encoder(&mut self) -> super::encoder::BcfRecordEncoder<'_> {
         super::encoder::BcfRecordEncoder {
             shared_buf: &mut self.shared_buf,
@@ -249,308 +107,11 @@ impl<W: Write> BcfWriter<W> {
     }
 }
 
-// --- Encoding helpers (using shared bcf_encoding module) ---
-
-// r[impl bcf_writer.flag_encoding]
-fn encode_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
-    match value {
-        InfoValue::Integer(v) => encode_typed_int_vec(buf, &[*v]),
-        InfoValue::Float(v) => {
-            encode_type_byte(buf, 1, BCF_BT_FLOAT);
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        InfoValue::Flag => {
-            // type=0, count=0
-            encode_type_byte(buf, 0, BCF_BT_NULL);
-        }
-        InfoValue::String(s) => encode_typed_string(buf, s.as_bytes()),
-        InfoValue::IntegerArray(arr) => {
-            // r[impl bcf_writer.smallest_int_type]
-            // Scan only concrete (non-missing) values to pick smallest type.
-            // Missing values get the per-type sentinel, not a fixed i32::MIN.
-            let typ = smallest_int_type_iter(arr.iter().filter_map(|v| *v));
-            encode_type_byte(buf, arr.len(), typ);
-            for v in arr {
-                match v {
-                    Some(n) => match typ {
-                        BCF_BT_INT8 => buf.push(*n as u8),
-                        BCF_BT_INT16 => buf.extend_from_slice(&(*n as i16).to_le_bytes()),
-                        _ => buf.extend_from_slice(&n.to_le_bytes()),
-                    },
-                    // r[impl bcf_writer.missing_sentinels]
-                    None => match typ {
-                        BCF_BT_INT8 => buf.push(INT8_MISSING),
-                        BCF_BT_INT16 => buf.extend_from_slice(&INT16_MISSING.to_le_bytes()),
-                        _ => buf.extend_from_slice(&INT32_MISSING.to_le_bytes()),
-                    },
-                }
-            }
-        }
-        InfoValue::FloatArray(arr) => {
-            encode_type_byte(buf, arr.len(), BCF_BT_FLOAT);
-            for v in arr {
-                match v {
-                    // r[impl bcf_writer.missing_sentinels]
-                    Some(f) => buf.extend_from_slice(&f.to_le_bytes()),
-                    None => buf.extend_from_slice(&FLOAT_MISSING.to_le_bytes()),
-                }
-            }
-        }
-        InfoValue::StringArray(arr) => {
-            // Comma-separated in a single typed string
-            let joined: String =
-                arr.iter().map(|v| v.as_deref().unwrap_or(".")).collect::<Vec<_>>().join(",");
-            encode_typed_string(buf, joined.as_bytes());
-        }
-    }
-}
-
-// r[impl bcf_writer.gt_encoding]
-fn encode_gt_field(
-    buf: &mut Vec<u8>,
-    samples: &[seqair_types::SmallVec<SampleValue, 6>],
-    field_idx: usize,
-) {
-    // Find max ploidy across samples
-    let mut max_ploidy = 0usize;
-    for sample in samples {
-        if let Some(SampleValue::Genotype(gt)) = sample.get(field_idx) {
-            max_ploidy = max_ploidy.max(gt.alleles.len());
-        }
-    }
-    if max_ploidy == 0 {
-        max_ploidy = 2; // default diploid
-    }
-
-    // Find max allele index to determine int type
-    let mut max_allele: i32 = 0;
-    for sample in samples {
-        if let Some(SampleValue::Genotype(gt)) = sample.get(field_idx) {
-            for idx in gt.alleles.iter().flatten() {
-                max_allele = max_allele.max(i32::from(*idx));
-            }
-        }
-    }
-
-    // GT value = (allele+1) << 1 | phased, so max value = (max_allele+1)*2+1
-    let max_val = (max_allele.saturating_add(1)).saturating_mul(2).saturating_add(1);
-    let typ = smallest_int_type(&[max_val]);
-
-    // Type descriptor: max_ploidy values per sample
-    encode_type_byte(buf, max_ploidy, typ);
-
-    // Encode all samples contiguously
-    for sample in samples {
-        let gt = match sample.get(field_idx) {
-            Some(SampleValue::Genotype(g)) => Some(g),
-            _ => None,
-        };
-
-        for i in 0..max_ploidy {
-            let encoded = if let Some(g) = gt {
-                if let Some(allele_opt) = g.alleles.get(i) {
-                    match allele_opt {
-                        Some(idx) => {
-                            let phased = if i == 0 {
-                                false // first allele separator is always unphased
-                            } else {
-                                g.phased.get(i.saturating_sub(1)).copied().unwrap_or(false)
-                            };
-                            ((i32::from(*idx).saturating_add(1)) << 1) | (phased as i32)
-                        }
-                        None => 0, // missing allele
-                    }
-                } else {
-                    // Haploid padding: end-of-vector
-                    match typ {
-                        BCF_BT_INT8 => {
-                            buf.push(INT8_END_OF_VECTOR);
-                            continue;
-                        }
-                        BCF_BT_INT16 => {
-                            buf.extend_from_slice(&INT16_END_OF_VECTOR.to_le_bytes());
-                            continue;
-                        }
-                        _ => {
-                            buf.extend_from_slice(&INT32_END_OF_VECTOR.to_le_bytes());
-                            continue;
-                        }
-                    }
-                }
-            } else {
-                0 // missing genotype
-            };
-
-            match typ {
-                BCF_BT_INT8 => buf.push(encoded as u8),
-                BCF_BT_INT16 => buf.extend_from_slice(&(encoded as i16).to_le_bytes()),
-                _ => buf.extend_from_slice(&encoded.to_le_bytes()),
-            }
-        }
-    }
-}
-
-fn encode_format_field(
-    buf: &mut Vec<u8>,
-    samples: &[seqair_types::SmallVec<SampleValue, 6>],
-    field_idx: usize,
-) {
-    // Determine type from first non-missing sample value
-    let first_val = samples
-        .iter()
-        .filter_map(|s| s.get(field_idx))
-        .find(|v| !matches!(v, SampleValue::Missing));
-
-    match first_val {
-        Some(SampleValue::Integer(_)) | None => {
-            // r[impl bcf_writer.smallest_int_type]
-            // Scan all values to pick smallest fitting type (no allocation)
-            let typ =
-                smallest_int_type_iter(samples.iter().filter_map(|s| match s.get(field_idx) {
-                    Some(SampleValue::Integer(v)) => Some(*v),
-                    _ => None,
-                }));
-            encode_type_byte(buf, 1, typ);
-            for sample in samples {
-                match sample.get(field_idx) {
-                    Some(SampleValue::Integer(v)) => match typ {
-                        BCF_BT_INT8 => buf.push(*v as u8),
-                        BCF_BT_INT16 => buf.extend_from_slice(&(*v as i16).to_le_bytes()),
-                        _ => buf.extend_from_slice(&v.to_le_bytes()),
-                    },
-                    _ => match typ {
-                        BCF_BT_INT8 => buf.push(INT8_MISSING),
-                        BCF_BT_INT16 => buf.extend_from_slice(&INT16_MISSING.to_le_bytes()),
-                        _ => buf.extend_from_slice(&INT32_MISSING.to_le_bytes()),
-                    },
-                }
-            }
-        }
-        Some(SampleValue::Float(_)) => {
-            encode_type_byte(buf, 1, BCF_BT_FLOAT);
-            for sample in samples {
-                match sample.get(field_idx) {
-                    Some(SampleValue::Float(v)) => buf.extend_from_slice(&v.to_le_bytes()),
-                    _ => buf.extend_from_slice(&FLOAT_MISSING.to_le_bytes()),
-                }
-            }
-        }
-        Some(SampleValue::String(s)) => {
-            // Find max string length
-            let max_len = samples
-                .iter()
-                .filter_map(|sv| match sv.get(field_idx) {
-                    Some(SampleValue::String(s)) => Some(s.len()),
-                    _ => None,
-                })
-                .max()
-                .unwrap_or(s.len());
-
-            encode_type_byte(buf, max_len, BCF_BT_CHAR);
-            for sample in samples {
-                match sample.get(field_idx) {
-                    Some(SampleValue::String(sv)) => {
-                        buf.extend_from_slice(sv.as_bytes());
-                        // Pad with NUL (end-of-vector for char)
-                        for _ in sv.len()..max_len {
-                            buf.push(0);
-                        }
-                    }
-                    _ => {
-                        buf.push(b'.'); // missing
-                        for _ in 1..max_len {
-                            buf.push(0);
-                        }
-                    }
-                }
-            }
-        }
-        Some(SampleValue::IntegerArray(arr)) => {
-            // Find max array length
-            let max_len = samples
-                .iter()
-                .filter_map(|sv| match sv.get(field_idx) {
-                    Some(SampleValue::IntegerArray(a)) => Some(a.len()),
-                    _ => None,
-                })
-                .max()
-                .unwrap_or(arr.len());
-
-            // r[impl bcf_writer.smallest_int_type]
-            // Scan all concrete values across all samples to pick smallest type
-            let typ = smallest_int_type_iter(samples.iter().flat_map(|s| {
-                match s.get(field_idx) {
-                    Some(SampleValue::IntegerArray(a)) => a.iter().filter_map(|v| *v).collect(),
-                    _ => Vec::new(),
-                }
-                .into_iter()
-            }));
-            encode_type_byte(buf, max_len, typ);
-            for sample in samples {
-                match sample.get(field_idx) {
-                    Some(SampleValue::IntegerArray(a)) => {
-                        for v in a.iter().take(max_len) {
-                            encode_int_value_or_missing(buf, *v, typ);
-                        }
-                        // r[impl bcf_writer.end_of_vector]
-                        for _ in a.len()..max_len {
-                            encode_int_eov(buf, typ);
-                        }
-                    }
-                    _ => {
-                        encode_int_missing(buf, typ);
-                        for _ in 1..max_len {
-                            encode_int_eov(buf, typ);
-                        }
-                    }
-                }
-            }
-        }
-        Some(SampleValue::FloatArray(arr)) => {
-            let max_len = samples
-                .iter()
-                .filter_map(|sv| match sv.get(field_idx) {
-                    Some(SampleValue::FloatArray(a)) => Some(a.len()),
-                    _ => None,
-                })
-                .max()
-                .unwrap_or(arr.len());
-
-            encode_type_byte(buf, max_len, BCF_BT_FLOAT);
-            for sample in samples {
-                match sample.get(field_idx) {
-                    Some(SampleValue::FloatArray(a)) => {
-                        for v in a.iter().take(max_len) {
-                            match v {
-                                Some(f) => buf.extend_from_slice(&f.to_le_bytes()),
-                                None => buf.extend_from_slice(&FLOAT_MISSING.to_le_bytes()),
-                            }
-                        }
-                        for _ in a.len()..max_len {
-                            buf.extend_from_slice(&FLOAT_END_OF_VECTOR.to_le_bytes());
-                            // float EOV
-                        }
-                    }
-                    _ => {
-                        buf.extend_from_slice(&FLOAT_MISSING.to_le_bytes());
-                        for _ in 1..max_len {
-                            buf.extend_from_slice(&FLOAT_END_OF_VECTOR.to_le_bytes());
-                        }
-                    }
-                }
-            }
-        }
-        _ => {
-            // Genotype handled separately; shouldn't reach here
-            encode_type_byte(buf, 0, BCF_BT_NULL);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::vcf::alleles::Alleles;
+    use crate::vcf::bcf_encoding::*;
     use crate::vcf::header::{ContigDef, FormatDef, InfoDef, Number, ValueType};
     use crate::vcf::record::{Genotype, SampleValue, VcfRecordBuilder};
     use seqair_types::{Base, One, Pos, SmolStr};
@@ -643,7 +204,7 @@ mod tests {
         let mut output = Vec::new();
         let mut writer = BcfWriter::new(&mut output, header, false);
         writer.write_header().unwrap();
-        writer.write_record(&record).unwrap();
+        writer.write_vcf_record(&record).unwrap();
         writer.finish().unwrap();
 
         // Decompress
@@ -731,7 +292,7 @@ mod tests {
         let mut output = Vec::new();
         let mut writer = BcfWriter::new(&mut output, header, false);
         writer.write_header().unwrap();
-        writer.write_record(&record).unwrap();
+        writer.write_vcf_record(&record).unwrap();
         writer.finish().unwrap();
 
         // Just verify it writes without error — detailed byte-level
@@ -766,7 +327,7 @@ mod tests {
         let mut output = Vec::new();
         let mut writer = BcfWriter::new(&mut output, header, true);
         writer.write_header().unwrap();
-        writer.write_record(&record).unwrap();
+        writer.write_vcf_record(&record).unwrap();
         let index = writer.finish().unwrap();
 
         assert!(index.is_some());
@@ -776,7 +337,7 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
-    use super::*;
+    use crate::vcf::bcf_encoding::*;
     use proptest::prelude::*;
 
     // r[verify bcf_writer.smallest_int_type]
