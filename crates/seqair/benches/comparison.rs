@@ -492,30 +492,51 @@ fn write_vcf_text(c: &mut Criterion) {
         });
     });
 
-    // Baseline: raw string concatenation (lower bound — no validation or encoding)
-    group.bench_function("raw_text_baseline", |b| {
+    // noodles: VCF text writer
+    group.bench_function("noodles", |b| {
+        use noodles::vcf;
+        use noodles::vcf::variant::io::Write as _;
+        use noodles::vcf::variant::record_buf::info::field::Value as InfoValue;
+        use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
+
+        let noodles_header: vcf::Header = header.to_vcf_text().parse().unwrap();
+
         b.iter(|| {
             let mut output = Vec::with_capacity(1_000_000);
-            // Write a minimal header + data lines as raw bytes
-            output.extend_from_slice(b"##fileformat=VCFv4.3\n");
-            output.extend_from_slice(b"##contig=<ID=chr1,length=250000000>\n");
-            output
-                .extend_from_slice(b"##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n");
-            output.extend_from_slice(
-                b"##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n",
-            );
-            output.extend_from_slice(
-                b"##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n",
-            );
-            output.extend_from_slice(
-                b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample1\n",
-            );
-            let mut itoa_buf = itoa::Buffer::new();
+            let mut writer = vcf::io::Writer::new(&mut output);
+            writer.write_header(&noodles_header).unwrap();
+
             for i in 1..=N_RECORDS {
-                output.extend_from_slice(b"chr1\t");
-                output.extend_from_slice(itoa_buf.format(i).as_bytes());
-                output.extend_from_slice(b"\t.\tA\tT\t30\tPASS\tDP=50\tGT:DP\t0/1:30\n");
+                let pos = noodles::core::Position::try_from(i as usize).unwrap();
+                let record = vcf::variant::RecordBuf::builder()
+                    .set_reference_sequence_name("chr1")
+                    .set_variant_start(pos)
+                    .set_reference_bases("A")
+                    .set_alternate_bases(vcf::variant::record_buf::AlternateBases::from(vec![
+                        "T".to_string(),
+                    ]))
+                    .set_quality_score(30.0)
+                    .set_filters(vcf::variant::record_buf::Filters::pass())
+                    .set_info(
+                        [("DP".parse().unwrap(), Some(InfoValue::Integer(50)))]
+                            .into_iter()
+                            .collect(),
+                    )
+                    .set_samples(vcf::variant::record_buf::Samples::new(
+                        ["GT".parse().unwrap(), "DP".parse().unwrap()].into_iter().collect(),
+                        vec![
+                            [
+                                Some(SampleValue::Genotype("0/1".parse().unwrap())),
+                                Some(SampleValue::Integer(30)),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ],
+                    ))
+                    .build();
+                writer.write_variant_record(&noodles_header, &record).unwrap();
             }
+            drop(writer);
             black_box(output.len())
         });
     });
@@ -685,6 +706,56 @@ fn write_bcf(c: &mut Criterion) {
         b.iter(|| {
             let tmp = write_htslib(rust_htslib::bcf::Format::Bcf);
             black_box(std::fs::metadata(tmp.path()).unwrap().len())
+        });
+    });
+
+    // noodles BCF writer
+    group.bench_function("noodles", |b| {
+        use noodles::bcf;
+        use noodles::vcf;
+        use noodles::vcf::variant::io::Write as _;
+        use noodles::vcf::variant::record_buf::info::field::Value as InfoValue;
+        use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
+
+        let noodles_header: vcf::Header = header.to_vcf_text().parse().unwrap();
+
+        b.iter(|| {
+            let mut output = Vec::with_capacity(1_000_000);
+            let mut writer = bcf::io::Writer::new(&mut output);
+            writer.write_header(&noodles_header).unwrap();
+
+            for i in 1..=N_RECORDS {
+                let pos = noodles::core::Position::try_from(i as usize).unwrap();
+                let record = vcf::variant::RecordBuf::builder()
+                    .set_reference_sequence_name("chr1")
+                    .set_variant_start(pos)
+                    .set_reference_bases("A")
+                    .set_alternate_bases(vcf::variant::record_buf::AlternateBases::from(vec![
+                        "T".to_string(),
+                    ]))
+                    .set_quality_score(30.0)
+                    .set_filters(vcf::variant::record_buf::Filters::pass())
+                    .set_info(
+                        [("DP".parse().unwrap(), Some(InfoValue::Integer(50)))]
+                            .into_iter()
+                            .collect(),
+                    )
+                    .set_samples(vcf::variant::record_buf::Samples::new(
+                        ["GT".parse().unwrap(), "DP".parse().unwrap()].into_iter().collect(),
+                        vec![
+                            [
+                                Some(SampleValue::Genotype("0/1".parse().unwrap())),
+                                Some(SampleValue::Integer(30)),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ],
+                    ))
+                    .build();
+                writer.write_variant_record(&noodles_header, &record).unwrap();
+            }
+            drop(writer);
+            black_box(output.len())
         });
     });
 
