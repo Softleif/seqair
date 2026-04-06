@@ -1,9 +1,8 @@
 use crate::{
-    ReaderError,
     bam::{BamHeader, IndexedBamReader, PileupEngine, RecordStore},
     cram::reader::IndexedCramReader,
     fasta::IndexedFastaReader,
-    reader::indexed::CursorReader,
+    reader::{ReaderError, indexed::CursorReader},
     sam::reader::IndexedSamReader,
 };
 use seqair_types::{Base, Pos, Zero};

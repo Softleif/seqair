@@ -1,7 +1,7 @@
 //! Tests for BGZF virtual offset representation and ordering.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use proptest::prelude::*;
-use seqair::bam::bgzf::VirtualOffset;
+use seqair::bam::{BamError, BamHeaderError, BgzfError, bgzf::VirtualOffset};
 
 // r[verify bgzf.virtual_offset]
 // Verifies the BAI spec (SAM1 §4.1): upper 48 bits = compressed block offset,
@@ -48,14 +48,14 @@ proptest! {
 fn error_types_implement_std_error_and_capture_context() {
     use std::error::Error;
 
-    let err = seqair::BamHeaderError::InvalidMagic;
+    let err = BamHeaderError::InvalidMagic;
     let _: &dyn Error = &err;
     assert!(format!("{err}").contains("BAM"));
 
-    let err = seqair::BamError::ContigNotFound { name: seqair_types::SmolStr::new("chr99") };
+    let err = BamError::ContigNotFound { name: seqair_types::SmolStr::new("chr99") };
     assert!(format!("{err}").contains("chr99"));
 
-    let err = seqair::BamError::RegionOutOfBounds {
+    let err = BamError::RegionOutOfBounds {
         contig: seqair_types::SmolStr::new("chr1"),
         start: 100,
         end: 200,
@@ -100,7 +100,7 @@ fn read_bam_verifies_crc32_and_tracks_offsets() {
 // r[verify bgzf.crc32]
 #[test]
 fn checksum_mismatch_error_formats_correctly() {
-    let err = seqair::BgzfError::ChecksumMismatch { expected: 0xDEADBEEF, found: 0xCAFEBABE };
+    let err = BgzfError::ChecksumMismatch { expected: 0xDEADBEEF, found: 0xCAFEBABE };
     let msg = format!("{err}");
     assert!(msg.contains("0xdeadbeef"), "should contain expected CRC: {msg}");
     assert!(msg.contains("0xcafebabe"), "should contain found CRC: {msg}");
