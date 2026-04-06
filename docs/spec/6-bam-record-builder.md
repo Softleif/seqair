@@ -75,20 +75,33 @@ r[bam.owned_record.set_qual]
 `BamRecord` MUST support replacing quality scores. The new array length MUST equal `seq.len()`.
 
 r[bam.owned_record.aligned_pairs]
-`BamRecord` MUST provide an `aligned_pairs()` iterator yielding `(Option<usize>, Option<i64>)` tuples: `(query_pos, ref_pos)`. The iterator MUST yield one tuple per consumed base on either side: for M/=/X operations, both values are `Some` and one tuple is yielded per base. For insertions (I), one tuple per inserted base is yielded with `ref_pos = None`. For deletions (D), one tuple per deleted base is yielded with `query_pos = None`. Soft clips (S) MUST be skipped. For unmapped reads (empty CIGAR), the iterator MUST be empty.
+`BamRecord` MUST provide an `aligned_pairs()` iterator yielding `(Option<usize>, Option<i64>)` tuples: `(query_pos, ref_pos)`. The iterator handles each CIGAR operation as follows:
+
+- **M/=/X** (alignment match, sequence match, mismatch): both values are `Some`, one tuple per base.
+- **I** (insertion to reference): `ref_pos = None`, one tuple per inserted base.
+- **D** (deletion from reference): `query_pos = None`, one tuple per deleted base.
+- **N** (reference skip / intron): `query_pos = None`, one tuple per skipped reference base. N consumes reference but not query, like D. This is important for RNA-seq BAMs where introns appear as N operations spanning thousands of reference bases.
+- **S** (soft clip): MUST be skipped entirely. Soft-clipped bases are present in the sequence but not aligned to the reference.
+- **H** (hard clip): MUST be skipped entirely. Hard-clipped bases are not present in the sequence.
+- **P** (padding): MUST be skipped entirely. Padding is used for padded-reference alignment and consumes neither query nor reference.
+
+For unmapped reads (empty CIGAR), the iterator MUST be empty.
 
 r[bam.owned_record.end_pos]
 `BamRecord` MUST provide `end_pos() -> i64` computing the rightmost reference position from `pos` + CIGAR reference-consuming operations. This uses the same logic as `r[bam.record.end_pos]` in [record.md](2-bam-3-2-record.md), but MUST be recomputed from the current CIGAR state (not cached from a stale value).
 
 r[bam.owned_record.bin]
-`BamRecord` MUST provide `bin() -> u16` computing the BAM bin value from `pos` and `end_pos` using the `reg2bin` algorithm from [SAM1] §5.3. Note: in the serialized 32-byte header this value is packed into the `bin_mq_nl` field as `bin << 16 | mapq << 8 | l_read_name` — the serialization logic in `to_bam_bytes` handles this packing.
+`BamRecord` MUST provide `bin() -> u16` computing the BAM bin value from `pos` and `end_pos` using the `reg2bin` algorithm from [SAM1] §5.3. This method is specific to the BAI binning scheme (min_shift=14, depth=5), where the maximum non-pseudo bin ID is 37449 — well within u16 range. CSI indexes with larger depths can produce bin IDs exceeding u16; those are handled by the IndexBuilder directly and do not flow through `BamRecord::bin()`. In the serialized 32-byte header, this value is packed into the `bin_mq_nl` field as `bin << 16 | mapq << 8 | l_read_name` — the serialization logic in `to_bam_bytes` handles this packing.
 
 ## Serialization
 
 > *[SAM1] §4.2 — BAM record binary layout: block_size (i32), 32-byte fixed header, variable fields*
 
 r[bam.owned_record.to_bam_bytes]
-`BamRecord` MUST serialize to BAM binary format into a caller-provided `&mut Vec<u8>`. The layout MUST follow [SAM1] §4.2: 32-byte fixed fields (refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen), NUL-terminated qname, packed CIGAR (u32 per op), 4-bit packed sequence (via `seq::encode_seq` from [seq_codec.md](2-bam-3-4-seq_codec.md)), quality scores, and raw auxiliary bytes. The method MUST NOT include the 4-byte `block_size` prefix — that is the caller's (writer's) responsibility, since the caller needs to know the total byte count to write the prefix.
+`BamRecord` MUST serialize to BAM binary format by appending into a caller-provided `&mut Vec<u8>` (the method appends; clearing the buffer is the caller's responsibility — see `r[bam_writer.reuse_buffers]` in [bam-writer.md](6-bam-writer.md)). The layout MUST follow [SAM1] §4.2: 32-byte fixed fields (refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen), NUL-terminated qname, packed CIGAR (u32 per op), 4-bit packed sequence (via `seq::encode_seq` from [seq_codec.md](2-bam-3-4-seq_codec.md)), quality scores, and raw auxiliary bytes. The method MUST NOT include the 4-byte `block_size` prefix — that is the caller's (writer's) responsibility, since the caller needs to know the total byte count to write the prefix.
+
+r[bam.owned_record.to_bam_field_overflow]
+The BAM binary format stores `pos` and `next_pos` as i32, and `ref_id` and `next_ref_id` as i32. The `BamRecord` stores `pos` and `next_pos` as i64 for internal flexibility (e.g., arithmetic without overflow risk). `to_bam_bytes` MUST validate that `pos` is in `[-1, i32::MAX]` and `next_pos` is in `[-1, i32::MAX]`, returning a typed error on overflow. The value -1 is the canonical sentinel for unmapped/unavailable. This validation catches bugs where CIGAR-based position calculations produce values exceeding the BAM coordinate space.
 
 r[bam.owned_record.to_bam_bin_field]
 The BAM `bin` value in the serialized `bin_mq_nl` field MUST be computed from the current `pos` and `end_pos` at serialization time, not stored as a persistent field. This ensures the bin is always consistent with the current alignment, even after modification.
@@ -120,7 +133,12 @@ r[bam.owned_record.aux_uniqueness]
 Tag names MUST be unique within a record (per [SAM1] §1.5). `set_*` methods MUST enforce this: if a tag with the given name already exists, it MUST be replaced, not duplicated. `get()` MUST be unambiguous.
 
 r[bam.owned_record.aux_int_encoding]
-`set_int(tag, value: i64)` MUST auto-select the smallest BAM integer type that fits the value: `c` (i8) for [-128, 127], `C` (u8) for [0, 255], `s` (i16) for [-32768, 32767], `S` (u16) for [0, 65535], `i` (i32) for [-2^31, 2^31-1], `I` (u32) for [0, 2^32-1]. Values outside the i32/u32 range MUST return an error — BAM auxiliary tags have no 64-bit integer type.
+`set_int(tag, value: i64)` MUST auto-select the smallest BAM integer type that fits the value. For values where both signed and unsigned types could apply (e.g. 42 fits in both i8 and u8), the unsigned type MUST be preferred — this matches htslib behavior and produces more compact encodings for the common case of non-negative values. The selection order is:
+
+1. Non-negative values: `C` (u8, 0..=255), `S` (u16, 256..=65535), `I` (u32, 65536..=2^32-1)
+2. Negative values: `c` (i8, -128..=-1), `s` (i16, -32768..=-129), `i` (i32, -2^31..=-32769)
+
+Values outside the union of i32 and u32 ranges MUST return a typed error — BAM auxiliary tags have no 64-bit integer type per [SAM1] §4.2.5.
 
 r[bam.owned_record.aux_array_encoding]
 `set_array_u8(tag, values)` MUST encode the tag in BAM B-type array format: 2-byte tag name, type byte `B`, subtype byte `C`, 4-byte little-endian element count, followed by the raw u8 values. This is used for the ML (modification likelihood) tag in SAM 4.5 methylation annotations.
