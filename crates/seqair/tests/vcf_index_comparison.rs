@@ -441,39 +441,23 @@ proptest! {
         let seqair_data = decompress_tbi(&seqair_tbi_path);
         let bcftools_data = decompress_tbi(&bcftools_tbi_path);
 
-        // Both must be valid TBI files with matching format fields.
-        // Note: n_ref may differ — bcftools omits references with no records,
-        // while seqair includes all declared contigs. This is valid per spec.
+        // Both must be valid TBI files. Now that seqair also omits empty refs,
+        // the entire header (magic + n_ref + format fields) should match.
         prop_assert!(seqair_data.len() >= 32, "seqair TBI too short");
         prop_assert!(bcftools_data.len() >= 32, "bcftools TBI too short");
-        prop_assert_eq!(&seqair_data[..4], b"TBI\x01", "seqair magic");
-        prop_assert_eq!(&bcftools_data[..4], b"TBI\x01", "bcftools magic");
-        // format, col_seq, col_beg, col_end, meta, skip (bytes 8..28) must match
-        prop_assert_eq!(&seqair_data[8..28], &bcftools_data[8..28],
-            "TBI format/column/meta fields mismatch");
+        prop_assert_eq!(&seqair_data[..32], &bcftools_data[..32],
+            "TBI header mismatch (magic + n_ref + format + columns + meta + skip)");
 
-        // bcftools sequence names are a subset of seqair's (bcftools omits empty refs).
-        // Verify bcftools names are all present in seqair's names.
-        let bcftools_l_nm = i32::from_le_bytes(
-            [bcftools_data[28], bcftools_data[29], bcftools_data[30], bcftools_data[31]]
-        ) as usize;
-        let bcftools_names_end = 32 + bcftools_l_nm;
-        let bcftools_names: Vec<&[u8]> = bcftools_data[32..bcftools_names_end]
-            .split(|&b| b == 0)
-            .filter(|s| !s.is_empty())
-            .collect();
+        // Sequence names must match exactly
         let seqair_l_nm = i32::from_le_bytes(
             [seqair_data[28], seqair_data[29], seqair_data[30], seqair_data[31]]
         ) as usize;
-        let seqair_names_end = 32 + seqair_l_nm;
-        let seqair_names: Vec<&[u8]> = seqair_data[32..seqair_names_end]
-            .split(|&b| b == 0)
-            .filter(|s| !s.is_empty())
-            .collect();
-        for name in &bcftools_names {
-            prop_assert!(seqair_names.contains(name),
-                "bcftools name not found in seqair names");
-        }
+        let names_end = 32 + seqair_l_nm;
+        prop_assert_eq!(
+            &seqair_data[32..names_end],
+            &bcftools_data[32..names_end],
+            "sequence names mismatch"
+        );
     }
 
     /// An empty VCF (header only, no records) produces a valid TBI that bcftools accepts.

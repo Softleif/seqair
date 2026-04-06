@@ -232,6 +232,7 @@ impl IndexBuilder {
 
     // r[impl index_builder.tbi_format]
     /// Write TBI format to a writer. The output is BGZF-compressed.
+    /// Only references with actual records are included (matching bcftools behavior).
     pub fn write_tbi<W: std::io::Write>(
         &self,
         writer: W,
@@ -239,13 +240,17 @@ impl IndexBuilder {
     ) -> Result<(), IndexError> {
         use crate::bam::bgzf_writer::BgzfWriter;
 
+        // Collect only references that have data (non-empty bins)
+        let active_refs: Vec<(usize, &RefIndexBuilder)> =
+            self.refs.iter().enumerate().filter(|(_, r)| !r.bins.is_empty()).collect();
+
         let mut bgzf = BgzfWriter::new(writer);
         let mut buf = Vec::new();
 
         // Magic
         buf.extend_from_slice(b"TBI\x01");
-        // n_ref
-        write_i32(&mut buf, self.refs.len() as i32);
+        // n_ref — only count references with data
+        write_i32(&mut buf, active_refs.len() as i32);
         // format = 2 (VCF)
         write_i32(&mut buf, 2);
         // col_seq = 1, col_beg = 2, col_end = 0
@@ -257,17 +262,19 @@ impl IndexBuilder {
         // skip = 0
         write_i32(&mut buf, 0);
 
-        // Concatenated null-terminated sequence names
+        // Concatenated null-terminated sequence names — only for active refs
         let mut names_buf = Vec::new();
-        for name in contig_names {
-            names_buf.extend_from_slice(name.as_bytes());
-            names_buf.push(0);
+        for &(idx, _) in &active_refs {
+            if let Some(name) = contig_names.get(idx) {
+                names_buf.extend_from_slice(name.as_bytes());
+                names_buf.push(0);
+            }
         }
         write_i32(&mut buf, names_buf.len() as i32);
         buf.extend_from_slice(&names_buf);
 
-        // Per-reference bin/chunk/linear data (BAI format)
-        for r in &self.refs {
+        // Per-reference bin/chunk/linear data — only for active refs
+        for &(_, r) in &active_refs {
             write_ref_index(&mut buf, r);
         }
 
