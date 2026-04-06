@@ -202,7 +202,7 @@ fn bcf_encoder_readable_by_noodles() {
 
         let alleles = Alleles::snv(Base::C, Base::G).unwrap();
         let mut enc = writer.record_encoder();
-        alleles.begin_record(&mut enc, contig, Pos::<One>::new(500).unwrap(), Some(45.0));
+        alleles.begin_record(&mut enc, contig, Pos::<One>::new(500).unwrap(), Some(45.0)).unwrap();
         FilterHandle::PASS.encode(&mut enc);
         dp_info.encode(&mut enc, 100);
         enc.begin_samples(1);

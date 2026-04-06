@@ -77,6 +77,10 @@ pub enum BgzfError {
 
     #[error("BGZF write failed")]
     WriteFailed { source: std::io::Error },
+
+    // r[impl bgzf.writer.finish]
+    #[error("BgzfWriter already finished")]
+    AlreadyFinished,
 }
 
 // r[impl bgzf.libdeflate]

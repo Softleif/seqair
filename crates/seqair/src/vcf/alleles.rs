@@ -210,6 +210,11 @@ impl Alleles {
         }
     }
 
+    /// Number of bytes `write_ref_into` writes (same as rlen for concrete alleles).
+    pub fn ref_byte_len(&self) -> usize {
+        self.rlen()
+    }
+
     // r[impl vcf_record.allele_count]
     /// Number of alleles including REF (n_allele for BCF).
     pub fn n_allele(&self) -> usize {

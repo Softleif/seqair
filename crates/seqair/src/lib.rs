@@ -233,7 +233,7 @@
 //! // Hot loop: zero allocations, pre-resolved dict indices
 //! let alleles = Alleles::snv(Base::A, Base::T)?;
 //! let mut enc = writer.record_encoder();
-//! alleles.begin_record(&mut enc, contig, Pos1::new(100).unwrap(), Some(30.0));
+//! alleles.begin_record(&mut enc, contig, Pos1::new(100).unwrap(), Some(30.0))?;
 //! FilterHandle::PASS.encode(&mut enc);
 //! dp.encode(&mut enc, 50);          // handle.encode(enc, value)
 //! enc.begin_samples(1);

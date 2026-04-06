@@ -5,7 +5,6 @@
 #![allow(clippy::arithmetic_side_effects)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use seqair_types::smallvec::smallvec;
 use std::hint::black_box;
 use std::io::Read;
 
@@ -412,7 +411,7 @@ fn htslib_header() -> rust_htslib::bcf::Header {
 
 /// Write N_RECORDS with rust-htslib to a temp file, return the file.
 fn write_htslib(format: rust_htslib::bcf::Format) -> tempfile::NamedTempFile {
-    use rust_htslib::bcf::{self, Read as _};
+    use rust_htslib::bcf;
 
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let hdr = htslib_header();
@@ -447,8 +446,6 @@ fn write_htslib(format: rust_htslib::bcf::Format) -> tempfile::NamedTempFile {
 // ---------------------------------------------------------------------------
 
 fn write_vcf_text(c: &mut Criterion) {
-    use noodles::vcf as nvcf;
-
     let mut group = c.benchmark_group("write_vcf_text");
     group.throughput(Throughput::Elements(N_RECORDS as u64));
 
@@ -536,7 +533,6 @@ fn write_vcf_text(c: &mut Criterion) {
                     .build();
                 writer.write_variant_record(&noodles_header, &record).unwrap();
             }
-            drop(writer);
             black_box(output.len())
         });
     });
@@ -688,7 +684,7 @@ fn write_bcf(c: &mut Criterion) {
             for i in 1..=N_RECORDS {
                 let pos = seqair_types::Pos1::new(i).unwrap();
                 let mut enc = writer.record_encoder();
-                alleles.begin_record(&mut enc, contig, pos, Some(30.0));
+                alleles.begin_record(&mut enc, contig, pos, Some(30.0)).unwrap();
                 FilterHandle::PASS.encode(&mut enc);
                 dp_info.encode(&mut enc, 50);
                 enc.begin_samples(1);

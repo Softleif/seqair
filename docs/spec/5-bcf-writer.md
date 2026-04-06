@@ -13,7 +13,7 @@ BCF positions are 0-based. The writer MUST subtract 1 from the 1-based VcfRecord
 > *[BCF2] — record layout: l_shared, l_indiv, shared data (site), individual data (samples)*
 
 r[bcf_writer.record_layout]
-Each record MUST be encoded as `l_shared: u32`, `l_indiv: u32`, followed by `l_shared` bytes of shared data and `l_indiv` bytes of individual (per-sample) data.
+Each record MUST be encoded as `l_shared: u32`, `l_indiv: u32`, followed by `l_shared` bytes of shared data and `l_indiv` bytes of individual (per-sample) data. The conversion of buffer lengths to `u32` MUST use checked conversion (`u32::try_from`) and return a typed error on overflow rather than silently truncating.
 
 r[bcf_writer.fixed_fields]
 The first 24 bytes of shared data MUST contain: CHROM (i32), POS (i32, 0-based), rlen (i32), QUAL (f32), n_info|n_allele (u32 packed: n_allele << 16 | n_info), n_fmt|n_sample (u32 packed: n_fmt << 24 | n_sample). All multi-byte values are little-endian.

@@ -3,7 +3,7 @@
 > **Sources:** [VCF43] §1.3 "Data lines" — tab-delimited format, field order, missing value `.` syntax; §1.3.1 "Fixed fields" — CHROM/POS/ID/REF/ALT/QUAL/FILTER/INFO serialization; §1.3.2 "Genotype fields" — FORMAT:sample colon-separated encoding, GT allele/phase syntax; §1.0.2 "Character encoding" — percent-encoding of special characters. BGZF compression for `.vcf.gz` follows [SAM1] §4.1. See [references.md](99-references.md).
 
 r[vcf_writer.output_formats]
-The text writer MUST support three output targets: uncompressed VCF (plain `io::Write`), BGZF-compressed VCF (`.vcf.gz` via `BgzfWriter`), and stdout.
+The text writer MUST support three output targets: uncompressed VCF (plain `io::Write`), BGZF-compressed VCF (`.vcf.gz` via `BgzfWriter`), and stdout. `OutputFormat::from_path` MUST return an error for unrecognized file extensions rather than silently defaulting.
 
 r[vcf_writer.header_first]
 `write_header()` MUST be called exactly once before any `write_record()` call. Calling `write_record` without a prior `write_header` MUST return an error.
