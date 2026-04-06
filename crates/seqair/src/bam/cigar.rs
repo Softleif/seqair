@@ -48,6 +48,22 @@ impl CigarOpType {
         }
     }
 
+    // r[impl bam.owned_record.cigar_op]
+    /// Convert back to the BAM numeric code. Inverse of [`from_bam`](Self::from_bam).
+    pub const fn to_bam_code(self) -> u8 {
+        match self {
+            Self::Match => CIGAR_M,
+            Self::Insertion => CIGAR_I,
+            Self::Deletion => CIGAR_D,
+            Self::RefSkip => CIGAR_N,
+            Self::SoftClip => CIGAR_S,
+            Self::HardClip => CIGAR_H,
+            Self::Padding => CIGAR_P,
+            Self::SeqMatch => CIGAR_EQ,
+            Self::SeqMismatch => CIGAR_X,
+        }
+    }
+
     pub const fn consumes_ref(self) -> bool {
         matches!(
             self,
@@ -60,6 +76,34 @@ impl CigarOpType {
             self,
             Self::Match | Self::Insertion | Self::SoftClip | Self::SeqMatch | Self::SeqMismatch
         )
+    }
+}
+
+// r[impl bam.owned_record.cigar_op]
+/// A single CIGAR operation with its operation type and length.
+///
+/// In BAM binary format, each op is packed as a u32: `len << 4 | op_code`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CigarOp {
+    pub op: CigarOpType,
+    pub len: u32,
+}
+
+impl CigarOp {
+    pub const fn new(op: CigarOpType, len: u32) -> Self {
+        Self { op, len }
+    }
+
+    /// Decode from BAM packed u32 format (`len << 4 | op_code`).
+    pub fn from_bam_u32(packed: u32) -> Option<Self> {
+        let op = CigarOpType::from_bam((packed & 0xF) as u8)?;
+        let len = packed >> 4;
+        Some(Self { op, len })
+    }
+
+    /// Encode to BAM packed u32 format (`len << 4 | op_code`).
+    pub const fn to_bam_u32(self) -> u32 {
+        (self.len << 4) | self.op.to_bam_code() as u32
     }
 }
 
@@ -373,6 +417,53 @@ mod tests {
     /// Pack a single CIGAR op into 4 LE bytes: upper 28 bits = len, lower 4 = op.
     fn pack_cigar_op(op: u8, len: u32) -> [u8; 4] {
         ((len << 4) | u32::from(op)).to_le_bytes()
+    }
+
+    // r[verify bam.owned_record.cigar_op]
+    #[test]
+    fn cigar_op_roundtrip_all_ops() {
+        let ops = [
+            (CigarOpType::Match, CIGAR_M),
+            (CigarOpType::Insertion, CIGAR_I),
+            (CigarOpType::Deletion, CIGAR_D),
+            (CigarOpType::RefSkip, CIGAR_N),
+            (CigarOpType::SoftClip, CIGAR_S),
+            (CigarOpType::HardClip, CIGAR_H),
+            (CigarOpType::Padding, CIGAR_P),
+            (CigarOpType::SeqMatch, CIGAR_EQ),
+            (CigarOpType::SeqMismatch, CIGAR_X),
+        ];
+        for (op_type, code) in ops {
+            assert_eq!(op_type.to_bam_code(), code, "to_bam_code failed for {op_type:?}");
+            assert_eq!(
+                CigarOpType::from_bam(code),
+                Some(op_type),
+                "from_bam failed for code {code}"
+            );
+
+            let cigar_op = CigarOp::new(op_type, 42);
+            let packed = cigar_op.to_bam_u32();
+            let decoded = CigarOp::from_bam_u32(packed).unwrap();
+            assert_eq!(decoded, cigar_op, "round-trip failed for {op_type:?}");
+        }
+    }
+
+    #[test]
+    fn cigar_op_max_length() {
+        // Upper 28 bits can hold up to 2^28 - 1 = 268_435_455
+        let max_len = (1u32 << 28) - 1;
+        let op = CigarOp::new(CigarOpType::Match, max_len);
+        let packed = op.to_bam_u32();
+        let decoded = CigarOp::from_bam_u32(packed).unwrap();
+        assert_eq!(decoded.len, max_len);
+        assert_eq!(decoded.op, CigarOpType::Match);
+    }
+
+    #[test]
+    fn cigar_op_from_bam_u32_invalid_code() {
+        // op code 9 is invalid
+        let packed = (100u32 << 4) | 9;
+        assert!(CigarOp::from_bam_u32(packed).is_none());
     }
 
     // r[verify cigar.compact_op_position_invariant]

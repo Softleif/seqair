@@ -108,6 +108,12 @@ impl IndexBuilder {
         Self::new(n_refs, 14, 5, header_end_offset)
     }
 
+    // r[impl index_builder.bai_constructor]
+    /// Create a BAI-compatible builder (min_shift=14, depth=5).
+    pub fn bai(n_refs: usize, header_end_offset: VirtualOffset) -> Self {
+        Self::new(n_refs, 14, 5, header_end_offset)
+    }
+
     // r[impl index_builder.single_pass]
     // r[impl index_builder.sort_validation]
     // r[impl index_builder.binning]
@@ -280,6 +286,41 @@ impl IndexBuilder {
 
         bgzf.write_all(&buf)?;
         bgzf.finish()?;
+        Ok(())
+    }
+
+    // r[impl index_builder.bai_format]
+    // r[impl index_builder.bai_all_refs]
+    // r[impl index_builder.bai_write]
+    /// Write BAI format to a writer. The output is uncompressed (not BGZF-wrapped).
+    ///
+    /// `n_refs` is the total number of reference sequences in the BAM header — BAI
+    /// includes an entry for every reference, even those with no records (n_bin=0, n_intv=0).
+    pub fn write_bai<W: std::io::Write>(
+        &self,
+        mut writer: W,
+        n_refs: usize,
+    ) -> Result<(), IndexError> {
+        let mut buf = Vec::new();
+
+        // Magic
+        buf.extend_from_slice(b"BAI\x01");
+        // n_ref — always the full header count (BAI uses positional lookup by tid)
+        write_i32(&mut buf, n_refs as i32);
+
+        // Per-reference data: include all refs, even empty ones
+        for tid in 0..n_refs {
+            match self.refs.get(tid) {
+                Some(r) if !r.bins.is_empty() => write_ref_index(&mut buf, r),
+                _ => {
+                    // Empty ref: n_bin=0, n_intv=0
+                    write_i32(&mut buf, 0); // n_bin
+                    write_i32(&mut buf, 0); // n_intv
+                }
+            }
+        }
+
+        writer.write_all(&buf).map_err(IndexError::Io)?;
         Ok(())
     }
 

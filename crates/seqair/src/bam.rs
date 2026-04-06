@@ -39,24 +39,31 @@
 
 // r[impl io.minimal_public_api]
 pub mod aux;
+pub mod aux_data;
 pub mod bgzf;
 pub mod bgzf_writer;
 pub mod cigar;
 pub mod flags;
 pub mod header;
 pub mod index;
+pub mod owned_record;
 pub mod pileup;
 pub mod reader;
 pub mod record;
 pub mod record_store;
 pub mod region_buf;
 pub mod seq;
+pub mod writer;
 
+pub use aux_data::{AuxData, AuxDataError};
 pub use bgzf::BgzfError;
+pub use cigar::CigarOp;
 pub use header::{BamHeader, BamHeaderError, ContigInfo};
 pub use index::{BaiError, BamIndex};
+pub use owned_record::{OwnedBamRecord, OwnedRecordError};
 pub use pileup::{PileupColumn, PileupEngine, PileupOp, RefSeq};
 pub use reader::{BamError, BamShared, IndexedBamReader};
 pub use record::BamRecord;
 pub use record_store::RecordStore;
 pub use seqair_types::{Offset, One, Pos, Zero};
+pub use writer::{BamWriteError, BamWriter};

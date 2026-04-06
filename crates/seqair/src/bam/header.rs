@@ -29,6 +29,38 @@ pub struct ContigInfo {
     pub len: u64,
 }
 
+// r[impl bam_writer.header_add_pg]
+/// Fields for a `@PG` header record.
+pub struct PgRecord {
+    pub id: SmolStr,
+    pub pn: Option<SmolStr>,
+    pub vn: Option<SmolStr>,
+    pub cl: Option<SmolStr>,
+    pub ds: Option<SmolStr>,
+    pub pp: Option<SmolStr>,
+}
+
+/// Access target name and length without exposing `TargetInfo` internals.
+pub trait TargetInfoAccess {
+    fn target_name(&self) -> &str;
+    fn target_length(&self) -> u64;
+}
+
+impl TargetInfoAccess for TargetInfo {
+    fn target_name(&self) -> &str {
+        self.name.as_str()
+    }
+    fn target_length(&self) -> u64 {
+        self.length
+    }
+}
+
+impl AsRef<str> for TargetInfo {
+    fn as_ref(&self) -> &str {
+        self.name.as_str()
+    }
+}
+
 // r[impl bam.header.errors]
 #[derive(Debug, thiserror::Error)]
 pub enum BamHeaderError {
@@ -261,6 +293,57 @@ impl BamHeader {
         &self.header_text
     }
 
+    /// Access the full target list (name + length) for binary header serialization.
+    pub fn targets(&self) -> &[impl AsRef<str> + TargetInfoAccess] {
+        &self.targets
+    }
+
+    // r[impl bam_writer.header_from_template]
+    /// Create a mutable copy from an existing header for use with BAM writing.
+    pub fn from_template(other: &BamHeader) -> Self {
+        Self {
+            header_text: other.header_text.clone(),
+            targets: other.targets.clone(),
+            name_to_tid: other.name_to_tid.clone(),
+        }
+    }
+
+    // r[impl bam_writer.header_add_pg]
+    /// Append a `@PG` header record. If `pg.pp` is `None`, it is auto-set to the ID of the
+    /// last existing `@PG` line (forming a provenance chain per [SAM1] §1.3).
+    pub fn add_pg(&mut self, pg: PgRecord) {
+        let pp = pg.pp.or_else(|| self.last_pg_id());
+
+        let mut line = format!("@PG\tID:{}", pg.id);
+        if let Some(pn) = &pg.pn {
+            line.push_str(&format!("\tPN:{pn}"));
+        }
+        if let Some(vn) = &pg.vn {
+            line.push_str(&format!("\tVN:{vn}"));
+        }
+        if let Some(cl) = &pg.cl {
+            line.push_str(&format!("\tCL:{cl}"));
+        }
+        if let Some(ds) = &pg.ds {
+            line.push_str(&format!("\tDS:{ds}"));
+        }
+        if let Some(pp_id) = &pp {
+            line.push_str(&format!("\tPP:{pp_id}"));
+        }
+        line.push('\n');
+
+        self.header_text.push_str(&line);
+    }
+
+    /// Find the ID of the last `@PG` line in the header text.
+    fn last_pg_id(&self) -> Option<SmolStr> {
+        self.header_text
+            .lines()
+            .rev()
+            .find(|l| l.starts_with("@PG"))
+            .and_then(|line| line.split('\t').find_map(|f| f.strip_prefix("ID:")).map(SmolStr::new))
+    }
+
     // r[impl unified.sort_order]
     pub fn validate_sort_order(&self) -> Result<(), BamHeaderError> {
         let hd_line = match self.header_text.lines().find(|l| l.starts_with("@HD")) {
@@ -471,6 +554,73 @@ mod tests {
             matches!(err, BamHeaderError::NegativeLength { field: "l_text", value: -1 }),
             "expected NegativeLength for l_text, got {err:?}"
         );
+    }
+
+    // r[verify bam_writer.header_from_template]
+    #[test]
+    fn from_template_clones_all_fields() {
+        let text = "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n@SQ\tSN:chr2\tLN:2000\n";
+        let original = BamHeader::from_sam_text(text).unwrap();
+        let copy = BamHeader::from_template(&original);
+
+        assert_eq!(copy.target_count(), 2);
+        assert_eq!(copy.tid("chr1"), Some(0));
+        assert_eq!(copy.tid("chr2"), Some(1));
+        assert_eq!(copy.target_len(0), Some(1000));
+        assert_eq!(copy.target_len(1), Some(2000));
+        assert_eq!(copy.header_text(), original.header_text());
+    }
+
+    // r[verify bam_writer.header_add_pg]
+    #[test]
+    fn add_pg_appends_line() {
+        let text = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n";
+        let mut header = BamHeader::from_sam_text(text).unwrap();
+        header.add_pg(PgRecord {
+            id: SmolStr::new("seqair"),
+            pn: Some(SmolStr::new("seqair")),
+            vn: Some(SmolStr::new("0.1.0")),
+            cl: None,
+            ds: None,
+            pp: None,
+        });
+
+        let text = header.header_text();
+        assert!(text.contains("@PG\tID:seqair\tPN:seqair\tVN:0.1.0\n"));
+    }
+
+    #[test]
+    fn add_pg_auto_chains_pp() {
+        let text = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n@PG\tID:bwa\tPN:bwa\n";
+        let mut header = BamHeader::from_sam_text(text).unwrap();
+        header.add_pg(PgRecord {
+            id: SmolStr::new("seqair"),
+            pn: Some(SmolStr::new("seqair")),
+            vn: None,
+            cl: None,
+            ds: None,
+            pp: None, // should auto-set to "bwa"
+        });
+
+        let text = header.header_text();
+        assert!(text.contains("PP:bwa"), "PP should be auto-set to last PG ID: {text}");
+    }
+
+    #[test]
+    fn add_pg_explicit_pp_overrides_auto() {
+        let text = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n@PG\tID:bwa\tPN:bwa\n";
+        let mut header = BamHeader::from_sam_text(text).unwrap();
+        header.add_pg(PgRecord {
+            id: SmolStr::new("seqair"),
+            pn: None,
+            vn: None,
+            cl: None,
+            ds: None,
+            pp: Some(SmolStr::new("custom")),
+        });
+
+        let text = header.header_text();
+        assert!(text.contains("PP:custom"), "explicit PP should override auto: {text}");
     }
 
     #[test]
