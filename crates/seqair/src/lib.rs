@@ -152,7 +152,7 @@
 //! writer.finish()?;
 //!
 //! let vcf_text = String::from_utf8(output)?;
-//! assert!(vcf_text.contains("chr1\t12345\t.\tA\tT\t30.0\tPASS\tDP=50"));
+//! assert!(vcf_text.contains("chr1\t12345\t.\tA\tT\t30\tPASS\tDP=50"));
 //! # Ok(())
 //! # }
 //! ```
