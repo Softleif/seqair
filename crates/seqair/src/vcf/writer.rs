@@ -111,10 +111,7 @@ impl<W: Write> VcfWriter<W> {
         // QUAL
         // r[impl vcf_writer.float_precision]
         match record.qual {
-            Some(q) => {
-                let mut ryu_buf = ryu::Buffer::new();
-                self.buf.extend_from_slice(ryu_buf.format(q).as_bytes());
-            }
+            Some(q) => write_float_g(&mut self.buf, q),
             None => self.buf.push(b'.'),
         }
         self.buf.push(b'\t');
@@ -225,10 +222,9 @@ impl<W: Write> VcfWriter<W> {
 // r[impl vcf_writer.integer_format]
 fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
     let mut itoa_buf = itoa::Buffer::new();
-    let mut ryu_buf = ryu::Buffer::new();
     match value {
         InfoValue::Integer(v) => buf.extend_from_slice(itoa_buf.format(*v).as_bytes()),
-        InfoValue::Float(v) => buf.extend_from_slice(ryu_buf.format(*v).as_bytes()),
+        InfoValue::Float(v) => write_float_g(buf, *v),
         InfoValue::Flag => {} // handled at call site
         InfoValue::String(s) => percent_encode_into(buf, s.as_bytes()),
         InfoValue::IntegerArray(arr) => {
@@ -248,7 +244,7 @@ fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
                     buf.push(b',');
                 }
                 match v {
-                    Some(f) => buf.extend_from_slice(ryu_buf.format(*f).as_bytes()),
+                    Some(f) => write_float_g(buf, *f),
                     None => buf.push(b'.'),
                 }
             }
@@ -264,6 +260,51 @@ fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
                 }
             }
         }
+    }
+}
+
+// r[impl vcf_writer.float_precision]
+/// Format a float like C's `%g` with 6 significant digits — no trailing zeros,
+/// no trailing decimal point. This matches htslib/bcftools VCF text output.
+///
+/// Examples: 35.89775 → "35.8978", 60.0 → "60", 0.777778 → "0.777778"
+fn write_float_g(buf: &mut Vec<u8>, v: f32) {
+    // %g with precision P means P significant digits.
+    // In fixed notation: decimal_places = P - floor(log10(|v|)) - 1
+    // For very small or very large values, %g switches to scientific notation,
+    // but VCF floats are typically in a reasonable range.
+    let v = f64::from(v);
+    let precision = 6usize; // %g default
+
+    if v == 0.0 {
+        buf.push(b'0');
+        return;
+    }
+
+    let magnitude = v.abs().log10().floor() as i32;
+    let decimal_places = (precision as i32).saturating_sub(magnitude).saturating_sub(1);
+    let decimal_places = decimal_places.max(0) as usize;
+
+    let mut tmp = [0u8; 32];
+    let len = {
+        use std::io::Write as _;
+        let mut cursor = std::io::Cursor::new(&mut tmp[..]);
+        write!(cursor, "{v:.decimal_places$}").unwrap();
+        cursor.position() as usize
+    };
+    let s = &tmp[..len];
+    // Strip trailing zeros after decimal point, then trailing decimal point
+    if let Some(dot) = s.iter().position(|&b| b == b'.') {
+        let mut end = len;
+        while end > dot.saturating_add(1) && s.get(end.saturating_sub(1)) == Some(&b'0') {
+            end = end.saturating_sub(1);
+        }
+        if end == dot.saturating_add(1) {
+            end = dot;
+        }
+        buf.extend_from_slice(&s[..end]);
+    } else {
+        buf.extend_from_slice(s);
     }
 }
 
@@ -288,11 +329,10 @@ fn percent_encode_into(buf: &mut Vec<u8>, data: &[u8]) {
 // r[impl vcf_writer.genotype_serialization]
 fn write_sample_value(buf: &mut Vec<u8>, value: &SampleValue) {
     let mut itoa_buf = itoa::Buffer::new();
-    let mut ryu_buf = ryu::Buffer::new();
     match value {
         SampleValue::Missing => buf.push(b'.'),
         SampleValue::Integer(v) => buf.extend_from_slice(itoa_buf.format(*v).as_bytes()),
-        SampleValue::Float(v) => buf.extend_from_slice(ryu_buf.format(*v).as_bytes()),
+        SampleValue::Float(v) => write_float_g(buf, *v),
         SampleValue::String(s) => percent_encode_into(buf, s.as_bytes()),
         SampleValue::Genotype(gt) => {
             for (i, allele) in gt.alleles.iter().enumerate() {
@@ -324,7 +364,7 @@ fn write_sample_value(buf: &mut Vec<u8>, value: &SampleValue) {
                     buf.push(b',');
                 }
                 match v {
-                    Some(f) => buf.extend_from_slice(ryu_buf.format(*f).as_bytes()),
+                    Some(f) => write_float_g(buf, *f),
                     None => buf.push(b'.'),
                 }
             }
@@ -439,7 +479,7 @@ mod tests {
         assert_eq!(f[2], ".");
         assert_eq!(f[3], "A");
         assert_eq!(f[4], "T");
-        assert_eq!(f[5], "30.0");
+        assert_eq!(f[5], "30"); // %g format: 30.0 → "30"
         assert_eq!(f[6], "PASS");
         assert_eq!(f[7], "DP=50");
     }
