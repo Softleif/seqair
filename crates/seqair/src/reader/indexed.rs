@@ -68,7 +68,7 @@ impl IndexedReader<std::fs::File> {
     /// Open a BAM or bgzf-compressed SAM file, auto-detecting the format.
     ///
     /// CRAM files are detected but require a FASTA reference — use
-    /// [`Readers::open`] instead. This method returns an error for CRAM
+    /// [`crate::Readers::open`] instead. This method returns an error for CRAM
     /// with a message directing the user to provide a reference.
     // r[impl unified.readers_backward_compat]
     #[instrument(level = "debug", fields(path = %path.display()), err)]
