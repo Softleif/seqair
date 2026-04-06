@@ -26,8 +26,11 @@ After all records, unset linear index slots MUST be backfilled right-to-left: ea
 r[index_builder.pseudo_bin]
 Each reference sequence MUST include a pseudo-bin (ID = `((1 << (depth*3 + 3)) - 1) / 7`, which is 37450 for depth=5) with two chunks: the first stores the virtual offset range `[off_beg, off_end)` of all records for that reference; the second stores mapped and unmapped counts as u64 pairs packed into the chunk's begin/end fields.
 
+r[index_builder.tbi_empty_refs]
+References with no records MUST be omitted from TBI output. Only references that received at least one `push()` call are included in n_ref, the sequence names section, and the per-reference bin/chunk/linear data. This matches bcftools behavior.
+
 r[index_builder.tbi_format]
-TBI output MUST be BGZF-compressed with magic `TBI\x01`, followed by: n_ref, format (2 for VCF), col_seq (1), col_beg (2), col_end (0), meta (`#` = 35), skip (0), sequence names; then BAI-compatible bin/chunk/linear data per reference.
+TBI output MUST be BGZF-compressed with magic `TBI\x01`, followed by: n_ref (only refs with data), format (2 for VCF), col_seq (1), col_beg (2), col_end (0), meta (`#` = 35), skip (0), sequence names (only for refs with data); then BAI-compatible bin/chunk/linear data per reference.
 
 r[index_builder.csi_format]
 CSI output MUST be BGZF-compressed with magic `CSI\x01`, followed by: min_shift, depth, l_aux, aux data; then per-reference bin data with per-bin loffset (computed from linear index), no separate linear index array.
