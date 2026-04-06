@@ -14,9 +14,10 @@
 //! ```
 
 use super::bcf_encoding::*;
-use super::error::VcfError;
+use super::error::{VcfError, VcfHeaderError};
+use super::header::VcfHeader;
 use super::index_builder::IndexBuilder;
-use super::record::Genotype;
+use super::record::{Filters, Genotype, InfoValue, SampleValue, VcfRecord};
 use crate::bam::bgzf::VirtualOffset;
 use crate::bam::bgzf_writer::BgzfWriter;
 use std::io::Write;
@@ -485,6 +486,350 @@ impl Alleles {
 }
 
 // ── Encoding helpers ────────────────────────────────────────────────────
+
+impl<'a> BcfRecordEncoder<'a> {
+    /// Encode a complete `VcfRecord` into this encoder and emit it.
+    pub fn write_vcf_record(
+        &mut self,
+        record: &VcfRecord,
+        header: &VcfHeader,
+    ) -> Result<(), VcfError> {
+        let tid = header.contig_id(&record.contig)?;
+        record.alleles.begin_record(self, ContigHandle(tid as u32), record.pos, record.qual);
+
+        // Filter
+        match &record.filters {
+            Filters::Pass => {
+                encode_type_byte(self.shared_buf, 1, BCF_BT_INT8);
+                self.shared_buf.push(0);
+            }
+            Filters::Failed(ids) => {
+                let mut indices = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let idx = header.string_map().get(id).ok_or_else(|| {
+                        VcfError::Header(VcfHeaderError::MissingFilter { id: id.clone() })
+                    })?;
+                    indices.push(idx as i32);
+                }
+                encode_typed_int_vec(self.shared_buf, &indices);
+            }
+            Filters::NotApplied => {
+                encode_type_byte(self.shared_buf, 0, BCF_BT_NULL);
+            }
+        }
+
+        // INFO fields
+        for (key, value) in record.info.iter() {
+            let dict_idx =
+                header.string_map().get(key).ok_or_else(|| {
+                    VcfError::Header(VcfHeaderError::MissingInfo { id: key.clone() })
+                })? as i32;
+            encode_typed_int_vec(self.shared_buf, &[dict_idx]);
+            encode_info_value(self.shared_buf, value);
+            self.n_info = self.n_info.saturating_add(1);
+        }
+
+        // FORMAT / individual fields
+        let n_sample = record.samples.values.len();
+        if n_sample > 0 && !record.samples.format_keys.is_empty() {
+            self.n_sample = n_sample as u32;
+            for (field_idx, key) in record.samples.format_keys.iter().enumerate() {
+                let dict_idx = header.string_map().get(key).ok_or_else(|| {
+                    VcfError::Header(VcfHeaderError::MissingFormat { id: key.clone() })
+                })? as i32;
+                encode_typed_int_vec(self.indiv_buf, &[dict_idx]);
+                if key == "GT" {
+                    encode_gt_field(self.indiv_buf, &record.samples.values, field_idx);
+                } else {
+                    encode_format_field(self.indiv_buf, &record.samples.values, field_idx);
+                }
+                self.n_fmt = self.n_fmt.saturating_add(1);
+            }
+        }
+
+        self.emit()
+    }
+}
+
+// ── Record-path encoding helpers ─────────────────────────────────────────
+
+// r[impl bcf_writer.flag_encoding]
+pub(crate) fn encode_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
+    match value {
+        InfoValue::Integer(v) => encode_typed_int_vec(buf, &[*v]),
+        InfoValue::Float(v) => {
+            encode_type_byte(buf, 1, BCF_BT_FLOAT);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        InfoValue::Flag => {
+            encode_type_byte(buf, 0, BCF_BT_NULL);
+        }
+        InfoValue::String(s) => encode_typed_string(buf, s.as_bytes()),
+        InfoValue::IntegerArray(arr) => {
+            // r[impl bcf_writer.smallest_int_type]
+            let typ = smallest_int_type_iter(arr.iter().filter_map(|v| *v));
+            encode_type_byte(buf, arr.len(), typ);
+            for v in arr {
+                match v {
+                    Some(n) => match typ {
+                        BCF_BT_INT8 => buf.push(*n as u8),
+                        BCF_BT_INT16 => buf.extend_from_slice(&(*n as i16).to_le_bytes()),
+                        _ => buf.extend_from_slice(&n.to_le_bytes()),
+                    },
+                    // r[impl bcf_writer.missing_sentinels]
+                    None => match typ {
+                        BCF_BT_INT8 => buf.push(INT8_MISSING),
+                        BCF_BT_INT16 => buf.extend_from_slice(&INT16_MISSING.to_le_bytes()),
+                        _ => buf.extend_from_slice(&INT32_MISSING.to_le_bytes()),
+                    },
+                }
+            }
+        }
+        InfoValue::FloatArray(arr) => {
+            encode_type_byte(buf, arr.len(), BCF_BT_FLOAT);
+            for v in arr {
+                match v {
+                    // r[impl bcf_writer.missing_sentinels]
+                    Some(f) => buf.extend_from_slice(&f.to_le_bytes()),
+                    None => buf.extend_from_slice(&FLOAT_MISSING.to_le_bytes()),
+                }
+            }
+        }
+        InfoValue::StringArray(arr) => {
+            let joined: String =
+                arr.iter().map(|v| v.as_deref().unwrap_or(".")).collect::<Vec<_>>().join(",");
+            encode_typed_string(buf, joined.as_bytes());
+        }
+    }
+}
+
+// r[impl bcf_writer.gt_encoding]
+pub(crate) fn encode_gt_field(
+    buf: &mut Vec<u8>,
+    samples: &[seqair_types::SmallVec<SampleValue, 6>],
+    field_idx: usize,
+) {
+    let mut max_ploidy = 0usize;
+    for sample in samples {
+        if let Some(SampleValue::Genotype(gt)) = sample.get(field_idx) {
+            max_ploidy = max_ploidy.max(gt.alleles.len());
+        }
+    }
+    if max_ploidy == 0 {
+        max_ploidy = 2;
+    }
+
+    let mut max_allele: i32 = 0;
+    for sample in samples {
+        if let Some(SampleValue::Genotype(gt)) = sample.get(field_idx) {
+            for idx in gt.alleles.iter().flatten() {
+                max_allele = max_allele.max(i32::from(*idx));
+            }
+        }
+    }
+
+    let max_val = (max_allele.saturating_add(1)).saturating_mul(2).saturating_add(1);
+    let typ = smallest_int_type(&[max_val]);
+
+    encode_type_byte(buf, max_ploidy, typ);
+
+    for sample in samples {
+        let gt = match sample.get(field_idx) {
+            Some(SampleValue::Genotype(g)) => Some(g),
+            _ => None,
+        };
+
+        for i in 0..max_ploidy {
+            let encoded = if let Some(g) = gt {
+                if let Some(allele_opt) = g.alleles.get(i) {
+                    match allele_opt {
+                        Some(idx) => {
+                            let phased = if i == 0 {
+                                false
+                            } else {
+                                g.phased.get(i.saturating_sub(1)).copied().unwrap_or(false)
+                            };
+                            ((i32::from(*idx).saturating_add(1)) << 1) | (phased as i32)
+                        }
+                        None => 0,
+                    }
+                } else {
+                    match typ {
+                        BCF_BT_INT8 => {
+                            buf.push(INT8_END_OF_VECTOR);
+                            continue;
+                        }
+                        BCF_BT_INT16 => {
+                            buf.extend_from_slice(&INT16_END_OF_VECTOR.to_le_bytes());
+                            continue;
+                        }
+                        _ => {
+                            buf.extend_from_slice(&INT32_END_OF_VECTOR.to_le_bytes());
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                0
+            };
+
+            match typ {
+                BCF_BT_INT8 => buf.push(encoded as u8),
+                BCF_BT_INT16 => buf.extend_from_slice(&(encoded as i16).to_le_bytes()),
+                _ => buf.extend_from_slice(&encoded.to_le_bytes()),
+            }
+        }
+    }
+}
+
+pub(crate) fn encode_format_field(
+    buf: &mut Vec<u8>,
+    samples: &[seqair_types::SmallVec<SampleValue, 6>],
+    field_idx: usize,
+) {
+    let first_val = samples
+        .iter()
+        .filter_map(|s| s.get(field_idx))
+        .find(|v| !matches!(v, SampleValue::Missing));
+
+    match first_val {
+        Some(SampleValue::Integer(_)) | None => {
+            // r[impl bcf_writer.smallest_int_type]
+            let typ =
+                smallest_int_type_iter(samples.iter().filter_map(|s| match s.get(field_idx) {
+                    Some(SampleValue::Integer(v)) => Some(*v),
+                    _ => None,
+                }));
+            encode_type_byte(buf, 1, typ);
+            for sample in samples {
+                match sample.get(field_idx) {
+                    Some(SampleValue::Integer(v)) => match typ {
+                        BCF_BT_INT8 => buf.push(*v as u8),
+                        BCF_BT_INT16 => buf.extend_from_slice(&(*v as i16).to_le_bytes()),
+                        _ => buf.extend_from_slice(&v.to_le_bytes()),
+                    },
+                    _ => match typ {
+                        BCF_BT_INT8 => buf.push(INT8_MISSING),
+                        BCF_BT_INT16 => buf.extend_from_slice(&INT16_MISSING.to_le_bytes()),
+                        _ => buf.extend_from_slice(&INT32_MISSING.to_le_bytes()),
+                    },
+                }
+            }
+        }
+        Some(SampleValue::Float(_)) => {
+            encode_type_byte(buf, 1, BCF_BT_FLOAT);
+            for sample in samples {
+                match sample.get(field_idx) {
+                    Some(SampleValue::Float(v)) => buf.extend_from_slice(&v.to_le_bytes()),
+                    _ => buf.extend_from_slice(&FLOAT_MISSING.to_le_bytes()),
+                }
+            }
+        }
+        Some(SampleValue::String(s)) => {
+            let max_len = samples
+                .iter()
+                .filter_map(|sv| match sv.get(field_idx) {
+                    Some(SampleValue::String(s)) => Some(s.len()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(s.len());
+
+            encode_type_byte(buf, max_len, BCF_BT_CHAR);
+            for sample in samples {
+                match sample.get(field_idx) {
+                    Some(SampleValue::String(sv)) => {
+                        buf.extend_from_slice(sv.as_bytes());
+                        for _ in sv.len()..max_len {
+                            buf.push(0);
+                        }
+                    }
+                    _ => {
+                        buf.push(b'.');
+                        for _ in 1..max_len {
+                            buf.push(0);
+                        }
+                    }
+                }
+            }
+        }
+        Some(SampleValue::IntegerArray(arr)) => {
+            let max_len = samples
+                .iter()
+                .filter_map(|sv| match sv.get(field_idx) {
+                    Some(SampleValue::IntegerArray(a)) => Some(a.len()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(arr.len());
+
+            // r[impl bcf_writer.smallest_int_type]
+            let typ = smallest_int_type_iter(samples.iter().flat_map(|s| {
+                match s.get(field_idx) {
+                    Some(SampleValue::IntegerArray(a)) => a.iter().filter_map(|v| *v).collect(),
+                    _ => Vec::new(),
+                }
+                .into_iter()
+            }));
+            encode_type_byte(buf, max_len, typ);
+            for sample in samples {
+                match sample.get(field_idx) {
+                    Some(SampleValue::IntegerArray(a)) => {
+                        for v in a.iter().take(max_len) {
+                            encode_int_value_or_missing(buf, *v, typ);
+                        }
+                        // r[impl bcf_writer.end_of_vector]
+                        for _ in a.len()..max_len {
+                            encode_int_eov(buf, typ);
+                        }
+                    }
+                    _ => {
+                        encode_int_missing(buf, typ);
+                        for _ in 1..max_len {
+                            encode_int_eov(buf, typ);
+                        }
+                    }
+                }
+            }
+        }
+        Some(SampleValue::FloatArray(arr)) => {
+            let max_len = samples
+                .iter()
+                .filter_map(|sv| match sv.get(field_idx) {
+                    Some(SampleValue::FloatArray(a)) => Some(a.len()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(arr.len());
+
+            encode_type_byte(buf, max_len, BCF_BT_FLOAT);
+            for sample in samples {
+                match sample.get(field_idx) {
+                    Some(SampleValue::FloatArray(a)) => {
+                        for v in a.iter().take(max_len) {
+                            match v {
+                                Some(f) => buf.extend_from_slice(&f.to_le_bytes()),
+                                None => buf.extend_from_slice(&FLOAT_MISSING.to_le_bytes()),
+                            }
+                        }
+                        for _ in a.len()..max_len {
+                            buf.extend_from_slice(&FLOAT_END_OF_VECTOR.to_le_bytes());
+                        }
+                    }
+                    _ => {
+                        buf.extend_from_slice(&FLOAT_MISSING.to_le_bytes());
+                        for _ in 1..max_len {
+                            buf.extend_from_slice(&FLOAT_END_OF_VECTOR.to_le_bytes());
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            encode_type_byte(buf, 0, BCF_BT_NULL);
+        }
+    }
+}
 
 /// Encode an array of BcfValue items. For i32, scans all values to select
 /// the smallest BCF int type that fits ALL values per r[bcf_writer.smallest_int_type].

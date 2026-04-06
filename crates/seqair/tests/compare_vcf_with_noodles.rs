@@ -162,7 +162,7 @@ fn bcf_write_record_readable_by_noodles() {
     {
         let mut writer = BcfWriter::new(&mut bcf_output, header, false);
         writer.write_header().unwrap();
-        writer.write_record(&record).unwrap();
+        writer.write_vcf_record(&record).unwrap();
         writer.finish().unwrap();
     }
 
@@ -279,7 +279,7 @@ proptest! {
         {
             let mut writer = BcfWriter::new(&mut bcf_output, header, false);
             writer.write_header().unwrap();
-            writer.write_record(&record).unwrap();
+            writer.write_vcf_record(&record).unwrap();
             writer.finish().unwrap();
         }
 

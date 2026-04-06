@@ -70,7 +70,7 @@ impl<W: Write> VcfWrite for bcf_writer::BcfWriter<W> {
         self.write_header()
     }
     fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
-        self.write_record(record)
+        self.write_vcf_record(record)
     }
     fn finish(self: Box<Self>) -> Result<Option<index_builder::IndexBuilder>, VcfError> {
         (*self).finish()

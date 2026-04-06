@@ -271,7 +271,7 @@ fn bcf_roundtrip(
         let mut writer = BcfWriter::new(&mut buf, header.clone(), false);
         writer.write_header().unwrap();
         for record in records {
-            writer.write_record(record).unwrap();
+            writer.write_vcf_record(record).unwrap();
         }
         writer.finish().unwrap();
     }

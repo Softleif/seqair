@@ -91,7 +91,7 @@ fn write_seqair_bcf(
     {
         let mut writer = BcfWriter::new(&mut buf, header.clone(), false);
         writer.write_header().unwrap();
-        writer.write_record(&record).unwrap();
+        writer.write_vcf_record(&record).unwrap();
         writer.finish().unwrap();
     }
     std::fs::write(tmp.path(), &buf).unwrap();
