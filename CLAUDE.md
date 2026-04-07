@@ -18,11 +18,12 @@ Expert Rust. Modern idioms. Types are the primary abstraction.
 * No indexing — use `.get()`. If indexing is unavoidable, `#[allow(clippy::indexing_slicing)]` + `debug_assert!`.
 * No `let _ =` on fallible ops — propagate, log with `warn!`, or handle.
 * No `from_utf8_lossy` — use `from_utf8()?` with typed errors.
-* Error enums: one per module, typed fields only (never `String`), `#[from]` for wrapping. Never use `io::Error::other("message")` — add a typed variant instead. Hierarchy: `BgzfError` → `BamHeaderError`/`BaiError` → `BamError`; `FaiError`/`GziError` → `FastaError`; `FormatDetectionError` → `ReaderError`; `VcfHeaderError`/`VcfEncodeError`/`AllelesError` → `VcfError`.
+* Error enums: one per module, typed fields only (never `String`), `#[from]` for wrapping. Never use `io::Error::other("message")` — add a typed variant instead. Hierarchy: `BgzfError` → `BamHeaderError`/`BaiError` → `BamError`; `BamWriteError` (parallel to `BamError` for the write path); `FaiError`/`GziError` → `FastaError`; `FormatDetectionError` → `ReaderError`; `VcfHeaderError`/`VcfEncodeError`/`AllelesError` → `VcfError`.
 * `color_eyre` for errors, `tracing` for logging.
 * Sequence names are `SmolStr`.
-* Tests: `cargo test`. Prefer `proptest` where applicable. Round-trip tests against noodles and bcftools are the strongest validation — always add them for new output formats.
+* Tests: `cargo test`. Prefer `proptest` where applicable. Round-trip tests against noodles and bcftools are the strongest validation — always add them for new output formats. Avoid tautological tests — don't verify code using a copy of the same logic (e.g., compute expected bin with the same `reg2bin`). Use independent oracles.
 * `SmallVec` in this project uses 2-arg form `SmallVec<T, N>` (not `SmallVec<[T; N]>`) due to debug-mode Vec alias in seqair-types. Use `vec![]` and `.to_vec()` instead of `SmallVec::from_buf`/`from_slice`.
+* No silent `as i32`/`as u32` truncation at serialization boundaries — use `i32::try_from()` or equivalent with typed errors. At allocation boundaries (parsing untrusted counts), apply practical upper bounds matching real-world data, not format maximums (`i32::MAX` is not a limit). See `r[io.writer_limits]` and `r[io.fuzz.alloc_limits]` in the general spec.
 
 ## Architecture notes
 
@@ -69,7 +70,23 @@ Expert Rust. Modern idioms. Types are the primary abstraction.
 - Integer arrays with missing values: scan only concrete values for `smallest_int_type`, then use per-type sentinel (int8=0x80, int16=0x8000, int32=0x80000000). Never use `i32::MIN` as a universal missing marker.
 - `BgzfWriter::virtual_offset()`: cap `buf.len()` at `u16::MAX` to prevent truncation when buffer is exactly 65536 bytes.
 
-**IndexBuilder**: single-pass TBI/CSI co-production during writing. Mirrors htslib's `hts_idx_push` state machine. Uses `BTreeMap` (not `HashMap`) for deterministic bin order.
+**IndexBuilder**: single-pass TBI/CSI/BAI co-production during writing. Mirrors htslib's `hts_idx_push` state machine. Uses `BTreeMap` (not `HashMap`) for deterministic bin order. `push()` counts `n_mapped`; `push_unmapped()` counts `n_unmapped` for the pseudo-bin (placed-unmapped BAM reads). `write_bai()` requires `finish()` first (enforced by `finished` flag).
+
+## BAM writing
+
+**OwnedBamRecord**: mutable record with `Vec<CigarOp>`, `Vec<Base>`, `AuxData`. Separate from the read-path `BamRecord` (which uses `Box<[u8]>` for zero-copy decode). `from_raw_bam()` decodes all fields including mate info that the read-path drops (next_ref_id, next_pos, template_len). `to_bam_bytes()` appends into a caller-provided buffer; the caller clears it. `bin()` is BAI-only (u16, max 37449) and recomputed at serialize time.
+
+**BamWriter**: wraps `BgzfWriter`, writes header eagerly at construction (no separate `write_header()`). Error poisoning: after any write failure, all subsequent writes return `Poisoned`. Index co-production validates records BEFORE writing to BGZF to avoid poisoning after partial writes.
+
+**Index record dispatch** (three cases for BAI co-production):
+1. Mapped (flags & 0x4 == 0, ref_id ≥ 0): `index.push(tid, pos, end_pos, voff)`
+2. Placed unmapped (flags & 0x4 != 0, ref_id ≥ 0): `index.push_unmapped(tid, pos, pos+1, voff)`
+3. Fully unmapped (ref_id == -1): not pushed to index
+4. Mapped with ref_id == -1: rejected with `MappedWithoutReference` error
+
+**AuxData**: raw BAM bytes with set/get/remove. `set_int()` validates range BEFORE writing tag bytes (orphaned bytes on error was a real bug). Unsigned-first type selection for non-negative values (C/S/I before c/s/i, matching htslib).
+
+**Reader/writer limit parity** (`r[io.writer_limits]`): writers enforce the same field-size limits as readers. BAM header: l_text ≤ 256 MiB, n_ref ≤ 1M, l_name ≤ 256 KiB. BAI index: n_ref ≤ 100K, n_bin ≤ 100K, n_chunk ≤ 1M, n_intv ≤ 500K. Record size ≤ 2 MiB.
 
 ## Profiling
 
