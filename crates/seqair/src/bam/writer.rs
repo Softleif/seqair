@@ -206,7 +206,12 @@ impl<W: Write> BamWriter<W> {
                     if ep < 0 { beg } else { ep as u64 }
                 };
                 let end = end.max(beg.saturating_add(1));
-                index.push(record.ref_id, beg, end, voff)?;
+                if is_unmapped {
+                    // Placed unmapped: increment n_unmapped (not n_mapped) in pseudo-bin
+                    index.push_unmapped(record.ref_id, beg, end, voff)?;
+                } else {
+                    index.push(record.ref_id, beg, end, voff)?;
+                }
             }
             // Case 3: fully unmapped (ref_id == -1) — not pushed to index
         }
@@ -247,14 +252,18 @@ fn write_bam_header<W: Write>(
     buf.extend_from_slice(text);
 
     // r[impl bam_writer.header_references]
-    buf.extend_from_slice(&(header.target_count() as i32).to_le_bytes());
+    // BAM stores reference count and lengths as i32. Truncation is harmless for
+    // practical genomes (human chr1 ≈ 249 Mbp) but would silently corrupt headers
+    // for contigs > 2.1 Gbp (e.g. some T2T scaffolds). We cap at i32::MAX.
+    buf.extend_from_slice(&(header.target_count().min(i32::MAX as usize) as i32).to_le_bytes());
     for target in header.targets() {
         let name = target.target_name().as_bytes();
-        let l_name = (name.len() as i32).saturating_add(1); // +1 for NUL
+        let l_name = name.len().saturating_add(1).min(i32::MAX as usize) as i32; // +1 for NUL
         buf.extend_from_slice(&l_name.to_le_bytes());
         buf.extend_from_slice(name);
         buf.push(0); // NUL terminator
-        buf.extend_from_slice(&(target.target_length() as i32).to_le_bytes());
+        let tlen = target.target_length().min(i32::MAX as u64) as i32;
+        buf.extend_from_slice(&tlen.to_le_bytes());
     }
 
     bgzf.write_all(&buf)?;

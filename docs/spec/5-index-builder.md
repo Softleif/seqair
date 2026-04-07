@@ -24,7 +24,7 @@ r[index_builder.linear_backfill]
 After all records, unset linear index slots MUST be backfilled right-to-left: each unset slot receives the value of the next valid slot to its right.
 
 r[index_builder.pseudo_bin]
-Each reference sequence MUST include a pseudo-bin (ID = `((1 << (depth*3 + 3)) - 1) / 7`, which is 37450 for depth=5) with two chunks: the first stores the virtual offset range `[off_beg, off_end)` of all records for that reference; the second stores mapped and unmapped counts as u64 pairs packed into the chunk's begin/end fields.
+Each reference sequence MUST include a pseudo-bin (ID = `((1 << (depth+1)*3) - 1) / 7 + 1`, which is 37450 for depth=5) with two chunks: the first stores the virtual offset range `[off_beg, off_end)` of all records for that reference; the second stores mapped and unmapped counts as u64 pairs packed into the chunk's begin/end fields.
 
 r[index_builder.tbi_empty_refs]
 References with no records MUST be omitted from TBI output. Only references that received at least one `push()` call are included in n_ref, the sequence names section, and the per-reference bin/chunk/linear data. This matches bcftools behavior.
