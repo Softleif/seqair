@@ -4,11 +4,11 @@ Each aligned read in a BAM file is stored as a **record**: a binary structure en
 
 The record's binary layout starts with 32 fixed bytes (position, flags, lengths, etc.), followed by variable-length fields in order: read name (qname), CIGAR operations, 4-bit packed sequence, quality scores, and auxiliary tags.
 
-> **Sources:** [SAM1] §4.2 "The BAM format" — binary record layout (refID, pos, l_read_name, mapq, bin, n_cigar_op, flag, l_seq, cigar, seq, qual, auxiliary); §4.2.4 "SEQ and QUAL encoding" — 4-bit sequence encoding; §4.2.5 "Auxiliary data encoding" — tag types A/c/C/s/S/i/I/f/Z/H/B; §1.4 "The alignment section: mandatory fields" — FLAG bit definitions. See [references.md](references.md).
+> **Sources:** [SAM1] §4.2 "The BAM format" — binary record layout (refID, pos, l_read_name, mapq, bin, n_cigar_op, flag, l_seq, cigar, seq, qual, auxiliary); §4.2.4 "SEQ and QUAL encoding" — 4-bit sequence encoding; §4.2.5 "Auxiliary data encoding" — tag types A/c/C/s/S/i/I/f/Z/H/B; §1.4 "The alignment section: mandatory fields" — FLAG bit definitions. See [References](./99-references.md).
 
 ## Decoding
 
-> *[SAM1] §4.2 "The BAM format" — block_size, fixed 32-byte header, variable-length field order*
+> _[SAM1] §4.2 "The BAM format" — block_size, fixed 32-byte header, variable-length field order_
 
 r[bam.record.decode]
 A BAM record MUST be decoded from its binary representation: 32 fixed bytes followed by variable-length qname, CIGAR, sequence, quality, and auxiliary data. The 4-byte block_size prefix is read by the caller.
@@ -30,7 +30,7 @@ When a read has zero reference-consuming CIGAR operations (e.g., pure soft-clip 
 
 ## Sequence encoding
 
-> *[SAM1] §4.2.4 "SEQ and QUAL encoding" — 4-bit nibble encoding, `=ACMGRSVTWYHKDBN` lookup table*
+> _[SAM1] §4.2.4 "SEQ and QUAL encoding" — 4-bit nibble encoding, `=ACMGRSVTWYHKDBN` lookup table_
 
 BAM stores DNA sequences in a compact 4-bit encoding: two bases per byte, high nibble first. This halves storage compared to ASCII but requires decoding before use.
 
@@ -45,7 +45,7 @@ The decoder MAY decode the full 4-bit sequence into `Base` enum values at constr
 
 ## Flag access
 
-> *[SAM1] §1.4 "The alignment section: mandatory fields" — FLAG bit table (0x4 unmapped, 0x10 reverse strand, 0x40 first in template, 0x80 second in template)*
+> _[SAM1] §1.4 "The alignment section: mandatory fields" — FLAG bit table (0x4 unmapped, 0x10 reverse strand, 0x40 first in template, 0x80 second in template)_
 
 Each record has a 16-bit flags field encoding properties like strand orientation, pairing status, and mapping quality. These are checked frequently during pileup construction and filtering.
 
@@ -63,7 +63,7 @@ r[bam.record.flag_unmapped]
 
 ## Auxiliary tags
 
-> *[SAM1] §4.2.5 "Auxiliary data encoding" — tag byte layout, type codes A/c/C/s/S/i/I/f/Z/H/B*
+> _[SAM1] §4.2.5 "Auxiliary data encoding" — tag byte layout, type codes A/c/C/s/S/i/I/f/Z/H/B_
 
 BAM records can carry optional key-value tags (e.g. `XR:Z:CT` for bismark strand, `MD:Z:...` for mismatch string). Tags are stored as a flat byte array at the end of the record, each prefixed by a 2-byte name and a 1-byte type code.
 

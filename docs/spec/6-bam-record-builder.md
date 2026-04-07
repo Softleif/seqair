@@ -4,7 +4,7 @@ When a BAM record needs to be constructed from scratch (for writing) or modified
 
 The `BamRecord` is an owned BAM record with individually-allocated fields that supports construction, modification, serialization to BAM binary format, and round-trip conversion to/from `RecordStore` entries. It is the unit of exchange between the read path (RecordStore/pileup) and the write path (BamWriter), and enables in-memory record manipulation for realignment workflows.
 
-> **Sources:** [SAM1] §4.2 "The BAM format" — binary record layout (block_size, refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen, qname, cigar, seq, qual, aux); §1.4 — FLAG bit definitions; §4.2.4 — SEQ 4-bit encoding; §4.2.5 — auxiliary tag encoding. CIGAR operation semantics from [SAM1] §1.4 "CIGAR". See [references.md](99-references.md).
+> **Sources:** [SAM1] §4.2 "The BAM format" — binary record layout (block_size, refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen, qname, cigar, seq, qual, aux); §1.4 — FLAG bit definitions; §4.2.4 — SEQ 4-bit encoding; §4.2.5 — auxiliary tag encoding. CIGAR operation semantics from [SAM1] §1.4 "CIGAR". See [References](./99-references.md).
 
 ## Background
 
@@ -22,29 +22,30 @@ The owned record type makes these modifications safe and explicit: callers get a
 
 ## Owned record structure
 
-> *[SAM1] §4.2 — fixed 32-byte header fields, variable-length qname/cigar/seq/qual/aux*
+> _[SAM1] §4.2 — fixed 32-byte header fields, variable-length qname/cigar/seq/qual/aux_
 
-r[bam.owned_record.fields]
-`BamRecord` MUST store the following fields, all owned and mutable:
-- `ref_id: i32` — reference sequence index (-1 for unmapped)
-- `pos: i64` — 0-based leftmost mapping position (-1 for unmapped)
-- `mapq: u8` — mapping quality
-- `flags: u16` — SAM flag bits
-- `next_ref_id: i32` — mate's reference sequence index
-- `next_pos: i64` — mate's 0-based position
-- `template_len: i32` — observed template length
-- `qname: Vec<u8>` — query name (without NUL terminator)
-- `cigar: Vec<CigarOp>` — typed CIGAR operations
-- `seq: Vec<Base>` — sequence as `Base` enum values
-- `qual: Vec<u8>` — Phred quality scores
-- `aux: AuxData` — auxiliary tags (see aux data section)
+> r[bam.owned_record.fields]
+> `BamRecord` MUST store the following fields, all owned and mutable:
+>
+> - `ref_id: i32` — reference sequence index (-1 for unmapped)
+> - `pos: i64` — 0-based leftmost mapping position (-1 for unmapped)
+> - `mapq: u8` — mapping quality
+> - `flags: u16` — SAM flag bits
+> - `next_ref_id: i32` — mate's reference sequence index
+> - `next_pos: i64` — mate's 0-based position
+> - `template_len: i32` — observed template length
+> - `qname: Vec<u8>` — query name (without NUL terminator)
+> - `cigar: Vec<CigarOp>` — typed CIGAR operations
+> - `seq: Vec<Base>` — sequence as `Base` enum values
+> - `qual: Vec<u8>` — Phred quality scores
+> - `aux: AuxData` — auxiliary tags (see aux data section)
 
 r[bam.owned_record.cigar_op]
 CIGAR operations MUST be represented as a typed `CigarOp` struct with an `op: CigarOpType` field (using the existing `CigarOpType` enum defined in `r[io.typed_cigar_ops]` in [general.md](0-general.md)) and a `len: u32` field. Conversion to/from the BAM packed u32 format (`len << 4 | op_code`) MUST be provided.
 
 ## Construction
 
-> *[SAM1] §4.2 — l_read_name (u8, max 255 including NUL), n_cigar_op (u16, max 65535), l_seq (i32)*
+> _[SAM1] §4.2 — l_read_name (u8, max 255 including NUL), n_cigar_op (u16, max 65535), l_seq (i32)_
 
 r[bam.owned_record.builder]
 `BamRecord` MUST provide a builder API for constructing records from individual fields. The builder MUST require at minimum `ref_id`, `pos`, and `qname`. Fields `cigar`, `seq`, and `qual` MUST default to empty (representing an unmapped read). Optional fields (`mapq`, `flags`, `next_ref_id`, `next_pos`, `template_len`, `aux`) MUST default to zero or -1 for reference IDs. The `flags` field MUST default to 0; callers are responsible for setting appropriate flag bits.
@@ -74,16 +75,17 @@ r[bam.owned_record.set_seq]
 r[bam.owned_record.set_qual]
 `BamRecord` MUST support replacing quality scores. The new array length MUST equal `seq.len()`.
 
-r[bam.owned_record.aligned_pairs]
-`BamRecord` MUST provide an `aligned_pairs()` iterator yielding `(Option<usize>, Option<i64>)` tuples: `(query_pos, ref_pos)`. The iterator handles each CIGAR operation as follows:
-
-- **M/=/X** (alignment match, sequence match, mismatch): both values are `Some`, one tuple per base.
-- **I** (insertion to reference): `ref_pos = None`, one tuple per inserted base.
-- **D** (deletion from reference): `query_pos = None`, one tuple per deleted base.
-- **N** (reference skip / intron): `query_pos = None`, one tuple per skipped reference base. N consumes reference but not query, like D. This is important for RNA-seq BAMs where introns appear as N operations spanning thousands of reference bases.
-- **S** (soft clip): MUST be skipped entirely. Soft-clipped bases are present in the sequence but not aligned to the reference.
-- **H** (hard clip): MUST be skipped entirely. Hard-clipped bases are not present in the sequence.
-- **P** (padding): MUST be skipped entirely. Padding is used for padded-reference alignment and consumes neither query nor reference.
+> r[bam.owned_record.aligned_pairs]
+> `BamRecord` MUST provide an `aligned_pairs()` iterator yielding `(Option<usize>, Option<i64>)` tuples: `(query_pos, ref_pos)`.
+> The iterator handles each CIGAR operation as follows:
+>
+> - **M/=/X** (alignment match, sequence match, mismatch): both values are `Some`, one tuple per base.
+> - **I** (insertion to reference): `ref_pos = None`, one tuple per inserted base.
+> - **D** (deletion from reference): `query_pos = None`, one tuple per deleted base.
+> - **N** (reference skip / intron): `query_pos = None`, one tuple per skipped reference base. N consumes reference but not query, like D. This is important for RNA-seq BAMs where introns appear as N operations spanning thousands of reference bases.
+> - **S** (soft clip): MUST be skipped entirely. Soft-clipped bases are present in the sequence but not aligned to the reference.
+> - **H** (hard clip): MUST be skipped entirely. Hard-clipped bases are not present in the sequence.
+> - **P** (padding): MUST be skipped entirely. Padding is used for padded-reference alignment and consumes neither query nor reference.
 
 For unmapped reads (empty CIGAR), the iterator MUST be empty.
 
@@ -95,7 +97,7 @@ r[bam.owned_record.bin]
 
 ## Serialization
 
-> *[SAM1] §4.2 — BAM record binary layout: block_size (i32), 32-byte fixed header, variable fields*
+> _[SAM1] §4.2 — BAM record binary layout: block_size (i32), 32-byte fixed header, variable fields_
 
 r[bam.owned_record.to_bam_bytes]
 `BamRecord` MUST serialize to BAM binary format by appending into a caller-provided `&mut Vec<u8>` (the method appends; clearing the buffer is the caller's responsibility — see `r[bam_writer.reuse_buffers]` in [bam-writer.md](6-bam-writer.md)). The layout MUST follow [SAM1] §4.2: 32-byte fixed fields (refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen), NUL-terminated qname, packed CIGAR (u32 per op), 4-bit packed sequence (via `seq::encode_seq` from [seq_codec.md](2-bam-3-4-seq_codec.md)), quality scores, and raw auxiliary bytes. The method MUST NOT include the 4-byte `block_size` prefix — that is the caller's (writer's) responsibility, since the caller needs to know the total byte count to write the prefix.
@@ -118,27 +120,28 @@ A record extracted via `to_owned_record(idx)` and re-inserted via `push_owned()`
 
 ## Auxiliary tag data
 
-> *[SAM1] §4.2.5 — tag byte layout: 2-byte tag name, 1-byte type code, variable-length value. Tag types: A (char), c/C/s/S/i/I (integers), f (float), d (double), Z (string), H (hex string), B (typed array with subtype byte + 4-byte count + values).*
+> _[SAM1] §4.2.5 — tag byte layout: 2-byte tag name, 1-byte type code, variable-length value. Tag types: A (char), c/C/s/S/i/I (integers), f (float), d (double), Z (string), H (hex string), B (typed array with subtype byte + 4-byte count + values)._
 
-r[bam.owned_record.aux_data]
-`AuxData` MUST store auxiliary tags in BAM binary format (packed bytes). Tag lookup via `get()` MUST delegate to the existing `aux::find_tag` implementation (see `r[bam.record.aux_parse]` in [record.md](2-bam-3-2-record.md)). Mutation methods MUST be provided:
-- `set_string(tag, value)` — add or replace a Z-type string tag
-- `set_int(tag, value: i64)` — add or replace an integer tag
-- `set_float(tag, value)` — add or replace an f-type float tag
-- `set_array_u8(tag, values)` — add or replace a B:C array tag
-- `remove(tag)` — remove a tag if present
-- `as_bytes() -> &[u8]` — raw bytes for serialization
+> r[bam.owned_record.aux_data]
+> `AuxData` MUST store auxiliary tags in BAM binary format (packed bytes). Tag lookup via `get()` MUST delegate to the existing `aux::find_tag` implementation (see `r[bam.record.aux_parse]` in [record.md](2-bam-3-2-record.md)). Mutation methods MUST be provided:
+>
+> - `set_string(tag, value)` — add or replace a Z-type string tag
+> - `set_int(tag, value: i64)` — add or replace an integer tag
+> - `set_float(tag, value)` — add or replace an f-type float tag
+> - `set_array_u8(tag, values)` — add or replace a B:C array tag
+> - `remove(tag)` — remove a tag if present
+> - `as_bytes() -> &[u8]` — raw bytes for serialization
 
 r[bam.owned_record.aux_uniqueness]
 Tag names MUST be unique within a record (per [SAM1] §1.5). `set_*` methods MUST enforce this: if a tag with the given name already exists, it MUST be replaced, not duplicated. `get()` MUST be unambiguous.
 
-r[bam.owned_record.aux_int_encoding]
-`set_int(tag, value: i64)` MUST auto-select the smallest BAM integer type that fits the value. For values where both signed and unsigned types could apply (e.g. 42 fits in both i8 and u8), the unsigned type MUST be preferred — this matches htslib behavior and produces more compact encodings for the common case of non-negative values. The selection order is:
-
-1. Non-negative values: `C` (u8, 0..=255), `S` (u16, 256..=65535), `I` (u32, 65536..=2^32-1)
-2. Negative values: `c` (i8, -128..=-1), `s` (i16, -32768..=-129), `i` (i32, -2^31..=-32769)
-
-Values outside the union of i32 and u32 ranges MUST return a typed error — BAM auxiliary tags have no 64-bit integer type per [SAM1] §4.2.5.
+> r[bam.owned_record.aux_int_encoding]
+> `set_int(tag, value: i64)` MUST auto-select the smallest BAM integer type that fits the value. For values where both signed and unsigned types could apply (e.g. 42 fits in both i8 and u8), the unsigned type MUST be preferred — this matches htslib behavior and produces more compact encodings for the common case of non-negative values. The selection order is:
+>
+> 1. Non-negative values: `C` (u8, 0..=255), `S` (u16, 256..=65535), `I` (u32, 65536..=2^32-1)
+> 2. Negative values: `c` (i8, -128..=-1), `s` (i16, -32768..=-129), `i` (i32, -2^31..=-32769)
+>
+> Values outside the union of i32 and u32 ranges MUST return a typed error — BAM auxiliary tags have no 64-bit integer type per [SAM1] §4.2.5.
 
 r[bam.owned_record.aux_array_encoding]
 `set_array_u8(tag, values)` MUST encode the tag in BAM B-type array format: 2-byte tag name, type byte `B`, subtype byte `C`, 4-byte little-endian element count, followed by the raw u8 values. This is used for the ML (modification likelihood) tag in SAM 4.5 methylation annotations.

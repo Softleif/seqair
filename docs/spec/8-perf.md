@@ -2,7 +2,7 @@
 
 The pileup engine is the innermost loop of Rastair's processing pipeline: for a typical 30× whole-genome BAM, it processes ~3 billion reference positions, each with ~30 aligned reads. These rules specify performance-sensitive behaviors to avoid unnecessary overhead in this hot path.
 
-> **Sources:** Seqair-specific performance rules with no upstream spec counterpart. Implementation strategies are guided by profiling results and cross-checked against [htslib] behaviour. See [references.md](references.md).
+> **Sources:** Seqair-specific performance rules with no upstream spec counterpart. Implementation strategies are guided by profiling results and cross-checked against [htslib] behaviour. See [References](./99-references.md).
 
 ## Allocation avoidance
 

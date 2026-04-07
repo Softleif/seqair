@@ -1,6 +1,6 @@
 # BCF Direct Encoder
 
-> **Sources:** [BCF2] — typed value encoding, record layout, field-major FORMAT encoding, GT encoding. See [5-bcf-writer.md](5-bcf-writer.md) for the underlying BCF format rules. This spec extends the BCF writer with a zero-allocation direct-encode API.
+> **Sources:** [BCF2] — typed value encoding, record layout, field-major FORMAT encoding, GT encoding. See [5-bcf-writer.md](5-bcf-writer.md) for the underlying BCF format rules. This spec extends the BCF writer with a zero-allocation direct-encode API. Also see [References](./99-references.md).
 
 ## Motivation
 
@@ -11,21 +11,25 @@ The `BcfWriter::write_record(&VcfRecord)` path constructs an intermediate `VcfRe
 r[bcf_encoder.handles]
 Field handles MUST be pre-resolved from the header at setup time via `resolve_*` methods on `BcfWriter`. Each handle stores the BCF dictionary index as an opaque `u32`. Resolution MUST validate that the field ID exists in the header and that the requested Number/Type matches the header declaration.
 
-r[bcf_encoder.handle_types]
-Handle types MUST encode the VCF Number semantics at the type level:
-- `ScalarInfoHandle<T>` / `ScalarFormatHandle<T>` — `Number::Count(1)`, encodes exactly 1 value
-- `FlagInfoHandle` — `Number::Count(0)`, encodes no value (presence = set)
-- `PerAltInfoHandle<T>` / `PerAltFormatHandle<T>` — `Number::A`, encodes `n_alt` values
-- `PerAlleleInfoHandle<T>` / `PerAlleleFormatHandle<T>` — `Number::R`, encodes `n_allele` values
-- `GtFormatHandle` — genotype encoding with `(allele+1)<<1|phased` scheme; MUST select smallest int type (int8/int16/int32) based on maximum allele index
-- `ContigHandle` — pre-resolved chromosome tid
-- `FilterHandle` — pre-resolved filter dictionary index; PASS is always index 0
+> r[bcf_encoder.handle_types]
+> Handle types MUST encode the VCF Number semantics at the type level:
+>
+> - `ScalarInfoHandle<T>` / `ScalarFormatHandle<T>` — `Number::Count(1)`, encodes exactly 1 value
+> - `FlagInfoHandle` — `Number::Count(0)`, encodes no value (presence = set)
+> - `PerAltInfoHandle<T>` / `PerAltFormatHandle<T>` — `Number::A`, encodes `n_alt` values
+> - `PerAlleleInfoHandle<T>` / `PerAlleleFormatHandle<T>` — `Number::R`, encodes `n_allele` values
+> - `GtFormatHandle` — genotype encoding with `(allele+1)<<1|phased` scheme; MUST select smallest int type (int8/int16/int32) based on maximum allele index
+> - `ContigHandle` — pre-resolved chromosome tid
+> - `FilterHandle` — pre-resolved filter dictionary index; PASS is always index 0
 
 r[bcf_encoder.handle_value_type]
 INFO and FORMAT handles MUST be generic over a value type `T: BcfValue`. The `BcfValue` trait defines how a Rust type maps to BCF typed encoding (type code, byte encoding, missing sentinel). Standard impls: `i32` (auto-selects smallest int type), `f32` (IEEE 754 LE). Domain types (`RootMeanSquare`, `Phred`) implement `BcfValue` by encoding as `f32`.
 
 r[bcf_encoder.handle_encode]
-Each handle type MUST provide an `encode(&self, enc: &mut BcfRecordEncoder, ...)` method. The method signature varies by handle kind:
+Each handle type MUST provide an `encode(&self, enc: &mut BcfRecordEncoder, ...)` method.
+
+The method signature varies by handle kind:
+
 - Scalar: `encode(&self, enc, value: T)`
 - Flag: `encode(&self, enc)` (no value argument)
 - PerAlt: `encode(&self, enc, values: &[T])` — debug-asserts `values.len() == enc.n_alt()`

@@ -10,7 +10,7 @@
 
 In paired-end sequencing, two reads (mates) are generated from opposite ends of the same DNA fragment. When the fragment is shorter than twice the read length, the mates overlap — both reads cover the same genomic positions in the middle. Without deduplication, these overlapping positions would be counted twice in the pileup, inflating the apparent coverage and biasing variant allele frequencies.
 
-> **Sources:** Mate detection relies on QNAME matching as defined in [SAM1] §1.4. The first-in-template / second-in-template distinction uses FLAG bits 0x40 and 0x80 defined in [SAM1] §1.4. See [references.md](references.md).
+> **Sources:** Mate detection relies on QNAME matching as defined in [SAM1] §1.4. The first-in-template / second-in-template distinction uses FLAG bits 0x40 and 0x80 defined in [SAM1] §1.4. See [References](./99-references.md).
 
 For example, with 150bp reads from a 200bp fragment, positions 50–150 are covered by both mates. At each of these positions, the pileup would show two observations from the same molecule. Deduplication removes one mate at each overlapping position, keeping the observation count honest.
 

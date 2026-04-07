@@ -2,11 +2,11 @@
 
 A BAM file begins with a header that describes the reference genome and records metadata about how the alignments were produced. The header contains two parts: a SAM-format text section (with `@HD`, `@SQ`, `@RG`, `@PG` lines) and a binary reference sequence table. The reference table maps each contig (chromosome) to a numeric **target ID** (tid) used throughout the rest of the file — every aligned read stores the tid of its reference contig rather than the name string.
 
-> **Sources:** [SAM1] §4.2 "The BAM format" (BAM magic, l_text, n_ref, reference sequence table); §1.3 "The header section" (SAM header line types @HD/@SQ/@RG/@PG). See [references.md](references.md).
+> **Sources:** [SAM1] §4.2 "The BAM format" (BAM magic, l_text, n_ref, reference sequence table); §1.3 "The header section" (SAM header line types @HD/@SQ/@RG/@PG). See [References](./99-references.md).
 
 ## Parsing
 
-> *[SAM1] §4.2 "The BAM format" — magic, l_text, text, n_ref, l_name, name, l_ref fields*
+> _[SAM1] §4.2 "The BAM format" — magic, l_text, text, n_ref, l_name, name, l_ref fields_
 
 r[bam.header.magic]
 A BAM file MUST begin with the magic bytes `BAM\1` (0x42, 0x41, 0x4d, 0x01) after BGZF decompression. The reader MUST reject files that do not start with this magic.

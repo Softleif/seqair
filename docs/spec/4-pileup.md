@@ -4,7 +4,7 @@ A pileup is a column-by-column view of all reads aligned to a reference region. 
 
 The pileup engine takes a set of BAM records (stored in a `RecordStore`) and iterates over reference positions from left to right, maintaining an "active set" of reads that overlap the current position. At each position, it yields a `PileupColumn` containing the aligned reads with their query positions (the position within each read that corresponds to this reference position).
 
-> **Sources:** The pileup algorithm is seqair-specific design, verified for correctness against [htslib] `bam_plp_auto`. FLAG bits referenced here (0x4 unmapped, 0x10 reverse strand) are defined in [SAM1] §1.4. CIGAR consume semantics (consumes query/reference) are from [SAM1] §1.4. See [references.md](references.md).
+> **Sources:** The pileup algorithm is seqair-specific design, verified for correctness against [htslib] `bam_plp_auto`. FLAG bits referenced here (0x4 unmapped, 0x10 reverse strand) are defined in [SAM1] §1.4. CIGAR consume semantics (consumes query/reference) are from [SAM1] §1.4. See [References](./99-references.md).
 
 ## Column iteration
 
@@ -14,11 +14,12 @@ The engine MUST iterate over every reference position from the region start to t
 r[pileup.active_set]
 At each position, the active set contains all records whose alignment span `[pos, end_pos]` includes the current position. Records MUST enter the active set when the current position reaches their `pos` and MUST be evicted when the current position exceeds their `end_pos`.
 
-r[pileup.column_contents]
-Each `PileupColumn` MUST provide:
-- the reference position
-- the number of active alignments (depth)
-- access to each alignment with its query position (`qpos`) and a `RecordRef`
+> r[pileup.column_contents]
+> Each `PileupColumn` MUST provide:
+>
+> - the reference position
+> - the number of active alignments (depth)
+> - access to each alignment with its query position (`qpos`) and a `RecordRef`
 
 ## Filtering
 

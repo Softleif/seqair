@@ -4,7 +4,7 @@ The indexed FASTA reader provides random access to reference genome sequences. I
 
 Rastair fetches reference sequences once per segment (~100 KB) for each worker thread. The forkable design shares the parsed index across threads while giving each thread its own file handle, matching the `IndexedBamReader` pattern.
 
-> **Sources:** The FASTA format and FAI index are not covered by any hts-specs document. The FAI format is defined by samtools (`samtools faidx`); the byte offset formula and field layout are described in the `samtools faidx` man page and implemented in [htslib]. The GZI index format is a htslib convention for bgzip-compressed random-access files, implemented in [htslib] `bgzf.c`. BGZF decompression follows [SAM1] §4.1. The forking and buffer-reuse design are seqair-specific. See [references.md](references.md).
+> **Sources:** The FASTA format and FAI index are not covered by any hts-specs document. The FAI format is defined by samtools (`samtools faidx`); the byte offset formula and field layout are described in the `samtools faidx` man page and implemented in [htslib]. The GZI index format is a htslib convention for bgzip-compressed random-access files, implemented in [htslib] `bgzf.c`. BGZF decompression follows [SAM1] §4.1. The forking and buffer-reuse design are seqair-specific. See [References](./99-references.md).
 
 ## FAI Index
 
