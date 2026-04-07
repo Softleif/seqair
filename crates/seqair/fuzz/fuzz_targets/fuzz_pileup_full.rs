@@ -26,7 +26,7 @@ fuzz_target!(|input: PileupInput| {
         Some(p) => p,
         None => return,
     };
-    let region_len = (input.region_len as u32).min(max_region_len as u32);
+    let region_len = (input.region_len as u32).min(max_region_len);
     let region_end =
         match region_start.checked_add_offset(seqair_types::Offset::new(region_len as i64)) {
             Some(p) => p,
@@ -40,7 +40,7 @@ fuzz_target!(|input: PileupInput| {
         let _ = store.push_raw(raw);
     }
 
-    if store.len() == 0 {
+    if store.is_empty() {
         return;
     }
 

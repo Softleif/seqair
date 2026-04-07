@@ -37,7 +37,7 @@ fuzz_target!(|data: &[u8]| {
             break;
         }
         let block_size = i32::from_le_bytes(buf) as usize;
-        if block_size < 32 || block_size > 100_000 {
+        if !(32..=100_000).contains(&block_size) {
             break;
         }
 
@@ -49,7 +49,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = store.push_raw(&record_buf);
     }
 
-    if store.len() == 0 {
+    if store.is_empty() {
         return;
     }
 

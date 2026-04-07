@@ -19,6 +19,8 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+      - run: cargo fmt --all --check
+        working-directory: crates/seqair/fuzz
 
   test:
     name: test (${{ matrix.runner }})
@@ -48,6 +50,11 @@ jobs:
         id: test
         continue-on-error: true
         run: cargo test --all
+      - name: Fuzz compiles
+        id: fuzz
+        continue-on-error: true
+        working-directory: crates/seqair/fuzz
+        run: cargo check
       - name: Fail if clippy or tests failed
         if: steps.clippy.outcome == 'failure' || steps.test.outcome == 'failure'
         run: exit 1

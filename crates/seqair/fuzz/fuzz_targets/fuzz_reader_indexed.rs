@@ -74,7 +74,7 @@ fuzz_target!(|data: &[u8]| {
     let mut store = RecordStore::new();
     let _ = readers.fetch_into(0, start, end, &mut store);
 
-    if store.len() == 0 {
+    if store.is_empty() {
         return;
     }
 
