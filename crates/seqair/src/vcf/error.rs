@@ -1,6 +1,6 @@
 //! VCF/BCF error types. Typed fields only, no `String` payloads.
 
-use crate::bam::bgzf::BgzfError;
+use crate::{bam::bgzf::BgzfError, vcf::writer::WriteError};
 use seqair_types::SmolStr;
 
 // r[impl vcf_header.builder]
@@ -113,4 +113,7 @@ pub enum VcfError {
     // r[impl vcf_writer.output_formats]
     #[error("unrecognized output format for path: {path}")]
     UnrecognizedFormat { path: String },
+
+    #[error("failed to write field {field}")]
+    FailedToWriteFormattedString { field: SmolStr, source: WriteError },
 }

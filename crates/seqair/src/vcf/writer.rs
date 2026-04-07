@@ -6,6 +6,8 @@ use super::header::VcfHeader;
 use super::index_builder::IndexBuilder;
 use super::record::{Filters, InfoValue, SampleValue, VcfRecord};
 use crate::bam::bgzf_writer::BgzfWriter;
+use seqair_types::SmolStr;
+use seqair_types::smol_str::format_smolstr;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -111,7 +113,12 @@ impl<W: Write> VcfWriter<W> {
         // QUAL
         // r[impl vcf_writer.float_precision]
         match record.qual {
-            Some(q) => write_float_g(&mut self.buf, q),
+            Some(q) => write_float_g(&mut self.buf, q).map_err(|source| {
+                VcfError::FailedToWriteFormattedString {
+                    field: SmolStr::new_static("qual"),
+                    source,
+                }
+            })?,
             None => self.buf.push(b'.'),
         }
         self.buf.push(b'\t');
@@ -146,7 +153,12 @@ impl<W: Write> VcfWriter<W> {
                     InfoValue::Flag => {} // key only, no =
                     _ => {
                         self.buf.push(b'=');
-                        write_info_value(&mut self.buf, value);
+                        write_info_value(&mut self.buf, value).map_err(|source| {
+                            VcfError::FailedToWriteFormattedString {
+                                field: format_smolstr!("INFO:{key}"),
+                                source,
+                            }
+                        })?;
                     }
                 }
             }
@@ -169,7 +181,19 @@ impl<W: Write> VcfWriter<W> {
                     if i > 0 {
                         self.buf.push(b':');
                     }
-                    write_sample_value(&mut self.buf, val);
+                    write_sample_value(&mut self.buf, val).map_err(|source| {
+                        VcfError::FailedToWriteFormattedString {
+                            field: format_smolstr!(
+                                "FORMAT:{}",
+                                record
+                                    .samples
+                                    .format_keys
+                                    .get(i)
+                                    .unwrap_or(&SmolStr::new_static("?"))
+                            ),
+                            source,
+                        }
+                    })?;
                 }
             }
         }
@@ -219,12 +243,24 @@ impl<W: Write> VcfWriter<W> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    #[error("failed to write formatted string")]
+    WriteFormattedString { source: std::io::Error },
+    #[error("Failed to strip trailing zeros from formatted float")]
+    FailedToStripTrailingZeros,
+    #[error("formatted float exceeds 32 bytes")]
+    FormattedFloatLongerThan32Chars,
+}
+
+type FmtResult = Result<(), WriteError>;
+
 // r[impl vcf_writer.integer_format]
-fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
+fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) -> FmtResult {
     let mut itoa_buf = itoa::Buffer::new();
     match value {
         InfoValue::Integer(v) => buf.extend_from_slice(itoa_buf.format(*v).as_bytes()),
-        InfoValue::Float(v) => write_float_g(buf, *v),
+        InfoValue::Float(v) => write_float_g(buf, *v)?,
         InfoValue::Flag => {} // handled at call site
         InfoValue::String(s) => percent_encode_into(buf, s.as_bytes()),
         InfoValue::IntegerArray(arr) => {
@@ -244,7 +280,7 @@ fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
                     buf.push(b',');
                 }
                 match v {
-                    Some(f) => write_float_g(buf, *f),
+                    Some(f) => write_float_g(buf, *f)?,
                     None => buf.push(b'.'),
                 }
             }
@@ -261,6 +297,7 @@ fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
             }
         }
     }
+    Ok(())
 }
 
 // r[impl vcf_writer.float_precision]
@@ -268,7 +305,7 @@ fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
 /// no trailing decimal point. This matches htslib/bcftools VCF text output.
 ///
 /// Examples: 35.89775 → "35.8978", 60.0 → "60", 0.777778 → "0.777778"
-fn write_float_g(buf: &mut Vec<u8>, v: f32) {
+fn write_float_g(buf: &mut Vec<u8>, v: f32) -> Result<(), WriteError> {
     // %g with precision P means P significant digits.
     // In fixed notation: decimal_places = P - floor(log10(|v|)) - 1
     // For very small or very large values, %g switches to scientific notation,
@@ -278,7 +315,7 @@ fn write_float_g(buf: &mut Vec<u8>, v: f32) {
 
     if v == 0.0 {
         buf.push(b'0');
-        return;
+        return Ok(());
     }
 
     let magnitude = v.abs().log10().floor() as i32;
@@ -289,10 +326,11 @@ fn write_float_g(buf: &mut Vec<u8>, v: f32) {
     let len = {
         use std::io::Write as _;
         let mut cursor = std::io::Cursor::new(&mut tmp[..]);
-        write!(cursor, "{v:.decimal_places$}").unwrap();
+        write!(cursor, "{v:.decimal_places$}")
+            .map_err(|source| WriteError::WriteFormattedString { source })?;
         cursor.position() as usize
     };
-    let s = &tmp[..len];
+    let s = &tmp.get(..len).ok_or(WriteError::FormattedFloatLongerThan32Chars)?;
     // Strip trailing zeros after decimal point, then trailing decimal point
     if let Some(dot) = s.iter().position(|&b| b == b'.') {
         let mut end = len;
@@ -302,10 +340,11 @@ fn write_float_g(buf: &mut Vec<u8>, v: f32) {
         if end == dot.saturating_add(1) {
             end = dot;
         }
-        buf.extend_from_slice(&s[..end]);
+        buf.extend_from_slice(s.get(..end).ok_or(WriteError::FailedToStripTrailingZeros)?);
     } else {
         buf.extend_from_slice(s);
     }
+    Ok(())
 }
 
 // r[impl vcf_writer.percent_encoding]
@@ -327,12 +366,12 @@ fn percent_encode_into(buf: &mut Vec<u8>, data: &[u8]) {
 }
 
 // r[impl vcf_writer.genotype_serialization]
-fn write_sample_value(buf: &mut Vec<u8>, value: &SampleValue) {
+fn write_sample_value(buf: &mut Vec<u8>, value: &SampleValue) -> FmtResult {
     let mut itoa_buf = itoa::Buffer::new();
     match value {
         SampleValue::Missing => buf.push(b'.'),
         SampleValue::Integer(v) => buf.extend_from_slice(itoa_buf.format(*v).as_bytes()),
-        SampleValue::Float(v) => write_float_g(buf, *v),
+        SampleValue::Float(v) => write_float_g(buf, *v)?,
         SampleValue::String(s) => percent_encode_into(buf, s.as_bytes()),
         SampleValue::Genotype(gt) => {
             for (i, allele) in gt.alleles.iter().enumerate() {
@@ -364,12 +403,13 @@ fn write_sample_value(buf: &mut Vec<u8>, value: &SampleValue) {
                     buf.push(b',');
                 }
                 match v {
-                    Some(f) => write_float_g(buf, *f),
+                    Some(f) => write_float_g(buf, *f)?,
                     None => buf.push(b'.'),
                 }
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
