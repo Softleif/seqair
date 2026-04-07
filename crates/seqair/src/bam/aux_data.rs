@@ -223,8 +223,8 @@ mod tests {
     #[test]
     fn set_and_get_float() {
         let mut aux = AuxData::new();
-        aux.set_float(*b"XF", 3.14);
-        assert_eq!(aux.get(*b"XF"), Some(AuxValue::Float(3.14)));
+        aux.set_float(*b"XF", std::f32::consts::PI);
+        assert_eq!(aux.get(*b"XF"), Some(AuxValue::Float(std::f32::consts::PI)));
     }
 
     // r[verify bam.owned_record.aux_array_encoding]
