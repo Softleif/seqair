@@ -290,6 +290,7 @@ impl BamHeader {
         self.targets.iter().map(|t| t.name.as_str())
     }
 
+    // r[impl bam_writer.header_text_generation]
     pub fn header_text(&self) -> &str {
         &self.header_text
     }

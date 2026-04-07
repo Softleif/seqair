@@ -54,6 +54,14 @@ pub enum OwnedRecordError {
         #[from]
         source: AuxDataError,
     },
+
+    /// Error decoding raw BAM bytes into an owned record.
+    #[error("failed to decode BAM record: {reason}")]
+    Decode { reason: &'static str },
+
+    /// Invalid CIGAR operation code in raw BAM data.
+    #[error("invalid CIGAR op code at index {index}")]
+    InvalidCigarOp { index: usize },
 }
 
 // r[impl bam.owned_record.fields]
@@ -175,7 +183,9 @@ impl OwnedBamRecord {
     pub fn from_raw_bam(raw: &[u8]) -> Result<Self, OwnedRecordError> {
         use super::record::parse_header;
 
-        let h = parse_header(raw).map_err(|_| OwnedRecordError::QnameTooLong { len: 0 })?;
+        let h = parse_header(raw).map_err(|_| OwnedRecordError::Decode {
+            reason: "failed to parse BAM record header",
+        })?;
 
         // Extract mate fields from the 32-byte fixed header (offsets 20-31)
         // parse_header already validated raw.len() >= 32
@@ -197,24 +207,24 @@ impl OwnedBamRecord {
         let cigar_bytes = &raw[h.var_start..h.cigar_end];
         let mut cigar = Vec::with_capacity(h.n_cigar_ops as usize);
         for i in 0..h.n_cigar_ops as usize {
-            let offset =
-                i.checked_mul(4).ok_or(OwnedRecordError::CigarCountOverflow { count: i })?;
-            let packed = u32::from_le_bytes([
-                *cigar_bytes
-                    .get(offset)
-                    .ok_or(OwnedRecordError::CigarCountOverflow { count: i })?,
-                *cigar_bytes
-                    .get(offset.saturating_add(1))
-                    .ok_or(OwnedRecordError::CigarCountOverflow { count: i })?,
-                *cigar_bytes
-                    .get(offset.saturating_add(2))
-                    .ok_or(OwnedRecordError::CigarCountOverflow { count: i })?,
-                *cigar_bytes
-                    .get(offset.saturating_add(3))
-                    .ok_or(OwnedRecordError::CigarCountOverflow { count: i })?,
-            ]);
+            let offset = i
+                .checked_mul(4)
+                .ok_or(OwnedRecordError::Decode { reason: "CIGAR offset overflow" })?;
+            let b0 = *cigar_bytes
+                .get(offset)
+                .ok_or(OwnedRecordError::Decode { reason: "CIGAR data truncated" })?;
+            let b1 = *cigar_bytes
+                .get(offset.saturating_add(1))
+                .ok_or(OwnedRecordError::Decode { reason: "CIGAR data truncated" })?;
+            let b2 = *cigar_bytes
+                .get(offset.saturating_add(2))
+                .ok_or(OwnedRecordError::Decode { reason: "CIGAR data truncated" })?;
+            let b3 = *cigar_bytes
+                .get(offset.saturating_add(3))
+                .ok_or(OwnedRecordError::Decode { reason: "CIGAR data truncated" })?;
+            let packed = u32::from_le_bytes([b0, b1, b2, b3]);
             let op = CigarOp::from_bam_u32(packed)
-                .ok_or(OwnedRecordError::CigarCountOverflow { count: i })?;
+                .ok_or(OwnedRecordError::InvalidCigarOp { index: i })?;
             cigar.push(op);
         }
 
@@ -296,10 +306,11 @@ impl OwnedBamRecord {
     /// Compute the BAI bin value from pos and end_pos (BAI scheme: min_shift=14, depth=5).
     pub fn bin(&self) -> u16 {
         let beg = if self.pos < 0 { 0u64 } else { self.pos as u64 };
-        let end = if self.end_pos() <= self.pos {
-            beg.saturating_add(1) // zero-span reads get beg..beg+1
+        let ep = self.end_pos();
+        let end = if ep <= self.pos || ep < 0 {
+            beg.saturating_add(1) // zero-span or negative end → beg..beg+1
         } else {
-            self.end_pos() as u64
+            ep as u64
         };
         reg2bin(beg, end, 14, 5) as u16
     }
@@ -594,11 +605,22 @@ mod tests {
 
     // r[verify bam.owned_record.to_bam_bin_field]
     #[test]
-    fn bin_computed_at_serialize_time() {
-        let rec = simple_record();
-        let bin = rec.bin();
-        // 100..105 should be in a leaf bin
-        assert!(bin > 0);
+    fn bin_recomputed_after_modification() {
+        let mut rec = simple_record(); // pos=100, 5M
+        let bin_before = rec.bin();
+
+        // Move to a completely different position — bin must change
+        rec.set_alignment(10_000_000, vec![CigarOp::new(CigarOpType::Match, 5)]).unwrap();
+        let bin_after = rec.bin();
+        assert_ne!(bin_before, bin_after, "bin must change when pos changes");
+
+        // Serialize and verify the bin in the bytes matches the new value
+        let mut buf = Vec::new();
+        rec.to_bam_bytes(&mut buf).unwrap();
+        // bin_mq_nl is at offset 8 in the 32-byte header (bytes 8-11)
+        let bin_mq_nl = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        let serialized_bin = (bin_mq_nl >> 16) as u16;
+        assert_eq!(serialized_bin, bin_after, "serialized bin must match current bin()");
     }
 
     // r[verify bam.owned_record.end_pos]

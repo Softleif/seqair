@@ -22,6 +22,9 @@ pub enum IndexError {
 
     #[error("BGZF error writing index")]
     Bgzf(#[from] crate::bam::bgzf::BgzfError),
+
+    #[error("finish() must be called before writing the index")]
+    NotFinished,
 }
 
 /// Per-reference accumulated index data.
@@ -73,6 +76,7 @@ pub struct IndexBuilder {
     last_tid: i32,
     save_tid: i32,
     last_coor: u64,
+    finished: bool,
 }
 
 impl IndexBuilder {
@@ -100,6 +104,7 @@ impl IndexBuilder {
             last_tid: -1,
             save_tid: -1,
             last_coor: 0,
+            finished: false,
         }
     }
 
@@ -191,6 +196,25 @@ impl IndexBuilder {
         Ok(())
     }
 
+    /// Register a placed-unmapped record (flag 0x4 set, ref_id >= 0).
+    /// Same as `push()` but increments `n_unmapped` instead of `n_mapped` in the
+    /// pseudo-bin, matching htslib's `hts_idx_push` behavior for unmapped reads.
+    pub fn push_unmapped(
+        &mut self,
+        tid: i32,
+        beg: u64,
+        end: u64,
+        offset: VirtualOffset,
+    ) -> Result<(), IndexError> {
+        self.push(tid, beg, end, offset)?;
+        // push() incremented n_mapped; correct it: undo mapped, add unmapped
+        if let Some(r) = self.refs.get_mut(tid as usize) {
+            r.n_mapped = r.n_mapped.saturating_sub(1);
+            r.n_unmapped = r.n_unmapped.saturating_add(1);
+        }
+        Ok(())
+    }
+
     fn flush_chunk(&mut self) {
         if self.save_bin == u32::MAX || self.save_tid < 0 {
             return;
@@ -233,6 +257,7 @@ impl IndexBuilder {
         for r in &mut self.refs {
             backfill_linear_index(&mut r.linear_index);
         }
+        self.finished = true;
         Ok(())
     }
 
@@ -301,6 +326,9 @@ impl IndexBuilder {
         mut writer: W,
         n_refs: usize,
     ) -> Result<(), IndexError> {
+        if !self.finished {
+            return Err(IndexError::NotFinished);
+        }
         let mut buf = Vec::new();
 
         // Magic
