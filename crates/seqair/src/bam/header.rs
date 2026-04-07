@@ -196,7 +196,11 @@ impl BamHeader {
                     .map_err(|source| BamHeaderError::NonUtf8ReferenceName { source })?,
             );
 
-            let l_ref = bgzf.read_i32()? as u64;
+            let l_ref_raw = bgzf.read_i32()?;
+            if l_ref_raw < 0 {
+                return Err(BamHeaderError::NegativeLength { field: "l_ref", value: l_ref_raw });
+            }
+            let l_ref = l_ref_raw as u64;
 
             name_to_tid.insert(name.clone(), tid as u32);
             targets.push(TargetInfo { name, length: l_ref });

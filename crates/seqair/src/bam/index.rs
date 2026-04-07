@@ -34,6 +34,9 @@ pub enum BaiError {
 
     #[error("BAI/tabix field has negative count: {value}")]
     NegativeCount { value: i32 },
+
+    #[error("BAI/tabix field `{field}` count {value} exceeds limit {limit}")]
+    FieldTooLarge { field: &'static str, value: usize, limit: usize },
 }
 
 #[derive(Debug)]
@@ -331,17 +334,35 @@ fn parse_refs(data: &[u8], pos: &mut usize) -> Result<BamIndex, BaiError> {
     parse_refs_with_count(data, pos, n_ref)
 }
 
+// r[impl io.fuzz.alloc_limits]
+// Practical upper bounds for index fields. These exceed any real-world genome
+// but catch corrupt/malicious files before they cause multi-GB allocations.
+const MAX_INDEX_REFS: usize = 100_000; // human: ~3000 contigs
+const MAX_BINS_PER_REF: usize = 100_000; // BAI depth=5: max 37451
+const MAX_CHUNKS_PER_BIN: usize = 1_000_000;
+const MAX_LINEAR_INDEX: usize = 500_000; // 3 Gbp / 16KiB ≈ 183K
+
+fn check_index_limit(value: usize, limit: usize, field: &'static str) -> Result<(), BaiError> {
+    if value > limit {
+        return Err(BaiError::FieldTooLarge { field, value, limit });
+    }
+    Ok(())
+}
+
 fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<BamIndex, BaiError> {
-    let mut references = Vec::with_capacity(n_ref.min(1024));
+    check_index_limit(n_ref, MAX_INDEX_REFS, "n_ref")?;
+    let mut references = Vec::with_capacity(n_ref);
 
     for _ in 0..n_ref {
         let n_bin = read_i32(data, pos)? as usize;
-        let mut bins = Vec::with_capacity(n_bin.min(65536));
+        check_index_limit(n_bin, MAX_BINS_PER_REF, "n_bin")?;
+        let mut bins = Vec::with_capacity(n_bin);
 
         for _ in 0..n_bin {
             let bin_id = read_u32(data, pos)?;
             let n_chunk = read_i32(data, pos)? as usize;
-            let mut chunks = Vec::with_capacity(n_chunk.min(65536));
+            check_index_limit(n_chunk, MAX_CHUNKS_PER_BIN, "n_chunk")?;
+            let mut chunks = Vec::with_capacity(n_chunk);
 
             for _ in 0..n_chunk {
                 let begin = VirtualOffset(read_u64(data, pos)?);
@@ -352,7 +373,8 @@ fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<B
         }
 
         let n_intv = read_i32(data, pos)? as usize;
-        let mut linear_index = Vec::with_capacity(n_intv.min(65536));
+        check_index_limit(n_intv, MAX_LINEAR_INDEX, "n_intv")?;
+        let mut linear_index = Vec::with_capacity(n_intv);
         for _ in 0..n_intv {
             linear_index.push(VirtualOffset(read_u64(data, pos)?));
         }
