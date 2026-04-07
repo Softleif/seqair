@@ -123,13 +123,20 @@ impl AuxData {
 
     // r[impl bam.owned_record.aux_array_encoding]
     /// Add or replace a B:C (unsigned byte array) tag.
-    pub fn set_array_u8(&mut self, tag: [u8; 2], values: &[u8]) {
+    ///
+    /// The BAM B-array element count is u32. In practice, array size is bounded by
+    /// the 2 MiB record size limit, so values longer than u32::MAX cannot occur in
+    /// valid BAM data. We validate the cast to be safe on 64-bit platforms.
+    pub fn set_array_u8(&mut self, tag: [u8; 2], values: &[u8]) -> Result<(), AuxDataError> {
+        let count = u32::try_from(values.len())
+            .map_err(|_| AuxDataError::IntegerOutOfRange { value: values.len() as i64 })?;
         self.remove(tag);
         self.data.extend_from_slice(&tag);
         self.data.push(b'B');
         self.data.push(b'C');
-        self.data.extend_from_slice(&(values.len() as u32).to_le_bytes());
+        self.data.extend_from_slice(&count.to_le_bytes());
         self.data.extend_from_slice(values);
+        Ok(())
     }
 
     /// Remove a tag if present.
@@ -224,7 +231,7 @@ mod tests {
     #[test]
     fn set_and_get_array_u8() {
         let mut aux = AuxData::new();
-        aux.set_array_u8(*b"ML", &[10, 20, 30]);
+        aux.set_array_u8(*b"ML", &[10, 20, 30]).unwrap();
         let val = aux.get(*b"ML");
         assert_eq!(val, Some(AuxValue::ArrayU8(&[10, 20, 30])));
     }
@@ -339,7 +346,7 @@ mod tests {
         aux.set_string(*b"RG", b"grp");
         aux.set_int(*b"NM", 3).unwrap();
         aux.set_float(*b"XF", 1.5);
-        aux.set_array_u8(*b"ML", &[10, 20]);
+        aux.set_array_u8(*b"ML", &[10, 20]).unwrap();
 
         assert_eq!(aux.get(*b"RG"), Some(AuxValue::String(b"grp")));
         assert_eq!(aux.get(*b"NM"), Some(AuxValue::U8(3)));

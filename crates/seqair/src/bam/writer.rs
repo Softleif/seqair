@@ -13,8 +13,14 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use thiserror::Error;
 
-/// Maximum record size the writer will accept (soft limit, matching reader's cap).
-const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
+/// Maximum record size the writer will accept (matching reader's 2 MiB cap).
+const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024;
+
+// Limits matching the reader (header.rs) — the writer should never produce
+// data that the reader would reject.
+const MAX_HEADER_TEXT: usize = 256 * 1024 * 1024; // 256 MiB (same as reader)
+const MAX_REFERENCES: usize = 1_000_000; // same as reader
+const MAX_REF_NAME: usize = 256 * 1024; // 256 KiB (same as reader)
 
 // r[impl bam_writer.error_type]
 /// Errors from BAM writing operations.
@@ -177,6 +183,8 @@ impl<W: Write> BamWriter<W> {
             }
         }
 
+        // Safe: buf.len() <= MAX_RECORD_SIZE (2 MiB) < i32::MAX, checked above.
+        debug_assert!(self.buf.len() <= MAX_RECORD_SIZE);
         let block_size = self.buf.len() as i32;
         let total = 4usize.saturating_add(self.buf.len());
 
@@ -248,34 +256,43 @@ fn write_bam_header<W: Write>(
 
     // r[impl bam_writer.header_text]
     let text = header.header_text().as_bytes();
-    let l_text = i32::try_from(text.len()).map_err(|_| BamHeaderError::FieldTooLarge {
-        field: "l_text",
-        value: text.len(),
-        limit: i32::MAX as usize,
-    })?;
-    buf.extend_from_slice(&l_text.to_le_bytes());
+    if text.len() > MAX_HEADER_TEXT {
+        return Err(BamHeaderError::FieldTooLarge {
+            field: "l_text",
+            value: text.len(),
+            limit: MAX_HEADER_TEXT,
+        }
+        .into());
+    }
+    buf.extend_from_slice(&(text.len() as i32).to_le_bytes());
     buf.extend_from_slice(text);
 
     // r[impl bam_writer.header_references]
-    let n_ref =
-        i32::try_from(header.target_count()).map_err(|_| BamHeaderError::FieldTooLarge {
+    if header.target_count() > MAX_REFERENCES {
+        return Err(BamHeaderError::FieldTooLarge {
             field: "n_ref",
             value: header.target_count(),
-            limit: i32::MAX as usize,
-        })?;
-    buf.extend_from_slice(&n_ref.to_le_bytes());
+            limit: MAX_REFERENCES,
+        }
+        .into());
+    }
+    buf.extend_from_slice(&(header.target_count() as i32).to_le_bytes());
     for target in header.targets() {
         let name = target.target_name().as_bytes();
-        let l_name = i32::try_from(name.len().saturating_add(1)).map_err(|_| {
-            BamHeaderError::FieldTooLarge {
+        let name_with_nul = name.len().saturating_add(1);
+        if name_with_nul > MAX_REF_NAME {
+            return Err(BamHeaderError::FieldTooLarge {
                 field: "l_name",
-                value: name.len().saturating_add(1),
-                limit: i32::MAX as usize,
+                value: name_with_nul,
+                limit: MAX_REF_NAME,
             }
-        })?;
-        buf.extend_from_slice(&l_name.to_le_bytes());
+            .into());
+        }
+        buf.extend_from_slice(&(name_with_nul as i32).to_le_bytes());
         buf.extend_from_slice(name);
         buf.push(0); // NUL terminator
+        // BAM stores l_ref as i32; reject contigs > i32::MAX (≈2.1 Gbp).
+        // This is the BAM format limit — no reasonable contig exceeds this.
         let l_ref =
             i32::try_from(target.target_length()).map_err(|_| BamHeaderError::FieldTooLarge {
                 field: "l_ref",
