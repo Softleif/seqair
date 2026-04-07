@@ -40,6 +40,9 @@ Only intentionally public types should be exported. Internal implementation modu
 r[io.checked_arithmetic]
 All integer arithmetic on values derived from untrusted input (file data, parsed fields) MUST use checked or saturating operations. Default wrapping arithmetic (`+`, `-`, `*`) MUST NOT be used on untrusted values. The `clippy::arithmetic_side_effects` lint should be enabled.
 
+r[io.writer_limits]
+Writers MUST enforce the same field-size limits that the corresponding reader enforces. A writer that produces output the reader would reject is a bug — it creates files that appear valid but cannot be re-read. When a format stores a count or length as i32/u32, the writer MUST validate the value fits before casting, using `i32::try_from()` or equivalent with a typed error. Silent truncation via `as i32` is never acceptable at a serialization boundary. Where the format limit (e.g. i32::MAX ≈ 2.1 GB) is much larger than any practical value, writers SHOULD apply a tighter practical limit matching the reader (e.g. 256 MiB for header text, 1M references) to catch corruption early.
+
 ## Robustness — fuzzing
 
 Seqair processes user-provided files that may be corrupt, truncated, or maliciously crafted. All parsers that read untrusted data SHOULD be fuzz-tested with `cargo-fuzz` (libFuzzer).

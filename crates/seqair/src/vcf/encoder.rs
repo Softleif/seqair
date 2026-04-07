@@ -125,6 +125,7 @@ impl FilterHandle {
 
     // r[impl bcf_encoder.handle_encode]
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>) {
+        debug_assert!(self.0 <= i32::MAX as u32, "filter dict index overflow");
         encode_typed_int_vec(enc.shared_buf, &[self.0 as i32]);
     }
 }
@@ -540,7 +541,12 @@ impl<'a> BcfRecordEncoder<'a> {
                     let idx = header.string_map().get(id).ok_or_else(|| {
                         VcfError::Header(VcfHeaderError::MissingFilter { id: id.clone() })
                     })?;
-                    indices.push(idx as i32);
+                    let idx_i32 = i32::try_from(idx).map_err(|_| VcfError::ValueOverflow {
+                        field: "filter_dict_idx",
+                        value: idx as u64,
+                        target_type: "i32",
+                    })?;
+                    indices.push(idx_i32);
                 }
                 encode_typed_int_vec(self.shared_buf, &indices);
             }
@@ -551,10 +557,15 @@ impl<'a> BcfRecordEncoder<'a> {
 
         // INFO fields
         for (key, value) in record.info.iter() {
-            let dict_idx =
-                header.string_map().get(key).ok_or_else(|| {
-                    VcfError::Header(VcfHeaderError::MissingInfo { id: key.clone() })
-                })? as i32;
+            let idx = header
+                .string_map()
+                .get(key)
+                .ok_or_else(|| VcfError::Header(VcfHeaderError::MissingInfo { id: key.clone() }))?;
+            let dict_idx = i32::try_from(idx).map_err(|_| VcfError::ValueOverflow {
+                field: "info_dict_idx",
+                value: idx as u64,
+                target_type: "i32",
+            })?;
             encode_typed_int_vec(self.shared_buf, &[dict_idx]);
             encode_info_value(self.shared_buf, value);
             self.n_info = self.n_info.saturating_add(1);
@@ -569,9 +580,14 @@ impl<'a> BcfRecordEncoder<'a> {
                 target_type: "u32",
             })?;
             for (field_idx, key) in record.samples.format_keys.iter().enumerate() {
-                let dict_idx = header.string_map().get(key).ok_or_else(|| {
+                let fmt_idx = header.string_map().get(key).ok_or_else(|| {
                     VcfError::Header(VcfHeaderError::MissingFormat { id: key.clone() })
-                })? as i32;
+                })?;
+                let dict_idx = i32::try_from(fmt_idx).map_err(|_| VcfError::ValueOverflow {
+                    field: "format_dict_idx",
+                    value: fmt_idx as u64,
+                    target_type: "i32",
+                })?;
                 encode_typed_int_vec(self.indiv_buf, &[dict_idx]);
                 if key == "GT" {
                     encode_gt_field(self.indiv_buf, &record.samples.values, field_idx);

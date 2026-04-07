@@ -100,10 +100,17 @@ pub fn encode_typed_int_key(buf: &mut Vec<u8>, dict_idx: u32) {
 }
 
 /// Write an i32 value using the specified BCF int type.
+/// The caller must ensure `value` fits in the target type (via `smallest_int_type`).
 pub fn encode_int_as(buf: &mut Vec<u8>, value: i32, typ: u8) {
     match typ {
-        BCF_BT_INT8 => buf.push(value as u8),
-        BCF_BT_INT16 => buf.extend_from_slice(&(value as i16).to_le_bytes()),
+        BCF_BT_INT8 => {
+            debug_assert!((INT8_MIN..=INT8_MAX).contains(&value), "INT8 overflow: {value}");
+            buf.push(value as u8);
+        }
+        BCF_BT_INT16 => {
+            debug_assert!((INT16_MIN..=INT16_MAX).contains(&value), "INT16 overflow: {value}");
+            buf.extend_from_slice(&(value as i16).to_le_bytes());
+        }
         _ => buf.extend_from_slice(&value.to_le_bytes()),
     }
 }

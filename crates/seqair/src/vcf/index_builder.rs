@@ -25,6 +25,9 @@ pub enum IndexError {
 
     #[error("finish() must be called before writing the index")]
     NotFinished,
+
+    #[error("index field `{field}` count {value} exceeds i32 limit")]
+    CountOverflow { field: &'static str, value: usize },
 }
 
 /// Per-reference accumulated index data.
@@ -281,7 +284,7 @@ impl IndexBuilder {
         // Magic
         buf.extend_from_slice(b"TBI\x01");
         // n_ref — only count references with data
-        write_i32(&mut buf, active_refs.len() as i32);
+        write_i32(&mut buf, count_i32(active_refs.len(), "n_ref")?);
         // format = 2 (VCF)
         write_i32(&mut buf, 2);
         // col_seq = 1, col_beg = 2, col_end = 0
@@ -301,12 +304,12 @@ impl IndexBuilder {
                 names_buf.push(0);
             }
         }
-        write_i32(&mut buf, names_buf.len() as i32);
+        write_i32(&mut buf, count_i32(names_buf.len(), "l_nm")?);
         buf.extend_from_slice(&names_buf);
 
         // Per-reference bin/chunk/linear data — only for active refs
         for &(_, r) in &active_refs {
-            write_ref_index(&mut buf, r);
+            write_ref_index(&mut buf, r)?;
         }
 
         bgzf.write_all(&buf)?;
@@ -334,12 +337,12 @@ impl IndexBuilder {
         // Magic
         buf.extend_from_slice(b"BAI\x01");
         // n_ref — always the full header count (BAI uses positional lookup by tid)
-        write_i32(&mut buf, n_refs as i32);
+        write_i32(&mut buf, count_i32(n_refs, "n_ref")?);
 
         // Per-reference data: include all refs, even empty ones
         for tid in 0..n_refs {
             match self.refs.get(tid) {
-                Some(r) if !r.bins.is_empty() => write_ref_index(&mut buf, r),
+                Some(r) if !r.bins.is_empty() => write_ref_index(&mut buf, r)?,
                 _ => {
                     // Empty ref: n_bin=0, n_intv=0
                     write_i32(&mut buf, 0); // n_bin
@@ -358,27 +361,31 @@ impl IndexBuilder {
     }
 }
 
-fn write_ref_index(buf: &mut Vec<u8>, r: &RefIndexBuilder) {
-    // n_bin
-    write_i32(buf, r.bins.len() as i32);
+/// Safe i32 cast for index field counts. These are structurally bounded
+/// (max ~37451 bins for depth=5, linear index ≤ genome_size / 16KiB), but
+/// we validate at the serialization boundary to catch corruption.
+fn count_i32(n: usize, field: &'static str) -> Result<i32, IndexError> {
+    i32::try_from(n).map_err(|_| IndexError::CountOverflow { field, value: n })
+}
+
+fn write_ref_index(buf: &mut Vec<u8>, r: &RefIndexBuilder) -> Result<(), IndexError> {
+    write_i32(buf, count_i32(r.bins.len(), "n_bin")?);
 
     for (&bin_id, chunks) in &r.bins {
-        // bin_id
         write_u32(buf, bin_id);
-        // n_chunk
-        write_i32(buf, chunks.len() as i32);
+        write_i32(buf, count_i32(chunks.len(), "n_chunk")?);
         for chunk in chunks {
             write_u64(buf, chunk.begin.0);
             write_u64(buf, chunk.end.0);
         }
     }
 
-    // Linear index
-    write_i32(buf, r.linear_index.len() as i32);
+    write_i32(buf, count_i32(r.linear_index.len(), "n_intv")?);
     for &offset in &r.linear_index {
         let val = if offset.0 == UNSET { 0 } else { offset.0 };
         write_u64(buf, val);
     }
+    Ok(())
 }
 
 // r[impl index_builder.binning]
