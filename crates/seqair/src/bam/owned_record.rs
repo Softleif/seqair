@@ -167,6 +167,87 @@ impl OwnedBamRecordBuilder {
 }
 
 impl OwnedBamRecord {
+    /// Decode a complete owned record from raw BAM bytes (after the 4-byte block_size prefix).
+    ///
+    /// Unlike [`BamRecord::decode`](super::record::BamRecord::decode), this preserves ALL fields
+    /// including mate info (next_ref_id, next_pos, template_len) that the read-path type drops.
+    /// This is essential for BAM rewriting pipelines that need to modify records and write them back.
+    pub fn from_raw_bam(raw: &[u8]) -> Result<Self, OwnedRecordError> {
+        use super::record::parse_header;
+
+        let h = parse_header(raw).map_err(|_| OwnedRecordError::QnameTooLong { len: 0 })?;
+
+        // Extract mate fields from the 32-byte fixed header (offsets 20-31)
+        // parse_header already validated raw.len() >= 32
+        #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 validated by parse_header")]
+        let next_ref_id = i32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
+        #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 validated by parse_header")]
+        let next_pos_i32 = i32::from_le_bytes([raw[24], raw[25], raw[26], raw[27]]);
+        #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 validated by parse_header")]
+        let template_len = i32::from_le_bytes([raw[28], raw[29], raw[30], raw[31]]);
+
+        // Extract qname (strip trailing NUL)
+        #[allow(clippy::indexing_slicing, reason = "bounds checked by parse_header")]
+        let qname_raw = &raw[32..h.var_start];
+        let qname_len = qname_raw.iter().position(|&b| b == 0).unwrap_or(qname_raw.len());
+        let qname = qname_raw.get(..qname_len).unwrap_or(qname_raw).to_vec();
+
+        // Convert packed CIGAR u32s to Vec<CigarOp>
+        #[allow(clippy::indexing_slicing, reason = "bounds checked by parse_header")]
+        let cigar_bytes = &raw[h.var_start..h.cigar_end];
+        let mut cigar = Vec::with_capacity(h.n_cigar_ops as usize);
+        for i in 0..h.n_cigar_ops as usize {
+            let offset =
+                i.checked_mul(4).ok_or(OwnedRecordError::CigarCountOverflow { count: i })?;
+            let packed = u32::from_le_bytes([
+                *cigar_bytes
+                    .get(offset)
+                    .ok_or(OwnedRecordError::CigarCountOverflow { count: i })?,
+                *cigar_bytes
+                    .get(offset.saturating_add(1))
+                    .ok_or(OwnedRecordError::CigarCountOverflow { count: i })?,
+                *cigar_bytes
+                    .get(offset.saturating_add(2))
+                    .ok_or(OwnedRecordError::CigarCountOverflow { count: i })?,
+                *cigar_bytes
+                    .get(offset.saturating_add(3))
+                    .ok_or(OwnedRecordError::CigarCountOverflow { count: i })?,
+            ]);
+            let op = CigarOp::from_bam_u32(packed)
+                .ok_or(OwnedRecordError::CigarCountOverflow { count: i })?;
+            cigar.push(op);
+        }
+
+        // Decode 4-bit packed sequence to Base values
+        #[allow(clippy::indexing_slicing, reason = "bounds checked by parse_header")]
+        let seq_packed = &raw[h.cigar_end..h.seq_end];
+        let seq_ascii = super::seq::decode_seq(seq_packed, h.seq_len as usize);
+        let seq: Vec<Base> = seq_ascii.iter().map(|&b| Base::from(b)).collect();
+
+        // Quality scores
+        #[allow(clippy::indexing_slicing, reason = "bounds checked by parse_header")]
+        let qual = raw[h.seq_end..h.qual_end].to_vec();
+
+        // Auxiliary data (everything after qual)
+        #[allow(clippy::indexing_slicing, reason = "qual_end <= raw.len()")]
+        let aux = AuxData::from_bytes(raw[h.qual_end..].to_vec());
+
+        Ok(OwnedBamRecord {
+            ref_id: h.tid,
+            pos: i64::from(h.pos.get() as i32),
+            mapq: h.mapq,
+            flags: h.flags,
+            next_ref_id,
+            next_pos: i64::from(next_pos_i32),
+            template_len,
+            qname,
+            cigar,
+            seq,
+            qual,
+            aux,
+        })
+    }
+
     /// Start building a record with the required fields.
     pub fn builder(ref_id: i32, pos: i64, qname: Vec<u8>) -> OwnedBamRecordBuilder {
         OwnedBamRecordBuilder {
@@ -221,6 +302,24 @@ impl OwnedBamRecord {
             self.end_pos() as u64
         };
         reg2bin(beg, end, 14, 5) as u16
+    }
+
+    // r[impl bam.owned_record.aligned_pairs]
+    /// Iterator over (query_pos, ref_pos) alignment pairs.
+    ///
+    /// Yields one tuple per consumed base:
+    /// - M/=/X: `(Some(qpos), Some(rpos))`
+    /// - I: `(Some(qpos), None)`
+    /// - D/N: `(None, Some(rpos))`
+    /// - S/H/P: skipped entirely
+    pub fn aligned_pairs(&self) -> AlignedPairsIter<'_> {
+        AlignedPairsIter {
+            cigar: &self.cigar,
+            op_idx: 0,
+            op_offset: 0,
+            query_pos: 0,
+            ref_pos: self.pos,
+        }
     }
 
     /// Query-consuming length of the CIGAR.
@@ -364,6 +463,66 @@ impl OwnedBamRecord {
         buf.extend_from_slice(self.aux.as_bytes());
 
         Ok(())
+    }
+}
+
+/// Iterator yielding `(Option<usize>, Option<i64>)` alignment pairs from CIGAR operations.
+pub struct AlignedPairsIter<'a> {
+    cigar: &'a [CigarOp],
+    op_idx: usize,
+    op_offset: u32,
+    query_pos: usize,
+    ref_pos: i64,
+}
+
+impl<'a> Iterator for AlignedPairsIter<'a> {
+    type Item = (Option<usize>, Option<i64>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let op = self.cigar.get(self.op_idx)?;
+            if self.op_offset >= op.len {
+                self.op_idx = self.op_idx.checked_add(1)?;
+                self.op_offset = 0;
+                continue;
+            }
+
+            let consumes_q = op.op.consumes_query();
+            let consumes_r = op.op.consumes_ref();
+
+            // S/H/P: skip entirely
+            if !consumes_q && !consumes_r {
+                self.op_idx = self.op_idx.checked_add(1)?;
+                self.op_offset = 0;
+                continue;
+            }
+
+            // Soft clip: advance query but don't yield
+            if matches!(op.op, super::cigar::CigarOpType::SoftClip) {
+                self.query_pos = self.query_pos.saturating_add(1);
+                self.op_offset = self.op_offset.saturating_add(1);
+                continue;
+            }
+
+            let qpos = if consumes_q {
+                let q = self.query_pos;
+                self.query_pos = self.query_pos.saturating_add(1);
+                Some(q)
+            } else {
+                None
+            };
+
+            let rpos = if consumes_r {
+                let r = self.ref_pos;
+                self.ref_pos = self.ref_pos.saturating_add(1);
+                Some(r)
+            } else {
+                None
+            };
+
+            self.op_offset = self.op_offset.saturating_add(1);
+            return Some((qpos, rpos));
+        }
     }
 }
 
@@ -573,5 +732,148 @@ mod tests {
         assert_eq!(decoded.n_cigar_ops, 0);
         assert_eq!(decoded.seq_len, 3);
         assert_eq!(decoded.flags & 0x4, 0x4);
+    }
+
+    // r[verify bam.owned_record.aligned_pairs]
+    #[test]
+    fn aligned_pairs_simple_match() {
+        let rec = simple_record(); // 5M at pos 100
+        let pairs: Vec<_> = rec.aligned_pairs().collect();
+        assert_eq!(pairs.len(), 5);
+        assert_eq!(pairs[0], (Some(0), Some(100)));
+        assert_eq!(pairs[4], (Some(4), Some(104)));
+    }
+
+    #[test]
+    fn aligned_pairs_with_insertion() {
+        let rec = OwnedBamRecord::builder(0, 100, b"r".to_vec())
+            .cigar(vec![
+                CigarOp::new(CigarOpType::Match, 2),
+                CigarOp::new(CigarOpType::Insertion, 1),
+                CigarOp::new(CigarOpType::Match, 2),
+            ])
+            .seq(vec![Base::A; 5])
+            .qual(vec![30; 5])
+            .build()
+            .unwrap();
+
+        let pairs: Vec<_> = rec.aligned_pairs().collect();
+        assert_eq!(pairs.len(), 5);
+        assert_eq!(pairs[0], (Some(0), Some(100))); // M
+        assert_eq!(pairs[1], (Some(1), Some(101))); // M
+        assert_eq!(pairs[2], (Some(2), None)); // I — no ref pos
+        assert_eq!(pairs[3], (Some(3), Some(102))); // M
+        assert_eq!(pairs[4], (Some(4), Some(103))); // M
+    }
+
+    #[test]
+    fn aligned_pairs_with_deletion() {
+        let rec = OwnedBamRecord::builder(0, 100, b"r".to_vec())
+            .cigar(vec![
+                CigarOp::new(CigarOpType::Match, 2),
+                CigarOp::new(CigarOpType::Deletion, 3),
+                CigarOp::new(CigarOpType::Match, 2),
+            ])
+            .seq(vec![Base::A; 4])
+            .qual(vec![30; 4])
+            .build()
+            .unwrap();
+
+        let pairs: Vec<_> = rec.aligned_pairs().collect();
+        assert_eq!(pairs.len(), 7); // 2M + 3D + 2M
+        assert_eq!(pairs[0], (Some(0), Some(100)));
+        assert_eq!(pairs[1], (Some(1), Some(101)));
+        assert_eq!(pairs[2], (None, Some(102))); // D
+        assert_eq!(pairs[3], (None, Some(103))); // D
+        assert_eq!(pairs[4], (None, Some(104))); // D
+        assert_eq!(pairs[5], (Some(2), Some(105)));
+        assert_eq!(pairs[6], (Some(3), Some(106)));
+    }
+
+    #[test]
+    fn aligned_pairs_with_soft_clip() {
+        let rec = OwnedBamRecord::builder(0, 100, b"r".to_vec())
+            .cigar(vec![
+                CigarOp::new(CigarOpType::SoftClip, 2),
+                CigarOp::new(CigarOpType::Match, 3),
+            ])
+            .seq(vec![Base::A; 5])
+            .qual(vec![30; 5])
+            .build()
+            .unwrap();
+
+        let pairs: Vec<_> = rec.aligned_pairs().collect();
+        // Soft clips are skipped, only 3M pairs
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0], (Some(2), Some(100))); // qpos starts at 2 (after 2S)
+        assert_eq!(pairs[2], (Some(4), Some(102)));
+    }
+
+    #[test]
+    fn aligned_pairs_empty_cigar() {
+        let rec = OwnedBamRecord::builder(-1, -1, b"r".to_vec()).flags(0x4).build().unwrap();
+        let pairs: Vec<_> = rec.aligned_pairs().collect();
+        assert!(pairs.is_empty());
+    }
+
+    // Test from_raw_bam round-trip
+    #[test]
+    fn from_raw_bam_preserves_all_fields() {
+        let original = OwnedBamRecord::builder(1, 500, b"read1".to_vec())
+            .flags(0x63)
+            .mapq(42)
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
+            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
+            .qual(vec![30, 31, 32, 33, 34])
+            .next_ref_id(2)
+            .next_pos(1000)
+            .template_len(150)
+            .build()
+            .unwrap();
+
+        let mut aux = AuxData::new();
+        aux.set_string(*b"RG", b"grp1");
+        aux.set_int(*b"NM", 3).unwrap();
+        let mut original = original;
+        original.aux = aux;
+
+        // Serialize to BAM bytes
+        let mut buf = Vec::new();
+        original.to_bam_bytes(&mut buf).unwrap();
+
+        // Reconstruct from raw bytes
+        let reconstructed = OwnedBamRecord::from_raw_bam(&buf).unwrap();
+
+        assert_eq!(reconstructed.ref_id, 1);
+        assert_eq!(reconstructed.pos, 500);
+        assert_eq!(reconstructed.flags, 0x63);
+        assert_eq!(reconstructed.mapq, 42);
+        assert_eq!(reconstructed.next_ref_id, 2);
+        assert_eq!(reconstructed.next_pos, 1000);
+        assert_eq!(reconstructed.template_len, 150);
+        assert_eq!(reconstructed.qname, b"read1");
+        assert_eq!(reconstructed.cigar.len(), 1);
+        assert_eq!(reconstructed.cigar[0], CigarOp::new(CigarOpType::Match, 5));
+        assert_eq!(reconstructed.seq.len(), 5);
+        assert_eq!(reconstructed.qual, vec![30, 31, 32, 33, 34]);
+        assert_eq!(reconstructed.aux.get(*b"NM"), Some(super::super::aux::AuxValue::U8(3)));
+        assert_eq!(
+            reconstructed.aux.get(*b"RG"),
+            Some(super::super::aux::AuxValue::String(b"grp1"))
+        );
+    }
+
+    // Test full round-trip: build → serialize → from_raw_bam → serialize → compare
+    #[test]
+    fn full_roundtrip_via_raw_bam() {
+        let rec = simple_record();
+        let mut buf1 = Vec::new();
+        rec.to_bam_bytes(&mut buf1).unwrap();
+
+        let reconstructed = OwnedBamRecord::from_raw_bam(&buf1).unwrap();
+        let mut buf2 = Vec::new();
+        reconstructed.to_bam_bytes(&mut buf2).unwrap();
+
+        assert_eq!(buf1, buf2);
     }
 }
