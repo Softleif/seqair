@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 // r[impl bcf_writer.magic]
 // r[impl bcf_writer.buffer_reuse]
+// r[impl bcf_writer.bgzf_blocks]
 /// BCF binary writer with BGZF compression and optional CSI index.
 pub struct BcfWriter<W: Write> {
     bgzf: BgzfWriter<W>,

@@ -20,6 +20,8 @@ pub enum Filters {
 }
 
 // r[impl vcf_record.info_fields]
+// r[impl vcf_record.missing_values]
+// r[impl vcf_record.smallvec]
 /// Value for a single INFO field.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InfoValue {
@@ -123,6 +125,7 @@ pub struct SampleFields {
 }
 
 // r[impl vcf_record.fields]
+// r[impl vcf_record.pos_one_based]
 /// A VCF record with type-safe alleles.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VcfRecord {

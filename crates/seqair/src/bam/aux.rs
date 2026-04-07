@@ -169,6 +169,7 @@ impl<'a> AuxIter<'a> {
                 let v = if typ == b'Z' { AuxValue::String(slice) } else { AuxValue::Hex(slice) };
                 Some(Some(v))
             }
+            // r[impl bam.record.aux_array_unsupported]
             b'B' => {
                 let elem_type = *self.data.get(self.pos)?;
                 let count_bytes =

@@ -104,7 +104,7 @@ pub enum SamError {
     #[error("tabix index not found for {sam_path} (tried .tbi and .bai)")]
     IndexNotFound { sam_path: PathBuf },
 
-    // r[depends sam.index.csi+2]
+    // r[impl sam.index.csi+2]
     #[error(
         "found CSI index at {path} but CSI indexes are not yet supported. \
          Re-index with `tabix -p sam` to create a .tbi index instead.",

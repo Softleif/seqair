@@ -274,6 +274,7 @@ impl IndexBuilder {
     ) -> Result<(), IndexError> {
         use crate::bam::bgzf_writer::BgzfWriter;
 
+        // r[impl index_builder.tbi_empty_refs]
         // Collect only references that have data (non-empty bins)
         let active_refs: Vec<(usize, &RefIndexBuilder)> =
             self.refs.iter().enumerate().filter(|(_, r)| !r.bins.is_empty()).collect();

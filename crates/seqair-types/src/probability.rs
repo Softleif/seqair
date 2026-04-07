@@ -127,7 +127,7 @@ mod tests {
         assert!(Probability::new(f64::NEG_INFINITY).is_err());
     }
 
-    // r[verify types.probability.r23_from_str_typed_error]
+    // r[verify io.errors.typed_variants]
     #[test]
     fn from_str_returns_typed_error() {
         // Valid parse
@@ -143,14 +143,14 @@ mod tests {
         assert!(matches!(err, ProbabilityError::OutOfRange { value } if value == 1.5));
     }
 
-    // r[verify types.probability.r23_new_returns_out_of_range]
+    // r[verify io.errors.typed_variants]
     #[test]
     fn new_returns_out_of_range_variant() {
         let err = Probability::new(2.0).unwrap_err();
         assert!(matches!(err, ProbabilityError::OutOfRange { value } if value == 2.0));
     }
 
-    // r[verify types.probability.r24_error_reexport]
+    // r[verify io.minimal_public_api]
     #[test]
     fn error_accessible_from_crate_root() {
         let err: crate::ProbabilityError = ProbabilityError::OutOfRange { value: 2.0 };

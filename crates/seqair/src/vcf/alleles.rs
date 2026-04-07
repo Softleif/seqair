@@ -201,6 +201,7 @@ impl Alleles {
     }
 
     // r[impl vcf_record.alleles_rlen]
+    // r[impl vcf_record.rlen]
     /// Reference length for BCF rlen field.
     pub fn rlen(&self) -> usize {
         match self {

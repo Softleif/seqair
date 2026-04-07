@@ -190,6 +190,7 @@ pub struct GtFormatHandle {
 // ── Handle encode implementations ──────────────────────────────────────
 
 // r[impl bcf_encoder.handle_encode]
+// r[impl bcf_encoder.info_counting]
 
 impl<T: BcfValue> ScalarInfoHandle<T> {
     // r[impl bcf_encoder.bcf_value_int] — uses scalar_type_code for smallest-int selection
@@ -241,6 +242,7 @@ impl<T: BcfValue> PerAlleleInfoHandle<T> {
     }
 }
 
+// r[impl bcf_encoder.format_field_major]
 impl<T: BcfValue> ScalarFormatHandle<T> {
     /// Encode a single-sample scalar FORMAT field.
     // r[impl bcf_encoder.bcf_value_int] — uses scalar_type_code for smallest-int selection
@@ -432,6 +434,7 @@ impl Alleles {
             value: u64::from(contig.0),
             target_type: "i32",
         })?;
+        // r[impl bcf_writer.coordinate_system]
         enc.pos_0based =
             i32::try_from(pos.to_zero_based().get()).map_err(|_| VcfError::ValueOverflow {
                 field: "pos",
@@ -456,11 +459,13 @@ impl Alleles {
             }
         })?;
 
+        // r[impl bcf_writer.qual_missing]
         let qual_bits = match qual {
             Some(q) => q.to_bits(),
             None => FLOAT_MISSING,
         };
 
+        // r[impl bcf_writer.fixed_fields]
         // 24-byte fixed header (n_info/n_allele and n_fmt/n_sample patched at emit)
         enc.shared_buf.extend_from_slice(&enc.tid.to_le_bytes());
         enc.shared_buf.extend_from_slice(&enc.pos_0based.to_le_bytes());
@@ -529,6 +534,7 @@ impl<'a> BcfRecordEncoder<'a> {
         })?;
         record.alleles.begin_record(self, ContigHandle(tid_u32), record.pos, record.qual)?;
 
+        // r[impl bcf_writer.filter_pass]
         // Filter
         match &record.filters {
             Filters::Pass => {
@@ -555,6 +561,7 @@ impl<'a> BcfRecordEncoder<'a> {
             }
         }
 
+        // r[impl bcf_writer.shared_variable]
         // INFO fields
         for (key, value) in record.info.iter() {
             let idx = header
@@ -571,6 +578,7 @@ impl<'a> BcfRecordEncoder<'a> {
             self.n_info = self.n_info.saturating_add(1);
         }
 
+        // r[impl bcf_writer.indiv_field_major]
         // FORMAT / individual fields
         let n_sample = record.samples.values.len();
         if n_sample > 0 && !record.samples.format_keys.is_empty() {

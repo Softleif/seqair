@@ -450,7 +450,7 @@ struct ReconstructResult {
 // r[impl cram.record.features]
 // r[impl cram.record.sequence]
 // r[impl cram.record.cigar_reconstruction]
-// r[impl cram.slice.ref_bounds_warning]
+// r[impl cram.slice.ref_bounds_warning+2]
 /// Look up a reference base by index, logging a warning on the first out-of-bounds access
 /// per slice and falling back to `b'N'`.
 fn ref_base_at(reference_seq: &[u8], index: usize, warned: &mut bool) -> u8 {
@@ -617,7 +617,7 @@ fn decode_features_and_reconstruct(
             feature_idx = feature_idx.wrapping_add(1);
 
             match &feature.data {
-                // r[related cram.slice.ref_bounds_warning]
+                // r[related cram.slice.ref_bounds_warning+2]
                 FeatureData::Substitution(code) => {
                     let ref_base = ref_base_at(
                         reference_seq,
@@ -880,7 +880,7 @@ mod tests {
         );
     }
 
-    // r[verify cram.slice.ref_bounds_warning]
+    // r[verify cram.slice.ref_bounds_warning+2]
     #[test]
     fn ref_base_at_warns_on_out_of_bounds() {
         // When requesting a base beyond the reference length, ref_base_at should

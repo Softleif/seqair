@@ -353,7 +353,7 @@ mod tests {
         );
     }
 
-    // r[verify types.region_string.r22_no_string_in_error]
+    // r[verify io.errors.typed_variants]
     #[test]
     fn test_malformed_is_unit_variant() {
         let err = RegionString::from_str(":100").unwrap_err();
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(err.to_string(), "Malformed region string");
     }
 
-    // r[verify types.region_string.r24_error_reexport]
+    // r[verify io.minimal_public_api]
     #[test]
     fn test_error_accessible_from_crate_root() {
         // Verify the error type is accessible via the crate re-export

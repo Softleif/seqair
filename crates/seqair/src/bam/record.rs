@@ -78,6 +78,7 @@ impl BamRecord {
             // r[impl bam.record.seq_at_simd+2]
             seq: seq::decode_seq(&raw[h.cigar_end..h.seq_end], seq_len_usize).into_boxed_slice(),
             qual: raw[h.seq_end..h.qual_end].into(),
+            // r[impl bam.record.raw_aux]
             aux: raw[h.qual_end..].into(),
         })
     }

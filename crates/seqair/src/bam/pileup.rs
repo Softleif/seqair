@@ -101,6 +101,7 @@ impl PileupColumn {
         self.pos
     }
 
+    // r[impl pileup_indel.depth_includes_all]
     #[must_use]
     pub fn depth(&self) -> usize {
         self.alignments.len()
@@ -171,6 +172,7 @@ impl PileupAlignment {
         &self.op
     }
 
+    // r[impl pileup.qpos_none]
     #[must_use]
     pub fn qpos(&self) -> Option<usize> {
         match self.op {

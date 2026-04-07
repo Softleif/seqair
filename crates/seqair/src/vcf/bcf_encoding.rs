@@ -27,6 +27,7 @@ pub const INT8_MAX: i32 = 127;
 pub const INT16_MIN: i32 = -32760;
 pub const INT16_MAX: i32 = 32767;
 
+// r[impl bcf_writer.typed_values]
 /// Write a BCF type byte: `(count << 4) | type_code`.
 /// For count >= 15, emits overflow encoding with a typed integer count.
 pub fn encode_type_byte(buf: &mut Vec<u8>, count: usize, type_code: u8) {
@@ -47,6 +48,7 @@ pub fn encode_type_byte(buf: &mut Vec<u8>, count: usize, type_code: u8) {
     }
 }
 
+// r[impl bcf_writer.string_encoding]
 /// Encode a string as a BCF typed char vector (type code 7).
 pub fn encode_typed_string(buf: &mut Vec<u8>, s: &[u8]) {
     encode_type_byte(buf, s.len(), BCF_BT_CHAR);

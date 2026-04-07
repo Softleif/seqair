@@ -18,6 +18,7 @@ pub const CIGAR_EQ: u8 = 7;
 pub const CIGAR_X: u8 = 8;
 
 // r[impl io.typed_cigar_ops]
+// r[impl cigar.index]
 /// Strongly-typed CIGAR operation kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CigarOpType {
@@ -200,6 +201,7 @@ impl CigarMapping {
         }
     }
 
+    // r[impl cigar.qpos_at]
     #[inline]
     pub fn pos_info_at(&self, pos: Pos<Zero>) -> Option<CigarPosInfo> {
         match self {
@@ -282,6 +284,7 @@ fn build_compact_ops(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> Option<SmallVec<
             ref_start_i64 >= i64::from(i32::MIN) && ref_start_i64 <= i64::from(i32::MAX),
             "ref_start {ref_start_i64} exceeds i32 range — BAM positions must fit in i32"
         );
+        // r[impl cigar.compact_op_position_invariant]
         ops.push(CompactOp {
             ref_start: ref_start_i64 as i32,
             query_start: query_off,
@@ -300,6 +303,7 @@ fn build_compact_ops(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> Option<SmallVec<
     Some(ops)
 }
 
+// r[impl pileup_indel.insertion_len]
 /// Sum insertion lengths for consecutive I ops after index `op_idx`.
 #[inline]
 fn next_insertion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
@@ -315,6 +319,8 @@ fn next_insertion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
     if total > 0 { Some(total) } else { None }
 }
 
+// r[impl pileup_indel.insertion_at_last_match]
+// r[impl pileup_indel.no_orphan_insertions]
 #[inline]
 fn classify_op(
     ops: &[CompactOp],
@@ -369,6 +375,7 @@ fn pos_info_linear(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
     None
 }
 
+// r[impl perf.cigar_binary_search]
 #[inline]
 fn pos_info_bsearch(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
     let pos_val = pos.get();
