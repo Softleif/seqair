@@ -4,11 +4,11 @@ A BAM file can be hundreds of gigabytes. Without an index, finding all reads ove
 
 The index uses a **binning scheme**: the genome is divided into hierarchical bins of decreasing size (the whole reference → 512 Mbp → 64 Mbp → ... → 16 KiB leaf bins). Each bin stores a list of **chunks** — pairs of virtual offsets (see `bgzf.md`) marking the start and end of compressed byte ranges in the BAM file that contain reads falling into that bin. A **linear index** provides an additional optimization: for each 16 KiB window, it stores the minimum virtual offset of any read starting in that window, allowing the reader to skip chunks that are entirely before the query start.
 
-> **Sources:** [SAM1] §5 "Indexing BAM" — binning algorithm; §5.1.1 "Basic binning index" — bin hierarchy and sizes; §5.2 "The BAI index format for BAM files" — binary format; §5.3 "C source code for computing bin number and overlapping bins" — `reg2bin`/`reg2bins`. [CSI] — for CSI format. See [references.md](references.md).
+> **Sources:** [SAM1] §5 "Indexing BAM" — binning algorithm; §5.1.1 "Basic binning index" — bin hierarchy and sizes; §5.2 "The BAI index format for BAM files" — binary format; §5.3 "C source code for computing bin number and overlapping bins" — `reg2bin`/`reg2bins`. [CSI] — for CSI format. See [References](./99-references.md).
 
 ## BAI format
 
-> *[SAM1] §5.2 "The BAI index format for BAM files" — magic, n_ref, n_bin, chunk virtual offsets, n_intv linear index*
+> _[SAM1] §5.2 "The BAI index format for BAM files" — magic, n_ref, n_bin, chunk virtual offsets, n_intv linear index_
 
 r[bam.index.bai_magic]
 A BAI file MUST begin with the magic bytes `BAI\1` (0x42, 0x41, 0x49, 0x01). The reader MUST reject files that do not match.
@@ -27,7 +27,7 @@ The BAI binning scheme uses `reg2bin(beg, end)` where bin 0 spans the whole refe
 
 ## Bin 0
 
-> *[SAM1] §5.1.1 "Basic binning index" — bin 0 spans 512 Mbp, bins 1–8 span 64 Mbp*
+> _[SAM1] §5.1.1 "Basic binning index" — bin 0 spans 512 Mbp, bins 1–8 span 64 Mbp_
 
 Bin 0 is the root of the binning hierarchy, covering the entire reference sequence (0 to 2^29). Each alignment is placed in the smallest bin that fully contains its `[pos, end)` interval. An alignment is placed in bin 0 when its interval straddles a level-1 boundary (multiples of 2^26 = 64 Mbp). This can happen to short reads (e.g. 150 bp) that cross positions like 67,108,864 or 134,217,728. See [SAM spec §5.3](https://samtools.github.io/hts-specs/SAMv1.pdf).
 
@@ -50,7 +50,7 @@ The reader uses the unified `query()` path, which merges nearby and distant chun
 
 ## CSI format
 
-> *[CSI] — min_shift, depth, l_aux header; per-bin loffset; parameterised reg2bin/reg2bins*
+> _[CSI] — min_shift, depth, l_aux header; per-bin loffset; parameterised reg2bin/reg2bins_
 
 CSI is an alternative index format that supports larger genomes and arbitrary bin sizes. It uses the same conceptual approach (bins + chunks + linear index) but with a configurable minimum shift and depth.
 

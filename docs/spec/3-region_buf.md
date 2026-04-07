@@ -1,6 +1,6 @@
 # Region Buffer
 
-> **Sources:** The RegionBuf design is seqair-specific (bulk I/O optimisation for cluster storage). BGZF block decompression follows [SAM1] §4.1. Virtual offsets are defined in [SAM1] §4.1 "Random access". Index chunks come from [SAM1] §5.2 (BAI) or [TABIX] (TBI). See [references.md](references.md).
+> **Sources:** The RegionBuf design is seqair-specific (bulk I/O optimisation for cluster storage). BGZF block decompression follows [SAM1] §4.1. Virtual offsets are defined in [SAM1] §4.1 "Random access". Index chunks come from [SAM1] §5.2 (BAI) or [TABIX] (TBI). See [References](./99-references.md).
 
 ## Background
 
@@ -15,6 +15,7 @@ On local SSDs this works fine — seek + read latency is microseconds. On **clus
 `RegionBuf` solves this by **pre-fetching all compressed bytes for a region into RAM in one shot**, then decompressing from the in-memory buffer. The I/O pattern changes from "hundreds of small reads" to "one large sequential read" per region. Since Rastair processes BAM segments in parallel (one thread per segment), each thread creates its own `RegionBuf` with no contention.
 
 The flow:
+
 1. Query the BAM index → get a list of chunks (compressed byte ranges)
 2. Merge overlapping/adjacent chunks into larger contiguous ranges
 3. Read each merged range with one `seek` + `read` into a `Vec<u8>`

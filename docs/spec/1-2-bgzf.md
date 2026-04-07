@@ -4,11 +4,11 @@ BGZF (Blocked Gzip Format) is the compression layer used by BAM and other HTS (H
 
 A BGZF file is simply a concatenation of these gzip blocks, ending with a special empty EOF marker block. Each block has a standard gzip header with an extra field that encodes the block's total compressed size (BSIZE), which the reader uses to locate where the next block begins.
 
-> **Sources:** All rules in this file derive from [SAM1] §4.1 "The BGZF compression format", §4.1 "Random access", and §4.1 "End-of-file marker". See [references.md](references.md).
+> **Sources:** All rules in this file derive from [SAM1] §4.1 "The BGZF compression format", §4.1 "Random access", and §4.1 "End-of-file marker". See [References](./99-references.md).
 
 ## Block structure
 
-> *[SAM1] §4.1 "The BGZF compression format" — block layout, extra field, BSIZE*
+> _[SAM1] §4.1 "The BGZF compression format" — block layout, extra field, BSIZE_
 
 r[bgzf.magic]
 A BGZF block MUST begin with the gzip magic bytes `1f 8b 08 04` (gzip, DEFLATE, FEXTRA flag set).
@@ -27,7 +27,7 @@ An EOF marker block has ISIZE=0. When encountered, the reader MUST signal end-of
 
 ## Virtual offsets
 
-> *[SAM1] §4.1 "Random access" — virtual file offset definition*
+> _[SAM1] §4.1 "Random access" — virtual file offset definition_
 
 Because BGZF blocks are at known compressed file offsets and have known uncompressed sizes, any byte in the uncompressed stream can be addressed with a **virtual offset**: a packed 64-bit value that combines "which block" and "where within that block." BAM index files (`.bai`) store virtual offsets to point at specific records.
 
@@ -52,7 +52,7 @@ Decompression SHOULD use the `libdeflater` crate (Rust bindings to the libdeflat
 
 ## Integrity
 
-> *[SAM1] §4.1 "The BGZF compression format" — gzip footer CRC32 and ISIZE fields*
+> _[SAM1] §4.1 "The BGZF compression format" — gzip footer CRC32 and ISIZE fields_
 
 Each gzip block includes a CRC32 checksum of the uncompressed data. Verifying this catches silent data corruption from disk errors, network glitches on cluster storage, or truncated writes.
 
@@ -72,7 +72,7 @@ The reader MUST track the current block's compressed file offset for virtual off
 
 ## Writing
 
-> *[SAM1] §4.1 "The BGZF compression format" — block structure, gzip member format, BC extra field, EOF marker block*
+> _[SAM1] §4.1 "The BGZF compression format" — block structure, gzip member format, BC extra field, EOF marker block_
 
 r[bgzf.writer]
 The writer MUST accept arbitrary byte sequences and emit valid BGZF blocks. Each block MUST contain a complete gzip member with the `BC` extra subfield, DEFLATE-compressed payload, CRC32 checksum, and ISIZE footer.

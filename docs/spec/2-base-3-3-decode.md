@@ -1,12 +1,13 @@
 # Base-typed Sequence Decoding
 
-> **Sources:** [SAM1] §4.2.4 "SEQ and QUAL encoding" — 4-bit nibble-to-base mapping (`=ACMGRSVTWYHKDBN`). The `Base` enum, SIMD acceleration, and direct-to-`Base` decode table are seqair-specific design choices; the upstream spec defines only the nibble codes. See [references.md](references.md).
+> **Sources:** [SAM1] §4.2.4 "SEQ and QUAL encoding" — 4-bit nibble-to-base mapping (`=ACMGRSVTWYHKDBN`). The `Base` enum, SIMD acceleration, and direct-to-`Base` decode table are seqair-specific design choices; the upstream spec defines only the nibble codes. See [References](./99-references.md).
 
 ## Background
 
 BAM sequences are stored as 4-bit nibbles (two bases per byte). The standard decode table maps nibbles to ASCII characters (`=ACMGRSVTWYHKDBN`). Downstream, the ASCII bytes must be converted to `Base` enum values (A, C, G, T, Unknown) at every pileup position — billions of times for whole-genome data.
 
 By decoding directly into `Base` values at record construction time, we:
+
 1. Eliminate the per-position `Base::from(u8)` conversion (a LUT lookup per read per position)
 2. Get compile-time type safety — a `Base` is guaranteed to be one of 5 valid values, not an arbitrary byte
 3. Collapse IUPAC ambiguity codes (M, R, W, S, Y, K, etc.) and `=` to `Base::Unknown` at decode time, instead of at each use site

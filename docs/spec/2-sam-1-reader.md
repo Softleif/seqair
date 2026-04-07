@@ -2,7 +2,7 @@
 
 A bgzf-compressed, indexed SAM reader for region-based random access. Plain (uncompressed) SAM files cannot be indexed and are NOT supported — users must compress with `bgzip` first.
 
-> **Sources:** [SAM1] §1 "The SAM Format Specification" — SAM text format, mandatory fields, FLAG bits, CIGAR string, header lines (@HD/@SQ/@RG/@PG); §1.3 "The header section"; §1.4 "The alignment section: mandatory fields". [TABIX] — TBI index format and SAM column configuration. [SAM1] §4.1 — BGZF decompression (shared with BAM). The coordinate conversion (1-based → 0-based) and aux-to-BAM-binary serialization are seqair-specific. See [references.md](references.md).
+> **Sources:** [SAM1] §1 "The SAM Format Specification" — SAM text format, mandatory fields, FLAG bits, CIGAR string, header lines (@HD/@SQ/@RG/@PG); §1.3 "The header section"; §1.4 "The alignment section: mandatory fields". [TABIX] — TBI index format and SAM column configuration. [SAM1] §4.1 — BGZF decompression (shared with BAM). The coordinate conversion (1-based → 0-based) and aux-to-BAM-binary serialization are seqair-specific. See [References](./99-references.md).
 
 ## Context
 
@@ -20,14 +20,15 @@ If the file does not start with BGZF magic (`1f 8b` with `BC` subfield), the rea
 
 ## Header parsing
 
-r[sam.header.parse]
-The SAM header consists of all lines starting with `@` at the beginning of the file. The reader MUST:
-1. Read lines from the BGZF stream until a line does NOT start with `@`.
-2. Record the BGZF virtual offset of the first alignment line (for seeking past the header).
-3. Parse `@SQ` lines to extract target names (`SN` tag) and lengths (`LN` tag).
-4. Construct a `BamHeader` from the parsed text via `BamHeader::from_sam_text()`.
-
-Lines starting with `@` that appear after the first alignment line are NOT header continuation — they are malformed alignment lines and MUST be treated as parse errors.
+> r[sam.header.parse]
+> The SAM header consists of all lines starting with `@` at the beginning of the file. The reader MUST:
+>
+> 1. Read lines from the BGZF stream until a line does NOT start with `@`.
+> 2. Record the BGZF virtual offset of the first alignment line (for seeking past the header).
+> 3. Parse `@SQ` lines to extract target names (`SN` tag) and lengths (`LN` tag).
+> 4. Construct a `BamHeader` from the parsed text via `BamHeader::from_sam_text()`.
+>
+> Lines starting with `@` that appear after the first alignment line are NOT header continuation — they are malformed alignment lines and MUST be treated as parse errors.
 
 r[sam.header.sq_required]
 If no `@SQ` lines are present, the reader MUST return an error. Without `@SQ` lines, target name→tid mapping is impossible and `fetch_into` cannot work.
@@ -37,26 +38,26 @@ The full header text (all `@` lines joined with newlines) MUST be stored in `Bam
 
 ## Alignment line parsing
 
-> *[SAM1] §1.4 "The alignment section: mandatory fields" — 11 mandatory fields: QNAME, FLAG, RNAME, POS (1-based), MAPQ, CIGAR, RNEXT, PNEXT, TLEN, SEQ, QUAL; QUAL Phred+33 encoding*
+> _[SAM1] §1.4 "The alignment section: mandatory fields" — 11 mandatory fields: QNAME, FLAG, RNAME, POS (1-based), MAPQ, CIGAR, RNEXT, PNEXT, TLEN, SEQ, QUAL; QUAL Phred+33 encoding_
 
-r[sam.record.parse]
-Each alignment line MUST be split on TAB characters into the 11 mandatory fields plus optional tag fields. The parser MUST handle:
-
-| Field | SAM type | Conversion to internal representation |
-|-------|----------|--------------------------------------|
-| QNAME | string | stored as bytes in name slab |
-| FLAG | integer | u16 (identical to BAM flags) |
-| RNAME | string | converted to tid via header's `name_to_tid` map |
-| POS | 1-based integer | subtract 1 for 0-based internal pos (i64) |
-| MAPQ | integer | u8 (255 means unavailable) |
-| CIGAR | string | parsed to packed BAM CIGAR ops (u32 per op: `len << 4 | op`) |
-| RNEXT | string | `=` means same as RNAME, `*` means unavailable — not stored in RecordStore |
-| PNEXT | integer | not stored in RecordStore (mate info) |
-| TLEN | integer | not stored in RecordStore (template length) |
-| SEQ | string | each ASCII char decoded to `Base` enum |
-| QUAL | string | each char minus 33 for Phred score; `*` means all 0xFF |
-
-The parser MUST validate each field and produce clear error messages for malformed records: non-integer POS, FLAG > 65535, negative MAPQ, etc. Real-world SAM files from non-standard tools may contain hand-edited or corrupted records.
+> r[sam.record.parse]
+> Each alignment line MUST be split on TAB characters into the 11 mandatory fields plus optional tag fields. The parser MUST handle:
+>
+> | Field | SAM type        | Conversion to internal representation                                      |
+> | ----- | --------------- | -------------------------------------------------------------------------- | ---- |
+> | QNAME | string          | stored as bytes in name slab                                               |
+> | FLAG  | integer         | u16 (identical to BAM flags)                                               |
+> | RNAME | string          | converted to tid via header's `name_to_tid` map                            |
+> | POS   | 1-based integer | subtract 1 for 0-based internal pos (i64)                                  |
+> | MAPQ  | integer         | u8 (255 means unavailable)                                                 |
+> | CIGAR | string          | parsed to packed BAM CIGAR ops (u32 per op: `len << 4                      | op`) |
+> | RNEXT | string          | `=` means same as RNAME, `*` means unavailable — not stored in RecordStore |
+> | PNEXT | integer         | not stored in RecordStore (mate info)                                      |
+> | TLEN  | integer         | not stored in RecordStore (template length)                                |
+> | SEQ   | string          | each ASCII char decoded to `Base` enum                                     |
+> | QUAL  | string          | each char minus 33 for Phred score; `*` means all 0xFF                     |
+>
+> The parser MUST validate each field and produce clear error messages for malformed records: non-integer POS, FLAG > 65535, negative MAPQ, etc. Real-world SAM files from non-standard tools may contain hand-edited or corrupted records.
 
 r[sam.record.coordinate_conversion]
 SAM POS is 1-based; the internal representation is 0-based (matching BAM). The parser MUST subtract 1 from POS. A POS of 0 in SAM means unmapped — after subtraction this becomes -1 (as i64). Unmapped records are filtered by FLAG 0x4 before reaching this point, so -1 positions should not appear in the RecordStore.
@@ -72,20 +73,21 @@ Note: the SAM character `=` means "identical to the reference base at this posit
 r[sam.record.qual_decode]
 QUAL characters MUST have 33 subtracted (Phred+33 encoding). The string `*` means quality unavailable; all quality bytes MUST be set to 0xFF (255). QUAL length MUST equal SEQ length when both are present.
 
-r[sam.record.aux_tags]
-Optional fields after the 11th column follow the format `TAG:TYPE:VALUE`. They MUST be serialized to BAM binary aux format for storage in the data slab:
-- `A` (char): `[tag0, tag1, 'A', char]`
-- `i` (integer): `[tag0, tag1, type, bytes...]` where type is the smallest fitting BAM integer type:
-  - [-128, 127] → `c` (int8)
-  - [128, 255] → `C` (uint8)
-  - [-32768, -129] or [256, 32767] → `s` (int16)
-  - [32768, 65535] → `S` (uint16)
-  - [-2147483648, -32769] or [65536, 2147483647] → `i` (int32)
-  - [2147483648, 4294967295] → `I` (uint32)
-- `f` (float): `[tag0, tag1, 'f', le_f32_bytes]`
-- `Z` (string): `[tag0, tag1, 'Z', string_bytes, 0x00]`
-- `H` (hex): `[tag0, tag1, 'H', hex_bytes, 0x00]`
-- `B` (array): `[tag0, tag1, 'B', subtype, count_le32, values...]`
+> r[sam.record.aux_tags]
+> Optional fields after the 11th column follow the format `TAG:TYPE:VALUE`. They MUST be serialized to BAM binary aux format for storage in the data slab:
+>
+> - `A` (char): `[tag0, tag1, 'A', char]`
+> - `i` (integer): `[tag0, tag1, type, bytes...]` where type is the smallest fitting BAM integer type:
+>   - [-128, 127] → `c` (int8)
+>   - [128, 255] → `C` (uint8)
+>   - [-32768, -129] or [256, 32767] → `s` (int16)
+>   - [32768, 65535] → `S` (uint16)
+>   - [-2147483648, -32769] or [65536, 2147483647] → `i` (int32)
+>   - [2147483648, 4294967295] → `I` (uint32)
+> - `f` (float): `[tag0, tag1, 'f', le_f32_bytes]`
+> - `Z` (string): `[tag0, tag1, 'Z', string_bytes, 0x00]`
+> - `H` (hex): `[tag0, tag1, 'H', hex_bytes, 0x00]`
+> - `B` (array): `[tag0, tag1, 'B', subtype, count_le32, values...]`
 
 Note: the integer type selected here may differ from the type used by the original BAM writer, since SAM text loses the specific width information. This is an inherent limitation — see `r[unified.push_fields_equivalence]`.
 
@@ -97,16 +99,17 @@ SAM aux integer values (type `i`) are serialized into the smallest BAM integer t
 
 ## Region fetching
 
-r[sam.reader.fetch_into]
-`fetch_into(tid, start, end, store)` MUST:
-1. Query the tabix/CSI index for BGZF virtual offset ranges overlapping the region.
-2. Use `RegionBuf` (or equivalent bulk read) to load compressed bytes.
-3. Decompress BGZF blocks to text.
-4. Split text into lines (on `\n`).
-5. Parse each alignment line.
-6. Filter: skip lines where RNAME's tid doesn't match, or where the record doesn't overlap `[start, end]`.
-7. Skip unmapped reads (FLAG 0x4).
-8. Push passing records into the RecordStore.
+> r[sam.reader.fetch_into]
+> `fetch_into(tid, start, end, store)` MUST:
+>
+> 1. Query the tabix/CSI index for BGZF virtual offset ranges overlapping the region.
+> 2. Use `RegionBuf` (or equivalent bulk read) to load compressed bytes.
+> 3. Decompress BGZF blocks to text.
+> 4. Split text into lines (on `\n`).
+> 5. Parse each alignment line.
+> 6. Filter: skip lines where RNAME's tid doesn't match, or where the record doesn't overlap `[start, end]`.
+> 7. Skip unmapped reads (FLAG 0x4).
+> 8. Push passing records into the RecordStore.
 
 r[sam.reader.overlap_filter+2]
 The overlap filter uses half-open intervals (0-based). `end_pos` MUST be computed from the parsed CIGAR. When CIGAR is `*` (unavailable), `end_pos = pos` (point record).
@@ -119,8 +122,8 @@ Records MUST be added to the store in coordinate-sorted order. Since bgzf-compre
 
 ## Tabix / CSI index
 
-> *[TABIX] — TBI magic `TBI\x01`, header fields, n_ref, bin/chunk/linear-index structure, format=1 for SAM*
-> *[CSI] — CSI magic `CSI\x01`, min_shift, depth, l_aux, per-bin loffset*
+> _[TABIX] — TBI magic `TBI\x01`, header fields, n_ref, bin/chunk/linear-index structure, format=1 for SAM_
+> _[CSI] — CSI magic `CSI\x01`, min_shift, depth, l_aux, per-bin loffset_
 
 r[sam.index.tabix]
 The reader MUST support tabix (`.tbi`) indexes. Tabix is a generic index for bgzf-compressed, TAB-delimited files. For SAM, the format code is `1` (not `0`/generic). The column configuration (seq_col=3, beg_col=4, end_col=0) is implicit for format=1 and may be ignored by some implementations; the reader SHOULD NOT reject a tabix file based on stored column values when format=1 is present.
@@ -164,6 +167,7 @@ r[sam.perf.bulk_read]
 Like BAM, the SAM reader SHOULD use `RegionBuf`-style bulk I/O: read all compressed bytes for the region in one large I/O operation, then decompress and parse from memory. This is critical for NFS/Lustre performance.
 
 Text parsing is inherently slower than BAM binary decoding. The SAM reader is expected to be 2-5× slower than BAM for the same data due to text parsing overhead and larger compressed size. This is acceptable since SAM is not the recommended input format. Implementation guidance:
+
 - Use `memchr` for fast TAB and newline scanning.
 - Avoid allocations during parsing (reuse line buffers).
 - Parse integers without going through `String` (direct byte-to-int conversion).

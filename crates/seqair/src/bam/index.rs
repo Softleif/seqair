@@ -158,8 +158,6 @@ impl BamIndex {
         BamIndex { references: Vec::new() }
     }
 
-    // r[impl tabix.magic]
-    // r[impl tabix.header]
     // r[impl tabix.bai_reuse]
     // r[impl tabix.index_data]
     // r[impl tabix.compression]
@@ -179,6 +177,7 @@ impl BamIndex {
         if data.len() < 4 {
             return Err(BaiError::TruncatedTabixHeader { reason: "file too short for magic" });
         }
+        // r[impl tabix.magic]
         if !data.starts_with(b"TBI\x01") {
             let mut found = [0u8; 4];
             if let Some(src) = data.get(..4) {
@@ -189,6 +188,7 @@ impl BamIndex {
 
         let mut pos = 4;
         // Read tabix header fields (skip over them — we reuse BAI parsing)
+        // r[impl tabix.header]
         let n_ref = read_i32(&data, &mut pos)?;
         let _format = read_i32(&data, &mut pos)?;
         let _col_seq = read_i32(&data, &mut pos)?;

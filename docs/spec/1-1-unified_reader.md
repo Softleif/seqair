@@ -13,21 +13,23 @@ seqair reads BAM, bgzf-compressed SAM, and CRAM files through a format-agnostic 
 
 ## Format detection
 
-r[unified.detect_format]
-`IndexedReader::open(path)` MUST auto-detect the file format by inspecting magic bytes:
-- Bytes `1f 8b` (gzip magic) → verify BGZF structure (extra field with `BC` subfield). If not BGZF, reject with error: "file is gzip-compressed but not BGZF; use `bgzip` instead of `gzip`." If BGZF, decompress the first block:
-  - Starts with `BAM\x01` → BAM format
-  - Starts with `@` (0x40) → bgzf-compressed SAM
-  - Otherwise → reject with error naming supported formats
-- Bytes `43 52 41 4d` (`CRAM`) → CRAM format
-- Byte `@` (0x40) at position 0 → uncompressed SAM. Reject with error: "uncompressed SAM files cannot be indexed; compress with `bgzip file.sam` then index with `samtools index file.sam.gz`."
-- Otherwise → return an error listing supported formats (BAM, bgzf-compressed SAM, CRAM)
+> r[unified.detect_format]
+> `IndexedReader::open(path)` MUST auto-detect the file format by inspecting magic bytes:
+>
+> - Bytes `1f 8b` (gzip magic) → verify BGZF structure (extra field with `BC` subfield). If not BGZF, reject with error: "file is gzip-compressed but not BGZF; use `bgzip` instead of `gzip`." If BGZF, decompress the first block:
+> - Starts with `BAM\x01` → BAM format
+> - Starts with `@` (0x40) → bgzf-compressed SAM
+> - Otherwise → reject with error naming supported formats
+> - Bytes `43 52 41 4d` (`CRAM`) → CRAM format
+> - Byte `@` (0x40) at position 0 → uncompressed SAM. Reject with error: "uncompressed SAM files cannot be indexed; compress with `bgzip file.sam` then index with `samtools index file.sam.gz`."
+> - Otherwise → return an error listing supported formats (BAM, bgzf-compressed SAM, CRAM)
 
-r[unified.detect_index]
-After format detection, the reader MUST locate the appropriate index file:
-- BAM: `.bai`, `.bam.bai`, or `.csi` (CSI supports references > 512 Mbp that BAI cannot)
-- SAM: `.tbi` or `.csi` (tabix or CSI index)
-- CRAM: `.crai` (CRAM index)
+> r[unified.detect_index]
+> After format detection, the reader MUST locate the appropriate index file:
+>
+> - BAM: `.bai`, `.bam.bai`, or `.csi` (CSI supports references > 512 Mbp that BAI cannot)
+> - SAM: `.tbi` or `.csi` (tabix or CSI index)
+> - CRAM: `.crai` (CRAM index)
 
 r[unified.detect_error]
 If the format is detected but no matching index is found, the error MUST name the expected index extension and suggest the tool to create it (`samtools index` for BAM/CRAM, `samtools index` or `tabix` for SAM).
@@ -37,28 +39,30 @@ If the format is detected but no matching index is found, the error MUST name th
 r[unified.reader_enum]
 The unified reader MUST be an enum dispatching to format-specific readers, not a trait object. This avoids dynamic dispatch overhead in the hot path and keeps the type concrete for `fork()`.
 
-r[unified.reader_api]
-The unified reader MUST expose:
-- `header() -> &BamHeader` — all formats produce the same header type (target names, lengths, tid lookup). The SAM and CRAM parsers convert their native header representations to `BamHeader`.
-- `fetch_into(tid, start, end, store) -> Result<usize>` — populates a `RecordStore` with records overlapping the region, identically to the BAM path.
-- `fork() -> Result<Self>` — creates a lightweight copy sharing immutable state.
-- `shared() -> &Arc<_>` — access to shared state for `Arc::ptr_eq` testing.
+> r[unified.reader_api]
+> The unified reader MUST expose:
+>
+> - `header() -> &BamHeader` — all formats produce the same header type (target names, lengths, tid lookup). The SAM and CRAM parsers convert their native header representations to `BamHeader`.
+> - `fetch_into(tid, start, end, store) -> Result<usize>` — populates a `RecordStore` with records overlapping the region, identically to the BAM path.
+> - `fork() -> Result<Self>` — creates a lightweight copy sharing immutable state.
+> - `shared() -> &Arc<_>` — access to shared state for `Arc::ptr_eq` testing.
 
 r[unified.fetch_equivalence]
 For a given BAM file and its SAM/CRAM representations of the same data, `fetch_into` for the same region MUST produce records with equivalent logical content: same positions, flags, sequences, qualities, and CIGAR operations. Aux tags MUST contain the same set of tag names and values, but tag ordering and integer type codes (e.g., `c` vs `i` for small values) MAY differ between formats because BAM writers choose specific integer widths that SAM text cannot preserve.
 
 ## RecordStore integration
 
-r[unified.record_store_push]
-Currently `RecordStore::push_raw()` takes raw BAM bytes. For SAM and CRAM, records arrive as parsed fields rather than BAM binary.
-
-The RecordStore MUST provide `push_fields()` (or equivalent) that accepts pre-parsed record fields:
-- pos, end_pos, flags, mapq, seq_len, matching_bases, indel_bases (fixed fields)
-- qname bytes
-- CIGAR as packed BAM-format u32 ops (SAM/CRAM parsers convert to this representation)
-- sequence as `&[Base]` (already the enum type stored in the bases slab — no conversion needed)
-- quality bytes
-- aux tag bytes in BAM binary format (SAM/CRAM parsers serialize tags to this format)
+> r[unified.record_store_push]
+> Currently `RecordStore::push_raw()` takes raw BAM bytes. For SAM and CRAM, records arrive as parsed fields rather than BAM binary.
+>
+> The RecordStore MUST provide `push_fields()` (or equivalent) that accepts pre-parsed record fields:
+>
+> - pos, end_pos, flags, mapq, seq_len, matching_bases, indel_bases (fixed fields)
+> - qname bytes
+> - CIGAR as packed BAM-format u32 ops (SAM/CRAM parsers convert to this representation)
+> - sequence as `&[Base]` (already the enum type stored in the bases slab — no conversion needed)
+> - quality bytes
+> - aux tag bytes in BAM binary format (SAM/CRAM parsers serialize tags to this format)
 
 This avoids a wasteful round-trip through BAM binary encoding.
 
@@ -99,12 +103,13 @@ r[unified.readers_open]
 r[unified.readers_fork]
 `Readers::fork()` MUST fork both the alignment reader and the FASTA reader, returning a new `Readers` with independent I/O handles but shared immutable state (indices, headers). The CRAM fork gets its own FASTA reader via `IndexedFastaReader::fork()`.
 
-r[unified.readers_accessors]
-`Readers` MUST expose:
-- `header() -> &BamHeader` — delegates to the alignment reader's header.
-- `fetch_into(tid, start, end, store) -> Result<usize>` — delegates to the alignment reader.
-- `fasta() -> &IndexedFastaReader` and `fasta_mut() -> &mut IndexedFastaReader` — direct access for callers that need reference sequences independently of the alignment reader (e.g., the call pipeline's segment fetching).
-- `alignment() -> &IndexedReader` and `alignment_mut() -> &mut IndexedReader` — direct access when needed.
+> r[unified.readers_accessors]
+> `Readers` MUST expose:
+>
+> - `header() -> &BamHeader` — delegates to the alignment reader's header.
+> - `fetch_into(tid, start, end, store) -> Result<usize>` — delegates to the alignment reader.
+> - `fasta() -> &IndexedFastaReader` and `fasta_mut() -> &mut IndexedFastaReader` — direct access for callers that need reference sequences independently of the alignment reader (e.g., the call pipeline's segment fetching).
+> - `alignment() -> &IndexedReader` and `alignment_mut() -> &mut IndexedReader` — direct access when needed.
 
 r[unified.readers_backward_compat]
 `IndexedReader::open(path)` MUST continue to work for BAM and SAM files without a FASTA path. CRAM detection in `IndexedReader::open()` MUST return an error explaining that CRAM requires a reference and suggesting `Readers::open()` instead. This preserves backward compatibility for code that only needs BAM/SAM.

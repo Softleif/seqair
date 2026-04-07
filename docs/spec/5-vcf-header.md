@@ -1,8 +1,8 @@
 # VCF Header
 
-> **Sources:** [VCF43] §1.1 "Meta-information lines" (fileformat, INFO/FILTER/FORMAT/contig field definitions, structured meta-information syntax), §1.2 "Header line syntax" (#CHROM line and sample columns). BCF dictionary mapping follows [BCF2] (string-to-index assignment for FILTER/INFO/FORMAT IDs, contig integer indices). See [references.md](99-references.md).
+> **Sources:** [VCF43] §1.1 "Meta-information lines" (fileformat, INFO/FILTER/FORMAT/contig field definitions, structured meta-information syntax), §1.2 "Header line syntax" (#CHROM line and sample columns). BCF dictionary mapping follows [BCF2] (string-to-index assignment for FILTER/INFO/FORMAT IDs, contig integer indices). See [References](./99-references.md).
 
-> *[VCF43] §1.1.1 "File format" — `##fileformat=VCFvX.Y` required first line*
+> _[VCF43] §1.1.1 "File format" — `##fileformat=VCFvX.Y` required first line_
 
 r[vcf_header.file_format]
 The header MUST begin with a `##fileformat=VCFvX.Y` line. The default version is VCFv4.3.
@@ -10,17 +10,17 @@ The header MUST begin with a `##fileformat=VCFvX.Y` line. The default version is
 r[vcf_header.builder]
 Headers MUST be constructed via a builder pattern. The builder validates all constraints at `build()` time and returns a typed error on violation.
 
-> *[VCF43] §1.1.7 "Contig field format" — `##contig=<ID=name,length=N>`. [BCF2] — contig lines required for BCF, define integer mapping*
+> _[VCF43] §1.1.7 "Contig field format" — `##contig=<ID=name,length=N>`. [BCF2] — contig lines required for BCF, define integer mapping_
 
 r[vcf_header.contig_required]
 Every contig referenced by a record MUST be declared in the header via `##contig=<ID=name[,length=N]>`. For BCF output, contig declarations define the integer-to-name mapping (index = insertion order, 0-based).
 
-> *[VCF43] §1.1.2 "Information field format" — ID, Number (A/R/G/./integer), Type (Integer/Float/Flag/Character/String), Description*
+> _[VCF43] §1.1.2 "Information field format" — ID, Number (A/R/G/./integer), Type (Integer/Float/Flag/Character/String), Description_
 
 r[vcf_header.info_def]
 Each INFO field MUST be declared with ID, Number, Type, and Description. Number is one of: a fixed count, `A` (one per ALT), `R` (one per allele), `G` (one per genotype), or `.` (unknown/variable). Type is one of: Integer, Float, Flag, Character, String. Flag type requires Number=0.
 
-> *[VCF43] §1.1.4 "Individual format field format" — same Number/Type as INFO except no Flag; GT must be first*
+> _[VCF43] §1.1.4 "Individual format field format" — same Number/Type as INFO except no Flag; GT must be first_
 
 r[vcf_header.format_def]
 Each FORMAT field MUST be declared with ID, Number, Type, and Description. Same Number/Type rules as INFO except Flag type is not permitted. GT, if declared, MUST always appear first in the FORMAT column.
@@ -28,7 +28,7 @@ Each FORMAT field MUST be declared with ID, Number, Type, and Description. Same 
 r[vcf_header.filter_def]
 Each FILTER MUST be declared with ID and Description. PASS MUST always be present (implicitly or explicitly) and MUST map to BCF dictionary index 0.
 
-> *[VCF43] §1.2 "Header line syntax" — sample names in #CHROM line must be unique*
+> _[VCF43] §1.2 "Header line syntax" — sample names in #CHROM line must be unique_
 
 r[vcf_header.sample_names]
 Sample names MUST be unique. The order of samples in the header defines the order of sample columns in records.

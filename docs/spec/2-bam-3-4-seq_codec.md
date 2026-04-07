@@ -4,7 +4,7 @@ BAM encodes DNA sequences in a compact 4-bit format: two bases per byte, high ni
 
 Decoding these sequences is on the hot path: during pileup construction, the engine needs the base at each read's query position for every reference position. With ~30 reads at ~3 billion positions, that's ~90 billion base lookups for a whole-genome BAM. Encoding is needed when rewriting BAM files with modified sequences.
 
-> **Sources:** [SAM1] §4.2.4 "SEQ and QUAL encoding" — 4-bit encoding table `=ACMGRSVTWYHKDBN → [0,15]`, high-nibble-first packing. The SIMD decode path and pair-table optimisation are seqair-specific. See [references.md](references.md).
+> **Sources:** [SAM1] §4.2.4 "SEQ and QUAL encoding" — 4-bit encoding table `=ACMGRSVTWYHKDBN → [0,15]`, high-nibble-first packing. The SIMD decode path and pair-table optimisation are seqair-specific. See [References](./99-references.md).
 
 ## Decoding (4-bit → ASCII)
 

@@ -1,6 +1,6 @@
 # Record Store
 
-> **Sources:** The slab-based RecordStore design is seqair-specific. The data it stores is defined by [SAM1] §4.2 (BAM record fields, CIGAR packed u32 format, quality Phred encoding, aux tag binary format). See [references.md](references.md).
+> **Sources:** The slab-based RecordStore design is seqair-specific. The data it stores is defined by [SAM1] §4.2 (BAM record fields, CIGAR packed u32 format, quality Phred encoding, aux tag binary format). See [References](./99-references.md).
 
 ## Background
 

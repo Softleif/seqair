@@ -1,6 +1,6 @@
 # Index Builder
 
-> **Sources:** [SAM1] §5 "Indexing BAM" — binning algorithm, reg2bin/reg2bins; §5.2 "The BAI index format" — bin/chunk/linear index binary format. [TABIX] — TBI format (magic, column config, same bin/chunk/linear data as BAI). [CSI] — CSI format (parameterised binning, per-bin loffset). htslib `hts.c` `hts_idx_push` / `hts_idx_finish` — single-pass incremental algorithm. See [references.md](99-references.md).
+> **Sources:** [SAM1] §5 "Indexing BAM" — binning algorithm, reg2bin/reg2bins; §5.2 "The BAI index format" — bin/chunk/linear index binary format. [TABIX] — TBI format (magic, column config, same bin/chunk/linear data as BAI). [CSI] — CSI format (parameterised binning, per-bin loffset). htslib `hts.c` `hts_idx_push` / `hts_idx_finish` — single-pass incremental algorithm. See [References](./99-references.md).
 
 r[index_builder.single_pass]
 The index MUST be built incrementally during writing in a single pass. The builder receives (tid, beg, end, virtual_offset) after each record is written. No second pass over the compressed file is required.
@@ -41,7 +41,7 @@ The IndexBuilder already accumulates the same bin/chunk/linear data structures t
 
 Adding `write_bai()` to the existing IndexBuilder enables BAM index co-production (see `r[bam_writer.index_coproduction]` in [bam-writer.md](6-bam-writer.md)) without duplicating the single-pass state machine. This is the same builder that already produces TBI for VCF and CSI for BCF.
 
-> *[SAM1] §5.2 "The BAI index format for BAM files" — magic, n_ref, bins, chunks, linear index*
+> _[SAM1] §5.2 "The BAI index format for BAM files" — magic, n_ref, bins, chunks, linear index_
 
 r[index_builder.bai_format]
 BAI output MUST be uncompressed (not BGZF-wrapped) with magic `BAI\x01` (0x42, 0x41, 0x49, 0x01), followed by: n_ref (i32 LE, always equal to the total number of reference sequences in the BAM header), then per-reference: n_bin (i32 LE), for each bin: bin_id (u32 LE) + n_chunk (i32 LE) + chunks (begin/end as u64 LE virtual offsets), then n_intv (i32 LE) + linear index entries (u64 LE virtual offsets). This is the same bin/chunk/linear data as TBI but without BGZF compression, without the TBI column config header, and with a different magic.
