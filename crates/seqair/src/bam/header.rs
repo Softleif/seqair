@@ -331,25 +331,31 @@ impl BamHeader {
     pub fn add_pg(&mut self, pg: PgRecord) {
         let pp = pg.pp.or_else(|| self.last_pg_id());
 
-        let mut line = format!("@PG\tID:{}", pg.id);
+        let line = &mut self.header_text;
+        line.push_str("@PG\tID:");
+        line.push_str(&pg.id);
+
         if let Some(pn) = &pg.pn {
-            line.push_str(&format!("\tPN:{pn}"));
+            line.push_str("\tPN:");
+            line.push_str(pn);
         }
         if let Some(vn) = &pg.vn {
-            line.push_str(&format!("\tVN:{vn}"));
+            line.push_str("\tVN:");
+            line.push_str(vn);
         }
         if let Some(cl) = &pg.cl {
-            line.push_str(&format!("\tCL:{cl}"));
+            line.push_str("\tCL:");
+            line.push_str(cl);
         }
         if let Some(ds) = &pg.ds {
-            line.push_str(&format!("\tDS:{ds}"));
+            line.push_str("\tDS:");
+            line.push_str(ds);
         }
         if let Some(pp_id) = &pp {
-            line.push_str(&format!("\tPP:{pp_id}"));
+            line.push_str("\tPP:");
+            line.push_str(pp_id);
         }
         line.push('\n');
-
-        self.header_text.push_str(&line);
     }
 
     /// Find the ID of the last `@PG` line in the header text.
