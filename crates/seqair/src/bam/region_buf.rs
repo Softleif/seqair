@@ -332,6 +332,10 @@ impl RegionBuf {
             .map_err(|_| BgzfError::TruncatedBlock)?;
         let uncompressed_size = u32::from_le_bytes(isize_bytes) as usize;
 
+        if uncompressed_size > MAX_BLOCK_SIZE {
+            return Err(BgzfError::UncompressedSizeTooLarge { isize_value: uncompressed_size });
+        }
+
         self.cursor = block_end;
 
         if uncompressed_size == 0 {
@@ -795,6 +799,43 @@ mod tests {
 
         let result = buf.seek_virtual(VirtualOffset::new(gap_offset, 0));
         assert!(result.is_err(), "seek into gap between ranges should fail");
+    }
+
+    // r[verify region_buf.decompress]
+    #[test]
+    fn read_block_rejects_corrupt_isize_in_footer() {
+        // Build a valid BGZF block, then corrupt the ISIZE footer field
+        // to claim a huge uncompressed size (e.g. ~4 GB). This must be
+        // rejected with UncompressedSizeTooLarge, not cause an OOM.
+        let payload = vec![0u8; 32];
+        let mut block = make_bgzf_block(&payload);
+
+        // The ISIZE field is the last 4 bytes of the BGZF block.
+        // Overwrite it with a value larger than MAX_BLOCK_SIZE (65536).
+        let isize_offset = block.len() - 4;
+        let corrupt_isize: u32 = 0xF0F0_F0F0; // ~4 GB
+        block[isize_offset..isize_offset + 4].copy_from_slice(&corrupt_isize.to_le_bytes());
+
+        let mut file = Vec::new();
+        file.extend_from_slice(&block);
+        file.extend_from_slice(&make_bgzf_eof());
+
+        let chunks = vec![Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(1, 0) }];
+
+        let mut cursor = std::io::Cursor::new(file);
+        let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        buf.seek_virtual(VirtualOffset::new(0, 0)).unwrap();
+
+        // read_block is called internally by seek_virtual (via within=0 path)
+        // or by read_exact_into. Force a read_block via read_exact_into.
+        let mut out = [0u8; 1];
+        let result = buf.read_exact_into(&mut out);
+        assert!(result.is_err(), "should reject corrupt ISIZE");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, BgzfError::UncompressedSizeTooLarge { .. }),
+            "expected UncompressedSizeTooLarge, got {err:?}"
+        );
     }
 
     // --- BGZF round-trip proptests ---
