@@ -1,0 +1,13 @@
+@HD	VN:1.6	SO:coordinate
+@SQ	SN:chr19	LN:61431566
+@SQ	SN:2kb_3_Unmodified	LN:2018
+@SQ	SN:bacteriopha1-PyBriQ	SN:chr19	LN:61431566
+@SQ	SN:2kb_3_U	LN:2018
+@SQ	SN:bacteriophaglambda_CpG	LN:48502
+@Ih-p1_S1	P6	SO:coordina1566
+@SQ	SN:1kb_3_Unmodified	LN:2018431566
+@SQ	SN:2kb_3_Unmodified	LN:2018
+@SQ	SN:bacteriQ	SN:chr19	LN:61431566
+@SQ	SN:23_Unmodified	LN:2018
+@SQ	SN:bacteriophage_@Smbda_CpG	LN:48502
+@-G	ID:sa view -h testst.sam
