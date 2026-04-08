@@ -45,7 +45,7 @@ impl<'a> BitReader<'a> {
 
     /// Read `n` bits as an i32 (MSB-first, unsigned interpretation).
     pub fn read_bits_i32(&mut self, n: u32) -> Option<i32> {
-        self.read_bits(n).map(|v| v as i32)
+        self.read_bits(n).map(|v| v.cast_signed())
     }
 
     /// Returns the number of bits remaining.

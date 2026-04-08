@@ -151,8 +151,13 @@ fn parse_crai_line(line: &str) -> Result<CraiEntry, CramError> {
         })
     };
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "CRAI ref_id is an ITF8 value bounded by i32 range; parsed as i64 for uniformity"
+    )]
+    let ref_id = parse_field(0, "ref_id")? as i32;
     Ok(CraiEntry {
-        ref_id: parse_field(0, "ref_id")? as i32,
+        ref_id,
         alignment_start: parse_field(1, "alignment_start")?,
         alignment_span: parse_field(2, "alignment_span")?,
         container_offset: parse_field(3, "container_offset")? as u64,

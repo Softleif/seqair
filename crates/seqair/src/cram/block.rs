@@ -54,7 +54,7 @@ pub fn parse_block(buf: &[u8]) -> Result<(Block, usize), CramError> {
         buf.get(pos..).ok_or(CramError::Truncated { context: "block content id" })?,
     )
     .ok_or(CramError::Truncated { context: "block content id" })?;
-    let content_id = content_id_u32 as i32;
+    let content_id = content_id_u32.cast_signed();
     pos = pos.checked_add(n).ok_or(CramError::Truncated { context: "block content id pos" })?;
 
     let (compressed_size, n) = varint::decode_itf8(

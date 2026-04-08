@@ -364,7 +364,8 @@ fn parse_tag_encoding_map(
     let mut map = FxHashMap::default();
     for _ in 0..num_entries {
         let key = varint::read_itf8_from(&mut mcur)
-            .ok_or(CramError::Truncated { context: "tag encoding key" })? as i32;
+            .ok_or(CramError::Truncated { context: "tag encoding key" })?
+            .cast_signed();
         let enc = ByteArrayEncoding::parse(&mut mcur)?;
         map.insert(key, enc);
     }

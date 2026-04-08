@@ -258,6 +258,10 @@ fn read_itf8_u16(src: &mut &[u8]) -> Result<u16, CramError> {
     // ITF8 for frequency table values (they fit in u16)
     let val = super::varint::read_itf8_from(src)
         .ok_or(CramError::Truncated { context: "rans frequency itf8" })?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "rANS frequency table values are bounded by 4096 (12-bit), fits in u16"
+    )]
     Ok(val as u16)
 }
 
