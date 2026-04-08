@@ -258,6 +258,10 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
             });
         }
 
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "FASTA sequences fit in usize on supported platforms; 32-bit addressable memory bounds the read size"
+        )]
         let num_bases =
             stop.checked_sub(start).expect("stop > start is guaranteed by bounds check above")
                 as usize;
@@ -271,6 +275,10 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
         let end_byte = last_base_byte
             .checked_add(1)
             .expect("byte_offset is within the file, so adding 1 cannot overflow u64");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "raw_len is bounded by the FASTA region size which fits in usize on supported platforms"
+        )]
         let raw_len = end_byte
             .checked_sub(start_byte)
             .expect("end_byte >= start_byte for any valid FAI entry")

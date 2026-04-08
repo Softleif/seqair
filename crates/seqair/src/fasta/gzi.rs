@@ -81,8 +81,14 @@ impl GziIndex {
             });
         }
 
-        let mut entries: Vec<GziEntry> = Vec::with_capacity(count as usize);
-        for i in 0..count as usize {
+        // count * 16 + 8 == data.len() (checked above), so count fits in usize
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "count * 16 + 8 == data.len() which fits in usize, so count fits in usize"
+        )]
+        let count_usize = count as usize;
+        let mut entries: Vec<GziEntry> = Vec::with_capacity(count_usize);
+        for i in 0..count_usize {
             let base = i
                 .checked_mul(16)
                 .and_then(|n| n.checked_add(8))
