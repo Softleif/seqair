@@ -97,6 +97,10 @@ impl RegionBuf {
         }
 
         let merged = merge_chunks(chunks);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
+        )]
         let total_bytes: usize = merged
             .iter()
             .map(|r| r.file_end.saturating_sub(r.file_start) as usize)
@@ -117,6 +121,10 @@ impl RegionBuf {
             let range_start = std::time::Instant::now();
             reader.seek(SeekFrom::Start(range.file_start)).map_err(|_| BgzfError::SeekFailed)?;
 
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
+            )]
             let len = range.file_end.saturating_sub(range.file_start) as usize;
             if len > MAX_REGION_BYTES {
                 return Err(BgzfError::RecordTooLarge { block_size: len });
@@ -132,7 +140,12 @@ impl RegionBuf {
             let actual_file_end = range.file_start.wrapping_add(actually_read as u64);
             data.truncate(buf_start.wrapping_add(actually_read));
 
-            max_range_us = max_range_us.max(range_start.elapsed().as_micros() as u64);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "elapsed microseconds cannot reach u64::MAX (~580K years)"
+            )]
+            let range_us = range_start.elapsed().as_micros() as u64;
+            max_range_us = max_range_us.max(range_us);
 
             range_map.push(RangeMapping {
                 file_start: range.file_start,
@@ -144,6 +157,11 @@ impl RegionBuf {
         let first_offset = merged.first().map_or(0, |r| r.file_start);
         let last_offset = merged.last().map_or(0, |r| r.file_start);
         let file_span = last_offset.saturating_sub(first_offset);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "elapsed microseconds cannot reach u64::MAX (~580K years)"
+        )]
+        let elapsed_us = load_start.elapsed().as_micros() as u64;
 
         tracing::debug!(
             target: PROFILE_TARGET,
@@ -154,7 +172,7 @@ impl RegionBuf {
             first_offset,
             last_offset,
             max_range_us,
-            elapsed_us = load_start.elapsed().as_micros() as u64,
+            elapsed_us,
             "region_buf::load",
         );
 
@@ -201,9 +219,12 @@ impl RegionBuf {
     fn file_offset_to_cursor(&self, file_off: u64) -> Result<usize, BgzfError> {
         for rm in &self.ranges {
             if file_off >= rm.file_start && file_off < rm.file_end {
-                return Ok(rm
-                    .buf_start
-                    .wrapping_add(file_off.wrapping_sub(rm.file_start) as usize));
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "buffer offsets bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
+                )]
+                let delta = file_off.wrapping_sub(rm.file_start) as usize;
+                return Ok(rm.buf_start.wrapping_add(delta));
             }
         }
         Err(BgzfError::VirtualOffsetOutOfRange { offset: file_off })
@@ -212,6 +233,10 @@ impl RegionBuf {
     /// Translate a buffer cursor position back to a file offset.
     fn cursor_to_file_offset(&self) -> u64 {
         for rm in &self.ranges {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "buffer offsets bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
+            )]
             let buf_end =
                 rm.buf_start.wrapping_add(rm.file_end.wrapping_sub(rm.file_start) as usize);
             if self.cursor >= rm.buf_start && self.cursor < buf_end {
@@ -220,6 +245,10 @@ impl RegionBuf {
         }
         // Past all ranges — return best estimate from the last range
         if let Some(last) = self.ranges.last() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "buffer offsets bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
+            )]
             let buf_end =
                 last.buf_start.wrapping_add(last.file_end.wrapping_sub(last.file_start) as usize);
             last.file_end.wrapping_add(self.cursor.saturating_sub(buf_end) as u64)
@@ -230,7 +259,13 @@ impl RegionBuf {
 
     // r[impl region_buf.virtual_offset]
     pub fn virtual_offset(&self) -> VirtualOffset {
-        VirtualOffset::new(self.block_offset, self.buf_pos as u16)
+        debug_assert!(self.buf_pos <= u16::MAX as usize, "BGZF block position exceeds 65535");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "BGZF block size is capped at 65535 bytes by spec; debug_assert enforces invariant"
+        )]
+        let buf_pos_u16 = self.buf_pos as u16;
+        VirtualOffset::new(self.block_offset, buf_pos_u16)
     }
 
     // r[impl region_buf.decompress]

@@ -514,7 +514,15 @@ fn reg2bins(beg: u64, end: u64) -> Vec<u32> {
     ];
 
     for &(offset, shift) in &levels {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "BAM positions are capped at 2^29; shifted by ≥14 gives values ≤ 2^15, fits in u32"
+        )]
         let mut k = offset.wrapping_add((beg >> shift) as u32);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "BAM positions are capped at 2^29; shifted by ≥14 gives values ≤ 2^15, fits in u32"
+        )]
         let end_k = offset.wrapping_add((end.saturating_sub(1) >> shift) as u32);
         while k <= end_k {
             bins.push(k);
@@ -776,7 +784,7 @@ mod tests {
         block.push(0xff); // OS
         block.extend_from_slice(&6u16.to_le_bytes()); // XLEN = 6
         block.extend_from_slice(&[b'B', b'C', 2, 0]); // BC subfield
-        // BSIZE = 16 means total block size = 17, which is < 18
+                                                      // BSIZE = 16 means total block size = 17, which is < 18
         block.extend_from_slice(&16u16.to_le_bytes());
         // Pad to make the block at least 18 bytes for the outer remaining check
         block.resize(18, 0);
