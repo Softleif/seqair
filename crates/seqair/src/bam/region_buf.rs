@@ -113,7 +113,7 @@ impl RegionBuf {
             .map(|r| r.file_end.saturating_sub(r.file_start) as usize)
             .fold(0usize, usize::saturating_add);
 
-        // Reject obviously corrupt chunk ranges that would cause OOM
+        // r[impl region_buf.max_region_bytes]
         if total_bytes > MAX_REGION_BYTES {
             return Err(BgzfError::RegionTooLarge { total_bytes, max_bytes: MAX_REGION_BYTES });
         }
@@ -1417,6 +1417,7 @@ mod tests {
         assert_eq!(size, range1 + range2);
     }
 
+    // r[verify region_buf.max_region_bytes]
     #[test]
     fn load_rejects_region_too_large() {
         // Create chunks whose merged range exceeds MAX_REGION_BYTES.

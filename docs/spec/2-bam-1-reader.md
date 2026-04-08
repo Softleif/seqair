@@ -19,6 +19,9 @@ The reader MUST expose the parsed `BamHeader` for contig name/tid/length lookups
 r[bam.reader.fetch_into+2]
 `fetch_into(region, store)` MUST clear the store, query the BAI index for chunks overlapping the region, seek through those chunks via BGZF, decode all records, and add records that actually overlap the region to the store (RecordStore).
 
+r[bam.reader.chunk_batching]
+When the merged compressed byte range of all chunks exceeds `MAX_REGION_BYTES` (256 MiB), `fetch_into` MUST partition chunks into batches where each batch fits within the limit, loading each batch with its own `RegionBuf`. This occurs on very large BAM files (>100 GB) where BAI bin structure produces huge level-5 bins spanning hundreds of megabytes of compressed data. Chunks MUST be added greedily in order; records from all batches MUST be collected into the same store. Peak memory MUST NOT exceed `MAX_REGION_BYTES` per batch (the previous `RegionBuf` is dropped before loading the next).
+
 r[bam.reader.overlap_filter]
 A record overlaps a region if `record.pos <= region.end` AND `record.end_pos >= region.start`. Records outside the region that appear in index chunks MUST be filtered out. This is necessary because the BAM index is approximate — chunks may contain records slightly outside the queried region.
 
