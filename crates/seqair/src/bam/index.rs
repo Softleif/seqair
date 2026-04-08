@@ -784,7 +784,7 @@ mod tests {
         block.push(0xff); // OS
         block.extend_from_slice(&6u16.to_le_bytes()); // XLEN = 6
         block.extend_from_slice(&[b'B', b'C', 2, 0]); // BC subfield
-                                                      // BSIZE = 16 means total block size = 17, which is < 18
+        // BSIZE = 16 means total block size = 17, which is < 18
         block.extend_from_slice(&16u16.to_le_bytes());
         // Pad to make the block at least 18 bytes for the outer remaining check
         block.resize(18, 0);

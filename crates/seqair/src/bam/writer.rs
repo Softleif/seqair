@@ -216,11 +216,7 @@ impl<W: Write> BamWriter<W> {
                 } else {
                     // Case 1: mapped — use end_pos from CIGAR
                     let ep = record.end_pos();
-                    if ep < 0 {
-                        beg
-                    } else {
-                        ep as u64
-                    }
+                    if ep < 0 { beg } else { ep as u64 }
                 };
                 let end = end.max(beg.saturating_add(1));
                 if is_unmapped {
@@ -315,8 +311,8 @@ fn write_bam_header<W: Write>(
         buf.extend_from_slice(&(name_with_nul as i32).to_le_bytes());
         buf.extend_from_slice(name);
         buf.push(0); // NUL terminator
-                     // BAM stores l_ref as i32; reject contigs > i32::MAX (≈2.1 Gbp).
-                     // This is the BAM format limit — no reasonable contig exceeds this.
+        // BAM stores l_ref as i32; reject contigs > i32::MAX (≈2.1 Gbp).
+        // This is the BAM format limit — no reasonable contig exceeds this.
         let l_ref =
             i32::try_from(target.target_length()).map_err(|_| BamHeaderError::FieldTooLarge {
                 field: "l_ref",

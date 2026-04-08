@@ -63,6 +63,7 @@ allow_attributes_without_reason = "warn"
 infinite_loop = "warn"
 create_dir = "warn"
 pathbuf_init_then_push = "warn"
+format_in_format_args = "warn"
 
 [profile.dev.package]
 rand_chacha.opt-level = 3
