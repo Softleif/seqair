@@ -36,6 +36,9 @@ r[region_buf.no_bin0]
 r[region_buf.load]
 `RegionBuf::load` MUST accept a seekable reader and a slice of index chunks. It MUST merge chunks, then perform one `seek` + `read_exact` per merged range to load all compressed bytes into a contiguous in-memory buffer. On typical BAM files this results in a single read of a few hundred KB to a few MB per region.
 
+r[region_buf.max_region_bytes]
+`RegionBuf::load` MUST reject chunk sets whose total merged compressed byte range exceeds 256 MiB (`MAX_REGION_BYTES`), returning a `RegionTooLarge` error. This guards against OOM from corrupt indexes or extremely large query regions. The caller (`fetch_into`) is responsible for partitioning chunks into batches that each fit within this limit (see `r[bam.reader.chunk_batching]`).
+
 r[region_buf.empty]
 When given zero chunks, `load` MUST return an empty buffer that immediately signals EOF on any read.
 

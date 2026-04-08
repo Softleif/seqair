@@ -192,6 +192,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         // block boundary; zero-copy slice from RegionBuf::buf is used otherwise.
         let mut scratch: Vec<u8> = Vec::new();
 
+        // r[impl bam.reader.chunk_batching]
         // Partition chunks into batches that each fit within MAX_REGION_BYTES.
         // For typical regions this produces a single batch (no overhead).
         // For very large BAM files where BAI bins span >256 MiB of compressed
@@ -420,6 +421,7 @@ mod tests {
         }
     }
 
+    // r[verify bam.reader.chunk_batching]
     /// Reproduces the 122 GB BAM scenario: many chunks that merge to >256 MiB.
     /// Verifies that `partition_chunks` splits them into batches that each fit.
     #[test]
