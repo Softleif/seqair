@@ -40,6 +40,11 @@ impl RefSeq {
         if offset < 0 {
             return Base::Unknown;
         }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "offset is non-negative (checked above) and bounded by reference sequence length; safe to cast on supported platforms"
+        )]
         self.bases.get(offset as usize).copied().unwrap_or(Base::Unknown)
     }
 }
@@ -269,7 +274,13 @@ impl PileupEngine {
             .checked_sub(self.current_pos.as_i64())
             .and_then(|d| d.checked_add(1))
             .unwrap_or(0);
-        diff.max(0) as usize
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "diff.max(0) is non-negative; bounded by region size which fits in usize on supported platforms"
+        )]
+        let r = diff.max(0) as usize;
+        r
     }
 
     /// Borrow the underlying `RecordStore` for qname lookups during iteration.
@@ -352,6 +363,10 @@ impl Iterator for PileupEngine {
             }
 
             while self.next_entry < self.store.len() {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "RecordStore capacity is bounded by SlabOverflow (u32); debug_assert enforces invariant"
+                )]
                 let idx = self.next_entry as u32;
                 debug_assert_eq!(idx as usize, self.next_entry, "next_entry exceeds u32::MAX");
 
@@ -399,6 +414,10 @@ impl Iterator for PileupEngine {
                 if self.next_entry >= self.store.len() {
                     return None;
                 }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "RecordStore capacity is bounded by SlabOverflow (u32); debug_assert enforces invariant"
+                )]
                 let next_entry_u32 = self.next_entry as u32;
                 debug_assert_eq!(
                     next_entry_u32 as usize, self.next_entry,
@@ -463,7 +482,12 @@ impl Iterator for PileupEngine {
 
             if !alignments.is_empty() {
                 self.columns_produced = self.columns_produced.saturating_add(1);
-                self.max_active_depth = self.max_active_depth.max(alignments.len() as u32);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "depth is bounded by max_depth (u32) or typical pileup sizes; saturates at u32::MAX for profiling"
+                )]
+                let depth_u32 = alignments.len() as u32;
+                self.max_active_depth = self.max_active_depth.max(depth_u32);
                 let reference_base =
                     self.ref_seq.as_ref().map_or(Base::Unknown, |r| r.base_at(pos));
                 return Some(PileupColumn { pos, reference_base, alignments });

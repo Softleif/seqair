@@ -455,7 +455,6 @@ impl OwnedBamRecord {
         buf.extend_from_slice(&self.ref_id.to_le_bytes());
         #[expect(
             clippy::cast_possible_truncation,
-            clippy::cast_possible_wrap,
             reason = "pos ∈ [-1, i32::MAX] validated above; fits in i32"
         )]
         buf.extend_from_slice(&(self.pos as i32).to_le_bytes());
@@ -465,7 +464,6 @@ impl OwnedBamRecord {
         buf.extend_from_slice(&self.next_ref_id.to_le_bytes());
         #[expect(
             clippy::cast_possible_truncation,
-            clippy::cast_possible_wrap,
             reason = "next_pos ∈ [-1, i32::MAX] validated above; fits in i32"
         )]
         buf.extend_from_slice(&(self.next_pos as i32).to_le_bytes());

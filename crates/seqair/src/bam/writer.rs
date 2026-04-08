@@ -185,6 +185,11 @@ impl<W: Write> BamWriter<W> {
 
         // Safe: buf.len() <= MAX_RECORD_SIZE (2 MiB) < i32::MAX, checked above.
         debug_assert!(self.buf.len() <= MAX_RECORD_SIZE);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "buf.len() ≤ MAX_RECORD_SIZE (2 MiB) < i32::MAX; debug_assert enforces invariant"
+        )]
         let block_size = self.buf.len() as i32;
         let total = 4usize.saturating_add(self.buf.len());
 
@@ -211,7 +216,11 @@ impl<W: Write> BamWriter<W> {
                 } else {
                     // Case 1: mapped — use end_pos from CIGAR
                     let ep = record.end_pos();
-                    if ep < 0 { beg } else { ep as u64 }
+                    if ep < 0 {
+                        beg
+                    } else {
+                        ep as u64
+                    }
                 };
                 let end = end.max(beg.saturating_add(1));
                 if is_unmapped {
@@ -264,6 +273,11 @@ fn write_bam_header<W: Write>(
         }
         .into());
     }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "text.len() ≤ MAX_HEADER_TEXT (256 MiB) < i32::MAX; validated above"
+    )]
     buf.extend_from_slice(&(text.len() as i32).to_le_bytes());
     buf.extend_from_slice(text);
 
@@ -276,6 +290,11 @@ fn write_bam_header<W: Write>(
         }
         .into());
     }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "target_count() ≤ MAX_REFERENCES (1M) < i32::MAX; validated above"
+    )]
     buf.extend_from_slice(&(header.target_count() as i32).to_le_bytes());
     for target in header.targets() {
         let name = target.target_name().as_bytes();
@@ -288,14 +307,23 @@ fn write_bam_header<W: Write>(
             }
             .into());
         }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "name_with_nul ≤ MAX_REF_NAME (256 KiB) < i32::MAX; validated above"
+        )]
         buf.extend_from_slice(&(name_with_nul as i32).to_le_bytes());
         buf.extend_from_slice(name);
         buf.push(0); // NUL terminator
-        // BAM stores l_ref as i32; reject contigs > i32::MAX (≈2.1 Gbp).
-        // This is the BAM format limit — no reasonable contig exceeds this.
+                     // BAM stores l_ref as i32; reject contigs > i32::MAX (≈2.1 Gbp).
+                     // This is the BAM format limit — no reasonable contig exceeds this.
         let l_ref =
             i32::try_from(target.target_length()).map_err(|_| BamHeaderError::FieldTooLarge {
                 field: "l_ref",
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "target_length() is u64; cast to usize for error reporting only (display value)"
+                )]
                 value: target.target_length() as usize,
                 limit: i32::MAX as usize,
             })?;
