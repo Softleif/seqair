@@ -88,6 +88,21 @@ Expert Rust. Modern idioms. Types are the primary abstraction.
 
 **Reader/writer limit parity** (`r[io.writer_limits]`): writers enforce the same field-size limits as readers. BAM header: l_text ≤ 256 MiB, n_ref ≤ 1M, l_name ≤ 256 KiB. BAI index: n_ref ≤ 100K, n_bin ≤ 100K, n_chunk ≤ 1M, n_intv ≤ 500K. Record size ≤ 2 MiB.
 
+## Fuzzing
+
+Fuzz targets live in `crates/seqair/fuzz/fuzz_targets/`. CI runs them nightly via `fuzz/run_all.sh`.
+
+**Reproducing a crash locally** (requires Docker on macOS — cargo-fuzz needs Linux/ASAN):
+```bash
+# Copy the crash artifact to crates/seqair/fuzz/artifacts/<target>/
+docker run --platform linux/amd64 --rm \
+  -v "$PWD":/workspace -w /workspace/crates/seqair rust:1.93 \
+  bash -c "rustup toolchain install nightly && cargo +nightly install cargo-fuzz && \
+    cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file> -- -runs=1 2>&1"
+```
+
+**Common crash patterns**: `debug_assert!` panics (cargo-fuzz enables `-Cdebug-assertions`). If a `debug_assert!` guards an `as i32`/`as u32` cast on untrusted input, replace it with `i32::try_from().trace_ok("msg")?` returning `None`/`Err`. Keep `debug_assert!` only for true internal invariants where the caller already validated the input.
+
 ## Profiling
 
 `SEQAIR_PROFILE_JSON=/path/to.jsonl` → analyze with `python3 tools/analyze_profile.py`.

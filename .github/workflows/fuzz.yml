@@ -37,5 +37,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: fuzzing-artifacts-${{ matrix.fuzz_target }}-${{ github.sha }}
+          name: fuzzing-artifacts--${{ github.sha }}
           path: crates/seqair/fuzz/artifacts

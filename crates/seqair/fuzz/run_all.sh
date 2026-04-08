@@ -80,8 +80,18 @@ for target in $TARGETS; do
             printf "CRASH\n"
             FAILED=$((FAILED + 1))
             FAILURES="$FAILURES  $target\n"
-            # Show crash details
-            echo "$output" | grep -A2 "Failing input\|Output of\|Reproduce with" | head -10
+            # Show crash details: panic message, failing input path, and debug output
+            echo "---"
+            echo "$output" | grep -E "panicked at|thread .* panicked" | head -3
+            echo "$output" | grep -A1 "Failing input" | head -5
+            echo "$output" | grep -B1 -A20 "Output of" | head -25
+            artifact=$(echo "$output" | grep -oE "fuzz/artifacts/[^ ]+" | head -1)
+            if [ -n "$artifact" ]; then
+                echo ""
+                echo "  Reproduce locally:"
+                echo "    cargo +nightly fuzz run --target $ARCH $target $artifact"
+            fi
+            echo "---"
             echo ""
             if [ "$QUICK" = "--quick" ]; then
                 echo "Stopping early (--quick mode)"

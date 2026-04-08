@@ -1,0 +1,18 @@
+@SQ	SN:               @SQ	SN:                                                      	CpG	LN:485801
+
+
+0et116~-p1_SIY:bwa	PN:bwa	VN:0.7n1431566
+@SQ	SN:2       @SQ	SN:                                                      	CpG	LN:485801
+
+
+
+1_SIY:bwa	PN:bwa	VN:0et116h-p1_SIY:bwa	PN:bwa	VN:0.7nate
+@SQ	SN:chr19	LN:61431566DDDDDDDDDD    @SQ	SN:                                                      	CpG	LN:485801
+
+    @H	SN:-66
+@SQ	SN:2kb_3_UnmodEifiins.fa.gz Data/fastq/mTDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD    @SQ	SN:                                                      	CpG	LN:485801
+
+    @H	           CpG	LN:485801
+
+    @H	SN:-kbTet1-PyBr-16hor3dit-e
+@p1_S

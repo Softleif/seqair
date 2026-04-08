@@ -1,0 +1,6 @@
+@SQ	SN	SN:                            	CpG	LN:485801
+
+ e
+@SQ	SN:chr38	LN:431566
+@SQ	SN:-kb_3_Unmodified	LN:2018
+@SQ	SN:bacteriophage_lalb`a_CpG	LN:485140	CL:bwa mem -M -t 8 Data/grio

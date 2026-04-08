@@ -1,0 +1,9 @@
+@HD	V.6	SO:coordinate
+
+@SQ	SN:bacteriophage_lambda_CpG	LN:5_Unmodified	LN:5663
+@SQ	SN:bacteriophage_lambda_CpG	LN:48004
+@RG	N66
+@SQ	SN:2Kb_3_Unmodified	LN:2018
+@SQ	SN:bacteriophage_lambda_CpG	LN:485001	SM:mES_TAPS	PL:Illumied	LN:2018
+@SQ	SN:bacteriophage_lambda_CpG	LN:48004
+@RG	ID:
