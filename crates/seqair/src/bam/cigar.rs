@@ -210,7 +210,10 @@ impl CigarMapping {
                     return None;
                 }
                 Some(CigarPosInfo::Match {
-                    qpos: (offset as u32).checked_add(*query_offset).trace_err("qpos overflow")?,
+                    qpos: u32::try_from(offset)
+                        .trace_ok("offset exceeds u32 range")?
+                        .checked_add(*query_offset)
+                        .trace_err("qpos overflow")?,
                 })
                 // Linear path never has insertions/deletions (try_linear rejects them)
             }
@@ -351,7 +354,8 @@ fn pos_info_linear(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
         if !consumes_ref(op.op_type) {
             continue;
         }
-        let ref_end = op.ref_start.saturating_add(op.len as i32);
+        let ref_end =
+            op.ref_start.saturating_add(i32::try_from(op.len).trace_ok("op len exceeds i32")?);
         if pos32 < op.ref_start || pos32 >= ref_end {
             continue;
         }
@@ -373,7 +377,8 @@ fn pos_info_bsearch(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
         if !consumes_ref(op.op_type) {
             continue;
         }
-        let ref_end = op.ref_start.saturating_add(op.len as i32);
+        let ref_end =
+            op.ref_start.saturating_add(i32::try_from(op.len).trace_ok("op len exceeds i32")?);
         if pos32 >= op.ref_start && pos32 < ref_end {
             return classify_op(ops, i, op, pos32, ref_end);
         }
