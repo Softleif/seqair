@@ -17,8 +17,8 @@ mod helpers;
 use helpers::{cigar_op, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::{
-    pileup::{PileupEngine, PileupOp},
     Pos, RecordStore, Zero,
+    pileup::{PileupEngine, PileupOp},
 };
 
 // ---- pileup_indel.deletions_included ----
@@ -198,7 +198,7 @@ fn type_safety_deletion_has_no_base() {
     // return Option proves the API is safe.
     let op = PileupOp::Deletion { del_len: 1 };
     let _ = op; // Deletion carries del_len but no base/qual/qpos — that's the point
-                // If someone tried: op.base — compile error. Must use match or convenience method.
+    // If someone tried: op.base — compile error. Must use match or convenience method.
 }
 
 // ---- pileup_indel.no_orphan_insertions ----

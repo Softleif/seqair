@@ -396,11 +396,7 @@ fn insertion_ops_match_htslib() {
             hts.alignments
                 .iter()
                 .filter_map(|a| {
-                    if let Indel::Ins(len) = a.indel {
-                        a.qpos.map(|q| (q, len))
-                    } else {
-                        None
-                    }
+                    if let Indel::Ins(len) = a.indel { a.qpos.map(|q| (q, len)) } else { None }
                 })
                 .collect();
         hts_ins.sort_unstable();

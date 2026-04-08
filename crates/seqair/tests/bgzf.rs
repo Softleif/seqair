@@ -7,7 +7,7 @@
     reason = "test code"
 )]
 use proptest::prelude::*;
-use seqair::bam::{bgzf::VirtualOffset, BamError, BamHeaderError, BgzfError};
+use seqair::bam::{BamError, BamHeaderError, BgzfError, bgzf::VirtualOffset};
 
 // r[verify bgzf.virtual_offset]
 // Verifies the BAI spec (SAM1 §4.1): upper 48 bits = compressed block offset,

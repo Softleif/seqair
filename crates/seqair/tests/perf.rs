@@ -13,7 +13,7 @@ mod helpers;
 use helpers::{cigar_bytes, cigar_op, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::cigar::{CigarMapping, CigarPosInfo};
-use seqair::bam::{pileup::PileupEngine, Pos, RecordStore, Zero};
+use seqair::bam::{Pos, RecordStore, Zero, pileup::PileupEngine};
 
 // ---- perf.reuse_alignment_vec ----
 // Verified indirectly: if the engine reuses the vec internally, output must

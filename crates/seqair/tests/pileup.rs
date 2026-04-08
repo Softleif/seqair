@@ -17,7 +17,7 @@ mod helpers;
 use helpers::{cigar_op, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::pileup::RefSeq;
-use seqair::bam::{pileup::PileupEngine, Pos, RecordStore, Zero};
+use seqair::bam::{Pos, RecordStore, Zero, pileup::PileupEngine};
 use seqair_types::Base;
 use std::{cell::Cell, rc::Rc};
 

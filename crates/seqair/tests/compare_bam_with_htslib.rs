@@ -11,8 +11,8 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
-use rust_htslib::bam::{self, record::Aux, FetchDefinition, Read as _};
-use seqair::bam::aux::{find_tag as find_aux_tag, AuxValue};
+use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
+use seqair::bam::aux::{AuxValue, find_tag as find_aux_tag};
 use seqair::bam::{Pos, Zero};
 use std::path::Path;
 

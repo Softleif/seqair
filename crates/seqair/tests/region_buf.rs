@@ -8,7 +8,7 @@
 )]
 #![allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 use seqair::bam::{
-    reader::IndexedBamReader, record_store::RecordStore, region_buf::RegionBuf, Pos, Zero,
+    Pos, Zero, reader::IndexedBamReader, record_store::RecordStore, region_buf::RegionBuf,
 };
 use std::path::Path;
 

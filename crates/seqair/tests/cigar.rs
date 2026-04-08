@@ -17,7 +17,7 @@ mod helpers;
 
 use helpers::{cigar_bytes, cigar_op};
 use proptest::prelude::*;
-use seqair::bam::cigar::{calc_matches_indels, CigarMapping, CigarPosInfo};
+use seqair::bam::cigar::{CigarMapping, CigarPosInfo, calc_matches_indels};
 use seqair::bam::{Pos, Zero};
 
 // ---- cigar.matches_indels ----

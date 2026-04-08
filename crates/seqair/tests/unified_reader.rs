@@ -12,9 +12,9 @@
     reason = "test code with known small values"
 )]
 
+use seqair::IndexedReader;
 use seqair::bam::{Pos, RecordStore, Zero};
 use seqair::reader::Readers;
-use seqair::IndexedReader;
 use std::path::Path;
 use std::process::Command;
 
