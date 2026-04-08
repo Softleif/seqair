@@ -317,6 +317,11 @@ fn write_info_value(buf: &mut Vec<u8>, value: &InfoValue) -> FmtResult {
 /// no trailing decimal point. This matches htslib/bcftools VCF text output.
 ///
 /// Examples: 35.89775 → "35.8978", 60.0 → "60", 0.777778 → "0.777778"
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "magnitude is log10 of f64 (range -308..=308), precision is a literal 6, cursor position is bounded by the 32-byte tmp buffer; all casts are safe"
+)]
 fn write_float_g(buf: &mut Vec<u8>, v: f32) -> Result<(), WriteError> {
     // %g with precision P means P significant digits.
     // In fixed notation: decimal_places = P - floor(log10(|v|)) - 1

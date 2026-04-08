@@ -79,6 +79,10 @@ impl BcfValue for i32 {
         }
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "type_code is selected by scalar_type_code/smallest_int_type which verified value fits"
+    )]
     fn encode_bcf_as(self, buf: &mut Vec<u8>, type_code: u8) {
         match type_code {
             BCF_BT_INT8 => buf.push(self as u8),
@@ -126,7 +130,7 @@ impl FilterHandle {
     // r[impl bcf_encoder.handle_encode]
     pub fn encode(&self, enc: &mut BcfRecordEncoder<'_>) {
         debug_assert!(self.0 <= i32::MAX as u32, "filter dict index overflow");
-        encode_typed_int_vec(enc.shared_buf, &[self.0 as i32]);
+        encode_typed_int_vec(enc.shared_buf, &[self.0.cast_signed()]);
     }
 }
 
@@ -613,6 +617,10 @@ impl<'a> BcfRecordEncoder<'a> {
 // ── Record-path encoding helpers ─────────────────────────────────────────
 
 // r[impl bcf_writer.flag_encoding]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "type selected by smallest_int_type which verified value fits in target type"
+)]
 pub(crate) fn encode_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
     match value {
         InfoValue::Integer(v) => encode_typed_int_vec(buf, &[*v]),
@@ -663,6 +671,10 @@ pub(crate) fn encode_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
 }
 
 // r[impl bcf_writer.gt_encoding]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "type selected by smallest_int_type which verified value fits in target type"
+)]
 pub(crate) fn encode_gt_field(
     buf: &mut Vec<u8>,
     samples: &[seqair_types::SmallVec<SampleValue, 6>],
@@ -741,6 +753,10 @@ pub(crate) fn encode_gt_field(
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "type selected by smallest_int_type which verified value fits in target type"
+)]
 pub(crate) fn encode_format_field(
     buf: &mut Vec<u8>,
     samples: &[seqair_types::SmallVec<SampleValue, 6>],

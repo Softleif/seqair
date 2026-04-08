@@ -30,6 +30,10 @@ pub const INT16_MAX: i32 = 32767;
 // r[impl bcf_writer.typed_values]
 /// Write a BCF type byte: `(count << 4) | type_code`.
 /// For count >= 15, emits overflow encoding with a typed integer count.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "each branch is guarded by a range check; else branch: count > u32::MAX requires >4 billion elements, exceeding addressable memory"
+)]
 pub fn encode_type_byte(buf: &mut Vec<u8>, count: usize, type_code: u8) {
     if count < 15 {
         buf.push(((count as u8) << 4) | type_code);
@@ -88,6 +92,10 @@ pub fn encode_typed_int_vec(buf: &mut Vec<u8>, values: &[i32]) {
 }
 
 /// Encode a dictionary index as a typed int (used for INFO/FORMAT/FILTER keys).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "each branch is guarded by a range check that ensures dict_idx fits in the target type"
+)]
 pub fn encode_typed_int_key(buf: &mut Vec<u8>, dict_idx: u32) {
     if dict_idx <= INT8_MAX as u32 {
         encode_type_byte(buf, 1, BCF_BT_INT8);
@@ -103,6 +111,10 @@ pub fn encode_typed_int_key(buf: &mut Vec<u8>, dict_idx: u32) {
 
 /// Write an i32 value using the specified BCF int type.
 /// The caller must ensure `value` fits in the target type (via `smallest_int_type`).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "debug_assert above verifies value fits in the target type"
+)]
 pub fn encode_int_as(buf: &mut Vec<u8>, value: i32, typ: u8) {
     match typ {
         BCF_BT_INT8 => {

@@ -174,7 +174,15 @@ impl IndexBuilder {
 
         // Update linear index
         if let Some(r) = self.refs.get_mut(tid as usize) {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "window index is beg/end >> min_shift (≥14); genomic coords fit well within usize on all supported targets"
+            )]
             let beg_window = (beg >> self.min_shift) as usize;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "window index is beg/end >> min_shift (≥14); genomic coords fit well within usize on all supported targets"
+            )]
             let end_window = (end.saturating_sub(1) >> self.min_shift) as usize;
             if r.linear_index.len() <= end_window {
                 r.linear_index.resize(end_window.saturating_add(1), VirtualOffset(UNSET));
@@ -392,6 +400,10 @@ fn write_ref_index(buf: &mut Vec<u8>, r: &RefIndexBuilder) -> Result<(), IndexEr
 // r[impl index_builder.binning]
 /// Compute the bin for a genomic interval.
 /// Matches htslib's `hts_reg2bin(beg, end, min_shift, n_lvls)`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "bin values are bounded by the TBI/CSI spec (e.g. depth=5 → max bin 37449), fits in u32"
+)]
 pub fn reg2bin(beg: u64, end: u64, min_shift: u32, depth: u32) -> u32 {
     let end = end.saturating_sub(1);
     let mut s = min_shift;
@@ -413,6 +425,10 @@ pub fn reg2bin(beg: u64, end: u64, min_shift: u32, depth: u32) -> u32 {
 
 /// Pseudo-bin ID for the given depth (one past the max valid bin).
 /// For depth=5: 37450.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "pseudo-bin is one past the max valid bin, bounded by depth (e.g. depth=5 → 37450), fits in u32"
+)]
 fn pseudo_bin(depth: u32) -> u32 {
     // max_bin_id = ((1 << (depth+1)*3) - 1) / 7
     let bits = depth.saturating_add(1).saturating_mul(3);
