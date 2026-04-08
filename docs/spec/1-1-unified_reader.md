@@ -2,7 +2,7 @@
 
 seqair reads BAM, bgzf-compressed SAM, and CRAM files through a format-agnostic reader interface that auto-detects the input format and dispatches to the appropriate parser, while presenting a uniform API to the rest of the codebase.
 
-> **Sources:** The unified reader design is seqair-specific. Format magic bytes come from [SAM1] §4.2 (BAM: `BAM\1`), [SAM1] §4.1 (BGZF: `1f 8b`), and [CRAM3] §6 (CRAM: `CRAM`). Sort order detection uses the `SO` tag from [SAM1] §1.3 "The header section" (`@HD` line). See [references.md](references.md).
+> **Sources:** The unified reader design is seqair-specific. Format magic bytes come from [SAM1] §4.2 (BAM: `BAM\1`), [SAM1] §4.1 (BGZF: `1f 8b`), and [CRAM3] §6 (CRAM: `CRAM`). Sort order detection uses the `SO` tag from [SAM1] §1.3 "The header section" (`@HD` line). See [References](./99-references.md).
 
 ## Goals
 
