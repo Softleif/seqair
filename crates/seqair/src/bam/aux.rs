@@ -2,6 +2,8 @@
 //!
 //! Parses raw BAM auxiliary data bytes into typed [`AuxValue`] values.
 
+use crate::utils::TraceOk;
+
 /// A single BAM auxiliary tag value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuxValue<'a> {
@@ -128,7 +130,7 @@ impl<'a> AuxIter<'a> {
             b'c' => {
                 let v = *self.data.get(self.pos)?;
                 self.pos = self.pos.checked_add(1)?;
-                Some(Some(AuxValue::I8(v as i8)))
+                Some(Some(AuxValue::I8(i8::try_from(v).trace_ok("invalid aux i8 value")?)))
             }
             b'C' => {
                 let v = *self.data.get(self.pos)?;

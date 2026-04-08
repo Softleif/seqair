@@ -108,6 +108,12 @@ pub enum BamHeaderError {
         #[from]
         source: BgzfError,
     },
+
+    #[error("BAM header contains invalid tid value")]
+    InvalidTid {
+        #[from]
+        source: std::num::TryFromIntError,
+    },
 }
 
 impl BamHeader {
@@ -203,7 +209,10 @@ impl BamHeader {
             }
             let l_ref = l_ref_raw as u64;
 
-            name_to_tid.insert(name.clone(), tid as u32);
+            name_to_tid.insert(
+                name.clone(),
+                u32::try_from(tid).map_err(|source| BamHeaderError::InvalidTid { source })?,
+            );
             targets.push(TargetInfo { name, length: l_ref });
         }
 
@@ -244,7 +253,8 @@ impl BamHeader {
 
             match (name, length) {
                 (Some(n), Some(l)) => {
-                    let tid = targets.len() as u32;
+                    let tid = u32::try_from(targets.len())
+                        .map_err(|source| BamHeaderError::InvalidTid { source })?;
                     name_to_tid.insert(SmolStr::new(n), tid);
                     targets.push(TargetInfo { name: SmolStr::new(n), length: l });
                 }
@@ -353,14 +363,12 @@ impl BamHeader {
 
     // r[impl unified.sort_order]
     pub fn validate_sort_order(&self) -> Result<(), BamHeaderError> {
-        let hd_line = match self.header_text.lines().find(|l| l.starts_with("@HD")) {
-            Some(line) => line,
-            None => return Ok(()),
+        let Some(hd_line) = self.header_text.lines().find(|l| l.starts_with("@HD")) else {
+            return Ok(());
         };
 
-        let sort_order = match hd_line.split('\t').find_map(|f| f.strip_prefix("SO:")) {
-            Some(so) => so,
-            None => return Ok(()),
+        let Some(sort_order) = hd_line.split('\t').find_map(|f| f.strip_prefix("SO:")) else {
+            return Ok(());
         };
 
         match sort_order {

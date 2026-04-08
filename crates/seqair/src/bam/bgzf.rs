@@ -174,8 +174,7 @@ impl<R: Read + Seek> BgzfReader<R> {
             if n == 0 {
                 break;
             }
-            #[allow(clippy::indexing_slicing)]
-            out.extend_from_slice(&tmp[..n]);
+            out.extend_from_slice(tmp.get(..n).ok_or(BgzfError::TruncatedBlock)?);
         }
         Ok(())
     }
@@ -199,6 +198,18 @@ impl BgzfReader<std::io::Cursor<Vec<u8>>> {
 impl<R: Read + Seek> BgzfReader<R> {
     /// Current virtual offset (block start + position within decompressed data).
     pub fn virtual_offset(&self) -> VirtualOffset {
+        debug_assert!(
+            self.buf_pos <= self.buf.len(),
+            "buf_pos {} out of bounds for buf len {}",
+            self.buf_pos,
+            self.buf.len()
+        );
+        debug_assert!(
+            self.buf_pos <= u16::MAX as usize,
+            "buf_pos {} exceeds maximum representable within-block offset",
+            self.buf_pos
+        );
+        #[allow(clippy::cast_possible_truncation, reason = "position in small buffer")]
         VirtualOffset::new(self.block_offset, self.buf_pos as u16)
     }
 
