@@ -1,7 +1,14 @@
 //! Tests for `RegionBuf`: bulk-read BGZF buffer for high-latency I/O.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 use seqair::bam::{
-    Pos, Zero, reader::IndexedBamReader, record_store::RecordStore, region_buf::RegionBuf,
+    reader::IndexedBamReader, record_store::RecordStore, region_buf::RegionBuf, Pos, Zero,
 };
 use std::path::Path;
 
@@ -119,7 +126,9 @@ fn fetch_into_uses_region_buf_and_matches_htslib() {
 
     // htslib records
     let mut hts_reader = bam::IndexedReader::from_path(bam_path).expect("htslib open");
-    hts_reader.fetch(("chr19", TEST_START as i64, TEST_END as i64)).expect("htslib fetch");
+    hts_reader
+        .fetch(("chr19", TEST_START.cast_signed(), TEST_END.cast_signed()))
+        .expect("htslib fetch");
     let hts_count = hts_reader.records().filter(|r| r.is_ok()).count();
 
     // seqair records (now via RegionBuf)

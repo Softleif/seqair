@@ -1,6 +1,16 @@
 //! Tests for `RecordStore`: slab-based BAM record storage.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-#![allow(clippy::arithmetic_side_effects)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "test code with known small values"
+)]
 use seqair::bam::record_store::RecordStore;
 use seqair::bam::{Pos, Zero};
 use seqair_types::Base;
@@ -256,7 +266,7 @@ fn push_raw_rejects_very_negative_position() {
 }
 
 /// Build a minimal raw BAM record for testing.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "test helper needs all BAM record fields")]
 fn make_test_record(
     tid: i32,
     pos: i32,

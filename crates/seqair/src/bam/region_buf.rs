@@ -584,7 +584,12 @@ fn merge_chunks(chunks: &[Chunk]) -> Vec<MergedRange> {
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic is not safety-critical")]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
+)]
 mod tests {
     use super::*;
 

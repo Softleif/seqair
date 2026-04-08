@@ -721,7 +721,11 @@ unsafe fn decode_seq_neon(encoded: &[u8], len: usize) -> Vec<u8> {
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic is not safety-critical")]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "test code with known small values"
+)]
 mod tests {
     use super::*;
 
