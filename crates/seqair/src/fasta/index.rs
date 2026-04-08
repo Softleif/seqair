@@ -74,7 +74,7 @@ pub struct FastaIndex {
 }
 
 impl FastaIndex {
-    #[instrument(level = "debug", fields(path = %path.display()), err)]
+    #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn from_file(path: &Path) -> Result<Self, FaiError> {
         let contents = std::fs::read_to_string(path)
             .map_err(|source| FaiError::Read { path: path.to_path_buf(), source })?;

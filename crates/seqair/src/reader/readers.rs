@@ -35,7 +35,7 @@ impl Readers {
     /// Auto-detects the alignment format. For CRAM, the FASTA path is passed
     /// to the CRAM reader for sequence reconstruction.
     // r[impl unified.readers_open]
-    #[instrument(level = "debug", fields(alignment = %alignment_path.display(), fasta = %fasta_path.display()), err)]
+    #[instrument(level = "debug", fields(alignment = %alignment_path.display(), fasta = %fasta_path.display()))]
     pub fn open(alignment_path: &Path, fasta_path: &Path) -> Result<Self, ReaderError> {
         let fasta = IndexedFastaReader::open(fasta_path)
             .map_err(|source| ReaderError::FastaOpen { source })?;

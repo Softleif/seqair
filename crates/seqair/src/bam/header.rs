@@ -121,16 +121,16 @@ impl BamHeader {
     // r[impl bam.header.text]
     // r[impl bam.header.references]
     /// Parse the BAM header from a BGZF reader positioned at the start of the file.
-    #[instrument(level = "debug", skip(bgzf), err)]
+    #[instrument(level = "debug", skip(bgzf))]
     /// Parse the BAM binary header from a BGZF reader.
     #[cfg(feature = "fuzz")]
-    #[instrument(level = "debug", skip(bgzf), err)]
+    #[instrument(level = "debug", skip(bgzf))]
     pub fn parse<R: Read + Seek>(bgzf: &mut BgzfReader<R>) -> Result<Self, BamHeaderError> {
         Self::parse_inner(bgzf)
     }
 
     #[cfg(not(feature = "fuzz"))]
-    #[instrument(level = "debug", skip(bgzf), err)]
+    #[instrument(level = "debug", skip(bgzf))]
     pub(crate) fn parse<R: Read + Seek>(bgzf: &mut BgzfReader<R>) -> Result<Self, BamHeaderError> {
         Self::parse_inner(bgzf)
     }
@@ -220,7 +220,7 @@ impl BamHeader {
     }
 
     /// Open a BAM file and parse just the header.
-    #[instrument(level = "debug", fields(path = %path.display()), err)]
+    #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn from_bam_path(path: &Path) -> Result<Self, BamHeaderError> {
         let mut bgzf = BgzfReader::open(path)?;
         Self::parse(&mut bgzf)
@@ -231,7 +231,7 @@ impl BamHeader {
     ///
     /// Extracts target names and lengths from `@SQ` lines (`SN` and `LN` tags).
     /// Returns an error if no `@SQ` lines are found.
-    #[instrument(level = "debug", skip(text), fields(text_len = text.len()), err)]
+    #[instrument(level = "debug", skip(text), fields(text_len = text.len()))]
     pub fn from_sam_text(text: &str) -> Result<Self, BamHeaderError> {
         let mut targets = Vec::new();
         let mut name_to_tid = HashMap::new();

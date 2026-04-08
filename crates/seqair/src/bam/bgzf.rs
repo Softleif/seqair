@@ -136,7 +136,7 @@ pub(crate) unsafe fn resize_uninit(buf: &mut Vec<u8>, new_len: usize) {
 }
 
 impl BgzfReader<std::fs::File> {
-    #[instrument(level = "debug", fields(path = %path.display()), err)]
+    #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, BgzfError> {
         let file = std::fs::File::open(path)
             .map_err(|source| BgzfError::Open { path: path.to_path_buf(), source })?;
@@ -214,7 +214,7 @@ impl<R: Read + Seek> BgzfReader<R> {
     }
 
     // r[impl bgzf.seek]
-    #[instrument(level = "debug", skip(self), fields(voff = %voff.0), err)]
+    #[instrument(level = "debug", skip(self), fields(voff = %voff.0))]
     pub fn seek_virtual(&mut self, voff: VirtualOffset) -> Result<(), BgzfError> {
         let block_off = voff.block_offset();
         let within = voff.within_block() as usize;

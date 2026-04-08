@@ -105,7 +105,7 @@ impl<R: Read + Seek> std::fmt::Debug for IndexedBamReader<R> {
 }
 
 impl IndexedBamReader<File> {
-    #[instrument(level = "debug", fields(path = %path.display()), err)]
+    #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, BamError> {
         let mut bgzf = BgzfReader::open(path)?;
         let header = BamHeader::parse(&mut bgzf)?;
@@ -126,7 +126,7 @@ impl IndexedBamReader<File> {
     // r[impl bam.reader.fork_independence]
     // r[impl bam.reader.fork_equivalence]
     // r[impl bam.reader.fork_concurrent]
-    #[instrument(level = "debug", skip(self), fields(path = %self.shared.bam_path.display()), err)]
+    #[instrument(level = "debug", skip(self), fields(path = %self.shared.bam_path.display()))]
     pub fn fork(&self) -> Result<Self, BamError> {
         let bulk_file = File::open(&self.shared.bam_path)
             .map_err(|source| BamError::Open { path: self.shared.bam_path.clone(), source })?;
@@ -166,7 +166,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     // r[impl bam.reader.secondary_supplementary_included+2]
     // r[impl region_buf.fetch_into+2]
     // r[impl region_buf.no_bin0]
-    #[instrument(level = "debug", skip(self, store), fields(tid, start, end), err)]
+    #[instrument(level = "debug", skip(self, store), fields(tid, start, end))]
     pub fn fetch_into(
         &mut self,
         tid: u32,
@@ -243,7 +243,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
                     }
 
                     accepted = accepted.saturating_add(1);
-                    store.push_raw(raw).map_err(|source| BamError::RecordDecode { source })?;
+                    store.push_raw(raw)?;
                 }
             }
         }
