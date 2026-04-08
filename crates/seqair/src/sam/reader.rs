@@ -82,6 +82,9 @@ pub enum SamRecordError {
 
     #[error("aux integer value {value} does not fit any BAM integer type (i8/u8/i16/u16/i32/u32)")]
     AuxIntOutOfRange { value: i64 },
+
+    #[error("aux B-array has {len} elements, exceeding u32::MAX")]
+    AuxArrayTooLarge { len: usize },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -259,7 +262,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
 
         let start_i64 = start.as_i64();
         let end_i64 = end.as_i64();
-        let tid_i32 = tid as i32;
+        let tid_i32 = tid.cast_signed();
 
         let mut cigar_buf = Vec::with_capacity(256);
         let mut bases_buf = Vec::with_capacity(256);
@@ -328,7 +331,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
 
         let start_i64 = start.as_i64();
         let end_i64 = end.as_i64();
-        let tid_i32 = tid as i32;
+        let tid_i32 = tid.cast_signed();
 
         // Buffer for accumulating lines that span BGZF block boundaries
         let mut line_buf = Vec::with_capacity(1024);
@@ -455,7 +458,7 @@ fn parse_sam_line(
     let rname_str = std::str::from_utf8(rname)
         .map_err(|_| SamRecordError::InvalidRname { value: rname.into() })?;
     let rec_tid = match header.tid(rname_str) {
-        Some(t) => t as i32,
+        Some(t) => t.cast_signed(),
         None => return Ok(None), // unknown contig, skip
     };
 
@@ -639,28 +642,50 @@ fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
                 buf.push(subtype);
                 let values_str = value.get(2..).unwrap_or(b"");
                 let values: Vec<&[u8]> = values_str.split(|&b| b == b',').collect();
-                buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+                let values_len_u32 = u32::try_from(values.len())
+                    .map_err(|_| SamRecordError::AuxArrayTooLarge { len: values.len() })?;
+                buf.extend_from_slice(&values_len_u32.to_le_bytes());
                 for v in &values {
                     match subtype {
                         b'c' | b'C' => {
-                            let n = parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
-                                tag: tag.into(),
-                                value: (*v).into(),
-                            })? as u8;
+                            let raw =
+                                parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
+                                    tag: tag.into(),
+                                    value: (*v).into(),
+                                })?;
+                            let n =
+                                u8::try_from(raw).map_err(|_| SamRecordError::InvalidAuxValue {
+                                    tag: tag.into(),
+                                    value: (*v).into(),
+                                })?;
                             buf.push(n);
                         }
                         b's' | b'S' => {
-                            let n = parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
-                                tag: tag.into(),
-                                value: (*v).into(),
-                            })? as u16;
+                            let raw =
+                                parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
+                                    tag: tag.into(),
+                                    value: (*v).into(),
+                                })?;
+                            let n = u16::try_from(raw).map_err(|_| {
+                                SamRecordError::InvalidAuxValue {
+                                    tag: tag.into(),
+                                    value: (*v).into(),
+                                }
+                            })?;
                             buf.extend_from_slice(&n.to_le_bytes());
                         }
                         b'i' | b'I' => {
-                            let n = parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
-                                tag: tag.into(),
-                                value: (*v).into(),
-                            })? as u32;
+                            let raw =
+                                parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
+                                    tag: tag.into(),
+                                    value: (*v).into(),
+                                })?;
+                            let n = u32::try_from(raw).map_err(|_| {
+                                SamRecordError::InvalidAuxValue {
+                                    tag: tag.into(),
+                                    value: (*v).into(),
+                                }
+                            })?;
                             buf.extend_from_slice(&n.to_le_bytes());
                         }
                         b'f' => {
@@ -691,6 +716,10 @@ fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
 // r[impl sam.record.aux_int_range+2]
 /// Serialize an integer value using the smallest BAM integer type.
 /// Returns an error if the value does not fit any BAM integer type (i8/u8/i16/u16/i32/u32).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "each branch is guarded by a range check that ensures value fits in the target type"
+)]
 fn serialize_bam_int(buf: &mut Vec<u8>, val: i64) -> Result<(), SamRecordError> {
     if (-128..=127).contains(&val) {
         buf.push(b'c');
