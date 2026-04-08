@@ -102,7 +102,7 @@ impl<R: Read + Seek> std::fmt::Debug for IndexedFastaReader<R> {
 }
 
 impl IndexedFastaReader<File> {
-    #[instrument(level = "debug", fields(path = %path.display()), err)]
+    #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, FastaError> {
         let fai_path = fai_path_for(path);
         // r[impl fasta.index.missing]
@@ -149,7 +149,7 @@ impl IndexedFastaReader<File> {
 
     // r[impl fasta.fork.operation]
     // r[impl fasta.fork.independence]
-    #[instrument(level = "debug", skip(self), fields(path = %self.shared.fasta_path.display()), err)]
+    #[instrument(level = "debug", skip(self), fields(path = %self.shared.fasta_path.display()))]
     pub fn fork(&self) -> Result<Self, FastaError> {
         let handle = if self.shared.is_bgzf {
             FileHandle::Bgzf(BgzfReader::open(&self.shared.fasta_path)?)
@@ -203,7 +203,7 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
 
     // r[impl fasta.fetch.raw_bytes]
     // r[impl fasta.fetch.buffer_reuse]
-    #[instrument(level = "debug", skip(self), fields(name, start, stop), err)]
+    #[instrument(level = "debug", skip(self), fields(name, start, stop))]
     pub fn fetch_seq(
         &mut self,
         name: &str,
@@ -216,7 +216,7 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
     }
 
     // r[impl fasta.fetch.raw_bytes]
-    #[instrument(level = "debug", skip(self, out), fields(name, start, stop), err)]
+    #[instrument(level = "debug", skip(self, out), fields(name, start, stop))]
     pub fn fetch_seq_into(
         &mut self,
         name: &str,

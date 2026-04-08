@@ -71,7 +71,7 @@ impl IndexedReader<std::fs::File> {
     /// [`crate::Readers::open`] instead. This method returns an error for CRAM
     /// with a message directing the user to provide a reference.
     // r[impl unified.readers_backward_compat]
-    #[instrument(level = "debug", fields(path = %path.display()), err)]
+    #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, ReaderError> {
         match formats::detect(path)? {
             Format::Bam => {

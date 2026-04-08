@@ -160,7 +160,7 @@ impl<R> std::fmt::Debug for IndexedSamReader<R> {
 
 impl IndexedSamReader<File> {
     // r[impl sam.reader.open]
-    #[instrument(level = "debug", fields(path = %path.display()), err)]
+    #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, SamError> {
         // r[impl sam.reader.reject_uncompressed]
         {
@@ -311,7 +311,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
 
     // r[impl sam.reader.fetch_into]
     // r[impl sam.reader.sorted_order]
-    #[instrument(level = "debug", skip(self, store), fields(tid, start, end), err)]
+    #[instrument(level = "debug", skip(self, store), fields(tid, start, end))]
     // r[impl sam.perf.bulk_read]
     pub fn fetch_into(
         &mut self,

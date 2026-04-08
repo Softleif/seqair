@@ -91,7 +91,7 @@ const CACHE_LEVEL_THRESHOLD: u8 = 2;
 impl BamIndex {
     // r[impl bam.index.bai_magic]
     // r[impl bam.index.bai_parse]
-    #[instrument(level = "debug", fields(path = %path.display()), err)]
+    #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn from_path(path: &Path) -> Result<Self, BaiError> {
         let data = std::fs::read(path)
             .map_err(|source| BaiError::Read { path: path.to_path_buf(), source })?;
@@ -167,7 +167,7 @@ impl BamIndex {
     ///
     /// Tabix files are BGZF-compressed. After decompression and the tabix-specific
     /// header, the bin/chunk/linear-index data is identical to BAI format.
-    #[instrument(level = "debug", fields(path = %path.display()), err)]
+    #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn from_tabix_path(path: &Path) -> Result<Self, BaiError> {
         let compressed = std::fs::read(path)
             .map_err(|source| BaiError::Read { path: path.to_path_buf(), source })?;

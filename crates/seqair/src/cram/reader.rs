@@ -241,7 +241,7 @@ impl<R: Read + Seek> std::fmt::Debug for IndexedCramReader<R> {
 
 impl IndexedCramReader<File> {
     /// Open a CRAM file with a FASTA reference for sequence reconstruction.
-    #[instrument(level = "debug", fields(cram = %cram_path.display(), fasta = %fasta_path.display()), err)]
+    #[instrument(level = "debug", fields(cram = %cram_path.display(), fasta = %fasta_path.display()))]
     pub fn open(cram_path: &Path, fasta_path: &Path) -> Result<Self, CramError> {
         let mut file = File::open(cram_path)
             .map_err(|source| CramError::Open { path: cram_path.to_path_buf(), source })?;
