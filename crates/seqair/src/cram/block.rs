@@ -173,6 +173,7 @@ fn decompress_block(
 
 /// Build a raw CRAM block from components (for testing).
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation, reason = "test helper with known small values")]
 pub fn build_test_block(content_type: u8, content_id: i32, data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -200,11 +201,12 @@ pub fn build_test_block(content_type: u8, content_id: i32, data: &[u8]) -> Vec<u
 fn encode_itf8_to(buf: &mut Vec<u8>, val: u32) {
     let mut tmp = [0u8; 5];
     let n = super::varint::encode_itf8(val, &mut tmp);
-    #[allow(clippy::indexing_slicing)]
+    #[allow(clippy::indexing_slicing, reason = "n is the return value of encode_itf8, always ≤ 5")]
     buf.extend_from_slice(&tmp[..n]);
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 mod tests {
     use super::*;
 
@@ -328,7 +330,10 @@ mod tests {
         let mut block_bytes = build_test_block(4, 0, data);
         // Corrupt the last byte of CRC32
         let len = block_bytes.len();
-        #[allow(clippy::indexing_slicing)]
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "len is the length of the vec just created above"
+        )]
         {
             block_bytes[len - 1] ^= 0xFF;
         }
@@ -375,7 +380,10 @@ mod tests {
         assert_eq!(b1.content_id, 1);
         assert_eq!(b1.data, b"first");
 
-        #[allow(clippy::indexing_slicing)]
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "consumed1 is a valid byte offset returned by parse_block"
+        )]
         let (b2, consumed2) = parse_block(&combined[consumed1..]).unwrap();
         assert_eq!(b2.content_id, 2);
         assert_eq!(b2.data, b"second");
@@ -572,7 +580,10 @@ mod tests {
                 .unwrap();
 
         // Skip 26-byte file definition
-        #[allow(clippy::indexing_slicing)]
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "CRAM file definition is always 26 bytes per spec"
+        )]
         let after_file_def = &data[26..];
 
         // Skip the container header (variable length) to get to the first block

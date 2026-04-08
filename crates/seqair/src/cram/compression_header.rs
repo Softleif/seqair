@@ -393,18 +393,27 @@ mod tests {
         use super::super::{block, container::ContainerHeader};
 
         // Skip file def + header container
-        #[allow(clippy::indexing_slicing)]
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "CRAM file definition is always 26 bytes per spec"
+        )]
         let after_file_def = &data[26..];
         let header_container = ContainerHeader::parse(after_file_def).unwrap();
         let data_start = header_container.header_size + header_container.length as usize;
 
         // Parse first data container
-        #[allow(clippy::indexing_slicing)]
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "data_start is computed from parsed container header fields"
+        )]
         let data_container_bytes = &after_file_def[data_start..];
         let data_container = ContainerHeader::parse(data_container_bytes).unwrap();
 
         // First block in data container is the compression header
-        #[allow(clippy::indexing_slicing)]
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "header_size is the parsed container header byte length"
+        )]
         let block_data = &data_container_bytes[data_container.header_size..];
         let (comp_block, _) = block::parse_block(block_data).unwrap();
         assert_eq!(comp_block.content_type, block::ContentType::CompressionHeader);

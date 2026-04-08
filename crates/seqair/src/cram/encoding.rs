@@ -684,6 +684,8 @@ mod tests {
         // Verify Beta decoding with varying bit widths and offsets: decoded value must
         // equal the raw bit pattern minus the offset, as per the CRAM spec.
         #[test]
+        #[allow(clippy::cast_possible_truncation, reason = "intentional byte extraction; val is clamped to ≤16 bits")]
+        #[allow(clippy::cast_possible_wrap, reason = "val is clamped to ≤16 bits so fits in i32")]
         fn beta_decode_with_varying_params(
             bits in 1u32..=16,
             offset in -100i32..=100,
@@ -701,7 +703,7 @@ mod tests {
             let mut ctx = DecodeContext::new(&data, FxHashMap::default());
             let enc = IntEncoding::Beta { offset, bits };
             let decoded = enc.decode(&mut ctx).unwrap();
-            proptest::prop_assert_eq!(decoded, val as i32 - offset);
+            proptest::prop_assert_eq!(decoded, val.cast_signed() - offset);
         }
 
         #[test]

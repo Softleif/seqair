@@ -253,6 +253,10 @@ pub fn read_ltf8_from(cursor: &mut &[u8]) -> Option<u64> {
 /// Returns the number of bytes written (1-5).
 /// Used only for testing roundtrips.
 #[cfg(test)]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "intentional byte extraction via bitmask shifts in ITF8 encoding"
+)]
 pub(super) fn encode_itf8(val: u32, buf: &mut [u8; 5]) -> usize {
     if val < 0x80 {
         buf[0] = val as u8;
@@ -330,11 +334,11 @@ mod tests {
     fn itf8_negative_as_i32() {
         // -1 in two's complement = 0xFFFF_FFFF
         let (val, _) = decode_itf8(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]).unwrap();
-        assert_eq!(val as i32, -1);
+        assert_eq!(val.cast_signed(), -1i32);
 
         // -2 = 0xFFFF_FFFE
         let (val, _) = decode_itf8(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0E]).unwrap();
-        assert_eq!(val as i32, -2);
+        assert_eq!(val.cast_signed(), -2i32);
     }
 
     #[test]
@@ -365,6 +369,7 @@ mod tests {
         // Verify that encode_itf8 produces wire bytes that match the ITF8 spec bit patterns,
         // and that decode_itf8 recovers the original value.
         #[test]
+        #[allow(clippy::cast_possible_truncation, reason = "val < 0x80 is checked before the cast")]
         fn itf8_wire_format_matches_spec(val: u32) {
             let mut buf = [0u8; 5];
             let n = encode_itf8(val, &mut buf);
@@ -473,6 +478,7 @@ mod tests {
 
     proptest! {
         #[test]
+        #[allow(clippy::cast_possible_truncation, reason = "val in 0..0x80 is checked by proptest range")]
         fn ltf8_small_values_match_itf8(val in 0u32..0x80) {
             // Values < 128 should encode identically in ITF8 and LTF8
             let (itf8_val, itf8_len) = decode_itf8(&[val as u8]).unwrap();

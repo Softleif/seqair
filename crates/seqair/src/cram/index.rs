@@ -295,9 +295,16 @@ mod tests {
                 continue; // skip unmapped
             }
             // Verify the container offset points to a valid container header
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "test runs on 64-bit; offset verified < file size"
+            )]
             let offset = entry.container_offset as usize;
             assert!(offset < cram_data.len(), "container offset out of bounds");
-            #[allow(clippy::indexing_slicing)]
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "offset is verified < cram_data.len() above"
+            )]
             let container =
                 super::super::container::ContainerHeader::parse(&cram_data[offset..]).unwrap();
             assert!(container.num_records > 0, "CRAI entry points to empty container");

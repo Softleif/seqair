@@ -182,7 +182,8 @@ fn read_ltf8_at(buf: &[u8], pos: usize, context: &'static str) -> Result<(u64, u
 #[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
-    reason = "test-only arithmetic on known-valid CRAM file data"
+    clippy::indexing_slicing,
+    reason = "test-only arithmetic and indexing on known-valid CRAM file data"
 )]
 mod tests {
     use super::*;
@@ -195,7 +196,6 @@ mod tests {
                 .unwrap();
 
         // Skip 26-byte file definition
-        #[allow(clippy::indexing_slicing)]
         let after_file_def = &data[26..];
 
         let header = ContainerHeader::parse(after_file_def).unwrap();
@@ -215,13 +215,11 @@ mod tests {
                 .unwrap();
 
         // Skip file def (26 bytes) + header container (header + data)
-        #[allow(clippy::indexing_slicing)]
         let after_file_def = &data[26..];
         let header_container = ContainerHeader::parse(after_file_def).unwrap();
 
         // Skip to after the header container's data
         let data_start = header_container.header_size + header_container.length as usize;
-        #[allow(clippy::indexing_slicing)]
         let after_header = &after_file_def[data_start..];
 
         let data_container = ContainerHeader::parse(after_header).unwrap();
@@ -246,18 +244,13 @@ mod tests {
 
         // The EOF container is the last 38 bytes of the file
         // But let's iterate containers to find it
-        #[allow(clippy::indexing_slicing)]
         let mut pos = 26; // skip file def
 
         let mut found_eof = false;
         let mut container_count = 0;
         while pos < data.len() {
-            #[allow(clippy::indexing_slicing)]
             let remaining = &data[pos..];
-            let container = match ContainerHeader::parse(remaining) {
-                Ok(c) => c,
-                Err(_) => break,
-            };
+            let Ok(container) = ContainerHeader::parse(remaining) else { break };
             container_count += 1;
 
             if container.is_eof() {
@@ -284,12 +277,10 @@ mod tests {
             std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.cram"))
                 .unwrap();
 
-        #[allow(clippy::indexing_slicing)]
         let after_file_def = &data[26..];
         let header_container = ContainerHeader::parse(after_file_def).unwrap();
 
         // The block data starts right after the container header
-        #[allow(clippy::indexing_slicing)]
         let block_data = &after_file_def[header_container.header_size..];
 
         let (blk, _) = block::parse_block(block_data).unwrap();
@@ -298,7 +289,6 @@ mod tests {
         // The file header block contains: i32 header_text_length + UTF-8 header text
         let header_len =
             i32::from_le_bytes([blk.data[0], blk.data[1], blk.data[2], blk.data[3]]) as usize;
-        #[allow(clippy::indexing_slicing)]
         let header_text = std::str::from_utf8(&blk.data[4..4 + header_len]).unwrap();
 
         assert!(header_text.starts_with("@HD"), "should start with @HD header line");
@@ -317,17 +307,14 @@ mod tests {
             std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.cram"))
                 .unwrap();
 
-        #[allow(clippy::indexing_slicing)]
         let after_file_def = &data[26..];
         let header_container = ContainerHeader::parse(after_file_def).unwrap();
 
-        #[allow(clippy::indexing_slicing)]
         let block_data = &after_file_def[header_container.header_size..];
         let (blk, _) = block::parse_block(block_data).unwrap();
 
         let header_len =
             i32::from_le_bytes([blk.data[0], blk.data[1], blk.data[2], blk.data[3]]) as usize;
-        #[allow(clippy::indexing_slicing)]
         let header_text = std::str::from_utf8(&blk.data[4..4 + header_len]).unwrap();
 
         let header = BamHeader::from_sam_text(header_text).unwrap();
