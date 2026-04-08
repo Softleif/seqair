@@ -55,7 +55,13 @@ impl BamRecord {
         )]
         let cigar_slice = &raw[h.var_start..h.cigar_end];
         let end_pos = compute_end_pos(h.pos, cigar_slice)
-            .ok_or(DecodeError::InvalidPosition { value: h.pos.get() as i32 })?;
+            .ok_or(DecodeError::InvalidPosition {
+                #[expect(
+                    clippy::cast_possible_wrap,
+                    reason = "BAM positions are capped at 2^29 by format spec; Pos<Zero> decoded from BAM always fits i32"
+                )]
+                value: h.pos.get() as i32,
+            })?;
         let (matching_bases, indel_bases) = super::cigar::calc_matches_indels(cigar_slice);
 
         #[allow(

@@ -101,7 +101,7 @@ impl RecordStore {
     pub fn push_raw(&mut self, raw: &[u8]) -> Result<u32, DecodeError> {
         let h = record::parse_header(raw)?;
 
-        let idx = self.records.len() as u32;
+        let idx = u32::try_from(self.records.len()).map_err(|_| DecodeError::SlabOverflow)?;
 
         // All slice bounds ≤ qual_end ≤ raw.len() (checked by parse_header)
         debug_assert!(h.qual_end <= raw.len(), "qual_end overrun: {} > {}", h.qual_end, raw.len());
@@ -112,7 +112,13 @@ impl RecordStore {
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let cigar_slice = &raw[h.var_start..h.cigar_end];
         let end_pos = record::compute_end_pos(h.pos, cigar_slice)
-            .ok_or(DecodeError::InvalidPosition { value: h.pos.get() as i32 })?;
+            .ok_or(DecodeError::InvalidPosition {
+                #[expect(
+                    clippy::cast_possible_wrap,
+                    reason = "BAM positions are capped at 2^29 by format spec; Pos<Zero> decoded from BAM always fits i32"
+                )]
+                value: h.pos.get() as i32,
+            })?;
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_slice);
 
         // --- Write into name slab ---
@@ -169,9 +175,17 @@ impl RecordStore {
             matching_bases,
             indel_bases,
             name_off,
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "BAM qname is validated to ≤ 254 bytes by parse_header (l_read_name is u8); fits in u16"
+            )]
             name_len: qname_actual_len as u16,
             bases_off,
             data_off,
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "aux data is bounded by slab limits (u32); slab overflow checked above via SlabOverflow"
+            )]
             aux_len: aux_slice.len() as u32,
         });
 
@@ -239,7 +253,15 @@ impl RecordStore {
         aux: &[u8],
     ) -> Result<u32, DecodeError> {
         let idx = u32::try_from(self.records.len()).map_err(|_| DecodeError::SlabOverflow)?;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "caller validates cigar op count ≤ 65535 (BAM n_cigar_op is u16); fits in u16"
+        )]
         let n_cigar_ops = (cigar_packed.len() / 4) as u16;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "seq length is bounded by slab limits (u32); slab overflow checked via SlabOverflow"
+        )]
         let seq_len = bases.len() as u32;
 
         // Name slab
@@ -269,9 +291,17 @@ impl RecordStore {
             matching_bases,
             indel_bases,
             name_off,
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "caller validates qname ≤ 254 bytes; fits in u16"
+            )]
             name_len: qname.len() as u16,
             bases_off,
             data_off,
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "aux data bounded by slab limits (u32); slab overflow checked via SlabOverflow"
+            )]
             aux_len: aux.len() as u32,
         });
 

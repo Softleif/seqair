@@ -244,7 +244,7 @@ impl OwnedBamRecord {
 
         Ok(OwnedBamRecord {
             ref_id: h.tid,
-            pos: i64::from(h.pos.get() as i32),
+            pos: i64::from(h.pos.get().cast_signed()),
             mapq: h.mapq,
             flags: h.flags,
             next_ref_id,
@@ -299,7 +299,7 @@ impl OwnedBamRecord {
     pub fn end_pos(&self) -> i64 {
         let ref_len: u64 =
             self.cigar.iter().filter(|op| op.op.consumes_ref()).map(|op| u64::from(op.len)).sum();
-        self.pos.saturating_add(ref_len as i64)
+        self.pos.saturating_add(ref_len.cast_signed())
     }
 
     // r[impl bam.owned_record.bin]
@@ -312,7 +312,12 @@ impl OwnedBamRecord {
         } else {
             ep as u64
         };
-        reg2bin(beg, end, 14, 5) as u16
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "BAI bin numbers with min_shift=14, depth=5 are bounded by 37449, fits in u16"
+        )]
+        let bin = reg2bin(beg, end, 14, 5) as u16;
+        bin
     }
 
     // r[impl bam.owned_record.aligned_pairs]
@@ -423,8 +428,21 @@ impl OwnedBamRecord {
 
         // Compute bin at serialization time
         let bin = self.bin();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "qname.len() ≤ 254 (validated above); fits in u32"
+        )]
         let l_read_name = (self.qname.len() as u32).saturating_add(1); // +1 for NUL
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "cigar.len() ≤ 65535 (validated above); fits in u32"
+        )]
         let n_cigar_op = self.cigar.len() as u32;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "seq.len() ≤ i32::MAX (validated above); fits in i32"
+        )]
         let l_seq = self.seq.len() as i32;
 
         // Pack bin_mq_nl: bin(16) | mapq(8) | l_read_name(8)
@@ -435,11 +453,21 @@ impl OwnedBamRecord {
 
         // 32-byte fixed header
         buf.extend_from_slice(&self.ref_id.to_le_bytes());
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "pos ∈ [-1, i32::MAX] validated above; fits in i32"
+        )]
         buf.extend_from_slice(&(self.pos as i32).to_le_bytes());
         buf.extend_from_slice(&bin_mq_nl.to_le_bytes());
         buf.extend_from_slice(&flag_nc.to_le_bytes());
         buf.extend_from_slice(&l_seq.to_le_bytes());
         buf.extend_from_slice(&self.next_ref_id.to_le_bytes());
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "next_pos ∈ [-1, i32::MAX] validated above; fits in i32"
+        )]
         buf.extend_from_slice(&(self.next_pos as i32).to_le_bytes());
         buf.extend_from_slice(&self.template_len.to_le_bytes());
 
