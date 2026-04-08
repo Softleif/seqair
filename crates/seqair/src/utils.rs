@@ -4,6 +4,8 @@ pub trait TraceErr<T> {
 }
 
 impl<T> TraceErr<T> for Option<T> {
+    #[track_caller]
+    #[inline(always)]
     fn trace_err(self, message: &'static str) -> Option<T> {
         if self.is_none() {
             tracing::trace!("{message}");
@@ -22,6 +24,8 @@ pub trait TraceOk<T> {
 }
 
 impl<T, E: std::fmt::Display> TraceOk<T> for Result<T, E> {
+    #[track_caller]
+    #[inline(always)]
     fn trace_ok(self, message: &'static str) -> Option<T> {
         match self {
             Ok(v) => Some(v),
