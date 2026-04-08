@@ -589,6 +589,11 @@ mod tests {
         rec.to_bam_bytes(&mut buf).unwrap();
 
         // Prepend block_size and decode with the existing BamRecord::decode
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "test: buf is a small record"
+        )]
         let block_size = buf.len() as i32;
         let mut full = block_size.to_le_bytes().to_vec();
         full.extend_from_slice(&buf);

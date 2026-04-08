@@ -409,7 +409,11 @@ impl Default for RecordStore {
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "test code with known small values"
+)]
 mod tests {
     use super::*;
 

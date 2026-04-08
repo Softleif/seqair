@@ -271,7 +271,7 @@ mod tests {
 
         let loc = gzi.translate(70000).unwrap();
         assert_eq!(loc.compressed_offset, 65536);
-        assert_eq!(loc.within_block_offset, (70000 - 65280) as u16);
+        assert_eq!(loc.within_block_offset, 4720u16);
     }
 
     #[test]
@@ -281,7 +281,7 @@ mod tests {
 
         let loc = gzi.translate(100000).unwrap();
         assert_eq!(loc.compressed_offset, 65536);
-        assert_eq!(loc.within_block_offset, (100000 - 65280) as u16);
+        assert_eq!(loc.within_block_offset, 34720u16);
     }
 
     #[test]

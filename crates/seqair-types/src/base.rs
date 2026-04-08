@@ -500,6 +500,7 @@ pub enum BaseError {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 mod tests {
     use super::*;
     use std::str::FromStr;
