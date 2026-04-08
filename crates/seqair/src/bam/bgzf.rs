@@ -71,6 +71,11 @@ pub enum BgzfError {
     #[error("BAM record block_size ({block_size}) exceeds maximum (2 MiB)")]
     RecordTooLarge { block_size: usize },
 
+    #[error(
+        "region requires {total_bytes} bytes of compressed data, exceeding the {max_bytes} byte limit"
+    )]
+    RegionTooLarge { total_bytes: usize, max_bytes: usize },
+
     // r[impl bgzf.writer]
     #[error("BGZF compression failed")]
     CompressionFailed { source: libdeflater::CompressionError },

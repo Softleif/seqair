@@ -18,6 +18,13 @@ const BGZF_FOOTER_SIZE: usize = 8;
 const BGZF_MAGIC: [u8; 4] = [0x1f, 0x8b, 0x08, 0x04];
 const MAX_BLOCK_SIZE: usize = 65536;
 
+/// Maximum compressed bytes loaded into a single [`RegionBuf`].
+///
+/// Guards against OOM from corrupt indexes or very large query regions.
+/// The batching logic in `fetch_into` partitions chunks so that each batch
+/// stays within this limit; the `RegionBuf::load` check is a final safeguard.
+pub(super) const MAX_REGION_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+
 /// Pre-computed byte range covering one or more merged index chunks.
 struct MergedRange {
     file_start: u64,
@@ -107,9 +114,8 @@ impl RegionBuf {
             .fold(0usize, usize::saturating_add);
 
         // Reject obviously corrupt chunk ranges that would cause OOM
-        const MAX_REGION_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
         if total_bytes > MAX_REGION_BYTES {
-            return Err(BgzfError::RecordTooLarge { block_size: total_bytes });
+            return Err(BgzfError::RegionTooLarge { total_bytes, max_bytes: MAX_REGION_BYTES });
         }
 
         let load_start = std::time::Instant::now();
@@ -127,7 +133,10 @@ impl RegionBuf {
             )]
             let len = range.file_end.saturating_sub(range.file_start) as usize;
             if len > MAX_REGION_BYTES {
-                return Err(BgzfError::RecordTooLarge { block_size: len });
+                return Err(BgzfError::RegionTooLarge {
+                    total_bytes: len,
+                    max_bytes: MAX_REGION_BYTES,
+                });
             }
             let buf_start = data.len();
             data.resize(buf_start.saturating_add(len), 0);
@@ -555,6 +564,21 @@ fn read_all<R: Read>(reader: &mut R, buf: &mut [u8]) -> usize {
         }
     }
     total
+}
+
+/// Compute the total compressed bytes that [`RegionBuf::load`] would read for `chunks`.
+///
+/// Used by the batching logic in `fetch_into` to partition chunks into groups
+/// that each fit within [`MAX_REGION_BYTES`].
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
+)]
+pub(super) fn merged_byte_size(chunks: &[Chunk]) -> usize {
+    merge_chunks(chunks)
+        .iter()
+        .map(|r| r.file_end.saturating_sub(r.file_start) as usize)
+        .fold(0usize, usize::saturating_add)
 }
 
 // r[impl region_buf.merge_chunks]
@@ -1348,5 +1372,106 @@ mod tests {
 
         let mut scratch = Vec::new();
         assert!(region.read_record(&mut scratch).is_err());
+    }
+
+    // --- RegionTooLarge / merged_byte_size tests ---
+
+    #[test]
+    fn merged_byte_size_single_chunk() {
+        let chunks =
+            vec![Chunk { begin: VirtualOffset::new(1000, 0), end: VirtualOffset::new(2000, 0) }];
+        let size = merged_byte_size(&chunks);
+        // end block_offset=2000, extended by MAX_BLOCK_SIZE=65536
+        // So range is [1000, 2000+65536) = 66536 bytes
+        assert_eq!(size, 66536);
+    }
+
+    #[test]
+    fn merged_byte_size_overlapping_chunks_merge() {
+        // Two chunks whose block ranges overlap after MAX_BLOCK_SIZE extension
+        let chunks = vec![
+            Chunk { begin: VirtualOffset::new(1000, 0), end: VirtualOffset::new(2000, 0) },
+            Chunk { begin: VirtualOffset::new(50_000, 0), end: VirtualOffset::new(60_000, 0) },
+        ];
+        let size = merged_byte_size(&chunks);
+        // Both within MAX_BLOCK_SIZE of each other after extension, so they merge:
+        // Range 1: [1000, 2000+65536) = [1000, 67536)
+        // Range 2: [50000, 60000+65536) = [50000, 125536)
+        // 50000 < 67536, so they merge to [1000, 125536) = 124536 bytes
+        assert_eq!(size, 124536);
+    }
+
+    #[test]
+    fn merged_byte_size_disjoint_chunks() {
+        let chunks = vec![
+            Chunk { begin: VirtualOffset::new(1000, 0), end: VirtualOffset::new(2000, 0) },
+            Chunk {
+                begin: VirtualOffset::new(1_000_000, 0),
+                end: VirtualOffset::new(1_001_000, 0),
+            },
+        ];
+        let size = merged_byte_size(&chunks);
+        // Disjoint: sum of two ranges
+        let range1 = 2000 + 65536 - 1000; // 66536
+        let range2 = 1_001_000 + 65536 - 1_000_000; // 66536
+        assert_eq!(size, range1 + range2);
+    }
+
+    #[test]
+    fn load_rejects_region_too_large() {
+        // Create chunks whose merged range exceeds MAX_REGION_BYTES.
+        // Use a single chunk with a huge span.
+        let far_end = MAX_REGION_BYTES as u64 + 1_000_000;
+        let chunks =
+            vec![Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(far_end, 0) }];
+
+        let mut cursor = std::io::Cursor::new(vec![0u8; 100]);
+        let result = RegionBuf::load(&mut cursor, &chunks);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, BgzfError::RegionTooLarge { .. }),
+            "expected RegionTooLarge, got {err:?}"
+        );
+    }
+
+    /// Reproduces the real-world failure from a 122 GB BAM file where BAI chunks
+    /// for region chr1:143199802-143300201 merge to ~267 MiB (exceeding 256 MiB).
+    /// Before the fix, this produced a misleading "BAM record `block_size` exceeds
+    /// maximum" error. After the fix, it returns `RegionTooLarge`.
+    #[test]
+    fn load_rejects_large_bai_region_like_122gb_bam() {
+        // Simulate the problematic chunk layout: one huge chunk spanning ~131 MiB
+        // of compressed data, plus a nearby chunk that pushes total past 256 MiB.
+        let chunk1_start = 5_971_912_384u64; // ~5.6 GB into file
+        let chunk1_end = 6_141_438_390u64; // ~131 MiB of compressed data
+        let chunk2_start = 6_141_453_885u64; // just after chunk1 + MAX_BLOCK_SIZE
+        let chunk2_end = 6_252_000_000u64; // another ~105 MiB
+
+        let chunks = vec![
+            Chunk {
+                begin: VirtualOffset::new(chunk1_start, 0),
+                end: VirtualOffset::new(chunk1_end, 0),
+            },
+            Chunk {
+                begin: VirtualOffset::new(chunk2_start, 0),
+                end: VirtualOffset::new(chunk2_end, 0),
+            },
+        ];
+
+        let total = merged_byte_size(&chunks);
+        assert!(
+            total > MAX_REGION_BYTES,
+            "test setup: merged size {total} should exceed MAX_REGION_BYTES {MAX_REGION_BYTES}"
+        );
+
+        let mut cursor = std::io::Cursor::new(vec![0u8; 100]);
+        let result = RegionBuf::load(&mut cursor, &chunks);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, BgzfError::RegionTooLarge { .. }),
+            "expected RegionTooLarge, got {err:?}"
+        );
     }
 }

@@ -6,10 +6,10 @@ use super::{
     bgzf::{BgzfError, BgzfReader},
     flags::FLAG_UNMAPPED,
     header::{BamHeader, BamHeaderError},
-    index::{BaiError, BamIndex},
+    index::{BaiError, BamIndex, Chunk},
     record::{DecodeError, compute_end_pos_from_raw},
     record_store::RecordStore,
-    region_buf::RegionBuf,
+    region_buf::{self, RegionBuf},
 };
 use seqair_types::{Pos, SmolStr, Zero};
 use std::{
@@ -188,14 +188,20 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         let mut skipped_out_of_range: u32 = 0;
         let mut accepted: u32 = 0;
 
-        {
-            let mut region = RegionBuf::load(&mut self.bulk_reader, &chunks)?;
+        // Scratch buffer for the rare case where a record body straddles a BGZF
+        // block boundary; zero-copy slice from RegionBuf::buf is used otherwise.
+        let mut scratch: Vec<u8> = Vec::new();
 
-            // Scratch buffer for the rare case where a record body straddles a BGZF
-            // block boundary; zero-copy slice from RegionBuf::buf is used otherwise.
-            let mut scratch: Vec<u8> = Vec::new();
+        // Partition chunks into batches that each fit within MAX_REGION_BYTES.
+        // For typical regions this produces a single batch (no overhead).
+        // For very large BAM files where BAI bins span >256 MiB of compressed
+        // data, this splits the work into multiple RegionBuf loads.
+        let batches = partition_chunks(&chunks, region_buf::MAX_REGION_BYTES);
 
-            for chunk in &chunks {
+        for batch in &batches {
+            let mut region = RegionBuf::load(&mut self.bulk_reader, batch)?;
+
+            for chunk in batch {
                 region.seek_virtual(chunk.begin)?;
 
                 loop {
@@ -254,6 +260,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
             skipped_tid,
             skipped_unmapped,
             skipped_out_of_range,
+            batches = batches.len(),
             "fetch_into",
         );
 
@@ -269,6 +276,57 @@ impl<R: Read + Seek> IndexedBamReader<R> {
 
         Ok(store.len())
     }
+}
+
+/// Partition chunks into batches where each batch's merged compressed byte
+/// range fits within `max_bytes`.
+///
+/// Chunks are added greedily in order. When adding the next chunk would push
+/// the batch over the limit, a new batch is started. A single chunk that
+/// exceeds `max_bytes` on its own gets its own batch ([`RegionBuf`] will still
+/// reject it, but this avoids infinite loops).
+fn partition_chunks(chunks: &[Chunk], max_bytes: usize) -> Vec<Vec<Chunk>> {
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+
+    // Fast path: if everything fits, return a single batch (avoids recomputing).
+    if region_buf::merged_byte_size(chunks) <= max_bytes {
+        return vec![chunks.to_vec()];
+    }
+
+    let mut batches: Vec<Vec<Chunk>> = Vec::new();
+    let mut current_batch: Vec<Chunk> = Vec::new();
+
+    for chunk in chunks {
+        if current_batch.is_empty() {
+            current_batch.push(*chunk);
+            continue;
+        }
+
+        // Tentatively add this chunk and check if we still fit.
+        current_batch.push(*chunk);
+        if region_buf::merged_byte_size(&current_batch) <= max_bytes {
+            continue;
+        }
+
+        // Doesn't fit — remove it and start a new batch.
+        current_batch.pop();
+        batches.push(std::mem::take(&mut current_batch));
+        current_batch.push(*chunk);
+    }
+
+    if !current_batch.is_empty() {
+        batches.push(current_batch);
+    }
+
+    tracing::info!(
+        batches = batches.len(),
+        total_chunks = chunks.len(),
+        "region split into multiple batches due to size"
+    );
+
+    batches
 }
 
 // r[impl unified.detect_index]
@@ -314,5 +372,138 @@ mod tests {
     fn fetch_into_accepts_max_valid_tid() {
         let result = validate_tid(i32::MAX as u32);
         assert!(result.is_ok(), "max valid tid must succeed");
+    }
+
+    use super::super::bgzf::VirtualOffset;
+
+    #[test]
+    fn partition_chunks_empty() {
+        let result = partition_chunks(&[], 1024);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn partition_chunks_single_batch_when_small() {
+        let chunks = vec![
+            Chunk { begin: VirtualOffset::new(100, 0), end: VirtualOffset::new(200, 0) },
+            Chunk { begin: VirtualOffset::new(300, 0), end: VirtualOffset::new(400, 0) },
+        ];
+        let result = partition_chunks(&chunks, region_buf::MAX_REGION_BYTES);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 2);
+    }
+
+    #[test]
+    fn partition_chunks_splits_large_ranges() {
+        // Create chunks that span more than max_bytes when merged.
+        // Use a small max_bytes to make this testable.
+        let max_bytes = 200_000;
+        let chunks = vec![
+            // Chunk spanning ~130KB of compressed data
+            Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(130_000, 0) },
+            // Disjoint chunk spanning another ~130KB
+            Chunk { begin: VirtualOffset::new(500_000, 0), end: VirtualOffset::new(630_000, 0) },
+        ];
+
+        // Together these exceed 200KB
+        let total = region_buf::merged_byte_size(&chunks);
+        assert!(total > max_bytes, "test setup: total {total} must exceed {max_bytes}");
+
+        let result = partition_chunks(&chunks, max_bytes);
+        assert_eq!(result.len(), 2, "should split into 2 batches");
+        assert_eq!(result[0].len(), 1);
+        assert_eq!(result[1].len(), 1);
+
+        // Each batch individually fits
+        for batch in &result {
+            assert!(region_buf::merged_byte_size(batch) <= max_bytes);
+        }
+    }
+
+    /// Reproduces the 122 GB BAM scenario: many chunks that merge to >256 MiB.
+    /// Verifies that `partition_chunks` splits them into batches that each fit.
+    #[test]
+    fn partition_chunks_122gb_bam_scenario() {
+        // Simulate chunk layout from the real BAM:
+        // - One huge chunk spanning ~131 MiB (bins 13421-13422)
+        // - Many smaller chunks from higher-level bins that overlap and extend the range
+        let mut chunks = vec![
+            // Large level-5 bin chunk: 131 MiB compressed span
+            Chunk {
+                begin: VirtualOffset::new(5_971_912_384, 12584),
+                end: VirtualOffset::new(6_141_438_390, 36748),
+            },
+        ];
+
+        // Add many smaller chunks from higher-level bins scattered in and around
+        for offset in (6_141_500_000..6_252_000_000u64).step_by(15_000) {
+            chunks.push(Chunk {
+                begin: VirtualOffset::new(offset, 0),
+                end: VirtualOffset::new(offset, 50000),
+            });
+        }
+        // Sort by begin (as query() does)
+        chunks.sort_by_key(|c| c.begin);
+
+        let total = region_buf::merged_byte_size(&chunks);
+        assert!(
+            total > region_buf::MAX_REGION_BYTES,
+            "test setup: total {total} must exceed MAX_REGION_BYTES"
+        );
+
+        let batches = partition_chunks(&chunks, region_buf::MAX_REGION_BYTES);
+        assert!(batches.len() >= 2, "should need at least 2 batches, got {}", batches.len());
+
+        // Every batch must fit within the limit
+        for (i, batch) in batches.iter().enumerate() {
+            let size = region_buf::merged_byte_size(batch);
+            assert!(
+                size <= region_buf::MAX_REGION_BYTES,
+                "batch {i} has size {size} exceeding limit {}",
+                region_buf::MAX_REGION_BYTES
+            );
+        }
+
+        // All chunks must be present across batches
+        let total_chunks: usize = batches.iter().map(|b| b.len()).sum();
+        assert_eq!(total_chunks, chunks.len());
+    }
+
+    proptest::proptest! {
+        /// Any set of chunks must be partitioned such that every batch fits
+        /// within the limit, and no chunks are lost.
+        #[test]
+        fn proptest_partition_preserves_all_chunks(
+            n_chunks in 1usize..20,
+            seed in 0u64..10_000,
+        ) {
+            let max_bytes = 500_000; // small limit for testing
+            let chunks: Vec<Chunk> = (0..n_chunks)
+                .map(|i| {
+                    let base = seed + (i as u64) * 200_000;
+                    Chunk {
+                        begin: VirtualOffset::new(base, 0),
+                        end: VirtualOffset::new(base + 100_000, 0),
+                    }
+                })
+                .collect();
+
+            let batches = partition_chunks(&chunks, max_bytes);
+
+            // All chunks preserved
+            let total: usize = batches.iter().map(|b| b.len()).sum();
+            proptest::prop_assert_eq!(total, chunks.len());
+
+            // Each batch fits (or is a single oversized chunk)
+            for batch in &batches {
+                if batch.len() > 1 {
+                    let size = region_buf::merged_byte_size(batch);
+                    proptest::prop_assert!(
+                        size <= max_bytes,
+                        "multi-chunk batch size {size} > {max_bytes}"
+                    );
+                }
+            }
+        }
     }
 }
