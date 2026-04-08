@@ -4,7 +4,14 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    reason = "test code"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::implicit_clone,
+    reason = "test code with known small values"
 )]
 //! noodles, assert every field comes back identical. Covers edge cases that
 //! simpler tests miss: multi-allelic, indels, missing values, phasing, flags.
@@ -296,7 +303,7 @@ fn vcf_roundtrip(
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "fields read in assertions via Debug formatting")]
 struct ParsedRecord {
     pos: u32,
     ref_allele: String,

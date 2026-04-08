@@ -1,11 +1,23 @@
 //! Tests for CIGAR operations, `CigarMapping`, and `pos_info_at` computation.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-#![allow(clippy::arithmetic_side_effects)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::format_collect,
+    reason = "test code with known small values"
+)]
 mod helpers;
 
 use helpers::{cigar_bytes, cigar_op};
 use proptest::prelude::*;
-use seqair::bam::cigar::{CigarMapping, CigarPosInfo, calc_matches_indels};
+use seqair::bam::cigar::{calc_matches_indels, CigarMapping, CigarPosInfo};
 use seqair::bam::{Pos, Zero};
 
 // ---- cigar.matches_indels ----

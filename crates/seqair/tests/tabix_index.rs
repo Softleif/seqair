@@ -1,6 +1,12 @@
 //! Tests for tabix (.tbi) index parsing.
 //! Creates a bgzf-compressed SAM from the test BAM, indexes it with samtools/tabix,
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
 
 use seqair::bam::index::BamIndex;
 use seqair_types::{Pos, Zero};

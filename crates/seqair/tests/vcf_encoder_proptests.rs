@@ -4,7 +4,13 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    reason = "test code"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
 )]
 //! identical BCF output to `BcfWriter::write_record(&VcfRecord)`.
 //!
@@ -74,7 +80,7 @@ fn test_header() -> Arc<VcfHeader> {
 
 /// Write a record using `BcfWriter::write_record()` (the `VcfRecord` path).
 /// Returns the raw BGZF-compressed output.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "test helper with many configurable fields")]
 fn write_via_record(
     header: &Arc<VcfHeader>,
     pos: u32,
@@ -105,7 +111,7 @@ fn write_via_record(
 
 /// Write the same record using `BcfRecordEncoder` (the direct-encode path).
 /// Returns the raw BGZF-compressed output.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "test helper with many configurable fields")]
 fn write_via_encoder(
     header: &Arc<VcfHeader>,
     pos: u32,
@@ -246,8 +252,7 @@ fn parse_bcf_with_noodles(bcf_bytes: &[u8]) -> Vec<ParsedRecord> {
             f.to_bits()
         });
         let ref_allele = rec.reference_bases().to_string();
-        let alt_alleles: Vec<String> =
-            rec.alternate_bases().as_ref().iter().map(|a| a.to_string()).collect();
+        let alt_alleles: Vec<String> = rec.alternate_bases().as_ref().to_vec();
         records.push(ParsedRecord { pos, ref_allele, alt_alleles, qual_bits: qual });
     }
     records

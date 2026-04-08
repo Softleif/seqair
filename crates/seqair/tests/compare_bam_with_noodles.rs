@@ -4,7 +4,13 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    reason = "test code"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
 )]
 use noodles::bam;
 use noodles::sam;
@@ -57,9 +63,8 @@ fn read_noodles_records(
             continue;
         }
 
-        let ref_seq_id = match record.reference_sequence_id().and_then(|r| r.ok()) {
-            Some(id) => id,
-            None => continue,
+        let Some(ref_seq_id) = record.reference_sequence_id().and_then(|r| r.ok()) else {
+            continue;
         };
         if ref_seq_id != contig_idx {
             continue;

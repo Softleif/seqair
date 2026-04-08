@@ -1,12 +1,23 @@
 //! Tests for `PileupEngine`: column iteration, filtering, max depth, edge cases.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-#![allow(clippy::arithmetic_side_effects)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
+)]
 mod helpers;
 
 use helpers::{cigar_op, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::pileup::RefSeq;
-use seqair::bam::{Pos, RecordStore, Zero, pileup::PileupEngine};
+use seqair::bam::{pileup::PileupEngine, Pos, RecordStore, Zero};
 use seqair_types::Base;
 use std::{cell::Cell, rc::Rc};
 

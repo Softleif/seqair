@@ -1,13 +1,24 @@
 //! Tests for pileup indel reporting: `PileupOp::Deletion`, `RefSkip`, Insertion.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-#![allow(clippy::arithmetic_side_effects)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
+)]
 mod helpers;
 
 use helpers::{cigar_op, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::{
-    Pos, RecordStore, Zero,
     pileup::{PileupEngine, PileupOp},
+    Pos, RecordStore, Zero,
 };
 
 // ---- pileup_indel.deletions_included ----
@@ -187,7 +198,7 @@ fn type_safety_deletion_has_no_base() {
     // return Option proves the API is safe.
     let op = PileupOp::Deletion { del_len: 1 };
     let _ = op; // Deletion carries del_len but no base/qual/qpos — that's the point
-    // If someone tried: op.base — compile error. Must use match or convenience method.
+                // If someone tried: op.base — compile error. Must use match or convenience method.
 }
 
 // ---- pileup_indel.no_orphan_insertions ----

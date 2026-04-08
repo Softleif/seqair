@@ -1,5 +1,16 @@
 //! Thread-safety tests for SAM reader forking.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
+)]
 use seqair::bam::{Pos, RecordStore, Zero};
 use seqair::sam::reader::IndexedSamReader;
 use std::path::Path;

@@ -1,6 +1,17 @@
 //! Tests for Base-typed sequence decoding.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-#![allow(clippy::arithmetic_side_effects)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
+)]
 use seqair::bam::record_store::RecordStore;
 use seqair::bam::{Pos, Zero};
 use seqair_types::Base;

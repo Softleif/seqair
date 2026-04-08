@@ -4,7 +4,8 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    reason = "test code"
 )]
 //!
 //! Writes BCF with seqair, runs `bcftools view` to verify the file is valid
@@ -59,7 +60,7 @@ fn shared_header() -> Arc<VcfHeader> {
 }
 
 /// Write a BCF file with seqair to a temp file.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "test helper with many configurable fields")]
 fn write_seqair_bcf(
     header: &Arc<VcfHeader>,
     pos: u32,

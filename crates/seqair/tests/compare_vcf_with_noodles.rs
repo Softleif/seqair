@@ -4,7 +4,13 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    reason = "test code"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
 )]
 
 use proptest::prelude::*;
@@ -244,7 +250,7 @@ fn arb_alleles() -> impl Strategy<Value = Alleles> {
     ]
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, reason = "may be used in future test expansions")]
 fn arb_genotype() -> impl Strategy<Value = Genotype> {
     prop_oneof![
         (0u16..4, 0u16..4).prop_map(|(a, b)| Genotype::unphased(a, b)),

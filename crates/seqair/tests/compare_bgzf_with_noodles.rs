@@ -1,5 +1,11 @@
 //! Cross-validation: seqair BGZF virtual offsets and decompression against noodles-bgzf.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
 use noodles_bgzf::VirtualPosition as NoodlesVP;
 use proptest::prelude::*;
 use seqair::bam::bgzf::{BgzfReader, VirtualOffset};

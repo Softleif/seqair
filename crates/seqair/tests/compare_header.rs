@@ -1,6 +1,17 @@
 //! Comparison tests: BAM header parsing.
 //! These tests verify that seqair's header parser produces identical
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
+)]
 
 use rust_htslib::bam::{self, Read as _};
 use std::path::Path;

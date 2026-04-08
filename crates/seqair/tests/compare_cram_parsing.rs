@@ -1,6 +1,17 @@
 //! Compares CRAM parsing between seqair, noodles-cram, and htslib.
 //! Tests verify that our CRAM container/block/header parsing produces
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
+)]
 
 use seqair::bam::{Pos, Zero};
 use std::path::Path;

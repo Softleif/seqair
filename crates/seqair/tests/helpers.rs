@@ -1,7 +1,18 @@
 //! Shared test helpers for building synthetic BAM records.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-#![allow(clippy::arithmetic_side_effects)]
-#![allow(dead_code)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
+#![allow(dead_code, reason = "shared test helpers, not all used in every test binary")]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
+)]
 
 pub fn cigar_op(len: u32, op: u8) -> u32 {
     (len << 4) | u32::from(op)

@@ -1,6 +1,17 @@
 //! Cross-validation: compress with the `bgzf` crate's Writer (which handles
 //! and seqair's `RegionBuf`. Both must match the original byte-for-byte.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
+)]
 use bgzf::{CompressionLevel, Reader as BgzfReader, Writer as BgzfWriter};
 use proptest::prelude::*;
 use seqair::bam::{bgzf::VirtualOffset, index::Chunk, region_buf::RegionBuf};

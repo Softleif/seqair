@@ -6,7 +6,13 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::type_complexity
+    clippy::type_complexity,
+    reason = "test code"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
 )]
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos, RecordStore, Zero};

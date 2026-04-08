@@ -1,7 +1,13 @@
 //! Tests for BGZF virtual offset representation and ordering.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
 use proptest::prelude::*;
-use seqair::bam::{BamError, BamHeaderError, BgzfError, bgzf::VirtualOffset};
+use seqair::bam::{bgzf::VirtualOffset, BamError, BamHeaderError, BgzfError};
 
 // r[verify bgzf.virtual_offset]
 // Verifies the BAI spec (SAM1 §4.1): upper 48 bits = compressed block offset,

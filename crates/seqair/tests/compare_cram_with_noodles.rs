@@ -8,7 +8,13 @@
     clippy::indexing_slicing,
     clippy::type_complexity,
     clippy::arithmetic_side_effects,
-    dead_code
+    dead_code,
+    reason = "test code"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test code with known small values"
 )]
 use noodles::cram;
 use noodles::fasta;
