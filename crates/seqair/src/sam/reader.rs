@@ -350,10 +350,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                 }
 
                 // Read one byte at a time, accumulating into line_buf until newline
-                let byte = match region.read_byte() {
-                    Ok(b) => b,
-                    Err(_) => break,
-                };
+                let Ok(byte) = region.read_byte() else { break };
 
                 if byte == b'\n' {
                     // Strip \r for Windows line endings
@@ -418,7 +415,10 @@ impl<R: Read + Seek> IndexedSamReader<R> {
 }
 
 // r[impl sam.record.parse]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "SAM line parsing needs header, filter, region, store, and per-record output parameters"
+)]
 fn parse_sam_line(
     line: &[u8],
     header: &BamHeader,

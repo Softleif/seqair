@@ -74,7 +74,10 @@ impl SliceHeader {
 ///
 /// `container_data` starts at the first block after the container header.
 /// `slice_offset` is the byte offset from container data start to this slice's header block.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
+)]
 pub fn decode_slice(
     ch: &CompressionHeader,
     container_data: &[u8],
@@ -224,7 +227,10 @@ pub fn decode_slice(
 ///
 /// Returns 1 if the record was pushed to the store, 0 if filtered out.
 // r[impl cram.record.decode_order]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CRAM record decoding requires compression header, slice header, context, and filter parameters"
+)]
 fn decode_record(
     ch: &CompressionHeader,
     sh: &SliceHeader,
@@ -472,7 +478,10 @@ fn ref_base_at(reference_seq: &[u8], index: usize, warned: &mut bool) -> u8 {
 }
 
 /// Decode features and reconstruct sequence + CIGAR.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "sequence reconstruction requires all CRAM encoding handles, reference slice, and output buffers"
+)]
 fn decode_features_and_reconstruct(
     ch: &CompressionHeader,
     ctx: &mut DecodeContext<'_>,

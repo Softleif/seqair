@@ -80,6 +80,10 @@ impl<W: Write> BgzfWriter<W> {
     ///
     /// Upper 48 bits = compressed offset of the current block.
     /// Lower 16 bits = bytes written into the current (unflushed) block.
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; BgzfWrite trait delegates to it for dyn dispatch"
+    )]
     pub fn virtual_offset(&self) -> VirtualOffset {
         debug_assert!(
             self.buf.len() <= MAX_UNCOMPRESSED_SIZE,
@@ -99,6 +103,10 @@ impl<W: Write> BgzfWriter<W> {
     ///
     /// Call this before writing a record to keep it from spanning block boundaries,
     /// improving seek granularity for index-based random access.
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; BgzfWrite trait delegates to it for dyn dispatch"
+    )]
     pub fn flush_if_needed(&mut self, upcoming_bytes: usize) -> Result<(), BgzfError> {
         if self.buf.len().saturating_add(upcoming_bytes) > MAX_UNCOMPRESSED_SIZE {
             self.flush_block()?;
@@ -107,6 +115,10 @@ impl<W: Write> BgzfWriter<W> {
     }
 
     /// Write data into the BGZF stream. Flushes blocks as needed.
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; BgzfWrite trait delegates to it for dyn dispatch"
+    )]
     pub fn write_all(&mut self, data: &[u8]) -> Result<(), BgzfError> {
         let mut remaining = data;
         while !remaining.is_empty() {

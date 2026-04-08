@@ -97,69 +97,63 @@ impl<'a> Iterator for AuxIter<'a> {
     type Item = ([u8; 2], AuxValue<'a>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let data = self.data;
-            if self.pos.saturating_add(3) > data.len() {
-                return None;
-            }
-
-            let tag = [*data.get(self.pos)?, *data.get(self.pos.saturating_add(1))?];
-            let typ = *data.get(self.pos.saturating_add(2))?;
-            self.pos = self.pos.checked_add(3)?;
-
-            match self.parse_value(typ) {
-                Some(Some(value)) => return Some((tag, value)),
-                Some(None) => continue, // skippable tag
-                None => return None,    // malformed data
-            }
+        if self.pos.saturating_add(3) > self.data.len() {
+            return None;
         }
+
+        let data = self.data;
+        let tag = [*data.get(self.pos)?, *data.get(self.pos.saturating_add(1))?];
+        let typ = *data.get(self.pos.saturating_add(2))?;
+        self.pos = self.pos.checked_add(3)?;
+
+        let value = self.parse_value(typ)?;
+        Some((tag, value))
     }
 }
 
 impl<'a> AuxIter<'a> {
-    /// Returns `Some(Some(value))` for a successfully parsed tag,
-    /// `Some(None)` for a tag that was intentionally skipped,
-    /// or `None` for malformed/truncated data.
-    fn parse_value(&mut self, typ: u8) -> Option<Option<AuxValue<'a>>> {
+    /// Returns `Some(value)` for a successfully parsed tag,
+    /// or `None` for unknown type codes or malformed/truncated data.
+    fn parse_value(&mut self, typ: u8) -> Option<AuxValue<'a>> {
         match typ {
             b'A' => {
                 let v = *self.data.get(self.pos)?;
                 self.pos = self.pos.checked_add(1)?;
-                Some(Some(AuxValue::Char(v)))
+                Some(AuxValue::Char(v))
             }
             b'c' => {
                 let v = *self.data.get(self.pos)?;
                 self.pos = self.pos.checked_add(1)?;
-                Some(Some(AuxValue::I8(i8::try_from(v).trace_ok("invalid aux i8 value")?)))
+                Some(AuxValue::I8(i8::try_from(v).trace_ok("invalid aux i8 value")?))
             }
             b'C' => {
                 let v = *self.data.get(self.pos)?;
                 self.pos = self.pos.checked_add(1)?;
-                Some(Some(AuxValue::U8(v)))
+                Some(AuxValue::U8(v))
             }
             b's' => {
                 let bytes = self.read_bytes::<2>()?;
-                Some(Some(AuxValue::I16(i16::from_le_bytes(bytes))))
+                Some(AuxValue::I16(i16::from_le_bytes(bytes)))
             }
             b'S' => {
                 let bytes = self.read_bytes::<2>()?;
-                Some(Some(AuxValue::U16(u16::from_le_bytes(bytes))))
+                Some(AuxValue::U16(u16::from_le_bytes(bytes)))
             }
             b'i' => {
                 let bytes = self.read_bytes::<4>()?;
-                Some(Some(AuxValue::I32(i32::from_le_bytes(bytes))))
+                Some(AuxValue::I32(i32::from_le_bytes(bytes)))
             }
             b'I' => {
                 let bytes = self.read_bytes::<4>()?;
-                Some(Some(AuxValue::U32(u32::from_le_bytes(bytes))))
+                Some(AuxValue::U32(u32::from_le_bytes(bytes)))
             }
             b'f' => {
                 let bytes = self.read_bytes::<4>()?;
-                Some(Some(AuxValue::Float(f32::from_le_bytes(bytes))))
+                Some(AuxValue::Float(f32::from_le_bytes(bytes)))
             }
             b'd' => {
                 let bytes = self.read_bytes::<8>()?;
-                Some(Some(AuxValue::Double(f64::from_le_bytes(bytes))))
+                Some(AuxValue::Double(f64::from_le_bytes(bytes)))
             }
             b'Z' | b'H' => {
                 let start = self.pos;
@@ -169,7 +163,7 @@ impl<'a> AuxIter<'a> {
                 let slice = self.data.get(start..self.pos)?;
                 self.pos = self.pos.checked_add(1)?; // skip null terminator
                 let v = if typ == b'Z' { AuxValue::String(slice) } else { AuxValue::Hex(slice) };
-                Some(Some(v))
+                Some(v)
             }
             // r[impl bam.record.aux_array_unsupported]
             b'B' => {
@@ -209,7 +203,7 @@ impl<'a> AuxIter<'a> {
                     b'f' => AuxValue::ArrayFloat(array_data),
                     _ => return None,
                 };
-                Some(Some(value))
+                Some(value)
             }
             _ => None,
         }

@@ -56,6 +56,10 @@ impl<W: Write> VcfWriter<W> {
 
     // r[impl vcf_writer.header_first]
     /// Write the VCF header. Must be called exactly once before any `write_record`.
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; VcfWrite trait delegates to it for dyn dispatch"
+    )]
     pub fn write_header(&mut self) -> Result<(), VcfError> {
         let text = self.header.to_vcf_text();
         match &mut self.output {
@@ -75,6 +79,10 @@ impl<W: Write> VcfWriter<W> {
     // r[impl vcf_writer.buffer_reuse]
     // r[impl vcf_writer.validation]
     /// Write a single VCF record.
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; VcfWrite trait delegates to it for dyn dispatch"
+    )]
     pub fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
         if !self.header_written {
             return Err(VcfError::HeaderNotWritten);
@@ -227,6 +235,10 @@ impl<W: Write> VcfWriter<W> {
     // r[impl vcf_writer.finish]
     /// Flush and finalize the writer.
     /// For BGZF: writes EOF marker. Returns the index builder if present.
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; VcfWrite trait delegates to it for dyn dispatch"
+    )]
     pub fn finish(self) -> Result<Option<IndexBuilder>, VcfError> {
         match self.output {
             Output::Plain(mut w) => {

@@ -109,7 +109,10 @@ pub fn decode_seq(encoded: &[u8], len: usize) -> Vec<u8> {
         return unsafe { decode_seq_neon(encoded, len) };
     }
 
-    #[allow(unreachable_code)]
+    #[expect(
+        unreachable_code,
+        reason = "scalar fallback is dead code on aarch64/x86_64 with SIMD; needed for other targets"
+    )]
     decode_seq_scalar(encoded, len)
 }
 
@@ -190,7 +193,10 @@ pub fn decode_bases_into(encoded: &[u8], len: usize, out: &mut [u8]) {
         return;
     }
 
-    #[allow(unreachable_code)]
+    #[expect(
+        unreachable_code,
+        reason = "scalar fallback is dead code on aarch64/x86_64 with SIMD; needed for other targets"
+    )]
     decode_bases_into_scalar(encoded, len, out);
 }
 
@@ -375,7 +381,10 @@ fn decode_bases_raw(encoded: &[u8], len: usize) -> Vec<u8> {
         return unsafe { decode_bases_neon(encoded, len) };
     }
 
-    #[allow(unreachable_code)]
+    #[expect(
+        unreachable_code,
+        reason = "scalar fallback is dead code on aarch64/x86_64 with SIMD; needed for other targets"
+    )]
     decode_bases_scalar(encoded, len)
 }
 

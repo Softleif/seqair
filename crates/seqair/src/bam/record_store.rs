@@ -220,7 +220,10 @@ impl RecordStore {
     ///
     /// Writes directly into the slabs without going through BAM binary encoding.
     /// CIGAR must be in BAM packed u32 format (`len << 4 | op`).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all fields are needed for zero-copy push into the record store slabs"
+    )]
     pub fn push_fields(
         &mut self,
         pos: Pos<Zero>,

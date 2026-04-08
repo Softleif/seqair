@@ -42,6 +42,10 @@ impl<W: Write> BcfWriter<W> {
 
     // r[impl bcf_writer.magic]
     /// Write the BCF magic and header. Must be called once before `write_record`.
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; VcfWrite trait delegates to it for dyn dispatch"
+    )]
     pub fn write_header(&mut self) -> Result<(), VcfError> {
         // Magic: BCF\x02\x02 (BCF version 2.2, the current version expected by htslib)
         self.bgzf.write_all(b"BCF\x02\x02")?;
@@ -97,6 +101,10 @@ impl<W: Write> BcfWriter<W> {
 
     // r[impl bcf_writer.finish]
     /// Finalize the writer. Returns the index builder if one was used.
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; VcfWrite trait delegates to it for dyn dispatch"
+    )]
     pub fn finish(self) -> Result<Option<IndexBuilder>, VcfError> {
         let voff = self.bgzf.virtual_offset();
         let mut index = self.index;
