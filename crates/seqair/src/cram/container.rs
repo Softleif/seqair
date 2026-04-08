@@ -71,13 +71,13 @@ impl ContainerHeader {
             .ok_or(CramError::Truncated { context: "container num_records pos" })?;
 
         let (record_counter_raw, n) = read_ltf8_at(buf, pos, "container record_counter")?;
-        let record_counter = record_counter_raw as i64;
+        let record_counter = record_counter_raw.cast_signed();
         pos = pos
             .checked_add(n)
             .ok_or(CramError::Truncated { context: "container record_counter pos" })?;
 
         let (bases_raw, n) = read_ltf8_at(buf, pos, "container bases")?;
-        let bases = bases_raw as i64;
+        let bases = bases_raw.cast_signed();
         pos = pos.checked_add(n).ok_or(CramError::Truncated { context: "container bases pos" })?;
 
         let (num_blocks, n) = read_itf8_at(buf, pos, "container num_blocks")?;
@@ -100,7 +100,7 @@ impl ContainerHeader {
         for i in 0..landmark_count {
             let (landmark, n) = read_itf8_at(buf, pos, "container landmark")?;
             let _ = i; // suppress unused warning
-            landmarks.push(landmark as i32);
+            landmarks.push(landmark.cast_signed());
             pos = pos
                 .checked_add(n)
                 .ok_or(CramError::Truncated { context: "container landmark pos" })?;
@@ -137,13 +137,13 @@ impl ContainerHeader {
 
         Ok(ContainerHeader {
             length,
-            ref_seq_id: ref_seq_id as i32,
-            alignment_start: alignment_start as i32,
-            alignment_span: alignment_span as i32,
-            num_records: num_records as i32,
+            ref_seq_id: ref_seq_id.cast_signed(),
+            alignment_start: alignment_start.cast_signed(),
+            alignment_span: alignment_span.cast_signed(),
+            num_records: num_records.cast_signed(),
             record_counter,
             bases,
-            num_blocks: num_blocks as i32,
+            num_blocks: num_blocks.cast_signed(),
             landmarks,
             header_size: pos,
         })

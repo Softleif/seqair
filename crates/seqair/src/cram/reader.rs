@@ -395,6 +395,10 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         let start_u64 = start.as_u64();
         let end_u64 = end.as_u64();
 
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "tid bounded by BAM header limits (MAX_REFERENCES = 1M), fits i32"
+        )]
         let entries = self.shared.index.query(tid as i32, start_u64, end_u64);
         if entries.is_empty() {
             return Ok(0);
@@ -493,7 +497,13 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     .fetch_seq_into(
                         &ref_name,
                         Pos::<Zero>::try_from_u64(ref_start)
-                            .ok_or(CramError::InvalidPosition { value: ref_start as i64 })?,
+                            .ok_or(CramError::InvalidPosition {
+                            #[expect(
+                                clippy::cast_possible_wrap,
+                                reason = "error reporting only; value may exceed i64::MAX but is only used for diagnostics"
+                            )]
+                            value: ref_start as i64,
+                        })?,
                         Pos::<Zero>::try_from_u64(ref_end_clamped)
                             .unwrap_or_else(Pos::<Zero>::max_value),
                         &mut self.ref_seq_buf,
@@ -517,7 +527,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &self.container_buf,
                     slice_offset,
                     &self.ref_seq_buf,
-                    ref_start as i64,
+                    ref_start.cast_signed(),
                     &self.shared.header,
                     tid,
                     start,

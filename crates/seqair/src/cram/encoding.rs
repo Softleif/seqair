@@ -220,7 +220,7 @@ impl IntEncoding {
                 let cursor = ctx.get_external(*content_id)?;
                 let val =
                     cursor.read_itf8().ok_or(CramError::Truncated { context: "external int" })?;
-                Ok(val as i32)
+                Ok(val.cast_signed())
             }
             // r[impl cram.encoding.huffman]
             Self::Huffman(table) => {
@@ -232,7 +232,7 @@ impl IntEncoding {
                     .core
                     .read_bits(*bits)
                     .ok_or(CramError::Truncated { context: "beta int" })?;
-                (raw as i32)
+                raw.cast_signed()
                     .checked_sub(*offset)
                     .ok_or(CramError::Truncated { context: "beta int offset overflow" })
             }
@@ -257,7 +257,7 @@ impl IntEncoding {
     pub fn parse(cursor: &mut &[u8]) -> Result<Self, CramError> {
         let encoding_id = varint::read_itf8_from(cursor)
             .ok_or(CramError::Truncated { context: "encoding id" })?
-            as i32;
+            .cast_signed();
         let param_len = varint::read_itf8_from(cursor)
             .ok_or(CramError::Truncated { context: "encoding param length" })?
             as usize;
@@ -271,7 +271,7 @@ impl IntEncoding {
             1 => {
                 let content_id = varint::read_itf8_from(&mut pcur)
                     .ok_or(CramError::Truncated { context: "external content_id" })?
-                    as i32;
+                    .cast_signed();
                 Ok(Self::External { content_id })
             }
             3 => {
@@ -282,7 +282,7 @@ impl IntEncoding {
             6 => {
                 let offset = varint::read_itf8_from(&mut pcur)
                     .ok_or(CramError::Truncated { context: "beta offset" })?
-                    as i32;
+                    .cast_signed();
                 let bits = varint::read_itf8_from(&mut pcur)
                     .ok_or(CramError::Truncated { context: "beta bits" })?;
                 Ok(Self::Beta { offset, bits })
@@ -290,7 +290,7 @@ impl IntEncoding {
             7 => {
                 let offset = varint::read_itf8_from(&mut pcur)
                     .ok_or(CramError::Truncated { context: "subexp offset" })?
-                    as i32;
+                    .cast_signed();
                 let k = varint::read_itf8_from(&mut pcur)
                     .ok_or(CramError::Truncated { context: "subexp k" })?;
                 Ok(Self::Subexp { offset, k })
@@ -298,7 +298,7 @@ impl IntEncoding {
             9 => {
                 let offset = varint::read_itf8_from(&mut pcur)
                     .ok_or(CramError::Truncated { context: "gamma offset" })?
-                    as i32;
+                    .cast_signed();
                 Ok(Self::Gamma { offset })
             }
             _ => Err(CramError::UnsupportedEncoding { encoding_id }),
@@ -323,6 +323,11 @@ impl ByteEncoding {
                 let val = table
                     .decode(&mut ctx.core)
                     .ok_or(CramError::Truncated { context: "huffman byte" })?;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "Huffman byte encoding returns i32 but values are 0..=255 for byte streams"
+                )]
                 Ok(val as u8)
             }
         }
@@ -331,7 +336,7 @@ impl ByteEncoding {
     pub fn parse(cursor: &mut &[u8]) -> Result<Self, CramError> {
         let encoding_id = varint::read_itf8_from(cursor)
             .ok_or(CramError::Truncated { context: "encoding id" })?
-            as i32;
+            .cast_signed();
         let param_len = varint::read_itf8_from(cursor)
             .ok_or(CramError::Truncated { context: "encoding param length" })?
             as usize;
@@ -345,7 +350,7 @@ impl ByteEncoding {
             1 => {
                 let content_id = varint::read_itf8_from(&mut pcur)
                     .ok_or(CramError::Truncated { context: "external content_id" })?
-                    as i32;
+                    .cast_signed();
                 Ok(Self::External { content_id })
             }
             3 => {
@@ -399,7 +404,7 @@ impl ByteArrayEncoding {
     pub fn parse(cursor: &mut &[u8]) -> Result<Self, CramError> {
         let encoding_id = varint::read_itf8_from(cursor)
             .ok_or(CramError::Truncated { context: "encoding id" })?
-            as i32;
+            .cast_signed();
         let param_len = varint::read_itf8_from(cursor)
             .ok_or(CramError::Truncated { context: "encoding param length" })?
             as usize;
@@ -413,7 +418,7 @@ impl ByteArrayEncoding {
             1 => {
                 let content_id = varint::read_itf8_from(&mut pcur)
                     .ok_or(CramError::Truncated { context: "external content_id" })?
-                    as i32;
+                    .cast_signed();
                 Ok(Self::External { content_id })
             }
             4 => {
@@ -431,7 +436,7 @@ impl ByteArrayEncoding {
                 pcur = pcur.get(1..).ok_or(CramError::Truncated { context: "byte array stop" })?;
                 let content_id = varint::read_itf8_from(&mut pcur)
                     .ok_or(CramError::Truncated { context: "byte array stop content_id" })?
-                    as i32;
+                    .cast_signed();
                 Ok(Self::ByteArrayStop { stop_byte: stop, content_id })
             }
             _ => Err(CramError::UnsupportedEncoding { encoding_id }),
@@ -447,18 +452,20 @@ impl ByteArrayEncoding {
 fn parse_huffman_params(cursor: &mut &[u8]) -> Result<(Vec<i32>, Vec<u32>), CramError> {
     let alpha_count = varint::read_itf8_from(cursor)
         .ok_or(CramError::Truncated { context: "huffman alphabet count" })?;
-    super::reader::check_alloc_size((alpha_count as usize).saturating_mul(4), "huffman alphabet")?;
-    let mut alphabet = Vec::with_capacity(alpha_count as usize);
+    let alpha_count_usize = alpha_count as usize;
+    super::reader::check_alloc_size(alpha_count_usize.saturating_mul(4), "huffman alphabet")?;
+    let mut alphabet = Vec::with_capacity(alpha_count_usize);
     for _ in 0..alpha_count {
         let sym = varint::read_itf8_from(cursor)
             .ok_or(CramError::Truncated { context: "huffman alphabet symbol" })?;
-        alphabet.push(sym as i32);
+        alphabet.push(sym.cast_signed());
     }
 
     let bl_count = varint::read_itf8_from(cursor)
         .ok_or(CramError::Truncated { context: "huffman bit length count" })?;
-    super::reader::check_alloc_size((bl_count as usize).saturating_mul(4), "huffman bit lengths")?;
-    let mut bit_lengths = Vec::with_capacity(bl_count as usize);
+    let bl_count_usize = bl_count as usize;
+    super::reader::check_alloc_size(bl_count_usize.saturating_mul(4), "huffman bit lengths")?;
+    let mut bit_lengths = Vec::with_capacity(bl_count_usize);
     for _ in 0..bl_count {
         let bl = varint::read_itf8_from(cursor)
             .ok_or(CramError::Truncated { context: "huffman bit length" })?;
@@ -478,7 +485,7 @@ fn decode_gamma(reader: &mut BitReader<'_>) -> Option<i32> {
         return Some(0);
     }
     let val = reader.read_bits(n)?;
-    let combined = (1u32.checked_shl(n)? | val) as i32;
+    let combined = (1u32.checked_shl(n)? | val).cast_signed();
     combined.checked_sub(1)
 }
 
@@ -490,12 +497,12 @@ fn decode_subexp(reader: &mut BitReader<'_>, k: u32) -> Option<i32> {
     }
     if n == 0 {
         let val = reader.read_bits(k)?;
-        return Some(val as i32);
+        return Some(val.cast_signed());
     }
     let bits = n.checked_add(k)?.checked_sub(1)?;
     let val = reader.read_bits(bits)?;
     let base = 1u32.checked_shl(bits)?.checked_sub(1u32.checked_shl(k)?)?;
-    Some(base.checked_add(val)? as i32)
+    Some(base.checked_add(val)?.cast_signed())
 }
 
 #[cfg(test)]

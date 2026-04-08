@@ -32,24 +32,24 @@ impl SliceHeader {
     pub fn parse(data: &[u8]) -> Result<Self, CramError> {
         let mut cursor: &[u8] = data;
 
-        let ref_seq_id = read_itf8(&mut cursor)? as i32;
-        let alignment_start = read_itf8(&mut cursor)? as i32;
-        let alignment_span = read_itf8(&mut cursor)? as i32;
-        let num_records = read_itf8(&mut cursor)? as i32;
-        let record_counter = read_ltf8(&mut cursor)? as i64;
-        let num_blocks = read_itf8(&mut cursor)? as i32;
+        let ref_seq_id = read_itf8(&mut cursor)?.cast_signed();
+        let alignment_start = read_itf8(&mut cursor)?.cast_signed();
+        let alignment_span = read_itf8(&mut cursor)?.cast_signed();
+        let num_records = read_itf8(&mut cursor)?.cast_signed();
+        let record_counter = read_ltf8(&mut cursor)?.cast_signed();
+        let num_blocks = read_itf8(&mut cursor)?.cast_signed();
 
         // r[impl cram.slice.validated_lengths]
         let num_content_ids_raw = read_itf8(&mut cursor)?;
-        let num_content_ids = usize::try_from(num_content_ids_raw as i32)
-            .map_err(|_| CramError::InvalidLength { value: num_content_ids_raw as i32 })?;
+        let num_content_ids = usize::try_from(num_content_ids_raw.cast_signed())
+            .map_err(|_| CramError::InvalidLength { value: num_content_ids_raw.cast_signed() })?;
         super::reader::check_alloc_size(num_content_ids.saturating_mul(4), "slice content IDs")?;
         let mut block_content_ids = Vec::with_capacity(num_content_ids);
         for _ in 0..num_content_ids {
-            block_content_ids.push(read_itf8(&mut cursor)? as i32);
+            block_content_ids.push(read_itf8(&mut cursor)?.cast_signed());
         }
 
-        let embedded_reference = read_itf8(&mut cursor)? as i32;
+        let embedded_reference = read_itf8(&mut cursor)?.cast_signed();
 
         let md5_bytes =
             cursor.get(..16).ok_or(CramError::Truncated { context: "slice reference MD5" })?;
@@ -253,9 +253,18 @@ fn decode_record(
 
     // r[impl cram.record.flags]
     // 1. BF (BAM flags)
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "BAM flags are 16-bit; CRAM encodes them as ITF8 i32 but only lower 16 bits are valid"
+    )]
     let bam_flags = ds.bam_flags.decode(ctx)? as u16;
 
     // 2. CF (CRAM flags)
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "CRAM flags are small non-negative integers encoded as ITF8 i32"
+    )]
     let cram_flags = ds.cram_flags.decode(ctx)? as u32;
     let quality_as_array = cram_flags & 0x1 != 0;
     let detached = cram_flags & 0x2 != 0;
@@ -378,6 +387,11 @@ fn decode_record(
         )?;
 
         // MQ
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "mapping quality is 0..=255 encoded as ITF8 i32; only lower 8 bits are valid"
+        )]
         let mapq = ds.mapping_quality.decode(ctx)? as u8;
 
         // r[impl cram.record.quality]
@@ -396,6 +410,10 @@ fn decode_record(
 
         // r[impl cram.index.multi_ref_slices]
         // Skip records from different references in multi-ref slices
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "tid comes from BAM header, capped at MAX_REFERENCES (1M), well within i32"
+        )]
         if record_ref_id != tid as i32 {
             return Ok(0);
         }
@@ -645,8 +663,13 @@ fn decode_features_and_reconstruct(
                     for &b in bases {
                         bases_buf.push(Base::from(b));
                     }
-                    push_cigar_op(&mut cigar_ops, len as u32, 1); // I
-                    indel_bases = indel_bases.saturating_add(len as u32);
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "insertion length is bounded by read_length (validated); fits in u32"
+                    )]
+                    let len_u32 = len as u32;
+                    push_cigar_op(&mut cigar_ops, len_u32, 1); // I
+                    indel_bases = indel_bases.saturating_add(len_u32);
                     read_pos = read_pos.wrapping_add(len);
                 }
                 FeatureData::SingleInsertion(base) => {
@@ -665,6 +688,10 @@ fn decode_features_and_reconstruct(
                     for &b in bases {
                         bases_buf.push(Base::from(b));
                     }
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "soft-clip length is bounded by read_length (validated); fits in u32"
+                    )]
                     push_cigar_op(&mut cigar_ops, len as u32, 4); // S
                     read_pos = read_pos.wrapping_add(len);
                 }
@@ -690,8 +717,13 @@ fn decode_features_and_reconstruct(
                     for &b in bases {
                         bases_buf.push(Base::from(b));
                     }
-                    push_cigar_op(&mut cigar_ops, len as u32, 0); // M
-                    matching_bases = matching_bases.saturating_add(len as u32);
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "bases length is bounded by read_length (validated); fits in u32"
+                    )]
+                    let len_u32 = len as u32;
+                    push_cigar_op(&mut cigar_ops, len_u32, 0); // M
+                    matching_bases = matching_bases.saturating_add(len_u32);
                     read_pos = read_pos.wrapping_add(len);
                     ref_pos = ref_pos.wrapping_add(len);
                 }
@@ -729,6 +761,10 @@ fn decode_features_and_reconstruct(
         cigar_buf.extend_from_slice(&packed.to_le_bytes());
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "ref_pos is bounded by reference sequence length which fits in u32; BAM positions are capped at 2^29"
+    )]
     Ok(ReconstructResult { ref_consumed: ref_pos as u32, matching_bases, indel_bases })
 }
 
