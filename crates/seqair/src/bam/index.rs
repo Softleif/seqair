@@ -399,7 +399,7 @@ fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
         }
 
         debug_assert!(remaining >= 18, "BGZF block too short: remaining={remaining}");
-        #[allow(clippy::indexing_slicing, reason = "remaining >= 18 checked above")]
+        #[expect(clippy::indexing_slicing, reason = "remaining >= 18 checked above")]
         let block = &compressed[offset..];
 
         // Verify gzip magic
@@ -409,7 +409,7 @@ fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
 
         // BSIZE from the BGZF extra field at offset 16-17 (after standard 12-byte gzip
         // header + 6-byte extra field header)
-        #[allow(clippy::indexing_slicing, reason = "remaining >= 18 checked above")]
+        #[expect(clippy::indexing_slicing, reason = "remaining >= 18 checked above")]
         let bsize = (u16::from_le_bytes([block[16], block[17]]) as usize).wrapping_add(1);
 
         if offset.wrapping_add(bsize) > compressed.len() {
@@ -419,12 +419,13 @@ fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
         // r[impl bam.index.bgzf_block_validation]
         // ISIZE (uncompressed size) from the last 4 bytes of the block
         if bsize < 18 {
+            #[expect(clippy::cast_possible_truncation, reason = "bsize < 18")]
             return Err(BaiError::Bgzf {
-                source: BgzfError::BlockSizeTooSmall { bsize: bsize.wrapping_sub(1) as u16 },
+                source: BgzfError::BlockSizeTooSmall { bsize: bsize as u16 },
             });
         }
         debug_assert!(bsize >= 18, "bsize should be >= 18 at this point: bsize={bsize}");
-        #[allow(clippy::indexing_slicing, reason = "bsize >= 18 checked above")]
+        #[expect(clippy::indexing_slicing, reason = "bsize >= 18 checked above")]
         let isize_bytes = &block[bsize.wrapping_sub(4)..bsize];
         let isize = u32::from_le_bytes(
             isize_bytes.try_into().unwrap_or_else(|_| unreachable!("bsize >= 18")),
@@ -437,8 +438,9 @@ fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
 
         // Compressed data starts at offset 18, ends at bsize - 8 (before CRC32 + ISIZE)
         if bsize < 26 {
+            #[expect(clippy::cast_possible_truncation, reason = "bsize < 26")]
             return Err(BaiError::Bgzf {
-                source: BgzfError::BlockSizeTooSmall { bsize: bsize.wrapping_sub(1) as u16 },
+                source: BgzfError::BlockSizeTooSmall { bsize: bsize as u16 },
             });
         }
         debug_assert!(bsize >= 26, "bsize should be >= 26 at this point: bsize={bsize}");
@@ -551,7 +553,8 @@ fn read_u64(data: &[u8], pos: &mut usize) -> Result<u64, BaiError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects, reason = "test code with controlled values")]
+#[allow(clippy::arithmetic_side_effects, reason = "tests")]
+#[allow(clippy::cast_possible_truncation, reason = "tests")]
 mod tests {
     use super::*;
     use seqair_types::Pos;
