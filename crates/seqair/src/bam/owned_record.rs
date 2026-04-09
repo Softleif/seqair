@@ -6,10 +6,9 @@
 
 use super::aux_data::{AuxData, AuxDataError};
 use super::cigar::CigarOp;
-use super::flags::BamFlags;
 use super::seq;
 use crate::vcf::index_builder::reg2bin;
-use seqair_types::Base;
+use seqair_types::{BamFlags, Base};
 use thiserror::Error;
 
 /// Errors from owned record construction or serialization.
@@ -71,7 +70,7 @@ pub struct OwnedBamRecord {
     pub ref_id: i32,
     pub pos: i64,
     pub mapq: u8,
-    pub flags: u16,
+    pub flags: BamFlags,
     pub next_ref_id: i32,
     pub next_pos: i64,
     pub template_len: i32,
@@ -87,7 +86,7 @@ pub struct OwnedBamRecordBuilder {
     ref_id: i32,
     pos: i64,
     mapq: u8,
-    flags: u16,
+    flags: BamFlags,
     next_ref_id: i32,
     next_pos: i64,
     template_len: i32,
@@ -100,7 +99,7 @@ pub struct OwnedBamRecordBuilder {
 
 // r[impl bam.owned_record.builder]
 impl OwnedBamRecordBuilder {
-    pub fn flags(mut self, flags: u16) -> Self {
+    pub fn flags(mut self, flags: BamFlags) -> Self {
         self.flags = flags;
         self
     }
@@ -264,7 +263,7 @@ impl OwnedBamRecord {
             ref_id,
             pos,
             mapq: 0,
-            flags: 0,
+            flags: BamFlags::empty(),
             next_ref_id: -1,
             next_pos: -1,
             template_len: 0,
@@ -276,22 +275,17 @@ impl OwnedBamRecord {
         }
     }
 
-    /// Flag predicates via the [`BamFlags`] newtype.
-    pub fn bam_flags(&self) -> BamFlags {
-        BamFlags::new(self.flags)
-    }
-
     // r[impl bam.owned_record.flag_methods]
-    pub fn set_flags(&mut self, flags: u16) {
+    pub fn set_flags(&mut self, flags: BamFlags) {
         self.flags = flags;
     }
 
     pub fn is_unmapped(&self) -> bool {
-        self.bam_flags().is_unmapped()
+        self.flags.is_unmapped()
     }
 
     pub fn is_reverse(&self) -> bool {
-        self.bam_flags().is_reverse()
+        self.flags.is_reverse()
     }
 
     // r[impl bam.owned_record.end_pos]
@@ -449,7 +443,7 @@ impl OwnedBamRecord {
         let bin_mq_nl = (u32::from(bin) << 16) | (u32::from(self.mapq) << 8) | (l_read_name & 0xFF);
 
         // Pack flag_nc: flag(16) | n_cigar_op(16)
-        let flag_nc = (u32::from(self.flags) << 16) | (n_cigar_op & 0xFFFF);
+        let flag_nc = (u32::from(self.flags.raw()) << 16) | (n_cigar_op & 0xFFFF);
 
         // 32-byte fixed header
         buf.extend_from_slice(&self.ref_id.to_le_bytes());
@@ -571,7 +565,7 @@ mod tests {
 
     fn simple_record() -> OwnedBamRecord {
         OwnedBamRecord::builder(0, 100, b"read1".to_vec())
-            .flags(0) // mapped
+            .flags(BamFlags::empty()) // mapped
             .mapq(30)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
@@ -603,7 +597,7 @@ mod tests {
         assert_eq!(decoded.tid, 0);
         assert_eq!(decoded.pos.get(), 100);
         assert_eq!(decoded.mapq, 30);
-        assert_eq!(decoded.flags, 0);
+        assert_eq!(decoded.flags, BamFlags::empty());
         assert_eq!(decoded.seq_len, 5);
         assert_eq!(decoded.n_cigar_ops, 1);
         assert_eq!(&*decoded.qname, b"read1");
@@ -754,7 +748,7 @@ mod tests {
         // The existing reader rejects pos=-1 (InvalidPosition), so we verify
         // serialization succeeds and the bytes have the right structure.
         let rec = OwnedBamRecord::builder(-1, -1, b"unmapped".to_vec())
-            .flags(0x4)
+            .flags(BamFlags::from(0x4))
             .seq(vec![Base::A, Base::C, Base::G])
             .build()
             .unwrap();
@@ -773,7 +767,7 @@ mod tests {
     fn placed_unmapped_record_roundtrips() {
         // Placed unmapped: has ref_id and pos, but flag 0x4 set
         let rec = OwnedBamRecord::builder(0, 500, b"placed".to_vec())
-            .flags(0x4)
+            .flags(BamFlags::from(0x4))
             .seq(vec![Base::A, Base::C, Base::G])
             .build()
             .unwrap();
@@ -784,7 +778,7 @@ mod tests {
         let decoded = super::super::record::BamRecord::decode(&buf).unwrap();
         assert_eq!(decoded.n_cigar_ops, 0);
         assert_eq!(decoded.seq_len, 3);
-        assert_eq!(decoded.flags & 0x4, 0x4);
+        assert_eq!(decoded.flags & BamFlags::from(0x4), BamFlags::from(0x4));
     }
 
     // r[verify bam.owned_record.aligned_pairs]
@@ -864,7 +858,10 @@ mod tests {
 
     #[test]
     fn aligned_pairs_empty_cigar() {
-        let rec = OwnedBamRecord::builder(-1, -1, b"r".to_vec()).flags(0x4).build().unwrap();
+        let rec = OwnedBamRecord::builder(-1, -1, b"r".to_vec())
+            .flags(BamFlags::from(0x4))
+            .build()
+            .unwrap();
         let pairs: Vec<_> = rec.aligned_pairs().collect();
         assert!(pairs.is_empty());
     }
@@ -873,7 +870,7 @@ mod tests {
     #[test]
     fn from_raw_bam_preserves_all_fields() {
         let original = OwnedBamRecord::builder(1, 500, b"read1".to_vec())
-            .flags(0x63)
+            .flags(BamFlags::from(0x63))
             .mapq(42)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
@@ -899,7 +896,7 @@ mod tests {
 
         assert_eq!(reconstructed.ref_id, 1);
         assert_eq!(reconstructed.pos, 500);
-        assert_eq!(reconstructed.flags, 0x63);
+        assert_eq!(reconstructed.flags, BamFlags::from(0x63));
         assert_eq!(reconstructed.mapq, 42);
         assert_eq!(reconstructed.next_ref_id, 2);
         assert_eq!(reconstructed.next_pos, 1000);

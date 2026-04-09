@@ -175,7 +175,7 @@ fn cram_chr19_records_match_noodles_field_by_field() {
         for (i, noodles_rec) in noodles_chr19.iter().enumerate() {
             let our_rec = store.record(our_records[i]);
             assert_eq!(our_rec.pos.as_i64(), noodles_rec.pos, "{version} rec {i}: pos");
-            assert_eq!(our_rec.flags, noodles_rec.flags, "{version} rec {i}: flags");
+            assert_eq!(our_rec.flags.raw(), noodles_rec.flags, "{version} rec {i}: flags");
             assert_eq!(our_rec.mapq, noodles_rec.mapq, "{version} rec {i}: mapq");
         }
     }

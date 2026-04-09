@@ -177,7 +177,7 @@ impl<W: Write> BamWriter<W> {
         // Validate indexability BEFORE writing to BGZF — a failed validation after writing
         // would leave the record in the stream but poison the writer.
         if self.index.is_some() {
-            let is_unmapped = record.flags & 0x4 != 0;
+            let is_unmapped = record.flags.is_unmapped();
             if record.ref_id == -1 && !is_unmapped {
                 return Err(BamWriteError::MappedWithoutReference);
             }
@@ -203,7 +203,7 @@ impl<W: Write> BamWriter<W> {
 
         // Push to index after writing (offset convention: offset AFTER the record)
         if let Some(ref mut index) = self.index {
-            let is_unmapped = record.flags & 0x4 != 0;
+            let is_unmapped = record.flags.is_unmapped();
 
             if record.ref_id != -1 {
                 // r[impl bam_writer.index_sort_order]
@@ -336,6 +336,7 @@ mod tests {
     use super::super::aux_data::AuxData;
     use super::super::cigar::{CigarOp, CigarOpType};
     use super::*;
+    use seqair_types::BamFlags;
     use seqair_types::Base;
 
     fn test_header() -> BamHeader {
@@ -436,7 +437,7 @@ mod tests {
             ref_id: 0,
             pos: 0,
             mapq: 0,
-            flags: 0,
+            flags: BamFlags::empty(),
             next_ref_id: -1,
             next_pos: -1,
             template_len: 0,
@@ -508,7 +509,7 @@ mod tests {
 
         // Mapped (flags & 0x4 == 0) but ref_id == -1
         let rec = OwnedBamRecord::builder(-1, 0, b"bad".to_vec())
-            .flags(0) // mapped
+            .flags(BamFlags::empty()) // mapped
             .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
             .seq(vec![Base::A, Base::C, Base::G])
             .qual(vec![30, 31, 32])
@@ -533,7 +534,7 @@ mod tests {
 
         // Fully unmapped: ref_id=-1, flags=0x4
         let unmapped = OwnedBamRecord::builder(-1, -1, b"unmapped".to_vec())
-            .flags(0x4)
+            .flags(BamFlags::from(0x4))
             .seq(vec![Base::A])
             .build()
             .unwrap();

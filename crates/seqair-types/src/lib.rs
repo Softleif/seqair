@@ -2,6 +2,7 @@
 #![deny(missing_docs)]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+pub mod bam_flags;
 mod base;
 mod phred;
 pub mod pos;
@@ -18,6 +19,7 @@ pub use smallvec::SmallVec;
 pub use pos::{Offset, One, Pos, Pos0, Pos1, Zero};
 
 pub use {
+    bam_flags::BamFlags,
     base::{Base, BaseError},
     phred::Phred,
     probability::{Probability, ProbabilityError},

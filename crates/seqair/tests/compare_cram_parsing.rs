@@ -277,8 +277,9 @@ fn cram_records_match_bam_records() {
             "position mismatch at record {i}: CRAM={cram_pos} vs BAM={hts_pos}"
         );
         assert_eq!(
-            cram_flags, *hts_flags,
-            "flags mismatch at record {i}: CRAM={cram_flags:#06x} vs BAM={hts_flags:#06x}"
+            cram_flags.raw(),
+            *hts_flags,
+            "flags mismatch at record {i}: CRAM={cram_flags:#06x} vs BAM={hts_flags:#06x}",
         );
         assert_eq!(
             cram_mapq, *hts_mapq,

@@ -252,7 +252,7 @@ fn pileup_qpos_matches() {
 
     for (col_idx, (rio, hts)) in columns.iter().zip(hts_columns.iter()).enumerate() {
         let mut alns: Vec<(usize, u16)> =
-            rio.alignments().filter_map(|a| a.qpos().map(|q| (q, a.flags))).collect();
+            rio.alignments().filter_map(|a| a.qpos().map(|q| (q, a.flags.raw()))).collect();
         alns.sort();
 
         assert_eq!(

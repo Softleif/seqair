@@ -156,7 +156,7 @@ fn sam_record_fields_match_htslib() {
             assert_eq!(r.pos.as_i64(), h.pos, "{contig} rec {i}: pos");
             // htslib end_pos is exclusive (past-the-end), ours is inclusive
             assert_eq!(r.end_pos.as_i64(), h.end_pos - 1, "{contig} rec {i}: end_pos");
-            assert_eq!(r.flags, h.flags, "{contig} rec {i}: flags");
+            assert_eq!(r.flags.raw(), h.flags, "{contig} rec {i}: flags");
             assert_eq!(r.mapq, h.mapq, "{contig} rec {i}: mapq");
             assert_eq!(store.qname(idx), h.qname.as_slice(), "{contig} rec {i}: qname");
             assert_eq!(r.seq_len as usize, h.seq_len, "{contig} rec {i}: seq_len");

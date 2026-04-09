@@ -133,7 +133,7 @@ fn record_fields_match() {
         let rio = store.record(i as u32);
 
         assert_eq!(rio.pos.as_i64(), hts.pos, "pos mismatch at record {i}");
-        assert_eq!(rio.flags, hts.flags, "flags mismatch at record {i}");
+        assert_eq!(rio.flags.raw(), hts.flags, "flags mismatch at record {i}");
         assert_eq!(rio.mapq, hts.mapq, "mapq mismatch at record {i}");
         assert_eq!(store.qname(i as u32), hts.qname.as_slice(), "qname mismatch at record {i}");
         assert_eq!(store.qual(i as u32), hts.qual.as_slice(), "qual mismatch at record {i}");
@@ -209,18 +209,22 @@ fn flag_helpers_match() {
     for (i, hts) in hts_records.iter().enumerate() {
         let rio = store.record(i as u32);
         assert_eq!(
-            rio.flags & 0x10 != 0,
+            rio.flags.is_reverse(),
             hts.flags & 0x10 != 0,
             "is_reverse mismatch at record {i}"
         );
-        assert_eq!(rio.flags & 0x40 != 0, hts.flags & 0x40 != 0, "is_first mismatch at record {i}");
         assert_eq!(
-            rio.flags & 0x80 != 0,
+            rio.flags.is_first_in_template(),
+            hts.flags & 0x40 != 0,
+            "is_first mismatch at record {i}"
+        );
+        assert_eq!(
+            rio.flags.is_second_in_template(),
             hts.flags & 0x80 != 0,
             "is_second mismatch at record {i}"
         );
         assert_eq!(
-            rio.flags & 0x4 != 0,
+            rio.flags.is_unmapped(),
             hts.flags & 0x4 != 0,
             "is_unmapped mismatch at record {i}"
         );

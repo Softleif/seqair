@@ -10,7 +10,7 @@ use super::{
 };
 use crate::bam::{BamHeader, record_store::RecordStore};
 use rustc_hash::FxHashMap;
-use seqair_types::{Base, One, Pos, Zero};
+use seqair_types::{BamFlags, Base, One, Pos, Zero};
 use tracing::warn;
 
 /// Parsed CRAM slice header.
@@ -258,7 +258,8 @@ fn decode_record(
         clippy::cast_sign_loss,
         reason = "BAM flags are 16-bit; CRAM encodes them as ITF8 i32 but only lower 16 bits are valid"
     )]
-    let bam_flags = ds.bam_flags.decode(ctx)? as u16;
+    let raw_flags: u16 = ds.bam_flags.decode(ctx)? as u16;
+    let bam_flags = BamFlags::from(raw_flags);
 
     // 2. CF (CRAM flags)
     #[expect(
@@ -358,7 +359,7 @@ fn decode_record(
         }
     }
 
-    let is_unmapped = bam_flags & 0x4 != 0;
+    let is_unmapped = bam_flags.is_unmapped();
 
     // 11. Mapped read: features + MQ + quality
     cigar_buf.clear();

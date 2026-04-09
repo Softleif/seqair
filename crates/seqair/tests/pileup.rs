@@ -120,6 +120,7 @@ proptest! {
 // ---- pileup.read_filter ----
 
 // r[verify pileup.read_filter]
+// r[verify flags.filter_signature]
 #[test]
 fn filter_evaluated_once_per_record() {
     let mut arena = RecordStore::new();
@@ -153,7 +154,7 @@ proptest! {
 
         let expected = pass_flags.iter().filter(|&&p| p).count();
         let mut engine = PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(0).unwrap());
-        engine.set_filter(move |flags, _aux| flags & 0x100 == 0);
+        engine.set_filter(move |flags, _aux| !flags.is_secondary());
         let columns: Vec<_> = engine.collect();
 
         if expected > 0 {

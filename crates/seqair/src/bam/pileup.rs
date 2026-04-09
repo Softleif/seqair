@@ -1,7 +1,7 @@
 //! Iterate over pileup columns. [`PileupEngine`] yields [`PileupColumn`]s with pre-extracted
 //! flat fields per active read. Supports read filtering and per-position max-depth.
 
-use seqair_types::{Base, Offset, Pos, Strand, Zero, strand_from_flags};
+use seqair_types::{BamFlags, Base, Offset, Pos, Strand, Zero, strand_from_flags};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 // PileupEngine is intentionally !Send due to RecordFilter: Box<dyn Fn(...)>.
 use std::rc::Rc;
@@ -10,7 +10,6 @@ use crate::utils::TraceErr;
 
 use super::{
     cigar::{CigarMapping, CigarPosInfo},
-    flags::FLAG_UNMAPPED,
     record_store::RecordStore,
 };
 
@@ -50,7 +49,8 @@ impl RefSeq {
 }
 
 /// Filter function receiving (flags, `aux_bytes`) for the candidate record.
-type RecordFilter = Box<dyn Fn(u16, &[u8]) -> bool>;
+// r[impl flags.filter_signature]
+type RecordFilter = Box<dyn Fn(BamFlags, &[u8]) -> bool>;
 
 // r[impl pileup.active_set]
 // r[impl pileup.zero_refspan_reads]
@@ -83,7 +83,7 @@ struct ActiveRecord {
     record_idx: u32,
     cigar: CigarMapping,
     // Cached from SlimRecord to avoid store lookups in the hot loop
-    flags: u16,
+    flags: BamFlags,
     strand: Strand,
     mapq: u8,
     seq_len: u32,
@@ -158,7 +158,7 @@ pub struct PileupAlignment {
     record_idx: u32,
     pub op: PileupOp,
     pub mapq: u8,
-    pub flags: u16,
+    pub flags: BamFlags,
     pub strand: Strand,
     pub seq_len: u32,
     pub matching_bases: u32,
@@ -263,7 +263,7 @@ impl PileupEngine {
 
     // r[impl pileup.read_filter]
     /// Set a filter that receives `(flags, aux_bytes)` for each record entering the active set.
-    pub fn set_filter(&mut self, f: impl Fn(u16, &[u8]) -> bool + 'static) {
+    pub fn set_filter(&mut self, f: impl Fn(BamFlags, &[u8]) -> bool + 'static) {
         self.filter = Some(Box::new(f));
     }
 
@@ -382,7 +382,7 @@ impl Iterator for PileupEngine {
                 }
 
                 // r[impl pileup.unmapped_excluded]
-                if rec.flags & FLAG_UNMAPPED != 0 {
+                if rec.flags.is_unmapped() {
                     continue;
                 }
 

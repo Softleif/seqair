@@ -13,7 +13,7 @@
 )]
 use seqair::bam::record_store::RecordStore;
 use seqair::bam::{Pos, Zero};
-use seqair_types::Base;
+use seqair_types::{BamFlags, Base};
 
 // r[verify record_store.push_raw+2]
 // r[verify record_store.field_access]
@@ -30,7 +30,7 @@ fn decode_record_into_slabs() {
     let rec = store.record(idx);
     assert_eq!(rec.pos, Pos::<Zero>::new(100).unwrap());
     assert_eq!(rec.mapq, 60);
-    assert_eq!(rec.flags, 0x63);
+    assert_eq!(rec.flags, BamFlags::from(0x63));
     assert_eq!(rec.seq_len, 4);
 
     assert_eq!(store.qname(idx), b"read1");
@@ -162,7 +162,7 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
     let idx_fields = store_fields.push_fields(
         Pos::<Zero>::new(100).unwrap(), // pos
         Pos::<Zero>::new(103).unwrap(), // end_pos (pos + 4M - 1)
-        0x63,
+        BamFlags::from(0x63),
         60,
         store_raw.record(idx_raw).matching_bases,
         store_raw.record(idx_raw).indel_bases,

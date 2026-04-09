@@ -113,7 +113,7 @@ fn single_arena_get_per_record_entry_still_correct() {
 
     let mut engine =
         PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(59).unwrap());
-    engine.set_filter(|flags, _aux| flags & 0x100 == 0);
+    engine.set_filter(|flags, _aux| !flags.is_secondary());
     let columns: Vec<_> = engine.collect();
 
     // Only the mapq=60 read should pass the filter

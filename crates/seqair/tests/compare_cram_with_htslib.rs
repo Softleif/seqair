@@ -147,7 +147,7 @@ fn cram_records_match_htslib_for_chr19() {
         for (i, hts) in hts_records.iter().enumerate() {
             let cram = store.record(i as u32);
             assert_eq!(cram.pos.as_i64(), hts.pos, "{version} rec {i}: pos");
-            assert_eq!(cram.flags, hts.flags, "{version} rec {i}: flags");
+            assert_eq!(cram.flags.raw(), hts.flags, "{version} rec {i}: flags");
             assert_eq!(cram.mapq, hts.mapq, "{version} rec {i}: mapq");
             assert_eq!(cram.seq_len as usize, hts.seq_len, "{version} rec {i}: seq_len");
             assert_eq!(cram.end_pos.as_i64(), hts.end_pos, "{version} rec {i}: end_pos");

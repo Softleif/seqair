@@ -3,7 +3,7 @@
 
 use crate::bam::{
     BaiError, BamHeader, BamHeaderError, BamIndex, cigar,
-    flags::FLAG_UNMAPPED,
+    flags::BamFlags,
     record::{DecodeError, compute_end_pos},
     record_store::RecordStore,
     region_buf::RegionBuf,
@@ -441,11 +441,13 @@ fn parse_sam_line(
 
     // Field 2: FLAG
     let flag_field = fields.get(1).copied().unwrap_or(b"0");
-    let flags = parse_u16(flag_field)
-        .ok_or_else(|| SamRecordError::InvalidFlag { value: flag_field.into() })?;
+    let flags = BamFlags::from(
+        parse_u16(flag_field)
+            .ok_or_else(|| SamRecordError::InvalidFlag { value: flag_field.into() })?,
+    );
 
     // Skip unmapped
-    if flags & FLAG_UNMAPPED != 0 {
+    if flags.is_unmapped() {
         return Ok(None);
     }
 

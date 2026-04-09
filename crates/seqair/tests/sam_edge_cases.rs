@@ -116,9 +116,8 @@ fn unmapped_reads_are_filtered() {
     assert!(!store.is_empty());
     // All returned records should NOT have the unmapped flag
     for i in 0..store.len() as u32 {
-        assert_eq!(
-            store.record(i).flags & 0x4,
-            0,
+        assert!(
+            !store.record(i).flags.is_unmapped(),
             "rec {i}: unmapped read should have been filtered"
         );
     }

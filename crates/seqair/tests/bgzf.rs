@@ -7,7 +7,11 @@
     reason = "test code"
 )]
 use proptest::prelude::*;
-use seqair::bam::{BamError, BamHeaderError, BgzfError, bgzf::VirtualOffset};
+use seqair::bam::{
+    BamError, BamHeaderError, BgzfError,
+    bgzf::VirtualOffset,
+    flags::{BamFlags, consts::*},
+};
 
 // r[verify bgzf.virtual_offset]
 // Verifies the BAI spec (SAM1 §4.1): upper 48 bits = compressed block offset,
@@ -115,7 +119,6 @@ fn checksum_mismatch_error_formats_correctly() {
 // r[verify io.named_constants]
 #[test]
 fn bam_flag_constants_match_sam_spec() {
-    use seqair::bam::flags::*;
     assert_eq!(FLAG_PAIRED, 0x1);
     assert_eq!(FLAG_PROPER_PAIR, 0x2);
     assert_eq!(FLAG_UNMAPPED, 0x4);
@@ -133,10 +136,8 @@ fn bam_flag_constants_match_sam_spec() {
 // r[verify io.typed_flags]
 #[test]
 fn bam_flags_newtype_predicate_methods() {
-    use seqair::bam::flags::BamFlags;
-
     // 0x53 = paired(0x1) + proper_pair(0x2) + reverse(0x10) + first_in_template(0x40)
-    let flags = BamFlags::new(0x53);
+    let flags = BamFlags::from(0x53);
     assert!(flags.is_paired());
     assert!(flags.is_proper_pair());
     assert!(flags.is_reverse());
@@ -145,7 +146,7 @@ fn bam_flags_newtype_predicate_methods() {
     assert!(!flags.is_secondary());
     assert!(!flags.is_supplementary());
 
-    let unmapped = BamFlags::new(0x4);
+    let unmapped = BamFlags::from(0x4);
     assert!(unmapped.is_unmapped());
     assert!(!unmapped.is_reverse());
 

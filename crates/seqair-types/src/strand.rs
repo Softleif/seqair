@@ -1,3 +1,4 @@
+use crate::bam_flags::{BamFlags, consts::*};
 use std::fmt;
 
 /// Original top or bottom strand of a read
@@ -47,7 +48,7 @@ impl fmt::Display for Strand {
     }
 }
 
-/// Determine strand from raw BAM flags.
+/// Determine strand from BAM flags.
 ///
 /// # Flags used
 ///
@@ -58,16 +59,16 @@ impl fmt::Display for Strand {
 /// | `0x40` |      64 | Read is first in pair                |
 /// | `0x80` |     128 | Read is second in pair               |
 #[allow(clippy::collapsible_else_if, reason = "clearer")]
-pub fn strand_from_flags(flags: u16) -> Strand {
-    if flags & 0x1 == 0 {
+pub fn strand_from_flags(flags: BamFlags) -> Strand {
+    if !flags.is_set(FLAG_PAIRED) {
         // Unpaired read: strand determined solely by alignment direction
-        if flags & 0x10 != 0 { Strand::OB } else { Strand::OT }
-    } else if flags & 0x40 != 0 {
+        if flags.is_set(FLAG_REVERSE) { Strand::OB } else { Strand::OT }
+    } else if flags.is_set(FLAG_FIRST_IN_TEMPLATE) {
         // First in pair
-        if flags & 0x10 != 0 { Strand::OB } else { Strand::OT }
-    } else if flags & 0x80 != 0 {
+        if flags.is_set(FLAG_REVERSE) { Strand::OB } else { Strand::OT }
+    } else if flags.is_set(FLAG_SECOND_IN_TEMPLATE) {
         // Last in pair
-        if flags & 0x20 != 0 { Strand::OB } else { Strand::OT }
+        if flags.is_set(FLAG_MATE_REVERSE) { Strand::OB } else { Strand::OT }
     } else {
         Strand::Unknown
     }
@@ -86,7 +87,7 @@ mod hts {
 
     impl StrandFromRecord for Record {
         fn strand(&self) -> Strand {
-            strand_from_flags(self.flags())
+            strand_from_flags(BamFlags::from(self.flags()))
         }
     }
 }
@@ -95,30 +96,34 @@ mod hts {
 mod tests {
     use super::*;
 
+    fn flags(raw: u16) -> BamFlags {
+        BamFlags::from(raw)
+    }
+
     #[test]
     fn test_various_records() {
-        assert_eq!(strand_from_flags(0x1 | 0x2 | 0x40 | 0x10), Strand::OB); // First in pair, reverse strand
-        assert_eq!(strand_from_flags(0x1 | 0x2 | 0x80 | 0x20), Strand::OB); // Second in pair, reverse strand
-        assert_eq!(strand_from_flags(0x1 | 0x2 | 0x40 | 0x20), Strand::OT); // First in pair, mate reverse strand
-        assert_eq!(strand_from_flags(0x1 | 0x2 | 0x80 | 0x10), Strand::OT); // Second in pair, mate reverse strand
-        assert_eq!(strand_from_flags(0x1 | 0x2 | 0x40), Strand::OT); // First in pair, forward strand
-        assert_eq!(strand_from_flags(0x1 | 0x2 | 0x80), Strand::OT); // Second in pair, forward strand
-        assert_eq!(strand_from_flags(0x00), Strand::OT); // No flags set, ie top strand
-        assert_eq!(strand_from_flags(0x10), Strand::OB); // No pairing flags, but read reverse strand -> OB
-        assert_eq!(strand_from_flags(0x01), Strand::Unknown); // Paired but no first/second information
+        assert_eq!(strand_from_flags(flags(0x1 | 0x2 | 0x40 | 0x10)), Strand::OB); // First in pair, reverse strand
+        assert_eq!(strand_from_flags(flags(0x1 | 0x2 | 0x80 | 0x20)), Strand::OB); // Second in pair, reverse strand
+        assert_eq!(strand_from_flags(flags(0x1 | 0x2 | 0x40 | 0x20)), Strand::OT); // First in pair, mate reverse strand
+        assert_eq!(strand_from_flags(flags(0x1 | 0x2 | 0x80 | 0x10)), Strand::OT); // Second in pair, mate reverse strand
+        assert_eq!(strand_from_flags(flags(0x1 | 0x2 | 0x40)), Strand::OT); // First in pair, forward strand
+        assert_eq!(strand_from_flags(flags(0x1 | 0x2 | 0x80)), Strand::OT); // Second in pair, forward strand
+        assert_eq!(strand_from_flags(flags(0x00)), Strand::OT); // No flags set, ie top strand
+        assert_eq!(strand_from_flags(flags(0x10)), Strand::OB); // No pairing flags, but read reverse strand -> OB
+        assert_eq!(strand_from_flags(flags(0x01)), Strand::Unknown); // Paired but no first/second information
     }
 
     #[test]
     fn test_unpaired_mode() {
-        assert_eq!(strand_from_flags(0x00), Strand::OT); // Single-end, forward
-        assert_eq!(strand_from_flags(0x10), Strand::OB); // Single-end, reverse
-        assert_eq!(strand_from_flags(0x40 | 0x10), Strand::OB); // Pair flags ignored in unpaired mode
-        assert_eq!(strand_from_flags(0x80 | 0x20), Strand::OT); // Pair/mate flags ignored, only 0x10 matters
+        assert_eq!(strand_from_flags(flags(0x00)), Strand::OT); // Single-end, forward
+        assert_eq!(strand_from_flags(flags(0x10)), Strand::OB); // Single-end, reverse
+        assert_eq!(strand_from_flags(flags(0x40 | 0x10)), Strand::OB); // Pair flags ignored in unpaired mode
+        assert_eq!(strand_from_flags(flags(0x80 | 0x20)), Strand::OT); // Pair/mate flags ignored, only 0x10 matters
     }
 
     #[test]
     fn test_unpaired_mode_ignores_paired_flags() {
-        assert_eq!(strand_from_flags(0x01 | 0x02 | 0x20 | 0x40), Strand::OT);
-        assert_eq!(strand_from_flags(0x01 | 0x02 | 0x20 | 0x40 | 0x10), Strand::OB);
+        assert_eq!(strand_from_flags(flags(0x01 | 0x02 | 0x20 | 0x40)), Strand::OT);
+        assert_eq!(strand_from_flags(flags(0x01 | 0x02 | 0x20 | 0x40 | 0x10)), Strand::OB);
     }
 }

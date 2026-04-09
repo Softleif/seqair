@@ -4,7 +4,7 @@
 
 use super::{
     bgzf::{BgzfError, BgzfReader},
-    flags::FLAG_UNMAPPED,
+    flags::BamFlags,
     header::{BamHeader, BamHeaderError},
     index::{BaiError, BamIndex, Chunk},
     record::{DecodeError, compute_end_pos_from_raw},
@@ -231,14 +231,14 @@ impl<R: Read + Seek> IndexedBamReader<R> {
                     let rec_pos = Pos::<Zero>::try_from_i64(i64::from(rec_pos_raw))
                         .ok_or(BamError::InvalidPosition { value: rec_pos_raw })?;
                     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-                    let rec_flags = u16::from_le_bytes([raw[14], raw[15]]);
+                    let rec_flags = BamFlags::from(u16::from_le_bytes([raw[14], raw[15]]));
 
                     if rec_tid != tid_i32 {
                         skipped_tid = skipped_tid.saturating_add(1);
                         continue;
                     }
 
-                    if rec_flags & FLAG_UNMAPPED != 0 {
+                    if rec_flags.is_unmapped() {
                         skipped_unmapped = skipped_unmapped.saturating_add(1);
                         continue;
                     }

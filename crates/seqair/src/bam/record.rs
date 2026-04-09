@@ -1,13 +1,8 @@
 //! Decode a BAM record from raw bytes into a [`BamRecord`] with owned variable-length fields.
 //! Used transiently during region loading; the pileup engine works from [`crate::bam::RecordStore`] instead.
 
-use super::{
-    flags::{
-        BamFlags, FLAG_FIRST_IN_TEMPLATE, FLAG_REVERSE, FLAG_SECOND_IN_TEMPLATE, FLAG_UNMAPPED,
-    },
-    seq,
-};
-use seqair_types::{Offset, Pos, Zero};
+use super::seq;
+use seqair_types::{BamFlags, Offset, Pos, Zero};
 
 /// A decoded BAM record with owned variable-length data.
 ///
@@ -15,13 +10,14 @@ use seqair_types::{Offset, Pos, Zero};
 /// All accessor methods live directly on the struct — no separate `RecordRef`.
 // r[impl bam.record.fields]
 // r[impl bam.record.decode]
+// r[impl flags.field_type]
 #[derive(Debug, Clone)]
 pub struct BamRecord {
     pub pos: Pos<Zero>,
     pub end_pos: Pos<Zero>,
     pub tid: i32,
     pub seq_len: u32,
-    pub flags: u16,
+    pub flags: BamFlags,
     pub n_cigar_ops: u16,
     pub mapq: u8,
     // r[impl perf.precompute_matches_indels]
@@ -91,28 +87,24 @@ impl BamRecord {
 
     // --- accessors ---
 
-    pub fn bam_flags(&self) -> BamFlags {
-        BamFlags::new(self.flags)
-    }
-
     // r[impl bam.record.flag_reverse]
     pub fn is_reverse(&self) -> bool {
-        self.flags & FLAG_REVERSE != 0
+        self.flags.is_reverse()
     }
 
     // r[impl bam.record.flag_first]
     pub fn is_first_in_template(&self) -> bool {
-        self.flags & FLAG_FIRST_IN_TEMPLATE != 0
+        self.flags.is_first_in_template()
     }
 
     // r[impl bam.record.flag_second]
     pub fn is_second_in_template(&self) -> bool {
-        self.flags & FLAG_SECOND_IN_TEMPLATE != 0
+        self.flags.is_second_in_template()
     }
 
     // r[impl bam.record.flag_unmapped]
     pub fn is_unmapped(&self) -> bool {
-        self.flags & FLAG_UNMAPPED != 0
+        self.flags.is_unmapped()
     }
 
     // r[impl bam.record.seq_at]
@@ -200,7 +192,7 @@ pub(crate) struct ParsedHeader {
     pub tid: i32,
     pub pos: Pos<Zero>,
     pub mapq: u8,
-    pub flags: u16,
+    pub flags: BamFlags,
     pub n_cigar_ops: u16,
     pub seq_len: u32,
     /// Start of variable-length data (32 + `name_len`).
@@ -237,7 +229,7 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
     let mapq = raw[9];
     let n_cigar_ops = u16::from_le_bytes(read2(raw, 12));
-    let flags = u16::from_le_bytes(read2(raw, 14));
+    let flags = BamFlags::from(u16::from_le_bytes(read2(raw, 14)));
     let seq_len = u32::from_le_bytes(read4(raw, 16));
 
     let cigar_bytes = usize::from(n_cigar_ops) * 4;
@@ -339,7 +331,7 @@ mod tests {
         let rec = BamRecord::decode(&raw[..47]).unwrap();
         assert_eq!(rec.pos, Pos::<Zero>::new(100).unwrap());
         assert_eq!(rec.end_pos, Pos::<Zero>::new(103).unwrap());
-        assert_eq!(rec.flags, 99);
+        assert_eq!(rec.flags, BamFlags::from(99));
         assert_eq!(rec.mapq, 60);
         assert_eq!(&*rec.qname, b"read");
         assert_eq!(rec.seq_at(0), b'A');

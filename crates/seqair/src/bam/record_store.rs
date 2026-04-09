@@ -5,7 +5,7 @@
 //! - **Bases slab**: decoded `Base` values per record, accessed per-position in pileup
 //! - **Data slab**: cigar + qual + aux per record, accessed during pileup construction
 
-use seqair_types::{Base, Pos, Zero};
+use seqair_types::{BamFlags, Base, Pos, Zero};
 
 use super::{
     cigar,
@@ -18,7 +18,7 @@ use super::{
 pub struct SlimRecord {
     pub pos: Pos<Zero>,
     pub end_pos: Pos<Zero>,
-    pub flags: u16,
+    pub flags: BamFlags,
     pub n_cigar_ops: u16,
     pub mapq: u8,
     pub seq_len: u32,
@@ -242,7 +242,7 @@ impl RecordStore {
         &mut self,
         pos: Pos<Zero>,
         end_pos: Pos<Zero>,
-        flags: u16,
+        flags: BamFlags,
         mapq: u8,
         matching_bases: u32,
         indel_bases: u32,
@@ -476,7 +476,7 @@ mod tests {
         let result: Result<u32, _> = store.push_fields(
             Pos::<Zero>::new(0).unwrap(),
             Pos::<Zero>::new(0).unwrap(),
-            0,
+            BamFlags::empty(),
             0,
             0,
             0,

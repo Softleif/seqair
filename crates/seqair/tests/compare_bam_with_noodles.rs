@@ -187,7 +187,7 @@ fn bam_record_fields_match_noodles() {
             let r = store.record(idx);
 
             assert_eq!(r.pos.as_i64(), n.pos, "{contig} rec {i}: pos");
-            assert_eq!(r.flags, n.flags, "{contig} rec {i}: flags");
+            assert_eq!(r.flags.raw(), n.flags, "{contig} rec {i}: flags");
             assert_eq!(r.mapq, n.mapq, "{contig} rec {i}: mapq");
             assert_eq!(store.qname(idx), n.qname.as_slice(), "{contig} rec {i}: qname");
         }
