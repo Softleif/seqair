@@ -180,18 +180,27 @@ impl VcfHeader {
         out.push_str(&self.file_format);
         out.push('\n');
 
-        // other lines (metadata such as ##rastairVersion, ##rastairCommand) come next,
-        // matching htslib convention of metadata before field definitions.
+        // PASS filter — always emitted immediately after fileformat, before metadata.
+        // This matches htslib's convention and ensures PASS gets BCF dict index 0.
+        if let Some(pass_def) = self.filters.get("PASS") {
+            out.push_str("##FILTER=<ID=PASS,Description=\"");
+            out.push_str(&pass_def.description);
+            out.push_str("\">\n");
+        }
+
+        // Other lines (metadata such as ##rastairVersion, ##rastairCommand) come next.
         for line in &self.other_lines {
             out.push_str("##");
             out.push_str(line);
             out.push('\n');
         }
 
-        // FILTER first — PASS is always first in the IndexMap, giving it dict index 0.
-        // This ordering ensures the BCF string dictionary matches the header text order.
+        // Remaining FILTER definitions (skip PASS, already emitted above).
         // r[impl vcf_header.serialization]
         for (id, def) in &self.filters {
+            if id == "PASS" {
+                continue;
+            }
             out.push_str("##FILTER=<ID=");
             out.push_str(id);
             out.push_str(",Description=\"");
