@@ -972,3 +972,233 @@ mod proptests {
         }
     }
 }
+
+#[cfg(test)]
+mod cross_format_tests {
+    use super::*;
+    use crate::vcf::bcf_writer::BcfWriter;
+    use crate::vcf::header::ContigDef;
+    use crate::vcf::record::Genotype;
+    use crate::vcf::writer::VcfWriter;
+    use proptest::prelude::*;
+    use seqair_types::Base;
+    use std::sync::Arc;
+
+    fn bcftools_available() -> bool {
+        std::process::Command::new("bcftools")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn setup() -> (
+        Arc<crate::vcf::header::VcfHeader>,
+        ContigId,
+        InfoInt,
+        InfoFloat,
+        InfoFlag,
+        InfoInts,
+        FormatGt,
+        FormatInt,
+    ) {
+        let mut builder = crate::vcf::header::VcfHeader::builder();
+        let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let dp = builder
+            .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
+            .unwrap();
+        let bq = builder
+            .register_info(&InfoFieldDef::new("BQ", Number::Count(1), ValueType::Float, "BQ"))
+            .unwrap();
+        let db = builder
+            .register_info(&InfoFieldDef::new("DB", Number::Count(0), ValueType::Flag, "dbSNP"))
+            .unwrap();
+        let ad = builder
+            .register_info(&InfoFieldDef::new(
+                "AD",
+                Number::ReferenceAlternateBases,
+                ValueType::Integer,
+                "Allele depth",
+            ))
+            .unwrap();
+        let gt = builder
+            .register_format(&FormatFieldDef::new("GT", Number::Count(1), ValueType::String, "GT"))
+            .unwrap();
+        let dp_fmt = builder
+            .register_format(&FormatFieldDef::new(
+                "DP",
+                Number::Count(1),
+                ValueType::Integer,
+                "DP",
+            ))
+            .unwrap();
+        let header = Arc::new(builder.add_sample("S1").unwrap().build().unwrap());
+        (header, contig, dp, bq, db, ad, gt, dp_fmt)
+    }
+
+    /// Encode a record via RecordEncoder into BCF, convert to VCF text via bcftools,
+    /// and compare to direct VCF text encoding.
+    // r[verify record_encoder.vcf_bcf_equivalence]
+    #[test]
+    fn bcf_and_vcf_produce_equivalent_records_via_bcftools() {
+        if !bcftools_available() {
+            eprintln!("skipping: bcftools not found");
+            return;
+        }
+
+        let (header, contig, dp_key, bq_key, db_key, ad_key, gt_key, dp_fmt_key) = setup();
+
+        let pos = seqair_types::Pos::<seqair_types::One>::new(42).unwrap();
+        let alleles = crate::vcf::alleles::Alleles::snv(Base::A, Base::T).unwrap();
+        let gt = Genotype::unphased(0, 1);
+
+        // Write BCF via RecordEncoder
+        let bcf_path = std::env::temp_dir().join("record_encoder_test.bcf");
+        {
+            let file = std::fs::File::create(&bcf_path).unwrap();
+            let mut writer = BcfWriter::new(file, header.clone(), false);
+            writer.write_header().unwrap();
+            let mut enc = writer.record_encoder();
+            enc.begin(&contig, pos, &alleles, Some(30.0)).unwrap();
+            enc.filter_pass();
+            dp_key.encode(&mut enc, 50);
+            bq_key.encode(&mut enc, 35.5);
+            db_key.encode(&mut enc);
+            ad_key.encode(&mut enc, &[30, 20]);
+            enc.begin_samples(1);
+            gt_key.encode(&mut enc, &gt);
+            dp_fmt_key.encode(&mut enc, 45);
+            enc.emit().unwrap();
+            writer.finish().unwrap();
+        }
+
+        // Write VCF text via RecordEncoder
+        let vcf_path = std::env::temp_dir().join("record_encoder_test.vcf");
+        {
+            let file = std::fs::File::create(&vcf_path).unwrap();
+            let mut writer = VcfWriter::new(file, header.clone());
+            writer.write_header().unwrap();
+            let mut enc = writer.record_encoder();
+            enc.begin(&contig, pos, &alleles, Some(30.0)).unwrap();
+            enc.filter_pass();
+            dp_key.encode(&mut enc, 50);
+            bq_key.encode(&mut enc, 35.5);
+            db_key.encode(&mut enc);
+            ad_key.encode(&mut enc, &[30, 20]);
+            enc.begin_samples(1);
+            gt_key.encode(&mut enc, &gt);
+            dp_fmt_key.encode(&mut enc, 45);
+            enc.emit().unwrap();
+            drop(enc);
+            writer.finish().unwrap();
+        }
+
+        // Convert BCF → VCF via bcftools
+        let bcftools_output = std::process::Command::new("bcftools")
+            .args(["view", "-H", bcf_path.to_str().unwrap()])
+            .output()
+            .expect("failed to run bcftools");
+        assert!(
+            bcftools_output.status.success(),
+            "bcftools view failed: {}",
+            String::from_utf8_lossy(&bcftools_output.stderr)
+        );
+        let bcf_as_vcf = String::from_utf8(bcftools_output.stdout).unwrap();
+
+        // Read VCF data lines
+        let vcf_text = std::fs::read_to_string(&vcf_path).unwrap();
+        let vcf_data: Vec<&str> = vcf_text.lines().filter(|l| !l.starts_with('#')).collect();
+        let bcf_data: Vec<&str> = bcf_as_vcf.lines().filter(|l| !l.is_empty()).collect();
+
+        assert_eq!(
+            vcf_data, bcf_data,
+            "VCF text and BCF (via bcftools) data lines must match"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&bcf_path);
+        let _ = std::fs::remove_file(&vcf_path);
+    }
+
+    // r[verify record_encoder.vcf_bcf_equivalence]
+    proptest! {
+        #[test]
+        fn bcf_vcf_equivalence_proptest(
+            pos in 1u32..100_000,
+            dp_val in 0i32..10000,
+            bq_val in 0.0f32..100.0,
+            has_flag in proptest::bool::ANY,
+            gt_a0 in 0u16..2,
+            gt_a1 in 0u16..2,
+            fmt_dp in 0i32..10000,
+            alt_base_idx in 1u8..4,
+        ) {
+            if !bcftools_available() {
+                return Ok(());
+            }
+
+            let (header, contig, dp_key, bq_key, db_key, _ad_key, gt_key, dp_fmt_key) = setup();
+
+            let alt_base = match alt_base_idx {
+                1 => Base::C,
+                2 => Base::G,
+                _ => Base::T,
+            };
+            let alleles = crate::vcf::alleles::Alleles::snv(Base::A, alt_base).unwrap();
+            let pos1 = seqair_types::Pos::<seqair_types::One>::new(pos).unwrap();
+            let gt = Genotype::unphased(gt_a0, gt_a1);
+
+            // BCF via RecordEncoder → temp file → bcftools view
+            let bcf_path = std::env::temp_dir().join(format!("proptest_bcf_{pos}.bcf"));
+            {
+                let file = std::fs::File::create(&bcf_path).unwrap();
+                let mut writer = BcfWriter::new(file, header.clone(), false);
+                writer.write_header().unwrap();
+                let mut enc = writer.record_encoder();
+                enc.begin(&contig, pos1, &alleles, Some(30.0)).unwrap();
+                enc.filter_pass();
+                dp_key.encode(&mut enc, dp_val);
+                bq_key.encode(&mut enc, bq_val);
+                if has_flag { db_key.encode(&mut enc); }
+                enc.begin_samples(1);
+                gt_key.encode(&mut enc, &gt);
+                dp_fmt_key.encode(&mut enc, fmt_dp);
+                enc.emit().unwrap();
+                writer.finish().unwrap();
+            }
+
+            // VCF text via RecordEncoder → in-memory
+            let vcf_text = {
+                let mut buf = Vec::new();
+                let mut writer = VcfWriter::new(&mut buf, header.clone());
+                writer.write_header().unwrap();
+                let mut enc = writer.record_encoder();
+                enc.begin(&contig, pos1, &alleles, Some(30.0)).unwrap();
+                enc.filter_pass();
+                dp_key.encode(&mut enc, dp_val);
+                bq_key.encode(&mut enc, bq_val);
+                if has_flag { db_key.encode(&mut enc); }
+                enc.begin_samples(1);
+                gt_key.encode(&mut enc, &gt);
+                dp_fmt_key.encode(&mut enc, fmt_dp);
+                enc.emit().unwrap();
+                drop(enc);
+                writer.finish().unwrap();
+                String::from_utf8(buf).unwrap()
+            };
+
+            let bcftools_output = std::process::Command::new("bcftools")
+                .args(["view", "-H", bcf_path.to_str().unwrap()])
+                .output()
+                .expect("failed to run bcftools");
+            let bcf_as_vcf = String::from_utf8(bcftools_output.stdout).unwrap();
+
+            let vcf_data: Vec<&str> = vcf_text.lines().filter(|l| !l.starts_with('#')).collect();
+            let bcf_data: Vec<&str> = bcf_as_vcf.lines().filter(|l| !l.is_empty()).collect();
+
+            let _ = std::fs::remove_file(&bcf_path);
+
+            prop_assert_eq!(vcf_data, bcf_data, "BCF↔VCF equivalence failed");
+        }
+    }
+}
