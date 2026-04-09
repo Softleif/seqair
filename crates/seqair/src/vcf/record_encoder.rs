@@ -983,6 +983,7 @@ mod cross_format_tests {
     use proptest::prelude::*;
     use seqair_types::Base;
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn bcftools_available() -> bool {
         std::process::Command::new("bcftools")
@@ -1025,12 +1026,7 @@ mod cross_format_tests {
             .register_format(&FormatFieldDef::new("GT", Number::Count(1), ValueType::String, "GT"))
             .unwrap();
         let dp_fmt = builder
-            .register_format(&FormatFieldDef::new(
-                "DP",
-                Number::Count(1),
-                ValueType::Integer,
-                "DP",
-            ))
+            .register_format(&FormatFieldDef::new("DP", Number::Count(1), ValueType::Integer, "DP"))
             .unwrap();
         let header = Arc::new(builder.add_sample("S1").unwrap().build().unwrap());
         (header, contig, dp, bq, db, ad, gt, dp_fmt)
@@ -1052,8 +1048,10 @@ mod cross_format_tests {
         let alleles = crate::vcf::alleles::Alleles::snv(Base::A, Base::T).unwrap();
         let gt = Genotype::unphased(0, 1);
 
+        let tmp = tempdir().unwrap();
+
         // Write BCF via RecordEncoder
-        let bcf_path = std::env::temp_dir().join("record_encoder_test.bcf");
+        let bcf_path = tmp.path().join("record_encoder_test.bcf");
         {
             let file = std::fs::File::create(&bcf_path).unwrap();
             let mut writer = BcfWriter::new(file, header.clone(), false);
@@ -1073,7 +1071,7 @@ mod cross_format_tests {
         }
 
         // Write VCF text via RecordEncoder
-        let vcf_path = std::env::temp_dir().join("record_encoder_test.vcf");
+        let vcf_path = tmp.path().join("record_encoder_test.vcf");
         {
             let file = std::fs::File::create(&vcf_path).unwrap();
             let mut writer = VcfWriter::new(file, header.clone());
@@ -1110,10 +1108,7 @@ mod cross_format_tests {
         let vcf_data: Vec<&str> = vcf_text.lines().filter(|l| !l.starts_with('#')).collect();
         let bcf_data: Vec<&str> = bcf_as_vcf.lines().filter(|l| !l.is_empty()).collect();
 
-        assert_eq!(
-            vcf_data, bcf_data,
-            "VCF text and BCF (via bcftools) data lines must match"
-        );
+        assert_eq!(vcf_data, bcf_data, "VCF text and BCF (via bcftools) data lines must match");
 
         // Cleanup
         let _ = std::fs::remove_file(&bcf_path);
@@ -1149,7 +1144,8 @@ mod cross_format_tests {
             let gt = Genotype::unphased(gt_a0, gt_a1);
 
             // BCF via RecordEncoder → temp file → bcftools view
-            let bcf_path = std::env::temp_dir().join(format!("proptest_bcf_{pos}.bcf"));
+            let tmp = tempdir().unwrap();
+            let bcf_path = tmp.path().join(format!("proptest_bcf_{pos}.bcf"));
             {
                 let file = std::fs::File::create(&bcf_path).unwrap();
                 let mut writer = BcfWriter::new(file, header.clone(), false);
