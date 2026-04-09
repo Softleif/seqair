@@ -3,13 +3,12 @@
 //! Reads all compressed bytes for a set of BAM index chunks into memory
 //! in one large I/O operation, then decompresses from RAM.
 
-use tracing::instrument;
-
 use super::{
     bgzf::{self, BgzfError, VirtualOffset},
     index::Chunk,
 };
 use std::io::{Read, Seek, SeekFrom};
+use tracing::{instrument, warn};
 
 pub const PROFILE_TARGET: &str = "seqair::profile";
 
@@ -115,10 +114,14 @@ impl RegionBuf {
 
         // r[impl region_buf.max_region_bytes]
         if total_bytes > MAX_REGION_BYTES {
-            return Err(BgzfError::RegionTooLarge { total_bytes, max_bytes: MAX_REGION_BYTES });
+            tracing::warn!(
+                total_bytes,
+                max_bytes = MAX_REGION_BYTES,
+                "region too large to load into memory; consider reducing batch size or query region"
+            );
         }
+        let mut data = Vec::with_capacity(total_bytes.min(MAX_REGION_BYTES));
 
-        let mut data = Vec::with_capacity(total_bytes);
         let mut range_map = Vec::with_capacity(merged.len());
         let mut max_range_us: u64 = 0;
 
@@ -131,6 +134,8 @@ impl RegionBuf {
                 reason = "bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
             )]
             let len = range.file_end.saturating_sub(range.file_start) as usize;
+
+            // r[impl region_buf.max_region_bytes]
             if len > MAX_REGION_BYTES {
                 return Err(BgzfError::RegionTooLarge {
                     total_bytes: len,
