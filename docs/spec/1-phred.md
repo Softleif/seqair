@@ -1,6 +1,6 @@
 # Seqair-Types — Phred Quality Score
 
-> **Sources:** Phred quality scores are defined in [SAM1] section 1.4 (QUAL field, Phred+33 encoding). The `Phred` newtype wraps the mathematical definition: `Q = -10 log10(P)`. See [references.md](references.md).
+> **Sources:** Phred quality scores are defined in [SAM1] section 1.4 (QUAL field, Phred+33 encoding). The `Phred` newtype wraps the mathematical definition: `Q = -10 log10(P)`. See [References](./99-references.md).
 
 ## Construction
 

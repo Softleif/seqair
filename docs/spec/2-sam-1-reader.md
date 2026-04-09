@@ -131,7 +131,7 @@ The reader MUST support tabix (`.tbi`) indexes. Tabix is a generic index for bgz
 Tabix files are BGZF-compressed and MUST be decompressed before parsing.
 
 r[sam.index.csi+2]
-The reader SHOULD also support CSI (`.csi`) indexes, which generalize the binning scheme with configurable `min_shift` and `depth` parameters. CSI supports references longer than 512 Mbp (BAI's limit). CSI files are BGZF-compressed and MUST be decompressed before parsing. **Not yet implemented** — see `r[csi.*]` rules in `tabix_index.md`.
+The reader SHOULD also support CSI (`.csi`) indexes, which generalize the binning scheme with configurable `min_shift` and `depth` parameters. CSI supports references longer than 512 Mbp (BAI's limit). CSI files are BGZF-compressed and MUST be decompressed before parsing.
 
 r[sam.index.locate+2]
 Index file lookup order: `<path>.tbi`, `<path>.bai`. If neither exists, return a clear error. CSI (`.csi`) lookup should be added when CSI support is implemented.

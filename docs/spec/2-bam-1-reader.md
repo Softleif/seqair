@@ -4,7 +4,7 @@ The indexed BAM reader is the main entry point for loading aligned reads from a 
 
 The reader's primary operation is `fetch_into`: given a genomic region like `chr19:6,105,700–6,105,800`, it queries the index, bulk-reads the relevant compressed data into memory (see `region_buf.md`), decompresses it, decodes the records, and stores them in a `RecordStore` for downstream processing by the pileup engine.
 
-> **Sources:** [SAM1] §4 "The BAM Format Specification" generally — BGZF, BAM header, record layout, and BAI index together define the reader's behaviour. The forking design and ChunkCache are seqair-specific optimisations with no upstream spec counterpart. See [references.md](references.md).
+> **Sources:** [SAM1] §4 "The BAM Format Specification" generally — BGZF, BAM header, record layout, and BAI index together define the reader's behaviour. The forking design and ChunkCache are seqair-specific optimisations with no upstream spec counterpart. See [References](./99-references.md).
 
 ## Opening
 
@@ -51,6 +51,7 @@ The BAM index and header MUST be stored behind `Arc` so that forked readers shar
 
 r[bam.reader.fork]
 `fork()` MUST produce a new reader that:
+
 1. Shares the same `Arc` holding `BamIndex` and `BamHeader` as the source reader (no re-parsing, no additional memory).
 2. Opens a fresh raw `File` handle for bulk `RegionBuf` reads. No `BgzfReader` is needed — `fetch_into` only uses `RegionBuf`, and the `BgzfReader` used during `open()` for header parsing is not retained.
 3. Allocates its own `ChunkCache` (starts empty, populated on first region fetch for a tid).

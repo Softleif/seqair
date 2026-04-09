@@ -10,7 +10,7 @@ The `BamRecord` is an owned BAM record with individually-allocated fields that s
 
 ### Why a separate type from SlimRecord
 
-`SlimRecord` (see [record_store.md](3-record_store.md)) stores fixed fields inline and references variable-length data by offset into shared slabs. This design eliminates per-record allocation and is optimal for the read-only pileup hot path, but it makes mutation impossible: changing one record's CIGAR would require shifting all subsequent records' data in the slab.
+`SlimRecord` (see [Record Store](./3-record_store.md)) stores fixed fields inline and references variable-length data by offset into shared slabs. This design eliminates per-record allocation and is optimal for the read-only pileup hot path, but it makes mutation impossible: changing one record's CIGAR would require shifting all subsequent records' data in the slab.
 
 `BamRecord` owns its data in separate `Vec`s, trading cache density for mutability. The typical use case is extracting a small number of records (e.g. reads at a realignment candidate site) from the store, modifying them, and either writing them to a BAM file or re-inserting them into a fresh `RecordStore` for re-pileup.
 
@@ -41,7 +41,7 @@ The owned record type makes these modifications safe and explicit: callers get a
 > - `aux: AuxData` — auxiliary tags (see aux data section)
 
 r[bam.owned_record.cigar_op]
-CIGAR operations MUST be represented as a typed `CigarOp` struct with an `op: CigarOpType` field (using the existing `CigarOpType` enum defined in `r[io.typed_cigar_ops]` in [general.md](0-general.md)) and a `len: u32` field. Conversion to/from the BAM packed u32 format (`len << 4 | op_code`) MUST be provided.
+CIGAR operations MUST be represented as a typed `CigarOp` struct with an `op: CigarOpType` field (using the existing `CigarOpType` enum defined in `r[io.typed_cigar_ops]`) and a `len: u32` field. Conversion to/from the BAM packed u32 format (`len << 4 | op_code`) MUST be provided.
 
 ## Construction
 
@@ -90,7 +90,7 @@ r[bam.owned_record.set_qual]
 For unmapped reads (empty CIGAR), the iterator MUST be empty.
 
 r[bam.owned_record.end_pos]
-`BamRecord` MUST provide `end_pos() -> i64` computing the rightmost reference position from `pos` + CIGAR reference-consuming operations. This uses the same logic as `r[bam.record.end_pos]` in [record.md](2-bam-3-2-record.md), but MUST be recomputed from the current CIGAR state (not cached from a stale value).
+`BamRecord` MUST provide `end_pos() -> i64` computing the rightmost reference position from `pos` + CIGAR reference-consuming operations. This uses the same logic as `r[bam.record.end_pos]`, but MUST be recomputed from the current CIGAR state (not cached from a stale value).
 
 r[bam.owned_record.bin]
 `BamRecord` MUST provide `bin() -> u16` computing the BAM bin value from `pos` and `end_pos` using the `reg2bin` algorithm from [SAM1] §5.3. This method is specific to the BAI binning scheme (min_shift=14, depth=5), where the maximum non-pseudo bin ID is 37449 — well within u16 range. CSI indexes with larger depths can produce bin IDs exceeding u16; those are handled by the IndexBuilder directly and do not flow through `BamRecord::bin()`. In the serialized 32-byte header, this value is packed into the `bin_mq_nl` field as `bin << 16 | mapq << 8 | l_read_name` — the serialization logic in `to_bam_bytes` handles this packing.
@@ -100,7 +100,7 @@ r[bam.owned_record.bin]
 > _[SAM1] §4.2 — BAM record binary layout: block_size (i32), 32-byte fixed header, variable fields_
 
 r[bam.owned_record.to_bam_bytes]
-`BamRecord` MUST serialize to BAM binary format by appending into a caller-provided `&mut Vec<u8>` (the method appends; clearing the buffer is the caller's responsibility — see `r[bam_writer.reuse_buffers]` in [bam-writer.md](6-bam-writer.md)). The layout MUST follow [SAM1] §4.2: 32-byte fixed fields (refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen), NUL-terminated qname, packed CIGAR (u32 per op), 4-bit packed sequence (via `seq::encode_seq` from [seq_codec.md](2-bam-3-4-seq_codec.md)), quality scores, and raw auxiliary bytes. The method MUST NOT include the 4-byte `block_size` prefix — that is the caller's (writer's) responsibility, since the caller needs to know the total byte count to write the prefix.
+`BamRecord` MUST serialize to BAM binary format by appending into a caller-provided `&mut Vec<u8>` (the method appends; clearing the buffer is the caller's responsibility — see `r[bam_writer.reuse_buffers]`). The layout MUST follow [SAM1] §4.2: 32-byte fixed fields (refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen), NUL-terminated qname, packed CIGAR (u32 per op), 4-bit packed sequence, quality scores, and raw auxiliary bytes. The method MUST NOT include the 4-byte `block_size` prefix — that is the caller's (writer's) responsibility, since the caller needs to know the total byte count to write the prefix.
 
 r[bam.owned_record.to_bam_field_overflow]
 The BAM binary format stores `pos` and `next_pos` as i32, and `ref_id` and `next_ref_id` as i32. The `BamRecord` stores `pos` and `next_pos` as i64 for internal flexibility (e.g., arithmetic without overflow risk). `to_bam_bytes` MUST validate that `pos` is in `[-1, i32::MAX]` and `next_pos` is in `[-1, i32::MAX]`, returning a typed error on overflow. The value -1 is the canonical sentinel for unmapped/unavailable. This validation catches bugs where CIGAR-based position calculations produce values exceeding the BAM coordinate space.
@@ -123,7 +123,7 @@ A record extracted via `to_owned_record(idx)` and re-inserted via `push_owned()`
 > _[SAM1] §4.2.5 — tag byte layout: 2-byte tag name, 1-byte type code, variable-length value. Tag types: A (char), c/C/s/S/i/I (integers), f (float), d (double), Z (string), H (hex string), B (typed array with subtype byte + 4-byte count + values)._
 
 > r[bam.owned_record.aux_data]
-> `AuxData` MUST store auxiliary tags in BAM binary format (packed bytes). Tag lookup via `get()` MUST delegate to the existing `aux::find_tag` implementation (see `r[bam.record.aux_parse]` in [record.md](2-bam-3-2-record.md)). Mutation methods MUST be provided:
+> `AuxData` MUST store auxiliary tags in BAM binary format (packed bytes). Tag lookup via `get()` MUST delegate to the existing `aux::find_tag` implementation (see `r[bam.record.aux_parse]`). Mutation methods MUST be provided:
 >
 > - `set_string(tag, value)` — add or replace a Z-type string tag
 > - `set_int(tag, value: i64)` — add or replace an integer tag
@@ -154,7 +154,7 @@ When extracting a record from `RecordStore`, the auxiliary data MUST be copied v
 
 ## Flag convenience methods
 
-`BamRecord` MUST implement the same flag interface as `SlimRecord`, as specified by `r[io.typed_flags]` in [general.md](0-general.md) and the flag rules in [record.md](2-bam-3-2-record.md) (`r[bam.record.flag_reverse]`, `r[bam.record.flag_first]`, `r[bam.record.flag_second]`, `r[bam.record.flag_unmapped]`).
+`BamRecord` MUST implement the same flag interface as `SlimRecord`, as specified by `r[io.typed_flags]` (and `r[bam.record.flag_reverse]`, `r[bam.record.flag_first]`, `r[bam.record.flag_second]`, `r[bam.record.flag_unmapped]`).
 
 r[bam.owned_record.flag_methods]
 In addition to the read-only flag predicates, `BamRecord` MUST provide `set_flags(flags: u16)` for bulk flag updates.

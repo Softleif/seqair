@@ -11,7 +11,7 @@ The key concept is which operations **consume** the reference and/or query (read
 
 This determines how to translate between reference positions and read positions — the core question the pileup engine asks thousands of times per second.
 
-> **Sources:** [SAM1] §1.4 "The alignment section: mandatory fields" — CIGAR operations table with op codes, BAM numeric encodings, and "consumes query"/"consumes reference" flags. §4.2 "The BAM format" — packed u32 CIGAR encoding (`op_len << 4 | op`). See [references.md](references.md).
+> **Sources:** [SAM1] §1.4 "The alignment section: mandatory fields" — CIGAR operations table with op codes, BAM numeric encodings, and "consumes query"/"consumes reference" flags. §4.2 "The BAM format" — packed u32 CIGAR encoding (`op_len << 4 | op`). See [References](./99-references.md).
 
 ## Operations
 

@@ -1,6 +1,6 @@
 # BAM Writer
 
-The BAM writer serializes alignment records into the BAM binary format: a BGZF-compressed file containing a header followed by a stream of binary records. This is the write counterpart to the BAM reader ([bam_reader.md](2-bam-1-reader.md)) and consumes `BamRecord` values from the owned record type ([bam_record_builder.md](6-bam-record-builder.md)).
+The BAM writer serializes alignment records into the BAM binary format: a BGZF-compressed file containing a header followed by a stream of binary records. This is the write counterpart to the BAM reader ([BAM Reader](./2-bam-1-reader.md)) and consumes `BamRecord` values from the owned record type ([BAM Record Builder](./6-bam-record-builder.md)).
 
 BAM writing is needed in two primary contexts:
 
@@ -8,7 +8,7 @@ BAM writing is needed in two primary contexts:
 
 2. **Post-realignment output** — after in-memory realignment (modifying CIGAR and position), modified records are written to a new BAM file. This may also involve sorting, though initial support can require pre-sorted input.
 
-> **Sources:** [SAM1] §4 "The BAM Format Specification" — file structure (magic, header, records); §4.2 "The BAM format" — binary record layout, bin_mq_nl / flag_nc packing, l_text / n_ref / l_name / l_ref header fields; §4.1 "The BGZF compression format" — block compression (implemented by `BgzfWriter`, see [bgzf.md](1-2-bgzf.md)). See [References](./99-references.md).
+> **Sources:** [SAM1] §4 "The BAM Format Specification" — file structure (magic, header, records); §4.2 "The BAM format" — binary record layout, bin_mq_nl / flag_nc packing, l_text / n_ref / l_name / l_ref header fields; §4.1 "The BGZF compression format" — block compression (implemented by `BgzfWriter`, see [BZGF](./1-2-bgzf.md)). See [References](./99-references.md).
 
 ## Background
 
@@ -21,7 +21,7 @@ The pipeline is parallelized: rayon workers each process a genomic region, produ
 ### Design goals
 
 - **API compatibility**: method names and semantics should be familiar to users of rust-htslib's writer
-- **Single-threaded first**: start with single-threaded BGZF compression (using `BgzfWriter` from [bgzf.md](1-2-bgzf.md)). Multi-threaded compression is a future optimization
+- **Single-threaded first**: start with single-threaded BGZF compression (using `BgzfWriter` from [BZGF](./1-2-bgzf.md)). Multi-threaded compression is a future optimization
 - **Streaming**: records are written one at a time, not buffered in memory. The writer handles BGZF block boundaries transparently
 - **Ordered output**: the writer preserves insertion order — records appear in the output file in the order `write()` is called
 
@@ -39,13 +39,13 @@ r[bam_writer.create_from_stdout]
 `BamWriter::from_stdout(header)` MUST write BGZF-compressed BAM to stdout. Index co-production is not supported for stdout output (there is no sidecar path for the `.bai` file). The caller is responsible for determining whether stdout is the intended target (e.g. by checking for `-` or `/dev/stdout` in a CLI argument).
 
 r[bam_writer.write_record]
-`write(record: &BamRecord)` MUST serialize the record into the writer's reusable buffer via `BamRecord::to_bam_bytes()` (see `r[bam.owned_record.to_bam_bytes]` in [bam_record_builder.md](6-bam-record-builder.md)), prepend the 4-byte `block_size` (i32 little-endian, equal to the serialized byte count), and write the result to the BGZF stream. If index co-production is enabled, the writer MUST then push the record to the IndexBuilder (see `r[bam_writer.index_record_dispatch]`).
+`write(record: &BamRecord)` MUST serialize the record into the writer's reusable buffer via `BamRecord::to_bam_bytes()` (see `r[bam.owned_record.to_bam_bytes]`), prepend the 4-byte `block_size` (i32 little-endian, equal to the serialized byte count), and write the result to the BGZF stream. If index co-production is enabled, the writer MUST then push the record to the IndexBuilder (see `r[bam_writer.index_record_dispatch]`).
 
 r[bam_writer.insertion_order]
 Records MUST appear in the output file in the exact order that `write()` is called. The writer MUST NOT reorder, buffer, or batch records.
 
 r[bam_writer.finish]
-`finish()` MUST flush any buffered BGZF data. If index co-production is enabled, it MUST call `index.finish(final_virtual_offset)` after flushing all record data (see `r[bam_writer.index_finish]`). It MUST then write the BGZF EOF marker block (as specified by `r[bgzf.writer.eof_marker]` in [bgzf.md](1-2-bgzf.md)). The method MUST return `Result<(W, Option<IndexBuilder>), BamWriteError>` — the inner writer `W` (matching the VCF writer's `r[vcf_writer.finish]` pattern) and the finished IndexBuilder if co-production was enabled. Dropping the writer without calling `finish()` SHOULD flush on a best-effort basis (see `r[bgzf.writer.finish]`).
+`finish()` MUST flush any buffered BGZF data. If index co-production is enabled, it MUST call `index.finish(final_virtual_offset)` after flushing all record data (see `r[bam_writer.index_finish]`). It MUST then write the BGZF EOF marker block (as specified by `r[bgzf.writer.eof_marker]`). The method MUST return `Result<(W, Option<IndexBuilder>), BamWriteError>` — the inner writer `W` (matching the VCF writer's `r[vcf_writer.finish]` pattern) and the finished IndexBuilder if co-production was enabled. Dropping the writer without calling `finish()` SHOULD flush on a best-effort basis (see `r[bgzf.writer.finish]`).
 
 r[bam_writer.compression_level]
 The compression level MUST be configurable as a constructor parameter (not a post-construction setter), since the header is written during construction and its BGZF blocks use whatever level is set at that point. The default SHOULD be level 6 (matching htslib). Level 1 (fastest) is commonly used in pipelines where downstream tools re-compress. The constructor signatures are: `from_path(path, header, build_index)` uses the default level; `from_path_with_level(path, header, build_index, level)` accepts an explicit level.
@@ -67,9 +67,9 @@ The BAM `block_size` field is an i32, so a single record's serialized size (excl
 
 Without co-production, generating a BAI requires a second pass over the entire BAM file (`samtools index`). For whole-genome BAM rewriting (~50 GB output), this adds minutes of wall time and doubles I/O. Co-producing the index during writing eliminates the second pass entirely — the IndexBuilder accumulates bin/chunk/linear data as records stream through, using virtual offsets captured from the BgzfWriter.
 
-This follows the same pattern established for VCF/BCF writing, where TBI/CSI indexes are co-produced during writing (see [index-builder.md](5-index-builder.md)).
+This follows the same pattern established for VCF/BCF writing, where TBI/CSI indexes are co-produced during writing (see [Index Builder](./5-index-builder.md)).
 
-> _[SAM1] §5.2 — BAI index format. The index builder (`r[index_builder.single_pass]` in [index-builder.md](5-index-builder.md)) supports BAI output via `r[index_builder.bai_format]`._
+> _[SAM1] §5.2 — BAI index format. The index builder (`r[index_builder.single_pass]`) supports BAI output via `r[index_builder.bai_format]`._
 
 r[bam_writer.index_coproduction]
 The writer MUST support co-producing a BAI index during writing. When enabled (via the `build_index` constructor parameter), the writer MUST hold an `IndexBuilder` configured for BAI via `IndexBuilder::bai(header.n_targets())` (see `r[index_builder.bai_constructor]`). After each record is written to the BGZF stream, the writer MUST dispatch the record to the IndexBuilder according to `r[bam_writer.index_record_dispatch]`.
@@ -94,7 +94,7 @@ When index co-production is enabled, the writer relies on the IndexBuilder's sor
 > _[SAM1] §4.2 — BAM header: magic bytes 0x42 0x41 0x4D 0x01 (`BAM\1`), l_text (i32 LE), header text, n_ref (i32 LE), then per-reference: l_name (i32 LE) + name + NUL + l_ref (i32 LE)_
 
 r[bam_writer.magic]
-The writer MUST begin the BAM file with the 4-byte magic `0x42 0x41 0x4D 0x01` (ASCII `BAM` followed by byte value 1). This is the same magic validated by `r[bam.header.magic]` in [header.md](2-bam-3-1-header.md).
+The writer MUST begin the BAM file with the 4-byte magic `0x42 0x41 0x4D 0x01` (ASCII `BAM` followed by byte value 1). This is the same magic validated by `r[bam.header.magic]` in [BAM Header](./2-bam-3-1-header.md).
 
 r[bam_writer.header_text]
 After the magic, the writer MUST write the header text length as an i32 (little-endian) followed by the header text bytes. The header text MUST NOT include a NUL terminator (the length field is sufficient per [SAM1] §4.2). The header text contains the `@HD`, `@SQ`, `@RG`, `@PG`, and `@CO` lines from the `BamHeader`.
@@ -104,7 +104,7 @@ After the header text, the writer MUST write the number of reference sequences a
 
 ## Header construction
 
-The following rules extend `BamHeader` (defined in [header.md](2-bam-3-1-header.md)) with construction and mutation capabilities needed for BAM writing.
+The following rules extend `BamHeader` (defined in [BAM Header](./2-bam-3-1-header.md)) with construction and mutation capabilities needed for BAM writing.
 
 r[bam_writer.header_from_template]
 `BamHeader` MUST support creating a copy from an existing header that clones all reference sequences, read groups, and other header lines. The caller can then add PG records or modify lines before passing it to the writer.
@@ -118,7 +118,7 @@ r[bam_writer.header_text_generation]
 ## Error handling
 
 r[bam_writer.error_type]
-Write errors MUST be represented by a dedicated `BamWriteError` enum with typed variants (per `r[io.errors.typed_variants]` in [general.md](0-general.md)).
+Write errors MUST be represented by a dedicated `BamWriteError` enum with typed variants (per `r[io.errors.typed_variants]`).
 
 Examples:
 

@@ -39,7 +39,7 @@ CSI output MUST be BGZF-compressed with magic `CSI\x01`, followed by: min_shift,
 
 The IndexBuilder already accumulates the same bin/chunk/linear data structures that BAI requires — the internal representation is format-agnostic. BAI, TBI, and CSI differ only in their serialization: BAI is uncompressed with a simpler header; TBI adds BGZF compression and column config; CSI replaces the linear index with per-bin loffsets.
 
-Adding `write_bai()` to the existing IndexBuilder enables BAM index co-production (see `r[bam_writer.index_coproduction]` in [bam-writer.md](6-bam-writer.md)) without duplicating the single-pass state machine. This is the same builder that already produces TBI for VCF and CSI for BCF.
+Adding `write_bai()` to the existing IndexBuilder enables BAM index co-production (see `r[bam_writer.index_coproduction]`) without duplicating the single-pass state machine. This is the same builder that already produces TBI for VCF and CSI for BCF.
 
 > _[SAM1] §5.2 "The BAI index format for BAM files" — magic, n_ref, bins, chunks, linear index_
 

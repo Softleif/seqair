@@ -1,6 +1,6 @@
 # BCF Direct Encoder
 
-> **Sources:** [BCF2] — typed value encoding, record layout, field-major FORMAT encoding, GT encoding. See [5-bcf-writer.md](5-bcf-writer.md) for the underlying BCF format rules. This spec extends the BCF writer with a zero-allocation direct-encode API. Also see [References](./99-references.md).
+> **Sources:** [BCF2] — typed value encoding, record layout, field-major FORMAT encoding, GT encoding. See [Bcf Writer](./5-bcf-writer.md) for the underlying BCF format rules. This spec extends the BCF writer with a zero-allocation direct-encode API. Also see [References](./99-references.md).
 
 ## Motivation
 

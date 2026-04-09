@@ -2,7 +2,7 @@
 
 These are cross-cutting design rules that apply to all modules in the Seqair crate. They establish conventions for error handling, type safety, and platform portability.
 
-> **Sources:** This file contains seqair-specific design rules with no direct upstream spec counterpart. Named constants (FLAG bits, CIGAR op codes) are derived from [SAM1] §1.4 and §4.2. See [references.md](references.md).
+> **Sources:** This file contains seqair-specific design rules with no direct upstream spec counterpart. Named constants (FLAG bits, CIGAR op codes) are derived from [SAM1] §1.4 and §4.2. See [References](./99-references.md).
 
 ## Error handling
 

@@ -12,13 +12,14 @@ A phantom-typed newtype `Pos<S>` solves both: the type system distinguishes coor
 ### Why `u32` and not `i64`?
 
 The SAM spec caps reference sequence length (`@SQ LN`) at `[1, 2^31-1]` (~2.1 billion) [SAM1 §1.3], and the BAM binary `l_ref` field is `uint32_t` with the same `< 2^31` constraint [SAM1 §4.2]. BAM binary `pos` is `int32_t`, giving a valid position range of `[0, 2^31-1]`. All current SAM/BAM positions therefore fit in `u32` (max ~4.3 billion) with room to spare. Using `u32`:
+
 - Halves position storage (4 bytes vs 8), improving cache density in hot structs (`SlimRecord`, `PileupAlignment`, `CompactOp`)
 - Eliminates the i64↔i32 casts currently scattered through cigar.rs
 - `Offset` (distance between positions) uses `i64` for safe intermediate arithmetic
 
-> **Note on large genomes and future widening:** The CSI index format [CSI] uses `int64_t` for positions to support sequences larger than `2^29` bases. Enormous total genome sizes do exist — the fern *Tmesipteris oblanceolata* has a ~160 Gbp genome ([Hidalgo et al., iScience 2024](https://www.cell.com/iscience/fulltext/S2589-0042(24)01111-8)) — but that size is spread across many chromosomes. However, individual chromosomes exceeding `2^31-1` already exist in practice: users have reported single chromosomes of ~2.36 Gbp that BAM simply cannot represent (`[E::bam_write1] Positional data is too large for BAM format`). This is an active unresolved issue in the SAM/BAM spec ([samtools/hts-specs#655](https://github.com/samtools/hts-specs/issues/655)); htslib already uses 64-bit coordinates internally for SAM, and CRAM 4.0 (still in draft) is planned to support them, but standard BAM and CRAM remain limited to `int32_t`. The proposed `PN`/`PO` header tags for stitching split chromosomes were never standardized. For seqair, `u32` is correct today because BAM enforces the `2^31-1` cap at the format level — but if support for SAM-only large-chromosome files or future CRAM 4.0 is ever added, `Pos<S>` would need to widen to `u64`.
+> **Note on large genomes and future widening:** The CSI index format [CSI] uses `int64_t` for positions to support sequences larger than `2^29` bases. Enormous total genome sizes do exist — the fern _Tmesipteris oblanceolata_ has a ~160 Gbp genome ([Hidalgo et al., iScience 2024](<https://www.cell.com/iscience/fulltext/S2589-0042(24)01111-8>)) — but that size is spread across many chromosomes. However, individual chromosomes exceeding `2^31-1` already exist in practice: users have reported single chromosomes of ~2.36 Gbp that BAM simply cannot represent (`[E::bam_write1] Positional data is too large for BAM format`). This is an active unresolved issue in the SAM/BAM spec ([samtools/hts-specs#655](https://github.com/samtools/hts-specs/issues/655)); htslib already uses 64-bit coordinates internally for SAM, and CRAM 4.0 (still in draft) is planned to support them, but standard BAM and CRAM remain limited to `int32_t`. The proposed `PN`/`PO` header tags for stitching split chromosomes were never standardized. For seqair, `u32` is correct today because BAM enforces the `2^31-1` cap at the format level — but if support for SAM-only large-chromosome files or future CRAM 4.0 is ever added, `Pos<S>` would need to widen to `u64`.
 
-> **Sources:** Coordinate conventions follow [SAM1] §1.4 (1-based POS), §4.2 (0-based BAM binary POS). Reference length limit from [SAM1] §1.3 (`@SQ LN` range `[1, 2^31-1]`) and §4.2 (`l_ref: uint32_t < 2^31`). CSI position width from [CSI]. See [references.md](99-references.md).
+> **Sources:** Coordinate conventions follow [SAM1] §1.4 (1-based POS), §4.2 (0-based BAM binary POS). Reference length limit from [SAM1] §1.3 (`@SQ LN` range `[1, 2^31-1]`) and §4.2 (`l_ref: uint32_t < 2^31`). CSI position width from [CSI]. See [References](./99-references.md).
 
 ## Position type
 
@@ -30,6 +31,7 @@ r[pos.size]
 
 r[pos.systems]
 Two coordinate system markers MUST be defined:
+
 - `Zero`: 0-based coordinates (BAM binary, BED, internal engine)
 - `One`: 1-based coordinates (SAM text, VCF, CRAM, user-facing)
 
@@ -46,6 +48,7 @@ r[pos.one_new]
 
 r[pos.try_from]
 Fallible constructors MUST be provided for wider integer types:
+
 - `try_from_i64(i64) -> Option<Self>`: rejects negative values (for `Zero`) or values < 1 (for `One`), and values exceeding `u32::MAX`.
 - `try_from_u64(u64) -> Option<Self>`: rejects values exceeding `u32::MAX`.
 - `try_from_i32(i32) -> Option<Self>` (for `One`): rejects values < 1.
