@@ -26,9 +26,9 @@ pub struct VcfWriter<W: Write> {
     header: Arc<VcfHeader>,
     buf: Vec<u8>,
     header_written: bool,
-    /// FORMAT key accumulator (reused across records by record_encoder).
+    /// FORMAT key accumulator (reused across records by `record_encoder`).
     fmt_keys: Vec<SmolStr>,
-    /// FORMAT value buffer (reused across records by record_encoder).
+    /// FORMAT value buffer (reused across records by `record_encoder`).
     fmt_values: Vec<u8>,
 }
 
@@ -725,7 +725,7 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
         #[cfg(debug_assertions)]
         debug_assert!(self.record_begun, "format_float() called before begin()");
         self.push_format_key(id);
-        write_float_g(&mut self.fmt_values, value).expect("writing to Vec<u8> is infallible");
+        write_float_g(self.fmt_values, value).expect("writing to Vec<u8> is infallible");
     }
 
     fn n_allele(&self) -> usize {
@@ -762,7 +762,7 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
 
             // Sample values column
             self.buf.push(b'\t');
-            self.buf.extend_from_slice(&self.fmt_values);
+            self.buf.extend_from_slice(self.fmt_values);
         }
 
         self.buf.push(b'\n');
