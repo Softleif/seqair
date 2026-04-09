@@ -169,6 +169,7 @@ fn parse_crai_line(line: &str) -> Result<CraiEntry, CramError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     // r[verify cram.index.parse]
     #[test]
@@ -339,8 +340,8 @@ mod tests {
 
     #[test]
     fn from_path_decompression_failed() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("seqair_test_bad.crai");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("seqair_test_bad.crai");
         std::fs::write(&path, b"this is not valid gzip data").unwrap();
         let err = CramIndex::from_path(&path).unwrap_err();
         assert!(
