@@ -17,6 +17,8 @@ pub enum Number {
     ReferenceAlternateBases,
     /// One per genotype combination (G).
     Genotypes,
+    /// One per possible base modification (M). VCF 4.2+ extension.
+    BaseModification,
     /// Unknown/variable count (.).
     Unknown,
 }
@@ -29,6 +31,7 @@ impl Number {
             Self::AlternateBases => SmolStr::from("A"),
             Self::ReferenceAlternateBases => SmolStr::from("R"),
             Self::Genotypes => SmolStr::from("G"),
+            Self::BaseModification => SmolStr::from("M"),
             Self::Unknown => SmolStr::from("."),
         }
     }
