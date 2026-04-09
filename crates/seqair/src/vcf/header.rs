@@ -177,6 +177,14 @@ impl VcfHeader {
         out.push_str(&self.file_format);
         out.push('\n');
 
+        // other lines (metadata such as ##rastairVersion, ##rastairCommand) come next,
+        // matching htslib convention of metadata before field definitions.
+        for line in &self.other_lines {
+            out.push_str("##");
+            out.push_str(line);
+            out.push('\n');
+        }
+
         // FILTER first — PASS is always first in the IndexMap, giving it dict index 0.
         // This ordering ensures the BCF string dictionary matches the header text order.
         // r[impl vcf_header.serialization]
@@ -223,13 +231,6 @@ impl VcfHeader {
                 out.push_str(&len.to_string());
             }
             out.push_str(">\n");
-        }
-
-        // other lines
-        for line in &self.other_lines {
-            out.push_str("##");
-            out.push_str(line);
-            out.push('\n');
         }
 
         // #CHROM line
