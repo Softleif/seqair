@@ -494,7 +494,7 @@ mod tests {
     use seqair_types::Base;
     use std::sync::Arc;
 
-    /// Build a header using register_* methods for the RecordEncoder path.
+    /// Build a header using register_* methods for the `RecordEncoder` path.
     struct TestSetup {
         header: Arc<crate::vcf::header::VcfHeader>,
         contig: ContigId,
@@ -561,7 +561,7 @@ mod tests {
         }
     }
 
-    /// Encode a simple SNV record via RecordEncoder and return the raw BCF bytes.
+    /// Encode a simple SNV record via `RecordEncoder` and return the raw BCF bytes.
     fn encode_via_record_encoder(setup: &TestSetup) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut writer = BcfWriter::new(&mut buf, setup.header.clone(), false);
@@ -584,7 +584,7 @@ mod tests {
         buf
     }
 
-    /// Encode the same record via VcfRecordBuilder and return the raw BCF bytes.
+    /// Encode the same record via `VcfRecordBuilder` and return the raw BCF bytes.
     fn encode_via_vcf_record(setup: &TestSetup) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut writer = BcfWriter::new(&mut buf, setup.header.clone(), false);
@@ -1082,7 +1082,7 @@ mod cross_format_tests {
         (header, contig, dp, bq, db, ad, gt, dp_fmt)
     }
 
-    /// Encode a record via RecordEncoder into BCF, convert to VCF text via bcftools,
+    /// Encode a record via `RecordEncoder` into BCF, convert to VCF text via bcftools,
     /// and compare to direct VCF text encoding.
     // r[verify record_encoder.vcf_bcf_equivalence]
     #[test]
