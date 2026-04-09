@@ -26,6 +26,10 @@ pub struct VcfWriter<W: Write> {
     header: Arc<VcfHeader>,
     buf: Vec<u8>,
     header_written: bool,
+    /// FORMAT key accumulator for record_encoder (lazily initialized).
+    fmt_keys: Option<Vec<SmolStr>>,
+    /// FORMAT value buffer for record_encoder (lazily initialized).
+    fmt_values: Option<Vec<u8>>,
 }
 
 impl<W: Write> VcfWriter<W> {
@@ -36,6 +40,8 @@ impl<W: Write> VcfWriter<W> {
             header,
             buf: Vec::with_capacity(4096),
             header_written: false,
+            fmt_keys: None,
+            fmt_values: None,
         }
     }
 
@@ -51,6 +57,8 @@ impl<W: Write> VcfWriter<W> {
             header,
             buf: Vec::with_capacity(4096),
             header_written: false,
+            fmt_keys: None,
+            fmt_values: None,
         }
     }
 
@@ -427,6 +435,344 @@ fn write_sample_value(buf: &mut Vec<u8>, value: &SampleValue) -> FmtResult {
         }
     }
     Ok(())
+}
+
+// ── VcfOutput trait ────────────────────────────────────────────────────
+
+// r[impl record_encoder.vcf_text_output]
+/// Abstracts over plain and BGZF VCF output for the record encoder.
+pub(crate) trait VcfOutput {
+    fn write_line(&mut self, buf: &[u8]) -> Result<(), VcfError>;
+    fn push_index(&mut self, tid: i32, beg: u64, end: u64) -> Result<(), VcfError>;
+}
+
+struct PlainOutput<'a, W: Write>(&'a mut W);
+
+impl<W: Write> VcfOutput for PlainOutput<'_, W> {
+    fn write_line(&mut self, buf: &[u8]) -> Result<(), VcfError> {
+        self.0.write_all(buf).map_err(VcfError::Io)
+    }
+    fn push_index(&mut self, _tid: i32, _beg: u64, _end: u64) -> Result<(), VcfError> {
+        Ok(())
+    }
+}
+
+struct BgzfOutput<'a, W: Write> {
+    bgzf: &'a mut BgzfWriter<W>,
+    index: &'a mut IndexBuilder,
+}
+
+impl<W: Write> VcfOutput for BgzfOutput<'_, W> {
+    fn write_line(&mut self, buf: &[u8]) -> Result<(), VcfError> {
+        self.bgzf.flush_if_needed(buf.len())?;
+        self.bgzf.write_all(buf)?;
+        Ok(())
+    }
+    fn push_index(&mut self, tid: i32, beg: u64, end: u64) -> Result<(), VcfError> {
+        self.index.push(tid, beg, end, self.bgzf.virtual_offset())?;
+        Ok(())
+    }
+}
+
+// ── VcfRecordEncoder ───────────────────────────────────────────────────
+
+use super::record_encoder::{ContigId, FieldId, FilterId, RecordEncoder};
+
+// r[impl record_encoder.vcf_text_encoder]
+// r[impl record_encoder.vcf_text_buffer_reuse]
+/// VCF text record encoder. Borrows reusable buffers from the [`VcfWriter`]
+/// to avoid per-record allocation after warmup.
+pub struct VcfRecordEncoder<'a> {
+    /// Main line buffer — contains CHROM through INFO.
+    buf: &'a mut Vec<u8>,
+    /// FORMAT key accumulator (reused across records).
+    fmt_keys: &'a mut Vec<SmolStr>,
+    /// Formatted sample values buffer (reused across records).
+    fmt_values: &'a mut Vec<u8>,
+    /// Output sink (plain or BGZF).
+    output: Box<dyn VcfOutput + 'a>,
+    /// Record state.
+    n_allele: u16,
+    n_alt: u16,
+    info_count: u16,
+    tid: i32,
+    pos_0based: u32,
+    rlen: u32,
+}
+
+// r[impl record_encoder.vcf_text_begin]
+// r[impl record_encoder.vcf_text_info]
+// r[impl record_encoder.vcf_text_format_accumulation]
+// r[impl record_encoder.vcf_text_emit]
+impl RecordEncoder for VcfRecordEncoder<'_> {
+    fn begin(
+        &mut self,
+        contig: &ContigId,
+        pos: seqair_types::Pos<seqair_types::One>,
+        alleles: &super::alleles::Alleles,
+        qual: Option<f32>,
+    ) -> Result<(), VcfError> {
+        self.buf.clear();
+        self.fmt_keys.clear();
+        self.fmt_values.clear();
+        self.info_count = 0;
+
+        self.n_allele = u16::try_from(alleles.n_allele()).map_err(|_| VcfError::ValueOverflow {
+            field: "n_allele",
+            value: alleles.n_allele() as u64,
+            target_type: "u16",
+        })?;
+        self.n_alt = self.n_allele.saturating_sub(1);
+        self.tid = i32::try_from(contig.tid()).map_err(|_| VcfError::ValueOverflow {
+            field: "contig_tid",
+            value: u64::from(contig.tid()),
+            target_type: "i32",
+        })?;
+        self.pos_0based = pos.to_zero_based().get();
+        self.rlen = alleles.rlen() as u32;
+
+        // CHROM
+        self.buf.extend_from_slice(contig.name().as_bytes());
+        self.buf.push(b'\t');
+
+        // POS (1-based)
+        let mut itoa_buf = itoa::Buffer::new();
+        self.buf.extend_from_slice(itoa_buf.format(pos.get()).as_bytes());
+        self.buf.push(b'\t');
+
+        // ID
+        self.buf.push(b'.');
+        self.buf.push(b'\t');
+
+        // REF
+        alleles.write_ref_into(self.buf);
+        self.buf.push(b'\t');
+
+        // ALT
+        let n_alts = alleles.write_alts_into(self.buf);
+        if n_alts == 0 {
+            self.buf.push(b'.');
+        }
+        self.buf.push(b'\t');
+
+        // QUAL
+        match qual {
+            Some(q) => {
+                // write_float_g can't fail when writing to Vec<u8>
+                let _ = write_float_g(self.buf, q);
+            }
+            None => self.buf.push(b'.'),
+        }
+        self.buf.push(b'\t');
+
+        Ok(())
+    }
+
+    fn filter_pass(&mut self) {
+        self.buf.extend_from_slice(b"PASS");
+        self.buf.push(b'\t');
+    }
+
+    fn filter_fail(&mut self, filters: &[&FilterId]) {
+        for (i, f) in filters.iter().enumerate() {
+            if i > 0 {
+                self.buf.push(b';');
+            }
+            self.buf.extend_from_slice(f.name().as_bytes());
+        }
+        self.buf.push(b'\t');
+    }
+
+    fn info_int(&mut self, id: &FieldId, value: i32) {
+        self.info_separator();
+        self.buf.extend_from_slice(id.name().as_bytes());
+        self.buf.push(b'=');
+        let mut itoa_buf = itoa::Buffer::new();
+        self.buf.extend_from_slice(itoa_buf.format(value).as_bytes());
+    }
+
+    fn info_float(&mut self, id: &FieldId, value: f32) {
+        self.info_separator();
+        self.buf.extend_from_slice(id.name().as_bytes());
+        self.buf.push(b'=');
+        let _ = write_float_g(self.buf, value);
+    }
+
+    fn info_ints(&mut self, id: &FieldId, values: &[i32]) {
+        self.info_separator();
+        self.buf.extend_from_slice(id.name().as_bytes());
+        self.buf.push(b'=');
+        let mut itoa_buf = itoa::Buffer::new();
+        for (i, v) in values.iter().enumerate() {
+            if i > 0 {
+                self.buf.push(b',');
+            }
+            self.buf.extend_from_slice(itoa_buf.format(*v).as_bytes());
+        }
+    }
+
+    fn info_floats(&mut self, id: &FieldId, values: &[f32]) {
+        self.info_separator();
+        self.buf.extend_from_slice(id.name().as_bytes());
+        self.buf.push(b'=');
+        for (i, v) in values.iter().enumerate() {
+            if i > 0 {
+                self.buf.push(b',');
+            }
+            let _ = write_float_g(self.buf, *v);
+        }
+    }
+
+    fn info_flag(&mut self, id: &FieldId) {
+        self.info_separator();
+        self.buf.extend_from_slice(id.name().as_bytes());
+    }
+
+    fn info_string(&mut self, id: &FieldId, value: &str) {
+        self.info_separator();
+        self.buf.extend_from_slice(id.name().as_bytes());
+        self.buf.push(b'=');
+        percent_encode_into(self.buf, value.as_bytes());
+    }
+
+    fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) {
+        self.info_separator();
+        self.buf.extend_from_slice(id.name().as_bytes());
+        self.buf.push(b'=');
+        let mut itoa_buf = itoa::Buffer::new();
+        for (i, v) in values.iter().enumerate() {
+            if i > 0 {
+                self.buf.push(b',');
+            }
+            match v {
+                Some(n) => self.buf.extend_from_slice(itoa_buf.format(*n).as_bytes()),
+                None => self.buf.push(b'.'),
+            }
+        }
+    }
+
+    fn begin_samples(&mut self, _n: u32) {
+        // For VCF text, sample count is implicit from the values written.
+    }
+
+    fn format_gt(&mut self, id: &FieldId, gt: &super::record::Genotype) {
+        self.push_format_key(id);
+        // Genotype serialization
+        let mut itoa_buf = itoa::Buffer::new();
+        for (i, allele) in gt.alleles.iter().enumerate() {
+            if i > 0 {
+                let phased = gt.phased.get(i.saturating_sub(1)).copied().unwrap_or(false);
+                self.fmt_values.push(if phased { b'|' } else { b'/' });
+            }
+            match allele {
+                Some(idx) => {
+                    self.fmt_values.extend_from_slice(itoa_buf.format(*idx).as_bytes());
+                }
+                None => self.fmt_values.push(b'.'),
+            }
+        }
+    }
+
+    fn format_int(&mut self, id: &FieldId, value: i32) {
+        self.push_format_key(id);
+        let mut itoa_buf = itoa::Buffer::new();
+        self.fmt_values.extend_from_slice(itoa_buf.format(value).as_bytes());
+    }
+
+    fn format_float(&mut self, id: &FieldId, value: f32) {
+        self.push_format_key(id);
+        let _ = write_float_g(&mut self.fmt_values, value);
+    }
+
+    fn n_allele(&self) -> usize {
+        self.n_allele as usize
+    }
+
+    fn n_alt(&self) -> usize {
+        self.n_alt as usize
+    }
+
+    fn emit(&mut self) -> Result<(), VcfError> {
+        // If no INFO fields were written, write "."
+        if self.info_count == 0 {
+            self.buf.push(b'.');
+        }
+
+        // FORMAT + samples
+        if !self.fmt_keys.is_empty() {
+            // FORMAT column: key1:key2:key3
+            self.buf.push(b'\t');
+            for (i, key) in self.fmt_keys.iter().enumerate() {
+                if i > 0 {
+                    self.buf.push(b':');
+                }
+                self.buf.extend_from_slice(key.as_bytes());
+            }
+
+            // Sample values column
+            self.buf.push(b'\t');
+            self.buf.extend_from_slice(&self.fmt_values);
+        }
+
+        self.buf.push(b'\n');
+
+        // Write to output
+        let beg = u64::from(self.pos_0based);
+        let end = beg.saturating_add(u64::from(self.rlen));
+        self.output.write_line(self.buf)?;
+        self.output.push_index(self.tid, beg, end)?;
+
+        Ok(())
+    }
+}
+
+impl VcfRecordEncoder<'_> {
+    /// Write INFO field separator (`;` between fields, nothing before the first).
+    fn info_separator(&mut self) {
+        if self.info_count > 0 {
+            self.buf.push(b';');
+        }
+        self.info_count = self.info_count.saturating_add(1);
+    }
+
+    /// Push a FORMAT key and add `:` separator to values if not the first field.
+    fn push_format_key(&mut self, id: &FieldId) {
+        if !self.fmt_keys.is_empty() {
+            self.fmt_values.push(b':');
+        }
+        self.fmt_keys.push(id.name.clone());
+    }
+}
+
+// ── VcfWriter::record_encoder() ────────────────────────────────────────
+
+impl<W: Write> VcfWriter<W> {
+    /// Get a direct record encoder for zero-alloc VCF text encoding.
+    pub fn record_encoder(&mut self) -> VcfRecordEncoder<'_> {
+        // Lazily initialize FORMAT accumulators
+        if self.fmt_keys.is_none() {
+            self.fmt_keys = Some(Vec::with_capacity(8));
+            self.fmt_values = Some(Vec::with_capacity(256));
+        }
+
+        let output: Box<dyn VcfOutput + '_> = match &mut self.output {
+            Output::Plain(w) => Box::new(PlainOutput(w)),
+            Output::Bgzf { bgzf, index } => Box::new(BgzfOutput { bgzf, index }),
+        };
+
+        VcfRecordEncoder {
+            buf: &mut self.buf,
+            fmt_keys: self.fmt_keys.as_mut().expect("initialized above"),
+            fmt_values: self.fmt_values.as_mut().expect("initialized above"),
+            output,
+            n_allele: 0,
+            n_alt: 0,
+            info_count: 0,
+            tid: 0,
+            pos_0based: 0,
+            rlen: 0,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -870,5 +870,105 @@ mod proptests {
                 "RecordEncoder and VcfRecordBuilder BCF output must be identical"
             );
         }
+
+        // r[verify record_encoder.vcf_text_encoder]
+        // r[verify record_encoder.vcf_text_begin]
+        // r[verify record_encoder.vcf_text_info]
+        // r[verify record_encoder.vcf_text_format_accumulation]
+        // r[verify record_encoder.vcf_text_emit]
+        // r[verify record_encoder.vcf_text_buffer_reuse]
+        // r[verify record_encoder.vcf_text_output]
+        // r[verify record_encoder.record_path_equivalence]
+        #[test]
+        fn vcf_text_record_encoder_matches_vcf_record_builder(
+            pos in 1u32..1_000_000,
+            qual in proptest::option::of(0.0f32..1000.0),
+            dp_val in 0i32..10000,
+            bq_val in 0.0f32..100.0,
+            has_flag in proptest::bool::ANY,
+            gt_a0 in 0u16..2,
+            gt_a1 in 0u16..2,
+            fmt_dp in 0i32..10000,
+            alt_base_idx in 1u8..4,
+        ) {
+            use crate::vcf::writer::VcfWriter;
+
+            let (header, contig, dp_key, bq_key, db_key, gt_key, dp_fmt_key) =
+                test_header_and_keys();
+
+            let alt_base = match alt_base_idx {
+                1 => Base::C,
+                2 => Base::G,
+                _ => Base::T,
+            };
+            let alleles = Alleles::snv(Base::A, alt_base).unwrap();
+            let pos1 = Pos::<One>::new(pos).unwrap();
+            let gt = Genotype::unphased(gt_a0, gt_a1);
+
+            // Path 1: VcfRecordEncoder
+            let encoder_text = {
+                let mut buf = Vec::new();
+                let mut writer = VcfWriter::new(&mut buf, header.clone());
+                writer.write_header().unwrap();
+                let mut enc = writer.record_encoder();
+                enc.begin(&contig, pos1, &alleles, qual).unwrap();
+                enc.filter_pass();
+                dp_key.encode(&mut enc, dp_val);
+                bq_key.encode(&mut enc, bq_val);
+                if has_flag {
+                    db_key.encode(&mut enc);
+                }
+                enc.begin_samples(1);
+                gt_key.encode(&mut enc, &gt);
+                dp_fmt_key.encode(&mut enc, fmt_dp);
+                enc.emit().unwrap();
+                drop(enc);
+                writer.finish().unwrap();
+                String::from_utf8(buf).unwrap()
+            };
+
+            // Path 2: VcfRecordBuilder
+            let record_text = {
+                let mut buf = Vec::new();
+                let mut writer = VcfWriter::new(&mut buf, header.clone());
+                writer.write_header().unwrap();
+
+                let mut builder = VcfRecordBuilder::new("chr1", pos1, alleles)
+                    .filter_pass()
+                    .info_integer("DP", dp_val)
+                    .info_float("BQ", bq_val);
+                if let Some(q) = qual {
+                    builder = builder.qual(q);
+                }
+                if has_flag {
+                    builder = builder.info_flag("DB");
+                }
+                let record = builder
+                    .format_keys(&["GT", "DP"])
+                    .add_sample(vec![
+                        SampleValue::Genotype(gt),
+                        SampleValue::Integer(fmt_dp),
+                    ])
+                    .build(&header)
+                    .unwrap();
+
+                writer.write_record(&record).unwrap();
+                writer.finish().unwrap();
+                String::from_utf8(buf).unwrap()
+            };
+
+            // Compare only data lines (skip header)
+            let encoder_data: Vec<&str> = encoder_text.lines()
+                .filter(|l| !l.starts_with('#'))
+                .collect();
+            let record_data: Vec<&str> = record_text.lines()
+                .filter(|l| !l.starts_with('#'))
+                .collect();
+            prop_assert_eq!(
+                encoder_data,
+                record_data,
+                "VcfRecordEncoder and VcfRecordBuilder VCF text output must be identical"
+            );
+        }
     }
 }
