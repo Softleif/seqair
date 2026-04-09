@@ -397,6 +397,9 @@ pub trait RecordEncoder {
     // r[impl record_encoder.emit]
     /// Finalize and write the record to output. This is the only method that
     /// performs I/O and may return an error.
+    ///
+    /// Not calling `emit()` silently discards the record.
+    #[must_use = "dropping the result of emit() silently discards the record and any I/O error"]
     fn emit(&mut self) -> Result<(), VcfError>;
 }
 
@@ -693,7 +696,8 @@ mod tests {
             }
         }
 
-        // Custom type for FORMAT
+        // Custom type for FORMAT — constructed only to verify the impl compiles.
+        #[allow(dead_code)]
         struct Score(f32);
         impl EncodeFormat for Score {
             type Key = FormatFloat;
@@ -715,6 +719,54 @@ mod tests {
         enc.emit().unwrap();
         writer.finish().unwrap();
         assert!(!buf.is_empty());
+    }
+
+    // r[verify record_encoder.filters]
+    #[test]
+    fn filter_fail_bcf_and_vcf_text() {
+        use crate::vcf::writer::VcfWriter;
+
+        let mut builder = crate::vcf::header::VcfHeader::builder();
+        let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let low_dp = builder.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
+        let header = Arc::new(builder.build().unwrap());
+
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let pos = Pos::<One>::new(10).unwrap();
+
+        // BCF path
+        let bcf_bytes = {
+            let mut buf = Vec::new();
+            let mut writer = BcfWriter::new(&mut buf, header.clone(), false);
+            writer.write_header().unwrap();
+            let mut enc = writer.record_encoder();
+            enc.begin(&contig, pos, &alleles, None).unwrap();
+            enc.filter_fail(&[&low_dp]);
+            enc.emit().unwrap();
+            writer.finish().unwrap();
+            buf
+        };
+        assert!(!bcf_bytes.is_empty(), "BCF output must not be empty");
+
+        // VCF text path
+        let vcf_text = {
+            let mut buf = Vec::new();
+            let mut writer = VcfWriter::new(&mut buf, header.clone());
+            writer.write_header().unwrap();
+            let mut enc = writer.record_encoder();
+            enc.begin(&contig, pos, &alleles, None).unwrap();
+            enc.filter_fail(&[&low_dp]);
+            enc.emit().unwrap();
+            drop(enc);
+            writer.finish().unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        let data_line = vcf_text.lines().find(|l| !l.starts_with('#')).unwrap();
+        let filter_col = data_line.split('\t').nth(6).unwrap();
+        assert_eq!(
+            filter_col, "lowDp",
+            "filter_fail must write the filter name to the FILTER column"
+        );
     }
 
     // r[verify record_encoder.key_types]

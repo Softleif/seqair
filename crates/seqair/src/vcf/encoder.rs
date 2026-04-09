@@ -432,7 +432,12 @@ impl RecordEncoder for BcfRecordEncoder<'_> {
     }
 
     fn filter_fail(&mut self, filters: &[&FilterId]) {
-        let indices: SmallVec<i32, 3> = filters.iter().map(|f| f.dict_idx as i32).collect();
+        let indices: SmallVec<i32, 3> = filters
+            .iter()
+            .map(|f| {
+                i32::try_from(f.dict_idx).expect("BCF string dict cannot exceed i32::MAX entries")
+            })
+            .collect();
         encode_typed_int_vec(self.shared_buf, &indices);
     }
 
@@ -468,10 +473,12 @@ impl RecordEncoder for BcfRecordEncoder<'_> {
 
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) {
         encode_typed_int_key(self.shared_buf, id.dict_idx);
-        encode_info_value(
-            self.shared_buf,
-            &InfoValue::IntegerArray(values.iter().copied().collect()),
-        );
+        // Encode directly from &[Option<i32>] — avoids collecting into an intermediate SmallVec.
+        let typ = smallest_int_type_iter(values.iter().filter_map(|v| *v));
+        encode_type_byte(self.shared_buf, values.len(), typ);
+        for &v in values {
+            encode_int_value_or_missing(self.shared_buf, v, typ);
+        }
         self.n_info = self.n_info.saturating_add(1);
     }
 

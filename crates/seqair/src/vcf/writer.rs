@@ -26,10 +26,10 @@ pub struct VcfWriter<W: Write> {
     header: Arc<VcfHeader>,
     buf: Vec<u8>,
     header_written: bool,
-    /// FORMAT key accumulator for record_encoder (lazily initialized).
-    fmt_keys: Option<Vec<SmolStr>>,
-    /// FORMAT value buffer for record_encoder (lazily initialized).
-    fmt_values: Option<Vec<u8>>,
+    /// FORMAT key accumulator (reused across records by record_encoder).
+    fmt_keys: Vec<SmolStr>,
+    /// FORMAT value buffer (reused across records by record_encoder).
+    fmt_values: Vec<u8>,
 }
 
 impl<W: Write> VcfWriter<W> {
@@ -40,8 +40,8 @@ impl<W: Write> VcfWriter<W> {
             header,
             buf: Vec::with_capacity(4096),
             header_written: false,
-            fmt_keys: None,
-            fmt_values: None,
+            fmt_keys: Vec::with_capacity(8),
+            fmt_values: Vec::with_capacity(256),
         }
     }
 
@@ -57,8 +57,8 @@ impl<W: Write> VcfWriter<W> {
             header,
             buf: Vec::with_capacity(4096),
             header_written: false,
-            fmt_keys: None,
-            fmt_values: None,
+            fmt_keys: Vec::with_capacity(8),
+            fmt_values: Vec::with_capacity(256),
         }
     }
 
@@ -482,6 +482,12 @@ use super::record_encoder::{ContigId, FieldId, FilterId, RecordEncoder};
 // r[impl record_encoder.vcf_text_buffer_reuse]
 /// VCF text record encoder. Borrows reusable buffers from the [`VcfWriter`]
 /// to avoid per-record allocation after warmup.
+///
+/// # Calling contract
+///
+/// Methods must be called in order: `begin` → `filter_pass`/`filter_fail` →
+/// `info_*` → `begin_samples` → `format_*` → `emit`. Debug builds enforce this
+/// with assertions. For compile-time enforcement consider a typestate wrapper.
 pub struct VcfRecordEncoder<'a> {
     /// Main line buffer — contains CHROM through INFO.
     buf: &'a mut Vec<u8>,
@@ -498,6 +504,11 @@ pub struct VcfRecordEncoder<'a> {
     tid: i32,
     pos_0based: u32,
     rlen: u32,
+    /// Number of samples declared via `begin_samples`. 0 means not yet called.
+    n_samples: u32,
+    /// Whether `begin()` has been called for the current record.
+    #[cfg(debug_assertions)]
+    record_begun: bool,
 }
 
 // r[impl record_encoder.vcf_text_begin]
@@ -516,6 +527,11 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
         self.fmt_keys.clear();
         self.fmt_values.clear();
         self.info_count = 0;
+        self.n_samples = 0;
+        #[cfg(debug_assertions)]
+        {
+            self.record_begun = true;
+        }
 
         self.n_allele = u16::try_from(alleles.n_allele()).map_err(|_| VcfError::ValueOverflow {
             field: "n_allele",
@@ -529,7 +545,11 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
             target_type: "i32",
         })?;
         self.pos_0based = pos.to_zero_based().get();
-        self.rlen = alleles.rlen() as u32;
+        self.rlen = u32::try_from(alleles.rlen()).map_err(|_| VcfError::ValueOverflow {
+            field: "rlen",
+            value: alleles.rlen() as u64,
+            target_type: "u32",
+        })?;
 
         // CHROM
         self.buf.extend_from_slice(contig.name().as_bytes());
@@ -558,8 +578,7 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
         // QUAL
         match qual {
             Some(q) => {
-                // write_float_g can't fail when writing to Vec<u8>
-                let _ = write_float_g(self.buf, q);
+                write_float_g(self.buf, q).expect("writing to Vec<u8> is infallible");
             }
             None => self.buf.push(b'.'),
         }
@@ -569,11 +588,15 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
     }
 
     fn filter_pass(&mut self) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "filter_pass() called before begin()");
         self.buf.extend_from_slice(b"PASS");
         self.buf.push(b'\t');
     }
 
     fn filter_fail(&mut self, filters: &[&FilterId]) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "filter_fail() called before begin()");
         for (i, f) in filters.iter().enumerate() {
             if i > 0 {
                 self.buf.push(b';');
@@ -584,6 +607,8 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
     }
 
     fn info_int(&mut self, id: &FieldId, value: i32) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "info_int() called before begin()");
         self.info_separator();
         self.buf.extend_from_slice(id.name().as_bytes());
         self.buf.push(b'=');
@@ -592,13 +617,17 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
     }
 
     fn info_float(&mut self, id: &FieldId, value: f32) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "info_float() called before begin()");
         self.info_separator();
         self.buf.extend_from_slice(id.name().as_bytes());
         self.buf.push(b'=');
-        let _ = write_float_g(self.buf, value);
+        write_float_g(self.buf, value).expect("writing to Vec<u8> is infallible");
     }
 
     fn info_ints(&mut self, id: &FieldId, values: &[i32]) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "info_ints() called before begin()");
         self.info_separator();
         self.buf.extend_from_slice(id.name().as_bytes());
         self.buf.push(b'=');
@@ -612,6 +641,8 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
     }
 
     fn info_floats(&mut self, id: &FieldId, values: &[f32]) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "info_floats() called before begin()");
         self.info_separator();
         self.buf.extend_from_slice(id.name().as_bytes());
         self.buf.push(b'=');
@@ -619,16 +650,20 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
             if i > 0 {
                 self.buf.push(b',');
             }
-            let _ = write_float_g(self.buf, *v);
+            write_float_g(self.buf, *v).expect("writing to Vec<u8> is infallible");
         }
     }
 
     fn info_flag(&mut self, id: &FieldId) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "info_flag() called before begin()");
         self.info_separator();
         self.buf.extend_from_slice(id.name().as_bytes());
     }
 
     fn info_string(&mut self, id: &FieldId, value: &str) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "info_string() called before begin()");
         self.info_separator();
         self.buf.extend_from_slice(id.name().as_bytes());
         self.buf.push(b'=');
@@ -636,6 +671,8 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
     }
 
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "info_int_opts() called before begin()");
         self.info_separator();
         self.buf.extend_from_slice(id.name().as_bytes());
         self.buf.push(b'=');
@@ -651,13 +688,16 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
         }
     }
 
-    fn begin_samples(&mut self, _n: u32) {
-        // For VCF text, sample count is implicit from the values written.
+    fn begin_samples(&mut self, n: u32) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "begin_samples() called before begin()");
+        self.n_samples = n;
     }
 
     fn format_gt(&mut self, id: &FieldId, gt: &super::record::Genotype) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "format_gt() called before begin()");
         self.push_format_key(id);
-        // Genotype serialization
         let mut itoa_buf = itoa::Buffer::new();
         for (i, allele) in gt.alleles.iter().enumerate() {
             if i > 0 {
@@ -674,14 +714,18 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
     }
 
     fn format_int(&mut self, id: &FieldId, value: i32) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "format_int() called before begin()");
         self.push_format_key(id);
         let mut itoa_buf = itoa::Buffer::new();
         self.fmt_values.extend_from_slice(itoa_buf.format(value).as_bytes());
     }
 
     fn format_float(&mut self, id: &FieldId, value: f32) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "format_float() called before begin()");
         self.push_format_key(id);
-        let _ = write_float_g(&mut self.fmt_values, value);
+        write_float_g(&mut self.fmt_values, value).expect("writing to Vec<u8> is infallible");
     }
 
     fn n_allele(&self) -> usize {
@@ -693,6 +737,13 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
     }
 
     fn emit(&mut self) -> Result<(), VcfError> {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.record_begun, "emit() called before begin()");
+
+        if !self.fmt_keys.is_empty() && self.n_samples == 0 {
+            return Err(VcfError::FormatDataWithoutSamples);
+        }
+
         // If no INFO fields were written, write "."
         if self.info_count == 0 {
             self.buf.push(b'.');
@@ -749,12 +800,6 @@ impl VcfRecordEncoder<'_> {
 impl<W: Write> VcfWriter<W> {
     /// Get a direct record encoder for zero-alloc VCF text encoding.
     pub fn record_encoder(&mut self) -> VcfRecordEncoder<'_> {
-        // Lazily initialize FORMAT accumulators
-        if self.fmt_keys.is_none() {
-            self.fmt_keys = Some(Vec::with_capacity(8));
-            self.fmt_values = Some(Vec::with_capacity(256));
-        }
-
         let output: Box<dyn VcfOutput + '_> = match &mut self.output {
             Output::Plain(w) => Box::new(PlainOutput(w)),
             Output::Bgzf { bgzf, index } => Box::new(BgzfOutput { bgzf, index }),
@@ -762,8 +807,8 @@ impl<W: Write> VcfWriter<W> {
 
         VcfRecordEncoder {
             buf: &mut self.buf,
-            fmt_keys: self.fmt_keys.as_mut().expect("initialized above"),
-            fmt_values: self.fmt_values.as_mut().expect("initialized above"),
+            fmt_keys: &mut self.fmt_keys,
+            fmt_values: &mut self.fmt_values,
             output,
             n_allele: 0,
             n_alt: 0,
@@ -771,6 +816,9 @@ impl<W: Write> VcfWriter<W> {
             tid: 0,
             pos_0based: 0,
             rlen: 0,
+            n_samples: 0,
+            #[cfg(debug_assertions)]
+            record_begun: false,
         }
     }
 }

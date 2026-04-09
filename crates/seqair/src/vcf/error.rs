@@ -50,6 +50,9 @@ pub enum VcfHeaderError {
 
     #[error("too many contigs (exceeds u32::MAX)")]
     TooManyContigs,
+
+    #[error("too many header fields: BCF string dictionary index exceeds u32::MAX")]
+    TooManyFields,
 }
 
 // r[impl vcf_record.alleles_typed]
@@ -102,6 +105,9 @@ pub enum VcfError {
 
     #[error("write_header() must be called before write_record()")]
     HeaderNotWritten,
+
+    #[error("FORMAT fields were written but begin_samples() was not called")]
+    FormatDataWithoutSamples,
 
     #[error("header text too large for BCF (exceeds u32::MAX)")]
     HeaderTooLarge,

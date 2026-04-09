@@ -402,7 +402,7 @@ impl VcfHeaderBuilder {
                 description: SmolStr::from(def.description),
             },
         );
-        let dict_idx = self.ensure_string_map_entry(&id);
+        let dict_idx = self.ensure_string_map_entry(&id)?;
         Ok(super::record_encoder::InfoKey(
             super::record_encoder::FieldId { dict_idx, name: id },
             std::marker::PhantomData,
@@ -429,7 +429,7 @@ impl VcfHeaderBuilder {
                 description: SmolStr::from(def.description),
             },
         );
-        let dict_idx = self.ensure_string_map_entry(&id);
+        let dict_idx = self.ensure_string_map_entry(&id)?;
         Ok(super::record_encoder::FormatKey(
             super::record_encoder::FieldId { dict_idx, name: id },
             std::marker::PhantomData,
@@ -446,7 +446,7 @@ impl VcfHeaderBuilder {
             return Err(VcfHeaderError::DuplicateFilter { id });
         }
         self.filters.insert(id.clone(), FilterDef { description: SmolStr::from(def.description) });
-        let dict_idx = self.ensure_string_map_entry(&id);
+        let dict_idx = self.ensure_string_map_entry(&id)?;
         Ok(super::record_encoder::FilterId { dict_idx, name: id })
     }
 
@@ -468,14 +468,14 @@ impl VcfHeaderBuilder {
 
     /// Ensure a string map entry exists, returning the dict index.
     /// Lazily initializes the string map with PASS at index 0.
-    fn ensure_string_map_entry(&mut self, id: &SmolStr) -> u32 {
+    fn ensure_string_map_entry(&mut self, id: &SmolStr) -> Result<u32, VcfHeaderError> {
         let map = self.string_map.get_or_insert_with(|| {
             let mut m = StringMap::new();
             // PASS must always be at index 0
             m.insert(SmolStr::from("PASS"));
             m
         });
-        map.insert(id.clone()) as u32
+        u32::try_from(map.insert(id.clone())).map_err(|_| VcfHeaderError::TooManyFields)
     }
 
     // r[impl vcf_header.builder]
