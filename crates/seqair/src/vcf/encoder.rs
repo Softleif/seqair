@@ -432,7 +432,7 @@ impl RecordEncoder for BcfRecordEncoder<'_> {
     }
 
     fn filter_fail(&mut self, filters: &[&FilterId]) {
-        let indices: Vec<i32> = filters.iter().map(|f| f.dict_idx as i32).collect();
+        let indices: SmallVec<i32, 3> = filters.iter().map(|f| f.dict_idx as i32).collect();
         encode_typed_int_vec(self.shared_buf, &indices);
     }
 
@@ -509,7 +509,7 @@ impl RecordEncoder for BcfRecordEncoder<'_> {
 // ── Alleles integration ─────────────────────────────────────────────────
 
 use super::alleles::Alleles;
-use seqair_types::{One, Pos};
+use seqair_types::{One, Pos, SmallVec};
 
 impl Alleles {
     // r[impl bcf_encoder.begin_record]
