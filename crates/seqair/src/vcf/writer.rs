@@ -578,7 +578,10 @@ impl<W: Write> RecordEncoder for VcfRecordEncoder<'_, W> {
         match qual {
             Some(q) => {
                 write_float_g(self.buf, q).map_err(|source| {
-                    VcfError::FailedToWriteFormattedString { field: SmolStr::from("QUAL"), source }
+                    VcfError::FailedToWriteFormattedString {
+                        field: SmolStr::new_static("QUAL"),
+                        source,
+                    }
                 })?;
             }
             None => self.buf.push(b'.'),
@@ -802,7 +805,7 @@ impl<W: Write> VcfRecordEncoder<'_, W> {
         if self.info_count > 0 {
             self.buf.push(b';');
         }
-        self.info_count = self.info_count.saturating_add(1);
+        self.info_count = self.info_count.checked_add(1).expect("more than u16::MAX INFO fields");
     }
 
     /// Push a FORMAT key and add `:` separator to values if not the first field.
@@ -818,13 +821,22 @@ impl<W: Write> VcfRecordEncoder<'_, W> {
 
 impl<W: Write> VcfWriter<W> {
     /// Get a direct record encoder for zero-alloc VCF text encoding.
-    pub fn record_encoder(&mut self) -> VcfRecordEncoder<'_, W> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VcfError::HeaderNotWritten`] if [`write_header`](Self::write_header)
+    /// has not been called yet.
+    pub fn record_encoder(&mut self) -> Result<VcfRecordEncoder<'_, W>, VcfError> {
+        if !self.header_written {
+            return Err(VcfError::HeaderNotWritten);
+        }
+
         let output = match &mut self.output {
             Output::Plain(w) => VcfRecordOutput::Plain(w),
             Output::Bgzf { bgzf, index } => VcfRecordOutput::Bgzf { bgzf, index },
         };
 
-        VcfRecordEncoder {
+        Ok(VcfRecordEncoder {
             buf: &mut self.buf,
             fmt_keys: &mut self.fmt_keys,
             fmt_values: &mut self.fmt_values,
@@ -839,7 +851,7 @@ impl<W: Write> VcfWriter<W> {
             filter_written: false,
             #[cfg(debug_assertions)]
             record_begun: false,
-        }
+        })
     }
 }
 
@@ -1077,7 +1089,7 @@ mod tests {
         let alleles = Alleles::reference(Base::A);
         let contig = super::ContigId { tid: 0, name: SmolStr::from("chr1") };
 
-        let mut enc = writer.record_encoder();
+        let mut enc = writer.record_encoder().unwrap();
         enc.begin(&contig, Pos::<One>::new(1).unwrap(), &alleles, None).unwrap();
         // Deliberately skip filter_pass()/filter_fail()
         enc.emit().unwrap();
@@ -1099,7 +1111,7 @@ mod tests {
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let contig = super::ContigId { tid: 0, name: SmolStr::from("chr1") };
 
-        let mut enc = writer.record_encoder();
+        let mut enc = writer.record_encoder().unwrap();
         enc.begin(&contig, Pos::<One>::new(1).unwrap(), &alleles, None).unwrap();
         enc.filter_pass();
         enc.begin_samples(2);

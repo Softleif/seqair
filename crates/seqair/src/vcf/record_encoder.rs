@@ -754,7 +754,7 @@ mod tests {
             let mut writer = VcfWriter::new(&mut buf, header.clone());
             writer.write_header().unwrap();
             {
-                let mut enc = writer.record_encoder();
+                let mut enc = writer.record_encoder().unwrap();
                 enc.begin(&contig, pos, &alleles, None).unwrap();
                 enc.filter_fail(&[&low_dp]);
                 enc.emit().unwrap();
@@ -962,7 +962,7 @@ mod proptests {
                 let mut writer = VcfWriter::new(&mut buf, header.clone());
                 writer.write_header().unwrap();
                 {
-                    let mut enc = writer.record_encoder();
+                    let mut enc = writer.record_encoder().unwrap();
                     enc.begin(&contig, pos1, &alleles, qual).unwrap();
                     enc.filter_pass();
                     dp_key.encode(&mut enc, dp_val);
@@ -1129,7 +1129,7 @@ mod cross_format_tests {
             let mut writer = VcfWriter::new(file, header.clone());
             writer.write_header().unwrap();
             {
-                let mut enc = writer.record_encoder();
+                let mut enc = writer.record_encoder().unwrap();
                 enc.begin(&contig, pos, &alleles, Some(30.0)).unwrap();
                 enc.filter_pass();
                 dp_key.encode(&mut enc, 50);
@@ -1222,7 +1222,7 @@ mod cross_format_tests {
                 let mut writer = VcfWriter::new(&mut buf, header.clone());
                 writer.write_header().unwrap();
                 {
-                    let mut enc = writer.record_encoder();
+                    let mut enc = writer.record_encoder().unwrap();
                     enc.begin(&contig, pos1, &alleles, Some(30.0)).unwrap();
                     enc.filter_pass();
                     dp_key.encode(&mut enc, dp_val);

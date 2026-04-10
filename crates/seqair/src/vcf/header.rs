@@ -122,6 +122,11 @@ impl StringMap {
     pub fn get(&self, id: &str) -> Option<usize> {
         self.entries.iter().position(|s| s == id)
     }
+
+    /// Iterate over `(index, id)` pairs.
+    fn iter(&self) -> impl Iterator<Item = (usize, &SmolStr)> {
+        self.entries.iter().enumerate()
+    }
 }
 
 // r[impl vcf_header.file_format]
@@ -502,15 +507,19 @@ impl VcfHeaderBuilder {
             self.filters = new_filters;
         }
 
-        // Build BCF string map in the same order as to_vcf_text() emits header lines.
-        // This ensures dict indices match what noodles/htslib compute from the header text.
+        // Build BCF string map from scratch in the same order as to_vcf_text()
+        // emits header lines. This ensures dict indices match what noodles/htslib
+        // compute from the header text.
         // Order: FILTER (PASS first), then INFO, then FORMAT.
         // r[impl vcf_header.string_map]
         //
-        // If register_* methods were used, the string map was built incrementally
-        // and already has correct entries. We still need to ensure all add_*-only
-        // fields are included.
-        let mut string_map = self.string_map.unwrap_or_default();
+        // We always rebuild from scratch here, even if register_* methods were
+        // used during construction. The register_* methods return dict indices
+        // eagerly, but those indices are only valid if fields were registered in
+        // canonical order (FILTER→INFO→FORMAT). Rebuilding ensures correctness
+        // regardless of call order, and we verify below that any pre-assigned
+        // indices still match.
+        let mut string_map = StringMap::new();
         for id in self.filters.keys() {
             string_map.insert(id.clone());
         }
@@ -519,6 +528,22 @@ impl VcfHeaderBuilder {
         }
         for id in self.formats.keys() {
             string_map.insert(id.clone());
+        }
+
+        // If register_* methods assigned dict indices, verify they match the
+        // canonical order. Mismatches mean fields were registered out of order.
+        if let Some(ref old_map) = self.string_map {
+            for (old_idx, id) in old_map.iter() {
+                if let Some(new_idx) = string_map.get(id)
+                    && old_idx != new_idx
+                {
+                    return Err(VcfHeaderError::DictIndexMismatch {
+                        id: id.clone(),
+                        registered: old_idx,
+                        canonical: new_idx,
+                    });
+                }
+            }
         }
 
         Ok(VcfHeader {
@@ -736,5 +761,71 @@ mod tests {
         let text = header.to_vcf_text();
         assert!(text.contains("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"));
         assert!(!text.contains("FORMAT"));
+    }
+
+    // r[verify vcf_header.string_map]
+    #[test]
+    fn register_out_of_order_detected() {
+        use crate::vcf::record_encoder::{
+            FilterFieldDef, FormatFieldDef, Gt, InfoFieldDef, Scalar,
+        };
+
+        let mut builder =
+            VcfHeader::builder().add_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+
+        // Register INFO before FILTER — wrong order
+        builder
+            .register_info(&InfoFieldDef::<Scalar<i32>>::new(
+                "DP",
+                Number::Count(1),
+                ValueType::Integer,
+                "Depth",
+            ))
+            .unwrap();
+        builder.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
+        builder
+            .register_format(&FormatFieldDef::<Gt>::new(
+                "GT",
+                Number::Count(1),
+                ValueType::String,
+                "Genotype",
+            ))
+            .unwrap();
+
+        let err = builder.add_sample("S1").unwrap().build();
+        assert!(err.is_err(), "build() should reject out-of-order register calls");
+    }
+
+    // r[verify vcf_header.string_map]
+    #[test]
+    fn register_canonical_order_accepted() {
+        use crate::vcf::record_encoder::{
+            FilterFieldDef, FormatFieldDef, Gt, InfoFieldDef, Scalar,
+        };
+
+        let mut builder =
+            VcfHeader::builder().add_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+
+        // Register in canonical order: FILTER → INFO → FORMAT
+        builder.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
+        builder
+            .register_info(&InfoFieldDef::<Scalar<i32>>::new(
+                "DP",
+                Number::Count(1),
+                ValueType::Integer,
+                "Depth",
+            ))
+            .unwrap();
+        builder
+            .register_format(&FormatFieldDef::<Gt>::new(
+                "GT",
+                Number::Count(1),
+                ValueType::String,
+                "Genotype",
+            ))
+            .unwrap();
+
+        let header = builder.add_sample("S1").unwrap().build();
+        assert!(header.is_ok(), "canonical order should succeed");
     }
 }

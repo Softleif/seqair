@@ -53,6 +53,12 @@ pub enum VcfHeaderError {
 
     #[error("too many header fields: BCF string dictionary index exceeds u32::MAX")]
     TooManyFields,
+
+    #[error(
+        "field {id} was registered with dict_idx={registered} but canonical order requires {canonical}; \
+         register fields in FILTER→INFO→FORMAT order"
+    )]
+    DictIndexMismatch { id: SmolStr, registered: usize, canonical: usize },
 }
 
 // r[impl vcf_record.alleles_typed]
