@@ -192,6 +192,7 @@
 //! provides zero-allocation direct BCF encoding with pre-resolved typed handles:
 //!
 //! ```
+//! use seqair::vcf::RecordEncoder;
 //! use seqair::vcf::bcf_writer::BcfWriter;
 //! use seqair::vcf::encoder::*;
 //! use seqair::vcf::header::*;
@@ -219,11 +220,11 @@
 //! // Resolve handles once at setup — no string lookups per record
 //! let contig = ContigHandle(0);
 //! let dp = ScalarInfoHandle::<i32> {
-//!     dict_idx: header.string_map().get("DP").unwrap() as u32,
+//!     dict_idx: u32::try_from(header.string_map().get("DP").unwrap()).unwrap(),
 //!     _marker: PhantomData,
 //! };
 //! let gt = GtFormatHandle {
-//!     dict_idx: header.string_map().get("GT").unwrap() as u32,
+//!     dict_idx: u32::try_from(header.string_map().get("GT").unwrap()).unwrap(),
 //! };
 //!
 //! let mut buf = Vec::new();
