@@ -619,7 +619,7 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
         let cols: Vec<&str> = data_line.split('\t').collect();
-        assert_eq!(cols.get(0), Some(&"chr1"), "CHROM");
+        assert_eq!(cols.first(), Some(&"chr1"), "CHROM");
         assert_eq!(cols.get(1), Some(&"100"), "POS");
         assert_eq!(cols.get(6), Some(&"PASS"), "FILTER");
     }

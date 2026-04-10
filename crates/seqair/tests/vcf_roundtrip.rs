@@ -412,7 +412,7 @@ fn bcf_roundtrip_snv_all_fields() {
         sample_gq: 30,
     };
 
-    let data = write_bcf(&setup, &[input.clone()]);
+    let data = write_bcf(&setup, std::slice::from_ref(&input));
     let parsed = parse_bcf_records(&data);
     assert_eq!(parsed.len(), 1);
     assert_record_matches(&input, &parsed[0], "BCF");
@@ -434,7 +434,7 @@ fn bcf_roundtrip_insertion() {
         sample_gq: 50,
     };
 
-    let data = write_bcf(&setup, &[input.clone()]);
+    let data = write_bcf(&setup, std::slice::from_ref(&input));
     let parsed = parse_bcf_records(&data);
     assert_eq!(parsed.len(), 1);
     assert_record_matches(&input, &parsed[0], "BCF-insertion");
@@ -458,7 +458,7 @@ fn bcf_roundtrip_deletion() {
         sample_gq: 40,
     };
 
-    let data = write_bcf(&setup, &[input.clone()]);
+    let data = write_bcf(&setup, std::slice::from_ref(&input));
     let parsed = parse_bcf_records(&data);
     assert_eq!(parsed.len(), 1);
     assert_record_matches(&input, &parsed[0], "BCF-deletion");
@@ -482,7 +482,7 @@ fn vcf_text_roundtrip_all_fields() {
         sample_gq: 99,
     };
 
-    let data = write_vcf(&setup, &[input.clone()]);
+    let data = write_vcf(&setup, std::slice::from_ref(&input));
     let parsed = parse_vcf_records(&data);
     assert_eq!(parsed.len(), 1);
     assert_record_matches(&input, &parsed[0], "VCF-text");
@@ -523,7 +523,7 @@ proptest! {
     #[test]
     fn bcf_deep_roundtrip(input in arb_test_record()) {
         let setup = make_setup();
-        let data = write_bcf(&setup, &[input.clone()]);
+        let data = write_bcf(&setup, std::slice::from_ref(&input));
         let parsed = parse_bcf_records(&data);
         prop_assert_eq!(parsed.len(), 1);
 
@@ -549,7 +549,7 @@ proptest! {
         prop_assume!(input.alleles.n_allele() > 1);
 
         let setup = make_setup();
-        let data = write_vcf(&setup, &[input.clone()]);
+        let data = write_vcf(&setup, std::slice::from_ref(&input));
         let parsed = parse_vcf_records(&data);
         prop_assert_eq!(parsed.len(), 1);
 
@@ -567,8 +567,8 @@ proptest! {
         prop_assume!(input.alleles.n_allele() > 1);
 
         let setup = make_setup();
-        let bcf_data = write_bcf(&setup, &[input.clone()]);
-        let vcf_data = write_vcf(&setup, &[input.clone()]);
+        let bcf_data = write_bcf(&setup, std::slice::from_ref(&input));
+        let vcf_data = write_vcf(&setup, std::slice::from_ref(&input));
         let bcf_parsed = parse_bcf_records(&bcf_data);
         let vcf_parsed = parse_vcf_records(&vcf_data);
 

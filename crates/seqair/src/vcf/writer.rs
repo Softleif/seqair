@@ -7,7 +7,8 @@
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
-    reason = "magnitude is log10 of f64 (range -308..=308), precision is a literal 6, cursor position is bounded by the 32-byte tmp buffer; all casts are safe"
+    clippy::indexing_slicing,
+    reason = "magnitude is log10 of f64 (range -308..=308), precision is a literal 6, cursor position is bounded by the 32-byte tmp buffer; all casts and slices are safe"
 )]
 pub(crate) fn write_float_g(buf: &mut Vec<u8>, v: f32) -> Result<(), WriteError> {
     let v = f64::from(v);
@@ -30,6 +31,7 @@ pub(crate) fn write_float_g(buf: &mut Vec<u8>, v: f32) -> Result<(), WriteError>
     let end = cursor.position() as usize;
 
     // Strip trailing zeros after decimal point, then trailing dot
+    debug_assert!(end <= tmp.len(), "cursor position must not exceed buffer size");
     let formatted = &tmp[..end];
     let trimmed = if formatted.contains(&b'.') {
         let without_zeros = formatted

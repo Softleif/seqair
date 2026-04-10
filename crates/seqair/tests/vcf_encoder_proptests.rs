@@ -2,8 +2,8 @@
 //!
 //! Generates random records, writes them with seqair's unified `Writer`, and
 //! verifies that noodles can parse the resulting BCF to identical site-level
-//! fields.  This replaced the old two-path equivalence test (BcfWriter vs
-//! BcfRecordEncoder) — both old paths have been removed; the unified Writer is
+//! fields.  This replaced the old two-path equivalence test (`BcfWriter` vs
+//! `BcfRecordEncoder`) — both old paths have been removed; the unified Writer is
 //! the only path now.
 #![allow(
     clippy::unwrap_used,

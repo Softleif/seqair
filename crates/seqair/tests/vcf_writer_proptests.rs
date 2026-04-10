@@ -1,5 +1,5 @@
 //! Property-based tests for VCF writer round-trip and BCF encoding correctness.
-//! Uses the unified Writer with OutputFormat::Vcf and OutputFormat::VcfGz.
+//! Uses the unified Writer with `OutputFormat::Vcf` and `OutputFormat::VcfGz`.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
