@@ -15,6 +15,80 @@ use tracing::instrument;
 /// Bundles an [`IndexedReader`] (BAM/SAM/CRAM) with an [`IndexedFastaReader`]
 /// so that CRAM has access to the reference it needs and all formats have
 /// uniform open/fork/fetch semantics.
+///
+/// # Quick start: pileup at a genomic region
+///
+/// ```no_run
+/// use seqair::reader::Readers;
+/// use seqair::bam::pileup::PileupOp;
+/// use seqair_types::Pos0;
+/// use std::path::Path;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // Open BAM + FASTA — auto-detects BAM/SAM/CRAM
+/// let mut readers = Readers::open(Path::new("sample.bam"), Path::new("reference.fa"))?;
+///
+/// let tid = readers.header().tid("chr19").expect("contig not found");
+/// let start = Pos0::new(6_100_000).unwrap();
+/// let end   = Pos0::new(6_200_000).unwrap();
+/// let mut pileup = readers.pileup(tid, start, end)?;
+///
+/// for column in pileup.by_ref() {
+///     let _pos      = column.pos();
+///     let _ref_base = column.reference_base();
+///     // depth() counts all alignments; match_depth() excludes deletions/ref-skips
+///     let _depth = column.depth();
+///
+///     for aln in column.alignments() {
+///         match &aln.op {
+///             PileupOp::Match { base, qual, .. } => {
+///                 let _ = (base, qual);
+///             }
+///             PileupOp::Insertion { base, qual, insert_len, .. } => {
+///                 let _ = (base, qual, insert_len);
+///             }
+///             PileupOp::Deletion { del_len } => {
+///                 let _ = del_len;
+///             }
+///             PileupOp::RefSkip => {}
+///         }
+///     }
+/// }
+///
+/// // Return the RecordStore to Readers for reuse on the next region
+/// readers.recover_store(&mut pileup);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Multi-threaded pileup
+///
+/// [`fork`](Readers::fork) gives each thread a fresh file handle while sharing
+/// the parsed index and header via `Arc` — no locking, no re-parsing.
+///
+/// ```no_run
+/// # use seqair::reader::Readers;
+/// # use seqair_types::Pos0;
+/// # use std::path::Path;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let readers = Readers::open(Path::new("sample.bam"), Path::new("ref.fa"))?;
+///
+/// std::thread::scope(|s| {
+///     for _ in 0..4 {
+///         let mut forked = readers.fork().unwrap();
+///         s.spawn(move || {
+///             let pileup = forked.pileup(
+///                 0,
+///                 Pos0::new(0).unwrap(),
+///                 Pos0::new(100_000).unwrap(),
+///             ).unwrap();
+///             for _col in pileup { /* process */ }
+///         });
+///     }
+/// });
+/// # Ok(())
+/// # }
+/// ```
 // r[impl unified.readers_struct]
 pub struct Readers {
     pub(crate) alignment: IndexedReader,

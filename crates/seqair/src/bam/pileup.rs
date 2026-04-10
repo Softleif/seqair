@@ -120,7 +120,11 @@ impl PileupColumn {
         self.reference_base
     }
 
-    /// Count of alignments with a base at this position (excludes deletions and ref-skips).
+    /// Count of alignments with a query base at this position.
+    ///
+    /// Unlike [`depth`](Self::depth), deletions and ref-skips are not counted.
+    /// Use `match_depth` when you need the number of reads that actually cover
+    /// the position with a base (e.g., for allele frequency calculations).
     #[must_use]
     pub fn match_depth(&self) -> usize {
         self.alignments.iter().filter(|a| a.qpos().is_some()).count()
@@ -131,6 +135,26 @@ impl PileupColumn {
 ///
 /// `base`, `qual`, and `qpos` are only available for `Match` and `Insertion`
 /// variants — the type system prevents reading a base from a deletion.
+///
+/// Use the convenience accessors [`PileupAlignment::base`], [`PileupAlignment::qual`],
+/// and [`PileupAlignment::qpos`] when you only need one field, or match exhaustively
+/// when different ops need different handling:
+///
+/// ```
+/// use seqair::bam::pileup::PileupOp;
+///
+/// fn summarize(op: &PileupOp) -> &'static str {
+///     match op {
+///         PileupOp::Match { .. }     => "match",
+///         PileupOp::Insertion { .. } => "insertion",
+///         PileupOp::Deletion { .. }  => "deletion",
+///         PileupOp::RefSkip          => "ref-skip",
+///     }
+/// }
+///
+/// assert_eq!(summarize(&PileupOp::Match { qpos: 10, base: seqair_types::Base::A, qual: 30 }), "match");
+/// assert_eq!(summarize(&PileupOp::Deletion { del_len: 3 }), "deletion");
+/// ```
 // r[impl pileup_indel.op_enum]
 // r[impl pileup_indel.type_safety]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

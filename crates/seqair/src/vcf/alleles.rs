@@ -8,7 +8,41 @@ use seqair_types::{Base, SmallVec, SmolStr};
 /// Type-safe allele representation for VCF records.
 ///
 /// Each variant enforces the structural rules of its VCF encoding and
-/// provides serialization to REF/ALT text columns.
+/// provides serialization to REF/ALT text columns. Invalid combinations
+/// (e.g., `ref == alt`, empty inserted bases) are rejected at construction.
+///
+/// # Examples
+///
+/// ```
+/// use seqair::vcf::alleles::Alleles;
+/// use seqair_types::Base;
+///
+/// // SNV: single ref base, single alt base
+/// let snv = Alleles::snv(Base::A, Base::T).unwrap();
+/// assert_eq!(snv.ref_text(), "A");
+/// assert_eq!(snv.rlen(), 1);
+///
+/// // Multi-allelic SNV (e.g. A→T and A→C)
+/// let multi = Alleles::snv_multi(Base::A, &[Base::T, Base::C]).unwrap();
+/// let alts = multi.alt_texts();
+/// assert_eq!(&*alts[0], "T");
+/// assert_eq!(&*alts[1], "C");
+///
+/// // Insertion: anchor + inserted bases → REF=A, ALT=ACGT
+/// let ins = Alleles::insertion(Base::A, &[Base::C, Base::G, Base::T]).unwrap();
+/// assert_eq!(ins.ref_text(), "A");
+/// assert_eq!(ins.alt_texts()[0], "ACGT");
+///
+/// // Deletion: anchor + deleted bases → REF=ACGT, ALT=A
+/// let del = Alleles::deletion(Base::A, &[Base::C, Base::G, Base::T]).unwrap();
+/// assert_eq!(del.ref_text(), "ACGT");
+/// assert_eq!(del.rlen(), 4);
+///
+/// // Invariants enforced at construction:
+/// assert!(Alleles::snv(Base::A, Base::A).is_err());      // ref == alt
+/// assert!(Alleles::insertion(Base::A, &[]).is_err());     // empty insertion
+/// assert!(Alleles::deletion(Base::A, &[]).is_err());      // empty deletion
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Alleles {
     /// Reference-only site (gVCF). REF=single base, no ALT.

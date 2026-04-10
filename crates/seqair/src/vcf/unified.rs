@@ -1,19 +1,101 @@
 //! Unified VCF/BCF writer with typestate enforcement.
 //!
 //! A single [`Writer`] type handles all output formats (VCF, VCF.gz, BCF).
-//! Records are encoded through [`RecordEncoder`] with compile-time state
-//! enforcement: `Begun` → `Filtered` → `WithSamples` → `emit()`.
+//! Records are encoded through a typestate chain that is enforced at compile time:
+//! `Begun` → `Filtered` → `WithSamples` → `emit()`.
 //!
-//! ```ignore
-//! let writer = Writer::new(buf, OutputFormat::Bcf);
+//! # Writing VCF records
+//!
+//! ```
+//! use seqair::vcf::{
+//!     Alleles, ContigDef, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
+//!     FormatGt, FormatInt, InfoInt,
+//! };
+//! use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
+//! use seqair_types::{Base, Pos1};
+//! use std::sync::Arc;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // 1. Build header — typed field handles are resolved once at setup, not per record.
+//! //    In production use VcfHeaderBuilder::from_bam_header() to copy contig info.
+//! let mut builder = VcfHeader::builder();
+//! let chr1 = builder.register_contig("chr1", ContigDef { length: Some(248_956_422) })?;
+//! let dp_info: InfoInt = builder.register_info(
+//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Total read depth")
+//! )?;
+//! let gt_fmt: FormatGt = builder.register_format(
+//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), ValueType::String, "Genotype")
+//! )?;
+//! let dp_fmt: FormatInt = builder.register_format(
+//!     &FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Sample depth")
+//! )?;
+//! let header = Arc::new(builder.add_sample("sample1")?.build()?);
+//!
+//! // 2. Write to an in-memory buffer (or any `impl Write`)
+//! let mut output = Vec::new();
+//! let writer = Writer::new(&mut output, OutputFormat::Vcf);
 //! let mut writer = writer.write_header(&header)?;
-//! let enc = writer.begin_record(&contig, pos, &alleles, Some(30.0))?;
+//!
+//! // 3. Encode one record — the typestate chain is enforced at compile time
+//! let alleles = Alleles::snv(Base::A, Base::T)?;
+//! let enc = writer.begin_record(&chr1, Pos1::new(12345).unwrap(), &alleles, Some(30.0))?;
+//! let mut enc = enc.filter_pass();    // Begun → Filtered
+//! dp_info.encode(&mut enc, 50);
+//! let mut enc = enc.begin_samples(1); // Filtered → WithSamples
+//! gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
+//! dp_fmt.encode(&mut enc, &[45]);
+//! enc.emit()?;
+//!
+//! writer.finish()?;
+//!
+//! let vcf = String::from_utf8(output)?;
+//! assert!(vcf.contains("chr1\t12345\t.\tA\tT\t30\tPASS\tDP=50"));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Writing BCF (binary VCF)
+//!
+//! Switch [`OutputFormat::Vcf`] to [`OutputFormat::Bcf`] — the encoding API is
+//! identical. Pre-resolved handles perform direct BCF encoding with no per-record
+//! allocations or string dictionary lookups.
+//!
+//! ```
+//! use seqair::vcf::{
+//!     Alleles, ContigDef, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
+//!     FormatGt, InfoInt,
+//! };
+//! use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
+//! use seqair_types::{Base, Pos1};
+//! use std::sync::Arc;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut builder = VcfHeader::builder();
+//! let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) })?;
+//! let dp: InfoInt = builder.register_info(
+//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Depth")
+//! )?;
+//! let gt: FormatGt = builder.register_format(
+//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), ValueType::String, "Genotype")
+//! )?;
+//! let header = Arc::new(builder.add_sample("sample1")?.build()?);
+//!
+//! let mut buf = Vec::new();
+//! let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+//! let mut writer = writer.write_header(&header)?;
+//!
+//! let alleles = Alleles::snv(Base::A, Base::T)?;
+//! let enc = writer.begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))?;
 //! let mut enc = enc.filter_pass();
 //! dp.encode(&mut enc, 50);
 //! let mut enc = enc.begin_samples(1);
-//! gt.encode(&mut enc, &Genotype::unphased(0, 1));
+//! gt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
 //! enc.emit()?;
+//!
 //! writer.finish()?;
+//! assert!(!buf.is_empty());
+//! # Ok(())
+//! # }
 //! ```
 
 use super::OutputFormat;
@@ -56,6 +138,8 @@ pub struct WithSamples;
 // r[impl record_encoder.writer]
 // r[impl record_encoder.writer_typestate]
 /// Unified VCF/BCF writer. Output format is selected at construction time.
+///
+/// See the [module documentation](self) for complete usage examples.
 pub struct Writer<W: Write, S = Unstarted> {
     inner: WriterInner<W>,
     _state: PhantomData<S>,

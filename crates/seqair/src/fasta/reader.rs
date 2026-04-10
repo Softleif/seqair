@@ -84,6 +84,31 @@ enum FileHandle<R: Read + Seek> {
     Bgzf(BgzfReader<R>),
 }
 
+/// Indexed FASTA reader for random-access subsequence fetching.
+///
+/// Supports plain FASTA (`.fa` / `.fasta`) and BGZF-compressed FASTA
+/// (`.fa.gz`). Both require an `.fai` index; BGZF additionally requires a
+/// `.gzi` index. Create both with `samtools faidx`.
+///
+/// # Example
+///
+/// ```no_run
+/// use seqair::fasta::IndexedFastaReader;
+/// use seqair_types::{Base, Pos0};
+/// use std::path::Path;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut reader = IndexedFastaReader::open(Path::new("reference.fa"))?;
+///
+/// // Fetch raw ASCII bytes for a region (half-open: start inclusive, end exclusive)
+/// let seq = reader.fetch_seq("chr1", Pos0::new(1000).unwrap(), Pos0::new(2000).unwrap())?;
+///
+/// // Convert to typed Base values (A/C/G/T/Unknown) for downstream use
+/// let bases = Base::from_ascii_vec(seq);
+/// assert_eq!(bases.len(), 1000);
+/// # Ok(())
+/// # }
+/// ```
 // r[impl fasta.fetch.coordinates]
 pub struct IndexedFastaReader<R: Read + Seek = File> {
     handle: FileHandle<R>,

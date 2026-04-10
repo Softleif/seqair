@@ -10,10 +10,27 @@
 //! type-safe key resolution. Register them on [`VcfHeaderBuilder`](super::header::VcfHeaderBuilder)
 //! to build the header and resolve keys in one step:
 //!
-//! ```ignore
-//! let dp = InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Depth");
-//! let dp_key = builder.register_info(&dp)?;
-//! // dp_key is InfoKey<Scalar<i32>> — can only encode i32 values
+//! ```
+//! use seqair::vcf::{Number, ValueType, VcfHeader, InfoInt, FormatGt};
+//! use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut builder = VcfHeader::builder();
+//!
+//! // Returns InfoKey<Scalar<i32>> (aliased InfoInt) — can only encode i32 values
+//! let dp_key: InfoInt = builder.register_info(
+//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Depth")
+//! )?;
+//!
+//! // Returns FormatKey<Gt> (aliased FormatGt) — can only encode Genotype slices
+//! let gt_key: FormatGt = builder.register_format(
+//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), ValueType::String, "Genotype")
+//! )?;
+//!
+//! assert_eq!(dp_key.id().name(), "DP");
+//! assert_eq!(gt_key.id().name(), "GT");
+//! # Ok(())
+//! # }
 //! ```
 
 use super::header::{Number, ValueType};
