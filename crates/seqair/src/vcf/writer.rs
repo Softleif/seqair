@@ -440,37 +440,33 @@ fn write_sample_value(buf: &mut Vec<u8>, value: &SampleValue) -> FmtResult {
 // ── VcfOutput trait ────────────────────────────────────────────────────
 
 // r[impl record_encoder.vcf_text_output]
-/// Abstracts over plain and BGZF VCF output for the record encoder.
-pub(crate) trait VcfOutput {
-    fn write_line(&mut self, buf: &[u8]) -> Result<(), VcfError>;
-    fn push_index(&mut self, tid: i32, beg: u64, end: u64) -> Result<(), VcfError>;
+/// Output sink for the VCF record encoder. Enum dispatch avoids a per-record
+/// heap allocation that `Box<dyn Trait>` would require.
+enum VcfRecordOutput<'a, W: Write> {
+    Plain(&'a mut W),
+    Bgzf { bgzf: &'a mut BgzfWriter<W>, index: &'a mut IndexBuilder },
 }
 
-struct PlainOutput<'a, W: Write>(&'a mut W);
-
-impl<W: Write> VcfOutput for PlainOutput<'_, W> {
+impl<W: Write> VcfRecordOutput<'_, W> {
     fn write_line(&mut self, buf: &[u8]) -> Result<(), VcfError> {
-        self.0.write_all(buf).map_err(VcfError::Io)
+        match self {
+            Self::Plain(w) => w.write_all(buf).map_err(VcfError::Io),
+            Self::Bgzf { bgzf, .. } => {
+                bgzf.flush_if_needed(buf.len())?;
+                bgzf.write_all(buf)?;
+                Ok(())
+            }
+        }
     }
-    fn push_index(&mut self, _tid: i32, _beg: u64, _end: u64) -> Result<(), VcfError> {
-        Ok(())
-    }
-}
 
-struct BgzfOutput<'a, W: Write> {
-    bgzf: &'a mut BgzfWriter<W>,
-    index: &'a mut IndexBuilder,
-}
-
-impl<W: Write> VcfOutput for BgzfOutput<'_, W> {
-    fn write_line(&mut self, buf: &[u8]) -> Result<(), VcfError> {
-        self.bgzf.flush_if_needed(buf.len())?;
-        self.bgzf.write_all(buf)?;
-        Ok(())
-    }
     fn push_index(&mut self, tid: i32, beg: u64, end: u64) -> Result<(), VcfError> {
-        self.index.push(tid, beg, end, self.bgzf.virtual_offset())?;
-        Ok(())
+        match self {
+            Self::Plain(_) => Ok(()),
+            Self::Bgzf { bgzf, index } => {
+                index.push(tid, beg, end, bgzf.virtual_offset())?;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -488,7 +484,7 @@ use super::record_encoder::{ContigId, FieldId, FilterId, RecordEncoder};
 /// Methods must be called in order: `begin` → `filter_pass`/`filter_fail` →
 /// `info_*` → `begin_samples` → `format_*` → `emit`. Debug builds enforce this
 /// with assertions. For compile-time enforcement consider a typestate wrapper.
-pub struct VcfRecordEncoder<'a> {
+pub struct VcfRecordEncoder<'a, W: Write> {
     /// Main line buffer — contains CHROM through INFO.
     buf: &'a mut Vec<u8>,
     /// FORMAT key accumulator (reused across records).
@@ -496,7 +492,7 @@ pub struct VcfRecordEncoder<'a> {
     /// Formatted sample values buffer (reused across records).
     fmt_values: &'a mut Vec<u8>,
     /// Output sink (plain or BGZF).
-    output: Box<dyn VcfOutput + 'a>,
+    output: VcfRecordOutput<'a, W>,
     /// Record state.
     n_allele: u16,
     n_alt: u16,
@@ -506,6 +502,8 @@ pub struct VcfRecordEncoder<'a> {
     rlen: u32,
     /// Number of samples declared via `begin_samples`. 0 means not yet called.
     n_samples: u32,
+    /// Whether a FILTER method has been called for the current record.
+    filter_written: bool,
     /// Whether `begin()` has been called for the current record.
     #[cfg(debug_assertions)]
     record_begun: bool,
@@ -515,7 +513,7 @@ pub struct VcfRecordEncoder<'a> {
 // r[impl record_encoder.vcf_text_info]
 // r[impl record_encoder.vcf_text_format_accumulation]
 // r[impl record_encoder.vcf_text_emit]
-impl RecordEncoder for VcfRecordEncoder<'_> {
+impl<W: Write> RecordEncoder for VcfRecordEncoder<'_, W> {
     fn begin(
         &mut self,
         contig: &ContigId,
@@ -528,6 +526,7 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
         self.fmt_values.clear();
         self.info_count = 0;
         self.n_samples = 0;
+        self.filter_written = false;
         #[cfg(debug_assertions)]
         {
             self.record_begun = true;
@@ -592,6 +591,7 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
     fn filter_pass(&mut self) {
         #[cfg(debug_assertions)]
         debug_assert!(self.record_begun, "filter_pass() called before begin()");
+        self.filter_written = true;
         self.buf.extend_from_slice(b"PASS");
         self.buf.push(b'\t');
     }
@@ -599,6 +599,7 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
     fn filter_fail(&mut self, filters: &[&FilterId]) {
         #[cfg(debug_assertions)]
         debug_assert!(self.record_begun, "filter_fail() called before begin()");
+        self.filter_written = true;
         for (i, f) in filters.iter().enumerate() {
             if i > 0 {
                 self.buf.push(b';');
@@ -746,6 +747,13 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
             return Err(VcfError::FormatDataWithoutSamples);
         }
 
+        if self.n_samples > 1 {
+            return Err(VcfError::MultiSampleNotSupported { n_samples: self.n_samples });
+        }
+
+        // Emit missing FILTER column if no filter method was called.
+        self.ensure_filter();
+
         // If no INFO fields were written, write "."
         if self.info_count == 0 {
             self.buf.push(b'.');
@@ -779,9 +787,18 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
     }
 }
 
-impl VcfRecordEncoder<'_> {
+impl<W: Write> VcfRecordEncoder<'_, W> {
+    /// If no filter method was called, emit ".\t" for the missing FILTER column.
+    fn ensure_filter(&mut self) {
+        if !self.filter_written {
+            self.filter_written = true;
+            self.buf.extend_from_slice(b".\t");
+        }
+    }
+
     /// Write INFO field separator (`;` between fields, nothing before the first).
     fn info_separator(&mut self) {
+        self.ensure_filter();
         if self.info_count > 0 {
             self.buf.push(b';');
         }
@@ -801,10 +818,10 @@ impl VcfRecordEncoder<'_> {
 
 impl<W: Write> VcfWriter<W> {
     /// Get a direct record encoder for zero-alloc VCF text encoding.
-    pub fn record_encoder(&mut self) -> VcfRecordEncoder<'_> {
-        let output: Box<dyn VcfOutput + '_> = match &mut self.output {
-            Output::Plain(w) => Box::new(PlainOutput(w)),
-            Output::Bgzf { bgzf, index } => Box::new(BgzfOutput { bgzf, index }),
+    pub fn record_encoder(&mut self) -> VcfRecordEncoder<'_, W> {
+        let output = match &mut self.output {
+            Output::Plain(w) => VcfRecordOutput::Plain(w),
+            Output::Bgzf { bgzf, index } => VcfRecordOutput::Bgzf { bgzf, index },
         };
 
         VcfRecordEncoder {
@@ -819,6 +836,7 @@ impl<W: Write> VcfWriter<W> {
             pos_0based: 0,
             rlen: 0,
             n_samples: 0,
+            filter_written: false,
             #[cfg(debug_assertions)]
             record_begun: false,
         }
@@ -1046,6 +1064,50 @@ mod tests {
         percent_encode_into(&mut buf, b"hello:world;key=val%done,x\ty\nz\rend");
         let result = String::from_utf8(buf).unwrap();
         assert_eq!(result, "hello%3Aworld%3Bkey%3Dval%25done%2Cx%09y%0Az%0Dend");
+    }
+
+    // r[verify record_encoder.vcf_text_emit]
+    #[test]
+    fn record_encoder_missing_filter_emits_dot() {
+        let header = test_header();
+        let mut output = Vec::new();
+        let mut writer = VcfWriter::new(&mut output, header.clone());
+        writer.write_header().unwrap();
+
+        let alleles = Alleles::reference(Base::A);
+        let contig = super::ContigId { tid: 0, name: SmolStr::from("chr1") };
+
+        let mut enc = writer.record_encoder();
+        enc.begin(&contig, Pos::<One>::new(1).unwrap(), &alleles, None).unwrap();
+        // Deliberately skip filter_pass()/filter_fail()
+        enc.emit().unwrap();
+
+        writer.finish().unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let f = last_line_fields(&text);
+        assert_eq!(f[6], ".", "missing filter should be '.'");
+        assert_eq!(f[7], ".", "missing info should be '.'");
+    }
+
+    #[test]
+    fn record_encoder_multi_sample_rejected() {
+        let header = test_header();
+        let mut output = Vec::new();
+        let mut writer = VcfWriter::new(&mut output, header.clone());
+        writer.write_header().unwrap();
+
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let contig = super::ContigId { tid: 0, name: SmolStr::from("chr1") };
+
+        let mut enc = writer.record_encoder();
+        enc.begin(&contig, Pos::<One>::new(1).unwrap(), &alleles, None).unwrap();
+        enc.filter_pass();
+        enc.begin_samples(2);
+        let err = enc.emit().unwrap_err();
+        assert!(
+            matches!(err, VcfError::MultiSampleNotSupported { n_samples: 2 }),
+            "expected MultiSampleNotSupported, got {err:?}"
+        );
     }
 
     // r[verify vcf_writer.percent_encoding]

@@ -109,6 +109,9 @@ pub enum VcfError {
     #[error("FORMAT fields were written but begin_samples() was not called")]
     FormatDataWithoutSamples,
 
+    #[error("RecordEncoder currently supports only single-sample output (got {n_samples} samples)")]
+    MultiSampleNotSupported { n_samples: u32 },
+
     #[error("header text too large for BCF (exceeds u32::MAX)")]
     HeaderTooLarge,
 

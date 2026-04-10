@@ -356,6 +356,10 @@ impl<'a> BcfRecordEncoder<'a> {
     // r[impl bcf_encoder.emit]
     /// Patch the header, write the record to BGZF, push to index.
     fn emit_inner(&mut self) -> Result<(), VcfError> {
+        if self.n_sample > 1 {
+            return Err(VcfError::MultiSampleNotSupported { n_samples: self.n_sample });
+        }
+
         // Patch n_info|n_allele and n_fmt|n_sample in the 24-byte fixed header
         // These are at offsets 16 and 20 in shared_buf
         let n_info_allele = (u32::from(self.n_allele) << 16) | u32::from(self.n_info);
@@ -416,11 +420,13 @@ impl RecordEncoder for BcfRecordEncoder<'_> {
         FilterHandle::PASS.encode(self);
     }
 
+    #[expect(clippy::cast_possible_wrap, reason = "dict_idx validated at registration time")]
     fn filter_fail(&mut self, filters: &[&FilterId]) {
         let indices: SmallVec<i32, 3> = filters
             .iter()
             .map(|f| {
-                i32::try_from(f.dict_idx).expect("BCF string dict cannot exceed i32::MAX entries")
+                debug_assert!(f.dict_idx <= i32::MAX as u32, "filter dict_idx overflows i32");
+                f.dict_idx as i32
             })
             .collect();
         encode_typed_int_vec(self.shared_buf, &indices);

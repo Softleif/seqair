@@ -753,11 +753,12 @@ mod tests {
             let mut buf = Vec::new();
             let mut writer = VcfWriter::new(&mut buf, header.clone());
             writer.write_header().unwrap();
-            let mut enc = writer.record_encoder();
-            enc.begin(&contig, pos, &alleles, None).unwrap();
-            enc.filter_fail(&[&low_dp]);
-            enc.emit().unwrap();
-            drop(enc);
+            {
+                let mut enc = writer.record_encoder();
+                enc.begin(&contig, pos, &alleles, None).unwrap();
+                enc.filter_fail(&[&low_dp]);
+                enc.emit().unwrap();
+            }
             writer.finish().unwrap();
             String::from_utf8(buf).unwrap()
         };
@@ -960,19 +961,20 @@ mod proptests {
                 let mut buf = Vec::new();
                 let mut writer = VcfWriter::new(&mut buf, header.clone());
                 writer.write_header().unwrap();
-                let mut enc = writer.record_encoder();
-                enc.begin(&contig, pos1, &alleles, qual).unwrap();
-                enc.filter_pass();
-                dp_key.encode(&mut enc, dp_val);
-                bq_key.encode(&mut enc, bq_val);
-                if has_flag {
-                    db_key.encode(&mut enc);
+                {
+                    let mut enc = writer.record_encoder();
+                    enc.begin(&contig, pos1, &alleles, qual).unwrap();
+                    enc.filter_pass();
+                    dp_key.encode(&mut enc, dp_val);
+                    bq_key.encode(&mut enc, bq_val);
+                    if has_flag {
+                        db_key.encode(&mut enc);
+                    }
+                    enc.begin_samples(1);
+                    gt_key.encode(&mut enc, &gt);
+                    dp_fmt_key.encode(&mut enc, fmt_dp);
+                    enc.emit().unwrap();
                 }
-                enc.begin_samples(1);
-                gt_key.encode(&mut enc, &gt);
-                dp_fmt_key.encode(&mut enc, fmt_dp);
-                enc.emit().unwrap();
-                drop(enc);
                 writer.finish().unwrap();
                 String::from_utf8(buf).unwrap()
             };
@@ -1126,18 +1128,19 @@ mod cross_format_tests {
             let file = std::fs::File::create(&vcf_path).unwrap();
             let mut writer = VcfWriter::new(file, header.clone());
             writer.write_header().unwrap();
-            let mut enc = writer.record_encoder();
-            enc.begin(&contig, pos, &alleles, Some(30.0)).unwrap();
-            enc.filter_pass();
-            dp_key.encode(&mut enc, 50);
-            bq_key.encode(&mut enc, 35.5);
-            db_key.encode(&mut enc);
-            ad_key.encode(&mut enc, &[30, 20]);
-            enc.begin_samples(1);
-            gt_key.encode(&mut enc, &gt);
-            dp_fmt_key.encode(&mut enc, 45);
-            enc.emit().unwrap();
-            drop(enc);
+            {
+                let mut enc = writer.record_encoder();
+                enc.begin(&contig, pos, &alleles, Some(30.0)).unwrap();
+                enc.filter_pass();
+                dp_key.encode(&mut enc, 50);
+                bq_key.encode(&mut enc, 35.5);
+                db_key.encode(&mut enc);
+                ad_key.encode(&mut enc, &[30, 20]);
+                enc.begin_samples(1);
+                gt_key.encode(&mut enc, &gt);
+                dp_fmt_key.encode(&mut enc, 45);
+                enc.emit().unwrap();
+            }
             writer.finish().unwrap();
         }
 
@@ -1218,17 +1221,18 @@ mod cross_format_tests {
                 let mut buf = Vec::new();
                 let mut writer = VcfWriter::new(&mut buf, header.clone());
                 writer.write_header().unwrap();
-                let mut enc = writer.record_encoder();
-                enc.begin(&contig, pos1, &alleles, Some(30.0)).unwrap();
-                enc.filter_pass();
-                dp_key.encode(&mut enc, dp_val);
-                bq_key.encode(&mut enc, bq_val);
-                if has_flag { db_key.encode(&mut enc); }
-                enc.begin_samples(1);
-                gt_key.encode(&mut enc, &gt);
-                dp_fmt_key.encode(&mut enc, fmt_dp);
-                enc.emit().unwrap();
-                drop(enc);
+                {
+                    let mut enc = writer.record_encoder();
+                    enc.begin(&contig, pos1, &alleles, Some(30.0)).unwrap();
+                    enc.filter_pass();
+                    dp_key.encode(&mut enc, dp_val);
+                    bq_key.encode(&mut enc, bq_val);
+                    if has_flag { db_key.encode(&mut enc); }
+                    enc.begin_samples(1);
+                    gt_key.encode(&mut enc, &gt);
+                    dp_fmt_key.encode(&mut enc, fmt_dp);
+                    enc.emit().unwrap();
+                }
                 writer.finish().unwrap();
                 String::from_utf8(buf).unwrap()
             };
