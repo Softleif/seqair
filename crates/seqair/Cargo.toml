@@ -44,7 +44,15 @@ noodles-util = { version = "0.78.0", features = ["alignment"] }
 cstr8 = "0.1.4"
 
 [[bench]]
-name = "comparison"
+name = "bam"
+harness = false
+
+[[bench]]
+name = "fasta"
+harness = false
+
+[[bench]]
+name = "vcf"
 harness = false
 
 [lints]
