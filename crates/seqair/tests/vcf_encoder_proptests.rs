@@ -84,8 +84,8 @@ fn write_bcf(
         .filter_pass();
     setup.dp_info.encode(&mut enc, depth);
     let mut enc = enc.begin_samples(1);
-    setup.gt_fmt.encode(&mut enc, gt);
-    setup.dp_fmt.encode(&mut enc, depth);
+    setup.gt_fmt.encode(&mut enc, std::slice::from_ref(gt));
+    setup.dp_fmt.encode(&mut enc, &[depth]);
     enc.emit().unwrap();
 
     writer.finish().unwrap();

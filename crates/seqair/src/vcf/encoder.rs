@@ -155,10 +155,6 @@ impl<'a> BcfRecordEncoder<'a> {
     /// Patch the header, write the record to BGZF, push to index.
     #[allow(dead_code, reason = "called by unified.rs do_emit_bcf")]
     pub(crate) fn emit_inner(&mut self) -> Result<(), VcfError> {
-        if self.n_sample > 1 {
-            return Err(VcfError::MultiSampleNotSupported { n_samples: self.n_sample });
-        }
-
         // Patch n_info|n_allele and n_fmt|n_sample in the 24-byte fixed header
         // These are at offsets 16 and 20 in shared_buf
         let n_info_allele = (u32::from(self.n_allele) << 16) | u32::from(self.n_info);

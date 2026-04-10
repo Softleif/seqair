@@ -134,8 +134,8 @@
 //! let mut enc = enc.filter_pass();
 //! dp_info.encode(&mut enc, 50);
 //! let mut enc = enc.begin_samples(1);
-//! gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
-//! dp_fmt.encode(&mut enc, 45);
+//! gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
+//! dp_fmt.encode(&mut enc, &[45]);
 //! enc.emit()?;
 //!
 //! writer.finish()?;
@@ -213,7 +213,7 @@
 //! let mut enc = enc.filter_pass();
 //! dp.encode(&mut enc, 50);
 //! let mut enc = enc.begin_samples(1);
-//! gt.encode(&mut enc, &Genotype::unphased(0, 1));
+//! gt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
 //! enc.emit()?;
 //!
 //! writer.finish()?;

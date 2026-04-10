@@ -66,14 +66,14 @@ enum WriterInner<W: Write> {
         output: W,
         buf: Vec<u8>,
         fmt_keys: Vec<SmolStr>,
-        fmt_values: Vec<u8>,
+        sample_bufs: Vec<Vec<u8>>,
     },
     VcfGz {
         bgzf: BgzfWriter<W>,
         index: Option<IndexBuilder>,
         buf: Vec<u8>,
         fmt_keys: Vec<SmolStr>,
-        fmt_values: Vec<u8>,
+        sample_bufs: Vec<Vec<u8>>,
     },
     Bcf {
         bgzf: BgzfWriter<W>,
@@ -92,14 +92,14 @@ impl<W: Write> Writer<W> {
                 output: inner,
                 buf: Vec::with_capacity(4096),
                 fmt_keys: Vec::with_capacity(8),
-                fmt_values: Vec::with_capacity(256),
+                sample_bufs: Vec::new(),
             },
             OutputFormat::VcfGz => WriterInner::VcfGz {
                 bgzf: BgzfWriter::new(inner),
                 index: None,
                 buf: Vec::with_capacity(4096),
                 fmt_keys: Vec::with_capacity(8),
-                fmt_values: Vec::with_capacity(256),
+                sample_bufs: Vec::new(),
             },
             OutputFormat::Bcf => WriterInner::Bcf {
                 bgzf: BgzfWriter::new(inner),
@@ -171,16 +171,30 @@ impl<W: Write> Writer<W, Ready> {
                 alleles.begin_record(&mut enc, ContigHandle(contig.tid()), pos, qual)?;
                 EncoderInner::Bcf(enc)
             }
-            WriterInner::Vcf { output, buf, fmt_keys, fmt_values } => {
+            WriterInner::Vcf { output, buf, fmt_keys, sample_bufs } => {
                 let output = VcfOutput::Plain(output);
                 EncoderInner::Vcf(begin_vcf_record(
-                    buf, fmt_keys, fmt_values, output, contig, pos, alleles, qual,
+                    buf,
+                    fmt_keys,
+                    sample_bufs,
+                    output,
+                    contig,
+                    pos,
+                    alleles,
+                    qual,
                 )?)
             }
-            WriterInner::VcfGz { bgzf, index, buf, fmt_keys, fmt_values } => {
+            WriterInner::VcfGz { bgzf, index, buf, fmt_keys, sample_bufs } => {
                 let output = VcfOutput::Bgzf { bgzf, index: index.as_mut() };
                 EncoderInner::Vcf(begin_vcf_record(
-                    buf, fmt_keys, fmt_values, output, contig, pos, alleles, qual,
+                    buf,
+                    fmt_keys,
+                    sample_bufs,
+                    output,
+                    contig,
+                    pos,
+                    alleles,
+                    qual,
                 )?)
             }
         };
@@ -255,7 +269,7 @@ impl VcfOutput<'_> {
 struct VcfEncoderFields<'a> {
     buf: &'a mut Vec<u8>,
     fmt_keys: &'a mut Vec<SmolStr>,
-    fmt_values: &'a mut Vec<u8>,
+    sample_bufs: &'a mut Vec<Vec<u8>>,
     output: VcfOutput<'a>,
     n_allele: u16,
     n_alt: u16,
@@ -273,7 +287,7 @@ struct VcfEncoderFields<'a> {
 fn begin_vcf_record<'a>(
     buf: &'a mut Vec<u8>,
     fmt_keys: &'a mut Vec<SmolStr>,
-    fmt_values: &'a mut Vec<u8>,
+    sample_bufs: &'a mut Vec<Vec<u8>>,
     output: VcfOutput<'a>,
     contig: &ContigId,
     pos: Pos<One>,
@@ -282,7 +296,7 @@ fn begin_vcf_record<'a>(
 ) -> Result<VcfEncoderFields<'a>, VcfError> {
     buf.clear();
     fmt_keys.clear();
-    fmt_values.clear();
+    sample_bufs.clear();
 
     let n_allele = u16::try_from(alleles.n_allele()).map_err(|_| VcfError::ValueOverflow {
         field: "n_allele",
@@ -334,7 +348,7 @@ fn begin_vcf_record<'a>(
     Ok(VcfEncoderFields {
         buf,
         fmt_keys,
-        fmt_values,
+        sample_bufs,
         output,
         n_allele,
         n_alt,
@@ -599,7 +613,13 @@ impl<'a> RecordEncoder<'a, Filtered> {
     pub fn begin_samples(mut self, n: u32) -> RecordEncoder<'a, WithSamples> {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => enc.n_sample = n,
-            EncoderInner::Vcf(vcf) => vcf.n_samples = n,
+            EncoderInner::Vcf(vcf) => {
+                vcf.n_samples = n;
+                vcf.sample_bufs.resize_with(n as usize, Vec::new);
+                for buf in vcf.sample_bufs.iter_mut() {
+                    buf.clear();
+                }
+            }
         }
         RecordEncoder { inner: self.inner, _state: PhantomData }
     }
@@ -613,88 +633,116 @@ impl<'a> RecordEncoder<'a, Filtered> {
 // ── WithSamples: FormatEncoder ─────────────────────────────────────────
 
 // r[impl record_encoder.format_encoder]
+#[allow(clippy::indexing_slicing, reason = "sample_bufs length validated by debug_assert")]
 impl FormatEncoder for RecordEncoder<'_, WithSamples> {
-    fn format_gt(&mut self, id: &FieldId, gt: &Genotype) {
+    fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 // r[impl bcf_writer.gt_encoding]
                 // r[impl bcf_writer.indiv_field_major]
                 // r[impl bcf_encoder.format_field_major]
+                debug_assert_eq!(gts.len(), enc.n_sample as usize);
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
-                let ploidy = gt.alleles.len();
-                let max_allele: i32 =
-                    gt.alleles.iter().flatten().map(|idx| i32::from(*idx)).max().unwrap_or(0);
+                let ploidy = gts.first().map_or(0, |g| g.alleles.len());
+                debug_assert!(gts.iter().all(|g| g.alleles.len() == ploidy));
+                let max_allele: i32 = gts
+                    .iter()
+                    .flat_map(|g| g.alleles.iter())
+                    .flatten()
+                    .map(|idx| i32::from(*idx))
+                    .max()
+                    .unwrap_or(0);
                 let max_val = (max_allele.saturating_add(1)).saturating_mul(2).saturating_add(1);
                 let typ = smallest_int_type(&[max_val]);
                 encode_type_byte(enc.indiv_buf, ploidy, typ);
-                for (i, allele_opt) in gt.alleles.iter().enumerate() {
-                    let encoded: i32 = match allele_opt {
-                        Some(idx) => {
-                            let phased = if i == 0 {
-                                false
-                            } else {
-                                gt.phased.get(i.saturating_sub(1)).copied().unwrap_or(false)
-                            };
-                            (i32::from(*idx).saturating_add(1) << 1) | i32::from(phased)
-                        }
-                        None => 0,
-                    };
-                    encode_int_as(enc.indiv_buf, encoded, typ);
+                for gt in gts {
+                    for (i, allele_opt) in gt.alleles.iter().enumerate() {
+                        let encoded: i32 = match allele_opt {
+                            Some(idx) => {
+                                let phased = if i == 0 {
+                                    false
+                                } else {
+                                    gt.phased.get(i.saturating_sub(1)).copied().unwrap_or(false)
+                                };
+                                (i32::from(*idx).saturating_add(1) << 1) | i32::from(phased)
+                            }
+                            None => 0,
+                        };
+                        encode_int_as(enc.indiv_buf, encoded, typ);
+                    }
                 }
                 enc.n_fmt = enc.n_fmt.saturating_add(1);
             }
             EncoderInner::Vcf(vcf) => {
                 // r[impl vcf_writer.genotype_serialization]
-                vcf_push_format_key(vcf, id);
+                debug_assert_eq!(gts.len(), vcf.n_samples as usize);
+                vcf_begin_format_field(vcf, id);
                 let mut b = itoa::Buffer::new();
-                for (i, allele) in gt.alleles.iter().enumerate() {
-                    if i > 0 {
-                        let phased = gt.phased.get(i.saturating_sub(1)).copied().unwrap_or(false);
-                        vcf.fmt_values.push(if phased { b'|' } else { b'/' });
-                    }
-                    match allele {
-                        Some(idx) => vcf.fmt_values.extend_from_slice(b.format(*idx).as_bytes()),
-                        None => vcf.fmt_values.push(b'.'),
+                for (si, gt) in gts.iter().enumerate() {
+                    for (i, allele) in gt.alleles.iter().enumerate() {
+                        if i > 0 {
+                            let phased =
+                                gt.phased.get(i.saturating_sub(1)).copied().unwrap_or(false);
+                            vcf.sample_bufs[si].push(if phased { b'|' } else { b'/' });
+                        }
+                        match allele {
+                            Some(idx) => {
+                                vcf.sample_bufs[si].extend_from_slice(b.format(*idx).as_bytes())
+                            }
+                            None => vcf.sample_bufs[si].push(b'.'),
+                        }
                     }
                 }
             }
         }
     }
-    fn format_int(&mut self, id: &FieldId, value: i32) {
+    fn format_int(&mut self, id: &FieldId, values: &[i32]) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 // r[impl bcf_writer.smallest_int_type]
                 // r[impl bcf_writer.indiv_field_major]
-                let tc = value.scalar_type_code();
+                debug_assert_eq!(values.len(), enc.n_sample as usize);
+                let tc = smallest_int_type(values);
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
                 encode_type_byte(enc.indiv_buf, 1, tc);
-                value.encode_bcf_as(enc.indiv_buf, tc);
+                for &v in values {
+                    v.encode_bcf_as(enc.indiv_buf, tc);
+                }
                 enc.n_fmt = enc.n_fmt.saturating_add(1);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_push_format_key(vcf, id);
+                debug_assert_eq!(values.len(), vcf.n_samples as usize);
+                vcf_begin_format_field(vcf, id);
                 // r[impl vcf_writer.integer_format]
                 let mut b = itoa::Buffer::new();
-                vcf.fmt_values.extend_from_slice(b.format(value).as_bytes());
+                for (i, &v) in values.iter().enumerate() {
+                    vcf.sample_bufs[i].extend_from_slice(b.format(v).as_bytes());
+                }
             }
         }
     }
-    fn format_float(&mut self, id: &FieldId, value: f32) {
+    fn format_float(&mut self, id: &FieldId, values: &[f32]) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 // r[impl bcf_writer.smallest_int_type]
                 // r[impl bcf_writer.indiv_field_major]
-                let tc = value.scalar_type_code();
+                debug_assert_eq!(values.len(), enc.n_sample as usize);
+                let tc = values.first().map_or(BCF_BT_FLOAT, |v| v.scalar_type_code());
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
                 encode_type_byte(enc.indiv_buf, 1, tc);
-                value.encode_bcf_as(enc.indiv_buf, tc);
+                for &v in values {
+                    v.encode_bcf_as(enc.indiv_buf, tc);
+                }
                 enc.n_fmt = enc.n_fmt.saturating_add(1);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_push_format_key(vcf, id);
+                debug_assert_eq!(values.len(), vcf.n_samples as usize);
+                vcf_begin_format_field(vcf, id);
                 // r[impl vcf_writer.float_precision]
-                write_float_g(vcf.fmt_values, value)
-                    .expect("f32 with 6 significant digits never exceeds 32 chars");
+                for (i, &v) in values.iter().enumerate() {
+                    write_float_g(&mut vcf.sample_bufs[i], v)
+                        .expect("f32 with 6 significant digits never exceeds 32 chars");
+                }
             }
         }
     }
@@ -733,9 +781,6 @@ fn vcf_emit(vcf: &mut VcfEncoderFields<'_>) -> Result<(), VcfError> {
     if !vcf.fmt_keys.is_empty() && vcf.n_samples == 0 {
         return Err(VcfError::FormatDataWithoutSamples);
     }
-    if vcf.n_samples > 1 {
-        return Err(VcfError::MultiSampleNotSupported { n_samples: vcf.n_samples });
-    }
     if !vcf.filter_written {
         vcf.buf.extend_from_slice(b".\t");
     }
@@ -752,8 +797,10 @@ fn vcf_emit(vcf: &mut VcfEncoderFields<'_>) -> Result<(), VcfError> {
             }
             vcf.buf.extend_from_slice(key.as_bytes());
         }
-        vcf.buf.push(b'\t');
-        vcf.buf.extend_from_slice(vcf.fmt_values);
+        for sample_buf in vcf.sample_bufs.iter() {
+            vcf.buf.push(b'\t');
+            vcf.buf.extend_from_slice(sample_buf);
+        }
     }
     vcf.buf.push(b'\n');
     let beg = u64::from(vcf.pos_0based);
@@ -778,9 +825,11 @@ fn vcf_info_separator(vcf: &mut VcfEncoderFields<'_>) {
 }
 
 // r[impl vcf_writer.format_serialization]
-fn vcf_push_format_key(vcf: &mut VcfEncoderFields<'_>, id: &FieldId) {
+fn vcf_begin_format_field(vcf: &mut VcfEncoderFields<'_>, id: &FieldId) {
     if !vcf.fmt_keys.is_empty() {
-        vcf.fmt_values.push(b':');
+        for buf in vcf.sample_bufs.iter_mut() {
+            buf.push(b':');
+        }
     }
     vcf.fmt_keys.push(id.name().into());
 }

@@ -116,8 +116,8 @@ fn vcf_text_readable_by_noodles() {
             .filter_pass();
         setup.dp_info.encode(&mut enc, 50);
         let mut enc = enc.begin_samples(1);
-        setup.gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
-        setup.dp_fmt.encode(&mut enc, 30);
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
+        setup.dp_fmt.encode(&mut enc, &[30]);
         enc.emit().unwrap();
         writer.finish().unwrap();
     }
@@ -155,8 +155,8 @@ fn bcf_write_record_readable_by_noodles() {
             .filter_pass();
         setup.dp_info.encode(&mut enc, 42);
         let mut enc = enc.begin_samples(1);
-        setup.gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
-        setup.dp_fmt.encode(&mut enc, 25);
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
+        setup.dp_fmt.encode(&mut enc, &[25]);
         enc.emit().unwrap();
         writer.finish().unwrap();
     }
@@ -190,8 +190,8 @@ fn bcf_encoder_readable_by_noodles() {
             .filter_pass();
         setup.dp_info.encode(&mut enc, 100);
         let mut enc = enc.begin_samples(1);
-        setup.gt_fmt.encode(&mut enc, &Genotype::phased_diploid(0, 1));
-        setup.dp_fmt.encode(&mut enc, 80);
+        setup.gt_fmt.encode(&mut enc, &[Genotype::phased_diploid(0, 1)]);
+        setup.dp_fmt.encode(&mut enc, &[80]);
         enc.emit().unwrap();
         writer.finish().unwrap();
     }

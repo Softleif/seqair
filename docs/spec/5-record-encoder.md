@@ -76,7 +76,10 @@ Typed keys MUST encode the VCF value type at the Rust type level via uninhabited
 > - `FormatKey<Scalar<f32>>` — single float FORMAT value
 
 r[record_encoder.key_encode]
-Each typed key MUST provide an `encode` method that delegates to the corresponding encoder trait method. INFO keys MUST accept `&mut impl InfoEncoder`, FORMAT keys MUST accept `&mut impl FormatEncoder`.
+Each typed key MUST provide an `encode` method that delegates to the corresponding encoder trait method. INFO keys MUST accept `&mut impl InfoEncoder` and a single value. FORMAT keys MUST accept `&mut impl FormatEncoder` and a slice of values (one per sample):
+
+- `FormatKey<Gt>::encode(&self, enc: &mut impl FormatEncoder, gts: &[Genotype])`
+- `FormatKey<Scalar<T>>::encode(&self, enc: &mut impl FormatEncoder, values: &[T])`
 
 ## Typestate Record Encoder
 
@@ -127,7 +130,7 @@ r[record_encoder.format_encoder]
 A `FormatEncoder` trait MUST be provided for encoding FORMAT fields. It MUST be object-safe. It MUST be implemented by `RecordEncoder<'_, WithSamples>`.
 
 r[record_encoder.format_methods]
-FORMAT methods (`format_gt`, `format_int`, `format_float`) MUST accept a `&FieldId` and the appropriate value. These methods MUST be infallible.
+FORMAT methods (`format_gt`, `format_int`, `format_float`) MUST accept a `&FieldId` and a **slice of values** — one element per sample. The slice length MUST equal the sample count declared by `begin_samples()`. These methods MUST be infallible. For single-sample records, callers pass a 1-element slice.
 
 r[record_encoder.format_state_queries]
 `FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
@@ -139,9 +142,6 @@ r[record_encoder.emit]
 
 r[record_encoder.emit_no_samples]
 `emit()` MUST be available on both `Filtered` (for records without samples) and `WithSamples` (for records with samples).
-
-r[record_encoder.single_sample]
-The encoder currently supports at most one sample per record. `emit()` MUST return an error if `begin_samples()` was called with `n > 1`. Multi-sample support is a future extension.
 
 ## Custom Type Encoding
 

@@ -170,9 +170,12 @@ pub trait InfoEncoder {
 // r[impl record_encoder.format_methods]
 /// Object-safe trait for encoding FORMAT fields.
 pub trait FormatEncoder {
-    fn format_gt(&mut self, id: &FieldId, gt: &Genotype);
-    fn format_int(&mut self, id: &FieldId, value: i32);
-    fn format_float(&mut self, id: &FieldId, value: f32);
+    /// Encode a GT FORMAT field for all samples. Slice length MUST equal sample count.
+    fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]);
+    /// Encode a scalar integer FORMAT field for all samples.
+    fn format_int(&mut self, id: &FieldId, values: &[i32]);
+    /// Encode a scalar float FORMAT field for all samples.
+    fn format_float(&mut self, id: &FieldId, values: &[f32]);
     fn n_allele(&self) -> usize;
     fn n_alt(&self) -> usize;
 }
@@ -224,20 +227,20 @@ impl InfoKey<OptArr<i32>> {
 }
 
 impl FormatKey<Gt> {
-    pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), gt: &Genotype) {
-        enc.format_gt(&self.0, gt);
+    pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), gts: &[Genotype]) {
+        enc.format_gt(&self.0, gts);
     }
 }
 
 impl FormatKey<Scalar<i32>> {
-    pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), value: i32) {
-        enc.format_int(&self.0, value);
+    pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), values: &[i32]) {
+        enc.format_int(&self.0, values);
     }
 }
 
 impl FormatKey<Scalar<f32>> {
-    pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), value: f32) {
-        enc.format_float(&self.0, value);
+    pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), values: &[f32]) {
+        enc.format_float(&self.0, values);
     }
 }
 
@@ -510,7 +513,7 @@ mod tests {
         impl EncodeFormat for Score {
             type Key = FormatFloat;
             fn encode_format(&self, enc: &mut dyn FormatEncoder, key: &Self::Key) {
-                key.encode(enc, self.0);
+                key.encode(enc, &[self.0]);
             }
         }
 
@@ -594,8 +597,8 @@ mod tests {
         setup.db_flag.encode(&mut enc);
         setup.ad_info.encode(&mut enc, &[30, 20]);
         let mut enc = enc.begin_samples(1);
-        setup.gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
-        setup.dp_fmt.encode(&mut enc, 45);
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
+        setup.dp_fmt.encode(&mut enc, &[45]);
         enc.emit().unwrap();
         writer.finish().unwrap();
         assert!(!buf.is_empty());
@@ -712,5 +715,128 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         let data_lines: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
         assert_eq!(data_lines.len(), 3, "expected 3 data records");
+    }
+
+    // ── Multi-sample tests ───────────────────────────────────────────
+
+    fn multi_sample_setup()
+    -> (Arc<crate::vcf::header::VcfHeader>, ContigId, InfoInt, FormatGt, FormatInt) {
+        let mut builder = crate::vcf::header::VcfHeader::builder();
+        let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let dp_info = builder
+            .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
+            .unwrap();
+        let gt_fmt = builder
+            .register_format(&FormatFieldDef::new(
+                "GT",
+                Number::Count(1),
+                ValueType::String,
+                "Genotype",
+            ))
+            .unwrap();
+        let dp_fmt = builder
+            .register_format(&FormatFieldDef::new(
+                "DP",
+                Number::Count(1),
+                ValueType::Integer,
+                "Read depth",
+            ))
+            .unwrap();
+        let header = Arc::new(
+            builder
+                .add_sample("S1")
+                .unwrap()
+                .add_sample("S2")
+                .unwrap()
+                .add_sample("S3")
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        (header, contig, dp_info, gt_fmt, dp_fmt)
+    }
+
+    // r[verify record_encoder.format_methods]
+    #[test]
+    fn multi_sample_bcf() {
+        let (header, contig, dp_info, gt_fmt, dp_fmt) = multi_sample_setup();
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&header).unwrap();
+
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap();
+        let mut enc = enc.filter_pass();
+        dp_info.encode(&mut enc, 150);
+        let mut enc = enc.begin_samples(3);
+        gt_fmt.encode(
+            &mut enc,
+            &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
+        );
+        dp_fmt.encode(&mut enc, &[45, 52, 38]);
+        enc.emit().unwrap();
+
+        writer.finish().unwrap();
+        assert!(!buf.is_empty());
+    }
+
+    // r[verify record_encoder.format_methods]
+    #[test]
+    fn multi_sample_vcf_text() {
+        let (header, contig, dp_info, gt_fmt, dp_fmt) = multi_sample_setup();
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&header).unwrap();
+
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap();
+        let mut enc = enc.filter_pass();
+        dp_info.encode(&mut enc, 150);
+        let mut enc = enc.begin_samples(3);
+        gt_fmt.encode(
+            &mut enc,
+            &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
+        );
+        dp_fmt.encode(&mut enc, &[45, 52, 38]);
+        enc.emit().unwrap();
+
+        writer.finish().unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
+        let cols: Vec<&str> = data_line.split('\t').collect();
+        // 8 fixed + FORMAT + 3 samples = 12 columns
+        assert_eq!(cols.len(), 12, "expected 12 columns for 3-sample VCF");
+        assert_eq!(cols[8], "GT:DP", "FORMAT column");
+        assert_eq!(cols[9], "0/1:45", "sample 1");
+        assert_eq!(cols[10], "0/0:52", "sample 2");
+        assert_eq!(cols[11], "1/1:38", "sample 3");
+    }
+
+    // r[verify record_encoder.format_methods]
+    #[test]
+    fn single_sample_slice_api() {
+        let setup = TestSetup::new();
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&setup.contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap();
+        let mut enc = enc.filter_pass();
+        setup.dp_info.encode(&mut enc, 50);
+        let mut enc = enc.begin_samples(1);
+        // Single-sample callers pass 1-element slices
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
+        setup.dp_fmt.encode(&mut enc, &[45]);
+        enc.emit().unwrap();
+
+        writer.finish().unwrap();
+        assert!(!buf.is_empty());
     }
 }
