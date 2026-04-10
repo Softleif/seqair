@@ -1,5 +1,5 @@
 //! Shared BCF typed value encoding constants and helpers.
-//! Used by both [`super::bcf_writer`] (`VcfRecord` path) and [`super::encoder`] (direct path).
+//! Used by [`super::encoder`] and the unified writer in [`super::unified`].
 
 // BCF type codes
 pub const BCF_BT_NULL: u8 = 0;
@@ -16,7 +16,9 @@ pub const INT32_MISSING: u32 = 0x80000000;
 pub const FLOAT_MISSING: u32 = 0x7F800001;
 
 // End-of-vector sentinels — r[bcf_writer.end_of_vector]
+#[allow(dead_code, reason = "BCF end-of-vector sentinel, needed for multi-sample support")]
 pub const INT8_END_OF_VECTOR: u8 = 0x81;
+#[allow(dead_code, reason = "BCF end-of-vector sentinel, needed for multi-sample support")]
 pub const INT16_END_OF_VECTOR: u16 = 0x8001;
 pub const INT32_END_OF_VECTOR: u32 = 0x80000001;
 pub const FLOAT_END_OF_VECTOR: u32 = 0x7F800002;
@@ -147,6 +149,7 @@ pub fn encode_int_missing(buf: &mut Vec<u8>, typ: u8) {
 }
 
 /// Write the end-of-vector sentinel for the given int type.
+#[allow(dead_code, reason = "BCF end-of-vector sentinel, needed for multi-sample support")]
 pub fn encode_int_eov(buf: &mut Vec<u8>, typ: u8) {
     match typ {
         BCF_BT_INT8 => buf.push(INT8_END_OF_VECTOR),

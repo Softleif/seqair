@@ -1,6 +1,5 @@
-//! Zero-allocation BCF direct encoder. [`BcfRecordEncoder`] implements
-//! [`RecordEncoder`](super::record_encoder::RecordEncoder), writing directly
-//! into BCF buffers without constructing a `VcfRecord` intermediate.
+//! BCF encoding primitives. [`BcfRecordEncoder`] is the internal BCF encoder
+//! used by the unified [`Writer`](super::unified::Writer) via enum dispatch.
 
 use super::bcf_encoding::*;
 use super::error::VcfError;

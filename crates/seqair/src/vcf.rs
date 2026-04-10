@@ -10,7 +10,6 @@
 
 pub mod alleles;
 pub(crate) mod bcf_encoding;
-pub(crate) mod bcf_writer;
 pub(crate) mod encoder;
 pub mod error;
 pub mod header;

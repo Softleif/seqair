@@ -382,15 +382,14 @@ impl<'a> RecordEncoder<'a, Begun> {
         RecordEncoder { inner: self.inner, _state: PhantomData }
     }
 
-    #[expect(clippy::cast_possible_wrap, reason = "dict_idx validated at registration time")]
     pub fn filter_fail(mut self, filters: &[&FilterId]) -> RecordEncoder<'a, Filtered> {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let indices: SmallVec<i32, 3> = filters
                     .iter()
                     .map(|f| {
-                        debug_assert!(f.dict_idx() <= i32::MAX as u32);
-                        f.dict_idx() as i32
+                        i32::try_from(f.dict_idx())
+                            .expect("filter dict_idx fits i32 (validated at registration)")
                     })
                     .collect();
                 encode_typed_int_vec(enc.shared_buf, &indices);
@@ -437,7 +436,7 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                 encode_type_byte(enc.shared_buf, 1, tc);
                 value.encode_bcf_as(enc.shared_buf, tc);
                 // r[impl bcf_encoder.info_counting]
-                enc.n_info = enc.n_info.saturating_add(1);
+                enc.n_info = enc.n_info.saturating_add(1); // saturates at u16::MAX; real VCFs have <100 INFO fields
             }
             EncoderInner::Vcf(vcf) => {
                 vcf_info_separator(vcf);
@@ -465,7 +464,8 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 // r[impl vcf_writer.float_precision]
-                write_float_g(vcf.buf, value).expect("infallible");
+                write_float_g(vcf.buf, value)
+                    .expect("f32 with 6 significant digits never exceeds 32 chars");
             }
         }
     }
@@ -509,7 +509,8 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                         vcf.buf.push(b',');
                     }
                     // r[impl vcf_writer.float_precision]
-                    write_float_g(vcf.buf, *v).expect("infallible");
+                    write_float_g(vcf.buf, *v)
+                        .expect("f32 with 6 significant digits never exceeds 32 chars");
                 }
             }
         }
@@ -692,7 +693,8 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
             EncoderInner::Vcf(vcf) => {
                 vcf_push_format_key(vcf, id);
                 // r[impl vcf_writer.float_precision]
-                write_float_g(vcf.fmt_values, value).expect("infallible");
+                write_float_g(vcf.fmt_values, value)
+                    .expect("f32 with 6 significant digits never exceeds 32 chars");
             }
         }
     }

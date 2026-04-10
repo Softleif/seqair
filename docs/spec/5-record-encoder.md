@@ -140,6 +140,9 @@ r[record_encoder.emit]
 r[record_encoder.emit_no_samples]
 `emit()` MUST be available on both `Filtered` (for records without samples) and `WithSamples` (for records with samples).
 
+r[record_encoder.single_sample]
+The encoder currently supports at most one sample per record. `emit()` MUST return an error if `begin_samples()` was called with `n > 1`. Multi-sample support is a future extension.
+
 ## Custom Type Encoding
 
 r[record_encoder.encode_info_trait]
