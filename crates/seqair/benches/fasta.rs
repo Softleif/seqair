@@ -3,6 +3,7 @@
 //! Compares seqair against htslib and noodles.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "benches")]
 #![allow(clippy::cast_possible_truncation, reason = "benches")]
+#![allow(clippy::arithmetic_side_effects, reason = "benches")]
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
