@@ -3,7 +3,7 @@
 //! Models a realistic germline WGS callset: 10 samples, GATK-style fields
 //! (DP, AN, AC[A], AF[A], MQ, QD, FS), mixed variant types (SNV/indel/multi-
 //! allelic), mixed genotypes (0/0, 0/1, 1/1, 0|1, ./.), and occasional
-//! LowQual filter failures.
+//! `LowQual` filter failures.
 //!
 //! Compares seqair against htslib and noodles across three output formats:
 //! plain VCF text, BGZF-compressed VCF, and BCF binary.
@@ -11,6 +11,7 @@
 #![allow(clippy::arithmetic_side_effects, reason = "benches")]
 #![allow(clippy::cast_possible_truncation, reason = "benches")]
 #![allow(clippy::cast_possible_wrap, reason = "benches")]
+#![allow(clippy::type_complexity, reason = "benches")]
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -145,7 +146,7 @@ fn germline_setup() -> GermlineSetup {
         .unwrap();
     let mut builder = builder.add_sample("SAMPLE01").unwrap();
     for s in 2..=N_GERMLINE_SAMPLES {
-        builder = builder.add_sample(&format!("SAMPLE{s:02}")).unwrap();
+        builder = builder.add_sample(format!("SAMPLE{s:02}")).unwrap();
     }
     let header = Arc::new(builder.build().unwrap());
     let alleles_bank = vec![
@@ -208,7 +209,7 @@ fn htslib_germline_header() -> rust_htslib::bcf::Header {
     h
 }
 
-/// Write N_RECORDS germline-style records with rust-htslib to a temp file.
+/// Write `N_RECORDS` germline-style records with rust-htslib to a temp file.
 fn write_htslib_germline(format: rust_htslib::bcf::Format) -> tempfile::NamedTempFile {
     use rust_htslib::bcf;
     use rust_htslib::bcf::record::GenotypeAllele;
