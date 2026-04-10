@@ -327,7 +327,7 @@ impl BamHeader {
 
     // r[impl bam_writer.header_add_pg]
     /// Append a `@PG` header record. If `pg.pp` is `None`, it is auto-set to the ID of the
-    /// last existing `@PG` line (forming a provenance chain per [SAM1] §1.3).
+    /// last existing `@PG` line (forming a provenance chain per SAM1 §1.3).
     pub fn add_pg(&mut self, pg: PgRecord) {
         let pp = pg.pp.or_else(|| self.last_pg_id());
 

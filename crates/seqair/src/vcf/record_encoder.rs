@@ -646,23 +646,23 @@ mod tests {
         // Verify dict indices match what the header's string_map would assign
         let map = setup.header.string_map();
         assert_eq!(
-            map.get("DP").unwrap() as u32,
-            setup.dp_info.id().dict_idx(),
+            map.get("DP").unwrap(),
+            setup.dp_info.id().dict_idx() as usize,
             "INFO DP dict_idx mismatch"
         );
         assert_eq!(
-            map.get("BQ").unwrap() as u32,
-            setup.bq_info.id().dict_idx(),
+            map.get("BQ").unwrap(),
+            setup.bq_info.id().dict_idx() as usize,
             "INFO BQ dict_idx mismatch"
         );
         assert_eq!(
-            map.get("DB").unwrap() as u32,
-            setup.db_flag.id().dict_idx(),
+            map.get("DB").unwrap(),
+            setup.db_flag.id().dict_idx() as usize,
             "INFO DB dict_idx mismatch"
         );
         assert_eq!(
-            map.get("GT").unwrap() as u32,
-            setup.gt_fmt.id().dict_idx(),
+            map.get("GT").unwrap(),
+            setup.gt_fmt.id().dict_idx() as usize,
             "FORMAT GT dict_idx mismatch"
         );
     }
@@ -697,7 +697,7 @@ mod tests {
         }
 
         // Custom type for FORMAT — constructed only to verify the impl compiles.
-        #[allow(dead_code)]
+        #[allow(dead_code, reason = "only exists to verify EncodeFormat impl compiles")]
         struct Score(f32);
         impl EncodeFormat for Score {
             type Key = FormatFloat;

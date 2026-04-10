@@ -31,7 +31,7 @@ pub trait BcfValue: Copy {
     /// The BCF type code used for scalar encoding.
     const TYPE_CODE: u8;
     /// BCF type code for a specific scalar value. Defaults to `TYPE_CODE`.
-    /// Overridden by i32 to select the smallest fitting type per r[`bcf_writer.smallest_int_type`].
+    /// Overridden by i32 to select the smallest fitting type per `r[bcf_writer.smallest_int_type]`.
     fn scalar_type_code(self) -> u8 {
         Self::TYPE_CODE
     }
@@ -68,7 +68,7 @@ impl BcfValue for f32 {
 impl BcfValue for i32 {
     const TYPE_CODE: u8 = BCF_BT_INT32;
 
-    /// Select smallest BCF int type for this value per r[`bcf_writer.smallest_int_type`].
+    /// Select smallest BCF int type for this value per `r[bcf_writer.smallest_int_type]`.
     fn scalar_type_code(self) -> u8 {
         if (INT8_MIN..=INT8_MAX).contains(&self) {
             BCF_BT_INT8
@@ -997,7 +997,7 @@ pub(crate) fn encode_format_field(
 }
 
 /// Encode an array of `BcfValue` items. For i32, scans all values to select
-/// the smallest BCF int type that fits ALL values per r[`bcf_writer.smallest_int_type`].
+/// the smallest BCF int type that fits ALL values per `r[bcf_writer.smallest_int_type]`.
 fn encode_array_values<T: BcfValue>(buf: &mut Vec<u8>, values: &[T]) {
     if values.is_empty() {
         encode_type_byte(buf, 0, T::TYPE_CODE);

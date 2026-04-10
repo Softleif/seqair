@@ -442,7 +442,7 @@ impl VcfHeaderBuilder {
         ))
     }
 
-    /// Register a FILTER: adds the header entry and returns a resolved [`FilterId`].
+    /// Register a FILTER: adds the header entry and returns a resolved [`FilterId`](super::record_encoder::FilterId).
     pub fn register_filter(
         &mut self,
         def: &super::record_encoder::FilterFieldDef,
@@ -457,7 +457,7 @@ impl VcfHeaderBuilder {
     }
 
     // r[impl record_encoder.register_contig]
-    /// Register a contig: adds the header entry and returns a resolved [`ContigId`].
+    /// Register a contig: adds the header entry and returns a resolved [`ContigId`](super::record_encoder::ContigId).
     pub fn register_contig(
         &mut self,
         name: impl Into<SmolStr>,

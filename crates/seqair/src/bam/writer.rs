@@ -1,6 +1,6 @@
 //! BAM file writer with optional BAI index co-production.
 //!
-//! [`BamWriter`] serializes [`OwnedBamRecord`](super::owned_record::OwnedBamRecord) values
+//! [`BamWriter`] serializes [`OwnedBamRecord`] values
 //! into BGZF-compressed BAM format and optionally co-produces a BAI index during writing.
 
 use super::bgzf::BgzfError;
