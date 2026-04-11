@@ -15,6 +15,7 @@ use super::{
 
 /// Compact BAM record with offsets into the store's slabs.
 // r[impl record_store.push_raw+2]
+// r[impl record_store.slim_record_fields]
 pub struct SlimRecord {
     pub pos: Pos<Zero>,
     pub end_pos: Pos<Zero>,
@@ -24,29 +25,30 @@ pub struct SlimRecord {
     pub seq_len: u32,
     pub matching_bases: u32,
     pub indel_bases: u32,
+    pub tid: i32,
+    pub next_pos: i32,
+    pub template_len: i32,
     /// Offset into the name slab.
     name_off: u32,
     /// Length of the qname in the name slab.
     name_len: u16,
     /// Offset into the bases slab (`seq_len` Base values).
     bases_off: u32,
-    /// Offset into the data slab (start of [cigar|qual|aux]).
+    /// Offset into the cigar slab (packed u32 ops).
+    cigar_off: u32,
+    /// Offset into the data slab (start of [qual|aux]).
     data_off: u32,
     /// Length of aux data in the data slab.
     aux_len: u32,
 }
 
 impl SlimRecord {
-    fn cigar_off(&self) -> usize {
-        self.data_off as usize
-    }
-
     fn cigar_len(&self) -> usize {
         (self.n_cigar_ops as usize).checked_mul(4).expect("cigar_len overflow")
     }
 
     fn qual_off(&self) -> usize {
-        self.cigar_off().checked_add(self.cigar_len()).expect("qual_off overflow")
+        self.data_off as usize
     }
 
     fn aux_off(&self) -> usize {
@@ -64,21 +66,29 @@ impl SlimRecord {
 // r[related pileup.qpos]
 /// Slab-based storage for BAM records.
 ///
-/// Four contiguous buffers hold all data for a region:
+/// Five contiguous buffers hold all data for a region:
 /// - `records`: compact fixed-size structs
 /// - `names`: packed qnames (for dedup)
 /// - `bases`: decoded `Base` values per record (for per-position base lookup)
-/// - `data`: packed [cigar|qual|aux] per record (for pileup construction)
+/// - `cigar`: packed CIGAR ops (separated for append-only mutation during realignment)
+/// - `data`: packed [qual|aux] per record
 pub struct RecordStore {
     records: Vec<SlimRecord>,
     names: Vec<u8>,
     bases: Vec<Base>,
+    cigar: Vec<u8>,
     data: Vec<u8>,
 }
 
 impl RecordStore {
     pub fn new() -> Self {
-        Self { records: Vec::new(), names: Vec::new(), bases: Vec::new(), data: Vec::new() }
+        Self {
+            records: Vec::new(),
+            names: Vec::new(),
+            bases: Vec::new(),
+            cigar: Vec::new(),
+            data: Vec::new(),
+        }
     }
 
     // r[impl perf.arena_capacity_hint+2]
@@ -91,6 +101,7 @@ impl RecordStore {
             records: Vec::with_capacity(record_count_est),
             names: Vec::with_capacity(record_count_est.saturating_mul(25)),
             bases: Vec::with_capacity(record_count_est.saturating_mul(150)),
+            cigar: Vec::with_capacity(record_count_est.saturating_mul(20)),
             data: Vec::with_capacity(uncompressed_est),
         }
     }
@@ -149,12 +160,14 @@ impl RecordStore {
             );
         }
 
-        // --- Write into data slab [cigar|qual|aux] ---
+        // --- Write into cigar slab ---
+        // r[impl record_store.checked_offsets]
+        let cigar_off = u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
+        self.cigar.extend_from_slice(cigar_slice);
+
+        // --- Write into data slab [qual|aux] ---
         // r[impl record_store.checked_offsets]
         let data_off = u32::try_from(self.data.len()).map_err(|_| DecodeError::SlabOverflow)?;
-
-        // Cigar bytes (raw packed u32s)
-        self.data.extend_from_slice(cigar_slice);
 
         // Quality scores
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
@@ -174,6 +187,9 @@ impl RecordStore {
             seq_len: h.seq_len,
             matching_bases,
             indel_bases,
+            tid: h.tid,
+            next_pos: h.next_pos,
+            template_len: h.template_len,
             name_off,
             #[expect(
                 clippy::cast_possible_truncation,
@@ -181,6 +197,7 @@ impl RecordStore {
             )]
             name_len: qname_actual_len as u16,
             bases_off,
+            cigar_off,
             data_off,
             #[expect(
                 clippy::cast_possible_truncation,
@@ -251,6 +268,9 @@ impl RecordStore {
         bases: &[Base],
         qual: &[u8],
         aux: &[u8],
+        tid: i32,
+        next_pos: i32,
+        template_len: i32,
     ) -> Result<u32, DecodeError> {
         let idx = u32::try_from(self.records.len()).map_err(|_| DecodeError::SlabOverflow)?;
         #[expect(
@@ -274,10 +294,14 @@ impl RecordStore {
         let bases_off = u32::try_from(self.bases.len()).map_err(|_| DecodeError::SlabOverflow)?;
         self.bases.extend_from_slice(bases);
 
-        // Data slab [cigar|qual|aux]
+        // Cigar slab
+        // r[impl record_store.checked_offsets]
+        let cigar_off = u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
+        self.cigar.extend_from_slice(cigar_packed);
+
+        // Data slab [qual|aux]
         // r[impl record_store.checked_offsets]
         let data_off = u32::try_from(self.data.len()).map_err(|_| DecodeError::SlabOverflow)?;
-        self.data.extend_from_slice(cigar_packed);
         self.data.extend_from_slice(qual);
         self.data.extend_from_slice(aux);
 
@@ -290,6 +314,9 @@ impl RecordStore {
             seq_len,
             matching_bases,
             indel_bases,
+            tid,
+            next_pos,
+            template_len,
             name_off,
             #[expect(
                 clippy::cast_possible_truncation,
@@ -297,6 +324,7 @@ impl RecordStore {
             )]
             name_len: qname.len() as u16,
             bases_off,
+            cigar_off,
             data_off,
             #[expect(
                 clippy::cast_possible_truncation,
@@ -340,9 +368,10 @@ impl RecordStore {
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
     pub fn cigar(&self, idx: u32) -> &[u8] {
         let rec = self.record(idx);
-        let end = rec.cigar_off().checked_add(rec.cigar_len()).expect("cigar end overflow");
-        debug_assert!(end <= self.data.len(), "cigar slab overrun: {end} > {}", self.data.len());
-        &self.data[rec.cigar_off()..end]
+        let start = rec.cigar_off as usize;
+        let end = start.checked_add(rec.cigar_len()).expect("cigar end overflow");
+        debug_assert!(end <= self.cigar.len(), "cigar slab overrun: {end} > {}", self.cigar.len());
+        &self.cigar[start..end]
     }
 
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
@@ -378,10 +407,70 @@ impl RecordStore {
         &self.data[rec.aux_off()..end]
     }
 
+    // r[impl record_store.set_alignment]
+    // r[impl record_store.set_alignment.validation]
+    /// Replace a record's alignment (pos + cigar) by appending new CIGAR to the
+    /// cigar slab. The old CIGAR bytes become dead data.
+    ///
+    /// After calling this on one or more records, call `sort_by_pos()` before
+    /// using the store for pileup iteration.
+    pub fn set_alignment(
+        &mut self,
+        idx: u32,
+        new_pos: Pos<Zero>,
+        new_cigar_packed: &[u8],
+    ) -> Result<(), DecodeError> {
+        let rec = self.record(idx);
+        let seq_len = rec.seq_len;
+
+        // Validate query length matches seq_len
+        let new_query_len = cigar::calc_query_len(new_cigar_packed);
+        if new_query_len != seq_len {
+            return Err(DecodeError::CigarQueryLenMismatch {
+                cigar_query_len: new_query_len,
+                seq_len,
+            });
+        }
+
+        let end_pos = record::compute_end_pos(new_pos, new_cigar_packed)
+            .ok_or(DecodeError::InvalidPosition {
+                #[expect(
+                    clippy::cast_possible_wrap,
+                    reason = "BAM positions are capped at 2^29 by format spec; Pos<Zero> always fits i32"
+                )]
+                value: new_pos.get() as i32,
+            })?;
+        let (matching_bases, indel_bases) = cigar::calc_matches_indels(new_cigar_packed);
+
+        // Append new cigar to end of cigar slab
+        let new_cigar_off =
+            u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
+        self.cigar.extend_from_slice(new_cigar_packed);
+
+        // Update the record in place
+        #[allow(clippy::indexing_slicing, reason = "idx validated by self.record() above")]
+        let rec = &mut self.records[idx as usize];
+        rec.pos = new_pos;
+        rec.end_pos = end_pos;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "CIGAR op count bounded by packed bytes / 4; ≤ 65535 validated by BAM format"
+        )]
+        {
+            rec.n_cigar_ops = (new_cigar_packed.len() / 4) as u16;
+        }
+        rec.cigar_off = new_cigar_off;
+        rec.matching_bases = matching_bases;
+        rec.indel_bases = indel_bases;
+
+        Ok(())
+    }
+
     pub fn clear(&mut self) {
         self.records.clear();
         self.names.clear();
         self.bases.clear();
+        self.cigar.clear();
         self.data.clear();
     }
 
@@ -395,6 +484,10 @@ impl RecordStore {
 
     pub fn bases_capacity(&self) -> usize {
         self.bases.capacity()
+    }
+
+    pub fn cigar_capacity(&self) -> usize {
+        self.cigar.capacity()
     }
 
     pub fn data_capacity(&self) -> usize {
@@ -485,6 +578,9 @@ mod tests {
             &[Base::A],
             &[30],
             &[],
+            0, // tid
+            0, // next_pos
+            0, // template_len
         );
         assert!(result.is_ok());
     }

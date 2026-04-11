@@ -532,6 +532,22 @@ fn parse_sam_line(
         parse_aux_tags(aux_text, aux_buf)?;
     }
 
+    // Field 8: PNEXT (1-based mate position, 0 = unavailable)
+    let pnext_field = fields.get(7).copied().unwrap_or(b"0");
+    let pnext = parse_i64(pnext_field).unwrap_or(0);
+    // Convert 1-based to 0-based; PNEXT=0 means unavailable → store as -1
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::arithmetic_side_effects,
+        reason = "SAM PNEXT fits i32 by spec; pnext > 0 guarantees no underflow"
+    )]
+    let next_pos = if pnext > 0 { (pnext - 1) as i32 } else { -1 };
+
+    // Field 9: TLEN
+    let tlen_field = fields.get(8).copied().unwrap_or(b"0");
+    #[expect(clippy::cast_possible_truncation, reason = "SAM TLEN fits i32 by spec")]
+    let template_len = parse_i64(tlen_field).unwrap_or(0) as i32;
+
     let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_buf);
 
     store.push_fields(
@@ -546,6 +562,9 @@ fn parse_sam_line(
         bases_buf,
         qual_buf,
         aux_buf,
+        rec_tid,
+        next_pos,
+        template_len,
     )?;
 
     Ok(Some(()))

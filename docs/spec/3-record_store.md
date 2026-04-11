@@ -10,24 +10,31 @@ The record store replaces this with a **slab-based design**: all variable-length
 
 ## Layout
 
-The store contains four vectors:
+The store contains five vectors:
 
 - **Record table** (`Vec<SlimRecord>`): compact fixed-size structs with alignment fields and offsets into the slabs.
 - **Name slab** (`Vec<u8>`): all read names (qnames) packed sequentially. Separated because qnames are only accessed during dedup mate detection — a linear scan of a compact, contiguous buffer.
 - **Bases slab** (`Vec<Base>`): decoded base sequences stored as `Base` enum values (A/C/G/T/Unknown). For BAM, decoded from 4-bit nibbles via SIMD at push time. For SAM/CRAM, provided directly as `&[Base]` by the reader.
-- **Data slab** (`Vec<u8>`): packed per-record as `[cigar | qual | aux]` — CIGAR in BAM packed u32 format, quality as raw Phred bytes, aux tags in BAM binary format.
+- **Cigar slab** (`Vec<u8>`): CIGAR ops in BAM packed u32 format. Separated from the data slab because CIGAR is the field that changes during local realignment — isolating it allows append-only mutation without copying qual/aux.
+- **Data slab** (`Vec<u8>`): packed per-record as `[qual | aux]` — quality as raw Phred bytes, aux tags in BAM binary format.
 
 ```
 Record table:  [SlimRecord₀] [SlimRecord₁] [SlimRecord₂] ...
 Name slab:     [qname₀|qname₁|qname₂|...]
 Bases slab:    [bases₀|bases₁|bases₂|...]
-Data slab:     [cigar₀|qual₀|aux₀|cigar₁|qual₁|aux₁|...]
+Cigar slab:    [cigar₀|cigar₁|cigar₂|...]
+Data slab:     [qual₀|aux₀|qual₁|aux₁|...]
 ```
+
+## Record fields
+
+r[record_store.slim_record_fields]
+Each `SlimRecord` MUST store the following fixed fields: `tid` (reference ID), `pos`, `end_pos`, `flags`, `mapq`, `n_cigar_ops`, `seq_len`, `matching_bases`, `indel_bases`, `next_pos` (mate position), `template_len` (signed insert size). The `tid`, `next_pos`, and `template_len` fields are required for BAM write-back after local realignment.
 
 ## Capacity estimation
 
 r[record_store.capacity]
-On construction, the store MUST pre-allocate all three vectors with estimated capacities to avoid reallocation during `push_raw`. Estimates SHOULD be based on the number of compressed bytes loaded for the region: a typical BAM compression ratio of ~3:1, an average record size of ~400 bytes, ~25 bytes per read name, and ~375 bytes per record of non-name data. The store MUST accept a byte-count hint for this purpose.
+On construction, the store MUST pre-allocate all five vectors with estimated capacities to avoid reallocation during `push_raw`. Estimates SHOULD be based on the number of compressed bytes loaded for the region: a typical BAM compression ratio of ~3:1, an average record size of ~400 bytes, ~25 bytes per read name, ~20 bytes per record of CIGAR data, and ~355 bytes per record of non-name/non-cigar data. The store MUST accept a byte-count hint for this purpose.
 
 ## Decoding into slabs
 
@@ -35,7 +42,7 @@ r[record_store.push_raw+2]
 `push_raw(raw_bytes)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `Base` enum values in the bases slab.
 
 r[record_store.checked_offsets]
-Slab offsets (name_off, bases_off, data_off) MUST be checked for u32 overflow before storing in both `push_raw` and `push_fields`. If any slab exceeds `u32::MAX` bytes, the store MUST return an error rather than silently truncating the offset.
+Slab offsets (name_off, bases_off, cigar_off, data_off) MUST be checked for u32 overflow before storing in both `push_raw` and `push_fields`. If any slab exceeds `u32::MAX` bytes, the store MUST return an error rather than silently truncating the offset.
 
 r[record_store.push_fields]
 `push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as packed BAM-format u32 ops, sequence as `&[Base]`, quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing.
@@ -48,10 +55,18 @@ The store MUST provide methods to access each variable-length field for a given 
 ## Region lifecycle
 
 r[record_store.clear+2]
-Clearing the store for a new region MUST retain the allocated capacity of all four vectors, so that subsequent regions reuse the same memory without reallocation.
+Clearing the store for a new region MUST retain the allocated capacity of all five vectors, so that subsequent regions reuse the same memory without reallocation.
 
 r[record_store.region_scoped]
 All records in the store MUST remain valid and accessible until the store is cleared.
+
+## Alignment mutation
+
+r[record_store.set_alignment]
+`set_alignment(idx, new_pos, new_cigar_packed)` MUST replace a record's alignment by appending the new CIGAR to the end of the cigar slab and updating the record's `cigar_off`, `n_cigar_ops`, `pos`, `end_pos`, `matching_bases`, and `indel_bases`. The old CIGAR bytes MUST be left in place as dead data (append-only mutation). The sequence, quality, aux, and name slabs MUST NOT be modified. After calling `set_alignment` on one or more records, the caller MUST call `sort_by_pos()` before using the store for pileup iteration.
+
+r[record_store.set_alignment.validation]
+`set_alignment` MUST validate that the new CIGAR's query-consuming length equals the record's `seq_len`. If they do not match, the method MUST return an error without modifying the store.
 
 ## Integration
 

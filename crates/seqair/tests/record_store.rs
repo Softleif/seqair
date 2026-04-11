@@ -171,6 +171,9 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
         &bases,
         qual,
         aux,
+        store_raw.record(idx_raw).tid,
+        store_raw.record(idx_raw).next_pos,
+        store_raw.record(idx_raw).template_len,
     )?;
 
     // Compare fixed fields
@@ -229,6 +232,9 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
             store.seq(i),
             store.qual(i),
             store.aux(i),
+            rec.tid,
+            rec.next_pos,
+            rec.template_len,
         )?;
     }
 

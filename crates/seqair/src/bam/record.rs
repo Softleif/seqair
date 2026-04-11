@@ -195,6 +195,8 @@ pub(crate) struct ParsedHeader {
     pub flags: BamFlags,
     pub n_cigar_ops: u16,
     pub seq_len: u32,
+    pub next_pos: i32,
+    pub template_len: i32,
     /// Start of variable-length data (32 + `name_len`).
     pub var_start: usize,
     /// End of CIGAR bytes.
@@ -231,6 +233,9 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     let n_cigar_ops = u16::from_le_bytes(read2(raw, 12));
     let flags = BamFlags::from(u16::from_le_bytes(read2(raw, 14)));
     let seq_len = u32::from_le_bytes(read4(raw, 16));
+    // next_ref_id at offset 20 is not stored (mate's tid rarely needed for realignment).
+    let next_pos = i32::from_le_bytes(read4(raw, 24));
+    let template_len = i32::from_le_bytes(read4(raw, 28));
 
     let cigar_bytes = usize::from(n_cigar_ops) * 4;
     let seq_bytes = (seq_len as usize).div_ceil(2);
@@ -251,6 +256,8 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
         flags,
         n_cigar_ops,
         seq_len,
+        next_pos,
+        template_len,
         var_start,
         cigar_end,
         seq_end,
@@ -271,6 +278,9 @@ pub enum DecodeError {
 
     #[error("invalid BAM position value {value}: negative positions are reserved")]
     InvalidPosition { value: i32 },
+
+    #[error("CIGAR query length {cigar_query_len} does not match seq_len {seq_len}")]
+    CigarQueryLenMismatch { cigar_query_len: u32, seq_len: u32 },
 }
 
 #[cfg(test)]

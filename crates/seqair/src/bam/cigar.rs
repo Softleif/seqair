@@ -120,6 +120,23 @@ const fn consumes_query(op: u8) -> bool {
     matches!(op, CIGAR_M | CIGAR_I | CIGAR_S | CIGAR_EQ | CIGAR_X)
 }
 
+/// Calculate the query-consuming length from packed CIGAR bytes (LE u32 per op).
+///
+/// Query-consuming ops: M, I, S, =, X.
+pub fn calc_query_len(cigar_bytes: &[u8]) -> u32 {
+    let mut qlen = 0u32;
+    let n_ops = cigar_bytes.len() / 4;
+    for i in 0..n_ops {
+        let op = u32::from_le_bytes(read4(cigar_bytes, i.wrapping_mul(4)));
+        let len = op >> 4;
+        let op_type = (op & 0xF) as u8;
+        if consumes_query(op_type) {
+            qlen = qlen.saturating_add(len);
+        }
+    }
+    qlen
+}
+
 // r[impl cigar.matches_indels]
 /// Calculate matches and indels from packed CIGAR bytes (LE u32 per op).
 ///
