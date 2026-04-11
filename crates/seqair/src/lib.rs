@@ -1,19 +1,12 @@
 //! Pure-Rust BAM/SAM/CRAM/FASTA reader, pileup engine, and VCF/BCF writer.
 //!
 //! seqair provides indexed random access to alignment files (BAM, SAM, CRAM),
-//! reference sequences (FASTA), and a column-based pileup engine. It also
-//! includes VCF/BCF writers with type-safe allele representation and single-pass
-//! index co-production.
+//! reference sequences (FASTA), and a column-based pileup engine.
+//! See [`Readers`] for examples.
 //!
-//! # Entry points
-//!
-//! | Task | Type |
-//! |---|---|
-//! | Open BAM/SAM/CRAM + FASTA | [`reader::Readers`] |
-//! | Pileup columns | [`bam::pileup::PileupEngine`] |
-//! | FASTA only | [`fasta::IndexedFastaReader`] |
-//! | Write VCF/BCF | [`vcf::Writer`] |
-//! | Type-safe alleles | [`vcf::Alleles`] |
+//! It also includes VCF/BCF writers with type-safe allele representation and
+//! single-pass index co-production.
+//! See [`vcf`] for examples.
 
 pub mod bam;
 pub mod cram;
@@ -23,4 +16,4 @@ pub mod sam;
 pub(crate) mod utils;
 pub mod vcf;
 
-pub use reader::{IndexedReader, Readers};
+pub use reader::Readers;
