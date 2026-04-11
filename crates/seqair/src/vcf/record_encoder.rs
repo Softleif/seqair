@@ -195,6 +195,8 @@ pub trait FormatEncoder {
     fn format_float(&mut self, id: &FieldId, values: &[f32]);
     fn n_allele(&self) -> usize;
     fn n_alt(&self) -> usize;
+    /// Number of samples declared by the header.
+    fn n_samples(&self) -> usize;
 }
 
 // ── Key encode methods ─────────────────────────────────────────────────
@@ -245,18 +247,39 @@ impl InfoKey<OptArr<i32>> {
 
 impl FormatKey<Gt> {
     pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), gts: &[Genotype]) {
+        debug_assert_eq!(
+            gts.len(),
+            enc.n_samples(),
+            "FormatKey<Gt>::encode: expected {} genotypes (one per sample), got {}",
+            enc.n_samples(),
+            gts.len(),
+        );
         enc.format_gt(&self.0, gts);
     }
 }
 
 impl FormatKey<Scalar<i32>> {
     pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), values: &[i32]) {
+        debug_assert_eq!(
+            values.len(),
+            enc.n_samples(),
+            "FormatKey<Scalar<i32>>::encode: expected {} values (one per sample), got {}",
+            enc.n_samples(),
+            values.len(),
+        );
         enc.format_int(&self.0, values);
     }
 }
 
 impl FormatKey<Scalar<f32>> {
     pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), values: &[f32]) {
+        debug_assert_eq!(
+            values.len(),
+            enc.n_samples(),
+            "FormatKey<Scalar<f32>>::encode: expected {} values (one per sample), got {}",
+            enc.n_samples(),
+            values.len(),
+        );
         enc.format_float(&self.0, values);
     }
 }
@@ -613,7 +636,7 @@ mod tests {
         setup.bq_info.encode(&mut enc, 35.5);
         setup.db_flag.encode(&mut enc);
         setup.ad_info.encode(&mut enc, &[30, 20]);
-        let mut enc = enc.begin_samples(1);
+        let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
         setup.dp_fmt.encode(&mut enc, &[45]);
         enc.emit().unwrap();
@@ -705,7 +728,7 @@ mod tests {
             .unwrap()
             .filter_pass();
         accepts_info_enc(&mut filtered);
-        let mut with_samples = filtered.begin_samples(1);
+        let mut with_samples = filtered.begin_samples();
         accepts_format_enc(&mut with_samples);
         with_samples.emit().unwrap();
         writer.finish().unwrap();
@@ -787,7 +810,7 @@ mod tests {
             .unwrap();
         let mut enc = enc.filter_pass();
         dp_info.encode(&mut enc, 150);
-        let mut enc = enc.begin_samples(3);
+        let mut enc = enc.begin_samples();
         gt_fmt.encode(
             &mut enc,
             &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
@@ -813,7 +836,7 @@ mod tests {
             .unwrap();
         let mut enc = enc.filter_pass();
         dp_info.encode(&mut enc, 150);
-        let mut enc = enc.begin_samples(3);
+        let mut enc = enc.begin_samples();
         gt_fmt.encode(
             &mut enc,
             &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
@@ -847,7 +870,7 @@ mod tests {
             .unwrap();
         let mut enc = enc.filter_pass();
         setup.dp_info.encode(&mut enc, 50);
-        let mut enc = enc.begin_samples(1);
+        let mut enc = enc.begin_samples();
         // Single-sample callers pass 1-element slices
         setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
         setup.dp_fmt.encode(&mut enc, &[45]);

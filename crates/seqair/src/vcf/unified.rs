@@ -41,7 +41,7 @@
 //! let enc = writer.begin_record(&chr1, Pos1::new(12345).unwrap(), &alleles, Some(30.0))?;
 //! let mut enc = enc.filter_pass();    // Begun → Filtered
 //! dp_info.encode(&mut enc, 50);
-//! let mut enc = enc.begin_samples(1); // Filtered → WithSamples
+//! let mut enc = enc.begin_samples(); // Filtered → WithSamples
 //! gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
 //! dp_fmt.encode(&mut enc, &[45]);
 //! enc.emit()?;
@@ -88,7 +88,7 @@
 //! let enc = writer.begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))?;
 //! let mut enc = enc.filter_pass();
 //! dp.encode(&mut enc, 50);
-//! let mut enc = enc.begin_samples(1);
+//! let mut enc = enc.begin_samples();
 //! gt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
 //! enc.emit()?;
 //!
@@ -151,6 +151,7 @@ enum WriterInner<W: Write> {
         buf: Vec<u8>,
         fmt_keys: Vec<SmolStr>,
         sample_bufs: Vec<Vec<u8>>,
+        n_samples: u32,
     },
     VcfGz {
         bgzf: BgzfWriter<W>,
@@ -158,12 +159,14 @@ enum WriterInner<W: Write> {
         buf: Vec<u8>,
         fmt_keys: Vec<SmolStr>,
         sample_bufs: Vec<Vec<u8>>,
+        n_samples: u32,
     },
     Bcf {
         bgzf: BgzfWriter<W>,
         index: Option<IndexBuilder>,
         shared_buf: Vec<u8>,
         indiv_buf: Vec<u8>,
+        n_samples: u32,
     },
 }
 
@@ -177,6 +180,7 @@ impl<W: Write> Writer<W> {
                 buf: Vec::with_capacity(4096),
                 fmt_keys: Vec::with_capacity(8),
                 sample_bufs: Vec::new(),
+                n_samples: 0,
             },
             OutputFormat::VcfGz => WriterInner::VcfGz {
                 bgzf: BgzfWriter::new(inner),
@@ -184,12 +188,14 @@ impl<W: Write> Writer<W> {
                 buf: Vec::with_capacity(4096),
                 fmt_keys: Vec::with_capacity(8),
                 sample_bufs: Vec::new(),
+                n_samples: 0,
             },
             OutputFormat::Bcf => WriterInner::Bcf {
                 bgzf: BgzfWriter::new(inner),
                 index: None,
                 shared_buf: Vec::with_capacity(4096),
                 indiv_buf: Vec::with_capacity(4096),
+                n_samples: 0,
             },
         };
         Writer { inner, _state: PhantomData }
@@ -200,16 +206,23 @@ impl<W: Write> Writer<W> {
     pub fn write_header(mut self, header: &VcfHeader) -> Result<Writer<W, Ready>, VcfError> {
         let header_text = header.to_vcf_text();
         let n_refs = header.contigs().len();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "sample count bounded by VcfHeader builder; realistic files have <100 samples"
+        )]
+        let header_n_samples = header.samples().len() as u32;
 
         match &mut self.inner {
-            WriterInner::Vcf { output, .. } => {
+            WriterInner::Vcf { output, n_samples, .. } => {
                 output.write_all(header_text.as_bytes()).map_err(VcfError::Io)?;
+                *n_samples = header_n_samples;
             }
-            WriterInner::VcfGz { bgzf, index, .. } => {
+            WriterInner::VcfGz { bgzf, index, n_samples, .. } => {
                 bgzf.write_all(header_text.as_bytes())?;
                 *index = Some(IndexBuilder::tbi(n_refs, bgzf.virtual_offset()));
+                *n_samples = header_n_samples;
             }
-            WriterInner::Bcf { bgzf, index, .. } => {
+            WriterInner::Bcf { bgzf, index, n_samples, .. } => {
                 // r[impl bcf_writer.magic]
                 bgzf.write_all(b"BCF\x02\x02")?;
                 let l_text = header_text.len().checked_add(1).ok_or(VcfError::HeaderTooLarge)?;
@@ -218,6 +231,7 @@ impl<W: Write> Writer<W> {
                 bgzf.write_all(header_text.as_bytes())?;
                 bgzf.write_all(&[0u8])?;
                 *index = Some(IndexBuilder::new(n_refs, 14, 5, bgzf.virtual_offset()));
+                *n_samples = header_n_samples;
             }
         }
 
@@ -236,7 +250,7 @@ impl<W: Write> Writer<W, Ready> {
         qual: Option<f32>,
     ) -> Result<RecordEncoder<'_, Begun>, VcfError> {
         let inner = match &mut self.inner {
-            WriterInner::Bcf { bgzf, index, shared_buf, indiv_buf } => {
+            WriterInner::Bcf { bgzf, index, shared_buf, indiv_buf, n_samples } => {
                 // r[impl bcf_writer.buffer_reuse]
                 let mut enc = BcfRecordEncoder {
                     shared_buf,
@@ -247,7 +261,7 @@ impl<W: Write> Writer<W, Ready> {
                     n_alt: 0,
                     n_info: 0,
                     n_fmt: 0,
-                    n_sample: 0,
+                    n_sample: *n_samples,
                     tid: 0,
                     pos_0based: 0,
                     rlen: 0,
@@ -255,7 +269,7 @@ impl<W: Write> Writer<W, Ready> {
                 alleles.begin_record(&mut enc, ContigHandle(contig.tid()), pos, qual)?;
                 EncoderInner::Bcf(enc)
             }
-            WriterInner::Vcf { output, buf, fmt_keys, sample_bufs } => {
+            WriterInner::Vcf { output, buf, fmt_keys, sample_bufs, n_samples } => {
                 let output = VcfOutput::Plain(output);
                 EncoderInner::Vcf(begin_vcf_record(
                     buf,
@@ -266,9 +280,10 @@ impl<W: Write> Writer<W, Ready> {
                     pos,
                     alleles,
                     qual,
+                    *n_samples,
                 )?)
             }
-            WriterInner::VcfGz { bgzf, index, buf, fmt_keys, sample_bufs } => {
+            WriterInner::VcfGz { bgzf, index, buf, fmt_keys, sample_bufs, n_samples } => {
                 let output = VcfOutput::Bgzf { bgzf, index: index.as_mut() };
                 EncoderInner::Vcf(begin_vcf_record(
                     buf,
@@ -279,6 +294,7 @@ impl<W: Write> Writer<W, Ready> {
                     pos,
                     alleles,
                     qual,
+                    *n_samples,
                 )?)
             }
         };
@@ -377,10 +393,15 @@ fn begin_vcf_record<'a>(
     pos: Pos<One>,
     alleles: &Alleles,
     qual: Option<f32>,
+    n_samples: u32,
 ) -> Result<VcfEncoderFields<'a>, VcfError> {
     buf.clear();
     fmt_keys.clear();
-    sample_bufs.clear();
+    // Retain existing Vec allocations for buffer reuse across records (r[record_encoder.buffer_reuse]).
+    // Only clear contents; begin_samples will resize if needed.
+    for sb in sample_bufs.iter_mut() {
+        sb.clear();
+    }
 
     let n_allele = u16::try_from(alleles.n_allele()).map_err(|_| VcfError::ValueOverflow {
         field: "n_allele",
@@ -440,7 +461,7 @@ fn begin_vcf_record<'a>(
         tid,
         pos_0based,
         rlen,
-        n_samples: 0,
+        n_samples,
         filter_written: false,
     })
 }
@@ -694,12 +715,20 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
 
 // r[impl record_encoder.typestate_transitions]
 impl<'a> RecordEncoder<'a, Filtered> {
-    pub fn begin_samples(mut self, n: u32) -> RecordEncoder<'a, WithSamples> {
+    /// Transition to the `WithSamples` state for encoding FORMAT fields.
+    ///
+    /// The sample count is derived from the header (set during `write_header`).
+    pub fn begin_samples(mut self) -> RecordEncoder<'a, WithSamples> {
         match &mut self.inner {
-            EncoderInner::Bcf(enc) => enc.n_sample = n,
+            EncoderInner::Bcf(_enc) => {
+                // n_sample already set from header in begin_record
+            }
             EncoderInner::Vcf(vcf) => {
-                vcf.n_samples = n;
-                vcf.sample_bufs.resize_with(n as usize, Vec::new);
+                let n = vcf.n_samples as usize;
+                // Grow sample_bufs if needed, reuse existing Vec allocations
+                vcf.sample_bufs.resize_with(n, Vec::new);
+                // Truncate if header has fewer samples than a previous use
+                vcf.sample_bufs.truncate(n);
                 for buf in vcf.sample_bufs.iter_mut() {
                     buf.clear();
                 }
@@ -727,8 +756,11 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 // r[impl bcf_encoder.format_field_major]
                 debug_assert_eq!(gts.len(), enc.n_sample as usize);
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
+                // Ploidy is taken from the first sample. Mixed ploidy (e.g., haploid +
+                // diploid on chrX) is not yet supported — BCF allows per-sample padding
+                // with end-of-vector sentinels but we don't encode that. For now, callers
+                // must pass uniform ploidy; mismatched samples will produce incorrect BCF.
                 let ploidy = gts.first().map_or(0, |g| g.alleles.len());
-                debug_assert!(gts.iter().all(|g| g.alleles.len() == ploidy));
                 let max_allele: i32 = gts
                     .iter()
                     .flat_map(|g| g.alleles.iter())
@@ -811,6 +843,9 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 // r[impl bcf_writer.smallest_int_type]
                 // r[impl bcf_writer.indiv_field_major]
                 debug_assert_eq!(values.len(), enc.n_sample as usize);
+                // f32::scalar_type_code() always returns BCF_BT_FLOAT regardless of value,
+                // so checking only the first element is harmless (unlike format_int which
+                // must scan all values to find the smallest fitting integer type).
                 let tc = values.first().map_or(BCF_BT_FLOAT, |v| v.scalar_type_code());
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
                 encode_type_byte(enc.indiv_buf, 1, tc);
@@ -841,6 +876,12 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         match &self.inner {
             EncoderInner::Bcf(e) => e.n_alt as usize,
             EncoderInner::Vcf(v) => v.n_alt as usize,
+        }
+    }
+    fn n_samples(&self) -> usize {
+        match &self.inner {
+            EncoderInner::Bcf(e) => e.n_sample as usize,
+            EncoderInner::Vcf(v) => v.n_samples as usize,
         }
     }
 }

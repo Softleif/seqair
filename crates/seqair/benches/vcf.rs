@@ -312,7 +312,7 @@ macro_rules! seqair_encode_record {
         mq_info.encode(&mut enc, 55.0 + (i % 20) as f32 * 0.5);
         qd_info.encode(&mut enc, 5.0 + (i % 25) as f32 * 0.8);
         fs_info.encode(&mut enc, (i % 30) as f32 * 0.5);
-        let mut enc = enc.begin_samples(N_GERMLINE_SAMPLES as u32);
+        let mut enc = enc.begin_samples();
         let gts: Vec<Genotype> = (0..N_GERMLINE_SAMPLES)
             .map(|s| match (s + i as usize) % 6 {
                 0 => Genotype::unphased(0, 0),

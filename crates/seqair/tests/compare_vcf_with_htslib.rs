@@ -90,7 +90,7 @@ fn write_seqair_bcf(
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, depth);
-        let mut enc = enc.begin_samples(1);
+        let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[gt]);
         setup.dp_fmt.encode(&mut enc, &[depth]);
         enc.emit().unwrap();

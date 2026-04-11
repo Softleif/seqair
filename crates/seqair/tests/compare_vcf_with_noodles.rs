@@ -115,7 +115,7 @@ fn vcf_text_readable_by_noodles() {
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, 50);
-        let mut enc = enc.begin_samples(1);
+        let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
         setup.dp_fmt.encode(&mut enc, &[30]);
         enc.emit().unwrap();
@@ -154,7 +154,7 @@ fn bcf_write_record_readable_by_noodles() {
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, 42);
-        let mut enc = enc.begin_samples(1);
+        let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
         setup.dp_fmt.encode(&mut enc, &[25]);
         enc.emit().unwrap();
@@ -189,7 +189,7 @@ fn bcf_encoder_readable_by_noodles() {
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, 100);
-        let mut enc = enc.begin_samples(1);
+        let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[Genotype::phased_diploid(0, 1)]);
         setup.dp_fmt.encode(&mut enc, &[80]);
         enc.emit().unwrap();
@@ -318,4 +318,196 @@ proptest! {
         }
         prop_assert_eq!(records.len(), 1, "noodles VCF reader should parse exactly 1 record");
     }
+}
+
+// ── Multi-sample round-trip tests ────────────────────────────────────
+
+fn multi_sample_setup() -> (Arc<VcfHeader>, ContigId, InfoInt, FormatGt, FormatInt) {
+    let mut builder = VcfHeader::builder();
+    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let dp_info = builder
+        .register_info(&InfoFieldDef::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Total Depth",
+        ))
+        .unwrap();
+    let gt_fmt = builder
+        .register_format(&FormatFieldDef::<Gt>::new(
+            "GT",
+            Number::Count(1),
+            ValueType::String,
+            "Genotype",
+        ))
+        .unwrap();
+    let dp_fmt = builder
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Read Depth",
+        ))
+        .unwrap();
+    let header = Arc::new(
+        builder
+            .add_sample("S1")
+            .unwrap()
+            .add_sample("S2")
+            .unwrap()
+            .add_sample("S3")
+            .unwrap()
+            .build()
+            .unwrap(),
+    );
+    (header, contig, dp_info, gt_fmt, dp_fmt)
+}
+
+// r[verify bcf_encoder.format_field_major]
+#[test]
+fn multi_sample_bcf_readable_by_noodles() {
+    let (header, contig, dp_info, gt_fmt, dp_fmt) = multi_sample_setup();
+    let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+
+    let mut bcf_output = Vec::new();
+    {
+        let writer = Writer::new(&mut bcf_output, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&header).unwrap();
+        let mut enc = writer
+            .begin_record(&contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        dp_info.encode(&mut enc, 150);
+        let mut enc = enc.begin_samples();
+        gt_fmt.encode(
+            &mut enc,
+            &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
+        );
+        dp_fmt.encode(&mut enc, &[45, 52, 38]);
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+    }
+
+    // Read back with noodles BCF reader
+    let mut reader = noodles::bcf::io::Reader::new(Cursor::new(&bcf_output));
+    let noodles_header = reader.read_header().unwrap();
+
+    // Verify header declares 3 samples
+    assert_eq!(noodles_header.sample_names().len(), 3, "header should have 3 samples");
+    assert!(noodles_header.sample_names().contains("S1"));
+    assert!(noodles_header.sample_names().contains("S2"));
+    assert!(noodles_header.sample_names().contains("S3"));
+
+    let mut records = Vec::new();
+    for result in reader.record_bufs(&noodles_header) {
+        records.push(result.unwrap());
+    }
+
+    assert_eq!(records.len(), 1, "expected 1 record from multi-sample BCF");
+}
+
+// r[verify bcf_encoder.format_field_major]
+#[test]
+fn multi_sample_vcf_readable_by_noodles() {
+    let (header, contig, dp_info, gt_fmt, dp_fmt) = multi_sample_setup();
+    let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+
+    let mut output = Vec::new();
+    {
+        let writer = Writer::new(&mut output, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&header).unwrap();
+        let mut enc = writer
+            .begin_record(&contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        dp_info.encode(&mut enc, 150);
+        let mut enc = enc.begin_samples();
+        gt_fmt.encode(
+            &mut enc,
+            &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
+        );
+        dp_fmt.encode(&mut enc, &[45, 52, 38]);
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+    }
+
+    // Read back with noodles VCF reader
+    let mut reader = noodles::vcf::io::Reader::new(Cursor::new(&output));
+    let noodles_header = reader.read_header().unwrap();
+
+    assert_eq!(noodles_header.sample_names().len(), 3, "header should have 3 samples");
+
+    let mut records = Vec::new();
+    for result in reader.record_bufs(&noodles_header) {
+        records.push(result.unwrap());
+    }
+
+    assert_eq!(records.len(), 1, "expected 1 record from multi-sample VCF");
+
+    // Verify the VCF text has the right columns
+    let text = String::from_utf8(output).unwrap();
+    let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
+    let cols: Vec<&str> = data_line.split('\t').collect();
+    // 8 fixed + FORMAT + 3 samples = 12 columns
+    assert_eq!(cols.len(), 12, "expected 12 columns for 3-sample VCF");
+    assert_eq!(cols[8], "GT:DP", "FORMAT column");
+    assert_eq!(cols[9], "0/1:45", "sample S1");
+    assert_eq!(cols[10], "0/0:52", "sample S2");
+    assert_eq!(cols[11], "1/1:38", "sample S3");
+}
+
+// r[verify bcf_encoder.format_field_major]
+#[test]
+fn multi_sample_bcf_readable_by_bcftools() {
+    let (header, contig, dp_info, gt_fmt, dp_fmt) = multi_sample_setup();
+    let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+
+    let tmp = tempfile::Builder::new().suffix(".bcf").tempfile().unwrap();
+
+    let mut buf = Vec::new();
+    {
+        let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&header).unwrap();
+        let mut enc = writer
+            .begin_record(&contig, Pos::<One>::new(200).unwrap(), &alleles, Some(50.0))
+            .unwrap()
+            .filter_pass();
+        dp_info.encode(&mut enc, 120);
+        let mut enc = enc.begin_samples();
+        gt_fmt.encode(
+            &mut enc,
+            &[Genotype::unphased(0, 1), Genotype::phased_diploid(1, 1), Genotype::unphased(0, 0)],
+        );
+        dp_fmt.encode(&mut enc, &[30, 40, 50]);
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+    }
+    std::fs::write(tmp.path(), &buf).unwrap();
+
+    // Run bcftools
+    let output = match std::process::Command::new("bcftools")
+        .args(["view", "-H"])
+        .arg(tmp.path())
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap(),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            panic!("bcftools view failed: {stderr}");
+        }
+        Err(_) => {
+            eprintln!("bcftools not found, skipping test");
+            return;
+        }
+    };
+
+    let line = output.lines().next().expect("expected at least 1 data line");
+    let cols: Vec<&str> = line.split('\t').collect();
+    assert_eq!(cols.len(), 12, "expected 12 columns for 3-sample VCF from bcftools");
+    assert!(cols[8].contains("GT"), "FORMAT should contain GT");
+    assert!(cols[8].contains("DP"), "FORMAT should contain DP");
+    // Verify sample genotype values are present
+    assert!(cols[9].starts_with("0/1"), "sample S1 GT should be 0/1, got {}", cols[9]);
+    assert!(cols[10].starts_with("1|1"), "sample S2 GT should be 1|1 (phased), got {}", cols[10]);
+    assert!(cols[11].starts_with("0/0"), "sample S3 GT should be 0/0, got {}", cols[11]);
 }

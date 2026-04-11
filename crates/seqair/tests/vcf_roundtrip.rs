@@ -212,7 +212,7 @@ fn write_one_record<W: std::io::Write>(
     }
     setup.mq_info.encode(&mut enc, rec.mq);
 
-    let mut enc = enc.begin_samples(1);
+    let mut enc = enc.begin_samples();
     setup.gt_fmt.encode(&mut enc, std::slice::from_ref(&rec.gt));
     setup.dp_fmt.encode(&mut enc, &[rec.sample_dp]);
     setup.gq_fmt.encode(&mut enc, &[rec.sample_gq]);

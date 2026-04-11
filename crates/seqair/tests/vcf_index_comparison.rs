@@ -81,7 +81,7 @@ fn write_vcf_gz_with_index(
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, (i as i32 + 1) * 10);
-        let mut enc = enc.begin_samples(1);
+        let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
         enc.emit().unwrap();
     }
@@ -93,7 +93,7 @@ fn write_vcf_gz_with_index(
         .unwrap()
         .filter_pass();
     setup.dp_info.encode(&mut enc, 80);
-    let mut enc = enc.begin_samples(1);
+    let mut enc = enc.begin_samples();
     setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(1, 1)]);
     enc.emit().unwrap();
 
@@ -349,7 +349,7 @@ fn write_proptest_vcf(
             .unwrap()
             .filter_pass();
         dp_info.encode(&mut enc, 30);
-        let mut enc = enc.begin_samples(1);
+        let mut enc = enc.begin_samples();
         gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
         enc.emit().unwrap();
     }
