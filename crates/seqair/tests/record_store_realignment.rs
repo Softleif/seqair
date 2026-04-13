@@ -1,9 +1,11 @@
-//! Tests for RecordStore alignment mutation (cigar slab, set_alignment, tid, mate fields).
+//! Tests for `RecordStore` alignment mutation (cigar slab, `set_alignment`, tid, mate fields).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
     reason = "test code"
 )]
 #![allow(
@@ -56,24 +58,24 @@ fn ref_len_from_parts(ops: &[(u32, u8)]) -> u32 {
         .sum()
 }
 
-/// Compute expected end_pos from pos and cigar parts (independent oracle).
+/// Compute expected `end_pos` from pos and cigar parts (independent oracle).
 fn expected_end_pos(pos: u32, ops: &[(u32, u8)]) -> u32 {
     let rlen = ref_len_from_parts(ops);
     if rlen == 0 { pos } else { pos + rlen - 1 }
 }
 
-/// Compute matching_bases from parts (independent oracle).
+/// Compute `matching_bases` from parts (independent oracle).
 fn expected_matching_bases(ops: &[(u32, u8)]) -> u32 {
     ops.iter().filter(|(_, op)| *op == CIGAR_M).map(|(len, _)| len).sum()
 }
 
-/// Compute indel_bases from parts (independent oracle).
+/// Compute `indel_bases` from parts (independent oracle).
 fn expected_indel_bases(ops: &[(u32, u8)]) -> u32 {
     ops.iter().filter(|(_, op)| *op == CIGAR_I || *op == CIGAR_D).map(|(len, _)| len).sum()
 }
 
 /// Build a minimal raw BAM record for testing.
-/// Same helper as in record_store.rs tests, extended with next_pos and template_len.
+/// Same helper as in `record_store.rs` tests, extended with `next_pos` and `template_len`.
 fn make_test_record(
     tid: i32,
     pos: i32,
@@ -392,7 +394,7 @@ fn set_alignment_multiple_times_same_record() {
 // Property-based tests
 // ---------------------------------------------------------------------------
 
-/// Generate a valid CIGAR as (len, op_type) parts with a guaranteed minimum
+/// Generate a valid CIGAR as (len, `op_type`) parts with a guaranteed minimum
 /// query length. Returns parts and the total query-consuming length.
 fn arb_cigar_parts_with_query_len(min_query: u32) -> impl Strategy<Value = Vec<(u32, u8)>> {
     // Generate 1..8 ops, M/I/D/S only (keeping it simple for tests)
@@ -410,7 +412,7 @@ fn arb_cigar_parts_with_query_len(min_query: u32) -> impl Strategy<Value = Vec<(
     })
 }
 
-/// Generate a pair of CIGARs with the same query length (for set_alignment).
+/// Generate a pair of CIGARs with the same query length (for `set_alignment`).
 /// The second cigar is constructed to have exactly the right query length
 /// by splitting it into a random number of M/I/S ops that sum to the target.
 fn arb_cigar_pair() -> impl Strategy<Value = (Vec<(u32, u8)>, Vec<(u32, u8)>)> {
