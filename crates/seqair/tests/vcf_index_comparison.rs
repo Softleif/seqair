@@ -82,7 +82,7 @@ fn write_vcf_gz_with_index(
             .filter_pass();
         setup.dp_info.encode(&mut enc, (i as i32 + 1) * 10);
         let mut enc = enc.begin_samples();
-        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         enc.emit().unwrap();
     }
 
@@ -94,7 +94,7 @@ fn write_vcf_gz_with_index(
         .filter_pass();
     setup.dp_info.encode(&mut enc, 80);
     let mut enc = enc.begin_samples();
-    setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(1, 1)]);
+    setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(1, 1)]).unwrap();
     enc.emit().unwrap();
 
     let index = writer.finish().unwrap().expect("VcfGz writer should produce TBI index");
@@ -350,7 +350,7 @@ fn write_proptest_vcf(
             .filter_pass();
         dp_info.encode(&mut enc, 30);
         let mut enc = enc.begin_samples();
-        gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
+        gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         enc.emit().unwrap();
     }
 
