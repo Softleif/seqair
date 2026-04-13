@@ -648,23 +648,25 @@ impl<'a> RecordEncoder<'a, Filtered> {
 // r[impl record_encoder.format_encoder]
 #[allow(clippy::indexing_slicing, reason = "sample_bufs length validated by debug_assert")]
 impl FormatEncoder for RecordEncoder<'_, WithSamples> {
-    fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]) {
+    fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]) -> Result<(), VcfError> {
+        // Ploidy is taken from the first sample. Mixed ploidy (e.g., haploid +
+        // diploid on chrX) is not yet supported — BCF allows per-sample padding
+        // with end-of-vector sentinels but we don't encode that.
+        let ploidy = gts.first().map_or(0, |g| g.alleles.len());
+        if let Some((i, g)) = gts.iter().enumerate().find(|(_, g)| g.alleles.len() != ploidy) {
+            return Err(VcfError::MixedPloidy {
+                first_ploidy: ploidy,
+                mismatch_index: i,
+                mismatch_ploidy: g.alleles.len(),
+            });
+        }
+
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 // r[impl bcf_writer.gt_encoding]
                 // r[impl bcf_writer.indiv_field_major]
                 // r[impl bcf_encoder.format_field_major]
-                debug_assert_eq!(gts.len(), enc.n_sample as usize);
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
-                // Ploidy is taken from the first sample. Mixed ploidy (e.g., haploid +
-                // diploid on chrX) is not yet supported — BCF allows per-sample padding
-                // with end-of-vector sentinels but we don't encode that.
-                let ploidy = gts.first().map_or(0, |g| g.alleles.len());
-                assert!(
-                    gts.iter().all(|g| g.alleles.len() == ploidy),
-                    "mixed ploidy not supported: first sample has ploidy {ploidy} but \
-                     at least one other sample differs",
-                );
                 let max_allele: i32 = gts
                     .iter()
                     .flat_map(|g| g.alleles.iter())
@@ -695,7 +697,6 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
             }
             EncoderInner::Vcf(vcf) => {
                 // r[impl vcf_writer.genotype_serialization]
-                debug_assert_eq!(gts.len(), vcf.n_samples as usize);
                 vcf_begin_format_field(vcf, id);
                 let mut b = itoa::Buffer::new();
                 for (si, gt) in gts.iter().enumerate() {
@@ -715,13 +716,13 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 }
             }
         }
+        Ok(())
     }
-    fn format_int(&mut self, id: &FieldId, values: &[i32]) {
+    fn format_int(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError> {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 // r[impl bcf_writer.smallest_int_type]
                 // r[impl bcf_writer.indiv_field_major]
-                debug_assert_eq!(values.len(), enc.n_sample as usize);
                 let tc = smallest_int_type(values);
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
                 encode_type_byte(enc.indiv_buf, 1, tc);
@@ -731,7 +732,6 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 enc.n_fmt = enc.n_fmt.saturating_add(1);
             }
             EncoderInner::Vcf(vcf) => {
-                debug_assert_eq!(values.len(), vcf.n_samples as usize);
                 vcf_begin_format_field(vcf, id);
                 // r[impl vcf_writer.integer_format]
                 let mut b = itoa::Buffer::new();
@@ -740,13 +740,13 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 }
             }
         }
+        Ok(())
     }
-    fn format_float(&mut self, id: &FieldId, values: &[f32]) {
+    fn format_float(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError> {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 // r[impl bcf_writer.smallest_int_type]
                 // r[impl bcf_writer.indiv_field_major]
-                debug_assert_eq!(values.len(), enc.n_sample as usize);
                 // f32::scalar_type_code() always returns BCF_BT_FLOAT regardless of value,
                 // so checking only the first element is harmless (unlike format_int which
                 // must scan all values to find the smallest fitting integer type).
@@ -759,15 +759,19 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 enc.n_fmt = enc.n_fmt.saturating_add(1);
             }
             EncoderInner::Vcf(vcf) => {
-                debug_assert_eq!(values.len(), vcf.n_samples as usize);
                 vcf_begin_format_field(vcf, id);
                 // r[impl vcf_writer.float_precision]
                 for (i, &v) in values.iter().enumerate() {
-                    write_float_g(&mut vcf.sample_bufs[i], v)
-                        .expect("f32 with 6 significant digits never exceeds 32 chars");
+                    write_float_g(&mut vcf.sample_bufs[i], v).map_err(|source| {
+                        VcfError::FailedToWriteFormattedString {
+                            field: SmolStr::from("FORMAT/float"),
+                            source,
+                        }
+                    })?;
                 }
             }
         }
+        Ok(())
     }
     // r[impl record_encoder.format_state_queries]
     fn n_allele(&self) -> usize {

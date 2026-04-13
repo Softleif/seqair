@@ -115,6 +115,14 @@ pub enum VcfError {
     #[error("FORMAT fields were written but begin_samples() was not called")]
     FormatDataWithoutSamples,
 
+    #[error("FORMAT field has {got} values but header declares {expected} samples")]
+    SampleCountMismatch { expected: usize, got: usize },
+
+    #[error(
+        "mixed ploidy in GT field: first sample has ploidy {first_ploidy} but sample {mismatch_index} has ploidy {mismatch_ploidy}"
+    )]
+    MixedPloidy { first_ploidy: usize, mismatch_index: usize, mismatch_ploidy: usize },
+
     #[error("header text too large for BCF (exceeds u32::MAX)")]
     HeaderTooLarge,
 

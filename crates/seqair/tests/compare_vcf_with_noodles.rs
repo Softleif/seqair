@@ -116,8 +116,8 @@ fn vcf_text_readable_by_noodles() {
             .filter_pass();
         setup.dp_info.encode(&mut enc, 50);
         let mut enc = enc.begin_samples();
-        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
-        setup.dp_fmt.encode(&mut enc, &[30]);
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[30]).unwrap();
         enc.emit().unwrap();
         writer.finish().unwrap();
     }
@@ -155,8 +155,8 @@ fn bcf_write_record_readable_by_noodles() {
             .filter_pass();
         setup.dp_info.encode(&mut enc, 42);
         let mut enc = enc.begin_samples();
-        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
-        setup.dp_fmt.encode(&mut enc, &[25]);
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[25]).unwrap();
         enc.emit().unwrap();
         writer.finish().unwrap();
     }
@@ -190,8 +190,8 @@ fn bcf_encoder_readable_by_noodles() {
             .filter_pass();
         setup.dp_info.encode(&mut enc, 100);
         let mut enc = enc.begin_samples();
-        setup.gt_fmt.encode(&mut enc, &[Genotype::phased_diploid(0, 1)]);
-        setup.dp_fmt.encode(&mut enc, &[80]);
+        setup.gt_fmt.encode(&mut enc, &[Genotype::phased_diploid(0, 1)]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[80]).unwrap();
         enc.emit().unwrap();
         writer.finish().unwrap();
     }
@@ -379,11 +379,13 @@ fn multi_sample_bcf_readable_by_noodles() {
             .filter_pass();
         dp_info.encode(&mut enc, 150);
         let mut enc = enc.begin_samples();
-        gt_fmt.encode(
-            &mut enc,
-            &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
-        );
-        dp_fmt.encode(&mut enc, &[45, 52, 38]);
+        gt_fmt
+            .encode(
+                &mut enc,
+                &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
+            )
+            .unwrap();
+        dp_fmt.encode(&mut enc, &[45, 52, 38]).unwrap();
         enc.emit().unwrap();
         writer.finish().unwrap();
     }
@@ -422,11 +424,13 @@ fn multi_sample_vcf_readable_by_noodles() {
             .filter_pass();
         dp_info.encode(&mut enc, 150);
         let mut enc = enc.begin_samples();
-        gt_fmt.encode(
-            &mut enc,
-            &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
-        );
-        dp_fmt.encode(&mut enc, &[45, 52, 38]);
+        gt_fmt
+            .encode(
+                &mut enc,
+                &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
+            )
+            .unwrap();
+        dp_fmt.encode(&mut enc, &[45, 52, 38]).unwrap();
         enc.emit().unwrap();
         writer.finish().unwrap();
     }
@@ -474,11 +478,17 @@ fn multi_sample_bcf_readable_by_bcftools() {
             .filter_pass();
         dp_info.encode(&mut enc, 120);
         let mut enc = enc.begin_samples();
-        gt_fmt.encode(
-            &mut enc,
-            &[Genotype::unphased(0, 1), Genotype::phased_diploid(1, 1), Genotype::unphased(0, 0)],
-        );
-        dp_fmt.encode(&mut enc, &[30, 40, 50]);
+        gt_fmt
+            .encode(
+                &mut enc,
+                &[
+                    Genotype::unphased(0, 1),
+                    Genotype::phased_diploid(1, 1),
+                    Genotype::unphased(0, 0),
+                ],
+            )
+            .unwrap();
+        dp_fmt.encode(&mut enc, &[30, 40, 50]).unwrap();
         enc.emit().unwrap();
         writer.finish().unwrap();
     }

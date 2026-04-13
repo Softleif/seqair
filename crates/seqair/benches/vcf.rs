@@ -326,9 +326,9 @@ macro_rules! seqair_encode_record {
         let dp_vals: Vec<i32> = (0..N_GERMLINE_SAMPLES as i32).map(|s| dp / 2 + s % 20).collect();
         let gq_vals: Vec<i32> =
             (0..N_GERMLINE_SAMPLES as i32).map(|s| 30 + (i as i32 + s) % 60).collect();
-        gt_fmt.encode(&mut enc, &gts);
-        dp_fmt.encode(&mut enc, &dp_vals);
-        gq_fmt.encode(&mut enc, &gq_vals);
+        gt_fmt.encode(&mut enc, &gts).unwrap();
+        dp_fmt.encode(&mut enc, &dp_vals).unwrap();
+        gq_fmt.encode(&mut enc, &gq_vals).unwrap();
         enc.emit().unwrap();
     }};
 }

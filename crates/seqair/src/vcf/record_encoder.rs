@@ -33,6 +33,7 @@
 //! # }
 //! ```
 
+use super::error::VcfError;
 use super::header::{Number, ValueType};
 use super::record::Genotype;
 use seqair_types::SmolStr;
@@ -188,11 +189,11 @@ pub trait InfoEncoder {
 /// Object-safe trait for encoding FORMAT fields.
 pub trait FormatEncoder {
     /// Encode a GT FORMAT field for all samples. Slice length MUST equal sample count.
-    fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]);
+    fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]) -> Result<(), VcfError>;
     /// Encode a scalar integer FORMAT field for all samples.
-    fn format_int(&mut self, id: &FieldId, values: &[i32]);
+    fn format_int(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError>;
     /// Encode a scalar float FORMAT field for all samples.
-    fn format_float(&mut self, id: &FieldId, values: &[f32]);
+    fn format_float(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError>;
     fn n_allele(&self) -> usize;
     fn n_alt(&self) -> usize;
     /// Number of samples declared by the header.
@@ -248,51 +249,61 @@ impl InfoKey<OptArr<i32>> {
 impl FormatKey<Gt> {
     /// Encode a GT FORMAT field. `gts` must have exactly one entry per sample.
     ///
-    /// # Panics
-    /// Panics if `gts.len() != n_samples` (programming error — the caller controls the slice).
-    pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), gts: &[Genotype]) {
-        assert_eq!(
-            gts.len(),
-            enc.n_samples(),
-            "FormatKey<Gt>::encode: expected {} genotypes (one per sample), got {}",
-            enc.n_samples(),
-            gts.len(),
-        );
-        enc.format_gt(&self.0, gts);
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if `gts.len() != n_samples`.
+    /// Returns [`VcfError::MixedPloidy`] if samples have different ploidy.
+    pub fn encode(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        gts: &[Genotype],
+    ) -> Result<(), VcfError> {
+        if gts.len() != enc.n_samples() {
+            return Err(VcfError::SampleCountMismatch {
+                expected: enc.n_samples(),
+                got: gts.len(),
+            });
+        }
+        enc.format_gt(&self.0, gts)
     }
 }
 
 impl FormatKey<Scalar<i32>> {
     /// Encode a scalar integer FORMAT field. `values` must have exactly one entry per sample.
     ///
-    /// # Panics
-    /// Panics if `values.len() != n_samples` (programming error — the caller controls the slice).
-    pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), values: &[i32]) {
-        assert_eq!(
-            values.len(),
-            enc.n_samples(),
-            "FormatKey<Scalar<i32>>::encode: expected {} values (one per sample), got {}",
-            enc.n_samples(),
-            values.len(),
-        );
-        enc.format_int(&self.0, values);
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if `values.len() != n_samples`.
+    pub fn encode(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        values: &[i32],
+    ) -> Result<(), VcfError> {
+        if values.len() != enc.n_samples() {
+            return Err(VcfError::SampleCountMismatch {
+                expected: enc.n_samples(),
+                got: values.len(),
+            });
+        }
+        enc.format_int(&self.0, values)
     }
 }
 
 impl FormatKey<Scalar<f32>> {
     /// Encode a scalar float FORMAT field. `values` must have exactly one entry per sample.
     ///
-    /// # Panics
-    /// Panics if `values.len() != n_samples` (programming error — the caller controls the slice).
-    pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), values: &[f32]) {
-        assert_eq!(
-            values.len(),
-            enc.n_samples(),
-            "FormatKey<Scalar<f32>>::encode: expected {} values (one per sample), got {}",
-            enc.n_samples(),
-            values.len(),
-        );
-        enc.format_float(&self.0, values);
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if `values.len() != n_samples`.
+    pub fn encode(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        values: &[f32],
+    ) -> Result<(), VcfError> {
+        if values.len() != enc.n_samples() {
+            return Err(VcfError::SampleCountMismatch {
+                expected: enc.n_samples(),
+                got: values.len(),
+            });
+        }
+        enc.format_float(&self.0, values)
     }
 }
 
@@ -565,7 +576,7 @@ mod tests {
         impl EncodeFormat for Score {
             type Key = FormatFloat;
             fn encode_format(&self, enc: &mut dyn FormatEncoder, key: &Self::Key) {
-                key.encode(enc, &[self.0]);
+                key.encode(enc, &[self.0]).unwrap();
             }
         }
 
@@ -649,8 +660,8 @@ mod tests {
         setup.db_flag.encode(&mut enc);
         setup.ad_info.encode(&mut enc, &[30, 20]);
         let mut enc = enc.begin_samples();
-        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
-        setup.dp_fmt.encode(&mut enc, &[45]);
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[45]).unwrap();
         enc.emit().unwrap();
         writer.finish().unwrap();
         assert!(!buf.is_empty());
@@ -823,11 +834,13 @@ mod tests {
         let mut enc = enc.filter_pass();
         dp_info.encode(&mut enc, 150);
         let mut enc = enc.begin_samples();
-        gt_fmt.encode(
-            &mut enc,
-            &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
-        );
-        dp_fmt.encode(&mut enc, &[45, 52, 38]);
+        gt_fmt
+            .encode(
+                &mut enc,
+                &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
+            )
+            .unwrap();
+        dp_fmt.encode(&mut enc, &[45, 52, 38]).unwrap();
         enc.emit().unwrap();
 
         writer.finish().unwrap();
@@ -849,11 +862,13 @@ mod tests {
         let mut enc = enc.filter_pass();
         dp_info.encode(&mut enc, 150);
         let mut enc = enc.begin_samples();
-        gt_fmt.encode(
-            &mut enc,
-            &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
-        );
-        dp_fmt.encode(&mut enc, &[45, 52, 38]);
+        gt_fmt
+            .encode(
+                &mut enc,
+                &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
+            )
+            .unwrap();
+        dp_fmt.encode(&mut enc, &[45, 52, 38]).unwrap();
         enc.emit().unwrap();
 
         writer.finish().unwrap();
@@ -884,8 +899,8 @@ mod tests {
         setup.dp_info.encode(&mut enc, 50);
         let mut enc = enc.begin_samples();
         // Single-sample callers pass 1-element slices
-        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]);
-        setup.dp_fmt.encode(&mut enc, &[45]);
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[45]).unwrap();
         enc.emit().unwrap();
 
         writer.finish().unwrap();
@@ -893,7 +908,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "expected 1 values (one per sample), got 2")]
     fn format_int_panics_on_sample_count_mismatch() {
         let setup = TestSetup::new(); // 1 sample
         let mut buf = Vec::new();
@@ -905,12 +919,12 @@ mod tests {
             .unwrap()
             .filter_pass();
         let mut enc = enc.begin_samples();
-        // Pass 2 values for 1-sample header — must panic
-        setup.dp_fmt.encode(&mut enc, &[45, 52]);
+        // Pass 2 values for 1-sample header — must return Err
+        let result = setup.dp_fmt.encode(&mut enc, &[45, 52]);
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "expected 1 genotypes (one per sample), got 3")]
     fn format_gt_panics_on_sample_count_mismatch() {
         let setup = TestSetup::new(); // 1 sample
         let mut buf = Vec::new();
@@ -922,15 +936,15 @@ mod tests {
             .unwrap()
             .filter_pass();
         let mut enc = enc.begin_samples();
-        // Pass 3 genotypes for 1-sample header — must panic
-        setup.gt_fmt.encode(
+        // Pass 3 genotypes for 1-sample header — must return Err
+        let result = setup.gt_fmt.encode(
             &mut enc,
             &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
         );
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "mixed ploidy not supported")]
     fn format_gt_panics_on_mixed_ploidy() {
         let (header, contig, _dp_info, gt_fmt, _dp_fmt) = multi_sample_setup();
         let mut buf = Vec::new();
@@ -942,10 +956,11 @@ mod tests {
             .unwrap()
             .filter_pass();
         let mut enc = enc.begin_samples();
-        // Haploid + diploid + diploid — must panic
-        gt_fmt.encode(
+        // Haploid + diploid + diploid — must return Err
+        let result = gt_fmt.encode(
             &mut enc,
             &[Genotype::haploid(0), Genotype::unphased(0, 1), Genotype::unphased(1, 1)],
         );
+        assert!(result.is_err());
     }
 }
