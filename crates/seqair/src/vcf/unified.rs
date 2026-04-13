@@ -629,8 +629,6 @@ impl<'a> RecordEncoder<'a, Filtered> {
                 let n = vcf.n_samples as usize;
                 // Grow sample_bufs if needed, reuse existing Vec allocations
                 vcf.sample_bufs.resize_with(n, Vec::new);
-                // Truncate if header has fewer samples than a previous use
-                vcf.sample_bufs.truncate(n);
                 for buf in vcf.sample_bufs.iter_mut() {
                     buf.clear();
                 }
@@ -660,9 +658,13 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
                 // Ploidy is taken from the first sample. Mixed ploidy (e.g., haploid +
                 // diploid on chrX) is not yet supported — BCF allows per-sample padding
-                // with end-of-vector sentinels but we don't encode that. For now, callers
-                // must pass uniform ploidy; mismatched samples will produce incorrect BCF.
+                // with end-of-vector sentinels but we don't encode that.
                 let ploidy = gts.first().map_or(0, |g| g.alleles.len());
+                assert!(
+                    gts.iter().all(|g| g.alleles.len() == ploidy),
+                    "mixed ploidy not supported: first sample has ploidy {ploidy} but \
+                     at least one other sample differs",
+                );
                 let max_allele: i32 = gts
                     .iter()
                     .flat_map(|g| g.alleles.iter())

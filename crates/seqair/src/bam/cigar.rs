@@ -127,7 +127,11 @@ pub fn calc_query_len(cigar_bytes: &[u8]) -> u32 {
     let mut qlen = 0u32;
     let n_ops = cigar_bytes.len() / 4;
     for i in 0..n_ops {
-        let op = u32::from_le_bytes(read4(cigar_bytes, i.wrapping_mul(4)));
+        #[expect(
+            clippy::arithmetic_side_effects,
+            reason = "i < n_ops = cigar_bytes.len()/4, so i*4 < cigar_bytes.len() ≤ usize::MAX"
+        )]
+        let op = u32::from_le_bytes(read4(cigar_bytes, i * 4));
         let len = op >> 4;
         let op_type = (op & 0xF) as u8;
         if consumes_query(op_type) {

@@ -395,7 +395,7 @@ macro_rules! noodles_write_record {
             })
             .collect();
         let record = vcf::variant::RecordBuf::builder()
-            .set_reference_sequence_name(std::str::from_utf8(ref_bytes).unwrap())
+            .set_reference_sequence_name("chr1")
             .set_variant_start(pos)
             .set_reference_bases(std::str::from_utf8(ref_bytes).unwrap())
             .set_alternate_bases(vcf::variant::record_buf::AlternateBases::from(alt_bases))

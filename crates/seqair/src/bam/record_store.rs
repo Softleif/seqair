@@ -423,7 +423,9 @@ impl RecordStore {
         let rec = self.record(idx);
         let seq_len = rec.seq_len;
 
-        // Validate query length matches seq_len
+        // ── All validation before any mutation ──
+        // If any check fails, the store is unchanged (r[record_store.set_alignment.validation]).
+
         let new_query_len = cigar::calc_query_len(new_cigar_packed);
         if new_query_len != seq_len {
             return Err(DecodeError::CigarQueryLenMismatch {
@@ -431,6 +433,10 @@ impl RecordStore {
                 seq_len,
             });
         }
+
+        let n_ops = new_cigar_packed.len() / 4;
+        let n_cigar_ops =
+            u16::try_from(n_ops).map_err(|_| DecodeError::CigarOpCountOverflow { count: n_ops })?;
 
         let end_pos = record::compute_end_pos(new_pos, new_cigar_packed)
             .ok_or(DecodeError::InvalidPosition {
@@ -440,25 +446,21 @@ impl RecordStore {
                 )]
                 value: new_pos.get() as i32,
             })?;
+
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(new_cigar_packed);
 
-        // Append new cigar to end of cigar slab
         let new_cigar_off =
             u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
+
+        // ── Point of no return: all mutation below ──
+
         self.cigar.extend_from_slice(new_cigar_packed);
 
-        // Update the record in place
         #[allow(clippy::indexing_slicing, reason = "idx validated by self.record() above")]
         let rec = &mut self.records[idx as usize];
         rec.pos = new_pos;
         rec.end_pos = end_pos;
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "CIGAR op count bounded by packed bytes / 4; ≤ 65535 validated by BAM format"
-        )]
-        {
-            rec.n_cigar_ops = (new_cigar_packed.len() / 4) as u16;
-        }
+        rec.n_cigar_ops = n_cigar_ops;
         rec.cigar_off = new_cigar_off;
         rec.matching_bases = matching_bases;
         rec.indel_bases = indel_bases;

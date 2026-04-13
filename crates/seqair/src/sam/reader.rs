@@ -68,6 +68,12 @@ pub enum SamRecordError {
     #[error("invalid MAPQ field: {}", format_aux_field(value, 32))]
     InvalidMapq { value: Box<[u8]> },
 
+    #[error("invalid PNEXT field: {}", format_aux_field(value, 32))]
+    InvalidPnext { value: Box<[u8]> },
+
+    #[error("invalid TLEN field: {}", format_aux_field(value, 32))]
+    InvalidTlen { value: Box<[u8]> },
+
     #[error("invalid CIGAR operation length: {}", format_aux_field(value, 32))]
     InvalidCigarLength { value: Box<[u8]> },
 
@@ -534,7 +540,8 @@ fn parse_sam_line(
 
     // Field 8: PNEXT (1-based mate position, 0 = unavailable)
     let pnext_field = fields.get(7).copied().unwrap_or(b"0");
-    let pnext = parse_i64(pnext_field).unwrap_or(0);
+    let pnext = parse_i64(pnext_field)
+        .ok_or_else(|| SamRecordError::InvalidPnext { value: pnext_field.into() })?;
     // Convert 1-based to 0-based; PNEXT=0 means unavailable → store as -1
     #[expect(
         clippy::cast_possible_truncation,
@@ -546,7 +553,9 @@ fn parse_sam_line(
     // Field 9: TLEN
     let tlen_field = fields.get(8).copied().unwrap_or(b"0");
     #[expect(clippy::cast_possible_truncation, reason = "SAM TLEN fits i32 by spec")]
-    let template_len = parse_i64(tlen_field).unwrap_or(0) as i32;
+    let template_len = parse_i64(tlen_field)
+        .ok_or_else(|| SamRecordError::InvalidTlen { value: tlen_field.into() })?
+        as i32;
 
     let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_buf);
 

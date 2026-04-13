@@ -66,7 +66,10 @@ r[record_store.set_alignment]
 `set_alignment(idx, new_pos, new_cigar_packed)` MUST replace a record's alignment by appending the new CIGAR to the end of the cigar slab and updating the record's `cigar_off`, `n_cigar_ops`, `pos`, `end_pos`, `matching_bases`, and `indel_bases`. The old CIGAR bytes MUST be left in place as dead data (append-only mutation). The sequence, quality, aux, and name slabs MUST NOT be modified. After calling `set_alignment` on one or more records, the caller MUST call `sort_by_pos()` before using the store for pileup iteration.
 
 r[record_store.set_alignment.validation]
-`set_alignment` MUST validate that the new CIGAR's query-consuming length equals the record's `seq_len`. If they do not match, the method MUST return an error without modifying the store.
+`set_alignment` MUST validate that the new CIGAR's query-consuming length equals the record's `seq_len` and that the CIGAR op count fits in `u16`. All validation MUST complete before any slab mutation. If validation fails, the method MUST return an error without modifying the store.
+
+r[record_store.set_alignment.dead_data]
+Each `set_alignment` call appends new CIGAR bytes to the cigar slab; old bytes become dead data. For a typical realignment pass where ~10% of records are realigned once, the dead-data overhead is ~10% of cigar slab size. Iterative algorithms that call `set_alignment` multiple times per record accumulate proportionally more dead data. Dead data is reclaimed when `clear()` is called (the cigar slab retains capacity but resets its length). No compaction is provided between `clear()` calls.
 
 ## Integration
 

@@ -246,8 +246,12 @@ impl InfoKey<OptArr<i32>> {
 }
 
 impl FormatKey<Gt> {
+    /// Encode a GT FORMAT field. `gts` must have exactly one entry per sample.
+    ///
+    /// # Panics
+    /// Panics if `gts.len() != n_samples` (programming error — the caller controls the slice).
     pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), gts: &[Genotype]) {
-        debug_assert_eq!(
+        assert_eq!(
             gts.len(),
             enc.n_samples(),
             "FormatKey<Gt>::encode: expected {} genotypes (one per sample), got {}",
@@ -259,8 +263,12 @@ impl FormatKey<Gt> {
 }
 
 impl FormatKey<Scalar<i32>> {
+    /// Encode a scalar integer FORMAT field. `values` must have exactly one entry per sample.
+    ///
+    /// # Panics
+    /// Panics if `values.len() != n_samples` (programming error — the caller controls the slice).
     pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), values: &[i32]) {
-        debug_assert_eq!(
+        assert_eq!(
             values.len(),
             enc.n_samples(),
             "FormatKey<Scalar<i32>>::encode: expected {} values (one per sample), got {}",
@@ -272,8 +280,12 @@ impl FormatKey<Scalar<i32>> {
 }
 
 impl FormatKey<Scalar<f32>> {
+    /// Encode a scalar float FORMAT field. `values` must have exactly one entry per sample.
+    ///
+    /// # Panics
+    /// Panics if `values.len() != n_samples` (programming error — the caller controls the slice).
     pub fn encode(&self, enc: &mut (impl FormatEncoder + ?Sized), values: &[f32]) {
-        debug_assert_eq!(
+        assert_eq!(
             values.len(),
             enc.n_samples(),
             "FormatKey<Scalar<f32>>::encode: expected {} values (one per sample), got {}",
@@ -878,5 +890,62 @@ mod tests {
 
         writer.finish().unwrap();
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "expected 1 values (one per sample), got 2")]
+    fn format_int_panics_on_sample_count_mismatch() {
+        let setup = TestSetup::new(); // 1 sample
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&setup.contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        let mut enc = enc.begin_samples();
+        // Pass 2 values for 1-sample header — must panic
+        setup.dp_fmt.encode(&mut enc, &[45, 52]);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected 1 genotypes (one per sample), got 3")]
+    fn format_gt_panics_on_sample_count_mismatch() {
+        let setup = TestSetup::new(); // 1 sample
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&setup.contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        let mut enc = enc.begin_samples();
+        // Pass 3 genotypes for 1-sample header — must panic
+        setup.gt_fmt.encode(
+            &mut enc,
+            &[Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::unphased(1, 1)],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "mixed ploidy not supported")]
+    fn format_gt_panics_on_mixed_ploidy() {
+        let (header, contig, _dp_info, gt_fmt, _dp_fmt) = multi_sample_setup();
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        let mut enc = enc.begin_samples();
+        // Haploid + diploid + diploid — must panic
+        gt_fmt.encode(
+            &mut enc,
+            &[Genotype::haploid(0), Genotype::unphased(0, 1), Genotype::unphased(1, 1)],
+        );
     }
 }

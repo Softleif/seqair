@@ -220,7 +220,7 @@ impl Alleles {
         enc.indiv_buf.clear();
         enc.n_info = 0;
         enc.n_fmt = 0;
-        // n_sample is set from the header in Writer::begin_record — don't reset it here.
+        // n_sample is set from the header via the struct literal in Writer::begin_record each call.
 
         enc.tid = i32::try_from(contig.0).map_err(|_| VcfError::ValueOverflow {
             field: "contig_tid",
