@@ -177,36 +177,49 @@ htslib's test suite has three layers:
 
 ### Seqair's Current Gaps
 
-| Gap | htslib Coverage | Seqair Status |
-|-----|----------------|---------------|
-| SAM/BAM writing round-trips | Extensive (SAM->BAM->SAM byte-identical) | BAM writer exists but no SAM->BAM->SAM integration test |
-| BGZF block boundary records | Dedicated `bgzf_boundaries/` tests | Not tested |
-| Large aux tags | `xx#large_aux.sam` (>64KB) | Not tested with dedicated edge cases |
-| CRAM Java interop | `*_java.cram` files from htsjdk | Not tested |
-| CRAM version matrix | v2.1, v3.0, v3.1, v4.0 profiles | v2.1 and v3.0 only |
-| Multi-ref CRAM containers | `ce#1000.sam` multi-ref test | Not explicitly tested |
-| DOS line endings | `index_dos.sam` with `\r\n` | Not tested |
-| Missing @SQ headers | `no_hdr_sq_1.bam` | Not tested |
-| Template length (TLEN) | 65 CRAM/SAM pairs | Not tested |
-| Embedded CRAM references | `embed_ref=2` tests | Not tested as integration test |
-| MD tag generation | 5 test modes | Not tested |
-| Base modifications (MM/ML) | 27 test cases | Not implemented |
-| BAQ calculation | 5 modes | Not implemented |
-| SAM filter expressions | Full expression engine | Not implemented |
-| FASTQ format | ~50 test files | Not implemented |
-| Multi-threaded I/O | All ops at 0 + 4 threads | Single-threaded only |
-| Large positions (>2GB) | `longrefs/` directory | Not tested |
-| Unmapped read variants | `ce#unmap*.sam`, `xx#u.sam` | Lightly tested |
-| Padding/depadding | `c1#pad*.sam`, `c1#tag_padded.sam` | Not tested |
-| CIGAR clipping edge cases | `c1#clip.sam` | Lightly tested |
-| Sequence-less reads | `c1#noseq.sam` | Not tested |
-| Unknown bases | `c1#unknown.sam` | Not tested |
-| Read groups | `xx#rg.sam` | Not tested |
-| Colon characters in names | `colons.bam` | Not tested |
-| BAM writer index co-production | htslib builds index during write | Tested (IndexBuilder) but limited edge cases |
-| VCF sync reader | Randomized multi-file merge | Not applicable (no sync reader) |
-| Reference caching (MD5) | Multi-tier cache server | Not applicable (no cache server) |
-| Annotation TSV | 64+ test files | Not applicable |
+#### Closed by Tier 1 (hts-eqv-tests branch)
+
+| Gap | Status |
+|-----|--------|
+| SAM/BAM writing round-trips | **Done** — `bam_write_roundtrip.rs`: 6 tests (simple, complex CIGARs, aux tags, multi-contig, paired-end, index co-production) |
+| BGZF block boundary records | **Done** — `bgzf_block_boundary.rs`: 3 tests (large seqs, long CIGARs, mixed sizes) |
+| DOS line endings | **Done** — `htslib_edge_cases.rs`: both SAM reader and BAM conversion paths |
+| Sequence-less reads | **Done** — `htslib_edge_cases.rs`: c1#noseq.sam, secondary with SEQ=* |
+| Unknown bases | **Done** — `htslib_edge_cases.rs`: c1#unknown.sam SEQ/QUAL combos |
+| Read groups | **Done** — `htslib_sam_parity.rs`: xx#rg.sam |
+| Colon characters in names | **Done** — `htslib_edge_cases.rs`: colons.bam with chr1:100, chr1,chr3 |
+| CIGAR clipping edge cases | **Done** — `htslib_sam_parity.rs`: c1#clip.sam (S, H, N, I ops) |
+| Padding CIGAR ops | **Done** — `htslib_edge_cases.rs`: c1#pad1/pad2/pad3.sam |
+| Unmapped read variants | **Done** — `htslib_edge_cases.rs`: ce#unmap.sam, supplementary/secondary tests |
+| BAM writer index co-production | **Done** — `index_roundtrip.rs`: 5 tests, samtools idxstats validation |
+| htslib test data import | **Done** — `htslib_sam_parity.rs`: 8 htslib SAMs parsed + compared vs noodles |
+
+#### Still Open
+
+| Gap | htslib Coverage | Seqair Status | Priority |
+|-----|----------------|---------------|----------|
+| Large aux tags | `xx#large_aux.sam` (>64KB) | Not tested with dedicated edge cases | Medium |
+| CRAM Java interop | `*_java.cram` files from htsjdk | Not tested — files available in tests/htslib/cram/ | High (Tier 2) |
+| CRAM version matrix | v2.1, v3.0, v3.1, v4.0 profiles | v2.1 and v3.0 only | High (Tier 2) |
+| Multi-ref CRAM containers | `ce#1000.sam` multi-ref test | Not explicitly tested | High (Tier 2) |
+| Template length (TLEN) | 65 CRAM/SAM pairs in tests/htslib/tlen/ | Not tested | Medium (Tier 2) |
+| Embedded CRAM references | `embed_ref=2` tests | Not tested as integration test | Medium (Tier 2) |
+| Missing @SQ text header | `no_hdr_sq_1.bam` (binary ref list but @CO in text) | Not tested — needs BAI creation | Low |
+| MD tag generation | 5 test modes (store/skip/force) | Not tested — seqair doesn't generate MD | Low |
+| Large positions (>2GB) | `longrefs/` directory with CSI indexes | Not tested — seqair uses BAI (not CSI) | Low |
+| Pileup vs samtools mpileup | htslib mpileup/ dir with expected outputs | Not compared — files in tests/htslib/mpileup/ | High (Tier 4) |
+| **Base modifications (MM/ML)** | 27 test cases in base_mods/ | **Not implemented** — feature missing | Future |
+| **BAQ calculation** | 5 modes (calculate, extended, recalc, apply, revert) | **Not implemented** — feature missing | Future |
+| **SAM filter expressions** | Full expression engine (arithmetic, regex, functions) | **Not implemented** — feature missing | Future |
+| **FASTQ format** | ~50 test files (interleaved, CASAVA, filtering) | **Not implemented** — no FASTQ reader | Future |
+| **Multi-threaded I/O** | All ops tested at 0 and 4 threads | **Single-threaded only** — no threading | Future |
+| **CSI index format** | CSI indexes for BAM, BCF, SAM.gz | **Not implemented** — BAI only | Future |
+| VCF sync reader | Randomized multi-file merge | Not applicable (no sync reader) | N/A |
+| Reference caching (MD5) | Multi-tier cache server | Not applicable (no cache server) | N/A |
+| Annotation TSV | 64+ test files | Not applicable | N/A |
+| BGZF re-indexing | `bgzip -g -r` for alternate deflate impls | Not applicable | N/A |
+| Plugin loading | Shared library plugin tests | Not applicable | N/A |
+| Thread stress tests | 7 `thrash_threads` concurrent access patterns | Not applicable (single-threaded) | N/A |
 
 ---
 
