@@ -314,7 +314,7 @@ fn indexed_reader_finds_csi_without_bam_infix() {
     reader
         .fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
         .expect("fetch");
-    assert!(store.len() > 0, "should find records via multi.csi");
+    assert!(!store.is_empty(), "should find records via multi.csi");
 }
 
 // --- IndexedBamReader with CSI (format detection) ---

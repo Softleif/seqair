@@ -404,6 +404,8 @@ fn csi_pseudo_bin(depth: u32) -> u32 {
 #[cfg(test)]
 #[allow(clippy::arithmetic_side_effects, reason = "tests")]
 #[allow(clippy::cast_possible_truncation, reason = "tests")]
+#[allow(clippy::cast_possible_wrap, reason = "tests")]
+#[allow(clippy::type_complexity, reason = "tests")]
 mod tests {
     use super::*;
     use crate::vcf::index_builder::reg2bin;
