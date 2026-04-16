@@ -193,17 +193,18 @@ htslib's test suite has three layers:
 | Unmapped read variants | **Done** — `htslib_edge_cases.rs`: ce#unmap.sam, supplementary/secondary tests |
 | BAM writer index co-production | **Done** — `index_roundtrip.rs`: 5 tests, samtools idxstats validation |
 | htslib test data import | **Done** — `htslib_sam_parity.rs`: 8 htslib SAMs parsed + compared vs noodles |
+| CRAM version matrix | **Done** — `cram_version_matrix.rs`: v3.0 (3 tests), v3.1 (4 tests) |
+| Multi-ref CRAM containers | **Done** — `cram_version_matrix.rs`: multi_seq_per_slice=1, ce#5b + ce#1000 |
+| Embedded CRAM references | **Done** — `cram_version_matrix.rs`: embed_ref=2, verified vs samtools |
+| Template length (TLEN) | **Done** — `cram_tlen.rs`: all 30 htslib pairs via BAM + 6 CRAM field checks |
 
 #### Still Open
 
 | Gap | htslib Coverage | Seqair Status | Priority |
 |-----|----------------|---------------|----------|
 | Large aux tags | `xx#large_aux.sam` (>64KB) | Not tested with dedicated edge cases | Medium |
-| CRAM Java interop | `*_java.cram` files from htsjdk | Not tested — files available in tests/htslib/cram/ | High (Tier 2) |
-| CRAM version matrix | v2.1, v3.0, v3.1, v4.0 profiles | v2.1 and v3.0 only | High (Tier 2) |
-| Multi-ref CRAM containers | `ce#1000.sam` multi-ref test | Not explicitly tested | High (Tier 2) |
-| Template length (TLEN) | 65 CRAM/SAM pairs in tests/htslib/tlen/ | Not tested | Medium (Tier 2) |
-| Embedded CRAM references | `embed_ref=2` tests | Not tested as integration test | Medium (Tier 2) |
+| CRAM Java interop | `*_java.cram` files from htsjdk | Not tested — files available in tests/htslib/cram/ | Medium |
+| **CRAM TLEN for attached mates** | htslib reconstructs TLEN for non-detached mates | **seqair returns 0** — only detached mates get TLEN | Bug/Gap |
 | Missing @SQ text header | `no_hdr_sq_1.bam` (binary ref list but @CO in text) | Not tested — needs BAI creation | Low |
 | MD tag generation | 5 test modes (store/skip/force) | Not tested — seqair doesn't generate MD | Low |
 | Large positions (>2GB) | `longrefs/` directory with CSI indexes | Not tested — seqair uses BAI (not CSI) | Low |
