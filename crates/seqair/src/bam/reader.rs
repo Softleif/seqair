@@ -4,9 +4,10 @@
 
 use super::{
     bgzf::{BgzfError, BgzfReader},
+    csi_index::CsiIndex,
     flags::BamFlags,
     header::{BamHeader, BamHeaderError},
-    index::{BaiError, BamIndex, Chunk},
+    index::{AlignmentIndex, BaiError, BamIndex, Chunk},
     record::{DecodeError, compute_end_pos_from_raw},
     record_store::RecordStore,
     region_buf::{self, RegionBuf},
@@ -44,6 +45,12 @@ pub enum BamError {
         source: BaiError,
     },
 
+    #[error("CSI index error")]
+    CsiIndex {
+        #[from]
+        source: super::csi_index::CsiError,
+    },
+
     #[error("truncated BAM record at virtual offset {offset:#x}")]
     TruncatedRecord { offset: u64 },
 
@@ -78,13 +85,13 @@ fn validate_tid(tid: u32) -> Result<i32, BamError> {
 
 // r[impl bam.reader.shared_state]
 pub struct BamShared {
-    index: BamIndex,
+    index: AlignmentIndex,
     header: BamHeader,
     pub bam_path: PathBuf,
 }
 
 impl BamShared {
-    pub fn index(&self) -> &BamIndex {
+    pub fn index(&self) -> &AlignmentIndex {
         &self.index
     }
 }
@@ -141,7 +148,7 @@ impl IndexedBamReader<std::io::Cursor<Vec<u8>>> {
         let mut bgzf = BgzfReader::from_cursor(bam_data.clone());
         let header = BamHeader::parse(&mut bgzf)?;
         header.validate_sort_order()?;
-        let index = BamIndex::from_bytes(bai_data)?;
+        let index = AlignmentIndex::Bai(BamIndex::from_bytes(bai_data)?);
 
         Ok(IndexedBamReader {
             bulk_reader: std::io::Cursor::new(bam_data),
@@ -312,10 +319,28 @@ fn partition_chunks(chunks: &[Chunk], max_bytes: usize) -> Vec<Vec<Chunk>> {
 
 // r[impl unified.detect_index]
 // r[impl unified.detect_error]
-fn find_and_open_index(bam_path: &Path) -> Result<BamIndex, BamError> {
+// r[impl csi.detect]
+fn find_and_open_index(bam_path: &Path) -> Result<AlignmentIndex, BamError> {
+    // CSI preferred: try .csi first (per htslib convention)
+    let csi_path = bam_path.with_extension("bam.csi");
+    if csi_path.exists() {
+        return Ok(AlignmentIndex::Csi(CsiIndex::from_path(&csi_path)?));
+    }
+
+    let mut csi_path2 = bam_path.to_path_buf();
+    let mut name2 = csi_path2.file_name().unwrap_or_default().to_os_string();
+    name2.push(".csi");
+    csi_path2.set_file_name(name2);
+    if csi_path2.exists() {
+        return Ok(AlignmentIndex::Csi(CsiIndex::from_path(&csi_path2)?));
+    }
+
+    // Fall back to BAI
     let bai_path = bam_path.with_extension("bam.bai");
     if bai_path.exists() {
-        return BamIndex::from_path(&bai_path).map_err(|source| BamError::Index { source });
+        return Ok(AlignmentIndex::Bai(
+            BamIndex::from_path(&bai_path).map_err(|source| BamError::Index { source })?,
+        ));
     }
 
     let mut bai_path2 = bam_path.to_path_buf();
@@ -323,7 +348,9 @@ fn find_and_open_index(bam_path: &Path) -> Result<BamIndex, BamError> {
     name.push(".bai");
     bai_path2.set_file_name(name);
     if bai_path2.exists() {
-        return BamIndex::from_path(&bai_path2).map_err(|source| BamError::Index { source });
+        return Ok(AlignmentIndex::Bai(
+            BamIndex::from_path(&bai_path2).map_err(|source| BamError::Index { source })?,
+        ));
     }
 
     Err(BamError::IndexNotFound { bam_path: bam_path.to_path_buf() })
