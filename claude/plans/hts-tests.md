@@ -197,6 +197,9 @@ htslib's test suite has three layers:
 | Multi-ref CRAM containers | **Done** — `cram_version_matrix.rs`: multi_seq_per_slice=1, ce#5b + ce#1000 |
 | Embedded CRAM references | **Done** — `cram_version_matrix.rs`: embed_ref=2, verified vs samtools |
 | Template length (TLEN) | **Done** — `cram_tlen.rs`: all 30 htslib pairs via BAM + 6 CRAM field checks |
+| BAM writer stress tests | **Done** — `bam_writer_stress.rs`: max fields, poisoning, unmapped dispatch, dense records |
+| VCF/BCF bcftools validation | **Done** — `vcf_bcftools_roundtrip.rs`: integer boundaries, genotypes, indels, stats |
+| BGZF writer validation | **Done** — `bgzf_writer_validation.rs`: bgzip decompresses small/large/chunked/empty output |
 
 #### Still Open
 
