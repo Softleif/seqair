@@ -1,6 +1,8 @@
 //! Decode CRAM slices into records. Reads data series blocks, applies the encodings from
 //! [`CompressionHeader`], and pushes decoded records into a [`RecordStore`].
 
+use std::ops::Neg;
+
 use super::{
     block::{self, Block, ContentType},
     compression_header::CompressionHeader,
@@ -22,7 +24,7 @@ struct SliceMateInfo {
     end_pos: i64,
     /// Absolute index of the mate record within this slice, or -1 if detached/no mate.
     mate_line: i32,
-    /// Index in the RecordStore if this record was pushed, or `None` if filtered out.
+    /// Index in the `RecordStore` if this record was pushed, or `None` if filtered out.
     store_idx: Option<u32>,
     /// BAM flags (needed for READ1/READ2 tie-breaking).
     bam_flags: u16,
@@ -350,6 +352,7 @@ fn decode_record(
         // NF is relative: absolute mate index = current + 1 + nf
         #[expect(
             clippy::cast_possible_wrap,
+            clippy::cast_possible_truncation,
             reason = "record_index is bounded by num_records (i32), fits in i32"
         )]
         {
@@ -548,6 +551,7 @@ fn decode_record(
 /// the alignment span (min start to max end) across all fragments, then
 /// assigns signed TLEN: positive for the leftmost fragment, negative for
 /// the rightmost, with ties broken by the READ1 flag.
+#[expect(clippy::indexing_slicing, reason = "everything is based on infos.len()")]
 fn resolve_mate_tlen(infos: &[SliceMateInfo], store: &mut RecordStore) {
     let n = infos.len();
     // Track which records we've already resolved to avoid reprocessing.
@@ -628,17 +632,17 @@ fn resolve_mate_tlen(infos: &[SliceMateInfo], store: &mut RecordStore) {
             tlen_magnitude
         } else if first.pos == aleft && first.end_pos == aright && left_cnt > 1 && right_cnt > 1 {
             // Both leftmost and rightmost with ties — break by READ1 flag
-            if first.bam_flags & 0x40 != 0 { tlen_magnitude } else { -tlen_magnitude }
+            if first.bam_flags & 0x40 != 0 { tlen_magnitude } else { tlen_magnitude.neg() }
         } else {
             // Rightmost or internal
-            -tlen_magnitude
+            tlen_magnitude.neg()
         };
 
         // First record gets first_tlen; all remaining get the opposite.
         if let Some(idx) = first.store_idx {
             store.set_template_len(idx, first_tlen);
         }
-        let rest_tlen = -first_tlen;
+        let rest_tlen = first_tlen.neg();
         for &j in &chain[1..] {
             if let Some(idx) = infos[j].store_idx {
                 store.set_template_len(idx, rest_tlen);

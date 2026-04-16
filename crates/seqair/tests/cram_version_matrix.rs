@@ -275,9 +275,9 @@ fn cram_v31_ce5b() {
 
 // --- Multi-ref CRAM containers ---
 
-/// ce#5b.sam has records across 5 contigs. With multi_seq_per_slice=1,
+/// ce#5b.sam has records across 5 contigs. With `multi_seq_per_slice=1`,
 /// samtools puts reads from different references into the same slice
-/// (ref_seq_id == -2). seqair must handle this.
+/// (`ref_seq_id` == -2). seqair must handle this.
 #[test]
 fn cram_multi_ref_container() {
     let dir = tempfile::tempdir().unwrap();
@@ -291,7 +291,7 @@ fn cram_multi_ref_container() {
     assert_cram_parity(&cram, &htslib_fasta("ce.fa"), "multi-ref/ce#5b");
 }
 
-/// ce#1000.sam has many records on CHROMOSOME_I — multi_seq_per_slice
+/// ce#1000.sam has many records on `CHROMOSOME_I` — `multi_seq_per_slice`
 /// shouldn't change behavior for single-contig data, but exercises the
 /// container routing.
 #[test]
@@ -311,7 +311,7 @@ fn cram_multi_ref_single_contig() {
 
 /// CRAM with embedded reference: the CRAM file contains the reference
 /// sequence, so it can be decoded without an external FASTA file.
-/// Verified against samtools (noodles has a bug reading embed_ref=2 CRAMs).
+/// Verified against samtools (noodles has a bug reading `embed_ref=2` CRAMs).
 #[test]
 fn cram_embedded_reference() {
     let dir = tempfile::tempdir().unwrap();

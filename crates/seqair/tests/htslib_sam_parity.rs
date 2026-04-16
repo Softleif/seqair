@@ -129,7 +129,7 @@ fn read_noodles_grouped(bam_path: &Path) -> (sam::Header, Vec<Vec<NoodlesRecord>
     (header, grouped)
 }
 
-/// Decode seqair's packed CIGAR bytes into (length, op_code) pairs.
+/// Decode seqair's packed CIGAR bytes into (length, `op_code`) pairs.
 fn decode_cigar(cigar_bytes: &[u8]) -> Vec<(u32, u8)> {
     (0..cigar_bytes.len() / 4)
         .map(|j| {
@@ -250,7 +250,7 @@ fn htslib_ce1() {
     assert_bam_parity("ce#1.sam");
 }
 
-/// 5 records on CHROMOSOME_I plus one supplementary alignment (flag 2048)
+/// 5 records on `CHROMOSOME_I` plus one supplementary alignment (flag 2048)
 /// with a large 27M100000D73M CIGAR.
 #[test]
 fn htslib_ce5() {

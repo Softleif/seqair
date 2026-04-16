@@ -1,16 +1,16 @@
 //! Pileup cross-validation: run seqair's pileup engine on htslib's mpileup
 //! test SAMs and compare depth + base/deletion/refskip counts against
-//! rust-htslib's bam_plp_auto (the reference per `r[pileup.htslib_compat]`).
+//! rust-htslib's `bam_plp_auto` (the reference per `r[pileup.htslib_compat]`).
 //!
 //! htslib's mpileup/ test files exercise specific CIGAR combinations:
-//! - mp_D: deletions (D ops)
-//! - mp_I: insertions (I ops)
-//! - mp_DI: deletion then insertion
-//! - mp_ID: insertion then deletion
-//! - mp_N: ref-skips (N ops, RNA-seq introns)
-//! - mp_N2: complex N+I+D+P combinations
-//! - mp_P: padding (P ops) with insertions
-//! - mp_overlap1/2: overlapping mate pairs
+//! - `mp_D`: deletions (D ops)
+//! - `mp_I`: insertions (I ops)
+//! - `mp_DI`: deletion then insertion
+//! - `mp_ID`: insertion then deletion
+//! - `mp_N`: ref-skips (N ops, RNA-seq introns)
+//! - `mp_N2`: complex N+I+D+P combinations
+//! - `mp_P`: padding (P ops) with insertions
+//! - `mp_overlap1/2`: overlapping mate pairs
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -62,7 +62,7 @@ struct HtsColumn {
     n_ins: usize,
 }
 
-/// Read pileup from rust-htslib (wraps bam_plp_auto).
+/// Read pileup from rust-htslib (wraps `bam_plp_auto`).
 fn htslib_pileup(bam_path: &Path, contig: &[u8], start: u64, end: u64) -> Vec<HtsColumn> {
     let mut reader = bam::IndexedReader::from_path(bam_path).expect("htslib open");
     let tid = reader.header().tid(contig).expect("tid");

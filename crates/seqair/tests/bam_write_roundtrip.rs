@@ -1,4 +1,4 @@
-//! BAM write round-trip tests: build records with seqair's BamWriter,
+//! BAM write round-trip tests: build records with seqair's `BamWriter`,
 //! read back with noodles and samtools, verify field-level parity.
 #![allow(
     clippy::unwrap_used,

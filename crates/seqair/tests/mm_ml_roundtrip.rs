@@ -51,7 +51,7 @@ fn write_bam(dir: &Path, records: &[OwnedBamRecord]) -> std::path::PathBuf {
     bam_path
 }
 
-/// Build a record with typical CpG methylation MM/ML tags.
+/// Build a record with typical `CpG` methylation MM/ML tags.
 fn make_methylation_record(
     pos: i64,
     name: &[u8],

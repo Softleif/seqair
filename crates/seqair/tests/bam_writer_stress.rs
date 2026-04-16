@@ -159,7 +159,7 @@ fn many_aux_tags() {
 
 // --- Index dispatch: mapped, placed-unmapped, fully-unmapped ---
 
-/// Placed-unmapped reads (FLAG 0x4, ref_id >= 0) should be included in
+/// Placed-unmapped reads (FLAG 0x4, `ref_id` >= 0) should be included in
 /// the BAI index (in the unmapped count) but not in normal fetch results.
 #[test]
 fn placed_unmapped_records() {
@@ -225,7 +225,7 @@ fn placed_unmapped_records() {
     assert_eq!(n_unmapped, 1, "chr1 should have 1 placed-unmapped");
 }
 
-/// Fully-unmapped records (ref_id == -1) should not be pushed to the index.
+/// Fully-unmapped records (`ref_id` == -1) should not be pushed to the index.
 /// Verified via samtools: the BAM has both mapped and unmapped, but indexed
 /// region queries only return the mapped record.
 #[test]

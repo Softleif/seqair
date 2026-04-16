@@ -101,7 +101,7 @@ fn dos_line_endings_in_sam() {
 }
 
 /// DOS line endings also work when converted to BAM (samtools handles \r\n).
-/// This tests the actual htslib index_dos.sam file.
+/// This tests the actual htslib `index_dos.sam` file.
 #[test]
 fn dos_line_endings_via_bam() {
     let sam_path = htslib_sam("index_dos.sam");
@@ -117,7 +117,7 @@ fn dos_line_endings_via_bam() {
         .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1_009_800).unwrap(), &mut store)
         .expect("fetch");
 
-    assert!(store.len() > 0, "should have records on CHROMOSOME_I");
+    assert!(!store.is_empty(), "should have records on CHROMOSOME_I");
 
     // Compare against noodles
     let file = std::fs::File::open(&bam_path).unwrap();
@@ -187,7 +187,7 @@ fn colons_in_contig_names() {
 // ---- Sequence-less reads (SEQ=*) ----
 
 /// c1#noseq.sam: mapped reads with SEQ=* — valid in BAM for secondary
-/// alignments. Tests that seq_len=0 is handled correctly.
+/// alignments. Tests that `seq_len=0` is handled correctly.
 #[test]
 fn sequence_less_mapped_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -286,7 +286,7 @@ fn seq_qual_presence_combos() {
 // ---- Fully-unmapped reads ----
 
 /// ce#unmap.sam: all reads have flag 0x4 (unmapped) with RNAME=*.
-/// fetch_into should return 0 records for any contig.
+/// `fetch_into` should return 0 records for any contig.
 #[test]
 fn fully_unmapped_file_returns_no_records() {
     let dir = tempfile::tempdir().unwrap();
@@ -343,7 +343,7 @@ fn supplementary_alignments_included() {
 // ---- Secondary alignments with SEQ=* ----
 
 /// ce#5b.sam includes a secondary alignment (flag 256) with SEQ=* and QUAL=*.
-/// This must parse without error and have seq_len=0.
+/// This must parse without error and have `seq_len=0`.
 #[test]
 fn secondary_alignment_without_sequence() {
     let dir = tempfile::tempdir().unwrap();
