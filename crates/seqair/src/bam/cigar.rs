@@ -171,6 +171,10 @@ pub enum CigarPosInfo {
     Insertion { qpos: u32, insert_len: u32 },
     /// D op: deletion spanning this position. `del_len` is the total length of the D CIGAR op.
     Deletion { del_len: u32 },
+    /// D or N op at its last position, followed by an I op (e.g. `D I M`).
+    /// `del_len` is the total D/N op length; `insert_len` is the total following insertion length.
+    // r[impl pileup_indel.complex_indel]
+    ComplexIndel { del_len: u32, insert_len: u32, is_refskip: bool },
     /// N op: reference skip spanning this position.
     RefSkip,
 }
@@ -319,12 +323,19 @@ fn build_compact_ops(rec_pos: Pos0, cigar_bytes: &[u8]) -> Option<SmallVec<Compa
 }
 
 // r[impl pileup_indel.insertion_len]
-/// Sum insertion lengths for consecutive I ops after index `op_idx`.
+// r[impl pileup_indel.complex_indel]
+/// Sum insertion lengths for consecutive I ops after index `op_idx`,
+/// skipping P (padding) ops. htslib skips P when peeking ahead for
+/// insertions (handles `M P I`, `D P I`, etc.).
 #[inline]
 fn next_insertion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
     let mut total = 0u32;
     let mut idx = op_idx.checked_add(1)?;
     while let Some(next) = ops.get(idx) {
+        if next.op_type == CIGAR_P {
+            idx = idx.checked_add(1)?;
+            continue;
+        }
         if next.op_type != CIGAR_I {
             break;
         }
@@ -335,7 +346,7 @@ fn next_insertion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
 }
 
 // r[impl pileup_indel.insertion_at_last_match]
-// r[impl pileup_indel.no_orphan_insertions]
+// r[impl pileup_indel.complex_indel]
 #[inline]
 fn classify_op(
     ops: &[CompactOp],
@@ -360,8 +371,28 @@ fn classify_op(
         Some(CigarPosInfo::Match { qpos })
     } else if op.op_type == CIGAR_D {
         // r[impl pileup_indel.op_enum]
+        // At the last position of a D op, check if a following I op exists (skipping P).
+        if pos32 == ref_end.wrapping_sub(1)
+            && let Some(insert_len) = next_insertion_len(ops, i)
+        {
+            return Some(CigarPosInfo::ComplexIndel {
+                del_len: op.len,
+                insert_len,
+                is_refskip: false,
+            });
+        }
         Some(CigarPosInfo::Deletion { del_len: op.len })
     } else if op.op_type == CIGAR_N {
+        // Same complex-indel check for N ops.
+        if pos32 == ref_end.wrapping_sub(1)
+            && let Some(insert_len) = next_insertion_len(ops, i)
+        {
+            return Some(CigarPosInfo::ComplexIndel {
+                del_len: op.len,
+                insert_len,
+                is_refskip: true,
+            });
+        }
         Some(CigarPosInfo::RefSkip)
     } else {
         None

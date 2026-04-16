@@ -200,12 +200,12 @@ fn type_safety_deletion_has_no_base() {
     // If someone tried: op.base — compile error. Must use match or convenience method.
 }
 
-// ---- pileup_indel.no_orphan_insertions ----
+// ---- pileup_indel.complex_indel ----
 
-// r[verify pileup_indel.no_orphan_insertions]
+// r[verify pileup_indel.complex_indel]
 #[test]
-fn insertion_after_deletion_not_reported() {
-    // CIGAR: 10M 5D 3I 10M — insertion follows deletion, no anchor match
+fn complex_indel_at_last_deletion_position() {
+    // CIGAR: 10M 5D 3I 10M — insertion follows deletion → ComplexIndel at last D position
     let raw = make_record_with_cigar(
         0,
         0,
@@ -230,12 +230,32 @@ fn insertion_after_deletion_not_reported() {
         aln.op
     );
 
-    // Deletion positions 10-14 should be Deletion
-    for pos in 10..15u32 {
+    // Interior deletion positions 10-13: plain Deletion
+    for pos in 10..14u32 {
         let col = columns.iter().find(|c| c.pos() == Pos0::new(pos).unwrap()).unwrap();
         let aln = col.alignments().next().unwrap();
-        assert!(aln.is_del(), "pos {} should be Deletion", pos);
+        assert!(
+            matches!(aln.op, PileupOp::Deletion { del_len: 5 }),
+            "pos {} should be plain Deletion(5), got {:?}",
+            pos,
+            aln.op
+        );
     }
+
+    // Last deletion position (14): ComplexIndel with del_len=5, insert_len=3
+    let col14 = columns.iter().find(|c| c.pos() == Pos0::new(14).unwrap()).unwrap();
+    let aln14 = col14.alignments().next().unwrap();
+    assert!(
+        matches!(aln14.op, PileupOp::ComplexIndel { del_len: 5, insert_len: 3, .. }),
+        "pos 14 should be ComplexIndel(del=5,ins=3), got {:?}",
+        aln14.op
+    );
+    assert!(aln14.is_del(), "ComplexIndel must report is_del() = true");
+    assert_eq!(aln14.del_len(), 5);
+    assert_eq!(aln14.insert_len(), 3);
+    assert_eq!(aln14.qpos(), None, "ComplexIndel has no qpos");
+    assert_eq!(aln14.base(), None, "ComplexIndel has no base");
+    assert_eq!(aln14.qual(), None, "ComplexIndel has no qual");
 }
 
 // ---- insertion before deletion ----
@@ -285,12 +305,12 @@ fn insertion_before_deletion() {
 }
 
 // r[verify pileup_indel.insertion_at_last_match]
-// r[verify pileup_indel.no_orphan_insertions]
+// r[verify pileup_indel.complex_indel]
 #[test]
-fn insertion_with_anchor_and_orphan_insertion_after_deletion() {
+fn insertion_with_anchor_and_complex_indel_after_deletion() {
     // CIGAR: 10M 2I 5D 3I 10M at pos 0
     // First I (len=2) has anchor at pos 9 → reported as Insertion
-    // Second I (len=3) follows D → orphaned, not reported
+    // Second I (len=3) follows D → ComplexIndel at last D position (pos 14)
     let raw = make_record_with_cigar(
         0,
         0,
@@ -314,19 +334,33 @@ fn insertion_with_anchor_and_orphan_insertion_after_deletion() {
         aln.op
     );
 
-    // pos 10-14: Deletion (the second I after D is orphaned, not visible)
-    for pos in 10..15u32 {
+    // pos 10-13: plain Deletion
+    for pos in 10..14u32 {
         let col = columns.iter().find(|c| c.pos() == Pos0::new(pos).unwrap()).unwrap();
         let aln = col.alignments().next().unwrap();
-        assert!(aln.is_del(), "pos {} should be Deletion, got {:?}", pos, aln.op);
+        assert!(
+            matches!(aln.op, PileupOp::Deletion { del_len: 5 }),
+            "pos {} should be plain Deletion(5), got {:?}",
+            pos,
+            aln.op
+        );
     }
 
-    // pos 15: Match (not Insertion — the I after D is orphaned)
+    // pos 14: ComplexIndel (last D position, followed by I)
+    let col14 = columns.iter().find(|c| c.pos() == Pos0::new(14).unwrap()).unwrap();
+    let aln14 = col14.alignments().next().unwrap();
+    assert!(
+        matches!(aln14.op, PileupOp::ComplexIndel { del_len: 5, insert_len: 3, .. }),
+        "pos 14 should be ComplexIndel(del=5,ins=3), got {:?}",
+        aln14.op
+    );
+
+    // pos 15: Match — qpos accounts for both insertions: 10M + 2I + 5D + 3I = qpos 15
     let col15 = columns.iter().find(|c| c.pos() == Pos0::new(15).unwrap()).unwrap();
     let aln15 = col15.alignments().next().unwrap();
     assert!(
         matches!(aln15.op, PileupOp::Match { .. }),
-        "pos 15 should be Match (orphan insertion not reported), got {:?}",
+        "pos 15 should be Match, got {:?}",
         aln15.op
     );
     // qpos at pos 15 should account for both insertions: 10 (first M) + 2 (first I) + 3 (second I) = 15

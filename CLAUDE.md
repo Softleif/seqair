@@ -37,7 +37,7 @@ Expert Rust. Modern idioms. Types are the primary abstraction.
 
 **PileupAlignment**: base/qual/mapq/flags/strand pre-extracted. Hot loop reads flat fields only.
 
-**PileupOp enum**: type-safe indel reporting — `Match`/`Insertion` carry `qpos`/`base`/`qual`, `Deletion` carries only `del_len`, `RefSkip` carries nothing. Compiler prevents reading a base from a deletion. Deletions and ref-skips are included in columns (not filtered out). `depth()` counts all alignments (matches htslib); `match_depth()` counts only those with a query base. Insertions attach to the last M/=/X position before the I op; `D I M` patterns produce orphaned insertions that are not reported. `del_len` is the total D op length at every position within the deletion (not remaining bases). `PileupOp` has a compile-time size guard (≤16 bytes).
+**PileupOp enum**: type-safe indel reporting — `Match`/`Insertion` carry `qpos`/`base`/`qual`, `Deletion` carries only `del_len`, `ComplexIndel` carries `del_len`+`insert_len` (deletion with following insertion, e.g. `D I M` in CIGAR), `RefSkip` carries nothing. Compiler prevents reading a base from a deletion. Deletions and ref-skips are included in columns (not filtered out). `depth()` counts all alignments (matches htslib); `match_depth()` counts only those with a query base. Insertions attach to the last M/=/X position before the I op; `D I M` patterns emit `ComplexIndel` at the last D position (matching htslib's `is_del=true, indel>0`). `del_len` is the total D op length at every position within the deletion (not remaining bases). `PileupOp` has a compile-time size guard (≤16 bytes).
 
 **FASTA**: returns raw `Vec<u8>` (not `Vec<Base>`) — CRAM MD5 needs exact bytes. Conversion to `Base` at app boundary.
 

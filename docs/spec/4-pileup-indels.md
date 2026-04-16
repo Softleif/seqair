@@ -28,10 +28,11 @@ We use a Rust enum (`PileupOp`) where `qpos`, `base`, and `qual` are only access
 > - **`Match`**: the read has a base aligned at this position (M, =, or X CIGAR op). Carries `qpos`, `base`, and `qual`.
 > - **`Insertion`**: same as Match, but an insertion of `insert_len` query bases follows before the next reference position. Carries `qpos`, `base`, `qual`, and `insert_len`.
 > - **`Deletion`**: the read spans this position via a deletion (D op). Carries `del_len` — the total number of reference bases deleted by this D CIGAR op. `del_len` is the same at every position within the deletion (it is the total D op length, not the remaining bases). Does not carry `qpos`, `base`, or `qual`.
+> - **`ComplexIndel`**: the read has a deletion at this position AND an insertion follows before the next reference-consuming op (e.g., CIGAR pattern `D I M`). Carries `del_len` and `insert_len`. Only emitted at the **last** position of the D op, matching htslib's peek-ahead semantics. Does not carry `qpos`, `base`, or `qual`. This is a complex variant event where reference bases are replaced by different query bases.
 > - **`RefSkip`**: the read spans this position via a reference skip (N op, e.g., intron). No query base exists. Does not carry `qpos`, `base`, or `qual`.
 
 r[pileup_indel.type_safety]
-`qpos`, `base`, and `qual` MUST only be accessible when the op is `Match` or `Insertion`. The type system (enum variants) MUST enforce this at compile time. Callers MUST NOT be able to read a `base` value from a `Deletion` or `RefSkip` alignment without an explicit match/conversion.
+`qpos`, `base`, and `qual` MUST only be accessible when the op is `Match` or `Insertion`. The type system (enum variants) MUST enforce this at compile time. Callers MUST NOT be able to read a `base` value from a `Deletion`, `ComplexIndel`, or `RefSkip` alignment without an explicit match/conversion.
 
 ## Inclusion in columns
 
@@ -54,29 +55,29 @@ An insertion MUST be reported at the last reference-consuming, query-consuming p
 r[pileup_indel.insertion_len]
 If multiple consecutive I ops appear (which is invalid per SAM spec but may occur), their lengths MUST be summed into a single `insert_len`.
 
-r[pileup_indel.no_orphan_insertions]
-An insertion that is not preceded by a M/=/X op within the same CIGAR (e.g., an insertion after a deletion: `D I M`) MUST NOT be reported as an `Insertion` op. The insertion's query bases are still consumed, but the insertion event is not surfaced because there is no anchor match position to attach it to.
+r[pileup_indel.complex_indel]
+An insertion that is not preceded by a M/=/X op within the same CIGAR (e.g., `D I M`) MUST be reported as a `ComplexIndel` op at the **last** position of the preceding D or N op. This matches htslib's behavior where `is_del=true` and `indel > 0` coexist on the same `bam_pileup1_t` entry. The `ComplexIndel` MUST only appear at the last position of the D/N op (interior deletion positions remain plain `Deletion`). `insert_len` gives the total length of the following insertion; `del_len` gives the total D op length (same as on a regular `Deletion` at this position).
 
 ## Convenience accessors
 
 > r[pileup_indel.accessors]
 > `PileupAlignment` MUST provide convenience methods:
 >
-> - `qpos() -> Option<usize>`: returns `Some(qpos)` for Match/Insertion, `None` for Deletion/RefSkip.
-> - `base() -> Option<Base>`: returns `Some(base)` for Match/Insertion, `None` for Deletion/RefSkip.
-> - `qual() -> Option<u8>`: returns `Some(qual)` for Match/Insertion, `None` for Deletion/RefSkip.
-> - `is_del() -> bool`: true for Deletion.
+> - `qpos() -> Option<usize>`: returns `Some(qpos)` for Match/Insertion, `None` for Deletion/ComplexIndel/RefSkip.
+> - `base() -> Option<Base>`: returns `Some(base)` for Match/Insertion, `None` for Deletion/ComplexIndel/RefSkip.
+> - `qual() -> Option<u8>`: returns `Some(qual)` for Match/Insertion, `None` for Deletion/ComplexIndel/RefSkip.
+> - `is_del() -> bool`: true for Deletion and ComplexIndel.
 > - `is_refskip() -> bool`: true for RefSkip.
-> - `insert_len() -> u32`: returns the insertion length for Insertion, 0 for all other ops.
-> - `del_len() -> u32`: returns the deletion length for Deletion, 0 for all other ops.
+> - `insert_len() -> u32`: returns the insertion length for Insertion and ComplexIndel, 0 for all other ops.
+> - `del_len() -> u32`: returns the deletion length for Deletion and ComplexIndel, 0 for all other ops.
 > - `op() -> &PileupOp`: returns a reference to the op enum.
 
 ## Deduplication interaction
 
 > r[pileup_indel.dedup_with_deletions]
-> Overlapping-pair deduplication MUST handle Deletion, RefSkip, and Insertion alignments. Resolution rules in priority order:
+> Overlapping-pair deduplication MUST handle Deletion, ComplexIndel, RefSkip, and Insertion alignments. Resolution rules in priority order:
 >
-> 1. When one mate has a base (Match/Insertion) and the other does not (Deletion/RefSkip), the mate with a base MUST be kept.
+> 1. When one mate has a base (Match/Insertion) and the other does not (Deletion/ComplexIndel/RefSkip), the mate with a base MUST be kept.
 > 2. When both have bases and show different bases, the first-in-template read MUST be kept.
 > 3. When both have the same base but one carries an Insertion op, the Insertion MUST be kept (it carries strictly more information for indel calling).
 > 4. When both have the same base and same insertion status, the first encountered (by arena order) MUST be kept.

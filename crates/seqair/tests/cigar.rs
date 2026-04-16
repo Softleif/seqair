@@ -350,7 +350,20 @@ proptest! {
 
         // Walk the string-form parts to derive expectations independently.
         let mut ref_pos = start;
-        for &(len, op) in &parts {
+        for (part_idx, &(len, op)) in parts.iter().enumerate() {
+            // Compute trailing insertion length after this op (skipping P ops), for D/N complex-indel check.
+            let following_insert_len = {
+                let mut total = 0u32;
+                let mut j = part_idx + 1;
+                while j < parts.len() {
+                    match parts[j].1 {
+                        'P' => { j += 1; }
+                        'I' => { total += parts[j].0; j += 1; }
+                        _ => break,
+                    }
+                }
+                total
+            };
             match op {
                 // M / = / X consume ref+query → every covered ref position must
                 // return Some(Match) or Some(Insertion).
@@ -369,29 +382,53 @@ proptest! {
                     }
                     ref_pos += len;
                 }
-                // D consumes ref only → Deletion at every covered position.
+                // D consumes ref only → interior positions are Deletion; the last position is
+                // ComplexIndel if a following insertion exists, otherwise Deletion.
                 'D' => {
                     for i in 0..len {
                         let pos = ref_pos + i;
-                        prop_assert_eq!(
-                            mapping.pos_info_at(Pos0::new(pos).unwrap()),
-                            Some(CigarPosInfo::Deletion { del_len: len }),
-                            "cigar={}: ref {} under D op should be Deletion",
-                            cigar_str, pos
-                        );
+                        let result = mapping.pos_info_at(Pos0::new(pos).unwrap());
+                        let is_last = i == len - 1;
+                        if is_last && following_insert_len > 0 {
+                            prop_assert_eq!(
+                                result,
+                                Some(CigarPosInfo::ComplexIndel { del_len: len, insert_len: following_insert_len, is_refskip: false }),
+                                "cigar={}: ref {} (last D pos) should be ComplexIndel",
+                                cigar_str, pos
+                            );
+                        } else {
+                            prop_assert_eq!(
+                                result,
+                                Some(CigarPosInfo::Deletion { del_len: len }),
+                                "cigar={}: ref {} under D op should be Deletion",
+                                cigar_str, pos
+                            );
+                        }
                     }
                     ref_pos += len;
                 }
-                // N consumes ref only → RefSkip at every covered position.
+                // N consumes ref only → interior positions are RefSkip; the last position is
+                // ComplexIndel if a following insertion exists, otherwise RefSkip.
                 'N' => {
                     for i in 0..len {
                         let pos = ref_pos + i;
-                        prop_assert_eq!(
-                            mapping.pos_info_at(Pos0::new(pos).unwrap()),
-                            Some(CigarPosInfo::RefSkip),
-                            "cigar={}: ref {} under N op should be RefSkip",
-                            cigar_str, pos
-                        );
+                        let result = mapping.pos_info_at(Pos0::new(pos).unwrap());
+                        let is_last = i == len - 1;
+                        if is_last && following_insert_len > 0 {
+                            prop_assert_eq!(
+                                result,
+                                Some(CigarPosInfo::ComplexIndel { del_len: len, insert_len: following_insert_len, is_refskip: true }),
+                                "cigar={}: ref {} (last N pos) should be ComplexIndel",
+                                cigar_str, pos
+                            );
+                        } else {
+                            prop_assert_eq!(
+                                result,
+                                Some(CigarPosInfo::RefSkip),
+                                "cigar={}: ref {} under N op should be RefSkip",
+                                cigar_str, pos
+                            );
+                        }
                     }
                     ref_pos += len;
                 }

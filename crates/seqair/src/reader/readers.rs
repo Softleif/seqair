@@ -49,6 +49,9 @@ use tracing::instrument;
 ///             PileupOp::Deletion { del_len } => {
 ///                 let _ = del_len;
 ///             }
+///             PileupOp::ComplexIndel { del_len, insert_len, .. } => {
+///                 let _ = (del_len, insert_len);
+///             }
 ///             PileupOp::RefSkip => {}
 ///         }
 ///     }
