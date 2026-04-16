@@ -145,15 +145,17 @@ impl PileupColumn {
 ///
 /// fn summarize(op: &PileupOp) -> &'static str {
 ///     match op {
-///         PileupOp::Match { .. }     => "match",
-///         PileupOp::Insertion { .. } => "insertion",
-///         PileupOp::Deletion { .. }  => "deletion",
-///         PileupOp::RefSkip          => "ref-skip",
+///         PileupOp::Match { .. }        => "match",
+///         PileupOp::Insertion { .. }    => "insertion",
+///         PileupOp::Deletion { .. }     => "deletion",
+///         PileupOp::ComplexIndel { .. } => "complex-indel",
+///         PileupOp::RefSkip             => "ref-skip",
 ///     }
 /// }
 ///
 /// assert_eq!(summarize(&PileupOp::Match { qpos: 10, base: seqair_types::Base::A, qual: 30 }), "match");
 /// assert_eq!(summarize(&PileupOp::Deletion { del_len: 3 }), "deletion");
+/// assert_eq!(summarize(&PileupOp::ComplexIndel { del_len: 3, insert_len: 2, is_refskip: false }), "complex-indel");
 /// ```
 // r[impl pileup_indel.op_enum]
 // r[impl pileup_indel.type_safety]
@@ -168,6 +170,13 @@ pub enum PileupOp {
     /// Read has a deletion spanning this position (D CIGAR op). `del_len` is the total length
     /// of the D CIGAR op — how many reference bases are deleted. No query base.
     Deletion { del_len: u32 },
+    /// Deletion or ref-skip at this position with a following insertion
+    /// (complex indel, e.g. D→I or N→I in CIGAR). Only emitted at the last
+    /// position of the D/N op. No query base exists at this position.
+    /// `is_refskip` distinguishes N→I (true) from D→I (false), matching
+    /// htslib where `is_del=true, is_refskip=true/false, indel>0` coexist.
+    // r[impl pileup_indel.complex_indel]
+    ComplexIndel { del_len: u32, insert_len: u32, is_refskip: bool },
     /// Read has a reference skip at this position (N CIGAR op, e.g. intron). No query base.
     RefSkip,
 }
@@ -206,7 +215,7 @@ impl PileupAlignment {
     pub fn qpos(&self) -> Option<usize> {
         match self.op {
             PileupOp::Match { qpos, .. } | PileupOp::Insertion { qpos, .. } => Some(qpos as usize),
-            PileupOp::Deletion { .. } | PileupOp::RefSkip => None,
+            PileupOp::Deletion { .. } | PileupOp::ComplexIndel { .. } | PileupOp::RefSkip => None,
         }
     }
 
@@ -214,7 +223,7 @@ impl PileupAlignment {
     pub fn base(&self) -> Option<Base> {
         match self.op {
             PileupOp::Match { base, .. } | PileupOp::Insertion { base, .. } => Some(base),
-            PileupOp::Deletion { .. } | PileupOp::RefSkip => None,
+            PileupOp::Deletion { .. } | PileupOp::ComplexIndel { .. } | PileupOp::RefSkip => None,
         }
     }
 
@@ -222,36 +231,39 @@ impl PileupAlignment {
     pub fn qual(&self) -> Option<u8> {
         match self.op {
             PileupOp::Match { qual, .. } | PileupOp::Insertion { qual, .. } => Some(qual),
-            PileupOp::Deletion { .. } | PileupOp::RefSkip => None,
+            PileupOp::Deletion { .. } | PileupOp::ComplexIndel { .. } | PileupOp::RefSkip => None,
         }
     }
 
+    // r[impl pileup_indel.accessors]
     #[must_use]
     pub fn is_del(&self) -> bool {
-        matches!(self.op, PileupOp::Deletion { .. })
+        matches!(self.op, PileupOp::Deletion { .. } | PileupOp::ComplexIndel { .. })
     }
 
     #[must_use]
     pub fn is_refskip(&self) -> bool {
-        matches!(self.op, PileupOp::RefSkip)
+        matches!(self.op, PileupOp::RefSkip | PileupOp::ComplexIndel { is_refskip: true, .. })
     }
 
     #[must_use]
     pub fn insert_len(&self) -> u32 {
         match self.op {
-            PileupOp::Insertion { insert_len, .. } => insert_len,
+            PileupOp::Insertion { insert_len, .. } | PileupOp::ComplexIndel { insert_len, .. } => {
+                insert_len
+            }
             _ => 0,
         }
     }
 
-    /// Returns the deletion length for a `Deletion` op, or 0 for all other ops.
+    /// Returns the deletion length for a `Deletion` or `ComplexIndel` op, or 0 for all other ops.
     /// All positions within the same D CIGAR op report the same `del_len` (the total
     /// D op length, not the remaining bases in the deletion).
     // r[impl pileup_indel.accessors]
     #[must_use]
     pub fn del_len(&self) -> u32 {
         match self.op {
-            PileupOp::Deletion { del_len } => del_len,
+            PileupOp::Deletion { del_len } | PileupOp::ComplexIndel { del_len, .. } => del_len,
             _ => 0,
         }
     }
@@ -484,6 +496,10 @@ impl Iterator for PileupEngine {
                         }
                     }
                     CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
+                    // r[impl pileup_indel.complex_indel]
+                    CigarPosInfo::ComplexIndel { del_len, insert_len, is_refskip } => {
+                        PileupOp::ComplexIndel { del_len, insert_len, is_refskip }
+                    }
                     CigarPosInfo::RefSkip => PileupOp::RefSkip,
                 };
 
