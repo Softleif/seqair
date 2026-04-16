@@ -364,6 +364,102 @@ impl IndexBuilder {
         Ok(())
     }
 
+    // r[impl csi.write]
+    // r[impl csi.write_format]
+    // r[impl csi.write_loffset]
+    /// Write CSI format to a writer. The output is uncompressed.
+    ///
+    /// `n_refs` is the total number of reference sequences in the BAM header —
+    /// CSI includes an entry for every reference, even those with no records.
+    pub fn write_csi<W: std::io::Write>(
+        &self,
+        mut writer: W,
+        n_refs: usize,
+        aux: &[u8],
+    ) -> Result<(), IndexError> {
+        if !self.finished {
+            return Err(IndexError::NotFinished);
+        }
+        let mut buf = Vec::new();
+
+        // r[impl csi.write_format]
+        buf.extend_from_slice(b"CSI\x01");
+        write_i32(&mut buf, count_i32(self.min_shift as usize, "min_shift")?);
+        write_i32(&mut buf, count_i32(self.depth as usize, "depth")?);
+        write_i32(&mut buf, count_i32(aux.len(), "l_aux")?);
+        buf.extend_from_slice(aux);
+        write_i32(&mut buf, count_i32(n_refs, "n_ref")?);
+
+        for tid in 0..n_refs {
+            match self.refs.get(tid) {
+                Some(r) if !r.bins.is_empty() => write_csi_ref_index(&mut buf, r)?,
+                _ => {
+                    write_i32(&mut buf, 0); // n_bin
+                }
+            }
+        }
+
+        writer.write_all(&buf).map_err(IndexError::Io)?;
+        Ok(())
+    }
+
+    // r[impl csi.write_tabix_aux]
+    /// Write CSI format with tabix metadata in the aux block (for VCF/BED/GFF).
+    /// BGZF-compressed output.
+    pub fn write_csi_tabix<W: std::io::Write>(
+        &self,
+        writer: W,
+        contig_names: &[SmolStr],
+    ) -> Result<(), IndexError> {
+        use crate::bam::bgzf_writer::BgzfWriter;
+
+        // Build tabix aux block
+        let mut aux = Vec::new();
+        // format = 2 (VCF)
+        write_i32(&mut aux, 2);
+        // col_seq = 1, col_beg = 2, col_end = 0
+        write_i32(&mut aux, 1);
+        write_i32(&mut aux, 2);
+        write_i32(&mut aux, 0);
+        // meta = '#' = 35
+        write_i32(&mut aux, 35);
+        // skip = 0
+        write_i32(&mut aux, 0);
+
+        // Collect only active references
+        let active_refs: Vec<(usize, &RefIndexBuilder)> =
+            self.refs.iter().enumerate().filter(|(_, r)| !r.bins.is_empty()).collect();
+
+        let mut names_buf = Vec::new();
+        for &(idx, _) in &active_refs {
+            if let Some(name) = contig_names.get(idx) {
+                names_buf.extend_from_slice(name.as_bytes());
+                names_buf.push(0);
+            }
+        }
+        write_i32(&mut aux, count_i32(names_buf.len(), "l_nm")?);
+        aux.extend_from_slice(&names_buf);
+
+        // Write into BGZF
+        let mut bgzf = BgzfWriter::new(writer);
+        let mut buf = Vec::new();
+
+        buf.extend_from_slice(b"CSI\x01");
+        write_i32(&mut buf, count_i32(self.min_shift as usize, "min_shift")?);
+        write_i32(&mut buf, count_i32(self.depth as usize, "depth")?);
+        write_i32(&mut buf, count_i32(aux.len(), "l_aux")?);
+        buf.extend_from_slice(&aux);
+        write_i32(&mut buf, count_i32(active_refs.len(), "n_ref")?);
+
+        for &(_, r) in &active_refs {
+            write_csi_ref_index(&mut buf, r)?;
+        }
+
+        bgzf.write_all(&buf)?;
+        bgzf.finish()?;
+        Ok(())
+    }
+
     /// Number of references in the index.
     pub fn n_refs(&self) -> usize {
         self.refs.len()
@@ -377,6 +473,26 @@ fn count_i32(n: usize, field: &'static str) -> Result<i32, IndexError> {
     i32::try_from(n).map_err(|_| IndexError::CountOverflow { field, value: n })
 }
 
+// r[impl csi.write_loffset]
+/// Write one reference's bin data in CSI format (with per-bin loffset, no linear index).
+fn write_csi_ref_index(buf: &mut Vec<u8>, r: &RefIndexBuilder) -> Result<(), IndexError> {
+    write_i32(buf, count_i32(r.bins.len(), "n_bin")?);
+
+    for (&bin_id, chunks) in &r.bins {
+        write_u32(buf, bin_id);
+        // loffset: virtual offset of the first record in this bin
+        let loffset = chunks.first().map_or(0, |c| c.begin.0);
+        write_u64(buf, loffset);
+        write_i32(buf, count_i32(chunks.len(), "n_chunk")?);
+        for chunk in chunks {
+            write_u64(buf, chunk.begin.0);
+            write_u64(buf, chunk.end.0);
+        }
+    }
+    Ok(())
+}
+
+/// Write one reference's bin data in BAI format (no per-bin loffset, with linear index).
 fn write_ref_index(buf: &mut Vec<u8>, r: &RefIndexBuilder) -> Result<(), IndexError> {
     write_i32(buf, count_i32(r.bins.len(), "n_bin")?);
 

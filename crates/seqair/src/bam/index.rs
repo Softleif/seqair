@@ -2,6 +2,7 @@
 //! region; [`BamIndex::query_split`] separates nearby (levels 3–5) from distant (levels 0–2) chunks.
 
 use super::bgzf::{BgzfError, VirtualOffset};
+use super::csi_index::CsiIndex;
 use seqair_types::Pos0;
 use std::path::Path;
 use tracing::instrument;
@@ -296,12 +297,51 @@ impl BamIndex {
     }
 }
 
+// r[impl csi.unified_enum]
+// r[impl csi.query_interface]
+/// Unified index type: dispatches queries transparently to BAI or CSI.
+#[derive(Debug)]
+pub enum AlignmentIndex {
+    Bai(BamIndex),
+    Csi(CsiIndex),
+}
+
+impl AlignmentIndex {
+    /// Query the index for chunks overlapping a region [start, end] (0-based inclusive).
+    pub fn query(&self, tid: u32, start: Pos0, end: Pos0) -> Vec<Chunk> {
+        match self {
+            Self::Bai(idx) => idx.query(tid, start, end),
+            Self::Csi(idx) => idx.query(tid, start, end),
+        }
+    }
+
+    /// Query the index, separating distant from nearby chunks.
+    pub fn query_split(&self, tid: u32, start: Pos0, end: Pos0) -> QueryChunks {
+        match self {
+            Self::Bai(idx) => idx.query_split(tid, start, end),
+            Self::Csi(idx) => idx.query_split(tid, start, end),
+        }
+    }
+}
+
+impl From<BamIndex> for AlignmentIndex {
+    fn from(idx: BamIndex) -> Self {
+        Self::Bai(idx)
+    }
+}
+
+impl From<CsiIndex> for AlignmentIndex {
+    fn from(idx: CsiIndex) -> Self {
+        Self::Csi(idx)
+    }
+}
+
 /// Merge sorted chunks whose byte ranges overlap or are adjacent.
 ///
 /// Chunks from different bins can cover overlapping file regions. Without
 /// merging, `fetch_into` would read records in the overlap zone twice.
 /// Input must be sorted by `begin`; output preserves that invariant.
-fn merge_overlapping_chunks(chunks: &mut Vec<Chunk>) {
+pub(super) fn merge_overlapping_chunks(chunks: &mut Vec<Chunk>) {
     if chunks.len() <= 1 {
         return;
     }
@@ -330,6 +370,7 @@ fn parse_refs(data: &[u8], pos: &mut usize) -> Result<BamIndex, BaiError> {
 }
 
 // r[impl io.fuzz.alloc_limits]
+// r[impl csi.alloc_limits]
 // Practical upper bounds for index fields. These exceed any real-world genome
 // but catch corrupt/malicious files before they cause multi-GB allocations.
 const MAX_INDEX_REFS: usize = 100_000; // human: ~3000 contigs
@@ -381,7 +422,7 @@ fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<B
 }
 
 /// Decompress all BGZF blocks from a BGZF-compressed file into a single buffer.
-fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
+pub(super) fn decompress_bgzf_file(compressed: &[u8]) -> Result<Vec<u8>, BaiError> {
     let mut result = Vec::with_capacity(compressed.len().wrapping_mul(3));
     let mut offset = 0;
     let mut decompressor = libdeflater::Decompressor::new();
