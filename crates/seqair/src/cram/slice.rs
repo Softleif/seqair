@@ -540,6 +540,7 @@ fn decode_record(
     ))
 }
 
+// r[impl cram.record.mate_tlen_reconstruction]
 /// Post-process mate cross-references to reconstruct `template_len` for
 /// attached/downstream mates. Mirrors htslib's `cram_decode_slice_xref`.
 ///

@@ -433,10 +433,25 @@ The reconstructed CIGAR MUST be packed into BAM u32 format for the data slab.
 > _[CRAM3] §10.4 "Mate records" — detached (CF bit 0x2) vs attached (NF) mate encoding_
 
 r[cram.record.mate_detached]
-When CRAM flags bit 0x2 is set (detached), mate information is stored inline: `MF` (mate flags), `NS` (next ref ID), `NP` (next mate position), `TS` (template size). These fields are NOT needed for RecordStore (which doesn't store mate info), but the decoder MUST read and discard them to advance the data stream correctly.
+When CRAM flags bit 0x2 is set (detached), mate information is stored inline: `MF` (mate flags), `NS` (next ref ID), `NP` (next mate position), `TS` (template size). The `NP` and `TS` values are stored in the RecordStore as `next_pos` and `template_len`. `MF` and `NS` MUST be read to advance the data stream.
 
 r[cram.record.mate_attached]
-When bit 0x2 is clear, the mate is "attached" — `NF` (next fragment distance) gives the record-skip to the mate within the same slice. The decoder MUST read `NF` but does not need to resolve the linkage for RecordStore purposes.
+When bit 0x2 is clear, the mate is "attached" — `NF` (next fragment distance) gives the record-skip to the mate within the same slice. The absolute mate index is `current_record_index + 1 + NF`. The decoder MUST read `NF` and record the mate link for post-processing.
+
+r[cram.record.mate_tlen_reconstruction]
+After all records in a slice are decoded, the decoder MUST reconstruct `template_len` for attached mates by following mate chains. The algorithm (matching htslib's `cram_decode_slice_xref`):
+
+1. Follow `mate_line` pointers to collect all records in the chain.
+2. Compute `aleft = min(pos)` and `aright = max(end_pos)` across all fragments.
+3. `tlen = aright - aleft` (in 0-based half-open coordinates).
+4. The first record in the chain gets its sign based on position:
+   - If leftmost and (`end_pos < aright` or it is the only leftmost): `+tlen`.
+   - If both leftmost and rightmost with multiple ties: tie-break by `BAM_FREAD1` flag (0x40).
+   - Otherwise: `-tlen`.
+5. All remaining chain members get the opposite sign.
+6. If any fragment is unmapped or the chain spans different references, `tlen = 0`.
+
+Only records that were pushed to the RecordStore (i.e., overlapping the query region) have their `template_len` updated. Mate position/end data is collected for ALL records in the slice regardless of region filtering.
 
 ### Auxiliary tags
 

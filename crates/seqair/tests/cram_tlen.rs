@@ -292,8 +292,9 @@ fn tlen_a5() {
     assert_tlen_via_bam("a5");
 }
 
-// --- CRAM path: fields except TLEN (representative subset) ---
+// --- CRAM path: full TLEN validation via attached mate reconstruction ---
 
+// r[verify cram.record.mate_tlen_reconstruction]
 #[test]
 fn cram_fields_a7() {
     assert_cram_fields_with_tlen("a7");
