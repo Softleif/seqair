@@ -41,7 +41,7 @@ jobs:
             autoconf automake libtool pkg-config \
             zlib1g-dev libbz2-dev liblzma-dev \
             libssl-dev libcurl4-openssl-dev \
-            samtools tabix
+            samtools tabix bcftools
       - name: Clippy
         id: clippy
         continue-on-error: true
