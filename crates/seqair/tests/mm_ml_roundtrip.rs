@@ -96,6 +96,7 @@ fn make_methylation_record(
 
 // ---- BAM round-trip ----
 
+// r[verify base_mod.passthrough.bam]
 /// MM/ML tags survive BAM write -> read round-trip via seqair.
 #[test]
 fn mm_ml_bam_roundtrip_seqair() {
@@ -172,6 +173,7 @@ fn mm_ml_bam_samtools_readable() {
 
 // ---- CRAM round-trip ----
 
+// r[verify base_mod.passthrough.cram]
 /// MM/ML tags survive BAM -> CRAM -> BAM round-trip via samtools + seqair.
 #[test]
 fn mm_ml_cram_roundtrip() {
@@ -363,6 +365,7 @@ fn mm_ml_large_tags() {
     }
 }
 
+// r[verify base_mod.passthrough.coexistence]
 /// MM/ML tags coexist with other aux tags without interference.
 #[test]
 fn mm_ml_coexist_with_other_tags() {
