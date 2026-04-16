@@ -1,3 +1,10 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing,
+    reason = "example"
+)]
+
 use anyhow::Context;
 use clap::Parser as _;
 use seqair::bam::pileup::{PileupEngine, PileupOp, RefSeq};
@@ -16,7 +23,7 @@ use std::rc::Rc;
 /// Outputs one line per covered reference position with depth and
 /// per-read base/indel information.
 ///
-/// By default, output matches htslib's bam_plp_auto semantics (includes
+/// By default, output matches htslib's `bam_plp_auto` semantics (includes
 /// trailing D/N positions in depth). Use `--samtools-compat` to match
 /// `samtools mpileup -B` output (excludes reads at trailing D/N positions).
 #[derive(Debug, clap::Parser)]
@@ -127,12 +134,12 @@ fn main() -> anyhow::Result<()> {
 
             for aln in column.alignments() {
                 // In samtools-compat mode, skip alignments at trailing D/N positions.
-                if args.samtools_compat && aln.qpos().is_none() {
-                    if let Some(&qend) = query_end_cache.get(&aln.record_idx()) {
-                        if *pos >= qend {
-                            continue;
-                        }
-                    }
+                if args.samtools_compat
+                    && aln.qpos().is_none()
+                    && let Some(&qend) = query_end_cache.get(&aln.record_idx())
+                    && *pos >= qend
+                {
+                    continue;
                 }
 
                 depth += 1;
