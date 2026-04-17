@@ -23,9 +23,9 @@ CRAM decode → RecordStore MUST preserve MM and ML tags. CRAM encodes these via
 r[base_mod.passthrough.coexistence]
 MM/ML tags MUST coexist with other auxiliary tags (NM, RG, MD, XS, etc.) without interference. Adding, removing, or updating other tags via `AuxData` methods MUST NOT corrupt MM/ML data.
 
-## Planned: structured modification API
+## Structured modification API
 
-The following rules describe the planned structured API for base modifications. They are not yet implemented.
+The following rules describe the structured API for base modifications. The pileup integration (`r[base_mod.pileup_integration]`) is the only piece still deferred; the rest is implemented in `crates/seqair/src/bam/base_mod.rs`.
 
 ### Design choices
 
@@ -45,7 +45,7 @@ r[base_mod.state]
 >
 > - Multiple canonical bases and modification types (e.g. `C+m,0,2;C+h,1,3;A+a,0;`)
 > - Mode markers after the modification code: `.` (explicit, unlisted positions are definitively unmodified), `?` (ambiguous, unlisted positions are explicitly marked as unknown), or absent (implicit, unlisted positions have unknown status). The API MUST preserve this three-way distinction; `?` and absent produce identical `is_unmodified` results but are retained separately in the parsed mode field.
-> - ChEBI numeric codes (e.g. `C+27551,0,2;` for 5mC by ChEBI ID)
+> - ChEBI numeric codes (e.g. `C+27551,0,2;` for 5mC by ChEBI ID). ChEBI ids MUST be parseable as `u32`; values that exceed `u32::MAX` MUST be rejected with a typed error.
 > - Combined modification codes in a single entry (e.g. `C+mh,0,2;`), where the ML array carries one value per (position, mod-code) pair in the order the codes appear. For an entry with N combined codes and K position deltas, the entry consumes `N * K` values from the ML array.
 > - Both `+` (top/forward strand) and `-` (bottom/reverse strand) modification strands
 
@@ -115,9 +115,11 @@ Callers who need to reason about the original biological strand (e.g. "this is a
 > r[base_mod.validation]
 > When parsing MM tags, the implementation MUST validate:
 >
-> - The canonical base character is one of A, C, G, T (case-insensitive)
+> - The canonical base character is one of A, C, G, T (case-insensitive). The ambiguity code `N` (and other IUPAC ambiguity letters) MUST be rejected with a distinct, typed error variant — `N`-anchored MM entries are syntactically valid per SAM 4.5 but are not currently supported, and conflating "unknown anchor" with "garbage byte" would hide that gap.
 > - The strand is `+` or `-`
-> - Position deltas are non-negative integers
+> - The modification code is either a single ASCII letter or a `u32`-representable ChEBI numeric id (see `r[base_mod.parse_mm]`)
+> - Position deltas are non-negative integers parseable as `u32`
 > - The total number of modification calls across all MM entries equals the ML array length
+> - The stored sequence length fits in `u32` (resolved positions are stored as `u32`); a longer sequence MUST be rejected with a typed error rather than silently truncated
 >
 > Validation failures MUST return typed errors, not panics.

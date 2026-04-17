@@ -13,7 +13,6 @@ use thiserror::Error;
 
 use super::cigar::{CigarMapping, CigarPosInfo};
 
-// r[impl base_mod.modification_struct]
 /// Modification type code: a single-character SAM code (`m`, `h`, `a`, …) or a
 /// numeric `ChEBI` ontology id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +46,7 @@ pub enum ModMode {
     Ambiguous,
 }
 
+// r[impl base_mod.modification_struct]
 /// A single modification call on a single base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Modification {
@@ -104,8 +104,6 @@ pub struct BaseModState {
 
 impl BaseModState {
     // r[impl base_mod.parse_mm]
-    // r[impl base_mod.resolve_positions]
-    // r[impl base_mod.reverse_complement]
     // r[impl base_mod.validation]
     /// Parse MM/ML tag values and resolve positions against `seq`.
     ///
@@ -347,6 +345,8 @@ fn parse_deltas(bytes: &[u8]) -> Result<Vec<u32>, BaseModError> {
     Ok(out)
 }
 
+// r[impl base_mod.resolve_positions]
+// r[impl base_mod.reverse_complement]
 #[allow(clippy::too_many_arguments, reason = "per-entry resolution is a local helper")]
 fn resolve_and_emit(
     canonical: Base,

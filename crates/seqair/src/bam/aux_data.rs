@@ -33,6 +33,8 @@ impl AuxData {
     }
 
     // r[impl bam.owned_record.aux_from_slab]
+    // r[impl base_mod.passthrough] — MM/ML are never decoded on the read path; the raw
+    //   BAM aux byte block is moved into the owned record without inspection.
     /// Wrap existing raw BAM auxiliary bytes. No parsing or validation is performed.
     pub fn from_bytes(data: Vec<u8>) -> Self {
         Self { data }
@@ -55,6 +57,8 @@ impl AuxData {
 
     // r[impl bam.owned_record.aux_uniqueness]
     // r[impl bam.owned_record.aux_replace_semantics]
+    // r[impl base_mod.passthrough.bam] — Z-type set/get round-trips MM bytes verbatim
+    // r[impl base_mod.passthrough.coexistence] — `remove(tag)` only touches the named tag
     /// Add or replace a Z-type (null-terminated string) tag.
     pub fn set_string(&mut self, tag: [u8; 2], value: &[u8]) {
         self.remove(tag);
@@ -125,6 +129,7 @@ impl AuxData {
     }
 
     // r[impl bam.owned_record.aux_array_encoding]
+    // r[impl base_mod.passthrough.bam] — B:C round-trips ML bytes verbatim
     /// Add or replace a B:C (unsigned byte array) tag.
     ///
     /// The BAM B-array element count is u32. In practice, array size is bounded by

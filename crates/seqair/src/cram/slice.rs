@@ -366,6 +366,9 @@ fn decode_record(
         .map_err(|_| CramError::InvalidLength { value: tag_line_idx_i32 })?;
 
     // r[impl cram.record.aux_tags]
+    // r[impl base_mod.passthrough.cram] — MM (Z) and ML (B:C) flow through the generic
+    //   tag-encoding path without truncation; arbitrary lengths are emitted into the
+    //   reconstructed BAM aux block as the encoded `tag_value` bytes.
     // 10. Decode tag values
     aux_buf.clear();
     if let Some(tag_set) = ch.preservation.tag_dictionary.get(tag_line_idx) {
