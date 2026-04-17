@@ -397,11 +397,7 @@ fn resolve_and_emit(
         let b = seq[stored_idx];
         if b == target {
             if remaining == 0 {
-                // Defense in depth: stored_idx < seq_len, but seq_len is
-                // untrusted user input. A >4 GiB sequence would silently
-                // truncate; surface it as a typed error instead.
-                let qp = u32::try_from(stored_idx)
-                    .map_err(|_| BaseModError::SeqTooLong { len: seq_len })?;
+                let qp = try_qpos(stored_idx, seq_len)?;
                 // Push one Modification per mod_type (combined codes interleaved in ML).
                 let base_offset = delta_idx
                     .checked_mul(num_mods)
@@ -464,6 +460,18 @@ fn resolve_and_emit(
     Ok(())
 }
 
+/// Convert a stored-sequence index into the `u32` we keep in `qpos`.
+///
+/// Defense in depth: callers already maintain `stored_idx < seq_len`, but
+/// `seq_len` itself comes from untrusted input. A >4 GiB sequence would
+/// silently truncate the cast — surface it as a typed error instead.
+///
+/// Pulled out as a standalone function so the failure path can be exercised
+/// without allocating a 4 GiB `Vec<Base>`; see `try_qpos_rejects_overflow`.
+fn try_qpos(stored_idx: usize, seq_len: usize) -> Result<u32, BaseModError> {
+    u32::try_from(stored_idx).map_err(|_| BaseModError::SeqTooLong { len: seq_len })
+}
+
 // TODO(pileup-integration): once `PileupColumn::modification_at` is added
 // (see spec `r[base_mod.pileup_integration]`), the pileup engine needs a
 // lazy per-active-record cache of `BaseModState`. The natural shape is a
@@ -476,6 +484,8 @@ fn resolve_and_emit(
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
     reason = "test code"
 )]
 mod tests {
@@ -759,6 +769,12 @@ mod tests {
         assert!(matches!(err, BaseModError::MissingModCode), "got {err:?}");
     }
 
+    #[test]
+    fn try_qpos_accepts_in_range_indices() {
+        assert_eq!(try_qpos(0, 1).unwrap(), 0);
+        assert_eq!(try_qpos(u32::MAX as usize, u32::MAX as usize + 1).unwrap(), u32::MAX);
+    }
+
     // ---------------- proptest oracles for the validation paths ----------------
 
     use proptest::prelude::*;
@@ -833,6 +849,28 @@ mod tests {
             let mm = [b'C', b'+', b'm', b',', byte, b';'];
             let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
             prop_assert!(matches!(err, BaseModError::InvalidDelta), "got {err:?}");
+        }
+
+        // r[verify base_mod.validation]
+        /// `try_qpos` MUST reject `stored_idx > u32::MAX` with `SeqTooLong`,
+        /// where `seq_len` is the length the caller would have observed when
+        /// the cast failed. We exercise this directly because allocating a
+        /// >4 GiB `Vec<Base>` to drive `parse` is impractical. Gated to 64-bit
+        /// targets — on 32-bit `usize <= u32::MAX` so the failure path is
+        /// unreachable and `usize as u64 + 1` may overflow the value range.
+        #[cfg(target_pointer_width = "64")]
+        #[test]
+        fn proptest_try_qpos_rejects_overflow(
+            // `stored_idx > u32::MAX` and `seq_len >= stored_idx + 1`.
+            stored_idx in (u64::from(u32::MAX) + 1)..=u64::from(u32::MAX) + 1_000_000,
+            extra in 0u64..=1_000_000,
+        ) {
+            let seq_len = (stored_idx + extra) as usize;
+            let stored_idx = stored_idx as usize;
+            match try_qpos(stored_idx, seq_len) {
+                Err(BaseModError::SeqTooLong { len }) => prop_assert_eq!(len, seq_len),
+                other => prop_assert!(false, "expected SeqTooLong, got {:?}", other),
+            }
         }
 
         // r[verify base_mod.parse_mm]
