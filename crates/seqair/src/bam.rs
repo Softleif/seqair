@@ -57,6 +57,7 @@ pub mod seq;
 pub mod writer;
 
 pub use aux_data::{AuxData, AuxDataError};
+pub use base_mod::{BaseModError, BaseModState, ModMode, ModStrand, ModType, Modification};
 pub use bgzf::BgzfError;
 pub use cigar::CigarOp;
 pub use csi_index::{CsiError, CsiIndex};

@@ -62,7 +62,7 @@ r[base_mod.query_qpos]
 `BaseModState` MUST provide `mod_at_qpos(qpos: usize) -> Option<&[Modification]>` to look up modifications at a given query-sequence position. Returns `None` if no modification is called at that position. Multiple modification types at the same position (e.g. 5mC and 5hmC on the same C) MUST all be returned.
 
 r[base_mod.query_refpos]
-`BaseModState` MUST provide `mod_at_ref_pos(ref_pos: i64, cigar: &CigarMapping) -> Option<&[Modification]>` to look up modifications at a reference position. This maps the reference position to a query position via the CIGAR, then delegates to `mod_at_qpos`. Returns `None` if the reference position falls in a deletion/ref-skip (no qpos) or has no modification.
+`BaseModState` MUST provide `mod_at_ref_pos(ref_pos: Pos0, cigar: &CigarMapping) -> Option<&[Modification]>` to look up modifications at a reference position. The position uses the typed `Pos0` newtype (not raw `i64`) to prevent off-by-one and signedness mistakes at the call site. This maps the reference position to a query position via the CIGAR, then delegates to `mod_at_qpos`. Returns `None` if the reference position falls in a deletion/ref-skip (no qpos) or has no modification.
 
 r[base_mod.modification_struct]
 Each `Modification` MUST carry:
@@ -76,6 +76,8 @@ r[base_mod.implicit_explicit]
 - `Some(true)` if the position's canonical base has an `Unmodified`-mode entry and the position is not listed (definitively unmodified)
 - `Some(false)` if the position has a modification call
 - `None` if the position has no mod call and all entries for its canonical base are `Implicit` or `Ambiguous` (unknown status)
+
+The accessor's scope is **per canonical base, not per modification type**. If two entries share the same canonical base but use different modes — e.g. `C+m.,…;C+h,…;` — `is_unmodified(qpos, C)` returns `Some(true)` for an unlisted `qpos` because the `C+m.` entry definitively excludes 5mC at every unlisted C. The status of the `Implicit`-mode `C+h` entry (5hmC) at the same position remains unknown, and that uncertainty is **not** reflected in the boolean result. The contract is "no `Unmodified`-mode modification of this canonical base at `qpos`", NOT "no modification of any kind at `qpos`". Callers needing per-mod-type semantics MUST inspect the `mod_at_qpos` slice directly and combine it with their own knowledge of which mod types were declared in the MM tag.
 
 ### Pileup integration
 

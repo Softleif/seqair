@@ -132,6 +132,24 @@ fn csi_roundtrip_parse() {
     assert_eq!(idx.depth(), 5);
 }
 
+/// `write_csi` MUST produce BGZF-compressed output (gzip magic 1f 8b) to
+/// match htslib's behavior. Tools that strictly validate the gzip header
+/// will reject uncompressed CSI files.
+#[test]
+fn write_csi_is_bgzf_compressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let bam_path = write_multi_contig_bam(dir.path());
+    let csi_path = bam_path.with_extension("bam.csi");
+    let raw = std::fs::read(&csi_path).expect("read csi");
+    assert!(raw.len() >= 2, "csi file unexpectedly short");
+    assert_eq!(
+        &raw[..2],
+        &[0x1f, 0x8b],
+        "write_csi output must be BGZF-compressed (gzip magic 1f 8b), got {:02x?}",
+        &raw[..raw.len().min(4)]
+    );
+}
+
 #[test]
 fn csi_roundtrip_query_matches_bai() {
     let dir = tempfile::tempdir().unwrap();

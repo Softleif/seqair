@@ -367,19 +367,26 @@ impl IndexBuilder {
     // r[impl csi.write]
     // r[impl csi.write_format]
     // r[impl csi.write_loffset]
-    /// Write CSI format to a writer. The output is uncompressed.
+    /// Write CSI format to a writer, BGZF-compressed.
     ///
     /// `n_refs` is the total number of reference sequences in the BAM header —
     /// CSI includes an entry for every reference, even those with no records.
+    ///
+    /// The output is BGZF-compressed to match htslib's behavior. Some
+    /// downstream tools strictly validate the gzip header and reject
+    /// uncompressed CSI files; the compressed form is the interoperable
+    /// default. The CSI reader transparently handles both forms.
     pub fn write_csi<W: std::io::Write>(
         &self,
-        mut writer: W,
+        writer: W,
         n_refs: usize,
         aux: &[u8],
     ) -> Result<(), IndexError> {
         if !self.finished {
             return Err(IndexError::NotFinished);
         }
+        use crate::bam::bgzf_writer::BgzfWriter;
+
         let mut buf = Vec::new();
 
         // r[impl csi.write_format]
@@ -399,7 +406,9 @@ impl IndexBuilder {
             }
         }
 
-        writer.write_all(&buf).map_err(IndexError::Io)?;
+        let mut bgzf = BgzfWriter::new(writer);
+        bgzf.write_all(&buf)?;
+        bgzf.finish()?;
         Ok(())
     }
 
