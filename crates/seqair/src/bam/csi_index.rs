@@ -9,8 +9,8 @@ use super::{
         merge_overlapping_chunks,
     },
 };
+use rustc_hash::FxHashMap;
 use seqair_types::Pos0;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::instrument;
 
@@ -58,6 +58,13 @@ pub enum CsiError {
          overflow the u64 shift width (must satisfy min_shift + depth*3 <= 63)"
     )]
     MinShiftTooLarge { min_shift: u32, depth: u32, sum: u64 },
+
+    /// Defense-in-depth: header validation already enforces
+    /// `min_shift + depth*3 <= 63` and `depth <= 16`, so the bin-math helpers
+    /// cannot overflow at runtime. This variant catches a future regression
+    /// in those bounds rather than a real input failure.
+    #[error("CSI bin arithmetic overflow in {context} (this indicates a bug)")]
+    BinArithmeticOverflow { context: &'static str },
 
     #[error("BGZF error decompressing CSI file")]
     Bgzf {
@@ -125,7 +132,12 @@ struct CsiRefIndex {
     /// Indexes into `bins` keyed by `bin_id`. Built once at parse time so that
     /// `csi_min_offset` does not have to do a linear scan per leaf-to-root
     /// step (relevant for dense indexes on large chromosomes).
-    by_bin_id: HashMap<u32, usize>,
+    ///
+    /// Uses `FxHashMap` (no `HashDoS` protection) rather than the default
+    /// `HashMap`. CSI is an offline file format, not a network surface, and
+    /// `n_bin` is capped at `MAX_BINS_PER_REF` (100k) so the worst-case
+    /// quadratic blowup from a maliciously crafted file is bounded.
+    by_bin_id: FxHashMap<u32, usize>,
 }
 
 impl CsiRefIndex {
@@ -291,8 +303,20 @@ impl CsiIndex {
         let start_u64 = start.as_u64();
         let end_u64 = end.as_u64();
         let candidate_bins =
-            csi_reg2bins(start_u64, end_u64.wrapping_add(1), self.min_shift, self.depth);
-        let min_offset = csi_min_offset(ref_idx, start_u64, self.min_shift, self.depth);
+            match csi_reg2bins(start_u64, end_u64.wrapping_add(1), self.min_shift, self.depth) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %e, "csi_reg2bins failed; returning no chunks");
+                    return Vec::new();
+                }
+            };
+        let min_offset = match csi_min_offset(ref_idx, start_u64, self.min_shift, self.depth) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(error = %e, "csi_min_offset failed; returning no chunks");
+                return Vec::new();
+            }
+        };
 
         let mut result = Vec::new();
         for bin in &ref_idx.bins {
@@ -315,18 +339,31 @@ impl CsiIndex {
     /// are "distant" (cached per-chromosome), levels `depth - 2` through `depth`
     /// are "nearby" (loaded per-query).
     pub fn query_split(&self, tid: u32, start: Pos0, end: Pos0) -> QueryChunks {
+        let empty = || QueryChunks { nearby: Vec::new(), distant: Vec::new() };
         let Some(ref_idx) = self.references.get(tid as usize) else {
-            return QueryChunks { nearby: Vec::new(), distant: Vec::new() };
+            return empty();
         };
 
         let start_u64 = start.as_u64();
         let end_u64 = end.as_u64();
         // reg2bins uses half-open interval
         let candidate_bins =
-            csi_reg2bins(start_u64, end_u64.wrapping_add(1), self.min_shift, self.depth);
+            match csi_reg2bins(start_u64, end_u64.wrapping_add(1), self.min_shift, self.depth) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %e, "csi_reg2bins failed; returning no chunks");
+                    return empty();
+                }
+            };
 
         // CSI uses per-bin loffset instead of a separate linear index
-        let min_offset = csi_min_offset(ref_idx, start_u64, self.min_shift, self.depth);
+        let min_offset = match csi_min_offset(ref_idx, start_u64, self.min_shift, self.depth) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(error = %e, "csi_min_offset failed; returning no chunks");
+                return empty();
+            }
+        };
 
         let cache_threshold = self.depth.saturating_sub(3);
 
@@ -334,7 +371,17 @@ impl CsiIndex {
         let mut distant = Vec::new();
         for bin in &ref_idx.bins {
             if candidate_bins.contains(&bin.bin_id) {
-                let level = csi_bin_level(bin.bin_id, self.depth);
+                let level = match csi_bin_level(bin.bin_id, self.depth) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            bin = bin.bin_id,
+                            "csi_bin_level failed; skipping bin"
+                        );
+                        continue;
+                    }
+                };
                 let target = if level <= cache_threshold { &mut distant } else { &mut nearby };
                 for chunk in &bin.chunks {
                     if chunk.end > min_offset {
@@ -355,43 +402,83 @@ impl CsiIndex {
 // r[impl csi.reg2bins]
 /// Compute all CSI bins overlapping the interval [beg, end) (0-based, half-open),
 /// parameterized by `min_shift` and `depth`.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "bin values are bounded by the CSI spec, fits in u32"
-)]
-fn csi_reg2bins(beg: u64, end: u64, min_shift: u32, depth: u32) -> Vec<u32> {
+///
+/// Returns `BinArithmeticOverflow` if any intermediate computation overflows.
+/// Given header validation (`min_shift + depth*3 <= 63`, `depth <= 16`) this
+/// is unreachable; the checked arithmetic exists to catch a future regression
+/// rather than hiding a real runtime error.
+fn csi_reg2bins(beg: u64, end: u64, min_shift: u32, depth: u32) -> Result<Vec<u32>, CsiError> {
+    const CTX: &str = "csi_reg2bins";
     let end = end.saturating_sub(1);
     let mut bins = Vec::with_capacity(32);
-    let mut s = min_shift.wrapping_add(depth.wrapping_mul(3));
+    let depth_times_three =
+        depth.checked_mul(3).ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+    let mut s = min_shift
+        .checked_add(depth_times_three)
+        .ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
     let mut t = 0u64;
 
     for l in 0..=depth {
-        let b = t.wrapping_add(beg >> s) as u32;
-        let e = t.wrapping_add(end >> s) as u32;
+        let beg_shifted =
+            beg.checked_shr(s).ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+        let end_shifted =
+            end.checked_shr(s).ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+        let b_u64 =
+            t.checked_add(beg_shifted).ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+        let e_u64 =
+            t.checked_add(end_shifted).ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+        let b =
+            u32::try_from(b_u64).map_err(|_| CsiError::BinArithmeticOverflow { context: CTX })?;
+        let e =
+            u32::try_from(e_u64).map_err(|_| CsiError::BinArithmeticOverflow { context: CTX })?;
         let mut i = b;
         while i <= e {
             bins.push(i);
-            i = i.wrapping_add(1);
+            let Some(next) = i.checked_add(1) else { break };
+            i = next;
         }
-        s = s.wrapping_sub(3);
-        t = t.wrapping_add(1u64 << (l.wrapping_mul(3)));
+        // `s` decreases monotonically by 3 each level; stop before it goes
+        // negative. Header validation guarantees `s >= 3` for all but the
+        // last iteration, but guard explicitly for defense in depth.
+        s = s.saturating_sub(3);
+        let l_times_three =
+            l.checked_mul(3).ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+        let delta = 1u64
+            .checked_shl(l_times_three)
+            .ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+        t = t.checked_add(delta).ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
     }
 
-    bins
+    Ok(bins)
 }
 
 /// Compute the minimum virtual offset for a CSI query starting at `beg`.
 ///
 /// Walks from the leaf-level bin containing `beg` up to the root, returning
 /// the `loffset` of the first bin found. This replaces BAI's linear index.
-fn csi_min_offset(ref_idx: &CsiRefIndex, beg: u64, min_shift: u32, depth: u32) -> VirtualOffset {
+fn csi_min_offset(
+    ref_idx: &CsiRefIndex,
+    beg: u64,
+    min_shift: u32,
+    depth: u32,
+) -> Result<VirtualOffset, CsiError> {
+    const CTX: &str = "csi_min_offset";
     // Leaf-level offset: ((1 << depth*3) - 1) / 7
-    let leaf_offset = ((1u64 << depth.wrapping_mul(3)).wrapping_sub(1)).checked_div(7).unwrap_or(0);
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "bin values are bounded by the CSI spec, fits in u32"
-    )]
-    let mut bin = leaf_offset.wrapping_add(beg >> min_shift) as u32;
+    let depth_times_three =
+        depth.checked_mul(3).ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+    let leaf_offset = 1u64
+        .checked_shl(depth_times_three)
+        .ok_or(CsiError::BinArithmeticOverflow { context: CTX })?
+        .checked_sub(1)
+        .and_then(|v| v.checked_div(7))
+        .unwrap_or(0);
+    let beg_shifted =
+        beg.checked_shr(min_shift).ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+    let bin_u64 = leaf_offset
+        .checked_add(beg_shifted)
+        .ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+    let mut bin =
+        u32::try_from(bin_u64).map_err(|_| CsiError::BinArithmeticOverflow { context: CTX })?;
 
     // Walk from leaf to root looking for an existing bin with loffset.
     // Uses the parse-time HashMap to avoid an O(n_bins) scan per step.
@@ -399,30 +486,40 @@ fn csi_min_offset(ref_idx: &CsiRefIndex, beg: u64, min_shift: u32, depth: u32) -
         if let Some(&i) = ref_idx.by_bin_id.get(&bin)
             && let Some(b) = ref_idx.bins.get(i)
         {
-            return b.loffset;
+            return Ok(b.loffset);
         }
         // Parent bin: (bin - 1) / 8
         if bin == 0 {
             break;
         }
-        bin = bin.wrapping_sub(1) / 8;
+        bin = bin.checked_sub(1).ok_or(CsiError::BinArithmeticOverflow { context: CTX })? / 8;
     }
 
-    VirtualOffset(0)
+    Ok(VirtualOffset(0))
 }
 
 /// Compute the level of a CSI bin given the binning depth.
-fn csi_bin_level(bin_id: u32, depth: u32) -> u32 {
+fn csi_bin_level(bin_id: u32, depth: u32) -> Result<u32, CsiError> {
+    const CTX: &str = "csi_bin_level";
     let bin_id = u64::from(bin_id);
     let mut t = 0u64;
     for l in 0..=depth {
-        let n_bins_at_level = 1u64 << (l.wrapping_mul(3));
-        if bin_id < t.wrapping_add(n_bins_at_level) {
-            return l;
+        let l_times_three =
+            l.checked_mul(3).ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+        let n_bins_at_level = 1u64
+            .checked_shl(l_times_three)
+            .ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+        let boundary = t
+            .checked_add(n_bins_at_level)
+            .ok_or(CsiError::BinArithmeticOverflow { context: CTX })?;
+        if bin_id < boundary {
+            return Ok(l);
         }
-        t = t.wrapping_add(n_bins_at_level);
+        t = boundary;
     }
-    depth.wrapping_add(1) // pseudo-bin or invalid
+    // Pseudo-bin or invalid. Use saturating_add since depth+1 is only used as
+    // a "past the end" sentinel; the caller never uses it for further math.
+    Ok(depth.saturating_add(1))
 }
 
 // r[impl csi.pseudo_bin]
@@ -447,13 +544,13 @@ mod tests {
 
     #[test]
     fn csi_reg2bins_bai_compat_includes_bin0() {
-        let bins = csi_reg2bins(0, 100, 14, 5);
+        let bins = csi_reg2bins(0, 100, 14, 5).unwrap();
         assert!(bins.contains(&0), "must include root bin");
     }
 
     #[test]
     fn csi_reg2bins_bai_compat_small_region() {
-        let bins = csi_reg2bins(100, 200, 14, 5);
+        let bins = csi_reg2bins(100, 200, 14, 5).unwrap();
         // Should include leaf bin for positions 100-199
         let leaf_offset = ((1u64 << 15) - 1) / 7; // 4681
         let expected_leaf = leaf_offset as u32 + (100 >> 14) as u32;
@@ -478,7 +575,7 @@ mod tests {
             }
             bins
         };
-        let csi_bins = csi_reg2bins(100, 200, 14, 5);
+        let csi_bins = csi_reg2bins(100, 200, 14, 5).unwrap();
         assert_eq!(bai_bins, csi_bins, "CSI with BAI params must match BAI");
     }
 
@@ -486,20 +583,20 @@ mod tests {
 
     #[test]
     fn bin_level_bai_compat() {
-        assert_eq!(csi_bin_level(0, 5), 0);
-        assert_eq!(csi_bin_level(1, 5), 1);
-        assert_eq!(csi_bin_level(8, 5), 1);
-        assert_eq!(csi_bin_level(9, 5), 2);
-        assert_eq!(csi_bin_level(72, 5), 2);
-        assert_eq!(csi_bin_level(73, 5), 3);
-        assert_eq!(csi_bin_level(584, 5), 3);
-        assert_eq!(csi_bin_level(585, 5), 4);
-        assert_eq!(csi_bin_level(4680, 5), 4);
-        assert_eq!(csi_bin_level(4681, 5), 5);
-        assert_eq!(csi_bin_level(37448, 5), 5); // last valid level-5 bin
+        assert_eq!(csi_bin_level(0, 5).unwrap(), 0);
+        assert_eq!(csi_bin_level(1, 5).unwrap(), 1);
+        assert_eq!(csi_bin_level(8, 5).unwrap(), 1);
+        assert_eq!(csi_bin_level(9, 5).unwrap(), 2);
+        assert_eq!(csi_bin_level(72, 5).unwrap(), 2);
+        assert_eq!(csi_bin_level(73, 5).unwrap(), 3);
+        assert_eq!(csi_bin_level(584, 5).unwrap(), 3);
+        assert_eq!(csi_bin_level(585, 5).unwrap(), 4);
+        assert_eq!(csi_bin_level(4680, 5).unwrap(), 4);
+        assert_eq!(csi_bin_level(4681, 5).unwrap(), 5);
+        assert_eq!(csi_bin_level(37448, 5).unwrap(), 5); // last valid level-5 bin
         // bin 37449 is bin_limit (past all valid bins), 37450 is pseudo-bin
-        assert_eq!(csi_bin_level(37449, 5), 6);
-        assert_eq!(csi_bin_level(37450, 5), 6);
+        assert_eq!(csi_bin_level(37449, 5).unwrap(), 6);
+        assert_eq!(csi_bin_level(37450, 5).unwrap(), 6);
     }
 
     #[test]
@@ -515,7 +612,7 @@ mod tests {
         let cases = [(0u64, 100u64), (16384, 32768), (0, 512_000_000), (100_000, 200_000)];
         for (beg, end) in cases {
             let single = reg2bin(beg, end, 14, 5);
-            let all = csi_reg2bins(beg, end, 14, 5);
+            let all = csi_reg2bins(beg, end, 14, 5).unwrap();
             assert!(all.contains(&single), "reg2bin({beg},{end})={single} not in reg2bins={all:?}");
         }
     }
@@ -533,7 +630,7 @@ mod tests {
             let end = beg.saturating_add(len).min(536_870_912);
             if beg >= end { return Ok(()); }
 
-            let csi_bins = csi_reg2bins(beg, end, 14, 5);
+            let csi_bins = csi_reg2bins(beg, end, 14, 5).expect("BAI-compat params don't overflow");
 
             // Reproduce BAI's hardcoded algorithm
             let mut bai_bins = Vec::with_capacity(32);
@@ -560,7 +657,7 @@ mod tests {
             if beg >= end { return Ok(()); }
 
             let single = reg2bin(beg, end, 14, 5);
-            let all = csi_reg2bins(beg, end, 14, 5);
+            let all = csi_reg2bins(beg, end, 14, 5).expect("BAI-compat params don't overflow");
             prop_assert!(
                 all.contains(&single),
                 "reg2bin({},{})={} not in reg2bins={:?}", beg, end, single, all
@@ -791,30 +888,72 @@ mod tests {
         assert!(chunks.is_empty());
     }
 
-    /// `csi_min_offset` walks from leaf to root. With a dense bin set spanning
-    /// many sibling bins the lookup must still return the correct `loffset`
-    /// for the queried position. This exercises the bin-id index used in
-    /// place of the prior linear scan.
-    #[test]
-    fn csi_min_offset_dense_bins() {
-        // Build a ref with many leaf-level bins, each with a distinct loffset.
-        // depth=5, min_shift=14 ⇒ leaf offset = 4681. Insert leaf bins
-        // 4681..4781 with loffset = (bin_id - 4681) * 1000.
-        let bins: Vec<(u32, u64, Vec<(u64, u64)>)> = (0..100u32)
-            .map(|i| {
-                let bin_id = 4681 + i;
-                let loff = u64::from(i) * 1000;
-                (bin_id, loff, vec![(loff, loff + 500)])
-            })
-            .collect();
-        let idx = make_csi_index(bins);
-        let ref_idx = &idx.references[0];
+    /// Independent oracle for `csi_min_offset`: walks leaf→root via the parent
+    /// formula `(bin - 1) / 8`, linear-scanning `bins` at each step. Returns
+    /// the loffset of the first match, or `VirtualOffset(0)` if none exist.
+    ///
+    /// Deliberately does NOT share the `HashMap` lookup used by the production
+    /// implementation — this is the whole point of having an oracle.
+    fn oracle_min_offset(bins: &[CsiBin], beg: u64, min_shift: u32, depth: u32) -> VirtualOffset {
+        let leaf_offset = ((1u64 << (depth * 3)) - 1) / 7;
+        let mut bin = (leaf_offset + (beg >> min_shift)) as u32;
+        for _ in 0..=depth {
+            if let Some(b) = bins.iter().find(|b| b.bin_id == bin) {
+                return b.loffset;
+            }
+            if bin == 0 {
+                break;
+            }
+            bin = (bin - 1) / 8;
+        }
+        VirtualOffset(0)
+    }
 
-        // The leaf bin for position p (with min_shift=14) is 4681 + (p >> 14).
-        for i in 0..100u32 {
-            let pos = u64::from(i) << 14; // start of the i-th 16 KiB window
-            let off = csi_min_offset(ref_idx, pos, 14, 5);
-            assert_eq!(off.0, u64::from(i) * 1000, "dense-bin lookup wrong at i={i}, pos={pos}");
+    proptest! {
+        /// `csi_min_offset` (HashMap-based) must agree with a linear-scan
+        /// oracle that walks the same leaf→root path. Uses BAI-compatible
+        /// params (depth=5, min_shift=14) so coordinates and bin ids fit
+        /// comfortably and the test stays fast.
+        ///
+        /// Generates a random subset of bins drawn from every level of the
+        /// tree (not just leaves) with arbitrary loffsets, then queries random
+        /// positions across the addressable coordinate space.
+        #[test]
+        fn csi_min_offset_matches_linear_scan(
+            // Up to 50 bins, each an arbitrary valid bin id (0..=37449), with
+            // an arbitrary u64 loffset. Bins may be ancestors or cousins of
+            // the query's leaf — the oracle handles whichever hits first.
+            bin_ids in prop::collection::vec(0u32..37450, 0..=50),
+            loffsets in prop::collection::vec(any::<u64>(), 0..=50),
+            pos in 0u64..536_870_912,
+        ) {
+            let n = bin_ids.len().min(loffsets.len());
+            // Deduplicate bin ids so both impls see the same first-wins
+            // semantics regardless of iteration order.
+            let mut seen = std::collections::HashSet::new();
+            let bins_raw: Vec<(u32, u64, Vec<(u64, u64)>)> = bin_ids
+                .iter()
+                .zip(loffsets.iter())
+                .take(n)
+                .filter_map(|(&id, &lo)| seen.insert(id).then_some((id, lo, Vec::new())))
+                .collect();
+
+            // Build both the production index (with HashMap) and a plain Vec
+            // for the oracle. Both are fed the same bin sequence.
+            let bins_for_oracle: Vec<CsiBin> = bins_raw
+                .iter()
+                .map(|(id, lo, _)| CsiBin {
+                    bin_id: *id,
+                    loffset: VirtualOffset(*lo),
+                    chunks: Vec::new(),
+                })
+                .collect();
+            let idx = make_csi_index(bins_raw);
+            let ref_idx = &idx.references[0];
+
+            let got = csi_min_offset(ref_idx, pos, 14, 5).expect("BAI-compat params");
+            let want = oracle_min_offset(&bins_for_oracle, pos, 14, 5);
+            prop_assert_eq!(got.0, want.0, "HashMap lookup disagrees with linear scan at pos={}", pos);
         }
     }
 
@@ -856,7 +995,7 @@ mod tests {
     #[test]
     fn csi_reg2bins_different_params() {
         // With min_shift=15, depth=6: larger coordinate space
-        let bins = csi_reg2bins(0, 100, 15, 6);
+        let bins = csi_reg2bins(0, 100, 15, 6).unwrap();
         assert!(bins.contains(&0), "must include root bin");
         // Leaf-level offset for depth=6: ((1<<18)-1)/7 = 37449
         let leaf_offset = ((1u64 << 18) - 1) / 7;
@@ -867,10 +1006,33 @@ mod tests {
     #[test]
     fn bin_level_different_depth() {
         // depth=3: levels 0-3
-        assert_eq!(csi_bin_level(0, 3), 0);
-        assert_eq!(csi_bin_level(1, 3), 1);
-        assert_eq!(csi_bin_level(9, 3), 2);
-        assert_eq!(csi_bin_level(73, 3), 3);
-        assert_eq!(csi_bin_level(584, 3), 3);
+        assert_eq!(csi_bin_level(0, 3).unwrap(), 0);
+        assert_eq!(csi_bin_level(1, 3).unwrap(), 1);
+        assert_eq!(csi_bin_level(9, 3).unwrap(), 2);
+        assert_eq!(csi_bin_level(73, 3).unwrap(), 3);
+        assert_eq!(csi_bin_level(584, 3).unwrap(), 3);
+    }
+
+    // r[verify csi.errors]
+    /// Defense-in-depth: header validation rejects depths past `MAX_CSI_DEPTH`,
+    /// but the bin-math helpers must independently refuse to produce wrong
+    /// results when handed out-of-range parameters. These params can never
+    /// reach the helpers through the public API; the test invokes them
+    /// directly to assert the checked arithmetic surfaces a typed error rather
+    /// than panicking on an unchecked shift or wrapping silently.
+    ///
+    /// `csi_bin_level` is not exercised here because, for any `u32` bin id,
+    /// the loop returns at level ≤ 11 before the overflow path becomes
+    /// reachable — the checked arithmetic in that function is purely
+    /// defensive and unreachable from valid inputs.
+    #[test]
+    fn helpers_reject_overflow_params() {
+        // depth=22 would need `1u64 << 66`, overflowing the u64 shift.
+        let err = csi_reg2bins(0, 100, 14, 22).unwrap_err();
+        assert!(matches!(err, CsiError::BinArithmeticOverflow { .. }), "got {err:?}");
+
+        let dummy = CsiRefIndex::new(Vec::new());
+        let err = csi_min_offset(&dummy, 0, 14, 22).unwrap_err();
+        assert!(matches!(err, CsiError::BinArithmeticOverflow { .. }), "got {err:?}");
     }
 }

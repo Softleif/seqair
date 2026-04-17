@@ -62,7 +62,7 @@ r[base_mod.query_qpos]
 `BaseModState` MUST provide `mod_at_qpos(qpos: usize) -> Option<&[Modification]>` to look up modifications at a given query-sequence position. Returns `None` if no modification is called at that position. Multiple modification types at the same position (e.g. 5mC and 5hmC on the same C) MUST all be returned.
 
 r[base_mod.query_refpos]
-`BaseModState` MUST provide `mod_at_ref_pos(ref_pos: Pos0, cigar: &CigarMapping) -> Option<&[Modification]>` to look up modifications at a reference position. The position uses the typed `Pos0` newtype (not raw `i64`) to prevent off-by-one and signedness mistakes at the call site. This maps the reference position to a query position via the CIGAR, then delegates to `mod_at_qpos`. Returns `None` if the reference position falls in a deletion/ref-skip (no qpos) or has no modification.
+`BaseModState` MUST provide `mod_at_ref_pos(ref_pos: Pos0, cigar: &CigarMapping) -> Option<&[Modification]>` to look up modifications at a reference position. The position uses the typed `Pos0` newtype (defined in `seqair-types`, see `r[pos.type]` in [docs/spec/0-1-pos.md](./0-1-pos.md)) rather than a raw `i64` to prevent off-by-one and signedness mistakes at the call site. This maps the reference position to a query position via the CIGAR, then delegates to `mod_at_qpos`. Returns `None` if the reference position falls in a deletion/ref-skip (no qpos) or has no modification.
 
 r[base_mod.modification_struct]
 Each `Modification` MUST carry:
