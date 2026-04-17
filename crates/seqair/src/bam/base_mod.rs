@@ -731,4 +731,125 @@ mod tests {
         assert!(matches!(state.mod_at_qpos(1).unwrap()[0].mod_type, ModType::Code(b'h')));
         assert!(matches!(state.mod_at_qpos(5).unwrap()[0].mod_type, ModType::Code(b'm')));
     }
+
+    // r[verify base_mod.validation]
+    #[test]
+    fn validation_invalid_delta_empty() {
+        let s = seq(&[A, C, G]);
+        // ',' followed immediately by terminator — `,;` — empty delta digits.
+        let err = BaseModState::parse(b"C+m,;", &[], &s, false).unwrap_err();
+        assert!(matches!(err, BaseModError::InvalidDelta), "got {err:?}");
+    }
+
+    // r[verify base_mod.validation]
+    #[test]
+    fn validation_missing_mod_code_empty_body() {
+        let s = seq(&[A, C, G]);
+        // BASE+STRAND followed immediately by ';' — body is empty.
+        let err = BaseModState::parse(b"C+;", &[], &s, false).unwrap_err();
+        assert!(matches!(err, BaseModError::MissingModCode), "got {err:?}");
+    }
+
+    // r[verify base_mod.validation]
+    #[test]
+    fn validation_missing_mod_code_only_delimiter() {
+        let s = seq(&[A, C, G]);
+        // BASE+STRAND, then ',' — body is `,…` which yields zero codes.
+        let err = BaseModState::parse(b"C+,0;", &[200], &s, false).unwrap_err();
+        assert!(matches!(err, BaseModError::MissingModCode), "got {err:?}");
+    }
+
+    // ---------------- proptest oracles for the validation paths ----------------
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // r[verify base_mod.validation]
+        /// Any byte that decodes (case-folded) to `n` MUST yield
+        /// `UnsupportedUnknownBase`, not `InvalidCanonicalBase` and not a panic.
+        /// Only `b'N'` and `b'n'` satisfy `byte | 0x20 == b'n'`, but the parser
+        /// reaches that branch via the same `byte | 0x20` mask, so testing both
+        /// covers the case-insensitive contract.
+        #[test]
+        fn proptest_n_canonical_rejected(case in prop_oneof![Just(b'N'), Just(b'n')]) {
+            let s = seq(&[A, C, G]);
+            let mm = [case, b'+', b'm', b',', b'0', b';'];
+            let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
+            prop_assert!(matches!(err, BaseModError::UnsupportedUnknownBase), "got {:?}", err);
+        }
+
+        // r[verify base_mod.validation]
+        /// Any non-ACGTN ASCII byte at the canonical-base position MUST yield
+        /// `InvalidCanonicalBase(byte)`. Excludes ACGT/acgt and N/n; also
+        /// excludes `;` because it terminates the entry early (the parser then
+        /// sees the *next* byte as the canonical base, exercising a different
+        /// path than this proptest is meant to cover).
+        #[test]
+        fn proptest_invalid_canonical_base_byte(byte in any::<u8>().prop_filter(
+            "exclude valid ACGT/N (any case) and the entry terminator",
+            |b| !matches!(b | 0x20, b'a' | b'c' | b'g' | b't' | b'n') && *b != b';',
+        )) {
+            let s = seq(&[A, C, G]);
+            let mm = [byte, b'+', b'm', b',', b'0', b';'];
+            let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
+            prop_assert!(
+                matches!(err, BaseModError::InvalidCanonicalBase(b) if b == byte),
+                "expected InvalidCanonicalBase({byte:#x}), got {err:?}",
+            );
+        }
+
+        // r[verify base_mod.validation]
+        /// Any non-alpha, non-delimiter, non-digit byte appearing where a mod
+        /// code is expected (after `BASE+STRAND`) MUST yield `InvalidModCode`.
+        /// Digits trigger the ChEBI branch; `,`, `;`, `.`, `?` are delimiters;
+        /// alphabetic bytes are valid single-char codes.
+        #[test]
+        fn proptest_invalid_mod_code_byte(byte in any::<u8>().prop_filter(
+            "exclude alpha, digits, and mod-body delimiters",
+            |b| !b.is_ascii_alphabetic()
+                && !b.is_ascii_digit()
+                && !matches!(*b, b',' | b';' | b'.' | b'?'),
+        )) {
+            let s = seq(&[A, C, G]);
+            let mm = [b'C', b'+', byte, b',', b'0', b';'];
+            let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
+            prop_assert!(
+                matches!(err, BaseModError::InvalidModCode(b) if b == byte),
+                "expected InvalidModCode({byte:#x}), got {err:?}",
+            );
+        }
+
+        // r[verify base_mod.validation]
+        /// A non-digit byte in the delta position (right after `,`) MUST yield
+        /// `InvalidDelta`. `;` is excluded because it terminates the entry
+        /// before the delta parser sees it (the empty-delta case is covered by
+        /// `validation_invalid_delta_empty`).
+        #[test]
+        fn proptest_invalid_delta_non_numeric(byte in any::<u8>().prop_filter(
+            "non-digit, not the entry terminator",
+            |b| !b.is_ascii_digit() && *b != b';',
+        )) {
+            let s = seq(&[A, C, G]);
+            let mm = [b'C', b'+', b'm', b',', byte, b';'];
+            let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
+            prop_assert!(matches!(err, BaseModError::InvalidDelta), "got {err:?}");
+        }
+
+        // r[verify base_mod.parse_mm]
+        /// Any decimal ChEBI id that exceeds `u32::MAX` MUST be rejected with
+        /// `InvalidChebi`. `str::parse::<u32>` returns `Err` for the entire
+        /// `(u32::MAX as u64 + 1)..=u64::MAX` range, so generating a `u64` in
+        /// that range covers the overflow contract.
+        #[test]
+        fn proptest_chebi_overflow_rejected(
+            id in (u64::from(u32::MAX) + 1)..=u64::MAX,
+        ) {
+            let s = seq(&[A, C, G]);
+            let mut mm: Vec<u8> = b"C+".to_vec();
+            mm.extend_from_slice(id.to_string().as_bytes());
+            mm.extend_from_slice(b",0;");
+            let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
+            prop_assert!(matches!(err, BaseModError::InvalidChebi), "got {err:?}");
+        }
+    }
 }
