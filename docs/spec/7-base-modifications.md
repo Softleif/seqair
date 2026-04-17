@@ -43,8 +43,9 @@ r[base_mod.state]
 r[base_mod.parse_mm]
 The MM parser MUST handle the full SAM 4.5 modification string syntax:
 - Multiple canonical bases and modification types (e.g. `C+m,0,2;C+h,1,3;A+a,0;`)
-- Implicit vs explicit mode: a trailing `.` after the semicolon (e.g. `C+m.,0,2;`) means unlisted positions are definitively unmodified; without `.`, unlisted positions have unknown modification status. The API MUST preserve this distinction.
+- Mode markers after the modification code: `.` (explicit, unlisted positions are definitively unmodified), `?` (ambiguous, unlisted positions are explicitly marked as unknown), or absent (implicit, unlisted positions have unknown status). The API MUST preserve this three-way distinction; `?` and absent produce identical `is_unmodified` results but are retained separately in the parsed mode field.
 - ChEBI numeric codes (e.g. `C+27551,0,2;` for 5mC by ChEBI ID)
+- Combined modification codes in a single entry (e.g. `C+mh,0,2;`), where the ML array carries one value per (position, mod-code) pair in the order the codes appear. For an entry with N combined codes and K position deltas, the entry consumes `N * K` values from the ML array.
 - Both `+` (top/forward strand) and `-` (bottom/reverse strand) modification strands
 
 r[base_mod.resolve_positions]
@@ -71,30 +72,32 @@ Each `Modification` MUST carry:
 - `strand`: `+` or `-`
 
 r[base_mod.implicit_explicit]
-`BaseModState` MUST track whether each canonical-base+strand combination uses implicit or explicit mode. A `is_unmodified(qpos: usize, canonical_base: Base) -> Option<bool>` accessor MUST return:
-- `Some(true)` if the position is in an explicit-mode entry and not listed (definitively unmodified)
+`BaseModState` MUST track the mode marker per entry as one of `Implicit` (no marker), `Unmodified` (`.`), or `Ambiguous` (`?`). A `is_unmodified(qpos: usize, canonical_base: Base) -> Option<bool>` accessor MUST return:
+- `Some(true)` if the position's canonical base has an `Unmodified`-mode entry and the position is not listed (definitively unmodified)
 - `Some(false)` if the position has a modification call
-- `None` if the position is in an implicit-mode entry and not listed (unknown status)
+- `None` if the position has no mod call and all entries for its canonical base are `Implicit` or `Ambiguous` (unknown status)
 
 ### Pileup integration
 
 r[base_mod.pileup_integration]
-The pileup engine MUST support exposing base modifications via a separate accessor on `PileupColumn`, NOT by extending `PileupOp` (which has a ≤16 byte size constraint). The accessor:
+*Deferred to a follow-up milestone.* The pileup engine will eventually expose modifications via a separate accessor on `PileupColumn` (NOT by extending `PileupOp`, which has a ≤16 byte size constraint):
 
 ```
 column.modification_at(alignment_idx: usize) -> Option<&[Modification]>
 ```
 
-returns the modification(s) at the current column's reference position for the given alignment, or `None` if the alignment has no MM/ML tags or no modification at this position. Internally, this uses `mod_at_qpos` with the alignment's `qpos`.
-
-`BaseModState` is constructed lazily on first call to `modification_at` for each alignment and cached for subsequent column positions within that alignment's active-set lifetime.
+This will return the modification(s) at the current column's reference position for the given alignment, using `mod_at_qpos` internally, with `BaseModState` constructed lazily and cached per active record. The initial `BaseModState` implementation is usable directly by callers (e.g. rastair) without pileup integration.
 
 ### Reverse complement
 
 r[base_mod.reverse_complement]
-For reverse-strand reads (flag 0x10), MM positions are encoded relative to the query sequence **as stored in BAM** (already reverse-complemented). `mod_at_qpos` operates in stored-sequence space and requires no strand adjustment — the MM positions directly index into the stored bases.
+Per SAM §1.7, MM position lists are always relative to the **original, unreversed** read sequence (5′→3′ of the sequenced molecule), regardless of alignment orientation. BAM stores the sequence reverse-complemented for reverse-strand alignments, so MM positions do NOT directly index into the stored BAM sequence for such reads.
 
-`mod_at_ref_pos` MUST also work correctly for reverse-strand reads: the CIGAR-to-qpos mapping already accounts for strand (the CIGAR describes the alignment of the stored sequence to the reference).
+`BaseModState` MUST take an `is_reverse` flag at construction and resolve MM positions into stored-BAM-sequence coordinates:
+- If `is_reverse == false`: count occurrences of the canonical base in the stored sequence from index 0 upward. The resolved `qpos` is the stored-sequence index of the matched base.
+- If `is_reverse == true`: count occurrences of the **complement** of the canonical base (A↔T, C↔G) in the stored sequence from the last index downward. The resolved `qpos` is the stored-sequence index of the matched base. This is equivalent to: reverse-complement the stored sequence to reconstruct the original, walk it 5′→3′ counting the canonical base, and map the resulting original-index `i` back to stored-index `seq_len - 1 - i`.
+
+After resolution, all public queries (`mod_at_qpos`, `mod_at_ref_pos`) operate in stored-BAM-sequence coordinates. `mod_at_ref_pos` delegates to the CIGAR mapping (which also operates in stored-sequence coordinates).
 
 Callers who need to reason about the original biological strand (e.g. "this is a methylated C on the bottom strand") can combine the `strand` field from `Modification` with the read's reverse flag.
 

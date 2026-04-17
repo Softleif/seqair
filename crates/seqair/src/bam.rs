@@ -40,6 +40,7 @@
 // r[impl io.minimal_public_api]
 pub mod aux;
 pub mod aux_data;
+pub mod base_mod;
 pub mod bgzf;
 pub mod bgzf_writer;
 pub mod cigar;
