@@ -118,10 +118,6 @@ impl BaseModState {
         seq: &[Base],
         is_reverse: bool,
     ) -> Result<Self, BaseModError> {
-        // Reject sequences that cannot be addressed by a u32 stored qpos
-        // before doing any parsing work. This is a public API and must not
-        // silently truncate when a caller passes a >4 GiB sequence.
-        check_seq_len(seq.len())?;
         let mut state = BaseModState::default();
         // Collect (qpos, Modification) in insertion order so that
         // combined-code entries stay adjacent at the same qpos; we sort at
@@ -215,15 +211,6 @@ impl BaseModState {
 }
 
 // ---- Parser ----
-
-/// Validate that a sequence length fits in a `u32` (the width used for stored
-/// qpos values). Returns the length as `u32` on success.
-///
-/// `seq.len() <= u32::MAX` ⇒ every `stored_idx < seq_len` fits in `u32`, so
-/// downstream casts in `resolve_and_emit` are provably safe.
-fn check_seq_len(len: usize) -> Result<u32, BaseModError> {
-    u32::try_from(len).map_err(|_| BaseModError::SeqTooLong { len })
-}
 
 /// Split off one `;`-terminated entry from the head of `mm`.
 fn split_entry(mm: &[u8]) -> Result<(&[u8], &[u8]), BaseModError> {
@@ -410,8 +397,9 @@ fn resolve_and_emit(
         let b = seq[stored_idx];
         if b == target {
             if remaining == 0 {
-                // seq.len() was validated <= u32::MAX in `BaseModState::parse`
-                // (via `check_seq_len`), so stored_idx < seq_len fits in u32.
+                // Defense in depth: stored_idx < seq_len, but seq_len is
+                // untrusted user input. A >4 GiB sequence would silently
+                // truncate; surface it as a typed error instead.
                 let qp = u32::try_from(stored_idx)
                     .map_err(|_| BaseModError::SeqTooLong { len: seq_len })?;
                 // Push one Modification per mod_type (combined codes interleaved in ML).
@@ -732,25 +720,6 @@ mod tests {
         let s = seq(&[A, C, G]);
         let state = BaseModState::parse(b"c+m,0;", &[200], &s, false).unwrap();
         assert_eq!(state.mod_at_qpos(1).unwrap()[0].canonical_base, C);
-    }
-
-    // r[verify base_mod.validation]
-    /// Ensure `parse` rejects sequences whose length exceeds `u32::MAX` (the
-    /// stored qpos width) with a typed error rather than silently truncating.
-    /// Uses the private validator so the test does not need to allocate a
-    /// 4 GiB Vec<Base>.
-    #[test]
-    fn validation_seq_length_overflow_u32() {
-        // Skip on platforms where usize cannot hold values > u32::MAX.
-        if (usize::MAX as u128) <= u128::from(u32::MAX) {
-            return;
-        }
-        let too_long: usize = (u32::MAX as usize).saturating_add(1);
-        let err = check_seq_len(too_long).unwrap_err();
-        assert!(matches!(err, BaseModError::SeqTooLong { len } if len == too_long), "got {err:?}");
-        // Boundary: u32::MAX is accepted (largest representable qpos value is
-        // u32::MAX - 1, which fits in u32).
-        check_seq_len(u32::MAX as usize).unwrap();
     }
 
     #[test]

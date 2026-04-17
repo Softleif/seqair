@@ -120,4 +120,4 @@ The CSI reader MUST enforce the same allocation limits as the BAI reader (see `r
 ## Error handling
 
 r[csi.errors]
-All CSI-specific errors MUST be part of a typed error enum (extending or paralleling `BaiError`). Errors MUST contain context (file path, field values) sufficient to diagnose the problem. The implementation MUST NOT use `panic!`, `unwrap()`, or string-based errors.
+All CSI-specific errors MUST be part of a typed error enum (extending or paralleling `BaiError`). Errors MUST contain context (file path, field values) sufficient to diagnose the problem. The implementation MUST NOT use `panic!`, `unwrap()`, or string-based errors. Bin-arithmetic helpers (`reg2bins`, `min_offset`, `bin_level`) MUST use checked arithmetic (`checked_add`/`checked_mul`/`checked_shl`/`checked_shr`) and surface a `BinArithmeticOverflow { context }` variant on overflow rather than panicking or wrapping silently. Header validation already enforces `min_shift + depth*3 <= 63` and `depth <= MAX_CSI_DEPTH`, so these errors are unreachable from valid inputs; the checked arithmetic exists as defense in depth against a future regression of those bounds.
