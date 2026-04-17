@@ -10,6 +10,7 @@ use super::{
     },
 };
 use seqair_types::Pos0;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::instrument;
 
@@ -23,6 +24,13 @@ const MAX_CHUNKS_PER_BIN: usize = 1_000_000;
 // gives shift=65 which overflows. depth=16 with min_shift=1 gives shift=49, safe.
 // No real genome needs depth > 10 (depth 10, min_shift 14 → 2^44 = 17.6 Tbp).
 const MAX_CSI_DEPTH: u32 = 16;
+
+// `min_shift + depth * 3` is used as a shift amount on u64 values. Rust masks
+// shift amounts by the type width, so `x >> 64` silently becomes `x >> 0`.
+// We require `min_shift + depth * 3 < 64`, i.e. `min_shift <= 63 - depth*3`.
+// This is the only constraint that protects `csi_reg2bins` and `csi_min_offset`
+// from silently wrong bin calculations on a malformed file.
+const MAX_CSI_SHIFT_SUM: u32 = 63;
 
 // r[impl csi.errors]
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +52,12 @@ pub enum CsiError {
 
     #[error("CSI depth {depth} exceeds maximum {max}")]
     DepthTooLarge { depth: u32, max: u32 },
+
+    #[error(
+        "CSI min_shift {min_shift} with depth {depth} produces shift sum {sum} which would \
+         overflow the u64 shift width (must satisfy min_shift + depth*3 <= 63)"
+    )]
+    MinShiftTooLarge { min_shift: u32, depth: u32, sum: u64 },
 
     #[error("BGZF error decompressing CSI file")]
     Bgzf {
@@ -108,6 +122,17 @@ pub struct CsiIndex {
 #[derive(Debug)]
 struct CsiRefIndex {
     bins: Vec<CsiBin>,
+    /// Indexes into `bins` keyed by `bin_id`. Built once at parse time so that
+    /// `csi_min_offset` does not have to do a linear scan per leaf-to-root
+    /// step (relevant for dense indexes on large chromosomes).
+    by_bin_id: HashMap<u32, usize>,
+}
+
+impl CsiRefIndex {
+    fn new(bins: Vec<CsiBin>) -> Self {
+        let by_bin_id = bins.iter().enumerate().map(|(i, b)| (b.bin_id, i)).collect();
+        CsiRefIndex { bins, by_bin_id }
+    }
 }
 
 #[derive(Debug)]
@@ -172,6 +197,11 @@ impl CsiIndex {
         if depth > MAX_CSI_DEPTH {
             return Err(CsiError::DepthTooLarge { depth, max: MAX_CSI_DEPTH });
         }
+        // r[impl csi.header_bounds]
+        let shift_sum = u64::from(min_shift).saturating_add(u64::from(depth).saturating_mul(3));
+        if shift_sum > u64::from(MAX_CSI_SHIFT_SUM) {
+            return Err(CsiError::MinShiftTooLarge { min_shift, depth, sum: shift_sum });
+        }
 
         // r[impl csi.aux_data]
         let l_aux = read_i32(data, &mut pos)?;
@@ -219,7 +249,7 @@ impl CsiIndex {
                 }
             }
 
-            references.push(CsiRefIndex { bins });
+            references.push(CsiRefIndex::new(bins));
         }
 
         Ok(CsiIndex { min_shift, depth, aux, references })
@@ -363,9 +393,12 @@ fn csi_min_offset(ref_idx: &CsiRefIndex, beg: u64, min_shift: u32, depth: u32) -
     )]
     let mut bin = leaf_offset.wrapping_add(beg >> min_shift) as u32;
 
-    // Walk from leaf to root looking for an existing bin with loffset
+    // Walk from leaf to root looking for an existing bin with loffset.
+    // Uses the parse-time HashMap to avoid an O(n_bins) scan per step.
     for _ in 0..=depth {
-        if let Some(b) = ref_idx.bins.iter().find(|b| b.bin_id == bin) {
+        if let Some(&i) = ref_idx.by_bin_id.get(&bin)
+            && let Some(b) = ref_idx.bins.get(i)
+        {
             return b.loffset;
         }
         // Parent bin: (bin - 1) / 8
@@ -646,6 +679,36 @@ mod tests {
 
     // r[verify csi.header_bounds]
     #[test]
+    fn min_shift_upper_bound_rejected() {
+        // min_shift + depth*3 must remain < 64 to avoid Rust's shift-amount
+        // masking on u64 (e.g. `beg >> 64` evaluates as `beg >> 0`).
+        // min_shift=64 with depth=0 already overflows.
+        let data = build_csi_bytes(64, 0, &[], &[]);
+        let err = CsiIndex::from_bytes_inner(&data).unwrap_err();
+        assert!(matches!(err, CsiError::MinShiftTooLarge { .. }), "got {err:?}");
+    }
+
+    // r[verify csi.header_bounds]
+    #[test]
+    fn min_shift_combined_with_depth_rejected() {
+        // min_shift=50, depth=5 → s = 50 + 15 = 65, overflows u64 shift
+        let data = build_csi_bytes(50, 5, &[], &[]);
+        let err = CsiIndex::from_bytes_inner(&data).unwrap_err();
+        assert!(matches!(err, CsiError::MinShiftTooLarge { .. }), "got {err:?}");
+    }
+
+    // r[verify csi.header_bounds]
+    #[test]
+    fn min_shift_at_boundary_accepted() {
+        // min_shift=15, depth=16 → s = 15 + 48 = 63, just under 64. Accepted.
+        let data = build_csi_bytes(15, 16, &[], &[]);
+        let idx = CsiIndex::from_bytes_inner(&data).unwrap();
+        assert_eq!(idx.min_shift(), 15);
+        assert_eq!(idx.depth(), 16);
+    }
+
+    // r[verify csi.header_bounds]
+    #[test]
     fn depth_16_accepted() {
         // depth=16 is the maximum allowed (min_shift+depth*3 = 14+48 = 62, safe)
         let data = build_csi_bytes(14, 16, &[], &[]);
@@ -685,23 +748,22 @@ mod tests {
     // --- Query tests ---
 
     fn make_csi_index(bins: Vec<(u32, u64, Vec<(u64, u64)>)>) -> CsiIndex {
+        let bins: Vec<CsiBin> = bins
+            .into_iter()
+            .map(|(bin_id, loffset, chunks)| CsiBin {
+                bin_id,
+                loffset: VirtualOffset(loffset),
+                chunks: chunks
+                    .into_iter()
+                    .map(|(b, e)| Chunk { begin: VirtualOffset(b), end: VirtualOffset(e) })
+                    .collect(),
+            })
+            .collect();
         CsiIndex {
             min_shift: 14,
             depth: 5,
             aux: Vec::new(),
-            references: vec![CsiRefIndex {
-                bins: bins
-                    .into_iter()
-                    .map(|(bin_id, loffset, chunks)| CsiBin {
-                        bin_id,
-                        loffset: VirtualOffset(loffset),
-                        chunks: chunks
-                            .into_iter()
-                            .map(|(b, e)| Chunk { begin: VirtualOffset(b), end: VirtualOffset(e) })
-                            .collect(),
-                    })
-                    .collect(),
-            }],
+            references: vec![CsiRefIndex::new(bins)],
         }
     }
 
@@ -727,6 +789,33 @@ mod tests {
         let idx = CsiIndex { min_shift: 14, depth: 5, aux: Vec::new(), references: Vec::new() };
         let chunks = idx.query(0, Pos0::new(0).unwrap(), Pos0::new(100).unwrap());
         assert!(chunks.is_empty());
+    }
+
+    /// `csi_min_offset` walks from leaf to root. With a dense bin set spanning
+    /// many sibling bins the lookup must still return the correct `loffset`
+    /// for the queried position. This exercises the bin-id index used in
+    /// place of the prior linear scan.
+    #[test]
+    fn csi_min_offset_dense_bins() {
+        // Build a ref with many leaf-level bins, each with a distinct loffset.
+        // depth=5, min_shift=14 ⇒ leaf offset = 4681. Insert leaf bins
+        // 4681..4781 with loffset = (bin_id - 4681) * 1000.
+        let bins: Vec<(u32, u64, Vec<(u64, u64)>)> = (0..100u32)
+            .map(|i| {
+                let bin_id = 4681 + i;
+                let loff = u64::from(i) * 1000;
+                (bin_id, loff, vec![(loff, loff + 500)])
+            })
+            .collect();
+        let idx = make_csi_index(bins);
+        let ref_idx = &idx.references[0];
+
+        // The leaf bin for position p (with min_shift=14) is 4681 + (p >> 14).
+        for i in 0..100u32 {
+            let pos = u64::from(i) << 14; // start of the i-th 16 KiB window
+            let off = csi_min_offset(ref_idx, pos, 14, 5);
+            assert_eq!(off.0, u64::from(i) * 1000, "dense-bin lookup wrong at i={i}, pos={pos}");
+        }
     }
 
     #[test]

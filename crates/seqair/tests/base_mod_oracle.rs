@@ -19,11 +19,14 @@
 
 use rust_htslib::bam::{self, Read as _};
 use seqair::bam::aux_data::AuxData;
-use seqair::bam::base_mod::{BaseModState, ModType};
+// Use the top-level `bam` re-export rather than the inner module path so the
+// public-API surface from `seqair::bam` is exercised. The inner path
+// `seqair::bam::base_mod::*` remains valid; both must compile.
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriter;
+use seqair::bam::{BaseModState, ModType};
 use seqair_types::{BamFlags, Base};
 const FLAG_REVERSE: u16 = 0x10;
 use std::path::Path;
@@ -110,16 +113,26 @@ fn htslib_calls(bam_path: &Path, qname: &[u8]) -> Vec<Call> {
     out
 }
 
+/// Convert a [`ModType`] into the signed integer code htslib reports.
+///
+/// htslib uses negative integers to represent `ChEBI` ids (negated) and the
+/// ASCII byte for single-character codes. Returns `None` if the `ChEBI` id
+/// cannot be represented as a positive `i32` (i.e. `id > i32::MAX`), which
+/// would otherwise wrap silently and cause a wrong oracle comparison.
+fn mod_code_for(mt: ModType) -> Option<i32> {
+    match mt {
+        ModType::Code(c) => Some(i32::from(c)),
+        ModType::ChEBI(n) => i32::try_from(n).ok().map(|v| -v),
+    }
+}
+
 fn seqair_calls(state: &BaseModState, seq_len: usize) -> Vec<Call> {
     let mut out = Vec::new();
     for qp in 0..seq_len {
         if let Some(mods) = state.mod_at_qpos(qp) {
             for m in mods {
-                let mod_code = match m.mod_type {
-                    ModType::Code(c) => i32::from(c),
-                    // htslib reports ChEBI ids as negative.
-                    ModType::ChEBI(n) => -(n as i32),
-                };
+                let mod_code = mod_code_for(m.mod_type)
+                    .unwrap_or_else(|| panic!("`ChEBI` id does not fit in i32: {:?}", m.mod_type));
                 // htslib reports qual=-1 when ML entry is missing. We always
                 // have a probability (u8) so report it as-is.
                 out.push(Call { qpos: qp as u32, mod_code, probability: i32::from(m.probability) });
@@ -128,6 +141,20 @@ fn seqair_calls(state: &BaseModState, seq_len: usize) -> Vec<Call> {
     }
     out.sort();
     out
+}
+
+#[test]
+fn mod_code_for_rejects_chebi_overflow() {
+    // `ChEBI` id > i32::MAX would silently wrap with `-(n as i32)` and produce
+    // a wrong oracle comparison. The new helper returns None instead.
+    let huge = u32::MAX;
+    assert!(mod_code_for(ModType::ChEBI(huge)).is_none(), "huge `ChEBI` id must not overflow");
+    let just_over = (i32::MAX as u32).saturating_add(1);
+    assert!(mod_code_for(ModType::ChEBI(just_over)).is_none(), "id > i32::MAX must be rejected");
+    // Boundary: i32::MAX is representable.
+    assert_eq!(mod_code_for(ModType::ChEBI(i32::MAX as u32)), Some(-i32::MAX));
+    // Single-char code passes through.
+    assert_eq!(mod_code_for(ModType::Code(b'm')), Some(i32::from(b'm')));
 }
 
 // r[verify base_mod.parse_mm]
