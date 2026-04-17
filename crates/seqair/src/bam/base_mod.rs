@@ -198,7 +198,7 @@ impl BaseModState {
 
     // r[impl base_mod.implicit_explicit]
     /// Whether `qpos` is definitively unmodified, definitively modified, or
-    /// unknown. See [`base_mod.implicit_explicit`] in the spec.
+    /// unknown.
     pub fn is_unmodified(&self, qpos: usize, canonical_base: Base) -> Option<bool> {
         if self.mod_at_qpos(qpos).is_some() {
             return Some(false);

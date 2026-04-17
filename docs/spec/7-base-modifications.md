@@ -40,16 +40,20 @@ The following rules describe the planned structured API for base modifications. 
 r[base_mod.state]
 `BaseModState` MUST be constructable from a record's MM string and ML array. It parses all modification entries in the MM string (not filtered by canonical base) and pairs them with the corresponding ML probabilities. The struct is immutable after construction.
 
-r[base_mod.parse_mm]
-The MM parser MUST handle the full SAM 4.5 modification string syntax:
-- Multiple canonical bases and modification types (e.g. `C+m,0,2;C+h,1,3;A+a,0;`)
-- Mode markers after the modification code: `.` (explicit, unlisted positions are definitively unmodified), `?` (ambiguous, unlisted positions are explicitly marked as unknown), or absent (implicit, unlisted positions have unknown status). The API MUST preserve this three-way distinction; `?` and absent produce identical `is_unmodified` results but are retained separately in the parsed mode field.
-- ChEBI numeric codes (e.g. `C+27551,0,2;` for 5mC by ChEBI ID)
-- Combined modification codes in a single entry (e.g. `C+mh,0,2;`), where the ML array carries one value per (position, mod-code) pair in the order the codes appear. For an entry with N combined codes and K position deltas, the entry consumes `N * K` values from the ML array.
-- Both `+` (top/forward strand) and `-` (bottom/reverse strand) modification strands
+> r[base_mod.parse_mm]
+> The MM parser MUST handle the full SAM 4.5 modification string syntax:
+>
+> - Multiple canonical bases and modification types (e.g. `C+m,0,2;C+h,1,3;A+a,0;`)
+> - Mode markers after the modification code: `.` (explicit, unlisted positions are definitively unmodified), `?` (ambiguous, unlisted positions are explicitly marked as unknown), or absent (implicit, unlisted positions have unknown status). The API MUST preserve this three-way distinction; `?` and absent produce identical `is_unmodified` results but are retained separately in the parsed mode field.
+> - ChEBI numeric codes (e.g. `C+27551,0,2;` for 5mC by ChEBI ID)
+> - Combined modification codes in a single entry (e.g. `C+mh,0,2;`), where the ML array carries one value per (position, mod-code) pair in the order the codes appear. For an entry with N combined codes and K position deltas, the entry consumes `N * K` values from the ML array.
+> - Both `+` (top/forward strand) and `-` (bottom/reverse strand) modification strands
 
 r[base_mod.resolve_positions]
-`BaseModState` MUST resolve the relative skip-counts in MM into absolute query-sequence positions at construction time. For each modification entry:
+`BaseModState` MUST resolve the relative skip-counts in MM into absolute query-sequence positions at construction time.
+
+For each modification entry:
+
 1. Iterate through the query sequence (provided at construction)
 2. Count only bases matching the canonical base for that entry
 3. At each skip-count boundary, record the absolute query position and pair it with the corresponding ML probability
@@ -64,40 +68,43 @@ r[base_mod.query_qpos]
 r[base_mod.query_refpos]
 `BaseModState` MUST provide `mod_at_ref_pos(ref_pos: Pos0, cigar: &CigarMapping) -> Option<&[Modification]>` to look up modifications at a reference position. The position uses the typed `Pos0` newtype (defined in `seqair-types`, see `r[pos.type]` in [docs/spec/0-1-pos.md](./0-1-pos.md)) rather than a raw `i64` to prevent off-by-one and signedness mistakes at the call site. This maps the reference position to a query position via the CIGAR, then delegates to `mod_at_qpos`. Returns `None` if the reference position falls in a deletion/ref-skip (no qpos) or has no modification.
 
-r[base_mod.modification_struct]
-Each `Modification` MUST carry:
-- `mod_type`: the modification type (single-char code or ChEBI number)
-- `probability`: the ML value (u8, 0–255)
-- `canonical_base`: which base is modified (A, C, G, T)
-- `strand`: `+` or `-`
+> r[base_mod.modification_struct]
+> Each `Modification` MUST carry:
+>
+> - `mod_type`: the modification type (single-char code or ChEBI number)
+> - `probability`: the ML value (u8, 0–255)
+> - `canonical_base`: which base is modified (A, C, G, T)
+> - `strand`: `+` or `-`
 
-r[base_mod.implicit_explicit]
-`BaseModState` MUST track the mode marker per entry as one of `Implicit` (no marker), `Unmodified` (`.`), or `Ambiguous` (`?`). A `is_unmodified(qpos: usize, canonical_base: Base) -> Option<bool>` accessor MUST return:
-- `Some(true)` if the position's canonical base has an `Unmodified`-mode entry and the position is not listed (definitively unmodified)
-- `Some(false)` if the position has a modification call
-- `None` if the position has no mod call and all entries for its canonical base are `Implicit` or `Ambiguous` (unknown status)
+> r[base_mod.implicit_explicit]
+> `BaseModState` MUST track the mode marker per entry as one of `Implicit` (no marker), `Unmodified` (`.`), or `Ambiguous` (`?`). A `is_unmodified(qpos: usize, canonical_base: Base) -> Option<bool>` accessor MUST return:
+>
+> - `Some(true)` if the position's canonical base has an `Unmodified`-mode entry and the position is not listed (definitively unmodified)
+> - `Some(false)` if the position has a modification call
+> - `None` if the position has no mod call and all entries for its canonical base are `Implicit` or `Ambiguous` (unknown status)
 
 The accessor's scope is **per canonical base, not per modification type**. If two entries share the same canonical base but use different modes — e.g. `C+m.,…;C+h,…;` — `is_unmodified(qpos, C)` returns `Some(true)` for an unlisted `qpos` because the `C+m.` entry definitively excludes 5mC at every unlisted C. The status of the `Implicit`-mode `C+h` entry (5hmC) at the same position remains unknown, and that uncertainty is **not** reflected in the boolean result. The contract is "no `Unmodified`-mode modification of this canonical base at `qpos`", NOT "no modification of any kind at `qpos`". Callers needing per-mod-type semantics MUST inspect the `mod_at_qpos` slice directly and combine it with their own knowledge of which mod types were declared in the MM tag.
 
 ### Pileup integration
 
-r[base_mod.pileup_integration]
-*Deferred to a follow-up milestone.* The pileup engine will eventually expose modifications via a separate accessor on `PileupColumn` (NOT by extending `PileupOp`, which has a ≤16 byte size constraint):
-
-```
-column.modification_at(alignment_idx: usize) -> Option<&[Modification]>
-```
+> r[base_mod.pileup_integration]
+> _Deferred to a follow-up milestone._ The pileup engine will eventually expose modifications via a separate accessor on `PileupColumn` (NOT by extending `PileupOp`, which has a ≤16 byte size constraint):
+>
+> ```
+> column.modification_at(alignment_idx: usize) -> Option<&[Modification]>
+> ```
 
 This will return the modification(s) at the current column's reference position for the given alignment, using `mod_at_qpos` internally, with `BaseModState` constructed lazily and cached per active record. The initial `BaseModState` implementation is usable directly by callers (e.g. rastair) without pileup integration.
 
 ### Reverse complement
 
-r[base_mod.reverse_complement]
-Per SAM §1.7, MM position lists are always relative to the **original, unreversed** read sequence (5′→3′ of the sequenced molecule), regardless of alignment orientation. BAM stores the sequence reverse-complemented for reverse-strand alignments, so MM positions do NOT directly index into the stored BAM sequence for such reads.
-
-`BaseModState` MUST take an `is_reverse` flag at construction and resolve MM positions into stored-BAM-sequence coordinates:
-- If `is_reverse == false`: count occurrences of the canonical base in the stored sequence from index 0 upward. The resolved `qpos` is the stored-sequence index of the matched base.
-- If `is_reverse == true`: count occurrences of the **complement** of the canonical base (A↔T, C↔G) in the stored sequence from the last index downward. The resolved `qpos` is the stored-sequence index of the matched base. This is equivalent to: reverse-complement the stored sequence to reconstruct the original, walk it 5′→3′ counting the canonical base, and map the resulting original-index `i` back to stored-index `seq_len - 1 - i`.
+> r[base_mod.reverse_complement]
+> Per SAM §1.7, MM position lists are always relative to the **original, unreversed** read sequence (5′→3′ of the sequenced molecule), regardless of alignment orientation. BAM stores the sequence reverse-complemented for reverse-strand alignments, so MM positions do NOT directly index into the stored BAM sequence for such reads.
+>
+> `BaseModState` MUST take an `is_reverse` flag at construction and resolve MM positions into stored-BAM-sequence coordinates:
+>
+> - If `is_reverse == false`: count occurrences of the canonical base in the stored sequence from index 0 upward. The resolved `qpos` is the stored-sequence index of the matched base.
+> - If `is_reverse == true`: count occurrences of the **complement** of the canonical base (A↔T, C↔G) in the stored sequence from the last index downward. The resolved `qpos` is the stored-sequence index of the matched base. This is equivalent to: reverse-complement the stored sequence to reconstruct the original, walk it 5′→3′ counting the canonical base, and map the resulting original-index `i` back to stored-index `seq_len - 1 - i`.
 
 After resolution, all public queries (`mod_at_qpos`, `mod_at_ref_pos`) operate in stored-BAM-sequence coordinates. `mod_at_ref_pos` delegates to the CIGAR mapping (which also operates in stored-sequence coordinates).
 
@@ -105,11 +112,12 @@ Callers who need to reason about the original biological strand (e.g. "this is a
 
 ### Validation
 
-r[base_mod.validation]
-When parsing MM tags, the implementation MUST validate:
-- The canonical base character is one of A, C, G, T (case-insensitive)
-- The strand is `+` or `-`
-- Position deltas are non-negative integers
-- The total number of modification calls across all MM entries equals the ML array length
-
-Validation failures MUST return typed errors, not panics.
+> r[base_mod.validation]
+> When parsing MM tags, the implementation MUST validate:
+>
+> - The canonical base character is one of A, C, G, T (case-insensitive)
+> - The strand is `+` or `-`
+> - Position deltas are non-negative integers
+> - The total number of modification calls across all MM entries equals the ML array length
+>
+> Validation failures MUST return typed errors, not panics.
