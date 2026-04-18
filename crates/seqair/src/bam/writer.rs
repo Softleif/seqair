@@ -232,6 +232,141 @@ impl<W: Write> BamWriter<W> {
         Ok(())
     }
 
+    // r[impl bam_writer.write_store_record]
+    /// Write a record directly from a [`RecordStore`] without constructing an
+    /// intermediate [`OwnedBamRecord`].
+    ///
+    /// Serializes the record's BAM binary representation into the writer's
+    /// reusable buffer, re-encoding the sequence from `Base` to 4-bit packed
+    /// format. CIGAR, quality, and aux data are already in BAM wire format
+    /// in the store's slabs and are copied directly.
+    pub fn write_store_record(
+        &mut self,
+        store: &super::record_store::RecordStore,
+        idx: u32,
+    ) -> Result<(), BamWriteError> {
+        if self.poisoned {
+            return Err(BamWriteError::Poisoned);
+        }
+        match self.write_store_record_inner(store, idx) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "all casts validated by bounds checks or BAM field limits"
+    )]
+    fn write_store_record_inner(
+        &mut self,
+        store: &super::record_store::RecordStore,
+        idx: u32,
+    ) -> Result<(), BamWriteError> {
+        let rec = store.record(idx);
+        let qname = store.qname(idx);
+        let cigar = store.cigar(idx);
+        let seq = store.seq(idx);
+        let qual = store.qual(idx);
+        let aux = store.aux(idx);
+
+        let l_read_name = qname.len() + 1; // +1 for NUL
+        let n_cigar_op = rec.n_cigar_ops;
+        let seq_bytes = (rec.seq_len as usize).div_ceil(2);
+
+        // Compute BAI bin from pos and end_pos
+        let beg = rec.pos.as_u64();
+        let end = rec.end_pos.as_u64().max(beg.saturating_add(1));
+        let bin = crate::vcf::index_builder::reg2bin(beg, end, 14, 5) as u16;
+
+        // Build the 32-byte fixed header + variable data into self.buf
+        self.buf.clear();
+
+        // ref_id (4)
+        self.buf.extend_from_slice(&rec.tid.to_le_bytes());
+        // pos (4)
+        self.buf.extend_from_slice(&rec.pos.as_i32().to_le_bytes());
+        // bin_mq_nl (4): bin << 16 | mapq << 8 | l_read_name
+        let bin_mq_nl = (u32::from(bin) << 16) | (u32::from(rec.mapq) << 8) | (l_read_name as u32);
+        self.buf.extend_from_slice(&bin_mq_nl.to_le_bytes());
+        // flag_nc (4): flags << 16 | n_cigar_op
+        let flag_nc = (u32::from(rec.flags.raw()) << 16) | u32::from(n_cigar_op);
+        self.buf.extend_from_slice(&flag_nc.to_le_bytes());
+        // l_seq (4)
+        self.buf.extend_from_slice(&(rec.seq_len as i32).to_le_bytes());
+        // next_ref_id (4)
+        self.buf.extend_from_slice(&rec.next_ref_id.to_le_bytes());
+        // next_pos (4)
+        self.buf.extend_from_slice(&rec.next_pos.to_le_bytes());
+        // template_len (4)
+        self.buf.extend_from_slice(&rec.template_len.to_le_bytes());
+
+        // qname + NUL
+        self.buf.extend_from_slice(qname);
+        self.buf.push(0);
+
+        // CIGAR (already packed u32 LE ops)
+        self.buf.extend_from_slice(cigar);
+
+        // Sequence: re-encode Base → 4-bit packed
+        // Base is #[repr(u8)] with ASCII discriminants.
+        let seq_as_u8: Vec<u8> = seq.iter().map(|b| *b as u8).collect();
+        let seq_bytes_buf = super::seq::encode_seq(&seq_as_u8);
+        debug_assert_eq!(seq_bytes_buf.len(), seq_bytes);
+        self.buf.extend_from_slice(&seq_bytes_buf);
+
+        // Quality scores
+        if qual.is_empty() {
+            self.buf.resize(self.buf.len() + rec.seq_len as usize, 0xFF);
+        } else {
+            self.buf.extend_from_slice(qual);
+        }
+
+        // Aux tags (raw BAM bytes)
+        self.buf.extend_from_slice(aux);
+
+        // Validate size
+        if self.buf.len() > MAX_RECORD_SIZE {
+            return Err(BamWriteError::RecordTooLarge { size: self.buf.len() });
+        }
+
+        // Validate indexability before writing
+        if self.index.is_some() {
+            let is_unmapped = rec.flags.is_unmapped();
+            if rec.tid == -1 && !is_unmapped {
+                return Err(BamWriteError::MappedWithoutReference);
+            }
+        }
+
+        let block_size = self.buf.len() as i32;
+        let total = 4usize.saturating_add(self.buf.len());
+
+        self.bgzf.flush_if_needed(total)?;
+        self.bgzf.write_all(&block_size.to_le_bytes())?;
+        self.bgzf.write_all(&self.buf)?;
+
+        // Index dispatch
+        if let Some(ref mut index) = self.index {
+            let is_unmapped = rec.flags.is_unmapped();
+            if rec.tid != -1 {
+                let voff = self.bgzf.virtual_offset();
+                let idx_end = if is_unmapped { beg } else { end };
+                let idx_end = idx_end.max(beg.saturating_add(1));
+                if is_unmapped {
+                    index.push_unmapped(rec.tid, beg, idx_end, voff)?;
+                } else {
+                    index.push(rec.tid, beg, idx_end, voff)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     // r[impl bam_writer.finish]
     // r[impl bam_writer.index_finish]
     /// Flush all data, finalize the index, write the BGZF EOF block, and return
@@ -555,6 +690,92 @@ mod tests {
         let writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, false).unwrap();
         let (_inner, index) = writer.finish().unwrap();
         assert!(index.is_none());
+    }
+
+    // r[verify bam_writer.test_store_roundtrip]
+    #[test]
+    fn write_store_record_roundtrips() {
+        use super::super::record_store::RecordStore;
+
+        let header = test_header();
+
+        // Build a RecordStore with two records
+        let mut store = RecordStore::new();
+        let rec1 = OwnedBamRecord::builder(0, 100, b"read1".to_vec())
+            .mapq(30)
+            .flags(BamFlags::from(0x63))
+            .next_ref_id(1)
+            .next_pos(500)
+            .template_len(250)
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
+            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
+            .qual(vec![30, 31, 32, 33, 34])
+            .aux({
+                let mut a = AuxData::new();
+                a.set_string(*b"RG", b"group1");
+                a
+            })
+            .build()
+            .unwrap();
+        let rec2 = OwnedBamRecord::builder(0, 200, b"read2".to_vec())
+            .mapq(60)
+            .cigar(vec![
+                CigarOp::new(CigarOpType::SoftClip, 2),
+                CigarOp::new(CigarOpType::Match, 3),
+            ])
+            .seq(vec![Base::G, Base::T, Base::A, Base::C, Base::G])
+            .qual(vec![35, 36, 37, 38, 39])
+            .build()
+            .unwrap();
+
+        // Write via OwnedBamRecord to get them into the store
+        let mut raw_buf = Vec::new();
+        rec1.to_bam_bytes(&mut raw_buf).unwrap();
+        store.push_raw(&raw_buf).unwrap();
+        raw_buf.clear();
+        rec2.to_bam_bytes(&mut raw_buf).unwrap();
+        store.push_raw(&raw_buf).unwrap();
+
+        // Write via write_store_record
+        let mut output = Vec::new();
+        {
+            let bgzf = BgzfWriter::new(&mut output);
+            let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, false).unwrap();
+            writer.write_store_record(&store, 0).unwrap();
+            writer.write_store_record(&store, 1).unwrap();
+            writer.finish().unwrap();
+        }
+
+        // Read back into a fresh store and compare
+        let mut reader = super::super::bgzf::BgzfReader::from_reader(io::Cursor::new(&output));
+        let _ = BamHeader::parse(&mut reader).unwrap();
+
+        let mut store2 = RecordStore::new();
+        for _ in 0..2 {
+            let block_size = reader.read_i32().unwrap();
+            let mut rec_data = vec![0u8; block_size as usize];
+            reader.read_exact_into(&mut rec_data).unwrap();
+            store2.push_raw(&rec_data).unwrap();
+        }
+
+        for i in 0..2u32 {
+            let a = store.record(i);
+            let b = store2.record(i);
+            assert_eq!(*a.pos, *b.pos, "pos mismatch for record {i}");
+            assert_eq!(a.flags, b.flags, "flags mismatch for record {i}");
+            assert_eq!(a.mapq, b.mapq, "mapq mismatch for record {i}");
+            assert_eq!(a.tid, b.tid, "tid mismatch for record {i}");
+            assert_eq!(a.next_ref_id, b.next_ref_id, "next_ref_id mismatch for record {i}");
+            assert_eq!(a.next_pos, b.next_pos, "next_pos mismatch for record {i}");
+            assert_eq!(a.template_len, b.template_len, "template_len mismatch for record {i}");
+            assert_eq!(a.seq_len, b.seq_len, "seq_len mismatch for record {i}");
+            assert_eq!(a.n_cigar_ops, b.n_cigar_ops, "n_cigar_ops mismatch for record {i}");
+            assert_eq!(store.qname(i), store2.qname(i), "qname mismatch for record {i}");
+            assert_eq!(store.cigar(i), store2.cigar(i), "cigar mismatch for record {i}");
+            assert_eq!(store.seq(i), store2.seq(i), "seq mismatch for record {i}");
+            assert_eq!(store.qual(i), store2.qual(i), "qual mismatch for record {i}");
+            assert_eq!(store.aux(i), store2.aux(i), "aux mismatch for record {i}");
+        }
     }
 
     // r[verify bam_writer.insertion_order]
