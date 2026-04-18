@@ -21,6 +21,7 @@ use noodles::bam;
 use noodles::sam;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::IndexedReader;
+use seqair_types::BaseQuality;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -228,11 +229,15 @@ fn assert_bam_parity(sam_name: &str) {
             let seqair_qual = store.qual(idx);
             if n.qual.is_empty() {
                 assert!(
-                    seqair_qual.is_empty() || seqair_qual.iter().all(|&q| q == 0xFF),
-                    "{ctx}: noodles reports empty qual but seqair has non-0xFF: {seqair_qual:?}"
+                    seqair_qual.is_empty() || seqair_qual.iter().all(|q| q.get().is_none()),
+                    "{ctx}: noodles reports empty qual but seqair has non-unavailable: {seqair_qual:?}"
                 );
             } else {
-                assert_eq!(seqair_qual, n.qual.as_slice(), "{ctx}: qual");
+                assert_eq!(
+                    BaseQuality::slice_to_bytes(seqair_qual),
+                    n.qual.as_slice(),
+                    "{ctx}: qual"
+                );
             }
         }
 

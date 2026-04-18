@@ -414,7 +414,7 @@ proptest! {
                         "invalid base byte {} at pos {}", base_byte, col.pos()
                     );
                     // Qual was set to 30 in make_record
-                    prop_assert_eq!(qual, 30, "qual should be 30");
+                    prop_assert_eq!(qual.get(), Some(30), "qual should be 30");
                 }
             }
         }

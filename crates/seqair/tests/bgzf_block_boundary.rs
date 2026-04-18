@@ -25,7 +25,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriter;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
-use seqair_types::Base;
+use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::Command;
 
@@ -68,7 +68,7 @@ fn make_large_record(pos: i64, name: &[u8], seq_len: u32) -> OwnedBamRecord {
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, seq_len)])
         .seq(cyclic_seq(seq_len as usize))
-        .qual(vec![30; seq_len as usize])
+        .qual(vec![BaseQuality::from_byte(30); seq_len as usize])
         .build()
         .unwrap()
 }
@@ -88,7 +88,7 @@ fn make_long_cigar_record(pos: i64, name: &[u8]) -> OwnedBamRecord {
         .mapq(50)
         .cigar(cigar)
         .seq(cyclic_seq(query_len as usize))
-        .qual(vec![25; query_len as usize])
+        .qual(vec![BaseQuality::from_byte(25); query_len as usize])
         .build()
         .unwrap()
 }
@@ -212,7 +212,7 @@ fn mixed_record_sizes_across_boundaries() {
                     .mapq(30)
                     .cigar(vec![CigarOp::new(CigarOpType::Match, 50)])
                     .seq(cyclic_seq(50))
-                    .qual(vec![30; 50])
+                    .qual(vec![BaseQuality::from_byte(30); 50])
                     .build()
                     .unwrap(),
             );

@@ -15,6 +15,7 @@
 
 use rust_htslib::bam::{self, Read as _};
 use seqair::bam::Pos0;
+use seqair_types::BaseQuality;
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -136,7 +137,11 @@ fn record_fields_match() {
         assert_eq!(rio.flags.raw(), hts.flags, "flags mismatch at record {i}");
         assert_eq!(rio.mapq, hts.mapq, "mapq mismatch at record {i}");
         assert_eq!(store.qname(i as u32), hts.qname.as_slice(), "qname mismatch at record {i}");
-        assert_eq!(store.qual(i as u32), hts.qual.as_slice(), "qual mismatch at record {i}");
+        assert_eq!(
+            BaseQuality::slice_to_bytes(store.qual(i as u32)),
+            hts.qual.as_slice(),
+            "qual mismatch at record {i}"
+        );
 
         // htslib's CigarStringView::end_pos() returns pos + ref_consumed (exclusive)
         // Our end_pos = pos + ref_consumed - 1 (inclusive)

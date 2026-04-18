@@ -160,7 +160,10 @@ fn missing_qual_produces_0xff() {
     assert_eq!(store.len(), 1);
     let qual = store.qual(0);
     assert_eq!(qual.len(), 4, "QUAL * with 4-base SEQ should produce 4 quality bytes");
-    assert!(qual.iter().all(|&q| q == 0xFF), "QUAL * should produce 0xFF bytes, got {qual:?}");
+    assert!(
+        qual.iter().all(|q| q.get().is_none()),
+        "QUAL * should produce unavailable qualities, got {qual:?}"
+    );
 }
 
 // r[verify sam.header.sq_required]

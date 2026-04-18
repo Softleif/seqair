@@ -18,7 +18,7 @@
 use proptest::prelude::*;
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
-use seqair_types::{BamFlags, Base};
+use seqair_types::{BamFlags, Base, BaseQuality};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -218,7 +218,7 @@ fn cigar_in_own_slab() {
     assert_eq!(store.cigar(idx), &cigar_packed);
     // qual and aux should be unaffected by cigar separation
     assert_eq!(store.qual(idx).len(), 4);
-    assert!(store.qual(idx).iter().all(|&q| q == 30));
+    assert!(store.qual(idx).iter().all(|q| q.get() == Some(30)));
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +267,7 @@ fn set_alignment_preserves_other_fields() {
     let idx = store.push_raw(&raw).unwrap();
 
     let orig_seq: Vec<Base> = store.seq(idx).to_vec();
-    let orig_qual: Vec<u8> = store.qual(idx).to_vec();
+    let orig_qual: Vec<BaseQuality> = store.qual(idx).to_vec();
     let orig_aux: Vec<u8> = store.aux(idx).to_vec();
     let orig_qname: Vec<u8> = store.qname(idx).to_vec();
 
@@ -502,7 +502,7 @@ proptest! {
         let idx = store.push_raw(&raw).unwrap();
 
         let orig_seq: Vec<Base> = store.seq(idx).to_vec();
-        let orig_qual: Vec<u8> = store.qual(idx).to_vec();
+        let orig_qual: Vec<BaseQuality> = store.qual(idx).to_vec();
         let orig_qname: Vec<u8> = store.qname(idx).to_vec();
 
         let new_cigar_bytes = pack_cigar(&new_parts);
@@ -601,7 +601,7 @@ fn realignment_workflow_with_real_bam() {
     // "Realign" the first record by shifting it 10bp left with same cigar
     let orig_cigar = store.cigar(0).to_vec();
     let orig_seq: Vec<Base> = store.seq(0).to_vec();
-    let orig_qual: Vec<u8> = store.qual(0).to_vec();
+    let orig_qual: Vec<BaseQuality> = store.qual(0).to_vec();
     let orig_pos = store.record(0).pos;
 
     let new_pos = Pos0::new(orig_pos.saturating_sub(10)).unwrap();

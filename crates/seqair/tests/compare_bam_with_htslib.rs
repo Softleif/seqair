@@ -14,6 +14,7 @@
 use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
 use seqair::bam::Pos0;
 use seqair::bam::aux::{AuxValue, find_tag as find_aux_tag};
+use seqair_types::BaseQuality;
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -133,7 +134,11 @@ fn all_contigs_record_fields_match() {
             assert_eq!(r.seq_len as usize, h.seq_len, "{contig} rec {i}: seq_len");
 
             // Quality scores
-            assert_eq!(store.qual(idx), h.qual.as_slice(), "{contig} rec {i}: qual");
+            assert_eq!(
+                BaseQuality::slice_to_bytes(store.qual(idx)),
+                h.qual.as_slice(),
+                "{contig} rec {i}: qual"
+            );
 
             // Sequence (Base vs ASCII)
             for pos in 0..h.seq_len {

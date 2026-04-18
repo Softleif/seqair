@@ -1,7 +1,7 @@
 //! Iterate over pileup columns. [`PileupEngine`] yields [`PileupColumn`]s with pre-extracted
 //! flat fields per active read. Supports read filtering and per-position max-depth.
 
-use seqair_types::{BamFlags, Base, Offset, Pos0, Strand, strand_from_flags};
+use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0, Strand, strand_from_flags};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 // PileupEngine is intentionally !Send due to RecordFilter: Box<dyn Fn(...)>.
 use std::rc::Rc;
@@ -153,7 +153,7 @@ impl PileupColumn {
 ///     }
 /// }
 ///
-/// assert_eq!(summarize(&PileupOp::Match { qpos: 10, base: seqair_types::Base::A, qual: 30 }), "match");
+/// assert_eq!(summarize(&PileupOp::Match { qpos: 10, base: seqair_types::Base::A, qual: seqair_types::BaseQuality::from_byte(30) }), "match");
 /// assert_eq!(summarize(&PileupOp::Deletion { del_len: 3 }), "deletion");
 /// assert_eq!(summarize(&PileupOp::ComplexIndel { del_len: 3, insert_len: 2, is_refskip: false }), "complex-indel");
 /// ```
@@ -162,11 +162,13 @@ impl PileupColumn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PileupOp {
     /// Read has a base aligned at this position (M, =, or X CIGAR op).
-    Match { qpos: u32, base: Base, qual: u8 },
+    // r[impl types.base_quality.field_type]
+    Match { qpos: u32, base: Base, qual: BaseQuality },
     /// Read has a base aligned at this position AND an insertion of
     /// `insert_len` query bases follows before the next reference position.
     /// Access inserted bases via the read's sequence at `qpos + 1 .. qpos + 1 + insert_len`.
-    Insertion { qpos: u32, base: Base, qual: u8, insert_len: u32 },
+    // r[impl types.base_quality.field_type]
+    Insertion { qpos: u32, base: Base, qual: BaseQuality, insert_len: u32 },
     /// Read has a deletion spanning this position (D CIGAR op). `del_len` is the total length
     /// of the D CIGAR op — how many reference bases are deleted. No query base.
     Deletion { del_len: u32 },
@@ -228,7 +230,7 @@ impl PileupAlignment {
     }
 
     #[must_use]
-    pub fn qual(&self) -> Option<u8> {
+    pub fn qual(&self) -> Option<BaseQuality> {
         match self.op {
             PileupOp::Match { qual, .. } | PileupOp::Insertion { qual, .. } => Some(qual),
             PileupOp::Deletion { .. } | PileupOp::ComplexIndel { .. } | PileupOp::RefSkip => None,

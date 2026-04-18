@@ -22,8 +22,8 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriter;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
-use seqair_types::Base;
 use seqair_types::bam_flags::BamFlags;
+use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::Command;
 
@@ -95,7 +95,7 @@ fn roundtrip_simple_records() {
                 Base::A,
                 Base::C,
             ])
-            .qual(vec![30, 31, 32, 33, 34, 35, 36, 37, 38, 39])
+            .qual([30, 31, 32, 33, 34, 35, 36, 37, 38, 39].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap(),
         OwnedBamRecord::builder(0, 200, b"read2".to_vec())
@@ -103,7 +103,7 @@ fn roundtrip_simple_records() {
             .mapq(50)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 8)])
             .seq(vec![Base::T, Base::G, Base::C, Base::A, Base::T, Base::G, Base::C, Base::A])
-            .qual(vec![40, 41, 42, 43, 44, 45, 46, 47])
+            .qual([40, 41, 42, 43, 44, 45, 46, 47].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap(),
     ];
@@ -180,7 +180,7 @@ fn roundtrip_complex_cigars() {
                 CigarOp::new(CigarOpType::SoftClip, 2),
             ])
             .seq(seq.clone())
-            .qual(vec![30; 15])
+            .qual(vec![BaseQuality::from_byte(30); 15])
             .build()
             .unwrap(),
         // Hard clips + intron (N op) — query length = 3+5 = 8
@@ -194,7 +194,7 @@ fn roundtrip_complex_cigars() {
                 CigarOp::new(CigarOpType::HardClip, 3),
             ])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A, Base::C, Base::G, Base::T])
-            .qual(vec![35; 8])
+            .qual(vec![BaseQuality::from_byte(35); 8])
             .build()
             .unwrap(),
         // SeqMatch/SeqMismatch ops — query length = 5+3+4 = 12
@@ -219,7 +219,7 @@ fn roundtrip_complex_cigars() {
                 Base::G,
                 Base::T,
             ])
-            .qual(vec![40; 12])
+            .qual(vec![BaseQuality::from_byte(40); 12])
             .build()
             .unwrap(),
     ];
@@ -310,7 +310,7 @@ fn roundtrip_aux_tags() {
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
-            .qual(vec![30, 31, 32, 33, 34])
+            .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
             .aux(aux)
             .build()
             .unwrap(),
@@ -341,14 +341,14 @@ fn roundtrip_multiple_contigs() {
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
-            .qual(vec![30; 5])
+            .qual(vec![BaseQuality::from_byte(30); 5])
             .build()
             .unwrap(),
         OwnedBamRecord::builder(1, 200, b"chr2_read".to_vec())
             .mapq(50)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 6)])
             .seq(vec![Base::T, Base::G, Base::C, Base::A, Base::T, Base::G])
-            .qual(vec![35; 6])
+            .qual(vec![BaseQuality::from_byte(35); 6])
             .build()
             .unwrap(),
     ];
@@ -404,7 +404,7 @@ fn index_coproduction_matches_samtools() {
                         })
                         .collect(),
                 )
-                .qual(vec![30; 100])
+                .qual(vec![BaseQuality::from_byte(30); 100])
                 .build()
                 .unwrap()
         })
@@ -451,7 +451,7 @@ fn roundtrip_paired_end() {
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5.clone())
-            .qual(vec![30; 5])
+            .qual(vec![BaseQuality::from_byte(30); 5])
             .next_ref_id(0)
             .next_pos(200)
             .template_len(105)
@@ -462,7 +462,7 @@ fn roundtrip_paired_end() {
             .mapq(55)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5)
-            .qual(vec![35; 5])
+            .qual(vec![BaseQuality::from_byte(35); 5])
             .next_ref_id(0)
             .next_pos(100)
             .template_len(-105)

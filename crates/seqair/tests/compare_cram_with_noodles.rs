@@ -22,6 +22,7 @@ use noodles::sam;
 use noodles::sam::alignment::record::Sequence as _;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::Readers;
+use seqair_types::BaseQuality;
 use std::path::Path;
 
 fn test_cram_v30_path() -> &'static Path {
@@ -273,7 +274,7 @@ fn cram_chr19_quality_scores_match_noodles() {
 
         for (i, noodles_rec) in noodles_chr19.iter().enumerate() {
             let idx = our_records[i];
-            let our_qual = store.qual(idx);
+            let our_qual = BaseQuality::slice_to_bytes(store.qual(idx));
             assert_eq!(
                 our_qual,
                 noodles_rec.qual.as_slice(),

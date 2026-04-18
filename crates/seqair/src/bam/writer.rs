@@ -338,6 +338,7 @@ mod tests {
     use super::*;
     use seqair_types::BamFlags;
     use seqair_types::Base;
+    use seqair_types::BaseQuality;
 
     fn test_header() -> BamHeader {
         BamHeader::from_sam_text(
@@ -351,7 +352,7 @@ mod tests {
             .mapq(30)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
-            .qual(vec![30, 31, 32, 33, 34])
+            .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap()
     }
@@ -512,7 +513,7 @@ mod tests {
             .flags(BamFlags::empty()) // mapped
             .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
             .seq(vec![Base::A, Base::C, Base::G])
-            .qual(vec![30, 31, 32])
+            .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap();
 

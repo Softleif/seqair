@@ -8,7 +8,7 @@ use super::aux_data::{AuxData, AuxDataError};
 use super::cigar::CigarOp;
 use super::seq;
 use crate::vcf::index_builder::reg2bin;
-use seqair_types::{BamFlags, Base};
+use seqair_types::{BamFlags, Base, BaseQuality};
 use thiserror::Error;
 
 /// Errors from owned record construction or serialization.
@@ -77,7 +77,8 @@ pub struct OwnedBamRecord {
     pub qname: Vec<u8>,
     pub cigar: Vec<CigarOp>,
     pub seq: Vec<Base>,
-    pub qual: Vec<u8>,
+    // r[impl types.base_quality.field_type]
+    pub qual: Vec<BaseQuality>,
     pub aux: AuxData,
 }
 
@@ -93,7 +94,7 @@ pub struct OwnedBamRecordBuilder {
     qname: Vec<u8>,
     cigar: Vec<CigarOp>,
     seq: Vec<Base>,
-    qual: Vec<u8>,
+    qual: Vec<BaseQuality>,
     aux: AuxData,
 }
 
@@ -115,7 +116,7 @@ impl OwnedBamRecordBuilder {
         self.seq = seq;
         self
     }
-    pub fn qual(mut self, qual: Vec<u8>) -> Self {
+    pub fn qual(mut self, qual: Vec<BaseQuality>) -> Self {
         self.qual = qual;
         self
     }
@@ -235,7 +236,8 @@ impl OwnedBamRecord {
 
         // Quality scores
         #[allow(clippy::indexing_slicing, reason = "bounds checked by parse_header")]
-        let qual = raw[h.seq_end..h.qual_end].to_vec();
+        let qual: Vec<BaseQuality> =
+            raw[h.seq_end..h.qual_end].iter().copied().map(BaseQuality::from_byte).collect();
 
         // Auxiliary data (everything after qual)
         #[allow(clippy::indexing_slicing, reason = "qual_end <= raw.len()")]
@@ -382,7 +384,7 @@ impl OwnedBamRecord {
 
     // r[impl bam.owned_record.set_qual]
     /// Replace quality scores. Length must equal seq length.
-    pub fn set_qual(&mut self, qual: Vec<u8>) -> Result<(), OwnedRecordError> {
+    pub fn set_qual(&mut self, qual: Vec<BaseQuality>) -> Result<(), OwnedRecordError> {
         if !qual.is_empty() && qual.len() != self.seq.len() {
             return Err(OwnedRecordError::SeqQualLengthMismatch {
                 seq_len: self.seq.len(),
@@ -487,7 +489,7 @@ impl OwnedBamRecord {
             // Missing qual: fill with 0xFF per SAM spec
             buf.resize(buf.len().saturating_add(self.seq.len()), 0xFF);
         } else {
-            buf.extend_from_slice(&self.qual);
+            buf.extend_from_slice(BaseQuality::slice_to_bytes(&self.qual));
         }
 
         // Auxiliary data
@@ -569,7 +571,7 @@ mod tests {
             .mapq(30)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
-            .qual(vec![30, 31, 32, 33, 34])
+            .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap()
     }
@@ -612,7 +614,7 @@ mod tests {
         let rec = OwnedBamRecord::builder(0, 100, b"r1".to_vec())
             .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
             .seq(vec![Base::A, Base::C, Base::G])
-            .qual(vec![30, 31, 32])
+            .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
             .aux(aux)
             .build()
             .unwrap();
@@ -664,7 +666,7 @@ mod tests {
                 CigarOp::new(CigarOpType::Match, 3),
             ])
             .seq(vec![Base::A; 8]) // 3M + 2I + 3M = 8 query bases
-            .qual(vec![30; 8])
+            .qual(vec![BaseQuality::from_byte(30); 8])
             .build()
             .unwrap();
         // Only M ops consume ref: 3 + 3 = 6
@@ -800,7 +802,7 @@ mod tests {
                 CigarOp::new(CigarOpType::Match, 2),
             ])
             .seq(vec![Base::A; 5])
-            .qual(vec![30; 5])
+            .qual(vec![BaseQuality::from_byte(30); 5])
             .build()
             .unwrap();
 
@@ -822,7 +824,7 @@ mod tests {
                 CigarOp::new(CigarOpType::Match, 2),
             ])
             .seq(vec![Base::A; 4])
-            .qual(vec![30; 4])
+            .qual(vec![BaseQuality::from_byte(30); 4])
             .build()
             .unwrap();
 
@@ -845,7 +847,7 @@ mod tests {
                 CigarOp::new(CigarOpType::Match, 3),
             ])
             .seq(vec![Base::A; 5])
-            .qual(vec![30; 5])
+            .qual(vec![BaseQuality::from_byte(30); 5])
             .build()
             .unwrap();
 
@@ -874,7 +876,7 @@ mod tests {
             .mapq(42)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
-            .qual(vec![30, 31, 32, 33, 34])
+            .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
             .next_ref_id(2)
             .next_pos(1000)
             .template_len(150)
@@ -905,7 +907,7 @@ mod tests {
         assert_eq!(reconstructed.cigar.len(), 1);
         assert_eq!(reconstructed.cigar[0], CigarOp::new(CigarOpType::Match, 5));
         assert_eq!(reconstructed.seq.len(), 5);
-        assert_eq!(reconstructed.qual, vec![30, 31, 32, 33, 34]);
+        assert_eq!(reconstructed.qual, [30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec());
         assert_eq!(reconstructed.aux.get(*b"NM"), Some(super::super::aux::AuxValue::U8(3)));
         assert_eq!(
             reconstructed.aux.get(*b"RG"),

@@ -17,6 +17,7 @@
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::Readers;
+use seqair_types::BaseQuality;
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -180,7 +181,7 @@ fn cram_quality_scores_match_htslib() {
         assert_eq!(store.len(), hts_quals.len(), "{version}: record count");
 
         for (i, hts_qual) in hts_quals.iter().enumerate() {
-            let cram_qual = store.qual(i as u32);
+            let cram_qual = BaseQuality::slice_to_bytes(store.qual(i as u32));
             assert_eq!(cram_qual, hts_qual.as_slice(), "{version} rec {i}: quality mismatch");
         }
     }

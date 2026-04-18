@@ -7,7 +7,7 @@
 //! - **Qual slab**: raw Phred bytes, hot in pileup per-base quality lookup
 //! - **Aux slab**: auxiliary tag bytes in BAM binary format, rarely read in pileup
 
-use seqair_types::{BamFlags, Base, Pos0};
+use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
 
 use super::{
     cigar,
@@ -447,13 +447,14 @@ impl RecordStore {
             .unwrap_or(Base::Unknown)
     }
 
+    // r[impl types.base_quality.field_type]
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
-    pub fn qual(&self, idx: u32) -> &[u8] {
+    pub fn qual(&self, idx: u32) -> &[BaseQuality] {
         let rec = self.record(idx);
         let start = rec.qual_off as usize;
         let end = start.checked_add(rec.seq_len as usize).expect("qual end overflow");
         debug_assert!(end <= self.qual.len(), "qual slab overrun: {end} > {}", self.qual.len());
-        &self.qual[start..end]
+        BaseQuality::slice_from_bytes(&self.qual[start..end])
     }
 
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]

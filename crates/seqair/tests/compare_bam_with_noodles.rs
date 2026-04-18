@@ -15,6 +15,7 @@
 use noodles::bam;
 use noodles::sam;
 use seqair::bam::Pos0;
+use seqair_types::BaseQuality;
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -272,7 +273,7 @@ fn bam_quality_scores_match_noodles() {
         for (i, n) in noodles.iter().enumerate() {
             let idx = seqair_indices[i];
             assert_eq!(
-                store.qual(idx),
+                BaseQuality::slice_to_bytes(store.qual(idx)),
                 n.qual.as_slice(),
                 "{contig} rec {i}: quality scores mismatch",
             );

@@ -16,6 +16,7 @@
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos0, RecordStore};
 use seqair::sam::reader::IndexedSamReader;
+use seqair_types::BaseQuality;
 use std::path::Path;
 use std::process::Command;
 
@@ -162,7 +163,11 @@ fn sam_record_fields_match_htslib() {
             assert_eq!(r.seq_len as usize, h.seq_len, "{contig} rec {i}: seq_len");
 
             // Quality scores
-            assert_eq!(store.qual(idx), h.qual.as_slice(), "{contig} rec {i}: qual");
+            assert_eq!(
+                BaseQuality::slice_to_bytes(store.qual(idx)),
+                h.qual.as_slice(),
+                "{contig} rec {i}: qual"
+            );
 
             // Sequence (Base vs ASCII)
             for pos in 0..h.seq_len {

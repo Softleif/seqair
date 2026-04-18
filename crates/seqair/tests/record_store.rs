@@ -13,7 +13,7 @@
 )]
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
-use seqair_types::{BamFlags, Base};
+use seqair_types::{BamFlags, Base, BaseQuality};
 
 // r[verify record_store.push_raw+2]
 // r[verify record_store.field_access]
@@ -39,7 +39,7 @@ fn decode_record_into_slabs() {
     assert_eq!(store.seq_at(idx, 2), Base::G);
     assert_eq!(store.seq_at(idx, 3), Base::T);
     assert_eq!(store.qual(idx).len(), 4);
-    assert!(store.qual(idx).iter().all(|&q| q == 30));
+    assert!(store.qual(idx).iter().all(|q| q.get() == Some(30)));
 }
 
 // r[verify record_store.push_raw+2]
@@ -59,8 +59,8 @@ fn multiple_records_share_slabs() {
     assert_eq!(store.record(idx2).pos, Pos0::new(200).unwrap());
     assert_eq!(store.qname(idx1), b"read1");
     assert_eq!(store.qname(idx2), b"read2");
-    assert_eq!(store.qual(idx1)[0], 30);
-    assert_eq!(store.qual(idx2)[0], 25);
+    assert_eq!(store.qual(idx1)[0].get(), Some(30));
+    assert_eq!(store.qual(idx2)[0].get(), Some(25));
 }
 
 // r[verify record_store.clear+2]
@@ -127,8 +127,8 @@ fn qual_and_aux_are_stored_in_independent_slabs() {
     // Round-trip: each accessor returns exactly the bytes that were pushed.
     assert_eq!(store.qual(i1).len(), 4);
     assert_eq!(store.qual(i2).len(), 8);
-    assert!(store.qual(i1).iter().all(|&q| q == 30));
-    assert!(store.qual(i2).iter().all(|&q| q == 25));
+    assert!(store.qual(i1).iter().all(|q| q.get() == Some(30)));
+    assert!(store.qual(i2).iter().all(|q| q.get() == Some(25)));
     assert_eq!(store.aux(i1), aux1);
     assert_eq!(store.aux(i2), aux2);
 
@@ -273,7 +273,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
             store.qname(i),
             store.cigar(i),
             store.seq(i),
-            store.qual(i),
+            BaseQuality::slice_to_bytes(store.qual(i)),
             store.aux(i),
             rec.tid,
             rec.next_pos,

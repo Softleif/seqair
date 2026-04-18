@@ -20,7 +20,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriter;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
-use seqair_types::Base;
+use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::Command;
 
@@ -57,7 +57,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 150)])
             .seq(cyclic_seq(150))
-            .qual(vec![30; 150])
+            .qual(vec![BaseQuality::from_byte(30); 150])
             .build()
             .unwrap();
         writer.write(&rec).unwrap();
@@ -69,7 +69,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
             .mapq(50)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
             .seq(cyclic_seq(100))
-            .qual(vec![25; 100])
+            .qual(vec![BaseQuality::from_byte(25); 100])
             .build()
             .unwrap();
         writer.write(&rec).unwrap();
@@ -81,7 +81,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
             .mapq(40)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 80)])
             .seq(cyclic_seq(80))
-            .qual(vec![20; 80])
+            .qual(vec![BaseQuality::from_byte(20); 80])
             .build()
             .unwrap();
         writer.write(&rec).unwrap();

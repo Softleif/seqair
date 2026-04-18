@@ -28,7 +28,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriter;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
-use seqair_types::Base;
+use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::Command;
 
@@ -88,7 +88,7 @@ fn make_methylation_record(
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, 20)])
         .seq(seq)
-        .qual(vec![30; 20])
+        .qual(vec![BaseQuality::from_byte(30); 20])
         .aux(aux)
         .build()
         .unwrap()
@@ -267,7 +267,7 @@ fn mm_ml_empty_values() {
                 Base::A,
                 Base::C,
             ])
-            .qual(vec![30; 10])
+            .qual(vec![BaseQuality::from_byte(30); 10])
             .aux(aux)
             .build()
             .unwrap(),
@@ -330,7 +330,7 @@ fn mm_ml_large_tags() {
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 1000)])
             .seq(seq)
-            .qual(vec![30; 1000])
+            .qual(vec![BaseQuality::from_byte(30); 1000])
             .aux(aux)
             .build()
             .unwrap(),
@@ -395,7 +395,7 @@ fn mm_ml_coexist_with_other_tags() {
                 Base::A,
                 Base::C,
             ])
-            .qual(vec![30; 10])
+            .qual(vec![BaseQuality::from_byte(30); 10])
             .aux(aux)
             .build()
             .unwrap(),

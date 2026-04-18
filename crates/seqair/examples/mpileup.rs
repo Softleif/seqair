@@ -170,7 +170,7 @@ fn main() -> anyhow::Result<()> {
                     bases.push('$');
                 }
 
-                match aln.qual() {
+                match aln.qual().and_then(|q| q.get()) {
                     Some(q) => quals.push((q.saturating_add(33)) as char),
                     None => quals.push('~'),
                 }

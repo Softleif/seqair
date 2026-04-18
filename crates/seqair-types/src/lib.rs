@@ -4,6 +4,7 @@
 
 pub mod bam_flags;
 mod base;
+mod base_quality;
 mod phred;
 pub mod pos;
 mod probability;
@@ -20,6 +21,7 @@ pub use pos::{Offset, One, Pos, Pos0, Pos1, PosOverflow, Zero};
 pub use {
     bam_flags::BamFlags,
     base::{Base, BaseError},
+    base_quality::BaseQuality,
     phred::Phred,
     probability::{Probability, ProbabilityError},
     region_string::{RegionString, RegionStringError},

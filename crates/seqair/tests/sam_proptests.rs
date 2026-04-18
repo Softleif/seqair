@@ -178,7 +178,7 @@ proptest! {
         let stored_qual = store.qual(0);
         prop_assert_eq!(stored_qual.len(), quals.len());
         for (i, (&expected, &actual)) in quals.iter().zip(stored_qual.iter()).enumerate() {
-            prop_assert_eq!(actual, expected, "pos {}", i);
+            prop_assert_eq!(actual.as_byte(), expected, "pos {}", i);
         }
     }
 }

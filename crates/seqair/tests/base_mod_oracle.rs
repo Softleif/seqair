@@ -27,7 +27,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriter;
 use seqair::bam::{BaseModState, ModType};
-use seqair_types::{BamFlags, Base};
+use seqair_types::{BamFlags, Base, BaseQuality};
 const FLAG_REVERSE: u16 = 0x10;
 use std::path::Path;
 
@@ -83,7 +83,7 @@ fn build_record(
         .mapq(60)
         .cigar(cigar)
         .seq(seq)
-        .qual(vec![30; seq_len])
+        .qual(vec![BaseQuality::from_byte(30); seq_len])
         .aux(aux)
         .build()
         .unwrap()

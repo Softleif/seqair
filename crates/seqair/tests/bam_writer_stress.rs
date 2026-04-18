@@ -20,8 +20,8 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::{BamWriteError, BamWriter};
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
-use seqair_types::Base;
 use seqair_types::bam_flags::BamFlags;
+use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::Command;
 
@@ -80,7 +80,7 @@ fn max_qname_length() {
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(cyclic_seq(10))
-            .qual(vec![30; 10])
+            .qual(vec![BaseQuality::from_byte(30); 10])
             .build()
             .unwrap(),
     ];
@@ -107,7 +107,7 @@ fn large_sequence() {
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, seq_len)])
             .seq(cyclic_seq(seq_len as usize))
-            .qual(vec![30; seq_len as usize])
+            .qual(vec![BaseQuality::from_byte(30); seq_len as usize])
             .build()
             .unwrap(),
     ];
@@ -141,7 +141,7 @@ fn many_aux_tags() {
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(cyclic_seq(10))
-            .qual(vec![30; 10])
+            .qual(vec![BaseQuality::from_byte(30); 10])
             .aux(aux)
             .build()
             .unwrap(),
@@ -173,7 +173,7 @@ fn placed_unmapped_records() {
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
         .seq(cyclic_seq(10))
-        .qual(vec![30; 10])
+        .qual(vec![BaseQuality::from_byte(30); 10])
         .build()
         .unwrap();
     writer.write(&mapped).unwrap();
@@ -191,7 +191,7 @@ fn placed_unmapped_records() {
         .mapq(55)
         .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
         .seq(cyclic_seq(10))
-        .qual(vec![30; 10])
+        .qual(vec![BaseQuality::from_byte(30); 10])
         .build()
         .unwrap();
     writer.write(&mapped2).unwrap();
@@ -286,7 +286,7 @@ fn poisoned_writer_partial_output_is_readable() {
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(cyclic_seq(10))
-            .qual(vec![30; 10])
+            .qual(vec![BaseQuality::from_byte(30); 10])
             .build()
             .unwrap();
         writer.write(&rec).unwrap();
@@ -314,7 +314,7 @@ fn poisoned_writer_partial_output_is_readable() {
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
         .seq(cyclic_seq(5))
-        .qual(vec![30; 5])
+        .qual(vec![BaseQuality::from_byte(30); 5])
         .build()
         .unwrap();
     let err = writer.write(&good_rec).unwrap_err();
@@ -343,7 +343,7 @@ fn dense_records_same_position() {
                 .mapq(60)
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 50)])
                 .seq(cyclic_seq(50))
-                .qual(vec![30; 50])
+                .qual(vec![BaseQuality::from_byte(30); 50])
                 .build()
                 .unwrap()
         })
