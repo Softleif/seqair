@@ -487,3 +487,108 @@ fn roundtrip_paired_end() {
     assert!(r2.flags().is_last_segment()); // read2
     assert!(r2.flags().is_reverse_complemented()); // reverse
 }
+
+/// write_store_record: write via RecordStore, validate with samtools + noodles.
+// r[verify bam_writer.test_store_roundtrip]
+#[test]
+fn roundtrip_write_store_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let header = make_header();
+
+    // Build OwnedBamRecords, serialize to raw BAM, push into RecordStore
+    let seq5 = vec![Base::A, Base::C, Base::G, Base::T, Base::A];
+    let records = vec![
+        OwnedBamRecord::builder(0, 100, b"sr1".to_vec())
+            .flags(BamFlags::from(99))
+            .mapq(60)
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
+            .seq(seq5.clone())
+            .qual(vec![30, 31, 32, 33, 34])
+            .next_ref_id(0)
+            .next_pos(300)
+            .template_len(205)
+            .aux({
+                let mut a = AuxData::new();
+                a.set_string(*b"RG", b"grp1");
+                a
+            })
+            .build()
+            .unwrap(),
+        OwnedBamRecord::builder(0, 300, b"sr1".to_vec())
+            .flags(BamFlags::from(147))
+            .mapq(55)
+            .cigar(vec![
+                CigarOp::new(CigarOpType::SoftClip, 1),
+                CigarOp::new(CigarOpType::Match, 4),
+            ])
+            .seq(seq5)
+            .qual(vec![35, 36, 37, 38, 39])
+            .next_ref_id(0)
+            .next_pos(100)
+            .template_len(-205)
+            .build()
+            .unwrap(),
+    ];
+
+    let mut store = RecordStore::new();
+    let mut raw_buf = Vec::new();
+    for rec in &records {
+        raw_buf.clear();
+        rec.to_bam_bytes(&mut raw_buf).unwrap();
+        store.push_raw(&raw_buf).unwrap();
+    }
+
+    // Write via write_store_record
+    let bam_path = dir.path().join("store.bam");
+    {
+        let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+        for i in 0..store.len() as u32 {
+            writer.write_store_record(&store, i).unwrap();
+        }
+        let (_inner, index_builder) = writer.finish().unwrap();
+        if let Some(ib) = index_builder {
+            let bai_file = std::fs::File::create(bam_path.with_extension("bam.bai")).unwrap();
+            ib.write_bai(bai_file, header.target_count()).unwrap();
+        }
+    }
+
+    // External validation
+    samtools_quickcheck(&bam_path);
+
+    // Noodles field-level comparison
+    let noodles_recs = noodles_read_all(&bam_path);
+    assert_eq!(noodles_recs.len(), 2);
+
+    let r1 = &noodles_recs[0];
+    assert_eq!(r1.name().map(|n| n.to_vec()).unwrap(), b"sr1");
+    assert_eq!(r1.alignment_start().unwrap().unwrap().get(), 101); // 1-based
+    assert_eq!(u8::from(r1.mapping_quality().unwrap()), 60);
+    assert!(r1.flags().is_first_segment());
+
+    let r2 = &noodles_recs[1];
+    assert_eq!(r2.name().map(|n| n.to_vec()).unwrap(), b"sr1");
+    assert_eq!(r2.alignment_start().unwrap().unwrap().get(), 301); // 1-based
+    assert!(r2.flags().is_last_segment());
+
+    // Read back via seqair and compare field-by-field with original store
+    let mut store2 = RecordStore::new();
+    let mut shared = IndexedBamReader::open(&bam_path).unwrap();
+    shared.fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(1000).unwrap(), &mut store2).unwrap();
+    assert_eq!(store2.len(), 2);
+
+    for i in 0..2u32 {
+        let a = store.record(i);
+        let b = store2.record(i);
+        assert_eq!(*a.pos, *b.pos, "pos mismatch record {i}");
+        assert_eq!(a.flags, b.flags, "flags mismatch record {i}");
+        assert_eq!(a.mapq, b.mapq, "mapq mismatch record {i}");
+        assert_eq!(a.next_ref_id, b.next_ref_id, "next_ref_id mismatch record {i}");
+        assert_eq!(a.next_pos, b.next_pos, "next_pos mismatch record {i}");
+        assert_eq!(a.template_len, b.template_len, "tlen mismatch record {i}");
+        assert_eq!(store.qname(i), store2.qname(i), "qname mismatch record {i}");
+        assert_eq!(store.cigar(i), store2.cigar(i), "cigar mismatch record {i}");
+        assert_eq!(store.seq(i), store2.seq(i), "seq mismatch record {i}");
+        assert_eq!(store.qual(i), store2.qual(i), "qual mismatch record {i}");
+        assert_eq!(store.aux(i), store2.aux(i), "aux mismatch record {i}");
+    }
+}

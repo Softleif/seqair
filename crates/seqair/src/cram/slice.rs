@@ -28,6 +28,8 @@ struct SliceMateInfo {
     store_idx: Option<u32>,
     /// BAM flags (needed for READ1/READ2 tie-breaking).
     bam_flags: u16,
+    /// Reference sequence ID for this record (needed for next_ref_id resolution).
+    ref_id: i32,
 }
 
 /// Parsed CRAM slice header.
@@ -466,6 +468,7 @@ fn decode_record(
                     mate_line,
                     store_idx: None,
                     bam_flags: raw_flags,
+                    ref_id: record_ref_id,
                 },
             ));
         }
@@ -480,6 +483,7 @@ fn decode_record(
                     mate_line,
                     store_idx: None,
                     bam_flags: raw_flags,
+                    ref_id: record_ref_id,
                 },
             ));
         }
@@ -512,6 +516,7 @@ fn decode_record(
                 mate_line,
                 store_idx: Some(store_idx),
                 bam_flags: raw_flags,
+                ref_id: record_ref_id,
             },
         ));
     }
@@ -544,6 +549,7 @@ fn decode_record(
             mate_line: -1,
             store_idx: None,
             bam_flags: raw_flags,
+            ref_id: record_ref_id,
         },
     ))
 }
@@ -651,6 +657,22 @@ fn resolve_mate_tlen(infos: &[SliceMateInfo], store: &mut RecordStore) {
         for &j in &chain[1..] {
             if let Some(idx) = infos[j].store_idx {
                 store.set_template_len(idx, rest_tlen);
+            }
+        }
+
+        // Resolve next_ref_id and next_pos for each record in the chain.
+        // Each record's mate is the next entry in the chain (last wraps to first).
+        for ci in 0..chain.len() {
+            let mate_ci = if ci + 1 < chain.len() { ci + 1 } else { 0 };
+            let record_idx = infos[chain[ci]].store_idx;
+            let mate = &infos[chain[mate_ci]];
+            if let Some(idx) = record_idx {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "mate positions fit in i32 for genomic data"
+                )]
+                let mate_pos = if mate.pos < 0 { -1 } else { mate.pos as i32 };
+                store.set_mate_info(idx, mate.ref_id, mate_pos);
             }
         }
     }

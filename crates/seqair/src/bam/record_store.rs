@@ -416,6 +416,17 @@ impl RecordStore {
         Some(())
     }
 
+    /// Update the mate fields (`next_ref_id`, `next_pos`) for a record.
+    /// Used by the CRAM decoder to fill in mate info after resolving
+    /// downstream mate cross-references within a slice.
+    pub fn set_mate_info(&mut self, idx: u32, next_ref_id: i32, next_pos: i32) -> Option<()> {
+        let idx = usize::try_from(idx).ok()?;
+        let rec = self.records.get_mut(idx)?;
+        rec.next_ref_id = next_ref_id;
+        rec.next_pos = next_pos;
+        Some(())
+    }
+
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
     pub fn qname(&self, idx: u32) -> &[u8] {
         let rec = self.record(idx);

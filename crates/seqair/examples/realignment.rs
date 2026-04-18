@@ -20,7 +20,7 @@
 //!    is ready for pileup / writing again.
 //!
 //! The "realignment rule" here: for each record whose CIGAR starts with an
-//! `NM` (match) op of length ≥ `min_match`, convert the first `clip` bases
+//! `M` (match) op of length ≥ `min_match`, convert the first `clip` bases
 //! of that leading match into a soft clip and shift `pos` right by `clip`.
 //! Example: `10M` at pos 100 → `2S8M` at pos 102 (when `clip = 2`).
 
@@ -184,7 +184,7 @@ struct Snapshot {
 
 fn snapshot(store: &RecordStore, idx: u32) -> Snapshot {
     let rec = store.record(idx);
-    let qname = String::from_utf8_lossy(store.qname(idx)).into_owned();
+    let qname = std::str::from_utf8(store.qname(idx)).unwrap_or("<non-utf8>").to_owned();
     Snapshot { qname, pos: *rec.pos, cigar_str: fmt_cigar(store.cigar(idx)) }
 }
 

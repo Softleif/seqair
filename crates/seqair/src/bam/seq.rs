@@ -545,6 +545,26 @@ unsafe fn decode_bases_neon(encoded: &[u8], len: usize) -> Vec<u8> {
     result
 }
 
+/// Encode ASCII bases to 4-bit packed BAM format, appending into `buf`.
+///
+/// This avoids the intermediate `Vec` allocation of [`encode_seq`].
+#[allow(clippy::indexing_slicing, reason = "bounds ensured by step_by loop and reserve")]
+pub fn encode_seq_into(bases: &[u8], buf: &mut Vec<u8>) {
+    let n_bytes = bases.len().div_ceil(2);
+    let start = buf.len();
+    buf.resize(start + n_bytes, 0);
+
+    for j in (0..bases.len()).step_by(2) {
+        let hi = ENCODE_BASE[bases[j] as usize];
+        let lo = if j.saturating_add(1) < bases.len() {
+            ENCODE_BASE[bases[j.saturating_add(1)] as usize]
+        } else {
+            0
+        };
+        buf[start + j / 2] = (hi << 4) | lo;
+    }
+}
+
 /// Encode ASCII bases to 4-bit packed BAM format.
 pub fn encode_seq(bases: &[u8]) -> Vec<u8> {
     let n_bytes = bases.len().div_ceil(2);
