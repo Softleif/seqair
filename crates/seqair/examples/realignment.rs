@@ -26,7 +26,7 @@
 
 use anyhow::Context;
 use clap::Parser as _;
-use seqair::bam::{AuxData, BamWriter, CigarOp, OwnedBamRecord, Pos0, RecordStore};
+use seqair::bam::{BamWriter, Pos0, RecordStore};
 use seqair::reader::IndexedReader;
 use std::path::PathBuf;
 
@@ -211,30 +211,9 @@ fn write_store(
         BamWriter::from_path(path, header, false).context("could not create BAM writer")?;
 
     for i in 0..store.len() as u32 {
-        let rec = store.record(i);
-        let cigar_bytes = store.cigar(i);
-        let mut cigar_ops = Vec::with_capacity(rec.n_cigar_ops as usize);
-        for chunk in cigar_bytes.chunks_exact(4) {
-            let packed = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            let op = CigarOp::from_bam_u32(packed).context("invalid CIGAR op")?;
-            cigar_ops.push(op);
-        }
-
-        // SlimRecord doesn't store next_ref_id (the read path drops it),
-        // so mate reference is lost. Fine for this toy example.
-        let owned = OwnedBamRecord::builder(rec.tid, rec.pos.as_i64(), store.qname(i).to_vec())
-            .mapq(rec.mapq)
-            .flags(rec.flags)
-            .cigar(cigar_ops)
-            .seq(store.seq(i).to_vec())
-            .qual(store.qual(i).to_vec())
-            .next_pos(i64::from(rec.next_pos))
-            .template_len(rec.template_len)
-            .aux(AuxData::from_bytes(store.aux(i).to_vec()))
-            .build()
-            .with_context(|| format!("could not build record {i}"))?;
-
-        writer.write(&owned).with_context(|| format!("could not write record {i}"))?;
+        writer
+            .write_store_record(store, i)
+            .with_context(|| format!("could not write record {i}"))?;
     }
 
     writer.finish().context("could not finalize BAM")?;
