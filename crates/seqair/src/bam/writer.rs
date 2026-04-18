@@ -331,7 +331,7 @@ impl<W: Write> BamWriter<W> {
         if qual.is_empty() {
             self.buf.resize(self.buf.len() + rec.seq_len as usize, 0xFF);
         } else {
-            self.buf.extend_from_slice(qual);
+            self.buf.extend_from_slice(seqair_types::BaseQuality::slice_to_bytes(qual));
         }
 
         // Aux tags (raw BAM bytes)
@@ -724,7 +724,7 @@ mod tests {
             .template_len(250)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
-            .qual(vec![30, 31, 32, 33, 34])
+            .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
             .aux({
                 let mut a = AuxData::new();
                 a.set_string(*b"RG", b"group1");
@@ -739,7 +739,7 @@ mod tests {
                 CigarOp::new(CigarOpType::Match, 3),
             ])
             .seq(vec![Base::G, Base::T, Base::A, Base::C, Base::G])
-            .qual(vec![35, 36, 37, 38, 39])
+            .qual([35, 36, 37, 38, 39].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap();
 
@@ -807,20 +807,20 @@ mod tests {
                 .mapq(30)
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
                 .seq(vec![Base::A, Base::C, Base::G])
-                .qual(vec![30, 31, 32])
+                .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
                 .build()
                 .unwrap(),
             OwnedBamRecord::builder(0, 200, b"pu1".to_vec())
                 .flags(BamFlags::from(0x4)) // unmapped but placed
                 .seq(vec![Base::T, Base::A])
-                .qual(vec![20, 21])
+                .qual([20, 21].map(BaseQuality::from_byte).to_vec())
                 .build()
                 .unwrap(),
             OwnedBamRecord::builder(0, 300, b"m2".to_vec())
                 .mapq(60)
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])
                 .seq(vec![Base::G, Base::T, Base::A, Base::C])
-                .qual(vec![33, 34, 35, 36])
+                .qual([33, 34, 35, 36].map(BaseQuality::from_byte).to_vec())
                 .build()
                 .unwrap(),
         ];

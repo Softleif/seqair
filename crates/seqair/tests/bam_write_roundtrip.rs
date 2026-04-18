@@ -503,7 +503,7 @@ fn roundtrip_write_store_record() {
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5.clone())
-            .qual(vec![30, 31, 32, 33, 34])
+            .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
             .next_ref_id(0)
             .next_pos(300)
             .template_len(205)
@@ -522,7 +522,7 @@ fn roundtrip_write_store_record() {
                 CigarOp::new(CigarOpType::Match, 4),
             ])
             .seq(seq5)
-            .qual(vec![35, 36, 37, 38, 39])
+            .qual([35, 36, 37, 38, 39].map(BaseQuality::from_byte).to_vec())
             .next_ref_id(0)
             .next_pos(100)
             .template_len(-205)

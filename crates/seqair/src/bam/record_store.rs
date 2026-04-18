@@ -64,13 +64,11 @@ impl SlimRecord {
     }
 }
 
-// Compile-time size guard: splitting the former `data` slab into independent
-// `qual` and `aux` slabs adds one u32 offset. With Rust's field reordering the
-// struct still packs to 64 bytes (14 u32 + 3 u16 + 1 u8 + 1 pad). If this ever
-// grows, revisit the layout before accepting the hit — see
-// `docs/spec/3-record_store.md` "Layout".
+// Compile-time size guard: 15 u32 (incl. next_ref_id) + 3 u16 + 1 u8 + padding
+// = 68 bytes. If this ever grows, revisit the layout before accepting the hit —
+// see `docs/spec/3-record_store.md` "Layout".
 const _: () =
-    assert!(std::mem::size_of::<SlimRecord>() <= 64, "SlimRecord grew unexpectedly large");
+    assert!(std::mem::size_of::<SlimRecord>() <= 68, "SlimRecord grew unexpectedly large");
 
 // r[impl record_store.push_raw+2]
 // r[impl record_store.field_access]
