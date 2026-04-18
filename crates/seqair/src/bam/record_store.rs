@@ -112,25 +112,32 @@ impl RecordStore {
 
     // r[impl perf.arena_capacity_hint+2]
     /// Pre-allocate based on estimated compressed bytes for the region.
-    /// Assumes ~3:1 compression ratio, ~400 bytes per record, ~150bp avg read.
-    /// Qual is ~`seq_len` bytes per record; aux receives the remaining budget.
+    ///
+    /// TODO(capacity-profiles): these are tuned for ~150bp Illumina short reads
+    /// (WGS and 5-base-modified). Long-read methylation (ONT/PacBio with large
+    /// MM/ML tags) has radically different per-slab proportions — aux can equal
+    /// or exceed qual, and CIGAR grows by 2+ orders of magnitude. If/when seqair
+    /// grows beyond rastair's current workloads, replace this with a `Profile`
+    /// enum carrying per-workload constant blocks.
     pub fn with_byte_hint(compressed_bytes: usize) -> Self {
-        let uncompressed_est = compressed_bytes.saturating_mul(3);
-        let record_count_est = (uncompressed_est / 400).max(64);
+        // 5× matches measured 4.6–8.1×; erring toward the low end avoids huge
+        // over-allocation on highly-compressible (chr-restricted) BAMs.
+        let uncompressed_est = compressed_bytes.saturating_mul(5);
+        // 550 B/rec ≈ pooled 569; rounded down so we over-estimate record count.
+        let record_count_est = (uncompressed_est / 550).max(64);
+
+        let names_est = record_count_est.saturating_mul(56); // headroom over pooled 51
+        let bases_est = record_count_est.saturating_mul(150);
+        // CIGAR at 8 gives headroom over measured ~4.4 without allocating the
+        // 20 B/rec long-read budget we don't need here.
+        let cigar_est = record_count_est.saturating_mul(8);
         let qual_est = record_count_est.saturating_mul(150);
-        let cigar_est = record_count_est.saturating_mul(20);
-        let names_est = record_count_est.saturating_mul(25);
-        // Aux slab gets whatever is left after names/cigar/qual; use saturating_sub
-        // so tiny hints don't underflow.
-        let aux_est = uncompressed_est
-            .saturating_sub(names_est)
-            .saturating_sub(cigar_est)
-            .saturating_sub(qual_est)
-            .max(record_count_est.saturating_mul(16));
+        let aux_est = record_count_est.saturating_mul(180); // rounded up from pooled 163
+
         Self {
             records: Vec::with_capacity(record_count_est),
             names: Vec::with_capacity(names_est),
-            bases: Vec::with_capacity(record_count_est.saturating_mul(150)),
+            bases: Vec::with_capacity(bases_est),
             cigar: Vec::with_capacity(cigar_est),
             qual: Vec::with_capacity(qual_est),
             aux: Vec::with_capacity(aux_est),
