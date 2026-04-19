@@ -488,7 +488,7 @@ fn roundtrip_paired_end() {
     assert!(r2.flags().is_reverse_complemented()); // reverse
 }
 
-/// write_store_record: write via RecordStore, validate with samtools + noodles.
+/// `write_store_record`: write via `RecordStore`, validate with samtools + noodles.
 // r[verify bam_writer.test_store_roundtrip]
 #[test]
 fn roundtrip_write_store_record() {

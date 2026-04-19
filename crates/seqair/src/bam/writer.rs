@@ -260,6 +260,7 @@ impl<W: Write> BamWriter<W> {
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
+        clippy::arithmetic_side_effects,
         reason = "all casts validated by bounds checks or BAM field limits"
     )]
     fn write_store_record_inner(
@@ -323,6 +324,8 @@ impl<W: Write> BamWriter<W> {
         // Sequence: re-encode Base → 4-bit packed directly into self.buf.
         // Base is #[repr(u8)] with compile-time size_of::<Base>() == 1 assert;
         // transmuting &[Base] to &[u8] is sound.
+        // SAFETY: Base is #[repr(u8)] with size_of::<Base>() == 1 (compile-time asserted),
+        // so &[Base] and &[u8] have identical layout.
         let seq_u8: &[u8] =
             unsafe { std::slice::from_raw_parts(seq.as_ptr().cast::<u8>(), seq.len()) };
         super::seq::encode_seq_into(seq_u8, &mut self.buf);
@@ -834,6 +837,7 @@ mod tests {
         let mut output = Vec::new();
         let bgzf = BgzfWriter::new(&mut output);
         let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, true).unwrap();
+        #[allow(clippy::cast_possible_truncation, reason = "test data is tiny")]
         for i in 0..store.len() as u32 {
             writer.write_store_record(&store, i).unwrap();
         }

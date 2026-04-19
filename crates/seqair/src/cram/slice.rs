@@ -28,7 +28,7 @@ struct SliceMateInfo {
     store_idx: Option<u32>,
     /// BAM flags (needed for READ1/READ2 tie-breaking).
     bam_flags: u16,
-    /// Reference sequence ID for this record (needed for next_ref_id resolution).
+    /// Reference sequence ID for this record (needed for `next_ref_id` resolution).
     ref_id: i32,
 }
 
@@ -562,7 +562,11 @@ fn decode_record(
 /// the alignment span (min start to max end) across all fragments, then
 /// assigns signed TLEN: positive for the leftmost fragment, negative for
 /// the rightmost, with ties broken by the READ1 flag.
-#[expect(clippy::indexing_slicing, reason = "everything is based on infos.len()")]
+#[expect(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "everything is based on infos.len()"
+)]
 fn resolve_mate_tlen(infos: &[SliceMateInfo], store: &mut RecordStore) {
     let n = infos.len();
     // Track which records we've already resolved to avoid reprocessing.
