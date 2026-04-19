@@ -310,6 +310,13 @@ impl RecordStore {
         next_pos: i32,
         template_len: i32,
     ) -> Result<u32, DecodeError> {
+        if qual.len() != bases.len() {
+            return Err(DecodeError::QualLenMismatch {
+                qual_len: qual.len(),
+                seq_len: bases.len(),
+            });
+        }
+
         let idx = u32::try_from(self.records.len()).map_err(|_| DecodeError::SlabOverflow)?;
         #[expect(
             clippy::cast_possible_truncation,

@@ -280,6 +280,9 @@ pub enum DecodeError {
 
     #[error("CIGAR op count {count} exceeds u16::MAX (BAM n_cigar_op limit)")]
     CigarOpCountOverflow { count: usize },
+
+    #[error("qual length {qual_len} does not match seq length {seq_len}")]
+    QualLenMismatch { qual_len: usize, seq_len: usize },
 }
 
 #[cfg(test)]
