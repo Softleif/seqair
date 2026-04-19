@@ -576,12 +576,13 @@ pub(super) fn merged_byte_size(chunks: &[Chunk]) -> usize {
 fn merge_chunks(chunks: &[Chunk]) -> Vec<MergedRange> {
     let mut offsets: Vec<(u64, u64)> = chunks
         .iter()
-        .map(|c| {
+        .filter_map(|c| {
             let start = c.begin.block_offset();
             // end's block_offset points to the block containing the last byte;
             // extend by max block size to ensure we capture the full final block.
             let end = c.end.block_offset().saturating_add(MAX_BLOCK_SIZE as u64);
-            (start, end)
+            // Skip degenerate chunks (e.g. from corrupt index data where begin > end).
+            (start < end).then_some((start, end))
         })
         .collect();
 

@@ -80,11 +80,10 @@ for target in $TARGETS; do
             printf "CRASH\n"
             FAILED=$((FAILED + 1))
             FAILURES="$FAILURES  $target\n"
-            # Show crash details: panic message, failing input path, and debug output
+            # Show crash details: panic message (with continuation), artifact path
             echo "---"
-            echo "$output" | grep -E "panicked at|thread .* panicked" | head -3
-            echo "$output" | grep -A1 "Failing input" | head -5
-            echo "$output" | grep -B1 -A20 "Output of" | head -25
+            echo "$output" | grep -A5 "panicked at" | head -10
+            echo "$output" | grep -A1 "Test unit written to" | head -3
             artifact=$(echo "$output" | grep -oE "fuzz/artifacts/[^ ]+" | head -1)
             if [ -n "$artifact" ]; then
                 echo ""

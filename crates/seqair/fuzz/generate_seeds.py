@@ -189,6 +189,38 @@ def main():
     for i, record in extract_bam_records(raw_bam, max_records=3):
         write_seed("fuzz_pileup_full", f"record_{i}", record)
 
+    # --- fuzz_csi_index: synthetic CSI index data ---
+    # Minimal: magic + header + 0 references
+    csi_empty = b"CSI\x01" + struct.pack("<iii", 14, 5, 0) + struct.pack("<i", 0)
+    write_seed("fuzz_csi_index", "empty", csi_empty)
+
+    # One reference with one bin containing one chunk
+    csi_one_ref = b"CSI\x01" + struct.pack("<iii", 14, 5, 0)  # header
+    csi_one_ref += struct.pack("<i", 1)  # n_ref=1
+    csi_one_ref += struct.pack("<i", 1)  # n_bin=1
+    csi_one_ref += struct.pack("<I", 4681)  # bin_id (leaf bin for pos 0)
+    csi_one_ref += struct.pack("<Q", 0)  # loffset
+    csi_one_ref += struct.pack("<i", 1)  # n_chunk=1
+    csi_one_ref += struct.pack("<QQ", 0, 1 << 16)  # chunk begin/end
+    write_seed("fuzz_csi_index", "one_ref", csi_one_ref)
+
+    # Two references, second empty — tests n_bin=0 path
+    csi_two = csi_one_ref + struct.pack("<i", 0)  # n_bin=0 for ref 2
+    write_seed("fuzz_csi_index", "two_refs", csi_two)
+
+    # With auxiliary data (tabix-style: format, col_seq, col_beg, col_end, meta, skip, l_nm, names)
+    aux = struct.pack("<iiiiiii", 2, 1, 2, 3, ord("#"), 0, 4) + b"chr1"
+    csi_aux = b"CSI\x01" + struct.pack("<iii", 14, 5, len(aux)) + aux
+    csi_aux += struct.pack("<i", 0)  # n_ref=0
+    write_seed("fuzz_csi_index", "with_aux", csi_aux)
+
+    # Deeper tree (depth=7, non-BAI) with larger min_shift
+    csi_deep = b"CSI\x01" + struct.pack("<iii", 12, 7, 0) + struct.pack("<i", 0)
+    write_seed("fuzz_csi_index", "deep_tree", csi_deep)
+
+    # Also seed with the raw BAI file (CSI parser rejects BAI magic, exercises error path)
+    write_seed("fuzz_csi_index", "bai_as_csi", bai)
+
     # --- fuzz_cram_decode_full: CRAM header data ---
     for cram_name in ["test.cram", "test_v30.cram"]:
         cram_path = os.path.join(DATA_DIR, cram_name)
