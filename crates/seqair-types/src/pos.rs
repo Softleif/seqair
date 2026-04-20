@@ -108,6 +108,7 @@ impl Pos<Zero> {
     /// Convert to 1-based. Fails only at `i32::MAX` (0-based) where the
     /// 1-based result would exceed `i32::MAX`.
     #[inline]
+    #[must_use]
     pub const fn to_one_based(self) -> Result<Pos<One>, PosOverflow> {
         let Some(new_val) = self.value.checked_add(1) else {
             // impossible by construction
@@ -147,6 +148,7 @@ impl Pos<One> {
     /// Convert to 0-based. Infallible: 1-based values are in `1..=i32::MAX`,
     /// so subtracting 1 gives `0..=i32::MAX - 1`, always valid.
     #[inline]
+    #[must_use]
     pub const fn to_zero_based(self) -> Pos<Zero> {
         let Some(new_val) = self.value.checked_sub(1) else {
             // always >0 by construction
@@ -203,6 +205,7 @@ impl<S> Pos<S> {
     // r[impl pos.add_offset]
     /// Checked position + offset. Returns `None` if result is negative or > `i32::MAX`.
     #[inline]
+    #[must_use]
     #[expect(
         clippy::cast_sign_loss,
         clippy::cast_possible_truncation,
@@ -220,6 +223,7 @@ impl<S> Pos<S> {
     // r[impl pos.sub_offset]
     /// Checked position - offset. Returns `None` if result is negative or > `i32::MAX`.
     #[inline]
+    #[must_use]
     pub fn checked_sub_offset(self, offset: Offset) -> Option<Self> {
         let negated = Offset(offset.0.checked_neg()?);
         self.checked_add_offset(negated)
