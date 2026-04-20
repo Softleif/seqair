@@ -1,0 +1,61 @@
+name: Spec Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  export:
+    name: Export spec coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Cache Tracey build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/tracey
+          key: tracey-${{ runner.os }}-nicer-exports-${{ hashFiles('.github/workflows/spec.yml') }}
+
+      - name: Install Tracey (fork)
+        run: |
+          if ! command -v tracey &>/dev/null; then
+            corepack enable pnpm
+            cargo install --git https://github.com/Softleif/tracey.git --branch feature/nicer-exports tracey --locked
+          fi
+
+      - name: Export spec site
+        run: tracey export _site .
+
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: export
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
