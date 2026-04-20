@@ -51,6 +51,7 @@ fn format_tag(tag: &[u8]) -> String {
     format_aux_field(tag, 32)
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SamRecordError {
     #[error("expected >= 11 TAB-separated fields, got {found}")]
@@ -93,6 +94,7 @@ pub enum SamRecordError {
     AuxArrayTooLarge { len: usize },
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SamError {
     #[error("I/O error opening {path}")]

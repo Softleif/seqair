@@ -12,6 +12,7 @@ pub struct IndexChunk {
     pub end: VirtualOffset,
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
     #[error("input not sorted: tid={tid}, pos={pos}")]

@@ -6,6 +6,7 @@ use std::{num::ParseFloatError, ops::Deref, str::FromStr};
 pub struct Probability(f64);
 
 /// Errors that can occur when creating or parsing a [`Probability`].
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ProbabilityError {
     /// The value is outside the valid range [0, 1]

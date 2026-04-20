@@ -161,7 +161,7 @@ impl OutputFormat {
         } else if name.ends_with(".vcf") {
             Ok(Self::Vcf)
         } else {
-            Err(VcfError::UnrecognizedFormat { path: name.to_string() })
+            Err(VcfError::UnrecognizedFormat { path: path.to_path_buf() })
         }
     }
 }

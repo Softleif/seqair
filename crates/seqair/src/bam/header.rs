@@ -64,6 +64,7 @@ impl AsRef<str> for TargetInfo {
 
 // r[impl io.errors]
 // r[impl io.errors.typed_variants]
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum BamHeaderError {
     #[error("invalid BAM magic bytes (expected BAM\\x01)")]

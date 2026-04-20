@@ -33,6 +33,7 @@ const MAX_CSI_DEPTH: u32 = 16;
 const MAX_CSI_SHIFT_SUM: u32 = 63;
 
 // r[impl csi.errors]
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum CsiError {
     #[error("I/O error reading CSI index {path}")]

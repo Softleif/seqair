@@ -22,6 +22,7 @@ use std::{
 use tracing::instrument;
 
 // r[impl io.errors]
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum BamError {
     #[error("I/O error opening {path}")]

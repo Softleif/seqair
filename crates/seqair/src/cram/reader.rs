@@ -23,6 +23,7 @@ use tracing::instrument;
 #[cfg(feature = "fuzz")]
 use std::io::Cursor;
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum CramError {
     #[error("I/O error opening {path}")]

@@ -5,6 +5,7 @@ use std::path::Path;
 use tracing::instrument;
 
 // r[impl io.errors]
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum GziError {
     #[error("I/O error reading GZI index {path}")]

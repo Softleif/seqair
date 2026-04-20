@@ -261,6 +261,7 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     })
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     #[error("BAM record too short: {len} bytes")]

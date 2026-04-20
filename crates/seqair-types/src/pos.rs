@@ -108,7 +108,6 @@ impl Pos<Zero> {
     /// Convert to 1-based. Fails only at `i32::MAX` (0-based) where the
     /// 1-based result would exceed `i32::MAX`.
     #[inline]
-    #[must_use]
     pub const fn to_one_based(self) -> Result<Pos<One>, PosOverflow> {
         let Some(new_val) = self.value.checked_add(1) else {
             // impossible by construction

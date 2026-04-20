@@ -486,6 +486,7 @@ impl From<Base> for &'static str {
 
 // r[impl types.base.error_display]
 /// Errors that can occur when parsing a [`Base`] from a string.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum BaseError {
     /// Input string was empty.

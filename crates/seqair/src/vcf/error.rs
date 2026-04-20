@@ -2,9 +2,11 @@
 
 use crate::{bam::bgzf::BgzfError, vcf::writer::WriteError};
 use seqair_types::SmolStr;
+use std::path::PathBuf;
 
 // r[impl vcf_header.builder]
 // r[impl vcf_header.no_duplicates]
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum VcfHeaderError {
     #[error("duplicate contig: {name}")]
@@ -56,6 +58,7 @@ pub enum VcfHeaderError {
 }
 
 // r[impl vcf_record.alleles_typed]
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum AllelesError {
     #[error("SNV alt base must differ from ref")]
@@ -74,6 +77,7 @@ pub enum AllelesError {
     DeletionEmpty,
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum VcfEncodeError {
     #[error("value type mismatch for field {field}: expected {expected}, got {got}")]
@@ -83,6 +87,7 @@ pub enum VcfEncodeError {
     IntegerOverflow { field: SmolStr, value: i64 },
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum VcfError {
     #[error(transparent)]
@@ -128,8 +133,8 @@ pub enum VcfError {
     ValueOverflow { field: &'static str, value: u64, target_type: &'static str },
 
     // r[impl vcf_writer.output_formats]
-    #[error("unrecognized output format for path: {path}")]
-    UnrecognizedFormat { path: String },
+    #[error("unrecognized output format for path: {}", path.display())]
+    UnrecognizedFormat { path: PathBuf },
 
     #[error("failed to write float field")]
     FailedToWriteFormattedString { source: WriteError },

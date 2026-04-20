@@ -30,6 +30,7 @@ impl VirtualOffset {
 }
 
 // r[impl io.errors]
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum BgzfError {
     #[error("I/O error opening {path}")]

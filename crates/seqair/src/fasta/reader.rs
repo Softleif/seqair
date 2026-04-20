@@ -20,6 +20,7 @@ use tracing::instrument;
 use std::io::Cursor;
 
 // r[impl fasta.errors]
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum FastaError {
     #[error(

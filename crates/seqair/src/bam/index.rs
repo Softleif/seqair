@@ -10,6 +10,7 @@ use tracing::instrument;
 const PSEUDO_BIN: u32 = 37450;
 
 // r[impl io.errors]
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum BaiError {
     #[error("I/O error reading index {path}")]

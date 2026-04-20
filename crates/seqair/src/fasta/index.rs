@@ -8,6 +8,7 @@ use std::path::Path;
 use tracing::instrument;
 
 // r[impl io.errors]
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum FaiError {
     #[error("I/O error reading FAI index {path}")]
@@ -20,6 +21,7 @@ pub enum FaiError {
     InvalidEntry { path: std::path::PathBuf, line_number: usize, kind: FaiEntryError },
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum FaiEntryError {
     #[error("expected 5 tab-separated fields, found {found}")]

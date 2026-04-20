@@ -5,6 +5,7 @@ use super::reader::CramError;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum CramIndexError {
     #[error("failed to decompress CRAI index")]

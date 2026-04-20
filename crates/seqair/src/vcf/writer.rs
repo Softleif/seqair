@@ -70,6 +70,7 @@ pub(crate) fn percent_encode_into(buf: &mut Vec<u8>, data: &[u8]) {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
     #[error("failed to write formatted string")]
