@@ -18,7 +18,7 @@ use seqair::bam::{Pos0, RecordStore};
 use seqair::sam::reader::IndexedSamReader;
 use seqair_types::BaseQuality;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn test_bam_path() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam"))
@@ -36,11 +36,18 @@ fn create_sam_gz(dir: &Path) -> std::path::PathBuf {
         .args(["view", "-h", "--output-fmt", "SAM,level=6", "-o"])
         .arg(&sam_gz)
         .arg(test_bam_path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools not found");
     assert!(status.success());
-    let status =
-        Command::new("tabix").args(["-p", "sam"]).arg(&sam_gz).status().expect("tabix not found");
+    let status = Command::new("tabix")
+        .args(["-p", "sam"])
+        .arg(&sam_gz)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("tabix not found");
     assert!(status.success());
     sam_gz
 }

@@ -23,7 +23,7 @@ use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair_types::bam_flags::BamFlags;
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn make_header() -> BamHeader {
     BamHeader::from_sam_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000000\n").unwrap()
@@ -246,10 +246,18 @@ fn fully_unmapped_not_indexed() {
         .args(["sort", "-o"])
         .arg(&bam_path)
         .arg(&sam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools sort");
     assert!(status.success());
-    let status = Command::new("samtools").arg("index").arg(&bam_path).status().unwrap();
+    let status = Command::new("samtools")
+        .arg("index")
+        .arg(&bam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
     assert!(status.success());
 
     // samtools sees both

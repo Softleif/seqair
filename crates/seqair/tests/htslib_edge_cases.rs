@@ -20,7 +20,7 @@ use noodles::sam;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::IndexedReader;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn htslib_sam(name: &str) -> PathBuf {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/htslib/sam/")).join(name)
@@ -38,6 +38,8 @@ fn sam_to_indexed_bam(dir: &Path, sam_path: &Path) -> PathBuf {
         .args(["sort", "-o"])
         .arg(&bam_path)
         .arg(sam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools not found");
     assert!(status.success(), "samtools sort failed for {}", sam_path.display());
@@ -45,6 +47,8 @@ fn sam_to_indexed_bam(dir: &Path, sam_path: &Path) -> PathBuf {
     let status = Command::new("samtools")
         .arg("index")
         .arg(&bam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools index failed");
     assert!(status.success(), "samtools index failed");
@@ -75,6 +79,7 @@ fn dos_line_endings_in_sam() {
         .arg("-c")
         .arg(&sam_path)
         .stdout(std::fs::File::create(&sam_gz_path).unwrap())
+        .stderr(Stdio::null())
         .status()
         .expect("bgzip not found");
     assert!(status.success(), "bgzip failed");
@@ -82,6 +87,8 @@ fn dos_line_endings_in_sam() {
     let status = Command::new("tabix")
         .args(["-p", "sam"])
         .arg(&sam_gz_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("tabix not found");
     assert!(status.success(), "tabix failed");

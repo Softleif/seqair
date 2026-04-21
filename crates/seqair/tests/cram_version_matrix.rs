@@ -21,7 +21,7 @@ use noodles::sam::alignment::record::Sequence as _;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::Readers;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn htslib_sam(name: &str) -> PathBuf {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/htslib/sam/")).join(name)
@@ -49,6 +49,8 @@ fn sam_to_cram(
         .args(["sort", "-o"])
         .arg(&bam_path)
         .arg(sam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools not found");
     assert!(status.success(), "samtools sort failed for {}", sam_path.display());
@@ -61,13 +63,16 @@ fn sam_to_cram(
     }
     cmd.arg("-T").arg(fasta_path).arg("-o").arg(&cram_path).arg(&bam_path);
 
-    let status = cmd.status().expect("samtools view -C failed");
+    let status =
+        cmd.stdout(Stdio::null()).stderr(Stdio::null()).status().expect("samtools view -C failed");
     assert!(status.success(), "samtools view -C failed");
 
     // Step 3: index
     let status = Command::new("samtools")
         .arg("index")
         .arg(&cram_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools index failed");
     assert!(status.success(), "samtools index failed");

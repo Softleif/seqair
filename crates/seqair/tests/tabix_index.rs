@@ -11,7 +11,7 @@
 use seqair::bam::index::BamIndex;
 use seqair_types::Pos0;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn test_bam_path() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam"))
@@ -30,12 +30,19 @@ fn create_sam_gz_with_tabix(tmpdir: &tempfile::TempDir) -> std::path::PathBuf {
         .args(["view", "-h", "--output-fmt", "SAM,level=6", "-o"])
         .arg(&sam_gz)
         .arg(test_bam_path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools not found");
     assert!(status.success(), "samtools view failed");
 
-    let status =
-        Command::new("tabix").args(["-p", "sam"]).arg(&sam_gz).status().expect("tabix not found");
+    let status = Command::new("tabix")
+        .args(["-p", "sam"])
+        .arg(&sam_gz)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("tabix not found");
     assert!(status.success(), "tabix indexing failed");
 
     sam_gz

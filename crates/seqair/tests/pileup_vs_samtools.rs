@@ -29,7 +29,7 @@ use rust_htslib::bam::pileup::Indel;
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{IndexedBamReader, PileupEngine, Pos0, RecordStore};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn mpileup_dir() -> PathBuf {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/htslib/mpileup/")).to_path_buf()
@@ -42,12 +42,16 @@ fn sam_to_bam(dir: &Path, sam_path: &Path) -> PathBuf {
         .args(["sort", "-o"])
         .arg(&bam_path)
         .arg(sam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools not found");
     assert!(status.success(), "samtools sort failed");
     let status = Command::new("samtools")
         .arg("index")
         .arg(&bam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools index failed");
     assert!(status.success());

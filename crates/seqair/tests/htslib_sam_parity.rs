@@ -23,7 +23,7 @@ use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::IndexedReader;
 use seqair_types::BaseQuality;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn htslib_sam(name: &str) -> PathBuf {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/htslib/sam/")).join(name)
@@ -37,6 +37,8 @@ fn sam_to_indexed_bam(dir: &Path, sam_path: &Path) -> PathBuf {
         .args(["sort", "-o"])
         .arg(&bam_path)
         .arg(sam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools not found — required for htslib parity tests");
     assert!(status.success(), "samtools sort failed for {}", sam_path.display());
@@ -44,6 +46,8 @@ fn sam_to_indexed_bam(dir: &Path, sam_path: &Path) -> PathBuf {
     let status = Command::new("samtools")
         .arg("index")
         .arg(&bam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools index failed");
     assert!(status.success(), "samtools index failed");

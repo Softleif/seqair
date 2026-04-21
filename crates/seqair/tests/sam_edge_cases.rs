@@ -14,7 +14,7 @@
 use seqair::bam::{Pos0, RecordStore};
 use seqair::sam::reader::IndexedSamReader;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn test_bam_path() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam"))
@@ -31,6 +31,7 @@ fn create_indexed_sam(dir: &Path, name: &str, sam_text: &str) -> std::path::Path
         .arg("-c")
         .arg(&sam_path)
         .stdout(std::fs::File::create(&sam_gz_path).expect("create .sam.gz"))
+        .stderr(Stdio::null())
         .status()
         .expect("bgzip not found");
     assert!(status.success(), "bgzip failed");
@@ -38,6 +39,8 @@ fn create_indexed_sam(dir: &Path, name: &str, sam_text: &str) -> std::path::Path
     let status = Command::new("tabix")
         .args(["-p", "sam"])
         .arg(&sam_gz_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("tabix not found");
     assert!(status.success(), "tabix failed");
@@ -90,9 +93,17 @@ fn unmapped_reads_are_filtered() {
             .args(["view", "-h", "--output-fmt", "SAM,level=6", "-o"])
             .arg(&sam_gz)
             .arg(test_bam_path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .expect("samtools not found");
-        Command::new("tabix").args(["-p", "sam"]).arg(&sam_gz).status().expect("tabix not found");
+        Command::new("tabix")
+            .args(["-p", "sam"])
+            .arg(&sam_gz)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("tabix not found");
         sam_gz
     };
 
@@ -180,6 +191,7 @@ fn header_without_sq_is_rejected() {
         .arg("-c")
         .arg(&sam_path)
         .stdout(std::fs::File::create(&sam_gz_path).unwrap())
+        .stderr(Stdio::null())
         .status()
         .expect("bgzip not found");
     assert!(status.success());
@@ -208,12 +220,16 @@ fn records_are_in_sorted_order() {
             .args(["view", "-h", "--output-fmt", "SAM,level=6", "-o"])
             .arg(&sam_gz)
             .arg(test_bam_path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .expect("samtools not found");
         assert!(status.success());
         let status = Command::new("tabix")
             .args(["-p", "sam"])
             .arg(&sam_gz)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .expect("tabix not found");
         assert!(status.success());
@@ -274,9 +290,17 @@ fn handles_lines_spanning_bgzf_blocks() {
             .args(["view", "-h", "--output-fmt", "SAM,level=6", "-o"])
             .arg(&sam_gz)
             .arg(test_bam_path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .expect("samtools not found");
-        Command::new("tabix").args(["-p", "sam"]).arg(&sam_gz).status().expect("tabix not found");
+        Command::new("tabix")
+            .args(["-p", "sam"])
+            .arg(&sam_gz)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("tabix not found");
         sam_gz
     };
 

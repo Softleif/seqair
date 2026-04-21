@@ -30,7 +30,7 @@ use seqair::bam::writer::BamWriter;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn make_header() -> BamHeader {
     BamHeader::from_sam_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:100000\n").unwrap()
@@ -191,8 +191,13 @@ fn mm_ml_cram_roundtrip() {
     let ref_path = dir.path().join("ref.fa");
     // Create a minimal reference for CRAM encoding
     std::fs::write(&ref_path, ">chr1\n".to_string() + &"A".repeat(100_000) + "\n").unwrap();
-    let status =
-        Command::new("samtools").arg("faidx").arg(&ref_path).status().expect("samtools faidx");
+    let status = Command::new("samtools")
+        .arg("faidx")
+        .arg(&ref_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("samtools faidx");
     assert!(status.success());
 
     let status = Command::new("samtools")
@@ -201,12 +206,19 @@ fn mm_ml_cram_roundtrip() {
         .arg("-o")
         .arg(&cram_path)
         .arg(&bam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools view -C");
     assert!(status.success());
 
-    let status =
-        Command::new("samtools").arg("index").arg(&cram_path).status().expect("samtools index");
+    let status = Command::new("samtools")
+        .arg("index")
+        .arg(&cram_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("samtools index");
     assert!(status.success());
 
     // Read CRAM with seqair

@@ -23,7 +23,7 @@
 
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn tlen_dir() -> PathBuf {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/htslib/tlen/")).to_path_buf()
@@ -59,12 +59,16 @@ fn sam_to_indexed_bam(dir: &Path, sam_path: &Path) -> PathBuf {
         .args(["sort", "-o"])
         .arg(&bam_path)
         .arg(sam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools not found");
     assert!(status.success(), "samtools sort failed");
     let status = Command::new("samtools")
         .arg("index")
         .arg(&bam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("samtools index failed");
     assert!(status.success(), "samtools index failed");
@@ -138,8 +142,13 @@ fn assert_cram_fields_with_tlen(name: &str) {
     // Copy CRAM and create index
     let cram_copy = tmpdir.path().join(format!("{name}.cram"));
     std::fs::copy(&cram_path, &cram_copy).unwrap();
-    let status =
-        Command::new("samtools").arg("index").arg(&cram_copy).status().expect("samtools index");
+    let status = Command::new("samtools")
+        .arg("index")
+        .arg(&cram_copy)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("samtools index");
     assert!(status.success(), "samtools index failed for {name}");
 
     let mut readers = seqair::reader::Readers::open(&cram_copy, &ref_fasta)
