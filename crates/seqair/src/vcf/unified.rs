@@ -80,7 +80,6 @@ enum WriterInner<W: Write> {
         sample_bufs: Vec<Vec<u8>>,
         n_samples: u32,
         info_tracker: FieldTracker,
-        fmt_tracker: FieldTracker,
     },
     VcfGz {
         bgzf: BgzfWriter<W>,
@@ -90,7 +89,6 @@ enum WriterInner<W: Write> {
         sample_bufs: Vec<Vec<u8>>,
         n_samples: u32,
         info_tracker: FieldTracker,
-        fmt_tracker: FieldTracker,
     },
     Bcf {
         bgzf: BgzfWriter<W>,
@@ -115,7 +113,6 @@ impl<W: Write> Writer<W> {
                 sample_bufs: Vec::new(),
                 n_samples: 0,
                 info_tracker: FieldTracker::default(),
-                fmt_tracker: FieldTracker::default(),
             },
             OutputFormat::VcfGz => WriterInner::VcfGz {
                 bgzf: BgzfWriter::new(inner),
@@ -125,7 +122,6 @@ impl<W: Write> Writer<W> {
                 sample_bufs: Vec::new(),
                 n_samples: 0,
                 info_tracker: FieldTracker::default(),
-                fmt_tracker: FieldTracker::default(),
             },
             OutputFormat::Bcf => WriterInner::Bcf {
                 bgzf: BgzfWriter::new(inner),
@@ -220,17 +216,8 @@ impl<W: Write> Writer<W, Ready> {
                 alleles.begin_record(&mut enc, ContigHandle(contig.tid()), pos, qual)?;
                 EncoderInner::Bcf(enc)
             }
-            WriterInner::Vcf {
-                output,
-                buf,
-                fmt_keys,
-                sample_bufs,
-                n_samples,
-                info_tracker,
-                fmt_tracker,
-            } => {
+            WriterInner::Vcf { output, buf, fmt_keys, sample_bufs, n_samples, info_tracker } => {
                 info_tracker.clear();
-                fmt_tracker.clear();
                 let output = VcfOutput::Plain(output);
                 EncoderInner::Vcf(begin_vcf_record(
                     buf,
@@ -253,10 +240,8 @@ impl<W: Write> Writer<W, Ready> {
                 sample_bufs,
                 n_samples,
                 info_tracker,
-                fmt_tracker,
             } => {
                 info_tracker.clear();
-                fmt_tracker.clear();
                 let output = VcfOutput::Bgzf { bgzf, index: index.as_mut() };
                 EncoderInner::Vcf(begin_vcf_record(
                     buf,

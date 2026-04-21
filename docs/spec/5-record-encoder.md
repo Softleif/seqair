@@ -125,7 +125,7 @@ r[record_encoder.info_state_queries]
 `InfoEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
 
 r[record_encoder.info_dedup]
-If the same INFO field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct INFO field. The deduplication tracker SHOULD reuse its allocation across records.
+If the same INFO field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct INFO field. The replacement field MUST appear after all non-replaced fields (i.e. it moves to the end of the INFO column). The deduplication tracker SHOULD reuse its allocation across records.
 
 ## FormatEncoder Trait
 
@@ -139,7 +139,7 @@ r[record_encoder.format_state_queries]
 `FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
 
 r[record_encoder.format_dedup]
-If the same FORMAT field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct FORMAT field. The deduplication tracker SHOULD reuse its allocation across records.
+If the same FORMAT field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct FORMAT field. The replacement field MUST appear after all non-replaced fields (i.e. it moves to the end of the FORMAT column). The deduplication tracker SHOULD reuse its allocation across records.
 
 ## Emit
 
