@@ -54,12 +54,6 @@ name = "fuzz_csi_index"
 path = "fuzz_targets/fuzz_csi_index.rs"
 doc = false
 
-# BAM CIGAR, sequence, and aux tag parsing
-[[bin]]
-name = "fuzz_bam_fields"
-path = "fuzz_targets/fuzz_bam_fields.rs"
-doc = false
-
 # SAM header text parsing
 [[bin]]
 name = "fuzz_sam_header"
