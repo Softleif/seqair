@@ -110,6 +110,73 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Custom fields and collecting field defs in a struct
+//!
+//! You can "co-locate" the field definitions with custom fields.
+//!
+//! ```rust
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use seqair_types::{Base, Pos1};
+//! use seqair::vcf::{self, EncodeInfo as _};
+//!
+//! // define type
+//! struct Depth(i32);
+//! impl Depth {
+//!     // header metadata
+//!     const DEF: vcf::InfoFieldDef<vcf::Scalar<i32>> = vcf::InfoFieldDef::new(
+//!         "DP", vcf::Number::Count(1), vcf::ValueType::Integer, "Combined depth"
+//!     );
+//! }
+//! impl vcf::EncodeInfo for Depth {
+//!     type Key = vcf::InfoInt;
+//!     // custom encoding logic
+//!     fn encode_info(&self, enc: &mut dyn vcf::InfoEncoder, key: &Self::Key) {
+//!         key.encode(enc, self.0);
+//!     }
+//! }
+//!
+//! // define all fields your app will use
+//! struct MyInfoFields {
+//!   depth: vcf::InfoInt,
+//! }
+//!
+//! // default header setup
+//! let mut builder = vcf::VcfHeader::builder();
+//! let contig =
+//!     builder.register_contig("chr1", vcf::ContigDef { length: Some(1000) })?;
+//! let mut builder = builder.infos();
+//! // register our field
+//! let depth_key = builder.register_info(&Depth::DEF)?;
+//! let header = builder.build()?;
+//! // collect fields
+//! let my_fields = MyInfoFields { depth: depth_key };
+//!
+//! let mut buf = Vec::new();
+//! let writer = vcf::Writer::new(&mut buf, vcf::OutputFormat::Bcf);
+//!
+//! // start by writing header
+//! let mut writer = writer.write_header(&header)?;
+//!
+//! // new record
+//! let mut enc = writer.begin_record(&contig,
+//!     Pos1::new(1).ok_or("invalid position")?,
+//!     &vcf::Alleles::snv(Base::A, Base::T).unwrap(),
+//!     None
+//! )?;
+//! // PASS
+//! let mut enc = enc.filter_pass();
+//! // add custom info field, a bit awkward
+//! my_fields.depth.encode(&mut enc, Depth(30).0);
+//! // or the other way around
+//! Depth(30).encode_info(&mut enc, &my_fields.depth);
+//! // write record
+//! enc.emit()?;
+//!
+//! writer.finish()?;
+//! # assert!(!buf.is_empty());
+//! # Ok(()) }
+//! ```
 
 pub mod alleles;
 pub(crate) mod bcf_encoding;

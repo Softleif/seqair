@@ -10,7 +10,7 @@
 //! type-safe key resolution. Register them on [`VcfHeaderBuilder`](super::header::VcfHeaderBuilder)
 //! to build the header and resolve keys in one step:
 //!
-//! ```
+//! ```rust
 //! use seqair::vcf::{Number, ValueType, VcfHeader, InfoInt, FormatGt};
 //! use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
 //!
