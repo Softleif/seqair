@@ -1177,14 +1177,15 @@ mod tests {
         enc.emit().unwrap();
         writer.finish().unwrap();
 
-        // Verify BCF is parseable by noodles (structural validity)
+        // Verify BCF is parseable by noodles and structurally correct.
+        // Value correctness is validated by format_overwrite_last_value_wins_vcf
+        // and the bcftools round-trip test in tests/vcf_bcftools_roundtrip.rs.
         use noodles::bcf;
+        use noodles::vcf::variant::record::Samples as _;
         let mut reader = bcf::io::Reader::new(std::io::Cursor::new(&buf));
         let header = reader.read_header().unwrap();
         let mut records = reader.record_bufs(&header);
         let rec = records.next().unwrap().unwrap();
-        // Check only one DP FORMAT key is present
-        use noodles::vcf::variant::record::Samples as _;
         let keys: Vec<&str> = rec.samples().column_names(&header).map(|r| r.unwrap()).collect();
         assert_eq!(
             keys.iter().filter(|k| **k == "DP").count(),

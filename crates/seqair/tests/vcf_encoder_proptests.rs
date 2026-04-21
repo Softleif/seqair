@@ -192,4 +192,71 @@ proptest! {
         );
         prop_assert_eq!(records[0].qual_bits, Some(qual.to_bits()), "QUAL");
     }
+
+    // r[verify record_encoder.info_dedup]
+    // r[verify record_encoder.format_dedup]
+    /// Writing INFO/FORMAT fields twice must produce output identical to writing
+    /// only the final value. Tested for both VCF text and BCF binary.
+    #[test]
+    fn dedup_matches_single_write(
+        pos in 1u32..10_000_000,
+        ref_base in arb_base(),
+        alt_base in arb_base(),
+        first_depth in 1i32..1000,
+        final_depth in 1i32..1000,
+        gt_a0 in 0u16..2,
+        gt_a1 in 0u16..2,
+        format_idx in 0usize..3, // which format to test: BCF, VCF, VCF.gz
+    ) {
+        prop_assume!(ref_base != alt_base);
+        let output_format = match format_idx {
+            0 => OutputFormat::Bcf,
+            1 => OutputFormat::Vcf,
+            _ => OutputFormat::VcfGz,
+        };
+        let setup = make_setup();
+        let alleles = Alleles::snv(ref_base, alt_base).unwrap();
+        let gt = Genotype::unphased(gt_a0, gt_a1);
+
+        // Write with dedup: write first_depth then overwrite with final_depth
+        let dedup_output = {
+            let mut output = Vec::new();
+            let writer = Writer::new(&mut output, output_format);
+            let mut writer = writer.write_header(&setup.header).unwrap();
+            let mut enc = writer
+                .begin_record(&setup.contig, Pos1::new(pos).unwrap(), &alleles, Some(30.0))
+                .unwrap()
+                .filter_pass();
+            setup.dp_info.encode(&mut enc, first_depth);
+            setup.dp_info.encode(&mut enc, final_depth); // overwrite
+            let mut enc = enc.begin_samples();
+            setup.gt_fmt.encode(&mut enc, std::slice::from_ref(&gt)).unwrap();
+            setup.dp_fmt.encode(&mut enc, &[first_depth]).unwrap();
+            setup.dp_fmt.encode(&mut enc, &[final_depth]).unwrap(); // overwrite
+            enc.emit().unwrap();
+            writer.finish().unwrap();
+            output
+        };
+
+        // Write without dedup: write final_depth directly
+        let clean_output = {
+            let mut output = Vec::new();
+            let writer = Writer::new(&mut output, output_format);
+            let mut writer = writer.write_header(&setup.header).unwrap();
+            let mut enc = writer
+                .begin_record(&setup.contig, Pos1::new(pos).unwrap(), &alleles, Some(30.0))
+                .unwrap()
+                .filter_pass();
+            setup.dp_info.encode(&mut enc, final_depth);
+            let mut enc = enc.begin_samples();
+            setup.gt_fmt.encode(&mut enc, std::slice::from_ref(&gt)).unwrap();
+            setup.dp_fmt.encode(&mut enc, &[final_depth]).unwrap();
+            enc.emit().unwrap();
+            writer.finish().unwrap();
+            output
+        };
+
+        prop_assert_eq!(dedup_output, clean_output,
+            "dedup output must be byte-identical to single-write output");
+    }
 }

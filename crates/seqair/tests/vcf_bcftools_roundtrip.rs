@@ -375,3 +375,37 @@ fn bcftools_stats_succeeds() {
     // Should contain summary line with record count
     assert!(stats.contains("number of records:"), "bcftools stats output: {stats}");
 }
+
+// r[verify record_encoder.info_dedup]
+// r[verify record_encoder.format_dedup]
+/// Write the same INFO and FORMAT fields twice, verify bcftools reads the
+/// overwritten values (not duplicates, not the first value).
+#[test]
+fn bcftools_dedup_overwrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = make_setup();
+    let bcf_path = write_bcf_file(dir.path(), &setup, |s, w| {
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = w
+            .begin_record(&s.contig, Pos1::new(100).unwrap(), &alleles, Some(99.0))
+            .unwrap()
+            .filter_pass();
+
+        // Write DP=50 then overwrite with DP=100
+        s.dp_info.encode(&mut enc, 50);
+        s.dp_info.encode(&mut enc, 100);
+
+        let mut enc = enc.begin_samples();
+        s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        // Write DP=30 then overwrite with DP=99
+        s.dp_fmt.encode(&mut enc, &[30]).unwrap();
+        s.dp_fmt.encode(&mut enc, &[99]).unwrap();
+        enc.emit().unwrap();
+    });
+
+    // bcftools must be able to read the file (no duplicate key errors)
+    let result = bcftools_query(&bcf_path, "%INFO/DP\t[%DP]\n");
+    let fields: Vec<&str> = result.trim().split('\t').collect();
+    assert_eq!(fields[0], "100", "INFO DP should be the overwritten value");
+    assert_eq!(fields[1], "99", "FORMAT DP should be the overwritten value");
+}

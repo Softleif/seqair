@@ -184,12 +184,13 @@ impl FieldTracker {
         tracing::warn!(field = name, "field encoded twice; overwriting previous value");
         let (start, end) = self.byte_range(idx, buf.len());
         buf.drain(start..end);
-        let mut delta = end - start;
+        let delta = end - start;
         // First field has no `;` prefix, but the next field does — strip it.
+        // The `;` is part of the next entry's tracked range, so removing it
+        // does not increase the offset delta for subsequent entries.
         if idx == 0 && self.entries.len() > idx + 1 {
             let sep_pos = start; // after drain, `;` is now at `start`
             buf.drain(sep_pos..=sep_pos);
-            delta += 1;
         }
         self.remove_and_adjust(idx, delta);
         *info_count = info_count.saturating_sub(1);
@@ -475,5 +476,114 @@ mod tests {
         assert_eq!(enc.pos_0based, 99); // 0-based
         assert_eq!(enc.rlen, 1);
         assert!(shared.len() >= 24, "must have at least 24-byte header");
+    }
+
+    // ── FieldTracker unit tests ─────────────────────────────────────
+
+    #[test]
+    fn field_tracker_remove_duplicate_first_of_three() {
+        // Simulate 3 BCF INFO fields: [AAAA][BBBB][CCCC]
+        let mut buf = b"AAAABBBBCCCC".to_vec();
+        let mut t = FieldTracker::default();
+        t.push(1, 0); // field 1 at offset 0
+        t.push(2, 4); // field 2 at offset 4
+        t.push(3, 8); // field 3 at offset 8
+
+        assert!(t.remove_duplicate(&mut buf, 1, "F1"));
+        assert_eq!(buf, b"BBBBCCCC");
+        // Tracker should have 2 entries with adjusted offsets
+        assert!(t.find(1).is_none());
+        assert_eq!(t.find(2), Some(0));
+        assert_eq!(t.find(3), Some(1));
+    }
+
+    #[test]
+    fn field_tracker_remove_duplicate_middle_of_three() {
+        let mut buf = b"AAAABBBBCCCC".to_vec();
+        let mut t = FieldTracker::default();
+        t.push(1, 0);
+        t.push(2, 4);
+        t.push(3, 8);
+
+        assert!(t.remove_duplicate(&mut buf, 2, "F2"));
+        assert_eq!(buf, b"AAAACCCC");
+        assert_eq!(t.find(1), Some(0));
+        assert!(t.find(2).is_none());
+        assert_eq!(t.find(3), Some(1));
+    }
+
+    #[test]
+    fn field_tracker_remove_duplicate_last_of_three() {
+        let mut buf = b"AAAABBBBCCCC".to_vec();
+        let mut t = FieldTracker::default();
+        t.push(1, 0);
+        t.push(2, 4);
+        t.push(3, 8);
+
+        assert!(t.remove_duplicate(&mut buf, 3, "F3"));
+        assert_eq!(buf, b"AAAABBBB");
+        assert_eq!(t.find(1), Some(0));
+        assert_eq!(t.find(2), Some(1));
+        assert!(t.find(3).is_none());
+    }
+
+    #[test]
+    fn field_tracker_remove_duplicate_only_entry() {
+        let mut buf = b"AAAA".to_vec();
+        let mut t = FieldTracker::default();
+        t.push(1, 0);
+
+        assert!(t.remove_duplicate(&mut buf, 1, "F1"));
+        assert!(buf.is_empty());
+        assert!(t.find(1).is_none());
+    }
+
+    #[test]
+    fn field_tracker_no_duplicate_returns_false() {
+        let mut buf = b"AAAA".to_vec();
+        let mut t = FieldTracker::default();
+        t.push(1, 0);
+
+        assert!(!t.remove_duplicate(&mut buf, 99, "missing"));
+        assert_eq!(buf, b"AAAA"); // unchanged
+    }
+
+    #[test]
+    fn field_tracker_vcf_remove_first_strips_separator() {
+        // VCF: "DP=50;BQ=30" — DP at 0, ;BQ at 5
+        let mut buf = b"DP=50;BQ=30".to_vec();
+        let mut t = FieldTracker::default();
+        t.push(1, 0); // DP starts at 0
+        t.push(2, 5); // ;BQ starts at 5
+        let mut count = 2u16;
+
+        assert!(t.remove_duplicate_vcf(&mut buf, &mut count, 1, "DP"));
+        assert_eq!(buf, b"BQ=30");
+        assert_eq!(count, 1);
+        assert!(t.find(1).is_none());
+        assert_eq!(t.find(2), Some(0));
+    }
+
+    #[test]
+    fn field_tracker_vcf_remove_last() {
+        let mut buf = b"DP=50;BQ=30".to_vec();
+        let mut t = FieldTracker::default();
+        t.push(1, 0);
+        t.push(2, 5);
+        let mut count = 2u16;
+
+        assert!(t.remove_duplicate_vcf(&mut buf, &mut count, 2, "BQ"));
+        assert_eq!(buf, b"DP=50");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn field_tracker_clear_resets() {
+        let mut t = FieldTracker::default();
+        t.push(1, 0);
+        t.push(2, 4);
+        t.clear();
+        assert!(t.find(1).is_none());
+        assert!(t.find(2).is_none());
     }
 }
