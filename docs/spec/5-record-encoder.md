@@ -124,6 +124,9 @@ INFO methods (`info_int`, `info_float`, `info_ints`, `info_floats`, `info_flag`,
 r[record_encoder.info_state_queries]
 `InfoEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
 
+r[record_encoder.info_dedup]
+If the same INFO field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct INFO field. The deduplication tracker SHOULD reuse its allocation across records.
+
 ## FormatEncoder Trait
 
 r[record_encoder.format_encoder]
@@ -134,6 +137,9 @@ FORMAT methods (`format_gt`, `format_int`, `format_float`) MUST accept a `&Field
 
 r[record_encoder.format_state_queries]
 `FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
+
+r[record_encoder.format_dedup]
+If the same FORMAT field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct FORMAT field. The deduplication tracker SHOULD reuse its allocation across records.
 
 ## Emit
 

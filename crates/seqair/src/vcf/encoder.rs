@@ -103,6 +103,100 @@ impl ContigHandle {
     }
 }
 
+// ── Field deduplication tracker ─────────────────────────────────────────
+
+// r[impl record_encoder.info_dedup]
+// r[impl record_encoder.format_dedup]
+/// Tracks written fields by `dict_idx` to detect duplicates within a record.
+/// Reused across records: cleared per record, allocation retained.
+#[derive(Default)]
+pub(crate) struct FieldTracker {
+    /// `(dict_idx, byte_offset_in_buffer)` in write order.
+    entries: Vec<(u32, usize)>,
+}
+
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "idx is always from find() which guarantees it is in bounds; \
+              delta is always ≤ buf.len() since it came from a drain range"
+)]
+impl FieldTracker {
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Returns `Some(index)` if `dict_idx` was already recorded.
+    fn find(&self, dict_idx: u32) -> Option<usize> {
+        self.entries.iter().position(|(id, _)| *id == dict_idx)
+    }
+
+    /// Byte range of the entry at `idx`. Uses `buf_len` as the end for the last entry.
+    fn byte_range(&self, idx: usize, buf_len: usize) -> (usize, usize) {
+        let start = self.entries[idx].1;
+        let end = self.entries.get(idx + 1).map_or(buf_len, |e| e.1);
+        (start, end)
+    }
+
+    /// Remove entry at `idx` and subtract `delta` from all subsequent offsets.
+    fn remove_and_adjust(&mut self, idx: usize, delta: usize) {
+        self.entries.remove(idx);
+        for entry in &mut self.entries[idx..] {
+            entry.1 -= delta;
+        }
+    }
+
+    pub(crate) fn push(&mut self, dict_idx: u32, offset: usize) {
+        self.entries.push((dict_idx, offset));
+    }
+
+    /// If `dict_idx` was previously written, remove its bytes from `buf` and
+    /// return `true`. The caller should skip incrementing the field count.
+    pub(crate) fn remove_duplicate(
+        &mut self,
+        buf: &mut Vec<u8>,
+        dict_idx: u32,
+        name: &str,
+    ) -> bool {
+        let Some(idx) = self.find(dict_idx) else {
+            return false;
+        };
+        tracing::warn!(field = name, "field encoded twice; overwriting previous value");
+        let (start, end) = self.byte_range(idx, buf.len());
+        buf.drain(start..end);
+        self.remove_and_adjust(idx, end - start);
+        true
+    }
+
+    /// Like [`remove_duplicate`](Self::remove_duplicate) but also handles the
+    /// VCF text `;` separator: when the first field is removed, the next field's
+    /// leading `;` must be stripped.
+    pub(crate) fn remove_duplicate_vcf(
+        &mut self,
+        buf: &mut Vec<u8>,
+        info_count: &mut u16,
+        dict_idx: u32,
+        name: &str,
+    ) -> bool {
+        let Some(idx) = self.find(dict_idx) else {
+            return false;
+        };
+        tracing::warn!(field = name, "field encoded twice; overwriting previous value");
+        let (start, end) = self.byte_range(idx, buf.len());
+        buf.drain(start..end);
+        let mut delta = end - start;
+        // First field has no `;` prefix, but the next field does — strip it.
+        if idx == 0 && self.entries.len() > idx + 1 {
+            let sep_pos = start; // after drain, `;` is now at `start`
+            buf.drain(sep_pos..=sep_pos);
+            delta += 1;
+        }
+        self.remove_and_adjust(idx, delta);
+        *info_count = info_count.saturating_sub(1);
+        true
+    }
+}
+
 // ── BcfRecordEncoder ────────────────────────────────────────────────────
 
 /// Zero-allocation BCF record encoder. Borrows the writer's buffers.
@@ -122,6 +216,9 @@ pub struct BcfRecordEncoder<'a> {
     pub(crate) tid: i32,
     pub(crate) pos_0based: i32,
     pub(crate) rlen: i32,
+    // Dedup trackers (borrowed from WriterInner for cross-record reuse)
+    pub(crate) info_tracker: &'a mut FieldTracker,
+    pub(crate) fmt_tracker: &'a mut FieldTracker,
 }
 
 // r[impl bcf_writer.bgzf_blocks]
@@ -313,6 +410,8 @@ mod tests {
         shared: &'a mut Vec<u8>,
         indiv: &'a mut Vec<u8>,
         bgzf_buf: &'a mut TestBgzf,
+        info_tracker: &'a mut FieldTracker,
+        fmt_tracker: &'a mut FieldTracker,
     ) -> BcfRecordEncoder<'a> {
         BcfRecordEncoder {
             shared_buf: shared,
@@ -327,6 +426,8 @@ mod tests {
             tid: 0,
             pos_0based: 0,
             rlen: 0,
+            info_tracker,
+            fmt_tracker,
         }
     }
 
@@ -360,7 +461,9 @@ mod tests {
         let mut shared = Vec::new();
         let mut indiv = Vec::new();
         let mut bgzf = TestBgzf::new();
-        let mut enc = test_encoder(&mut shared, &mut indiv, &mut bgzf);
+        let mut it = FieldTracker::default();
+        let mut ft = FieldTracker::default();
+        let mut enc = test_encoder(&mut shared, &mut indiv, &mut bgzf, &mut it, &mut ft);
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let pos = Pos1::new(100).unwrap();

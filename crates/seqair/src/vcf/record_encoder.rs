@@ -968,4 +968,228 @@ mod tests {
         );
         assert!(result.is_err());
     }
+
+    // ── INFO dedup tests ────────────────────────────────────────────
+
+    // r[verify record_encoder.info_dedup]
+    #[test]
+    fn info_overwrite_last_value_wins_vcf() {
+        let setup = TestSetup::new();
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = writer
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, 50);
+        setup.dp_info.encode(&mut enc, 100); // overwrite
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
+        let info_col = data_line.split('\t').nth(7).unwrap();
+        assert_eq!(info_col, "DP=100", "duplicate INFO should keep only the last value");
+    }
+
+    // r[verify record_encoder.info_dedup]
+    #[test]
+    fn info_overwrite_first_of_multiple_vcf() {
+        let setup = TestSetup::new();
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = writer
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, 50);
+        setup.bq_info.encode(&mut enc, 35.5);
+        setup.dp_info.encode(&mut enc, 100); // overwrite first
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
+        let info_col = data_line.split('\t').nth(7).unwrap();
+        assert_eq!(info_col, "BQ=35.5;DP=100", "overwritten field should appear last");
+    }
+
+    // r[verify record_encoder.info_dedup]
+    #[test]
+    fn info_overwrite_middle_vcf() {
+        let setup = TestSetup::new();
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = writer
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, 50);
+        setup.bq_info.encode(&mut enc, 35.5);
+        setup.db_flag.encode(&mut enc);
+        setup.bq_info.encode(&mut enc, 99.0); // overwrite middle
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
+        let info_col = data_line.split('\t').nth(7).unwrap();
+        assert_eq!(info_col, "DP=50;DB;BQ=99", "overwritten middle field should move to end");
+    }
+
+    // r[verify record_encoder.info_dedup]
+    #[test]
+    fn info_overwrite_last_value_wins_bcf() {
+        let setup = TestSetup::new();
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = writer
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, 50);
+        setup.bq_info.encode(&mut enc, 35.5);
+        setup.dp_info.encode(&mut enc, 100); // overwrite
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+
+        // Parse with noodles to verify the BCF is valid and has the correct value
+        use noodles::bcf;
+        use noodles::vcf::variant::record_buf::info::field::Value as InfoBufValue;
+        let mut reader = bcf::io::Reader::new(std::io::Cursor::new(&buf));
+        let header = reader.read_header().unwrap();
+        let mut records = reader.record_bufs(&header);
+        let rec = records.next().unwrap().unwrap();
+        let dp =
+            rec.info().get("DP").expect("DP should exist").expect("DP value should not be None");
+        assert!(
+            matches!(dp, &InfoBufValue::Integer(100)),
+            "BCF DP should be overwritten to 100, got {dp:?}"
+        );
+    }
+
+    // r[verify record_encoder.info_dedup]
+    #[test]
+    fn info_dedup_tracker_resets_between_records() {
+        let setup = TestSetup::new();
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+
+        // Record 1: write DP=50
+        let mut enc = writer
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, 50);
+        enc.emit().unwrap();
+
+        // Record 2: write DP=100 — should NOT be treated as a duplicate
+        let mut enc = writer
+            .begin_record(&setup.contig, Pos1::new(200).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, 100);
+        enc.emit().unwrap();
+
+        writer.finish().unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let data_lines: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(data_lines.len(), 2);
+        assert_eq!(data_lines[0].split('\t').nth(7).unwrap(), "DP=50");
+        assert_eq!(data_lines[1].split('\t').nth(7).unwrap(), "DP=100");
+    }
+
+    // ── FORMAT dedup tests ──────────────────────────────────────────
+
+    // r[verify record_encoder.format_dedup]
+    #[test]
+    fn format_overwrite_last_value_wins_vcf() {
+        let setup = TestSetup::new(); // 1 sample
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        let mut enc = enc.begin_samples();
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[45]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[99]).unwrap(); // overwrite
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
+        let cols: Vec<&str> = data_line.split('\t').collect();
+        assert_eq!(cols[8], "GT:DP", "FORMAT column should list each key once");
+        assert_eq!(cols[9], "0/1:99", "overwritten FORMAT DP should be 99");
+    }
+
+    // r[verify record_encoder.format_dedup]
+    #[test]
+    fn format_overwrite_first_of_multiple_vcf() {
+        let setup = TestSetup::new(); // 1 sample
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        let mut enc = enc.begin_samples();
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[45]).unwrap();
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(1, 1)]).unwrap(); // overwrite first
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
+        let cols: Vec<&str> = data_line.split('\t').collect();
+        assert_eq!(cols[8], "DP:GT", "overwritten GT should move to end of FORMAT keys");
+        assert_eq!(cols[9], "45:1/1", "sample data should match reordered keys");
+    }
+
+    // r[verify record_encoder.format_dedup]
+    #[test]
+    fn format_overwrite_bcf() {
+        let setup = TestSetup::new(); // 1 sample
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        let mut enc = enc.begin_samples();
+        setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[45]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[99]).unwrap(); // overwrite
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+
+        // Verify BCF is parseable by noodles (structural validity)
+        use noodles::bcf;
+        let mut reader = bcf::io::Reader::new(std::io::Cursor::new(&buf));
+        let header = reader.read_header().unwrap();
+        let mut records = reader.record_bufs(&header);
+        let rec = records.next().unwrap().unwrap();
+        // Check only one DP FORMAT key is present
+        use noodles::vcf::variant::record::Samples as _;
+        let keys: Vec<&str> = rec.samples().column_names(&header).map(|r| r.unwrap()).collect();
+        assert_eq!(
+            keys.iter().filter(|k| **k == "DP").count(),
+            1,
+            "BCF should have exactly one DP FORMAT key"
+        );
+    }
 }

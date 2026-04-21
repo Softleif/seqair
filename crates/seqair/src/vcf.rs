@@ -166,9 +166,9 @@
 //! )?;
 //! // PASS
 //! let mut enc = enc.filter_pass();
-//! // add custom info field, a bit awkward
+//! // add custom info field
 //! my_fields.depth.encode(&mut enc, Depth(30).0);
-//! // or the other way around
+//! // …or like this (btw, setting the field twice overwrites it)
 //! Depth(30).encode_info(&mut enc, &my_fields.depth);
 //! // write record
 //! enc.emit()?;

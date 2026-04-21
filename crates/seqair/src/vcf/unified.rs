@@ -3,7 +3,7 @@
 use super::OutputFormat;
 use super::alleles::Alleles;
 use super::bcf_encoding::*;
-use super::encoder::{BcfRecordEncoder, BcfValue, BgzfWrite, ContigHandle};
+use super::encoder::{BcfRecordEncoder, BcfValue, BgzfWrite, ContigHandle, FieldTracker};
 use super::error::VcfError;
 use super::header::VcfHeader;
 use super::record::Genotype;
@@ -79,6 +79,8 @@ enum WriterInner<W: Write> {
         fmt_keys: Vec<SmolStr>,
         sample_bufs: Vec<Vec<u8>>,
         n_samples: u32,
+        info_tracker: FieldTracker,
+        fmt_tracker: FieldTracker,
     },
     VcfGz {
         bgzf: BgzfWriter<W>,
@@ -87,6 +89,8 @@ enum WriterInner<W: Write> {
         fmt_keys: Vec<SmolStr>,
         sample_bufs: Vec<Vec<u8>>,
         n_samples: u32,
+        info_tracker: FieldTracker,
+        fmt_tracker: FieldTracker,
     },
     Bcf {
         bgzf: BgzfWriter<W>,
@@ -94,6 +98,8 @@ enum WriterInner<W: Write> {
         shared_buf: Vec<u8>,
         indiv_buf: Vec<u8>,
         n_samples: u32,
+        info_tracker: FieldTracker,
+        fmt_tracker: FieldTracker,
     },
 }
 
@@ -108,6 +114,8 @@ impl<W: Write> Writer<W> {
                 fmt_keys: Vec::with_capacity(8),
                 sample_bufs: Vec::new(),
                 n_samples: 0,
+                info_tracker: FieldTracker::default(),
+                fmt_tracker: FieldTracker::default(),
             },
             OutputFormat::VcfGz => WriterInner::VcfGz {
                 bgzf: BgzfWriter::new(inner),
@@ -116,6 +124,8 @@ impl<W: Write> Writer<W> {
                 fmt_keys: Vec::with_capacity(8),
                 sample_bufs: Vec::new(),
                 n_samples: 0,
+                info_tracker: FieldTracker::default(),
+                fmt_tracker: FieldTracker::default(),
             },
             OutputFormat::Bcf => WriterInner::Bcf {
                 bgzf: BgzfWriter::new(inner),
@@ -123,6 +133,8 @@ impl<W: Write> Writer<W> {
                 shared_buf: Vec::with_capacity(4096),
                 indiv_buf: Vec::with_capacity(4096),
                 n_samples: 0,
+                info_tracker: FieldTracker::default(),
+                fmt_tracker: FieldTracker::default(),
             },
         };
         Writer { inner, _state: PhantomData }
@@ -177,7 +189,17 @@ impl<W: Write> Writer<W, Ready> {
         qual: Option<f32>,
     ) -> Result<RecordEncoder<'_, Begun>, VcfError> {
         let inner = match &mut self.inner {
-            WriterInner::Bcf { bgzf, index, shared_buf, indiv_buf, n_samples } => {
+            WriterInner::Bcf {
+                bgzf,
+                index,
+                shared_buf,
+                indiv_buf,
+                n_samples,
+                info_tracker,
+                fmt_tracker,
+            } => {
+                info_tracker.clear();
+                fmt_tracker.clear();
                 // r[impl bcf_writer.buffer_reuse]
                 let mut enc = BcfRecordEncoder {
                     shared_buf,
@@ -192,11 +214,23 @@ impl<W: Write> Writer<W, Ready> {
                     tid: 0,
                     pos_0based: 0,
                     rlen: 0,
+                    info_tracker,
+                    fmt_tracker,
                 };
                 alleles.begin_record(&mut enc, ContigHandle(contig.tid()), pos, qual)?;
                 EncoderInner::Bcf(enc)
             }
-            WriterInner::Vcf { output, buf, fmt_keys, sample_bufs, n_samples } => {
+            WriterInner::Vcf {
+                output,
+                buf,
+                fmt_keys,
+                sample_bufs,
+                n_samples,
+                info_tracker,
+                fmt_tracker,
+            } => {
+                info_tracker.clear();
+                fmt_tracker.clear();
                 let output = VcfOutput::Plain(output);
                 EncoderInner::Vcf(begin_vcf_record(
                     buf,
@@ -208,9 +242,21 @@ impl<W: Write> Writer<W, Ready> {
                     alleles,
                     qual,
                     *n_samples,
+                    info_tracker,
                 )?)
             }
-            WriterInner::VcfGz { bgzf, index, buf, fmt_keys, sample_bufs, n_samples } => {
+            WriterInner::VcfGz {
+                bgzf,
+                index,
+                buf,
+                fmt_keys,
+                sample_bufs,
+                n_samples,
+                info_tracker,
+                fmt_tracker,
+            } => {
+                info_tracker.clear();
+                fmt_tracker.clear();
                 let output = VcfOutput::Bgzf { bgzf, index: index.as_mut() };
                 EncoderInner::Vcf(begin_vcf_record(
                     buf,
@@ -222,6 +268,7 @@ impl<W: Write> Writer<W, Ready> {
                     alleles,
                     qual,
                     *n_samples,
+                    info_tracker,
                 )?)
             }
         };
@@ -311,6 +358,7 @@ struct VcfEncoderFields<'a> {
     rlen: u32,
     n_samples: u32,
     filter_written: bool,
+    info_tracker: &'a mut FieldTracker,
 }
 
 // r[impl record_encoder.buffer_reuse]
@@ -326,6 +374,7 @@ fn begin_vcf_record<'a>(
     alleles: &Alleles,
     qual: Option<f32>,
     n_samples: u32,
+    info_tracker: &'a mut FieldTracker,
 ) -> Result<VcfEncoderFields<'a>, VcfError> {
     buf.clear();
     fmt_keys.clear();
@@ -393,6 +442,7 @@ fn begin_vcf_record<'a>(
         rlen,
         n_samples,
         filter_written: false,
+        info_tracker,
     })
 }
 
@@ -508,6 +558,132 @@ impl<'a> RecordEncoder<'a, Begun> {
     }
 }
 
+// ── Field dedup helpers ───────────────────────────────────────────────
+
+// r[impl record_encoder.info_dedup]
+impl VcfEncoderFields<'_> {
+    /// Handle duplicate removal and separator, returning the buffer offset for
+    /// the caller to start writing key=value bytes.
+    fn prepare_info_field(&mut self, id: &FieldId) {
+        self.info_tracker.remove_duplicate_vcf(
+            self.buf,
+            &mut self.info_count,
+            id.dict_idx(),
+            id.name(),
+        );
+        if !self.filter_written {
+            self.filter_written = true;
+            self.buf.extend_from_slice(b".\t");
+        }
+        let start = self.buf.len();
+        if self.info_count > 0 {
+            self.buf.push(b';');
+        }
+        self.info_count = self.info_count.saturating_add(1);
+        self.info_tracker.push(id.dict_idx(), start);
+    }
+}
+
+// r[impl record_encoder.info_dedup]
+impl BcfRecordEncoder<'_> {
+    /// Handle duplicate removal, track offset. Returns `true` if replacing
+    /// (caller should skip incrementing `n_info`).
+    fn prepare_info_field(&mut self, id: &FieldId) -> bool {
+        let replacing =
+            self.info_tracker.remove_duplicate(self.shared_buf, id.dict_idx(), id.name());
+        self.info_tracker.push(id.dict_idx(), self.shared_buf.len());
+        replacing
+    }
+
+    // r[impl record_encoder.format_dedup]
+    fn prepare_format_field(&mut self, id: &FieldId) -> bool {
+        let replacing = self.fmt_tracker.remove_duplicate(self.indiv_buf, id.dict_idx(), id.name());
+        self.fmt_tracker.push(id.dict_idx(), self.indiv_buf.len());
+        replacing
+    }
+}
+
+// r[impl record_encoder.format_dedup]
+impl VcfEncoderFields<'_> {
+    /// Handle FORMAT duplicate removal. Removes the previous key from `fmt_keys`
+    /// and the corresponding colon-delimited data from each sample buffer.
+    fn prepare_format_field(&mut self, id: &FieldId) {
+        if let Some(idx) = self.fmt_keys.iter().position(|k| k.as_str() == id.name()) {
+            tracing::warn!(
+                field = id.name(),
+                "FORMAT field encoded twice; overwriting previous value"
+            );
+            let total = self.fmt_keys.len();
+            self.fmt_keys.remove(idx);
+            for buf in self.sample_bufs.iter_mut() {
+                remove_colon_delimited_field(buf, idx, total);
+            }
+        }
+        // Normal begin_format_field logic
+        if !self.fmt_keys.is_empty() {
+            for buf in self.sample_bufs.iter_mut() {
+                buf.push(b':');
+            }
+        }
+        self.fmt_keys.push(id.name().into());
+    }
+}
+
+/// Remove the `field_idx`-th colon-delimited field from `buf`.
+///
+/// `total_fields` is the field count _before_ removal. For a buffer like
+/// `"GT:DP:GQ"` with `total_fields=3`, removing field 1 yields `"GT:GQ"`.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "field_idx < total_fields guaranteed by caller; \
+              +1/-1 are safe because non-first fields always have a preceding ':'"
+)]
+fn remove_colon_delimited_field(buf: &mut Vec<u8>, field_idx: usize, total_fields: usize) {
+    if total_fields == 0 {
+        return;
+    }
+    // Walk to the target field by counting ':' separators.
+    let mut current = 0;
+    let mut start = 0;
+    for i in 0..buf.len() {
+        if buf[i] == b':' {
+            if current == field_idx {
+                // Field is at [start..i].
+                drain_delimited(buf, start, i, field_idx, total_fields);
+                return;
+            }
+            current += 1;
+            start = i + 1;
+        }
+    }
+    // Target is the last field: [start..buf.len()].
+    if current == field_idx {
+        drain_delimited(buf, start, buf.len(), field_idx, total_fields);
+    }
+}
+
+/// Drain bytes for one colon-delimited field including exactly one separator.
+#[allow(clippy::arithmetic_side_effects, reason = "see remove_colon_delimited_field")]
+fn drain_delimited(
+    buf: &mut Vec<u8>,
+    field_start: usize,
+    field_end: usize,
+    field_idx: usize,
+    total_fields: usize,
+) {
+    let range = if total_fields == 1 {
+        field_start..field_end
+    } else if field_idx == 0 {
+        // First of multiple: remove field + following ':'
+        field_start..field_end + 1
+    } else {
+        // Non-first: remove preceding ':' + field
+        field_start - 1..field_end
+    };
+    buf.drain(range);
+}
+
 // ── Filtered: InfoEncoder ──────────────────────────────────────────────
 
 // r[impl record_encoder.info_encoder]
@@ -517,16 +693,19 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     fn info_int(&mut self, id: &FieldId, value: i32) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_info_field(id);
                 // r[impl bcf_writer.smallest_int_type]
                 let tc = value.scalar_type_code();
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_type_byte(enc.shared_buf, 1, tc);
                 value.encode_bcf_as(enc.shared_buf, tc);
                 // r[impl bcf_encoder.info_counting]
-                enc.n_info = enc.n_info.saturating_add(1); // saturates at u16::MAX; real VCFs have <100 INFO fields
+                if !replacing {
+                    enc.n_info = enc.n_info.saturating_add(1);
+                }
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_info_separator(vcf);
+                vcf.prepare_info_field(id);
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 // r[impl vcf_writer.integer_format]
@@ -538,16 +717,19 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     fn info_float(&mut self, id: &FieldId, value: f32) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_info_field(id);
                 // r[impl bcf_writer.smallest_int_type]
                 let tc = value.scalar_type_code();
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_type_byte(enc.shared_buf, 1, tc);
                 value.encode_bcf_as(enc.shared_buf, tc);
                 // r[impl bcf_encoder.info_counting]
-                enc.n_info = enc.n_info.saturating_add(1);
+                if !replacing {
+                    enc.n_info = enc.n_info.saturating_add(1);
+                }
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_info_separator(vcf);
+                vcf.prepare_info_field(id);
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 // r[impl vcf_writer.float_precision]
@@ -559,13 +741,16 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     fn info_ints(&mut self, id: &FieldId, values: &[i32]) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_info_field(id);
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_array_values(enc.shared_buf, values);
                 // r[impl bcf_encoder.info_counting]
-                enc.n_info = enc.n_info.saturating_add(1);
+                if !replacing {
+                    enc.n_info = enc.n_info.saturating_add(1);
+                }
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_info_separator(vcf);
+                vcf.prepare_info_field(id);
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 // r[impl vcf_writer.integer_format]
@@ -582,13 +767,16 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     fn info_floats(&mut self, id: &FieldId, values: &[f32]) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_info_field(id);
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_array_values(enc.shared_buf, values);
                 // r[impl bcf_encoder.info_counting]
-                enc.n_info = enc.n_info.saturating_add(1);
+                if !replacing {
+                    enc.n_info = enc.n_info.saturating_add(1);
+                }
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_info_separator(vcf);
+                vcf.prepare_info_field(id);
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 for (i, v) in values.iter().enumerate() {
@@ -605,14 +793,17 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     fn info_flag(&mut self, id: &FieldId) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_info_field(id);
                 // r[impl bcf_writer.flag_encoding]
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_type_byte(enc.shared_buf, 0, BCF_BT_NULL);
                 // r[impl bcf_encoder.info_counting]
-                enc.n_info = enc.n_info.saturating_add(1);
+                if !replacing {
+                    enc.n_info = enc.n_info.saturating_add(1);
+                }
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_info_separator(vcf);
+                vcf.prepare_info_field(id);
                 vcf.buf.extend_from_slice(id.name().as_bytes());
             }
         }
@@ -620,13 +811,16 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     fn info_string(&mut self, id: &FieldId, value: &str) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_info_field(id);
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_typed_string(enc.shared_buf, value.as_bytes());
                 // r[impl bcf_encoder.info_counting]
-                enc.n_info = enc.n_info.saturating_add(1);
+                if !replacing {
+                    enc.n_info = enc.n_info.saturating_add(1);
+                }
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_info_separator(vcf);
+                vcf.prepare_info_field(id);
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 // r[impl vcf_writer.percent_encoding]
@@ -637,6 +831,7 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_info_field(id);
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 // r[impl bcf_writer.missing_sentinels]
                 let typ = smallest_int_type_iter(values.iter().filter_map(|v| *v));
@@ -645,10 +840,12 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                     encode_int_value_or_missing(enc.shared_buf, v, typ);
                 }
                 // r[impl bcf_encoder.info_counting]
-                enc.n_info = enc.n_info.saturating_add(1);
+                if !replacing {
+                    enc.n_info = enc.n_info.saturating_add(1);
+                }
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_info_separator(vcf);
+                vcf.prepare_info_field(id);
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 let mut b = itoa::Buffer::new();
@@ -729,6 +926,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
 
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_format_field(id);
                 // r[impl bcf_writer.gt_encoding]
                 // r[impl bcf_writer.indiv_field_major]
                 // r[impl bcf_encoder.format_field_major]
@@ -759,11 +957,13 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         encode_int_as(enc.indiv_buf, encoded, typ);
                     }
                 }
-                enc.n_fmt = enc.n_fmt.saturating_add(1);
+                if !replacing {
+                    enc.n_fmt = enc.n_fmt.saturating_add(1);
+                }
             }
             EncoderInner::Vcf(vcf) => {
                 // r[impl vcf_writer.genotype_serialization]
-                vcf_begin_format_field(vcf, id);
+                vcf.prepare_format_field(id);
                 let mut b = itoa::Buffer::new();
                 for (si, gt) in gts.iter().enumerate() {
                     for (i, allele) in gt.alleles.iter().enumerate() {
@@ -787,6 +987,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     fn format_int(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError> {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_format_field(id);
                 // r[impl bcf_writer.smallest_int_type]
                 // r[impl bcf_writer.indiv_field_major]
                 let tc = smallest_int_type(values);
@@ -795,10 +996,12 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 for &v in values {
                     v.encode_bcf_as(enc.indiv_buf, tc);
                 }
-                enc.n_fmt = enc.n_fmt.saturating_add(1);
+                if !replacing {
+                    enc.n_fmt = enc.n_fmt.saturating_add(1);
+                }
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_begin_format_field(vcf, id);
+                vcf.prepare_format_field(id);
                 // r[impl vcf_writer.integer_format]
                 let mut b = itoa::Buffer::new();
                 for (i, &v) in values.iter().enumerate() {
@@ -811,6 +1014,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     fn format_float(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError> {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_format_field(id);
                 // r[impl bcf_writer.smallest_int_type]
                 // r[impl bcf_writer.indiv_field_major]
                 // f32::scalar_type_code() always returns BCF_BT_FLOAT regardless of value,
@@ -822,10 +1026,12 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 for &v in values {
                     v.encode_bcf_as(enc.indiv_buf, tc);
                 }
-                enc.n_fmt = enc.n_fmt.saturating_add(1);
+                if !replacing {
+                    enc.n_fmt = enc.n_fmt.saturating_add(1);
+                }
             }
             EncoderInner::Vcf(vcf) => {
-                vcf_begin_format_field(vcf, id);
+                vcf.prepare_format_field(id);
                 // r[impl vcf_writer.float_precision]
                 for (i, &v) in values.iter().enumerate() {
                     write_float_g(&mut vcf.sample_bufs[i], v)
@@ -906,28 +1112,6 @@ fn vcf_emit(vcf: &mut VcfEncoderFields<'_>) -> Result<(), VcfError> {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
-
-// r[impl vcf_writer.info_serialization]
-fn vcf_info_separator(vcf: &mut VcfEncoderFields<'_>) {
-    if !vcf.filter_written {
-        vcf.filter_written = true;
-        vcf.buf.extend_from_slice(b".\t");
-    }
-    if vcf.info_count > 0 {
-        vcf.buf.push(b';');
-    }
-    vcf.info_count = vcf.info_count.saturating_add(1);
-}
-
-// r[impl vcf_writer.format_serialization]
-fn vcf_begin_format_field(vcf: &mut VcfEncoderFields<'_>, id: &FieldId) {
-    if !vcf.fmt_keys.is_empty() {
-        for buf in vcf.sample_bufs.iter_mut() {
-            buf.push(b':');
-        }
-    }
-    vcf.fmt_keys.push(id.name().into());
-}
 
 fn encode_array_values<T: BcfValue>(buf: &mut Vec<u8>, values: &[T]) {
     let mut type_code = 0u8;
