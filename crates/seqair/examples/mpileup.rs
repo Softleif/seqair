@@ -8,14 +8,18 @@
 use anyhow::Context;
 use clap::Parser as _;
 use seqair::bam::pileup::{PileupEngine, PileupOp, RefSeq};
-use seqair::bam::{Pos0, RecordStore};
-use seqair::fasta::IndexedFastaReader;
 use seqair::reader::IndexedReader;
-use seqair_types::Base;
+use seqair::{
+    bam::{Pos0, RecordStore},
+    fasta::IndexedFastaReader,
+};
+use seqair_types::{Base, SmolStr};
 use std::collections::HashMap;
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
-use std::rc::Rc;
+use std::{
+    io::{BufWriter, Write},
+    path::PathBuf,
+    rc::Rc,
+};
 
 /// seqair mpileup — a simple pileup viewer
 ///
@@ -81,19 +85,37 @@ fn main() -> anyhow::Result<()> {
             .collect()
     };
 
+    // Window size for streaming pileup.  1 MiB of genomic positions keeps
+    // the RegionBuf well under 256 MiB even at very high coverage, while
+    // being large enough that index-query overhead is negligible.
+    const WINDOW: u32 = 1_000_000;
+
+    // Pre-compute all windows so the header borrow is released before the
+    // fetch loop (fetch_into needs &mut reader).
+    let mut windows: Vec<(u32, SmolStr, u32, u32)> = Vec::new();
+    for (tid, region_start, region_end) in &regions {
+        let contig_name: SmolStr = reader.header().target_name(*tid).context("unknown tid")?.into();
+        let mut ws = *region_start;
+        while ws < *region_end {
+            let we = (*region_end).min(ws.saturating_add(WINDOW));
+            windows.push((*tid, contig_name.clone(), ws, we));
+            ws = we;
+        }
+    }
+
     let mut store = Some(RecordStore::new());
     // Cache: record_idx → last query-consuming ref position (exclusive, 0-based).
     // Only used in samtools-compat mode.
     let mut query_end_cache: HashMap<u32, u32> = HashMap::new();
 
-    for (tid, start, end) in regions {
-        let start_pos = Pos0::new(start).context("invalid start position")?;
-        let end_pos = Pos0::new(end).context("invalid end position")?;
+    for (tid, contig_name, win_start, win_end) in &windows {
+        let start_pos = Pos0::new(*win_start).context("invalid start position")?;
+        let end_pos = Pos0::new(*win_end).context("invalid end position")?;
 
         let mut s = store.take().unwrap_or_default();
         reader
-            .fetch_into(tid, start_pos, end_pos, &mut s)
-            .with_context(|| format!("fetch failed for tid={tid} {start}-{end}"))?;
+            .fetch_into(*tid, start_pos, end_pos, &mut s)
+            .with_context(|| format!("fetch failed for {contig_name}:{win_start}-{win_end}"))?;
 
         // Pre-compute query-end positions for samtools-compat mode.
         if args.samtools_compat {
@@ -106,7 +128,6 @@ fn main() -> anyhow::Result<()> {
         }
 
         let ref_seq = if let Some(ref mut fasta) = fasta {
-            let contig_name = reader.header().target_name(tid).context("unknown tid")?;
             let raw = fasta
                 .fetch_seq(contig_name, start_pos, end_pos)
                 .with_context(|| format!("could not fetch reference for {contig_name}"))?;
@@ -120,8 +141,6 @@ fn main() -> anyhow::Result<()> {
         if let Some(rs) = ref_seq {
             engine.set_reference_seq(rs);
         }
-
-        let contig_name = reader.header().target_name(tid).context("unknown tid")?;
 
         while let Some(column) = engine.next() {
             let pos = column.pos();
