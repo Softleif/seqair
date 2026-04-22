@@ -13,7 +13,7 @@ use seqair::{
     bam::{Pos0, RecordStore},
     fasta::IndexedFastaReader,
 };
-use seqair_types::{Base, SmolStr};
+use seqair_types::{Base, RegionString, SmolStr};
 use std::collections::HashMap;
 use std::{
     io::{BufWriter, Write},
@@ -42,7 +42,7 @@ struct Cli {
 
     /// Region to display (e.g. "chr1:1000-2000"). Omit for whole genome.
     #[clap(long, short)]
-    region: Option<String>,
+    region: Option<RegionString>,
 
     /// Output file (defaults to stdout)
     #[clap(long, short)]
@@ -73,8 +73,15 @@ fn main() -> anyhow::Result<()> {
         Box::new(BufWriter::new(std::io::stdout().lock()))
     };
 
-    let regions = if let Some(ref region_str) = args.region {
-        vec![parse_region(region_str, reader.header())?]
+    let regions = if let Some(region_str) = args.region.as_ref() {
+        let name = &region_str.chromosome;
+        let tid =
+            reader.header().tid(name).with_context(|| format!("contig '{name}' not found"))?;
+        vec![(
+            tid,
+            *region_str.start.context("no start pos given")?,
+            *region_str.end.context("no end pos given")?,
+        )]
     } else {
         (0..reader.header().target_count())
             .map(|i| {
@@ -107,6 +114,9 @@ fn main() -> anyhow::Result<()> {
     // Cache: record_idx → last query-consuming ref position (exclusive, 0-based).
     // Only used in samtools-compat mode.
     let mut query_end_cache: HashMap<u32, u32> = HashMap::new();
+
+    let mut bases = String::new();
+    let mut quals = String::new();
 
     for (tid, contig_name, win_start, win_end) in &windows {
         let start_pos = Pos0::new(*win_start).context("invalid start position")?;
@@ -147,9 +157,9 @@ fn main() -> anyhow::Result<()> {
             let pos1 = *pos + 1;
             let ref_base = column.reference_base();
 
-            let mut bases = String::new();
-            let mut quals = String::new();
             let mut depth = 0u32;
+            bases.clear();
+            quals.clear();
 
             for aln in column.alignments() {
                 // In samtools-compat mode, skip alignments at trailing D/N positions.
@@ -307,25 +317,5 @@ fn format_alignment(
             let _ = write!(buf, "*+{insert_len}");
         }
         PileupOp::RefSkip => buf.push(if is_reverse { '<' } else { '>' }),
-    }
-}
-
-/// Parse a region string like "chr1:1000-2000" into (tid, start, end).
-fn parse_region(region: &str, header: &seqair::bam::BamHeader) -> anyhow::Result<(u32, u32, u32)> {
-    if let Some((name, range)) = region.split_once(':') {
-        let tid = header.tid(name).with_context(|| format!("contig '{name}' not found"))?;
-        let (start_str, end_str) =
-            range.split_once('-').with_context(|| format!("invalid range: {range}"))?;
-        let start: u32 = start_str
-            .replace(',', "")
-            .parse()
-            .with_context(|| format!("invalid start: {start_str}"))?;
-        let end: u32 =
-            end_str.replace(',', "").parse().with_context(|| format!("invalid end: {end_str}"))?;
-        Ok((tid, start.saturating_sub(1), end))
-    } else {
-        let tid = header.tid(region).with_context(|| format!("contig '{region}' not found"))?;
-        let len = header.target_len(tid).unwrap_or(0) as u32;
-        Ok((tid, 0, len))
     }
 }

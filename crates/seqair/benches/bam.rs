@@ -8,21 +8,15 @@
 #![allow(clippy::cast_possible_wrap, reason = "benches")]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use seqair_types::Pos0;
 use std::hint::black_box;
 use std::io::Read;
 
 const BAM_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam");
 
 const CHROM: &str = "chr19";
-const START: u64 = 6_105_000;
-const END: u64 = 6_140_000;
-
-fn start_pos() -> seqair::bam::Pos<seqair::bam::Zero> {
-    seqair::bam::Pos::<seqair::bam::Zero>::new(START as u32).unwrap()
-}
-fn end_pos() -> seqair::bam::Pos<seqair::bam::Zero> {
-    seqair::bam::Pos::<seqair::bam::Zero>::new(END as u32).unwrap()
-}
+const START: Pos0 = Pos0::new(6_105_000).unwrap();
+const END: Pos0 = Pos0::new(6_140_000).unwrap();
 
 // ---------------------------------------------------------------------------
 // Group 1: BGZF decompression throughput
@@ -116,7 +110,7 @@ fn bam_record_decode(c: &mut Criterion) {
             let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
             let mut store = seqair::bam::RecordStore::new();
             let tid = reader.header().tid(CHROM).unwrap();
-            reader.fetch_into(tid, start_pos(), end_pos(), &mut store).unwrap();
+            reader.fetch_into(tid, START, END, &mut store).unwrap();
             black_box(store.len())
         });
     });
@@ -125,7 +119,7 @@ fn bam_record_decode(c: &mut Criterion) {
     group.bench_function("htslib", |b| {
         b.iter(|| {
             let mut reader = bam::IndexedReader::from_path(BAM_PATH).unwrap();
-            reader.fetch(FetchDefinition::Region(0, START as i64, END as i64)).unwrap();
+            reader.fetch(FetchDefinition::Region(0, START.as_i64(), END.as_i64())).unwrap();
             let mut record = bam::Record::new();
             let mut count = 0usize;
             while reader.read(&mut record) == Some(Ok(())) {
@@ -140,7 +134,7 @@ fn bam_record_decode(c: &mut Criterion) {
     group.bench_function("htslib+base_decode", |b| {
         b.iter(|| {
             let mut reader = bam::IndexedReader::from_path(BAM_PATH).unwrap();
-            reader.fetch(FetchDefinition::Region(0, START as i64, END as i64)).unwrap();
+            reader.fetch(FetchDefinition::Region(0, START.as_i64(), END.as_i64())).unwrap();
             let mut record = bam::Record::new();
             let mut total_bases = 0usize;
             while reader.read(&mut record) == Some(Ok(())) {
@@ -177,7 +171,7 @@ fn bam_record_decode(c: &mut Criterion) {
                     Some(pos) => usize::from(pos) as i64 - 1,
                     None => continue,
                 };
-                if aln_start >= START as i64 && aln_start < END as i64 {
+                if aln_start >= START.as_i64() && aln_start < END.as_i64() {
                     count += 1;
                 }
             }
@@ -215,7 +209,7 @@ fn bam_roundtrip(c: &mut Criterion) {
             let header = BamHeader::from_template(reader.header());
             let tid = reader.header().tid(CHROM).unwrap();
             let mut store = seqair::bam::RecordStore::new();
-            reader.fetch_into(tid, start_pos(), end_pos(), &mut store).unwrap();
+            reader.fetch_into(tid, START, END, &mut store).unwrap();
 
             let mut output = Vec::with_capacity(2_000_000);
             let bgzf = BgzfWriter::new(&mut output);
@@ -262,7 +256,7 @@ fn bam_roundtrip(c: &mut Criterion) {
     group.bench_function("htslib", |b| {
         b.iter(|| {
             let mut reader = bam::IndexedReader::from_path(BAM_PATH).unwrap();
-            reader.fetch(FetchDefinition::Region(0, START as i64, END as i64)).unwrap();
+            reader.fetch(FetchDefinition::Region(0, START.as_i64(), END.as_i64())).unwrap();
             let hdr = bam::Header::from_template(reader.header());
 
             // Write to temp file (htslib Writer requires a path or fd, not a Vec)
@@ -302,7 +296,7 @@ fn bam_roundtrip(c: &mut Criterion) {
                     Some(pos) => usize::from(pos) as i64 - 1,
                     None => continue,
                 };
-                if aln_start >= START as i64 && aln_start < END as i64 {
+                if aln_start >= START.as_i64() && aln_start < END.as_i64() {
                     records.push(record);
                 }
             }
@@ -343,9 +337,9 @@ fn pileup_e2e(c: &mut Criterion) {
             let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
             let mut store = seqair::bam::RecordStore::new();
             let tid = reader.header().tid(CHROM).unwrap();
-            reader.fetch_into(tid, start_pos(), end_pos(), &mut store).unwrap();
+            reader.fetch_into(tid, START, END, &mut store).unwrap();
 
-            let engine = seqair::bam::PileupEngine::new(store, start_pos(), end_pos());
+            let engine = seqair::bam::PileupEngine::new(store, START, END);
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
             for col in engine {
@@ -361,14 +355,16 @@ fn pileup_e2e(c: &mut Criterion) {
         b.iter(|| {
             let mut reader = bam::IndexedReader::from_path(BAM_PATH).unwrap();
             let tid = reader.header().tid(CHROM.as_bytes()).unwrap();
-            reader.fetch(FetchDefinition::Region(tid as i32, START as i64, END as i64)).unwrap();
+            reader
+                .fetch(FetchDefinition::Region(tid as i32, START.as_i64(), END.as_i64()))
+                .unwrap();
 
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
             for p in reader.pileup() {
                 let p = p.unwrap();
                 let pos = u64::from(p.pos());
-                if !(START..=END).contains(&pos) {
+                if !(START.as_u64()..=END.as_u64()).contains(&pos) {
                     continue;
                 }
                 total_depth += u64::from(p.depth());
@@ -399,7 +395,7 @@ fn pileup_e2e(c: &mut Criterion) {
                     }
                     let aln_start = record.alignment_start().and_then(|r| r.ok())?;
                     let pos = usize::from(aln_start) as u64 - 1;
-                    if (START..END).contains(&pos) {
+                    if (START.as_u64()..END.as_u64()).contains(&pos) {
                         Some(Ok(Box::new(record) as Box<dyn sam::alignment::Record>))
                     } else {
                         None

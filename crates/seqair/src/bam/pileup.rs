@@ -183,7 +183,7 @@ pub enum PileupOp {
     RefSkip,
 }
 
-const _: () = assert!(std::mem::size_of::<PileupOp>() <= 16, "PileupOp grew unexpectedly large");
+const _: () = assert!(std::mem::size_of::<PileupOp>() <= 12, "PileupOp grew unexpectedly large");
 
 // r[impl pileup.qpos]
 // r[impl base_decode.alignment]
