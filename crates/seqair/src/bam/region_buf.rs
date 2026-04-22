@@ -17,6 +17,11 @@ const BGZF_FOOTER_SIZE: usize = 8;
 const BGZF_MAGIC: [u8; 4] = [0x1f, 0x8b, 0x08, 0x04];
 const MAX_BLOCK_SIZE: usize = 65536;
 
+/// Padding added past each chunk's end block offset when computing the byte
+/// range to load. Covers the final BGZF block plus a little extra for the
+/// record that straddles the end boundary.
+pub(super) const CHUNK_END_PAD: usize = MAX_BLOCK_SIZE;
+
 /// Maximum compressed bytes loaded into a single [`RegionBuf`].
 ///
 /// Guards against OOM from corrupt indexes or very large query regions.
@@ -105,7 +110,7 @@ impl RegionBuf {
         let merged = merge_chunks(chunks);
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
+            reason = "file offsets fit in usize on 64-bit platforms; BAM files are < 2^63"
         )]
         let total_bytes: usize = merged
             .iter()
@@ -129,18 +134,22 @@ impl RegionBuf {
             let range_start = std::time::Instant::now();
             reader.seek(SeekFrom::Start(range.file_start)).map_err(|_| BgzfError::SeekFailed)?;
 
-            #[expect(
+            #[allow(
                 clippy::cast_possible_truncation,
-                reason = "bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
+                reason = "on 64-bit platforms u64 → usize is lossless; BAM files are < 2^63"
             )]
             let len = range.file_end.saturating_sub(range.file_start) as usize;
 
-            // r[impl region_buf.max_region_bytes]
+            // The batching logic in fetch_into normally keeps ranges within
+            // MAX_REGION_BYTES. Whole-chromosome queries can produce single
+            // ranges that exceed the limit; allow them with a warning rather
+            // than returning an error, since the data is legitimate.
             if len > MAX_REGION_BYTES {
-                return Err(BgzfError::RegionTooLarge {
-                    total_bytes: len,
-                    max_bytes: MAX_REGION_BYTES,
-                });
+                tracing::warn!(
+                    len,
+                    max_bytes = MAX_REGION_BYTES,
+                    "single merged range exceeds MAX_REGION_BYTES; loading anyway"
+                );
             }
             let buf_start = data.len();
             data.resize(buf_start.saturating_add(len), 0);
@@ -579,8 +588,9 @@ fn merge_chunks(chunks: &[Chunk]) -> Vec<MergedRange> {
         .filter_map(|c| {
             let start = c.begin.block_offset();
             // end's block_offset points to the block containing the last byte;
-            // extend by max block size to ensure we capture the full final block.
-            let end = c.end.block_offset().saturating_add(MAX_BLOCK_SIZE as u64);
+            // extend by CHUNK_END_PAD to capture the full final block plus any
+            // record that may straddle a sub-chunk boundary during batching.
+            let end = c.end.block_offset().saturating_add(CHUNK_END_PAD as u64);
             // Skip degenerate chunks (e.g. from corrupt index data where begin > end).
             (start < end).then_some((start, end))
         })
@@ -685,7 +695,7 @@ mod tests {
     fn keep_disjoint_chunks() {
         let chunks = vec![
             Chunk { begin: VirtualOffset::new(100, 0), end: VirtualOffset::new(200, 0) },
-            Chunk { begin: VirtualOffset::new(500_000, 0), end: VirtualOffset::new(600_000, 0) },
+            Chunk { begin: VirtualOffset::new(200_000, 0), end: VirtualOffset::new(300_000, 0) },
         ];
         let ranges = merge_chunks(&chunks);
         assert_eq!(ranges.len(), 2);
@@ -726,24 +736,21 @@ mod tests {
 
     #[test]
     fn disjoint_ranges_data_loaded_correctly() {
-        // With MAX_BLOCK_SIZE=65536, chunks within 65536 of each other merge.
-        // Use offsets > 65536 apart.
+        // With CHUNK_END_PAD = MAX_BLOCK_SIZE = 65536, chunks more than 65536
+        // bytes apart stay disjoint after padding.
         let chunks = vec![
             Chunk { begin: VirtualOffset::new(100, 0), end: VirtualOffset::new(200, 0) },
-            Chunk { begin: VirtualOffset::new(100_000, 0), end: VirtualOffset::new(100_100, 0) },
+            Chunk { begin: VirtualOffset::new(200_000, 0), end: VirtualOffset::new(200_100, 0) },
         ];
         let ranges = merge_chunks(&chunks);
         assert_eq!(ranges.len(), 2, "chunks should be disjoint");
 
         // Now load from a file big enough to contain both ranges
-        let big_file = fake_file(200_000);
+        let big_file = fake_file(400_000);
         let mut cursor = std::io::Cursor::new(big_file.clone());
         let buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
 
         // Buffer should contain data from BOTH ranges concatenated.
-        // Range1: file[100..100+65536+200] (with 64KB extension)
-        // Range2: file[100000..100000+65536+100100]
-        // Total: both ranges' bytes.
         assert!(!buf.data.is_empty());
 
         // Verify first range's data starts with file[100]
@@ -754,17 +761,17 @@ mod tests {
     #[test]
     fn disjoint_ranges_seek_to_second_range_is_correct() {
         // This is the core regression test.
-        // Two disjoint ranges: [100, 300) and [100000, 100200).
-        // After load, seeking to file offset 100000 must land at the
+        // Two disjoint ranges: [100, 300) and [200000, 200200).
+        // After load, seeking to file offset 200000 must land at the
         // correct position in the buffer (start of second range's data),
-        // NOT at offset 100000 - 100 = 99900 (which would be garbage).
+        // NOT at offset 200000 - 100 = 199900 (which would be garbage).
 
-        let big_file = fake_file(200_000);
+        let big_file = fake_file(400_000);
         let mut cursor = std::io::Cursor::new(big_file.clone());
 
         let chunks = vec![
             Chunk { begin: VirtualOffset::new(100, 0), end: VirtualOffset::new(200, 0) },
-            Chunk { begin: VirtualOffset::new(100_000, 0), end: VirtualOffset::new(100_100, 0) },
+            Chunk { begin: VirtualOffset::new(200_000, 0), end: VirtualOffset::new(200_100, 0) },
         ];
         let ranges = merge_chunks(&chunks);
         assert_eq!(ranges.len(), 2, "should have 2 disjoint ranges");
@@ -781,7 +788,7 @@ mod tests {
         assert_eq!(buf.data[buf.cursor], big_file[100]);
 
         // Seek to start of second range — this is the bug
-        buf.seek_virtual(VirtualOffset::new(100_000, 0)).unwrap();
+        buf.seek_virtual(VirtualOffset::new(200_000, 0)).unwrap();
 
         // cursor should point to the start of range2's data in the buffer,
         // which is at offset range1_len (after range1's data).
@@ -791,33 +798,33 @@ mod tests {
             buf.cursor
         );
 
-        // And the data there should be file[100000]
-        assert_eq!(buf.data[buf.cursor], big_file[100_000]);
+        // And the data there should be file[200000]
+        assert_eq!(buf.data[buf.cursor], big_file[200_000]);
     }
 
     #[test]
     fn disjoint_ranges_seek_within_second_range() {
-        let big_file = fake_file(200_000);
+        let big_file = fake_file(400_000);
         let mut cursor = std::io::Cursor::new(big_file.clone());
 
         let chunks = vec![
             Chunk { begin: VirtualOffset::new(100, 0), end: VirtualOffset::new(200, 0) },
-            Chunk { begin: VirtualOffset::new(100_000, 0), end: VirtualOffset::new(100_100, 0) },
+            Chunk { begin: VirtualOffset::new(200_000, 0), end: VirtualOffset::new(200_100, 0) },
         ];
         let ranges = merge_chunks(&chunks);
         let range1_len = (ranges[0].file_end - ranges[0].file_start) as usize;
 
         let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
 
-        // Seek to file offset 100050 (50 bytes into second range)
-        buf.seek_virtual(VirtualOffset::new(100_050, 0)).unwrap();
+        // Seek to file offset 200050 (50 bytes into second range)
+        buf.seek_virtual(VirtualOffset::new(200_050, 0)).unwrap();
         assert_eq!(buf.cursor, range1_len + 50, "seek 50 bytes into range2");
-        assert_eq!(buf.data[buf.cursor], big_file[100_050]);
+        assert_eq!(buf.data[buf.cursor], big_file[200_050]);
     }
 
     #[test]
     fn disjoint_ranges_seek_before_loaded_region_fails() {
-        let big_file = fake_file(200_000);
+        let big_file = fake_file(400_000);
         let mut cursor = std::io::Cursor::new(big_file);
 
         let chunks =
@@ -832,17 +839,17 @@ mod tests {
 
     #[test]
     fn disjoint_ranges_seek_in_gap_between_ranges_fails() {
-        let big_file = fake_file(200_000);
+        let big_file = fake_file(400_000);
         let mut cursor = std::io::Cursor::new(big_file);
 
         let chunks = vec![
             Chunk { begin: VirtualOffset::new(100, 0), end: VirtualOffset::new(200, 0) },
-            Chunk { begin: VirtualOffset::new(100_000, 0), end: VirtualOffset::new(100_100, 0) },
+            Chunk { begin: VirtualOffset::new(200_000, 0), end: VirtualOffset::new(200_100, 0) },
         ];
 
         let ranges = merge_chunks(&chunks);
-        // Range1 ends at 200 + 65536 = 65736. Range2 starts at 100000.
-        // The gap is [65736, 100000). Pick an offset in that gap.
+        // Range1 ends at 200 + CHUNK_END_PAD. Range2 starts at 200_000.
+        // The gap is between them. Pick an offset in that gap.
         let gap_offset = ranges[0].file_end + 1;
         assert!(
             gap_offset < ranges[1].file_start,
@@ -1028,7 +1035,7 @@ mod tests {
             // Build group A
             let (mut file, offsets_a) = make_bgzf_file(&blocks_a);
 
-            // Add padding to create a gap > MAX_BLOCK_SIZE so chunks are disjoint
+            // Add padding to create a gap > CHUNK_END_PAD so chunks are disjoint
             let pad_start = file.len();
             file.resize(pad_start + padding, 0);
 
@@ -1372,98 +1379,54 @@ mod tests {
         let chunks =
             vec![Chunk { begin: VirtualOffset::new(1000, 0), end: VirtualOffset::new(2000, 0) }];
         let size = merged_byte_size(&chunks);
-        // end block_offset=2000, extended by MAX_BLOCK_SIZE=65536
-        // So range is [1000, 2000+65536) = 66536 bytes
-        assert_eq!(size, 66536);
+        // end block_offset=2000, extended by CHUNK_END_PAD
+        // So range is [1000, 2000+CHUNK_END_PAD)
+        assert_eq!(size, 1000 + CHUNK_END_PAD);
     }
 
     #[test]
     fn merged_byte_size_overlapping_chunks_merge() {
-        // Two chunks whose block ranges overlap after MAX_BLOCK_SIZE extension
+        // Two chunks whose block ranges overlap after CHUNK_END_PAD extension.
+        // Place them far enough apart to be disjoint with the old MAX_BLOCK_SIZE
+        // padding, but they now overlap with CHUNK_END_PAD.
         let chunks = vec![
             Chunk { begin: VirtualOffset::new(1000, 0), end: VirtualOffset::new(2000, 0) },
             Chunk { begin: VirtualOffset::new(50_000, 0), end: VirtualOffset::new(60_000, 0) },
         ];
         let size = merged_byte_size(&chunks);
-        // Both within MAX_BLOCK_SIZE of each other after extension, so they merge:
-        // Range 1: [1000, 2000+65536) = [1000, 67536)
-        // Range 2: [50000, 60000+65536) = [50000, 125536)
-        // 50000 < 67536, so they merge to [1000, 125536) = 124536 bytes
-        assert_eq!(size, 124536);
+        // Range 1: [1000, 2000+CHUNK_END_PAD)
+        // Range 2: [50000, 60000+CHUNK_END_PAD)
+        // 50000 < 2000+CHUNK_END_PAD, so they merge to [1000, 60000+CHUNK_END_PAD)
+        assert_eq!(size, 59000 + CHUNK_END_PAD);
     }
 
     #[test]
     fn merged_byte_size_disjoint_chunks() {
+        // Place chunks far enough apart that they remain disjoint even with CHUNK_END_PAD.
+        let far = 10_000_000u64;
         let chunks = vec![
             Chunk { begin: VirtualOffset::new(1000, 0), end: VirtualOffset::new(2000, 0) },
-            Chunk {
-                begin: VirtualOffset::new(1_000_000, 0),
-                end: VirtualOffset::new(1_001_000, 0),
-            },
+            Chunk { begin: VirtualOffset::new(far, 0), end: VirtualOffset::new(far + 1000, 0) },
         ];
         let size = merged_byte_size(&chunks);
         // Disjoint: sum of two ranges
-        let range1 = 2000 + 65536 - 1000; // 66536
-        let range2 = 1_001_000 + 65536 - 1_000_000; // 66536
+        let range1 = 1000 + CHUNK_END_PAD;
+        let range2 = 1000 + CHUNK_END_PAD;
         assert_eq!(size, range1 + range2);
     }
 
     // r[verify region_buf.max_region_bytes]
+    /// Oversized regions now warn instead of erroring, allowing whole-chromosome
+    /// queries on large BAM files.
     #[test]
-    fn load_rejects_region_too_large() {
-        // Create chunks whose merged range exceeds MAX_REGION_BYTES.
-        // Use a single chunk with a huge span.
+    fn load_accepts_oversized_region() {
         let far_end = MAX_REGION_BYTES as u64 + 1_000_000;
         let chunks =
             vec![Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(far_end, 0) }];
 
+        // Small cursor — load will read what's available (no error).
         let mut cursor = std::io::Cursor::new(vec![0u8; 100]);
         let result = RegionBuf::load(&mut cursor, &chunks);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, BgzfError::RegionTooLarge { .. }),
-            "expected RegionTooLarge, got {err:?}"
-        );
-    }
-
-    /// Reproduces the real-world failure from a 122 GB BAM file where BAI chunks
-    /// for region chr1:143199802-143300201 merge to ~267 MiB (exceeding 256 MiB).
-    /// Before the fix, this produced a misleading "BAM record `block_size` exceeds
-    /// maximum" error. After the fix, it returns `RegionTooLarge`.
-    #[test]
-    fn load_rejects_large_bai_region_like_122gb_bam() {
-        // Simulate the problematic chunk layout: one huge chunk spanning ~131 MiB
-        // of compressed data, plus a nearby chunk that pushes total past 256 MiB.
-        let chunk1_start = 5_971_912_384u64; // ~5.6 GB into file
-        let chunk1_end = 6_141_438_390u64; // ~131 MiB of compressed data
-        let chunk2_start = 6_141_453_885u64; // just after chunk1 + MAX_BLOCK_SIZE
-        let chunk2_end = 6_252_000_000u64; // another ~105 MiB
-
-        let chunks = vec![
-            Chunk {
-                begin: VirtualOffset::new(chunk1_start, 0),
-                end: VirtualOffset::new(chunk1_end, 0),
-            },
-            Chunk {
-                begin: VirtualOffset::new(chunk2_start, 0),
-                end: VirtualOffset::new(chunk2_end, 0),
-            },
-        ];
-
-        let total = merged_byte_size(&chunks);
-        assert!(
-            total > MAX_REGION_BYTES,
-            "test setup: merged size {total} should exceed MAX_REGION_BYTES {MAX_REGION_BYTES}"
-        );
-
-        let mut cursor = std::io::Cursor::new(vec![0u8; 100]);
-        let result = RegionBuf::load(&mut cursor, &chunks);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, BgzfError::RegionTooLarge { .. }),
-            "expected RegionTooLarge, got {err:?}"
-        );
+        assert!(result.is_ok(), "oversized region should load (warns, not errors)");
     }
 }

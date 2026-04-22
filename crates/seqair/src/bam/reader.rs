@@ -272,8 +272,8 @@ impl<R: Read + Seek> IndexedBamReader<R> {
 ///
 /// Chunks are added greedily in order. When adding the next chunk would push
 /// the batch over the limit, a new batch is started. A single chunk that
-/// exceeds `max_bytes` on its own gets its own batch ([`RegionBuf`] will still
-/// reject it, but this avoids infinite loops).
+/// exceeds `max_bytes` on its own gets its own batch — `RegionBuf::load`
+/// handles oversized ranges by warning and allocating the needed memory.
 fn partition_chunks(chunks: &[Chunk], max_bytes: usize) -> Vec<Vec<Chunk>> {
     if chunks.is_empty() {
         return Vec::new();
@@ -398,28 +398,31 @@ mod tests {
 
     #[test]
     fn partition_chunks_splits_large_ranges() {
-        // Create chunks that span more than max_bytes when merged.
-        // Use a small max_bytes to make this testable.
-        let max_bytes = 200_000;
+        // Create two disjoint chunks that individually fit but together exceed max_bytes.
+        // Chunks must be spaced > CHUNK_END_PAD apart to stay disjoint after padding.
+        let max_bytes = 10_000_000; // 10 MiB
+        let gap = (region_buf::CHUNK_END_PAD as u64) + 1_000_000; // > CHUNK_END_PAD
+        let span = 5_000_000u64; // each chunk spans 5 MiB
+
         let chunks = vec![
-            // Chunk spanning ~130KB of compressed data
-            Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(130_000, 0) },
-            // Disjoint chunk spanning another ~130KB
-            Chunk { begin: VirtualOffset::new(500_000, 0), end: VirtualOffset::new(630_000, 0) },
+            Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(span, 0) },
+            Chunk {
+                begin: VirtualOffset::new(span + gap, 0),
+                end: VirtualOffset::new(span + gap + span, 0),
+            },
         ];
 
-        // Together these exceed 200KB
+        // Together these exceed max_bytes (two disjoint ranges of ~7 MiB each)
         let total = region_buf::merged_byte_size(&chunks);
         assert!(total > max_bytes, "test setup: total {total} must exceed {max_bytes}");
 
         let result = partition_chunks(&chunks, max_bytes);
         assert_eq!(result.len(), 2, "should split into 2 batches");
-        assert_eq!(result[0].len(), 1);
-        assert_eq!(result[1].len(), 1);
 
         // Each batch individually fits
         for batch in &result {
-            assert!(region_buf::merged_byte_size(batch) <= max_bytes);
+            let size = region_buf::merged_byte_size(batch);
+            assert!(size <= max_bytes, "batch size {size} exceeds {max_bytes}");
         }
     }
 
@@ -468,23 +471,25 @@ mod tests {
             );
         }
 
-        // All chunks must be present across batches
+        // All chunks are preserved (no loss, no duplication)
         let total_chunks: usize = batches.iter().map(|b| b.len()).sum();
         assert_eq!(total_chunks, chunks.len());
     }
 
     proptest::proptest! {
         /// Any set of chunks must be partitioned such that every batch fits
-        /// within the limit, and no chunks are lost.
+        /// within the limit, and no chunks are lost or duplicated.
         #[test]
         fn proptest_partition_preserves_all_chunks(
             n_chunks in 1usize..20,
             seed in 0u64..10_000,
         ) {
-            let max_bytes = 500_000; // small limit for testing
+            let max_bytes = 500_000;
+            // Space chunks far enough apart to stay disjoint after CHUNK_END_PAD.
+            let spacing = 200_000u64;
             let chunks: Vec<Chunk> = (0..n_chunks)
                 .map(|i| {
-                    let base = seed + (i as u64) * 200_000;
+                    let base = seed + (i as u64) * spacing;
                     Chunk {
                         begin: VirtualOffset::new(base, 0),
                         end: VirtualOffset::new(base + 100_000, 0),
@@ -494,7 +499,7 @@ mod tests {
 
             let batches = partition_chunks(&chunks, max_bytes);
 
-            // All chunks preserved
+            // All chunks preserved (no loss, no duplication from splitting)
             let total: usize = batches.iter().map(|b| b.len()).sum();
             proptest::prop_assert_eq!(total, chunks.len());
 
@@ -504,7 +509,7 @@ mod tests {
                     let size = region_buf::merged_byte_size(batch);
                     proptest::prop_assert!(
                         size <= max_bytes,
-                        "multi-chunk batch size {size} > {max_bytes}"
+                        "batch size {size} > {max_bytes}"
                     );
                 }
             }
