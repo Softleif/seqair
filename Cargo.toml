@@ -77,3 +77,7 @@ md5.opt-level = 3
 xz2.opt-level = 3
 bzip2.opt-level = 3
 flate2.opt-level = 3
+
+[profile.profiling]
+inherits = "release"
+debug = true

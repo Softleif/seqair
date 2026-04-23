@@ -15,7 +15,7 @@ use std::io::Read;
 const BAM_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam");
 
 const CHROM: &str = "chr19";
-const START: Pos0 = Pos0::new(6_105_000).unwrap();
+const START: Pos0 = Pos0::new(0).unwrap();
 const END: Pos0 = Pos0::new(6_140_000).unwrap();
 
 // ---------------------------------------------------------------------------
@@ -372,7 +372,7 @@ fn pileup_e2e(c: &mut Criterion) {
                 columns += 1;
                 col.alignments().for_each(|aln| counter.count(aln.base().unwrap_or_default()));
             }
-            black_box((columns, total_depth))
+            black_box((columns, total_depth, counter))
         });
     });
 
@@ -403,7 +403,7 @@ fn pileup_e2e(c: &mut Criterion) {
                     }
                 });
             }
-            black_box((columns, total_depth))
+            black_box((columns, total_depth, counter))
         });
     });
 
@@ -439,7 +439,6 @@ fn pileup_e2e(c: &mut Criterion) {
             let pileup = Depth::new(&header, records.into_iter());
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
-            let mut counter = Counter::new();
 
             for result in pileup {
                 let Ok((pos, depth)) = result else {
