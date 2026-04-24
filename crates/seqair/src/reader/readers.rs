@@ -142,6 +142,11 @@ impl Readers {
         self.alignment.fetch_into(tid, start, end, store)
     }
 
+    /// Configure the internal [`RecordStore`] used by `pileup()`.
+    pub fn configure_store(&mut self, f: impl FnOnce(&mut RecordStore)) {
+        f(&mut self.store);
+    }
+
     /// Fetch records for a region and return a [`PileupEngine`] ready for iteration.
     ///
     /// Uses an internal [`RecordStore`] whose capacity is retained across calls.
@@ -150,7 +155,7 @@ impl Readers {
     /// allocates a fresh store (small perf hit, not a correctness issue).
     pub fn pileup(
         &mut self,
-        tid: u32,
+        tid: impl ResolveTid, // TODO: trait with `.resolve_tid(&self, &bam_header) -> Result<Tid>` impl'd on &str and u32, and where `struct Tid(u32)` represents a resolved and valid tid that fetch_into accepts
         start: Pos0,
         end: Pos0,
     ) -> Result<PileupEngine, ReaderError> {

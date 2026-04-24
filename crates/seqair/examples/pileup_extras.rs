@@ -49,7 +49,7 @@ struct Cli {
 
     /// Region to display (e.g. "chr1:1000-2000").
     #[clap(long, short)]
-    region: String,
+    region: RegionString,
 
     /// Minimum mapping quality.
     #[clap(long, default_value_t = 20)]
@@ -59,8 +59,6 @@ struct Cli {
 /// Per-record data computed once at load time, accessed per-column.
 #[derive(Debug)]
 struct ReadInfo {
-    /// Qname bytes, owned — avoids repeated slab lookups during overlap dedup.
-    qname: Vec<u8>,
     /// Read group extracted from aux tags (RG:Z:...), if present.
     read_group: Option<String>,
     /// Fraction of the read that is aligned (`matching_bases` / `seq_len`).
@@ -70,74 +68,31 @@ struct ReadInfo {
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
-    let mut readers =
-        Readers::open(&args.input, &args.reference).context("could not open BAM + FASTA")?;
-
-    let (tid, start, end) = parse_region(&args.region, readers.header())?;
-    let contig_name = readers.header().target_name(tid).context("unknown tid")?.to_owned();
-
-    // ── Step 1: Load records into RecordStore<()> ─────────────────────
-    let mut store = RecordStore::new();
-    readers
-        .fetch_into(tid, start, end, &mut store)
-        .map_err(anyhow::Error::from)
-        .context("could not fetch region")?;
-
-    let record_count = store.len();
-    eprintln!(
-        "Loaded {record_count} records from {contig_name}:{start}-{end}",
-        start = *start,
-        end = *end
-    );
-
-    // ── Step 2: Compute per-record extras ─────────────────────────────
-    //
-    // The closure receives (record_index, &RecordStore<()>) and can access
-    // any slab: record fields, qname, aux, sequence, quality.
-    let store = store.with_extras(|idx, s| {
+    let store = RecordStore::new().with_extras(|idx, s| {
         let rec = s.record(idx);
-        let qname = s.qname(idx).to_vec();
         let read_group = extract_rg(s.aux(idx));
         let aligned_fraction =
             if rec.seq_len > 0 { rec.matching_bases as f64 / rec.seq_len as f64 } else { 0.0 };
-        ReadInfo { qname, read_group, aligned_fraction }
+        ReadInfo { read_group, aligned_fraction }
     });
+    // future feature: pre-filter records at load time, e.g. by mapq:
+    // let store = store.with_pre_filter(|record| record.mapq >= args.min_mapq);
 
-    // ── Step 3: Sort/dedup on the typed store ─────────────────────────
-    //
-    // This is safe because each SlimRecord carries an extras_idx that
-    // survives reordering. Before this change, sort_by_pos and dedup
-    // were restricted to RecordStore<()>.
-    let mut store = store;
-    store.sort_by_pos();
-    store.dedup();
+    // todo: add this to give readers custom store and also take on its generic type, e.g. `Readers<ReadInfo>` — would be more ergonomic than passing the store separately to pileup and columns_with_store
+    let mut readers = Readers::open_with_store(&args.input, &args.reference, store)
+        .context("could not open BAM + FASTA")?;
 
-    let after_dedup = store.len();
-    if after_dedup < record_count {
-        eprintln!("Deduped: {record_count} → {after_dedup} records");
-    }
+    // todo: add this method that resolves region strings directly using headers to fill optional start and end positions, e.g. `chr1` gets start=0 and end=chr1_len, `chr1:1000` gets end=chrom_len
+    let (tid, start, end) = args.region.resolve(&readers);
 
-    // ── Step 4: Build the pileup engine with the typed store ──────────
-    let ref_bases = readers
-        .fasta_mut()
-        .fetch_seq(&contig_name, start, end)
-        .context("could not fetch reference")?;
-    let ref_seq = RefSeq::new(Rc::from(Base::from_ascii_vec(ref_bases)), start);
+    // todo: build proper pileup engine, should set reference seq, etc
+    let mut engine: PileupEngine = readers.pileup(store, start, end);
+    engine.set_filter(|flags, _aux| !flags.is_unmapped());
 
-    let min_mapq = args.min_mapq;
-    let mut engine = PileupEngine::new(store, start, end);
-    engine.set_reference_seq(ref_seq);
-    engine.set_filter(move |flags, _aux| !flags.is_unmapped() && !flags.is_secondary());
-
-    // ── Step 5: Iterate with columns_with_store ───────────────────────
-    //
-    // columns_with_store yields (PileupColumn, &RecordStore<ReadInfo>)
-    // per position, giving access to extras without pre-extraction.
     println!("pos\tdepth\tref\tuniq_reads\tread_groups\tmean_aligned_frac");
 
-    let mut cols = engine.columns_with_store();
-    let mut seen_qnames: Vec<u32> = Vec::new();
-    while let Some((column, store)) = cols.next_column() {
+    // todo: make this work as iterator
+    for column in engine.iter() {
         let depth = column.depth();
         if depth == 0 {
             continue;
@@ -153,20 +108,12 @@ fn main() -> anyhow::Result<()> {
                 continue;
             }
 
-            // Access per-record extras via the store.
-            let info = store.extra(aln.record_idx());
+            // Access per-record extras
+            let info: ReadInfo = aln.extra();
 
             // Use the pre-computed aligned fraction.
             aligned_sum += info.aligned_fraction;
             counted += 1;
-
-            // Count distinct read names (overlap dedup use case).
-            // In a real caller you'd use this to resolve mate-pair overlaps.
-            let already_seen =
-                seen_qnames.iter().any(|&prev_idx| store.extra(prev_idx).qname == info.qname);
-            if !already_seen {
-                seen_qnames.push(aln.record_idx());
-            }
 
             // Tally read groups.
             let rg = info.read_group.as_deref().unwrap_or(".");
@@ -245,19 +192,4 @@ fn extract_rg(aux: &[u8]) -> Option<String> {
         }
     }
     None
-}
-
-fn parse_region(
-    region: &str,
-    header: &seqair::bam::BamHeader,
-) -> anyhow::Result<(u32, Pos0, Pos0)> {
-    let region: seqair_types::RegionString = region.parse().context("invalid region")?;
-    let tid = header
-        .tid(&region.chromosome)
-        .with_context(|| format!("contig '{}' not found", region.chromosome))?;
-    let start = *region.start.context("no start")?;
-    let end = *region.end.context("no end")?;
-    let start = Pos0::new(start).context("invalid start")?;
-    let end = Pos0::new(end).context("invalid end")?;
-    Ok((tid, start, end))
 }
