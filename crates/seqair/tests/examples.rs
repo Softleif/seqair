@@ -2,6 +2,7 @@
 //!
 //! Each test builds and runs the example with the repo's test data,
 //! asserting that it exits successfully and produces some output.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test code")]
 
 use std::process::Command;
 

@@ -1,4 +1,4 @@
-//! Tests for `RecordStore<U>` per-record extras and `PileupEngine` columns_with_store.
+//! Tests for `RecordStore<U>` per-record extras and `PileupEngine` `columns_with_store`.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -9,6 +9,9 @@
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_lossless,
+    clippy::drop_non_drop,
     reason = "test code with known small values"
 )]
 

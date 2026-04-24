@@ -63,7 +63,7 @@ struct ReadInfo {
     qname: Vec<u8>,
     /// Read group extracted from aux tags (RG:Z:...), if present.
     read_group: Option<String>,
-    /// Fraction of the read that is aligned (matching_bases / seq_len).
+    /// Fraction of the read that is aligned (`matching_bases` / `seq_len`).
     aligned_fraction: f64,
 }
 
