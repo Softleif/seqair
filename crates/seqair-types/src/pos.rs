@@ -93,6 +93,9 @@ impl std::error::Error for PosOverflow {}
 // ---- Pos<Zero> construction ----
 
 impl Pos<Zero> {
+    /// Zero position (0-based). Valid and commonly used, so provided as a constant.
+    pub const ZERO: Self = Self::new(0).unwrap();
+
     // r[impl pos.zero_new]
     /// Create a 0-based position from a `u32`. Returns `None` if `value > i32::MAX`.
     #[inline]

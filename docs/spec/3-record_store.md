@@ -84,6 +84,9 @@ r[record_store.extras.push_unit]
 r[record_store.extras.with_extras]
 `RecordStore<()>` MUST provide `with_extras<V>(self, f) -> RecordStore<V>` that consumes the store and computes one `V` per record in a single pass. The closure MUST receive `(record_index, &RecordStore<()>)` so it can access any slab (record fields, aux, seq, qname). All existing slabs MUST be moved, not copied.
 
+r[record_store.extras.provider]
+`RecordStore<()>` MUST additionally provide `apply_extras<E: RecordStoreExtras>(self, provider: &mut E) -> RecordStore<E::Extra>` that computes one `E::Extra` per record by calling `provider.compute(idx, &self)`. This differs from `with_extras` in that the provider is reusable (Readers holds one provider and applies it on every region fetch), and carries its own state (counters, caches) that persist across regions. The trait is defined as `trait RecordStoreExtras: Clone { type Extra; fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> Self::Extra; }` — the `Clone` bound allows `Readers::fork` to duplicate the provider into the forked reader. A blanket `impl RecordStoreExtras for ()` MUST exist with `type Extra = ()` so the default no-extras case costs zero at runtime (`Vec<()>` is a ZST vector).
+
 r[record_store.extras.access]
 `RecordStore<U>` MUST provide `extra(idx) -> &U` and `extra_mut(idx) -> &mut U` to access the per-record extra by record index. Access MUST go through the record's `extras_idx` field (indirection into the extras slab), so that extras remain valid after `sort_by_pos` or `dedup` reorder/remove records.
 

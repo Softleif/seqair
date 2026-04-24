@@ -10,35 +10,32 @@
 //! Per-record extras in a pileup.
 //!
 //! Demonstrates attaching custom per-record data to a `RecordStore` and
-//! accessing it during pileup iteration via `columns_with_store`.
+//! accessing it during pileup iteration via `Readers<E>` + `aln.extra()`.
 //!
 //! The workflow:
 //!
-//! 1. Load records into a `RecordStore<()>` (the default).
-//! 2. Compute per-record extras with `store.with_extras(...)`, producing
-//!    a `RecordStore<ReadInfo>`.
-//! 3. Sort/dedup the typed store — `extras_idx` keeps the mapping intact.
-//! 4. Build a `PileupEngine` from the typed store.
-//! 5. Iterate with `columns_with_store()` to access extras during pileup.
-//!
-//! This avoids pre-extracting per-record data into a separate `Vec` before
-//! iteration — the extras live alongside the record slabs and are accessed
-//! by record index through the store.
+//! 1. Define a `Clone` struct implementing [`RecordStoreExtras`] that computes
+//!    one `Extra` value per record.
+//! 2. Open the readers with `Readers::open_with_extras(bam, fasta, provider)`.
+//! 3. Resolve the region string against the header with `readers.resolve_region`.
+//! 4. Call `readers.pileup(tid, start, end)` — this fetches records, runs the
+//!    extras provider once per record, fetches the reference sequence, and
+//!    returns a `PileupEngine<E::Extra>` ready for iteration.
+//! 5. Iterate with `while let Some(col) = engine.pileups()`. Each alignment
+//!    view exposes `aln.extra()` alongside the usual fields.
 
 use anyhow::Context;
 use clap::Parser as _;
-use seqair::bam::RecordStore;
-use seqair::bam::pileup::{PileupEngine, RefSeq};
+use seqair::bam::record_store::{RecordStore, RecordStoreExtras};
 use seqair::reader::Readers;
-use seqair_types::{Base, Pos0};
+use seqair_types::RegionString;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 /// seqair pileup-extras — demonstrate per-record extras in pileup
 ///
 /// Loads a BAM region, computes per-record metadata (read group, aligned
-/// fraction, overlap-dedup key), and prints a per-column summary showing
-/// how extras are accessed during iteration.
+/// fraction), and prints a per-column summary showing how extras are accessed
+/// during iteration.
 #[derive(Debug, clap::Parser)]
 struct Cli {
     /// BAM/SAM/CRAM file (must be indexed).
@@ -57,7 +54,7 @@ struct Cli {
 }
 
 /// Per-record data computed once at load time, accessed per-column.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ReadInfo {
     /// Read group extracted from aux tags (RG:Z:...), if present.
     read_group: Option<String>,
@@ -65,34 +62,49 @@ struct ReadInfo {
     aligned_fraction: f64,
 }
 
-fn main() -> anyhow::Result<()> {
-    let args = Cli::parse();
+/// Extras provider — just a zero-sized marker that produces `ReadInfo` per record.
+///
+/// `Clone` so `Readers::fork` can duplicate the provider for multi-threaded use.
+#[derive(Debug, Clone, Default)]
+struct ReadInfoBuilder;
 
-    let store = RecordStore::new().with_extras(|idx, s| {
-        let rec = s.record(idx);
-        let read_group = extract_rg(s.aux(idx));
+impl RecordStoreExtras for ReadInfoBuilder {
+    type Extra = ReadInfo;
+
+    fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> ReadInfo {
+        let rec = store.record(idx);
+        let read_group = extract_rg(store.aux(idx));
         let aligned_fraction =
             if rec.seq_len > 0 { rec.matching_bases as f64 / rec.seq_len as f64 } else { 0.0 };
         ReadInfo { read_group, aligned_fraction }
-    });
-    // future feature: pre-filter records at load time, e.g. by mapq:
-    // let store = store.with_pre_filter(|record| record.mapq >= args.min_mapq);
+    }
+}
 
-    // todo: add this to give readers custom store and also take on its generic type, e.g. `Readers<ReadInfo>` — would be more ergonomic than passing the store separately to pileup and columns_with_store
-    let mut readers = Readers::open_with_store(&args.input, &args.reference, store)
-        .context("could not open BAM + FASTA")?;
+fn main() -> anyhow::Result<()> {
+    let args = Cli::parse();
 
-    // todo: add this method that resolves region strings directly using headers to fill optional start and end positions, e.g. `chr1` gets start=0 and end=chr1_len, `chr1:1000` gets end=chrom_len
-    let (tid, start, end) = args.region.resolve(&readers);
+    let mut readers =
+        Readers::<ReadInfoBuilder>::open_with_extras(&args.input, &args.reference, ReadInfoBuilder)
+            .context("could not open BAM + FASTA")?;
 
-    // todo: build proper pileup engine, should set reference seq, etc
-    let mut engine: PileupEngine = readers.pileup(store, start, end);
-    engine.set_filter(|flags, _aux| !flags.is_unmapped());
+    // Resolve region string against the header — fills in default start/end
+    // when missing and validates the contig name.
+    let (tid, start, end) = readers.resolve_region(&args.region)?;
 
-    println!("pos\tdepth\tref\tuniq_reads\tread_groups\tmean_aligned_frac");
+    let min_mapq = args.min_mapq;
+    let mut engine = readers.pileup(tid, start, end).context("could not build pileup")?;
+    engine.set_filter(move |flags, _aux| !flags.is_unmapped() && !flags.is_secondary());
 
-    // todo: make this work as iterator
-    for column in engine.iter() {
+    eprintln!(
+        "Loaded pileup for {region} ({start}..={end})",
+        region = args.region.chromosome,
+        start = *start,
+        end = *end,
+    );
+
+    println!("pos\tdepth\tref\tread_groups\tmean_aligned_frac");
+
+    while let Some(column) = engine.pileups() {
         let depth = column.depth();
         if depth == 0 {
             continue;
@@ -101,17 +113,15 @@ fn main() -> anyhow::Result<()> {
         let mut rg_counts: Vec<(&str, u32)> = Vec::new();
         let mut aligned_sum = 0.0;
         let mut counted = 0u32;
-        seen_qnames.clear();
 
         for aln in column.alignments() {
             if aln.mapq < min_mapq {
                 continue;
             }
 
-            // Access per-record extras
-            let info: ReadInfo = aln.extra();
+            // Access per-record extras via the alignment view.
+            let info = aln.extra();
 
-            // Use the pre-computed aligned fraction.
             aligned_sum += info.aligned_fraction;
             counted += 1;
 
@@ -134,14 +144,15 @@ fn main() -> anyhow::Result<()> {
             rg_counts.iter().map(|(name, count)| format!("{name}:{count}")).collect();
 
         println!(
-            "{pos}\t{depth}\t{ref_base}\t{uniq}\t{rgs}\t{mean:.3}",
+            "{pos}\t{depth}\t{ref_base}\t{rgs}\t{mean:.3}",
             pos = *column.pos() + 1,
             ref_base = column.reference_base() as u8 as char,
-            uniq = seen_qnames.len(),
             rgs = rg_summary.join(","),
             mean = aligned_sum / counted as f64,
         );
     }
+
+    readers.recover_store(&mut engine);
 
     Ok(())
 }

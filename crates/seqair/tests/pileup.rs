@@ -14,7 +14,7 @@
 )]
 mod helpers;
 
-use helpers::{cigar_op, make_record, make_record_with_cigar};
+use helpers::{cigar_op, collect_columns, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::pileup::RefSeq;
 use seqair::bam::{Pos0, RecordStore, pileup::PileupEngine};
@@ -58,8 +58,8 @@ proptest! {
             expected_depth[i] = running.max(0) as usize;
         }
 
-        let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(600).unwrap());
-        for col in engine {
+        let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(600).unwrap());
+        while let Some(col) = engine.pileups() {
             let pos = col.pos().as_usize();
             let exp = expected_depth.get(pos).copied().unwrap_or(0);
             prop_assert_eq!(col.depth(), exp,
@@ -103,8 +103,8 @@ proptest! {
             expected_depth[i] = running.max(0);
         }
 
-        let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(600).unwrap());
-        let columns: Vec<_> = engine.collect();
+        let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(600).unwrap());
+        let columns = collect_columns(&mut engine);
         let col_positions: std::collections::HashSet<u32> =
             columns.iter().map(|c| *c.pos()).collect();
 
@@ -134,7 +134,7 @@ fn filter_evaluated_once_per_record() {
         true
     });
 
-    let columns: Vec<_> = engine.collect();
+    let columns = collect_columns(&mut engine);
     assert_eq!(columns.len(), 20);
     assert_eq!(count.get(), 1, "filter called once per record, not per column");
 }
@@ -154,7 +154,7 @@ proptest! {
         let expected = pass_flags.iter().filter(|&&p| p).count();
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(0).unwrap());
         engine.set_filter(move |flags, _aux| !flags.is_secondary());
-        let columns: Vec<_> = engine.collect();
+        let columns = collect_columns(&mut engine);
 
         if expected > 0 {
             prop_assert_eq!(columns[0].depth(), expected);
@@ -177,7 +177,7 @@ proptest! {
 
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(len - 1).unwrap());
         engine.set_max_depth(max);
-        for col in engine {
+        while let Some(col) = engine.pileups() {
             prop_assert!(col.depth() <= max as usize);
         }
     }
@@ -197,7 +197,7 @@ proptest! {
 
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(99).unwrap());
         engine.set_max_depth(3);
-        let columns: Vec<_> = engine.collect();
+        let columns = collect_columns(&mut engine);
 
         let col0 = columns.iter().find(|c| c.pos() == Pos0::new(0).unwrap()).unwrap();
         prop_assert_eq!(col0.depth(), 3); // capped
@@ -218,9 +218,9 @@ proptest! {
 
         let start_u32 = start as u32;
         let end_u32 = start_u32 + len - 1;
-        let engine = PileupEngine::new(arena, Pos0::new(start_u32).unwrap(), Pos0::new(end_u32).unwrap());
+        let mut engine = PileupEngine::new(arena, Pos0::new(start_u32).unwrap(), Pos0::new(end_u32).unwrap());
 
-        for col in engine {
+        while let Some(col) = engine.pileups() {
             for aln in col.alignments() {
                 prop_assert_eq!(aln.qpos().unwrap(), (*col.pos() - start_u32) as usize);
             }
@@ -240,8 +240,8 @@ proptest! {
         arena.push_raw(&make_record(0, pos2, 99, 60, len2)).unwrap();
 
         let end = pos2 as u32 + len2 + 10;
-        let engine = PileupEngine::new(arena, Pos0::new(pos1 as u32).unwrap(), Pos0::new(end).unwrap());
-        for col in engine {
+        let mut engine = PileupEngine::new(arena, Pos0::new(pos1 as u32).unwrap(), Pos0::new(end).unwrap());
+        while let Some(col) = engine.pileups() {
             prop_assert!(col.depth() > 0, "empty column at {}", col.pos());
         }
     }
@@ -257,8 +257,8 @@ fn unmapped_reads_excluded_from_pileup() {
     arena.push_raw(&make_record(0, 100, 0x4, 60, 50)).unwrap(); // unmapped
     arena.push_raw(&make_record(0, 100, 163, 60, 50)).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(149).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(149).unwrap());
+    let columns = collect_columns(&mut engine);
     assert_eq!(columns[0].depth(), 2, "unmapped should be excluded");
 }
 
@@ -272,8 +272,8 @@ fn zero_refspan_read_handled_gracefully() {
     arena.push_raw(&raw).unwrap();
     assert_eq!(arena.record(0).end_pos, Pos0::new(50).unwrap());
 
-    let engine = PileupEngine::new(arena, Pos0::new(48).unwrap(), Pos0::new(52).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(48).unwrap(), Pos0::new(52).unwrap());
+    let columns = collect_columns(&mut engine);
     // Pure soft-clip has no ref-consuming ops → no qpos → no column
     assert!(
         columns.is_empty()
@@ -291,8 +291,8 @@ fn leading_softclip_does_not_extend_ref_range() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(95).unwrap(), Pos0::new(125).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(95).unwrap(), Pos0::new(125).unwrap());
+    let columns = collect_columns(&mut engine);
     let positions: Vec<u32> = columns.iter().map(|c| *c.pos()).collect();
 
     assert_eq!(positions.first(), Some(&100), "should start at first ref-consuming pos");
@@ -312,8 +312,8 @@ fn secondary_and_supplementary_reads_in_arena() {
 
     assert_eq!(arena.len(), 3);
 
-    let engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(149).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(149).unwrap());
+    let columns = collect_columns(&mut engine);
     assert_eq!(columns[0].depth(), 3, "secondary+supplementary should appear by default");
 }
 
@@ -345,9 +345,9 @@ proptest! {
             arena.push_raw(&make_record(0, offset, 99, 60, read_len)).unwrap();
         }
 
-        let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(300).unwrap());
+        let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(300).unwrap());
         let mut prev_pos: Option<u32> = None;
-        for col in engine {
+        while let Some(col) = engine.pileups() {
             let cur = *col.pos();
             if let Some(prev) = prev_pos {
                 prop_assert!(cur > prev,
@@ -373,9 +373,9 @@ proptest! {
 
         let start_u32 = start as u32;
         let end_u32 = start_u32 + len - 1;
-        let engine = PileupEngine::new(arena, Pos0::new(start_u32).unwrap(), Pos0::new(end_u32).unwrap());
+        let mut engine = PileupEngine::new(arena, Pos0::new(start_u32).unwrap(), Pos0::new(end_u32).unwrap());
 
-        for col in engine {
+        while let Some(col) = engine.pileups() {
             for aln in col.alignments() {
                 if let Some(qpos) = aln.qpos() {
                     prop_assert!(qpos < len as usize,
@@ -401,8 +401,8 @@ proptest! {
             arena.push_raw(&make_record(0, 0, 99, 60, len)).unwrap();
         }
 
-        let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(len - 1).unwrap());
-        for col in engine {
+        let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(len - 1).unwrap());
+        while let Some(col) = engine.pileups() {
             prop_assert!(col.depth() > 0);
             for aln in col.alignments() {
                 // Simple M CIGAR — only Match ops, so base and qual are always present.
@@ -436,8 +436,8 @@ proptest! {
 
         let start_u32 = start as u32;
         let region_end = start_u32 + len + trailing;
-        let engine = PileupEngine::new(arena, Pos0::new(start_u32).unwrap(), Pos0::new(region_end).unwrap());
-        let columns: Vec<_> = engine.collect();
+        let mut engine = PileupEngine::new(arena, Pos0::new(start_u32).unwrap(), Pos0::new(region_end).unwrap());
+        let columns = collect_columns(&mut engine);
 
         // Should produce exactly `len` columns, not `len + trailing`
         prop_assert_eq!(columns.len(), len as usize,
@@ -469,7 +469,7 @@ fn reference_base_matches_ref_seq() {
 
     let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
     engine.set_reference_seq(ref_seq);
-    let columns: Vec<_> = engine.collect();
+    let columns = collect_columns(&mut engine);
 
     assert_eq!(columns.len(), 10);
     for (i, col) in columns.iter().enumerate() {
@@ -488,8 +488,8 @@ fn reference_base_unknown_without_ref_seq() {
     let mut arena = RecordStore::new();
     arena.push_raw(&make_record(0, 0, 99, 60, 5)).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(4).unwrap());
-    for col in engine {
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(4).unwrap());
+    while let Some(col) = engine.pileups() {
         assert_eq!(col.reference_base(), Base::Unknown, "should be Unknown when no ref_seq set");
     }
 }
@@ -504,7 +504,7 @@ fn take_store_reuse_across_regions() {
     // Drive the engine to completion without consuming it via collect().
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(9).unwrap());
     let mut count = 0usize;
-    while engine.next().is_some() {
+    while engine.pileups().is_some() {
         count += 1;
     }
     assert_eq!(count, 10);
@@ -514,8 +514,8 @@ fn take_store_reuse_across_regions() {
     assert!(store.records_capacity() > 0, "capacity should be retained");
 
     store.push_raw(&make_record(0, 100, 99, 60, 5)).unwrap();
-    let engine2 = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(104).unwrap());
-    let columns2: Vec<_> = engine2.collect();
+    let mut engine2 = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(104).unwrap());
+    let columns2 = collect_columns(&mut engine2);
     assert_eq!(columns2.len(), 5);
     assert_eq!(columns2[0].pos(), Pos0::new(100).unwrap());
 }
@@ -526,7 +526,7 @@ fn take_store_returns_none_after_second_take() {
     arena.push_raw(&make_record(0, 0, 99, 60, 5)).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(4).unwrap());
-    while engine.next().is_some() {}
+    while engine.pileups().is_some() {}
 
     let store = engine.take_store();
     assert!(store.is_some());
@@ -550,8 +550,8 @@ proptest! {
 
         let region_start = read_start as u32 + region_start_offset;
         let region_end = read_start as u32 + read_len - 1;
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
-        let columns: Vec<_> = engine.collect();
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let columns = collect_columns(&mut engine);
 
         if !columns.is_empty() {
             prop_assert_eq!(columns[0].pos(), Pos0::new(region_start).unwrap(),
@@ -571,8 +571,8 @@ fn read_extending_past_region_end_is_truncated() {
     arena.push_raw(&make_record(0, 0, 99, 60, 100)).unwrap();
 
     // Region only covers positions 0-9, but read covers 0-99
-    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(9).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(9).unwrap());
+    let columns = collect_columns(&mut engine);
     assert_eq!(columns.len(), 10);
     assert_eq!(columns.last().unwrap().pos(), Pos0::new(9).unwrap(), "last column at region_end");
 }
@@ -594,8 +594,8 @@ proptest! {
             arena.push_raw(&make_record(0, 0, 0x4, 60, 20)).unwrap(); // unmapped flag
         }
 
-        let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
-        for col in engine {
+        let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
+        while let Some(col) = engine.pileups() {
             prop_assert_eq!(col.depth(), n_mapped,
                 "unmapped reads should be excluded, expected {} at pos {}", n_mapped, col.pos());
         }
@@ -626,8 +626,8 @@ proptest! {
             .max()
             .unwrap();
 
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
-        for col in engine {
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        while let Some(col) = engine.pileups() {
             // Only count M/=/X alignments (those with a qpos) — D/N are now included
             // in depth too, so compare match-depth against the oracle's M/=/X count.
             let match_depth = col.alignments().filter(|a| a.qpos().is_some()).count();
@@ -653,8 +653,8 @@ proptest! {
             .max()
             .unwrap();
 
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
-        for col in engine {
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        while let Some(col) = engine.pileups() {
             for aln in col.alignments() {
                 let read = &reads[aln.record_idx() as usize];
                 let expected_qpos = read.qpos_at(col.pos().as_i64());
@@ -679,10 +679,10 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span;
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
 
         let covered = read.covered_ref_positions();
-        for col in engine {
+        while let Some(col) = engine.pileups() {
             // Every ref position now yields depth 1 — M/=/X positions have qpos,
             // D/N positions have Deletion or RefSkip op without qpos.
             prop_assert_eq!(col.depth(), 1,
@@ -713,9 +713,9 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span;
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
 
-        for col in engine {
+        while let Some(col) = engine.pileups() {
             let expected_qpos = read.qpos_at(col.pos().as_i64());
             if let Some(expected) = expected_qpos {
                 prop_assert_eq!(col.depth(), 1);
@@ -741,8 +741,8 @@ proptest! {
             .max()
             .unwrap();
 
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
-        for col in engine {
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        while let Some(col) = engine.pileups() {
             prop_assert!(col.depth() > 0,
                 "empty column at pos {} with complex CIGARs", col.pos());
         }
@@ -763,8 +763,8 @@ proptest! {
             .max()
             .unwrap();
 
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
-        for col in engine {
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        while let Some(col) = engine.pileups() {
             for aln in col.alignments() {
                 if let Some(qpos) = aln.qpos() {
                     prop_assert!(qpos < aln.seq_len as usize,
@@ -804,8 +804,8 @@ fn pileup_includes_out_of_order_records() {
     // that the pileup engine requires (same as fetch_into does after cache injection)
     store.sort_by_pos();
 
-    let engine = PileupEngine::new(store, Pos0::new(80).unwrap(), Pos0::new(280).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(store, Pos0::new(80).unwrap(), Pos0::new(280).unwrap());
+    let columns = collect_columns(&mut engine);
 
     // At positions 100..150, all three reads should be active:
     // r1 (100..150), r3 (80..280), and optionally r2 doesn't reach here
@@ -852,8 +852,8 @@ fn pileup_deduplicates_cross_category_records() {
     store.sort_by_pos();
     store.dedup();
 
-    let engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(170).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(170).unwrap());
+    let columns = collect_columns(&mut engine);
 
     // At position 120, both r1 and r2 cover it, but r1 should appear only once
     let col = columns.iter().find(|c| *c.pos() == 130).expect("column at 130");

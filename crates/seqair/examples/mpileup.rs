@@ -152,10 +152,11 @@ fn main() -> anyhow::Result<()> {
             engine.set_reference_seq(rs);
         }
 
-        while let Some(column) = engine.next() {
+        while let Some(column) = engine.pileups() {
             let pos = column.pos();
             let pos1 = *pos + 1;
             let ref_base = column.reference_base();
+            let store = column.store();
 
             let mut depth = 0u32;
             bases.clear();
@@ -172,7 +173,7 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 depth += 1;
-                let rec = engine.store().record(aln.record_idx());
+                let rec = store.record(aln.record_idx());
                 let is_reverse = aln.flags.is_reverse();
 
                 // Read-start marker
@@ -186,7 +187,7 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 format_alignment(&mut bases, &aln.op, ref_base, is_reverse, || {
-                    read_inserted_bases(engine.store(), aln.record_idx(), &aln.op)
+                    read_inserted_bases(store, aln.record_idx(), &aln.op)
                 });
 
                 // Read-end marker

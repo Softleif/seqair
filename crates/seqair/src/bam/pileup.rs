@@ -94,14 +94,31 @@ struct ActiveRecord {
 
 // r[impl pileup.column_contents]
 // r[impl pileup.htslib_compat]
-#[derive(Debug)]
-pub struct PileupColumn {
+// r[impl pileup.lending_iterator]
+/// A single pileup column, borrowing the record store for the duration of its use.
+///
+/// Returned by [`PileupEngine::pileups`]. Valid until the next call to `pileups`
+/// on the same engine. Access per-record extras or slab data (qname, aux) via
+/// [`alignments`](Self::alignments), which yields [`AlignmentView`] wrappers, or
+/// via [`store`](Self::store) directly.
+pub struct PileupColumn<'store, U = ()> {
     pos: Pos0,
     reference_base: Base,
     alignments: Vec<PileupAlignment>,
+    store: &'store RecordStore<U>,
 }
 
-impl PileupColumn {
+impl<U> std::fmt::Debug for PileupColumn<'_, U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PileupColumn")
+            .field("pos", &self.pos)
+            .field("reference_base", &self.reference_base)
+            .field("depth", &self.alignments.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'store, U> PileupColumn<'store, U> {
     #[must_use]
     pub fn pos(&self) -> Pos0 {
         self.pos
@@ -113,12 +130,28 @@ impl PileupColumn {
         self.alignments.len()
     }
 
-    pub fn alignments(&self) -> impl Iterator<Item = &PileupAlignment> {
+    /// Iterate alignments with store access for per-record extras, qname, and aux.
+    ///
+    /// Each yielded [`AlignmentView`] derefs to [`PileupAlignment`] for the flat
+    /// per-position fields, and exposes [`extra`](AlignmentView::extra),
+    /// [`qname`](AlignmentView::qname), and [`aux`](AlignmentView::aux) for slab data.
+    pub fn alignments(&self) -> impl Iterator<Item = AlignmentView<'_, 'store, U>> + '_ {
+        let store = self.store;
+        self.alignments.iter().map(move |aln| AlignmentView { aln, store })
+    }
+
+    /// Iterate the raw alignments without store access (equivalent to the old API).
+    pub fn raw_alignments(&self) -> impl Iterator<Item = &PileupAlignment> + '_ {
         self.alignments.iter()
     }
 
     pub fn reference_base(&self) -> Base {
         self.reference_base
+    }
+
+    /// Borrow the record store for custom slab access (e.g., record fields by index).
+    pub fn store(&self) -> &'store RecordStore<U> {
+        self.store
     }
 
     /// Count of alignments with a query base at this position.
@@ -129,6 +162,58 @@ impl PileupColumn {
     #[must_use]
     pub fn match_depth(&self) -> usize {
         self.alignments.iter().filter(|a| a.qpos().is_some()).count()
+    }
+}
+
+/// A view over a single alignment in a column, with access to the record store.
+///
+/// Derefs to [`PileupAlignment`] so existing field and method access works
+/// unchanged. Adds [`extra`](Self::extra), [`qname`](Self::qname), and
+/// [`aux`](Self::aux) for data stored in the record store's slabs.
+// r[impl pileup.alignment_view]
+pub struct AlignmentView<'a, 'store, U> {
+    aln: &'a PileupAlignment,
+    store: &'store RecordStore<U>,
+}
+
+impl<U> std::fmt::Debug for AlignmentView<'_, '_, U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AlignmentView").field("aln", &self.aln).finish_non_exhaustive()
+    }
+}
+
+impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
+    /// The per-record extra, as computed by the extras provider / `with_extras`.
+    pub fn extra(&self) -> &'store U {
+        self.store.extra(self.aln.record_idx())
+    }
+
+    /// The read's QNAME bytes in the store's name slab.
+    pub fn qname(&self) -> &'store [u8] {
+        self.store.qname(self.aln.record_idx())
+    }
+
+    /// The raw BAM aux bytes for this record.
+    pub fn aux(&self) -> &'store [u8] {
+        self.store.aux(self.aln.record_idx())
+    }
+
+    /// The underlying [`PileupAlignment`] — use when you want to call
+    /// [`Clone::clone`] or otherwise escape the deref coercion.
+    pub fn alignment(&self) -> &'a PileupAlignment {
+        self.aln
+    }
+
+    /// The store this view references.
+    pub fn store(&self) -> &'store RecordStore<U> {
+        self.store
+    }
+}
+
+impl<U> std::ops::Deref for AlignmentView<'_, '_, U> {
+    type Target = PileupAlignment;
+    fn deref(&self) -> &PileupAlignment {
+        self.aln
     }
 }
 
@@ -356,8 +441,11 @@ impl<U> std::fmt::Debug for PileupEngine<U> {
 
 // r[impl pileup.position_iteration]
 impl<U> PileupEngine<U> {
-    /// Core iteration logic shared by `Iterator::next()` and `ColumnsWithStore::next_column()`.
-    fn advance(&mut self) -> Option<PileupColumn> {
+    /// Core iteration logic used by [`pileups`](Self::pileups).
+    ///
+    /// Returns the per-column data (pos, reference base, alignments) so the caller
+    /// can attach a store reference to build a [`PileupColumn`].
+    fn advance(&mut self) -> Option<(Pos0, Base, Vec<PileupAlignment>)> {
         loop {
             if self.current_pos > self.region_end {
                 return None;
@@ -528,47 +616,31 @@ impl<U> PileupEngine<U> {
                 self.max_active_depth = self.max_active_depth.max(depth_u32);
                 let reference_base =
                     self.ref_seq.as_ref().map_or(Base::Unknown, |r| r.base_at(pos));
-                return Some(PileupColumn { pos, reference_base, alignments });
+                return Some((pos, reference_base, alignments));
             }
         }
     }
 
-    // r[impl pileup.extras.columns_with_store]
-    /// Lending iterator that yields `(PileupColumn, &RecordStore<U>)` per position.
+    // r[impl pileup.lending_iterator]
+    /// Advance to the next pileup column.
     ///
-    /// Unlike the `Iterator` impl, this gives access to the store during iteration,
-    /// allowing callers to read per-record extras, qnames, and aux tags without
-    /// pre-extracting them.
-    pub fn columns_with_store(&mut self) -> ColumnsWithStore<'_, U> {
-        ColumnsWithStore { engine: self }
+    /// Returns `Some(PileupColumn<'_, U>)` borrowing the record store. Call
+    /// this in a `while let` loop. The column is valid until the next call to
+    /// `pileups` on the same engine.
+    ///
+    /// This is a lending iterator — the returned column holds a borrow of the
+    /// engine's store, so it cannot be collected into a `Vec` or held across
+    /// subsequent `pileups` calls. Extract primitive data (pos, depth, etc.)
+    /// if you need to retain it.
+    pub fn pileups(&mut self) -> Option<PileupColumn<'_, U>> {
+        let (pos, reference_base, alignments) = self.advance()?;
+        Some(PileupColumn { pos, reference_base, alignments, store: &self.store })
     }
-}
 
-/// Lending iterator over pileup columns with store access.
-///
-/// See [`PileupEngine::columns_with_store`].
-pub struct ColumnsWithStore<'a, U = ()> {
-    engine: &'a mut PileupEngine<U>,
-}
-
-impl<U> ColumnsWithStore<'_, U> {
-    /// Advance to the next column. Returns the owned column and an immutable
-    /// reference to the store, valid until the next call.
-    pub fn next_column(&mut self) -> Option<(PileupColumn, &RecordStore<U>)> {
-        let col = self.engine.advance()?;
-        Some((col, &self.engine.store))
-    }
-}
-
-impl<U> Iterator for PileupEngine<U> {
-    type Item = PileupColumn;
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
+    /// Remaining positions in the current region — lower-bound estimate for
+    /// pre-allocation of result vectors.
+    pub fn size_hint(&self) -> (usize, Option<usize>) {
         (0, Some(self.remaining_positions()))
-    }
-
-    fn next(&mut self) -> Option<PileupColumn> {
-        self.advance()
     }
 }
 

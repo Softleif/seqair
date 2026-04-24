@@ -416,11 +416,11 @@ impl RecordStore {
     ///     Pos0::new(103).unwrap(),
     /// );
     ///
-    /// // Use columns_with_store to access extras during iteration:
-    /// let mut cols = engine.columns_with_store();
-    /// while let Some((column, store)) = cols.next_column() {
+    /// // Iterate via the lending `pileups()` — the column borrows the store,
+    /// // and alignments expose `.extra()` for the per-record data.
+    /// while let Some(column) = engine.pileups() {
     ///     for aln in column.alignments() {
-    ///         let info = store.extra(aln.record_idx());
+    ///         let info = aln.extra();
     ///         assert!(info.is_reverse);
     ///         assert_eq!(info.qname_len, 5);
     ///     }
@@ -432,6 +432,28 @@ impl RecordStore {
             reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
         )]
         let extras: Vec<V> = (0..self.records.len()).map(|i| f(i as u32, &self)).collect();
+        self.into_parts_with_extras(extras)
+    }
+
+    // r[impl record_store.extras.provider]
+    /// Compute per-record extras using a [`RecordStoreExtras`] provider.
+    ///
+    /// Unlike [`with_extras`](Self::with_extras), the provider is a reusable
+    /// value: it can carry state and is `Clone`, so it survives calls across
+    /// regions and across [`Readers::fork`] in a multi-threaded pipeline.
+    ///
+    /// See [`RecordStoreExtras`] for the trait requirements.
+    pub fn apply_extras<E: RecordStoreExtras>(self, provider: &mut E) -> RecordStore<E::Extra> {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
+        )]
+        let extras: Vec<E::Extra> =
+            (0..self.records.len()).map(|i| provider.compute(i as u32, &self)).collect();
+        self.into_parts_with_extras(extras)
+    }
+
+    fn into_parts_with_extras<V>(self, extras: Vec<V>) -> RecordStore<V> {
         let mut records = self.records;
         // Reset extras_idx to sequential — the new extras Vec was built in
         // current record order, so extras[i] corresponds to records[i].
@@ -452,6 +474,47 @@ impl RecordStore {
             extras,
         }
     }
+}
+
+// r[impl record_store.extras.provider]
+/// Computes per-record extras for a [`RecordStore`].
+///
+/// Used by [`Readers`](crate::reader::Readers) to attach user data to every
+/// record as it is loaded. The provider itself must be `Clone` so it can be
+/// duplicated across forked readers in a multi-threaded pipeline.
+///
+/// # Example
+///
+/// ```
+/// use seqair::bam::record_store::{RecordStore, RecordStoreExtras};
+///
+/// #[derive(Clone, Default)]
+/// struct QnameLen;
+///
+/// impl RecordStoreExtras for QnameLen {
+///     type Extra = usize;
+///     fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> usize {
+///         store.qname(idx).len()
+///     }
+/// }
+/// ```
+pub trait RecordStoreExtras: Clone {
+    /// The per-record data produced by this provider.
+    type Extra;
+
+    /// Compute the extra for record `idx` in `store`.
+    fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> Self::Extra;
+}
+
+// r[impl record_store.extras.provider]
+/// Blanket no-op implementation for the default `()` case.
+///
+/// `RecordStore<()>` does not need extras; `Readers<()>` uses this to skip the
+/// `apply_extras` pass entirely when there is nothing to compute.
+impl RecordStoreExtras for () {
+    type Extra = ();
+    #[inline]
+    fn compute(&mut self, _idx: u32, _store: &RecordStore<()>) {}
 }
 
 impl<U> RecordStore<U> {

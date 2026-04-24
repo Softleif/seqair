@@ -4,11 +4,13 @@
 //! handle when no FASTA is needed. Both types are forkable for multi-threaded use.
 
 use crate::{bam::BamError, cram::reader::CramError, fasta::FastaError, sam::reader::SamError};
+use seqair_types::SmolStr;
 use std::path::PathBuf;
 
 mod formats;
 mod indexed;
 mod readers;
+mod resolve;
 
 #[cfg(feature = "fuzz")]
 mod fuzz;
@@ -16,6 +18,7 @@ mod fuzz;
 pub use formats::FormatDetectionError;
 pub use indexed::IndexedReader;
 pub use readers::Readers;
+pub use resolve::{ResolveTid, Tid, TidError};
 
 #[cfg(feature = "fuzz")]
 pub use fuzz::FuzzReaders;
@@ -56,4 +59,19 @@ pub enum ReaderError {
 
     #[error("failed to fork FASTA reader")]
     FastaFork { source: FastaError },
+
+    #[error("failed to fetch reference sequence for {contig}:{start}-{end}")]
+    FastaFetch { contig: SmolStr, start: u32, end: u32, source: FastaError },
+
+    #[error("could not resolve target id")]
+    Tid {
+        #[from]
+        source: resolve::TidError,
+    },
+
+    #[error("contig '{name}' has zero length; cannot resolve a region")]
+    EmptyContig { name: SmolStr },
+
+    #[error("region end {end} exceeds i32::MAX; not representable as Pos0")]
+    RegionEndTooLarge { end: u64 },
 }

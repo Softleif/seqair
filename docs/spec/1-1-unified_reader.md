@@ -95,21 +95,34 @@ CRAM fork: shares `Arc` holding CRAI index + header, opens fresh `File` handle f
 ## Readers: alignment + reference bundle
 
 r[unified.readers_struct]
-The `Readers` struct bundles an `IndexedReader` (alignment) with an `IndexedFastaReader` (reference) in a single type. This eliminates the need for separate FASTA path passing — CRAM can access the reference it needs for sequence reconstruction, and all formats have uniform open/fork semantics.
+The `Readers` struct bundles an `IndexedReader` (alignment) with an `IndexedFastaReader` (reference) in a single type. This eliminates the need for separate FASTA path passing — CRAM can access the reference it needs for sequence reconstruction, and all formats have uniform open/fork semantics. `Readers` is parameterized on `E: RecordStoreExtras = ()` so callers can attach a per-record extras provider at open time (see `r[record_store.extras.provider]`); the provider is run by `pileup()` after every fetch.
 
 r[unified.readers_open]
-`Readers::open(alignment_path, fasta_path)` MUST auto-detect the alignment format (via `r[unified.detect_format]`), open the appropriate reader, and open the FASTA reader. For CRAM, the fasta_path is passed to `IndexedCramReader::open()` for sequence reconstruction. For BAM/SAM, the FASTA reader is opened but not used by the alignment reader.
+`Readers::open(alignment_path, fasta_path)` MUST auto-detect the alignment format (via `r[unified.detect_format]`), open the appropriate reader, and open the FASTA reader. For CRAM, the fasta_path is passed to `IndexedCramReader::open()` for sequence reconstruction. For BAM/SAM, the FASTA reader is opened but not used by the alignment reader. `Readers::open` is only available when `E = ()`; for non-trivial providers use `open_with_extras`.
+
+r[unified.readers_open_with_extras]
+`Readers::<E>::open_with_extras(alignment_path, fasta_path, provider)` MUST open the readers the same way as `Readers::open` but carry the user-supplied provider along for `pileup()` to invoke on each fetched region. The provider value is stored by ownership inside the `Readers` struct.
 
 r[unified.readers_fork]
-`Readers::fork()` MUST fork both the alignment reader and the FASTA reader, returning a new `Readers` with independent I/O handles but shared immutable state (indices, headers). The CRAM fork gets its own FASTA reader via `IndexedFastaReader::fork()`.
+`Readers::fork()` MUST fork both the alignment reader and the FASTA reader, returning a new `Readers` with independent I/O handles but shared immutable state (indices, headers). The CRAM fork gets its own FASTA reader via `IndexedFastaReader::fork()`. When `E ≠ ()`, `fork()` MUST clone the extras provider into the new `Readers` (the `Clone` bound on `RecordStoreExtras` guarantees this is cheap).
+
+r[unified.readers_resolve_region]
+`Readers::resolve_region(region: &RegionString) -> Result<(Tid, Pos0, Pos0), ReaderError>` MUST resolve a region string against the reader's header: look up the contig by name, convert 1-based `Pos1` start/end to 0-based `Pos0`, and default missing start to `Pos0(0)` / missing end to the contig's last base (inclusive). An empty contig (length 0) MUST return `ReaderError::EmptyContig`. The returned `Tid` is a validated newtype index (see `r[unified.tid.newtype]`). The inclusive-end convention matches `PileupEngine::region_end`.
+
+r[unified.tid.newtype]
+A validated `Tid(u32)` newtype MUST wrap BAM target ids so downstream code cannot pass an unvalidated `u32`. Construction is only through the `ResolveTid::resolve_tid(header)` method, which MUST be implemented for `u32` (range-check), `&str`/`String`/`SmolStr` (by-name lookup), and `Tid` (passthrough). `ResolveTid::resolve_tid` MUST return a typed `TidError` on failure (unknown contig name or out-of-range `u32`). `Readers::pileup` MUST accept `impl ResolveTid` so callers can pass either a resolved `Tid`, a raw `u32`, or a contig name without pre-lookup.
+
+r[unified.readers_pileup]
+`Readers::pileup(tid, start, end)` MUST: (1) resolve the tid argument via `ResolveTid`; (2) call `fetch_into` to load records into the internal `RecordStore<()>`; (3) fetch the reference sequence for `[start, end]` inclusive via the FASTA reader; (4) rebuild the store as `RecordStore<E::Extra>` by running the provider over every record via `apply_extras`; (5) construct a `PileupEngine<E::Extra>` with the typed store and the fetched reference sequence pre-attached via `set_reference_seq`. The returned engine is ready for `pileups()` iteration with no further configuration required.
 
 > r[unified.readers_accessors]
 > `Readers` MUST expose:
 >
 > - `header() -> &BamHeader` — delegates to the alignment reader's header.
-> - `fetch_into(tid, start, end, store) -> Result<usize>` — delegates to the alignment reader.
+> - `fetch_into(tid, start, end, store) -> Result<usize>` — delegates to the alignment reader. Always loads into a `RecordStore<()>` (the extras-bearing store is produced by `pileup` via `apply_extras`).
 > - `fasta() -> &IndexedFastaReader` and `fasta_mut() -> &mut IndexedFastaReader` — direct access for callers that need reference sequences independently of the alignment reader (e.g., the call pipeline's segment fetching).
 > - `alignment() -> &IndexedReader` and `alignment_mut() -> &mut IndexedReader` — direct access when needed.
+> - `extras_provider() -> &E` / `extras_provider_mut() -> &mut E` — direct access to inspect or reset the provider's state between regions.
 
 r[unified.readers_backward_compat]
 `IndexedReader::open(path)` MUST continue to work for BAM and SAM files without a FASTA path. CRAM detection in `IndexedReader::open()` MUST return an error explaining that CRAM requires a reference and suggesting `Readers::open()` instead. This preserves backward compatibility for code that only needs BAM/SAM.

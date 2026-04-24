@@ -1,10 +1,17 @@
-use super::{ReaderError, indexed::IndexedReader};
+use super::{
+    ReaderError,
+    indexed::IndexedReader,
+    resolve::{ResolveTid, Tid},
+};
 use crate::{
-    bam::{BamHeader, pileup::PileupEngine, record_store::RecordStore},
+    bam::{
+        BamHeader,
+        pileup::{PileupEngine, RefSeq},
+        record_store::{RecordStore, RecordStoreExtras},
+    },
     fasta::{FastaError, IndexedFastaReader},
 };
-use seqair_types::Base;
-use seqair_types::Pos0;
+use seqair_types::{Base, Pos0, RegionString, SmolStr};
 use std::path::Path;
 use std::rc::Rc;
 use tracing::instrument;
@@ -15,40 +22,42 @@ use tracing::instrument;
 /// so that CRAM has access to the reference it needs and all formats have
 /// uniform open/fork/fetch semantics.
 ///
+/// The optional type parameter `E` attaches a [`RecordStoreExtras`] provider —
+/// user code computes per-record data once at load time and accesses it during
+/// pileup iteration via [`AlignmentView::extra`](crate::bam::pileup::AlignmentView::extra).
+/// When `E = ()` (the default), no extras are computed and the provider pass is
+/// skipped.
+///
 /// # Quick start: pileup at a genomic region
 ///
 /// ```no_run
 /// use seqair::reader::Readers;
 /// use seqair::bam::pileup::PileupOp;
-/// use seqair_types::Pos0;
 /// use std::path::Path;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Open BAM + FASTA — auto-detects BAM/SAM/CRAM
 /// let mut readers = Readers::open(Path::new("sample.bam"), Path::new("reference.fa"))?;
 ///
-/// let tid = readers.header().tid("chr19").expect("contig not found");
-/// let start = Pos0::new(6_100_000).unwrap();
-/// let end   = Pos0::new(6_200_000).unwrap();
+/// // Resolve "chr19:6_100_000-6_200_000" against the header.
+/// let region = "chr19:6100000-6200000".parse()?;
+/// let (tid, start, end) = readers.resolve_region(&region)?;
+///
+/// // `pileup()` fetches records AND the reference sequence for the region.
 /// let mut pileup = readers.pileup(tid, start, end)?;
 ///
-/// for column in pileup.by_ref() {
+/// while let Some(column) = pileup.pileups() {
 ///     let _pos      = column.pos();
 ///     let _ref_base = column.reference_base();
-///     // depth() counts all alignments; match_depth() excludes deletions/ref-skips
-///     let _depth = column.depth();
+///     let _depth    = column.depth();
 ///
 ///     for aln in column.alignments() {
 ///         match &aln.op {
-///             PileupOp::Match { base, qual, .. } => {
-///                 let _ = (base, qual);
-///             }
+///             PileupOp::Match { base, qual, .. } => { let _ = (base, qual); }
 ///             PileupOp::Insertion { base, qual, insert_len, .. } => {
 ///                 let _ = (base, qual, insert_len);
 ///             }
-///             PileupOp::Deletion { del_len } => {
-///                 let _ = del_len;
-///             }
+///             PileupOp::Deletion { del_len } => { let _ = del_len; }
 ///             PileupOp::ComplexIndel { del_len, insert_len, .. } => {
 ///                 let _ = (del_len, insert_len);
 ///             }
@@ -79,12 +88,12 @@ use tracing::instrument;
 ///     for _ in 0..4 {
 ///         let mut forked = readers.fork().unwrap();
 ///         s.spawn(move || {
-///             let pileup = forked.pileup(
-///                 0,
+///             let mut pileup = forked.pileup(
+///                 0u32,
 ///                 Pos0::new(0).unwrap(),
 ///                 Pos0::new(100_000).unwrap(),
 ///             ).unwrap();
-///             for _col in pileup { /* process */ }
+///             while let Some(_col) = pileup.pileups() { /* process */ }
 ///         });
 ///     }
 /// });
@@ -92,20 +101,21 @@ use tracing::instrument;
 /// # }
 /// ```
 // r[impl unified.readers_struct]
-pub struct Readers {
+pub struct Readers<E: RecordStoreExtras = ()> {
     pub(crate) alignment: IndexedReader,
     pub(crate) fasta: IndexedFastaReader,
-    pub(crate) store: RecordStore,
+    pub(crate) store: RecordStore<()>,
     pub(crate) fasta_buf: Vec<u8>,
+    pub(crate) extras_provider: E,
 }
 
-impl std::fmt::Debug for Readers {
+impl<E: RecordStoreExtras> std::fmt::Debug for Readers<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Readers").field("alignment", &self.alignment).finish()
     }
 }
 
-impl Readers {
+impl Readers<()> {
     /// Open an alignment file (BAM/SAM/CRAM) and a FASTA reference.
     ///
     /// Auto-detects the alignment format. For CRAM, the FASTA path is passed
@@ -113,18 +123,45 @@ impl Readers {
     // r[impl unified.readers_open]
     #[instrument(level = "debug", fields(alignment = %alignment_path.display(), fasta = %fasta_path.display()))]
     pub fn open(alignment_path: &Path, fasta_path: &Path) -> Result<Self, ReaderError> {
+        Self::open_with_extras(alignment_path, fasta_path, ())
+    }
+}
+
+impl<E: RecordStoreExtras> Readers<E> {
+    // r[impl unified.readers_open_with_extras]
+    /// Open like [`open`](Readers::open) but attach a [`RecordStoreExtras`]
+    /// provider so per-record extras are computed every time records are loaded.
+    pub fn open_with_extras(
+        alignment_path: &Path,
+        fasta_path: &Path,
+        extras_provider: E,
+    ) -> Result<Self, ReaderError> {
         let fasta = IndexedFastaReader::open(fasta_path)
             .map_err(|source| ReaderError::FastaOpen { source })?;
         let alignment = IndexedReader::open_with_fasta(alignment_path, fasta_path)?;
-        Ok(Readers { alignment, fasta, store: RecordStore::default(), fasta_buf: Vec::new() })
+        Ok(Readers {
+            alignment,
+            fasta,
+            store: RecordStore::default(),
+            fasta_buf: Vec::new(),
+            extras_provider,
+        })
     }
 
     /// Fork both the alignment reader and the FASTA reader.
+    ///
+    /// The extras provider is cloned so each fork has its own copy.
     // r[impl unified.readers_fork]
     pub fn fork(&self) -> Result<Self, ReaderError> {
         let alignment = self.alignment.fork()?;
         let fasta = self.fasta.fork().map_err(|source| ReaderError::FastaFork { source })?;
-        Ok(Readers { alignment, fasta, store: RecordStore::default(), fasta_buf: Vec::new() })
+        Ok(Readers {
+            alignment,
+            fasta,
+            store: RecordStore::default(),
+            fasta_buf: Vec::new(),
+            extras_provider: self.extras_provider.clone(),
+        })
     }
 
     // r[impl unified.readers_accessors]
@@ -137,32 +174,108 @@ impl Readers {
         tid: u32,
         start: Pos0,
         end: Pos0,
-        store: &mut RecordStore,
+        store: &mut RecordStore<()>,
     ) -> Result<usize, ReaderError> {
         self.alignment.fetch_into(tid, start, end, store)
     }
 
-    /// Configure the internal [`RecordStore`] used by `pileup()`.
-    pub fn configure_store(&mut self, f: impl FnOnce(&mut RecordStore)) {
-        f(&mut self.store);
+    /// Access the extras provider, e.g. to inspect any internal counters it carries.
+    pub fn extras_provider(&self) -> &E {
+        &self.extras_provider
     }
 
+    /// Mutable access to the extras provider, e.g. to reset state between regions.
+    pub fn extras_provider_mut(&mut self) -> &mut E {
+        &mut self.extras_provider
+    }
+
+    // r[impl unified.readers_resolve_region]
+    /// Resolve a [`RegionString`] into `(tid, start, end)` for [`pileup`](Self::pileup).
+    ///
+    /// Missing start defaults to position 1 (1-based) → `Pos0(0)`. Missing end
+    /// defaults to the contig's last base (inclusive) — so a bare `chr1`
+    /// resolves to `[0, contig_len - 1]`. Returns [`ReaderError::EmptyContig`]
+    /// if the contig has zero length.
+    pub fn resolve_region(&self, region: &RegionString) -> Result<(Tid, Pos0, Pos0), ReaderError> {
+        let tid = region.chromosome.as_str().resolve_tid(self.header())?;
+        let start_pos0 = match region.start {
+            Some(p1) => p1.to_zero_based(),
+            None => Pos0::ZERO,
+        };
+        let end_pos0 = match region.end {
+            Some(p1) => p1.to_zero_based(),
+            None => {
+                // Default end: last base of the contig (inclusive).
+                let len = self.header().target_len(tid.as_u32()).unwrap_or(0);
+                if len == 0 {
+                    return Err(ReaderError::EmptyContig { name: region.chromosome.clone() });
+                }
+                let last = len.checked_sub(1).expect("len > 0 checked above");
+                let last_u32 = u32::try_from(last)
+                    .map_err(|_| ReaderError::RegionEndTooLarge { end: last })?;
+                Pos0::new(last_u32).ok_or(ReaderError::RegionEndTooLarge { end: last })?
+            }
+        };
+        Ok((tid, start_pos0, end_pos0))
+    }
+
+    // r[impl unified.readers_pileup]
     /// Fetch records for a region and return a [`PileupEngine`] ready for iteration.
+    ///
+    /// Accepts any [`ResolveTid`] value (a `u32`, a contig name `&str`, or a
+    /// pre-resolved [`Tid`]). Always fetches the reference sequence for
+    /// `[start, end]` and attaches it to the engine, so [`PileupColumn::reference_base`]
+    /// returns real bases instead of `Unknown`.
+    ///
+    /// When `E != ()`, the extras provider is run once per record after the
+    /// records are loaded, before the engine is constructed.
     ///
     /// Uses an internal [`RecordStore`] whose capacity is retained across calls.
     /// After iterating the engine, call [`recover_store`](Self::recover_store) to
     /// return the store for reuse. If not called, the next `pileup()` call
     /// allocates a fresh store (small perf hit, not a correctness issue).
+    ///
+    /// [`PileupColumn::reference_base`]: crate::bam::pileup::PileupColumn::reference_base
     pub fn pileup(
         &mut self,
-        tid: impl ResolveTid, // TODO: trait with `.resolve_tid(&self, &bam_header) -> Result<Tid>` impl'd on &str and u32, and where `struct Tid(u32)` represents a resolved and valid tid that fetch_into accepts
+        tid: impl ResolveTid,
         start: Pos0,
         end: Pos0,
-    ) -> Result<PileupEngine, ReaderError> {
-        self.alignment.fetch_into(tid, start, end, &mut self.store)?;
+    ) -> Result<PileupEngine<E::Extra>, ReaderError> {
+        let tid = tid.resolve_tid(self.header())?;
+        self.alignment.fetch_into(tid.as_u32(), start, end, &mut self.store)?;
 
-        let store = std::mem::take(&mut self.store);
-        Ok(PileupEngine::new(store, start, end))
+        let contig = self
+            .header()
+            .target_name(tid.as_u32())
+            .ok_or_else(|| super::resolve::TidError::TidOutOfRange {
+                tid: tid.as_u32(),
+                n_targets: u32::try_from(self.header().target_count()).unwrap_or(u32::MAX),
+            })?
+            .to_owned();
+        // Fetch `[start, end]` (inclusive). FASTA APIs expect half-open [start, stop),
+        // so stop = end + 1; clamp at i32::MAX.
+        let stop =
+            end.checked_add_offset(seqair_types::Offset::new(1)).unwrap_or_else(Pos0::max_value);
+        let contig_name: SmolStr = contig.into();
+        self.fasta.fetch_seq_into(&contig_name, start, stop, &mut self.fasta_buf).map_err(
+            |source| ReaderError::FastaFetch {
+                contig: contig_name.clone(),
+                start: u32::try_from(start.as_i64().max(0)).unwrap_or(0),
+                end: u32::try_from(end.as_i64().max(0)).unwrap_or(0),
+                source,
+            },
+        )?;
+        let fasta_buf = std::mem::take(&mut self.fasta_buf);
+        let bases = Base::from_ascii_vec(fasta_buf);
+        let ref_seq = RefSeq::new(Rc::from(bases), start);
+
+        let base_store = std::mem::take(&mut self.store);
+        let typed_store = base_store.apply_extras(&mut self.extras_provider);
+
+        let mut engine = PileupEngine::new(typed_store, start, end);
+        engine.set_reference_seq(ref_seq);
+        Ok(engine)
     }
 
     // r[impl pileup.extras.recover_store]

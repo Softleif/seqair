@@ -53,14 +53,14 @@ fn example_pileup_extras() {
     let output = run_example("pileup_extras", &[&bam, &fasta, "-r", REGION]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Loaded"), "should print record count to stderr");
+    assert!(stderr.contains("Loaded pileup"), "should print region summary to stderr");
     // Header + data lines
     let lines: Vec<&str> = stdout.lines().collect();
     assert!(lines.len() > 1, "should produce header + data lines");
     assert!(lines[0].starts_with("pos\t"), "first line should be header");
-    // Data line has 6 columns
+    // Data line has 5 columns: pos, depth, ref, read_groups, mean_aligned_frac
     let data_fields: Vec<&str> = lines[1].split('\t').collect();
-    assert_eq!(data_fields.len(), 6, "data lines should have 6 columns, got: {}", lines[1]);
+    assert_eq!(data_fields.len(), 5, "data lines should have 5 columns, got: {}", lines[1]);
 }
 
 #[test]

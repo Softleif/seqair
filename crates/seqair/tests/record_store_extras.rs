@@ -1,4 +1,4 @@
-//! Tests for `RecordStore<U>` per-record extras and `PileupEngine` `columns_with_store`.
+//! Tests for `RecordStore<U>` per-record extras and `PileupEngine` `pileups()`.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -17,7 +17,7 @@
 
 mod helpers;
 
-use helpers::make_record;
+use helpers::{collect_columns, make_record};
 use seqair::bam::Pos0;
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::RecordStore;
@@ -250,43 +250,45 @@ fn engine_accepts_typed_store() {
     engine.set_filter(|flags, _aux| !flags.is_duplicate());
 
     // Verify the engine still works — iterate and check columns are produced.
-    let columns: Vec<_> = engine.collect();
+    let columns = collect_columns(&mut engine);
     assert!(!columns.is_empty());
 }
 
-// r[verify pileup.extras.columns_with_store]
+// r[verify pileup.lending_iterator]
+// r[verify pileup.alignment_view]
 #[test]
-fn columns_with_store_yields_same_columns_as_iterator() {
+fn pileups_yields_same_columns_on_unit_and_typed_store() {
     let store = store_with_n_records(5);
 
-    // Collect columns via Iterator.
+    // Collect columns via pileups() on a unit store.
     let store_copy = store_with_n_records(5);
-    let engine = PileupEngine::new(store_copy, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
-    let iter_columns: Vec<_> = engine.map(|c| (c.pos(), c.depth())).collect();
+    let mut engine =
+        PileupEngine::new(store_copy, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
+    let iter_columns: Vec<_> =
+        collect_columns(&mut engine).into_iter().map(|c| (c.pos(), c.depth())).collect();
 
-    // Collect columns via columns_with_store.
+    // Collect columns via pileups() on a typed store.
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
     let mut cws_columns = Vec::new();
-    let mut cols = engine.columns_with_store();
-    while let Some((col, _store)) = cols.next_column() {
+    while let Some(col) = engine.pileups() {
         cws_columns.push((col.pos(), col.depth()));
     }
 
     assert_eq!(iter_columns, cws_columns);
 }
 
-// r[verify pileup.extras.columns_with_store]
+// r[verify pileup.lending_iterator]
+// r[verify pileup.alignment_view]
 #[test]
-fn columns_with_store_provides_store_access() {
+fn pileups_column_exposes_store_access_via_alignment_view() {
     let store = store_with_n_records(3);
     let store = store.with_extras(|idx, s| s.record(idx).pos.as_i32());
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
 
     let mut saw_extras = false;
-    let mut cols = engine.columns_with_store();
-    while let Some((col, store)) = cols.next_column() {
+    while let Some(col) = engine.pileups() {
         for aln in col.alignments() {
-            let extra = store.extra(aln.record_idx());
+            let extra = aln.extra();
             // Extra should be the record's position.
             assert!(*extra >= 100 && *extra <= 102);
             saw_extras = true;
@@ -304,9 +306,7 @@ fn recover_store_works_with_extras_engine() {
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
 
     // Consume all columns.
-    let mut cols = engine.columns_with_store();
-    while let Some((_col, _store)) = cols.next_column() {}
-    drop(cols);
+    while engine.pileups().is_some() {}
 
     // take_store + strip_extras (the same operation recover_store does internally).
     let store = engine.take_store().expect("store should be available");
@@ -433,12 +433,11 @@ fn pileup_with_sorted_typed_store() {
 
     // Build engine with the sorted typed store.
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(114).unwrap());
-    let mut cols = engine.columns_with_store();
     let mut column_count = 0;
-    while let Some((col, store)) = cols.next_column() {
+    while let Some(col) = engine.pileups() {
         for aln in col.alignments() {
             // extras should be accessible and valid
-            let _extra = store.extra(aln.record_idx());
+            let _extra = aln.extra();
         }
         column_count += 1;
     }

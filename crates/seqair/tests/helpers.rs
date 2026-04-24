@@ -1,4 +1,7 @@
 //! Shared test helpers for building synthetic BAM records.
+//!
+//! Also provides [`OwnedPileupColumn`] and [`collect_columns`] as a drop-in
+//! replacement for the pre-lending-iterator `engine.collect::<Vec<_>>()` pattern.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -13,6 +16,50 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+
+/// Owned snapshot of a [`seqair::bam::pileup::PileupColumn`] for tests that
+/// previously relied on `engine.collect::<Vec<_>>()`. Since the new `pileups()`
+/// API is a lending iterator, tests that need to retain columns past the next
+/// advance must copy out the primitive data.
+#[derive(Debug, Clone)]
+pub struct OwnedPileupColumn {
+    pub pos: seqair_types::Pos0,
+    pub reference_base: seqair_types::Base,
+    pub alignments: Vec<seqair::bam::pileup::PileupAlignment>,
+}
+
+impl OwnedPileupColumn {
+    pub fn pos(&self) -> seqair_types::Pos0 {
+        self.pos
+    }
+    pub fn reference_base(&self) -> seqair_types::Base {
+        self.reference_base
+    }
+    pub fn depth(&self) -> usize {
+        self.alignments.len()
+    }
+    pub fn match_depth(&self) -> usize {
+        self.alignments.iter().filter(|a| a.qpos().is_some()).count()
+    }
+    pub fn alignments(&self) -> impl Iterator<Item = &seqair::bam::pileup::PileupAlignment> + '_ {
+        self.alignments.iter()
+    }
+}
+
+/// Drain all remaining columns from a pileup engine into owned snapshots.
+pub fn collect_columns<U>(
+    engine: &mut seqair::bam::pileup::PileupEngine<U>,
+) -> Vec<OwnedPileupColumn> {
+    let mut out = Vec::new();
+    while let Some(col) = engine.pileups() {
+        out.push(OwnedPileupColumn {
+            pos: col.pos(),
+            reference_base: col.reference_base(),
+            alignments: col.raw_alignments().cloned().collect(),
+        });
+    }
+    out
+}
 
 pub fn cigar_op(len: u32, op: u8) -> u32 {
     (len << 4) | u32::from(op)

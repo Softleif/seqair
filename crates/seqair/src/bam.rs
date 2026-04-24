@@ -64,7 +64,7 @@ pub use csi_index::{CsiError, CsiIndex};
 pub use header::{BamHeader, BamHeaderError, ContigInfo};
 pub use index::{AlignmentIndex, BaiError, BamIndex};
 pub use owned_record::{OwnedBamRecord, OwnedRecordError};
-pub use pileup::{ColumnsWithStore, PileupColumn, PileupEngine, PileupOp, RefSeq};
+pub use pileup::{AlignmentView, PileupColumn, PileupEngine, PileupOp, RefSeq};
 pub use reader::{BamError, BamShared, IndexedBamReader};
 pub use record::BamRecord;
 pub use record_store::RecordStore;

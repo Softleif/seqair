@@ -363,11 +363,11 @@ fn pileup_e2e(c: &mut Criterion) {
             let tid = reader.header().tid(CHROM).unwrap();
             reader.fetch_into(tid, START, END, &mut store).unwrap();
 
-            let engine = seqair::bam::PileupEngine::new(store, START, END);
+            let mut engine = seqair::bam::PileupEngine::new(store, START, END);
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
             let mut counter = Counter::new();
-            for col in engine {
+            while let Some(col) = engine.pileups() {
                 total_depth += col.depth() as u64;
                 columns += 1;
                 col.alignments().for_each(|aln| counter.count(aln.base().unwrap_or_default()));

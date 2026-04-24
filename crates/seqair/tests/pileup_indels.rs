@@ -38,8 +38,8 @@ fn deletion_positions_have_deletion_op() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(124).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(124).unwrap());
+    let columns = helpers::collect_columns(&mut engine);
 
     // Positions 100-109: Match
     for col in columns
@@ -102,8 +102,8 @@ fn refskip_positions_have_refskip_op() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(119).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(119).unwrap());
+    let columns = helpers::collect_columns(&mut engine);
 
     // Should have 120 columns: 10 match + 100 refskip + 10 match
     assert_eq!(columns.len(), 120, "should include refskip positions");
@@ -135,8 +135,8 @@ fn depth_counts_deletions_and_refskips() {
         ))
         .unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
+    let columns = helpers::collect_columns(&mut engine);
 
     // At deletion positions (5-9): depth should be 2 (one Match + one Deletion)
     let col7 = columns.iter().find(|c| c.pos() == Pos0::new(7).unwrap()).unwrap();
@@ -160,8 +160,8 @@ fn insertion_reported_at_last_match_before_insert() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
+    let columns = helpers::collect_columns(&mut engine);
     assert_eq!(columns.len(), 20);
 
     // Position 9 (last base before insertion): should be Insertion with insert_len=3
@@ -217,8 +217,8 @@ fn complex_indel_at_last_deletion_position() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
+    let columns = helpers::collect_columns(&mut engine);
 
     // Position 9 (last match before D): should be plain Match, NOT Insertion
     // because the insertion follows the deletion, not this match
@@ -275,8 +275,8 @@ fn insertion_before_deletion() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
+    let columns = helpers::collect_columns(&mut engine);
 
     // pos 9: last M before I → should be Insertion with insert_len=3
     let col9 = columns.iter().find(|c| c.pos() == Pos0::new(9).unwrap()).unwrap();
@@ -322,8 +322,8 @@ fn insertion_with_anchor_and_complex_indel_after_deletion() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
+    let columns = helpers::collect_columns(&mut engine);
 
     // pos 9: last M before first I → Insertion with insert_len=2
     let col9 = columns.iter().find(|c| c.pos() == Pos0::new(9).unwrap()).unwrap();
@@ -378,8 +378,8 @@ fn minimal_insertion_1m_1i_1m() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(1).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(1).unwrap());
+    let columns = helpers::collect_columns(&mut engine);
     assert_eq!(columns.len(), 2);
 
     // pos 0: single base that is BOTH first and last of its M block → Insertion
@@ -417,8 +417,8 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
-        let columns: Vec<_> = engine.collect();
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let columns = helpers::collect_columns(&mut engine);
 
         // With deletions/refskips included, every position in ref_span should have a column
         prop_assert_eq!(columns.len(), read.ref_span as usize,
@@ -434,10 +434,10 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
 
         let covered = read.covered_ref_positions();
-        for col in engine {
+        while let Some(col) = engine.pileups() {
             let aln = col.alignments().next().unwrap();
             if covered.contains(&col.pos().as_i64()) {
                 prop_assert!(aln.qpos().is_some(),
@@ -465,9 +465,9 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
 
-        for col in engine {
+        while let Some(col) = engine.pileups() {
             let aln = col.alignments().next().unwrap();
             let rpos = col.pos().as_i64();
             match read.del_len_at(rpos) {
@@ -493,9 +493,9 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
 
-        for col in engine {
+        while let Some(col) = engine.pileups() {
             let aln = col.alignments().next().unwrap();
             if aln.is_del() {
                 prop_assert!(aln.del_len() > 0,
@@ -516,8 +516,8 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
-        let engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
-        let columns: Vec<_> = engine.collect();
+        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let columns = helpers::collect_columns(&mut engine);
 
         // Group consecutive deletion columns and verify they all have the same del_len
         let mut i = 0;

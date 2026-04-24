@@ -201,7 +201,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut n_calls = 0u32;
 
-    for column in pileup.by_ref() {
+    while let Some(column) = pileup.pileups() {
         let ref_base = column.reference_base();
         // Skip positions where the reference is unknown (N).
         if ref_base == Base::Unknown {

@@ -53,8 +53,8 @@ proptest! {
             expected_depth[i] = running.max(0) as usize;
         }
 
-        let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(300).unwrap());
-        for col in engine {
+        let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(300).unwrap());
+        while let Some(col) = engine.pileups() {
             let pos = col.pos().as_usize();
             let exp = expected_depth.get(pos).copied().unwrap_or(0);
             prop_assert_eq!(col.depth(), exp, "depth wrong at pos {}", col.pos());
@@ -75,8 +75,8 @@ fn already_sorted_records_produce_correct_pileup() {
     arena.push_raw(&make_record(0, 20, 99, 60, 30)).unwrap();
     arena.push_raw(&make_record(0, 30, 99, 60, 30)).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(70).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(70).unwrap());
+    let columns = helpers::collect_columns(&mut engine);
 
     // pos 10-19: 1 read
     assert_eq!(columns.iter().find(|c| c.pos() == Pos0::new(15).unwrap()).unwrap().depth(), 1);
@@ -100,7 +100,7 @@ fn single_arena_get_per_record_entry_still_correct() {
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(59).unwrap());
     engine.set_filter(|flags, _aux| !flags.is_secondary());
-    let columns: Vec<_> = engine.collect();
+    let columns = helpers::collect_columns(&mut engine);
 
     // Only the mapq=60 read should pass the filter
     for col in &columns {
@@ -131,8 +131,8 @@ fn cigar_index_from_arena_slab_correct() {
     );
     arena.push_raw(&raw).unwrap();
 
-    let engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(154).unwrap());
-    let columns: Vec<_> = engine.collect();
+    let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(154).unwrap());
+    let columns = helpers::collect_columns(&mut engine);
 
     // Before deletion: qpos = pos - 100
     let col = columns.iter().find(|c| c.pos() == Pos0::new(110).unwrap()).unwrap();

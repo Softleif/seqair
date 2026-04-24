@@ -62,13 +62,16 @@ When a reference position falls within the soft-clipped portion of a read's alig
 ## Per-record extras in pileup
 
 r[pileup.extras.generic_param]
-`PileupEngine` MUST accept a type parameter `U` (default `()`) matching its `RecordStore<U>`. When `U` is `()`, the engine MUST behave identically to the non-generic version — the `Iterator` impl, column construction, and all existing APIs MUST be unchanged.
+`PileupEngine` MUST accept a type parameter `U` (default `()`) matching its `RecordStore<U>`. When `U` is `()`, the engine MUST behave identically to the non-generic version — column construction and all non-extras-specific APIs MUST be unchanged.
 
 r[pileup.extras.constructor_accepts_any_u]
-`PileupEngine::new` MUST accept `RecordStore<U>` for any `U`. Callers MUST compute extras on the store (via `RecordStore::with_extras`) before constructing the engine. There is no engine-level `with_extras` method — the constructor is the only entry point.
+`PileupEngine::new` MUST accept `RecordStore<U>` for any `U`. Callers MUST compute extras on the store (via `RecordStore::with_extras` or `RecordStore::apply_extras` for a [`RecordStoreExtras`](../../crates/seqair/src/bam/record_store.rs) provider) before constructing the engine. There is no engine-level `with_extras` method — the constructor is the only entry point.
 
-r[pileup.extras.columns_with_store]
-`PileupEngine<U>` MUST provide `columns_with_store(&mut self) -> ColumnsWithStore<'_, U>`. `ColumnsWithStore` MUST provide `next_column(&mut self) -> Option<(PileupColumn, &RecordStore<U>)>` that yields the same columns as the `Iterator` impl but additionally provides an immutable reference to the store. This allows callers to access per-record extras (and other slab data like qnames and aux) during iteration without pre-extraction.
+r[pileup.lending_iterator]
+`PileupEngine<U>` MUST expose iteration via a single lending method `pileups(&mut self) -> Option<PileupColumn<'_, U>>`. The returned `PileupColumn<'store, U>` MUST borrow the engine's store for the duration of its use. `PileupEngine` MUST NOT implement `Iterator` — the store borrow held by each column would be incompatible with `Iterator::next`'s `&mut self` contract. Callers MUST use a `while let Some(col) = engine.pileups() { ... }` loop.
+
+r[pileup.alignment_view]
+`PileupColumn<'store, U>::alignments(&self)` MUST yield `AlignmentView<'_, 'store, U>` items. `AlignmentView` MUST deref to `PileupAlignment` so existing field and method access on alignments is unchanged. `AlignmentView` MUST additionally provide `extra(&self) -> &'store U`, `qname(&self) -> &'store [u8]`, and `aux(&self) -> &'store [u8]` methods that read from the borrowed store without additional arguments. `PileupColumn` MUST also expose `raw_alignments()` yielding `&PileupAlignment` for callers that do not need store access.
 
 r[pileup.extras.recover_store]
 `Readers::recover_store` MUST accept `PileupEngine<U>` for any `U`. It MUST strip extras via `RecordStore::strip_extras` before storing the recovered `RecordStore<()>` for reuse.

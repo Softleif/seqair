@@ -82,7 +82,7 @@ fn pileup_alignment_has_base_type() {
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(103).unwrap());
     engine.set_max_depth(1000);
 
-    let col = engine.next().expect("should have a column");
+    let col = engine.pileups().expect("should have a column");
     let aln = col.alignments().next().expect("should have an alignment");
 
     // aln.base() returns Option<Base> — this verifies the type via the convenience method

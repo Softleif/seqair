@@ -11,6 +11,8 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+mod helpers;
+
 use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
 use seqair::bam::Pos0;
 use seqair::bam::aux::{AuxValue, find_tag as find_aux_tag};
@@ -210,12 +212,12 @@ fn all_contigs_pileup_positions_and_depth_match() {
             )
             .expect("fetch");
 
-        let engine = seqair::bam::PileupEngine::new(
+        let mut engine = seqair::bam::PileupEngine::new(
             store,
             Pos0::new(start as u32).unwrap(),
             Pos0::new(end as u32).unwrap(),
         );
-        let rio: Vec<_> = engine.collect();
+        let rio = helpers::collect_columns(&mut engine);
 
         assert_eq!(
             rio.len(),
@@ -261,12 +263,12 @@ fn all_contigs_pileup_qpos_and_flags_match() {
             )
             .expect("fetch");
 
-        let engine = seqair::bam::PileupEngine::new(
+        let mut engine = seqair::bam::PileupEngine::new(
             store,
             Pos0::new(start as u32).unwrap(),
             Pos0::new(end as u32).unwrap(),
         );
-        let rio: Vec<_> = engine.collect();
+        let rio = helpers::collect_columns(&mut engine);
 
         for (col_idx, (r, h)) in rio.iter().zip(&hts).enumerate() {
             let mut qf: Vec<(usize, u16)> =
@@ -318,12 +320,12 @@ fn all_contigs_pileup_bases_match() {
             )
             .expect("fetch");
 
-        let engine = seqair::bam::PileupEngine::new(
+        let mut engine = seqair::bam::PileupEngine::new(
             store,
             Pos0::new(start as u32).unwrap(),
             Pos0::new(end as u32).unwrap(),
         );
-        let rio: Vec<_> = engine.collect();
+        let rio = helpers::collect_columns(&mut engine);
 
         for (col_idx, (r, h)) in rio.iter().zip(&hts).enumerate() {
             let mut bases: Vec<u8> =

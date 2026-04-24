@@ -14,6 +14,8 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+
 use rust_htslib::bam::pileup::Indel;
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::Pos0;
@@ -110,7 +112,7 @@ fn fetch_seqair_pileup_region(
     region: &str,
     start: u64,
     end: u64,
-) -> Vec<seqair::bam::PileupColumn> {
+) -> Vec<helpers::OwnedPileupColumn> {
     let bam_path = test_bam_path();
     let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("seqair open");
     let mut store = seqair::bam::RecordStore::new();
@@ -123,12 +125,12 @@ fn fetch_seqair_pileup_region(
             &mut store,
         )
         .expect("seqair fetch");
-    seqair::bam::PileupEngine::new(
+    let mut engine = seqair::bam::PileupEngine::new(
         store,
         Pos0::new(start as u32).unwrap(),
         Pos0::new(end as u32).unwrap(),
-    )
-    .collect()
+    );
+    helpers::collect_columns(&mut engine)
 }
 
 // r[verify pileup.htslib_compat]
@@ -151,12 +153,12 @@ fn pileup_positions_match() {
         )
         .expect("seqair fetch");
 
-    let engine = seqair::bam::PileupEngine::new(
+    let mut engine = seqair::bam::PileupEngine::new(
         store,
         Pos0::new(TEST_START as u32).unwrap(),
         Pos0::new(TEST_END as u32).unwrap(),
     );
-    let columns: Vec<_> = engine.collect();
+    let columns = helpers::collect_columns(&mut engine);
 
     let hts_positions: Vec<u32> = hts_columns.iter().map(|c| c.pos).collect();
     let positions: Vec<u32> = columns.iter().map(|c| *c.pos()).collect();
@@ -194,12 +196,12 @@ fn pileup_depth_matches() {
         )
         .expect("seqair fetch");
 
-    let engine = seqair::bam::PileupEngine::new(
+    let mut engine = seqair::bam::PileupEngine::new(
         store,
         Pos0::new(TEST_START as u32).unwrap(),
         Pos0::new(TEST_END as u32).unwrap(),
     );
-    let columns: Vec<_> = engine.collect();
+    let columns = helpers::collect_columns(&mut engine);
 
     for (i, (rio, hts)) in columns.iter().zip(hts_columns.iter()).enumerate() {
         // htslib depth includes deletions; alignments.len() only counts bases with qpos.
@@ -243,12 +245,12 @@ fn pileup_qpos_matches() {
         )
         .expect("seqair fetch");
 
-    let engine = seqair::bam::PileupEngine::new(
+    let mut engine = seqair::bam::PileupEngine::new(
         store,
         Pos0::new(TEST_START as u32).unwrap(),
         Pos0::new(TEST_END as u32).unwrap(),
     );
-    let columns: Vec<_> = engine.collect();
+    let columns = helpers::collect_columns(&mut engine);
 
     for (col_idx, (rio, hts)) in columns.iter().zip(hts_columns.iter()).enumerate() {
         let mut alns: Vec<(usize, u16)> =
@@ -314,7 +316,7 @@ fn deletion_ops_match_htslib() {
     assert_eq!(hts_cols.len(), seq_cols.len(), "column count mismatch");
 
     // Build position lookup for seqair columns to enable anchor→deletion cross-validation.
-    let seq_by_pos: std::collections::HashMap<u32, &seqair::bam::PileupColumn> =
+    let seq_by_pos: std::collections::HashMap<u32, &helpers::OwnedPileupColumn> =
         seq_cols.iter().map(|c| (*c.pos(), c)).collect();
 
     for (i, (hts, seq)) in hts_cols.iter().zip(seq_cols.iter()).enumerate() {
