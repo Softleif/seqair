@@ -661,3 +661,87 @@ fn keep_record_drops_low_mapq_records_via_fetch_into_filtered() {
     // FetchCounts invariant
     let _: FetchCounts = counts_none;
 }
+
+// r[verify cram.fetch_into_filtered.push_time]
+#[test]
+fn cram_fetch_into_filtered_applies_filter_at_push_time() {
+    use seqair::bam::record_store::SlimRecord;
+    use seqair::cram::reader::IndexedCramReader;
+    use seqair::reader::FetchCounts;
+
+    let workspace_data = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/data");
+    let cram_path = workspace_data.join("test_v30.cram");
+    let fasta_path = workspace_data.join("test.fasta.gz");
+    if !cram_path.exists() || !fasta_path.exists() {
+        return; // skip if test data not available in this workspace layout
+    }
+
+    let mut reader = IndexedCramReader::open(&cram_path, &fasta_path).expect("open CRAM");
+    let tid = reader.header().tid("chr19").expect("chr19 missing from CRAM header");
+    let region_start = Pos0::new(6_103_076).unwrap();
+    let region_end = Pos0::new(6_143_229).unwrap();
+    let mut store = RecordStore::new();
+
+    // Baseline: always-keep — kept == fetched and matches the sparse fetch_into count.
+    let counts_all = reader
+        .fetch_into_filtered(
+            tid,
+            region_start,
+            region_end,
+            &mut store,
+            |_: &SlimRecord, _: &RecordStore| true,
+        )
+        .expect("fetch_into_filtered all");
+    assert!(counts_all.fetched > 0, "test region should produce records");
+    assert_eq!(counts_all.kept, counts_all.fetched, "always-keep must keep everything");
+    assert_eq!(store.len(), counts_all.kept);
+
+    // Snapshot positions of all fetched records — we'll use them as an oracle
+    // for the mixed filter below.
+    let mut all_positions: Vec<i64> =
+        (0..store.len() as u32).map(|i| store.record(i).pos.as_i64()).collect();
+    all_positions.sort_unstable();
+
+    // Drop-all: fetched unchanged, kept == 0. The store (including all slabs)
+    // must be empty after rollback — this is the zero-waste guarantee the
+    // previous retain-based implementation couldn't provide.
+    let counts_none = reader
+        .fetch_into_filtered(
+            tid,
+            region_start,
+            region_end,
+            &mut store,
+            |_: &SlimRecord, _: &RecordStore| false,
+        )
+        .expect("fetch_into_filtered none");
+    assert_eq!(counts_none.fetched, counts_all.fetched, "fetched must be filter-independent");
+    assert_eq!(counts_none.kept, 0, "drop-all must yield no kept records");
+    assert_eq!(store.len(), 0, "store must be empty after drop-all (rollback)");
+
+    // Mixed filter: keep records whose pos is even. Use an independent oracle
+    // (slice-and-filter the baseline positions) to verify the survivors.
+    let counts_mixed = reader
+        .fetch_into_filtered(
+            tid,
+            region_start,
+            region_end,
+            &mut store,
+            |rec: &SlimRecord, _: &RecordStore| rec.pos.as_i64() % 2 == 0,
+        )
+        .expect("fetch_into_filtered mixed");
+    assert_eq!(counts_mixed.fetched, counts_all.fetched, "fetched must be filter-independent");
+    let expected_kept: usize = all_positions.iter().filter(|p| *p % 2 == 0).count();
+    assert_eq!(counts_mixed.kept, expected_kept, "filter result must match oracle");
+    assert_eq!(store.len(), expected_kept);
+    for i in 0..store.len() as u32 {
+        assert_eq!(store.record(i).pos.as_i64() % 2, 0, "record {i} failed filter predicate");
+    }
+
+    // FetchCounts invariant: the type is `Copy + Default`.
+    let _: FetchCounts = counts_mixed;
+}

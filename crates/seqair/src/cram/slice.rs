@@ -10,7 +10,10 @@ use super::{
     reader::CramError,
     varint,
 };
-use crate::bam::{BamHeader, record_store::RecordStore};
+use crate::bam::{
+    BamHeader,
+    record_store::{RecordStore, SlimRecord},
+};
 use rustc_hash::FxHashMap;
 use seqair_types::{BamFlags, Base, Pos0, Pos1};
 use tracing::warn;
@@ -93,11 +96,18 @@ impl SliceHeader {
 ///
 /// `container_data` starts at the first block after the container header.
 /// `slice_offset` is the byte offset from container data start to this slice's header block.
+///
+/// `keep` is a push-time filter: each record that passes the reader's built-in
+/// overlap/tid/unmapped checks is pushed and then consulted via this closure.
+/// When `keep` returns `false`, the push is rolled back with zero slab waste
+/// (same as BAM/SAM). Returns `(fetched, kept)` where `fetched` counts records
+/// that reached the push step and `kept` counts those that survived the filter.
+// r[impl cram.fetch_into_filtered.push_time]
 #[expect(
     clippy::too_many_arguments,
     reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
 )]
-pub fn decode_slice(
+pub fn decode_slice<F>(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
@@ -112,7 +122,11 @@ pub fn decode_slice(
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
-) -> Result<usize, CramError> {
+    keep: &mut F,
+) -> Result<(usize, usize), CramError>
+where
+    F: FnMut(&SlimRecord, &RecordStore) -> bool,
+{
     let slice_data = container_data
         .get(slice_offset..)
         .ok_or(CramError::Truncated { context: "slice offset" })?;
@@ -135,7 +149,7 @@ pub fn decode_slice(
 
     // r[impl cram.edge.empty_slice]
     if sh.num_records == 0 {
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     // r[impl cram.edge.reference_mismatch]
@@ -205,7 +219,8 @@ pub fn decode_slice(
 
     // Decode records, collecting mate cross-reference info for TLEN reconstruction.
     let mut alignment_pos = i64::from(sh.alignment_start);
-    let mut records_pushed = 0usize;
+    let mut fetched_count = 0usize;
+    let mut kept_count = 0usize;
     let num_records = usize::try_from(sh.num_records)
         .map_err(|_| CramError::InvalidLength { value: sh.num_records })?;
     let mut mate_infos: Vec<SliceMateInfo> = Vec::with_capacity(num_records);
@@ -221,7 +236,7 @@ pub fn decode_slice(
             ref_start_0based
         };
 
-        let (count, mate_info) = decode_record(
+        let (fetched, mate_info) = decode_record(
             ch,
             &sh,
             is_multi_ref,
@@ -239,29 +254,39 @@ pub fn decode_slice(
             qual_buf,
             aux_buf,
             record_index,
+            keep,
         )?;
+        if fetched {
+            fetched_count = fetched_count.wrapping_add(1);
+            if mate_info.store_idx.is_some() {
+                kept_count = kept_count.wrapping_add(1);
+            }
+        }
         mate_infos.push(mate_info);
-        records_pushed = records_pushed.wrapping_add(count);
     }
 
     // Post-process: resolve template_len for attached/downstream mates.
     // Follow mate_line chains to compute alignment span, then assign signed TLEN.
     resolve_mate_tlen(&mate_infos, store);
 
-    Ok(records_pushed)
+    Ok((fetched_count, kept_count))
 }
 
 /// Decode a single CRAM record from the decode context.
 ///
-/// Returns `(count, mate_info)` where `count` is 1 if the record was pushed to the
-/// store and 0 if filtered out, and `mate_info` contains the position and mate-link
-/// data needed for post-processing TLEN of attached mates.
+/// Returns `(fetched, mate_info)` where `fetched` is `true` if the record
+/// reached the push step (i.e., was not rejected by the reader's built-in
+/// overlap/tid/unmapped checks) and `false` otherwise. `mate_info.store_idx`
+/// is `Some(idx)` if the record survived both the reader check and the user's
+/// `keep` filter, and `None` if either the reader or the filter dropped it —
+/// the mate-resolution pass already handles the `None` case.
 // r[impl cram.record.decode_order]
+// r[impl cram.fetch_into_filtered.push_time]
 #[expect(
     clippy::too_many_arguments,
     reason = "CRAM record decoding requires compression header, slice header, context, and filter parameters"
 )]
-fn decode_record(
+fn decode_record<F>(
     ch: &CompressionHeader,
     sh: &SliceHeader,
     is_multi_ref: bool,
@@ -279,7 +304,11 @@ fn decode_record(
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
     record_index: usize,
-) -> Result<(usize, SliceMateInfo), CramError> {
+    keep: &mut F,
+) -> Result<(bool, SliceMateInfo), CramError>
+where
+    F: FnMut(&SlimRecord, &RecordStore) -> bool,
+{
     let ds = &ch.data_series;
 
     // r[impl cram.record.flags]
@@ -461,7 +490,7 @@ fn decode_record(
         )]
         if record_ref_id != tid as i32 {
             return Ok((
-                0,
+                false,
                 SliceMateInfo {
                     pos: pos_0based.as_i64(),
                     end_pos: end_pos_raw,
@@ -476,7 +505,7 @@ fn decode_record(
         // Check overlap with query region
         if pos_0based >= query_end || end_pos <= query_start {
             return Ok((
-                0,
+                false,
                 SliceMateInfo {
                     pos: pos_0based.as_i64(),
                     end_pos: end_pos_raw,
@@ -490,34 +519,36 @@ fn decode_record(
 
         let qname: &[u8] = &read_name;
 
-        let store_idx = store
-            .push_fields(
-                pos_0based,
-                end_pos,
-                bam_flags,
-                mapq,
-                result.matching_bases,
-                result.indel_bases,
-                qname,
-                cigar_buf,
-                bases_buf,
-                qual_buf,
-                aux_buf,
-                record_ref_id,
-                next_ref_id_val,
-                next_pos_val,
-                template_len_val,
-                |_, _| true,
-            )?
-            .expect("no filter: push_fields always returns Some");
+        // r[impl cram.fetch_into_filtered.push_time]
+        // Push the record, then consult the user's filter. `push_fields`
+        // returns `Ok(None)` when the filter rejects and rolls back slab
+        // writes with zero waste (same as BAM/SAM).
+        let store_idx = store.push_fields(
+            pos_0based,
+            end_pos,
+            bam_flags,
+            mapq,
+            result.matching_bases,
+            result.indel_bases,
+            qname,
+            cigar_buf,
+            bases_buf,
+            qual_buf,
+            aux_buf,
+            record_ref_id,
+            next_ref_id_val,
+            next_pos_val,
+            template_len_val,
+            |rec, s| keep(rec, s),
+        )?;
 
         return Ok((
-            1,
+            true,
             SliceMateInfo {
                 pos: pos_0based.as_i64(),
                 end_pos: end_pos_raw,
                 mate_line,
-                store_idx: Some(store_idx),
+                store_idx,
                 bam_flags: raw_flags,
                 ref_id: record_ref_id,
             },
@@ -545,7 +576,7 @@ fn decode_record(
     // r[impl cram.edge.unmapped_reads]
     // Unmapped reads — skip for fetch_into (same as BAM/SAM)
     Ok((
-        0,
+        false,
         SliceMateInfo {
             pos: -1,
             end_pos: -1,
@@ -1099,6 +1130,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
+            &mut |_: &SlimRecord, _: &RecordStore| true,
         );
 
         assert!(

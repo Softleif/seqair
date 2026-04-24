@@ -381,52 +381,6 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         &self.shared.header
     }
 
-    // r[impl unified.fetch_into_filtered]
-    /// Filter-aware variant: delegates to `fetch_into` and then applies a
-    /// post-fetch retain pass. Unlike BAM/SAM (which filter at push time with
-    /// zero slab waste), CRAM records that fail the filter stay in the slabs
-    /// as dead data until the next [`RecordStore::clear`]. The `fetched` vs
-    /// `kept` distinction in [`FetchCounts`](crate::reader::FetchCounts) lets
-    /// callers tell how much was dropped.
-    pub fn fetch_into_filtered<F>(
-        &mut self,
-        tid: u32,
-        start: Pos0,
-        end: Pos0,
-        store: &mut RecordStore,
-        mut keep: F,
-    ) -> Result<crate::reader::FetchCounts, CramError>
-    where
-        F: FnMut(&super::super::bam::record_store::SlimRecord, &RecordStore) -> bool,
-    {
-        let fetched = self.fetch_into(tid, start, end, store)?;
-        // The `keep` closure needs `&RecordStore` plus each record. We split
-        // the borrow by snapshotting positions into an index vector — simpler
-        // than plumbing the filter through every CRAM decode path.
-        let mut drop_idx: Vec<u32> = Vec::new();
-        for i in 0..store.len() {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "store.len() bounded by SlabOverflow (u32)"
-            )]
-            let idx = i as u32;
-            let rec_ref = store.record(idx);
-            if !keep(rec_ref, store) {
-                drop_idx.push(idx);
-            }
-        }
-        if !drop_idx.is_empty() {
-            let keep_set: std::collections::HashSet<u32> = drop_idx.into_iter().collect();
-            let mut cursor: u32 = 0;
-            store.retain(|_| {
-                let keep_this = !keep_set.contains(&cursor);
-                cursor = cursor.saturating_add(1);
-                keep_this
-            });
-        }
-        Ok(crate::reader::FetchCounts { fetched, kept: store.len() })
-    }
-
     // r[impl region_buf.not_cram]
     // r[impl cram.container.region_skip]
     // r[impl cram.perf.slice_granularity]
@@ -440,6 +394,28 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, CramError> {
+        self.fetch_into_filtered(tid, start, end, store, |_, _| true).map(|c| c.kept)
+    }
+
+    // r[impl unified.fetch_into_filtered]
+    // r[impl cram.fetch_into_filtered.push_time]
+    /// Filter-aware variant: each record that passes the reader's built-in
+    /// overlap/tid/unmapped checks is pushed into the store and then consulted
+    /// against `keep`. Rejection triggers the same zero-waste rollback used by
+    /// BAM/SAM — the slabs are truncated back to their pre-push lengths.
+    /// The returned [`FetchCounts`](crate::reader::FetchCounts) reports
+    /// `fetched` (produced by the reader) vs `kept` (survived the filter).
+    pub fn fetch_into_filtered<F>(
+        &mut self,
+        tid: u32,
+        start: Pos0,
+        end: Pos0,
+        store: &mut RecordStore,
+        mut keep: F,
+    ) -> Result<crate::reader::FetchCounts, CramError>
+    where
+        F: FnMut(&super::super::bam::record_store::SlimRecord, &RecordStore) -> bool,
+    {
         store.clear();
 
         let start_u64 = start.as_u64();
@@ -451,8 +427,11 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         )]
         let entries = self.shared.index.query(tid as i32, start_u64, end_u64);
         if entries.is_empty() {
-            return Ok(0);
+            return Ok(crate::reader::FetchCounts::default());
         }
+
+        let mut fetched_total = 0usize;
+        let mut kept_total = 0usize;
 
         // Group entries by container_offset (multiple slices may be in same container)
         let mut container_offsets: Vec<u64> = entries.iter().map(|e| e.container_offset).collect();
@@ -571,7 +550,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     .map_err(|_| CramError::InvalidLength { value: landmark })?;
 
                 // r[impl cram.edge.coordinate_clamp]
-                slice::decode_slice(
+                let (slice_fetched, slice_kept) = slice::decode_slice(
                     &ch,
                     &self.container_buf,
                     slice_offset,
@@ -586,11 +565,14 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &mut self.bases_buf,
                     &mut self.qual_buf,
                     &mut self.aux_buf,
+                    &mut keep,
                 )?;
+                fetched_total = fetched_total.wrapping_add(slice_fetched);
+                kept_total = kept_total.wrapping_add(slice_kept);
             }
         }
 
-        Ok(store.len())
+        Ok(crate::reader::FetchCounts { fetched: fetched_total, kept: kept_total })
     }
 }
 

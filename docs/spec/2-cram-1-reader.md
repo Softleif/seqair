@@ -65,6 +65,9 @@ The file MUST end with an EOF container. The EOF container produced by samtools 
 r[cram.container.region_skip]
 During `fetch_into`, the reader MUST skip containers whose `[alignment_start, alignment_start + alignment_span)` range does not overlap the query region. The CRAI index provides byte offsets for this.
 
+r[cram.fetch_into_filtered.push_time]
+`IndexedCramReader::fetch_into_filtered` MUST apply the user's `keep` closure at push time, not post-hoc. The filter is threaded through `decode_slice` → `decode_record` into `RecordStore::push_fields`, so a rejected record's slab writes are rolled back with zero waste (matching BAM/SAM). Each record reaching the push step counts toward `FetchCounts::fetched` regardless of the filter's verdict; only records the filter keeps count toward `FetchCounts::kept`. Records that fail the reader's own overlap/tid/unmapped checks are not counted in either field. Filtered-out mates still appear in the per-slice `mate_infos` vector with `store_idx = None`, so `resolve_mate_tlen` can see them for span computation but will not write TLEN/mate-pos fields back to them.
+
 ### Slices
 
 > _[CRAM3] §8.4 "Slice header block" — slice header fields, multi-ref slices, embedded reference, reference_md5_
