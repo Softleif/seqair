@@ -16,7 +16,7 @@ mod resolve;
 mod fuzz;
 
 pub use formats::FormatDetectionError;
-pub use indexed::IndexedReader;
+pub use indexed::{FetchCounts, IndexedReader};
 pub use readers::Readers;
 pub use resolve::{ResolveTid, Tid, TidError};
 

@@ -23,7 +23,7 @@ fn decode_standard_bases() {
     // packed_seq: 0x12 = A(1)|C(2), 0x48 = G(4)|T(8) → ACGT
     let raw = make_record(&[0x12, 0x48], 4);
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw).unwrap();
+    let idx = store.push_raw(&raw, |_, _| true).unwrap().expect("kept");
 
     assert_eq!(store.seq_at(idx, 0), Base::A);
     assert_eq!(store.seq_at(idx, 1), Base::C);
@@ -38,7 +38,7 @@ fn decode_unknown_and_n() {
     // 0x0F = =(0)|N(15)
     let raw = make_record(&[0x0F], 2);
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw).unwrap();
+    let idx = store.push_raw(&raw, |_, _| true).unwrap().expect("kept");
 
     assert_eq!(store.seq_at(idx, 0), Base::Unknown);
     assert_eq!(store.seq_at(idx, 1), Base::Unknown);
@@ -51,7 +51,7 @@ fn decode_iupac_ambiguity_maps_to_unknown() {
     // 0x35 = M(3)|R(5)
     let raw = make_record(&[0x35], 2);
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw).unwrap();
+    let idx = store.push_raw(&raw, |_, _| true).unwrap().expect("kept");
 
     assert_eq!(store.seq_at(idx, 0), Base::Unknown);
     assert_eq!(store.seq_at(idx, 1), Base::Unknown);
@@ -62,7 +62,7 @@ fn decode_iupac_ambiguity_maps_to_unknown() {
 fn bases_stored_in_separate_slab() {
     let raw = make_record(&[0x12, 0x48], 4);
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw).unwrap();
+    let idx = store.push_raw(&raw, |_, _| true).unwrap().expect("kept");
 
     // Access the full base slice — should be 4 Base values
     let bases = store.seq(idx);
@@ -77,7 +77,7 @@ fn pileup_alignment_has_base_type() {
 
     let raw = make_record(&[0x12, 0x48], 4);
     let mut store = RecordStore::new();
-    store.push_raw(&raw).unwrap();
+    store.push_raw(&raw, |_, _| true).unwrap();
 
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(103).unwrap());
     engine.set_max_depth(1000);

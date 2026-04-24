@@ -381,6 +381,52 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         &self.shared.header
     }
 
+    // r[impl unified.fetch_into_filtered]
+    /// Filter-aware variant: delegates to `fetch_into` and then applies a
+    /// post-fetch retain pass. Unlike BAM/SAM (which filter at push time with
+    /// zero slab waste), CRAM records that fail the filter stay in the slabs
+    /// as dead data until the next [`RecordStore::clear`]. The `fetched` vs
+    /// `kept` distinction in [`FetchCounts`](crate::reader::FetchCounts) lets
+    /// callers tell how much was dropped.
+    pub fn fetch_into_filtered<F>(
+        &mut self,
+        tid: u32,
+        start: Pos0,
+        end: Pos0,
+        store: &mut RecordStore,
+        mut keep: F,
+    ) -> Result<crate::reader::FetchCounts, CramError>
+    where
+        F: FnMut(&super::super::bam::record_store::SlimRecord, &RecordStore) -> bool,
+    {
+        let fetched = self.fetch_into(tid, start, end, store)?;
+        // The `keep` closure needs `&RecordStore` plus each record. We split
+        // the borrow by snapshotting positions into an index vector — simpler
+        // than plumbing the filter through every CRAM decode path.
+        let mut drop_idx: Vec<u32> = Vec::new();
+        for i in 0..store.len() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "store.len() bounded by SlabOverflow (u32)"
+            )]
+            let idx = i as u32;
+            let rec_ref = store.record(idx);
+            if !keep(rec_ref, store) {
+                drop_idx.push(idx);
+            }
+        }
+        if !drop_idx.is_empty() {
+            let keep_set: std::collections::HashSet<u32> = drop_idx.into_iter().collect();
+            let mut cursor: u32 = 0;
+            store.retain(|_| {
+                let keep_this = !keep_set.contains(&cursor);
+                cursor = cursor.saturating_add(1);
+                keep_this
+            });
+        }
+        Ok(crate::reader::FetchCounts { fetched, kept: store.len() })
+    }
+
     // r[impl region_buf.not_cram]
     // r[impl cram.container.region_skip]
     // r[impl cram.perf.slice_granularity]

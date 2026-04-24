@@ -182,11 +182,31 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, BamError> {
+        self.fetch_into_filtered(tid, start, end, store, |_, _| true).map(|c| c.kept)
+    }
+
+    // r[impl unified.fetch_into_filtered]
+    /// Filter-aware variant: each record that passes the reader's built-in
+    /// checks is pushed, then the user's `keep` closure decides whether to
+    /// retain it. Rejected records roll back their slab writes. The returned
+    /// [`FetchCounts`] reports `fetched` (produced by the reader) vs `kept`
+    /// (survived the filter).
+    pub fn fetch_into_filtered<F>(
+        &mut self,
+        tid: u32,
+        start: Pos0,
+        end: Pos0,
+        store: &mut RecordStore,
+        mut keep: F,
+    ) -> Result<crate::reader::FetchCounts, BamError>
+    where
+        F: FnMut(&super::record_store::SlimRecord, &RecordStore) -> bool,
+    {
         store.clear();
 
         let chunks = self.shared.index.query(tid, start, end);
         if chunks.is_empty() {
-            return Ok(0);
+            return Ok(crate::reader::FetchCounts::default());
         }
 
         let tid_i32 = validate_tid(tid)?;
@@ -195,6 +215,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         let mut skipped_unmapped: u32 = 0;
         let mut skipped_out_of_range: u32 = 0;
         let mut accepted: u32 = 0;
+        let mut kept_count: usize = 0;
 
         // Scratch buffer for the rare case where a record body straddles a BGZF
         // block boundary; zero-copy slice from RegionBuf::buf is used otherwise.
@@ -258,12 +279,14 @@ impl<R: Read + Seek> IndexedBamReader<R> {
                     }
 
                     accepted = accepted.saturating_add(1);
-                    store.push_raw(raw)?;
+                    if store.push_raw(raw, &mut keep)?.is_some() {
+                        kept_count = kept_count.saturating_add(1);
+                    }
                 }
             }
         }
 
-        Ok(store.len())
+        Ok(crate::reader::FetchCounts { fetched: accepted as usize, kept: kept_count })
     }
 }
 

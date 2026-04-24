@@ -301,6 +301,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
                 &mut bases_buf,
                 &mut qual_buf,
                 &mut aux_buf,
+                &mut |_, _| true,
             )?;
         }
 
@@ -328,11 +329,26 @@ impl<R: Read + Seek> IndexedSamReader<R> {
         end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, SamError> {
+        self.fetch_into_filtered(tid, start, end, store, |_, _| true).map(|c| c.kept)
+    }
+
+    // r[impl unified.fetch_into_filtered]
+    pub fn fetch_into_filtered<F>(
+        &mut self,
+        tid: u32,
+        start: Pos0,
+        end: Pos0,
+        store: &mut RecordStore,
+        mut keep: F,
+    ) -> Result<crate::reader::FetchCounts, SamError>
+    where
+        F: FnMut(&super::super::bam::record_store::SlimRecord, &RecordStore) -> bool,
+    {
         store.clear();
 
         let chunks = self.shared.index.query(tid, start, end);
         if chunks.is_empty() {
-            return Ok(0);
+            return Ok(crate::reader::FetchCounts::default());
         }
 
         let mut region = RegionBuf::load(&mut self.bulk_reader, &chunks)?;
@@ -348,6 +364,8 @@ impl<R: Read + Seek> IndexedSamReader<R> {
         let mut bases_buf = Vec::with_capacity(256);
         let mut qual_buf = Vec::with_capacity(256);
         let mut aux_buf = Vec::with_capacity(256);
+        let mut fetched: usize = 0;
+        let mut kept: usize = 0;
 
         for chunk in &chunks {
             region.seek_virtual(chunk.begin)?;
@@ -376,7 +394,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                     }
 
                     // Parse the SAM line
-                    if parse_sam_line(
+                    if let Some(outcome) = parse_sam_line(
                         &line_buf,
                         &self.shared.header,
                         tid_i32,
@@ -387,9 +405,12 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                         &mut bases_buf,
                         &mut qual_buf,
                         &mut aux_buf,
-                    )? == Some(())
-                    {
-                        // record was added to store
+                        &mut keep,
+                    )? {
+                        fetched = fetched.saturating_add(1);
+                        if outcome {
+                            kept = kept.saturating_add(1);
+                        }
                     }
 
                     line_buf.clear();
@@ -403,8 +424,8 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                 if line_buf.last() == Some(&b'\r') {
                     line_buf.pop();
                 }
-                if !line_buf.is_empty() {
-                    parse_sam_line(
+                if !line_buf.is_empty()
+                    && let Some(outcome) = parse_sam_line(
                         &line_buf,
                         &self.shared.header,
                         tid_i32,
@@ -415,13 +436,19 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                         &mut bases_buf,
                         &mut qual_buf,
                         &mut aux_buf,
-                    )?;
+                        &mut keep,
+                    )?
+                {
+                    fetched = fetched.saturating_add(1);
+                    if outcome {
+                        kept = kept.saturating_add(1);
+                    }
                 }
                 line_buf.clear();
             }
         }
 
-        Ok(store.len())
+        Ok(crate::reader::FetchCounts { fetched, kept })
     }
 }
 
@@ -430,7 +457,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
     clippy::too_many_arguments,
     reason = "SAM line parsing needs header, filter, region, store, and per-record output parameters"
 )]
-fn parse_sam_line(
+fn parse_sam_line<F>(
     line: &[u8],
     header: &BamHeader,
     tid_filter: i32,
@@ -441,7 +468,11 @@ fn parse_sam_line(
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
-) -> Result<Option<()>, SamError> {
+    keep: &mut F,
+) -> Result<Option<bool>, SamError>
+where
+    F: FnMut(&super::super::bam::record_store::SlimRecord, &RecordStore) -> bool,
+{
     let fields: Vec<&[u8]> = line.splitn(12, |&b| b == b'\t').collect();
     if fields.len() < 11 {
         return Err(SamRecordError::TooFewFields { found: fields.len() }.into());
@@ -573,25 +604,28 @@ fn parse_sam_line(
 
     let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_buf);
 
-    store.push_fields(
-        pos,
-        end_pos,
-        flags,
-        mapq,
-        matching_bases,
-        indel_bases,
-        qname,
-        cigar_buf,
-        bases_buf,
-        qual_buf,
-        aux_buf,
-        rec_tid,
-        next_ref_id,
-        next_pos,
-        template_len,
-    )?;
+    let kept = store
+        .push_fields(
+            pos,
+            end_pos,
+            flags,
+            mapq,
+            matching_bases,
+            indel_bases,
+            qname,
+            cigar_buf,
+            bases_buf,
+            qual_buf,
+            aux_buf,
+            rec_tid,
+            next_ref_id,
+            next_pos,
+            template_len,
+            |rec, s| keep(rec, s),
+        )?
+        .is_some();
 
-    Ok(Some(()))
+    Ok(Some(kept))
 }
 
 // r[impl sam.record.cigar_parse]
@@ -948,7 +982,7 @@ mod tests {
         (RecordStore::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
     }
 
-    fn call_parse(line: &[u8], header: &BamHeader) -> Result<Option<()>, SamError> {
+    fn call_parse(line: &[u8], header: &BamHeader) -> Result<Option<bool>, SamError> {
         let (mut store, mut cigar_buf, mut bases_buf, mut qual_buf, mut aux_buf) =
             make_store_and_bufs();
         parse_sam_line(
@@ -962,6 +996,7 @@ mod tests {
             &mut bases_buf,
             &mut qual_buf,
             &mut aux_buf,
+            &mut |_, _| true,
         )
     }
 
@@ -1085,7 +1120,7 @@ mod tests {
         header: &BamHeader,
         start: i64,
         end: i64,
-    ) -> Result<(Option<()>, RecordStore), SamError> {
+    ) -> Result<(Option<bool>, RecordStore), SamError> {
         let (mut store, mut cigar_buf, mut bases_buf, mut qual_buf, mut aux_buf) =
             make_store_and_bufs();
         let result = parse_sam_line(
@@ -1099,6 +1134,7 @@ mod tests {
             &mut bases_buf,
             &mut qual_buf,
             &mut aux_buf,
+            &mut |_, _| true,
         )?;
         Ok((result, store))
     }

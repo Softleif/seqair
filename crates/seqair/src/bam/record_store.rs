@@ -155,10 +155,21 @@ impl RecordStore {
     }
 
     // r[impl record_store.extras.push_unit]
-    /// Decode a raw BAM record and append to the store.
+    // r[impl record_store.pre_filter.rollback]
+    /// Decode a raw BAM record, append it, then consult `keep` to decide
+    /// whether to commit or roll back.
     ///
-    /// Variable-length data is written directly into the slabs.
-    pub fn push_raw(&mut self, raw: &[u8]) -> Result<u32, DecodeError> {
+    /// Returns `Ok(Some(idx))` if the record was kept, `Ok(None)` if the filter
+    /// rejected it (in which case all slab writes are truncated back to their
+    /// pre-push lengths — no waste). Use `|_, _| true` for no filtering.
+    ///
+    /// The filter sees both the freshly-parsed [`SlimRecord`] and the `&self`
+    /// store, so it can read qname, aux, etc. of the pending record (those
+    /// bytes live at the tail of the corresponding slabs until rollback).
+    pub fn push_raw<F>(&mut self, raw: &[u8], mut keep: F) -> Result<Option<u32>, DecodeError>
+    where
+        F: FnMut(&SlimRecord, &Self) -> bool,
+    {
         let h = record::parse_header(raw)?;
 
         let idx = u32::try_from(self.records.len()).map_err(|_| DecodeError::SlabOverflow)?;
@@ -257,22 +268,53 @@ impl RecordStore {
         });
         self.extras.push(());
 
-        Ok(idx)
+        // r[impl record_store.pre_filter.rollback]
+        if keep(
+            self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
+            self,
+        ) {
+            Ok(Some(idx))
+        } else {
+            self.rollback_last_push();
+            Ok(None)
+        }
+    }
+
+    // r[impl record_store.pre_filter.rollback]
+    /// Undo the most recent `push_raw`/`push_fields` by truncating every slab
+    /// to the offsets recorded on the last `SlimRecord`. Only valid when the
+    /// last record is the freshly-pushed one (no subsequent `sort`/`dedup`).
+    fn rollback_last_push(&mut self) {
+        let rec = self.records.pop().expect("rollback_last_push called with empty records Vec");
+        self.extras
+            .pop()
+            .expect("push_raw/push_fields always append a matching () to extras before filter");
+        self.names.truncate(rec.name_off as usize);
+        self.bases.truncate(rec.bases_off as usize);
+        self.cigar.truncate(rec.cigar_off as usize);
+        self.qual.truncate(rec.qual_off as usize);
+        self.aux.truncate(rec.aux_off as usize);
     }
 
     // r[impl unified.record_store_push]
     // r[impl record_store.push_fields]
     // r[impl unified.push_fields_equivalence]
     // r[impl record_store.checked_offsets]
-    /// Append a record from pre-parsed fields (for SAM/CRAM readers).
+    // r[impl record_store.pre_filter.rollback]
+    /// Append a record from pre-parsed fields (for SAM/CRAM readers), then
+    /// consult `keep` to decide whether to commit or roll back.
     ///
     /// Writes directly into the slabs without going through BAM binary encoding.
     /// CIGAR must be in BAM packed u32 format (`len << 4 | op`).
+    ///
+    /// Returns `Ok(Some(idx))` if kept, `Ok(None)` if `keep` rejected the
+    /// record (all slab writes are truncated back). Use `|_, _| true` to
+    /// disable filtering.
     #[expect(
         clippy::too_many_arguments,
         reason = "all fields are needed for zero-copy push into the record store slabs"
     )]
-    pub fn push_fields(
+    pub fn push_fields<F>(
         &mut self,
         pos: Pos0,
         end_pos: Pos0,
@@ -289,7 +331,11 @@ impl RecordStore {
         next_ref_id: i32,
         next_pos: i32,
         template_len: i32,
-    ) -> Result<u32, DecodeError> {
+        mut keep: F,
+    ) -> Result<Option<u32>, DecodeError>
+    where
+        F: FnMut(&SlimRecord, &Self) -> bool,
+    {
         if qual.len() != bases.len() {
             return Err(DecodeError::QualLenMismatch {
                 qual_len: qual.len(),
@@ -366,15 +412,25 @@ impl RecordStore {
         });
         self.extras.push(());
 
-        Ok(idx)
+        // r[impl record_store.pre_filter.rollback]
+        if keep(
+            self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
+            self,
+        ) {
+            Ok(Some(idx))
+        } else {
+            self.rollback_last_push();
+            Ok(None)
+        }
     }
 
-    // r[impl record_store.extras.with_extras]
-    /// Compute per-record extras in a single pass, consuming this `RecordStore<()>`.
+    // r[impl record_store.extras.provider]
+    /// Compute per-record extras using a [`RecordStoreExtras`] provider,
+    /// consuming this `RecordStore<()>` and producing `RecordStore<E::Extra>`.
     ///
-    /// The closure receives `(record_index, &RecordStore<()>)` so it can access
-    /// any slab (record fields, aux, seq, qname, etc.). All existing slabs are
-    /// moved, not copied.
+    /// All existing slabs are moved, not copied. The provider sees each
+    /// record's index and the whole `&RecordStore<()>`, so it can read any
+    /// slab (record fields, aux, seq, qname).
     ///
     /// # Example
     ///
@@ -383,41 +439,42 @@ impl RecordStore {
     /// ```
     /// use seqair::bam::{Pos0, RecordStore};
     /// use seqair::bam::pileup::PileupEngine;
+    /// use seqair::bam::record_store::RecordStoreExtras;
     /// use seqair_types::{BamFlags, Base};
     ///
-    /// // Per-record data computed at load time.
-    /// struct ReadInfo {
-    ///     is_reverse: bool,
-    ///     qname_len: usize,
+    /// #[derive(Debug, Clone, Default)]
+    /// struct ReadInfoBuilder;
+    ///
+    /// #[derive(Debug)]
+    /// struct ReadInfo { is_reverse: bool, qname_len: usize }
+    ///
+    /// impl RecordStoreExtras for ReadInfoBuilder {
+    ///     type Extra = ReadInfo;
+    ///     fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> ReadInfo {
+    ///         let rec = store.record(idx);
+    ///         ReadInfo {
+    ///             is_reverse: rec.flags.is_reverse(),
+    ///             qname_len: store.qname(idx).len(),
+    ///         }
+    ///     }
     /// }
     ///
-    /// // After loading records into a RecordStore<()>...
     /// let mut store = RecordStore::new();
     /// # let cigar = (4u32 << 4).to_le_bytes(); // 4M
     /// # store.push_fields(
     /// #     Pos0::new(100).unwrap(), Pos0::new(103).unwrap(),
     /// #     BamFlags::from(0x10), 60, 4, 0, b"read1", &cigar,
     /// #     &[Base::A, Base::C, Base::G, Base::T], &[30; 4], &[], 0, -1, 0, 0,
+    /// #     |_, _| true,
     /// # ).unwrap();
     ///
-    /// // Compute extras from record fields:
-    /// let store = store.with_extras(|idx, store| {
-    ///     let rec = store.record(idx);
-    ///     ReadInfo {
-    ///         is_reverse: rec.flags.is_reverse(),
-    ///         qname_len: store.qname(idx).len(),
-    ///     }
-    /// });
-    ///
-    /// // Build a pileup engine with the extras-bearing store:
+    /// let store = store.apply_extras(&mut ReadInfoBuilder);
     /// let mut engine = PileupEngine::new(
     ///     store,
     ///     Pos0::new(100).unwrap(),
     ///     Pos0::new(103).unwrap(),
     /// );
     ///
-    /// // Iterate via the lending `pileups()` — the column borrows the store,
-    /// // and alignments expose `.extra()` for the per-record data.
     /// while let Some(column) = engine.pileups() {
     ///     for aln in column.alignments() {
     ///         let info = aln.extra();
@@ -426,23 +483,6 @@ impl RecordStore {
     ///     }
     /// }
     /// ```
-    pub fn with_extras<V>(self, mut f: impl FnMut(u32, &Self) -> V) -> RecordStore<V> {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
-        )]
-        let extras: Vec<V> = (0..self.records.len()).map(|i| f(i as u32, &self)).collect();
-        self.into_parts_with_extras(extras)
-    }
-
-    // r[impl record_store.extras.provider]
-    /// Compute per-record extras using a [`RecordStoreExtras`] provider.
-    ///
-    /// Unlike [`with_extras`](Self::with_extras), the provider is a reusable
-    /// value: it can carry state and is `Clone`, so it survives calls across
-    /// regions and across [`Readers::fork`] in a multi-threaded pipeline.
-    ///
-    /// See [`RecordStoreExtras`] for the trait requirements.
     pub fn apply_extras<E: RecordStoreExtras>(self, provider: &mut E) -> RecordStore<E::Extra> {
         #[expect(
             clippy::cast_possible_truncation,
@@ -502,6 +542,22 @@ pub trait RecordStoreExtras: Clone {
     /// The per-record data produced by this provider.
     type Extra;
 
+    // r[impl record_store.pre_filter.provider_hook]
+    /// Pre-filter: called on each freshly-pushed record BEFORE extras are
+    /// computed. Returning `false` rolls back the slab writes for this
+    /// record — it is as if the record was never fetched.
+    ///
+    /// Default: keep every record.
+    ///
+    /// The filter sees the pushed [`SlimRecord`] (with its `pos`, `flags`,
+    /// `mapq`, etc.) and the `&RecordStore<()>` for reading slab-backed
+    /// data like qname, aux, and sequence bytes. The freshly-pushed record
+    /// is at the tail of each slab, so all of its bytes are accessible.
+    #[inline]
+    fn keep_record(&mut self, _rec: &SlimRecord, _store: &RecordStore<()>) -> bool {
+        true
+    }
+
     /// Compute the extra for record `idx` in `store`.
     fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> Self::Extra;
 }
@@ -510,7 +566,9 @@ pub trait RecordStoreExtras: Clone {
 /// Blanket no-op implementation for the default `()` case.
 ///
 /// `RecordStore<()>` does not need extras; `Readers<()>` uses this to skip the
-/// `apply_extras` pass entirely when there is nothing to compute.
+/// `apply_extras` pass entirely when there is nothing to compute. The default
+/// `keep_record` from the trait (always `true`) means `Readers<()>` never
+/// filters either.
 impl RecordStoreExtras for () {
     type Extra = ();
     #[inline]
@@ -557,6 +615,22 @@ impl<U> RecordStore<U> {
                 }
             }
         });
+    }
+
+    // r[impl record_store.pre_filter.retain]
+    /// Drop records for which `predicate` returns `false`.
+    ///
+    /// Unlike [`push_raw`](Self::push_raw)'s per-record filter (which rolls
+    /// back slab writes at push time), `retain` runs after records are
+    /// already committed. Slab data for removed records is left in place —
+    /// dead bytes until [`clear`](Self::clear). Prefer the push-time filter
+    /// where possible; this method is for paths like CRAM where the decoder
+    /// can't be instrumented with a filter callback.
+    pub fn retain<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&SlimRecord) -> bool,
+    {
+        self.records.retain(|rec| predicate(rec));
     }
 
     // --- Accessors ---
@@ -868,7 +942,7 @@ mod tests {
         raw[12..14].copy_from_slice(&u16::MAX.to_le_bytes()); // n_cigar_ops
         raw[16..20].copy_from_slice(&u32::MAX.to_le_bytes()); // seq_len
 
-        let result = store.push_raw(&raw);
+        let result = store.push_raw(&raw, |_, _| true);
         assert!(result.is_err());
     }
 
@@ -880,7 +954,7 @@ mod tests {
         // Directly inflate the names slab past u32::MAX to trigger overflow
         // We can't actually allocate 4GB in a test, so we test the check path
         // by verifying the function returns Result (compile-time check)
-        let result: Result<u32, _> = store.push_fields(
+        let result: Result<Option<u32>, _> = store.push_fields(
             Pos0::new(0).unwrap(),
             Pos0::new(0).unwrap(),
             BamFlags::empty(),
@@ -896,6 +970,7 @@ mod tests {
             -1, // next_ref_id
             0,  // next_pos
             0,  // template_len
+            |_, _| true,
         );
         assert!(result.is_ok());
     }
@@ -905,7 +980,7 @@ mod tests {
     fn push_raw_normal_record_succeeds() {
         let mut store = RecordStore::new();
         let raw = make_raw_record(b"read1", 4, 1);
-        let result = store.push_raw(&raw);
+        let result = store.push_raw(&raw, |_, _| true);
         assert!(result.is_ok());
         assert_eq!(store.len(), 1);
     }
@@ -917,8 +992,131 @@ mod tests {
         let mut raw = make_raw_record(b"read1", 4, 1);
         // Write next_ref_id = 7 at BAM offset 20
         raw[20..24].copy_from_slice(&7i32.to_le_bytes());
-        store.push_raw(&raw).unwrap();
+        store.push_raw(&raw, |_, _| true).unwrap();
         assert_eq!(store.record(0).next_ref_id, 7);
+    }
+
+    // r[verify record_store.pre_filter.rollback]
+    #[test]
+    fn push_raw_with_rejecting_filter_truncates_all_slabs() {
+        let mut store = RecordStore::new();
+
+        // Push record A (kept)
+        let a = make_raw_record(b"read1", 4, 1);
+        let idx_a = store.push_raw(&a, |_, _| true).unwrap();
+        assert_eq!(idx_a, Some(0));
+        let after_a = (
+            store.records.len(),
+            store.names.len(),
+            store.bases.len(),
+            store.cigar.len(),
+            store.qual.len(),
+            store.aux.len(),
+            store.extras.len(),
+        );
+
+        // Push record B (rejected by filter) — all slab extensions must roll back
+        let b = make_raw_record(b"read2", 8, 2);
+        let idx_b = store.push_raw(&b, |_, _| false).unwrap();
+        assert_eq!(idx_b, None, "rejected record must not yield an index");
+
+        let after_b = (
+            store.records.len(),
+            store.names.len(),
+            store.bases.len(),
+            store.cigar.len(),
+            store.qual.len(),
+            store.aux.len(),
+            store.extras.len(),
+        );
+        assert_eq!(after_a, after_b, "slab lengths must match pre-reject state exactly");
+
+        // Push record C (kept) — indexing must continue from idx 1 (B was never committed)
+        let c = make_raw_record(b"read3", 4, 1);
+        let idx_c = store.push_raw(&c, |_, _| true).unwrap();
+        assert_eq!(idx_c, Some(1), "rejected record must not consume an index");
+        assert_eq!(store.len(), 2, "store should hold A and C only");
+    }
+
+    // r[verify record_store.pre_filter.rollback]
+    #[test]
+    fn push_raw_filter_can_read_slim_record_and_store() {
+        let mut store = RecordStore::new();
+        // Push a record with mapq = 0 via the default make_raw_record.
+        let raw = make_raw_record(b"readX", 4, 1);
+        let kept_idx = store
+            .push_raw(&raw, |rec, s| {
+                // Filter sees the SlimRecord and store; verifies we can
+                // read qname from the freshly-pushed record at the tail.
+                assert_eq!(rec.mapq, 0);
+                let qname = &s.names[rec.name_off as usize..][..rec.name_len as usize];
+                assert_eq!(qname, b"readX");
+                true
+            })
+            .unwrap();
+        assert_eq!(kept_idx, Some(0));
+    }
+
+    // r[verify record_store.pre_filter.rollback]
+    #[test]
+    fn push_fields_with_rejecting_filter_rolls_back() {
+        use seqair_types::Base;
+        let mut store = RecordStore::new();
+
+        // Push one kept record first
+        store
+            .push_fields(
+                Pos0::new(0).unwrap(),
+                Pos0::new(4).unwrap(),
+                BamFlags::empty(),
+                30,
+                4,
+                0,
+                b"kept",
+                &(4u32 << 4).to_le_bytes(),
+                &[Base::A, Base::C, Base::G, Base::T],
+                &[30, 31, 32, 33],
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                |_, _| true,
+            )
+            .unwrap();
+
+        let names_len = store.names.len();
+        let bases_len = store.bases.len();
+        let cigar_len = store.cigar.len();
+        let qual_len = store.qual.len();
+
+        // Push a rejected one
+        let rejected = store
+            .push_fields(
+                Pos0::new(10).unwrap(),
+                Pos0::new(14).unwrap(),
+                BamFlags::empty(),
+                30,
+                4,
+                0,
+                b"dropped",
+                &(4u32 << 4).to_le_bytes(),
+                &[Base::A, Base::C, Base::G, Base::T],
+                &[30, 31, 32, 33],
+                b"NM:i:0",
+                0,
+                -1,
+                0,
+                0,
+                |_, _| false,
+            )
+            .unwrap();
+        assert_eq!(rejected, None);
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.names.len(), names_len);
+        assert_eq!(store.bases.len(), bases_len);
+        assert_eq!(store.cigar.len(), cigar_len);
+        assert_eq!(store.qual.len(), qual_len);
     }
 
     // r[verify record_store.slim_record_fields]
@@ -943,8 +1141,357 @@ mod tests {
                 3,   // next_ref_id
                 500, // next_pos
                 200, // template_len
+                |_, _| true,
             )
             .unwrap();
         assert_eq!(store.record(0).next_ref_id, 3);
+    }
+
+    // ---- Model-based property tests for rollback ----
+    //
+    // The rollback invariant: pushing a sequence of records with per-record
+    // accept/reject decisions MUST produce a store byte-identical to pushing
+    // only the accepted records in order with no filter. That is, a rollback
+    // must perfectly undo both the records Vec push and all slab extensions,
+    // leaving zero dead bytes.
+    mod rollback_props {
+        use super::super::*;
+        use proptest::prelude::*;
+        use seqair_types::{BamFlags, Base};
+
+        /// A synthetic push input covering every slab. Fields are bounded to
+        /// small sizes so proptest can generate long sequences without
+        /// exhausting memory.
+        #[derive(Debug, Clone)]
+        struct PushInput {
+            qname: Vec<u8>,
+            bases: Vec<Base>,
+            quals: Vec<u8>,
+            aux: Vec<u8>,
+            pos: u32,
+            mapq: u8,
+            /// Single M op whose length matches `bases.len()`; kept trivial so
+            /// the invariant we're testing stays isolated to rollback, not
+            /// CIGAR math.
+            accept: bool,
+        }
+
+        impl PushInput {
+            fn cigar_packed(&self) -> [u8; 4] {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "bases.len() is bounded by strategy (≤ 16)"
+                )]
+                let op = (self.bases.len() as u32) << 4;
+                op.to_le_bytes()
+            }
+
+            fn end_pos(&self) -> Pos0 {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "bases.len() ≤ 16, pos ≤ 1000 — sum fits in u32"
+                )]
+                let end = self.pos + self.bases.len() as u32;
+                Pos0::new(end).expect("bounded by strategy to < i32::MAX")
+            }
+        }
+
+        fn arb_base() -> impl Strategy<Value = Base> {
+            prop_oneof![
+                Just(Base::A),
+                Just(Base::C),
+                Just(Base::G),
+                Just(Base::T),
+                Just(Base::Unknown),
+            ]
+        }
+
+        fn arb_push_input() -> impl Strategy<Value = PushInput> {
+            (
+                // qname: 1..16 ASCII bytes without NUL
+                prop::collection::vec(1u8..=126, 1..=16),
+                // bases: 1..16 bases (non-empty so qual len matches)
+                prop::collection::vec(arb_base(), 1..=16),
+                // aux: 0..32 bytes (NOT parsed, so any bytes OK)
+                prop::collection::vec(any::<u8>(), 0..=32),
+                0u32..1_000_000,
+                0u8..=60,
+                any::<bool>(),
+            )
+                .prop_map(|(qname, bases, aux, pos, mapq, accept)| {
+                    let quals = bases.iter().map(|_| 30u8).collect();
+                    PushInput { qname, bases, quals, aux, pos, mapq, accept }
+                })
+        }
+
+        /// Push one `PushInput` into the store via `push_fields`, honoring its
+        /// accept flag. Returns the new record index if kept.
+        #[allow(
+            clippy::expect_used,
+            clippy::unwrap_in_result,
+            reason = "proptest synthetic input bounded by strategy; panic on violation is informative"
+        )]
+        fn push_one(store: &mut RecordStore<()>, input: &PushInput) -> Option<u32> {
+            let cigar = input.cigar_packed();
+            #[expect(clippy::cast_possible_truncation, reason = "bases.len() bounded ≤ 16")]
+            let matching = input.bases.len() as u32;
+            store
+                .push_fields(
+                    Pos0::new(input.pos).expect("strategy bounds pos < 1_000_000"),
+                    input.end_pos(),
+                    BamFlags::empty(),
+                    input.mapq,
+                    matching,
+                    0,
+                    &input.qname,
+                    &cigar,
+                    &input.bases,
+                    &input.quals,
+                    &input.aux,
+                    0,
+                    -1,
+                    0,
+                    0,
+                    |_, _| input.accept,
+                )
+                .expect("push_fields must not error on synthetic input")
+        }
+
+        /// Push one record with the accept flag ignored (used for the
+        /// no-filter reference store that only receives kept records).
+        fn push_kept(store: &mut RecordStore<()>, input: &PushInput) -> u32 {
+            let mut forced_keep = input.clone();
+            forced_keep.accept = true;
+            push_one(store, &forced_keep).expect("accept=true always yields Some")
+        }
+
+        /// Snapshot of all slab contents + record/extras counts — used by the
+        /// rollback proptest as the equivalence model.
+        type SlabSnapshot = (usize, Vec<u8>, Vec<Base>, Vec<u8>, Vec<u8>, Vec<u8>, usize);
+
+        fn dump_slabs(store: &RecordStore<()>) -> SlabSnapshot {
+            (
+                store.records.len(),
+                store.names.clone(),
+                store.bases.clone(),
+                store.cigar.clone(),
+                store.qual.clone(),
+                store.aux.clone(),
+                store.extras.len(),
+            )
+        }
+
+        proptest! {
+            // r[verify record_store.pre_filter.rollback]
+            /// Model check: pushing a mixed accept/reject sequence yields the
+            /// same state as pushing only the accepted inputs with no filter.
+            /// This is the strongest guarantee — it catches silent slab
+            /// corruption that size-only checks would miss.
+            #[test]
+            fn push_fields_rollback_matches_filtered_replay(
+                inputs in prop::collection::vec(arb_push_input(), 0..=60),
+            ) {
+                // Store A: push all inputs with per-record filter (rollback path).
+                let mut a = RecordStore::new();
+                for inp in &inputs {
+                    push_one(&mut a, inp);
+                }
+
+                // Store B: push only accepted inputs with always-keep filter.
+                let mut b = RecordStore::new();
+                for inp in inputs.iter().filter(|i| i.accept) {
+                    push_kept(&mut b, inp);
+                }
+
+                // Every slab must be byte-identical. Records too — we compare
+                // their individual fields since SlimRecord doesn't derive Eq.
+                prop_assert_eq!(a.records.len(), b.records.len(), "records len");
+                for (ra, rb) in a.records.iter().zip(b.records.iter()) {
+                    prop_assert_eq!(ra.pos, rb.pos);
+                    prop_assert_eq!(ra.end_pos, rb.end_pos);
+                    prop_assert_eq!(ra.flags, rb.flags);
+                    prop_assert_eq!(ra.mapq, rb.mapq);
+                    prop_assert_eq!(ra.seq_len, rb.seq_len);
+                    prop_assert_eq!(ra.name_off, rb.name_off, "name_off");
+                    prop_assert_eq!(ra.name_len, rb.name_len, "name_len");
+                    prop_assert_eq!(ra.bases_off, rb.bases_off, "bases_off");
+                    prop_assert_eq!(ra.cigar_off, rb.cigar_off, "cigar_off");
+                    prop_assert_eq!(ra.qual_off, rb.qual_off, "qual_off");
+                    prop_assert_eq!(ra.aux_off, rb.aux_off, "aux_off");
+                    prop_assert_eq!(ra.aux_len, rb.aux_len, "aux_len");
+                    prop_assert_eq!(ra.extras_idx, rb.extras_idx, "extras_idx");
+                }
+                prop_assert_eq!(dump_slabs(&a), dump_slabs(&b), "slab bytes");
+            }
+
+            // r[verify record_store.pre_filter.rollback]
+            /// Per-step invariant: slab lengths track exactly the running
+            /// total of accepted inputs. Catches cases where rollback leaves
+            /// trailing garbage in one slab but not others.
+            #[test]
+            fn push_fields_slab_lengths_track_accepted_prefix(
+                inputs in prop::collection::vec(arb_push_input(), 0..=40),
+            ) {
+                let mut store = RecordStore::new();
+                let mut expected_names = 0usize;
+                let mut expected_bases = 0usize;
+                let mut expected_cigar = 0usize;
+                let mut expected_qual = 0usize;
+                let mut expected_aux = 0usize;
+                let mut expected_records = 0usize;
+
+                for inp in &inputs {
+                    let before = dump_slabs(&store);
+                    let result = push_one(&mut store, inp);
+
+                    if inp.accept {
+                        prop_assert!(result.is_some(), "accept=true must return Some");
+                        expected_records += 1;
+                        expected_names += inp.qname.len();
+                        expected_bases += inp.bases.len();
+                        expected_cigar += 4;
+                        expected_qual += inp.quals.len();
+                        expected_aux += inp.aux.len();
+                    } else {
+                        prop_assert!(result.is_none(), "accept=false must return None");
+                        // Reject path: state must be untouched.
+                        prop_assert_eq!(before, dump_slabs(&store), "rollback left state altered");
+                    }
+
+                    prop_assert_eq!(store.records.len(), expected_records, "records len");
+                    prop_assert_eq!(store.names.len(), expected_names, "names len");
+                    prop_assert_eq!(store.bases.len(), expected_bases, "bases len");
+                    prop_assert_eq!(store.cigar.len(), expected_cigar, "cigar len");
+                    prop_assert_eq!(store.qual.len(), expected_qual, "qual len");
+                    prop_assert_eq!(store.aux.len(), expected_aux, "aux len");
+                    prop_assert_eq!(store.extras.len(), expected_records, "extras len");
+                }
+            }
+
+            // r[verify record_store.pre_filter.rollback]
+            /// Indices returned by push_fields across a filtered run must be
+            /// dense and sequential — a rejected record must NOT burn an index.
+            #[test]
+            fn push_fields_indices_are_dense_for_accepted(
+                inputs in prop::collection::vec(arb_push_input(), 0..=40),
+            ) {
+                let mut store = RecordStore::new();
+                let mut kept: Vec<u32> = Vec::new();
+                for inp in &inputs {
+                    if let Some(idx) = push_one(&mut store, inp) {
+                        kept.push(idx);
+                    }
+                }
+                let expected: Vec<u32> =
+                    (0..kept.len()).map(|i| u32::try_from(i).unwrap()).collect();
+                prop_assert_eq!(kept, expected);
+            }
+        }
+
+        // Same three proptests, but for push_raw. We build synthetic BAM
+        // records so parse_header accepts them; the slab invariants are
+        // identical but the decode path is different (qname NUL-termination,
+        // packed seq decoding, cigar slicing).
+
+        /// Build a minimal BAM record with the given qname, `seq_len`, and a
+        /// single M op. Mirrors the helper in the outer test module but
+        /// adapted for proptest inputs.
+        fn build_bam_raw(qname: &[u8], seq_len: u32, pos: i32, mapq: u8) -> Vec<u8> {
+            let mut name_with_nul: Vec<u8> = qname.to_vec();
+            name_with_nul.push(0);
+            while !name_with_nul.len().is_multiple_of(4) {
+                name_with_nul.push(0);
+            }
+            let name_len = name_with_nul.len();
+            let cigar_bytes = 4usize; // one op
+            let seq_bytes = (seq_len as usize).div_ceil(2);
+            let total = 32 + name_len + cigar_bytes + seq_bytes + seq_len as usize;
+
+            let mut raw = vec![0u8; total];
+            raw[0..4].copy_from_slice(&0i32.to_le_bytes());
+            raw[4..8].copy_from_slice(&pos.to_le_bytes());
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "name_len bounded ≤ 20 by strategy"
+            )]
+            {
+                raw[8] = name_len as u8;
+            }
+            raw[9] = mapq;
+            raw[12..14].copy_from_slice(&1u16.to_le_bytes()); // n_cigar_ops
+            raw[14..16].copy_from_slice(&0u16.to_le_bytes()); // flags
+            raw[16..20].copy_from_slice(&seq_len.to_le_bytes());
+            raw[20..24].copy_from_slice(&(-1i32).to_le_bytes()); // next_ref_id
+            raw[24..28].copy_from_slice(&(-1i32).to_le_bytes()); // next_pos
+            raw[28..32].copy_from_slice(&0i32.to_le_bytes()); // tlen
+
+            raw[32..32 + name_len].copy_from_slice(&name_with_nul);
+
+            let cigar_start = 32 + name_len;
+            let op = seq_len << 4; // M
+            raw[cigar_start..cigar_start + 4].copy_from_slice(&op.to_le_bytes());
+
+            // Seq bytes already zeroed (all Unknown after decode); leave qual zero.
+            raw
+        }
+
+        #[derive(Debug, Clone)]
+        struct RawInput {
+            qname: Vec<u8>,
+            seq_len: u32,
+            pos: i32,
+            mapq: u8,
+            accept: bool,
+        }
+
+        fn arb_raw_input() -> impl Strategy<Value = RawInput> {
+            (
+                prop::collection::vec(b'a'..=b'z', 1..=10), // ASCII-safe qname
+                1u32..=16,
+                0i32..=1_000,
+                0u8..=60,
+                any::<bool>(),
+            )
+                .prop_map(|(qname, seq_len, pos, mapq, accept)| RawInput {
+                    qname,
+                    seq_len,
+                    pos,
+                    mapq,
+                    accept,
+                })
+        }
+
+        fn push_raw_one(store: &mut RecordStore<()>, input: &RawInput) -> Option<u32> {
+            let raw = build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq);
+            store
+                .push_raw(&raw, |_, _| input.accept)
+                .expect("synthetic BAM record is always parseable")
+        }
+
+        fn push_raw_kept(store: &mut RecordStore<()>, input: &RawInput) -> u32 {
+            let mut forced_keep = input.clone();
+            forced_keep.accept = true;
+            push_raw_one(store, &forced_keep).expect("accept=true always yields Some")
+        }
+
+        proptest! {
+            // r[verify record_store.pre_filter.rollback]
+            #[test]
+            fn push_raw_rollback_matches_filtered_replay(
+                inputs in prop::collection::vec(arb_raw_input(), 0..=40),
+            ) {
+                let mut a = RecordStore::new();
+                for inp in &inputs {
+                    push_raw_one(&mut a, inp);
+                }
+
+                let mut b = RecordStore::new();
+                for inp in inputs.iter().filter(|i| i.accept) {
+                    push_raw_kept(&mut b, inp);
+                }
+
+                prop_assert_eq!(dump_slabs(&a), dump_slabs(&b), "slab bytes");
+            }
+        }
     }
 }

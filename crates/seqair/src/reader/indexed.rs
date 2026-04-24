@@ -1,7 +1,10 @@
 use super::ReaderError;
 use super::formats::{self, Format, FormatDetectionError};
 use crate::{
-    bam::{BamHeader, IndexedBamReader, record_store::RecordStore},
+    bam::{
+        BamHeader, IndexedBamReader,
+        record_store::{RecordStore, SlimRecord},
+    },
     cram::reader::IndexedCramReader,
     sam::reader::IndexedSamReader,
 };
@@ -11,6 +14,20 @@ use std::{
     path::Path,
 };
 use tracing::instrument;
+
+// r[impl unified.fetch_counts]
+/// Return value of the filter-aware `fetch_into_filtered` methods on each
+/// reader. `kept <= fetched` always holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FetchCounts {
+    /// Records that passed the reader's built-in overlap/unmapped checks,
+    /// before the user's pre-filter. This is the count you'd get from a
+    /// filter-free fetch.
+    pub fetched: usize,
+    /// Records that also passed the user's pre-filter and remain in the store.
+    /// Equal to `fetched` when no filter is installed.
+    pub kept: usize,
+}
 
 /// Format-agnostic indexed alignment reader, generic over the I/O backend.
 ///
@@ -55,10 +72,36 @@ impl<R: Read + Seek> IndexedReader<R> {
         end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
+        self.fetch_into_filtered(tid, start, end, store, |_, _| true).map(|c| c.kept)
+    }
+
+    // r[impl unified.fetch_into_filtered]
+    /// Filter-aware variant of [`fetch_into`]. For each record that would
+    /// normally enter the store, `keep` is invoked; if it returns `false`,
+    /// the push is rolled back (zero slab waste, see [`RecordStore::push_raw`]).
+    /// The returned [`FetchCounts`] distinguishes records the reader produced
+    /// (`fetched`) from those the filter retained (`kept`).
+    pub fn fetch_into_filtered<F>(
+        &mut self,
+        tid: u32,
+        start: Pos0,
+        end: Pos0,
+        store: &mut RecordStore,
+        keep: F,
+    ) -> Result<FetchCounts, ReaderError>
+    where
+        F: FnMut(&SlimRecord, &RecordStore) -> bool,
+    {
         match self {
-            Self::Bam(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
-            Self::Sam(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
-            Self::Cram(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
+            Self::Bam(r) => {
+                r.fetch_into_filtered(tid, start, end, store, keep).map_err(ReaderError::from)
+            }
+            Self::Sam(r) => {
+                r.fetch_into_filtered(tid, start, end, store, keep).map_err(ReaderError::from)
+            }
+            Self::Cram(r) => {
+                r.fetch_into_filtered(tid, start, end, store, keep).map_err(ReaderError::from)
+            }
         }
     }
 }

@@ -43,7 +43,7 @@ proptest! {
             if end_excl <= MAX_POS {
                 delta[end_excl] -= 1;
             }
-            arena.push_raw(&make_record(0, offset, 99, 60, len)).unwrap();
+            arena.push_raw(&make_record(0, offset, 99, 60, len), |_, _| true).unwrap();
         }
 
         let mut expected_depth = vec![0usize; MAX_POS];
@@ -71,9 +71,9 @@ proptest! {
 fn already_sorted_records_produce_correct_pileup() {
     let mut arena = RecordStore::new();
     // Push in sorted order (as fetch_into guarantees)
-    arena.push_raw(&make_record(0, 10, 99, 60, 30)).unwrap();
-    arena.push_raw(&make_record(0, 20, 99, 60, 30)).unwrap();
-    arena.push_raw(&make_record(0, 30, 99, 60, 30)).unwrap();
+    arena.push_raw(&make_record(0, 10, 99, 60, 30), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 20, 99, 60, 30), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 30, 99, 60, 30), |_, _| true).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(70).unwrap());
     let columns = helpers::collect_columns(&mut engine);
@@ -95,8 +95,8 @@ fn already_sorted_records_produce_correct_pileup() {
 #[test]
 fn single_arena_get_per_record_entry_still_correct() {
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 0, 99, 60, 50)).unwrap();
-    arena.push_raw(&make_record(0, 10, 99 | 0x100, 40, 50)).unwrap(); // secondary flag
+    arena.push_raw(&make_record(0, 0, 99, 60, 50), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 10, 99 | 0x100, 40, 50), |_, _| true).unwrap(); // secondary flag
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(59).unwrap());
     engine.set_filter(|flags, _aux| !flags.is_secondary());
@@ -129,7 +129,7 @@ fn cigar_index_from_arena_slab_correct() {
         &[cigar_op(30, 0), cigar_op(5, 2), cigar_op(20, 0)],
         50,
     );
-    arena.push_raw(&raw).unwrap();
+    arena.push_raw(&raw, |_, _| true).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(154).unwrap());
     let columns = helpers::collect_columns(&mut engine);
@@ -163,7 +163,7 @@ fn precomputed_matches_indels_accessible_from_record() {
         &[cigar_op(30, 0), cigar_op(5, 1), cigar_op(15, 0)],
         50,
     );
-    arena.push_raw(&raw).unwrap();
+    arena.push_raw(&raw, |_, _| true).unwrap();
 
     let r = arena.record(0);
     assert_eq!(r.matching_bases, 45);
@@ -225,7 +225,7 @@ proptest! {
 
         let raw = make_record_with_cigar(0, 0, 99, 60, &ops, seq_len);
         let mut arena = RecordStore::new();
-        arena.push_raw(&raw).unwrap();
+        arena.push_raw(&raw, |_, _| true).unwrap();
         let r = arena.record(0);
 
         prop_assert_eq!(r.matching_bases, exp_matches,
@@ -347,7 +347,7 @@ fn arena_with_capacity_avoids_realloc() {
     let mut arena = RecordStore::with_byte_hint(50_000);
 
     for i in 0..100 {
-        arena.push_raw(&make_record(0, i * 10, 99, 60, 50)).unwrap();
+        arena.push_raw(&make_record(0, i * 10, 99, 60, 50), |_, _| true).unwrap();
     }
     assert_eq!(arena.len(), 100);
 

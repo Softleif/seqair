@@ -490,23 +490,26 @@ fn decode_record(
 
         let qname: &[u8] = &read_name;
 
-        let store_idx = store.push_fields(
-            pos_0based,
-            end_pos,
-            bam_flags,
-            mapq,
-            result.matching_bases,
-            result.indel_bases,
-            qname,
-            cigar_buf,
-            bases_buf,
-            qual_buf,
-            aux_buf,
-            record_ref_id,
-            next_ref_id_val,
-            next_pos_val,
-            template_len_val,
-        )?;
+        let store_idx = store
+            .push_fields(
+                pos_0based,
+                end_pos,
+                bam_flags,
+                mapq,
+                result.matching_bases,
+                result.indel_bases,
+                qname,
+                cigar_buf,
+                bases_buf,
+                qual_buf,
+                aux_buf,
+                record_ref_id,
+                next_ref_id_val,
+                next_pos_val,
+                template_len_val,
+                |_, _| true,
+            )?
+            .expect("no filter: push_fields always returns Some");
 
         return Ok((
             1,

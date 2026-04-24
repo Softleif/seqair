@@ -243,7 +243,15 @@ impl<E: RecordStoreExtras> Readers<E> {
         end: Pos0,
     ) -> Result<PileupEngine<E::Extra>, ReaderError> {
         let tid = tid.resolve_tid(self.header())?;
-        self.alignment.fetch_into(tid.as_u32(), start, end, &mut self.store)?;
+
+        // Split borrows: the filter closure captures `extras_provider` while
+        // the fetch writes into `store`. Three disjoint &mut borrows of self.
+        let alignment = &mut self.alignment;
+        let store = &mut self.store;
+        let provider = &mut self.extras_provider;
+        alignment.fetch_into_filtered(tid.as_u32(), start, end, store, |rec, s| {
+            provider.keep_record(rec, s)
+        })?;
 
         let contig = self
             .header()

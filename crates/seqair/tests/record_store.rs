@@ -24,7 +24,7 @@ fn decode_record_into_slabs() {
         make_test_record(0, 100, 0x63, 60, b"read1", &[(4 << 4)], &[0x12, 0x48], &[30; 4], &[]);
 
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw).expect("decode");
+    let idx = store.push_raw(&raw, |_, _| true).expect("decode").expect("kept");
 
     assert_eq!(store.len(), 1);
     let rec = store.record(idx);
@@ -51,8 +51,8 @@ fn multiple_records_share_slabs() {
         make_test_record(0, 200, 0x63, 50, b"read2", &[(4 << 4)], &[0x12, 0x48], &[25; 4], &[]);
 
     let mut store = RecordStore::new();
-    let idx1 = store.push_raw(&raw1).unwrap();
-    let idx2 = store.push_raw(&raw2).unwrap();
+    let idx1 = store.push_raw(&raw1, |_, _| true).unwrap().expect("kept");
+    let idx2 = store.push_raw(&raw2, |_, _| true).unwrap().expect("kept");
 
     assert_eq!(store.len(), 2);
     assert_eq!(store.record(idx1).pos, Pos0::new(100).unwrap());
@@ -71,7 +71,7 @@ fn clear_retains_capacity() {
 
     let mut store = RecordStore::new();
     for _ in 0..100 {
-        store.push_raw(&raw).unwrap();
+        store.push_raw(&raw, |_, _| true).unwrap();
     }
 
     let records_cap = store.records_capacity();
@@ -121,8 +121,8 @@ fn qual_and_aux_are_stored_in_independent_slabs() {
     );
 
     let mut store = RecordStore::new();
-    let i1 = store.push_raw(&raw1).unwrap();
-    let i2 = store.push_raw(&raw2).unwrap();
+    let i1 = store.push_raw(&raw1, |_, _| true).unwrap().expect("kept");
+    let i2 = store.push_raw(&raw2, |_, _| true).unwrap().expect("kept");
 
     // Round-trip: each accessor returns exactly the bytes that were pushed.
     assert_eq!(store.qual(i1).len(), 4);
@@ -151,7 +151,7 @@ fn aux_tag_accessible_from_store() {
         make_test_record(0, 100, 0x63, 60, b"read1", &[(4 << 4)], &[0x12, 0x48], &[30; 4], aux);
 
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw).unwrap();
+    let idx = store.push_raw(&raw, |_, _| true).unwrap().expect("kept");
 
     let aux_bytes = store.aux(idx);
     assert!(!aux_bytes.is_empty());
@@ -195,30 +195,33 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
     let raw = make_test_record(0, 100, 0x63, 60, b"read1", cigar_ops, packed_seq, qual, aux);
 
     let mut store_raw = RecordStore::new();
-    let idx_raw = store_raw.push_raw(&raw)?;
+    let idx_raw = store_raw.push_raw(&raw, |_, _| true)?.expect("kept");
 
     // Build the same record from pre-parsed fields
     let cigar_packed: Vec<u8> = cigar_ops.iter().flat_map(|op| op.to_le_bytes()).collect();
     let bases = [Base::A, Base::C, Base::G, Base::T];
 
     let mut store_fields = RecordStore::new();
-    let idx_fields = store_fields.push_fields(
-        Pos0::new(100).unwrap(), // pos
-        Pos0::new(103).unwrap(), // end_pos (pos + 4M - 1)
-        BamFlags::from(0x63),
-        60,
-        store_raw.record(idx_raw).matching_bases,
-        store_raw.record(idx_raw).indel_bases,
-        b"read1",
-        &cigar_packed,
-        &bases,
-        qual,
-        aux,
-        store_raw.record(idx_raw).tid,
-        store_raw.record(idx_raw).next_ref_id,
-        store_raw.record(idx_raw).next_pos,
-        store_raw.record(idx_raw).template_len,
-    )?;
+    let idx_fields = store_fields
+        .push_fields(
+            Pos0::new(100).unwrap(), // pos
+            Pos0::new(103).unwrap(), // end_pos (pos + 4M - 1)
+            BamFlags::from(0x63),
+            60,
+            store_raw.record(idx_raw).matching_bases,
+            store_raw.record(idx_raw).indel_bases,
+            b"read1",
+            &cigar_packed,
+            &bases,
+            qual,
+            aux,
+            store_raw.record(idx_raw).tid,
+            store_raw.record(idx_raw).next_ref_id,
+            store_raw.record(idx_raw).next_pos,
+            store_raw.record(idx_raw).template_len,
+            |_, _| true,
+        )?
+        .expect("kept");
 
     // Compare fixed fields
     let r = store_raw.record(idx_raw);
@@ -280,6 +283,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
             rec.next_ref_id,
             rec.next_pos,
             rec.template_len,
+            |_, _| true,
         )?;
     }
 
@@ -302,7 +306,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
 fn push_raw_rejects_negative_position() {
     let mut store = RecordStore::new();
     let raw = make_test_record(0, -1, 0x4, 0, b"read1", &[(4 << 4)], &[0x11, 0x11], &[30; 4], &[]);
-    let result = store.push_raw(&raw);
+    let result = store.push_raw(&raw, |_, _| true);
     assert!(result.is_err(), "negative position should be rejected");
 }
 
@@ -312,7 +316,7 @@ fn push_raw_rejects_very_negative_position() {
     let mut store = RecordStore::new();
     let raw =
         make_test_record(0, i32::MIN, 0x4, 0, b"read1", &[(4 << 4)], &[0x11, 0x11], &[30; 4], &[]);
-    let result = store.push_raw(&raw);
+    let result = store.push_raw(&raw, |_, _| true);
     assert!(result.is_err(), "i32::MIN position should be rejected");
 }
 

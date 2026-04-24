@@ -535,7 +535,7 @@ fn roundtrip_write_store_record() {
     for rec in &records {
         raw_buf.clear();
         rec.to_bam_bytes(&mut raw_buf).unwrap();
-        store.push_raw(&raw_buf).unwrap();
+        store.push_raw(&raw_buf, |_, _| true).unwrap();
     }
 
     // Write via write_store_record
