@@ -227,7 +227,7 @@ fn bam_roundtrip(c: &mut Criterion) {
                         cigar_bytes[off + 2],
                         cigar_bytes[off + 3],
                     ]);
-                    cigar.push(seqair::bam::CigarOp::from_bam_u32(packed).unwrap());
+                    cigar.push(seqair::bam::CigarOp::from_bam_u32(packed));
                 }
 
                 let rec = OwnedBamRecord {

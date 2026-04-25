@@ -189,11 +189,13 @@ fn cigar_op_type_roundtrip_all_valid_codes() {
 
     for code in 0..=8u8 {
         let op = CigarOpType::from_bam(code);
-        assert!(op.is_some(), "valid code {code} should parse");
+        assert!(!matches!(op, CigarOpType::Unknown(_)), "code {code} should be a known op");
+        assert_eq!(op.to_bam_code(), code);
     }
-    // Invalid codes
-    assert!(CigarOpType::from_bam(9).is_none());
-    assert!(CigarOpType::from_bam(255).is_none());
+    // Reserved codes surface as Unknown carrying the raw nibble.
+    assert_eq!(CigarOpType::from_bam(9), CigarOpType::Unknown(9));
+    assert_eq!(CigarOpType::from_bam(15), CigarOpType::Unknown(15));
+    assert_eq!(CigarOpType::Unknown(9).to_bam_code(), 9);
 }
 
 // r[verify io.typed_cigar_ops]

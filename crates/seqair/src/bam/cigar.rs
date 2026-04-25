@@ -19,7 +19,10 @@ pub const CIGAR_X: u8 = 8;
 
 // r[impl io.typed_cigar_ops]
 // r[impl cigar.index]
-/// Strongly-typed CIGAR operation kind.
+/// Strongly-typed CIGAR operation kind. `Unknown` carries the raw 4-bit
+/// op code from BAM for codes that aren't in the SAM spec — we tolerate
+/// them on read so a single bad op doesn't fail the whole record, and
+/// round-trip them verbatim on write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CigarOpType {
     Match,       // M(0): alignment match (may be sequence match or mismatch)
@@ -31,21 +34,23 @@ pub enum CigarOpType {
     Padding,     // P(6): padding
     SeqMatch,    // =(7): sequence match
     SeqMismatch, // X(8): sequence mismatch
+    Unknown(u8), // 9..=15: reserved/unspecified code from BAM; the inner byte is the raw 4-bit op
 }
 
 impl CigarOpType {
-    pub fn from_bam(code: u8) -> Option<Self> {
+    /// Decode a 4-bit BAM op code. Codes outside the spec become [`Unknown`].
+    pub const fn from_bam(code: u8) -> Self {
         match code {
-            CIGAR_M => Some(Self::Match),
-            CIGAR_I => Some(Self::Insertion),
-            CIGAR_D => Some(Self::Deletion),
-            CIGAR_N => Some(Self::RefSkip),
-            CIGAR_S => Some(Self::SoftClip),
-            CIGAR_H => Some(Self::HardClip),
-            CIGAR_P => Some(Self::Padding),
-            CIGAR_EQ => Some(Self::SeqMatch),
-            CIGAR_X => Some(Self::SeqMismatch),
-            _ => None,
+            CIGAR_M => Self::Match,
+            CIGAR_I => Self::Insertion,
+            CIGAR_D => Self::Deletion,
+            CIGAR_N => Self::RefSkip,
+            CIGAR_S => Self::SoftClip,
+            CIGAR_H => Self::HardClip,
+            CIGAR_P => Self::Padding,
+            CIGAR_EQ => Self::SeqMatch,
+            CIGAR_X => Self::SeqMismatch,
+            other => Self::Unknown(other),
         }
     }
 
@@ -62,6 +67,7 @@ impl CigarOpType {
             Self::Padding => CIGAR_P,
             Self::SeqMatch => CIGAR_EQ,
             Self::SeqMismatch => CIGAR_X,
+            Self::Unknown(code) => code,
         }
     }
 
@@ -97,12 +103,10 @@ impl CigarOp {
         Self((len << 4) | op.to_bam_code() as u32)
     }
 
-    /// Decode from BAM packed u32 format (`len << 4 | op_code`). Returns `None`
-    /// if the lower 4 bits don't match a known CIGAR op.
-    pub fn from_bam_u32(packed: u32) -> Option<Self> {
-        // Validate the op code at construction so subsequent `op_type()` calls are infallible.
-        CigarOpType::from_bam((packed & 0xF) as u8)?;
-        Some(Self(packed))
+    /// Wrap a raw BAM-packed u32 (`len << 4 | op_code`). Always succeeds —
+    /// unknown 4-bit codes surface as [`CigarOpType::Unknown`] when decoded.
+    pub const fn from_bam_u32(packed: u32) -> Self {
+        Self(packed)
     }
 
     /// Encode to BAM packed u32 format (`len << 4 | op_code`).
@@ -121,17 +125,16 @@ impl CigarOp {
         (self.0 & 0xF) as u8
     }
 
-    /// Decoded op type. Always succeeds because the op code is validated at construction.
-    pub fn op_type(self) -> CigarOpType {
+    /// Decoded op type. Reserved op codes (9..=15) decode to [`CigarOpType::Unknown`].
+    pub const fn op_type(self) -> CigarOpType {
         CigarOpType::from_bam(self.op_code())
-            .expect("op code validated at construction; CigarOp invariant violated")
     }
 
-    pub fn consumes_ref(self) -> bool {
+    pub const fn consumes_ref(self) -> bool {
         consumes_ref(self.op_code())
     }
 
-    pub fn consumes_query(self) -> bool {
+    pub const fn consumes_query(self) -> bool {
         consumes_query(self.op_code())
     }
 }
@@ -512,15 +515,11 @@ mod tests {
         ];
         for (op_type, code) in ops {
             assert_eq!(op_type.to_bam_code(), code, "to_bam_code failed for {op_type:?}");
-            assert_eq!(
-                CigarOpType::from_bam(code),
-                Some(op_type),
-                "from_bam failed for code {code}"
-            );
+            assert_eq!(CigarOpType::from_bam(code), op_type, "from_bam failed for code {code}");
 
             let cigar_op = CigarOp::new(op_type, 42);
             let packed = cigar_op.to_bam_u32();
-            let decoded = CigarOp::from_bam_u32(packed).unwrap();
+            let decoded = CigarOp::from_bam_u32(packed);
             assert_eq!(decoded, cigar_op, "round-trip failed for {op_type:?}");
         }
     }
@@ -531,16 +530,22 @@ mod tests {
         let max_len = (1u32 << 28) - 1;
         let op = CigarOp::new(CigarOpType::Match, max_len);
         let packed = op.to_bam_u32();
-        let decoded = CigarOp::from_bam_u32(packed).unwrap();
+        let decoded = CigarOp::from_bam_u32(packed);
         assert_eq!(decoded.len(), max_len);
         assert_eq!(decoded.op_type(), CigarOpType::Match);
     }
 
     #[test]
-    fn cigar_op_from_bam_u32_invalid_code() {
-        // op code 9 is invalid
+    fn cigar_op_unknown_code_round_trips() {
+        // Op codes 9..=15 are reserved; they decode to Unknown and round-trip verbatim.
         let packed = (100u32 << 4) | 9;
-        assert!(CigarOp::from_bam_u32(packed).is_none());
+        let op = CigarOp::from_bam_u32(packed);
+        assert_eq!(op.op_type(), CigarOpType::Unknown(9));
+        assert_eq!(op.len(), 100);
+        assert_eq!(op.to_bam_u32(), packed);
+        // Unknown ops consume neither ref nor query.
+        assert!(!op.consumes_ref());
+        assert!(!op.consumes_query());
     }
 
     // r[verify cigar.compact_op_position_invariant]

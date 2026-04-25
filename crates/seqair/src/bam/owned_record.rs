@@ -57,10 +57,6 @@ pub enum OwnedRecordError {
     /// Error decoding raw BAM bytes into an owned record.
     #[error("failed to decode BAM record: {reason}")]
     Decode { reason: &'static str },
-
-    /// Invalid CIGAR operation code in raw BAM data.
-    #[error("invalid CIGAR op code at index {index}")]
-    InvalidCigarOp { index: usize },
 }
 
 // r[impl bam.owned_record.fields]
@@ -214,10 +210,7 @@ impl OwnedBamRecord {
                 .get(offset..offset.saturating_add(4))
                 .and_then(|s| s.try_into().ok())
                 .ok_or(OwnedRecordError::Decode { reason: "CIGAR data truncated" })?;
-            let packed = u32::from_le_bytes(chunk);
-            let op = CigarOp::from_bam_u32(packed)
-                .ok_or(OwnedRecordError::InvalidCigarOp { index: i })?;
-            cigar.push(op);
+            cigar.push(CigarOp::from_bam_u32(u32::from_le_bytes(chunk)));
         }
 
         // Decode 4-bit packed sequence to Base values
