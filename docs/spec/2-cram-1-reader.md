@@ -68,6 +68,9 @@ During `fetch_into`, the reader MUST skip containers whose `[alignment_start, al
 r[cram.fetch_into_customized.push_time]
 `IndexedCramReader::fetch_into_customized` MUST apply the customize value's `keep_record` at push time, not post-hoc. The customize value is threaded through `decode_slice` → `decode_record` into `RecordStore::push_fields`, so a rejected record's slab writes are rolled back with zero waste (matching BAM/SAM). Each record reaching the push step counts toward `FetchCounts::fetched` regardless of the filter's verdict; only records the filter keeps count toward `FetchCounts::kept`. Records that fail the reader's own overlap/tid/unmapped checks are not counted in either field. Filtered-out mates still appear in the per-slice `mate_infos` vector with `store_idx = None`, so `resolve_mate_tlen` can see them for span computation but will not write TLEN/mate-pos fields back to them.
 
+r[cram.fetch_into_customized.filtered_mate_sentinel]
+When a kept record's mate was rejected by `keep_record`, `resolve_mate_tlen` MUST leave the kept record's `template_len` as the full-chain span (the same value an unfiltered fetch would produce — TLEN is a per-template property), but MUST set its `next_ref_id` and `next_pos` to -1, the BAM "mate unavailable" sentinel. This signals to consumers that the mate is not in the store while preserving the across-template length. Detecting "mate was filtered" is therefore as simple as checking `next_pos == -1` on a kept record.
+
 ### Slices
 
 > _[CRAM3] §8.4 "Slice header block" — slice header fields, multi-ref slices, embedded reference, reference_md5_

@@ -1384,11 +1384,16 @@ mod tests {
             }
 
             fn end_pos(&self) -> Pos0 {
+                // Match the inclusive 0-based convention used by
+                // `compute_end_pos` (pos + ref_len - 1). For our trivial 1-op
+                // M CIGAR, ref_len == bases.len(), so end = pos + len - 1.
+                // bases.len() >= 1 by strategy, so the subtraction is safe.
                 #[expect(
                     clippy::cast_possible_truncation,
-                    reason = "bases.len() ≤ 16, pos ≤ 1000 — sum fits in u32"
+                    clippy::arithmetic_side_effects,
+                    reason = "bases.len() ≥ 1 ≤ 16, pos < 1_000_000; sum fits in u32"
                 )]
-                let end = self.pos + self.bases.len() as u32;
+                let end = self.pos + self.bases.len() as u32 - 1;
                 Pos0::new(end).expect("bounded by strategy to < i32::MAX")
             }
         }
@@ -1480,12 +1485,16 @@ mod tests {
 
         proptest! {
             // r[verify record_store.pre_filter.rollback]
-            /// Model check: pushing a mixed accept/reject sequence yields the
-            /// same state as pushing only the accepted inputs with no filter.
-            /// This is the strongest guarantee — it catches silent slab
-            /// corruption that size-only checks would miss.
+            /// Self-consistency check: pushing a mixed accept/reject sequence
+            /// produces the same state as pushing only the accepted inputs
+            /// with no filter. This catches divergence between the rollback
+            /// path and the always-keep path inside `push_fields`, but does
+            /// NOT catch bugs that affect both paths (`push_fields` is its
+            /// own oracle here). For independent byte-correctness oracles
+            /// see `push_fields_matches_owned_bam_round_trip` (A) and
+            /// `push_fields_input_is_readable_via_getters` (B) below.
             #[test]
-            fn push_fields_rollback_matches_filtered_replay(
+            fn push_fields_rollback_self_consistency(
                 inputs in prop::collection::vec(arb_push_input(), 0..=60),
             ) {
                 // Store A: push all inputs with per-record filter (rollback path).
@@ -1582,6 +1591,136 @@ mod tests {
                 let expected: Vec<u32> =
                     (0..kept.len()).map(|i| u32::try_from(i).unwrap()).collect();
                 prop_assert_eq!(kept, expected);
+            }
+        }
+
+        // ---- Independent oracle (A): BAM round-trip ----
+        //
+        // Push the same logical input two different ways:
+        //   - via `push_fields` directly (the system under test)
+        //   - by building an `OwnedBamRecord`, serializing to BAM-binary form
+        //     via `to_bam_bytes`, and feeding to `push_raw` (different code
+        //     path: BAM-binary decode + 4-bit seq decode + cigar bulk memcpy)
+        //
+        // The two stores must end up with byte-identical slabs. A bug shared
+        // by both call paths in `push_fields` is invisible to the rollback
+        // self-consistency proptest above, but here it would diverge from
+        // the BAM-encode/decode round-trip.
+
+        use crate::bam::aux_data::AuxData;
+        use crate::bam::owned_record::OwnedBamRecord;
+        use seqair_types::BaseQuality;
+
+        fn build_owned_bam(input: &PushInput) -> OwnedBamRecord {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "bases.len() bounded ≤ 16 by strategy; fits in u32"
+            )]
+            let len = input.bases.len() as u32;
+            OwnedBamRecord::builder(0, i64::from(input.pos), input.qname.clone())
+                .flags(BamFlags::empty())
+                .mapq(input.mapq)
+                .cigar(vec![CigarOp::new(cigar::CigarOpType::Match, len)])
+                .seq(input.bases.clone())
+                .qual(input.quals.iter().copied().map(BaseQuality::from_byte).collect())
+                .aux(AuxData::from_bytes(input.aux.clone()))
+                .build()
+                .expect("synthetic OwnedBamRecord must build")
+        }
+
+        proptest! {
+            // r[verify unified.push_fields_equivalence]
+            #[test]
+            fn push_fields_matches_owned_bam_round_trip(
+                inputs in prop::collection::vec(arb_push_input(), 0..=20),
+            ) {
+                // Store A: BAM-binary encode then push_raw (independent path).
+                let mut a = RecordStore::new();
+                let mut raw_buf = Vec::new();
+                for inp in inputs.iter().filter(|i| i.accept) {
+                    let owned = build_owned_bam(inp);
+                    raw_buf.clear();
+                    owned.to_bam_bytes(&mut raw_buf)
+                        .expect("to_bam_bytes must succeed on synthetic input");
+                    a.push_raw(&raw_buf, &mut ())
+                        .expect("push_raw must accept BAM bytes from to_bam_bytes")
+                        .expect("default keep_record returns true");
+                }
+
+                // Store B: push_fields directly (system under test).
+                let mut b = RecordStore::new();
+                for inp in inputs.iter().filter(|i| i.accept) {
+                    push_kept(&mut b, inp);
+                }
+
+                // Both must produce byte-identical slabs and matching record fields.
+                prop_assert_eq!(a.records.len(), b.records.len(), "records len");
+                for (ra, rb) in a.records.iter().zip(b.records.iter()) {
+                    prop_assert_eq!(ra.pos, rb.pos, "pos");
+                    prop_assert_eq!(ra.end_pos, rb.end_pos, "end_pos");
+                    prop_assert_eq!(ra.flags, rb.flags, "flags");
+                    prop_assert_eq!(ra.mapq, rb.mapq, "mapq");
+                    prop_assert_eq!(ra.seq_len, rb.seq_len, "seq_len");
+                    prop_assert_eq!(ra.n_cigar_ops, rb.n_cigar_ops, "n_cigar_ops");
+                    prop_assert_eq!(ra.matching_bases, rb.matching_bases, "matching_bases");
+                    prop_assert_eq!(ra.indel_bases, rb.indel_bases, "indel_bases");
+                }
+                prop_assert_eq!(dump_slabs(&a), dump_slabs(&b), "slab bytes");
+            }
+        }
+
+        // ---- Independent oracle (B): read-back via getters ----
+        //
+        // After pushing a sequence of inputs via `push_fields`, the slab
+        // accessors must return what we put in. Independent of slab layout —
+        // catches "wrote at the wrong offset", "split a field across slabs",
+        // "encoded the wrong length" without depending on the encoding logic
+        // itself. The input is the source of truth.
+
+        proptest! {
+            #[test]
+            fn push_fields_input_is_readable_via_getters(
+                inputs in prop::collection::vec(arb_push_input(), 0..=40),
+            ) {
+                let mut store = RecordStore::new();
+                let mut kept_inputs: Vec<&PushInput> = Vec::new();
+                for inp in &inputs {
+                    if let Some(idx) = push_one(&mut store, inp) {
+                        prop_assert_eq!(idx as usize, kept_inputs.len(), "dense indices");
+                        kept_inputs.push(inp);
+                    }
+                }
+
+                prop_assert_eq!(store.len(), kept_inputs.len(), "store len matches kept count");
+
+                for (i, inp) in kept_inputs.iter().enumerate() {
+                    let idx = i as u32;
+                    prop_assert_eq!(store.qname(idx), inp.qname.as_slice(), "qname rec {}", i);
+                    prop_assert_eq!(store.seq(idx), inp.bases.as_slice(), "seq rec {}", i);
+                    let qual_bytes = BaseQuality::slice_to_bytes(store.qual(idx));
+                    prop_assert_eq!(qual_bytes, inp.quals.as_slice(), "qual rec {}", i);
+                    prop_assert_eq!(store.aux(idx), inp.aux.as_slice(), "aux rec {}", i);
+                    let cigar = store.cigar(idx);
+                    prop_assert_eq!(cigar.len(), 1, "cigar op count rec {}", i);
+                    let op = cigar[0];
+                    prop_assert_eq!(op.op_type(), cigar::CigarOpType::Match, "cigar op type rec {}", i);
+                    prop_assert_eq!(op.len() as usize, inp.bases.len(), "cigar op len rec {}", i);
+
+                    let rec = store.record(idx);
+                    #[expect(
+                        clippy::cast_sign_loss,
+                        reason = "PushInput.pos is bounded < 1_000_000 so always nonneg"
+                    )]
+                    let rec_pos_u32 = rec.pos.as_i32() as u32;
+                    prop_assert_eq!(rec_pos_u32, inp.pos, "pos rec {}", i);
+                    prop_assert_eq!(rec.mapq, inp.mapq, "mapq rec {}", i);
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "bases.len() bounded ≤ 16; fits in u32"
+                    )]
+                    let expected_seq_len = inp.bases.len() as u32;
+                    prop_assert_eq!(rec.seq_len, expected_seq_len, "seq_len rec {}", i);
+                }
             }
         }
 

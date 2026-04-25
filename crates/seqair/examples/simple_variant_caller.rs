@@ -116,9 +116,28 @@ impl BaseCounts {
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
-    // ── Open readers ───────────────────────────────────────────────────
+    // ── Open readers with a push-time filter ───────────────────────────
+    // Skip reads that are unmapped, secondary, supplementary, QC-failed, or
+    // duplicate before they enter the store. Mapping quality is checked per
+    // alignment in the pileup loop below since `min_mapq` is dynamic.
+    use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
+    #[derive(Clone)]
+    struct DropUseless;
+    impl CustomizeRecordStore for DropUseless {
+        type Extra = ();
+        fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+            !rec.flags.is_unmapped()
+                && !rec.flags.is_secondary()
+                && !rec.flags.is_supplementary()
+                && !rec.flags.is_failed_qc()
+                && !rec.flags.is_duplicate()
+        }
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+    }
+
     let mut readers =
-        Readers::open(&args.input, &args.reference).context("could not open BAM + FASTA")?;
+        Readers::<DropUseless>::open_customized(&args.input, &args.reference, DropUseless)
+            .context("could not open BAM + FASTA")?;
 
     let (tid, start, end) = parse_region(&args.region, readers.header())?;
     let contig_name = readers.header().target_name(tid).context("unknown tid")?.to_owned();
@@ -188,17 +207,6 @@ fn main() -> anyhow::Result<()> {
     let min_mapq = args.min_mapq;
 
     let mut pileup = readers.pileup(tid, start_pos, end_pos)?;
-
-    // Skip reads that are unmapped, secondary, supplementary, QC-failed,
-    // duplicate, or below the minimum mapping quality.
-    pileup.set_filter(move |flags, _cigar| {
-        !flags.is_unmapped()
-            && !flags.is_secondary()
-            && !flags.is_supplementary()
-            && !flags.is_failed_qc()
-            && !flags.is_duplicate()
-    });
-
     let mut n_calls = 0u32;
 
     while let Some(column) = pileup.pileups() {

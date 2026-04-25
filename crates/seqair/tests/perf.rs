@@ -94,21 +94,32 @@ fn already_sorted_records_produce_correct_pileup() {
 // r[verify perf.avoid_redundant_arena_get+2]
 #[test]
 fn single_arena_get_per_record_entry_still_correct() {
+    use seqair::bam::record_store::{CustomizeRecordStore, SlimRecord};
+
+    #[derive(Clone)]
+    struct DropSecondary;
+    impl CustomizeRecordStore for DropSecondary {
+        type Extra = ();
+        fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+            !rec.flags.is_secondary()
+        }
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+    }
+
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 0, 99, 60, 50), &mut ()).unwrap();
-    arena.push_raw(&make_record(0, 10, 99 | 0x100, 40, 50), &mut ()).unwrap(); // secondary flag
+    arena.push_raw(&make_record(0, 0, 99, 60, 50), &mut DropSecondary).unwrap();
+    arena.push_raw(&make_record(0, 10, 99 | 0x100, 40, 50), &mut DropSecondary).unwrap(); // secondary flag
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(59).unwrap());
-    engine.set_filter(|flags, _aux| !flags.is_secondary());
     let columns = helpers::collect_columns(&mut engine);
 
-    // Only the mapq=60 read should pass the filter
+    // Only the mapq=60 read should remain in the store after push-time filtering.
     for col in &columns {
         if col.pos() < Pos0::new(10).unwrap() {
             assert_eq!(col.depth(), 1, "only high-mapq read at pos {}", col.pos());
         }
     }
-    // At pos 10+, still only 1 because second read is filtered
+    // At pos 10+, still only 1 because second read was filtered before push.
     let col = columns.iter().find(|c| c.pos() == Pos0::new(25).unwrap()).unwrap();
     assert_eq!(col.depth(), 1);
 }

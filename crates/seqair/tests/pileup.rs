@@ -117,43 +117,61 @@ proptest! {
     }
 }
 
-// ---- pileup.read_filter ----
+// ---- record-store push-time filtering (the engine no longer has its own filter) ----
 
-// r[verify pileup.read_filter]
-// r[verify flags.filter_signature]
+// r[verify record_store.pre_filter.rollback]
+// r[verify flags.field_type]
 #[test]
-fn filter_evaluated_once_per_record() {
-    let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 0, 99, 60, 20), &mut ()).unwrap();
+fn keep_record_called_once_per_pushed_record() {
+    use seqair::bam::record_store::{CustomizeRecordStore, SlimRecord};
+
+    #[derive(Clone)]
+    struct Counting(Rc<Cell<usize>>);
+    impl CustomizeRecordStore for Counting {
+        type Extra = ();
+        fn keep_record(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
+            self.0.set(self.0.get() + 1);
+            true
+        }
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+    }
 
     let count = Rc::new(Cell::new(0usize));
-    let count_clone = count.clone();
-    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
-    engine.set_filter(move |_flags, _aux| {
-        count_clone.set(count_clone.get() + 1);
-        true
-    });
+    let mut arena = RecordStore::new();
+    arena.push_raw(&make_record(0, 0, 99, 60, 20), &mut Counting(count.clone())).unwrap();
 
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
     let columns = collect_columns(&mut engine);
     assert_eq!(columns.len(), 20);
-    assert_eq!(count.get(), 1, "filter called once per record, not per column");
+    assert_eq!(count.get(), 1, "keep_record called once per record, not per column");
 }
 
-// r[verify pileup.read_filter]
+// r[verify record_store.pre_filter.rollback]
 proptest! {
     #[test]
-    fn filter_by_flags_excludes_correct_reads(
+    fn keep_record_by_flags_excludes_correct_reads(
         pass_flags in prop::collection::vec(prop::bool::ANY, 1..=20),
     ) {
+        use seqair::bam::record_store::{CustomizeRecordStore, SlimRecord};
+
+        #[derive(Clone)]
+        struct DropSecondary;
+        impl CustomizeRecordStore for DropSecondary {
+            type Extra = ();
+            fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+                !rec.flags.is_secondary()
+            }
+            fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+        }
+
         let mut arena = RecordStore::new();
         for &pass in &pass_flags {
             let flags = if pass { 99 } else { 99 | 0x100 }; // 0x100 = secondary
-            arena.push_raw(&make_record(0, 0, flags, 60, 10), &mut ()).unwrap();
+            arena.push_raw(&make_record(0, 0, flags, 60, 10), &mut DropSecondary).unwrap();
         }
 
         let expected = pass_flags.iter().filter(|&&p| p).count();
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(0).unwrap());
-        engine.set_filter(move |flags, _aux| !flags.is_secondary());
         let columns = collect_columns(&mut engine);
 
         if expected > 0 {

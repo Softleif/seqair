@@ -321,13 +321,8 @@ impl<W: Write> BamWriter<W> {
         self.buf.extend_from_slice(crate::bam::cigar::CigarOp::ops_as_bytes(cigar));
 
         // Sequence: re-encode Base → 4-bit packed directly into self.buf.
-        // Base is #[repr(u8)] with compile-time size_of::<Base>() == 1 assert;
-        // transmuting &[Base] to &[u8] is sound.
-        // SAFETY: Base is #[repr(u8)] with size_of::<Base>() == 1 (compile-time asserted),
-        // so &[Base] and &[u8] have identical layout.
-        let seq_u8: &[u8] =
-            unsafe { std::slice::from_raw_parts(seq.as_ptr().cast::<u8>(), seq.len()) };
-        super::seq::encode_seq_into(seq_u8, &mut self.buf);
+        // Base: NoUninit allows the &[Base] → &[u8] cast at zero cost.
+        super::seq::encode_seq_into(bytemuck::cast_slice(seq), &mut self.buf);
 
         // Quality scores
         if qual.is_empty() {

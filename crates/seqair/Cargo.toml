@@ -16,6 +16,7 @@ fuzz = []
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
+bytemuck = { workspace = true }
 indexmap = "2"
 itoa = "1"
 libdeflater = "1.25.2"
