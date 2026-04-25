@@ -101,7 +101,7 @@ impl CigarOpType {
 /// on disk: `len << 4 | op_code`. Decoding the op type is a single shift+mask;
 /// re-encoding for BAM output is a no-op.
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CigarOp(u32);
 
 const _: () = assert!(size_of::<CigarOp>() == 4, "CigarOp must stay 4 bytes");
@@ -149,19 +149,15 @@ impl CigarOp {
     }
 
     /// Reinterpret a slice of ops as their on-the-wire BAM bytes
-    /// (LE u32 per op). Safe because `CigarOp` is `repr(transparent)`
-    /// over `u32` and we widen alignment from 4 to 1.
+    /// (LE u32 per op). Safe via `CigarOp: Pod` — `repr(transparent)` over
+    /// `u32` with every bit pattern a valid op.
     ///
     /// On big-endian hosts the bytes are still in native order, NOT BAM-on-disk
     /// order. Callers that write to disk on a BE host would need to byte-swap
     /// each op first; we don't, because seqair targets LE only.
     #[inline]
     pub fn ops_as_bytes(ops: &[Self]) -> &[u8] {
-        let len_bytes = ops.len().checked_mul(size_of::<Self>()).expect("ops byte-len overflow");
-        // SAFETY: CigarOp is #[repr(transparent)] over u32. A &[CigarOp] of
-        // length N points to N * 4 contiguous initialized bytes, with align 4
-        // (≥ align 1 required by &[u8]). Lifetime is tied to the input slice.
-        unsafe { std::slice::from_raw_parts(ops.as_ptr().cast::<u8>(), len_bytes) }
+        bytemuck::cast_slice(ops)
     }
 
     /// Append BAM-on-disk CIGAR bytes (LE u32 per op) into a typed `Vec<CigarOp>`.
