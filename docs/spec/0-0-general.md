@@ -24,7 +24,7 @@ Magic numbers (bit flags, format constants, operation codes) MUST be defined as 
 BAM flags have a strongly-typed `BamFlags` newtype — see [BAM Flags](./0-1-bam-flags.md) for the full specification (`r[flags.type]`, `r[flags.field_type]`).
 
 r[io.typed_cigar_ops]
-CIGAR operations MUST have a `CigarOpType` enum with variants for all 9 SAM-spec operations (M, I, D, N, S, H, P, =, X). The enum MUST provide `consumes_ref()` and `consumes_query()` methods. Invalid operation codes MUST be represented as `None` via `from_bam(u8) -> Option<CigarOpType>`.
+CIGAR operations MUST have a `CigarOpType` enum with variants for all 9 SAM-spec operations (M, I, D, N, S, H, P, =, X). The enum MUST provide `consumes_ref()` and `consumes_query()` methods. Reserved op codes (9..=15 in BAM's 4-bit op field) MUST be represented as `Unknown(u8)` carrying the raw nibble, so `from_bam(u8) -> CigarOpType` is infallible and unknown ops round-trip verbatim through `to_bam_code()` (`Unknown(b) => b`). `Unknown` ops MUST report `consumes_ref() == consumes_query() == false`, so downstream walkers (end_pos, query length, aligned-pairs) silently skip them rather than producing bogus alignment positions.
 
 ## API design
 

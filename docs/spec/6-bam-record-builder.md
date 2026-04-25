@@ -41,7 +41,7 @@ The owned record type makes these modifications safe and explicit: callers get a
 > - `aux: AuxData` — auxiliary tags (see aux data section)
 
 r[bam.owned_record.cigar_op]
-CIGAR operations MUST be represented as a typed `CigarOp` struct with an `op: CigarOpType` field (using the existing `CigarOpType` enum defined in `r[io.typed_cigar_ops]`) and a `len: u32` field. Conversion to/from the BAM packed u32 format (`len << 4 | op_code`) MUST be provided.
+CIGAR operations MUST be represented by a `CigarOp` type that wraps the BAM-on-disk packed `u32` (`len << 4 | op_code`) with `#[repr(transparent)]`, so a `&[CigarOp]` is byte-identical to the on-disk BAM CIGAR layout on little-endian hosts. `CigarOp` MUST expose getters `len() -> u32`, `op_code() -> u8`, `op_type() -> CigarOpType` (using the enum defined in `r[io.typed_cigar_ops]`), `consumes_ref()`, and `consumes_query()`, plus `from_bam_u32(packed)` / `to_bam_u32()` for round-tripping the wire format. The constructor `new(op: CigarOpType, len: u32)` MUST debug-assert that `len < 2^28` (the BAM 28-bit length limit). `from_bam_u32` MUST be infallible — reserved op codes surface via `CigarOpType::Unknown(u8)` per `r[io.typed_cigar_ops]`.
 
 ## Construction
 

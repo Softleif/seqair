@@ -50,7 +50,7 @@ The full header text (all `@` lines joined with newlines) MUST be stored in `Bam
 > | RNAME | string          | converted to tid via header's `name_to_tid` map                            |
 > | POS   | 1-based integer | subtract 1 for 0-based internal pos (i64)                                  |
 > | MAPQ  | integer         | u8 (255 means unavailable)                                                 |
-> | CIGAR | string          | parsed to packed BAM CIGAR ops (u32 per op: `len << 4                      | op`) |
+> | CIGAR | string          | parsed to `Vec<CigarOp>` (typed BAM-on-disk packed layout, see `r[bam.owned_record.cigar_op]`) |
 > | RNEXT | string          | `=` means same as RNAME, `*` means unavailable — not stored in RecordStore |
 > | PNEXT | integer         | not stored in RecordStore (mate info)                                      |
 > | TLEN  | integer         | not stored in RecordStore (template length)                                |
@@ -63,7 +63,7 @@ r[sam.record.coordinate_conversion]
 SAM POS is 1-based; the internal representation is 0-based (matching BAM). The parser MUST subtract 1 from POS. A POS of 0 in SAM means unmapped — after subtraction this becomes -1 (as i64). Unmapped records are filtered by FLAG 0x4 before reaching this point, so -1 positions should not appear in the RecordStore.
 
 r[sam.record.cigar_parse]
-The CIGAR string MUST be parsed into the same packed u32 format used by BAM: each operation is `(length << 4) | op_code`, where op_codes are M=0, I=1, D=2, N=3, S=4, H=5, P=6, =7, X=8. The string `*` means CIGAR unavailable (0 operations, and end_pos = pos).
+The CIGAR string MUST be parsed into a `Vec<CigarOp>`. Each `CigarOp` wraps the BAM packed `u32` (`(length << 4) | op_code`), with op_codes M=0, I=1, D=2, N=3, S=4, H=5, P=6, =7, X=8. Unknown op characters MUST produce a typed parse error (this is stricter than BAM ingest, which tolerates reserved op codes via `CigarOpType::Unknown` per `r[io.typed_cigar_ops]`, because in SAM the lexical character is the only signal). The string `*` means CIGAR unavailable (0 operations, and end_pos = pos).
 
 r[sam.record.seq_decode]
 SEQ characters MUST be decoded to `Base` values: A→A, C→C, G→G, T→T, all others (N, IUPAC codes)→Unknown. The string `*` means sequence unavailable (length 0).

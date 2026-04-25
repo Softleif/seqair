@@ -15,7 +15,7 @@ The store contains six vectors:
 - **Record table** (`Vec<SlimRecord>`): compact fixed-size structs with alignment fields and offsets into the slabs.
 - **Name slab** (`Vec<u8>`): all read names (qnames) packed sequentially. Separated because qnames are only accessed during dedup mate detection — a linear scan of a compact, contiguous buffer.
 - **Bases slab** (`Vec<Base>`): decoded base sequences stored as `Base` enum values (A/C/G/T/Unknown). For BAM, decoded from 4-bit nibbles via SIMD at push time. For SAM/CRAM, provided directly as `&[Base]` by the reader.
-- **Cigar slab** (`Vec<u8>`): CIGAR ops in BAM packed u32 format. Separated because CIGAR is the field that changes during local realignment — isolating it allows append-only mutation without copying other per-record data.
+- **Cigar slab** (`Vec<CigarOp>`): typed CIGAR ops. `CigarOp` is `#[repr(transparent)]` over `u32` and stores the same `len << 4 | op_code` layout BAM uses on disk, so on little-endian hosts the slab is byte-identical to the BAM wire format and ingest is a single memcpy. Separated because CIGAR is the field that changes during local realignment — isolating it allows append-only mutation without copying other per-record data.
 - **Qual slab** (`Vec<u8>`): per-record quality as raw Phred bytes. Separated from aux so that the pileup hot path (which reads qual but rarely aux) scans a dense, contiguous buffer without aux bytes polluting the cache.
 - **Aux slab** (`Vec<u8>`): per-record auxiliary tag bytes in BAM binary format.
 
@@ -47,7 +47,7 @@ r[record_store.checked_offsets]
 Slab offsets (name_off, bases_off, cigar_off, qual_off, aux_off) MUST be checked for u32 overflow before storing in both `push_raw` and `push_fields`. If any slab exceeds `u32::MAX` bytes, the store MUST return an error rather than silently truncating the offset.
 
 r[record_store.push_fields]
-`push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as packed BAM-format u32 ops, sequence as `&[Base]`, quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing.
+`push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as `&[CigarOp]`, sequence as `&[Base]`, quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing.
 
 ## Field access
 
@@ -65,13 +65,13 @@ All records in the store MUST remain valid and accessible until the store is cle
 ## Alignment mutation
 
 r[record_store.set_alignment]
-`set_alignment(idx, new_pos, new_cigar_packed)` MUST replace a record's alignment by appending the new CIGAR to the end of the cigar slab and updating the record's `cigar_off`, `n_cigar_ops`, `pos`, `end_pos`, `matching_bases`, and `indel_bases`. The old CIGAR bytes MUST be left in place as dead data (append-only mutation). The sequence, quality, aux, and name slabs MUST NOT be modified. After calling `set_alignment` on one or more records, the caller MUST call `sort_by_pos()` before using the store for pileup iteration.
+`set_alignment(idx, new_pos, new_cigar_ops: &[CigarOp])` MUST replace a record's alignment by appending the new ops to the end of the cigar slab and updating the record's `cigar_off`, `n_cigar_ops`, `pos`, `end_pos`, `matching_bases`, and `indel_bases`. The old CIGAR ops MUST be left in place as dead data (append-only mutation). The sequence, quality, aux, and name slabs MUST NOT be modified. After calling `set_alignment` on one or more records, the caller MUST call `sort_by_pos()` before using the store for pileup iteration.
 
 r[record_store.set_alignment.validation]
 `set_alignment` MUST validate that the new CIGAR's query-consuming length equals the record's `seq_len` and that the CIGAR op count fits in `u16`. All validation MUST complete before any slab mutation. If validation fails, the method MUST return an error without modifying the store.
 
 r[record_store.set_alignment.dead_data]
-Each `set_alignment` call appends new CIGAR bytes to the cigar slab; old bytes become dead data. For a typical realignment pass where ~10% of records are realigned once, the dead-data overhead is ~10% of cigar slab size. Iterative algorithms that call `set_alignment` multiple times per record accumulate proportionally more dead data. Dead data is reclaimed when `clear()` is called (the cigar slab retains capacity but resets its length). No compaction is provided between `clear()` calls.
+Each `set_alignment` call appends new CIGAR ops to the cigar slab; old ops become dead data. For a typical realignment pass where ~10% of records are realigned once, the dead-data overhead is ~10% of cigar slab size. Iterative algorithms that call `set_alignment` multiple times per record accumulate proportionally more dead data. Dead data is reclaimed when `clear()` is called (the cigar slab retains capacity but resets its length). No compaction is provided between `clear()` calls.
 
 ## Per-record extras and filtering
 
@@ -94,7 +94,7 @@ r[record_store.pre_filter.retain]
 `RecordStore<U>` MUST provide `retain<F: FnMut(&SlimRecord) -> bool>(&mut self, predicate: F)` that removes records where the predicate returns `false`. Unlike the push-time filter, `retain` runs post-push: slab data for dropped records is left in place as dead bytes until `clear()`. This is a general-purpose post-filter for callers that need to drop records after other mutations (e.g., `set_alignment`); the reader-level `fetch_into_customized` on all three formats (BAM, SAM, CRAM) filters at push time with zero waste and does not use `retain`.
 
 r[record_store.slim_record.field_getters]
-`SlimRecord` MUST provide getter methods `seq(&store) -> Result<&[Base]>`, `qual(&store) -> Result<&[BaseQuality]>`, `cigar(&store) -> Result<&[u8]>` (packed BAM CIGAR), and `aux(&store) -> Result<&[u8]>` that take `&RecordStore<U>` for any `U` and return slab-backed slices using the record's offset fields. They MUST validate offsets and return a typed `RecordAccessError` on overflow rather than panic. `extra(&store) -> Result<&U>` follows the same shape but reads the extras slab. These getters are the canonical way for `CustomizeRecordStore` impls to access a record's variable-length data without going through `RecordStore::record(idx)` first.
+`SlimRecord` MUST provide getter methods `seq(&store) -> Result<&[Base]>`, `qual(&store) -> Result<&[BaseQuality]>`, `cigar(&store) -> Result<&[CigarOp]>`, and `aux(&store) -> Result<&[u8]>` that take `&RecordStore<U>` for any `U` and return slab-backed slices using the record's offset fields. They MUST validate offsets and return a typed `RecordAccessError` on overflow rather than panic. `extra(&store) -> Result<&U>` follows the same shape but reads the extras slab. These getters are the canonical way for `CustomizeRecordStore` impls to access a record's variable-length data without going through `RecordStore::record(idx)` first.
 
 r[record_store.extras.access]
 `RecordStore<U>` MUST provide `extra(idx) -> &U` and `extra_mut(idx) -> &mut U` to access the per-record extra by record index. Access MUST go through the record's `extras_idx` field (indirection into the extras slab), so that extras remain valid after `sort_by_pos` or `dedup` reorder/remove records.

@@ -16,7 +16,7 @@ r[perf.no_sorted_indices]
 Since BAM records arrive in coordinate-sorted order from `fetch_into`, the pileup engine MUST NOT sort record indices. It MUST iterate records in arena order directly.
 
 r[perf.cigar_no_to_vec]
-Building a `CigarIndex` MUST NOT clone the CIGAR bytes via `.to_vec()`. The CIGAR bytes live in the arena slab for the lifetime of the region; the `CigarIndex` MUST borrow or reference them by offset, not own a copy.
+Building a `CigarMapping` MUST NOT clone the CIGAR ops via `.to_vec()`. The typed CIGAR ops live in the arena slab for the lifetime of the region (see `r[record_store.slim_record.field_getters]`); `CigarMapping::new` MUST take a borrowed `&[CigarOp]` and either pre-extract a small `CompactOp` array (Complex path) or compute summary state without copying the ops (Linear path).
 
 r[perf.precompute_matches_indels]
 Matches and indels counts MUST be computed once per record during decode and stored in `BamRecord`, NOT recomputed from CIGAR at every pileup position.

@@ -429,7 +429,7 @@ The `q` (0x71) read feature carries a stretch of quality scores from the `QQ` da
 > - `H` → H ops
 > - `P` → P ops
 
-The reconstructed CIGAR MUST be packed into BAM u32 format for the cigar slab.
+The reconstructed CIGAR MUST be assembled as `Vec<CigarOp>` (typed BAM-on-disk packed layout, see `r[bam.owned_record.cigar_op]`) before pushing into the cigar slab.
 
 ### Mate information
 
