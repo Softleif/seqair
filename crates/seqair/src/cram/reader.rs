@@ -9,6 +9,7 @@ use super::{
     index::{self, CramIndex, CramIndexError},
     slice,
 };
+use crate::bam::cigar::CigarOp;
 use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
@@ -230,7 +231,7 @@ pub struct IndexedCramReader<R: Read + Seek = File> {
     shared: Arc<CramShared>,
     // Scratch buffers reused across fetch_into calls
     container_buf: Vec<u8>,
-    cigar_buf: Vec<u8>,
+    cigar_buf: Vec<CigarOp>,
     bases_buf: Vec<Base>,
     qual_buf: Vec<u8>,
     aux_buf: Vec<u8>,

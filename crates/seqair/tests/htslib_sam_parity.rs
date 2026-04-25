@@ -134,19 +134,9 @@ fn read_noodles_grouped(bam_path: &Path) -> (sam::Header, Vec<Vec<NoodlesRecord>
     (header, grouped)
 }
 
-/// Decode seqair's packed CIGAR bytes into (length, `op_code`) pairs.
-fn decode_cigar(cigar_bytes: &[u8]) -> Vec<(u32, u8)> {
-    (0..cigar_bytes.len() / 4)
-        .map(|j| {
-            let packed = u32::from_le_bytes([
-                cigar_bytes[j * 4],
-                cigar_bytes[j * 4 + 1],
-                cigar_bytes[j * 4 + 2],
-                cigar_bytes[j * 4 + 3],
-            ]);
-            (packed >> 4, (packed & 0xF) as u8)
-        })
-        .collect()
+/// Decode seqair's typed CIGAR ops into (length, `op_code`) pairs for comparison.
+fn decode_cigar(ops: &[seqair::bam::CigarOp]) -> Vec<(u32, u8)> {
+    ops.iter().map(|op| (op.len(), op.op_code())).collect()
 }
 
 /// Core comparison: convert SAM to BAM, read with both seqair and noodles,

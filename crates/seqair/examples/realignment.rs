@@ -83,7 +83,7 @@ fn main() -> anyhow::Result<()> {
 
     // Pass 1: inspect records and plan changes without mutating the store.
     // `set_alignment` needs `&mut self`, so we collect the work first.
-    let mut plan: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+    let mut plan: Vec<(u32, u32, Vec<seqair::bam::CigarOp>)> = Vec::new();
     for idx in 0..store.len() as u32 {
         let rec = store.record(idx);
         // Skip unmapped reads — no alignment to update.
@@ -140,40 +140,32 @@ fn main() -> anyhow::Result<()> {
 /// the record does not match the rule (empty CIGAR, leading op not M, or M
 /// too short).
 fn propose_realignment(
-    cigar: &[u8],
+    cigar: &[seqair::bam::CigarOp],
     pos: u32,
     clip: u32,
     min_match: u32,
-) -> Option<(u32, Vec<u8>)> {
-    if clip == 0 || cigar.len() < 4 {
+) -> Option<(u32, Vec<seqair::bam::CigarOp>)> {
+    use seqair::bam::CigarOp;
+    use seqair::bam::cigar::CigarOpType;
+
+    let first = *cigar.first()?;
+    if clip == 0 || !matches!(first.op_type(), CigarOpType::Match) {
         return None;
     }
-
-    let first = u32::from_le_bytes([cigar[0], cigar[1], cigar[2], cigar[3]]);
-    let first_op = first & 0xF;
-    let first_len = first >> 4;
-
-    // Only rewrite a plain leading M op; leave soft-clipped/insertion-led
-    // reads alone so this stays a narrow, local edit.
-    const CIGAR_M: u32 = 0;
-    const CIGAR_S: u32 = 4;
-    if first_op != CIGAR_M || first_len < min_match || first_len <= clip {
+    let first_len = first.len();
+    if first_len < min_match || first_len <= clip {
         return None;
     }
 
     let new_match_len = first_len - clip;
     let new_pos = pos.checked_add(clip)?;
 
-    // Rebuild: [clip]S + [new_match_len]M + cigar[4..]
-    let mut out = Vec::with_capacity(cigar.len() + 4);
-    out.extend_from_slice(&pack_op(clip, CIGAR_S).to_le_bytes());
-    out.extend_from_slice(&pack_op(new_match_len, CIGAR_M).to_le_bytes());
-    out.extend_from_slice(&cigar[4..]);
+    // Rebuild: [clip]S + [new_match_len]M + cigar[1..]
+    let mut out = Vec::with_capacity(cigar.len() + 1);
+    out.push(CigarOp::new(CigarOpType::SoftClip, clip));
+    out.push(CigarOp::new(CigarOpType::Match, new_match_len));
+    out.extend_from_slice(&cigar[1..]);
     Some((new_pos, out))
-}
-
-fn pack_op(len: u32, op: u32) -> u32 {
-    (len << 4) | op
 }
 
 struct Snapshot {
@@ -188,16 +180,25 @@ fn snapshot(store: &RecordStore, idx: u32) -> Snapshot {
     Snapshot { qname, pos: *rec.pos, cigar_str: fmt_cigar(store.cigar(idx)) }
 }
 
-fn fmt_cigar(packed: &[u8]) -> String {
-    const OPS: &[u8] = b"MIDNSHP=X";
+fn fmt_cigar(ops: &[seqair::bam::CigarOp]) -> String {
+    use seqair::bam::cigar::CigarOpType;
     let mut s = String::new();
-    for chunk in packed.chunks_exact(4) {
-        let w = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        let op = (w & 0xF) as usize;
-        let len = w >> 4;
+    for op in ops {
         use std::fmt::Write as _;
-        let _ = write!(s, "{len}");
-        s.push(*OPS.get(op).unwrap_or(&b'?') as char);
+        let _ = write!(s, "{}", op.len());
+        let c = match op.op_type() {
+            CigarOpType::Match => 'M',
+            CigarOpType::Insertion => 'I',
+            CigarOpType::Deletion => 'D',
+            CigarOpType::RefSkip => 'N',
+            CigarOpType::SoftClip => 'S',
+            CigarOpType::HardClip => 'H',
+            CigarOpType::Padding => 'P',
+            CigarOpType::SeqMatch => '=',
+            CigarOpType::SeqMismatch => 'X',
+            CigarOpType::Unknown(_) => '?',
+        };
+        s.push(c);
     }
     s
 }

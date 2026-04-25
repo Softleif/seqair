@@ -643,17 +643,16 @@ mod tests {
     // r[verify base_mod.query_refpos]
     #[test]
     fn query_refpos_via_cigar() {
-        use super::super::cigar::CigarMapping;
+        use super::super::cigar::{CigarMapping, CigarOp, CigarOpType};
         use seqair_types::Pos0;
 
         // Read starts at ref 1000, 10M. C's at qpos 1, 3 → ref 1001, 1003.
         let s = seq(&[A, C, G, C, G, A, C, G, T, A]);
         let state = BaseModState::parse(b"C+m,0,0;", &[200, 180], &s, false).unwrap();
 
-        // Build a simple 10M CIGAR via bytes (BAM-packed: len<<4 | op, M=0).
-        let cigar_op: u32 = 10u32 << 4;
-        let cigar_bytes = cigar_op.to_le_bytes().to_vec();
-        let cm = CigarMapping::new(Pos0::new(1000).unwrap(), &cigar_bytes).unwrap();
+        // Build a simple 10M CIGAR.
+        let cigar = [CigarOp::new(CigarOpType::Match, 10)];
+        let cm = CigarMapping::new(Pos0::new(1000).unwrap(), &cigar).unwrap();
 
         let m = state.mod_at_ref_pos(Pos0::new(1001).unwrap(), &cm).unwrap();
         assert_eq!(m[0].probability, 200);

@@ -69,6 +69,13 @@ pub fn cigar_bytes(ops: &[u32]) -> Vec<u8> {
     ops.iter().flat_map(|op| op.to_le_bytes()).collect()
 }
 
+/// Convert packed u32 ops into typed `CigarOp` slots — the form expected
+/// by the typed CIGAR APIs (`CigarMapping::new`, `calc_*`, `compute_end_pos`,
+/// `RecordStore::set_alignment`, …).
+pub fn cigar_ops(ops: &[u32]) -> Vec<seqair::bam::CigarOp> {
+    ops.iter().map(|&op| seqair::bam::CigarOp::from_bam_u32(op)).collect()
+}
+
 /// Build a synthetic BAM record with a simple N×M CIGAR.
 pub fn make_record(tid: i32, pos: i32, flags: u16, mapq: u8, seq_len: u32) -> Vec<u8> {
     make_record_with_cigar(tid, pos, flags, mapq, &[cigar_op(seq_len, 0)], seq_len)

@@ -10,7 +10,7 @@ use super::{
     reader::CramError,
     varint,
 };
-use crate::bam::{BamHeader, record_store::RecordStore};
+use crate::bam::{BamHeader, cigar::CigarOp, record_store::RecordStore};
 use rustc_hash::FxHashMap;
 use seqair_types::{BamFlags, Base, Pos0, Pos1};
 use tracing::warn;
@@ -116,7 +116,7 @@ pub fn decode_slice<E: crate::bam::record_store::CustomizeRecordStore>(
     query_start: Pos0,
     query_end: Pos0,
     store: &mut RecordStore,
-    cigar_buf: &mut Vec<u8>,
+    cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
@@ -294,7 +294,7 @@ fn decode_record<E: crate::bam::record_store::CustomizeRecordStore>(
     query_start: Pos0,
     query_end: Pos0,
     store: &mut RecordStore,
-    cigar_buf: &mut Vec<u8>,
+    cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
@@ -751,7 +751,7 @@ fn decode_features_and_reconstruct(
     pos_0based: i64,
     slice_start_0based: i64,
     reference_seq: &[u8],
-    cigar_buf: &mut Vec<u8>,
+    cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
 ) -> Result<ReconstructResult, CramError> {
     let ds = &ch.data_series;
@@ -997,11 +997,10 @@ fn decode_features_and_reconstruct(
         }
     }
 
-    // Pack CIGAR ops into BAM format
+    // Pack CIGAR ops into typed BAM-layout CigarOps
     cigar_buf.clear();
     for (len, op) in &cigar_ops {
-        let packed = (len << 4) | u32::from(*op);
-        cigar_buf.extend_from_slice(&packed.to_le_bytes());
+        cigar_buf.push(CigarOp::from_bam_u32((len << 4) | u32::from(*op)));
     }
 
     #[expect(

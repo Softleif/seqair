@@ -230,36 +230,23 @@ fn main() -> anyhow::Result<()> {
 /// For CIGAR `2D7M2D`: the trailing 2D has nothing after → strip it.
 fn query_end_pos(store: &RecordStore, record_idx: u32, record_pos: u32) -> u32 {
     let cigar = store.cigar(record_idx);
-    let n_ops = cigar.len() / 4;
 
     // Walk backwards to find trailing ref-consuming, non-query-consuming ops
     // (D=2, N=3) that have no query-consuming ops after them.
     let mut trailing_ref_len = 0u32;
-    for i in (0..n_ops).rev() {
-        let packed = u32::from_le_bytes([
-            cigar[i * 4],
-            cigar[i * 4 + 1],
-            cigar[i * 4 + 2],
-            cigar[i * 4 + 3],
-        ]);
-        let op = packed & 0xF;
-        let len = packed >> 4;
-
-        match op {
-            2 | 3 => trailing_ref_len += len, // D, N: trailing ref-only ops
-            5 | 6 => {}                       // H, P: skip (no ref, no query)
+    for op in cigar.iter().rev() {
+        match op.op_code() {
+            2 | 3 => trailing_ref_len += op.len(), // D, N: trailing ref-only ops
+            5 | 6 => {}                            // H, P: skip (no ref, no query)
             _ => break, // M, I, S, =, X: query-consuming op found → stop stripping
         }
     }
 
     // Full rlen
     let mut rlen = 0u32;
-    for chunk in cigar.chunks_exact(4) {
-        let packed = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        let op = packed & 0xF;
-        let len = packed >> 4;
-        if matches!(op, 0 | 2 | 3 | 7 | 8) {
-            rlen += len;
+    for op in cigar {
+        if matches!(op.op_code(), 0 | 2 | 3 | 7 | 8) {
+            rlen += op.len();
         }
     }
 

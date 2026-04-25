@@ -243,16 +243,17 @@ fn main() -> anyhow::Result<()> {
 ///
 /// Returns `None` if qpos falls in an insertion or soft clip (no reference
 /// coordinate).
-fn qpos_to_ref_pos(cigar: &[u8], record_pos: u32, target_qpos: u32) -> Option<u32> {
+fn qpos_to_ref_pos(
+    cigar: &[seqair::bam::CigarOp],
+    record_pos: u32,
+    target_qpos: u32,
+) -> Option<u32> {
     let mut rpos = record_pos;
     let mut qpos = 0u32;
 
-    for chunk in cigar.chunks_exact(4) {
-        let packed = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        let op = packed & 0xF;
-        let len = packed >> 4;
-
-        match op {
+    for op in cigar {
+        let len = op.len();
+        match op.op_code() {
             // M, =, X: consume both ref and query
             0 | 7 | 8 => {
                 if target_qpos >= qpos && target_qpos < qpos + len {

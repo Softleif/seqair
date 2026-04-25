@@ -35,9 +35,11 @@ fn pack_cigar_op(len: u32, op: u8) -> u32 {
     (len << 4) | u32::from(op)
 }
 
-/// Encode a list of (len, op) pairs into packed BAM CIGAR bytes.
-fn pack_cigar(ops: &[(u32, u8)]) -> Vec<u8> {
-    ops.iter().flat_map(|&(len, op)| pack_cigar_op(len, op).to_le_bytes()).collect()
+/// Encode a list of (len, op) pairs as typed `CigarOp` slots.
+fn pack_cigar(ops: &[(u32, u8)]) -> Vec<seqair::bam::CigarOp> {
+    ops.iter()
+        .map(|&(len, op)| seqair::bam::CigarOp::from_bam_u32(pack_cigar_op(len, op)))
+        .collect()
 }
 
 /// Compute query-consuming length from a list of (len, op) parts.

@@ -186,9 +186,9 @@ fn long_cigar_records_spanning_blocks() {
         let r = store.record(i);
         assert_eq!(r.seq_len, 4000, "rec {i}: seq_len should be 4000");
 
-        // Verify CIGAR op count: 4000 ops × 4 bytes = 16000 bytes of CIGAR
-        let cigar_bytes = store.cigar(i);
-        assert_eq!(cigar_bytes.len(), 4000 * 4, "rec {i}: cigar byte count");
+        // Verify CIGAR op count: 4000 typed ops in the slab.
+        let cigar_ops = store.cigar(i);
+        assert_eq!(cigar_ops.len(), 4000, "rec {i}: cigar op count");
     }
 }
 

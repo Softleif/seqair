@@ -10,7 +10,7 @@
 #![allow(clippy::arithmetic_side_effects, reason = "test code")]
 mod helpers;
 
-use helpers::{cigar_bytes, cigar_op, make_record, make_record_with_cigar};
+use helpers::{cigar_op, cigar_ops, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::cigar::{CigarMapping, CigarPosInfo};
 use seqair::bam::{Pos0, RecordStore, pileup::PileupEngine};
@@ -241,7 +241,7 @@ proptest! {
 #[test]
 fn binary_search_correct_for_many_ops() {
     // Simulate RNA-seq: 30M 5000N 30M 3000N 40M (5 ops, triggers binary search)
-    let ops = cigar_bytes(&[
+    let ops = cigar_ops(&[
         cigar_op(30, 0),
         cigar_op(5000, 3),
         cigar_op(30, 0),
@@ -307,8 +307,8 @@ proptest! {
                 ops.push(cigar_op(intron_len, 3)); // N
             }
         }
-        let bytes = cigar_bytes(&ops);
-        let mapping = CigarMapping::new(Pos0::new(0).unwrap(), &bytes).unwrap();
+        let typed = cigar_ops(&ops);
+        let mapping = CigarMapping::new(Pos0::new(0).unwrap(), &typed).unwrap();
 
         // Compute total ref span
         let total_ref: u32 = ops.iter().map(|&op| {

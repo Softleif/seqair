@@ -306,19 +306,9 @@ fn bam_cigar_matches_noodles() {
 
         for (i, n) in noodles.iter().enumerate() {
             let idx = seqair_indices[i];
-            let cigar_bytes = store.cigar(idx);
-
-            // Decode seqair's packed u32 CIGAR: lower 4 bits = op code, upper 28 bits = length.
-            let n_ops = cigar_bytes.len() / 4;
-            let seqair_ops: Vec<(u32, u8)> = (0..n_ops)
-                .map(|j| {
-                    let b = cigar_bytes.get(j * 4..j * 4 + 4).expect("cigar slice in bounds");
-                    let packed = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-                    let len = packed >> 4;
-                    let op = (packed & 0xF) as u8;
-                    (len, op)
-                })
-                .collect();
+            let cigar = store.cigar(idx);
+            let seqair_ops: Vec<(u32, u8)> =
+                cigar.iter().map(|op| (op.len(), op.op_code())).collect();
 
             assert_eq!(
                 seqair_ops.len(),

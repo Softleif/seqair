@@ -317,8 +317,8 @@ impl<W: Write> BamWriter<W> {
         self.buf.extend_from_slice(qname);
         self.buf.push(0);
 
-        // CIGAR (already packed u32 LE ops)
-        self.buf.extend_from_slice(cigar);
+        // CIGAR — typed slab is already in BAM-on-disk byte layout on LE hosts.
+        self.buf.extend_from_slice(crate::bam::cigar::CigarOp::ops_as_bytes(cigar));
 
         // Sequence: re-encode Base → 4-bit packed directly into self.buf.
         // Base is #[repr(u8)] with compile-time size_of::<Base>() == 1 assert;

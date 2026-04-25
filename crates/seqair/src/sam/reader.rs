@@ -2,9 +2,10 @@
 //! records for a region into a [`RecordStore`], with the same API as [`crate::bam::reader::IndexedBamReader`].
 
 use crate::bam::{
-    BaiError, BamHeader, BamHeaderError, BamIndex, cigar,
+    BaiError, BamHeader, BamHeaderError, BamIndex,
+    cigar::{self, CigarOp},
     flags::BamFlags,
-    record::{DecodeError, compute_end_pos},
+    record::DecodeError,
     record_store::RecordStore,
     region_buf::RegionBuf,
 };
@@ -461,7 +462,7 @@ fn parse_sam_line<E: super::super::bam::record_store::CustomizeRecordStore>(
     start: i64,
     end: i64,
     store: &mut RecordStore,
-    cigar_buf: &mut Vec<u8>,
+    cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
@@ -524,7 +525,7 @@ fn parse_sam_line<E: super::super::bam::record_store::CustomizeRecordStore>(
     // compute_end_pos returns None only if the CIGAR ref span overflows u32 range;
     // fall back to pos (zero-span) to avoid panicking on malformed input.
     let end_pos =
-        if cigar_available { compute_end_pos(pos, cigar_buf).unwrap_or(pos) } else { pos };
+        if cigar_available { cigar::compute_end_pos(pos, cigar_buf).unwrap_or(pos) } else { pos };
 
     // r[impl sam.reader.overlap_filter+2]
     // r[impl sam.reader.overlap_halfopen]
@@ -624,7 +625,7 @@ fn parse_sam_line<E: super::super::bam::record_store::CustomizeRecordStore>(
 
 // r[impl sam.record.cigar_parse]
 // r[impl sam.edge.long_cigar]
-fn parse_cigar(cigar_str: &[u8], buf: &mut Vec<u8>) -> Result<bool, SamError> {
+fn parse_cigar(cigar_str: &[u8], buf: &mut Vec<CigarOp>) -> Result<bool, SamError> {
     if cigar_str == b"*" {
         return Ok(false);
     }
@@ -654,8 +655,7 @@ fn parse_cigar(cigar_str: &[u8], buf: &mut Vec<u8>) -> Result<bool, SamError> {
             }
         };
 
-        let packed = (len << 4) | op;
-        buf.extend_from_slice(&packed.to_le_bytes());
+        buf.push(CigarOp::from_bam_u32((len << 4) | op));
         num_start = i.checked_add(1).expect("CIGAR byte index cannot overflow usize");
     }
 
@@ -972,7 +972,7 @@ mod tests {
         BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:1000\n").expect("failed to build test header")
     }
 
-    fn make_store_and_bufs() -> (RecordStore, Vec<u8>, Vec<Base>, Vec<u8>, Vec<u8>) {
+    fn make_store_and_bufs() -> (RecordStore, Vec<CigarOp>, Vec<Base>, Vec<u8>, Vec<u8>) {
         (RecordStore::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
     }
 
