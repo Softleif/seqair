@@ -10,10 +10,7 @@ use super::{
     reader::CramError,
     varint,
 };
-use crate::bam::{
-    BamHeader,
-    record_store::{RecordStore, SlimRecord},
-};
+use crate::bam::{BamHeader, record_store::RecordStore};
 use rustc_hash::FxHashMap;
 use seqair_types::{BamFlags, Base, Pos0, Pos1};
 use tracing::warn;
@@ -97,17 +94,18 @@ impl SliceHeader {
 /// `container_data` starts at the first block after the container header.
 /// `slice_offset` is the byte offset from container data start to this slice's header block.
 ///
-/// `keep` is a push-time filter: each record that passes the reader's built-in
-/// overlap/tid/unmapped checks is pushed and then consulted via this closure.
-/// When `keep` returns `false`, the push is rolled back with zero slab waste
-/// (same as BAM/SAM). Returns `(fetched, kept)` where `fetched` counts records
-/// that reached the push step and `kept` counts those that survived the filter.
+/// `customize` is a push-time customizer: each record that passes the
+/// reader's built-in overlap/tid/unmapped checks is pushed and
+/// `customize.keep_record` is consulted. When it returns `false`, the push
+/// is rolled back with zero slab waste (same as BAM/SAM). Returns
+/// `(fetched, kept)` where `fetched` counts records that reached the push
+/// step and `kept` counts those that survived the filter.
 // r[impl cram.fetch_into_filtered.push_time]
 #[expect(
     clippy::too_many_arguments,
     reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
 )]
-pub fn decode_slice<F>(
+pub fn decode_slice<E: crate::bam::record_store::CustomizeRecordStore>(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
@@ -122,11 +120,8 @@ pub fn decode_slice<F>(
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
-    keep: &mut F,
-) -> Result<(usize, usize), CramError>
-where
-    F: FnMut(&SlimRecord, &RecordStore) -> bool,
-{
+    customize: &mut E,
+) -> Result<(usize, usize), CramError> {
     let slice_data = container_data
         .get(slice_offset..)
         .ok_or(CramError::Truncated { context: "slice offset" })?;
@@ -254,7 +249,7 @@ where
             qual_buf,
             aux_buf,
             record_index,
-            keep,
+            customize,
         )?;
         if fetched {
             fetched_count = fetched_count.wrapping_add(1);
@@ -277,16 +272,16 @@ where
 /// Returns `(fetched, mate_info)` where `fetched` is `true` if the record
 /// reached the push step (i.e., was not rejected by the reader's built-in
 /// overlap/tid/unmapped checks) and `false` otherwise. `mate_info.store_idx`
-/// is `Some(idx)` if the record survived both the reader check and the user's
-/// `keep` filter, and `None` if either the reader or the filter dropped it —
-/// the mate-resolution pass already handles the `None` case.
+/// is `Some(idx)` if the record survived both the reader check and the
+/// user's `customize.keep_record`, and `None` if either dropped it — the
+/// mate-resolution pass already handles the `None` case.
 // r[impl cram.record.decode_order]
 // r[impl cram.fetch_into_filtered.push_time]
 #[expect(
     clippy::too_many_arguments,
-    reason = "CRAM record decoding requires compression header, slice header, context, and filter parameters"
+    reason = "CRAM record decoding requires compression header, slice header, context, and customize parameters"
 )]
-fn decode_record<F>(
+fn decode_record<E: crate::bam::record_store::CustomizeRecordStore>(
     ch: &CompressionHeader,
     sh: &SliceHeader,
     is_multi_ref: bool,
@@ -304,11 +299,8 @@ fn decode_record<F>(
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
     record_index: usize,
-    keep: &mut F,
-) -> Result<(bool, SliceMateInfo), CramError>
-where
-    F: FnMut(&SlimRecord, &RecordStore) -> bool,
-{
+    customize: &mut E,
+) -> Result<(bool, SliceMateInfo), CramError> {
     let ds = &ch.data_series;
 
     // r[impl cram.record.flags]
@@ -539,7 +531,7 @@ where
             next_ref_id_val,
             next_pos_val,
             template_len_val,
-            |rec, s| keep(rec, s),
+            customize,
         )?;
 
         return Ok((
@@ -1130,7 +1122,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
-            &mut |_: &SlimRecord, _: &RecordStore| true,
+            &mut (),
         );
 
         assert!(

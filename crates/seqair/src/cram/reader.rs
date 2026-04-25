@@ -394,28 +394,26 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, CramError> {
-        self.fetch_into_filtered(tid, start, end, store, |_, _| true).map(|c| c.kept)
+        self.fetch_into_customized(tid, start, end, store, &mut ()).map(|c| c.kept)
     }
 
-    // r[impl unified.fetch_into_filtered]
+    // r[impl unified.fetch_into_customized]
     // r[impl cram.fetch_into_filtered.push_time]
-    /// Filter-aware variant: each record that passes the reader's built-in
-    /// overlap/tid/unmapped checks is pushed into the store and then consulted
-    /// against `keep`. Rejection triggers the same zero-waste rollback used by
-    /// BAM/SAM — the slabs are truncated back to their pre-push lengths.
-    /// The returned [`FetchCounts`](crate::reader::FetchCounts) reports
-    /// `fetched` (produced by the reader) vs `kept` (survived the filter).
-    pub fn fetch_into_filtered<F>(
+    /// Customized variant: each record that passes the reader's built-in
+    /// overlap/tid/unmapped checks is pushed into the store, with
+    /// `customize.keep_record` consulted at push time. Rejection triggers
+    /// the same zero-waste rollback used by BAM/SAM — the slabs are
+    /// truncated back to their pre-push lengths. The returned
+    /// [`FetchCounts`](crate::reader::FetchCounts) reports `fetched`
+    /// (produced by the reader) vs `kept` (survived the filter).
+    pub fn fetch_into_customized<E: super::super::bam::record_store::CustomizeRecordStore>(
         &mut self,
         tid: u32,
         start: Pos0,
         end: Pos0,
         store: &mut RecordStore,
-        mut keep: F,
-    ) -> Result<crate::reader::FetchCounts, CramError>
-    where
-        F: FnMut(&super::super::bam::record_store::SlimRecord, &RecordStore) -> bool,
-    {
+        customize: &mut E,
+    ) -> Result<crate::reader::FetchCounts, CramError> {
         store.clear();
 
         let start_u64 = start.as_u64();
@@ -565,7 +563,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &mut self.bases_buf,
                     &mut self.qual_buf,
                     &mut self.aux_buf,
-                    &mut keep,
+                    customize,
                 )?;
                 fetched_total = fetched_total.wrapping_add(slice_fetched);
                 kept_total = kept_total.wrapping_add(slice_kept);

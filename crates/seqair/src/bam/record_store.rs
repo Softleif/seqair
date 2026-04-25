@@ -9,8 +9,6 @@
 
 use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
 
-use crate::utils::TraceErr;
-
 use super::{
     cigar,
     record::{self, DecodeError},
@@ -64,15 +62,34 @@ pub struct SlimRecord {
     extras_idx: u32,
 }
 
+// r[impl record_store.slim_record.field_getters]
 impl SlimRecord {
     fn cigar_len(&self) -> usize {
         (self.n_cigar_ops as usize).checked_mul(4).expect("cigar_len overflow")
     }
 
-    /// Get the qname for this record from the store
+    /// Read this record's qname bytes from the store's name slab.
+    pub fn qname<'store, U>(
+        &self,
+        store: &'store RecordStore<U>,
+    ) -> Result<&'store [u8], RecordAccessError> {
+        let start = self.name_off as usize;
+        let end =
+            start.checked_add(self.name_len as usize).ok_or(RecordAccessError::OffsetOverflow {
+                slab: Slab::Names,
+                offset: self.name_off,
+                len: self.name_len as usize,
+            })?;
+        store.names.get(start..end).ok_or(RecordAccessError::SlabOffsetOutOfRange {
+            slab: Slab::Names,
+            offset: self.name_off,
+        })
+    }
+
+    /// Read this record's decoded sequence bases from the store's bases slab.
     pub fn seq<'store, U>(
         &self,
-        store: &'store RecordStore<()>,
+        store: &'store RecordStore<U>,
     ) -> Result<&'store [Base], RecordAccessError> {
         let start = self.bases_off as usize;
         let end =
@@ -87,10 +104,10 @@ impl SlimRecord {
         })
     }
 
-    /// Get the `qname` for this record from the store
+    /// Read this record's per-base quality scores from the store's qual slab.
     pub fn qual<'store, U>(
         &self,
-        store: &'store RecordStore<()>,
+        store: &'store RecordStore<U>,
     ) -> Result<&'store [BaseQuality], RecordAccessError> {
         let start = self.qual_off as usize;
         let end =
@@ -106,10 +123,10 @@ impl SlimRecord {
         Ok(BaseQuality::slice_from_bytes(q))
     }
 
-    /// Get the CIGAR ops for this record from the store (packed u32 format).
+    /// Read the CIGAR ops for this record from the store (packed u32 format).
     pub fn cigar<'store, U>(
         &self,
-        store: &'store RecordStore<()>,
+        store: &'store RecordStore<U>,
     ) -> Result<&'store [u8], RecordAccessError> {
         let start = self.cigar_off as usize;
         let end = start.checked_add(self.cigar_len()).ok_or(RecordAccessError::OffsetOverflow {
@@ -123,10 +140,10 @@ impl SlimRecord {
         })
     }
 
-    /// Get the auxiliary tag bytes for this record from the store (BAM binary format).
+    /// Read the auxiliary tag bytes for this record (BAM binary format).
     pub fn aux<'store, U>(
         &self,
-        store: &'store RecordStore<()>,
+        store: &'store RecordStore<U>,
     ) -> Result<&'store [u8], RecordAccessError> {
         let start = self.aux_off as usize;
         let end =
@@ -141,7 +158,7 @@ impl SlimRecord {
         })
     }
 
-    /// Get the extras for this record from the store.
+    /// Read the per-record extra value for this record.
     pub fn extra<'store, U>(
         &self,
         store: &'store RecordStore<U>,
@@ -202,7 +219,8 @@ pub enum Slab {
 ///   does not pollute the cache when scanning qual)
 /// - `extras`: per-record user data of type `U` (default `()`, zero-cost)
 ///
-/// Use [`with_extras`](RecordStore::with_extras) to compute per-record data after loading.
+/// Use [`apply_customize`](RecordStore::apply_customize) to compute per-record
+/// data after loading via a [`CustomizeRecordStore`] value.
 // r[impl record_store.extras.generic_param]
 pub struct RecordStore<U = ()> {
     records: Vec<SlimRecord>,
@@ -264,20 +282,23 @@ impl RecordStore {
 
     // r[impl record_store.extras.push_unit]
     // r[impl record_store.pre_filter.rollback]
-    /// Decode a raw BAM record, append it, then consult `keep` to decide
-    /// whether to commit or roll back.
+    /// Decode a raw BAM record, append it, then consult
+    /// `customize.keep_record` to decide whether to commit or roll back.
     ///
-    /// Returns `Ok(Some(idx))` if the record was kept, `Ok(None)` if the filter
-    /// rejected it (in which case all slab writes are truncated back to their
-    /// pre-push lengths — no waste). Use `|_, _| true` for no filtering.
+    /// Returns `Ok(Some(idx))` if the record was kept, `Ok(None)` if the
+    /// customizer rejected it (in which case all slab writes are truncated
+    /// back to their pre-push lengths — no waste). Pass `&mut ()` for no
+    /// filtering (the blanket [`CustomizeRecordStore`] impl on `()` keeps
+    /// every record).
     ///
-    /// The filter sees both the freshly-parsed [`SlimRecord`] and the `&self`
-    /// store, so it can read qname, aux, etc. of the pending record (those
-    /// bytes live at the tail of the corresponding slabs until rollback).
-    pub fn push_raw<F>(&mut self, raw: &[u8], mut keep: F) -> Result<Option<u32>, DecodeError>
-    where
-        F: FnMut(&SlimRecord, &Self) -> bool,
-    {
+    /// `keep_record` sees both the freshly-parsed [`SlimRecord`] and the
+    /// `&self` store, so it can read qname, aux, etc. of the pending record
+    /// (those bytes live at the tail of the corresponding slabs until rollback).
+    pub fn push_raw<E: CustomizeRecordStore>(
+        &mut self,
+        raw: &[u8],
+        customize: &mut E,
+    ) -> Result<Option<u32>, DecodeError> {
         let h = record::parse_header(raw)?;
 
         let idx = u32::try_from(self.records.len()).map_err(|_| DecodeError::SlabOverflow)?;
@@ -377,7 +398,7 @@ impl RecordStore {
         self.extras.push(());
 
         // r[impl record_store.pre_filter.rollback]
-        if keep(
+        if customize.keep_record(
             self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
             self,
         ) {
@@ -410,19 +431,19 @@ impl RecordStore {
     // r[impl record_store.checked_offsets]
     // r[impl record_store.pre_filter.rollback]
     /// Append a record from pre-parsed fields (for SAM/CRAM readers), then
-    /// consult `keep` to decide whether to commit or roll back.
+    /// consult `customize.keep_record` to decide whether to commit or roll back.
     ///
     /// Writes directly into the slabs without going through BAM binary encoding.
     /// CIGAR must be in BAM packed u32 format (`len << 4 | op`).
     ///
-    /// Returns `Ok(Some(idx))` if kept, `Ok(None)` if `keep` rejected the
-    /// record (all slab writes are truncated back). Use `|_, _| true` to
+    /// Returns `Ok(Some(idx))` if kept, `Ok(None)` if `keep_record` rejected
+    /// the record (all slab writes are truncated back). Pass `&mut ()` to
     /// disable filtering.
     #[expect(
         clippy::too_many_arguments,
         reason = "all fields are needed for zero-copy push into the record store slabs"
     )]
-    pub fn push_fields<F>(
+    pub fn push_fields<E: CustomizeRecordStore>(
         &mut self,
         pos: Pos0,
         end_pos: Pos0,
@@ -439,11 +460,8 @@ impl RecordStore {
         next_ref_id: i32,
         next_pos: i32,
         template_len: i32,
-        mut keep: F,
-    ) -> Result<Option<u32>, DecodeError>
-    where
-        F: FnMut(&SlimRecord, &Self) -> bool,
-    {
+        customize: &mut E,
+    ) -> Result<Option<u32>, DecodeError> {
         if qual.len() != bases.len() {
             return Err(DecodeError::QualLenMismatch {
                 qual_len: qual.len(),
@@ -521,7 +539,7 @@ impl RecordStore {
         self.extras.push(());
 
         // r[impl record_store.pre_filter.rollback]
-        if keep(
+        if customize.keep_record(
             self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
             self,
         ) {
@@ -532,13 +550,14 @@ impl RecordStore {
         }
     }
 
-    // r[impl record_store.extras.provider]
-    /// Compute per-record extras using a [`RecordStoreExtras`] provider,
+    // r[impl record_store.customize.apply]
+    /// Compute per-record extras using a [`CustomizeRecordStore`] value,
     /// consuming this `RecordStore<()>` and producing `RecordStore<E::Extra>`.
     ///
-    /// All existing slabs are moved, not copied. The provider sees each
-    /// record's index and the whole `&RecordStore<()>`, so it can read any
-    /// slab (record fields, aux, seq, qname).
+    /// All existing slabs are moved, not copied. `customize.compute` sees
+    /// each `&SlimRecord` and the whole `&RecordStore<()>`, so it can use
+    /// the `SlimRecord` getters (`rec.seq(store)`, `rec.aux(store)`, …) to
+    /// read any slab.
     ///
     /// # Example
     ///
@@ -547,7 +566,7 @@ impl RecordStore {
     /// ```
     /// use seqair::bam::{Pos0, RecordStore};
     /// use seqair::bam::pileup::PileupEngine;
-    /// use seqair::bam::record_store::RecordStoreExtras;
+    /// use seqair::bam::record_store::{CustomizeRecordStore, SlimRecord};
     /// use seqair_types::{BamFlags, Base};
     ///
     /// #[derive(Debug, Clone, Default)]
@@ -556,13 +575,12 @@ impl RecordStore {
     /// #[derive(Debug)]
     /// struct ReadInfo { is_reverse: bool, qname_len: usize }
     ///
-    /// impl RecordStoreExtras for ReadInfoBuilder {
+    /// impl CustomizeRecordStore for ReadInfoBuilder {
     ///     type Extra = ReadInfo;
-    ///     fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> ReadInfo {
-    ///         let rec = store.record(idx);
+    ///     fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> ReadInfo {
     ///         ReadInfo {
     ///             is_reverse: rec.flags.is_reverse(),
-    ///             qname_len: store.qname(idx).len(),
+    ///             qname_len: rec.qname(store).map(|n| n.len()).unwrap_or(0),
     ///         }
     ///     }
     /// }
@@ -573,10 +591,10 @@ impl RecordStore {
     /// #     Pos0::new(100).unwrap(), Pos0::new(103).unwrap(),
     /// #     BamFlags::from(0x10), 60, 4, 0, b"read1", &cigar,
     /// #     &[Base::A, Base::C, Base::G, Base::T], &[30; 4], &[], 0, -1, 0, 0,
-    /// #     |_, _| true,
+    /// #     &mut (),
     /// # ).unwrap();
     ///
-    /// let store = store.apply_extras(&mut ReadInfoBuilder);
+    /// let store = store.apply_customize(&mut ReadInfoBuilder);
     /// let mut engine = PileupEngine::new(
     ///     store,
     ///     Pos0::new(100).unwrap(),
@@ -591,13 +609,16 @@ impl RecordStore {
     ///     }
     /// }
     /// ```
-    pub fn apply_extras<E: CustomizeRecordStore>(self, provider: &mut E) -> RecordStore<E::Extra> {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
-        )]
-        let extras: Vec<E::Extra> =
-            (0..self.records.len()).map(|i| provider.compute(i as u32, &self)).collect();
+    pub fn apply_customize<E: CustomizeRecordStore>(
+        self,
+        customize: &mut E,
+    ) -> RecordStore<E::Extra> {
+        let mut extras: Vec<E::Extra> = Vec::with_capacity(self.records.len());
+        // Borrow self.records immutably and self immutably at the same time —
+        // both are shared borrows, so no aliasing conflict.
+        for rec in &self.records {
+            extras.push(customize.compute(rec, &self));
+        }
         self.into_parts_with_extras(extras)
     }
 
@@ -624,30 +645,40 @@ impl RecordStore {
     }
 }
 
-// r[impl record_store.extras.provider]
-/// Computes per-record extras for a [`RecordStore`].
+// r[impl record_store.customize.trait]
+/// Customize how records flow into a [`RecordStore`]: filter at push time
+/// and compute per-record extras at apply time.
 ///
-/// Used by [`Readers`](crate::reader::Readers) to attach user data to every
-/// record as it is loaded. The provider itself must be `Clone` so it can be
-/// duplicated across forked readers in a multi-threaded pipeline.
+/// Used by [`Readers`](crate::reader::Readers) and the lower-level
+/// `push_raw`/`push_fields`/`fetch_into_customized` APIs. Implementors are
+/// `Clone` so they can be duplicated across forked readers in multi-threaded
+/// pipelines.
 ///
 /// # Example
 ///
+/// A customizer that drops low-quality reads and tags each kept read with
+/// its qname length:
+///
 /// ```
-/// use seqair::bam::record_store::{RecordStore, RecordStoreExtras};
+/// use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
 ///
 /// #[derive(Clone, Default)]
-/// struct QnameLen;
+/// struct QnameLen { min_mapq: u8 }
 ///
-/// impl RecordStoreExtras for QnameLen {
+/// impl CustomizeRecordStore for QnameLen {
 ///     type Extra = usize;
-///     fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> usize {
-///         store.qname(idx).len()
+///
+///     fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+///         rec.mapq >= self.min_mapq
+///     }
+///
+///     fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> usize {
+///         rec.qname(store).map(|n| n.len()).unwrap_or(0)
 ///     }
 /// }
 /// ```
 pub trait CustomizeRecordStore: Clone {
-    /// The per-record data produced by this provider.
+    /// The per-record data produced by `compute`.
     type Extra;
 
     // r[impl record_store.pre_filter.provider_hook]
@@ -655,32 +686,37 @@ pub trait CustomizeRecordStore: Clone {
     /// computed. Returning `false` rolls back the slab writes for this
     /// record — it is as if the record was never fetched.
     ///
-    /// Default: keep mapped records, filter out unmapped.
+    /// Default: keep every record. Override to filter at push time.
     ///
     /// The filter sees the pushed [`SlimRecord`] (with its `pos`, `flags`,
     /// `mapq`, etc.) and the `&RecordStore<()>` for reading slab-backed
-    /// data like qname, aux, and sequence bytes. The freshly-pushed record
-    /// is at the tail of each slab, so all of its bytes are accessible.
+    /// data via `rec.qname(store)`, `rec.aux(store)`, etc. The freshly-pushed
+    /// record is at the tail of each slab, so all of its bytes are accessible.
     #[inline]
-    fn keep_record(&mut self, rec: &SlimRecord, _store: &RecordStore<()>) -> bool {
-        !rec.flags.is_unmapped()
+    fn keep_record(&mut self, _rec: &SlimRecord, _store: &RecordStore<()>) -> bool {
+        true
     }
 
-    /// Compute the extra for record `idx` in `store`.
-    fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> Self::Extra;
+    /// Compute the extra for `rec`. Called once per kept record by
+    /// [`RecordStore::apply_customize`]. Use the `rec.seq(store)`,
+    /// `rec.qual(store)`, `rec.aux(store)`, `rec.qname(store)`, and
+    /// `rec.cigar(store)` getters on `SlimRecord` to read variable-length
+    /// data without going through `RecordStore::record(idx)` first.
+    fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> Self::Extra;
 }
 
-// r[impl record_store.extras.provider]
+// r[impl record_store.customize.trait]
 /// Blanket no-op implementation for the default `()` case.
 ///
-/// `RecordStore<()>` does not need extras; `Readers<()>` uses this to skip the
-/// `apply_extras` pass entirely when there is nothing to compute. The default
-/// `keep_record` from the trait (always `true`) means `Readers<()>` never
-/// filters either.
+/// `RecordStore<()>` does not need extras; `Readers<()>` uses this to skip
+/// the `apply_customize` pass entirely when there is nothing to compute.
+/// The default `keep_record` (always `true`) means `Readers<()>` never
+/// filters either, so `&mut ()` is the no-op customizer to pass into
+/// `push_raw`/`push_fields`/`fetch_into_customized`.
 impl CustomizeRecordStore for () {
     type Extra = ();
     #[inline]
-    fn compute(&mut self, _idx: u32, _store: &RecordStore<()>) {}
+    fn compute(&mut self, _rec: &SlimRecord, _store: &RecordStore<()>) {}
 }
 
 impl<U> RecordStore<U> {
@@ -1006,6 +1042,28 @@ impl Default for RecordStore {
 mod tests {
     use super::*;
 
+    /// Drop every record at push time (no-extra customizer).
+    #[derive(Clone, Default)]
+    struct KeepNone;
+    impl CustomizeRecordStore for KeepNone {
+        type Extra = ();
+        fn keep_record(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
+            false
+        }
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+    }
+
+    /// Decide accept/reject from a runtime flag — used by proptests.
+    #[derive(Clone)]
+    struct AcceptFlag(bool);
+    impl CustomizeRecordStore for AcceptFlag {
+        type Extra = ();
+        fn keep_record(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
+            self.0
+        }
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+    }
+
     /// Build a minimal valid BAM record raw bytes.
     fn make_raw_record(qname: &[u8], seq_len: u32, n_cigar_ops: u16) -> Vec<u8> {
         let name_len = qname.len() as u8 + 1; // includes NUL
@@ -1050,7 +1108,7 @@ mod tests {
         raw[12..14].copy_from_slice(&u16::MAX.to_le_bytes()); // n_cigar_ops
         raw[16..20].copy_from_slice(&u32::MAX.to_le_bytes()); // seq_len
 
-        let result = store.push_raw(&raw, |_, _| true);
+        let result = store.push_raw(&raw, &mut ());
         assert!(result.is_err());
     }
 
@@ -1078,7 +1136,7 @@ mod tests {
             -1, // next_ref_id
             0,  // next_pos
             0,  // template_len
-            |_, _| true,
+            &mut (),
         );
         assert!(result.is_ok());
     }
@@ -1088,7 +1146,7 @@ mod tests {
     fn push_raw_normal_record_succeeds() {
         let mut store = RecordStore::new();
         let raw = make_raw_record(b"read1", 4, 1);
-        let result = store.push_raw(&raw, |_, _| true);
+        let result = store.push_raw(&raw, &mut ());
         assert!(result.is_ok());
         assert_eq!(store.len(), 1);
     }
@@ -1100,7 +1158,7 @@ mod tests {
         let mut raw = make_raw_record(b"read1", 4, 1);
         // Write next_ref_id = 7 at BAM offset 20
         raw[20..24].copy_from_slice(&7i32.to_le_bytes());
-        store.push_raw(&raw, |_, _| true).unwrap();
+        store.push_raw(&raw, &mut ()).unwrap();
         assert_eq!(store.record(0).next_ref_id, 7);
     }
 
@@ -1111,7 +1169,7 @@ mod tests {
 
         // Push record A (kept)
         let a = make_raw_record(b"read1", 4, 1);
-        let idx_a = store.push_raw(&a, |_, _| true).unwrap();
+        let idx_a = store.push_raw(&a, &mut ()).unwrap();
         assert_eq!(idx_a, Some(0));
         let after_a = (
             store.records.len(),
@@ -1125,7 +1183,7 @@ mod tests {
 
         // Push record B (rejected by filter) — all slab extensions must roll back
         let b = make_raw_record(b"read2", 8, 2);
-        let idx_b = store.push_raw(&b, |_, _| false).unwrap();
+        let idx_b = store.push_raw(&b, &mut KeepNone).unwrap();
         assert_eq!(idx_b, None, "rejected record must not yield an index");
 
         let after_b = (
@@ -1141,7 +1199,7 @@ mod tests {
 
         // Push record C (kept) — indexing must continue from idx 1 (B was never committed)
         let c = make_raw_record(b"read3", 4, 1);
-        let idx_c = store.push_raw(&c, |_, _| true).unwrap();
+        let idx_c = store.push_raw(&c, &mut ()).unwrap();
         assert_eq!(idx_c, Some(1), "rejected record must not consume an index");
         assert_eq!(store.len(), 2, "store should hold A and C only");
     }
@@ -1149,19 +1207,24 @@ mod tests {
     // r[verify record_store.pre_filter.rollback]
     #[test]
     fn push_raw_filter_can_read_slim_record_and_store() {
-        let mut store = RecordStore::new();
-        // Push a record with mapq = 0 via the default make_raw_record.
-        let raw = make_raw_record(b"readX", 4, 1);
-        let kept_idx = store
-            .push_raw(&raw, |rec, s| {
-                // Filter sees the SlimRecord and store; verifies we can
-                // read qname from the freshly-pushed record at the tail.
+        // Customizer that asserts the freshly-pushed record's fields are
+        // visible (qname, mapq) by the time keep_record is called.
+        #[derive(Clone, Default)]
+        struct AssertReadX;
+        impl CustomizeRecordStore for AssertReadX {
+            type Extra = ();
+            fn keep_record(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> bool {
                 assert_eq!(rec.mapq, 0);
-                let qname = &s.names[rec.name_off as usize..][..rec.name_len as usize];
+                let qname = rec.qname(store).expect("qname slab must be readable");
                 assert_eq!(qname, b"readX");
                 true
-            })
-            .unwrap();
+            }
+            fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+        }
+
+        let mut store = RecordStore::new();
+        let raw = make_raw_record(b"readX", 4, 1);
+        let kept_idx = store.push_raw(&raw, &mut AssertReadX).unwrap();
         assert_eq!(kept_idx, Some(0));
     }
 
@@ -1189,7 +1252,7 @@ mod tests {
                 -1,
                 0,
                 0,
-                |_, _| true,
+                &mut (),
             )
             .unwrap();
 
@@ -1216,7 +1279,7 @@ mod tests {
                 -1,
                 0,
                 0,
-                |_, _| false,
+                &mut KeepNone,
             )
             .unwrap();
         assert_eq!(rejected, None);
@@ -1249,7 +1312,7 @@ mod tests {
                 3,   // next_ref_id
                 500, // next_pos
                 200, // template_len
-                |_, _| true,
+                &mut (),
             )
             .unwrap();
         assert_eq!(store.record(0).next_ref_id, 3);
@@ -1264,6 +1327,7 @@ mod tests {
     // leaving zero dead bytes.
     mod rollback_props {
         use super::super::*;
+        use super::AcceptFlag;
         use proptest::prelude::*;
         use seqair_types::{BamFlags, Base};
 
@@ -1360,7 +1424,7 @@ mod tests {
                     -1,
                     0,
                     0,
-                    |_, _| input.accept,
+                    &mut AcceptFlag(input.accept),
                 )
                 .expect("push_fields must not error on synthetic input")
         }
@@ -1572,7 +1636,7 @@ mod tests {
         fn push_raw_one(store: &mut RecordStore<()>, input: &RawInput) -> Option<u32> {
             let raw = build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq);
             store
-                .push_raw(&raw, |_, _| input.accept)
+                .push_raw(&raw, &mut AcceptFlag(input.accept))
                 .expect("synthetic BAM record is always parseable")
         }
 

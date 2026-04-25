@@ -22,11 +22,13 @@ use tracing::instrument;
 /// so that CRAM has access to the reference it needs and all formats have
 /// uniform open/fork/fetch semantics.
 ///
-/// The optional type parameter `E` attaches a [`RecordStoreExtras`] provider —
-/// user code computes per-record data once at load time and accesses it during
-/// pileup iteration via [`AlignmentView::extra`](crate::bam::pileup::AlignmentView::extra).
-/// When `E = ()` (the default), no extras are computed and the provider pass is
-/// skipped.
+/// The optional type parameter `E` attaches a [`CustomizeRecordStore`]
+/// value — user code defines per-record filtering (`keep_record`) and
+/// per-record data computation (`compute`), and accesses the computed data
+/// during pileup iteration via
+/// [`AlignmentView::extra`](crate::bam::pileup::AlignmentView::extra). When
+/// `E = ()` (the default), no records are filtered and no extras are
+/// computed (zero-cost).
 ///
 /// # Quick start: pileup at a genomic region
 ///
@@ -106,7 +108,7 @@ pub struct Readers<E: CustomizeRecordStore = ()> {
     pub(crate) fasta: IndexedFastaReader,
     pub(crate) store: RecordStore<()>,
     pub(crate) fasta_buf: Vec<u8>,
-    pub(crate) extras_provider: E,
+    pub(crate) customize: E,
 }
 
 impl<E: CustomizeRecordStore> std::fmt::Debug for Readers<E> {
@@ -123,18 +125,19 @@ impl Readers<()> {
     // r[impl unified.readers_open]
     #[instrument(level = "debug", fields(alignment = %alignment_path.display(), fasta = %fasta_path.display()))]
     pub fn open(alignment_path: &Path, fasta_path: &Path) -> Result<Self, ReaderError> {
-        Self::open_with_extras(alignment_path, fasta_path, ())
+        Self::open_customized(alignment_path, fasta_path, ())
     }
 }
 
 impl<E: CustomizeRecordStore> Readers<E> {
-    // r[impl unified.readers_open_with_extras]
-    /// Open like [`open`](Readers::open) but attach a [`RecordStoreExtras`]
-    /// provider so per-record extras are computed every time records are loaded.
-    pub fn open_with_extras(
+    // r[impl unified.readers_open_customized]
+    /// Open like [`open`](Readers::open) but attach a [`CustomizeRecordStore`]
+    /// value so per-record filtering and extras computation runs every time
+    /// records are loaded.
+    pub fn open_customized(
         alignment_path: &Path,
         fasta_path: &Path,
-        extras_provider: E,
+        customize: E,
     ) -> Result<Self, ReaderError> {
         let fasta = IndexedFastaReader::open(fasta_path)
             .map_err(|source| ReaderError::FastaOpen { source })?;
@@ -144,13 +147,13 @@ impl<E: CustomizeRecordStore> Readers<E> {
             fasta,
             store: RecordStore::default(),
             fasta_buf: Vec::new(),
-            extras_provider,
+            customize,
         })
     }
 
     /// Fork both the alignment reader and the FASTA reader.
     ///
-    /// The extras provider is cloned so each fork has its own copy.
+    /// The customize value is cloned so each fork has its own copy.
     // r[impl unified.readers_fork]
     pub fn fork(&self) -> Result<Self, ReaderError> {
         let alignment = self.alignment.fork()?;
@@ -160,7 +163,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
             fasta,
             store: RecordStore::default(),
             fasta_buf: Vec::new(),
-            extras_provider: self.extras_provider.clone(),
+            customize: self.customize.clone(),
         })
     }
 
@@ -179,14 +182,14 @@ impl<E: CustomizeRecordStore> Readers<E> {
         self.alignment.fetch_into(tid, start, end, store)
     }
 
-    /// Access the extras provider, e.g. to inspect any internal counters it carries.
-    pub fn extras_provider(&self) -> &E {
-        &self.extras_provider
+    /// Access the customize value, e.g. to inspect any internal counters it carries.
+    pub fn customize(&self) -> &E {
+        &self.customize
     }
 
-    /// Mutable access to the extras provider, e.g. to reset state between regions.
-    pub fn extras_provider_mut(&mut self) -> &mut E {
-        &mut self.extras_provider
+    /// Mutable access to the customize value, e.g. to reset state between regions.
+    pub fn customize_mut(&mut self) -> &mut E {
+        &mut self.customize
     }
 
     // r[impl unified.readers_resolve_region]
@@ -244,14 +247,12 @@ impl<E: CustomizeRecordStore> Readers<E> {
     ) -> Result<PileupEngine<E::Extra>, ReaderError> {
         let tid = tid.resolve_tid(self.header())?;
 
-        // Split borrows: the filter closure captures `extras_provider` while
-        // the fetch writes into `store`. Three disjoint &mut borrows of self.
+        // Split borrows: fetch writes into `store` while customize is consulted
+        // for keep_record. Three disjoint &mut borrows of self.
         let alignment = &mut self.alignment;
         let store = &mut self.store;
-        let provider = &mut self.extras_provider;
-        alignment.fetch_into_filtered(tid.as_u32(), start, end, store, |rec, s| {
-            provider.keep_record(rec, s)
-        })?;
+        let customize = &mut self.customize;
+        alignment.fetch_into_customized(tid.as_u32(), start, end, store, customize)?;
 
         let contig = self
             .header()
@@ -279,7 +280,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
         let ref_seq = RefSeq::new(Rc::from(bases), start);
 
         let base_store = std::mem::take(&mut self.store);
-        let typed_store = base_store.apply_extras(&mut self.extras_provider);
+        let typed_store = base_store.apply_customize(&mut self.customize);
 
         let mut engine = PileupEngine::new(typed_store, start, end);
         engine.set_reference_seq(ref_seq);

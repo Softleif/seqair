@@ -748,10 +748,10 @@ mod tests {
         // Write via OwnedBamRecord to get them into the store
         let mut raw_buf = Vec::new();
         rec1.to_bam_bytes(&mut raw_buf).unwrap();
-        store.push_raw(&raw_buf, |_, _| true).unwrap();
+        store.push_raw(&raw_buf, &mut ()).unwrap();
         raw_buf.clear();
         rec2.to_bam_bytes(&mut raw_buf).unwrap();
-        store.push_raw(&raw_buf, |_, _| true).unwrap();
+        store.push_raw(&raw_buf, &mut ()).unwrap();
 
         // Write via write_store_record
         let mut output = Vec::new();
@@ -772,7 +772,7 @@ mod tests {
             let block_size = reader.read_i32().unwrap();
             let mut rec_data = vec![0u8; block_size as usize];
             reader.read_exact_into(&mut rec_data).unwrap();
-            store2.push_raw(&rec_data, |_, _| true).unwrap();
+            store2.push_raw(&rec_data, &mut ()).unwrap();
         }
 
         for i in 0..2u32 {
@@ -830,7 +830,7 @@ mod tests {
         for rec in &recs {
             raw_buf.clear();
             rec.to_bam_bytes(&mut raw_buf).unwrap();
-            store.push_raw(&raw_buf, |_, _| true).unwrap();
+            store.push_raw(&raw_buf, &mut ()).unwrap();
         }
 
         let mut output = Vec::new();

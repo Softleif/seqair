@@ -301,7 +301,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
                 &mut bases_buf,
                 &mut qual_buf,
                 &mut aux_buf,
-                &mut |_, _| true,
+                &mut (),
             )?;
         }
 
@@ -329,21 +329,18 @@ impl<R: Read + Seek> IndexedSamReader<R> {
         end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, SamError> {
-        self.fetch_into_filtered(tid, start, end, store, |_, _| true).map(|c| c.kept)
+        self.fetch_into_customized(tid, start, end, store, &mut ()).map(|c| c.kept)
     }
 
-    // r[impl unified.fetch_into_filtered]
-    pub fn fetch_into_filtered<F>(
+    // r[impl unified.fetch_into_customized]
+    pub fn fetch_into_customized<E: super::super::bam::record_store::CustomizeRecordStore>(
         &mut self,
         tid: u32,
         start: Pos0,
         end: Pos0,
         store: &mut RecordStore,
-        mut keep: F,
-    ) -> Result<crate::reader::FetchCounts, SamError>
-    where
-        F: FnMut(&super::super::bam::record_store::SlimRecord, &RecordStore) -> bool,
-    {
+        customize: &mut E,
+    ) -> Result<crate::reader::FetchCounts, SamError> {
         store.clear();
 
         let chunks = self.shared.index.query(tid, start, end);
@@ -405,7 +402,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                         &mut bases_buf,
                         &mut qual_buf,
                         &mut aux_buf,
-                        &mut keep,
+                        customize,
                     )? {
                         fetched = fetched.saturating_add(1);
                         if outcome {
@@ -436,7 +433,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                         &mut bases_buf,
                         &mut qual_buf,
                         &mut aux_buf,
-                        &mut keep,
+                        customize,
                     )?
                 {
                     fetched = fetched.saturating_add(1);
@@ -455,9 +452,9 @@ impl<R: Read + Seek> IndexedSamReader<R> {
 // r[impl sam.record.parse]
 #[expect(
     clippy::too_many_arguments,
-    reason = "SAM line parsing needs header, filter, region, store, and per-record output parameters"
+    reason = "SAM line parsing needs header, customize, region, store, and per-record output parameters"
 )]
-fn parse_sam_line<F>(
+fn parse_sam_line<E: super::super::bam::record_store::CustomizeRecordStore>(
     line: &[u8],
     header: &BamHeader,
     tid_filter: i32,
@@ -468,11 +465,8 @@ fn parse_sam_line<F>(
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
-    keep: &mut F,
-) -> Result<Option<bool>, SamError>
-where
-    F: FnMut(&super::super::bam::record_store::SlimRecord, &RecordStore) -> bool,
-{
+    customize: &mut E,
+) -> Result<Option<bool>, SamError> {
     let fields: Vec<&[u8]> = line.splitn(12, |&b| b == b'\t').collect();
     if fields.len() < 11 {
         return Err(SamRecordError::TooFewFields { found: fields.len() }.into());
@@ -621,7 +615,7 @@ where
             next_ref_id,
             next_pos,
             template_len,
-            |rec, s| keep(rec, s),
+            customize,
         )?
         .is_some();
 
@@ -996,7 +990,7 @@ mod tests {
             &mut bases_buf,
             &mut qual_buf,
             &mut aux_buf,
-            &mut |_, _| true,
+            &mut (),
         )
     }
 
@@ -1134,7 +1128,7 @@ mod tests {
             &mut bases_buf,
             &mut qual_buf,
             &mut aux_buf,
-            &mut |_, _| true,
+            &mut (),
         )?;
         Ok((result, store))
     }

@@ -3,7 +3,7 @@ use super::formats::{self, Format, FormatDetectionError};
 use crate::{
     bam::{
         BamHeader, IndexedBamReader,
-        record_store::{RecordStore, SlimRecord},
+        record_store::{CustomizeRecordStore, RecordStore},
     },
     cram::reader::IndexedCramReader,
     sam::reader::IndexedSamReader,
@@ -72,36 +72,34 @@ impl<R: Read + Seek> IndexedReader<R> {
         end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
-        self.fetch_into_filtered(tid, start, end, store, |_, _| true).map(|c| c.kept)
+        self.fetch_into_customized(tid, start, end, store, &mut ()).map(|c| c.kept)
     }
 
-    // r[impl unified.fetch_into_filtered]
-    /// Filter-aware variant of [`fetch_into`]. For each record that would
-    /// normally enter the store, `keep` is invoked; if it returns `false`,
-    /// the push is rolled back (zero slab waste, see [`RecordStore::push_raw`]).
-    /// The returned [`FetchCounts`] distinguishes records the reader produced
-    /// (`fetched`) from those the filter retained (`kept`).
-    pub fn fetch_into_filtered<F>(
+    // r[impl unified.fetch_into_customized]
+    /// Customized variant of [`fetch_into`]. For each record that would
+    /// normally enter the store, `customize.keep_record` is invoked; if it
+    /// returns `false`, the push is rolled back (zero slab waste, see
+    /// [`RecordStore::push_raw`]). The returned [`FetchCounts`]
+    /// distinguishes records the reader produced (`fetched`) from those
+    /// the filter retained (`kept`). Pass `&mut ()` for no filtering.
+    pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
         tid: u32,
         start: Pos0,
         end: Pos0,
         store: &mut RecordStore,
-        keep: F,
-    ) -> Result<FetchCounts, ReaderError>
-    where
-        F: FnMut(&SlimRecord, &RecordStore) -> bool,
-    {
+        customize: &mut E,
+    ) -> Result<FetchCounts, ReaderError> {
         match self {
-            Self::Bam(r) => {
-                r.fetch_into_filtered(tid, start, end, store, keep).map_err(ReaderError::from)
-            }
-            Self::Sam(r) => {
-                r.fetch_into_filtered(tid, start, end, store, keep).map_err(ReaderError::from)
-            }
-            Self::Cram(r) => {
-                r.fetch_into_filtered(tid, start, end, store, keep).map_err(ReaderError::from)
-            }
+            Self::Bam(r) => r
+                .fetch_into_customized(tid, start, end, store, customize)
+                .map_err(ReaderError::from),
+            Self::Sam(r) => r
+                .fetch_into_customized(tid, start, end, store, customize)
+                .map_err(ReaderError::from),
+            Self::Cram(r) => r
+                .fetch_into_customized(tid, start, end, store, customize)
+                .map_err(ReaderError::from),
         }
     }
 }

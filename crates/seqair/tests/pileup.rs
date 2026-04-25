@@ -47,7 +47,7 @@ proptest! {
             if end_excl <= MAX_POS {
                 delta[end_excl] -= 1;
             }
-            arena.push_raw(&make_record(0, offset, 99, 60, read_len), |_, _| true).unwrap();
+            arena.push_raw(&make_record(0, offset, 99, 60, read_len), &mut ()).unwrap();
         }
 
         // Compute prefix sum to get expected depth at each position.
@@ -92,7 +92,7 @@ proptest! {
             if end_excl <= MAX_POS {
                 delta[end_excl] -= 1;
             }
-            arena.push_raw(&make_record(0, offset, 99, 60, read_len), |_, _| true).unwrap();
+            arena.push_raw(&make_record(0, offset, 99, 60, read_len), &mut ()).unwrap();
         }
 
         // Prefix sum → expected depth per position.
@@ -124,7 +124,7 @@ proptest! {
 #[test]
 fn filter_evaluated_once_per_record() {
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 0, 99, 60, 20), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 0, 99, 60, 20), &mut ()).unwrap();
 
     let count = Rc::new(Cell::new(0usize));
     let count_clone = count.clone();
@@ -148,7 +148,7 @@ proptest! {
         let mut arena = RecordStore::new();
         for &pass in &pass_flags {
             let flags = if pass { 99 } else { 99 | 0x100 }; // 0x100 = secondary
-            arena.push_raw(&make_record(0, 0, flags, 60, 10), |_, _| true).unwrap();
+            arena.push_raw(&make_record(0, 0, flags, 60, 10), &mut ()).unwrap();
         }
 
         let expected = pass_flags.iter().filter(|&&p| p).count();
@@ -172,7 +172,7 @@ proptest! {
     fn max_depth_never_exceeded(max in 1u32..=10, n in 1usize..=30, len in 10u32..=50) {
         let mut arena = RecordStore::new();
         for _ in 0..n {
-            arena.push_raw(&make_record(0, 0, 99, 60, len), |_, _| true).unwrap();
+            arena.push_raw(&make_record(0, 0, 99, 60, len), &mut ()).unwrap();
         }
 
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(len - 1).unwrap());
@@ -189,10 +189,10 @@ proptest! {
     fn reads_available_at_lower_coverage_despite_cap(extra in 3usize..=10) {
         let mut arena = RecordStore::new();
         for _ in 0..2 {
-            arena.push_raw(&make_record(0, 0, 99, 60, 100), |_, _| true).unwrap();
+            arena.push_raw(&make_record(0, 0, 99, 60, 100), &mut ()).unwrap();
         }
         for _ in 0..extra {
-            arena.push_raw(&make_record(0, 0, 99, 60, 20), |_, _| true).unwrap();
+            arena.push_raw(&make_record(0, 0, 99, 60, 20), &mut ()).unwrap();
         }
 
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(99).unwrap());
@@ -214,7 +214,7 @@ proptest! {
     #[test]
     fn qpos_for_simple_cigar_is_offset_from_start(start in 0i32..100, len in 10u32..=50) {
         let mut arena = RecordStore::new();
-        arena.push_raw(&make_record(0, start, 99, 60, len), |_, _| true).unwrap();
+        arena.push_raw(&make_record(0, start, 99, 60, len), &mut ()).unwrap();
 
         let start_u32 = start as u32;
         let end_u32 = start_u32 + len - 1;
@@ -236,8 +236,8 @@ proptest! {
     fn no_empty_columns(pos1 in 0i32..100, len1 in 5u32..=20, gap in 50i32..=500, len2 in 5u32..=20) {
         let pos2 = pos1 + i32::from(len1 as u16) + gap;
         let mut arena = RecordStore::new();
-        arena.push_raw(&make_record(0, pos1, 99, 60, len1), |_, _| true).unwrap();
-        arena.push_raw(&make_record(0, pos2, 99, 60, len2), |_, _| true).unwrap();
+        arena.push_raw(&make_record(0, pos1, 99, 60, len1), &mut ()).unwrap();
+        arena.push_raw(&make_record(0, pos2, 99, 60, len2), &mut ()).unwrap();
 
         let end = pos2 as u32 + len2 + 10;
         let mut engine = PileupEngine::new(arena, Pos0::new(pos1 as u32).unwrap(), Pos0::new(end).unwrap());
@@ -253,9 +253,9 @@ proptest! {
 #[test]
 fn unmapped_reads_excluded_from_pileup() {
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 100, 99, 60, 50), |_, _| true).unwrap();
-    arena.push_raw(&make_record(0, 100, 0x4, 60, 50), |_, _| true).unwrap(); // unmapped
-    arena.push_raw(&make_record(0, 100, 163, 60, 50), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 100, 99, 60, 50), &mut ()).unwrap();
+    arena.push_raw(&make_record(0, 100, 0x4, 60, 50), &mut ()).unwrap(); // unmapped
+    arena.push_raw(&make_record(0, 100, 163, 60, 50), &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(149).unwrap());
     let columns = collect_columns(&mut engine);
@@ -269,7 +269,7 @@ fn unmapped_reads_excluded_from_pileup() {
 fn zero_refspan_read_handled_gracefully() {
     let raw = make_record_with_cigar(0, 50, 99, 60, &[cigar_op(10, 4)], 10); // 10S
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, |_, _| true).unwrap();
+    arena.push_raw(&raw, &mut ()).unwrap();
     assert_eq!(arena.record(0).end_pos, Pos0::new(50).unwrap());
 
     let mut engine = PileupEngine::new(arena, Pos0::new(48).unwrap(), Pos0::new(52).unwrap());
@@ -289,7 +289,7 @@ fn leading_softclip_does_not_extend_ref_range() {
     // 5S 20M at pos 100 → ref 100-119, query 5-24
     let raw = make_record_with_cigar(0, 100, 99, 60, &[cigar_op(5, 4), cigar_op(20, 0)], 25);
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, |_, _| true).unwrap();
+    arena.push_raw(&raw, &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(95).unwrap(), Pos0::new(125).unwrap());
     let columns = collect_columns(&mut engine);
@@ -306,9 +306,9 @@ fn leading_softclip_does_not_extend_ref_range() {
 #[test]
 fn secondary_and_supplementary_reads_in_arena() {
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 100, 99, 60, 50), |_, _| true).unwrap();
-    arena.push_raw(&make_record(0, 100, 0x100 | 99, 60, 50), |_, _| true).unwrap(); // secondary
-    arena.push_raw(&make_record(0, 100, 0x800 | 99, 60, 50), |_, _| true).unwrap(); // supplementary
+    arena.push_raw(&make_record(0, 100, 99, 60, 50), &mut ()).unwrap();
+    arena.push_raw(&make_record(0, 100, 0x100 | 99, 60, 50), &mut ()).unwrap(); // secondary
+    arena.push_raw(&make_record(0, 100, 0x800 | 99, 60, 50), &mut ()).unwrap(); // supplementary
 
     assert_eq!(arena.len(), 3);
 
@@ -324,7 +324,7 @@ fn secondary_and_supplementary_reads_in_arena() {
 fn zero_refspan_endpos_equals_pos() {
     let raw = make_record_with_cigar(0, 100, 99, 60, &[cigar_op(10, 4)], 10); // 10S
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, |_, _| true).unwrap();
+    arena.push_raw(&raw, &mut ()).unwrap();
     let r = arena.record(0);
     assert_eq!(r.end_pos, Pos0::new(100).unwrap(), "zero-refspan should have end_pos == pos");
 }
@@ -342,7 +342,7 @@ proptest! {
 
         let mut arena = RecordStore::new();
         for &(offset, read_len) in &sorted {
-            arena.push_raw(&make_record(0, offset, 99, 60, read_len), |_, _| true).unwrap();
+            arena.push_raw(&make_record(0, offset, 99, 60, read_len), &mut ()).unwrap();
         }
 
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(300).unwrap());
@@ -369,7 +369,7 @@ proptest! {
     ) {
         let mut arena = RecordStore::new();
         // make_record uses a simple NxM CIGAR — no deletions, so all alignments have qpos.
-        arena.push_raw(&make_record(0, start, 99, 60, len), |_, _| true).unwrap();
+        arena.push_raw(&make_record(0, start, 99, 60, len), &mut ()).unwrap();
 
         let start_u32 = start as u32;
         let end_u32 = start_u32 + len - 1;
@@ -398,7 +398,7 @@ proptest! {
         let mut arena = RecordStore::new();
         // make_record uses simple NxM CIGAR — all alignments are Match, so all have base/qual.
         for _ in 0..n {
-            arena.push_raw(&make_record(0, 0, 99, 60, len), |_, _| true).unwrap();
+            arena.push_raw(&make_record(0, 0, 99, 60, len), &mut ()).unwrap();
         }
 
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(len - 1).unwrap());
@@ -432,7 +432,7 @@ proptest! {
         trailing in 100u32..=500,
     ) {
         let mut arena = RecordStore::new();
-        arena.push_raw(&make_record(0, start, 99, 60, len), |_, _| true).unwrap();
+        arena.push_raw(&make_record(0, start, 99, 60, len), &mut ()).unwrap();
 
         let start_u32 = start as u32;
         let region_end = start_u32 + len + trailing;
@@ -465,7 +465,7 @@ fn reference_base_matches_ref_seq() {
     let ref_seq = RefSeq::new(Rc::from(ref_bases.as_slice()), Pos0::new(100).unwrap());
 
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 100, 99, 60, 10), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
     engine.set_reference_seq(ref_seq);
@@ -486,7 +486,7 @@ fn reference_base_matches_ref_seq() {
 #[test]
 fn reference_base_unknown_without_ref_seq() {
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 0, 99, 60, 5), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 0, 99, 60, 5), &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(4).unwrap());
     while let Some(col) = engine.pileups() {
@@ -499,7 +499,7 @@ fn reference_base_unknown_without_ref_seq() {
 #[test]
 fn take_store_reuse_across_regions() {
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 0, 99, 60, 10), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 0, 99, 60, 10), &mut ()).unwrap();
 
     // Drive the engine to completion without consuming it via collect().
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(9).unwrap());
@@ -513,7 +513,7 @@ fn take_store_reuse_across_regions() {
     assert!(store.is_empty(), "store should be cleared after take");
     assert!(store.records_capacity() > 0, "capacity should be retained");
 
-    store.push_raw(&make_record(0, 100, 99, 60, 5), |_, _| true).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 5), &mut ()).unwrap();
     let mut engine2 = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(104).unwrap());
     let columns2 = collect_columns(&mut engine2);
     assert_eq!(columns2.len(), 5);
@@ -523,7 +523,7 @@ fn take_store_reuse_across_regions() {
 #[test]
 fn take_store_returns_none_after_second_take() {
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 0, 99, 60, 5), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 0, 99, 60, 5), &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(4).unwrap());
     while engine.pileups().is_some() {}
@@ -546,7 +546,7 @@ proptest! {
         region_start_offset in 10u32..=40,
     ) {
         let mut arena = RecordStore::new();
-        arena.push_raw(&make_record(0, read_start, 99, 60, read_len), |_, _| true).unwrap();
+        arena.push_raw(&make_record(0, read_start, 99, 60, read_len), &mut ()).unwrap();
 
         let region_start = read_start as u32 + region_start_offset;
         let region_end = read_start as u32 + read_len - 1;
@@ -568,7 +568,7 @@ proptest! {
 #[test]
 fn read_extending_past_region_end_is_truncated() {
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 0, 99, 60, 100), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 0, 99, 60, 100), &mut ()).unwrap();
 
     // Region only covers positions 0-9, but read covers 0-99
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(9).unwrap());
@@ -588,10 +588,10 @@ proptest! {
     ) {
         let mut arena = RecordStore::new();
         for _ in 0..n_mapped {
-            arena.push_raw(&make_record(0, 0, 99, 60, 20), |_, _| true).unwrap();
+            arena.push_raw(&make_record(0, 0, 99, 60, 20), &mut ()).unwrap();
         }
         for _ in 0..n_unmapped {
-            arena.push_raw(&make_record(0, 0, 0x4, 60, 20), |_, _| true).unwrap(); // unmapped flag
+            arena.push_raw(&make_record(0, 0, 0x4, 60, 20), &mut ()).unwrap(); // unmapped flag
         }
 
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
@@ -617,7 +617,7 @@ proptest! {
     fn depth_matches_cigar_derived_coverage(reads in arb_read_set(15)) {
         let mut arena = RecordStore::new();
         for read in &reads {
-            arena.push_raw(&read.raw, |_, _| true).unwrap();
+            arena.push_raw(&read.raw, &mut ()).unwrap();
         }
 
         let region_start = reads.iter().map(|r| r.pos as u32).min().unwrap();
@@ -644,7 +644,7 @@ proptest! {
     fn qpos_matches_independent_cigar_walk(reads in arb_read_set(10)) {
         let mut arena = RecordStore::new();
         for read in &reads {
-            arena.push_raw(&read.raw, |_, _| true).unwrap();
+            arena.push_raw(&read.raw, &mut ()).unwrap();
         }
 
         let region_start = reads.iter().map(|r| r.pos as u32).min().unwrap();
@@ -675,7 +675,7 @@ proptest! {
         }
 
         let mut arena = RecordStore::new();
-        arena.push_raw(&read.raw, |_, _| true).unwrap();
+        arena.push_raw(&read.raw, &mut ()).unwrap();
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span;
@@ -709,7 +709,7 @@ proptest! {
         }
 
         let mut arena = RecordStore::new();
-        arena.push_raw(&read.raw, |_, _| true).unwrap();
+        arena.push_raw(&read.raw, &mut ()).unwrap();
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span;
@@ -732,7 +732,7 @@ proptest! {
     fn no_zero_depth_columns_with_complex_cigars(reads in arb_read_set(8)) {
         let mut arena = RecordStore::new();
         for read in &reads {
-            arena.push_raw(&read.raw, |_, _| true).unwrap();
+            arena.push_raw(&read.raw, &mut ()).unwrap();
         }
 
         let region_start = reads.iter().map(|r| r.pos as u32).min().unwrap();
@@ -754,7 +754,7 @@ proptest! {
     fn qpos_always_within_seq_bounds(reads in arb_read_set(10)) {
         let mut arena = RecordStore::new();
         for read in &reads {
-            arena.push_raw(&read.raw, |_, _| true).unwrap();
+            arena.push_raw(&read.raw, &mut ()).unwrap();
         }
 
         let region_start = reads.iter().map(|r| r.pos as u32).min().unwrap();
@@ -796,9 +796,9 @@ fn pileup_includes_out_of_order_records() {
     // but has an EARLIER position that overlaps both nearby reads' range
     let r3 = make_record(0, 80, 0x63, 60, 200); // pos=80, 200M → covers 80..280
 
-    store.push_raw(&r1, |_, _| true).unwrap();
-    store.push_raw(&r2, |_, _| true).unwrap();
-    store.push_raw(&r3, |_, _| true).unwrap(); // appended last, but starts at 80
+    store.push_raw(&r1, &mut ()).unwrap();
+    store.push_raw(&r2, &mut ()).unwrap();
+    store.push_raw(&r3, &mut ()).unwrap(); // appended last, but starts at 80
 
     // Reproduce the fix: sort_by_pos restores the position-sorted invariant
     // that the pileup engine requires (same as fetch_into does after cache injection)
@@ -845,9 +845,9 @@ fn pileup_deduplicates_cross_category_records() {
     // Simulate r1 loaded from both nearby (first) and distant cache (second)
     let r1_dup = make_record(0, 100, 0x63, 60, 50); // same record
 
-    store.push_raw(&r1, |_, _| true).unwrap();
-    store.push_raw(&r2, |_, _| true).unwrap();
-    store.push_raw(&r1_dup, |_, _| true).unwrap(); // duplicate from cache
+    store.push_raw(&r1, &mut ()).unwrap();
+    store.push_raw(&r2, &mut ()).unwrap();
+    store.push_raw(&r1_dup, &mut ()).unwrap(); // duplicate from cache
 
     store.sort_by_pos();
     store.dedup();

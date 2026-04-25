@@ -65,7 +65,7 @@ r[pileup.extras.generic_param]
 `PileupEngine` MUST accept a type parameter `U` (default `()`) matching its `RecordStore<U>`. When `U` is `()`, the engine MUST behave identically to the non-generic version — column construction and all non-extras-specific APIs MUST be unchanged.
 
 r[pileup.extras.constructor_accepts_any_u]
-`PileupEngine::new` MUST accept `RecordStore<U>` for any `U`. Callers MUST compute extras on the store (via `RecordStore::with_extras` or `RecordStore::apply_extras` for a [`RecordStoreExtras`](../../crates/seqair/src/bam/record_store.rs) provider) before constructing the engine. There is no engine-level `with_extras` method — the constructor is the only entry point.
+`PileupEngine::new` MUST accept `RecordStore<U>` for any `U`. Callers MUST compute extras on the store via `RecordStore::apply_customize` with a [`CustomizeRecordStore`](../../crates/seqair/src/bam/record_store.rs) value before constructing the engine. There is no engine-level customize method — the constructor is the only entry point.
 
 r[pileup.lending_iterator]
 `PileupEngine<U>` MUST expose iteration via a single lending method `pileups(&mut self) -> Option<PileupColumn<'_, U>>`. The returned `PileupColumn<'store, U>` MUST borrow the engine's store for the duration of its use. `PileupEngine` MUST NOT implement `Iterator` — the store borrow held by each column would be incompatible with `Iterator::next`'s `&mut self` contract. Callers MUST use a `while let Some(col) = engine.pileups() { ... }` loop.

@@ -1,4 +1,4 @@
-//! Tests for `RecordStore<U>` per-record extras and `PileupEngine` `pileups()`.
+//! Tests for `RecordStore<U>` per-record customize/extras and `PileupEngine` `pileups()`.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -20,36 +20,37 @@ mod helpers;
 use helpers::{collect_columns, make_record};
 use seqair::bam::Pos0;
 use seqair::bam::pileup::PileupEngine;
-use seqair::bam::record_store::{RecordStore, CustomizeRecordStore};
+use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
 
 /// Helper: push N synthetic records at positions 100, 101, ... with 10M CIGAR.
 fn store_with_n_records(n: u32) -> RecordStore {
     let mut store = RecordStore::new();
     for i in 0..n {
         let pos = 100 + i as i32;
-        store.push_raw(&make_record(0, pos, 99, 60, 10), |_, _| true).unwrap();
+        store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ()).unwrap();
     }
     store
 }
 
+/// Customize value used in the position-extracting tests below.
+#[derive(Clone, Default)]
+struct ExtractPos;
+impl CustomizeRecordStore for ExtractPos {
+    type Extra = i32;
+    fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> i32 {
+        rec.pos.as_i32()
+    }
+}
+
 // ---- RecordStore extras ----
 
-// r[verify record_store.extras.provider]
+// r[verify record_store.customize.apply]
 // r[verify record_store.extras.access]
 #[test]
 fn with_extras_computes_per_record_data() {
     let store = store_with_n_records(5);
 
-    #[derive(Clone, Default)]
-    struct ExtractPos;
-    impl CustomizeRecordStore for ExtractPos {
-        type Extra = i32;
-        fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
-            s.record(idx).pos.as_i32()
-        }
-    }
-
-    let store = store.apply_extras(&mut ExtractPos);
+    let store = store.apply_customize(&mut ExtractPos);
 
     assert_eq!(store.len(), 5);
     for i in 0..5u32 {
@@ -57,7 +58,7 @@ fn with_extras_computes_per_record_data() {
     }
 }
 
-// r[verify record_store.extras.provider]
+// r[verify record_store.customize.apply]
 #[test]
 fn with_extras_preserves_slab_data() {
     let store = store_with_n_records(3);
@@ -70,12 +71,12 @@ fn with_extras_preserves_slab_data() {
     struct ExtractMapqScaled;
     impl CustomizeRecordStore for ExtractMapqScaled {
         type Extra = u16;
-        fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> u16 {
-            s.record(idx).mapq as u16 * 10
+        fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> u16 {
+            rec.mapq as u16 * 10
         }
     }
 
-    let store = store.apply_extras(&mut ExtractMapqScaled);
+    let store = store.apply_customize(&mut ExtractMapqScaled);
 
     // Slab data must be moved, not copied — verify it's still correct.
     for i in 0..3u32 {
@@ -97,12 +98,12 @@ fn extra_mut_allows_modification() {
     struct ZeroExtra;
     impl CustomizeRecordStore for ZeroExtra {
         type Extra = u32;
-        fn compute(&mut self, _idx: u32, _s: &RecordStore<()>) -> u32 {
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> u32 {
             0
         }
     }
 
-    let mut store = store.apply_extras(&mut ZeroExtra);
+    let mut store = store.apply_customize(&mut ZeroExtra);
 
     *store.extra_mut(1) = 42;
 
@@ -111,45 +112,65 @@ fn extra_mut_allows_modification() {
     assert_eq!(*store.extra(2), 0);
 }
 
-// r[verify record_store.extras.provider]
+// r[verify record_store.customize.apply]
+// r[verify record_store.slim_record.field_getters]
 #[test]
-fn with_extras_closure_can_read_aux() {
-    // Build a record with aux data and verify the provider can access it.
+fn compute_can_read_aux_via_slim_record_getter() {
+    // Build a record with aux data and verify the customizer can access it
+    // via `rec.aux(store)`.
     let aux = b"NMCd"; // NM:C:100 (tag NM, type C=u8, value 100)
     let raw = helpers::make_record_with_aux(0, 100, 99, 60, 10, aux);
 
     let mut store = RecordStore::new();
-    store.push_raw(&raw, |_, _| true).unwrap();
+    store.push_raw(&raw, &mut ()).unwrap();
 
     #[derive(Clone, Default)]
     struct AuxLen;
     impl CustomizeRecordStore for AuxLen {
         type Extra = usize;
-        fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> usize {
-            s.aux(idx).len()
+        fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> usize {
+            rec.aux(store).map(|a| a.len()).unwrap_or(0)
         }
     }
 
-    let store = store.apply_extras(&mut AuxLen);
+    let store = store.apply_customize(&mut AuxLen);
 
     assert_eq!(*store.extra(0), aux.len());
+}
+
+// r[verify record_store.slim_record.field_getters]
+#[test]
+fn slim_record_getters_return_slab_data() {
+    // Build a record with a known qname + aux + sequence and read each slab
+    // back via the SlimRecord getters.
+    let aux = b"RGZmy_rg\0";
+    let raw = helpers::make_record_with_aux(0, 200, 0, 30, 10, aux);
+
+    let mut store = RecordStore::new();
+    store.push_raw(&raw, &mut ()).unwrap();
+    let rec = store.record(0);
+
+    let qname = rec.qname(&store).expect("qname slab readable");
+    assert_eq!(qname, b"read");
+
+    let seq = rec.seq(&store).expect("seq slab readable");
+    assert_eq!(seq.len(), 10);
+
+    let qual = rec.qual(&store).expect("qual slab readable");
+    assert_eq!(qual.len(), 10);
+
+    let cigar = rec.cigar(&store).expect("cigar slab readable");
+    assert_eq!(cigar.len(), 4); // single op, packed as u32
+
+    let aux_bytes = rec.aux(&store).expect("aux slab readable");
+    assert_eq!(aux_bytes, aux);
 }
 
 // r[verify record_store.extras.clear]
 #[test]
 fn clear_clears_extras_and_retains_capacity() {
     let store = store_with_n_records(50);
-
-    #[derive(Clone, Default)]
-    struct ExtractPos;
-    impl CustomizeRecordStore for ExtractPos {
-        type Extra = i32;
-        fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
-            s.record(idx).pos.as_i32()
-        }
-    }
-
-    let mut store = store.apply_extras(&mut ExtractPos);
+    let mut store = store.apply_customize(&mut ExtractPos);
 
     assert_eq!(store.len(), 50);
     let records_cap = store.records_capacity();
@@ -167,17 +188,7 @@ fn clear_clears_extras_and_retains_capacity() {
 #[test]
 fn strip_extras_preserves_slab_capacity() {
     let store = store_with_n_records(50);
-
-    #[derive(Clone, Default)]
-    struct ExtractPos;
-    impl CustomizeRecordStore for ExtractPos {
-        type Extra = i32;
-        fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
-            s.record(idx).pos.as_i32()
-        }
-    }
-
-    let store = store.apply_extras(&mut ExtractPos);
+    let store = store.apply_customize(&mut ExtractPos);
 
     let records_cap = store.records_capacity();
     let names_cap = store.names_capacity();
@@ -211,8 +222,8 @@ fn unit_extras_is_zero_cost() {
 fn sort_and_dedup_work_on_unit_store() {
     let mut store = RecordStore::new();
     // Push records out of order.
-    store.push_raw(&make_record(0, 200, 99, 60, 10), |_, _| true).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), |_, _| true).unwrap();
+    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut ()).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
 
     store.sort_by_pos();
     assert_eq!(store.record(0).pos, Pos0::new(100).unwrap());
@@ -224,21 +235,12 @@ fn sort_and_dedup_work_on_unit_store() {
 fn sort_by_pos_preserves_extras_mapping() {
     let mut store = RecordStore::new();
     // Push records out of order: pos 300, 100, 200
-    store.push_raw(&make_record(0, 300, 99, 60, 10), |_, _| true).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), |_, _| true).unwrap();
-    store.push_raw(&make_record(0, 200, 99, 60, 10), |_, _| true).unwrap();
-
-    #[derive(Clone, Default)]
-    struct ExtractPos;
-    impl CustomizeRecordStore for ExtractPos {
-        type Extra = i32;
-        fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
-            s.record(idx).pos.as_i32()
-        }
-    }
+    store.push_raw(&make_record(0, 300, 99, 60, 10), &mut ()).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
+    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut ()).unwrap();
 
     // Compute extras BEFORE sorting — extras carry the original position.
-    let mut store = store.apply_extras(&mut ExtractPos);
+    let mut store = store.apply_customize(&mut ExtractPos);
 
     // Now sort — records reorder, but extras_idx preserves the mapping.
     store.sort_by_pos();
@@ -259,22 +261,26 @@ fn sort_by_pos_preserves_extras_mapping() {
 fn dedup_on_typed_store_preserves_extras() {
     let mut store = RecordStore::new();
     // Push duplicate records at same position with same flags/name.
-    store.push_raw(&make_record(0, 100, 99, 60, 10), |_, _| true).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), |_, _| true).unwrap(); // dup
-    store.push_raw(&make_record(0, 200, 99, 60, 10), |_, _| true).unwrap();
-    store.push_raw(&make_record(0, 200, 99, 60, 10), |_, _| true).unwrap(); // dup
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap(); // dup
+    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut ()).unwrap();
+    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut ()).unwrap(); // dup
 
+    /// Tag each record with the index it had at compute time.
     #[derive(Clone, Default)]
-    struct RecordIdx;
+    struct RecordIdx {
+        next: u32,
+    }
     impl CustomizeRecordStore for RecordIdx {
         type Extra = u32;
-        fn compute(&mut self, idx: u32, _s: &RecordStore<()>) -> u32 {
-            idx
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> u32 {
+            let i = self.next;
+            self.next = i.wrapping_add(1);
+            i
         }
     }
 
-    // Tag each record with a unique ID before dedup.
-    let mut store = store.apply_extras(&mut RecordIdx);
+    let mut store = store.apply_customize(&mut RecordIdx::default());
 
     store.sort_by_pos();
     store.dedup();
@@ -285,7 +291,6 @@ fn dedup_on_typed_store_preserves_extras() {
     assert_eq!(store.record(1).pos, Pos0::new(200).unwrap());
 
     // Extras should still be accessible and correspond to the surviving records.
-    // The exact idx values depend on which duplicate survives (dedup_by keeps the first).
     let e0 = *store.extra(0);
     let e1 = *store.extra(1);
     assert_ne!(e0, e1, "surviving records should have distinct extras");
@@ -295,20 +300,11 @@ fn dedup_on_typed_store_preserves_extras() {
 #[test]
 fn set_alignment_then_sort_on_typed_store() {
     let mut store = RecordStore::new();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), |_, _| true).unwrap();
-    store.push_raw(&make_record(0, 50, 99, 60, 10), |_, _| true).unwrap();
-
-    #[derive(Clone, Default)]
-    struct ExtractPos;
-    impl CustomizeRecordStore for ExtractPos {
-        type Extra = i32;
-        fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
-            s.record(idx).pos.as_i32()
-        }
-    }
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
+    store.push_raw(&make_record(0, 50, 99, 60, 10), &mut ()).unwrap();
 
     // Compute extras with original positions.
-    let mut store = store.apply_extras(&mut ExtractPos);
+    let mut store = store.apply_customize(&mut ExtractPos);
 
     // Sort — now record at pos=50 comes first.
     store.sort_by_pos();
@@ -329,12 +325,12 @@ fn engine_accepts_typed_store() {
     struct ExtractMapq;
     impl CustomizeRecordStore for ExtractMapq {
         type Extra = u8;
-        fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> u8 {
-            s.record(idx).mapq
+        fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> u8 {
+            rec.mapq
         }
     }
 
-    let store = store.apply_extras(&mut ExtractMapq);
+    let store = store.apply_customize(&mut ExtractMapq);
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
     engine.set_max_depth(10);
     engine.set_filter(|flags, _aux| !flags.is_duplicate());
@@ -372,17 +368,7 @@ fn pileups_yields_same_columns_on_unit_and_typed_store() {
 #[test]
 fn pileups_column_exposes_store_access_via_alignment_view() {
     let store = store_with_n_records(3);
-
-    #[derive(Clone, Default)]
-    struct ExtractPos;
-    impl CustomizeRecordStore for ExtractPos {
-        type Extra = i32;
-        fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
-            s.record(idx).pos.as_i32()
-        }
-    }
-
-    let store = store.apply_extras(&mut ExtractPos);
+    let store = store.apply_customize(&mut ExtractPos);
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
 
     let mut saw_extras = false;
@@ -407,12 +393,12 @@ fn recover_store_works_with_extras_engine() {
     struct ExtractMapqU32;
     impl CustomizeRecordStore for ExtractMapqU32 {
         type Extra = u32;
-        fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> u32 {
-            s.record(idx).mapq as u32
+        fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> u32 {
+            rec.mapq as u32
         }
     }
 
-    let store = store.apply_extras(&mut ExtractMapqU32);
+    let store = store.apply_customize(&mut ExtractMapqU32);
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
 
     // Consume all columns.
@@ -439,20 +425,11 @@ proptest! {
     ) {
         let mut store = RecordStore::new();
         for &pos in &positions {
-            store.push_raw(&make_record(0, pos, 99, 60, 10), |_, _| true).unwrap();
-        }
-
-        #[derive(Clone, Default)]
-        struct ExtractPos;
-        impl CustomizeRecordStore for ExtractPos {
-            type Extra = i32;
-            fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
-                s.record(idx).pos.as_i32()
-            }
+            store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ()).unwrap();
         }
 
         // Tag each record with its original position before sorting.
-        let mut store = store.apply_extras(&mut ExtractPos);
+        let mut store = store.apply_customize(&mut ExtractPos);
 
         store.sort_by_pos();
 
@@ -481,20 +458,11 @@ proptest! {
         let mut store = RecordStore::new();
         for &pos in &positions {
             // Same flags/mapq/seq_len so duplicates at same pos are detected.
-            store.push_raw(&make_record(0, pos, 99, 60, 10), |_, _| true).unwrap();
-        }
-
-        #[derive(Clone, Default)]
-        struct ExtractPos;
-        impl CustomizeRecordStore for ExtractPos {
-            type Extra = i32;
-            fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
-                s.record(idx).pos.as_i32()
-            }
+            store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ()).unwrap();
         }
 
         // Compute extras (original position) before sort+dedup.
-        let mut store = store.apply_extras(&mut ExtractPos);
+        let mut store = store.apply_customize(&mut ExtractPos);
 
         store.sort_by_pos();
         store.dedup();
@@ -518,35 +486,26 @@ proptest! {
         }
     }
 
-    // r[verify record_store.extras.provider]
+    // r[verify record_store.customize.apply]
     #[test]
-    fn proptest_with_extras_after_sort_produces_correct_mapping(
+    fn proptest_apply_customize_after_sort_produces_correct_mapping(
         positions in proptest::collection::vec(0i32..500, 2..30),
     ) {
         let mut store = RecordStore::new();
         for &pos in &positions {
-            store.push_raw(&make_record(0, pos, 99, 60, 10), |_, _| true).unwrap();
-        }
-
-        #[derive(Clone, Default)]
-        struct ExtractPos;
-        impl CustomizeRecordStore for ExtractPos {
-            type Extra = i32;
-            fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
-                s.record(idx).pos.as_i32()
-            }
+            store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ()).unwrap();
         }
 
         // Sort first (on unit store), then compute extras.
         store.sort_by_pos();
 
-        let store = store.apply_extras(&mut ExtractPos);
+        let store = store.apply_customize(&mut ExtractPos);
 
-        // After apply_extras on a sorted store, extras_idx is reset to sequential.
+        // After apply_customize on a sorted store, extras_idx is reset to sequential.
         for i in 0..store.len() as u32 {
             let pos = store.record(i).pos.as_i32();
             let extra = *store.extra(i);
-            prop_assert_eq!(pos, extra, "apply_extras mapping wrong at record {}", i);
+            prop_assert_eq!(pos, extra, "apply_customize mapping wrong at record {}", i);
         }
     }
 }
@@ -554,23 +513,28 @@ proptest! {
 // r[verify pileup.extras.constructor_accepts_any_u]
 #[test]
 fn pileup_with_sorted_typed_store() {
-    // End-to-end: load out of order, compute extras, sort, pileup.
+    // End-to-end: load out of order, compute extras (original push index),
+    // sort, pileup.
     let mut store = RecordStore::new();
-    store.push_raw(&make_record(0, 105, 99, 60, 10), |_, _| true).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), |_, _| true).unwrap();
-    store.push_raw(&make_record(0, 102, 99, 60, 10), |_, _| true).unwrap();
+    store.push_raw(&make_record(0, 105, 99, 60, 10), &mut ()).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
+    store.push_raw(&make_record(0, 102, 99, 60, 10), &mut ()).unwrap();
 
+    /// Counter customizer so each record's extra is its push index.
     #[derive(Clone, Default)]
-    struct RecordIdx;
-    impl CustomizeRecordStore for RecordIdx {
+    struct PushIdx {
+        next: u32,
+    }
+    impl CustomizeRecordStore for PushIdx {
         type Extra = u32;
-        fn compute(&mut self, idx: u32, _s: &RecordStore<()>) -> u32 {
-            idx
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> u32 {
+            let i = self.next;
+            self.next = i.wrapping_add(1);
+            i
         }
     }
 
-    // Compute extras before sorting — each extra is the original push index.
-    let mut store = store.apply_extras(&mut RecordIdx);
+    let mut store = store.apply_customize(&mut PushIdx::default());
 
     // Sort — records reorder, extras follow via extras_idx.
     store.sort_by_pos();
@@ -590,33 +554,57 @@ fn pileup_with_sorted_typed_store() {
     assert!(column_count > 0, "should have produced at least one column");
 }
 
+// ---- push-time filtering ----
+
+/// Drop records whose mapq is below `threshold`. Verifies push-time filtering
+/// based on a `SlimRecord` field.
+#[derive(Clone)]
+struct MinMapq {
+    threshold: u8,
+}
+impl CustomizeRecordStore for MinMapq {
+    type Extra = ();
+    fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+        rec.mapq >= self.threshold
+    }
+    fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+}
+
+/// Drop everything at push time — used to verify zero-waste rollback.
+#[derive(Clone, Default)]
+struct DropAll;
+impl CustomizeRecordStore for DropAll {
+    type Extra = ();
+    fn keep_record(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
+        false
+    }
+    fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+}
+
 // r[verify record_store.pre_filter.provider_hook]
 #[test]
-fn keep_record_drops_low_mapq_records_via_fetch_into_filtered() {
-    use seqair::bam::IndexedBamReader;
-    use seqair::bam::record_store::SlimRecord;
-    use seqair::reader::FetchCounts;
-
-    // Build a synthetic store with records at mapq 0, 10, 20, 30, 40, 50.
-    let mapqs = [0u8, 10, 20, 30, 40, 50];
-
-    // Verify the keep_record hook via a direct push_raw_filtered flow first —
-    // this checks that the provider's keep_record is honored by RecordStore.
+fn keep_record_drops_low_mapq_records_via_push_raw() {
     let mut store = RecordStore::new();
+    let mut filter = MinMapq { threshold: 20 };
+
+    let mapqs = [0u8, 10, 20, 30, 40, 50];
     for (i, &mq) in mapqs.iter().enumerate() {
         let raw = make_record(0, 100 + i as i32, 99, mq, 10);
-        // Inline filter equivalent to `rec.mapq >= 20`.
-        store.push_raw(&raw, |rec, _s| rec.mapq >= 20).unwrap();
+        store.push_raw(&raw, &mut filter).unwrap();
     }
+
     assert_eq!(store.len(), 4, "records with mapq < 20 should be dropped");
     for i in 0..4u32 {
         assert!(store.record(i).mapq >= 20, "kept record at idx {i} below threshold");
     }
+}
 
-    // Now the same check through IndexedBamReader::fetch_into_filtered using
-    // a test BAM. We can't easily inject synthetic mapq into the test BAM,
-    // so just assert FetchCounts semantics (fetched >= kept, kept equal to
-    // store.len() after call).
+// r[verify record_store.pre_filter.provider_hook]
+#[test]
+fn keep_record_drops_low_mapq_records_via_fetch_into_customized() {
+    use seqair::bam::IndexedBamReader;
+    use seqair::reader::FetchCounts;
+
     let bam_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -632,14 +620,14 @@ fn keep_record_drops_low_mapq_records_via_fetch_into_filtered() {
 
     // Always-keep: kept == fetched.
     let counts_all = reader
-        .fetch_into_filtered(
+        .fetch_into_customized(
             tid,
             Pos0::new(6_103_000).unwrap(),
             Pos0::new(6_104_000).unwrap(),
             &mut store,
-            |_: &SlimRecord, _: &RecordStore| true,
+            &mut (),
         )
-        .expect("fetch_into_filtered");
+        .expect("fetch_into_customized");
     assert!(counts_all.fetched > 0, "test region should produce records");
     assert_eq!(counts_all.kept, counts_all.fetched);
     let all_len = store.len();
@@ -647,25 +635,23 @@ fn keep_record_drops_low_mapq_records_via_fetch_into_filtered() {
 
     // Drop-all: kept == 0 but fetched unchanged.
     let counts_none = reader
-        .fetch_into_filtered(
+        .fetch_into_customized(
             tid,
             Pos0::new(6_103_000).unwrap(),
             Pos0::new(6_104_000).unwrap(),
             &mut store,
-            |_: &SlimRecord, _: &RecordStore| false,
+            &mut DropAll,
         )
-        .expect("fetch_into_filtered");
+        .expect("fetch_into_customized");
     assert_eq!(counts_none.fetched, counts_all.fetched);
     assert_eq!(counts_none.kept, 0);
     assert_eq!(store.len(), 0, "all records rolled back");
-    // FetchCounts invariant
     let _: FetchCounts = counts_none;
 }
 
 // r[verify cram.fetch_into_filtered.push_time]
 #[test]
-fn cram_fetch_into_filtered_applies_filter_at_push_time() {
-    use seqair::bam::record_store::SlimRecord;
+fn cram_fetch_into_customized_applies_filter_at_push_time() {
     use seqair::cram::reader::IndexedCramReader;
     use seqair::reader::FetchCounts;
 
@@ -689,14 +675,8 @@ fn cram_fetch_into_filtered_applies_filter_at_push_time() {
 
     // Baseline: always-keep — kept == fetched and matches the sparse fetch_into count.
     let counts_all = reader
-        .fetch_into_filtered(
-            tid,
-            region_start,
-            region_end,
-            &mut store,
-            |_: &SlimRecord, _: &RecordStore| true,
-        )
-        .expect("fetch_into_filtered all");
+        .fetch_into_customized(tid, region_start, region_end, &mut store, &mut ())
+        .expect("fetch_into_customized all");
     assert!(counts_all.fetched > 0, "test region should produce records");
     assert_eq!(counts_all.kept, counts_all.fetched, "always-keep must keep everything");
     assert_eq!(store.len(), counts_all.kept);
@@ -708,32 +688,29 @@ fn cram_fetch_into_filtered_applies_filter_at_push_time() {
     all_positions.sort_unstable();
 
     // Drop-all: fetched unchanged, kept == 0. The store (including all slabs)
-    // must be empty after rollback — this is the zero-waste guarantee the
-    // previous retain-based implementation couldn't provide.
+    // must be empty after rollback — this is the zero-waste guarantee.
     let counts_none = reader
-        .fetch_into_filtered(
-            tid,
-            region_start,
-            region_end,
-            &mut store,
-            |_: &SlimRecord, _: &RecordStore| false,
-        )
-        .expect("fetch_into_filtered none");
+        .fetch_into_customized(tid, region_start, region_end, &mut store, &mut DropAll)
+        .expect("fetch_into_customized none");
     assert_eq!(counts_none.fetched, counts_all.fetched, "fetched must be filter-independent");
     assert_eq!(counts_none.kept, 0, "drop-all must yield no kept records");
     assert_eq!(store.len(), 0, "store must be empty after drop-all (rollback)");
 
     // Mixed filter: keep records whose pos is even. Use an independent oracle
-    // (slice-and-filter the baseline positions) to verify the survivors.
+    // (filter the baseline positions) to verify the survivors.
+    #[derive(Clone)]
+    struct EvenPos;
+    impl CustomizeRecordStore for EvenPos {
+        type Extra = ();
+        fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+            rec.pos.as_i64() % 2 == 0
+        }
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+    }
+
     let counts_mixed = reader
-        .fetch_into_filtered(
-            tid,
-            region_start,
-            region_end,
-            &mut store,
-            |rec: &SlimRecord, _: &RecordStore| rec.pos.as_i64() % 2 == 0,
-        )
-        .expect("fetch_into_filtered mixed");
+        .fetch_into_customized(tid, region_start, region_end, &mut store, &mut EvenPos)
+        .expect("fetch_into_customized mixed");
     assert_eq!(counts_mixed.fetched, counts_all.fetched, "fetched must be filter-independent");
     let expected_kept: usize = all_positions.iter().filter(|p| *p % 2 == 0).count();
     assert_eq!(counts_mixed.kept, expected_kept, "filter result must match oracle");
@@ -742,6 +719,128 @@ fn cram_fetch_into_filtered_applies_filter_at_push_time() {
         assert_eq!(store.record(i).pos.as_i64() % 2, 0, "record {i} failed filter predicate");
     }
 
-    // FetchCounts invariant: the type is `Copy + Default`.
     let _: FetchCounts = counts_mixed;
+}
+
+// ---- read-group filter via aux tag ----
+
+/// Extract the value of the BAM aux RG:Z tag from the raw aux bytes, if present.
+/// Aux entries are `tag(2 bytes) + type(1 byte) + value`. RG is type Z
+/// (NUL-terminated string).
+fn extract_rg(aux: &[u8]) -> Option<&[u8]> {
+    let mut i = 0;
+    while i + 3 <= aux.len() {
+        let tag = &aux[i..i + 2];
+        let val_type = aux[i + 2];
+        i += 3;
+        if tag == b"RG" && val_type == b'Z' {
+            let start = i;
+            while i < aux.len() && aux[i] != 0 {
+                i += 1;
+            }
+            return Some(&aux[start..i]);
+        }
+        // Skip value based on type for tags we don't care about.
+        match val_type {
+            b'A' | b'c' | b'C' => i += 1,
+            b's' | b'S' => i += 2,
+            b'i' | b'I' | b'f' => i += 4,
+            b'Z' | b'H' => {
+                while i < aux.len() && aux[i] != 0 {
+                    i += 1;
+                }
+                i += 1; // skip NUL
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Customizer that keeps only records whose RG:Z aux tag matches `wanted`.
+/// Demonstrates push-time filtering driven by aux data — a common need for
+/// callers who want to subset by sample/read group in the alignment file.
+#[derive(Clone)]
+struct ReadGroupFilter {
+    wanted: Vec<u8>,
+}
+impl CustomizeRecordStore for ReadGroupFilter {
+    type Extra = ();
+    fn keep_record(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> bool {
+        // The just-pushed record's aux bytes live at the tail of the aux slab.
+        let Ok(aux) = rec.aux(store) else { return false };
+        extract_rg(aux) == Some(self.wanted.as_slice())
+    }
+    fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+}
+
+// r[verify record_store.pre_filter.provider_hook]
+// r[verify record_store.slim_record.field_getters]
+#[test]
+fn read_group_filter_keeps_only_matching_records() {
+    // Build records with three different read groups: two RG1, one RG2, one RG3.
+    let rg1_aux = b"RGZRG1\0";
+    let rg2_aux = b"RGZRG2\0";
+    let rg3_aux = b"RGZRG3\0";
+
+    let mut store = RecordStore::new();
+    let mut filter = ReadGroupFilter { wanted: b"RG1".to_vec() };
+
+    let inputs: &[(i32, &[u8])] = &[
+        (100, rg1_aux),
+        (101, rg2_aux),
+        (102, rg1_aux),
+        (103, rg3_aux),
+        (104, rg2_aux),
+        (105, rg1_aux),
+    ];
+    for (pos, aux) in inputs {
+        let raw = helpers::make_record_with_aux(0, *pos, 99, 60, 10, aux);
+        store.push_raw(&raw, &mut filter).unwrap();
+    }
+
+    // Three records had RG1 → exactly three should survive.
+    assert_eq!(store.len(), 3, "only RG1 records should remain");
+    let kept_positions: Vec<i32> =
+        (0..store.len() as u32).map(|i| store.record(i).pos.as_i32()).collect();
+    assert_eq!(kept_positions, vec![100, 102, 105]);
+
+    // Each surviving record's aux must indeed contain RG1.
+    for i in 0..store.len() as u32 {
+        let rec = store.record(i);
+        let aux = rec.aux(&store).expect("aux readable");
+        assert_eq!(extract_rg(aux), Some(b"RG1".as_ref()));
+    }
+}
+
+// r[verify record_store.pre_filter.provider_hook]
+#[test]
+fn read_group_filter_rolls_back_rejected_records() {
+    // Drop everything but RG1; verify the store ends up byte-identical to
+    // pushing only the matching records with no filter.
+    let rg1_aux = b"RGZRG1\0";
+    let other_aux = b"RGZRG2\0";
+
+    let mut a = RecordStore::new();
+    let mut filter = ReadGroupFilter { wanted: b"RG1".to_vec() };
+    let inputs: &[&[u8]] = &[other_aux, rg1_aux, other_aux, rg1_aux, rg1_aux, other_aux];
+    for (i, aux) in inputs.iter().enumerate() {
+        let raw = helpers::make_record_with_aux(0, 100 + i as i32, 99, 60, 10, aux);
+        a.push_raw(&raw, &mut filter).unwrap();
+    }
+
+    // Reference store: only the matching records, no filter.
+    let mut b = RecordStore::new();
+    for (i, aux) in inputs.iter().enumerate() {
+        if extract_rg(aux) == Some(b"RG1".as_ref()) {
+            let raw = helpers::make_record_with_aux(0, 100 + i as i32, 99, 60, 10, aux);
+            b.push_raw(&raw, &mut ()).unwrap();
+        }
+    }
+
+    assert_eq!(a.len(), b.len(), "rollback must yield same record count");
+    for i in 0..a.len() as u32 {
+        assert_eq!(a.record(i).pos, b.record(i).pos);
+        assert_eq!(a.aux(i), b.aux(i));
+    }
 }

@@ -36,7 +36,7 @@ fn deletion_positions_have_deletion_op() {
         20,
     );
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, |_, _| true).unwrap();
+    arena.push_raw(&raw, &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(124).unwrap());
     let columns = helpers::collect_columns(&mut engine);
@@ -100,7 +100,7 @@ fn refskip_positions_have_refskip_op() {
         20,
     );
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, |_, _| true).unwrap();
+    arena.push_raw(&raw, &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(119).unwrap());
     let columns = helpers::collect_columns(&mut engine);
@@ -122,7 +122,7 @@ fn refskip_positions_have_refskip_op() {
 fn depth_counts_deletions_and_refskips() {
     let mut arena = RecordStore::new();
     // Read 1: 20M (covers 0-19)
-    arena.push_raw(&make_record(0, 0, 99, 60, 20), |_, _| true).unwrap();
+    arena.push_raw(&make_record(0, 0, 99, 60, 20), &mut ()).unwrap();
     // Read 2: 5M 5D 10M at pos 0 (covers 0-19 with deletion at 5-9)
     arena
         .push_raw(
@@ -134,7 +134,7 @@ fn depth_counts_deletions_and_refskips() {
                 &[cigar_op(5, 0), cigar_op(5, 2), cigar_op(10, 0)],
                 15,
             ),
-            |_, _| true,
+            &mut (),
         )
         .unwrap();
 
@@ -161,7 +161,7 @@ fn insertion_reported_at_last_match_before_insert() {
         23,
     );
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, |_, _| true).unwrap();
+    arena.push_raw(&raw, &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
     let columns = helpers::collect_columns(&mut engine);
@@ -218,7 +218,7 @@ fn complex_indel_at_last_deletion_position() {
         23,
     );
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, |_, _| true).unwrap();
+    arena.push_raw(&raw, &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
     let columns = helpers::collect_columns(&mut engine);
@@ -276,7 +276,7 @@ fn insertion_before_deletion() {
         23,
     );
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, |_, _| true).unwrap();
+    arena.push_raw(&raw, &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
     let columns = helpers::collect_columns(&mut engine);
@@ -323,7 +323,7 @@ fn insertion_with_anchor_and_complex_indel_after_deletion() {
         25,
     );
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, |_, _| true).unwrap();
+    arena.push_raw(&raw, &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
     let columns = helpers::collect_columns(&mut engine);
@@ -379,7 +379,7 @@ fn minimal_insertion_1m_1i_1m() {
     let raw =
         make_record_with_cigar(0, 0, 99, 60, &[cigar_op(1, 0), cigar_op(1, 1), cigar_op(1, 0)], 3);
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, |_, _| true).unwrap();
+    arena.push_raw(&raw, &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(1).unwrap());
     let columns = helpers::collect_columns(&mut engine);
@@ -416,7 +416,7 @@ proptest! {
     #[test]
     fn every_ref_position_produces_column_for_single_read(read in arb_read()) {
         let mut arena = RecordStore::new();
-        arena.push_raw(&read.raw, |_, _| true).unwrap();
+        arena.push_raw(&read.raw, &mut ()).unwrap();
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
@@ -433,7 +433,7 @@ proptest! {
     #[test]
     fn qpos_presence_matches_cigar_op_type(read in arb_read()) {
         let mut arena = RecordStore::new();
-        arena.push_raw(&read.raw, |_, _| true).unwrap();
+        arena.push_raw(&read.raw, &mut ()).unwrap();
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
@@ -464,7 +464,7 @@ proptest! {
     #[test]
     fn del_len_matches_cigar_d_op_length(read in arb_read()) {
         let mut arena = RecordStore::new();
-        arena.push_raw(&read.raw, |_, _| true).unwrap();
+        arena.push_raw(&read.raw, &mut ()).unwrap();
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
@@ -492,7 +492,7 @@ proptest! {
     #[test]
     fn del_len_nonzero_iff_deletion(read in arb_read()) {
         let mut arena = RecordStore::new();
-        arena.push_raw(&read.raw, |_, _| true).unwrap();
+        arena.push_raw(&read.raw, &mut ()).unwrap();
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
@@ -515,7 +515,7 @@ proptest! {
     #[test]
     fn del_len_consistent_across_deletion_span(read in arb_read()) {
         let mut arena = RecordStore::new();
-        arena.push_raw(&read.raw, |_, _| true).unwrap();
+        arena.push_raw(&read.raw, &mut ()).unwrap();
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;

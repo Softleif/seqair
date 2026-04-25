@@ -14,19 +14,21 @@
 //!
 //! The workflow:
 //!
-//! 1. Define a `Clone` struct implementing [`RecordStoreExtras`] that computes
-//!    one `Extra` value per record.
-//! 2. Open the readers with `Readers::open_with_extras(bam, fasta, provider)`.
+//! 1. Define a `Clone` struct implementing [`CustomizeRecordStore`] that
+//!    computes one `Extra` value per record (and optionally filters records
+//!    via `keep_record`).
+//! 2. Open the readers with `Readers::open_customized(bam, fasta, customize)`.
 //! 3. Resolve the region string against the header with `readers.resolve_region`.
-//! 4. Call `readers.pileup(tid, start, end)` — this fetches records, runs the
-//!    extras provider once per record, fetches the reference sequence, and
-//!    returns a `PileupEngine<E::Extra>` ready for iteration.
+//! 4. Call `readers.pileup(tid, start, end)` — this fetches records (running
+//!    `keep_record` at push time), then `compute` once per kept record,
+//!    fetches the reference sequence, and returns a `PileupEngine<E::Extra>`
+//!    ready for iteration.
 //! 5. Iterate with `while let Some(col) = engine.pileups()`. Each alignment
 //!    view exposes `aln.extra()` alongside the usual fields.
 
 use anyhow::Context;
 use clap::Parser as _;
-use seqair::bam::record_store::{CustomizeRecordStore, RecordStore};
+use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
 use seqair::reader::Readers;
 use seqair_types::RegionString;
 use std::path::PathBuf;
@@ -62,18 +64,24 @@ struct ReadInfo {
     aligned_fraction: f64,
 }
 
-/// Extras provider — just a zero-sized marker that produces `ReadInfo` per record.
+/// Extras customizer — a zero-sized marker that produces `ReadInfo` per record
+/// and (optionally) filters out unmapped/secondary reads at push time.
 ///
-/// `Clone` so `Readers::fork` can duplicate the provider for multi-threaded use.
+/// `Clone` so `Readers::fork` can duplicate it for multi-threaded use.
 #[derive(Debug, Clone, Default)]
 struct ReadInfoBuilder;
 
 impl CustomizeRecordStore for ReadInfoBuilder {
     type Extra = ReadInfo;
 
-    fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> ReadInfo {
-        let rec = store.record(idx);
-        let read_group = extract_rg(store.aux(idx));
+    fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+        // Drop unmapped and secondary alignments before they enter the store —
+        // saves slab space and skips compute() for records the pileup ignores.
+        !rec.flags.is_unmapped() && !rec.flags.is_secondary()
+    }
+
+    fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> ReadInfo {
+        let read_group = rec.aux(store).ok().and_then(extract_rg);
         let aligned_fraction =
             if rec.seq_len > 0 { rec.matching_bases as f64 / rec.seq_len as f64 } else { 0.0 };
         ReadInfo { read_group, aligned_fraction }
@@ -84,7 +92,7 @@ fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
     let mut readers =
-        Readers::<ReadInfoBuilder>::open_with_extras(&args.input, &args.reference, ReadInfoBuilder)
+        Readers::<ReadInfoBuilder>::open_customized(&args.input, &args.reference, ReadInfoBuilder)
             .context("could not open BAM + FASTA")?;
 
     // Resolve region string against the header — fills in default start/end

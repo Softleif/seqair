@@ -182,26 +182,24 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, BamError> {
-        self.fetch_into_filtered(tid, start, end, store, |_, _| true).map(|c| c.kept)
+        self.fetch_into_customized(tid, start, end, store, &mut ()).map(|c| c.kept)
     }
 
-    // r[impl unified.fetch_into_filtered]
-    /// Filter-aware variant: each record that passes the reader's built-in
-    /// checks is pushed, then the user's `keep` closure decides whether to
-    /// retain it. Rejected records roll back their slab writes. The returned
-    /// [`FetchCounts`] reports `fetched` (produced by the reader) vs `kept`
-    /// (survived the filter).
-    pub fn fetch_into_filtered<F>(
+    // r[impl unified.fetch_into_customized]
+    /// Customized variant: each record that passes the reader's built-in
+    /// checks is pushed via [`RecordStore::push_raw`], which forwards the
+    /// `customize` value's `keep_record` to decide retention. Rejected
+    /// records roll back their slab writes. The returned [`FetchCounts`]
+    /// reports `fetched` (produced by the reader) vs `kept` (survived the
+    /// filter).
+    pub fn fetch_into_customized<E: super::record_store::CustomizeRecordStore>(
         &mut self,
         tid: u32,
         start: Pos0,
         end: Pos0,
         store: &mut RecordStore,
-        mut keep: F,
-    ) -> Result<crate::reader::FetchCounts, BamError>
-    where
-        F: FnMut(&super::record_store::SlimRecord, &RecordStore) -> bool,
-    {
+        customize: &mut E,
+    ) -> Result<crate::reader::FetchCounts, BamError> {
         store.clear();
 
         let chunks = self.shared.index.query(tid, start, end);
@@ -279,7 +277,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
                     }
 
                     accepted = accepted.saturating_add(1);
-                    if store.push_raw(raw, &mut keep)?.is_some() {
+                    if store.push_raw(raw, customize)?.is_some() {
                         kept_count = kept_count.saturating_add(1);
                     }
                 }
