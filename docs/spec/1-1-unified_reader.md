@@ -125,10 +125,10 @@ r[unified.fetch_counts]
 > `Readers` MUST expose:
 >
 > - `header() -> &BamHeader` — delegates to the alignment reader's header.
-> - `fetch_into(tid, start, end, store) -> Result<usize>` — delegates to the alignment reader. Always loads into a `RecordStore<()>` (the extras-bearing store is produced by `pileup` via `apply_extras`).
+> - `fetch_into(tid, start, end, store) -> Result<usize>` — delegates to the alignment reader. Always loads into a `RecordStore<()>` (the extras-bearing store is produced by `pileup` via `apply_customize`).
 > - `fasta() -> &IndexedFastaReader` and `fasta_mut() -> &mut IndexedFastaReader` — direct access for callers that need reference sequences independently of the alignment reader (e.g., the call pipeline's segment fetching).
 > - `alignment() -> &IndexedReader` and `alignment_mut() -> &mut IndexedReader` — direct access when needed.
-> - `extras_provider() -> &E` / `extras_provider_mut() -> &mut E` — direct access to inspect or reset the provider's state between regions.
+> - `customize() -> &E` / `customize_mut() -> &mut E` — direct access to inspect or reset the customize value's state between regions.
 
 r[unified.readers_backward_compat]
 `IndexedReader::open(path)` MUST continue to work for BAM and SAM files without a FASTA path. CRAM detection in `IndexedReader::open()` MUST return an error explaining that CRAM requires a reference and suggesting `Readers::open()` instead. This preserves backward compatibility for code that only needs BAM/SAM.

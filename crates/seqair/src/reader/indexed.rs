@@ -16,7 +16,7 @@ use std::{
 use tracing::instrument;
 
 // r[impl unified.fetch_counts]
-/// Return value of the filter-aware `fetch_into_filtered` methods on each
+/// Return value of the customize-aware `fetch_into_customized` methods on each
 /// reader. `kept <= fetched` always holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FetchCounts {

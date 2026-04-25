@@ -47,7 +47,7 @@ impl CustomizeRecordStore for ExtractPos {
 // r[verify record_store.customize.apply]
 // r[verify record_store.extras.access]
 #[test]
-fn with_extras_computes_per_record_data() {
+fn apply_customize_computes_per_record_data() {
     let store = store_with_n_records(5);
 
     let store = store.apply_customize(&mut ExtractPos);
@@ -60,7 +60,7 @@ fn with_extras_computes_per_record_data() {
 
 // r[verify record_store.customize.apply]
 #[test]
-fn with_extras_preserves_slab_data() {
+fn apply_customize_preserves_slab_data() {
     let store = store_with_n_records(3);
 
     // Capture original data before transformation.
@@ -385,7 +385,7 @@ fn pileups_column_exposes_store_access_via_alignment_view() {
 
 // r[verify pileup.extras.recover_store]
 #[test]
-fn recover_store_works_with_extras_engine() {
+fn recover_store_works_after_apply_customize() {
     // Build a store manually, transform to extras, feed into engine, then strip.
     let store = store_with_n_records(10);
 
@@ -581,7 +581,7 @@ impl CustomizeRecordStore for DropAll {
     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
 }
 
-// r[verify record_store.pre_filter.provider_hook]
+// r[verify record_store.pre_filter.rollback]
 #[test]
 fn keep_record_drops_low_mapq_records_via_push_raw() {
     let mut store = RecordStore::new();
@@ -599,7 +599,7 @@ fn keep_record_drops_low_mapq_records_via_push_raw() {
     }
 }
 
-// r[verify record_store.pre_filter.provider_hook]
+// r[verify record_store.pre_filter.rollback]
 #[test]
 fn keep_record_drops_low_mapq_records_via_fetch_into_customized() {
     use seqair::bam::IndexedBamReader;
@@ -649,7 +649,7 @@ fn keep_record_drops_low_mapq_records_via_fetch_into_customized() {
     let _: FetchCounts = counts_none;
 }
 
-// r[verify cram.fetch_into_filtered.push_time]
+// r[verify cram.fetch_into_customized.push_time]
 #[test]
 fn cram_fetch_into_customized_applies_filter_at_push_time() {
     use seqair::cram::reader::IndexedCramReader;
@@ -774,7 +774,7 @@ impl CustomizeRecordStore for ReadGroupFilter {
     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
 }
 
-// r[verify record_store.pre_filter.provider_hook]
+// r[verify record_store.pre_filter.rollback]
 // r[verify record_store.slim_record.field_getters]
 #[test]
 fn read_group_filter_keeps_only_matching_records() {
@@ -813,7 +813,7 @@ fn read_group_filter_keeps_only_matching_records() {
     }
 }
 
-// r[verify record_store.pre_filter.provider_hook]
+// r[verify record_store.pre_filter.rollback]
 #[test]
 fn read_group_filter_rolls_back_rejected_records() {
     // Drop everything but RG1; verify the store ends up byte-identical to

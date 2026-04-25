@@ -658,6 +658,27 @@ impl RecordStore {
 /// `Clone` so they can be duplicated across forked readers in multi-threaded
 /// pipelines.
 ///
+/// # Ordering and state
+///
+/// The two methods run in two distinct passes:
+///
+/// 1. **`keep_record`** is called once per record at push time, in the order
+///    records arrive from the underlying reader (BAM/SAM/CRAM coordinate
+///    order for sorted inputs). State changes made in `keep_record` are
+///    visible to subsequent `keep_record` calls and to `compute`.
+/// 2. **`compute`** is called once per *kept* record by
+///    [`RecordStore::apply_customize`], after the entire fetch has finished
+///    and the store may have been sorted/deduped. Records arrive in
+///    `RecordStore` order at that point. `compute` MUST NOT assume it runs
+///    immediately after `keep_record` for the same record — they are
+///    separate passes.
+///
+/// The same `&mut E` instance is reused across regions (`Readers` holds one
+/// customize value for its whole lifetime). Implementors that want
+/// per-region state MUST reset it themselves between fetches via
+/// [`Readers::customize_mut`](crate::reader::Readers::customize_mut).
+/// Counters that should accumulate across regions need no special handling.
+///
 /// # Example
 ///
 /// A customizer that drops low-quality reads and tags each kept read with
@@ -685,7 +706,7 @@ pub trait CustomizeRecordStore: Clone {
     /// The per-record data produced by `compute`.
     type Extra;
 
-    // r[impl record_store.pre_filter.provider_hook]
+    // r[impl record_store.customize.trait]
     /// Pre-filter: called on each freshly-pushed record BEFORE extras are
     /// computed. Returning `false` rolls back the slab writes for this
     /// record — it is as if the record was never fetched.

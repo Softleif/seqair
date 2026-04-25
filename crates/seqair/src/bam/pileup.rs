@@ -183,7 +183,7 @@ impl<U> std::fmt::Debug for AlignmentView<'_, '_, U> {
 }
 
 impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
-    /// The per-record extra, as computed by the extras provider / `with_extras`.
+    /// The per-record extra, as computed by the customize value's `compute` method.
     pub fn extra(&self) -> &'store U {
         self.store.extra(self.aln.record_idx())
     }

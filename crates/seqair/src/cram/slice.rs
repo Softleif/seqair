@@ -100,7 +100,7 @@ impl SliceHeader {
 /// is rolled back with zero slab waste (same as BAM/SAM). Returns
 /// `(fetched, kept)` where `fetched` counts records that reached the push
 /// step and `kept` counts those that survived the filter.
-// r[impl cram.fetch_into_filtered.push_time]
+// r[impl cram.fetch_into_customized.push_time]
 #[expect(
     clippy::too_many_arguments,
     reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
@@ -276,7 +276,7 @@ pub fn decode_slice<E: crate::bam::record_store::CustomizeRecordStore>(
 /// user's `customize.keep_record`, and `None` if either dropped it — the
 /// mate-resolution pass already handles the `None` case.
 // r[impl cram.record.decode_order]
-// r[impl cram.fetch_into_filtered.push_time]
+// r[impl cram.fetch_into_customized.push_time]
 #[expect(
     clippy::too_many_arguments,
     reason = "CRAM record decoding requires compression header, slice header, context, and customize parameters"
@@ -511,7 +511,7 @@ fn decode_record<E: crate::bam::record_store::CustomizeRecordStore>(
 
         let qname: &[u8] = &read_name;
 
-        // r[impl cram.fetch_into_filtered.push_time]
+        // r[impl cram.fetch_into_customized.push_time]
         // Push the record, then consult the user's filter. `push_fields`
         // returns `Ok(None)` when the filter rejects and rolls back slab
         // writes with zero waste (same as BAM/SAM).

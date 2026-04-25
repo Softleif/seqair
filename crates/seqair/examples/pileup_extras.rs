@@ -99,9 +99,10 @@ fn main() -> anyhow::Result<()> {
     // when missing and validates the contig name.
     let (tid, start, end) = readers.resolve_region(&args.region)?;
 
+    // No `engine.set_filter`: unmapped/secondary records are already dropped at
+    // push time by `ReadInfoBuilder::keep_record`, so the engine never sees them.
     let min_mapq = args.min_mapq;
     let mut engine = readers.pileup(tid, start, end).context("could not build pileup")?;
-    engine.set_filter(move |flags, _aux| !flags.is_unmapped() && !flags.is_secondary());
 
     eprintln!(
         "Loaded pileup for {region} ({start}..={end})",

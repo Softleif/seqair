@@ -399,7 +399,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     }
 
     // r[impl unified.fetch_into_customized]
-    // r[impl cram.fetch_into_filtered.push_time]
+    // r[impl cram.fetch_into_customized.push_time]
     /// Customized variant: each record that passes the reader's built-in
     /// overlap/tid/unmapped checks is pushed into the store, with
     /// `customize.keep_record` consulted at push time. Rejection triggers
