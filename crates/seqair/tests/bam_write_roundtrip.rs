@@ -592,3 +592,120 @@ fn roundtrip_write_store_record() {
         assert_eq!(store.aux(i), store2.aux(i), "aux mismatch record {i}");
     }
 }
+
+// ---- Independent oracle (C): end-to-end push_fields → BamWriter → IndexedBamReader ----
+//
+// Push synthetic inputs into a RecordStore via push_fields, write to a temp
+// BAM via BamWriter::write_store_record, read back via IndexedBamReader, and
+// compare every field of every record. This is the strongest oracle — it
+// catches bugs in push_fields, the writer, and the reader as a triple, but
+// requires the inputs to be valid for all three layers (sorted by pos, valid
+// aux bytes, etc.).
+mod e2e_oracle {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone)]
+    struct E2eInput {
+        qname: Vec<u8>,
+        bases: Vec<Base>,
+        quals: Vec<u8>,
+        pos: u32,
+        mapq: u8,
+    }
+
+    fn arb_base() -> impl Strategy<Value = Base> {
+        prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T)]
+    }
+
+    fn arb_e2e_input() -> impl Strategy<Value = E2eInput> {
+        (
+            prop::collection::vec(b'a'..=b'z', 1..=12),
+            prop::collection::vec(arb_base(), 1..=12),
+            0u32..50_000,
+            0u8..=60,
+        )
+            .prop_map(|(qname, bases, pos, mapq)| {
+                let quals = bases.iter().map(|_| 30u8).collect();
+                E2eInput { qname, bases, quals, pos, mapq }
+            })
+    }
+
+    proptest! {
+        // r[verify bam_writer.test_store_roundtrip]
+        // r[verify unified.push_fields_equivalence]
+        #[test]
+        fn push_fields_then_bam_write_then_read_round_trips(
+            mut inputs in prop::collection::vec(arb_e2e_input(), 1..=20),
+        ) {
+            // BamWriter requires sorted-by-position records when building the
+            // BAI index, so sort up front.
+            inputs.sort_by_key(|i| i.pos);
+
+            let mut store = RecordStore::new();
+            for inp in &inputs {
+                let cigar = [CigarOp::new(CigarOpType::Match, inp.bases.len() as u32)];
+                store
+                    .push_fields(
+                        Pos0::new(inp.pos).unwrap(),
+                        Pos0::new(inp.pos + inp.bases.len() as u32 - 1).unwrap(),
+                        BamFlags::empty(),
+                        inp.mapq,
+                        inp.bases.len() as u32, // matching_bases for 1×M CIGAR
+                        0,
+                        &inp.qname,
+                        &cigar,
+                        &inp.bases,
+                        &inp.quals,
+                        &[], // no aux
+                        0,   // tid
+                        -1,
+                        -1,
+                        0,
+                        &mut (),
+                    )
+                    .unwrap();
+            }
+
+            // Write the store out via write_store_record + index
+            let dir = tempfile::tempdir().unwrap();
+            let bam_path = dir.path().join("e2e.bam");
+            let header = make_header();
+            {
+                let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+                for i in 0..store.len() as u32 {
+                    writer.write_store_record(&store, i).unwrap();
+                }
+                let (_inner, idx) = writer.finish().unwrap();
+                let bai_file =
+                    std::fs::File::create(bam_path.with_extension("bam.bai")).unwrap();
+                idx.unwrap().write_bai(bai_file, header.target_count()).unwrap();
+            }
+
+            // Read back via IndexedBamReader
+            let mut store2 = RecordStore::new();
+            let mut reader = IndexedBamReader::open(&bam_path).unwrap();
+            reader
+                .fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store2)
+                .unwrap();
+
+            prop_assert_eq!(store2.len(), inputs.len(), "record count round-tripped");
+
+            for (i, inp) in inputs.iter().enumerate() {
+                let idx = i as u32;
+                let rec = store2.record(idx);
+                prop_assert_eq!(rec.pos.as_i32() as u32, inp.pos, "pos rec {}", i);
+                prop_assert_eq!(rec.mapq, inp.mapq, "mapq rec {}", i);
+                prop_assert_eq!(rec.seq_len as usize, inp.bases.len(), "seq_len rec {}", i);
+                prop_assert_eq!(store2.qname(idx), inp.qname.as_slice(), "qname rec {}", i);
+                prop_assert_eq!(store2.seq(idx), inp.bases.as_slice(), "seq rec {}", i);
+                let quals_back = BaseQuality::slice_to_bytes(store2.qual(idx));
+                prop_assert_eq!(quals_back, inp.quals.as_slice(), "qual rec {}", i);
+                let cigar = store2.cigar(idx);
+                prop_assert_eq!(cigar.len(), 1, "cigar op count rec {}", i);
+                prop_assert_eq!(cigar[0].op_type(), CigarOpType::Match, "cigar op type rec {}", i);
+                prop_assert_eq!(cigar[0].len() as usize, inp.bases.len(), "cigar op len rec {}", i);
+            }
+        }
+    }
+}

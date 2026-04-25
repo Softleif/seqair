@@ -1,9 +1,13 @@
 //! Iterate over pileup columns. [`PileupEngine`] yields [`PileupColumn`]s with pre-extracted
-//! flat fields per active read. Supports read filtering and per-position max-depth.
+//! flat fields per active read. Supports per-position max-depth.
+//!
+//! Read filtering happens at fetch time via
+//! [`CustomizeRecordStore::keep_record`](crate::bam::record_store::CustomizeRecordStore::keep_record),
+//! not in this engine. Records that should not pollute the pileup never enter
+//! the store in the first place.
 
 use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0, Strand, strand_from_flags};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
-// PileupEngine is intentionally !Send due to RecordFilter: Box<dyn Fn(...)>.
 use std::rc::Rc;
 
 use crate::utils::TraceErr;
@@ -48,10 +52,6 @@ impl RefSeq {
     }
 }
 
-/// Filter function receiving (flags, `aux_bytes`) for the candidate record.
-// r[impl flags.filter_signature]
-type RecordFilter = Box<dyn Fn(BamFlags, &[u8]) -> bool>;
-
 // r[impl pileup.active_set]
 // r[impl pileup.zero_refspan_reads]
 // r[impl pileup.soft_clip_at_position]
@@ -71,7 +71,6 @@ pub struct PileupEngine<U = ()> {
     /// Cold fields: only accessed for records that survive retain.
     active: Vec<ActiveRecord>,
     max_depth: Option<u32>,
-    filter: Option<RecordFilter>,
     ref_seq: Option<RefSeq>,
     // Profiling counters — u32 is sufficient for single-region pileups (max ~250M positions).
     // For whole-genome streaming, these saturate at u32::MAX which is acceptable for debug output.
@@ -368,7 +367,6 @@ impl<U> PileupEngine<U> {
             active_end_pos: Vec::new(),
             active: Vec::new(),
             max_depth: None,
-            filter: None,
             ref_seq: None,
             columns_produced: 0,
             max_active_depth: 0,
@@ -383,12 +381,6 @@ impl<U> PileupEngine<U> {
     // r[impl pileup.max_depth_per_position]
     pub fn set_max_depth(&mut self, max: u32) {
         self.max_depth = Some(max);
-    }
-
-    // r[impl pileup.read_filter]
-    /// Set a filter that receives `(flags, aux_bytes)` for each record entering the active set.
-    pub fn set_filter(&mut self, f: impl Fn(BamFlags, &[u8]) -> bool + 'static) {
-        self.filter = Some(Box::new(f));
     }
 
     pub fn remaining_positions(&self) -> usize {
@@ -505,12 +497,6 @@ impl<U> PileupEngine<U> {
 
                 // r[impl pileup.unmapped_excluded]
                 if rec.flags.is_unmapped() {
-                    continue;
-                }
-
-                if let Some(filter) = &self.filter
-                    && !filter(rec.flags, self.store.aux(idx))
-                {
                     continue;
                 }
 

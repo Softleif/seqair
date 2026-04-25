@@ -100,7 +100,4 @@ r[flags.format_traits]
 ## Field usage
 
 r[flags.field_type]
-All BAM flag fields in the codebase (`BamRecord`, `SlimRecord`, `OwnedBamRecord`, `PileupAlignment`, `ActiveRecord`, `ParsedHeader`, etc.) MUST use `BamFlags` instead of raw `u16`. Exception: test helpers that construct raw BAM wire-format bytes (e.g. `make_test_record`) and comparison structs that mirror external library types (`HtsRecord`, `SyntheticRead`) MAY use `u16` at the serialization/interop boundary.
-
-r[flags.filter_signature]
-The pileup `RecordFilter` closure MUST accept `BamFlags` (not `u16`) as its first argument.
+All BAM flag fields in the codebase (`BamRecord`, `SlimRecord`, `OwnedBamRecord`, `PileupAlignment`, `ActiveRecord`, `ParsedHeader`, etc.) MUST use `BamFlags` instead of raw `u16`. Exception: test helpers that construct raw BAM wire-format bytes (e.g. `make_test_record`) and comparison structs that mirror external library types (`HtsRecord`, `SyntheticRead`) MAY use `u16` at the serialization/interop boundary. Filter callbacks (`CustomizeRecordStore::keep_record`) that read flags do so via the `&SlimRecord` argument's typed `flags: BamFlags` field, never via raw `u16`.

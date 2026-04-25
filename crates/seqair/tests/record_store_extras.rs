@@ -333,7 +333,6 @@ fn engine_accepts_typed_store() {
     let store = store.apply_customize(&mut ExtractMapq);
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
     engine.set_max_depth(10);
-    engine.set_filter(|flags, _aux| !flags.is_duplicate());
 
     // Verify the engine still works — iterate and check columns are produced.
     let columns = collect_columns(&mut engine);

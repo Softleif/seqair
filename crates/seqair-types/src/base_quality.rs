@@ -17,7 +17,7 @@ use std::fmt;
 // r[impl types.base_quality.copy]
 // r[impl types.base_quality.no_ord]
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BaseQuality(u8);
 
 // r[impl types.base_quality.size]
@@ -65,14 +65,12 @@ impl BaseQuality {
     ///
     /// Sound by `r[types.base_quality.type]` + `r[types.base_quality.size]`:
     /// `#[repr(transparent)]` over `u8` guarantees identical layout and
-    /// alignment, and every byte value is a valid `BaseQuality`.
+    /// alignment, and every byte value is a valid `BaseQuality` — encoded
+    /// in the `Pod` derive on the type.
     // r[impl types.base_quality.slice_from_bytes]
     #[inline]
     pub fn slice_from_bytes(bytes: &[u8]) -> &[BaseQuality] {
-        // SAFETY: BaseQuality is #[repr(transparent)] over u8 (compile-time
-        // asserts above confirm size + alignment match), and every u8 value
-        // is a valid BaseQuality (no invariants).
-        unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<BaseQuality>(), bytes.len()) }
+        bytemuck::cast_slice(bytes)
     }
 
     /// Inverse of [`BaseQuality::slice_from_bytes`]: view `&[BaseQuality]` as
@@ -80,8 +78,7 @@ impl BaseQuality {
     // r[impl types.base_quality.slice_to_bytes]
     #[inline]
     pub fn slice_to_bytes(quals: &[BaseQuality]) -> &[u8] {
-        // SAFETY: see slice_from_bytes.
-        unsafe { std::slice::from_raw_parts(quals.as_ptr().cast::<u8>(), quals.len()) }
+        bytemuck::cast_slice(quals)
     }
 }
 

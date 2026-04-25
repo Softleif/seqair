@@ -692,18 +692,28 @@ fn resolve_mate_tlen(infos: &[SliceMateInfo], store: &mut RecordStore) {
 
         // Resolve next_ref_id and next_pos for each record in the chain.
         // Each record's mate is the next entry in the chain (last wraps to first).
+        // r[impl cram.fetch_into_customized.filtered_mate_sentinel]
+        // If the mate was rejected by the user's keep_record (store_idx == None),
+        // null out the kept record's mate fields so the BAM "mate unavailable"
+        // sentinel (-1, -1) reflects what's actually in the store. TLEN is left
+        // as the full-chain span — it's a per-template property and matches what
+        // an unfiltered fetch would compute.
         for ci in 0..chain.len() {
             let mate_ci = if ci + 1 < chain.len() { ci + 1 } else { 0 };
             let record_idx = infos[chain[ci]].store_idx;
             let mate = &infos[chain[mate_ci]];
-            if let Some(idx) = record_idx {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "mate positions fit in i32 for genomic data"
-                )]
-                let mate_pos = if mate.pos < 0 { -1 } else { mate.pos as i32 };
-                store.set_mate_info(idx, mate.ref_id, mate_pos);
+            let Some(idx) = record_idx else { continue };
+            if mate.store_idx.is_none() {
+                // Mate was filtered out — set the BAM "mate unavailable" sentinel.
+                store.set_mate_info(idx, -1, -1);
+                continue;
             }
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "mate positions fit in i32 for genomic data"
+            )]
+            let mate_pos = if mate.pos < 0 { -1 } else { mate.pos as i32 };
+            store.set_mate_info(idx, mate.ref_id, mate_pos);
         }
     }
 }

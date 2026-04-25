@@ -23,8 +23,7 @@ At each position, the active set contains all records whose alignment span `[pos
 
 ## Filtering
 
-r[pileup.read_filter]
-The engine MUST support a per-read filter function that is evaluated once per record when it enters the active set (NOT re-evaluated at each position). Records that fail the filter MUST be excluded from all subsequent columns.
+Read filtering is the responsibility of `CustomizeRecordStore::keep_record` (see [Record Store](./3-record_store.md)) at fetch time. By the time records reach the pileup engine they have already been filtered, so `PileupEngine` MUST NOT expose a separate read-filter API. The previous engine-level `set_filter` callback was removed because it duplicated `keep_record` while allocating a boxed closure and forcing pileup to be `!Send`; push-time filtering is strictly better (zero slab waste, no `'static` bound, sees the whole `SlimRecord` rather than just `(flags, aux)`).
 
 r[pileup.max_depth]
 The engine MUST support a maximum depth setting. When more records pass the filter than `max_depth` allows, excess records MUST be dropped (preferring records already in the active set).
