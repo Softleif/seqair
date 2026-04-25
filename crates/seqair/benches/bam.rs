@@ -217,18 +217,7 @@ fn bam_roundtrip(c: &mut Criterion) {
             for i in 0..store.len() {
                 let idx = i as u32;
                 let slim = store.record(idx);
-                let cigar_bytes = store.cigar(idx);
-                let mut cigar = Vec::with_capacity(slim.n_cigar_ops as usize);
-                for j in 0..slim.n_cigar_ops as usize {
-                    let off = j * 4;
-                    let packed = u32::from_le_bytes([
-                        cigar_bytes[off],
-                        cigar_bytes[off + 1],
-                        cigar_bytes[off + 2],
-                        cigar_bytes[off + 3],
-                    ]);
-                    cigar.push(seqair::bam::CigarOp::from_bam_u32(packed));
-                }
+                let cigar = store.cigar(idx).to_vec();
 
                 let rec = OwnedBamRecord {
                     ref_id: tid as i32,

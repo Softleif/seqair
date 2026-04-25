@@ -1,8 +1,9 @@
 //! Decode a BAM record from raw bytes into a [`BamRecord`] with owned variable-length fields.
 //! Used transiently during region loading; the pileup engine works from [`crate::bam::RecordStore`] instead.
 
+use super::cigar::CigarOp;
 use super::seq;
-use seqair_types::{BamFlags, Offset, Pos0};
+use seqair_types::{BamFlags, Pos0};
 
 /// A decoded BAM record with owned variable-length data.
 ///
@@ -24,7 +25,7 @@ pub struct BamRecord {
     pub matching_bases: u32,
     pub indel_bases: u32,
     pub qname: Box<[u8]>,
-    pub cigar: Box<[u8]>,
+    pub cigar: Box<[CigarOp]>,
     pub seq: Box<[u8]>,
     pub qual: Box<[u8]>,
     pub aux: Box<[u8]>,
@@ -50,9 +51,11 @@ impl BamRecord {
             reason = "all bounds ≤ qual_end ≤ raw.len() checked by parse_header"
         )]
         let cigar_slice = &raw[h.var_start..h.cigar_end];
-        let end_pos = compute_end_pos(h.pos, cigar_slice)
+        let mut cigar_ops: Vec<CigarOp> = Vec::new();
+        CigarOp::extend_from_bam_bytes(&mut cigar_ops, cigar_slice);
+        let end_pos = super::cigar::compute_end_pos(h.pos, &cigar_ops)
             .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?;
-        let (matching_bases, indel_bases) = super::cigar::calc_matches_indels(cigar_slice);
+        let (matching_bases, indel_bases) = super::cigar::calc_matches_indels(&cigar_ops);
 
         #[allow(
             clippy::indexing_slicing,
@@ -69,7 +72,7 @@ impl BamRecord {
             matching_bases,
             indel_bases,
             qname: qname_raw[..qname_actual_len].into(),
-            cigar: cigar_slice.into(),
+            cigar: cigar_ops.into_boxed_slice(),
             // r[impl bam.record.seq_4bit]
             // r[impl bam.record.seq_at_simd+2]
             seq: seq::decode_seq(&raw[h.cigar_end..h.seq_end], seq_len_usize).into_boxed_slice(),
@@ -113,23 +116,24 @@ impl BamRecord {
 }
 
 /// Compute `end_pos` from raw BAM record bytes (before full decode).
+///
+/// Walks the packed CIGAR bytes in place — used on the hot pre-push scan
+/// path before we know whether to keep the record, so we can't afford to
+/// allocate a `Vec<CigarOp>` here.
 pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos0> {
+    use super::cigar::{CIGAR_D, CIGAR_EQ, CIGAR_M, CIGAR_N, CIGAR_X};
+    use seqair_types::Offset;
+
     let h = parse_header(raw).ok()?;
     // All bounds ≤ qual_end ≤ raw.len() checked by parse_header
     debug_assert!(h.cigar_end <= raw.len(), "cigar overrun: {} > {}", h.cigar_end, raw.len());
     #[allow(clippy::indexing_slicing, reason = "cigar_end ≤ raw.len() checked by parse_header")]
-    compute_end_pos(h.pos, &raw[h.var_start..h.cigar_end])
-}
-
-// r[impl bam.record.end_pos]
-// r[impl bam.record.zero_refspan]
-pub(crate) fn compute_end_pos(pos: Pos0, cigar_bytes: &[u8]) -> Option<Pos0> {
-    use super::cigar::{CIGAR_D, CIGAR_EQ, CIGAR_M, CIGAR_N, CIGAR_X};
+    let cigar_bytes = &raw[h.var_start..h.cigar_end];
 
     let mut ref_len: i64 = 0;
-    let n_ops = cigar_bytes.len() / 4;
-    for i in 0..n_ops {
-        let op = u32::from_le_bytes(read4(cigar_bytes, i.checked_mul(4)?));
+    for chunk in cigar_bytes.chunks_exact(4) {
+        let arr: [u8; 4] = chunk.try_into().expect("chunks_exact(4) yields 4 bytes");
+        let op = u32::from_le_bytes(arr);
         let op_len = i64::from(op >> 4);
         let op_type = (op & 0xF) as u8;
         match op_type {
@@ -140,9 +144,9 @@ pub(crate) fn compute_end_pos(pos: Pos0, cigar_bytes: &[u8]) -> Option<Pos0> {
         }
     }
     if ref_len == 0 {
-        Some(pos)
+        Some(h.pos)
     } else {
-        pos.checked_add_offset(Offset::new(ref_len.checked_sub(1)?))
+        h.pos.checked_add_offset(Offset::new(ref_len.checked_sub(1)?))
     }
 }
 
@@ -293,11 +297,9 @@ mod tests {
 
     #[test]
     fn test_compute_end_pos() {
-        let op = 50u32 << 4;
-        assert_eq!(
-            compute_end_pos(Pos0::new(100).unwrap(), &op.to_le_bytes()),
-            Some(Pos0::new(149).unwrap())
-        );
+        use super::super::cigar::{CigarOp, CigarOpType, compute_end_pos};
+        let ops = [CigarOp::new(CigarOpType::Match, 50)];
+        assert_eq!(compute_end_pos(Pos0::new(100).unwrap(), &ops), Some(Pos0::new(149).unwrap()));
     }
 
     // r[verify bam.record.checked_offsets]

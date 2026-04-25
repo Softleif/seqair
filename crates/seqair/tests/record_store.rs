@@ -198,7 +198,8 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
     let idx_raw = store_raw.push_raw(&raw, &mut ())?.expect("kept");
 
     // Build the same record from pre-parsed fields
-    let cigar_packed: Vec<u8> = cigar_ops.iter().flat_map(|op| op.to_le_bytes()).collect();
+    let cigar_typed: Vec<seqair::bam::CigarOp> =
+        cigar_ops.iter().map(|&op| seqair::bam::CigarOp::from_bam_u32(op)).collect();
     let bases = [Base::A, Base::C, Base::G, Base::T];
 
     let mut store_fields = RecordStore::new();
@@ -211,7 +212,7 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
             store_raw.record(idx_raw).matching_bases,
             store_raw.record(idx_raw).indel_bases,
             b"read1",
-            &cigar_packed,
+            &cigar_typed,
             &bases,
             qual,
             aux,

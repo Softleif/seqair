@@ -160,7 +160,7 @@ fn slim_record_getters_return_slab_data() {
     assert_eq!(qual.len(), 10);
 
     let cigar = rec.cigar(&store).expect("cigar slab readable");
-    assert_eq!(cigar.len(), 4); // single op, packed as u32
+    assert_eq!(cigar.len(), 1); // single typed op
 
     let aux_bytes = rec.aux(&store).expect("aux slab readable");
     assert_eq!(aux_bytes, aux);
