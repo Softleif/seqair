@@ -84,17 +84,11 @@ r[record_store.extras.push_unit]
 r[record_store.customize.trait]
 The customize trait MUST be defined as `trait CustomizeRecordStore: Clone { type Extra; fn keep_record(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> bool { true } fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> Self::Extra; }`. The `Clone` bound allows `Readers::fork` to duplicate the customize value into the forked reader. The default `keep_record` returns `true` so simple extras-only customizers do not need to override it. A blanket `impl CustomizeRecordStore for ()` MUST exist with `type Extra = ()` and `compute` returning `()` so the default no-customize case costs zero at runtime (`Vec<()>` is a ZST vector). `RecordStore` MUST NOT expose closure-based filter or extras APIs — the trait is the only API, so customize values are always reusable and clone-forwardable. Both `keep_record` and `compute` receive `&SlimRecord` so callers can use `SlimRecord::seq/qual/cigar/aux` getters directly.
 
-r[record_store.customize.apply]
-`RecordStore<()>` MUST provide `apply_customize<E: CustomizeRecordStore>(self, customize: &mut E) -> RecordStore<E::Extra>` that computes one `E::Extra` per record by calling `customize.compute(rec, &self)` in `RecordStore` order (i.e. after any post-fetch `sort_by_pos`/`dedup`), once per kept record. The customize value is reusable: `Readers` holds one and runs it on every region fetch, and may carry state (counters, caches) that persist across regions; per-region state MUST be reset by the caller via `Readers::customize_mut` between fetches.
-
 r[record_store.customize.ordering]
 `keep_record` and `compute` run in two distinct passes for any given fetch: `keep_record` is called once per pushed record at fetch time in reader order; `compute` is called once per kept record after the fetch completes (and any sort/dedup pass has run) in `RecordStore` order. Implementors MUST NOT assume `compute` runs immediately after `keep_record` for the same record. Both methods receive `&mut self`, and state changes made in either pass are visible in subsequent calls within the same `&mut E`.
 
 r[record_store.pre_filter.rollback]
 `RecordStore<()>::push_raw` and `RecordStore<()>::push_fields` MUST accept `&mut E` (`E: CustomizeRecordStore`) as their last argument and return `Result<Option<u32>, DecodeError>`. After parsing and writing the record's slab data they MUST call `customize.keep_record(rec, &self)`; if it returns `false`, the record just pushed MUST be rolled back so that every slab (names/bases/cigar/qual/aux/records/extras) is byte-identical to its pre-push state. Rollback uses the just-pushed `SlimRecord`'s `*_off` offsets as pre-push slab lengths, since push is append-only. The returned `Option<u32>` is `Some(idx)` when kept, `None` when rejected — rejected records MUST NOT consume an index. Passing `&mut ()` (whose default `keep_record` is `true`) is the no-filter form. A proptest verifies that pushing a mixed accept/reject sequence produces byte-identical state to pushing only the accepted inputs with no filter.
-
-r[record_store.pre_filter.retain]
-`RecordStore<U>` MUST provide `retain<F: FnMut(&SlimRecord) -> bool>(&mut self, predicate: F)` that removes records where the predicate returns `false`. Unlike the push-time filter, `retain` runs post-push: slab data for dropped records is left in place as dead bytes until `clear()`. This is a general-purpose post-filter for callers that need to drop records after other mutations (e.g., `set_alignment`); the reader-level `fetch_into_customized` on all three formats (BAM, SAM, CRAM) filters at push time with zero waste and does not use `retain`.
 
 r[record_store.slim_record.field_getters]
 `SlimRecord` MUST provide getter methods `seq(&store) -> Result<&[Base]>`, `qual(&store) -> Result<&[BaseQuality]>`, `cigar(&store) -> Result<&[CigarOp]>`, and `aux(&store) -> Result<&[u8]>` that take `&RecordStore<U>` for any `U` and return slab-backed slices using the record's offset fields. They MUST validate offsets and return a typed `RecordAccessError` on overflow rather than panic. `extra(&store) -> Result<&U>` follows the same shape but reads the extras slab. These getters are the canonical way for `CustomizeRecordStore` impls to access a record's variable-length data without going through `RecordStore::record(idx)` first.
@@ -104,9 +98,6 @@ r[record_store.extras.access]
 
 r[record_store.extras.clear]
 `clear()` on `RecordStore<U>` MUST also clear the extras slab, retaining its allocated capacity.
-
-r[record_store.extras.strip]
-`RecordStore<U>` MUST provide `strip_extras(self) -> RecordStore<()>` that discards the extras slab while preserving all other slab capacity. This is used by `Readers::recover_store` to recycle a `RecordStore<U>` back to `RecordStore<()>`.
 
 r[record_store.extras.sort_dedup_generic]
 `sort_by_pos` and `dedup` MUST be available on `RecordStore<U>` for any `U`. Each `SlimRecord` carries an `extras_idx` field that indexes into the extras slab, so reordering or removing records does not invalidate the extras mapping. Dead extras entries from `dedup` are left in place (minor waste, same as dead slab data for names, cigar, etc.).

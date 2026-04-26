@@ -106,7 +106,7 @@ use tracing::instrument;
 pub struct Readers<E: CustomizeRecordStore = ()> {
     pub(crate) alignment: IndexedReader,
     pub(crate) fasta: IndexedFastaReader,
-    pub(crate) store: RecordStore<()>,
+    pub(crate) store: RecordStore<E::Extra>,
     pub(crate) fasta_buf: Vec<u8>,
     pub(crate) customize: E,
 }
@@ -279,10 +279,9 @@ impl<E: CustomizeRecordStore> Readers<E> {
         let bases = Base::from_ascii_vec(fasta_buf);
         let ref_seq = RefSeq::new(Rc::from(bases), start);
 
-        let base_store = std::mem::take(&mut self.store);
-        let typed_store = base_store.apply_customize(&mut self.customize);
+        let store = std::mem::take(&mut self.store);
 
-        let mut engine = PileupEngine::new(typed_store, start, end);
+        let mut engine = PileupEngine::new(store, start, end);
         engine.set_reference_seq(ref_seq);
         Ok(engine)
     }
@@ -293,9 +292,9 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// Call this after iteration is complete. The store retains its allocated
     /// capacity, avoiding ~39 MB of re-allocation on the next `pileup()` call.
     /// Accepts `PileupEngine<U>` for any `U` — extras are stripped during recovery.
-    pub fn recover_store<U>(&mut self, engine: &mut PileupEngine<U>) {
+    pub fn recover_store(&mut self, engine: &mut PileupEngine<E::Extra>) {
         if let Some(store) = engine.take_store() {
-            self.store = store.strip_extras();
+            self.store = store;
         }
     }
 

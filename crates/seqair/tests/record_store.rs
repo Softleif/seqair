@@ -90,7 +90,7 @@ fn clear_retains_capacity() {
 // r[verify record_store.capacity]
 #[test]
 fn with_capacity_hint_preallocates() {
-    let store = RecordStore::with_byte_hint(100_000);
+    let store = RecordStore::<()>::with_byte_hint(100_000);
     assert!(store.records_capacity() > 0);
     assert!(store.names_capacity() > 0);
     assert!(store.qual_capacity() > 0);

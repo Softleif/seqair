@@ -10,7 +10,11 @@ use super::{
     reader::CramError,
     varint,
 };
-use crate::bam::{BamHeader, cigar::CigarOp, record_store::RecordStore};
+use crate::bam::{
+    BamHeader,
+    cigar::CigarOp,
+    record_store::{CustomizeRecordStore, RecordStore},
+};
 use rustc_hash::FxHashMap;
 use seqair_types::{BamFlags, Base, Pos0, Pos1};
 use tracing::warn;
@@ -105,7 +109,7 @@ impl SliceHeader {
     clippy::too_many_arguments,
     reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
 )]
-pub fn decode_slice<E: crate::bam::record_store::CustomizeRecordStore>(
+pub fn decode_slice<E: CustomizeRecordStore>(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
@@ -115,7 +119,7 @@ pub fn decode_slice<E: crate::bam::record_store::CustomizeRecordStore>(
     tid: u32,
     query_start: Pos0,
     query_end: Pos0,
-    store: &mut RecordStore,
+    store: &mut RecordStore<E::Extra>,
     cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
@@ -281,7 +285,7 @@ pub fn decode_slice<E: crate::bam::record_store::CustomizeRecordStore>(
     clippy::too_many_arguments,
     reason = "CRAM record decoding requires compression header, slice header, context, and customize parameters"
 )]
-fn decode_record<E: crate::bam::record_store::CustomizeRecordStore>(
+fn decode_record<E: CustomizeRecordStore>(
     ch: &CompressionHeader,
     sh: &SliceHeader,
     is_multi_ref: bool,
@@ -293,7 +297,7 @@ fn decode_record<E: crate::bam::record_store::CustomizeRecordStore>(
     tid: u32,
     query_start: Pos0,
     query_end: Pos0,
-    store: &mut RecordStore,
+    store: &mut RecordStore<E::Extra>,
     cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
@@ -593,7 +597,7 @@ fn decode_record<E: crate::bam::record_store::CustomizeRecordStore>(
     clippy::arithmetic_side_effects,
     reason = "everything is based on infos.len()"
 )]
-fn resolve_mate_tlen(infos: &[SliceMateInfo], store: &mut RecordStore) {
+fn resolve_mate_tlen<U>(infos: &[SliceMateInfo], store: &mut RecordStore<U>) {
     let n = infos.len();
     // Track which records we've already resolved to avoid reprocessing.
     let mut resolved = vec![false; n];

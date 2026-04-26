@@ -87,7 +87,7 @@ impl<R: Read + Seek> IndexedReader<R> {
         tid: u32,
         start: Pos0,
         end: Pos0,
-        store: &mut RecordStore,
+        store: &mut RecordStore<E::Extra>,
         customize: &mut E,
     ) -> Result<FetchCounts, ReaderError> {
         match self {

@@ -7,13 +7,12 @@
 //! - **Qual slab**: raw Phred bytes, hot in pileup per-base quality lookup
 //! - **Aux slab**: auxiliary tag bytes in BAM binary format, rarely read in pileup
 
-use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
-
 use super::{
     cigar::{self, CigarOp},
     record::{self, DecodeError},
     seq,
 };
+use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
 
 /// Compact BAM record with offsets into the store's slabs.
 // r[impl record_store.push_raw+2]
@@ -232,7 +231,7 @@ pub struct RecordStore<U = ()> {
     extras: Vec<U>,
 }
 
-impl RecordStore {
+impl<U> RecordStore<U> {
     pub fn new() -> Self {
         Self {
             records: Vec::new(),
@@ -279,6 +278,24 @@ impl RecordStore {
             extras: Vec::new(),
         }
     }
+}
+
+impl<U> RecordStore<U> {
+    // r[impl record_store.pre_filter.rollback]
+    /// Undo the most recent `push_raw`/`push_fields` by truncating every slab
+    /// to the offsets recorded on the last `SlimRecord`. Only valid when the
+    /// last record is the freshly-pushed one (no subsequent `sort`/`dedup`).
+    fn rollback_last_push(&mut self) {
+        let rec = self.records.pop().expect("rollback_last_push called with empty records Vec");
+        self.extras
+            .pop()
+            .expect("push_raw/push_fields always append a matching () to extras before filter");
+        self.names.truncate(rec.name_off as usize);
+        self.bases.truncate(rec.bases_off as usize);
+        self.cigar.truncate(rec.cigar_off as usize);
+        self.qual.truncate(rec.qual_off as usize);
+        self.aux.truncate(rec.aux_off as usize);
+    }
 
     // r[impl record_store.extras.push_unit]
     // r[impl record_store.pre_filter.rollback]
@@ -294,7 +311,7 @@ impl RecordStore {
     /// `keep_record` sees both the freshly-parsed [`SlimRecord`] and the
     /// `&self` store, so it can read qname, aux, etc. of the pending record
     /// (those bytes live at the tail of the corresponding slabs until rollback).
-    pub fn push_raw<E: CustomizeRecordStore>(
+    pub fn push_raw<E: CustomizeRecordStore<Extra = U>>(
         &mut self,
         raw: &[u8],
         customize: &mut E,
@@ -399,7 +416,10 @@ impl RecordStore {
             aux_len: aux_slice.len() as u32,
             extras_idx: idx,
         });
-        self.extras.push(());
+        self.extras.push(customize.compute(
+            self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
+            self,
+        ));
 
         // r[impl record_store.pre_filter.rollback]
         if customize.keep_record(
@@ -411,22 +431,6 @@ impl RecordStore {
             self.rollback_last_push();
             Ok(None)
         }
-    }
-
-    // r[impl record_store.pre_filter.rollback]
-    /// Undo the most recent `push_raw`/`push_fields` by truncating every slab
-    /// to the offsets recorded on the last `SlimRecord`. Only valid when the
-    /// last record is the freshly-pushed one (no subsequent `sort`/`dedup`).
-    fn rollback_last_push(&mut self) {
-        let rec = self.records.pop().expect("rollback_last_push called with empty records Vec");
-        self.extras
-            .pop()
-            .expect("push_raw/push_fields always append a matching () to extras before filter");
-        self.names.truncate(rec.name_off as usize);
-        self.bases.truncate(rec.bases_off as usize);
-        self.cigar.truncate(rec.cigar_off as usize);
-        self.qual.truncate(rec.qual_off as usize);
-        self.aux.truncate(rec.aux_off as usize);
     }
 
     // r[impl unified.record_store_push]
@@ -446,7 +450,7 @@ impl RecordStore {
         clippy::too_many_arguments,
         reason = "all fields are needed for zero-copy push into the record store slabs"
     )]
-    pub fn push_fields<E: CustomizeRecordStore>(
+    pub fn push_fields<E: CustomizeRecordStore<Extra = U>>(
         &mut self,
         pos: Pos0,
         end_pos: Pos0,
@@ -539,7 +543,10 @@ impl RecordStore {
             aux_len: aux.len() as u32,
             extras_idx: idx,
         });
-        self.extras.push(());
+        self.extras.push(customize.compute(
+            self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
+            self,
+        ));
 
         // r[impl record_store.pre_filter.rollback]
         if customize.keep_record(
@@ -550,101 +557,6 @@ impl RecordStore {
         } else {
             self.rollback_last_push();
             Ok(None)
-        }
-    }
-
-    // r[impl record_store.customize.apply]
-    /// Compute per-record extras using a [`CustomizeRecordStore`] value,
-    /// consuming this `RecordStore<()>` and producing `RecordStore<E::Extra>`.
-    ///
-    /// All existing slabs are moved, not copied. `customize.compute` sees
-    /// each `&SlimRecord` and the whole `&RecordStore<()>`, so it can use
-    /// the `SlimRecord` getters (`rec.seq(store)`, `rec.aux(store)`, …) to
-    /// read any slab.
-    ///
-    /// # Example
-    ///
-    /// Attach per-record metadata and access it during pileup iteration:
-    ///
-    /// ```
-    /// use seqair::bam::{Pos0, RecordStore};
-    /// use seqair::bam::pileup::PileupEngine;
-    /// use seqair::bam::record_store::{CustomizeRecordStore, SlimRecord};
-    /// use seqair_types::{BamFlags, Base};
-    ///
-    /// #[derive(Debug, Clone, Default)]
-    /// struct ReadInfoBuilder;
-    ///
-    /// #[derive(Debug)]
-    /// struct ReadInfo { is_reverse: bool, qname_len: usize }
-    ///
-    /// impl CustomizeRecordStore for ReadInfoBuilder {
-    ///     type Extra = ReadInfo;
-    ///     fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> ReadInfo {
-    ///         ReadInfo {
-    ///             is_reverse: rec.flags.is_reverse(),
-    ///             qname_len: rec.qname(store).map(|n| n.len()).unwrap_or(0),
-    ///         }
-    ///     }
-    /// }
-    ///
-    /// let mut store = RecordStore::new();
-    /// # use seqair::bam::cigar::{CigarOp, CigarOpType};
-    /// # let cigar = [CigarOp::new(CigarOpType::Match, 4)];
-    /// # store.push_fields(
-    /// #     Pos0::new(100).unwrap(), Pos0::new(103).unwrap(),
-    /// #     BamFlags::from(0x10), 60, 4, 0, b"read1", &cigar,
-    /// #     &[Base::A, Base::C, Base::G, Base::T], &[30; 4], &[], 0, -1, 0, 0,
-    /// #     &mut (),
-    /// # ).unwrap();
-    ///
-    /// let store = store.apply_customize(&mut ReadInfoBuilder);
-    /// let mut engine = PileupEngine::new(
-    ///     store,
-    ///     Pos0::new(100).unwrap(),
-    ///     Pos0::new(103).unwrap(),
-    /// );
-    ///
-    /// while let Some(column) = engine.pileups() {
-    ///     for aln in column.alignments() {
-    ///         let info = aln.extra();
-    ///         assert!(info.is_reverse);
-    ///         assert_eq!(info.qname_len, 5);
-    ///     }
-    /// }
-    /// ```
-    pub fn apply_customize<E: CustomizeRecordStore>(
-        self,
-        customize: &mut E,
-    ) -> RecordStore<E::Extra> {
-        let mut extras: Vec<E::Extra> = Vec::with_capacity(self.records.len());
-        // Borrow self.records immutably and self immutably at the same time —
-        // both are shared borrows, so no aliasing conflict.
-        for rec in &self.records {
-            extras.push(customize.compute(rec, &self));
-        }
-        self.into_parts_with_extras(extras)
-    }
-
-    fn into_parts_with_extras<V>(self, extras: Vec<V>) -> RecordStore<V> {
-        let mut records = self.records;
-        // Reset extras_idx to sequential — the new extras Vec was built in
-        // current record order, so extras[i] corresponds to records[i].
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
-        )]
-        for (i, rec) in records.iter_mut().enumerate() {
-            rec.extras_idx = i as u32;
-        }
-        RecordStore {
-            records,
-            names: self.names,
-            bases: self.bases,
-            cigar: self.cigar,
-            qual: self.qual,
-            aux: self.aux,
-            extras,
         }
     }
 }
@@ -693,11 +605,11 @@ impl RecordStore {
 /// impl CustomizeRecordStore for QnameLen {
 ///     type Extra = usize;
 ///
-///     fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+///     fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<usize>) -> bool {
 ///         rec.mapq >= self.min_mapq
 ///     }
 ///
-///     fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> usize {
+///     fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<usize>) -> usize {
 ///         rec.qname(store).map(|n| n.len()).unwrap_or(0)
 ///     }
 /// }
@@ -718,7 +630,7 @@ pub trait CustomizeRecordStore: Clone {
     /// data via `rec.qname(store)`, `rec.aux(store)`, etc. The freshly-pushed
     /// record is at the tail of each slab, so all of its bytes are accessible.
     #[inline]
-    fn keep_record(&mut self, _rec: &SlimRecord, _store: &RecordStore<()>) -> bool {
+    fn keep_record(&mut self, _rec: &SlimRecord, _store: &RecordStore<Self::Extra>) -> bool {
         true
     }
 
@@ -727,7 +639,7 @@ pub trait CustomizeRecordStore: Clone {
     /// `rec.qual(store)`, `rec.aux(store)`, `rec.qname(store)`, and
     /// `rec.cigar(store)` getters on `SlimRecord` to read variable-length
     /// data without going through `RecordStore::record(idx)` first.
-    fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> Self::Extra;
+    fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<Self::Extra>) -> Self::Extra;
 }
 
 // r[impl record_store.customize.trait]
@@ -784,22 +696,6 @@ impl<U> RecordStore<U> {
                 }
             }
         });
-    }
-
-    // r[impl record_store.pre_filter.retain]
-    /// Drop records for which `predicate` returns `false`.
-    ///
-    /// Unlike [`push_raw`](Self::push_raw)'s per-record filter (which rolls
-    /// back slab writes at push time), `retain` runs after records are
-    /// already committed. Slab data for removed records is left in place —
-    /// dead bytes until [`clear`](Self::clear). Prefer the push-time filter
-    /// where possible; this method is for paths like CRAM where the decoder
-    /// can't be instrumented with a filter callback.
-    pub fn retain<F>(&mut self, mut predicate: F)
-    where
-        F: FnMut(&SlimRecord) -> bool,
-    {
-        self.records.retain(|rec| predicate(rec));
     }
 
     // --- Accessors ---
@@ -1008,21 +904,6 @@ impl<U> RecordStore<U> {
         self.extras.clear();
     }
 
-    // r[impl record_store.extras.strip]
-    /// Discard the extras slab, returning a `RecordStore<()>` that preserves
-    /// all other slab data and capacity. Used by `Readers::recover_store`.
-    pub fn strip_extras(self) -> RecordStore {
-        RecordStore {
-            records: self.records,
-            names: self.names,
-            bases: self.bases,
-            cigar: self.cigar,
-            qual: self.qual,
-            aux: self.aux,
-            extras: Vec::new(),
-        }
-    }
-
     pub fn records_capacity(&self) -> usize {
         self.records.capacity()
     }
@@ -1052,7 +933,7 @@ impl<U> RecordStore<U> {
     }
 }
 
-impl Default for RecordStore {
+impl<U> Default for RecordStore<U> {
     fn default() -> Self {
         Self::new()
     }

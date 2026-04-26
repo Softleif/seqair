@@ -74,13 +74,13 @@ struct ReadInfoBuilder;
 impl CustomizeRecordStore for ReadInfoBuilder {
     type Extra = ReadInfo;
 
-    fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+    fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<ReadInfo>) -> bool {
         // Drop unmapped and secondary alignments before they enter the store —
         // saves slab space and skips compute() for records the pileup ignores.
         !rec.flags.is_unmapped() && !rec.flags.is_secondary()
     }
 
-    fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> ReadInfo {
+    fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<ReadInfo>) -> ReadInfo {
         let read_group = rec.aux(store).ok().and_then(extract_rg);
         let aligned_fraction =
             if rec.seq_len > 0 { rec.matching_bases as f64 / rec.seq_len as f64 } else { 0.0 };
@@ -91,9 +91,8 @@ impl CustomizeRecordStore for ReadInfoBuilder {
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
-    let mut readers =
-        Readers::<ReadInfoBuilder>::open_customized(&args.input, &args.reference, ReadInfoBuilder)
-            .context("could not open BAM + FASTA")?;
+    let mut readers = Readers::open_customized(&args.input, &args.reference, ReadInfoBuilder)
+        .context("could not open BAM + FASTA")?;
 
     // Resolve region string against the header — fills in default start/end
     // when missing and validates the contig name.

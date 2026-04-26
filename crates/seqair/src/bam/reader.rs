@@ -9,7 +9,7 @@ use super::{
     header::{BamHeader, BamHeaderError},
     index::{AlignmentIndex, BaiError, BamIndex, Chunk},
     record::{DecodeError, compute_end_pos_from_raw},
-    record_store::RecordStore,
+    record_store::{CustomizeRecordStore, RecordStore},
     region_buf::{self, RegionBuf},
 };
 use seqair_types::{Pos0, SmolStr};
@@ -192,12 +192,12 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     /// records roll back their slab writes. The returned [`FetchCounts`]
     /// reports `fetched` (produced by the reader) vs `kept` (survived the
     /// filter).
-    pub fn fetch_into_customized<E: super::record_store::CustomizeRecordStore>(
+    pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
         tid: u32,
         start: Pos0,
         end: Pos0,
-        store: &mut RecordStore,
+        store: &mut RecordStore<E::Extra>,
         customize: &mut E,
     ) -> Result<crate::reader::FetchCounts, BamError> {
         store.clear();

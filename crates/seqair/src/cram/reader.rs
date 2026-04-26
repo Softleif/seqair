@@ -3,6 +3,7 @@
 //! Call [`IndexedCramReader::fork`] for cheap per-thread readers.
 
 use super::{
+    super::bam::record_store::CustomizeRecordStore,
     block,
     compression_header::CompressionHeader,
     container::ContainerHeader,
@@ -407,12 +408,12 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     /// truncated back to their pre-push lengths. The returned
     /// [`FetchCounts`](crate::reader::FetchCounts) reports `fetched`
     /// (produced by the reader) vs `kept` (survived the filter).
-    pub fn fetch_into_customized<E: super::super::bam::record_store::CustomizeRecordStore>(
+    pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
         tid: u32,
         start: Pos0,
         end: Pos0,
-        store: &mut RecordStore,
+        store: &mut RecordStore<E::Extra>,
         customize: &mut E,
     ) -> Result<crate::reader::FetchCounts, CramError> {
         store.clear();

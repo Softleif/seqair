@@ -168,9 +168,9 @@ impl FuzzReaders {
         self.fetch_records(tid, start, end, store)
     }
 
-    pub fn recover_store<U>(&mut self, engine: &mut PileupEngine<U>) {
+    pub fn recover_store(&mut self, engine: &mut PileupEngine) {
         if let Some(store) = engine.take_store() {
-            self.store = store.strip_extras();
+            self.store = store;
         }
     }
 }

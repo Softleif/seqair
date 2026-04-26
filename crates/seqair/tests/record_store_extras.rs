@@ -32,111 +32,30 @@ fn store_with_n_records(n: u32) -> RecordStore {
     store
 }
 
+fn store_with_n_records_customized<C: CustomizeRecordStore>(
+    n: u32,
+    mut c: C,
+) -> RecordStore<C::Extra> {
+    let mut store = RecordStore::new();
+    for i in 0..n {
+        let pos = 100 + i as i32;
+        store.push_raw(&make_record(0, pos, 99, 60, 10), &mut c).unwrap();
+    }
+    store
+}
+
 /// Customize value used in the position-extracting tests below.
 #[derive(Clone, Default)]
 struct ExtractPos;
+
 impl CustomizeRecordStore for ExtractPos {
     type Extra = i32;
-    fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> i32 {
+    fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<i32>) -> i32 {
         rec.pos.as_i32()
     }
 }
 
 // ---- RecordStore extras ----
-
-// r[verify record_store.customize.apply]
-// r[verify record_store.extras.access]
-#[test]
-fn apply_customize_computes_per_record_data() {
-    let store = store_with_n_records(5);
-
-    let store = store.apply_customize(&mut ExtractPos);
-
-    assert_eq!(store.len(), 5);
-    for i in 0..5u32 {
-        assert_eq!(*store.extra(i), 100 + i as i32);
-    }
-}
-
-// r[verify record_store.customize.apply]
-#[test]
-fn apply_customize_preserves_slab_data() {
-    let store = store_with_n_records(3);
-
-    // Capture original data before transformation.
-    let original_positions: Vec<i32> = (0..3u32).map(|i| store.record(i).pos.as_i32()).collect();
-    let original_mapqs: Vec<u8> = (0..3u32).map(|i| store.record(i).mapq).collect();
-
-    #[derive(Clone, Default)]
-    struct ExtractMapqScaled;
-    impl CustomizeRecordStore for ExtractMapqScaled {
-        type Extra = u16;
-        fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> u16 {
-            rec.mapq as u16 * 10
-        }
-    }
-
-    let store = store.apply_customize(&mut ExtractMapqScaled);
-
-    // Slab data must be moved, not copied — verify it's still correct.
-    for i in 0..3u32 {
-        assert_eq!(store.record(i).pos.as_i32(), original_positions[i as usize]);
-        assert_eq!(store.record(i).mapq, original_mapqs[i as usize]);
-    }
-    // Extras computed correctly.
-    assert_eq!(*store.extra(0), 600);
-    assert_eq!(*store.extra(1), 600);
-    assert_eq!(*store.extra(2), 600);
-}
-
-// r[verify record_store.extras.access]
-#[test]
-fn extra_mut_allows_modification() {
-    let store = store_with_n_records(3);
-
-    #[derive(Clone, Default)]
-    struct ZeroExtra;
-    impl CustomizeRecordStore for ZeroExtra {
-        type Extra = u32;
-        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> u32 {
-            0
-        }
-    }
-
-    let mut store = store.apply_customize(&mut ZeroExtra);
-
-    *store.extra_mut(1) = 42;
-
-    assert_eq!(*store.extra(0), 0);
-    assert_eq!(*store.extra(1), 42);
-    assert_eq!(*store.extra(2), 0);
-}
-
-// r[verify record_store.customize.apply]
-// r[verify record_store.slim_record.field_getters]
-#[test]
-fn compute_can_read_aux_via_slim_record_getter() {
-    // Build a record with aux data and verify the customizer can access it
-    // via `rec.aux(store)`.
-    let aux = b"NMCd"; // NM:C:100 (tag NM, type C=u8, value 100)
-    let raw = helpers::make_record_with_aux(0, 100, 99, 60, 10, aux);
-
-    let mut store = RecordStore::new();
-    store.push_raw(&raw, &mut ()).unwrap();
-
-    #[derive(Clone, Default)]
-    struct AuxLen;
-    impl CustomizeRecordStore for AuxLen {
-        type Extra = usize;
-        fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> usize {
-            rec.aux(store).map(|a| a.len()).unwrap_or(0)
-        }
-    }
-
-    let store = store.apply_customize(&mut AuxLen);
-
-    assert_eq!(*store.extra(0), aux.len());
-}
 
 // r[verify record_store.slim_record.field_getters]
 #[test]
@@ -169,8 +88,7 @@ fn slim_record_getters_return_slab_data() {
 // r[verify record_store.extras.clear]
 #[test]
 fn clear_clears_extras_and_retains_capacity() {
-    let store = store_with_n_records(50);
-    let mut store = store.apply_customize(&mut ExtractPos);
+    let mut store = store_with_n_records_customized(50, ExtractPos);
 
     assert_eq!(store.len(), 50);
     let records_cap = store.records_capacity();
@@ -182,27 +100,6 @@ fn clear_clears_extras_and_retains_capacity() {
     assert_eq!(store.len(), 0);
     assert!(store.records_capacity() >= records_cap);
     assert!(store.extras_capacity() >= extras_cap);
-}
-
-// r[verify record_store.extras.strip]
-#[test]
-fn strip_extras_preserves_slab_capacity() {
-    let store = store_with_n_records(50);
-    let store = store.apply_customize(&mut ExtractPos);
-
-    let records_cap = store.records_capacity();
-    let names_cap = store.names_capacity();
-    let qual_cap = store.qual_capacity();
-
-    let store = store.strip_extras();
-
-    // Slab capacities preserved.
-    assert!(store.records_capacity() >= records_cap);
-    assert!(store.names_capacity() >= names_cap);
-    assert!(store.qual_capacity() >= qual_cap);
-
-    // Records still accessible (they were moved, not cleared).
-    assert_eq!(store.len(), 50);
 }
 
 // r[verify record_store.extras.generic_param]
@@ -235,12 +132,9 @@ fn sort_and_dedup_work_on_unit_store() {
 fn sort_by_pos_preserves_extras_mapping() {
     let mut store = RecordStore::new();
     // Push records out of order: pos 300, 100, 200
-    store.push_raw(&make_record(0, 300, 99, 60, 10), &mut ()).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
-    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut ()).unwrap();
-
-    // Compute extras BEFORE sorting — extras carry the original position.
-    let mut store = store.apply_customize(&mut ExtractPos);
+    store.push_raw(&make_record(0, 300, 99, 60, 10), &mut ExtractPos).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ExtractPos).unwrap();
+    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut ExtractPos).unwrap();
 
     // Now sort — records reorder, but extras_idx preserves the mapping.
     store.sort_by_pos();
@@ -259,13 +153,6 @@ fn sort_by_pos_preserves_extras_mapping() {
 // r[verify record_store.extras.sort_dedup_generic]
 #[test]
 fn dedup_on_typed_store_preserves_extras() {
-    let mut store = RecordStore::new();
-    // Push duplicate records at same position with same flags/name.
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap(); // dup
-    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut ()).unwrap();
-    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut ()).unwrap(); // dup
-
     /// Tag each record with the index it had at compute time.
     #[derive(Clone, Default)]
     struct RecordIdx {
@@ -273,14 +160,20 @@ fn dedup_on_typed_store_preserves_extras() {
     }
     impl CustomizeRecordStore for RecordIdx {
         type Extra = u32;
-        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> u32 {
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<u32>) -> u32 {
             let i = self.next;
             self.next = i.wrapping_add(1);
             i
         }
     }
 
-    let mut store = store.apply_customize(&mut RecordIdx::default());
+    let mut store = RecordStore::new();
+    let mut c = RecordIdx::default();
+    // Push duplicate records at same position with same flags/name.
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut c).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut c).unwrap(); // dup
+    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut c).unwrap();
+    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut c).unwrap(); // dup
 
     store.sort_by_pos();
     store.dedup();
@@ -300,11 +193,8 @@ fn dedup_on_typed_store_preserves_extras() {
 #[test]
 fn set_alignment_then_sort_on_typed_store() {
     let mut store = RecordStore::new();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
-    store.push_raw(&make_record(0, 50, 99, 60, 10), &mut ()).unwrap();
-
-    // Compute extras with original positions.
-    let mut store = store.apply_customize(&mut ExtractPos);
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ExtractPos).unwrap();
+    store.push_raw(&make_record(0, 50, 99, 60, 10), &mut ExtractPos).unwrap();
 
     // Sort — now record at pos=50 comes first.
     store.sort_by_pos();
@@ -319,18 +209,17 @@ fn set_alignment_then_sort_on_typed_store() {
 // r[verify pileup.extras.constructor_accepts_any_u]
 #[test]
 fn engine_accepts_typed_store() {
-    let store = store_with_n_records(5);
+    let store = store_with_n_records_customized(5, ExtractMapq);
 
     #[derive(Clone, Default)]
     struct ExtractMapq;
     impl CustomizeRecordStore for ExtractMapq {
         type Extra = u8;
-        fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> u8 {
+        fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<u8>) -> u8 {
             rec.mapq
         }
     }
 
-    let store = store.apply_customize(&mut ExtractMapq);
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
     engine.set_max_depth(10);
 
@@ -366,8 +255,7 @@ fn pileups_yields_same_columns_on_unit_and_typed_store() {
 // r[verify pileup.alignment_view]
 #[test]
 fn pileups_column_exposes_store_access_via_alignment_view() {
-    let store = store_with_n_records(3);
-    let store = store.apply_customize(&mut ExtractPos);
+    let store = store_with_n_records_customized(3, ExtractPos);
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
 
     let mut saw_extras = false;
@@ -386,18 +274,17 @@ fn pileups_column_exposes_store_access_via_alignment_view() {
 #[test]
 fn recover_store_works_after_apply_customize() {
     // Build a store manually, transform to extras, feed into engine, then strip.
-    let store = store_with_n_records(10);
+    let store = store_with_n_records_customized(10, ExtractMapqU32);
 
     #[derive(Clone, Default)]
     struct ExtractMapqU32;
     impl CustomizeRecordStore for ExtractMapqU32 {
         type Extra = u32;
-        fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> u32 {
+        fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<u32>) -> u32 {
             rec.mapq as u32
         }
     }
 
-    let store = store.apply_customize(&mut ExtractMapqU32);
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
 
     // Consume all columns.
@@ -405,7 +292,6 @@ fn recover_store_works_after_apply_customize() {
 
     // take_store + strip_extras (the same operation recover_store does internally).
     let store = engine.take_store().expect("store should be available");
-    let store: RecordStore = store.strip_extras();
 
     // The recovered store should be empty (cleared by take_store) but have capacity.
     assert_eq!(store.len(), 0);
@@ -424,11 +310,8 @@ proptest! {
     ) {
         let mut store = RecordStore::new();
         for &pos in &positions {
-            store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ()).unwrap();
+            store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ExtractPos).unwrap();
         }
-
-        // Tag each record with its original position before sorting.
-        let mut store = store.apply_customize(&mut ExtractPos);
 
         store.sort_by_pos();
 
@@ -457,11 +340,8 @@ proptest! {
         let mut store = RecordStore::new();
         for &pos in &positions {
             // Same flags/mapq/seq_len so duplicates at same pos are detected.
-            store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ()).unwrap();
+            store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ExtractPos).unwrap();
         }
-
-        // Compute extras (original position) before sort+dedup.
-        let mut store = store.apply_customize(&mut ExtractPos);
 
         store.sort_by_pos();
         store.dedup();
@@ -484,29 +364,6 @@ proptest! {
             }
         }
     }
-
-    // r[verify record_store.customize.apply]
-    #[test]
-    fn proptest_apply_customize_after_sort_produces_correct_mapping(
-        positions in proptest::collection::vec(0i32..500, 2..30),
-    ) {
-        let mut store = RecordStore::new();
-        for &pos in &positions {
-            store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ()).unwrap();
-        }
-
-        // Sort first (on unit store), then compute extras.
-        store.sort_by_pos();
-
-        let store = store.apply_customize(&mut ExtractPos);
-
-        // After apply_customize on a sorted store, extras_idx is reset to sequential.
-        for i in 0..store.len() as u32 {
-            let pos = store.record(i).pos.as_i32();
-            let extra = *store.extra(i);
-            prop_assert_eq!(pos, extra, "apply_customize mapping wrong at record {}", i);
-        }
-    }
 }
 
 // r[verify pileup.extras.constructor_accepts_any_u]
@@ -515,9 +372,6 @@ fn pileup_with_sorted_typed_store() {
     // End-to-end: load out of order, compute extras (original push index),
     // sort, pileup.
     let mut store = RecordStore::new();
-    store.push_raw(&make_record(0, 105, 99, 60, 10), &mut ()).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
-    store.push_raw(&make_record(0, 102, 99, 60, 10), &mut ()).unwrap();
 
     /// Counter customizer so each record's extra is its push index.
     #[derive(Clone, Default)]
@@ -526,14 +380,17 @@ fn pileup_with_sorted_typed_store() {
     }
     impl CustomizeRecordStore for PushIdx {
         type Extra = u32;
-        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> u32 {
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<u32>) -> u32 {
             let i = self.next;
             self.next = i.wrapping_add(1);
             i
         }
     }
 
-    let mut store = store.apply_customize(&mut PushIdx::default());
+    let mut c = PushIdx::default();
+    store.push_raw(&make_record(0, 105, 99, 60, 10), &mut c).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut c).unwrap();
+    store.push_raw(&make_record(0, 102, 99, 60, 10), &mut c).unwrap();
 
     // Sort — records reorder, extras follow via extras_idx.
     store.sort_by_pos();

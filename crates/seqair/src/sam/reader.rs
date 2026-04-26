@@ -18,6 +18,8 @@ use std::{
 };
 use tracing::instrument;
 
+use super::super::bam::record_store::CustomizeRecordStore;
+
 /// Format a byte slice for error display: printable ASCII shown as-is, other bytes as `\xNN`.
 /// Output is capped to `max_len` bytes of input, with "..." appended if truncated.
 fn format_aux_field(bytes: &[u8], max_len: usize) -> String {
@@ -334,12 +336,12 @@ impl<R: Read + Seek> IndexedSamReader<R> {
     }
 
     // r[impl unified.fetch_into_customized]
-    pub fn fetch_into_customized<E: super::super::bam::record_store::CustomizeRecordStore>(
+    pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
         tid: u32,
         start: Pos0,
         end: Pos0,
-        store: &mut RecordStore,
+        store: &mut RecordStore<E::Extra>,
         customize: &mut E,
     ) -> Result<crate::reader::FetchCounts, SamError> {
         store.clear();
@@ -455,13 +457,13 @@ impl<R: Read + Seek> IndexedSamReader<R> {
     clippy::too_many_arguments,
     reason = "SAM line parsing needs header, customize, region, store, and per-record output parameters"
 )]
-fn parse_sam_line<E: super::super::bam::record_store::CustomizeRecordStore>(
+fn parse_sam_line<E: CustomizeRecordStore>(
     line: &[u8],
     header: &BamHeader,
     tid_filter: i32,
     start: i64,
     end: i64,
-    store: &mut RecordStore,
+    store: &mut RecordStore<E::Extra>,
     cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
