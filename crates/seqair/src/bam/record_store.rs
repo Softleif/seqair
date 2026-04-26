@@ -543,16 +543,15 @@ impl<U> RecordStore<U> {
             aux_len: aux.len() as u32,
             extras_idx: idx,
         });
-        self.extras.push(customize.compute(
-            self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
-            self,
-        ));
+
+        let record =
+            self.records.last().expect("just pushed a SlimRecord above; records.last() is Some");
+
+        // r[impl record_store.extras.generic_param]
+        self.extras.push(customize.compute(record, self));
 
         // r[impl record_store.pre_filter.rollback]
-        if customize.keep_record(
-            self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
-            self,
-        ) {
+        if customize.keep_record(record, self) {
             Ok(Some(idx))
         } else {
             self.rollback_last_push();
@@ -619,14 +618,14 @@ pub trait CustomizeRecordStore: Clone {
     type Extra;
 
     // r[impl record_store.customize.trait]
-    /// Pre-filter: called on each freshly-pushed record BEFORE extras are
-    /// computed. Returning `false` rolls back the slab writes for this
-    /// record — it is as if the record was never fetched.
+    /// Pre-filter: called on each freshly-pushed record. Returning `false`
+    /// rolls back the slab writes for this record — it is as if the record was
+    /// never fetched.
     ///
     /// Default: keep every record. Override to filter at push time.
     ///
     /// The filter sees the pushed [`SlimRecord`] (with its `pos`, `flags`,
-    /// `mapq`, etc.) and the `&RecordStore<()>` for reading slab-backed
+    /// `mapq`, etc.) and the `&RecordStore` for reading slab-backed
     /// data via `rec.qname(store)`, `rec.aux(store)`, etc. The freshly-pushed
     /// record is at the tail of each slab, so all of its bytes are accessible.
     #[inline]
