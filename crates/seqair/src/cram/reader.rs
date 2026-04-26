@@ -567,8 +567,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &mut self.aux_buf,
                     customize,
                 )?;
-                fetched_total = fetched_total.wrapping_add(slice_fetched);
-                kept_total = kept_total.wrapping_add(slice_kept);
+                fetched_total = fetched_total.saturating_add(slice_fetched);
+                kept_total = kept_total.saturating_add(slice_kept);
             }
         }
 

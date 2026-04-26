@@ -218,8 +218,10 @@ pub enum Slab {
 ///   does not pollute the cache when scanning qual)
 /// - `extras`: per-record user data of type `U` (default `()`, zero-cost)
 ///
-/// Use [`apply_customize`](RecordStore::apply_customize) to compute per-record
-/// data after loading via a [`CustomizeRecordStore`] value.
+/// Use [`CustomizeRecordStore`] to filter and compute per-record extras —
+/// `compute` runs inline during [`push_raw`](RecordStore::push_raw) /
+/// [`push_fields`](RecordStore::push_fields), populating the extras slab as
+/// records arrive.
 // r[impl record_store.extras.generic_param]
 pub struct RecordStore<U = ()> {
     records: Vec<SlimRecord>,
@@ -275,7 +277,7 @@ impl<U> RecordStore<U> {
             cigar: Vec::with_capacity(cigar_est),
             qual: Vec::with_capacity(qual_est),
             aux: Vec::with_capacity(aux_est),
-            extras: Vec::new(),
+            extras: Vec::with_capacity(record_count_est),
         }
     }
 }
@@ -561,8 +563,8 @@ impl<U> RecordStore<U> {
 }
 
 // r[impl record_store.customize.trait]
-/// Customize how records flow into a [`RecordStore`]: filter at push time
-/// and compute per-record extras at apply time.
+/// Customize how records flow into a [`RecordStore`]: filter and compute
+/// per-record extras, both inline at push time.
 ///
 /// Used by [`Readers`](crate::reader::Readers) and the lower-level
 /// `push_raw`/`push_fields`/`fetch_into_customized` APIs. Implementors are
@@ -571,18 +573,18 @@ impl<U> RecordStore<U> {
 ///
 /// # Ordering and state
 ///
-/// The two methods run in two distinct passes:
+/// Both methods run inline during push, for every record:
 ///
-/// 1. **`keep_record`** is called once per record at push time, in the order
-///    records arrive from the underlying reader (BAM/SAM/CRAM coordinate
-///    order for sorted inputs). State changes made in `keep_record` are
-///    visible to subsequent `keep_record` calls and to `compute`.
-/// 2. **`compute`** is called once per *kept* record by
-///    [`RecordStore::apply_customize`], after the entire fetch has finished
-///    and the store may have been sorted/deduped. Records arrive in
-///    `RecordStore` order at that point. `compute` MUST NOT assume it runs
-///    immediately after `keep_record` for the same record — they are
-///    separate passes.
+/// 1. **`compute`** runs first, producing the extra value for the
+///    freshly-pushed record. The `&RecordStore<Self::Extra>` argument
+///    includes extras from previously-pushed records.
+/// 2. **`keep_record`** runs next. If it returns `false`, all slab writes
+///    for this record (including the just-computed extra) are rolled back
+///    with zero waste — it is as if the record was never pushed.
+///
+/// Because `compute` runs before `keep_record`, heavy computation on
+/// records likely to be dropped wastes work. Make `compute` cheap, or
+/// include the necessary cheap checks in both methods.
 ///
 /// The same `&mut E` instance is reused across regions (`Readers` holds one
 /// customize value for its whole lifetime). Implementors that want
@@ -633,8 +635,9 @@ pub trait CustomizeRecordStore: Clone {
         true
     }
 
-    /// Compute the extra for `rec`. Called once per kept record by
-    /// [`RecordStore::apply_customize`]. Use the `rec.seq(store)`,
+    /// Compute the extra for `rec`. Called inline at push time for every
+    /// record (before [`keep_record`](Self::keep_record)), so the value is
+    /// wasted if the record is later rejected. Use the `rec.seq(store)`,
     /// `rec.qual(store)`, `rec.aux(store)`, `rec.qname(store)`, and
     /// `rec.cigar(store)` getters on `SlimRecord` to read variable-length
     /// data without going through `RecordStore::record(idx)` first.
@@ -644,8 +647,8 @@ pub trait CustomizeRecordStore: Clone {
 // r[impl record_store.customize.trait]
 /// Blanket no-op implementation for the default `()` case.
 ///
-/// `RecordStore<()>` does not need extras; `Readers<()>` uses this to skip
-/// the `apply_customize` pass entirely when there is nothing to compute.
+/// `RecordStore<()>` does not need extras; `Readers<()>` uses this so
+/// `compute` is a zero-cost no-op at push time.
 /// The default `keep_record` (always `true`) means `Readers<()>` never
 /// filters either, so `&mut ()` is the no-op customizer to pass into
 /// `push_raw`/`push_fields`/`fetch_into_customized`.

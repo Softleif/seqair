@@ -174,11 +174,13 @@ impl CigarOp {
             let n_bytes = n_ops.checked_mul(4).expect("cigar byte length overflow");
             let new_len = dst.len().checked_add(n_ops).expect("cigar slab len overflow");
             dst.reserve(n_ops);
-            // SAFETY: CigarOp is repr(transparent) over u32 (4 bytes). On LE the
-            // in-memory u32 byte order matches BAM's LE on-disk order, so a
-            // bytewise memcpy of n_ops * 4 source bytes produces n_ops valid
-            // CigarOp values. dst has at least n_ops uninit slots after reserve();
-            // we copy n_bytes into it, then bump len.
+            // SAFETY: CigarOp is repr(transparent) over u32 (4 bytes) with a
+            // compile-time size guard on line 107. Every bit pattern is a valid
+            // CigarOp (op codes 0..=15 all decodable, length field is unconstrained
+            // u28). On LE the in-memory u32 byte order matches BAM's LE on-disk
+            // order, so a bytewise memcpy of n_ops * 4 source bytes produces n_ops
+            // valid CigarOp values. dst has at least n_ops uninit slots after
+            // reserve(); we copy n_bytes into it, then bump len.
             unsafe {
                 let dst_ptr = dst.as_mut_ptr().add(dst.len()).cast::<u8>();
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst_ptr, n_bytes);
