@@ -37,7 +37,7 @@ fuzz_target!(|input: PileupInput| {
 
     // Push up to max_records into the store
     for raw in input.records.iter().take(max_records) {
-        let _ = store.push_raw(raw);
+        let _ = store.push_raw(raw, &mut ());
     }
 
     if store.is_empty() {
@@ -49,7 +49,7 @@ fuzz_target!(|input: PileupInput| {
     engine.set_max_depth(100);
 
     let mut columns = 0u32;
-    for col in &mut engine {
+    while let Some(col) = engine.pileups() {
         // Exercise all accessors on the column
         let _pos = col.pos();
         let _depth = col.depth();
@@ -67,7 +67,6 @@ fuzz_target!(|input: PileupInput| {
             let _ilen = aln.insert_len();
             let _dlen = aln.del_len();
         }
-
         columns = columns.saturating_add(1);
         if columns > max_region_len {
             break;

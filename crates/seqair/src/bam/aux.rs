@@ -107,16 +107,39 @@ pub fn find_tag<'a>(aux: &'a [u8], tag: [u8; 2]) -> Option<AuxValue<'a>> {
 }
 
 // r[impl bam.record.aux_get_error]
+/// A 2-byte BAM auxiliary tag name with human-readable [`Display`].
+///
+/// [`Display`]: std::fmt::Display
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuxTag(pub [u8; 2]);
+
+impl std::fmt::Display for AuxTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.iter().all(u8::is_ascii_graphic) {
+            write!(f, "{:?}", std::str::from_utf8(&self.0).unwrap_or("??"))
+        } else {
+            write!(f, "[{:02x}, {:02x}]", self.0[0], self.0[1])
+        }
+    }
+}
+
+impl From<[u8; 2]> for AuxTag {
+    fn from(tag: [u8; 2]) -> Self {
+        Self(tag)
+    }
+}
+
+// r[impl bam.record.aux_get_error]
 /// Error from [`Aux::get`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum GetAuxError {
     /// The requested tag is not present in the auxiliary data.
-    #[error("tag not found: {tag:?}")]
-    TagNotFound { tag: [u8; 2] },
+    #[error("tag not found: {tag}")]
+    TagNotFound { tag: AuxTag },
     /// Tag name must be exactly 2 bytes (BAM format requirement).
-    #[error("invalid tag name length: expected 2, got {len}")]
-    InvalidTagName { len: usize },
+    #[error("invalid tag name length: expected 2, got {len} (bytes: {actual:02x?})")]
+    InvalidTagName { len: usize, actual: Vec<u8> },
     /// The tag exists but has a different BAM type than requested.
     #[error("type mismatch: expected {expected}, got {actual}")]
     TypeMismatch { expected: &'static str, actual: &'static str },
@@ -178,6 +201,9 @@ impl<'a> FromAuxValue<'a> for u64 {
             AuxValue::U8(v) => Ok(u64::from(v)),
             AuxValue::U16(v) => Ok(u64::from(v)),
             AuxValue::U32(v) => Ok(u64::from(v)),
+            AuxValue::I8(v) if v >= 0 => Ok(v as u64),
+            AuxValue::I16(v) if v >= 0 => Ok(v as u64),
+            AuxValue::I32(v) if v >= 0 => Ok(v as u64),
             ref other => Err(GetAuxError::TypeMismatch {
                 expected: "unsigned integer",
                 actual: other.type_name(),
@@ -192,6 +218,9 @@ impl<'a> FromAuxValue<'a> for u32 {
             AuxValue::U8(v) => Ok(u32::from(v)),
             AuxValue::U16(v) => Ok(u32::from(v)),
             AuxValue::U32(v) => Ok(v),
+            AuxValue::I8(v) if v >= 0 => Ok(v as u32),
+            AuxValue::I16(v) if v >= 0 => Ok(v as u32),
+            AuxValue::I32(v) if v >= 0 => Ok(v as u32),
             ref other => Err(GetAuxError::TypeMismatch {
                 expected: "unsigned integer",
                 actual: other.type_name(),
@@ -205,6 +234,7 @@ impl<'a> FromAuxValue<'a> for u16 {
         match value {
             AuxValue::U8(v) => Ok(u16::from(v)),
             AuxValue::U16(v) => Ok(v),
+            AuxValue::I8(v) if v >= 0 => Ok(v as u16),
             ref other => Err(GetAuxError::TypeMismatch {
                 expected: "unsigned integer",
                 actual: other.type_name(),
@@ -217,6 +247,7 @@ impl<'a> FromAuxValue<'a> for u8 {
     fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError> {
         match value {
             AuxValue::U8(v) => Ok(v),
+            AuxValue::I8(v) if v >= 0 => Ok(v as u8),
             ref other => {
                 Err(GetAuxError::TypeMismatch { expected: "U8", actual: other.type_name() })
             }
@@ -262,9 +293,9 @@ impl<'a> FromAuxValue<'a> for char {
 impl<'a> FromAuxValue<'a> for &'a [u8] {
     fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError> {
         match value {
-            AuxValue::String(s) => Ok(s),
+            AuxValue::String(s) | AuxValue::Hex(s) => Ok(s),
             ref other => {
-                Err(GetAuxError::TypeMismatch { expected: "Z", actual: other.type_name() })
+                Err(GetAuxError::TypeMismatch { expected: "Z or H", actual: other.type_name() })
             }
         }
     }
@@ -349,14 +380,15 @@ impl<'a> Aux<'a> {
     /// - [`GetAuxError::TagNotFound`] if the tag is not present.
     /// - [`GetAuxError::InvalidTagName`] if the tag name is not exactly 2 bytes.
     /// - [`GetAuxError::TypeMismatch`] if the tag has a different BAM type.
-    /// - [`GetAuxError::InvalidUtf8`] if a `Z`-type string is not valid UTF-8.
+    #[must_use = "get() returns a fallible Result — ignoring it silently drops errors"]
     pub fn get<T: FromAuxValue<'a>>(&self, tag: impl AsRef<[u8]>) -> Result<T, GetAuxError> {
         let tag_bytes = tag.as_ref();
-        let tag_arr: [u8; 2] = tag_bytes
-            .try_into()
-            .map_err(|_| GetAuxError::InvalidTagName { len: tag_bytes.len() })?;
-        let value =
-            find_tag(self.data, tag_arr).ok_or(GetAuxError::TagNotFound { tag: tag_arr })?;
+        let tag_arr: [u8; 2] = tag_bytes.try_into().map_err(|_| GetAuxError::InvalidTagName {
+            len: tag_bytes.len(),
+            actual: tag_bytes.to_vec(),
+        })?;
+        let value = find_tag(self.data, tag_arr)
+            .ok_or(GetAuxError::TagNotFound { tag: AuxTag(tag_arr) })?;
         T::from_aux_value(value)
     }
 }
@@ -778,10 +810,14 @@ mod prop_tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Generate a valid 2-byte ASCII tag name.
+    /// Generate a valid 2-byte tag name from [A-Za-z0-9].
     fn tag_name() -> impl Strategy<Value = [u8; 2]> {
-        (prop::char::range('A', 'Z'), prop::char::range('A', 'Z'))
-            .prop_map(|(a, b)| [a as u8, b as u8])
+        let ch = proptest::strategy::Union::new(vec![
+            proptest::char::range('A', 'Z'),
+            proptest::char::range('a', 'z'),
+            proptest::char::range('0', '9'),
+        ]);
+        (ch.clone(), ch).prop_map(|(a, b)| [a as u8, b as u8])
     }
 
     /// Encode an i64 into the smallest BAM integer type and return the raw type+value bytes.
@@ -828,103 +864,158 @@ mod prop_tests {
     }
 
     proptest! {
-        // r[verify bam.record.aux_get]
-        #[test]
-        fn aux_get_roundtrips_ints(
-            tag in tag_name(),
-            value in i32::MIN as i64..=u32::MAX as i64,
-        ) {
-            let raw = encode_int(value);
-            let aux_bytes = build_aux(&[(tag, &raw)]);
-            let aux = Aux::new(&aux_bytes);
-            let got: i64 = aux.get(&tag).unwrap();
-            assert_eq!(got, value);
-        }
+            // r[verify bam.record.aux_get]
+            #[test]
+            fn aux_get_roundtrips_ints(
+                tag in tag_name(),
+                value in i32::MIN as i64..=u32::MAX as i64,
+            ) {
+                let raw = encode_int(value);
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let got: i64 = aux.get(&tag).unwrap();
+                assert_eq!(got, value);
+            }
 
-        // r[verify bam.record.aux_widening]
-        #[test]
-        fn aux_get_widens_u8_to_u64(
-            tag in tag_name(),
-            value in prop::num::u8::ANY,
-        ) {
-            let raw = [b'C', value];
-            let aux_bytes = build_aux(&[(tag, &raw)]);
-            let aux = Aux::new(&aux_bytes);
-            let got: u64 = aux.get(&tag).unwrap();
-            assert_eq!(got, u64::from(value));
-        }
+            // r[verify bam.record.aux_widening]
+            #[test]
+            fn aux_get_widens_u8_to_u64(
+                tag in tag_name(),
+                value in prop::num::u8::ANY,
+            ) {
+                let raw = [b'C', value];
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let got: u64 = aux.get(&tag).unwrap();
+                assert_eq!(got, u64::from(value));
+            }
 
-        #[test]
-        fn aux_get_widens_u16_to_u64(
-            tag in tag_name(),
-            value in prop::num::u16::ANY,
-        ) {
-            let mut raw = vec![b'S'];
-            raw.extend_from_slice(&value.to_le_bytes());
-            let aux_bytes = build_aux(&[(tag, &raw)]);
-            let aux = Aux::new(&aux_bytes);
-            let got: u64 = aux.get(&tag).unwrap();
-            assert_eq!(got, u64::from(value));
-        }
+            #[test]
+            fn aux_get_widens_u16_to_u64(
+                tag in tag_name(),
+                value in prop::num::u16::ANY,
+            ) {
+                let mut raw = vec![b'S'];
+                raw.extend_from_slice(&value.to_le_bytes());
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let got: u64 = aux.get(&tag).unwrap();
+                assert_eq!(got, u64::from(value));
+            }
 
-        // r[verify bam.record.aux_from_aux_value]
-        #[test]
-        fn aux_get_string_roundtrip(
-            tag in tag_name(),
-            value in "[a-zA-Z0-9]{1,20}",
-        ) {
-            let mut raw = vec![b'Z'];
-            raw.extend_from_slice(value.as_bytes());
-            raw.push(0);
-            let aux_bytes = build_aux(&[(tag, &raw)]);
-            let aux = Aux::new(&aux_bytes);
+            // r[verify bam.record.aux_from_aux_value]
+            #[test]
+            fn aux_get_string_roundtrip(
+                tag in tag_name(),
+                value in "[a-zA-Z0-9]{1,20}",
+            ) {
+                let mut raw = vec![b'Z'];
+                raw.extend_from_slice(value.as_bytes());
+                raw.push(0);
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
 
-            let got: &str = aux.get(&tag).unwrap();
-            assert_eq!(got, value);
+                let got: &str = aux.get(&tag).unwrap();
+                assert_eq!(got, value);
 
-            let owned: String = aux.get(&tag).unwrap();
-            assert_eq!(owned, value);
+                let owned: String = aux.get(&tag).unwrap();
+                assert_eq!(owned, value);
 
-            let smol: SmolStr = aux.get(&tag).unwrap();
-            assert_eq!(smol, value);
-        }
+                let smol: SmolStr = aux.get(&tag).unwrap();
+                assert_eq!(smol, value);
+            }
 
-        #[test]
-        fn tag_not_found_is_error(
-            tag in tag_name(),
-            other in tag_name(),
-            value in prop::num::u8::ANY,
-        ) {
-            prop_assume!(tag != other);
-            let raw = [b'C', value];
-            let aux_bytes = build_aux(&[(tag, &raw)]);
-            let aux = Aux::new(&aux_bytes);
-            let err = aux.get::<u8>(&other).unwrap_err();
-            assert!(matches!(err, GetAuxError::TagNotFound { .. }));
-        }
+            #[test]
+            fn tag_not_found_is_error(
+                tag in tag_name(),
+                other in tag_name(),
+                value in prop::num::u8::ANY,
+            ) {
+                prop_assume!(tag != other);
+                let raw = [b'C', value];
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let err = aux.get::<u8>(&other).unwrap_err();
+                assert!(matches!(err, GetAuxError::TagNotFound { .. }));
+            }
 
-        #[test]
-        fn type_mismatch_is_error(
-            tag in tag_name(),
-            value in prop::num::u8::ANY,
-        ) {
-            // Tag is U8 (C type), request as &str (Z type)
-            let raw = [b'C', value];
-            let aux_bytes = build_aux(&[(tag, &raw)]);
-            let aux = Aux::new(&aux_bytes);
-            let err = aux.get::<&str>(&tag).unwrap_err();
-            assert!(matches!(err, GetAuxError::TypeMismatch { .. }));
-        }
+            #[test]
+            fn type_mismatch_is_error(
+                tag in tag_name(),
+                value in prop::num::u8::ANY,
+            ) {
+                // Tag is U8 (C type), request as &str (Z type)
+                let raw = [b'C', value];
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let err = aux.get::<&str>(&tag).unwrap_err();
+                assert!(matches!(err, GetAuxError::TypeMismatch { .. }));
+            }
 
-        #[test]
-        fn invalid_tag_name_length_is_error(
-            name in prop::collection::vec(prop::num::u8::ANY, 0..=1)
-                .prop_union(prop::collection::vec(prop::num::u8::ANY, 3..=10)),
-        ) {
-            prop_assume!(name.len() != 2);
-            let aux = Aux::new(&[]);
-            let err = aux.get::<u8>(&name).unwrap_err();
-            assert!(matches!(err, GetAuxError::InvalidTagName { .. }));
-        }
+            // r[verify bam.record.aux_widening]
+            #[test]
+            fn signed_int_to_unsigned_widening(
+                tag in tag_name(),
+                value in 0i8..=i8::MAX,
+            ) {
+                // I8 non-negative → u64
+                let raw = [b'c', value as u8];
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let got: u64 = aux.get(&tag).unwrap();
+                assert_eq!(got, u64::from(value as u8));
+            }
+
+            #[test]
+            fn f64_accepts_f32_and_f64(
+                tag in tag_name(),
+                value in prop::num::f32::ANY,
+            ) {
+                // Float → f64 widening
+                prop_assume!(value.is_finite());
+                let mut raw = vec![b'f'];
+                raw.extend_from_slice(&value.to_le_bytes());
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let got: f64 = aux.get(&tag).unwrap();
+                assert!((got - f64::from(value)).abs() < 1e-6);
+            }
+
+            #[test]
+            fn char_roundtrip(
+                tag in tag_name(),
+                value in prop::char::range('!', '~'),
+            ) {
+                let raw = [b'A', value as u8];
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let got: char = aux.get(&tag).unwrap();
+                assert_eq!(got, value);
+            }
+
+            #[test]
+            fn i32_narrowing_overflow_from_u32_is_error(
+                tag in tag_name(),
+                value in (i32::MAX as u32 + 1)..=u32::MAX,
+            ) {
+                let mut raw = vec![b'I'];
+                raw.extend_from_slice(&value.to_le_bytes());
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let err = aux.get::<i32>(&tag).unwrap_err();
+                assert!(matches!(err, GetAuxError::TypeMismatch { .. }));
+            }
+
+            #[test]
+            fn invalid_utf8_in_z_string(
+                tag in tag_name(),
+            ) {
+                // Build a Z-type tag with invalid UTF-8 bytes
+                let mut raw = vec![b'Z', 0xC3, 0x28, 0]; // 0xC3 0x28 is invalid UTF-8
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let err = aux.get::<&str>(&tag).unwrap_err();
+                assert!(matches!(err, GetAuxError::InvalidUtf8));
+            }
     }
 }

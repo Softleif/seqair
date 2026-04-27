@@ -9,5 +9,5 @@ fuzz_target!(|data: &[u8]| {
 
     // Also fuzz RecordStore::push_raw which decodes and stores
     let mut store = RecordStore::default();
-    let _ = store.push_raw(data);
+    let _ = store.push_raw(data, &mut ());
 });

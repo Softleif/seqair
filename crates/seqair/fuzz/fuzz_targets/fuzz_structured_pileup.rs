@@ -190,7 +190,7 @@ fuzz_target!(|input: FuzzPileupInput| {
         let raw = build_raw_record(rec);
         // Errors from push_raw are expected (e.g. zero-length CIGAR → zero ref-span).
         // We intentionally ignore them — the goal is to reach pileup logic.
-        let _ = store.push_raw(&raw);
+        let _ = store.push_raw(&raw, &mut ());
     }
 
     if store.is_empty() {
@@ -204,7 +204,7 @@ fuzz_target!(|input: FuzzPileupInput| {
     engine.set_max_depth(200);
 
     let mut columns_seen: u32 = 0;
-    for col in &mut engine {
+    while let Some(col) = engine.pileups() {
         let _pos = col.pos();
         let _depth = col.depth();
         let _mdepth = col.match_depth();
@@ -227,7 +227,6 @@ fuzz_target!(|input: FuzzPileupInput| {
             let _matching = aln.matching_bases;
             let _indels = aln.indel_bases;
         }
-
         columns_seen = columns_seen.saturating_add(1);
         if columns_seen > MAX_REGION_LEN {
             break;

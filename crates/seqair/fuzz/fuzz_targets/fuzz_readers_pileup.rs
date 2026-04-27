@@ -73,7 +73,8 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Iterate pileup — the production hot path
-    for col in engine.by_ref().take(1000) {
+    let mut col_count: usize = 0;
+    while let Some(col) = engine.pileups() {
         let _pos = col.pos();
         let _depth = col.depth();
         let _mdepth = col.match_depth();
@@ -83,6 +84,10 @@ fuzz_target!(|data: &[u8]| {
             let _base = aln.base();
             let _qual = aln.qual();
             let _qpos = aln.qpos();
+        }
+        col_count = col_count.saturating_add(1);
+        if col_count >= 1000 {
+            break;
         }
     }
 
