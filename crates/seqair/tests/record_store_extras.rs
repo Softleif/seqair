@@ -18,9 +18,9 @@
 mod helpers;
 
 use helpers::{collect_columns, make_record};
+use seqair::bam::Pos0;
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
-use seqair::bam::Pos0;
 
 /// Helper: push N synthetic records at positions 100, 101, ... with 10M CIGAR.
 fn store_with_n_records(n: u32) -> RecordStore {

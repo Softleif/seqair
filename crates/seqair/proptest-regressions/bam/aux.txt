@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 4ef2c7670aee0ebf06d6e370f80c76734cc82e217bc8b10807631f5476de1684 # shrinks to tag = [65, 65], value = 4294967296
+cc 6cc1e4ca841db8831903134a56a04b66d93aec9c0b3981579ce7cf161dfcf7f6 # shrinks to tag = [65, 65], value = -inf

@@ -46,7 +46,7 @@ fuzz_target!(|data: &[u8]| {
             break;
         }
 
-        let _ = store.push_raw(&record_buf);
+        let _ = store.push_raw(&record_buf, &mut ());
     }
 
     if store.is_empty() {
@@ -62,7 +62,8 @@ fuzz_target!(|data: &[u8]| {
 
     let mut engine = PileupEngine::new(store, region_start, region_end);
     engine.set_max_depth(50);
-    for col in engine.by_ref().take(1000) {
+    let mut col_count: usize = 0;
+    while let Some(col) = engine.pileups() {
         let _depth = col.depth();
         let _mdepth = col.match_depth();
         let _refbase = col.reference_base();
@@ -70,6 +71,10 @@ fuzz_target!(|data: &[u8]| {
             let _op = aln.op();
             let _base = aln.base();
             let _qual = aln.qual();
+        }
+        col_count = col_count.saturating_add(1);
+        if col_count >= 1000 {
+            break;
         }
     }
 });

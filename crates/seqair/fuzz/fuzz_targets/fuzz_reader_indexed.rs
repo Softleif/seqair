@@ -80,13 +80,18 @@ fuzz_target!(|data: &[u8]| {
 
     let mut engine = PileupEngine::new(store, start, end);
     engine.set_max_depth(50);
-    for col in engine.by_ref().take(1000) {
+    let mut col_count: usize = 0;
+    while let Some(col) = engine.pileups() {
         let _depth = col.depth();
         let _mdepth = col.match_depth();
         for aln in col.alignments() {
             let _op = aln.op();
             let _base = aln.base();
             let _qual = aln.qual();
+        }
+        col_count = col_count.saturating_add(1);
+        if col_count >= 1000 {
+            break;
         }
     }
 });
