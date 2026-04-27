@@ -2,6 +2,8 @@
 //! for a region into a [`RecordStore`]. Call [`IndexedBamReader::fork`] to get a cheap
 //! per-thread reader that shares the parsed index and header via [`Arc<BamShared>`].
 
+use crate::reader::FetchCounts;
+
 use super::{
     bgzf::{BgzfError, BgzfReader},
     csi_index::CsiIndex,
@@ -199,12 +201,12 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         end: Pos0,
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,
-    ) -> Result<crate::reader::FetchCounts, BamError> {
+    ) -> Result<FetchCounts, BamError> {
         store.clear();
 
         let chunks = self.shared.index.query(tid, start, end);
         if chunks.is_empty() {
-            return Ok(crate::reader::FetchCounts::default());
+            return Ok(FetchCounts::default());
         }
 
         let tid_i32 = validate_tid(tid)?;
@@ -284,7 +286,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
             }
         }
 
-        Ok(crate::reader::FetchCounts { fetched: accepted as usize, kept: kept_count })
+        Ok(FetchCounts { fetched: accepted as usize, kept: kept_count })
     }
 }
 

@@ -27,7 +27,7 @@ pub struct SlimRecord {
     pub flags: BamFlags,
     /// Number of CIGAR ops; bounded by BAM's u16 `l_op` field.
     pub n_cigar_ops: u16,
-    /// Mapping quality (0..=254; 255 = unavailable per [SAM1] §1.4).
+    /// Mapping quality (0..=254; 255 = unavailable per `[SAM1] §1.4`).
     pub mapq: u8,
     /// Query sequence length in bases — also the qual slab length for this record.
     pub seq_len: u32,

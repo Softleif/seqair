@@ -8,7 +8,7 @@ use std::fmt;
 ///
 /// This is distinct from [`crate::Phred`], which is an `f64` for probability
 /// math. `BaseQuality` is the wire-level byte, and `0xFF` is reserved by
-/// [SAM1] §4.2.3 as the per-record "quality unavailable" sentinel.
+/// `[SAM1] §4.2.3` as the per-record "quality unavailable" sentinel.
 ///
 /// Access the Phred integer via [`BaseQuality::get`], which returns `None`
 /// for the sentinel. Intentionally does not implement `Ord`/`PartialOrd` —

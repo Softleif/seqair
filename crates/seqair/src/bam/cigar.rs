@@ -48,7 +48,7 @@ pub enum CigarOpType {
 }
 
 impl CigarOpType {
-    /// Decode a 4-bit BAM op code. Codes outside the spec become [`Unknown`].
+    /// Decode a 4-bit BAM op code. Codes outside the spec become [`Self::Unknown`].
     pub const fn from_bam(code: u8) -> Self {
         match code {
             CIGAR_M => Self::Match,
