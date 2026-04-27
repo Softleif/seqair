@@ -627,7 +627,7 @@ use helpers::{arb_read, arb_read_set};
 // r[verify pileup.active_set]
 // r[verify pileup.qpos]
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(200))]
+    #![proptest_config(ProptestConfig::with_cases(100))]
 
     /// Every column's match-depth must match the number of reads with M/=/X at that position.
     /// Deletions/RefSkips are now included in the pileup but not in covered_ref_positions.

@@ -31,6 +31,7 @@ use clap::Parser as _;
 use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
 use seqair::reader::Readers;
 use seqair_types::RegionString;
+use seqair_types::SmolStr;
 use std::path::PathBuf;
 
 /// seqair pileup-extras — demonstrate per-record extras in pileup
@@ -59,7 +60,7 @@ struct Cli {
 #[derive(Debug, Clone)]
 struct ReadInfo {
     /// Read group extracted from aux tags (RG:Z:...), if present.
-    read_group: Option<String>,
+    read_group: Option<SmolStr>,
     /// Fraction of the read that is aligned (`matching_bases` / `seq_len`).
     aligned_fraction: f64,
 }
@@ -81,7 +82,8 @@ impl CustomizeRecordStore for ReadInfoBuilder {
     }
 
     fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<ReadInfo>) -> ReadInfo {
-        let read_group = rec.aux(store).ok().and_then(extract_rg);
+        let read_group: Option<SmolStr> =
+            if let Ok(aux) = rec.aux(store) { aux.get("RG").ok() } else { None };
         let aligned_fraction =
             if rec.seq_len > 0 { rec.matching_bases as f64 / rec.seq_len as f64 } else { 0.0 };
         ReadInfo { read_group, aligned_fraction }
@@ -163,52 +165,4 @@ fn main() -> anyhow::Result<()> {
     readers.recover_store(&mut engine);
 
     Ok(())
-}
-
-/// Extract the RG:Z tag from raw BAM aux bytes.
-fn extract_rg(aux: &[u8]) -> Option<String> {
-    // BAM aux format: 2-byte tag + 1-byte type + value.
-    // RG is type 'Z' (NUL-terminated string).
-    let mut i = 0;
-    while i + 3 <= aux.len() {
-        let tag = [aux[i], aux[i + 1]];
-        let val_type = aux[i + 2];
-        i += 3;
-        if tag == *b"RG" && val_type == b'Z' {
-            let start = i;
-            while i < aux.len() && aux[i] != 0 {
-                i += 1;
-            }
-            return String::from_utf8(aux[start..i].to_vec()).ok();
-        }
-        // Skip value based on type.
-        match val_type {
-            b'A' | b'c' | b'C' => i += 1,
-            b's' | b'S' => i += 2,
-            b'i' | b'I' | b'f' => i += 4,
-            b'Z' | b'H' => {
-                while i < aux.len() && aux[i] != 0 {
-                    i += 1;
-                }
-                i += 1; // skip NUL
-            }
-            b'B' => {
-                if i + 5 > aux.len() {
-                    break;
-                }
-                let elem_type = aux[i];
-                let count = u32::from_le_bytes([aux[i + 1], aux[i + 2], aux[i + 3], aux[i + 4]]);
-                i += 5;
-                let elem_size = match elem_type {
-                    b'c' | b'C' => 1,
-                    b's' | b'S' => 2,
-                    b'i' | b'I' | b'f' => 4,
-                    _ => break,
-                };
-                i += count as usize * elem_size;
-            }
-            _ => break,
-        }
-    }
-    None
 }

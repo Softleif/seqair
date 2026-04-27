@@ -8,6 +8,7 @@
 //! - **Aux slab**: auxiliary tag bytes in BAM binary format, rarely read in pileup
 
 use super::{
+    aux::Aux,
     cigar::{self, CigarOp},
     record::{self, DecodeError},
     seq,
@@ -139,11 +140,15 @@ impl SlimRecord {
         })
     }
 
-    /// Read the auxiliary tag bytes for this record (BAM binary format).
+    // r[impl bam.record.aux_wrapper]
+    /// Read the auxiliary tag data for this record.
+    ///
+    /// Returns an [`Aux`] wrapper that provides a fluent
+    /// [`get`](Aux::get) API with automatic type conversion.
     pub fn aux<'store, U>(
         &self,
         store: &'store RecordStore<U>,
-    ) -> Result<&'store [u8], RecordAccessError> {
+    ) -> Result<Aux<'store>, RecordAccessError> {
         let start = self.aux_off as usize;
         let end =
             start.checked_add(self.aux_len as usize).ok_or(RecordAccessError::OffsetOverflow {
@@ -151,10 +156,11 @@ impl SlimRecord {
                 offset: self.aux_off,
                 len: self.aux_len as usize,
             })?;
-        store.aux.get(start..end).ok_or(RecordAccessError::SlabOffsetOutOfRange {
+        let bytes = store.aux.get(start..end).ok_or(RecordAccessError::SlabOffsetOutOfRange {
             slab: Slab::Aux,
             offset: self.aux_off,
-        })
+        })?;
+        Ok(Aux::new(bytes))
     }
 
     /// Read the per-record extra value for this record.

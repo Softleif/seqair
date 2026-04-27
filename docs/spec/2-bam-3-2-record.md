@@ -75,3 +75,15 @@ Unknown type codes and truncated/malformed tag values MUST stop iteration — `A
 
 r[bam.record.raw_aux]
 The record MUST provide access to raw auxiliary data bytes for efficient filtering without full tag parsing.
+
+r[bam.record.aux_wrapper]
+An `Aux<'a>` wrapper (a newtype over `&'a [u8]`) MUST provide a fluent query API for auxiliary tags. It MUST `Deref` to `[u8]` for backward compatibility with existing `&[u8]` access. `SlimRecord::aux(store)` MUST return `Aux<'store>` instead of raw `&[u8]`.
+
+r[bam.record.aux_get]
+`Aux::get<T: FromAuxValue<'a>>(&self, tag: impl AsRef<[u8]>) -> Result<T, GetAuxError>` MUST look up a tag by name and convert it to the requested type. The tag name MUST be validated to exactly 2 bytes (BAM requirement). Missing tags MUST return `TagNotFound`. Wrong BAM types MUST return `TypeMismatch` with human-readable type names.
+
+r[bam.record.aux_from_aux_value]
+The `FromAuxValue<'a>` trait MUST provide: `fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError>`. Implementations MUST be provided for `i64`, `u64`, `f64`, `&'a str`, `&'a [u8]`, `SmolStr`, `String`, `u8`, `u16`, `u32`, `i32`, `f32`, and `char`. Integer implementations MUST perform widening (source type narrower than target) without loss; narrowing (e.g. `U32` → `i32` where value > `i32::MAX`) MUST return `TypeMismatch`. `&'a str` and `SmolStr`/`String` MUST validate UTF-8 for Z-type strings, returning `InvalidUtf8` on failure. Float implementations MUST convert `Float` to `f64` (widening); `Double` to `f64` (exact).
+
+r[bam.record.aux_get_error]
+`GetAuxError` MUST be a `#[non_exhaustive]` thiserror enum with variants: `TagNotFound { tag: [u8; 2] }`, `InvalidTagName { len: usize }`, `TypeMismatch { expected: &'static str, actual: &'static str }`, `InvalidUtf8`.

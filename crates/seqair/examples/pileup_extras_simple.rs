@@ -42,7 +42,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 struct ReadInfo {
-    read_group: Option<String>,
+    read_group: Option<seqair_types::SmolStr>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,10 +58,6 @@ impl CustomizeRecordStore for ReadInfoBuilder {
     }
 
     fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<ReadInfo>) -> ReadInfo {
-        ReadInfo { read_group: rec.aux(store).ok().and_then(extract_rg) }
+        ReadInfo { read_group: rec.aux(store).ok().and_then(|aux| aux.get("RG").ok()) }
     }
-}
-
-fn extract_rg(_aux: &[u8]) -> Option<String> {
-    None // actual parsing code elided
 }
