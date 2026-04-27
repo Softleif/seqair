@@ -76,7 +76,7 @@ fn cram_header_matches_bam_header_via_htslib() {
     // Compare target lengths
     for tid in 0..our_header.target_count() as u32 {
         let our_len = our_header.target_len(tid).unwrap();
-        let hts_len = htslib_header.target_len(tid).unwrap() as u64;
+        let hts_len = htslib_header.target_len(tid).unwrap();
         assert_eq!(our_len, hts_len, "length mismatch for tid={tid}");
     }
 }

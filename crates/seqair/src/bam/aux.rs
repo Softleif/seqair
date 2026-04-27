@@ -853,7 +853,7 @@ mod prop_tests {
         }
     }
 
-    /// Build raw aux bytes from a list of (tag, raw_type_value) pairs.
+    /// Build raw aux bytes from a list of (tag, `raw_type_value`) pairs.
     fn build_aux(tags: &[([u8; 2], &[u8])]) -> Vec<u8> {
         let mut buf = Vec::new();
         for (tag, data) in tags {
@@ -868,12 +868,12 @@ mod prop_tests {
             #[test]
             fn aux_get_roundtrips_ints(
                 tag in tag_name(),
-                value in i32::MIN as i64..=u32::MAX as i64,
+                value in i64::from(i32::MIN)..=i64::from(u32::MAX),
             ) {
                 let raw = encode_int(value);
                 let aux_bytes = build_aux(&[(tag, &raw)]);
                 let aux = Aux::new(&aux_bytes);
-                let got: i64 = aux.get(&tag).unwrap();
+                let got: i64 = aux.get(tag).unwrap();
                 assert_eq!(got, value);
             }
 
@@ -886,7 +886,7 @@ mod prop_tests {
                 let raw = [b'C', value];
                 let aux_bytes = build_aux(&[(tag, &raw)]);
                 let aux = Aux::new(&aux_bytes);
-                let got: u64 = aux.get(&tag).unwrap();
+                let got: u64 = aux.get(tag).unwrap();
                 assert_eq!(got, u64::from(value));
             }
 
@@ -899,7 +899,7 @@ mod prop_tests {
                 raw.extend_from_slice(&value.to_le_bytes());
                 let aux_bytes = build_aux(&[(tag, &raw)]);
                 let aux = Aux::new(&aux_bytes);
-                let got: u64 = aux.get(&tag).unwrap();
+                let got: u64 = aux.get(tag).unwrap();
                 assert_eq!(got, u64::from(value));
             }
 
@@ -915,13 +915,13 @@ mod prop_tests {
                 let aux_bytes = build_aux(&[(tag, &raw)]);
                 let aux = Aux::new(&aux_bytes);
 
-                let got: &str = aux.get(&tag).unwrap();
+                let got: &str = aux.get(tag).unwrap();
                 assert_eq!(got, value);
 
-                let owned: String = aux.get(&tag).unwrap();
+                let owned: String = aux.get(tag).unwrap();
                 assert_eq!(owned, value);
 
-                let smol: SmolStr = aux.get(&tag).unwrap();
+                let smol: SmolStr = aux.get(tag).unwrap();
                 assert_eq!(smol, value);
             }
 
@@ -962,7 +962,7 @@ mod prop_tests {
                 let raw = [b'c', value as u8];
                 let aux_bytes = build_aux(&[(tag, &raw)]);
                 let aux = Aux::new(&aux_bytes);
-                let got: u64 = aux.get(&tag).unwrap();
+                let got: u64 = aux.get(tag).unwrap();
                 assert_eq!(got, u64::from(value as u8));
             }
 
@@ -977,7 +977,7 @@ mod prop_tests {
                 raw.extend_from_slice(&value.to_le_bytes());
                 let aux_bytes = build_aux(&[(tag, &raw)]);
                 let aux = Aux::new(&aux_bytes);
-                let got: f64 = aux.get(&tag).unwrap();
+                let got: f64 = aux.get(tag).unwrap();
                 assert!((got - f64::from(value)).abs() < 1e-6);
             }
 
@@ -989,11 +989,12 @@ mod prop_tests {
                 let raw = [b'A', value as u8];
                 let aux_bytes = build_aux(&[(tag, &raw)]);
                 let aux = Aux::new(&aux_bytes);
-                let got: char = aux.get(&tag).unwrap();
+                let got: char = aux.get(tag).unwrap();
                 assert_eq!(got, value);
             }
 
             #[test]
+            #[allow(clippy::arithmetic_side_effects, reason = "prop test: i32::MAX is a constant")]
             fn i32_narrowing_overflow_from_u32_is_error(
                 tag in tag_name(),
                 value in (i32::MAX as u32 + 1)..=u32::MAX,
@@ -1011,7 +1012,7 @@ mod prop_tests {
                 tag in tag_name(),
             ) {
                 // Build a Z-type tag with invalid UTF-8 bytes
-                let mut raw = vec![b'Z', 0xC3, 0x28, 0]; // 0xC3 0x28 is invalid UTF-8
+                let raw = vec![b'Z', 0xC3, 0x28, 0]; // 0xC3 0x28 is invalid UTF-8
                 let aux_bytes = build_aux(&[(tag, &raw)]);
                 let aux = Aux::new(&aux_bytes);
                 let err = aux.get::<&str>(&tag).unwrap_err();

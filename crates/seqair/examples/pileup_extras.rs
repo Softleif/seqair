@@ -149,7 +149,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         // Format read group summary: "RG1:5,RG2:3" or ".:10"
-        rg_counts.sort_by(|a, b| b.1.cmp(&a.1));
+        rg_counts.sort_by_key(|b| std::cmp::Reverse(b.1));
         let rg_summary: Vec<String> =
             rg_counts.iter().map(|(name, count)| format!("{name}:{count}")).collect();
 

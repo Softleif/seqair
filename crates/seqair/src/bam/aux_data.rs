@@ -217,6 +217,10 @@ impl AuxData {
     }
 }
 
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "checked by wrapping_rem above; divisor is the compile-time-known element size"
+)]
 /// Validate array element count and compute it from byte length.
 ///
 /// Returns `InvalidArrayLength` if `byte_len` is not a multiple of `elem_size`,
