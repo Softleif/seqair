@@ -77,13 +77,19 @@ r[bam.record.raw_aux]
 The record MUST provide access to raw auxiliary data bytes for efficient filtering without full tag parsing.
 
 r[bam.record.aux_wrapper]
-An `Aux<'a>` wrapper (a newtype over `&'a [u8]`) MUST provide a fluent query API for auxiliary tags. It MUST `Deref` to `[u8]` for backward compatibility with existing `&[u8]` access. `SlimRecord::aux(store)` MUST return `Aux<'store>` instead of raw `&[u8]`.
+An `Aux<'a>` wrapper (a newtype over `&'a [u8]`) MUST provide a fluent query API for auxiliary tags. Raw byte access MUST be available via `Aux::as_bytes()`. The wrapper MUST NOT implement `Deref<Target = [u8]>` — this would allow `aux.iter()` to silently resolve to byte iteration, shadowing the inherent `iter_tags()` and surprising callers who expect `(tag, value)` pairs. `SlimRecord::aux(store)` MUST return `Aux<'store>`.
 
 r[bam.record.aux_get]
 `Aux::get<T: FromAuxValue<'a>>(&self, tag: impl AsRef<[u8]>) -> Result<T, GetAuxError>` MUST look up a tag by name and convert it to the requested type. The tag name MUST be validated to exactly 2 bytes (BAM requirement). Missing tags MUST return `TagNotFound`. Wrong BAM types MUST return `TypeMismatch` with human-readable type names.
 
 r[bam.record.aux_from_aux_value]
-The `FromAuxValue<'a>` trait MUST provide: `fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError>`. Implementations MUST be provided for `i64`, `u64`, `f64`, `&'a str`, `&'a [u8]`, `SmolStr`, `String`, `u8`, `u16`, `u32`, `i32`, `f32`, and `char`. Integer implementations MUST perform widening (source type narrower than target) without loss; narrowing (e.g. `U32` → `i32` where value > `i32::MAX`) MUST return `TypeMismatch`. `&'a str` and `SmolStr`/`String` MUST validate UTF-8 for Z-type strings, returning `InvalidUtf8` on failure. Float implementations MUST convert `Float` to `f64` (widening); `Double` to `f64` (exact).
+The `FromAuxValue<'a>` trait MUST provide: `fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError>`. Implementations MUST be provided for `i64`, `u64`, `f64`, `&'a str`, `&'a [u8]`, `SmolStr`, `String`, `u8`, `u16`, `u32`, `i32`, `f32`, and `char`. Integer implementations MUST perform widening (source type narrower than target) without loss. When the BAM type is an integer but the value does not fit the requested Rust type (e.g. `U32` value > `i32::MAX` requested as `i32`, or a negative `I32` value requested as `u32`), the impl MUST return `GetAuxError::OutOfRange { value, target }` — NOT `TypeMismatch`, because the underlying tag IS an integer; only the magnitude is wrong. `&'a str` and `SmolStr`/`String` MUST validate UTF-8 for Z-type strings, returning `InvalidUtf8` on failure. Float implementations MUST convert `Float` to `f64` (widening); `Double` to `f64` (exact). The `char` impl MUST accept any `Char` byte (the SAM grammar restricts A-type to printable ASCII, but the reader stays lenient to avoid rejecting in-the-wild records that violate the spec).
 
 r[bam.record.aux_get_error]
-`GetAuxError` MUST be a `#[non_exhaustive]` thiserror enum with variants: `TagNotFound { tag: [u8; 2] }`, `InvalidTagName { len: usize }`, `TypeMismatch { expected: &'static str, actual: &'static str }`, `InvalidUtf8`.
+`GetAuxError` MUST be a `#[non_exhaustive]` thiserror enum with variants:
+
+- `TagNotFound { tag: AuxTag }` — `AuxTag` is a newtype over `[u8; 2]` whose `Display` impl prints printable tag names as `"XX"` and non-printable bytes as `[hh, hh]`, so error messages stay readable.
+- `InvalidTagName { len: usize, actual: Vec<u8> }` — both the offending length and the raw bytes (typically a misuse like `aux.get("RGX")`); the bytes are kept so the error message can quote the input.
+- `TypeMismatch { expected: &'static str, actual: &'static str }` — the BAM type code mismatched (e.g. requested `&str`, found `C`). Both fields use BAM type letters (`A`, `c`, `C`, `s`, `S`, `i`, `I`, `f`, `d`, `Z`, `H`, `B:c`, …) consistently across all `FromAuxValue` impls.
+- `OutOfRange { value: i64, target: &'static str }` — the BAM type matched but the numeric value did not fit the requested Rust type (e.g. `U32` value exceeding `i32::MAX` requested as `i32`). This is distinct from `TypeMismatch`: a caller catching `OutOfRange` knows the tag is an integer, just too large.
+- `InvalidUtf8` — a `Z`-type string contained bytes that are not valid UTF-8.

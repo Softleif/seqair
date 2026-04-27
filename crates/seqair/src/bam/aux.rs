@@ -143,6 +143,11 @@ pub enum GetAuxError {
     /// The tag exists but has a different BAM type than requested.
     #[error("type mismatch: expected {expected}, got {actual}")]
     TypeMismatch { expected: &'static str, actual: &'static str },
+    /// The BAM type matched but the numeric value did not fit the requested
+    /// Rust type (e.g. `U32` value > `i32::MAX` requested as `i32`,
+    /// or a negative `I32` value requested as `u32`).
+    #[error("value {value} out of range for {target}")]
+    OutOfRange { value: i64, target: &'static str },
     /// A `Z`-type string contains bytes that are not valid UTF-8.
     #[error("Z-type string contains invalid UTF-8")]
     InvalidUtf8,
@@ -178,6 +183,19 @@ impl<'a> FromAuxValue<'a> for i64 {
     }
 }
 
+// Helper: classify an integer-valued mismatch.
+//
+// If the underlying tag IS an integer but the numeric value doesn't fit the
+// requested Rust type, return `OutOfRange`. Otherwise (the tag is a non-integer
+// type like Z or B), return `TypeMismatch`.
+fn out_of_range_or_mismatch(value: &AuxValue<'_>, target: &'static str) -> GetAuxError {
+    if let Some(v) = value.as_i64() {
+        GetAuxError::OutOfRange { value: v, target }
+    } else {
+        GetAuxError::TypeMismatch { expected: "integer", actual: value.type_name() }
+    }
+}
+
 impl<'a> FromAuxValue<'a> for i32 {
     fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError> {
         match value {
@@ -187,10 +205,8 @@ impl<'a> FromAuxValue<'a> for i32 {
             AuxValue::U16(v) => Ok(i32::from(v)),
             AuxValue::I32(v) => Ok(v),
             AuxValue::U32(v) => i32::try_from(v)
-                .map_err(|_| GetAuxError::TypeMismatch { expected: "i32", actual: "U32" }),
-            ref other => {
-                Err(GetAuxError::TypeMismatch { expected: "integer", actual: other.type_name() })
-            }
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "i32" }),
+            ref other => Err(out_of_range_or_mismatch(other, "i32")),
         }
     }
 }
@@ -201,13 +217,13 @@ impl<'a> FromAuxValue<'a> for u64 {
             AuxValue::U8(v) => Ok(u64::from(v)),
             AuxValue::U16(v) => Ok(u64::from(v)),
             AuxValue::U32(v) => Ok(u64::from(v)),
-            AuxValue::I8(v) if v >= 0 => Ok(v as u64),
-            AuxValue::I16(v) if v >= 0 => Ok(v as u64),
-            AuxValue::I32(v) if v >= 0 => Ok(v as u64),
-            ref other => Err(GetAuxError::TypeMismatch {
-                expected: "unsigned integer",
-                actual: other.type_name(),
-            }),
+            AuxValue::I8(v) => u64::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u64" }),
+            AuxValue::I16(v) => u64::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u64" }),
+            AuxValue::I32(v) => u64::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u64" }),
+            ref other => Err(out_of_range_or_mismatch(other, "u64")),
         }
     }
 }
@@ -218,13 +234,13 @@ impl<'a> FromAuxValue<'a> for u32 {
             AuxValue::U8(v) => Ok(u32::from(v)),
             AuxValue::U16(v) => Ok(u32::from(v)),
             AuxValue::U32(v) => Ok(v),
-            AuxValue::I8(v) if v >= 0 => Ok(v as u32),
-            AuxValue::I16(v) if v >= 0 => Ok(v as u32),
-            AuxValue::I32(v) if v >= 0 => Ok(v as u32),
-            ref other => Err(GetAuxError::TypeMismatch {
-                expected: "unsigned integer",
-                actual: other.type_name(),
-            }),
+            AuxValue::I8(v) => u32::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u32" }),
+            AuxValue::I16(v) => u32::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u32" }),
+            AuxValue::I32(v) => u32::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u32" }),
+            ref other => Err(out_of_range_or_mismatch(other, "u32")),
         }
     }
 }
@@ -234,11 +250,15 @@ impl<'a> FromAuxValue<'a> for u16 {
         match value {
             AuxValue::U8(v) => Ok(u16::from(v)),
             AuxValue::U16(v) => Ok(v),
-            AuxValue::I8(v) if v >= 0 => Ok(v as u16),
-            ref other => Err(GetAuxError::TypeMismatch {
-                expected: "unsigned integer",
-                actual: other.type_name(),
-            }),
+            AuxValue::U32(v) => u16::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u16" }),
+            AuxValue::I8(v) => u16::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u16" }),
+            AuxValue::I16(v) => u16::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u16" }),
+            AuxValue::I32(v) => u16::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u16" }),
+            ref other => Err(out_of_range_or_mismatch(other, "u16")),
         }
     }
 }
@@ -247,10 +267,17 @@ impl<'a> FromAuxValue<'a> for u8 {
     fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError> {
         match value {
             AuxValue::U8(v) => Ok(v),
-            AuxValue::I8(v) if v >= 0 => Ok(v as u8),
-            ref other => {
-                Err(GetAuxError::TypeMismatch { expected: "U8", actual: other.type_name() })
-            }
+            AuxValue::U16(v) => u8::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u8" }),
+            AuxValue::U32(v) => u8::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u8" }),
+            AuxValue::I8(v) => u8::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u8" }),
+            AuxValue::I16(v) => u8::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u8" }),
+            AuxValue::I32(v) => u8::try_from(v)
+                .map_err(|_| GetAuxError::OutOfRange { value: i64::from(v), target: "u8" }),
+            ref other => Err(out_of_range_or_mismatch(other, "u8")),
         }
     }
 }
@@ -330,7 +357,12 @@ impl<'a> FromAuxValue<'a> for SmolStr {
 /// Borrowed view of a record's auxiliary tag bytes.
 ///
 /// Provides a fluent [`get`](Aux::get) API with automatic type conversion
-/// via [`FromAuxValue`]. Derefs to `[u8]` for backward compatibility.
+/// via [`FromAuxValue`]. Raw byte access is via [`as_bytes`](Aux::as_bytes).
+///
+/// `Aux` deliberately does NOT implement `Deref<Target = [u8]>`: that would let
+/// `aux.iter()` resolve to `<[u8]>::iter()` and silently iterate bytes
+/// instead of `(tag, value)` pairs. Callers who need the underlying bytes
+/// must call `aux.as_bytes()`.
 ///
 /// # Examples
 ///
@@ -364,8 +396,21 @@ impl<'a> Aux<'a> {
         self.data
     }
 
-    /// Iterate over all tags.
-    pub fn iter(&self) -> AuxIter<'a> {
+    /// Whether there are no tag bytes.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Length of the underlying tag-byte block.
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Iterate over all tags as `([u8; 2], AuxValue)` pairs.
+    ///
+    /// Named `iter_tags` (not `iter`) to avoid any confusion with byte iteration —
+    /// callers who want bytes should use `aux.as_bytes().iter()`.
+    pub fn iter_tags(&self) -> AuxIter<'a> {
         iter_tags(self.data)
     }
 
@@ -390,14 +435,6 @@ impl<'a> Aux<'a> {
         let value = find_tag(self.data, tag_arr)
             .ok_or(GetAuxError::TagNotFound { tag: AuxTag(tag_arr) })?;
         T::from_aux_value(value)
-    }
-}
-
-impl<'a> std::ops::Deref for Aux<'a> {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.data
     }
 }
 
@@ -993,9 +1030,12 @@ mod prop_tests {
                 assert_eq!(got, value);
             }
 
+            // r[verify bam.record.aux_from_aux_value]
+            // U32 values that don't fit i32 surface as `OutOfRange` (NOT
+            // `TypeMismatch`: the tag IS an integer, just too large).
             #[test]
             #[allow(clippy::arithmetic_side_effects, reason = "prop test: i32::MAX is a constant")]
-            fn i32_narrowing_overflow_from_u32_is_error(
+            fn i32_narrowing_overflow_from_u32_is_out_of_range(
                 tag in tag_name(),
                 value in (i32::MAX as u32 + 1)..=u32::MAX,
             ) {
@@ -1004,7 +1044,44 @@ mod prop_tests {
                 let aux_bytes = build_aux(&[(tag, &raw)]);
                 let aux = Aux::new(&aux_bytes);
                 let err = aux.get::<i32>(&tag).unwrap_err();
-                assert!(matches!(err, GetAuxError::TypeMismatch { .. }));
+                match err {
+                    GetAuxError::OutOfRange { value: v, target } => {
+                        assert_eq!(v, i64::from(value));
+                        assert_eq!(target, "i32");
+                    }
+                    other => panic!("expected OutOfRange, got {other:?}"),
+                }
+            }
+
+            // Negative I32 → u32 must be `OutOfRange`.
+            #[test]
+            fn negative_i32_to_u32_is_out_of_range(
+                tag in tag_name(),
+                value in i32::MIN..0i32,
+            ) {
+                let mut raw = vec![b'i'];
+                raw.extend_from_slice(&value.to_le_bytes());
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let err = aux.get::<u32>(&tag).unwrap_err();
+                assert!(matches!(err, GetAuxError::OutOfRange { target: "u32", .. }),
+                    "expected OutOfRange, got {err:?}");
+            }
+
+            // Non-integer requested as integer is `TypeMismatch` (not OutOfRange).
+            #[test]
+            fn string_to_i32_is_type_mismatch(
+                tag in tag_name(),
+                value in "[a-z]{1,8}",
+            ) {
+                let mut raw = vec![b'Z'];
+                raw.extend_from_slice(value.as_bytes());
+                raw.push(0);
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+                let err = aux.get::<i32>(&tag).unwrap_err();
+                assert!(matches!(err, GetAuxError::TypeMismatch { actual: "Z", .. }),
+                    "expected TypeMismatch with actual=Z, got {err:?}");
             }
 
             #[test]
