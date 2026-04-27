@@ -125,13 +125,15 @@ A record extracted via `to_owned_record(idx)` and re-inserted via `push_owned()`
 > r[bam.owned_record.aux_data]
 > `AuxData` MUST store auxiliary tags in BAM binary format (packed bytes). Tag lookup via `get()` MUST delegate to the existing `aux::find_tag` implementation (see `r[bam.record.aux_parse]`). Mutation methods MUST be provided:
 >
-> - `set_string(tag, value)` — add or replace a Z-type string tag
+> - `set_string(tag, value: &[u8])` — add or replace a Z-type string tag
+> - `set_hex(tag, value: &[u8])` — add or replace an H-type hex string tag (encoded with type byte `H`, NUL-terminated like Z)
 > - `set_int(tag, value: i64)` — add or replace an integer tag
-> - `set_float(tag, value)` — add or replace an f-type float tag
-> - `set_char(tag, value)` — add or replace an A-type character tag
-> - `set_double(tag, value)` — add or replace a d-type double-precision float tag
-> - `set_array_u8(tag, values)` — add or replace a B:C array tag
-> - `set_array_i16(tag, values)`, `set_array_u16`, `set_array_i32`, `set_array_u32`, `set_array_f32` — typed B-array setters
+> - `set_float(tag, value: f32)` — add or replace an f-type float tag
+> - `set_char(tag, value: u8) -> Result` — add or replace an A-type character tag. The byte MUST be in `[!-~]` (0x21..=0x7E, the printable-ASCII grammar from [SAM1]); other bytes MUST return `AuxDataError::InvalidCharByte { value }`. Validation happens BEFORE any mutation (no orphaned bytes on error).
+> - `set_double(tag, value: f64)` — add or replace a d-type double-precision float tag
+> - `set_array_u8(tag, values: &[u8])` — add or replace a B:C array tag
+> - `set_array_i8(tag, values: &[i8])` — add or replace a B:c array tag
+> - `set_array_i16(tag, values: &[i16])`, `set_array_u16(&[u16])`, `set_array_i32(&[i32])`, `set_array_u32(&[u32])`, `set_array_f32(&[f32])` — typed B-array setters that take native Rust slices and encode each element in little-endian internally. They MUST NOT take `&[u8]` shaped at the byte level — that signature would silently accept callers' raw `i16` slices reinterpreted as bytes and produce mojibake.
 > - `remove(tag)` — remove a tag if present
 > - `as_bytes() -> &[u8]` — raw bytes for serialization
 
@@ -150,7 +152,7 @@ r[bam.owned_record.aux_array_encoding]
 `set_array_u8(tag, values)` MUST encode the tag in BAM B-type array format: 2-byte tag name, type byte `B`, subtype byte `C`, 4-byte little-endian element count, followed by the raw u8 values. This is used for the ML (modification likelihood) tag in SAM 4.5 methylation annotations.
 
 r[bam.owned_record.aux_array_setters]
-All B-type array setters MUST produce the correct BAM binary format with the corresponding subtype byte. The element count MUST be validated via `u32::try_from` to catch impossibly-large arrays on 64-bit platforms, returning `AuxDataError::IntegerOutOfRange`. Each setter MUST round-trip through `get()` producing the correct `AuxValue::Array*` variant.
+All B-type array setters MUST produce the correct BAM binary format with the corresponding subtype byte (`c`, `C`, `s`, `S`, `i`, `I`, `f`). They MUST take typed slices (`&[i8]`, `&[u8]`, `&[i16]`, `&[u16]`, `&[i32]`, `&[u32]`, `&[f32]`) and serialize each element little-endian internally — taking `&[u8]` would let a caller's typed slice be silently reinterpreted as bytes and produce wrong values. The element count MUST be validated via `u32::try_from` to catch impossibly-large arrays on 64-bit platforms, returning `AuxDataError::IntegerOutOfRange`. Each setter MUST round-trip through `get()` producing the correct `AuxValue::Array*` variant.
 
 r[bam.owned_record.aux_replace_semantics]
 When `set_*` is called for a tag that already exists, the tag MUST be removed and re-appended with the new value. Implementations MAY optimize the case where the new encoded byte length (including tag name and type byte) matches the old length by replacing in-place, but this is not required.

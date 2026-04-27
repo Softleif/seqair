@@ -625,7 +625,7 @@ impl CustomizeRecordStore for ReadGroupFilter {
     fn keep_record(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> bool {
         // The just-pushed record's aux bytes live at the tail of the aux slab.
         let Ok(aux) = rec.aux(store) else { return false };
-        extract_rg(&aux) == Some(self.wanted.as_slice())
+        extract_rg(aux.as_bytes()) == Some(self.wanted.as_slice())
     }
     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
 }
@@ -665,7 +665,7 @@ fn read_group_filter_keeps_only_matching_records() {
     for i in 0..store.len() as u32 {
         let rec = store.record(i);
         let aux = rec.aux(&store).expect("aux readable");
-        assert_eq!(extract_rg(&aux), Some(b"RG1".as_ref()));
+        assert_eq!(extract_rg(aux.as_bytes()), Some(b"RG1".as_ref()));
     }
 }
 
