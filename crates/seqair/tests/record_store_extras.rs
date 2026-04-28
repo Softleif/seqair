@@ -271,8 +271,11 @@ fn pileups_column_exposes_store_access_via_alignment_view() {
 }
 
 // r[verify pileup.extras.recover_store]
+/// `engine.take_store()` returns a cleared store with retained capacity.
+/// This is the low-level mechanism that `PileupGuard::drop` uses to recover
+/// the buffer back into `Readers`.
 #[test]
-fn recover_store_works_after_apply_customize() {
+fn engine_take_store_clears_records_and_keeps_capacity() {
     // Build a store manually, transform to extras, feed into engine, then strip.
     let store = store_with_n_records_customized(10, ExtractMapqU32);
 
@@ -290,7 +293,6 @@ fn recover_store_works_after_apply_customize() {
     // Consume all columns.
     while engine.pileups().is_some() {}
 
-    // take_store + strip_extras (the same operation recover_store does internally).
     let store = engine.take_store().expect("store should be available");
 
     // The recovered store should be empty (cleared by take_store) but have capacity.

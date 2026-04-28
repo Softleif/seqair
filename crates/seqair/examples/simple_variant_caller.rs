@@ -287,7 +287,7 @@ fn main() -> anyhow::Result<()> {
             n_calls += 1;
         }
 
-        readers.recover_store(&mut pileup);
+        // `pileup` drops at end of scope, returning the store to `readers`.
     }
 
     vcf_writer.finish()?;

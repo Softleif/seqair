@@ -431,6 +431,79 @@ impl<U> std::fmt::Debug for PileupEngine<U> {
     }
 }
 
+// r[impl pileup.extras.recover_store]
+/// RAII guard around a [`PileupEngine`] that returns the underlying
+/// [`RecordStore`] to a caller-provided slot when dropped.
+///
+/// Returned by [`Readers::pileup`](crate::reader::Readers::pileup). Derefs
+/// to the inner [`PileupEngine`], so all engine methods (`pileups`,
+/// `set_max_depth`, `store`, …) are available transparently. The point of
+/// the guard is that buffer recovery is automatic: drop the guard (end of
+/// scope, `break` out of the loop, `?`-propagated error mid-iteration)
+/// and the populated-then-cleared store is moved back into the slot,
+/// retaining its allocated capacity for the next pileup. Callers no
+/// longer need an explicit `recover_store` step.
+pub struct PileupGuard<'a, U = ()> {
+    engine: PileupEngine<U>,
+    slot: &'a mut RecordStore<U>,
+}
+
+impl<'a, U> PileupGuard<'a, U> {
+    /// Build a guard from a populated engine and the slot to recover into.
+    /// Used by [`Readers::pileup`] to wire up automatic store recovery;
+    /// `pub(crate)` because external callers should always go through
+    /// `Readers::pileup` to obtain one.
+    pub(crate) fn new(engine: PileupEngine<U>, slot: &'a mut RecordStore<U>) -> Self {
+        Self { engine, slot }
+    }
+
+    /// Consume the guard and return the inner engine, **without**
+    /// recovering the store. Rare escape hatch — prefer letting the guard
+    /// drop normally.
+    pub fn into_inner(self) -> PileupEngine<U> {
+        // ManuallyDrop so the guard's Drop doesn't run after we move
+        // `engine` out (would try to recover from a moved-out value).
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: ManuallyDrop guarantees `this`'s Drop won't run, so it
+        // is safe to read the field by value. We only read `engine` here;
+        // `slot` is a `&mut` reference and is dropped (releasing the
+        // borrow) when `this` goes out of scope.
+        unsafe { std::ptr::read(&this.engine) }
+    }
+}
+
+impl<U> std::ops::Deref for PileupGuard<'_, U> {
+    type Target = PileupEngine<U>;
+    fn deref(&self) -> &PileupEngine<U> {
+        &self.engine
+    }
+}
+
+impl<U> std::ops::DerefMut for PileupGuard<'_, U> {
+    fn deref_mut(&mut self) -> &mut PileupEngine<U> {
+        &mut self.engine
+    }
+}
+
+impl<U> std::fmt::Debug for PileupGuard<'_, U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PileupGuard").field("engine", &self.engine).finish_non_exhaustive()
+    }
+}
+
+impl<U> Drop for PileupGuard<'_, U> {
+    fn drop(&mut self) {
+        // Recover the store into the caller's slot. `take_store` returns
+        // `None` if the store was already moved out via `into_inner` (in
+        // which case the guard's Drop is suppressed by ManuallyDrop) or
+        // if the engine was constructed with an empty store and never
+        // populated. Either way, leave the slot untouched.
+        if let Some(store) = self.engine.take_store() {
+            *self.slot = store;
+        }
+    }
+}
+
 // r[impl pileup.position_iteration]
 impl<U> PileupEngine<U> {
     /// Core iteration logic used by [`pileups`](Self::pileups).
