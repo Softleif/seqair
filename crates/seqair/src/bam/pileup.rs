@@ -2,7 +2,7 @@
 //! flat fields per active read. Supports per-position max-depth.
 //!
 //! Read filtering happens at fetch time via
-//! [`CustomizeRecordStore::keep_record`](crate::bam::record_store::CustomizeRecordStore::keep_record),
+//! [`CustomizeRecordStore::filter`](crate::bam::record_store::CustomizeRecordStore::filter),
 //! not in this engine. Records that should not pollute the pileup never enter
 //! the store in the first place.
 

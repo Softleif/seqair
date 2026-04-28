@@ -60,7 +60,7 @@ struct ReadInfoBuilder {
 impl CustomizeRecordStore for ReadInfoBuilder {
     type Extra = ReadInfo;
 
-    fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<ReadInfo>) -> bool {
+    fn filter(&mut self, rec: &SlimRecord, _: &RecordStore<ReadInfo>) -> bool {
         !rec.flags.is_unmapped()
     }
 

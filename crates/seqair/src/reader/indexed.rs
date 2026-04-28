@@ -77,7 +77,7 @@ impl<R: Read + Seek> IndexedReader<R> {
 
     // r[impl unified.fetch_into_customized]
     /// Customized variant of [`Self::fetch_into`]. For each record that would
-    /// normally enter the store, `customize.keep_record` is invoked; if it
+    /// normally enter the store, `customize.filter` is invoked; if it
     /// returns `false`, the push is rolled back (zero slab waste, see
     /// [`RecordStore::push_raw`]). The returned [`FetchCounts`]
     /// distinguishes records the reader produced (`fetched`) from those

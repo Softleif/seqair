@@ -308,17 +308,19 @@ impl<U> RecordStore<U> {
     // r[impl record_store.extras.push_unit]
     // r[impl record_store.pre_filter.rollback]
     /// Decode a raw BAM record, append it, then consult
-    /// `customize.keep_record` to decide whether to commit or roll back.
+    /// `customize.filter_raw` (pre-extend) and `customize.filter` (post-compute)
+    /// to decide whether to commit or roll back.
     ///
-    /// Returns `Ok(Some(idx))` if the record was kept, `Ok(None)` if the
-    /// customizer rejected it (in which case all slab writes are truncated
-    /// back to their pre-push lengths — no waste). Pass `&mut ()` for no
-    /// filtering (the blanket [`CustomizeRecordStore`] impl on `()` keeps
-    /// every record).
+    /// Returns `Ok(Some(idx))` if the record survived all filters,
+    /// `Ok(None)` if `filter_raw` or `filter` rejected it. If `filter_raw`
+    /// rejects, no slab extension or base decode is performed.
     ///
-    /// `keep_record` sees both the freshly-parsed [`SlimRecord`] and the
-    /// `&self` store, so it can read qname, aux, etc. of the pending record
-    /// (those bytes live at the tail of the corresponding slabs until rollback).
+    /// `filter_raw` sees the raw bytes before any slab work. `filter` sees
+    /// the freshly-pushed [`SlimRecord`] and the `&self` store, so it can read
+    /// qname, aux, etc. (those bytes live at the tail of the corresponding
+    /// slabs until rollback). Pass `&mut ()` for no filtering (the blanket
+    /// [`CustomizeRecordStore`] impl on `()` keeps every record).
+    // r[impl record_store.filter_raw]
     pub fn push_raw<E: CustomizeRecordStore<Extra = U>>(
         &mut self,
         raw: &[u8],
@@ -336,6 +338,47 @@ impl<U> RecordStore<U> {
 
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let cigar_bytes = &raw[h.var_start..h.cigar_end];
+
+        // --- filter_raw: pre-filter before any slab extension or base decode ---
+        // r[impl record_store.filter_raw]
+        {
+            let qname_stripped = &qname_raw[..qname_actual_len];
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "all bounds \u{2264} qual_end \u{2264} raw.len()"
+            )]
+            let qual_slice = &raw[h.seq_end..h.qual_end];
+            #[allow(clippy::indexing_slicing, reason = "qual_end \u{2264} raw.len()")]
+            let aux_slice = &raw[h.qual_end..];
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "all bounds \u{2264} qual_end \u{2264} raw.len()"
+            )]
+            let packed_seq_slice = &raw[h.cigar_end..h.seq_end];
+            if !customize.filter_raw(&FilterRawFields {
+                pos: h.pos,
+                end_pos: h.pos, // not yet computed from CIGAR
+                flags: h.flags,
+                mapq: h.mapq,
+                n_cigar_ops: h.n_cigar_ops,
+                seq_len: h.seq_len,
+                matching_bases: 0,
+                indel_bases: 0,
+                tid: h.tid,
+                next_ref_id: h.next_ref_id,
+                next_pos: h.next_pos,
+                template_len: h.template_len,
+                qname: qname_stripped,
+                qual_bytes: qual_slice,
+                aux_bytes: aux_slice,
+                raw_cigar_bytes: Some(cigar_bytes),
+                cigar_ops: None,
+                packed_seq: Some(packed_seq_slice),
+                bases: None,
+            }) {
+                return Ok(None);
+            }
+        }
 
         // --- Write into cigar slab (typed; bulk memcpy on LE) ---
         // r[impl record_store.checked_offsets]
@@ -430,7 +473,7 @@ impl<U> RecordStore<U> {
         ));
 
         // r[impl record_store.pre_filter.rollback]
-        if customize.keep_record(
+        if customize.filter(
             self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
             self,
         ) {
@@ -447,13 +490,15 @@ impl<U> RecordStore<U> {
     // r[impl record_store.checked_offsets]
     // r[impl record_store.pre_filter.rollback]
     /// Append a record from pre-parsed fields (for SAM/CRAM readers), then
-    /// consult `customize.keep_record` to decide whether to commit or roll back.
+    /// consult `customize.filter_raw` (pre-extend) and `customize.filter`
+    /// (post-compute) to decide whether to commit or roll back.
     ///
     /// Writes directly into the slabs without going through BAM binary encoding.
     ///
-    /// Returns `Ok(Some(idx))` if kept, `Ok(None)` if `keep_record` rejected
-    /// the record (all slab writes are truncated back). Pass `&mut ()` to
-    /// disable filtering.
+    /// Returns `Ok(Some(idx))` if the record survived all filters,
+    /// `Ok(None)` if `filter_raw` or `filter` rejected it. If `filter_raw`
+    /// rejects, no slab extension is performed. Pass `&mut ()` to disable
+    /// filtering.
     #[expect(
         clippy::too_many_arguments,
         reason = "all fields are needed for zero-copy push into the record store slabs"
@@ -495,6 +540,32 @@ impl<U> RecordStore<U> {
             reason = "seq length is bounded by slab limits (u32); slab overflow checked via SlabOverflow"
         )]
         let seq_len = bases.len() as u32;
+
+        // --- filter_raw: pre-filter before any slab extension ---
+        // r[impl record_store.filter_raw]
+        if !customize.filter_raw(&FilterRawFields {
+            pos,
+            end_pos,
+            flags,
+            mapq,
+            n_cigar_ops,
+            seq_len,
+            matching_bases,
+            indel_bases,
+            tid,
+            next_ref_id,
+            next_pos,
+            template_len,
+            qname,
+            qual_bytes: qual,
+            aux_bytes: aux,
+            raw_cigar_bytes: None,
+            cigar_ops: Some(cigar_ops),
+            packed_seq: None,
+            bases: Some(bases),
+        }) {
+            return Ok(None);
+        }
 
         // Name slab
         // r[impl record_store.checked_offsets]
@@ -559,7 +630,7 @@ impl<U> RecordStore<U> {
         self.extras.push(customize.compute(record, self));
 
         // r[impl record_store.pre_filter.rollback]
-        if customize.keep_record(record, self) {
+        if customize.filter(record, self) {
             Ok(Some(idx))
         } else {
             self.rollback_last_push();
@@ -568,6 +639,71 @@ impl<U> RecordStore<U> {
     }
 }
 
+// r[impl record_store.filter_raw_fields]
+/// Fields available to [`CustomizeRecordStore::filter_raw`] before any slab
+/// data is written — the raw slices and parsed header fields from the incoming
+/// record.
+///
+/// This struct is passed to `filter_raw` so customizers can reject records
+/// without incurring any slab extension or base decode work.
+///
+/// # `push_raw` vs `push_fields`
+///
+/// From `push_raw` (BAM binary decode):
+/// - `raw_cigar_bytes` is `Some` (the raw BAM CIGAR bytes).
+/// - `packed_seq` is `Some` (4-bit packed sequence bytes).
+/// - `cigar_ops` and `bases` are `None` (not yet decoded).
+/// - `end_pos`, `matching_bases`, `indel_bases` are not yet computed (set to
+///   `pos`, `0`, `0` respectively).
+///
+/// From `push_fields` (pre-parsed SAM/CRAM fields):
+/// - `cigar_ops` is `Some` (decoded CIGAR ops).
+/// - `bases` is `Some` (decoded sequence bases).
+/// - `raw_cigar_bytes` and `packed_seq` are `None`.
+/// - `end_pos`, `matching_bases`, `indel_bases` are the pre-computed values.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct FilterRawFields<'a> {
+    /// 0-based reference position.
+    pub pos: Pos0,
+    /// Exclusive end position (computed from CIGAR; `pos` for `push_raw` since
+    /// CIGAR is not yet decoded).
+    pub end_pos: Pos0,
+    /// BAM flags.
+    pub flags: BamFlags,
+    /// Mapping quality (0..254).
+    pub mapq: u8,
+    /// Number of CIGAR ops.
+    pub n_cigar_ops: u16,
+    /// Query sequence length.
+    pub seq_len: u32,
+    /// Sum of M/=/X CIGAR op lengths. `0` for `push_raw` (not yet computed).
+    pub matching_bases: u32,
+    /// Sum of I/D CIGAR op lengths. `0` for `push_raw` (not yet computed).
+    pub indel_bases: u32,
+    /// Reference target index; -1 for unmapped.
+    pub tid: i32,
+    /// Mate reference target index.
+    pub next_ref_id: i32,
+    /// Mate 0-based reference position; -1 if unavailable.
+    pub next_pos: i32,
+    /// Signed template/insert size.
+    pub template_len: i32,
+    /// Query name (NUL stripped).
+    pub qname: &'a [u8],
+    /// Raw quality score bytes.
+    pub qual_bytes: &'a [u8],
+    /// Raw auxiliary tag bytes (BAM binary format).
+    pub aux_bytes: &'a [u8],
+    /// Raw BAM CIGAR bytes (`push_raw` path); `None` from `push_fields`.
+    pub raw_cigar_bytes: Option<&'a [u8]>,
+    /// Decoded CIGAR ops (`push_fields` path); `None` from `push_raw`.
+    pub cigar_ops: Option<&'a [CigarOp]>,
+    /// 4-bit packed sequence bytes (`push_raw` path); `None` from `push_fields`.
+    pub packed_seq: Option<&'a [u8]>,
+    /// Decoded sequence bases (`push_fields` path); `None` from `push_raw`.
+    pub bases: Option<&'a [Base]>,
+}
 // r[impl record_store.customize.trait]
 /// Customize how records flow into a [`RecordStore`]: filter and compute
 /// per-record extras, both inline at push time.
@@ -579,18 +715,20 @@ impl<U> RecordStore<U> {
 ///
 /// # Ordering and state
 ///
-/// Both methods run inline during push, for every record:
+/// Three methods run inline during push, for every record:
 ///
-/// 1. **`compute`** runs first, producing the extra value for the
+/// 1. **`filter_raw`** runs before any slab extension or base decode.
+///    Returning `false` skips the record with zero wasted work.
+/// 2. **`compute`** runs next, producing the extra value for the
 ///    freshly-pushed record. The `&RecordStore<Self::Extra>` argument
 ///    includes extras from previously-pushed records.
-/// 2. **`keep_record`** runs next. If it returns `false`, all slab writes
+/// 3. **`filter`** runs last. If it returns `false`, all slab writes
 ///    for this record (including the just-computed extra) are rolled back
 ///    with zero waste — it is as if the record was never pushed.
 ///
-/// Because `compute` runs before `keep_record`, heavy computation on
-/// records likely to be dropped wastes work. Make `compute` cheap, or
-/// include the necessary cheap checks in both methods.
+/// Because `filter_raw` runs before any work, use it for cheap checks
+/// (mapq, flags, tid, qname prefix) that can reject records without
+/// touching the slabs.
 ///
 /// The same `&mut E` instance is reused across regions (`Readers` holds one
 /// customize value for its whole lifetime). Implementors that want
@@ -600,11 +738,11 @@ impl<U> RecordStore<U> {
 ///
 /// # Example
 ///
-/// A customizer that drops low-quality reads and tags each kept read with
-/// its qname length:
+/// A customizer that drops low-quality reads early and tags each kept read
+/// with its qname length:
 ///
 /// ```
-/// use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
+/// use seqair::bam::record_store::{CustomizeRecordStore, FilterRawFields, RecordStore, SlimRecord};
 ///
 /// #[derive(Clone, Default)]
 /// struct QnameLen { min_mapq: u8 }
@@ -612,8 +750,8 @@ impl<U> RecordStore<U> {
 /// impl CustomizeRecordStore for QnameLen {
 ///     type Extra = usize;
 ///
-///     fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<usize>) -> bool {
-///         rec.mapq >= self.min_mapq
+///     fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
+///         fields.mapq >= self.min_mapq
 ///     }
 ///
 ///     fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<usize>) -> usize {
@@ -624,11 +762,26 @@ impl<U> RecordStore<U> {
 pub trait CustomizeRecordStore: Clone {
     /// The per-record data produced by `compute`.
     type Extra;
-
+    // r[impl record_store.filter_raw]
+    /// Pre-filter on raw data: called before any slab extension or base
+    /// decoding. Returning `false` skips the record with zero wasted work —
+    /// no bytes are memcpy'd into slabs and no bases are decoded.
+    ///
+    /// Default: keep every record. Override to filter at the earliest
+    /// possible point.
+    ///
+    /// Called from `push_raw` after parsing the BAM header and slicing
+    /// the raw bytes, and from `push_fields` before any `extend_from_slice`.
+    /// The [`FilterRawFields`] struct carries all header fields plus the
+    /// raw slices (or decoded cigar/bases depending on the path).
+    #[inline]
+    fn filter_raw(&mut self, _fields: &FilterRawFields<'_>) -> bool {
+        true
+    }
     // r[impl record_store.customize.trait]
-    /// Pre-filter: called on each freshly-pushed record. Returning `false`
-    /// rolls back the slab writes for this record — it is as if the record was
-    /// never fetched.
+    /// Post-compute filter: called on each freshly-pushed record after
+    /// [`compute`](Self::compute). Returning `false` rolls back the slab
+    /// writes for this record — it is as if the record was never fetched.
     ///
     /// Default: keep every record. Override to filter at push time.
     ///
@@ -637,12 +790,11 @@ pub trait CustomizeRecordStore: Clone {
     /// data via `rec.qname(store)`, `rec.aux(store)`, etc. The freshly-pushed
     /// record is at the tail of each slab, so all of its bytes are accessible.
     #[inline]
-    fn keep_record(&mut self, _rec: &SlimRecord, _store: &RecordStore<Self::Extra>) -> bool {
+    fn filter(&mut self, _rec: &SlimRecord, _store: &RecordStore<Self::Extra>) -> bool {
         true
     }
-
     /// Compute the extra for `rec`. Called inline at push time for every
-    /// record (before [`keep_record`](Self::keep_record)), so the value is
+    /// record (before [`filter`](Self::filter)), so the value is
     /// wasted if the record is later rejected. Use the `rec.seq(store)`,
     /// `rec.qual(store)`, `rec.aux(store)`, `rec.qname(store)`, and
     /// `rec.cigar(store)` getters on `SlimRecord` to read variable-length
@@ -655,7 +807,7 @@ pub trait CustomizeRecordStore: Clone {
 ///
 /// `RecordStore<()>` does not need extras; `Readers<()>` uses this so
 /// `compute` is a zero-cost no-op at push time.
-/// The default `keep_record` (always `true`) means `Readers<()>` never
+/// The default `filter_raw` and `filter` (always `true`) mean `Readers<()>` never
 /// filters either, so `&mut ()` is the no-op customizer to pass into
 /// `push_raw`/`push_fields`/`fetch_into_customized`.
 impl CustomizeRecordStore for () {
@@ -961,7 +1113,7 @@ mod tests {
     struct KeepNone;
     impl CustomizeRecordStore for KeepNone {
         type Extra = ();
-        fn keep_record(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
+        fn filter(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
             false
         }
         fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
@@ -972,7 +1124,7 @@ mod tests {
     struct AcceptFlag(bool);
     impl CustomizeRecordStore for AcceptFlag {
         type Extra = ();
-        fn keep_record(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
+        fn filter(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
             self.0
         }
         fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
@@ -1118,16 +1270,109 @@ mod tests {
         assert_eq!(store.len(), 2, "store should hold A and C only");
     }
 
+    // r[verify record_store.filter_raw]
+    #[test]
+    fn push_raw_filter_raw_rejection_avoids_slab_write() {
+        /// Reject everything in filter_raw — no slab extensions should happen.
+        #[derive(Clone, Default)]
+        struct RejectRaw;
+        impl CustomizeRecordStore for RejectRaw {
+            type Extra = ();
+            fn filter_raw(&mut self, _: &FilterRawFields<'_>) -> bool {
+                false
+            }
+            fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+        }
+
+        let mut store = RecordStore::new();
+        let before = (
+            store.names.len(),
+            store.bases.len(),
+            store.cigar.len(),
+            store.qual.len(),
+            store.aux.len(),
+        );
+
+        let raw = make_raw_record(b"readX", 8, 2);
+        let result = store.push_raw(&raw, &mut RejectRaw).unwrap();
+        assert_eq!(result, None);
+
+        let after = (
+            store.names.len(),
+            store.bases.len(),
+            store.cigar.len(),
+            store.qual.len(),
+            store.aux.len(),
+        );
+        assert_eq!(before, after, "filter_raw rejection must not extend any slab");
+    }
+
+    // r[verify record_store.filter_raw]
+    #[test]
+    fn push_fields_filter_raw_rejection_avoids_slab_write() {
+        use seqair_types::Base;
+
+        #[derive(Clone, Default)]
+        struct RejectRaw;
+        impl CustomizeRecordStore for RejectRaw {
+            type Extra = ();
+            fn filter_raw(&mut self, _: &FilterRawFields<'_>) -> bool {
+                false
+            }
+            fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+        }
+
+        let mut store = RecordStore::new();
+        let before = (
+            store.names.len(),
+            store.bases.len(),
+            store.cigar.len(),
+            store.qual.len(),
+            store.aux.len(),
+        );
+
+        let result = store
+            .push_fields(
+                Pos0::new(0).unwrap(),
+                Pos0::new(4).unwrap(),
+                BamFlags::empty(),
+                42,
+                4,
+                0,
+                b"readY",
+                &[CigarOp::new(cigar::CigarOpType::Match, 5)],
+                &[Base::A; 5],
+                &[30; 5],
+                b"tagdata",
+                0,
+                -1,
+                0,
+                0,
+                &mut RejectRaw,
+            )
+            .unwrap();
+        assert_eq!(result, None);
+
+        let after = (
+            store.names.len(),
+            store.bases.len(),
+            store.cigar.len(),
+            store.qual.len(),
+            store.aux.len(),
+        );
+        assert_eq!(before, after, "filter_raw rejection must not extend any slab");
+    }
+
     // r[verify record_store.pre_filter.rollback]
     #[test]
     fn push_raw_filter_can_read_slim_record_and_store() {
         // Customizer that asserts the freshly-pushed record's fields are
-        // visible (qname, mapq) by the time keep_record is called.
+        // visible (qname, mapq) by the time filter is called.
         #[derive(Clone, Default)]
         struct AssertReadX;
         impl CustomizeRecordStore for AssertReadX {
             type Extra = ();
-            fn keep_record(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> bool {
+            fn filter(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> bool {
                 assert_eq!(rec.mapq, 0);
                 let qname = rec.qname(store).expect("qname slab must be readable");
                 assert_eq!(qname, b"readX");
@@ -1533,7 +1778,7 @@ mod tests {
                         .expect("to_bam_bytes must succeed on synthetic input");
                     a.push_raw(&raw_buf, &mut ())
                         .expect("push_raw must accept BAM bytes from to_bam_bytes")
-                        .expect("default keep_record returns true");
+                        .expect("default filter returns true");
                 }
 
                 // Store B: push_fields directly (system under test).

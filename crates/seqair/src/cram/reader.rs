@@ -403,7 +403,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     // r[impl cram.fetch_into_customized.push_time]
     /// Customized variant: each record that passes the reader's built-in
     /// overlap/tid/unmapped checks is pushed into the store, with
-    /// `customize.keep_record` consulted at push time. Rejection triggers
+    /// `customize.filter` consulted at push time. Rejection triggers
     /// the same zero-waste rollback used by BAM/SAM — the slabs are
     /// truncated back to their pre-push lengths. The returned
     /// [`FetchCounts`](crate::reader::FetchCounts) reports `fetched`

@@ -100,7 +100,7 @@ fn single_arena_get_per_record_entry_still_correct() {
     struct DropSecondary;
     impl CustomizeRecordStore for DropSecondary {
         type Extra = ();
-        fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+        fn filter(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
             !rec.flags.is_secondary()
         }
         fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}

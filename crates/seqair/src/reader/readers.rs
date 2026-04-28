@@ -23,7 +23,7 @@ use tracing::instrument;
 /// uniform open/fork/fetch semantics.
 ///
 /// The optional type parameter `E` attaches a [`CustomizeRecordStore`]
-/// value — user code defines per-record filtering (`keep_record`) and
+/// value — user code defines per-record filtering (`filter`) and
 /// per-record data computation (`compute`), and accesses the computed data
 /// during pileup iteration via
 /// [`AlignmentView::extra`](crate::bam::pileup::AlignmentView::extra). When
@@ -323,7 +323,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
         }
 
         // Split borrows: fetch writes into `store` while customize is consulted
-        // for keep_record. Three disjoint &mut borrows of self.
+        // for filter. Three disjoint &mut borrows of self.
         let alignment = &mut self.alignment;
         let store = &mut self.store;
         let customize = &mut self.customize;

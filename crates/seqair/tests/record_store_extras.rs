@@ -422,7 +422,7 @@ struct MinMapq {
 }
 impl CustomizeRecordStore for MinMapq {
     type Extra = ();
-    fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+    fn filter(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
         rec.mapq >= self.threshold
     }
     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
@@ -433,7 +433,7 @@ impl CustomizeRecordStore for MinMapq {
 struct DropAll;
 impl CustomizeRecordStore for DropAll {
     type Extra = ();
-    fn keep_record(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
+    fn filter(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
         false
     }
     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
@@ -560,7 +560,7 @@ fn cram_fetch_into_customized_applies_filter_at_push_time() {
     struct EvenPos;
     impl CustomizeRecordStore for EvenPos {
         type Extra = ();
-        fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+        fn filter(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
             rec.pos.as_i64() % 2 == 0
         }
         fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
@@ -624,7 +624,7 @@ struct ReadGroupFilter {
 }
 impl CustomizeRecordStore for ReadGroupFilter {
     type Extra = ();
-    fn keep_record(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> bool {
+    fn filter(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> bool {
         // The just-pushed record's aux bytes live at the tail of the aux slab.
         let Ok(aux) = rec.aux(store) else { return false };
         extract_rg(aux.as_bytes()) == Some(self.wanted.as_slice())
