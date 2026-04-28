@@ -291,6 +291,23 @@ pub struct FromBamHeader {
     pub contigs: Vec<super::record_encoder::ContigId>,
 }
 
+impl FromBamHeader {
+    /// Look up the [`ContigId`](super::record_encoder::ContigId) registered
+    /// for `tid`.
+    ///
+    /// `tid` is a validated index into the BAM header that produced this
+    /// `FromBamHeader`, so the lookup succeeds whenever both come from the
+    /// same header. Returns `None` if the `tid` was resolved against a
+    /// different header (mismatched `Readers` foot-gun).
+    #[must_use]
+    pub fn contig(&self, tid: crate::reader::Tid) -> Option<&super::record_encoder::ContigId> {
+        // tid.as_u32() is bounded by the header's target count (Tid invariant).
+        // u32 -> usize widens on 64-bit and is equal-width on 32-bit; never
+        // truncates on supported platforms.
+        self.contigs.get(tid.as_u32() as usize)
+    }
+}
+
 /// Initial phase: set file format, contigs, and metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct Contigs;
@@ -706,6 +723,36 @@ impl VcfHeaderBuilder<Samples> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // r[verify vcf_header.from_bam_header]
+    /// `FromBamHeader::contig(tid)` must return the same `ContigId` as
+    /// indexing `from_bam.contigs[tid as usize]`, and `None` for an
+    /// out-of-range tid (the cross-header foot-gun).
+    #[test]
+    fn from_bam_header_contig_lookup() {
+        let sam =
+            "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n@SQ\tSN:chr2\tLN:2000\n@SQ\tSN:chrM\tLN:16000\n";
+        let header = BamHeader::from_sam_text(sam).unwrap();
+        let from_bam = VcfHeaderBuilder::from_bam_header(&header).unwrap();
+
+        for tid_u32 in 0..3u32 {
+            let tid = crate::reader::ResolveTid::resolve_tid(&tid_u32, &header).unwrap();
+            let via_helper = from_bam.contig(tid).expect("tid in range");
+            let via_index = &from_bam.contigs[tid_u32 as usize];
+            // ContigId doesn't impl PartialEq; compare its public fields.
+            assert_eq!(via_helper.tid(), via_index.tid());
+            assert_eq!(via_helper.name(), via_index.name());
+        }
+
+        // Out-of-range tid (e.g. resolved against a different header). Build
+        // a Tid with a numeric value past the contig list so the lookup
+        // misses, but stay within u32.
+        let bigger =
+            "@HD\tVN:1.6\n@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n@SQ\tSN:d\tLN:1\n";
+        let bigger_header = BamHeader::from_sam_text(bigger).unwrap();
+        let stale_tid = crate::reader::ResolveTid::resolve_tid(&3u32, &bigger_header).unwrap();
+        assert!(from_bam.contig(stale_tid).is_none());
+    }
 
     // r[verify vcf_header.builder]
     // r[verify vcf_header.file_format]

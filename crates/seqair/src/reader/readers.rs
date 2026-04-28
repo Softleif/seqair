@@ -316,12 +316,13 @@ impl<E: CustomizeRecordStore> Readers<E> {
             .fetch_seq_into_u64(contig_name, start.as_u64(), stop_u64, &mut self.fasta_buf)
             .map_err(|source| ReaderError::FastaFetch {
             contig: contig_name.clone(),
-            start: u32::try_from(start.as_i64().max(0)).unwrap_or(0),
-            end: u32::try_from(end.as_i64().max(0)).unwrap_or(0),
+            start: start.as_u64(),
+            end: end.as_u64(),
             source,
         })?;
-        let fasta_buf = std::mem::take(&mut self.fasta_buf);
-        let bases = Base::from_ascii_vec(fasta_buf);
+        // Convert in-place and copy into the Rc<[Base]> while keeping
+        // `fasta_buf` (and its capacity) for the next pileup call.
+        let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);
         let ref_seq = RefSeq::new(Rc::from(bases), start);
 
         let store = std::mem::take(&mut self.store);
@@ -354,9 +355,11 @@ impl<E: CustomizeRecordStore> Readers<E> {
     // r[impl fasta.fetch.buffer_reuse]
     /// Fetch a reference sequence region and return it as `Rc<[Base]>`.
     ///
-    /// Uses an internal buffer whose capacity is retained across calls,
-    /// avoiding per-segment allocation. The returned `Rc<[Base]>` owns its
-    /// own copy — the internal buffer is reused on the next call.
+    /// Uses an internal buffer whose capacity is retained across calls. The
+    /// returned `Rc<[Base]>` owns its own copy of the bases — the internal
+    /// buffer is converted in place and the slice is copied into the `Rc`
+    /// allocation, so we pay one allocation for the `Rc` and zero for the
+    /// buffer on subsequent calls.
     pub fn fetch_base_seq(
         &mut self,
         name: &str,
@@ -364,11 +367,9 @@ impl<E: CustomizeRecordStore> Readers<E> {
         stop: Pos0,
     ) -> Result<Rc<[Base]>, FastaError> {
         self.fasta.fetch_seq_into(name, start, stop, &mut self.fasta_buf)?;
-        // Take the buffer so from_ascii_vec can reinterpret it in-place (safe),
-        // then create the Rc (which copies). The buffer capacity is lost but
-        // fasta_buf re-grows on the next call.
-        let buf = std::mem::take(&mut self.fasta_buf);
-        let bases = Base::from_ascii_vec(buf);
+        // Convert ASCII → Base in place; the &[Base] borrow keeps fasta_buf
+        // alive (and its capacity).
+        let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);
         Ok(Rc::from(bases))
     }
 
@@ -378,5 +379,124 @@ impl<E: CustomizeRecordStore> Readers<E> {
 
     pub fn alignment_mut(&mut self) -> &mut IndexedReader {
         &mut self.alignment
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
+mod tests {
+    use super::*;
+    use crate::reader::segment::Segment;
+    use seqair_types::{Pos0, SmolStr};
+
+    fn test_bam_path() -> &'static Path {
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam"))
+    }
+
+    fn test_fasta_path() -> &'static Path {
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.gz"))
+    }
+
+    // r[verify fasta.fetch.buffer_reuse]
+    /// `fetch_base_seq` must keep `fasta_buf`'s capacity across calls so the
+    /// next fetch doesn't reallocate. Pre-fix this test would have failed:
+    /// `mem::take` left an empty Vec with zero capacity.
+    #[test]
+    fn fetch_base_seq_retains_buffer_capacity() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let start = Pos0::new(6_100_000).unwrap();
+        let stop = Pos0::new(6_101_000).unwrap();
+        let _first = readers.fetch_base_seq("chr19", start, stop).unwrap();
+        let cap_after_first = readers.fasta_buf.capacity();
+        assert!(cap_after_first > 0, "buffer should have grown to hold the fetched region");
+
+        // Second call: capacity must not drop. (Could grow if region is bigger,
+        // but for the same region must stay equal.)
+        let _second = readers.fetch_base_seq("chr19", start, stop).unwrap();
+        assert_eq!(
+            cap_after_first,
+            readers.fasta_buf.capacity(),
+            "second fetch_base_seq must reuse the existing buffer allocation"
+        );
+    }
+
+    // r[verify unified.readers_pileup]
+    /// Pileup must reject a `Segment` whose contig name doesn't resolve to
+    /// the same tid in this `Readers`' header. Catches the foot-gun where a
+    /// `Segment` built against one `Readers` is fed to another.
+    #[test]
+    fn pileup_rejects_segment_with_mismatched_contig_name() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        // Resolve a real tid so the segment's `tid()` is in range, but use a
+        // contig name that doesn't exist in the header.
+        let chr19_tid = readers.header().tid("chr19").expect("test BAM has chr19");
+        let real_tid =
+            crate::reader::ResolveTid::resolve_tid(&chr19_tid, readers.header()).unwrap();
+        let bogus_contig: SmolStr = "chr_does_not_exist".into();
+        let last_pos =
+            Pos0::new(u32::try_from(readers.header().target_len(chr19_tid).unwrap() - 1).unwrap())
+                .unwrap();
+        let segment = Segment::new(
+            real_tid,
+            bogus_contig.clone(),
+            Pos0::new(0).unwrap(),
+            Pos0::new(99).unwrap(),
+            0,
+            0,
+            last_pos,
+        )
+        .unwrap();
+
+        let err = readers.pileup(&segment).unwrap_err();
+        match err {
+            ReaderError::SegmentHeaderMismatch { contig, expected_tid } => {
+                assert_eq!(contig, bogus_contig);
+                assert_eq!(expected_tid, real_tid.as_u32());
+            }
+            other => panic!("expected SegmentHeaderMismatch, got {other:?}"),
+        }
+    }
+
+    // r[verify unified.readers_pileup]
+    /// The mismatch check also catches the case where the contig name *does*
+    /// exist in the header but resolves to a different numeric tid than the
+    /// segment's pre-resolved tid (e.g., a segment built against a different
+    /// header where contig order differs).
+    #[test]
+    fn pileup_rejects_segment_with_mismatched_tid() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        // Find two distinct tids in the header — a segment built with tid
+        // for chrA but contig name for chrB triggers the same error path.
+        let chr19_tid = readers.header().tid("chr19").expect("test BAM has chr19");
+        // Pick a different tid (any other contig); fall back to chr19 again
+        // if there's only one contig (then the test trivially passes by name
+        // mismatch, not tid).
+        let other_tid: u32 = (0..u32::try_from(readers.header().target_count()).unwrap())
+            .find(|t| *t != chr19_tid)
+            .expect("test BAM has more than one contig");
+        let other_name: SmolStr = readers.header().target_name(other_tid).unwrap().into();
+
+        // Resolve a Tid newtype against the wrong numeric id.
+        let chr19_real_tid =
+            crate::reader::ResolveTid::resolve_tid(&chr19_tid, readers.header()).unwrap();
+        let last_pos =
+            Pos0::new(u32::try_from(readers.header().target_len(chr19_tid).unwrap() - 1).unwrap())
+                .unwrap();
+        let segment = Segment::new(
+            chr19_real_tid,
+            other_name,
+            Pos0::new(0).unwrap(),
+            Pos0::new(99).unwrap(),
+            0,
+            0,
+            last_pos,
+        )
+        .unwrap();
+
+        let err = readers.pileup(&segment).unwrap_err();
+        assert!(
+            matches!(err, ReaderError::SegmentHeaderMismatch { .. }),
+            "expected SegmentHeaderMismatch, got {err:?}"
+        );
     }
 }

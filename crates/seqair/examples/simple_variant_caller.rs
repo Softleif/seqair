@@ -29,13 +29,13 @@
 use anyhow::Context;
 use clap::Parser as _;
 use seqair::bam::pileup::PileupOp;
-use seqair::reader::{Readers, SegmentOptions};
+use seqair::reader::{Readers, ResolveTid, SegmentOptions};
 use seqair::vcf::{
     Alleles, FormatGt, FormatInt, Genotype, InfoInt, Number, OutputFormat, ValueType,
     VcfHeaderBuilder, Writer,
     record_encoder::{Arr, FormatFieldDef, Gt, InfoFieldDef, Scalar},
 };
-use seqair_types::{Base, Pos0, Pos1};
+use seqair_types::{Base, Pos1, RegionString};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ struct Cli {
 
     /// Region to call (e.g. "chr1:1000-2000"). Required.
     #[clap(long, short)]
-    region: String,
+    region: RegionString,
 
     /// Sample name to use in the VCF header.
     #[clap(long, default_value = "SAMPLE")]
@@ -139,13 +139,18 @@ fn main() -> anyhow::Result<()> {
         Readers::<DropUseless>::open_customized(&args.input, &args.reference, DropUseless)
             .context("could not open BAM + FASTA")?;
 
-    let (tid, start, end) = parse_region(&args.region, readers.header())?;
-    let contig_name = readers.header().target_name(tid).context("unknown tid")?.to_owned();
-
     // ── Build VCF header ───────────────────────────────────────────────
     // from_bam_header copies all @SQ lines so contig names/lengths match.
     let from_bam = VcfHeaderBuilder::from_bam_header(readers.header())
         .context("could not build VCF header from BAM")?;
+
+    // All segments of a single-contig region share one ContigId, so resolve
+    // it once via the new `FromBamHeader::contig(tid)` helper before we
+    // partial-move `from_bam.builder` into the typestate chain below.
+    let region_tid = args.region.chromosome.as_str().resolve_tid(readers.header())?;
+    let region_contig =
+        from_bam.contig(region_tid).context("contig not registered in VCF header")?.clone();
+
     let mut builder = from_bam.builder.infos();
 
     // INFO fields: DP (total depth), AF (alt allele frequency)
@@ -202,15 +207,15 @@ fn main() -> anyhow::Result<()> {
     let mut vcf_writer = vcf_writer.write_header(&header)?;
 
     // ── Pileup and call variants ───────────────────────────────────────
-    let start_pos = Pos0::new(start).context("invalid start position")?;
-    let end_pos = Pos0::new(end).context("invalid end position")?;
     let min_mapq = args.min_mapq;
 
     // Tile the requested region into 100 kb segments. This example processes
-    // them sequentially; a real caller would parallelize across forks.
+    // them sequentially; a real caller would parallelize across forks. The
+    // parsed RegionString is fed straight to `segments()` — no manual region
+    // parsing needed.
     let max_len = std::num::NonZeroU32::new(100_000).expect("non-zero literal");
     let opts = SegmentOptions::new(max_len);
-    let plan: Vec<_> = readers.segments((tid, start_pos, end_pos), opts)?.collect();
+    let plan: Vec<_> = readers.segments(&args.region, opts)?.collect();
     let mut n_calls = 0u32;
 
     for segment in &plan {
@@ -262,8 +267,7 @@ fn main() -> anyhow::Result<()> {
 
             // Encode through the typestate chain:
             //   begin_record → filter_pass (INFO) → begin_samples (FORMAT) → emit
-            let enc =
-                vcf_writer.begin_record(&from_bam.contigs[tid as usize], pos1, &alleles, None)?;
+            let enc = vcf_writer.begin_record(&region_contig, pos1, &alleles, None)?;
             let mut enc = enc.filter_pass();
             dp_info.encode(&mut enc, bc.total);
             af_info.encode(&mut enc, &[af as f32]);
@@ -290,28 +294,11 @@ fn main() -> anyhow::Result<()> {
     output.flush()?;
 
     eprintln!(
-        "called {n_calls} SNV(s) in {contig_name}:{start}-{end} (min_depth={}, min_af={:.2})",
-        args.min_depth, args.min_af,
+        "called {n_calls} SNV(s) in {region} (min_depth={}, min_af={:.2})",
+        args.min_depth,
+        args.min_af,
+        region = args.region,
     );
 
     Ok(())
-}
-
-fn parse_region(region: &str, header: &seqair::bam::BamHeader) -> anyhow::Result<(u32, u32, u32)> {
-    if let Some((name, range)) = region.split_once(':') {
-        let tid = header.tid(name).with_context(|| format!("contig '{name}' not found"))?;
-        let (start_str, end_str) =
-            range.split_once('-').with_context(|| format!("invalid range: {range}"))?;
-        let start: u32 = start_str
-            .replace(',', "")
-            .parse()
-            .with_context(|| format!("invalid start: {start_str}"))?;
-        let end: u32 =
-            end_str.replace(',', "").parse().with_context(|| format!("invalid end: {end_str}"))?;
-        Ok((tid, start.saturating_sub(1), end))
-    } else {
-        let tid = header.tid(region).with_context(|| format!("contig '{region}' not found"))?;
-        let len = header.target_len(tid).unwrap_or(0) as u32;
-        Ok((tid, 0, len))
-    }
 }

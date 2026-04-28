@@ -29,6 +29,24 @@ use super::{
     resolve::{ResolveTid, Tid},
 };
 
+/// Errors returned by [`Segment::new`] when invariants are violated.
+///
+/// The constructor is `pub(crate)`, so external callers never hit these —
+/// they're surfaced for the iterator's tests and any future internal caller.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SegmentInvariantError {
+    #[error("segment start {start} > end {end}")]
+    StartAfterEnd { start: u64, end: u64 },
+    #[error("segment end {end} exceeds contig_last_pos {contig_last_pos}")]
+    EndPastContig { end: u64, contig_last_pos: u64 },
+    #[error(
+        "overlap_start ({overlap_start}) + overlap_end ({overlap_end}) \
+         must be < tile length ({len})"
+    )]
+    OverlapTooLarge { overlap_start: u32, overlap_end: u32, len: u32 },
+}
+
 // r[impl unified.segment_struct]
 /// One bounded tile of a genomic region, ready for [`Readers::pileup`].
 ///
@@ -49,6 +67,9 @@ pub struct Segment {
     start: Pos0,
     /// Inclusive 0-based end of this tile.
     end: Pos0,
+    /// Number of bases covered by this tile (= `end - start + 1`). Computed
+    /// once at construction so accessors don't have to re-derive it.
+    len: u32,
     overlap_start: u32,
     overlap_end: u32,
     /// Inclusive 0-based last position of the contig this tile belongs to.
@@ -59,15 +80,12 @@ impl Segment {
     /// Construct a segment. `pub(crate)` so only the iterator and tests in
     /// this crate can build them.
     ///
-    /// Invariants enforced by `debug_assert!`:
+    /// Returns [`SegmentInvariantError`] when:
     ///
-    /// * `start <= end <= contig_last_pos`
-    /// * `overlap_start + overlap_end < len()` — guarantees `core_range()`
-    ///   yields a non-empty inclusive range (`r[unified.segment_overlap]`).
-    ///   A future broken caller that violates this would silently make
-    ///   `core_range()` return the entire tile, breaking neighbor-dedupe
-    ///   downstream. The assert catches it in debug builds.
-    #[must_use]
+    /// * `start > end`
+    /// * `end > contig_last_pos`
+    /// * `overlap_start + overlap_end >= len()` — would make `core_range()`
+    ///   cover the entire tile, breaking neighbor-dedupe downstream.
     pub(crate) fn new(
         tid: Tid,
         contig: SmolStr,
@@ -76,18 +94,37 @@ impl Segment {
         overlap_start: u32,
         overlap_end: u32,
         contig_last_pos: Pos0,
-    ) -> Self {
-        debug_assert!(start <= end, "Segment::new: start > end");
-        debug_assert!(end <= contig_last_pos, "Segment::new: end > contig_last_pos");
-        // overlap_start + overlap_end < (end - start + 1).
-        let span = end.as_u64().saturating_sub(start.as_u64()).saturating_add(1);
+    ) -> Result<Self, SegmentInvariantError> {
+        if start > end {
+            return Err(SegmentInvariantError::StartAfterEnd {
+                start: start.as_u64(),
+                end: end.as_u64(),
+            });
+        }
+        if end > contig_last_pos {
+            return Err(SegmentInvariantError::EndPastContig {
+                end: end.as_u64(),
+                contig_last_pos: contig_last_pos.as_u64(),
+            });
+        }
+        // start <= end <= i32::MAX (both are Pos0), so end - start + 1 fits
+        // in u32 exactly: max value is i32::MAX + 1 = 2_147_483_648, and that
+        // round-trips through u32 since u32::MAX = 4_294_967_295. Use checked
+        // arithmetic so a future Pos0 representation widening can't quietly
+        // wrap.
+        let span_u64 =
+            end.as_u64().checked_sub(start.as_u64()).and_then(|d| d.checked_add(1)).ok_or(
+                SegmentInvariantError::StartAfterEnd { start: start.as_u64(), end: end.as_u64() },
+            )?;
+        let len = u32::try_from(span_u64).map_err(|_| SegmentInvariantError::EndPastContig {
+            end: end.as_u64(),
+            contig_last_pos: contig_last_pos.as_u64(),
+        })?;
         let overlap_total = u64::from(overlap_start).saturating_add(u64::from(overlap_end));
-        debug_assert!(
-            overlap_total < span,
-            "Segment::new: overlap_start ({overlap_start}) + overlap_end ({overlap_end}) \
-             must be < tile length ({span})"
-        );
-        Self { tid, contig, start, end, overlap_start, overlap_end, contig_last_pos }
+        if overlap_total >= u64::from(len) {
+            return Err(SegmentInvariantError::OverlapTooLarge { overlap_start, overlap_end, len });
+        }
+        Ok(Self { tid, contig, start, end, len, overlap_start, overlap_end, contig_last_pos })
     }
 
     /// The validated target id of the contig this tile lies on.
@@ -117,16 +154,7 @@ impl Segment {
     /// Number of bases covered by this tile (= `end - start + 1`). Always >= 1.
     #[must_use]
     pub fn len(&self) -> u32 {
-        // start <= end <= i32::MAX (Segment::new debug_asserts), so
-        // end - start + 1 fits in u64 with room to spare and in u32 exactly.
-        let span = self
-            .end
-            .as_u64()
-            .checked_sub(self.start.as_u64())
-            .expect("Segment invariant: start <= end")
-            .checked_add(1)
-            .expect("Segment invariant: end <= i32::MAX, so span <= i32::MAX + 1 fits in u64");
-        u32::try_from(span).expect("span <= i32::MAX + 1 fits in u32")
+        self.len
     }
 
     /// Always `false`. A `Segment` is built only by the iterator, which
@@ -330,26 +358,52 @@ pub(crate) fn resolve_target<T: IntoSegmentTarget>(
     private::IntoSegmentTargetSealed::resolve_target(target, header)
 }
 
-/// Helper: build a `ResolvedRange` covering the entire contig identified by
-/// `tid`. Errors if the contig has zero length.
-fn whole_contig(header: &BamHeader, tid: Tid) -> Result<ResolvedRange, ReaderError> {
-    let name = header
-        .target_name(tid.as_u32())
-        .ok_or_else(|| super::resolve::TidError::TidOutOfRange {
-            tid: tid.as_u32(),
-            n_targets: u32::try_from(header.target_count()).unwrap_or(u32::MAX),
-        })?
-        .to_owned();
+/// Cap a `usize` target count to `u32`, returning a typed error if the cap
+/// would silently lose information. BAM allows up to `i32::MAX` references,
+/// so this overflow is theoretical, but we surface it as a real error rather
+/// than saturating to `u32::MAX`.
+fn target_count_u32(header: &BamHeader) -> Result<u32, ReaderError> {
+    let count = header.target_count();
+    u32::try_from(count).map_err(|_| ReaderError::HeaderTargetCountOverflow { count })
+}
+
+/// Helper: build a `ResolvedRange` for the contig identified by `tid`,
+/// reusing `name` instead of looking it up in the header. Used when the
+/// caller already has the contig name as a [`SmolStr`] (e.g. `&SmolStr`,
+/// `&RegionString`) so we skip a redundant `target_name` + `String::to_owned`
+/// + `Into<SmolStr>` round-trip.
+fn whole_contig_with_name(
+    header: &BamHeader,
+    tid: Tid,
+    name: SmolStr,
+) -> Result<ResolvedRange, ReaderError> {
     let len = header.target_len(tid.as_u32()).unwrap_or(0);
-    let contig: SmolStr = name.into();
     if len == 0 {
-        return Err(ReaderError::EmptyContig { name: contig });
+        return Err(ReaderError::EmptyContig { name });
     }
     let last = len.checked_sub(1).expect("len > 0 checked above");
     let last_u32 = u32::try_from(last).map_err(|_| ReaderError::RegionEndTooLarge { end: last })?;
     let contig_last_pos =
         Pos0::new(last_u32).ok_or(ReaderError::RegionEndTooLarge { end: last })?;
-    Ok(ResolvedRange { tid, contig, start: Pos0::ZERO, end: contig_last_pos, contig_last_pos })
+    Ok(ResolvedRange {
+        tid,
+        contig: name,
+        start: Pos0::ZERO,
+        end: contig_last_pos,
+        contig_last_pos,
+    })
+}
+
+/// Helper: build a `ResolvedRange` covering the entire contig identified by
+/// `tid`. Errors if the contig has zero length, the tid is out of range, or
+/// the header advertises more targets than fit in a `u32`.
+fn whole_contig(header: &BamHeader, tid: Tid) -> Result<ResolvedRange, ReaderError> {
+    let n_targets = target_count_u32(header)?;
+    let name = header
+        .target_name(tid.as_u32())
+        .ok_or(super::resolve::TidError::TidOutOfRange { tid: tid.as_u32(), n_targets })?
+        .to_owned();
+    whole_contig_with_name(header, tid, name.into())
 }
 
 impl private::IntoSegmentTargetSealed for Tid {
@@ -372,6 +426,10 @@ impl private::IntoSegmentTargetSealed for &str {
     }
 }
 
+// Ergonomic forwarder: `&String` and `&SmolStr` exist because the trait is
+// sealed, so we can't take `impl AsRef<str>` and let users coerce. They both
+// route to a `whole_contig` path; `&SmolStr` short-circuits the header
+// `target_name` lookup since the caller already has the name owned.
 impl private::IntoSegmentTargetSealed for &String {
     fn resolve_target(self, header: &BamHeader) -> Result<Vec<ResolvedRange>, ReaderError> {
         private::IntoSegmentTargetSealed::resolve_target(self.as_str(), header)
@@ -380,14 +438,17 @@ impl private::IntoSegmentTargetSealed for &String {
 
 impl private::IntoSegmentTargetSealed for &SmolStr {
     fn resolve_target(self, header: &BamHeader) -> Result<Vec<ResolvedRange>, ReaderError> {
-        private::IntoSegmentTargetSealed::resolve_target(self.as_str(), header)
+        let tid = self.as_str().resolve_tid(header)?;
+        Ok(vec![whole_contig_with_name(header, tid, self.clone())?])
     }
 }
 
 impl private::IntoSegmentTargetSealed for &RegionString {
     fn resolve_target(self, header: &BamHeader) -> Result<Vec<ResolvedRange>, ReaderError> {
         let tid = self.chromosome.as_str().resolve_tid(header)?;
-        let mut range = whole_contig(header, tid)?;
+        // Reuse the parsed chromosome SmolStr instead of re-fetching it from
+        // the header.
+        let mut range = whole_contig_with_name(header, tid, self.chromosome.clone())?;
         if let Some(p1) = self.start {
             range.start = p1.to_zero_based();
         }
@@ -433,8 +494,8 @@ impl<R: ResolveTid> private::IntoSegmentTargetSealed for (R, Pos0, Pos0) {
 /// Whole-genome scan: every contig with non-zero length, in header order.
 impl private::IntoSegmentTargetSealed for () {
     fn resolve_target(self, header: &BamHeader) -> Result<Vec<ResolvedRange>, ReaderError> {
-        let n = u32::try_from(header.target_count()).unwrap_or(u32::MAX);
-        let mut out = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
+        let n = target_count_u32(header)?;
+        let mut out = Vec::with_capacity(header.target_count());
         for tid_u32 in 0..n {
             let tid = tid_u32.resolve_tid(header)?;
             match whole_contig(header, tid) {
@@ -528,6 +589,9 @@ impl Iterator for Segments {
             let tile_start = pos0_from_u64(tile_start_u64).unwrap_or(range.start);
             let tile_end = pos0_from_u64(tile_end_u64).unwrap_or(range.end);
 
+            // The iterator's arithmetic is verified by unit + property tests
+            // (see `segments_match_oracle`, `cores_tile_input_exactly`), so any
+            // construction failure here is an internal bug, not user input.
             let seg = Segment::new(
                 range.tid,
                 range.contig.clone(),
@@ -536,7 +600,8 @@ impl Iterator for Segments {
                 overlap_start,
                 overlap_end,
                 range.contig_last_pos,
-            );
+            )
+            .expect("iterator arithmetic produces valid Segment invariants");
 
             // Advance to the next range explicitly when this tile reached the
             // last base of the current range. We can't rely on the
@@ -547,14 +612,19 @@ impl Iterator for Segments {
             if core_end_u64 >= range_end_u64 {
                 self.advance_to_next_range();
             } else {
+                // In this branch `core_end_u64 < range_end_u64 <= i32::MAX`,
+                // so `core_end_u64 + 1` always fits in `Pos0`. The `None`
+                // arm is unreachable today; if a future change ever breaks
+                // that invariant we end the iterator cleanly instead of
+                // looping forever or panicking.
                 let next = core_end_u64.saturating_add(1);
-                self.next_core_start = pos0_from_u64(next).unwrap_or_else(|| {
-                    // Defensive: if `next` somehow doesn't fit in Pos0
-                    // (impossible while range_end <= i32::MAX), force the
-                    // outer loop to advance to the next range on the next
-                    // poll instead of looping in place.
-                    Pos0::max_value()
-                });
+                match pos0_from_u64(next) {
+                    Some(p) => self.next_core_start = p,
+                    None => {
+                        self.current = None;
+                        self.ranges = Vec::new().into_iter();
+                    }
+                }
             }
 
             return Some(seg);
@@ -668,11 +738,66 @@ mod tests {
     // r[verify unified.segment_overlap]
     #[test]
     fn segment_core_range_excludes_overlap() {
-        let seg = Segment::new(tid(0), "c0".into(), p(100), p(199), 10, 5, p(999));
+        let seg = Segment::new(tid(0), "c0".into(), p(100), p(199), 10, 5, p(999)).unwrap();
         assert_eq!(seg.len(), 100);
         let core = seg.core_range();
         assert_eq!(*core.start(), p(110));
         assert_eq!(*core.end(), p(194));
+    }
+
+    // r[verify unified.segment_struct]
+    #[test]
+    fn segment_new_rejects_start_after_end() {
+        let err =
+            Segment::new(tid(0), "c0".into(), p(200), p(100), 0, 0, p(999)).expect_err("invalid");
+        assert!(matches!(err, SegmentInvariantError::StartAfterEnd { start: 200, end: 100 }));
+    }
+
+    // r[verify unified.segment_struct]
+    #[test]
+    fn segment_new_rejects_end_past_contig() {
+        let err =
+            Segment::new(tid(0), "c0".into(), p(0), p(500), 0, 0, p(100)).expect_err("invalid");
+        assert!(matches!(
+            err,
+            SegmentInvariantError::EndPastContig { end: 500, contig_last_pos: 100 }
+        ));
+    }
+
+    // r[verify unified.segment_struct]
+    // r[verify unified.segment_overlap]
+    #[test]
+    fn segment_new_rejects_overlap_total_ge_len() {
+        // Tile length is 100. overlap_start + overlap_end == 100 covers the
+        // entire tile and leaves zero core, which would break neighbor-dedupe.
+        let err =
+            Segment::new(tid(0), "c0".into(), p(0), p(99), 50, 50, p(999)).expect_err("invalid");
+        assert!(matches!(
+            err,
+            SegmentInvariantError::OverlapTooLarge { overlap_start: 50, overlap_end: 50, len: 100 }
+        ));
+        // overlap_start + overlap_end > len is also rejected.
+        let err2 =
+            Segment::new(tid(0), "c0".into(), p(0), p(99), 60, 50, p(999)).expect_err("invalid");
+        assert!(matches!(err2, SegmentInvariantError::OverlapTooLarge { .. }));
+        // Boundary: total == len - 1 is allowed (leaves 1 base of core).
+        let ok = Segment::new(tid(0), "c0".into(), p(0), p(99), 50, 49, p(999)).unwrap();
+        assert_eq!(ok.len(), 100);
+        assert_eq!(*ok.core_range().start(), p(50));
+        assert_eq!(*ok.core_range().end(), p(50));
+    }
+
+    // r[verify unified.segment_struct]
+    /// `Segment::len()` is computed once at construction. Spot-check the
+    /// stored value across a small spread of tile shapes.
+    #[test]
+    fn segment_len_matches_inclusive_span() {
+        for (s, e, expected) in
+            [(0u32, 0u32, 1u32), (0, 99, 100), (5, 14, 10), (1_000_000, 1_000_499, 500)]
+        {
+            let seg = Segment::new(tid(0), "c0".into(), p(s), p(e), 0, 0, p(2_000_000)).unwrap();
+            assert_eq!(seg.len(), expected, "span [{s}..={e}]");
+        }
     }
 
     #[test]

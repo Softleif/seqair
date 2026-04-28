@@ -103,6 +103,25 @@ impl Base {
         from_ascii_dispatch(bytes);
     }
 
+    /// Convert ASCII bytes to `Base` discriminants in-place and return a
+    /// borrowed `&[Base]` view of the same memory.
+    ///
+    /// Unlike [`from_ascii_vec`], this does not consume the buffer: the
+    /// caller keeps ownership of the underlying `Vec<u8>` (and its capacity).
+    /// Use it when you want one allocation for repeated fetches and need
+    /// to hand a `&[Base]` to downstream code (e.g. for `Rc::<[Base]>::from`).
+    ///
+    /// [`from_ascii_vec`]: Self::from_ascii_vec
+    pub fn convert_ascii_in_place_as_slice(bytes: &mut [u8]) -> &[Base] {
+        from_ascii_dispatch(bytes);
+        // Safety: from_ascii_dispatch has written only valid Base discriminants
+        // (A=65, C=67, G=71, T=84, Unknown=78). Base is repr(u8), so the layout
+        // matches `[u8]` exactly. The returned reference borrows `bytes` for
+        // the same lifetime, so the caller can't use the &mut [u8] view to
+        // mutate the slice contents while the &[Base] is alive.
+        unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<Base>(), bytes.len()) }
+    }
+
     /// Reinterpret a `Vec<u8>` whose bytes are all valid `Base` discriminants.
     ///
     /// # Safety
@@ -648,6 +667,26 @@ mod tests {
         for (i, (&byte, &base)) in buf.iter().zip(expected.iter()).enumerate() {
             assert_eq!(byte, base as u8, "mismatch at index {i}: byte={byte:#x}, base={base:?}");
         }
+    }
+
+    // r[verify base_decode.ascii_batch]
+    /// `convert_ascii_in_place_as_slice` must yield the same bases as
+    /// `from_ascii_vec`, while leaving the caller's `Vec<u8>` capacity intact
+    /// (the whole point of the helper).
+    #[test]
+    fn test_convert_ascii_in_place_as_slice_matches_from_ascii_vec() {
+        let input = b"ACGTacgtNnMRWSYKVHDB\x00\xff".to_vec();
+        let expected = Base::from_ascii_vec(input.clone());
+
+        let mut buf = input;
+        let cap_before = buf.capacity();
+        let view: &[Base] = Base::convert_ascii_in_place_as_slice(&mut buf);
+        assert_eq!(view, expected.as_slice());
+        // Caller still owns the buffer with its capacity preserved.
+        let cap_after = buf.capacity();
+        assert_eq!(cap_before, cap_after);
+        // Length is unchanged — only the byte values were rewritten.
+        assert_eq!(buf.len(), expected.len());
     }
 
     // r[verify types.base.from_str_validation+2]
