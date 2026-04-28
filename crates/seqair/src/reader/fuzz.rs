@@ -1,5 +1,5 @@
 use crate::{
-    bam::{BamHeader, IndexedBamReader, PileupEngine, RecordStore},
+    bam::{BamHeader, IndexedBamReader, PileupEngine, PileupGuard, RecordStore},
     cram::reader::IndexedCramReader,
     fasta::IndexedFastaReader,
     reader::{ReaderError, indexed::CursorReader},
@@ -113,34 +113,44 @@ impl FuzzReaders {
         }
     }
 
-    /// Full pileup pipeline: `fetch_into` → `PileupEngine` with reference sequence.
+    /// Full pileup pipeline: `fetch_into` → `PileupGuard` with reference sequence.
+    /// Returns a guard so the buffer recovers automatically on drop, mirroring
+    /// the production `Readers::pileup` API.
     pub fn pileup(
         &mut self,
         tid: u32,
         start: Pos0,
         end: Pos0,
-    ) -> Result<PileupEngine, ReaderError> {
+    ) -> Result<PileupGuard<'_, ()>, ReaderError> {
         match &mut self.alignment {
             AlignmentBackend::Indexed(r) => r.fetch_into(tid, start, end, &mut self.store)?,
             AlignmentBackend::PlainSam(r) => {
                 r.fetch_plain_into(tid, start, end, &mut self.store).map_err(ReaderError::from)?
             }
         };
-        let store = std::mem::take(&mut self.store);
-        let mut engine = PileupEngine::new(store, start, end);
 
-        // Try to set reference sequence
-        if let Some(name) = self.header().target_name(tid) {
+        // Resolve the reference sequence (if any) before taking the store, so
+        // we don't borrow `self.fasta_buf` while we already hold a `&mut` to
+        // `self.store`.
+        let ref_seq = if let Some(name) = self.header().target_name(tid) {
             let name = name.to_owned();
             if self.fasta.fetch_seq_into(&name, start, end, &mut self.fasta_buf).is_ok() {
                 let buf = std::mem::take(&mut self.fasta_buf);
                 let bases = Base::from_ascii_vec(buf);
-                let ref_seq = crate::bam::pileup::RefSeq::new(Rc::from(bases), start);
-                engine.set_reference_seq(ref_seq);
+                Some(crate::bam::pileup::RefSeq::new(Rc::from(bases), start))
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
-        Ok(engine)
+        let store = std::mem::take(&mut self.store);
+        let mut engine = PileupEngine::new(store, start, end);
+        if let Some(ref_seq) = ref_seq {
+            engine.set_reference_seq(ref_seq);
+        }
+        Ok(PileupGuard::new(engine, &mut self.store))
     }
 
     fn fetch_records(
@@ -166,11 +176,5 @@ impl FuzzReaders {
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
         self.fetch_records(tid, start, end, store)
-    }
-
-    pub fn recover_store(&mut self, engine: &mut PileupEngine) {
-        if let Some(store) = engine.take_store() {
-            self.store = store;
-        }
     }
 }

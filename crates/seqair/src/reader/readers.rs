@@ -6,7 +6,7 @@ use super::{
 use crate::{
     bam::{
         BamHeader,
-        pileup::{PileupEngine, RefSeq},
+        pileup::{PileupEngine, PileupGuard, RefSeq},
         record_store::{CustomizeRecordStore, RecordStore},
     },
     fasta::{FastaError, IndexedFastaReader},
@@ -56,6 +56,8 @@ use tracing::instrument;
 ///
 /// for segment in &plan {
 ///     // `pileup()` fetches records AND the reference sequence for the segment.
+///     // The returned guard derefs to PileupEngine and on drop returns the
+///     // RecordStore to Readers (no manual recover step needed).
 ///     let mut pileup = readers.pileup(segment)?;
 ///
 ///     while let Some(column) = pileup.pileups() {
@@ -77,9 +79,8 @@ use tracing::instrument;
 ///             }
 ///         }
 ///     }
-///
-///     // Return the RecordStore to Readers for reuse on the next segment
-///     readers.recover_store(&mut pileup);
+///     // `pileup` drops here, returning the RecordStore to `readers` for
+///     // the next segment.
 /// }
 /// # Ok(())
 /// # }
@@ -108,7 +109,7 @@ use tracing::instrument;
 ///             for seg in &chunk {
 ///                 let mut pileup = forked.pileup(seg).unwrap();
 ///                 while let Some(_col) = pileup.pileups() { /* process */ }
-///                 forked.recover_store(&mut pileup);
+///                 // `pileup` drops here; store goes back into `forked`.
 ///             }
 ///         });
 ///     }
@@ -234,7 +235,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// for seg in plan {
     ///     let mut p = readers.pileup(&seg)?;
     ///     while let Some(_col) = p.pileups() { /* ... */ }
-    ///     readers.recover_store(&mut p);
+    ///     // `p` drops here; the RecordStore goes back into `readers`.
     /// }
     /// # Ok(())
     /// # }
@@ -250,7 +251,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
 
     // r[impl unified.readers_pileup]
     /// Fetch records and reference sequence for `segment`, returning a
-    /// [`PileupEngine`] ready for iteration.
+    /// [`PileupGuard`] that derefs to a [`PileupEngine`] ready for iteration.
     ///
     /// `segment` must come from [`segments`](Self::segments) — there is no
     /// other way to construct one. The segment's `tid`, `start`, `end`, and
@@ -278,15 +279,15 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// When `E != ()`, the extras provider runs once per record at fetch
     /// time, before the engine is constructed.
     ///
-    /// Uses an internal [`RecordStore`] whose capacity is retained across
-    /// calls. After iterating the engine, call
-    /// [`recover_store`](Self::recover_store) to return the store for
-    /// reuse. If you skip `recover_store` (or break out of the pileup loop
-    /// early without calling it), the next `pileup()` call allocates a
-    /// fresh ~39 MB store; correctness is unaffected.
+    /// **Buffer reuse.** Uses an internal [`RecordStore`] whose capacity
+    /// is retained across calls. The returned [`PileupGuard`] borrows
+    /// `&mut self.store`; on drop (end of scope, `?`-propagated error,
+    /// `break` out of the loop) the populated-then-cleared store is
+    /// moved back, so subsequent `pileup()` calls keep the ~39 MB
+    /// allocation. No explicit recover step is needed.
     ///
     /// [`PileupColumn::reference_base`]: crate::bam::pileup::PileupColumn::reference_base
-    pub fn pileup(&mut self, segment: &Segment) -> Result<PileupEngine<E::Extra>, ReaderError> {
+    pub fn pileup(&mut self, segment: &Segment) -> Result<PileupGuard<'_, E::Extra>, ReaderError> {
         let tid = segment.tid();
         let start = segment.start();
         let end = segment.end();
@@ -347,23 +348,14 @@ impl<E: CustomizeRecordStore> Readers<E> {
         let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);
         let ref_seq = RefSeq::new(Rc::from(bases), start);
 
+        // Move the populated store into the engine. After this `mem::take`,
+        // `self.store` holds a default (empty) RecordStore — the slot the
+        // guard's Drop will overwrite with the recovered store on scope exit.
         let store = std::mem::take(&mut self.store);
 
         let mut engine = PileupEngine::new(store, start, end);
         engine.set_reference_seq(ref_seq);
-        Ok(engine)
-    }
-
-    // r[impl pileup.extras.recover_store]
-    /// Recover the [`RecordStore`] from a consumed [`PileupEngine`] for reuse.
-    ///
-    /// Call this after iteration is complete. The store retains its allocated
-    /// capacity, avoiding ~39 MB of re-allocation on the next `pileup()` call.
-    /// Accepts `PileupEngine<U>` for any `U` — extras are stripped during recovery.
-    pub fn recover_store(&mut self, engine: &mut PileupEngine<E::Extra>) {
-        if let Some(store) = engine.take_store() {
-            self.store = store;
-        }
+        Ok(PileupGuard::new(engine, &mut self.store))
     }
 
     pub fn fasta(&self) -> &IndexedFastaReader {
@@ -439,6 +431,66 @@ mod tests {
             cap_after_first,
             readers.fasta_buf.capacity(),
             "second fetch_base_seq must reuse the existing buffer allocation"
+        );
+    }
+
+    // r[verify pileup.extras.recover_store]
+    /// The `PileupGuard` returned by `pileup()` recovers the
+    /// [`RecordStore`] into `Readers` on drop, retaining capacity for the
+    /// next call. The user is *not* expected to call any explicit recover
+    /// step. The test verifies that:
+    ///
+    /// 1. After a normal pileup loop, `readers.store` has non-zero
+    ///    capacity (the guard's Drop wrote back).
+    /// 2. After breaking out of the pileup loop early — the foot-gun the
+    ///    old explicit `recover_store` API failed on — the same capacity
+    ///    is recovered.
+    #[test]
+    fn pileup_guard_recovers_store_on_drop_even_with_early_break() {
+        use std::num::NonZeroU32;
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let opts = SegmentOptions::new(NonZeroU32::new(3_000).unwrap());
+        // Known-populated region from `tests/segments.rs`.
+        let segments: Vec<_> = readers
+            .segments(("chr19", Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap()), opts)
+            .unwrap()
+            .collect();
+        assert!(!segments.is_empty(), "test BAM should yield at least one segment");
+
+        // Full loop: drain the engine, then drop.
+        {
+            let mut p = readers.pileup(&segments[0]).unwrap();
+            while p.pileups().is_some() {}
+            // p drops at end of scope.
+        }
+        let cap_after_full = readers.store.records_capacity();
+        assert!(cap_after_full > 0, "guard's Drop must recover the store with non-zero capacity");
+
+        // Early-break loop: pull one column then break, do *not* call any
+        // recover step. The guard's Drop must still write the store back.
+        {
+            let mut p = readers.pileup(&segments[0]).unwrap();
+            // Pull one column then break — simulating the "user found what
+            // they were looking for and broke out" pattern that the old
+            // explicit `recover_store` API failed on. Suppress
+            // `clippy::never_loop` because the loop *intentionally* runs
+            // at most one iteration to exercise the early-drop path.
+            #[allow(clippy::never_loop, reason = "intentional early break to exercise guard Drop")]
+            while let Some(_col) = p.pileups() {
+                break;
+            }
+            // p drops here.
+        }
+        let cap_after_early_break = readers.store.records_capacity();
+        assert!(
+            cap_after_early_break > 0,
+            "guard's Drop must recover the store even when the loop is broken early"
+        );
+        // Capacity should be at least as large as after the full drain
+        // (records are cleared, allocations retained).
+        assert_eq!(
+            cap_after_early_break, cap_after_full,
+            "early-break recovery should retain the same capacity as full-drain recovery"
         );
     }
 

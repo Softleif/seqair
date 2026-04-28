@@ -73,7 +73,7 @@ r[pileup.alignment_view]
 `PileupColumn<'store, U>::alignments(&self)` MUST yield `AlignmentView<'_, 'store, U>` items. `AlignmentView` MUST deref to `PileupAlignment` so existing field and method access on alignments is unchanged. `AlignmentView` MUST additionally provide `extra(&self) -> &'store U`, `qname(&self) -> &'store [u8]`, and `aux(&self) -> &'store [u8]` methods that read from the borrowed store without additional arguments. `PileupColumn` MUST also expose `raw_alignments()` yielding `&PileupAlignment` for callers that do not need store access.
 
 r[pileup.extras.recover_store]
-`Readers::recover_store` MUST accept `PileupEngine<U>` for any `U`. It MUST strip extras via `RecordStore::strip_extras` before storing the recovered `RecordStore<()>` for reuse.
+`Readers::pileup` MUST return a guard type (`PileupGuard<'_, E::Extra>`) that derefs to `PileupEngine<E::Extra>` and whose `Drop` impl moves the underlying `RecordStore` back into the originating `Readers`, retaining its allocated capacity for the next pileup call. Recovery MUST happen on every drop path — end of scope, `?`-propagated error mid-iteration, `break` out of the loop — so callers do not need an explicit recover step. There MUST NOT be a separate `Readers::recover_store` method on the public API; if extras-stripping is needed it happens inside the guard's drop path.
 
 ## Compatibility
 

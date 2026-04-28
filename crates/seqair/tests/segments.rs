@@ -71,7 +71,7 @@ fn pileup_single(
             ref_base: col.reference_base() as u8,
         });
     }
-    readers.recover_store(&mut engine);
+    drop(engine);
     out
 }
 
@@ -107,7 +107,7 @@ fn pileup_segmented(
                 ref_base: col.reference_base() as u8,
             });
         }
-        readers.recover_store(&mut engine);
+        // `engine` drops at end of scope, returning the store to `readers`.
     }
     out
 }

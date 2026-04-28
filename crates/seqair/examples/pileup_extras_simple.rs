@@ -42,8 +42,7 @@ fn main() -> anyhow::Result<()> {
                 // ...
             }
         }
-
-        readers.recover_store(&mut engine);
+        // `engine` drops here; the RecordStore goes back into `readers`.
     }
 
     Ok(())
