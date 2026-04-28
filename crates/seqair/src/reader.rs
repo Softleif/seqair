@@ -63,7 +63,7 @@ pub enum ReaderError {
     FastaFork { source: FastaError },
 
     #[error("failed to fetch reference sequence for {contig}:{start}-{end}")]
-    FastaFetch { contig: SmolStr, start: u32, end: u32, source: FastaError },
+    FastaFetch { contig: SmolStr, start: u64, end: u64, source: FastaError },
 
     #[error("could not resolve target id")]
     Tid {
@@ -84,4 +84,7 @@ pub enum ReaderError {
         "segment for contig '{contig}' (tid {expected_tid}) does not match this Readers' header"
     )]
     SegmentHeaderMismatch { contig: SmolStr, expected_tid: u32 },
+
+    #[error("BAM header target count {count} does not fit in u32")]
+    HeaderTargetCountOverflow { count: usize },
 }

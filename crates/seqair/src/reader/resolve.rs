@@ -19,6 +19,15 @@ impl Tid {
     pub fn as_u32(self) -> u32 {
         self.0
     }
+
+    /// The raw target id as a `usize`, for indexing into per-contig vectors.
+    ///
+    /// Always lossless on supported platforms: BAM tids fit in a `u32`, and
+    /// `usize` is at least 32 bits everywhere we run.
+    #[must_use]
+    pub fn as_usize(self) -> usize {
+        self.0 as usize
+    }
 }
 
 impl From<Tid> for u32 {
