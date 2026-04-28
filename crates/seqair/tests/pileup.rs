@@ -129,7 +129,7 @@ fn keep_record_called_once_per_pushed_record() {
     struct Counting(Rc<Cell<usize>>);
     impl CustomizeRecordStore for Counting {
         type Extra = ();
-        fn keep_record(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
+        fn filter(&mut self, _: &SlimRecord, _: &RecordStore<()>) -> bool {
             self.0.set(self.0.get() + 1);
             true
         }
@@ -158,7 +158,7 @@ proptest! {
         struct DropSecondary;
         impl CustomizeRecordStore for DropSecondary {
             type Extra = ();
-            fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+            fn filter(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
                 !rec.flags.is_secondary()
             }
             fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 3799f96d16d2146f4c6fde28df84b7071de8fe3d1260f1724a646ed42a45801a # shrinks to tag_names = [(0, 0), (0, 0)], values = [0, 0, 0, 0]
+cc 3998f65e96a4f6db87a44977f05353f2caa119b76fd3246e0f43cd5a11537e36 # shrinks to raw = [0, 0, 102, 0, 0, 129, 127]

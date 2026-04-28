@@ -10,7 +10,7 @@ use super::{
     flags::BamFlags,
     header::{BamHeader, BamHeaderError},
     index::{AlignmentIndex, BaiError, BamIndex, Chunk},
-    record::{DecodeError, compute_end_pos_from_raw},
+    record::{compute_end_pos_from_raw, DecodeError},
     record_store::{CustomizeRecordStore, RecordStore},
     region_buf::{self, RegionBuf},
 };
@@ -190,7 +190,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     // r[impl unified.fetch_into_customized]
     /// Customized variant: each record that passes the reader's built-in
     /// checks is pushed via [`RecordStore::push_raw`], which forwards the
-    /// `customize` value's `keep_record` to decide retention. Rejected
+    /// `customize` value's `filter` to decide retention. Rejected
     /// records roll back their slab writes. The returned [`FetchCounts`]
     /// reports `fetched` (produced by the reader) vs `kept` (survived the
     /// filter).

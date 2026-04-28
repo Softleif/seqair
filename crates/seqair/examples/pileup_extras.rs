@@ -77,7 +77,7 @@ struct ReadInfoBuilder;
 impl CustomizeRecordStore for ReadInfoBuilder {
     type Extra = ReadInfo;
 
-    fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<ReadInfo>) -> bool {
+    fn filter(&mut self, rec: &SlimRecord, _: &RecordStore<ReadInfo>) -> bool {
         // Drop unmapped and secondary alignments before they enter the store —
         // saves slab space and skips compute() for records the pileup ignores.
         !rec.flags.is_unmapped() && !rec.flags.is_secondary()

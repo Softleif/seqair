@@ -100,7 +100,7 @@ impl SliceHeader {
 ///
 /// `customize` is a push-time customizer: each record that passes the
 /// reader's built-in overlap/tid/unmapped checks is pushed and
-/// `customize.keep_record` is consulted. When it returns `false`, the push
+/// `customize.filter` is consulted. When it returns `false`, the push
 /// is rolled back with zero slab waste (same as BAM/SAM). Returns
 /// `(fetched, kept)` where `fetched` counts records that reached the push
 /// step and `kept` counts those that survived the filter.
@@ -277,7 +277,7 @@ pub fn decode_slice<E: CustomizeRecordStore>(
 /// reached the push step (i.e., was not rejected by the reader's built-in
 /// overlap/tid/unmapped checks) and `false` otherwise. `mate_info.store_idx`
 /// is `Some(idx)` if the record survived both the reader check and the
-/// user's `customize.keep_record`, and `None` if either dropped it — the
+/// user's `customize.filter`, and `None` if either dropped it — the
 /// mate-resolution pass already handles the `None` case.
 // r[impl cram.record.decode_order]
 // r[impl cram.fetch_into_customized.push_time]
@@ -697,7 +697,7 @@ fn resolve_mate_tlen<U>(infos: &[SliceMateInfo], store: &mut RecordStore<U>) {
         // Resolve next_ref_id and next_pos for each record in the chain.
         // Each record's mate is the next entry in the chain (last wraps to first).
         // r[impl cram.fetch_into_customized.filtered_mate_sentinel]
-        // If the mate was rejected by the user's keep_record (store_idx == None),
+        // If the mate was rejected by the user's filter (store_idx == None),
         // null out the kept record's mate fields so the BAM "mate unavailable"
         // sentinel (-1, -1) reflects what's actually in the store. TLEN is left
         // as the full-chain span — it's a per-template property and matches what
