@@ -125,6 +125,14 @@ impl RegionBuf {
                 "region too large to load into memory; consider reducing batch size or query region"
             );
         }
+
+        // r[impl io.fuzz.alloc_limits]
+        // Cap per-range allocations to the actual file size. Corrupt indexes
+        // can produce virtual offsets pointing far past EOF; without this cap,
+        // `data.resize(buf_start + len, 0)` would attempt a huge allocation
+        // even though `read_all` would only return whatever bytes exist.
+        let file_size = reader.seek(SeekFrom::End(0)).map_err(|_| BgzfError::SeekFailed)?;
+
         let mut data = Vec::with_capacity(total_bytes.min(MAX_REGION_BYTES));
 
         let mut range_map = Vec::with_capacity(merged.len());
@@ -138,7 +146,10 @@ impl RegionBuf {
                 clippy::cast_possible_truncation,
                 reason = "on 64-bit platforms u64 → usize is lossless; BAM files are < 2^63"
             )]
-            let len = range.file_end.saturating_sub(range.file_start) as usize;
+            let len = file_size
+                .saturating_sub(range.file_start)
+                .min(range.file_end.saturating_sub(range.file_start))
+                as usize;
 
             // The batching logic in fetch_into normally keeps ranges within
             // MAX_REGION_BYTES. Whole-chromosome queries can produce single
@@ -1428,5 +1439,23 @@ mod tests {
         let mut cursor = std::io::Cursor::new(vec![0u8; 100]);
         let result = RegionBuf::load(&mut cursor, &chunks);
         assert!(result.is_ok(), "oversized region should load (warns, not errors)");
+    }
+
+    // r[verify io.fuzz.alloc_limits]
+    /// A corrupt index entry whose virtual offset points far past EOF must
+    /// not trigger a huge allocation. The per-range allocation must be capped
+    /// to the actual file size.
+    #[test]
+    fn load_caps_allocation_when_range_exceeds_file_size() {
+        // Virtual offset block_offsets near the 48-bit max — would request
+        // ~280 TiB without the cap.
+        let huge = 0xffff_0801_0000u64;
+        let chunks =
+            vec![Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(huge, 0) }];
+
+        let mut cursor = std::io::Cursor::new(vec![0u8; 64]);
+        // Must not panic / OOM. Returns Ok with a buffer of at most 64 bytes.
+        let buf = RegionBuf::load(&mut cursor, &chunks).expect("must not crash");
+        assert!(buf.data.len() <= 64);
     }
 }
