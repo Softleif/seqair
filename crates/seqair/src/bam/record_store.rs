@@ -320,7 +320,6 @@ impl<U> RecordStore<U> {
     /// qname, aux, etc. (those bytes live at the tail of the corresponding
     /// slabs until rollback). Pass `&mut ()` for no filtering (the blanket
     /// [`CustomizeRecordStore`] impl on `()` keeps every record).
-    // r[impl record_store.filter_raw]
     pub fn push_raw<E: CustomizeRecordStore<Extra = U>>(
         &mut self,
         raw: &[u8],
@@ -340,8 +339,9 @@ impl<U> RecordStore<U> {
         let cigar_bytes = &raw[h.var_start..h.cigar_end];
 
         // --- filter_raw: pre-filter before any slab extension or base decode ---
-        // r[impl record_store.filter_raw]
+        // r[impl record_store.pre_filter.rollback]
         {
+            #[allow(clippy::indexing_slicing, reason = "qname_actual_len <= qname_raw.len()")]
             let qname_stripped = &qname_raw[..qname_actual_len];
             #[allow(
                 clippy::indexing_slicing,
@@ -1273,7 +1273,7 @@ mod tests {
     // r[verify record_store.filter_raw]
     #[test]
     fn push_raw_filter_raw_rejection_avoids_slab_write() {
-        /// Reject everything in filter_raw — no slab extensions should happen.
+        /// Reject everything in `filter_raw` — no slab extensions should happen.
         #[derive(Clone, Default)]
         struct RejectRaw;
         impl CustomizeRecordStore for RejectRaw {

@@ -344,7 +344,8 @@ fn advance_past_value(data: &[u8], mut pos: usize, typ: u8) -> Option<usize> {
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
+#[allow(clippy::arithmetic_side_effects, reason = "test code")]
+#[allow(clippy::cast_possible_truncation, reason = "test code")]
 mod tests {
     use super::*;
     use proptest::prelude::*;
@@ -803,10 +804,29 @@ mod tests {
                     AuxValue::U16(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
                     AuxValue::I32(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
                     AuxValue::U32(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                    // Float/Double: NaN != NaN with PartialEq, so compare bits.
+                    AuxValue::Float(v) => {
+                        let rt_bits = match rt {
+                            AuxValue::Float(f) => f.to_bits(),
+                            AuxValue::Double(d) => (d as f32).to_bits(),
+                            ref other => panic!("expected float/double, got {other:?}"),
+                        };
+                        prop_assert_eq!(rt_bits, v.to_bits(),
+                            "tag mismatch after rebuild (Float)");
+                    }
+                    AuxValue::Double(v) => {
+                        let rt_bits = match rt {
+                            AuxValue::Double(d) => d.to_bits(),
+                            AuxValue::Float(f) => f64::from(f).to_bits(),
+                            ref other => panic!("expected float/double, got {other:?}"),
+                        };
+                        prop_assert_eq!(rt_bits, v.to_bits(),
+                            "tag mismatch after rebuild (Double)");
+                    }
                     _ => prop_assert_eq!(&rt, *original, "tag mismatch after rebuild"),
-                }
             }
         }
+    }
 
         // r[verify bam.owned_record.aux_uniqueness]
         /// Setting the same tag name multiple times MUST NOT create duplicates.

@@ -10,7 +10,7 @@ use super::{
     flags::BamFlags,
     header::{BamHeader, BamHeaderError},
     index::{AlignmentIndex, BaiError, BamIndex, Chunk},
-    record::{compute_end_pos_from_raw, DecodeError},
+    record::{DecodeError, compute_end_pos_from_raw},
     record_store::{CustomizeRecordStore, RecordStore},
     region_buf::{self, RegionBuf},
 };
