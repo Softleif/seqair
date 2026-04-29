@@ -60,6 +60,8 @@ r[cigar.qpos_accuracy]
 
 The `AlignedPairs` iterator walks a record's CIGAR operations once per record and yields typed `AlignedPair` variants describing the aligned query/reference positions. This is analogous to htslib's `aligned_pairs` / `aligned_pairs_full`, but uses a typed enum instead of `(Option<i64>, Option<i64>)` tuples.
 
+> **Runnable example:** `cargo run --example aligned_pairs_walk -- --input X.bam --reference X.fa --region chrZ:A-B` exercises all three layers (bare walk, `with_read`, `with_reference`) against a real BAM/FASTA pair. It also has stand-alone showcase functions for indel collection and `MatchKind`-based mismatch counting.
+
 r[cigar.aligned_pairs.types]
 The `AlignedPair` enum MUST have the following variants:
 

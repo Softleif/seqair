@@ -8,6 +8,25 @@
 //! Default mode yields only position-bearing ops (`Match`, `Insertion`, `Deletion`, `RefSkip`).
 //! Opt in to `SoftClip` via [`.with_soft_clips()`](AlignedPairs::with_soft_clips) or
 //! all ops via [`.full()`](AlignedPairs::full).
+//!
+//! # Layered views
+//!
+//! [`AlignedPairs::with_read`] attaches the read's seq/qual to the events;
+//! `.with_reference(&ref_seq)` further attaches reference base lookups.
+//! See [`super::aligned_pairs_view`] for the layered API and the
+//! `aligned_pairs_walk` example crate-side for an end-to-end walk over a real
+//! BAM/FASTA pair (`cargo run --example aligned_pairs_walk -- --help`).
+//!
+//! # Quick reference
+//!
+//! | Need | API |
+//! |---|---|
+//! | Positions only (cheapest) | `slim.aligned_pairs(store)?` |
+//! | Positions + read base/qual | `slim.aligned_pairs_with_read(store)?` |
+//! | Positions + read + ref base | `…aligned_pairs_with_read(store)?.with_reference(&ref_seq)` |
+//! | M-vs-=-vs-X distinction | `AlignedPair::Match { kind, .. }` (`MatchKind` enum) |
+//! | Soft clips visible | `.with_soft_clips()` on any layer |
+//! | Padding/Unknown visible | `.full()` on any layer |
 
 use super::cigar::{CigarOp, CigarOpType};
 use super::record_store::{RecordAccessError, RecordStore, SlimRecord};
