@@ -221,11 +221,11 @@ fn bam_roundtrip(c: &mut Criterion) {
 
                 let rec = OwnedBamRecord {
                     ref_id: tid as i32,
-                    pos: slim.pos.as_i64(),
+                    pos: Some(slim.pos),
                     mapq: slim.mapq,
                     flags: slim.flags,
                     next_ref_id: -1,
-                    next_pos: -1,
+                    next_pos: None,
                     template_len: 0,
                     qname: store.qname(idx).to_vec(),
                     cigar,
@@ -443,5 +443,128 @@ fn pileup_e2e(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bgzf_decompress, bam_record_decode, bam_roundtrip, pileup_e2e);
+// ---------------------------------------------------------------------------
+// Group 5: AlignedPairs walking (per-record CIGAR walk)
+//
+// Compares seqair's AlignedPairs (and the layered with_read variant) against
+// rust-htslib's aligned_pairs_full (per-base) extension. Both walk every
+// record in a region and visit every (qpos, rpos) pair.
+//
+// Records are pre-loaded once outside the timer so we measure only the walk,
+// not the fetch overhead. (The fetch path is benchmarked separately in
+// `bam_record_decode`.)
+// ---------------------------------------------------------------------------
+
+fn aligned_pairs_walk(c: &mut Criterion) {
+    use rust_htslib::bam::{self, FetchDefinition, Read as _, ext::BamRecordExtensions};
+
+    let mut group = c.benchmark_group("aligned_pairs_walk");
+
+    // ── seqair: pre-load the RecordStore once ──
+    let seqair_store = {
+        let path = std::path::Path::new(BAM_PATH);
+        let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
+        let mut store = seqair::bam::RecordStore::new();
+        let tid = reader.header().tid(CHROM).unwrap();
+        reader.fetch_into(tid, START, END, &mut store).unwrap();
+        store
+    };
+
+    // ── htslib: pre-load all records into a Vec once ──
+    let htslib_records: Vec<bam::Record> = {
+        let mut reader = bam::IndexedReader::from_path(BAM_PATH).unwrap();
+        let tid = reader.header().tid(CHROM.as_bytes()).unwrap();
+        reader.fetch(FetchDefinition::Region(tid as i32, START.as_i64(), END.as_i64())).unwrap();
+        let mut out = Vec::new();
+        let mut rec = bam::Record::new();
+        while reader.read(&mut rec) == Some(Ok(())) {
+            out.push(rec.clone());
+        }
+        out
+    };
+
+    // seqair bare AlignedPairs: positions only (no seq/qual lookup).
+    group.bench_function("seqair_bare", |b| {
+        b.iter(|| {
+            let mut total_pairs: u64 = 0;
+            for idx in 0..seqair_store.len() as u32 {
+                let rec = seqair_store.record(idx);
+                for pair in rec.aligned_pairs(&seqair_store).unwrap() {
+                    let _ = black_box(pair);
+                    total_pairs += 1;
+                }
+            }
+            black_box(total_pairs)
+        });
+    });
+
+    // seqair with_read: pairs + per-position read base/qual.
+    group.bench_function("seqair_with_read", |b| {
+        b.iter(|| {
+            let mut total_pairs: u64 = 0;
+            for idx in 0..seqair_store.len() as u32 {
+                let rec = seqair_store.record(idx);
+                for ev in rec.aligned_pairs_with_read(&seqair_store).unwrap() {
+                    let _ = black_box(ev);
+                    total_pairs += 1;
+                }
+            }
+            black_box(total_pairs)
+        });
+    });
+
+    // seqair matches_only: positions filtered to Match-only.
+    group.bench_function("seqair_matches_only", |b| {
+        b.iter(|| {
+            let mut total: u64 = 0;
+            for idx in 0..seqair_store.len() as u32 {
+                let rec = seqair_store.record(idx);
+                for m in rec.aligned_pairs(&seqair_store).unwrap().matches_only() {
+                    let _ = black_box(m);
+                    total += 1;
+                }
+            }
+            black_box(total)
+        });
+    });
+
+    // rust-htslib aligned_pairs_full (the closest analogue — per-base events).
+    group.bench_function("htslib_aligned_pairs_full", |b| {
+        b.iter(|| {
+            let mut total: u64 = 0;
+            for record in &htslib_records {
+                for pair in record.aligned_pairs_full() {
+                    let _ = black_box(pair);
+                    total += 1;
+                }
+            }
+            black_box(total)
+        });
+    });
+
+    // rust-htslib aligned_pairs (matches-only — filtered to M positions).
+    group.bench_function("htslib_aligned_pairs", |b| {
+        b.iter(|| {
+            let mut total: u64 = 0;
+            for record in &htslib_records {
+                for pair in record.aligned_pairs() {
+                    let _ = black_box(pair);
+                    total += 1;
+                }
+            }
+            black_box(total)
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bgzf_decompress,
+    bam_record_decode,
+    bam_roundtrip,
+    pileup_e2e,
+    aligned_pairs_walk,
+);
 criterion_main!(benches);
