@@ -170,3 +170,16 @@ The matches-only adapters (`MatchesOnly`, `MatchedBases`, `MatchedRefs`) MUST im
 
 r[cigar.aligned_pairs.with_read.owned_record]
 `OwnedBamRecord::aligned_pairs_with_read()` MUST be a one-shot helper symmetric with `SlimRecord::aligned_pairs_with_read`, equivalent to `self.aligned_pairs()?.with_read(&self.seq, &self.qual)`. It validates the same length invariants and returns `AlignedPairsError` on failure.
+
+## NM and MD recompute
+
+The `NM` (edit distance) and `MD` (mismatch positions) tags are derivable from a record's CIGAR walk against a reference. `AlignedPairsWithRef` exposes them as consuming methods so callers can compute on demand without re-walking.
+
+r[cigar.aligned_pairs.nm.compute]
+`AlignedPairsWithRef::nm() -> u32` MUST consume the iterator and return the SAM-spec edit distance: `M`-op mismatches (decided by `query != ref_base`) + `=` always 0 + `X` always 1 per position + `I` length + `D` length. `N` and clips contribute 0. The function is best-effort: positions where the reference is outside the loaded `RefSeq` window MUST be skipped (count 0) rather than erroring. Callers needing strict computation MUST verify `RefSeq` coverage before calling. Comparison semantics: `Base::Unknown` (`N`) is treated as a mismatch against any base, including another `N`.
+
+r[cigar.aligned_pairs.md.compute]
+`AlignedPairsWithRef::md() -> Result<Vec<u8>, NmMdError>` MUST consume the iterator and return the SAM-spec MD tag bytes: alternating digit runs (counts of consecutive matching positions) and either single ref bases (mismatches) or `^` followed by ref bases (deletions). The output MUST start AND end with a digit (possibly `0`). Two adjacent deletions MUST be separated by a `0` to remain unambiguous. Insertions and soft clips MUST NOT appear. Reference skips (`N`) MUST NOT contribute to MD (matches `samtools calmd` behavior). Returns `NmMdError::MissingReference` if any required reference position is outside the loaded `RefSeq` window — MD encodes ref bases verbatim and partial coverage would corrupt the output.
+
+r[cigar.aligned_pairs.nm_md.consistency]
+For the same record + reference + iterator configuration, `nm()` and `md()` MUST agree: the computed `NM` MUST equal `(MD letters outside ^) + (MD bases inside ^) + (CIGAR insertion lengths)`. This invariant is verified by a property test.
