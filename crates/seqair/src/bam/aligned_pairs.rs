@@ -398,7 +398,8 @@ impl Iterator for AlignedPairs<'_> {
             // ── Expand multi-base ops (M/=/X) ──
             match std::mem::replace(&mut self.expanding, ExpandingState::None) {
                 ExpandingState::PerBase { remaining, kind } if remaining > 0 => {
-                    self.expanding = ExpandingState::PerBase { remaining: remaining - 1, kind };
+                    self.expanding =
+                        ExpandingState::PerBase { remaining: remaining.saturating_sub(1), kind };
                     let qpos = self.qpos;
                     let rpos = self.rpos;
                     self.qpos = self.qpos.saturating_add(1);
@@ -546,7 +547,8 @@ impl std::iter::FusedIterator for MatchesOnly<'_> {}
 #[inline]
 fn advance_rpos(rpos: Pos0, n: u32) -> Pos0 {
     let val = rpos.as_u64().saturating_add(u64::from(n));
-    let clamped = val.min(i32::MAX as u64) as u32;
+    // val.min(i32::MAX as u64) is ≤ i32::MAX, so the cast cannot truncate.
+    let clamped = u32::try_from(val.min(i32::MAX as u64)).unwrap_or(i32::MAX as u32);
     // clamped ≤ i32::MAX, so Pos0::new can't fail
     Pos0::new(clamped).unwrap_or(rpos)
 }
@@ -1225,9 +1227,7 @@ mod tests {
     fn oracle_matches_iterator_full() {
         let cigar = &[soft(1), m(1), pad(2), ins(1), del(1), unk(9, 2), m(1)];
         let actual: Vec<_> = AlignedPairs::new(p0(0), cigar).full().collect();
-        let mut opts = AlignedPairsOptions::default();
-        opts.soft_clips = true;
-        opts.padding_and_unknown = true;
+        let opts = AlignedPairsOptions { soft_clips: true, padding_and_unknown: true };
         let expected = oracle_walk(cigar, p0(0), opts);
         assert_eq!(actual, expected);
     }
@@ -1276,9 +1276,10 @@ mod tests {
                 pos in arb_pos0(),
             ) {
                 let actual: Vec<_> = AlignedPairs::new(pos, &cigar).full().collect();
-                let mut opts = AlignedPairsOptions::default();
-                opts.soft_clips = true;
-                opts.padding_and_unknown = true;
+                let opts = AlignedPairsOptions {
+                    soft_clips: true,
+                    padding_and_unknown: true,
+                };
                 let expected = oracle_walk(&cigar, pos, opts);
                 prop_assert_eq!(actual, expected);
             }
@@ -1347,12 +1348,12 @@ mod tests {
                     }
                     AlignedPair::Deletion { rpos, del_len } => {
                         for i in 0..del_len {
-                            result.push((None, Some(advance_rpos(rpos, i).as_u64() as u32)));
+                            result.push((None, Some(*advance_rpos(rpos, i))));
                         }
                     }
                     AlignedPair::RefSkip { rpos, skip_len } => {
                         for i in 0..skip_len {
-                            result.push((None, Some(advance_rpos(rpos, i).as_u64() as u32)));
+                            result.push((None, Some(*advance_rpos(rpos, i))));
                         }
                     }
                     AlignedPair::SoftClip { qpos, len } => {
@@ -1442,8 +1443,14 @@ mod tests {
             ];
 
             for &(cigar_str, pos) in test_cases {
+                #[expect(
+                    clippy::cast_sign_loss,
+                    clippy::cast_possible_truncation,
+                    reason = "test fixtures: positions are non-negative and ≤ i32::MAX"
+                )]
+                let pos_u32 = pos as u32;
                 let our_pairs =
-                    expand_iterator(&parse_cigar_string(cigar_str), Pos0::new(pos as u32).unwrap());
+                    expand_iterator(&parse_cigar_string(cigar_str), Pos0::new(pos_u32).unwrap());
                 let hts_pairs = htslib_pairs(cigar_str, pos);
                 assert_eq!(
                     our_pairs, hts_pairs,
@@ -1471,7 +1478,7 @@ mod tests {
             assert_eq!(expansions[1], expansions[2], "5= and 5X must expand identically");
         }
 
-        /// Build a rust-htslib CigarString from a CIGAR string like "5M2I3D".
+        /// Build a rust-htslib `CigarString` from a CIGAR string like `"5M2I3D"`.
         fn build_htslib_cigar(s: &str) -> rust_htslib::bam::record::CigarString {
             use rust_htslib::bam::record::{Cigar, CigarString};
             let mut cigars = Vec::new();
@@ -1576,9 +1583,15 @@ mod tests {
                     cigar_str in arb_cigar_string(),
                     pos in 0i64..=100_000i64,
                 ) {
+                    #[expect(
+                        clippy::cast_sign_loss,
+                        clippy::cast_possible_truncation,
+                        reason = "proptest range 0..=100_000 fits in u32"
+                    )]
+                    let pos_u32 = pos as u32;
                     let our_pairs = expand_iterator(
                         &parse_cigar_string(&cigar_str),
-                        Pos0::new(pos as u32).unwrap(),
+                        Pos0::new(pos_u32).unwrap(),
                     );
                     let hts_pairs = htslib_pairs(&cigar_str, pos);
                     prop_assert_eq!(
@@ -1592,7 +1605,7 @@ mod tests {
             }
         }
 
-        /// Parse a CIGAR string like "5M2I3D" into our CigarOp vec.
+        /// Parse a CIGAR string like `"5M2I3D"` into our `CigarOp` vec.
         fn parse_cigar_string(s: &str) -> Vec<CigarOp> {
             let mut ops = Vec::new();
             let mut num = 0u32;
@@ -1652,8 +1665,8 @@ mod tests {
         use super::*;
         use seqair_types::{BamFlags, Base, BaseQuality};
 
-        /// Build a record via OwnedBamRecord, serialize to BAM bytes, push into
-        /// a fresh RecordStore via push_raw.
+        /// Build a record via [`OwnedBamRecord`], serialize to BAM bytes, push
+        /// into a fresh [`RecordStore`] via `push_raw`.
         fn store_with_record(pos: u32, cigar: &[CigarOp], seq_len: usize) -> RecordStore<()> {
             let rec = OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), b"r".to_vec())
                 .flags(BamFlags::empty())

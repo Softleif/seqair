@@ -12,18 +12,24 @@ Specs in `docs/spec/*.md` with `r[rule.id]`. Code: `// r[impl rule.id]`, tests: 
 
 Expert Rust. Modern idioms. Types are the primary abstraction.
 
-* Correctness and clarity first. Comments explain "why" only.
-* No `mod.rs` — use `src/some_module.rs`.
-* No `unwrap()` — propagate with `?`.
-* No indexing — use `.get()`. If indexing is unavoidable, `#[allow(clippy::indexing_slicing)]` + `debug_assert!`.
-* No `let _ =` on fallible ops — propagate, log with `warn!`, or handle.
-* No `from_utf8_lossy` — use `from_utf8()?` with typed errors.
-* Error enums: one per module, typed fields only (never `String`), `#[from]` for wrapping. Never use `io::Error::other("message")` — add a typed variant instead. Hierarchy: `BgzfError` → `BamHeaderError`/`BaiError` → `BamError`; `BamWriteError` (parallel to `BamError` for the write path); `FaiError`/`GziError` → `FastaError`; `FormatDetectionError` → `ReaderError`; `VcfHeaderError`/`VcfEncodeError`/`AllelesError` → `VcfError`.
-* `color_eyre` for errors, `tracing` for logging.
-* Sequence names are `SmolStr`.
-* Tests: `cargo test`. Prefer `proptest` where applicable. Round-trip tests against noodles and bcftools are the strongest validation — always add them for new output formats. Avoid tautological tests — don't verify code using a copy of the same logic (e.g., compute expected bin with the same `reg2bin`). Use independent oracles. For tests that write temp files (e.g., bcftools round-trips), use the `tempfile` crate (`tempfile::NamedTempFile`) rather than `std::env::temp_dir().join(...)` to avoid filename collisions under parallel test execution.
-* `SmallVec` in this project uses 2-arg form `SmallVec<T, N>` (not `SmallVec<[T; N]>`) due to debug-mode Vec alias in seqair-types. Use `vec![]` and `.to_vec()` instead of `SmallVec::from_buf`/`from_slice`.
-* No silent `as i32`/`as u32` truncation at serialization boundaries — use `i32::try_from()` or equivalent with typed errors. At allocation boundaries (parsing untrusted counts), apply practical upper bounds matching real-world data, not format maximums (`i32::MAX` is not a limit). See `r[io.writer_limits]` and `r[io.fuzz.alloc_limits]` in the general spec.
+- Correctness and clarity first. Comments explain "why" only.
+- No `mod.rs` — use `src/some_module.rs`.
+- No `unwrap()` — propagate with `?`.
+- No indexing — use `.get()`. If indexing is unavoidable, `#[allow(clippy::indexing_slicing)]` + `debug_assert!`.
+- No `let _ =` on fallible ops — propagate, log with `warn!`, or handle.
+- No `from_utf8_lossy` — use `from_utf8()?` with typed errors.
+- Error enums: one per module, typed fields only (never `String`), `#[from]` for wrapping. Never use `io::Error::other("message")` — add a typed variant instead. Hierarchy: `BgzfError` → `BamHeaderError`/`BaiError` → `BamError`; `BamWriteError` (parallel to `BamError` for the write path); `FaiError`/`GziError` → `FastaError`; `FormatDetectionError` → `ReaderError`; `VcfHeaderError`/`VcfEncodeError`/`AllelesError` → `VcfError`.
+- `color_eyre` for errors, `tracing` for logging.
+- Sequence names are `SmolStr`.
+- Tests: `cargo test --all --quiet`. Prefer `proptest` where applicable. Round-trip tests against noodles and bcftools are the strongest validation — always add them for new output formats. Avoid tautological tests — don't verify code using a copy of the same logic (e.g., compute expected bin with the same `reg2bin`). Use independent oracles. For tests that write temp files (e.g., bcftools round-trips), use the `tempfile` crate (`tempfile::NamedTempFile`) rather than `std::env::temp_dir().join(...)` to avoid filename collisions under parallel test execution.
+- `SmallVec` in this project uses 2-arg form `SmallVec<T, N>` (not `SmallVec<[T; N]>`).
+- No silent `as i32`/`as u32` truncation at serialization boundaries — use `i32::try_from()` or equivalent with typed errors. At allocation boundaries (parsing untrusted counts), apply practical upper bounds matching real-world data, not format maximums (`i32::MAX` is not a limit). See `r[io.writer_limits]` and `r[io.fuzz.alloc_limits]` in the general spec.
+
+## Pre-push CI parity
+
+CI runs clippy and tests with `-D warnings`. **Before pushing, always run with the same flag:**
+
+Frequent CI-only failures to watch for: `clippy::cast_possible_truncation`, `clippy::arithmetic_side_effects`, `clippy::doc_markdown`, `clippy::field_reassign_with_default`, `clippy::needless_update`, `clippy::useless_conversion`, `clippy::unnecessary_cast`
 
 ## Architecture notes
 
@@ -65,6 +71,7 @@ Expert Rust. Modern idioms. Types are the primary abstraction.
 **Typed field handles**: `ScalarInfoHandle<T>`, `PerAlleleInfoHandle<T>`, `FlagInfoHandle`, `GtFormatHandle`, etc. Pre-resolved from header at setup. `handle.encode(&mut enc, value)` writes directly into BCF buffers. `BcfValue` trait: `scalar_type_code()` selects smallest int type for i32; arrays scan all values for uniform type.
 
 **BCF format pitfalls** (caught by tests):
+
 - BCF magic is `BCF\x02\x02` (v2.2), NOT `\x02\x01` (v2.1). bcftools rejects v2.1.
 - BCF string dictionary order MUST match VCF header text emission order. Emit FILTER (PASS first) → INFO → FORMAT. If these don't match, noodles/htslib compute different dict indices and fields decode wrong.
 - Integer arrays with missing values: scan only concrete values for `smallest_int_type`, then use per-type sentinel (int8=0x80, int16=0x8000, int32=0x80000000). Never use `i32::MIN` as a universal missing marker.
@@ -79,6 +86,7 @@ Expert Rust. Modern idioms. Types are the primary abstraction.
 **BamWriter**: wraps `BgzfWriter`, writes header eagerly at construction (no separate `write_header()`). Error poisoning: after any write failure, all subsequent writes return `Poisoned`. Index co-production validates records BEFORE writing to BGZF to avoid poisoning after partial writes.
 
 **Index record dispatch** (three cases for BAI co-production):
+
 1. Mapped (flags & 0x4 == 0, ref_id ≥ 0): `index.push(tid, pos, end_pos, voff)`
 2. Placed unmapped (flags & 0x4 != 0, ref_id ≥ 0): `index.push_unmapped(tid, pos, pos+1, voff)`
 3. Fully unmapped (ref_id == -1): not pushed to index
@@ -93,6 +101,7 @@ Expert Rust. Modern idioms. Types are the primary abstraction.
 Fuzz targets live in `crates/seqair/fuzz/fuzz_targets/`. CI runs them nightly via `fuzz/run_all.sh`.
 
 **Reproducing a crash locally** (requires Docker on macOS — cargo-fuzz needs Linux/ASAN):
+
 ```bash
 # Copy the crash artifact to crates/seqair/fuzz/artifacts/<target>/
 docker run --platform linux/amd64 --rm \

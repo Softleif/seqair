@@ -72,13 +72,13 @@ struct Cli {
     min_qual: u8,
 }
 
-/// A `keep_record` filter that drops records that won't produce useful
+/// A push-time filter that drops records that won't produce useful
 /// evidence — same defensive set as the variant caller example.
 #[derive(Clone)]
 struct DropUseless;
 impl CustomizeRecordStore for DropUseless {
     type Extra = ();
-    fn keep_record(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
+    fn filter(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
         !rec.flags.is_unmapped()
             && !rec.flags.is_secondary()
             && !rec.flags.is_supplementary()

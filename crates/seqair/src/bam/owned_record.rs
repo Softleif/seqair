@@ -51,7 +51,7 @@ pub enum OwnedRecordError {
     Decode { reason: &'static str },
 }
 
-/// Decode a BAM-wire `i32` pos/next_pos field into `Option<Pos0>`.
+/// Decode a BAM-wire `i32` `pos`/`next_pos` field into `Option<Pos0>`.
 ///
 /// `-1` (the canonical "unmapped/unavailable" sentinel from [SAM1] §1.4) maps
 /// to `None`. Non-negative values map to `Some(Pos0)`. Other negative values
