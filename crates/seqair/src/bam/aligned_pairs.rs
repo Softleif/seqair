@@ -160,6 +160,26 @@ const _: () = assert!(
     "AlignedPair grew past 16 bytes — revisit before accepting the hit"
 );
 
+// ── MatchPosition ──────────────────────────────────────────────────────────
+
+// r[impl cigar.aligned_pairs.matches_only.types]
+/// A position from a `Match` event, stripped of the enum and indel variants.
+///
+/// Returned by [`AlignedPairs::matches_only`] when the caller only wants
+/// matched query/reference positions and doesn't care about indels. This is
+/// the seqair equivalent of pysam's `aligned_pairs(matches_only=True)` and
+/// rust-htslib's `BamRecordExtensions::aligned_pairs()`.
+///
+/// `kind` is preserved so callers can distinguish `M` (ambiguous) from `=`
+/// (explicit match) and `X` (explicit mismatch); htslib's variant collapses
+/// these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MatchPosition {
+    pub qpos: u32,
+    pub rpos: Pos0,
+    pub kind: MatchKind,
+}
+
 // ── AlignedPairsOptions ────────────────────────────────────────────────────
 
 // r[impl cigar.aligned_pairs.options]
@@ -200,7 +220,7 @@ pub struct AlignedPairsOptions {
 ///     }
 /// }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AlignedPairs<'a> {
     /// Remaining CIGAR ops to process.
     ops: &'a [CigarOp],
@@ -283,6 +303,24 @@ impl<'a> AlignedPairs<'a> {
     ///     // ...
     /// }
     /// ```
+    // r[impl cigar.aligned_pairs.matches_only.bare]
+    /// Filter to `Match` events only, yielding flat [`MatchPosition`] values.
+    ///
+    /// Equivalent to filtering `AlignedPair::Match` and stripping the enum,
+    /// but the named adapter makes intent visible at the call site and gives
+    /// callers a clean type for function signatures. Indels and clips are
+    /// dropped silently.
+    ///
+    /// # Example
+    /// ```ignore
+    /// for m in slim.aligned_pairs(&store)?.matches_only() {
+    ///     // m.qpos, m.rpos, m.kind — no enum dispatch needed
+    /// }
+    /// ```
+    pub fn matches_only(self) -> MatchesOnly<'a> {
+        MatchesOnly { inner: self }
+    }
+
     pub fn with_read<'read>(
         self,
         seq: &'read [seqair_types::Base],
@@ -317,6 +355,43 @@ impl<'a> AlignedPairs<'a> {
 
 impl Iterator for AlignedPairs<'_> {
     type Item = AlignedPair;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // We can compute the exact remaining count by walking the unprocessed
+        // CIGAR ops with the current options + expansion state. Each call is
+        // O(n_ops) which is fine: n_ops is small (single-digit on Illumina,
+        // tens on long-read) and `size_hint` is not in the inner loop.
+        let mut count: usize = 0;
+        if let ExpandingState::PerBase { remaining, .. } = self.expanding {
+            count = count.saturating_add(remaining as usize);
+        }
+        for op in self.ops {
+            let len = op.len();
+            if len == 0 {
+                continue;
+            }
+            match op.op_type() {
+                CigarOpType::Match | CigarOpType::SeqMatch | CigarOpType::SeqMismatch => {
+                    count = count.saturating_add(len as usize);
+                }
+                CigarOpType::Insertion | CigarOpType::Deletion | CigarOpType::RefSkip => {
+                    count = count.saturating_add(1);
+                }
+                CigarOpType::SoftClip => {
+                    if self.options.soft_clips {
+                        count = count.saturating_add(1);
+                    }
+                }
+                CigarOpType::HardClip => {}
+                CigarOpType::Padding | CigarOpType::Unknown(_) => {
+                    if self.options.padding_and_unknown {
+                        count = count.saturating_add(1);
+                    }
+                }
+            }
+        }
+        (count, Some(count))
+    }
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -421,6 +496,49 @@ impl Iterator for AlignedPairs<'_> {
     }
 }
 
+// `size_hint` returns `(n, Some(n))` so the iterator is exact-sized.
+impl ExactSizeIterator for AlignedPairs<'_> {}
+
+// `next()` never returns Some after returning None — the implementation drains
+// `ops` and `expanding` strictly forward.
+impl std::iter::FusedIterator for AlignedPairs<'_> {}
+
+// ── MatchesOnly iterator ───────────────────────────────────────────────────
+
+// r[impl cigar.aligned_pairs.matches_only.bare]
+/// Iterator over [`MatchPosition`] — produced by
+/// [`AlignedPairs::matches_only`]. Walks the underlying `AlignedPairs` and
+/// yields only `Match` events as flat structs.
+#[derive(Debug, Clone)]
+pub struct MatchesOnly<'a> {
+    inner: AlignedPairs<'a>,
+}
+
+impl Iterator for MatchesOnly<'_> {
+    type Item = MatchPosition;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // We can't predict how many of the remaining events are Match without
+        // re-walking the CIGAR, so report a filter-style hint: lower bound 0,
+        // upper bound = inner's upper bound.
+        let (_, upper) = self.inner.size_hint();
+        (0, upper)
+    }
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.inner.next()? {
+                AlignedPair::Match { qpos, rpos, kind } => {
+                    return Some(MatchPosition { qpos, rpos, kind });
+                }
+                _ => continue,
+            }
+        }
+    }
+}
+
+impl std::iter::FusedIterator for MatchesOnly<'_> {}
+
 /// Advance a `Pos0` by `n` positions, saturating at `i32::MAX`.
 /// Used internally by the iterator; overflow only happens on degenerate BAM
 /// (positions would already exceed BAM's i32 range) and saturation is the
@@ -514,6 +632,32 @@ impl super::owned_record::OwnedBamRecord {
             None if self.cigar.is_empty() => Ok(AlignedPairs::new(Pos0::ZERO, &self.cigar)),
             None => Err(AlignedPairsError::UnmappedWithCigar { cigar_ops: self.cigar.len() }),
         }
+    }
+
+    // r[impl cigar.aligned_pairs.with_read.owned_record]
+    /// One-shot walk with read seq/qual attached — symmetric with
+    /// [`SlimRecord::aligned_pairs_with_read`](super::record_store::SlimRecord::aligned_pairs_with_read).
+    ///
+    /// Equivalent to `self.aligned_pairs()?.with_read(&self.seq, &self.qual)`,
+    /// but bundled to avoid the verbose three-line chain at every call site.
+    /// The same validation applies: cigar query length must match seq length;
+    /// qual must be empty (BAM missing-qual sentinel) or match seq length.
+    ///
+    /// Chain `.with_reference(&ref_seq)` to add reference base lookups.
+    ///
+    /// # Example
+    /// ```ignore
+    /// for ev in record.aligned_pairs_with_read()? {
+    ///     if let AlignedPairWithRead::Match { qpos, query, qual, .. } = ev {
+    ///         // ...
+    ///     }
+    /// }
+    /// ```
+    pub fn aligned_pairs_with_read(
+        &self,
+    ) -> Result<super::aligned_pairs_view::AlignedPairsWithRead<'_, '_>, AlignedPairsError> {
+        let pairs = self.aligned_pairs()?;
+        pairs.with_read(&self.seq, &self.qual)
     }
 }
 
@@ -789,6 +933,114 @@ mod tests {
         assert_eq!(pairs.len(), 2);
         assert!(matches!(pairs[0], AlignedPair::Match { .. }));
         assert!(matches!(pairs[1], AlignedPair::Match { .. }));
+    }
+
+    // ── matches_only adapter ──────────────────────────────────────────────
+
+    // r[verify cigar.aligned_pairs.matches_only.bare]
+    #[test]
+    fn matches_only_drops_indels_and_keeps_match_kind() {
+        // 2M + 3I + 2= + 1D + 2X = 2 + 2 + 2 = 6 Match positions
+        // (3I and 1D are dropped — they aren't Match events.)
+        let cigar = [m(2), ins(3), seq_match(2), del(1), seq_mismatch(2)];
+        let matches: Vec<_> = AlignedPairs::new(p0(100), &cigar).matches_only().collect();
+        assert_eq!(matches.len(), 6);
+        // Spot-check kind preservation across the M/=/X mix.
+        assert_eq!(matches[0].kind, MatchKind::Match);
+        assert_eq!(matches[1].kind, MatchKind::Match);
+        assert_eq!(matches[2].kind, MatchKind::SeqMatch);
+        assert_eq!(matches[3].kind, MatchKind::SeqMatch);
+        assert_eq!(matches[4].kind, MatchKind::SeqMismatch);
+        assert_eq!(matches[5].kind, MatchKind::SeqMismatch);
+        // Position monotonicity
+        for window in matches.windows(2) {
+            assert!(window[0].qpos <= window[1].qpos);
+            assert!(*window[0].rpos <= *window[1].rpos);
+        }
+    }
+
+    // r[verify cigar.aligned_pairs.matches_only.bare]
+    #[test]
+    fn matches_only_count_equals_filtered_match_events() {
+        let cigar = [soft(2), m(5), ins(3), m(4), del(2), m(3)];
+        let bare_match_count = AlignedPairs::new(p0(0), &cigar)
+            .filter(|p| matches!(p, AlignedPair::Match { .. }))
+            .count();
+        let matches_only_count = AlignedPairs::new(p0(0), &cigar).matches_only().count();
+        assert_eq!(bare_match_count, matches_only_count);
+        assert_eq!(matches_only_count, 12);
+    }
+
+    // ── size_hint / ExactSizeIterator ────────────────────────────────────
+
+    #[test]
+    fn size_hint_exact_for_match_only_cigar() {
+        let cigar = [m(5)];
+        let it = AlignedPairs::new(p0(0), &cigar);
+        assert_eq!(it.size_hint(), (5, Some(5)));
+        assert_eq!(it.len(), 5);
+    }
+
+    #[test]
+    fn size_hint_exact_with_indels_and_clips() {
+        // Default mode: 2 SoftClip hidden + 5M + 1I (summary) + 4M + 1D + 3M
+        // = 5 + 1 + 4 + 1 + 3 = 14 events
+        let cigar = [soft(2), m(5), ins(3), m(4), del(2), m(3)];
+        let it = AlignedPairs::new(p0(0), &cigar);
+        assert_eq!(it.size_hint(), (14, Some(14)));
+    }
+
+    #[test]
+    fn size_hint_includes_soft_clips_when_enabled() {
+        // 2S + 5M = 5 in default mode, 6 with soft clips
+        let cigar = [soft(2), m(5)];
+        assert_eq!(AlignedPairs::new(p0(0), &cigar).len(), 5);
+        assert_eq!(AlignedPairs::new(p0(0), &cigar).with_soft_clips().len(), 6);
+    }
+
+    #[test]
+    fn size_hint_skips_zero_length_ops() {
+        // 0M (skipped) + 3M + 0I (skipped) + 2M = 5 events
+        let cigar = [m(0), m(3), ins(0), m(2)];
+        assert_eq!(AlignedPairs::new(p0(0), &cigar).len(), 5);
+    }
+
+    #[test]
+    fn size_hint_decrements_with_iteration() {
+        // After consuming N events, len() should return (total - N).
+        let cigar = [m(5), del(1), m(3)];
+        let mut it = AlignedPairs::new(p0(0), &cigar);
+        assert_eq!(it.len(), 9); // 5M + 1D(summary) + 3M
+        let _ = it.next();
+        assert_eq!(it.len(), 8);
+        let _ = it.next();
+        assert_eq!(it.len(), 7);
+        // Drain to end
+        while it.next().is_some() {}
+        assert_eq!(it.len(), 0);
+    }
+
+    #[test]
+    fn collect_pre_allocates_with_size_hint() {
+        // Verify size_hint is honored: the collected Vec's capacity is at
+        // least the iterator's len(). std::vec::Vec uses the lower bound of
+        // size_hint for `with_capacity` in `collect()`.
+        let cigar = [m(100)];
+        let collected: Vec<_> = AlignedPairs::new(p0(0), &cigar).collect();
+        assert_eq!(collected.len(), 100);
+        assert!(collected.capacity() >= 100);
+    }
+
+    // ── Clone ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clone_lets_caller_walk_twice() {
+        let cigar = [m(3), ins(1), m(2)];
+        let it = AlignedPairs::new(p0(50), &cigar);
+        let it_clone = it.clone();
+        let first: Vec<_> = it.collect();
+        let second: Vec<_> = it_clone.collect();
+        assert_eq!(first, second);
     }
 
     // ── D-I adjacency ─────────────────────────────────────────────────────

@@ -823,6 +823,51 @@ mod tests {
         ));
     }
 
+    // r[verify cigar.aligned_pairs.with_read.owned_record]
+    #[test]
+    fn aligned_pairs_with_read_attaches_query_base() {
+        // 3M record with seq [A, C, G] — verify the helper attaches per-pos
+        // bases without going through the SlimRecord/RecordStore round-trip.
+        use super::super::aligned_pairs_view::AlignedPairWithRead;
+        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(50).unwrap()), b"r".to_vec())
+            .flags(BamFlags::empty())
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
+            .seq(vec![Base::A, Base::C, Base::G])
+            .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
+            .build()
+            .unwrap();
+
+        let events: Vec<_> = rec.aligned_pairs_with_read().unwrap().collect();
+        assert_eq!(events.len(), 3);
+        match events[0] {
+            AlignedPairWithRead::Match { qpos: 0, query: Base::A, .. } => {}
+            other => panic!("expected Match{{qpos=0, query=A}}, got {other:?}"),
+        }
+        match events[2] {
+            AlignedPairWithRead::Match { qpos: 2, query: Base::G, .. } => {}
+            other => panic!("expected Match{{qpos=2, query=G}}, got {other:?}"),
+        }
+    }
+
+    // r[verify cigar.aligned_pairs.with_read.owned_record]
+    #[test]
+    fn aligned_pairs_with_read_propagates_unmapped_error() {
+        // pos = None + non-empty CIGAR → UnmappedWithCigar surfaces through
+        // the helper just like through the bare aligned_pairs().
+        let rec = OwnedBamRecord::builder(-1, None, b"r".to_vec())
+            .flags(BamFlags::from(0x4))
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
+            .seq(vec![Base::A; 3])
+            .qual(vec![BaseQuality::from_byte(30); 3])
+            .build()
+            .unwrap();
+        let result = rec.aligned_pairs_with_read();
+        assert!(matches!(
+            result,
+            Err(super::super::aligned_pairs::AlignedPairsError::UnmappedWithCigar { cigar_ops: 1 })
+        ));
+    }
+
     // r[verify cigar.aligned_pairs.owned_record]
     #[test]
     fn aligned_pairs_accepts_unmapped_with_empty_cigar() {

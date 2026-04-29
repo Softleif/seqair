@@ -138,3 +138,35 @@ r[cigar.aligned_pairs.with_reference.types]
 
 r[cigar.aligned_pairs.with_reference.iterator]
 `AlignedPairsWithRead::with_reference(ref_seq) -> AlignedPairsWithRef<'cigar, 'read, 'ref_seq>` MUST reuse the existing `RefSeq` type from the pileup engine — no new wrapper, no copy. All three lifetimes are independent. `with_soft_clips()` and `full()` MUST also be available here, forwarding through both layers.
+
+## Matches-only adapters
+
+For methylation and SNV calling, callers usually only care about `Match` events — indels and clips are noise. Each layer provides a `matches_only()` adapter that filters to Match events and yields a flat struct (no enum dispatch).
+
+r[cigar.aligned_pairs.matches_only.types]
+Three flat structs MUST be provided, one per layer:
+
+- `MatchPosition { qpos: u32, rpos: Pos0, kind: MatchKind }` — bare layer, equivalent to pysam's `aligned_pairs(matches_only=True)` plus the `kind` distinction htslib loses.
+- `MatchedBase { qpos, rpos, kind, query: Base, qual: BaseQuality }` — with-read layer.
+- `MatchedRef { qpos, rpos, kind, query, qual, ref_base: Option<Base> }` — with-reference layer; the most common shape for methylation and per-record SNV calling.
+
+None of these carry lifetimes — `Base`, `BaseQuality`, `MatchKind`, and `Pos0` are all `Copy`, so the iterators yield owned values.
+
+r[cigar.aligned_pairs.matches_only.bare]
+`AlignedPairs::matches_only() -> MatchesOnly` MUST yield only `Match` events, dropping indels and clips silently. Field values MUST equal the corresponding `AlignedPair::Match` fields one-to-one.
+
+r[cigar.aligned_pairs.matches_only.with_read]
+`AlignedPairsWithRead::matches_only() -> MatchedBases` MUST yield only `Match` events with read base/qual attached.
+
+r[cigar.aligned_pairs.matches_only.with_reference]
+`AlignedPairsWithRef::matches_only() -> MatchedRefs` MUST yield only `Match` events with read base/qual AND `ref_base` attached.
+
+## Iterator invariants
+
+r[cigar.aligned_pairs.iterator_traits]
+The bare and layered iterators (`AlignedPairs`, `AlignedPairsWithRead`, `AlignedPairsWithRef`) MUST implement `Clone`, `ExactSizeIterator`, and `FusedIterator`. `size_hint()` MUST return `(n, Some(n))` where `n` is the exact number of remaining events (the iterator can compute this from the unprocessed CIGAR plus the current expansion state).
+
+The matches-only adapters (`MatchesOnly`, `MatchedBases`, `MatchedRefs`) MUST implement `Clone` and `FusedIterator`. Because they filter, `size_hint()` MUST return `(0, Some(upper))` where `upper` is the inner iterator's upper bound — they're not exact-sized.
+
+r[cigar.aligned_pairs.with_read.owned_record]
+`OwnedBamRecord::aligned_pairs_with_read()` MUST be a one-shot helper symmetric with `SlimRecord::aligned_pairs_with_read`, equivalent to `self.aligned_pairs()?.with_read(&self.seq, &self.qual)`. It validates the same length invariants and returns `AlignedPairsError` on failure.

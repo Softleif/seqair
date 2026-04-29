@@ -62,6 +62,44 @@ use super::aligned_pairs::{AlignedPair, AlignedPairs, MatchKind};
 use super::pileup::RefSeq;
 use seqair_types::{Base, BaseQuality, Pos0};
 
+// ── MatchedBase / MatchedRef value types ───────────────────────────────────
+
+// r[impl cigar.aligned_pairs.matches_only.with_read]
+/// A position from a `Match` event with the read base and qual attached.
+///
+/// Returned by [`AlignedPairsWithRead::matches_only`]. Like [`MatchPosition`]
+/// but enriched with the read's contribution at this position. No lifetime —
+/// `Base` and `BaseQuality` are `Copy`, so the iterator can hand back owned
+/// values without borrowing the seq/qual slabs.
+///
+/// [`MatchPosition`]: super::aligned_pairs::MatchPosition
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchedBase {
+    pub qpos: u32,
+    pub rpos: Pos0,
+    pub kind: MatchKind,
+    pub query: Base,
+    pub qual: BaseQuality,
+}
+
+// r[impl cigar.aligned_pairs.matches_only.with_reference]
+/// A position from a `Match` event with read AND reference base attached.
+///
+/// Returned by [`AlignedPairsWithRef::matches_only`]. The most common shape
+/// for methylation and per-record SNV calling: every field needed to evaluate
+/// "what does this read say about this reference position?" in one struct.
+/// `ref_base` is `None` if `rpos` falls outside the loaded `RefSeq` window;
+/// `Some(Base::Unknown)` for an in-window `N`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchedRef {
+    pub qpos: u32,
+    pub rpos: Pos0,
+    pub kind: MatchKind,
+    pub query: Base,
+    pub qual: BaseQuality,
+    pub ref_base: Option<Base>,
+}
+
 // ── AlignedPairWithRead ────────────────────────────────────────────────────
 
 // r[impl cigar.aligned_pairs.with_read.types]
@@ -116,7 +154,7 @@ pub enum AlignedPairWithRead<'read> {
 /// Lifetimes: `'cigar` ties to the CIGAR slice; `'read` ties to the seq/qual
 /// slabs. They are independent so callers can compose borrows from different
 /// sources (e.g. CIGAR from a realignment buffer + seq/qual from the store).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AlignedPairsWithRead<'cigar, 'read> {
     inner: AlignedPairs<'cigar>,
     seq: &'read [Base],
@@ -155,6 +193,13 @@ impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
         ref_seq: &'ref_seq RefSeq,
     ) -> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
         AlignedPairsWithRef { inner: self, ref_seq }
+    }
+
+    // r[impl cigar.aligned_pairs.matches_only.with_read]
+    /// Filter to `Match` events only, yielding flat [`MatchedBase`] values.
+    /// Indels and clips are dropped silently.
+    pub fn matches_only(self) -> MatchedBases<'cigar, 'read> {
+        MatchedBases { inner: self }
     }
 
     fn attach_read(&self, pair: AlignedPair) -> AlignedPairWithRead<'read> {
@@ -200,11 +245,19 @@ impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
 impl<'read> Iterator for AlignedPairsWithRead<'_, 'read> {
     type Item = AlignedPairWithRead<'read>;
 
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // 1:1 with inner — this layer enriches but doesn't filter.
+        self.inner.size_hint()
+    }
+
     fn next(&mut self) -> Option<Self::Item> {
         let pair = self.inner.next()?;
         Some(self.attach_read(pair))
     }
 }
+
+impl ExactSizeIterator for AlignedPairsWithRead<'_, '_> {}
+impl std::iter::FusedIterator for AlignedPairsWithRead<'_, '_> {}
 
 #[inline]
 fn range_for(qpos: u32, len: u32) -> (usize, usize) {
@@ -263,7 +316,7 @@ pub enum AlignedPairWithRef<'read, 'ref_seq> {
 /// Reuses the [`RefSeq`] already loaded by the reader (no copy or new window).
 /// Borrows the slab references from `with_read` plus a borrow of the
 /// reference window for the duration of iteration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
     inner: AlignedPairsWithRead<'cigar, 'read>,
     ref_seq: &'ref_seq RefSeq,
@@ -281,10 +334,21 @@ impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
         self.inner = self.inner.full();
         self
     }
+
+    // r[impl cigar.aligned_pairs.matches_only.with_reference]
+    /// Filter to `Match` events only, yielding flat [`MatchedRef`] values.
+    /// Indels and clips are dropped silently.
+    pub fn matches_only(self) -> MatchedRefs<'cigar, 'read, 'ref_seq> {
+        MatchedRefs { inner: self }
+    }
 }
 
 impl<'read, 'ref_seq> Iterator for AlignedPairsWithRef<'_, 'read, 'ref_seq> {
     type Item = AlignedPairWithRef<'read, 'ref_seq>;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
 
     fn next(&mut self) -> Option<Self::Item> {
         let pair = self.inner.next()?;
@@ -318,6 +382,75 @@ impl<'read, 'ref_seq> Iterator for AlignedPairsWithRef<'_, 'read, 'ref_seq> {
         })
     }
 }
+
+impl ExactSizeIterator for AlignedPairsWithRef<'_, '_, '_> {}
+impl std::iter::FusedIterator for AlignedPairsWithRef<'_, '_, '_> {}
+
+// ── MatchedBases iterator ──────────────────────────────────────────────────
+
+// r[impl cigar.aligned_pairs.matches_only.with_read]
+/// Iterator over [`MatchedBase`] — produced by
+/// [`AlignedPairsWithRead::matches_only`]. Walks the underlying with-read
+/// iterator and yields only `Match` events as flat structs.
+#[derive(Debug, Clone)]
+pub struct MatchedBases<'cigar, 'read> {
+    inner: AlignedPairsWithRead<'cigar, 'read>,
+}
+
+impl Iterator for MatchedBases<'_, '_> {
+    type Item = MatchedBase;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (_, upper) = self.inner.size_hint();
+        (0, upper)
+    }
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.inner.next()? {
+                AlignedPairWithRead::Match { qpos, rpos, kind, query, qual } => {
+                    return Some(MatchedBase { qpos, rpos, kind, query, qual });
+                }
+                _ => continue,
+            }
+        }
+    }
+}
+
+impl std::iter::FusedIterator for MatchedBases<'_, '_> {}
+
+// ── MatchedRefs iterator ───────────────────────────────────────────────────
+
+// r[impl cigar.aligned_pairs.matches_only.with_reference]
+/// Iterator over [`MatchedRef`] — produced by
+/// [`AlignedPairsWithRef::matches_only`]. Walks the underlying with-reference
+/// iterator and yields only `Match` events as flat structs.
+#[derive(Debug, Clone)]
+pub struct MatchedRefs<'cigar, 'read, 'ref_seq> {
+    inner: AlignedPairsWithRef<'cigar, 'read, 'ref_seq>,
+}
+
+impl Iterator for MatchedRefs<'_, '_, '_> {
+    type Item = MatchedRef;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (_, upper) = self.inner.size_hint();
+        (0, upper)
+    }
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.inner.next()? {
+                AlignedPairWithRef::Match { qpos, rpos, kind, query, qual, ref_base } => {
+                    return Some(MatchedRef { qpos, rpos, kind, query, qual, ref_base });
+                }
+                _ => continue,
+            }
+        }
+    }
+}
+
+impl std::iter::FusedIterator for MatchedRefs<'_, '_, '_> {}
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -738,6 +871,82 @@ mod tests {
         assert_eq!(conversions, 1, "expected exactly one C→T conversion at pos 100");
     }
 
+    // ── matches_only adapters ─────────────────────────────────────────────
+
+    // r[verify cigar.aligned_pairs.matches_only.with_read]
+    #[test]
+    fn with_read_matches_only_yields_matched_bases() {
+        // 2M + 1I + 2M, seq = [A,C, T, G,N]
+        let cigar = vec![
+            op(CigarOpType::Match, 2),
+            op(CigarOpType::Insertion, 1),
+            op(CigarOpType::Match, 2),
+        ];
+        let seq = vec![Base::A, Base::C, Base::T, Base::G, Base::Unknown];
+        let qual = vec![BaseQuality::from_byte(30); 5];
+        let store = make_store(p0(50), cigar, seq, qual);
+        let rec = store.record(0);
+
+        let matches: Vec<_> = rec.aligned_pairs_with_read(&store).unwrap().matches_only().collect();
+        assert_eq!(matches.len(), 4, "expected 2M + 2M = 4 match positions");
+        assert_eq!(matches[0].qpos, 0);
+        assert_eq!(matches[0].query, Base::A);
+        assert_eq!(matches[0].kind, MatchKind::Match);
+        assert_eq!(matches[3].qpos, 4);
+        assert_eq!(matches[3].query, Base::Unknown);
+    }
+
+    // r[verify cigar.aligned_pairs.matches_only.with_reference]
+    #[test]
+    fn with_reference_matches_only_yields_matched_refs() {
+        let cigar = vec![op(CigarOpType::Match, 3)];
+        let seq = vec![Base::A, Base::T, Base::G];
+        let qual = vec![BaseQuality::from_byte(30); 3];
+        let store = make_store(p0(100), cigar, seq, qual);
+        let rec = store.record(0);
+        let ref_seq = make_ref_seq(100, &[Base::A, Base::C, Base::G]);
+
+        let matches: Vec<_> = rec
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .matches_only()
+            .collect();
+        assert_eq!(matches.len(), 3);
+        assert_eq!(matches[0].ref_base, Some(Base::A));
+        assert_eq!(matches[0].query, Base::A);
+        assert_eq!(matches[1].ref_base, Some(Base::C));
+        assert_eq!(matches[1].query, Base::T); // mismatch
+        assert_eq!(matches[2].ref_base, Some(Base::G));
+        assert_eq!(matches[2].query, Base::G);
+    }
+
+    // r[verify cigar.aligned_pairs.matches_only.with_reference]
+    #[test]
+    fn matches_only_skips_indels_and_clips() {
+        // 2S + 2M + 1I + 1D + 2M
+        let cigar = vec![
+            op(CigarOpType::SoftClip, 2),
+            op(CigarOpType::Match, 2),
+            op(CigarOpType::Insertion, 1),
+            op(CigarOpType::Deletion, 1),
+            op(CigarOpType::Match, 2),
+        ];
+        let seq = vec![Base::A; 7];
+        let qual = vec![BaseQuality::from_byte(30); 7];
+        let store = make_store(p0(100), cigar, seq, qual);
+        let rec = store.record(0);
+        let ref_seq = make_ref_seq(100, &[Base::A; 10]);
+
+        let count = rec
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .matches_only()
+            .count();
+        assert_eq!(count, 4, "only 2M + 2M positions; soft clip + I + D dropped");
+    }
+
     // ── Realistic-length records ──────────────────────────────────────────
 
     /// 150bp Illumina-shaped read with a typical methylation-callable CIGAR.
@@ -1143,6 +1352,61 @@ mod tests {
                         _ => {}
                     }
                 }
+            }
+        }
+
+        // ── matches_only equivalence ─────────────────────────────────────
+
+        proptest! {
+            /// `matches_only` MUST yield exactly the Match events from the
+            /// underlying iterator, in order, with the same field values.
+            /// Equivalent to `.filter_map` on Match — naming it shouldn't
+            /// change semantics.
+            #[test]
+            fn with_read_matches_only_equals_manual_filter(
+                ops in proptest::collection::vec(arb_cigar_op(), 0..10),
+                start in 0u32..=10_000u32,
+            ) {
+                let qlen: u32 = ops
+                    .iter()
+                    .filter(|o| matches!(
+                        o.op_type(),
+                        CigarOpType::Match
+                            | CigarOpType::Insertion
+                            | CigarOpType::SoftClip
+                            | CigarOpType::SeqMatch
+                            | CigarOpType::SeqMismatch
+                    ))
+                    .map(|o| o.len())
+                    .sum();
+                let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
+                let qual: Vec<BaseQuality> =
+                    (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
+
+                let pos = Pos0::new(start).unwrap();
+                let it = AlignedPairs::new(pos, &ops)
+                    .with_soft_clips()
+                    .with_read(&seq, &qual);
+                let it = match it {
+                    Ok(x) => x,
+                    Err(e) => {
+                        prop_assert!(false, "with_read validation failed: {e}");
+                        return Ok(());
+                    }
+                };
+
+                // Snapshot via clone so we can iterate twice.
+                let manual: Vec<MatchedBase> = it
+                    .clone()
+                    .filter_map(|ev| match ev {
+                        AlignedPairWithRead::Match { qpos, rpos, kind, query, qual } => {
+                            Some(MatchedBase { qpos, rpos, kind, query, qual })
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let via_adapter: Vec<MatchedBase> = it.matches_only().collect();
+                prop_assert_eq!(manual, via_adapter);
             }
         }
     }

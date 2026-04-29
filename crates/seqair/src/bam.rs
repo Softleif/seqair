@@ -58,9 +58,12 @@ pub mod region_buf;
 pub mod seq;
 pub mod writer;
 
-pub use aligned_pairs::{AlignedPair, AlignedPairs, AlignedPairsError, MatchKind};
+pub use aligned_pairs::{
+    AlignedPair, AlignedPairs, AlignedPairsError, MatchKind, MatchPosition, MatchesOnly,
+};
 pub use aligned_pairs_view::{
     AlignedPairWithRead, AlignedPairWithRef, AlignedPairsWithRead, AlignedPairsWithRef,
+    MatchedBase, MatchedBases, MatchedRef, MatchedRefs,
 };
 pub use aux_data::{AuxData, AuxDataError};
 pub use base_mod::{BaseModError, BaseModState, ModMode, ModStrand, ModType, Modification};
