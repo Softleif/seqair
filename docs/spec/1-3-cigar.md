@@ -63,14 +63,20 @@ The `AlignedPairs` iterator walks a record's CIGAR operations once per record an
 r[cigar.aligned_pairs.types]
 The `AlignedPair` enum MUST have the following variants:
 
-- `Match { qpos: u32, rpos: Pos0 }` — M/=/X op, one yield per position
+- `Match { qpos: u32, rpos: Pos0, kind: MatchKind }` — M/=/X op, one yield per position; `kind` distinguishes the source CIGAR op (see `r[cigar.aligned_pairs.match_kind]`)
 - `Insertion { qpos: u32, insert_len: u32 }` — I op, one yield per op (summary form)
 - `Deletion { rpos: Pos0, del_len: u32 }` — D op, one yield per op (summary form)
 - `RefSkip { rpos: Pos0, skip_len: u32 }` — N op, one yield per op (summary form)
 - `SoftClip { qpos: u32, len: u32 }` — S op, one yield per op; yield controlled by options
-- `Padding` — P op; yield controlled by options
+- `Padding { len: u32 }` — P op, one yield per op; yield controlled by options
 - `Unknown { code: u8, len: u32 }` — reserved op code (9–15); yield controlled by options
-  Hard clips (H) MUST never be yielded.
+  Hard clips (H) MUST never be yielded. The total in-memory size of `AlignedPair` MUST be ≤ 16 bytes; this is enforced by a compile-time `const _` assert.
+
+r[cigar.aligned_pairs.match_kind]
+The `MatchKind` enum MUST have three variants — `Match` (M, BAM op 0), `SeqMatch` (=, BAM op 7), and `SeqMismatch` (X, BAM op 8) — and MUST be carried inside every `AlignedPair::Match`. The qpos/rpos sequence yielded by the iterator MUST be identical regardless of `kind`; the field is informational only. This preserves the per-op distinction that htslib's `aligned_pairs_full` discards.
+
+r[cigar.aligned_pairs.zero_length_ops]
+The iterator MUST skip zero-length CIGAR ops uniformly. No `len: 0` summary variant (`Insertion`, `Deletion`, `RefSkip`, `SoftClip`, `Padding`, `Unknown`) is ever yielded, and zero-length M/=/X ops do not enter expansion. This mirrors htslib's CIGAR walker, whose per-op for-loops simply do not iterate at length 0.
 
 r[cigar.aligned_pairs.iterator]
 The `AlignedPairs` iterator MUST maintain `qpos` (query position) and `rpos` (reference position) cursors and advance them according to CIGAR semantics: M/=/X advances both, I/S advance qpos only, D/N advance rpos only, H/P advance neither. Match ops MUST expand to per-position yields; Insertion/Deletion/RefSkip/SoftClip MUST yield once per op (summary form). The iterator MUST be infallible once constructed — all validation happens at construction time when the CIGAR slice is obtained.
@@ -103,11 +109,29 @@ r[cigar.aligned_pairs.slim_record]
 r[cigar.aligned_pairs.owned_record]
 `OwnedBamRecord::aligned_pairs(&self)` MUST return `AlignedPairs` directly from the owned CIGAR without an intermediate `Result`.
 
-r[cigar.aligned_pairs.complementary]
-`AlignedPairs` and `CigarMapping::pos_info_at` are complementary, not redundant. `AlignedPairs` iterates per-CIGAR-op (record-walking); `pos_info_at` looks up by reference position (column-at-a-time). `PileupEngine` MUST continue to use `CigarMapping::pos_info_at` — do not refactor it onto `AlignedPairs`.
+**Design note (non-verifiable):** `AlignedPairs` and `CigarMapping::pos_info_at` are complementary, not redundant. `AlignedPairs` iterates per-CIGAR-op (record-walking); `pos_info_at` looks up by reference position (column-at-a-time). `PileupEngine` continues to use `CigarMapping::pos_info_at` — do not refactor it onto `AlignedPairs`. (No `r[…]` because there is no per-call behavior to verify; this is a structural caveat.)
 
 r[cigar.aligned_pairs.htslib_equivalence]
 The expanded form (one `AlignedPair` per consumed base, as would be produced by `htslib::aligned_pairs_full`) MUST produce identical `(qpos, rpos)` pairs when compared against htslib for test fixtures. This is verified by property tests gated on the `rust-htslib` dev-dependency.
 
 r[cigar.aligned_pairs.position_monotonicity]
 Both `qpos` and `rpos` across yielded `AlignedPair` variants MUST be monotone non-decreasing. This is verified by property tests.
+
+## Layered iterator views
+
+The base [`AlignedPairs`] iterator yields position-only events. Two adapter layers attach per-event read and reference data on demand. The layering exists for pay-for-what-you-use cost on hot paths: bare iteration has no slab lookups; `with_read` adds two slab references; `with_reference` adds one window borrow. Each layer's yield type is a distinct enum, so the compiler enforces the presence of the relevant data.
+
+r[cigar.aligned_pairs.with_read.types]
+`AlignedPairWithRead` MUST have one variant per `AlignedPair` variant. `Match` MUST gain `query: Base` and `qual: BaseQuality` (the read base and Phred score at `qpos`). `Insertion` and `SoftClip` MUST gain `query: &[Base]` and `qual: &[BaseQuality]` slices borrowed from the record's seq/qual slabs (the inserted/clipped run, not the whole record). `Deletion`, `RefSkip`, `Padding`, `Unknown` MUST pass through unchanged (no read data applies).
+
+r[cigar.aligned_pairs.with_read.iterator]
+`AlignedPairs::with_read(seq: &'a [Base], qual: &'a [BaseQuality]) -> AlignedPairsWithRead<'a>` MUST attach the read's seq and qual slabs to the iterator. The number of yielded events MUST be identical to the underlying `AlignedPairs` (the layer enriches; it does not filter or split events). `with_soft_clips()` and `full()` MUST be available on `AlignedPairsWithRead`, forwarding to the inner iterator.
+
+r[cigar.aligned_pairs.with_read.slim_record]
+`SlimRecord::aligned_pairs_with_read(store) -> Result<AlignedPairsWithRead, RecordAccessError>` MUST be a one-shot helper equivalent to `self.aligned_pairs(store)?.with_read(self.seq(store)?, self.qual(store)?)`. It exists so callers do not have to fan out three slab accesses by hand.
+
+r[cigar.aligned_pairs.with_reference.types]
+`AlignedPairWithRef` MUST mirror `AlignedPairWithRead`'s variants. `Match` MUST gain `ref_base: Option<Base>` (`None` if `rpos` is outside the loaded `RefSeq` window; `Some(Base::Unknown)` for in-window N's). `Deletion` MUST gain `ref_bases: Option<&[Base]>` (`None` if any position in the deletion span is outside the window — partial overlap does not pad). All other variants pass through unchanged.
+
+r[cigar.aligned_pairs.with_reference.iterator]
+`AlignedPairsWithRead::with_reference(ref_seq: &'b RefSeq) -> AlignedPairsWithRef<'a, 'b>` MUST reuse the existing `RefSeq` type from the pileup engine — no new wrapper, no copy. The reference window's lifetime is independent of the read slab borrow. `with_soft_clips()` and `full()` MUST also be available here, forwarding through both layers.

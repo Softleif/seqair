@@ -13,20 +13,55 @@ use super::cigar::{CigarOp, CigarOpType};
 use super::record_store::{RecordAccessError, RecordStore, SlimRecord};
 use seqair_types::Pos0;
 
+// ── MatchKind ──────────────────────────────────────────────────────────────
+
+// r[impl cigar.aligned_pairs.match_kind]
+/// Distinguishes the three aligner-emitted "matched-base" CIGAR ops.
+///
+/// htslib's `aligned_pairs_full` collapses M/=/X into a single tuple shape,
+/// losing the per-op distinction. [`AlignedPair::Match`] preserves it via this
+/// field so callers that care (e.g. NM/MD recompute, variant calling against
+/// `=`/`X` CIGARs) don't have to re-walk the CIGAR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MatchKind {
+    /// `M` (BAM op 0) — alignment match, ambiguous between sequence match and
+    /// mismatch. The aligner did not commit either way.
+    Match,
+    /// `=` (BAM op 7) — explicit sequence match.
+    SeqMatch,
+    /// `X` (BAM op 8) — explicit sequence mismatch.
+    SeqMismatch,
+}
+
 // ── AlignedPair ────────────────────────────────────────────────────────────
 
 // r[impl cigar.aligned_pairs.types]
 /// A typed aligned pair — one event from walking a record's CIGAR.
 ///
 /// Unlike htslib's `(Option<i64>, Option<i64>)`, this enum uses typed variants:
-/// `Match` carries both positions, `Insertion` carries `qpos`+len, `Deletion`
-/// carries `rpos`+len, `RefSkip` carries `rpos`+len. Match ops expand
-/// per-position; I/D/N/S ops yield once per op (summary form).
+/// `Match` carries both positions plus a [`MatchKind`] tag, `Insertion`
+/// carries `qpos`+len, `Deletion` carries `rpos`+len, `RefSkip` carries
+/// `rpos`+len. Match ops expand per-position; I/D/N/S ops yield once per op
+/// (summary form).
+///
+/// # Example
+/// ```ignore
+/// for pair in record.aligned_pairs(store)? {
+///     match pair {
+///         AlignedPair::Match { qpos, rpos, kind } => { /* M, =, or X */ }
+///         AlignedPair::Insertion { qpos, insert_len } => { /* I */ }
+///         AlignedPair::Deletion { rpos, del_len } => { /* D */ }
+///         AlignedPair::RefSkip { rpos, skip_len } => { /* N */ }
+///         _ => {}
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlignedPair {
     /// M / = / X op — read base aligned to a reference base.
-    /// Yields one variant per consumed position.
-    Match { qpos: u32, rpos: Pos0 },
+    /// Yields one variant per consumed position. Use `kind` to distinguish
+    /// `M` (ambiguous) from `=` (explicit match) and `X` (explicit mismatch).
+    Match { qpos: u32, rpos: Pos0, kind: MatchKind },
 
     /// I op — `insert_len` query bases follow `qpos`, no reference span.
     /// `qpos` is the position of the first inserted base.
@@ -42,13 +77,22 @@ pub enum AlignedPair {
     /// Hidden by default; opt in via [`.with_soft_clips()`](AlignedPairs::with_soft_clips) or [`.full()`](AlignedPairs::full).
     SoftClip { qpos: u32, len: u32 },
 
-    /// P op — padding. Hidden by default; opt in via [`.full()`](AlignedPairs::full).
-    Padding,
+    /// P op — padding. `len` is the op length (typically small — most aligners
+    /// emit `1P` or `0P`). Hidden by default; opt in via [`.full()`](AlignedPairs::full).
+    Padding { len: u32 },
 
     /// Reserved op code (9..=15) we tolerate on read. `code` is the raw 4-bit op.
     /// Yielded by [`.full()`](AlignedPairs::full) only.
     Unknown { code: u8, len: u32 },
 }
+
+// Compile-time size guard: enum stays small enough for a hot-path iterator.
+// Match { u32, u32, MatchKind(u8) } = 9 bytes payload, padded to 12. Plus a
+// 1-byte discriminant rounded up by alignment → 16 bytes total.
+const _: () = assert!(
+    std::mem::size_of::<AlignedPair>() <= 16,
+    "AlignedPair grew past 16 bytes — revisit before accepting the hit"
+);
 
 // ── AlignedPairsOptions ────────────────────────────────────────────────────
 
@@ -106,9 +150,11 @@ pub struct AlignedPairs<'a> {
 #[derive(Debug, Clone, Copy)]
 enum ExpandingState {
     None,
-    /// Yield one Match per remaining base.
+    /// Yield one Match per remaining base. `kind` is fixed for the run
+    /// (all expanded yields of an M op are M, not interleaved with =/X).
     PerBase {
         remaining: u32,
+        kind: MatchKind,
     },
 }
 
@@ -142,6 +188,30 @@ impl<'a> AlignedPairs<'a> {
         self.options.padding_and_unknown = true;
         self
     }
+
+    // r[impl cigar.aligned_pairs.with_read.iterator]
+    /// Attach the read's sequence and quality slabs, producing an
+    /// [`AlignedPairsWithRead`](super::aligned_pairs_view::AlignedPairsWithRead)
+    /// that yields events enriched with the per-position read base and qual,
+    /// and pre-sliced inserted/clipped runs.
+    ///
+    /// Lifetimes: `seq` and `qual` must live at least as long as the CIGAR
+    /// borrow (typically all three come from the same
+    /// [`RecordStore`](super::record_store::RecordStore)).
+    ///
+    /// # Example
+    /// ```ignore
+    /// for ev in slim.aligned_pairs(&store)?.with_read(seq, qual) {
+    ///     // ...
+    /// }
+    /// ```
+    pub fn with_read(
+        self,
+        seq: &'a [seqair_types::Base],
+        qual: &'a [seqair_types::BaseQuality],
+    ) -> super::aligned_pairs_view::AlignedPairsWithRead<'a> {
+        super::aligned_pairs_view::AlignedPairsWithRead::new(self, seq, qual)
+    }
 }
 
 impl Iterator for AlignedPairs<'_> {
@@ -151,13 +221,13 @@ impl Iterator for AlignedPairs<'_> {
         loop {
             // ── Expand multi-base ops (M/=/X) ──
             match std::mem::replace(&mut self.expanding, ExpandingState::None) {
-                ExpandingState::PerBase { remaining } if remaining > 0 => {
-                    self.expanding = ExpandingState::PerBase { remaining: remaining - 1 };
+                ExpandingState::PerBase { remaining, kind } if remaining > 0 => {
+                    self.expanding = ExpandingState::PerBase { remaining: remaining - 1, kind };
                     let qpos = self.qpos;
                     let rpos = self.rpos;
                     self.qpos = self.qpos.saturating_add(1);
                     self.rpos = advance_rpos(self.rpos, 1);
-                    return Some(AlignedPair::Match { qpos, rpos });
+                    return Some(AlignedPair::Match { qpos, rpos, kind });
                 }
                 ExpandingState::PerBase { .. } => {
                     // Remaining was 0 — already replaced with None, loop to next op.
@@ -171,13 +241,30 @@ impl Iterator for AlignedPairs<'_> {
             self.ops = rest;
 
             let len = op.len();
-            match op.op_type() {
-                CigarOpType::Match | CigarOpType::SeqMatch | CigarOpType::SeqMismatch => {
-                    if len == 0 {
-                        continue;
-                    }
-                    // Enter expansion state; loop back to yield first position.
-                    self.expanding = ExpandingState::PerBase { remaining: len };
+            let op_type = op.op_type();
+            // r[impl cigar.aligned_pairs.zero_length_ops]
+            // Zero-length ops are degenerate — htslib's CIGAR walker skips them
+            // (its for-loops simply don't iterate). We mirror that for every op
+            // kind so callers never see a `len: 0` summary.
+            // HardClip/Padding/Unknown still need to be considered for advancing
+            // qpos/rpos but those don't move when len == 0 anyway.
+            if len == 0 && !matches!(op_type, CigarOpType::HardClip) {
+                continue;
+            }
+            match op_type {
+                CigarOpType::Match => {
+                    self.expanding =
+                        ExpandingState::PerBase { remaining: len, kind: MatchKind::Match };
+                    continue;
+                }
+                CigarOpType::SeqMatch => {
+                    self.expanding =
+                        ExpandingState::PerBase { remaining: len, kind: MatchKind::SeqMatch };
+                    continue;
+                }
+                CigarOpType::SeqMismatch => {
+                    self.expanding =
+                        ExpandingState::PerBase { remaining: len, kind: MatchKind::SeqMismatch };
                     continue;
                 }
 
@@ -219,7 +306,7 @@ impl Iterator for AlignedPairs<'_> {
 
                 CigarOpType::Padding => {
                     if self.options.padding_and_unknown {
-                        return Some(AlignedPair::Padding);
+                        return Some(AlignedPair::Padding { len });
                     }
                 }
 
@@ -256,11 +343,45 @@ impl SlimRecord {
     ///
     /// Default mode yields `Match`, `Insertion`, `Deletion`, `RefSkip`.
     /// Chain `.with_soft_clips()` or `.full()` on the result to widen.
+    ///
+    /// # Example
+    /// ```ignore
+    /// for pair in slim_record.aligned_pairs(&store)? {
+    ///     if let AlignedPair::Match { qpos, rpos, kind } = pair {
+    ///         // ...
+    ///     }
+    /// }
+    /// ```
     pub fn aligned_pairs<'store, U>(
         &self,
         store: &'store RecordStore<U>,
     ) -> Result<AlignedPairs<'store>, RecordAccessError> {
         Ok(AlignedPairs::new(self.pos, self.cigar(store)?))
+    }
+
+    // r[impl cigar.aligned_pairs.with_read.slim_record]
+    /// Walk this record's CIGAR with read seq/qual attached. One-shot helper:
+    /// equivalent to `self.aligned_pairs(store)?.with_read(self.seq(store)?, self.qual(store)?)`
+    /// but only borrows `store` once.
+    ///
+    /// Chain `.with_reference(&ref_seq)` to add reference-base lookup.
+    ///
+    /// # Example
+    /// ```ignore
+    /// for ev in slim.aligned_pairs_with_read(&store)? {
+    ///     if let AlignedPairWithRead::Match { qpos, query, qual, .. } = ev {
+    ///         // ...
+    ///     }
+    /// }
+    /// ```
+    pub fn aligned_pairs_with_read<'store, U>(
+        &self,
+        store: &'store RecordStore<U>,
+    ) -> Result<super::aligned_pairs_view::AlignedPairsWithRead<'store>, RecordAccessError> {
+        let cigar = self.cigar(store)?;
+        let seq = self.seq(store)?;
+        let qual = self.qual(store)?;
+        Ok(AlignedPairs::new(self.pos, cigar).with_read(seq, qual))
     }
 }
 
@@ -271,14 +392,17 @@ impl super::owned_record::OwnedBamRecord {
     /// Walk this record's CIGAR, yielding typed [`AlignedPair`]s.
     ///
     /// Uses the owned CIGAR directly — no store access needed.
-    /// For unmapped records (pos = -1), `rpos` starts at 0.
+    /// For unmapped records (`pos == None`), `rpos` starts at 0; iteration
+    /// over an empty CIGAR (the typical unmapped case) yields nothing.
+    ///
+    /// # Example
+    /// ```ignore
+    /// for pair in record.aligned_pairs() {
+    ///     // ...
+    /// }
+    /// ```
     pub fn aligned_pairs(&self) -> AlignedPairs<'_> {
-        let rpos = if self.pos >= 0 {
-            Pos0::new(self.pos as u32).unwrap_or(Pos0::ZERO)
-        } else {
-            Pos0::ZERO
-        };
-        AlignedPairs::new(rpos, &self.cigar)
+        AlignedPairs::new(self.pos.unwrap_or(Pos0::ZERO), &self.cigar)
     }
 }
 
@@ -309,8 +433,8 @@ mod tests {
     fn hard(len: u32) -> Op {
         Op::new(CigarOpType::HardClip, len)
     }
-    fn pad() -> Op {
-        Op::new(CigarOpType::Padding, 0)
+    fn pad(len: u32) -> Op {
+        Op::new(CigarOpType::Padding, len)
     }
     fn unk(code: u8, len: u32) -> Op {
         Op::new(CigarOpType::Unknown(code), len)
@@ -318,6 +442,26 @@ mod tests {
 
     fn p0(v: u32) -> Pos0 {
         Pos0::new(v).unwrap()
+    }
+
+    fn match_m(qpos: u32, rpos: Pos0) -> AlignedPair {
+        AlignedPair::Match { qpos, rpos, kind: MatchKind::Match }
+    }
+
+    fn match_eq(qpos: u32, rpos: Pos0) -> AlignedPair {
+        AlignedPair::Match { qpos, rpos, kind: MatchKind::SeqMatch }
+    }
+
+    fn match_x(qpos: u32, rpos: Pos0) -> AlignedPair {
+        AlignedPair::Match { qpos, rpos, kind: MatchKind::SeqMismatch }
+    }
+
+    fn seq_match(len: u32) -> Op {
+        Op::new(CigarOpType::SeqMatch, len)
+    }
+
+    fn seq_mismatch(len: u32) -> Op {
+        Op::new(CigarOpType::SeqMismatch, len)
     }
 
     // ── Basic unit tests ──────────────────────────────────────────────────
@@ -328,8 +472,47 @@ mod tests {
         let cigar = [m(5)];
         let pairs: Vec<_> = AlignedPairs::new(p0(100), &cigar).collect();
         assert_eq!(pairs.len(), 5);
-        assert_eq!(pairs[0], AlignedPair::Match { qpos: 0, rpos: p0(100) });
-        assert_eq!(pairs[4], AlignedPair::Match { qpos: 4, rpos: p0(104) });
+        assert_eq!(pairs[0], match_m(0, p0(100)));
+        assert_eq!(pairs[4], match_m(4, p0(104)));
+    }
+
+    // r[verify cigar.aligned_pairs.match_kind]
+    #[test]
+    fn match_kind_is_preserved_per_op() {
+        // 2M + 2= + 2X — each op type yields its own MatchKind
+        let cigar = [m(2), seq_match(2), seq_mismatch(2)];
+        let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).collect();
+        assert_eq!(pairs.len(), 6);
+        assert_eq!(pairs[0], match_m(0, p0(0)));
+        assert_eq!(pairs[1], match_m(1, p0(1)));
+        assert_eq!(pairs[2], match_eq(2, p0(2)));
+        assert_eq!(pairs[3], match_eq(3, p0(3)));
+        assert_eq!(pairs[4], match_x(4, p0(4)));
+        assert_eq!(pairs[5], match_x(5, p0(5)));
+    }
+
+    // r[verify cigar.aligned_pairs.match_kind]
+    #[test]
+    fn match_kind_does_not_change_qpos_rpos() {
+        // The qpos/rpos sequence must be identical regardless of kind.
+        let m_only = [m(3)];
+        let eq_only = [seq_match(3)];
+        let x_only = [seq_mismatch(3)];
+
+        let strip_kind = |pairs: Vec<AlignedPair>| -> Vec<(u32, u32)> {
+            pairs
+                .iter()
+                .filter_map(|p| match p {
+                    AlignedPair::Match { qpos, rpos, .. } => Some((*qpos, **rpos)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let m_pos = strip_kind(AlignedPairs::new(p0(50), &m_only).collect());
+        let eq_pos = strip_kind(AlignedPairs::new(p0(50), &eq_only).collect());
+        let x_pos = strip_kind(AlignedPairs::new(p0(50), &x_only).collect());
+        assert_eq!(m_pos, eq_pos);
+        assert_eq!(eq_pos, x_pos);
     }
 
     // r[verify cigar.aligned_pairs.insertion_qpos]
@@ -338,12 +521,12 @@ mod tests {
         let cigar = [m(2), ins(1), m(2)];
         let pairs: Vec<_> = AlignedPairs::new(p0(100), &cigar).collect();
         assert_eq!(pairs.len(), 5, "2M + 1I(summary) + 2M = 5 items");
-        assert_eq!(pairs[0], AlignedPair::Match { qpos: 0, rpos: p0(100) });
-        assert_eq!(pairs[1], AlignedPair::Match { qpos: 1, rpos: p0(101) });
+        assert_eq!(pairs[0], match_m(0, p0(100)));
+        assert_eq!(pairs[1], match_m(1, p0(101)));
         // Insertion summary: qpos = 2 (first inserted base), len = 1
         assert_eq!(pairs[2], AlignedPair::Insertion { qpos: 2, insert_len: 1 });
-        assert_eq!(pairs[3], AlignedPair::Match { qpos: 3, rpos: p0(102) });
-        assert_eq!(pairs[4], AlignedPair::Match { qpos: 4, rpos: p0(103) });
+        assert_eq!(pairs[3], match_m(3, p0(102)));
+        assert_eq!(pairs[4], match_m(4, p0(103)));
     }
 
     // r[verify cigar.aligned_pairs.deletion_rpos]
@@ -352,12 +535,12 @@ mod tests {
         let cigar = [m(2), del(3), m(2)];
         let pairs: Vec<_> = AlignedPairs::new(p0(100), &cigar).collect();
         assert_eq!(pairs.len(), 5, "2M + 1D(summary) + 2M = 5 items");
-        assert_eq!(pairs[0], AlignedPair::Match { qpos: 0, rpos: p0(100) });
-        assert_eq!(pairs[1], AlignedPair::Match { qpos: 1, rpos: p0(101) });
+        assert_eq!(pairs[0], match_m(0, p0(100)));
+        assert_eq!(pairs[1], match_m(1, p0(101)));
         // Deletion summary: rpos = 102 (start of deletion), del_len = 3
         assert_eq!(pairs[2], AlignedPair::Deletion { rpos: p0(102), del_len: 3 });
-        assert_eq!(pairs[3], AlignedPair::Match { qpos: 2, rpos: p0(105) });
-        assert_eq!(pairs[4], AlignedPair::Match { qpos: 3, rpos: p0(106) });
+        assert_eq!(pairs[3], match_m(2, p0(105)));
+        assert_eq!(pairs[4], match_m(3, p0(106)));
     }
 
     #[test]
@@ -366,7 +549,7 @@ mod tests {
         let pairs: Vec<_> = AlignedPairs::new(p0(100), &cigar).collect();
         assert_eq!(pairs.len(), 6, "2M + 1N(summary) + 3M = 6 items");
         assert_eq!(pairs[2], AlignedPair::RefSkip { rpos: p0(102), skip_len: 5 });
-        assert_eq!(pairs[3], AlignedPair::Match { qpos: 2, rpos: p0(107) });
+        assert_eq!(pairs[3], match_m(2, p0(107)));
     }
 
     // r[verify cigar.aligned_pairs.qpos_semantics]
@@ -376,8 +559,8 @@ mod tests {
         let cigar = [soft(5), m(3)];
         let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).collect();
         assert_eq!(pairs.len(), 3);
-        assert_eq!(pairs[0], AlignedPair::Match { qpos: 5, rpos: p0(0) });
-        assert_eq!(pairs[2], AlignedPair::Match { qpos: 7, rpos: p0(2) });
+        assert_eq!(pairs[0], match_m(5, p0(0)));
+        assert_eq!(pairs[2], match_m(7, p0(2)));
     }
 
     // r[verify cigar.aligned_pairs.hard_clips]
@@ -387,8 +570,8 @@ mod tests {
         let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).collect();
         assert_eq!(pairs.len(), 2);
         // qpos starts at 0 — hard clips don't advance it
-        assert_eq!(pairs[0], AlignedPair::Match { qpos: 0, rpos: p0(0) });
-        assert_eq!(pairs[1], AlignedPair::Match { qpos: 1, rpos: p0(1) });
+        assert_eq!(pairs[0], match_m(0, p0(0)));
+        assert_eq!(pairs[1], match_m(1, p0(1)));
     }
 
     // r[verify cigar.aligned_pairs.default_mode]
@@ -408,19 +591,19 @@ mod tests {
         let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).with_soft_clips().collect();
         assert_eq!(pairs.len(), 3, "SoftClip(summary) + 2M");
         assert_eq!(pairs[0], AlignedPair::SoftClip { qpos: 0, len: 3 });
-        assert_eq!(pairs[1], AlignedPair::Match { qpos: 3, rpos: p0(0) });
+        assert_eq!(pairs[1], match_m(3, p0(0)));
     }
 
     // r[verify cigar.aligned_pairs.options]
     #[test]
     fn full_yields_everything() {
-        let cigar = [soft(1), m(1), pad(), ins(1), unk(9, 2)];
+        let cigar = [soft(1), m(1), pad(2), ins(1), unk(9, 2)];
         let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).full().collect();
         // 5 ops: SoftClip + Match + Padding + Insertion + Unknown
         assert_eq!(pairs.len(), 5);
         assert!(matches!(pairs[0], AlignedPair::SoftClip { .. }));
         assert!(matches!(pairs[1], AlignedPair::Match { .. }));
-        assert!(matches!(pairs[2], AlignedPair::Padding));
+        assert_eq!(pairs[2], AlignedPair::Padding { len: 2 });
         assert!(matches!(pairs[3], AlignedPair::Insertion { .. }));
         assert!(matches!(pairs[4], AlignedPair::Unknown { code: 9, len: 2 }));
     }
@@ -428,18 +611,18 @@ mod tests {
     #[test]
     fn full_yields_padding_and_unknown() {
         // Simpler: just pad and unknown
-        let cigar = [m(1), pad(), unk(13, 4), m(1)];
+        let cigar = [m(1), pad(3), unk(13, 4), m(1)];
         let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).full().collect();
         assert_eq!(pairs.len(), 4);
         assert!(matches!(pairs[0], AlignedPair::Match { .. }));
-        assert!(matches!(pairs[1], AlignedPair::Padding));
+        assert_eq!(pairs[1], AlignedPair::Padding { len: 3 });
         assert!(matches!(pairs[2], AlignedPair::Unknown { code: 13, len: 4 }));
         assert!(matches!(pairs[3], AlignedPair::Match { .. }));
     }
 
     #[test]
     fn default_skips_padding_and_unknown() {
-        let cigar = [m(1), pad(), unk(13, 4), m(1)];
+        let cigar = [m(1), pad(1), unk(13, 4), m(1)];
         let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).collect();
         assert_eq!(pairs.len(), 2);
         assert!(matches!(pairs[0], AlignedPair::Match { .. }));
@@ -453,13 +636,34 @@ mod tests {
         assert!(pairs.is_empty());
     }
 
+    // r[verify cigar.aligned_pairs.zero_length_ops]
     #[test]
-    fn zero_length_op_skipped() {
-        // Degenerate: a 0-length M op should be skipped
+    fn zero_length_match_skipped() {
         let cigar = [m(0), m(2)];
         let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).collect();
         assert_eq!(pairs.len(), 2);
-        assert_eq!(pairs[0], AlignedPair::Match { qpos: 0, rpos: p0(0) });
+        assert_eq!(pairs[0], match_m(0, p0(0)));
+    }
+
+    // r[verify cigar.aligned_pairs.zero_length_ops]
+    #[test]
+    fn zero_length_indel_skipped() {
+        // Zero-length I/D/N/S must not yield summary variants with len=0
+        let cigar = [m(1), ins(0), del(0), skip(0), Op::new(CigarOpType::SoftClip, 0), m(1)];
+        let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).with_soft_clips().collect();
+        assert_eq!(pairs.len(), 2, "only the two Match positions remain");
+        assert_eq!(pairs[0], match_m(0, p0(0)));
+        assert_eq!(pairs[1], match_m(1, p0(1)));
+    }
+
+    // r[verify cigar.aligned_pairs.zero_length_ops]
+    #[test]
+    fn zero_length_padding_and_unknown_skipped() {
+        let cigar = [m(1), pad(0), unk(9, 0), m(1)];
+        let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).full().collect();
+        assert_eq!(pairs.len(), 2);
+        assert!(matches!(pairs[0], AlignedPair::Match { .. }));
+        assert!(matches!(pairs[1], AlignedPair::Match { .. }));
     }
 
     // ── D-I adjacency ─────────────────────────────────────────────────────
@@ -486,16 +690,16 @@ mod tests {
 
         // Expected: 3M + I(summary) + 2M + D(summary) + N(summary) + 2M = 10 items
         let expected = vec![
-            AlignedPair::Match { qpos: 2, rpos: p0(50) }, // after 2S
-            AlignedPair::Match { qpos: 3, rpos: p0(51) },
-            AlignedPair::Match { qpos: 4, rpos: p0(52) },
+            match_m(2, p0(50)), // after 2S
+            match_m(3, p0(51)),
+            match_m(4, p0(52)),
             AlignedPair::Insertion { qpos: 5, insert_len: 1 },
-            AlignedPair::Match { qpos: 6, rpos: p0(53) },
-            AlignedPair::Match { qpos: 7, rpos: p0(54) },
+            match_m(6, p0(53)),
+            match_m(7, p0(54)),
             AlignedPair::Deletion { rpos: p0(55), del_len: 1 },
             AlignedPair::RefSkip { rpos: p0(56), skip_len: 1 },
-            AlignedPair::Match { qpos: 8, rpos: p0(57) },
-            AlignedPair::Match { qpos: 9, rpos: p0(58) },
+            match_m(8, p0(57)),
+            match_m(9, p0(58)),
         ];
         assert_eq!(pairs, expected);
     }
@@ -557,12 +761,24 @@ mod tests {
 
         for op in cigar {
             let len = op.len();
+            // Skip zero-length ops uniformly (htslib behavior).
+            if len == 0 && !matches!(op.op_type(), CigarOpType::HardClip) {
+                continue;
+            }
+            let match_kind = match op.op_type() {
+                CigarOpType::Match => Some(MatchKind::Match),
+                CigarOpType::SeqMatch => Some(MatchKind::SeqMatch),
+                CigarOpType::SeqMismatch => Some(MatchKind::SeqMismatch),
+                _ => None,
+            };
             match op.op_type() {
                 CigarOpType::Match | CigarOpType::SeqMatch | CigarOpType::SeqMismatch => {
+                    let kind = match_kind.expect("set above for M/=/X");
                     for i in 0..len {
                         pairs.push(AlignedPair::Match {
                             qpos: qpos.saturating_add(i),
                             rpos: advance_rpos(rpos, i),
+                            kind,
                         });
                     }
                     qpos = qpos.saturating_add(len);
@@ -591,7 +807,7 @@ mod tests {
                 }
                 CigarOpType::Padding => {
                     if options.padding_and_unknown {
-                        pairs.push(AlignedPair::Padding);
+                        pairs.push(AlignedPair::Padding { len });
                     }
                 }
                 CigarOpType::Unknown(code) => {
@@ -615,9 +831,10 @@ mod tests {
             &[m(2), skip(5), m(3)],
             &[del(2), ins(3)],
             &[hard(3), m(2)],
-            &[m(1), pad(), m(1)],
+            &[m(1), pad(2), m(1)],
             &[],
             &[soft(1), m(1), ins(1), del(1), skip(1), m(1)],
+            &[m(1), seq_match(2), seq_mismatch(1), m(1)],
         ];
 
         for cigar in cigars {
@@ -629,7 +846,7 @@ mod tests {
 
     #[test]
     fn oracle_matches_iterator_full() {
-        let cigar = &[soft(1), m(1), pad(), ins(1), del(1), unk(9, 2), m(1)];
+        let cigar = &[soft(1), m(1), pad(2), ins(1), del(1), unk(9, 2), m(1)];
         let actual: Vec<_> = AlignedPairs::new(p0(0), cigar).full().collect();
         let mut opts = AlignedPairsOptions::default();
         opts.soft_clips = true;
@@ -645,8 +862,9 @@ mod tests {
         use proptest::prelude::*;
 
         fn arb_cigar_op() -> impl Strategy<Value = CigarOp> {
-            // Generate valid CIGAR ops within reasonable bounds
-            (0u8..=14u8, 1u32..=50u32).prop_map(|(code, len)| {
+            // Generate valid CIGAR ops within reasonable bounds.
+            // Includes len=0 to exercise the zero-length-skip behavior.
+            (0u8..=14u8, 0u32..=50u32).prop_map(|(code, len)| {
                 // Map codes 9..=14 to Unknown variant (reserved codes)
                 let op_type = CigarOpType::from_bam(code);
                 CigarOp::new(op_type, len)
@@ -730,71 +948,81 @@ mod tests {
     mod htslib_tests {
         use super::*;
 
-        /// Walk a CIGAR in expanded form (one yield per consumed base, like
-        /// htslib's `aligned_pairs_full`) and return `(Option<qpos>, Option<rpos>)` tuples.
-        fn expanded_pairs(cigar: &[CigarOp], rec_pos: Pos0) -> Vec<(Option<u32>, Option<Pos0>)> {
+        /// Expand the actual `AlignedPairs` iterator into per-base
+        /// `(Option<qpos>, Option<rpos>)` tuples — the shape rust-htslib's
+        /// `aligned_pairs_full()` yields. Closes the loop: this test exercises
+        /// the real iterator instead of comparing two seqair-internal oracles.
+        ///
+        /// Soft clips are enabled via `.with_soft_clips()` to match htslib;
+        /// padding is intentionally excluded because rust-htslib's
+        /// `aligned_pairs_full` panics on `Cigar::Pad`.
+        fn expand_iterator(cigar: &[CigarOp], rec_pos: Pos0) -> Vec<(Option<u32>, Option<u32>)> {
             let mut result = Vec::new();
-            let mut qpos = 0u32;
-            let mut rpos = rec_pos;
-
-            for op in cigar {
-                let len = op.len();
-                match op.op_type() {
-                    CigarOpType::Match | CigarOpType::SeqMatch | CigarOpType::SeqMismatch => {
-                        for i in 0..len {
-                            result.push((Some(qpos + i), Some(advance_rpos(rpos, i))));
+            for pair in AlignedPairs::new(rec_pos, cigar).with_soft_clips() {
+                match pair {
+                    AlignedPair::Match { qpos, rpos, .. } => {
+                        result.push((Some(qpos), Some(*rpos)));
+                    }
+                    AlignedPair::Insertion { qpos, insert_len } => {
+                        for i in 0..insert_len {
+                            result.push((Some(qpos.saturating_add(i)), None));
                         }
-                        qpos = qpos.saturating_add(len);
-                        rpos = advance_rpos(rpos, len);
                     }
-                    CigarOpType::Insertion => {
-                        for i in 0..len {
-                            result.push((Some(qpos + i), None));
+                    AlignedPair::Deletion { rpos, del_len } => {
+                        for i in 0..del_len {
+                            result.push((None, Some(advance_rpos(rpos, i).as_u64() as u32)));
                         }
-                        qpos = qpos.saturating_add(len);
                     }
-                    CigarOpType::Deletion | CigarOpType::RefSkip => {
-                        for i in 0..len {
-                            result.push((None, Some(advance_rpos(rpos, i))));
+                    AlignedPair::RefSkip { rpos, skip_len } => {
+                        for i in 0..skip_len {
+                            result.push((None, Some(advance_rpos(rpos, i).as_u64() as u32)));
                         }
-                        rpos = advance_rpos(rpos, len);
                     }
-                    CigarOpType::SoftClip => {
+                    AlignedPair::SoftClip { qpos, len } => {
                         for i in 0..len {
-                            result.push((Some(qpos + i), None));
+                            result.push((Some(qpos.saturating_add(i)), None));
                         }
-                        qpos = qpos.saturating_add(len);
                     }
-                    CigarOpType::HardClip => {
-                        // htslib excludes hard clips entirely
-                    }
-                    CigarOpType::Padding => {
-                        // htslib includes padding as (None, None) pairs if requested
-                    }
-                    CigarOpType::Unknown(_) => {
-                        // htslib treats unknown ops like padding
+                    AlignedPair::Padding { .. } | AlignedPair::Unknown { .. } => {
+                        // Default mode hides these; with_soft_clips alone
+                        // doesn't enable them — included here for completeness.
                     }
                 }
             }
-
             result
         }
 
-        /// Compare our expanded output against htslib's `aligned_pairs_full`.
-        /// This test requires the `rust-htslib` dev-dependency.
-        #[test]
-        fn matches_htslib_aligned_pairs_full() {
-            // Build a set of CIGARs and verify expanded output matches
-            // what htslib would produce for similarly-configured records.
-            //
-            // We verify equivalence by constructing htslib records with the
-            // same CIGAR and comparing position by position.
-
+        /// Drive `rust_htslib::bam::ext::BamRecordExtensions::aligned_pairs_full()`
+        /// over the same CIGAR + pos and return its yields in the same shape
+        /// `expand_iterator` produces.
+        fn htslib_pairs(cigar_str: &str, pos: i64) -> Vec<(Option<u32>, Option<u32>)> {
             use rust_htslib::bam::ext::BamRecordExtensions;
             use rust_htslib::bam::record::Record;
 
+            let cigar_string = build_htslib_cigar(cigar_str);
+            let mut rec = Record::new();
+            rec.set_pos(pos);
+            rec.set_cigar(Some(&cigar_string));
+
+            #[expect(
+                clippy::cast_sign_loss,
+                clippy::cast_possible_truncation,
+                reason = "test fixtures: positions are non-negative and ≤ i32::MAX"
+            )]
+            let pairs = rec
+                .aligned_pairs_full()
+                .map(|arr| (arr[0].map(|v| v as u32), arr[1].map(|v| v as u32)))
+                .collect();
+            pairs
+        }
+
+        // r[verify cigar.aligned_pairs.htslib_equivalence]
+        #[test]
+        fn matches_htslib_aligned_pairs_full() {
+            // (CIGAR string, pos). Cigar::Pad excluded — rust-htslib panics.
+            // = and X are exercised here too — htslib collapses them into the
+            // same (Some, Some) shape we produce.
             let test_cases: &[(&str, i64)] = &[
-                // (CIGAR string, pos)
                 ("5M", 100),
                 ("2M1I2M", 100),
                 ("2M3D2M", 100),
@@ -802,39 +1030,39 @@ mod tests {
                 ("3S5M2S", 0),
                 ("3M2N4M", 100),
                 ("2M1D1I2M", 100),
-                // htslib panics on Cigar::Pad in aligned_pairs_full, so we skip P ops here
                 ("2M1I2D3M", 100),
+                ("3=2X1=", 50),
+                ("2S3=1X2=2S", 0),
             ];
 
             for &(cigar_str, pos) in test_cases {
-                // Build htslib record
-                let cigar_string = build_htslib_cigar(cigar_str);
-                let mut rec = Record::new();
-                rec.set_pos(pos);
-                rec.set_cigar(Some(&cigar_string));
-
-                // Get htslib's aligned_pairs_full
-                let hts_pairs: Vec<_> = rec
-                    .aligned_pairs_full()
-                    .map(|arr| (arr[0].map(|v| v as u32), arr[1].map(|v| v as u32)))
-                    .collect();
-
-                // Get our expanded pairs
-                let cigar_ops: Vec<CigarOp> = {
-                    // Parse the same CIGAR string into our ops
-                    parse_cigar_string(cigar_str)
-                };
-                let rec_pos = Pos0::new(pos as u32).unwrap();
-                let our_pairs: Vec<_> = expanded_pairs(&cigar_ops, rec_pos)
-                    .into_iter()
-                    .map(|(q, r)| (q, r.map(|p| *p)))
-                    .collect();
-
+                let our_pairs =
+                    expand_iterator(&parse_cigar_string(cigar_str), Pos0::new(pos as u32).unwrap());
+                let hts_pairs = htslib_pairs(cigar_str, pos);
                 assert_eq!(
                     our_pairs, hts_pairs,
-                    "CIGAR '{cigar_str}' at pos {pos}: seqair expanded pairs differ from htslib"
+                    "CIGAR '{cigar_str}' at pos {pos}: seqair AlignedPairs (expanded) \
+                     differs from rust-htslib::aligned_pairs_full"
                 );
             }
+        }
+
+        // r[verify cigar.aligned_pairs.htslib_equivalence]
+        #[test]
+        fn match_kind_does_not_change_htslib_shape() {
+            // Critical invariant: adding `kind: MatchKind` to AlignedPair::Match
+            // must NOT change the (qpos, rpos) sequence — htslib parity is
+            // about positions, not op kinds. M/=/X with the same lengths must
+            // produce byte-identical expansions.
+            let cigars = ["5M", "5=", "5X"];
+            let pos = 100;
+
+            let mut expansions = Vec::new();
+            for s in cigars {
+                expansions.push(expand_iterator(&parse_cigar_string(s), Pos0::new(pos).unwrap()));
+            }
+            assert_eq!(expansions[0], expansions[1], "5M and 5= must expand identically");
+            assert_eq!(expansions[1], expansions[2], "5= and 5X must expand identically");
         }
 
         /// Build a rust-htslib CigarString from a CIGAR string like "5M2I3D".
@@ -938,6 +1166,70 @@ mod tests {
                 }
             }
             ops
+        }
+    }
+
+    // ── SlimRecord integration via push_raw → store → SlimRecord round-trip ──
+
+    mod slim_record_tests {
+        use super::super::super::owned_record::OwnedBamRecord;
+        use super::super::super::record_store::RecordStore;
+        use super::*;
+        use seqair_types::{BamFlags, Base, BaseQuality};
+
+        /// Build a record via OwnedBamRecord, serialize to BAM bytes, push into
+        /// a fresh RecordStore via push_raw.
+        fn store_with_record(pos: u32, cigar: &[CigarOp], seq_len: usize) -> RecordStore<()> {
+            let rec = OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), b"r".to_vec())
+                .flags(BamFlags::empty())
+                .cigar(cigar.to_vec())
+                .seq(vec![Base::A; seq_len])
+                .qual(vec![BaseQuality::from_byte(30); seq_len])
+                .build()
+                .unwrap();
+            let mut buf = Vec::new();
+            rec.to_bam_bytes(&mut buf).unwrap();
+
+            let mut store = RecordStore::<()>::new();
+            let _ = store.push_raw(&buf, &mut ()).unwrap();
+            store
+        }
+
+        // r[verify cigar.aligned_pairs.slim_record]
+        #[test]
+        fn slim_record_round_trips_simple_match() {
+            let cigar = [m(5)];
+            let store = store_with_record(100, &cigar, 5);
+            let rec = store.record(0);
+            let pairs: Vec<_> = rec.aligned_pairs(&store).unwrap().collect();
+            assert_eq!(pairs.len(), 5);
+            assert_eq!(pairs[0], match_m(0, p0(100)));
+            assert_eq!(pairs[4], match_m(4, p0(104)));
+        }
+
+        // r[verify cigar.aligned_pairs.slim_record]
+        #[test]
+        fn slim_record_matches_owned_record_walk() {
+            // Build once, push into a store, then walk via both entry points.
+            // The AlignedPair sequences must be identical.
+            let cigar = vec![m(2), ins(1), m(2), del(1), m(2)];
+            let owned = OwnedBamRecord::builder(0, Some(Pos0::new(200).unwrap()), b"r".to_vec())
+                .flags(BamFlags::empty())
+                .cigar(cigar.clone())
+                .seq(vec![Base::A; 7])
+                .qual(vec![BaseQuality::from_byte(30); 7])
+                .build()
+                .unwrap();
+            let mut buf = Vec::new();
+            owned.to_bam_bytes(&mut buf).unwrap();
+
+            let mut store = RecordStore::<()>::new();
+            let _ = store.push_raw(&buf, &mut ()).unwrap();
+
+            let slim = store.record(0);
+            let slim_pairs: Vec<_> = slim.aligned_pairs(&store).unwrap().collect();
+            let owned_pairs: Vec<_> = owned.aligned_pairs().collect();
+            assert_eq!(slim_pairs, owned_pairs);
         }
     }
 }

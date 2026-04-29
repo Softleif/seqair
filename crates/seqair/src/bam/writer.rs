@@ -208,14 +208,13 @@ impl<W: Write> BamWriter<W> {
                 // r[impl bam_writer.index_sort_order]
                 // Sort validation is delegated to IndexBuilder::push()
                 let voff = self.bgzf.virtual_offset();
-                let beg = if record.pos < 0 { 0u64 } else { record.pos as u64 };
+                let beg = record.pos.map(seqair_types::Pos0::as_u64).unwrap_or(0);
                 let end = if is_unmapped {
                     // Case 2: placed unmapped — beg = end = pos
                     beg
                 } else {
                     // Case 1: mapped — use end_pos from CIGAR
-                    let ep = record.end_pos();
-                    if ep < 0 { beg } else { ep as u64 }
+                    record.end_pos().map(|p| p.as_u64()).unwrap_or(beg)
                 };
                 let end = end.max(beg.saturating_add(1));
                 if is_unmapped {
@@ -486,6 +485,7 @@ mod tests {
     use seqair_types::BamFlags;
     use seqair_types::Base;
     use seqair_types::BaseQuality;
+    use seqair_types::Pos0;
 
     fn test_header() -> BamHeader {
         BamHeader::from_sam_text(
@@ -494,8 +494,8 @@ mod tests {
         .unwrap()
     }
 
-    fn test_record(ref_id: i32, pos: i64, qname: &[u8]) -> OwnedBamRecord {
-        OwnedBamRecord::builder(ref_id, pos, qname.to_vec())
+    fn test_record(ref_id: i32, pos: u32, qname: &[u8]) -> OwnedBamRecord {
+        OwnedBamRecord::builder(ref_id, Some(Pos0::new(pos).unwrap()), qname.to_vec())
             .mapq(30)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
@@ -583,11 +583,11 @@ mod tests {
         // Force poison by writing a record with an oversized qname
         let bad_rec = OwnedBamRecord {
             ref_id: 0,
-            pos: 0,
+            pos: Some(Pos0::new(0).unwrap()),
             mapq: 0,
             flags: BamFlags::empty(),
             next_ref_id: -1,
-            next_pos: -1,
+            next_pos: None,
             template_len: 0,
             qname: vec![b'A'; 255], // too long
             cigar: Vec::new(),
@@ -656,7 +656,7 @@ mod tests {
         let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, true).unwrap();
 
         // Mapped (flags & 0x4 == 0) but ref_id == -1
-        let rec = OwnedBamRecord::builder(-1, 0, b"bad".to_vec())
+        let rec = OwnedBamRecord::builder(-1, Some(Pos0::new(0).unwrap()), b"bad".to_vec())
             .flags(BamFlags::empty()) // mapped
             .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
             .seq(vec![Base::A, Base::C, Base::G])
@@ -681,7 +681,7 @@ mod tests {
         writer.write(&mapped).unwrap();
 
         // Fully unmapped: ref_id=-1, flags=0x4
-        let unmapped = OwnedBamRecord::builder(-1, -1, b"unmapped".to_vec())
+        let unmapped = OwnedBamRecord::builder(-1, None, b"unmapped".to_vec())
             .flags(BamFlags::from(0x4))
             .seq(vec![Base::A])
             .build()
@@ -713,11 +713,11 @@ mod tests {
 
         // Build a RecordStore with two records
         let mut store = RecordStore::new();
-        let rec1 = OwnedBamRecord::builder(0, 100, b"read1".to_vec())
+        let rec1 = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"read1".to_vec())
             .mapq(30)
             .flags(BamFlags::from(0x63))
             .next_ref_id(1)
-            .next_pos(500)
+            .next_pos(Some(Pos0::new(500).unwrap()))
             .template_len(250)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
@@ -729,7 +729,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        let rec2 = OwnedBamRecord::builder(0, 200, b"read2".to_vec())
+        let rec2 = OwnedBamRecord::builder(0, Some(Pos0::new(200).unwrap()), b"read2".to_vec())
             .mapq(60)
             .cigar(vec![
                 CigarOp::new(CigarOpType::SoftClip, 2),
@@ -800,20 +800,20 @@ mod tests {
         // Build a store with 3 sorted records (mapped, placed-unmapped, mapped)
         let mut store = RecordStore::new();
         let recs = [
-            OwnedBamRecord::builder(0, 100, b"m1".to_vec())
+            OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"m1".to_vec())
                 .mapq(30)
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
                 .seq(vec![Base::A, Base::C, Base::G])
                 .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
                 .build()
                 .unwrap(),
-            OwnedBamRecord::builder(0, 200, b"pu1".to_vec())
+            OwnedBamRecord::builder(0, Some(Pos0::new(200).unwrap()), b"pu1".to_vec())
                 .flags(BamFlags::from(0x4)) // unmapped but placed
                 .seq(vec![Base::T, Base::A])
                 .qual([20, 21].map(BaseQuality::from_byte).to_vec())
                 .build()
                 .unwrap(),
-            OwnedBamRecord::builder(0, 300, b"m2".to_vec())
+            OwnedBamRecord::builder(0, Some(Pos0::new(300).unwrap()), b"m2".to_vec())
                 .mapq(60)
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])
                 .seq(vec![Base::G, Base::T, Base::A, Base::C])
@@ -860,7 +860,7 @@ mod tests {
 
             for i in 0..5 {
                 let name = format!("read{i}");
-                let rec = test_record(0, i64::from(i) * 100, name.as_bytes());
+                let rec = test_record(0, i * 100, name.as_bytes());
                 writer.write(&rec).unwrap();
             }
             writer.finish().unwrap();

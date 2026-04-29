@@ -27,6 +27,7 @@ use noodles::bam as nbam;
 use noodles::sam as nsam;
 use rust_htslib::bam::record::Aux as HtsAux;
 use rust_htslib::bam::{self as htsbam, Read as _};
+use seqair::bam::Pos0;
 use seqair::bam::aux_data::AuxData;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
@@ -41,7 +42,7 @@ fn write_bam_with_aux(dir: &std::path::Path, aux: AuxData) -> std::path::PathBuf
         BamHeader::from_sam_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n").unwrap();
     let bam_path = dir.join("aux.bam");
 
-    let rec = OwnedBamRecord::builder(0, 100, b"r1".to_vec())
+    let rec = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"r1".to_vec())
         .flags(BamFlags::empty())
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])

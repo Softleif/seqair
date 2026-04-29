@@ -22,6 +22,7 @@ use seqair::bam::aux_data::AuxData;
 // Use the top-level `bam` re-export rather than the inner module path so the
 // public-API surface from `seqair::bam` is exercised. The inner path
 // `seqair::bam::base_mod::*` remains valid; both must compile.
+use seqair::bam::Pos0;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
@@ -65,7 +66,7 @@ fn reverse_complement(seq: &[Base]) -> Vec<Base> {
 }
 
 fn build_record(
-    pos: i64,
+    pos: u32,
     qname: &[u8],
     seq: Vec<Base>,
     cigar: Vec<CigarOp>,
@@ -78,7 +79,7 @@ fn build_record(
     aux.set_array_u8(*b"ML", ml).unwrap();
     let flags = if is_reverse { BamFlags::from(FLAG_REVERSE) } else { BamFlags::empty() };
     let seq_len = seq.len();
-    OwnedBamRecord::builder(0, pos, qname.to_vec())
+    OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), qname.to_vec())
         .flags(flags)
         .mapq(60)
         .cigar(cigar)

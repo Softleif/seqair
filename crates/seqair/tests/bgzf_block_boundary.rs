@@ -63,8 +63,8 @@ fn cyclic_seq(n: usize) -> Vec<Base> {
 /// Build a large record that will exceed a single BGZF block (64KB).
 /// Uses a long sequence (~8000 bases) which creates a large BAM record.
 /// Multiple such records ensure block boundaries are exercised.
-fn make_large_record(pos: i64, name: &[u8], seq_len: u32) -> OwnedBamRecord {
-    OwnedBamRecord::builder(0, pos, name.to_vec())
+fn make_large_record(pos: u32, name: &[u8], seq_len: u32) -> OwnedBamRecord {
+    OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), name.to_vec())
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, seq_len)])
         .seq(cyclic_seq(seq_len as usize))
@@ -75,7 +75,7 @@ fn make_large_record(pos: i64, name: &[u8], seq_len: u32) -> OwnedBamRecord {
 
 /// Build a record with a very long CIGAR (many small ops) to inflate the
 /// binary CIGAR size. Each CIGAR op is 4 bytes in BAM, so 4000 ops = 16KB.
-fn make_long_cigar_record(pos: i64, name: &[u8]) -> OwnedBamRecord {
+fn make_long_cigar_record(pos: u32, name: &[u8]) -> OwnedBamRecord {
     // Alternate M and I ops: 2000 × (1M + 1I) = 4000 ops, query_len = 4000
     let mut cigar = Vec::with_capacity(4000);
     for _ in 0..2000 {
@@ -84,7 +84,7 @@ fn make_long_cigar_record(pos: i64, name: &[u8]) -> OwnedBamRecord {
     }
     let query_len = 4000u32; // 2000 M + 2000 I
 
-    OwnedBamRecord::builder(0, pos, name.to_vec())
+    OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), name.to_vec())
         .mapq(50)
         .cigar(cigar)
         .seq(cyclic_seq(query_len as usize))
@@ -101,9 +101,8 @@ fn large_records_spanning_blocks() {
 
     // Each record with 8000 bases: ~4000 bytes seq + 8000 bytes qual + overhead ≈ 12KB.
     // Write enough records to span multiple 64KB blocks.
-    let records: Vec<OwnedBamRecord> = (0..20)
-        .map(|i| make_large_record(i64::from(i) * 10000, format!("big{i}").as_bytes(), 8000))
-        .collect();
+    let records: Vec<OwnedBamRecord> =
+        (0..20).map(|i| make_large_record(i * 10000, format!("big{i}").as_bytes(), 8000)).collect();
 
     let bam_path = write_bam_with_index(dir.path(), &records);
 
@@ -159,7 +158,7 @@ fn long_cigar_records_spanning_blocks() {
     let dir = tempfile::tempdir().unwrap();
 
     let records: Vec<OwnedBamRecord> = (0..10)
-        .map(|i| make_long_cigar_record(i64::from(i) * 50000, format!("cigar{i}").as_bytes()))
+        .map(|i| make_long_cigar_record(i * 50000, format!("cigar{i}").as_bytes()))
         .collect();
 
     let bam_path = write_bam_with_index(dir.path(), &records);
@@ -200,7 +199,7 @@ fn mixed_record_sizes_across_boundaries() {
 
     let mut records = Vec::new();
     for i in 0..50u32 {
-        let pos = i64::from(i) * 2000;
+        let pos = i * 2000;
         let name = format!("mix{i}");
         if i % 5 == 0 {
             // Every 5th record is large (8000 bases)
@@ -208,7 +207,7 @@ fn mixed_record_sizes_across_boundaries() {
         } else {
             // Normal small record (50 bases)
             records.push(
-                OwnedBamRecord::builder(0, pos, name.into_bytes())
+                OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), name.into_bytes())
                     .mapq(30)
                     .cigar(vec![CigarOp::new(CigarOpType::Match, 50)])
                     .seq(cyclic_seq(50))

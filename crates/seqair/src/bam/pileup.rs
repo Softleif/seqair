@@ -36,6 +36,24 @@ impl RefSeq {
         Self { bases, start_pos }
     }
 
+    /// 0-based reference position of the first base in the loaded window.
+    #[inline]
+    pub fn start_pos(&self) -> Pos0 {
+        self.start_pos
+    }
+
+    /// Number of bases loaded in this window.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.bases.len()
+    }
+
+    /// `true` if no bases are loaded.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.bases.is_empty()
+    }
+
     pub fn base_at(&self, pos: Pos0) -> Base {
         let Some(offset) = pos.as_i64().checked_sub(self.start_pos.as_i64()) else {
             return Base::Unknown;
@@ -49,6 +67,44 @@ impl RefSeq {
             reason = "offset is non-negative (checked above) and bounded by reference sequence length; safe to cast on supported platforms"
         )]
         self.bases.get(offset as usize).copied().unwrap_or(Base::Unknown)
+    }
+
+    /// Look up a single base at `pos`. Returns `None` if `pos` falls outside
+    /// the loaded window. Use this when callers need to distinguish "outside
+    /// the loaded reference window" from "inside the window but `Base::Unknown`
+    /// (e.g. an `N` in the FASTA)" — [`base_at`](Self::base_at) collapses both
+    /// into `Base::Unknown`.
+    pub fn try_base_at(&self, pos: Pos0) -> Option<Base> {
+        let offset = pos.as_i64().checked_sub(self.start_pos.as_i64())?;
+        if offset < 0 {
+            return None;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "offset is non-negative (checked above)"
+        )]
+        self.bases.get(offset as usize).copied()
+    }
+
+    /// Borrow `len` reference bases starting at `pos`. Returns `None` if any
+    /// position in `pos..pos+len` falls outside the loaded window.
+    ///
+    /// Unlike [`base_at`](Self::base_at), partial overlaps return `None`
+    /// rather than padding with `Base::Unknown`.
+    pub fn range(&self, pos: Pos0, len: u32) -> Option<&[Base]> {
+        let offset = pos.as_i64().checked_sub(self.start_pos.as_i64())?;
+        if offset < 0 {
+            return None;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "offset is non-negative (checked above)"
+        )]
+        let start = offset as usize;
+        let end = start.checked_add(len as usize)?;
+        self.bases.get(start..end)
     }
 }
 

@@ -53,7 +53,7 @@ fn write_bam(dir: &Path, records: &[OwnedBamRecord]) -> std::path::PathBuf {
 
 /// Build a record with typical `CpG` methylation MM/ML tags.
 fn make_methylation_record(
-    pos: i64,
+    pos: u32,
     name: &[u8],
     mm_str: &[u8],
     ml_probs: &[u8],
@@ -84,7 +84,7 @@ fn make_methylation_record(
     aux.set_string(*b"MM", mm_str);
     aux.set_array_u8(*b"ML", ml_probs).unwrap();
 
-    OwnedBamRecord::builder(0, pos, name.to_vec())
+    OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), name.to_vec())
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, 20)])
         .seq(seq)
@@ -264,7 +264,7 @@ fn mm_ml_empty_values() {
     aux.set_array_u8(*b"ML", &[]).unwrap();
 
     let records = vec![
-        OwnedBamRecord::builder(0, 100, b"empty_mods".to_vec())
+        OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"empty_mods".to_vec())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(vec![
@@ -338,7 +338,7 @@ fn mm_ml_large_tags() {
     aux.set_array_u8(*b"ML", &ml_probs).unwrap();
 
     let records = vec![
-        OwnedBamRecord::builder(0, 100, b"long_read".to_vec())
+        OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"long_read".to_vec())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 1000)])
             .seq(seq)
@@ -392,7 +392,7 @@ fn mm_ml_coexist_with_other_tags() {
     aux.set_string(*b"MD", b"5A4^GT10");
 
     let records = vec![
-        OwnedBamRecord::builder(0, 100, b"multi_aux".to_vec())
+        OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"multi_aux".to_vec())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(vec![

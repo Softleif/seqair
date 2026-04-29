@@ -53,37 +53,49 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
 
     // chr1: 30 records at positions 0, 10000, 20000, ...
     for i in 0..30u32 {
-        let rec = OwnedBamRecord::builder(0, i64::from(i) * 10000, format!("c1r{i}").into_bytes())
-            .mapq(60)
-            .cigar(vec![CigarOp::new(CigarOpType::Match, 150)])
-            .seq(cyclic_seq(150))
-            .qual(vec![BaseQuality::from_byte(30); 150])
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            0,
+            Some(Pos0::new(i * 10000).unwrap()),
+            format!("c1r{i}").into_bytes(),
+        )
+        .mapq(60)
+        .cigar(vec![CigarOp::new(CigarOpType::Match, 150)])
+        .seq(cyclic_seq(150))
+        .qual(vec![BaseQuality::from_byte(30); 150])
+        .build()
+        .unwrap();
         writer.write(&rec).unwrap();
     }
 
     // chr2: 15 records
     for i in 0..15u32 {
-        let rec = OwnedBamRecord::builder(1, i64::from(i) * 20000, format!("c2r{i}").into_bytes())
-            .mapq(50)
-            .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
-            .seq(cyclic_seq(100))
-            .qual(vec![BaseQuality::from_byte(25); 100])
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            1,
+            Some(Pos0::new(i * 20000).unwrap()),
+            format!("c2r{i}").into_bytes(),
+        )
+        .mapq(50)
+        .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
+        .seq(cyclic_seq(100))
+        .qual(vec![BaseQuality::from_byte(25); 100])
+        .build()
+        .unwrap();
         writer.write(&rec).unwrap();
     }
 
     // chr3: 5 records
     for i in 0..5u32 {
-        let rec = OwnedBamRecord::builder(2, i64::from(i) * 30000, format!("c3r{i}").into_bytes())
-            .mapq(40)
-            .cigar(vec![CigarOp::new(CigarOpType::Match, 80)])
-            .seq(cyclic_seq(80))
-            .qual(vec![BaseQuality::from_byte(20); 80])
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            2,
+            Some(Pos0::new(i * 30000).unwrap()),
+            format!("c3r{i}").into_bytes(),
+        )
+        .mapq(40)
+        .cigar(vec![CigarOp::new(CigarOpType::Match, 80)])
+        .seq(cyclic_seq(80))
+        .qual(vec![BaseQuality::from_byte(20); 80])
+        .build()
+        .unwrap();
         writer.write(&rec).unwrap();
     }
 

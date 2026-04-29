@@ -1744,6 +1744,7 @@ mod tests {
         use crate::bam::aux_data::AuxData;
         use crate::bam::owned_record::OwnedBamRecord;
         use seqair_types::BaseQuality;
+        use seqair_types::Pos0;
 
         fn build_owned_bam(input: &PushInput) -> OwnedBamRecord {
             #[expect(
@@ -1751,15 +1752,19 @@ mod tests {
                 reason = "bases.len() bounded ≤ 16 by strategy; fits in u32"
             )]
             let len = input.bases.len() as u32;
-            OwnedBamRecord::builder(0, i64::from(input.pos), input.qname.clone())
-                .flags(BamFlags::empty())
-                .mapq(input.mapq)
-                .cigar(vec![CigarOp::new(cigar::CigarOpType::Match, len)])
-                .seq(input.bases.clone())
-                .qual(input.quals.iter().copied().map(BaseQuality::from_byte).collect())
-                .aux(AuxData::from_bytes(input.aux.clone()))
-                .build()
-                .expect("synthetic OwnedBamRecord must build")
+            OwnedBamRecord::builder(
+                0,
+                Some(Pos0::new(u32::from(input.pos)).unwrap()),
+                input.qname.clone(),
+            )
+            .flags(BamFlags::empty())
+            .mapq(input.mapq)
+            .cigar(vec![CigarOp::new(cigar::CigarOpType::Match, len)])
+            .seq(input.bases.clone())
+            .qual(input.quals.iter().copied().map(BaseQuality::from_byte).collect())
+            .aux(AuxData::from_bytes(input.aux.clone()))
+            .build()
+            .expect("synthetic OwnedBamRecord must build")
         }
 
         proptest! {

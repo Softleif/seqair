@@ -25,19 +25,19 @@ The owned record type makes these modifications safe and explicit: callers get a
 > _[SAM1] §4.2 — fixed 32-byte header fields, variable-length qname/cigar/seq/qual/aux_
 
 > r[bam.owned_record.fields]
-> `BamRecord` MUST store the following fields, all owned and mutable:
+> `OwnedBamRecord` MUST store the following fields, all owned and mutable:
 >
-> - `ref_id: i32` — reference sequence index (-1 for unmapped)
-> - `pos: i64` — 0-based leftmost mapping position (-1 for unmapped)
+> - `ref_id: i32` — reference sequence index (-1 sentinel for unmapped, preserved as raw `i32` because every reader uses it as a header-table index)
+> - `pos: Option<Pos0>` — 0-based leftmost mapping position; `None` represents the BAM wire `-1` (unmapped/unavailable). `Pos0` constructively bounds the value to `[0, i32::MAX]`, so wire-format overflow is unconstructable.
 > - `mapq: u8` — mapping quality
-> - `flags: u16` — SAM flag bits
-> - `next_ref_id: i32` — mate's reference sequence index
-> - `next_pos: i64` — mate's 0-based position
+> - `flags: BamFlags` — SAM flag bits
+> - `next_ref_id: i32` — mate's reference sequence index (same -1 rationale as `ref_id`)
+> - `next_pos: Option<Pos0>` — mate's 0-based position; `None` for unavailable
 > - `template_len: i32` — observed template length
 > - `qname: Vec<u8>` — query name (without NUL terminator)
 > - `cigar: Vec<CigarOp>` — typed CIGAR operations
 > - `seq: Vec<Base>` — sequence as `Base` enum values
-> - `qual: Vec<u8>` — Phred quality scores
+> - `qual: Vec<BaseQuality>` — Phred quality scores
 > - `aux: AuxData` — auxiliary tags (see aux data section)
 
 r[bam.owned_record.cigar_op]
@@ -75,19 +75,7 @@ r[bam.owned_record.set_seq]
 r[bam.owned_record.set_qual]
 `BamRecord` MUST support replacing quality scores. The new array length MUST equal `seq.len()`.
 
-> r[bam.owned_record.aligned_pairs]
-> `BamRecord` MUST provide an `aligned_pairs()` iterator yielding `(Option<usize>, Option<i64>)` tuples: `(query_pos, ref_pos)`.
-> The iterator handles each CIGAR operation as follows:
->
-> - **M/=/X** (alignment match, sequence match, mismatch): both values are `Some`, one tuple per base.
-> - **I** (insertion to reference): `ref_pos = None`, one tuple per inserted base.
-> - **D** (deletion from reference): `query_pos = None`, one tuple per deleted base.
-> - **N** (reference skip / intron): `query_pos = None`, one tuple per skipped reference base. N consumes reference but not query, like D. This is important for RNA-seq BAMs where introns appear as N operations spanning thousands of reference bases.
-> - **S** (soft clip): MUST be skipped entirely. Soft-clipped bases are present in the sequence but not aligned to the reference.
-> - **H** (hard clip): MUST be skipped entirely. Hard-clipped bases are not present in the sequence.
-> - **P** (padding): MUST be skipped entirely. Padding is used for padded-reference alignment and consumes neither query nor reference.
-
-For unmapped reads (empty CIGAR), the iterator MUST be empty.
+**`OwnedBamRecord::aligned_pairs()`** is the owned-record counterpart to `SlimRecord::aligned_pairs(store)`. Both return the typed `AlignedPairs` iterator from [CIGAR Operations](./1-3-cigar.md). See `r[cigar.aligned_pairs.owned_record]` for the integration contract and `r[cigar.aligned_pairs.types]` for the variant set. For unmapped reads (empty CIGAR), the iterator is empty.
 
 r[bam.owned_record.end_pos]
 `BamRecord` MUST provide `end_pos() -> i64` computing the rightmost reference position from `pos` + CIGAR reference-consuming operations. This uses the same logic as `r[bam.record.end_pos]`, but MUST be recomputed from the current CIGAR state (not cached from a stale value).
@@ -102,8 +90,7 @@ r[bam.owned_record.bin]
 r[bam.owned_record.to_bam_bytes]
 `BamRecord` MUST serialize to BAM binary format by appending into a caller-provided `&mut Vec<u8>` (the method appends; clearing the buffer is the caller's responsibility — see `r[bam_writer.reuse_buffers]`). The layout MUST follow [SAM1] §4.2: 32-byte fixed fields (refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen), NUL-terminated qname, packed CIGAR (u32 per op), 4-bit packed sequence, quality scores, and raw auxiliary bytes. The method MUST NOT include the 4-byte `block_size` prefix — that is the caller's (writer's) responsibility, since the caller needs to know the total byte count to write the prefix.
 
-r[bam.owned_record.to_bam_field_overflow]
-The BAM binary format stores `pos` and `next_pos` as i32, and `ref_id` and `next_ref_id` as i32. The `BamRecord` stores `pos` and `next_pos` as i64 for internal flexibility (e.g., arithmetic without overflow risk). `to_bam_bytes` MUST validate that `pos` is in `[-1, i32::MAX]` and `next_pos` is in `[-1, i32::MAX]`, returning a typed error on overflow. The value -1 is the canonical sentinel for unmapped/unavailable. This validation catches bugs where CIGAR-based position calculations produce values exceeding the BAM coordinate space.
+**Position fields (constructive validity):** `pos` and `next_pos` are `Option<Pos0>`. `Pos0` constructively guarantees `0..=i32::MAX`, and the `Option` carries the unmapped-sentinel meaning explicitly. Wire serialization writes `Some(p)` as `p.as_i32()` and `None` as `-1`. There is no run-time overflow check at serialization because the type system has already enforced the bound — overflow is unconstructable.
 
 r[bam.owned_record.to_bam_bin_field]
 The BAM `bin` value in the serialized `bin_mq_nl` field MUST be computed from the current `pos` and `end_pos` at serialization time, not stored as a persistent field. This ensures the bin is always consistent with the current alignment, even after modification.
@@ -175,8 +162,7 @@ A record loaded via `push_raw` and extracted via `to_owned_record` MUST have ide
 r[bam.owned_record.test_roundtrip_bytes]
 A `BamRecord` serialized via `to_bam_bytes` (with a prepended block_size) and decoded via `push_raw` MUST produce a store entry with identical field values. This verifies the encoder/decoder symmetry.
 
-r[bam.owned_record.test_aligned_pairs]
-`aligned_pairs()` output MUST match `rust_htslib::bam::ext::BamRecordExtensions::aligned_pairs_full()` for the same record. Test cases MUST include: match-only CIGAR, CIGAR with insertions (one tuple per inserted base), CIGAR with deletions (one tuple per deleted base), CIGAR with soft clips (skipped), CIGAR with mixed operations, and unmapped records (empty iterator).
+**Test coverage for `aligned_pairs()`** is provided by `r[cigar.aligned_pairs.htslib_equivalence]` (not duplicated here).
 
 r[bam.owned_record.test_modification]
-After `set_alignment()` with a new CIGAR, `end_pos()` and `bin()` MUST reflect the new alignment. `aligned_pairs()` MUST yield positions consistent with the new CIGAR. The old alignment's values MUST NOT leak through.
+After `set_alignment()` with a new CIGAR, `end_pos()` and `bin()` MUST reflect the new alignment. The old alignment's values MUST NOT leak through.
