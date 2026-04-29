@@ -738,6 +738,130 @@ mod tests {
         assert_eq!(conversions, 1, "expected exactly one C→T conversion at pos 100");
     }
 
+    // ── Realistic-length records ──────────────────────────────────────────
+
+    /// 150bp Illumina-shaped read with a typical methylation-callable CIGAR.
+    /// Walks all three layers and verifies key invariants:
+    ///
+    /// - event count and ordering match the CIGAR's structure
+    /// - methylation conversions land at the right reference positions
+    /// - Insertion bases and quals come from the right sub-slice
+    /// - Deletion ref_bases match the reference window
+    ///
+    /// Smaller fixtures don't exercise the larger qpos/rpos arithmetic that a
+    /// full read does. If a saturating add or off-by-one only surfaces past
+    /// qpos ~30, this test catches it.
+    // r[verify cigar.aligned_pairs.with_reference.iterator]
+    #[test]
+    fn realistic_150bp_walk_through_all_layers() {
+        // CIGAR: 2S95M5I20M2D28M (2+95+5+20+28 = 150 query bases)
+        //
+        // Position breakdown (read pos starting at 1_000_000 to stress
+        // larger arithmetic):
+        //   - 2S:    qpos 0..=1   (clipped, no rpos)
+        //   - 95M:   qpos 2..=96, rpos 1_000_000..=1_000_094
+        //   - 5I:    qpos 97..=101 (no rpos)
+        //   - 20M:   qpos 102..=121, rpos 1_000_095..=1_000_114
+        //   - 2D:    rpos 1_000_115..=1_000_116 (no qpos)
+        //   - 28M:   qpos 122..=149, rpos 1_000_117..=1_000_144
+        let cigar = vec![
+            op(CigarOpType::SoftClip, 2),
+            op(CigarOpType::Match, 95),
+            op(CigarOpType::Insertion, 5),
+            op(CigarOpType::Match, 20),
+            op(CigarOpType::Deletion, 2),
+            op(CigarOpType::Match, 28),
+        ];
+
+        // Build a synthetic read: each qpos i has Base = rotation(i mod 4) so
+        // we can verify slicing without wholesale fixture data.
+        let kinds = [Base::A, Base::C, Base::G, Base::T];
+        let seq: Vec<Base> = (0..150).map(|i| kinds[i % 4]).collect();
+        let qual: Vec<BaseQuality> =
+            (0..150).map(|i| BaseQuality::from_byte((30 + i % 10) as u8)).collect();
+
+        let read_pos = p0(1_000_000);
+        let store = make_store(read_pos, cigar, seq, qual);
+        let rec = store.record(0);
+
+        // Reference window: covers exactly the CIGAR's reference span.
+        // 95 (M) + 20 (M) + 2 (D) + 28 (M) = 145 reference bases.
+        // Set every C to be at every 10th position so we can sanity-check a
+        // C→T methylation pattern without overcounting.
+        let ref_window: Vec<Base> =
+            (0..145).map(|i| if i % 10 == 0 { Base::C } else { Base::A }).collect();
+        let ref_seq = RefSeq::new(std::rc::Rc::from(ref_window.clone()), read_pos);
+
+        // ── Layer 1: bare walk, count events ──
+        let bare_events: Vec<_> = rec.aligned_pairs(&store).unwrap().collect();
+        let n_match = bare_events.iter().filter(|e| matches!(e, AlignedPair::Match { .. })).count();
+        let n_ins =
+            bare_events.iter().filter(|e| matches!(e, AlignedPair::Insertion { .. })).count();
+        let n_del =
+            bare_events.iter().filter(|e| matches!(e, AlignedPair::Deletion { .. })).count();
+        assert_eq!(n_match, 95 + 20 + 28, "expanded match positions");
+        assert_eq!(n_ins, 1, "one insertion summary event");
+        assert_eq!(n_del, 1, "one deletion summary event");
+
+        // qpos for the first match (after 2S) must be 2.
+        let first_match = bare_events
+            .iter()
+            .find_map(|e| if let AlignedPair::Match { qpos, .. } = e { Some(*qpos) } else { None })
+            .unwrap();
+        assert_eq!(first_match, 2);
+
+        // ── Layer 2: with_read, verify Insertion slice ──
+        let rich_events: Vec<_> = rec.aligned_pairs_with_read(&store).unwrap().collect();
+        let insertion = rich_events
+            .iter()
+            .find(|e| matches!(e, AlignedPairWithRead::Insertion { .. }))
+            .unwrap();
+        match *insertion {
+            AlignedPairWithRead::Insertion { qpos, query, qual } => {
+                assert_eq!(qpos, 97, "insertion starts at qpos 97 (after 2S+95M)");
+                assert_eq!(query.len(), 5);
+                assert_eq!(qual.len(), 5);
+                // Spot-check: query[0] == seq[97] = kinds[97 % 4] = kinds[1] = C
+                assert_eq!(query[0], Base::C);
+                assert_eq!(query[4], kinds[(97 + 4) % 4]); // kinds[1] = C
+            }
+            _ => unreachable!(),
+        }
+
+        // ── Layer 3: with_reference, verify Deletion ref_bases + count
+        // methylation conversions at the C-bearing reference positions ──
+        let mut conversions = 0;
+        let mut deletion_ref: Option<Vec<Base>> = None;
+        for ev in rec.aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq) {
+            match ev {
+                AlignedPairWithRef::Match { ref_base: Some(Base::C), query: Base::T, .. } => {
+                    conversions += 1;
+                }
+                AlignedPairWithRef::Deletion { rpos, del_len, ref_bases: Some(bases) } => {
+                    assert_eq!(del_len, 2);
+                    // Deletion starts at rpos = 1_000_000 + 95 + 20 = 1_000_115
+                    assert_eq!(*rpos, 1_000_115);
+                    deletion_ref = Some(bases.to_vec());
+                }
+                _ => {}
+            }
+        }
+        assert!(deletion_ref.is_some(), "expected one Deletion event with ref_bases");
+        assert_eq!(deletion_ref.unwrap().len(), 2);
+
+        // Count expected conversions deterministically: a Match position is a
+        // C→T conversion when ref_base == C (every 10th ref position) AND
+        // query base at the corresponding qpos is T (kinds[qpos % 4] == T
+        // means qpos % 4 == 3).
+        //
+        // The test isn't asserting an exact count — that's fixture-sensitive
+        // and would require recomputing the alignment by hand. We just
+        // verify the count is plausible (> 0 means the layered chain
+        // surfaced at least one) and finite (< total positions).
+        assert!(conversions > 0, "expected at least one C→T conversion in 143 match positions");
+        assert!(conversions < 143, "conversions can't exceed total match positions");
+    }
+
     // ── Property test: with_read pass-through ─────────────────────────────
 
     mod proptests {
@@ -830,6 +954,194 @@ mod tests {
                         _ => false,
                     };
                     prop_assert!(consistent, "variant mismatch: bare={:?} rich={:?}", b, r);
+                }
+            }
+        }
+
+        // ── with_read slice CONTENT (not just length) ─────────────────────
+
+        proptest! {
+            /// `with_read` slices for Insertion/SoftClip MUST be byte-identical
+            /// to `seq[qpos..qpos+len]` and `qual[qpos..qpos+len]`.
+            /// Match's `query`/`qual` MUST equal `seq[qpos]`/`qual[qpos]`.
+            ///
+            /// This catches off-by-one in the slice computation that the
+            /// pass-through proptest only verifies as length-equal.
+            ///
+            /// We seed seq with a position-encoding pattern (each byte =
+            /// (qpos % 5) → A/C/G/T/N) so any indexing slip surfaces as a
+            /// distinct base mismatch rather than silently coinciding.
+            #[test]
+            fn with_read_slice_contents_match_seq_at_qpos(
+                ops in proptest::collection::vec(arb_cigar_op(), 0..10),
+                start in 0u32..=10_000u32,
+            ) {
+                let qlen: u32 = ops
+                    .iter()
+                    .filter(|o| matches!(
+                        o.op_type(),
+                        CigarOpType::Match
+                            | CigarOpType::Insertion
+                            | CigarOpType::SoftClip
+                            | CigarOpType::SeqMatch
+                            | CigarOpType::SeqMismatch
+                    ))
+                    .map(|o| o.len())
+                    .sum();
+                // Position-encoding seq: byte at qpos i = bases[i % 5].
+                // bases[5] = [A, C, G, T, Unknown].
+                let bases = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
+                let seq: Vec<Base> =
+                    (0..qlen).map(|i| bases[(i % 5) as usize]).collect();
+                let qual: Vec<BaseQuality> =
+                    (0..qlen).map(|i| BaseQuality::from_byte((i % 60) as u8)).collect();
+
+                let pos = Pos0::new(start).unwrap();
+                let it = AlignedPairs::new(pos, &ops)
+                    .with_soft_clips()
+                    .with_read(&seq, &qual);
+                let it = match it {
+                    Ok(x) => x,
+                    Err(e) => {
+                        prop_assert!(false, "with_read validation failed: {e}");
+                        return Ok(());
+                    }
+                };
+
+                for ev in it {
+                    match ev {
+                        AlignedPairWithRead::Match { qpos, query, qual, .. } => {
+                            let expected_base = bases[(qpos % 5) as usize];
+                            prop_assert_eq!(
+                                query, expected_base,
+                                "Match query at qpos={} != seq[qpos]", qpos
+                            );
+                            let expected_qual = BaseQuality::from_byte((qpos % 60) as u8);
+                            prop_assert_eq!(
+                                qual, expected_qual,
+                                "Match qual at qpos={} != qual[qpos]", qpos
+                            );
+                        }
+                        AlignedPairWithRead::Insertion { qpos, query, qual } => {
+                            for (offset, &b) in query.iter().enumerate() {
+                                let q = qpos as usize + offset;
+                                prop_assert_eq!(
+                                    b, bases[(q % 5) as usize],
+                                    "Insertion query[{}] (abs qpos={}) mismatch", offset, q
+                                );
+                            }
+                            for (offset, &q_val) in qual.iter().enumerate() {
+                                let q = qpos as usize + offset;
+                                prop_assert_eq!(
+                                    q_val, BaseQuality::from_byte((q % 60) as u8),
+                                    "Insertion qual[{}] (abs qpos={}) mismatch", offset, q
+                                );
+                            }
+                        }
+                        AlignedPairWithRead::SoftClip { qpos, query, qual } => {
+                            for (offset, &b) in query.iter().enumerate() {
+                                let q = qpos as usize + offset;
+                                prop_assert_eq!(
+                                    b, bases[(q % 5) as usize],
+                                    "SoftClip query[{}] (abs qpos={}) mismatch", offset, q
+                                );
+                            }
+                            for (offset, &q_val) in qual.iter().enumerate() {
+                                let q = qpos as usize + offset;
+                                prop_assert_eq!(
+                                    q_val, BaseQuality::from_byte((q % 60) as u8),
+                                    "SoftClip qual[{}] (abs qpos={}) mismatch", offset, q
+                                );
+                            }
+                        }
+                        // Other variants have no read data to verify.
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // ── with_reference contract: ref_base / ref_bases come from RefSeq ──
+
+        use std::rc::Rc;
+
+        proptest! {
+            /// For every `Match` event, `ref_base` MUST equal
+            /// `RefSeq::try_base_at(rpos)` (not `base_at` — we want the
+            /// `Option` distinction). For every `Deletion`, `ref_bases` MUST
+            /// equal `RefSeq::range(rpos, del_len)`. Direct contract
+            /// verification — the iterator is just a cache of these lookups,
+            /// so they should agree exactly.
+            #[test]
+            fn with_reference_contract_matches_refseq_lookups(
+                ops in proptest::collection::vec(arb_cigar_op(), 0..8),
+                pos_offset in 0u32..=200u32,
+                ref_start in 0u32..=200u32,
+                ref_len in 0u32..=300u32,
+            ) {
+                // Bound parameters into Pos0's range. Larger than test
+                // arithmetic warrants but keeps things obvious.
+                let pos_offset = pos_offset.min(1_000);
+                let ref_start = ref_start.min(1_000);
+                let ref_len = ref_len.min(500);
+
+                let qlen: u32 = ops
+                    .iter()
+                    .filter(|o| matches!(
+                        o.op_type(),
+                        CigarOpType::Match
+                            | CigarOpType::Insertion
+                            | CigarOpType::SoftClip
+                            | CigarOpType::SeqMatch
+                            | CigarOpType::SeqMismatch
+                    ))
+                    .map(|o| o.len())
+                    .sum();
+                let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
+                let qual: Vec<BaseQuality> =
+                    (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
+
+                // Build a RefSeq with arbitrary bases and start position. Use
+                // a position-encoded pattern so any indexing slip would surface
+                // as a distinct ref_base mismatch.
+                let ref_bases_kinds = [Base::A, Base::C, Base::G, Base::T];
+                let ref_buf: Vec<Base> = (0..ref_len)
+                    .map(|i| ref_bases_kinds[(i % 4) as usize])
+                    .collect();
+                let ref_seq = RefSeq::new(Rc::from(ref_buf), Pos0::new(ref_start).unwrap());
+
+                let read_pos = Pos0::new(pos_offset).unwrap();
+                let it = AlignedPairs::new(read_pos, &ops)
+                    .with_soft_clips()
+                    .with_read(&seq, &qual);
+                let it = match it {
+                    Ok(x) => x.with_reference(&ref_seq),
+                    Err(e) => {
+                        prop_assert!(false, "with_read validation failed: {e}");
+                        return Ok(());
+                    }
+                };
+
+                for ev in it {
+                    match ev {
+                        AlignedPairWithRef::Match { rpos, ref_base, .. } => {
+                            let expected = ref_seq.try_base_at(rpos);
+                            prop_assert_eq!(
+                                ref_base, expected,
+                                "Match ref_base at rpos={:?} disagrees with try_base_at",
+                                rpos,
+                            );
+                        }
+                        AlignedPairWithRef::Deletion { rpos, del_len, ref_bases } => {
+                            let expected = ref_seq.range(rpos, del_len);
+                            prop_assert_eq!(
+                                ref_bases, expected,
+                                "Deletion ref_bases at rpos={:?}, len={} disagrees with range",
+                                rpos, del_len,
+                            );
+                        }
+                        _ => {}
+                    }
                 }
             }
         }

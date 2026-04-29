@@ -1271,6 +1271,75 @@ mod tests {
             CigarString(cigars)
         }
 
+        // r[verify cigar.aligned_pairs.htslib_equivalence]
+        mod htslib_proptests {
+            use super::*;
+            use proptest::prelude::*;
+
+            /// Generate a CIGAR fragment as `(char, len)`. Excludes `P` because
+            /// rust-htslib's `aligned_pairs_full` panics on `Cigar::Pad`. Excludes
+            /// op codes 9..=14 because rust-htslib has no representation for them.
+            /// Restricts to non-empty (1..=20) lengths because zero-length op skip
+            /// is htslib-equivalent (its for-loop simply doesn't iterate) but our
+            /// expansion explicitly drops len=0 events; testing both produces the
+            /// same empty contribution but the `assert_eq!` on `Vec<...>` would
+            /// pass trivially. Keeping len > 0 stresses the actual walking logic.
+            fn arb_op_char_len() -> impl Strategy<Value = (char, u32)> {
+                let chars = prop_oneof![
+                    Just('M'),
+                    Just('I'),
+                    Just('D'),
+                    Just('N'),
+                    Just('S'),
+                    Just('H'),
+                    Just('='),
+                    Just('X'),
+                ];
+                (chars, 1u32..=20u32)
+            }
+
+            fn arb_cigar_string() -> impl Strategy<Value = String> {
+                proptest::collection::vec(arb_op_char_len(), 1..=10).prop_map(|ops| {
+                    let mut s = String::new();
+                    for (c, n) in ops {
+                        s.push_str(&n.to_string());
+                        s.push(c);
+                    }
+                    s
+                })
+            }
+
+            proptest! {
+                /// For random valid CIGARs (M/I/D/N/S/H/=/X with non-zero
+                /// lengths) at random positions, seqair's expanded
+                /// `AlignedPairs` output MUST match rust-htslib's
+                /// `aligned_pairs_full()` exactly.
+                ///
+                /// This is the strongest possible parity test we can build:
+                /// rust-htslib is the htslib-binding ground truth, and the
+                /// proptest exercises the full CIGAR-walk state machine on
+                /// inputs we never hand-wrote.
+                #[test]
+                fn matches_htslib_random_cigars(
+                    cigar_str in arb_cigar_string(),
+                    pos in 0i64..=100_000i64,
+                ) {
+                    let our_pairs = expand_iterator(
+                        &parse_cigar_string(&cigar_str),
+                        Pos0::new(pos as u32).unwrap(),
+                    );
+                    let hts_pairs = htslib_pairs(&cigar_str, pos);
+                    prop_assert_eq!(
+                        our_pairs,
+                        hts_pairs,
+                        "CIGAR '{}' at pos {} diverges from rust-htslib",
+                        cigar_str,
+                        pos,
+                    );
+                }
+            }
+        }
+
         /// Parse a CIGAR string like "5M2I3D" into our CigarOp vec.
         fn parse_cigar_string(s: &str) -> Vec<CigarOp> {
             let mut ops = Vec::new();
