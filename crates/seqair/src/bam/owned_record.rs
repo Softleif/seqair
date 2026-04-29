@@ -699,7 +699,7 @@ mod tests {
     fn aligned_pairs_simple_match() {
         use super::super::aligned_pairs::{AlignedPair, MatchKind};
         let rec = simple_record(); // 5M at pos 100
-        let pairs: Vec<_> = rec.aligned_pairs().collect();
+        let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         assert_eq!(pairs.len(), 5);
         assert_eq!(
             pairs[0],
@@ -725,7 +725,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let pairs: Vec<_> = rec.aligned_pairs().collect();
+        let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         let m = |q, r| AlignedPair::Match {
             qpos: q,
             rpos: Pos0::new(r).unwrap(),
@@ -753,7 +753,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let pairs: Vec<_> = rec.aligned_pairs().collect();
+        let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         let m = |q, r| AlignedPair::Match {
             qpos: q,
             rpos: Pos0::new(r).unwrap(),
@@ -781,7 +781,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let pairs: Vec<_> = rec.aligned_pairs().collect();
+        let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         let m = |q, r| AlignedPair::Match {
             qpos: q,
             rpos: Pos0::new(r).unwrap(),
@@ -799,7 +799,40 @@ mod tests {
             .flags(BamFlags::from(0x4))
             .build()
             .unwrap();
-        let pairs: Vec<_> = rec.aligned_pairs().collect();
+        let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
+        assert!(pairs.is_empty());
+    }
+
+    // r[verify cigar.aligned_pairs.owned_record]
+    #[test]
+    fn aligned_pairs_rejects_unmapped_with_cigar() {
+        // Degenerate but constructible: pos = None + non-empty CIGAR. Walking
+        // would produce nonsense rpos values anchored at Pos0::ZERO, so we
+        // refuse rather than silently corrupt the output.
+        let rec = OwnedBamRecord::builder(-1, None, b"r".to_vec())
+            .flags(BamFlags::from(0x4))
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
+            .seq(vec![Base::A; 5])
+            .qual(vec![BaseQuality::from_byte(30); 5])
+            .build()
+            .unwrap();
+        let result = rec.aligned_pairs();
+        assert!(matches!(
+            result,
+            Err(super::super::aligned_pairs::AlignedPairsError::UnmappedWithCigar { cigar_ops: 1 })
+        ));
+    }
+
+    // r[verify cigar.aligned_pairs.owned_record]
+    #[test]
+    fn aligned_pairs_accepts_unmapped_with_empty_cigar() {
+        // The "fully unmapped" case: pos = None AND cigar = empty. Iteration
+        // yields nothing — no rpos anchoring needed.
+        let rec = OwnedBamRecord::builder(-1, None, b"r".to_vec())
+            .flags(BamFlags::from(0x4))
+            .build()
+            .unwrap();
+        let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         assert!(pairs.is_empty());
     }
 

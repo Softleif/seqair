@@ -72,27 +72,31 @@ use seqair_types::{Base, BaseQuality, Pos0};
 /// single `query`/`qual`. `Insertion` and `SoftClip` carry slices of the
 /// inserted/clipped run. `Deletion`/`RefSkip`/`Padding`/`Unknown` have no
 /// read data, so they pass through unchanged.
+///
+/// The lifetime `'read` ties to the seq/qual slabs (typically a
+/// [`RecordStore`](super::record_store::RecordStore)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AlignedPairWithRead<'a> {
+pub enum AlignedPairWithRead<'read> {
     /// M / = / X — read base aligned to a reference base.
     Match {
         qpos: u32,
         rpos: Pos0,
         kind: MatchKind,
-        /// The read base at `qpos`. `Base::Unknown` if `qpos` is somehow out
-        /// of range (shouldn't happen for valid records).
+        /// The read base at `qpos`. Always in bounds — `with_read`
+        /// constructor enforces seq/CIGAR length consistency.
         query: Base,
-        /// Phred quality at `qpos`. [`BaseQuality::UNAVAILABLE`] if missing.
+        /// Phred quality at `qpos`. [`BaseQuality::UNAVAILABLE`] if `qual`
+        /// was passed empty (BAM missing-qual sentinel).
         qual: BaseQuality,
     },
     /// I — `query` and `qual` are the inserted bases and their Phred scores.
-    Insertion { qpos: u32, query: &'a [Base], qual: &'a [BaseQuality] },
+    Insertion { qpos: u32, query: &'read [Base], qual: &'read [BaseQuality] },
     /// D — deletion from the reference. No read data.
     Deletion { rpos: Pos0, del_len: u32 },
     /// N — reference skip (e.g. intron). No read data.
     RefSkip { rpos: Pos0, skip_len: u32 },
     /// S — soft clip. `query` and `qual` are the clipped run.
-    SoftClip { qpos: u32, query: &'a [Base], qual: &'a [BaseQuality] },
+    SoftClip { qpos: u32, query: &'read [Base], qual: &'read [BaseQuality] },
     /// P — padding. No read data.
     Padding { len: u32 },
     /// Reserved op code (9..=15). No read data.
@@ -108,14 +112,23 @@ pub enum AlignedPairWithRead<'a> {
 /// Carries the read's `seq` and `qual` slabs (borrowed from a
 /// [`RecordStore`](super::record_store::RecordStore)) and slices into them as
 /// it walks the CIGAR.
-pub struct AlignedPairsWithRead<'a> {
-    inner: AlignedPairs<'a>,
-    seq: &'a [Base],
-    qual: &'a [BaseQuality],
+///
+/// Lifetimes: `'cigar` ties to the CIGAR slice; `'read` ties to the seq/qual
+/// slabs. They are independent so callers can compose borrows from different
+/// sources (e.g. CIGAR from a realignment buffer + seq/qual from the store).
+#[derive(Debug)]
+pub struct AlignedPairsWithRead<'cigar, 'read> {
+    inner: AlignedPairs<'cigar>,
+    seq: &'read [Base],
+    qual: &'read [BaseQuality],
 }
 
-impl<'a> AlignedPairsWithRead<'a> {
-    pub(super) fn new(inner: AlignedPairs<'a>, seq: &'a [Base], qual: &'a [BaseQuality]) -> Self {
+impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
+    pub(super) fn new(
+        inner: AlignedPairs<'cigar>,
+        seq: &'read [Base],
+        qual: &'read [BaseQuality],
+    ) -> Self {
         Self { inner, seq, qual }
     }
 
@@ -137,11 +150,14 @@ impl<'a> AlignedPairsWithRead<'a> {
     /// Match gains `ref_base: Option<Base>` and Deletion gains
     /// `ref_bases: Option<&[Base]>`. `None` means the position is outside the
     /// loaded window (`RefSeq` only covers the queried region).
-    pub fn with_reference<'b>(self, ref_seq: &'b RefSeq) -> AlignedPairsWithRef<'a, 'b> {
+    pub fn with_reference<'ref_seq>(
+        self,
+        ref_seq: &'ref_seq RefSeq,
+    ) -> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
         AlignedPairsWithRef { inner: self, ref_seq }
     }
 
-    fn attach_read(&self, pair: AlignedPair) -> AlignedPairWithRead<'a> {
+    fn attach_read(&self, pair: AlignedPair) -> AlignedPairWithRead<'read> {
         match pair {
             AlignedPair::Match { qpos, rpos, kind } => {
                 let q = qpos as usize;
@@ -181,8 +197,8 @@ impl<'a> AlignedPairsWithRead<'a> {
     }
 }
 
-impl<'a> Iterator for AlignedPairsWithRead<'a> {
-    type Item = AlignedPairWithRead<'a>;
+impl<'read> Iterator for AlignedPairsWithRead<'_, 'read> {
+    type Item = AlignedPairWithRead<'read>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let pair = self.inner.next()?;
@@ -206,8 +222,11 @@ fn range_for(qpos: u32, len: u32) -> (usize, usize) {
 /// Match positions gain `ref_base: Option<Base>`; Deletion gains
 /// `ref_bases: Option<&[Base]>`. `None` means the corresponding reference
 /// position is outside the loaded [`RefSeq`] window.
+///
+/// Lifetimes: `'read` is the seq/qual slab borrow; `'ref_seq` is the
+/// reference-window borrow. They are independent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AlignedPairWithRef<'a, 'b> {
+pub enum AlignedPairWithRef<'read, 'ref_seq> {
     /// M / = / X — query base, ref base, kind.
     Match {
         qpos: u32,
@@ -221,14 +240,14 @@ pub enum AlignedPairWithRef<'a, 'b> {
         ref_base: Option<Base>,
     },
     /// I — inserted query bases and quals (no reference span).
-    Insertion { qpos: u32, query: &'a [Base], qual: &'a [BaseQuality] },
+    Insertion { qpos: u32, query: &'read [Base], qual: &'read [BaseQuality] },
     /// D — deleted reference bases. `ref_bases` is `None` if any position in
     /// the deletion span falls outside the loaded `RefSeq` window.
-    Deletion { rpos: Pos0, del_len: u32, ref_bases: Option<&'b [Base]> },
+    Deletion { rpos: Pos0, del_len: u32, ref_bases: Option<&'ref_seq [Base]> },
     /// N — reference skip.
     RefSkip { rpos: Pos0, skip_len: u32 },
     /// S — soft clip (read-only; reference doesn't participate).
-    SoftClip { qpos: u32, query: &'a [Base], qual: &'a [BaseQuality] },
+    SoftClip { qpos: u32, query: &'read [Base], qual: &'read [BaseQuality] },
     /// P — padding.
     Padding { len: u32 },
     /// Reserved op code.
@@ -244,12 +263,13 @@ pub enum AlignedPairWithRef<'a, 'b> {
 /// Reuses the [`RefSeq`] already loaded by the reader (no copy or new window).
 /// Borrows the slab references from `with_read` plus a borrow of the
 /// reference window for the duration of iteration.
-pub struct AlignedPairsWithRef<'a, 'b> {
-    inner: AlignedPairsWithRead<'a>,
-    ref_seq: &'b RefSeq,
+#[derive(Debug)]
+pub struct AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
+    inner: AlignedPairsWithRead<'cigar, 'read>,
+    ref_seq: &'ref_seq RefSeq,
 }
 
-impl<'a, 'b> AlignedPairsWithRef<'a, 'b> {
+impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
     /// Forward `with_soft_clips()` to the inner iterator.
     pub fn with_soft_clips(mut self) -> Self {
         self.inner = self.inner.with_soft_clips();
@@ -263,8 +283,8 @@ impl<'a, 'b> AlignedPairsWithRef<'a, 'b> {
     }
 }
 
-impl<'a, 'b> Iterator for AlignedPairsWithRef<'a, 'b> {
-    type Item = AlignedPairWithRef<'a, 'b>;
+impl<'read, 'ref_seq> Iterator for AlignedPairsWithRef<'_, 'read, 'ref_seq> {
+    type Item = AlignedPairWithRef<'read, 'ref_seq>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let pair = self.inner.next()?;
@@ -563,6 +583,135 @@ mod tests {
         }
     }
 
+    // r[verify cigar.aligned_pairs.with_reference.iterator]
+    #[test]
+    fn with_reference_then_with_soft_clips_chains_correctly() {
+        // 2S + 3M at pos 100. Without `.with_soft_clips()` the SoftClip event
+        // is skipped; with it, we get 1 SoftClip + 3 Match. Verifies the
+        // forwarder on AlignedPairsWithRef (not just AlignedPairsWithRead).
+        let cigar = vec![op(CigarOpType::SoftClip, 2), op(CigarOpType::Match, 3)];
+        let seq = vec![Base::Unknown, Base::Unknown, Base::A, Base::C, Base::G];
+        let qual = vec![BaseQuality::from_byte(20); 5];
+        let store = make_store(p0(100), cigar, seq, qual);
+        let rec = store.record(0);
+        let ref_seq = make_ref_seq(100, &[Base::A, Base::C, Base::G]);
+
+        // Default: SoftClip hidden — 3 events.
+        let default_events: Vec<_> =
+            rec.aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq).collect();
+        assert_eq!(default_events.len(), 3);
+        assert!(default_events.iter().all(|e| matches!(e, AlignedPairWithRef::Match { .. })));
+
+        // With soft clips chained AFTER with_reference — must propagate through.
+        let chained_events: Vec<_> = rec
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .with_soft_clips()
+            .collect();
+        assert_eq!(chained_events.len(), 4, "1 SoftClip + 3 Match");
+        assert!(matches!(chained_events[0], AlignedPairWithRef::SoftClip { .. }));
+        assert!(matches!(chained_events[1], AlignedPairWithRef::Match { .. }));
+        assert!(matches!(chained_events[3], AlignedPairWithRef::Match { .. }));
+    }
+
+    // r[verify cigar.aligned_pairs.with_reference.iterator]
+    #[test]
+    fn with_reference_full_yields_padding_and_unknown() {
+        // Confirm `.full()` propagates through both layers — Padding/Unknown
+        // events surface even in the with_reference iterator.
+        let cigar = vec![
+            op(CigarOpType::Match, 1),
+            op(CigarOpType::Padding, 2),
+            op(CigarOpType::Unknown(9), 3),
+            op(CigarOpType::Match, 1),
+        ];
+        let seq = vec![Base::A, Base::C];
+        let qual = vec![BaseQuality::from_byte(30); 2];
+        let store = make_store(p0(50), cigar, seq, qual);
+        let rec = store.record(0);
+        let ref_seq = make_ref_seq(50, &[Base::A, Base::C]);
+
+        let events: Vec<_> =
+            rec.aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq).full().collect();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[0], AlignedPairWithRef::Match { .. }));
+        assert_eq!(events[1], AlignedPairWithRef::Padding { len: 2 });
+        assert!(matches!(events[2], AlignedPairWithRef::Unknown { code: 9, len: 3 }));
+        assert!(matches!(events[3], AlignedPairWithRef::Match { .. }));
+    }
+
+    // ── Validation errors ─────────────────────────────────────────────────
+
+    #[test]
+    fn with_read_rejects_seq_shorter_than_cigar_query_len() {
+        // CIGAR claims 3M (3 query bases) but seq has only 2 bases. The
+        // earlier silent Base::Unknown substitution would mask this; the
+        // validation now surfaces a typed error instead.
+        let cigar = [op(CigarOpType::Match, 3)];
+        let seq = vec![Base::A, Base::C];
+        let qual = vec![BaseQuality::from_byte(30); 2];
+        let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, &qual);
+        match result {
+            Err(super::super::aligned_pairs::AlignedPairsError::CigarSeqLengthMismatch {
+                cigar_qlen: 3,
+                seq_len: 2,
+            }) => {}
+            other => panic!("expected CigarSeqLengthMismatch{{3,2}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_read_rejects_seq_longer_than_cigar_query_len() {
+        // Inverse mismatch: CIGAR 2M but seq 3 bases.
+        let cigar = [op(CigarOpType::Match, 2)];
+        let seq = vec![Base::A, Base::C, Base::G];
+        let qual = vec![BaseQuality::from_byte(30); 3];
+        let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, &qual);
+        assert!(matches!(
+            result,
+            Err(super::super::aligned_pairs::AlignedPairsError::CigarSeqLengthMismatch {
+                cigar_qlen: 2,
+                seq_len: 3,
+            })
+        ));
+    }
+
+    #[test]
+    fn with_read_rejects_qual_length_mismatch() {
+        // qual.len() must equal seq.len() OR be zero (BAM missing-qual sentinel).
+        let cigar = [op(CigarOpType::Match, 3)];
+        let seq = vec![Base::A; 3];
+        let qual = vec![BaseQuality::from_byte(30); 2]; // length 2 ≠ 3
+        let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, &qual);
+        assert!(matches!(
+            result,
+            Err(super::super::aligned_pairs::AlignedPairsError::SeqQualLengthMismatch {
+                seq_len: 3,
+                qual_len: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn with_read_accepts_empty_qual_as_missing_sentinel() {
+        // qual.len() == 0 represents BAM's "qual missing" encoding (0xFF bytes).
+        // Should succeed; iteration uses BaseQuality::UNAVAILABLE.
+        let cigar = [op(CigarOpType::Match, 3)];
+        let seq = vec![Base::A; 3];
+        let qual: Vec<BaseQuality> = vec![];
+        let it = AlignedPairs::new(p0(0), &cigar).with_read(&seq, &qual).unwrap();
+        let events: Vec<_> = it.collect();
+        for ev in events {
+            match ev {
+                AlignedPairWithRead::Match { qual, .. } => {
+                    assert_eq!(qual, BaseQuality::UNAVAILABLE);
+                }
+                _ => panic!("expected only Match events for 3M, got {ev:?}"),
+            }
+        }
+    }
+
     // ── End-to-end: methylation calling pattern ──────────────────────────
 
     // r[verify cigar.aligned_pairs.with_reference.iterator]
@@ -597,7 +746,11 @@ mod tests {
         use proptest::prelude::*;
 
         fn arb_cigar_op() -> impl Strategy<Value = CigarOp> {
-            (0u8..=8u8, 1u32..=10u32).prop_map(|(code, len)| {
+            // Match the bare-iterator proptest: full op-code range (0..=14
+            // covers M/I/D/N/S/H/P/=/X plus reserved Unknown variants) and
+            // include zero-length ops (0..=10) so zero-length skip behavior is
+            // exercised through the with_read layer too.
+            (0u8..=14u8, 0u32..=10u32).prop_map(|(code, len)| {
                 let t = CigarOpType::from_bam(code);
                 CigarOp::new(t, len)
             })
@@ -629,10 +782,19 @@ mod tests {
 
                 let pos = Pos0::new(start).unwrap();
                 let bare: Vec<_> = AlignedPairs::new(pos, &ops).with_soft_clips().collect();
-                let rich: Vec<_> = AlignedPairs::new(pos, &ops)
+                let rich_iter = AlignedPairs::new(pos, &ops)
                     .with_soft_clips()
-                    .with_read(&seq, &qual)
-                    .collect();
+                    .with_read(&seq, &qual);
+                let rich = match rich_iter {
+                    Ok(it) => it.collect::<Vec<_>>(),
+                    Err(e) => {
+                        // We sized seq/qual to qlen exactly, so validation
+                        // should always pass. If it ever fails, surface the
+                        // diagnostic loudly rather than silently skipping.
+                        prop_assert!(false, "with_read validation failed unexpectedly: {e}");
+                        return Ok(());
+                    }
+                };
 
                 prop_assert_eq!(bare.len(), rich.len());
                 for (b, r) in bare.iter().zip(rich.iter()) {
@@ -644,7 +806,7 @@ mod tests {
                         (
                             AlignedPair::Insertion { qpos: bq, insert_len: bl },
                             AlignedPairWithRead::Insertion { qpos: rq, query, .. },
-                        ) => bq == rq && *bl as usize == query.len(),
+                        ) => bq == rq && (*bl) as usize == query.len(),
                         (
                             AlignedPair::Deletion { rpos: br, del_len: bl },
                             AlignedPairWithRead::Deletion { rpos: rr, del_len: rl },
@@ -656,7 +818,7 @@ mod tests {
                         (
                             AlignedPair::SoftClip { qpos: bq, len: bl },
                             AlignedPairWithRead::SoftClip { qpos: rq, query, .. },
-                        ) => bq == rq && *bl as usize == query.len(),
+                        ) => bq == rq && (*bl) as usize == query.len(),
                         (
                             AlignedPair::Padding { len: bl },
                             AlignedPairWithRead::Padding { len: rl },

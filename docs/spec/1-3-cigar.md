@@ -91,7 +91,8 @@ Builder methods `.with_soft_clips()` and `.full()` MUST control which additional
 
 - `.with_soft_clips()` adds `SoftClip` to the default set
 - `.full()` adds `SoftClip`, `Padding`, and `Unknown` to the default set
-  These MUST be set-once methods that consume and return `Self`.
+
+These MUST consume `self` and return `Self`. Calling either more than once is permitted and idempotent — the second call has no additional effect because the underlying option flags are already set. The methods are also available on the layered `AlignedPairsWithRead` and `AlignedPairsWithRef` iterators, where they forward to the inner iterator.
 
 r[cigar.aligned_pairs.qpos_semantics]
 `qpos` MUST be 0-based within the full read sequence including soft clips. The first match after a leading soft clip MUST have `qpos` equal to the soft-clip length. This matches htslib behavior where `aligned_pairs_full()` reports `Some(clip_start)` for the first match after clips.
@@ -109,7 +110,7 @@ r[cigar.aligned_pairs.slim_record]
 `SlimRecord::aligned_pairs(&self, store: &RecordStore<U>)` MUST return `Result<AlignedPairs, RecordAccessError>` by first reading the CIGAR slice from the store. Iteration over the returned `AlignedPairs` is infallible.
 
 r[cigar.aligned_pairs.owned_record]
-`OwnedBamRecord::aligned_pairs(&self)` MUST return `AlignedPairs` directly from the owned CIGAR without an intermediate `Result`.
+`OwnedBamRecord::aligned_pairs(&self) -> Result<AlignedPairs, AlignedPairsError>` MUST validate before iteration starts: if `pos = None` (unmapped) AND the CIGAR is non-empty, it MUST return `AlignedPairsError::UnmappedWithCigar { cigar_ops }`. For mapped records (`pos = Some(_)`) and fully-unmapped records (`pos = None` + empty CIGAR), iteration is infallible. The reason: walking a non-empty CIGAR for an unmapped record without a base reference position would produce nonsense `rpos` values anchored at `Pos0::ZERO`; refusing is safer than silently corrupting output.
 
 **Design note (non-verifiable):** `AlignedPairs` and `CigarMapping::pos_info_at` are complementary, not redundant. `AlignedPairs` iterates per-CIGAR-op (record-walking); `pos_info_at` looks up by reference position (column-at-a-time). `PileupEngine` continues to use `CigarMapping::pos_info_at` — do not refactor it onto `AlignedPairs`. (No `r[…]` because there is no per-call behavior to verify; this is a structural caveat.)
 
@@ -127,13 +128,13 @@ r[cigar.aligned_pairs.with_read.types]
 `AlignedPairWithRead` MUST have one variant per `AlignedPair` variant. `Match` MUST gain `query: Base` and `qual: BaseQuality` (the read base and Phred score at `qpos`). `Insertion` and `SoftClip` MUST gain `query: &[Base]` and `qual: &[BaseQuality]` slices borrowed from the record's seq/qual slabs (the inserted/clipped run, not the whole record). `Deletion`, `RefSkip`, `Padding`, `Unknown` MUST pass through unchanged (no read data applies).
 
 r[cigar.aligned_pairs.with_read.iterator]
-`AlignedPairs::with_read(seq: &'a [Base], qual: &'a [BaseQuality]) -> AlignedPairsWithRead<'a>` MUST attach the read's seq and qual slabs to the iterator. The number of yielded events MUST be identical to the underlying `AlignedPairs` (the layer enriches; it does not filter or split events). `with_soft_clips()` and `full()` MUST be available on `AlignedPairsWithRead`, forwarding to the inner iterator.
+`AlignedPairs::with_read(seq, qual) -> Result<AlignedPairsWithRead<'cigar, 'read>, AlignedPairsError>` MUST validate length invariants up front: the iterator's total query-consuming CIGAR length MUST equal `seq.len()` (otherwise `CigarSeqLengthMismatch`), and `qual.len()` MUST be either zero (BAM missing-qual sentinel) or equal to `seq.len()` (otherwise `SeqQualLengthMismatch`). Once construction succeeds, every yielded `Match`/`Insertion`/`SoftClip` index is provably in-bounds; iteration is infallible. Lifetimes `'cigar` and `'read` are independent so callers can compose borrows from different sources. The number of yielded events MUST be identical to the underlying `AlignedPairs` (the layer enriches; it does not filter or split events). `with_soft_clips()` and `full()` MUST be available on `AlignedPairsWithRead`, forwarding to the inner iterator.
 
 r[cigar.aligned_pairs.with_read.slim_record]
-`SlimRecord::aligned_pairs_with_read(store) -> Result<AlignedPairsWithRead, RecordAccessError>` MUST be a one-shot helper equivalent to `self.aligned_pairs(store)?.with_read(self.seq(store)?, self.qual(store)?)`. It exists so callers do not have to fan out three slab accesses by hand.
+`SlimRecord::aligned_pairs_with_read(store) -> Result<AlignedPairsWithRead, AlignedPairsError>` MUST be a one-shot helper equivalent to `self.aligned_pairs(store)?.with_read(self.seq(store)?, self.qual(store)?)`. It exists so callers do not have to fan out three slab accesses by hand. Errors from the slab fetch surface as `AlignedPairsError::Access`; mismatched lengths surface as `CigarSeqLengthMismatch` / `SeqQualLengthMismatch`.
 
 r[cigar.aligned_pairs.with_reference.types]
 `AlignedPairWithRef` MUST mirror `AlignedPairWithRead`'s variants. `Match` MUST gain `ref_base: Option<Base>` (`None` if `rpos` is outside the loaded `RefSeq` window; `Some(Base::Unknown)` for in-window N's). `Deletion` MUST gain `ref_bases: Option<&[Base]>` (`None` if any position in the deletion span is outside the window — partial overlap does not pad). All other variants pass through unchanged.
 
 r[cigar.aligned_pairs.with_reference.iterator]
-`AlignedPairsWithRead::with_reference(ref_seq: &'b RefSeq) -> AlignedPairsWithRef<'a, 'b>` MUST reuse the existing `RefSeq` type from the pileup engine — no new wrapper, no copy. The reference window's lifetime is independent of the read slab borrow. `with_soft_clips()` and `full()` MUST also be available here, forwarding through both layers.
+`AlignedPairsWithRead::with_reference(ref_seq) -> AlignedPairsWithRef<'cigar, 'read, 'ref_seq>` MUST reuse the existing `RefSeq` type from the pileup engine — no new wrapper, no copy. All three lifetimes are independent. `with_soft_clips()` and `full()` MUST also be available here, forwarding through both layers.

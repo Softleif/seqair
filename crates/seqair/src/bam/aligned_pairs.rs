@@ -31,6 +31,53 @@
 use super::cigar::{CigarOp, CigarOpType};
 use super::record_store::{RecordAccessError, RecordStore, SlimRecord};
 use seqair_types::Pos0;
+use thiserror::Error;
+
+// ── Errors ─────────────────────────────────────────────────────────────────
+
+/// Errors raised by `aligned_pairs*` constructors.
+///
+/// Iteration itself is infallible — once the iterator is constructed it does
+/// not return errors. All validation happens up front.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum AlignedPairsError {
+    /// Failed to read CIGAR / seq / qual bytes from the [`RecordStore`].
+    #[error("record access error")]
+    Access {
+        #[from]
+        source: RecordAccessError,
+    },
+
+    /// An unmapped record (`pos = None`) carries CIGAR operations.
+    /// Per [SAM1] §1.4, unmapped reads must have an empty CIGAR. Walking
+    /// CIGAR ops without a base reference position would produce nonsense
+    /// `rpos` values, so we refuse rather than silently anchor to position 0.
+    #[error(
+        "unmapped record (pos = None) has {cigar_ops} CIGAR op(s); only an empty CIGAR is valid \
+         for unmapped records — check flags and CIGAR consistency before constructing the walk"
+    )]
+    UnmappedWithCigar { cigar_ops: usize },
+
+    /// CIGAR's query-consuming length disagrees with `seq.len()`. The walk
+    /// would slice past the end of the sequence and silently substitute
+    /// [`Base::Unknown`](seqair_types::Base::Unknown), which is
+    /// indistinguishable from a legitimate `N` in the read.
+    #[error(
+        "CIGAR query-consuming length {cigar_qlen} != seq length {seq_len} — record's seq slab \
+         and CIGAR are out of sync"
+    )]
+    CigarSeqLengthMismatch { cigar_qlen: u64, seq_len: usize },
+
+    /// Quality slab length disagrees with `seq.len()`. BAM allows missing
+    /// qual (filled with `0xFF`), in which case `qual.len() == 0` is
+    /// accepted; any other length is a structural mismatch.
+    #[error(
+        "qual length {qual_len} != seq length {seq_len} — qual slab must be either empty (BAM \
+         missing-qual sentinel) or match seq length exactly"
+    )]
+    SeqQualLengthMismatch { seq_len: usize, qual_len: usize },
+}
 
 // ── MatchKind ──────────────────────────────────────────────────────────────
 
@@ -153,6 +200,7 @@ pub struct AlignedPairsOptions {
 ///     }
 /// }
 /// ```
+#[derive(Debug)]
 pub struct AlignedPairs<'a> {
     /// Remaining CIGAR ops to process.
     ops: &'a [CigarOp],
@@ -214,22 +262,56 @@ impl<'a> AlignedPairs<'a> {
     /// that yields events enriched with the per-position read base and qual,
     /// and pre-sliced inserted/clipped runs.
     ///
-    /// Lifetimes: `seq` and `qual` must live at least as long as the CIGAR
-    /// borrow (typically all three come from the same
-    /// [`RecordStore`](super::record_store::RecordStore)).
+    /// Validates up front:
+    /// - the iterator's remaining query-consuming CIGAR length fits inside
+    ///   `seq[qpos..]` — otherwise returns
+    ///   [`AlignedPairsError::CigarSeqLengthMismatch`];
+    /// - `qual.len()` equals `seq.len()` or is zero (BAM missing-qual
+    ///   sentinel) — otherwise returns
+    ///   [`AlignedPairsError::SeqQualLengthMismatch`].
+    ///
+    /// Once construction succeeds, iteration is infallible — every yielded
+    /// `Match`/`Insertion`/`SoftClip` index is provably in-bounds.
+    ///
+    /// Lifetimes are split: `'cigar` ties to the CIGAR slice, `'read` ties to
+    /// the seq/qual slabs. They may differ, allowing callers to compose
+    /// borrows from different stores or buffers.
     ///
     /// # Example
     /// ```ignore
-    /// for ev in slim.aligned_pairs(&store)?.with_read(seq, qual) {
+    /// for ev in slim.aligned_pairs(&store)?.with_read(seq, qual)? {
     ///     // ...
     /// }
     /// ```
-    pub fn with_read(
+    pub fn with_read<'read>(
         self,
-        seq: &'a [seqair_types::Base],
-        qual: &'a [seqair_types::BaseQuality],
-    ) -> super::aligned_pairs_view::AlignedPairsWithRead<'a> {
-        super::aligned_pairs_view::AlignedPairsWithRead::new(self, seq, qual)
+        seq: &'read [seqair_types::Base],
+        qual: &'read [seqair_types::BaseQuality],
+    ) -> Result<super::aligned_pairs_view::AlignedPairsWithRead<'a, 'read>, AlignedPairsError> {
+        // Compute the remaining query-consuming CIGAR length and compare to
+        // `seq[qpos..]`. We work in u64 so a runaway 32-bit CIGAR can't
+        // wrap; real-world records are far below this.
+        let cigar_remaining_qlen: u64 =
+            self.ops.iter().filter(|op| op.consumes_query()).map(|op| u64::from(op.len())).sum();
+        let qpos_consumed = u64::from(self.qpos);
+        let total_qlen = cigar_remaining_qlen.saturating_add(qpos_consumed);
+        // total_qlen represents the total query-consuming length the iterator
+        // expects across the *full* CIGAR (already-consumed + remaining). The
+        // seq slab must cover all of it. Strict equality lets us also catch
+        // the inverse mismatch (seq longer than CIGAR claims).
+        if total_qlen != seq.len() as u64 {
+            return Err(AlignedPairsError::CigarSeqLengthMismatch {
+                cigar_qlen: total_qlen,
+                seq_len: seq.len(),
+            });
+        }
+        if !qual.is_empty() && qual.len() != seq.len() {
+            return Err(AlignedPairsError::SeqQualLengthMismatch {
+                seq_len: seq.len(),
+                qual_len: qual.len(),
+            });
+        }
+        Ok(super::aligned_pairs_view::AlignedPairsWithRead::new(self, seq, qual))
     }
 }
 
@@ -396,11 +478,15 @@ impl SlimRecord {
     pub fn aligned_pairs_with_read<'store, U>(
         &self,
         store: &'store RecordStore<U>,
-    ) -> Result<super::aligned_pairs_view::AlignedPairsWithRead<'store>, RecordAccessError> {
+    ) -> Result<super::aligned_pairs_view::AlignedPairsWithRead<'store, 'store>, AlignedPairsError>
+    {
         let cigar = self.cigar(store)?;
         let seq = self.seq(store)?;
         let qual = self.qual(store)?;
-        Ok(AlignedPairs::new(self.pos, cigar).with_read(seq, qual))
+        // Records pushed via `push_raw` always have cigar.qlen == seq.len() ==
+        // qual.len(), so this validation should always succeed for store-resident
+        // records — but the typed error makes the "should" provable.
+        AlignedPairs::new(self.pos, cigar).with_read(seq, qual)
     }
 }
 
@@ -410,18 +496,24 @@ impl SlimRecord {
 impl super::owned_record::OwnedBamRecord {
     /// Walk this record's CIGAR, yielding typed [`AlignedPair`]s.
     ///
-    /// Uses the owned CIGAR directly — no store access needed.
-    /// For unmapped records (`pos == None`), `rpos` starts at 0; iteration
-    /// over an empty CIGAR (the typical unmapped case) yields nothing.
+    /// Returns [`AlignedPairsError::UnmappedWithCigar`] if `pos = None` but
+    /// the CIGAR is non-empty — walking that CIGAR without a base reference
+    /// position would produce nonsense `rpos` values. For mapped records
+    /// (`pos = Some(_)`) and fully-unmapped records (`pos = None` + empty
+    /// CIGAR), iteration over the returned `AlignedPairs` is infallible.
     ///
     /// # Example
     /// ```ignore
-    /// for pair in record.aligned_pairs() {
+    /// for pair in record.aligned_pairs()? {
     ///     // ...
     /// }
     /// ```
-    pub fn aligned_pairs(&self) -> AlignedPairs<'_> {
-        AlignedPairs::new(self.pos.unwrap_or(Pos0::ZERO), &self.cigar)
+    pub fn aligned_pairs(&self) -> Result<AlignedPairs<'_>, AlignedPairsError> {
+        match self.pos {
+            Some(p) => Ok(AlignedPairs::new(p, &self.cigar)),
+            None if self.cigar.is_empty() => Ok(AlignedPairs::new(Pos0::ZERO, &self.cigar)),
+            None => Err(AlignedPairsError::UnmappedWithCigar { cigar_ops: self.cigar.len() }),
+        }
     }
 }
 
@@ -513,10 +605,16 @@ mod tests {
     // r[verify cigar.aligned_pairs.match_kind]
     #[test]
     fn match_kind_does_not_change_qpos_rpos() {
-        // The qpos/rpos sequence must be identical regardless of kind.
-        let m_only = [m(3)];
-        let eq_only = [seq_match(3)];
-        let x_only = [seq_mismatch(3)];
+        // Walk a single CIGAR mixing all three kinds. The (qpos, rpos)
+        // sequence under kind variation must equal the same sequence with all
+        // ops collapsed to plain `M`. If the iterator's position cursor ever
+        // drifted based on `kind`, this would fire.
+        //
+        // Earlier version of this test compared three separate CIGARs (5M,
+        // 5=, 5X) and would pass even if MatchKind handling were completely
+        // broken — included this as a regression note.
+        let mixed = [m(2), seq_match(3), seq_mismatch(2), m(1)];
+        let collapsed = [m(8)];
 
         let strip_kind = |pairs: Vec<AlignedPair>| -> Vec<(u32, u32)> {
             pairs
@@ -527,11 +625,19 @@ mod tests {
                 })
                 .collect()
         };
-        let m_pos = strip_kind(AlignedPairs::new(p0(50), &m_only).collect());
-        let eq_pos = strip_kind(AlignedPairs::new(p0(50), &eq_only).collect());
-        let x_pos = strip_kind(AlignedPairs::new(p0(50), &x_only).collect());
-        assert_eq!(m_pos, eq_pos);
-        assert_eq!(eq_pos, x_pos);
+        let mixed_positions = strip_kind(AlignedPairs::new(p0(50), &mixed).collect());
+        let collapsed_positions = strip_kind(AlignedPairs::new(p0(50), &collapsed).collect());
+        assert_eq!(mixed_positions, collapsed_positions, "kind must not affect qpos/rpos");
+        // Sanity check: the mixed walk really did expose all three kinds.
+        let kinds: Vec<MatchKind> = AlignedPairs::new(p0(50), &mixed)
+            .filter_map(|p| match p {
+                AlignedPair::Match { kind, .. } => Some(kind),
+                _ => None,
+            })
+            .collect();
+        assert!(kinds.contains(&MatchKind::Match), "mixed walk must have M");
+        assert!(kinds.contains(&MatchKind::SeqMatch), "mixed walk must have =");
+        assert!(kinds.contains(&MatchKind::SeqMismatch), "mixed walk must have X");
     }
 
     // r[verify cigar.aligned_pairs.insertion_qpos]
@@ -1041,17 +1147,46 @@ mod tests {
             // (CIGAR string, pos). Cigar::Pad excluded — rust-htslib panics.
             // = and X are exercised here too — htslib collapses them into the
             // same (Some, Some) shape we produce.
+            //
+            // Hard-clip cases (`H`) explicitly verify htslib's "exclude
+            // entirely, do not advance qpos" semantics — covered by spec
+            // rule cigar.aligned_pairs.hard_clips.
+            //
+            // Adjacent indel cases (D-I, I-D, D-N, N-D) verify that the
+            // summary form's separation of events matches htslib's expanded
+            // form when both are flattened.
             let test_cases: &[(&str, i64)] = &[
+                // ── Single-op CIGARs ──
                 ("5M", 100),
+                ("3=", 100),
+                ("3X", 100),
+                // ── Match with one indel ──
                 ("2M1I2M", 100),
                 ("2M3D2M", 100),
+                ("3M2N4M", 100),
+                // ── Soft clips ──
                 ("5S3M", 0),
                 ("3S5M2S", 0),
-                ("3M2N4M", 100),
+                ("3M5S", 0),
+                // ── Hard clips: must NOT advance qpos and MUST be excluded ──
+                ("3H5M", 100),
+                ("5M2H", 100),
+                ("3H5M2H", 100),
+                ("3H2S5M", 100),
+                // ── Hard + soft + match combinations ──
+                ("2H3S5M2S1H", 100),
+                // ── Adjacent indels ──
                 ("2M1D1I2M", 100),
                 ("2M1I2D3M", 100),
+                ("3M1I1D2M", 100),
+                ("2M1D2N1M", 100),
+                // ── = and X interleaved ──
                 ("3=2X1=", 50),
                 ("2S3=1X2=2S", 0),
+                ("1=1X1=1X1M", 50),
+                // ── Long single ops to stress saturating arithmetic ──
+                ("100M", 1_000_000),
+                ("50M50D50M", 0),
             ];
 
             for &(cigar_str, pos) in test_cases {
@@ -1247,7 +1382,7 @@ mod tests {
 
             let slim = store.record(0);
             let slim_pairs: Vec<_> = slim.aligned_pairs(&store).unwrap().collect();
-            let owned_pairs: Vec<_> = owned.aligned_pairs().collect();
+            let owned_pairs: Vec<_> = owned.aligned_pairs().unwrap().collect();
             assert_eq!(slim_pairs, owned_pairs);
         }
     }
