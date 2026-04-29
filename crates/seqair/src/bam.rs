@@ -38,6 +38,7 @@
 // are indeed cache-friendly.
 
 // r[impl io.minimal_public_api]
+pub mod aligned_pairs;
 pub mod aux;
 pub mod aux_data;
 pub mod base_mod;
@@ -59,6 +60,7 @@ pub mod writer;
 pub use aux_data::{AuxData, AuxDataError};
 pub use base_mod::{BaseModError, BaseModState, ModMode, ModStrand, ModType, Modification};
 pub use bgzf::BgzfError;
+pub use aligned_pairs::{AlignedPair, AlignedPairs};
 pub use cigar::CigarOp;
 pub use csi_index::{CsiError, CsiIndex};
 pub use header::{BamHeader, BamHeaderError, ContigInfo};

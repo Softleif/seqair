@@ -301,24 +301,6 @@ impl OwnedBamRecord {
         bin
     }
 
-    // r[impl bam.owned_record.aligned_pairs]
-    /// Iterator over (`query_pos`, `ref_pos`) alignment pairs.
-    ///
-    /// Yields one tuple per consumed base:
-    /// - M/=/X: `(Some(qpos), Some(rpos))`
-    /// - I: `(Some(qpos), None)`
-    /// - D/N: `(None, Some(rpos))`
-    /// - S/H/P: skipped entirely
-    pub fn aligned_pairs(&self) -> AlignedPairsIter<'_> {
-        AlignedPairsIter {
-            cigar: &self.cigar,
-            op_idx: 0,
-            op_offset: 0,
-            query_pos: 0,
-            ref_pos: self.pos,
-        }
-    }
-
     /// Query-consuming length of the CIGAR.
     pub fn cigar_query_len(&self) -> u64 {
         self.cigar.iter().filter(|op| op.consumes_query()).map(|op| u64::from(op.len())).sum()
@@ -484,71 +466,12 @@ impl OwnedBamRecord {
     }
 }
 
-/// Iterator yielding `(Option<usize>, Option<i64>)` alignment pairs from CIGAR operations.
-pub struct AlignedPairsIter<'a> {
-    cigar: &'a [CigarOp],
-    op_idx: usize,
-    op_offset: u32,
-    query_pos: usize,
-    ref_pos: i64,
-}
-
-impl<'a> Iterator for AlignedPairsIter<'a> {
-    type Item = (Option<usize>, Option<i64>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let op = self.cigar.get(self.op_idx)?;
-            if self.op_offset >= op.len() {
-                self.op_idx = self.op_idx.checked_add(1)?;
-                self.op_offset = 0;
-                continue;
-            }
-
-            let consumes_q = op.consumes_query();
-            let consumes_r = op.consumes_ref();
-
-            // S/H/P: skip entirely
-            if !consumes_q && !consumes_r {
-                self.op_idx = self.op_idx.checked_add(1)?;
-                self.op_offset = 0;
-                continue;
-            }
-
-            // Soft clip: advance query but don't yield
-            if matches!(op.op_type(), super::cigar::CigarOpType::SoftClip) {
-                self.query_pos = self.query_pos.saturating_add(1);
-                self.op_offset = self.op_offset.saturating_add(1);
-                continue;
-            }
-
-            let qpos = if consumes_q {
-                let q = self.query_pos;
-                self.query_pos = self.query_pos.saturating_add(1);
-                Some(q)
-            } else {
-                None
-            };
-
-            let rpos = if consumes_r {
-                let r = self.ref_pos;
-                self.ref_pos = self.ref_pos.saturating_add(1);
-                Some(r)
-            } else {
-                None
-            };
-
-            self.op_offset = self.op_offset.saturating_add(1);
-            return Some((qpos, rpos));
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
 mod tests {
     use super::super::cigar::CigarOpType;
     use super::*;
+    use seqair_types::Pos0;
 
     fn simple_record() -> OwnedBamRecord {
         OwnedBamRecord::builder(0, 100, b"read1".to_vec())
@@ -774,8 +697,20 @@ mod tests {
         let rec = simple_record(); // 5M at pos 100
         let pairs: Vec<_> = rec.aligned_pairs().collect();
         assert_eq!(pairs.len(), 5);
-        assert_eq!(pairs[0], (Some(0), Some(100)));
-        assert_eq!(pairs[4], (Some(4), Some(104)));
+        assert_eq!(
+            pairs[0],
+            super::super::aligned_pairs::AlignedPair::Match {
+                qpos: 0,
+                rpos: Pos0::new(100).unwrap()
+            }
+        );
+        assert_eq!(
+            pairs[4],
+            super::super::aligned_pairs::AlignedPair::Match {
+                qpos: 4,
+                rpos: Pos0::new(104).unwrap()
+            }
+        );
     }
 
     #[test]
@@ -793,11 +728,12 @@ mod tests {
 
         let pairs: Vec<_> = rec.aligned_pairs().collect();
         assert_eq!(pairs.len(), 5);
-        assert_eq!(pairs[0], (Some(0), Some(100))); // M
-        assert_eq!(pairs[1], (Some(1), Some(101))); // M
-        assert_eq!(pairs[2], (Some(2), None)); // I — no ref pos
-        assert_eq!(pairs[3], (Some(3), Some(102))); // M
-        assert_eq!(pairs[4], (Some(4), Some(103))); // M
+        use super::super::aligned_pairs::AlignedPair;
+        assert_eq!(pairs[0], AlignedPair::Match { qpos: 0, rpos: Pos0::new(100).unwrap() });
+        assert_eq!(pairs[1], AlignedPair::Match { qpos: 1, rpos: Pos0::new(101).unwrap() });
+        assert_eq!(pairs[2], AlignedPair::Insertion { qpos: 2, insert_len: 1 });
+        assert_eq!(pairs[3], AlignedPair::Match { qpos: 3, rpos: Pos0::new(102).unwrap() });
+        assert_eq!(pairs[4], AlignedPair::Match { qpos: 4, rpos: Pos0::new(103).unwrap() });
     }
 
     #[test]
@@ -814,14 +750,14 @@ mod tests {
             .unwrap();
 
         let pairs: Vec<_> = rec.aligned_pairs().collect();
-        assert_eq!(pairs.len(), 7); // 2M + 3D + 2M
-        assert_eq!(pairs[0], (Some(0), Some(100)));
-        assert_eq!(pairs[1], (Some(1), Some(101)));
-        assert_eq!(pairs[2], (None, Some(102))); // D
-        assert_eq!(pairs[3], (None, Some(103))); // D
-        assert_eq!(pairs[4], (None, Some(104))); // D
-        assert_eq!(pairs[5], (Some(2), Some(105)));
-        assert_eq!(pairs[6], (Some(3), Some(106)));
+        assert_eq!(pairs.len(), 5); // 2M + D(summary) + 2M = 5
+        use super::super::aligned_pairs::AlignedPair;
+        assert_eq!(pairs[0], AlignedPair::Match { qpos: 0, rpos: Pos0::new(100).unwrap() });
+        assert_eq!(pairs[1], AlignedPair::Match { qpos: 1, rpos: Pos0::new(101).unwrap() });
+        // Deletion summary: rpos=102, del_len=3
+        assert_eq!(pairs[2], AlignedPair::Deletion { rpos: Pos0::new(102).unwrap(), del_len: 3 });
+        assert_eq!(pairs[3], AlignedPair::Match { qpos: 2, rpos: Pos0::new(105).unwrap() });
+        assert_eq!(pairs[4], AlignedPair::Match { qpos: 3, rpos: Pos0::new(106).unwrap() });
     }
 
     #[test]
@@ -837,10 +773,11 @@ mod tests {
             .unwrap();
 
         let pairs: Vec<_> = rec.aligned_pairs().collect();
-        // Soft clips are skipped, only 3M pairs
+        // Soft clips are skipped by default, only 3 Match pairs
         assert_eq!(pairs.len(), 3);
-        assert_eq!(pairs[0], (Some(2), Some(100))); // qpos starts at 2 (after 2S)
-        assert_eq!(pairs[2], (Some(4), Some(102)));
+        use super::super::aligned_pairs::AlignedPair;
+        assert_eq!(pairs[0], AlignedPair::Match { qpos: 2, rpos: Pos0::new(100).unwrap() });
+        assert_eq!(pairs[2], AlignedPair::Match { qpos: 4, rpos: Pos0::new(102).unwrap() });
     }
 
     #[test]
