@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 19eabb8b79a9a14010ea3c4c91479cc404b3978a2616209daac59971f64efd52 # shrinks to ops = [CigarOp { op: SoftClip, len: 1 }], read_pos = 0

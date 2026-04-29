@@ -472,7 +472,7 @@ mod tests {
         Pos0::new(v).unwrap()
     }
 
-    /// Build a single-record store via OwnedBamRecord -> raw BAM -> push_raw.
+    /// Build a single-record store via `OwnedBamRecord` -> raw BAM -> `push_raw`.
     fn make_store(
         pos: Pos0,
         cigar: Vec<CigarOp>,
@@ -955,7 +955,7 @@ mod tests {
     /// - event count and ordering match the CIGAR's structure
     /// - methylation conversions land at the right reference positions
     /// - Insertion bases and quals come from the right sub-slice
-    /// - Deletion ref_bases match the reference window
+    /// - Deletion `ref_bases` match the reference window
     ///
     /// Smaller fixtures don't exercise the larger qpos/rpos arithmetic that a
     /// full read does. If a saturating add or off-by-one only surfaces past
@@ -987,7 +987,7 @@ mod tests {
         let kinds = [Base::A, Base::C, Base::G, Base::T];
         let seq: Vec<Base> = (0..150).map(|i| kinds[i % 4]).collect();
         let qual: Vec<BaseQuality> =
-            (0..150).map(|i| BaseQuality::from_byte((30 + i % 10) as u8)).collect();
+            (0..150_u8).map(|i| BaseQuality::from_byte(30u8.saturating_add(i % 10))).collect();
 
         let read_pos = p0(1_000_000);
         let store = make_store(read_pos, cigar, seq, qual);
@@ -1202,8 +1202,9 @@ mod tests {
                 let bases = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
                 let seq: Vec<Base> =
                     (0..qlen).map(|i| bases[(i % 5) as usize]).collect();
-                let qual: Vec<BaseQuality> =
-                    (0..qlen).map(|i| BaseQuality::from_byte((i % 60) as u8)).collect();
+                let qual: Vec<BaseQuality> = (0..qlen)
+                    .map(|i| BaseQuality::from_byte(u8::try_from(i % 60).unwrap_or(0)))
+                    .collect();
 
                 let pos = Pos0::new(start).unwrap();
                 let it = AlignedPairs::new(pos, &ops)
@@ -1235,14 +1236,15 @@ mod tests {
                             for (offset, &b) in query.iter().enumerate() {
                                 let q = qpos as usize + offset;
                                 prop_assert_eq!(
-                                    b, bases[(q % 5) as usize],
+                                    b, bases[q % 5],
                                     "Insertion query[{}] (abs qpos={}) mismatch", offset, q
                                 );
                             }
                             for (offset, &q_val) in qual.iter().enumerate() {
                                 let q = qpos as usize + offset;
+                                let q_byte = u8::try_from(q % 60).unwrap_or(0);
                                 prop_assert_eq!(
-                                    q_val, BaseQuality::from_byte((q % 60) as u8),
+                                    q_val, BaseQuality::from_byte(q_byte),
                                     "Insertion qual[{}] (abs qpos={}) mismatch", offset, q
                                 );
                             }
@@ -1251,14 +1253,15 @@ mod tests {
                             for (offset, &b) in query.iter().enumerate() {
                                 let q = qpos as usize + offset;
                                 prop_assert_eq!(
-                                    b, bases[(q % 5) as usize],
+                                    b, bases[q % 5],
                                     "SoftClip query[{}] (abs qpos={}) mismatch", offset, q
                                 );
                             }
                             for (offset, &q_val) in qual.iter().enumerate() {
                                 let q = qpos as usize + offset;
+                                let q_byte = u8::try_from(q % 60).unwrap_or(0);
                                 prop_assert_eq!(
-                                    q_val, BaseQuality::from_byte((q % 60) as u8),
+                                    q_val, BaseQuality::from_byte(q_byte),
                                     "SoftClip qual[{}] (abs qpos={}) mismatch", offset, q
                                 );
                             }

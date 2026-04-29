@@ -229,7 +229,7 @@ fn push_number(out: &mut Vec<u8>, n: u32) {
         let digit = (n % 10) as u8;
         #[allow(clippy::indexing_slicing, reason = "i bounded by buf.len() above")]
         {
-            buf[i] = b'0' + digit;
+            buf[i] = b'0'.saturating_add(digit);
         }
         n /= 10;
     }
@@ -607,11 +607,11 @@ mod tests {
     // ── Cross-validation: NM and MD must agree ────────────────────────────
 
     /// Parse the count of mismatch letters and deleted bases from an MD tag.
-    /// Returns (mismatch_count, deleted_count).
+    /// Returns `(mismatch_count, deleted_count)`.
     ///
     /// MD grammar: `[0-9]+(([A-Z]|\^[A-Z]+)[0-9]+)*`. Digits = match-run lengths
     /// (skipped); letters = mismatches; `^[A-Z]+` = deletion (each letter
-    /// counts toward deleted_count).
+    /// counts toward `deleted_count`).
     fn parse_md_for_counts(md: &[u8]) -> (u32, u32) {
         let mut mismatches = 0u32;
         let mut deletions = 0u32;
