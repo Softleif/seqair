@@ -16,7 +16,7 @@ use crate::bam::{
     record_store::{CustomizeRecordStore, RecordStore},
 };
 use rustc_hash::FxHashMap;
-use seqair_types::{BamFlags, Base, Pos0, Pos1};
+use seqair_types::{BamFlags, Base, Pos0, Pos1, SmolStr};
 use tracing::warn;
 
 /// Mate cross-reference info collected during CRAM record decoding.
@@ -116,6 +116,7 @@ pub fn decode_slice<E: CustomizeRecordStore>(
     reference_seq: &[u8],
     ref_start_0based: i64,
     header: &BamHeader,
+    read_group_ids: &[SmolStr],
     tid: u32,
     query_start: Pos0,
     query_end: Pos0,
@@ -243,7 +244,7 @@ pub fn decode_slice<E: CustomizeRecordStore>(
             &mut alignment_pos,
             effective_ref,
             effective_ref_start,
-            header,
+            read_group_ids,
             tid,
             query_start,
             query_end,
@@ -293,7 +294,7 @@ fn decode_record<E: CustomizeRecordStore>(
     prev_alignment_pos: &mut i64,
     reference_seq: &[u8],
     ref_start_0based: i64,
-    header: &BamHeader,
+    read_group_ids: &[SmolStr],
     tid: u32,
     query_start: Pos0,
     query_end: Pos0,
@@ -416,16 +417,16 @@ fn decode_record<E: CustomizeRecordStore>(
     }
 
     // r[impl cram.record.rg_tag]
-    // Add RG tag if read group >= 0
-    if let Ok(rg_idx) = usize::try_from(read_group) {
-        // Look up @RG ID from header text
-        if let Some(rg_id) = get_read_group_id(header, rg_idx) {
-            aux_buf.push(b'R');
-            aux_buf.push(b'G');
-            aux_buf.push(b'Z');
-            aux_buf.extend_from_slice(rg_id.as_bytes());
-            aux_buf.push(0); // null terminator for Z-type
-        }
+    // Add RG tag if read group >= 0. RG IDs are pre-parsed from the header
+    // once at open time (cached on `CramShared::read_group_ids`); used to
+    // be a per-record header text scan + String allocation, which dominated
+    // `decode_record` profiles.
+    if let Ok(rg_idx) = usize::try_from(read_group)
+        && let Some(rg_id) = read_group_ids.get(rg_idx)
+    {
+        aux_buf.extend_from_slice(b"RGZ");
+        aux_buf.extend_from_slice(rg_id.as_bytes());
+        aux_buf.push(0); // null terminator for Z-type
     }
 
     let is_unmapped = bam_flags.is_unmapped();
@@ -1045,26 +1046,6 @@ fn decode_features_and_reconstruct(
     Ok(ReconstructResult { ref_consumed: ref_pos as u32, matching_bases, indel_bases })
 }
 
-fn get_read_group_id(header: &BamHeader, rg_index: usize) -> Option<String> {
-    // Parse @RG lines from header text to get the ID at the given index
-    let text = header.header_text();
-    let mut idx = 0;
-    for line in text.lines() {
-        if line.starts_with("@RG") {
-            if idx == rg_index {
-                // Extract ID field
-                for field in line.split('\t') {
-                    if let Some(id) = field.strip_prefix("ID:") {
-                        return Some(id.to_string());
-                    }
-                }
-            }
-            idx = idx.wrapping_add(1);
-        }
-    }
-    None
-}
-
 fn read_itf8(cursor: &mut &[u8]) -> Result<u32, CramError> {
     varint::read_itf8_from(cursor).ok_or(CramError::Truncated { context: "slice header itf8" })
 }
@@ -1148,6 +1129,7 @@ mod tests {
             &fake_ref,
             ref_start,
             &bam_header,
+            &[],
             0,
             Pos0::new(0).unwrap(),
             Pos0::max_value(),

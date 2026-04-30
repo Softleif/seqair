@@ -222,8 +222,31 @@ pub(crate) fn check_alloc_size(size: usize, context: &'static str) -> Result<(),
 pub struct CramShared {
     pub index: CramIndex,
     pub header: BamHeader,
+    /// Pre-parsed `@RG ID:` values, indexed by RG order in the SAM header.
+    /// CRAM records reference read groups by index into this list, so the
+    /// alternative — re-scanning `header.header_text()` per record inside
+    /// `decode_record` — was the dominant cost in `fetch_into_customized`
+    /// profiles. Computed once at `open()` time.
+    pub read_group_ids: Vec<SmolStr>,
     pub cram_path: PathBuf,
     pub fasta_path: PathBuf,
+}
+
+/// Parse `@RG ID:` values from SAM header text in declaration order.
+fn parse_read_group_ids(header_text: &str) -> Vec<SmolStr> {
+    let mut ids = Vec::new();
+    for line in header_text.lines() {
+        if !line.starts_with("@RG") {
+            continue;
+        }
+        for field in line.split('\t') {
+            if let Some(id) = field.strip_prefix("ID:") {
+                ids.push(SmolStr::new(id));
+                break;
+            }
+        }
+    }
+    ids
 }
 
 pub struct IndexedCramReader<R: Read + Seek = File> {
@@ -283,12 +306,15 @@ impl IndexedCramReader<File> {
         // Open FASTA reader
         let fasta = IndexedFastaReader::open(fasta_path)?;
 
+        let read_group_ids = parse_read_group_ids(header.header_text());
+
         Ok(IndexedCramReader {
             file,
             fasta,
             shared: Arc::new(CramShared {
                 index: cram_index,
                 header,
+                read_group_ids,
                 cram_path: cram_path.to_path_buf(),
                 fasta_path: fasta_path.to_path_buf(),
             }),
@@ -557,6 +583,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &self.ref_seq_buf,
                     ref_start.cast_signed(),
                     &self.shared.header,
+                    &self.shared.read_group_ids,
                     tid,
                     start,
                     end,
