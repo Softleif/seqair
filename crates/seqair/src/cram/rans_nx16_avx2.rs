@@ -27,8 +27,8 @@ pub(crate) unsafe fn decode_32state_loop(
     states: &mut [u32],
 ) -> Result<(), CramError> {
     let full_chunks = dst.len() / 32;
-    let threshold = _mm256_set1_epi32(0x8000);
-    let mask_12bit = _mm256_set1_epi32(0xFFF);
+    let threshold = unsafe { _mm256_set1_epi32(0x8000) };
+    let mask_12bit = unsafe { _mm256_set1_epi32(0xFFF) };
 
     for chunk_idx in 0..full_chunks {
         let start = chunk_idx.wrapping_mul(32);
@@ -36,7 +36,7 @@ pub(crate) unsafe fn decode_32state_loop(
             .get_mut(start..start.wrapping_add(32))
             .ok_or(CramError::Truncated { context: "avx2 chunk range" })?;
 
-        // ── Symbol lookup: scalar (32 iterations) ──
+        // Symbol lookup: scalar (32 iterations)
         for j in 0..32 {
             let f = states.get(j).unwrap_or(&0) & 0xFFF;
             let sym = sym_table
@@ -45,11 +45,11 @@ pub(crate) unsafe fn decode_32state_loop(
             *chunk.get_mut(j).unwrap_or(&mut 0) = *sym;
         }
 
-        // ── State update: SIMD (4 groups of 8) ──
+        // State update: SIMD (4 groups of 8)
         for j in (0..32).step_by(8) {
-            let s = _mm256_loadu_si256(states.as_ptr().add(j) as *const __m256i);
-            let hi = _mm256_srli_epi32(s, 12);
-            let f = _mm256_and_si256(s, mask_12bit);
+            let s = unsafe { _mm256_loadu_si256(states.as_ptr().add(j) as *const __m256i) };
+            let hi = unsafe { _mm256_srli_epi32(s, 12) };
+            let f = unsafe { _mm256_and_si256(s, mask_12bit) };
 
             let syms = [
                 usize::from(chunk[j]),
@@ -82,15 +82,15 @@ pub(crate) unsafe fn decode_32state_loop(
                 cumulative_frequencies[syms[7]],
             ];
 
-            let freqs = _mm256_loadu_si256(freq_arr.as_ptr() as *const __m256i);
-            let cums = _mm256_loadu_si256(cum_arr.as_ptr() as *const __m256i);
-            let prod = _mm256_mullo_epi32(freqs, hi);
-            let sum = _mm256_add_epi32(prod, f);
-            let new_s = _mm256_sub_epi32(sum, cums);
-            _mm256_storeu_si256(states.as_mut_ptr().add(j) as *mut __m256i, new_s);
+            let freqs = unsafe { _mm256_loadu_si256(freq_arr.as_ptr() as *const __m256i) };
+            let cums = unsafe { _mm256_loadu_si256(cum_arr.as_ptr() as *const __m256i) };
+            let prod = unsafe { _mm256_mullo_epi32(freqs, hi) };
+            let sum = unsafe { _mm256_add_epi32(prod, f) };
+            let new_s = unsafe { _mm256_sub_epi32(sum, cums) };
+            unsafe { _mm256_storeu_si256(states.as_mut_ptr().add(j) as *mut __m256i, new_s) };
         }
 
-        // ── Renormalize: scalar (32 iterations) ──
+        // Renormalize: scalar (32 iterations)
         for state in states.iter_mut() {
             if *state < (1 << 15) {
                 let lo = u32::from(

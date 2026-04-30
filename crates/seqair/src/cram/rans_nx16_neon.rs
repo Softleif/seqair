@@ -32,8 +32,8 @@ pub(crate) unsafe fn decode_32state_loop(
     states: &mut [u32],
 ) -> Result<(), CramError> {
     let full_chunks = dst.len() / 32;
-    let threshold = vdupq_n_u32(1 << 15);
-    let mask_12bit = vdupq_n_u32(0xFFF);
+    let threshold = unsafe { vdupq_n_u32(1 << 15) };
+    let mask_12bit = unsafe { vdupq_n_u32(0xFFF) };
 
     for chunk_idx in 0..full_chunks {
         let start = chunk_idx.wrapping_mul(32);
@@ -41,7 +41,7 @@ pub(crate) unsafe fn decode_32state_loop(
             .get_mut(start..start.wrapping_add(32))
             .ok_or(CramError::Truncated { context: "neon chunk range" })?;
 
-        // ── Symbol lookup: scalar table lookup (32 iterations) ──
+        // Scalar symbol lookup
         for j in 0..32 {
             let f = states.get(j).unwrap_or(&0) & 0xFFF;
             let sym = sym_table
@@ -50,11 +50,11 @@ pub(crate) unsafe fn decode_32state_loop(
             *chunk.get_mut(j).unwrap_or(&mut 0) = *sym;
         }
 
-        // ── State update: SIMD arithmetic (8 groups of 4) ──
+        // SIMD state update (8 groups of 4)
         for j in (0..32).step_by(4) {
-            let s = vld1q_u32(states.as_ptr().add(j));
-            let hi = vshrq_n_u32(s, 12);
-            let f = vandq_u32(s, mask_12bit);
+            let s = unsafe { vld1q_u32(states.as_ptr().add(j)) };
+            let hi = unsafe { vshrq_n_u32(s, 12) };
+            let f = unsafe { vandq_u32(s, mask_12bit) };
 
             let syms = [
                 usize::from(chunk[j]),
@@ -75,10 +75,10 @@ pub(crate) unsafe fn decode_32state_loop(
                 cumulative_frequencies[syms[3]],
             ];
 
-            let freqs = vld1q_u32(freq_arr.as_ptr());
-            let cums = vld1q_u32(cum_arr.as_ptr());
-            let new_s = vsubq_u32(vaddq_u32(vmulq_u32(freqs, hi), f), cums);
-            vst1q_u32(states.as_mut_ptr().add(j), new_s);
+            let freqs = unsafe { vld1q_u32(freq_arr.as_ptr()) };
+            let cums = unsafe { vld1q_u32(cum_arr.as_ptr()) };
+            let new_s = unsafe { vsubq_u32(vaddq_u32(vmulq_u32(freqs, hi), f), cums) };
+            unsafe { vst1q_u32(states.as_mut_ptr().add(j), new_s) };
         }
 
         // ── Renormalize: scalar (32 iterations) ──
