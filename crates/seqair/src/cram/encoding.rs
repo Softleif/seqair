@@ -2,6 +2,14 @@
 //! cover all encoding kinds defined by the spec (external, Huffman, Beta, subexp, byte array
 //! length/stop), and are driven by [`CompressionHeader`](super::compression_header::CompressionHeader).
 
+// See rans.rs for the rationale: lazy `ok_or_else(|| CramError::...)`
+// is the deliberate hot-path choice on per-byte helpers because eager
+// construction triggers a per-call `drop_in_place<CramError>`.
+#![allow(
+    clippy::unnecessary_lazy_evaluations,
+    reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
+)]
+
 use super::{bitstream::BitReader, reader::CramError, varint};
 use rustc_hash::FxHashMap;
 
@@ -297,8 +305,16 @@ impl<'a> DecodeContext<'a> {
         Self { core: BitReader::new(core_data), external: external_blocks }
     }
 
+    /// `get_external` is per-byte hot for any External-encoded data
+    /// series. `#[inline]` so callers can fold the `FxHashMap` lookup
+    /// directly into their loop bodies; `ok_or_else` keeps `CramError`
+    /// construction lazy so the success path doesn't pay
+    /// `drop_in_place<CramError>`.
+    #[inline]
     fn get_external(&mut self, content_id: i32) -> Result<&mut ExternalCursor, CramError> {
-        self.external.get_mut(&content_id).ok_or(CramError::ExternalBlockNotFound { content_id })
+        self.external
+            .get_mut(&content_id)
+            .ok_or_else(|| CramError::ExternalBlockNotFound { content_id })
     }
 }
 
