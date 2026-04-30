@@ -11,7 +11,7 @@
 )]
 
 use super::{bitstream::BitReader, reader::CramError, varint};
-use rustc_hash::FxHashMap;
+use seqair_types::SmallVec;
 
 /// Integer encoding (for data series like BF, CF, RL, AP, etc.)
 #[derive(Debug, Clone)]
@@ -295,26 +295,33 @@ impl ExternalCursor {
 }
 
 /// Decode context holding core bit reader and external block cursors.
+///
+/// External blocks are stored as a `SmallVec<(content_id, cursor)>` with
+/// inline capacity 4. CRAM slices have 0–10 external blocks; the typical
+/// case (≤4) stays on the stack with no heap alloc. Lookup is a linear
+/// scan — faster than hashing for this N.
 pub struct DecodeContext<'a> {
     pub core: BitReader<'a>,
-    pub external: FxHashMap<i32, ExternalCursor>,
+    pub external: SmallVec<(i32, ExternalCursor), 4>,
 }
 
 impl<'a> DecodeContext<'a> {
-    pub fn new(core_data: &'a [u8], external_blocks: FxHashMap<i32, ExternalCursor>) -> Self {
+    pub fn new(core_data: &'a [u8], external_blocks: SmallVec<(i32, ExternalCursor), 4>) -> Self {
         Self { core: BitReader::new(core_data), external: external_blocks }
     }
 
-    /// `get_external` is per-byte hot for any External-encoded data
-    /// series. `#[inline]` so callers can fold the `FxHashMap` lookup
-    /// directly into their loop bodies; `ok_or_else` keeps `CramError`
-    /// construction lazy so the success path doesn't pay
-    /// `drop_in_place<CramError>`.
+    /// Linear scan for the cursor matching `content_id`. `#[inline]` so
+    /// callers fold the scan directly into their loop bodies. The
+    /// per-cursor check is two integer comparisons (tag match + index
+    /// guard), faster than hash + probe for typical slice sizes.
     #[inline]
     fn get_external(&mut self, content_id: i32) -> Result<&mut ExternalCursor, CramError> {
-        self.external
-            .get_mut(&content_id)
-            .ok_or_else(|| CramError::ExternalBlockNotFound { content_id })
+        for (id, cursor) in &mut self.external {
+            if *id == content_id {
+                return Ok(cursor);
+            }
+        }
+        Err(CramError::ExternalBlockNotFound { content_id })
     }
 }
 
@@ -445,7 +452,7 @@ impl ByteEncoding {
     /// Decode `n` bytes and append them to `buf`.
     ///
     /// For `External` (the common case for `BA` / `QS` / per-byte
-    /// payload streams), this is a single `FxHashMap` lookup followed
+    /// payload streams), this is a single external-block lookup followed
     /// by one `extend_from_slice` of `n` bytes — orders of magnitude
     /// faster than calling [`Self::decode`] in a loop, which would do
     /// `n` lookups and `n` byte reads. samply showed
@@ -558,7 +565,7 @@ impl ByteArrayEncoding {
                     .map_err(|_| super::reader::CramError::InvalidLength { value: len_i32 })?;
                 super::reader::check_alloc_size(len, "byte array length")?;
                 // `decode_n_into` fast-paths the External case (one
-                // FxHashMap lookup + one memcpy of `len` bytes) instead
+                // external-block lookup + one memcpy of `len` bytes) instead
                 // of the per-byte `val_encoding.decode(ctx)` loop that
                 // used to do `len` lookups and `len` byte reads.
                 val_encoding.decode_n_into(ctx, len, buf)
@@ -771,7 +778,7 @@ mod tests {
     #[test]
     fn beta_encoding_decode() {
         let data = [0b10110000]; // bits: 1011 = 11
-        let mut ctx = DecodeContext::new(&data, FxHashMap::default());
+        let mut ctx = DecodeContext::new(&data, SmallVec::new());
         let enc = IntEncoding::Beta { offset: 0, bits: 4 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), 11);
     }
@@ -779,7 +786,7 @@ mod tests {
     #[test]
     fn beta_encoding_with_offset() {
         let data = [0b10110000]; // bits: 1011 = 11, minus offset 5 = 6
-        let mut ctx = DecodeContext::new(&data, FxHashMap::default());
+        let mut ctx = DecodeContext::new(&data, SmallVec::new());
         let enc = IntEncoding::Beta { offset: 5, bits: 4 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), 6);
     }
@@ -787,8 +794,8 @@ mod tests {
     // r[verify cram.encoding.external]
     #[test]
     fn external_int_decode() {
-        let mut external = FxHashMap::default();
-        external.insert(7, ExternalCursor::new(vec![42])); // ITF8(42)
+        let mut external = SmallVec::new();
+        external.push((7, ExternalCursor::new(vec![42]))); // ITF8(42)
         let mut ctx = DecodeContext::new(&[], external);
         let enc = IntEncoding::External { content_id: 7 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), 42);
@@ -796,8 +803,8 @@ mod tests {
 
     #[test]
     fn external_byte_decode() {
-        let mut external = FxHashMap::default();
-        external.insert(3, ExternalCursor::new(vec![0xAB]));
+        let mut external = SmallVec::new();
+        external.push((3, ExternalCursor::new(vec![0xAB])));
         let mut ctx = DecodeContext::new(&[], external);
         let enc = ByteEncoding::External { content_id: 3 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), 0xAB);
@@ -806,8 +813,8 @@ mod tests {
     // r[verify cram.encoding.byte_array_stop]
     #[test]
     fn byte_array_stop_decode() {
-        let mut external = FxHashMap::default();
-        external.insert(5, ExternalCursor::new(b"test\x00".to_vec()));
+        let mut external = SmallVec::new();
+        external.push((5, ExternalCursor::new(b"test\x00".to_vec())));
         let mut ctx = DecodeContext::new(&[], external);
         let enc = ByteArrayEncoding::ByteArrayStop { stop_byte: 0, content_id: 5 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), b"test");
@@ -816,10 +823,10 @@ mod tests {
     // r[verify cram.encoding.byte_array_len]
     #[test]
     fn byte_array_len_decode() {
-        let mut external = FxHashMap::default();
+        let mut external = SmallVec::new();
         // Length comes from core Huffman (single symbol = 3)
         // Values come from external block
-        external.insert(1, ExternalCursor::new(vec![0x41, 0x42, 0x43]));
+        external.push((1, ExternalCursor::new(vec![0x41, 0x42, 0x43])));
         let mut ctx = DecodeContext::new(&[], external);
 
         let enc = ByteArrayEncoding::ByteArrayLen {
@@ -832,7 +839,7 @@ mod tests {
     // r[verify cram.encoding.null]
     #[test]
     fn null_encodings_return_defaults() {
-        let mut ctx = DecodeContext::new(&[], FxHashMap::default());
+        let mut ctx = DecodeContext::new(&[], SmallVec::new());
         assert_eq!(IntEncoding::Null.decode(&mut ctx).unwrap(), 0);
         assert_eq!(ByteEncoding::Null.decode(&mut ctx).unwrap(), 0);
         assert_eq!(ByteArrayEncoding::Null.decode(&mut ctx).unwrap(), Vec::<u8>::new());
@@ -861,7 +868,7 @@ mod tests {
     fn external_byte_array_needs_length_returned() {
         // ByteArrayEncoding::External always returns ExternalByteArrayNeedsLength
         let enc = ByteArrayEncoding::External { content_id: 42 };
-        let mut ctx = DecodeContext::new(&[], FxHashMap::default());
+        let mut ctx = DecodeContext::new(&[], SmallVec::new());
         let err = enc.decode(&mut ctx).unwrap_err();
         assert!(matches!(err, CramError::ExternalByteArrayNeedsLength { content_id: 42 }));
     }
@@ -886,7 +893,7 @@ mod tests {
             let packed = val << shift;
             let data = [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8];
 
-            let mut ctx = DecodeContext::new(&data, FxHashMap::default());
+            let mut ctx = DecodeContext::new(&data, SmallVec::new());
             let enc = IntEncoding::Beta { offset, bits };
             let decoded = enc.decode(&mut ctx).unwrap();
             proptest::prop_assert_eq!(decoded, val.cast_signed() - offset);
@@ -894,8 +901,8 @@ mod tests {
 
         #[test]
         fn external_byte_roundtrip(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..32)) {
-            let mut external = FxHashMap::default();
-            external.insert(0, ExternalCursor::new(bytes.clone()));
+            let mut external = SmallVec::new();
+            external.push((0, ExternalCursor::new(bytes.clone())));
             let mut ctx = DecodeContext::new(&[], external);
             let enc = ByteEncoding::External { content_id: 0 };
             for &expected in &bytes {

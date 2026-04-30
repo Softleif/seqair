@@ -15,8 +15,7 @@ use crate::bam::{
     cigar::CigarOp,
     record_store::{CustomizeRecordStore, RecordStore},
 };
-use rustc_hash::FxHashMap;
-use seqair_types::{BamFlags, Base, Pos0, Pos1, SmolStr};
+use seqair_types::{BamFlags, Base, Pos0, Pos1, SmallVec, SmolStr};
 use tracing::warn;
 
 /// Mate cross-reference info collected during CRAM record decoding.
@@ -183,7 +182,7 @@ pub fn decode_slice<E: CustomizeRecordStore>(
 
     // Parse remaining blocks: core data + external data
     let mut core_block: Option<Block> = None;
-    let mut external_blocks: FxHashMap<i32, ExternalCursor> = FxHashMap::default();
+    let mut external_blocks: SmallVec<(i32, ExternalCursor), 4> = SmallVec::new();
 
     for _ in 0..sh.num_blocks {
         let remaining =
@@ -196,7 +195,7 @@ pub fn decode_slice<E: CustomizeRecordStore>(
                 core_block = Some(blk);
             }
             ContentType::ExternalData => {
-                external_blocks.insert(blk.content_id, ExternalCursor::new(blk.data));
+                external_blocks.push((blk.content_id, ExternalCursor::new(blk.data)));
             }
             _ => {
                 // Ignore unexpected block types
@@ -206,10 +205,13 @@ pub fn decode_slice<E: CustomizeRecordStore>(
 
     // r[impl cram.slice.embedded_ref]
     let embedded_ref_data = if sh.embedded_reference >= 0 {
-        external_blocks
-            .remove(&sh.embedded_reference)
-            .map(|cursor| cursor.into_data())
-            .unwrap_or_default()
+        let idx = external_blocks
+            .iter()
+            .position(|(id, _)| *id == sh.embedded_reference);
+        match idx {
+            Some(i) => external_blocks.swap_remove(i).1.into_data(),
+            None => Vec::new(),
+        }
     } else {
         Vec::new()
     };
@@ -489,7 +491,7 @@ fn decode_record<E: CustomizeRecordStore>(
         let mapq = ds.mapping_quality.decode(ctx)? as u8;
 
         // r[impl cram.record.quality]
-        // Quality scores. Bulk decode for External (single FxHashMap
+        // Quality scores. Bulk decode for External (single external-block
         // lookup + one memcpy of `read_length` bytes) instead of the
         // per-byte `decode(ctx)` loop that dominated profiles.
         if quality_as_array {
