@@ -385,12 +385,15 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
 
         let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)?;
 
+        let read_group_ids = parse_read_group_ids(header.header_text());
+
         Ok(IndexedCramReader {
             file: Cursor::new(cram_data),
             fasta,
             shared: Arc::new(CramShared {
                 index: cram_index,
                 header,
+                read_group_ids,
                 cram_path: PathBuf::from("<fuzz>"),
                 fasta_path: PathBuf::from("<fuzz>"),
             }),
@@ -464,9 +467,12 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         container_offsets.sort_unstable();
         container_offsets.dedup();
 
-        // Get reference name for FASTA lookup
-        let ref_name =
-            self.shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid })?.to_string();
+        // Get reference name for FASTA lookup. Borrow into the Arc'd
+        // header — the FASTA fetch only needs `&str`, and the cold
+        // MissingReference error path is the single place we materialize
+        // a `SmolStr`.
+        let ref_name: &str =
+            self.shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid })?;
 
         for &container_offset in &container_offsets {
             self.file.seek(SeekFrom::Start(container_offset))?;
@@ -550,7 +556,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                 // r[impl cram.edge.missing_reference]
                 self.fasta
                     .fetch_seq_into(
-                        &ref_name,
+                        ref_name,
                         Pos0::try_from(ref_start)
                             .map_err(|_| CramError::InvalidPosition {
                             #[expect(
@@ -564,7 +570,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     )
                     .map_err(|e| match &e {
                         FastaError::SequenceNotFound { .. } => {
-                            CramError::MissingReference { contig: SmolStr::new(&ref_name) }
+                            CramError::MissingReference { contig: SmolStr::new(ref_name) }
                         }
                         _ => CramError::from(e),
                     })?;
