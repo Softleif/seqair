@@ -325,6 +325,23 @@ fn decode_order_0_32state(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramErr
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            // Safety: AVX2 availability verified above.
+            unsafe {
+                return super::rans_nx16_avx2::decode_32state_loop(
+                    src,
+                    dst,
+                    &frequencies,
+                    &cumulative_frequencies,
+                    &sym_table,
+                    &mut states,
+                );
+            }
+        }
+    }
+
     // Scalar fallback
     let truncated = || CramError::Truncated { context: "rans_nx16 order-0 truncated" };
     for chunk in dst.chunks_mut(32) {
