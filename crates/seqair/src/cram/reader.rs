@@ -227,6 +227,13 @@ pub struct CramShared {
     /// alternative — re-scanning `header.header_text()` per record inside
     /// `decode_record` — was the dominant cost in `fetch_into_customized`
     /// profiles. Computed once at `open()` time.
+    ///
+    /// TODO(perf): this lives on `CramShared` because BAM/SAM keep RG in
+    /// raw aux bytes and don't need the indexed lookup. If a future
+    /// reader (e.g. SAM-from-CRAM converter) starts needing it too,
+    /// promote the parsed list to `BamHeader` itself so every format
+    /// shares one canonical cache instead of each opening parser
+    /// re-scanning the header text.
     pub read_group_ids: Vec<SmolStr>,
     pub cram_path: PathBuf,
     pub fasta_path: PathBuf,
@@ -495,6 +502,41 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         let ref_name: &str =
             self.shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid })?;
 
+        // TODO(perf): container-scoped re-reading and re-parsing.
+        //
+        // Each `fetch_into` call below re-reads the container bytes off
+        // disk into `self.container_buf` (E) and re-parses the
+        // compression header — including `tag_dictionary` and
+        // `tag_encodings` — fresh every time (D). For multi-segment
+        // pileup workflows (Readers::pileup over many segments of the
+        // same contig) successive fetches frequently revisit the same
+        // container, so this is repeated work.
+        //
+        // Fix options:
+        //
+        //   1. One-entry "last container" cache: store
+        //      `Option<(container_offset, ContainerHeader, CompressionHeader, Vec<u8>)>`
+        //      on the reader. On hit, skip the seek + read + parse and
+        //      reuse `container_buf` + `ch`. Trivial to implement,
+        //      handles the common case where consecutive segments fall
+        //      in the same container. Memory cost: one extra
+        //      `container_buf`-sized Vec.
+        //
+        //   2. Small LRU (size 2-4): same idea but covers the case
+        //      where neighbouring segments span 2-3 containers. Picks
+        //      up overlapping segments and forked workers iterating
+        //      adjacent ranges.
+        //
+        //   3. Per-tile container plan: when used through
+        //      `Readers::pileup`, the outer loop knows the segment
+        //      sequence ahead of time. Could pre-group segments by
+        //      container at plan time and only fetch each container
+        //      once. Largest win, but couples the unified reader to
+        //      the segment iterator.
+        //
+        // Profile signal: look for `block::parse_block`,
+        // `CompressionHeader::parse`, and `File::read_exact` near the
+        // top of `fetch_into_customized` self-time.
         for &container_offset in &container_offsets {
             self.file.seek(SeekFrom::Start(container_offset))?;
 
