@@ -312,17 +312,26 @@ fn decode_order_0_32state(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramErr
 
     #[cfg(target_arch = "aarch64")]
     {
+        let states_snapshot = states.clone();
+        let src_snapshot = *src;
         // Safety: NEON is always available on aarch64.
         unsafe {
-            return super::rans_nx16_neon::decode_32state_loop(
+            if super::rans_nx16_neon::decode_32state_loop(
                 src,
                 dst,
                 &frequencies,
                 &cumulative_frequencies,
                 &sym_table,
                 &mut states,
-            );
+            )
+            .is_ok()
+            {
+                return Ok(());
+            }
         }
+        // NEON failed — restore pre-NEON state and fall through to scalar.
+        states = states_snapshot;
+        *src = src_snapshot;
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -1101,10 +1110,48 @@ mod tests {
         assert_eq!(result, vec![0u8; 32], "SIMD path failed");
     }
 
+    #[test]
+    fn neon_fallback_handles_len_128_decode() {
+        let len = 128;
+        let mut stream = Vec::new();
+        stream.push(FLAG_N32);
+        encode_uint7_prv(&mut stream, len as u32);
+        stream.extend_from_slice(&[0, 0]);
+        stream.push(0x80);
+        stream.push(0x20);
+        for _ in 0..32 {
+            stream.extend_from_slice(&0x01000000u32.to_le_bytes());
+        }
+        let result = decode(&stream, 0).unwrap();
+        assert_eq!(result.len(), len);
+    }
+
+    #[test]
+    fn neon_fallback_handles_len_128_direct() {
+        let len = 128;
+        let mut stream = Vec::new();
+        stream.push(FLAG_N32);
+        encode_uint7_prv(&mut stream, len as u32);
+        stream.extend_from_slice(&[0, 0]);
+        stream.push(0x80);
+        stream.push(0x20);
+        for _ in 0..32 {
+            stream.extend_from_slice(&0x01000000u32.to_le_bytes());
+        }
+
+        // Direct call: decode_order_0_32state bypasses decode()'s wrapper
+        let mut cur: &[u8] = &stream;
+        read_u8(&mut cur).unwrap();
+        read_uint7(&mut cur).unwrap();
+        let mut dst = vec![0u8; len];
+        decode_order_0_32state(&mut cur, &mut dst).unwrap();
+        assert!(dst.iter().all(|&b| b == 0), "decode_order_0_32state produced non-zero output");
+    }
+
     proptest::proptest! {
         #[test]
         fn simd_matches_scalar_order0_32state(
-            len in 0usize..96,
+            len in 0usize..1024,
         ) {
             // Stream decoding to `len` zero bytes. Symbol 0 has freq=4096
             // (covers the full 12-bit range), all other symbols freq=0.
