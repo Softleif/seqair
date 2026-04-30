@@ -8,3 +8,8 @@ fail-fast = false
 
 [profile.ci.junit]
 path = "junit.xml"
+
+[[profile.default.overrides]]
+# Run slow examples first
+filter = 'test(/^example_/)'
+priority = 100

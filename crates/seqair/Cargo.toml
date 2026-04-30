@@ -70,5 +70,9 @@ harness = false
 name = "vcf"
 harness = false
 
+[[bench]]
+name = "cram"
+harness = false
+
 [lints]
 workspace = true

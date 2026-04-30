@@ -2,8 +2,16 @@
 //! cover all encoding kinds defined by the spec (external, Huffman, Beta, subexp, byte array
 //! length/stop), and are driven by [`CompressionHeader`](super::compression_header::CompressionHeader).
 
+// See rans.rs for the rationale: lazy `ok_or_else(|| CramError::...)`
+// is the deliberate hot-path choice on per-byte helpers because eager
+// construction triggers a per-call `drop_in_place<CramError>`.
+#![allow(
+    clippy::unnecessary_lazy_evaluations,
+    reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
+)]
+
 use super::{bitstream::BitReader, reader::CramError, varint};
-use rustc_hash::FxHashMap;
+use seqair_types::SmallVec;
 
 /// Integer encoding (for data series like BF, CF, RL, AP, etc.)
 #[derive(Debug, Clone)]
@@ -34,13 +42,35 @@ pub enum ByteArrayEncoding {
 }
 
 /// Precomputed canonical Huffman decode table.
+///
+/// Pre-computes the canonical-code assignment and a per-bit-length
+/// index in [`HuffmanTable::new`] so [`HuffmanTable::decode`] is a hot
+/// loop with no allocation and O(`max_len`) work per symbol. Earlier
+/// versions rebuilt the codes vector and linear-scanned the symbol list
+/// at every bit-length level on every byte decoded, which dominated
+/// CRAM `ByteEncoding`/`ByteArrayEncoding` profiles.
 #[derive(Debug, Clone)]
 pub struct HuffmanTable {
-    /// (symbol, `bit_length`) pairs sorted by (`bit_length`, symbol) for canonical assignment.
-    symbols: Vec<(i32, u32)>,
+    /// Symbols sorted by (`bit_length`, symbol) — canonical Huffman order.
+    symbols: Vec<i32>,
+    /// Canonical code for each entry, parallel to `symbols`.
+    codes: Vec<u32>,
+    /// `level_starts[L]` = index into `symbols`/`codes` of the first
+    /// entry whose `bit_length == L`. Padded with `symbols.len()` past
+    /// `max_len`, so range `level_starts[L]..level_starts[L+1]` always
+    /// indexes the entries at level `L` even for empty levels.
+    level_starts: [u32; LEVEL_STARTS_LEN],
+    /// Longest code in the table (1..=32). 0 for the single-symbol /
+    /// empty cases (handled specially).
+    max_len: u32,
     /// For single-symbol codes (`bit_length=0`), the symbol value.
     single_symbol: Option<i32>,
 }
+
+/// `level_starts` covers bit lengths 1..=32, plus a sentinel at index 33.
+/// Index 0 is unused so callers can index by `target_len` directly.
+const LEVEL_STARTS_LEN: usize = 34;
+const MAX_HUFFMAN_BIT_LEN: u32 = 32;
 
 impl HuffmanTable {
     pub fn new(alphabet: &[i32], bit_lengths: &[u32]) -> Result<Self, CramError> {
@@ -52,26 +82,116 @@ impl HuffmanTable {
         }
 
         if alphabet.is_empty() {
-            return Ok(Self { symbols: Vec::new(), single_symbol: None });
+            return Ok(Self {
+                symbols: Vec::new(),
+                codes: Vec::new(),
+                level_starts: [0; LEVEL_STARTS_LEN],
+                max_len: 0,
+                single_symbol: None,
+            });
         }
 
         // Check for single-symbol code (bit_length=0)
         if let Some(&single) = alphabet.first().filter(|_| alphabet.len() == 1) {
-            return Ok(Self { symbols: vec![(single, 0)], single_symbol: Some(single) });
+            return Ok(Self {
+                symbols: vec![single],
+                codes: vec![0],
+                level_starts: [0; LEVEL_STARTS_LEN],
+                max_len: 0,
+                single_symbol: Some(single),
+            });
         }
 
-        // Build (symbol, bit_length) pairs and sort canonically
+        // Sort entries by (bit_length, symbol) for canonical assignment.
         let mut pairs: Vec<(i32, u32)> =
             alphabet.iter().zip(bit_lengths.iter()).map(|(&sym, &bl)| (sym, bl)).collect();
         pairs.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
 
-        Ok(Self { symbols: pairs, single_symbol: None })
+        // Pre-assign canonical codes: codes start at 0, increment within a
+        // bit-length level, and left-shift when crossing to a longer level.
+        let mut symbols = Vec::with_capacity(pairs.len());
+        let mut codes = Vec::with_capacity(pairs.len());
+        let mut code = 0u32;
+        let Some(&(_, mut prev_len)) = pairs.first() else {
+            // Unreachable — pairs is non-empty (alphabet is non-empty and
+            // the single-symbol case returned above).
+            return Err(CramError::HuffmanSizeMismatch {
+                alphabet_size: alphabet.len(),
+                bit_lengths_size: bit_lengths.len(),
+            });
+        };
+        if prev_len > MAX_HUFFMAN_BIT_LEN {
+            return Err(CramError::HuffmanSizeMismatch {
+                alphabet_size: alphabet.len(),
+                bit_lengths_size: bit_lengths.len(),
+            });
+        }
+
+        for &(sym, bit_len) in &pairs {
+            if bit_len > MAX_HUFFMAN_BIT_LEN {
+                return Err(CramError::HuffmanSizeMismatch {
+                    alphabet_size: alphabet.len(),
+                    bit_lengths_size: bit_lengths.len(),
+                });
+            }
+            if bit_len > prev_len {
+                let shift = bit_len.wrapping_sub(prev_len);
+                code = code.checked_shl(shift).ok_or(CramError::HuffmanSizeMismatch {
+                    alphabet_size: alphabet.len(),
+                    bit_lengths_size: bit_lengths.len(),
+                })?;
+                prev_len = bit_len;
+            }
+            symbols.push(sym);
+            codes.push(code);
+            code = code.wrapping_add(1);
+        }
+
+        // Build `level_starts`: linear scan over the sorted entries.
+        let mut level_starts = [0u32; LEVEL_STARTS_LEN];
+        let entry_count = u32::try_from(symbols.len()).unwrap_or(u32::MAX);
+        let mut idx_u32 = 0u32;
+        let mut next_level: u32 = 1;
+        for &(_, bit_len) in &pairs {
+            while next_level <= bit_len && (next_level as usize) < LEVEL_STARTS_LEN {
+                #[allow(
+                    clippy::indexing_slicing,
+                    reason = "next_level < LEVEL_STARTS_LEN checked above"
+                )]
+                {
+                    level_starts[next_level as usize] = idx_u32;
+                }
+                next_level = next_level.wrapping_add(1);
+            }
+            idx_u32 = idx_u32.wrapping_add(1);
+        }
+        // Pad the tail past max_len with `entry_count` so the
+        // `[level_starts[L]..level_starts[L+1]]` range query at the last
+        // level returns the correct count rather than 0.
+        while (next_level as usize) < LEVEL_STARTS_LEN {
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "next_level < LEVEL_STARTS_LEN checked by the loop"
+            )]
+            {
+                level_starts[next_level as usize] = entry_count;
+            }
+            next_level = next_level.wrapping_add(1);
+        }
+
+        let max_len = pairs.last().map(|&(_, bl)| bl).unwrap_or(0);
+
+        Ok(Self { symbols, codes, level_starts, max_len, single_symbol: None })
     }
 
     /// Decode a single symbol from the bit stream.
     ///
-    /// Uses canonical Huffman decoding: read one bit at a time, tracking the
-    /// current code value against the canonical code for each bit length level.
+    /// O(`max_len`) per call: reads one bit per level until the
+    /// accumulated value lands in the canonical code range for some
+    /// level, then returns that level's symbol by direct index. No
+    /// allocation, no inner linear scan — both the canonical codes and
+    /// the per-level start indices are precomputed in
+    /// [`HuffmanTable::new`].
     pub fn decode(&self, reader: &mut BitReader<'_>) -> Option<i32> {
         if let Some(sym) = self.single_symbol {
             return Some(sym);
@@ -81,38 +201,28 @@ impl HuffmanTable {
             return None;
         }
 
-        // Pre-assign canonical codes: sorted by (bit_len, symbol),
-        // codes start at 0 and increment, left-shifting when length increases.
-        let mut codes: Vec<u32> = Vec::with_capacity(self.symbols.len());
-        let mut code = 0u32;
-        let mut prev_len = self.symbols.first()?.1;
-
-        for &(_sym, bit_len) in &self.symbols {
-            if bit_len > prev_len {
-                let shift = bit_len.checked_sub(prev_len)?;
-                if shift >= 32 {
-                    return None;
-                }
-                code <<= shift;
-                prev_len = bit_len;
-            }
-            codes.push(code);
-            code = code.wrapping_add(1);
-        }
-
-        // Read bits incrementally, checking codes at each length level
         let mut value = 0u32;
-        let mut bits_read = 0u32;
-
-        let max_len = self.symbols.last()?.1;
-        for target_len in 1..=max_len {
-            while bits_read < target_len {
-                value = (value << 1) | u32::from(reader.read_bit()?);
-                bits_read = bits_read.checked_add(1)?;
-            }
-            for (i, &(sym, bl)) in self.symbols.iter().enumerate() {
-                if bl == target_len && *codes.get(i)? == value {
-                    return Some(sym);
+        for target_len in 1..=self.max_len {
+            value = value.wrapping_shl(1) | u32::from(reader.read_bit()?);
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "target_len is bounded by max_len ≤ MAX_HUFFMAN_BIT_LEN < LEVEL_STARTS_LEN"
+            )]
+            let start = self.level_starts[target_len as usize];
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "target_len + 1 ≤ MAX_HUFFMAN_BIT_LEN + 1 < LEVEL_STARTS_LEN"
+            )]
+            let end = self.level_starts[(target_len as usize).wrapping_add(1)];
+            if start < end {
+                let base_code = *self.codes.get(start as usize)?;
+                if value >= base_code {
+                    let offset = value.wrapping_sub(base_code);
+                    let count = end.wrapping_sub(start);
+                    if offset < count {
+                        let idx = (start as usize).checked_add(offset as usize)?;
+                        return self.symbols.get(idx).copied();
+                    }
                 }
             }
         }
@@ -146,42 +256,33 @@ impl ExternalCursor {
         Some(val)
     }
 
-    // TODO(perf): read_bytes_until and read_bytes both .to_vec() from contiguous data.
-    // Three options to avoid per-call allocation:
-    //
-    // 1. Quick win (no API change): for ByteArrayLen with External val_encoding,
-    //    add read_bytes_slice() that returns &[u8] and memcpy once, instead of
-    //    N push() calls. Same for read_bytes_until → read_bytes_until_slice.
-    //    NLL allows returning &[u8] from &mut self (borrows data, not mutability).
-    //
-    // 2. decode_into(ctx, buf: &mut Vec<u8>): callers pass a reusable scratch buffer.
-    //    Still copies, but buffer capacity stabilizes after first region — zero allocs
-    //    in steady state. Requires changing call sites in slice.rs.
-    //
-    // 3. True zero-copy: change pos to Cell<usize>, all cursor methods take &self,
-    //    get_external returns &ExternalCursor, decode returns Cow<'_, [u8]>.
-    //    Problem: read_name is stored across many decode() calls, so Cow borrows ctx
-    //    and blocks subsequent decodes. Would need split borrows or a different caller
-    //    pattern (immediate .to_vec() for read_name, Cow for short-lived results).
+    /// Append `n` bytes starting at `pos` into `buf`, advancing `pos` past
+    /// them. Replaces the allocating `read_bytes`: callers pass a scratch
+    /// buffer they reuse across records, so the steady state is zero
+    /// allocations.
+    pub fn read_bytes_into(&mut self, n: usize, buf: &mut Vec<u8>) -> Option<()> {
+        let end = self.pos.checked_add(n)?;
+        let slice = self.data.get(self.pos..end)?;
+        buf.extend_from_slice(slice);
+        self.pos = end;
+        Some(())
+    }
 
-    pub fn read_bytes_until(&mut self, stop: u8) -> Option<Vec<u8>> {
+    /// Append bytes up to (but not including) the first `stop` byte into
+    /// `buf`, advancing `pos` past the stop byte. Replaces the allocating
+    /// `read_bytes_until`.
+    pub fn read_bytes_until_into(&mut self, stop: u8, buf: &mut Vec<u8>) -> Option<()> {
         let start = self.pos;
         while self.pos < self.data.len() {
             if *self.data.get(self.pos)? == stop {
-                let result = self.data.get(start..self.pos)?.to_vec();
+                let slice = self.data.get(start..self.pos)?;
+                buf.extend_from_slice(slice);
                 self.pos = self.pos.checked_add(1)?; // skip stop byte
-                return Some(result);
+                return Some(());
             }
             self.pos = self.pos.checked_add(1)?;
         }
         None
-    }
-
-    pub fn read_bytes(&mut self, n: usize) -> Option<Vec<u8>> {
-        let end = self.pos.checked_add(n)?;
-        let result = self.data.get(self.pos..end)?.to_vec();
-        self.pos = end;
-        Some(result)
     }
 
     pub fn into_data(self) -> Vec<u8> {
@@ -194,18 +295,33 @@ impl ExternalCursor {
 }
 
 /// Decode context holding core bit reader and external block cursors.
+///
+/// External blocks are stored as a `SmallVec<(content_id, cursor)>` with
+/// inline capacity 4. CRAM slices have 0–10 external blocks; the typical
+/// case (≤4) stays on the stack with no heap alloc. Lookup is a linear
+/// scan — faster than hashing for this N.
 pub struct DecodeContext<'a> {
     pub core: BitReader<'a>,
-    pub external: FxHashMap<i32, ExternalCursor>,
+    pub external: SmallVec<(i32, ExternalCursor), 4>,
 }
 
 impl<'a> DecodeContext<'a> {
-    pub fn new(core_data: &'a [u8], external_blocks: FxHashMap<i32, ExternalCursor>) -> Self {
+    pub fn new(core_data: &'a [u8], external_blocks: SmallVec<(i32, ExternalCursor), 4>) -> Self {
         Self { core: BitReader::new(core_data), external: external_blocks }
     }
 
+    /// Linear scan for the cursor matching `content_id`. `#[inline]` so
+    /// callers fold the scan directly into their loop bodies. The
+    /// per-cursor check is two integer comparisons (tag match + index
+    /// guard), faster than hash + probe for typical slice sizes.
+    #[inline]
     fn get_external(&mut self, content_id: i32) -> Result<&mut ExternalCursor, CramError> {
-        self.external.get_mut(&content_id).ok_or(CramError::ExternalBlockNotFound { content_id })
+        for (id, cursor) in &mut self.external {
+            if *id == content_id {
+                return Ok(cursor);
+            }
+        }
+        Err(CramError::ExternalBlockNotFound { content_id })
     }
 }
 
@@ -317,18 +433,67 @@ impl ByteEncoding {
             Self::Null => Ok(0),
             Self::External { content_id } => {
                 let cursor = ctx.get_external(*content_id)?;
-                cursor.read_byte().ok_or(CramError::Truncated { context: "external byte" })
+                cursor.read_byte().ok_or_else(|| CramError::Truncated { context: "external byte" })
             }
             Self::Huffman(table) => {
                 let val = table
                     .decode(&mut ctx.core)
-                    .ok_or(CramError::Truncated { context: "huffman byte" })?;
+                    .ok_or_else(|| CramError::Truncated { context: "huffman byte" })?;
                 #[expect(
                     clippy::cast_possible_truncation,
                     clippy::cast_sign_loss,
                     reason = "Huffman byte encoding returns i32 but values are 0..=255 for byte streams"
                 )]
                 Ok(val as u8)
+            }
+        }
+    }
+
+    /// Decode `n` bytes and append them to `buf`.
+    ///
+    /// For `External` (the common case for `BA` / `QS` / per-byte
+    /// payload streams), this is a single external-block lookup followed
+    /// by one `extend_from_slice` of `n` bytes — orders of magnitude
+    /// faster than calling [`Self::decode`] in a loop, which would do
+    /// `n` lookups and `n` byte reads. samply showed
+    /// `ByteEncoding::decode` near the top of `decode_record` self-time
+    /// because the `quality_score` and the inner `val_encoding` of
+    /// `ByteArrayLen` were called per byte through that path.
+    ///
+    /// For `Null` we extend with zeros; for `Huffman` we still loop
+    /// (each symbol's bit length is data-dependent).
+    #[inline]
+    pub fn decode_n_into(
+        &self,
+        ctx: &mut DecodeContext<'_>,
+        n: usize,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), CramError> {
+        match self {
+            Self::Null => {
+                buf.resize(buf.len().saturating_add(n), 0);
+                Ok(())
+            }
+            Self::External { content_id } => {
+                let cursor = ctx.get_external(*content_id)?;
+                cursor
+                    .read_bytes_into(n, buf)
+                    .ok_or_else(|| CramError::Truncated { context: "external bulk bytes" })
+            }
+            Self::Huffman(table) => {
+                buf.reserve(n);
+                for _ in 0..n {
+                    let val = table
+                        .decode(&mut ctx.core)
+                        .ok_or_else(|| CramError::Truncated { context: "huffman byte" })?;
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "Huffman byte encoding returns i32 but values are 0..=255 for byte streams"
+                    )]
+                    buf.push(val as u8);
+                }
+                Ok(())
             }
         }
     }
@@ -369,9 +534,23 @@ impl ByteEncoding {
 }
 
 impl ByteArrayEncoding {
-    pub fn decode(&self, ctx: &mut DecodeContext<'_>) -> Result<Vec<u8>, CramError> {
+    /// Append decoded bytes onto `buf`. Caller decides whether to clear
+    /// `buf` first (e.g. clear when reading a record's qname; *don't*
+    /// clear when appending a tag value into an existing aux block).
+    ///
+    /// Replaces the allocating `decode(ctx) -> Vec<u8>` form: per-record
+    /// decode in CRAM hot loops used to allocate one or more `Vec<u8>`s
+    /// per record (`read_name` + every tag value + every insertion /
+    /// soft-clip / `Bases`-block feature). With a caller-owned scratch
+    /// buffer the steady state is zero allocations after the first
+    /// record warms the buffer's capacity.
+    pub fn decode_into(
+        &self,
+        ctx: &mut DecodeContext<'_>,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), CramError> {
         match self {
-            Self::Null => Ok(Vec::new()),
+            Self::Null => Ok(()),
             // r[impl cram.encoding.external]
             Self::External { content_id } => {
                 // For byte arrays with external encoding, the entire array is in the external block.
@@ -385,20 +564,29 @@ impl ByteArrayEncoding {
                 let len = usize::try_from(len_i32)
                     .map_err(|_| super::reader::CramError::InvalidLength { value: len_i32 })?;
                 super::reader::check_alloc_size(len, "byte array length")?;
-                let mut result = Vec::with_capacity(len);
-                for _ in 0..len {
-                    result.push(val_encoding.decode(ctx)?);
-                }
-                Ok(result)
+                // `decode_n_into` fast-paths the External case (one
+                // external-block lookup + one memcpy of `len` bytes) instead
+                // of the per-byte `val_encoding.decode(ctx)` loop that
+                // used to do `len` lookups and `len` byte reads.
+                val_encoding.decode_n_into(ctx, len, buf)
             }
             // r[impl cram.encoding.byte_array_stop]
             Self::ByteArrayStop { stop_byte, content_id } => {
                 let cursor = ctx.get_external(*content_id)?;
                 cursor
-                    .read_bytes_until(*stop_byte)
-                    .ok_or(CramError::Truncated { context: "byte array stop" })
+                    .read_bytes_until_into(*stop_byte, buf)
+                    .ok_or_else(|| CramError::Truncated { context: "byte array stop" })
             }
         }
+    }
+
+    /// Allocating wrapper around `decode_into` for callers that don't yet
+    /// have a scratch buffer. New code should prefer `decode_into` to keep
+    /// the steady-state allocation count at zero.
+    pub fn decode(&self, ctx: &mut DecodeContext<'_>) -> Result<Vec<u8>, CramError> {
+        let mut buf = Vec::new();
+        self.decode_into(ctx, &mut buf)?;
+        Ok(buf)
     }
 
     pub fn parse(cursor: &mut &[u8]) -> Result<Self, CramError> {
@@ -576,16 +764,21 @@ mod tests {
     #[test]
     fn external_cursor_read_bytes_until() {
         let mut cursor = ExternalCursor::new(b"hello\x00world\x00".to_vec());
-        assert_eq!(cursor.read_bytes_until(0), Some(b"hello".to_vec()));
-        assert_eq!(cursor.read_bytes_until(0), Some(b"world".to_vec()));
-        assert_eq!(cursor.read_bytes_until(0), None);
+        let mut buf = Vec::new();
+        cursor.read_bytes_until_into(0, &mut buf).expect("first token");
+        assert_eq!(buf, b"hello");
+        buf.clear();
+        cursor.read_bytes_until_into(0, &mut buf).expect("second token");
+        assert_eq!(buf, b"world");
+        buf.clear();
+        assert!(cursor.read_bytes_until_into(0, &mut buf).is_none());
     }
 
     // r[verify cram.encoding.beta]
     #[test]
     fn beta_encoding_decode() {
         let data = [0b10110000]; // bits: 1011 = 11
-        let mut ctx = DecodeContext::new(&data, FxHashMap::default());
+        let mut ctx = DecodeContext::new(&data, SmallVec::new());
         let enc = IntEncoding::Beta { offset: 0, bits: 4 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), 11);
     }
@@ -593,7 +786,7 @@ mod tests {
     #[test]
     fn beta_encoding_with_offset() {
         let data = [0b10110000]; // bits: 1011 = 11, minus offset 5 = 6
-        let mut ctx = DecodeContext::new(&data, FxHashMap::default());
+        let mut ctx = DecodeContext::new(&data, SmallVec::new());
         let enc = IntEncoding::Beta { offset: 5, bits: 4 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), 6);
     }
@@ -601,8 +794,8 @@ mod tests {
     // r[verify cram.encoding.external]
     #[test]
     fn external_int_decode() {
-        let mut external = FxHashMap::default();
-        external.insert(7, ExternalCursor::new(vec![42])); // ITF8(42)
+        let mut external = SmallVec::new();
+        external.push((7, ExternalCursor::new(vec![42]))); // ITF8(42)
         let mut ctx = DecodeContext::new(&[], external);
         let enc = IntEncoding::External { content_id: 7 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), 42);
@@ -610,8 +803,8 @@ mod tests {
 
     #[test]
     fn external_byte_decode() {
-        let mut external = FxHashMap::default();
-        external.insert(3, ExternalCursor::new(vec![0xAB]));
+        let mut external = SmallVec::new();
+        external.push((3, ExternalCursor::new(vec![0xAB])));
         let mut ctx = DecodeContext::new(&[], external);
         let enc = ByteEncoding::External { content_id: 3 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), 0xAB);
@@ -620,8 +813,8 @@ mod tests {
     // r[verify cram.encoding.byte_array_stop]
     #[test]
     fn byte_array_stop_decode() {
-        let mut external = FxHashMap::default();
-        external.insert(5, ExternalCursor::new(b"test\x00".to_vec()));
+        let mut external = SmallVec::new();
+        external.push((5, ExternalCursor::new(b"test\x00".to_vec())));
         let mut ctx = DecodeContext::new(&[], external);
         let enc = ByteArrayEncoding::ByteArrayStop { stop_byte: 0, content_id: 5 };
         assert_eq!(enc.decode(&mut ctx).unwrap(), b"test");
@@ -630,10 +823,10 @@ mod tests {
     // r[verify cram.encoding.byte_array_len]
     #[test]
     fn byte_array_len_decode() {
-        let mut external = FxHashMap::default();
+        let mut external = SmallVec::new();
         // Length comes from core Huffman (single symbol = 3)
         // Values come from external block
-        external.insert(1, ExternalCursor::new(vec![0x41, 0x42, 0x43]));
+        external.push((1, ExternalCursor::new(vec![0x41, 0x42, 0x43])));
         let mut ctx = DecodeContext::new(&[], external);
 
         let enc = ByteArrayEncoding::ByteArrayLen {
@@ -646,7 +839,7 @@ mod tests {
     // r[verify cram.encoding.null]
     #[test]
     fn null_encodings_return_defaults() {
-        let mut ctx = DecodeContext::new(&[], FxHashMap::default());
+        let mut ctx = DecodeContext::new(&[], SmallVec::new());
         assert_eq!(IntEncoding::Null.decode(&mut ctx).unwrap(), 0);
         assert_eq!(ByteEncoding::Null.decode(&mut ctx).unwrap(), 0);
         assert_eq!(ByteArrayEncoding::Null.decode(&mut ctx).unwrap(), Vec::<u8>::new());
@@ -675,7 +868,7 @@ mod tests {
     fn external_byte_array_needs_length_returned() {
         // ByteArrayEncoding::External always returns ExternalByteArrayNeedsLength
         let enc = ByteArrayEncoding::External { content_id: 42 };
-        let mut ctx = DecodeContext::new(&[], FxHashMap::default());
+        let mut ctx = DecodeContext::new(&[], SmallVec::new());
         let err = enc.decode(&mut ctx).unwrap_err();
         assert!(matches!(err, CramError::ExternalByteArrayNeedsLength { content_id: 42 }));
     }
@@ -700,7 +893,7 @@ mod tests {
             let packed = val << shift;
             let data = [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8];
 
-            let mut ctx = DecodeContext::new(&data, FxHashMap::default());
+            let mut ctx = DecodeContext::new(&data, SmallVec::new());
             let enc = IntEncoding::Beta { offset, bits };
             let decoded = enc.decode(&mut ctx).unwrap();
             proptest::prop_assert_eq!(decoded, val.cast_signed() - offset);
@@ -708,8 +901,8 @@ mod tests {
 
         #[test]
         fn external_byte_roundtrip(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..32)) {
-            let mut external = FxHashMap::default();
-            external.insert(0, ExternalCursor::new(bytes.clone()));
+            let mut external = SmallVec::new();
+            external.push((0, ExternalCursor::new(bytes.clone())));
             let mut ctx = DecodeContext::new(&[], external);
             let enc = ByteEncoding::External { content_id: 0 };
             for &expected in &bytes {

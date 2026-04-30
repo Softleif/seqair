@@ -3,27 +3,80 @@
 //! 4-way interleaved asymmetric numeral systems with 8-bit renormalization.
 //! Supports order-0 and order-1 modes.
 
+// `clippy::unnecessary_lazy_evaluations` flags every `ok_or_else(||
+// CramError::Truncated { ... })` here, because the variant's
+// construction is "cheap". On the per-byte hot path it isn't: the
+// eager `ok_or` form has the compiler build (and drop) a full-sized
+// `CramError` on every successful read — the type's Drop has to
+// dispatch on the discriminant because other variants own `PathBuf` /
+// `std::io::Error` / `SmolStr`. samply showed
+// `core::ptr::drop_in_place<CramError>` next to `decode_order_1` /
+// `read_u8` for exactly this. Keep the lazy form here.
+#![allow(
+    clippy::unnecessary_lazy_evaluations,
+    reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
+)]
+
 use super::reader::CramError;
 
 const ALPHABET_SIZE: usize = 256;
 const LOWER_BOUND: u32 = 1 << 23;
 
+/// Reusable allocations for rANS 4x8 order-1 decoding.
+///
+/// Order-1 needs three large tables per block: frequency array (128 KB),
+/// cumulative frequency array (128 KB), and symbol lookup table (1 MB).
+/// Allocating them fresh for every block dominated CRAM decode profiles.
+/// This struct holds one of each; zero it or overwrite it per block.
+pub(crate) struct Rans4x8Buf {
+    pub freq: Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>,
+    pub cum_freq: Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>,
+    pub sym_tables: Box<[[u8; 4096]; ALPHABET_SIZE]>,
+}
+
+impl Rans4x8Buf {
+    pub fn new() -> Self {
+        Self {
+            freq: Box::new([[0u16; ALPHABET_SIZE]; ALPHABET_SIZE]),
+            cum_freq: Box::new([[0u16; ALPHABET_SIZE]; ALPHABET_SIZE]),
+            sym_tables: Box::new([[0u8; 4096]; ALPHABET_SIZE]),
+        }
+    }
+}
+
+impl Default for Rans4x8Buf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // r[impl cram.codec.rans4x8]
-/// Decode a rANS 4x8 compressed block.
+/// Decode a rANS 4x8 compressed block (allocating path — for callers
+/// without a reusable buffer). Prefer [`decode_with_buf`] on the hot path.
 pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
+    let mut buf = Rans4x8Buf::new();
+    decode_with_buf(src, &mut buf)
+}
+
+/// Decode a rANS 4x8 compressed block, reusing the caller-owned
+/// [`Rans4x8Buf`] for order-1 tables. Order-0 blocks don't touch the buf.
+pub(crate) fn decode_with_buf(src: &[u8], buf: &mut Rans4x8Buf) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
 
     // Header: order (u8), compressed_size (u32 LE), uncompressed_size (u32 LE)
-    let order = read_u8(&mut cur)?;
-    let _compressed_size = read_u32_le(&mut cur)?;
-    let uncompressed_size = read_u32_le(&mut cur)? as usize;
+    let order = read_u8(&mut cur).ok_or_else(|| CramError::Truncated { context: "rans header" })?;
+    let _compressed_size =
+        read_u32_le(&mut cur).ok_or_else(|| CramError::Truncated { context: "rans header" })?;
+    let uncompressed_size = read_u32_le(&mut cur)
+        .ok_or_else(|| CramError::Truncated { context: "rans header" })?
+        as usize;
 
     super::reader::check_alloc_size(uncompressed_size, "rANS 4x8 output")?;
     let mut dst = vec![0u8; uncompressed_size];
 
     match order {
         0 => decode_order_0(&mut cur, &mut dst)?,
-        1 => decode_order_1(&mut cur, &mut dst)?,
+        1 => decode_order_1_buf(&mut cur, &mut dst, buf)?,
         _ => return Err(CramError::InvalidRansOrder { order }),
     }
 
@@ -35,10 +88,14 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
     reason = "indices are bounded: f ≤ 4095 (12-bit mask), sym/i ≤ 255 (u8)"
 )]
 fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
-    let freq = read_frequencies_0(src)?;
+    // CramError::Truncated is materialised lazily on the err path; the
+    // hot inner loop never builds one because `renormalize` returns
+    // `Option<()>`. See the helper-module comment for the cost story.
+    let truncated = || CramError::Truncated { context: "rans order-0 truncated" };
+    let freq = read_frequencies_0(src).ok_or_else(truncated)?;
     let cum_freq = build_cumulative_frequencies(&freq);
     let sym_table = build_symbol_table(&cum_freq);
-    let mut states = read_states(src)?;
+    let mut states = read_states(src).ok_or_else(truncated)?;
 
     for chunk in dst.chunks_mut(4) {
         for (d, state) in chunk.iter_mut().zip(states.iter_mut()) {
@@ -51,7 +108,7 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
                 .wrapping_mul(*state >> 12)
                 .wrapping_add(*state & 0x0FFF)
                 .wrapping_sub(u32::from(cum_freq[i]));
-            renormalize(state, src)?;
+            renormalize(state, src).ok_or_else(truncated)?;
         }
     }
 
@@ -62,59 +119,59 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     clippy::indexing_slicing,
     reason = "indices are bounded: ctx/sym ≤ 255 (u8), f ≤ 4095 (12-bit mask)"
 )]
-fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
-    let freq = read_frequencies_1(src)?;
+fn decode_order_1_buf(
+    src: &mut &[u8],
+    dst: &mut [u8],
+    buf: &mut Rans4x8Buf,
+) -> Result<(), CramError> {
+    // See decode_order_0 for the lazy-CramError pattern.
+    let truncated = || CramError::Truncated { context: "rans order-1 truncated" };
+    read_frequencies_1_into(src, &mut buf.freq).ok_or_else(truncated)?;
 
-    let mut cum_freq = vec![[0u16; ALPHABET_SIZE]; ALPHABET_SIZE];
-    let mut sym_tables: Box<[[u8; 4096]; ALPHABET_SIZE]> = Box::new([[0u8; 4096]; ALPHABET_SIZE]);
     for ctx in 0..ALPHABET_SIZE {
-        cum_freq[ctx] = build_cumulative_frequencies(&freq[ctx]);
-        sym_tables[ctx] = build_symbol_table(&cum_freq[ctx]);
+        buf.cum_freq[ctx] = build_cumulative_frequencies(&buf.freq[ctx]);
+        buf.sym_tables[ctx] = build_symbol_table(&buf.cum_freq[ctx]);
     }
 
-    let mut states = read_states(src)?;
+    let mut states = read_states(src).ok_or_else(truncated)?;
     let mut prev_syms = [0u8; 4];
 
     // Chunk-based interleaving: split output into 4 equal segments.
     // Each state decodes into its own segment sequentially.
     let chunk_size = dst.len() / 4;
+    let bases: [usize; 4] = [0, chunk_size, chunk_size.wrapping_mul(2), chunk_size.wrapping_mul(3)];
 
     for pos in 0..chunk_size {
         for si in 0usize..4 {
-            let out_idx = si
-                .checked_mul(chunk_size)
-                .and_then(|base| base.checked_add(pos))
-                .ok_or(CramError::Truncated { context: "rans order-1 out_idx overflow" })?;
+            let mut state = states[si];
             let ctx = prev_syms[si] as usize;
-            let f = (states[si] & 0x0FFF) as u16;
-            let sym = sym_tables[ctx][f as usize];
-            dst[out_idx] = sym;
+            let f = (state & 0x0FFF) as u16;
+            let sym = buf.sym_tables[ctx][f as usize];
+            dst[bases[si].wrapping_add(pos)] = sym;
             let sym_idx = sym as usize;
-            states[si] = u32::from(freq[ctx][sym_idx])
-                .wrapping_mul(states[si] >> 12)
-                .wrapping_add(states[si] & 0x0FFF)
-                .wrapping_sub(u32::from(cum_freq[ctx][sym_idx]));
-            renormalize(&mut states[si], src)?;
+            state = u32::from(buf.freq[ctx][sym_idx])
+                .wrapping_mul(state >> 12)
+                .wrapping_add(state & 0x0FFF)
+                .wrapping_sub(u32::from(buf.cum_freq[ctx][sym_idx]));
+            renormalize(&mut state, src).ok_or_else(truncated)?;
+            states[si] = state;
             prev_syms[si] = sym;
         }
     }
 
-    // Remainder: state 3 handles trailing bytes
-    let remainder_start = 4usize
-        .checked_mul(chunk_size)
-        .ok_or(CramError::Truncated { context: "rans order-1 remainder offset overflow" })?;
+    let remainder_start = chunk_size.wrapping_mul(4);
     for pos in remainder_start..dst.len() {
         let ctx = prev_syms[3] as usize;
         let f = (states[3] & 0x0FFF) as u16;
-        let sym = sym_tables[ctx][f as usize];
+        let sym = buf.sym_tables[ctx][f as usize];
         dst[pos] = sym;
         let sym_idx = sym as usize;
-        states[3] = u32::from(freq[ctx][sym_idx])
+        states[3] = u32::from(buf.freq[ctx][sym_idx])
             .wrapping_mul(states[3] >> 12)
             .wrapping_add(states[3] & 0x0FFF)
-            .wrapping_sub(u32::from(cum_freq[ctx][sym_idx]));
+            .wrapping_sub(u32::from(buf.cum_freq[ctx][sym_idx]));
         if pos.checked_add(1).is_some_and(|next| next < dst.len()) {
-            renormalize(&mut states[3], src)?;
+            renormalize(&mut states[3], src).ok_or_else(truncated)?;
         }
         prev_syms[3] = sym;
     }
@@ -122,24 +179,45 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     Ok(())
 }
 
-fn renormalize(state: &mut u32, src: &mut &[u8]) -> Result<(), CramError> {
-    while *state < LOWER_BOUND {
-        let b = u32::from(read_u8(src)?);
-        *state = (*state << 8) | b;
+/// Returns `None` when the source is exhausted mid-renormalize. The
+/// caller materializes a `CramError::Truncated` from the `None` only
+/// on the err path — see the helpers above for the size + drop story.
+///
+/// Mirrors htslib's `RansDecRenorm`: the common case for a well-formed
+/// 4x8 stream is one renormalize byte per call (state was just above
+/// `LOWER_BOUND >> 8` before the decode step). Two unrolled `if`-and-
+/// read steps cover that and the slightly-rarer 2-byte case as
+/// straight-line code, without a `while`-loop overhead per state
+/// update. A small tail loop catches the pathological "state was
+/// near 0" case (which only arises on malformed streams in practice
+/// but is cheap to keep correct).
+#[inline]
+fn renormalize(state: &mut u32, src: &mut &[u8]) -> Option<()> {
+    if *state >= LOWER_BOUND {
+        return Some(());
     }
-    Ok(())
+    *state = state.wrapping_shl(8) | u32::from(read_u8(src)?);
+    if *state >= LOWER_BOUND {
+        return Some(());
+    }
+    *state = state.wrapping_shl(8) | u32::from(read_u8(src)?);
+    while *state < LOWER_BOUND {
+        *state = state.wrapping_shl(8) | u32::from(read_u8(src)?);
+    }
+    Some(())
 }
 
-fn read_states(src: &mut &[u8]) -> Result<[u32; 4], CramError> {
+#[inline]
+fn read_states(src: &mut &[u8]) -> Option<[u32; 4]> {
     let mut states = [0u32; 4];
     for s in &mut states {
         *s = read_u32_le(src)?;
     }
-    Ok(states)
+    Some(states)
 }
 
 #[allow(clippy::indexing_slicing, reason = "sym is u8, so sym as usize ≤ 255 < ALPHABET_SIZE=256")]
-fn read_frequencies_0(src: &mut &[u8]) -> Result<[u16; ALPHABET_SIZE], CramError> {
+fn read_frequencies_0(src: &mut &[u8]) -> Option<[u16; ALPHABET_SIZE]> {
     let mut freq = [0u16; ALPHABET_SIZE];
     let mut sym = read_u8(src)?;
     let mut prev_sym = sym;
@@ -170,15 +248,14 @@ fn read_frequencies_0(src: &mut &[u8]) -> Result<[u16; ALPHABET_SIZE], CramError
         prev_sym = sym;
     }
 
-    Ok(freq)
+    Some(freq)
 }
 
 #[allow(clippy::indexing_slicing, reason = "ctx is u8, so ctx as usize ≤ 255 < ALPHABET_SIZE=256")]
-fn read_frequencies_1(
+fn read_frequencies_1_into(
     src: &mut &[u8],
-) -> Result<Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>, CramError> {
-    let mut freq = Box::new([[0u16; ALPHABET_SIZE]; ALPHABET_SIZE]);
-
+    freq: &mut [[u16; ALPHABET_SIZE]; ALPHABET_SIZE],
+) -> Option<()> {
     let mut ctx = read_u8(src)?;
     let mut prev_ctx = ctx;
 
@@ -201,7 +278,7 @@ fn read_frequencies_1(
         prev_ctx = ctx;
     }
 
-    Ok(freq)
+    Some(())
 }
 
 #[allow(
@@ -239,30 +316,49 @@ fn build_symbol_table(cum_freq: &[u16; ALPHABET_SIZE]) -> [u8; 4096] {
     table
 }
 
-fn read_u8(src: &mut &[u8]) -> Result<u8, CramError> {
-    let &b = src.first().ok_or(CramError::Truncated { context: "rans u8" })?;
-    *src = src.get(1..).ok_or(CramError::Truncated { context: "rans u8" })?;
-    Ok(b)
+// These per-byte helpers return `Option<T>` rather than
+// `Result<T, CramError>` for two compounding reasons:
+//
+// 1. Size. `CramError` is 80 bytes (sized to fit `Open { path: PathBuf,
+//    source: std::io::Error }` and other heap-owning variants), so
+//    `Result<u8, CramError>` is also 80 bytes — passed via memory/sret
+//    in the non-inlined ABI. `Option<u8>` is 2 bytes, in a register.
+// 2. Drop. `CramError` has a discriminant-dispatched Drop because some
+//    variants own `PathBuf` / `SmolStr` / `io::Error`. samply flagged
+//    `core::ptr::drop_in_place<CramError>` next to `read_u8` /
+//    `renormalize` because the eager `ok_or(CramError::...)` form
+//    constructed and then dropped a CramError on every successful read.
+//
+// Callers materialize a `CramError` only on the failure path, with
+// `ok_or_else(|| CramError::Truncated { context: ... })` at the
+// outermost function that knows the context.
+//
+// `split_first` / `split_first_chunk` (not `first` + `get(1..)`) is
+// also load-bearing — the two-step form does two slice bounds checks
+// and `slice::first` was at the top of the renormalize stack.
+#[inline]
+fn read_u8(src: &mut &[u8]) -> Option<u8> {
+    let (&b, rest) = src.split_first()?;
+    *src = rest;
+    Some(b)
 }
 
-fn read_u32_le(src: &mut &[u8]) -> Result<u32, CramError> {
-    let bytes = src.get(..4).ok_or(CramError::Truncated { context: "rans u32" })?;
-    let val = u32::from_le_bytes(
-        bytes.try_into().map_err(|_| CramError::Truncated { context: "rans u32" })?,
-    );
-    *src = src.get(4..).ok_or(CramError::Truncated { context: "rans u32" })?;
-    Ok(val)
+#[inline]
+fn read_u32_le(src: &mut &[u8]) -> Option<u32> {
+    let (head, rest) = src.split_first_chunk::<4>()?;
+    *src = rest;
+    Some(u32::from_le_bytes(*head))
 }
 
-fn read_itf8_u16(src: &mut &[u8]) -> Result<u16, CramError> {
+#[inline]
+fn read_itf8_u16(src: &mut &[u8]) -> Option<u16> {
     // ITF8 for frequency table values (they fit in u16)
-    let val = super::varint::read_itf8_from(src)
-        .ok_or(CramError::Truncated { context: "rans frequency itf8" })?;
+    let val = super::varint::read_itf8_from(src)?;
     #[expect(
         clippy::cast_possible_truncation,
         reason = "rANS frequency table values are bounded by 4096 (12-bit), fits in u16"
     )]
-    Ok(val as u16)
+    Some(val as u16)
 }
 
 #[cfg(test)]

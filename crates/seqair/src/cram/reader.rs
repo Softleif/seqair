@@ -8,6 +8,8 @@ use super::{
     compression_header::CompressionHeader,
     container::ContainerHeader,
     index::{self, CramIndex, CramIndexError},
+    rans::Rans4x8Buf,
+    rans_nx16::Nx16Order1Buf,
     slice,
 };
 use crate::bam::cigar::CigarOp;
@@ -222,21 +224,69 @@ pub(crate) fn check_alloc_size(size: usize, context: &'static str) -> Result<(),
 pub struct CramShared {
     pub index: CramIndex,
     pub header: BamHeader,
+    /// Pre-parsed `@RG ID:` values, indexed by RG order in the SAM header.
+    /// CRAM records reference read groups by index into this list, so the
+    /// alternative — re-scanning `header.header_text()` per record inside
+    /// `decode_record` — was the dominant cost in `fetch_into_customized`
+    /// profiles. Computed once at `open()` time.
+    ///
+    /// TODO(perf): this lives on `CramShared` because BAM/SAM keep RG in
+    /// raw aux bytes and don't need the indexed lookup. If a future
+    /// reader (e.g. SAM-from-CRAM converter) starts needing it too,
+    /// promote the parsed list to `BamHeader` itself so every format
+    /// shares one canonical cache instead of each opening parser
+    /// re-scanning the header text.
+    pub read_group_ids: Vec<SmolStr>,
     pub cram_path: PathBuf,
     pub fasta_path: PathBuf,
+}
+
+/// Parse `@RG ID:` values from SAM header text in declaration order.
+fn parse_read_group_ids(header_text: &str) -> Vec<SmolStr> {
+    let mut ids = Vec::new();
+    for line in header_text.lines() {
+        if !line.starts_with("@RG") {
+            continue;
+        }
+        for field in line.split('\t') {
+            if let Some(id) = field.strip_prefix("ID:") {
+                ids.push(SmolStr::new(id));
+                break;
+            }
+        }
+    }
+    ids
 }
 
 pub struct IndexedCramReader<R: Read + Seek = File> {
     file: R,
     fasta: IndexedFastaReader<R>,
     shared: Arc<CramShared>,
-    // Scratch buffers reused across fetch_into calls
+    // Scratch buffers reused across fetch_into calls. The per-record
+    // ones (`name_buf`, `feature_byte_buf`, `cigar_ops_buf`) used to be
+    // `Vec::new()` allocated inside `decode_record`, dominating profiles
+    // in N-record hot loops. Hoisting them here means the second record
+    // onward pays zero alloc cost.
     container_buf: Vec<u8>,
     cigar_buf: Vec<CigarOp>,
     bases_buf: Vec<Base>,
     qual_buf: Vec<u8>,
     aux_buf: Vec<u8>,
     ref_seq_buf: Vec<u8>,
+    /// Reused across records: read name (qname) bytes.
+    name_buf: Vec<u8>,
+    /// Reused across records: per-feature byte payloads (insertion bases,
+    /// soft-clip bases, bases-block, quality-block).
+    feature_byte_buf: Vec<u8>,
+    /// Reused across records: accumulated `(length, op_code)` CIGAR ops
+    /// before being packed into BAM-layout `CigarOp`s.
+    cigar_ops_buf: Vec<(u32, u8)>,
+    /// Reused across blocks: rANS 4x8 order-1 tables (1.25 MB).
+    /// Lazily allocated on first order-1 block.
+    rans_4x8_buf: Option<Rans4x8Buf>,
+    /// Reused across blocks: rANS Nx16 order-1 tables (∼512 KB).
+    /// Lazily allocated on first order-1 block.
+    nx16_order1_buf: Option<Nx16Order1Buf>,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for IndexedCramReader<R> {
@@ -283,12 +333,15 @@ impl IndexedCramReader<File> {
         // Open FASTA reader
         let fasta = IndexedFastaReader::open(fasta_path)?;
 
+        let read_group_ids = parse_read_group_ids(header.header_text());
+
         Ok(IndexedCramReader {
             file,
             fasta,
             shared: Arc::new(CramShared {
                 index: cram_index,
                 header,
+                read_group_ids,
                 cram_path: cram_path.to_path_buf(),
                 fasta_path: fasta_path.to_path_buf(),
             }),
@@ -298,6 +351,11 @@ impl IndexedCramReader<File> {
             qual_buf: Vec::new(),
             aux_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
+            name_buf: Vec::new(),
+            feature_byte_buf: Vec::new(),
+            cigar_ops_buf: Vec::new(),
+            rans_4x8_buf: None,
+            nx16_order1_buf: None,
         })
     }
 
@@ -315,6 +373,11 @@ impl IndexedCramReader<File> {
             qual_buf: Vec::new(),
             aux_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
+            name_buf: Vec::new(),
+            feature_byte_buf: Vec::new(),
+            cigar_ops_buf: Vec::new(),
+            rans_4x8_buf: None,
+            nx16_order1_buf: None,
         })
     }
 }
@@ -359,12 +422,15 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
 
         let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)?;
 
+        let read_group_ids = parse_read_group_ids(header.header_text());
+
         Ok(IndexedCramReader {
             file: Cursor::new(cram_data),
             fasta,
             shared: Arc::new(CramShared {
                 index: cram_index,
                 header,
+                read_group_ids,
                 cram_path: PathBuf::from("<fuzz>"),
                 fasta_path: PathBuf::from("<fuzz>"),
             }),
@@ -374,6 +440,11 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
             qual_buf: Vec::new(),
             aux_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
+            name_buf: Vec::new(),
+            feature_byte_buf: Vec::new(),
+            cigar_ops_buf: Vec::new(),
+            rans_4x8_buf: None,
+            nx16_order1_buf: None,
         })
     }
 }
@@ -438,10 +509,48 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         container_offsets.sort_unstable();
         container_offsets.dedup();
 
-        // Get reference name for FASTA lookup
-        let ref_name =
-            self.shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid })?.to_string();
+        // Get reference name for FASTA lookup. Borrow into the Arc'd
+        // header — the FASTA fetch only needs `&str`, and the cold
+        // MissingReference error path is the single place we materialize
+        // a `SmolStr`.
+        let ref_name: &str =
+            self.shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid })?;
 
+        // TODO(perf): container-scoped re-reading and re-parsing.
+        //
+        // Each `fetch_into` call below re-reads the container bytes off
+        // disk into `self.container_buf` (E) and re-parses the
+        // compression header — including `tag_dictionary` and
+        // `tag_encodings` — fresh every time (D). For multi-segment
+        // pileup workflows (Readers::pileup over many segments of the
+        // same contig) successive fetches frequently revisit the same
+        // container, so this is repeated work.
+        //
+        // Fix options:
+        //
+        //   1. One-entry "last container" cache: store
+        //      `Option<(container_offset, ContainerHeader, CompressionHeader, Vec<u8>)>`
+        //      on the reader. On hit, skip the seek + read + parse and
+        //      reuse `container_buf` + `ch`. Trivial to implement,
+        //      handles the common case where consecutive segments fall
+        //      in the same container. Memory cost: one extra
+        //      `container_buf`-sized Vec.
+        //
+        //   2. Small LRU (size 2-4): same idea but covers the case
+        //      where neighbouring segments span 2-3 containers. Picks
+        //      up overlapping segments and forked workers iterating
+        //      adjacent ranges.
+        //
+        //   3. Per-tile container plan: when used through
+        //      `Readers::pileup`, the outer loop knows the segment
+        //      sequence ahead of time. Could pre-group segments by
+        //      container at plan time and only fetch each container
+        //      once. Largest win, but couples the unified reader to
+        //      the segment iterator.
+        //
+        // Profile signal: look for `block::parse_block`,
+        // `CompressionHeader::parse`, and `File::read_exact` near the
+        // top of `fetch_into_customized` self-time.
         for &container_offset in &container_offsets {
             self.file.seek(SeekFrom::Start(container_offset))?;
 
@@ -524,7 +633,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                 // r[impl cram.edge.missing_reference]
                 self.fasta
                     .fetch_seq_into(
-                        &ref_name,
+                        ref_name,
                         Pos0::try_from(ref_start)
                             .map_err(|_| CramError::InvalidPosition {
                             #[expect(
@@ -538,7 +647,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     )
                     .map_err(|e| match &e {
                         FastaError::SequenceNotFound { .. } => {
-                            CramError::MissingReference { contig: SmolStr::new(&ref_name) }
+                            CramError::MissingReference { contig: SmolStr::new(ref_name) }
                         }
                         _ => CramError::from(e),
                     })?;
@@ -557,6 +666,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &self.ref_seq_buf,
                     ref_start.cast_signed(),
                     &self.shared.header,
+                    &self.shared.read_group_ids,
                     tid,
                     start,
                     end,
@@ -565,7 +675,12 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &mut self.bases_buf,
                     &mut self.qual_buf,
                     &mut self.aux_buf,
+                    &mut self.name_buf,
+                    &mut self.feature_byte_buf,
+                    &mut self.cigar_ops_buf,
                     customize,
+                    &mut self.rans_4x8_buf,
+                    &mut self.nx16_order1_buf,
                 )?;
                 fetched_total = fetched_total.saturating_add(slice_fetched);
                 kept_total = kept_total.saturating_add(slice_kept);

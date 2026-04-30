@@ -15,8 +15,7 @@ use crate::bam::{
     cigar::CigarOp,
     record_store::{CustomizeRecordStore, RecordStore},
 };
-use rustc_hash::FxHashMap;
-use seqair_types::{BamFlags, Base, Pos0, Pos1};
+use seqair_types::{BamFlags, Base, Pos0, Pos1, SmallVec, SmolStr};
 use tracing::warn;
 
 /// Mate cross-reference info collected during CRAM record decoding.
@@ -109,13 +108,14 @@ impl SliceHeader {
     clippy::too_many_arguments,
     reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
 )]
-pub fn decode_slice<E: CustomizeRecordStore>(
+pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
     reference_seq: &[u8],
     ref_start_0based: i64,
     header: &BamHeader,
+    read_group_ids: &[SmolStr],
     tid: u32,
     query_start: Pos0,
     query_end: Pos0,
@@ -124,14 +124,20 @@ pub fn decode_slice<E: CustomizeRecordStore>(
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
+    name_buf: &mut Vec<u8>,
+    feature_byte_buf: &mut Vec<u8>,
+    cigar_ops_buf: &mut Vec<(u32, u8)>,
     customize: &mut E,
+    rans_4x8_buf: &mut Option<super::rans::Rans4x8Buf>,
+    nx16_order1_buf: &mut Option<super::rans_nx16::Nx16Order1Buf>,
 ) -> Result<(usize, usize), CramError> {
     let slice_data = container_data
         .get(slice_offset..)
         .ok_or(CramError::Truncated { context: "slice offset" })?;
 
     // Parse slice header block
-    let (slice_header_block, mut pos) = block::parse_block(slice_data)?;
+    let (slice_header_block, mut pos) =
+        block::parse_block_with_buf(slice_data, rans_4x8_buf.as_mut(), nx16_order1_buf.as_mut())?;
     if slice_header_block.content_type != ContentType::SliceHeader {
         return Err(CramError::ExpectedSliceHeader { found: slice_header_block.content_type });
     }
@@ -179,12 +185,16 @@ pub fn decode_slice<E: CustomizeRecordStore>(
 
     // Parse remaining blocks: core data + external data
     let mut core_block: Option<Block> = None;
-    let mut external_blocks: FxHashMap<i32, ExternalCursor> = FxHashMap::default();
+    let mut external_blocks: SmallVec<(i32, ExternalCursor), 4> = SmallVec::new();
 
     for _ in 0..sh.num_blocks {
         let remaining =
             slice_data.get(pos..).ok_or(CramError::Truncated { context: "slice block" })?;
-        let (blk, consumed) = block::parse_block(remaining)?;
+        let (blk, consumed) = block::parse_block_with_buf(
+            remaining,
+            rans_4x8_buf.as_mut(),
+            nx16_order1_buf.as_mut(),
+        )?;
         pos = pos.wrapping_add(consumed);
 
         match blk.content_type {
@@ -192,7 +202,7 @@ pub fn decode_slice<E: CustomizeRecordStore>(
                 core_block = Some(blk);
             }
             ContentType::ExternalData => {
-                external_blocks.insert(blk.content_id, ExternalCursor::new(blk.data));
+                external_blocks.push((blk.content_id, ExternalCursor::new(blk.data)));
             }
             _ => {
                 // Ignore unexpected block types
@@ -202,10 +212,11 @@ pub fn decode_slice<E: CustomizeRecordStore>(
 
     // r[impl cram.slice.embedded_ref]
     let embedded_ref_data = if sh.embedded_reference >= 0 {
-        external_blocks
-            .remove(&sh.embedded_reference)
-            .map(|cursor| cursor.into_data())
-            .unwrap_or_default()
+        let idx = external_blocks.iter().position(|(id, _)| *id == sh.embedded_reference);
+        match idx {
+            Some(i) => external_blocks.swap_remove(i).1.into_data(),
+            None => Vec::new(),
+        }
     } else {
         Vec::new()
     };
@@ -243,7 +254,7 @@ pub fn decode_slice<E: CustomizeRecordStore>(
             &mut alignment_pos,
             effective_ref,
             effective_ref_start,
-            header,
+            read_group_ids,
             tid,
             query_start,
             query_end,
@@ -252,6 +263,9 @@ pub fn decode_slice<E: CustomizeRecordStore>(
             bases_buf,
             qual_buf,
             aux_buf,
+            name_buf,
+            feature_byte_buf,
+            cigar_ops_buf,
             record_index,
             customize,
         )?;
@@ -293,7 +307,7 @@ fn decode_record<E: CustomizeRecordStore>(
     prev_alignment_pos: &mut i64,
     reference_seq: &[u8],
     ref_start_0based: i64,
-    header: &BamHeader,
+    read_group_ids: &[SmolStr],
     tid: u32,
     query_start: Pos0,
     query_end: Pos0,
@@ -302,6 +316,9 @@ fn decode_record<E: CustomizeRecordStore>(
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
+    name_buf: &mut Vec<u8>,
+    feature_byte_buf: &mut Vec<u8>,
+    cigar_ops_buf: &mut Vec<(u32, u8)>,
     record_index: usize,
     customize: &mut E,
 ) -> Result<(bool, SliceMateInfo), CramError> {
@@ -356,9 +373,12 @@ fn decode_record<E: CustomizeRecordStore>(
     let read_group = ds.read_group.decode(ctx)?;
 
     // r[impl cram.record.read_name]
-    // 7. RN (read name)
-    let read_name =
-        if ch.preservation.read_names_included { ds.read_name.decode(ctx)? } else { Vec::new() };
+    // 7. RN (read name) — decode straight into the caller's reusable
+    // `name_buf` to avoid a per-record `Vec<u8>` allocation.
+    name_buf.clear();
+    if ch.preservation.read_names_included {
+        ds.read_name.decode_into(ctx, name_buf)?;
+    }
 
     // r[impl cram.record.mate_detached]
     // r[impl cram.record.mate_attached]
@@ -370,7 +390,14 @@ fn decode_record<E: CustomizeRecordStore>(
     if detached {
         let _mate_flags = ds.mate_flags.decode(ctx)?;
         if !ch.preservation.read_names_included {
-            let _ = ds.read_name.decode(ctx)?;
+            // Detached + RN=false: the codec stream carries a read-name
+            // (the mate's, per the CRAM spec) that we must consume but
+            // also must discard — when read_names_included is false the
+            // record's qname is unknown. Decode into `name_buf` (which is
+            // already empty for this branch) and immediately clear so
+            // qname stays empty downstream. No allocation in steady state.
+            ds.read_name.decode_into(ctx, name_buf)?;
+            name_buf.clear();
         }
         next_ref_id_val = ds.next_segment_ref.decode(ctx)?;
         next_pos_val = ds.next_mate_pos.decode(ctx)?;
@@ -405,27 +432,29 @@ fn decode_record<E: CustomizeRecordStore>(
                 | (i32::from(entry.tag[1]) << 8)
                 | i32::from(entry.bam_type);
             if let Some(enc) = ch.tag_encodings.get(&tag_key) {
-                let tag_value = enc.decode(ctx)?;
-                // Serialize to BAM binary aux format: tag[0] tag[1] type value_bytes
+                // Serialize to BAM binary aux format: tag[0] tag[1] type value_bytes.
+                // Decoding the value directly into `aux_buf` skips the
+                // per-tag `Vec<u8>` allocation that the old `decode` API
+                // forced.
                 aux_buf.push(entry.tag[0]);
                 aux_buf.push(entry.tag[1]);
                 aux_buf.push(entry.bam_type);
-                aux_buf.extend_from_slice(&tag_value);
+                enc.decode_into(ctx, aux_buf)?;
             }
         }
     }
 
     // r[impl cram.record.rg_tag]
-    // Add RG tag if read group >= 0
-    if let Ok(rg_idx) = usize::try_from(read_group) {
-        // Look up @RG ID from header text
-        if let Some(rg_id) = get_read_group_id(header, rg_idx) {
-            aux_buf.push(b'R');
-            aux_buf.push(b'G');
-            aux_buf.push(b'Z');
-            aux_buf.extend_from_slice(rg_id.as_bytes());
-            aux_buf.push(0); // null terminator for Z-type
-        }
+    // Add RG tag if read group >= 0. RG IDs are pre-parsed from the header
+    // once at open time (cached on `CramShared::read_group_ids`); used to
+    // be a per-record header text scan + String allocation, which dominated
+    // `decode_record` profiles.
+    if let Ok(rg_idx) = usize::try_from(read_group)
+        && let Some(rg_id) = read_group_ids.get(rg_idx)
+    {
+        aux_buf.extend_from_slice(b"RGZ");
+        aux_buf.extend_from_slice(rg_id.as_bytes());
+        aux_buf.push(0); // null terminator for Z-type
     }
 
     let is_unmapped = bam_flags.is_unmapped();
@@ -454,6 +483,8 @@ fn decode_record<E: CustomizeRecordStore>(
             reference_seq,
             cigar_buf,
             bases_buf,
+            feature_byte_buf,
+            cigar_ops_buf,
         )?;
 
         // MQ
@@ -465,18 +496,33 @@ fn decode_record<E: CustomizeRecordStore>(
         let mapq = ds.mapping_quality.decode(ctx)? as u8;
 
         // r[impl cram.record.quality]
-        // Quality scores
+        // Quality scores. Bulk decode for External (single external-block
+        // lookup + one memcpy of `read_length` bytes) instead of the
+        // per-byte `decode(ctx)` loop that dominated profiles.
         if quality_as_array {
-            for _ in 0..read_length {
-                qual_buf.push(ds.quality_score.decode(ctx)?);
-            }
+            ds.quality_score.decode_n_into(ctx, read_length, qual_buf)?;
         } else {
             qual_buf.resize(read_length, 0xFF);
         }
 
+        // `end_pos_raw` is the half-open exclusive reference end
+        // (`pos + ref_consumed`). It is used for TLEN math
+        // (`aright - aleft`), where half-open arithmetic is the natural
+        // form. The value stored in `SlimRecord::end_pos` is the 0-based
+        // **inclusive** last reference position covered, matching the
+        // BAM/SAM path's `compute_end_pos` and the pileup engine's
+        // eviction check (`end_pos < pos`). For zero-refspan reads we
+        // store `pos` itself, the same fallback BAM uses.
+        // r[impl cram.record.end_pos]
         let end_pos_raw = pos_0based.as_i64().wrapping_add(i64::from(result.ref_consumed));
-        let end_pos = Pos0::try_from(end_pos_raw)
-            .map_err(|_| super::reader::CramError::InvalidPosition { value: end_pos_raw })?;
+        let end_pos_inclusive_raw = if result.ref_consumed == 0 {
+            pos_0based.as_i64()
+        } else {
+            end_pos_raw.wrapping_sub(1)
+        };
+        let end_pos = Pos0::try_from(end_pos_inclusive_raw).map_err(|_| {
+            super::reader::CramError::InvalidPosition { value: end_pos_inclusive_raw }
+        })?;
 
         // r[impl cram.index.multi_ref_slices]
         // Skip records from different references in multi-ref slices
@@ -498,8 +544,14 @@ fn decode_record<E: CustomizeRecordStore>(
             ));
         }
 
-        // Check overlap with query region
-        if pos_0based >= query_end || end_pos <= query_start {
+        // Check overlap with query region. Both `query_start` and
+        // `query_end` are inclusive (matches the BAM IndexedReader's
+        // convention: a record is kept iff `rec_pos <= query_end &&
+        // rec_end >= query_start`). `end_pos` is the inclusive last
+        // covered position. Mismatching this with the half-open
+        // semantics used elsewhere drops boundary records (reads
+        // starting exactly at the requested end position).
+        if pos_0based > query_end || end_pos < query_start {
             return Ok((
                 false,
                 SliceMateInfo {
@@ -513,7 +565,7 @@ fn decode_record<E: CustomizeRecordStore>(
             ));
         }
 
-        let qname: &[u8] = &read_name;
+        let qname: &[u8] = name_buf;
 
         // r[impl cram.fetch_into_customized.push_time]
         // Push the record, then consult the user's filter. `push_fields`
@@ -560,11 +612,10 @@ fn decode_record<E: CustomizeRecordStore>(
         }
     }
 
-    // Quality
+    // Quality. See the mapped-read branch above for the bulk-decode
+    // rationale.
     if quality_as_array {
-        for _ in 0..read_length {
-            qual_buf.push(ds.quality_score.decode(ctx)?);
-        }
+        ds.quality_score.decode_n_into(ctx, read_length, qual_buf)?;
     } else {
         qual_buf.resize(read_length, 0xFF);
     }
@@ -752,7 +803,22 @@ fn ref_base_at(reference_seq: &[u8], index: usize, warned: &mut bool) -> u8 {
     }
 }
 
-/// Decode features and reconstruct sequence + CIGAR.
+/// Decode features and reconstruct sequence + CIGAR in a single fused
+/// pass.
+///
+/// Earlier this was two passes: collect every feature into a local
+/// `Vec<Feature>` (with `Vec<u8>` payloads for I/S/B/q), then walk the
+/// read filling reference + applying features. That allocated three
+/// times per record (`features` + each `FeatureData::Insertion(Vec)` /
+/// `SoftClip(Vec)` / `Bases(Vec)`) and a fourth `cigar_ops: Vec::new()`.
+///
+/// CRAM features are emitted in *increasing* read-position order
+/// (`feature_pos` is delta-encoded), so we can decode each feature just
+/// before applying it: fill reference bases up to the feature's anchor,
+/// decode the feature's payload into the caller's reusable
+/// `feature_byte_buf`, apply, repeat. `cigar_ops_buf` is also threaded
+/// in so the run-length encoder works in-place. Net effect: zero
+/// allocations per record after the first record warms the buffers.
 #[expect(
     clippy::too_many_arguments,
     reason = "sequence reconstruction requires all CRAM encoding handles, reference slice, and output buffers"
@@ -767,100 +833,11 @@ fn decode_features_and_reconstruct(
     reference_seq: &[u8],
     cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
+    feature_byte_buf: &mut Vec<u8>,
+    cigar_ops_buf: &mut Vec<(u32, u8)>,
 ) -> Result<ReconstructResult, CramError> {
     let ds = &ch.data_series;
 
-    // Collect features first
-    struct Feature {
-        read_pos: u32, // 1-based position within read
-        data: FeatureData,
-    }
-
-    enum FeatureData {
-        Substitution(u8),    // BS code
-        Insertion(Vec<u8>),  // IN bases
-        SingleInsertion(u8), // BA single base
-        Deletion(u32),       // DL length
-        SoftClip(Vec<u8>),   // SC bases
-        HardClip(u32),       // HC length
-        RefSkip(u32),        // RS length
-        Padding(u32),        // PD length
-        BaseQuality(u8, u8), // BA + QS
-        Bases(Vec<u8>),      // BB
-        // r[unimpl cram.feature.quality_block]
-        Qualities, // QQ — data decoded but not yet applied to qual_buf
-        // r[unimpl cram.feature.quality_score]
-        Quality, // QS single — data decoded but not yet applied to qual_buf
-    }
-
-    let mut features = Vec::with_capacity(feature_count);
-    let mut prev_read_pos = 0u32;
-
-    for _ in 0..feature_count {
-        let fc = ds.feature_code.decode(ctx)?;
-        let fp = ds.feature_pos.decode(ctx)? as u32;
-        prev_read_pos = prev_read_pos.wrapping_add(fp);
-        let read_pos = prev_read_pos;
-
-        let data = match fc {
-            b'X' => {
-                let bs = ds.base_sub.decode(ctx)?;
-                FeatureData::Substitution(bs)
-            }
-            b'I' => {
-                let bases = ds.insertion.decode(ctx)?;
-                FeatureData::Insertion(bases)
-            }
-            b'i' => {
-                let base = ds.base.decode(ctx)?;
-                FeatureData::SingleInsertion(base)
-            }
-            b'D' => {
-                let len = ds.deletion_length.decode(ctx)? as u32;
-                FeatureData::Deletion(len)
-            }
-            b'S' => {
-                let bases = ds.soft_clip.decode(ctx)?;
-                FeatureData::SoftClip(bases)
-            }
-            b'H' => {
-                let len = ds.hard_clip.decode(ctx)? as u32;
-                FeatureData::HardClip(len)
-            }
-            b'N' => {
-                let len = ds.ref_skip.decode(ctx)? as u32;
-                FeatureData::RefSkip(len)
-            }
-            b'P' => {
-                let len = ds.padding.decode(ctx)? as u32;
-                FeatureData::Padding(len)
-            }
-            b'B' => {
-                let base = ds.base.decode(ctx)?;
-                let qual = ds.quality_score.decode(ctx)?;
-                FeatureData::BaseQuality(base, qual)
-            }
-            b'b' => {
-                let bases = ds.bases_block.decode(ctx)?;
-                FeatureData::Bases(bases)
-            }
-            b'q' => {
-                let _quals = ds.quality_block.decode(ctx)?;
-                FeatureData::Qualities
-            }
-            b'Q' => {
-                let _qual = ds.quality_score.decode(ctx)?;
-                FeatureData::Quality
-            }
-            _ => {
-                return Err(CramError::UnknownFeatureCode { feature_code: fc });
-            }
-        };
-
-        features.push(Feature { read_pos, data });
-    }
-
-    // Reconstruct sequence and CIGAR from reference + features
     // pos_0based >= slice_start_0based is guaranteed by CRAM structure; a negative
     // difference would indicate a malformed file, so clamp to 0 and let ref_base_at
     // handle out-of-bounds via its warning path.
@@ -871,8 +848,7 @@ fn decode_features_and_reconstruct(
     let mut matching_bases = 0u32;
     let mut indel_bases = 0u32;
 
-    // CIGAR ops: accumulate as (length, op_code) then pack at the end
-    let mut cigar_ops: Vec<(u32, u8)> = Vec::new();
+    cigar_ops_buf.clear();
 
     fn push_cigar_op(ops: &mut Vec<(u32, u8)>, len: u32, op: u8) {
         if len == 0 {
@@ -887,134 +863,220 @@ fn decode_features_and_reconstruct(
         ops.push((len, op));
     }
 
-    let mut feature_idx = 0;
+    /// Emit one matching base copied from the reference, advancing both
+    /// `read_pos` and `ref_pos`. Used both for fill-up-to-next-feature
+    /// and for quality-only features (which don't modify the sequence).
+    #[expect(clippy::too_many_arguments, reason = "shared helper for ref-match emit")]
+    fn emit_ref_match(
+        reference_seq: &[u8],
+        ref_offset: usize,
+        ref_pos: &mut usize,
+        read_pos: &mut usize,
+        ref_warned: &mut bool,
+        bases_buf: &mut Vec<Base>,
+        cigar_ops: &mut Vec<(u32, u8)>,
+        matching_bases: &mut u32,
+    ) {
+        let ref_base = ref_base_at(reference_seq, ref_offset.wrapping_add(*ref_pos), ref_warned);
+        bases_buf.push(Base::from(ref_base));
+        push_cigar_op(cigar_ops, 1, 0); // M
+        *matching_bases = matching_bases.saturating_add(1);
+        *read_pos = read_pos.wrapping_add(1);
+        *ref_pos = ref_pos.wrapping_add(1);
+    }
 
-    while read_pos < read_length {
-        // Check for feature at current read position (1-based in features)
-        if feature_idx < features.len()
-            && features.get(feature_idx).map(|f| f.read_pos as usize)
-                == Some(read_pos.wrapping_add(1))
-        {
-            let feature = features
-                .get(feature_idx)
-                .ok_or(CramError::Truncated { context: "feature index" })?;
-            feature_idx = feature_idx.wrapping_add(1);
+    let mut feature_read_pos = 0u32; // 1-based, accumulator for delta-encoded positions
 
-            match &feature.data {
-                // r[related cram.slice.ref_bounds_warning+2]
-                FeatureData::Substitution(code) => {
-                    let ref_base = ref_base_at(
-                        reference_seq,
-                        ref_offset.wrapping_add(ref_pos),
-                        &mut ref_warned,
-                    );
-                    let read_base = ch.preservation.substitution_matrix.substitute(ref_base, *code);
-                    bases_buf.push(Base::from(read_base));
-                    push_cigar_op(&mut cigar_ops, 1, 0); // M
-                    matching_bases = matching_bases.saturating_add(1); // substitutions count as alignment match
-                    read_pos = read_pos.wrapping_add(1);
-                    ref_pos = ref_pos.wrapping_add(1);
-                }
-                FeatureData::Insertion(bases) => {
-                    let len = bases.len();
-                    for &b in bases {
-                        bases_buf.push(Base::from(b));
-                    }
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "insertion length is bounded by read_length (validated); fits in u32"
-                    )]
-                    let len_u32 = len as u32;
-                    push_cigar_op(&mut cigar_ops, len_u32, 1); // I
-                    indel_bases = indel_bases.saturating_add(len_u32);
-                    read_pos = read_pos.wrapping_add(len);
-                }
-                FeatureData::SingleInsertion(base) => {
-                    bases_buf.push(Base::from(*base));
-                    push_cigar_op(&mut cigar_ops, 1, 1); // I
-                    indel_bases = indel_bases.saturating_add(1);
-                    read_pos = read_pos.wrapping_add(1);
-                }
-                FeatureData::Deletion(len) => {
-                    push_cigar_op(&mut cigar_ops, *len, 2); // D
-                    indel_bases = indel_bases.saturating_add(*len);
-                    ref_pos = ref_pos.wrapping_add(*len as usize);
-                }
-                FeatureData::SoftClip(bases) => {
-                    let len = bases.len();
-                    for &b in bases {
-                        bases_buf.push(Base::from(b));
-                    }
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "soft-clip length is bounded by read_length (validated); fits in u32"
-                    )]
-                    push_cigar_op(&mut cigar_ops, len as u32, 4); // S
-                    read_pos = read_pos.wrapping_add(len);
-                }
-                FeatureData::HardClip(len) => {
-                    push_cigar_op(&mut cigar_ops, *len, 5); // H
-                }
-                FeatureData::RefSkip(len) => {
-                    push_cigar_op(&mut cigar_ops, *len, 3); // N
-                    ref_pos = ref_pos.wrapping_add(*len as usize);
-                }
-                FeatureData::Padding(len) => {
-                    push_cigar_op(&mut cigar_ops, *len, 6); // P
-                }
-                FeatureData::BaseQuality(base, _qual) => {
-                    bases_buf.push(Base::from(*base));
-                    push_cigar_op(&mut cigar_ops, 1, 0); // M
-                    matching_bases = matching_bases.saturating_add(1);
-                    read_pos = read_pos.wrapping_add(1);
-                    ref_pos = ref_pos.wrapping_add(1);
-                }
-                FeatureData::Bases(bases) => {
-                    let len = bases.len();
-                    for &b in bases {
-                        bases_buf.push(Base::from(b));
-                    }
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "bases length is bounded by read_length (validated); fits in u32"
-                    )]
-                    let len_u32 = len as u32;
-                    push_cigar_op(&mut cigar_ops, len_u32, 0); // M
-                    matching_bases = matching_bases.saturating_add(len_u32);
-                    read_pos = read_pos.wrapping_add(len);
-                    ref_pos = ref_pos.wrapping_add(len);
-                }
-                FeatureData::Qualities | FeatureData::Quality => {
-                    // Quality features don't affect sequence or CIGAR
-                    // Copy ref base as matching
-                    let ref_base = ref_base_at(
-                        reference_seq,
-                        ref_offset.wrapping_add(ref_pos),
-                        &mut ref_warned,
-                    );
-                    bases_buf.push(Base::from(ref_base));
-                    push_cigar_op(&mut cigar_ops, 1, 0); // M
-                    matching_bases = matching_bases.saturating_add(1);
-                    read_pos = read_pos.wrapping_add(1);
-                    ref_pos = ref_pos.wrapping_add(1);
-                }
-            }
-        } else {
-            // No feature at this position — copy from reference (match)
-            let ref_base =
-                ref_base_at(reference_seq, ref_offset.wrapping_add(ref_pos), &mut ref_warned);
-            bases_buf.push(Base::from(ref_base));
-            push_cigar_op(&mut cigar_ops, 1, 0); // M
-            matching_bases = matching_bases.saturating_add(1);
-            read_pos = read_pos.wrapping_add(1);
-            ref_pos = ref_pos.wrapping_add(1);
+    for _ in 0..feature_count {
+        let fc = ds.feature_code.decode(ctx)?;
+        let fp = ds.feature_pos.decode(ctx)? as u32;
+        feature_read_pos = feature_read_pos.wrapping_add(fp);
+        // Feature positions are 1-based in CRAM; the 0-based read_pos
+        // catches up to `feature_read_pos - 1` before applying.
+        let feat_target = (feature_read_pos as usize).saturating_sub(1);
+
+        // Fill reference matches until read_pos reaches the feature's anchor.
+        while read_pos < feat_target && read_pos < read_length {
+            emit_ref_match(
+                reference_seq,
+                ref_offset,
+                &mut ref_pos,
+                &mut read_pos,
+                &mut ref_warned,
+                bases_buf,
+                cigar_ops_buf,
+                &mut matching_bases,
+            );
         }
+
+        // Apply the feature inline. Payload-bearing variants decode straight
+        // into `feature_byte_buf` (cleared, then filled) — no per-feature alloc.
+        // r[related cram.slice.ref_bounds_warning+2]
+        match fc {
+            // X — substitution: 1 read base, 1 ref base, M cigar.
+            b'X' => {
+                let bs = ds.base_sub.decode(ctx)?;
+                let ref_base =
+                    ref_base_at(reference_seq, ref_offset.wrapping_add(ref_pos), &mut ref_warned);
+                let read_base = ch.preservation.substitution_matrix.substitute(ref_base, bs);
+                bases_buf.push(Base::from(read_base));
+                push_cigar_op(cigar_ops_buf, 1, 0); // M
+                matching_bases = matching_bases.saturating_add(1);
+                read_pos = read_pos.wrapping_add(1);
+                ref_pos = ref_pos.wrapping_add(1);
+            }
+            // I — insertion: N read bases, 0 ref, I cigar.
+            b'I' => {
+                feature_byte_buf.clear();
+                ds.insertion.decode_into(ctx, feature_byte_buf)?;
+                let len = feature_byte_buf.len();
+                bases_buf.reserve(len);
+                for &b in feature_byte_buf.iter() {
+                    bases_buf.push(Base::from(b));
+                }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "insertion length is bounded by read_length (validated); fits in u32"
+                )]
+                let len_u32 = len as u32;
+                push_cigar_op(cigar_ops_buf, len_u32, 1); // I
+                indel_bases = indel_bases.saturating_add(len_u32);
+                read_pos = read_pos.wrapping_add(len);
+            }
+            // i — single-base insertion.
+            b'i' => {
+                let base = ds.base.decode(ctx)?;
+                bases_buf.push(Base::from(base));
+                push_cigar_op(cigar_ops_buf, 1, 1); // I
+                indel_bases = indel_bases.saturating_add(1);
+                read_pos = read_pos.wrapping_add(1);
+            }
+            // D — deletion: 0 read, N ref, D cigar.
+            b'D' => {
+                let len = ds.deletion_length.decode(ctx)? as u32;
+                push_cigar_op(cigar_ops_buf, len, 2); // D
+                indel_bases = indel_bases.saturating_add(len);
+                ref_pos = ref_pos.wrapping_add(len as usize);
+            }
+            // S — soft clip: N read bases, 0 ref, S cigar.
+            b'S' => {
+                feature_byte_buf.clear();
+                ds.soft_clip.decode_into(ctx, feature_byte_buf)?;
+                let len = feature_byte_buf.len();
+                bases_buf.reserve(len);
+                for &b in feature_byte_buf.iter() {
+                    bases_buf.push(Base::from(b));
+                }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "soft-clip length is bounded by read_length (validated); fits in u32"
+                )]
+                let len_u32 = len as u32;
+                push_cigar_op(cigar_ops_buf, len_u32, 4); // S
+                read_pos = read_pos.wrapping_add(len);
+            }
+            // H — hard clip: emit cigar but consume neither read nor ref.
+            b'H' => {
+                let len = ds.hard_clip.decode(ctx)? as u32;
+                push_cigar_op(cigar_ops_buf, len, 5); // H
+            }
+            // N — ref skip: 0 read, N ref, N cigar.
+            b'N' => {
+                let len = ds.ref_skip.decode(ctx)? as u32;
+                push_cigar_op(cigar_ops_buf, len, 3); // N
+                ref_pos = ref_pos.wrapping_add(len as usize);
+            }
+            // P — padding: emit cigar but consume neither read nor ref.
+            b'P' => {
+                let len = ds.padding.decode(ctx)? as u32;
+                push_cigar_op(cigar_ops_buf, len, 6); // P
+            }
+            // B — base + quality (BA + QS): treated as a 1-base match.
+            // The qual byte is decoded but currently ignored (matches previous
+            // behaviour; see r[unimpl cram.feature.quality_score]).
+            b'B' => {
+                let base = ds.base.decode(ctx)?;
+                let _qual = ds.quality_score.decode(ctx)?;
+                bases_buf.push(Base::from(base));
+                push_cigar_op(cigar_ops_buf, 1, 0); // M
+                matching_bases = matching_bases.saturating_add(1);
+                read_pos = read_pos.wrapping_add(1);
+                ref_pos = ref_pos.wrapping_add(1);
+            }
+            // b — bases block: N read bases, N ref, M cigar.
+            b'b' => {
+                feature_byte_buf.clear();
+                ds.bases_block.decode_into(ctx, feature_byte_buf)?;
+                let len = feature_byte_buf.len();
+                bases_buf.reserve(len);
+                for &b in feature_byte_buf.iter() {
+                    bases_buf.push(Base::from(b));
+                }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "bases length is bounded by read_length (validated); fits in u32"
+                )]
+                let len_u32 = len as u32;
+                push_cigar_op(cigar_ops_buf, len_u32, 0); // M
+                matching_bases = matching_bases.saturating_add(len_u32);
+                read_pos = read_pos.wrapping_add(len);
+                ref_pos = ref_pos.wrapping_add(len);
+            }
+            // q — quality block: data is consumed (so the codec stream stays
+            // aligned), value discarded. Anchors a 1-base reference match.
+            // r[unimpl cram.feature.quality_block]
+            b'q' => {
+                feature_byte_buf.clear();
+                ds.quality_block.decode_into(ctx, feature_byte_buf)?;
+                emit_ref_match(
+                    reference_seq,
+                    ref_offset,
+                    &mut ref_pos,
+                    &mut read_pos,
+                    &mut ref_warned,
+                    bases_buf,
+                    cigar_ops_buf,
+                    &mut matching_bases,
+                );
+            }
+            // Q — single quality score: same shape as q but no payload.
+            // r[unimpl cram.feature.quality_score]
+            b'Q' => {
+                let _qual = ds.quality_score.decode(ctx)?;
+                emit_ref_match(
+                    reference_seq,
+                    ref_offset,
+                    &mut ref_pos,
+                    &mut read_pos,
+                    &mut ref_warned,
+                    bases_buf,
+                    cigar_ops_buf,
+                    &mut matching_bases,
+                );
+            }
+            _ => return Err(CramError::UnknownFeatureCode { feature_code: fc }),
+        }
+    }
+
+    // Tail: fill reference matches until the read length is reached.
+    while read_pos < read_length {
+        emit_ref_match(
+            reference_seq,
+            ref_offset,
+            &mut ref_pos,
+            &mut read_pos,
+            &mut ref_warned,
+            bases_buf,
+            cigar_ops_buf,
+            &mut matching_bases,
+        );
     }
 
     // Pack CIGAR ops into typed BAM-layout CigarOps
     cigar_buf.clear();
-    for (len, op) in &cigar_ops {
-        cigar_buf.push(CigarOp::from_bam_u32((len << 4) | u32::from(*op)));
+    cigar_buf.reserve(cigar_ops_buf.len());
+    for &(len, op) in cigar_ops_buf.iter() {
+        cigar_buf.push(CigarOp::from_bam_u32((len << 4) | u32::from(op)));
     }
 
     #[expect(
@@ -1022,26 +1084,6 @@ fn decode_features_and_reconstruct(
         reason = "ref_pos is bounded by reference sequence length which fits in u32; BAM positions are capped at 2^29"
     )]
     Ok(ReconstructResult { ref_consumed: ref_pos as u32, matching_bases, indel_bases })
-}
-
-fn get_read_group_id(header: &BamHeader, rg_index: usize) -> Option<String> {
-    // Parse @RG lines from header text to get the ID at the given index
-    let text = header.header_text();
-    let mut idx = 0;
-    for line in text.lines() {
-        if line.starts_with("@RG") {
-            if idx == rg_index {
-                // Extract ID field
-                for field in line.split('\t') {
-                    if let Some(id) = field.strip_prefix("ID:") {
-                        return Some(id.to_string());
-                    }
-                }
-            }
-            idx = idx.wrapping_add(1);
-        }
-    }
-    None
 }
 
 fn read_itf8(cursor: &mut &[u8]) -> Result<u32, CramError> {
@@ -1127,6 +1169,7 @@ mod tests {
             &fake_ref,
             ref_start,
             &bam_header,
+            &[],
             0,
             Pos0::new(0).unwrap(),
             Pos0::max_value(),
@@ -1135,7 +1178,12 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
             &mut (),
+            &mut None,
+            &mut None,
         );
 
         assert!(

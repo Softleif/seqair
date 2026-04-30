@@ -10,6 +10,8 @@ pub mod encoding;
 pub mod index;
 pub mod rans;
 pub mod rans_nx16;
+pub mod rans_nx16_avx2;
+pub mod rans_nx16_neon;
 pub mod reader;
 pub mod slice;
 pub mod tok3;

@@ -44,6 +44,11 @@ const CRAM_VERSIONS: &[(&str, fn() -> &'static Path)] = &[
 
 struct NoodlesRecord {
     pos: i64,
+    /// 0-based inclusive last reference position covered by the alignment.
+    /// noodles' `alignment_end` is 1-based inclusive (Position), so we
+    /// subtract 1 to land on the same convention seqair stores in
+    /// `SlimRecord::end_pos`.
+    end_pos: i64,
     flags: u16,
     mapq: u8,
     ref_id: Option<usize>,
@@ -79,6 +84,11 @@ fn read_noodles_records(cram_path: &Path) -> (sam::Header, Vec<NoodlesRecord>) {
         }
 
         let pos = record.alignment_start().map(|p| usize::from(p) as i64 - 1).unwrap_or(-1);
+        // noodles `alignment_end` is 1-based inclusive. Convert to 0-based
+        // inclusive (subtract 1) so it matches seqair's `SlimRecord::end_pos`
+        // convention. For zero-refspan reads alignment_end falls back to
+        // alignment_start, matching seqair's behaviour for that edge case.
+        let end_pos = record.alignment_end().map(|p| usize::from(p) as i64 - 1).unwrap_or(pos);
         let mapq = record.mapping_quality().map(u8::from).unwrap_or(255);
         let ref_id = record.reference_sequence_id();
         let seq: Vec<u8> = record.sequence().iter().collect();
@@ -88,6 +98,7 @@ fn read_noodles_records(cram_path: &Path) -> (sam::Header, Vec<NoodlesRecord>) {
 
         records.push(NoodlesRecord {
             pos,
+            end_pos,
             flags: flags_bits,
             mapq,
             ref_id,
@@ -114,7 +125,7 @@ fn cram_chr19_count_matches_noodles() {
 
         let noodles_in_range = noodles_records
             .iter()
-            .filter(|r| r.ref_id == Some(0) && r.pos >= start as i64 && r.pos < end as i64)
+            .filter(|r| r.ref_id == Some(0) && r.pos >= start as i64 && r.pos <= end as i64)
             .count();
 
         let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
@@ -153,7 +164,7 @@ fn cram_chr19_records_match_noodles_field_by_field() {
 
         let noodles_chr19: Vec<&NoodlesRecord> = noodles_records
             .iter()
-            .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos < end)
+            .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos <= end)
             .collect();
 
         let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
@@ -182,6 +193,65 @@ fn cram_chr19_records_match_noodles_field_by_field() {
     }
 }
 
+// r[verify cram.record.end_pos]
+/// Regression for the CRAM `end_pos` off-by-one: seqair's BAM path stores
+/// `end_pos` as the **0-based inclusive** last reference position covered
+/// (`pos + ref_consumed - 1`), and the pileup engine evicts on
+/// `end_pos < pos` — i.e. it treats `end_pos` as inclusive. The CRAM slice
+/// decoder was producing `pos + ref_consumed` (exclusive), making every
+/// CRAM record's `end_pos` one base larger than the BAM/SAM equivalent and
+/// inflating pileup depth by 1 on the trailing column of every read.
+///
+/// Cross-validated against noodles, which exposes 1-based inclusive
+/// `alignment_end`; converting to 0-based inclusive (`-1`) yields the
+/// value seqair must store.
+#[test]
+fn cram_end_pos_matches_noodles_inclusive_convention() {
+    let start = 6_105_000i64;
+    let end = 6_140_000i64;
+
+    for &(version, cram_path_fn) in CRAM_VERSIONS {
+        let cram_path = cram_path_fn();
+        let (_header, noodles_records) = read_noodles_records(cram_path);
+
+        let noodles_chr19: Vec<&NoodlesRecord> = noodles_records
+            .iter()
+            .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos <= end)
+            .collect();
+
+        let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
+        let chr19_tid = readers.header().tid("chr19").unwrap();
+        let mut store = RecordStore::new();
+        readers
+            .fetch_into(
+                chr19_tid,
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
+                &mut store,
+            )
+            .unwrap();
+
+        let our_records: Vec<u32> =
+            (0..store.len() as u32).filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+
+        assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
+
+        for (i, noodles_rec) in noodles_chr19.iter().enumerate() {
+            let our_rec = store.record(our_records[i]);
+            assert_eq!(
+                our_rec.end_pos.as_i64(),
+                noodles_rec.end_pos,
+                "{version} rec {i}: CRAM end_pos {our} != noodles inclusive end_pos {theirs} \
+                 (pos={pos}). seqair must store the 0-based inclusive last reference \
+                 position to match its BAM path and the pileup engine's eviction logic.",
+                our = our_rec.end_pos.as_i64(),
+                theirs = noodles_rec.end_pos,
+                pos = our_rec.pos.as_i64(),
+            );
+        }
+    }
+}
+
 // r[verify cram.record.decode_order]
 #[test]
 fn cram_chr19_sequences_match_noodles() {
@@ -194,7 +264,7 @@ fn cram_chr19_sequences_match_noodles() {
 
         let noodles_chr19: Vec<&NoodlesRecord> = noodles_records
             .iter()
-            .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos < end)
+            .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos <= end)
             .collect();
 
         let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
@@ -252,7 +322,7 @@ fn cram_chr19_quality_scores_match_noodles() {
 
         let noodles_chr19: Vec<&NoodlesRecord> = noodles_records
             .iter()
-            .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos < end)
+            .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos <= end)
             .collect();
 
         let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
@@ -296,7 +366,7 @@ fn cram_chr19_qnames_match_noodles() {
 
         let noodles_chr19: Vec<&NoodlesRecord> = noodles_records
             .iter()
-            .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos < end)
+            .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos <= end)
             .collect();
 
         let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
