@@ -34,13 +34,35 @@ pub enum ByteArrayEncoding {
 }
 
 /// Precomputed canonical Huffman decode table.
+///
+/// Pre-computes the canonical-code assignment and a per-bit-length
+/// index in [`HuffmanTable::new`] so [`HuffmanTable::decode`] is a hot
+/// loop with no allocation and O(`max_len`) work per symbol. Earlier
+/// versions rebuilt the codes vector and linear-scanned the symbol list
+/// at every bit-length level on every byte decoded, which dominated
+/// CRAM `ByteEncoding`/`ByteArrayEncoding` profiles.
 #[derive(Debug, Clone)]
 pub struct HuffmanTable {
-    /// (symbol, `bit_length`) pairs sorted by (`bit_length`, symbol) for canonical assignment.
-    symbols: Vec<(i32, u32)>,
+    /// Symbols sorted by (`bit_length`, symbol) — canonical Huffman order.
+    symbols: Vec<i32>,
+    /// Canonical code for each entry, parallel to `symbols`.
+    codes: Vec<u32>,
+    /// `level_starts[L]` = index into `symbols`/`codes` of the first
+    /// entry whose `bit_length == L`. Padded with `symbols.len()` past
+    /// `max_len`, so range `level_starts[L]..level_starts[L+1]` always
+    /// indexes the entries at level `L` even for empty levels.
+    level_starts: [u32; LEVEL_STARTS_LEN],
+    /// Longest code in the table (1..=32). 0 for the single-symbol /
+    /// empty cases (handled specially).
+    max_len: u32,
     /// For single-symbol codes (`bit_length=0`), the symbol value.
     single_symbol: Option<i32>,
 }
+
+/// `level_starts` covers bit lengths 1..=32, plus a sentinel at index 33.
+/// Index 0 is unused so callers can index by `target_len` directly.
+const LEVEL_STARTS_LEN: usize = 34;
+const MAX_HUFFMAN_BIT_LEN: u32 = 32;
 
 impl HuffmanTable {
     pub fn new(alphabet: &[i32], bit_lengths: &[u32]) -> Result<Self, CramError> {
@@ -52,26 +74,116 @@ impl HuffmanTable {
         }
 
         if alphabet.is_empty() {
-            return Ok(Self { symbols: Vec::new(), single_symbol: None });
+            return Ok(Self {
+                symbols: Vec::new(),
+                codes: Vec::new(),
+                level_starts: [0; LEVEL_STARTS_LEN],
+                max_len: 0,
+                single_symbol: None,
+            });
         }
 
         // Check for single-symbol code (bit_length=0)
         if let Some(&single) = alphabet.first().filter(|_| alphabet.len() == 1) {
-            return Ok(Self { symbols: vec![(single, 0)], single_symbol: Some(single) });
+            return Ok(Self {
+                symbols: vec![single],
+                codes: vec![0],
+                level_starts: [0; LEVEL_STARTS_LEN],
+                max_len: 0,
+                single_symbol: Some(single),
+            });
         }
 
-        // Build (symbol, bit_length) pairs and sort canonically
+        // Sort entries by (bit_length, symbol) for canonical assignment.
         let mut pairs: Vec<(i32, u32)> =
             alphabet.iter().zip(bit_lengths.iter()).map(|(&sym, &bl)| (sym, bl)).collect();
         pairs.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
 
-        Ok(Self { symbols: pairs, single_symbol: None })
+        // Pre-assign canonical codes: codes start at 0, increment within a
+        // bit-length level, and left-shift when crossing to a longer level.
+        let mut symbols = Vec::with_capacity(pairs.len());
+        let mut codes = Vec::with_capacity(pairs.len());
+        let mut code = 0u32;
+        let Some(&(_, mut prev_len)) = pairs.first() else {
+            // Unreachable — pairs is non-empty (alphabet is non-empty and
+            // the single-symbol case returned above).
+            return Err(CramError::HuffmanSizeMismatch {
+                alphabet_size: alphabet.len(),
+                bit_lengths_size: bit_lengths.len(),
+            });
+        };
+        if prev_len > MAX_HUFFMAN_BIT_LEN {
+            return Err(CramError::HuffmanSizeMismatch {
+                alphabet_size: alphabet.len(),
+                bit_lengths_size: bit_lengths.len(),
+            });
+        }
+
+        for &(sym, bit_len) in &pairs {
+            if bit_len > MAX_HUFFMAN_BIT_LEN {
+                return Err(CramError::HuffmanSizeMismatch {
+                    alphabet_size: alphabet.len(),
+                    bit_lengths_size: bit_lengths.len(),
+                });
+            }
+            if bit_len > prev_len {
+                let shift = bit_len.wrapping_sub(prev_len);
+                code = code.checked_shl(shift).ok_or(CramError::HuffmanSizeMismatch {
+                    alphabet_size: alphabet.len(),
+                    bit_lengths_size: bit_lengths.len(),
+                })?;
+                prev_len = bit_len;
+            }
+            symbols.push(sym);
+            codes.push(code);
+            code = code.wrapping_add(1);
+        }
+
+        // Build `level_starts`: linear scan over the sorted entries.
+        let mut level_starts = [0u32; LEVEL_STARTS_LEN];
+        let entry_count = u32::try_from(symbols.len()).unwrap_or(u32::MAX);
+        let mut idx_u32 = 0u32;
+        let mut next_level: u32 = 1;
+        for &(_, bit_len) in &pairs {
+            while next_level <= bit_len && (next_level as usize) < LEVEL_STARTS_LEN {
+                #[allow(
+                    clippy::indexing_slicing,
+                    reason = "next_level < LEVEL_STARTS_LEN checked above"
+                )]
+                {
+                    level_starts[next_level as usize] = idx_u32;
+                }
+                next_level = next_level.wrapping_add(1);
+            }
+            idx_u32 = idx_u32.wrapping_add(1);
+        }
+        // Pad the tail past max_len with `entry_count` so the
+        // `[level_starts[L]..level_starts[L+1]]` range query at the last
+        // level returns the correct count rather than 0.
+        while (next_level as usize) < LEVEL_STARTS_LEN {
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "next_level < LEVEL_STARTS_LEN checked by the loop"
+            )]
+            {
+                level_starts[next_level as usize] = entry_count;
+            }
+            next_level = next_level.wrapping_add(1);
+        }
+
+        let max_len = pairs.last().map(|&(_, bl)| bl).unwrap_or(0);
+
+        Ok(Self { symbols, codes, level_starts, max_len, single_symbol: None })
     }
 
     /// Decode a single symbol from the bit stream.
     ///
-    /// Uses canonical Huffman decoding: read one bit at a time, tracking the
-    /// current code value against the canonical code for each bit length level.
+    /// O(`max_len`) per call: reads one bit per level until the
+    /// accumulated value lands in the canonical code range for some
+    /// level, then returns that level's symbol by direct index. No
+    /// allocation, no inner linear scan — both the canonical codes and
+    /// the per-level start indices are precomputed in
+    /// [`HuffmanTable::new`].
     pub fn decode(&self, reader: &mut BitReader<'_>) -> Option<i32> {
         if let Some(sym) = self.single_symbol {
             return Some(sym);
@@ -81,38 +193,28 @@ impl HuffmanTable {
             return None;
         }
 
-        // Pre-assign canonical codes: sorted by (bit_len, symbol),
-        // codes start at 0 and increment, left-shifting when length increases.
-        let mut codes: Vec<u32> = Vec::with_capacity(self.symbols.len());
-        let mut code = 0u32;
-        let mut prev_len = self.symbols.first()?.1;
-
-        for &(_sym, bit_len) in &self.symbols {
-            if bit_len > prev_len {
-                let shift = bit_len.checked_sub(prev_len)?;
-                if shift >= 32 {
-                    return None;
-                }
-                code <<= shift;
-                prev_len = bit_len;
-            }
-            codes.push(code);
-            code = code.wrapping_add(1);
-        }
-
-        // Read bits incrementally, checking codes at each length level
         let mut value = 0u32;
-        let mut bits_read = 0u32;
-
-        let max_len = self.symbols.last()?.1;
-        for target_len in 1..=max_len {
-            while bits_read < target_len {
-                value = (value << 1) | u32::from(reader.read_bit()?);
-                bits_read = bits_read.checked_add(1)?;
-            }
-            for (i, &(sym, bl)) in self.symbols.iter().enumerate() {
-                if bl == target_len && *codes.get(i)? == value {
-                    return Some(sym);
+        for target_len in 1..=self.max_len {
+            value = value.wrapping_shl(1) | u32::from(reader.read_bit()?);
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "target_len is bounded by max_len ≤ MAX_HUFFMAN_BIT_LEN < LEVEL_STARTS_LEN"
+            )]
+            let start = self.level_starts[target_len as usize];
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "target_len + 1 ≤ MAX_HUFFMAN_BIT_LEN + 1 < LEVEL_STARTS_LEN"
+            )]
+            let end = self.level_starts[(target_len as usize).wrapping_add(1)];
+            if start < end {
+                let base_code = *self.codes.get(start as usize)?;
+                if value >= base_code {
+                    let offset = value.wrapping_sub(base_code);
+                    let count = end.wrapping_sub(start);
+                    if offset < count {
+                        let idx = (start as usize).checked_add(offset as usize)?;
+                        return self.symbols.get(idx).copied();
+                    }
                 }
             }
         }
