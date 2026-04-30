@@ -151,7 +151,69 @@ fn cram_records_match_htslib_for_chr19() {
             assert_eq!(cram.flags.raw(), hts.flags, "{version} rec {i}: flags");
             assert_eq!(cram.mapq, hts.mapq, "{version} rec {i}: mapq");
             assert_eq!(cram.seq_len as usize, hts.seq_len, "{version} rec {i}: seq_len");
-            assert_eq!(cram.end_pos.as_i64(), hts.end_pos, "{version} rec {i}: end_pos");
+            // rust-htslib's `cigar.end_pos()` is half-open (exclusive last+1).
+            // seqair stores `end_pos` as 0-based inclusive last position
+            // (matches the BAM path's `compute_end_pos` and the pileup
+            // engine's eviction check `end_pos < pos`). Compare with `-1`.
+            assert_eq!(cram.end_pos.as_i64(), hts.end_pos - 1, "{version} rec {i}: end_pos");
+        }
+    }
+}
+
+// r[verify cram.record.end_pos]
+/// Dedicated regression for the CRAM `end_pos` off-by-one. The CRAM slice
+/// decoder used to store `pos + ref_consumed` (exclusive end), one base
+/// larger than the BAM/SAM path's `pos + ref_consumed - 1` (inclusive end).
+/// Cross-validated against rust-htslib's `cigar.end_pos()`, which is
+/// exclusive — converting via `-1` yields the inclusive value seqair must
+/// store for the pileup engine's eviction check (`end_pos < pos`) to match
+/// htslib's column boundaries.
+#[test]
+fn cram_end_pos_matches_htslib_inclusive_convention() {
+    let contig = "chr19";
+    let start = 6_103_076u64;
+    let end = 6_143_229u64;
+    let hts_records = fetch_hts_records(contig, start, end);
+
+    for &(version, cram_path_fn) in CRAM_VERSIONS {
+        let mut readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
+        let mut store = RecordStore::new();
+        let tid = readers.header().tid(contig).unwrap();
+        readers
+            .fetch_into(
+                tid,
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
+                &mut store,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.len(),
+            hts_records.len(),
+            "{version}: record count mismatch: cram={}, htslib={}",
+            store.len(),
+            hts_records.len(),
+        );
+
+        for (i, hts) in hts_records.iter().enumerate() {
+            let cram = store.record(i as u32);
+            // BAM path: r.end_pos == hts.end_pos - 1 (see
+            // compare_bam_with_htslib.rs::all_contigs_record_fields_match).
+            // CRAM must agree: same eviction, same pileup depth, same
+            // `samtools end` calculation in downstream tools.
+            let expected_inclusive = hts.end_pos - 1;
+            assert_eq!(
+                cram.end_pos.as_i64(),
+                expected_inclusive,
+                "{version} rec {i}: CRAM end_pos {cram_end} != BAM-convention inclusive end {bam_end} \
+                 (htslib exclusive end {hts_end}, pos {pos}). The CRAM slice decoder must store \
+                 the inclusive last reference position covered, not the half-open exclusive end.",
+                cram_end = cram.end_pos.as_i64(),
+                bam_end = expected_inclusive,
+                hts_end = hts.end_pos,
+                pos = cram.pos.as_i64(),
+            );
         }
     }
 }

@@ -474,9 +474,24 @@ fn decode_record<E: CustomizeRecordStore>(
             qual_buf.resize(read_length, 0xFF);
         }
 
+        // `end_pos_raw` is the half-open exclusive reference end
+        // (`pos + ref_consumed`). It is used for TLEN math
+        // (`aright - aleft`), where half-open arithmetic is the natural
+        // form. The value stored in `SlimRecord::end_pos` is the 0-based
+        // **inclusive** last reference position covered, matching the
+        // BAM/SAM path's `compute_end_pos` and the pileup engine's
+        // eviction check (`end_pos < pos`). For zero-refspan reads we
+        // store `pos` itself, the same fallback BAM uses.
+        // r[impl cram.record.end_pos]
         let end_pos_raw = pos_0based.as_i64().wrapping_add(i64::from(result.ref_consumed));
-        let end_pos = Pos0::try_from(end_pos_raw)
-            .map_err(|_| super::reader::CramError::InvalidPosition { value: end_pos_raw })?;
+        let end_pos_inclusive_raw = if result.ref_consumed == 0 {
+            pos_0based.as_i64()
+        } else {
+            end_pos_raw.wrapping_sub(1)
+        };
+        let end_pos = Pos0::try_from(end_pos_inclusive_raw).map_err(|_| {
+            super::reader::CramError::InvalidPosition { value: end_pos_inclusive_raw }
+        })?;
 
         // r[impl cram.index.multi_ref_slices]
         // Skip records from different references in multi-ref slices
@@ -498,8 +513,14 @@ fn decode_record<E: CustomizeRecordStore>(
             ));
         }
 
-        // Check overlap with query region
-        if pos_0based >= query_end || end_pos <= query_start {
+        // Check overlap with query region. Both `query_start` and
+        // `query_end` are inclusive (matches the BAM IndexedReader's
+        // convention: a record is kept iff `rec_pos <= query_end &&
+        // rec_end >= query_start`). `end_pos` is the inclusive last
+        // covered position. Mismatching this with the half-open
+        // semantics used elsewhere drops boundary records (reads
+        // starting exactly at the requested end position).
+        if pos_0based > query_end || end_pos < query_start {
             return Ok((
                 false,
                 SliceMateInfo {
