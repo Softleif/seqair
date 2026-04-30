@@ -28,9 +28,12 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
 
     // Header: order (u8), compressed_size (u32 LE), uncompressed_size (u32 LE)
-    let order = read_u8(&mut cur)?;
-    let _compressed_size = read_u32_le(&mut cur)?;
-    let uncompressed_size = read_u32_le(&mut cur)? as usize;
+    let order = read_u8(&mut cur).ok_or_else(|| CramError::Truncated { context: "rans header" })?;
+    let _compressed_size =
+        read_u32_le(&mut cur).ok_or_else(|| CramError::Truncated { context: "rans header" })?;
+    let uncompressed_size = read_u32_le(&mut cur)
+        .ok_or_else(|| CramError::Truncated { context: "rans header" })?
+        as usize;
 
     super::reader::check_alloc_size(uncompressed_size, "rANS 4x8 output")?;
     let mut dst = vec![0u8; uncompressed_size];
@@ -49,10 +52,14 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
     reason = "indices are bounded: f ≤ 4095 (12-bit mask), sym/i ≤ 255 (u8)"
 )]
 fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
-    let freq = read_frequencies_0(src)?;
+    // CramError::Truncated is materialised lazily on the err path; the
+    // hot inner loop never builds one because `renormalize` returns
+    // `Option<()>`. See the helper-module comment for the cost story.
+    let truncated = || CramError::Truncated { context: "rans order-0 truncated" };
+    let freq = read_frequencies_0(src).ok_or_else(truncated)?;
     let cum_freq = build_cumulative_frequencies(&freq);
     let sym_table = build_symbol_table(&cum_freq);
-    let mut states = read_states(src)?;
+    let mut states = read_states(src).ok_or_else(truncated)?;
 
     for chunk in dst.chunks_mut(4) {
         for (d, state) in chunk.iter_mut().zip(states.iter_mut()) {
@@ -65,7 +72,7 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
                 .wrapping_mul(*state >> 12)
                 .wrapping_add(*state & 0x0FFF)
                 .wrapping_sub(u32::from(cum_freq[i]));
-            renormalize(state, src)?;
+            renormalize(state, src).ok_or_else(truncated)?;
         }
     }
 
@@ -77,7 +84,9 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     reason = "indices are bounded: ctx/sym ≤ 255 (u8), f ≤ 4095 (12-bit mask)"
 )]
 fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
-    let freq = read_frequencies_1(src)?;
+    // See decode_order_0 for the lazy-CramError pattern.
+    let truncated = || CramError::Truncated { context: "rans order-1 truncated" };
+    let freq = read_frequencies_1(src).ok_or_else(truncated)?;
 
     let mut cum_freq = vec![[0u16; ALPHABET_SIZE]; ALPHABET_SIZE];
     let mut sym_tables: Box<[[u8; 4096]; ALPHABET_SIZE]> = Box::new([[0u8; 4096]; ALPHABET_SIZE]);
@@ -86,7 +95,7 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
         sym_tables[ctx] = build_symbol_table(&cum_freq[ctx]);
     }
 
-    let mut states = read_states(src)?;
+    let mut states = read_states(src).ok_or_else(truncated)?;
     let mut prev_syms = [0u8; 4];
 
     // Chunk-based interleaving: split output into 4 equal segments.
@@ -108,7 +117,7 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
                 .wrapping_mul(states[si] >> 12)
                 .wrapping_add(states[si] & 0x0FFF)
                 .wrapping_sub(u32::from(cum_freq[ctx][sym_idx]));
-            renormalize(&mut states[si], src)?;
+            renormalize(&mut states[si], src).ok_or_else(truncated)?;
             prev_syms[si] = sym;
         }
     }
@@ -128,7 +137,7 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
             .wrapping_add(states[3] & 0x0FFF)
             .wrapping_sub(u32::from(cum_freq[ctx][sym_idx]));
         if pos.checked_add(1).is_some_and(|next| next < dst.len()) {
-            renormalize(&mut states[3], src)?;
+            renormalize(&mut states[3], src).ok_or_else(truncated)?;
         }
         prev_syms[3] = sym;
     }
@@ -136,24 +145,29 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     Ok(())
 }
 
-fn renormalize(state: &mut u32, src: &mut &[u8]) -> Result<(), CramError> {
+/// Returns `None` when the source is exhausted mid-renormalize. The
+/// caller materializes a `CramError::Truncated` from the `None` only
+/// on the err path — see the helpers above for the size + drop story.
+#[inline]
+fn renormalize(state: &mut u32, src: &mut &[u8]) -> Option<()> {
     while *state < LOWER_BOUND {
         let b = u32::from(read_u8(src)?);
         *state = (*state << 8) | b;
     }
-    Ok(())
+    Some(())
 }
 
-fn read_states(src: &mut &[u8]) -> Result<[u32; 4], CramError> {
+#[inline]
+fn read_states(src: &mut &[u8]) -> Option<[u32; 4]> {
     let mut states = [0u32; 4];
     for s in &mut states {
         *s = read_u32_le(src)?;
     }
-    Ok(states)
+    Some(states)
 }
 
 #[allow(clippy::indexing_slicing, reason = "sym is u8, so sym as usize ≤ 255 < ALPHABET_SIZE=256")]
-fn read_frequencies_0(src: &mut &[u8]) -> Result<[u16; ALPHABET_SIZE], CramError> {
+fn read_frequencies_0(src: &mut &[u8]) -> Option<[u16; ALPHABET_SIZE]> {
     let mut freq = [0u16; ALPHABET_SIZE];
     let mut sym = read_u8(src)?;
     let mut prev_sym = sym;
@@ -184,13 +198,11 @@ fn read_frequencies_0(src: &mut &[u8]) -> Result<[u16; ALPHABET_SIZE], CramError
         prev_sym = sym;
     }
 
-    Ok(freq)
+    Some(freq)
 }
 
 #[allow(clippy::indexing_slicing, reason = "ctx is u8, so ctx as usize ≤ 255 < ALPHABET_SIZE=256")]
-fn read_frequencies_1(
-    src: &mut &[u8],
-) -> Result<Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>, CramError> {
+fn read_frequencies_1(src: &mut &[u8]) -> Option<Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>> {
     let mut freq = Box::new([[0u16; ALPHABET_SIZE]; ALPHABET_SIZE]);
 
     let mut ctx = read_u8(src)?;
@@ -215,7 +227,7 @@ fn read_frequencies_1(
         prev_ctx = ctx;
     }
 
-    Ok(freq)
+    Some(freq)
 }
 
 #[allow(
@@ -253,45 +265,49 @@ fn build_symbol_table(cum_freq: &[u16; ALPHABET_SIZE]) -> [u8; 4096] {
     table
 }
 
-// `ok_or_else` (not `ok_or`) is load-bearing in these per-byte helpers.
-// `CramError` is sized for its largest variant (Open carries a `PathBuf`
-// + `std::io::Error`, IndexParse owns paths, etc.) and the type has a
-// real Drop. `ok_or` evaluates the error eagerly, so on every call the
-// Truncated variant is built on the stack and then *dropped* even on
-// the success path — the drop must dispatch on the discriminant. samply
-// flagged `drop_in_place<CramError>` next to `read_u8` for exactly this
-// reason. The closure form is lazy: nothing built, nothing dropped on
-// the hot path.
+// These per-byte helpers return `Option<T>` rather than
+// `Result<T, CramError>` for two compounding reasons:
 //
-// `split_first` (not `first` + `get(1..)`) is also load-bearing:
-// `slice::first` showed up at the top of the renormalize stack in
-// profiles because the two-step form did two slice bounds checks. The
-// `split_first` form returns `(first, rest)` in one shot.
-fn read_u8(src: &mut &[u8]) -> Result<u8, CramError> {
-    let (&b, rest) =
-        src.split_first().ok_or_else(|| CramError::Truncated { context: "rans u8" })?;
+// 1. Size. `CramError` is 80 bytes (sized to fit `Open { path: PathBuf,
+//    source: std::io::Error }` and other heap-owning variants), so
+//    `Result<u8, CramError>` is also 80 bytes — passed via memory/sret
+//    in the non-inlined ABI. `Option<u8>` is 2 bytes, in a register.
+// 2. Drop. `CramError` has a discriminant-dispatched Drop because some
+//    variants own `PathBuf` / `SmolStr` / `io::Error`. samply flagged
+//    `core::ptr::drop_in_place<CramError>` next to `read_u8` /
+//    `renormalize` because the eager `ok_or(CramError::...)` form
+//    constructed and then dropped a CramError on every successful read.
+//
+// Callers materialize a `CramError` only on the failure path, with
+// `ok_or_else(|| CramError::Truncated { context: ... })` at the
+// outermost function that knows the context.
+//
+// `split_first` / `split_first_chunk` (not `first` + `get(1..)`) is
+// also load-bearing — the two-step form does two slice bounds checks
+// and `slice::first` was at the top of the renormalize stack.
+#[inline]
+fn read_u8(src: &mut &[u8]) -> Option<u8> {
+    let (&b, rest) = src.split_first()?;
     *src = rest;
-    Ok(b)
+    Some(b)
 }
 
-fn read_u32_le(src: &mut &[u8]) -> Result<u32, CramError> {
-    // `split_first_chunk` does the same single-bounds-check trick as
-    // `split_first` for fixed-size slices.
-    let (head, rest) =
-        src.split_first_chunk::<4>().ok_or_else(|| CramError::Truncated { context: "rans u32" })?;
+#[inline]
+fn read_u32_le(src: &mut &[u8]) -> Option<u32> {
+    let (head, rest) = src.split_first_chunk::<4>()?;
     *src = rest;
-    Ok(u32::from_le_bytes(*head))
+    Some(u32::from_le_bytes(*head))
 }
 
-fn read_itf8_u16(src: &mut &[u8]) -> Result<u16, CramError> {
+#[inline]
+fn read_itf8_u16(src: &mut &[u8]) -> Option<u16> {
     // ITF8 for frequency table values (they fit in u16)
-    let val = super::varint::read_itf8_from(src)
-        .ok_or_else(|| CramError::Truncated { context: "rans frequency itf8" })?;
+    let val = super::varint::read_itf8_from(src)?;
     #[expect(
         clippy::cast_possible_truncation,
         reason = "rANS frequency table values are bounded by 4096 (12-bit), fits in u16"
     )]
-    Ok(val as u16)
+    Some(val as u16)
 }
 
 #[cfg(test)]

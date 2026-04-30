@@ -28,7 +28,8 @@ const FLAG_PACK: u8 = 0x80;
 pub fn decode(src: &[u8], mut uncompressed_size: usize) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
 
-    let flags = read_u8(&mut cur)?;
+    let flags =
+        read_u8(&mut cur).ok_or_else(|| CramError::Truncated { context: "rans_nx16 flags" })?;
     let state_count = if flags & FLAG_N32 != 0 { 32 } else { 4 };
 
     if flags & FLAG_NO_SIZE == 0 {
@@ -80,35 +81,37 @@ pub fn decode(src: &[u8], mut uncompressed_size: usize) -> Result<Vec<u8>, CramE
 
 // ── Primitive readers ────────────────────────────────────────────────
 
-// Lazy `ok_or_else` and single-bounds-check `split_first` /
-// `split_first_chunk` are load-bearing in these per-byte helpers — see
-// the analogous comment in rans.rs::read_u8 for why eager `ok_or` and
-// the two-step `first` + `get(1..)` form show up under `read_u8` in
-// profiles.
-fn read_u8(src: &mut &[u8]) -> Result<u8, CramError> {
-    let (&b, rest) =
-        src.split_first().ok_or_else(|| CramError::Truncated { context: "rans_nx16 u8" })?;
+// These per-byte helpers return `Option<T>` rather than
+// `Result<T, CramError>` to keep the return-type small (2 bytes vs 80)
+// and avoid eager `CramError` construction + drop on the hot path.
+// See the helper-module comment in rans.rs for the full size + drop
+// story; identical reasoning applies here. `split_first` /
+// `split_first_chunk` keep the slice bounds check to a single
+// branch.
+#[inline]
+fn read_u8(src: &mut &[u8]) -> Option<u8> {
+    let (&b, rest) = src.split_first()?;
     *src = rest;
-    Ok(b)
+    Some(b)
 }
 
-fn read_u16_le(src: &mut &[u8]) -> Result<u16, CramError> {
-    let (head, rest) = src
-        .split_first_chunk::<2>()
-        .ok_or_else(|| CramError::Truncated { context: "rans_nx16 u16" })?;
+#[inline]
+fn read_u16_le(src: &mut &[u8]) -> Option<u16> {
+    let (head, rest) = src.split_first_chunk::<2>()?;
     *src = rest;
-    Ok(u16::from_le_bytes(*head))
+    Some(u16::from_le_bytes(*head))
 }
 
-fn read_u32_le(src: &mut &[u8]) -> Result<u32, CramError> {
-    let (head, rest) = src
-        .split_first_chunk::<4>()
-        .ok_or_else(|| CramError::Truncated { context: "rans_nx16 u32" })?;
+#[inline]
+fn read_u32_le(src: &mut &[u8]) -> Option<u32> {
+    let (head, rest) = src.split_first_chunk::<4>()?;
     *src = rest;
-    Ok(u32::from_le_bytes(*head))
+    Some(u32::from_le_bytes(*head))
 }
 
 // r[impl cram.codec.uint7_bounded]
+// Cold helper (parsed once per block); keeps the rich `CramError`
+// signature so the `Uint7Overflow` variant survives.
 fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
     let mut n: u32 = 0;
     let mut count: u8 = 0;
@@ -122,7 +125,9 @@ fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
             count += 1;
         }
 
-        let b = u32::from(read_u8(src)?);
+        let b = u32::from(
+            read_u8(src).ok_or_else(|| CramError::Truncated { context: "rans_nx16 uint7" })?,
+        );
         n = (n << 7) | (b & 0x7f);
         if b & 0x80 == 0 {
             break;
@@ -139,7 +144,11 @@ fn split_off<'a>(src: &mut &'a [u8], len: usize) -> Result<&'a [u8], CramError> 
 }
 
 fn read_states(src: &mut &[u8], state_count: usize) -> Result<Vec<u32>, CramError> {
-    (0..state_count).map(|_| read_u32_le(src)).collect()
+    (0..state_count)
+        .map(|_| {
+            read_u32_le(src).ok_or_else(|| CramError::Truncated { context: "rans_nx16 state" })
+        })
+        .collect()
 }
 
 // ── Core rANS step functions ─────────────────────────────────────────
@@ -176,14 +185,17 @@ fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
     result.wrapping_sub(g)
 }
 
-fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Result<u32, CramError> {
+/// Returns `None` when the source is exhausted mid-renormalize. The
+/// caller materializes a `CramError::Truncated` from the `None` only on
+/// the err path — see the helper-module comment for the size + drop
+/// story.
+#[inline]
+fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Option<u32> {
     if s < (1 << 15) {
         let lo = u32::from(read_u16_le(src)?);
-        s = s.checked_shl(16).and_then(|hi| hi.checked_add(lo)).ok_or_else(|| {
-            CramError::Truncated { context: "rans_nx16 state renormalize overflow" }
-        })?;
+        s = s.checked_shl(16).and_then(|hi| hi.checked_add(lo))?;
     }
-    Ok(s)
+    Some(s)
 }
 
 // ── Alphabet reading ─────────────────────────────────────────────────
@@ -193,22 +205,23 @@ fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Result<u32, CramError> {
     reason = "sym is u8 so usize::from(sym) ≤ 255 < ALPHABET_SIZE=256"
 )]
 fn read_alphabet(src: &mut &[u8]) -> Result<[bool; ALPHABET_SIZE], CramError> {
+    let truncated = || CramError::Truncated { context: "rans_nx16 alphabet" };
     let mut alphabet = [false; ALPHABET_SIZE];
 
-    let mut sym = read_u8(src)?;
+    let mut sym = read_u8(src).ok_or_else(truncated)?;
     let mut prev_sym = sym;
 
     loop {
         alphabet[usize::from(sym)] = true;
 
-        sym = read_u8(src)?;
+        sym = read_u8(src).ok_or_else(truncated)?;
 
         if sym == 0 {
             break;
         }
 
         if sym == prev_sym.wrapping_add(1) {
-            let len = read_u8(src)?;
+            let len = read_u8(src).ok_or_else(truncated)?;
             for _ in 0..len {
                 alphabet[usize::from(sym)] = true;
                 sym = sym.wrapping_add(1);
@@ -226,6 +239,7 @@ fn read_alphabet(src: &mut &[u8]) -> Result<[bool; ALPHABET_SIZE], CramError> {
 const ORDER_0_BITS: u32 = 12;
 
 fn decode_order_0(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result<(), CramError> {
+    let truncated = || CramError::Truncated { context: "rans_nx16 order-0 truncated" };
     let frequencies = read_frequencies_0(src)?;
     let cumulative_frequencies = build_cumulative_frequencies(&frequencies);
     let mut states = read_states(src, state_count)?;
@@ -242,7 +256,7 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
                 *cumulative_frequencies.get(i).unwrap_or(&0),
                 ORDER_0_BITS,
             );
-            *state = state_renormalize(*state, src)?;
+            *state = state_renormalize(*state, src).ok_or_else(truncated)?;
         }
     }
 
@@ -351,22 +365,23 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
 
             let l = usize::from(sym);
             *state = state_step(*state, frequencies[k][l], cumulative_frequencies[k][l], bits);
-            *state = state_renormalize(*state, src)?;
+            *state = state_renormalize(*state, src)
+                .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 renormalize" })?;
             *prev_sym = sym;
         }
     }
 
-    let last_chunk_start = chunk_size
-        .checked_mul(state_count)
-        .ok_or(CramError::Truncated { context: "rans_nx16 order-1 last chunk offset overflow" })?;
+    let last_chunk_start = chunk_size.checked_mul(state_count).ok_or_else(|| {
+        CramError::Truncated { context: "rans_nx16 order-1 last chunk offset overflow" }
+    })?;
     let last_chunk = &mut dst[last_chunk_start..];
     if !last_chunk.is_empty() {
         let mut state = *states
             .last()
-            .ok_or(CramError::Truncated { context: "rans_nx16 order-1 last state" })?;
+            .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 last state" })?;
         let mut prev_sym = *prev_syms
             .last()
-            .ok_or(CramError::Truncated { context: "rans_nx16 order-1 last prev_sym" })?;
+            .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 last prev_sym" })?;
 
         for d in last_chunk {
             let k = usize::from(prev_sym);
@@ -375,7 +390,9 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
             *d = sym;
             let l = usize::from(sym);
             state = state_step(state, frequencies[k][l], cumulative_frequencies[k][l], bits);
-            state = state_renormalize(state, src)?;
+            state = state_renormalize(state, src).ok_or_else(|| CramError::Truncated {
+                context: "rans_nx16 order-1 last renormalize",
+            })?;
             prev_sym = sym;
         }
     }
@@ -384,7 +401,8 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
 }
 
 fn read_frequencies_1(src: &mut &[u8], frequencies: &mut Frequencies1) -> Result<u32, CramError> {
-    let n = read_u8(src)?;
+    let n =
+        read_u8(src).ok_or_else(|| CramError::Truncated { context: "rans_nx16 freq1 header" })?;
     let bits = u32::from(n >> 4);
     let is_compressed = (n & 0x01) != 0;
 
@@ -426,7 +444,9 @@ fn read_frequencies_1_inner(
             fs[sym_idx] = f;
 
             if f == 0 {
-                let n = read_u8(src)? as usize;
+                let n = read_u8(src)
+                    .ok_or_else(|| CramError::Truncated { context: "rans_nx16 freq1 inner run" })?
+                    as usize;
                 for _ in 0..n {
                     let _ = sym_iter.next();
                 }
@@ -450,7 +470,9 @@ fn build_cumulative_frequencies_1(frequencies: &Frequencies1) -> CumulativeFrequ
 // ── Stripe transform ─────────────────────────────────────────────────
 
 fn decode_stripe(src: &mut &[u8], uncompressed_size: usize) -> Result<Vec<u8>, CramError> {
-    let chunk_count = read_u8(src)? as usize;
+    let chunk_count = read_u8(src)
+        .ok_or_else(|| CramError::Truncated { context: "rans_nx16 stripe chunk count" })?
+        as usize;
     if chunk_count == 0 {
         return Err(CramError::RansStripeZeroChunks);
     }
@@ -501,7 +523,9 @@ fn read_bit_pack_context(
     src: &mut &[u8],
     uncompressed_size: usize,
 ) -> Result<(BitPackContext, usize), CramError> {
-    let symbol_count = read_u8(src)? as usize;
+    let symbol_count = read_u8(src)
+        .ok_or_else(|| CramError::Truncated { context: "rans_nx16 bit_pack symbol count" })?
+        as usize;
     if symbol_count == 0 {
         return Err(CramError::RansBitPackZeroSymbols);
     }
@@ -613,13 +637,14 @@ fn apply_rle(src: &[u8], ctx: &RleContext) -> Result<Vec<u8>, CramError> {
     reason = "sym is u8 so usize::from(sym) ≤ 255 < ALPHABET_SIZE=256"
 )]
 fn read_rle_alphabet(src: &mut &[u8]) -> Result<[bool; ALPHABET_SIZE], CramError> {
+    let truncated = || CramError::Truncated { context: "rans_nx16 rle alphabet" };
     let mut alphabet = [false; ALPHABET_SIZE];
 
-    let n = read_u8(src)? as usize;
+    let n = read_u8(src).ok_or_else(truncated)? as usize;
     let symbol_count = if n == 0 { ALPHABET_SIZE } else { n };
 
     for _ in 0..symbol_count {
-        let sym = read_u8(src)?;
+        let sym = read_u8(src).ok_or_else(truncated)?;
         alphabet[usize::from(sym)] = true;
     }
 
