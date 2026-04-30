@@ -1066,4 +1066,71 @@ mod tests {
         decode_order_0_generic(&mut src2, &mut dst2, 32).unwrap();
         assert_eq!(dst1, dst2);
     }
+
+    fn encode_uint7_prv(stream: &mut Vec<u8>, mut val: u32) {
+        while val >= 0x80 {
+            stream.push((val as u8 & 0x7F) | 0x80);
+            val >>= 7;
+        }
+        stream.push(val as u8);
+    }
+
+    #[test]
+    fn neon_simd_handles_len_32() {
+        let len = 32;
+        let mut stream = Vec::new();
+        stream.push(FLAG_N32);
+        encode_uint7_prv(&mut stream, len as u32);
+        stream.extend_from_slice(&[0, 0]);
+        stream.push(0x80);
+        stream.push(0x20);
+        for _ in 0..32 {
+            stream.extend_from_slice(&0x01000000u32.to_le_bytes());
+        }
+
+        // Scalar path (bypass SIMD dispatch)
+        let mut cur: &[u8] = &stream;
+        read_u8(&mut cur).unwrap();
+        read_uint7(&mut cur).unwrap();
+        let mut dst = vec![0u8; len];
+        decode_order_0_generic(&mut cur, &mut dst, 32).unwrap();
+        assert_eq!(dst, vec![0u8; 32], "scalar path failed");
+
+        // Full decode (may use SIMD)
+        let result = decode(&stream, 0).unwrap();
+        assert_eq!(result, vec![0u8; 32], "SIMD path failed");
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn simd_matches_scalar_order0_32state(
+            len in 0usize..96,
+        ) {
+            // Stream decoding to `len` zero bytes. Symbol 0 has freq=4096
+            // (covers the full 12-bit range), all other symbols freq=0.
+            // With freq[sym0]=4096 the state is invariant — no renorm needed.
+            let mut stream = Vec::new();
+            stream.push(FLAG_N32);
+            encode_uint7_prv(&mut stream, len as u32);
+            // Alphabet: sym 0 only
+            stream.extend_from_slice(&[0, 0]);
+            // Frequency: 4096 for sym 0 (2-byte uint7), 0 for all others (single 0 byte each)
+        stream.push(0x80);
+        stream.push(0x20); // freq[0] = 4096 (uint7: 0x1000 → 0x80, 0x20)
+            // 32 initial states
+            for _ in 0..32 {
+                stream.extend_from_slice(&0x01000000u32.to_le_bytes());
+            }
+
+            let simd_result = decode(&stream, 0).unwrap();
+            assert_eq!(simd_result.len(), len);
+
+            let mut cur: &[u8] = &stream;
+            read_u8(&mut cur).unwrap();
+            read_uint7(&mut cur).unwrap();
+            let mut scalar_dst = vec![0u8; len];
+            decode_order_0_generic(&mut cur, &mut scalar_dst, 32).unwrap();
+            assert_eq!(simd_result, scalar_dst);
+        }
+    }
 }
