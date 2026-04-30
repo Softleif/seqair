@@ -7,18 +7,16 @@
 
 use anyhow::Context;
 use clap::Parser as _;
-use seqair::bam::pileup::{PileupEngine, PileupOp, RefSeq};
-use seqair::reader::IndexedReader;
-use seqair::{
-    bam::{Pos0, RecordStore},
-    fasta::IndexedFastaReader,
-};
-use seqair_types::{Base, RegionString, SmolStr};
+use seqair::Readers;
+use seqair::bam::RecordStore;
+use seqair::bam::pileup::PileupOp;
+use seqair::reader::{Segment, SegmentOptions};
+use seqair_types::{Base, RegionString};
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::{
     io::{BufWriter, Write},
     path::PathBuf,
-    rc::Rc,
 };
 
 /// seqair mpileup — a simple pileup viewer
@@ -32,19 +30,21 @@ use std::{
 /// `samtools mpileup -B` output (excludes reads at trailing D/N positions).
 #[derive(Debug, clap::Parser)]
 struct Cli {
-    /// BAM/SAM/CRAM file to read
+    /// BAM/SAM/CRAM file to read.
     input: PathBuf,
 
-    /// Reference FASTA (required for CRAM, optional for BAM/SAM).
-    /// Enables reference base display in column 3.
+    /// Reference FASTA. Required for CRAM, used to render the reference
+    /// base column for BAM/SAM. Not optional under the unified `Readers`
+    /// API.
     #[clap(long, short = 'f')]
-    reference: Option<PathBuf>,
+    reference: PathBuf,
 
-    /// Region to display (e.g. "chr1:1000-2000"). Omit for whole genome.
+    /// Region to display. Accepts `chr`, `chr:start`, or `chr:start-end`
+    /// (1-based, inclusive). Omit to scan every contig in the header.
     #[clap(long, short)]
     region: Option<RegionString>,
 
-    /// Output file (defaults to stdout)
+    /// Output file (defaults to stdout).
     #[clap(long, short)]
     out: Option<PathBuf>,
 
@@ -54,16 +54,15 @@ struct Cli {
     samtools_compat: bool,
 }
 
+/// Tile size for the segmenter. 1 Mbp keeps peak `RecordStore` memory
+/// well-bounded while keeping per-tile fetch overhead negligible.
+const MAX_TILE_LEN: u32 = 1_000_000;
+
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
-    let mut reader = IndexedReader::open(&args.input).context("could not open alignment file")?;
-    let mut fasta = args
-        .reference
-        .as_ref()
-        .map(|p| IndexedFastaReader::open(p))
-        .transpose()
-        .context("could not open reference FASTA")?;
+    let mut readers =
+        Readers::open(&args.input, &args.reference).context("could not open alignment file")?;
 
     let mut output: Box<dyn Write> = if let Some(out) = &args.out {
         let file =
@@ -73,84 +72,45 @@ fn main() -> anyhow::Result<()> {
         Box::new(BufWriter::new(std::io::stdout().lock()))
     };
 
-    let regions = if let Some(region_str) = args.region.as_ref() {
-        let name = &region_str.chromosome;
-        let tid =
-            reader.header().tid(name).with_context(|| format!("contig '{name}' not found"))?;
-        vec![(
-            tid,
-            *region_str.start.context("no start pos given")?,
-            *region_str.end.context("no end pos given")?,
-        )]
+    let max_len = NonZeroU32::new(MAX_TILE_LEN).expect("non-zero literal");
+    let opts = SegmentOptions::new(max_len);
+
+    // Plan segments: either a parsed region (whole contig / start-only /
+    // start-end), or `()` for a whole-genome scan. The iterator borrows
+    // `&readers` only, so we collect to release the header borrow before
+    // the &mut self pileup loop.
+    let plan: Vec<Segment> = if let Some(region) = args.region.as_ref() {
+        readers.segments(region, opts).context("could not plan region")?.collect()
     } else {
-        (0..reader.header().target_count())
-            .map(|i| {
-                let tid = i as u32;
-                let len = reader.header().target_len(tid).unwrap_or(0);
-                (tid, 0u32, len as u32)
-            })
-            .collect()
+        readers.segments((), opts).context("could not plan whole-genome scan")?.collect()
     };
 
-    // Window size for streaming pileup.  1 MiB of genomic positions keeps
-    // the RegionBuf well under 256 MiB even at very high coverage, while
-    // being large enough that index-query overhead is negligible.
-    const WINDOW: u32 = 1_000_000;
-
-    // Pre-compute all windows so the header borrow is released before the
-    // fetch loop (fetch_into needs &mut reader).
-    let mut windows: Vec<(u32, SmolStr, u32, u32)> = Vec::new();
-    for (tid, region_start, region_end) in &regions {
-        let contig_name: SmolStr = reader.header().target_name(*tid).context("unknown tid")?.into();
-        let mut ws = *region_start;
-        while ws < *region_end {
-            let we = (*region_end).min(ws.saturating_add(WINDOW));
-            windows.push((*tid, contig_name.clone(), ws, we));
-            ws = we;
-        }
-    }
-
-    let mut store = Some(RecordStore::new());
-    // Cache: record_idx → last query-consuming ref position (exclusive, 0-based).
-    // Only used in samtools-compat mode.
+    // Cache: record_idx → last query-consuming ref position (exclusive,
+    // 0-based). Only used in samtools-compat mode. Cleared per-segment
+    // because record_idx is only unique within a single fetch.
     let mut query_end_cache: HashMap<u32, u32> = HashMap::new();
 
     let mut bases = String::new();
     let mut quals = String::new();
 
-    for (tid, contig_name, win_start, win_end) in &windows {
-        let start_pos = Pos0::new(*win_start).context("invalid start position")?;
-        let end_pos = Pos0::new(*win_end).context("invalid end position")?;
+    for segment in &plan {
+        let mut engine = readers
+            .pileup(segment)
+            .with_context(|| format!("pileup failed for {}", segment.contig()))?;
 
-        let mut s = store.take().unwrap_or_default();
-        reader
-            .fetch_into(*tid, start_pos, end_pos, &mut s)
-            .with_context(|| format!("fetch failed for {contig_name}:{win_start}-{win_end}"))?;
-
-        // Pre-compute query-end positions for samtools-compat mode.
+        // Pre-compute query-end positions for samtools-compat mode using
+        // the engine's store.
         if args.samtools_compat {
             query_end_cache.clear();
-            for i in 0..s.len() as u32 {
-                let rec = s.record(i);
-                let qend = query_end_pos(&s, i, *rec.pos);
+            let store = engine.store();
+            for i in 0..store.len() as u32 {
+                let rec = store.record(i);
+                let qend = query_end_pos(store, i, *rec.pos);
                 query_end_cache.insert(i, qend);
             }
         }
 
-        let ref_seq = if let Some(ref mut fasta) = fasta {
-            let raw = fasta
-                .fetch_seq(contig_name, start_pos, end_pos)
-                .with_context(|| format!("could not fetch reference for {contig_name}"))?;
-            let bases = Base::from_ascii_vec(raw);
-            Some(RefSeq::new(Rc::from(bases), start_pos))
-        } else {
-            None
-        };
-
-        let mut engine = PileupEngine::new(s, start_pos, end_pos);
-        if let Some(rs) = ref_seq {
-            engine.set_reference_seq(rs);
-        }
+        let contig_name = segment.contig().clone();
 
         while let Some(column) = engine.pileups() {
             let pos = column.pos();
@@ -214,9 +174,7 @@ fn main() -> anyhow::Result<()> {
                 )?;
             }
         }
-
-        store = engine.take_store();
-        query_end_cache.clear();
+        // `engine` drops here; the RecordStore goes back into `readers`.
     }
 
     output.flush()?;
@@ -228,7 +186,7 @@ fn main() -> anyhow::Result<()> {
 ///
 /// For CIGAR `7M2D2I`: the 2I after the D means the D is NOT trailing → full rlen.
 /// For CIGAR `2D7M2D`: the trailing 2D has nothing after → strip it.
-fn query_end_pos(store: &RecordStore, record_idx: u32, record_pos: u32) -> u32 {
+fn query_end_pos<U>(store: &RecordStore<U>, record_idx: u32, record_pos: u32) -> u32 {
     let cigar = store.cigar(record_idx);
 
     // Walk backwards to find trailing ref-consuming, non-query-consuming ops
@@ -254,7 +212,11 @@ fn query_end_pos(store: &RecordStore, record_idx: u32, record_pos: u32) -> u32 {
 }
 
 /// Read the inserted bases from a record's sequence.
-fn read_inserted_bases(store: &RecordStore, record_idx: u32, op: &PileupOp) -> Option<Vec<u8>> {
+fn read_inserted_bases<U>(
+    store: &RecordStore<U>,
+    record_idx: u32,
+    op: &PileupOp,
+) -> Option<Vec<u8>> {
     let (qpos, insert_len) = match op {
         PileupOp::Insertion { qpos, insert_len, .. } if *insert_len > 0 => (*qpos, *insert_len),
         _ => return None,
