@@ -234,11 +234,22 @@ fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
 /// caller materializes a `CramError::Truncated` from the `None` only on
 /// the err path — see the helper-module comment for the size + drop
 /// story.
+///
+/// Two unrolled read steps cover the common 1- and 2-byte cases as
+/// straight-line code (matching htslib's 16-bit renorm pattern). The
+/// tail `while` only fires on malformed data where the state was
+/// near zero. `wrapping_shl` + `|` replaces `checked_*` because
+/// `s < 0x8000` guarantees `s << 16 ≤ 0x7FFF0000` (always fits in u32).
 #[inline]
 fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Option<u32> {
     if s < (1 << 15) {
-        let lo = u32::from(read_u16_le(src)?);
-        s = s.checked_shl(16).and_then(|hi| hi.checked_add(lo))?;
+        s = s.wrapping_shl(16) | u32::from(read_u16_le(src)?);
+        if s < (1 << 15) {
+            s = s.wrapping_shl(16) | u32::from(read_u16_le(src)?);
+            while s < (1 << 15) {
+                s = s.wrapping_shl(16) | u32::from(read_u16_le(src)?);
+            }
+        }
     }
     Some(s)
 }
