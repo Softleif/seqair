@@ -4,6 +4,7 @@
 //! (8 × u32 per register), processing 32 states in 4 groups.
 #![allow(clippy::indexing_slicing, reason = "SIMD lane indices bounded by step_by(8) with j<32")]
 
+#[cfg(target_arch = "x86_64")]
 use super::reader::CramError;
 
 #[cfg(target_arch = "x86_64")]

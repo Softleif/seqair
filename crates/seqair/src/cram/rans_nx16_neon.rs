@@ -7,6 +7,7 @@
     reason = "SIMD lane indices are compiler-checked array access; bounds guaranteed by j<32 invariant"
 )]
 
+#[cfg(target_arch = "aarch64")]
 use super::reader::CramError;
 
 #[cfg(target_arch = "aarch64")]
