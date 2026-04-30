@@ -84,7 +84,7 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
             let out_idx = si
                 .checked_mul(chunk_size)
                 .and_then(|base| base.checked_add(pos))
-                .ok_or(CramError::Truncated { context: "rans order-1 out_idx overflow" })?;
+                .ok_or_else(|| CramError::Truncated { context: "rans order-1 out_idx overflow" })?;
             let ctx = prev_syms[si] as usize;
             let f = (states[si] & 0x0FFF) as u16;
             let sym = sym_tables[ctx][f as usize];
@@ -100,9 +100,9 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     }
 
     // Remainder: state 3 handles trailing bytes
-    let remainder_start = 4usize
-        .checked_mul(chunk_size)
-        .ok_or(CramError::Truncated { context: "rans order-1 remainder offset overflow" })?;
+    let remainder_start = 4usize.checked_mul(chunk_size).ok_or_else(|| CramError::Truncated {
+        context: "rans order-1 remainder offset overflow",
+    })?;
     for pos in remainder_start..dst.len() {
         let ctx = prev_syms[3] as usize;
         let f = (states[3] & 0x0FFF) as u16;
@@ -239,25 +239,34 @@ fn build_symbol_table(cum_freq: &[u16; ALPHABET_SIZE]) -> [u8; 4096] {
     table
 }
 
+// `ok_or_else` (not `ok_or`) is load-bearing in these per-byte helpers.
+// `CramError` is sized for its largest variant (Open carries a `PathBuf`
+// + `std::io::Error`, IndexParse owns paths, etc.) and the type has a
+// real Drop. `ok_or` evaluates the error eagerly, so on every call the
+// Truncated variant is built on the stack and then *dropped* even on
+// the success path — the drop must dispatch on the discriminant. samply
+// flagged `drop_in_place<CramError>` next to `read_u8` for exactly this
+// reason. The closure form is lazy: nothing built, nothing dropped on
+// the hot path.
 fn read_u8(src: &mut &[u8]) -> Result<u8, CramError> {
-    let &b = src.first().ok_or(CramError::Truncated { context: "rans u8" })?;
-    *src = src.get(1..).ok_or(CramError::Truncated { context: "rans u8" })?;
+    let &b = src.first().ok_or_else(|| CramError::Truncated { context: "rans u8" })?;
+    *src = src.get(1..).ok_or_else(|| CramError::Truncated { context: "rans u8" })?;
     Ok(b)
 }
 
 fn read_u32_le(src: &mut &[u8]) -> Result<u32, CramError> {
-    let bytes = src.get(..4).ok_or(CramError::Truncated { context: "rans u32" })?;
+    let bytes = src.get(..4).ok_or_else(|| CramError::Truncated { context: "rans u32" })?;
     let val = u32::from_le_bytes(
         bytes.try_into().map_err(|_| CramError::Truncated { context: "rans u32" })?,
     );
-    *src = src.get(4..).ok_or(CramError::Truncated { context: "rans u32" })?;
+    *src = src.get(4..).ok_or_else(|| CramError::Truncated { context: "rans u32" })?;
     Ok(val)
 }
 
 fn read_itf8_u16(src: &mut &[u8]) -> Result<u16, CramError> {
     // ITF8 for frequency table values (they fit in u16)
     let val = super::varint::read_itf8_from(src)
-        .ok_or(CramError::Truncated { context: "rans frequency itf8" })?;
+        .ok_or_else(|| CramError::Truncated { context: "rans frequency itf8" })?;
     #[expect(
         clippy::cast_possible_truncation,
         reason = "rANS frequency table values are bounded by 4096 (12-bit), fits in u16"
