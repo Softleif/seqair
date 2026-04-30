@@ -287,12 +287,13 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
     let truncated = || CramError::Truncated { context: "rans_nx16 order-0 truncated" };
     let frequencies = read_frequencies_0(src)?;
     let cumulative_frequencies = build_cumulative_frequencies(&frequencies);
+    let sym_table = build_symbol_table_nx16(&cumulative_frequencies);
     let mut states = read_states(src, state_count)?;
 
     for chunk in dst.chunks_mut(states.len()) {
         for (d, state) in chunk.iter_mut().zip(states.iter_mut()) {
             let f = state_cumulative_frequency(*state, ORDER_0_BITS);
-            let sym = cumulative_frequencies_symbol(&cumulative_frequencies, f);
+            let sym = sym_table[f as usize];
             *d = sym;
             let i = usize::from(sym);
             *state = state_step(
@@ -366,6 +367,25 @@ fn build_cumulative_frequencies(frequencies: &[u32; ALPHABET_SIZE]) -> [u32; ALP
     }
 
     cumulative_frequencies
+}
+
+/// Pre-computed symbol table for order-0: `table[f]` returns the symbol
+/// whose cumulative frequency range contains `f` (0 ≤ f < 4096).
+/// Eliminates the per-state linear scan in `cumulative_frequencies_symbol`.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "sym ≤ 254 (loop guard), sym+1 ≤ 255 < ALPHABET_SIZE=256"
+)]
+fn build_symbol_table_nx16(cum: &[u32; ALPHABET_SIZE]) -> [u8; 4096] {
+    let mut table = [0u8; 4096];
+    let mut sym = 0u8;
+    for (f, entry) in (0u32..4096).zip(&mut table) {
+        while sym < 255 && f >= *cum.get(usize::from(sym).wrapping_add(1)).unwrap_or(&u32::MAX) {
+            sym = sym.wrapping_add(1);
+        }
+        *entry = sym;
+    }
+    table
 }
 
 fn decode_order_1_with_buf(
@@ -885,5 +905,46 @@ mod tests {
             matches!(result, Err(CramError::FrequencyNormalizationOverflow { .. })),
             "expected overflow error, got: {result:?}"
         );
+    }
+
+    #[test]
+    fn build_symbol_table_matches_linear_scan() {
+        // Verify the pre-computed 4096-entry table matches
+        // cumulative_frequencies_symbol for all 4096 possible f values.
+        let freq: [u32; 256] = {
+            let mut f = [0u32; 256];
+            // A non-trivial frequency distribution
+            f[0] = 100;
+            f[1] = 200;
+            f[2] = 50;
+            f[3] = 3646; // sum = 3996, leaving 100 for rest
+            f[4] = 100;
+            f
+        };
+        let cum = build_cumulative_frequencies(&freq);
+        let table = build_symbol_table_nx16(&cum);
+
+        for f_val in 0u32..4096 {
+            let expected = cumulative_frequencies_symbol(&cum, f_val);
+            let actual = table[f_val as usize];
+            assert_eq!(
+                actual, expected,
+                "mismatch at f={f_val}: table gives {actual}, linear scan gives {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_symbol_table_matches_linear_scan_uniform() {
+        // Also test with uniformly distributed frequencies (every symbol same freq)
+        let freq = [16u32; 256]; // 256 * 16 = 4096
+        let cum = build_cumulative_frequencies(&freq);
+        let table = build_symbol_table_nx16(&cum);
+
+        for f_val in 0u32..4096 {
+            let expected = cumulative_frequencies_symbol(&cum, f_val);
+            let actual = table[f_val as usize];
+            assert_eq!(actual, expected);
+        }
     }
 }
