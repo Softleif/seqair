@@ -129,6 +129,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     cigar_ops_buf: &mut Vec<(u32, u8)>,
     customize: &mut E,
     rans_4x8_buf: &mut Option<super::rans::Rans4x8Buf>,
+    nx16_order1_buf: &mut Option<super::rans_nx16::Nx16Order1Buf>,
 ) -> Result<(usize, usize), CramError> {
     let slice_data = container_data
         .get(slice_offset..)
@@ -136,7 +137,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
 
     // Parse slice header block
     let (slice_header_block, mut pos) =
-        block::parse_block_with_buf(slice_data, rans_4x8_buf.as_mut())?;
+        block::parse_block_with_buf(slice_data, rans_4x8_buf.as_mut(), nx16_order1_buf.as_mut())?;
     if slice_header_block.content_type != ContentType::SliceHeader {
         return Err(CramError::ExpectedSliceHeader { found: slice_header_block.content_type });
     }
@@ -189,7 +190,11 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     for _ in 0..sh.num_blocks {
         let remaining =
             slice_data.get(pos..).ok_or(CramError::Truncated { context: "slice block" })?;
-        let (blk, consumed) = block::parse_block_with_buf(remaining, rans_4x8_buf.as_mut())?;
+        let (blk, consumed) = block::parse_block_with_buf(
+            remaining,
+            rans_4x8_buf.as_mut(),
+            nx16_order1_buf.as_mut(),
+        )?;
         pos = pos.wrapping_add(consumed);
 
         match blk.content_type {
@@ -1177,6 +1182,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut (),
+            &mut None,
             &mut None,
         );
 

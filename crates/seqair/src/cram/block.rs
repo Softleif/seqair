@@ -40,22 +40,22 @@ pub struct Block {
 // r[impl cram.block.crc32]
 /// Returns the block and the number of bytes consumed from `buf`.
 pub fn parse_block(buf: &[u8]) -> Result<(Block, usize), CramError> {
-    parse_block_inner(buf, None)
+    parse_block_inner(buf, None, None)
 }
 
-/// Parse a CRAM block, optionally reusing an [`crate::cram::rans::Rans4x8Buf`]
-/// for rANS 4x8 decompression. Use this on the hot path to avoid 1.25 MB of
-/// re-allocation per order-1 block.
+/// Parse a CRAM block, optionally reusing rANS buffers for the hot path.
 pub(crate) fn parse_block_with_buf(
     buf: &[u8],
     rans_4x8_buf: Option<&mut super::rans::Rans4x8Buf>,
+    nx16_order1_buf: Option<&mut super::rans_nx16::Nx16Order1Buf>,
 ) -> Result<(Block, usize), CramError> {
-    parse_block_inner(buf, rans_4x8_buf)
+    parse_block_inner(buf, rans_4x8_buf, nx16_order1_buf)
 }
 
 fn parse_block_inner(
     buf: &[u8],
     rans_4x8_buf: Option<&mut super::rans::Rans4x8Buf>,
+    nx16_order1_buf: Option<&mut super::rans_nx16::Nx16Order1Buf>,
 ) -> Result<(Block, usize), CramError> {
     let mut pos = 0;
 
@@ -133,6 +133,7 @@ fn parse_block_inner(
         content_type_byte,
         content_id,
         rans_4x8_buf,
+        nx16_order1_buf,
     )?;
 
     Ok((Block { content_type, content_id, data }, pos))
@@ -145,6 +146,7 @@ fn decompress_block(
     content_type: u8,
     content_id: i32,
     rans_4x8_buf: Option<&mut super::rans::Rans4x8Buf>,
+    nx16_order1_buf: Option<&mut super::rans_nx16::Nx16Order1Buf>,
 ) -> Result<Vec<u8>, CramError> {
     match method {
         // r[impl cram.codec.raw]
@@ -185,7 +187,10 @@ fn decompress_block(
             None => super::rans::decode(compressed),
         },
         // r[impl cram.codec.rans_nx16]
-        5 => super::rans_nx16::decode(compressed, uncompressed_size),
+        5 => match nx16_order1_buf {
+            Some(buf) => super::rans_nx16::decode_with_buf(compressed, uncompressed_size, buf),
+            None => super::rans_nx16::decode(compressed, uncompressed_size),
+        },
         // r[impl cram.codec.tok3]
         8 => super::tok3::decode(compressed),
         // r[impl cram.codec.unknown]

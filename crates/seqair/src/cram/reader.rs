@@ -9,6 +9,7 @@ use super::{
     container::ContainerHeader,
     index::{self, CramIndex, CramIndexError},
     rans::Rans4x8Buf,
+    rans_nx16::Nx16Order1Buf,
     slice,
 };
 use crate::bam::cigar::CigarOp;
@@ -283,6 +284,9 @@ pub struct IndexedCramReader<R: Read + Seek = File> {
     /// Reused across blocks: rANS 4x8 order-1 tables (1.25 MB).
     /// Lazily allocated on first order-1 block.
     rans_4x8_buf: Option<Rans4x8Buf>,
+    /// Reused across blocks: rANS Nx16 order-1 tables (∼512 KB).
+    /// Lazily allocated on first order-1 block.
+    nx16_order1_buf: Option<Nx16Order1Buf>,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for IndexedCramReader<R> {
@@ -351,6 +355,7 @@ impl IndexedCramReader<File> {
             feature_byte_buf: Vec::new(),
             cigar_ops_buf: Vec::new(),
             rans_4x8_buf: None,
+            nx16_order1_buf: None,
         })
     }
 
@@ -372,6 +377,7 @@ impl IndexedCramReader<File> {
             feature_byte_buf: Vec::new(),
             cigar_ops_buf: Vec::new(),
             rans_4x8_buf: None,
+            nx16_order1_buf: None,
         })
     }
 }
@@ -437,6 +443,8 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
             name_buf: Vec::new(),
             feature_byte_buf: Vec::new(),
             cigar_ops_buf: Vec::new(),
+            rans_4x8_buf: None,
+            nx16_order1_buf: None,
         })
     }
 }
@@ -672,6 +680,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &mut self.cigar_ops_buf,
                     customize,
                     &mut self.rans_4x8_buf,
+                    &mut self.nx16_order1_buf,
                 )?;
                 fetched_total = fetched_total.saturating_add(slice_fetched);
                 kept_total = kept_total.saturating_add(slice_kept);

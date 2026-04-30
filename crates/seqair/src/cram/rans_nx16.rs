@@ -24,8 +24,53 @@ const FLAG_CAT: u8 = 0x20;
 const FLAG_RLE: u8 = 0x40;
 const FLAG_PACK: u8 = 0x80;
 
-/// Decode a rANS Nx16 compressed block.
-pub fn decode(src: &[u8], mut uncompressed_size: usize) -> Result<Vec<u8>, CramError> {
+type Frequencies1 = Box<[[u32; ALPHABET_SIZE]; ALPHABET_SIZE]>;
+type CumulativeFrequencies1 = Box<[[u32; ALPHABET_SIZE]; ALPHABET_SIZE]>;
+
+/// Reusable allocations for rANS Nx16 order-1 decoding (∼512 KB).
+///
+/// Holds the per-context frequency and cumulative-frequency tables
+/// so they aren't `Box::new`'d for every order-1 block.
+pub(crate) struct Nx16Order1Buf {
+    pub frequencies: Frequencies1,
+    pub cumulative_frequencies: CumulativeFrequencies1,
+    pub states: Vec<u32>,
+    pub prev_syms: Vec<u8>,
+}
+
+impl Nx16Order1Buf {
+    pub fn new() -> Self {
+        Self {
+            frequencies: Box::new([[0u32; ALPHABET_SIZE]; ALPHABET_SIZE]),
+            cumulative_frequencies: Box::new([[0u32; ALPHABET_SIZE]; ALPHABET_SIZE]),
+            states: Vec::with_capacity(32),
+            prev_syms: Vec::with_capacity(32),
+        }
+    }
+}
+
+impl Default for Nx16Order1Buf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Decode a rANS Nx16 compressed block (allocating path — for callers
+/// without a reusable buffer). Prefer [`decode_with_buf`] on the hot path.
+pub fn decode(src: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, CramError> {
+    let mut buf = Nx16Order1Buf::new();
+    decode_with_buf(src, uncompressed_size, &mut buf)
+}
+
+/// Decode a rANS Nx16 compressed block, reusing the caller-owned
+/// [`Nx16Order1Buf`] for order-1 tables. Order-0 and transform paths
+/// don't touch `buf` (the stripe path re-enters via `decode_with_buf`
+/// for each sub-block).
+pub(crate) fn decode_with_buf(
+    src: &[u8],
+    mut uncompressed_size: usize,
+    buf: &mut Nx16Order1Buf,
+) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
 
     let flags =
@@ -38,7 +83,7 @@ pub fn decode(src: &[u8], mut uncompressed_size: usize) -> Result<Vec<u8>, CramE
     super::reader::check_alloc_size(uncompressed_size, "rANS Nx16 output")?;
 
     if flags & FLAG_STRIPE != 0 {
-        return decode_stripe(&mut cur, uncompressed_size);
+        return decode_stripe_with_buf(&mut cur, uncompressed_size, buf);
     }
 
     let bit_pack_ctx = if flags & FLAG_PACK != 0 {
@@ -65,7 +110,7 @@ pub fn decode(src: &[u8], mut uncompressed_size: usize) -> Result<Vec<u8>, CramE
     } else if flags & FLAG_ORDER == 0 {
         decode_order_0(&mut cur, &mut dst, state_count)?;
     } else {
-        decode_order_1(&mut cur, &mut dst, state_count)?;
+        decode_order_1_with_buf(&mut cur, &mut dst, state_count, buf)?;
     }
 
     if let Some(ctx) = rle_ctx {
@@ -323,38 +368,42 @@ fn build_cumulative_frequencies(frequencies: &[u32; ALPHABET_SIZE]) -> [u32; ALP
     cumulative_frequencies
 }
 
-// ── Order-1 ──────────────────────────────────────────────────────────
+fn decode_order_1_with_buf(
+    src: &mut &[u8],
+    dst: &mut [u8],
+    state_count: usize,
+    buf: &mut Nx16Order1Buf,
+) -> Result<(), CramError> {
+    let bits = read_frequencies_1(src, &mut buf.frequencies)?;
+    build_cumulative_frequencies_1_into(&buf.frequencies, &mut buf.cumulative_frequencies);
 
-type Frequencies1 = Box<[[u32; ALPHABET_SIZE]; ALPHABET_SIZE]>;
-type CumulativeFrequencies1 = Box<[[u32; ALPHABET_SIZE]; ALPHABET_SIZE]>;
+    let states = &mut buf.states;
+    states.clear();
+    (0..state_count)
+        .try_for_each(|_| -> Option<()> {
+            states.push(read_u32_le(src)?);
+            Some(())
+        })
+        .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 states" })?;
 
-#[allow(
-    clippy::indexing_slicing,
-    reason = "k/l ≤ 255 (from u8 prev_sym/sym), arrays are [ALPHABET_SIZE=256]"
-)]
-fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result<(), CramError> {
-    let mut frequencies = Box::new([[0u32; ALPHABET_SIZE]; ALPHABET_SIZE]);
-    let bits = read_frequencies_1(src, &mut frequencies)?;
-    let cumulative_frequencies = build_cumulative_frequencies_1(&frequencies);
-
-    let mut states = read_states(src, state_count)?;
-    let mut prev_syms = vec![0u8; state_count];
+    let prev_syms = &mut buf.prev_syms;
+    prev_syms.clear();
+    prev_syms.resize(state_count, 0);
 
     let chunk_size = dst
         .len()
         .checked_div(state_count)
         .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 zero state count" })?;
 
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "k/l ≤ 255, state/prev_sym indices from enumerate < state_count"
+    )]
     for i in 0..chunk_size {
-        for (j, (state, prev_sym)) in states.iter_mut().zip(&mut prev_syms).enumerate() {
+        for (j, (state, prev_sym)) in states.iter_mut().zip(prev_syms.iter_mut()).enumerate() {
             let k = usize::from(*prev_sym);
             let f = state_cumulative_frequency(*state, bits);
-            let sym = cumulative_frequencies_symbol(
-                cumulative_frequencies
-                    .get(k)
-                    .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 cumfreq" })?,
-                f,
-            );
+            let sym = cumulative_frequencies_symbol(&buf.cumulative_frequencies[k], f);
 
             let out_idx =
                 j.checked_mul(chunk_size).and_then(|v| v.checked_add(i)).ok_or_else(|| {
@@ -364,7 +413,8 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
                 .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 output" })? = sym;
 
             let l = usize::from(sym);
-            *state = state_step(*state, frequencies[k][l], cumulative_frequencies[k][l], bits);
+            *state =
+                state_step(*state, buf.frequencies[k][l], buf.cumulative_frequencies[k][l], bits);
             *state = state_renormalize(*state, src)
                 .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 renormalize" })?;
             *prev_sym = sym;
@@ -386,10 +436,11 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
         for d in last_chunk {
             let k = usize::from(prev_sym);
             let f = state_cumulative_frequency(state, bits);
-            let sym = cumulative_frequencies_symbol(&cumulative_frequencies[k], f);
+            let sym = cumulative_frequencies_symbol(&buf.cumulative_frequencies[k], f);
             *d = sym;
             let l = usize::from(sym);
-            state = state_step(state, frequencies[k][l], cumulative_frequencies[k][l], bits);
+            state =
+                state_step(state, buf.frequencies[k][l], buf.cumulative_frequencies[k][l], bits);
             state = state_renormalize(state, src).ok_or_else(|| CramError::Truncated {
                 context: "rans_nx16 order-1 last renormalize",
             })?;
@@ -398,6 +449,15 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
     }
 
     Ok(())
+}
+
+fn build_cumulative_frequencies_1_into(
+    frequencies: &Frequencies1,
+    cf: &mut CumulativeFrequencies1,
+) {
+    for (f, g) in frequencies.iter().zip(cf.iter_mut()) {
+        *g = build_cumulative_frequencies(f);
+    }
 }
 
 fn read_frequencies_1(src: &mut &[u8], frequencies: &mut Frequencies1) -> Result<u32, CramError> {
@@ -459,17 +519,13 @@ fn read_frequencies_1_inner(
     Ok(())
 }
 
-fn build_cumulative_frequencies_1(frequencies: &Frequencies1) -> CumulativeFrequencies1 {
-    let mut cf = Box::new([[0u32; ALPHABET_SIZE]; ALPHABET_SIZE]);
-    for (f, g) in frequencies.iter().zip(cf.iter_mut()) {
-        *g = build_cumulative_frequencies(f);
-    }
-    cf
-}
-
 // ── Stripe transform ─────────────────────────────────────────────────
 
-fn decode_stripe(src: &mut &[u8], uncompressed_size: usize) -> Result<Vec<u8>, CramError> {
+fn decode_stripe_with_buf(
+    src: &mut &[u8],
+    uncompressed_size: usize,
+    buf: &mut Nx16Order1Buf,
+) -> Result<Vec<u8>, CramError> {
     let chunk_count = read_u8(src)
         .ok_or_else(|| CramError::Truncated { context: "rans_nx16 stripe chunk count" })?
         as usize;
@@ -480,7 +536,6 @@ fn decode_stripe(src: &mut &[u8], uncompressed_size: usize) -> Result<Vec<u8>, C
     let compressed_sizes: Vec<usize> =
         (0..chunk_count).map(|_| read_uint7(src).map(|n| n as usize)).collect::<Result<_, _>>()?;
 
-    // chunk_count > 0 is checked above; checked_div is still used to satisfy the lint.
     let q = uncompressed_size.checked_div(chunk_count).ok_or(CramError::RansStripeZeroChunks)?;
     let r = uncompressed_size.checked_rem(chunk_count).ok_or(CramError::RansStripeZeroChunks)?;
     let uncompressed_sizes: Vec<usize> =
@@ -490,8 +545,8 @@ fn decode_stripe(src: &mut &[u8], uncompressed_size: usize) -> Result<Vec<u8>, C
         .iter()
         .zip(&uncompressed_sizes)
         .map(|(&cs, &us)| {
-            let buf = split_off(src, cs)?;
-            decode(buf, us)
+            let sub = split_off(src, cs)?;
+            decode_with_buf(sub, us, buf)
         })
         .collect::<Result<_, _>>()?;
 
