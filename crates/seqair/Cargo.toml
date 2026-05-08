@@ -6,6 +6,7 @@ description = "Pure-Rust BAM/SAM/CRAM/FASTA reader and pileup engine"
 repository = "https://github.com/Softleif/seqair"
 license = "MIT OR Apache-2.0"
 rust-version = "1.92.0"
+readme = "../../README.md"
 
 [package.metadata.docs.rs]
 cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
