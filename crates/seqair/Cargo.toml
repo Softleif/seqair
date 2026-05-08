@@ -23,7 +23,7 @@ indexmap = "2"
 itoa = "1"
 libdeflater = "1.25.2"
 ryu = "1"
-seqair-types = { version = "0.1.0", path = "../seqair-types" }
+seqair-types = { version = "^0.1.0", path = "../seqair-types" }
 rustc-hash = "2.1.2"
 flate2 = "1.1.9"
 bzip2 = "0.6.1"
