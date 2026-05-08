@@ -61,8 +61,8 @@ const MAX_TILE_LEN: u32 = 1_000_000;
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
-    let mut readers =
-        Readers::open(&args.input, &args.reference).context("could not open alignment file")?;
+    let mut readers = Readers::open(&args.input, args.reference.as_path())
+        .context("could not open alignment file")?;
 
     let mut output: Box<dyn Write> = if let Some(out) = &args.out {
         let file =

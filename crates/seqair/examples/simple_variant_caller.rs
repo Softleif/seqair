@@ -144,7 +144,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut readers =
-        Readers::<DropUseless>::open_customized(&args.input, &args.reference, DropUseless)
+        Readers::<DropUseless>::open_customized(&args.input, args.reference.as_path(), DropUseless)
             .context("could not open BAM + FASTA")?;
 
     // ── Build VCF header ───────────────────────────────────────────────

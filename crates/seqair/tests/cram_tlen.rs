@@ -151,7 +151,7 @@ fn assert_cram_fields_with_tlen(name: &str) {
         .expect("samtools index");
     assert!(status.success(), "samtools index failed for {name}");
 
-    let mut readers = seqair::reader::Readers::open(&cram_copy, &ref_fasta)
+    let mut readers = seqair::reader::Readers::open(&cram_copy, ref_fasta.as_path())
         .unwrap_or_else(|e| panic!("{name}: open failed: {e:#}"));
     let tid = readers.header().tid("ref").expect("contig 'ref'");
     let mut store = RecordStore::new();

@@ -192,14 +192,16 @@ fn fork_works_for_both_formats() {
 
 // r[verify unified.detect_format]
 // r[verify unified.readers_backward_compat]
+// r[verify cram.fasta.optional]
+/// `IndexedReader::open` MUST accept a CRAM file without a FASTA. Open is
+/// always allowed to succeed; missing-reference errors only surface at fetch
+/// time.
 #[test]
-fn indexed_reader_open_rejects_cram_without_fasta() {
-    let err = IndexedReader::open(test_cram_path()).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("CRAM") && msg.contains("reference"),
-        "error should mention CRAM and reference: {msg}"
-    );
+fn indexed_reader_open_accepts_cram_without_fasta() {
+    let reader = IndexedReader::open(test_cram_path())
+        .expect("IndexedReader::open must accept CRAM without a FASTA");
+    assert!(matches!(reader, IndexedReader::Cram(_)));
+    assert!(reader.header().target_count() > 0);
 }
 
 // ── Readers struct tests ─────────────────────────────────────────────

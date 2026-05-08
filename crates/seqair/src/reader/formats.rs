@@ -72,13 +72,6 @@ pub fn detect(path: &Path) -> Result<Format, ReaderError> {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum FormatDetectionError {
-    #[error(
-        "CRAM format detected but no FASTA reference provided. \
-         Use Readers::open(alignment_path, fasta_path) instead, \
-         or convert to BAM with `samtools view -b`"
-    )]
-    CramRequiresFasta,
-
     #[error("file too short to determine format ({len} bytes)")]
     FileTooShort { path: PathBuf, len: u64 },
 

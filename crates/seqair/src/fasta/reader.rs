@@ -62,6 +62,9 @@ pub enum FastaError {
 
     #[error("BGZF FASTA missing GZI index (internal error)")]
     MissingGzi,
+
+    #[error("no FASTA reference attached; reopen with `Readers::open` to enable reference lookups")]
+    NotConfigured,
 }
 
 fn format_available_sequences(available: &[SmolStr]) -> String {

@@ -114,6 +114,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     slice_offset: usize,
     reference_seq: &[u8],
     ref_start_0based: i64,
+    fasta_available: bool,
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     tid: u32,
@@ -221,6 +222,21 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     };
     let effective_ref: &[u8] =
         if sh.embedded_reference >= 0 { &embedded_ref_data } else { reference_seq };
+
+    // r[impl cram.fasta.optional]
+    // r[impl cram.edge.missing_reference]
+    // The reader was opened without a FASTA, the writer set RR=true, and this
+    // slice does not embed its own reference — bases cannot be reconstructed.
+    // Surface a typed error rather than silently producing N's.
+    if !fasta_available
+        && ch.preservation.reference_required
+        && sh.embedded_reference < 0
+        && sh.ref_seq_id >= 0
+    {
+        return Err(CramError::MissingReference {
+            contig: header.target_name(tid).unwrap_or("?").into(),
+        });
+    }
 
     let core_data = core_block.ok_or(CramError::MissingCoreDataBlock)?;
 
@@ -1358,6 +1374,7 @@ mod tests {
             first_landmark as usize,
             &fake_ref,
             ref_start,
+            true,
             &bam_header,
             &[],
             0,

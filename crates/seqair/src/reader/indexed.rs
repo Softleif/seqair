@@ -1,5 +1,5 @@
 use super::ReaderError;
-use super::formats::{self, Format, FormatDetectionError};
+use super::formats::{self, Format};
 use crate::{
     bam::{
         BamHeader, IndexedBamReader,
@@ -106,29 +106,26 @@ impl<R: Read + Seek> IndexedReader<R> {
 
 // r[impl unified.reader_api]
 impl IndexedReader<std::fs::File> {
-    /// Open a BAM or bgzf-compressed SAM file, auto-detecting the format.
+    /// Open a BAM, bgzf-compressed SAM, or CRAM file, auto-detecting the format.
     ///
-    /// CRAM files are detected but require a FASTA reference — use
-    /// [`crate::Readers::open`] instead. This method returns an error for CRAM
-    /// with a message directing the user to provide a reference.
+    /// For CRAM, opening without a FASTA always succeeds; missing-reference
+    /// errors only surface at fetch time when a slice actually needs an
+    /// external reference (`r[cram.fasta.optional]`).
     // r[impl unified.readers_backward_compat]
     #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, ReaderError> {
-        match formats::detect(path)? {
-            Format::Bam => {
-                let reader = IndexedBamReader::open(path)?;
-                Ok(IndexedReader::Bam(reader))
-            }
-            Format::Sam => {
-                let reader = IndexedSamReader::open(path)?;
-                Ok(IndexedReader::Sam(reader))
-            }
-            Format::Cram => Err(FormatDetectionError::CramRequiresFasta.into()),
-        }
+        Self::open_with_optional_fasta(path, None)
     }
 
     /// Open any format, with a FASTA path for CRAM support.
     pub(crate) fn open_with_fasta(path: &Path, fasta_path: &Path) -> Result<Self, ReaderError> {
+        Self::open_with_optional_fasta(path, Some(fasta_path))
+    }
+
+    fn open_with_optional_fasta(
+        path: &Path,
+        fasta_path: Option<&Path>,
+    ) -> Result<Self, ReaderError> {
         match formats::detect(path)? {
             Format::Bam => {
                 let reader = IndexedBamReader::open(path)?;
@@ -139,7 +136,10 @@ impl IndexedReader<std::fs::File> {
                 Ok(IndexedReader::Sam(reader))
             }
             Format::Cram => {
-                let reader = IndexedCramReader::open(path, fasta_path)?;
+                let reader = match fasta_path {
+                    Some(fp) => IndexedCramReader::open(path, fp)?,
+                    None => IndexedCramReader::open_without_reference(path)?,
+                };
                 Ok(IndexedReader::Cram(Box::new(reader)))
             }
         }
@@ -163,17 +163,19 @@ mod tests {
     use std::io::Write as _;
     use tempfile::NamedTempFile;
 
+    // r[verify cram.fasta.optional]
+    /// `IndexedReader::open` MUST accept CRAM files without a FASTA. The
+    /// reader fails with a downstream CRAM error (here, missing CRAI for our
+    /// stub file) rather than with `CramRequiresFasta`.
     #[test]
-    fn cram_requires_fasta() {
-        // A file starting with the CRAM magic bytes — IndexedReader::open (no FASTA)
-        // must return CramRequiresFasta.
+    fn cram_open_without_fasta_does_not_short_circuit() {
         let mut f = NamedTempFile::new().expect("tempfile");
         f.write_all(b"CRAM\x03\x00").expect("write");
         f.flush().expect("flush");
         let err = IndexedReader::open(f.path()).unwrap_err();
         assert!(
-            matches!(err, ReaderError::Format { source: FormatDetectionError::CramRequiresFasta }),
-            "unexpected error: {err}"
+            !matches!(&err, ReaderError::Format { .. }),
+            "open should reach the CRAM reader, not error during format detection: {err}"
         );
     }
 }

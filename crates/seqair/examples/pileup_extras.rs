@@ -95,8 +95,9 @@ impl CustomizeRecordStore for ReadInfoBuilder {
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
-    let mut readers = Readers::open_customized(&args.input, &args.reference, ReadInfoBuilder)
-        .context("could not open BAM + FASTA")?;
+    let mut readers =
+        Readers::open_customized(&args.input, args.reference.as_path(), ReadInfoBuilder)
+            .context("could not open BAM + FASTA")?;
 
     // Tile the requested region into 100 kb segments. Unmapped/secondary
     // records are already dropped at push time by `ReadInfoBuilder::keep_record`,

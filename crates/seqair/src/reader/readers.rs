@@ -120,7 +120,10 @@ use tracing::instrument;
 // r[impl unified.readers_struct]
 pub struct Readers<E: CustomizeRecordStore = ()> {
     pub(crate) alignment: IndexedReader,
-    pub(crate) fasta: IndexedFastaReader,
+    /// Optional FASTA reference — `None` when opened via
+    /// [`Readers::open_without_reference`] or
+    /// [`Readers::open_customized_without_reference`].
+    pub(crate) fasta: Option<IndexedFastaReader>,
     pub(crate) store: RecordStore<E::Extra>,
     pub(crate) fasta_buf: Vec<u8>,
     pub(crate) customize: E,
@@ -133,13 +136,34 @@ impl<E: CustomizeRecordStore> std::fmt::Debug for Readers<E> {
 }
 
 impl Readers<()> {
-    /// Open an alignment file (BAM/SAM/CRAM) and a FASTA reference.
+    /// Open an alignment file (BAM/SAM/CRAM) with an optional FASTA reference.
     ///
-    /// Auto-detects the alignment format. For CRAM, the FASTA path is passed
-    /// to the CRAM reader for sequence reconstruction.
+    /// `fasta_path` accepts both `&Path` (FASTA attached) and `Option<&Path>`
+    /// (`Some(path)` for FASTA, `None` for none) — pick whichever reads
+    /// nicer at the call site:
+    ///
+    /// ```no_run
+    /// # use seqair::reader::Readers;
+    /// # use std::path::Path;
+    /// # fn ex() -> Result<(), Box<dyn std::error::Error>> {
+    /// let _with    = Readers::open(Path::new("a.bam"), Path::new("ref.fa"))?;
+    /// let _no_ref  = Readers::open(Path::new("a.bam"), None)?;
+    /// let _maybe   = Readers::open(Path::new("a.bam"), Some(Path::new("ref.fa")))?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Auto-detects the alignment format. For CRAM, the FASTA path (if any)
+    /// is passed to the CRAM reader for sequence reconstruction; CRAM follows
+    /// `r[cram.fasta.optional]` and only errors at fetch time when a slice
+    /// actually needs an external reference. With no FASTA, `pileup()` skips
+    /// the FASTA fetch and every `PileupColumn::reference_base()` reports
+    /// `Base::Unknown`.
     // r[impl unified.readers_open]
-    #[instrument(level = "debug", fields(alignment = %alignment_path.display(), fasta = %fasta_path.display()))]
-    pub fn open(alignment_path: &Path, fasta_path: &Path) -> Result<Self, ReaderError> {
+    pub fn open<'a>(
+        alignment_path: &Path,
+        fasta_path: impl Into<Option<&'a Path>>,
+    ) -> Result<Self, ReaderError> {
         Self::open_customized(alignment_path, fasta_path, ())
     }
 }
@@ -148,15 +172,24 @@ impl<E: CustomizeRecordStore> Readers<E> {
     // r[impl unified.readers_open_customized]
     /// Open like [`open`](Readers::open) but attach a [`CustomizeRecordStore`]
     /// value so per-record filtering and extras computation runs every time
-    /// records are loaded.
-    pub fn open_customized(
+    /// records are loaded. `fasta_path` accepts both `&Path` and
+    /// `Option<&Path>`, identically to [`open`](Readers::open).
+    #[instrument(level = "debug", skip(fasta_path, customize), fields(alignment = %alignment_path.display()))]
+    pub fn open_customized<'a>(
         alignment_path: &Path,
-        fasta_path: &Path,
+        fasta_path: impl Into<Option<&'a Path>>,
         customize: E,
     ) -> Result<Self, ReaderError> {
-        let fasta = IndexedFastaReader::open(fasta_path)
-            .map_err(|source| ReaderError::FastaOpen { source })?;
-        let alignment = IndexedReader::open_with_fasta(alignment_path, fasta_path)?;
+        let fasta_path: Option<&Path> = fasta_path.into();
+        let (alignment, fasta) = match fasta_path {
+            Some(fp) => {
+                let fasta = IndexedFastaReader::open(fp)
+                    .map_err(|source| ReaderError::FastaOpen { source })?;
+                let alignment = IndexedReader::open_with_fasta(alignment_path, fp)?;
+                (alignment, Some(fasta))
+            }
+            None => (IndexedReader::open(alignment_path)?, None),
+        };
         Ok(Readers {
             alignment,
             fasta,
@@ -166,13 +199,17 @@ impl<E: CustomizeRecordStore> Readers<E> {
         })
     }
 
-    /// Fork both the alignment reader and the FASTA reader.
+    /// Fork both the alignment reader and the FASTA reader (if any).
     ///
     /// The customize value is cloned so each fork has its own copy.
     // r[impl unified.readers_fork]
+    // r[impl unified.fork_cram]
     pub fn fork(&self) -> Result<Self, ReaderError> {
         let alignment = self.alignment.fork()?;
-        let fasta = self.fasta.fork().map_err(|source| ReaderError::FastaFork { source })?;
+        let fasta = match self.fasta.as_ref() {
+            Some(f) => Some(f.fork().map_err(|source| ReaderError::FastaFork { source })?),
+            None => None,
+        };
         Ok(Readers {
             alignment,
             fasta,
@@ -329,24 +366,32 @@ impl<E: CustomizeRecordStore> Readers<E> {
         let customize = &mut self.customize;
         alignment.fetch_into_customized(tid.as_u32(), start, end, store, customize)?;
 
-        // Fetch `[start, end]` (inclusive). FASTA APIs expect half-open [start, stop).
-        // Use the u64 path so `end == Pos0::max_value()` doesn't truncate the
-        // last reference base — `stop = end + 1` is i32::MAX + 1, which doesn't
-        // fit in a Pos0 but does fit comfortably in a u64.
+        // Fetch `[start, end]` (inclusive) when a FASTA is attached. With no
+        // FASTA the engine simply has no reference window — `reference_base`
+        // returns `Base::Unknown` per `r[pileup.reference_base.optional]`.
+        // FASTA APIs expect half-open [start, stop). Use the u64 path so
+        // `end == Pos0::max_value()` doesn't truncate the last reference
+        // base — `stop = end + 1` is i32::MAX + 1, which doesn't fit in a
+        // Pos0 but does fit comfortably in a u64.
         let contig_name = segment.contig();
-        let stop_u64 = end.as_u64().saturating_add(1);
-        self.fasta
-            .fetch_seq_into_u64(contig_name, start.as_u64(), stop_u64, &mut self.fasta_buf)
-            .map_err(|source| ReaderError::FastaFetch {
-            contig: contig_name.clone(),
-            start: start.as_u64(),
-            end: end.as_u64(),
-            source,
-        })?;
-        // Convert in-place and copy into the Rc<[Base]> while keeping
-        // `fasta_buf` (and its capacity) for the next pileup call.
-        let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);
-        let ref_seq = RefSeq::new(Rc::from(bases), start);
+        let ref_seq = match self.fasta.as_mut() {
+            Some(fasta) => {
+                let stop_u64 = end.as_u64().saturating_add(1);
+                fasta
+                    .fetch_seq_into_u64(contig_name, start.as_u64(), stop_u64, &mut self.fasta_buf)
+                    .map_err(|source| ReaderError::FastaFetch {
+                        contig: contig_name.clone(),
+                        start: start.as_u64(),
+                        end: end.as_u64(),
+                        source,
+                    })?;
+                // Convert in-place and copy into the Rc<[Base]> while keeping
+                // `fasta_buf` (and its capacity) for the next pileup call.
+                let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);
+                Some(RefSeq::new(Rc::from(bases), start))
+            }
+            None => None,
+        };
 
         // Move the populated store into the engine. After this `mem::take`,
         // `self.store` holds a default (empty) RecordStore — the slot the
@@ -354,33 +399,37 @@ impl<E: CustomizeRecordStore> Readers<E> {
         let store = std::mem::take(&mut self.store);
 
         let mut engine = PileupEngine::new(store, start, end);
-        engine.set_reference_seq(ref_seq);
+        if let Some(rs) = ref_seq {
+            engine.set_reference_seq(rs);
+        }
         Ok(PileupGuard::new(engine, &mut self.store))
     }
 
-    pub fn fasta(&self) -> &IndexedFastaReader {
-        &self.fasta
+    /// Borrow the FASTA reader, if one is attached.
+    pub fn fasta(&self) -> Option<&IndexedFastaReader> {
+        self.fasta.as_ref()
     }
 
-    pub fn fasta_mut(&mut self) -> &mut IndexedFastaReader {
-        &mut self.fasta
+    /// Mutably borrow the FASTA reader, if one is attached.
+    pub fn fasta_mut(&mut self) -> Option<&mut IndexedFastaReader> {
+        self.fasta.as_mut()
     }
 
     // r[impl fasta.fetch.buffer_reuse]
     /// Fetch a reference sequence region and return it as `Rc<[Base]>`.
     ///
-    /// Uses an internal buffer whose capacity is retained across calls. The
-    /// returned `Rc<[Base]>` owns its own copy of the bases — the internal
-    /// buffer is converted in place and the slice is copied into the `Rc`
-    /// allocation, so we pay one allocation for the `Rc` and zero for the
-    /// buffer on subsequent calls.
+    /// Returns `Err(FastaError::NotConfigured)` when this `Readers` was
+    /// opened without a FASTA. Otherwise uses an internal buffer whose
+    /// capacity is retained across calls; the returned `Rc<[Base]>` owns its
+    /// own copy of the bases.
     pub fn fetch_base_seq(
         &mut self,
         name: &str,
         start: Pos0,
         stop: Pos0,
     ) -> Result<Rc<[Base]>, FastaError> {
-        self.fasta.fetch_seq_into(name, start, stop, &mut self.fasta_buf)?;
+        let fasta = self.fasta.as_mut().ok_or(FastaError::NotConfigured)?;
+        fasta.fetch_seq_into(name, start, stop, &mut self.fasta_buf)?;
         // Convert ASCII → Base in place; the &[Base] borrow keeps fasta_buf
         // alive (and its capacity).
         let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);

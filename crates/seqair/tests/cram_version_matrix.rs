@@ -336,7 +336,8 @@ fn cram_embedded_reference() {
     assert!(samtools_count > 0, "embedded-ref CRAM should have records");
 
     // seqair reads the same CRAM with the external FASTA
-    let mut readers = Readers::open(&cram, &htslib_fasta("c1.fa")).expect("seqair: open");
+    let fasta = htslib_fasta("c1.fa");
+    let mut readers = Readers::open(&cram, fasta.as_path()).expect("seqair: open");
     let tid = readers.header().tid("c1").expect("tid");
     let mut store = RecordStore::new();
     readers

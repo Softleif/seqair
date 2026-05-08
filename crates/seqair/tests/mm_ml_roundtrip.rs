@@ -223,7 +223,8 @@ fn mm_ml_cram_roundtrip() {
     assert!(status.success());
 
     // Read CRAM with seqair
-    let mut readers = seqair::reader::Readers::open(&cram_path, &ref_path).expect("open CRAM");
+    let mut readers =
+        seqair::reader::Readers::open(&cram_path, ref_path.as_path()).expect("open CRAM");
     let tid = readers.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     readers

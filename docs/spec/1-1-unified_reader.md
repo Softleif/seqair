@@ -90,7 +90,7 @@ r[unified.fork_sam]
 SAM fork: shares `Arc` holding parsed tabix/CSI index + header, opens fresh `File` handle for BGZF reading.
 
 r[unified.fork_cram]
-CRAM fork: shares `Arc` holding CRAI index + header, opens fresh `File` handle for container reading. Each fork MUST have its own FASTA reader (via `fasta_reader.fork()`) for thread-safe reference lookups. Reference caching (`r[cram.perf.reference_caching]`) MUST be per-fork, not shared.
+CRAM fork: shares `Arc` holding CRAI index + header, opens fresh `File` handle for container reading. When the source reader carries a FASTA, each fork MUST also have its own FASTA reader (via `fasta_reader.fork()`) for thread-safe reference lookups. When the source reader was opened without a FASTA (`r[cram.fasta.optional]`), the fork MUST also have no FASTA. Reference caching (`r[cram.perf.reference_caching]`) MUST be per-fork, not shared.
 
 ## Readers: alignment + reference bundle
 
@@ -98,10 +98,10 @@ r[unified.readers_struct]
 The `Readers` struct bundles an `IndexedReader` (alignment) with an `IndexedFastaReader` (reference) in a single type. This eliminates the need for separate FASTA path passing — CRAM can access the reference it needs for sequence reconstruction, and all formats have uniform open/fork semantics. `Readers` is parameterized on `E: CustomizeRecordStore = ()` so callers can attach a per-record customize value at open time (see `r[record_store.customize.trait]`); the customize value's `keep_record` runs at fetch time and `compute` runs by `pileup()` after every fetch.
 
 r[unified.readers_open]
-`Readers::open(alignment_path, fasta_path)` MUST auto-detect the alignment format (via `r[unified.detect_format]`), open the appropriate reader, and open the FASTA reader. For CRAM, the fasta_path is passed to `IndexedCramReader::open()` for sequence reconstruction. For BAM/SAM, the FASTA reader is opened but not used by the alignment reader. `Readers::open` is only available when `E = ()`; for non-trivial customizers use `open_customized`.
+`Readers::open(alignment_path, fasta_path)` MUST auto-detect the alignment format (via `r[unified.detect_format]`) and open the appropriate reader. The `fasta_path` parameter MUST accept both a `&Path` (FASTA attached) and `Option<&Path>` (`None` for no FASTA, `Some(path)` for FASTA) — concretely, the parameter type is `impl Into<Option<&Path>>`, so `Readers::open(bam, &ref_fa)`, `Readers::open(bam, Some(&ref_fa))`, and `Readers::open(bam, None)` MUST all compile and work. With a FASTA, the path is passed to `IndexedCramReader::open()` for CRAM sequence reconstruction; for BAM/SAM the FASTA reader is opened but not used during decoding. With no FASTA, the alignment reader is opened reference-free: BAM and SAM never need a reference for record decoding, and CRAM follows `r[cram.fasta.optional]`. The returned `Readers` then carries `fasta = None`, so `pileup()` MUST skip the FASTA fetch and the resulting `PileupColumn::reference_base()` MUST be `Base::Unknown` for every column; callers that later need bases for a CRAM slice without an embedded reference will see `CramError::MissingReference` propagated through `ReaderError::Cram`. `Readers::open` is only available when `E = ()`; for non-trivial customizers use `open_customized`.
 
 r[unified.readers_open_customized]
-`Readers::<E>::open_customized(alignment_path, fasta_path, customize)` MUST open the readers the same way as `Readers::open` but carry the user-supplied customize value along for `pileup()` to invoke on each fetched region. The customize value is stored by ownership inside the `Readers` struct.
+`Readers::<E>::open_customized(alignment_path, fasta_path, customize)` MUST open the readers the same way as `Readers::open` (including the `impl Into<Option<&Path>>` polymorphism for the FASTA argument) but carry the user-supplied customize value along for `pileup()` to invoke on each fetched region. The customize value is stored by ownership inside the `Readers` struct.
 
 r[unified.readers_fork]
 `Readers::fork()` MUST fork both the alignment reader and the FASTA reader, returning a new `Readers` with independent I/O handles but shared immutable state (indices, headers). The CRAM fork gets its own FASTA reader via `IndexedFastaReader::fork()`. When `E ≠ ()`, `fork()` MUST clone the customize value into the new `Readers` (the `Clone` bound on `CustomizeRecordStore` guarantees this is cheap).
@@ -279,7 +279,7 @@ r[unified.fetch_counts]
 > - `customize() -> &E` / `customize_mut() -> &mut E` — direct access to inspect or reset the customize value's state between regions.
 
 r[unified.readers_backward_compat]
-`IndexedReader::open(path)` MUST continue to work for BAM and SAM files without a FASTA path. CRAM detection in `IndexedReader::open()` MUST return an error explaining that CRAM requires a reference and suggesting `Readers::open()` instead. This preserves backward compatibility for code that only needs BAM/SAM.
+`IndexedReader::open(path)` MUST continue to work for BAM, SAM, and CRAM files without a FASTA path. For CRAM the reader follows `r[cram.fasta.optional]`: opening always succeeds, and missing-reference errors only surface at fetch time when a slice actually needs an external reference.
 
 ## API surface
 

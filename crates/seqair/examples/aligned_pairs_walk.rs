@@ -84,8 +84,8 @@ struct Counts {
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
-    let mut readers =
-        Readers::open(&args.input, &args.reference).context("could not open BAM + FASTA")?;
+    let mut readers = Readers::open(&args.input, args.reference.as_path())
+        .context("could not open BAM + FASTA")?;
 
     // Resolve the region against the BAM header. `RegionString` is parsed
     // by clap; here we lift its `(name, Pos1, Pos1)` into the engine's

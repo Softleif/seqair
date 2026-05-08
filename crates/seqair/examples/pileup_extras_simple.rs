@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut readers = Readers::open_customized(
         &args.input,
-        &args.reference,
+        args.reference.as_path(),
         ReadInfoBuilder { min_mapq: args.min_mapq },
     )?;
     let max_len = std::num::NonZeroU32::new(100_000).expect("non-zero literal");

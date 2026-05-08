@@ -18,9 +18,12 @@ The reader MUST support CRAM v3.0 and v3.1. CRAM v2.0 and v2.1 MAY be supported 
 The reader is read-only. CRAM writing is out of scope — rastair writes BAM (via htslib) for output.
 
 r[cram.scope.reference_required]
-CRAM decoding requires access to the reference genome (FASTA). The reader MUST accept a FASTA reader (the one being built on the other branch) for sequence lookups. Embedded reference slices (where the reference is stored in the CRAM container itself) MUST also be supported as a fallback.
+CRAM record decoding can require access to a reference genome (FASTA), but the FASTA is _optional_ at open time: many fields (header, CRAI, slice metadata, position, flags, MAPQ, CIGAR, qname, mate info, qualities, aux tags) decode without any reference. Bases need a reference _only_ when the writer set `RR=true` in the compression header _and_ the slice does not embed its own reference. The reader MUST therefore accept opening with no FASTA and only error out at fetch time when a slice actually needs an external reference (`RR=true` and `embedded_reference < 0` and `ref_seq_id >= 0`). When a FASTA is supplied, the reader MUST use it; embedded reference slices MUST always take precedence over the external FASTA, including when the FASTA is also present.
 
 Note: htslib supports automatic reference download via `REF_PATH`/`REF_CACHE` environment variables and the EBI reference server. This is out of scope for seqair, but when the FASTA reader is missing or the required contig is absent, the error message SHOULD mention `REF_PATH`/`REF_CACHE` as an alternative for users familiar with the htslib workflow.
+
+r[cram.fasta.optional]
+`IndexedCramReader::open(path)` and the FASTA-less constructor on the unified reader MUST succeed for any well-formed CRAM file regardless of whether bases will later be decodable. The decision "does this slice need an external reference?" is taken at fetch time by inspecting the container's compression-header `RR` flag and the slice's `embedded_reference` field. When `RR=false` the reader MUST skip the external FASTA fetch entirely (records carry their bases verbatim or as deltas against the embedded ref). When `embedded_reference >= 0` the reader MUST use the embedded block and MUST NOT consult the external FASTA. When `RR=true` _and_ `embedded_reference < 0` _and_ `ref_seq_id >= 0` _and_ no FASTA was supplied at open, the reader MUST return `CramError::MissingReference` for that slice — silently producing `N` bases is forbidden.
 
 ## File structure
 
@@ -504,7 +507,7 @@ r[cram.edge.reference_mismatch]
 If the reference MD5 in the slice header does not match the MD5 of the FASTA sequence for that region, the reader MUST return an error. The MD5 is computed over the uppercase reference sequence for the exact range `[alignment_start, alignment_start + alignment_span)`, with no newlines or other formatting. If the range extends beyond the reference length, this is a file/reference mismatch error.
 
 r[cram.edge.missing_reference]
-If the FASTA reader cannot provide the reference sequence for a slice's region (e.g., contig not in FASTA), the reader MUST return an error unless the slice has an embedded reference. The error SHOULD mention `REF_PATH`/`REF_CACHE` as alternatives.
+If the FASTA reader cannot provide the reference sequence for a slice's region (e.g., contig not in FASTA), or no FASTA was supplied at open (`r[cram.fasta.optional]`), the reader MUST return `CramError::MissingReference` _unless_ the slice has an embedded reference (`embedded_reference >= 0`) or the container's compression header has `RR=false`. The error SHOULD mention `REF_PATH`/`REF_CACHE` as alternatives. The check MUST happen before record reconstruction so that "missing reference" surfaces as a typed error rather than as silent `N` bases.
 
 r[cram.edge.unknown_read_names]
 When `RN=false` in the preservation map, read names are not available. The reader MUST log a warning (once per slice). Records without read names are stored with empty qnames. The pileup engine's overlapping-pair dedup MUST skip records with empty or `*` qnames, since mate matching requires real qnames.

@@ -250,7 +250,11 @@ pub struct CramShared {
     /// re-scanning the header text.
     pub read_group_ids: Vec<SmolStr>,
     pub cram_path: PathBuf,
-    pub fasta_path: PathBuf,
+    /// Path of the FASTA reference, if one was supplied at open time.
+    /// `None` when the reader was opened without a reference
+    /// (`r[cram.fasta.optional]`); `MissingReference` is then surfaced lazily
+    /// at fetch time only for slices that actually need an external reference.
+    pub fasta_path: Option<PathBuf>,
 }
 
 /// Parse `@RG ID:` values from SAM header text in declaration order.
@@ -272,7 +276,9 @@ fn parse_read_group_ids(header_text: &str) -> Vec<SmolStr> {
 
 pub struct IndexedCramReader<R: Read + Seek = File> {
     file: R,
-    fasta: IndexedFastaReader<R>,
+    /// Optional FASTA for sequence reconstruction. `None` when the reader was
+    /// opened without a reference (`r[cram.fasta.optional]`).
+    fasta: Option<IndexedFastaReader<R>>,
     shared: Arc<CramShared>,
     // Scratch buffers reused across fetch_into calls. The per-record
     // ones (`name_buf`, `feature_byte_buf`, `cigar_ops_buf`) used to be
@@ -311,6 +317,18 @@ impl IndexedCramReader<File> {
     /// Open a CRAM file with a FASTA reference for sequence reconstruction.
     #[instrument(level = "debug", fields(cram = %cram_path.display(), fasta = %fasta_path.display()))]
     pub fn open(cram_path: &Path, fasta_path: &Path) -> Result<Self, CramError> {
+        Self::open_optional_fasta(cram_path, Some(fasta_path))
+    }
+
+    /// Open a CRAM file without a FASTA reference. See `r[cram.fasta.optional]`:
+    /// open always succeeds, and `MissingReference` is only surfaced at fetch
+    /// time for slices that actually need an external reference.
+    #[instrument(level = "debug", fields(cram = %cram_path.display()))]
+    pub fn open_without_reference(cram_path: &Path) -> Result<Self, CramError> {
+        Self::open_optional_fasta(cram_path, None)
+    }
+
+    fn open_optional_fasta(cram_path: &Path, fasta_path: Option<&Path>) -> Result<Self, CramError> {
         let mut file = File::open(cram_path)
             .map_err(|source| CramError::Open { path: cram_path.to_path_buf(), source })?;
 
@@ -342,8 +360,8 @@ impl IndexedCramReader<File> {
         let cram_index = CramIndex::from_path(&crai_path)?;
 
         // r[impl cram.scope.reference_required]
-        // Open FASTA reader
-        let fasta = IndexedFastaReader::open(fasta_path)?;
+        // r[impl cram.fasta.optional]
+        let fasta = fasta_path.map(IndexedFastaReader::open).transpose()?;
 
         let read_group_ids = parse_read_group_ids(header.header_text());
 
@@ -355,7 +373,7 @@ impl IndexedCramReader<File> {
                 header,
                 read_group_ids,
                 cram_path: cram_path.to_path_buf(),
-                fasta_path: fasta_path.to_path_buf(),
+                fasta_path: fasta_path.map(Path::to_path_buf),
             }),
             container_buf: Vec::new(),
             cigar_buf: Vec::new(),
@@ -371,10 +389,14 @@ impl IndexedCramReader<File> {
         })
     }
 
+    // r[impl unified.fork_cram]
     pub fn fork(&self) -> Result<Self, CramError> {
         let file = File::open(&self.shared.cram_path)
             .map_err(|source| CramError::Open { path: self.shared.cram_path.clone(), source })?;
-        let fasta = self.fasta.fork()?;
+        let fasta = match self.fasta.as_ref() {
+            Some(f) => Some(f.fork()?),
+            None => None,
+        };
         Ok(IndexedCramReader {
             file,
             fasta,
@@ -438,13 +460,13 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
 
         Ok(IndexedCramReader {
             file: Cursor::new(cram_data),
-            fasta,
+            fasta: Some(fasta),
             shared: Arc::new(CramShared {
                 index: cram_index,
                 header,
                 read_group_ids,
                 cram_path: PathBuf::from("<fuzz>"),
-                fasta_path: PathBuf::from("<fuzz>"),
+                fasta_path: Some(PathBuf::from("<fuzz>")),
             }),
             container_buf: Vec::new(),
             cigar_buf: Vec::new(),
@@ -650,9 +672,21 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             };
 
             self.ref_seq_buf.clear();
-            if ref_start < ref_end_clamped {
+            // r[impl cram.fasta.optional]
+            // Only fetch external reference bytes when this container's
+            // compression header says they're needed AND we actually have a
+            // FASTA. When `RR=false`, records carry their bases verbatim or
+            // as deltas against an embedded reference, so the FASTA fetch is
+            // pure waste. When the FASTA is missing, we leave `ref_seq_buf`
+            // empty and let `decode_slice` decide whether the slice can still
+            // be decoded (embedded ref or unmapped) or must error out
+            // (`r[cram.edge.missing_reference]`).
+            if ref_start < ref_end_clamped
+                && ch.preservation.reference_required
+                && let Some(fasta) = self.fasta.as_mut()
+            {
                 // r[impl cram.edge.missing_reference]
-                self.fasta
+                fasta
                     .fetch_seq_into(
                         ref_name,
                         Pos0::try_from(ref_start)
@@ -673,6 +707,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                         _ => CramError::from(e),
                     })?;
             }
+            let fasta_available = self.fasta.is_some();
 
             // Decode each slice listed by CRAI as overlapping our query.
             // CRAI's `slice_offset` matches the container's landmark value
@@ -697,6 +732,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     slice_offset,
                     &self.ref_seq_buf,
                     ref_start.cast_signed(),
+                    fasta_available,
                     &self.shared.header,
                     &self.shared.read_group_ids,
                     tid,
@@ -849,6 +885,28 @@ mod tests {
         assert!(
             msg.contains("UTF-8") || msg.contains("utf-8") || msg.contains("valid"),
             "message: {msg}"
+        );
+    }
+
+    // r[verify cram.fasta.optional]
+    #[test]
+    fn open_without_reference_succeeds() {
+        let reader = IndexedCramReader::open_without_reference(cram_path()).unwrap();
+        assert!(reader.header().target_count() > 0);
+    }
+
+    // r[verify cram.edge.missing_reference]
+    #[test]
+    fn fetch_without_reference_errors_when_slice_needs_fasta() {
+        let mut reader = IndexedCramReader::open_without_reference(cram_path()).unwrap();
+        let mut store = RecordStore::new();
+        let tid = 0;
+        let err = reader
+            .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::max_value(), &mut store)
+            .expect_err("CRAM with external-only ref must error without FASTA");
+        assert!(
+            matches!(err, CramError::MissingReference { .. }),
+            "expected MissingReference, got {err:?}"
         );
     }
 }
