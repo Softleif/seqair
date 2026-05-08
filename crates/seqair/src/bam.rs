@@ -40,6 +40,7 @@
 // r[impl io.minimal_public_api]
 pub mod aligned_pairs;
 pub mod aligned_pairs_view;
+#[path = "bam/aux_.rs"]
 pub mod aux;
 pub mod aux_data;
 pub mod base_mod;
