@@ -70,6 +70,22 @@ impl SlimRecord {
         self.n_cigar_ops as usize
     }
 
+    // r[impl record_store.end_pos_htslib]
+    /// htslib-compatible end position.
+    ///
+    /// For mapped reads, this is the 0-based exclusive end computed from CIGAR
+    /// (same as [`end_pos`](Self::end_pos)). For unmapped reads, returns `pos`
+    /// — htslib ignores the CIGAR and reports `end = start + 1`, which for
+    /// 0-based exclusive semantics is `pos`.
+    ///
+    /// Use this when iterating records for counting/coverage tools that need
+    /// htslib-compatible alignment spans (e.g., perbase `only-depth`).
+    #[must_use]
+    #[inline]
+    pub fn end_pos_htslib(&self) -> Pos0 {
+        if self.flags.is_unmapped() { self.pos } else { self.end_pos }
+    }
+
     /// Read this record's qname bytes from the store's name slab.
     pub fn qname<'store, U>(
         &self,
@@ -1516,6 +1532,70 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.record(0).next_ref_id, 3);
+    }
+
+    // r[verify record_store.end_pos_htslib]
+    #[test]
+    fn end_pos_htslib_mapped_uses_cigar_derived() {
+        use seqair_types::{BamFlags, Base};
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(100).unwrap(),
+                Pos0::new(104).unwrap(), // 0-based inclusive, 5M: span = [100, 104]
+                BamFlags::empty(),       // mapped
+                30,
+                5,
+                0,
+                b"read1",
+                &[CigarOp::new(cigar::CigarOpType::Match, 5)],
+                &[Base::A; 5],
+                &[30; 5],
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                &mut (),
+            )
+            .unwrap();
+        let rec = store.record(0);
+        assert_eq!(rec.end_pos, Pos0::new(104).unwrap());
+        assert_eq!(rec.end_pos_htslib(), Pos0::new(104).unwrap());
+    }
+
+    // r[verify record_store.end_pos_htslib]
+    #[test]
+    fn end_pos_htslib_unmapped_ignores_cigar() {
+        use seqair_types::bam_flags::consts::FLAG_UNMAPPED;
+        use seqair_types::{BamFlags, Base};
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(100).unwrap(),
+                Pos0::new(199).unwrap(), // CIGAR-derived: 100M → span [100, 199]
+                BamFlags::from(FLAG_UNMAPPED), // unmapped
+                0,
+                100,
+                0,
+                b"read1",
+                &[CigarOp::new(cigar::CigarOpType::Match, 100)],
+                &[Base::A; 100],
+                &[0; 100],
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                &mut (),
+            )
+            .unwrap();
+        let rec = store.record(0);
+        assert!(rec.flags.is_unmapped());
+        // CIGAR-derived end_pos is still stored
+        assert_eq!(rec.end_pos, Pos0::new(199).unwrap());
+        // htslib-compatible end_pos ignores CIGAR for unmapped reads
+        assert_eq!(rec.end_pos_htslib(), Pos0::new(100).unwrap());
     }
 
     // ---- Model-based property tests for rollback ----
