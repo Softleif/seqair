@@ -166,6 +166,115 @@ fn base_qual_at<U>(
     (store.seq_at(active.record_idx, qpos as usize), q)
 }
 
+// r[impl pileup.summary_base_counts]
+/// Counts of canonical and unknown bases observed in a pileup column.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BaseCounts {
+    /// Count of `A` bases.
+    pub a: usize,
+    /// Count of `C` bases.
+    pub c: usize,
+    /// Count of `G` bases.
+    pub g: usize,
+    /// Count of `T` bases.
+    pub t: usize,
+    /// Count of unknown bases.
+    pub unknown: usize,
+}
+
+impl BaseCounts {
+    /// Add one observed base to the counts.
+    pub fn add_base(&mut self, base: Base) {
+        match base {
+            Base::A => self.a = self.a.saturating_add(1),
+            Base::C => self.c = self.c.saturating_add(1),
+            Base::G => self.g = self.g.saturating_add(1),
+            Base::T => self.t = self.t.saturating_add(1),
+            Base::Unknown => self.unknown = self.unknown.saturating_add(1),
+        }
+    }
+}
+
+/// Counts of raw [`PileupOp`] variants observed in a pileup column.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PileupOpCounts {
+    /// Count of [`PileupOp::Match`] operations.
+    pub match_ops: usize,
+    /// Count of [`PileupOp::Insertion`] operations.
+    pub insertion_ops: usize,
+    /// Count of [`PileupOp::Deletion`] operations.
+    pub deletion_ops: usize,
+    /// Count of [`PileupOp::ComplexIndel`] operations.
+    pub complex_indel_ops: usize,
+    /// Count of [`PileupOp::RefSkip`] operations.
+    pub refskip_ops: usize,
+}
+
+// r[impl pileup.summary]
+// r[impl pileup.summary_indel_counts]
+/// Common counts for a single emitted pileup column.
+///
+/// Summary counts describe the same post-max-depth alignments exposed by
+/// [`PileupColumn::raw_alignments`]. They do not apply downstream read filters
+/// or base-quality thresholds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PileupSummary {
+    /// Total number of emitted alignments.
+    pub depth: usize,
+    /// Number of emitted alignments with a query base.
+    pub match_depth: usize,
+    /// Number of emitted alignments with an insertion signal.
+    pub insertion_count: usize,
+    /// Number of emitted alignments with a deletion signal.
+    pub deletion_count: usize,
+    /// Number of emitted alignments with a reference-skip signal.
+    pub ref_skip_count: usize,
+    /// Counts of raw pileup operation variants.
+    pub op_counts: PileupOpCounts,
+    /// Counts of bases from operations that carry a query base.
+    pub base_counts: BaseCounts,
+}
+
+impl PileupSummary {
+    /// Add one emitted alignment to the summary.
+    pub fn observe(&mut self, alignment: &PileupAlignment) {
+        self.depth = self.depth.saturating_add(1);
+        match alignment.op {
+            PileupOp::Match { base, .. } => {
+                self.match_depth = self.match_depth.saturating_add(1);
+                self.op_counts.match_ops = self.op_counts.match_ops.saturating_add(1);
+                self.base_counts.add_base(base);
+            }
+            PileupOp::Insertion { base, .. } => {
+                self.match_depth = self.match_depth.saturating_add(1);
+                self.insertion_count = self.insertion_count.saturating_add(1);
+                self.op_counts.insertion_ops = self.op_counts.insertion_ops.saturating_add(1);
+                self.base_counts.add_base(base);
+            }
+            PileupOp::Deletion { .. } => {
+                self.deletion_count = self.deletion_count.saturating_add(1);
+                self.op_counts.deletion_ops = self.op_counts.deletion_ops.saturating_add(1);
+            }
+            PileupOp::ComplexIndel { insert_len, is_refskip, .. } => {
+                self.op_counts.complex_indel_ops =
+                    self.op_counts.complex_indel_ops.saturating_add(1);
+                if insert_len > 0 {
+                    self.insertion_count = self.insertion_count.saturating_add(1);
+                }
+                if is_refskip {
+                    self.ref_skip_count = self.ref_skip_count.saturating_add(1);
+                } else {
+                    self.deletion_count = self.deletion_count.saturating_add(1);
+                }
+            }
+            PileupOp::RefSkip => {
+                self.ref_skip_count = self.ref_skip_count.saturating_add(1);
+                self.op_counts.refskip_ops = self.op_counts.refskip_ops.saturating_add(1);
+            }
+        }
+    }
+}
+
 // r[impl pileup.column_contents]
 // r[impl pileup.htslib_compat]
 // r[impl pileup.lending_iterator]
@@ -179,6 +288,7 @@ pub struct PileupColumn<'store, U = ()> {
     pos: Pos0,
     reference_base: Base,
     alignments: Vec<PileupAlignment>,
+    summary: PileupSummary,
     store: &'store RecordStore<U>,
 }
 
@@ -187,7 +297,7 @@ impl<U> std::fmt::Debug for PileupColumn<'_, U> {
         f.debug_struct("PileupColumn")
             .field("pos", &self.pos)
             .field("reference_base", &self.reference_base)
-            .field("depth", &self.alignments.len())
+            .field("depth", &self.summary.depth)
             .finish_non_exhaustive()
     }
 }
@@ -201,7 +311,7 @@ impl<'store, U> PileupColumn<'store, U> {
     // r[impl pileup_indel.depth_includes_all]
     #[must_use]
     pub fn depth(&self) -> usize {
-        self.alignments.len()
+        self.summary.depth
     }
 
     /// Iterate alignments with store access for per-record extras, qname, and aux.
@@ -228,6 +338,13 @@ impl<'store, U> PileupColumn<'store, U> {
         self.store
     }
 
+    /// Common counts for this emitted column.
+    // r[impl pileup.summary]
+    #[must_use]
+    pub fn summary(&self) -> &PileupSummary {
+        &self.summary
+    }
+
     /// Count of alignments with a query base at this position.
     ///
     /// Unlike [`depth`](Self::depth), deletions and ref-skips are not counted.
@@ -235,7 +352,37 @@ impl<'store, U> PileupColumn<'store, U> {
     /// the position with a base (e.g., for allele frequency calculations).
     #[must_use]
     pub fn match_depth(&self) -> usize {
-        self.alignments.iter().filter(|a| a.qpos().is_some()).count()
+        self.summary.match_depth
+    }
+
+    /// Count of alignments with an insertion signal at this position.
+    #[must_use]
+    pub fn insertion_count(&self) -> usize {
+        self.summary.insertion_count
+    }
+
+    /// Count of alignments with a deletion signal at this position.
+    #[must_use]
+    pub fn deletion_count(&self) -> usize {
+        self.summary.deletion_count
+    }
+
+    /// Count of alignments with a reference-skip signal at this position.
+    #[must_use]
+    pub fn ref_skip_count(&self) -> usize {
+        self.summary.ref_skip_count
+    }
+
+    /// Base counts for operations with a query base at this position.
+    #[must_use]
+    pub fn base_counts(&self) -> BaseCounts {
+        self.summary.base_counts
+    }
+
+    /// Raw pileup operation counts for this position.
+    #[must_use]
+    pub fn op_counts(&self) -> PileupOpCounts {
+        self.summary.op_counts
     }
 }
 
@@ -431,6 +578,153 @@ impl PileupAlignment {
     }
 }
 
+/// Metadata supplied when a custom pileup accumulator finishes a column.
+pub struct PileupColumnContext<'store, U> {
+    pos: Pos0,
+    reference_base: Base,
+    depth: usize,
+    store: &'store RecordStore<U>,
+}
+
+impl<'store, U> PileupColumnContext<'store, U> {
+    /// Reference position for the column.
+    #[must_use]
+    pub fn pos(&self) -> Pos0 {
+        self.pos
+    }
+
+    /// Reference base for the column, or [`Base::Unknown`] when unavailable.
+    pub fn reference_base(&self) -> Base {
+        self.reference_base
+    }
+
+    /// Number of alignments observed by the accumulator.
+    #[must_use]
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// Borrow the record store for per-record extras, names, and auxiliary data.
+    #[must_use]
+    pub fn store(&self) -> &'store RecordStore<U> {
+        self.store
+    }
+}
+
+// r[impl pileup.custom_aggregation]
+/// Accumulates caller-defined output while the pileup engine builds one column.
+///
+/// This is an opt-in alternative to [`PileupEngine::pileups`] for callers that
+/// want to compute per-column summaries without materializing a public
+/// [`PileupColumn`]. The accumulator observes the same post-max-depth
+/// alignments that `pileups()` would expose.
+pub trait PileupColumnAccumulator<U> {
+    /// Owned output produced for each emitted column.
+    type Output;
+
+    /// Start a new emitted pileup column.
+    fn begin_column(&mut self, pos: Pos0, reference_base: Base);
+
+    /// Optional reservation hint for accumulators that store per-alignment data.
+    fn reserve_column(&mut self, _active_upper_bound: usize) {}
+
+    /// Observe one emitted alignment.
+    fn observe_alignment(&mut self, alignment: PileupAlignment, store: &RecordStore<U>);
+
+    /// Finish the current emitted column.
+    ///
+    /// Returning `None` skips user-visible output for this column; iteration will
+    /// continue with the next column.
+    fn finish_column(&mut self, context: PileupColumnContext<'_, U>) -> Option<Self::Output>;
+}
+
+enum AccumulatorAdvance<T> {
+    End,
+    Skip,
+    Output(T),
+}
+
+struct MaterializedColumn {
+    pos: Pos0,
+    reference_base: Base,
+    alignments: Vec<PileupAlignment>,
+    summary: PileupSummary,
+}
+
+#[derive(Default)]
+struct MaterializeColumnAccumulator {
+    pos: Option<Pos0>,
+    reference_base: Base,
+    alignments: Vec<PileupAlignment>,
+    summary: PileupSummary,
+}
+
+impl<U> PileupColumnAccumulator<U> for MaterializeColumnAccumulator {
+    type Output = MaterializedColumn;
+
+    fn begin_column(&mut self, pos: Pos0, reference_base: Base) {
+        self.pos = Some(pos);
+        self.reference_base = reference_base;
+        self.alignments.clear();
+        self.summary = PileupSummary::default();
+    }
+
+    fn reserve_column(&mut self, active_upper_bound: usize) {
+        self.alignments.reserve(active_upper_bound);
+    }
+
+    fn observe_alignment(&mut self, alignment: PileupAlignment, _store: &RecordStore<U>) {
+        self.summary.observe(&alignment);
+        self.alignments.push(alignment);
+    }
+
+    fn finish_column(&mut self, _context: PileupColumnContext<'_, U>) -> Option<Self::Output> {
+        let pos = self.pos.take()?;
+        Some(MaterializedColumn {
+            pos,
+            reference_base: self.reference_base,
+            alignments: std::mem::take(&mut self.alignments),
+            summary: self.summary,
+        })
+    }
+}
+
+fn build_alignment<U>(
+    store: &RecordStore<U>,
+    active: &ActiveRecord,
+    pos: Pos0,
+) -> Option<PileupAlignment> {
+    let info = active.cigar.pos_info_at(pos)?;
+
+    let op = match info {
+        CigarPosInfo::Match { qpos } => {
+            let (base, qual) = base_qual_at(store, active, qpos);
+            PileupOp::Match { qpos, base, qual }
+        }
+        CigarPosInfo::Insertion { qpos, insert_len } => {
+            let (base, qual) = base_qual_at(store, active, qpos);
+            PileupOp::Insertion { qpos, base, qual, insert_len }
+        }
+        CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
+        // r[impl pileup_indel.complex_indel]
+        CigarPosInfo::ComplexIndel { del_len, insert_len, is_refskip } => {
+            PileupOp::ComplexIndel { del_len, insert_len, is_refskip }
+        }
+        CigarPosInfo::RefSkip => PileupOp::RefSkip,
+    };
+
+    Some(PileupAlignment {
+        op,
+        mapq: active.mapq,
+        flags: active.flags,
+        strand: active.strand,
+        seq_len: active.seq_len,
+        matching_bases: active.matching_bases,
+        indel_bases: active.indel_bases,
+        record_idx: active.record_idx,
+    })
+}
+
 impl<U> PileupEngine<U> {
     /// Create a pileup engine that owns the record store.
     pub fn new(store: RecordStore<U>, region_start: Pos0, region_end: Pos0) -> Self {
@@ -611,14 +905,15 @@ impl<U> Drop for PileupGuard<'_, U> {
 
 // r[impl pileup.position_iteration]
 impl<U> PileupEngine<U> {
-    /// Core iteration logic used by [`pileups`](Self::pileups).
-    ///
-    /// Returns the per-column data (pos, reference base, alignments) so the caller
-    /// can attach a store reference to build a [`PileupColumn`].
-    fn advance(&mut self) -> Option<(Pos0, Base, Vec<PileupAlignment>)> {
+    /// Core iteration logic used by [`pileups`](Self::pileups) and
+    /// [`pileup_with`](Self::pileup_with).
+    fn advance_with_accumulator<A>(&mut self, accumulator: &mut A) -> AccumulatorAdvance<A::Output>
+    where
+        A: PileupColumnAccumulator<U>,
+    {
         loop {
             if self.current_pos > self.region_end {
-                return None;
+                return AccumulatorAdvance::End;
             }
 
             let pos = self.current_pos;
@@ -629,10 +924,14 @@ impl<U> PileupEngine<U> {
                 reason = "infallible: current_pos <= region_end < u32::MAX - 1"
             )]
             {
-                self.current_pos = self
+                let Some(next_pos) = self
                     .current_pos
                     .checked_add_offset(Offset::new(1))
-                    .trace_err("BUG: current_pos + 1 overflowed despite being <= region_end")?;
+                    .trace_err("BUG: current_pos + 1 overflowed despite being <= region_end")
+                else {
+                    return AccumulatorAdvance::End;
+                };
+                self.current_pos = next_pos;
             }
 
             // Evict expired records. Iterate the compact end_pos vec (4-byte stride)
@@ -649,7 +948,12 @@ impl<U> PileupEngine<U> {
                         self.active_end_pos.swap_remove(i);
                         self.active.swap_remove(i);
                     } else {
-                        i = i.checked_add(1).trace_err("active set size exceeded usize::MAX")?;
+                        let Some(next_i) =
+                            i.checked_add(1).trace_err("active set size exceeded usize::MAX")
+                        else {
+                            return AccumulatorAdvance::End;
+                        };
+                        i = next_i;
                     }
                 }
             }
@@ -666,8 +970,12 @@ impl<U> PileupEngine<U> {
                 if rec.pos > pos {
                     break;
                 }
-                self.next_entry =
-                    self.next_entry.checked_add(1).trace_err("next_entry exceeded usize::MAX")?;
+                let Some(next_entry) =
+                    self.next_entry.checked_add(1).trace_err("next_entry exceeded usize::MAX")
+                else {
+                    return AccumulatorAdvance::End;
+                };
+                self.next_entry = next_entry;
 
                 if rec.end_pos < pos {
                     continue;
@@ -678,8 +986,11 @@ impl<U> PileupEngine<U> {
                     continue;
                 }
 
-                let cigar = CigarMapping::new(rec.pos, self.store.cigar(idx))
-                    .trace_err("failed to generate cigar mapping")?;
+                let Some(cigar) = CigarMapping::new(rec.pos, self.store.cigar(idx))
+                    .trace_err("failed to generate cigar mapping")
+                else {
+                    return AccumulatorAdvance::End;
+                };
 
                 self.active_end_pos.push(rec.end_pos);
                 self.active.push(ActiveRecord {
@@ -698,7 +1009,7 @@ impl<U> PileupEngine<U> {
             if self.active.is_empty() {
                 // r[impl pileup.trailing_empty_termination]
                 if self.next_entry >= self.store.len() {
-                    return None;
+                    return AccumulatorAdvance::End;
                 }
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -720,61 +1031,70 @@ impl<U> PileupEngine<U> {
             // r[impl pileup_indel.deletions_included]
             // r[impl pileup_indel.refskips_included]
             // r[related record_store.field_access]
-            // r[impl perf.reuse_alignment_vec+2]
-            let mut alignments = Vec::with_capacity(self.active.len());
+            // r[impl pileup.custom_aggregation_max_depth]
+            let max_depth = self.max_depth.map(|max| usize::try_from(max).unwrap_or(usize::MAX));
+            let mut emitted_depth = 0usize;
+            let mut started = false;
+            let reference_base = self.ref_seq.as_ref().map_or(Base::Unknown, |r| r.base_at(pos));
+
             for active in &self.active {
-                let Some(info) = active.cigar.pos_info_at(pos) else { continue };
+                if max_depth.is_some_and(|max| emitted_depth >= max) {
+                    break;
+                }
 
-                let op = match info {
-                    CigarPosInfo::Match { qpos } => {
-                        let (base, qual) = base_qual_at(&self.store, active, qpos);
-                        PileupOp::Match { qpos, base, qual }
-                    }
-                    CigarPosInfo::Insertion { qpos, insert_len } => {
-                        let (base, qual) = base_qual_at(&self.store, active, qpos);
-                        PileupOp::Insertion { qpos, base, qual, insert_len }
-                    }
-                    CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
-                    // r[impl pileup_indel.complex_indel]
-                    CigarPosInfo::ComplexIndel { del_len, insert_len, is_refskip } => {
-                        PileupOp::ComplexIndel { del_len, insert_len, is_refskip }
-                    }
-                    CigarPosInfo::RefSkip => PileupOp::RefSkip,
-                };
+                let Some(alignment) = build_alignment(&self.store, active, pos) else { continue };
 
-                alignments.push(PileupAlignment {
-                    op,
-                    mapq: active.mapq,
-                    flags: active.flags,
-                    strand: active.strand,
-                    seq_len: active.seq_len,
-                    matching_bases: active.matching_bases,
-                    indel_bases: active.indel_bases,
-                    record_idx: active.record_idx,
-                });
+                if !started {
+                    accumulator.begin_column(pos, reference_base);
+                    accumulator.reserve_column(self.active.len());
+                    started = true;
+                }
+
+                emitted_depth = emitted_depth.saturating_add(1);
+                accumulator.observe_alignment(alignment, &self.store);
             }
 
-            // r[impl pileup.max_depth_per_position]
-            if let Some(max) = self.max_depth {
-                alignments.truncate(max as usize);
-            }
-
-            if !alignments.is_empty() {
+            if emitted_depth > 0 {
                 self.columns_produced = self.columns_produced.saturating_add(1);
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "depth is bounded by max_depth (u32) or typical pileup sizes; saturates at u32::MAX for profiling"
-                )]
-                let depth_u32 = alignments.len() as u32;
+                let depth_u32 = u32::try_from(emitted_depth).unwrap_or(u32::MAX);
                 self.max_active_depth = self.max_active_depth.max(depth_u32);
-                let reference_base =
-                    self.ref_seq.as_ref().map_or(Base::Unknown, |r| r.base_at(pos));
-                return Some((pos, reference_base, alignments));
+                let context = PileupColumnContext {
+                    pos,
+                    reference_base,
+                    depth: emitted_depth,
+                    store: &self.store,
+                };
+                return match accumulator.finish_column(context) {
+                    Some(output) => AccumulatorAdvance::Output(output),
+                    None => AccumulatorAdvance::Skip,
+                };
+            }
+        }
+    }
+
+    // r[impl pileup.custom_aggregation]
+    /// Advance to the next accumulator-produced pileup output.
+    ///
+    /// The accumulator observes the same post-max-depth alignments that
+    /// [`pileups`](Self::pileups) would expose, but it can summarize them
+    /// without materializing a [`PileupColumn`]. If the accumulator returns
+    /// `None` from [`PileupColumnAccumulator::finish_column`], iteration skips
+    /// that column and continues to the next one.
+    pub fn pileup_with<A>(&mut self, accumulator: &mut A) -> Option<A::Output>
+    where
+        A: PileupColumnAccumulator<U>,
+    {
+        loop {
+            match self.advance_with_accumulator(accumulator) {
+                AccumulatorAdvance::End => return None,
+                AccumulatorAdvance::Skip => continue,
+                AccumulatorAdvance::Output(output) => return Some(output),
             }
         }
     }
 
     // r[impl pileup.lending_iterator]
+    // r[impl pileup.custom_aggregation_existing_api_unchanged]
     /// Advance to the next pileup column.
     ///
     /// Returns `Some(PileupColumn<'_, U>)` borrowing the record store. Call
@@ -786,8 +1106,15 @@ impl<U> PileupEngine<U> {
     /// subsequent `pileups` calls. Extract primitive data (pos, depth, etc.)
     /// if you need to retain it.
     pub fn pileups(&mut self) -> Option<PileupColumn<'_, U>> {
-        let (pos, reference_base, alignments) = self.advance()?;
-        Some(PileupColumn { pos, reference_base, alignments, store: &self.store })
+        let mut accumulator = MaterializeColumnAccumulator::default();
+        let materialized = self.pileup_with(&mut accumulator)?;
+        Some(PileupColumn {
+            pos: materialized.pos,
+            reference_base: materialized.reference_base,
+            alignments: materialized.alignments,
+            summary: materialized.summary,
+            store: &self.store,
+        })
     }
 
     /// Remaining positions in the current region — lower-bound estimate for

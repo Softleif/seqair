@@ -16,7 +16,9 @@ mod helpers;
 
 use helpers::{cigar_op, collect_columns, make_record, make_record_with_cigar};
 use proptest::prelude::*;
-use seqair::bam::pileup::RefSeq;
+use seqair::bam::pileup::{
+    BaseCounts, PileupColumnAccumulator, PileupColumnContext, PileupOpCounts, PileupSummary, RefSeq,
+};
 use seqair::bam::{Pos0, RecordStore, pileup::PileupEngine};
 use seqair_types::Base;
 use std::{cell::Cell, rc::Rc};
@@ -223,6 +225,214 @@ proptest! {
         let col50 = columns.iter().find(|c| c.pos() == Pos0::new(50).unwrap()).unwrap();
         prop_assert_eq!(col50.depth(), 2); // below cap
     }
+}
+
+// ---- pileup.summary + pileup.custom_aggregation ----
+
+fn summary_test_store() -> RecordStore {
+    let mut arena = RecordStore::new();
+    arena.push_raw(&make_record(0, 0, 99, 60, 1), &mut ()).unwrap();
+    arena.push_raw(&make_record(0, 0, 99, 60, 1), &mut ()).unwrap();
+    arena
+        .push_raw(
+            &make_record_with_cigar(0, 0, 99, 60, &[cigar_op(1, 0), cigar_op(1, 1)], 2),
+            &mut (),
+        )
+        .unwrap();
+    arena.push_raw(&make_record_with_cigar(0, 0, 99, 60, &[cigar_op(1, 2)], 0), &mut ()).unwrap();
+    arena.push_raw(&make_record_with_cigar(0, 0, 99, 60, &[cigar_op(1, 3)], 0), &mut ()).unwrap();
+    arena
+}
+
+// r[verify pileup.summary]
+// r[verify pileup.summary_matches_alignments]
+// r[verify pileup.summary_base_counts]
+// r[verify pileup.summary_indel_counts]
+#[test]
+fn pileup_summary_counts_emitted_alignments() {
+    let mut engine =
+        PileupEngine::new(summary_test_store(), Pos0::new(0).unwrap(), Pos0::new(0).unwrap());
+    let column = engine.pileups().unwrap();
+
+    let expected = PileupSummary {
+        depth: 5,
+        match_depth: 3,
+        insertion_count: 1,
+        deletion_count: 1,
+        ref_skip_count: 1,
+        op_counts: PileupOpCounts {
+            match_ops: 2,
+            insertion_ops: 1,
+            deletion_ops: 1,
+            complex_indel_ops: 0,
+            refskip_ops: 1,
+        },
+        base_counts: BaseCounts { a: 3, c: 0, g: 0, t: 0, unknown: 0 },
+    };
+
+    assert_eq!(*column.summary(), expected);
+    assert_eq!(column.depth(), expected.depth);
+    assert_eq!(column.match_depth(), expected.match_depth);
+    assert_eq!(column.insertion_count(), expected.insertion_count);
+    assert_eq!(column.deletion_count(), expected.deletion_count);
+    assert_eq!(column.ref_skip_count(), expected.ref_skip_count);
+    assert_eq!(column.base_counts(), expected.base_counts);
+    assert_eq!(column.op_counts(), expected.op_counts);
+    assert_eq!(column.raw_alignments().count(), expected.depth);
+}
+
+// r[verify pileup.summary_matches_alignments]
+// r[verify pileup.custom_aggregation_max_depth]
+#[test]
+fn summary_and_custom_aggregation_are_post_max_depth() {
+    let mut arena = RecordStore::new();
+    for _ in 0..5 {
+        arena.push_raw(&make_record(0, 0, 99, 60, 1), &mut ()).unwrap();
+    }
+
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(0).unwrap());
+    engine.set_max_depth(3);
+    let column = engine.pileups().unwrap();
+
+    assert_eq!(column.depth(), 3);
+    assert_eq!(column.summary().depth, 3);
+    assert_eq!(column.summary().match_depth, 3);
+    assert_eq!(column.summary().base_counts.a, 3);
+}
+
+#[derive(Default)]
+struct DepthAccumulator {
+    pos: Option<Pos0>,
+    reference_base: Base,
+    depth: usize,
+    match_depth: usize,
+}
+
+impl<U> PileupColumnAccumulator<U> for DepthAccumulator {
+    type Output = (Pos0, Base, usize, usize);
+
+    fn begin_column(&mut self, pos: Pos0, reference_base: Base) {
+        self.pos = Some(pos);
+        self.reference_base = reference_base;
+        self.depth = 0;
+        self.match_depth = 0;
+    }
+
+    fn observe_alignment(
+        &mut self,
+        alignment: seqair::bam::pileup::PileupAlignment,
+        _store: &RecordStore<U>,
+    ) {
+        self.depth += 1;
+        if alignment.qpos().is_some() {
+            self.match_depth += 1;
+        }
+    }
+
+    fn finish_column(&mut self, context: PileupColumnContext<'_, U>) -> Option<Self::Output> {
+        assert_eq!(context.depth(), self.depth);
+        Some((self.pos.take()?, self.reference_base, self.depth, self.match_depth))
+    }
+}
+
+// r[verify pileup.custom_aggregation]
+// r[verify pileup.custom_aggregation_existing_api_unchanged]
+#[test]
+fn custom_accumulator_matches_materialized_column_counts() {
+    let mut materialized_engine =
+        PileupEngine::new(summary_test_store(), Pos0::new(0).unwrap(), Pos0::new(0).unwrap());
+    let materialized = materialized_engine.pileups().unwrap();
+
+    let mut accumulator_engine =
+        PileupEngine::new(summary_test_store(), Pos0::new(0).unwrap(), Pos0::new(0).unwrap());
+    let mut accumulator = DepthAccumulator::default();
+    let (pos, reference_base, depth, match_depth) =
+        accumulator_engine.pileup_with(&mut accumulator).unwrap();
+
+    assert_eq!(pos, materialized.pos());
+    assert_eq!(reference_base, materialized.reference_base());
+    assert_eq!(depth, materialized.depth());
+    assert_eq!(match_depth, materialized.match_depth());
+}
+
+// r[verify pileup.read_disposition_via_extras]
+#[test]
+fn custom_accumulator_can_use_extras_for_count_fail_drop() {
+    use seqair::bam::record_store::{CustomizeRecordStore, SlimRecord};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Disposition {
+        Count,
+        FailOnly,
+        Drop,
+    }
+
+    #[derive(Clone)]
+    struct ClassifyByMapq;
+
+    impl CustomizeRecordStore for ClassifyByMapq {
+        type Extra = Disposition;
+
+        fn filter(&mut self, rec: &SlimRecord, _store: &RecordStore<Disposition>) -> bool {
+            rec.mapq != 10
+        }
+
+        fn compute(&mut self, rec: &SlimRecord, _store: &RecordStore<Disposition>) -> Disposition {
+            match rec.mapq {
+                0 => Disposition::FailOnly,
+                10 => Disposition::Drop,
+                _ => Disposition::Count,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct DispositionAccumulator {
+        count: usize,
+        fail: usize,
+    }
+
+    impl PileupColumnAccumulator<Disposition> for DispositionAccumulator {
+        type Output = (usize, usize, usize);
+
+        fn begin_column(&mut self, _pos: Pos0, _reference_base: Base) {
+            self.count = 0;
+            self.fail = 0;
+        }
+
+        fn observe_alignment(
+            &mut self,
+            alignment: seqair::bam::pileup::PileupAlignment,
+            store: &RecordStore<Disposition>,
+        ) {
+            match store.extra(alignment.record_idx()) {
+                Disposition::Count => self.count += 1,
+                Disposition::FailOnly => self.fail += 1,
+                Disposition::Drop => panic!("dropped records must not reach pileup"),
+            }
+        }
+
+        fn finish_column(
+            &mut self,
+            context: PileupColumnContext<'_, Disposition>,
+        ) -> Option<Self::Output> {
+            Some((context.depth(), self.count, self.fail))
+        }
+    }
+
+    let mut arena = RecordStore::new();
+    let mut customize = ClassifyByMapq;
+    arena.push_raw(&make_record(0, 0, 99, 60, 1), &mut customize).unwrap();
+    arena.push_raw(&make_record(0, 0, 99, 0, 1), &mut customize).unwrap();
+    arena.push_raw(&make_record(0, 0, 99, 10, 1), &mut customize).unwrap();
+
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(0).unwrap());
+    let mut accumulator = DispositionAccumulator::default();
+    let (raw_depth, count, fail) = engine.pileup_with(&mut accumulator).unwrap();
+
+    assert_eq!(raw_depth, 2);
+    assert_eq!(count, 1);
+    assert_eq!(fail, 1);
 }
 
 // ---- pileup.qpos ----

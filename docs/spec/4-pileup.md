@@ -31,6 +31,32 @@ The engine MUST support a maximum depth setting. When more records pass the filt
 r[pileup.max_depth_per_position]
 Max depth MUST be enforced per-position, not globally at arena-load time. A read that is rejected at one high-coverage position may still be included at an adjacent lower-coverage position. This matches htslib's behavior where `MAXCNT` is checked against the current column's depth.
 
+## Column summaries and aggregation
+
+r[pileup.summary]
+A `PileupColumn` SHOULD expose a `PileupSummary` containing common counts for the emitted column: total depth, match depth, operation counts, insertion/deletion/ref-skip signal counts, and A/C/G/T/Unknown base counts.
+
+r[pileup.summary_matches_alignments]
+`PileupColumn::summary()` MUST describe exactly the alignments exposed by `PileupColumn::raw_alignments()`. When max depth is set, summary counts are post-truncation and MUST match a caller recomputing the same counts by iterating the emitted alignments.
+
+r[pileup.summary_base_counts]
+Summary base counts MUST include only pileup operations with a query base (`Match` and `Insertion`). `Base::Unknown` MUST be counted separately from A/C/G/T.
+
+r[pileup.summary_indel_counts]
+Summary insertion/deletion/ref-skip signal counts MUST be defined in terms of `PileupOp`: insertion signals include simple insertions and complex indels with an insertion length; deletion signals include deletions and non-refskip complex indels; ref-skip signals include ref-skips and refskip complex indels.
+
+r[pileup.custom_aggregation]
+The engine MAY expose an opt-in custom aggregation API that lets callers observe emitted alignments for each column and produce caller-defined owned output.
+
+r[pileup.custom_aggregation_existing_api_unchanged]
+Custom aggregation MUST NOT change the behavior of `PileupEngine::pileups()` or the lending lifetime of `PileupColumn`.
+
+r[pileup.custom_aggregation_max_depth]
+Custom aggregation MUST observe the same alignments that `PileupEngine::pileups()` would expose after max-depth truncation.
+
+r[pileup.read_disposition_via_extras]
+Downstream tools MAY represent count/fail/drop-style read disposition using `RecordStore` extras: dropped reads are rejected by `CustomizeRecordStore`, while kept reads carry caller-defined extras that custom aggregators can inspect through the store.
+
 ## Query position
 
 The query position (`qpos`) maps a reference position back into a read's coordinate system. For example, if a read starts at reference position 100 and has CIGAR `50M`, then at reference position 125, `qpos` = 25. For complex CIGARs with insertions or deletions, the mapping requires walking the CIGAR operations (see `cigar.md`).
