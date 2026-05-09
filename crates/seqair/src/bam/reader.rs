@@ -303,7 +303,12 @@ impl<R: Read + Seek> IndexedBamReader<R> {
                         continue;
                     }
 
-                    let rec_end = compute_end_pos_from_raw(raw).unwrap_or(rec_pos);
+                    // r[impl record_store.end_pos_htslib]
+                    let rec_end = if rec_flags.is_unmapped() {
+                        rec_pos
+                    } else {
+                        compute_end_pos_from_raw(raw).unwrap_or(rec_pos)
+                    };
                     if rec_pos > end || rec_end < start {
                         skipped_out_of_range = skipped_out_of_range.saturating_add(1);
                         continue;
