@@ -80,7 +80,10 @@ pub use header::{BamHeader, BamHeaderError, ContigInfo};
 pub use index::{AlignmentIndex, BaiError, BamIndex};
 pub use nm_md::NmMdError;
 pub use owned_record::{OwnedBamRecord, OwnedRecordError};
-pub use pileup::{AlignmentView, PileupColumn, PileupEngine, PileupGuard, PileupOp, RefSeq};
+pub use pileup::{
+    AlignmentView, PileupAlignment, PileupColumn, PileupColumnPinned, PileupEngine, PileupGuard,
+    PileupOp, RefSeq,
+};
 pub use reader::{BamError, BamShared, IndexedBamReader};
 // `record` is intentionally not re-exported as a type. The production decode
 // path is `RecordStore::push_raw`; the `record` module exposes only shared
