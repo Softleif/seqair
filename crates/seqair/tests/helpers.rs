@@ -61,6 +61,24 @@ pub fn collect_columns<U>(
     out
 }
 
+/// Drain all remaining columns using [`PileupEngine::pileups_into`] —
+/// the caller-provided-buffer path. Returns identical output to
+/// [`collect_columns`], proving the two APIs are interchangeable.
+pub fn collect_columns_into<U>(
+    engine: &mut seqair::bam::pileup::PileupEngine<U>,
+) -> Vec<OwnedPileupColumn> {
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    while let Some(col) = engine.pileups_into(&mut buf) {
+        out.push(OwnedPileupColumn {
+            pos: col.pos(),
+            reference_base: col.reference_base(),
+            alignments: col.raw_alignments().cloned().collect(),
+        });
+    }
+    out
+}
+
 pub fn cigar_op(len: u32, op: u8) -> u32 {
     (len << 4) | u32::from(op)
 }
