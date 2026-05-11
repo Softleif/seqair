@@ -14,6 +14,13 @@
 )]
 use noodles::bam;
 use noodles::sam;
+#[derive(Clone, Default)]
+struct RejectUnmapped;
+impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
+    type Extra = ();
+    fn filter_raw(&mut self, f: &seqair::bam::record_store::FilterRawFields<'_>) -> bool { !f.flags.is_unmapped() }
+    fn compute(&mut self, _: &seqair::bam::record_store::SlimRecord, _: &seqair::bam::RecordStore<()>) {}
+}
 use seqair::bam::Pos0;
 use seqair_types::BaseQuality;
 use std::path::Path;
@@ -135,7 +142,7 @@ fn bam_record_count_matches_noodles() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
@@ -169,7 +176,7 @@ fn bam_record_fields_match_noodles() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
@@ -206,7 +213,7 @@ fn bam_sequence_matches_noodles() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
@@ -257,7 +264,7 @@ fn bam_quality_scores_match_noodles() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
@@ -291,7 +298,7 @@ fn bam_cigar_matches_noodles() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
