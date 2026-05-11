@@ -14,7 +14,7 @@
 )]
 
 use rust_htslib::bam::{self, Read as _};
-use seqair::bam::Pos0;
+use seqair::bam::{Pos0, RejectUnmapped};
 use seqair_types::BaseQuality;
 use std::path::Path;
 
@@ -118,22 +118,6 @@ fn record_count_matches() {
 const UNMAPPED_REGION: &str = "chr19";
 const UNMAPPED_START: u64 = 6_104_000;
 const UNMAPPED_END: u64 = 6_106_000;
-
-/// Customizer that rejects unmapped reads at filter_raw time.
-#[derive(Clone, Default)]
-struct RejectUnmapped;
-impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
-    type Extra = ();
-    fn filter_raw(&mut self, f: &seqair::bam::record_store::FilterRawFields<'_>) -> bool {
-        !f.flags.is_unmapped()
-    }
-    fn compute(
-        &mut self,
-        _: &seqair::bam::record_store::SlimRecord,
-        _: &seqair::bam::RecordStore<()>,
-    ) {
-    }
-}
 
 /// Fetch records, optionally rejecting unmapped via filter_raw.
 fn fetch_count(reject_unmapped: bool) -> usize {

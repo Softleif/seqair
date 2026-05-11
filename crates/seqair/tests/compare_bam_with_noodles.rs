@@ -12,24 +12,9 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
-#[derive(Clone, Default)]
-struct RejectUnmapped;
-impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
-    type Extra = ();
-    fn filter_raw(&mut self, fields: &seqair::bam::record_store::FilterRawFields<'_>) -> bool {
-        !fields.flags.is_unmapped()
-    }
-    fn compute(
-        &mut self,
-        _: &seqair::bam::record_store::SlimRecord,
-        _: &seqair::bam::RecordStore<()>,
-    ) {
-    }
-}
-
 use noodles::bam;
 use noodles::sam;
-use seqair::bam::Pos0;
+use seqair::bam::{Pos0, RejectUnmapped};
 use seqair_types::BaseQuality;
 use std::path::Path;
 

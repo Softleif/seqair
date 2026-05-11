@@ -13,22 +13,7 @@
     reason = "test code with known small values"
 )]
 
-#[derive(Clone, Default)]
-struct RejectUnmapped;
-impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
-    type Extra = ();
-    fn filter_raw(&mut self, f: &seqair::bam::record_store::FilterRawFields<'_>) -> bool {
-        !f.flags.is_unmapped()
-    }
-    fn compute(
-        &mut self,
-        _: &seqair::bam::record_store::SlimRecord,
-        _: &seqair::bam::RecordStore<()>,
-    ) {
-    }
-}
-
-use seqair::bam::Pos0;
+use seqair::bam::{Pos0, RejectUnmapped};
 use std::path::Path;
 
 fn test_cram_path() -> &'static Path {

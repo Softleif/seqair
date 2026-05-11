@@ -14,23 +14,8 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
-#[derive(Clone, Default)]
-struct RejectUnmapped;
-impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
-    type Extra = ();
-    fn filter_raw(&mut self, f: &seqair::bam::record_store::FilterRawFields<'_>) -> bool {
-        !f.flags.is_unmapped()
-    }
-    fn compute(
-        &mut self,
-        _: &seqair::bam::record_store::SlimRecord,
-        _: &seqair::bam::RecordStore<()>,
-    ) {
-    }
-}
-
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
-use seqair::bam::{Pos0, RecordStore};
+use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::Readers;
 use seqair_types::BaseQuality;
 use std::path::Path;
