@@ -356,6 +356,21 @@ impl<U> RecordStore<U> {
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let cigar_bytes = &raw[h.var_start..h.cigar_end];
 
+        // Zero-cost transmute on aligned LE input; falls back to a local copy
+        // when the CIGAR pointer is unaligned (samtools/pysam routinely produce
+        // unpadded l_read_name values — the BAM spec doesn't mandate 4-byte alignment).
+        let mut cigar_fallback: Vec<CigarOp> = Vec::new();
+        let cigar_ops: &[CigarOp] = match CigarOp::slice_from_bam_bytes(cigar_bytes) {
+            Some(ops) => ops,
+            None if cigar_bytes.len() % 4 != 0 => {
+                return Err(DecodeError::CigarByteLength { length: cigar_bytes.len() });
+            }
+            None => {
+                CigarOp::extend_from_bam_bytes(&mut cigar_fallback, cigar_bytes);
+                &cigar_fallback
+            }
+        };
+
         // --- filter_raw: pre-filter before any slab extension or base decode ---
         // r[impl record_store.pre_filter.rollback]
         {
@@ -389,21 +404,19 @@ impl<U> RecordStore<U> {
                 qname: qname_stripped,
                 qual_bytes: qual_slice,
                 aux_bytes: aux_slice,
-                cigar: CigarSlice::Bytes(cigar_bytes),
+                cigar: cigar_ops,
                 seq: Sequence::Packed(packed_seq_slice),
             }) {
                 return Ok(None);
             }
         }
 
-        // --- Write into cigar slab (typed; bulk memcpy on LE) ---
+        // --- Write into cigar slab ---
         // r[impl record_store.checked_offsets]
         let cigar_off = u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
-        CigarOp::extend_from_bam_bytes(&mut self.cigar, cigar_bytes);
-        let cigar_start = cigar_off as usize;
-        #[allow(clippy::indexing_slicing, reason = "just appended; offsets within slab bounds")]
-        let cigar_ops = &self.cigar[cigar_start..];
+        self.cigar.extend_from_slice(cigar_ops);
 
+        // cigar_ops is a transmuted view of raw BAM bytes (still valid after slab write).
         let end_pos = cigar::compute_end_pos(h.pos, cigar_ops)
             .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?;
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_ops);
@@ -576,7 +589,7 @@ impl<U> RecordStore<U> {
             qname,
             qual_bytes: qual,
             aux_bytes: aux,
-            cigar: CigarSlice::Ops(cigar_ops),
+            cigar: cigar_ops,
             seq: Sequence::Bases(bases),
         }) {
             return Ok(None);
@@ -658,23 +671,6 @@ impl<U> RecordStore<U> {
 /// The form in which the CIGAR data is available in [`FilterRawFields`].
 ///
 /// In the `push_raw` path (BAM), the CIGAR is available as raw BAM bytes
-/// because it hasn't been decoded yet. In `push_fields` (SAM/CRAM), it has
-/// already been decoded into typed [`CigarOp`]s.
-///
-/// Use a `match` to handle both paths, or call [`CigarSlice::ops`] to get
-/// typed ops (at the cost of a decode step in the `Bytes` path).
-#[derive(Debug, Clone, Copy)]
-pub enum CigarSlice<'a> {
-    /// Raw BAM CIGAR bytes (from `push_raw`). Decode with
-    /// [`CigarOp::from_bam_bytes`](super::cigar::CigarOp::from_bam_bytes).
-    Bytes(&'a [u8]),
-    /// Decoded CIGAR ops (from `push_fields`).
-    Ops(&'a [CigarOp]),
-}
-
-// r[impl record_store.filter_raw_fields]
-/// The form in which the read sequence is available in [`FilterRawFields`].
-///
 /// In `push_raw` (BAM), the sequence is in 4-bit packed BAM format.
 /// In `push_fields` (SAM/CRAM), it has already been decoded into typed
 /// [`Base`] values.
@@ -697,18 +693,21 @@ pub enum Sequence<'a> {
 /// # `push_raw` vs `push_fields`
 ///
 /// From `push_raw` (BAM binary decode):
-/// - [`cigar`](Self::cigar) is [`CigarSlice::Bytes`] (raw BAM CIGAR bytes).
 /// - [`seq`](Self::seq) is [`Sequence::Packed`] (4-bit packed sequence bytes).
 /// - [`end_pos`](Self::end_pos) is `None` (not yet computed from CIGAR).
 /// - [`matching_bases`](Self::matching_bases) and [`indel_bases`](Self::indel_bases)
 ///   are `0` (not yet computed from CIGAR).
 ///
 /// From `push_fields` (pre-parsed SAM/CRAM fields):
-/// - [`cigar`](Self::cigar) is [`CigarSlice::Ops`] (decoded CIGAR ops).
 /// - [`seq`](Self::seq) is [`Sequence::Bases`] (decoded sequence bases).
 /// - [`end_pos`](Self::end_pos) is `Some(_)` (pre-computed).
 /// - [`matching_bases`](Self::matching_bases) and [`indel_bases`](Self::indel_bases)
 ///   are the pre-computed values.
+///
+/// [`cigar`](Self::cigar) is always a typed `&[CigarOp]` slice. On aligned
+/// little-endian input this is a zero-cost transmute from raw BAM bytes;
+/// unaligned input (samtools/pysam routinely produce unpadded `l_read_name`)
+/// falls back to a local copy. On big-endian the record is rejected.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct FilterRawFields<'a> {
@@ -746,9 +745,10 @@ pub struct FilterRawFields<'a> {
     pub qual_bytes: &'a [u8],
     /// Raw auxiliary tag bytes (BAM binary format).
     pub aux_bytes: &'a [u8],
-    /// CIGAR data. [`CigarSlice::Bytes`] from `push_raw` (BAM),
-    /// [`CigarSlice::Ops`] from `push_fields` (SAM/CRAM).
-    pub cigar: CigarSlice<'a>,
+    /// Decoded CIGAR ops. In `push_raw` (BAM) this is a zero-cost transmute
+    /// from raw bytes validated for u32 alignment; in `push_fields` (SAM/CRAM)
+    /// the ops are already decoded.
+    pub cigar: &'a [CigarOp],
     /// Read sequence. [`Sequence::Packed`] from `push_raw` (BAM),
     /// [`Sequence::Bases`] from `push_fields` (SAM/CRAM).
     pub seq: Sequence<'a>,
