@@ -14,6 +14,21 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+#[derive(Clone, Default)]
+struct RejectUnmapped;
+impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
+    type Extra = ();
+    fn filter_raw(&mut self, f: &seqair::bam::record_store::FilterRawFields<'_>) -> bool {
+        !f.flags.is_unmapped()
+    }
+    fn compute(
+        &mut self,
+        _: &seqair::bam::record_store::SlimRecord,
+        _: &seqair::bam::RecordStore<()>,
+    ) {
+    }
+}
+
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::Readers;
@@ -135,7 +150,8 @@ fn cram_records_match_htslib_for_chr19() {
     let hts_records = fetch_hts_records(contig, start, end);
 
     for &(version, cram_path_fn) in CRAM_VERSIONS {
-        let mut readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path_fn(), test_fasta_path(), RejectUnmapped).unwrap();
         let mut store = RecordStore::new();
         let tid = readers.header().tid(contig).unwrap();
         let cram_count = readers
@@ -189,7 +205,8 @@ fn cram_mate_fields_match_htslib() {
     let hts_records = fetch_hts_records(contig, start, end);
 
     for &(version, cram_path_fn) in CRAM_VERSIONS {
-        let mut readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path_fn(), test_fasta_path(), RejectUnmapped).unwrap();
         let mut store = RecordStore::new();
         let tid = readers.header().tid(contig).unwrap();
         readers
@@ -237,7 +254,8 @@ fn cram_end_pos_matches_htslib_inclusive_convention() {
     let hts_records = fetch_hts_records(contig, start, end);
 
     for &(version, cram_path_fn) in CRAM_VERSIONS {
-        let mut readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path_fn(), test_fasta_path(), RejectUnmapped).unwrap();
         let mut store = RecordStore::new();
         let tid = readers.header().tid(contig).unwrap();
         readers
@@ -289,7 +307,8 @@ fn cram_quality_scores_match_htslib() {
     let hts_quals = fetch_hts_quals(contig, start, end);
 
     for &(version, cram_path_fn) in CRAM_VERSIONS {
-        let mut readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path_fn(), test_fasta_path(), RejectUnmapped).unwrap();
         let mut store = RecordStore::new();
         let tid = readers.header().tid(contig).unwrap();
         readers
@@ -326,7 +345,8 @@ fn cram_sequences_match_htslib() {
     let hts_seqs = fetch_hts_seqs(contig, start, end);
 
     for &(version, cram_path_fn) in CRAM_VERSIONS {
-        let mut readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path_fn(), test_fasta_path(), RejectUnmapped).unwrap();
         let mut store = RecordStore::new();
         let tid = readers.header().tid(contig).unwrap();
         readers
@@ -373,7 +393,8 @@ fn cram_sequences_match_htslib() {
 #[test]
 fn cram_fork_produces_same_records() {
     for &(version, cram_path_fn) in CRAM_VERSIONS {
-        let readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
+        let readers =
+            Readers::open_customized(cram_path_fn(), test_fasta_path(), RejectUnmapped).unwrap();
         let mut fork1 = readers.fork().unwrap();
         let mut fork2 = readers.fork().unwrap();
 

@@ -93,12 +93,14 @@ fn record_count_matches() {
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid(TEST_REGION).expect("tid");
     reader
-        .fetch_into(
+        .fetch_into_customized(
             tid,
             Pos0::new(TEST_START as u32).unwrap(),
             Pos0::new(TEST_END as u32).unwrap(),
             &mut store,
+            &mut RejectUnmapped,
         )
+        .map(|c| c.kept)
         .expect("seqair fetch");
 
     assert_eq!(

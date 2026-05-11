@@ -12,6 +12,21 @@
     reason = "test code with known small values"
 )]
 
+#[derive(Clone, Default)]
+struct RejectUnmapped;
+impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
+    type Extra = ();
+    fn filter_raw(&mut self, f: &seqair::bam::record_store::FilterRawFields<'_>) -> bool {
+        !f.flags.is_unmapped()
+    }
+    fn compute(
+        &mut self,
+        _: &seqair::bam::record_store::SlimRecord,
+        _: &seqair::bam::RecordStore<()>,
+    ) {
+    }
+}
+
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::{IndexedReader, Readers};
 use std::path::Path;
@@ -209,7 +224,8 @@ fn indexed_reader_open_rejects_cram_without_fasta() {
 // r[verify unified.readers_accessors]
 #[test]
 fn readers_open_bam() {
-    let readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+    let readers =
+        Readers::open_customized(test_bam_path(), test_fasta_path(), RejectUnmapped).unwrap();
     assert!(readers.header().target_count() > 0);
     assert!(matches!(readers.alignment(), &IndexedReader::Bam(_)));
 }
@@ -219,7 +235,7 @@ fn readers_open_bam() {
 fn readers_open_sam() {
     let dir = tempfile::tempdir().unwrap();
     let sam_gz = create_sam_gz(dir.path());
-    let readers = Readers::open(&sam_gz, test_fasta_path()).unwrap();
+    let readers = Readers::open_customized(&sam_gz, test_fasta_path(), RejectUnmapped).unwrap();
     assert!(matches!(readers.alignment(), &IndexedReader::Sam(_)));
 }
 
@@ -228,7 +244,8 @@ fn readers_open_sam() {
 // r[verify unified.fork_cram]
 #[test]
 fn readers_open_cram() {
-    let readers = Readers::open(test_cram_path(), test_fasta_path()).unwrap();
+    let readers =
+        Readers::open_customized(test_cram_path(), test_fasta_path(), RejectUnmapped).unwrap();
     assert!(matches!(readers.alignment(), &IndexedReader::Cram(_)));
     assert!(readers.header().target_count() > 0);
 }
@@ -236,7 +253,8 @@ fn readers_open_cram() {
 // r[verify unified.readers_fork]
 #[test]
 fn readers_fork_cram() {
-    let readers = Readers::open(test_cram_path(), test_fasta_path()).unwrap();
+    let readers =
+        Readers::open_customized(test_cram_path(), test_fasta_path(), RejectUnmapped).unwrap();
     let mut forked = readers.fork().unwrap();
     let tid = forked.header().tid("chr19").unwrap();
     let mut store = RecordStore::new();
@@ -249,8 +267,10 @@ fn readers_fork_cram() {
 // r[verify unified.fetch_equivalence]
 #[test]
 fn bam_and_cram_produce_same_records() {
-    let mut bam = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
-    let mut cram = Readers::open(test_cram_path(), test_fasta_path()).unwrap();
+    let mut bam =
+        Readers::open_customized(test_bam_path(), test_fasta_path(), RejectUnmapped).unwrap();
+    let mut cram =
+        Readers::open_customized(test_cram_path(), test_fasta_path(), RejectUnmapped).unwrap();
 
     for &(contig, start, end) in CONTIGS {
         let bam_tid = bam.header().tid(contig).unwrap();
@@ -304,9 +324,11 @@ fn all_three_formats_produce_same_records() {
     let dir = tempfile::tempdir().unwrap();
     let sam_gz = create_sam_gz(dir.path());
 
-    let mut bam = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
-    let mut sam = Readers::open(&sam_gz, test_fasta_path()).unwrap();
-    let mut cram = Readers::open(test_cram_path(), test_fasta_path()).unwrap();
+    let mut bam =
+        Readers::open_customized(test_bam_path(), test_fasta_path(), RejectUnmapped).unwrap();
+    let mut sam = Readers::open_customized(&sam_gz, test_fasta_path(), RejectUnmapped).unwrap();
+    let mut cram =
+        Readers::open_customized(test_cram_path(), test_fasta_path(), RejectUnmapped).unwrap();
 
     let contig = "chr19";
     let start = 6_105_700u64;
