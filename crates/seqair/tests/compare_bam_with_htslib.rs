@@ -13,14 +13,15 @@
 )]
 mod helpers;
 
-use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
 #[derive(Clone, Default)]
 struct RejectUnmapped;
 impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
     type Extra = ();
-    fn filter_raw(&mut self, f: &seqair::bam::record_store::FilterRawFields<'_>) -> bool { !f.flags.is_unmapped() }
+    fn filter_raw(&mut self, fields: &seqair::bam::record_store::FilterRawFields<'_>) -> bool { !fields.flags.is_unmapped() }
     fn compute(&mut self, _: &seqair::bam::record_store::SlimRecord, _: &seqair::bam::RecordStore<()>) {}
 }
+
+use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
 use seqair::bam::Pos0;
 use seqair::bam::aux::{AuxValue, find_tag as find_aux_tag};
 use seqair_types::BaseQuality;
@@ -96,7 +97,9 @@ fn all_contigs_record_count_matches() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         assert_eq!(
@@ -128,7 +131,9 @@ fn all_contigs_record_fields_match() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         for (i, h) in hts.iter().enumerate() {
@@ -216,7 +221,9 @@ fn all_contigs_pileup_positions_and_depth_match() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let mut engine = seqair::bam::PileupEngine::new(
@@ -267,7 +274,9 @@ fn all_contigs_pileup_qpos_and_flags_match() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let mut engine = seqair::bam::PileupEngine::new(
@@ -324,7 +333,9 @@ fn all_contigs_pileup_bases_match() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let mut engine = seqair::bam::PileupEngine::new(
@@ -423,7 +434,9 @@ fn all_contigs_aux_tags_match() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         assert_eq!(
