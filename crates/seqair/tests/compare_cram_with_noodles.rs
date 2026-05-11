@@ -16,6 +16,21 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+#[derive(Clone, Default)]
+struct RejectUnmapped;
+impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
+    type Extra = ();
+    fn filter_raw(&mut self, f: &seqair::bam::record_store::FilterRawFields<'_>) -> bool {
+        !f.flags.is_unmapped()
+    }
+    fn compute(
+        &mut self,
+        _: &seqair::bam::record_store::SlimRecord,
+        _: &seqair::bam::RecordStore<()>,
+    ) {
+    }
+}
+
 use noodles::cram;
 use noodles::fasta;
 use noodles::sam;
@@ -143,7 +158,8 @@ fn cram_chr19_count_matches_noodles() {
             .filter(|r| r.ref_id == Some(0) && r.pos >= start as i64 && r.pos <= end as i64)
             .count();
 
-        let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path, test_fasta_path(), RejectUnmapped).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
         readers
@@ -182,7 +198,8 @@ fn cram_chr19_records_match_noodles_field_by_field() {
             .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos <= end)
             .collect();
 
-        let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path, test_fasta_path(), RejectUnmapped).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
         readers
@@ -268,7 +285,8 @@ fn cram_end_pos_matches_noodles_inclusive_convention() {
             .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos <= end)
             .collect();
 
-        let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path, test_fasta_path(), RejectUnmapped).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
         readers
@@ -316,7 +334,8 @@ fn cram_chr19_sequences_match_noodles() {
             .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos <= end)
             .collect();
 
-        let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path, test_fasta_path(), RejectUnmapped).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
         readers
@@ -374,7 +393,8 @@ fn cram_chr19_quality_scores_match_noodles() {
             .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos <= end)
             .collect();
 
-        let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path, test_fasta_path(), RejectUnmapped).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
         readers
@@ -418,7 +438,8 @@ fn cram_chr19_qnames_match_noodles() {
             .filter(|r| r.ref_id == Some(0) && r.pos >= start && r.pos <= end)
             .collect();
 
-        let mut readers = Readers::open(cram_path, test_fasta_path()).unwrap();
+        let mut readers =
+            Readers::open_customized(cram_path, test_fasta_path(), RejectUnmapped).unwrap();
         let chr19_tid = readers.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
         readers

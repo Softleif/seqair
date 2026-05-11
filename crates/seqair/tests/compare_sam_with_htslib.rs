@@ -17,8 +17,15 @@
 struct RejectUnmapped;
 impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
     type Extra = ();
-    fn filter_raw(&mut self, fields: &seqair::bam::record_store::FilterRawFields<'_>) -> bool { !fields.flags.is_unmapped() }
-    fn compute(&mut self, _: &seqair::bam::record_store::SlimRecord, _: &seqair::bam::RecordStore<()>) {}
+    fn filter_raw(&mut self, fields: &seqair::bam::record_store::FilterRawFields<'_>) -> bool {
+        !fields.flags.is_unmapped()
+    }
+    fn compute(
+        &mut self,
+        _: &seqair::bam::record_store::SlimRecord,
+        _: &seqair::bam::RecordStore<()>,
+    ) {
+    }
 }
 
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
@@ -209,7 +216,13 @@ fn sam_aux_tags_present() {
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into_customized(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store, &mut RejectUnmapped)
+        .fetch_into_customized(
+            tid,
+            Pos0::new(6_105_700).unwrap(),
+            Pos0::new(6_105_800).unwrap(),
+            &mut store,
+            &mut RejectUnmapped,
+        )
         .map(|c| c.kept)
         .expect("fetch");
 
@@ -240,7 +253,13 @@ fn sam_aux_rg_tag_matches_htslib() {
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into_customized(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store, &mut RejectUnmapped)
+        .fetch_into_customized(
+            tid,
+            Pos0::new(6_105_700).unwrap(),
+            Pos0::new(6_105_800).unwrap(),
+            &mut store,
+            &mut RejectUnmapped,
+        )
         .map(|c| c.kept)
         .expect("fetch");
 
