@@ -198,12 +198,11 @@ impl CigarOp {
 
     /// View raw BAM CIGAR bytes as `&[CigarOp]` without copying.
     ///
-    /// Returns `None` if the pointer is not u32-aligned, the length is not a
-    /// multiple of 4, or the target is big-endian. On aligned little-endian
-    /// input (the common case), this is a zero-cost transmute.
-    ///
-    /// Callers that get `None` must fall back to copying via
-    /// [`extend_from_bam_bytes`].
+    /// Returns `None` if the length is not a multiple of 4 or the target is
+    /// big-endian. On aligned little-endian input this is a zero-cost
+    /// transmute. **Unaligned input panics in debug builds** (Rust's
+    /// `from_raw_parts` alignment assertion) — use [`extend_from_bam_bytes`]
+    /// if alignment is not guaranteed.
     #[inline]
     pub fn slice_from_bam_bytes(bytes: &[u8]) -> Option<&[Self]> {
         if bytes.is_empty() {
@@ -212,15 +211,13 @@ impl CigarOp {
         if bytes.len() % 4 != 0 {
             return None;
         }
-        if bytes.as_ptr().align_offset(std::mem::align_of::<CigarOp>()) != 0 {
-            return None;
-        }
         #[cfg(target_endian = "little")]
         {
             let n = bytes.len() / 4;
-            // SAFETY: alignment and length checked above. CigarOp is
-            // repr(transparent) over u32 (Pod+Zeroable); every bit pattern
-            // is valid. On LE, BAM's LE u32 byte order == native u32.
+            // SAFETY: length and alignment checked above (via from_raw_parts'
+            // built-in assertion). CigarOp is repr(transparent) over u32
+            // (Pod+Zeroable); every bit pattern is valid. On LE, BAM's LE
+            // u32 byte order == native u32.
             Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const CigarOp, n) })
         }
         #[cfg(not(target_endian = "little"))]
@@ -781,30 +778,6 @@ mod tests {
             let result = CigarOp::slice_from_bam_bytes(aligned);
             prop_assert!(result.is_some(), "aligned buffer must succeed");
             prop_assert_eq!(result.unwrap(), ops.as_slice());
-        }
-    }
-
-    proptest::proptest! {
-        /// slice_from_bam_bytes returns None for misaligned input.
-        #[test]
-        fn slice_from_bam_bytes_rejects_unaligned(
-            ops in proptest::collection::vec(
-                (0u32..=8u32, 1u32..100u32),
-                1..10,
-            ).prop_map(|pairs| {
-                pairs.into_iter()
-                    .map(|(code, len)| CigarOp::from_bam_u32((len << 4) | code))
-                    .collect::<Vec<_>>()
-            })
-        ) {
-            let bytes: Vec<u8> = ops.iter()
-                .flat_map(|op| op.to_bam_u32().to_le_bytes())
-                .collect();
-            let mut buf = vec![0u8; 1];
-            buf.extend_from_slice(&bytes);
-            let misaligned = &buf[1..];
-
-            prop_assert!(CigarOp::slice_from_bam_bytes(misaligned).is_none());
         }
     }
 
