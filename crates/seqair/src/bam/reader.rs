@@ -106,12 +106,6 @@ pub struct IndexedBamReader<R: Read + Seek = File> {
     /// large sequential reads that don't benefit from `BufReader`).
     bulk_reader: R,
     shared: Arc<BamShared>,
-    /// When `true`, `fetch_into` keeps placed-unmapped reads (flag 0x4 with a
-    /// valid tid) so the caller's `filter_raw` / `filter` can decide. Default
-    /// `false` preserves the legacy behavior (reader drops them silently).
-    /// Fully unmapped reads (tid = -1) are filtered separately by the BAI
-    /// chunk lookup and never reach this branch regardless.
-    keep_unmapped: bool,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for IndexedBamReader<R> {
@@ -135,7 +129,6 @@ impl IndexedBamReader<File> {
         Ok(IndexedBamReader {
             bulk_reader: bulk_file,
             shared: Arc::new(BamShared { index, header, bam_path: path.to_path_buf() }),
-            keep_unmapped: false,
         })
     }
 
@@ -148,11 +141,7 @@ impl IndexedBamReader<File> {
         let bulk_file = File::open(&self.shared.bam_path)
             .map_err(|source| BamError::Open { path: self.shared.bam_path.clone(), source })?;
 
-        Ok(IndexedBamReader {
-            bulk_reader: bulk_file,
-            shared: Arc::clone(&self.shared),
-            keep_unmapped: self.keep_unmapped,
-        })
+        Ok(IndexedBamReader { bulk_reader: bulk_file, shared: Arc::clone(&self.shared) })
     }
 }
 
@@ -167,7 +156,6 @@ impl IndexedBamReader<std::io::Cursor<Vec<u8>>> {
         Ok(IndexedBamReader {
             bulk_reader: std::io::Cursor::new(bam_data),
             shared: Arc::new(BamShared { index, header, bam_path: PathBuf::from("<fuzz>") }),
-            keep_unmapped: false,
         })
     }
 }
@@ -180,25 +168,6 @@ impl<R: Read + Seek> IndexedBamReader<R> {
 
     pub fn header(&self) -> &BamHeader {
         &self.shared.header
-    }
-
-    // r[impl bam.reader.unmapped_skipped+2]
-    /// Keep placed-unmapped reads (flag 0x4 with a valid tid) in the fetch
-    /// stream so the customize layer's `filter_raw` / `filter` decides their
-    /// fate. Default `false` mirrors htslib's pileup behavior. Useful for
-    /// downstream tools (e.g. perbase `only-depth -x`) that want
-    /// htslib-`view`-equivalent semantics where placed-unmapped reads still
-    /// reach user code.
-    ///
-    /// Builder-style: returns `self` for chaining after `open` / `fork`.
-    pub fn keep_unmapped(mut self, keep: bool) -> Self {
-        self.keep_unmapped = keep;
-        self
-    }
-
-    /// Inspect the current `keep_unmapped` setting.
-    pub fn keeps_unmapped(&self) -> bool {
-        self.keep_unmapped
     }
 
     // r[impl bam.reader.fetch_into+2]
@@ -243,7 +212,6 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         let tid_i32 = validate_tid(tid)?;
 
         let mut skipped_tid: u32 = 0;
-        let mut skipped_unmapped: u32 = 0;
         let mut skipped_out_of_range: u32 = 0;
         let mut accepted: u32 = 0;
         let mut kept_count: usize = 0;
@@ -282,7 +250,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
                         return Err(BamError::TruncatedRecord { offset: current_voff.0 });
                     }
 
-                    // r[impl bam.reader.unmapped_skipped+2]
+                    // r[impl bam.reader.unmapped_skipped]
                     debug_assert!(raw.len() >= 32, "raw record too short: {}", raw.len());
                     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
                     let rec_tid = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
@@ -295,11 +263,6 @@ impl<R: Read + Seek> IndexedBamReader<R> {
 
                     if rec_tid != tid_i32 {
                         skipped_tid = skipped_tid.saturating_add(1);
-                        continue;
-                    }
-
-                    if rec_flags.is_unmapped() && !self.keep_unmapped {
-                        skipped_unmapped = skipped_unmapped.saturating_add(1);
                         continue;
                     }
 

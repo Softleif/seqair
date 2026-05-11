@@ -482,11 +482,6 @@ fn parse_sam_line<E: CustomizeRecordStore>(
             .ok_or_else(|| SamRecordError::InvalidFlag { value: flag_field.into() })?,
     );
 
-    // Skip unmapped
-    if flags.is_unmapped() {
-        return Ok(None);
-    }
-
     // r[impl sam.edge.rname_star]
     let rname = fields.get(2).copied().unwrap_or(b"*");
     if rname == b"*" {
