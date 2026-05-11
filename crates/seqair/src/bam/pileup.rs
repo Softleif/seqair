@@ -652,22 +652,30 @@ impl<U> PileupEngine<U> {
                     .trace_err("BUG: current_pos + 1 overflowed despite being <= region_end")?;
             }
 
-            // Evict expired records.
+            // Evict expired records — stable retain, preserves insertion order.
             {
-                let mut i = 0;
-                while i < self.active_end_pos.len() {
-                    debug_assert!(i < self.active.len());
+                let mut write = 0;
+                let len = self.active_end_pos.len();
+                for read in 0..len {
+                    debug_assert!(read < self.active.len());
                     #[allow(
                         clippy::indexing_slicing,
-                        reason = "i < active_end_pos.len() == active.len()"
+                        reason = "read < active_end_pos.len() == active.len()"
                     )]
-                    if self.active_end_pos[i] < pos {
-                        self.active_end_pos.swap_remove(i);
-                        self.active.swap_remove(i);
-                    } else {
-                        i = i.checked_add(1).trace_err("active set size exceeded usize::MAX")?;
+                    if self.active_end_pos[read] >= pos {
+                        if read != write {
+                            self.active_end_pos[write] = self.active_end_pos[read];
+                            // swap(write, read) with write < read moves the survivor left
+                            // without needing Clone on ActiveRecord.
+                            self.active.swap(write, read);
+                        }
+                        write = write
+                            .checked_add(1)
+                            .trace_err("active set size exceeded usize::MAX")?;
                     }
                 }
+                self.active_end_pos.truncate(write);
+                self.active.truncate(write);
             }
 
             while self.next_entry < self.store.len() {
@@ -904,5 +912,124 @@ mod tests {
         // Second column — same buffer, capacity must be retained.
         assert!(engine.pileups().is_some());
         assert_eq!(engine.buf.capacity(), cap_after_first, "buffer capacity retained across calls");
+    }
+
+    // r[verify pileup.eviction_preserves_order]
+    /// After eviction of expired records, survivors must remain in insertion order.
+    /// With the old `swap_remove` eviction, removing the shortest-lived record would
+    /// swap in the last record, scrambling the order (e.g. [0,1,2,3,4] → [4,1,2,3]).
+    /// Stable retain keeps them in order ([1,2,3,4]).
+    #[test]
+    fn eviction_preserves_insertion_order() {
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        let mut store = RecordStore::new();
+
+        // 5 records at pos=0 with spans 10, 20, 30, 40, 50.
+        // Record 0 (span 10) covers [0,9], record 1 (span 20) covers [0,19], etc.
+        // At pos=10, record 0 is evicted. Old swap_remove would have moved record 4
+        // into slot 0; stable retain keeps 1,2,3,4 in insertion order.
+        for (i, span) in [10u32, 20, 30, 40, 50].iter().enumerate() {
+            let end = span.saturating_sub(1);
+            store
+                .push_fields(
+                    Pos0::new(0).unwrap(),
+                    Pos0::new(end).unwrap(),
+                    BamFlags::empty(),
+                    30,
+                    *span,
+                    0,
+                    format!("read{i}").as_bytes(),
+                    &[CigarOp::new(CigarOpType::Match, *span)],
+                    &vec![Base::A; *span as usize],
+                    &vec![40u8; *span as usize],
+                    &[],
+                    0,
+                    -1,
+                    0,
+                    0,
+                    &mut (),
+                )
+                .unwrap();
+        }
+
+        let mut engine = PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(49).unwrap());
+
+        let mut columns = Vec::new();
+        while let Some(col) = engine.pileups() {
+            let indices: Vec<u32> = col.alignments().map(|a| a.record_idx()).collect();
+            columns.push((col.pos(), indices));
+        }
+
+        // Pre-eviction: pos 5 — all 5 records in insertion order
+        let at_5 = columns.iter().find(|(p, _)| *p == Pos0::new(5).unwrap()).unwrap();
+        assert_eq!(at_5.1, vec![0, 1, 2, 3, 4]);
+
+        // After first eviction (record 0 expired at pos=10): pos 15 — [1,2,3,4]
+        let at_15 = columns.iter().find(|(p, _)| *p == Pos0::new(15).unwrap()).unwrap();
+        assert_eq!(at_15.1, vec![1, 2, 3, 4]);
+
+        // After second eviction (record 1 expired at pos=20): pos 25 — [2,3,4]
+        let at_25 = columns.iter().find(|(p, _)| *p == Pos0::new(25).unwrap()).unwrap();
+        assert_eq!(at_25.1, vec![2, 3, 4]);
+
+        // After third eviction (record 2 expired at pos=30): pos 35 — [3,4]
+        let at_35 = columns.iter().find(|(p, _)| *p == Pos0::new(35).unwrap()).unwrap();
+        assert_eq!(at_35.1, vec![3, 4]);
+
+        // After fourth eviction (record 3 expired at pos=40): pos 45 — [4]
+        let at_45 = columns.iter().find(|(p, _)| *p == Pos0::new(45).unwrap()).unwrap();
+        assert_eq!(at_45.1, vec![4]);
+    }
+
+    // r[verify pileup.max_depth_order]
+    /// max_depth truncation must keep the first N alignments in insertion order,
+    /// not arbitrary ones. After the stable-retain fix, the insertion order is
+    /// preserved through eviction, so truncation drops predictable (last N) entries.
+    #[test]
+    fn max_depth_truncates_in_insertion_order() {
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        let mut store = RecordStore::new();
+
+        // 5 records at pos=0, all spanning the full 0..50 range.
+        for i in 0..5u32 {
+            store
+                .push_fields(
+                    Pos0::new(0).unwrap(),
+                    Pos0::new(49).unwrap(),
+                    BamFlags::empty(),
+                    30,
+                    50,
+                    0,
+                    format!("read{i}").as_bytes(),
+                    &[CigarOp::new(CigarOpType::Match, 50)],
+                    &vec![Base::A; 50],
+                    &vec![40u8; 50],
+                    &[],
+                    0,
+                    -1,
+                    0,
+                    0,
+                    &mut (),
+                )
+                .unwrap();
+        }
+
+        let mut engine = PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(49).unwrap());
+        engine.set_max_depth(3);
+
+        // At every position, only the first 3 records (indices 0,1,2) should be kept.
+        while let Some(col) = engine.pileups() {
+            let indices: Vec<u32> = col.alignments().map(|a| a.record_idx()).collect();
+            assert_eq!(
+                indices,
+                vec![0, 1, 2],
+                "max_depth=3 should keep first 3 records in insertion order at pos {:?}",
+                col.pos()
+            );
+        }
     }
 }
