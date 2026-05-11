@@ -548,6 +548,13 @@ impl<U> std::fmt::Debug for PileupEngine<U> {
 /// without recovering the store, so the next
 /// [`Readers::pileup`](crate::reader::Readers::pileup) allocates a fresh
 /// store. Prefer letting the guard drop normally.
+///
+/// ⚠️ Because the guard [`Deref`](std::ops::Deref)s to [`PileupEngine`],
+/// [`PileupEngine::take_store`] is reachable as `guard.take_store()`.
+/// Calling it leaves the engine's store empty, and the guard's `Drop`
+/// finds nothing to recover — the next pileup allocates a fresh store.
+/// Use [`into_inner`](Self::into_inner) if you genuinely need to skip
+/// recovery.
 pub struct PileupGuard<'a, U = ()> {
     /// `Some` for the lifetime of the guard, then taken to `None` by
     /// [`Self::into_inner`] (so the `Drop` impl knows to skip recovery).

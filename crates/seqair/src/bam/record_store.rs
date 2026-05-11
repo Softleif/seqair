@@ -21,7 +21,12 @@ use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
 pub struct SlimRecord {
     /// 0-based leftmost aligned reference position.
     pub pos: Pos0,
-    /// 0-based exclusive end (`pos` + reference-consuming CIGAR length).
+    /// 0-based exclusive end, htslib-compatible.
+    ///
+    /// For mapped reads: computed from CIGAR (`pos` + reference-consuming op
+    /// lengths). For unmapped reads: equals [`pos`](Self::pos) — htslib ignores
+    /// the CIGAR and reports `end = start + 1`, which in 0-based exclusive
+    /// semantics is `pos`.
     pub end_pos: Pos0,
     // r[impl flags.field_type]
     /// BAM flag bits (paired, unmapped, reverse strand, …).
@@ -68,22 +73,6 @@ pub struct SlimRecord {
 impl SlimRecord {
     fn cigar_len(&self) -> usize {
         self.n_cigar_ops as usize
-    }
-
-    // r[impl record_store.end_pos_htslib]
-    /// htslib-compatible end position.
-    ///
-    /// For mapped reads, this is the 0-based exclusive end computed from CIGAR
-    /// (same as [`end_pos`](Self::end_pos)). For unmapped reads, returns `pos`
-    /// — htslib ignores the CIGAR and reports `end = start + 1`, which for
-    /// 0-based exclusive semantics is `pos`.
-    ///
-    /// Use this when iterating records for counting/coverage tools that need
-    /// htslib-compatible alignment spans (e.g., perbase `only-depth`).
-    #[must_use]
-    #[inline]
-    pub fn end_pos_htslib(&self) -> Pos0 {
-        if self.flags.is_unmapped() { self.pos } else { self.end_pos }
     }
 
     /// Read this record's qname bytes from the store's name slab.
@@ -403,8 +392,13 @@ impl<U> RecordStore<U> {
         let cigar_start = cigar_off as usize;
         #[allow(clippy::indexing_slicing, reason = "just appended; offsets within slab bounds")]
         let cigar_ops = &self.cigar[cigar_start..];
-        let end_pos = cigar::compute_end_pos(h.pos, cigar_ops)
-            .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?;
+        // r[impl record_store.end_pos_htslib]
+        let end_pos = if h.flags.is_unmapped() {
+            h.pos
+        } else {
+            cigar::compute_end_pos(h.pos, cigar_ops)
+                .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?
+        };
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_ops);
 
         // --- Write into name slab ---
@@ -1145,8 +1139,13 @@ impl<U> RecordStore<U> {
         let n_cigar_ops =
             u16::try_from(n_ops).map_err(|_| DecodeError::CigarOpCountOverflow { count: n_ops })?;
 
-        let end_pos = cigar::compute_end_pos(new_pos, new_cigar_ops)
-            .ok_or(DecodeError::InvalidPosition { value: new_pos.as_i32() })?;
+        // r[impl record_store.end_pos_htslib]
+        let end_pos = if rec.flags.is_unmapped() {
+            new_pos
+        } else {
+            cigar::compute_end_pos(new_pos, new_cigar_ops)
+                .ok_or(DecodeError::InvalidPosition { value: new_pos.as_i32() })?
+        };
 
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(new_cigar_ops);
 
@@ -1661,7 +1660,7 @@ mod tests {
 
     // r[verify record_store.end_pos_htslib]
     #[test]
-    fn end_pos_htslib_mapped_uses_cigar_derived() {
+    fn end_pos_mapped_uses_cigar() {
         use seqair_types::{BamFlags, Base};
         let mut store = RecordStore::new();
         store
@@ -1686,19 +1685,18 @@ mod tests {
             .unwrap();
         let rec = store.record(0);
         assert_eq!(rec.end_pos, Pos0::new(104).unwrap());
-        assert_eq!(rec.end_pos_htslib(), Pos0::new(104).unwrap());
     }
 
     // r[verify record_store.end_pos_htslib]
     #[test]
-    fn end_pos_htslib_unmapped_ignores_cigar() {
+    fn end_pos_unmapped_ignores_cigar() {
         use seqair_types::bam_flags::consts::FLAG_UNMAPPED;
         use seqair_types::{BamFlags, Base};
         let mut store = RecordStore::new();
         store
             .push_fields(
                 Pos0::new(100).unwrap(),
-                Pos0::new(199).unwrap(), // CIGAR-derived: 100M → span [100, 199]
+                Pos0::new(100).unwrap(), // htslib-compatible: end_pos = pos for unmapped
                 BamFlags::from(FLAG_UNMAPPED), // unmapped
                 0,
                 100,
@@ -1717,10 +1715,96 @@ mod tests {
             .unwrap();
         let rec = store.record(0);
         assert!(rec.flags.is_unmapped());
-        // CIGAR-derived end_pos is still stored
-        assert_eq!(rec.end_pos, Pos0::new(199).unwrap());
-        // htslib-compatible end_pos ignores CIGAR for unmapped reads
-        assert_eq!(rec.end_pos_htslib(), Pos0::new(100).unwrap());
+        assert_eq!(rec.end_pos, Pos0::new(100).unwrap());
+    }
+
+    // r[verify record_store.end_pos_htslib]
+    /// Verify the CRAM unmapped-read code path semantics: unmapped reads pushed
+    /// via `push_fields` (the path CRAM uses, `cram/slice.rs:649-705`) have
+    /// `end_pos == pos`, `mapq == 0`, and correct flags/sequence data.
+    #[test]
+    fn push_fields_unmapped_cram_semantics() {
+        use seqair_types::bam_flags::consts::FLAG_UNMAPPED;
+        use seqair_types::{BamFlags, Base};
+
+        let mut store = RecordStore::new();
+        let pos = Pos0::new(200).unwrap();
+        let bases = &[Base::A, Base::C, Base::G, Base::T];
+        let quals = &[30u8, 31, 32, 33];
+        let aux = b"RGZ\x00read_group";
+        store
+            .push_fields(
+                pos,
+                pos, // end_pos = pos (htslib-compatible, as CRAM does at slice.rs:676)
+                BamFlags::from(FLAG_UNMAPPED),
+                0, // mapq = 0 (CRAM slice.rs:681)
+                0, // matching_bases = 0 (slice.rs:682)
+                0, // indel_bases = 0 (slice.rs:683)
+                b"cram_unmapped_read",
+                &[], // empty CIGAR (slice.rs:685)
+                bases,
+                quals,
+                aux,
+                0,  // tid
+                -1, // next_ref_id
+                0,  // next_pos
+                0,  // template_len
+                &mut (),
+            )
+            .unwrap();
+
+        let rec = store.record(0);
+        assert!(rec.flags.is_unmapped(), "CRAM unmapped reads must have FLAG_UNMAPPED");
+        assert_eq!(rec.mapq, 0, "CRAM unmapped reads must have MAPQ=0");
+        assert_eq!(rec.end_pos, pos, "CRAM unmapped reads must have end_pos == pos");
+        assert_eq!(rec.seq_len, 4, "CRAM unmapped reads retain decoded sequence");
+        assert_eq!(rec.matching_bases, 0, "CRAM unmapped reads have zero matching_bases");
+        assert_eq!(rec.indel_bases, 0, "CRAM unmapped reads have zero indel_bases");
+        assert_eq!(rec.qname(&store).unwrap(), b"cram_unmapped_read");
+    }
+
+    // r[verify record_store.end_pos_htslib]
+    /// Verify that `compute_end_pos_from_raw` (used by the BAM reader's pre-push
+    /// overlap filter) agrees with the stored `end_pos` after `push_raw`, for
+    /// both mapped and unmapped reads.
+    #[test]
+    fn push_raw_end_pos_agrees_with_reader_prefilter() {
+        use seqair_types::bam_flags::consts::FLAG_UNMAPPED;
+
+        // --- Mapped read ---
+        let mut mapped = make_raw_record(b"read1", 10, 1); // 1 CIGAR op (10M)
+        mapped[4..8].copy_from_slice(&100i32.to_le_bytes()); // pos = 100
+        let reader_end = record::compute_end_pos_from_raw(&mapped).unwrap();
+        let mut store = RecordStore::new();
+        store.push_raw(&mapped, &mut ()).unwrap();
+        assert_eq!(
+            store.record(0).end_pos,
+            reader_end,
+            "mapped: reader's compute_end_pos_from_raw must agree with push_raw's stored end_pos"
+        );
+
+        // --- Unmapped read ---
+        let mut unmapped = make_raw_record(b"read2", 10, 1); // 1 CIGAR op (10M)
+        unmapped[4..8].copy_from_slice(&100i32.to_le_bytes()); // pos = 100
+        unmapped[14..16].copy_from_slice(&FLAG_UNMAPPED.to_le_bytes()); // flag 0x4
+        let reader_end = record::compute_end_pos_from_raw(&unmapped).unwrap();
+        // compute_end_pos_from_raw computes CIGAR-derived (doesn't check flags).
+        // After refactor, push_raw stores pos for unmapped reads.
+        let mut store2 = RecordStore::new();
+        store2.push_raw(&unmapped, &mut ()).unwrap();
+        assert!(store2.record(0).flags.is_unmapped());
+        assert_eq!(
+            store2.record(0).end_pos,
+            Pos0::new(100).unwrap(),
+            "unmapped: push_raw stores pos (htslib-compatible), not CIGAR-derived end"
+        );
+        // Verify they differ: reader's prefilter returns CIGAR-derived (which is fine
+        // for overlap checking — it's a loose upper bound), while store is exact.
+        assert_ne!(
+            store2.record(0).end_pos,
+            reader_end,
+            "reader prefilter end_pos (CIGAR-derived) differs from stored end_pos (pos) for unmapped reads"
+        );
     }
 
     // ---- Model-based property tests for rollback ----
