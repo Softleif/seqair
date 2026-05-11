@@ -375,7 +375,7 @@ impl<U> RecordStore<U> {
             let packed_seq_slice = &raw[h.cigar_end..h.seq_end];
             if !customize.filter_raw(&FilterRawFields {
                 pos: h.pos,
-                end_pos: h.pos, // not yet computed from CIGAR
+                end_pos: None,
                 flags: h.flags,
                 mapq: h.mapq,
                 n_cigar_ops: h.n_cigar_ops,
@@ -564,7 +564,7 @@ impl<U> RecordStore<U> {
         // r[impl record_store.filter_raw]
         if !customize.filter_raw(&FilterRawFields {
             pos,
-            end_pos,
+            end_pos: Some(end_pos),
             flags,
             mapq,
             n_cigar_ops,
@@ -672,22 +672,26 @@ impl<U> RecordStore<U> {
 /// - `raw_cigar_bytes` is `Some` (the raw BAM CIGAR bytes).
 /// - `packed_seq` is `Some` (4-bit packed sequence bytes).
 /// - `cigar_ops` and `bases` are `None` (not yet decoded).
-/// - `end_pos`, `matching_bases`, `indel_bases` are not yet computed (set to
-///   `pos`, `0`, `0` respectively).
+/// - `end_pos` is `None` (not yet computed from CIGAR).
+/// - `matching_bases` and `indel_bases` are `0` (not yet computed from CIGAR).
 ///
 /// From `push_fields` (pre-parsed SAM/CRAM fields):
 /// - `cigar_ops` is `Some` (decoded CIGAR ops).
 /// - `bases` is `Some` (decoded sequence bases).
 /// - `raw_cigar_bytes` and `packed_seq` are `None`.
-/// - `end_pos`, `matching_bases`, `indel_bases` are the pre-computed values.
+/// - `end_pos` is `Some(_)` (pre-computed).
+/// - `matching_bases` and `indel_bases` are the pre-computed values.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct FilterRawFields<'a> {
     /// 0-based reference position.
     pub pos: Pos0,
-    /// Exclusive end position (computed from CIGAR; `pos` for `push_raw` since
-    /// CIGAR is not yet decoded).
-    pub end_pos: Pos0,
+    /// Exclusive end position, computed from CIGAR.
+    ///
+    /// `Some(_)` from `push_fields` (SAM/CRAM) where the CIGAR is pre-parsed.
+    /// `None` from `push_raw` (BAM) because the CIGAR hasn't been decoded yet
+    /// at this point — `filter_raw` runs before any slab work.
+    pub end_pos: Option<Pos0>,
     /// BAM flags.
     pub flags: BamFlags,
     /// Mapping quality (0..254).
@@ -748,6 +752,54 @@ pub struct FilterRawFields<'a> {
 /// Because `filter_raw` runs before any work, use it for cheap checks
 /// (mapq, flags, tid, qname prefix) that can reject records without
 /// touching the slabs.
+///
+/// # `compute` before `filter` — wasted work
+///
+/// `compute` runs *before* `filter`. If your `compute` is expensive (aux
+/// parsing, base counting, read group extraction) and your `filter` might
+/// reject many records, that work is wasted. When possible, push rejection
+/// logic into `filter_raw` instead — it runs before any slab extension.
+///
+/// For checks that require slab data (aux tags, CIGAR, sequence), you have
+/// two options:
+///
+/// 1. **Accept the waste.** If your `filter` rejects few records and your
+///    `compute` needs the same slab data anyway, the waste is negligible.
+/// 2. **Inline the check into `filter_raw`.** Parse the raw bytes directly
+///    to reject early. This avoids slab writes AND `compute` for rejected
+///    records. The second example below shows this pattern for read groups.
+///
+/// # Example: pre-filter on read group
+///
+/// A customizer that only keeps reads from a specific read group. Rather
+/// than relying on `filter` (which would waste `compute` on every rejected
+/// record), it scans the raw aux bytes in `filter_raw` — before any slab
+/// work happens:
+///
+/// ```
+/// use seqair::bam::record_store::{CustomizeRecordStore, FilterRawFields, RecordStore, SlimRecord};
+///
+/// #[derive(Clone)]
+/// struct ReadGroupFilter {
+///     /// Expected read group, e.g. `b"@RG\tID:mygroup"`.
+///     target_rg: Vec<u8>,
+/// }
+///
+/// impl CustomizeRecordStore for ReadGroupFilter {
+///     type Extra = ();
+///
+///     /// Reject records whose RG tag doesn't match, before any slab extension.
+///     fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
+///         // Quick: if the aux bytes don't contain our target string at all,
+///         // skip the record. No slab work done.
+///         fields.aux_bytes
+///             .windows(self.target_rg.len())
+///             .any(|w| w == self.target_rg.as_slice())
+///     }
+///
+///     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+/// }
+/// ```
 ///
 /// The same `&mut E` instance is reused across regions (`Readers` holds one
 /// customize value for its whole lifetime). Implementors that want
@@ -831,6 +883,68 @@ pub trait CustomizeRecordStore: Clone {
 /// `push_raw`/`push_fields`/`fetch_into_customized`.
 impl CustomizeRecordStore for () {
     type Extra = ();
+    #[inline]
+    fn compute(&mut self, _rec: &SlimRecord, _store: &RecordStore<()>) {}
+}
+
+/// Drop unmapped reads at the earliest possible point.
+///
+/// This is the simplest possible [`CustomizeRecordStore`] — it implements
+/// only [`filter_raw`](CustomizeRecordStore::filter_raw) to reject unmapped
+/// reads before any slab extension or base decode work happens. Because
+/// [`filter_raw`](CustomizeRecordStore::filter_raw) runs before CIGAR is
+/// decoded in the BAM path, it can only check fields that are always
+/// available: `flags`, `mapq`, `tid`, `qname`, etc.
+///
+/// Pass this to [`Readers::open_customized`](crate::reader::Readers::open_customized)
+/// to get htslib-compatible behavior where unmapped reads never enter the record
+/// store. The default [`Readers::open`](crate::reader::Readers::open) passes
+/// `()` as the customizer, which keeps unmapped reads — the pileup engine will
+/// exclude them from columns but they remain in the store for other uses.
+///
+/// # Example
+///
+/// ```no_run
+/// use seqair::bam::record_store::RejectUnmapped;
+/// use seqair::reader::Readers;
+/// use std::path::Path;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut readers = Readers::open_customized(
+///     Path::new("sample.bam"),
+///     Path::new("reference.fa"),
+///     RejectUnmapped,
+/// )?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Source
+///
+/// The entire implementation:
+///
+/// ```
+/// # use seqair::bam::record_store::{CustomizeRecordStore, FilterRawFields, RecordStore, SlimRecord};
+/// #[derive(Clone, Default)]
+/// pub struct RejectUnmapped;
+///
+/// impl CustomizeRecordStore for RejectUnmapped {
+///     type Extra = ();
+///     fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
+///         !fields.flags.is_unmapped()
+///     }
+///     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+/// }
+/// ```
+#[derive(Clone, Default)]
+pub struct RejectUnmapped;
+
+impl CustomizeRecordStore for RejectUnmapped {
+    type Extra = ();
+    #[inline]
+    fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
+        !fields.flags.is_unmapped()
+    }
     #[inline]
     fn compute(&mut self, _rec: &SlimRecord, _store: &RecordStore<()>) {}
 }
