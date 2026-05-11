@@ -389,10 +389,8 @@ impl<U> RecordStore<U> {
                 qname: qname_stripped,
                 qual_bytes: qual_slice,
                 aux_bytes: aux_slice,
-                raw_cigar_bytes: Some(cigar_bytes),
-                cigar_ops: None,
-                packed_seq: Some(packed_seq_slice),
-                bases: None,
+                cigar: CigarSlice::Bytes(cigar_bytes),
+                seq: Sequence::Packed(packed_seq_slice),
             }) {
                 return Ok(None);
             }
@@ -578,10 +576,8 @@ impl<U> RecordStore<U> {
             qname,
             qual_bytes: qual,
             aux_bytes: aux,
-            raw_cigar_bytes: None,
-            cigar_ops: Some(cigar_ops),
-            packed_seq: None,
-            bases: Some(bases),
+            cigar: CigarSlice::Ops(cigar_ops),
+            seq: Sequence::Bases(bases),
         }) {
             return Ok(None);
         }
@@ -659,6 +655,38 @@ impl<U> RecordStore<U> {
 }
 
 // r[impl record_store.filter_raw_fields]
+/// The form in which the CIGAR data is available in [`FilterRawFields`].
+///
+/// In the `push_raw` path (BAM), the CIGAR is available as raw BAM bytes
+/// because it hasn't been decoded yet. In `push_fields` (SAM/CRAM), it has
+/// already been decoded into typed [`CigarOp`]s.
+///
+/// Use a `match` to handle both paths, or call [`CigarSlice::ops`] to get
+/// typed ops (at the cost of a decode step in the `Bytes` path).
+#[derive(Debug, Clone, Copy)]
+pub enum CigarSlice<'a> {
+    /// Raw BAM CIGAR bytes (from `push_raw`). Decode with
+    /// [`CigarOp::from_bam_bytes`](super::cigar::CigarOp::from_bam_bytes).
+    Bytes(&'a [u8]),
+    /// Decoded CIGAR ops (from `push_fields`).
+    Ops(&'a [CigarOp]),
+}
+
+// r[impl record_store.filter_raw_fields]
+/// The form in which the read sequence is available in [`FilterRawFields`].
+///
+/// In `push_raw` (BAM), the sequence is in 4-bit packed BAM format.
+/// In `push_fields` (SAM/CRAM), it has already been decoded into typed
+/// [`Base`] values.
+#[derive(Debug, Clone, Copy)]
+pub enum Sequence<'a> {
+    /// 4-bit packed BAM sequence bytes (from `push_raw`).
+    Packed(&'a [u8]),
+    /// Decoded sequence bases (from `push_fields`).
+    Bases(&'a [Base]),
+}
+
+// r[impl record_store.filter_raw_fields]
 /// Fields available to [`CustomizeRecordStore::filter_raw`] before any slab
 /// data is written — the raw slices and parsed header fields from the incoming
 /// record.
@@ -669,18 +697,18 @@ impl<U> RecordStore<U> {
 /// # `push_raw` vs `push_fields`
 ///
 /// From `push_raw` (BAM binary decode):
-/// - `raw_cigar_bytes` is `Some` (the raw BAM CIGAR bytes).
-/// - `packed_seq` is `Some` (4-bit packed sequence bytes).
-/// - `cigar_ops` and `bases` are `None` (not yet decoded).
-/// - `end_pos` is `None` (not yet computed from CIGAR).
-/// - `matching_bases` and `indel_bases` are `0` (not yet computed from CIGAR).
+/// - [`cigar`](Self::cigar) is [`CigarSlice::Bytes`] (raw BAM CIGAR bytes).
+/// - [`seq`](Self::seq) is [`Sequence::Packed`] (4-bit packed sequence bytes).
+/// - [`end_pos`](Self::end_pos) is `None` (not yet computed from CIGAR).
+/// - [`matching_bases`](Self::matching_bases) and [`indel_bases`](Self::indel_bases)
+///   are `0` (not yet computed from CIGAR).
 ///
 /// From `push_fields` (pre-parsed SAM/CRAM fields):
-/// - `cigar_ops` is `Some` (decoded CIGAR ops).
-/// - `bases` is `Some` (decoded sequence bases).
-/// - `raw_cigar_bytes` and `packed_seq` are `None`.
-/// - `end_pos` is `Some(_)` (pre-computed).
-/// - `matching_bases` and `indel_bases` are the pre-computed values.
+/// - [`cigar`](Self::cigar) is [`CigarSlice::Ops`] (decoded CIGAR ops).
+/// - [`seq`](Self::seq) is [`Sequence::Bases`] (decoded sequence bases).
+/// - [`end_pos`](Self::end_pos) is `Some(_)` (pre-computed).
+/// - [`matching_bases`](Self::matching_bases) and [`indel_bases`](Self::indel_bases)
+///   are the pre-computed values.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct FilterRawFields<'a> {
@@ -718,14 +746,12 @@ pub struct FilterRawFields<'a> {
     pub qual_bytes: &'a [u8],
     /// Raw auxiliary tag bytes (BAM binary format).
     pub aux_bytes: &'a [u8],
-    /// Raw BAM CIGAR bytes (`push_raw` path); `None` from `push_fields`.
-    pub raw_cigar_bytes: Option<&'a [u8]>,
-    /// Decoded CIGAR ops (`push_fields` path); `None` from `push_raw`.
-    pub cigar_ops: Option<&'a [CigarOp]>,
-    /// 4-bit packed sequence bytes (`push_raw` path); `None` from `push_fields`.
-    pub packed_seq: Option<&'a [u8]>,
-    /// Decoded sequence bases (`push_fields` path); `None` from `push_raw`.
-    pub bases: Option<&'a [Base]>,
+    /// CIGAR data. [`CigarSlice::Bytes`] from `push_raw` (BAM),
+    /// [`CigarSlice::Ops`] from `push_fields` (SAM/CRAM).
+    pub cigar: CigarSlice<'a>,
+    /// Read sequence. [`Sequence::Packed`] from `push_raw` (BAM),
+    /// [`Sequence::Bases`] from `push_fields` (SAM/CRAM).
+    pub seq: Sequence<'a>,
 }
 // r[impl record_store.customize.trait]
 /// Customize how records flow into a [`RecordStore`]: filter and compute
