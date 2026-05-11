@@ -356,21 +356,6 @@ impl<U> RecordStore<U> {
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let cigar_bytes = &raw[h.var_start..h.cigar_end];
 
-        // Zero-cost transmute on aligned LE input; falls back to a local copy
-        // when the CIGAR pointer is unaligned (samtools/pysam routinely produce
-        // unpadded l_read_name values — the BAM spec doesn't mandate 4-byte alignment).
-        let mut cigar_fallback: Vec<CigarOp> = Vec::new();
-        let cigar_ops: &[CigarOp] = match CigarOp::slice_from_bam_bytes(cigar_bytes) {
-            Some(ops) => ops,
-            None if cigar_bytes.len() % 4 != 0 => {
-                return Err(DecodeError::CigarByteLength { length: cigar_bytes.len() });
-            }
-            None => {
-                CigarOp::extend_from_bam_bytes(&mut cigar_fallback, cigar_bytes);
-                &cigar_fallback
-            }
-        };
-
         // --- filter_raw: pre-filter before any slab extension or base decode ---
         // r[impl record_store.pre_filter.rollback]
         {
@@ -404,7 +389,7 @@ impl<U> RecordStore<U> {
                 qname: qname_stripped,
                 qual_bytes: qual_slice,
                 aux_bytes: aux_slice,
-                cigar: cigar_ops,
+                cigar: cigar_bytes,
                 seq: Sequence::Packed(packed_seq_slice),
             }) {
                 return Ok(None);
@@ -414,9 +399,10 @@ impl<U> RecordStore<U> {
         // --- Write into cigar slab ---
         // r[impl record_store.checked_offsets]
         let cigar_off = u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
-        self.cigar.extend_from_slice(cigar_ops);
-
-        // cigar_ops is a transmuted view of raw BAM bytes (still valid after slab write).
+        CigarOp::extend_from_bam_bytes(&mut self.cigar, cigar_bytes);
+        let cigar_start = cigar_off as usize;
+        #[allow(clippy::indexing_slicing, reason = "just appended; offsets within slab bounds")]
+        let cigar_ops = &self.cigar[cigar_start..];
         let end_pos = cigar::compute_end_pos(h.pos, cigar_ops)
             .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?;
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_ops);
@@ -589,7 +575,7 @@ impl<U> RecordStore<U> {
             qname,
             qual_bytes: qual,
             aux_bytes: aux,
-            cigar: cigar_ops,
+            cigar: CigarOp::ops_as_bytes(cigar_ops),
             seq: Sequence::Bases(bases),
         }) {
             return Ok(None);
@@ -704,10 +690,9 @@ pub enum Sequence<'a> {
 /// - [`matching_bases`](Self::matching_bases) and [`indel_bases`](Self::indel_bases)
 ///   are the pre-computed values.
 ///
-/// [`cigar`](Self::cigar) is always a typed `&[CigarOp]` slice. On aligned
-/// little-endian input this is a zero-cost transmute from raw BAM bytes;
-/// unaligned input (samtools/pysam routinely produce unpadded `l_read_name`)
-/// falls back to a local copy. On big-endian the record is rejected.
+/// [`cigar`](Self::cigar) is always raw BAM CIGAR bytes (`&[u8]`). Use
+/// [`CigarOp::slice_from_bam_bytes`] or [`CigarOp::extend_from_bam_bytes`]
+/// for typed access.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct FilterRawFields<'a> {
@@ -745,10 +730,10 @@ pub struct FilterRawFields<'a> {
     pub qual_bytes: &'a [u8],
     /// Raw auxiliary tag bytes (BAM binary format).
     pub aux_bytes: &'a [u8],
-    /// Decoded CIGAR ops. In `push_raw` (BAM) this is a zero-cost transmute
-    /// from raw bytes validated for u32 alignment; in `push_fields` (SAM/CRAM)
-    /// the ops are already decoded.
-    pub cigar: &'a [CigarOp],
+    /// Raw BAM CIGAR bytes. Use [`CigarOp::slice_from_bam_bytes`] for zero-cost
+    /// typed access on aligned little-endian input, or
+    /// [`CigarOp::extend_from_bam_bytes`] to copy into a `Vec<CigarOp>`.
+    pub cigar: &'a [u8],
     /// Read sequence. [`Sequence::Packed`] from `push_raw` (BAM),
     /// [`Sequence::Bases`] from `push_fields` (SAM/CRAM).
     pub seq: Sequence<'a>,
