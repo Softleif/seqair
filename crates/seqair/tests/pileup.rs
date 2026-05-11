@@ -14,9 +14,7 @@
 )]
 mod helpers;
 
-use helpers::{
-    cigar_op, collect_columns, collect_columns_into, make_record, make_record_with_cigar,
-};
+use helpers::{cigar_op, collect_columns, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::pileup::RefSeq;
 use seqair::bam::{Pos0, RecordStore, pileup::PileupEngine};
@@ -878,49 +876,4 @@ fn pileup_deduplicates_cross_category_records() {
     // At position 120, both r1 and r2 cover it, but r1 should appear only once
     let col = columns.iter().find(|c| *c.pos() == 130).expect("column at 130");
     assert_eq!(col.depth(), 2, "expected exactly 2 (r1 + r2) after dedup, got {}", col.depth());
-}
-
-// ---- pileup.pileups_into parity ----
-
-// r[verify pileup.pileups_into]
-proptest! {
-    /// `pileups_into` and `pileups` must produce identical columns for any
-    /// set of synthetic reads — same depth, same positions, same alignment
-    /// ops across all columns.
-    #[test]
-    fn pileups_into_matches_pileups(
-        reads in helpers::arb_read_set(20),
-    ) {
-        let mut store_a = RecordStore::new();
-        let mut store_b = RecordStore::new();
-        for r in &reads {
-            store_a.push_raw(&r.raw, &mut ()).unwrap();
-            store_b.push_raw(&r.raw, &mut ()).unwrap();
-        }
-
-        let mut engine_a = PileupEngine::new(store_a, Pos0::new(0).unwrap(), Pos0::new(600).unwrap());
-        let mut engine_b = PileupEngine::new(store_b, Pos0::new(0).unwrap(), Pos0::new(600).unwrap());
-
-        let cols_a = collect_columns(&mut engine_a);
-        let cols_b = collect_columns_into(&mut engine_b);
-
-        prop_assert_eq!(cols_a.len(), cols_b.len(), "column count");
-        for (i, (a, b)) in cols_a.iter().zip(&cols_b).enumerate() {
-            let msg_col = format!("col {i}");
-            prop_assert_eq!(a.pos(), b.pos(), "{} pos", msg_col);
-            prop_assert_eq!(a.reference_base(), b.reference_base(), "{} ref_base", msg_col);
-            prop_assert_eq!(a.depth(), b.depth(), "{} depth", msg_col);
-            prop_assert_eq!(a.match_depth(), b.match_depth(), "{} match_depth", msg_col);
-            prop_assert_eq!(a.alignments.len(), b.alignments.len(), "{} alignment count", msg_col);
-            for (j, (aa, ab)) in a.alignments.iter().zip(&b.alignments).enumerate() {
-                let msg_aln = format!("col {i} aln {j}");
-                prop_assert_eq!(aa.op, ab.op, "{} op", msg_aln);
-                prop_assert_eq!(aa.mapq, ab.mapq, "{} mapq", msg_aln);
-                prop_assert_eq!(aa.flags, ab.flags, "{} flags", msg_aln);
-                prop_assert_eq!(aa.strand, ab.strand, "{} strand", msg_aln);
-                prop_assert_eq!(aa.seq_len, ab.seq_len, "{} seq_len", msg_aln);
-                prop_assert_eq!(aa.record_idx(), ab.record_idx(), "{} record_idx", msg_aln);
-            }
-        }
-    }
 }

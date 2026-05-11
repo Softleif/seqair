@@ -81,14 +81,15 @@ pub use index::{AlignmentIndex, BaiError, BamIndex};
 pub use nm_md::NmMdError;
 pub use owned_record::{OwnedBamRecord, OwnedRecordError};
 pub use pileup::{
-    AlignmentView, PileupAlignment, PileupColumn, PileupColumnPinned, PileupEngine, PileupGuard,
-    PileupOp, RefSeq,
+    AlignmentView, PileupAlignment, PileupColumn, PileupEngine, PileupGuard, PileupOp, RefSeq,
 };
 pub use reader::{BamError, BamShared, IndexedBamReader};
 // `record` is intentionally not re-exported as a type. The production decode
 // path is `RecordStore::push_raw`; the `record` module exposes only shared
 // decode primitives (`parse_header`, `compute_end_pos_from_raw`, `DecodeError`).
-pub use record_store::{CustomizeRecordStore, FilterRawFields, RecordStore, RejectUnmapped};
+pub use record_store::{
+    CigarSlice, CustomizeRecordStore, FilterRawFields, RecordStore, RejectUnmapped, Sequence,
+};
 pub use seqair_types::bam_flags as flags;
 pub use seqair_types::{Offset, One, Pos, Pos0, Pos1, Zero};
 pub use writer::{BamWriteError, BamWriter, BamWriterBuilder, ToPath, ToWriter};

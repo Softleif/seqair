@@ -100,23 +100,8 @@ fn htslib_pileup(bam_path: &Path, contig: &[u8], start: u64, end: u64) -> Vec<Ht
     columns
 }
 
-/// Read pileup from seqair (standard `pileups()` API).
+/// Read pileup from seqair.
 fn seqair_pileup(bam_path: &Path, contig: &str, start: u32, end: u32) -> Vec<HtsColumn> {
-    seqair_pileup_inner(bam_path, contig, start, end, false)
-}
-
-/// Read pileup from seqair (`pileups_into()` API with caller-owned buffer).
-fn seqair_pileup_into(bam_path: &Path, contig: &str, start: u32, end: u32) -> Vec<HtsColumn> {
-    seqair_pileup_inner(bam_path, contig, start, end, true)
-}
-
-fn seqair_pileup_inner(
-    bam_path: &Path,
-    contig: &str,
-    start: u32,
-    end: u32,
-    use_pileups_into: bool,
-) -> Vec<HtsColumn> {
     let mut reader = IndexedBamReader::open(bam_path).expect("seqair open");
     let tid = reader.header().tid(contig).expect("contig not found");
     let mut store = RecordStore::new();
@@ -127,14 +112,12 @@ fn seqair_pileup_inner(
     let mut engine = PileupEngine::new(store, Pos0::new(start).unwrap(), Pos0::new(end).unwrap());
 
     let mut columns = Vec::new();
-    let mut buf = Vec::new();
 
-    // Closure that processes a single column, shared by both APIs.
-    let mut process = |col: &dyn PileupColumnLike| {
+    while let Some(col) = engine.pileups() {
         let mut n_del = 0;
         let mut n_refskip = 0;
         let mut n_ins = 0;
-        for a in col.alignments_iter() {
+        for a in col.raw_alignments() {
             match a.op {
                 seqair::bam::PileupOp::Deletion { .. } => n_del += 1,
                 seqair::bam::PileupOp::ComplexIndel { is_refskip, .. } => {
@@ -159,51 +142,9 @@ fn seqair_pileup_inner(
             n_refskip,
             n_ins,
         });
-    };
-
-    if use_pileups_into {
-        while let Some(col) = engine.pileups_into(&mut buf) {
-            process(&col);
-        }
-    } else {
-        while let Some(col) = engine.pileups() {
-            process(&col);
-        }
     }
 
     columns
-}
-
-/// Trait abstracting over both `PileupColumn` and `PileupColumnPinned`
-/// so the same column-processing logic works for both APIs.
-trait PileupColumnLike {
-    fn pos(&self) -> Pos0;
-    fn depth(&self) -> usize;
-    fn alignments_iter(&self) -> Box<dyn Iterator<Item = &seqair::bam::PileupAlignment> + '_>;
-}
-
-impl<U> PileupColumnLike for seqair::bam::pileup::PileupColumn<'_, U> {
-    fn pos(&self) -> Pos0 {
-        seqair::bam::pileup::PileupColumn::pos(self)
-    }
-    fn depth(&self) -> usize {
-        seqair::bam::pileup::PileupColumn::depth(self)
-    }
-    fn alignments_iter(&self) -> Box<dyn Iterator<Item = &seqair::bam::PileupAlignment> + '_> {
-        Box::new(self.raw_alignments())
-    }
-}
-
-impl<U> PileupColumnLike for seqair::bam::pileup::PileupColumnPinned<'_, '_, U> {
-    fn pos(&self) -> Pos0 {
-        seqair::bam::pileup::PileupColumnPinned::pos(self)
-    }
-    fn depth(&self) -> usize {
-        seqair::bam::pileup::PileupColumnPinned::depth(self)
-    }
-    fn alignments_iter(&self) -> Box<dyn Iterator<Item = &seqair::bam::PileupAlignment> + '_> {
-        Box::new(self.raw_alignments())
-    }
 }
 
 /// Compare seqair and htslib pileup column-by-column.
@@ -326,67 +267,4 @@ fn mpileup_overlap1() {
 #[test]
 fn mpileup_overlap2() {
     assert_pileup_parity("mp_overlap2", "1", 100_020);
-}
-
-/// seqair `pileups_into` must match htslib across all CIGAR patterns.
-/// Reuses `seqair_pileup_into` and the existing parity checking logic.
-fn assert_pileup_into_parity(sam_name: &str, contig: &str, contig_len: u32) {
-    let sam_path = mpileup_dir().join(format!("{sam_name}.sam"));
-    assert!(sam_path.exists(), "SAM not found: {}", sam_path.display());
-
-    let dir = tempfile::tempdir().unwrap();
-    let bam_path = sam_to_bam(dir.path(), &sam_path);
-
-    let hts = htslib_pileup(&bam_path, contig.as_bytes(), 0, u64::from(contig_len));
-    let seqair_pileups = seqair_pileup(&bam_path, contig, 0, contig_len);
-    let seqair_into = seqair_pileup_into(&bam_path, contig, 0, contig_len);
-
-    // pileups_into must produce same columns as pileups
-    assert_eq!(
-        seqair_pileups.len(),
-        seqair_into.len(),
-        "{sam_name}: pileups vs pileups_into column count"
-    );
-    for (i, (a, b)) in seqair_pileups.iter().zip(&seqair_into).enumerate() {
-        assert_eq!(a.pos, b.pos, "{sam_name} col {i}: pileups vs pileups_into pos");
-        assert_eq!(a.depth, b.depth, "{sam_name} col {i}: pileups vs pileups_into depth");
-        assert_eq!(a.n_del, b.n_del, "{sam_name} col {i}: pileups vs pileups_into n_del");
-        assert_eq!(
-            a.n_refskip, b.n_refskip,
-            "{sam_name} col {i}: pileups vs pileups_into n_refskip"
-        );
-        assert_eq!(a.n_ins, b.n_ins, "{sam_name} col {i}: pileups vs pileups_into n_ins");
-    }
-
-    // Both must match htslib
-    for (_i, (s, h)) in seqair_into.iter().zip(&hts).enumerate() {
-        assert_eq!(
-            s.depth,
-            h.depth,
-            "{sam_name} pos {}: pileups_into depth seqair={} htslib={}",
-            s.pos + 1,
-            s.depth,
-            h.depth
-        );
-        assert_eq!(s.n_del, h.n_del, "{sam_name} pos {}: pileups_into n_del", s.pos + 1);
-        assert_eq!(
-            s.n_refskip,
-            h.n_refskip,
-            "{sam_name} pos {}: pileups_into n_refskip",
-            s.pos + 1
-        );
-        assert_eq!(s.n_ins, h.n_ins, "{sam_name} pos {}: pileups_into n_ins", s.pos + 1);
-    }
-}
-
-/// Quick parity: run pileups_into against htslib for the deletion CIGAR pattern.
-#[test]
-fn mpileup_into_deletions() {
-    assert_pileup_into_parity("mp_D", "z", 13);
-}
-
-/// Quick parity: run pileups_into against htslib for the deletion-then-insertion pattern.
-#[test]
-fn mpileup_into_del_then_ins() {
-    assert_pileup_into_parity("mp_DI", "z", 13);
 }

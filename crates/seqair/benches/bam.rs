@@ -363,29 +363,6 @@ fn pileup_e2e(c: &mut Criterion) {
         });
     });
 
-    // seqair pileups_into: same as above but reuses a caller-owned buffer
-    group.bench_function("seqair_pileups_into", |b| {
-        b.iter(|| {
-            let path = std::path::Path::new(BAM_PATH);
-            let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
-            let mut store = seqair::bam::RecordStore::new();
-            let tid = reader.header().tid(CHROM).unwrap();
-            reader.fetch_into(tid, START, END, &mut store).unwrap();
-
-            let mut engine = seqair::bam::PileupEngine::new(store, START, END);
-            let mut total_depth: u64 = 0;
-            let mut columns: u64 = 0;
-            let mut counter = Counter::new();
-            let mut buf = Vec::new();
-            while let Some(col) = engine.pileups_into(&mut buf) {
-                total_depth += col.depth() as u64;
-                columns += 1;
-                col.alignments().for_each(|aln| counter.count(aln.base().unwrap_or_default()));
-            }
-            black_box((columns, total_depth, counter, buf.capacity()))
-        });
-    });
-
     // htslib: IndexedReader → pileup() → iterate columns
     group.bench_function("htslib", |b| {
         b.iter(|| {
