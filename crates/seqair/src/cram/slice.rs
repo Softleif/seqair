@@ -647,14 +647,58 @@ fn decode_record<E: CustomizeRecordStore>(
     }
 
     // r[impl cram.edge.unmapped_reads]
-    // Unmapped reads — skip for fetch_into (same as BAM/SAM)
+    // Unmapped read — push to store so filter_raw can decide.
+    // htslib compat: end_pos = pos (ignore CIGAR for unmapped reads).
+    //
+    // Apply the same foreign-tid and overlap checks as the mapped path
+    // so unmapped reads from other references in multi-ref slices or
+    // outside the query region don't pollute the store.
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "tid comes from BAM header, capped at MAX_REFERENCES (1M), well within i32"
+    )]
+    let is_multi_ref_unmapped = is_multi_ref && record_ref_id != tid as i32 && record_ref_id != -1;
+    if is_multi_ref_unmapped || pos_0based > query_end {
+        return Ok((
+            false,
+            SliceMateInfo {
+                pos: pos_0based.as_i64(),
+                end_pos: pos_0based.as_i64(),
+                mate_line,
+                store_idx: None,
+                bam_flags: raw_flags,
+                ref_id: record_ref_id,
+            },
+        ));
+    }
+
+    let qname: &[u8] = name_buf;
+    let end_pos = pos_0based;
+    let store_idx = store.push_fields(
+        pos_0based,
+        end_pos,
+        bam_flags,
+        0, // mapq — unmapped reads have MAPQ=0 per spec
+        0, // matching_bases
+        0, // indel_bases
+        qname,
+        &[], // empty cigar — unmapped reads don't have features decoded
+        bases_buf,
+        qual_buf,
+        aux_buf,
+        record_ref_id,
+        next_ref_id_val,
+        next_pos_val,
+        template_len_val,
+        customize,
+    )?;
     Ok((
-        false,
+        true,
         SliceMateInfo {
-            pos: -1,
-            end_pos: -1,
-            mate_line: -1,
-            store_idx: None,
+            pos: pos_0based.as_i64(),
+            end_pos: end_pos.as_i64(),
+            mate_line,
+            store_idx,
             bam_flags: raw_flags,
             ref_id: record_ref_id,
         },
