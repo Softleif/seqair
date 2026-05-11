@@ -229,6 +229,9 @@ pub enum DecodeError {
 
     #[error("qual length {qual_len} does not match seq length {seq_len}")]
     QualLenMismatch { qual_len: usize, seq_len: usize },
+
+    #[error("CIGAR byte length {length} is not a multiple of 4; malformed BAM record")]
+    CigarByteLength { length: usize },
 }
 
 #[cfg(test)]

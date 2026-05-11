@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 602ee9fc1af50d28393c25b01b7acd9c4833a6d3b46c2db7e2d4b7449f564993 # shrinks to mut inputs = [E2eInput { qname: [97, 97, 97, 97, 97, 97], bases: [A], quals: [30], pos: 0, mapq: 0 }]

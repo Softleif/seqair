@@ -325,8 +325,9 @@ impl OwnedBamRecord {
     pub fn to_bam_bytes(&self, buf: &mut Vec<u8>) -> Result<(), OwnedRecordError> {
         // Validate field limits. `pos`/`next_pos` are constructively bounded
         // by `Option<Pos0>` (Pos0 ≤ i32::MAX) so no overflow check is needed.
-        if self.qname.len() > 254 {
-            return Err(OwnedRecordError::QnameTooLong { len: self.qname.len() });
+        let name_len = self.qname.len();
+        if name_len > 254 {
+            return Err(OwnedRecordError::QnameTooLong { len: name_len });
         }
         if self.cigar.len() > 65535 {
             return Err(OwnedRecordError::CigarCountOverflow { count: self.cigar.len() });
