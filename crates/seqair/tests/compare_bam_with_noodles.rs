@@ -12,15 +12,16 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
-use noodles::bam;
-use noodles::sam;
 #[derive(Clone, Default)]
 struct RejectUnmapped;
 impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
     type Extra = ();
-    fn filter_raw(&mut self, f: &seqair::bam::record_store::FilterRawFields<'_>) -> bool { !f.flags.is_unmapped() }
+    fn filter_raw(&mut self, fields: &seqair::bam::record_store::FilterRawFields<'_>) -> bool { !fields.flags.is_unmapped() }
     fn compute(&mut self, _: &seqair::bam::record_store::SlimRecord, _: &seqair::bam::RecordStore<()>) {}
 }
+
+use noodles::bam;
+use noodles::sam;
 use seqair::bam::Pos0;
 use seqair_types::BaseQuality;
 use std::path::Path;
@@ -147,7 +148,9 @@ fn bam_record_count_matches_noodles() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         // seqair's index-based fetch may include records starting before
@@ -181,7 +184,9 @@ fn bam_record_fields_match_noodles() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         // Filter seqair records to match noodles' sequential filter (pos >= start).
@@ -218,7 +223,9 @@ fn bam_sequence_matches_noodles() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let seqair_indices: Vec<u32> = (0..store.len() as u32)
@@ -269,7 +276,9 @@ fn bam_quality_scores_match_noodles() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let seqair_indices: Vec<u32> = (0..store.len() as u32)
@@ -303,7 +312,9 @@ fn bam_cigar_matches_noodles() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let seqair_indices: Vec<u32> = (0..store.len() as u32)

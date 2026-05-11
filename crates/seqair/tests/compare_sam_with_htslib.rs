@@ -13,14 +13,15 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
-use rust_htslib::bam::{self, FetchDefinition, Read as _};
 #[derive(Clone, Default)]
 struct RejectUnmapped;
 impl seqair::bam::record_store::CustomizeRecordStore for RejectUnmapped {
     type Extra = ();
-    fn filter_raw(&mut self, f: &seqair::bam::record_store::FilterRawFields<'_>) -> bool { !f.flags.is_unmapped() }
+    fn filter_raw(&mut self, fields: &seqair::bam::record_store::FilterRawFields<'_>) -> bool { !fields.flags.is_unmapped() }
     fn compute(&mut self, _: &seqair::bam::record_store::SlimRecord, _: &seqair::bam::RecordStore<()>) {}
 }
+
+use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos0, RecordStore};
 use seqair::sam::reader::IndexedSamReader;
 use seqair_types::BaseQuality;
@@ -127,7 +128,9 @@ fn sam_record_count_matches_htslib() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("rio fetch");
 
         assert_eq!(
@@ -161,7 +164,9 @@ fn sam_record_fields_match_htslib() {
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("rio fetch");
 
         for (i, h) in hts.iter().enumerate() {
