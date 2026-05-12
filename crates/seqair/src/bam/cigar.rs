@@ -198,11 +198,13 @@ impl CigarOp {
 
     /// View raw BAM CIGAR bytes as `&[CigarOp]` without copying.
     ///
-    /// Returns `None` if the length is not a multiple of 4 or the target is
-    /// big-endian. On aligned little-endian input this is a zero-cost
-    /// transmute. **Unaligned input panics in debug builds** (Rust's
-    /// `from_raw_parts` alignment assertion) — use [`extend_from_bam_bytes`]
-    /// if alignment is not guaranteed.
+    /// Returns `None` if the length is not a multiple of 4, the pointer is
+    /// not 4-byte aligned, or the target is big-endian. On aligned LE input
+    /// this is a zero-cost transmute. BAM CIGAR data is **not** guaranteed
+    /// aligned — the read name length determines the start offset, and
+    /// samtools produces unaligned CIGAR data when `l_read_name` is not a
+    /// multiple of 4. Use [`extend_from_bam_bytes`] if alignment cannot be
+    /// guaranteed (it's always correct, just requires a copy).
     #[inline]
     pub fn slice_from_bam_bytes(bytes: &[u8]) -> Option<&[Self]> {
         if bytes.is_empty() {
@@ -213,11 +215,30 @@ impl CigarOp {
         }
         #[cfg(target_endian = "little")]
         {
+            // BAM data is packed sequentially: 32-byte fixed header, then
+            // qname (l_read_name bytes, including NUL), then CIGAR. If
+            // l_read_name is not a multiple of 4, the CIGAR pointer is
+            // unaligned. from_raw_parts requires CigarOp alignment (4).
+            #[allow(
+                clippy::arithmetic_side_effects,
+                clippy::manual_is_multiple_of,
+                reason = "pointer-to-usize cast is defined on all supported targets; align_of is non-zero so % is safe"
+            )]
+            if bytes.as_ptr() as usize % align_of::<CigarOp>() != 0 {
+                return None;
+            }
             let n = bytes.len() / 4;
-            // SAFETY: length and alignment checked above (via from_raw_parts'
-            // built-in assertion). CigarOp is repr(transparent) over u32
-            // (Pod+Zeroable); every bit pattern is valid. On LE, BAM's LE
-            // u32 byte order == native u32.
+            // SAFETY:
+            // - Length: `n` is `bytes.len() / 4`, checked to be a multiple of
+            //   4 above. The pointer advance of `n * size_of::<CigarOp>()`
+            //   (== n * 4) stays within the allocation.
+            // - Alignment: checked via `is_aligned()` above.
+            // - Validity: every `u32` bit pattern is a valid `CigarOp` — the
+            //   op code field is 4 bits (0..=15, all decodable) and the length
+            //   field is an unconstrained 28-bit integer.
+            // - Endianness: guarded by `#[cfg(target_endian = "little")]`;
+            //   on LE hosts BAM's on-disk LE `u32` byte order matches native
+            //   in-memory layout.
             Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const CigarOp, n) })
         }
         #[cfg(not(target_endian = "little"))]
@@ -833,5 +854,31 @@ mod tests {
     #[test]
     fn slice_from_bam_bytes_empty_ok() {
         assert_eq!(CigarOp::slice_from_bam_bytes(&[]), Some(&[][..]));
+    }
+
+    // r[verify cigar.slice_from_bam_bytes]
+    #[test]
+    fn slice_from_bam_bytes_rejects_unaligned_input() {
+        // BAM CIGAR data can be unaligned within the record: the read name
+        // sits between the 32-byte fixed header and the CIGAR data. If
+        // l_read_name is not a multiple of 4, the CIGAR bytes start at a
+        // non-4-byte-aligned offset. Samtools produces such records.
+        let cigar_op = CigarOp::new(CigarOpType::Match, 100);
+        let packed = cigar_op.to_bam_u32();
+        let mut buf = vec![0u8];
+        buf.extend_from_slice(&packed.to_le_bytes());
+        buf.extend_from_slice(&packed.to_le_bytes());
+        buf.extend_from_slice(&packed.to_le_bytes());
+
+        let mut any_unaligned = false;
+        for off in 0..=3 {
+            let sub = &buf[off..off + 4];
+            let result = CigarOp::slice_from_bam_bytes(sub);
+            if sub.as_ptr() as usize % 4 != 0 {
+                assert!(result.is_none(), "unaligned slice at offset {off} must return None");
+                any_unaligned = true;
+            }
+        }
+        assert!(any_unaligned, "at least one test offset must be unaligned");
     }
 }
