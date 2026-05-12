@@ -112,15 +112,14 @@ fn seqair_pileup(bam_path: &Path, contig: &str, start: u32, end: u32) -> Vec<Hts
     let mut engine = PileupEngine::new(store, Pos0::new(start).unwrap(), Pos0::new(end).unwrap());
 
     let mut columns = Vec::new();
+
     while let Some(col) = engine.pileups() {
         let mut n_del = 0;
         let mut n_refskip = 0;
         let mut n_ins = 0;
-        for a in col.alignments() {
+        for a in col.raw_alignments() {
             match a.op {
                 seqair::bam::PileupOp::Deletion { .. } => n_del += 1,
-                // ComplexIndel counts as both a deletion and an insertion
-                // (htslib: is_del=true + indel>0). N→I also sets is_refskip.
                 seqair::bam::PileupOp::ComplexIndel { is_refskip, .. } => {
                     n_del += 1;
                     n_ins += 1;
@@ -128,8 +127,6 @@ fn seqair_pileup(bam_path: &Path, contig: &str, start: u32, end: u32) -> Vec<Hts
                         n_refskip += 1;
                     }
                 }
-                // htslib sets is_del=true for BOTH D and N ops (meaning
-                // "no query base"). is_refskip is the additional flag for N.
                 seqair::bam::PileupOp::RefSkip => {
                     n_del += 1;
                     n_refskip += 1;
@@ -139,13 +136,14 @@ fn seqair_pileup(bam_path: &Path, contig: &str, start: u32, end: u32) -> Vec<Hts
             }
         }
         columns.push(HtsColumn {
-            pos: *col.pos(),
+            pos: u32::from(col.pos()),
             depth: col.depth() as u32,
             n_del,
             n_refskip,
             n_ins,
         });
     }
+
     columns
 }
 

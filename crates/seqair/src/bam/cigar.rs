@@ -195,6 +195,57 @@ impl CigarOp {
             }
         }
     }
+
+    /// View raw BAM CIGAR bytes as `&[CigarOp]` without copying.
+    ///
+    /// Returns `None` if the length is not a multiple of 4, the pointer is
+    /// not 4-byte aligned, or the target is big-endian. On aligned LE input
+    /// this is a zero-cost transmute. BAM CIGAR data is **not** guaranteed
+    /// aligned — the read name length determines the start offset, and
+    /// samtools produces unaligned CIGAR data when `l_read_name` is not a
+    /// multiple of 4. Use [`extend_from_bam_bytes`] if alignment cannot be
+    /// guaranteed (it's always correct, just requires a copy).
+    #[inline]
+    pub fn slice_from_bam_bytes(bytes: &[u8]) -> Option<&[Self]> {
+        if bytes.is_empty() {
+            return Some(&[]);
+        }
+        if !bytes.len().is_multiple_of(4) {
+            return None;
+        }
+        #[cfg(target_endian = "little")]
+        {
+            // BAM data is packed sequentially: 32-byte fixed header, then
+            // qname (l_read_name bytes, including NUL), then CIGAR. If
+            // l_read_name is not a multiple of 4, the CIGAR pointer is
+            // unaligned. from_raw_parts requires CigarOp alignment (4).
+            #[allow(
+                clippy::arithmetic_side_effects,
+                clippy::manual_is_multiple_of,
+                reason = "pointer-to-usize cast is defined on all supported targets; align_of is non-zero so % is safe"
+            )]
+            if bytes.as_ptr() as usize % align_of::<CigarOp>() != 0 {
+                return None;
+            }
+            let n = bytes.len() / 4;
+            // SAFETY:
+            // - Length: `n` is `bytes.len() / 4`, checked to be a multiple of
+            //   4 above. The pointer advance of `n * size_of::<CigarOp>()`
+            //   (== n * 4) stays within the allocation.
+            // - Alignment: checked via `is_aligned()` above.
+            // - Validity: every `u32` bit pattern is a valid `CigarOp` — the
+            //   op code field is 4 bits (0..=15, all decodable) and the length
+            //   field is an unconstrained 28-bit integer.
+            // - Endianness: guarded by `#[cfg(target_endian = "little")]`;
+            //   on LE hosts BAM's on-disk LE `u32` byte order matches native
+            //   in-memory layout.
+            Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const CigarOp, n) })
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            None
+        }
+    }
 }
 
 impl std::fmt::Debug for CigarOp {
@@ -316,13 +367,28 @@ pub enum CigarPosInfo {
 
 /// Compact CIGAR mapping for fast qpos lookup in the pileup engine.
 ///
-/// For the ~90% of reads with simple CIGARs (clips + one match block),
-/// `Linear` avoids any allocation and computes qpos with a single subtraction.
-/// Complex CIGARs use a `SmallVec` of compact ops that stays inline for ≤6 ops.
+/// Two variants:
+///
+/// **`Linear`**: For the ~96% of reads whose CIGAR is a single contiguous
+/// match block with optional leading/trailing clips (`[HS]* [M=X]+ [HS]*`).
+/// Computes `qpos` with a single subtraction. 16 bytes.
+///
+/// **`Complex`**: For reads with insertions, deletions, reference skips,
+/// or multiple disjoint match blocks (~4% of reads). Stores a pre-computed
+/// index of [`CompactOp`]s — 12 bytes each, 6 inline (72-byte buffer, no
+/// heap allocation for 98.1% of complex CIGARs).
+///
+/// Real-world data from NA12878 chr12 Illumina WGS (100k reads):
+/// 96.1% Linear, 3.9% Complex. Of complex reads: 79% have 3 ops (e.g. `M I M`),
+/// 98.1% fit in ≤6 ops (inline).
 pub enum CigarMapping {
-    /// `qpos = (pos - rec_pos) as usize + query_offset as usize`
+    /// `qpos = (pos - rec_pos) + query_offset`. No insertion/deletion support —
+    /// `try_linear` rejects CIGARs containing I, D, or N ops.
     Linear { rec_pos: Pos0, query_offset: u32, match_len: u32 },
-    /// Pre-computed compact ops for linear/binary search.
+    /// Pre-computed compact ops for position lookup via linear scan (≤4 ops)
+    /// or binary search (>4 ops). The mapping is immutable — `pos_info_at`
+    /// is a pure function of `pos`, allowing the active set to be reordered
+    /// without invalidating state.
     Complex(SmallVec<CompactOp, 6>),
 }
 
@@ -340,13 +406,46 @@ impl std::fmt::Debug for CigarMapping {
     }
 }
 
-/// 16-byte CIGAR op for the compact index.
+/// Compact CIGAR operation for the position-lookup index used by the pileup engine.
+///
+/// 12 bytes (down from 16). Each op records the absolute reference start, absolute
+/// query start, operation length, and CIGAR op code. The length and op code are
+/// packed into a single `u32` (`len << 4 | op_code`), matching BAM's on-disk
+/// packing — extraction is a single shift or mask.
+///
+/// Stored inline in [`CigarMapping::Complex`] via `SmallVec<CompactOp, 6>`
+/// (72-byte inline buffer, no heap allocation for 98.1% of complex CIGARs).
 #[derive(Clone, Copy)]
 pub struct CompactOp {
-    ref_start: i32,
+    /// 0-based reference position where this operation begins.
+    /// Range: `0..=i32::MAX` (BAM's position limit).
+    ref_start: u32,
+    /// 0-based query position where this operation begins. Equal to the
+    /// cumulative leading clip length plus all preceding query-consuming
+    /// op lengths.
     query_start: u32,
-    len: u32,
-    op_type: u8,
+    /// Packed: `len << 4 | op_code`. Same layout as BAM's on-disk CIGAR
+    /// encoding. Upper 28 bits = operation length, lower 4 bits = CIGAR
+    /// op code (0=M, 1=I, 2=D, 3=N, 4=S, 5=H, 6=P, 7==, 8=X).
+    len_op: u32,
+}
+
+impl CompactOp {
+    /// CIGAR operation length (upper 28 bits of the BAM-packed `u32`).
+    #[inline]
+    #[allow(
+        clippy::len_without_is_empty,
+        reason = "CIGAR ops don't have a meaningful 'empty' state"
+    )]
+    pub fn len(self) -> u32 {
+        self.len_op >> 4
+    }
+    /// BAM CIGAR op code (lower 4 bits). See module-level constants
+    /// `CIGAR_M` through `CIGAR_X`.
+    #[inline]
+    pub fn op_type(self) -> u8 {
+        (self.len_op & 0xF) as u8
+    }
 }
 
 impl CigarMapping {
@@ -431,8 +530,9 @@ fn build_compact_ops(rec_pos: Pos0, ops: &[CigarOp]) -> Option<SmallVec<CompactO
 
         let ref_start_i64 = rec_pos.as_i64().wrapping_add(ref_off);
         // r[impl cigar.compact_op_position_invariant]
-        let ref_start = i32::try_from(ref_start_i64).trace_ok("ref_start exceeds i32 range")?;
-        out.push(CompactOp { ref_start, query_start: query_off, len, op_type });
+        let ref_start = u32::try_from(ref_start_i64).trace_ok("ref_start exceeds u32 range")?;
+        let len_op = op.to_bam_u32();
+        out.push(CompactOp { ref_start, query_start: query_off, len_op });
 
         if consumes_ref(op_type) {
             ref_off = ref_off.checked_add(i64::from(len)).trace_err("ref offset overflow")?;
@@ -455,14 +555,14 @@ fn next_insertion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
     let mut total = 0u32;
     let mut idx = op_idx.checked_add(1)?;
     while let Some(next) = ops.get(idx) {
-        if next.op_type == CIGAR_P {
+        if next.op_type() == CIGAR_P {
             idx = idx.checked_add(1)?;
             continue;
         }
-        if next.op_type != CIGAR_I {
+        if next.op_type() != CIGAR_I {
             break;
         }
-        total = total.saturating_add(next.len);
+        total = total.saturating_add(next.len());
         idx = idx.checked_add(1)?;
     }
     if total > 0 { Some(total) } else { None }
@@ -475,43 +575,40 @@ fn classify_op(
     ops: &[CompactOp],
     i: usize,
     op: &CompactOp,
-    pos32: i32,
-    ref_end: i32,
+    pos: u32,
+    ref_end: u32,
 ) -> Option<CigarPosInfo> {
-    if consumes_query(op.op_type) {
+    if consumes_query(op.op_type()) {
         debug_assert!(
-            matches!(op.op_type, CIGAR_M | CIGAR_EQ | CIGAR_X),
+            matches!(op.op_type(), CIGAR_M | CIGAR_EQ | CIGAR_X),
             "classify_op reached query-consuming branch with unexpected op type {}",
-            op.op_type
+            op.op_type()
         );
-        let offset = pos32.wrapping_sub(op.ref_start) as u32;
+        let offset = pos.wrapping_sub(op.ref_start);
         let qpos = op.query_start.checked_add(offset).trace_err("qpos overflow")?;
-        if pos32 == ref_end.wrapping_sub(1)
+        if pos == ref_end.wrapping_sub(1)
             && let Some(insert_len) = next_insertion_len(ops, i)
         {
             return Some(CigarPosInfo::Insertion { qpos, insert_len });
         }
         Some(CigarPosInfo::Match { qpos })
-    } else if op.op_type == CIGAR_D {
-        // r[impl pileup_indel.op_enum]
-        // At the last position of a D op, check if a following I op exists (skipping P).
-        if pos32 == ref_end.wrapping_sub(1)
+    } else if op.op_type() == CIGAR_D {
+        if pos == ref_end.wrapping_sub(1)
             && let Some(insert_len) = next_insertion_len(ops, i)
         {
             return Some(CigarPosInfo::ComplexIndel {
-                del_len: op.len,
+                del_len: op.len(),
                 insert_len,
                 is_refskip: false,
             });
         }
-        Some(CigarPosInfo::Deletion { del_len: op.len })
-    } else if op.op_type == CIGAR_N {
-        // Same complex-indel check for N ops.
-        if pos32 == ref_end.wrapping_sub(1)
+        Some(CigarPosInfo::Deletion { del_len: op.len() })
+    } else if op.op_type() == CIGAR_N {
+        if pos == ref_end.wrapping_sub(1)
             && let Some(insert_len) = next_insertion_len(ops, i)
         {
             return Some(CigarPosInfo::ComplexIndel {
-                del_len: op.len,
+                del_len: op.len(),
                 insert_len,
                 is_refskip: true,
             });
@@ -524,17 +621,16 @@ fn classify_op(
 
 #[inline]
 fn pos_info_linear(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
-    let pos32 = pos.as_i32();
+    let pos: u32 = *pos;
     for (i, op) in ops.iter().enumerate() {
-        if !consumes_ref(op.op_type) {
+        if !consumes_ref(op.op_type()) {
             continue;
         }
-        let ref_end =
-            op.ref_start.saturating_add(i32::try_from(op.len).trace_ok("op len exceeds i32")?);
-        if pos32 < op.ref_start || pos32 >= ref_end {
+        let ref_end = op.ref_start.saturating_add(op.len());
+        if pos < op.ref_start || pos >= ref_end {
             continue;
         }
-        return classify_op(ops, i, op, pos32, ref_end);
+        return classify_op(ops, i, op, pos, ref_end);
     }
     None
 }
@@ -542,20 +638,19 @@ fn pos_info_linear(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
 // r[impl perf.cigar_binary_search]
 #[inline]
 fn pos_info_bsearch(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
-    let pos32 = pos.as_i32();
-    let idx = ops.partition_point(|op| op.ref_start <= pos32);
+    let pos: u32 = *pos;
+    let idx = ops.partition_point(|op| op.ref_start <= pos);
     if idx == 0 {
         return None;
     }
     for i in idx.saturating_sub(2)..ops.len().min(idx.saturating_add(1)) {
         let Some(op) = ops.get(i) else { continue };
-        if !consumes_ref(op.op_type) {
+        if !consumes_ref(op.op_type()) {
             continue;
         }
-        let ref_end =
-            op.ref_start.saturating_add(i32::try_from(op.len).trace_ok("op len exceeds i32")?);
-        if pos32 >= op.ref_start && pos32 < ref_end {
-            return classify_op(ops, i, op, pos32, ref_end);
+        let ref_end = op.ref_start.saturating_add(op.len());
+        if pos >= op.ref_start && pos < ref_end {
+            return classify_op(ops, i, op, pos, ref_end);
         }
     }
     None
@@ -565,6 +660,7 @@ fn pos_info_bsearch(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
 #[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn op(op_type: CigarOpType, len: u32) -> CigarOp {
         CigarOp::new(op_type, len)
@@ -720,5 +816,69 @@ mod tests {
             None,
             "pos far before alignment must return None"
         );
+    }
+
+    // r[verify cigar.slice_from_bam_bytes]
+    proptest::proptest! {
+        /// Round-trip: encode CigarOp → BAM LE bytes → slice_from_bam_bytes → same ops.
+        #[test]
+        fn roundtrip_slice_from_bam_bytes(
+            ops in proptest::collection::vec(
+                (0u32..=8u32, 1u32..1000u32),
+                1..20,
+            ).prop_map(|pairs| {
+                pairs.into_iter()
+                    .map(|(code, len)| CigarOp::from_bam_u32((len << 4) | code))
+                    .collect::<Vec<_>>()
+            })
+        ) {
+            let bytes: Vec<u8> = ops.iter()
+                .flat_map(|op| op.to_bam_u32().to_le_bytes())
+                .collect();
+            // 8 bytes padding ensures 8-byte alignment (≥ 4-byte for CigarOp)
+            let mut buf = vec![0u8; 8];
+            buf.extend_from_slice(&bytes);
+            let aligned = &buf[8..];
+
+            let result = CigarOp::slice_from_bam_bytes(aligned);
+            prop_assert!(result.is_some(), "aligned buffer must succeed");
+            prop_assert_eq!(result.unwrap(), ops.as_slice());
+        }
+    }
+
+    #[test]
+    fn slice_from_bam_bytes_rejects_odd_length() {
+        assert!(CigarOp::slice_from_bam_bytes(&[0u8; 7]).is_none());
+    }
+
+    #[test]
+    fn slice_from_bam_bytes_empty_ok() {
+        assert_eq!(CigarOp::slice_from_bam_bytes(&[]), Some(&[][..]));
+    }
+
+    // r[verify cigar.slice_from_bam_bytes]
+    #[test]
+    fn slice_from_bam_bytes_rejects_unaligned_input() {
+        // BAM CIGAR data can be unaligned within the record: the read name
+        // sits between the 32-byte fixed header and the CIGAR data. If
+        // l_read_name is not a multiple of 4, the CIGAR bytes start at a
+        // non-4-byte-aligned offset. Samtools produces such records.
+        let cigar_op = CigarOp::new(CigarOpType::Match, 100);
+        let packed = cigar_op.to_bam_u32();
+        let mut buf = vec![0u8];
+        buf.extend_from_slice(&packed.to_le_bytes());
+        buf.extend_from_slice(&packed.to_le_bytes());
+        buf.extend_from_slice(&packed.to_le_bytes());
+
+        let mut any_unaligned = false;
+        for off in 0..=3 {
+            let sub = &buf[off..off + 4];
+            let result = CigarOp::slice_from_bam_bytes(sub);
+            if sub.as_ptr() as usize % 4 != 0 {
+                assert!(result.is_none(), "unaligned slice at offset {off} must return None");
+                any_unaligned = true;
+            }
+        }
+        assert!(any_unaligned, "at least one test offset must be unaligned");
     }
 }

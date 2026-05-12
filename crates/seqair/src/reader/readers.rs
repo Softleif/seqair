@@ -192,9 +192,11 @@ impl<E: CustomizeRecordStore> Readers<E> {
         tid: u32,
         start: Pos0,
         end: Pos0,
-        store: &mut RecordStore<()>,
+        store: &mut RecordStore<E::Extra>,
     ) -> Result<usize, ReaderError> {
-        self.alignment.fetch_into(tid, start, end, store)
+        self.alignment
+            .fetch_into_customized(tid, start, end, store, &mut self.customize)
+            .map(|c| c.kept)
     }
 
     /// Access the customize value, e.g. to inspect any internal counters it carries.

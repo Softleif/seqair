@@ -17,7 +17,7 @@
 
 use noodles::bam;
 use noodles::sam;
-use seqair::bam::{Pos0, RecordStore};
+use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::IndexedReader;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -97,7 +97,14 @@ fn dos_line_endings_in_sam() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1000).unwrap(), &mut store)
+        .fetch_into_customized(
+            tid,
+            Pos0::new(0).unwrap(),
+            Pos0::new(1000).unwrap(),
+            &mut store,
+            &mut RejectUnmapped,
+        )
+        .map(|c| c.kept)
         .expect("fetch");
 
     assert_eq!(store.len(), 2, "should parse 2 records from DOS SAM");
@@ -121,7 +128,14 @@ fn dos_line_endings_via_bam() {
     let tid = reader.header().tid("CHROMOSOME_I").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1_009_800).unwrap(), &mut store)
+        .fetch_into_customized(
+            tid,
+            Pos0::new(0).unwrap(),
+            Pos0::new(1_009_800).unwrap(),
+            &mut store,
+            &mut RejectUnmapped,
+        )
+        .map(|c| c.kept)
         .expect("fetch");
 
     assert!(!store.is_empty(), "should have records on CHROMOSOME_I");
@@ -151,7 +165,14 @@ fn dos_line_endings_via_bam() {
         if let Some(tid) = reader.header().tid(name) {
             store.clear();
             reader
-                .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(5000).unwrap(), &mut store)
+                .fetch_into_customized(
+                    tid,
+                    Pos0::new(0).unwrap(),
+                    Pos0::new(5000).unwrap(),
+                    &mut store,
+                    &mut RejectUnmapped,
+                )
+                .map(|c| c.kept)
                 .unwrap();
             total += store.len();
         }
@@ -182,7 +203,14 @@ fn colons_in_contig_names() {
 
         let mut store = RecordStore::new();
         reader
-            .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(len).unwrap(), &mut store)
+            .fetch_into_customized(
+                tid,
+                Pos0::new(0).unwrap(),
+                Pos0::new(len).unwrap(),
+                &mut store,
+                &mut RejectUnmapped,
+            )
+            .map(|c| c.kept)
             .unwrap_or_else(|e| panic!("fetch {contig}: {e}"));
 
         let qnames: Vec<&[u8]> = (0..store.len() as u32).map(|i| store.qname(i)).collect();
@@ -212,7 +240,14 @@ fn sequence_less_mapped_reads() {
     let tid = reader.header().tid("c1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(10).unwrap(), &mut store)
+        .fetch_into_customized(
+            tid,
+            Pos0::new(0).unwrap(),
+            Pos0::new(10).unwrap(),
+            &mut store,
+            &mut RejectUnmapped,
+        )
+        .map(|c| c.kept)
         .expect("fetch");
 
     assert_eq!(store.len(), noodles_records.len(), "mapped record count mismatch");
@@ -261,7 +296,14 @@ fn seq_qual_presence_combos() {
     let tid = reader.header().tid("c1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(10).unwrap(), &mut store)
+        .fetch_into_customized(
+            tid,
+            Pos0::new(0).unwrap(),
+            Pos0::new(10).unwrap(),
+            &mut store,
+            &mut RejectUnmapped,
+        )
+        .map(|c| c.kept)
         .expect("fetch");
 
     assert_eq!(store.len(), noodles_mapped.len(), "mapped record count mismatch");
@@ -330,7 +372,14 @@ fn supplementary_alignments_included() {
     let tid = reader.header().tid("CHROMOSOME_I").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1_009_800).unwrap(), &mut store)
+        .fetch_into_customized(
+            tid,
+            Pos0::new(0).unwrap(),
+            Pos0::new(1_009_800).unwrap(),
+            &mut store,
+            &mut RejectUnmapped,
+        )
+        .map(|c| c.kept)
         .expect("fetch");
 
     // Check that supplementary alignments (flag 2048) are present
@@ -360,7 +409,14 @@ fn secondary_alignment_without_sequence() {
     let tid = reader.header().tid("CHROMOSOME_V").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(5000).unwrap(), &mut store)
+        .fetch_into_customized(
+            tid,
+            Pos0::new(0).unwrap(),
+            Pos0::new(5000).unwrap(),
+            &mut store,
+            &mut RejectUnmapped,
+        )
+        .map(|c| c.kept)
         .expect("fetch");
 
     // Find the secondary alignment (flag 256)
@@ -387,7 +443,14 @@ fn padding_cigar_operations() {
         let tid = reader.header().tid("c1").expect("tid");
         let mut store = RecordStore::new();
         reader
-            .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(10).unwrap(), &mut store)
+            .fetch_into_customized(
+                tid,
+                Pos0::new(0).unwrap(),
+                Pos0::new(10).unwrap(),
+                &mut store,
+                &mut RejectUnmapped,
+            )
+            .map(|c| c.kept)
             .expect("fetch");
 
         // Verify against noodles

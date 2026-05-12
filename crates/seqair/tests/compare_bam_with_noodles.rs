@@ -14,7 +14,7 @@
 )]
 use noodles::bam;
 use noodles::sam;
-use seqair::bam::Pos0;
+use seqair::bam::{Pos0, RejectUnmapped};
 use seqair_types::BaseQuality;
 use std::path::Path;
 
@@ -135,12 +135,14 @@ fn bam_record_count_matches_noodles() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         // seqair's index-based fetch may include records starting before
@@ -169,12 +171,14 @@ fn bam_record_fields_match_noodles() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         // Filter seqair records to match noodles' sequential filter (pos >= start).
@@ -206,12 +210,14 @@ fn bam_sequence_matches_noodles() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let seqair_indices: Vec<u32> = (0..store.len() as u32)
@@ -257,12 +263,14 @@ fn bam_quality_scores_match_noodles() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let seqair_indices: Vec<u32> = (0..store.len() as u32)
@@ -291,12 +299,14 @@ fn bam_cigar_matches_noodles() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let seqair_indices: Vec<u32> = (0..store.len() as u32)

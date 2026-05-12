@@ -14,7 +14,7 @@
 )]
 
 use rust_htslib::bam::{self, Read as _};
-use seqair::bam::Pos0;
+use seqair::bam::{Pos0, RejectUnmapped};
 use seqair_types::BaseQuality;
 use std::path::Path;
 
@@ -93,12 +93,14 @@ fn record_count_matches() {
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid(TEST_REGION).expect("tid");
     reader
-        .fetch_into(
+        .fetch_into_customized(
             tid,
             Pos0::new(TEST_START as u32).unwrap(),
             Pos0::new(TEST_END as u32).unwrap(),
             &mut store,
+            &mut RejectUnmapped,
         )
+        .map(|c| c.kept)
         .expect("seqair fetch");
 
     assert_eq!(
@@ -110,36 +112,60 @@ fn record_count_matches() {
     );
 }
 
-// r[verify bam.reader.unmapped_skipped+2]
+// r[verify bam.reader.unmapped_skipped]
 /// Region with both mapped and placed-unmapped reads (chr19:6104000-6106000
 /// has 4 unmapped + 625 mapped per `samtools view -c -f 4`).
 const UNMAPPED_REGION: &str = "chr19";
 const UNMAPPED_START: u64 = 6_104_000;
 const UNMAPPED_END: u64 = 6_106_000;
 
-fn fetch_count(keep_unmapped: bool) -> usize {
+/// Fetch records, optionally rejecting unmapped via filter_raw.
+fn fetch_count(reject_unmapped: bool) -> usize {
     let bam_path = test_bam_path();
-    let reader = seqair::bam::IndexedBamReader::open(bam_path).expect("open");
-    let mut reader = reader.keep_unmapped(keep_unmapped);
-    assert_eq!(reader.keeps_unmapped(), keep_unmapped, "keep_unmapped flag round-trips");
-
+    let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("open");
     let tid = reader.header().tid(UNMAPPED_REGION).expect("tid");
     let mut store = seqair::bam::RecordStore::new();
-    reader
-        .fetch_into(
-            tid,
-            Pos0::new(UNMAPPED_START as u32).unwrap(),
-            Pos0::new(UNMAPPED_END as u32).unwrap(),
-            &mut store,
-        )
-        .expect("fetch");
+    if reject_unmapped {
+        reader
+            .fetch_into_customized(
+                tid,
+                Pos0::new(UNMAPPED_START as u32).unwrap(),
+                Pos0::new(UNMAPPED_END as u32).unwrap(),
+                &mut store,
+                &mut RejectUnmapped,
+            )
+            .map(|c| c.kept)
+            .expect("fetch");
+    } else {
+        reader
+            .fetch_into(
+                tid,
+                Pos0::new(UNMAPPED_START as u32).unwrap(),
+                Pos0::new(UNMAPPED_END as u32).unwrap(),
+                &mut store,
+            )
+            .expect("fetch");
+    }
     store.len()
 }
 
 #[test]
-fn keep_unmapped_default_drops_placed_unmapped_reads() {
-    // Default behavior: unmapped reads filtered out. Compare against
-    // htslib's view -F 4 over the same region.
+fn default_includes_unmapped_reads_in_store() {
+    let bam_path = test_bam_path();
+    let mut hts = bam::IndexedReader::from_path(bam_path).expect("htslib open");
+    let tid = hts.header().tid(UNMAPPED_REGION.as_bytes()).expect("tid");
+    hts.fetch((tid, UNMAPPED_START as i64, UNMAPPED_END as i64)).expect("fetch");
+    let mut hts_total = 0usize;
+    let mut record = bam::Record::new();
+    while hts.read(&mut record) == Some(Ok(())) {
+        hts_total += 1;
+    }
+    let seqair_total = fetch_count(false);
+    assert_eq!(seqair_total, hts_total, "default includes all reads matching htslib full fetch");
+}
+
+#[test]
+fn filter_raw_can_reject_unmapped_reads() {
     let bam_path = test_bam_path();
     let mut hts = bam::IndexedReader::from_path(bam_path).expect("htslib open");
     let tid = hts.header().tid(UNMAPPED_REGION.as_bytes()).expect("tid");
@@ -154,51 +180,37 @@ fn keep_unmapped_default_drops_placed_unmapped_reads() {
             hts_mapped += 1;
         }
     }
-    assert!(hts_unmapped > 0, "test region must contain placed-unmapped reads");
-
-    let seqair_default = fetch_count(false);
-    assert_eq!(
-        seqair_default, hts_mapped,
-        "default keep_unmapped=false should match htslib mapped-only count"
-    );
+    assert!(hts_unmapped > 0);
+    let seqair_reject = fetch_count(true);
+    assert_eq!(seqair_reject, hts_mapped, "filter_raw reject matches htslib mapped-only count");
+    assert!(fetch_count(false) > seqair_reject, "unfiltered includes more than filtered");
 }
 
 #[test]
-fn keep_unmapped_true_includes_placed_unmapped_reads() {
+fn fork_produces_identical_results() {
     let bam_path = test_bam_path();
-    let mut hts = bam::IndexedReader::from_path(bam_path).expect("htslib open");
-    let tid = hts.header().tid(UNMAPPED_REGION.as_bytes()).expect("tid");
-    hts.fetch((tid, UNMAPPED_START as i64, UNMAPPED_END as i64)).expect("fetch");
-    let mut hts_total = 0usize;
-    let mut record = bam::Record::new();
-    while hts.read(&mut record) == Some(Ok(())) {
-        hts_total += 1;
-    }
-
-    let seqair_with_unmapped = fetch_count(true);
-    assert_eq!(
-        seqair_with_unmapped, hts_total,
-        "keep_unmapped=true should match htslib's full fetch count"
-    );
-
-    // And it should be strictly more than the default — proves the flag flips behavior.
-    let seqair_default = fetch_count(false);
-    assert!(
-        seqair_with_unmapped > seqair_default,
-        "keep_unmapped=true ({seqair_with_unmapped}) must yield more than default ({seqair_default})"
-    );
-}
-
-#[test]
-fn keep_unmapped_propagates_through_fork() {
-    let bam_path = test_bam_path();
-    let parent = seqair::bam::IndexedBamReader::open(bam_path).expect("open").keep_unmapped(true);
-    let child = parent.fork().expect("fork");
-    assert!(child.keeps_unmapped(), "fork must inherit keep_unmapped=true");
-
-    let parent_off = seqair::bam::IndexedBamReader::open(bam_path).expect("open");
-    let child_off = parent_off.fork().expect("fork");
-    assert!(!child_off.keeps_unmapped(), "fork must inherit keep_unmapped=false");
+    let mut parent = seqair::bam::IndexedBamReader::open(bam_path).expect("open");
+    let mut child = parent.fork().expect("fork");
+    let tid = parent.header().tid(UNMAPPED_REGION).expect("tid");
+    let mut ps = seqair::bam::RecordStore::new();
+    let mut cs = seqair::bam::RecordStore::new();
+    parent
+        .fetch_into(
+            tid,
+            Pos0::new(UNMAPPED_START as u32).unwrap(),
+            Pos0::new(UNMAPPED_END as u32).unwrap(),
+            &mut ps,
+        )
+        .expect("parent");
+    child
+        .fetch_into(
+            tid,
+            Pos0::new(UNMAPPED_START as u32).unwrap(),
+            Pos0::new(UNMAPPED_END as u32).unwrap(),
+            &mut cs,
+        )
+        .expect("child");
+    assert_eq!(ps.len(), cs.len(), "fork produces identical results");
 }
 
 // r[verify bam.record.decode]

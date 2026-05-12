@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ce29820e7f85cf8d61f65ce2bb072a88ce00f7fbb17e0b7e3d3c94a1fdcc7076 # shrinks to ops = [CigarOp { op: Match, len: 1 }]

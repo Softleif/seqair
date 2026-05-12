@@ -21,7 +21,12 @@ use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
 pub struct SlimRecord {
     /// 0-based leftmost aligned reference position.
     pub pos: Pos0,
-    /// 0-based exclusive end (`pos` + reference-consuming CIGAR length).
+    /// 0-based exclusive end, htslib-compatible.
+    ///
+    /// For mapped reads: computed from CIGAR (`pos` + reference-consuming op
+    /// lengths). For unmapped reads: equals [`pos`](Self::pos) — htslib ignores
+    /// the CIGAR and reports `end = start + 1`, which in 0-based exclusive
+    /// semantics is `pos`.
     pub end_pos: Pos0,
     // r[impl flags.field_type]
     /// BAM flag bits (paired, unmapped, reverse strand, …).
@@ -359,7 +364,7 @@ impl<U> RecordStore<U> {
             let packed_seq_slice = &raw[h.cigar_end..h.seq_end];
             if !customize.filter_raw(&FilterRawFields {
                 pos: h.pos,
-                end_pos: h.pos, // not yet computed from CIGAR
+                end_pos: None,
                 flags: h.flags,
                 mapq: h.mapq,
                 n_cigar_ops: h.n_cigar_ops,
@@ -373,25 +378,27 @@ impl<U> RecordStore<U> {
                 qname: qname_stripped,
                 qual_bytes: qual_slice,
                 aux_bytes: aux_slice,
-                raw_cigar_bytes: Some(cigar_bytes),
-                cigar_ops: None,
-                packed_seq: Some(packed_seq_slice),
-                bases: None,
+                cigar: cigar_bytes,
+                seq: Sequence::Packed(packed_seq_slice),
             }) {
                 return Ok(None);
             }
         }
 
-        // --- Write into cigar slab (typed; bulk memcpy on LE) ---
+        // --- Write into cigar slab ---
         // r[impl record_store.checked_offsets]
         let cigar_off = u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
         CigarOp::extend_from_bam_bytes(&mut self.cigar, cigar_bytes);
         let cigar_start = cigar_off as usize;
         #[allow(clippy::indexing_slicing, reason = "just appended; offsets within slab bounds")]
         let cigar_ops = &self.cigar[cigar_start..];
-
-        let end_pos = cigar::compute_end_pos(h.pos, cigar_ops)
-            .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?;
+        // r[impl record_store.end_pos_htslib]
+        let end_pos = if h.flags.is_unmapped() {
+            h.pos
+        } else {
+            cigar::compute_end_pos(h.pos, cigar_ops)
+                .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?
+        };
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_ops);
 
         // --- Write into name slab ---
@@ -548,7 +555,7 @@ impl<U> RecordStore<U> {
         // r[impl record_store.filter_raw]
         if !customize.filter_raw(&FilterRawFields {
             pos,
-            end_pos,
+            end_pos: Some(end_pos),
             flags,
             mapq,
             n_cigar_ops,
@@ -562,10 +569,8 @@ impl<U> RecordStore<U> {
             qname,
             qual_bytes: qual,
             aux_bytes: aux,
-            raw_cigar_bytes: None,
-            cigar_ops: Some(cigar_ops),
-            packed_seq: None,
-            bases: Some(bases),
+            cigar: CigarOp::ops_as_bytes(cigar_ops),
+            seq: Sequence::Bases(bases),
         }) {
             return Ok(None);
         }
@@ -643,6 +648,21 @@ impl<U> RecordStore<U> {
 }
 
 // r[impl record_store.filter_raw_fields]
+/// The form in which the CIGAR data is available in [`FilterRawFields`].
+///
+/// In the `push_raw` path (BAM), the CIGAR is available as raw BAM bytes
+/// In `push_raw` (BAM), the sequence is in 4-bit packed BAM format.
+/// In `push_fields` (SAM/CRAM), it has already been decoded into typed
+/// [`Base`] values.
+#[derive(Debug, Clone, Copy)]
+pub enum Sequence<'a> {
+    /// 4-bit packed BAM sequence bytes (from `push_raw`).
+    Packed(&'a [u8]),
+    /// Decoded sequence bases (from `push_fields`).
+    Bases(&'a [Base]),
+}
+
+// r[impl record_store.filter_raw_fields]
 /// Fields available to [`CustomizeRecordStore::filter_raw`] before any slab
 /// data is written — the raw slices and parsed header fields from the incoming
 /// record.
@@ -653,25 +673,31 @@ impl<U> RecordStore<U> {
 /// # `push_raw` vs `push_fields`
 ///
 /// From `push_raw` (BAM binary decode):
-/// - `raw_cigar_bytes` is `Some` (the raw BAM CIGAR bytes).
-/// - `packed_seq` is `Some` (4-bit packed sequence bytes).
-/// - `cigar_ops` and `bases` are `None` (not yet decoded).
-/// - `end_pos`, `matching_bases`, `indel_bases` are not yet computed (set to
-///   `pos`, `0`, `0` respectively).
+/// - [`seq`](Self::seq) is [`Sequence::Packed`] (4-bit packed sequence bytes).
+/// - [`end_pos`](Self::end_pos) is `None` (not yet computed from CIGAR).
+/// - [`matching_bases`](Self::matching_bases) and [`indel_bases`](Self::indel_bases)
+///   are `0` (not yet computed from CIGAR).
 ///
 /// From `push_fields` (pre-parsed SAM/CRAM fields):
-/// - `cigar_ops` is `Some` (decoded CIGAR ops).
-/// - `bases` is `Some` (decoded sequence bases).
-/// - `raw_cigar_bytes` and `packed_seq` are `None`.
-/// - `end_pos`, `matching_bases`, `indel_bases` are the pre-computed values.
+/// - [`seq`](Self::seq) is [`Sequence::Bases`] (decoded sequence bases).
+/// - [`end_pos`](Self::end_pos) is `Some(_)` (pre-computed).
+/// - [`matching_bases`](Self::matching_bases) and [`indel_bases`](Self::indel_bases)
+///   are the pre-computed values.
+///
+/// [`cigar`](Self::cigar) is always raw BAM CIGAR bytes (`&[u8]`). Use
+/// [`CigarOp::slice_from_bam_bytes`] or [`CigarOp::extend_from_bam_bytes`]
+/// for typed access.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct FilterRawFields<'a> {
     /// 0-based reference position.
     pub pos: Pos0,
-    /// Exclusive end position (computed from CIGAR; `pos` for `push_raw` since
-    /// CIGAR is not yet decoded).
-    pub end_pos: Pos0,
+    /// Exclusive end position, computed from CIGAR.
+    ///
+    /// `Some(_)` from `push_fields` (SAM/CRAM) where the CIGAR is pre-parsed.
+    /// `None` from `push_raw` (BAM) because the CIGAR hasn't been decoded yet
+    /// at this point — `filter_raw` runs before any slab work.
+    pub end_pos: Option<Pos0>,
     /// BAM flags.
     pub flags: BamFlags,
     /// Mapping quality (0..254).
@@ -698,14 +724,13 @@ pub struct FilterRawFields<'a> {
     pub qual_bytes: &'a [u8],
     /// Raw auxiliary tag bytes (BAM binary format).
     pub aux_bytes: &'a [u8],
-    /// Raw BAM CIGAR bytes (`push_raw` path); `None` from `push_fields`.
-    pub raw_cigar_bytes: Option<&'a [u8]>,
-    /// Decoded CIGAR ops (`push_fields` path); `None` from `push_raw`.
-    pub cigar_ops: Option<&'a [CigarOp]>,
-    /// 4-bit packed sequence bytes (`push_raw` path); `None` from `push_fields`.
-    pub packed_seq: Option<&'a [u8]>,
-    /// Decoded sequence bases (`push_fields` path); `None` from `push_raw`.
-    pub bases: Option<&'a [Base]>,
+    /// Raw BAM CIGAR bytes. Use [`CigarOp::slice_from_bam_bytes`] for zero-cost
+    /// typed access on aligned little-endian input, or
+    /// [`CigarOp::extend_from_bam_bytes`] to copy into a `Vec<CigarOp>`.
+    pub cigar: &'a [u8],
+    /// Read sequence. [`Sequence::Packed`] from `push_raw` (BAM),
+    /// [`Sequence::Bases`] from `push_fields` (SAM/CRAM).
+    pub seq: Sequence<'a>,
 }
 // r[impl record_store.customize.trait]
 /// Customize how records flow into a [`RecordStore`]: filter and compute
@@ -732,6 +757,54 @@ pub struct FilterRawFields<'a> {
 /// Because `filter_raw` runs before any work, use it for cheap checks
 /// (mapq, flags, tid, qname prefix) that can reject records without
 /// touching the slabs.
+///
+/// # `compute` before `filter` — wasted work
+///
+/// `compute` runs *before* `filter`. If your `compute` is expensive (aux
+/// parsing, base counting, read group extraction) and your `filter` might
+/// reject many records, that work is wasted. When possible, push rejection
+/// logic into `filter_raw` instead — it runs before any slab extension.
+///
+/// For checks that require slab data (aux tags, CIGAR, sequence), you have
+/// two options:
+///
+/// 1. **Accept the waste.** If your `filter` rejects few records and your
+///    `compute` needs the same slab data anyway, the waste is negligible.
+/// 2. **Inline the check into `filter_raw`.** Parse the raw bytes directly
+///    to reject early. This avoids slab writes AND `compute` for rejected
+///    records. The second example below shows this pattern for read groups.
+///
+/// # Example: pre-filter on read group
+///
+/// A customizer that only keeps reads from a specific read group. Rather
+/// than relying on `filter` (which would waste `compute` on every rejected
+/// record), it scans the raw aux bytes in `filter_raw` — before any slab
+/// work happens:
+///
+/// ```
+/// use seqair::bam::record_store::{CustomizeRecordStore, FilterRawFields, RecordStore, SlimRecord};
+///
+/// #[derive(Clone)]
+/// struct ReadGroupFilter {
+///     /// Expected read group, e.g. `b"@RG\tID:mygroup"`.
+///     target_rg: Vec<u8>,
+/// }
+///
+/// impl CustomizeRecordStore for ReadGroupFilter {
+///     type Extra = ();
+///
+///     /// Reject records whose RG tag doesn't match, before any slab extension.
+///     fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
+///         // Quick: if the aux bytes don't contain our target string at all,
+///         // skip the record. No slab work done.
+///         fields.aux_bytes
+///             .windows(self.target_rg.len())
+///             .any(|w| w == self.target_rg.as_slice())
+///     }
+///
+///     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+/// }
+/// ```
 ///
 /// The same `&mut E` instance is reused across regions (`Readers` holds one
 /// customize value for its whole lifetime). Implementors that want
@@ -815,6 +888,68 @@ pub trait CustomizeRecordStore: Clone {
 /// `push_raw`/`push_fields`/`fetch_into_customized`.
 impl CustomizeRecordStore for () {
     type Extra = ();
+    #[inline]
+    fn compute(&mut self, _rec: &SlimRecord, _store: &RecordStore<()>) {}
+}
+
+/// Drop unmapped reads at the earliest possible point.
+///
+/// This is the simplest possible [`CustomizeRecordStore`] — it implements
+/// only [`filter_raw`](CustomizeRecordStore::filter_raw) to reject unmapped
+/// reads before any slab extension or base decode work happens. Because
+/// [`filter_raw`](CustomizeRecordStore::filter_raw) runs before CIGAR is
+/// decoded in the BAM path, it can only check fields that are always
+/// available: `flags`, `mapq`, `tid`, `qname`, etc.
+///
+/// Pass this to [`Readers::open_customized`](crate::reader::Readers::open_customized)
+/// to get htslib-compatible behavior where unmapped reads never enter the record
+/// store. The default [`Readers::open`](crate::reader::Readers::open) passes
+/// `()` as the customizer, which keeps unmapped reads — the pileup engine will
+/// exclude them from columns but they remain in the store for other uses.
+///
+/// # Example
+///
+/// ```no_run
+/// use seqair::bam::record_store::RejectUnmapped;
+/// use seqair::reader::Readers;
+/// use std::path::Path;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut readers = Readers::open_customized(
+///     Path::new("sample.bam"),
+///     Path::new("reference.fa"),
+///     RejectUnmapped,
+/// )?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Source
+///
+/// The entire implementation:
+///
+/// ```
+/// # use seqair::bam::record_store::{CustomizeRecordStore, FilterRawFields, RecordStore, SlimRecord};
+/// #[derive(Clone, Default)]
+/// pub struct RejectUnmapped;
+///
+/// impl CustomizeRecordStore for RejectUnmapped {
+///     type Extra = ();
+///     fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
+///         !fields.flags.is_unmapped()
+///     }
+///     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+/// }
+/// ```
+#[derive(Clone, Default)]
+pub struct RejectUnmapped;
+
+impl CustomizeRecordStore for RejectUnmapped {
+    type Extra = ();
+    #[inline]
+    fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
+        !fields.flags.is_unmapped()
+    }
     #[inline]
     fn compute(&mut self, _rec: &SlimRecord, _store: &RecordStore<()>) {}
 }
@@ -1004,8 +1139,13 @@ impl<U> RecordStore<U> {
         let n_cigar_ops =
             u16::try_from(n_ops).map_err(|_| DecodeError::CigarOpCountOverflow { count: n_ops })?;
 
-        let end_pos = cigar::compute_end_pos(new_pos, new_cigar_ops)
-            .ok_or(DecodeError::InvalidPosition { value: new_pos.as_i32() })?;
+        // r[impl record_store.end_pos_htslib]
+        let end_pos = if rec.flags.is_unmapped() {
+            new_pos
+        } else {
+            cigar::compute_end_pos(new_pos, new_cigar_ops)
+                .ok_or(DecodeError::InvalidPosition { value: new_pos.as_i32() })?
+        };
 
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(new_cigar_ops);
 
@@ -1516,6 +1656,155 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.record(0).next_ref_id, 3);
+    }
+
+    // r[verify record_store.end_pos_htslib]
+    #[test]
+    fn end_pos_mapped_uses_cigar() {
+        use seqair_types::{BamFlags, Base};
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(100).unwrap(),
+                Pos0::new(104).unwrap(), // 0-based inclusive, 5M: span = [100, 104]
+                BamFlags::empty(),       // mapped
+                30,
+                5,
+                0,
+                b"read1",
+                &[CigarOp::new(cigar::CigarOpType::Match, 5)],
+                &[Base::A; 5],
+                &[30; 5],
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                &mut (),
+            )
+            .unwrap();
+        let rec = store.record(0);
+        assert_eq!(rec.end_pos, Pos0::new(104).unwrap());
+    }
+
+    // r[verify record_store.end_pos_htslib]
+    #[test]
+    fn end_pos_unmapped_ignores_cigar() {
+        use seqair_types::bam_flags::consts::FLAG_UNMAPPED;
+        use seqair_types::{BamFlags, Base};
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(100).unwrap(),
+                Pos0::new(100).unwrap(), // htslib-compatible: end_pos = pos for unmapped
+                BamFlags::from(FLAG_UNMAPPED), // unmapped
+                0,
+                100,
+                0,
+                b"read1",
+                &[CigarOp::new(cigar::CigarOpType::Match, 100)],
+                &[Base::A; 100],
+                &[0; 100],
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                &mut (),
+            )
+            .unwrap();
+        let rec = store.record(0);
+        assert!(rec.flags.is_unmapped());
+        assert_eq!(rec.end_pos, Pos0::new(100).unwrap());
+    }
+
+    // r[verify record_store.end_pos_htslib]
+    /// Verify the CRAM unmapped-read code path semantics: unmapped reads pushed
+    /// via `push_fields` (the path CRAM uses, `cram/slice.rs:649-705`) have
+    /// `end_pos == pos`, `mapq == 0`, and correct flags/sequence data.
+    #[test]
+    fn push_fields_unmapped_cram_semantics() {
+        use seqair_types::bam_flags::consts::FLAG_UNMAPPED;
+        use seqair_types::{BamFlags, Base};
+
+        let mut store = RecordStore::new();
+        let pos = Pos0::new(200).unwrap();
+        let bases = &[Base::A, Base::C, Base::G, Base::T];
+        let quals = &[30u8, 31, 32, 33];
+        let aux = b"RGZ\x00read_group";
+        store
+            .push_fields(
+                pos,
+                pos, // end_pos = pos (htslib-compatible, as CRAM does at slice.rs:676)
+                BamFlags::from(FLAG_UNMAPPED),
+                0, // mapq = 0 (CRAM slice.rs:681)
+                0, // matching_bases = 0 (slice.rs:682)
+                0, // indel_bases = 0 (slice.rs:683)
+                b"cram_unmapped_read",
+                &[], // empty CIGAR (slice.rs:685)
+                bases,
+                quals,
+                aux,
+                0,  // tid
+                -1, // next_ref_id
+                0,  // next_pos
+                0,  // template_len
+                &mut (),
+            )
+            .unwrap();
+
+        let rec = store.record(0);
+        assert!(rec.flags.is_unmapped(), "CRAM unmapped reads must have FLAG_UNMAPPED");
+        assert_eq!(rec.mapq, 0, "CRAM unmapped reads must have MAPQ=0");
+        assert_eq!(rec.end_pos, pos, "CRAM unmapped reads must have end_pos == pos");
+        assert_eq!(rec.seq_len, 4, "CRAM unmapped reads retain decoded sequence");
+        assert_eq!(rec.matching_bases, 0, "CRAM unmapped reads have zero matching_bases");
+        assert_eq!(rec.indel_bases, 0, "CRAM unmapped reads have zero indel_bases");
+        assert_eq!(rec.qname(&store).unwrap(), b"cram_unmapped_read");
+    }
+
+    // r[verify record_store.end_pos_htslib]
+    /// Verify that `compute_end_pos_from_raw` (used by the BAM reader's pre-push
+    /// overlap filter) agrees with the stored `end_pos` after `push_raw`, for
+    /// both mapped and unmapped reads.
+    #[test]
+    fn push_raw_end_pos_agrees_with_reader_prefilter() {
+        use seqair_types::bam_flags::consts::FLAG_UNMAPPED;
+
+        // --- Mapped read ---
+        let mut mapped = make_raw_record(b"read1", 10, 1); // 1 CIGAR op (10M)
+        mapped[4..8].copy_from_slice(&100i32.to_le_bytes()); // pos = 100
+        let reader_end = record::compute_end_pos_from_raw(&mapped).unwrap();
+        let mut store = RecordStore::new();
+        store.push_raw(&mapped, &mut ()).unwrap();
+        assert_eq!(
+            store.record(0).end_pos,
+            reader_end,
+            "mapped: reader's compute_end_pos_from_raw must agree with push_raw's stored end_pos"
+        );
+
+        // --- Unmapped read ---
+        let mut unmapped = make_raw_record(b"read2", 10, 1); // 1 CIGAR op (10M)
+        unmapped[4..8].copy_from_slice(&100i32.to_le_bytes()); // pos = 100
+        unmapped[14..16].copy_from_slice(&FLAG_UNMAPPED.to_le_bytes()); // flag 0x4
+        let reader_end = record::compute_end_pos_from_raw(&unmapped).unwrap();
+        // compute_end_pos_from_raw computes CIGAR-derived (doesn't check flags).
+        // After refactor, push_raw stores pos for unmapped reads.
+        let mut store2 = RecordStore::new();
+        store2.push_raw(&unmapped, &mut ()).unwrap();
+        assert!(store2.record(0).flags.is_unmapped());
+        assert_eq!(
+            store2.record(0).end_pos,
+            Pos0::new(100).unwrap(),
+            "unmapped: push_raw stores pos (htslib-compatible), not CIGAR-derived end"
+        );
+        // Verify they differ: reader's prefilter returns CIGAR-derived (which is fine
+        // for overlap checking — it's a loose upper bound), while store is exact.
+        assert_ne!(
+            store2.record(0).end_pos,
+            reader_end,
+            "reader prefilter end_pos (CIGAR-derived) differs from stored end_pos (pos) for unmapped reads"
+        );
     }
 
     // ---- Model-based property tests for rollback ----

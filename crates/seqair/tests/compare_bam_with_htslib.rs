@@ -14,8 +14,10 @@
 mod helpers;
 
 use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
-use seqair::bam::Pos0;
-use seqair::bam::aux::{AuxValue, find_tag as find_aux_tag};
+use seqair::bam::{
+    Pos0, RejectUnmapped,
+    aux::{AuxValue, find_tag as find_aux_tag},
+};
 use seqair_types::BaseQuality;
 use std::path::Path;
 
@@ -84,12 +86,14 @@ fn all_contigs_record_count_matches() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         assert_eq!(
@@ -116,12 +120,14 @@ fn all_contigs_record_fields_match() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         for (i, h) in hts.iter().enumerate() {
@@ -204,12 +210,14 @@ fn all_contigs_pileup_positions_and_depth_match() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let mut engine = seqair::bam::PileupEngine::new(
@@ -255,12 +263,14 @@ fn all_contigs_pileup_qpos_and_flags_match() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let mut engine = seqair::bam::PileupEngine::new(
@@ -312,12 +322,14 @@ fn all_contigs_pileup_bases_match() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         let mut engine = seqair::bam::PileupEngine::new(
@@ -411,12 +423,14 @@ fn all_contigs_aux_tags_match() {
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(contig).expect("tid");
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("fetch");
 
         assert_eq!(

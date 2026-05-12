@@ -13,7 +13,7 @@
     reason = "test code with known small values"
 )]
 
-use seqair::bam::Pos0;
+use seqair::bam::{Pos0, RejectUnmapped};
 use std::path::Path;
 
 fn test_cram_path() -> &'static Path {
@@ -241,12 +241,14 @@ fn cram_records_match_bam_records() {
     let end = 6_143_229u64;
 
     let cram_count = cram_reader
-        .fetch_into(
+        .fetch_into_customized(
             tid,
             Pos0::new(start as u32).unwrap(),
             Pos0::new(end as u32).unwrap(),
             &mut cram_store,
+            &mut RejectUnmapped,
         )
+        .map(|c| c.kept)
         .unwrap();
 
     hts.fetch(FetchDefinition::Region(tid as i32, start as i64, end as i64)).unwrap();

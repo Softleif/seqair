@@ -118,6 +118,8 @@ impl RefSeq {
 // r[impl pileup.extras.generic_param]
 pub struct PileupEngine<U = ()> {
     store: RecordStore<U>,
+    /// Alignment buffer reused across columns — cleared each call.
+    buf: Vec<PileupAlignment>,
     current_pos: Pos0,
     region_end: Pos0,
     next_entry: usize,
@@ -169,17 +171,22 @@ fn base_qual_at<U>(
 // r[impl pileup.column_contents]
 // r[impl pileup.htslib_compat]
 // r[impl pileup.lending_iterator]
-/// A single pileup column, borrowing the record store for the duration of its use.
+/// A single pileup column, borrowing the record store and alignment
+/// buffer for the duration of its use.
 ///
-/// Returned by [`PileupEngine::pileups`]. Valid until the next call to `pileups`
-/// on the same engine. Access per-record extras or slab data (qname, aux) via
-/// [`alignments`](Self::alignments), which yields [`AlignmentView`] wrappers, or
-/// via [`store`](Self::store) directly.
-pub struct PileupColumn<'store, U = ()> {
+/// Returned by [`PileupEngine::pileups`]. Valid until the next call to
+/// `pileups` on the same engine. Both the per-alignment data and the
+/// record store borrow from the engine, so the column cannot outlive
+/// the `pileups` call that produced it.
+///
+/// Access per-record extras or slab data (qname, aux, seq, qualities) via
+/// [`alignments`](Self::alignments), which yields [`AlignmentView`]
+/// wrappers, or via [`store`](Self::store) directly.
+pub struct PileupColumn<'eng, U = ()> {
     pos: Pos0,
     reference_base: Base,
-    alignments: Vec<PileupAlignment>,
-    store: &'store RecordStore<U>,
+    alignments: &'eng [PileupAlignment],
+    store: &'eng RecordStore<U>,
 }
 
 impl<U> std::fmt::Debug for PileupColumn<'_, U> {
@@ -192,7 +199,7 @@ impl<U> std::fmt::Debug for PileupColumn<'_, U> {
     }
 }
 
-impl<'store, U> PileupColumn<'store, U> {
+impl<'eng, U> PileupColumn<'eng, U> {
     #[must_use]
     pub fn pos(&self) -> Pos0 {
         self.pos
@@ -204,17 +211,19 @@ impl<'store, U> PileupColumn<'store, U> {
         self.alignments.len()
     }
 
-    /// Iterate alignments with store access for per-record extras, qname, and aux.
+    /// Iterate alignments with store access for per-record extras, qname, aux,
+    /// seq, and qual.
     ///
     /// Each yielded [`AlignmentView`] derefs to [`PileupAlignment`] for the flat
     /// per-position fields, and exposes [`extra`](AlignmentView::extra),
-    /// [`qname`](AlignmentView::qname), and [`aux`](AlignmentView::aux) for slab data.
-    pub fn alignments(&self) -> impl Iterator<Item = AlignmentView<'_, 'store, U>> + '_ {
+    /// [`qname`](AlignmentView::qname), [`aux`](AlignmentView::aux),
+    /// [`seq`](AlignmentView::seq), and [`qualities`](AlignmentView::qualities) for slab data.
+    pub fn alignments(&self) -> impl Iterator<Item = AlignmentView<'_, 'eng, U>> + '_ {
         let store = self.store;
         self.alignments.iter().map(move |aln| AlignmentView { aln, store })
     }
 
-    /// Iterate the raw alignments without store access (equivalent to the old API).
+    /// Iterate the raw alignments without store access.
     pub fn raw_alignments(&self) -> impl Iterator<Item = &PileupAlignment> + '_ {
         self.alignments.iter()
     }
@@ -224,7 +233,7 @@ impl<'store, U> PileupColumn<'store, U> {
     }
 
     /// Borrow the record store for custom slab access (e.g., record fields by index).
-    pub fn store(&self) -> &'store RecordStore<U> {
+    pub fn store(&self) -> &'eng RecordStore<U> {
         self.store
     }
 
@@ -270,6 +279,16 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
     /// The raw BAM aux bytes for this record.
     pub fn aux(&self) -> &'store [u8] {
         self.store.aux(self.aln.record_idx())
+    }
+
+    /// The read's full decoded sequence (all bases, not just the pileup position).
+    pub fn seq(&self) -> &'store [Base] {
+        self.store.seq(self.aln.record_idx())
+    }
+
+    /// The read's full per-base quality scores (all positions, not just the pileup position).
+    pub fn qualities(&self) -> &'store [BaseQuality] {
+        self.store.qual(self.aln.record_idx())
     }
 
     /// The underlying [`PileupAlignment`] — use when you want to call
@@ -436,6 +455,7 @@ impl<U> PileupEngine<U> {
     pub fn new(store: RecordStore<U>, region_start: Pos0, region_end: Pos0) -> Self {
         PileupEngine {
             store,
+            buf: Vec::new(),
             current_pos: region_start,
             region_end,
             next_entry: 0,
@@ -483,6 +503,11 @@ impl<U> PileupEngine<U> {
     ///
     /// Call this after iteration is complete. The returned store retains its
     /// allocated capacity but is cleared.
+    /// Take the `RecordStore` out for reuse. Returns `None` if already taken.
+    ///
+    /// Call this after iteration is complete when using `PileupEngine` directly
+    /// (without the [`PileupGuard`] wrapper). The guard recovers the store
+    /// automatically on drop — prefer that path.
     pub fn take_store(&mut self) -> Option<RecordStore<U>> {
         if self.store.is_empty() && self.store.records_capacity() == 0 {
             return None;
@@ -519,17 +544,17 @@ impl<U> std::fmt::Debug for PileupEngine<U> {
 /// retaining its allocated capacity for the next pileup. Callers no
 /// longer need an explicit `recover_store` step.
 ///
-/// # Footgun: don't drain the engine via `Deref`
-///
-/// Because the guard `Deref`s to [`PileupEngine`], the engine's
-/// [`PileupEngine::take_store`] is reachable as `guard.take_store()`.
-/// Calling it leaves the engine's store empty, and then the guard's
-/// `Drop` finds nothing to recover, so the next call to
+/// The escape hatch is [`Self::into_inner`] — it consumes the guard
+/// without recovering the store, so the next
 /// [`Readers::pileup`](crate::reader::Readers::pileup) allocates a fresh
-/// ~39 MB store. **Do not call `take_store` on a guard.** If you need
-/// the underlying engine without recovery, use [`Self::into_inner`] —
-/// that path is documented to disable recovery and at least makes the
-/// intent explicit.
+/// store. Prefer letting the guard drop normally.
+///
+/// ⚠️ Because the guard [`Deref`](std::ops::Deref)s to [`PileupEngine`],
+/// [`PileupEngine::take_store`] is reachable as `guard.take_store()`.
+/// Calling it leaves the engine's store empty, and the guard's `Drop`
+/// finds nothing to recover — the next pileup allocates a fresh store.
+/// Use [`into_inner`](Self::into_inner) if you genuinely need to skip
+/// recovery.
 pub struct PileupGuard<'a, U = ()> {
     /// `Some` for the lifetime of the guard, then taken to `None` by
     /// [`Self::into_inner`] (so the `Drop` impl knows to skip recovery).
@@ -598,9 +623,9 @@ impl<U> Drop for PileupGuard<'_, U> {
         // Recover the store into the caller's slot. The engine is `None`
         // only after [`PileupGuard::into_inner`], in which case recovery
         // is intentionally skipped. `take_store` further returns `None`
-        // if the store was already drained through `Deref` (the
-        // documented footgun) or was empty with zero capacity from the
-        // start. In any of those cases, leave the slot untouched.
+        // if the store was already drained (edge case) or was empty with
+        // zero capacity from the start. In any of those cases, leave the
+        // slot untouched.
         if let Some(mut engine) = self.engine.take()
             && let Some(store) = engine.take_store()
         {
@@ -611,19 +636,18 @@ impl<U> Drop for PileupGuard<'_, U> {
 
 // r[impl pileup.position_iteration]
 impl<U> PileupEngine<U> {
-    /// Core iteration logic used by [`pileups`](Self::pileups).
+    /// Core iteration logic for [`pileups`](Self::pileups).
     ///
-    /// Returns the per-column data (pos, reference base, alignments) so the caller
-    /// can attach a store reference to build a [`PileupColumn`].
-    fn advance(&mut self) -> Option<(Pos0, Base, Vec<PileupAlignment>)> {
+    /// Clears `self.buf` and fills it with the alignments for the next
+    /// non-empty column. Returns `(pos, reference_base)` so the caller
+    /// can build a [`PileupColumn`] borrowing the buffer.
+    fn advance(&mut self) -> Option<(Pos0, Base)> {
         loop {
             if self.current_pos > self.region_end {
                 return None;
             }
 
             let pos = self.current_pos;
-            // current_pos <= region_end (checked above), and region_end < u32::MAX (niche),
-            // so current_pos + 1 always fits.
             #[allow(
                 clippy::unwrap_in_result,
                 reason = "infallible: current_pos <= region_end < u32::MAX - 1"
@@ -635,23 +659,30 @@ impl<U> PileupEngine<U> {
                     .trace_err("BUG: current_pos + 1 overflowed despite being <= region_end")?;
             }
 
-            // Evict expired records. Iterate the compact end_pos vec (4-byte stride)
-            // and swap-remove from both vecs in lockstep.
+            // Evict expired records — stable retain, preserves insertion order.
             {
-                let mut i = 0;
-                while i < self.active_end_pos.len() {
-                    debug_assert!(i < self.active.len());
+                let mut write = 0;
+                let len = self.active_end_pos.len();
+                for read in 0..len {
+                    debug_assert!(read < self.active.len());
                     #[allow(
                         clippy::indexing_slicing,
-                        reason = "i < active_end_pos.len() == active.len()"
+                        reason = "read < active_end_pos.len() == active.len()"
                     )]
-                    if self.active_end_pos[i] < pos {
-                        self.active_end_pos.swap_remove(i);
-                        self.active.swap_remove(i);
-                    } else {
-                        i = i.checked_add(1).trace_err("active set size exceeded usize::MAX")?;
+                    if self.active_end_pos[read] >= pos {
+                        if read != write {
+                            self.active_end_pos[write] = self.active_end_pos[read];
+                            // swap(write, read) with write < read moves the survivor left
+                            // without needing Clone on ActiveRecord.
+                            self.active.swap(write, read);
+                        }
+                        write = write
+                            .checked_add(1)
+                            .trace_err("active set size exceeded usize::MAX")?;
                     }
                 }
+                self.active_end_pos.truncate(write);
+                self.active.truncate(write);
             }
 
             while self.next_entry < self.store.len() {
@@ -721,7 +752,7 @@ impl<U> PileupEngine<U> {
             // r[impl pileup_indel.refskips_included]
             // r[related record_store.field_access]
             // r[impl perf.reuse_alignment_vec+2]
-            let mut alignments = Vec::with_capacity(self.active.len());
+            self.buf.clear();
             for active in &self.active {
                 let Some(info) = active.cigar.pos_info_at(pos) else { continue };
 
@@ -742,7 +773,7 @@ impl<U> PileupEngine<U> {
                     CigarPosInfo::RefSkip => PileupOp::RefSkip,
                 };
 
-                alignments.push(PileupAlignment {
+                self.buf.push(PileupAlignment {
                     op,
                     mapq: active.mapq,
                     flags: active.flags,
@@ -756,20 +787,20 @@ impl<U> PileupEngine<U> {
 
             // r[impl pileup.max_depth_per_position]
             if let Some(max) = self.max_depth {
-                alignments.truncate(max as usize);
+                self.buf.truncate(max as usize);
             }
 
-            if !alignments.is_empty() {
+            if !self.buf.is_empty() {
                 self.columns_produced = self.columns_produced.saturating_add(1);
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "depth is bounded by max_depth (u32) or typical pileup sizes; saturates at u32::MAX for profiling"
                 )]
-                let depth_u32 = alignments.len() as u32;
+                let depth_u32 = self.buf.len() as u32;
                 self.max_active_depth = self.max_active_depth.max(depth_u32);
                 let reference_base =
                     self.ref_seq.as_ref().map_or(Base::Unknown, |r| r.base_at(pos));
-                return Some((pos, reference_base, alignments));
+                return Some((pos, reference_base));
             }
         }
     }
@@ -777,17 +808,17 @@ impl<U> PileupEngine<U> {
     // r[impl pileup.lending_iterator]
     /// Advance to the next pileup column.
     ///
-    /// Returns `Some(PileupColumn<'_, U>)` borrowing the record store. Call
-    /// this in a `while let` loop. The column is valid until the next call to
-    /// `pileups` on the same engine.
+    /// Returns `Some(PileupColumn<'_, U>)` borrowing the engine's record store
+    /// and alignment buffer. Call this in a `while let` loop. The column is
+    /// valid until the next call to `pileups` on the same engine.
     ///
-    /// This is a lending iterator — the returned column holds a borrow of the
-    /// engine's store, so it cannot be collected into a `Vec` or held across
-    /// subsequent `pileups` calls. Extract primitive data (pos, depth, etc.)
-    /// if you need to retain it.
+    /// This is a lending iterator — the returned column borrows from the engine,
+    /// so it cannot be collected into a `Vec` or held across subsequent
+    /// `pileups` calls. Extract primitive data (pos, depth, etc.) if you need
+    /// to retain it.
     pub fn pileups(&mut self) -> Option<PileupColumn<'_, U>> {
-        let (pos, reference_base, alignments) = self.advance()?;
-        Some(PileupColumn { pos, reference_base, alignments, store: &self.store })
+        let (pos, reference_base) = self.advance()?;
+        Some(PileupColumn { pos, reference_base, alignments: &self.buf, store: &self.store })
     }
 
     /// Remaining positions in the current region — lower-bound estimate for
@@ -844,5 +875,168 @@ mod tests {
     fn ref_seq_base_at_empty() {
         let ref_seq = RefSeq::new(Rc::from([]), Pos0::new(100).unwrap());
         assert_eq!(ref_seq.base_at(Pos0::new(100).unwrap()), Base::Unknown);
+    }
+
+    // r[verify pileup.internal_buf]
+    /// The internal buffer must retain capacity across columns so the
+    /// engine doesn't keep re-allocating.
+    #[test]
+    fn internal_buf_retains_capacity() {
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(100).unwrap(),
+                Pos0::new(104).unwrap(),
+                BamFlags::empty(),
+                30,
+                5,
+                0,
+                b"read1",
+                &[CigarOp::new(CigarOpType::Match, 5)],
+                &[Base::A; 5],
+                &[40; 5],
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                &mut (),
+            )
+            .unwrap();
+
+        let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(104).unwrap());
+
+        // First column — buf grows to accommodate alignments.
+        let col1 = engine.pileups().unwrap();
+        assert!(col1.depth() > 0, "should have at least one alignment");
+        drop(col1);
+        let cap_after_first = engine.buf.capacity();
+        assert!(cap_after_first > 0, "buffer should have allocated");
+
+        // Second column — same buffer, capacity must be retained.
+        assert!(engine.pileups().is_some());
+        assert_eq!(engine.buf.capacity(), cap_after_first, "buffer capacity retained across calls");
+    }
+
+    // r[verify pileup.eviction_preserves_order]
+    /// After eviction of expired records, survivors must remain in insertion order.
+    /// With the old `swap_remove` eviction, removing the shortest-lived record would
+    /// swap in the last record, scrambling the order (e.g. [0,1,2,3,4] → [4,1,2,3]).
+    /// Stable retain keeps them in order ([1,2,3,4]).
+    #[test]
+    fn eviction_preserves_insertion_order() {
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        let mut store = RecordStore::new();
+
+        // 5 records at pos=0 with spans 10, 20, 30, 40, 50.
+        // Record 0 (span 10) covers [0,9], record 1 (span 20) covers [0,19], etc.
+        // At pos=10, record 0 is evicted. Old swap_remove would have moved record 4
+        // into slot 0; stable retain keeps 1,2,3,4 in insertion order.
+        for (i, span) in [10u32, 20, 30, 40, 50].iter().enumerate() {
+            let end = span.saturating_sub(1);
+            store
+                .push_fields(
+                    Pos0::new(0).unwrap(),
+                    Pos0::new(end).unwrap(),
+                    BamFlags::empty(),
+                    30,
+                    *span,
+                    0,
+                    format!("read{i}").as_bytes(),
+                    &[CigarOp::new(CigarOpType::Match, *span)],
+                    &vec![Base::A; *span as usize],
+                    &vec![40u8; *span as usize],
+                    &[],
+                    0,
+                    -1,
+                    0,
+                    0,
+                    &mut (),
+                )
+                .unwrap();
+        }
+
+        let mut engine = PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(49).unwrap());
+
+        let mut columns = Vec::new();
+        while let Some(col) = engine.pileups() {
+            let indices: Vec<u32> = col.alignments().map(|a| a.record_idx()).collect();
+            columns.push((col.pos(), indices));
+        }
+
+        // Pre-eviction: pos 5 — all 5 records in insertion order
+        let at_5 = columns.iter().find(|(p, _)| *p == Pos0::new(5).unwrap()).unwrap();
+        assert_eq!(at_5.1, vec![0, 1, 2, 3, 4]);
+
+        // After first eviction (record 0 expired at pos=10): pos 15 — [1,2,3,4]
+        let at_15 = columns.iter().find(|(p, _)| *p == Pos0::new(15).unwrap()).unwrap();
+        assert_eq!(at_15.1, vec![1, 2, 3, 4]);
+
+        // After second eviction (record 1 expired at pos=20): pos 25 — [2,3,4]
+        let at_25 = columns.iter().find(|(p, _)| *p == Pos0::new(25).unwrap()).unwrap();
+        assert_eq!(at_25.1, vec![2, 3, 4]);
+
+        // After third eviction (record 2 expired at pos=30): pos 35 — [3,4]
+        let at_35 = columns.iter().find(|(p, _)| *p == Pos0::new(35).unwrap()).unwrap();
+        assert_eq!(at_35.1, vec![3, 4]);
+
+        // After fourth eviction (record 3 expired at pos=40): pos 45 — [4]
+        let at_45 = columns.iter().find(|(p, _)| *p == Pos0::new(45).unwrap()).unwrap();
+        assert_eq!(at_45.1, vec![4]);
+    }
+
+    // r[verify pileup.max_depth_order]
+    /// max_depth truncation must keep the first N alignments in insertion order,
+    /// not arbitrary ones. After the stable-retain fix, the insertion order is
+    /// preserved through eviction, so truncation drops predictable (last N) entries.
+    #[test]
+    fn max_depth_truncates_in_insertion_order() {
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        let mut store = RecordStore::new();
+
+        // 5 records at pos=0, all spanning the full 0..50 range.
+        for i in 0..5u32 {
+            store
+                .push_fields(
+                    Pos0::new(0).unwrap(),
+                    Pos0::new(49).unwrap(),
+                    BamFlags::empty(),
+                    30,
+                    50,
+                    0,
+                    format!("read{i}").as_bytes(),
+                    &[CigarOp::new(CigarOpType::Match, 50)],
+                    &vec![Base::A; 50],
+                    &vec![40u8; 50],
+                    &[],
+                    0,
+                    -1,
+                    0,
+                    0,
+                    &mut (),
+                )
+                .unwrap();
+        }
+
+        let mut engine = PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(49).unwrap());
+        engine.set_max_depth(3);
+
+        // At every position, only the first 3 records (indices 0,1,2) should be kept.
+        while let Some(col) = engine.pileups() {
+            let indices: Vec<u32> = col.alignments().map(|a| a.record_idx()).collect();
+            assert_eq!(
+                indices,
+                vec![0, 1, 2],
+                "max_depth=3 should keep first 3 records in insertion order at pos {:?}",
+                col.pos()
+            );
+        }
     }
 }

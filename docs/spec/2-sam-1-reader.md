@@ -60,7 +60,7 @@ The full header text (all `@` lines joined with newlines) MUST be stored in `Bam
 > The parser MUST validate each field and produce clear error messages for malformed records: non-integer POS, FLAG > 65535, negative MAPQ, etc. Real-world SAM files from non-standard tools may contain hand-edited or corrupted records.
 
 r[sam.record.coordinate_conversion]
-SAM POS is 1-based; the internal representation is 0-based (matching BAM). The parser MUST subtract 1 from POS. A POS of 0 in SAM means unmapped — after subtraction this becomes -1 (as i64). Unmapped records are filtered by FLAG 0x4 before reaching this point, so -1 positions should not appear in the RecordStore.
+SAM POS is 1-based; the internal representation is 0-based (matching BAM). The parser MUST subtract 1 from POS. A POS of 0 in SAM means unmapped — after subtraction this becomes -1 (as i64). All records (including unmapped) flow through to the `filter_raw` customizer; the pileup engine is responsible for excluding unmapped reads per `r[pileup.unmapped_excluded]`.
 
 r[sam.record.cigar_parse]
 The CIGAR string MUST be parsed into a `Vec<CigarOp>`. Each `CigarOp` wraps the BAM packed `u32` (`(length << 4) | op_code`), with op_codes M=0, I=1, D=2, N=3, S=4, H=5, P=6, =7, X=8. Unknown op characters MUST produce a typed parse error (this is stricter than BAM ingest, which tolerates reserved op codes via `CigarOpType::Unknown` per `r[io.typed_cigar_ops]`, because in SAM the lexical character is the only signal). The string `*` means CIGAR unavailable (0 operations, and end_pos = pos).
@@ -108,8 +108,7 @@ SAM aux integer values (type `i`) are serialized into the smallest BAM integer t
 > 4. Split text into lines (on `\n`).
 > 5. Parse each alignment line.
 > 6. Filter: skip lines where RNAME's tid doesn't match, or where the record doesn't overlap `[start, end]`.
-> 7. Skip unmapped reads (FLAG 0x4).
-> 8. Push passing records into the RecordStore.
+> 7. Push passing records into the RecordStore.
 
 r[sam.reader.overlap_filter+2]
 The overlap filter uses half-open intervals (0-based). `end_pos` MUST be computed from the parsed CIGAR. When CIGAR is `*` (unavailable), `end_pos = pos` (point record).
@@ -151,7 +150,7 @@ r[sam.edge.empty_lines]
 Blank lines (empty or whitespace-only) between alignment records MUST be silently skipped.
 
 r[sam.edge.rname_star]
-RNAME of `*` means unmapped. Combined with FLAG 0x4, these records MUST be filtered out by `fetch_into` (same as BAM's unmapped filtering). RNAME `*` without FLAG 0x4 is malformed but SHOULD be treated as unmapped.
+RNAME of `*` means unmapped. These records flow through to the `filter_raw` customizer; the pileup engine is responsible for excluding them per `r[pileup.unmapped_excluded]`. RNAME `*` without FLAG 0x4 is malformed but SHOULD be treated as unmapped.
 
 r[sam.edge.line_spanning_blocks]
 A single SAM alignment line may span multiple BGZF blocks. The reader MUST buffer partial lines across block boundaries and only parse complete lines (terminated by `\n`). The parser MUST also strip `\r` at line boundaries to handle `\r\n` (Windows-style) line endings that may appear in files from mixed-platform pipelines.

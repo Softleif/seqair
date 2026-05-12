@@ -493,7 +493,7 @@ r[cram.index.multi_ref_slices]
 Multi-ref slices produce multiple index entries (one per reference they span). A query for one reference may hit a multi-ref slice that also contains records from other references. The reader MUST filter records by reference ID after decoding.
 
 r[cram.index.unmapped]
-Unmapped records (ref ID = -1) have start=0, span=0. They are only returned if explicitly queried. For `fetch_into`, unmapped records MUST be skipped (same as BAM).
+Unmapped records (ref ID = -1) have start=0, span=0. They are only returned if explicitly queried. For `fetch_into`, unmapped records MUST flow through to the `filter_raw` customizer; the pileup engine is responsible for excluding them per `r[pileup.unmapped_excluded]`.
 
 r[cram.index.crai_per_slice]
 A CRAI entry's `slice_offset` field is the same value the container header records as the slice's `landmark` (byte offset from the start of the container data block to the slice header). When iterating containers during fetch, the reader SHOULD use the CRAI-listed slice_offsets to skip landmarks for slices the index says do not overlap the query. This is a strict optimisation — `decode_slice` already filters records by overlap, so omitting the per-slice filter is correct but wastes work in multi-slice and multi-ref containers. Single-slice / single-ref containers behave identically either way.

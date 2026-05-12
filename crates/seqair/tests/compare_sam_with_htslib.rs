@@ -14,7 +14,7 @@
     reason = "test code with known small values"
 )]
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
-use seqair::bam::{Pos0, RecordStore};
+use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::sam::reader::IndexedSamReader;
 use seqair_types::BaseQuality;
 use std::path::Path;
@@ -115,12 +115,14 @@ fn sam_record_count_matches_htslib() {
         let tid = reader.header().tid(contig).expect("tid");
         let mut store = RecordStore::new();
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("rio fetch");
 
         assert_eq!(
@@ -149,12 +151,14 @@ fn sam_record_fields_match_htslib() {
         let tid = reader.header().tid(contig).expect("tid");
         let mut store = RecordStore::new();
         reader
-            .fetch_into(
+            .fetch_into_customized(
                 tid,
                 Pos0::new(start as u32).unwrap(),
                 Pos0::new(end as u32).unwrap(),
                 &mut store,
+                &mut RejectUnmapped,
             )
+            .map(|c| c.kept)
             .expect("rio fetch");
 
         for (i, h) in hts.iter().enumerate() {
@@ -197,7 +201,14 @@ fn sam_aux_tags_present() {
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store)
+        .fetch_into_customized(
+            tid,
+            Pos0::new(6_105_700).unwrap(),
+            Pos0::new(6_105_800).unwrap(),
+            &mut store,
+            &mut RejectUnmapped,
+        )
+        .map(|c| c.kept)
         .expect("fetch");
 
     // Every record in the test data should have aux tags (at least RG)
@@ -227,7 +238,14 @@ fn sam_aux_rg_tag_matches_htslib() {
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store)
+        .fetch_into_customized(
+            tid,
+            Pos0::new(6_105_700).unwrap(),
+            Pos0::new(6_105_800).unwrap(),
+            &mut store,
+            &mut RejectUnmapped,
+        )
+        .map(|c| c.kept)
         .expect("fetch");
 
     assert_eq!(store.len(), hts.len());
