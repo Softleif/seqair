@@ -5,7 +5,7 @@
 use crate::reader::FetchCounts;
 
 use super::{
-    bgzf::{BgzfError, BgzfReader},
+    bgzf::{BgzfError, BgzfReader, VirtualOffset},
     csi_index::CsiIndex,
     flags::BamFlags,
     header::{BamHeader, BamHeaderError},
@@ -184,7 +184,18 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, BamError> {
-        self.fetch_into_customized(tid, start, end, store, &mut ()).map(|c| c.kept)
+        let mut query = self.query(tid, start, end)?;
+        store.clear();
+
+        let mut kept = 0usize;
+        query.for_each_result::<_, BamError>(|raw| {
+            if store.push_raw(raw, &mut ())?.is_some() {
+                kept = kept.saturating_add(1);
+            }
+            Ok(())
+        })?;
+
+        Ok(kept)
     }
 
     // r[impl unified.fetch_into_customized]
@@ -204,88 +215,259 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     ) -> Result<FetchCounts, BamError> {
         store.clear();
 
-        let chunks = self.shared.index.query(tid, start, end);
-        if chunks.is_empty() {
-            return Ok(FetchCounts::default());
-        }
-
-        let tid_i32 = validate_tid(tid)?;
-
-        let mut skipped_tid: u32 = 0;
-        let mut skipped_out_of_range: u32 = 0;
-        let mut accepted: u32 = 0;
+        let mut query = self.query(tid, start, end)?;
         let mut kept_count: usize = 0;
-
-        // Scratch buffer for the rare case where a record body straddles a BGZF
-        // block boundary; zero-copy slice from RegionBuf::buf is used otherwise.
-        let mut scratch: Vec<u8> = Vec::new();
-
-        // r[impl bam.reader.chunk_batching]
-        // Partition chunks into batches that each fit within MAX_REGION_BYTES.
-        // For typical regions this produces a single batch (no overhead).
-        // For very large BAM files where BAI bins span >256 MiB of compressed
-        // data, this splits the work into multiple RegionBuf loads.
-        let batches = partition_chunks(&chunks, region_buf::MAX_REGION_BYTES);
-
-        for batch in &batches {
-            let mut region = RegionBuf::load(&mut self.bulk_reader, batch)?;
-
-            for chunk in batch {
-                region.seek_virtual(chunk.begin)?;
-
-                loop {
-                    let current_voff = region.virtual_offset();
-                    if current_voff >= chunk.end {
-                        break;
-                    }
-
-                    // r[impl bam.reader.propagate_errors]
-                    let raw = match region.read_record(&mut scratch) {
-                        Ok(s) => s,
-                        Err(BgzfError::UnexpectedEof) => break,
-                        Err(e) => return Err(BamError::from(e)),
-                    };
-
-                    if raw.len() < 32 {
-                        return Err(BamError::TruncatedRecord { offset: current_voff.0 });
-                    }
-
-                    // r[impl bam.reader.unmapped_skipped]
-                    debug_assert!(raw.len() >= 32, "raw record too short: {}", raw.len());
-                    #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-                    let rec_tid = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-                    #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-                    let rec_pos_raw = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-                    let rec_pos = Pos0::try_from(rec_pos_raw)
-                        .map_err(|_| BamError::InvalidPosition { value: rec_pos_raw })?;
-                    #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-                    let rec_flags = BamFlags::from(u16::from_le_bytes([raw[14], raw[15]]));
-
-                    if rec_tid != tid_i32 {
-                        skipped_tid = skipped_tid.saturating_add(1);
-                        continue;
-                    }
-
-                    // r[impl record_store.end_pos_htslib]
-                    let rec_end = if rec_flags.is_unmapped() {
-                        rec_pos
-                    } else {
-                        compute_end_pos_from_raw(raw).unwrap_or(rec_pos)
-                    };
-                    if rec_pos > end || rec_end < start {
-                        skipped_out_of_range = skipped_out_of_range.saturating_add(1);
-                        continue;
-                    }
-
-                    accepted = accepted.saturating_add(1);
-                    if store.push_raw(raw, customize)?.is_some() {
-                        kept_count = kept_count.saturating_add(1);
-                    }
-                }
+        query.for_each_result::<_, BamError>(|raw| {
+            if store.push_raw(raw, customize)?.is_some() {
+                kept_count = kept_count.saturating_add(1);
             }
+            Ok(())
+        })?;
+
+        let qc = query.counts();
+        Ok(FetchCounts { fetched: qc.fetched, kept: kept_count })
+    }
+
+    /// Create a cursor over raw BAM records in a genomic region.
+    ///
+    /// Returns a [`BamQuery`] that yields raw `&[u8]` record bytes (including the
+    /// 32-byte BAM fixed header) for records overlapping `[start, end)` on `tid`.
+    /// Records are pre-filtered by tid and position range — the caller sees only
+    /// records that fall within the requested region.
+    ///
+    /// Unlike [`fetch_into_customized`](Self::fetch_into_customized), this
+    /// does not involve [`RecordStore`] or [`CustomizeRecordStore`]. The caller
+    /// receives raw bytes and can parse, filter, or store them however they want.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut query = reader.query(tid, start, end)?;
+    /// query.for_each(|raw| {
+    ///     let ref_id = i32::from_le_bytes(raw[0..4].try_into().unwrap());
+    ///     // ... process raw bytes ...
+    /// })?;
+    /// let counts = query.counts();
+    /// ```
+    pub fn query(&mut self, tid: u32, start: Pos0, end: Pos0) -> Result<BamQuery<'_, R>, BamError> {
+        let chunks = self.shared.index.query(tid, start, end);
+        let tid_i32 = validate_tid(tid)?;
+        let batches = if chunks.is_empty() {
+            Vec::new()
+        } else {
+            partition_chunks(&chunks, region_buf::MAX_REGION_BYTES)
+        };
+
+        Ok(BamQuery {
+            reader: &mut self.bulk_reader,
+            batches,
+            batch_idx: 0,
+            region: None,
+            chunk_idx: 0,
+            chunk_end: VirtualOffset(0),
+            scratch: Vec::new(),
+            tid_i32,
+            start,
+            end,
+            accepted: 0,
+            skipped_tid: 0,
+            skipped_out_of_range: 0,
+        })
+    }
+}
+
+// ── BamQuery ────────────────────────────────────────────────────────────
+
+/// Streaming cursor over raw BAM records within a genomic region.
+///
+/// Created by [`IndexedBamReader::query`]. Call [`for_each`](Self::for_each) to
+/// process pre-filtered (tid + position) raw record bytes with zero-copy
+/// closure-based iteration. Use [`for_each_result`](Self::for_each_result) if
+/// the closure can fail.
+///
+/// The cursor borrows the reader's file handle exclusively. Drop it to
+/// release the borrow.
+pub struct BamQuery<'r, R: Read + Seek> {
+    reader: &'r mut R,
+    batches: Vec<Vec<Chunk>>,
+    batch_idx: usize,
+    region: Option<RegionBuf>,
+    chunk_idx: usize,
+    chunk_end: VirtualOffset,
+    scratch: Vec<u8>,
+    tid_i32: i32,
+    start: Pos0,
+    end: Pos0,
+    accepted: u32,
+    skipped_tid: u32,
+    skipped_out_of_range: u32,
+}
+
+impl<R: Read + Seek> std::fmt::Debug for BamQuery<'_, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BamQuery")
+            .field("batches", &self.batches.len())
+            .field("batch_idx", &self.batch_idx)
+            .field("chunk_idx", &self.chunk_idx)
+            .field("chunk_end", &self.chunk_end)
+            .field("accepted", &self.accepted)
+            .field("skipped_tid", &self.skipped_tid)
+            .field("skipped_out_of_range", &self.skipped_out_of_range)
+            .finish()
+    }
+}
+
+/// Snapshot of the cursor's internal counters.
+///
+/// Returned by [`BamQuery::counts`]. Unlike [`FetchCounts`] there is no
+/// `kept` field — the cursor does not filter beyond position and tid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BamQueryCounts {
+    /// Records that passed the built-in tid and position checks.
+    pub fetched: usize,
+    /// Records skipped because their reference ID didn't match.
+    pub skipped_tid: usize,
+    /// Records skipped because they fell outside the requested range.
+    pub skipped_out_of_range: usize,
+}
+
+impl<'r, R: Read + Seek> BamQuery<'r, R> {
+    /// Iterate over raw BAM records in the region, calling `f` for each.
+    ///
+    /// Zero-copy: the `&[u8]` passed to `f` borrows from the cursor's
+    /// internal decompressed buffer (or scratch buffer for cross-block records)
+    /// and is valid only within the closure call.
+    ///
+    /// Records are already filtered by `tid` and genomic position `[start, end)`.
+    /// I/O and decode errors are returned immediately (the iteration stops).
+    ///
+    /// Returns the final [`BamQueryCounts`] on success.
+    pub fn for_each<F>(&mut self, mut f: F) -> Result<BamQueryCounts, BamError>
+    where
+        F: FnMut(&[u8]),
+    {
+        self.run_loop(|raw| {
+            f(raw);
+            Ok(())
+        })
+    }
+
+    /// Like [`for_each`](Self::for_each), but the closure can return an error
+    /// that propagates out of the iteration.
+    ///
+    /// This is used internally by [`fetch_into_customized`] and is also useful
+    /// for callers that want to short-circuit on their own error conditions.
+    pub fn for_each_result<F, E>(&mut self, f: F) -> Result<BamQueryCounts, E>
+    where
+        F: FnMut(&[u8]) -> Result<(), E>,
+        E: From<BamError>,
+    {
+        self.run_loop(f)
+    }
+
+    fn run_loop<F, E>(&mut self, mut f: F) -> Result<BamQueryCounts, E>
+    where
+        F: FnMut(&[u8]) -> Result<(), E>,
+        E: From<BamError>,
+    {
+        loop {
+            if self.region.is_none() {
+                if self.batch_idx >= self.batches.len() {
+                    break;
+                }
+                debug_assert!(self.batch_idx < self.batches.len());
+                #[allow(clippy::indexing_slicing, reason = "bounds checked above")]
+                let batch = &self.batches[self.batch_idx];
+                self.batch_idx = self.batch_idx.saturating_add(1);
+                debug_assert!(!batch.is_empty());
+
+                let mut region =
+                    RegionBuf::load(self.reader, batch).map_err(|e| E::from(BamError::from(e)))?;
+                #[allow(clippy::indexing_slicing, reason = "non-empty assert above")]
+                let first_chunk = batch[0];
+                region.seek_virtual(first_chunk.begin).map_err(|e| E::from(BamError::from(e)))?;
+                self.chunk_end = first_chunk.end;
+                self.chunk_idx = 0;
+                self.region = Some(region);
+            }
+
+            let region = self.region.as_mut().expect("region guaranteed Some above");
+
+            if region.virtual_offset() >= self.chunk_end {
+                self.chunk_idx = self.chunk_idx.saturating_add(1);
+                debug_assert!(self.batch_idx >= 1, "batch_idx incremented on load");
+                #[allow(
+                    clippy::indexing_slicing,
+                    reason = "batch_idx >= 1 after first load; saturating_sub(1) safe"
+                )]
+                let batch = &self.batches[self.batch_idx.saturating_sub(1)];
+                if self.chunk_idx >= batch.len() {
+                    self.region = None;
+                    continue;
+                }
+                #[allow(clippy::indexing_slicing, reason = "chunk_idx < batch.len() checked above")]
+                let chunk = &batch[self.chunk_idx];
+                region.seek_virtual(chunk.begin).map_err(|e| E::from(BamError::from(e)))?;
+                self.chunk_end = chunk.end;
+                continue;
+            }
+
+            // r[impl bam.reader.propagate_errors]
+            let current_voff = region.virtual_offset();
+            let raw = match region.read_record(&mut self.scratch) {
+                Ok(s) => s,
+                Err(BgzfError::UnexpectedEof) => continue,
+                Err(e) => return Err(E::from(BamError::from(e))),
+            };
+
+            if raw.len() < 32 {
+                return Err(E::from(BamError::TruncatedRecord { offset: current_voff.0 }));
+            }
+
+            // r[impl bam.reader.unmapped_skipped]
+            debug_assert!(raw.len() >= 32, "raw record too short: {}", raw.len());
+            #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
+            let rec_tid = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
+            let rec_pos_raw = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+            let rec_pos = Pos0::try_from(rec_pos_raw)
+                .map_err(|_| E::from(BamError::InvalidPosition { value: rec_pos_raw }))?;
+            #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
+            let rec_flags = BamFlags::from(u16::from_le_bytes([raw[14], raw[15]]));
+
+            if rec_tid != self.tid_i32 {
+                self.skipped_tid = self.skipped_tid.saturating_add(1);
+                continue;
+            }
+
+            // r[impl record_store.end_pos_htslib]
+            let rec_end = if rec_flags.is_unmapped() {
+                rec_pos
+            } else {
+                compute_end_pos_from_raw(raw).unwrap_or(rec_pos)
+            };
+            if rec_pos > self.end || rec_end < self.start {
+                self.skipped_out_of_range = self.skipped_out_of_range.saturating_add(1);
+                continue;
+            }
+
+            self.accepted = self.accepted.saturating_add(1);
+            f(raw)?;
         }
 
-        Ok(FetchCounts { fetched: accepted as usize, kept: kept_count })
+        Ok(self.counts())
+    }
+
+    /// Return the current counter snapshot.
+    ///
+    /// Can be called at any point during iteration — mid-stream, after
+    /// exhaustion, or after an error. Useful for diagnostics.
+    pub fn counts(&self) -> BamQueryCounts {
+        BamQueryCounts {
+            fetched: self.accepted as usize,
+            skipped_tid: self.skipped_tid as usize,
+            skipped_out_of_range: self.skipped_out_of_range as usize,
+        }
     }
 }
 
