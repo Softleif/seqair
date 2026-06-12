@@ -485,6 +485,43 @@ impl CigarMapping {
             }
         }
     }
+
+    /// Length of a deletion that immediately follows reference position `pos`
+    /// for this read — i.e. when `pos` is the last matched reference base
+    /// before a `D` op (the deletion's *anchor*). `None` everywhere else.
+    ///
+    /// This is the deletion counterpart of the `Insertion` that
+    /// [`pos_info_at`](Self::pos_info_at) already reports at an anchor, and
+    /// mirrors htslib's `bam_pileup` reporting a negative `indel` on the base
+    /// before a deletion. Insertions are *not* reported here — read those from
+    /// [`CigarPosInfo::Insertion`].
+    pub fn deletion_after_at(&self, pos: Pos0) -> Option<u32> {
+        match self {
+            // Linear CIGARs are clips-match-clips with no indels.
+            Self::Linear { .. } => None,
+            Self::Complex(ops) => {
+                let pos: u32 = *pos;
+                for (i, op) in ops.iter().enumerate() {
+                    if !consumes_ref(op.op_type()) {
+                        continue;
+                    }
+                    let ref_end = op.ref_start.saturating_add(op.len());
+                    if pos < op.ref_start || pos >= ref_end {
+                        continue;
+                    }
+                    // A deletion can only follow a match block, and only from
+                    // its last reference position.
+                    if matches!(op.op_type(), CIGAR_M | CIGAR_EQ | CIGAR_X)
+                        && pos == ref_end.wrapping_sub(1)
+                    {
+                        return next_deletion_len(ops, i);
+                    }
+                    return None;
+                }
+                None
+            }
+        }
+    }
 }
 
 // r[impl cigar.qpos_bounds]
@@ -566,6 +603,21 @@ fn next_insertion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
         idx = idx.checked_add(1)?;
     }
     if total > 0 { Some(total) } else { None }
+}
+
+/// Length of the `D` op immediately following index `op_idx` (skipping `P`
+/// padding ops, as htslib does), or `None` if the next op is not a deletion.
+#[inline]
+fn next_deletion_len(ops: &[CompactOp], op_idx: usize) -> Option<u32> {
+    let mut idx = op_idx.checked_add(1)?;
+    while let Some(next) = ops.get(idx) {
+        match next.op_type() {
+            CIGAR_P => idx = idx.checked_add(1)?,
+            CIGAR_D => return Some(next.len()),
+            _ => return None,
+        }
+    }
+    None
 }
 
 // r[impl pileup_indel.insertion_at_last_match]
