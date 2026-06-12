@@ -77,6 +77,12 @@ pub enum ReaderError {
     #[error("region end {end} exceeds i32::MAX; not representable as Pos0")]
     RegionEndTooLarge { end: u64 },
 
+    #[error(
+        "region end {end} is past the end of contig '{contig}' \
+         (last valid 0-based position {contig_last_pos})"
+    )]
+    RegionEndPastContig { contig: SmolStr, end: u64, contig_last_pos: u64 },
+
     #[error("region start {start} > end {end} on contig '{contig}'")]
     RegionStartAfterEnd { contig: SmolStr, start: u64, end: u64 },
 

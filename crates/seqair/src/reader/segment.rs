@@ -479,7 +479,11 @@ impl private::IntoSegmentTargetSealed for &RegionString {
         if let Some(p1) = self.end {
             let end0 = p1.to_zero_based();
             if end0 > range.contig_last_pos {
-                return Err(ReaderError::RegionEndTooLarge { end: end0.as_u64() });
+                return Err(ReaderError::RegionEndPastContig {
+                    contig: range.contig.clone(),
+                    end: end0.as_u64(),
+                    contig_last_pos: range.contig_last_pos.as_u64(),
+                });
             }
             range.end = end0;
         }
@@ -507,7 +511,11 @@ impl<R: ResolveTid> private::IntoSegmentTargetSealed for (R, Pos0, Pos0) {
             });
         }
         if end > range.contig_last_pos {
-            return Err(ReaderError::RegionEndTooLarge { end: end.as_u64() });
+            return Err(ReaderError::RegionEndPastContig {
+                contig: range.contig.clone(),
+                end: end.as_u64(),
+                contig_last_pos: range.contig_last_pos.as_u64(),
+            });
         }
         range.start = start;
         range.end = end;
@@ -1002,7 +1010,7 @@ mod tests {
     fn into_segment_target_end_past_contig_errors() {
         let header = header_with_contigs(&[("chr1", 100)]);
         let err = ("chr1", p(0), p(500)).resolve_target(&header).unwrap_err();
-        assert!(matches!(err, ReaderError::RegionEndTooLarge { .. }));
+        assert!(matches!(err, ReaderError::RegionEndPastContig { .. }));
     }
 
     proptest! {
