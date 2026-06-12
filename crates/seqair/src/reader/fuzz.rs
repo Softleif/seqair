@@ -150,7 +150,7 @@ impl FuzzReaders {
         if let Some(ref_seq) = ref_seq {
             engine.set_reference_seq(ref_seq);
         }
-        Ok(PileupGuard::new(engine, &mut self.store))
+        Ok(PileupGuard::new(engine, &mut self.store, None))
     }
 
     fn fetch_records(

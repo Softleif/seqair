@@ -136,6 +136,18 @@ pub struct PileupEngine<U = ()> {
     max_active_depth: u32,
 }
 
+/// Reusable scratch buffers for [`PileupEngine`], pooled across regions by
+/// [`Readers`](crate::reader::Readers) so each `pileup()` call doesn't
+/// reallocate them. The buffers are reused *within* a region (cleared per
+/// column); this additionally reuses them *between* regions, the same way the
+/// `RecordStore` is recovered by [`PileupGuard`].
+#[derive(Default)]
+pub(crate) struct PileupScratch {
+    buf: Vec<PileupAlignment>,
+    active_end_pos: Vec<Pos0>,
+    active: Vec<ActiveRecord>,
+}
+
 #[derive(Debug)]
 struct ActiveRecord {
     record_idx: u32,
@@ -453,18 +465,42 @@ impl PileupAlignment {
 impl<U> PileupEngine<U> {
     /// Create a pileup engine that owns the record store.
     pub fn new(store: RecordStore<U>, region_start: Pos0, region_end: Pos0) -> Self {
+        Self::with_scratch(store, region_start, region_end, PileupScratch::default())
+    }
+
+    /// Build an engine reusing pooled scratch buffers. The buffers are cleared
+    /// (capacity retained) so no stale alignments leak from a previous region.
+    pub(crate) fn with_scratch(
+        store: RecordStore<U>,
+        region_start: Pos0,
+        region_end: Pos0,
+        mut scratch: PileupScratch,
+    ) -> Self {
+        scratch.buf.clear();
+        scratch.active_end_pos.clear();
+        scratch.active.clear();
         PileupEngine {
             store,
-            buf: Vec::new(),
+            buf: scratch.buf,
             current_pos: region_start,
             region_end,
             next_entry: 0,
-            active_end_pos: Vec::new(),
-            active: Vec::new(),
+            active_end_pos: scratch.active_end_pos,
+            active: scratch.active,
             max_depth: None,
             ref_seq: None,
             columns_produced: 0,
             max_active_depth: 0,
+        }
+    }
+
+    /// Reclaim the scratch buffers (with capacity) for reuse by the next
+    /// region. Called by [`PileupGuard`]'s `Drop`.
+    pub(crate) fn take_scratch(&mut self) -> PileupScratch {
+        PileupScratch {
+            buf: std::mem::take(&mut self.buf),
+            active_end_pos: std::mem::take(&mut self.active_end_pos),
+            active: std::mem::take(&mut self.active),
         }
     }
 
@@ -562,15 +598,24 @@ pub struct PileupGuard<'a, U = ()> {
     /// dance that an owning field would require.
     engine: Option<PileupEngine<U>>,
     slot: &'a mut RecordStore<U>,
+    /// Optional slot to recover the engine's scratch buffers into, so the next
+    /// region's pileup reuses them instead of allocating fresh. `None` for
+    /// guards that don't pool scratch (e.g. the fuzz harness).
+    scratch_slot: Option<&'a mut PileupScratch>,
 }
 
 impl<'a, U> PileupGuard<'a, U> {
-    /// Build a guard from a populated engine and the slot to recover into.
-    /// Used by [`Readers::pileup`] to wire up automatic store recovery;
-    /// `pub(crate)` because external callers should always go through
-    /// `Readers::pileup` to obtain one.
-    pub(crate) fn new(engine: PileupEngine<U>, slot: &'a mut RecordStore<U>) -> Self {
-        Self { engine: Some(engine), slot }
+    /// Build a guard from a populated engine and the slots to recover into.
+    /// Used by [`Readers::pileup`] to wire up automatic store recovery (and,
+    /// when `scratch_slot` is `Some`, pooling of the engine's scratch buffers
+    /// across regions); `pub(crate)` because external callers should always go
+    /// through `Readers::pileup` to obtain one.
+    pub(crate) fn new(
+        engine: PileupEngine<U>,
+        slot: &'a mut RecordStore<U>,
+        scratch_slot: Option<&'a mut PileupScratch>,
+    ) -> Self {
+        Self { engine: Some(engine), slot, scratch_slot }
     }
 
     /// Consume the guard and return the inner engine, **without**
@@ -626,10 +671,13 @@ impl<U> Drop for PileupGuard<'_, U> {
         // if the store was already drained (edge case) or was empty with
         // zero capacity from the start. In any of those cases, leave the
         // slot untouched.
-        if let Some(mut engine) = self.engine.take()
-            && let Some(store) = engine.take_store()
-        {
-            *self.slot = store;
+        if let Some(mut engine) = self.engine.take() {
+            if let Some(store) = engine.take_store() {
+                *self.slot = store;
+            }
+            if let Some(scratch_slot) = self.scratch_slot.take() {
+                *scratch_slot = engine.take_scratch();
+            }
         }
     }
 }
