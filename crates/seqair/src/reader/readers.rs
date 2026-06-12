@@ -124,6 +124,8 @@ pub struct Readers<E: CustomizeRecordStore = ()> {
     pub(crate) store: RecordStore<E::Extra>,
     pub(crate) fasta_buf: Vec<u8>,
     pub(crate) customize: E,
+    /// Pooled pileup scratch buffers, reused across `pileup()` calls.
+    pub(crate) pileup_scratch: crate::bam::pileup::PileupScratch,
 }
 
 impl<E: CustomizeRecordStore> std::fmt::Debug for Readers<E> {
@@ -163,6 +165,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
             store: RecordStore::default(),
             fasta_buf: Vec::new(),
             customize,
+            pileup_scratch: crate::bam::pileup::PileupScratch::default(),
         })
     }
 
@@ -179,6 +182,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
             store: RecordStore::default(),
             fasta_buf: Vec::new(),
             customize: self.customize.clone(),
+            pileup_scratch: crate::bam::pileup::PileupScratch::default(),
         })
     }
 
@@ -354,10 +358,11 @@ impl<E: CustomizeRecordStore> Readers<E> {
         // `self.store` holds a default (empty) RecordStore — the slot the
         // guard's Drop will overwrite with the recovered store on scope exit.
         let store = std::mem::take(&mut self.store);
+        let scratch = std::mem::take(&mut self.pileup_scratch);
 
-        let mut engine = PileupEngine::new(store, start, end);
+        let mut engine = PileupEngine::with_scratch(store, start, end, scratch);
         engine.set_reference_seq(ref_seq);
-        Ok(PileupGuard::new(engine, &mut self.store))
+        Ok(PileupGuard::new(engine, &mut self.store, Some(&mut self.pileup_scratch)))
     }
 
     pub fn fasta(&self) -> &IndexedFastaReader {
