@@ -81,7 +81,8 @@ pub use index::{AlignmentIndex, BaiError, BamIndex};
 pub use nm_md::NmMdError;
 pub use owned_record::{OwnedBamRecord, OwnedRecordError};
 pub use pileup::{
-    AlignmentView, PileupAlignment, PileupColumn, PileupEngine, PileupGuard, PileupOp, RefSeq,
+    AlignmentView, Indel, PileupAlignment, PileupColumn, PileupEngine, PileupGuard, PileupOp,
+    RefSeq,
 };
 pub use reader::{BamError, BamQuery, BamQueryCounts, BamShared, IndexedBamReader};
 // `record` is intentionally not re-exported as a type. The production decode

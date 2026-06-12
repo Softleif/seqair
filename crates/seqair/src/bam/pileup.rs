@@ -412,6 +412,24 @@ pub enum PileupOp {
 
 const _: () = assert!(std::mem::size_of::<PileupOp>() <= 12, "PileupOp grew unexpectedly large");
 
+/// The indel immediately following a column's reference position for one read —
+/// the typed equivalent of htslib's signed `bam_pileup1_t::indel`.
+///
+/// Reported at the indel's *anchor* (the matched base just before the gap), so
+/// `Deletion` appears on the `PileupOp::Match` column before the deleted
+/// reference bases — NOT on the `PileupOp::Deletion` columns (which seqair
+/// emits at each deleted position). This lets a consumer collect one
+/// observation per indel at the position htslib would use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Indel {
+    /// No insertion or deletion follows this position for this read.
+    None,
+    /// An insertion of `n` query bases follows (`= htslib indel > 0`).
+    Insertion(u32),
+    /// A deletion of `n` reference bases follows (`= htslib indel < 0`).
+    Deletion(u32),
+}
+
 // r[impl pileup.qpos]
 // r[impl base_decode.alignment]
 // r[impl pileup_indel.op_enum]
@@ -425,6 +443,8 @@ pub struct PileupAlignment {
     pub seq_len: u32,
     pub matching_bases: u32,
     pub indel_bases: u32,
+    /// The indel anchored at this column for this read (see [`Indel`]).
+    indel_after: Indel,
 }
 
 // r[impl pileup_indel.accessors]
@@ -437,6 +457,15 @@ impl PileupAlignment {
     #[must_use]
     pub fn op(&self) -> &PileupOp {
         &self.op
+    }
+
+    /// The indel anchored at this column for this read — the typed equivalent
+    /// of htslib's `a.indel()`. `Insertion`/`Deletion` appear only on the
+    /// anchor (the matched base before the gap); every other column is
+    /// [`Indel::None`].
+    #[must_use]
+    pub fn indel_after(&self) -> Indel {
+        self.indel_after
     }
 
     // r[impl pileup.qpos_none]
@@ -857,6 +886,21 @@ impl<U> PileupEngine<U> {
                     CigarPosInfo::RefSkip => PileupOp::RefSkip,
                 };
 
+                // Anchor-addressed indel (htslib `a.indel()` parity). Insertions
+                // are already encoded in the op; deletions are not (seqair emits
+                // `PileupOp::Deletion` at the deleted positions, not the anchor),
+                // so resolve them from the CIGAR at the anchor Match column.
+                let indel_after = match op {
+                    PileupOp::Insertion { insert_len, .. } => Indel::Insertion(insert_len),
+                    PileupOp::Match { .. } => match active.cigar.deletion_after_at(pos) {
+                        Some(del_len) => Indel::Deletion(del_len),
+                        None => Indel::None,
+                    },
+                    PileupOp::Deletion { .. }
+                    | PileupOp::ComplexIndel { .. }
+                    | PileupOp::RefSkip => Indel::None,
+                };
+
                 self.buf.push(PileupAlignment {
                     op,
                     mapq: active.mapq,
@@ -866,6 +910,7 @@ impl<U> PileupEngine<U> {
                     matching_bases: active.matching_bases,
                     indel_bases: active.indel_bases,
                     record_idx: active.record_idx,
+                    indel_after,
                 });
             }
 
@@ -1128,6 +1173,75 @@ mod tests {
             }
         }
         assert!(saw_insertion, "expected an Insertion op at the anchor column");
+    }
+
+    #[test]
+    fn pileup_alignment_indel_after() {
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        fn run(cigar: &[CigarOp], seq_len: u32, last_ref_pos: u32) -> Vec<(u32, Indel)> {
+            let mut store = RecordStore::new();
+            store
+                .push_fields(
+                    Pos0::new(0).unwrap(),
+                    Pos0::new(last_ref_pos).unwrap(),
+                    BamFlags::empty(),
+                    30,
+                    6,
+                    0,
+                    b"r",
+                    cigar,
+                    &vec![Base::A; seq_len as usize],
+                    &vec![40u8; seq_len as usize],
+                    &[],
+                    0,
+                    -1,
+                    0,
+                    0,
+                    &mut (),
+                )
+                .unwrap();
+            let mut engine =
+                PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(last_ref_pos).unwrap());
+            let mut out = Vec::new();
+            while let Some(col) = engine.pileups() {
+                let pos = *col.pos();
+                for aln in col.alignments() {
+                    out.push((pos, aln.indel_after()));
+                }
+            }
+            out
+        }
+        let at = |v: &[(u32, Indel)], p: u32| v.iter().find(|(q, _)| *q == p).unwrap().1;
+
+        // 3M 2D 3M: deletion of 2 ref bases anchored at ref pos 2.
+        let del = run(
+            &[
+                CigarOp::new(CigarOpType::Match, 3),
+                CigarOp::new(CigarOpType::Deletion, 2),
+                CigarOp::new(CigarOpType::Match, 3),
+            ],
+            6,
+            7,
+        );
+        assert_eq!(at(&del, 2), Indel::Deletion(2), "deletion reported at its anchor");
+        assert_eq!(at(&del, 1), Indel::None, "mid-match has no indel");
+        assert_eq!(at(&del, 3), Indel::None, "deleted positions are not the anchor");
+        assert_eq!(at(&del, 5), Indel::None);
+
+        // 3M 2I 3M: insertion of 2 query bases anchored at ref pos 2.
+        let ins = run(
+            &[
+                CigarOp::new(CigarOpType::Match, 3),
+                CigarOp::new(CigarOpType::Insertion, 2),
+                CigarOp::new(CigarOpType::Match, 3),
+            ],
+            8,
+            5,
+        );
+        assert_eq!(at(&ins, 2), Indel::Insertion(2), "insertion reported at its anchor");
+        assert_eq!(at(&ins, 3), Indel::None);
     }
 
     // r[verify pileup.max_depth_order]
