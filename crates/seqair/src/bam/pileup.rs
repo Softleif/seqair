@@ -303,6 +303,31 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
         self.store.qual(self.aln.record_idx())
     }
 
+    /// The inserted bases for a [`PileupOp::Insertion`] at this column — the
+    /// run `seq[qpos + 1 .. qpos + 1 + insert_len]`. Returns an empty slice for
+    /// every other op (including `ComplexIndel`, whose inserted run has no
+    /// anchor base in this column). Saves callers the manual `qpos + 1` slice
+    /// arithmetic into [`seq`](Self::seq).
+    pub fn inserted_bases(&self) -> &'store [Base] {
+        match self.aln.op {
+            PileupOp::Insertion { qpos, insert_len, .. } => {
+                inserted_run(self.seq(), qpos, insert_len)
+            }
+            _ => &[],
+        }
+    }
+
+    /// The qualities of the [`inserted_bases`](Self::inserted_bases), aligned
+    /// one-to-one. Empty for non-insertion ops.
+    pub fn inserted_quals(&self) -> &'store [BaseQuality] {
+        match self.aln.op {
+            PileupOp::Insertion { qpos, insert_len, .. } => {
+                inserted_run(self.qualities(), qpos, insert_len)
+            }
+            _ => &[],
+        }
+    }
+
     /// The underlying [`PileupAlignment`] — use when you want to call
     /// [`Clone::clone`] or otherwise escape the deref coercion.
     pub fn alignment(&self) -> &'a PileupAlignment {
@@ -313,6 +338,15 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
     pub fn store(&self) -> &'store RecordStore<U> {
         self.store
     }
+}
+
+/// Slice the inserted run `full[qpos + 1 .. qpos + 1 + insert_len]`, returning
+/// an empty slice on any out-of-bounds index rather than panicking.
+#[inline]
+fn inserted_run<T>(full: &[T], qpos: u32, insert_len: u32) -> &[T] {
+    let start = (qpos as usize).saturating_add(1);
+    let end = start.saturating_add(insert_len as usize);
+    full.get(start..end).unwrap_or(&[])
 }
 
 impl<U> std::ops::Deref for AlignmentView<'_, '_, U> {
@@ -357,7 +391,9 @@ pub enum PileupOp {
     Match { qpos: u32, base: Base, qual: BaseQuality },
     /// Read has a base aligned at this position AND an insertion of
     /// `insert_len` query bases follows before the next reference position.
-    /// Access inserted bases via the read's sequence at `qpos + 1 .. qpos + 1 + insert_len`.
+    /// Access the inserted bases via
+    /// [`AlignmentView::inserted_bases`](AlignmentView::inserted_bases) (or
+    /// manually as the read's sequence at `qpos + 1 .. qpos + 1 + insert_len`).
     // r[impl types.base_quality.field_type]
     Insertion { qpos: u32, base: Base, qual: BaseQuality, insert_len: u32 },
     /// Read has a deletion spanning this position (D CIGAR op). `del_len` is the total length
@@ -1036,6 +1072,62 @@ mod tests {
         // After fourth eviction (record 3 expired at pos=40): pos 45 — [4]
         let at_45 = columns.iter().find(|(p, _)| *p == Pos0::new(45).unwrap()).unwrap();
         assert_eq!(at_45.1, vec![4]);
+    }
+
+    #[test]
+    fn alignment_view_inserted_bases() {
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        // 3M 2I 3M: ref span 6 (pos 0..=5), 8 query bases; "CG" inserted after
+        // ref pos 2. The insertion is reported at the anchor column (pos 2).
+        let seq = [Base::A, Base::A, Base::A, Base::C, Base::G, Base::A, Base::A, Base::A];
+        let quals = [10u8, 11, 12, 20, 21, 13, 14, 15];
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(0).unwrap(),
+                Pos0::new(5).unwrap(),
+                BamFlags::empty(),
+                30,
+                6,
+                2,
+                b"ins_read",
+                &[
+                    CigarOp::new(CigarOpType::Match, 3),
+                    CigarOp::new(CigarOpType::Insertion, 2),
+                    CigarOp::new(CigarOpType::Match, 3),
+                ],
+                &seq,
+                &quals,
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                &mut (),
+            )
+            .unwrap();
+
+        let mut engine = PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(5).unwrap());
+
+        let mut saw_insertion = false;
+        while let Some(col) = engine.pileups() {
+            for aln in col.alignments() {
+                if matches!(aln.op, PileupOp::Insertion { .. }) {
+                    saw_insertion = true;
+                    assert_eq!(col.pos(), Pos0::new(2).unwrap());
+                    assert_eq!(aln.inserted_bases(), &[Base::C, Base::G]);
+                    let q: Vec<u8> = aln.inserted_quals().iter().filter_map(|x| x.get()).collect();
+                    assert_eq!(q, vec![20, 21]);
+                } else {
+                    // Every other op exposes no inserted run.
+                    assert!(aln.inserted_bases().is_empty());
+                    assert!(aln.inserted_quals().is_empty());
+                }
+            }
+        }
+        assert!(saw_insertion, "expected an Insertion op at the anchor column");
     }
 
     // r[verify pileup.max_depth_order]
