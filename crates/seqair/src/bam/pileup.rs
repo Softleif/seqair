@@ -1039,9 +1039,8 @@ mod tests {
         let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(104).unwrap());
 
         // First column — buf grows to accommodate alignments.
-        let col1 = engine.pileups().unwrap();
-        assert!(col1.depth() > 0, "should have at least one alignment");
-        drop(col1);
+        let depth = engine.pileups().unwrap().depth();
+        assert!(depth > 0, "should have at least one alignment");
         let cap_after_first = engine.buf.capacity();
         assert!(cap_after_first > 0, "buffer should have allocated");
 
@@ -1245,7 +1244,7 @@ mod tests {
     }
 
     // r[verify pileup.max_depth_order]
-    /// max_depth truncation must keep the first N alignments in insertion order,
+    /// `max_depth` truncation must keep the first N alignments in insertion order,
     /// not arbitrary ones. After the stable-retain fix, the insertion order is
     /// preserved through eviction, so truncation drops predictable (last N) entries.
     #[test]
@@ -1267,8 +1266,8 @@ mod tests {
                     0,
                     format!("read{i}").as_bytes(),
                     &[CigarOp::new(CigarOpType::Match, 50)],
-                    &vec![Base::A; 50],
-                    &vec![40u8; 50],
+                    &[Base::A; 50],
+                    &[40u8; 50],
                     &[],
                     0,
                     -1,
