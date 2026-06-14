@@ -1026,6 +1026,48 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         }
         Ok(())
     }
+    fn format_floats(&mut self, id: &FieldId, per_sample: &[&[f32]]) -> Result<(), VcfError> {
+        let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_format_field(id);
+                // r[impl bcf_writer.indiv_field_major]
+                encode_typed_int_key(enc.indiv_buf, id.dict_idx());
+                encode_type_byte(enc.indiv_buf, width, BCF_BT_FLOAT);
+                for s in per_sample {
+                    for &v in *s {
+                        v.encode_bcf_as(enc.indiv_buf, BCF_BT_FLOAT);
+                    }
+                    // r[impl bcf_writer.end_of_vector]
+                    for _ in s.len()..width {
+                        f32::encode_end_of_vector(enc.indiv_buf);
+                    }
+                }
+                if !replacing {
+                    enc.n_fmt = enc.n_fmt.saturating_add(1);
+                }
+            }
+            EncoderInner::Vcf(vcf) => {
+                vcf.prepare_format_field(id);
+                for (i, s) in per_sample.iter().enumerate() {
+                    if s.is_empty() {
+                        // r[impl vcf_writer.missing_dot]
+                        vcf.sample_bufs[i].push(b'.');
+                        continue;
+                    }
+                    for (j, &v) in s.iter().enumerate() {
+                        if j > 0 {
+                            vcf.sample_bufs[i].push(b',');
+                        }
+                        // r[impl vcf_writer.float_precision]
+                        write_float_g(&mut vcf.sample_bufs[i], v)
+                            .map_err(|source| VcfError::FailedToWriteFormattedString { source })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     // r[impl record_encoder.format_state_queries]
     fn n_allele(&self) -> usize {
         match &self.inner {

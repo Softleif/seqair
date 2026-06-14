@@ -171,6 +171,7 @@ pub type InfoIntOpts = InfoKey<OptArr<i32>>;
 pub type FormatGt = FormatKey<Gt>;
 pub type FormatInt = FormatKey<Scalar<i32>>;
 pub type FormatFloat = FormatKey<Scalar<f32>>;
+pub type FormatFloats = FormatKey<Arr<f32>>;
 
 // ── InfoEncoder trait ──────────────────────────────────────────────────
 
@@ -199,6 +200,11 @@ pub trait FormatEncoder {
     fn format_int(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError>;
     /// Encode a scalar float FORMAT field for all samples.
     fn format_float(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError>;
+    /// Encode a multi-valued float FORMAT field. `per_sample` holds one slice
+    /// per sample (its length MUST equal the sample count); each inner slice is
+    /// that sample's values. For BCF the stored width is the longest inner
+    /// slice, shorter samples padded with the float end-of-vector sentinel.
+    fn format_floats(&mut self, id: &FieldId, per_sample: &[&[f32]]) -> Result<(), VcfError>;
     fn n_allele(&self) -> usize;
     fn n_alt(&self) -> usize;
     /// Number of samples declared by the header.
@@ -309,6 +315,27 @@ impl FormatKey<Scalar<f32>> {
             });
         }
         enc.format_float(&self.0, values)
+    }
+}
+
+impl FormatKey<Arr<f32>> {
+    /// Encode a multi-valued float FORMAT field. `per_sample` must have exactly
+    /// one slice per sample.
+    ///
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if `per_sample.len() != n_samples`.
+    pub fn encode(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        per_sample: &[&[f32]],
+    ) -> Result<(), VcfError> {
+        if per_sample.len() != enc.n_samples() {
+            return Err(VcfError::SampleCountMismatch {
+                expected: enc.n_samples(),
+                got: per_sample.len(),
+            });
+        }
+        enc.format_floats(&self.0, per_sample)
     }
 }
 
