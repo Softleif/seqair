@@ -1026,6 +1026,64 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         }
         Ok(())
     }
+    fn format_ints(&mut self, id: &FieldId, per_sample: &[&[i32]]) -> Result<(), VcfError> {
+        let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_format_field(id);
+                // BCF stores one integer type for the whole FORMAT column, so the
+                // type must fit every value across every sample, not just one sample.
+                // r[impl bcf_writer.smallest_int_type]
+                let typ = smallest_int_type_iter(per_sample.iter().flat_map(|s| s.iter().copied()));
+                // r[impl bcf_writer.indiv_field_major]
+                encode_typed_int_key(enc.indiv_buf, id.dict_idx());
+                encode_type_byte(enc.indiv_buf, width, typ);
+                for s in per_sample {
+                    if s.is_empty() {
+                        // Match the VCF text path's `.`: a sample with no values is
+                        // the missing sentinel followed by end-of-vector padding,
+                        // which bcftools/noodles render as missing (not an empty cell).
+                        if width > 0 {
+                            encode_int_missing(enc.indiv_buf, typ);
+                            for _ in 1..width {
+                                encode_int_eov(enc.indiv_buf, typ);
+                            }
+                        }
+                        continue;
+                    }
+                    for &v in *s {
+                        encode_int_as(enc.indiv_buf, v, typ);
+                    }
+                    // r[impl bcf_writer.end_of_vector]
+                    for _ in s.len()..width {
+                        encode_int_eov(enc.indiv_buf, typ);
+                    }
+                }
+                if !replacing {
+                    enc.n_fmt = enc.n_fmt.saturating_add(1);
+                }
+            }
+            EncoderInner::Vcf(vcf) => {
+                vcf.prepare_format_field(id);
+                let mut b = itoa::Buffer::new();
+                for (i, s) in per_sample.iter().enumerate() {
+                    if s.is_empty() {
+                        // r[impl vcf_writer.missing_dot]
+                        vcf.sample_bufs[i].push(b'.');
+                        continue;
+                    }
+                    for (j, &v) in s.iter().enumerate() {
+                        if j > 0 {
+                            vcf.sample_bufs[i].push(b',');
+                        }
+                        // r[impl vcf_writer.integer_format]
+                        vcf.sample_bufs[i].extend_from_slice(b.format(v).as_bytes());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     fn format_floats(&mut self, id: &FieldId, per_sample: &[&[f32]]) -> Result<(), VcfError> {
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
         match &mut self.inner {
@@ -1035,6 +1093,17 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
                 encode_type_byte(enc.indiv_buf, width, BCF_BT_FLOAT);
                 for s in per_sample {
+                    if s.is_empty() {
+                        // Match the VCF text path's `.`: a sample with no values is
+                        // the missing sentinel followed by end-of-vector padding.
+                        if width > 0 {
+                            f32::encode_missing(enc.indiv_buf);
+                            for _ in 1..width {
+                                f32::encode_end_of_vector(enc.indiv_buf);
+                            }
+                        }
+                        continue;
+                    }
                     for &v in *s {
                         v.encode_bcf_as(enc.indiv_buf, BCF_BT_FLOAT);
                     }
@@ -1062,6 +1131,47 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         // r[impl vcf_writer.float_precision]
                         write_float_g(&mut vcf.sample_bufs[i], v)
                             .map_err(|source| VcfError::FailedToWriteFormattedString { source })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    fn format_string(&mut self, id: &FieldId, values: &[&str]) -> Result<(), VcfError> {
+        // A missing (empty) sample is stored as the literal `.` char (htslib's BCF
+        // string-missing convention), so the column width must leave room for it.
+        let width =
+            values.iter().map(|s| if s.is_empty() { 1 } else { s.len() }).max().unwrap_or(0);
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let replacing = enc.prepare_format_field(id);
+                // BCF FORMAT char vectors are fixed-width: every sample stores `width`
+                // bytes, shorter strings NUL-padded (htslib bcf_enc_vchar).
+                // r[impl bcf_writer.string_encoding]
+                // r[impl bcf_writer.indiv_field_major]
+                encode_typed_int_key(enc.indiv_buf, id.dict_idx());
+                encode_type_byte(enc.indiv_buf, width, BCF_BT_CHAR);
+                for s in values {
+                    // Match the VCF text path's `.`: an empty string is stored as the
+                    // literal `.` char, which bcftools/noodles render as missing.
+                    let bytes = if s.is_empty() { b"." } else { s.as_bytes() };
+                    enc.indiv_buf.extend_from_slice(bytes);
+                    for _ in bytes.len()..width {
+                        enc.indiv_buf.push(0);
+                    }
+                }
+                if !replacing {
+                    enc.n_fmt = enc.n_fmt.saturating_add(1);
+                }
+            }
+            EncoderInner::Vcf(vcf) => {
+                vcf.prepare_format_field(id);
+                for (i, s) in values.iter().enumerate() {
+                    if s.is_empty() {
+                        // r[impl vcf_writer.missing_dot]
+                        vcf.sample_bufs[i].push(b'.');
+                    } else {
+                        vcf.sample_bufs[i].extend_from_slice(s.as_bytes());
                     }
                 }
             }

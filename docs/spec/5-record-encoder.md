@@ -74,12 +74,17 @@ Typed keys MUST encode the VCF value type at the Rust type level via uninhabited
 > - `FormatKey<Gt>` — genotype FORMAT value
 > - `FormatKey<Scalar<i32>>` — single integer FORMAT value
 > - `FormatKey<Scalar<f32>>` — single float FORMAT value
+> - `FormatKey<Arr<i32>>` — multi-valued integer FORMAT value (one array per sample)
+> - `FormatKey<Arr<f32>>` — multi-valued float FORMAT value (one array per sample)
+> - `FormatKey<Str>` — string FORMAT value (one string per sample)
 
 r[record_encoder.key_encode]
-Each typed key MUST provide an `encode` method that delegates to the corresponding encoder trait method. INFO keys MUST accept `&mut impl InfoEncoder` and a single value. FORMAT keys MUST accept `&mut impl FormatEncoder` and a slice of values (one per sample):
+Each typed key MUST provide an `encode` method that delegates to the corresponding encoder trait method. INFO keys MUST accept `&mut impl InfoEncoder` and a single value. FORMAT keys MUST accept `&mut impl FormatEncoder` and a slice of per-sample values (one element, or one inner slice for array keys, per sample):
 
 - `FormatKey<Gt>::encode(&self, enc: &mut impl FormatEncoder, gts: &[Genotype])`
 - `FormatKey<Scalar<T>>::encode(&self, enc: &mut impl FormatEncoder, values: &[T])`
+- `FormatKey<Arr<T>>::encode(&self, enc: &mut impl FormatEncoder, per_sample: &[&[T]])`
+- `FormatKey<Str>::encode(&self, enc: &mut impl FormatEncoder, values: &[&str])`
 
 ## Typestate Record Encoder
 
@@ -133,7 +138,7 @@ r[record_encoder.format_encoder]
 A `FormatEncoder` trait MUST be provided for encoding FORMAT fields. It MUST be object-safe. It MUST be implemented by `RecordEncoder<'_, WithSamples>`.
 
 r[record_encoder.format_methods]
-FORMAT methods (`format_gt`, `format_int`, `format_float`) MUST accept a `&FieldId` and a **slice of values** — one element per sample. The slice length MUST equal the sample count declared by `begin_samples()`. These methods MUST be infallible. For single-sample records, callers pass a 1-element slice.
+FORMAT methods (`format_gt`, `format_int`, `format_float`, `format_ints`, `format_floats`, `format_string`) MUST accept a `&FieldId` and a **slice of per-sample values** — one element per sample for scalar/string/GT methods, or one inner slice per sample (`&[&[T]]`) for the multi-valued array methods. The outer slice length MUST equal the sample count declared by `begin_samples()`. These methods return `Result<(), VcfError>` because they validate the per-sample count (and, for `format_gt`, ploidy) before encoding. For single-sample records, callers pass a 1-element slice. For the multi-valued array methods, the BCF encoding stores a single column width equal to the longest inner slice; a sample with fewer values MUST be padded to the column width with the end-of-vector sentinel for the chosen type. A sample with **no** values (empty slice / empty string) MUST be encoded as the BCF missing value (so it renders as `.`, matching the VCF text path) — the per-type integer/float missing sentinel followed by end-of-vector padding, or the literal `.` char NUL-padded for strings. For multi-valued integers the BCF integer type MUST be chosen to fit every value across all samples (the column stores one type), not just the first sample.
 
 r[record_encoder.format_state_queries]
 `FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
