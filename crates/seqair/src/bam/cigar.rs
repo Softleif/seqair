@@ -926,7 +926,7 @@ mod tests {
         for off in 0..=3 {
             let sub = &buf[off..off + 4];
             let result = CigarOp::slice_from_bam_bytes(sub);
-            if sub.as_ptr() as usize % 4 != 0 {
+            if !(sub.as_ptr() as usize).is_multiple_of(4) {
                 assert!(result.is_none(), "unaligned slice at offset {off} must return None");
                 any_unaligned = true;
             }

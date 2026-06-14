@@ -119,7 +119,7 @@ const UNMAPPED_REGION: &str = "chr19";
 const UNMAPPED_START: u64 = 6_104_000;
 const UNMAPPED_END: u64 = 6_106_000;
 
-/// Fetch records, optionally rejecting unmapped via filter_raw.
+/// Fetch records, optionally rejecting unmapped via `filter_raw`.
 fn fetch_count(reject_unmapped: bool) -> usize {
     let bam_path = test_bam_path();
     let mut reader = seqair::bam::IndexedBamReader::open(bam_path).expect("open");
