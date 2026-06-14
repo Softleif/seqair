@@ -894,9 +894,15 @@ impl<'a> RecordEncoder<'a, Filtered> {
 // ── WithSamples: FormatEncoder ─────────────────────────────────────────
 
 // r[impl record_encoder.format_encoder]
-#[allow(clippy::indexing_slicing, reason = "sample_bufs length validated by debug_assert")]
+// `sample_bufs[i]` is indexed with `i` in `0..values.len()`; each method asserts
+// `values.len() == n_samples()` up front, and `sample_bufs` is sized to
+// `n_samples()` in `begin_samples()`. The typed `FormatKey::encode` wrappers
+// return `SampleCountMismatch` for the same condition; the `debug_assert`s catch
+// direct (untyped) trait calls that bypass that check.
+#[allow(clippy::indexing_slicing, reason = "i < values.len() == n_samples() == sample_bufs.len()")]
 impl FormatEncoder for RecordEncoder<'_, WithSamples> {
     fn format_gt(&mut self, id: &FieldId, gts: &[Genotype]) -> Result<(), VcfError> {
+        debug_assert_eq!(gts.len(), self.n_samples(), "one GT per sample");
         // Ploidy is taken from the first sample. Mixed ploidy (e.g., haploid +
         // diploid on chrX) is not yet supported — BCF allows per-sample padding
         // with end-of-vector sentinels but we don't encode that.
@@ -970,6 +976,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         Ok(())
     }
     fn format_int(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError> {
+        debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let replacing = enc.prepare_format_field(id);
@@ -997,6 +1004,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         Ok(())
     }
     fn format_float(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError> {
+        debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let replacing = enc.prepare_format_field(id);
@@ -1027,6 +1035,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         Ok(())
     }
     fn format_ints(&mut self, id: &FieldId, per_sample: &[&[i32]]) -> Result<(), VcfError> {
+        debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
@@ -1085,6 +1094,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         Ok(())
     }
     fn format_floats(&mut self, id: &FieldId, per_sample: &[&[f32]]) -> Result<(), VcfError> {
+        debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
@@ -1138,8 +1148,11 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         Ok(())
     }
     fn format_string(&mut self, id: &FieldId, values: &[&str]) -> Result<(), VcfError> {
+        debug_assert_eq!(values.len(), self.n_samples(), "one string per sample");
         // A missing (empty) sample is stored as the literal `.` char (htslib's BCF
         // string-missing convention), so the column width must leave room for it.
+        // Note: a *non-empty* value of exactly "." is indistinguishable from missing
+        // on read-back — that ambiguity is inherent to BCF/VCF, not specific to us.
         let width =
             values.iter().map(|s| if s.is_empty() { 1 } else { s.len() }).max().unwrap_or(0);
         match &mut self.inner {
@@ -1171,7 +1184,11 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         // r[impl vcf_writer.missing_dot]
                         vcf.sample_bufs[i].push(b'.');
                     } else {
-                        vcf.sample_bufs[i].extend_from_slice(s.as_bytes());
+                        // r[impl vcf_writer.percent_encoding]
+                        // The colon is the FORMAT subfield delimiter, so a raw `:`
+                        // (or `;`, TAB, …) in the value would corrupt the line and
+                        // disagree with the length-prefixed BCF encoding.
+                        percent_encode_into(&mut vcf.sample_bufs[i], s.as_bytes());
                     }
                 }
             }

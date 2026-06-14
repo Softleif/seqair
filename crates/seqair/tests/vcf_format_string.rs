@@ -109,3 +109,60 @@ fn bcf_format_string_roundtrips_through_bcftools() {
     // Longest string is "pass" (width 4); "lo" NUL-padded to 4, empty sample → `.`.
     assert_eq!(lbl.trim(), "pass\tlo\t.", "bcftools read LBL back as: {lbl}");
 }
+
+// r[verify record_encoder.format_methods]
+// r[verify vcf_writer.percent_encoding]
+/// A value containing the FORMAT subfield delimiter (`:`) and other reserved
+/// characters MUST be percent-encoded in VCF text — otherwise it corrupts the
+/// colon-separated sample column. The BCF path is length-prefixed, so the raw
+/// value survives; bcftools reads it back intact, proving the two formats agree.
+#[test]
+fn format_string_percent_encodes_reserved_chars() {
+    let s = make_setup(&["a"]);
+
+    // VCF text: `:` and `;` must become %3A / %3B, keeping exactly one subfield.
+    let mut out = Vec::new();
+    let writer = Writer::new(&mut out, OutputFormat::Vcf);
+    let mut writer = writer.write_header(&s.header).unwrap();
+    let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+    let enc = writer.begin_record(&s.contig, Pos1::new(10).unwrap(), &alleles, None).unwrap();
+    let enc = enc.filter_pass();
+    let mut enc = enc.begin_samples();
+    s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+    s.lbl_fmt.encode(&mut enc, &["a:b;c"]).unwrap();
+    enc.emit().unwrap();
+    writer.finish().unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
+    assert!(data_line.ends_with("0/1:a%3Ab%3Bc"), "expected percent-encoding: {data_line}");
+    // Exactly two colon-separated subfields in the sample column (GT + LBL).
+    let sample_col = data_line.rsplit('\t').next().unwrap();
+    assert_eq!(sample_col.split(':').count(), 2, "reserved char split the column: {sample_col}");
+
+    if std::process::Command::new("bcftools").arg("--version").output().is_err() {
+        eprintln!("bcftools not available, skipping BCF half");
+        return;
+    }
+    // BCF: the raw value round-trips (bcftools reads back `a:b;c`), confirming the
+    // VCF percent-encoding and BCF storage describe the same string.
+    let mut out = Vec::new();
+    let writer = Writer::new(&mut out, OutputFormat::Bcf);
+    let mut writer = writer.write_header(&s.header).unwrap();
+    let enc = writer.begin_record(&s.contig, Pos1::new(10).unwrap(), &alleles, None).unwrap();
+    let enc = enc.filter_pass();
+    let mut enc = enc.begin_samples();
+    s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+    s.lbl_fmt.encode(&mut enc, &["a:b;c"]).unwrap();
+    enc.emit().unwrap();
+    writer.finish().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.bcf");
+    std::fs::write(&path, &out).unwrap();
+    let q = std::process::Command::new("bcftools")
+        .args(["query", "-f", "[%LBL]\n"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(q.status.success(), "bcftools stderr: {}", String::from_utf8_lossy(&q.stderr));
+    assert_eq!(String::from_utf8(q.stdout).unwrap().trim(), "a:b;c", "BCF value not preserved");
+}
