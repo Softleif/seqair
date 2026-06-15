@@ -111,32 +111,24 @@
 //! # }
 //! ```
 //!
-//! # Custom fields and collecting field defs in a struct
+//! # Collecting field defs and resolved keys in a struct
 //!
-//! You can "co-locate" the field definitions with custom fields.
+//! Co-locate each field's header definition with the resolved, typed key your
+//! application encodes through. The typed key (`InfoInt`, `InfoFloats`, …)
+//! enforces the value type at the call site, so there is no need for a custom
+//! encoding trait.
 //!
 //! ```rust
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use seqair_types::{Base, Pos1};
-//! use seqair::vcf::{self, EncodeInfo as _};
+//! use seqair::vcf;
 //!
-//! // define type
-//! struct Depth(i32);
-//! impl Depth {
-//!     // header metadata
-//!     const DEF: vcf::InfoFieldDef<vcf::Scalar<i32>> = vcf::InfoFieldDef::new(
-//!         "DP", vcf::Number::Count(1), vcf::ValueType::Integer, "Combined depth"
-//!     );
-//! }
-//! impl vcf::EncodeInfo for Depth {
-//!     type Key = vcf::InfoInt;
-//!     // custom encoding logic
-//!     fn encode_info(&self, enc: &mut dyn vcf::InfoEncoder, key: &Self::Key) {
-//!         key.encode(enc, self.0);
-//!     }
-//! }
+//! // header metadata for the field, defined once
+//! const DP_DEF: vcf::InfoFieldDef<vcf::Scalar<i32>> = vcf::InfoFieldDef::new(
+//!     "DP", vcf::Number::Count(1), vcf::ValueType::Integer, "Combined depth"
+//! );
 //!
-//! // define all fields your app will use
+//! // all resolved keys your app will encode through
 //! struct MyInfoFields {
 //!   depth: vcf::InfoInt,
 //! }
@@ -146,10 +138,9 @@
 //! let contig =
 //!     builder.register_contig("chr1", vcf::ContigDef { length: Some(1000) })?;
 //! let mut builder = builder.infos();
-//! // register our field
-//! let depth_key = builder.register_info(&Depth::DEF)?;
+//! // register our field, keeping the typed key it resolves to
+//! let depth_key = builder.register_info(&DP_DEF)?;
 //! let header = builder.build()?;
-//! // collect fields
 //! let my_fields = MyInfoFields { depth: depth_key };
 //!
 //! let mut buf = Vec::new();
@@ -166,10 +157,8 @@
 //! )?;
 //! // PASS
 //! let mut enc = enc.filter_pass();
-//! // add custom info field
-//! my_fields.depth.encode(&mut enc, Depth(30).0);
-//! // …or like this (btw, setting the field twice overwrites it)
-//! Depth(30).encode_info(&mut enc, &my_fields.depth);
+//! // add the info field through its typed key (only i32 is accepted)
+//! my_fields.depth.encode(&mut enc, 30);
 //! // write record
 //! enc.emit()?;
 //!
@@ -196,10 +185,10 @@ pub use header::{
 };
 pub use record::Genotype;
 pub use record_encoder::{
-    Arr, ContigId, EncodeFormat, EncodeInfo, FieldDescription, FieldId, FilterFieldDef, FilterId,
-    Flag, FormatEncoder, FormatFieldDef, FormatFloat, FormatFloats, FormatGt, FormatInt,
-    FormatInts, FormatKey, FormatString, Gt, InfoEncoder, InfoFieldDef, InfoFlag, InfoFloat,
-    InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoKey, InfoString, OptArr, Scalar, Str,
+    Arr, ContigId, FieldDescription, FieldId, FilterFieldDef, FilterId, Flag, FormatEncoder,
+    FormatFieldDef, FormatFloat, FormatFloats, FormatGt, FormatInt, FormatInts, FormatKey,
+    FormatString, Gt, InfoEncoder, InfoFieldDef, InfoFlag, InfoFloat, InfoFloats, InfoInt,
+    InfoIntOpts, InfoInts, InfoKey, InfoString, OptArr, Scalar, Str,
 };
 pub use unified::{Begun, Filtered, Ready, RecordEncoder, Unstarted, WithSamples, Writer};
 

@@ -504,11 +504,17 @@ impl<'a> RecordEncoder<'a, Begun> {
         RecordEncoder { inner: self.inner, _state: PhantomData }
     }
 
-    pub fn filter_fail(mut self, filters: &[&FilterId]) -> RecordEncoder<'a, Filtered> {
+    /// Mark the record as failing the given filters. Accepts any iterator of
+    /// `&FilterId` (e.g. a slice's `.iter().copied()`, or a `map` over a
+    /// caller's lookup table) so callers need not materialize a `&[&FilterId]`.
+    pub fn filter_fail<'f>(
+        mut self,
+        filters: impl IntoIterator<Item = &'f FilterId>,
+    ) -> RecordEncoder<'a, Filtered> {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let indices: SmallVec<i32, 3> = filters
-                    .iter()
+                    .into_iter()
                     .map(|f| {
                         i32::try_from(f.dict_idx())
                             .expect("filter dict_idx fits i32 (validated at registration)")
@@ -518,7 +524,7 @@ impl<'a> RecordEncoder<'a, Begun> {
             }
             EncoderInner::Vcf(vcf) => {
                 vcf.filter_written = true;
-                for (i, f) in filters.iter().enumerate() {
+                for (i, f) in filters.into_iter().enumerate() {
                     if i > 0 {
                         vcf.buf.push(b';');
                     }

@@ -121,7 +121,7 @@ Exactly one filter method MUST be called per record: `filter_pass()` for PASS, `
 ## InfoEncoder Trait
 
 r[record_encoder.info_encoder]
-An `InfoEncoder` trait MUST be provided for encoding INFO fields. It MUST be object-safe (all methods use `&mut self` and concrete parameter types). It MUST be implemented by `RecordEncoder<'_, Filtered>`.
+An `InfoEncoder` trait MUST be provided for encoding INFO fields. It MUST be implemented by `RecordEncoder<'_, Filtered>`. Its methods take `&mut self` and concrete parameter types; the typed [`InfoKey`] encode wrappers dispatch through it.
 
 r[record_encoder.info_methods]
 INFO methods (`info_int`, `info_float`, `info_ints`, `info_floats`, `info_flag`, `info_string`, `info_int_opts`) MUST accept a `&FieldId` and the appropriate value. These methods MUST be infallible — they write to in-memory buffers which cannot fail.
@@ -135,10 +135,13 @@ If the same INFO field (identified by `FieldId`) is encoded more than once withi
 ## FormatEncoder Trait
 
 r[record_encoder.format_encoder]
-A `FormatEncoder` trait MUST be provided for encoding FORMAT fields. It MUST be object-safe. It MUST be implemented by `RecordEncoder<'_, WithSamples>`.
+A `FormatEncoder` trait MUST be provided for encoding FORMAT fields. It MUST be implemented by `RecordEncoder<'_, WithSamples>`.
 
 r[record_encoder.format_methods]
 FORMAT methods (`format_gt`, `format_int`, `format_float`, `format_ints`, `format_floats`, `format_string`) MUST accept a `&FieldId` and a **slice of per-sample values** — one element per sample for scalar/string/GT methods, or one inner slice per sample (`&[&[T]]`) for the multi-valued array methods. The outer slice length MUST equal the sample count declared by `begin_samples()`. These methods return `Result<(), VcfError>` because they validate the per-sample count (and, for `format_gt`, ploidy) before encoding. For single-sample records, callers pass a 1-element slice. For the multi-valued array methods, the BCF encoding stores a single column width equal to the longest inner slice; a sample with fewer values MUST be padded to the column width with the end-of-vector sentinel for the chosen type. A sample with **no** values (empty slice / empty string) MUST be encoded as the BCF missing value (so it renders as `.`, matching the VCF text path) — the per-type integer/float missing sentinel followed by end-of-vector padding, or the literal `.` char NUL-padded for strings. For multi-valued integers the BCF integer type MUST be chosen to fit every value across all samples (the column stores one type), not just the first sample.
+
+r[record_encoder.format_single_sample]
+The multi-valued array FORMAT keys (`FormatKey<Arr<i32>>`, `FormatKey<Arr<f32>>`) MUST provide an `encode_single_sample` convenience that takes one sample's values as a flat `&[T]` (rather than `&[&[T]]`) and encodes them for a single-sample record. It MUST return [`VcfError::SampleCountMismatch`] if the header declares anything other than exactly one sample.
 
 r[record_encoder.format_state_queries]
 `FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
@@ -153,17 +156,6 @@ r[record_encoder.emit]
 
 r[record_encoder.emit_no_samples]
 `emit()` MUST be available on both `Filtered` (for records without samples) and `WithSamples` (for records with samples).
-
-## Custom Type Encoding
-
-r[record_encoder.encode_info_trait]
-An `EncodeInfo` trait MUST be provided with an associated `Key` type and an `encode_info(&self, enc: &mut dyn InfoEncoder, key: &Self::Key)` method. This allows domain types to encapsulate their VCF encoding logic, including multi-field expansion (e.g., a strand-specific type producing separate OT and OB fields).
-
-r[record_encoder.encode_format_trait]
-An `EncodeFormat` trait MUST be provided with the same pattern as `EncodeInfo`, using `&mut dyn FormatEncoder`. Implementations that produce no output for certain values (e.g., unknown methylation status) simply do not call any encoder methods, and the FORMAT key does not appear.
-
-r[record_encoder.encode_dyn]
-`EncodeInfo` and `EncodeFormat` MUST use `&mut dyn InfoEncoder` and `&mut dyn FormatEncoder` respectively (not `&mut impl`) so that implementations do not need to be generic over the encoder type.
 
 ## Format-Specific Encoding
 
