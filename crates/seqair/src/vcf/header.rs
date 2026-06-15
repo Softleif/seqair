@@ -89,6 +89,14 @@ pub struct ContigDef {
     pub length: Option<u64>,
 }
 
+// r[impl vcf_header.dict_capacity]
+/// Maximum number of FILTER/INFO/FORMAT entries in the BCF string dictionary.
+///
+/// Capped at 64 so the per-record duplicate-field tracker can address every
+/// field with a single `u64` bitset keyed by `dict_idx`. Real VCFs use far
+/// fewer; exceeding this returns [`VcfHeaderError::TooManyFields`].
+pub const MAX_DICT_ENTRIES: usize = 64;
+
 // r[impl vcf_header.string_map]
 /// Ordered mapping of header string IDs to BCF dictionary indices.
 ///
@@ -412,8 +420,17 @@ impl<P> VcfHeaderBuilder<P> {
     }
 
     /// Insert an ID into the string map, returning the dict index.
+    ///
+    /// The dictionary is capped at [`MAX_DICT_ENTRIES`] so that BCF dictionary
+    /// indices stay in `0..64` — the per-record duplicate-field tracker keys a
+    /// `u64` bitset directly by `dict_idx` (see `FieldTracker`).
     fn insert_string_map_entry(&mut self, id: &SmolStr) -> Result<u32, VcfHeaderError> {
-        u32::try_from(self.string_map.insert(id.clone())).map_err(|_| VcfHeaderError::TooManyFields)
+        let idx = self.string_map.insert(id.clone());
+        if idx >= MAX_DICT_ENTRIES {
+            return Err(VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES });
+        }
+        // idx < MAX_DICT_ENTRIES (64), so this conversion cannot fail.
+        u32::try_from(idx).map_err(|_| VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES })
     }
 
     // r[impl vcf_header.file_format]
@@ -844,6 +861,58 @@ mod tests {
         // PASS should be first (index 0)
         let first = header.filters().keys().next().unwrap();
         assert_eq!(first.as_str(), "PASS");
+    }
+
+    // r[verify vcf_header.dict_capacity]
+    #[test]
+    fn dict_capacity_rejects_more_than_64_entries() {
+        // PASS already occupies index 0, leaving room for MAX_DICT_ENTRIES-1 more.
+        let mut builder = VcfHeader::builder().infos();
+        for i in 0..(MAX_DICT_ENTRIES - 1) {
+            builder
+                .add_info(
+                    format!("I{i}"),
+                    InfoDef {
+                        number: Number::Count(1),
+                        typ: ValueType::Integer,
+                        description: SmolStr::from("x"),
+                    },
+                )
+                .unwrap();
+        }
+        // The dictionary is now full (PASS + 63 INFO = 64). One more must fail.
+        let err = builder
+            .add_info(
+                "overflow",
+                InfoDef {
+                    number: Number::Count(1),
+                    typ: ValueType::Integer,
+                    description: SmolStr::from("x"),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES }));
+    }
+
+    // r[verify vcf_header.dict_capacity]
+    #[test]
+    fn dict_capacity_allows_exactly_64_entries() {
+        let mut builder = VcfHeader::builder().infos();
+        for i in 0..(MAX_DICT_ENTRIES - 1) {
+            builder
+                .add_info(
+                    format!("I{i}"),
+                    InfoDef {
+                        number: Number::Count(1),
+                        typ: ValueType::Integer,
+                        description: SmolStr::from("x"),
+                    },
+                )
+                .unwrap();
+        }
+        let header = builder.build().unwrap();
+        // PASS=0 plus 63 INFO fields → highest dict index is 63 (fits a u64 bitset).
+        assert_eq!(header.string_map().get(&format!("I{}", MAX_DICT_ENTRIES - 2)), Some(63));
     }
 
     // r[verify vcf_header.string_map]
