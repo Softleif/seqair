@@ -468,8 +468,9 @@ mod tests {
             .collect();
         assert_eq!(positional.len(), 1, "without a budget the region is one tile");
 
-        // A budget below the whole-region size must subdivide it.
-        let budget = NonZeroU64::new((total / 4).max(1)).unwrap();
+        // A budget below the whole-region size (but above one ~16 kb leaf bin)
+        // must subdivide it into several smaller, in-budget segments.
+        let budget = NonZeroU64::new((total / 2).max(1)).unwrap();
         let budgeted: Vec<_> = readers
             .segments(("chr19", start, end), SegmentOptions::new(big).with_max_bytes(budget))
             .unwrap()
@@ -487,14 +488,16 @@ mod tests {
             );
         }
 
-        // Each segment fits the budget, unless it's an irreducible single base.
+        // The peak segment load is strictly below the whole-region load (the
+        // point of subdivision), and no segment exceeds the budget unless a
+        // single index leaf bin alone does (none here — budget > one bin).
         for s in &budgeted {
             let bytes = readers.estimate_region_bytes(tid, s.start(), s.end()).unwrap();
+            assert!(bytes < total, "segment {bytes} B not below whole-region {total} B");
             assert!(
-                bytes <= budget.get() || s.len() == 1,
-                "segment {:?} = {bytes} B over budget {budget} with len {}",
-                (s.start().as_u64(), s.end().as_u64()),
-                s.len()
+                bytes <= budget.get(),
+                "segment {:?} = {bytes} B over budget {budget}",
+                (s.start().as_u64(), s.end().as_u64())
             );
         }
     }
