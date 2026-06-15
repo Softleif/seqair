@@ -409,3 +409,156 @@ fn bcftools_dedup_overwrite() {
     assert_eq!(fields[0], "100", "INFO DP should be the overwritten value");
     assert_eq!(fields[1], "99", "FORMAT DP should be the overwritten value");
 }
+
+// r[verify record_encoder.info_dedup]
+/// Overwrite an INFO field that has *another* field written between the two
+/// occurrences. The in-between field must survive untouched and the overwritten
+/// field must take its final value — verified through bcftools.
+#[test]
+fn bcftools_dedup_interleaved_info() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = make_setup();
+    let bcf_path = write_bcf_file(dir.path(), &setup, |s, w| {
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = w
+            .begin_record(&s.contig, Pos1::new(100).unwrap(), &alleles, Some(99.0))
+            .unwrap()
+            .filter_pass();
+        // DP=50, then AF in between, then DP=100 (overwrite the *first* field).
+        s.dp_info.encode(&mut enc, 50);
+        s.af_info.encode(&mut enc, 0.25);
+        s.dp_info.encode(&mut enc, 100);
+        enc.emit().unwrap();
+    });
+
+    let result = bcftools_query(&bcf_path, "%INFO/DP\t%INFO/AF\n");
+    let fields: Vec<&str> = result.trim().split('\t').collect();
+    assert_eq!(fields[0], "100", "overwritten DP takes its final value");
+    assert_eq!(fields[1], "0.25", "the interleaved AF is preserved");
+}
+
+// r[verify record_encoder.info_dedup]
+/// Overwrite an INFO *array* field with a different number of elements; bcftools
+/// must read back the final array (the in-place splice handles width changes).
+#[test]
+fn bcftools_dedup_array_width_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = make_setup();
+    let bcf_path = write_bcf_file(dir.path(), &setup, |s, w| {
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = w
+            .begin_record(&s.contig, Pos1::new(100).unwrap(), &alleles, Some(99.0))
+            .unwrap()
+            .filter_pass();
+        s.dp_info.encode(&mut enc, 7);
+        s.ad_info.encode(&mut enc, &[10, 20]);
+        s.ad_info.encode(&mut enc, &[30, 40, 50]); // grow, with DP already after the old AD
+        enc.emit().unwrap();
+    });
+
+    let result = bcftools_query(&bcf_path, "%INFO/AD\t%INFO/DP\n");
+    let fields: Vec<&str> = result.trim().split('\t').collect();
+    assert_eq!(fields[0], "30,40,50", "overwritten array reads back at its new width");
+    assert_eq!(fields[1], "7", "the field written between the two AD writes is intact");
+}
+
+// r[verify record_encoder.info_dedup]
+/// The same INFO field written three times reads back as its last value.
+#[test]
+fn bcftools_dedup_repeated_overwrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = make_setup();
+    let bcf_path = write_bcf_file(dir.path(), &setup, |s, w| {
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = w
+            .begin_record(&s.contig, Pos1::new(100).unwrap(), &alleles, Some(99.0))
+            .unwrap()
+            .filter_pass();
+        s.dp_info.encode(&mut enc, 1);
+        s.dp_info.encode(&mut enc, 2);
+        s.dp_info.encode(&mut enc, 3);
+        let mut enc = enc.begin_samples();
+        s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        s.dp_fmt.encode(&mut enc, &[10]).unwrap();
+        s.dp_fmt.encode(&mut enc, &[20]).unwrap();
+        s.dp_fmt.encode(&mut enc, &[30]).unwrap();
+        enc.emit().unwrap();
+    });
+
+    let result = bcftools_query(&bcf_path, "%INFO/DP\t[%DP]\n");
+    let fields: Vec<&str> = result.trim().split('\t').collect();
+    assert_eq!(fields[0], "3", "INFO DP keeps the last of three writes");
+    assert_eq!(fields[1], "30", "FORMAT DP keeps the last of three writes");
+}
+
+// r[verify record_encoder.format_dedup]
+/// Overwrite a FORMAT field that sits *between* two others (GT:DP:GQ, overwrite
+/// DP after GQ is written). The per-sample colon splice must keep every column
+/// in place; bcftools reads each FORMAT subfield correctly.
+#[test]
+fn bcftools_dedup_interleaved_format_middle() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = make_setup();
+    let bcf_path = write_bcf_file(dir.path(), &setup, |s, w| {
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = w
+            .begin_record(&s.contig, Pos1::new(100).unwrap(), &alleles, Some(99.0))
+            .unwrap()
+            .filter_pass();
+        let mut enc = enc.begin_samples();
+        s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        s.dp_fmt.encode(&mut enc, &[30]).unwrap();
+        s.gq_fmt.encode(&mut enc, &[40]).unwrap();
+        s.dp_fmt.encode(&mut enc, &[99]).unwrap(); // overwrite the middle column
+        enc.emit().unwrap();
+    });
+
+    let result = bcftools_query(&bcf_path, "[%GT\t%DP\t%GQ]\n");
+    let fields: Vec<&str> = result.trim().split('\t').collect();
+    assert_eq!(fields[0], "0/1", "GT column intact");
+    assert_eq!(fields[1], "99", "overwritten DP column takes its final value");
+    assert_eq!(fields[2], "40", "GQ column (written between the DP writes) intact");
+}
+
+// r[verify record_encoder.info_dedup]
+// r[verify record_encoder.format_dedup]
+/// A full record where every INFO and FORMAT field is written twice, in
+/// interleaved order. bcftools must read each field's final value.
+#[test]
+fn bcftools_dedup_all_fields_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = make_setup();
+    let bcf_path = write_bcf_file(dir.path(), &setup, |s, w| {
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = w
+            .begin_record(&s.contig, Pos1::new(100).unwrap(), &alleles, Some(99.0))
+            .unwrap()
+            .filter_pass();
+        // First pass.
+        s.dp_info.encode(&mut enc, 50);
+        s.af_info.encode(&mut enc, 0.1);
+        s.ad_info.encode(&mut enc, &[5, 6]);
+        // Second pass, same interleaving — every field overwritten in place.
+        s.dp_info.encode(&mut enc, 100);
+        s.af_info.encode(&mut enc, 0.5);
+        s.ad_info.encode(&mut enc, &[15, 16]);
+
+        let mut enc = enc.begin_samples();
+        s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        s.dp_fmt.encode(&mut enc, &[10]).unwrap();
+        s.gq_fmt.encode(&mut enc, &[20]).unwrap();
+        s.gt_fmt.encode(&mut enc, &[Genotype::unphased(1, 1)]).unwrap();
+        s.dp_fmt.encode(&mut enc, &[11]).unwrap();
+        s.gq_fmt.encode(&mut enc, &[22]).unwrap();
+        enc.emit().unwrap();
+    });
+
+    let result = bcftools_query(&bcf_path, "%INFO/DP\t%INFO/AF\t%INFO/AD\t[%GT\t%DP\t%GQ]\n");
+    let fields: Vec<&str> = result.trim().split('\t').collect();
+    assert_eq!(fields[0], "100", "INFO DP");
+    assert_eq!(fields[1], "0.5", "INFO AF");
+    assert_eq!(fields[2], "15,16", "INFO AD");
+    assert_eq!(fields[3], "1/1", "FORMAT GT");
+    assert_eq!(fields[4], "11", "FORMAT DP");
+    assert_eq!(fields[5], "22", "FORMAT GQ");
+}
