@@ -428,17 +428,29 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
             debug_assert!(raw.len() >= 32, "raw record too short: {}", raw.len());
             #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
             let rec_tid = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-            #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-            let rec_pos_raw = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-            let rec_pos = Pos0::try_from(rec_pos_raw)
-                .map_err(|_| E::from(BamError::InvalidPosition { value: rec_pos_raw }))?;
-            #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-            let rec_flags = BamFlags::from(u16::from_le_bytes([raw[14], raw[15]]));
 
+            // Skip reads on other references before touching position. Unplaced
+            // unmapped reads carry tid = -1 / pos = -1 and can appear at chunk
+            // boundaries (the unmapped block trails the last contig's records),
+            // so checking tid first also keeps us from parsing their reserved
+            // pos = -1, which would otherwise error the whole query.
             if rec_tid != self.tid_i32 {
                 self.skipped_tid = self.skipped_tid.saturating_add(1);
                 continue;
             }
+
+            #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
+            let rec_pos_raw = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+            // A record claiming this reference but with pos = -1 can't overlap
+            // any region; skip it rather than erroring out the whole query.
+            if rec_pos_raw < 0 {
+                self.skipped_out_of_range = self.skipped_out_of_range.saturating_add(1);
+                continue;
+            }
+            let rec_pos = Pos0::try_from(rec_pos_raw)
+                .map_err(|_| E::from(BamError::InvalidPosition { value: rec_pos_raw }))?;
+            #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
+            let rec_flags = BamFlags::from(u16::from_le_bytes([raw[14], raw[15]]));
 
             // r[impl record_store.end_pos_htslib]
             let rec_end = if rec_flags.is_unmapped() {
@@ -579,6 +591,87 @@ mod tests {
     fn fetch_into_accepts_max_valid_tid() {
         let result = validate_tid(i32::MAX as u32);
         assert!(result.is_ok(), "max valid tid must succeed");
+    }
+
+    /// Frame a record with its 4-byte `block_size` prefix, as it appears on the
+    /// BAM wire (what [`RegionBuf::read_record`] expects to find).
+    fn framed_record(rec: &super::super::owned_record::OwnedBamRecord) -> Vec<u8> {
+        let mut body = Vec::new();
+        rec.to_bam_bytes(&mut body).unwrap();
+        let mut out = i32::try_from(body.len()).unwrap().to_le_bytes().to_vec();
+        out.extend_from_slice(&body);
+        out
+    }
+
+    // r[verify bam.reader.unmapped_skipped]
+    /// When a query's chunk range extends past the queried contig's reads into
+    /// the trailing block of unplaced reads (tid = -1 / pos = -1), those records
+    /// must be skipped, not error the whole query. This reproduces the `GRCh38`
+    /// ALT/decoy crash where the last contigs' BAI chunk end abuts the unmapped
+    /// block at the end of the file.
+    ///
+    /// We build `BamQuery` directly (rather than via a real index) because a
+    /// correctly-built index keeps `chunk_end` tight; the bug only surfaces when
+    /// the scanned range reaches into the unplaced block, which we model with an
+    /// explicit chunk covering both records.
+    #[test]
+    fn query_skips_trailing_unplaced_reads() {
+        use super::super::owned_record::OwnedBamRecord;
+        use crate::io::BgzfWriter;
+        use seqair_types::Base;
+
+        let mapped = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"mapped".to_vec())
+            .seq(vec![Base::A, Base::C, Base::G])
+            .build()
+            .unwrap();
+        // Fully unplaced read: ref_id = -1, pos = -1 (BAM wire), unmapped flag.
+        let unplaced = OwnedBamRecord::builder(-1, None, b"unplaced".to_vec())
+            .flags(BamFlags::from(0x4))
+            .seq(vec![Base::A, Base::C, Base::G])
+            .build()
+            .unwrap();
+
+        // One BGZF block holding [mapped(tid=0), unplaced(tid=-1/pos=-1)].
+        let mut payload = framed_record(&mapped);
+        payload.extend_from_slice(&framed_record(&unplaced));
+        let payload_len = u16::try_from(payload.len()).expect("payload fits one block");
+
+        let mut bgzf = BgzfWriter::new(Vec::new());
+        bgzf.write_all(&payload).unwrap();
+        let bam_bytes = bgzf.finish().unwrap();
+
+        // A single chunk whose end sits past the mapped record, so the scan
+        // reads on into the unplaced record — the production index quirk.
+        let batch = vec![Chunk {
+            begin: VirtualOffset::new(0, 0),
+            end: VirtualOffset::new(0, payload_len),
+        }];
+
+        let mut reader = std::io::Cursor::new(bam_bytes);
+        let mut query = BamQuery {
+            reader: &mut reader,
+            batches: vec![batch],
+            batch_idx: 0,
+            region: None,
+            chunk_idx: 0,
+            chunk_end: VirtualOffset(0),
+            scratch: Vec::new(),
+            tid_i32: 0,
+            start: Pos0::new(0).unwrap(),
+            end: Pos0::new(1000).unwrap(),
+            accepted: 0,
+            skipped_tid: 0,
+            skipped_out_of_range: 0,
+        };
+
+        let mut seen = 0usize;
+        let counts = query
+            .for_each(|_raw| seen += 1)
+            .expect("query must not error on trailing unplaced reads");
+
+        assert_eq!(seen, 1, "only the mapped record should be yielded");
+        assert_eq!(counts.fetched, 1);
+        assert_eq!(counts.skipped_tid, 1, "the unplaced read must be skipped by tid");
     }
 
     use super::super::bgzf::VirtualOffset;
