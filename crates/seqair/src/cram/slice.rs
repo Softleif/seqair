@@ -362,10 +362,18 @@ fn decode_record<E: CustomizeRecordStore>(
         ap
     };
     // r[impl cram.edge.position_overflow]
-    // Convert from 1-based to 0-based
-    let pos_0based = Pos1::try_from(alignment_pos)
-        .map(|p| p.to_zero_based())
-        .map_err(|_| super::reader::CramError::InvalidPosition { value: alignment_pos })?;
+    // Convert from 1-based to 0-based. Unmapped/unplaced reads carry AP <= 0
+    // (htslib uses 0 for "no position"). They have no real coordinate, so map
+    // them to 0-based 0 rather than erroring — the unmapped path below still
+    // pushes them to the store and lets the region filter decide. A *mapped*
+    // read must always have a valid (>= 1) AP, so it still errors.
+    let pos_0based = if bam_flags.is_unmapped() && alignment_pos < 1 {
+        Pos0::ZERO
+    } else {
+        Pos1::try_from(alignment_pos)
+            .map(|p| p.to_zero_based())
+            .map_err(|_| super::reader::CramError::InvalidPosition { value: alignment_pos })?
+    };
 
     // r[impl cram.record.read_group]
     // 6. RG (read group)

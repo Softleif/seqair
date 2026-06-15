@@ -503,7 +503,12 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     let pos_field = fields.get(3).copied().unwrap_or(b"0");
     let pos_1based = parse_i64(pos_field)
         .ok_or_else(|| SamRecordError::InvalidPos { value: pos_field.into() })?;
-    // SAM POS is 1-based; convert to 0-based Pos0. POS=0 means unmapped — skip.
+    // SAM POS is 1-based; POS=0 means unmapped/unplaced — skip it (mirrors the
+    // BAM reader skipping pos = -1) rather than erroring the whole query. A
+    // negative or out-of-range POS is still a malformed record and errors.
+    if pos_1based == 0 {
+        return Ok(None);
+    }
     let pos = Pos1::try_from(pos_1based)
         .map(|p| p.to_zero_based())
         .map_err(|_| SamRecordError::InvalidPos { value: pos_field.into() })?;
@@ -1039,6 +1044,27 @@ mod tests {
             matches!(err, SamError::MalformedRecord { source: SamRecordError::InvalidPos { .. } }),
             "expected InvalidPos, got: {err}"
         );
+    }
+
+    // r[verify sam.edge.rname_star]
+    /// A record on a known contig but with POS=0 (the SAM marker for "no
+    /// position", i.e. unmapped/unplaced) must be skipped, not error the query.
+    /// Mirrors the BAM reader skipping pos = -1.
+    #[test]
+    fn pos_zero_is_skipped_not_errored() {
+        let header = make_header();
+        let line = b"r\t4\tchr1\t0\t0\t*\t*\t0\t0\tACGTACGTAC\tIIIIIIIIII";
+        let result = call_parse(line, &header).expect("POS=0 must not error");
+        assert_eq!(result, None, "POS=0 record should be skipped");
+    }
+
+    /// An unplaced read (RNAME=*) is skipped before POS is even parsed.
+    #[test]
+    fn rname_star_is_skipped() {
+        let header = make_header();
+        let line = b"r\t4\t*\t0\t0\t*\t*\t0\t0\tACGTACGTAC\tIIIIIIIIII";
+        let result = call_parse(line, &header).expect("RNAME=* must not error");
+        assert_eq!(result, None, "RNAME=* record should be skipped");
     }
 
     #[test]

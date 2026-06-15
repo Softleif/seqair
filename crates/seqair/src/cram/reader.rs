@@ -813,6 +813,32 @@ mod tests {
         assert!(count > 0, "should fetch records from tid={tid}");
     }
 
+    // r[verify cram.edge.unmapped_reads]
+    /// A multi-ref slice can interleave a truly unplaced read (RNAME=*, AP=0)
+    /// with mapped reads. Decoding that slice for a positional query must not
+    /// error on the unplaced read's `alignment_pos = 0` — it has no coordinate
+    /// and is mapped to 0-based 0. Mirrors the BAM reader skipping pos = -1.
+    #[test]
+    fn fetch_into_tolerates_unplaced_read_in_multiref_slice() {
+        let cram = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/unplaced_multiref.cram"
+        ));
+        let fasta = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/unplaced_multiref.fa"
+        ));
+        let mut reader = IndexedCramReader::open(cram, fasta).unwrap();
+        let mut store = RecordStore::new();
+
+        // Querying chr1 decodes the multi-ref slice that also holds the unplaced
+        // read; before the fix this errored with InvalidPosition { value: 0 }.
+        let count = reader
+            .fetch_into(0, Pos0::new(0).unwrap(), Pos0::max_value(), &mut store)
+            .expect("query must not error on an unplaced read in a multi-ref slice");
+        assert!(count >= 1, "the mapped chr1 read must be returned");
+    }
+
     // r[verify cram.edge.missing_reference]
     #[test]
     fn missing_reference_gives_helpful_error() {
