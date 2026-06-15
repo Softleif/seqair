@@ -760,25 +760,64 @@ pub(crate) fn split_segment_by_bytes(
     estimate: &mut dyn FnMut(u32, Pos0, Pos0) -> u64,
     out: &mut Vec<Segment>,
 ) {
+    let ctx = SplitCtx {
+        tid: seg.tid(),
+        contig: seg.contig(),
+        contig_last_pos: seg.contig_last_pos(),
+        clamp_start: seg.start().as_u64(),
+        clamp_end: seg.end().as_u64(),
+        overlap: u64::from(overlap),
+    };
     let core = seg.core_range();
-    split_core(
-        SplitCtx {
-            tid: seg.tid(),
-            contig: seg.contig(),
-            contig_last_pos: seg.contig_last_pos(),
-            clamp_start: seg.start().as_u64(),
-            clamp_end: seg.end().as_u64(),
-            overlap: u64::from(overlap),
-            budget,
-        },
-        core.start().as_u64(),
-        core.end().as_u64(),
-        estimate,
-        out,
-    );
+    let total_end = core.end().as_u64();
+    let mut core_start = core.start().as_u64();
+
+    // Greedy forward growth: each segment grows its core to the largest end
+    // still within budget, then the next starts after it. This is robust to the
+    // index's ~16 kb quantization (bisecting at a midpoint that lands mid-bin
+    // wouldn't lower the estimate), and it bounds the irreducible case: if even
+    // a single position is over budget (a leaf bin bigger than the budget), the
+    // estimate stays flat across that bin, so growth stops at the bin's end and
+    // the bin becomes ONE over-budget segment — loaded once, not once per base.
+    loop {
+        let base = estimate_full(&ctx, core_start, core_start, estimate);
+        let threshold = budget.max(base);
+        let core_end = largest_core_end(&ctx, core_start, total_end, threshold, estimate);
+        emit_segment(&ctx, core_start, core_end, out);
+        if core_end >= total_end {
+            break;
+        }
+        core_start = core_end.saturating_add(1);
+    }
 }
 
-/// Invariant context for [`split_core`] — fixed across the whole recursion.
+/// Binary-search the largest `core_end` in `[core_start, total_end]` whose
+/// full-range estimate is `<= threshold`. Relies on the estimate being
+/// monotonic non-decreasing in `core_end` (a larger range queries a superset of
+/// index bins). `core_start` itself always qualifies, since the caller sets
+/// `threshold >= estimate(core_start)`.
+fn largest_core_end(
+    ctx: &SplitCtx<'_>,
+    core_start: u64,
+    total_end: u64,
+    threshold: u64,
+    estimate: &mut dyn FnMut(u32, Pos0, Pos0) -> u64,
+) -> u64 {
+    let mut lo = core_start;
+    let mut hi = total_end;
+    while lo < hi {
+        // Upper mid (in [lo+1, hi]) so the search always makes progress.
+        let mid = lo.saturating_add(hi.saturating_sub(lo).saturating_add(1) / 2);
+        if estimate_full(ctx, core_start, mid, estimate) <= threshold {
+            lo = mid;
+        } else {
+            hi = mid.saturating_sub(1);
+        }
+    }
+    lo
+}
+
+/// Invariant context for the byte-split helpers — fixed for one segment.
 #[derive(Clone, Copy)]
 struct SplitCtx<'a> {
     tid: Tid,
@@ -787,46 +826,44 @@ struct SplitCtx<'a> {
     clamp_start: u64,
     clamp_end: u64,
     overlap: u64,
-    budget: u64,
 }
 
-fn split_core(
-    ctx: SplitCtx<'_>,
+/// Full `[start, end]` of a core: core ± overlap, clamped to the parent extent.
+fn full_range(ctx: &SplitCtx<'_>, core_start: u64, core_end: u64) -> (Pos0, Pos0) {
+    let full_start = core_start.saturating_sub(ctx.overlap).max(ctx.clamp_start);
+    let full_end = core_end.saturating_add(ctx.overlap).min(ctx.clamp_end);
+    (
+        pos0_from_u64(full_start).expect("clamped start within Pos0"),
+        pos0_from_u64(full_end).expect("clamped end within Pos0"),
+    )
+}
+
+fn estimate_full(
+    ctx: &SplitCtx<'_>,
     core_start: u64,
     core_end: u64,
     estimate: &mut dyn FnMut(u32, Pos0, Pos0) -> u64,
-    out: &mut Vec<Segment>,
-) {
-    // Full range = core ± overlap, clamped to the parent segment's extent.
-    let full_start = core_start.saturating_sub(ctx.overlap).max(ctx.clamp_start);
-    let full_end = core_end.saturating_add(ctx.overlap).min(ctx.clamp_end);
-    let full_start_p = pos0_from_u64(full_start).expect("clamped start within Pos0");
-    let full_end_p = pos0_from_u64(full_end).expect("clamped end within Pos0");
+) -> u64 {
+    let (full_start, full_end) = full_range(ctx, core_start, core_end);
+    estimate(ctx.tid.as_u32(), full_start, full_end)
+}
 
-    let bytes = estimate(ctx.tid.as_u32(), full_start_p, full_end_p);
-    if bytes <= ctx.budget || core_start >= core_end {
-        let overlap_start =
-            u32::try_from(core_start.saturating_sub(full_start)).unwrap_or(u32::MAX);
-        let overlap_end = u32::try_from(full_end.saturating_sub(core_end)).unwrap_or(u32::MAX);
-        let seg = Segment::new(
-            ctx.tid,
-            ctx.contig.clone(),
-            full_start_p,
-            full_end_p,
-            overlap_start,
-            overlap_end,
-            ctx.contig_last_pos,
-        )
-        .expect("byte-split produces valid Segment invariants");
-        out.push(seg);
-        return;
-    }
-
-    // core_start < core_end here, so mid is in [core_start, core_end - 1] and
-    // both halves are strictly smaller — the recursion always terminates.
-    let mid = core_start.saturating_add(core_end.saturating_sub(core_start) / 2);
-    split_core(ctx, core_start, mid, estimate, out);
-    split_core(ctx, mid.saturating_add(1), core_end, estimate, out);
+fn emit_segment(ctx: &SplitCtx<'_>, core_start: u64, core_end: u64, out: &mut Vec<Segment>) {
+    let (full_start, full_end) = full_range(ctx, core_start, core_end);
+    let overlap_start =
+        u32::try_from(core_start.saturating_sub(full_start.as_u64())).unwrap_or(u32::MAX);
+    let overlap_end = u32::try_from(full_end.as_u64().saturating_sub(core_end)).unwrap_or(u32::MAX);
+    let seg = Segment::new(
+        ctx.tid,
+        ctx.contig.clone(),
+        full_start,
+        full_end,
+        overlap_start,
+        overlap_end,
+        ctx.contig_last_pos,
+    )
+    .expect("byte-split produces valid Segment invariants");
+    out.push(seg);
 }
 
 #[cfg(test)]
@@ -1222,7 +1259,7 @@ mod tests {
 
     // r[verify unified.segment_byte_budget]
     #[test]
-    fn byte_split_bisects_until_under_budget() {
+    fn byte_split_splits_until_under_budget() {
         // 1000 bases × 10 B = 10_000 B; budget 2000 B forces several splits.
         let budget = 2000;
         let opts = SegmentOptions::new(NonZeroU32::new(10_000).unwrap());
@@ -1258,17 +1295,41 @@ mod tests {
     }
 
     // r[verify unified.segment_byte_budget]
-    /// The irreducible case: when even a single base is over budget, the split
-    /// bottoms out at single-base cores instead of looping forever.
+    /// The irreducible case: when bisecting never lowers the byte estimate (a
+    /// single oversized index leaf bin reports the same size for any sub-range),
+    /// the region must be emitted as ONE over-budget segment — not bisected into
+    /// many pieces that would each reload the whole bin.
     #[test]
-    fn byte_split_irreducible_bottoms_out_at_single_base() {
+    fn byte_split_irreducible_region_emits_one_segment() {
         let opts = SegmentOptions::new(NonZeroU32::new(10_000).unwrap());
-        let segs = byte_aware(2000, 100..=109, opts, 1, |_t, _s, _e| u64::MAX);
-        assert_eq!(segs.len(), 10, "10 positions → 10 single-base segments");
-        for s in &segs {
-            assert_eq!(s.core_range().start(), s.core_range().end(), "single-base core");
-        }
+        // Constant estimate for every range → splitting can never help.
+        let segs = byte_aware(2000, 100..=109, opts, 1, |_t, _s, _e| 1_000_000);
+        assert_eq!(segs.len(), 1, "irreducible region must not be bisected");
+        assert_eq!((segs[0].start(), segs[0].end()), (p(100), p(109)));
         assert_cores_tile(&segs, p(100), p(109));
+    }
+
+    // r[verify unified.segment_byte_budget]
+    /// A reducible region containing one irreducible "leaf bin" must split the
+    /// reducible part but keep the bin in a single segment (loaded once), never
+    /// reloading it per sub-position.
+    #[test]
+    fn byte_split_irreducible_bin_loaded_once() {
+        let opts = SegmentOptions::new(NonZeroU32::new(10_000).unwrap());
+        // A 100-base "leaf bin" [200,299] reports 1 MB for ANY overlapping query;
+        // everywhere else costs 10 B/base.
+        let estimate = |_t: u32, s: Pos0, e: Pos0| {
+            let (s, e) = (s.as_u64(), e.as_u64());
+            if s <= 299 && e >= 200 { 1_000_000 } else { (e - s + 1) * 10 }
+        };
+        let segs = byte_aware(2000, 0..=399, opts, 5_000, estimate);
+
+        assert_cores_tile(&segs, p(0), p(399));
+        // Far fewer than the ~400 single-base pieces a naive bisect would make.
+        assert!(segs.len() < 20, "got {} segments, expected a handful", segs.len());
+        let bin_segments =
+            segs.iter().filter(|s| s.start().as_u64() <= 299 && s.end().as_u64() >= 200).count();
+        assert_eq!(bin_segments, 1, "the irreducible bin must sit in exactly one segment");
     }
 
     proptest! {
@@ -1414,14 +1475,17 @@ mod tests {
                     w[1].core_range().start().as_u64()
                 );
             }
-            // Each segment fits the budget, or its core is a single base.
+            // Each segment fits the budget, or it can't be made cheaper: the
+            // greedy floor is one core position expanded by overlap on each
+            // side (the smallest range it can emit), so an over-budget segment
+            // costs at most that floor.
+            let floor = (1 + 2 * u64::from(overlap)) * bytes_per_base;
             for s in &segs {
                 let bytes = (s.end().as_u64() - s.start().as_u64() + 1) * bytes_per_base;
-                let single_base = s.core_range().start() == s.core_range().end();
                 prop_assert!(
-                    bytes <= budget || single_base,
-                    "segment {:?} = {} B over budget {} with multi-base core",
-                    (s.start().as_u64(), s.end().as_u64()), bytes, budget
+                    bytes <= budget.max(floor),
+                    "segment {:?} = {} B exceeds max(budget {}, floor {})",
+                    (s.start().as_u64(), s.end().as_u64()), bytes, budget, floor
                 );
             }
         }
