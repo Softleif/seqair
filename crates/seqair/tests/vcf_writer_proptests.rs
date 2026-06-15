@@ -227,7 +227,7 @@ proptest! {
                 writer
                     .begin_record(&contig, pos_typed, &alleles, None)
                     .unwrap()
-                    .filter_fail(&[&q20])
+                    .filter_fail([&q20])
                     .emit()
                     .unwrap();
                 "q20"

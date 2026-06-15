@@ -222,7 +222,7 @@ fn seqair_encode_record<W: std::io::Write>(
     let enc =
         writer.begin_record(&s.contig, pos, alleles, Some(10.0 + (i % 50) as f32 * 2.0)).unwrap();
     let mut enc =
-        if i % 10 == 7 { enc.filter_fail(&[&s.lowqual_filter]) } else { enc.filter_pass() };
+        if i % 10 == 7 { enc.filter_fail([&s.lowqual_filter]) } else { enc.filter_pass() };
 
     let dp = 30 + (i % 70) as i32;
     s.dp_info.encode(&mut enc, dp);

@@ -373,6 +373,48 @@ impl FormatKey<Arr<f32>> {
     }
 }
 
+// r[impl record_encoder.format_single_sample]
+
+impl FormatKey<Arr<i32>> {
+    /// Encode this multi-valued integer FORMAT field for a single-sample record,
+    /// passing that one sample's values directly instead of wrapping them in a
+    /// `&[&[i32]]`.
+    ///
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if the header declares anything
+    /// other than exactly one sample.
+    pub fn encode_single_sample(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        values: &[i32],
+    ) -> Result<(), VcfError> {
+        if enc.n_samples() != 1 {
+            return Err(VcfError::SampleCountMismatch { expected: enc.n_samples(), got: 1 });
+        }
+        enc.format_ints(&self.0, &[values])
+    }
+}
+
+impl FormatKey<Arr<f32>> {
+    /// Encode this multi-valued float FORMAT field for a single-sample record,
+    /// passing that one sample's values directly instead of wrapping them in a
+    /// `&[&[f32]]`.
+    ///
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if the header declares anything
+    /// other than exactly one sample.
+    pub fn encode_single_sample(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        values: &[f32],
+    ) -> Result<(), VcfError> {
+        if enc.n_samples() != 1 {
+            return Err(VcfError::SampleCountMismatch { expected: enc.n_samples(), got: 1 });
+        }
+        enc.format_floats(&self.0, &[values])
+    }
+}
+
 impl FormatKey<Str> {
     /// Encode a string FORMAT field. `values` must have exactly one string per sample.
     ///
@@ -486,21 +528,6 @@ impl<V> FieldDescription for FormatFieldDef<V> {
     fn description(&self) -> &str {
         self.description
     }
-}
-
-// ── Custom type encoding traits ────────────────────────────────────────
-
-// r[impl record_encoder.encode_info_trait]
-// r[impl record_encoder.encode_dyn]
-pub trait EncodeInfo {
-    type Key;
-    fn encode_info(&self, enc: &mut dyn InfoEncoder, key: &Self::Key);
-}
-
-// r[impl record_encoder.encode_format_trait]
-pub trait EncodeFormat {
-    type Key;
-    fn encode_format(&self, enc: &mut dyn FormatEncoder, key: &Self::Key);
 }
 
 #[cfg(test)]
@@ -647,31 +674,11 @@ mod tests {
         assert_eq!(map.get("GT").unwrap(), setup.gt_fmt.id().dict_idx() as usize, "FORMAT GT");
     }
 
-    // r[verify record_encoder.encode_info_trait]
-    // r[verify record_encoder.encode_dyn]
     // r[verify record_encoder.field_def]
     // r[verify record_encoder.field_def_types]
     #[test]
-    fn typestate_custom_encode_traits() {
-        struct Depth(i32);
-        impl EncodeInfo for Depth {
-            type Key = InfoInt;
-            fn encode_info(&self, enc: &mut dyn InfoEncoder, key: &Self::Key) {
-                key.encode(enc, self.0);
-            }
-        }
-
-        #[allow(dead_code, reason = "only exists to verify EncodeFormat impl compiles")]
-        struct Score(f32);
-        impl EncodeFormat for Score {
-            type Key = FormatFloat;
-            fn encode_format(&self, enc: &mut dyn FormatEncoder, key: &Self::Key) {
-                key.encode(enc, &[self.0]).unwrap();
-            }
-        }
-
+    fn field_def_generic_keys_encode() {
         let setup = TestSetup::new();
-        let depth = Depth(42);
         let mut buf = Vec::new();
         let writer = Writer::new(&mut buf, OutputFormat::Bcf);
         let mut writer = writer.write_header(&setup.header).unwrap();
@@ -680,7 +687,7 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(1).unwrap(), &alleles, None)
             .unwrap()
             .filter_pass();
-        depth.encode_info(&mut enc, &setup.dp_info);
+        setup.dp_info.encode(&mut enc, 42);
         enc.emit().unwrap();
         writer.finish().unwrap();
         assert!(!buf.is_empty());
@@ -705,7 +712,7 @@ mod tests {
             writer
                 .begin_record(&contig, pos, &alleles, None)
                 .unwrap()
-                .filter_fail(&[&low_dp])
+                .filter_fail([&low_dp])
                 .emit()
                 .unwrap();
             writer.finish().unwrap();
@@ -720,7 +727,7 @@ mod tests {
             writer
                 .begin_record(&contig, pos, &alleles, None)
                 .unwrap()
-                .filter_fail(&[&low_dp])
+                .filter_fail([&low_dp])
                 .emit()
                 .unwrap();
             writer.finish().unwrap();
@@ -796,7 +803,7 @@ mod tests {
         writer
             .begin_record(&contig, Pos1::new(10).unwrap(), &alleles, None)
             .unwrap()
-            .filter_fail(&[&ld])
+            .filter_fail([&ld])
             .emit()
             .unwrap();
         writer.finish().unwrap();
@@ -824,29 +831,6 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
         assert_eq!(data_line.split('\t').nth(6), Some("PASS"));
-    }
-
-    // r[verify record_encoder.encode_info_trait]
-    // r[verify record_encoder.encode_format_trait]
-    #[test]
-    fn typestate_info_and_format_encoder_are_object_safe() {
-        fn accepts_info_enc(_enc: &mut dyn InfoEncoder) {}
-        fn accepts_format_enc(_enc: &mut dyn FormatEncoder) {}
-
-        let setup = TestSetup::new();
-        let mut buf = Vec::new();
-        let writer = Writer::new(&mut buf, OutputFormat::Bcf);
-        let mut writer = writer.write_header(&setup.header).unwrap();
-        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        let mut filtered = writer
-            .begin_record(&setup.contig, Pos1::new(1).unwrap(), &alleles, None)
-            .unwrap()
-            .filter_pass();
-        accepts_info_enc(&mut filtered);
-        let mut with_samples = filtered.begin_samples();
-        accepts_format_enc(&mut with_samples);
-        with_samples.emit().unwrap();
-        writer.finish().unwrap();
     }
 
     // r[verify record_encoder.bcf_encoding]
@@ -991,6 +975,76 @@ mod tests {
 
         writer.finish().unwrap();
         assert!(!buf.is_empty());
+    }
+
+    // r[verify record_encoder.format_single_sample]
+    #[test]
+    fn format_single_sample_helper_matches_nested_slice() {
+        let mut builder = crate::vcf::header::VcfHeader::builder();
+        let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let mut builder = builder.formats();
+        let pl_fmt: FormatInts = builder
+            .register_format(&FormatFieldDef::new(
+                "PL",
+                Number::Genotypes,
+                ValueType::Integer,
+                "Phred likelihoods",
+            ))
+            .unwrap();
+        let mut builder = builder.samples();
+        builder.add_sample("S1").unwrap();
+        let header = Arc::new(builder.build().unwrap());
+
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&contig, Pos1::new(1).unwrap(), &alleles, None)
+            .unwrap()
+            .filter_pass();
+        let mut enc = enc.begin_samples();
+        // The flat helper must produce the same bytes as the explicit &[&[..]] form.
+        pl_fmt.encode_single_sample(&mut enc, &[10, 20, 30]).unwrap();
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
+        let cols: Vec<&str> = data_line.split('\t').collect();
+        assert_eq!(cols[8], "PL");
+        assert_eq!(cols[9], "10,20,30");
+    }
+
+    #[test]
+    fn format_single_sample_helper_rejects_multi_sample() {
+        let mut hb = crate::vcf::header::VcfHeader::builder();
+        let contig = hb.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let mut hb = hb.formats();
+        let af: FormatFloats = hb
+            .register_format(&FormatFieldDef::new(
+                "AF",
+                Number::Unknown,
+                ValueType::Float,
+                "Allele freq",
+            ))
+            .unwrap();
+        let mut hb = hb.samples();
+        hb.add_sample("A").unwrap();
+        hb.add_sample("B").unwrap();
+        let header = Arc::new(hb.build().unwrap());
+
+        let mut buf = Vec::new();
+        let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&header).unwrap();
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let enc = writer
+            .begin_record(&contig, Pos1::new(1).unwrap(), &alleles, None)
+            .unwrap()
+            .filter_pass();
+        let mut enc = enc.begin_samples();
+        // Header has 2 samples → the single-sample helper must refuse.
+        let result = af.encode_single_sample(&mut enc, &[0.5]);
+        assert!(matches!(result, Err(VcfError::SampleCountMismatch { .. })));
     }
 
     #[test]

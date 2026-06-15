@@ -190,7 +190,7 @@ fn write_one_record<W: std::io::Write>(
         .unwrap();
 
     let mut enc =
-        if rec.filter_pass { enc.filter_pass() } else { enc.filter_fail(&[&setup.q20_filter]) };
+        if rec.filter_pass { enc.filter_pass() } else { enc.filter_fail([&setup.q20_filter]) };
 
     // INFO fields
     setup.dp_info.encode(&mut enc, rec.dp);
