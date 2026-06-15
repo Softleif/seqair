@@ -64,6 +64,18 @@ impl<R: Read + Seek> IndexedReader<R> {
         }
     }
 
+    /// Estimate the compressed bytes a `[start, end]` region query would load,
+    /// for byte-aware segmentation. Returns `None` for CRAM, whose slice-based
+    /// reader bounds memory differently (there is no `RegionBuf` bulk-load), so
+    /// callers should skip byte-budget subdivision for it.
+    pub fn estimate_region_bytes(&self, tid: u32, start: Pos0, end: Pos0) -> Option<u64> {
+        match self {
+            Self::Bam(r) => Some(r.estimate_region_bytes(tid, start, end)),
+            Self::Sam(r) => Some(r.estimate_region_bytes(tid, start, end)),
+            Self::Cram(_) => None,
+        }
+    }
+
     // r[impl unified.fetch_equivalence]
     pub fn fetch_into(
         &mut self,

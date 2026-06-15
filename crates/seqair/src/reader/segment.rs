@@ -22,7 +22,7 @@
 
 use crate::bam::BamHeader;
 use seqair_types::{Pos0, RegionString, SmolStr};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use super::{
     ReaderError,
@@ -257,20 +257,28 @@ impl Segment {
 pub struct SegmentOptions {
     max_len: NonZeroU32,
     overlap: u32,
+    max_bytes: Option<NonZeroU64>,
 }
 
+/// Default per-segment compressed-byte budget (256 MiB), matching the
+/// `RegionBuf` bulk-load guard. The budget is in **compressed** bytes (what
+/// the index can estimate); the decoded `RecordStore` is a few× larger.
+const DEFAULT_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
 impl Default for SegmentOptions {
-    /// 10 kb tiles, no overlap. Suits exploratory and per-region work; pick
-    /// a larger `max_len` via [`SegmentOptions::new`] for whole-genome scans.
+    /// 10 kb tiles, no overlap, 256 MiB byte budget. Suits exploratory and
+    /// per-region work; pick a larger `max_len` via [`SegmentOptions::new`]
+    /// for whole-genome scans.
     fn default() -> Self {
         // SAFETY: 10_000 is non-zero.
         let max_len = NonZeroU32::new(10_000).expect("non-zero literal");
-        Self { max_len, overlap: 0 }
+        Self { max_len, overlap: 0, max_bytes: NonZeroU64::new(DEFAULT_MAX_BYTES) }
     }
 }
 
 impl SegmentOptions {
-    /// Plain options: tile *cores* up to `max_len` bases, no overlap.
+    /// Plain options: tile *cores* up to `max_len` bases, no overlap, with the
+    /// default 256 MiB byte budget (see [`with_max_bytes`](Self::with_max_bytes)).
     ///
     /// `max_len` caps the **core** length of each tile
     /// (`Segment::core_range()`). With
@@ -280,7 +288,7 @@ impl SegmentOptions {
     /// clip their overlap to the requested range and are smaller.
     #[must_use]
     pub const fn new(max_len: NonZeroU32) -> Self {
-        Self { max_len, overlap: 0 }
+        Self { max_len, overlap: 0, max_bytes: NonZeroU64::new(DEFAULT_MAX_BYTES) }
     }
 
     /// Set the per-edge overlap (bases shared with each neighboring tile).
@@ -295,7 +303,26 @@ impl SegmentOptions {
                 overlap,
             });
         }
-        Ok(Self { max_len: self.max_len, overlap })
+        Ok(Self { max_len: self.max_len, overlap, max_bytes: self.max_bytes })
+    }
+
+    /// Cap each segment's estimated **compressed** load to `max_bytes`.
+    ///
+    /// [`Readers::segments`](super::Readers::segments) consults the index and
+    /// subdivides any tile whose estimated byte size exceeds this budget, so
+    /// each emitted [`Segment`] stays loadable within it. A single index leaf
+    /// bin (~16 kb) that alone exceeds the budget can't be split further and
+    /// is emitted as-is.
+    #[must_use]
+    pub const fn with_max_bytes(self, max_bytes: NonZeroU64) -> Self {
+        Self { max_len: self.max_len, overlap: self.overlap, max_bytes: Some(max_bytes) }
+    }
+
+    /// Disable the byte budget: segments are bounded by `max_len` (positions)
+    /// only, regardless of how much data they cover.
+    #[must_use]
+    pub const fn without_byte_budget(self) -> Self {
+        Self { max_len: self.max_len, overlap: self.overlap, max_bytes: None }
     }
 
     /// Maximum tile length, in bases.
@@ -308,6 +335,12 @@ impl SegmentOptions {
     #[must_use]
     pub const fn overlap(&self) -> u32 {
         self.overlap
+    }
+
+    /// Per-segment compressed-byte budget, or `None` if disabled.
+    #[must_use]
+    pub const fn max_bytes(&self) -> Option<NonZeroU64> {
+        self.max_bytes
     }
 }
 
@@ -560,6 +593,45 @@ impl private::IntoSegmentTargetSealed for () {
 ///   0` for the last tile of each range; internal tiles carry the requested
 ///   overlap on both edges.
 pub struct Segments {
+    inner: SegmentsInner,
+}
+
+enum SegmentsInner {
+    /// Lazy positional tiling — bounded by `max_len` only. Used directly when
+    /// no byte budget applies (or `Segments` is built without index access).
+    Planned(PlannedSegments),
+    /// Byte-aware subdivision already applied by
+    /// [`Readers::segments`](super::Readers::segments); replay the built list.
+    Precomputed(std::vec::IntoIter<Segment>),
+}
+
+impl Segments {
+    pub(crate) fn new(ranges: Vec<ResolvedRange>, opts: SegmentOptions) -> Self {
+        Self { inner: SegmentsInner::Planned(PlannedSegments::new(ranges, opts)) }
+    }
+
+    /// Wrap a pre-built segment list (after byte-aware subdivision).
+    pub(crate) fn precomputed(segments: Vec<Segment>) -> Self {
+        Self { inner: SegmentsInner::Precomputed(segments.into_iter()) }
+    }
+}
+
+impl Iterator for Segments {
+    type Item = Segment;
+
+    fn next(&mut self) -> Option<Segment> {
+        match &mut self.inner {
+            SegmentsInner::Planned(p) => p.next(),
+            SegmentsInner::Precomputed(it) => it.next(),
+        }
+    }
+}
+
+/// Lazy positional tiler: walks `ResolvedRange`s and emits `max_len`-core
+/// tiles. The byte budget in [`SegmentOptions`] is **not** applied here — that
+/// happens in [`Readers::segments`](super::Readers::segments), which has index
+/// access; this keeps the positional arithmetic (and its tests) index-free.
+struct PlannedSegments {
     ranges: std::vec::IntoIter<ResolvedRange>,
     current: Option<ResolvedRange>,
     /// 0-based inclusive start of the *next core* to emit within the current
@@ -569,8 +641,8 @@ pub struct Segments {
     opts: SegmentOptions,
 }
 
-impl Segments {
-    pub(crate) fn new(ranges: Vec<ResolvedRange>, opts: SegmentOptions) -> Self {
+impl PlannedSegments {
+    fn new(ranges: Vec<ResolvedRange>, opts: SegmentOptions) -> Self {
         let mut iter = ranges.into_iter();
         let current = iter.next();
         let next_core_start = current.as_ref().map_or(Pos0::ZERO, |r| r.start);
@@ -583,10 +655,6 @@ impl Segments {
             self.next_core_start = r.start;
         }
     }
-}
-
-impl Iterator for Segments {
-    type Item = Segment;
 
     fn next(&mut self) -> Option<Segment> {
         loop {
@@ -670,6 +738,95 @@ impl Iterator for Segments {
 fn pos0_from_u64(v: u64) -> Option<Pos0> {
     let v32 = u32::try_from(v).ok()?;
     Pos0::new(v32)
+}
+
+// r[impl unified.segment_byte_budget]
+/// Recursively bisect `seg` so that each emitted sub-segment's full
+/// `[start, end]` is estimated by `estimate` to load at most `budget` bytes.
+///
+/// `overlap` is the per-edge overlap from [`SegmentOptions`]. Each sub-segment
+/// is clamped to the parent segment's `[start, end]`, which reproduces the
+/// positional iterator's overlap rules for free: an interior split boundary
+/// gets the full `overlap` on each side, while a boundary that coincides with
+/// the parent's edge inherits the parent's (already range-clamped) overlap.
+///
+/// A single-base core that still exceeds `budget` is emitted as-is — the index
+/// can't address finer than its ~16 kb leaf bin, so callers must tolerate the
+/// rare over-budget segment (it warns and loads in `RegionBuf`).
+pub(crate) fn split_segment_by_bytes(
+    seg: &Segment,
+    overlap: u32,
+    budget: u64,
+    estimate: &mut dyn FnMut(u32, Pos0, Pos0) -> u64,
+    out: &mut Vec<Segment>,
+) {
+    let core = seg.core_range();
+    split_core(
+        SplitCtx {
+            tid: seg.tid(),
+            contig: seg.contig(),
+            contig_last_pos: seg.contig_last_pos(),
+            clamp_start: seg.start().as_u64(),
+            clamp_end: seg.end().as_u64(),
+            overlap: u64::from(overlap),
+            budget,
+        },
+        core.start().as_u64(),
+        core.end().as_u64(),
+        estimate,
+        out,
+    );
+}
+
+/// Invariant context for [`split_core`] — fixed across the whole recursion.
+#[derive(Clone, Copy)]
+struct SplitCtx<'a> {
+    tid: Tid,
+    contig: &'a SmolStr,
+    contig_last_pos: Pos0,
+    clamp_start: u64,
+    clamp_end: u64,
+    overlap: u64,
+    budget: u64,
+}
+
+fn split_core(
+    ctx: SplitCtx<'_>,
+    core_start: u64,
+    core_end: u64,
+    estimate: &mut dyn FnMut(u32, Pos0, Pos0) -> u64,
+    out: &mut Vec<Segment>,
+) {
+    // Full range = core ± overlap, clamped to the parent segment's extent.
+    let full_start = core_start.saturating_sub(ctx.overlap).max(ctx.clamp_start);
+    let full_end = core_end.saturating_add(ctx.overlap).min(ctx.clamp_end);
+    let full_start_p = pos0_from_u64(full_start).expect("clamped start within Pos0");
+    let full_end_p = pos0_from_u64(full_end).expect("clamped end within Pos0");
+
+    let bytes = estimate(ctx.tid.as_u32(), full_start_p, full_end_p);
+    if bytes <= ctx.budget || core_start >= core_end {
+        let overlap_start =
+            u32::try_from(core_start.saturating_sub(full_start)).unwrap_or(u32::MAX);
+        let overlap_end = u32::try_from(full_end.saturating_sub(core_end)).unwrap_or(u32::MAX);
+        let seg = Segment::new(
+            ctx.tid,
+            ctx.contig.clone(),
+            full_start_p,
+            full_end_p,
+            overlap_start,
+            overlap_end,
+            ctx.contig_last_pos,
+        )
+        .expect("byte-split produces valid Segment invariants");
+        out.push(seg);
+        return;
+    }
+
+    // core_start < core_end here, so mid is in [core_start, core_end - 1] and
+    // both halves are strictly smaller — the recursion always terminates.
+    let mid = core_start.saturating_add(core_end.saturating_sub(core_start) / 2);
+    split_core(ctx, core_start, mid, estimate, out);
+    split_core(ctx, mid.saturating_add(1), core_end, estimate, out);
 }
 
 #[cfg(test)]
@@ -1013,6 +1170,107 @@ mod tests {
         assert!(matches!(err, ReaderError::RegionEndPastContig { .. }));
     }
 
+    // ── Byte-aware subdivision (split_segment_by_bytes) ──────────────────────
+
+    /// Mock byte oracle: `bpb` compressed bytes per base of the *full* range.
+    fn span_estimate(bpb: u64) -> impl FnMut(u32, Pos0, Pos0) -> u64 {
+        move |_tid, s, e| (e.as_u64() - s.as_u64() + 1) * bpb
+    }
+
+    /// Mirror `Readers::segments`: positional tiling, then byte-aware split of
+    /// each tile using `estimate`. Returns the final segment list.
+    fn byte_aware(
+        contig_len: u32,
+        range: std::ops::RangeInclusive<u32>,
+        opts: SegmentOptions,
+        budget: u64,
+        mut estimate: impl FnMut(u32, Pos0, Pos0) -> u64,
+    ) -> Vec<Segment> {
+        let header = header_with_contigs(&[("chr1", contig_len)]);
+        let ranges = ("chr1", p(*range.start()), p(*range.end())).resolve_target(&header).unwrap();
+        let mut out = Vec::new();
+        for seg in Segments::new(ranges, opts) {
+            split_segment_by_bytes(&seg, opts.overlap(), budget, &mut estimate, &mut out);
+        }
+        out
+    }
+
+    /// Assert the segments' cores partition `[start, end]` exactly (contiguous,
+    /// no gap, no overlap).
+    fn assert_cores_tile(segs: &[Segment], start: Pos0, end: Pos0) {
+        assert!(!segs.is_empty(), "no segments produced");
+        assert_eq!(*segs.first().unwrap().core_range().start(), start, "first core start");
+        assert_eq!(*segs.last().unwrap().core_range().end(), end, "last core end");
+        for w in segs.windows(2) {
+            assert_eq!(
+                w[0].core_range().end().as_u64() + 1,
+                w[1].core_range().start().as_u64(),
+                "cores must be contiguous"
+            );
+        }
+    }
+
+    // r[verify unified.segment_byte_budget]
+    #[test]
+    fn byte_split_passthrough_when_under_budget() {
+        let opts = SegmentOptions::new(NonZeroU32::new(1000).unwrap());
+        let segs = byte_aware(2000, 0..=99, opts, 1_000_000, span_estimate(10));
+        assert_eq!(segs.len(), 1, "a small segment should not be split");
+        assert_eq!((segs[0].start(), segs[0].end()), (p(0), p(99)));
+        assert_eq!((segs[0].overlap_start(), segs[0].overlap_end()), (0, 0));
+    }
+
+    // r[verify unified.segment_byte_budget]
+    #[test]
+    fn byte_split_bisects_until_under_budget() {
+        // 1000 bases × 10 B = 10_000 B; budget 2000 B forces several splits.
+        let budget = 2000;
+        let opts = SegmentOptions::new(NonZeroU32::new(10_000).unwrap());
+        let segs = byte_aware(2000, 0..=999, opts, budget, span_estimate(10));
+        assert!(segs.len() > 1, "expected the segment to be split");
+        for s in &segs {
+            let bytes = (s.end().as_u64() - s.start().as_u64() + 1) * 10;
+            assert!(
+                bytes <= budget,
+                "segment {:?} = {bytes} B exceeds {budget}",
+                (s.start(), s.end())
+            );
+        }
+        assert_cores_tile(&segs, p(0), p(999));
+    }
+
+    // r[verify unified.segment_byte_budget]
+    // r[verify unified.segment_overlap]
+    #[test]
+    fn byte_split_preserves_overlap_and_tiling() {
+        let opts = SegmentOptions::new(NonZeroU32::new(10_000).unwrap()).with_overlap(10).unwrap();
+        let segs = byte_aware(5000, 0..=999, opts, 2000, span_estimate(10));
+        assert!(segs.len() > 2, "need interior segments to check overlap");
+        // Range edges have zero outward overlap; interior boundaries carry the
+        // requested overlap on both sides.
+        assert_eq!(segs.first().unwrap().overlap_start(), 0);
+        assert_eq!(segs.last().unwrap().overlap_end(), 0);
+        for s in &segs[1..segs.len() - 1] {
+            assert_eq!(s.overlap_start(), 10, "interior overlap_start");
+            assert_eq!(s.overlap_end(), 10, "interior overlap_end");
+        }
+        assert_cores_tile(&segs, p(0), p(999));
+    }
+
+    // r[verify unified.segment_byte_budget]
+    /// The irreducible case: when even a single base is over budget, the split
+    /// bottoms out at single-base cores instead of looping forever.
+    #[test]
+    fn byte_split_irreducible_bottoms_out_at_single_base() {
+        let opts = SegmentOptions::new(NonZeroU32::new(10_000).unwrap());
+        let segs = byte_aware(2000, 100..=109, opts, 1, |_t, _s, _e| u64::MAX);
+        assert_eq!(segs.len(), 10, "10 positions → 10 single-base segments");
+        for s in &segs {
+            assert_eq!(s.core_range().start(), s.core_range().end(), "single-base core");
+        }
+        assert_cores_tile(&segs, p(100), p(109));
+    }
+
     proptest! {
         // r[verify unified.readers_segments]
         #[test]
@@ -1126,6 +1384,45 @@ mod tests {
             for s in &segs {
                 prop_assert!(s.start() >= p(range_start));
                 prop_assert!(s.end() <= p(range_end));
+            }
+        }
+
+        // r[verify unified.segment_byte_budget]
+        /// Byte-aware subdivision must (a) keep cores tiling the range exactly
+        /// and (b) keep every segment under budget unless its core is a single
+        /// base (the irreducible leaf-bin case).
+        #[test]
+        fn byte_split_stays_under_budget_and_tiles(
+            range_start in 0u32..50_000,
+            len in 1u32..2_000,
+            bytes_per_base in 1u64..1_000,
+            budget in 1u64..200_000,
+            overlap in 0u32..50,
+        ) {
+            let range_end = range_start.saturating_add(len - 1).min(99_999);
+            let max_len = NonZeroU32::new(10_000).unwrap();
+            let opts = SegmentOptions::new(max_len).with_overlap(overlap).unwrap();
+            let segs =
+                byte_aware(100_000, range_start..=range_end, opts, budget, span_estimate(bytes_per_base));
+
+            // Cores tile the requested range exactly.
+            prop_assert_eq!(*segs.first().unwrap().core_range().start(), p(range_start));
+            prop_assert_eq!(*segs.last().unwrap().core_range().end(), p(range_end));
+            for w in segs.windows(2) {
+                prop_assert_eq!(
+                    w[0].core_range().end().as_u64() + 1,
+                    w[1].core_range().start().as_u64()
+                );
+            }
+            // Each segment fits the budget, or its core is a single base.
+            for s in &segs {
+                let bytes = (s.end().as_u64() - s.start().as_u64() + 1) * bytes_per_base;
+                let single_base = s.core_range().start() == s.core_range().end();
+                prop_assert!(
+                    bytes <= budget || single_base,
+                    "segment {:?} = {} B over budget {} with multi-base core",
+                    (s.start().as_u64(), s.end().as_u64()), bytes, budget
+                );
             }
         }
     }
