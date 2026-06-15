@@ -376,15 +376,33 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
         self.run_loop(f)
     }
 
+    /// Drive the cursor: a flat `loop` + `continue` state machine over three
+    /// phases, resumable so `for_each` can stop early. State persists in
+    /// `self.{region, batch_idx, chunk_idx, chunk_end}` between iterations.
+    ///
+    /// 1. **Load** — no region in hand: take the next batch, [`RegionBuf::load`]
+    ///    *all* its compressed bytes into memory in one bulk read (this is the
+    ///    big allocation — bounded by `MAX_REGION_BYTES`, and by the byte-aware
+    ///    segment planner upstream), seek to the first chunk's `begin`, record
+    ///    its `end`.
+    /// 2. **Advance** — the cursor passed the current chunk's `end`: step to the
+    ///    next chunk in the batch, or drop the region so phase 1 loads the next
+    ///    batch.
+    /// 3. **Record** — read one record from the in-memory buffer, filter by tid
+    ///    then position, and hand accepted records to `f`.
+    ///
+    /// The phases are mutually exclusive per iteration; each ends in `continue`
+    /// (or `break`) so the next iteration re-evaluates from the top.
     fn run_loop<F, E>(&mut self, mut f: F) -> Result<BamQueryCounts, E>
     where
         F: FnMut(&[u8]) -> Result<(), E>,
         E: From<BamError>,
     {
         loop {
+            // ── Phase 1: load the next batch into a fresh RegionBuf ──────────
             if self.region.is_none() {
                 if self.batch_idx >= self.batches.len() {
-                    break;
+                    break; // all batches consumed → done
                 }
                 debug_assert!(self.batch_idx < self.batches.len());
                 #[allow(clippy::indexing_slicing, reason = "bounds checked above")]
@@ -392,6 +410,7 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
                 self.batch_idx = self.batch_idx.saturating_add(1);
                 debug_assert!(!batch.is_empty());
 
+                // One bulk read of every compressed byte in the batch's chunks.
                 let mut region =
                     RegionBuf::load(self.reader, batch).map_err(|e| E::from(BamError::from(e)))?;
                 #[allow(clippy::indexing_slicing, reason = "non-empty assert above")]
@@ -404,6 +423,7 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
 
             let region = self.region.as_mut().expect("region guaranteed Some above");
 
+            // ── Phase 2: cursor reached this chunk's end → advance ───────────
             if region.virtual_offset() >= self.chunk_end {
                 self.chunk_idx = self.chunk_idx.saturating_add(1);
                 debug_assert!(self.batch_idx >= 1, "batch_idx incremented on load");
@@ -413,9 +433,10 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
                 )]
                 let batch = &self.batches[self.batch_idx.saturating_sub(1)];
                 if self.chunk_idx >= batch.len() {
-                    self.region = None;
+                    self.region = None; // batch exhausted → phase 1 loads the next
                     continue;
                 }
+                // Same in-memory buffer, just reposition to the next chunk.
                 #[allow(clippy::indexing_slicing, reason = "chunk_idx < batch.len() checked above")]
                 let chunk = &batch[self.chunk_idx];
                 region.seek_virtual(chunk.begin).map_err(|e| E::from(BamError::from(e)))?;
@@ -423,10 +444,13 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
                 continue;
             }
 
+            // ── Phase 3: read one record from the in-memory buffer ───────────
             // r[impl bam.reader.propagate_errors]
             let current_voff = region.virtual_offset();
             let raw = match region.read_record(&mut self.scratch) {
                 Ok(s) => s,
+                // Buffer exhausted before chunk_end (e.g. a record straddling the
+                // loaded range's tail): loop back so phase 2 advances the chunk.
                 Err(BgzfError::UnexpectedEof) => continue,
                 Err(e) => return Err(E::from(BamError::from(e))),
             };
