@@ -39,6 +39,9 @@ Duplicate IDs within the same field category (INFO, FORMAT, FILTER, contig) MUST
 r[vcf_header.string_map]
 For BCF output, the header MUST provide a string-to-index dictionary mapping all FILTER, INFO, and FORMAT IDs to integer indices. The dictionary is built incrementally during builder construction; the typestate phase ordering guarantees entries appear in canonical order (PASS at index 0, then remaining FILTERs, then INFO, then FORMAT) without a runtime verification pass. Contig names use a separate index namespace matching insertion order.
 
+r[vcf_header.dict_capacity]
+The FILTER/INFO/FORMAT string dictionary MUST be capped at 64 entries, so every `dict_idx` fits in `0..64` and the per-record duplicate-field tracker can key a single `u64` bitset directly by index. Registering a field that would exceed this cap MUST return a typed error (`TooManyFields`). The cap does not apply to the separate contig namespace.
+
 r[vcf_header.serialization]
 `to_vcf_text()` MUST emit all meta-information lines (`##`) followed by the `#CHROM` header line. Lines MUST be ordered: fileformat first, then other lines (metadata), then FILTER (PASS first), INFO, FORMAT, contig, then the #CHROM line. This ordering ensures the BCF string dictionary (built by scanning header lines in order) assigns PASS to index 0 and matches the dictionary indices used during encoding.
 

@@ -553,15 +553,11 @@ impl<'a> RecordEncoder<'a, Begun> {
 
 // r[impl record_encoder.info_dedup]
 impl VcfEncoderFields<'_> {
-    /// Handle duplicate removal and separator, returning the buffer offset for
-    /// the caller to start writing key=value bytes.
-    fn prepare_info_field(&mut self, id: &FieldId) {
-        self.info_tracker.remove_duplicate_vcf(
-            self.buf,
-            &mut self.info_count,
-            id.dict_idx(),
-            id.name(),
-        );
+    /// Open an INFO field: ensure the FILTER column is closed, then emit the
+    /// `;` separator (when this is not the first field) and return the byte
+    /// offset of the field unit. The caller writes `key=value` after this, then
+    /// calls [`commit_info_field`](Self::commit_info_field).
+    fn begin_info_field(&mut self) -> usize {
         if !self.filter_written {
             self.filter_written = true;
             self.buf.extend_from_slice(b".\t");
@@ -570,109 +566,121 @@ impl VcfEncoderFields<'_> {
         if self.info_count > 0 {
             self.buf.push(b';');
         }
-        self.info_count = self.info_count.saturating_add(1);
-        self.info_tracker.push(id.dict_idx(), start);
+        start
+    }
+
+    /// Close the INFO field opened at `start`. A duplicate is spliced over its
+    /// previous occurrence in place (dropping the just-written leading `;` when
+    /// the overwritten field is first); a new field bumps `info_count`.
+    fn commit_info_field(&mut self, id: &FieldId, start: usize) {
+        if self.info_tracker.commit(self.buf, id.dict_idx(), id.name(), start, true) {
+            self.info_count = self.info_count.saturating_add(1);
+        }
     }
 }
 
 // r[impl record_encoder.info_dedup]
 impl BcfRecordEncoder<'_> {
-    /// Handle duplicate removal, track offset. Returns `true` if replacing
-    /// (caller should skip incrementing `n_info`).
-    fn prepare_info_field(&mut self, id: &FieldId) -> bool {
-        let replacing =
-            self.info_tracker.remove_duplicate(self.shared_buf, id.dict_idx(), id.name());
-        self.info_tracker.push(id.dict_idx(), self.shared_buf.len());
-        replacing
+    /// Commit an INFO field whose bytes were just appended at `[start..]` in
+    /// `shared_buf`. On a duplicate, splices the new bytes over the previous
+    /// occurrence in place; otherwise bumps `n_info`.
+    fn commit_info_field(&mut self, id: &FieldId, start: usize) {
+        if self.info_tracker.commit(self.shared_buf, id.dict_idx(), id.name(), start, false) {
+            self.n_info = self.n_info.saturating_add(1);
+        }
     }
 
     // r[impl record_encoder.format_dedup]
-    fn prepare_format_field(&mut self, id: &FieldId) -> bool {
-        let replacing = self.fmt_tracker.remove_duplicate(self.indiv_buf, id.dict_idx(), id.name());
-        self.fmt_tracker.push(id.dict_idx(), self.indiv_buf.len());
-        replacing
+    /// FORMAT counterpart of [`commit_info_field`](Self::commit_info_field),
+    /// operating on `indiv_buf` and `n_fmt`.
+    fn commit_format_field(&mut self, id: &FieldId, start: usize) {
+        if self.fmt_tracker.commit(self.indiv_buf, id.dict_idx(), id.name(), start, false) {
+            self.n_fmt = self.n_fmt.saturating_add(1);
+        }
     }
 }
 
 // r[impl record_encoder.format_dedup]
 impl VcfEncoderFields<'_> {
-    /// Handle FORMAT duplicate removal. Removes the previous key from `fmt_keys`
-    /// and the corresponding colon-delimited data from each sample buffer.
-    fn prepare_format_field(&mut self, id: &FieldId) {
-        if let Some(idx) = self.fmt_keys.iter().position(|k| k.as_str() == id.name()) {
-            tracing::warn!(
-                field = id.name(),
-                "FORMAT field encoded twice; overwriting previous value"
-            );
-            let total = self.fmt_keys.len();
-            self.fmt_keys.remove(idx);
-            for buf in self.sample_bufs.iter_mut() {
-                remove_colon_delimited_field(buf, idx, total);
-            }
-        }
-        // Normal begin_format_field logic
+    /// Open a FORMAT field: append the `:` separator to every sample buffer when
+    /// this is not the first field. The caller then writes each sample's value,
+    /// followed by [`commit_format_field`](Self::commit_format_field).
+    fn begin_format_field(&mut self) {
         if !self.fmt_keys.is_empty() {
             for buf in self.sample_bufs.iter_mut() {
                 buf.push(b':');
             }
         }
-        self.fmt_keys.push(id.name().into());
+    }
+
+    /// Close a FORMAT field. A new key is appended to `fmt_keys`. A duplicate
+    /// keeps its original column position: the freshly-appended value (now the
+    /// last colon-field in each sample buffer) is moved over the previous
+    /// occurrence in place, preserving key order to match the BCF/htslib path.
+    fn commit_format_field(&mut self, id: &FieldId) {
+        match self.fmt_keys.iter().position(|k| k.as_str() == id.name()) {
+            Some(idx) => {
+                tracing::warn!(
+                    field = id.name(),
+                    "FORMAT field encoded twice; overwriting previous value"
+                );
+                // `+1`: the appended occupies a transient extra column we now fold away.
+                let total = self.fmt_keys.len().saturating_add(1);
+                for buf in self.sample_bufs.iter_mut() {
+                    move_last_colon_field_to(buf, idx, total);
+                }
+            }
+            None => self.fmt_keys.push(id.name().into()),
+        }
     }
 }
 
-/// Remove the `field_idx`-th colon-delimited field from `buf`.
+/// Move the last colon-delimited field of `buf` over the `target_idx`-th field,
+/// in place, keeping every other field's position. `total_fields` counts the
+/// fields currently present (including the appended last one).
 ///
-/// `total_fields` is the field count _before_ removal. For a buffer like
-/// `"GT:DP:GQ"` with `total_fields=3`, removing field 1 yields `"GT:GQ"`.
+/// Example: `buf = "0/1:45:99"`, `target_idx = 1`, `total_fields = 3` → the last
+/// field `99` replaces field 1, yielding `"0/1:99"`.
 #[allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
-    reason = "field_idx < total_fields guaranteed by caller; \
-              +1/-1 are safe because non-first fields always have a preceding ':'"
+    reason = "target_idx < total_fields-1 so the target lies strictly before the final ':'; \
+              last_sep+1 is in bounds because a duplicate implies >= 2 colon-fields"
 )]
-fn remove_colon_delimited_field(buf: &mut Vec<u8>, field_idx: usize, total_fields: usize) {
-    if total_fields == 0 {
+fn move_last_colon_field_to(buf: &mut Vec<u8>, target_idx: usize, total_fields: usize) {
+    if total_fields <= 1 || target_idx + 1 >= total_fields {
         return;
     }
-    // Walk to the target field by counting ':' separators.
-    let mut current = 0;
+    let Some(last_sep) = buf.iter().rposition(|&b| b == b':') else {
+        return;
+    };
+    // Capture the appended value (everything after the final ':'), then drop it.
+    let value: SmallVec<u8, 16> = buf[last_sep + 1..].iter().copied().collect();
+    buf.truncate(last_sep);
+    // Locate the target field's value range among the remaining fields and splice.
+    let (ts, te) = nth_colon_field(buf, target_idx);
+    buf.splice(ts..te, value.iter().copied());
+}
+
+/// Byte range of the `n`-th colon-delimited field's value (separators excluded).
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "i < buf.len(); start/idx only advance past a found ':' so stay in bounds"
+)]
+fn nth_colon_field(buf: &[u8], n: usize) -> (usize, usize) {
+    let mut idx = 0;
     let mut start = 0;
-    for i in 0..buf.len() {
-        if buf[i] == b':' {
-            if current == field_idx {
-                // Field is at [start..i].
-                drain_delimited(buf, start, i, field_idx, total_fields);
-                return;
+    for (i, &byte) in buf.iter().enumerate() {
+        if byte == b':' {
+            if idx == n {
+                return (start, i);
             }
-            current += 1;
+            idx += 1;
             start = i + 1;
         }
     }
-    // Target is the last field: [start..buf.len()].
-    if current == field_idx {
-        drain_delimited(buf, start, buf.len(), field_idx, total_fields);
-    }
-}
-
-/// Drain bytes for one colon-delimited field including exactly one separator.
-#[allow(clippy::arithmetic_side_effects, reason = "see remove_colon_delimited_field")]
-fn drain_delimited(
-    buf: &mut Vec<u8>,
-    field_start: usize,
-    field_end: usize,
-    field_idx: usize,
-    total_fields: usize,
-) {
-    let range = if total_fields == 1 {
-        field_start..field_end
-    } else if field_idx == 0 {
-        // First of multiple: remove field + following ':'
-        field_start..field_end + 1
-    } else {
-        // Non-first: remove preceding ':' + field
-        field_start - 1..field_end
-    };
-    buf.drain(range);
+    (start, buf.len())
 }
 
 // ── Filtered: InfoEncoder ──────────────────────────────────────────────
@@ -684,64 +692,60 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
     fn info_int(&mut self, id: &FieldId, value: i32) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_info_field(id);
+                let start = enc.shared_buf.len();
                 // r[impl bcf_writer.smallest_int_type]
                 let tc = value.scalar_type_code();
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_type_byte(enc.shared_buf, 1, tc);
                 value.encode_bcf_as(enc.shared_buf, tc);
                 // r[impl bcf_encoder.info_counting]
-                if !replacing {
-                    enc.n_info = enc.n_info.saturating_add(1);
-                }
+                enc.commit_info_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_info_field(id);
+                let start = vcf.begin_info_field();
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 // r[impl vcf_writer.integer_format]
                 let mut b = itoa::Buffer::new();
                 vcf.buf.extend_from_slice(b.format(value).as_bytes());
+                vcf.commit_info_field(id, start);
             }
         }
     }
     fn info_float(&mut self, id: &FieldId, value: f32) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_info_field(id);
+                let start = enc.shared_buf.len();
                 // r[impl bcf_writer.smallest_int_type]
                 let tc = value.scalar_type_code();
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_type_byte(enc.shared_buf, 1, tc);
                 value.encode_bcf_as(enc.shared_buf, tc);
                 // r[impl bcf_encoder.info_counting]
-                if !replacing {
-                    enc.n_info = enc.n_info.saturating_add(1);
-                }
+                enc.commit_info_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_info_field(id);
+                let start = vcf.begin_info_field();
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 // r[impl vcf_writer.float_precision]
                 write_float_g(vcf.buf, value)
                     .expect("f32 with 6 significant digits never exceeds 32 chars");
+                vcf.commit_info_field(id, start);
             }
         }
     }
     fn info_ints(&mut self, id: &FieldId, values: &[i32]) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_info_field(id);
+                let start = enc.shared_buf.len();
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_array_values(enc.shared_buf, values);
                 // r[impl bcf_encoder.info_counting]
-                if !replacing {
-                    enc.n_info = enc.n_info.saturating_add(1);
-                }
+                enc.commit_info_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_info_field(id);
+                let start = vcf.begin_info_field();
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 // r[impl vcf_writer.integer_format]
@@ -752,22 +756,21 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                     }
                     vcf.buf.extend_from_slice(b.format(*v).as_bytes());
                 }
+                vcf.commit_info_field(id, start);
             }
         }
     }
     fn info_floats(&mut self, id: &FieldId, values: &[f32]) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_info_field(id);
+                let start = enc.shared_buf.len();
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_array_values(enc.shared_buf, values);
                 // r[impl bcf_encoder.info_counting]
-                if !replacing {
-                    enc.n_info = enc.n_info.saturating_add(1);
-                }
+                enc.commit_info_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_info_field(id);
+                let start = vcf.begin_info_field();
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 for (i, v) in values.iter().enumerate() {
@@ -778,51 +781,50 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                     write_float_g(vcf.buf, *v)
                         .expect("f32 with 6 significant digits never exceeds 32 chars");
                 }
+                vcf.commit_info_field(id, start);
             }
         }
     }
     fn info_flag(&mut self, id: &FieldId) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_info_field(id);
+                let start = enc.shared_buf.len();
                 // r[impl bcf_writer.flag_encoding]
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_type_byte(enc.shared_buf, 0, BCF_BT_NULL);
                 // r[impl bcf_encoder.info_counting]
-                if !replacing {
-                    enc.n_info = enc.n_info.saturating_add(1);
-                }
+                enc.commit_info_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_info_field(id);
+                let start = vcf.begin_info_field();
                 vcf.buf.extend_from_slice(id.name().as_bytes());
+                vcf.commit_info_field(id, start);
             }
         }
     }
     fn info_string(&mut self, id: &FieldId, value: &str) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_info_field(id);
+                let start = enc.shared_buf.len();
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 encode_typed_string(enc.shared_buf, value.as_bytes());
                 // r[impl bcf_encoder.info_counting]
-                if !replacing {
-                    enc.n_info = enc.n_info.saturating_add(1);
-                }
+                enc.commit_info_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_info_field(id);
+                let start = vcf.begin_info_field();
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 // r[impl vcf_writer.percent_encoding]
                 percent_encode_into(vcf.buf, value.as_bytes());
+                vcf.commit_info_field(id, start);
             }
         }
     }
     fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) {
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_info_field(id);
+                let start = enc.shared_buf.len();
                 encode_typed_int_key(enc.shared_buf, id.dict_idx());
                 // r[impl bcf_writer.missing_sentinels]
                 let typ = smallest_int_type_iter(values.iter().filter_map(|v| *v));
@@ -831,12 +833,10 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                     encode_int_value_or_missing(enc.shared_buf, v, typ);
                 }
                 // r[impl bcf_encoder.info_counting]
-                if !replacing {
-                    enc.n_info = enc.n_info.saturating_add(1);
-                }
+                enc.commit_info_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_info_field(id);
+                let start = vcf.begin_info_field();
                 vcf.buf.extend_from_slice(id.name().as_bytes());
                 vcf.buf.push(b'=');
                 let mut b = itoa::Buffer::new();
@@ -851,6 +851,7 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                         None => vcf.buf.push(b'.'),
                     }
                 }
+                vcf.commit_info_field(id, start);
             }
         }
     }
@@ -923,7 +924,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
 
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_format_field(id);
+                let start = enc.indiv_buf.len();
                 // r[impl bcf_writer.gt_encoding]
                 // r[impl bcf_writer.indiv_field_major]
                 // r[impl bcf_encoder.format_field_major]
@@ -954,13 +955,11 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         encode_int_as(enc.indiv_buf, encoded, typ);
                     }
                 }
-                if !replacing {
-                    enc.n_fmt = enc.n_fmt.saturating_add(1);
-                }
+                enc.commit_format_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
                 // r[impl vcf_writer.genotype_serialization]
-                vcf.prepare_format_field(id);
+                vcf.begin_format_field();
                 let mut b = itoa::Buffer::new();
                 for (si, gt) in gts.iter().enumerate() {
                     for (i, allele) in gt.alleles.iter().enumerate() {
@@ -977,6 +976,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         }
                     }
                 }
+                vcf.commit_format_field(id);
             }
         }
         Ok(())
@@ -985,7 +985,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_format_field(id);
+                let start = enc.indiv_buf.len();
                 // r[impl bcf_writer.smallest_int_type]
                 // r[impl bcf_writer.indiv_field_major]
                 let tc = smallest_int_type(values);
@@ -994,17 +994,16 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 for &v in values {
                     v.encode_bcf_as(enc.indiv_buf, tc);
                 }
-                if !replacing {
-                    enc.n_fmt = enc.n_fmt.saturating_add(1);
-                }
+                enc.commit_format_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_format_field(id);
+                vcf.begin_format_field();
                 // r[impl vcf_writer.integer_format]
                 let mut b = itoa::Buffer::new();
                 for (i, &v) in values.iter().enumerate() {
                     vcf.sample_bufs[i].extend_from_slice(b.format(v).as_bytes());
                 }
+                vcf.commit_format_field(id);
             }
         }
         Ok(())
@@ -1013,7 +1012,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_format_field(id);
+                let start = enc.indiv_buf.len();
                 // r[impl bcf_writer.smallest_int_type]
                 // r[impl bcf_writer.indiv_field_major]
                 // f32::scalar_type_code() always returns BCF_BT_FLOAT regardless of value,
@@ -1025,17 +1024,16 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 for &v in values {
                     v.encode_bcf_as(enc.indiv_buf, tc);
                 }
-                if !replacing {
-                    enc.n_fmt = enc.n_fmt.saturating_add(1);
-                }
+                enc.commit_format_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_format_field(id);
+                vcf.begin_format_field();
                 // r[impl vcf_writer.float_precision]
                 for (i, &v) in values.iter().enumerate() {
                     write_float_g(&mut vcf.sample_bufs[i], v)
                         .map_err(|source| VcfError::FailedToWriteFormattedString { source })?;
                 }
+                vcf.commit_format_field(id);
             }
         }
         Ok(())
@@ -1045,7 +1043,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_format_field(id);
+                let start = enc.indiv_buf.len();
                 // BCF stores one integer type for the whole FORMAT column, so the
                 // type must fit every value across every sample, not just one sample.
                 // r[impl bcf_writer.smallest_int_type]
@@ -1074,12 +1072,10 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         encode_int_eov(enc.indiv_buf, typ);
                     }
                 }
-                if !replacing {
-                    enc.n_fmt = enc.n_fmt.saturating_add(1);
-                }
+                enc.commit_format_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_format_field(id);
+                vcf.begin_format_field();
                 let mut b = itoa::Buffer::new();
                 for (i, s) in per_sample.iter().enumerate() {
                     if s.is_empty() {
@@ -1095,6 +1091,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         vcf.sample_bufs[i].extend_from_slice(b.format(v).as_bytes());
                     }
                 }
+                vcf.commit_format_field(id);
             }
         }
         Ok(())
@@ -1104,7 +1101,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_format_field(id);
+                let start = enc.indiv_buf.len();
                 // r[impl bcf_writer.indiv_field_major]
                 encode_typed_int_key(enc.indiv_buf, id.dict_idx());
                 encode_type_byte(enc.indiv_buf, width, BCF_BT_FLOAT);
@@ -1128,12 +1125,10 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         f32::encode_end_of_vector(enc.indiv_buf);
                     }
                 }
-                if !replacing {
-                    enc.n_fmt = enc.n_fmt.saturating_add(1);
-                }
+                enc.commit_format_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_format_field(id);
+                vcf.begin_format_field();
                 for (i, s) in per_sample.iter().enumerate() {
                     if s.is_empty() {
                         // r[impl vcf_writer.missing_dot]
@@ -1149,6 +1144,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                             .map_err(|source| VcfError::FailedToWriteFormattedString { source })?;
                     }
                 }
+                vcf.commit_format_field(id);
             }
         }
         Ok(())
@@ -1163,7 +1159,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
             values.iter().map(|s| if s.is_empty() { 1 } else { s.len() }).max().unwrap_or(0);
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
-                let replacing = enc.prepare_format_field(id);
+                let start = enc.indiv_buf.len();
                 // BCF FORMAT char vectors are fixed-width: every sample stores `width`
                 // bytes, shorter strings NUL-padded (htslib bcf_enc_vchar).
                 // r[impl bcf_writer.string_encoding]
@@ -1179,12 +1175,10 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         enc.indiv_buf.push(0);
                     }
                 }
-                if !replacing {
-                    enc.n_fmt = enc.n_fmt.saturating_add(1);
-                }
+                enc.commit_format_field(id, start);
             }
             EncoderInner::Vcf(vcf) => {
-                vcf.prepare_format_field(id);
+                vcf.begin_format_field();
                 for (i, s) in values.iter().enumerate() {
                     if s.is_empty() {
                         // r[impl vcf_writer.missing_dot]
@@ -1197,6 +1191,7 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                         percent_encode_into(&mut vcf.sample_bufs[i], s.as_bytes());
                     }
                 }
+                vcf.commit_format_field(id);
             }
         }
         Ok(())

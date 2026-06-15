@@ -1148,7 +1148,8 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
         let info_col = data_line.split('\t').nth(7).unwrap();
-        assert_eq!(info_col, "BQ=35.5;DP=100", "overwritten field should appear last");
+        // In-place overwrite (htslib parity): DP keeps its original first position.
+        assert_eq!(info_col, "DP=100;BQ=35.5", "overwritten field keeps its original position");
     }
 
     // r[verify record_encoder.info_dedup]
@@ -1172,7 +1173,8 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
         let info_col = data_line.split('\t').nth(7).unwrap();
-        assert_eq!(info_col, "DP=50;DB;BQ=99", "overwritten middle field should move to end");
+        // In-place overwrite (htslib parity): BQ keeps its middle position.
+        assert_eq!(info_col, "DP=50;BQ=99;DB", "overwritten middle field keeps its position");
     }
 
     // r[verify record_encoder.info_dedup]
@@ -1289,8 +1291,9 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         let data_line = text.lines().find(|l| !l.starts_with('#')).unwrap();
         let cols: Vec<&str> = data_line.split('\t').collect();
-        assert_eq!(cols[8], "DP:GT", "overwritten GT should move to end of FORMAT keys");
-        assert_eq!(cols[9], "45:1/1", "sample data should match reordered keys");
+        // In-place overwrite (htslib parity): GT keeps its original first column.
+        assert_eq!(cols[8], "GT:DP", "overwritten GT keeps its original position");
+        assert_eq!(cols[9], "1/1:45", "sample data follows the unchanged key order");
     }
 
     // r[verify record_encoder.format_dedup]

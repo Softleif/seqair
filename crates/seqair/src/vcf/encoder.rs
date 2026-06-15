@@ -107,26 +107,54 @@ impl ContigHandle {
 
 // r[impl record_encoder.info_dedup]
 // r[impl record_encoder.format_dedup]
-/// Tracks written fields by `dict_idx` to detect duplicates within a record.
-/// Reused across records: cleared per record, allocation retained.
+/// Tracks written fields by `dict_idx` to detect duplicates within a record and
+/// overwrite them in place. Reused across records: cleared per record, all
+/// allocations retained.
+///
+/// Duplicate **detection** is O(1): a `u64` bitset keyed directly by `dict_idx`
+/// (which the header builder caps below 64 via
+/// [`MAX_DICT_ENTRIES`](crate::vcf::header::MAX_DICT_ENTRIES)). The linear
+/// `entries` scan only runs when a duplicate is actually found — i.e. never on
+/// the common write-each-field-once path.
 #[derive(Default)]
 pub(crate) struct FieldTracker {
-    /// `(dict_idx, byte_offset_in_buffer)` in write order.
+    /// `(dict_idx, start_offset)` per distinct field, in first-write order.
+    /// Offsets stay ascending and are kept in sync across in-place overwrites.
     entries: Vec<(u32, usize)>,
+    /// Membership bitset keyed by `dict_idx`. Bit `i` set ⇒ field `i` written.
+    seen: u64,
+    /// Reused scratch holding the freshly-appended field bytes during the rare
+    /// overwrite path, so they can be spliced over the previous occurrence.
+    scratch: Vec<u8>,
+}
+
+/// Bit for `dict_idx` in the membership set. `dict_idx < 64` is guaranteed by
+/// the header builder; the mask keeps the shift defined even if that is violated
+/// (the worst case is a spurious scan, never UB).
+fn dict_bit(dict_idx: u32) -> u64 {
+    debug_assert!(dict_idx < 64, "dict_idx must be < 64 (enforced by the header builder)");
+    1u64 << (dict_idx & 63)
 }
 
 #[allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
-    reason = "idx is always from find() which guarantees it is in bounds; \
-              delta is always ≤ buf.len() since it came from a drain range"
+    reason = "idx comes from find() (in bounds); old_end >= old_start are a tracked byte range; \
+              start/end offsets stay within buf by construction"
 )]
 impl FieldTracker {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.seen = 0;
+        // `scratch` keeps its capacity for reuse.
     }
 
-    /// Returns `Some(index)` if `dict_idx` was already recorded.
+    /// Whether `dict_idx` has already been written in this record (O(1)).
+    fn contains(&self, dict_idx: u32) -> bool {
+        self.seen & dict_bit(dict_idx) != 0
+    }
+
+    /// Index of `dict_idx` in `entries`. Only called once a duplicate is known.
     fn find(&self, dict_idx: u32) -> Option<usize> {
         self.entries.iter().position(|(id, _)| *id == dict_idx)
     }
@@ -138,63 +166,62 @@ impl FieldTracker {
         (start, end)
     }
 
-    /// Remove entry at `idx` and subtract `delta` from all subsequent offsets.
-    fn remove_and_adjust(&mut self, idx: usize, delta: usize) {
-        self.entries.remove(idx);
-        for entry in &mut self.entries[idx..] {
-            entry.1 -= delta;
+    /// Record a brand-new field starting at `start`.
+    fn mark(&mut self, dict_idx: u32, start: usize) {
+        self.seen |= dict_bit(dict_idx);
+        self.entries.push((dict_idx, start));
+    }
+
+    /// Shift the offsets of every field written after `idx` by `new_len - old_len`
+    /// (the size change of an in-place overwrite). The field at `idx` keeps its
+    /// start offset.
+    fn adjust_after(&mut self, idx: usize, old_len: usize, new_len: usize) {
+        if new_len >= old_len {
+            let grow = new_len - old_len;
+            for entry in &mut self.entries[idx + 1..] {
+                entry.1 += grow;
+            }
+        } else {
+            let shrink = old_len - new_len;
+            for entry in &mut self.entries[idx + 1..] {
+                entry.1 -= shrink;
+            }
         }
     }
 
-    pub(crate) fn push(&mut self, dict_idx: u32, offset: usize) {
-        self.entries.push((dict_idx, offset));
-    }
-
-    /// If `dict_idx` was previously written, remove its bytes from `buf` and
-    /// return `true`. The caller should skip incrementing the field count.
-    pub(crate) fn remove_duplicate(
+    /// Commit a field whose encoded bytes were just appended at `[start..buf.len()]`.
+    ///
+    /// Returns `true` for a new field (the caller increments its field count).
+    /// For a duplicate, the freshly-appended bytes are spliced over the previous
+    /// occurrence **in place** — preserving field order, matching htslib's
+    /// `bcf_update_*` overwrite semantics — and `false` is returned. `skip_sep`
+    /// drops one leading byte (the VCF `;` separator) from the appended bytes
+    /// when the overwritten field occupies the first slot, which has no separator.
+    pub(crate) fn commit(
         &mut self,
         buf: &mut Vec<u8>,
         dict_idx: u32,
         name: &str,
+        start: usize,
+        skip_sep: bool,
     ) -> bool {
-        let Some(idx) = self.find(dict_idx) else {
-            return false;
-        };
-        tracing::warn!(field = name, "field encoded twice; overwriting previous value");
-        let (start, end) = self.byte_range(idx, buf.len());
-        buf.drain(start..end);
-        self.remove_and_adjust(idx, end - start);
-        true
-    }
-
-    /// Like [`remove_duplicate`](Self::remove_duplicate) but also handles the
-    /// VCF text `;` separator: when the first field is removed, the next field's
-    /// leading `;` must be stripped.
-    pub(crate) fn remove_duplicate_vcf(
-        &mut self,
-        buf: &mut Vec<u8>,
-        info_count: &mut u16,
-        dict_idx: u32,
-        name: &str,
-    ) -> bool {
-        let Some(idx) = self.find(dict_idx) else {
-            return false;
-        };
-        tracing::warn!(field = name, "field encoded twice; overwriting previous value");
-        let (start, end) = self.byte_range(idx, buf.len());
-        buf.drain(start..end);
-        let delta = end - start;
-        // First field has no `;` prefix, but the next field does — strip it.
-        // The `;` is part of the next entry's tracked range, so removing it
-        // does not increase the offset delta for subsequent entries.
-        if idx == 0 && self.entries.len() > idx + 1 {
-            let sep_pos = start; // after drain, `;` is now at `start`
-            buf.drain(sep_pos..=sep_pos);
+        if !self.contains(dict_idx) {
+            self.mark(dict_idx, start);
+            return true;
         }
-        self.remove_and_adjust(idx, delta);
-        *info_count = info_count.saturating_sub(1);
-        true
+        tracing::warn!(field = name, "field encoded twice; overwriting previous value");
+        let idx = self.find(dict_idx).expect("contains() implies an entry exists");
+        let (old_start, old_end) = self.byte_range(idx, start);
+
+        self.scratch.clear();
+        self.scratch.extend_from_slice(&buf[start..]);
+        buf.truncate(start);
+        let off = usize::from(skip_sep && idx == 0);
+        let new = &self.scratch[off..];
+        let (old_len, new_len) = (old_end - old_start, new.len());
+        buf.splice(old_start..old_end, new.iter().copied());
+        self.adjust_after(idx, old_len, new_len);
+        false
     }
 }
 
@@ -480,110 +507,126 @@ mod tests {
 
     // ── FieldTracker unit tests ─────────────────────────────────────
 
-    #[test]
-    fn field_tracker_remove_duplicate_first_of_three() {
-        // Simulate 3 BCF INFO fields: [AAAA][BBBB][CCCC]
-        let mut buf = b"AAAABBBBCCCC".to_vec();
-        let mut t = FieldTracker::default();
-        t.push(1, 0); // field 1 at offset 0
-        t.push(2, 4); // field 2 at offset 4
-        t.push(3, 8); // field 3 at offset 8
-
-        assert!(t.remove_duplicate(&mut buf, 1, "F1"));
-        assert_eq!(buf, b"BBBBCCCC");
-        // Tracker should have 2 entries with adjusted offsets
-        assert!(t.find(1).is_none());
-        assert_eq!(t.find(2), Some(0));
-        assert_eq!(t.find(3), Some(1));
+    /// Mimic the encoder flow: append `bytes` at the buffer's end, then commit
+    /// them as field `dict_idx`. Returns whether the field was new.
+    fn append_commit(
+        t: &mut FieldTracker,
+        buf: &mut Vec<u8>,
+        dict_idx: u32,
+        bytes: &[u8],
+        skip_sep: bool,
+    ) -> bool {
+        let start = buf.len();
+        buf.extend_from_slice(bytes);
+        t.commit(buf, dict_idx, "f", start, skip_sep)
     }
 
     #[test]
-    fn field_tracker_remove_duplicate_middle_of_three() {
-        let mut buf = b"AAAABBBBCCCC".to_vec();
+    fn commit_new_fields_append_in_order() {
+        let mut buf = Vec::new();
         let mut t = FieldTracker::default();
-        t.push(1, 0);
-        t.push(2, 4);
-        t.push(3, 8);
-
-        assert!(t.remove_duplicate(&mut buf, 2, "F2"));
-        assert_eq!(buf, b"AAAACCCC");
-        assert_eq!(t.find(1), Some(0));
-        assert!(t.find(2).is_none());
-        assert_eq!(t.find(3), Some(1));
-    }
-
-    #[test]
-    fn field_tracker_remove_duplicate_last_of_three() {
-        let mut buf = b"AAAABBBBCCCC".to_vec();
-        let mut t = FieldTracker::default();
-        t.push(1, 0);
-        t.push(2, 4);
-        t.push(3, 8);
-
-        assert!(t.remove_duplicate(&mut buf, 3, "F3"));
-        assert_eq!(buf, b"AAAABBBB");
+        assert!(append_commit(&mut t, &mut buf, 1, b"AAAA", false));
+        assert!(append_commit(&mut t, &mut buf, 2, b"BBBB", false));
+        assert!(append_commit(&mut t, &mut buf, 3, b"CCCC", false));
+        assert_eq!(buf, b"AAAABBBBCCCC");
         assert_eq!(t.find(1), Some(0));
         assert_eq!(t.find(2), Some(1));
-        assert!(t.find(3).is_none());
+        assert_eq!(t.find(3), Some(2));
     }
 
     #[test]
-    fn field_tracker_remove_duplicate_only_entry() {
-        let mut buf = b"AAAA".to_vec();
+    fn commit_duplicate_overwrites_in_place_same_width() {
+        let mut buf = Vec::new();
         let mut t = FieldTracker::default();
-        t.push(1, 0);
-
-        assert!(t.remove_duplicate(&mut buf, 1, "F1"));
-        assert!(buf.is_empty());
-        assert!(t.find(1).is_none());
+        append_commit(&mut t, &mut buf, 1, b"AAAA", false);
+        append_commit(&mut t, &mut buf, 2, b"BBBB", false);
+        append_commit(&mut t, &mut buf, 3, b"CCCC", false);
+        // Overwrite the middle field — it MUST keep its position, not move to end.
+        assert!(!append_commit(&mut t, &mut buf, 2, b"DDDD", false));
+        assert_eq!(buf, b"AAAADDDDCCCC");
+        assert_eq!(t.find(1), Some(0));
+        assert_eq!(t.find(2), Some(1)); // still the middle entry
+        assert_eq!(t.find(3), Some(2));
+        assert_eq!(t.byte_range(2, buf.len()), (8, 12)); // C field unmoved
     }
 
     #[test]
-    fn field_tracker_no_duplicate_returns_false() {
-        let mut buf = b"AAAA".to_vec();
+    fn commit_duplicate_overwrites_in_place_shrinks() {
+        let mut buf = Vec::new();
         let mut t = FieldTracker::default();
-        t.push(1, 0);
-
-        assert!(!t.remove_duplicate(&mut buf, 99, "missing"));
-        assert_eq!(buf, b"AAAA"); // unchanged
+        append_commit(&mut t, &mut buf, 1, b"AAAA", false);
+        append_commit(&mut t, &mut buf, 2, b"BBBB", false);
+        append_commit(&mut t, &mut buf, 3, b"CCCC", false);
+        // Replace field 1 with a SHORTER value: trailing fields shift left.
+        assert!(!append_commit(&mut t, &mut buf, 1, b"X", false));
+        assert_eq!(buf, b"XBBBBCCCC");
+        assert_eq!(t.byte_range(0, buf.len()), (0, 1)); // shrunk field 1
+        assert_eq!(t.byte_range(1, buf.len()), (1, 5)); // field 2 followed it
+        assert_eq!(t.byte_range(2, buf.len()), (5, 9)); // field 3 after that
     }
 
     #[test]
-    fn field_tracker_vcf_remove_first_strips_separator() {
-        // VCF: "DP=50;BQ=30" — DP at 0, ;BQ at 5
-        let mut buf = b"DP=50;BQ=30".to_vec();
+    fn commit_duplicate_overwrites_in_place_grows() {
+        let mut buf = Vec::new();
         let mut t = FieldTracker::default();
-        t.push(1, 0); // DP starts at 0
-        t.push(2, 5); // ;BQ starts at 5
-        let mut count = 2u16;
-
-        assert!(t.remove_duplicate_vcf(&mut buf, &mut count, 1, "DP"));
-        assert_eq!(buf, b"BQ=30");
-        assert_eq!(count, 1);
-        assert!(t.find(1).is_none());
-        assert_eq!(t.find(2), Some(0));
+        append_commit(&mut t, &mut buf, 1, b"AAAA", false);
+        append_commit(&mut t, &mut buf, 2, b"BBBB", false);
+        // Replace field 1 with a LONGER value: field 2 shifts right.
+        assert!(!append_commit(&mut t, &mut buf, 1, b"AAAAAA", false));
+        assert_eq!(buf, b"AAAAAABBBB");
+        assert_eq!(t.byte_range(0, buf.len()), (0, 6));
+        assert_eq!(t.byte_range(1, buf.len()), (6, 10));
     }
 
     #[test]
-    fn field_tracker_vcf_remove_last() {
-        let mut buf = b"DP=50;BQ=30".to_vec();
+    fn commit_repeated_duplicate_keeps_position() {
+        let mut buf = Vec::new();
         let mut t = FieldTracker::default();
-        t.push(1, 0);
-        t.push(2, 5);
-        let mut count = 2u16;
-
-        assert!(t.remove_duplicate_vcf(&mut buf, &mut count, 2, "BQ"));
-        assert_eq!(buf, b"DP=50");
-        assert_eq!(count, 1);
+        append_commit(&mut t, &mut buf, 1, b"AAAA", false);
+        append_commit(&mut t, &mut buf, 2, b"BBBB", false);
+        append_commit(&mut t, &mut buf, 1, b"PP", false);
+        append_commit(&mut t, &mut buf, 1, b"QQQ", false);
+        assert_eq!(buf, b"QQQBBBB");
+        assert_eq!(t.find(1), Some(0));
+        assert_eq!(t.find(2), Some(1));
     }
 
     #[test]
-    fn field_tracker_clear_resets() {
+    fn commit_vcf_overwrite_first_drops_separator() {
+        // "DP=50;BQ=30" then overwrite DP (the first slot) → "DP=99;BQ=30".
+        let mut buf = Vec::new();
         let mut t = FieldTracker::default();
-        t.push(1, 0);
-        t.push(2, 4);
+        append_commit(&mut t, &mut buf, 1, b"DP=50", true);
+        append_commit(&mut t, &mut buf, 2, b";BQ=30", true);
+        assert_eq!(buf, b"DP=50;BQ=30");
+        // The encoder always appends a leading ';' for a non-first write; the
+        // first-slot overwrite must drop it.
+        assert!(!append_commit(&mut t, &mut buf, 1, b";DP=99", true));
+        assert_eq!(buf, b"DP=99;BQ=30");
+        assert_eq!(t.find(1), Some(0));
+        assert_eq!(t.find(2), Some(1));
+    }
+
+    #[test]
+    fn commit_vcf_overwrite_non_first_keeps_separator() {
+        let mut buf = Vec::new();
+        let mut t = FieldTracker::default();
+        append_commit(&mut t, &mut buf, 1, b"DP=50", true);
+        append_commit(&mut t, &mut buf, 2, b";BQ=30", true);
+        // Overwriting a non-first slot keeps its ';' separator.
+        assert!(!append_commit(&mut t, &mut buf, 2, b";BQ=99", true));
+        assert_eq!(buf, b"DP=50;BQ=99");
+    }
+
+    #[test]
+    fn commit_contains_and_clear() {
+        let mut buf = Vec::new();
+        let mut t = FieldTracker::default();
+        append_commit(&mut t, &mut buf, 5, b"AAAA", false);
+        assert!(t.contains(5));
+        assert!(!t.contains(6));
         t.clear();
-        assert!(t.find(1).is_none());
-        assert!(t.find(2).is_none());
+        assert!(!t.contains(5));
+        assert!(t.find(5).is_none());
     }
 }

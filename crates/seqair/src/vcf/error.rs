@@ -53,8 +53,12 @@ pub enum VcfHeaderError {
     #[error("too many contigs (exceeds u32::MAX)")]
     TooManyContigs,
 
-    #[error("too many header fields: BCF string dictionary index exceeds u32::MAX")]
-    TooManyFields,
+    #[error(
+        "too many header fields: the FILTER/INFO/FORMAT string dictionary is limited to {max} \
+         entries (so the per-record duplicate-field tracker can use a u64 bitset keyed by \
+         dictionary index)"
+    )]
+    TooManyFields { max: usize },
 }
 
 // r[impl vcf_record.alleles_typed]
