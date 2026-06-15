@@ -576,7 +576,7 @@ fn read_all<R: Read>(reader: &mut R, buf: &mut [u8]) -> usize {
     clippy::cast_possible_truncation,
     reason = "bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
 )]
-pub(super) fn merged_byte_size(chunks: &[Chunk]) -> usize {
+pub(crate) fn merged_byte_size(chunks: &[Chunk]) -> usize {
     merge_chunks(chunks)
         .iter()
         .map(|r| {

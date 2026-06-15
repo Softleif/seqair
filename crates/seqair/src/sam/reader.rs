@@ -321,6 +321,14 @@ impl<R: Read + Seek> IndexedSamReader<R> {
         &self.shared.header
     }
 
+    /// Estimate the compressed bytes a `[start, end]` region query would load,
+    /// for byte-aware segmentation. See
+    /// [`IndexedBamReader::estimate_region_bytes`](crate::bam::IndexedBamReader::estimate_region_bytes).
+    pub fn estimate_region_bytes(&self, tid: u32, start: Pos0, end: Pos0) -> u64 {
+        let chunks = self.shared.index.query(tid, start, end);
+        crate::bam::region_buf::merged_byte_size(&chunks) as u64
+    }
+
     // r[impl sam.reader.fetch_into]
     // r[impl sam.reader.sorted_order]
     #[instrument(level = "debug", skip(self, store), fields(tid, start, end))]

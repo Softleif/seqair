@@ -252,7 +252,34 @@ impl<E: CustomizeRecordStore> Readers<E> {
         opts: SegmentOptions,
     ) -> Result<Segments, ReaderError> {
         let ranges = super::segment::resolve_target(target, self.header())?;
-        Ok(Segments::new(ranges, opts))
+
+        // With a byte budget set, tile positionally and then subdivide each
+        // tile so its estimated compressed load stays within budget. This is
+        // eager (it queries the index per tile), but the per-tile cost is an
+        // in-memory BAI lookup and the result is what callers collect anyway.
+        // Backends that can't estimate bytes (CRAM) report 0 here, so the
+        // split is a no-op and tiles pass through unchanged.
+        let Some(budget) = opts.max_bytes() else {
+            return Ok(Segments::new(ranges, opts));
+        };
+        let budget = budget.get();
+        let overlap = opts.overlap();
+        let mut estimate = |tid: u32, start: Pos0, end: Pos0| {
+            self.alignment.estimate_region_bytes(tid, start, end).unwrap_or(0)
+        };
+        let mut out = Vec::new();
+        for seg in Segments::new(ranges, opts) {
+            super::segment::split_segment_by_bytes(&seg, overlap, budget, &mut estimate, &mut out);
+        }
+        Ok(Segments::precomputed(out))
+    }
+
+    /// Estimate the **compressed** bytes a `[start, end]` region query would
+    /// load. `None` for CRAM (its slice reader bounds memory differently). This
+    /// is the same estimate [`segments`](Self::segments) budgets against.
+    #[must_use]
+    pub fn estimate_region_bytes(&self, tid: u32, start: Pos0, end: Pos0) -> Option<u64> {
+        self.alignment.estimate_region_bytes(tid, start, end)
     }
 
     // r[impl unified.readers_pileup]
@@ -416,6 +443,60 @@ mod tests {
 
     fn test_fasta_path() -> &'static Path {
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.gz"))
+    }
+
+    // r[verify unified.segment_byte_budget]
+    /// `segments()` with a byte budget subdivides a region (spanning several
+    /// index leaf bins) so each emitted segment's estimated load stays within
+    /// budget, while the cores still tile the requested range exactly.
+    #[test]
+    fn segments_byte_budget_subdivides_region() {
+        use std::num::{NonZeroU32, NonZeroU64};
+        let readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        // chr19 reads span ~6.10–6.14 Mb (several 16 kb leaf bins).
+        let start = Pos0::new(6_100_000).unwrap();
+        let end = Pos0::new(6_145_000).unwrap();
+        let tid = readers.header().tid("chr19").expect("chr19 in header");
+        let total = readers.estimate_region_bytes(tid, start, end).expect("BAM estimate");
+        assert!(total > 0, "test region should contain reads");
+
+        // One positional tile over the whole region (no byte budget).
+        let big = NonZeroU32::new(1_000_000).unwrap();
+        let positional: Vec<_> = readers
+            .segments(("chr19", start, end), SegmentOptions::new(big).without_byte_budget())
+            .unwrap()
+            .collect();
+        assert_eq!(positional.len(), 1, "without a budget the region is one tile");
+
+        // A budget below the whole-region size must subdivide it.
+        let budget = NonZeroU64::new((total / 4).max(1)).unwrap();
+        let budgeted: Vec<_> = readers
+            .segments(("chr19", start, end), SegmentOptions::new(big).with_max_bytes(budget))
+            .unwrap()
+            .collect();
+        assert!(budgeted.len() > 1, "budget {budget} (of {total}) must split the region");
+
+        // Cores tile [start, end] exactly.
+        assert_eq!(*budgeted.first().unwrap().core_range().start(), start);
+        assert_eq!(*budgeted.last().unwrap().core_range().end(), end);
+        for w in budgeted.windows(2) {
+            assert_eq!(
+                w[0].core_range().end().as_u64() + 1,
+                w[1].core_range().start().as_u64(),
+                "cores must be contiguous"
+            );
+        }
+
+        // Each segment fits the budget, unless it's an irreducible single base.
+        for s in &budgeted {
+            let bytes = readers.estimate_region_bytes(tid, s.start(), s.end()).unwrap();
+            assert!(
+                bytes <= budget.get() || s.len() == 1,
+                "segment {:?} = {bytes} B over budget {budget} with len {}",
+                (s.start().as_u64(), s.end().as_u64()),
+                s.len()
+            );
+        }
     }
 
     // r[verify fasta.fetch.buffer_reuse]

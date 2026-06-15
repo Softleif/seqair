@@ -170,6 +170,17 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         &self.shared.header
     }
 
+    /// Estimate the **compressed** bytes a `[start, end]` region query would
+    /// load into a [`RegionBuf`] — the merged byte span of its index chunks.
+    ///
+    /// This is what byte-aware segmentation budgets against. It's only as fine
+    /// as the index (~16 kb leaf bins), so a sub-bin range still reports its
+    /// whole leaf bin's size.
+    pub fn estimate_region_bytes(&self, tid: u32, start: Pos0, end: Pos0) -> u64 {
+        let chunks = self.shared.index.query(tid, start, end);
+        region_buf::merged_byte_size(&chunks) as u64
+    }
+
     // r[impl bam.reader.fetch_into+2]
     // r[impl bam.reader.overlap_filter]
     // r[impl bam.reader.sorted_order+2]
