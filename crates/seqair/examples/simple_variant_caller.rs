@@ -227,7 +227,7 @@ fn main() -> anyhow::Result<()> {
     let mut n_calls = 0u32;
 
     for segment in &plan {
-        let mut pileup = readers.pileup(segment)?;
+        let mut pileup = readers.pileup(segment, seqair::reader::DepthLimit::Unlimited)?;
 
         // Restrict emission to the segment's "owned" core range so that
         // adjacent overlapping segments don't double-call the same site.

@@ -6,6 +6,7 @@ use super::{
 use crate::{
     bam::{
         BamHeader,
+        depth_cap::{DepthCap, DepthLimit},
         pileup::{PileupEngine, PileupGuard, RefSeq},
         record_store::{CustomizeRecordStore, RecordStore},
     },
@@ -58,7 +59,7 @@ use tracing::instrument;
 ///     // `pileup()` fetches records AND the reference sequence for the segment.
 ///     // The returned guard derefs to PileupEngine and on drop returns the
 ///     // RecordStore to Readers (no manual recover step needed).
-///     let mut pileup = readers.pileup(segment)?;
+///     let mut pileup = readers.pileup(segment, seqair::reader::DepthLimit::Unlimited)?;
 ///
 ///     while let Some(column) = pileup.pileups() {
 ///         let _pos      = column.pos();
@@ -107,7 +108,7 @@ use tracing::instrument;
 ///         let chunk = chunk.to_vec();
 ///         s.spawn(move || {
 ///             for seg in &chunk {
-///                 let mut pileup = forked.pileup(seg).unwrap();
+///                 let mut pileup = forked.pileup(seg, seqair::reader::DepthLimit::Unlimited).unwrap();
 ///                 while let Some(_col) = pileup.pileups() { /* process */ }
 ///                 // `pileup` drops here; store goes back into `forked`.
 ///             }
@@ -239,7 +240,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// let opts = SegmentOptions::new(NonZeroU32::new(100_000).unwrap()).with_overlap(200)?;
     /// let plan: Vec<_> = readers.segments("chr19", opts)?.collect();
     /// for seg in plan {
-    ///     let mut p = readers.pileup(&seg)?;
+    ///     let mut p = readers.pileup(&seg, seqair::reader::DepthLimit::Unlimited)?;
     ///     while let Some(_col) = p.pileups() { /* ... */ }
     ///     // `p` drops here; the RecordStore goes back into `readers`.
     /// }
@@ -320,7 +321,11 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// allocation. No explicit recover step is needed.
     ///
     /// [`PileupColumn::reference_base`]: crate::bam::pileup::PileupColumn::reference_base
-    pub fn pileup(&mut self, segment: &Segment) -> Result<PileupGuard<'_, E::Extra>, ReaderError> {
+    pub fn pileup(
+        &mut self,
+        segment: &Segment,
+        depth: DepthLimit,
+    ) -> Result<PileupGuard<'_, E::Extra>, ReaderError> {
         let tid = segment.tid();
         let start = segment.start();
         let end = segment.end();
@@ -355,12 +360,31 @@ impl<E: CustomizeRecordStore> Readers<E> {
             });
         }
 
-        // Split borrows: fetch writes into `store` while customize is consulted
-        // for filter. Three disjoint &mut borrows of self.
-        let alignment = &mut self.alignment;
-        let store = &mut self.store;
-        let customize = &mut self.customize;
-        alignment.fetch_into_customized(tid.as_u32(), start, end, store, customize)?;
+        match depth.per_column() {
+            None => {
+                // Split borrows: fetch writes into `store` while customize is
+                // consulted for filter. Three disjoint &mut borrows of self.
+                let alignment = &mut self.alignment;
+                let store = &mut self.store;
+                let customize = &mut self.customize;
+                alignment.fetch_into_customized(tid.as_u32(), start, end, store, customize)?;
+            }
+            Some(cap) => {
+                // Cap reads overlapping any column at load time so an
+                // ultra-deep pileup can't blow up the `RecordStore`. The
+                // customize is cloned for the fetch and restored afterwards so
+                // any state it accumulates survives.
+                let mut capped = DepthCap::with_cap(self.customize.clone(), Some(cap));
+                self.alignment.fetch_into_customized(
+                    tid.as_u32(),
+                    start,
+                    end,
+                    &mut self.store,
+                    &mut capped,
+                )?;
+                self.customize = capped.into_inner();
+            }
+        }
 
         // Fetch `[start, end]` (inclusive). FASTA APIs expect half-open [start, stop).
         // Use the u64 path so `end == Pos0::max_value()` doesn't truncate the
@@ -550,7 +574,7 @@ mod tests {
 
         // Full loop: drain the engine, then drop.
         {
-            let mut p = readers.pileup(&segments[0]).unwrap();
+            let mut p = readers.pileup(&segments[0], DepthLimit::Unlimited).unwrap();
             while p.pileups().is_some() {}
             // p drops at end of scope.
         }
@@ -560,7 +584,7 @@ mod tests {
         // Early-break loop: pull one column then break, do *not* call any
         // recover step. The guard's Drop must still write the store back.
         {
-            let mut p = readers.pileup(&segments[0]).unwrap();
+            let mut p = readers.pileup(&segments[0], DepthLimit::Unlimited).unwrap();
             // Pull one column then break — simulating the "user found what
             // they were looking for and broke out" pattern that the old
             // explicit `recover_store` API failed on. Suppress
@@ -605,7 +629,7 @@ mod tests {
 
         // Misuse: drain the store through Deref before the guard drops.
         {
-            let mut p = readers.pileup(&segments[0]).unwrap();
+            let mut p = readers.pileup(&segments[0], DepthLimit::Unlimited).unwrap();
             while p.pileups().is_some() {}
             let drained = p.take_store().expect("populated store available for the first take");
             // Hold the drained store alive past the guard's drop.
@@ -649,7 +673,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = readers.pileup(&segment).unwrap_err();
+        let err = readers.pileup(&segment, DepthLimit::Unlimited).unwrap_err();
         match err {
             ReaderError::SegmentHeaderMismatch { contig, expected_tid } => {
                 assert_eq!(contig, bogus_contig);
@@ -689,7 +713,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = readers.pileup(&segment).unwrap_err();
+        let err = readers.pileup(&segment, DepthLimit::Unlimited).unwrap_err();
         match err {
             ReaderError::SegmentContigLengthMismatch {
                 contig,
@@ -740,7 +764,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = readers.pileup(&segment).unwrap_err();
+        let err = readers.pileup(&segment, DepthLimit::Unlimited).unwrap_err();
         assert!(
             matches!(err, ReaderError::SegmentHeaderMismatch { .. }),
             "expected SegmentHeaderMismatch, got {err:?}"

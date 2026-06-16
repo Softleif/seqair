@@ -20,7 +20,7 @@
 //! 2. Open the readers with `Readers::open_customized(bam, fasta, customize)`.
 //! 3. Plan the pass with `readers.segments(target, opts)` — pick a `max_len`
 //!    that bounds memory per tile.
-//! 4. For each [`Segment`], call `readers.pileup(&segment)` — this fetches
+//! 4. For each [`Segment`], call `readers.pileup(&segment, seqair::reader::DepthLimit::Unlimited)` — this fetches
 //!    records (running `keep_record` at push time), then `compute` once per
 //!    kept record, fetches the reference sequence, and returns a
 //!    `PileupEngine<E::Extra>` ready for iteration.
@@ -114,7 +114,9 @@ fn main() -> anyhow::Result<()> {
     println!("pos\tdepth\tref\tread_groups\tmean_aligned_frac");
 
     for segment in &plan {
-        let mut engine = readers.pileup(segment).context("could not build pileup")?;
+        let mut engine = readers
+            .pileup(segment, seqair::reader::DepthLimit::Unlimited)
+            .context("could not build pileup")?;
         let core = segment.core_range();
 
         while let Some(column) = engine.pileups() {
