@@ -1,14 +1,15 @@
-//! Bulk-read BGZF buffer for high-latency I/O (cluster/NFS storage).
+//! Streaming windowed BGZF buffer for high-latency I/O (cluster/NFS storage).
 //!
-//! Reads all compressed bytes for a set of BAM index chunks into memory
-//! in one large I/O operation, then decompresses from RAM.
+//! Reads compressed bytes for a set of BAM index chunks in a bounded sliding
+//! window (a few large sequential reads), refilling forward on demand as
+//! decompression advances. Peak resident memory is the window budget, not the
+//! whole region — see [`WINDOW_BUDGET`].
 
 use super::{
     bgzf::{self, BgzfError, VirtualOffset},
     index::Chunk,
 };
 use std::io::{Read, Seek, SeekFrom};
-use tracing::{instrument, warn};
 
 pub const PROFILE_TARGET: &str = "seqair::profile";
 
@@ -22,12 +23,13 @@ const MAX_BLOCK_SIZE: usize = 65536;
 /// record that straddles the end boundary.
 pub(super) const CHUNK_END_PAD: usize = MAX_BLOCK_SIZE;
 
-/// Maximum compressed bytes loaded into a single [`RegionBuf`].
+/// Target resident compressed bytes per [`RegionBuf`] window.
 ///
-/// Guards against OOM from corrupt indexes or very large query regions.
-/// The batching logic in `fetch_into` partitions chunks so that each batch
-/// stays within this limit; the `RegionBuf::load` check is a final safeguard.
-pub(super) const MAX_REGION_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+/// Each refill reads up to this much in one large sequential read, so memory
+/// stays bounded regardless of how large the queried region is. The effective
+/// budget is floored at one max BGZF block ([`MAX_BLOCK_SIZE`]) so any single
+/// block always fits.
+pub(super) const WINDOW_BUDGET: usize = 64 * 1024 * 1024; // 64 MiB
 
 /// Pre-computed byte range covering one or more merged index chunks.
 struct MergedRange {
@@ -35,34 +37,37 @@ struct MergedRange {
     file_end: u64,
 }
 
-/// Maps a file offset range to a position in the buffer.
-#[derive(Debug, Clone)]
-struct RangeMapping {
-    /// Start file offset of this range.
-    file_start: u64,
-    /// End file offset (exclusive) of this range.
-    file_end: u64,
-    /// Offset in the data buffer where this range's bytes begin.
-    buf_start: usize,
-}
-
-/// In-memory BGZF decompressor for a pre-fetched region.
+/// Streaming BGZF decompressor over a region's index chunks.
 ///
-/// Created by [`RegionBuf::load`], which bulk-reads all compressed bytes
-/// for a region's index chunks into memory. All subsequent decompression
-/// happens from RAM with zero network I/O.
-pub struct RegionBuf {
-    /// Raw compressed bytes covering all merged chunk ranges (concatenated).
-    data: Vec<u8>,
-    /// Maps file offset ranges to buffer positions for disjoint ranges.
-    ranges: Vec<RangeMapping>,
-    /// Current read position within `data`.
+/// Created by [`RegionBuf::new`], which borrows a seekable reader and computes
+/// the merged byte ranges to stream, but reads nothing eagerly. Compressed
+/// bytes are pulled into a bounded [`WINDOW_BUDGET`]-sized window on demand and
+/// decompressed block-by-block.
+pub struct RegionBuf<'r, R: Read + Seek> {
+    /// Reader kept alive to refill the window. Bulk, unbuffered.
+    reader: &'r mut R,
+    /// Merged byte ranges to stream, sorted by file offset (the read plan).
+    ranges: Vec<MergedRange>,
+    /// Index of the range currently being streamed.
+    range_idx: usize,
+    /// Resident compressed bytes for the current position within `ranges[range_idx]`.
+    window: Vec<u8>,
+    /// File offset of `window[0]`.
+    ///
+    /// Invariant: `window_file_start + cursor` is the true file offset of
+    /// `window[cursor]`, and the window lies within `ranges[range_idx]`.
+    window_file_start: u64,
+    /// Read position within `window`.
     cursor: usize,
+    /// Authoritative file length, captured once; refills never read past it.
+    file_size: u64,
+    /// Per-window compressed-byte budget (floored at `MAX_BLOCK_SIZE`).
+    budget: usize,
     /// Decompressed block buffer (reused across blocks).
     buf: Vec<u8>,
     /// Current position within `buf`.
     buf_pos: usize,
-    /// File offset of the current BGZF block.
+    /// True file offset of the current BGZF block.
     block_offset: u64,
     eof: bool,
     decompressor: libdeflater::Decompressor,
@@ -70,11 +75,13 @@ pub struct RegionBuf {
     decompressed_bytes: u64,
 }
 
-impl std::fmt::Debug for RegionBuf {
+impl<R: Read + Seek> std::fmt::Debug for RegionBuf<'_, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegionBuf")
-            .field("data_len", &self.data.len())
             .field("ranges", &self.ranges.len())
+            .field("range_idx", &self.range_idx)
+            .field("window_len", &self.window.len())
+            .field("window_file_start", &self.window_file_start)
             .field("cursor", &self.cursor)
             .field("block_offset", &self.block_offset)
             .field("eof", &self.eof)
@@ -82,137 +89,163 @@ impl std::fmt::Debug for RegionBuf {
     }
 }
 
-impl RegionBuf {
-    // r[impl region_buf.load]
+impl<'r, R: Read + Seek> RegionBuf<'r, R> {
+    // r[impl region_buf.new]
     // r[impl region_buf.empty]
     // r[related region_buf.merge_chunks]
-    /// Bulk-read all compressed bytes for the given chunks into memory.
+    /// Plan a streaming read over the given chunks.
     ///
-    /// Merges overlapping/adjacent chunks to minimize I/O, then performs
-    /// one large read per merged range.
-    #[instrument(level = "trace", skip_all, fields(input_chunks = chunks.len()))]
-    pub fn load<R: Read + Seek>(reader: &mut R, chunks: &[Chunk]) -> Result<Self, BgzfError> {
-        if chunks.is_empty() {
-            return Ok(Self {
-                data: Vec::new(),
-                ranges: Vec::new(),
-                cursor: 0,
-                buf: Vec::new(),
-                buf_pos: 0,
-                block_offset: 0,
-                eof: true,
-                decompressor: libdeflater::Decompressor::new(),
-                blocks_decompressed: 0,
-                decompressed_bytes: 0,
-            });
-        }
+    /// Merges overlapping/adjacent chunks into the ranges to stream, but reads
+    /// nothing — the first window is pulled lazily on the first decode (or
+    /// [`seek_virtual`](Self::seek_virtual) with a non-zero intra-block offset).
+    pub fn new(reader: &'r mut R, chunks: &[Chunk]) -> Result<Self, BgzfError> {
+        Self::with_budget(reader, chunks, WINDOW_BUDGET)
+    }
 
-        let merged = merge_chunks(chunks);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "file offsets fit in usize on 64-bit platforms; BAM files are < 2^63"
-        )]
-        let total_bytes: usize = merged
-            .iter()
-            .map(|r| r.file_end.saturating_sub(r.file_start) as usize)
-            .fold(0usize, usize::saturating_add);
-
-        // r[impl region_buf.max_region_bytes]
-        if total_bytes > MAX_REGION_BYTES {
-            tracing::warn!(
-                total_bytes,
-                max_bytes = MAX_REGION_BYTES,
-                "region too large to load into memory; consider reducing batch size or query region"
-            );
-        }
-
+    // r[impl region_buf.window_budget]
+    /// Like [`new`](Self::new) but with an explicit window budget. Exposed for
+    /// tests that force many refills with a tiny budget; the budget is floored
+    /// at one max BGZF block so a single block always fits.
+    #[doc(hidden)]
+    pub fn with_budget(
+        reader: &'r mut R,
+        chunks: &[Chunk],
+        budget: usize,
+    ) -> Result<Self, BgzfError> {
+        let budget = budget.max(MAX_BLOCK_SIZE);
+        let ranges = merge_chunks(chunks);
+        let eof = ranges.is_empty();
+        let window_file_start = ranges.first().map(|r| r.file_start).unwrap_or(0);
         // r[impl io.fuzz.alloc_limits]
-        // Cap per-range allocations to the actual file size. Corrupt indexes
-        // can produce virtual offsets pointing far past EOF; without this cap,
-        // `data.resize(buf_start + len, 0)` would attempt a huge allocation
-        // even though `read_all` would only return whatever bytes exist.
+        // Capture the real file length so refills never over-allocate when a
+        // corrupt index points a chunk's end far past EOF.
         let file_size = reader.seek(SeekFrom::End(0)).map_err(|_| BgzfError::SeekFailed)?;
-
-        let mut data = Vec::with_capacity(total_bytes.min(MAX_REGION_BYTES));
-
-        let mut range_map = Vec::with_capacity(merged.len());
-        let mut max_range_us: u64 = 0;
-
-        for range in &merged {
-            let range_start = std::time::Instant::now();
-            reader.seek(SeekFrom::Start(range.file_start)).map_err(|_| BgzfError::SeekFailed)?;
-
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "on 64-bit platforms u64 → usize is lossless; BAM files are < 2^63"
-            )]
-            let len = file_size
-                .saturating_sub(range.file_start)
-                .min(range.file_end.saturating_sub(range.file_start))
-                as usize;
-
-            // The batching logic in fetch_into normally keeps ranges within
-            // MAX_REGION_BYTES. Whole-chromosome queries can produce single
-            // ranges that exceed the limit; allow them with a warning rather
-            // than returning an error, since the data is legitimate.
-            if len > MAX_REGION_BYTES {
-                tracing::warn!(
-                    len,
-                    max_bytes = MAX_REGION_BYTES,
-                    "single merged range exceeds MAX_REGION_BYTES; loading anyway"
-                );
-            }
-            let buf_start = data.len();
-            data.resize(buf_start.saturating_add(len), 0);
-            // Read as much as available — the last range may extend past EOF
-            #[allow(
-                clippy::indexing_slicing,
-                reason = "buf_start = pre-resize len, within bounds after resize"
-            )]
-            let actually_read = read_all(reader, &mut data[buf_start..]);
-            let actual_file_end = range.file_start.wrapping_add(actually_read as u64);
-            data.truncate(buf_start.wrapping_add(actually_read));
-
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "elapsed microseconds cannot reach u64::MAX (~580K years)"
-            )]
-            let range_us = range_start.elapsed().as_micros() as u64;
-            max_range_us = max_range_us.max(range_us);
-
-            range_map.push(RangeMapping {
-                file_start: range.file_start,
-                file_end: actual_file_end,
-                buf_start,
-            });
-        }
-
-        let first_file_start = range_map.first().map(|r| r.file_start).unwrap_or(0);
-
         Ok(RegionBuf {
-            data,
-            ranges: range_map,
+            reader,
+            ranges,
+            range_idx: 0,
+            window: Vec::new(),
+            window_file_start,
             cursor: 0,
+            file_size,
+            budget,
             buf: Vec::with_capacity(MAX_BLOCK_SIZE),
             buf_pos: 0,
-            block_offset: first_file_start,
-            eof: false,
+            block_offset: window_file_start,
+            eof,
             decompressor: libdeflater::Decompressor::new(),
             blocks_decompressed: 0,
             decompressed_bytes: 0,
         })
     }
 
+    /// Ensure at least `need` compressed bytes are resident at/after `cursor`
+    /// within the current range, refilling from the reader as necessary.
+    /// Returns the bytes available at/after `cursor` (may be `< need` at a
+    /// range tail or EOF — the caller then advances the range or stops).
+    fn ensure_available(&mut self, need: usize) -> Result<usize, BgzfError> {
+        let avail = self.window.len().wrapping_sub(self.cursor);
+        if avail >= need {
+            return Ok(avail);
+        }
+
+        // Drop the consumed prefix, keeping `window_file_start + cursor` exact.
+        if self.cursor > 0 {
+            let keep = self.window.len().wrapping_sub(self.cursor);
+            self.window.copy_within(self.cursor.., 0);
+            self.window.truncate(keep);
+            self.window_file_start = self.window_file_start.wrapping_add(self.cursor as u64);
+            self.cursor = 0;
+        }
+
+        let range_end = match self.ranges.get(self.range_idx) {
+            Some(range) => range.file_end.min(self.file_size),
+            None => return Ok(self.window.len()),
+        };
+
+        while self.window.len() < need {
+            let next_file = self.window_file_start.wrapping_add(self.window.len() as u64);
+            let range_remaining = range_end.saturating_sub(next_file);
+            if range_remaining == 0 {
+                break;
+            }
+            // Grow to at least `need`, but prefer a full budget-sized read so
+            // refills stay rare. Never read past the range (clamped to EOF).
+            let want = need
+                .saturating_sub(self.window.len())
+                .max(self.budget.saturating_sub(self.window.len()));
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "min(want, range_remaining) ≤ want ≤ budget+block, fits usize on 64-bit"
+            )]
+            let read_len = (want as u64).min(range_remaining) as usize;
+            if read_len == 0 {
+                break;
+            }
+
+            self.reader.seek(SeekFrom::Start(next_file)).map_err(|_| BgzfError::SeekFailed)?;
+            let old_len = self.window.len();
+            // Safety: read_all overwrites [old_len..] before any read; we
+            // truncate to the bytes actually read immediately after.
+            unsafe { bgzf::resize_uninit(&mut self.window, old_len.wrapping_add(read_len)) };
+            #[allow(clippy::indexing_slicing, reason = "old_len ≤ window.len() after resize above")]
+            let got = read_all(self.reader, &mut self.window[old_len..]);
+            self.window.truncate(old_len.wrapping_add(got));
+            if got < read_len {
+                // Reader delivered fewer bytes than the (EOF-clamped) range
+                // promised — treat as the end of this range.
+                break;
+            }
+        }
+
+        Ok(self.window.len().wrapping_sub(self.cursor))
+    }
+
+    /// Step to the next merged range, resetting the window to its start.
+    /// Returns `false` when no further range exists.
+    fn advance_range(&mut self) -> bool {
+        self.range_idx = self.range_idx.wrapping_add(1);
+        let Some(range) = self.ranges.get(self.range_idx) else {
+            return false;
+        };
+        self.window.clear();
+        self.window_file_start = range.file_start;
+        self.cursor = 0;
+        true
+    }
+
     // r[impl region_buf.seek_virtual]
-    /// Seek to a virtual offset within the pre-loaded data.
-    #[instrument(level = "trace", skip(self))]
+    /// Seek to a virtual offset within the planned ranges.
+    ///
+    /// Repositions the window if the target lies outside the resident bytes.
+    /// Errors if the offset falls in a gap between ranges or outside all of
+    /// them (validated against the *planned* ranges, which may extend up to
+    /// `CHUNK_END_PAD` past the last record).
     pub fn seek_virtual(&mut self, voff: VirtualOffset) -> Result<(), BgzfError> {
         let block_off = voff.block_offset();
         let within = voff.within_block() as usize;
 
-        let cursor_pos = self.file_offset_to_cursor(block_off)?;
+        let idx = self
+            .ranges
+            .iter()
+            .position(|r| block_off >= r.file_start && block_off < r.file_end)
+            .ok_or(BgzfError::VirtualOffsetOutOfRange { offset: block_off })?;
 
-        self.cursor = cursor_pos;
+        let win_end = self.window_file_start.wrapping_add(self.window.len() as u64);
+        if idx == self.range_idx && block_off >= self.window_file_start && block_off < win_end {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "block_off - window_file_start < window.len() ≤ budget, fits usize"
+            )]
+            let new_cursor = block_off.wrapping_sub(self.window_file_start) as usize;
+            self.cursor = new_cursor;
+        } else {
+            self.range_idx = idx;
+            self.window.clear();
+            self.window_file_start = block_off;
+            self.cursor = 0;
+        }
+
         self.block_offset = block_off;
         self.buf.clear();
         self.buf_pos = 0;
@@ -224,48 +257,6 @@ impl RegionBuf {
         }
 
         Ok(())
-    }
-
-    /// Translate a file offset to a buffer cursor position using the range map.
-    fn file_offset_to_cursor(&self, file_off: u64) -> Result<usize, BgzfError> {
-        for rm in &self.ranges {
-            if file_off >= rm.file_start && file_off < rm.file_end {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "buffer offsets bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
-                )]
-                let delta = file_off.wrapping_sub(rm.file_start) as usize;
-                return Ok(rm.buf_start.wrapping_add(delta));
-            }
-        }
-        Err(BgzfError::VirtualOffsetOutOfRange { offset: file_off })
-    }
-
-    /// Translate a buffer cursor position back to a file offset.
-    fn cursor_to_file_offset(&self) -> u64 {
-        for rm in &self.ranges {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "buffer offsets bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
-            )]
-            let buf_end =
-                rm.buf_start.wrapping_add(rm.file_end.wrapping_sub(rm.file_start) as usize);
-            if self.cursor >= rm.buf_start && self.cursor < buf_end {
-                return rm.file_start.wrapping_add(self.cursor.wrapping_sub(rm.buf_start) as u64);
-            }
-        }
-        // Past all ranges — return best estimate from the last range
-        if let Some(last) = self.ranges.last() {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "buffer offsets bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
-            )]
-            let buf_end =
-                last.buf_start.wrapping_add(last.file_end.wrapping_sub(last.file_start) as usize);
-            last.file_end.wrapping_add(self.cursor.saturating_sub(buf_end) as u64)
-        } else {
-            self.cursor as u64
-        }
     }
 
     // r[impl region_buf.virtual_offset]
@@ -282,142 +273,141 @@ impl RegionBuf {
     // r[impl region_buf.decompress]
     // r[impl region_buf.fast_header]
     fn read_block(&mut self) -> Result<bool, BgzfError> {
-        self.block_offset = self.cursor_to_file_offset();
+        loop {
+            // Ensure the 18-byte header is resident (refilling if needed).
+            let avail = self.ensure_available(BGZF_HEADER_SIZE)?;
+            if avail < BGZF_HEADER_SIZE {
+                if self.advance_range() {
+                    continue;
+                }
+                self.eof = true;
+                self.buf.clear();
+                self.buf_pos = 0;
+                return Ok(false);
+            }
 
-        if self.cursor.wrapping_add(BGZF_HEADER_SIZE) > self.data.len() {
-            self.eof = true;
-            self.buf.clear();
-            self.buf_pos = 0;
-            return Ok(false);
-        }
+            // The window may have compacted in `ensure_available`; `cursor` now
+            // points at the block start. Record its TRUE file offset here — any
+            // later compaction preserves `window_file_start + cursor` for this
+            // block, so this value stays correct through the full-block ensure.
+            self.block_offset = self.window_file_start.wrapping_add(self.cursor as u64);
 
-        // header is always BGZF_HEADER_SIZE=18 bytes (bounds checked above).
-        debug_assert!(
-            self.cursor.wrapping_add(BGZF_HEADER_SIZE) <= self.data.len(),
-            "header overrun: {} > {}",
-            self.cursor.wrapping_add(BGZF_HEADER_SIZE),
-            self.data.len()
-        );
-        #[allow(
-            clippy::indexing_slicing,
-            reason = "header length = BGZF_HEADER_SIZE = 18; all indices < 18"
-        )]
-        let header = &self.data[self.cursor..self.cursor.wrapping_add(BGZF_HEADER_SIZE)];
+            // Copy the header out so later `ensure_available` calls (which take
+            // `&mut self`) don't conflict with a borrow of `window`.
+            #[allow(clippy::indexing_slicing, reason = "avail ≥ 18 checked above")]
+            let header: [u8; BGZF_HEADER_SIZE] = self.window
+                [self.cursor..self.cursor.wrapping_add(BGZF_HEADER_SIZE)]
+                .try_into()
+                .map_err(|_| BgzfError::TruncatedBlock)?;
 
-        #[allow(clippy::indexing_slicing, reason = "header.len() = 18; indices < 18")]
-        if header[..4] != BGZF_MAGIC {
-            return Err(BgzfError::InvalidMagic);
-        }
+            if header[..4] != BGZF_MAGIC {
+                return Err(BgzfError::InvalidMagic);
+            }
 
-        #[allow(clippy::indexing_slicing, reason = "header.len() = 18; indices 10, 11 < 18")]
-        let xlen = u16::from_le_bytes([header[10], header[11]]) as usize;
+            let xlen = u16::from_le_bytes([header[10], header[11]]) as usize;
 
-        // Fast path: standard BGZF header
-        #[allow(clippy::indexing_slicing, reason = "header.len() = 18; indices 12-17 < 18")]
-        let bsize = if xlen == 6
-            && header[12] == b'B'
-            && header[13] == b'C'
-            && header[14] == 2
-            && header[15] == 0
-        {
-            u16::from_le_bytes([header[16], header[17]])
-        } else {
-            let extra_start = self.cursor.wrapping_add(12);
-            let extra_end = extra_start.wrapping_add(xlen);
-            if extra_end > self.data.len() {
+            // Fast path: standard BGZF header carries BSIZE in the BC subfield.
+            let bsize = if xlen == 6
+                && header[12] == b'B'
+                && header[13] == b'C'
+                && header[14] == 2
+                && header[15] == 0
+            {
+                u16::from_le_bytes([header[16], header[17]])
+            } else {
+                // Non-standard extra field: ensure it's resident, then scan it.
+                let extra_len = 12usize.wrapping_add(xlen);
+                let avail = self.ensure_available(extra_len)?;
+                if avail < extra_len {
+                    return Err(BgzfError::TruncatedBlock);
+                }
+                let extra_start = self.cursor.wrapping_add(12);
+                let extra_end = self.cursor.wrapping_add(extra_len);
+                #[allow(clippy::indexing_slicing, reason = "avail ≥ extra_len checked above")]
+                bgzf::find_bsize(&self.window[extra_start..extra_end])
+                    .ok_or(BgzfError::MissingBsize)?
+            };
+
+            let total_block_size = (bsize as usize).wrapping_add(1);
+
+            // Ensure the whole block is resident.
+            let avail = self.ensure_available(total_block_size)?;
+            if avail < total_block_size {
+                // Partial block at the range tail — advance, or EOF.
+                if self.advance_range() {
+                    continue;
+                }
+                self.eof = true;
+                self.buf.clear();
+                self.buf_pos = 0;
+                return Ok(false);
+            }
+
+            let block_end = self.cursor.wrapping_add(total_block_size);
+            let data_start = self.cursor.wrapping_add(12).wrapping_add(xlen);
+            if data_start > block_end {
+                return Err(BgzfError::BlockSizeTooSmall { bsize });
+            }
+            let remaining =
+                self.window.get(data_start..block_end).ok_or(BgzfError::TruncatedBlock)?;
+
+            if remaining.len() < BGZF_FOOTER_SIZE {
                 return Err(BgzfError::TruncatedBlock);
             }
-            debug_assert!(
-                extra_end <= self.data.len(),
-                "extra field overrun: {extra_end} > {}",
-                self.data.len()
-            );
-            #[allow(clippy::indexing_slicing, reason = "extra_end ≤ data.len() checked above")]
-            bgzf::find_bsize(&self.data[extra_start..extra_end]).ok_or(BgzfError::MissingBsize)?
-        };
 
-        let total_block_size = (bsize as usize).wrapping_add(1);
-        let block_end = self.cursor.wrapping_add(total_block_size);
+            let footer_start = remaining.len().wrapping_sub(BGZF_FOOTER_SIZE);
+            #[allow(clippy::indexing_slicing, reason = "footer_start + 8 = remaining.len()")]
+            let crc32_bytes: [u8; 4] = remaining[footer_start..footer_start.wrapping_add(4)]
+                .try_into()
+                .map_err(|_| BgzfError::TruncatedBlock)?;
+            let expected_crc = u32::from_le_bytes(crc32_bytes);
 
-        if block_end > self.data.len() {
-            // Partial block at end of loaded data — treat as EOF
-            self.eof = true;
-            self.buf.clear();
+            #[allow(clippy::indexing_slicing, reason = "footer_start + 8 = remaining.len()")]
+            let isize_bytes: [u8; 4] = remaining
+                [footer_start.wrapping_add(4)..footer_start.wrapping_add(8)]
+                .try_into()
+                .map_err(|_| BgzfError::TruncatedBlock)?;
+            let uncompressed_size = u32::from_le_bytes(isize_bytes) as usize;
+
+            if uncompressed_size > MAX_BLOCK_SIZE {
+                return Err(BgzfError::UncompressedSizeTooLarge { isize_value: uncompressed_size });
+            }
+
+            self.cursor = block_end;
+
+            if uncompressed_size == 0 {
+                self.eof = true;
+                self.buf.clear();
+                self.buf_pos = 0;
+                return Ok(false);
+            }
+
+            #[allow(clippy::indexing_slicing, reason = "footer_start ≤ remaining.len()")]
+            let deflate_data = &remaining[..footer_start];
+
+            // Safety: all bytes written by deflate_decompress before any read.
+            unsafe { bgzf::resize_uninit(&mut self.buf, uncompressed_size) };
+            let actual = self
+                .decompressor
+                .deflate_decompress(deflate_data, &mut self.buf)
+                .map_err(|source| BgzfError::DecompressionFailed { source })?;
+            self.buf.truncate(actual);
+
+            // Verify CRC32
+            let mut crc = libdeflater::Crc::new();
+            crc.update(&self.buf);
+            if crc.sum() != expected_crc {
+                return Err(BgzfError::ChecksumMismatch {
+                    expected: expected_crc,
+                    found: crc.sum(),
+                });
+            }
+
             self.buf_pos = 0;
-            return Ok(false);
+            self.blocks_decompressed = self.blocks_decompressed.wrapping_add(1);
+            self.decompressed_bytes = self.decompressed_bytes.wrapping_add(actual as u64);
+            return Ok(true);
         }
-
-        let data_start = self.cursor.saturating_add(12).saturating_add(xlen);
-        if data_start > block_end {
-            return Err(BgzfError::BlockSizeTooSmall { bsize });
-        }
-        let remaining = self.data.get(data_start..block_end).ok_or(BgzfError::TruncatedBlock)?;
-
-        if remaining.len() < BGZF_FOOTER_SIZE {
-            return Err(BgzfError::TruncatedBlock);
-        }
-
-        let footer_start = remaining.len().wrapping_sub(BGZF_FOOTER_SIZE);
-        // footer_start + 8 = remaining.len() ≤ remaining.len() is trivially true.
-        debug_assert!(
-            footer_start.wrapping_add(8) <= remaining.len(),
-            "footer overrun: {} > {}",
-            footer_start.wrapping_add(8),
-            remaining.len()
-        );
-        #[allow(clippy::indexing_slicing, reason = "footer_start + 8 = remaining.len()")]
-        let crc32_bytes: [u8; 4] = remaining[footer_start..footer_start.wrapping_add(4)]
-            .try_into()
-            .map_err(|_| BgzfError::TruncatedBlock)?;
-        let expected_crc = u32::from_le_bytes(crc32_bytes);
-
-        #[allow(clippy::indexing_slicing, reason = "footer_start + 8 = remaining.len()")]
-        let isize_bytes: [u8; 4] = remaining
-            [footer_start.wrapping_add(4)..footer_start.wrapping_add(8)]
-            .try_into()
-            .map_err(|_| BgzfError::TruncatedBlock)?;
-        let uncompressed_size = u32::from_le_bytes(isize_bytes) as usize;
-
-        if uncompressed_size > MAX_BLOCK_SIZE {
-            return Err(BgzfError::UncompressedSizeTooLarge { isize_value: uncompressed_size });
-        }
-
-        self.cursor = block_end;
-
-        if uncompressed_size == 0 {
-            self.eof = true;
-            self.buf.clear();
-            self.buf_pos = 0;
-            return Ok(false);
-        }
-
-        debug_assert!(
-            footer_start <= remaining.len(),
-            "deflate slice overrun: {footer_start} > {}",
-            remaining.len()
-        );
-        #[allow(clippy::indexing_slicing, reason = "footer_start ≤ remaining.len()")]
-        let deflate_data = &remaining[..footer_start];
-
-        // Safety: all bytes written by deflate_decompress before any read.
-        unsafe { bgzf::resize_uninit(&mut self.buf, uncompressed_size) };
-        let actual = self
-            .decompressor
-            .deflate_decompress(deflate_data, &mut self.buf)
-            .map_err(|source| BgzfError::DecompressionFailed { source })?;
-        self.buf.truncate(actual);
-
-        // Verify CRC32
-        let mut crc = libdeflater::Crc::new();
-        crc.update(&self.buf);
-        if crc.sum() != expected_crc {
-            return Err(BgzfError::ChecksumMismatch { expected: expected_crc, found: crc.sum() });
-        }
-
-        self.buf_pos = 0;
-        self.blocks_decompressed = self.blocks_decompressed.wrapping_add(1);
-        self.decompressed_bytes = self.decompressed_bytes.wrapping_add(actual as u64);
-        Ok(true)
     }
 
     // r[impl region_buf.read_exact]
@@ -522,7 +512,7 @@ impl RegionBuf {
 }
 
 // r[impl region_buf.drop_no_panic]
-impl Drop for RegionBuf {
+impl<R: Read + Seek> Drop for RegionBuf<'_, R> {
     fn drop(&mut self) {
         if self.blocks_decompressed > 0 {
             let max_gap = self
@@ -539,10 +529,10 @@ impl Drop for RegionBuf {
             tracing::debug!(
                 target: PROFILE_TARGET,
                 blocks = self.blocks_decompressed,
-                compressed_bytes = self.data.len(),
                 decompressed_bytes = self.decompressed_bytes,
                 ranges = self.ranges.len(),
                 max_gap_bytes = max_gap,
+                window_capacity = self.window.capacity(),
                 buf_capacity = self.buf.capacity(),
                 "region_buf summary",
             );
@@ -568,13 +558,14 @@ fn read_all<R: Read>(reader: &mut R, buf: &mut [u8]) -> usize {
     total
 }
 
-/// Compute the total compressed bytes that [`RegionBuf::load`] would read for `chunks`.
+/// Compute the total compressed bytes a [`RegionBuf`] would stream for `chunks`.
 ///
-/// Used by the batching logic in `fetch_into` to partition chunks into groups
-/// that each fit within [`MAX_REGION_BYTES`].
+/// This is the merged byte span of the chunks' index ranges — what byte-aware
+/// segmentation budgets against (see `estimate_region_bytes`). It reflects the
+/// planned read size, independent of the smaller resident window.
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "bounded by MAX_REGION_BYTES (256 MiB), fits in usize"
+    reason = "BAM files are < 2^63 bytes; merged span fits in usize on 64-bit"
 )]
 pub(crate) fn merged_byte_size(chunks: &[Chunk]) -> usize {
     merge_chunks(chunks)
@@ -638,13 +629,19 @@ mod tests {
     fn drop_does_not_panic_with_overlapping_ranges() {
         // Simulate a RegionBuf with overlapping ranges where file_start < prev file_end
         // (which would cause subtraction underflow without saturating_sub).
+        let mut cursor = std::io::Cursor::new(vec![0u8; 100]);
         let buf = RegionBuf {
-            data: vec![0; 100],
+            reader: &mut cursor,
             ranges: vec![
-                RangeMapping { file_start: 100, file_end: 300, buf_start: 0 },
-                RangeMapping { file_start: 200, file_end: 400, buf_start: 50 },
+                MergedRange { file_start: 100, file_end: 300 },
+                MergedRange { file_start: 200, file_end: 400 },
             ],
+            range_idx: 0,
+            window: vec![0; 100],
+            window_file_start: 0,
             cursor: 0,
+            file_size: 100,
+            budget: WINDOW_BUDGET,
             buf: Vec::new(),
             buf_pos: 0,
             block_offset: 0,
@@ -678,7 +675,7 @@ mod tests {
         }];
 
         let mut cursor = std::io::Cursor::new(file);
-        let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
         buf.seek_virtual(VirtualOffset::new(0, 0)).unwrap();
 
         let mut scratch = Vec::new();
@@ -715,7 +712,7 @@ mod tests {
     #[test]
     fn empty_chunks_is_eof() {
         let mut cursor = std::io::Cursor::new(vec![]);
-        let buf = RegionBuf::load(&mut cursor, &[]).unwrap();
+        let buf = RegionBuf::new(&mut cursor, &[]).unwrap();
         assert!(buf.eof);
     }
 
@@ -726,27 +723,30 @@ mod tests {
         (0..len).map(|i| (i % 256) as u8).collect()
     }
 
+    /// The true file offset of the byte at `cursor`.
+    fn file_pos<R: Read + Seek>(buf: &RegionBuf<'_, R>) -> u64 {
+        buf.window_file_start + buf.cursor as u64
+    }
+
     #[test]
-    fn single_range_seek_uses_simple_offset() {
+    fn single_range_seek_tracks_file_offset() {
         let file_data = fake_file(1000);
         let mut cursor = std::io::Cursor::new(file_data);
 
         let chunks =
             vec![Chunk { begin: VirtualOffset::new(100, 0), end: VirtualOffset::new(200, 0) }];
 
-        let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
 
-        // Seek to file offset 100 → cursor should be 0 (start of buffer)
         buf.seek_virtual(VirtualOffset::new(100, 0)).unwrap();
-        assert_eq!(buf.cursor, 0);
+        assert_eq!(file_pos(&buf), 100);
 
-        // Seek to file offset 150 → cursor should be 50
         buf.seek_virtual(VirtualOffset::new(150, 0)).unwrap();
-        assert_eq!(buf.cursor, 50);
+        assert_eq!(file_pos(&buf), 150);
     }
 
     #[test]
-    fn disjoint_ranges_data_loaded_correctly() {
+    fn disjoint_ranges_data_streamed_correctly() {
         // With CHUNK_END_PAD = MAX_BLOCK_SIZE = 65536, chunks more than 65536
         // bytes apart stay disjoint after padding.
         let chunks = vec![
@@ -756,27 +756,22 @@ mod tests {
         let ranges = merge_chunks(&chunks);
         assert_eq!(ranges.len(), 2, "chunks should be disjoint");
 
-        // Now load from a file big enough to contain both ranges
         let big_file = fake_file(400_000);
         let mut cursor = std::io::Cursor::new(big_file.clone());
-        let buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
 
-        // Buffer should contain data from BOTH ranges concatenated.
-        assert!(!buf.data.is_empty());
-
-        // Verify first range's data starts with file[100]
-        assert_eq!(buf.data[0], big_file[100]);
-        assert_eq!(buf.data[1], big_file[101]);
+        // Position at the first range and pull a window — it must start at file[100].
+        buf.seek_virtual(VirtualOffset::new(100, 0)).unwrap();
+        buf.ensure_available(2).unwrap();
+        assert_eq!(buf.window[buf.cursor], big_file[100]);
+        assert_eq!(buf.window[buf.cursor + 1], big_file[101]);
     }
 
     #[test]
     fn disjoint_ranges_seek_to_second_range_is_correct() {
-        // This is the core regression test.
-        // Two disjoint ranges: [100, 300) and [200000, 200200).
-        // After load, seeking to file offset 200000 must land at the
-        // correct position in the buffer (start of second range's data),
-        // NOT at offset 200000 - 100 = 199900 (which would be garbage).
-
+        // The streaming analog of the old concat regression: seeking to the
+        // second range must reposition the window there (range_idx advances)
+        // and expose file[200000], not garbage from a miscomputed offset.
         let big_file = fake_file(400_000);
         let mut cursor = std::io::Cursor::new(big_file.clone());
 
@@ -784,33 +779,21 @@ mod tests {
             Chunk { begin: VirtualOffset::new(100, 0), end: VirtualOffset::new(200, 0) },
             Chunk { begin: VirtualOffset::new(200_000, 0), end: VirtualOffset::new(200_100, 0) },
         ];
-        let ranges = merge_chunks(&chunks);
-        assert_eq!(ranges.len(), 2, "should have 2 disjoint ranges");
+        assert_eq!(merge_chunks(&chunks).len(), 2, "should have 2 disjoint ranges");
 
-        let range1_len = (ranges[0].file_end - ranges[0].file_start) as usize;
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
 
-        let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
-
-        // Seek to start of first range
         buf.seek_virtual(VirtualOffset::new(100, 0)).unwrap();
-        assert_eq!(buf.cursor, 0, "seek to range1 start");
+        buf.ensure_available(1).unwrap();
+        assert_eq!(buf.range_idx, 0, "seek to range1");
+        assert_eq!(file_pos(&buf), 100);
+        assert_eq!(buf.window[buf.cursor], big_file[100]);
 
-        // The data at cursor=0 should be file[100]
-        assert_eq!(buf.data[buf.cursor], big_file[100]);
-
-        // Seek to start of second range — this is the bug
         buf.seek_virtual(VirtualOffset::new(200_000, 0)).unwrap();
-
-        // cursor should point to the start of range2's data in the buffer,
-        // which is at offset range1_len (after range1's data).
-        assert_eq!(
-            buf.cursor, range1_len,
-            "seek to range2 should land at buffer offset {range1_len}, got {}",
-            buf.cursor
-        );
-
-        // And the data there should be file[200000]
-        assert_eq!(buf.data[buf.cursor], big_file[200_000]);
+        buf.ensure_available(1).unwrap();
+        assert_eq!(buf.range_idx, 1, "seek to range2 advances range_idx");
+        assert_eq!(file_pos(&buf), 200_000);
+        assert_eq!(buf.window[buf.cursor], big_file[200_000]);
     }
 
     #[test]
@@ -822,15 +805,15 @@ mod tests {
             Chunk { begin: VirtualOffset::new(100, 0), end: VirtualOffset::new(200, 0) },
             Chunk { begin: VirtualOffset::new(200_000, 0), end: VirtualOffset::new(200_100, 0) },
         ];
-        let ranges = merge_chunks(&chunks);
-        let range1_len = (ranges[0].file_end - ranges[0].file_start) as usize;
 
-        let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
 
         // Seek to file offset 200050 (50 bytes into second range)
         buf.seek_virtual(VirtualOffset::new(200_050, 0)).unwrap();
-        assert_eq!(buf.cursor, range1_len + 50, "seek 50 bytes into range2");
-        assert_eq!(buf.data[buf.cursor], big_file[200_050]);
+        buf.ensure_available(1).unwrap();
+        assert_eq!(buf.range_idx, 1);
+        assert_eq!(file_pos(&buf), 200_050);
+        assert_eq!(buf.window[buf.cursor], big_file[200_050]);
     }
 
     #[test]
@@ -841,7 +824,7 @@ mod tests {
         let chunks =
             vec![Chunk { begin: VirtualOffset::new(1000, 0), end: VirtualOffset::new(2000, 0) }];
 
-        let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
 
         // Seeking to file offset 500 (before the loaded range) must fail
         let result = buf.seek_virtual(VirtualOffset::new(500, 0));
@@ -868,7 +851,7 @@ mod tests {
             ranges[1].file_start
         );
 
-        let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
 
         let result = buf.seek_virtual(VirtualOffset::new(gap_offset, 0));
         assert!(result.is_err(), "seek into gap between ranges should fail");
@@ -896,7 +879,7 @@ mod tests {
         let chunks = vec![Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(1, 0) }];
 
         let mut cursor = std::io::Cursor::new(file);
-        let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
         buf.seek_virtual(VirtualOffset::new(0, 0)).unwrap();
 
         // read_block is called internally by seek_virtual (via within=0 path)
@@ -1004,7 +987,7 @@ mod tests {
             }];
 
             let mut cursor = std::io::Cursor::new(file);
-            let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+            let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
 
             // Seek to the first block and read all data
             buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
@@ -1075,7 +1058,7 @@ mod tests {
             prop_assert_eq!(ranges.len(), 2);
 
             let mut cursor = std::io::Cursor::new(file);
-            let mut buf = RegionBuf::load(&mut cursor, &[chunk_a, chunk_b]).unwrap();
+            let mut buf = RegionBuf::new(&mut cursor, &[chunk_a, chunk_b]).unwrap();
 
             // Read group A
             buf.seek_virtual(VirtualOffset::new(offsets_a[0], 0)).unwrap();
@@ -1113,7 +1096,7 @@ mod tests {
             }];
 
             let mut cursor = std::io::Cursor::new(file);
-            let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+            let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
 
             let within_clamped = within.min(block_size - 1);
             buf.seek_virtual(VirtualOffset::new(offsets[0], within_clamped as u16)).unwrap();
@@ -1149,7 +1132,7 @@ mod tests {
                 }];
 
                 let mut cursor = std::io::Cursor::new(file);
-                let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+                let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
                 buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
 
                 let mut output = vec![0u8; block_size];
@@ -1186,7 +1169,7 @@ mod tests {
         }];
 
         let mut cursor = std::io::Cursor::new(file);
-        let mut region = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut region = RegionBuf::new(&mut cursor, &chunks).unwrap();
         region.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
 
         let mut scratch: Vec<u8> = Vec::new();
@@ -1220,7 +1203,7 @@ mod tests {
         }];
 
         let mut cursor = std::io::Cursor::new(file);
-        let mut region = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut region = RegionBuf::new(&mut cursor, &chunks).unwrap();
         // Seek past the filler to where the length prefix starts (within_block = 60).
         region.seek_virtual(VirtualOffset::new(offsets[0], 60)).unwrap();
 
@@ -1255,7 +1238,7 @@ mod tests {
         }];
 
         let mut cursor = std::io::Cursor::new(file);
-        let mut region = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut region = RegionBuf::new(&mut cursor, &chunks).unwrap();
         // Seek to where the first 2 bytes of the prefix begin (within_block = 62).
         region.seek_virtual(VirtualOffset::new(offsets[0], 62)).unwrap();
 
@@ -1285,7 +1268,7 @@ mod tests {
         }];
 
         let mut cursor = std::io::Cursor::new(file);
-        let mut region = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut region = RegionBuf::new(&mut cursor, &chunks).unwrap();
         region.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
 
         let mut scratch = Vec::new();
@@ -1326,7 +1309,7 @@ mod tests {
             }];
 
             let mut cursor = std::io::Cursor::new(file);
-            let mut region = RegionBuf::load(&mut cursor, &chunks).unwrap();
+            let mut region = RegionBuf::new(&mut cursor, &chunks).unwrap();
             region.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
 
             let mut scratch = Vec::new();
@@ -1351,7 +1334,7 @@ mod tests {
         }];
 
         let mut cursor = std::io::Cursor::new(file);
-        let mut region = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut region = RegionBuf::new(&mut cursor, &chunks).unwrap();
         region.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
 
         let mut scratch = Vec::new();
@@ -1376,7 +1359,7 @@ mod tests {
         }];
 
         let mut cursor = std::io::Cursor::new(file);
-        let mut region = RegionBuf::load(&mut cursor, &chunks).unwrap();
+        let mut region = RegionBuf::new(&mut cursor, &chunks).unwrap();
         region.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
 
         let mut scratch = Vec::new();
@@ -1426,27 +1409,26 @@ mod tests {
         assert_eq!(size, range1 + range2);
     }
 
-    // r[verify region_buf.max_region_bytes]
-    /// Oversized regions now warn instead of erroring, allowing whole-chromosome
-    /// queries on large BAM files.
+    // r[verify region_buf.window_budget]
+    /// `new` is lazy: planning a huge region reads nothing up front. The window
+    /// only fills (bounded) when decoding actually advances.
     #[test]
-    fn load_accepts_oversized_region() {
-        let far_end = MAX_REGION_BYTES as u64 + 1_000_000;
+    fn new_is_lazy_for_oversized_region() {
+        let far_end = (WINDOW_BUDGET as u64) * 8 + 1_000_000;
         let chunks =
             vec![Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(far_end, 0) }];
 
-        // Small cursor — load will read what's available (no error).
         let mut cursor = std::io::Cursor::new(vec![0u8; 100]);
-        let result = RegionBuf::load(&mut cursor, &chunks);
-        assert!(result.is_ok(), "oversized region should load (warns, not errors)");
+        let buf = RegionBuf::new(&mut cursor, &chunks).expect("plan oversized region");
+        assert!(buf.window.is_empty(), "new must not eagerly read the region");
     }
 
     // r[verify io.fuzz.alloc_limits]
-    /// A corrupt index entry whose virtual offset points far past EOF must
-    /// not trigger a huge allocation. The per-range allocation must be capped
-    /// to the actual file size.
+    /// A corrupt index entry whose virtual offset points far past EOF must not
+    /// trigger a huge allocation: refills are bounded by the window budget and
+    /// clamped to the real file size.
     #[test]
-    fn load_caps_allocation_when_range_exceeds_file_size() {
+    fn refill_caps_allocation_when_range_exceeds_file_size() {
         // Virtual offset block_offsets near the 48-bit max — would request
         // ~280 TiB without the cap.
         let huge = 0xffff_0801_0000u64;
@@ -1454,8 +1436,157 @@ mod tests {
             vec![Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(huge, 0) }];
 
         let mut cursor = std::io::Cursor::new(vec![0u8; 64]);
-        // Must not panic / OOM. Returns Ok with a buffer of at most 64 bytes.
-        let buf = RegionBuf::load(&mut cursor, &chunks).expect("must not crash");
-        assert!(buf.data.len() <= 64);
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).expect("must not crash");
+        buf.seek_virtual(VirtualOffset::new(0, 0)).unwrap();
+        // Force a refill; the window must stay bounded by the 64-byte file.
+        let avail = buf.ensure_available(BGZF_HEADER_SIZE).unwrap();
+        assert!(buf.window.len() <= 64, "window bounded by file size, got {}", buf.window.len());
+        assert!(avail <= 64);
+    }
+
+    /// Seeking backward to an offset already consumed (now behind the window)
+    /// must reposition and re-read it — the window is not append-only.
+    #[test]
+    fn seek_virtual_backward_within_range_rereads() {
+        let blocks: Vec<Vec<u8>> =
+            (0..4u8).map(|i| (0..200u16).map(|j| i.wrapping_add(j as u8)).collect()).collect();
+        let (file, offsets) = make_bgzf_file(&blocks);
+        let last = *offsets.last().unwrap();
+        let chunks = vec![Chunk {
+            begin: VirtualOffset::new(offsets[0], 0),
+            end: VirtualOffset::new(last + 1, 0),
+        }];
+
+        let mut cursor = std::io::Cursor::new(file);
+        // Tiny budget so reading forward compacts the early blocks out of the window.
+        let mut buf = RegionBuf::with_budget(&mut cursor, &chunks, MAX_BLOCK_SIZE).unwrap();
+
+        // Read the last block to advance the window well past block 0.
+        buf.seek_virtual(VirtualOffset::new(last, 0)).unwrap();
+        let mut tail = vec![0u8; blocks[3].len()];
+        buf.read_exact_into(&mut tail).unwrap();
+        assert_eq!(tail, blocks[3]);
+
+        // Seek back to block 0 (now behind window_file_start) and re-read it.
+        buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
+        assert_eq!(buf.range_idx, 0);
+        let mut head = vec![0u8; blocks[0].len()];
+        buf.read_exact_into(&mut head).unwrap();
+        assert_eq!(head, blocks[0], "backward seek must re-read the earlier block");
+    }
+
+    // --- Window-budget parity against a trivial oracle ---
+
+    /// Budgets that force many refills (≥ one block floor), a few blocks per
+    /// window, and a single huge window (the old "load everything" behavior).
+    const PARITY_BUDGETS: [usize; 3] = [MAX_BLOCK_SIZE, 200_000, usize::MAX / 2];
+
+    /// Decode every block of a single-range region via `read_exact_into` and
+    /// return the concatenated decompressed bytes.
+    fn stream_all_bytes(file: &[u8], chunks: &[Chunk], budget: usize, total: usize) -> Vec<u8> {
+        let mut cursor = std::io::Cursor::new(file.to_vec());
+        let mut buf = RegionBuf::with_budget(&mut cursor, chunks, budget).unwrap();
+        buf.seek_virtual(chunks[0].begin).unwrap();
+        let mut out = vec![0u8; total];
+        buf.read_exact_into(&mut out).unwrap();
+        out
+    }
+
+    proptest! {
+        /// Decoded output (and per-block virtual offsets) must be byte-identical
+        /// no matter the window budget — windowing only changes *when* bytes are
+        /// read, never *what* is produced. The oracle is the original payloads.
+        #[test]
+        fn proptest_window_budget_parity(
+            n_blocks in 1usize..12,
+            block_size in 1usize..4000,
+            seed in 0u8..255,
+        ) {
+            let blocks: Vec<Vec<u8>> = (0..n_blocks)
+                .map(|i| (0..block_size)
+                    .map(|j| seed.wrapping_add(i as u8).wrapping_mul(31).wrapping_add(j as u8))
+                    .collect())
+                .collect();
+            let (file, offsets) = make_bgzf_file(&blocks);
+            let last = *offsets.last().unwrap();
+            let chunks = vec![Chunk {
+                begin: VirtualOffset::new(offsets[0], 0),
+                end: VirtualOffset::new(last + 1, 0),
+            }];
+            let oracle: Vec<u8> = blocks.iter().flatten().copied().collect();
+
+            for budget in PARITY_BUDGETS {
+                let got = stream_all_bytes(&file, &chunks, budget, oracle.len());
+                prop_assert_eq!(&got, &oracle, "budget {} mismatch", budget);
+            }
+
+            // Per-block virtual offset (= true file offset) must be stable across
+            // budgets: read block-by-block and compare the recorded block_offset.
+            let mut cursor = std::io::Cursor::new(file.clone());
+            let mut buf = RegionBuf::with_budget(&mut cursor, &chunks, MAX_BLOCK_SIZE).unwrap();
+            buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
+            for &expected_off in &offsets {
+                prop_assert!(buf.read_block().unwrap());
+                prop_assert_eq!(buf.block_offset, expected_off, "block_offset drift across refill");
+            }
+        }
+
+        /// Disjoint ranges with a tiny budget must still decode both groups
+        /// correctly (each range refills independently).
+        #[test]
+        fn proptest_disjoint_budget_parity(
+            n_a in 1usize..4,
+            n_b in 1usize..4,
+            block_size in 10usize..300,
+            padding in 100_000usize..200_000,
+            seed in 0u8..255,
+        ) {
+            let mk = |base: u8, n: usize| -> Vec<Vec<u8>> {
+                (0..n).map(|i| (0..block_size)
+                    .map(|j| seed.wrapping_add(base).wrapping_add(i as u8).wrapping_add(j as u8))
+                    .collect()).collect()
+            };
+            let blocks_a = mk(0, n_a);
+            let blocks_b = mk(100, n_b);
+
+            let (mut file, offsets_a) = make_bgzf_file(&blocks_a);
+            let pad_start = file.len();
+            file.resize(pad_start + padding, 0);
+            let group_b_start = file.len() as u64;
+            let mut offsets_b = Vec::new();
+            for block in &blocks_b {
+                offsets_b.push(file.len() as u64);
+                file.extend_from_slice(&make_bgzf_block(block));
+            }
+            file.extend_from_slice(&make_bgzf_eof());
+
+            let chunk_a = Chunk {
+                begin: VirtualOffset::new(offsets_a[0], 0),
+                end: VirtualOffset::new(*offsets_a.last().unwrap() + 1, 0),
+            };
+            let chunk_b = Chunk {
+                begin: VirtualOffset::new(group_b_start, 0),
+                end: VirtualOffset::new(*offsets_b.last().unwrap() + 1, 0),
+            };
+            prop_assert_eq!(merge_chunks(&[chunk_a, chunk_b]).len(), 2);
+
+            let mut cursor = std::io::Cursor::new(file);
+            let mut buf = RegionBuf::with_budget(&mut cursor, &[chunk_a, chunk_b], MAX_BLOCK_SIZE)
+                .unwrap();
+
+            buf.seek_virtual(VirtualOffset::new(offsets_a[0], 0)).unwrap();
+            let total_a: usize = blocks_a.iter().map(|b| b.len()).sum();
+            let mut out_a = vec![0u8; total_a];
+            buf.read_exact_into(&mut out_a).unwrap();
+            let exp_a: Vec<u8> = blocks_a.iter().flatten().copied().collect();
+            prop_assert_eq!(out_a, exp_a, "group A");
+
+            buf.seek_virtual(VirtualOffset::new(group_b_start, 0)).unwrap();
+            let total_b: usize = blocks_b.iter().map(|b| b.len()).sum();
+            let mut out_b = vec![0u8; total_b];
+            buf.read_exact_into(&mut out_b).unwrap();
+            let exp_b: Vec<u8> = blocks_b.iter().flatten().copied().collect();
+            prop_assert_eq!(out_b, exp_b, "group B");
+        }
     }
 }

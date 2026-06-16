@@ -35,7 +35,7 @@ Frequent CI-only failures to watch for: `clippy::cast_possible_truncation`, `cli
 
 **RecordStore**: 4 contiguous Vecs (records, names, bases, data). Zero per-record heap alloc.
 
-**RegionBuf**: bulk-reads compressed bytes for a region, decompresses from memory. Uses `Vec<RangeMapping>` for disjoint chunks — never subtract offsets directly.
+**RegionBuf**: streams a region's compressed bytes through a bounded sliding window (`WINDOW_BUDGET`, 64 MiB), refilling forward on demand — peak RAM is the window, not the whole region. `RegionBuf::new` borrows the reader and plans `Vec<MergedRange>` (lazy, reads nothing); `ensure_available(need)` refills the window (compacting the consumed prefix, keeping `window_file_start + cursor` = true file offset), `advance_range` steps to the next disjoint range. `block_offset` (for virtual offsets) MUST be set as `window_file_start + cursor` *after* the header `ensure_available` and before the cursor advances — a stale read there silently corrupts every virtual offset. `with_budget(reader, chunks, budget)` (doc-hidden) forces tiny windows in tests. There is no batching/`MAX_REGION_BYTES` anymore — one streaming `RegionBuf` spans all of a query's chunks (see `BamQuery`).
 
 **ChunkCache**: `BamIndex::query_split()` separates nearby (L3–L5) from distant (L0–L2) BAI chunks. Distant chunks loaded once per tid per thread.
 
@@ -58,7 +58,7 @@ Frequent CI-only failures to watch for: `clippy::cast_possible_truncation`, `cli
 ## I/O layers
 
 1. `BgzfReader` (header only): BufReader 128KB → compressed 64KB → decompressed 64KB
-2. `RegionBuf` (hot path): raw File → `data: Vec<u8>` (all compressed) → 64KB decompressed blocks
+2. `RegionBuf` (hot path): raw File → bounded `window: Vec<u8>` (≤64 MiB compressed, refilled forward) → 64KB decompressed blocks
 3. BAI: `fs::read()` into memory at open
 4. `RecordStore`: ~900KB total for typical 30x region
 

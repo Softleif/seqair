@@ -25,7 +25,7 @@ const TEST_END: u64 = 6_105_800;
 fn empty_chunks_returns_eof() {
     let data: Vec<u8> = vec![];
     let mut cursor = std::io::Cursor::new(data);
-    let mut buf = RegionBuf::load(&mut cursor, &[]).expect("load empty");
+    let mut buf = RegionBuf::new(&mut cursor, &[]).expect("load empty");
     let mut out = [0u8; 4];
     assert!(buf.read_exact_into(&mut out).is_err(), "reading from empty RegionBuf should error");
 }
@@ -52,7 +52,7 @@ fn overlapping_chunks_are_merged() {
     assert!(count > 0, "should read records from test region");
 }
 
-// r[verify region_buf.load]
+// r[verify region_buf.new]
 // r[verify region_buf.decompress]
 // r[verify region_buf.read_exact]
 // r[verify region_buf.virtual_offset]

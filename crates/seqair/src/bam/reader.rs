@@ -263,19 +263,23 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     pub fn query(&mut self, tid: u32, start: Pos0, end: Pos0) -> Result<BamQuery<'_, R>, BamError> {
         let chunks = self.shared.index.query(tid, start, end);
         let tid_i32 = validate_tid(tid)?;
-        let batches = if chunks.is_empty() {
-            Vec::new()
-        } else {
-            partition_chunks(&chunks, region_buf::MAX_REGION_BYTES)
+
+        // One streaming RegionBuf spans all chunks: the sliding window bounds
+        // peak memory, so there's no need to pre-partition into batches.
+        let mut region = RegionBuf::new(&mut self.bulk_reader, &chunks)?;
+        let chunk_end = match chunks.first() {
+            Some(first) => {
+                region.seek_virtual(first.begin)?;
+                first.end
+            }
+            None => VirtualOffset(0),
         };
 
         Ok(BamQuery {
-            reader: &mut self.bulk_reader,
-            batches,
-            batch_idx: 0,
-            region: None,
+            region,
+            chunks,
             chunk_idx: 0,
-            chunk_end: VirtualOffset(0),
+            chunk_end,
             scratch: Vec::new(),
             tid_i32,
             start,
@@ -299,10 +303,10 @@ impl<R: Read + Seek> IndexedBamReader<R> {
 /// The cursor borrows the reader's file handle exclusively. Drop it to
 /// release the borrow.
 pub struct BamQuery<'r, R: Read + Seek> {
-    reader: &'r mut R,
-    batches: Vec<Vec<Chunk>>,
-    batch_idx: usize,
-    region: Option<RegionBuf>,
+    /// Streaming buffer spanning all of the query's chunks; owns the reader borrow.
+    region: RegionBuf<'r, R>,
+    /// All index chunks for the query, in begin order.
+    chunks: Vec<Chunk>,
     chunk_idx: usize,
     chunk_end: VirtualOffset,
     scratch: Vec<u8>,
@@ -317,8 +321,7 @@ pub struct BamQuery<'r, R: Read + Seek> {
 impl<R: Read + Seek> std::fmt::Debug for BamQuery<'_, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BamQuery")
-            .field("batches", &self.batches.len())
-            .field("batch_idx", &self.batch_idx)
+            .field("chunks", &self.chunks.len())
             .field("chunk_idx", &self.chunk_idx)
             .field("chunk_end", &self.chunk_end)
             .field("accepted", &self.accepted)
@@ -376,19 +379,14 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
         self.run_loop(f)
     }
 
-    /// Drive the cursor: a flat `loop` + `continue` state machine over three
+    /// Drive the cursor: a flat `loop` + `continue` state machine over two
     /// phases, resumable so `for_each` can stop early. State persists in
-    /// `self.{region, batch_idx, chunk_idx, chunk_end}` between iterations.
+    /// `self.{region, chunk_idx, chunk_end}` between iterations.
     ///
-    /// 1. **Load** — no region in hand: take the next batch, [`RegionBuf::load`]
-    ///    *all* its compressed bytes into memory in one bulk read (this is the
-    ///    big allocation — bounded by `MAX_REGION_BYTES`, and by the byte-aware
-    ///    segment planner upstream), seek to the first chunk's `begin`, record
-    ///    its `end`.
-    /// 2. **Advance** — the cursor passed the current chunk's `end`: step to the
-    ///    next chunk in the batch, or drop the region so phase 1 loads the next
-    ///    batch.
-    /// 3. **Record** — read one record from the in-memory buffer, filter by tid
+    /// 1. **Advance** — the cursor passed the current chunk's `end`: step to
+    ///    the next chunk and seek the streaming buffer to its `begin` (skipping
+    ///    any bytes between chunks). The window refills lazily as needed.
+    /// 2. **Record** — read one record from the streaming buffer, filter by tid
     ///    then position, and hand accepted records to `f`.
     ///
     /// The phases are mutually exclusive per iteration; each ends in `continue`
@@ -399,55 +397,26 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
         E: From<BamError>,
     {
         loop {
-            // ── Phase 1: load the next batch into a fresh RegionBuf ──────────
-            if self.region.is_none() {
-                if self.batch_idx >= self.batches.len() {
-                    break; // all batches consumed → done
-                }
-                debug_assert!(self.batch_idx < self.batches.len());
-                #[allow(clippy::indexing_slicing, reason = "bounds checked above")]
-                let batch = &self.batches[self.batch_idx];
-                self.batch_idx = self.batch_idx.saturating_add(1);
-                debug_assert!(!batch.is_empty());
-
-                // One bulk read of every compressed byte in the batch's chunks.
-                let mut region =
-                    RegionBuf::load(self.reader, batch).map_err(|e| E::from(BamError::from(e)))?;
-                #[allow(clippy::indexing_slicing, reason = "non-empty assert above")]
-                let first_chunk = batch[0];
-                region.seek_virtual(first_chunk.begin).map_err(|e| E::from(BamError::from(e)))?;
-                self.chunk_end = first_chunk.end;
-                self.chunk_idx = 0;
-                self.region = Some(region);
+            if self.chunk_idx >= self.chunks.len() {
+                break; // all chunks consumed → done
             }
 
-            let region = self.region.as_mut().expect("region guaranteed Some above");
-
-            // ── Phase 2: cursor reached this chunk's end → advance ───────────
-            if region.virtual_offset() >= self.chunk_end {
+            // ── Phase 1: cursor reached this chunk's end → advance ───────────
+            if self.region.virtual_offset() >= self.chunk_end {
                 self.chunk_idx = self.chunk_idx.saturating_add(1);
-                debug_assert!(self.batch_idx >= 1, "batch_idx incremented on load");
-                #[allow(
-                    clippy::indexing_slicing,
-                    reason = "batch_idx >= 1 after first load; saturating_sub(1) safe"
-                )]
-                let batch = &self.batches[self.batch_idx.saturating_sub(1)];
-                if self.chunk_idx >= batch.len() {
-                    self.region = None; // batch exhausted → phase 1 loads the next
-                    continue;
-                }
-                // Same in-memory buffer, just reposition to the next chunk.
-                #[allow(clippy::indexing_slicing, reason = "chunk_idx < batch.len() checked above")]
-                let chunk = &batch[self.chunk_idx];
-                region.seek_virtual(chunk.begin).map_err(|e| E::from(BamError::from(e)))?;
+                let Some(chunk) = self.chunks.get(self.chunk_idx) else {
+                    break; // no more chunks
+                };
+                let chunk = *chunk;
+                self.region.seek_virtual(chunk.begin).map_err(|e| E::from(BamError::from(e)))?;
                 self.chunk_end = chunk.end;
                 continue;
             }
 
-            // ── Phase 3: read one record from the in-memory buffer ───────────
+            // ── Phase 2: read one record from the streaming buffer ───────────
             // r[impl bam.reader.propagate_errors]
-            let current_voff = region.virtual_offset();
-            let raw = match region.read_record(&mut self.scratch) {
+            let current_voff = self.region.virtual_offset();
+            let raw = match self.region.read_record(&mut self.scratch) {
                 Ok(s) => s,
                 // Buffer exhausted before chunk_end (e.g. a record straddling the
                 // loaded range's tail): loop back so phase 2 advances the chunk.
@@ -516,57 +485,6 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
             skipped_out_of_range: self.skipped_out_of_range as usize,
         }
     }
-}
-
-/// Partition chunks into batches where each batch's merged compressed byte
-/// range fits within `max_bytes`.
-///
-/// Chunks are added greedily in order. When adding the next chunk would push
-/// the batch over the limit, a new batch is started. A single chunk that
-/// exceeds `max_bytes` on its own gets its own batch — `RegionBuf::load`
-/// handles oversized ranges by warning and allocating the needed memory.
-fn partition_chunks(chunks: &[Chunk], max_bytes: usize) -> Vec<Vec<Chunk>> {
-    if chunks.is_empty() {
-        return Vec::new();
-    }
-
-    // Fast path: if everything fits, return a single batch (avoids recomputing).
-    if region_buf::merged_byte_size(chunks) <= max_bytes {
-        return vec![chunks.to_vec()];
-    }
-
-    let mut batches: Vec<Vec<Chunk>> = Vec::new();
-    let mut current_batch: Vec<Chunk> = Vec::new();
-
-    for chunk in chunks {
-        if current_batch.is_empty() {
-            current_batch.push(*chunk);
-            continue;
-        }
-
-        // Tentatively add this chunk and check if we still fit.
-        current_batch.push(*chunk);
-        if region_buf::merged_byte_size(&current_batch) <= max_bytes {
-            continue;
-        }
-
-        // Doesn't fit — remove it and start a new batch.
-        current_batch.pop();
-        batches.push(std::mem::take(&mut current_batch));
-        current_batch.push(*chunk);
-    }
-
-    if !current_batch.is_empty() {
-        batches.push(current_batch);
-    }
-
-    tracing::info!(
-        batches = batches.len(),
-        total_chunks = chunks.len(),
-        "region split into multiple batches due to size"
-    );
-
-    batches
 }
 
 // r[impl unified.detect_index]
@@ -683,13 +601,13 @@ mod tests {
         }];
 
         let mut reader = std::io::Cursor::new(bam_bytes);
+        let mut region = RegionBuf::new(&mut reader, &batch).unwrap();
+        region.seek_virtual(batch[0].begin).unwrap();
         let mut query = BamQuery {
-            reader: &mut reader,
-            batches: vec![batch],
-            batch_idx: 0,
-            region: None,
+            region,
+            chunks: batch,
             chunk_idx: 0,
-            chunk_end: VirtualOffset(0),
+            chunk_end: VirtualOffset::new(0, payload_len),
             scratch: Vec::new(),
             tid_i32: 0,
             start: Pos0::new(0).unwrap(),
@@ -710,141 +628,4 @@ mod tests {
     }
 
     use super::super::bgzf::VirtualOffset;
-
-    #[test]
-    fn partition_chunks_empty() {
-        let result = partition_chunks(&[], 1024);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn partition_chunks_single_batch_when_small() {
-        let chunks = vec![
-            Chunk { begin: VirtualOffset::new(100, 0), end: VirtualOffset::new(200, 0) },
-            Chunk { begin: VirtualOffset::new(300, 0), end: VirtualOffset::new(400, 0) },
-        ];
-        let result = partition_chunks(&chunks, region_buf::MAX_REGION_BYTES);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].len(), 2);
-    }
-
-    #[test]
-    fn partition_chunks_splits_large_ranges() {
-        // Create two disjoint chunks that individually fit but together exceed max_bytes.
-        // Chunks must be spaced > CHUNK_END_PAD apart to stay disjoint after padding.
-        let max_bytes = 10_000_000; // 10 MiB
-        let gap = (region_buf::CHUNK_END_PAD as u64) + 1_000_000; // > CHUNK_END_PAD
-        let span = 5_000_000u64; // each chunk spans 5 MiB
-
-        let chunks = vec![
-            Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(span, 0) },
-            Chunk {
-                begin: VirtualOffset::new(span + gap, 0),
-                end: VirtualOffset::new(span + gap + span, 0),
-            },
-        ];
-
-        // Together these exceed max_bytes (two disjoint ranges of ~7 MiB each)
-        let total = region_buf::merged_byte_size(&chunks);
-        assert!(total > max_bytes, "test setup: total {total} must exceed {max_bytes}");
-
-        let result = partition_chunks(&chunks, max_bytes);
-        assert_eq!(result.len(), 2, "should split into 2 batches");
-
-        // Each batch individually fits
-        for batch in &result {
-            let size = region_buf::merged_byte_size(batch);
-            assert!(size <= max_bytes, "batch size {size} exceeds {max_bytes}");
-        }
-    }
-
-    // r[verify bam.reader.chunk_batching]
-    /// Reproduces the 122 GB BAM scenario: many chunks that merge to >256 MiB.
-    /// Verifies that `partition_chunks` splits them into batches that each fit.
-    #[test]
-    fn partition_chunks_122gb_bam_scenario() {
-        // Simulate chunk layout from the real BAM:
-        // - One huge chunk spanning ~131 MiB (bins 13421-13422)
-        // - Many smaller chunks from higher-level bins that overlap and extend the range
-        let mut chunks = vec![
-            // Large level-5 bin chunk: 131 MiB compressed span
-            Chunk {
-                begin: VirtualOffset::new(5_971_912_384, 12584),
-                end: VirtualOffset::new(6_141_438_390, 36748),
-            },
-        ];
-
-        // Add many smaller chunks from higher-level bins scattered in and around
-        for offset in (6_141_500_000..6_252_000_000u64).step_by(15_000) {
-            chunks.push(Chunk {
-                begin: VirtualOffset::new(offset, 0),
-                end: VirtualOffset::new(offset, 50000),
-            });
-        }
-        // Sort by begin (as query() does)
-        chunks.sort_by_key(|c| c.begin);
-
-        let total = region_buf::merged_byte_size(&chunks);
-        assert!(
-            total > region_buf::MAX_REGION_BYTES,
-            "test setup: total {total} must exceed MAX_REGION_BYTES"
-        );
-
-        let batches = partition_chunks(&chunks, region_buf::MAX_REGION_BYTES);
-        assert!(batches.len() >= 2, "should need at least 2 batches, got {}", batches.len());
-
-        // Every batch must fit within the limit
-        for (i, batch) in batches.iter().enumerate() {
-            let size = region_buf::merged_byte_size(batch);
-            assert!(
-                size <= region_buf::MAX_REGION_BYTES,
-                "batch {i} has size {size} exceeding limit {}",
-                region_buf::MAX_REGION_BYTES
-            );
-        }
-
-        // All chunks are preserved (no loss, no duplication)
-        let total_chunks: usize = batches.iter().map(|b| b.len()).sum();
-        assert_eq!(total_chunks, chunks.len());
-    }
-
-    proptest::proptest! {
-        /// Any set of chunks must be partitioned such that every batch fits
-        /// within the limit, and no chunks are lost or duplicated.
-        #[test]
-        fn proptest_partition_preserves_all_chunks(
-            n_chunks in 1usize..20,
-            seed in 0u64..10_000,
-        ) {
-            let max_bytes = 500_000;
-            // Space chunks far enough apart to stay disjoint after CHUNK_END_PAD.
-            let spacing = 200_000u64;
-            let chunks: Vec<Chunk> = (0..n_chunks)
-                .map(|i| {
-                    let base = seed + (i as u64) * spacing;
-                    Chunk {
-                        begin: VirtualOffset::new(base, 0),
-                        end: VirtualOffset::new(base + 100_000, 0),
-                    }
-                })
-                .collect();
-
-            let batches = partition_chunks(&chunks, max_bytes);
-
-            // All chunks preserved (no loss, no duplication from splitting)
-            let total: usize = batches.iter().map(|b| b.len()).sum();
-            proptest::prop_assert_eq!(total, chunks.len());
-
-            // Each batch fits (or is a single oversized chunk)
-            for batch in &batches {
-                if batch.len() > 1 {
-                    let size = region_buf::merged_byte_size(batch);
-                    proptest::prop_assert!(
-                        size <= max_bytes,
-                        "batch size {size} > {max_bytes}"
-                    );
-                }
-            }
-        }
-    }
 }
