@@ -147,7 +147,7 @@ pub(crate) fn decode_with_buf(
 // the `Option<T>` design rationale (avoiding `drop_in_place<CramError>`
 // on the per-byte hot path).
 pub(crate) use super::codec_io::read_u16_le as read_u16_le_prv;
-use super::codec_io::{read_u8, read_u32_le};
+use super::codec_io::{read_u32_le, read_u8};
 
 /// Local thin wrappers that produce a `CramError` with a tagged context
 /// from the narrow `Option`/`Uint7Error` returns.
@@ -527,9 +527,11 @@ fn decode_order_1_with_buf(
         .checked_div(state_count)
         .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 zero state count" })?;
 
+    // r[impl cram.codec.rans_nx16_bits_validation]
     #[allow(
         clippy::indexing_slicing,
-        reason = "k/l ≤ 255, state/prev_sym indices from enumerate < state_count, f < 4096"
+        reason = "k/l ≤ 255, state/prev_sym indices from enumerate < state_count; \
+                  f < 4096 (bits ≤ 12 validated by read_frequencies_1)"
     )]
     for i in 0..chunk_size {
         for (j, (state, prev_sym)) in states.iter_mut().zip(prev_syms.iter_mut()).enumerate() {
@@ -608,6 +610,13 @@ fn read_frequencies_1(src: &mut &[u8], frequencies: &mut Frequencies1) -> Result
     let n =
         read_u8(src).ok_or_else(|| CramError::Truncated { context: "rans_nx16 freq1 header" })?;
     let bits = u32::from(n >> 4);
+    // rANS Nx16 symbol tables are always 4096 entries (1 << 12).
+    // bits > 12 would cause state_cumulative_frequency to produce
+    // indices outside the table bounds.
+    // r[impl cram.codec.rans_nx16_bits_validation]
+    if bits > ORDER_0_BITS {
+        return Err(CramError::InvalidRansNx16Bits { bits });
+    }
     let is_compressed = (n & 0x01) != 0;
 
     if is_compressed {
@@ -893,10 +902,10 @@ mod tests {
         let packed_len: u8 = 0; // uint7 = 0
         let mut src = Vec::new();
         src.push(FLAG_PACK); // flags = PACK
-        // FLAG_NO_SIZE not set → read uncompressed_size as uint7
+                             // FLAG_NO_SIZE not set → read uncompressed_size as uint7
         src.push(10u8); // uncompressed_size
         src.push(symbol_count); // symbol_count = 17
-        // mapping_table: 17 bytes
+                                // mapping_table: 17 bytes
         src.extend(std::iter::repeat_n(b'A', symbol_count as usize));
         src.push(packed_len); // packed_len uint7
 
@@ -910,7 +919,7 @@ mod tests {
         src2.push(symbol_count); // symbol_count = 17
         src2.extend(std::iter::repeat_n(b'A', symbol_count as usize));
         src2.push(packed_len); // packed_len uint7
-        // CAT data: 0 bytes (packed_len = 0)
+                               // CAT data: 0 bytes (packed_len = 0)
 
         let err = decode(&src2, 0).unwrap_err();
         assert!(
@@ -1179,6 +1188,35 @@ mod tests {
     }
 
     // r[verify cram.codec.normalize_checked]
+    // r[verify cram.codec.rans_nx16_bits_validation]
+    #[test]
+    fn invalid_bits_returns_error() {
+        // rANS Nx16 symbol tables are 4096 entries (1 << 12). If the
+        // frequency-table header specifies bits != 12, state_cumulative_frequency
+        // would produce indices outside the table bounds, causing a panic.
+        // This validates that read_frequencies_1 rejects invalid bits early.
+        //
+        // Crafted input: flags=ORDER|NO_SIZE (order-1, 4 states, skip stream
+        // size), freq header byte with bits=13 (0xD0), single-symbol alphabet
+        // (sym=0), frequency=1, 4 states. Before the fix the decode loop
+        // would panic with index 6007 in a 4096-element table.
+        let stream: &[u8] = &[
+            0x11, // flags: ORDER | NO_SIZE
+            0xD0, // freq header: bits=13 (0xD >> 4), not compressed
+            0x00, // alphabet: sym=0
+            0x00, // alphabet: sentinel
+            0x01, // freq[0] = 1 (uint7)
+            // 4 u32 LE states; first state's lower 13 bits = 6007
+            0x77, 0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        let result = decode(stream, 4);
+        assert!(
+            matches!(result, Err(CramError::InvalidRansNx16Bits { bits: 13 })),
+            "expected InvalidRansNx16Bits, got: {result:?}"
+        );
+    }
+
     #[test]
     fn normalize_frequencies_overflow_returns_error() {
         // Fill frequencies so sum overflows u32.
