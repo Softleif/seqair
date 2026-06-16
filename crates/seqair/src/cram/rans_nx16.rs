@@ -118,6 +118,9 @@ pub(crate) fn decode_with_buf(
         None
     };
 
+    // r[impl cram.codec.alloc_bounds]
+    // Re-check after PACK/RLE transforms may have updated uncompressed_size.
+    super::reader::check_alloc_size(uncompressed_size, "rANS Nx16 output (post-transform)")?;
     let mut dst = vec![0u8; uncompressed_size];
 
     if flags & FLAG_CAT != 0 {
@@ -147,7 +150,7 @@ pub(crate) fn decode_with_buf(
 // the `Option<T>` design rationale (avoiding `drop_in_place<CramError>`
 // on the per-byte hot path).
 pub(crate) use super::codec_io::read_u16_le as read_u16_le_prv;
-use super::codec_io::{read_u32_le, read_u8};
+use super::codec_io::{read_u8, read_u32_le};
 
 /// Local thin wrappers that produce a `CramError` with a tagged context
 /// from the narrow `Option`/`Uint7Error` returns.
@@ -623,6 +626,8 @@ fn read_frequencies_1(src: &mut &[u8], frequencies: &mut Frequencies1) -> Result
         let uncompressed_size = read_uint7(src)? as usize;
         let compressed_size = read_uint7(src)? as usize;
         let mut compressed_data = split_off(src, compressed_size)?;
+        // r[impl cram.codec.alloc_bounds]
+        super::reader::check_alloc_size(uncompressed_size, "rans_nx16 freq1 compressed")?;
         let mut tmp = vec![0u8; uncompressed_size];
         decode_order_0(&mut compressed_data, &mut tmp, 4)?;
         read_frequencies_1_inner(&mut &tmp[..], frequencies, bits)?;
@@ -795,6 +800,8 @@ fn read_rle_context(
 ) -> Result<(RleContext, usize), CramError> {
     let header = read_uint7(src)?;
     let context_size = (header >> 1) as usize;
+    // r[impl cram.codec.alloc_bounds]
+    super::reader::check_alloc_size(context_size, "rans_nx16 rle context")?;
     let is_compressed = (header & 0x01) == 0;
 
     let rle_encoded_len = read_uint7(src)? as usize;
@@ -902,10 +909,10 @@ mod tests {
         let packed_len: u8 = 0; // uint7 = 0
         let mut src = Vec::new();
         src.push(FLAG_PACK); // flags = PACK
-                             // FLAG_NO_SIZE not set → read uncompressed_size as uint7
+        // FLAG_NO_SIZE not set → read uncompressed_size as uint7
         src.push(10u8); // uncompressed_size
         src.push(symbol_count); // symbol_count = 17
-                                // mapping_table: 17 bytes
+        // mapping_table: 17 bytes
         src.extend(std::iter::repeat_n(b'A', symbol_count as usize));
         src.push(packed_len); // packed_len uint7
 
@@ -919,7 +926,7 @@ mod tests {
         src2.push(symbol_count); // symbol_count = 17
         src2.extend(std::iter::repeat_n(b'A', symbol_count as usize));
         src2.push(packed_len); // packed_len uint7
-                               // CAT data: 0 bytes (packed_len = 0)
+        // CAT data: 0 bytes (packed_len = 0)
 
         let err = decode(&src2, 0).unwrap_err();
         assert!(
