@@ -41,15 +41,22 @@ fn bgzf_decompress(compressed: &[u8]) -> Vec<u8> {
     output
 }
 
-/// Decompress using seqair's `RegionBuf`.
+/// Decompress using seqair's `RegionBuf` with the default window budget.
 /// `expected_len` is used to pre-allocate and read the exact amount.
 fn seqair_decompress(compressed: &[u8], expected_len: usize) -> Vec<u8> {
+    seqair_decompress_budget(compressed, expected_len, usize::MAX / 2)
+}
+
+/// Like [`seqair_decompress`] but with an explicit window budget — a tiny
+/// budget forces the sliding window to refill repeatedly mid-stream, so the
+/// `bgzf`-crate oracle also validates the streaming/refill path.
+fn seqair_decompress_budget(compressed: &[u8], expected_len: usize, budget: usize) -> Vec<u8> {
     let mut cursor = std::io::Cursor::new(compressed.to_vec());
     let file_len = compressed.len() as u64;
     let chunks =
         vec![Chunk { begin: VirtualOffset::new(0, 0), end: VirtualOffset::new(file_len, 0) }];
 
-    let mut buf = RegionBuf::load(&mut cursor, &chunks).unwrap();
+    let mut buf = RegionBuf::with_budget(&mut cursor, &chunks, budget).unwrap();
     buf.seek_virtual(VirtualOffset::new(0, 0)).unwrap();
 
     let mut output = vec![0u8; expected_len];
@@ -131,15 +138,35 @@ fn random_looking_data() {
     assert_eq!(out, data);
 }
 
+// r[verify region_buf.window_budget]
+/// A multi-block stream decoded with a tiny window budget (forcing many
+/// refills) must still match the `bgzf` crate oracle byte-for-byte.
+#[test]
+fn tiny_window_budget_matches_oracle() {
+    // 100 KB → ~2 BGZF blocks; a 64 KiB budget floor refills across them.
+    let data: Vec<u8> = (0..100_000).map(|i| ((i * 7 + 3) % 256) as u8).collect();
+    let compressed = bgzf_compress(&data, 3);
+
+    let bgzf_out = bgzf_decompress(&compressed);
+    // Budget is floored at one max BGZF block, so 1 here means "one block per window".
+    let out = seqair_decompress_budget(&compressed, data.len(), 1);
+
+    assert_eq!(bgzf_out, data, "bgzf crate mismatch");
+    assert_eq!(out, data, "seqair tiny-budget mismatch");
+    assert_eq!(bgzf_out, out, "cross-crate mismatch");
+}
+
 proptest! {
     // this is slow!
     #![proptest_config(ProptestConfig { cases: 20, .. ProptestConfig::default() })]
 
     /// Both decompressors must produce identical output for arbitrary data
-    /// compressed by the bgzf crate's Writer.
+    /// compressed by the bgzf crate's Writer — checked at both the default
+    /// window budget and a tiny one that forces repeated refills.
     // r[verify bgzf.decompression]
     // r[verify bgzf.crc32]
     // r[verify region_buf.decompress]
+    // r[verify region_buf.window_budget]
     #[test]
     fn proptest_both_decompressors_match(
         data in prop::collection::vec(0..255u8, 1..1_000_000),
@@ -149,11 +176,13 @@ proptest! {
 
         let bgzf_out = bgzf_decompress(&compressed);
         let out = seqair_decompress(&compressed, data.len());
+        let out_tiny = seqair_decompress_budget(&compressed, data.len(), 1);
 
         prop_assert_eq!(bgzf_out.len(), data.len());
         prop_assert_eq!(out.len(), data.len());
         prop_assert_eq!(&bgzf_out, &data);
         prop_assert_eq!(&out, &data);
         prop_assert_eq!(&bgzf_out, &out);
+        prop_assert_eq!(&out_tiny, &data, "tiny-budget streaming mismatch");
     }
 }

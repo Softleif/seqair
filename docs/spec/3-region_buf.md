@@ -12,14 +12,14 @@ On local SSDs this works fine — seek + read latency is microseconds. On **clus
 
 ## Approach
 
-`RegionBuf` solves this by **pre-fetching all compressed bytes for a region into RAM in one shot**, then decompressing from the in-memory buffer. The I/O pattern changes from "hundreds of small reads" to "one large sequential read" per region. Since Rastair processes BAM segments in parallel (one thread per segment), each thread creates its own `RegionBuf` with no contention.
+`RegionBuf` solves this by streaming a region's compressed bytes through a **bounded sliding window** (a few large sequential reads), refilling forward on demand as decompression advances — instead of reading hundreds of small blocks *or* slurping the whole region into RAM. The I/O pattern is still "large sequential reads", but each read is capped at the window budget (`WINDOW_BUDGET`, 64 MiB) so peak resident memory is independent of region size. Since Rastair processes BAM segments in parallel (one thread per segment), each thread creates its own `RegionBuf` with no contention.
 
 The flow:
 
 1. Query the BAM index → get a list of chunks (compressed byte ranges)
-2. Merge overlapping/adjacent chunks into larger contiguous ranges
-3. Read each merged range with one `seek` + `read` into a `Vec<u8>`
-4. Decompress BGZF blocks from the in-memory buffer (zero network I/O)
+2. Merge overlapping/adjacent chunks into larger contiguous ranges (the read plan)
+3. Pull compressed bytes for the current position into a window, reading up to `WINDOW_BUDGET` per refill; refill forward (or advance to the next range) as the cursor consumes the window
+4. Decompress BGZF blocks from the resident window (zero network I/O between refills)
 
 ## Chunk merging
 
@@ -31,23 +31,23 @@ Before reading, index chunks MUST be merged into non-overlapping byte ranges sor
 r[region_buf.no_bin0]
 `RegionBuf` MUST NOT include bin 0 chunks in its bulk read. Bin 0 chunks are at distant file offsets and contain very few reads; including them would cause an expensive additional seek. Bin 0 records are handled separately via the bin 0 cache (see `bam_index.md`).
 
-## Loading
+## Construction
 
-r[region_buf.load]
-`RegionBuf::load` MUST accept a seekable reader and a slice of index chunks. It MUST merge chunks, then perform one `seek` + `read_exact` per merged range to load all compressed bytes into a contiguous in-memory buffer. On typical BAM files this results in a single read of a few hundred KB to a few MB per region.
+r[region_buf.new]
+`RegionBuf::new` MUST accept a seekable reader (borrowed for the buffer's lifetime) and a slice of index chunks. It MUST merge chunks into the ranges to stream, but MUST NOT eagerly read the region; compressed bytes are pulled into the window lazily on the first decode (or on a `seek_virtual` with a non-zero intra-block offset). Each refill MUST be a large sequential read (up to the window budget), targeting roughly one read per `WINDOW_BUDGET` of compressed data rather than one read per block.
 
-r[region_buf.max_region_bytes]
-`RegionBuf::load` MUST reject chunk sets whose total merged compressed byte range exceeds 256 MiB (`MAX_REGION_BYTES`), returning a `RegionTooLarge` error. This guards against OOM from corrupt indexes or extremely large query regions. The caller (`fetch_into`) is responsible for partitioning chunks into batches that each fit within this limit (see `r[bam.reader.chunk_batching]`).
+r[region_buf.window_budget]
+The resident compressed window MUST be bounded by `WINDOW_BUDGET` (64 MiB), with the effective budget floored at one maximum BGZF block (64 KiB) so any single block always fits. A single block — or a record assembled across blocks — larger than the budget MUST still be readable by growing the window just enough to hold it. Refills MUST be clamped to the actual file length so a corrupt index pointing past EOF cannot trigger an oversized allocation.
 
 r[region_buf.empty]
-When given zero chunks, `load` MUST return an empty buffer that immediately signals EOF on any read.
+When given zero chunks, `new` MUST return an empty buffer that immediately signals EOF on any read.
 
 ## Seeking
 
-After loading, the caller iterates through the original (unmerged) chunks. For each chunk, it seeks to the chunk's start virtual offset within the pre-loaded buffer and reads records until reaching the chunk's end.
+The caller iterates through the original (unmerged) chunks. For each chunk, it seeks to the chunk's start virtual offset and reads records until reaching the chunk's end. Within a query these seeks move forward.
 
 r[region_buf.seek_virtual]
-The region buffer MUST support seeking to a virtual offset within the pre-loaded data. Since disjoint ranges are concatenated, the buffer MUST maintain a range map that translates file offsets to buffer positions. A seek to a file offset that falls within any loaded range MUST succeed; a seek to an offset in a gap between ranges or before/after the loaded data MUST return an error.
+The region buffer MUST support seeking to a virtual offset within the planned ranges. The target file offset is translated to a window position via `window_file_start + cursor` for the active range; if the target lies outside the resident window (or in another range), the window MUST be repositioned and refilled there. A seek to a file offset that falls within any merged range MUST succeed; a seek to an offset in a gap between ranges or before/after all ranges MUST return an error. Validation is against the *planned* ranges (which may extend up to `CHUNK_END_PAD` past the last record).
 
 ## Block decompression
 
@@ -68,7 +68,7 @@ r[region_buf.drop_no_panic]
 The `Drop` implementation MUST never panic. Gap-size calculations between ranges MUST use saturating arithmetic to handle overlapping or malformed range boundaries safely.
 
 r[region_buf.virtual_offset]
-The region buffer MUST track virtual offsets correctly: the block offset corresponds to the file position of the current block (not the buffer position), so that virtual offset comparisons with the BAM index chunk boundaries work correctly.
+The region buffer MUST track virtual offsets correctly: the block offset corresponds to the file position of the current block, computed as `window_file_start + cursor` at the block's start. This MUST remain exact across window compaction (dropping the consumed prefix advances `window_file_start` in lockstep) and range advances, so virtual offset comparisons with the BAM index chunk boundaries work correctly.
 
 ## Integration
 

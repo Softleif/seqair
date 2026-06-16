@@ -359,7 +359,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
             return Ok(crate::reader::FetchCounts::default());
         }
 
-        let mut region = RegionBuf::load(&mut self.bulk_reader, &chunks)?;
+        let mut region = RegionBuf::new(&mut self.bulk_reader, &chunks)?;
 
         let start_i64 = start.as_i64();
         let end_i64 = end.as_i64();
