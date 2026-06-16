@@ -141,6 +141,9 @@ pub enum CramError {
     #[error("invalid rANS 4x8 order: {order}")]
     InvalidRansOrder { order: u8 },
 
+    #[error("invalid rANS Nx16 bits: {bits} (must be ≤ 12)")]
+    InvalidRansNx16Bits { bits: u32 },
+
     #[error(
         "rANS 4x8 header compressed_size ({advertised}) does not match remaining payload \
          length ({actual}) — file truncated or header corrupt"
