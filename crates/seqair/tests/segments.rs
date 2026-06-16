@@ -22,7 +22,7 @@
 )]
 
 use proptest::prelude::*;
-use seqair::reader::{Readers, SegmentOptions};
+use seqair::reader::{DepthLimit, Readers, SegmentOptions};
 use seqair_types::Pos0;
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -61,7 +61,7 @@ fn pileup_single(
     let mut plan = readers.segments((contig, start, end), opts).unwrap();
     let segment = plan.next().expect("at least one segment");
     assert!(plan.next().is_none(), "single-tile setup should yield exactly one segment");
-    let mut engine = readers.pileup(&segment).unwrap();
+    let mut engine = readers.pileup(&segment, DepthLimit::Unlimited).unwrap();
     let mut out = Vec::new();
     while let Some(col) = engine.pileups() {
         out.push(ColumnSnapshot {
@@ -95,7 +95,7 @@ fn pileup_segmented(
     let mut out = Vec::new();
     for segment in &plan {
         let core = segment.core_range();
-        let mut engine = readers.pileup(segment).unwrap();
+        let mut engine = readers.pileup(segment, DepthLimit::Unlimited).unwrap();
         while let Some(col) = engine.pileups() {
             if !core.contains(&col.pos()) {
                 continue;

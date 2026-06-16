@@ -16,6 +16,7 @@ mod segment;
 #[cfg(feature = "fuzz")]
 mod fuzz;
 
+pub use crate::bam::depth_cap::{DepthCap, DepthLimit};
 pub use formats::FormatDetectionError;
 pub use indexed::{FetchCounts, IndexedReader};
 pub use readers::Readers;

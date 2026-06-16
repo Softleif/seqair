@@ -95,7 +95,7 @@ fn main() -> anyhow::Result<()> {
 
     for segment in &plan {
         let mut engine = readers
-            .pileup(segment)
+            .pileup(segment, seqair::reader::DepthLimit::Unlimited)
             .with_context(|| format!("pileup failed for {}", segment.contig()))?;
 
         // Pre-compute query-end positions for samtools-compat mode using

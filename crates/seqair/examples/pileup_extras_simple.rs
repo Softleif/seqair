@@ -33,7 +33,7 @@ fn main() -> anyhow::Result<()> {
     let plan: Vec<_> = readers.segments(&args.region, opts)?.collect();
 
     for segment in &plan {
-        let mut engine = readers.pileup(segment)?;
+        let mut engine = readers.pileup(segment, seqair::reader::DepthLimit::Unlimited)?;
 
         while let Some(column) = engine.pileups() {
             for aln in column.alignments() {
