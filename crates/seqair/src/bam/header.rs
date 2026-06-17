@@ -41,25 +41,15 @@ pub struct PgRecord {
     pub pp: Option<SmolStr>,
 }
 
-/// Access target name and length without exposing `TargetInfo` internals.
-pub trait TargetInfoAccess {
-    fn target_name(&self) -> &str;
-    fn target_length(&self) -> u64;
-}
-
-impl TargetInfoAccess for TargetInfo {
-    fn target_name(&self) -> &str {
-        self.name.as_str()
-    }
-    fn target_length(&self) -> u64 {
-        self.length
-    }
-}
-
-impl AsRef<str> for TargetInfo {
-    fn as_ref(&self) -> &str {
-        self.name.as_str()
-    }
+/// A target sequence (`@SQ`) entry: its `tid`, name, and length.
+///
+/// Yielded by [`BamHeader::targets`] in tid order so callers can iterate
+/// name + length together without re-looking up the length per tid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub tid: u32,
+    pub name: SmolStr,
+    pub length: u64,
 }
 
 // r[impl io.errors]
@@ -311,9 +301,20 @@ impl BamHeader {
         &self.header_text
     }
 
-    /// Access the full target list (name + length) for binary header serialization.
-    pub fn targets(&self) -> &[impl AsRef<str> + TargetInfoAccess] {
-        &self.targets
+    /// Iterate over every target sequence (`@SQ`) as a [`Target`] in tid order.
+    ///
+    /// Yields tid, name, and length together, so callers building per-contig
+    /// state (VCF headers, region lists) don't re-derive the length via a
+    /// second `target_len(tid)` lookup.
+    pub fn targets(&self) -> impl Iterator<Item = Target> {
+        self.targets.iter().enumerate().map(|(tid, t)| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "target count ≤ MAX_REFERENCES (1M) enforced at parse, so tid fits in u32"
+            )]
+            let tid = tid as u32;
+            Target { tid, name: t.name.clone(), length: t.length }
+        })
     }
 
     // r[impl bam_writer.header_from_template]

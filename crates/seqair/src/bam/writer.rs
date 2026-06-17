@@ -3,7 +3,7 @@
 //! [`BamWriter`] serializes [`OwnedBamRecord`] values
 //! into BGZF-compressed BAM format and optionally co-produces a BAI index during writing.
 
-use super::header::{BamHeader, BamHeaderError, TargetInfoAccess};
+use super::header::{BamHeader, BamHeaderError};
 use super::owned_record::{OwnedBamRecord, OwnedRecordError};
 use super::record_store::RecordStore;
 use crate::io::{BgzfError, BgzfWriter, IndexBuilder, IndexError};
@@ -468,7 +468,7 @@ fn write_bam_header<W: Write>(
     )]
     buf.extend_from_slice(&(header.target_count() as i32).to_le_bytes());
     for target in header.targets() {
-        let name = target.target_name().as_bytes();
+        let name = target.name.as_bytes();
         let name_with_nul = name.len().saturating_add(1);
         if name_with_nul > MAX_REF_NAME {
             return Err(BamHeaderError::FieldTooLarge {
@@ -489,13 +489,13 @@ fn write_bam_header<W: Write>(
         // BAM stores l_ref as i32; reject contigs > i32::MAX (≈2.1 Gbp).
         // This is the BAM format limit — no reasonable contig exceeds this.
         let l_ref =
-            i32::try_from(target.target_length()).map_err(|_| BamHeaderError::FieldTooLarge {
+            i32::try_from(target.length).map_err(|_| BamHeaderError::FieldTooLarge {
                 field: "l_ref",
                 #[expect(
                     clippy::cast_possible_truncation,
-                    reason = "target_length() is u64; cast to usize for error reporting only (display value)"
+                    reason = "target.length is u64; cast to usize for error reporting only (display value)"
                 )]
-                value: target.target_length() as usize,
+                value: target.length as usize,
                 limit: i32::MAX as usize,
             })?;
         buf.extend_from_slice(&l_ref.to_le_bytes());

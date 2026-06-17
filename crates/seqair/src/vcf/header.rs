@@ -535,14 +535,9 @@ impl VcfHeaderBuilder<Contigs> {
     pub fn from_bam_header(header: &BamHeader) -> Result<FromBamHeader, VcfHeaderError> {
         let mut builder = Self::new();
         let mut contigs = Vec::new();
-        for (tid, name) in header.target_names().enumerate() {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "BAM header n_ref ≤ 1M (enforced at parse), so tid fits in u32"
-            )]
-            let length = header.target_len(tid as u32);
-            let def = ContigDef { length };
-            contigs.push(builder.register_contig(name, def)?);
+        for target in header.targets() {
+            let def = ContigDef { length: Some(target.length) };
+            contigs.push(builder.register_contig(target.name, def)?);
         }
         Ok(FromBamHeader { builder, contigs })
     }
