@@ -69,6 +69,9 @@ pub struct WithSamples;
 /// ```
 pub struct Writer<W: Write, S = Unstarted> {
     inner: WriterInner<W>,
+    /// Contig names in rid order, captured from the header. Empty for plain
+    /// VCF; used to label the coordinate index returned by [`Writer::finish`].
+    contig_names: Vec<SmolStr>,
     _state: PhantomData<S>,
 }
 
@@ -133,7 +136,7 @@ impl<W: Write> Writer<W> {
                 fmt_tracker: FieldTracker::default(),
             },
         };
-        Writer { inner, _state: PhantomData }
+        Writer { inner, contig_names: Vec::new(), _state: PhantomData }
     }
 
     // r[impl record_encoder.write_header]
@@ -141,6 +144,11 @@ impl<W: Write> Writer<W> {
     pub fn write_header(mut self, header: &VcfHeader) -> Result<Writer<W, Ready>, VcfError> {
         let header_text = header.to_vcf_text();
         let n_refs = header.contigs().len();
+        // Only compressed output is indexed; plain VCF needs no contig names.
+        let contig_names: Vec<SmolStr> = match self.inner {
+            WriterInner::Vcf { .. } => Vec::new(),
+            _ => header.contigs().keys().cloned().collect(),
+        };
         #[expect(
             clippy::cast_possible_truncation,
             reason = "sample count bounded by VcfHeader builder; realistic files have <100 samples"
@@ -170,7 +178,7 @@ impl<W: Write> Writer<W> {
             }
         }
 
-        Ok(Writer { inner: self.inner, _state: PhantomData })
+        Ok(Writer { inner: self.inner, contig_names, _state: PhantomData })
     }
 }
 
@@ -262,13 +270,16 @@ impl<W: Write> Writer<W, Ready> {
     }
 
     // r[impl record_encoder.finish]
-    /// Finalize the writer, returning the inner writer and optional index builder.
+    /// Finalize the writer, returning the inner writer and an optional
+    /// [`CoordinateIndex`].
     ///
     /// For VCF.gz and BCF, all buffered data is flushed and the BGZF EOF marker
     /// is written before this returns — the caller does not need to flush `W`.
-    /// The index builder is `Some` for `VcfGz` (TBI) and `Bcf` (CSI), `None`
-    /// for plain VCF. This signature matches [`crate::bam::BamWriter::finish`].
-    pub fn finish(self) -> Result<(W, Option<IndexBuilder>), VcfError> {
+    /// The index is `Some` for `VcfGz`/`Bcf` and `None` for plain VCF; it is
+    /// self-describing, so callers write it with [`CoordinateIndex::write`]
+    /// without choosing a serializer or re-supplying contig names.
+    pub fn finish(self) -> Result<(W, Option<CoordinateIndex>), VcfError> {
+        let contig_names = self.contig_names;
         match self.inner {
             WriterInner::Vcf { mut output, .. } => {
                 output.flush().map_err(VcfError::Io)?;
@@ -281,6 +292,11 @@ impl<W: Write> Writer<W, Ready> {
                     idx.finish(voff)?;
                 }
                 let inner = bgzf.finish()?;
+                let index = index.map(|builder| CoordinateIndex {
+                    builder,
+                    format: OutputFormat::VcfGz,
+                    contig_names,
+                });
                 Ok((inner, index))
             }
             WriterInner::Bcf { bgzf, mut index, .. } => {
@@ -290,9 +306,93 @@ impl<W: Write> Writer<W, Ready> {
                     idx.finish(voff)?;
                 }
                 let inner = bgzf.finish()?;
+                let index = index.map(|builder| CoordinateIndex {
+                    builder,
+                    format: OutputFormat::Bcf,
+                    contig_names,
+                });
                 Ok((inner, index))
             }
         }
+    }
+}
+
+/// A finalized coordinate index for a VCF.gz or BCF file, ready to serialize.
+///
+/// Returned by [`Writer::finish`] for compressed output. It bundles the
+/// [`IndexBuilder`], the [`OutputFormat`], and the contig names in rid order, so
+/// callers serialize with one [`write`](Self::write) call instead of selecting
+/// the right `IndexBuilder` method and re-supplying names and ref counts.
+///
+/// Convention: the index lives next to the data file with [`SUFFIX`](Self::SUFFIX)
+/// appended (e.g. `calls.bcf` → `calls.bcf.csi`).
+///
+/// ```
+/// use seqair_types::{Base, Pos1};
+/// use seqair::vcf::{Alleles, ContigDef, CoordinateIndex, OutputFormat, VcfHeader, Writer};
+/// use std::sync::Arc;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = VcfHeader::builder();
+/// let chr1 = builder.register_contig("chr1", ContigDef { length: Some(1000) })?;
+/// let header = Arc::new(builder.build()?);
+///
+/// let mut bcf = Vec::new();
+/// let mut writer = Writer::new(&mut bcf, OutputFormat::Bcf).write_header(&header)?;
+/// let alleles = Alleles::snv(Base::A, Base::T)?;
+/// writer
+///     .begin_record(&chr1, Pos1::new(100).unwrap(), &alleles, Some(30.0))?
+///     .filter_pass()
+///     .emit()?;
+///
+/// // Compressed output yields an index from finish(); plain VCF yields `None`.
+/// let (_, index) = writer.finish()?;
+/// let index = index.expect("BCF output is indexed");
+///
+/// // Write it next to the data file, e.g. `calls.bcf.{SUFFIX}`:
+/// assert_eq!(CoordinateIndex::SUFFIX, "csi");
+/// let mut csi = Vec::new();
+/// index.write(&mut csi)?;
+/// assert!(!csi.is_empty());
+/// # Ok(()) }
+/// ```
+pub struct CoordinateIndex {
+    builder: IndexBuilder,
+    format: OutputFormat,
+    contig_names: Vec<SmolStr>,
+}
+
+impl CoordinateIndex {
+    /// Conventional filename suffix appended to the data file path.
+    pub const SUFFIX: &'static str = "csi";
+
+    /// Serialize the index (BGZF-compressed) to `writer`, choosing the correct
+    /// on-disk format: CSI with tabix metadata for VCF.gz, plain CSI for BCF.
+    pub fn write<W: Write>(&self, writer: W) -> Result<(), VcfError> {
+        match self.format {
+            OutputFormat::VcfGz => self.builder.write_csi_tabix(writer, &self.contig_names)?,
+            OutputFormat::Bcf => self.builder.write_csi(writer, self.contig_names.len(), &[])?,
+            // finish() never builds a CoordinateIndex for plain VCF.
+            OutputFormat::Vcf => {}
+        }
+        Ok(())
+    }
+
+    /// Serialize the index to `path`, creating or truncating the file.
+    pub fn write_to_path(&self, path: impl AsRef<std::path::Path>) -> Result<(), VcfError> {
+        let file = std::fs::File::create(path).map_err(VcfError::Io)?;
+        self.write(std::io::BufWriter::new(file))
+    }
+
+    /// Borrow the underlying [`IndexBuilder`] for direct serialization (e.g. to
+    /// emit a `.tbi` instead of `.csi`, or to compare formats in tests).
+    pub fn builder(&self) -> &IndexBuilder {
+        &self.builder
+    }
+
+    /// Consume the index, returning the underlying [`IndexBuilder`].
+    pub fn into_builder(self) -> IndexBuilder {
+        self.builder
     }
 }
 

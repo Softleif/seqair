@@ -1,9 +1,14 @@
 //! VCF/BCF writing with type-safe alleles and zero-allocation encoding.
 //!
 //! Use [`Writer`] with [`OutputFormat`] for all VCF/BCF output:
-//! - `.vcf` → plain text VCF
-//! - `.vcf.gz` → BGZF-compressed VCF with automatic TBI index co-production
-//! - `.bcf` → BCF binary with automatic CSI index co-production
+//! - `.vcf` → plain text VCF (no index)
+//! - `.vcf.gz` → BGZF-compressed VCF; [`Writer::finish`] returns a CSI [`CoordinateIndex`]
+//! - `.bcf` → BCF binary; [`Writer::finish`] returns a CSI [`CoordinateIndex`]
+//!
+//! For compressed output, [`Writer::finish`] hands back a [`CoordinateIndex`]
+//! alongside the inner writer; write it next to the data file (e.g.
+//! `calls.bcf.csi`) with [`CoordinateIndex::write`] or
+//! [`write_to_path`](CoordinateIndex::write_to_path).
 //!
 //! Records are encoded through a typestate [`RecordEncoder`] that enforces
 //! the correct field ordering at compile time.
@@ -105,8 +110,13 @@
 //! gt.encode(&mut enc, &[Genotype::unphased(0, 1)])?;
 //! enc.emit()?;
 //!
-//! writer.finish()?;
+//! // For compressed output, finish() returns a CoordinateIndex. Write it next
+//! // to the data file as `<path>.csi`; here we serialize to an in-memory buffer.
+//! let (_, index) = writer.finish()?;
+//! let mut csi = Vec::new();
+//! index.expect("BCF output is indexed").write(&mut csi)?;
 //! # assert!(!buf.is_empty());
+//! # assert!(!csi.is_empty());
 //! # Ok(())
 //! # }
 //! ```
@@ -190,7 +200,9 @@ pub use record_encoder::{
     FormatString, Gt, InfoEncoder, InfoFieldDef, InfoFlag, InfoFloat, InfoFloats, InfoInt,
     InfoIntOpts, InfoInts, InfoKey, InfoString, OptArr, Scalar, Str,
 };
-pub use unified::{Begun, Filtered, Ready, RecordEncoder, Unstarted, WithSamples, Writer};
+pub use unified::{
+    Begun, CoordinateIndex, Filtered, Ready, RecordEncoder, Unstarted, WithSamples, Writer,
+};
 
 /// Output format for [`Writer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

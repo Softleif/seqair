@@ -102,7 +102,7 @@ fn write_vcf_gz_with_index(
     enc.emit().unwrap();
 
     let (_inner, index) = writer.finish().unwrap();
-    let index = index.expect("VcfGz writer should produce TBI index");
+    let index = index.expect("VcfGz writer should produce TBI index").into_builder();
     (vcf_path, index)
 }
 
@@ -364,7 +364,7 @@ fn write_proptest_vcf(
     }
 
     let (_inner, index) = writer.finish().unwrap();
-    let index = index.expect("should produce index");
+    let index = index.expect("should produce index").into_builder();
     let tbi_path = vcf_path.with_extension("gz.tbi");
     use seqair_types::SmolStr;
     let names: Vec<SmolStr> = header.contigs().keys().cloned().collect();
