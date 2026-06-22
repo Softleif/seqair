@@ -145,6 +145,19 @@ impl Readers<()> {
     pub fn open(alignment_path: &Path, fasta_path: &Path) -> Result<Self, ReaderError> {
         Self::open_customized(alignment_path, fasta_path, ())
     }
+
+    /// Assemble a reference-aware reader from an already-open alignment handle
+    /// and FASTA reader.
+    ///
+    /// This is the composition primitive behind [`open`](Self::open): it does
+    /// no I/O and performs no format detection. Use it when you opened an
+    /// [`IndexedReader`] first (e.g. to stream records) and later decided you
+    /// want pileup, or to supply a FASTA reader obtained from elsewhere. The
+    /// ergonomic spelling is [`IndexedReader::into_pileup`].
+    // r[impl unified.readers_from_parts]
+    pub fn from_parts(alignment: IndexedReader, fasta: IndexedFastaReader) -> Self {
+        Self::from_parts_customized(alignment, fasta, ())
+    }
 }
 
 impl<E: CustomizeRecordStore> Readers<E> {
@@ -159,15 +172,29 @@ impl<E: CustomizeRecordStore> Readers<E> {
     ) -> Result<Self, ReaderError> {
         let fasta = IndexedFastaReader::open(fasta_path)
             .map_err(|source| ReaderError::FastaOpen { source })?;
-        let alignment = IndexedReader::open_with_fasta(alignment_path, fasta_path)?;
-        Ok(Readers {
+        let alignment = IndexedReader::open_with_reference(alignment_path, fasta_path)?;
+        Ok(Self::from_parts_customized(alignment, fasta, customize))
+    }
+
+    /// Assemble a reader from already-open parts and a [`CustomizeRecordStore`].
+    ///
+    /// The generic form of [`from_parts`](Readers::from_parts); the shared
+    /// builder behind [`open_customized`](Self::open_customized) and
+    /// [`fork`](Self::fork). Does no I/O.
+    // r[impl unified.readers_from_parts]
+    pub fn from_parts_customized(
+        alignment: IndexedReader,
+        fasta: IndexedFastaReader,
+        customize: E,
+    ) -> Self {
+        Readers {
             alignment,
             fasta,
             store: RecordStore::default(),
             fasta_buf: Vec::new(),
             customize,
             pileup_scratch: crate::bam::pileup::PileupScratch::default(),
-        })
+        }
     }
 
     /// Fork both the alignment reader and the FASTA reader.
@@ -177,14 +204,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
     pub fn fork(&self) -> Result<Self, ReaderError> {
         let alignment = self.alignment.fork()?;
         let fasta = self.fasta.fork().map_err(|source| ReaderError::FastaFork { source })?;
-        Ok(Readers {
-            alignment,
-            fasta,
-            store: RecordStore::default(),
-            fasta_buf: Vec::new(),
-            customize: self.customize.clone(),
-            pileup_scratch: crate::bam::pileup::PileupScratch::default(),
-        })
+        Ok(Self::from_parts_customized(alignment, fasta, self.customize.clone()))
     }
 
     // r[impl unified.readers_accessors]
@@ -768,6 +788,86 @@ mod tests {
         assert!(
             matches!(err, ReaderError::SegmentHeaderMismatch { .. }),
             "expected SegmentHeaderMismatch, got {err:?}"
+        );
+    }
+
+    // r[verify unified.open_with_reference]
+    /// The record-iteration handle streams records from any format without a
+    /// pileup engine: opened via `IndexedReader::open_with_reference`, a plain
+    /// `fetch_into` into a caller-owned `RecordStore` populates records for a
+    /// known-covered region.
+    #[test]
+    fn open_with_reference_streams_records_without_pileup() {
+        let mut reader =
+            IndexedReader::open_with_reference(test_bam_path(), test_fasta_path()).unwrap();
+        let tid = reader.header().tid("chr19").expect("test BAM has chr19");
+        let mut store = RecordStore::default();
+        let n = reader
+            .fetch_into(
+                tid,
+                Pos0::new(6_103_500).unwrap(),
+                Pos0::new(6_106_500).unwrap(),
+                &mut store,
+            )
+            .unwrap();
+        assert!(n > 0, "known-covered region must yield records");
+        assert_eq!(n, store.len(), "fetch_into return value must match records pushed");
+    }
+
+    // r[verify unified.readers_from_parts]
+    /// `from_parts` assembles a `Readers` from already-open handles with no I/O
+    /// and starts with fresh, empty record/scratch buffers — it MUST NOT carry
+    /// over any buffers from the source readers.
+    #[test]
+    fn from_parts_starts_with_empty_buffers() {
+        let alignment =
+            IndexedReader::open_with_reference(test_bam_path(), test_fasta_path()).unwrap();
+        let fasta = IndexedFastaReader::open(test_fasta_path()).unwrap();
+        let readers = Readers::from_parts(alignment, fasta);
+        assert!(readers.store.is_empty(), "assembled store must start empty");
+        assert_eq!(readers.store.records_capacity(), 0, "no record buffer should be pre-allocated");
+        assert_eq!(readers.fasta_buf.capacity(), 0, "no fasta buffer should be pre-allocated");
+    }
+
+    // r[verify unified.into_pileup]
+    /// `IndexedReader::into_pileup` is an alternate construction path for a
+    /// reference-aware `Readers`. Independent oracle: a pileup driven through
+    /// the `open_with_reference(...).into_pileup(...)` path must produce
+    /// exactly the same per-column `(pos, depth)` sequence as the same pileup
+    /// driven through `Readers::open`.
+    #[test]
+    fn into_pileup_matches_readers_open() {
+        use std::num::NonZeroU32;
+
+        fn column_depths(readers: &mut Readers, seg: &Segment) -> Vec<(u64, usize)> {
+            let mut out = Vec::new();
+            let mut p = readers.pileup(seg, DepthLimit::Unlimited).unwrap();
+            while let Some(col) = p.pileups() {
+                out.push((col.pos().as_u64(), col.depth()));
+            }
+            out
+        }
+
+        let opts = SegmentOptions::new(NonZeroU32::new(3_000).unwrap());
+        let region = ("chr19", Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap());
+
+        // Path A: the canonical Readers::open.
+        let mut via_open = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let seg_a = via_open.segments(region, opts).unwrap().next().expect("at least one segment");
+        let depths_open = column_depths(&mut via_open, &seg_a);
+
+        // Path B: record-iteration handle upgraded with into_pileup.
+        let alignment =
+            IndexedReader::open_with_reference(test_bam_path(), test_fasta_path()).unwrap();
+        let fasta = IndexedFastaReader::open(test_fasta_path()).unwrap();
+        let mut via_into = alignment.into_pileup(fasta);
+        let seg_b = via_into.segments(region, opts).unwrap().next().expect("at least one segment");
+        let depths_into = column_depths(&mut via_into, &seg_b);
+
+        assert!(!depths_open.is_empty(), "test region must produce pileup columns");
+        assert_eq!(
+            depths_open, depths_into,
+            "into_pileup construction must yield identical pileup to Readers::open"
         );
     }
 }

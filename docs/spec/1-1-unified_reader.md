@@ -103,6 +103,9 @@ r[unified.readers_open]
 r[unified.readers_open_customized]
 `Readers::<E>::open_customized(alignment_path, fasta_path, customize)` MUST open the readers the same way as `Readers::open` but carry the user-supplied customize value along for `pileup()` to invoke on each fetched region. The customize value is stored by ownership inside the `Readers` struct.
 
+r[unified.readers_from_parts]
+`Readers::<E>::from_parts_customized(alignment, fasta, customize)` MUST assemble a `Readers` from an already-open `IndexedReader` and `IndexedFastaReader` without performing any I/O or format detection. It is the shared constructor behind `open_customized`, `fork` (`r[unified.readers_fork]`), and `IndexedReader::into_pileup` (`r[unified.into_pileup]`). `Readers::from_parts(alignment, fasta)` is the `E = ()` convenience wrapper. A fresh empty `RecordStore`, `fasta_buf`, and `PileupScratch` MUST be created — an assembled `Readers` MUST NOT inherit record or scratch buffers from any prior reader.
+
 r[unified.readers_fork]
 `Readers::fork()` MUST fork both the alignment reader and the FASTA reader, returning a new `Readers` with independent I/O handles but shared immutable state (indices, headers). The CRAM fork gets its own FASTA reader via `IndexedFastaReader::fork()`. When `E ≠ ()`, `fork()` MUST clone the customize value into the new `Readers` (the `Clone` bound on `CustomizeRecordStore` guarantees this is cheap).
 
@@ -280,6 +283,20 @@ r[unified.fetch_counts]
 
 r[unified.readers_backward_compat]
 `IndexedReader::open(path)` MUST continue to work for BAM and SAM files without a FASTA path. CRAM detection in `IndexedReader::open()` MUST return an error explaining that CRAM requires a reference and suggesting `Readers::open()` instead. This preserves backward compatibility for code that only needs BAM/SAM.
+
+## Record-iteration vs pileup tiers
+
+A caller may want records from any format without the pileup engine — for CRAM
+this still requires a reference to reconstruct read bases, but it should not
+pay for the reference-fetch buffer or pileup scratch that `Readers` carries.
+The two methods below provide that record-only tier and a zero-I/O upgrade
+path to a full reference-aware `Readers`.
+
+r[unified.open_with_reference]
+`IndexedReader::open_with_reference(path, reference_path)` MUST open any of the three formats (auto-detected via `r[unified.detect_format]`) as a **record-iteration handle**: it builds no pileup engine and allocates no reference-fetch buffer. For BAM/SAM the reference path is not consulted (records carry their own bases); for CRAM it MUST be passed to `IndexedCramReader::open()` to reconstruct read bases during decoding. This is the public entry point for streaming records from any format — including CRAM — without the pileup machinery that `Readers::open` builds.
+
+r[unified.into_pileup]
+`IndexedReader::into_pileup(fasta) -> Readers<()>` MUST consume the record-iteration handle and bundle it with an already-open `IndexedFastaReader` into a reference-aware `Readers`, reusing the alignment handle as-is (via `r[unified.readers_from_parts]`). It MUST perform no I/O and no format detection. The CRAM decode reference (supplied at `open_with_reference` time) and the pileup analysis reference (`fasta`) are independent handles; `into_pileup` MUST NOT require them to refer to the same file, matching the two-handle design of `Readers`.
 
 ## API surface
 

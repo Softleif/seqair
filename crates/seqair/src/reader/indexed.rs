@@ -1,11 +1,13 @@
 use super::ReaderError;
 use super::formats::{self, Format, FormatDetectionError};
+use super::readers::Readers;
 use crate::{
     bam::{
         BamHeader, IndexedBamReader,
         record_store::{CustomizeRecordStore, RecordStore},
     },
     cram::reader::IndexedCramReader,
+    fasta::IndexedFastaReader,
     sam::reader::IndexedSamReader,
 };
 use seqair_types::Pos0;
@@ -120,9 +122,11 @@ impl<R: Read + Seek> IndexedReader<R> {
 impl IndexedReader<std::fs::File> {
     /// Open a BAM or bgzf-compressed SAM file, auto-detecting the format.
     ///
-    /// CRAM files are detected but require a FASTA reference — use
-    /// [`crate::Readers::open`] instead. This method returns an error for CRAM
-    /// with a message directing the user to provide a reference.
+    /// CRAM files are detected but require a reference. To stream CRAM
+    /// records without the pileup engine, use
+    /// [`open_with_reference`](Self::open_with_reference); for reference-aware
+    /// pileup, use [`crate::Readers::open`]. This method returns an error for
+    /// CRAM with a message directing the user to provide a reference.
     // r[impl unified.readers_backward_compat]
     #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, ReaderError> {
@@ -139,8 +143,35 @@ impl IndexedReader<std::fs::File> {
         }
     }
 
-    /// Open any format, with a FASTA path for CRAM support.
-    pub(crate) fn open_with_fasta(path: &Path, fasta_path: &Path) -> Result<Self, ReaderError> {
+    /// Open any alignment format, supplying a FASTA reference for CRAM.
+    ///
+    /// This is the **record-iteration** handle for all three formats: it does
+    /// not build a pileup engine and allocates no reference-fetch buffer. For
+    /// BAM/SAM the reference is not consulted (records carry their own bases);
+    /// for CRAM it is required to reconstruct read bases during decoding. Use
+    /// this when you want to stream records from any format without paying for
+    /// pileup machinery. For reference-aware pileup, see [`crate::Readers`], or
+    /// call [`into_pileup`](Self::into_pileup) to upgrade afterwards.
+    ///
+    /// ```no_run
+    /// use seqair::reader::IndexedReader;
+    /// use seqair::bam::record_store::RecordStore;
+    /// use seqair_types::Pos0;
+    /// use std::path::Path;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Records only, any format (here CRAM), no pileup cost.
+    /// let mut reader =
+    ///     IndexedReader::open_with_reference(Path::new("sample.cram"), Path::new("ref.fa"))?;
+    /// let tid = reader.header().tid("chr1").expect("chr1 in header");
+    /// let mut store = RecordStore::default();
+    /// let (start, end) = (Pos0::new(1_000).unwrap(), Pos0::new(2_000).unwrap());
+    /// reader.fetch_into(tid, start, end, &mut store)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    // r[impl unified.open_with_reference]
+    pub fn open_with_reference(path: &Path, reference_path: &Path) -> Result<Self, ReaderError> {
         match formats::detect(path)? {
             Format::Bam => {
                 let reader = IndexedBamReader::open(path)?;
@@ -151,10 +182,38 @@ impl IndexedReader<std::fs::File> {
                 Ok(IndexedReader::Sam(reader))
             }
             Format::Cram => {
-                let reader = IndexedCramReader::open(path, fasta_path)?;
+                let reader = IndexedCramReader::open(path, reference_path)?;
                 Ok(IndexedReader::Cram(Box::new(reader)))
             }
         }
+    }
+
+    /// Upgrade this record reader into a reference-aware [`Readers`] for pileup.
+    ///
+    /// The alignment handle is reused as-is; `fasta` supplies the per-column
+    /// reference sequence consumed by the pileup engine. Note that the CRAM
+    /// decode reference (passed at open time) and this analysis reference are
+    /// independent handles — this method does not check they point at the same
+    /// file, matching the existing two-handle design.
+    ///
+    /// ```no_run
+    /// use seqair::reader::IndexedReader;
+    /// use seqair::fasta::IndexedFastaReader;
+    /// use std::path::Path;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Opened a records-only reader earlier; now decide we want pileup.
+    /// let reader =
+    ///     IndexedReader::open_with_reference(Path::new("sample.cram"), Path::new("ref.fa"))?;
+    /// let readers = reader.into_pileup(IndexedFastaReader::open(Path::new("ref.fa"))?);
+    /// // `readers` is a full reference-aware `Readers` ready for `segments()`/`pileup()`.
+    /// # let _ = readers;
+    /// # Ok(())
+    /// # }
+    /// ```
+    // r[impl unified.into_pileup]
+    pub fn into_pileup(self, fasta: IndexedFastaReader) -> Readers<()> {
+        Readers::from_parts(self, fasta)
     }
 
     // r[impl unified.fork_bam]
