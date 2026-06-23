@@ -1,6 +1,6 @@
 [package]
 name = "seqair"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Pure-Rust BAM/SAM/CRAM/FASTA reader and pileup engine"
 repository = "https://github.com/Softleif/seqair"
