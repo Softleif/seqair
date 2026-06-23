@@ -486,6 +486,74 @@ impl CigarMapping {
         }
     }
 
+    /// Query position of a soft-clipped base projected onto reference position
+    /// `pos`, when `pos` lies within `max_overhang` reference bases of the
+    /// alignment on the side that carries a soft clip.
+    ///
+    /// Soft-clipped bases are not aligned, so this assumes a gapless diagonal
+    /// extension of the read past its alignment boundary — the natural
+    /// interpretation for recovering a single clipped base adjacent to the
+    /// alignment (e.g. a TAPS methylation base the aligner trimmed). `query_len`
+    /// is the read's SEQ length (soft clips counted, hard clips excluded), used
+    /// to size the trailing clip.
+    // r[impl cigar.soft_clip_qpos]
+    pub fn soft_clip_qpos_at(&self, pos: Pos0, max_overhang: u32, query_len: u32) -> Option<u32> {
+        if max_overhang == 0 {
+            return None;
+        }
+        let pos = pos.as_i64();
+        match self {
+            Self::Linear { rec_pos, query_offset, match_len } => {
+                let aln_start = rec_pos.as_i64();
+                // Leading clip: columns [aln_start - k, aln_start).
+                let lead_k = max_overhang.min(*query_offset);
+                let lead_d = aln_start.checked_sub(pos)?;
+                if lead_d >= 1 && lead_d <= i64::from(lead_k) {
+                    return u32::try_from(i64::from(*query_offset).checked_sub(lead_d)?).ok();
+                }
+                // Trailing clip: columns [aln_end, aln_end + k).
+                let aln_end = aln_start.checked_add(i64::from(*match_len))?;
+                let trail_len = query_len.saturating_sub(query_offset.saturating_add(*match_len));
+                let trail_k = max_overhang.min(trail_len);
+                let trail_d = pos.checked_sub(aln_end)?;
+                if trail_d >= 0 && trail_d < i64::from(trail_k) {
+                    return u32::try_from(
+                        i64::from(*query_offset)
+                            .checked_add(i64::from(*match_len))?
+                            .checked_add(trail_d)?,
+                    )
+                    .ok();
+                }
+                None
+            }
+            Self::Complex(ops) => {
+                let (lead, trail) = clip_flanks(ops);
+                if let Some(clip) = lead {
+                    let aln_start = i64::from(clip.ref_start);
+                    let k = max_overhang.min(clip.len());
+                    let d = aln_start.checked_sub(pos)?;
+                    if d >= 1 && d <= i64::from(k) {
+                        return u32::try_from(
+                            i64::from(clip.query_start)
+                                .checked_add(i64::from(clip.len()))?
+                                .checked_sub(d)?,
+                        )
+                        .ok();
+                    }
+                }
+                if let Some(clip) = trail {
+                    let aln_end = i64::from(clip.ref_start);
+                    let k = max_overhang.min(clip.len());
+                    let d = pos.checked_sub(aln_end)?;
+                    if d >= 0 && d < i64::from(k) {
+                        return u32::try_from(i64::from(clip.query_start).checked_add(d)?).ok();
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Length of a deletion that immediately follows reference position `pos`
     /// for this read — i.e. when `pos` is the last matched reference base
     /// before a `D` op (the deletion's *anchor*). `None` everywhere else.
@@ -554,6 +622,43 @@ fn try_linear(ops: &[CigarOp]) -> Option<(u32, u32)> {
     // Only succeed if we reached the match phase (phase >= 1).
     // Pure soft/hard clips (phase == 0) should use the complex path.
     if phase >= 1 { Some((query_offset, match_len)) } else { None }
+}
+
+/// The leading and trailing soft-clip ops of a compact CIGAR, if present.
+/// "Leading" is the soft clip before the first reference-consuming op (its
+/// `ref_start` is the alignment start); "trailing" is the soft clip after the
+/// last reference-consuming op (its `ref_start` is one past the last aligned
+/// reference base). Hard clips, which neither consume reference nor query, are
+/// skipped.
+///
+/// Pure-soft-clip CIGARs (no reference-consuming ops) return the same op for
+/// lead and trail. This is unreachable in the pileup path — such reads are
+/// excluded from the active set by r[pileup.soft_clip_at_position] — but the
+/// caller should not assume lead ≠ trail.
+fn clip_flanks(ops: &[CompactOp]) -> (Option<CompactOp>, Option<CompactOp>) {
+    let mut lead = None;
+    for op in ops {
+        match op.op_type() {
+            CIGAR_S => {
+                lead = Some(*op);
+                break;
+            }
+            CIGAR_H => continue,
+            _ => break,
+        }
+    }
+    let mut trail = None;
+    for op in ops.iter().rev() {
+        match op.op_type() {
+            CIGAR_S => {
+                trail = Some(*op);
+                break;
+            }
+            CIGAR_H => continue,
+            _ => break,
+        }
+    }
+    (lead, trail)
 }
 
 fn build_compact_ops(rec_pos: Pos0, ops: &[CigarOp]) -> Option<SmallVec<CompactOp, 6>> {
@@ -868,6 +973,143 @@ mod tests {
             None,
             "pos far before alignment must return None"
         );
+    }
+
+    fn p(pos: u32) -> Pos0 {
+        Pos0::new(pos).unwrap()
+    }
+
+    // r[verify cigar.soft_clip_qpos]
+    #[test]
+    fn soft_clip_qpos_linear_leading_and_trailing() {
+        // 5S 100M 3S: rec_pos=1000, query_offset=5, match_len=100, query_len=108.
+        let cigar = [
+            op(CigarOpType::SoftClip, 5),
+            op(CigarOpType::Match, 100),
+            op(CigarOpType::SoftClip, 3),
+        ];
+        let m = CigarMapping::new(p(1000), &cigar).unwrap();
+        assert!(matches!(m, CigarMapping::Linear { .. }));
+        let q = |pos, k| m.soft_clip_qpos_at(p(pos), k, 108);
+
+        // Leading: the base adjacent to the alignment (pos 999) is the last clip base (qpos 4).
+        assert_eq!(q(999, 1), Some(4));
+        assert_eq!(q(998, 1), None, "overhang 1 reaches only one base");
+        assert_eq!(q(998, 2), Some(3));
+        assert_eq!(q(995, 5), Some(0), "first leading clip base");
+        assert_eq!(q(994, 5), None, "beyond the 5bp leading clip");
+        assert_eq!(q(994, 9), None, "overhang capped by clip length");
+
+        // Trailing: pos 1100 is the first trailing clip base (qpos 105).
+        assert_eq!(q(1100, 1), Some(105));
+        assert_eq!(q(1102, 3), Some(107), "last trailing clip base");
+        assert_eq!(q(1103, 3), None, "beyond the 3bp trailing clip");
+
+        // Inside the alignment and overhang 0 yield nothing.
+        assert_eq!(q(1050, 5), None);
+        assert_eq!(q(999, 0), None);
+    }
+
+    #[test]
+    fn soft_clip_qpos_no_clip_returns_none() {
+        let cigar = [op(CigarOpType::Match, 50)];
+        let m = CigarMapping::new(p(200), &cigar).unwrap();
+        assert_eq!(m.soft_clip_qpos_at(p(199), 1, 50), None);
+        assert_eq!(m.soft_clip_qpos_at(p(250), 1, 50), None);
+    }
+
+    #[test]
+    fn soft_clip_qpos_hard_clip_excluded_from_seq() {
+        // 2H 5S 100M: hard clip is not in SEQ, so query_offset stays 5 and qpos
+        // indexes SEQ directly. query_len (SEQ) = 105.
+        let cigar = [
+            op(CigarOpType::HardClip, 2),
+            op(CigarOpType::SoftClip, 5),
+            op(CigarOpType::Match, 100),
+        ];
+        let m = CigarMapping::new(p(1000), &cigar).unwrap();
+        assert_eq!(m.soft_clip_qpos_at(p(999), 1, 105), Some(4));
+    }
+
+    #[test]
+    fn soft_clip_qpos_complex_mapping() {
+        // 5S 10M 2I 10M 3S forces the Complex path (insertion). aln spans
+        // 1000..1020; trailing clip query starts at 5+10+2+10 = 27.
+        let cigar = [
+            op(CigarOpType::SoftClip, 5),
+            op(CigarOpType::Match, 10),
+            op(CigarOpType::Insertion, 2),
+            op(CigarOpType::Match, 10),
+            op(CigarOpType::SoftClip, 3),
+        ];
+        let m = CigarMapping::new(p(1000), &cigar).unwrap();
+        assert!(matches!(m, CigarMapping::Complex(_)));
+        let query_len = 5 + 10 + 2 + 10 + 3;
+        assert_eq!(m.soft_clip_qpos_at(p(999), 1, query_len), Some(4), "leading partner");
+        assert_eq!(m.soft_clip_qpos_at(p(995), 5, query_len), Some(0), "first leading base");
+        assert_eq!(m.soft_clip_qpos_at(p(1020), 1, query_len), Some(27), "trailing partner");
+        assert_eq!(m.soft_clip_qpos_at(p(1022), 3, query_len), Some(29), "last trailing base");
+        assert_eq!(m.soft_clip_qpos_at(p(1023), 3, query_len), None);
+    }
+
+    proptest::proptest! {
+        /// For an arbitrary clips-match-clips CIGAR, `soft_clip_qpos_at` MUST be
+        /// the exact complement of `pos_info_at` over the flanking windows:
+        /// never both `Some` at one position, every hit indexes the correct
+        /// clip run, and the number of hits per side is exactly
+        /// `min(overhang, clip_len)`.
+        // r[verify cigar.soft_clip_qpos]
+        #[test]
+        fn soft_clip_qpos_windows(
+            rec_pos in 100u32..1_000,
+            lead in 0u32..5,
+            mlen in 1u32..10,
+            trail in 0u32..5,
+            overhang in 0u32..6,
+        ) {
+            let mut ops = Vec::new();
+            if lead > 0 {
+                ops.push(op(CigarOpType::SoftClip, lead));
+            }
+            ops.push(op(CigarOpType::Match, mlen));
+            if trail > 0 {
+                ops.push(op(CigarOpType::SoftClip, trail));
+            }
+            let query_len = lead + mlen + trail;
+            let m = CigarMapping::new(p(rec_pos), &ops).unwrap();
+
+            let aln_start = rec_pos;
+            let aln_end = rec_pos + mlen; // one past the last aligned base
+
+            let lo = aln_start.saturating_sub(overhang + 2);
+            let hi = aln_end + overhang + 2;
+            let mut lead_hits = 0u32;
+            let mut trail_hits = 0u32;
+            for pos in lo..hi {
+                let pp = p(pos);
+                let sc = m.soft_clip_qpos_at(pp, overhang, query_len);
+                let aligned = m.pos_info_at(pp);
+                prop_assert!(
+                    !(sc.is_some() && aligned.is_some()),
+                    "soft clip and aligned base cannot coexist at one position"
+                );
+                if let Some(q) = sc {
+                    prop_assert!(q < query_len);
+                    if pos < aln_start {
+                        prop_assert!(q < lead, "leading hit must index the leading clip run");
+                        lead_hits += 1;
+                    } else {
+                        prop_assert!(
+                            q >= lead + mlen,
+                            "trailing hit must index the trailing clip run"
+                        );
+                        trail_hits += 1;
+                    }
+                }
+            }
+            prop_assert_eq!(lead_hits, overhang.min(lead));
+            prop_assert_eq!(trail_hits, overhang.min(trail));
+        }
     }
 
     // r[verify cigar.slice_from_bam_bytes]

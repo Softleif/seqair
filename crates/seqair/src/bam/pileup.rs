@@ -130,6 +130,10 @@ pub struct PileupEngine<U = ()> {
     active: Vec<ActiveRecord>,
     max_depth: Option<u32>,
     ref_seq: Option<RefSeq>,
+    /// When > 0, emit up to this many soft-clipped fringe bases adjacent to each
+    /// alignment as [`PileupOp::SoftClip`] columns. 0 (default) = current
+    /// behavior (soft clips invisible), preserving htslib pileup parity.
+    soft_clip_overhang: u32,
     // Profiling counters — u32 is sufficient for single-region pileups (max ~250M positions).
     // For whole-genome streaming, these saturate at u32::MAX which is acceptable for debug output.
     columns_produced: u32,
@@ -254,6 +258,11 @@ impl<'eng, U> PileupColumn<'eng, U> {
     /// Unlike [`depth`](Self::depth), deletions and ref-skips are not counted.
     /// Use `match_depth` when you need the number of reads that actually cover
     /// the position with a base (e.g., for allele frequency calculations).
+    ///
+    /// Note: when [`PileupEngine::set_soft_clip_overhang`] is enabled, this
+    /// includes projected [`PileupOp::SoftClip`] bases (which carry a real
+    /// query base). Subtract those with [`PileupAlignment::is_soft_clip`] if
+    /// you want the aligned-only base count.
     #[must_use]
     pub fn match_depth(&self) -> usize {
         self.alignments.iter().filter(|a| a.qpos().is_some()).count()
@@ -375,6 +384,7 @@ impl<U> std::ops::Deref for AlignmentView<'_, '_, U> {
 ///         PileupOp::Deletion { .. }     => "deletion",
 ///         PileupOp::ComplexIndel { .. } => "complex-indel",
 ///         PileupOp::RefSkip             => "ref-skip",
+///         PileupOp::SoftClip { .. }     => "soft-clip",
 ///     }
 /// }
 ///
@@ -408,6 +418,12 @@ pub enum PileupOp {
     ComplexIndel { del_len: u32, insert_len: u32, is_refskip: bool },
     /// Read has a reference skip at this position (N CIGAR op, e.g. intron). No query base.
     RefSkip,
+    /// Read has a *soft-clipped* base projected onto this reference position.
+    /// The base is not aligned here — it is the clipped fringe base the engine
+    /// emits when `soft_clip_overhang > 0`, assuming a gapless extension past the
+    /// alignment boundary. Only ever produced opt-in; `base`/`qual`/`qpos`
+    /// behave like [`PileupOp::Match`].
+    SoftClip { qpos: u32, base: Base, qual: BaseQuality },
 }
 
 const _: () = assert!(std::mem::size_of::<PileupOp>() <= 12, "PileupOp grew unexpectedly large");
@@ -472,7 +488,9 @@ impl PileupAlignment {
     #[must_use]
     pub fn qpos(&self) -> Option<usize> {
         match self.op {
-            PileupOp::Match { qpos, .. } | PileupOp::Insertion { qpos, .. } => Some(qpos as usize),
+            PileupOp::Match { qpos, .. }
+            | PileupOp::Insertion { qpos, .. }
+            | PileupOp::SoftClip { qpos, .. } => Some(qpos as usize),
             PileupOp::Deletion { .. } | PileupOp::ComplexIndel { .. } | PileupOp::RefSkip => None,
         }
     }
@@ -480,7 +498,9 @@ impl PileupAlignment {
     #[must_use]
     pub fn base(&self) -> Option<Base> {
         match self.op {
-            PileupOp::Match { base, .. } | PileupOp::Insertion { base, .. } => Some(base),
+            PileupOp::Match { base, .. }
+            | PileupOp::Insertion { base, .. }
+            | PileupOp::SoftClip { base, .. } => Some(base),
             PileupOp::Deletion { .. } | PileupOp::ComplexIndel { .. } | PileupOp::RefSkip => None,
         }
     }
@@ -488,9 +508,18 @@ impl PileupAlignment {
     #[must_use]
     pub fn qual(&self) -> Option<BaseQuality> {
         match self.op {
-            PileupOp::Match { qual, .. } | PileupOp::Insertion { qual, .. } => Some(qual),
+            PileupOp::Match { qual, .. }
+            | PileupOp::Insertion { qual, .. }
+            | PileupOp::SoftClip { qual, .. } => Some(qual),
             PileupOp::Deletion { .. } | PileupOp::ComplexIndel { .. } | PileupOp::RefSkip => None,
         }
+    }
+
+    /// True when this column entry is an engine-projected soft-clipped fringe
+    /// base (see [`PileupOp::SoftClip`]), rather than an aligned base.
+    #[must_use]
+    pub fn is_soft_clip(&self) -> bool {
+        matches!(self.op, PileupOp::SoftClip { .. })
     }
 
     // r[impl pileup_indel.accessors]
@@ -554,6 +583,7 @@ impl<U> PileupEngine<U> {
             active: scratch.active,
             max_depth: None,
             ref_seq: None,
+            soft_clip_overhang: 0,
             columns_produced: 0,
             max_active_depth: 0,
         }
@@ -577,6 +607,15 @@ impl<U> PileupEngine<U> {
     // r[impl pileup.max_depth_per_position]
     pub fn set_max_depth(&mut self, max: u32) {
         self.max_depth = Some(max);
+    }
+
+    /// Emit up to `overhang` soft-clipped fringe bases adjacent to each
+    /// alignment as [`PileupOp::SoftClip`] columns. `0` (default) restores the
+    /// htslib-parity behavior where soft clips are invisible. Used to recover
+    /// methylation evidence the aligner trimmed (e.g. a TAPS T over a `CpG` C).
+    // r[impl pileup.soft_clip_overhang.default_off]
+    pub fn set_soft_clip_overhang(&mut self, overhang: u32) {
+        self.soft_clip_overhang = overhang;
     }
 
     pub fn remaining_positions(&self) -> usize {
@@ -761,27 +800,21 @@ impl<U> PileupEngine<U> {
             }
 
             let pos = self.current_pos;
-            #[allow(
-                clippy::unwrap_in_result,
-                reason = "infallible: current_pos <= region_end < u32::MAX - 1"
-            )]
-            {
-                self.current_pos = self
-                    .current_pos
-                    .checked_add_offset(Offset::new(1))
-                    .trace_err("BUG: current_pos + 1 overflowed despite being <= region_end")?;
-            }
+            self.current_pos = self
+                .current_pos
+                .checked_add_offset(Offset::new(1))
+                .trace_err("BUG: current_pos + 1 overflowed despite being <= region_end")?;
 
             // Evict expired records — stable retain, preserves insertion order.
             {
                 let mut write = 0;
                 let len = self.active_end_pos.len();
+                #[allow(
+                    clippy::indexing_slicing,
+                    reason = "going by index to simplify borrowing, 0 <= read < len, 0 <= write < len"
+                )]
                 for read in 0..len {
                     debug_assert!(read < self.active.len());
-                    #[allow(
-                        clippy::indexing_slicing,
-                        reason = "read < active_end_pos.len() == active.len()"
-                    )]
                     if self.active_end_pos[read] >= pos {
                         if read != write {
                             self.active_end_pos[write] = self.active_end_pos[read];
@@ -801,19 +834,26 @@ impl<U> PileupEngine<U> {
             while self.next_entry < self.store.len() {
                 #[expect(
                     clippy::cast_possible_truncation,
-                    reason = "RecordStore capacity is bounded by SlabOverflow (u32); debug_assert enforces invariant"
+                    reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
                 )]
                 let idx = self.next_entry as u32;
                 debug_assert_eq!(idx as usize, self.next_entry, "next_entry exceeds u32::MAX");
 
                 let rec = self.store.record(idx);
-                if rec.pos > pos {
+                // With soft-clip overhang, a record becomes active `overhang`
+                // columns before its alignment start (to emit the leading clip
+                // partner) and stays active `overhang` columns past its end (for
+                // the trailing clip). `pos - overhang` is monotonic in `pos`, so
+                // the store's pos-sorted order remains valid.
+                // r[impl pileup.soft_clip_overhang.activation]
+                let overhang = self.soft_clip_overhang;
+                if rec.pos.as_i64() > pos.as_i64().saturating_add(i64::from(overhang)) {
                     break;
                 }
                 self.next_entry =
                     self.next_entry.checked_add(1).trace_err("next_entry exceeded usize::MAX")?;
 
-                if rec.end_pos < pos {
+                if rec.end_pos.as_i64().saturating_add(i64::from(overhang)) < pos.as_i64() {
                     continue;
                 }
 
@@ -825,7 +865,16 @@ impl<U> PileupEngine<U> {
                 let cigar = CigarMapping::new(rec.pos, self.store.cigar(idx))
                     .trace_err("failed to generate cigar mapping")?;
 
-                self.active_end_pos.push(rec.end_pos);
+                // Bake the trailing overhang into the eviction key so the retain
+                // loop keeps the record active through its trailing soft clip.
+                let active_end = match overhang {
+                    0 => rec.end_pos,
+                    n => rec
+                        .end_pos
+                        .checked_add_offset(Offset::new(i64::from(n)))
+                        .unwrap_or(Pos0::max_value()),
+                };
+                self.active_end_pos.push(active_end);
                 self.active.push(ActiveRecord {
                     record_idx: idx,
                     cigar,
@@ -853,9 +902,18 @@ impl<U> PileupEngine<U> {
                     next_entry_u32 as usize, self.next_entry,
                     "next_entry exceeds u32::MAX"
                 );
+                // Jump to the next record, but back up by the overhang so the
+                // leading soft-clip columns just before its alignment are not
+                // skipped.
                 let next_pos = self.store.record(next_entry_u32).pos;
-                if next_pos > self.current_pos {
-                    self.current_pos = next_pos;
+                let next_start = match self.soft_clip_overhang {
+                    0 => next_pos,
+                    n => {
+                        next_pos.checked_sub_offset(Offset::new(i64::from(n))).unwrap_or(Pos0::ZERO)
+                    }
+                };
+                if next_start > self.current_pos {
+                    self.current_pos = next_start;
                 }
                 continue;
             }
@@ -867,7 +925,32 @@ impl<U> PileupEngine<U> {
             // r[impl perf.reuse_alignment_vec+2]
             self.buf.clear();
             for active in &self.active {
-                let Some(info) = active.cigar.pos_info_at(pos) else { continue };
+                let Some(info) = active.cigar.pos_info_at(pos) else {
+                    // Outside the aligned span: emit a soft-clip fringe base if
+                    // this column falls within the overhang window of a clip.
+                    // r[impl pileup.soft_clip_overhang.emit]
+                    if self.soft_clip_overhang > 0
+                        && let Some(qpos) = active.cigar.soft_clip_qpos_at(
+                            pos,
+                            self.soft_clip_overhang,
+                            active.seq_len,
+                        )
+                    {
+                        let (base, qual) = base_qual_at(&self.store, active, qpos);
+                        self.buf.push(PileupAlignment {
+                            op: PileupOp::SoftClip { qpos, base, qual },
+                            mapq: active.mapq,
+                            flags: active.flags,
+                            strand: active.strand,
+                            seq_len: active.seq_len,
+                            matching_bases: active.matching_bases,
+                            indel_bases: active.indel_bases,
+                            record_idx: active.record_idx,
+                            indel_after: Indel::None,
+                        });
+                    }
+                    continue;
+                };
 
                 let op = match info {
                     CigarPosInfo::Match { qpos } => {
@@ -898,7 +981,8 @@ impl<U> PileupEngine<U> {
                     },
                     PileupOp::Deletion { .. }
                     | PileupOp::ComplexIndel { .. }
-                    | PileupOp::RefSkip => Indel::None,
+                    | PileupOp::RefSkip
+                    | PileupOp::SoftClip { .. } => Indel::None,
                 };
 
                 self.buf.push(PileupAlignment {
@@ -1116,6 +1200,445 @@ mod tests {
         // After fourth eviction (record 3 expired at pos=40): pos 45 — [4]
         let at_45 = columns.iter().find(|(p, _)| *p == Pos0::new(45).unwrap()).unwrap();
         assert_eq!(at_45.1, vec![4]);
+    }
+
+    // r[verify pileup.soft_clip_overhang.activation]
+    // r[verify pileup.soft_clip_overhang.emit]
+    #[test]
+    fn soft_clip_overhang_emits_fringe_partner() {
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        // 2S 5M 2S at pos 100: leading clip bases [C,T] at query 0..2, match at
+        // ref 100..=104 (query 2..7), trailing clip [G,C] at query 7..9. With
+        // overhang 1, the engine should emit one SoftClip column at pos 99 (the
+        // leading partner, query 1 = T) and one at pos 105 (the trailing
+        // partner, query 7 = G).
+        let seq = [Base::C, Base::T, Base::A, Base::A, Base::A, Base::A, Base::A, Base::G, Base::C];
+        let quals = [10u8, 11, 40, 40, 40, 40, 40, 12, 13];
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(100).unwrap(),
+                Pos0::new(104).unwrap(),
+                BamFlags::empty(),
+                30,
+                5,
+                0,
+                b"clip_read",
+                &[
+                    CigarOp::new(CigarOpType::SoftClip, 2),
+                    CigarOp::new(CigarOpType::Match, 5),
+                    CigarOp::new(CigarOpType::SoftClip, 2),
+                ],
+                &seq,
+                &quals,
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                &mut (),
+            )
+            .unwrap();
+
+        let mut engine = PileupEngine::new(store, Pos0::new(98).unwrap(), Pos0::new(107).unwrap());
+        engine.set_soft_clip_overhang(1);
+
+        let mut soft: Vec<(u32, u32, Base)> = Vec::new();
+        let mut positions: Vec<u32> = Vec::new();
+        while let Some(col) = engine.pileups() {
+            positions.push(u32::from(col.pos()));
+            for aln in col.alignments() {
+                if aln.is_soft_clip() {
+                    soft.push((
+                        u32::from(col.pos()),
+                        u32::try_from(aln.qpos().unwrap()).unwrap(),
+                        aln.base().unwrap(),
+                    ));
+                }
+            }
+        }
+
+        assert_eq!(
+            soft,
+            vec![(99, 1, Base::T), (105, 7, Base::G)],
+            "exactly the two fringe partners, in coordinate order"
+        );
+        // No spurious empty column at pos 98 (record activates early but has no
+        // base there).
+        assert!(!positions.contains(&98), "no column before the leading partner");
+        assert!(!positions.contains(&106), "trailing clip beyond overhang not emitted");
+    }
+
+    // r[verify pileup.soft_clip_overhang.default_off]
+    #[test]
+    fn soft_clip_overhang_zero_is_invisible() {
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        let seq = [Base::C, Base::A, Base::A, Base::A, Base::A, Base::A];
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(100).unwrap(),
+                Pos0::new(104).unwrap(),
+                BamFlags::empty(),
+                30,
+                5,
+                0,
+                b"clip_read",
+                &[CigarOp::new(CigarOpType::SoftClip, 1), CigarOp::new(CigarOpType::Match, 5)],
+                &seq,
+                &[40u8; 6],
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                &mut (),
+            )
+            .unwrap();
+
+        let mut engine = PileupEngine::new(store, Pos0::new(98).unwrap(), Pos0::new(106).unwrap());
+        // Default overhang 0: behaves exactly as before, no SoftClip columns.
+        let mut positions: Vec<u32> = Vec::new();
+        while let Some(col) = engine.pileups() {
+            positions.push(u32::from(col.pos()));
+            assert!(col.alignments().all(|a| !a.is_soft_clip()));
+        }
+        assert_eq!(positions, vec![100, 101, 102, 103, 104]);
+    }
+
+    /// Property tests for the opt-in soft-clip overhang mode. The headline
+    /// invariant is `r[pileup.soft_clip_overhang.additive]`: enabling the
+    /// overhang only *adds* `SoftClip` entries and never perturbs the aligned
+    /// column stream a baseline (overhang-0) run produces.
+    mod overhang_proptest {
+        use super::super::*;
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use proptest::prelude::*;
+        use seqair_types::{BamFlags, Base};
+
+        const BASES: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
+
+        #[derive(Clone, Debug)]
+        struct ReadSpec {
+            pos: u32,
+            lead: u32,
+            a: u32,
+            d: u32,
+            b: u32,
+            trail: u32,
+            seq: Vec<Base>,
+        }
+
+        impl ReadSpec {
+            fn ref_span(&self) -> u32 {
+                self.a + self.d + self.b
+            }
+            fn aln_start(&self) -> u32 {
+                self.pos
+            }
+            fn aln_end(&self) -> u32 {
+                self.pos + self.ref_span()
+            }
+            fn cigar(&self) -> Vec<CigarOp> {
+                let mut ops = Vec::new();
+                if self.lead > 0 {
+                    ops.push(CigarOp::new(CigarOpType::SoftClip, self.lead));
+                }
+                ops.push(CigarOp::new(CigarOpType::Match, self.a));
+                if self.d > 0 {
+                    ops.push(CigarOp::new(CigarOpType::Deletion, self.d));
+                    ops.push(CigarOp::new(CigarOpType::Match, self.b));
+                }
+                if self.trail > 0 {
+                    ops.push(CigarOp::new(CigarOpType::SoftClip, self.trail));
+                }
+                ops
+            }
+        }
+
+        fn read_spec() -> impl Strategy<Value = ReadSpec> {
+            (50u32..150, 0u32..4, any::<bool>(), 1u32..6, 1u32..4, 1u32..6, 0u32..4).prop_flat_map(
+                |(pos, lead, has_del, a, d, b, trail)| {
+                    let (d, b) = if has_del { (d, b) } else { (0, 0) };
+                    let qlen = (lead + a + b + trail) as usize;
+                    proptest::collection::vec(0u8..4, qlen..=qlen).prop_map(move |idxs| ReadSpec {
+                        pos,
+                        lead,
+                        a,
+                        d,
+                        b,
+                        trail,
+                        seq: idxs.into_iter().map(|i| BASES[i as usize]).collect(),
+                    })
+                },
+            )
+        }
+
+        const KIND_MATCH: u8 = 0;
+        const KIND_INS: u8 = 1;
+        const KIND_DEL: u8 = 2;
+        const KIND_COMPLEX: u8 = 3;
+        const KIND_REFSKIP: u8 = 4;
+
+        struct RunResult {
+            /// Sorted `(pos, record_idx, kind, qpos)` for every non-`SoftClip` op.
+            aligned: Vec<(u32, u32, u8, i64)>,
+            /// `(pos, record_idx, qpos)` for every `SoftClip` op.
+            softclips: Vec<(u32, u32, i64)>,
+            softclips_valid: bool,
+            min_depth: usize,
+            saw_column: bool,
+        }
+
+        fn run_engine(reads: &[ReadSpec], overhang: u32) -> RunResult {
+            // The engine requires records in coordinate (`pos`) order; the
+            // generator does not, so sort before loading. `record_idx` then
+            // refers to this sorted order.
+            let mut reads = reads.to_vec();
+            reads.sort_by_key(|r| r.pos);
+            let reads = &reads;
+
+            let mut store = RecordStore::<()>::new();
+            for (i, r) in reads.iter().enumerate() {
+                let quals = vec![40u8; r.seq.len()];
+                store
+                    .push_fields(
+                        Pos0::new(r.pos).unwrap(),
+                        Pos0::new(r.aln_end() - 1).unwrap(),
+                        BamFlags::empty(),
+                        60,
+                        r.a + r.b,
+                        0,
+                        format!("r{i}").as_bytes(),
+                        &r.cigar(),
+                        &r.seq,
+                        &quals,
+                        &[],
+                        0,
+                        -1,
+                        0,
+                        0,
+                        &mut (),
+                    )
+                    .unwrap();
+            }
+
+            let mut engine =
+                PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(220).unwrap());
+            engine.set_soft_clip_overhang(overhang);
+
+            let mut aligned = Vec::new();
+            let mut softclips = Vec::new();
+            let mut softclips_valid = true;
+            let mut min_depth = usize::MAX;
+            let mut saw_column = false;
+
+            while let Some(col) = engine.pileups() {
+                saw_column = true;
+                min_depth = min_depth.min(col.depth());
+                let pos = u32::from(col.pos());
+                for aln in col.alignments() {
+                    let rec = aln.record_idx();
+                    match aln.op {
+                        PileupOp::Match { qpos, .. } => {
+                            aligned.push((pos, rec, KIND_MATCH, i64::from(qpos)));
+                        }
+                        PileupOp::Insertion { qpos, .. } => {
+                            aligned.push((pos, rec, KIND_INS, i64::from(qpos)));
+                        }
+                        PileupOp::Deletion { .. } => aligned.push((pos, rec, KIND_DEL, -1)),
+                        PileupOp::ComplexIndel { .. } => {
+                            aligned.push((pos, rec, KIND_COMPLEX, -1));
+                        }
+                        PileupOp::RefSkip => aligned.push((pos, rec, KIND_REFSKIP, -1)),
+                        PileupOp::SoftClip { qpos, base, .. } => {
+                            softclips.push((pos, rec, i64::from(qpos)));
+                            let r = &reads[rec as usize];
+                            let qpos = qpos as usize;
+                            // Base must be the actual clipped SEQ base.
+                            if r.seq.get(qpos).copied() != Some(base) {
+                                softclips_valid = false;
+                            }
+                            // Position must be within `overhang` of a boundary.
+                            let in_lead = pos < r.aln_start()
+                                && r.aln_start() - pos <= overhang
+                                && r.lead > 0;
+                            let in_trail =
+                                pos >= r.aln_end() && pos - r.aln_end() < overhang && r.trail > 0;
+                            if !(in_lead || in_trail) {
+                                softclips_valid = false;
+                            }
+                        }
+                    }
+                }
+            }
+
+            aligned.sort_unstable();
+            if min_depth == usize::MAX {
+                min_depth = 0;
+            }
+            RunResult { aligned, softclips, softclips_valid, min_depth, saw_column }
+        }
+
+        proptest! {
+            // r[verify pileup.soft_clip_overhang.additive]
+            // r[verify pileup.soft_clip_overhang.default_off]
+            // r[verify pileup.soft_clip_overhang.emit]
+            #[test]
+            fn overhang_only_adds_soft_clips(
+                reads in proptest::collection::vec(read_spec(), 1..6),
+                overhang in 1u32..4,
+            ) {
+                let baseline = run_engine(&reads, 0);
+                let with_oh = run_engine(&reads, overhang);
+
+                // Baseline never produces soft clips.
+                prop_assert!(baseline.softclips.is_empty());
+
+                // The aligned column stream is byte-identical with the overhang on.
+                prop_assert_eq!(&with_oh.aligned, &baseline.aligned);
+
+                // Every emitted soft clip references a real clipped SEQ base inside
+                // the overhang window.
+                prop_assert!(with_oh.softclips_valid);
+
+                // No empty columns are ever emitted.
+                if with_oh.saw_column {
+                    prop_assert!(with_oh.min_depth >= 1);
+                }
+            }
+        }
+    }
+
+    // r[verify pileup.soft_clip_overhang.activation]
+    // r[verify pileup.soft_clip_overhang.emit]
+    #[test]
+    fn soft_clip_active_end_overflow_near_i32_max() {
+        // When end_pos + overhang exceeds i32::MAX, the record must still stay
+        // active through the end of the contig — not silently fall back to its
+        // natural end_pos (which would drop trailing clip columns).
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        let max_pos = i32::MAX as u32;
+        // pos=i32::MAX-4, 3 matches → end_pos=i32::MAX-2, trailing clip=3.
+        // overhang=3 → active_end needs (i32::MAX-2)+3 = i32::MAX+1 → overflow.
+        // With the fix, active_end = max_value (i32::MAX); without it would
+        // silently fall back to end_pos=i32::MAX-2 and the trailing clip at
+        // i32::MAX-1 would be dropped.
+        //
+        // Note: the engine cannot emit position i32::MAX itself (current_pos+1
+        // overflows before the column is built — a pre-existing edge), so we
+        // verify the trailing clip at i32::MAX-1, the highest processable column
+        // where active_end overflow matters.
+        let pos = max_pos - 4;
+        let seq = [Base::A, Base::A, Base::A, Base::T, Base::C, Base::G];
+        let quals = [40u8; 6];
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(pos).unwrap(),
+                Pos0::new(pos + 2).unwrap(), // end_pos = i32::MAX - 2
+                BamFlags::empty(),
+                60,
+                3,
+                0,
+                b"edge_read",
+                &[CigarOp::new(CigarOpType::Match, 3), CigarOp::new(CigarOpType::SoftClip, 3)],
+                &seq,
+                &quals,
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                &mut (),
+            )
+            .unwrap();
+
+        let mut engine = PileupEngine::new(
+            store,
+            Pos0::new(max_pos - 5).unwrap(),
+            Pos0::new(max_pos - 1).unwrap(), // region_end <= i32::MAX - 1
+        );
+        engine.set_soft_clip_overhang(3);
+
+        let mut trailing: Vec<(u32, Base)> = Vec::new();
+        while let Some(col) = engine.pileups() {
+            for aln in col.alignments() {
+                if aln.is_soft_clip() {
+                    trailing.push((u32::from(col.pos()), aln.base().unwrap()));
+                }
+            }
+        }
+
+        // Trailing clip: 3bp clip at aln_end=i32::MAX-1, overhang=3.
+        // Position i32::MAX-1 (d=0, qpos=query_offset+match_len+0=3): Base::T.
+        assert_eq!(trailing, vec![(max_pos - 1, Base::T)]);
+    }
+
+    // r[verify pileup.soft_clip_overhang.activation]
+    // r[verify pileup.soft_clip_overhang.emit]
+    #[test]
+    fn soft_clip_next_start_underflow_at_zero() {
+        // When next_pos - overhang underflows below 0, the engine should jump
+        // to position 0 — not stay at next_pos — so leading clip columns
+        // immediately before the alignment are emitted.
+        use crate::bam::cigar::{CigarOp, CigarOpType};
+        use seqair_types::{BamFlags, Base};
+
+        // Record at pos=2 with leading clip=3, so the leading clip base nearest
+        // the alignment is at reference position 1 (qpos 2). With overhang=5,
+        // next_start would be 2-5=-3 — underflow → should become 0.
+        let seq = [Base::C, Base::G, Base::T, Base::A, Base::A];
+        let quals = [40u8; 5];
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(2).unwrap(),
+                Pos0::new(3).unwrap(),
+                BamFlags::empty(),
+                60,
+                2,
+                0,
+                b"zero_read",
+                &[CigarOp::new(CigarOpType::SoftClip, 3), CigarOp::new(CigarOpType::Match, 2)],
+                &seq,
+                &quals,
+                &[],
+                0,
+                -1,
+                0,
+                0,
+                &mut (),
+            )
+            .unwrap();
+
+        // Query from 0. The engine starts at 0, but there's no active record yet.
+        // The activation loop at pos 0 sees rec.pos=2, which is > 0+5=5? No,
+        // 2 <= 5, so the record activates at position 0. The leading clip base is
+        // at qpos 2 (Base::T) at reference position 1. At position 0, the first
+        // leading clip base (qpos 0 = Base::C) also emits.
+        let mut engine = PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(5).unwrap());
+        engine.set_soft_clip_overhang(5);
+
+        let mut leading: Vec<(u32, Base)> = Vec::new();
+        while let Some(col) = engine.pileups() {
+            for aln in col.alignments() {
+                if aln.is_soft_clip() {
+                    leading.push((u32::from(col.pos()), aln.base().unwrap()));
+                }
+            }
+        }
+
+        // 3bp leading clip: qpos 0=C at ref -1 (doesn't exist), qpos 1=G at
+        // ref 0, qpos 2=T at ref 1. The formula maps aln_start - d → query
+        // clip tail: qpos = query_start + clip_len - d.
+        assert_eq!(leading, vec![(0, Base::G), (1, Base::T)]);
     }
 
     #[test]

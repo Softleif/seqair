@@ -133,6 +133,7 @@ fn seqair_pileup(bam_path: &Path, contig: &str, start: u32, end: u32) -> Vec<Hts
                 }
                 seqair::bam::PileupOp::Insertion { .. } => n_ins += 1,
                 seqair::bam::PileupOp::Match { .. } => {}
+                seqair::bam::PileupOp::SoftClip { .. } => {}
             }
         }
         columns.push(HtsColumn {

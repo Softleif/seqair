@@ -61,6 +61,22 @@ Reads with zero reference-consuming CIGAR operations (pure soft-clip, insertion-
 r[pileup.soft_clip_at_position]
 When a reference position falls within the soft-clipped portion of a read's alignment, the read is NOT active at that position (soft clips do not consume reference). The read only becomes active at its first reference-consuming position.
 
+## Soft-clip overhang mode (opt-in)
+
+By default soft clips are invisible to the pileup (r[pileup.soft_clip_at_position]). The overhang mode opts into emitting the clipped fringe bases immediately adjacent to each alignment, so a caller can recover evidence the aligner trimmed — for example a TAPS methylation base (a `T` over a CpG `C`) clipped because it looked like a mismatch at the read end. The mode is off by default to preserve htslib parity.
+
+r[pileup.soft_clip_overhang.default_off]
+The soft-clip overhang MUST default to 0. With overhang 0 the engine MUST behave exactly as r[pileup.soft_clip_at_position] specifies — soft-clipped positions yield no alignment — and the column stream MUST remain byte-identical to the htslib-parity behavior (r[pileup.htslib_compat]).
+
+r[pileup.soft_clip_overhang.activation]
+When the overhang is `n > 0`, a record MUST enter the active set up to `n` reference positions before its `pos` and MUST remain active up to `n` positions after its `end_pos`, so the columns flanking its alignment can carry its clipped fringe bases. The activation order MUST remain valid for the store's `pos`-sorted records (`pos - n` is monotonic in `pos`).
+
+r[pileup.soft_clip_overhang.emit]
+At a flanking position, a record whose soft clip on that side extends far enough MUST be emitted as a `PileupOp::SoftClip { qpos, base, qual }`, where `qpos` is `CigarMapping::soft_clip_qpos_at` (r[cigar.soft_clip_qpos]). The `base`, `qual`, and `qpos` accessors MUST resolve `SoftClip` identically to `Match`, and `is_soft_clip()` MUST distinguish it. A record with no soft clip on the flanking side MUST contribute nothing there.
+
+r[pileup.soft_clip_overhang.additive]
+Enabling the overhang MUST be purely additive: for the same records, the sequence of non-`SoftClip` column entries — positions, per-alignment `(record, op, qpos)`, and the depth excluding soft clips — MUST be identical to an overhang-0 run. The mode only adds `SoftClip` entries; it MUST NOT alter or remove any aligned/deletion/refskip entry, and MUST NOT emit columns whose only contents would be zero alignments.
+
 ## Per-record extras in pileup
 
 r[pileup.extras.generic_param]

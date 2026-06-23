@@ -268,5 +268,6 @@ fn format_alignment(
             let _ = write!(buf, "*+{insert_len}");
         }
         PileupOp::RefSkip => buf.push(if is_reverse { '<' } else { '>' }),
+        PileupOp::SoftClip { .. } => {}
     }
 }

@@ -29,6 +29,7 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
 ### Added
 
 - `engine.pileups_into(&mut buf)`, `AlignmentView::inserted_bases` / `inserted_quals`, and anchor-addressed `PileupAlignment::indel_after`.
+- `engine.set_soft_clip_overhang(n)` allows getting `n` soft-clipped bases at the fringes of alignments
 - `SlimRecord::end_pos_htslib()` for htslib-compatible unmapped read spans.
 - Byte-aware segment planning to bound per-segment memory.
 - VCF FORMAT parity: `FormatInts`, `FormatString`, array-of-floats; percent-encode FORMAT string values;

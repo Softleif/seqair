@@ -77,6 +77,7 @@ use tracing::instrument;
 ///                     let _ = (del_len, insert_len);
 ///                 }
 ///                 PileupOp::RefSkip => {}
+///                 PileupOp::SoftClip { base, qual, .. } => { let _ = (base, qual); }
 ///             }
 ///         }
 ///     }

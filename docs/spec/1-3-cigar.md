@@ -53,6 +53,9 @@ r[cigar.qpos_bounds]
 r[cigar.compact_op_position_invariant]
 `CompactOp::ref_start` is stored as `i32`. Since BAM positions are defined as `i32` values (max 2^31 - 1), this is sufficient. The construction of `CompactOp` MUST assert (via `debug_assert!`) that the computed reference position fits in `i32`.
 
+r[cigar.soft_clip_qpos]
+`CigarMapping::soft_clip_qpos_at(ref_pos, max_overhang, query_len)` projects a *soft-clipped* base onto a reference position by gapless diagonal extension of the read past its alignment boundary. It MUST return `Some(query_pos)` only when `ref_pos` lies within `min(max_overhang, clip_len)` reference bases of the alignment on a side that carries a soft clip — `[aln_start - k, aln_start)` for the leading clip and `[aln_end, aln_end + k)` for the trailing clip — where `aln_end` is one past the last reference-consuming op. It MUST return `None` everywhere `qpos_at` (r[cigar.qpos_at]) returns `Some` (i.e. inside the alignment), beyond the soft clip's length, and whenever `max_overhang == 0`. The returned `query_pos` MUST index the soft-clipped run within SEQ (hard clips excluded), so the clipped base adjacent to the alignment maps to the clip base nearest the alignment.
+
 r[cigar.qpos_accuracy]
 `qpos_at` MUST produce identical results to htslib's `Alignment::qpos()` for every reference position within the alignment span. This is verified by comparison tests.
 
