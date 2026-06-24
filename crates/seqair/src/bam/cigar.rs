@@ -633,7 +633,7 @@ fn try_linear(ops: &[CigarOp]) -> Option<(u32, u32)> {
 ///
 /// Pure-soft-clip CIGARs (no reference-consuming ops) return the same op for
 /// lead and trail. This is unreachable in the pileup path — such reads are
-/// excluded from the active set by r[pileup.soft_clip_at_position] — but the
+/// excluded from the active set by r[`pileup.soft_clip_at_position`] — but the
 /// caller should not assume lead ≠ trail.
 fn clip_flanks(ops: &[CompactOp]) -> (Option<CompactOp>, Option<CompactOp>) {
     let mut lead = None;

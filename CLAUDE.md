@@ -111,7 +111,3 @@ docker run --platform linux/amd64 --rm \
 ```
 
 **Common crash patterns**: `debug_assert!` panics (cargo-fuzz enables `-Cdebug-assertions`). If a `debug_assert!` guards an `as i32`/`as u32` cast on untrusted input, replace it with `i32::try_from().trace_ok("msg")?` returning `None`/`Err`. Keep `debug_assert!` only for true internal invariants where the caller already validated the input.
-
-## Profiling
-
-`SEQAIR_PROFILE_JSON=/path/to.jsonl` → analyze with `python3 tools/analyze_profile.py`.
