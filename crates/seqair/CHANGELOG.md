@@ -15,6 +15,7 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
   It now borrows the reader, so it gained a lifetime and a required generic type parameter (`RegionBuf<'a, _>`),
   no longer implements `UnwindSafe`, and `RegionBuf::load` was removed (use `ensure_available` / `advance_range`).
 - **`Readers::pileup` takes an extra parameter**, the optional reference is now threaded through.
+- **`PileupAlignment`** does not expose `strand` anymore. Use `Strand::from(rec.flags)` (or your own logic) instead.
 - **Unmapped-read filtering unified on `filter_raw`.**
   Removed `IndexedBamReader::keep_unmapped` / `keeps_unmapped`.
   `FilterRawFields` is now type-level enums: public fields `raw_cigar_bytes`, `cigar_ops`, `packed_seq`, `bases` removed;

@@ -26,5 +26,5 @@ pub use {
     probability::{Probability, ProbabilityError},
     region_string::{RegionString, RegionStringError},
     rms::{RmsAccumulator, RootMeanSquare, RootMeanSquareExt},
-    strand::{Strand, StrandFromRecord, strand_from_flags},
+    strand::{Strand, StrandFromRecord},
 };

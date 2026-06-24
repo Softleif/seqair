@@ -6,7 +6,7 @@
 //! not in this engine. Records that should not pollute the pileup never enter
 //! the store in the first place.
 
-use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0, Strand, strand_from_flags};
+use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 use std::rc::Rc;
 
@@ -158,7 +158,6 @@ struct ActiveRecord {
     cigar: CigarMapping,
     // Cached from SlimRecord to avoid store lookups in the hot loop
     flags: BamFlags,
-    strand: Strand,
     mapq: u8,
     seq_len: u32,
     matching_bases: u32,
@@ -455,7 +454,6 @@ pub struct PileupAlignment {
     pub op: PileupOp,
     pub mapq: u8,
     pub flags: BamFlags,
-    pub strand: Strand,
     pub seq_len: u32,
     pub matching_bases: u32,
     pub indel_bases: u32,
@@ -879,7 +877,6 @@ impl<U> PileupEngine<U> {
                     record_idx: idx,
                     cigar,
                     flags: rec.flags,
-                    strand: strand_from_flags(rec.flags),
                     mapq: rec.mapq,
                     seq_len: rec.seq_len,
                     matching_bases: rec.matching_bases,
@@ -941,7 +938,6 @@ impl<U> PileupEngine<U> {
                             op: PileupOp::SoftClip { qpos, base, qual },
                             mapq: active.mapq,
                             flags: active.flags,
-                            strand: active.strand,
                             seq_len: active.seq_len,
                             matching_bases: active.matching_bases,
                             indel_bases: active.indel_bases,
@@ -989,7 +985,6 @@ impl<U> PileupEngine<U> {
                     op,
                     mapq: active.mapq,
                     flags: active.flags,
-                    strand: active.strand,
                     seq_len: active.seq_len,
                     matching_bases: active.matching_bases,
                     indel_bases: active.indel_bases,
