@@ -347,6 +347,41 @@ impl<E: CustomizeRecordStore> Readers<E> {
         segment: &Segment,
         depth: DepthLimit,
     ) -> Result<PileupGuard<'_, E::Extra>, ReaderError> {
+        self.pileup_impl(segment, depth, None::<fn(&mut RecordStore<E::Extra>)>)
+    }
+
+    /// Like [`pileup`](Self::pileup), but runs `mutate` on the freshly fetched
+    /// [`RecordStore`] **before** the pileup engine is built, then re-sorts the
+    /// store by position. This is the hook for in-place local realignment: the
+    /// mutator may call [`RecordStore::set_alignment`] to rewrite read
+    /// (pos, CIGAR) pairs (e.g. from a POA consensus), and the subsequent
+    /// pileup sees the corrected alignments. Buffer reuse is preserved exactly
+    /// as in [`pileup`](Self::pileup).
+    ///
+    /// The mutator must preserve each record's query length (`set_alignment`
+    /// enforces this); positions may change freely since the store is re-sorted
+    /// afterward.
+    pub fn pileup_with<F>(
+        &mut self,
+        segment: &Segment,
+        depth: DepthLimit,
+        mutate: F,
+    ) -> Result<PileupGuard<'_, E::Extra>, ReaderError>
+    where
+        F: FnMut(&mut RecordStore<E::Extra>),
+    {
+        self.pileup_impl(segment, depth, Some(mutate))
+    }
+
+    fn pileup_impl<F>(
+        &mut self,
+        segment: &Segment,
+        depth: DepthLimit,
+        mutate: Option<F>,
+    ) -> Result<PileupGuard<'_, E::Extra>, ReaderError>
+    where
+        F: FnMut(&mut RecordStore<E::Extra>),
+    {
         let tid = segment.tid();
         let start = segment.start();
         let end = segment.end();
@@ -405,6 +440,13 @@ impl<E: CustomizeRecordStore> Readers<E> {
                 )?;
                 self.customize = capped.into_inner();
             }
+        }
+
+        // In-place realignment hook: rewrite (pos, CIGAR) on the fetched store,
+        // then restore position order before the engine consumes it.
+        if let Some(mut mutate) = mutate {
+            mutate(&mut self.store);
+            self.store.sort_by_pos();
         }
 
         // Fetch `[start, end]` (inclusive). FASTA APIs expect half-open [start, stop).
@@ -628,6 +670,108 @@ mod tests {
             cap_after_early_break, cap_after_full,
             "early-break recovery should retain the same capacity as full-drain recovery"
         );
+    }
+
+    /// A region known to contain reads in the test BAM.
+    #[cfg(test)]
+    fn realign_test_segment(readers: &Readers) -> Segment {
+        use std::num::NonZeroU32;
+        let opts = SegmentOptions::new(NonZeroU32::new(5_000).unwrap());
+        readers
+            .segments(("chr19", Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap()), opts)
+            .unwrap()
+            .next()
+            .expect("test BAM should yield a segment")
+    }
+
+    #[cfg(test)]
+    fn pileup_profile(p: &mut PileupGuard<'_, ()>) -> Vec<(u64, usize)> {
+        let mut out = Vec::new();
+        while let Some(col) = p.pileups() {
+            out.push((col.pos().as_u64(), col.depth()));
+        }
+        out
+    }
+
+    /// A no-op `pileup_with` must produce exactly the same columns as `pileup`:
+    /// the hook is transparent when the mutator changes nothing, and it sees the
+    /// fully fetched store.
+    #[test]
+    fn pileup_with_noop_matches_pileup() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let segment = realign_test_segment(&readers);
+
+        let baseline = {
+            let mut p = readers.pileup(&segment, DepthLimit::Unlimited).unwrap();
+            pileup_profile(&mut p)
+        };
+        assert!(!baseline.is_empty(), "region should pile up some columns");
+
+        let mut seen_records = 0usize;
+        let mutated = {
+            let mut p = readers
+                .pileup_with(&segment, DepthLimit::Unlimited, |store| {
+                    seen_records = store.len();
+                })
+                .unwrap();
+            pileup_profile(&mut p)
+        };
+
+        assert!(seen_records > 0, "mutator must observe the fetched records");
+        assert_eq!(baseline, mutated, "a no-op mutator must not change the pileup");
+    }
+
+    /// A mutator that soft-clips the first aligned base of every read whose
+    /// CIGAR starts with `M` (shifting `pos` right by one) must be reflected in
+    /// the pileup — the corrected alignments are what the engine sees.
+    #[test]
+    fn pileup_with_realignment_is_observed() {
+        use crate::bam::CigarOp;
+        use crate::bam::cigar::CigarOpType;
+
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let segment = realign_test_segment(&readers);
+
+        let baseline = {
+            let mut p = readers.pileup(&segment, DepthLimit::Unlimited).unwrap();
+            pileup_profile(&mut p)
+        };
+
+        let mut changed = 0usize;
+        let realigned = {
+            let mut p = readers
+                .pileup_with(&segment, DepthLimit::Unlimited, |store| {
+                    let mut plan: Vec<(u32, Pos0, Vec<CigarOp>)> = Vec::new();
+                    for idx in 0..store.len() as u32 {
+                        let rec = store.record(idx);
+                        if rec.flags.is_unmapped() {
+                            continue;
+                        }
+                        let Ok(cigar) = rec.cigar(store) else { continue };
+                        let Some(first) = cigar.first() else { continue };
+                        if first.op_type() != CigarOpType::Match || first.len() < 2 {
+                            continue;
+                        }
+                        let mut new = Vec::with_capacity(cigar.len() + 1);
+                        new.push(CigarOp::new(CigarOpType::SoftClip, 1));
+                        new.push(CigarOp::new(CigarOpType::Match, first.len() - 1));
+                        new.extend_from_slice(&cigar[1..]);
+                        let Some(new_pos) = Pos0::new(rec.pos.as_u64() as u32 + 1) else {
+                            continue;
+                        };
+                        plan.push((idx, new_pos, new));
+                    }
+                    for (idx, pos, cig) in &plan {
+                        store.set_alignment(*idx, *pos, cig).unwrap();
+                    }
+                    changed = plan.len();
+                })
+                .unwrap();
+            pileup_profile(&mut p)
+        };
+
+        assert!(changed > 0, "fixture should have reads with a leading M op to realign");
+        assert_ne!(baseline, realigned, "soft-clipping leading bases must change the pileup");
     }
 
     // r[verify pileup.extras.recover_store]
