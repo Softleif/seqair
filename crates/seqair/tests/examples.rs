@@ -161,6 +161,19 @@ fn example_realignment() {
 }
 
 #[test]
+fn example_realign_pileup() {
+    let bam = test_data("tests/data/test.bam");
+    let fasta = test_data("tests/data/test.fasta.gz");
+    let output = run_example("realign_pileup", &[&bam, &fasta, "-r", REGION]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("realigned"), "should report how many records were realigned");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "pos\tdepth_before\tdepth_after", "first line is the header");
+    assert!(lines.len() > 1, "should produce a before/after depth profile");
+}
+
+#[test]
 fn example_base_mods() {
     let bam = test_data("tests/data/test.bam");
     // base_mods needs a region with MM/ML tags — the test BAM has them
