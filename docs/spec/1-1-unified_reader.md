@@ -264,6 +264,26 @@ chromosome in one call without thinking about tile size.
 > There MUST NOT be a `pileup(tid, start, end)` overload — callers wanting
 > a one-shot region build a `Segment` via `Readers::segments`.
 
+> r[unified.readers_pileup_supplied_reference]
+> `Readers::pileup_with_reference(segment, depth, ref_seq: RefSeq)` MUST behave
+> exactly as `r[unified.readers_pileup]` except that step 3 — the FASTA fetch —
+> is skipped and `ref_seq` is attached to the engine instead. A caller that
+> already holds the region's bases (typically because its own analysis needs
+> them) can then drive every sub-segment pileup of that region from a single
+> fetch, rather than re-reading and re-decoding the same interval once per
+> `pileup()` call.
+>
+> The supplied reference MUST cover the segment: `ref_seq.start_pos()` MUST be
+> at or before `segment.start()`, and the reference MUST extend to at least
+> `segment.end()`. A reference that does not cover the segment MUST be rejected
+> with `ReaderError::SuppliedReferenceTooSmall`. Accepting it is not an option:
+> `RefSeq::base_at` reads an uncovered position as `Base::Unknown`, which turns
+> every reference comparison there into a silent mismatch rather than an error.
+>
+> Because `RefSeq` resolves absolute positions, one reference spanning a whole
+> region is valid for every sub-segment within it — no per-segment slicing.
+
+
 r[unified.fetch_into_customized]
 Each format reader (`IndexedBamReader`, `IndexedSamReader`, `IndexedCramReader`, and the format-agnostic `IndexedReader`) MUST expose `fetch_into_customized<E: CustomizeRecordStore>(tid, start, end, store, customize) -> Result<FetchCounts>` in addition to `fetch_into`. The reader MUST forward `customize` to `RecordStore::push_raw`/`push_fields` so its `keep_record` runs at push time. `FetchCounts { fetched, kept }` reports records produced by the reader's built-in overlap/unmapped checks (`fetched`) vs those that also passed `keep_record` (`kept`). Existing `fetch_into` MUST remain a thin wrapper passing `&mut ()` (whose default `keep_record` returns `true`) so its signature and behavior are unchanged.
 

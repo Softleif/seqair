@@ -347,7 +347,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
         segment: &Segment,
         depth: DepthLimit,
     ) -> Result<PileupGuard<'_, E::Extra>, ReaderError> {
-        self.pileup_impl(segment, depth, None::<fn(&mut RecordStore<E::Extra>)>)
+        self.pileup_impl(segment, depth, None::<fn(&mut RecordStore<E::Extra>)>, None)
     }
 
     /// Like [`pileup`](Self::pileup), but runs `mutate` on the freshly fetched
@@ -370,7 +370,31 @@ impl<E: CustomizeRecordStore> Readers<E> {
     where
         F: FnMut(&mut RecordStore<E::Extra>),
     {
-        self.pileup_impl(segment, depth, Some(mutate))
+        self.pileup_impl(segment, depth, Some(mutate), None)
+    }
+
+    // r[impl unified.readers_pileup_supplied_reference]
+    /// Like [`pileup`](Self::pileup), but drives the engine from a reference
+    /// the caller already holds instead of re-reading it from the FASTA.
+    ///
+    /// A caller that fetched a region's bases for its own use — and then tiles
+    /// that region into several segments — otherwise pays one FASTA seek and
+    /// decode per segment for bases it is already holding. `RefSeq` resolves
+    /// absolute positions, so one reference spanning the whole region serves
+    /// every segment within it.
+    ///
+    /// `ref_seq` MUST cover `segment`; a reference that falls short is
+    /// rejected with [`ReaderError::SuppliedReferenceTooSmall`] rather than
+    /// silently reading the uncovered positions as [`Base::Unknown`].
+    ///
+    /// [`Base::Unknown`]: seqair_types::Base::Unknown
+    pub fn pileup_with_reference(
+        &mut self,
+        segment: &Segment,
+        depth: DepthLimit,
+        ref_seq: RefSeq,
+    ) -> Result<PileupGuard<'_, E::Extra>, ReaderError> {
+        self.pileup_impl(segment, depth, None::<fn(&mut RecordStore<E::Extra>)>, Some(ref_seq))
     }
 
     fn pileup_impl<F>(
@@ -378,6 +402,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
         segment: &Segment,
         depth: DepthLimit,
         mutate: Option<F>,
+        supplied_ref: Option<RefSeq>,
     ) -> Result<PileupGuard<'_, E::Extra>, ReaderError>
     where
         F: FnMut(&mut RecordStore<E::Extra>),
@@ -449,24 +474,46 @@ impl<E: CustomizeRecordStore> Readers<E> {
             self.store.sort_by_pos();
         }
 
-        // Fetch `[start, end]` (inclusive). FASTA APIs expect half-open [start, stop).
-        // Use the u64 path so `end == Pos0::max_value()` doesn't truncate the
-        // last reference base — `stop = end + 1` is i32::MAX + 1, which doesn't
-        // fit in a Pos0 but does fit comfortably in a u64.
-        let contig_name = segment.contig();
-        let stop_u64 = end.as_u64().saturating_add(1);
-        self.fasta
-            .fetch_seq_into_u64(contig_name, start.as_u64(), stop_u64, &mut self.fasta_buf)
-            .map_err(|source| ReaderError::FastaFetch {
-            contig: contig_name.clone(),
-            start: start.as_u64(),
-            end: end.as_u64(),
-            source,
-        })?;
-        // Convert in-place and copy into the Rc<[Base]> while keeping
-        // `fasta_buf` (and its capacity) for the next pileup call.
-        let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);
-        let ref_seq = RefSeq::new(Rc::from(bases), start);
+        let ref_seq = match supplied_ref {
+            // r[impl unified.readers_pileup_supplied_reference]
+            Some(ref_seq) => {
+                // An uncovered position reads as `Base::Unknown`, which is
+                // indistinguishable from a genuine `N` in the reference — every
+                // comparison against it would silently become a mismatch.
+                let ref_start = ref_seq.start_pos().as_u64();
+                let ref_last = ref_start.saturating_add(ref_seq.len() as u64).saturating_sub(1);
+                if ref_start > start.as_u64() || ref_last < end.as_u64() {
+                    return Err(ReaderError::SuppliedReferenceTooSmall {
+                        contig: segment.contig().clone(),
+                        ref_start,
+                        ref_end: ref_last,
+                        segment_start: start.as_u64(),
+                        segment_end: end.as_u64(),
+                    });
+                }
+                ref_seq
+            }
+            // Fetch `[start, end]` (inclusive). FASTA APIs expect half-open [start, stop).
+            // Use the u64 path so `end == Pos0::max_value()` doesn't truncate the
+            // last reference base — `stop = end + 1` is i32::MAX + 1, which doesn't
+            // fit in a Pos0 but does fit comfortably in a u64.
+            None => {
+                let contig_name = segment.contig();
+                let stop_u64 = end.as_u64().saturating_add(1);
+                self.fasta
+                    .fetch_seq_into_u64(contig_name, start.as_u64(), stop_u64, &mut self.fasta_buf)
+                    .map_err(|source| ReaderError::FastaFetch {
+                        contig: contig_name.clone(),
+                        start: start.as_u64(),
+                        end: end.as_u64(),
+                        source,
+                    })?;
+                // Convert in-place and copy into the Rc<[Base]> while keeping
+                // `fasta_buf` (and its capacity) for the next pileup call.
+                let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);
+                RefSeq::new(Rc::from(bases), start)
+            }
+        };
 
         // Move the populated store into the engine. After this `mem::take`,
         // `self.store` holds a default (empty) RecordStore — the slot the
@@ -691,6 +738,109 @@ mod tests {
             out.push((col.pos().as_u64(), col.depth()));
         }
         out
+    }
+
+    /// Fetch the reference for a whole span as a single `RefSeq`, the way a
+    /// caller that already needs those bases would hold them.
+    ///
+    /// `end` is inclusive, matching `Segment::end()`; `fetch_base_seq` is
+    /// half-open, hence the `+ 1`.
+    #[cfg(test)]
+    fn whole_span_reference(readers: &mut Readers, contig: &str, start: Pos0, end: Pos0) -> RefSeq {
+        let stop = Pos0::new(end.as_u64() as u32 + 1).unwrap();
+        let bases = readers.fetch_base_seq(contig, start, stop).unwrap();
+        RefSeq::new(bases, start)
+    }
+
+    // r[verify unified.readers_pileup_supplied_reference]
+    /// Supplying the reference must not change a single column: the engine sees
+    /// the same bases it would have fetched itself.
+    #[test]
+    fn pileup_with_reference_matches_pileup() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let segment = realign_test_segment(&readers);
+
+        let expected = {
+            let mut p = readers.pileup(&segment, DepthLimit::Unlimited).unwrap();
+            pileup_profile(&mut p)
+        };
+        let expected_bases = {
+            let mut p = readers.pileup(&segment, DepthLimit::Unlimited).unwrap();
+            let mut out = Vec::new();
+            while let Some(col) = p.pileups() {
+                out.push(col.reference_base());
+            }
+            out
+        };
+
+        let ref_seq = whole_span_reference(&mut readers, "chr19", segment.start(), segment.end());
+        let mut p =
+            readers.pileup_with_reference(&segment, DepthLimit::Unlimited, ref_seq).unwrap();
+        let mut actual = Vec::new();
+        let mut actual_bases = Vec::new();
+        while let Some(col) = p.pileups() {
+            actual.push((col.pos().as_u64(), col.depth()));
+            actual_bases.push(col.reference_base());
+        }
+
+        assert_eq!(actual, expected, "columns must be identical to a self-fetched pileup");
+        assert_eq!(actual_bases, expected_bases, "reference bases must be identical");
+    }
+
+    // r[verify unified.readers_pileup_supplied_reference]
+    /// One reference spanning a whole region serves every segment tiled inside
+    /// it — `RefSeq` resolves absolute positions, so no per-segment slicing.
+    #[test]
+    fn one_reference_serves_every_segment_in_the_span() {
+        use std::num::NonZeroU32;
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let (start, end) = (Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap());
+
+        // Tile the span finely enough that several segments come out of it.
+        let opts = SegmentOptions::new(NonZeroU32::new(500).unwrap());
+        let segments: Vec<Segment> =
+            readers.segments(("chr19", start, end), opts).unwrap().collect();
+        assert!(segments.len() > 1, "span should tile into several segments");
+
+        let expected: Vec<Vec<(u64, usize)>> = segments
+            .iter()
+            .map(|seg| {
+                let mut p = readers.pileup(seg, DepthLimit::Unlimited).unwrap();
+                pileup_profile(&mut p)
+            })
+            .collect();
+
+        let ref_seq = whole_span_reference(&mut readers, "chr19", start, end);
+        for (seg, want) in segments.iter().zip(&expected) {
+            let mut p =
+                readers.pileup_with_reference(seg, DepthLimit::Unlimited, ref_seq.clone()).unwrap();
+            assert_eq!(&pileup_profile(&mut p), want, "segment {:?} diverged", seg.start());
+        }
+    }
+
+    // r[verify unified.readers_pileup_supplied_reference]
+    /// A reference that falls short of the segment must be a typed error, not a
+    /// run of `Unknown` bases that silently mismatch everything.
+    #[test]
+    fn pileup_with_short_reference_is_rejected() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let segment = realign_test_segment(&readers);
+
+        // Starts where the segment starts but stops well before its end.
+        let short_end = Pos0::new(segment.start().as_u64() as u32 + 10).unwrap();
+        let short = whole_span_reference(&mut readers, "chr19", segment.start(), short_end);
+        assert!(matches!(
+            readers.pileup_with_reference(&segment, DepthLimit::Unlimited, short),
+            Err(ReaderError::SuppliedReferenceTooSmall { .. })
+        ));
+
+        // Covers the segment's end but begins after its start.
+        let late_start = Pos0::new(segment.start().as_u64() as u32 + 10).unwrap();
+        let late = whole_span_reference(&mut readers, "chr19", late_start, segment.end());
+        assert!(matches!(
+            readers.pileup_with_reference(&segment, DepthLimit::Unlimited, late),
+            Err(ReaderError::SuppliedReferenceTooSmall { .. })
+        ));
     }
 
     /// A no-op `pileup_with` must produce exactly the same columns as `pileup`:
