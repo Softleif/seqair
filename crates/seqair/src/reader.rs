@@ -102,6 +102,18 @@ pub enum ReaderError {
         header_last_pos: Option<u64>,
     },
 
+    #[error(
+        "supplied reference covers [{ref_start}, {ref_end}] but segment '{contig}' \
+         needs [{segment_start}, {segment_end}]"
+    )]
+    SuppliedReferenceTooSmall {
+        contig: SmolStr,
+        ref_start: u64,
+        ref_end: u64,
+        segment_start: u64,
+        segment_end: u64,
+    },
+
     #[error("BAM header target count {count} does not fit in u32")]
     HeaderTargetCountOverflow { count: usize },
 }

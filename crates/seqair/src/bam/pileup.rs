@@ -17,6 +17,9 @@ use super::{
     record_store::RecordStore,
 };
 
+/// Cloning is a pointer clone of the shared bases, so one `RefSeq` can drive
+/// several pileups over segments tiled inside its span.
+#[derive(Clone)]
 pub struct RefSeq {
     bases: Rc<[Base]>,
     start_pos: Pos0,
