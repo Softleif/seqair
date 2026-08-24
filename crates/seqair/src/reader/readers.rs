@@ -350,6 +350,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
         self.pileup_impl(segment, depth, None::<fn(&mut RecordStore<E::Extra>)>, None)
     }
 
+    // r[impl unified.readers_pileup_store_mutation]
     /// Like [`pileup`](Self::pileup), but runs `mutate` on the freshly fetched
     /// [`RecordStore`] **before** the pileup engine is built, then re-sorts the
     /// store by position. This is the hook for in-place local realignment: the
@@ -747,7 +748,7 @@ mod tests {
     /// half-open, hence the `+ 1`.
     #[cfg(test)]
     fn whole_span_reference(readers: &mut Readers, contig: &str, start: Pos0, end: Pos0) -> RefSeq {
-        let stop = Pos0::new(end.as_u64() as u32 + 1).unwrap();
+        let stop = Pos0::try_from(end.as_u64().saturating_add(1)).unwrap();
         let bases = readers.fetch_base_seq(contig, start, stop).unwrap();
         RefSeq::new(bases, start)
     }
@@ -827,7 +828,7 @@ mod tests {
         let segment = realign_test_segment(&readers);
 
         // Starts where the segment starts but stops well before its end.
-        let short_end = Pos0::new(segment.start().as_u64() as u32 + 10).unwrap();
+        let short_end = Pos0::try_from(segment.start().as_u64().saturating_add(10)).unwrap();
         let short = whole_span_reference(&mut readers, "chr19", segment.start(), short_end);
         assert!(matches!(
             readers.pileup_with_reference(&segment, DepthLimit::Unlimited, short),
@@ -835,7 +836,7 @@ mod tests {
         ));
 
         // Covers the segment's end but begins after its start.
-        let late_start = Pos0::new(segment.start().as_u64() as u32 + 10).unwrap();
+        let late_start = Pos0::try_from(segment.start().as_u64().saturating_add(10)).unwrap();
         let late = whole_span_reference(&mut readers, "chr19", late_start, segment.end());
         assert!(matches!(
             readers.pileup_with_reference(&segment, DepthLimit::Unlimited, late),
@@ -843,6 +844,7 @@ mod tests {
         ));
     }
 
+    // r[verify unified.readers_pileup_store_mutation]
     /// A no-op `pileup_with` must produce exactly the same columns as `pileup`:
     /// the hook is transparent when the mutator changes nothing, and it sees the
     /// fully fetched store.
@@ -871,6 +873,7 @@ mod tests {
         assert_eq!(baseline, mutated, "a no-op mutator must not change the pileup");
     }
 
+    // r[verify unified.readers_pileup_store_mutation]
     /// A mutator that soft-clips the first aligned base of every read whose
     /// CIGAR starts with `M` (shifting `pos` right by one) must be reflected in
     /// the pileup — the corrected alignments are what the engine sees.
@@ -892,7 +895,7 @@ mod tests {
             let mut p = readers
                 .pileup_with(&segment, DepthLimit::Unlimited, |store| {
                     let mut plan: Vec<(u32, Pos0, Vec<CigarOp>)> = Vec::new();
-                    for idx in 0..store.len() as u32 {
+                    for idx in 0..u32::try_from(store.len()).unwrap_or(u32::MAX) {
                         let rec = store.record(idx);
                         if rec.flags.is_unmapped() {
                             continue;
@@ -906,7 +909,7 @@ mod tests {
                         new.push(CigarOp::new(CigarOpType::SoftClip, 1));
                         new.push(CigarOp::new(CigarOpType::Match, first.len() - 1));
                         new.extend_from_slice(&cigar[1..]);
-                        let Some(new_pos) = Pos0::new(rec.pos.as_u64() as u32 + 1) else {
+                        let Ok(new_pos) = Pos0::try_from(rec.pos.as_u64().saturating_add(1)) else {
                             continue;
                         };
                         plan.push((idx, new_pos, new));

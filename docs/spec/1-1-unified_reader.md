@@ -264,6 +264,24 @@ chromosome in one call without thinking about tile size.
 > There MUST NOT be a `pileup(tid, start, end)` overload — callers wanting
 > a one-shot region build a `Segment` via `Readers::segments`.
 
+> r[unified.readers_pileup_store_mutation]
+> `Readers::pileup_with(segment, depth, mutate)` MUST behave exactly as
+> `r[unified.readers_pileup]` except that `mutate` is run on the freshly
+> fetched `RecordStore` after step 2 and before the engine is constructed in
+> step 4, and the store MUST be re-sorted by position afterwards. This is the
+> hook for in-place local realignment: the mutator may call
+> `RecordStore::set_alignment` to rewrite a record's `(pos, CIGAR)` pair — for
+> example from a POA consensus — and the pileup that follows MUST see the
+> rewritten alignments.
+>
+> Positions may change freely because of the re-sort; query length MUST NOT,
+> and `set_alignment` enforces that. Buffer reuse (`r[unified.readers_pileup]`
+> step 4 and the guard's store recovery) MUST be preserved unchanged: taking
+> the mutation hook MUST NOT cost an allocation that `pileup()` avoids.
+>
+> A mutator that changes nothing MUST yield exactly the columns `pileup()`
+> yields.
+
 > r[unified.readers_pileup_supplied_reference]
 > `Readers::pileup_with_reference(segment, depth, ref_seq: RefSeq)` MUST behave
 > exactly as `r[unified.readers_pileup]` except that step 3 — the FASTA fetch —
