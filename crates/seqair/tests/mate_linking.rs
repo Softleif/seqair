@@ -820,14 +820,45 @@ fn link_counts_through_readers(path: &Path) -> (usize, usize, usize) {
     (alignments, linked, in_overlap)
 }
 
+/// The BAM re-encoded as bgzf SAM, so the reader tests cover all three formats.
+/// Returns `None` when samtools is not on `PATH`.
+fn sam_gz_of_the_bam(dir: &Path) -> Option<std::path::PathBuf> {
+    let sam_gz = dir.join("test.sam.gz");
+    let ok = std::process::Command::new("samtools")
+        .args(["view", "-h", "--output-fmt", "SAM,level=6", "-o"])
+        .arg(&sam_gz)
+        .arg(fixture("test.bam"))
+        .status()
+        .ok()?
+        .success();
+    if !ok {
+        return None;
+    }
+    let indexed = std::process::Command::new("tabix")
+        .args(["-p", "sam"])
+        .arg(&sam_gz)
+        .status()
+        .ok()?
+        .success();
+    indexed.then_some(sam_gz)
+}
+
 // r[verify record_store.link_mates.invalidated]
 // r[verify pileup.mate_link_cache]
 /// `Readers::pileup` must link mates itself — a consumer that never calls
 /// `link_mates` still gets usable links, on every format.
 #[test]
 fn readers_pileup_links_mates_on_every_format() {
-    for name in ["test.bam", "test.cram", "test_v30.cram"] {
-        let (alignments, linked, in_overlap) = link_counts_through_readers(fixture(name));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut paths: Vec<std::path::PathBuf> =
+        ["test.bam", "test.cram", "test_v30.cram"].iter().map(|n| fixture(n).to_owned()).collect();
+    // SAM.gz has to be built from the BAM; skip it where samtools is missing
+    // rather than failing a test that is about mate links.
+    paths.extend(sam_gz_of_the_bam(dir.path()));
+
+    for path in paths {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+        let (alignments, linked, in_overlap) = link_counts_through_readers(&path);
         assert!(alignments > 0, "{name}: fixture produced no alignments");
         assert!(
             linked > 0,
