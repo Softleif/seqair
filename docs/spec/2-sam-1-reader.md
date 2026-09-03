@@ -107,14 +107,23 @@ SAM aux integer values (type `i`) are serialized into the smallest BAM integer t
 > 3. Decompress BGZF blocks to text.
 > 4. Split text into lines (on `\n`).
 > 5. Parse each alignment line.
-> 6. Filter: skip lines where RNAME's tid doesn't match, or where the record doesn't overlap `[start, end]`.
+> 6. Filter: skip lines where RNAME's tid doesn't match, or where the record doesn't overlap the inclusive region `[start, end]`.
 > 7. Push passing records into the RecordStore.
 
-r[sam.reader.overlap_filter+2]
-The overlap filter uses half-open intervals (0-based). `end_pos` MUST be computed from the parsed CIGAR. When CIGAR is `*` (unavailable), `end_pos = pos` (point record).
+r[sam.reader.overlap_filter+3]
+`end_pos` MUST be computed from the parsed CIGAR. When CIGAR is `*` (unavailable), `end_pos = pos` (point record).
 
-r[sam.reader.overlap_halfopen]
-A record overlaps `[start, end)` iff `pos < end && end_pos > start`. Records where `pos == end` or `end_pos == start` do NOT overlap and MUST be filtered out.
+r[sam.reader.overlap_inclusive]
+A record overlaps the queried region iff `pos <= end && end_pos >= start`, per
+[`interval.overlap_test`](./0-1-pos.md#intervaloverlap_test) — both ends of the
+query are inclusive, and `end_pos` is the last covered position. A record whose
+last base is exactly `start`, or which starts exactly at `end`, DOES overlap.
+
+> **Was:** this reader used to test `pos < end && end_pos > start`, i.e. a
+> half-open query end *and* an exclusive reading of `end_pos`. `end_pos` has
+> always been inclusive (`r[interval.end_pos_inclusive]`), so that dropped every
+> record overlapping the region by exactly its last base, and it disagreed with
+> the BAM and CRAM readers on the same query.
 
 r[sam.reader.sorted_order]
 Records MUST be added to the store in coordinate-sorted order. Since bgzf-compressed indexed SAM files are coordinate-sorted by construction (indexing requires it), the natural parse order is correct.

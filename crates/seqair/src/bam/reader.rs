@@ -242,7 +242,8 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     /// Create a cursor over raw BAM records in a genomic region.
     ///
     /// Returns a [`BamQuery`] that yields raw `&[u8]` record bytes (including the
-    /// 32-byte BAM fixed header) for records overlapping `[start, end)` on `tid`.
+    /// 32-byte BAM fixed header) for records overlapping the inclusive region
+    /// `[start, end]` on `tid` (r[`interval.overlap_test`]).
     /// Records are pre-filtered by tid and position range — the caller sees only
     /// records that fall within the requested region.
     ///
@@ -462,6 +463,7 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
             } else {
                 compute_end_pos_from_raw(raw).unwrap_or(rec_pos)
             };
+            // r[impl interval.overlap_test]
             if rec_pos > self.end || rec_end < self.start {
                 self.skipped_out_of_range = self.skipped_out_of_range.saturating_add(1);
                 continue;

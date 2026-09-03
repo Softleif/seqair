@@ -23,7 +23,7 @@ r[bam.reader.chunk_batching]
 **Superseded.** Chunk pre-partitioning (the former `MAX_REGION_BYTES` batching) has been removed. A single streaming `RegionBuf` now spans all of a query's chunks, and its bounded sliding window (`r[region_buf.window_budget]`, 64 MiB) caps peak memory regardless of how large the merged byte range is — including the huge level-5 bins of >100 GB BAM files. Records from all chunks are still collected into the same store in order.
 
 r[bam.reader.overlap_filter]
-A record overlaps a region if `record.pos <= region.end` AND `record.end_pos >= region.start`. Records outside the region that appear in index chunks MUST be filtered out. This is necessary because the BAM index is approximate — chunks may contain records slightly outside the queried region.
+A record overlaps a region if `record.pos <= region.end` AND `record.end_pos >= region.start` (both query ends inclusive, `end_pos` the last covered position — see [`interval.overlap_test`](./0-1-pos.md#intervaloverlap_test)). Records outside the region that appear in index chunks MUST be filtered out. This is necessary because the BAM index is approximate — chunks may contain records slightly outside the queried region.
 
 r[bam.reader.sorted_order+2]
 Records in the store MUST be in coordinate-sorted order (by pos, then by end_pos as tiebreaker) after `fetch_into`, matching the order a sorted BAM file provides.

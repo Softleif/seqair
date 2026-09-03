@@ -156,6 +156,97 @@ fn bam_and_sam_produce_same_records() {
     }
 }
 
+// r[verify interval.overlap_test]
+// r[verify interval.end_pos_inclusive]
+// r[verify interval.inclusive_ends]
+/// The one-base edges of a query are where the three readers used to disagree:
+/// SAM tested a half-open `[start, end)` against an exclusive reading of
+/// `end_pos`, so it dropped a record overlapping the region by exactly its last
+/// base while BAM and CRAM kept it. Query each edge of a known record and
+/// require all three formats to answer identically.
+#[test]
+fn every_format_agrees_on_the_edges_of_a_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let sam_gz = create_sam_gz(dir.path());
+
+    // Take a real record's span from the BAM, then probe its two edges.
+    let mut bam_reader = IndexedReader::open(test_bam_path()).expect("bam");
+    let tid = bam_reader.header().tid("chr19").unwrap();
+    let mut store = RecordStore::new();
+    bam_reader
+        .fetch_into(tid, Pos0::new(6_103_076).unwrap(), Pos0::new(6_104_000).unwrap(), &mut store)
+        .unwrap();
+    let probe = store.record(0);
+    let (first, last) = (probe.pos, probe.end_pos);
+    assert!(last > first, "need a record spanning more than one base");
+    let qname = store.qname(0).to_vec();
+
+    /// A named way to open the same data in one of the three formats.
+    type OpenReader<'a> = (&'a str, Box<dyn Fn() -> IndexedReader + 'a>);
+
+    let readers: [OpenReader<'_>; 3] = [
+        ("bam", Box::new(|| IndexedReader::open(test_bam_path()).expect("bam"))),
+        (
+            "sam",
+            Box::new({
+                let sam_gz = sam_gz.clone();
+                move || IndexedReader::open(&sam_gz).expect("sam")
+            }),
+        ),
+        (
+            "cram",
+            Box::new(|| {
+                IndexedReader::open_with_reference(test_cram_path(), test_fasta_path())
+                    .expect("cram")
+            }),
+        ),
+    ];
+
+    // A single-position query on the record's *last* base, and one on its first.
+    for (label, edge) in [("last base", last), ("first base", first)] {
+        let mut found = Vec::new();
+        for (format, open) in &readers {
+            let mut reader = open();
+            let tid = reader.header().tid("chr19").unwrap();
+            let mut store = RecordStore::new();
+            reader.fetch_into(tid, edge, edge, &mut store).unwrap();
+            let hit = (0..store.len() as u32).any(|i| store.qname(i) == qname.as_slice());
+            assert!(
+                hit,
+                "{format}: the record covering its own {label} ({}) must overlap a query there",
+                edge.as_u64()
+            );
+            found.push((*format, store.len()));
+        }
+        let (_, expected) = found[0];
+        for &(format, len) in &found {
+            assert_eq!(
+                len, expected,
+                "{format}: {label} query returned {len} records, bam returned {expected}"
+            );
+        }
+    }
+
+    // One base past the record's end, it must be gone from every format.
+    let past = Pos0::new(last.as_u64() as u32 + 1).unwrap();
+    for (format, open) in &readers {
+        let mut reader = open();
+        let tid = reader.header().tid("chr19").unwrap();
+        let mut store = RecordStore::new();
+        reader.fetch_into(tid, past, past, &mut store).unwrap();
+        // Other records may cover that position; this one must not be reported
+        // as covering it unless it genuinely does.
+        for i in 0..store.len() as u32 {
+            if store.qname(i) == qname.as_slice() {
+                assert!(
+                    store.record(i).end_pos >= past,
+                    "{format}: record returned for a position it does not cover"
+                );
+            }
+        }
+    }
+}
+
 // r[verify unified.fork_bam]
 // r[verify unified.fork_sam]
 #[test]

@@ -152,6 +152,7 @@ impl Segment {
         self.start
     }
 
+    // r[impl interval.inclusive_ends]
     /// Inclusive 0-based end of the tile (last pileup position).
     #[must_use]
     pub fn end(&self) -> Pos0 {
