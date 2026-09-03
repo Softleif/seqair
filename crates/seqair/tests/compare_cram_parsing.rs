@@ -126,7 +126,7 @@ fn container_iteration_finds_all_containers() {
 // ── CRAI index comparison ────────────────────────────────────────────
 
 // r[verify cram.index.parse]
-// r[verify cram.index.query]
+// r[verify cram.index.query+2]
 // r[verify cram.index.multi_ref_slices]
 #[test]
 fn crai_index_covers_all_containers() {

@@ -65,8 +65,8 @@ impl DepthLimit {
 pub struct DepthCap<E> {
     inner: E,
     cap: Option<NonZeroU32>,
-    /// Exclusive end positions of currently-overlapping kept reads (min-heap
-    /// via [`Reverse`]).
+    /// Last covered position of each currently-overlapping kept read
+    /// (inclusive, min-heap via [`Reverse`]).
     active: BinaryHeap<Reverse<u64>>,
     /// Sentinel `i32::MIN` so the first record always resets the window.
     last_tid: i32,
@@ -129,17 +129,19 @@ impl<E: CustomizeRecordStore> CustomizeRecordStore for DepthCap<E> {
         self.last_tid = fields.tid;
         self.last_start = start;
 
-        // Exclusive end. `end_pos` is pre-computed for SAM/CRAM; for BAM
-        // (`push_raw`) it is `None`, so derive the reference span from the raw
-        // CIGAR. Guarantee a minimum 1bp span so a read always occupies a slot.
-        let end = fields
-            .end_pos
-            .map(Pos0::as_u64)
-            .unwrap_or_else(|| start.saturating_add(ref_span_from_cigar(fields.cigar).max(1)));
+        // r[impl record_store.depth_cap.window]
+        // Last covered position, inclusive. `end_pos` is pre-computed for
+        // SAM/CRAM; for BAM (`push_raw`) it is `None`, so derive the reference
+        // span from the raw CIGAR. Guarantee a minimum 1bp span so a read
+        // always occupies a slot.
+        let end = fields.end_pos.map(Pos0::as_u64).unwrap_or_else(|| {
+            let span = ref_span_from_cigar(fields.cigar).max(1);
+            start.saturating_add(span.saturating_sub(1))
+        });
 
-        // Evict reads that no longer overlap `start`.
+        // Evict reads whose last covered position is behind `start`.
         while let Some(&Reverse(min_end)) = self.active.peek() {
-            if min_end <= start {
+            if min_end < start {
                 self.active.pop();
             } else {
                 break;
@@ -177,4 +179,105 @@ fn ref_span_from_cigar(cigar: &[u8]) -> u64 {
         }
     }
     span
+}
+
+#[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
+mod tests {
+    use super::*;
+    use crate::bam::record_store::Sequence;
+    use seqair_types::BamFlags;
+
+    /// One `<len>M` CIGAR op as raw BAM bytes.
+    fn match_cigar(len: u32) -> Vec<u8> {
+        (len << 4).to_le_bytes().to_vec()
+    }
+
+    /// The fields a `push_raw` (BAM) record presents: no `end_pos`, raw CIGAR.
+    fn bam_fields<'a>(pos: Pos0, cigar: &'a [u8]) -> FilterRawFields<'a> {
+        FilterRawFields {
+            pos,
+            end_pos: None,
+            flags: BamFlags::empty(),
+            mapq: 60,
+            n_cigar_ops: 1,
+            seq_len: 0,
+            matching_bases: 0,
+            indel_bases: 0,
+            tid: 0,
+            next_ref_id: -1,
+            next_pos: -1,
+            template_len: 0,
+            qname: b"r",
+            qual_bytes: &[],
+            aux_bytes: &[],
+            cigar,
+            seq: Sequence::Bases(&[]),
+        }
+    }
+
+    /// The same record as a `push_fields` (SAM/CRAM) record: `end_pos` supplied.
+    fn field_fields<'a>(pos: Pos0, end_pos: Pos0, cigar: &'a [u8]) -> FilterRawFields<'a> {
+        FilterRawFields { end_pos: Some(end_pos), ..bam_fields(pos, cigar) }
+    }
+
+    fn pos(p: u32) -> Pos0 {
+        Pos0::new(p).expect("valid position")
+    }
+
+    // r[verify record_store.depth_cap.window]
+    /// A kept read occupies a slot at every position it covers, up to and
+    /// including its last one — and the boundary lands identically whether the
+    /// span was supplied (SAM/CRAM) or derived from the CIGAR (BAM).
+    #[test]
+    fn the_cap_window_ends_at_the_last_covered_position() {
+        let cigar = match_cigar(5); // covers pos ..= pos + 4
+        let cap = NonZeroU32::new(1);
+
+        // Second read starts on the first read's last base: still overlapping.
+        for supplied in [false, true] {
+            let mut capped = DepthCap::with_cap((), cap);
+            let first = |p: u32| {
+                if supplied {
+                    field_fields(pos(p), pos(p + 4), &cigar)
+                } else {
+                    bam_fields(pos(p), &cigar)
+                }
+            };
+            assert!(capped.filter_raw(&first(100)), "first read is always kept");
+            assert!(
+                !capped.filter_raw(&first(104)),
+                "a read starting on the last covered base overlaps (supplied end_pos: {supplied})"
+            );
+        }
+
+        // One position further along, the first read is out of the window.
+        for supplied in [false, true] {
+            let mut capped = DepthCap::with_cap((), cap);
+            let build = |p: u32| {
+                if supplied {
+                    field_fields(pos(p), pos(p + 4), &cigar)
+                } else {
+                    bam_fields(pos(p), &cigar)
+                }
+            };
+            assert!(capped.filter_raw(&build(100)));
+            assert!(
+                capped.filter_raw(&build(105)),
+                "a read starting past the last covered base is kept (supplied end_pos: {supplied})"
+            );
+        }
+    }
+
+    // r[verify record_store.depth_cap.window]
+    /// A CIGAR that consumes no reference still occupies exactly one position,
+    /// so two such reads at the same start cannot both pass a cap of one.
+    #[test]
+    fn a_zero_span_read_occupies_one_position() {
+        let cigar = match_cigar(0);
+        let mut capped = DepthCap::with_cap((), NonZeroU32::new(1));
+        assert!(capped.filter_raw(&bam_fields(pos(100), &cigar)));
+        assert!(!capped.filter_raw(&bam_fields(pos(100), &cigar)));
+        assert!(capped.filter_raw(&bam_fields(pos(101), &cigar)));
+    }
 }

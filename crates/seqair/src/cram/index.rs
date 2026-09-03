@@ -84,14 +84,17 @@ impl CramIndex {
         Ok(CramIndex { entries })
     }
 
-    /// Find all index entries whose range overlaps `[start, end)` for the given
-    /// reference ID. Returns entries sorted by `alignment_start`.
+    /// Find all index entries whose range overlaps the 0-based inclusive region
+    /// `[start, end]` for the given reference ID. Returns entries sorted by
+    /// `alignment_start`.
     ///
-    /// Positions are 0-based half-open (matching the query convention).
-    /// CRAI entries use 1-based positions internally, but the comparison
-    /// handles both correctly since we just check overlap.
-    // r[impl cram.index.query]
+    /// CRAI stores a **1-based** `alignment_start`, so it is converted here
+    /// before the comparison — the two conventions are not interchangeable even
+    /// in a symmetric overlap test, and reading the entry one position too high
+    /// prunes the container holding a narrow query's only records.
+    // r[impl cram.index.query+2]
     // r[impl cram.index.unmapped]
+    // r[impl interval.overlap_test]
     pub fn query(&self, tid: i32, start: u64, end: u64) -> Vec<&CraiEntry> {
         self.entries
             .iter()
@@ -103,13 +106,17 @@ impl CramIndex {
                 if e.alignment_start == 0 && e.alignment_span == 0 {
                     return false;
                 }
-                let entry_start = e.alignment_start as u64;
-                // r[impl cram.index.zero_span]
+                // 1-based -> 0-based. `alignment_start == 0` only for the
+                // unmapped entries rejected above, so this cannot underflow
+                // into a meaningful position.
+                let entry_start = e.alignment_start.unsigned_abs().saturating_sub(1);
+                // r[impl cram.index.zero_span+2]
                 if e.alignment_span == 0 {
-                    return entry_start < end;
+                    return entry_start <= end;
                 }
-                let entry_end = entry_start.saturating_add(e.alignment_span as u64);
-                entry_start < end && entry_end > start
+                let entry_last =
+                    entry_start.saturating_add(e.alignment_span.unsigned_abs()).saturating_sub(1);
+                entry_start <= end && entry_last >= start
             })
             .collect()
     }
@@ -187,7 +194,7 @@ mod tests {
         }
     }
 
-    // r[verify cram.index.query]
+    // r[verify cram.index.query+2]
     #[test]
     fn query_crai_for_known_region() {
         let crai_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.cram.crai");
@@ -226,7 +233,7 @@ mod tests {
         assert!(matches!(result, Err(CramError::IndexNotFound { .. })));
     }
 
-    // r[verify cram.index.zero_span]
+    // r[verify cram.index.zero_span+2]
     #[test]
     fn query_with_zero_span_entries() {
         // CRAI entries with span=0 occur when samtools writes CRAM with

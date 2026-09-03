@@ -334,6 +334,7 @@ pub fn calc_matches_indels(ops: &[CigarOp]) -> (u32, u32) {
 // r[impl bam.record.end_pos]
 // r[impl bam.record.zero_refspan]
 /// 0-based exclusive end position from `pos` + reference-consuming op lengths.
+// r[impl interval.end_pos_inclusive]
 pub fn compute_end_pos(pos: Pos0, ops: &[CigarOp]) -> Option<Pos0> {
     let mut ref_len: i64 = 0;
     for op in ops {

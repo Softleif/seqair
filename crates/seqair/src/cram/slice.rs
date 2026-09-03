@@ -585,6 +585,7 @@ fn decode_record<E: CustomizeRecordStore>(
         // covered position. Mismatching this with the half-open
         // semantics used elsewhere drops boundary records (reads
         // starting exactly at the requested end position).
+        // r[impl interval.overlap_test]
         if pos_0based > query_end || end_pos < query_start {
             return Ok((
                 false,

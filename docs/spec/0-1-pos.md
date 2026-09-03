@@ -95,6 +95,36 @@ r[pos.sub_offset]
 r[pos.no_add_pos]
 Adding two positions (`Pos<S> + Pos<S>`) MUST be a compile error. Adding positions is not a meaningful operation.
 
+## Reference intervals
+
+Every reader and the pileup engine work on the same kind of interval, and the
+one number worth being pedantic about is where it stops. Half-open ends and
+inclusive ends both appear in the file formats this library reads (htslib's
+`bam_endpos` is exclusive, CRAM's slice spans are inclusive), so seqair picks
+one internally and converts at the format boundary.
+
+r[interval.inclusive_ends]
+A reference interval in seqair's API is 0-based with **both ends inclusive**:
+`[start, end]` covers `end - start + 1` positions. This applies to the range
+passed to `fetch_into`/`fetch_into_customized`, to `Segment`, and to the pileup
+engine's region. A half-open interval MUST NOT be used at these boundaries;
+where an external format needs one, the conversion happens in the format's
+own reader.
+
+r[interval.end_pos_inclusive]
+A record's `end_pos` is the **last reference position it covers**
+(`pos + ref_len - 1`), not one past it. A record with a CIGAR that consumes no
+reference has `end_pos == pos`, matching the single position htslib reports as
+`end = start + 1` in its exclusive convention.
+
+r[interval.overlap_test]
+A record overlaps `[start, end]` iff `record.pos <= end && record.end_pos >= start`.
+Every reader MUST use exactly this test, so that the same query returns the same
+records from BAM, SAM, and CRAM. A `Range<Pos0>` built from these values —
+[`RecordStore::mate_overlap`](./3-record_store.md), for instance — is half-open
+and therefore ends at `end_pos + 1`; that conversion belongs at the point the
+`Range` is constructed.
+
 ## Traits
 
 r[pos.derives]

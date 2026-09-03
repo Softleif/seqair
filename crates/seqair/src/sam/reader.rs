@@ -537,9 +537,10 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     let end_pos =
         if cigar_available { cigar::compute_end_pos(pos, cigar_buf).unwrap_or(pos) } else { pos };
 
-    // r[impl sam.reader.overlap_filter+2]
-    // r[impl sam.reader.overlap_halfopen]
-    if pos.as_i64() >= end || end_pos.as_i64() <= start {
+    // r[impl sam.reader.overlap_filter+3]
+    // r[impl sam.reader.overlap_inclusive]
+    // r[impl interval.overlap_test]
+    if pos.as_i64() > end || end_pos.as_i64() < start {
         return Ok(None);
     }
 
@@ -1164,42 +1165,59 @@ mod tests {
         Ok((result, store))
     }
 
-    // r[verify sam.reader.overlap_halfopen]
+    // r[verify sam.reader.overlap_inclusive]
+    /// A record starting exactly at the query end still overlaps: both ends of
+    /// the query are inclusive.
     #[test]
-    fn overlap_filter_halfopen_pos_equals_end() {
+    fn overlap_filter_record_starting_at_query_end() {
         let header = make_header();
-        // Record at pos=100 (1-based), 4M cigar -> 0-based pos=99, end_pos=103
-        // Query region [0, 99) — pos == end, should be filtered out
+        // pos=100 (1-based) -> 0-based 99; 4M covers 99..=102.
         let line = b"r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~";
         let (result, store) =
             call_parse_with_region(line, &header, 0, 99).expect("parse should succeed");
-        assert!(result.is_none(), "record at pos=99 should be filtered when end=99");
-        assert_eq!(store.len(), 0);
+        assert!(result.is_some(), "record starting at the inclusive query end overlaps");
+        assert_eq!(store.len(), 1);
     }
 
-    // r[verify sam.reader.overlap_halfopen]
+    // r[verify sam.reader.overlap_inclusive]
+    /// A record whose *last* covered base is the query start overlaps by one
+    /// base. The old half-open test dropped exactly this record.
     #[test]
-    fn overlap_filter_halfopen_end_pos_equals_start() {
+    fn overlap_filter_record_ending_at_query_start() {
         let header = make_header();
-        // Record at pos=100 (1-based), 4M cigar -> 0-based pos=99, end_pos=103
-        // Query region [103, 200) — end_pos == start, should be filtered out
+        // 4M at 0-based 99 covers 99..=102, so end_pos == 102.
         let line = b"r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~";
         let (result, store) =
+            call_parse_with_region(line, &header, 102, 200).expect("parse should succeed");
+        assert!(result.is_some(), "record covering the query start overlaps");
+        assert_eq!(store.len(), 1);
+    }
+
+    // r[verify sam.reader.overlap_inclusive]
+    #[test]
+    fn overlap_filter_rejects_records_outside_the_region() {
+        let header = make_header();
+        let line = b"r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~";
+        // Region ends one before the record starts.
+        let (before, store) =
+            call_parse_with_region(line, &header, 0, 98).expect("parse should succeed");
+        assert!(before.is_none(), "record starting past the region must be filtered");
+        assert_eq!(store.len(), 0);
+        // Region starts one past the record's last covered base.
+        let (after, store) =
             call_parse_with_region(line, &header, 103, 200).expect("parse should succeed");
-        assert!(result.is_none(), "record with end_pos=103 should be filtered when start=103");
+        assert!(after.is_none(), "record ending before the region must be filtered");
         assert_eq!(store.len(), 0);
     }
 
-    // r[verify sam.reader.overlap_halfopen]
+    // r[verify sam.reader.overlap_inclusive]
     #[test]
-    fn overlap_filter_halfopen_overlapping() {
+    fn overlap_filter_overlapping() {
         let header = make_header();
-        // Record at pos=100 (1-based), 4M cigar -> 0-based pos=99, end_pos=103
-        // Query region [100, 103) — should overlap
         let line = b"r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~";
         let (result, store) =
             call_parse_with_region(line, &header, 100, 103).expect("parse should succeed");
-        assert!(result.is_some(), "record should overlap region [100, 103)");
+        assert!(result.is_some(), "record should overlap region [100, 103]");
         assert_eq!(store.len(), 1);
     }
 

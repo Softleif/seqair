@@ -483,11 +483,13 @@ The `RG` data series is separate from aux tags. If a read group is present, the 
 > 5. Slice byte offset relative to container data start (int)
 > 6. Slice size in bytes (int)
 
-r[cram.index.query]
-Region queries MUST find all index entries where `[start, start+span)` overlaps the query region for the given reference ID. The reader then seeks to the container byte offset, skips to the slice offset, and decodes the slice.
+r[cram.index.query+2]
+Region queries MUST find all index entries whose alignment range overlaps the query region for the given reference ID, per [`interval.overlap_test`](./0-1-pos.md#intervaloverlap_test). A CRAI `alignment_start` is **1-based** (`r[cram.index.parse]`) while the query is 0-based inclusive, so the entry's range MUST be converted before comparing: an entry covers 0-based `[alignment_start - 1, alignment_start - 1 + span - 1]`. The reader then seeks to the container byte offset, skips to the slice offset, and decodes the slice.
 
-r[cram.index.zero_span]
-CRAI entries with `alignment_span == 0` (but `alignment_start > 0`) indicate unknown extent — this occurs when samtools writes CRAM with embedded references or when the span is not computed. These entries MUST be included in query results whenever `entry.alignment_start < query_end`, since the slice may contain records at any position past the start. Treating span=0 as "zero-width" would silently drop all records in that slice.
+> **Was:** the two conventions were compared directly, on the reasoning that an overlap test is symmetric. It is not: the 1-based entry start read one position too high, so a query ending within one base of a container's first record pruned that container entirely and the records vanished — while BAM and CRAM disagreed on the same narrow query. Over-inclusive index pruning is harmless (`decode_slice` re-filters every record); under-inclusive pruning loses data silently.
+
+r[cram.index.zero_span+2]
+CRAI entries with `alignment_span == 0` (but `alignment_start > 0`) indicate unknown extent — this occurs when samtools writes CRAM with embedded references or when the span is not computed. These entries MUST be included in query results whenever the entry's 0-based start is at or before the query end, since the slice may contain records at any position past the start. Treating span=0 as "zero-width" would silently drop all records in that slice.
 
 r[cram.index.multi_ref_slices]
 Multi-ref slices produce multiple index entries (one per reference they span). A query for one reference may hit a multi-ref slice that also contains records from other references. The reader MUST filter records by reference ID after decoding.
