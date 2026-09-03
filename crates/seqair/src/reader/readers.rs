@@ -475,6 +475,12 @@ impl<E: CustomizeRecordStore> Readers<E> {
             self.store.sort_by_pos();
         }
 
+        // r[impl record_store.link_mates.invalidated]
+        // After the fetch and before the engine: a mate index is a store index,
+        // so linking has to be the last thing that touches the store (after the
+        // realignment hook above re-sorted it).
+        self.store.link_mates();
+
         let ref_seq = match supplied_ref {
             // r[impl unified.readers_pileup_supplied_reference]
             Some(ref_seq) => {

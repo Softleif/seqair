@@ -13,7 +13,64 @@ use super::{
     record::{self, DecodeError},
     seq,
 };
+use rustc_hash::FxHashMap;
 use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
+use std::{collections::hash_map::Entry, ops::Range};
+
+// r[impl record_store.qname_hash]
+/// Seed-fixed 64-bit hash of a read name, with full avalanche.
+///
+/// Both mates of a template carry the same qname (`[SAM1] §1.4`), so this is
+/// also a fragment identifier: a pure function of the bytes, with no per-store,
+/// per-thread, or per-run state, so the same read hashes to the same value in
+/// every store that ever holds it.
+///
+/// The construction is a folded 128-bit multiply per 8-byte word (the wyhash
+/// primitive): the fold of the high and low halves mixes every input bit into
+/// every output bit, unlike the single low-half multiply of `FxHash`, whose output
+/// low bits barely move when only the high bytes of a word differ — which is
+/// exactly the shape of Illumina qnames, where reads of one tile share a long
+/// ASCII prefix.
+#[must_use]
+pub fn qname_hash(name: &[u8]) -> u64 {
+    // Arbitrary odd 64-bit constants with ~half their bits set; any such
+    // triple works, they only need to be fixed forever.
+    const K0: u64 = 0x2d35_8dcc_aa6c_78a5;
+    const K1: u64 = 0x8bb8_4b93_962e_acc9;
+    const K2: u64 = 0x4b33_a62e_d433_d4a3;
+
+    let len = u64::try_from(name.len()).unwrap_or(u64::MAX);
+    let mut acc = fold_mul(K0 ^ len, K1);
+
+    let mut chunks = name.chunks_exact(8);
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes(<[u8; 8]>::try_from(chunk).unwrap_or([0; 8]));
+        acc = fold_mul(acc ^ word, K1);
+    }
+
+    let rest = chunks.remainder();
+    if !rest.is_empty() {
+        let mut buf = [0u8; 8];
+        if let Some(head) = buf.get_mut(..rest.len()) {
+            head.copy_from_slice(rest);
+        }
+        acc = fold_mul(acc ^ u64::from_le_bytes(buf), K2);
+    }
+
+    fold_mul(acc, K2)
+}
+
+/// The 128-bit product of `a * k`, folded down to 64 bits by `XOR`ing its halves.
+#[inline]
+fn fold_mul(a: u64, k: u64) -> u64 {
+    let product = u128::from(a).wrapping_mul(u128::from(k));
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the truncation is the point: both halves of the product are folded together"
+    )]
+    let folded = (product as u64) ^ ((product >> 64) as u64);
+    folded
+}
 
 /// Compact BAM record with offsets into the store's slabs.
 // r[impl record_store.push_raw+2]
@@ -67,7 +124,20 @@ pub struct SlimRecord {
     /// other fields — survives record reordering (sort/dedup) without
     /// requiring the extras Vec to be reordered in lockstep.
     extras_idx: u32,
+    // r[impl record_store.qname_hash]
+    /// Seed-fixed hash of the qname bytes, computed at push time. Both mates of
+    /// a template share it; see [`qname_hash`].
+    pub qname_hash: u64,
+    // r[impl record_store.link_mates]
+    /// Store index of this record's mate, or [`NO_MATE`] when unlinked. Only
+    /// [`RecordStore::link_mates`] writes it.
+    mate_idx: u32,
 }
+
+/// Sentinel for [`SlimRecord::mate_idx`]: no mate linked. `u32::MAX` can never
+/// be a real index because slab offsets are `u32` and every record occupies at
+/// least one byte in the name slab.
+const NO_MATE: u32 = u32::MAX;
 
 // r[impl record_store.slim_record.field_getters]
 impl SlimRecord {
@@ -170,6 +240,14 @@ impl SlimRecord {
         Ok(Aux::new(bytes))
     }
 
+    // r[impl record_store.link_mates]
+    /// Store index of this record's mate, if [`RecordStore::link_mates`] linked
+    /// it. Invalidated by `sort_by_pos`/`dedup`.
+    #[must_use]
+    pub fn mate_idx(&self) -> Option<u32> {
+        (self.mate_idx != NO_MATE).then_some(self.mate_idx)
+    }
+
     /// Read the per-record extra value for this record.
     pub fn extra<'store, U>(
         &self,
@@ -182,11 +260,13 @@ impl SlimRecord {
     }
 }
 
-// Compile-time size guard: 16 u32 (incl. next_ref_id, extras_idx) + 3 u16 + 1 u8 + padding
-// = 72 bytes. If this ever grows, revisit the layout before accepting the hit —
+// Compile-time size guard: 17 u32 (incl. next_ref_id, extras_idx, mate_idx)
+// + 1 u64 (qname_hash) + 3 u16 + 1 u8 + padding = 88 bytes. The u64 raises the
+// struct's alignment to 8, so the 12 bytes of mate linking cost 16. If this ever
+// grows, revisit the layout before accepting the hit —
 // see `docs/spec/3-record_store.md` "Layout".
 const _: () =
-    assert!(std::mem::size_of::<SlimRecord>() <= 72, "SlimRecord grew unexpectedly large");
+    assert!(std::mem::size_of::<SlimRecord>() <= 88, "SlimRecord grew unexpectedly large");
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -447,6 +527,10 @@ impl<U> RecordStore<U> {
         let aux_slice = &raw[h.qual_end..];
         self.aux.extend_from_slice(aux_slice);
 
+        #[allow(clippy::indexing_slicing, reason = "qname_actual_len ≤ qname_raw.len()")]
+        // r[impl record_store.qname_hash]
+        let name_hash = qname_hash(&qname_raw[..qname_actual_len]);
+
         self.records.push(SlimRecord {
             pos: h.pos,
             end_pos,
@@ -476,6 +560,8 @@ impl<U> RecordStore<U> {
             )]
             aux_len: aux_slice.len() as u32,
             extras_idx: idx,
+            qname_hash: name_hash,
+            mate_idx: NO_MATE,
         });
         self.extras.push(customize.compute(
             self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
@@ -629,6 +715,9 @@ impl<U> RecordStore<U> {
             )]
             aux_len: aux.len() as u32,
             extras_idx: idx,
+            // r[impl record_store.qname_hash]
+            qname_hash: qname_hash(qname),
+            mate_idx: NO_MATE,
         });
 
         let record =
@@ -967,7 +1056,10 @@ impl<U> RecordStore<U> {
     ///
     /// Safe for any `U` because each record carries its own `extras_idx`,
     /// so reordering the records Vec does not invalidate the extras mapping.
+    /// Mate links are *not* safe for reordering and are dropped
+    /// (r[`record_store.link_mates.invalidated`]).
     pub fn sort_by_pos(&mut self) {
+        self.clear_mate_links();
         self.records.sort_by_key(|r| r.pos);
     }
 
@@ -979,6 +1071,7 @@ impl<U> RecordStore<U> {
     /// Slab data (including extras) for removed records is left in place (minor waste),
     /// same as dead name/cigar bytes from removed records.
     pub fn dedup(&mut self) {
+        self.clear_mate_links();
         let names = &self.names;
         self.records.dedup_by(|a, b| {
             a.pos == b.pos && a.flags == b.flags && a.name_len == b.name_len && {
@@ -994,6 +1087,85 @@ impl<U> RecordStore<U> {
                 }
             }
         });
+    }
+
+    // --- Mate linking ---
+
+    // r[impl record_store.link_mates.invalidated]
+    /// Drop every mate link. A mate index is a store index, so any operation
+    /// that moves or removes records invalidates it.
+    fn clear_mate_links(&mut self) {
+        for rec in &mut self.records {
+            rec.mate_idx = NO_MATE;
+        }
+    }
+
+    // r[impl record_store.link_mates]
+    /// Link the mates of every template that has both of its primary mapped
+    /// alignments in this store, so consumers can find a read's mate — and the
+    /// reference interval the two share — without matching qnames per column.
+    ///
+    /// Run this as the *last* mutation before pileup iteration: `sort_by_pos`
+    /// and `dedup` clear the links again
+    /// (r[`record_store.link_mates.invalidated`]). [`Readers::pileup`] does this
+    /// for you.
+    ///
+    /// [`Readers::pileup`]: crate::reader::Readers::pileup
+    pub fn link_mates(&mut self) {
+        // Split the borrow: the qname verification reads the name slab while
+        // the link is written into the records Vec.
+        let Self { records, names, .. } = self;
+        for rec in records.iter_mut() {
+            rec.mate_idx = NO_MATE;
+        }
+
+        let mut seen: FxHashMap<MateKey, u32> = FxHashMap::default();
+        seen.reserve(records.len());
+
+        for idx in 0..records.len() {
+            let Ok(idx_u32) = u32::try_from(idx) else { break };
+            let Some(rec) = records.get(idx) else { continue };
+            let Some(key) = MateKey::of(rec) else { continue };
+
+            let candidate = match seen.entry(key) {
+                Entry::Vacant(slot) => {
+                    slot.insert(idx_u32);
+                    continue;
+                }
+                // Leave the entry pointing at the first record: a third
+                // alignment with the same key must not steal the link.
+                Entry::Occupied(slot) => *slot.get(),
+            };
+
+            let Some(other) = records.get(candidate as usize) else { continue };
+            if other.mate_idx != NO_MATE
+                || rec.pos.as_i32() != other.next_pos
+                || other.pos.as_i32() != rec.next_pos
+                || qname_bytes(names, rec) != qname_bytes(names, other)
+            {
+                continue;
+            }
+
+            if let Some(this) = records.get_mut(idx) {
+                this.mate_idx = candidate;
+            }
+            if let Some(other) = records.get_mut(candidate as usize) {
+                other.mate_idx = idx_u32;
+            }
+        }
+    }
+
+    // r[impl record_store.mate_overlap]
+    /// The half-open reference interval both mates of `idx` cover, or `None`
+    /// when the record has no linked mate. Empty when the two alignments are
+    /// disjoint (mates of a fragment longer than twice the read length).
+    #[must_use]
+    pub fn mate_overlap(&self, idx: u32) -> Option<Range<Pos0>> {
+        let rec = self.record(idx);
+        let mate = self.records.get(rec.mate_idx()? as usize)?;
+        let start = rec.pos.max(mate.pos);
+        let end = rec.end_pos.min(mate.end_pos).max(start);
+        Some(start..end)
     }
 
     // --- Accessors ---
@@ -1247,6 +1419,51 @@ impl<U> RecordStore<U> {
     pub fn extras_capacity(&self) -> usize {
         self.extras.capacity()
     }
+}
+
+// r[impl record_store.link_mates]
+/// Identity of a mate pair: the template's qname hash plus the two alignment
+/// starts, ordered so both mates build the same key. Including the positions
+/// makes a hash collision between two unrelated templates harmless (they would
+/// also have to start at each other's mate position), and keeps a supplementary
+/// alignment — whose `pos` is not its mate's `next_pos` — out of the pairing.
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+struct MateKey {
+    qname_hash: u64,
+    lo: i32,
+    hi: i32,
+}
+
+impl MateKey {
+    /// `None` when the record cannot be one half of a linkable pair.
+    fn of(rec: &SlimRecord) -> Option<Self> {
+        let flags = rec.flags;
+        let linkable = flags.is_paired()
+            && !flags.is_unmapped()
+            && !flags.is_mate_unmapped()
+            && !flags.is_secondary()
+            && !flags.is_supplementary()
+            && rec.next_ref_id == rec.tid
+            && rec.next_pos >= 0;
+        if !linkable {
+            return None;
+        }
+        let pos = rec.pos.as_i32();
+        Some(Self {
+            qname_hash: rec.qname_hash,
+            lo: pos.min(rec.next_pos),
+            hi: pos.max(rec.next_pos),
+        })
+    }
+}
+
+/// The record's qname bytes, read straight from a borrowed name slab. Returns
+/// an empty slice on a malformed offset — two malformed records then compare
+/// equal on names alone, which the position and hash checks still reject.
+fn qname_bytes<'a>(names: &'a [u8], rec: &SlimRecord) -> &'a [u8] {
+    let start = rec.name_off as usize;
+    let end = start.saturating_add(rec.name_len as usize);
+    names.get(start..end).unwrap_or(&[])
 }
 
 impl<U> Default for RecordStore<U> {

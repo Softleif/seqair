@@ -102,6 +102,50 @@ r[record_store.extras.clear]
 r[record_store.extras.sort_dedup_generic]
 `sort_by_pos` and `dedup` MUST be available on `RecordStore<U>` for any `U`. Each `SlimRecord` carries an `extras_idx` field that indexes into the extras slab, so reordering or removing records does not invalidate the extras mapping. Dead extras entries from `dedup` are left in place (minor waste, same as dead slab data for names, cigar, etc.).
 
+## Mate linking
+
+Paired-end reads whose fragment is shorter than twice the read length cover the
+same reference positions twice. Consumers need to know, cheaply and per column,
+whether a read is inside such an overlap and which store record its mate is —
+and phasing needs a template identifier that is stable no matter how a region
+was fetched or split. Both come from one pass over the store.
+
+r[record_store.qname_hash]
+`push_raw` and `push_fields` MUST compute a 64-bit hash of the record's qname
+bytes at push time and store it on the `SlimRecord`. The hash MUST be a pure
+function of those bytes: fixed seed, no per-store or per-process state, so both
+mates of a template (and every supplementary copy) get the same value, and the
+value is reproducible across stores, threads, and runs. It MUST have full
+avalanche. FxHash-style hashes MUST NOT be used here — their weak avalanche on
+the structured ASCII suffix of Illumina qnames leaves the low bits
+under-discriminating, which is exactly the part consumers key maps on. Consumers
+MAY treat the hash as a fragment identifier; the SAM spec makes the qname the
+template identifier, so uniqueness of the id is uniqueness of the qname.
+
+r[record_store.link_mates]
+`link_mates()` MUST link the mates of a template that are both present in the
+store, setting each record's mate index to the other's store index. A record is
+a candidate only when it is paired, mapped, primary (neither secondary nor
+supplementary), has a mapped mate, and `next_ref_id == tid`. Two candidates MUST
+be linked only when all of: equal `qname_hash`, equal qname bytes, and mutually
+consistent mate positions (`a.pos == b.next_pos` and `b.pos == a.next_pos`).
+Each record MUST be linked at most once, so when more than two candidates share
+a key only the first two are linked. Linking MUST be O(number of records).
+
+r[record_store.mate_overlap]
+For a linked pair, `mate_overlap(idx)` MUST return the half-open reference
+interval `[max(a.pos, b.pos), min(a.end_pos, b.end_pos))` — the positions both
+mates cover — and MUST return an empty interval when the two alignments are
+disjoint. It MUST return `None` for an unlinked record. The interval is derived
+from the mate's record rather than stored, to keep `SlimRecord` small.
+
+r[record_store.link_mates.invalidated]
+`sort_by_pos()` and `dedup()` MUST clear all mate links, because a mate index is
+a store index and both operations move or remove records. `link_mates()` MUST
+therefore be the last store mutation before pileup iteration, and
+[`Readers::pileup`](./1-1-unified_reader.md) MUST call it after its own
+fetch/mutate/sort sequence.
+
 ## Integration
 
 r[record_store.no_rc]

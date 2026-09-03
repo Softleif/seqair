@@ -8,7 +8,7 @@
 
 use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
-use std::rc::Rc;
+use std::{ops::Range, rc::Rc};
 
 use crate::utils::TraceErr;
 
@@ -165,6 +165,13 @@ struct ActiveRecord {
     seq_len: u32,
     matching_bases: u32,
     indel_bases: u32,
+    // r[impl pileup.mate_link_cache]
+    qname_hash: u64,
+    /// Store index of the mate, or `u32::MAX` when unlinked.
+    mate_idx: u32,
+    /// The reference interval both mates cover, resolved once on activation so
+    /// the column loop only compares two positions. Empty when unlinked.
+    mate_overlap: Range<Pos0>,
 }
 
 // r[impl pileup.empty_seq_unknown_base]
@@ -268,6 +275,22 @@ impl<'eng, U> PileupColumn<'eng, U> {
     #[must_use]
     pub fn match_depth(&self) -> usize {
         self.alignments.iter().filter(|a| a.qpos().is_some()).count()
+    }
+
+    // r[impl pileup.column_find_record]
+    // r[depends pileup.column_record_order]
+    /// The entry of `record_idx` in this column, or `None` when that record has
+    /// none here (it may not overlap the position, or the column may have been
+    /// truncated by `max_depth`).
+    ///
+    /// Binary search: the column is ordered by ascending `record_idx`. This is
+    /// how a consumer reaches the other mate of an overlapping pair
+    /// ([`PileupAlignment::mate_idx`]) while walking the column once.
+    #[must_use]
+    pub fn find_record(&self, record_idx: u32) -> Option<AlignmentView<'_, 'eng, U>> {
+        let found = self.alignments.binary_search_by_key(&record_idx, |a| a.record_idx).ok()?;
+        let aln = self.alignments.get(found)?;
+        Some(AlignmentView { aln, store: self.store })
     }
 }
 
@@ -462,6 +485,10 @@ pub struct PileupAlignment {
     pub indel_bases: u32,
     /// The indel anchored at this column for this read (see [`Indel`]).
     indel_after: Indel,
+    // r[impl pileup.mate_link_cache]
+    qname_hash: u64,
+    mate_idx: u32,
+    in_mate_overlap: bool,
 }
 
 // r[impl pileup_indel.accessors]
@@ -469,6 +496,34 @@ impl PileupAlignment {
     #[must_use]
     pub fn record_idx(&self) -> u32 {
         self.record_idx
+    }
+
+    // r[impl pileup.mate_link_cache]
+    /// Store index of this read's mate, when
+    /// [`RecordStore::link_mates`](crate::bam::record_store::RecordStore::link_mates)
+    /// found both mates in the store. `None` for an unpaired, unlinked, or
+    /// secondary/supplementary alignment.
+    #[must_use]
+    pub fn mate_idx(&self) -> Option<u32> {
+        (self.mate_idx != u32::MAX).then_some(self.mate_idx)
+    }
+
+    // r[impl pileup.mate_link_cache]
+    /// True when this column's position is covered by both mates of the
+    /// template — the only positions at which a consumer needs to decide which
+    /// mate to keep.
+    #[must_use]
+    pub fn in_mate_overlap(&self) -> bool {
+        self.in_mate_overlap
+    }
+
+    // r[impl pileup.mate_link_cache]
+    /// The template's identity: the seed-fixed hash of the read's qname, shared
+    /// by both mates and stable across stores and runs. See
+    /// [`qname_hash`](crate::bam::record_store::qname_hash).
+    #[must_use]
+    pub fn qname_hash(&self) -> u64 {
+        self.qname_hash
     }
 
     #[must_use]
@@ -875,6 +930,11 @@ impl<U> PileupEngine<U> {
                         .checked_add_offset(Offset::new(i64::from(n)))
                         .unwrap_or(Pos0::max_value()),
                 };
+                // r[impl pileup.mate_link_cache]
+                let mate_overlap = self.store.mate_overlap(idx).unwrap_or(Pos0::ZERO..Pos0::ZERO);
+                let mate_idx = rec.mate_idx().unwrap_or(u32::MAX);
+                let qname_hash = rec.qname_hash;
+
                 self.active_end_pos.push(active_end);
                 self.active.push(ActiveRecord {
                     record_idx: idx,
@@ -884,6 +944,9 @@ impl<U> PileupEngine<U> {
                     seq_len: rec.seq_len,
                     matching_bases: rec.matching_bases,
                     indel_bases: rec.indel_bases,
+                    qname_hash,
+                    mate_idx,
+                    mate_overlap,
                 });
             }
 
@@ -923,6 +986,9 @@ impl<U> PileupEngine<U> {
             // r[impl pileup_indel.refskips_included]
             // r[related record_store.field_access]
             // r[impl perf.reuse_alignment_vec+2]
+            // r[impl pileup.column_record_order]
+            // The active set is appended in store order and compacted stably on
+            // eviction, so walking it yields ascending record indices.
             self.buf.clear();
             for active in &self.active {
                 let Some(info) = active.cigar.pos_info_at(pos) else {
@@ -946,6 +1012,9 @@ impl<U> PileupEngine<U> {
                             indel_bases: active.indel_bases,
                             record_idx: active.record_idx,
                             indel_after: Indel::None,
+                            qname_hash: active.qname_hash,
+                            mate_idx: active.mate_idx,
+                            in_mate_overlap: active.mate_overlap.contains(&pos),
                         });
                     }
                     continue;
@@ -993,6 +1062,10 @@ impl<U> PileupEngine<U> {
                     indel_bases: active.indel_bases,
                     record_idx: active.record_idx,
                     indel_after,
+                    // r[impl pileup.mate_link_cache]
+                    qname_hash: active.qname_hash,
+                    mate_idx: active.mate_idx,
+                    in_mate_overlap: active.mate_overlap.contains(&pos),
                 });
             }
 
