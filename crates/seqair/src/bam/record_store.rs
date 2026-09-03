@@ -14,7 +14,7 @@ use super::{
     seq,
 };
 use rustc_hash::FxHashMap;
-use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
+use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0};
 use std::{collections::hash_map::Entry, ops::Range};
 
 // r[impl record_store.qname_hash]
@@ -78,12 +78,12 @@ fn fold_mul(a: u64, k: u64) -> u64 {
 pub struct SlimRecord {
     /// 0-based leftmost aligned reference position.
     pub pos: Pos0,
-    /// 0-based exclusive end, htslib-compatible.
+    /// Last reference position the alignment covers, 0-based and **inclusive**
+    /// (`pos + ref_len - 1`).
     ///
-    /// For mapped reads: computed from CIGAR (`pos` + reference-consuming op
-    /// lengths). For unmapped reads: equals [`pos`](Self::pos) — htslib ignores
-    /// the CIGAR and reports `end = start + 1`, which in 0-based exclusive
-    /// semantics is `pos`.
+    /// For unmapped reads, and for a CIGAR that consumes no reference, it
+    /// equals [`pos`](Self::pos) — the same single position htslib reports as
+    /// `end = start + 1` in its exclusive convention.
     pub end_pos: Pos0,
     // r[impl flags.field_type]
     /// BAM flag bits (paired, unmapped, reverse strand, …).
@@ -1159,12 +1159,19 @@ impl<U> RecordStore<U> {
     /// The half-open reference interval both mates of `idx` cover, or `None`
     /// when the record has no linked mate. Empty when the two alignments are
     /// disjoint (mates of a fragment longer than twice the read length).
+    ///
+    /// [`end_pos`](SlimRecord::end_pos) is inclusive, so the last shared
+    /// position is one before the end of the returned range.
     #[must_use]
     pub fn mate_overlap(&self, idx: u32) -> Option<Range<Pos0>> {
         let rec = self.record(idx);
         let mate = self.records.get(rec.mate_idx()? as usize)?;
         let start = rec.pos.max(mate.pos);
-        let end = rec.end_pos.min(mate.end_pos).max(start);
+        let last = rec.end_pos.min(mate.end_pos);
+        if last < start {
+            return Some(start..start);
+        }
+        let end = last.checked_add_offset(Offset::new(1)).unwrap_or(Pos0::max_value());
         Some(start..end)
     }
 
