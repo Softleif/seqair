@@ -154,6 +154,66 @@ fn qname_hash_avalanches() {
     assert!(worst >= 8, "a single input bit moved only {worst} output bits");
 }
 
+// r[verify record_store.qname_hash]
+/// Avalanche over bit flips is not the whole story: what a hash table needs is
+/// that *realistic* keys spread. Illumina qnames share a long prefix and differ
+/// only in tile/x/y near the end, which is the shape that punishes a weak hash.
+///
+/// Both ends of the value are checked, because both are load-bearing in
+/// `hashbrown`: the low bits pick the bucket, the top 7 bits are the SIMD
+/// control byte compared before any key is touched.
+#[test]
+fn qname_hash_spreads_realistic_illumina_names() {
+    const BUCKETS: usize = 4096;
+    let mut hashes = Vec::new();
+    for lane in 1..=4u32 {
+        for tile in 1101..1126u32 {
+            for x in 0..40u32 {
+                for y in 0..5u32 {
+                    let name = format!(
+                        "A00123:45:HVWXYDRXX:{lane}:{tile}:{}:{}",
+                        1000 + x * 137,
+                        6000 + y * 11
+                    );
+                    hashes.push(qname_hash(name.as_bytes()));
+                }
+            }
+        }
+    }
+    assert_eq!(hashes.len(), 20_000);
+
+    let unique: HashSet<u64> = hashes.iter().copied().collect();
+    assert_eq!(unique.len(), hashes.len(), "realistic qnames must not collide at 64 bits");
+
+    // Bucket index: the low bits.
+    let mut low = vec![0u32; BUCKETS];
+    // Control byte: the top 7 bits.
+    let mut top = vec![0u32; 128];
+    for &h in &hashes {
+        low[(h as usize) % BUCKETS] += 1;
+        top[(h >> 57) as usize] += 1;
+    }
+
+    // 20k names over 4096 buckets averages 4.9 per bucket. For a hash that
+    // behaves like a fair coin the Poisson tail puts the fullest bucket around
+    // 15 and leaves about e^-4.9 * 4096 ~= 31 buckets empty. Both bounds are
+    // generous multiples of that; what they rule out is clustering, where a
+    // hash whose low bits barely move on this input piles hundreds into one
+    // bucket and empties most of the table.
+    let worst_low = low.iter().copied().max().unwrap_or(0);
+    let empty_low = low.iter().filter(|&&n| n == 0).count();
+    assert!(worst_low <= 20, "low bits cluster: worst bucket holds {worst_low} of 20000");
+    assert!(empty_low <= 80, "low bits cluster: {empty_low} of {BUCKETS} buckets unused");
+
+    // 20k over 128 control-byte values averages 156.
+    let (worst_top, best_top) =
+        (top.iter().copied().max().unwrap_or(0), top.iter().copied().min().unwrap_or(0));
+    assert!(
+        worst_top < 250 && best_top > 80,
+        "control byte clusters: {best_top}..={worst_top} per value, expected ~156"
+    );
+}
+
 // ── linking ───────────────────────────────────────────────────────────────
 
 // r[verify record_store.link_mates+2]

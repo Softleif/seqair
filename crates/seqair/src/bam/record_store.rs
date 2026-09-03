@@ -13,8 +13,7 @@ use super::{
     record::{self, DecodeError},
     seq,
 };
-use rustc_hash::FxHashMap;
-use seqair_types::SmallVec;
+use hashbrown::HashTable;
 use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0};
 use std::ops::Range;
 
@@ -1169,18 +1168,23 @@ impl<U> RecordStore<U> {
             rec.mate_idx = NO_MATE;
         }
 
-        // Candidates that have not found a partner yet, bucketed by key. The
-        // bucket — rather than one slot per key — is what makes a hash
-        // collision cost a byte comparison instead of a lost link: the colliding
-        // record stays in the bucket and its own mate still finds it.
-        let mut seen: FxHashMap<MateKey, SmallVec<u32, 2>> = FxHashMap::default();
-        seen.reserve(records.len());
+        // Records still waiting for their mate, keyed by template identity.
+        // A hash table is the right shape here for the reason any hash table
+        // is: the hash groups candidates, and equality — which lives in the
+        // name slab, not in the stored `u32` — decides. `HashTable` takes the
+        // hash and the comparison as arguments precisely so the key can be
+        // data the entry only points at. Two templates whose qnames collide
+        // therefore share a bucket and cost one byte comparison; neither loses
+        // its own mate, which a one-slot-per-key map would have caused.
+        let mut waiting: HashTable<u32> = HashTable::with_capacity(records.len());
         let mut stats = MateLinkStats::default();
 
         for idx in 0..records.len() {
             let Ok(idx_u32) = u32::try_from(idx) else { break };
             let Some(rec) = records.get(idx) else { continue };
-            let Some(key) = MateKey::of(rec) else { continue };
+            if !can_link(rec) {
+                continue;
+            }
             let qname = qname_bytes(names, rec);
             // r[impl record_store.qname_hash.no_name]
             if qname.is_empty() {
@@ -1188,26 +1192,24 @@ impl<U> RecordStore<U> {
             }
             let (pos, next_pos) = (rec.pos.as_i32(), rec.next_pos);
 
-            let bucket = seen.entry(key).or_default();
-            let mut partner = None;
+            // The probe visits every waiting candidate in the bucket, so it is
+            // also where a same-qname record that cannot be *this* record's
+            // mate gets noticed — a third primary alignment for the qname, or
+            // the same record twice.
+            // r[impl record_store.link_mates.qname_uniqueness]
             let mut same_qname_present = false;
-            for &candidate in bucket.iter() {
-                let Some(other) = records.get(candidate as usize) else { continue };
-                if qname_bytes(names, other) != qname {
-                    // Same key, different template: a hash collision. Keep
-                    // looking — and leave it in the bucket for its own mate.
-                    continue;
-                }
-                same_qname_present = true;
-                if other.mate_idx != NO_MATE
-                    || pos != other.next_pos
-                    || other.pos.as_i32() != next_pos
-                {
-                    continue;
-                }
-                partner = Some(candidate);
-                break;
-            }
+            let partner = waiting
+                .find(rec.qname_hash, |&candidate| {
+                    let Some(other) = records.get(candidate as usize) else { return false };
+                    if qname_bytes(names, other) != qname {
+                        return false;
+                    }
+                    same_qname_present = true;
+                    other.mate_idx == NO_MATE
+                        && pos == other.next_pos
+                        && other.pos.as_i32() == next_pos
+                })
+                .copied();
 
             match partner {
                 Some(partner) => {
@@ -1220,12 +1222,15 @@ impl<U> RecordStore<U> {
                     stats.pairs = stats.pairs.saturating_add(1);
                 }
                 None => {
-                    // r[impl record_store.link_mates.qname_uniqueness]
                     if same_qname_present {
                         stats.ambiguous_qnames = stats.ambiguous_qnames.saturating_add(1);
                     }
-                    // `bucket` was invalidated by the `records` borrows above.
-                    seen.entry(key).or_default().push(idx_u32);
+                    // Linked records stay in the table: a later record with the
+                    // same qname must still be able to see that it arrived too
+                    // late, which is what `ambiguous_qnames` counts.
+                    waiting.insert_unique(rec.qname_hash, idx_u32, |&candidate| {
+                        records.get(candidate as usize).map_or(0, |r| r.qname_hash)
+                    });
                 }
             }
         }
@@ -1545,41 +1550,17 @@ impl MateLinkStats {
 }
 
 // r[impl record_store.link_mates+2]
-/// Identity of a mate pair: the template's qname hash plus the two alignment
-/// starts, ordered so both mates build the same key. Including the positions
-/// makes a hash collision between two unrelated templates harmless (they would
-/// also have to start at each other's mate position), and keeps a supplementary
-/// alignment — whose `pos` is not its mate's `next_pos` — out of the pairing.
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
-struct MateKey {
-    qname_hash: u64,
-    lo: i32,
-    hi: i32,
-}
-
-impl MateKey {
-    // r[impl record_store.link_mates+2]
-    /// `None` when the record cannot be one half of a linkable pair. A record
-    /// with no qname is rejected later, where the name slab is in hand.
-    fn of(rec: &SlimRecord) -> Option<Self> {
-        let flags = rec.flags;
-        let linkable = flags.is_paired()
-            && !flags.is_unmapped()
-            && !flags.is_mate_unmapped()
-            && !flags.is_secondary()
-            && !flags.is_supplementary()
-            && rec.next_ref_id == rec.tid
-            && rec.next_pos >= 0;
-        if !linkable {
-            return None;
-        }
-        let pos = rec.pos.as_i32();
-        Some(Self {
-            qname_hash: rec.qname_hash,
-            lo: pos.min(rec.next_pos),
-            hi: pos.max(rec.next_pos),
-        })
-    }
+/// Whether a record can be one half of a linkable pair at all. A record with no
+/// qname is rejected separately, where the name slab is in hand.
+fn can_link(rec: &SlimRecord) -> bool {
+    let flags = rec.flags;
+    flags.is_paired()
+        && !flags.is_unmapped()
+        && !flags.is_mate_unmapped()
+        && !flags.is_secondary()
+        && !flags.is_supplementary()
+        && rec.next_ref_id == rec.tid
+        && rec.next_pos >= 0
 }
 
 /// The record's qname bytes, read straight from a borrowed name slab. Returns
