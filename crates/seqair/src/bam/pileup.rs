@@ -518,12 +518,15 @@ impl PileupAlignment {
     }
 
     // r[impl pileup.mate_link_cache]
+    // r[impl record_store.qname_hash.no_name]
     /// The template's identity: the seed-fixed hash of the read's qname, shared
-    /// by both mates and stable across stores and runs. See
+    /// by both mates and stable across stores and runs. `None` when the record
+    /// carries no qname (a CRAM written with `RN=false`), which is also why a
+    /// consumer must not treat a missing hash as "one big fragment". See
     /// [`qname_hash`](crate::bam::record_store::qname_hash).
     #[must_use]
-    pub fn qname_hash(&self) -> u64 {
-        self.qname_hash
+    pub fn qname_hash(&self) -> Option<u64> {
+        (self.qname_hash != 0).then_some(self.qname_hash)
     }
 
     #[must_use]
@@ -843,6 +846,7 @@ impl<U> Drop for PileupGuard<'_, U> {
 }
 
 // r[impl pileup.position_iteration]
+// r[impl interval.inclusive_ends]
 impl<U> PileupEngine<U> {
     /// Core iteration logic for [`pileups`](Self::pileups).
     ///
@@ -944,7 +948,7 @@ impl<U> PileupEngine<U> {
                         start..end
                     });
                 let mate_idx = rec.mate_idx().unwrap_or(u32::MAX);
-                let qname_hash = rec.qname_hash;
+                let qname_hash = rec.qname_hash_raw();
 
                 self.active_end_pos.push(active_end);
                 self.active.push(ActiveRecord {

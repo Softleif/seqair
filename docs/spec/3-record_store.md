@@ -102,6 +102,20 @@ r[record_store.extras.clear]
 r[record_store.extras.sort_dedup_generic]
 `sort_by_pos` and `dedup` MUST be available on `RecordStore<U>` for any `U`. Each `SlimRecord` carries an `extras_idx` field that indexes into the extras slab, so reordering or removing records does not invalidate the extras mapping. Dead extras entries from `dedup` are left in place (minor waste, same as dead slab data for names, cigar, etc.).
 
+## Load-time depth cap
+
+r[record_store.depth_cap.window]
+`DepthCap` wraps a customize value and rejects a record in `filter_raw` once
+`cap` already-kept records overlap its start position. The overlap window MUST
+use the inclusive convention of
+[`interval.end_pos_inclusive`](./0-1-pos.md#intervalend_pos_inclusive): a kept
+record occupies a slot at every position in `[pos, end_pos]`, so it is evicted
+only once the incoming record starts *past* its last covered position. The
+window MUST behave identically whether the record arrived through `push_raw`
+(where `FilterRawFields::end_pos` is `None` and the span is derived from the raw
+CIGAR) or `push_fields` (where it is supplied), so the same reads survive the
+cap in BAM, SAM, and CRAM.
+
 ## Mate linking
 
 Paired-end reads whose fragment is shorter than twice the read length cover the
@@ -118,19 +132,62 @@ mates of a template (and every supplementary copy) get the same value, and the
 value is reproducible across stores, threads, and runs. It MUST have full
 avalanche. FxHash-style hashes MUST NOT be used here — their weak avalanche on
 the structured ASCII suffix of Illumina qnames leaves the low bits
-under-discriminating, which is exactly the part consumers key maps on. Consumers
-MAY treat the hash as a fragment identifier; the SAM spec makes the qname the
-template identifier, so uniqueness of the id is uniqueness of the qname.
+under-discriminating, which is exactly the part consumers key maps on.
 
-r[record_store.link_mates]
+r[record_store.qname_hash.no_name]
+A record with no qname has no template identity: its hash MUST be `0`, and a
+non-empty qname MUST NOT hash to `0`. `SlimRecord::qname_hash()` MUST therefore
+return `Option<u64>`, `None` for such a record. This is not hypothetical — a
+CRAM written with `RN=false` does not store read names at all, and every record
+in it would otherwise share one hash and read as one enormous template.
+
+r[record_store.qname_hash.identity_is_probabilistic]
+The hash identifies a template only up to collision: two distinct qnames sharing
+a hash are indistinguishable through it. Mate *linking* does not rely on this —
+it verifies the qname bytes (r[`record_store.link_mates`]) — but a consumer
+using the hash as a fragment identifier MUST tolerate two templates being merged
+into one. At 64 bits with full avalanche and the few thousand templates that
+interact within one segment, the per-segment probability is around 1e-13.
+
+r[record_store.link_mates+2]
 `link_mates()` MUST link the mates of a template that are both present in the
 store, setting each record's mate index to the other's store index. A record is
 a candidate only when it is paired, mapped, primary (neither secondary nor
-supplementary), has a mapped mate, and `next_ref_id == tid`. Two candidates MUST
-be linked only when all of: equal `qname_hash`, equal qname bytes, and mutually
-consistent mate positions (`a.pos == b.next_pos` and `b.pos == a.next_pos`).
-Each record MUST be linked at most once, so when more than two candidates share
-a key only the first two are linked. Linking MUST be O(number of records).
+supplementary), has a mapped mate, `next_ref_id == tid`, and has a qname. Two
+candidates MUST be linked only when their qname *bytes* are equal and their mate
+positions are mutually consistent (`a.pos == b.next_pos` and
+`b.pos == a.next_pos`). Each record MUST be linked at most once. Linking MUST be
+O(number of records) in the size of the store.
+
+A hash may be used to bucket candidates, but MUST NOT be the deciding evidence:
+a collision MUST cost only a byte comparison, and MUST NOT prevent either
+colliding record from linking to its own mate. Concretely, a bucket holds every
+candidate that has not yet found a partner, and a record scans it for the first
+entry with an equal qname, no link yet, and reciprocal positions.
+
+r[record_store.link_mates.qname_uniqueness]
+Linking assumes what `[SAM1] §1.4` requires: a qname identifies one template, so
+at most two primary alignments share it. Input that violates this (a merged or
+re-headered BAM with repeated qnames) MUST NOT crash or mislink — the first free
+pair wins and further records with that qname stay unlinked — and every such
+record MUST be counted in the returned statistics, so a caller can report it.
+Note this is where linking parts company with per-column qname matching, which
+collapsed *every* record sharing a qname; a consumer relying on that behaviour
+for malformed input no longer gets it.
+
+r[record_store.link_mates.stats]
+`link_mates()` MUST return the number of pairs it linked and the number of
+records it could not link although a same-qname candidate was present
+(r[`record_store.link_mates.qname_uniqueness`]). It MUST be `#[must_use]`: the
+count is the only signal a caller gets that its input violates the uniqueness
+assumption.
+
+r[record_store.link_mates.unique_records]
+Linking assumes each record appears in the store once. A store holding the same
+record twice (the same alignment loaded from two overlapping index chunks) is
+indistinguishable from a repeated primary qname, and is reported the same way.
+Readers MUST NOT produce such a store; `dedup()` restores the invariant for
+callers that mutate one.
 
 r[record_store.mate_overlap]
 For a linked pair, `mate_overlap(idx)` MUST return the half-open reference

@@ -14,10 +14,12 @@ use super::{
     seq,
 };
 use rustc_hash::FxHashMap;
+use seqair_types::SmallVec;
 use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0};
-use std::{collections::hash_map::Entry, ops::Range};
+use std::ops::Range;
 
 // r[impl record_store.qname_hash]
+// r[impl record_store.qname_hash.identity_is_probabilistic]
 /// Seed-fixed 64-bit hash of a read name, with full avalanche.
 ///
 /// Both mates of a template carry the same qname (`[SAM1] §1.4`), so this is
@@ -39,6 +41,11 @@ pub fn qname_hash(name: &[u8]) -> u64 {
     const K1: u64 = 0x8bb8_4b93_962e_acc9;
     const K2: u64 = 0x4b33_a62e_d433_d4a3;
 
+    // r[impl record_store.qname_hash.no_name]
+    if name.is_empty() {
+        return 0;
+    }
+
     let len = u64::try_from(name.len()).unwrap_or(u64::MAX);
     let mut acc = fold_mul(K0 ^ len, K1);
 
@@ -57,7 +64,15 @@ pub fn qname_hash(name: &[u8]) -> u64 {
         acc = fold_mul(acc ^ u64::from_le_bytes(buf), K2);
     }
 
-    fold_mul(acc, K2)
+    // r[impl record_store.qname_hash.no_name]
+    // 0 is the reserved "this record has no qname" value, so a real name must
+    // never land on it. Mapping the single colliding input to 1 costs one
+    // predictable branch and doubles that value's probability, which at 2^-64
+    // is not a number anyone will ever notice.
+    match fold_mul(acc, K2) {
+        0 => 1,
+        h => h,
+    }
 }
 
 /// The 128-bit product of `a * k`, folded down to 64 bits by `XOR`ing its halves.
@@ -78,6 +93,7 @@ fn fold_mul(a: u64, k: u64) -> u64 {
 pub struct SlimRecord {
     /// 0-based leftmost aligned reference position.
     pub pos: Pos0,
+    // r[impl interval.end_pos_inclusive]
     /// Last reference position the alignment covers, 0-based and **inclusive**
     /// (`pos + ref_len - 1`).
     ///
@@ -125,10 +141,12 @@ pub struct SlimRecord {
     /// requiring the extras Vec to be reordered in lockstep.
     extras_idx: u32,
     // r[impl record_store.qname_hash]
-    /// Seed-fixed hash of the qname bytes, computed at push time. Both mates of
-    /// a template share it; see [`qname_hash`].
-    pub qname_hash: u64,
-    // r[impl record_store.link_mates]
+    /// Seed-fixed hash of the qname bytes, computed at push time; `0` for a
+    /// record with no qname. Both mates of a template share it. Read it through
+    /// [`qname_hash`](Self::qname_hash); see the free [`qname_hash`] function
+    /// for the construction.
+    qname_hash: u64,
+    // r[impl record_store.link_mates+2]
     /// Store index of this record's mate, or [`NO_MATE`] when unlinked. Only
     /// [`RecordStore::link_mates`] writes it.
     mate_idx: u32,
@@ -240,12 +258,33 @@ impl SlimRecord {
         Ok(Aux::new(bytes))
     }
 
-    // r[impl record_store.link_mates]
+    // r[impl record_store.link_mates+2]
     /// Store index of this record's mate, if [`RecordStore::link_mates`] linked
     /// it. Invalidated by `sort_by_pos`/`dedup`.
     #[must_use]
     pub fn mate_idx(&self) -> Option<u32> {
         (self.mate_idx != NO_MATE).then_some(self.mate_idx)
+    }
+
+    // r[impl record_store.qname_hash.no_name]
+    /// The template's identity: the seed-fixed hash of the qname
+    /// ([`qname_hash`]), shared by both mates. `None` when the record carries no
+    /// qname — a CRAM written with `RN=false` stores none — in which case it has
+    /// no template identity at all and never links to a mate.
+    ///
+    /// Two distinct qnames can in principle share a hash
+    /// (r[`record_store.qname_hash.identity_is_probabilistic`]); mate linking
+    /// compares the bytes and is unaffected, but a consumer using this as a
+    /// fragment id must tolerate the merge.
+    #[must_use]
+    pub fn qname_hash(&self) -> Option<u64> {
+        (self.qname_hash != 0).then_some(self.qname_hash)
+    }
+
+    /// The raw stored hash, `0` for a record with no qname. For the pileup
+    /// engine's flat-field cache, which reconstructs the `Option` at the edge.
+    pub(crate) fn qname_hash_raw(&self) -> u64 {
+        self.qname_hash
     }
 
     /// Read the per-record extra value for this record.
@@ -781,11 +820,13 @@ pub enum Sequence<'a> {
 pub struct FilterRawFields<'a> {
     /// 0-based reference position.
     pub pos: Pos0,
-    /// Exclusive end position, computed from CIGAR.
+    /// Last reference position the record covers, inclusive
+    /// (r[`interval.end_pos_inclusive`]).
     ///
     /// `Some(_)` from `push_fields` (SAM/CRAM) where the CIGAR is pre-parsed.
     /// `None` from `push_raw` (BAM) because the CIGAR hasn't been decoded yet
-    /// at this point — `filter_raw` runs before any slab work.
+    /// at this point — `filter_raw` runs before any slab work; derive the span
+    /// from [`cigar`](Self::cigar) if you need it there.
     pub end_pos: Option<Pos0>,
     /// BAM flags.
     pub flags: BamFlags,
@@ -1063,6 +1104,7 @@ impl<U> RecordStore<U> {
         self.records.sort_by_key(|r| r.pos);
     }
 
+    // r[impl record_store.link_mates.unique_records]
     /// Remove consecutive duplicate records (same position, flags, and read
     /// name). Must be called after `sort_by_pos` so duplicates are adjacent.
     ///
@@ -1100,7 +1142,9 @@ impl<U> RecordStore<U> {
         }
     }
 
-    // r[impl record_store.link_mates]
+    // r[impl record_store.link_mates+2]
+    // r[impl record_store.link_mates.qname_uniqueness]
+    // r[impl record_store.link_mates.stats]
     /// Link the mates of every template that has both of its primary mapped
     /// alignments in this store, so consumers can find a read's mate — and the
     /// reference interval the two share — without matching qnames per column.
@@ -1110,8 +1154,14 @@ impl<U> RecordStore<U> {
     /// (r[`record_store.link_mates.invalidated`]). [`Readers::pileup`] does this
     /// for you.
     ///
+    /// The returned [`MateLinkStats`] is the only signal that the input broke
+    /// the one assumption here — that a qname belongs to one template
+    /// (`[SAM1] §1.4`) — so a caller should at least log a non-zero
+    /// `ambiguous_qnames`.
+    ///
     /// [`Readers::pileup`]: crate::reader::Readers::pileup
-    pub fn link_mates(&mut self) {
+    #[must_use]
+    pub fn link_mates(&mut self) -> MateLinkStats {
         // Split the borrow: the qname verification reads the name slab while
         // the link is written into the records Vec.
         let Self { records, names, .. } = self;
@@ -1119,40 +1169,82 @@ impl<U> RecordStore<U> {
             rec.mate_idx = NO_MATE;
         }
 
-        let mut seen: FxHashMap<MateKey, u32> = FxHashMap::default();
+        // Candidates that have not found a partner yet, bucketed by key. The
+        // bucket — rather than one slot per key — is what makes a hash
+        // collision cost a byte comparison instead of a lost link: the colliding
+        // record stays in the bucket and its own mate still finds it.
+        let mut seen: FxHashMap<MateKey, SmallVec<u32, 2>> = FxHashMap::default();
         seen.reserve(records.len());
+        let mut stats = MateLinkStats::default();
 
         for idx in 0..records.len() {
             let Ok(idx_u32) = u32::try_from(idx) else { break };
             let Some(rec) = records.get(idx) else { continue };
             let Some(key) = MateKey::of(rec) else { continue };
-
-            let candidate = match seen.entry(key) {
-                Entry::Vacant(slot) => {
-                    slot.insert(idx_u32);
-                    continue;
-                }
-                // Leave the entry pointing at the first record: a third
-                // alignment with the same key must not steal the link.
-                Entry::Occupied(slot) => *slot.get(),
-            };
-
-            let Some(other) = records.get(candidate as usize) else { continue };
-            if other.mate_idx != NO_MATE
-                || rec.pos.as_i32() != other.next_pos
-                || other.pos.as_i32() != rec.next_pos
-                || qname_bytes(names, rec) != qname_bytes(names, other)
-            {
+            let qname = qname_bytes(names, rec);
+            // r[impl record_store.qname_hash.no_name]
+            if qname.is_empty() {
                 continue;
             }
+            let (pos, next_pos) = (rec.pos.as_i32(), rec.next_pos);
 
-            if let Some(this) = records.get_mut(idx) {
-                this.mate_idx = candidate;
+            let bucket = seen.entry(key).or_default();
+            let mut partner = None;
+            let mut same_qname_present = false;
+            for &candidate in bucket.iter() {
+                let Some(other) = records.get(candidate as usize) else { continue };
+                if qname_bytes(names, other) != qname {
+                    // Same key, different template: a hash collision. Keep
+                    // looking — and leave it in the bucket for its own mate.
+                    continue;
+                }
+                same_qname_present = true;
+                if other.mate_idx != NO_MATE
+                    || pos != other.next_pos
+                    || other.pos.as_i32() != next_pos
+                {
+                    continue;
+                }
+                partner = Some(candidate);
+                break;
             }
-            if let Some(other) = records.get_mut(candidate as usize) {
-                other.mate_idx = idx_u32;
+
+            match partner {
+                Some(partner) => {
+                    if let Some(this) = records.get_mut(idx) {
+                        this.mate_idx = partner;
+                    }
+                    if let Some(other) = records.get_mut(partner as usize) {
+                        other.mate_idx = idx_u32;
+                    }
+                    stats.pairs = stats.pairs.saturating_add(1);
+                }
+                None => {
+                    // r[impl record_store.link_mates.qname_uniqueness]
+                    if same_qname_present {
+                        stats.ambiguous_qnames = stats.ambiguous_qnames.saturating_add(1);
+                    }
+                    // `bucket` was invalidated by the `records` borrows above.
+                    seen.entry(key).or_default().push(idx_u32);
+                }
             }
         }
+
+        stats
+    }
+
+    #[doc(hidden)]
+    /// Test seam: overwrite a record's qname hash to stage a collision.
+    ///
+    /// A 64-bit hash with full avalanche cannot be collided by construction in
+    /// a test, but the code path that survives a collision must still be
+    /// exercised — so the hash is forced instead. Same shape as
+    /// `RegionBuf::with_budget`, which forces a tiny window for tests.
+    /// Do not call this outside tests: mate linking assumes the stored hash is
+    /// the hash of the stored qname.
+    pub fn set_qname_hash(&mut self, idx: u32, hash: u64) -> Option<()> {
+        self.records.get_mut(usize::try_from(idx).ok()?)?.qname_hash = hash;
+        Some(())
     }
 
     // r[impl record_store.mate_overlap]
@@ -1428,7 +1520,31 @@ impl<U> RecordStore<U> {
     }
 }
 
-// r[impl record_store.link_mates]
+// r[impl record_store.link_mates.stats]
+/// What one [`RecordStore::link_mates`] pass found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MateLinkStats {
+    /// Templates whose two primary alignments were both in the store.
+    pub pairs: u32,
+    /// Records that found no free partner although another record with the same
+    /// qname was already waiting — a third primary alignment for that qname, or
+    /// the same record present twice. Non-zero means the input breaks the
+    /// one-template-per-qname assumption of `[SAM1] §1.4`, and that reads which
+    /// per-column qname matching would have collapsed are now counted
+    /// separately.
+    pub ambiguous_qnames: u32,
+}
+
+impl MateLinkStats {
+    /// Whether anything about the input's qnames was surprising.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.ambiguous_qnames == 0
+    }
+}
+
+// r[impl record_store.link_mates+2]
 /// Identity of a mate pair: the template's qname hash plus the two alignment
 /// starts, ordered so both mates build the same key. Including the positions
 /// makes a hash collision between two unrelated templates harmless (they would
@@ -1442,7 +1558,9 @@ struct MateKey {
 }
 
 impl MateKey {
-    /// `None` when the record cannot be one half of a linkable pair.
+    // r[impl record_store.link_mates+2]
+    /// `None` when the record cannot be one half of a linkable pair. A record
+    /// with no qname is rejected later, where the name slab is in hand.
     fn of(rec: &SlimRecord) -> Option<Self> {
         let flags = rec.flags;
         let linkable = flags.is_paired()
