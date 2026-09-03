@@ -931,7 +931,18 @@ impl<U> PileupEngine<U> {
                         .unwrap_or(Pos0::max_value()),
                 };
                 // r[impl pileup.mate_link_cache]
-                let mate_overlap = self.store.mate_overlap(idx).unwrap_or(Pos0::ZERO..Pos0::ZERO);
+                // Widen by the overhang so a rescued soft-clip fringe base,
+                // which the engine projects up to `overhang` columns outside
+                // the alignment, still counts as being inside the pair's
+                // overlap — it is the same molecule either way. With the
+                // default overhang of 0 this is the store's interval verbatim.
+                let mate_overlap =
+                    self.store.mate_overlap(idx).map_or(Pos0::ZERO..Pos0::ZERO, |ov| {
+                        let offset = Offset::new(i64::from(overhang));
+                        let start = ov.start.checked_sub_offset(offset).unwrap_or(Pos0::ZERO);
+                        let end = ov.end.checked_add_offset(offset).unwrap_or(Pos0::max_value());
+                        start..end
+                    });
                 let mate_idx = rec.mate_idx().unwrap_or(u32::MAX);
                 let qname_hash = rec.qname_hash;
 

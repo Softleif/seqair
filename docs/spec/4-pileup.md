@@ -109,7 +109,11 @@ qname hash, and its mate-overlap interval, so that column construction reads
 flat fields only and never looks the mate up in the store. `PileupAlignment`
 MUST expose `mate_idx() -> Option<u32>` (the store index of the mate, `None`
 when unlinked), `in_mate_overlap() -> bool` (true when this column's position
-lies inside the mate-overlap interval), and `qname_hash() -> u64`.
+lies inside the mate-overlap interval), and `qname_hash() -> u64`. When the
+soft-clip overhang is enabled, the cached interval MUST be widened by the
+overhang at both ends, so a projected fringe base is reported as being inside
+the overlap: it is the same molecule as its mate's aligned base at that
+position, which is the only thing a consumer's dedup asks.
 
 r[pileup.column_record_order]
 The alignments of a column MUST be ordered by ascending `record_idx`, since the
