@@ -24,6 +24,22 @@ Mates MUST be detected by matching qnames within the same pileup column. Records
 r[dedup.mate_pairs_only]
 Only the first two records sharing a qname are treated as mates. If three or more records share the same qname (supplementary alignments, etc.), only the first pair is linked; additional records are treated as unpaired for dedup purposes.
 
+### What seqair provides
+
+Matching qnames *per column* is the expensive way to do this: every read is
+hashed or compared again at every position it covers. seqair therefore links
+mates once per store — see
+[`record_store.link_mates`](./3-record_store.md#record_storelink_mates) and
+[`pileup.mate_link_cache`](./4-pileup.md#pileupmate_link_cache) — and the
+consumer's per-column work reduces to `in_mate_overlap()` plus, for the reads
+inside an overlap, one `find_record(mate_idx)` lookup. The resolution rule and
+its ordering relative to quality filtering stay entirely with the consumer.
+
+Note the scope difference this creates against qname matching: only true mates
+link, so alignments that merely share a qname without being each other's mate
+(secondary and supplementary alignments, present only when a consumer relaxes
+its flag filter) are no longer deduplicated against their primary.
+
 ## Resolution rule
 
 When both mates are present at a position, one must be removed. Since both mates originate from the same DNA molecule, either could serve as the observation. The resolution rule must be **deterministic regardless of read iteration order** — different pileup engines (htslib, seqair) may iterate reads in different physical file orders.

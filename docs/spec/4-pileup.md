@@ -94,6 +94,36 @@ r[pileup.alignment_view]
 r[pileup.extras.recover_store]
 `Readers::pileup` MUST return a guard type (`PileupGuard<'_, E::Extra>`) that derefs to `PileupEngine<E::Extra>` and whose `Drop` impl moves the underlying `RecordStore` back into the originating `Readers`, retaining its allocated capacity for the next pileup call. Recovery MUST happen on every drop path — end of scope, `?`-propagated error mid-iteration, `break` out of the loop — so callers do not need an explicit recover step. There MUST NOT be a separate `Readers::recover_store` method on the public API; if extras-stripping is needed it happens inside the guard's drop path.
 
+## Mate links in columns
+
+The pileup engine does not deduplicate overlapping mates itself (see
+[Overlapping Pair Deduplication](./4-pileup-dedup.md) for why that has to happen
+after per-position quality filtering). What it MUST do is hand the consumer the
+mate link computed once per store by
+[`RecordStore::link_mates`](./3-record_store.md), so the consumer never has to
+hash or compare a qname per column.
+
+r[pileup.mate_link_cache]
+When a record enters the active set, the engine MUST cache its mate index, its
+qname hash, and its mate-overlap interval, so that column construction reads
+flat fields only and never looks the mate up in the store. `PileupAlignment`
+MUST expose `mate_idx() -> Option<u32>` (the store index of the mate, `None`
+when unlinked), `in_mate_overlap() -> bool` (true when this column's position
+lies inside the mate-overlap interval), and `qname_hash() -> u64`.
+
+r[pileup.column_record_order]
+The alignments of a column MUST be ordered by ascending `record_idx`, since the
+active set preserves store order and the store is position-sorted. Consumers MAY
+rely on this to look up another alignment of the same column by record index.
+
+r[pileup.column_find_record]
+`PileupColumn::find_record(record_idx)` MUST return the `AlignmentView` of that
+record in this column, or `None` when the record has no entry here. It MUST run
+in `O(log depth)` by binary search over
+[`pileup.column_record_order`](#pileupcolumn_record_order). This is how a
+consumer reaches the other mate of an overlapping pair while walking the column
+exactly once.
+
 ## Compatibility
 
 r[pileup.htslib_compat]
