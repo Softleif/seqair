@@ -134,9 +134,9 @@ a key only the first two are linked. Linking MUST be O(number of records).
 
 r[record_store.mate_overlap]
 For a linked pair, `mate_overlap(idx)` MUST return the half-open reference
-interval `[max(a.pos, b.pos), min(a.end_pos, b.end_pos))` — the positions both
-mates cover — and MUST return an empty interval when the two alignments are
-disjoint. It MUST return `None` for an unlinked record. The interval is derived
+interval `[max(a.pos, b.pos), min(a.end_pos, b.end_pos) + 1)` — the positions
+both mates cover, `end_pos` being inclusive — and MUST return an empty interval
+when the two alignments are disjoint. It MUST return `None` for an unlinked record. The interval is derived
 from the mate's record rather than stored, to keep `SlimRecord` small.
 
 r[record_store.link_mates.invalidated]

@@ -48,8 +48,9 @@ impl Read {
         Self { pos, len, mate_pos, flags: PAIRED | which, tid: 0, mate_tid: 0 }
     }
 
+    /// Last covered position: `end_pos` is inclusive.
     fn end(self) -> i32 {
-        self.pos + self.len as i32
+        self.pos + self.len as i32 - 1
     }
 
     fn with_flags(mut self, flags: u16) -> Self {
@@ -459,7 +460,12 @@ proptest! {
                 let a = store.record(idx);
                 let b = store.record(partner);
                 let start = a.pos.max(b.pos);
-                let end = a.end_pos.min(b.end_pos).max(start);
+                let last = a.end_pos.min(b.end_pos);
+                let end = if last < start {
+                    start
+                } else {
+                    Pos0::new(last.as_u64() as u32 + 1).unwrap()
+                };
                 prop_assert_eq!(store.mate_overlap(idx), Some(start..end));
                 prop_assert_eq!(store.mate_overlap(partner), Some(start..end));
             } else {
