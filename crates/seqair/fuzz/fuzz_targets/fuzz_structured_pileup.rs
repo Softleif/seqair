@@ -200,6 +200,25 @@ fuzz_target!(|input: FuzzPileupInput| {
     // Sort by position as the pileup engine requires.
     store.sort_by_pos();
 
+    // Mate linking, on arbitrary flags and mate coordinates. The invariants it
+    // must hold whatever the input: a link points at a real record, never at
+    // itself, is symmetric, and only ever joins two records that agree on the
+    // qname — the properties the pileup engine's cached overlap relies on.
+    let stats = store.link_mates();
+    let mut linked = 0u32;
+    for idx in 0..store.len() as u32 {
+        let Some(mate) = store.record(idx).mate_idx() else { continue };
+        assert!((mate as usize) < store.len(), "mate index out of range");
+        assert_ne!(mate, idx, "record linked to itself");
+        assert_eq!(store.record(mate).mate_idx(), Some(idx), "asymmetric mate link");
+        assert_eq!(store.qname(idx), store.qname(mate), "linked records disagree on qname");
+        assert!(!store.qname(idx).is_empty(), "a nameless record must never link");
+        let overlap = store.mate_overlap(idx).expect("a linked record has an overlap");
+        assert_eq!(store.mate_overlap(mate), Some(overlap), "mates disagree on their overlap");
+        linked = linked.saturating_add(1);
+    }
+    assert_eq!(linked, stats.pairs.saturating_mul(2), "stats disagree with the links");
+
     let mut engine = PileupEngine::new(store, region_start, region_end);
     engine.set_max_depth(200);
 
@@ -222,7 +241,6 @@ fuzz_target!(|input: FuzzPileupInput| {
             let _dlen = aln.del_len();
             let _mapq = aln.mapq;
             let _flags = aln.flags;
-            let _strand = aln.strand;
             let _seq_len = aln.seq_len;
             let _matching = aln.matching_bases;
             let _indels = aln.indel_bases;
