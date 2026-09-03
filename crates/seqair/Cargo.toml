@@ -25,6 +25,9 @@ libdeflater = "1.25.2"
 ryu = "1"
 seqair-types = { version = "^0.1.0", path = "../seqair-types" }
 rustc-hash = "2.1.2"
+# `HashTable`: a hash table whose equality lives outside the stored value —
+# mate linking stores record indices and compares the qnames they point into.
+hashbrown = "0.17.0"
 flate2 = "1.1.9"
 bzip2 = "0.6.1"
 xz2 = "0.1.7"

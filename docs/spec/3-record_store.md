@@ -161,9 +161,20 @@ O(number of records) in the size of the store.
 
 A hash may be used to bucket candidates, but MUST NOT be the deciding evidence:
 a collision MUST cost only a byte comparison, and MUST NOT prevent either
-colliding record from linking to its own mate. Concretely, a bucket holds every
-candidate that has not yet found a partner, and a record scans it for the first
-entry with an equal qname, no link yet, and reciprocal positions.
+colliding record from linking to its own mate. This is the ordinary contract of
+a hash table — the hash groups, equality decides — and the implementation SHOULD
+be an actual hash table rather than a hand-rolled chain. The wrinkle is that the
+key is not the stored value: entries are record indices whose equality lives in
+the name slab, so the table MUST be one that takes the hash and the comparison
+as arguments (`hashbrown::HashTable`).
+
+The hash given to that table MUST be the record's `qname_hash`
+(r[`record_store.qname_hash`]) and MUST NOT be re-hashed through a general-purpose
+hasher: `qname_hash` is chosen for this input, and a second pass adds latency
+without adding entropy. Both ends of the value matter — the low bits select the
+bucket and the top bits form the SIMD control byte — so the spread of realistic
+qnames through both is a property worth testing directly, not just avalanche
+under bit flips.
 
 r[record_store.link_mates.qname_uniqueness]
 Linking assumes what `[SAM1] §1.4` requires: a qname identifies one template, so
