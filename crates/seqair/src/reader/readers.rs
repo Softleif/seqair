@@ -479,7 +479,19 @@ impl<E: CustomizeRecordStore> Readers<E> {
         // After the fetch and before the engine: a mate index is a store index,
         // so linking has to be the last thing that touches the store (after the
         // realignment hook above re-sorted it).
-        self.store.link_mates();
+        // r[impl record_store.link_mates.stats]
+        let mate_links = self.store.link_mates();
+        if !mate_links.is_clean() {
+            // Repeated primary qnames, or the same record present twice.
+            // Neither is valid input; say so once per fetch, not per column.
+            tracing::debug!(
+                contig = %segment.contig(),
+                start = start.as_u64(),
+                pairs = mate_links.pairs,
+                ambiguous_qnames = mate_links.ambiguous_qnames,
+                "qnames are not unique here; those reads are not mate-deduplicated"
+            );
+        }
 
         let ref_seq = match supplied_ref {
             // r[impl unified.readers_pileup_supplied_reference]
