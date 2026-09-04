@@ -68,6 +68,13 @@ pub enum FastaError {
     )]
     CorruptIndexSpan { name: SmolStr, start_byte: u64, last_base_byte: u64 },
 
+    // r[impl fasta.index.terminator_bound]
+    #[error(
+        "FAI entry for sequence {name:?} (offset {offset}) yields a byte offset for position \
+         {pos} that overflows u64"
+    )]
+    IndexOffsetOverflow { name: SmolStr, offset: u64, pos: u64 },
+
     #[error("BGZF error reading FASTA")]
     Bgzf {
         #[from]
@@ -361,19 +368,30 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
         let num_bases =
             stop.checked_sub(start).expect("stop > start is guaranteed by bounds check above")
                 as usize;
-        let start_byte = entry.byte_offset(start);
-        let last_base_byte = entry.byte_offset(
-            (num_bases as u64)
-                .checked_sub(1)
-                .and_then(|n| start.checked_add(n))
-                .expect("num_bases >= 1 is guaranteed by stop > start"),
-        );
+        let last_pos = (num_bases as u64)
+            .checked_sub(1)
+            .and_then(|n| start.checked_add(n))
+            .expect("num_bases >= 1 is guaranteed by stop > start");
         // r[impl fasta.index.terminator_bound]
-        // `byte_offset` is deliberately wrapping, so a near-`u64::MAX` offset
-        // can put `end_byte` below `start_byte`. That is a corrupt index, not
-        // an internal invariant, so it is an error rather than a panic. The
-        // terminator bound enforced by the FAI parser is what keeps the span
-        // itself proportional to the bases requested.
+        // `byte_offset` uses checked arithmetic, so a near-`u64::MAX` index
+        // offset surfaces here as `None` rather than wrapping into a small,
+        // in-bounds-looking value that would make the reader silently serve
+        // unrelated bytes from elsewhere in the file.
+        let start_byte =
+            entry.byte_offset(start).ok_or_else(|| FastaError::IndexOffsetOverflow {
+                name: SmolStr::new(name),
+                offset: entry.offset,
+                pos: start,
+            })?;
+        let last_base_byte =
+            entry.byte_offset(last_pos).ok_or_else(|| FastaError::IndexOffsetOverflow {
+                name: SmolStr::new(name),
+                offset: entry.offset,
+                pos: last_pos,
+            })?;
+        // Both offsets are individually addressable (checked above), but
+        // `last_base_byte + 1` can still overflow when it lands on
+        // `u64::MAX`, so this stays a checked op rather than a bare `+ 1`.
         let span = last_base_byte
             .checked_add(1)
             .and_then(|end_byte| end_byte.checked_sub(start_byte))
