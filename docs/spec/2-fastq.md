@@ -1,6 +1,8 @@
 # FASTQ Reader
 
-The FASTQ reader provides sequential access to FASTQ files, producing unmapped records for each entry. FASTQ is the standard format for raw sequencing reads before alignment. Seqair supports FASTQ for feature parity with htslib.
+> **Status: Partially implemented — indexed reference access only.** What ships today is *coordinate queries against a line-wrapped FASTQ reference*, by reusing [`IndexedFastaReader`](./2-fasta.md) and its FAI byte-span math: `access.index_format`, `access.index_parse`, `access.indexed_seq`, `access.indexed_qual` (locate; range fetch pending), and the plain-gzip indexed-open rejection shared with the FASTA reader (see [`fasta.bgzf.plain_gzip_rejected`](./2-fasta.md)). **Not implemented — design only:** the streaming record reader (`record.*`, `multiline`, `output.*`, `access.streaming`, `errors`), paired-end (`paired.*`), CASAVA (`casava.*`), UMI (`umi`), aux tags (`output.aux`), and sequential BGZF/gzip decode as read paths (`compression.bgzf`/`gzip`/`plain`). Where a rule below uses "MUST", it specifies intended behavior, not necessarily current behavior, unless it is in the implemented list.
+
+The FASTQ reader is specified here to provide sequential access to FASTQ files, producing unmapped records for each entry. FASTQ is the standard format for raw sequencing reads before alignment. The goal is FASTQ support for feature parity with htslib; see the Status note above for what is currently implemented.
 
 FASTQ has no formal specification. The format was invented by Jim Mullikin at the Sanger Institute. The authoritative reference is Cock et al., "The Sanger FASTQ file format for sequences with quality scores" (Nucleic Acids Research, 2010). The quality encoding follows the Sanger/Phred+33 convention used by all modern Illumina instruments.
 
@@ -35,7 +37,7 @@ Some FASTQ files use multiple lines for the sequence and/or quality data (e.g., 
 r[fastq.multiline.ambiguity]
 The quality length rule is the *only* correct termination condition, because `@` and `+` are both valid quality characters (Phred 31 and 10). A quality line may therefore begin with either sigil, and a parser that finds the next record by scanning for a leading `@` MUST NOT be used. The reader MUST count bases, not sigils.
 
-> **Note:** every surveyed Rust FASTQ crate — `noodles-fastq`, `seq_io`, `needletail`, `paraseq`, `fastx` — assumes exactly four lines per record and errors on wrapped input; `helicase` accepts it and mis-parses silently, taking a `@`-prefixed quality line as the next record's header. htslib is the only implementation that gets this right.
+> **Note:** every surveyed Rust FASTQ crate — `noodles-fastq`, `seq_io`, `needletail`, `paraseq`, `fastx` — assumes exactly four lines per record and errors on wrapped input; `helicase` accepts it and mis-parses silently, taking a `@`-prefixed quality line as the next record's header. htslib is the only implementation that gets this right. **Verified 2026-09** against the versions pinned in `Cargo.toml`; `benches/fastq.rs::fastq_index_build` re-checks the `noodles-fastq` claim at runtime and prints a "revisit the module docs" note if it changes — re-verify the rest before relying on them.
 
 ## Output representation
 
@@ -131,7 +133,7 @@ There is no separate "FQI" format. Both `samtools faidx` and `samtools fqidx` wr
 name  length  seq_offset  linebases  linewidth  qual_offset
 ```
 
-`qual_offset` is the byte offset of the record's quality block. htslib tells the two forms apart by the `format` argument to `fai_load_format`, never by file name. As for FASTA, indexing requires every line of a record to be the same length except the last; htslib's indexer rejects ragged records outright.
+`qual_offset` is the byte offset of the record's quality block. htslib tells the two forms apart by the `format` argument to `fai_load_format`, never by file name. As for FASTA, indexing requires every line of a record to be the same length except the last; htslib's indexer rejects ragged records outright. The parser MUST reject a 6-column entry whose `qual_offset <= offset`: in a FASTQ record the quality block always follows the sequence block and the `+` line, so a non-increasing `qual_offset` is a corrupt index, not a legal layout.
 
 r[fastq.access.index_parse]
 The FAI parser MUST accept both the 5-column (FASTA) and the 6-column (FASTQ) form, retaining `qual_offset` when it is present, and MUST NOT reject the 6-column form as `TooManyFields`. htslib's FASTA parser reads four numeric fields with `sscanf` and silently ignores a trailing fifth; seqair MUST accept the extra column deliberately rather than by accident.
@@ -140,7 +142,7 @@ r[fastq.access.indexed_seq]
 Coordinate queries against the sequence block MUST reuse the FASTA byte-span math unchanged. The span is bounded by `length`, so the reader never walks into the `+` separator or the quality block. This makes indexed access immune to the `@`/`+`-in-quality ambiguity described under [Multi-line FASTQ](#multi-line-fastq).
 
 r[fastq.access.indexed_qual]
-Fetching quality scores for a coordinate range MUST start from `qual_offset` and reuse the `linebases`/`linewidth` geometry of the sequence block, which `samtools fqidx` also assumes the two blocks share.
+`FaiEntry::qual_byte_offset(pos)` MUST *locate* the byte offset of the quality character for `pos`: it starts from `qual_offset` and reuses the `linebases`/`linewidth` geometry of the sequence block, which `samtools fqidx` also assumes the two blocks share, and returns `None` for a FASTA (5-column) entry. Range *fetching* of qualities is a planned consumer of this primitive, not yet implemented. When it is, it MUST apply the same wraparound guard and `fasta.index.data_bound` check to the quality span that the sequence fetch applies — at fetch time, not in the parser. The parser deliberately bounds `qual_offset` only by the degenerate `qual_offset <= offset` case in [`fastq.access.index_format`](#indexed); it cannot bound a far-future quality offset, because the quality block sits at the end of the record and the index carries no length for it.
 
 ## Error handling
 
