@@ -32,6 +32,11 @@ If the quality line length differs from the sequence line length, the reader MUS
 r[fastq.multiline]
 Some FASTQ files use multiple lines for the sequence and/or quality data (e.g., wrapping at 80 characters). The reader MUST support multi-line records by concatenating sequence lines until the `+` separator is encountered, then concatenating quality lines until the quality length equals the sequence length. This matches htslib behavior.
 
+r[fastq.multiline.ambiguity]
+The quality length rule is the *only* correct termination condition, because `@` and `+` are both valid quality characters (Phred 31 and 10). A quality line may therefore begin with either sigil, and a parser that finds the next record by scanning for a leading `@` MUST NOT be used. The reader MUST count bases, not sigils.
+
+> **Note:** every surveyed Rust FASTQ crate — `noodles-fastq`, `seq_io`, `needletail`, `paraseq`, `fastx` — assumes exactly four lines per record and errors on wrapped input; `helicase` accepts it and mis-parses silently, taking a `@`-prefixed quality line as the next record's header. htslib is the only implementation that gets this right.
+
 ## Output representation
 
 r[fastq.output.record]
@@ -103,21 +108,39 @@ r[fastq.compression.bgzf]
 BGZF-compressed FASTQ files MUST be read using the existing `BgzfReader`. This reuses the proven BGZF decompression path.
 
 r[fastq.compression.gzip]
-Plain gzip-compressed FASTQ files MUST be supported by wrapping the input in a gzip decompressor (using the `BgzfReader` in compatibility mode or a separate `flate2`/`miniz_oxide` decoder). Implementation detail TBD.
+Plain gzip-compressed FASTQ files MUST be supported for streaming access by wrapping the input in a gzip decompressor (using the `BgzfReader` in compatibility mode or a separate `flate2`/`miniz_oxide` decoder). Implementation detail TBD. Plain gzip cannot support indexed access — there are no block boundaries to seek to — and the reader MUST reject an indexed open of a plain-gzip FASTQ with a diagnostic naming `bgzip`, as htslib does.
 
 r[fastq.compression.plain]
 Uncompressed FASTQ files MUST be supported without requiring any compression.
 
-## Streaming access
+## Access modes
+
+Which mode a caller needs follows from what the file holds. A read-like FASTQ — millions of short, unwrapped records — is streamed. A reference-like FASTQ — a handful of long, line-wrapped records, the thing a caller would hand to `Readers::open` next to a BAM/CRAM — is queried by coordinate, exactly like a FASTA reference.
+
+### Sequential
 
 r[fastq.access.streaming]
-The FASTQ reader provides streaming (sequential) access only. FASTQ files are not indexed — there is no random access by position or read name. The reader MUST iterate records in file order.
+The FASTQ reader MUST provide streaming (sequential) access, iterating records in file order, and MUST NOT require an index to do so.
 
-r[fastq.access.no_index]
-The FASTQ reader MUST NOT require an index file. Unlike BAM/CRAM, FASTQ is always read sequentially.
+### Indexed
 
-r[fastq.access.fqi_future]
-htslib defines an FQI (FASTQ index) format for random access into BGZF-compressed FASTQ, analogous to FAI for FASTA. FQI support MAY be added as a follow-up if random-access FASTQ queries prove useful.
+r[fastq.access.index_format]
+There is no separate "FQI" format. Both `samtools faidx` and `samtools fqidx` write a `<file>.fai` next to the FASTQ, carrying the five FASTA columns plus a sixth:
+
+```
+name  length  seq_offset  linebases  linewidth  qual_offset
+```
+
+`qual_offset` is the byte offset of the record's quality block. htslib tells the two forms apart by the `format` argument to `fai_load_format`, never by file name. As for FASTA, indexing requires every line of a record to be the same length except the last; htslib's indexer rejects ragged records outright.
+
+r[fastq.access.index_parse]
+The FAI parser MUST accept both the 5-column (FASTA) and the 6-column (FASTQ) form, retaining `qual_offset` when it is present, and MUST NOT reject the 6-column form as `TooManyFields`. htslib's FASTA parser reads four numeric fields with `sscanf` and silently ignores a trailing fifth; seqair MUST accept the extra column deliberately rather than by accident.
+
+r[fastq.access.indexed_seq]
+Coordinate queries against the sequence block MUST reuse the FASTA byte-span math unchanged. The span is bounded by `length`, so the reader never walks into the `+` separator or the quality block. This makes indexed access immune to the `@`/`+`-in-quality ambiguity described under [Multi-line FASTQ](#multi-line-fastq).
+
+r[fastq.access.indexed_qual]
+Fetching quality scores for a coordinate range MUST start from `qual_offset` and reuse the `linebases`/`linewidth` geometry of the sequence block, which `samtools fqidx` also assumes the two blocks share.
 
 ## Error handling
 

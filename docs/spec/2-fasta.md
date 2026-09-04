@@ -16,7 +16,7 @@ r[fasta.index.parse]
 The FAI parser MUST read a `.fai` file and produce an index with one entry per sequence. Each entry MUST contain: sequence name (`String`), length (number of bases, `u64`), byte offset of the first base in the file (`u64`), bases per line (`u64`), and bytes per line including line terminator (`u64`). The parser MUST NOT trim whitespace from field values — tabs are the only delimiter, and sequence names may contain spaces.
 
 r[fasta.index.fields]
-Each line MUST have exactly 5 tab-separated fields: NAME, LENGTH, OFFSET, LINEBASES, LINEWIDTH. Lines with fewer or more fields MUST produce an error identifying the malformed line. Empty lines MUST be skipped.
+Each line MUST have 5 tab-separated fields: NAME, LENGTH, OFFSET, LINEBASES, LINEWIDTH — or 6, where the sixth is the FASTQ `qual_offset` (see [`fastq.access.index_parse`](./2-fastq.md)). Lines with fewer than 5 or more than 6 fields MUST produce an error identifying the malformed line. Empty lines MUST be skipped.
 
 r[fasta.index.validation]
 The parser MUST reject entries where `linewidth < linebases` (line terminator would be negative), `linebases == 0` (would cause division by zero in offset calculations), or `length == 0` (empty sequences are not useful for region queries). Note: `linewidth == linebases` is valid — it means lines have no trailing newline character, which occurs when a sequence is stored on a single line without a mid-sequence newline.

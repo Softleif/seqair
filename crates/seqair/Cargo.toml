@@ -54,9 +54,12 @@ noodles = { version = "0.110.0", features = [
     "core",
     "cram",
     "fasta",
+    "fastq",
     "sam",
     "vcf",
 ] }
+needletail = { version = "0.6", default-features = false, features = ["flate2"] }
+seq_io = "0.3"
 noodles-bgzf = { version = "0.47.0", features = ["libdeflate"] }
 noodles-util = { version = "0.79.0", features = ["alignment"] }
 cstr8 = "0.1.4"
@@ -69,6 +72,10 @@ harness = false
 
 [[bench]]
 name = "fasta"
+harness = false
+
+[[bench]]
+name = "fastq"
 harness = false
 
 [[bench]]

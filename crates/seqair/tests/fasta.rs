@@ -67,6 +67,7 @@ proptest! {
             offset: 0,
             linebases,
             linewidth,
+            qual_offset: None,
         };
 
         for pos in 0..n_bases {
