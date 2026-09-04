@@ -52,7 +52,7 @@ impl RmsAccumulator {
     /// Adds a value to the accumulator.
     #[inline]
     pub fn add(&mut self, x: f64) {
-        self.add_squared(x * x);
+        self.add_squared(x.algebraic_mul(x));
     }
 
     /// Adds a pre-computed squared value to the accumulator.
@@ -60,7 +60,7 @@ impl RmsAccumulator {
     /// Use this when the square of `x` is already available to avoid redundant multiplication.
     #[inline]
     pub fn add_squared(&mut self, x_sq: f64) {
-        self.sum_of_squares += x_sq;
+        self.sum_of_squares = self.sum_of_squares.algebraic_add(x_sq);
         self.count = self.count.saturating_add(1);
     }
 
@@ -69,7 +69,7 @@ impl RmsAccumulator {
         if self.count == 0 {
             return RootMeanSquare(0.0);
         }
-        let average = self.sum_of_squares / f64::from(self.count);
+        let average = self.sum_of_squares.algebraic_div(f64::from(self.count));
         RootMeanSquare(average.sqrt())
     }
 }

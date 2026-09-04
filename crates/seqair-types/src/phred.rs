@@ -59,7 +59,7 @@ impl Phred {
 
 impl From<Probability> for Phred {
     fn from(probability: Probability) -> Self {
-        let phred = -10.0 * probability.log10();
+        let phred = (-10.0_f64).algebraic_mul(probability.log10());
         Self(phred)
     }
 }
