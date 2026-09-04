@@ -235,6 +235,81 @@ proptest! {
     }
 }
 
+// r[verify fasta.plain.positional_read]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// The plain-FASTA fetch is a positional read, so one reader must answer an
+    /// arbitrarily ordered stream of overlapping requests without any of them
+    /// perturbing the next. Each is checked against the generated bases, and the
+    /// last request is repeated at the end so a drifting file position would
+    /// show up as a disagreement with its own earlier answer.
+    #[test]
+    fn out_of_order_fetches_on_one_reader_are_independent(
+        (bases, linebases) in fasta_sequence_strategy(),
+        raw_ranges in prop::collection::vec((0.0f64..1.0, 0.0f64..1.0), 2..12),
+    ) {
+        let seq_len = bases.len() as u64;
+        let dir = TempDir::new().unwrap();
+        let fasta_path = dir.path().join("plain.fa");
+        let linewidth = linebases + 1;
+
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">seq1").unwrap();
+        for chunk in bases.chunks(linebases as usize) {
+            f.write_all(chunk).unwrap();
+            f.write_all(b"\n").unwrap();
+        }
+        drop(f);
+        let mut fai = std::fs::File::create(dir.path().join("plain.fa.fai")).unwrap();
+        writeln!(fai, "seq1\t{}\t6\t{}\t{}", seq_len, linebases, linewidth).unwrap();
+        drop(fai);
+
+        // Map the generated fractions onto in-bounds, non-empty ranges.
+        let ranges: Vec<(u64, u64)> = raw_ranges
+            .iter()
+            .map(|(a, b)| {
+                let x = ((a * seq_len as f64) as u64).min(seq_len - 1);
+                let y = ((b * seq_len as f64) as u64).min(seq_len - 1);
+                let (lo, hi) = if x <= y { (x, y) } else { (y, x) };
+                (lo, hi + 1)
+            })
+            .collect();
+
+        let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
+        let fetch = |reader: &mut IndexedFastaReader, start: u64, stop: u64| {
+            reader
+                .fetch_seq(
+                    "seq1",
+                    Pos0::try_from(start).unwrap(),
+                    Pos0::try_from(stop).unwrap(),
+                )
+                .unwrap()
+        };
+
+        let mut first_answer = None;
+        for (i, &(start, stop)) in ranges.iter().enumerate() {
+            let got = fetch(&mut reader, start, stop);
+            let mut expected = bases[start as usize..stop as usize].to_vec();
+            expected.make_ascii_uppercase();
+            prop_assert_eq!(&got, &expected, "request {} [{}, {})", i, start, stop);
+            if i == 0 {
+                first_answer = Some(got);
+            }
+        }
+
+        // Re-issue the first request last: every intervening read must have
+        // left the reader able to answer it identically.
+        let (start, stop) = ranges[0];
+        prop_assert_eq!(
+            fetch(&mut reader, start, stop),
+            first_answer.unwrap(),
+            "repeating the first request after {} others changed its answer",
+            ranges.len() - 1
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bgzip FASTA: random positions compared to htslib
 // ---------------------------------------------------------------------------

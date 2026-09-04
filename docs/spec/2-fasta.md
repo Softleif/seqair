@@ -69,7 +69,10 @@ r[fasta.fetch.buffer_reuse]
 ## Plain FASTA reading
 
 r[fasta.plain.read]
-For uncompressed FASTA files, the reader MUST seek to the computed byte offset and read the required byte range in a single I/O operation, then strip newlines and uppercase the result.
+For uncompressed FASTA files, the reader MUST read the required byte range at the computed byte offset in a single I/O operation, then strip newlines and uppercase the result.
+
+r[fasta.plain.positional_read]
+That read MUST be positional — one `pread`, not `lseek` followed by `read` — where the platform provides it. A fetch's fixed cost is dominated by its syscalls, not by copying: measured on macOS/arm64, `lseek` + `read` of a 510-byte span costs ~505 ns against ~287 ns for the equivalent `pread`. The pileup takes one short reference slice per segment, so this is the cost that scales with the number of segments. A positional read also leaves no stream cursor to keep consistent, which is why the plain handle need not be seekable.
 
 r[fasta.plain.read_size]
 The raw read size MUST account for embedded newlines. For a fetch of `n` bases starting at position `pos`, the number of raw bytes to read is: `end_byte_offset - start_byte_offset` where both offsets are computed via `fasta.index.offset_calculation`.

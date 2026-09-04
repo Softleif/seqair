@@ -10,7 +10,7 @@ use crate::bam::bgzf::{BgzfError, BgzfReader};
 use seqair_types::{Pos0, SmolStr};
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -81,7 +81,11 @@ struct FastaShared {
 }
 
 enum FileHandle<R: Read + Seek> {
-    Plain(R),
+    /// Plain FASTA is always a real file on disk — the in-memory constructor
+    /// only ever builds [`FileHandle::Bgzf`] — so this variant is concrete.
+    /// That lets the fetch path issue a positional read instead of moving a
+    /// stream cursor it would otherwise have to own.
+    Plain(File),
     Bgzf(BgzfReader<R>),
 }
 
@@ -332,13 +336,12 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
 
         match &mut self.handle {
             FileHandle::Plain(file) => {
-                file.seek(SeekFrom::Start(start_byte)).map_err(|source| FastaError::Read {
-                    path: self.shared.fasta_path.clone(),
-                    source,
-                })?;
-                file.read_exact(&mut self.raw_buf).map_err(|source| FastaError::Read {
-                    path: self.shared.fasta_path.clone(),
-                    source,
+                // One `pread` rather than `lseek` + `read`. The span is short
+                // and the syscalls are the bulk of a fetch's fixed cost — the
+                // pileup takes one reference slice per segment, so halving that
+                // cost is worth more here than any bulk-copy tuning.
+                read_exact_at(file, &mut self.raw_buf, start_byte).map_err(|source| {
+                    FastaError::Read { path: self.shared.fasta_path.clone(), source }
                 })?;
             }
             FileHandle::Bgzf(bgzf) => {
@@ -369,6 +372,36 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
 
         Ok(())
     }
+}
+
+// r[impl fasta.plain.positional_read]
+/// Read exactly `buf.len()` bytes starting at `offset`, in one syscall where
+/// the platform offers one, without disturbing the file's stream cursor.
+#[cfg(unix)]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+}
+
+// r[impl fasta.plain.positional_read]
+/// Windows has no `pread`; `seek_read` is positional but may come up short, so
+/// it is driven to completion here.
+#[cfg(windows)]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let mut done = 0usize;
+    while let Some(rest) = buf.get_mut(done..).filter(|r| !r.is_empty()) {
+        let at = u64::try_from(done)
+            .ok()
+            .and_then(|d| offset.checked_add(d))
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "read offset overflowed u64"))?;
+        match std::os::windows::fs::FileExt::seek_read(file, rest, at) {
+            Ok(0) => return Err(ErrorKind::UnexpectedEof.into()),
+            Ok(n) => done = done.saturating_add(n),
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 // r[impl fasta.index.location]
