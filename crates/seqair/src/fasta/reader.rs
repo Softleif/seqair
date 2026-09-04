@@ -48,6 +48,18 @@ pub enum FastaError {
     #[error("I/O error reading FASTA {path}")]
     Read { path: PathBuf, source: std::io::Error },
 
+    #[error(
+        "FAI entry for sequence {name:?} points past the end of the data: needs bytes \
+         {start_byte}..{end_byte} but the file holds at most {data_len}"
+    )]
+    SpanBeyondData { name: SmolStr, start_byte: u64, end_byte: u64, data_len: u64 },
+
+    #[error(
+        "FAI entry for sequence {name:?} yields a byte span that is not addressable \
+         (first base at {start_byte}, last at {last_base_byte})"
+    )]
+    CorruptIndexSpan { name: SmolStr, start_byte: u64, last_base_byte: u64 },
+
     #[error("BGZF error reading FASTA")]
     Bgzf {
         #[from]
@@ -78,6 +90,13 @@ struct FastaShared {
     gzi: Option<GziIndex>,
     fasta_path: PathBuf,
     is_bgzf: bool,
+    // r[impl fasta.index.data_bound]
+    /// Upper bound on the addressable bytes of sequence data: the file length
+    /// for plain FASTA, a GZI-derived bound for BGZF. A `.fai` is free to claim
+    /// any `length` it likes for a ten-byte file, and the fetch buffer is sized
+    /// from the index before anything is read, so the read is bounded by what
+    /// can actually exist rather than by what the index asserts.
+    data_len: u64,
 }
 
 enum FileHandle<R: Read + Seek> {
@@ -162,17 +181,35 @@ impl IndexedFastaReader<File> {
             None
         };
 
-        let handle = if is_bgzf {
-            FileHandle::Bgzf(BgzfReader::open(path)?)
+        // r[impl fasta.index.data_bound]
+        let (handle, data_len) = if is_bgzf {
+            let compressed_len = std::fs::metadata(path)
+                .map_err(|source| FastaError::Read { path: path.to_path_buf(), source })?
+                .len();
+            let bound = gzi
+                .as_ref()
+                .map_or(0, GziIndex::max_uncompressed_size)
+                .min(max_bgzf_expansion(compressed_len));
+            (FileHandle::Bgzf(BgzfReader::open(path)?), bound)
         } else {
             let file = File::open(path)
                 .map_err(|source| FastaError::Read { path: path.to_path_buf(), source })?;
-            FileHandle::Plain(file)
+            let len = file
+                .metadata()
+                .map_err(|source| FastaError::Read { path: path.to_path_buf(), source })?
+                .len();
+            (FileHandle::Plain(file), len)
         };
 
         Ok(IndexedFastaReader {
             handle,
-            shared: Arc::new(FastaShared { index, gzi, fasta_path: path.to_path_buf(), is_bgzf }),
+            shared: Arc::new(FastaShared {
+                index,
+                gzi,
+                fasta_path: path.to_path_buf(),
+                is_bgzf,
+                data_len,
+            }),
             raw_buf: Vec::with_capacity(64 * 1024),
         })
     }
@@ -208,7 +245,9 @@ impl IndexedFastaReader<Cursor<Vec<u8>>> {
     ) -> Result<Self, FastaError> {
         let index = FastaIndex::from_contents(fai_contents)?;
         let gzi = GziIndex::from_bytes(gzi_data)?;
+        let compressed_len = fasta_gz_data.len() as u64;
         let bgzf = BgzfReader::from_cursor(fasta_gz_data);
+        let data_len = gzi.max_uncompressed_size().min(max_bgzf_expansion(compressed_len));
         Ok(IndexedFastaReader {
             handle: FileHandle::Bgzf(bgzf),
             shared: Arc::new(FastaShared {
@@ -216,6 +255,7 @@ impl IndexedFastaReader<Cursor<Vec<u8>>> {
                 gzi: Some(gzi),
                 fasta_path: PathBuf::from("<fuzz>"),
                 is_bgzf: true,
+                data_len,
             }),
             raw_buf: Vec::with_capacity(64 * 1024),
         })
@@ -315,17 +355,39 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
                 .and_then(|n| start.checked_add(n))
                 .expect("num_bases >= 1 is guaranteed by stop > start"),
         );
-        let end_byte = last_base_byte
+        // r[impl fasta.index.terminator_bound]
+        // `byte_offset` is deliberately wrapping, so a near-`u64::MAX` offset
+        // can put `end_byte` below `start_byte`. That is a corrupt index, not
+        // an internal invariant, so it is an error rather than a panic. The
+        // terminator bound enforced by the FAI parser is what keeps the span
+        // itself proportional to the bases requested.
+        let span = last_base_byte
             .checked_add(1)
-            .expect("byte_offset is within the file, so adding 1 cannot overflow u64");
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "raw_len is bounded by the FASTA region size which fits in usize on supported platforms"
-        )]
-        let raw_len = end_byte
-            .checked_sub(start_byte)
-            .expect("end_byte >= start_byte for any valid FAI entry")
-            as usize;
+            .and_then(|end_byte| end_byte.checked_sub(start_byte))
+            .ok_or_else(|| FastaError::CorruptIndexSpan {
+                name: SmolStr::new(name),
+                start_byte,
+                last_base_byte,
+            })?;
+        let raw_len = usize::try_from(span).map_err(|_| FastaError::CorruptIndexSpan {
+            name: SmolStr::new(name),
+            start_byte,
+            last_base_byte,
+        })?;
+
+        // r[impl fasta.index.data_bound]
+        // Checked before the buffer is sized, not after the read fails: the
+        // allocation is the expensive part, and an index is free to claim a
+        // `length` the file cannot back.
+        let end_byte = start_byte.saturating_add(span);
+        if end_byte > self.shared.data_len {
+            return Err(FastaError::SpanBeyondData {
+                name: SmolStr::new(name),
+                start_byte,
+                end_byte,
+                data_len: self.shared.data_len,
+            });
+        }
 
         // r[impl fasta.plain.read]
         // r[impl fasta.plain.read_size]
@@ -372,6 +434,22 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
 
         Ok(())
     }
+}
+
+// r[impl fasta.index.data_bound]
+/// Largest uncompressed size `compressed_len` bytes of BGZF can expand to.
+///
+/// The GZI is untrusted like everything else, so its offsets alone are not a
+/// bound — a forged index can claim any size. A BGZF block is at least 28 bytes
+/// on the wire (the size of an empty one) and holds at most 64 KiB, which caps
+/// the expansion regardless of what any index says.
+fn max_bgzf_expansion(compressed_len: u64) -> u64 {
+    const MAX_BLOCK: u64 = 1 << 16;
+    const MIN_BLOCK_ON_DISK: u64 = 28;
+    compressed_len
+        .saturating_div(MIN_BLOCK_ON_DISK)
+        .saturating_add(1)
+        .saturating_mul(MAX_BLOCK)
 }
 
 // r[impl fasta.plain.positional_read]

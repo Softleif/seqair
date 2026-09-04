@@ -39,6 +39,12 @@ pub enum FaiEntryError {
     #[error("linewidth ({linewidth}) < linebases ({linebases}) for sequence {name:?}")]
     LinewidthTooSmall { name: SmolStr, linebases: u64, linewidth: u64 },
 
+    #[error(
+        "line terminator is {terminator} bytes (linewidth {linewidth} - linebases {linebases}) \
+         for sequence {name:?}; at most 2 (CRLF) is possible"
+    )]
+    LineTerminatorTooLong { name: SmolStr, linebases: u64, linewidth: u64, terminator: u64 },
+
     #[error("sequence length is 0 for sequence {name:?}")]
     ZeroLength { name: SmolStr },
 
@@ -169,6 +175,26 @@ impl FastaIndex {
                     path: path.to_path_buf(),
                     line_number: line_num.wrapping_add(1),
                     kind: FaiEntryError::LinewidthTooSmall { name, linebases, linewidth },
+                });
+            }
+            // r[impl fasta.index.terminator_bound]
+            // Without this, `linewidth` is an unbounded multiplier on every
+            // byte offset: a fetch spans `bases * linewidth / linebases` bytes
+            // and is allocated before a single byte is read, so an index
+            // claiming a huge line width turns a small query into a huge
+            // allocation. A real line terminator is LF or CRLF, and 0 means
+            // "one line, no trailing newline" — nothing else is producible.
+            let terminator = linewidth.saturating_sub(linebases);
+            if terminator > 2 {
+                return Err(FaiError::InvalidEntry {
+                    path: path.to_path_buf(),
+                    line_number: line_num.wrapping_add(1),
+                    kind: FaiEntryError::LineTerminatorTooLong {
+                        name,
+                        linebases,
+                        linewidth,
+                        terminator,
+                    },
                 });
             }
             if length == 0 {
@@ -314,6 +340,41 @@ mod tests {
         assert_eq!(e.byte_offset(50), 6 + 51);
         // Quality geometry mirrors it from `qual_offset`.
         assert_eq!(e.qual_byte_offset(50), Some(120 + 51));
+    }
+
+    // r[verify fasta.index.terminator_bound]
+    #[test]
+    fn reject_absurd_line_terminator() {
+        // linebases = 1, linewidth = 2^40. Accepted, this makes `linewidth` an
+        // unbounded multiplier on every byte offset: a 100 kb fetch would size
+        // its read buffer at ~97.7 PiB and abort the process on allocation.
+        let contents = "evil\t1000000\t0\t1\t1099511627776\n";
+        let err = FastaIndex::parse(contents, &test_path()).unwrap_err();
+        match err {
+            FaiError::InvalidEntry {
+                kind: FaiEntryError::LineTerminatorTooLong { terminator, .. },
+                ..
+            } => assert_eq!(terminator, 1_099_511_627_775),
+            other => panic!("expected LineTerminatorTooLong, got {other:?}"),
+        }
+    }
+
+    // r[verify fasta.index.terminator_bound]
+    #[test]
+    fn accept_every_real_line_terminator() {
+        // 0 = single line, no trailing newline; 1 = LF; 2 = CRLF.
+        for terminator in 0..=2u64 {
+            let contents = format!("s\t100\t6\t50\t{}\n", 50 + terminator);
+            let idx = FastaIndex::parse(&contents, &test_path())
+                .unwrap_or_else(|e| panic!("terminator {terminator} must be accepted: {e:?}"));
+            assert_eq!(idx.get("s").unwrap().linewidth, 50 + terminator);
+        }
+        // 3 is not producible by any writer.
+        let err = FastaIndex::parse("s\t100\t6\t50\t53\n", &test_path()).unwrap_err();
+        assert!(matches!(
+            err,
+            FaiError::InvalidEntry { kind: FaiEntryError::LineTerminatorTooLong { .. }, .. }
+        ));
     }
 
     // r[verify fasta.index.fields]

@@ -27,6 +27,51 @@
 //!
 //! **The layer underneath** — raw BGZF/gzip decompression throughput, which
 //! turns out to dominate every compressed measurement above.
+//!
+//! # Fairness
+//!
+//! What each contender is and is not charged for, since the numbers are only
+//! worth anything if that is explicit.
+//!
+//! * **Buffering is matched.** `seq_io` and `needletail` each own a 64 KiB
+//!   `buffer_redux` reader, so they are handed the raw source — wrapping them
+//!   in a `BufReader` would stack a second buffer in front and charge them an
+//!   extra copy of every byte. `noodles` takes `BufRead` by construction, so it
+//!   gets a `BufReader` at that same 64 KiB.
+//! * **seqair is charged for work the others skip.** `fetch_seq*` uppercases
+//!   per `r[fasta.fetch.uppercase]`; htslib and noodles return the soft-mask
+//!   case verbatim. The comparison is therefore against seqair, not for it.
+//! * **Allocation is shown both ways.** `seqair_fetch_into` reuses a caller
+//!   buffer, which neither of the others offers; `seqair_fetch_seq` allocates
+//!   per call like they do, and both are reported.
+//! * **Query construction counts only where it is real.** `noodles::query`
+//!   needs an allocated `Region`; seqair and htslib take `&str`. Where the
+//!   region is loop-invariant it is hoisted out of the timed section; in
+//!   `fastq_pileup_walk`, where it changes every step, it is not.
+//! * **The gap to htslib is structural, not binding overhead.**
+//!   `rust_htslib`'s `fetch_seq` adopts htslib's `malloc`'d buffer rather than
+//!   copying it, so the binding adds one `CString` per call and little else.
+//!   The difference is in `fai_retrieve`, which issues one `bgzf_read` *per
+//!   line* of the requested span and goes through the BGZF layer even for a
+//!   plain file; seqair issues a single `pread` over the whole span and strips
+//!   newlines in one pass. Expect the gap to widen as `linebases` shrinks.
+//! * **noodles decodes eagerly**, copying name/sequence/quality into an owned
+//!   record, where `seq_io` and `needletail` hand out borrowed slices. That is
+//!   a design difference rather than an inefficiency, which is why
+//!   `fastq_sequential_full` touches every field of every record.
+//! * **`noodles_bgzf_mt` pays thread startup inside each iteration**, because
+//!   the reader consumes the file and cannot be hoisted. On a ~70 MB input that
+//!   is a real part of the cost, but it is not a steady-state number.
+//! * **Everything runs warm.** Criterion re-reads the same files thousands of
+//!   times, so the page cache is hot for every contender. These measure CPU and
+//!   syscall cost, not cold-start I/O.
+//! * **Inputs avoid the uniform-random trap.** See `data::reads_fastq` — reads
+//!   are sampled from a synthetic genome with realistic error and 4-bin
+//!   Illumina quality, giving a ~4.3x gzip ratio rather than the ~2x that
+//!   uniform-random data yields and that would distort every compressed
+//!   measurement. `fastq_indexed_fetch_real` runs against chr19 re-emitted as
+//!   FASTQ, with its real base composition, soft-masking and centromeric `N`
+//!   runs.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "benches")]
 #![allow(clippy::cast_possible_truncation, reason = "benches")]
 #![allow(clippy::arithmetic_side_effects, reason = "benches")]
@@ -114,10 +159,14 @@ fn fastq_indexed_fetch(c: &mut Criterion) {
             });
         }
 
+        // The region is constant across iterations here, so building it is
+        // hoisted out of the timed loop: `Region::new` allocates, and neither
+        // seqair nor htslib constructs a query object at all. (In
+        // `fastq_pileup_walk` the region changes every step, so there building
+        // it is genuinely part of the work and stays inside.)
+        let query_region = region(CTG, START, end);
         group.bench_with_input(BenchmarkId::new("noodles_fasta_on_fastq", size), &size, |b, _| {
-            b.iter(|| {
-                black_box(noodles_reader.query(&region(CTG, START, end)).unwrap().sequence().len())
-            });
+            b.iter(|| black_box(noodles_reader.query(&query_region).unwrap().sequence().len()));
         });
     }
 
@@ -312,6 +361,19 @@ fn count_needletail(path: &Path) -> usize {
     n
 }
 
+/// `needletail` fed the same already-decompressed stream the others get, so the
+/// compressed groups compare parsers rather than each crate's plumbing. Its own
+/// `parse_fastx_file` re-sniffs the magic bytes and stacks two `Chain` adapters
+/// in front of the decoder, which is measured separately.
+fn count_needletail_reader<R: std::io::Read + Send>(inner: R) -> usize {
+    let mut reader = needletail::parse_fastx_reader(inner).unwrap();
+    let mut n = 0;
+    while let Some(rec) = reader.next() {
+        n += rec.unwrap().seq().len();
+    }
+    n
+}
+
 fn count_needletail_full(path: &Path) -> usize {
     let mut reader = needletail::parse_fastx_file(path).unwrap();
     let mut n = 0;
@@ -322,12 +384,26 @@ fn count_needletail_full(path: &Path) -> usize {
     n
 }
 
+/// `noodles` requires `BufRead`, so it gets a 64 KiB `BufReader` — the same
+/// capacity `seq_io` and `needletail` use for the buffers they own.
 fn open_plain(path: &Path) -> BufReader<File> {
     BufReader::with_capacity(1 << 16, File::open(path).unwrap())
 }
 
 fn open_gz(path: &Path) -> BufReader<flate2::read::MultiGzDecoder<File>> {
     BufReader::with_capacity(1 << 16, flate2::read::MultiGzDecoder::new(File::open(path).unwrap()))
+}
+
+/// `seq_io` and `needletail` take `Read` and wrap it in their *own* 64 KiB
+/// `buffer_redux` reader. Handing them a `BufReader` would stack a second
+/// buffer in front of that and charge them an extra copy of every byte, so
+/// they get the raw source.
+fn open_raw(path: &Path) -> File {
+    File::open(path).unwrap()
+}
+
+fn open_gz_raw(path: &Path) -> flate2::read::MultiGzDecoder<File> {
+    flate2::read::MultiGzDecoder::new(File::open(path).unwrap())
 }
 
 fn fastq_sequential(c: &mut Criterion) {
@@ -357,9 +433,9 @@ fn fastq_sequential(c: &mut Criterion) {
         group.bench_function("seq_io", |b| {
             b.iter(|| {
                 black_box(if compressed {
-                    count_seq_io(open_gz(path))
+                    count_seq_io(open_gz_raw(path))
                 } else {
-                    count_seq_io(open_plain(path))
+                    count_seq_io(open_raw(path))
                 })
             });
         });
@@ -367,15 +443,29 @@ fn fastq_sequential(c: &mut Criterion) {
         group.bench_function("seq_io_recordset", |b| {
             b.iter(|| {
                 black_box(if compressed {
-                    count_seq_io_recordset(open_gz(path))
+                    count_seq_io_recordset(open_gz_raw(path))
                 } else {
-                    count_seq_io_recordset(open_plain(path))
+                    count_seq_io_recordset(open_raw(path))
                 })
             });
         });
 
-        // needletail sniffs compression itself from the file's magic bytes.
-        group.bench_function("needletail", |b| b.iter(|| black_box(count_needletail(path))));
+        group.bench_function("needletail", |b| {
+            b.iter(|| {
+                black_box(if compressed {
+                    count_needletail_reader(open_gz_raw(path))
+                } else {
+                    count_needletail_reader(open_raw(path))
+                })
+            });
+        });
+
+        // needletail's convenience entry point, which opens the path and sniffs
+        // the compression itself. Reported separately because it is measuring
+        // that plumbing, not the parser the row above isolates.
+        group.bench_function("needletail_parse_fastx_file", |b| {
+            b.iter(|| black_box(count_needletail(path)));
+        });
 
         group.finish();
     }
@@ -395,7 +485,7 @@ fn fastq_sequential_full(c: &mut Criterion) {
         b.iter(|| black_box(count_noodles_full(open_plain(&plain))));
     });
     group.bench_function("seq_io", |b| {
-        b.iter(|| black_box(count_seq_io_full(open_plain(&plain))));
+        b.iter(|| black_box(count_seq_io_full(open_raw(&plain))));
     });
     group.bench_function("needletail", |b| {
         b.iter(|| black_box(count_needletail_full(&plain)));
@@ -429,6 +519,26 @@ fn fastq_decompress(c: &mut Criterion) {
                 if k == 0 {
                     break;
                 }
+                n += k;
+            }
+            black_box(n)
+        });
+    });
+
+    // `flate2_gzip` reads the decoder directly; the parsers all put a buffer in
+    // front of it. Both shapes are measured so the parse groups have a control
+    // that matches how they actually consume the stream.
+    group.bench_function("flate2_gzip_bufread", |b| {
+        b.iter(|| {
+            use std::io::BufRead as _;
+            let mut r = open_gz(&gz);
+            let mut n = 0usize;
+            loop {
+                let k = r.fill_buf().unwrap().len();
+                if k == 0 {
+                    break;
+                }
+                r.consume(k);
                 n += k;
             }
             black_box(n)
@@ -500,19 +610,27 @@ fn fastq_decompress(c: &mut Criterion) {
         });
     });
 
+    // Spawning the worker pool is done in the (untimed) setup step: creating a
+    // reader per iteration would measure thread startup on a ~17 MB input
+    // rather than steady-state throughput, and the pool cannot be reused
+    // because the reader owns the file.
     group.bench_function("noodles_bgzf_mt", |b| {
-        b.iter(|| {
-            let mut r = noodles_bgzf::io::MultithreadedReader::new(File::open(&bgz).unwrap());
-            let mut n = 0usize;
-            loop {
-                let k = r.read(&mut sink).unwrap();
-                if k == 0 {
-                    break;
+        b.iter_batched(
+            || noodles_bgzf::io::MultithreadedReader::new(File::open(&bgz).unwrap()),
+            |mut r| {
+                let mut local = vec![0u8; 1 << 16];
+                let mut n = 0usize;
+                loop {
+                    let k = r.read(&mut local).unwrap();
+                    if k == 0 {
+                        break;
+                    }
+                    n += k;
                 }
-                n += k;
-            }
-            black_box(n)
-        });
+                black_box(n)
+            },
+            criterion::BatchSize::PerIteration,
+        );
     });
 
     group.finish();

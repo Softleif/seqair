@@ -235,6 +235,66 @@ proptest! {
     }
 }
 
+// r[verify fasta.index.terminator_bound]
+/// A near-`u64::MAX` offset makes `byte_offset` wrap, putting the end of the
+/// requested span below its start. That is a corrupt index, so it must be a
+/// typed error — not the panic the arithmetic would otherwise produce.
+#[test]
+fn wrapped_byte_span_is_an_error_not_a_panic() {
+    let dir = TempDir::new().unwrap();
+    let fasta_path = dir.path().join("wrap.fa");
+    let mut f = std::fs::File::create(&fasta_path).unwrap();
+    writeln!(f, ">seq1").unwrap();
+    writeln!(f, "ACGTACGTAC").unwrap();
+    drop(f);
+
+    // Line geometry is legal; only `offset` is hostile.
+    let mut fai = std::fs::File::create(dir.path().join("wrap.fa.fai")).unwrap();
+    writeln!(fai, "seq1\t1000\t{}\t50\t51", u64::MAX - 10).unwrap();
+    drop(fai);
+
+    let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
+    let err = reader
+        .fetch_seq("seq1", Pos0::new(0).unwrap(), Pos0::new(100).unwrap())
+        .expect_err("a wrapped span must not be served");
+    assert!(
+        matches!(err, seqair::fasta::FastaError::CorruptIndexSpan { .. }),
+        "expected CorruptIndexSpan, got {err:?}"
+    );
+}
+
+// r[verify fasta.index.terminator_bound]
+/// The bound that keeps a fetch's allocation proportional to the bases asked
+/// for. Without it this index would size a read buffer at ~97.7 PiB and abort
+/// the process before touching the file.
+#[test]
+fn absurd_line_width_is_rejected_at_open() {
+    let dir = TempDir::new().unwrap();
+    let fasta_path = dir.path().join("evil.fa");
+    let mut f = std::fs::File::create(&fasta_path).unwrap();
+    writeln!(f, ">evil").unwrap();
+    writeln!(f, "ACGT").unwrap();
+    drop(f);
+
+    let mut fai = std::fs::File::create(dir.path().join("evil.fa.fai")).unwrap();
+    writeln!(fai, "evil\t1000000\t0\t1\t1099511627776").unwrap();
+    drop(fai);
+
+    let err = IndexedFastaReader::open(&fasta_path).expect_err("hostile index must be rejected");
+    assert!(
+        matches!(
+            err,
+            seqair::fasta::FastaError::Fai {
+                source: seqair::fasta::FaiError::InvalidEntry {
+                    kind: seqair::fasta::FaiEntryError::LineTerminatorTooLong { .. },
+                    ..
+                }
+            }
+        ),
+        "expected LineTerminatorTooLong, got {err:?}"
+    );
+}
+
 // r[verify fasta.plain.positional_read]
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]

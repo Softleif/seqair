@@ -21,6 +21,14 @@ Each line MUST have 5 tab-separated fields: NAME, LENGTH, OFFSET, LINEBASES, LIN
 r[fasta.index.validation]
 The parser MUST reject entries where `linewidth < linebases` (line terminator would be negative), `linebases == 0` (would cause division by zero in offset calculations), or `length == 0` (empty sequences are not useful for region queries). Note: `linewidth == linebases` is valid — it means lines have no trailing newline character, which occurs when a sequence is stored on a single line without a mid-sequence newline.
 
+r[fasta.index.terminator_bound]
+The parser MUST reject entries whose line terminator — `linewidth - linebases` — exceeds 2 bytes. Only LF (1) and CRLF (2) are producible, and 0 means a single line with no trailing newline. This is a memory-safety bound, not a pedantry: `linewidth` multiplies every byte offset, and a fetch allocates the whole byte span before reading anything, so an index claiming `linebases = 1, linewidth = 2^40` turns an in-bounds 100 kb query into a 97.7 PiB allocation and aborts the process. htslib is structurally immune because `fai_retrieve` reads one line at a time and allocates only `bases + terminator`; seqair reads the span in one call and so must bound it at the index instead. With the bound in place a fetch of `n` bases spans at most `3n` bytes.
+
+A byte span that is not addressable — `byte_offset` is deliberately wrapping, so a near-`u64::MAX` offset can place the end below the start — MUST likewise produce an error naming the sequence, not a panic.
+
+r[fasta.index.data_bound]
+A fetch MUST NOT size its read buffer from the index alone. The reader MUST record an upper bound on the addressable sequence data at open time — the file length for plain FASTA, and for BGZF `last GZI uncompressed offset + 64 KiB` (a BGZF block holds at most 64 KiB, and GZI omits the first block, so an empty index bounds the file at one block) — and MUST reject a span extending past it *before* allocating. A `.fai` may claim any `length` for a ten-byte file, and the buffer is sized from the index before a byte is read, so without this the reader allocates what the index asserts rather than what can exist.
+
 r[fasta.index.name_lookup]
 The index MUST support O(1) lookup of a sequence entry by name. Duplicate sequence names MUST produce an error at parse time.
 
