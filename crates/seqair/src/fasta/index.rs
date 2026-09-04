@@ -24,10 +24,10 @@ pub enum FaiError {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum FaiEntryError {
-    #[error("expected 5 tab-separated fields, found {found}")]
+    #[error("expected 5 (FASTA) or 6 (FASTQ) tab-separated fields, found {found}")]
     TooFewFields { found: usize },
 
-    #[error("expected 5 tab-separated fields, found {found}")]
+    #[error("expected 5 (FASTA) or 6 (FASTQ) tab-separated fields, found {found}")]
     TooManyFields { found: usize },
 
     #[error("invalid {field} value {raw_value:?}: not a valid integer")]
@@ -47,6 +47,10 @@ pub enum FaiEntryError {
 }
 
 /// A single entry from a `.fai` index file.
+///
+/// The same type covers FASTA and FASTQ. A FASTQ index carries one extra
+/// column, `qual_offset`, and the sequence-block geometry (`offset`,
+/// `linebases`, `linewidth`) means exactly the same thing in both.
 #[derive(Debug, Clone)]
 pub struct FaiEntry {
     pub name: SmolStr,
@@ -54,16 +58,37 @@ pub struct FaiEntry {
     pub offset: u64,
     pub linebases: u64,
     pub linewidth: u64,
+    // r[impl fastq.access.index_format]
+    /// Byte offset of the record's quality block. `Some` only for a FASTQ
+    /// (6-column) index; always `None` for FASTA.
+    pub qual_offset: Option<u64>,
 }
 
 impl FaiEntry {
     // r[impl fasta.index.offset_calculation]
     pub fn byte_offset(&self, pos: u64) -> u64 {
+        self.offset_from(self.offset, pos)
+    }
+
+    // r[impl fastq.access.indexed_qual]
+    /// Byte offset of the quality character for `pos`, or `None` for a FASTA
+    /// index. `samtools fqidx` likewise assumes the quality block repeats the
+    /// sequence block's line geometry.
+    pub fn qual_byte_offset(&self, pos: u64) -> Option<u64> {
+        Some(self.offset_from(self.qual_offset?, pos))
+    }
+
+    fn offset_from(&self, base: u64, pos: u64) -> u64 {
         let line =
             pos.checked_div(self.linebases).expect("linebases is non-zero, enforced by FAI parser");
         let col =
             pos.checked_rem(self.linebases).expect("linebases is non-zero, enforced by FAI parser");
-        self.offset.wrapping_add(line.wrapping_mul(self.linewidth)).wrapping_add(col)
+        base.wrapping_add(line.wrapping_mul(self.linewidth)).wrapping_add(col)
+    }
+
+    /// Whether this entry came from a FASTQ (6-column) index.
+    pub fn is_fastq(&self) -> bool {
+        self.qual_offset.is_some()
     }
 }
 
@@ -99,7 +124,9 @@ impl FastaIndex {
             }
 
             // r[impl fasta.index.fields]
-            let mut fields = line.splitn(6, '\t');
+            // r[impl fastq.access.index_parse]
+            // Five fields is FASTA; a sixth is the FASTQ `qual_offset`.
+            let mut fields = line.splitn(7, '\t');
             let (Some(name_str), Some(len_s), Some(off_s), Some(lb_s), Some(lw_s)) =
                 (fields.next(), fields.next(), fields.next(), fields.next(), fields.next())
             else {
@@ -110,6 +137,7 @@ impl FastaIndex {
                     kind: FaiEntryError::TooFewFields { found },
                 });
             };
+            let qual_offset_s = fields.next();
             if fields.next().is_some() {
                 let found = line.split('\t').count();
                 return Err(FaiError::InvalidEntry {
@@ -124,6 +152,9 @@ impl FastaIndex {
             let offset = parse_fai_field(off_s, "offset", line_num, path)?;
             let linebases = parse_fai_field(lb_s, "linebases", line_num, path)?;
             let linewidth = parse_fai_field(lw_s, "linewidth", line_num, path)?;
+            let qual_offset = qual_offset_s
+                .map(|s| parse_fai_field(s, "qual_offset", line_num, path))
+                .transpose()?;
 
             // r[impl fasta.index.validation]
             if linebases == 0 {
@@ -157,7 +188,7 @@ impl FastaIndex {
             }
 
             name_to_idx.insert(name.clone(), entries.len());
-            entries.push(FaiEntry { name, length, offset, linebases, linewidth });
+            entries.push(FaiEntry { name, length, offset, linebases, linewidth, qual_offset });
         }
 
         if entries.is_empty() {
@@ -256,7 +287,8 @@ mod tests {
     // r[verify fasta.index.fields]
     #[test]
     fn reject_too_many_fields() {
-        let contents = "seq1\t100\t6\t50\t51\textra\n"; // 6 fields
+        // Six fields is the valid FASTQ form; seven is nothing.
+        let contents = "seq1\t100\t6\t50\t51\t120\textra\n"; // 7 fields
         let err = FastaIndex::parse(contents, &test_path()).unwrap_err();
         match err {
             FaiError::InvalidEntry {
@@ -264,11 +296,24 @@ mod tests {
                 line_number,
                 ..
             } => {
-                assert_eq!(found, 6, "should report 6 fields found");
+                assert_eq!(found, 7, "should report 7 fields found");
                 assert_eq!(line_number, 1);
             }
             other => panic!("expected TooManyFields, got {other:?}"),
         }
+    }
+
+    // r[verify fastq.access.index_parse]
+    #[test]
+    fn accepts_six_column_fastq_index() {
+        let contents = "seq1\t100\t6\t50\t51\t120\n";
+        let idx = FastaIndex::parse(contents, &test_path()).unwrap();
+        let e = idx.get("seq1").unwrap();
+        assert_eq!(e.qual_offset, Some(120));
+        // Sequence geometry is unchanged by the extra column.
+        assert_eq!(e.byte_offset(50), 6 + 51);
+        // Quality geometry mirrors it from `qual_offset`.
+        assert_eq!(e.qual_byte_offset(50), Some(120 + 51));
     }
 
     // r[verify fasta.index.fields]
@@ -369,7 +414,14 @@ mod tests {
     #[test]
     fn byte_offset_single_line() {
         // Sequence fits on one line: 4 bases, linebases=4, linewidth=5
-        let entry = FaiEntry { name: "s".into(), length: 4, offset: 6, linebases: 4, linewidth: 5 };
+        let entry = FaiEntry {
+            name: "s".into(),
+            length: 4,
+            offset: 6,
+            linebases: 4,
+            linewidth: 5,
+            qual_offset: None,
+        };
         // pos 0 → offset + 0 = 6
         assert_eq!(entry.byte_offset(0), 6);
         // pos 3 → offset + 3 = 9
@@ -379,8 +431,14 @@ mod tests {
     #[test]
     fn byte_offset_multi_line() {
         // 100 bases, 50 per line, linewidth 51 (50 bases + \n)
-        let entry =
-            FaiEntry { name: "s".into(), length: 100, offset: 10, linebases: 50, linewidth: 51 };
+        let entry = FaiEntry {
+            name: "s".into(),
+            length: 100,
+            offset: 10,
+            linebases: 50,
+            linewidth: 51,
+            qual_offset: None,
+        };
         // pos 0 → 10
         assert_eq!(entry.byte_offset(0), 10);
         // pos 49 → 10 + 49 = 59 (last base of first line)
@@ -400,6 +458,7 @@ mod tests {
             offset: 10,
             linebases: 50,
             linewidth: 52, // 50 bases + \r\n
+            qual_offset: None,
         };
         // pos 50 → 10 + 1*52 + 0 = 62 (skips \r\n)
         assert_eq!(entry.byte_offset(50), 62);

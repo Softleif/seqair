@@ -357,6 +357,9 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
 
         // r[impl fasta.fetch.newline_stripping]
         // r[impl fasta.fetch.uppercase]
+        // r[impl fastq.access.indexed_seq]
+        // The span above is bounded by the record's `length`, so on a FASTQ
+        // this never reaches the `+` separator or the quality block.
         out.reserve(num_bases);
         for &b in &self.raw_buf {
             if b != b'\n' && b != b'\r' {

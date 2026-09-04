@@ -214,10 +214,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "buffer-redux"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "431a9cc8d7efa49bc326729264537f5e60affce816c66edf434350778c9f4f54"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
+
+[[package]]
+name = "bytecount"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
 
 [[package]]
 name = "bytemuck"
@@ -1214,6 +1229,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "needletail"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aa22e1ae8bce4ecf257e2475ef2046026caea08d66b1848d073fe7bc77e4351"
+dependencies = [
+ "buffer-redux",
+ "bytecount",
+ "flate2",
+ "memchr",
+]
+
+[[package]]
 name = "newtype_derive"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1244,6 +1271,7 @@ dependencies = [
  "noodles-core",
  "noodles-cram",
  "noodles-fasta",
+ "noodles-fastq",
  "noodles-sam",
  "noodles-vcf",
 ]
@@ -1341,6 +1369,16 @@ dependencies = [
  "memchr",
  "noodles-bgzf",
  "noodles-core",
+]
+
+[[package]]
+name = "noodles-fastq"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1bd7ca5f1595f089e7373da29fbcda325e05f02ca130424b09e9a877f9de9f9"
+dependencies = [
+ "bstr",
+ "memchr",
 ]
 
 [[package]]
@@ -1747,6 +1785,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "scoped_threadpool"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d51f5df5af43ab3f1360b429fa5e0152ac5ce8c0bd6485cae490332e96846a8"
+
+[[package]]
 name = "semver"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1757,6 +1801,20 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+
+[[package]]
+name = "seq_io"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86b213fabdebb1c56d330d1dbf92cef0257f3873b718eb2202bb73c707197e9c"
+dependencies = [
+ "buffer-redux",
+ "crossbeam-utils",
+ "memchr",
+ "scoped_threadpool",
+ "serde",
+ "serde_derive",
+]
 
 [[package]]
 name = "seqair"
@@ -1776,6 +1834,7 @@ dependencies = [
  "itoa",
  "libdeflater",
  "md5",
+ "needletail",
  "noodles",
  "noodles-bgzf",
  "noodles-util",
@@ -1783,6 +1842,7 @@ dependencies = [
  "rust-htslib",
  "rustc-hash 2.1.2",
  "ryu",
+ "seq_io",
  "seqair-types",
  "tempfile",
  "thiserror 2.0.18",
