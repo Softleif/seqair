@@ -23,6 +23,13 @@ docker run --platform linux/amd64 --tmpfs /tmp --rm seqair-fuzz-x86 \
   "cd crates/seqair && ./fuzz/run_all.sh 30"
 ```
 
+### What counts as a failure
+
+`run_all.sh` fails CI on crashes (exit 77) *and* on OOMs (exit 71). An OOM is not
+the fuzzer being greedy: an unbounded allocation trips the RSS limit long before it
+trips a crash, so excusing exit 71 hides exactly the bugs the allocation caps exist
+to catch — several entries in [Bugs found](#bugs-found) were OOMs.
+
 ## Targets
 
 ### Full-stack (reader → fetch → pileup)
