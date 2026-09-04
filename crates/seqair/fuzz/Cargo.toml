@@ -102,6 +102,12 @@ name = "fuzz_fasta_index"
 path = "fuzz_targets/fuzz_fasta_index.rs"
 doc = false
 
+# Indexed FASTA/FASTQ fetching against an adversarial index
+[[bin]]
+name = "fuzz_fastq_index"
+path = "fuzz_targets/fuzz_fastq_index.rs"
+doc = false
+
 # GZI index parsing
 [[bin]]
 name = "fuzz_gzi"

@@ -146,6 +146,21 @@ impl GziIndex {
         Self::parse(data, Path::new("<fuzz>"))
     }
 
+    // r[impl fasta.index.data_bound]
+    /// Upper bound on the uncompressed size of the indexed file.
+    ///
+    /// The last GZI entry is the start of the final block, and a BGZF block
+    /// holds at most 64 KiB uncompressed. GZI omits the first block, so an
+    /// empty index means the file is that single block. The result is a bound,
+    /// not the exact size — enough to keep a fetch from sizing a buffer off an
+    /// index that lies about how long a sequence is.
+    pub fn max_uncompressed_size(&self) -> u64 {
+        const MAX_BLOCK: u64 = 1 << 16;
+        self.entries
+            .last()
+            .map_or(MAX_BLOCK, |e| e.uncompressed_offset.saturating_add(MAX_BLOCK))
+    }
+
     // r[impl fasta.gzi.translate]
     pub fn translate(&self, uncompressed_offset: u64) -> Result<BlockLocation, GziError> {
         // The GZI entries are sorted by uncompressed_offset. We want the last entry

@@ -44,6 +44,36 @@ impl Rng {
         const BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
         BASES.get((self.next_u64() >> 33) as usize % 4).copied().unwrap_or(b'N')
     }
+
+    /// A base at ~41% GC, the human genome-wide figure, rather than 50%.
+    pub fn gc_base(&mut self) -> u8 {
+        match (self.next_u64() >> 33) % 200 {
+            0..=40 => b'C',
+            41..=81 => b'G',
+            82..=140 => b'A',
+            _ => b'T',
+        }
+    }
+
+    /// Quality from the 4-bin scheme current Illumina instruments emit, with
+    /// the low bins growing toward the 3' end of the read. Returns the ASCII
+    /// (Phred+33) character.
+    pub fn illumina_qual(&mut self, pos: usize, read_len: usize) -> u8 {
+        // 0 at the 5' end, 100 at the 3' end.
+        let decay = pos.saturating_mul(100).checked_div(read_len.max(1)).unwrap_or(0) as u64;
+        // Chance of dropping out of the top bin rises along the read.
+        let roll = (self.next_u64() >> 40) % 1000;
+        let threshold = 20 + decay.saturating_mul(2);
+        33 + if roll >= threshold {
+            37
+        } else if roll >= threshold / 4 {
+            23
+        } else if roll >= threshold / 16 {
+            12
+        } else {
+            2
+        }
+    }
 }
 
 fn samtools_faidx(path: &Path) {
@@ -152,30 +182,60 @@ pub fn ref_fastq_seqair_view() -> PathBuf {
 /// Read-like FASTQ: 200k records of 150 bp, unwrapped. ~68 MB plain.
 ///
 /// Returned as `(plain, gzip, bgzf)`.
+///
+/// Deliberately not uniform random. Uniform ACGT with flat quality is the
+/// worst input a compression benchmark can use: it is close to incompressible,
+/// so gzip ratios land near 2x where real FASTQ reaches 4-5x, and the whole
+/// compressed-input picture shifts. Instead:
+///
+/// * Reads are 150 bp substrings of a 5 Mb synthetic genome, half of them
+///   reverse-complemented, with a ~0.3% per-base error rate. That gives the
+///   redundancy between records that real short-read data has.
+/// * Quality uses the 4-bin scheme current Illumina instruments emit (Q2/Q12/
+///   Q23/Q37), with the low bins weighted toward the 3' end. Real quality is
+///   binned and highly skewed, which is most of why FASTQ compresses at all.
+/// * Names follow the Illumina convention with varying tile and x/y fields.
 pub fn reads_fastq() -> (PathBuf, PathBuf, PathBuf) {
-    let plain = scratch("bench_reads.fq");
-    let gz = scratch("bench_reads.fq.gz");
-    let bgz = scratch("bench_reads.fq.bgz");
+    let plain = scratch("reads_150bp.fq");
+    let gz = scratch("reads_150bp.fq.gz");
+    let bgz = scratch("reads_150bp.fq.bgz");
     if plain.exists() && gz.exists() && bgz.exists() {
         return (plain, gz, bgz);
     }
     std::fs::create_dir_all(scratch_root()).unwrap();
     let mut rng = Rng::new(0xBEEF);
+
+    const GENOME: usize = 5_000_000;
+    const READ_LEN: usize = 150;
+    const N_READS: u32 = 200_000;
+
+    let genome: Vec<u8> = (0..GENOME).map(|_| rng.gc_base()).collect();
+
     let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&plain).unwrap());
-    let mut seq = [0u8; 150];
-    let mut qual = [0u8; 150];
-    for i in 0..200_000u32 {
-        for b in seq.iter_mut() {
-            *b = rng.base();
+    let mut seq = [0u8; READ_LEN];
+    let mut qual = [0u8; READ_LEN];
+    for i in 0..N_READS {
+        let start = (rng.next_u64() >> 20) as usize % (GENOME - READ_LEN);
+        let revcomp = rng.next_u64() >> 63 == 1;
+        for (j, b) in seq.iter_mut().enumerate() {
+            let src = if revcomp { start + READ_LEN - 1 - j } else { start + j };
+            let g = genome.get(src).copied().unwrap_or(b'N');
+            let g = if revcomp { complement(g) } else { g };
+            // ~0.3% sequencing error.
+            *b = if (rng.next_u64() >> 40) % 1000 < 3 { rng.gc_base() } else { g };
         }
-        for q in qual.iter_mut() {
-            *q = b'!' + (rng.next_u64() >> 40) as u8 % 40;
+        for (j, q) in qual.iter_mut().enumerate() {
+            *q = rng.illumina_qual(j, READ_LEN);
         }
-        writeln!(w, "@READ_{i}:1:FLOWCELL:1:1101:{i}:{i} 1:N:0:ATCGATCG").unwrap();
+        let tile = 1101 + (rng.next_u64() >> 40) % 78;
+        let x = (rng.next_u64() >> 40) % 30_000;
+        let y = (rng.next_u64() >> 40) % 30_000;
+        writeln!(w, "@A00519:247:HG7YTDSXX:1:{tile}:{x}:{y} 1:N:0:ATTACTCG+GGCTCTGA").unwrap();
         w.write_all(&seq).unwrap();
         writeln!(w, "\n+").unwrap();
         w.write_all(&qual).unwrap();
         w.write_all(b"\n").unwrap();
+        let _ = i;
     }
     w.into_inner().unwrap();
     for (dst, prog) in [(&gz, "gzip -c"), (&bgz, "bgzip -c")] {
@@ -187,6 +247,16 @@ pub fn reads_fastq() -> (PathBuf, PathBuf, PathBuf) {
         assert!(status.success(), "{prog} failed");
     }
     (plain, gz, bgz)
+}
+
+fn complement(b: u8) -> u8 {
+    match b {
+        b'A' => b'T',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'T' => b'A',
+        other => other,
+    }
 }
 
 /// Build a 5-column view of a 6-column FASTQ index.
