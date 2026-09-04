@@ -71,7 +71,7 @@ proptest! {
         };
 
         for pos in 0..n_bases {
-            let byte_off = entry.byte_offset(pos);
+            let byte_off = entry.byte_offset(pos).expect("small test offsets never overflow u64");
             let actual_byte = content.get(byte_off as usize).copied();
             let expected_byte = bases.get(pos as usize).copied();
             prop_assert_eq!(
@@ -236,9 +236,10 @@ proptest! {
 }
 
 // r[verify fasta.index.terminator_bound]
-/// A near-`u64::MAX` offset makes `byte_offset` wrap, putting the end of the
-/// requested span below its start. That is a corrupt index, so it must be a
-/// typed error — not the panic the arithmetic would otherwise produce.
+/// A near-`u64::MAX` offset makes the byte-offset calculation overflow `u64`
+/// for the end of the requested span. That is a corrupt index, so it must be
+/// a typed error — not the panic the arithmetic would otherwise produce, and
+/// not a wrapped value silently treated as valid.
 #[test]
 fn wrapped_byte_span_is_an_error_not_a_panic() {
     let dir = TempDir::new().unwrap();
@@ -256,10 +257,45 @@ fn wrapped_byte_span_is_an_error_not_a_panic() {
     let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
     let err = reader
         .fetch_seq("seq1", Pos0::new(0).unwrap(), Pos0::new(100).unwrap())
-        .expect_err("a wrapped span must not be served");
+        .expect_err("an overflowing offset must not be served");
     assert!(
-        matches!(err, seqair::fasta::FastaError::CorruptIndexSpan { .. }),
-        "expected CorruptIndexSpan, got {err:?}"
+        matches!(err, seqair::fasta::FastaError::IndexOffsetOverflow { .. }),
+        "expected IndexOffsetOverflow, got {err:?}"
+    );
+}
+
+// r[verify fasta.index.terminator_bound]
+/// Before `byte_offset` used checked arithmetic, a `u64::MAX`-adjacent offset
+/// that overflowed for *both* endpoints of a span wrapped each endpoint down
+/// by the same amount, so the span length came out correct even though both
+/// endpoints landed at the wrong (small, in-bounds-looking) file location.
+/// The reader would have served 11 bytes from near the start of the file
+/// instead of erroring. Checked arithmetic must catch this before any read.
+#[test]
+fn wraparound_offset_is_rejected_not_served_from_wrong_location() {
+    let dir = TempDir::new().unwrap();
+    let fasta_path = dir.path().join("wrap2.fa");
+    let mut f = std::fs::File::create(&fasta_path).unwrap();
+    writeln!(f, ">seq1").unwrap();
+    writeln!(f, "ACGTACGTACGTACGTACGTACGTACGTAC").unwrap();
+    drop(f);
+
+    // A single-line sequence (linebases > every requested position), so
+    // `byte_offset(pos) == offset + pos` exactly. `offset` sits 5 below
+    // `u64::MAX`, so `offset + 10` and `offset + 20` both overflow, wrapping
+    // to 4 and 14 under naive wrapping arithmetic — a plausible, ordered,
+    // in-bounds span that is nonetheless nowhere near the real data.
+    let mut fai = std::fs::File::create(dir.path().join("wrap2.fa.fai")).unwrap();
+    writeln!(fai, "seq1\t1000\t{}\t1000\t1000", u64::MAX - 5).unwrap();
+    drop(fai);
+
+    let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
+    let err = reader
+        .fetch_seq("seq1", Pos0::new(10).unwrap(), Pos0::new(21).unwrap())
+        .expect_err("an overflowing offset must not be served");
+    assert!(
+        matches!(err, seqair::fasta::FastaError::IndexOffsetOverflow { .. }),
+        "expected IndexOffsetOverflow, got {err:?}"
     );
 }
 

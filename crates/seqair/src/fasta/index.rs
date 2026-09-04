@@ -78,24 +78,37 @@ pub struct FaiEntry {
 
 impl FaiEntry {
     // r[impl fasta.index.offset_calculation]
-    pub fn byte_offset(&self, pos: u64) -> u64 {
+    // r[impl fasta.index.terminator_bound]
+    /// Byte offset of the base at 0-based position `pos`, or `None` if the
+    /// entry's `offset` combined with `pos` overflows `u64` — a hostile or
+    /// corrupt index, since no real file is that large. Checked rather than
+    /// wrapping arithmetic matters here: `offset` is untrusted and can sit
+    /// near `u64::MAX`, and wrapping would silently fold it back into a
+    /// small, in-bounds-looking offset instead of surfacing the corruption.
+    pub fn byte_offset(&self, pos: u64) -> Option<u64> {
         self.offset_from(self.offset, pos)
     }
 
     // r[impl fastq.access.indexed_qual]
     /// Byte offset of the quality character for `pos`, or `None` for a FASTA
-    /// index. `samtools fqidx` likewise assumes the quality block repeats the
+    /// index or on `u64` overflow (see [`byte_offset`](Self::byte_offset)).
+    /// `samtools fqidx` likewise assumes the quality block repeats the
     /// sequence block's line geometry.
     pub fn qual_byte_offset(&self, pos: u64) -> Option<u64> {
-        Some(self.offset_from(self.qual_offset?, pos))
+        self.offset_from(self.qual_offset?, pos)
     }
 
-    fn offset_from(&self, base: u64, pos: u64) -> u64 {
+    #[allow(
+        clippy::unwrap_in_result,
+        reason = "linebases == 0 is rejected by the FAI parser (ZeroLinebases), so this expect \
+                  documents an internal invariant, not a fallible input"
+    )]
+    fn offset_from(&self, base: u64, pos: u64) -> Option<u64> {
         let line =
             pos.checked_div(self.linebases).expect("linebases is non-zero, enforced by FAI parser");
         let col =
             pos.checked_rem(self.linebases).expect("linebases is non-zero, enforced by FAI parser");
-        base.wrapping_add(line.wrapping_mul(self.linewidth)).wrapping_add(col)
+        line.checked_mul(self.linewidth)?.checked_add(col)?.checked_add(base)
     }
 
     /// Whether this entry came from a FASTQ (6-column) index.
@@ -359,7 +372,7 @@ mod tests {
         let e = idx.get("seq1").unwrap();
         assert_eq!(e.qual_offset, Some(120));
         // Sequence geometry is unchanged by the extra column.
-        assert_eq!(e.byte_offset(50), 6 + 51);
+        assert_eq!(e.byte_offset(50), Some(6 + 51));
         // Quality geometry mirrors it from `qual_offset`.
         assert_eq!(e.qual_byte_offset(50), Some(120 + 51));
     }
@@ -532,9 +545,9 @@ mod tests {
             qual_offset: None,
         };
         // pos 0 → offset + 0 = 6
-        assert_eq!(entry.byte_offset(0), 6);
+        assert_eq!(entry.byte_offset(0), Some(6));
         // pos 3 → offset + 3 = 9
-        assert_eq!(entry.byte_offset(3), 9);
+        assert_eq!(entry.byte_offset(3), Some(9));
     }
 
     #[test]
@@ -549,13 +562,13 @@ mod tests {
             qual_offset: None,
         };
         // pos 0 → 10
-        assert_eq!(entry.byte_offset(0), 10);
+        assert_eq!(entry.byte_offset(0), Some(10));
         // pos 49 → 10 + 49 = 59 (last base of first line)
-        assert_eq!(entry.byte_offset(49), 59);
+        assert_eq!(entry.byte_offset(49), Some(59));
         // pos 50 → 10 + 1*51 + 0 = 61 (first base of second line, skipping \n)
-        assert_eq!(entry.byte_offset(50), 61);
+        assert_eq!(entry.byte_offset(50), Some(61));
         // pos 51 → 10 + 1*51 + 1 = 62
-        assert_eq!(entry.byte_offset(51), 62);
+        assert_eq!(entry.byte_offset(51), Some(62));
     }
 
     #[test]
@@ -570,7 +583,7 @@ mod tests {
             qual_offset: None,
         };
         // pos 50 → 10 + 1*52 + 0 = 62 (skips \r\n)
-        assert_eq!(entry.byte_offset(50), 62);
+        assert_eq!(entry.byte_offset(50), Some(62));
     }
 
     #[test]
