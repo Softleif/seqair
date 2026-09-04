@@ -368,10 +368,12 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
         let num_bases =
             stop.checked_sub(start).expect("stop > start is guaranteed by bounds check above")
                 as usize;
-        let last_pos = (num_bases as u64)
-            .checked_sub(1)
-            .and_then(|n| start.checked_add(n))
-            .expect("num_bases >= 1 is guaranteed by stop > start");
+        // Derived from `stop` directly (== start + num_bases - 1), not by
+        // round-tripping `num_bases` through `usize` and back: on a 32-bit
+        // target that cast truncates a range wider than `u32::MAX`, which
+        // would make a non-empty range look empty and panic the `expect`
+        // below instead of reaching the checked-arithmetic error paths.
+        let last_pos = stop.checked_sub(1).expect("stop > start >= 0 is guaranteed above");
         // r[impl fasta.index.terminator_bound]
         // `byte_offset` uses checked arithmetic, so a near-`u64::MAX` index
         // offset surfaces here as `None` rather than wrapping into a small,
