@@ -70,32 +70,35 @@ for target in $TARGETS; do
            $extra_args \
            $seed_args 2>&1) || true
 
-    # Check for crashes/OOM (exit codes 77=crash, 71=OOM)
+    # Check for crashes/OOM (exit codes 77=crash, 71=OOM). Both are failures:
+    # an unbounded allocation surfaces as an OOM long before it surfaces as a
+    # crash, so excusing exit 71 hides exactly the class of bug that the
+    # allocation bounds exist to catch.
     if echo "$output" | grep -q "SUMMARY: \|Fuzz target exited with"; then
-        if echo "$output" | grep -q "exit status: 71"; then
+        if echo "$output" | grep -q "exit status: 71\|out-of-memory"; then
             printf "OOM (rss_limit=%sMB)\n" "$RSS_LIMIT"
-            # OOM with high RSS limit is not a code bug, just note it
-            PASSED=$((PASSED + 1))
+            kind="OOM"
         else
             printf "CRASH\n"
-            FAILED=$((FAILED + 1))
-            FAILURES="$FAILURES  $target\n"
-            # Show crash details: panic message (with continuation), artifact path
-            echo "---"
-            echo "$output" | grep -A5 "panicked at" | head -10
-            echo "$output" | grep -A1 "Test unit written to" | head -3
-            artifact=$(echo "$output" | grep -oE "fuzz/artifacts/[^ ]+" | head -1)
-            if [ -n "$artifact" ]; then
-                echo ""
-                echo "  Reproduce locally:"
-                echo "    cargo +nightly fuzz run --target $ARCH $target $artifact"
-            fi
-            echo "---"
+            kind="CRASH"
+        fi
+        FAILED=$((FAILED + 1))
+        FAILURES="$FAILURES  $target [$kind]\n"
+        # Show failure details: panic or allocation message, artifact path
+        echo "---"
+        echo "$output" | grep -E "panicked at|memory allocation of [0-9]+ bytes failed|out-of-memory|Allocating [0-9]+ bytes" -A4 | head -14
+        echo "$output" | grep -A1 "Test unit written to" | head -3
+        artifact=$(echo "$output" | grep -oE "fuzz/artifacts/[^ ]+" | head -1)
+        if [ -n "$artifact" ]; then
             echo ""
-            if [ "$QUICK" = "--quick" ]; then
-                echo "Stopping early (--quick mode)"
-                break
-            fi
+            echo "  Reproduce locally:"
+            echo "    cargo +nightly fuzz run --target $ARCH $target $artifact"
+        fi
+        echo "---"
+        echo ""
+        if [ "$QUICK" = "--quick" ]; then
+            echo "Stopping early (--quick mode)"
+            break
         fi
     else
         # Extract coverage and run count from last line
