@@ -5,7 +5,7 @@ edition = "2024"
 description = "Core types for the seqair bioinformatics library"
 repository = "https://github.com/Softleif/seqair"
 license = "MIT OR Apache-2.0"
-rust-version = "1.92.0"
+rust-version = "1.98.1"
 readme = "README.md"
 
 [dependencies]
