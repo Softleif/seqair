@@ -97,9 +97,11 @@ pub fn plain_fasta() -> PathBuf {
     }
     std::fs::create_dir_all(scratch_root()).unwrap();
     let src = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.gz");
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(format!("bgzip -dc {src} > {}", out.display()))
+    let dest = std::fs::File::create(&out).unwrap();
+    let status = Command::new("bgzip")
+        .arg("-dc")
+        .arg(src)
+        .stdout(dest)
         .status()
         .expect("bgzip must be on PATH");
     assert!(status.success(), "bgzip decompress failed");
@@ -238,10 +240,12 @@ pub fn reads_fastq() -> (PathBuf, PathBuf, PathBuf) {
         let _ = i;
     }
     w.into_inner().unwrap();
-    for (dst, prog) in [(&gz, "gzip -c"), (&bgz, "bgzip -c")] {
-        let status = Command::new("sh")
+    for (dst, prog) in [(&gz, "gzip"), (&bgz, "bgzip")] {
+        let dest = std::fs::File::create(dst).unwrap();
+        let status = Command::new(prog)
             .arg("-c")
-            .arg(format!("{prog} {} > {}", plain.display(), dst.display()))
+            .arg(&plain)
+            .stdout(dest)
             .status()
             .expect("gzip/bgzip must be on PATH");
         assert!(status.success(), "{prog} failed");
@@ -272,7 +276,11 @@ pub fn five_column_view(real: &Path, stem: &str) -> PathBuf {
     let out = scratch(stem);
     let fai = scratch(&format!("{stem}.fai"));
     if !out.exists() {
-        std::os::unix::fs::symlink(real, &out).unwrap();
+        // A hard link, not a symlink: both paths sit in the same scratch
+        // directory, and `std::fs::hard_link` is portable where
+        // `std::os::unix::fs::symlink` would leave this bench target unable
+        // to compile on Windows.
+        std::fs::hard_link(real, &out).unwrap();
     }
     if !fai.exists() {
         let mut six_path = real.as_os_str().to_owned();
