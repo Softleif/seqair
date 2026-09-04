@@ -374,10 +374,7 @@ mod tests {
             assert!(
                 matches!(
                     err,
-                    FaiError::InvalidEntry {
-                        kind: FaiEntryError::QualBeforeSequence { .. },
-                        ..
-                    }
+                    FaiError::InvalidEntry { kind: FaiEntryError::QualBeforeSequence { .. }, .. }
                 ),
                 "qual_offset={qual}: expected QualBeforeSequence, got {err:?}"
             );

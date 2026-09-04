@@ -596,8 +596,7 @@ fn pileup_with_reference(c: &mut Criterion) {
     // the next `segments()` call.
     let bench_seqair = |ref_path: &std::path::Path| {
         let mut readers = Readers::open(bam, ref_path).unwrap();
-        let segments: Vec<_> =
-            readers.segments((CHROM, P_START, P_END), opts).unwrap().collect();
+        let segments: Vec<_> = readers.segments((CHROM, P_START, P_END), opts).unwrap().collect();
         let mut total_depth: u64 = 0;
         let mut mismatches: u64 = 0;
         for seg in &segments {
@@ -621,7 +620,11 @@ fn pileup_with_reference(c: &mut Criterion) {
     // real reads (otherwise the pileup loop silently benches nothing).
     let (expected_depth, expected_mm) = bench_seqair(&fasta);
     assert!(expected_depth > 0, "test BAM should produce pileup depth in this region");
-    assert_eq!(bench_seqair(&fastq), (expected_depth, expected_mm), "FASTA and FASTQ references disagree");
+    assert_eq!(
+        bench_seqair(&fastq),
+        (expected_depth, expected_mm),
+        "FASTA and FASTQ references disagree"
+    );
 
     group.bench_function("seqair_fasta", |b| {
         b.iter(|| black_box(bench_seqair(&fasta)));

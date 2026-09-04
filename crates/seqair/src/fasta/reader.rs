@@ -455,10 +455,7 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
 fn max_bgzf_expansion(compressed_len: u64) -> u64 {
     const MAX_BLOCK: u64 = 1 << 16;
     const MIN_BLOCK_ON_DISK: u64 = 28;
-    compressed_len
-        .saturating_div(MIN_BLOCK_ON_DISK)
-        .saturating_add(1)
-        .saturating_mul(MAX_BLOCK)
+    compressed_len.saturating_div(MIN_BLOCK_ON_DISK).saturating_add(1).saturating_mul(MAX_BLOCK)
 }
 
 // r[impl fasta.plain.positional_read]
@@ -534,8 +531,7 @@ fn sniff_reference(path: &Path) -> Result<(File, RefFormat), FastaError> {
     let mut got = 0usize;
     while got < header.len() {
         // `got < header.len()` guarantees a non-exhausted buffer.
-        let rest =
-            header.get_mut(got..).expect("got < header.len() keeps the buffer non-empty");
+        let rest = header.get_mut(got..).expect("got < header.len() keeps the buffer non-empty");
         match file.read(rest) {
             Ok(0) => break,
             Ok(n) => got = got.saturating_add(n),
