@@ -5,6 +5,7 @@
 use super::{
     gzi::{GziError, GziIndex},
     index::{FaiError, FastaIndex},
+    strip::strip_newlines_uppercase,
 };
 use crate::bam::bgzf::{BgzfError, BgzfReader};
 use seqair_types::{Pos0, SmolStr};
@@ -427,11 +428,7 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
         // The span above is bounded by the record's `length`, so on a FASTQ
         // this never reaches the `+` separator or the quality block.
         out.reserve(num_bases);
-        for &b in &self.raw_buf {
-            if b != b'\n' && b != b'\r' {
-                out.push(b.to_ascii_uppercase());
-            }
-        }
+        strip_newlines_uppercase(&self.raw_buf, out);
 
         Ok(())
     }

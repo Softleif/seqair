@@ -13,6 +13,7 @@
 mod gzi;
 mod index;
 mod reader;
+mod strip;
 
 pub use gzi::{BlockLocation, GziError, GziIndex};
 pub use index::{FaiEntry, FaiEntryError, FaiError, FastaIndex};
