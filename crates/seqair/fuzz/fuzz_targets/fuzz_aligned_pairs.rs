@@ -150,7 +150,7 @@ fuzz_target!(|input: FuzzInput| {
     let raw = build_raw_record(&input);
 
     let mut store = RecordStore::<()>::new();
-    let _ = match store.push_raw(&raw, &mut ()) {
+    match store.push_raw(&raw, &mut ()) {
         Ok(Some(_)) => (),
         _ => return,
     };
@@ -193,10 +193,7 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // ── Layer 1: with_read ──
-    let with_read_result = match rec.aligned_pairs_with_read(&store) {
-        Ok(it) => Some(it),
-        Err(_) => None,
-    };
+    let with_read_result = rec.aligned_pairs_with_read(&store).ok();
     if let Some(it) = with_read_result.clone() {
         consume_with_read(it);
     }
@@ -232,8 +229,8 @@ fuzz_target!(|input: FuzzInput| {
     }
 });
 
-fn consume_bare(mut it: AlignedPairs<'_>) {
-    while let Some(pair) = it.next() {
+fn consume_bare(it: AlignedPairs<'_>) {
+    for pair in it {
         // Touch every field to ensure no destructure panic.
         match pair {
             AlignedPair::Match { qpos, rpos, kind } => {

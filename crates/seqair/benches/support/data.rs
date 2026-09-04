@@ -41,7 +41,7 @@ impl Rng {
     }
 
     pub fn base(&mut self) -> u8 {
-        const BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
+        const BASES: [u8; 4] = *b"ACGT";
         BASES.get((self.next_u64() >> 33) as usize % 4).copied().unwrap_or(b'N')
     }
 

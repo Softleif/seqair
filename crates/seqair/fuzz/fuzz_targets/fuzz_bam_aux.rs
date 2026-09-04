@@ -31,19 +31,19 @@ fn assert_value_roundtrip(original: &AuxValue<'_>, roundtripped: Option<AuxValue
 /// Decode a B-array byte slice (parser output) into a typed Vec for the
 /// matching typed setter. The parser only emits length-aligned slices.
 fn decode_i16(bytes: &[u8]) -> Vec<i16> {
-    bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect()
+    bytes.as_chunks::<2>().0.iter().map(|c| i16::from_le_bytes(*c)).collect()
 }
 fn decode_u16(bytes: &[u8]) -> Vec<u16> {
-    bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+    bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect()
 }
 fn decode_i32(bytes: &[u8]) -> Vec<i32> {
-    bytes.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect()
 }
 fn decode_u32(bytes: &[u8]) -> Vec<u32> {
-    bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect()
 }
 fn decode_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
 /// Set a single tag value into `AuxData`. Returns `false` if the writer
