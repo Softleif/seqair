@@ -299,6 +299,75 @@ fn wraparound_offset_is_rejected_not_served_from_wrong_location() {
     );
 }
 
+// r[verify fasta.index.data_bound]
+/// A `.fai` can claim any `length` for a tiny plain file. The span computed
+/// from that lie must be rejected against the real file size before the read
+/// buffer is sized, not discovered as a short read (or an OOM) afterward.
+#[test]
+fn plain_fasta_span_beyond_file_is_rejected_before_allocation() {
+    let dir = TempDir::new().unwrap();
+    let fasta_path = dir.path().join("short.fa");
+    let mut f = std::fs::File::create(&fasta_path).unwrap();
+    writeln!(f, ">seq1").unwrap();
+    writeln!(f, "ACGT").unwrap();
+    drop(f); // the file holds ~11 bytes total
+
+    // The FAI claims a sequence far longer than the file backing it, with
+    // line geometry that puts the requested range's byte offset well past
+    // the real end of the file.
+    let mut fai = std::fs::File::create(dir.path().join("short.fa.fai")).unwrap();
+    writeln!(fai, "seq1\t2000000000\t6\t60\t61").unwrap();
+    drop(fai);
+
+    let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
+    let err = reader
+        .fetch_seq("seq1", Pos0::new(1_999_999_900).unwrap(), Pos0::new(1_999_999_950).unwrap())
+        .expect_err("a span past the real file size must not be served");
+    assert!(
+        matches!(err, seqair::fasta::FastaError::SpanBeyondData { .. }),
+        "expected SpanBeyondData, got {err:?}"
+    );
+}
+
+// r[verify fasta.index.data_bound]
+/// The BGZF/GZI counterpart of [`plain_fasta_span_beyond_file_is_rejected_before_allocation`]:
+/// the data bound comes from the GZI (`last entry + one block`), not the
+/// compressed file's own size, and a `.fai` claiming a far longer sequence
+/// than that bound must still be rejected before the read buffer is sized.
+#[test]
+fn bgzf_fasta_span_beyond_gzi_bound_is_rejected_before_allocation() {
+    let dir = TempDir::new().unwrap();
+    let fasta_path = dir.path().join("short.fa.gz");
+
+    {
+        let file = std::fs::File::create(&fasta_path).unwrap();
+        let mut writer = seqair::io::BgzfWriter::new(file);
+        writer.write_all(b">seq1\nACGT\n").unwrap();
+        writer.finish().unwrap();
+    }
+
+    // An empty GZI (no entries) means "one block, at most 64 KiB
+    // uncompressed" — `FaiEntry::byte_offset`'s data-bound counterpart to the
+    // plain-file test above.
+    let gzi_data = make_gzi_data(&[]);
+    std::fs::write(dir.path().join("short.fa.gz.gzi"), &gzi_data).unwrap();
+
+    // The FAI claims a sequence long enough that this range's byte offset
+    // (~101 KB) sits past the ~64 KiB GZI bound.
+    let mut fai = std::fs::File::create(dir.path().join("short.fa.gz.fai")).unwrap();
+    writeln!(fai, "seq1\t1000000\t6\t60\t61").unwrap();
+    drop(fai);
+
+    let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
+    let err = reader
+        .fetch_seq("seq1", Pos0::new(100_000).unwrap(), Pos0::new(100_050).unwrap())
+        .expect_err("a span past the GZI-derived bound must not be served");
+    assert!(
+        matches!(err, seqair::fasta::FastaError::SpanBeyondData { .. }),
+        "expected SpanBeyondData, got {err:?}"
+    );
+}
+
 // r[verify fasta.index.terminator_bound]
 /// The bound that keeps a fetch's allocation proportional to the bases asked
 /// for. Without it this index would size a read buffer at ~97.7 PiB and abort
