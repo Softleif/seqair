@@ -557,6 +557,131 @@ fn aligned_pairs_walk(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Group 5: End-to-end pileup *with reference fetch*
+// `pileup_e2e` feeds the engine no reference at all, so the FASTA/FASTQ fetch
+// path (newline-strip + uppercase) never shows up in it. This group times the
+// full `Readers::pileup` loop — per-segment reference fetch included — once
+// against a BGZF FASTA and once against a FASTQ view of the same reference.
+// ---------------------------------------------------------------------------
+
+fn pileup_with_reference(c: &mut Criterion) {
+    use rust_htslib::bam::{self, FetchDefinition, Read as _};
+    use rust_htslib::faidx;
+    use seqair::reader::{DepthLimit, Readers, SegmentOptions};
+    use std::num::NonZeroU32;
+
+    #[path = "support/data.rs"]
+    // This bench only uses `plain_fasta`/`chr19_fastq`; the shared module's
+    // other helpers stay available to the fasta/fastq benches.
+    #[allow(dead_code, reason = "shared bench-data module; not all helpers used here")]
+    mod data;
+
+    let bam = std::path::Path::new(BAM_PATH);
+    let fasta = data::plain_fasta();
+    let fastq = data::chr19_fastq();
+
+    // Populate reads: chr19 reads span ~6.10–6.14 Mb.
+    const P_START: Pos0 = Pos0::new(6_100_000).unwrap();
+    const P_END: Pos0 = Pos0::new(6_140_000).unwrap();
+
+    let mut group = c.benchmark_group("pileup_with_reference");
+    group.sample_size(30);
+
+    let opts = SegmentOptions::new(NonZeroU32::new(100_000).unwrap());
+
+    // seqair: Readers::pileup fetches the reference slice per segment, then
+    // piles up reads against it. The closure keeps the borrow story simple:
+    // the guard borrows `readers`, so it must be drained and dropped before
+    // the next `segments()` call.
+    let bench_seqair = |ref_path: &std::path::Path| {
+        let mut readers = Readers::open(bam, ref_path).unwrap();
+        let segments: Vec<_> =
+            readers.segments((CHROM, P_START, P_END), opts).unwrap().collect();
+        let mut total_depth: u64 = 0;
+        let mut mismatches: u64 = 0;
+        for seg in &segments {
+            let mut p = readers.pileup(seg, DepthLimit::Unlimited).unwrap();
+            while let Some(col) = p.pileups() {
+                total_depth += col.depth() as u64;
+                let ref_base = col.reference_base();
+                for aln in col.alignments() {
+                    if let Some(base) = aln.base()
+                        && base != ref_base
+                    {
+                        mismatches += 1;
+                    }
+                }
+            }
+        }
+        (total_depth, mismatches)
+    };
+
+    // Cross-check once: FASTA and FASTQ views must agree, and both must see
+    // real reads (otherwise the pileup loop silently benches nothing).
+    let (expected_depth, expected_mm) = bench_seqair(&fasta);
+    assert!(expected_depth > 0, "test BAM should produce pileup depth in this region");
+    assert_eq!(bench_seqair(&fastq), (expected_depth, expected_mm), "FASTA and FASTQ references disagree");
+
+    group.bench_function("seqair_fasta", |b| {
+        b.iter(|| black_box(bench_seqair(&fasta)));
+    });
+    group.bench_function("seqair_fastq", |b| {
+        b.iter(|| black_box(bench_seqair(&fastq)));
+    });
+
+    // htslib: reads pileup + faidx slice per 100 kb tile, uppercased to match
+    // seqair's `r[fasta.fetch.uppercase]`. Tiles are cached: a naive
+    // fetch-per-column runs ~340x slower than seqair (3.1 s vs 9 ms), which
+    // measures faidx syscall overhead, not anything a real caller would do.
+    group.bench_function("htslib_fasta", |b| {
+        b.iter(|| {
+            let mut reader = bam::IndexedReader::from_path(bam).unwrap();
+            let ref_reader = faidx::Reader::from_path(&fasta).unwrap();
+            let tid = reader.header().tid(CHROM.as_bytes()).unwrap();
+            reader
+                .fetch(FetchDefinition::Region(tid as i32, P_START.as_i64(), P_END.as_i64()))
+                .unwrap();
+
+            let mut total_depth: u64 = 0;
+            let mut mismatches: u64 = 0;
+            let mut tile = u64::MAX; // sentinel: no tile fetched yet
+            let mut ref_seq: Vec<u8> = Vec::new();
+            let mut tile_start = 0u64;
+            for p in reader.pileup() {
+                let p = p.unwrap();
+                let pos = u64::from(p.pos());
+                if !(P_START.as_u64()..=P_END.as_u64()).contains(&pos) {
+                    continue;
+                }
+                total_depth += u64::from(p.depth());
+                // The tile index mirrors seqair's 100 kb segments; fetch_seq
+                // is inclusive-end, hence the -1.
+                let t = pos / 100_000;
+                if t != tile {
+                    tile = t;
+                    tile_start = t * 100_000;
+                    let e = ((t + 1) * 100_000).min(P_END.as_u64() + 1);
+                    ref_seq =
+                        ref_reader.fetch_seq(CHROM, tile_start as usize, e as usize - 1).unwrap();
+                    ref_seq.make_ascii_uppercase();
+                }
+                let ref_base = ref_seq[(pos - tile_start) as usize];
+                for aln in p.alignments() {
+                    let Some(qpos) = aln.qpos() else { continue };
+                    let record = aln.record();
+                    if record.seq()[qpos] != ref_base {
+                        mismatches += 1;
+                    }
+                }
+            }
+            black_box((total_depth, mismatches))
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bgzf_decompress,
@@ -564,5 +689,6 @@ criterion_group!(
     bam_roundtrip,
     pileup_e2e,
     aligned_pairs_walk,
+    pileup_with_reference,
 );
 criterion_main!(benches);
