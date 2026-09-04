@@ -2,7 +2,7 @@
 
 The indexed FASTA reader provides random access to reference genome sequences. It reads `.fai` index files to locate sequence data within plain or bgzip-compressed FASTA files, enabling efficient region queries without scanning the entire file.
 
-Rastair fetches reference sequences once per segment (~100 KB) for each worker thread. The forkable design shares the parsed index across threads while giving each thread its own file handle, matching the `IndexedBamReader` pattern.
+Rastair fetches reference sequences once per segment (~100 KB) for each worker thread. The forkable design shares the parsed index across threads while giving each thread its own read buffer, matching the `IndexedBamReader` pattern. Where a handle has mutable state — the BGZF decoder — each fork opens its own; a plain FASTA handle is shared outright, because positional reads make it stateless.
 
 > **Sources:** The FASTA format and FAI index are not covered by any hts-specs document. The FAI format is defined by samtools (`samtools faidx`); the byte offset formula and field layout are described in the `samtools faidx` man page and implemented in [htslib]. The GZI index format is a htslib convention for bgzip-compressed random-access files, implemented in [htslib] `bgzf.c`. BGZF decompression follows [SAM1] §4.1. The forking and buffer-reuse design are seqair-specific. See [References](./99-references.md).
 
@@ -124,13 +124,13 @@ r[fasta.fork.shared_state]
 The FAI index and GZI index (if applicable) MUST be stored behind `Arc` so forked readers share a single parsed copy. These structures are read-only after initial parsing.
 
 r[fasta.fork.operation]
-`fork()` MUST produce a new reader that shares the same `Arc` as the source (no re-parsing) and opens a fresh `File` handle. Each fork MUST own its own read buffer.
+`fork()` MUST produce a new reader that shares the same `Arc` as the source (no re-parsing). Each fork MUST own its own read buffer. A plain FASTA fork also shares the source's file handle: reads are positional (see `r[fasta.plain.positional_read]`), so there is no cursor for two forks to contend over, and re-opening buys nothing but an `open` syscall per thread. A BGZF fork MUST open a fresh handle, because its decoder carries mutable state.
 
 r[fasta.fork.equivalence]
 A forked reader MUST produce byte-identical results to independently opening the same FASTA file.
 
 r[fasta.fork.independence]
-Forked readers MUST be fully independent for mutable operations. Seeking on one MUST NOT affect any other.
+Forked readers MUST be fully independent for mutable operations: fetching on one MUST NOT affect any other. For plain FASTA that independence comes from positional reads, not from separate file descriptors.
 
 ## Error handling
 
