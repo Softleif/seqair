@@ -358,11 +358,8 @@ impl<'a> HexBytes<'a> {
             return Err(HexDecodeError::OddLength { len: self.0.len() });
         }
         let mut out = Vec::with_capacity(self.0.len() / 2);
-        for (chunk_idx, chunk) in self.0.chunks_exact(2).enumerate() {
-            let [hi_byte, lo_byte] = *chunk else {
-                debug_assert!(false, "chunks_exact(2) must yield 2-byte slices");
-                return Err(HexDecodeError::OddLength { len: self.0.len() });
-            };
+        for (chunk_idx, chunk) in self.0.as_chunks::<2>().0.iter().enumerate() {
+            let [hi_byte, lo_byte] = *chunk;
             let pos = chunk_idx.saturating_mul(2);
             let hi = decode_hex_digit(hi_byte)
                 .ok_or(HexDecodeError::InvalidDigit { pos, byte: hi_byte })?;

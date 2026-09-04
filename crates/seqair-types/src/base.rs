@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn test_u8_to_base_valid() {
-        let valid_bases = [b'A', b'C', b'G', b'T'];
+        let valid_bases = *b"ACGT";
         for &base in &valid_bases {
             let parsed = Base::from(base);
             assert_eq!(*parsed, base);

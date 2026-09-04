@@ -168,10 +168,15 @@ impl<E: CustomizeRecordStore> CustomizeRecordStore for DepthCap<E> {
 
 /// Sum of reference-consuming CIGAR op lengths from raw BAM CIGAR bytes
 /// (`n_cigar_op` little-endian `u32`s: `len << 4 | op`).
-#[allow(clippy::indexing_slicing, reason = "chunks_exact(4) yields exactly 4 bytes")]
+#[allow(clippy::indexing_slicing, reason = "as_chunks(4) yields exactly 4 bytes")]
 fn ref_span_from_cigar(cigar: &[u8]) -> u64 {
     let mut span = 0u64;
-    for chunk in cigar.chunks_exact(4) {
+    debug_assert!(
+        cigar.len().is_multiple_of(4),
+        "BAM CIGAR bytes must be n_cigar_op * 4, got {}",
+        cigar.len()
+    );
+    for chunk in cigar.as_chunks::<4>().0 {
         let val = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         // Reference-consuming ops: M(0), D(2), N(3), =(7), X(8).
         if matches!(val & 0xf, 0 | 2 | 3 | 7 | 8) {

@@ -48,13 +48,13 @@ pub fn qname_hash(name: &[u8]) -> u64 {
     let len = u64::try_from(name.len()).unwrap_or(u64::MAX);
     let mut acc = fold_mul(K0 ^ len, K1);
 
-    let mut chunks = name.chunks_exact(8);
-    for chunk in &mut chunks {
-        let word = u64::from_le_bytes(<[u8; 8]>::try_from(chunk).unwrap_or([0; 8]));
+    let chunks = name.as_chunks::<8>();
+    for chunk in chunks.0 {
+        let word = u64::from_le_bytes(*chunk);
         acc = fold_mul(acc ^ word, K1);
     }
 
-    let rest = chunks.remainder();
+    let rest = chunks.1;
     if !rest.is_empty() {
         let mut buf = [0u8; 8];
         if let Some(head) = buf.get_mut(..rest.len()) {

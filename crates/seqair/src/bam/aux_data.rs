@@ -739,32 +739,42 @@ mod tests {
                     }
                     AuxValue::ArrayU8(a) => drop(built.set_array_u8(*tag, a)),
                     AuxValue::ArrayI16(a) => {
-                        let typed: Vec<i16> = a.chunks_exact(2)
-                            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        debug_assert!(a.len().is_multiple_of(2), "ArrayI16 len {} not 2-aligned", a.len());
+                        let typed: Vec<i16> = a.as_chunks::<2>().0
+                            .iter()
+                            .map(|c| i16::from_le_bytes(*c))
                             .collect();
                         drop(built.set_array_i16(*tag, &typed));
                     }
                     AuxValue::ArrayU16(a) => {
-                        let typed: Vec<u16> = a.chunks_exact(2)
-                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        debug_assert!(a.len().is_multiple_of(2), "ArrayU16 len {} not 2-aligned", a.len());
+                        let typed: Vec<u16> = a.as_chunks::<2>().0
+                            .iter()
+                            .map(|c| u16::from_le_bytes(*c))
                             .collect();
                         drop(built.set_array_u16(*tag, &typed));
                     }
                     AuxValue::ArrayI32(a) => {
-                        let typed: Vec<i32> = a.chunks_exact(4)
-                            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        debug_assert!(a.len().is_multiple_of(4), "ArrayI32 len {} not 4-aligned", a.len());
+                        let typed: Vec<i32> = a.as_chunks::<4>().0
+                            .iter()
+                            .map(|c| i32::from_le_bytes(*c))
                             .collect();
                         drop(built.set_array_i32(*tag, &typed));
                     }
                     AuxValue::ArrayU32(a) => {
-                        let typed: Vec<u32> = a.chunks_exact(4)
-                            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        debug_assert!(a.len().is_multiple_of(4), "ArrayU32 len {} not 4-aligned", a.len());
+                        let typed: Vec<u32> = a.as_chunks::<4>().0
+                            .iter()
+                            .map(|c| u32::from_le_bytes(*c))
                             .collect();
                         drop(built.set_array_u32(*tag, &typed));
                     }
                     AuxValue::ArrayFloat(a) => {
-                        let typed: Vec<f32> = a.chunks_exact(4)
-                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        debug_assert!(a.len().is_multiple_of(4), "ArrayFloat len {} not 4-aligned", a.len());
+                        let typed: Vec<f32> = a.as_chunks::<4>().0
+                            .iter()
+                            .map(|c| f32::from_le_bytes(*c))
                             .collect();
                         drop(built.set_array_f32(*tag, &typed));
                     }

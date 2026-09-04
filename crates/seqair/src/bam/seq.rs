@@ -65,10 +65,8 @@ pub fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
     let full_bytes = len / 2;
     let mut result = vec![0u8; len];
 
-    #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + chunks_exact")]
-    for (chunk, &byte) in
-        result[..full_bytes.saturating_mul(2)].chunks_exact_mut(2).zip(&encoded[..full_bytes])
-    {
+    #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + as_chunks")]
+    for (chunk, &byte) in result.as_chunks_mut::<2>().0.iter_mut().zip(&encoded[..full_bytes]) {
         let pair = DECODE_PAIR[byte as usize];
         chunk[0] = pair[0];
         chunk[1] = pair[1];
@@ -147,10 +145,7 @@ static DECODE_BASE_TYPED: &[u8; 16] = &[
 // r[depends base_decode.table_invariant]
 #[allow(clippy::indexing_slicing, reason = "i < 256, nibbles < 16")]
 static DECODE_PAIR_TYPED: [[u8; 2]; 256] = {
-    const B: [u8; 16] = [
-        b'N', b'A', b'C', b'N', b'G', b'N', b'N', b'N', b'T', b'N', b'N', b'N', b'N', b'N', b'N',
-        b'N',
-    ];
+    const B: [u8; 16] = *b"NACNGNNNTNNNNNNN";
     let mut table = [[0u8; 2]; 256];
     let mut i = 0;
     while i < 256 {
@@ -204,10 +199,8 @@ pub fn decode_bases_into(encoded: &[u8], len: usize, out: &mut [u8]) {
 fn decode_bases_into_scalar(encoded: &[u8], len: usize, out: &mut [u8]) {
     let full_bytes = len / 2;
 
-    #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + chunks_exact")]
-    for (chunk, &byte) in
-        out[..full_bytes.saturating_mul(2)].chunks_exact_mut(2).zip(&encoded[..full_bytes])
-    {
+    #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + as_chunks")]
+    for (chunk, &byte) in out.as_chunks_mut::<2>().0.iter_mut().zip(&encoded[..full_bytes]) {
         let pair = DECODE_PAIR_TYPED[byte as usize];
         chunk[0] = pair[0];
         chunk[1] = pair[1];
@@ -393,10 +386,8 @@ fn decode_bases_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
     let full_bytes = len / 2;
     let mut result = vec![0u8; len];
 
-    #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + chunks_exact")]
-    for (chunk, &byte) in
-        result[..full_bytes.saturating_mul(2)].chunks_exact_mut(2).zip(&encoded[..full_bytes])
-    {
+    #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + as_chunks")]
+    for (chunk, &byte) in result.as_chunks_mut::<2>().0.iter_mut().zip(&encoded[..full_bytes]) {
         let pair = DECODE_PAIR_TYPED[byte as usize];
         chunk[0] = pair[0];
         chunk[1] = pair[1];

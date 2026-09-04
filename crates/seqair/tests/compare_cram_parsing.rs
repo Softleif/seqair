@@ -190,7 +190,7 @@ fn compression_header_has_required_data_series() {
 
     // Substitution matrix should produce valid bases for all ref/code combos
     let sm = &ch.preservation.substitution_matrix;
-    for ref_base in [b'A', b'C', b'G', b'T', b'N'] {
+    for ref_base in *b"ACGTN" {
         for code in 0..4u8 {
             let sub = sm.substitute(ref_base, code);
             assert!(
