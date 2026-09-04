@@ -45,11 +45,11 @@ pub struct SubstitutionMatrix {
 impl SubstitutionMatrix {
     /// Possible read bases for each reference base (excluding the ref itself).
     const READ_BASES: [[u8; 4]; 5] = [
-        [b'C', b'G', b'T', b'N'], // ref A
-        [b'A', b'G', b'T', b'N'], // ref C
-        [b'A', b'C', b'T', b'N'], // ref G
-        [b'A', b'C', b'G', b'N'], // ref T
-        [b'A', b'C', b'G', b'T'], // ref N
+        *b"CGTN", // ref A
+        *b"AGTN", // ref C
+        *b"ACTN", // ref G
+        *b"ACGN", // ref T
+        *b"ACGT", // ref N
     ];
 
     // r[impl cram.compression.substitution_matrix]
@@ -468,11 +468,11 @@ mod tests {
         // Default samtools matrix: for ref A, subs are C(0) G(1) T(2) N(3)
         let sm = SubstitutionMatrix {
             matrix: [
-                [b'C', b'G', b'T', b'N'], // ref A
-                [b'A', b'G', b'T', b'N'], // ref C
-                [b'A', b'C', b'T', b'N'], // ref G
-                [b'A', b'C', b'G', b'N'], // ref T
-                [b'A', b'C', b'G', b'T'], // ref N
+                *b"CGTN", // ref A
+                *b"AGTN", // ref C
+                *b"ACTN", // ref G
+                *b"ACGN", // ref T
+                *b"ACGT", // ref N
             ],
         };
         assert_eq!(sm.substitute(b'A', 0), b'C');
@@ -521,11 +521,11 @@ mod tests {
         fn substitution_matrix_code_in_bounds(ref_idx in 0u8..5, code in 0u8..4) {
             let sm = SubstitutionMatrix {
                 matrix: [
-                    [b'C', b'G', b'T', b'N'],
-                    [b'A', b'G', b'T', b'N'],
-                    [b'A', b'C', b'T', b'N'],
-                    [b'A', b'C', b'G', b'N'],
-                    [b'A', b'C', b'G', b'T'],
+                    *b"CGTN",
+                    *b"AGTN",
+                    *b"ACTN",
+                    *b"ACGN",
+                    *b"ACGT",
                 ],
             };
             let ref_base = match ref_idx {

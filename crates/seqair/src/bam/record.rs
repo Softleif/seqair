@@ -31,10 +31,15 @@ pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos0> {
     debug_assert!(h.cigar_end <= raw.len(), "cigar overrun: {} > {}", h.cigar_end, raw.len());
     #[allow(clippy::indexing_slicing, reason = "cigar_end ≤ raw.len() checked by parse_header")]
     let cigar_bytes = &raw[h.var_start..h.cigar_end];
+    debug_assert!(
+        cigar_bytes.len().is_multiple_of(4),
+        "BAM CIGAR region must be n_cigar_op * 4 bytes, got {}",
+        cigar_bytes.len()
+    );
 
     let mut ref_len: i64 = 0;
-    for chunk in cigar_bytes.chunks_exact(4) {
-        let arr: [u8; 4] = chunk.try_into().expect("chunks_exact(4) yields 4 bytes");
+    for chunk in cigar_bytes.as_chunks::<4>().0 {
+        let arr: [u8; 4] = *chunk;
         let op = u32::from_le_bytes(arr);
         let op_len = i64::from(op >> 4);
         let op_type = (op & 0xF) as u8;
