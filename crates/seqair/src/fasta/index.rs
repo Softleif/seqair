@@ -48,6 +48,12 @@ pub enum FaiEntryError {
     #[error("sequence length is 0 for sequence {name:?}")]
     ZeroLength { name: SmolStr },
 
+    #[error(
+        "qual_offset ({qual_offset}) is not past the sequence offset ({offset}) for sequence \
+         {name:?}; the quality block always follows the sequence block"
+    )]
+    QualBeforeSequence { name: SmolStr, offset: u64, qual_offset: u64 },
+
     #[error("duplicate sequence name {name:?}")]
     DuplicateName { name: SmolStr },
 }
@@ -205,6 +211,22 @@ impl FastaIndex {
                 });
             }
 
+            // r[impl fastq.access.index_format]
+            // The quality block follows the sequence block and the `+` line, so
+            // a non-increasing qual_offset is a corrupt index. This is a
+            // degenerate-case guard only; the enormous-span attack is bounded at
+            // fetch time (see r[fastq.access.indexed_qual]), not here, because
+            // the index carries no length for the quality block.
+            if let Some(qual_offset) = qual_offset
+                && qual_offset <= offset
+            {
+                return Err(FaiError::InvalidEntry {
+                    path: path.to_path_buf(),
+                    line_number: line_num.wrapping_add(1),
+                    kind: FaiEntryError::QualBeforeSequence { name, offset, qual_offset },
+                });
+            }
+
             if name_to_idx.contains_key(&name) {
                 return Err(FaiError::InvalidEntry {
                     path: path.to_path_buf(),
@@ -340,6 +362,35 @@ mod tests {
         assert_eq!(e.byte_offset(50), 6 + 51);
         // Quality geometry mirrors it from `qual_offset`.
         assert_eq!(e.qual_byte_offset(50), Some(120 + 51));
+    }
+
+    // r[verify fastq.access.index_format]
+    #[test]
+    fn rejects_qual_offset_not_past_sequence_offset() {
+        // Equal and reversed are both impossible in a real FASTQ record.
+        for qual in ["6", "5"] {
+            let contents = format!("seq1\t100\t6\t50\t51\t{qual}\n");
+            let err = FastaIndex::parse(&contents, &test_path()).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    FaiError::InvalidEntry {
+                        kind: FaiEntryError::QualBeforeSequence { .. },
+                        ..
+                    }
+                ),
+                "qual_offset={qual}: expected QualBeforeSequence, got {err:?}"
+            );
+        }
+    }
+
+    // r[verify fastq.access.index_format]
+    #[test]
+    fn accepts_qual_offset_just_past_sequence_offset() {
+        // offset=6, qual_offset=7 is legal (quality block starts right after).
+        let contents = "seq1\t100\t6\t50\t51\t7\n";
+        let idx = FastaIndex::parse(contents, &test_path()).unwrap();
+        assert_eq!(idx.get("seq1").unwrap().qual_offset, Some(7));
     }
 
     // r[verify fasta.index.terminator_bound]

@@ -90,6 +90,9 @@ The raw read size MUST account for embedded newlines. For a fetch of `n` bases s
 r[fasta.bgzf.detect]
 The reader MUST auto-detect bgzip compression by reading the first 18 bytes of the file and checking for: (1) gzip magic bytes `1f 8b`, (2) DEFLATE compression method `08`, (3) FEXTRA flag `04`, and (4) the `BC` subfield identifier at bytes 12–13. All four checks MUST pass to identify a file as BGZF. Plain gzip files with the FEXTRA flag but without the BC subfield MUST NOT be misidentified as BGZF.
 
+r[fasta.bgzf.plain_gzip_rejected]
+When the header is not BGZF but begins with the gzip magic `1f 8b`, the file is plain gzip, which has no block boundaries to seek to. Indexed open MUST fail with a diagnostic naming `bgzip`, rather than falling through to the plain-file path — which would `pread` the compressed bytes as if they were sequence and return garbage. This guards FASTA and FASTQ references alike, since both open through `IndexedFastaReader::open`.
+
 r[fasta.bgzf.gzi_required]
 For bgzip FASTA files, a GZI index (`.gzi`) MUST be present alongside the FASTA. The GZI index maps compressed block offsets to uncompressed byte offsets, enabling random access into the compressed data.
 
@@ -135,4 +138,4 @@ Forked readers MUST be fully independent for mutable operations: fetching on one
 ## Error handling
 
 r[fasta.errors]
-All FASTA-specific errors MUST contain context (file paths, sequence names, positions) sufficient to diagnose the problem without a debugger. The implementation MUST NOT use `panic!`, `unwrap()`, `expect()`, or `unreachable!()` — all error paths MUST propagate errors via `Result`.
+All FASTA-specific errors MUST contain context (file paths, sequence names, positions) sufficient to diagnose the problem without a debugger. Error paths MUST propagate via `Result` and MUST NOT use `panic!`, `unwrap()`, or `unreachable!()`. `expect()` is permitted only where its message names a caller-established invariant that earlier validation already guarantees (e.g. `linebases != 0` enforced by the FAI parser, `stop > start` enforced by the bounds check) — those are unreachable-on-valid-input assertions, not error paths.

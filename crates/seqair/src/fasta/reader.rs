@@ -46,6 +46,13 @@ pub enum FastaError {
         source: GziError,
     },
 
+    // r[impl fasta.bgzf.plain_gzip_rejected]
+    #[error(
+        "compressed reference {path} is plain gzip, not BGZF — indexed access needs block \
+         boundaries; recompress with `bgzip` (then `samtools faidx`)"
+    )]
+    PlainGzipUnsupported { path: PathBuf },
+
     #[error("I/O error reading FASTA {path}")]
     Read { path: PathBuf, source: std::io::Error },
 
@@ -167,41 +174,45 @@ impl IndexedFastaReader<File> {
         let index = FastaIndex::from_file(&fai_path)?;
 
         // r[impl fasta.bgzf.detect]
-        let is_bgzf = detect_bgzf(path)?;
+        // r[impl fasta.bgzf.plain_gzip_rejected]
+        // One open and one header read classify the file. The plain handle is
+        // reused below, so a plain reference is opened exactly once.
+        let (file, format) = sniff_reference(path)?;
+        let is_bgzf = matches!(format, RefFormat::Bgzf);
 
         // r[impl fasta.bgzf.gzi_required]
-        let gzi = if is_bgzf {
-            let gzi_path = gzi_path_for(path);
-            // r[impl fasta.bgzf.gzi_missing]
-            if !gzi_path.exists() {
-                return Err(FastaError::GziIndexNotFound {
-                    fasta_path: path.to_path_buf(),
-                    expected_path: gzi_path,
-                });
-            }
-            Some(GziIndex::from_file(&gzi_path)?)
-        } else {
-            None
-        };
-
         // r[impl fasta.index.data_bound]
-        let (handle, data_len) = if is_bgzf {
-            let compressed_len = std::fs::metadata(path)
-                .map_err(|source| FastaError::Read { path: path.to_path_buf(), source })?
-                .len();
-            let bound = gzi
-                .as_ref()
-                .map_or(0, GziIndex::max_uncompressed_size)
-                .min(max_bgzf_expansion(compressed_len));
-            (FileHandle::Bgzf(BgzfReader::open(path)?), bound)
-        } else {
-            let file = File::open(path)
-                .map_err(|source| FastaError::Read { path: path.to_path_buf(), source })?;
-            let len = file
-                .metadata()
-                .map_err(|source| FastaError::Read { path: path.to_path_buf(), source })?
-                .len();
-            (FileHandle::Plain(Arc::new(file)), len)
+        let (handle, gzi, data_len) = match format {
+            RefFormat::PlainGzip => {
+                return Err(FastaError::PlainGzipUnsupported { path: path.to_path_buf() });
+            }
+            RefFormat::Bgzf => {
+                let gzi_path = gzi_path_for(path);
+                // r[impl fasta.bgzf.gzi_missing]
+                if !gzi_path.exists() {
+                    return Err(FastaError::GziIndexNotFound {
+                        fasta_path: path.to_path_buf(),
+                        expected_path: gzi_path,
+                    });
+                }
+                let gzi = GziIndex::from_file(&gzi_path)?;
+                let compressed_len = file
+                    .metadata()
+                    .map_err(|source| FastaError::Read { path: path.to_path_buf(), source })?
+                    .len();
+                let bound = gzi.max_uncompressed_size().min(max_bgzf_expansion(compressed_len));
+                (FileHandle::Bgzf(BgzfReader::open(path)?), Some(gzi), bound)
+            }
+            RefFormat::Plain => {
+                // The header read left the cursor advanced, but every plain read
+                // is positional, so it does not matter — and forks share this
+                // handle for the same reason.
+                let len = file
+                    .metadata()
+                    .map_err(|source| FastaError::Read { path: path.to_path_buf(), source })?
+                    .len();
+                (FileHandle::Plain(Arc::new(file)), None, len)
+            }
         };
 
         Ok(IndexedFastaReader {
@@ -493,28 +504,62 @@ fn gzi_path_for(fasta_path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// What the leading bytes of a reference file say about its format, decided
+/// from one open and one header read.
+#[derive(Debug, Clone, Copy)]
+enum RefFormat {
+    /// Uncompressed sequence data — safe to read positionally.
+    Plain,
+    /// Begins with the gzip magic but is not BGZF: no block boundaries, so it
+    /// cannot support indexed access.
+    PlainGzip,
+    /// BGZF: gzip magic plus the `BC` extra subfield.
+    Bgzf,
+}
+
 // r[impl fasta.bgzf.detect]
-fn detect_bgzf(path: &Path) -> Result<bool, FastaError> {
+// r[impl fasta.bgzf.plain_gzip_rejected]
+/// Open `path` once and read its leading header to classify it. The handle is
+/// returned advanced past the header; that is harmless, because the only caller
+/// that keeps it is the plain path and every plain fetch is positional. BGZF
+/// opens its own decoding handle, so this one is dropped there.
+fn sniff_reference(path: &Path) -> Result<(File, RefFormat), FastaError> {
     let mut file =
         File::open(path).map_err(|source| FastaError::Read { path: path.to_path_buf(), source })?;
 
-    // Full BGZF header is 18 bytes: 10-byte gzip header + 2 XLEN + 6 BC subfield.
-    // Check gzip magic (1f 8b), DEFLATE method (08), FEXTRA flag (04),
-    // then verify XLEN and BC subfield presence.
+    // A full BGZF header is 18 bytes: 10-byte gzip header + 2 XLEN + 6-byte BC
+    // subfield. Read up to that many, tolerating a shorter file and retrying on
+    // interruption (which a plain `read_exact` would do, but not on EOF).
     let mut header = [0u8; 18];
-    match file.read_exact(&mut header) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
-        Err(source) => return Err(FastaError::Read { path: path.to_path_buf(), source }),
+    let mut got = 0usize;
+    while got < header.len() {
+        // `got < header.len()` guarantees a non-exhausted buffer.
+        let rest =
+            header.get_mut(got..).expect("got < header.len() keeps the buffer non-empty");
+        match file.read(rest) {
+            Ok(0) => break,
+            Ok(n) => got = got.saturating_add(n),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(source) => return Err(FastaError::Read { path: path.to_path_buf(), source }),
+        }
     }
 
-    // Bytes 0-3: gzip magic + method + FEXTRA flag
-    if header.get(..4) != Some(&[0x1f, 0x8b, 0x08, 0x04]) {
-        return Ok(false);
-    }
-
-    // Bytes 12-13: BC subfield identifier
-    Ok(header.get(12..14) == Some(b"BC"))
+    // BGZF: gzip magic (1f 8b) + DEFLATE method (08) + FEXTRA flag (04), then the
+    // `BC` subfield identifier at bytes 12-13. All four must hold, and the file
+    // must be at least that long.
+    let is_bgzf = got == header.len()
+        && header.get(..4) == Some(&[0x1f, 0x8b, 0x08, 0x04])
+        && header.get(12..14) == Some(b"BC");
+    let format = if is_bgzf {
+        RefFormat::Bgzf
+    } else if header.get(..2) == Some(&[0x1f, 0x8b]) {
+        // Plain gzip: has the magic but failed the BGZF checks, so no seekable
+        // block boundaries exist.
+        RefFormat::PlainGzip
+    } else {
+        RefFormat::Plain
+    };
+    Ok((file, format))
 }
 
 #[cfg(test)]
@@ -664,6 +709,30 @@ mod tests {
             }
             _ => panic!("expected FaiIndexNotFound, got {err:?}"),
         }
+    }
+
+    // r[verify fasta.bgzf.plain_gzip_rejected]
+    #[test]
+    fn plain_gzip_reference_is_rejected_with_bgzip_hint() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        let dir = TempDir::new().unwrap();
+        // A plain-gzip (NOT bgzf) reference: the indexed reader must refuse it
+        // rather than `pread` the compressed bytes as sequence.
+        let fasta_path = dir.path().join("plain.fa.gz");
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(b">seq1\nACGTACGTAC\n").unwrap();
+        std::fs::write(&fasta_path, enc.finish().unwrap()).unwrap();
+        // A well-formed 5-column FAI; rejection happens before it is used.
+        std::fs::write(dir.path().join("plain.fa.gz.fai"), "seq1\t10\t6\t10\t11\n").unwrap();
+
+        let err = IndexedFastaReader::open(&fasta_path).unwrap_err();
+        match &err {
+            FastaError::PlainGzipUnsupported { path } => assert_eq!(path, &fasta_path),
+            other => panic!("expected PlainGzipUnsupported, got {other:?}"),
+        }
+        assert!(err.to_string().contains("bgzip"), "diagnostic must name bgzip: {err}");
     }
 
     // r[impl fasta.fork.equivalence]
