@@ -103,8 +103,10 @@ enum FileHandle<R: Read + Seek> {
     /// Plain FASTA is always a real file on disk — the in-memory constructor
     /// only ever builds [`FileHandle::Bgzf`] — so this variant is concrete.
     /// That lets the fetch path issue a positional read instead of moving a
-    /// stream cursor it would otherwise have to own.
-    Plain(File),
+    /// stream cursor it would otherwise have to own, which in turn lets forks
+    /// share one handle: a positional read has no state for two forks to
+    /// disagree about.
+    Plain(Arc<File>),
     Bgzf(BgzfReader<R>),
 }
 
@@ -198,7 +200,7 @@ impl IndexedFastaReader<File> {
                 .metadata()
                 .map_err(|source| FastaError::Read { path: path.to_path_buf(), source })?
                 .len();
-            (FileHandle::Plain(file), len)
+            (FileHandle::Plain(Arc::new(file)), len)
         };
 
         Ok(IndexedFastaReader {
@@ -218,14 +220,13 @@ impl IndexedFastaReader<File> {
     // r[impl fasta.fork.independence]
     #[instrument(level = "debug", skip(self), fields(path = %self.shared.fasta_path.display()))]
     pub fn fork(&self) -> Result<Self, FastaError> {
-        let handle = if self.shared.is_bgzf {
-            FileHandle::Bgzf(BgzfReader::open(&self.shared.fasta_path)?)
-        } else {
-            let file = File::open(&self.shared.fasta_path).map_err(|source| FastaError::Read {
-                path: self.shared.fasta_path.clone(),
-                source,
-            })?;
-            FileHandle::Plain(file)
+        // A plain FASTA fork reuses the handle: reads are positional, so there
+        // is no cursor to keep consistent and no `open` syscall to pay per
+        // thread. BGZF owns a decode cursor and a block buffer, so it MUST get
+        // a handle of its own.
+        let handle = match &self.handle {
+            FileHandle::Plain(file) => FileHandle::Plain(Arc::clone(file)),
+            FileHandle::Bgzf(_) => FileHandle::Bgzf(BgzfReader::open(&self.shared.fasta_path)?),
         };
 
         Ok(IndexedFastaReader {
@@ -402,7 +403,7 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
                 // and the syscalls are the bulk of a fetch's fixed cost — the
                 // pileup takes one reference slice per segment, so halving that
                 // cost is worth more here than any bulk-copy tuning.
-                read_exact_at(file, &mut self.raw_buf, start_byte).map_err(|source| {
+                read_exact_at(file.as_ref(), &mut self.raw_buf, start_byte).map_err(|source| {
                     FastaError::Read { path: self.shared.fasta_path.clone(), source }
                 })?;
             }
@@ -715,6 +716,35 @@ mod tests {
         assert_eq!(s2, b"GGCC");
         assert_eq!(s3, b"GGCC");
         assert_eq!(s4, b"ACGT");
+    }
+
+    // r[verify fasta.fork.independence]
+    /// Plain FASTA forks share one file handle, so concurrent fetches contend
+    /// on it by design. They must still come out correct: a positional read
+    /// cannot disturb another thread's read.
+    #[test]
+    fn plain_forks_fetch_concurrently_on_one_handle() {
+        let dir = TempDir::new().unwrap();
+        let (fasta_path, _) = make_plain_fasta(&dir);
+
+        let reader = IndexedFastaReader::open(&fasta_path).unwrap();
+        let forks: Vec<_> = (0..8).map(|_| reader.fork().unwrap()).collect();
+
+        let handles = forks.into_iter().map(|mut forked| {
+            std::thread::spawn(move || {
+                let mut ok = true;
+                for _ in 0..256 {
+                    ok &= forked.fetch_seq("seq1", p(0), p(8)).unwrap() == b"ACGTTGCA";
+                    ok &= forked.fetch_seq("seq1", p(2), p(6)).unwrap() == b"GTTG";
+                    ok &= forked.fetch_seq("seq2", p(0), p(4)).unwrap() == b"GGCC";
+                }
+                ok
+            })
+        });
+
+        for handle in handles {
+            assert!(handle.join().unwrap(), "concurrent fetch returned wrong bytes");
+        }
     }
 
     #[test]
