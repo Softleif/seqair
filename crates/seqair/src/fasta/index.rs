@@ -79,9 +79,10 @@ pub struct FaiEntry {
 impl FaiEntry {
     // r[impl fasta.index.offset_calculation]
     // r[impl fasta.index.terminator_bound]
-    /// Byte offset of the base at 0-based position `pos`, or `None` if the
-    /// entry's `offset` combined with `pos` overflows `u64` — a hostile or
-    /// corrupt index, since no real file is that large. Checked rather than
+    /// Byte offset of the base at 0-based position `pos`, or `None` if
+    /// `linebases == 0` (division by zero) or the entry's `offset` combined
+    /// with `pos` overflows `u64` — either way a hostile or corrupt entry,
+    /// since a real `.fai` never produces either. Checked rather than
     /// wrapping arithmetic matters here: `offset` is untrusted and can sit
     /// near `u64::MAX`, and wrapping would silently fold it back into a
     /// small, in-bounds-looking offset instead of surfacing the corruption.
@@ -91,23 +92,20 @@ impl FaiEntry {
 
     // r[impl fastq.access.indexed_qual]
     /// Byte offset of the quality character for `pos`, or `None` for a FASTA
-    /// index or on `u64` overflow (see [`byte_offset`](Self::byte_offset)).
+    /// index or on failure (see [`byte_offset`](Self::byte_offset)).
     /// `samtools fqidx` likewise assumes the quality block repeats the
     /// sequence block's line geometry.
     pub fn qual_byte_offset(&self, pos: u64) -> Option<u64> {
         self.offset_from(self.qual_offset?, pos)
     }
 
-    #[allow(
-        clippy::unwrap_in_result,
-        reason = "linebases == 0 is rejected by the FAI parser (ZeroLinebases), so this expect \
-                  documents an internal invariant, not a fallible input"
-    )]
+    // `FaiEntry`'s fields are public, so a caller can build one directly with
+    // `linebases == 0` without going through the parser's `ZeroLinebases`
+    // check — this MUST NOT rely on that check as an invariant. `checked_div`/
+    // `checked_rem` fail closed via `?` instead of panicking.
     fn offset_from(&self, base: u64, pos: u64) -> Option<u64> {
-        let line =
-            pos.checked_div(self.linebases).expect("linebases is non-zero, enforced by FAI parser");
-        let col =
-            pos.checked_rem(self.linebases).expect("linebases is non-zero, enforced by FAI parser");
+        let line = pos.checked_div(self.linebases)?;
+        let col = pos.checked_rem(self.linebases)?;
         line.checked_mul(self.linewidth)?.checked_add(col)?.checked_add(base)
     }
 
@@ -584,6 +582,25 @@ mod tests {
         };
         // pos 50 → 10 + 1*52 + 0 = 62 (skips \r\n)
         assert_eq!(entry.byte_offset(50), Some(62));
+    }
+
+    // r[verify fasta.index.offset_calculation]
+    /// `FaiEntry`'s fields are public, so a caller can build one with
+    /// `linebases == 0` without going through the parser's `ZeroLinebases`
+    /// check. `byte_offset` must fail closed (`None`), not panic on the
+    /// division its `Option` signature promises to guard against.
+    #[test]
+    fn byte_offset_returns_none_for_hand_built_zero_linebases() {
+        let entry = FaiEntry {
+            name: "s".into(),
+            length: 4,
+            offset: 0,
+            linebases: 0,
+            linewidth: 0,
+            qual_offset: Some(0),
+        };
+        assert_eq!(entry.byte_offset(0), None);
+        assert_eq!(entry.qual_byte_offset(0), None);
     }
 
     #[test]
