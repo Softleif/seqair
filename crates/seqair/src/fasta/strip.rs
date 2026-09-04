@@ -127,7 +127,8 @@ unsafe fn find_newline_avx2(raw: &[u8], from: usize) -> Option<usize> {
         // Safety: `i + 32 <= len` keeps the load inside the slice.
         let mask = unsafe {
             let chunk = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
-            let hit = _mm256_or_si256(_mm256_cmpeq_epi8(chunk, v_lf), _mm256_cmpeq_epi8(chunk, v_cr));
+            let hit =
+                _mm256_or_si256(_mm256_cmpeq_epi8(chunk, v_lf), _mm256_cmpeq_epi8(chunk, v_cr));
             _mm256_movemask_epi8(hit)
         };
         if mask != 0 {

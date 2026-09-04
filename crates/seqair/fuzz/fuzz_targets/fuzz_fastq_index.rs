@@ -47,11 +47,7 @@ struct Input {
 fn sanitize(name: &str) -> String {
     let cleaned: String =
         name.chars().filter(|c| *c != '\t' && *c != '\n' && *c != '\r').take(64).collect();
-    if cleaned.is_empty() {
-        "seq".to_owned()
-    } else {
-        cleaned
-    }
+    if cleaned.is_empty() { "seq".to_owned() } else { cleaned }
 }
 
 fn build_fai(entries: &[Entry]) -> (String, Vec<String>) {

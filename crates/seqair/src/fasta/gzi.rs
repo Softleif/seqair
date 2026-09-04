@@ -156,9 +156,7 @@ impl GziIndex {
     /// index that lies about how long a sequence is.
     pub fn max_uncompressed_size(&self) -> u64 {
         const MAX_BLOCK: u64 = 1 << 16;
-        self.entries
-            .last()
-            .map_or(MAX_BLOCK, |e| e.uncompressed_offset.saturating_add(MAX_BLOCK))
+        self.entries.last().map_or(MAX_BLOCK, |e| e.uncompressed_offset.saturating_add(MAX_BLOCK))
     }
 
     // r[impl fasta.gzi.translate]
