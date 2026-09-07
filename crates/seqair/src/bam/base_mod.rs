@@ -8,7 +8,7 @@
 //! positions into stored-sequence coordinates up front — subsequent queries
 //! never re-read the strand.
 
-use seqair_types::Base;
+use seqair_types::{Base, QPos};
 use thiserror::Error;
 
 use super::aux::{AuxValue, GetAuxError, find_tag};
@@ -233,8 +233,11 @@ impl BaseModState {
     // r[impl base_mod.query_qpos]
     /// All modifications called at the given stored-sequence position, or
     /// `None` if no call is present.
-    pub fn mod_at_qpos(&self, qpos: usize) -> Option<&[Modification]> {
-        let target = u32::try_from(qpos).ok()?;
+    ///
+    /// Takes a [`QPos`] — an offset into the read's sequence — not a genomic
+    /// position; see [`QPos`] for why the two are separate types.
+    pub fn mod_at_qpos(&self, qpos: QPos) -> Option<&[Modification]> {
+        let target = qpos.get();
         let lo = self.qpos.partition_point(|&q| q < target);
         let hi = self.qpos.partition_point(|&q| q <= target);
         if lo == hi {
@@ -254,7 +257,7 @@ impl BaseModState {
     ) -> Option<&[Modification]> {
         match cigar.pos_info_at(ref_pos)? {
             CigarPosInfo::Match { qpos } | CigarPosInfo::Insertion { qpos, .. } => {
-                self.mod_at_qpos(qpos.as_usize())
+                self.mod_at_qpos(qpos)
             }
             CigarPosInfo::Deletion { .. }
             | CigarPosInfo::RefSkip
@@ -265,7 +268,7 @@ impl BaseModState {
     // r[impl base_mod.implicit_explicit]
     /// Whether `qpos` is definitively unmodified, definitively modified, or
     /// unknown.
-    pub fn is_unmodified(&self, qpos: usize, canonical_base: Base) -> Option<bool> {
+    pub fn is_unmodified(&self, qpos: QPos, canonical_base: Base) -> Option<bool> {
         if self.mod_at_qpos(qpos).is_some() {
             return Some(false);
         }
@@ -575,14 +578,14 @@ mod tests {
         let state = BaseModState::parse(b"C+m,0,2;", &[200, 180], &s, false).unwrap();
         assert_eq!(state.len(), 2);
         // First C is at qpos 1; after skipping 2 C's (5, 7), next is at 10.
-        let m1 = state.mod_at_qpos(1).unwrap();
+        let m1 = state.mod_at_qpos(QPos::new(1)).unwrap();
         assert_eq!(m1.len(), 1);
         assert_eq!(m1[0].probability, 200);
         assert!(matches!(m1[0].mod_type, ModType::Code(b'm')));
         assert_eq!(m1[0].canonical_base, C);
         assert!(matches!(m1[0].strand, ModStrand::Plus));
 
-        let m2 = state.mod_at_qpos(10).unwrap();
+        let m2 = state.mod_at_qpos(QPos::new(10)).unwrap();
         assert_eq!(m2[0].probability, 180);
     }
 
@@ -591,9 +594,9 @@ mod tests {
     fn delta_zero_is_first_occurrence() {
         let s = seq(&[A, C, C, C]);
         let state = BaseModState::parse(b"C+m,0;", &[128], &s, false).unwrap();
-        assert_eq!(state.mod_at_qpos(1).unwrap()[0].probability, 128);
-        assert!(state.mod_at_qpos(0).is_none());
-        assert!(state.mod_at_qpos(2).is_none());
+        assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability, 128);
+        assert!(state.mod_at_qpos(QPos::new(0)).is_none());
+        assert!(state.mod_at_qpos(QPos::new(2)).is_none());
     }
 
     // r[verify base_mod.reverse_complement]
@@ -612,9 +615,9 @@ mod tests {
         // pos 5) should map to stored pos 1.
         let stored = seq(&[C, G, T, A, C, G, T]);
         let state = BaseModState::parse(b"C+m,0,0;", &[200, 210], &stored, true).unwrap();
-        let m_first = state.mod_at_qpos(5).unwrap();
+        let m_first = state.mod_at_qpos(QPos::new(5)).unwrap();
         assert_eq!(m_first[0].probability, 200);
-        let m_second = state.mod_at_qpos(1).unwrap();
+        let m_second = state.mod_at_qpos(QPos::new(1)).unwrap();
         assert_eq!(m_second[0].probability, 210);
     }
 
@@ -624,8 +627,8 @@ mod tests {
         let s = seq(&[A, C, G, C, G, A, C, G]);
         let state = BaseModState::parse(b"C+m,0;C+h,1;", &[200, 150], &s, false).unwrap();
         // m on the 0th C (qpos 1); h on the 1st C (qpos 3) after skipping 1.
-        assert!(matches!(state.mod_at_qpos(1).unwrap()[0].mod_type, ModType::Code(b'm')));
-        assert!(matches!(state.mod_at_qpos(3).unwrap()[0].mod_type, ModType::Code(b'h')));
+        assert!(matches!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].mod_type, ModType::Code(b'm')));
+        assert!(matches!(state.mod_at_qpos(QPos::new(3)).unwrap()[0].mod_type, ModType::Code(b'h')));
     }
 
     // r[verify base_mod.parse_mm]
@@ -635,13 +638,13 @@ mod tests {
         // 4 C's at qpos 1, 3, 5, 7. delta 0 → C@1; delta 2 → skip 2 more (3,5) → C@7.
         let s = seq(&[A, C, A, C, A, C, A, C]);
         let state = BaseModState::parse(b"C+mh,0,2;", &[200, 100, 220, 120], &s, false).unwrap();
-        let at1 = state.mod_at_qpos(1).unwrap();
+        let at1 = state.mod_at_qpos(QPos::new(1)).unwrap();
         assert_eq!(at1.len(), 2);
         assert!(matches!(at1[0].mod_type, ModType::Code(b'm')));
         assert_eq!(at1[0].probability, 200);
         assert!(matches!(at1[1].mod_type, ModType::Code(b'h')));
         assert_eq!(at1[1].probability, 100);
-        let at7 = state.mod_at_qpos(7).unwrap();
+        let at7 = state.mod_at_qpos(QPos::new(7)).unwrap();
         assert_eq!(at7.len(), 2);
         assert_eq!(at7[0].probability, 220);
         assert_eq!(at7[1].probability, 120);
@@ -652,7 +655,7 @@ mod tests {
     fn parses_chebi_code() {
         let s = seq(&[A, C, G, T]);
         let state = BaseModState::parse(b"C+27551,0;", &[200], &s, false).unwrap();
-        assert!(matches!(state.mod_at_qpos(1).unwrap()[0].mod_type, ModType::ChEBI(27551)));
+        assert!(matches!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].mod_type, ModType::ChEBI(27551)));
     }
 
     // r[verify base_mod.implicit_explicit]
@@ -674,15 +677,15 @@ mod tests {
         // unlisted C's is unknown.
         let state = BaseModState::parse(b"C+m.,0;C+h,1;", &[200, 150], &s, false).unwrap();
         // Position 1 has a 5mC call — Some(false).
-        assert_eq!(state.is_unmodified(1, C), Some(false));
+        assert_eq!(state.is_unmodified(QPos::new(1), C), Some(false));
         // Position 3 has a 5hmC call — Some(false).
-        assert_eq!(state.is_unmodified(3, C), Some(false));
+        assert_eq!(state.is_unmodified(QPos::new(3), C), Some(false));
         // Position 5 has neither call. Per the spec: because at least one
         // C-entry is `Unmodified`, this returns `Some(true)`. The contract
         // is "no Unmodified-mode modification of this canonical base at qpos",
         // NOT "no modification of any kind at qpos".
         assert_eq!(
-            state.is_unmodified(5, C),
+            state.is_unmodified(QPos::new(5), C),
             Some(true),
             "is_unmodified is per-canonical-base, not per-mod-type"
         );
@@ -695,17 +698,17 @@ mod tests {
 
         // Implicit mode: unlisted positions are unknown.
         let implicit = BaseModState::parse(b"C+m,0;", &[200], &s, false).unwrap();
-        assert_eq!(implicit.is_unmodified(1, C), Some(false));
-        assert_eq!(implicit.is_unmodified(3, C), None);
+        assert_eq!(implicit.is_unmodified(QPos::new(1), C), Some(false));
+        assert_eq!(implicit.is_unmodified(QPos::new(3), C), None);
 
         // Explicit `.`: unlisted positions are definitively unmodified.
         let explicit = BaseModState::parse(b"C+m.,0;", &[200], &s, false).unwrap();
-        assert_eq!(explicit.is_unmodified(1, C), Some(false));
-        assert_eq!(explicit.is_unmodified(3, C), Some(true));
+        assert_eq!(explicit.is_unmodified(QPos::new(1), C), Some(false));
+        assert_eq!(explicit.is_unmodified(QPos::new(3), C), Some(true));
 
         // Ambiguous `?`: same observable behavior as Implicit.
         let ambiguous = BaseModState::parse(b"C+m?,0;", &[200], &s, false).unwrap();
-        assert_eq!(ambiguous.is_unmodified(3, C), None);
+        assert_eq!(ambiguous.is_unmodified(QPos::new(3), C), None);
     }
 
     // r[verify base_mod.query_refpos]
@@ -774,8 +777,8 @@ mod tests {
         let s = seq(&[A, C, G]);
         let state = BaseModState::parse(b"", &[], &s, false).unwrap();
         assert!(state.is_empty());
-        assert!(state.mod_at_qpos(1).is_none());
-        assert_eq!(state.is_unmodified(1, C), None);
+        assert!(state.mod_at_qpos(QPos::new(1)).is_none());
+        assert_eq!(state.is_unmodified(QPos::new(1), C), None);
     }
 
     #[test]
@@ -789,14 +792,14 @@ mod tests {
     fn strand_minus_parses() {
         let s = seq(&[A, C, G]);
         let state = BaseModState::parse(b"C-m,0;", &[200], &s, false).unwrap();
-        assert!(matches!(state.mod_at_qpos(1).unwrap()[0].strand, ModStrand::Minus));
+        assert!(matches!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].strand, ModStrand::Minus));
     }
 
     #[test]
     fn lowercase_canonical_base() {
         let s = seq(&[A, C, G]);
         let state = BaseModState::parse(b"c+m,0;", &[200], &s, false).unwrap();
-        assert_eq!(state.mod_at_qpos(1).unwrap()[0].canonical_base, C);
+        assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].canonical_base, C);
     }
 
     #[test]
@@ -805,8 +808,8 @@ mod tests {
         let s = seq(&[A, C, G, C, G, C]);
         // C+m,2 → skip 2 C's → C@5. C+h,0 → C@1.
         let state = BaseModState::parse(b"C+m,2;C+h,0;", &[200, 100], &s, false).unwrap();
-        assert!(matches!(state.mod_at_qpos(1).unwrap()[0].mod_type, ModType::Code(b'h')));
-        assert!(matches!(state.mod_at_qpos(5).unwrap()[0].mod_type, ModType::Code(b'm')));
+        assert!(matches!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].mod_type, ModType::Code(b'h')));
+        assert!(matches!(state.mod_at_qpos(QPos::new(5)).unwrap()[0].mod_type, ModType::Code(b'm')));
     }
 
     // r[verify base_mod.validation]
@@ -893,8 +896,8 @@ mod tests {
         let expected = BaseModState::parse(b"C+m,0,2;", &[200, 180], &bases, false).unwrap();
 
         assert_eq!(from_rec.len(), expected.len());
-        let m_from = from_rec.mod_at_qpos(1).unwrap();
-        let m_exp = expected.mod_at_qpos(1).unwrap();
+        let m_from = from_rec.mod_at_qpos(QPos::new(1)).unwrap();
+        let m_exp = expected.mod_at_qpos(QPos::new(1)).unwrap();
         assert_eq!(m_from.len(), m_exp.len());
         assert_eq!(m_from[0].probability, m_exp[0].probability);
         assert_eq!(m_from[0].canonical_base, m_exp[0].canonical_base);
@@ -1026,8 +1029,8 @@ mod tests {
 
         let rec = store.record(idx);
         let state = BaseModState::from_record(rec, &store).unwrap().expect("MM present");
-        assert_eq!(state.mod_at_qpos(5).unwrap()[0].probability, 200);
-        assert_eq!(state.mod_at_qpos(1).unwrap()[0].probability, 210);
+        assert_eq!(state.mod_at_qpos(QPos::new(5)).unwrap()[0].probability, 200);
+        assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability, 210);
     }
 
     // ---------------- proptest oracles for the validation paths ----------------

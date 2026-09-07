@@ -63,7 +63,7 @@ The resolved positions are stored internally as a sorted list for efficient look
 ### Query API
 
 r[base_mod.query_qpos]
-`BaseModState` MUST provide `mod_at_qpos(qpos: usize) -> Option<&[Modification]>` to look up modifications at a given query-sequence position. Returns `None` if no modification is called at that position. Multiple modification types at the same position (e.g. 5mC and 5hmC on the same C) MUST all be returned.
+`BaseModState` MUST provide `mod_at_qpos(qpos: QPos) -> Option<&[Modification]>` to look up modifications at a given query-sequence position. The position uses the typed `QPos` newtype (defined in `seqair-types`, see `r[qpos.type]` in [docs/spec/0-1-pos.md](./0-1-pos.md)) rather than a raw `usize` so a genomic position cannot be passed where a read offset is expected — the same mistake class `QPos` exists to prevent. Returns `None` if no modification is called at that position. Multiple modification types at the same position (e.g. 5mC and 5hmC on the same C) MUST all be returned.
 
 r[base_mod.query_refpos]
 `BaseModState` MUST provide `mod_at_ref_pos(ref_pos: Pos0, cigar: &CigarMapping) -> Option<&[Modification]>` to look up modifications at a reference position. The position uses the typed `Pos0` newtype (defined in `seqair-types`, see `r[pos.type]` in [docs/spec/0-1-pos.md](./0-1-pos.md)) rather than a raw `i64` to prevent off-by-one and signedness mistakes at the call site. This maps the reference position to a query position via the CIGAR, then delegates to `mod_at_qpos`. Returns `None` if the reference position falls in a deletion/ref-skip (no qpos) or has no modification.
@@ -77,7 +77,7 @@ r[base_mod.query_refpos]
 > - `strand`: `+` or `-`
 
 > r[base_mod.implicit_explicit]
-> `BaseModState` MUST track the mode marker per entry as one of `Implicit` (no marker), `Unmodified` (`.`), or `Ambiguous` (`?`). A `is_unmodified(qpos: usize, canonical_base: Base) -> Option<bool>` accessor MUST return:
+> `BaseModState` MUST track the mode marker per entry as one of `Implicit` (no marker), `Unmodified` (`.`), or `Ambiguous` (`?`). A `is_unmodified(qpos: QPos, canonical_base: Base) -> Option<bool>` accessor MUST return:
 >
 > - `Some(true)` if the position's canonical base has an `Unmodified`-mode entry and the position is not listed (definitively unmodified)
 > - `Some(false)` if the position has a modification call
@@ -88,7 +88,7 @@ The accessor's scope is **per canonical base, not per modification type**. If tw
 ### Pileup integration
 
 > r[base_mod.pileup_integration]
-> _Deferred to a follow-up milestone._ The pileup engine will eventually expose modifications via a separate accessor on `PileupColumn` (NOT by extending `PileupOp`, which has a ≤16 byte size constraint):
+> _Deferred to a follow-up milestone._ The pileup engine will eventually expose modifications via a separate accessor on `PileupColumn` (NOT by extending `PileupOp`, which has a ≤12 byte size constraint):
 >
 > ```
 > column.modification_at(alignment_idx: usize) -> Option<&[Modification]>

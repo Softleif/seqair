@@ -28,7 +28,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{BaseModState, ModType};
-use seqair_types::{BamFlags, Base, BaseQuality};
+use seqair_types::{BamFlags, Base, BaseQuality, QPos};
 const FLAG_REVERSE: u16 = 0x10;
 use std::path::Path;
 
@@ -130,14 +130,18 @@ fn mod_code_for(mt: ModType) -> Option<i32> {
 
 fn seqair_calls(state: &BaseModState, seq_len: usize) -> Vec<Call> {
     let mut out = Vec::new();
-    for qp in 0..seq_len {
+    for qp in (0..seq_len).map(|q| QPos::new(u32::try_from(q).unwrap())) {
         if let Some(mods) = state.mod_at_qpos(qp) {
             for m in mods {
                 let mod_code = mod_code_for(m.mod_type)
                     .unwrap_or_else(|| panic!("`ChEBI` id does not fit in i32: {:?}", m.mod_type));
                 // htslib reports qual=-1 when ML entry is missing. We always
                 // have a probability (u8) so report it as-is.
-                out.push(Call { qpos: qp as u32, mod_code, probability: i32::from(m.probability) });
+                out.push(Call {
+                    qpos: qp.get(),
+                    mod_code,
+                    probability: i32::from(m.probability),
+                });
             }
         }
     }
