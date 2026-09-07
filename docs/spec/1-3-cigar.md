@@ -54,7 +54,7 @@ r[cigar.compact_op_position_invariant]
 `CompactOp::ref_start` is stored as `i32`. Since BAM positions are defined as `i32` values (max 2^31 - 1), this is sufficient. The construction of `CompactOp` MUST assert (via `debug_assert!`) that the computed reference position fits in `i32`.
 
 r[cigar.soft_clip_qpos]
-`CigarMapping::soft_clip_qpos_at(ref_pos, max_overhang, query_len)` projects a *soft-clipped* base onto a reference position by gapless diagonal extension of the read past its alignment boundary. It MUST return `Some(query_pos)` only when `ref_pos` lies within `min(max_overhang, clip_len)` reference bases of the alignment on a side that carries a soft clip — `[aln_start - k, aln_start)` for the leading clip and `[aln_end, aln_end + k)` for the trailing clip — where `aln_end` is one past the last reference-consuming op. It MUST return `None` everywhere `qpos_at` (r[cigar.qpos_at]) returns `Some` (i.e. inside the alignment), beyond the soft clip's length, and whenever `max_overhang == 0`. The returned `query_pos` MUST index the soft-clipped run within SEQ (hard clips excluded), so the clipped base adjacent to the alignment maps to the clip base nearest the alignment.
+`CigarMapping::soft_clip_qpos_at(ref_pos, max_overhang, query_len)` projects a *soft-clipped* base onto a reference position by gapless diagonal extension of the read past its alignment boundary. It MUST return `Some(query_pos)` only when `ref_pos` lies within `min(max_overhang, clip_len)` reference bases of the alignment on a side that carries a soft clip — `[aln_start - k, aln_start)` for the leading clip and `[aln_end, aln_end + k)` for the trailing clip — where `aln_end` is one past the last reference-consuming op. It MUST return `None` everywhere `qpos_at` (r[cigar.qpos_at]) returns `Some` (i.e. inside the alignment), beyond the soft clip's length, and whenever `max_overhang == 0`. The returned `QPos` (see `r[qpos.type]` in [docs/spec/0-1-pos.md](./0-1-pos.md)) MUST index the soft-clipped run within SEQ (hard clips excluded), so the clipped base adjacent to the alignment maps to the clip base nearest the alignment.
 
 r[cigar.qpos_accuracy]
 `qpos_at` MUST produce identical results to htslib's `Alignment::qpos()` for every reference position within the alignment span. This is verified by comparison tests.
@@ -68,11 +68,11 @@ The `AlignedPairs` iterator walks a record's CIGAR operations once per record an
 r[cigar.aligned_pairs.types]
 The `AlignedPair` enum MUST have the following variants:
 
-- `Match { qpos: u32, rpos: Pos0, kind: MatchKind }` — M/=/X op, one yield per position; `kind` distinguishes the source CIGAR op (see `r[cigar.aligned_pairs.match_kind]`)
-- `Insertion { qpos: u32, insert_len: u32 }` — I op, one yield per op (summary form)
+- `Match { qpos: QPos, rpos: Pos0, kind: MatchKind }` — M/=/X op, one yield per position; `kind` distinguishes the source CIGAR op (see `r[cigar.aligned_pairs.match_kind]`); `qpos` is a [`QPos`] (see `r[qpos.type]` in [docs/spec/0-1-pos.md](./0-1-pos.md)), not a genomic position
+- `Insertion { qpos: QPos, insert_len: u32 }` — I op, one yield per op (summary form)
 - `Deletion { rpos: Pos0, del_len: u32 }` — D op, one yield per op (summary form)
 - `RefSkip { rpos: Pos0, skip_len: u32 }` — N op, one yield per op (summary form)
-- `SoftClip { qpos: u32, len: u32 }` — S op, one yield per op; yield controlled by options
+- `SoftClip { qpos: QPos, len: u32 }` — S op, one yield per op; yield controlled by options
 - `Padding { len: u32 }` — P op, one yield per op; yield controlled by options
 - `Unknown { code: u8, len: u32 }` — reserved op code (9–15); yield controlled by options
   Hard clips (H) MUST never be yielded. The total in-memory size of `AlignedPair` MUST be ≤ 16 bytes; this is enforced by a compile-time `const _` assert.
@@ -104,7 +104,7 @@ r[cigar.aligned_pairs.hard_clips]
 Hard clips (H) MUST NOT advance `qpos` and MUST NOT yield any variant. This is consistent with htslib, which also excludes hard clips from `aligned_pairs_full()`.
 
 r[cigar.aligned_pairs.insertion_qpos]
-For `Insertion { qpos, insert_len }`, `qpos` MUST be the position of the _first_ inserted base (the query position before the I op advances).
+For `Insertion { qpos, insert_len }`, `qpos` MUST be the position of the _first_ inserted base (the query position before the I op advances). Note the frame: this differs from `PileupOp::Insertion.qpos` (r[pileup_indel.insertion_at_last_match] in [docs/spec/4-pileup-indels.md](./4-pileup-indels.md)), which reports the _matched base preceding_ the insertion; the inserted run is at `qpos..qpos+insert_len` here but at `qpos+1..qpos+1+insert_len` there.
 
 r[cigar.aligned_pairs.deletion_rpos]
 For `Deletion { rpos, del_len }`, `rpos` MUST be the reference position where the deletion begins (before the D op advances rpos).
@@ -149,11 +149,11 @@ For methylation and SNV calling, callers usually only care about `Match` events 
 r[cigar.aligned_pairs.matches_only.types]
 Three flat structs MUST be provided, one per layer:
 
-- `MatchPosition { qpos: u32, rpos: Pos0, kind: MatchKind }` — bare layer, equivalent to pysam's `aligned_pairs(matches_only=True)` plus the `kind` distinction htslib loses.
+- `MatchPosition { qpos: QPos, rpos: Pos0, kind: MatchKind }` — bare layer, equivalent to pysam's `aligned_pairs(matches_only=True)` plus the `kind` distinction htslib loses.
 - `MatchedBase { qpos, rpos, kind, query: Base, qual: BaseQuality }` — with-read layer.
 - `MatchedRef { qpos, rpos, kind, query, qual, ref_base: Option<Base> }` — with-reference layer; the most common shape for methylation and per-record SNV calling.
 
-None of these carry lifetimes — `Base`, `BaseQuality`, `MatchKind`, and `Pos0` are all `Copy`, so the iterators yield owned values.
+None of these carry lifetimes — `Base`, `BaseQuality`, `MatchKind`, `Pos0`, and `QPos` are all `Copy`, so the iterators yield owned values.
 
 r[cigar.aligned_pairs.matches_only.bare]
 `AlignedPairs::matches_only() -> MatchesOnly` MUST yield only `Match` events, dropping indels and clips silently. Field values MUST equal the corresponding `AlignedPair::Match` fields one-to-one.

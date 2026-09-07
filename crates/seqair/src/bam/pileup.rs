@@ -478,6 +478,10 @@ pub enum PileupOp {
     /// Access the inserted bases via
     /// [`AlignmentView::inserted_bases`](AlignmentView::inserted_bases) (or
     /// manually as the read's sequence at `qpos + 1 .. qpos + 1 + insert_len`).
+    /// NB: `qpos` here reports the matched base *preceding* the insertion — a
+    /// different frame from
+    /// [`AlignedPair::Insertion`](super::aligned_pairs::AlignedPair::Insertion),
+    /// whose `qpos` is the first inserted base.
     // r[impl types.base_quality.field_type]
     Insertion { qpos: QPos, base: Base, qual: BaseQuality, insert_len: u32 },
     /// Read has a deletion spanning this position (D CIGAR op). `del_len` is the total length

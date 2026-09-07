@@ -130,7 +130,10 @@ pub enum AlignedPair {
     Match { qpos: QPos, rpos: Pos0, kind: MatchKind },
 
     /// I op — `insert_len` query bases follow `qpos`, no reference span.
-    /// `qpos` is the position of the first inserted base.
+    /// `qpos` is the position of the first inserted base. NB: this is a
+    /// different frame from [`PileupOp::Insertion`](super::PileupOp::Insertion),
+    /// whose `qpos` reports the matched base *preceding* the insertion and
+    /// whose inserted run starts at `qpos + 1`.
     Insertion { qpos: QPos, insert_len: u32 },
 
     /// D op — `del_len` reference bases starting at `rpos`, no query span.

@@ -50,7 +50,7 @@ r[pileup_indel.depth_includes_all]
 > _Insertions in CIGAR (I op) consume query but not reference. They occur between two reference positions._
 
 r[pileup_indel.insertion_at_last_match]
-An insertion MUST be reported at the last reference-consuming, query-consuming position (M/=/X) before the I op in the CIGAR. The `insert_len` field gives the total length of inserted query bases. The caller can access the inserted bases via the read's sequence at `qpos + 1 .. qpos + 1 + insert_len`.
+An insertion MUST be reported at the last reference-consuming, query-consuming position (M/=/X) before the I op in the CIGAR. The `insert_len` field gives the total length of inserted query bases. The caller can access the inserted bases via the read's sequence at `qpos + 1 .. qpos + 1 + insert_len`. Note the frame: `PileupOp::Insertion.qpos` reports the _matched base preceding_ the insertion, unlike `AlignedPair::Insertion.qpos` (r[cigar.aligned_pairs.insertion_qpos] in [docs/spec/1-3-cigar.md](./1-3-cigar.md)), which reports the first inserted base.
 
 r[pileup_indel.insertion_len]
 If multiple consecutive I ops appear (which is invalid per SAM spec but may occur), their lengths MUST be summed into a single `insert_len`.
@@ -63,7 +63,7 @@ An insertion that is not preceded by a M/=/X op within the same CIGAR (e.g., `D 
 > r[pileup_indel.accessors]
 > `PileupAlignment` MUST provide convenience methods:
 >
-> - `qpos() -> Option<usize>`: returns `Some(qpos)` for Match/Insertion, `None` for Deletion/ComplexIndel/RefSkip.
+> - `qpos() -> Option<QPos>`: returns `Some(qpos)` for Match/Insertion/SoftClip, `None` for Deletion/ComplexIndel/RefSkip.
 > - `base() -> Option<Base>`: returns `Some(base)` for Match/Insertion, `None` for Deletion/ComplexIndel/RefSkip.
 > - `qual() -> Option<u8>`: returns `Some(qual)` for Match/Insertion, `None` for Deletion/ComplexIndel/RefSkip.
 > - `is_del() -> bool`: true for Deletion and ComplexIndel.
