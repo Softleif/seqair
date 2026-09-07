@@ -331,7 +331,7 @@ impl<'a> AlignedPairs<'a> {
         // wrap; real-world records are far below this.
         let cigar_remaining_qlen: u64 =
             self.ops.iter().filter(|op| op.consumes_query()).map(|op| u64::from(op.len())).sum();
-        let qpos_consumed = u64::from(self.qpos);
+        let qpos_consumed = u64::from(self.qpos.get());
         let total_qlen = cigar_remaining_qlen.saturating_add(qpos_consumed);
         // total_qlen represents the total query-consuming length the iterator
         // expects across the *full* CIGAR (already-consumed + remaining). The

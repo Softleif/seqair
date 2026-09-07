@@ -155,6 +155,14 @@ passing one where the other is expected.
 > sequence from the wrong locus, no error. This was a live bug in rastair's
 > deletion alleles, where 82.6 % of multi-base REF alleles did not match the
 > reference. Both integers were `usize`, so nothing could catch it.
+>
+> **Boundary of the guarantee.** The newtype stops mix-ups only where a
+> signature names `QPos` or `Pos`; the raw accessors are deliberate escape
+> hatches (slice indexing requires `usize`) and `Pos0::try_from(qpos.get())`
+> still compiles. Consumers MUST type their own position-carrying parameters
+> with `QPos`/`Pos0` for the guarantee to extend past the seqair API boundary.
+> Neither `QPos` nor `Pos<S>` implements `From`/`Into` for integer types —
+> extraction is always the explicit, named accessor.
 
 r[qpos.new]
 `QPos::new(u32) -> Self` MUST be infallible. Unlike `Pos`, no format caps a query

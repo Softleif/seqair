@@ -465,6 +465,7 @@ impl QPos {
         self.0
     }
 
+    // r[impl qpos.get]
     /// Convenience for indexing into a read's sequence or qualities.
     #[inline]
     #[must_use]
@@ -483,6 +484,7 @@ impl QPos {
         }
     }
 
+    // r[impl qpos.checked]
     /// Checked offset - delta.
     #[inline]
     #[must_use]
@@ -500,27 +502,6 @@ impl QPos {
     #[must_use]
     pub const fn saturating_add(self, delta: u32) -> Self {
         Self(self.0.saturating_add(delta))
-    }
-}
-
-impl From<QPos> for u32 {
-    #[inline]
-    fn from(value: QPos) -> Self {
-        value.0
-    }
-}
-
-impl From<QPos> for usize {
-    #[inline]
-    fn from(value: QPos) -> Self {
-        value.0 as Self
-    }
-}
-
-impl From<QPos> for u64 {
-    #[inline]
-    fn from(value: QPos) -> Self {
-        Self::from(value.0)
     }
 }
 
@@ -904,5 +885,56 @@ mod tests {
             prop_assert!(i >= 0);
             prop_assert_eq!(i as u32, v);
         }
+    }
+
+    // ---- QPos ----
+
+    // r[verify pos.as_u32]
+    #[test]
+    fn as_u32_returns_raw_value() {
+        assert_eq!(Pos0::new(I32_MAX_U32).unwrap().as_u32(), I32_MAX_U32);
+        assert_eq!(Pos0::ZERO.as_u32(), 0);
+    }
+
+    // r[verify qpos.type]
+    #[test]
+    fn qpos_is_transparent_u32() {
+        assert_eq!(std::mem::size_of::<QPos>(), 4);
+        assert_eq!(std::mem::align_of::<QPos>(), 4);
+    }
+
+    // r[verify qpos.new]
+    // r[verify qpos.get]
+    #[test]
+    fn qpos_roundtrip() {
+        assert_eq!(QPos::new(0).get(), 0);
+        assert_eq!(QPos::new(42).as_usize(), 42);
+        assert_eq!(QPos::default(), QPos::ZERO);
+    }
+
+    // r[verify qpos.new]
+    // Contrast with `Pos`: no format caps a query offset, so construction is
+    // infallible even above `i32::MAX` — the cap lives in the read length,
+    // which the iterator layers check, not the type.
+    #[test]
+    fn qpos_accepts_above_i32_max() {
+        assert_eq!(QPos::new(u32::MAX).get(), u32::MAX);
+    }
+
+    // r[verify qpos.checked]
+    #[test]
+    fn qpos_checked_arith() {
+        assert_eq!(QPos::new(10).checked_add(5), Some(QPos::new(15)));
+        assert_eq!(QPos::new(10).checked_sub(3), Some(QPos::new(7)));
+        assert_eq!(QPos::new(10).checked_sub(11), None);
+        assert_eq!(QPos::new(u32::MAX).checked_add(1), None);
+    }
+
+    // r[verify qpos.saturating]
+    #[test]
+    fn qpos_saturates_at_u32_max() {
+        assert_eq!(QPos::new(u32::MAX).saturating_add(1), QPos::new(u32::MAX));
+        assert_eq!(QPos::new(u32::MAX - 1).saturating_add(100), QPos::new(u32::MAX));
+        assert_eq!(QPos::new(5).saturating_add(5), QPos::new(10), "no saturation below the cap");
     }
 }
