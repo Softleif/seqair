@@ -480,7 +480,7 @@ fn begin_vcf_record<'a>(
         value: u64::from(contig.tid()),
         target_type: "i32",
     })?;
-    let pos_0based = *pos.to_zero_based();
+    let pos_0based = pos.to_zero_based().as_u32();
     let rlen = u32::try_from(alleles.rlen()).map_err(|_| VcfError::ValueOverflow {
         field: "rlen",
         value: alleles.rlen() as u64,
@@ -492,7 +492,7 @@ fn begin_vcf_record<'a>(
     buf.push(b'\t');
     // r[impl vcf_writer.integer_format]
     let mut itoa_buf = itoa::Buffer::new();
-    buf.extend_from_slice(itoa_buf.format(*pos).as_bytes());
+    buf.extend_from_slice(itoa_buf.format(pos.as_u32()).as_bytes());
     buf.push(b'\t');
     buf.push(b'.');
     buf.push(b'\t');

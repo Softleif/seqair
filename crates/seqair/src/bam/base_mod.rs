@@ -254,7 +254,7 @@ impl BaseModState {
     ) -> Option<&[Modification]> {
         match cigar.pos_info_at(ref_pos)? {
             CigarPosInfo::Match { qpos } | CigarPosInfo::Insertion { qpos, .. } => {
-                self.mod_at_qpos(qpos as usize)
+                self.mod_at_qpos(qpos.as_usize())
             }
             CigarPosInfo::Deletion { .. }
             | CigarPosInfo::RefSkip

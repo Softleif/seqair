@@ -18,7 +18,7 @@ use helpers::{cigar_op, collect_columns, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::pileup::RefSeq;
 use seqair::bam::{Pos0, RecordStore, pileup::PileupEngine};
-use seqair_types::Base;
+use seqair_types::{Base, QPos};
 use std::{cell::Cell, rc::Rc};
 
 // ---- pileup.active_set + pileup.column_contents ----
@@ -106,7 +106,7 @@ proptest! {
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(600).unwrap());
         let columns = collect_columns(&mut engine);
         let col_positions: std::collections::HashSet<u32> =
-            columns.iter().map(|c| *c.pos()).collect();
+            columns.iter().map(|c| c.pos().as_u32()).collect();
 
         for pos in 0..MAX_POS as u32 {
             let exp_covered = expected_depth.get(pos as usize).copied().unwrap_or(0) > 0;
@@ -240,7 +240,7 @@ proptest! {
 
         while let Some(col) = engine.pileups() {
             for aln in col.alignments() {
-                prop_assert_eq!(aln.qpos().unwrap(), (*col.pos() - start_u32) as usize);
+                prop_assert_eq!(aln.qpos().unwrap(), QPos::new(col.pos().as_u32() - start_u32));
             }
         }
     }
@@ -311,11 +311,11 @@ fn leading_softclip_does_not_extend_ref_range() {
 
     let mut engine = PileupEngine::new(arena, Pos0::new(95).unwrap(), Pos0::new(125).unwrap());
     let columns = collect_columns(&mut engine);
-    let positions: Vec<u32> = columns.iter().map(|c| *c.pos()).collect();
+    let positions: Vec<u32> = columns.iter().map(|c| c.pos().as_u32()).collect();
 
     assert_eq!(positions.first(), Some(&100), "should start at first ref-consuming pos");
     assert_eq!(positions.last(), Some(&119));
-    assert_eq!(columns[0].alignments().next().unwrap().qpos().unwrap(), 5);
+    assert_eq!(columns[0].alignments().next().unwrap().qpos().unwrap(), QPos::new(5));
 }
 
 // ---- bam.reader edge cases ----
@@ -366,7 +366,7 @@ proptest! {
         let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(300).unwrap());
         let mut prev_pos: Option<u32> = None;
         while let Some(col) = engine.pileups() {
-            let cur = *col.pos();
+            let cur = col.pos().as_u32();
             if let Some(prev) = prev_pos {
                 prop_assert!(cur > prev,
                     "positions must be strictly increasing: {} not > {}", cur, prev);
@@ -396,7 +396,7 @@ proptest! {
         while let Some(col) = engine.pileups() {
             for aln in col.alignments() {
                 if let Some(qpos) = aln.qpos() {
-                    prop_assert!(qpos < len as usize,
+                    prop_assert!(qpos.as_usize() < len as usize,
                         "qpos {} must be < seq_len {} at pos {}", qpos, len, col.pos());
                 }
             }
@@ -676,7 +676,7 @@ proptest! {
             for aln in col.alignments() {
                 let read = &reads[aln.record_idx() as usize];
                 let expected_qpos = read.qpos_at(col.pos().as_i64());
-                prop_assert_eq!(aln.qpos(), expected_qpos,
+                prop_assert_eq!(aln.qpos(), expected_qpos.map(|q| QPos::new(q as u32)),
                     "qpos mismatch at pos {} for read at pos {} with cigar {:?}",
                     col.pos(), read.pos, read.cigar_ops);
             }
@@ -738,7 +738,7 @@ proptest! {
             if let Some(expected) = expected_qpos {
                 prop_assert_eq!(col.depth(), 1);
                 let aln = col.alignments().next().unwrap();
-                prop_assert_eq!(aln.qpos(), Some(expected),
+                prop_assert_eq!(aln.qpos(), Some(QPos::new(expected as u32)),
                     "qpos wrong at pos {} — insertion should shift query offset", col.pos());
             }
         }
@@ -785,7 +785,7 @@ proptest! {
         while let Some(col) = engine.pileups() {
             for aln in col.alignments() {
                 if let Some(qpos) = aln.qpos() {
-                    prop_assert!(qpos < aln.seq_len as usize,
+                    prop_assert!(qpos.as_usize() < aln.seq_len as usize,
                         "qpos {} >= seq_len {} at pos {} for read with cigar {:?}",
                         qpos, aln.seq_len, col.pos(),
                         reads[aln.record_idx() as usize].cigar_ops);
@@ -827,7 +827,7 @@ fn pileup_includes_out_of_order_records() {
 
     // At positions 100..150, all three reads should be active:
     // r1 (100..150), r3 (80..280), and optionally r2 doesn't reach here
-    let col_at_120 = columns.iter().find(|c| *c.pos() == 120).expect("column at 120");
+    let col_at_120 = columns.iter().find(|c| c.pos().as_u32() == 120).expect("column at 120");
     assert_eq!(
         col_at_120.depth(),
         2,
@@ -836,7 +836,7 @@ fn pileup_includes_out_of_order_records() {
     );
 
     // At positions 200..250, r2 and r3 should both be active
-    let col_at_220 = columns.iter().find(|c| *c.pos() == 220).expect("column at 220");
+    let col_at_220 = columns.iter().find(|c| c.pos().as_u32() == 220).expect("column at 220");
     assert_eq!(
         col_at_220.depth(),
         2,
@@ -845,7 +845,7 @@ fn pileup_includes_out_of_order_records() {
     );
 
     // At position 90, only r3 should be active
-    let col_at_90 = columns.iter().find(|c| *c.pos() == 90).expect("column at 90");
+    let col_at_90 = columns.iter().find(|c| c.pos().as_u32() == 90).expect("column at 90");
     assert_eq!(col_at_90.depth(), 1, "expected only r3 at pos 90, got depth {}", col_at_90.depth());
 }
 
@@ -874,6 +874,6 @@ fn pileup_deduplicates_cross_category_records() {
     let columns = collect_columns(&mut engine);
 
     // At position 120, both r1 and r2 cover it, but r1 should appear only once
-    let col = columns.iter().find(|c| *c.pos() == 130).expect("column at 130");
+    let col = columns.iter().find(|c| c.pos().as_u32() == 130).expect("column at 130");
     assert_eq!(col.depth(), 2, "expected exactly 2 (r1 + r2) after dedup, got {}", col.depth());
 }

@@ -105,7 +105,7 @@ fn main() -> anyhow::Result<()> {
             let store = engine.store();
             for i in 0..store.len() as u32 {
                 let rec = store.record(i);
-                let qend = query_end_pos(store, i, *rec.pos);
+                let qend = query_end_pos(store, i, rec.pos.as_u32());
                 query_end_cache.insert(i, qend);
             }
         }
@@ -127,7 +127,7 @@ fn main() -> anyhow::Result<()> {
                 if args.samtools_compat
                     && aln.qpos().is_none()
                     && let Some(&qend) = query_end_cache.get(&aln.record_idx())
-                    && *pos >= qend
+                    && pos.as_u32() >= qend
                 {
                     continue;
                 }
@@ -152,11 +152,11 @@ fn main() -> anyhow::Result<()> {
 
                 // Read-end marker
                 let read_end = if args.samtools_compat {
-                    query_end_cache.get(&aln.record_idx()).copied().unwrap_or(*rec.end_pos)
+                    query_end_cache.get(&aln.record_idx()).copied().unwrap_or(rec.end_pos.as_u32())
                 } else {
-                    *rec.end_pos
+                    rec.end_pos.as_u32()
                 };
-                if *pos + 1 >= read_end {
+                if pos.as_u32() + 1 >= read_end {
                     bases.push('$');
                 }
 
@@ -170,7 +170,7 @@ fn main() -> anyhow::Result<()> {
                 writeln!(
                     output,
                     "{contig_name}\t{}\t{}\t{depth}\t{bases}\t{quals}",
-                    *pos1,
+                    pos1.as_u32(),
                     ref_base.as_char(),
                 )?;
             }
@@ -222,7 +222,7 @@ fn read_inserted_bases<U>(
         PileupOp::Insertion { qpos, insert_len, .. } if *insert_len > 0 => (*qpos, *insert_len),
         _ => return None,
     };
-    let start = qpos as usize + 1;
+    let start = qpos.as_usize() + 1;
     let seq = store.seq(record_idx);
     let end = (start + insert_len as usize).min(seq.len());
     Some(seq.get(start..end)?.iter().map(|b| *b as u8).collect())

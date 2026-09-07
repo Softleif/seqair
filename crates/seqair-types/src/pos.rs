@@ -12,7 +12,7 @@
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::{Deref, Sub};
+use std::ops::Sub;
 
 /// Maximum valid raw value for any `Pos`: `i32::MAX` (2,147,483,647).
 ///
@@ -204,6 +204,14 @@ impl<S> Pos<S> {
         self.value as u64
     }
 
+    // r[impl pos.as_u32]
+    /// The raw value. Infallible; this is the representation.
+    #[inline]
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self.value
+    }
+
     // r[impl pos.add_offset]
     /// Checked position + offset. Returns `None` if result is negative or > `i32::MAX`.
     #[inline]
@@ -229,14 +237,6 @@ impl<S> Pos<S> {
     pub fn checked_sub_offset(self, offset: Offset) -> Option<Self> {
         let negated = Offset(offset.0.checked_neg()?);
         self.checked_add_offset(negated)
-    }
-}
-
-impl<S> Deref for Pos<S> {
-    type Target = u32;
-    #[inline]
-    fn deref(&self) -> &u32 {
-        &self.value
     }
 }
 
@@ -426,6 +426,107 @@ impl TryFrom<u64> for Pos<One> {
     }
 }
 
+// ---- Query positions ----
+
+// r[impl qpos.type]
+// r[impl qpos.not_a_pos]
+/// A 0-based offset into a read's sequence (query coordinates).
+///
+/// Deliberately **not** a [`Pos`]. A [`Pos`] names a place on the reference; a
+/// `QPos` indexes a read. They are different spaces, and code that resolves
+/// reference bases from a segment or window needs the former — handed the
+/// latter it computes a wrong answer that still type-checks. Keeping the two
+/// apart at the type level is the entire purpose of this newtype.
+///
+/// Unlike [`Pos`] there is no `i32::MAX` cap: a query offset is bounded by the
+/// read length, and no format constrains it further. Construction is therefore
+/// infallible.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct QPos(u32);
+
+impl QPos {
+    /// The first base of a read.
+    pub const ZERO: Self = Self(0);
+
+    // r[impl qpos.new]
+    /// Create a query offset.
+    #[inline]
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    // r[impl qpos.get]
+    /// The raw offset.
+    #[inline]
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Convenience for indexing into a read's sequence or qualities.
+    #[inline]
+    #[must_use]
+    pub const fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+
+    // r[impl qpos.checked]
+    /// Checked offset + delta.
+    #[inline]
+    #[must_use]
+    pub const fn checked_add(self, delta: u32) -> Option<Self> {
+        match self.0.checked_add(delta) {
+            Some(v) => Some(Self(v)),
+            None => None,
+        }
+    }
+
+    /// Checked offset - delta.
+    #[inline]
+    #[must_use]
+    pub const fn checked_sub(self, delta: u32) -> Option<Self> {
+        match self.0.checked_sub(delta) {
+            Some(v) => Some(Self(v)),
+            None => None,
+        }
+    }
+}
+
+impl From<QPos> for u32 {
+    #[inline]
+    fn from(value: QPos) -> Self {
+        value.0
+    }
+}
+
+impl From<QPos> for usize {
+    #[inline]
+    fn from(value: QPos) -> Self {
+        value.0 as Self
+    }
+}
+
+impl From<QPos> for u64 {
+    #[inline]
+    fn from(value: QPos) -> Self {
+        Self::from(value.0)
+    }
+}
+
+impl fmt::Debug for QPos {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "QPos({})", self.0)
+    }
+}
+
+impl fmt::Display for QPos {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 // ---- Display / Debug ----
 
 impl fmt::Debug for Pos<Zero> {
@@ -489,7 +590,7 @@ mod tests {
     fn zero_based_roundtrip() {
         let z = Pos0::new(100).unwrap();
         let o = z.to_one_based().unwrap();
-        assert_eq!(*o, 101);
+        assert_eq!(o.as_u32(), 101);
         assert_eq!(o.to_zero_based(), z);
     }
 
@@ -499,7 +600,7 @@ mod tests {
     fn one_based_roundtrip() {
         let o = Pos1::new(1).unwrap();
         let z = o.to_zero_based();
-        assert_eq!(*z, 0);
+        assert_eq!(z.as_u32(), 0);
         assert_eq!(z.to_one_based().unwrap(), o);
     }
 
@@ -528,7 +629,7 @@ mod tests {
     fn pos_plus_offset() {
         let p = Pos0::new(10).unwrap();
         let q = p.checked_add_offset(Offset::new(5)).unwrap();
-        assert_eq!(*q, 15);
+        assert_eq!(q.as_u32(), 15);
     }
 
     // r[verify pos.sub_offset]
@@ -536,7 +637,7 @@ mod tests {
     fn pos_minus_offset() {
         let p = Pos0::new(10).unwrap();
         let q = p.checked_sub_offset(Offset::new(3)).unwrap();
-        assert_eq!(*q, 7);
+        assert_eq!(q.as_u32(), 7);
     }
 
     // r[verify pos.try_from]
@@ -550,9 +651,9 @@ mod tests {
     // r[verify pos.try_from]
     #[test]
     fn try_from_i32_accepts_valid() {
-        assert_eq!(*Pos0::try_from(0i32).unwrap(), 0);
-        assert_eq!(*Pos1::try_from(1i32).unwrap(), 1);
-        assert_eq!(*Pos0::try_from(100i32).unwrap(), 100);
+        assert_eq!(Pos0::try_from(0i32).unwrap().as_u32(), 0);
+        assert_eq!(Pos1::try_from(1i32).unwrap().as_u32(), 1);
+        assert_eq!(Pos0::try_from(100i32).unwrap().as_u32(), 100);
     }
 
     // r[verify pos.try_from]
@@ -574,9 +675,9 @@ mod tests {
     // r[verify pos.try_from]
     #[test]
     fn try_from_i64_accepts_valid() {
-        assert_eq!(*Pos0::try_from(0i64).unwrap(), 0);
-        assert_eq!(*Pos1::try_from(1i64).unwrap(), 1);
-        assert_eq!(*Pos0::try_from(100i64).unwrap(), 100);
+        assert_eq!(Pos0::try_from(0i64).unwrap().as_u32(), 0);
+        assert_eq!(Pos1::try_from(1i64).unwrap().as_u32(), 1);
+        assert_eq!(Pos0::try_from(100i64).unwrap().as_u32(), 100);
     }
 
     // r[verify pos.try_from]
@@ -587,17 +688,17 @@ mod tests {
         assert!(Pos0::try_from(i32::MAX as u64 + 1).is_err());
         assert!(Pos1::try_from(0u64).is_err(), "Pos1 rejects 0");
         assert!(Pos1::try_from(i32::MAX as u64 + 1).is_err());
-        assert_eq!(*Pos1::try_from(1u64).unwrap(), 1);
+        assert_eq!(Pos1::try_from(1u64).unwrap().as_u32(), 1);
     }
 
     // r[verify pos.try_from]
     #[test]
     fn try_from_u32() {
-        assert_eq!(*Pos0::try_from(0u32).unwrap(), 0);
-        assert_eq!(*Pos0::try_from(i32::MAX as u32).unwrap(), i32::MAX as u32);
+        assert_eq!(Pos0::try_from(0u32).unwrap().as_u32(), 0);
+        assert_eq!(Pos0::try_from(i32::MAX as u32).unwrap().as_u32(), i32::MAX as u32);
         assert!(Pos0::try_from(i32::MAX as u32 + 1).is_err());
         assert!(Pos1::try_from(0u32).is_err());
-        assert_eq!(*Pos1::try_from(1u32).unwrap(), 1);
+        assert_eq!(Pos1::try_from(1u32).unwrap().as_u32(), 1);
         assert!(Pos1::try_from(i32::MAX as u32 + 1).is_err());
     }
 
@@ -654,14 +755,14 @@ mod tests {
     #[test]
     fn max_value_zero() {
         let m = Pos0::max_value();
-        assert_eq!(*m, I32_MAX_U32);
+        assert_eq!(m.as_u32(), I32_MAX_U32);
     }
 
     // r[verify pos.one_new]
     #[test]
     fn max_value_one() {
         let m = Pos1::max_value();
-        assert_eq!(*m, I32_MAX_U32);
+        assert_eq!(m.as_u32(), I32_MAX_U32);
     }
 
     #[test]
@@ -710,7 +811,7 @@ mod tests {
     #[test]
     fn checked_sub_offset_works() {
         let p = Pos0::new(10).unwrap();
-        assert_eq!(*p.checked_sub_offset(Offset::new(3)).unwrap(), 7);
+        assert_eq!(p.checked_sub_offset(Offset::new(3)).unwrap().as_u32(), 7);
         assert!(p.checked_sub_offset(Offset::new(11)).is_none());
     }
 
@@ -782,7 +883,7 @@ mod tests {
             if let Some(p) = Pos0::new(v)
                 && let Some(result) = p.checked_add_offset(Offset::new(off))
             {
-                prop_assert!(*result <= I32_MAX_U32, "checked_add must not exceed i32::MAX");
+                prop_assert!(result.as_u32() <= I32_MAX_U32, "checked_add must not exceed i32::MAX");
             }
         }
 

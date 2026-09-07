@@ -766,7 +766,7 @@ mod tests {
             pairs
                 .iter()
                 .filter_map(|p| match p {
-                    AlignedPair::Match { qpos, rpos, .. } => Some((*qpos, **rpos)),
+                    AlignedPair::Match { qpos, rpos, .. } => Some((*qpos, rpos.as_u32())),
                     _ => None,
                 })
                 .collect()
@@ -957,7 +957,7 @@ mod tests {
         // Position monotonicity
         for window in matches.windows(2) {
             assert!(window[0].qpos <= window[1].qpos);
-            assert!(*window[0].rpos <= *window[1].rpos);
+            assert!(window[0].rpos.as_u32() <= window[1].rpos.as_u32());
         }
     }
 
@@ -1114,9 +1114,9 @@ mod tests {
         let rposes: Vec<u32> = pairs
             .iter()
             .filter_map(|p| match p {
-                AlignedPair::Match { rpos, .. } => Some(**rpos),
-                AlignedPair::Deletion { rpos, .. } => Some(**rpos),
-                AlignedPair::RefSkip { rpos, .. } => Some(**rpos),
+                AlignedPair::Match { rpos, .. } => Some(rpos.as_u32()),
+                AlignedPair::Deletion { rpos, .. } => Some(rpos.as_u32()),
+                AlignedPair::RefSkip { rpos, .. } => Some(rpos.as_u32()),
                 _ => None,
             })
             .collect();
@@ -1293,9 +1293,9 @@ mod tests {
             ) {
                 let pairs: Vec<_> = AlignedPairs::new(Pos0::ZERO, &cigar).collect();
                 let rposes: Vec<u32> = pairs.iter().filter_map(|p| match p {
-                    AlignedPair::Match { rpos, .. } => Some(**rpos),
-                    AlignedPair::Deletion { rpos, .. } => Some(**rpos),
-                    AlignedPair::RefSkip { rpos, .. } => Some(**rpos),
+                    AlignedPair::Match { rpos, .. } => Some(rpos.as_u32()),
+                    AlignedPair::Deletion { rpos, .. } => Some(rpos.as_u32()),
+                    AlignedPair::RefSkip { rpos, .. } => Some(rpos.as_u32()),
                     _ => None,
                 }).collect();
                 prop_assert!(rposes.windows(2).all(|w| w[0] <= w[1]));
@@ -1339,7 +1339,7 @@ mod tests {
             for pair in AlignedPairs::new(rec_pos, cigar).with_soft_clips() {
                 match pair {
                     AlignedPair::Match { qpos, rpos, .. } => {
-                        result.push((Some(qpos), Some(*rpos)));
+                        result.push((Some(qpos), Some(rpos.as_u32())));
                     }
                     AlignedPair::Insertion { qpos, insert_len } => {
                         for i in 0..insert_len {
@@ -1348,12 +1348,12 @@ mod tests {
                     }
                     AlignedPair::Deletion { rpos, del_len } => {
                         for i in 0..del_len {
-                            result.push((None, Some(*advance_rpos(rpos, i))));
+                            result.push((None, Some(advance_rpos(rpos, i).as_u32())));
                         }
                     }
                     AlignedPair::RefSkip { rpos, skip_len } => {
                         for i in 0..skip_len {
-                            result.push((None, Some(*advance_rpos(rpos, i))));
+                            result.push((None, Some(advance_rpos(rpos, i).as_u32())));
                         }
                     }
                     AlignedPair::SoftClip { qpos, len } => {

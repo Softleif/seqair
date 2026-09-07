@@ -165,7 +165,7 @@ fn main() -> anyhow::Result<()> {
             let pos1 = column.pos().to_one_based().context("position overflow")?;
             println!(
                 "{pos}\t{depth}\t{ref_base}\t{rgs}\t{mean:.3}",
-                pos = *pos1,
+                pos = pos1.as_u32(),
                 ref_base = column.reference_base().as_char(),
                 rgs = rg_summary.join(","),
                 mean = aligned_sum / counted as f64,

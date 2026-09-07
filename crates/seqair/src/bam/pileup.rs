@@ -6,7 +6,7 @@
 //! not in this engine. Records that should not pollute the pileup never enter
 //! the store in the first place.
 
-use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0};
+use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0, QPos};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 use std::{ops::Range, rc::Rc};
 
@@ -183,14 +183,14 @@ struct ActiveRecord {
 fn base_qual_at<U>(
     store: &RecordStore<U>,
     active: &ActiveRecord,
-    qpos: u32,
+    qpos: QPos,
 ) -> (Base, BaseQuality) {
     if active.seq_len == 0 {
         return (Base::Unknown, BaseQuality::UNAVAILABLE);
     }
     let qual = store.qual(active.record_idx);
-    let q = qual.get(qpos as usize).copied().unwrap_or(BaseQuality::UNAVAILABLE);
-    (store.seq_at(active.record_idx, qpos as usize), q)
+    let q = qual.get(qpos.as_usize()).copied().unwrap_or(BaseQuality::UNAVAILABLE);
+    (store.seq_at(active.record_idx, qpos.as_usize()), q)
 }
 
 // r[impl pileup.column_contents]
@@ -345,7 +345,7 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
     pub fn inserted_bases(&self) -> &'store [Base] {
         match self.aln.op {
             PileupOp::Insertion { qpos, insert_len, .. } => {
-                inserted_run(self.seq(), qpos, insert_len)
+                inserted_run(self.seq(), qpos.get(), insert_len)
             }
             _ => &[],
         }
@@ -356,7 +356,7 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
     pub fn inserted_quals(&self) -> &'store [BaseQuality] {
         match self.aln.op {
             PileupOp::Insertion { qpos, insert_len, .. } => {
-                inserted_run(self.qualities(), qpos, insert_len)
+                inserted_run(self.qualities(), qpos.get(), insert_len)
             }
             _ => &[],
         }
@@ -413,7 +413,7 @@ impl<U> std::ops::Deref for AlignmentView<'_, '_, U> {
 ///     }
 /// }
 ///
-/// assert_eq!(summarize(&PileupOp::Match { qpos: 10, base: seqair_types::Base::A, qual: seqair_types::BaseQuality::from_byte(30) }), "match");
+/// assert_eq!(summarize(&PileupOp::Match { qpos: seqair_types::QPos::new(10), base: seqair_types::Base::A, qual: seqair_types::BaseQuality::from_byte(30) }), "match");
 /// assert_eq!(summarize(&PileupOp::Deletion { del_len: 3 }), "deletion");
 /// assert_eq!(summarize(&PileupOp::ComplexIndel { del_len: 3, insert_len: 2, is_refskip: false }), "complex-indel");
 /// ```
@@ -423,14 +423,14 @@ impl<U> std::ops::Deref for AlignmentView<'_, '_, U> {
 pub enum PileupOp {
     /// Read has a base aligned at this position (M, =, or X CIGAR op).
     // r[impl types.base_quality.field_type]
-    Match { qpos: u32, base: Base, qual: BaseQuality },
+    Match { qpos: QPos, base: Base, qual: BaseQuality },
     /// Read has a base aligned at this position AND an insertion of
     /// `insert_len` query bases follows before the next reference position.
     /// Access the inserted bases via
     /// [`AlignmentView::inserted_bases`](AlignmentView::inserted_bases) (or
     /// manually as the read's sequence at `qpos + 1 .. qpos + 1 + insert_len`).
     // r[impl types.base_quality.field_type]
-    Insertion { qpos: u32, base: Base, qual: BaseQuality, insert_len: u32 },
+    Insertion { qpos: QPos, base: Base, qual: BaseQuality, insert_len: u32 },
     /// Read has a deletion spanning this position (D CIGAR op). `del_len` is the total length
     /// of the D CIGAR op — how many reference bases are deleted. No query base.
     Deletion { del_len: u32 },
@@ -448,7 +448,7 @@ pub enum PileupOp {
     /// emits when `soft_clip_overhang > 0`, assuming a gapless extension past the
     /// alignment boundary. Only ever produced opt-in; `base`/`qual`/`qpos`
     /// behave like [`PileupOp::Match`].
-    SoftClip { qpos: u32, base: Base, qual: BaseQuality },
+    SoftClip { qpos: QPos, base: Base, qual: BaseQuality },
 }
 
 const _: () = assert!(std::mem::size_of::<PileupOp>() <= 12, "PileupOp grew unexpectedly large");
@@ -544,12 +544,16 @@ impl PileupAlignment {
     }
 
     // r[impl pileup.qpos_none]
+    /// The read offset of the base at this column, if the read has one here.
+    ///
+    /// A [`QPos`], not a genomic position — see [`QPos`] for why the two are
+    /// separate types.
     #[must_use]
-    pub fn qpos(&self) -> Option<usize> {
+    pub fn qpos(&self) -> Option<QPos> {
         match self.op {
             PileupOp::Match { qpos, .. }
             | PileupOp::Insertion { qpos, .. }
-            | PileupOp::SoftClip { qpos, .. } => Some(qpos as usize),
+            | PileupOp::SoftClip { qpos, .. } => Some(qpos),
             PileupOp::Deletion { .. } | PileupOp::ComplexIndel { .. } | PileupOp::RefSkip => None,
         }
     }
@@ -1339,7 +1343,7 @@ mod tests {
                 if aln.is_soft_clip() {
                     soft.push((
                         u32::from(col.pos()),
-                        u32::try_from(aln.qpos().unwrap()).unwrap(),
+                        aln.qpos().unwrap().get(),
                         aln.base().unwrap(),
                     ));
                 }
@@ -1531,10 +1535,10 @@ mod tests {
                     let rec = aln.record_idx();
                     match aln.op {
                         PileupOp::Match { qpos, .. } => {
-                            aligned.push((pos, rec, KIND_MATCH, i64::from(qpos)));
+                            aligned.push((pos, rec, KIND_MATCH, i64::from(qpos.get())));
                         }
                         PileupOp::Insertion { qpos, .. } => {
-                            aligned.push((pos, rec, KIND_INS, i64::from(qpos)));
+                            aligned.push((pos, rec, KIND_INS, i64::from(qpos.get())));
                         }
                         PileupOp::Deletion { .. } => aligned.push((pos, rec, KIND_DEL, -1)),
                         PileupOp::ComplexIndel { .. } => {
@@ -1542,9 +1546,9 @@ mod tests {
                         }
                         PileupOp::RefSkip => aligned.push((pos, rec, KIND_REFSKIP, -1)),
                         PileupOp::SoftClip { qpos, base, .. } => {
-                            softclips.push((pos, rec, i64::from(qpos)));
+                            softclips.push((pos, rec, i64::from(qpos.get())));
                             let r = &reads[rec as usize];
-                            let qpos = qpos as usize;
+                            let qpos = qpos.as_usize();
                             // Base must be the actual clipped SEQ base.
                             if r.seq.get(qpos).copied() != Some(base) {
                                 softclips_valid = false;
@@ -1814,7 +1818,7 @@ mod tests {
                 PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(last_ref_pos).unwrap());
             let mut out = Vec::new();
             while let Some(col) = engine.pileups() {
-                let pos = *col.pos();
+                let pos = col.pos().as_u32();
                 for aln in col.alignments() {
                     out.push((pos, aln.indel_after()));
                 }

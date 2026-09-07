@@ -281,8 +281,10 @@ fn all_contigs_pileup_qpos_and_flags_match() {
         let rio = helpers::collect_columns(&mut engine);
 
         for (col_idx, (r, h)) in rio.iter().zip(&hts).enumerate() {
-            let mut qf: Vec<(usize, u16)> =
-                r.alignments().filter_map(|a| a.qpos().map(|q| (q, a.flags.raw()))).collect();
+            let mut qf: Vec<(usize, u16)> = r
+                .alignments()
+                .filter_map(|a| a.qpos().map(|q| (q.as_usize(), a.flags.raw())))
+                .collect();
             qf.sort();
 
             assert_eq!(

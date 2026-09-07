@@ -162,7 +162,7 @@ fn pileup_positions_match() {
     let columns = helpers::collect_columns(&mut engine);
 
     let hts_positions: Vec<u32> = hts_columns.iter().map(|c| c.pos).collect();
-    let positions: Vec<u32> = columns.iter().map(|c| *c.pos()).collect();
+    let positions: Vec<u32> = columns.iter().map(|c| c.pos().as_u32()).collect();
 
     assert_eq!(
         positions.len(),
@@ -254,8 +254,10 @@ fn pileup_qpos_matches() {
     let columns = helpers::collect_columns(&mut engine);
 
     for (col_idx, (rio, hts)) in columns.iter().zip(hts_columns.iter()).enumerate() {
-        let mut alns: Vec<(usize, u16)> =
-            rio.alignments().filter_map(|a| a.qpos().map(|q| (q, a.flags.raw()))).collect();
+        let mut alns: Vec<(usize, u16)> = rio
+            .alignments()
+            .filter_map(|a| a.qpos().map(|q| (q.as_usize(), a.flags.raw())))
+            .collect();
         alns.sort();
 
         assert_eq!(
@@ -294,7 +296,7 @@ fn total_depth_with_deletions_matches_htslib() {
 
     assert_eq!(hts_cols.len(), seq_cols.len(), "column count mismatch");
     for (i, (hts, seq)) in hts_cols.iter().zip(seq_cols.iter()).enumerate() {
-        assert_eq!(hts.pos, *seq.pos(), "pos mismatch at column {i}");
+        assert_eq!(hts.pos, seq.pos().as_u32(), "pos mismatch at column {i}");
         assert_eq!(
             hts.depth as usize,
             seq.depth(),
@@ -318,7 +320,7 @@ fn deletion_ops_match_htslib() {
 
     // Build position lookup for seqair columns to enable anchor→deletion cross-validation.
     let seq_by_pos: std::collections::HashMap<u32, &helpers::OwnedPileupColumn> =
-        seq_cols.iter().map(|c| (*c.pos(), c)).collect();
+        seq_cols.iter().map(|c| (c.pos().as_u32(), c)).collect();
 
     for (i, (hts, seq)) in hts_cols.iter().zip(seq_cols.iter()).enumerate() {
         let hts_del = hts.alignments.iter().filter(|a| a.is_del).count();
@@ -407,7 +409,7 @@ fn insertion_ops_match_htslib() {
         let mut seq_ins: Vec<(usize, u32)> = seq
             .alignments()
             .filter(|a| a.insert_len() > 0)
-            .filter_map(|a| a.qpos().map(|q| (q, a.insert_len())))
+            .filter_map(|a| a.qpos().map(|q| (q.as_usize(), a.insert_len())))
             .collect();
         seq_ins.sort_unstable();
 
@@ -513,7 +515,7 @@ fn pileup_empty_seq_matches_htslib() {
     );
 
     for (i, (sc, &(hp, hd, hm))) in cols.iter().zip(hts_cols.iter()).enumerate() {
-        assert_eq!(*sc.pos(), hp, "pos mismatch at column {i}");
+        assert_eq!(sc.pos().as_u32(), hp, "pos mismatch at column {i}");
         assert_eq!(
             sc.depth(),
             hd as usize,

@@ -65,7 +65,7 @@ fn pileup_single(
     let mut out = Vec::new();
     while let Some(col) = engine.pileups() {
         out.push(ColumnSnapshot {
-            pos: *col.pos(),
+            pos: col.pos().as_u32(),
             depth: col.depth(),
             match_depth: col.match_depth(),
             ref_base: col.reference_base() as u8,
@@ -101,7 +101,7 @@ fn pileup_segmented(
                 continue;
             }
             out.push(ColumnSnapshot {
-                pos: *col.pos(),
+                pos: col.pos().as_u32(),
                 depth: col.depth(),
                 match_depth: col.match_depth(),
                 ref_base: col.reference_base() as u8,
@@ -156,8 +156,8 @@ fn cores_partition_input_with_overlap() {
     for w in plan.windows(2) {
         let prev_end = *w[0].core_range().end();
         let next_start = *w[1].core_range().start();
-        let prev_u32: u32 = *prev_end;
-        let next_u32: u32 = *next_start;
+        let prev_u32: u32 = prev_end.as_u32();
+        let next_u32: u32 = next_start.as_u32();
         assert_eq!(
             prev_u32 + 1,
             next_u32,

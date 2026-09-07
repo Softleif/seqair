@@ -14,6 +14,7 @@ use helpers::{cigar_op, cigar_ops, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::cigar::{CigarMapping, CigarPosInfo};
 use seqair::bam::{Pos0, RecordStore, pileup::PileupEngine};
+use seqair_types::QPos;
 
 // ---- perf.reuse_alignment_vec ----
 // Verified indirectly: if the engine reuses the vec internally, output must
@@ -147,7 +148,7 @@ fn cigar_index_from_arena_slab_correct() {
 
     // Before deletion: qpos = pos - 100
     let col = columns.iter().find(|c| c.pos() == Pos0::new(110).unwrap()).unwrap();
-    assert_eq!(col.alignments().next().unwrap().qpos(), Some(10));
+    assert_eq!(col.alignments().next().unwrap().qpos(), Some(QPos::new(10)));
 
     // Inside deletion: alignment present with Deletion op (no qpos)
     let del_col = columns.iter().find(|c| c.pos() == Pos0::new(132).unwrap()).unwrap();
@@ -156,7 +157,7 @@ fn cigar_index_from_arena_slab_correct() {
 
     // After deletion: qpos = pos - 100 - 5 (deletion consumes 5 ref but 0 query)
     let col = columns.iter().find(|c| c.pos() == Pos0::new(140).unwrap()).unwrap();
-    assert_eq!(col.alignments().next().unwrap().qpos(), Some(35));
+    assert_eq!(col.alignments().next().unwrap().qpos(), Some(QPos::new(35)));
 }
 
 // ---- perf.precompute_matches_indels ----
@@ -264,11 +265,11 @@ fn binary_search_correct_for_many_ops() {
     // First M block: 1000-1029
     assert_eq!(
         mapping.pos_info_at(Pos0::new(1000).unwrap()),
-        Some(CigarPosInfo::Match { qpos: 0 })
+        Some(CigarPosInfo::Match { qpos: QPos::new(0) })
     );
     assert_eq!(
         mapping.pos_info_at(Pos0::new(1029).unwrap()),
-        Some(CigarPosInfo::Match { qpos: 29 })
+        Some(CigarPosInfo::Match { qpos: QPos::new(29) })
     );
 
     // N skip: 1030-6029 → RefSkip
@@ -278,11 +279,11 @@ fn binary_search_correct_for_many_ops() {
     // Second M block: 6030-6059
     assert_eq!(
         mapping.pos_info_at(Pos0::new(6030).unwrap()),
-        Some(CigarPosInfo::Match { qpos: 30 })
+        Some(CigarPosInfo::Match { qpos: QPos::new(30) })
     );
     assert_eq!(
         mapping.pos_info_at(Pos0::new(6059).unwrap()),
-        Some(CigarPosInfo::Match { qpos: 59 })
+        Some(CigarPosInfo::Match { qpos: QPos::new(59) })
     );
 
     // Second N skip: 6060-9059 → RefSkip
@@ -291,11 +292,11 @@ fn binary_search_correct_for_many_ops() {
     // Third M block: 9060-9099
     assert_eq!(
         mapping.pos_info_at(Pos0::new(9060).unwrap()),
-        Some(CigarPosInfo::Match { qpos: 60 })
+        Some(CigarPosInfo::Match { qpos: QPos::new(60) })
     );
     assert_eq!(
         mapping.pos_info_at(Pos0::new(9099).unwrap()),
-        Some(CigarPosInfo::Match { qpos: 99 })
+        Some(CigarPosInfo::Match { qpos: QPos::new(99) })
     );
     assert_eq!(mapping.pos_info_at(Pos0::new(9100).unwrap()), None);
 }
@@ -329,11 +330,11 @@ proptest! {
         }).sum();
 
         // Check every position — qpos must be in range and monotonically increasing
-        let mut last_qpos: Option<u32> = None;
+        let mut last_qpos: Option<QPos> = None;
         for pos in 0..total_ref {
             match mapping.pos_info_at(Pos0::new(pos).unwrap()) {
                 Some(CigarPosInfo::Match { qpos }) => {
-                    prop_assert!((qpos as usize) < total_query as usize,
+                    prop_assert!(qpos.as_usize() < total_query as usize,
                         "qpos {qpos} out of range at ref {pos}");
                     if let Some(prev) = last_qpos {
                         prop_assert!(qpos > prev, "qpos not monotonic at ref {pos}");

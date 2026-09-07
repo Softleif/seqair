@@ -1049,7 +1049,7 @@ mod tests {
                 AlignedPairWithRef::Deletion { rpos, del_len, ref_bases: Some(bases) } => {
                     assert_eq!(del_len, 2);
                     // Deletion starts at rpos = 1_000_000 + 95 + 20 = 1_000_115
-                    assert_eq!(*rpos, 1_000_115);
+                    assert_eq!(rpos.as_u32(), 1_000_115);
                     deletion_ref = Some(bases.to_vec());
                 }
                 _ => {}

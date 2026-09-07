@@ -176,7 +176,7 @@ fn insertion_reported_at_last_match_before_insert() {
         aln.op
     );
     assert_eq!(aln.insert_len(), 3);
-    assert_eq!(aln.qpos(), Some(9));
+    assert_eq!(aln.qpos(), Some(QPos::new(9)));
 
     // Position 8: regular Match (not the last before insertion)
     let col8 = columns.iter().find(|c| c.pos() == Pos0::new(8).unwrap()).unwrap();
@@ -187,7 +187,11 @@ fn insertion_reported_at_last_match_before_insert() {
     // Position 10 (first after insertion): Match with qpos = 10 + 3 = 13
     let col10 = columns.iter().find(|c| c.pos() == Pos0::new(10).unwrap()).unwrap();
     let aln10 = col10.alignments().next().unwrap();
-    assert_eq!(aln10.qpos(), Some(13), "qpos after insertion should skip inserted bases");
+    assert_eq!(
+        aln10.qpos(),
+        Some(QPos::new(13)),
+        "qpos after insertion should skip inserted bases"
+    );
 }
 
 // ---- pileup_indel.type_safety (compile-time) ----
@@ -367,7 +371,7 @@ fn insertion_with_anchor_and_complex_indel_after_deletion() {
         aln15.op
     );
     // qpos at pos 15 should account for both insertions: 10 (first M) + 2 (first I) + 3 (second I) = 15
-    assert_eq!(aln15.qpos(), Some(15), "qpos should skip both insertions' query bases");
+    assert_eq!(aln15.qpos(), Some(QPos::new(15)), "qpos should skip both insertions' query bases");
 }
 
 // ---- minimal insertion ----
@@ -393,18 +397,19 @@ fn minimal_insertion_1m_1i_1m() {
         "pos 0 should be Insertion with len=1, got {:?}",
         aln.op
     );
-    assert_eq!(aln.qpos(), Some(0));
+    assert_eq!(aln.qpos(), Some(QPos::new(0)));
 
     // pos 1: Match after the insertion
     let col1 = columns.iter().find(|c| c.pos() == Pos0::new(1).unwrap()).unwrap();
     let aln1 = col1.alignments().next().unwrap();
     assert!(matches!(aln1.op, PileupOp::Match { .. }));
-    assert_eq!(aln1.qpos(), Some(2)); // qpos 0 (M) + 1 (I) + 0 offset = 2
+    assert_eq!(aln1.qpos(), Some(QPos::new(2))); // qpos 0 (M) + 1 (I) + 0 offset = 2
 }
 
 // ---- proptest: complex CIGARs with indels ----
 
 use helpers::arb_read;
+use seqair_types::QPos;
 
 // r[verify pileup_indel.op_enum]
 // r[verify pileup_indel.deletions_included]

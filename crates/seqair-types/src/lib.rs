@@ -16,7 +16,7 @@ pub use smallvec;
 pub use smallvec::SmallVec;
 pub use smol_str::{self, SmolStr};
 
-pub use pos::{Offset, One, Pos, Pos0, Pos1, PosOverflow, Zero};
+pub use pos::{Offset, One, Pos, Pos0, Pos1, PosOverflow, QPos, Zero};
 
 pub use {
     bam_flags::BamFlags,

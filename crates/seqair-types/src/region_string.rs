@@ -314,13 +314,13 @@ mod tests {
                 let after_colon = display.split(':').nth(1).unwrap_or("");
                 let start_str = after_colon.split('-').next().unwrap_or("");
                 let parsed_start: u32 = start_str.parse().expect("start in display must be numeric");
-                proptest::prop_assert_eq!(parsed_start, *start);
+                proptest::prop_assert_eq!(parsed_start, start.as_u32());
             }
             if let Some(end) = parsed.end {
                 proptest::prop_assert!(display.contains('-'), "display missing '-': {display}");
                 let after_dash = display.split('-').nth(1).unwrap_or("");
                 let parsed_end: u32 = after_dash.parse().expect("end in display must be numeric");
-                proptest::prop_assert_eq!(parsed_end, *end);
+                proptest::prop_assert_eq!(parsed_end, end.as_u32());
             }
             // can be used as a FetchDefinition for bam
             #[cfg(feature = "hts-compat")]

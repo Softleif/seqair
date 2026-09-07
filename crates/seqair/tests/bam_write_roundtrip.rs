@@ -585,7 +585,7 @@ fn roundtrip_write_store_record() {
     for i in 0..2u32 {
         let a = store.record(i);
         let b = store2.record(i);
-        assert_eq!(*a.pos, *b.pos, "pos mismatch record {i}");
+        assert_eq!(a.pos.as_u32(), b.pos.as_u32(), "pos mismatch record {i}");
         assert_eq!(a.flags, b.flags, "flags mismatch record {i}");
         assert_eq!(a.mapq, b.mapq, "mapq mismatch record {i}");
         assert_eq!(a.next_ref_id, b.next_ref_id, "next_ref_id mismatch record {i}");

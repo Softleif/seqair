@@ -3,7 +3,7 @@
 //! [`CigarPosInfo`] describes what occupies a given reference position.
 
 use crate::utils::{TraceErr, TraceOk};
-use seqair_types::{Pos0, SmallVec};
+use seqair_types::{Pos0, QPos, SmallVec};
 
 // r[impl cigar.operations]
 // r[impl io.named_constants]
@@ -353,9 +353,9 @@ pub fn compute_end_pos(pos: Pos0, ops: &[CigarOp]) -> Option<Pos0> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CigarPosInfo {
     /// M/=/X op: read has a base aligned here.
-    Match { qpos: u32 },
+    Match { qpos: QPos },
     /// M/=/X op at the last position before an I op follows.
-    Insertion { qpos: u32, insert_len: u32 },
+    Insertion { qpos: QPos, insert_len: u32 },
     /// D op: deletion spanning this position. `del_len` is the total length of the D CIGAR op.
     Deletion { del_len: u32 },
     /// D or N op at its last position, followed by an I op (e.g. `D I M`).
@@ -470,10 +470,12 @@ impl CigarMapping {
                     return None;
                 }
                 Some(CigarPosInfo::Match {
-                    qpos: u32::try_from(offset)
-                        .trace_ok("offset exceeds u32 range")?
-                        .checked_add(*query_offset)
-                        .trace_err("qpos overflow")?,
+                    qpos: QPos::new(
+                        u32::try_from(offset)
+                            .trace_ok("offset exceeds u32 range")?
+                            .checked_add(*query_offset)
+                            .trace_err("qpos overflow")?,
+                    ),
                 })
                 // Linear path never has insertions/deletions (try_linear rejects them)
             }
@@ -498,7 +500,7 @@ impl CigarMapping {
     /// is the read's SEQ length (soft clips counted, hard clips excluded), used
     /// to size the trailing clip.
     // r[impl cigar.soft_clip_qpos]
-    pub fn soft_clip_qpos_at(&self, pos: Pos0, max_overhang: u32, query_len: u32) -> Option<u32> {
+    pub fn soft_clip_qpos_at(&self, pos: Pos0, max_overhang: u32, query_len: u32) -> Option<QPos> {
         if max_overhang == 0 {
             return None;
         }
@@ -510,7 +512,9 @@ impl CigarMapping {
                 let lead_k = max_overhang.min(*query_offset);
                 let lead_d = aln_start.checked_sub(pos)?;
                 if lead_d >= 1 && lead_d <= i64::from(lead_k) {
-                    return u32::try_from(i64::from(*query_offset).checked_sub(lead_d)?).ok();
+                    return u32::try_from(i64::from(*query_offset).checked_sub(lead_d)?)
+                        .ok()
+                        .map(QPos::new);
                 }
                 // Trailing clip: columns [aln_end, aln_end + k).
                 let aln_end = aln_start.checked_add(i64::from(*match_len))?;
@@ -523,7 +527,8 @@ impl CigarMapping {
                             .checked_add(i64::from(*match_len))?
                             .checked_add(trail_d)?,
                     )
-                    .ok();
+                    .ok()
+                    .map(QPos::new);
                 }
                 None
             }
@@ -539,7 +544,8 @@ impl CigarMapping {
                                 .checked_add(i64::from(clip.len()))?
                                 .checked_sub(d)?,
                         )
-                        .ok();
+                        .ok()
+                        .map(QPos::new);
                     }
                 }
                 if let Some(clip) = trail {
@@ -547,7 +553,9 @@ impl CigarMapping {
                     let k = max_overhang.min(clip.len());
                     let d = pos.checked_sub(aln_end)?;
                     if d >= 0 && d < i64::from(k) {
-                        return u32::try_from(i64::from(clip.query_start).checked_add(d)?).ok();
+                        return u32::try_from(i64::from(clip.query_start).checked_add(d)?)
+                            .ok()
+                            .map(QPos::new);
                     }
                 }
                 None
@@ -569,7 +577,7 @@ impl CigarMapping {
             // Linear CIGARs are clips-match-clips with no indels.
             Self::Linear { .. } => None,
             Self::Complex(ops) => {
-                let pos: u32 = *pos;
+                let pos: u32 = pos.as_u32();
                 for (i, op) in ops.iter().enumerate() {
                     if !consumes_ref(op.op_type()) {
                         continue;
@@ -743,7 +751,7 @@ fn classify_op(
             op.op_type()
         );
         let offset = pos.wrapping_sub(op.ref_start);
-        let qpos = op.query_start.checked_add(offset).trace_err("qpos overflow")?;
+        let qpos = QPos::new(op.query_start.checked_add(offset).trace_err("qpos overflow")?);
         if pos == ref_end.wrapping_sub(1)
             && let Some(insert_len) = next_insertion_len(ops, i)
         {
@@ -779,7 +787,7 @@ fn classify_op(
 
 #[inline]
 fn pos_info_linear(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
-    let pos: u32 = *pos;
+    let pos: u32 = pos.as_u32();
     for (i, op) in ops.iter().enumerate() {
         if !consumes_ref(op.op_type()) {
             continue;
@@ -796,7 +804,7 @@ fn pos_info_linear(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
 // r[impl perf.cigar_binary_search]
 #[inline]
 fn pos_info_bsearch(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
-    let pos: u32 = *pos;
+    let pos: u32 = pos.as_u32();
     let idx = ops.partition_point(|op| op.ref_start <= pos);
     if idx == 0 {
         return None;
@@ -883,7 +891,7 @@ mod tests {
         let mapping = CigarMapping::new(rec_pos, &cigar).unwrap();
         // Should work fine — position fits in i32
         assert!(matches!(mapping, CigarMapping::Linear { .. }));
-        assert_eq!(mapping.pos_info_at(rec_pos), Some(CigarPosInfo::Match { qpos: 0 }));
+        assert_eq!(mapping.pos_info_at(rec_pos), Some(CigarPosInfo::Match { qpos: QPos::new(0) }));
     }
 
     #[test]
@@ -938,15 +946,15 @@ mod tests {
         // Valid positions: 1000..1100
         assert_eq!(
             mapping.pos_info_at(Pos0::new(1000).unwrap()),
-            Some(CigarPosInfo::Match { qpos: 5 })
+            Some(CigarPosInfo::Match { qpos: QPos::new(5) })
         );
         assert_eq!(
             mapping.pos_info_at(Pos0::new(1050).unwrap()),
-            Some(CigarPosInfo::Match { qpos: 55 })
+            Some(CigarPosInfo::Match { qpos: QPos::new(55) })
         );
         assert_eq!(
             mapping.pos_info_at(Pos0::new(1099).unwrap()),
-            Some(CigarPosInfo::Match { qpos: 104 })
+            Some(CigarPosInfo::Match { qpos: QPos::new(104) })
         );
 
         // Out-of-range: before alignment start
@@ -994,16 +1002,16 @@ mod tests {
         let q = |pos, k| m.soft_clip_qpos_at(p(pos), k, 108);
 
         // Leading: the base adjacent to the alignment (pos 999) is the last clip base (qpos 4).
-        assert_eq!(q(999, 1), Some(4));
+        assert_eq!(q(999, 1), Some(QPos::new(4)));
         assert_eq!(q(998, 1), None, "overhang 1 reaches only one base");
-        assert_eq!(q(998, 2), Some(3));
-        assert_eq!(q(995, 5), Some(0), "first leading clip base");
+        assert_eq!(q(998, 2), Some(QPos::new(3)));
+        assert_eq!(q(995, 5), Some(QPos::new(0)), "first leading clip base");
         assert_eq!(q(994, 5), None, "beyond the 5bp leading clip");
         assert_eq!(q(994, 9), None, "overhang capped by clip length");
 
         // Trailing: pos 1100 is the first trailing clip base (qpos 105).
-        assert_eq!(q(1100, 1), Some(105));
-        assert_eq!(q(1102, 3), Some(107), "last trailing clip base");
+        assert_eq!(q(1100, 1), Some(QPos::new(105)));
+        assert_eq!(q(1102, 3), Some(QPos::new(107)), "last trailing clip base");
         assert_eq!(q(1103, 3), None, "beyond the 3bp trailing clip");
 
         // Inside the alignment and overhang 0 yield nothing.
@@ -1029,7 +1037,7 @@ mod tests {
             op(CigarOpType::Match, 100),
         ];
         let m = CigarMapping::new(p(1000), &cigar).unwrap();
-        assert_eq!(m.soft_clip_qpos_at(p(999), 1, 105), Some(4));
+        assert_eq!(m.soft_clip_qpos_at(p(999), 1, 105), Some(QPos::new(4)));
     }
 
     #[test]
@@ -1046,10 +1054,26 @@ mod tests {
         let m = CigarMapping::new(p(1000), &cigar).unwrap();
         assert!(matches!(m, CigarMapping::Complex(_)));
         let query_len = 5 + 10 + 2 + 10 + 3;
-        assert_eq!(m.soft_clip_qpos_at(p(999), 1, query_len), Some(4), "leading partner");
-        assert_eq!(m.soft_clip_qpos_at(p(995), 5, query_len), Some(0), "first leading base");
-        assert_eq!(m.soft_clip_qpos_at(p(1020), 1, query_len), Some(27), "trailing partner");
-        assert_eq!(m.soft_clip_qpos_at(p(1022), 3, query_len), Some(29), "last trailing base");
+        assert_eq!(
+            m.soft_clip_qpos_at(p(999), 1, query_len),
+            Some(QPos::new(4)),
+            "leading partner"
+        );
+        assert_eq!(
+            m.soft_clip_qpos_at(p(995), 5, query_len),
+            Some(QPos::new(0)),
+            "first leading base"
+        );
+        assert_eq!(
+            m.soft_clip_qpos_at(p(1020), 1, query_len),
+            Some(QPos::new(27)),
+            "trailing partner"
+        );
+        assert_eq!(
+            m.soft_clip_qpos_at(p(1022), 3, query_len),
+            Some(QPos::new(29)),
+            "last trailing base"
+        );
         assert_eq!(m.soft_clip_qpos_at(p(1023), 3, query_len), None);
     }
 
@@ -1095,13 +1119,13 @@ mod tests {
                     "soft clip and aligned base cannot coexist at one position"
                 );
                 if let Some(q) = sc {
-                    prop_assert!(q < query_len);
+                    prop_assert!(q.get() < query_len);
                     if pos < aln_start {
-                        prop_assert!(q < lead, "leading hit must index the leading clip run");
+                        prop_assert!(q.get() < lead, "leading hit must index the leading clip run");
                         lead_hits += 1;
                     } else {
                         prop_assert!(
-                            q >= lead + mlen,
+                            q.get() >= lead + mlen,
                             "trailing hit must index the trailing clip run"
                         );
                         trail_hits += 1;

@@ -132,7 +132,7 @@ impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
         for ev in self {
             match ev {
                 AlignedPairWithRef::Match { kind, query, ref_base, rpos, .. } => {
-                    let rb = ref_base.ok_or(NmMdError::MissingReference { rpos: *rpos })?;
+                    let rb = ref_base.ok_or(NmMdError::MissingReference { rpos: rpos.as_u32() })?;
                     let is_match = match kind {
                         MatchKind::SeqMatch => true,
                         MatchKind::SeqMismatch => false,
@@ -151,7 +151,8 @@ impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
                     }
                 }
                 AlignedPairWithRef::Deletion { del_len, ref_bases, rpos } => {
-                    let bases = ref_bases.ok_or(NmMdError::MissingReference { rpos: *rpos })?;
+                    let bases =
+                        ref_bases.ok_or(NmMdError::MissingReference { rpos: rpos.as_u32() })?;
                     debug_assert_eq!(bases.len(), del_len as usize);
                     // MD requires a number before `^` (even 0). However, two
                     // adjacent deletions need a `0` between them — `^A^C`

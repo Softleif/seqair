@@ -436,7 +436,7 @@ mod tests {
         let decoded = store.record(0);
 
         assert_eq!(decoded.tid, 0);
-        assert_eq!(*decoded.pos, 100);
+        assert_eq!(decoded.pos.as_u32(), 100);
         assert_eq!(decoded.mapq, 30);
         assert_eq!(decoded.flags, BamFlags::empty());
         assert_eq!(decoded.seq_len, 5);

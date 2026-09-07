@@ -69,11 +69,11 @@ fn main() -> anyhow::Result<()> {
     let (tid, start, end, contig) = resolve_region(args.region.as_ref(), reader.header())?;
 
     let mut store = RecordStore::new();
-    reader
-        .fetch_into(tid, start, end, &mut store)
-        .with_context(|| format!("fetch failed for {contig}:{}-{}", *start, *end))?;
+    reader.fetch_into(tid, start, end, &mut store).with_context(|| {
+        format!("fetch failed for {contig}:{}-{}", start.as_u32(), end.as_u32())
+    })?;
 
-    println!("fetched {} record(s) from {contig}:{}-{}", store.len(), *start, *end);
+    println!("fetched {} record(s) from {contig}:{}-{}", store.len(), start.as_u32(), end.as_u32());
 
     // Pass 1: inspect records and plan changes without mutating the store.
     // `set_alignment` needs `&mut self`, so we collect the work first.
@@ -106,7 +106,11 @@ fn main() -> anyhow::Result<()> {
             let after = snapshot(&store, *idx);
             println!(
                 "  [{idx}] {:?}  {} @ {}  ->  {} @ {}",
-                before.qname, before.cigar_str, *before.pos, after.cigar_str, *after.pos,
+                before.qname,
+                before.cigar_str,
+                before.pos.as_u32(),
+                after.cigar_str,
+                after.pos.as_u32(),
             );
         }
     }
@@ -177,7 +181,7 @@ fn propose_realignment(
     }
 
     let new_match_len = first_len - clip;
-    let new_pos = Pos0::new((*pos).checked_add(clip)?)?;
+    let new_pos = Pos0::new(pos.as_u32().checked_add(clip)?)?;
 
     // Rebuild: [clip]S + [new_match_len]M + cigar[1..]
     let mut out = Vec::with_capacity(cigar.len() + 1);

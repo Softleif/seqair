@@ -108,9 +108,9 @@ fn main() -> anyhow::Result<()> {
     };
 
     let mut store = RecordStore::new();
-    reader
-        .fetch_into(tid, start, end, &mut store)
-        .with_context(|| format!("fetch failed for {contig_name}:{}-{}", *start, *end))?;
+    reader.fetch_into(tid, start, end, &mut store).with_context(|| {
+        format!("fetch failed for {contig_name}:{}-{}", start.as_u32(), end.as_u32())
+    })?;
 
     let mut output: Box<dyn Write> = if let Some(ref path) = args.output {
         Box::new(BufWriter::new(
@@ -158,7 +158,7 @@ fn main() -> anyhow::Result<()> {
             writeln!(
                 output,
                 "# {qname} (pos={}, strand={})",
-                *rec.pos,
+                rec.pos.as_u32(),
                 strand_char(rec.flags.is_reverse())
             )?;
         }
@@ -191,8 +191,8 @@ fn main() -> anyhow::Result<()> {
                     )?;
                 }
 
-                let ref_pos = *rpos;
-                if ref_pos < *start || ref_pos >= *end {
+                let ref_pos = rpos.as_u32();
+                if ref_pos < start.as_u32() || ref_pos >= end.as_u32() {
                     continue;
                 }
 
@@ -234,8 +234,8 @@ fn main() -> anyhow::Result<()> {
 
     eprintln!(
         "{contig_name}:{}-{}: {} records, {} with modifications, {} total calls",
-        *start,
-        *end,
+        start.as_u32(),
+        end.as_u32(),
         store.len(),
         records_with_mods,
         total_calls,

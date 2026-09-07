@@ -585,12 +585,12 @@ mod tests {
 
         let idx0 = push_one_record_from_bgzf(&mut reader, &mut store);
         assert_eq!(store.qname(idx0), b"read1");
-        assert_eq!(*store.record(idx0).pos, 100);
+        assert_eq!(store.record(idx0).pos.as_u32(), 100);
         assert_eq!(store.record(idx0).mapq, 30);
 
         let idx1 = push_one_record_from_bgzf(&mut reader, &mut store);
         assert_eq!(store.qname(idx1), b"read2");
-        assert_eq!(*store.record(idx1).pos, 200);
+        assert_eq!(store.record(idx1).pos.as_u32(), 200);
     }
 
     // r[verify bam_writer.error_poisoning]
@@ -805,7 +805,7 @@ mod tests {
         for i in 0..2u32 {
             let a = store.record(i);
             let b = store2.record(i);
-            assert_eq!(*a.pos, *b.pos, "pos mismatch for record {i}");
+            assert_eq!(a.pos.as_u32(), b.pos.as_u32(), "pos mismatch for record {i}");
             assert_eq!(a.flags, b.flags, "flags mismatch for record {i}");
             assert_eq!(a.mapq, b.mapq, "mapq mismatch for record {i}");
             assert_eq!(a.tid, b.tid, "tid mismatch for record {i}");

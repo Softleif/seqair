@@ -78,6 +78,18 @@ r[pos.as_usize]
 r[pos.as_i64]
 `pos.as_i64() -> i64` MUST return the raw value as `i64` for wider arithmetic.
 
+r[pos.as_u32]
+`pos.as_u32() -> u32` MUST return the raw value. This is the representation, so
+the conversion is infallible.
+
+r[pos.no_deref]
+`Pos<S>` MUST NOT implement `Deref<Target = u32>`. A `Deref` to the
+representation defeats the newtype: `*pos` yields a bare integer that flows into
+any `u32` parameter, and autoderef silently exposes every `u32` method
+(`pos.saturating_sub(n)` resolves and compiles). Callers wanting the number MUST
+say so through a named accessor. This mirrors the same prohibition on `Aux` in
+[BAM records](./2-bam-3-2-record.md).
+
 ## Arithmetic
 
 r[pos.offset]
@@ -124,6 +136,35 @@ records from BAM, SAM, and CRAM. A `Range<Pos0>` built from these values —
 [`RecordStore::mate_overlap`](./3-record_store.md), for instance — is half-open
 and therefore ends at `end_pos + 1`; that conversion belongs at the point the
 `Range` is constructed.
+
+## Query positions
+
+r[qpos.type]
+`QPos` MUST be a `#[repr(transparent)]` newtype over `u32` representing a
+0-based offset into a read's sequence.
+
+r[qpos.not_a_pos]
+`QPos` and `Pos<S>` MUST be distinct, non-interconvertible types. A `Pos` names a
+location on the reference; a `QPos` indexes a read. The compiler MUST reject
+passing one where the other is expected.
+
+> **Why this exists.** Code that resolves reference bases from a segment computes
+> `pos - segment_start`. Handed a query offset instead of a genomic position that
+> subtraction underflows — and where it was written with `saturating_sub`, it
+> clamps to 0 and silently returns bases from the start of the segment: real
+> sequence from the wrong locus, no error. This was a live bug in rastair's
+> deletion alleles, where 82.6 % of multi-base REF alleles did not match the
+> reference. Both integers were `usize`, so nothing could catch it.
+
+r[qpos.new]
+`QPos::new(u32) -> Self` MUST be infallible. Unlike `Pos`, no format caps a query
+offset below `u32::MAX`; it is bounded by the read length.
+
+r[qpos.get]
+`QPos::get() -> u32` and `QPos::as_usize() -> usize` MUST return the raw offset.
+
+r[qpos.checked]
+`QPos::checked_add(u32)` and `QPos::checked_sub(u32)` MUST return `Option<Self>`.
 
 ## Traits
 
