@@ -170,7 +170,7 @@ fn main() -> anyhow::Result<()> {
         // coordinate.
         for pair in rec.aligned_pairs(&store)? {
             let AlignedPair::Match { qpos, rpos, .. } = pair else { continue };
-            let Some(mods) = state.mod_at_qpos(qpos as usize) else { continue };
+            let Some(mods) = state.mod_at_qpos(qpos.as_usize()) else { continue };
 
             for m in mods {
                 let code = mod_code_char(m.mod_type);

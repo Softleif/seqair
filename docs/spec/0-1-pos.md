@@ -166,6 +166,10 @@ r[qpos.get]
 r[qpos.checked]
 `QPos::checked_add(u32)` and `QPos::checked_sub(u32)` MUST return `Option<Self>`.
 
+r[qpos.saturating]
+`QPos::saturating_add(u32) -> Self` MUST saturate rather than wrap, so a
+malformed CIGAR cannot walk a query cursor back to the start of the read.
+
 ## Traits
 
 r[pos.derives]

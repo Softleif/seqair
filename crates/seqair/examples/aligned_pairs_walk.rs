@@ -219,7 +219,7 @@ fn collect_insertions(
     let mut out = Vec::new();
     for ev in rec.aligned_pairs_with_read(store)? {
         if let AlignedPairWithRead::Insertion { qpos, query, .. } = ev {
-            out.push((qpos, query.to_vec()));
+            out.push((qpos.get(), query.to_vec()));
         }
     }
     Ok(out)

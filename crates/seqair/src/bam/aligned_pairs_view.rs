@@ -60,7 +60,7 @@
 
 use super::aligned_pairs::{AlignedPair, AlignedPairs, MatchKind};
 use super::pileup::RefSeq;
-use seqair_types::{Base, BaseQuality, Pos0};
+use seqair_types::{Base, BaseQuality, Pos0, QPos};
 
 // ── MatchedBase / MatchedRef value types ───────────────────────────────────
 
@@ -75,7 +75,7 @@ use seqair_types::{Base, BaseQuality, Pos0};
 /// [`MatchPosition`]: super::aligned_pairs::MatchPosition
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchedBase {
-    pub qpos: u32,
+    pub qpos: QPos,
     pub rpos: Pos0,
     pub kind: MatchKind,
     pub query: Base,
@@ -92,7 +92,7 @@ pub struct MatchedBase {
 /// `Some(Base::Unknown)` for an in-window `N`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchedRef {
-    pub qpos: u32,
+    pub qpos: QPos,
     pub rpos: Pos0,
     pub kind: MatchKind,
     pub query: Base,
@@ -117,7 +117,7 @@ pub struct MatchedRef {
 pub enum AlignedPairWithRead<'read> {
     /// M / = / X — read base aligned to a reference base.
     Match {
-        qpos: u32,
+        qpos: QPos,
         rpos: Pos0,
         kind: MatchKind,
         /// The read base at `qpos`. Always in bounds — `with_read`
@@ -128,13 +128,13 @@ pub enum AlignedPairWithRead<'read> {
         qual: BaseQuality,
     },
     /// I — `query` and `qual` are the inserted bases and their Phred scores.
-    Insertion { qpos: u32, query: &'read [Base], qual: &'read [BaseQuality] },
+    Insertion { qpos: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
     /// D — deletion from the reference. No read data.
     Deletion { rpos: Pos0, del_len: u32 },
     /// N — reference skip (e.g. intron). No read data.
     RefSkip { rpos: Pos0, skip_len: u32 },
     /// S — soft clip. `query` and `qual` are the clipped run.
-    SoftClip { qpos: u32, query: &'read [Base], qual: &'read [BaseQuality] },
+    SoftClip { qpos: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
     /// P — padding. No read data.
     Padding { len: u32 },
     /// Reserved op code (9..=15). No read data.
@@ -205,7 +205,7 @@ impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
     fn attach_read(&self, pair: AlignedPair) -> AlignedPairWithRead<'read> {
         match pair {
             AlignedPair::Match { qpos, rpos, kind } => {
-                let q = qpos as usize;
+                let q = qpos.as_usize();
                 AlignedPairWithRead::Match {
                     qpos,
                     rpos,
@@ -260,8 +260,8 @@ impl ExactSizeIterator for AlignedPairsWithRead<'_, '_> {}
 impl std::iter::FusedIterator for AlignedPairsWithRead<'_, '_> {}
 
 #[inline]
-fn range_for(qpos: u32, len: u32) -> (usize, usize) {
-    let start = qpos as usize;
+fn range_for(qpos: QPos, len: u32) -> (usize, usize) {
+    let start = qpos.as_usize();
     let end = start.saturating_add(len as usize);
     (start, end)
 }
@@ -282,7 +282,7 @@ fn range_for(qpos: u32, len: u32) -> (usize, usize) {
 pub enum AlignedPairWithRef<'read, 'ref_seq> {
     /// M / = / X — query base, ref base, kind.
     Match {
-        qpos: u32,
+        qpos: QPos,
         rpos: Pos0,
         kind: MatchKind,
         query: Base,
@@ -293,14 +293,14 @@ pub enum AlignedPairWithRef<'read, 'ref_seq> {
         ref_base: Option<Base>,
     },
     /// I — inserted query bases and quals (no reference span).
-    Insertion { qpos: u32, query: &'read [Base], qual: &'read [BaseQuality] },
+    Insertion { qpos: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
     /// D — deleted reference bases. `ref_bases` is `None` if any position in
     /// the deletion span falls outside the loaded `RefSeq` window.
     Deletion { rpos: Pos0, del_len: u32, ref_bases: Option<&'ref_seq [Base]> },
     /// N — reference skip.
     RefSkip { rpos: Pos0, skip_len: u32 },
     /// S — soft clip (read-only; reference doesn't participate).
-    SoftClip { qpos: u32, query: &'read [Base], qual: &'read [BaseQuality] },
+    SoftClip { qpos: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
     /// P — padding.
     Padding { len: u32 },
     /// Reserved op code.
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(
             events[0],
             AlignedPairWithRead::Match {
-                qpos: 0,
+                qpos: QPos::new(0),
                 rpos: p0(100),
                 kind: MatchKind::Match,
                 query: Base::A,
@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(
             events[2],
             AlignedPairWithRead::Match {
-                qpos: 2,
+                qpos: QPos::new(2),
                 rpos: p0(102),
                 kind: MatchKind::Match,
                 query: Base::G,
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(events.len(), 5);
         match events[2] {
             AlignedPairWithRead::Insertion { qpos, query, qual } => {
-                assert_eq!(qpos, 2);
+                assert_eq!(qpos, QPos::new(2));
                 assert_eq!(query, &[Base::T, Base::G, Base::T]);
                 assert_eq!(qual.len(), 3);
                 assert_eq!(qual[0].as_byte(), 22);
@@ -575,7 +575,7 @@ mod tests {
             rec.aligned_pairs_with_read(&store).unwrap().with_soft_clips().collect();
         match events[0] {
             AlignedPairWithRead::SoftClip { qpos, query, qual } => {
-                assert_eq!(qpos, 0);
+                assert_eq!(qpos, QPos::new(0));
                 assert_eq!(query, &[Base::Unknown, Base::Unknown]);
                 assert_eq!(qual.len(), 2);
             }
@@ -889,10 +889,10 @@ mod tests {
 
         let matches: Vec<_> = rec.aligned_pairs_with_read(&store).unwrap().matches_only().collect();
         assert_eq!(matches.len(), 4, "expected 2M + 2M = 4 match positions");
-        assert_eq!(matches[0].qpos, 0);
+        assert_eq!(matches[0].qpos, QPos::new(0));
         assert_eq!(matches[0].query, Base::A);
         assert_eq!(matches[0].kind, MatchKind::Match);
-        assert_eq!(matches[3].qpos, 4);
+        assert_eq!(matches[3].qpos, QPos::new(4));
         assert_eq!(matches[3].query, Base::Unknown);
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
             .iter()
             .find_map(|e| if let AlignedPair::Match { qpos, .. } = e { Some(*qpos) } else { None })
             .unwrap();
-        assert_eq!(first_match, 2);
+        assert_eq!(first_match, QPos::new(2));
 
         // ── Layer 2: with_read, verify Insertion slice ──
         let rich_events: Vec<_> = rec.aligned_pairs_with_read(&store).unwrap().collect();
@@ -1027,7 +1027,7 @@ mod tests {
             .unwrap();
         match *insertion {
             AlignedPairWithRead::Insertion { qpos, query, qual } => {
-                assert_eq!(qpos, 97, "insertion starts at qpos 97 (after 2S+95M)");
+                assert_eq!(qpos, QPos::new(97), "insertion starts at qpos 97 (after 2S+95M)");
                 assert_eq!(query.len(), 5);
                 assert_eq!(qual.len(), 5);
                 // Spot-check: query[0] == seq[97] = kinds[97 % 4] = kinds[1] = C
@@ -1221,12 +1221,12 @@ mod tests {
                 for ev in it {
                     match ev {
                         AlignedPairWithRead::Match { qpos, query, qual, .. } => {
-                            let expected_base = bases[(qpos % 5) as usize];
+                            let expected_base = bases[(qpos.get() % 5) as usize];
                             prop_assert_eq!(
                                 query, expected_base,
                                 "Match query at qpos={} != seq[qpos]", qpos
                             );
-                            let expected_qual = BaseQuality::from_byte((qpos % 60) as u8);
+                            let expected_qual = BaseQuality::from_byte((qpos.get() % 60) as u8);
                             prop_assert_eq!(
                                 qual, expected_qual,
                                 "Match qual at qpos={} != qual[qpos]", qpos
@@ -1234,14 +1234,14 @@ mod tests {
                         }
                         AlignedPairWithRead::Insertion { qpos, query, qual } => {
                             for (offset, &b) in query.iter().enumerate() {
-                                let q = qpos as usize + offset;
+                                let q = qpos.as_usize() + offset;
                                 prop_assert_eq!(
                                     b, bases[q % 5],
                                     "Insertion query[{}] (abs qpos={}) mismatch", offset, q
                                 );
                             }
                             for (offset, &q_val) in qual.iter().enumerate() {
-                                let q = qpos as usize + offset;
+                                let q = qpos.as_usize() + offset;
                                 let q_byte = u8::try_from(q % 60).unwrap_or(0);
                                 prop_assert_eq!(
                                     q_val, BaseQuality::from_byte(q_byte),
@@ -1251,14 +1251,14 @@ mod tests {
                         }
                         AlignedPairWithRead::SoftClip { qpos, query, qual } => {
                             for (offset, &b) in query.iter().enumerate() {
-                                let q = qpos as usize + offset;
+                                let q = qpos.as_usize() + offset;
                                 prop_assert_eq!(
                                     b, bases[q % 5],
                                     "SoftClip query[{}] (abs qpos={}) mismatch", offset, q
                                 );
                             }
                             for (offset, &q_val) in qual.iter().enumerate() {
-                                let q = qpos as usize + offset;
+                                let q = qpos.as_usize() + offset;
                                 let q_byte = u8::try_from(q % 60).unwrap_or(0);
                                 prop_assert_eq!(
                                     q_val, BaseQuality::from_byte(q_byte),

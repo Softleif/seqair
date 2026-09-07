@@ -30,7 +30,7 @@
 
 use super::cigar::{CigarOp, CigarOpType};
 use super::record_store::{RecordAccessError, RecordStore, SlimRecord};
-use seqair_types::Pos0;
+use seqair_types::{Pos0, QPos};
 use thiserror::Error;
 
 // ── Errors ─────────────────────────────────────────────────────────────────
@@ -127,11 +127,11 @@ pub enum AlignedPair {
     /// M / = / X op — read base aligned to a reference base.
     /// Yields one variant per consumed position. Use `kind` to distinguish
     /// `M` (ambiguous) from `=` (explicit match) and `X` (explicit mismatch).
-    Match { qpos: u32, rpos: Pos0, kind: MatchKind },
+    Match { qpos: QPos, rpos: Pos0, kind: MatchKind },
 
     /// I op — `insert_len` query bases follow `qpos`, no reference span.
     /// `qpos` is the position of the first inserted base.
-    Insertion { qpos: u32, insert_len: u32 },
+    Insertion { qpos: QPos, insert_len: u32 },
 
     /// D op — `del_len` reference bases starting at `rpos`, no query span.
     Deletion { rpos: Pos0, del_len: u32 },
@@ -141,7 +141,7 @@ pub enum AlignedPair {
 
     /// S op — soft clip. `qpos` is the start of the clipped run.
     /// Hidden by default; opt in via [`.with_soft_clips()`](AlignedPairs::with_soft_clips) or [`.full()`](AlignedPairs::full).
-    SoftClip { qpos: u32, len: u32 },
+    SoftClip { qpos: QPos, len: u32 },
 
     /// P op — padding. `len` is the op length (typically small — most aligners
     /// emit `1P` or `0P`). Hidden by default; opt in via [`.full()`](AlignedPairs::full).
@@ -175,7 +175,7 @@ const _: () = assert!(
 /// these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatchPosition {
-    pub qpos: u32,
+    pub qpos: QPos,
     pub rpos: Pos0,
     pub kind: MatchKind,
 }
@@ -225,7 +225,7 @@ pub struct AlignedPairs<'a> {
     /// Remaining CIGAR ops to process.
     ops: &'a [CigarOp],
     /// Current 0-based query position (includes soft clips).
-    qpos: u32,
+    qpos: QPos,
     /// Current 0-based reference position.
     rpos: Pos0,
     /// Which variants to yield.
@@ -253,7 +253,7 @@ impl<'a> AlignedPairs<'a> {
     pub fn new(rec_pos: Pos0, cigar: &'a [CigarOp]) -> Self {
         Self {
             ops: cigar,
-            qpos: 0,
+            qpos: QPos::ZERO,
             rpos: rec_pos,
             options: AlignedPairsOptions::default(),
             expanding: ExpandingState::None,
@@ -702,15 +702,15 @@ mod tests {
     }
 
     fn match_m(qpos: u32, rpos: Pos0) -> AlignedPair {
-        AlignedPair::Match { qpos, rpos, kind: MatchKind::Match }
+        AlignedPair::Match { qpos: QPos::new(qpos), rpos, kind: MatchKind::Match }
     }
 
     fn match_eq(qpos: u32, rpos: Pos0) -> AlignedPair {
-        AlignedPair::Match { qpos, rpos, kind: MatchKind::SeqMatch }
+        AlignedPair::Match { qpos: QPos::new(qpos), rpos, kind: MatchKind::SeqMatch }
     }
 
     fn match_x(qpos: u32, rpos: Pos0) -> AlignedPair {
-        AlignedPair::Match { qpos, rpos, kind: MatchKind::SeqMismatch }
+        AlignedPair::Match { qpos: QPos::new(qpos), rpos, kind: MatchKind::SeqMismatch }
     }
 
     fn seq_match(len: u32) -> Op {
@@ -766,7 +766,7 @@ mod tests {
             pairs
                 .iter()
                 .filter_map(|p| match p {
-                    AlignedPair::Match { qpos, rpos, .. } => Some((*qpos, rpos.as_u32())),
+                    AlignedPair::Match { qpos, rpos, .. } => Some((qpos.get(), rpos.as_u32())),
                     _ => None,
                 })
                 .collect()
@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(pairs[0], match_m(0, p0(100)));
         assert_eq!(pairs[1], match_m(1, p0(101)));
         // Insertion summary: qpos = 2 (first inserted base), len = 1
-        assert_eq!(pairs[2], AlignedPair::Insertion { qpos: 2, insert_len: 1 });
+        assert_eq!(pairs[2], AlignedPair::Insertion { qpos: QPos::new(2), insert_len: 1 });
         assert_eq!(pairs[3], match_m(3, p0(102)));
         assert_eq!(pairs[4], match_m(4, p0(103)));
     }
@@ -861,7 +861,7 @@ mod tests {
         let cigar = [soft(3), m(2)];
         let pairs: Vec<_> = AlignedPairs::new(p0(0), &cigar).with_soft_clips().collect();
         assert_eq!(pairs.len(), 3, "SoftClip(summary) + 2M");
-        assert_eq!(pairs[0], AlignedPair::SoftClip { qpos: 0, len: 3 });
+        assert_eq!(pairs[0], AlignedPair::SoftClip { qpos: QPos::new(0), len: 3 });
         assert_eq!(pairs[1], match_m(3, p0(0)));
     }
 
@@ -1056,7 +1056,7 @@ mod tests {
         let pairs: Vec<_> = AlignedPairs::new(p0(100), &cigar).collect();
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0], AlignedPair::Deletion { rpos: p0(100), del_len: 2 });
-        assert_eq!(pairs[1], AlignedPair::Insertion { qpos: 0, insert_len: 3 });
+        assert_eq!(pairs[1], AlignedPair::Insertion { qpos: QPos::new(0), insert_len: 3 });
     }
 
     // ── Full CIGAR walk ───────────────────────────────────────────────────
@@ -1072,7 +1072,7 @@ mod tests {
             match_m(2, p0(50)), // after 2S
             match_m(3, p0(51)),
             match_m(4, p0(52)),
-            AlignedPair::Insertion { qpos: 5, insert_len: 1 },
+            AlignedPair::Insertion { qpos: QPos::new(5), insert_len: 1 },
             match_m(6, p0(53)),
             match_m(7, p0(54)),
             AlignedPair::Deletion { rpos: p0(55), del_len: 1 },
@@ -1096,9 +1096,9 @@ mod tests {
         let qposes: Vec<u32> = pairs
             .iter()
             .filter_map(|p| match p {
-                AlignedPair::Match { qpos, .. } => Some(*qpos),
-                AlignedPair::Insertion { qpos, .. } => Some(*qpos),
-                AlignedPair::SoftClip { qpos, .. } => Some(*qpos),
+                AlignedPair::Match { qpos, .. } => Some(qpos.get()),
+                AlignedPair::Insertion { qpos, .. } => Some(qpos.get()),
+                AlignedPair::SoftClip { qpos, .. } => Some(qpos.get()),
                 _ => None,
             })
             .collect();
@@ -1135,7 +1135,7 @@ mod tests {
         options: AlignedPairsOptions,
     ) -> Vec<AlignedPair> {
         let mut pairs = Vec::new();
-        let mut qpos = 0u32;
+        let mut qpos = QPos::ZERO;
         let mut rpos = rec_pos;
 
         for op in cigar {
@@ -1309,9 +1309,9 @@ mod tests {
             ) {
                 let pairs: Vec<_> = AlignedPairs::new(Pos0::ZERO, &cigar).full().collect();
                 let qposes: Vec<u32> = pairs.iter().filter_map(|p| match p {
-                    AlignedPair::Match { qpos, .. } => Some(*qpos),
-                    AlignedPair::Insertion { qpos, .. } => Some(*qpos),
-                    AlignedPair::SoftClip { qpos, .. } => Some(*qpos),
+                    AlignedPair::Match { qpos, .. } => Some(qpos.get()),
+                    AlignedPair::Insertion { qpos, .. } => Some(qpos.get()),
+                    AlignedPair::SoftClip { qpos, .. } => Some(qpos.get()),
                     _ => None,
                 }).collect();
                 prop_assert!(qposes.windows(2).all(|w| w[0] <= w[1]));
@@ -1339,11 +1339,11 @@ mod tests {
             for pair in AlignedPairs::new(rec_pos, cigar).with_soft_clips() {
                 match pair {
                     AlignedPair::Match { qpos, rpos, .. } => {
-                        result.push((Some(qpos), Some(rpos.as_u32())));
+                        result.push((Some(qpos.get()), Some(rpos.as_u32())));
                     }
                     AlignedPair::Insertion { qpos, insert_len } => {
                         for i in 0..insert_len {
-                            result.push((Some(qpos.saturating_add(i)), None));
+                            result.push((Some(qpos.saturating_add(i).get()), None));
                         }
                     }
                     AlignedPair::Deletion { rpos, del_len } => {
@@ -1358,7 +1358,7 @@ mod tests {
                     }
                     AlignedPair::SoftClip { qpos, len } => {
                         for i in 0..len {
-                            result.push((Some(qpos.saturating_add(i)), None));
+                            result.push((Some(qpos.saturating_add(i).get()), None));
                         }
                     }
                     AlignedPair::Padding { .. } | AlignedPair::Unknown { .. } => {

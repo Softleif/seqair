@@ -409,7 +409,7 @@ impl OwnedBamRecord {
 mod tests {
     use super::super::cigar::CigarOpType;
     use super::*;
-    use seqair_types::Pos0;
+    use seqair_types::{Pos0, QPos};
 
     fn simple_record() -> OwnedBamRecord {
         OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"read1".to_vec())
@@ -621,11 +621,19 @@ mod tests {
         assert_eq!(pairs.len(), 5);
         assert_eq!(
             pairs[0],
-            AlignedPair::Match { qpos: 0, rpos: Pos0::new(100).unwrap(), kind: MatchKind::Match }
+            AlignedPair::Match {
+                qpos: QPos::new(0),
+                rpos: Pos0::new(100).unwrap(),
+                kind: MatchKind::Match
+            }
         );
         assert_eq!(
             pairs[4],
-            AlignedPair::Match { qpos: 4, rpos: Pos0::new(104).unwrap(), kind: MatchKind::Match }
+            AlignedPair::Match {
+                qpos: QPos::new(4),
+                rpos: Pos0::new(104).unwrap(),
+                kind: MatchKind::Match
+            }
         );
     }
 
@@ -650,11 +658,11 @@ mod tests {
             kind: MatchKind::Match,
         };
         assert_eq!(pairs.len(), 5);
-        assert_eq!(pairs[0], m(0, 100));
-        assert_eq!(pairs[1], m(1, 101));
-        assert_eq!(pairs[2], AlignedPair::Insertion { qpos: 2, insert_len: 1 });
-        assert_eq!(pairs[3], m(3, 102));
-        assert_eq!(pairs[4], m(4, 103));
+        assert_eq!(pairs[0], m(QPos::new(0), 100));
+        assert_eq!(pairs[1], m(QPos::new(1), 101));
+        assert_eq!(pairs[2], AlignedPair::Insertion { qpos: QPos::new(2), insert_len: 1 });
+        assert_eq!(pairs[3], m(QPos::new(3), 102));
+        assert_eq!(pairs[4], m(QPos::new(4), 103));
     }
 
     #[test]
@@ -678,12 +686,12 @@ mod tests {
             kind: MatchKind::Match,
         };
         assert_eq!(pairs.len(), 5); // 2M + D(summary) + 2M = 5
-        assert_eq!(pairs[0], m(0, 100));
-        assert_eq!(pairs[1], m(1, 101));
+        assert_eq!(pairs[0], m(QPos::new(0), 100));
+        assert_eq!(pairs[1], m(QPos::new(1), 101));
         // Deletion summary: rpos=102, del_len=3
         assert_eq!(pairs[2], AlignedPair::Deletion { rpos: Pos0::new(102).unwrap(), del_len: 3 });
-        assert_eq!(pairs[3], m(2, 105));
-        assert_eq!(pairs[4], m(3, 106));
+        assert_eq!(pairs[3], m(QPos::new(2), 105));
+        assert_eq!(pairs[4], m(QPos::new(3), 106));
     }
 
     #[test]
@@ -707,8 +715,8 @@ mod tests {
         };
         // Soft clips are skipped by default, only 3 Match pairs
         assert_eq!(pairs.len(), 3);
-        assert_eq!(pairs[0], m(2, 100));
-        assert_eq!(pairs[2], m(4, 102));
+        assert_eq!(pairs[0], m(QPos::new(2), 100));
+        assert_eq!(pairs[2], m(QPos::new(4), 102));
     }
 
     #[test]
@@ -758,11 +766,11 @@ mod tests {
         let events: Vec<_> = rec.aligned_pairs_with_read().unwrap().collect();
         assert_eq!(events.len(), 3);
         match events[0] {
-            AlignedPairWithRead::Match { qpos: 0, query: Base::A, .. } => {}
+            AlignedPairWithRead::Match { qpos, query: Base::A, .. } if qpos == QPos::ZERO => {}
             other => panic!("expected Match{{qpos=0, query=A}}, got {other:?}"),
         }
         match events[2] {
-            AlignedPairWithRead::Match { qpos: 2, query: Base::G, .. } => {}
+            AlignedPairWithRead::Match { qpos, query: Base::G, .. } if qpos == QPos::new(2) => {}
             other => panic!("expected Match{{qpos=2, query=G}}, got {other:?}"),
         }
     }

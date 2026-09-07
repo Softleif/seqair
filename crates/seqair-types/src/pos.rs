@@ -492,6 +492,15 @@ impl QPos {
             None => None,
         }
     }
+
+    // r[impl qpos.saturating]
+    /// Saturating offset + delta, for advancing a query cursor across CIGAR
+    /// ops where a malformed record must not wrap.
+    #[inline]
+    #[must_use]
+    pub const fn saturating_add(self, delta: u32) -> Self {
+        Self(self.0.saturating_add(delta))
+    }
 }
 
 impl From<QPos> for u32 {
