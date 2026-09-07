@@ -2,8 +2,8 @@
 //!
 //! Covers `record_store.qname_hash`, `record_store.link_mates`,
 //! `record_store.mate_overlap`, `record_store.link_mates.invalidated`,
-//! `pileup.mate_link_cache`, `pileup.column_record_order` and
-//! `pileup.column_find_record`.
+//! `pileup.mate_link_cache`, `pileup.column_record_order`,
+//! `pileup.column_find_record`, and `pileup_indel.pair_indel`.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -21,7 +21,7 @@
 
 use proptest::prelude::*;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
-use seqair::bam::pileup::PileupEngine;
+use seqair::bam::pileup::{Indel, PairIndel, PileupColumn, PileupEngine};
 use seqair::bam::record_store::{RecordStore, qname_hash};
 use seqair::reader::{DepthLimit, Readers, SegmentOptions};
 use seqair_types::{BamFlags, Base, Pos0};
@@ -558,6 +558,262 @@ fn column_alignments_are_ordered_by_record_idx() {
             "column not ascending by record_idx: {idxs:?}"
         );
     }
+}
+
+// ── pair indel queries ────────────────────────────────────────────────────
+
+/// The anchor both mates of the fixtures below cover and where each mate's
+/// indel (when it has one) is reported: `100 + 11` for the left read's
+/// `12M…`/`20M` and `104 + 7` for the right read's `8M2I…`/`8M2D…`.
+const ANCHOR: u32 = 111;
+
+fn m(len: u32) -> CigarOp {
+    CigarOp::new(CigarOpType::Match, len)
+}
+fn i(len: u32) -> CigarOp {
+    CigarOp::new(CigarOpType::Insertion, len)
+}
+fn d(len: u32) -> CigarOp {
+    CigarOp::new(CigarOpType::Deletion, len)
+}
+
+/// Push one half of a template with an explicit CIGAR and SEQ, carrying the
+/// reciprocal mate fields `link_mates` requires to pair the two.
+#[allow(clippy::too_many_arguments, reason = "a BAM record has this many fields")]
+fn push_pair_read(
+    store: &mut RecordStore,
+    qname: &[u8],
+    pos: u32,
+    end_pos: u32,
+    which: u16,
+    mate_pos: i32,
+    cigar: &[CigarOp],
+    matching_bases: u32,
+    indel_bases: u32,
+    seq: &[Base],
+) {
+    store
+        .push_fields(
+            Pos0::new(pos).unwrap(),
+            Pos0::new(end_pos).unwrap(),
+            BamFlags::from(PAIRED | which),
+            60,
+            matching_bases,
+            indel_bases,
+            qname,
+            cigar,
+            seq,
+            &vec![40u8; seq.len()],
+            &[],
+            0,
+            0,
+            mate_pos,
+            0,
+            &mut (),
+        )
+        .expect("push_fields accepts a well-formed record")
+        .expect("no customizer rejects records");
+}
+
+/// Left mate: plain `20M` covering 100..=119, no indel anywhere.
+fn push_left_plain(store: &mut RecordStore, mate_pos: i32) {
+    push_pair_read(store, b"frag", 100, 119, FIRST, mate_pos, &[m(20)], 20, 0, &vec![Base::A; 20]);
+}
+
+/// Right mate: `8M2I5M` at 104..=116 — an insertion of `CG` anchored at
+/// position 111.
+fn push_right_ins(store: &mut RecordStore) {
+    let mut seq = vec![Base::A; 8];
+    seq.extend([Base::C, Base::G]);
+    seq.extend(vec![Base::A; 5]);
+    push_pair_read(store, b"frag", 104, 116, SECOND, 100, &[m(8), i(2), m(5)], 13, 2, &seq);
+}
+
+/// Run `engine` to the column at [`ANCHOR`] and apply `check` to it.
+fn with_anchor_column(engine: &mut PileupEngine, check: impl FnOnce(&PileupColumn<'_>)) {
+    let mut found = false;
+    while let Some(col) = engine.pileups() {
+        if col.pos().as_u32() == ANCHOR {
+            check(&col);
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "engine never produced a column at {ANCHOR}");
+}
+
+// r[verify pileup_indel.pair_indel]
+/// Both mates carry an insertion anchored at the same position: the kept
+/// read's own indel wins and the mate is never consulted.
+#[test]
+fn pair_indel_own_wins_over_the_mate() {
+    let mut store = RecordStore::new();
+    // Left mate `12M2I8M` (100..=119): its own insertion anchored at 111.
+    let mut left_seq = vec![Base::A; 12];
+    left_seq.extend([Base::T, Base::T]);
+    left_seq.extend(vec![Base::A; 8]);
+    push_pair_read(
+        &mut store,
+        b"frag",
+        100,
+        119,
+        FIRST,
+        104,
+        &[m(12), i(2), m(8)],
+        20,
+        2,
+        &left_seq,
+    );
+    push_right_ins(&mut store);
+    let stats = store.link_mates();
+    assert_eq!(stats.pairs, 1, "fixture must link");
+
+    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    with_anchor_column(&mut engine, |col| {
+        // The mate DOES carry an indel here — Own must still win.
+        let mate = col.find_record(1).expect("mate covers the anchor");
+        assert_eq!(mate.indel_after(), Indel::Insertion(2));
+        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        assert!(matches!(col.pair_indel(&view), PairIndel::Own));
+    });
+}
+
+// r[verify pileup_indel.pair_indel]
+/// The kept read has no indel but its linked mate carries an insertion at the
+/// anchor: the mate's view is surfaced, with the inserted run reachable.
+#[test]
+fn pair_indel_surfaces_mate_insertion() {
+    let mut store = RecordStore::new();
+    push_left_plain(&mut store, 104);
+    push_right_ins(&mut store);
+    let stats = store.link_mates();
+    assert_eq!(stats.pairs, 1, "fixture must link");
+
+    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    with_anchor_column(&mut engine, |col| {
+        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        assert!(view.in_mate_overlap(), "the anchor lies inside the pair overlap");
+        assert_eq!(view.indel_after(), Indel::None, "the kept read has no indel");
+        match col.pair_indel(&view) {
+            PairIndel::Mate(mate) => {
+                assert_eq!(mate.record_idx(), 1);
+                assert_eq!(mate.indel_after(), Indel::Insertion(2));
+                assert_eq!(mate.inserted_bases(), &[Base::C, Base::G]);
+            }
+            other => panic!("expected the mate's insertion, got {other:?}"),
+        }
+    });
+}
+
+// r[verify pileup_indel.pair_indel]
+/// The kept read has no indel but its linked mate carries a deletion at the
+/// anchor: `indel_after()` on the returned view is `Deletion(2)`.
+#[test]
+fn pair_indel_surfaces_mate_deletion() {
+    let mut store = RecordStore::new();
+    push_left_plain(&mut store, 104);
+    // Right mate `8M2D5M` at 104..=118: deletion anchored at 111.
+    push_pair_read(
+        &mut store,
+        b"frag",
+        104,
+        118,
+        SECOND,
+        100,
+        &[m(8), d(2), m(5)],
+        13,
+        0,
+        &vec![Base::A; 13],
+    );
+    let stats = store.link_mates();
+    assert_eq!(stats.pairs, 1, "fixture must link");
+
+    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    with_anchor_column(&mut engine, |col| {
+        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        match col.pair_indel(&view) {
+            PairIndel::Mate(mate) => {
+                assert_eq!(mate.record_idx(), 1);
+                assert_eq!(mate.indel_after(), Indel::Deletion(2));
+            }
+            other => panic!("expected the mate's deletion, got {other:?}"),
+        }
+    });
+}
+
+// r[verify pileup_indel.pair_indel]
+/// No fragment indel at the anchor: an unlinked read is `None`, and so is a
+/// linked pair whose mate is in the column but carries no indel either.
+#[test]
+fn pair_indel_none_without_any_evidence() {
+    // Unlinked: only the left mate is in the store.
+    let mut store = RecordStore::new();
+    push_left_plain(&mut store, 999);
+    let stats = store.link_mates();
+    assert_eq!(stats.pairs, 0);
+    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    with_anchor_column(&mut engine, |col| {
+        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        assert_eq!(view.mate_idx(), None, "unpaired fixture");
+        assert!(matches!(col.pair_indel(&view), PairIndel::None));
+    });
+
+    // Linked and overlapping, but neither mate carries an indel: the mate IS
+    // reachable in the column, so this is the "mate has no indel" arm.
+    let mut store = RecordStore::new();
+    push_left_plain(&mut store, 104);
+    push_pair_read(&mut store, b"frag", 104, 118, SECOND, 100, &[m(15)], 15, 0, &vec![Base::A; 15]);
+    let stats = store.link_mates();
+    assert_eq!(stats.pairs, 1, "fixture must link");
+    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    with_anchor_column(&mut engine, |col| {
+        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        assert!(view.in_mate_overlap());
+        assert!(col.find_record(1).is_some(), "the mate is in the column");
+        assert!(matches!(col.pair_indel(&view), PairIndel::None));
+    });
+}
+
+// r[verify pileup_indel.pair_indel]
+/// A linked mate with an indel that is NOT in this column must not be
+/// invented: neither `max_depth` truncation nor a disjoint alignment at the
+/// queried position yields a `Mate` arm.
+#[test]
+fn pair_indel_none_when_mate_absent_from_column() {
+    // Truncation: the mate covers the anchor and carries an insertion, but
+    // `max_depth` drops it from the column.
+    let mut store = RecordStore::new();
+    push_left_plain(&mut store, 104);
+    push_right_ins(&mut store);
+    let stats = store.link_mates();
+    assert_eq!(stats.pairs, 1, "fixture must link");
+    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    engine.set_max_depth(1);
+    with_anchor_column(&mut engine, |col| {
+        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        assert!(view.in_mate_overlap(), "the pair still overlaps at the anchor");
+        assert_eq!(view.mate_idx(), Some(1), "the mate is linked in the store");
+        assert!(col.find_record(1).is_none(), "truncation removed the mate");
+        assert!(matches!(col.pair_indel(&view), PairIndel::None));
+    });
+
+    // Disjoint: the mate's insertion is anchored far outside the left read's
+    // span, so it is absent from the anchor's column.
+    let mut store = RecordStore::new();
+    push_left_plain(&mut store, 204);
+    let mut seq = vec![Base::A; 8];
+    seq.extend([Base::C, Base::G]);
+    seq.extend(vec![Base::A; 5]);
+    push_pair_read(&mut store, b"frag", 204, 216, SECOND, 100, &[m(8), i(2), m(5)], 13, 2, &seq);
+    let stats = store.link_mates();
+    assert_eq!(stats.pairs, 1, "fixture must link");
+    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(219).unwrap());
+    with_anchor_column(&mut engine, |col| {
+        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        assert!(!view.in_mate_overlap(), "disjoint mates do not overlap at the anchor");
+        assert!(col.find_record(1).is_none(), "the mate is not in this column");
+        assert!(matches!(col.pair_indel(&view), PairIndel::None));
+    });
 }
 
 // ── proptest ──────────────────────────────────────────────────────────────

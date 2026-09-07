@@ -292,6 +292,55 @@ impl<'eng, U> PileupColumn<'eng, U> {
         let aln = self.alignments.get(found)?;
         Some(AlignmentView { aln, store: self.store })
     }
+
+    // r[impl pileup_indel.pair_indel]
+    /// The indel evidence a fragment shows at this anchor, resolved across the
+    /// two mates of an overlapping pair.
+    ///
+    /// A consumer that deduplicates overlapping mates keeps one alignment per
+    /// fragment per column. When the kept read carries no indel but the dropped
+    /// mate does, the fragment's only indel observation would otherwise be
+    /// lost — this query recovers it from the mate already present in the
+    /// column, without any I/O.
+    ///
+    /// Precedence: the view's own indel always wins and the mate is never
+    /// consulted; otherwise a linked mate *in this column* supplies the indel.
+    /// A mate outside the column (unlinked, no overlap at this position, or
+    /// dropped by `max_depth` truncation) yields [`PairIndel::None`] rather
+    /// than a guess.
+    ///
+    /// Read-only: costs at most one binary search and never perturbs column
+    /// contents, depth, or op emission.
+    #[must_use]
+    pub fn pair_indel<'a>(&'a self, view: &AlignmentView<'a, 'eng, U>) -> PairIndel<'a, 'eng, U> {
+        if view.alignment().indel_after() != Indel::None {
+            return PairIndel::Own;
+        }
+        if !view.in_mate_overlap() {
+            return PairIndel::None;
+        }
+        let Some(mate_idx) = view.mate_idx() else {
+            return PairIndel::None;
+        };
+        match self.find_record(mate_idx) {
+            Some(mate) if mate.indel_after() != Indel::None => PairIndel::Mate(mate),
+            _ => PairIndel::None,
+        }
+    }
+}
+
+// r[impl pileup_indel.pair_indel]
+/// The indel evidence a fragment shows at this anchor, for overlap-dedup consumers.
+///
+/// Returned by [`PileupColumn::pair_indel`].
+#[derive(Debug)]
+pub enum PairIndel<'a, 'store, U> {
+    /// Neither the view's read nor its linked mate carries an indel here.
+    None,
+    /// The view's own read carries the indel (use the view itself).
+    Own,
+    /// The linked mate carries an indel the view's read lacks; the mate's view is returned.
+    Mate(AlignmentView<'a, 'store, U>),
 }
 
 /// A view over a single alignment in a column, with access to the record store.
