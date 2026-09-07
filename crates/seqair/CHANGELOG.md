@@ -26,6 +26,15 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
 - **Trait `TargetInfoAccess` removed** from `seqair::bam::header`.
 - **`ReaderError`** gained a new variant distinguishing "region end past contig" from "exceeds `i32::MAX`.
 - **`VcfHeaderError::TooManyFields` changed from a unit variant to data-carrying.**
+- **Query offsets are now the `QPos` newtype, not bare `u32`/`usize`.**
+  Changed: `AlignedPair::{Match, Insertion, SoftClip}.qpos`,
+  `MatchPosition` / `MatchedBase` / `MatchedRef` / `AlignedPairWithRead::*` / `AlignedPairWithRef::*`,
+  `CigarPosInfo::{Match, Insertion}.qpos`, `CigarMapping::soft_clip_qpos_at` (now returns `Option<QPos>`),
+  `PileupOp::{Match, Insertion, SoftClip}.qpos`, and `PileupAlignment::qpos()` (now returns `Option<QPos>`).
+  `QPos` and `Pos` are deliberately non-interconvertible: a read-local offset handed to code
+  expecting a genomic position previously compiled and silently resolved bases from the wrong locus.
+- **`BaseModState::mod_at_qpos` / `is_unmodified` take `QPos`** instead of `usize`, so a genomic
+  position can no longer be passed where a read offset is expected.
 
 ### Added
 

@@ -2,7 +2,7 @@
 
 Pure-Rust BAM/SAM/CRAM/FASTA reader + pileup engine. I/O backend for [rastair](https://github.com/bsblabludwig/rastair).
 
-Workspace: `crates/seqair` (readers, pileup, BGZF, CRAM) and `crates/seqair-types` (Base, Strand, Phred, Probability, RmsAccumulator, RegionString).
+Workspace: `crates/seqair` (readers, pileup, BGZF, CRAM) and `crates/seqair-types` (Base, Strand, Phred, Probability, RmsAccumulator, RegionString, Pos/QPos).
 
 ## Tracey specs
 
@@ -43,7 +43,9 @@ Frequent CI-only failures to watch for: `clippy::cast_possible_truncation`, `cli
 
 **PileupAlignment**: base/qual/mapq/flags/strand pre-extracted. Hot loop reads flat fields only.
 
-**PileupOp enum**: type-safe indel reporting — `Match`/`Insertion` carry `qpos`/`base`/`qual`, `Deletion` carries only `del_len`, `ComplexIndel` carries `del_len`+`insert_len` (deletion with following insertion, e.g. `D I M` in CIGAR), `RefSkip` carries nothing. Compiler prevents reading a base from a deletion. Deletions and ref-skips are included in columns (not filtered out). `depth()` counts all alignments (matches htslib); `match_depth()` counts only those with a query base. Insertions attach to the last M/=/X position before the I op; `D I M` patterns emit `ComplexIndel` at the last D position (matching htslib's `is_del=true, indel>0`). `del_len` is the total D op length at every position within the deletion (not remaining bases). `PileupOp` has a compile-time size guard (≤16 bytes).
+**PileupOp enum**: type-safe indel reporting — `Match`/`Insertion` carry `qpos` (a `QPos`, see below)/`base`/`qual`, `Deletion` carries only `del_len`, `ComplexIndel` carries `del_len`+`insert_len` (deletion with following insertion, e.g. `D I M` in CIGAR), `RefSkip` carries nothing. Compiler prevents reading a base from a deletion. Deletions and ref-skips are included in columns (not filtered out). `depth()` counts all alignments (matches htslib); `match_depth()` counts only those with a query base. Insertions attach to the last M/=/X position before the I op; `D I M` patterns emit `ComplexIndel` at the last D position (matching htslib's `is_del=true, indel>0`). `del_len` is the total D op length at every position within the deletion (not remaining bases). `PileupOp` has a compile-time size guard (≤12 bytes).
+
+**QPos vs Pos**: query offsets (`QPos`, 0-based into a read's SEQ) and genomic positions (`Pos0`/`Pos1`) are distinct, non-interconvertible newtypes — no `From`/`Into` between either and integer types; extract explicitly (`as_u32()`/`get()`). `AlignedPair`/`PileupOp`/`CigarPosInfo`/`BaseModState` query-space APIs all carry `QPos`. NB: `PileupOp::Insertion.qpos` is the matched base *before* the insertion; `AlignedPair::Insertion.qpos` is the *first inserted* base.
 
 **FASTA**: returns raw `Vec<u8>` (not `Vec<Base>`) — CRAM MD5 needs exact bytes. Conversion to `Base` at app boundary.
 
