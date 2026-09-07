@@ -617,7 +617,7 @@ fn push_pair_read(
 
 /// Left mate: plain `20M` covering 100..=119, no indel anywhere.
 fn push_left_plain(store: &mut RecordStore, mate_pos: i32) {
-    push_pair_read(store, b"frag", 100, 119, FIRST, mate_pos, &[m(20)], 20, 0, &vec![Base::A; 20]);
+    push_pair_read(store, b"frag", 100, 119, FIRST, mate_pos, &[m(20)], 20, 0, &[Base::A; 20]);
 }
 
 /// Right mate: `8M2I5M` at 104..=116 — an insertion of `CG` anchored at
@@ -723,7 +723,7 @@ fn pair_indel_surfaces_mate_deletion() {
         &[m(8), d(2), m(5)],
         13,
         0,
-        &vec![Base::A; 13],
+        &[Base::A; 13],
     );
     let stats = store.link_mates();
     assert_eq!(stats.pairs, 1, "fixture must link");
@@ -762,7 +762,7 @@ fn pair_indel_none_without_any_evidence() {
     // reachable in the column, so this is the "mate has no indel" arm.
     let mut store = RecordStore::new();
     push_left_plain(&mut store, 104);
-    push_pair_read(&mut store, b"frag", 104, 118, SECOND, 100, &[m(15)], 15, 0, &vec![Base::A; 15]);
+    push_pair_read(&mut store, b"frag", 104, 118, SECOND, 100, &[m(15)], 15, 0, &[Base::A; 15]);
     let stats = store.link_mates();
     assert_eq!(stats.pairs, 1, "fixture must link");
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
