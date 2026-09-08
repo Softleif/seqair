@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   infallible (no format caps a query offset; it is bounded by the read length). Carried by seqair's
   `PileupOp`, `AlignedPair`, and `CigarPosInfo` families.
 - `Pos::as_u32()` accessor, replacing the removed deref.
+- `Probability` → `Phred` conversions and `RmsAccumulator` arithmetic use algebraic float ops
+  (`algebraic_mul` / `algebraic_add` / `algebraic_div`); MSRV raised to 1.98.1 for them.
 
 ## v0.1.0 (2026-05-08)
 
