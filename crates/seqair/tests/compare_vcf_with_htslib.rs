@@ -77,13 +77,28 @@ fn write_seqair_bcf(
     gt_a1: u16,
     phased: bool,
 ) -> tempfile::NamedTempFile {
-    let tmp = tempfile::Builder::new().suffix(".bcf").tempfile().unwrap();
-    let alleles = Alleles::snv(ref_base, alt_base).unwrap();
     let gt = if phased {
         Genotype::phased_diploid(gt_a0, gt_a1)
     } else {
         Genotype::unphased(gt_a0, gt_a1)
     };
+    write_seqair_bcf_with_gt(setup, pos, ref_base, alt_base, qual, depth, gt)
+}
+
+/// As `write_seqair_bcf`, with the genotype supplied directly — for genotypes
+/// the diploid constructors cannot express.
+#[allow(clippy::too_many_arguments, reason = "test helper mirroring the record shape")]
+fn write_seqair_bcf_with_gt(
+    setup: &TestSetup,
+    pos: u32,
+    ref_base: Base,
+    alt_base: Base,
+    qual: f32,
+    depth: i32,
+    gt: Genotype,
+) -> tempfile::NamedTempFile {
+    let tmp = tempfile::Builder::new().suffix(".bcf").tempfile().unwrap();
+    let alleles = Alleles::snv(ref_base, alt_base).unwrap();
 
     let mut buf = Vec::new();
     {
@@ -148,6 +163,41 @@ fn bcftools_reads_seqair_simple_snv() {
     assert_eq!(fields[5], "30", "QUAL");
     assert_eq!(fields[6], "PASS", "FILTER");
     assert!(fields[7].contains("DP=50"), "INFO should contain DP=50, got: {}", fields[7]);
+}
+
+/// A partially phased genotype round-trips through htslib unchanged.
+///
+/// VCF 4.5 makes the first indicator "implicitly defined as `/` if any phasing
+/// indicators are `/` and `|` otherwise", so this genotype's leading bit is
+/// unphased — and htslib is entitled to *omit* the indicator it can infer,
+/// which it does: `0|1/1`, not `/0|1/1`. Both spell the same genotype.
+///
+/// So this case cannot distinguish the first-allele phase bit;
+/// `bcftools_reads_seqair_phased_gt` is what pins that, because a fully phased
+/// genotype is where an unset leading bit becomes visible (`/0|1`). This test
+/// guards the other half: that setting the bit correctly did not disturb a
+/// genotype whose leading indicator must stay unphased.
+#[test]
+fn bcftools_reads_a_partially_phased_gt() {
+    if !has_bcftools() {
+        eprintln!("skipping: bcftools not found");
+        return;
+    }
+
+    let setup = shared_setup();
+    let gt = Genotype {
+        alleles: [Some(0), Some(1), Some(1)].into_iter().collect(),
+        phased: [true, false].into_iter().collect(),
+    };
+    let tmp = write_seqair_bcf_with_gt(&setup, 1000, Base::C, Base::G, 99.0, 100, gt);
+
+    let vcf_text = bcftools_view(tmp.path()).unwrap();
+    let fields: Vec<&str> = vcf_text.trim().split('\t').collect();
+    assert!(
+        fields[9].starts_with("0|1/1"),
+        "mixed phasing must survive the round trip, got: {}",
+        fields[9]
+    );
 }
 
 #[test]

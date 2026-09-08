@@ -1043,8 +1043,15 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                     for (i, allele_opt) in gt.alleles.iter().enumerate() {
                         let encoded: i32 = match allele_opt {
                             Some(idx) => {
+                                // r[impl vcf_record.gt_first_phase]
+                                // The first allele carries a phase bit too, and
+                                // from VCF 4.4 it is read rather than ignored:
+                                // the spec makes the leading indicator "`/` if
+                                // any phasing indicators are `/` and `|`
+                                // otherwise". Hardcoding it to unphased made
+                                // htslib render a fully phased `0|1` as `/0|1`.
                                 let phased = if i == 0 {
-                                    false
+                                    !gt.phased.is_empty() && gt.phased.iter().all(|p| *p)
                                 } else {
                                     gt.phased.get(i.saturating_sub(1)).copied().unwrap_or(false)
                                 };
