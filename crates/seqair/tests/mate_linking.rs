@@ -829,7 +829,7 @@ fn mate_of_is_none_when_the_mate_is_absent_from_the_column() {
         Pos0::new(100).unwrap(),
         Pos0::new(119).unwrap(),
     );
-    engine.set_max_depth(1);
+    engine.set_max_depth(NonZeroU32::new(1).unwrap());
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
         assert!(view.in_mate_overlap(), "the pair still overlaps at the anchor");

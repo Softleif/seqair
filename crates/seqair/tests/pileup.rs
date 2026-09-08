@@ -19,6 +19,7 @@ use proptest::prelude::*;
 use seqair::bam::pileup::RefSeq;
 use seqair::bam::{Pos0, RecordStore, pileup::PileupEngine};
 use seqair_types::{Base, QPos};
+use std::num::NonZeroU32;
 use std::{cell::Cell, rc::Rc};
 
 // ---- pileup.active_set + pileup.column_contents ----
@@ -198,7 +199,7 @@ proptest! {
         }
 
         let mut engine = PileupEngine::new(arena.prepare_for_pileup().input, Pos0::new(0).unwrap(), Pos0::new(len - 1).unwrap());
-        engine.set_max_depth(max);
+        engine.set_max_depth(NonZeroU32::new(max).unwrap());
         while let Some(col) = engine.pileups() {
             prop_assert!(col.depth() <= max as usize);
         }
@@ -218,7 +219,7 @@ proptest! {
         }
 
         let mut engine = PileupEngine::new(arena.prepare_for_pileup().input, Pos0::new(0).unwrap(), Pos0::new(99).unwrap());
-        engine.set_max_depth(3);
+        engine.set_max_depth(NonZeroU32::new(3).unwrap());
         let columns = collect_columns(&mut engine);
 
         let col0 = columns.iter().find(|c| c.pos() == Pos0::new(0).unwrap()).unwrap();

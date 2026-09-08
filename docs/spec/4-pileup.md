@@ -28,6 +28,13 @@ Read filtering is the responsibility of `CustomizeRecordStore::keep_record` (see
 r[pileup.max_depth]
 The engine MUST support a maximum depth setting. When more records pass the filter than `max_depth` allows, excess records MUST be dropped (preferring records already in the active set).
 
+r[pileup.max_depth.nonzero]
+The setter MUST take a `NonZeroU32`. A cap of zero is not a cap but "emit no
+alignments at any position", which no caller wants and which a caller whose own
+configuration spells unlimited as `0` would otherwise ask for by accident —
+rastair did exactly that, pairing an unlimited *load* with a zero *column* cap
+and producing an empty VCF at unbounded memory. Unset means no cap.
+
 r[pileup.max_depth_per_position]
 Max depth MUST be enforced per-position, not globally at arena-load time. A read that is rejected at one high-coverage position may still be included at an adjacent lower-coverage position. This matches htslib's behavior where `MAXCNT` is checked against the current column's depth.
 

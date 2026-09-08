@@ -8,7 +8,7 @@
 
 use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0, QPos};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
-use std::{ops::Range, rc::Rc};
+use std::{num::NonZeroU32, ops::Range, rc::Rc};
 
 use crate::utils::TraceErr;
 
@@ -131,7 +131,7 @@ pub struct PileupEngine<U = ()> {
     active_end_pos: Vec<Pos0>,
     /// Cold fields: only accessed for records that survive retain.
     active: Vec<ActiveRecord>,
-    max_depth: Option<u32>,
+    max_depth: Option<NonZeroU32>,
     ref_seq: Option<RefSeq>,
     /// When > 0, emit up to this many soft-clipped fringe bases adjacent to each
     /// alignment as [`PileupOp::SoftClip`] columns. 0 (default) = current
@@ -717,7 +717,14 @@ impl<U> PileupEngine<U> {
 
     // r[impl pileup.max_depth]
     // r[impl pileup.max_depth_per_position]
-    pub fn set_max_depth(&mut self, max: u32) {
+    // r[impl pileup.max_depth.nonzero]
+    /// Cap how many alignments a column reports.
+    ///
+    /// `NonZeroU32`, because a cap of zero is not a cap — it is "emit no
+    /// alignments anywhere", which no caller wants and which a caller whose
+    /// own configuration spells "unlimited" as `0` would ask for by accident.
+    /// Leave it unset for no cap.
+    pub fn set_max_depth(&mut self, max: NonZeroU32) {
         self.max_depth = Some(max);
     }
 
@@ -1136,7 +1143,7 @@ impl<U> PileupEngine<U> {
 
             // r[impl pileup.max_depth_per_position]
             if let Some(max) = self.max_depth {
-                self.buf.truncate(max as usize);
+                self.buf.truncate(max.get() as usize);
             }
 
             if !self.buf.is_empty() {
@@ -1972,7 +1979,7 @@ mod tests {
             Pos0::new(0).unwrap(),
             Pos0::new(49).unwrap(),
         );
-        engine.set_max_depth(3);
+        engine.set_max_depth(NonZeroU32::new(3).expect("3 is non-zero"));
 
         // At every position, only the first 3 records (indices 0,1,2) should be kept.
         while let Some(col) = engine.pileups() {

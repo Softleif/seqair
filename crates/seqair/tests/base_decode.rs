@@ -15,6 +15,7 @@
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
 use seqair_types::Base;
+use std::num::NonZeroU32;
 
 // r[verify base_decode.table]
 // r[verify base_decode.decode]
@@ -84,7 +85,7 @@ fn pileup_alignment_has_base_type() {
         Pos0::new(100).unwrap(),
         Pos0::new(103).unwrap(),
     );
-    engine.set_max_depth(1000);
+    engine.set_max_depth(NonZeroU32::new(1000).unwrap());
 
     let col = engine.pileups().expect("should have a column");
     let aln = col.alignments().next().expect("should have an alignment");

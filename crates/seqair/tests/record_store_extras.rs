@@ -21,6 +21,7 @@ use helpers::{collect_columns, make_record};
 use seqair::bam::Pos0;
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
+use std::num::NonZeroU32;
 
 /// Helper: push N synthetic records at positions 100, 101, ... with 10M CIGAR.
 fn store_with_n_records(n: u32) -> RecordStore {
@@ -225,7 +226,7 @@ fn engine_accepts_typed_store() {
         Pos0::new(100).unwrap(),
         Pos0::new(109).unwrap(),
     );
-    engine.set_max_depth(10);
+    engine.set_max_depth(NonZeroU32::new(10).unwrap());
 
     // Verify the engine still works — iterate and check columns are produced.
     let columns = collect_columns(&mut engine);
