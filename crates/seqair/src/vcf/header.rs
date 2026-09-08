@@ -18,7 +18,15 @@ pub enum Number {
     ReferenceAlternateBases,
     /// One per genotype combination (G).
     Genotypes,
-    /// One per possible base modification (M). VCF 4.2+ extension.
+    /// One per possible base modification (M). **VCF 4.5**: "one value for each
+    /// possible base modification for the corresponding ChEBI ID" — not the
+    /// "4.2+ extension" this comment used to claim. Headers declare 4.5
+    /// ([`VcfHeader::FILE_FORMAT`]), so it is covered.
+    ///
+    /// Note that a strict reader may still refuse it: noodles, and so every
+    /// tool built on it, rejects a header carrying `Number=M` regardless of the
+    /// declared version. [`Number::Unknown`] states the same cardinality in a
+    /// form every reader accepts.
     BaseModification,
     /// Unknown/variable count (.).
     Unknown,
@@ -139,7 +147,6 @@ impl StringMap {
 /// VCF header with typed field definitions in insertion order.
 #[derive(Debug, Clone)]
 pub struct VcfHeader {
-    file_format: SmolStr,
     infos: IndexMap<SmolStr, InfoDef>,
     formats: IndexMap<SmolStr, FormatDef>,
     filters: IndexMap<SmolStr, FilterDef>,
@@ -150,13 +157,21 @@ pub struct VcfHeader {
 }
 
 impl VcfHeader {
+    // r[impl vcf_header.file_format]
+    /// The VCF version seqair writes. There is no setter: a cardinality is
+    /// versioned (`Number=M` is 4.5 and nothing earlier), so a header that
+    /// could declare an older version could promise a grammar it then violates.
+    /// Emitting one version removes the question.
+    pub const FILE_FORMAT: &'static str = "VCFv4.5";
+
     /// Start building a new header.
     pub fn builder() -> VcfHeaderBuilder {
         VcfHeaderBuilder::new()
     }
 
-    pub fn file_format(&self) -> &str {
-        &self.file_format
+    /// The VCF version this header declares — always [`Self::FILE_FORMAT`].
+    pub fn file_format(&self) -> &'static str {
+        Self::FILE_FORMAT
     }
 
     pub fn infos(&self) -> &IndexMap<SmolStr, InfoDef> {
@@ -198,7 +213,7 @@ impl VcfHeader {
 
         // fileformat first
         out.push_str("##fileformat=");
-        out.push_str(&self.file_format);
+        out.push_str(Self::FILE_FORMAT);
         out.push('\n');
 
         // PASS filter — always emitted immediately after fileformat, before metadata.
@@ -359,7 +374,6 @@ pub struct Samples;
 /// )).unwrap();
 /// ```
 pub struct VcfHeaderBuilder<Phase = Contigs> {
-    file_format: SmolStr,
     infos: IndexMap<SmolStr, InfoDef>,
     formats: IndexMap<SmolStr, FormatDef>,
     filters: IndexMap<SmolStr, FilterDef>,
@@ -374,7 +388,6 @@ pub struct VcfHeaderBuilder<Phase = Contigs> {
 impl<P> std::fmt::Debug for VcfHeaderBuilder<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VcfHeaderBuilder")
-            .field("file_format", &self.file_format)
             .field("infos", &self.infos)
             .field("formats", &self.formats)
             .field("filters", &self.filters)
@@ -388,7 +401,6 @@ impl<P> std::fmt::Debug for VcfHeaderBuilder<P> {
 impl<P> Clone for VcfHeaderBuilder<P> {
     fn clone(&self) -> Self {
         Self {
-            file_format: self.file_format.clone(),
             infos: self.infos.clone(),
             formats: self.formats.clone(),
             filters: self.filters.clone(),
@@ -407,7 +419,6 @@ impl<P> VcfHeaderBuilder<P> {
     /// Transition to a different phase (private — callers use named methods).
     fn into_phase<Q>(self) -> VcfHeaderBuilder<Q> {
         VcfHeaderBuilder {
-            file_format: self.file_format,
             infos: self.infos,
             formats: self.formats,
             filters: self.filters,
@@ -433,15 +444,6 @@ impl<P> VcfHeaderBuilder<P> {
         u32::try_from(idx).map_err(|_| VcfHeaderError::TooManyFields { max: MAX_DICT_ENTRIES })
     }
 
-    // r[impl vcf_header.file_format]
-    /// Set the VCF file format version (default: VCFv4.3).
-    ///
-    /// Available from any phase — metadata does not affect BCF string
-    /// dictionary ordering.
-    pub fn file_format(&mut self, version: impl Into<SmolStr>) {
-        self.file_format = version.into();
-    }
-
     /// Append a `##key=value` metadata line (e.g. `##source=myapp`).
     ///
     /// Available from any phase — metadata does not affect BCF string
@@ -458,7 +460,6 @@ impl<P> VcfHeaderBuilder<P> {
     #[must_use = "build() returns the header; ignoring it discards all configuration"]
     pub fn build(self) -> Result<VcfHeader, VcfHeaderError> {
         Ok(VcfHeader {
-            file_format: self.file_format,
             infos: self.infos,
             formats: self.formats,
             filters: self.filters,
@@ -484,7 +485,6 @@ impl VcfHeaderBuilder<Contigs> {
         string_map.insert(SmolStr::from("PASS"));
 
         Self {
-            file_format: SmolStr::from("VCFv4.3"),
             infos: IndexMap::new(),
             formats: IndexMap::new(),
             filters,
@@ -798,7 +798,7 @@ mod tests {
         builder.add_sample("sample0").unwrap();
         let header = builder.build().unwrap();
 
-        assert_eq!(header.file_format(), "VCFv4.3");
+        assert_eq!(header.file_format(), "VCFv4.5");
         assert!(header.contigs().contains_key("chr1"));
         assert!(header.infos().contains_key("DP"));
         assert!(header.formats().contains_key("GT"));
@@ -992,7 +992,7 @@ mod tests {
         let header = builder.build().unwrap();
 
         let text = header.to_vcf_text();
-        assert!(text.starts_with("##fileformat=VCFv4.3\n"));
+        assert!(text.starts_with("##fileformat=VCFv4.5\n"));
         assert!(text.contains("##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">"));
         assert!(text.contains("##FILTER=<ID=PASS,Description=\"All filters passed\">"));
         assert!(text.contains("##contig=<ID=chr1,length=1000>"));

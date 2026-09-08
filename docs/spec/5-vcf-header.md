@@ -7,6 +7,33 @@
 r[vcf_header.file_format]
 The header MUST begin with a `##fileformat=VCFvX.Y` line. The default version is VCFv4.3.
 
+r[vcf_header.file_format.single_version]
+A cardinality is versioned: `Number=M` is defined by VCF 4.5 ("one value for
+each possible base modification for the corresponding ChEBI ID") and by no
+earlier version, so a header declaring 4.3 while using `M` promises a grammar it
+then violates, and nothing downstream can tell.
+
+seqair MUST therefore emit exactly one version, `VcfHeader::FILE_FORMAT`
+(`VCFv4.5`), and MUST NOT expose a setter for it. Backwards compatibility with
+older readers is explicitly not a goal; removing the choice removes the class of
+mismatch, which a per-field version floor would only have detected.
+
+`Number` MUST therefore expose `min_vcf_version()`, the earliest version
+defining it, and the builder MUST track the maximum over every registered INFO
+and FORMAT field. At `build`:
+
+- when no version was set explicitly, the header MUST declare
+  `max(VcfVersion::DEFAULT, floor)`;
+- when one was set and is at least the floor, it MUST be kept — cardinalities
+  set a floor, not the value, because a field may be versioned in ways its
+  `Number` cannot express (a 4.5 reserved key such as `M5mC` with `Number=.`);
+- when one was set and is below the floor, `build` MUST fail with
+  `VersionTooLow`, naming the field that raised it, rather than silently
+  adjusting a version the caller explicitly asked for.
+
+The version MUST be a typed, ordered `VcfVersion` rather than a string, so that
+"is this header new enough" is a comparison and not a parse.
+
 r[vcf_header.builder]
 Headers MUST be constructed via a typestate builder that enforces field registration order at compile time. The builder progresses through phases — Contigs → Filters → Infos → Formats → Samples — and each phase only exposes methods appropriate for that stage. Phase transitions consume the builder and return the next phase; phases may be skipped. `build()` is available from any phase. Duplicate-ID and type-constraint errors are returned as typed errors.
 
