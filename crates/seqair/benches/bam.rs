@@ -686,6 +686,96 @@ fn pileup_with_reference(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Group 7: tiled region queries — the shape a variant caller actually uses
+//
+// The groups above issue one query for a whole span. rastair does the
+// opposite: it tiles a contig into 10 kb segments and issues an independent
+// index query per segment, so everything that is paid *per query* — the BAI
+// lookup, `RegionBuf` setup, re-decompressing the block a tile boundary falls
+// in, sorting and mate-linking the store — is paid ~13 k times on a
+// chromosome instead of once.
+//
+// Varying the tile size over one fixed span turns that overhead into a slope:
+// the same reads, columns and bases come out of every tile size, so anything
+// that grows as tiles shrink is per-query cost and nothing else.
+// ---------------------------------------------------------------------------
+
+fn pileup_tiled(c: &mut Criterion) {
+    use seqair::reader::{DepthLimit, Readers, SegmentOptions};
+    use std::num::NonZeroU32;
+
+    #[path = "support/data.rs"]
+    #[allow(dead_code, reason = "shared bench-data module; not all helpers used here")]
+    mod data;
+
+    let bam = std::path::Path::new(BAM_PATH);
+    let fasta = data::plain_fasta();
+
+    // The span the test BAM's reads actually cover.
+    const T_START: Pos0 = Pos0::new(6_100_000).unwrap();
+    const T_END: Pos0 = Pos0::new(6_140_000).unwrap();
+    /// rastair's default `--segment-overlap`.
+    const OVERLAP: u32 = 200;
+    /// rastair's default `--max-coverage`, so the `DepthCap` wrapper the
+    /// per-column limit installs is in the measured path.
+    const DEPTH_CAP: u32 = 8_000;
+
+    let mut group = c.benchmark_group("pileup_tiled");
+    group.sample_size(20);
+
+    let run = |readers: &mut Readers, opts: SegmentOptions| {
+        let segments: Vec<_> =
+            readers.segments((CHROM, T_START, T_END), opts).unwrap().collect();
+        let cap = DepthLimit::PerColumn(NonZeroU32::new(DEPTH_CAP).unwrap());
+        let mut columns: u64 = 0;
+        let mut bases: u64 = 0;
+        for seg in &segments {
+            let mut p = readers.pileup(seg, cap).unwrap();
+            while let Some(col) = p.pileups() {
+                // Tiles overlap, so count each column once — the totals have to
+                // be identical across tile sizes for the comparison to mean
+                // anything.
+                if !seg.core_range().contains(&col.pos()) {
+                    continue;
+                }
+                columns += 1;
+                for aln in col.alignments() {
+                    bases += u64::from(aln.base().is_some());
+                }
+            }
+        }
+        (columns, bases)
+    };
+
+    // One tile over the whole span is the floor: the same work with the
+    // per-query overhead paid once.
+    let mut readers = Readers::open(bam, &fasta).unwrap();
+    let whole = SegmentOptions::new(NonZeroU32::new(u32::MAX).unwrap());
+    let expected = run(&mut readers, whole);
+    assert!(expected.0 > 0, "test BAM should produce columns in this region");
+
+    for tile in [1_000u32, 10_000, 100_000] {
+        let opts = SegmentOptions::new(NonZeroU32::new(tile).unwrap())
+            .with_overlap(OVERLAP)
+            .unwrap();
+        assert_eq!(
+            run(&mut readers, opts),
+            expected,
+            "tile size {tile} changed what the pileup sees"
+        );
+        group.bench_with_input(BenchmarkId::new("seqair", tile), &opts, |b, &opts| {
+            b.iter(|| black_box(run(&mut readers, opts)));
+        });
+    }
+
+    group.bench_function("seqair_single_query", |b| {
+        b.iter(|| black_box(run(&mut readers, whole)));
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bgzf_decompress,
@@ -694,5 +784,6 @@ criterion_group!(
     pileup_e2e,
     aligned_pairs_walk,
     pileup_with_reference,
+    pileup_tiled,
 );
 criterion_main!(benches);
