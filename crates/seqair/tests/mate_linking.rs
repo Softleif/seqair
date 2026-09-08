@@ -3,7 +3,7 @@
 //! Covers `record_store.qname_hash`, `record_store.link_mates`,
 //! `record_store.mate_overlap`, `record_store.link_mates.invalidated`,
 //! `pileup.mate_link_cache`, `pileup.column_record_order`,
-//! `pileup.column_find_record`, and `pileup_indel.pair_indel`.
+//! `pileup.column_find_record`, and `pileup.column_mate_of`.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -21,7 +21,7 @@
 
 use proptest::prelude::*;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
-use seqair::bam::pileup::{Indel, PairIndel, PileupColumn, PileupEngine};
+use seqair::bam::pileup::{Indel, PileupColumn, PileupEngine};
 use seqair::bam::record_store::{RecordStore, qname_hash};
 use seqair::reader::{DepthLimit, Readers, SegmentOptions};
 use seqair_types::{BamFlags, Base, Pos0};
@@ -654,51 +654,10 @@ fn with_anchor_column(engine: &mut PileupEngine, check: impl FnOnce(&PileupColum
     assert!(found, "engine never produced a column at {ANCHOR}");
 }
 
-// r[verify pileup_indel.pair_indel]
-/// Both mates carry an insertion anchored at the same position: the kept
-/// read's own indel wins and the mate is never consulted.
+// r[verify pileup.column_mate_of]
+/// The kept read's linked mate, when it is also in this column.
 #[test]
-fn pair_indel_own_wins_over_the_mate() {
-    let mut store = RecordStore::new();
-    // Left mate `12M2I8M` (100..=119): its own insertion anchored at 111.
-    let mut left_seq = vec![Base::A; 12];
-    left_seq.extend([Base::T, Base::T]);
-    left_seq.extend(vec![Base::A; 8]);
-    push_pair_read(
-        &mut store,
-        b"frag",
-        100,
-        119,
-        FIRST,
-        104,
-        &[m(12), i(2), m(8)],
-        20,
-        2,
-        &left_seq,
-    );
-    push_right_ins(&mut store);
-    let stats = store.link_mates();
-    assert_eq!(stats.pairs, 1, "fixture must link");
-
-    let mut engine = PileupEngine::new(
-        store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(119).unwrap(),
-    );
-    with_anchor_column(&mut engine, |col| {
-        // The mate DOES carry an indel here — Own must still win.
-        let mate = col.find_record(1).expect("mate covers the anchor");
-        assert_eq!(mate.indel_after(), Indel::Insertion(2));
-        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
-        assert!(matches!(col.pair_indel(&view), PairIndel::Own));
-    });
-}
-
-// r[verify pileup_indel.pair_indel]
-/// The kept read has no indel but its linked mate carries an insertion at the
-/// anchor: the mate's view is surfaced, with the inserted run reachable.
-#[test]
-fn pair_indel_surfaces_mate_insertion() {
+fn mate_of_surfaces_the_linked_mate() {
     let mut store = RecordStore::new();
     push_left_plain(&mut store, 104);
     push_right_ins(&mut store);
@@ -713,23 +672,19 @@ fn pair_indel_surfaces_mate_insertion() {
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
         assert!(view.in_mate_overlap(), "the anchor lies inside the pair overlap");
-        assert_eq!(view.indel_after(), Indel::None, "the kept read has no indel");
-        match col.pair_indel(&view) {
-            PairIndel::Mate(mate) => {
-                assert_eq!(mate.record_idx(), 1);
-                assert_eq!(mate.indel_after(), Indel::Insertion(2));
-                assert_eq!(mate.inserted_bases(), &[Base::C, Base::G]);
-            }
-            other => panic!("expected the mate's insertion, got {other:?}"),
-        }
+        let mate = col.mate_of(&view).expect("the mate covers the anchor");
+        assert_eq!(mate.record_idx(), 1);
+        assert_eq!(mate.indel_after(), Indel::Insertion(2));
+        assert_eq!(mate.inserted_bases(), &[Base::C, Base::G]);
     });
 }
 
-// r[verify pileup_indel.pair_indel]
-/// The kept read has no indel but its linked mate carries a deletion at the
-/// anchor: `indel_after()` on the returned view is `Deletion(2)`.
+// r[verify pileup.column_mate_of]
+/// The mate's view carries whatever it carries: a deletion reaches the caller
+/// as readily as an insertion, and they take different paths through
+/// `indel_after()`.
 #[test]
-fn pair_indel_surfaces_mate_deletion() {
+fn mate_of_surfaces_a_mate_deletion() {
     let mut store = RecordStore::new();
     push_left_plain(&mut store, 104);
     // Right mate `8M2D5M` at 104..=118: deletion anchored at 111.
@@ -755,22 +710,92 @@ fn pair_indel_surfaces_mate_deletion() {
     );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
-        match col.pair_indel(&view) {
-            PairIndel::Mate(mate) => {
-                assert_eq!(mate.record_idx(), 1);
-                assert_eq!(mate.indel_after(), Indel::Deletion(2));
-            }
-            other => panic!("expected the mate's deletion, got {other:?}"),
+        let mate = col.mate_of(&view).expect("the mate covers the anchor");
+        assert_eq!(mate.record_idx(), 1);
+        assert_eq!(mate.indel_after(), Indel::Deletion(2));
+    });
+}
+
+// r[verify pileup.column_mate_of]
+/// The relation is symmetric and irreflexive: each mate reaches the other, and
+/// neither reaches itself. A caller deduplicating a pair sees the same two
+/// reads from either side, so the rule it applies cannot depend on which one it
+/// started from.
+#[test]
+fn mate_of_is_symmetric_and_never_self() {
+    let mut store = RecordStore::new();
+    push_left_plain(&mut store, 104);
+    push_right_ins(&mut store);
+    let stats = store.link_mates();
+    assert_eq!(stats.pairs, 1, "fixture must link");
+
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(119).unwrap(),
+    );
+    with_anchor_column(&mut engine, |col| {
+        for idx in [0, 1] {
+            let view = col.alignments().find(|a| a.record_idx() == idx).unwrap();
+            let mate = col.mate_of(&view).expect("both mates cover the anchor");
+            assert_ne!(mate.record_idx(), idx, "a read is not its own mate");
+            let back = col.mate_of(&mate).expect("the relation is symmetric");
+            assert_eq!(back.record_idx(), idx);
         }
     });
 }
 
-// r[verify pileup_indel.pair_indel]
-/// No fragment indel at the anchor: an unlinked read is `None`, and so is a
-/// linked pair whose mate is in the column but carries no indel either.
+// r[verify pileup.column_mate_of]
+/// The mate is surfaced whatever either read carries — including when the kept
+/// read has an indel of its own.
+///
+/// This is why the column exposes the *mate* rather than a verdict about the
+/// pair's indel. The `pair_indel` query this replaces answered "the view's own
+/// indel wins and the mate is never consulted", which is unusable for a caller
+/// that applies its own filters: rastair rejects an indel too close to a read
+/// end or on a read carrying too many mismatches, so a read can carry an indel
+/// and still contribute nothing, and the mate has to remain reachable.
 #[test]
-fn pair_indel_none_without_any_evidence() {
-    // Unlinked: only the left mate is in the store.
+fn mate_of_does_not_depend_on_what_either_read_carries() {
+    let mut store = RecordStore::new();
+    // Left mate `12M2I8M` (100..=119): its own insertion anchored at 111.
+    let mut left_seq = vec![Base::A; 12];
+    left_seq.extend([Base::T, Base::T]);
+    left_seq.extend(vec![Base::A; 8]);
+    push_pair_read(
+        &mut store,
+        b"frag",
+        100,
+        119,
+        FIRST,
+        104,
+        &[m(12), i(2), m(8)],
+        22,
+        2,
+        &left_seq,
+    );
+    push_right_ins(&mut store);
+    let stats = store.link_mates();
+    assert_eq!(stats.pairs, 1, "fixture must link");
+
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(119).unwrap(),
+    );
+    with_anchor_column(&mut engine, |col| {
+        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        assert_eq!(view.indel_after(), Indel::Insertion(2), "the kept read has its own");
+        let mate = col.mate_of(&view).expect("the mate is reachable regardless");
+        assert_eq!(mate.record_idx(), 1);
+        assert_eq!(mate.indel_after(), Indel::Insertion(2));
+    });
+}
+
+// r[verify pileup.column_mate_of]
+/// An unpaired read has no mate to surface.
+#[test]
+fn mate_of_is_none_without_a_linked_mate() {
     let mut store = RecordStore::new();
     push_left_plain(&mut store, 999);
     let stats = store.link_mates();
@@ -783,37 +808,16 @@ fn pair_indel_none_without_any_evidence() {
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
         assert_eq!(view.mate_idx(), None, "unpaired fixture");
-        assert!(matches!(col.pair_indel(&view), PairIndel::None));
-    });
-
-    // Linked and overlapping, but neither mate carries an indel: the mate IS
-    // reachable in the column, so this is the "mate has no indel" arm.
-    let mut store = RecordStore::new();
-    push_left_plain(&mut store, 104);
-    push_pair_read(&mut store, b"frag", 104, 118, SECOND, 100, &[m(15)], 15, 0, &[Base::A; 15]);
-    let stats = store.link_mates();
-    assert_eq!(stats.pairs, 1, "fixture must link");
-    let mut engine = PileupEngine::new(
-        store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(119).unwrap(),
-    );
-    with_anchor_column(&mut engine, |col| {
-        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
-        assert!(view.in_mate_overlap());
-        assert!(col.find_record(1).is_some(), "the mate is in the column");
-        assert!(matches!(col.pair_indel(&view), PairIndel::None));
+        assert!(col.mate_of(&view).is_none());
     });
 }
 
-// r[verify pileup_indel.pair_indel]
-/// A linked mate with an indel that is NOT in this column must not be
-/// invented: neither `max_depth` truncation nor a disjoint alignment at the
-/// queried position yields a `Mate` arm.
+// r[verify pileup.column_mate_of]
+/// A mate linked in the store but absent from *this* column must not be
+/// invented: neither `max_depth` truncation nor a disjoint alignment yields one.
 #[test]
-fn pair_indel_none_when_mate_absent_from_column() {
-    // Truncation: the mate covers the anchor and carries an insertion, but
-    // `max_depth` drops it from the column.
+fn mate_of_is_none_when_the_mate_is_absent_from_the_column() {
+    // Truncation: the mate covers the anchor but `max_depth` drops it.
     let mut store = RecordStore::new();
     push_left_plain(&mut store, 104);
     push_right_ins(&mut store);
@@ -830,11 +834,10 @@ fn pair_indel_none_when_mate_absent_from_column() {
         assert!(view.in_mate_overlap(), "the pair still overlaps at the anchor");
         assert_eq!(view.mate_idx(), Some(1), "the mate is linked in the store");
         assert!(col.find_record(1).is_none(), "truncation removed the mate");
-        assert!(matches!(col.pair_indel(&view), PairIndel::None));
+        assert!(col.mate_of(&view).is_none());
     });
 
-    // Disjoint: the mate's insertion is anchored far outside the left read's
-    // span, so it is absent from the anchor's column.
+    // Disjoint: the mate is aligned far away, so it is not in this column.
     let mut store = RecordStore::new();
     push_left_plain(&mut store, 204);
     let mut seq = vec![Base::A; 8];
@@ -852,7 +855,7 @@ fn pair_indel_none_when_mate_absent_from_column() {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
         assert!(!view.in_mate_overlap(), "disjoint mates do not overlap at the anchor");
         assert!(col.find_record(1).is_none(), "the mate is not in this column");
-        assert!(matches!(col.pair_indel(&view), PairIndel::None));
+        assert!(col.mate_of(&view).is_none());
     });
 }
 

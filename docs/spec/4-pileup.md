@@ -128,6 +128,25 @@ in `O(log depth)` by binary search over
 consumer reaches the other mate of an overlapping pair while walking the column
 exactly once.
 
+r[pileup.column_mate_of]
+`PileupColumn::mate_of(view)` MUST return the linked mate of `view` when that
+mate is also an alignment in this column, and `None` otherwise — including when
+the read has no linked mate, when the column position lies outside the pair's
+overlap, and when the mate was dropped from the column by `max_depth`
+truncation. A mate absent from the column MUST NOT be surfaced: the column is
+the frame the caller can see the rest of.
+
+The relation MUST be symmetric and irreflexive: each mate of a pair present in
+the column reaches the other, and no alignment reaches itself, so a pairwise
+rule gives the same answer whichever mate the caller starts from.
+
+It MUST be an accessor rather than a verdict about the pair. A query that folds
+in a precedence rule (for instance "the view's own indel wins, the mate is never
+consulted") cannot serve a caller that applies its own filters to what it finds:
+a read may carry evidence the caller then rejects, and the mate must remain
+reachable. The query MUST be read-only, cost at most one binary search, and MUST
+NOT change column contents, depth, or op emission.
+
 ## Compatibility
 
 r[pileup.htslib_compat]

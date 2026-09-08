@@ -72,17 +72,6 @@ An insertion that is not preceded by a M/=/X op within the same CIGAR (e.g., `D 
 > - `del_len() -> u32`: returns the deletion length for Deletion and ComplexIndel, 0 for all other ops.
 > - `op() -> &PileupOp`: returns a reference to the op enum.
 
-## Pair indel access
-
-> r[pileup_indel.pair_indel]
-> `PileupColumn::pair_indel(view)` MUST report the indel evidence a fragment shows at the column's anchor position, so a consumer that deduplicates overlapping mates cannot silently lose the fragment's only indel observation when the kept read carries none. Precedence:
->
-> - When the view's own read carries an indel (`indel_after() != Indel::None`), the result MUST be `PairIndel::Own` — the kept read's own indel always wins and the mate MUST NOT be consulted.
-> - Otherwise, when the read is not in a mate overlap or has no linked mate, the result MUST be `PairIndel::None`.
-> - Otherwise the column MUST be searched for the mate via `find_record`. If the mate is present in the column and its `indel_after()` is not `Indel::None`, the result MUST be `PairIndel::Mate(mate_view)` exposing the mate's view. A mate absent from the column (e.g. dropped by `max_depth` truncation) MUST yield `PairIndel::None`.
->
-> The query is read-only: it MUST NOT change column contents, depth, or op emission, and the mate lookup MUST be lazy — performed only when the view's own read has no indel.
-
 ## Deduplication interaction
 
 > r[pileup_indel.dedup_with_deletions]
