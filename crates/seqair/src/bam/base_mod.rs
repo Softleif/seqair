@@ -627,8 +627,14 @@ mod tests {
         let s = seq(&[A, C, G, C, G, A, C, G]);
         let state = BaseModState::parse(b"C+m,0;C+h,1;", &[200, 150], &s, false).unwrap();
         // m on the 0th C (qpos 1); h on the 1st C (qpos 3) after skipping 1.
-        assert!(matches!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].mod_type, ModType::Code(b'm')));
-        assert!(matches!(state.mod_at_qpos(QPos::new(3)).unwrap()[0].mod_type, ModType::Code(b'h')));
+        assert!(matches!(
+            state.mod_at_qpos(QPos::new(1)).unwrap()[0].mod_type,
+            ModType::Code(b'm')
+        ));
+        assert!(matches!(
+            state.mod_at_qpos(QPos::new(3)).unwrap()[0].mod_type,
+            ModType::Code(b'h')
+        ));
     }
 
     // r[verify base_mod.parse_mm]
@@ -655,7 +661,10 @@ mod tests {
     fn parses_chebi_code() {
         let s = seq(&[A, C, G, T]);
         let state = BaseModState::parse(b"C+27551,0;", &[200], &s, false).unwrap();
-        assert!(matches!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].mod_type, ModType::ChEBI(27551)));
+        assert!(matches!(
+            state.mod_at_qpos(QPos::new(1)).unwrap()[0].mod_type,
+            ModType::ChEBI(27551)
+        ));
     }
 
     // r[verify base_mod.implicit_explicit]
@@ -808,8 +817,14 @@ mod tests {
         let s = seq(&[A, C, G, C, G, C]);
         // C+m,2 → skip 2 C's → C@5. C+h,0 → C@1.
         let state = BaseModState::parse(b"C+m,2;C+h,0;", &[200, 100], &s, false).unwrap();
-        assert!(matches!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].mod_type, ModType::Code(b'h')));
-        assert!(matches!(state.mod_at_qpos(QPos::new(5)).unwrap()[0].mod_type, ModType::Code(b'm')));
+        assert!(matches!(
+            state.mod_at_qpos(QPos::new(1)).unwrap()[0].mod_type,
+            ModType::Code(b'h')
+        ));
+        assert!(matches!(
+            state.mod_at_qpos(QPos::new(5)).unwrap()[0].mod_type,
+            ModType::Code(b'm')
+        ));
     }
 
     // r[verify base_mod.validation]

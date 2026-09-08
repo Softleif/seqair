@@ -137,11 +137,7 @@ fn seqair_calls(state: &BaseModState, seq_len: usize) -> Vec<Call> {
                     .unwrap_or_else(|| panic!("`ChEBI` id does not fit in i32: {:?}", m.mod_type));
                 // htslib reports qual=-1 when ML entry is missing. We always
                 // have a probability (u8) so report it as-is.
-                out.push(Call {
-                    qpos: qp.get(),
-                    mod_code,
-                    probability: i32::from(m.probability),
-                });
+                out.push(Call { qpos: qp.get(), mod_code, probability: i32::from(m.probability) });
             }
         }
     }
