@@ -463,8 +463,13 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
             } else {
                 compute_end_pos_from_raw(raw).unwrap_or(rec_pos)
             };
+            // r[impl bam.reader.early_exit]
+            // r[depends bam.reader.sorted_order]
+            if rec_pos > self.end {
+                break;
+            }
             // r[impl interval.overlap_test]
-            if rec_pos > self.end || rec_end < self.start {
+            if rec_end < self.start {
                 self.skipped_out_of_range = self.skipped_out_of_range.saturating_add(1);
                 continue;
             }

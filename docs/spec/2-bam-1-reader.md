@@ -28,6 +28,15 @@ A record overlaps a region if `record.pos <= region.end` AND `record.end_pos >= 
 r[bam.reader.sorted_order+2]
 Records in the store MUST be in coordinate-sorted order (by pos, then by end_pos as tiebreaker) after `fetch_into`, matching the order a sorted BAM file provides.
 
+r[bam.reader.early_exit]
+Because of `r[bam.reader.sorted_order]`, the first record whose start lies past
+the query end proves no later record can overlap. The query MUST stop there
+rather than skip it and continue: a BAI query returns the chunks of every
+*ancestor* bin of the region as well as its own, and those chunk lists run far
+past the region — on a 10 kb query against a 26x human chromosome, continuing
+through them inflated ~4x the BAM instead of ~2x. A record before the region
+(`end_pos < start`) is still a skip, not a stop; only the far end terminates.
+
 ## Edge cases
 
 r[bam.reader.unmapped_skipped]

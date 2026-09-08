@@ -381,3 +381,47 @@ fn arena_with_capacity_avoids_realloc() {
         assert_eq!(r.pos, Pos0::new(i * 10).unwrap());
     }
 }
+
+// ---- bam.reader.early_exit ----
+
+/// A narrow query must not walk the rest of the contig.
+///
+/// The reader used to treat a record past the query end as a skip and keep
+/// reading, so every query ran to the end of the last chunk the index handed
+/// back — and a BAI query hands back the chunks of every ancestor bin, whose
+/// byte ranges run far past the region. The observable consequence is the
+/// record count the query touches: with the early exit it is the region's own
+/// reads plus the tail of the block it starts in, without it the whole contig.
+// r[verify bam.reader.early_exit]
+#[test]
+fn a_narrow_query_stops_at_the_first_record_past_its_end() {
+    use seqair::bam::IndexedBamReader;
+
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam");
+    let mut reader = IndexedBamReader::open(std::path::Path::new(path)).unwrap();
+    let tid = reader.header().tid("chr19").unwrap();
+
+    // The test BAM's reads cover chr19:6,103,075–6,143,000 (0-based).
+    let mut examined = |start: u32, end: u32| {
+        let mut query =
+            reader.query(tid, Pos0::new(start).unwrap(), Pos0::new(end).unwrap()).unwrap();
+        query.for_each(|_| {}).unwrap();
+        let c = query.counts();
+        (c.fetched, c.fetched + c.skipped_out_of_range + c.skipped_tid)
+    };
+
+    let (whole_fetched, whole_examined) = examined(0, 6_143_000);
+    let (narrow_fetched, narrow_examined) = examined(6_103_000, 6_103_999);
+
+    assert!(narrow_fetched > 0, "the narrow region must contain reads at all");
+    assert!(narrow_fetched < whole_fetched, "the narrow region must be a strict subset");
+    // Everything examined and not kept started before the region — the reader
+    // may still be inside the block the region begins in. Nothing past the end
+    // should be reached at all: skip-and-continue examined 2529 records here
+    // for the same 313 it kept, on a BAM of one small contig.
+    assert!(
+        narrow_examined < narrow_fetched * 2,
+        "a 1 kb query examined {narrow_examined} records to keep {narrow_fetched} \
+         (the contig has {whole_examined}) — it is reading past its end"
+    );
+}
