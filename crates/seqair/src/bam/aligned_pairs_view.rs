@@ -127,8 +127,11 @@ pub enum AlignedPairWithRead<'read> {
         /// was passed empty (BAM missing-qual sentinel).
         qual: BaseQuality,
     },
-    /// I — `query` and `qual` are the inserted bases and their Phred scores.
-    Insertion { qpos: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
+    /// I — `query` and `qual` are the inserted bases and their Phred scores,
+    /// starting at `first_inserted`. See
+    /// [`AlignedPair::Insertion`](super::AlignedPair::Insertion) for why the
+    /// field is not called `qpos`.
+    Insertion { first_inserted: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
     /// D — deletion from the reference. No read data.
     Deletion { rpos: Pos0, del_len: u32 },
     /// N — reference skip (e.g. intron). No read data.
@@ -214,10 +217,10 @@ impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
                     qual: self.qual.get(q).copied().unwrap_or(BaseQuality::UNAVAILABLE),
                 }
             }
-            AlignedPair::Insertion { qpos, insert_len } => {
-                let (q, q_end) = range_for(qpos, insert_len);
+            AlignedPair::Insertion { first_inserted, insert_len } => {
+                let (q, q_end) = range_for(first_inserted, insert_len);
                 AlignedPairWithRead::Insertion {
-                    qpos,
+                    first_inserted,
                     query: self.seq.get(q..q_end).unwrap_or(&[]),
                     qual: self.qual.get(q..q_end).unwrap_or(&[]),
                 }
@@ -292,8 +295,11 @@ pub enum AlignedPairWithRef<'read, 'ref_seq> {
         /// as `Some(Base::Unknown)`.
         ref_base: Option<Base>,
     },
-    /// I — inserted query bases and quals (no reference span).
-    Insertion { qpos: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
+    /// I — inserted query bases and quals (no reference span), starting at
+    /// `first_inserted`. See
+    /// [`AlignedPair::Insertion`](super::AlignedPair::Insertion) for why the
+    /// field is not called `qpos`.
+    Insertion { first_inserted: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
     /// D — deleted reference bases. `ref_bases` is `None` if any position in
     /// the deletion span falls outside the loaded `RefSeq` window.
     Deletion { rpos: Pos0, del_len: u32, ref_bases: Option<&'ref_seq [Base]> },
@@ -363,8 +369,8 @@ impl<'read, 'ref_seq> Iterator for AlignedPairsWithRef<'_, 'read, 'ref_seq> {
                     ref_base: self.ref_seq.try_base_at(rpos),
                 }
             }
-            AlignedPairWithRead::Insertion { qpos, query, qual } => {
-                AlignedPairWithRef::Insertion { qpos, query, qual }
+            AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
+                AlignedPairWithRef::Insertion { first_inserted, query, qual }
             }
             AlignedPairWithRead::Deletion { rpos, del_len } => AlignedPairWithRef::Deletion {
                 rpos,
@@ -550,8 +556,8 @@ mod tests {
         // 2 Match + 1 Insertion (summary) + 2 Match = 5 events
         assert_eq!(events.len(), 5);
         match events[2] {
-            AlignedPairWithRead::Insertion { qpos, query, qual } => {
-                assert_eq!(qpos, QPos::new(2));
+            AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
+                assert_eq!(first_inserted, QPos::new(2));
                 assert_eq!(query, &[Base::T, Base::G, Base::T]);
                 assert_eq!(qual.len(), 3);
                 assert_eq!(qual[0].as_byte(), 22);
@@ -1026,8 +1032,12 @@ mod tests {
             .find(|e| matches!(e, AlignedPairWithRead::Insertion { .. }))
             .unwrap();
         match *insertion {
-            AlignedPairWithRead::Insertion { qpos, query, qual } => {
-                assert_eq!(qpos, QPos::new(97), "insertion starts at qpos 97 (after 2S+95M)");
+            AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
+                assert_eq!(
+                    first_inserted,
+                    QPos::new(97),
+                    "insertion starts at qpos 97 (after 2S+95M)"
+                );
                 assert_eq!(query.len(), 5);
                 assert_eq!(qual.len(), 5);
                 // Spot-check: query[0] == seq[97] = kinds[97 % 4] = kinds[1] = C
@@ -1137,8 +1147,8 @@ mod tests {
                             AlignedPairWithRead::Match { qpos: rq, rpos: rr, kind: rk, .. },
                         ) => bq == rq && br == rr && bk == rk,
                         (
-                            AlignedPair::Insertion { qpos: bq, insert_len: bl },
-                            AlignedPairWithRead::Insertion { qpos: rq, query, .. },
+                            AlignedPair::Insertion { first_inserted: bq, insert_len: bl },
+                            AlignedPairWithRead::Insertion { first_inserted: rq, query, .. },
                         ) => bq == rq && (*bl) as usize == query.len(),
                         (
                             AlignedPair::Deletion { rpos: br, del_len: bl },
@@ -1232,16 +1242,16 @@ mod tests {
                                 "Match qual at qpos={} != qual[qpos]", qpos
                             );
                         }
-                        AlignedPairWithRead::Insertion { qpos, query, qual } => {
+                        AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
                             for (offset, &b) in query.iter().enumerate() {
-                                let q = qpos.as_usize() + offset;
+                                let q = first_inserted.as_usize() + offset;
                                 prop_assert_eq!(
                                     b, bases[q % 5],
                                     "Insertion query[{}] (abs qpos={}) mismatch", offset, q
                                 );
                             }
                             for (offset, &q_val) in qual.iter().enumerate() {
-                                let q = qpos.as_usize() + offset;
+                                let q = first_inserted.as_usize() + offset;
                                 let q_byte = u8::try_from(q % 60).unwrap_or(0);
                                 prop_assert_eq!(
                                     q_val, BaseQuality::from_byte(q_byte),

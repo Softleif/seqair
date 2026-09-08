@@ -218,8 +218,8 @@ fn collect_insertions(
     use seqair::bam::AlignedPairWithRead;
     let mut out = Vec::new();
     for ev in rec.aligned_pairs_with_read(store)? {
-        if let AlignedPairWithRead::Insertion { qpos, query, .. } = ev {
-            out.push((qpos.get(), query.to_vec()));
+        if let AlignedPairWithRead::Insertion { first_inserted, query, .. } = ev {
+            out.push((first_inserted.get(), query.to_vec()));
         }
     }
     Ok(out)

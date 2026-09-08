@@ -660,7 +660,10 @@ mod tests {
         assert_eq!(pairs.len(), 5);
         assert_eq!(pairs[0], m(QPos::new(0), 100));
         assert_eq!(pairs[1], m(QPos::new(1), 101));
-        assert_eq!(pairs[2], AlignedPair::Insertion { qpos: QPos::new(2), insert_len: 1 });
+        assert_eq!(
+            pairs[2],
+            AlignedPair::Insertion { first_inserted: QPos::new(2), insert_len: 1 }
+        );
         assert_eq!(pairs[3], m(QPos::new(3), 102));
         assert_eq!(pairs[4], m(QPos::new(4), 103));
     }

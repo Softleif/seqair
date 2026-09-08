@@ -104,7 +104,9 @@ r[cigar.aligned_pairs.hard_clips]
 Hard clips (H) MUST NOT advance `qpos` and MUST NOT yield any variant. This is consistent with htslib, which also excludes hard clips from `aligned_pairs_full()`.
 
 r[cigar.aligned_pairs.insertion_qpos]
-For `Insertion { qpos, insert_len }`, `qpos` MUST be the position of the _first_ inserted base (the query position before the I op advances). Note the frame: this differs from `PileupOp::Insertion.qpos` (r[pileup_indel.insertion_at_last_match] in [docs/spec/4-pileup-indels.md](./4-pileup-indels.md)), which reports the _matched base preceding_ the insertion; the inserted run is at `qpos..qpos+insert_len` here but at `qpos+1..qpos+1+insert_len` there.
+For `Insertion { first_inserted, insert_len }`, `first_inserted` MUST be the position of the _first_ inserted base (the query position before the I op advances), so the inserted run is `first_inserted..first_inserted + insert_len`.
+
+The field MUST NOT be called `qpos`. There are two frames for an insertion and they are one base apart: `PileupOp::Insertion.qpos` (r[pileup_indel.insertion_at_last_match] in [docs/spec/4-pileup-indels.md](./4-pileup-indels.md)) reports the _matched base preceding_ the run, because a pileup column must sit on a reference position and an insertion consumes none. Sharing a field name across the two makes a pattern copied from one silently read one base off in the other; naming this one for what it points at makes that a compile error. The same name MUST be used by `AlignedPairWithRead::Insertion` and `AlignedPairWithRef::Insertion`, which mirror this variant.
 
 r[cigar.aligned_pairs.deletion_rpos]
 For `Deletion { rpos, del_len }`, `rpos` MUST be the reference position where the deletion begins (before the D op advances rpos).

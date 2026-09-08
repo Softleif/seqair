@@ -115,7 +115,7 @@ pub enum MatchKind {
 /// for pair in record.aligned_pairs(store)? {
 ///     match pair {
 ///         AlignedPair::Match { qpos, rpos, kind } => { /* M, =, or X */ }
-///         AlignedPair::Insertion { qpos, insert_len } => { /* I */ }
+///         AlignedPair::Insertion { first_inserted, insert_len } => { /* I */ }
 ///         AlignedPair::Deletion { rpos, del_len } => { /* D */ }
 ///         AlignedPair::RefSkip { rpos, skip_len } => { /* N */ }
 ///         _ => {}
@@ -129,12 +129,17 @@ pub enum AlignedPair {
     /// `M` (ambiguous) from `=` (explicit match) and `X` (explicit mismatch).
     Match { qpos: QPos, rpos: Pos0, kind: MatchKind },
 
-    /// I op — `insert_len` query bases follow `qpos`, no reference span.
-    /// `qpos` is the position of the first inserted base. NB: this is a
-    /// different frame from [`PileupOp::Insertion`](super::PileupOp::Insertion),
-    /// whose `qpos` reports the matched base *preceding* the insertion and
-    /// whose inserted run starts at `qpos + 1`.
-    Insertion { qpos: QPos, insert_len: u32 },
+    /// I op — `insert_len` query bases starting at `first_inserted`, no
+    /// reference span.
+    ///
+    /// The field is not called `qpos` because there are two frames for an
+    /// insertion and they are one base apart:
+    /// [`PileupOp::Insertion`](super::PileupOp::Insertion) reports the matched
+    /// base *preceding* the run, since a pileup column must sit on a reference
+    /// position and an insertion consumes none. Naming this one for what it
+    /// points at means a pattern copied from the other side fails to compile
+    /// rather than reading one base off.
+    Insertion { first_inserted: QPos, insert_len: u32 },
 
     /// D op — `del_len` reference bases starting at `rpos`, no query span.
     Deletion { rpos: Pos0, del_len: u32 },
@@ -218,7 +223,7 @@ pub struct AlignedPairsOptions {
 /// for pair in record.aligned_pairs(store)?.full() {
 ///     match pair {
 ///         AlignedPair::Match { qpos, rpos } => { /* ... */ }
-///         AlignedPair::Insertion { qpos, insert_len } => { /* ... */ }
+///         AlignedPair::Insertion { first_inserted, insert_len } => { /* ... */ }
 ///         // ...
 ///     }
 /// }
@@ -450,9 +455,9 @@ impl Iterator for AlignedPairs<'_> {
 
                 // r[impl cigar.aligned_pairs.insertion_qpos]
                 CigarOpType::Insertion => {
-                    let qpos = self.qpos;
+                    let first_inserted = self.qpos;
                     self.qpos = self.qpos.saturating_add(len);
-                    return Some(AlignedPair::Insertion { qpos, insert_len: len });
+                    return Some(AlignedPair::Insertion { first_inserted, insert_len: len });
                 }
 
                 // r[impl cigar.aligned_pairs.deletion_rpos]
@@ -798,7 +803,10 @@ mod tests {
         assert_eq!(pairs[0], match_m(0, p0(100)));
         assert_eq!(pairs[1], match_m(1, p0(101)));
         // Insertion summary: qpos = 2 (first inserted base), len = 1
-        assert_eq!(pairs[2], AlignedPair::Insertion { qpos: QPos::new(2), insert_len: 1 });
+        assert_eq!(
+            pairs[2],
+            AlignedPair::Insertion { first_inserted: QPos::new(2), insert_len: 1 }
+        );
         assert_eq!(pairs[3], match_m(3, p0(102)));
         assert_eq!(pairs[4], match_m(4, p0(103)));
     }
@@ -1059,7 +1067,10 @@ mod tests {
         let pairs: Vec<_> = AlignedPairs::new(p0(100), &cigar).collect();
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0], AlignedPair::Deletion { rpos: p0(100), del_len: 2 });
-        assert_eq!(pairs[1], AlignedPair::Insertion { qpos: QPos::new(0), insert_len: 3 });
+        assert_eq!(
+            pairs[1],
+            AlignedPair::Insertion { first_inserted: QPos::new(0), insert_len: 3 }
+        );
     }
 
     // ── Full CIGAR walk ───────────────────────────────────────────────────
@@ -1075,7 +1086,7 @@ mod tests {
             match_m(2, p0(50)), // after 2S
             match_m(3, p0(51)),
             match_m(4, p0(52)),
-            AlignedPair::Insertion { qpos: QPos::new(5), insert_len: 1 },
+            AlignedPair::Insertion { first_inserted: QPos::new(5), insert_len: 1 },
             match_m(6, p0(53)),
             match_m(7, p0(54)),
             AlignedPair::Deletion { rpos: p0(55), del_len: 1 },
@@ -1100,7 +1111,7 @@ mod tests {
             .iter()
             .filter_map(|p| match p {
                 AlignedPair::Match { qpos, .. } => Some(qpos.get()),
-                AlignedPair::Insertion { qpos, .. } => Some(qpos.get()),
+                AlignedPair::Insertion { first_inserted, .. } => Some(first_inserted.get()),
                 AlignedPair::SoftClip { qpos, .. } => Some(qpos.get()),
                 _ => None,
             })
@@ -1167,7 +1178,7 @@ mod tests {
                     rpos = advance_rpos(rpos, len);
                 }
                 CigarOpType::Insertion => {
-                    pairs.push(AlignedPair::Insertion { qpos, insert_len: len });
+                    pairs.push(AlignedPair::Insertion { first_inserted: qpos, insert_len: len });
                     qpos = qpos.saturating_add(len);
                 }
                 CigarOpType::Deletion => {
@@ -1313,7 +1324,7 @@ mod tests {
                 let pairs: Vec<_> = AlignedPairs::new(Pos0::ZERO, &cigar).full().collect();
                 let qposes: Vec<u32> = pairs.iter().filter_map(|p| match p {
                     AlignedPair::Match { qpos, .. } => Some(qpos.get()),
-                    AlignedPair::Insertion { qpos, .. } => Some(qpos.get()),
+                    AlignedPair::Insertion { first_inserted, .. } => Some(first_inserted.get()),
                     AlignedPair::SoftClip { qpos, .. } => Some(qpos.get()),
                     _ => None,
                 }).collect();
@@ -1344,9 +1355,9 @@ mod tests {
                     AlignedPair::Match { qpos, rpos, .. } => {
                         result.push((Some(qpos.get()), Some(rpos.as_u32())));
                     }
-                    AlignedPair::Insertion { qpos, insert_len } => {
+                    AlignedPair::Insertion { first_inserted, insert_len } => {
                         for i in 0..insert_len {
-                            result.push((Some(qpos.saturating_add(i).get()), None));
+                            result.push((Some(first_inserted.saturating_add(i).get()), None));
                         }
                     }
                     AlignedPair::Deletion { rpos, del_len } => {
