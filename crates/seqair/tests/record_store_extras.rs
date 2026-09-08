@@ -220,7 +220,11 @@ fn engine_accepts_typed_store() {
         }
     }
 
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(109).unwrap(),
+    );
     engine.set_max_depth(10);
 
     // Verify the engine still works — iterate and check columns are produced.
@@ -236,13 +240,20 @@ fn pileups_yields_same_columns_on_unit_and_typed_store() {
 
     // Collect columns via pileups() on a unit store.
     let store_copy = store_with_n_records(5);
-    let mut engine =
-        PileupEngine::new(store_copy, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
+    let mut engine = PileupEngine::new(
+        store_copy.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(109).unwrap(),
+    );
     let iter_columns: Vec<_> =
         collect_columns(&mut engine).into_iter().map(|c| (c.pos(), c.depth())).collect();
 
     // Collect columns via pileups() on a typed store.
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(109).unwrap(),
+    );
     let mut cws_columns = Vec::new();
     while let Some(col) = engine.pileups() {
         cws_columns.push((col.pos(), col.depth()));
@@ -256,7 +267,11 @@ fn pileups_yields_same_columns_on_unit_and_typed_store() {
 #[test]
 fn pileups_column_exposes_store_access_via_alignment_view() {
     let store = store_with_n_records_customized(3, ExtractPos);
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(109).unwrap(),
+    );
 
     let mut saw_extras = false;
     while let Some(col) = engine.pileups() {
@@ -271,11 +286,11 @@ fn pileups_column_exposes_store_access_via_alignment_view() {
 }
 
 // r[verify pileup.extras.recover_store]
-/// `engine.take_store()` returns a cleared store with retained capacity.
+/// `engine.reclaim_allocation()` returns a cleared store with retained capacity.
 /// This is the low-level mechanism that `PileupGuard::drop` uses to recover
 /// the buffer back into `Readers`.
 #[test]
-fn engine_take_store_clears_records_and_keeps_capacity() {
+fn engine_reclaim_allocation_clears_records_and_keeps_capacity() {
     // Build a store manually, transform to extras, feed into engine, then strip.
     let store = store_with_n_records_customized(10, ExtractMapqU32);
 
@@ -288,14 +303,18 @@ fn engine_take_store_clears_records_and_keeps_capacity() {
         }
     }
 
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(109).unwrap(),
+    );
 
     // Consume all columns.
     while engine.pileups().is_some() {}
 
-    let store = engine.take_store().expect("store should be available");
+    let store = engine.reclaim_allocation().expect("store should be available");
 
-    // The recovered store should be empty (cleared by take_store) but have capacity.
+    // The recovered store should be empty (cleared by reclaim_allocation) but have capacity.
     assert_eq!(store.len(), 0);
     assert!(store.records_capacity() > 0);
 }
@@ -400,7 +419,11 @@ fn pileup_with_sorted_typed_store() {
     assert_eq!(*store.extra(0), 1); // originally the second record pushed
 
     // Build engine with the sorted typed store.
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(114).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(114).unwrap(),
+    );
     let mut column_count = 0;
     while let Some(col) = engine.pileups() {
         for aln in col.alignments() {

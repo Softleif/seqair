@@ -109,7 +109,11 @@ fn seqair_pileup(bam_path: &Path, contig: &str, start: u32, end: u32) -> Vec<Hts
         .fetch_into(tid, Pos0::new(start).unwrap(), Pos0::new(end).unwrap(), &mut store)
         .expect("fetch");
 
-    let mut engine = PileupEngine::new(store, Pos0::new(start).unwrap(), Pos0::new(end).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(start).unwrap(),
+        Pos0::new(end).unwrap(),
+    );
 
     let mut columns = Vec::new();
 

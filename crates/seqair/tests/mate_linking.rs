@@ -501,7 +501,11 @@ fn linking_survives_a_sort_of_out_of_order_records() {
 #[test]
 fn columns_report_the_overlap_and_can_reach_the_mate() {
     let store = linked_pair(Read::mate(100, 50, 130, FIRST), Read::mate(130, 50, 100, SECOND));
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(200).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(200).unwrap(),
+    );
 
     let mut checked = 0;
     while let Some(col) = engine.pileups() {
@@ -533,7 +537,11 @@ fn columns_report_the_overlap_and_can_reach_the_mate() {
 #[test]
 fn find_record_returns_none_for_a_record_outside_the_column() {
     let store = linked_pair(Read::mate(100, 50, 300, FIRST), Read::mate(300, 50, 100, SECOND));
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(120).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(120).unwrap(),
+    );
     let col = engine.pileups().expect("a column at 100");
     assert!(col.find_record(0).is_some());
     assert!(col.find_record(1).is_none(), "the disjoint mate is not in this column");
@@ -549,7 +557,11 @@ fn column_alignments_are_ordered_by_record_idx() {
         push(&mut store, name.as_bytes(), Read::mate(pos, 50, pos + 20, FIRST));
     }
     let _stats = store.link_mates();
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(160).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(160).unwrap(),
+    );
 
     while let Some(col) = engine.pileups() {
         let idxs: Vec<u32> = col.raw_alignments().map(|a| a.record_idx()).collect();
@@ -668,7 +680,11 @@ fn pair_indel_own_wins_over_the_mate() {
     let stats = store.link_mates();
     assert_eq!(stats.pairs, 1, "fixture must link");
 
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(119).unwrap(),
+    );
     with_anchor_column(&mut engine, |col| {
         // The mate DOES carry an indel here — Own must still win.
         let mate = col.find_record(1).expect("mate covers the anchor");
@@ -689,7 +705,11 @@ fn pair_indel_surfaces_mate_insertion() {
     let stats = store.link_mates();
     assert_eq!(stats.pairs, 1, "fixture must link");
 
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(119).unwrap(),
+    );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
         assert!(view.in_mate_overlap(), "the anchor lies inside the pair overlap");
@@ -728,7 +748,11 @@ fn pair_indel_surfaces_mate_deletion() {
     let stats = store.link_mates();
     assert_eq!(stats.pairs, 1, "fixture must link");
 
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(119).unwrap(),
+    );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
         match col.pair_indel(&view) {
@@ -751,7 +775,11 @@ fn pair_indel_none_without_any_evidence() {
     push_left_plain(&mut store, 999);
     let stats = store.link_mates();
     assert_eq!(stats.pairs, 0);
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(119).unwrap(),
+    );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
         assert_eq!(view.mate_idx(), None, "unpaired fixture");
@@ -765,7 +793,11 @@ fn pair_indel_none_without_any_evidence() {
     push_pair_read(&mut store, b"frag", 104, 118, SECOND, 100, &[m(15)], 15, 0, &[Base::A; 15]);
     let stats = store.link_mates();
     assert_eq!(stats.pairs, 1, "fixture must link");
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(119).unwrap(),
+    );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
         assert!(view.in_mate_overlap());
@@ -787,7 +819,11 @@ fn pair_indel_none_when_mate_absent_from_column() {
     push_right_ins(&mut store);
     let stats = store.link_mates();
     assert_eq!(stats.pairs, 1, "fixture must link");
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(119).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(119).unwrap(),
+    );
     engine.set_max_depth(1);
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
@@ -807,7 +843,11 @@ fn pair_indel_none_when_mate_absent_from_column() {
     push_pair_read(&mut store, b"frag", 204, 216, SECOND, 100, &[m(8), i(2), m(5)], 13, 2, &seq);
     let stats = store.link_mates();
     assert_eq!(stats.pairs, 1, "fixture must link");
-    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(219).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(219).unwrap(),
+    );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
         assert!(!view.in_mate_overlap(), "disjoint mates do not overlap at the anchor");

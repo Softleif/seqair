@@ -54,7 +54,7 @@ proptest! {
             expected_depth[i] = running.max(0) as usize;
         }
 
-        let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(300).unwrap());
+        let mut engine = PileupEngine::new(arena.prepare_for_pileup().input, Pos0::new(0).unwrap(), Pos0::new(300).unwrap());
         while let Some(col) = engine.pileups() {
             let pos = col.pos().as_usize();
             let exp = expected_depth.get(pos).copied().unwrap_or(0);
@@ -76,7 +76,11 @@ fn already_sorted_records_produce_correct_pileup() {
     arena.push_raw(&make_record(0, 20, 99, 60, 30), &mut ()).unwrap();
     arena.push_raw(&make_record(0, 30, 99, 60, 30), &mut ()).unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(70).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(0).unwrap(),
+        Pos0::new(70).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
 
     // pos 10-19: 1 read
@@ -111,7 +115,11 @@ fn single_arena_get_per_record_entry_still_correct() {
     arena.push_raw(&make_record(0, 0, 99, 60, 50), &mut DropSecondary).unwrap();
     arena.push_raw(&make_record(0, 10, 99 | 0x100, 40, 50), &mut DropSecondary).unwrap(); // secondary flag
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(59).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(0).unwrap(),
+        Pos0::new(59).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
 
     // Only the mapq=60 read should remain in the store after push-time filtering.
@@ -143,7 +151,11 @@ fn cigar_index_from_arena_slab_correct() {
     );
     arena.push_raw(&raw, &mut ()).unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(154).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(154).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
 
     // Before deletion: qpos = pos - 100

@@ -14,7 +14,7 @@ use crate::utils::TraceErr;
 
 use super::{
     cigar::{CigarMapping, CigarPosInfo},
-    record_store::RecordStore,
+    record_store::{PileupInput, RecordStore},
 };
 
 /// Cloning is a pointer clone of the shared bases, so one `RefSeq` can drive
@@ -673,15 +673,22 @@ impl PileupAlignment {
 }
 
 impl<U> PileupEngine<U> {
+    // r[impl record_store.pileup_input]
     /// Create a pileup engine that owns the record store.
-    pub fn new(store: RecordStore<U>, region_start: Pos0, region_end: Pos0) -> Self {
-        Self::with_scratch(store, region_start, region_end, PileupScratch::default())
+    ///
+    /// Takes a [`PileupInput`] rather than a [`RecordStore`] because the engine
+    /// relies on ascending position order and linked mates and checks neither:
+    /// an unsorted store loses whole reads without reporting a gap, and an
+    /// unlinked one makes every alignment look like it has no mate. Only
+    /// [`RecordStore::prepare_for_pileup`] mints that type.
+    pub fn new(input: PileupInput<U>, region_start: Pos0, region_end: Pos0) -> Self {
+        Self::with_scratch(input, region_start, region_end, PileupScratch::default())
     }
 
     /// Build an engine reusing pooled scratch buffers. The buffers are cleared
     /// (capacity retained) so no stale alignments leak from a previous region.
     pub(crate) fn with_scratch(
-        store: RecordStore<U>,
+        input: PileupInput<U>,
         region_start: Pos0,
         region_end: Pos0,
         mut scratch: PileupScratch,
@@ -690,7 +697,7 @@ impl<U> PileupEngine<U> {
         scratch.active_end_pos.clear();
         scratch.active.clear();
         PileupEngine {
-            store,
+            store: input.into_store(),
             buf: scratch.buf,
             current_pos: region_start,
             region_end,
@@ -755,16 +762,17 @@ impl<U> PileupEngine<U> {
         &self.store
     }
 
-    /// Take the `RecordStore` out for reuse. Returns `None` if already taken.
+    /// Reclaim the store's heap allocation for the next region. Returns `None`
+    /// if it has already been reclaimed.
     ///
-    /// Call this after iteration is complete. The returned store retains its
-    /// allocated capacity but is cleared.
-    /// Take the `RecordStore` out for reuse. Returns `None` if already taken.
+    /// **The returned store is empty.** Its slabs keep their capacity, which is
+    /// the entire point — the next region refills them without reallocating —
+    /// but the records are gone, so this is not a way to read the pileup's
+    /// input back. Use [`Self::store`] for that, before iteration ends.
     ///
-    /// Call this after iteration is complete when using `PileupEngine` directly
-    /// (without the [`PileupGuard`] wrapper). The guard recovers the store
-    /// automatically on drop — prefer that path.
-    pub fn take_store(&mut self) -> Option<RecordStore<U>> {
+    /// Call this after iteration when driving [`PileupEngine`] directly. The
+    /// [`PileupGuard`] wrapper does it on drop; prefer that path.
+    pub fn reclaim_allocation(&mut self) -> Option<RecordStore<U>> {
         if self.store.is_empty() && self.store.records_capacity() == 0 {
             return None;
         }
@@ -806,7 +814,7 @@ impl<U> std::fmt::Debug for PileupEngine<U> {
 /// store. Prefer letting the guard drop normally.
 ///
 /// ⚠️ Because the guard [`Deref`](std::ops::Deref)s to [`PileupEngine`],
-/// [`PileupEngine::take_store`] is reachable as `guard.take_store()`.
+/// [`PileupEngine::reclaim_allocation`] is reachable as `guard.reclaim_allocation()`.
 /// Calling it leaves the engine's store empty, and the guard's `Drop`
 /// finds nothing to recover — the next pileup allocates a fresh store.
 /// Use [`into_inner`](Self::into_inner) if you genuinely need to skip
@@ -887,12 +895,12 @@ impl<U> Drop for PileupGuard<'_, U> {
     fn drop(&mut self) {
         // Recover the store into the caller's slot. The engine is `None`
         // only after [`PileupGuard::into_inner`], in which case recovery
-        // is intentionally skipped. `take_store` further returns `None`
+        // is intentionally skipped. `reclaim_allocation` further returns `None`
         // if the store was already drained (edge case) or was empty with
         // zero capacity from the start. In any of those cases, leave the
         // slot untouched.
         if let Some(mut engine) = self.engine.take() {
-            if let Some(store) = engine.take_store() {
+            if let Some(store) = engine.reclaim_allocation() {
                 *self.slot = store;
             }
             if let Some(scratch_slot) = self.scratch_slot.take() {
@@ -1263,7 +1271,11 @@ mod tests {
             )
             .unwrap();
 
-        let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(104).unwrap());
+        let mut engine = PileupEngine::new(
+            store.prepare_for_pileup().input,
+            Pos0::new(100).unwrap(),
+            Pos0::new(104).unwrap(),
+        );
 
         // First column — buf grows to accommodate alignments.
         let depth = engine.pileups().unwrap().depth();
@@ -1316,7 +1328,11 @@ mod tests {
                 .unwrap();
         }
 
-        let mut engine = PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(49).unwrap());
+        let mut engine = PileupEngine::new(
+            store.prepare_for_pileup().input,
+            Pos0::new(0).unwrap(),
+            Pos0::new(49).unwrap(),
+        );
 
         let mut columns = Vec::new();
         while let Some(col) = engine.pileups() {
@@ -1385,7 +1401,11 @@ mod tests {
             )
             .unwrap();
 
-        let mut engine = PileupEngine::new(store, Pos0::new(98).unwrap(), Pos0::new(107).unwrap());
+        let mut engine = PileupEngine::new(
+            store.prepare_for_pileup().input,
+            Pos0::new(98).unwrap(),
+            Pos0::new(107).unwrap(),
+        );
         engine.set_soft_clip_overhang(1);
 
         let mut soft: Vec<(u32, u32, Base)> = Vec::new();
@@ -1443,7 +1463,11 @@ mod tests {
             )
             .unwrap();
 
-        let mut engine = PileupEngine::new(store, Pos0::new(98).unwrap(), Pos0::new(106).unwrap());
+        let mut engine = PileupEngine::new(
+            store.prepare_for_pileup().input,
+            Pos0::new(98).unwrap(),
+            Pos0::new(106).unwrap(),
+        );
         // Default overhang 0: behaves exactly as before, no SoftClip columns.
         let mut positions: Vec<u32> = Vec::new();
         while let Some(col) = engine.pileups() {
@@ -1570,8 +1594,11 @@ mod tests {
                     .unwrap();
             }
 
-            let mut engine =
-                PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(220).unwrap());
+            let mut engine = PileupEngine::new(
+                store.prepare_for_pileup().input,
+                Pos0::new(0).unwrap(),
+                Pos0::new(220).unwrap(),
+            );
             engine.set_soft_clip_overhang(overhang);
 
             let mut aligned = Vec::new();
@@ -1704,7 +1731,7 @@ mod tests {
             .unwrap();
 
         let mut engine = PileupEngine::new(
-            store,
+            store.prepare_for_pileup().input,
             Pos0::new(max_pos - 5).unwrap(),
             Pos0::new(max_pos - 1).unwrap(), // region_end <= i32::MAX - 1
         );
@@ -1766,7 +1793,11 @@ mod tests {
         // 2 <= 5, so the record activates at position 0. The leading clip base is
         // at qpos 2 (Base::T) at reference position 1. At position 0, the first
         // leading clip base (qpos 0 = Base::C) also emits.
-        let mut engine = PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(5).unwrap());
+        let mut engine = PileupEngine::new(
+            store.prepare_for_pileup().input,
+            Pos0::new(0).unwrap(),
+            Pos0::new(5).unwrap(),
+        );
         engine.set_soft_clip_overhang(5);
 
         let mut leading: Vec<(u32, Base)> = Vec::new();
@@ -1819,7 +1850,11 @@ mod tests {
             )
             .unwrap();
 
-        let mut engine = PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(5).unwrap());
+        let mut engine = PileupEngine::new(
+            store.prepare_for_pileup().input,
+            Pos0::new(0).unwrap(),
+            Pos0::new(5).unwrap(),
+        );
 
         let mut saw_insertion = false;
         while let Some(col) = engine.pileups() {
@@ -1867,8 +1902,11 @@ mod tests {
                     &mut (),
                 )
                 .unwrap();
-            let mut engine =
-                PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(last_ref_pos).unwrap());
+            let mut engine = PileupEngine::new(
+                store.prepare_for_pileup().input,
+                Pos0::new(0).unwrap(),
+                Pos0::new(last_ref_pos).unwrap(),
+            );
             let mut out = Vec::new();
             while let Some(col) = engine.pileups() {
                 let pos = col.pos().as_u32();
@@ -1944,7 +1982,11 @@ mod tests {
                 .unwrap();
         }
 
-        let mut engine = PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(49).unwrap());
+        let mut engine = PileupEngine::new(
+            store.prepare_for_pileup().input,
+            Pos0::new(0).unwrap(),
+            Pos0::new(49).unwrap(),
+        );
         engine.set_max_depth(3);
 
         // At every position, only the first 3 records (indices 0,1,2) should be kept.

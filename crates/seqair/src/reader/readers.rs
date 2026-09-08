@@ -8,7 +8,7 @@ use crate::{
         BamHeader,
         depth_cap::{DepthCap, DepthLimit},
         pileup::{PileupEngine, PileupGuard, RefSeq},
-        record_store::{CustomizeRecordStore, RecordStore},
+        record_store::{CustomizeRecordStore, Prepared, RecordStore},
     },
     fasta::{FastaError, IndexedFastaReader},
 };
@@ -468,31 +468,13 @@ impl<E: CustomizeRecordStore> Readers<E> {
             }
         }
 
-        // In-place realignment hook: rewrite (pos, CIGAR) on the fetched store,
-        // then restore position order before the engine consumes it.
+        // In-place realignment hook: rewrite (pos, CIGAR) on the fetched store.
+        // Restoring position order is `prepare_for_pileup`'s job below — the
+        // hook only has to mark the store as reordered, which `set_alignment`
+        // does.
         if let Some(mut mutate) = mutate {
             mutate(&mut self.store);
-            self.store.sort_by_pos();
         }
-
-        // r[impl record_store.link_mates.invalidated]
-        // After the fetch and before the engine: a mate index is a store index,
-        // so linking has to be the last thing that touches the store (after the
-        // realignment hook above re-sorted it).
-        // r[impl record_store.link_mates.stats]
-        let mate_links = self.store.link_mates();
-        if !mate_links.is_clean() {
-            // Repeated primary qnames, or the same record present twice.
-            // Neither is valid input; say so once per fetch, not per column.
-            tracing::debug!(
-                contig = %segment.contig(),
-                start = start.as_u64(),
-                pairs = mate_links.pairs,
-                ambiguous_qnames = mate_links.ambiguous_qnames,
-                "qnames are not unique here; those reads are not mate-deduplicated"
-            );
-        }
-
         let ref_seq = match supplied_ref {
             // r[impl unified.readers_pileup_supplied_reference]
             Some(ref_seq) => {
@@ -540,7 +522,26 @@ impl<E: CustomizeRecordStore> Readers<E> {
         let store = std::mem::take(&mut self.store);
         let scratch = std::mem::take(&mut self.pileup_scratch);
 
-        let mut engine = PileupEngine::with_scratch(store, start, end, scratch);
+        // r[impl record_store.link_mates.invalidated]
+        // r[impl record_store.link_mates.stats]
+        // Sorts (the realignment hook above may have moved records) and links,
+        // in that order — a mate index is a store index and cannot survive a
+        // reorder. Producing the engine's input is the only way to do this, so
+        // neither step can be skipped.
+        let Prepared { input, stats: mate_links } = store.prepare_for_pileup();
+        if !mate_links.is_clean() {
+            // Repeated primary qnames, or the same record present twice.
+            // Neither is valid input; say so once per fetch, not per column.
+            tracing::debug!(
+                contig = %segment.contig(),
+                start = start.as_u64(),
+                pairs = mate_links.pairs,
+                ambiguous_qnames = mate_links.ambiguous_qnames,
+                "qnames are not unique here; those reads are not mate-deduplicated"
+            );
+        }
+
+        let mut engine = PileupEngine::with_scratch(input, start, end, scratch);
         engine.set_reference_seq(ref_seq);
         Ok(PileupGuard::new(engine, &mut self.store, Some(&mut self.pileup_scratch)))
     }
@@ -947,13 +948,13 @@ mod tests {
 
     // r[verify pileup.extras.recover_store]
     /// Documented footgun: the guard derefs to `PileupEngine`, so
-    /// `guard.take_store()` is reachable. If the user calls it, the
+    /// `guard.reclaim_allocation()` is reachable. If the user calls it, the
     /// guard's `Drop` finds nothing to recover and the next `pileup()`
     /// re-allocates from scratch. This test pins that behavior so a
     /// future change to the guard's recovery logic doesn't silently
     /// alter the contract documented on `PileupGuard`.
     #[test]
-    fn pileup_guard_take_store_via_deref_disables_recovery() {
+    fn pileup_guard_reclaim_allocation_via_deref_disables_recovery() {
         use std::num::NonZeroU32;
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
         let opts = SegmentOptions::new(NonZeroU32::new(3_000).unwrap());
@@ -967,10 +968,11 @@ mod tests {
         {
             let mut p = readers.pileup(&segments[0], DepthLimit::Unlimited).unwrap();
             while p.pileups().is_some() {}
-            let drained = p.take_store().expect("populated store available for the first take");
+            let drained =
+                p.reclaim_allocation().expect("populated store available for the first take");
             // Hold the drained store alive past the guard's drop.
             assert!(drained.records_capacity() > 0);
-            // p drops here. take_store on the engine returns None (already
+            // p drops here. reclaim_allocation on the engine returns None (already
             // taken), so the slot is left as the empty Default that
             // `Readers::pileup` put there at construction time.
         }

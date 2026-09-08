@@ -362,11 +362,69 @@ pub struct RecordStore<U = ()> {
     qual: Vec<u8>,
     aux: Vec<u8>,
     extras: Vec<U>,
+    /// The two properties [`PileupEngine`] relies on, tracked as records are
+    /// pushed and reordered. Not public: they exist so
+    /// [`RecordStore::prepare_for_pileup`] can be cheap when they already
+    /// hold, and so that no caller can claim them without earning them.
+    ///
+    /// [`PileupEngine`]: crate::bam::pileup::PileupEngine
+    order: RecordOrder,
+    mate_links: MateLinkState,
+}
+
+// r[impl record_store.pileup_input]
+/// A [`RecordStore`] that is in ascending position order and has its mates
+/// linked — the two properties [`PileupEngine`] relies on and does not check.
+///
+/// There is no constructor: [`RecordStore::prepare_for_pileup`] is the only
+/// way to obtain one, so the properties cannot be claimed without being
+/// established.
+///
+/// [`PileupEngine`]: crate::bam::pileup::PileupEngine
+pub struct PileupInput<U = ()> {
+    store: RecordStore<U>,
+}
+
+impl<U> PileupInput<U> {
+    /// Unwrap to the underlying store. Used by the pileup engine; the
+    /// guarantees do not travel with the returned value.
+    pub(crate) fn into_store(self) -> RecordStore<U> {
+        self.store
+    }
+}
+
+/// The result of [`RecordStore::prepare_for_pileup`]: the store the engine
+/// accepts, and what linking found.
+///
+/// `stats` is separate rather than folded into [`PileupInput`] because callers
+/// log it (repeated primary qnames mean some reads are not deduplicated) and
+/// the engine has no use for it.
+pub struct Prepared<U = ()> {
+    pub input: PileupInput<U>,
+    pub stats: MateLinkStats,
+}
+
+/// Whether the store's records are in ascending `pos` order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordOrder {
+    /// Every record is at or after its predecessor. An empty store qualifies.
+    Ascending,
+    /// A push arrived before its predecessor; only `sort_by_pos` restores it.
+    Unknown,
+}
+
+/// Whether `link_mates` has run since the last thing that invalidated it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MateLinkState {
+    Linked,
+    Unlinked,
 }
 
 impl<U> RecordStore<U> {
     pub fn new() -> Self {
         Self {
+            order: RecordOrder::Ascending,
+            mate_links: MateLinkState::Unlinked,
             records: Vec::new(),
             names: Vec::new(),
             bases: Vec::new(),
@@ -402,6 +460,8 @@ impl<U> RecordStore<U> {
         let aux_est = record_count_est.saturating_mul(180); // rounded up from pooled 163
 
         Self {
+            order: RecordOrder::Ascending,
+            mate_links: MateLinkState::Unlinked,
             records: Vec::with_capacity(record_count_est),
             names: Vec::with_capacity(names_est),
             bases: Vec::with_capacity(bases_est),
@@ -569,6 +629,7 @@ impl<U> RecordStore<U> {
         // r[impl record_store.qname_hash]
         let name_hash = qname_hash(&qname_raw[..qname_actual_len]);
 
+        self.note_push(h.pos);
         self.records.push(SlimRecord {
             pos: h.pos,
             end_pos,
@@ -724,6 +785,7 @@ impl<U> RecordStore<U> {
         let aux_off = u32::try_from(self.aux.len()).map_err(|_| DecodeError::SlabOverflow)?;
         self.aux.extend_from_slice(aux);
 
+        self.note_push(pos);
         self.records.push(SlimRecord {
             pos,
             end_pos,
@@ -1101,6 +1163,7 @@ impl<U> RecordStore<U> {
     pub fn sort_by_pos(&mut self) {
         self.clear_mate_links();
         self.records.sort_by_key(|r| r.pos);
+        self.order = RecordOrder::Ascending;
     }
 
     // r[impl record_store.link_mates.unique_records]
@@ -1136,6 +1199,7 @@ impl<U> RecordStore<U> {
     /// Drop every mate link. A mate index is a store index, so any operation
     /// that moves or removes records invalidates it.
     fn clear_mate_links(&mut self) {
+        self.mate_links = MateLinkState::Unlinked;
         for rec in &mut self.records {
             rec.mate_idx = NO_MATE;
         }
@@ -1235,6 +1299,7 @@ impl<U> RecordStore<U> {
             }
         }
 
+        self.mate_links = MateLinkState::Linked;
         stats
     }
 
@@ -1389,8 +1454,11 @@ impl<U> RecordStore<U> {
     /// Replace a record's alignment (pos + cigar) by appending new CIGAR to the
     /// cigar slab. The old CIGAR bytes become dead data.
     ///
-    /// After calling this on one or more records, call `sort_by_pos()` before
-    /// using the store for pileup iteration.
+    /// Moving a record breaks position order, so this retracts that guarantee
+    /// and `prepare_for_pileup` re-establishes it — which the engine cannot be
+    /// reached without. Mate indices survive (nothing is reordered here, and
+    /// `mate_overlap` derives from the current positions), but the re-sort will
+    /// clear them and preparing relinks.
     pub fn set_alignment(
         &mut self,
         idx: u32,
@@ -1435,6 +1503,8 @@ impl<U> RecordStore<U> {
         #[allow(clippy::indexing_slicing, reason = "idx validated by self.record() above")]
         let rec = &mut self.records[idx as usize];
         rec.pos = new_pos;
+        // A moved record can land anywhere relative to its neighbours.
+        self.order = RecordOrder::Unknown;
         rec.end_pos = end_pos;
         rec.n_cigar_ops = n_cigar_ops;
         rec.cigar_off = new_cigar_off;
@@ -1472,9 +1542,16 @@ impl<U> RecordStore<U> {
     }
 
     /// Take all contents out, leaving an empty store with no capacity.
-    /// Used by `PileupEngine::take_store` to avoid requiring `Default`.
+    /// Used by `PileupEngine::reclaim_allocation` to avoid requiring `Default`.
     pub(crate) fn take_contents(&mut self) -> Self {
+        // What is taken keeps the state; what is left behind is empty, and an
+        // empty store is trivially ordered and has nothing to link.
+        let (order, mate_links) = (self.order, self.mate_links);
+        self.order = RecordOrder::Ascending;
+        self.mate_links = MateLinkState::Unlinked;
         RecordStore {
+            order,
+            mate_links,
             records: std::mem::take(&mut self.records),
             names: std::mem::take(&mut self.names),
             bases: std::mem::take(&mut self.bases),
@@ -1486,7 +1563,56 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl record_store.extras.clear]
+    // r[impl record_store.pileup_input]
+    /// Establish the two properties [`PileupEngine`] relies on and hand back a
+    /// store it will accept.
+    ///
+    /// The engine walks records assuming ascending `pos`, and reads `mate_idx`
+    /// to surface mate overlap. Neither is checked at use: an unsorted store
+    /// loses whole reads (the engine never reaches them, and no column reports
+    /// a gap), and an unlinked one reports `mate_idx() == None` and
+    /// `in_mate_overlap() == false` on every alignment — which is exactly what
+    /// a record with no mate looks like, so a consumer that deduplicates
+    /// overlapping mates silently keeps both.
+    ///
+    /// Both were reachable because [`PileupEngine::new`] took a bare
+    /// [`RecordStore`]. It takes [`PileupInput`] instead, and this is the only
+    /// way to make one.
+    ///
+    /// Idempotent and cheap to repeat: the sort is skipped when no push
+    /// arrived out of order, and the linking when nothing has invalidated it.
+    ///
+    /// [`PileupEngine`]: crate::bam::pileup::PileupEngine
+    /// [`PileupEngine::new`]: crate::bam::pileup::PileupEngine::new
+    #[must_use]
+    pub fn prepare_for_pileup(mut self) -> Prepared<U> {
+        if self.order == RecordOrder::Unknown {
+            // Also clears mate links: `mate_idx` is a store index, so it
+            // cannot survive a reorder.
+            self.sort_by_pos();
+        }
+        let stats = match self.mate_links {
+            MateLinkState::Linked => MateLinkStats::default(),
+            MateLinkState::Unlinked => self.link_mates(),
+        };
+        Prepared { input: PileupInput { store: self }, stats }
+    }
+
+    /// Note the arrival of a record at `pos`, before it is appended.
+    ///
+    /// A push can only ever *lose* the ascending-order property, and it always
+    /// invalidates mate links: `mate_idx` is a store index, so a new record
+    /// shifts nothing but a new mate may exist for an already-linked read.
+    fn note_push(&mut self, pos: Pos0) {
+        if self.records.last().is_some_and(|last| pos < last.pos) {
+            self.order = RecordOrder::Unknown;
+        }
+        self.mate_links = MateLinkState::Unlinked;
+    }
+
     pub fn clear(&mut self) {
+        self.order = RecordOrder::Ascending;
+        self.mate_links = MateLinkState::Unlinked;
         self.records.clear();
         self.names.clear();
         self.bases.clear();

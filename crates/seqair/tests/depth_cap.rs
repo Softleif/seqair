@@ -120,7 +120,11 @@ fn seqair_depths(
         )
         .expect("fetch");
 
-    let mut engine = PileupEngine::new(store, Pos0::new(start).unwrap(), Pos0::new(end).unwrap());
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(start).unwrap(),
+        Pos0::new(end).unwrap(),
+    );
     let mut out = Vec::new();
     while let Some(col) = engine.pileups() {
         out.push((u32::from(col.pos()), col.depth() as u32));

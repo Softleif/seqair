@@ -221,7 +221,7 @@ fn all_contigs_pileup_positions_and_depth_match() {
             .expect("fetch");
 
         let mut engine = seqair::bam::PileupEngine::new(
-            store,
+            store.prepare_for_pileup().input,
             Pos0::new(start as u32).unwrap(),
             Pos0::new(end as u32).unwrap(),
         );
@@ -274,7 +274,7 @@ fn all_contigs_pileup_qpos_and_flags_match() {
             .expect("fetch");
 
         let mut engine = seqair::bam::PileupEngine::new(
-            store,
+            store.prepare_for_pileup().input,
             Pos0::new(start as u32).unwrap(),
             Pos0::new(end as u32).unwrap(),
         );
@@ -335,7 +335,7 @@ fn all_contigs_pileup_bases_match() {
             .expect("fetch");
 
         let mut engine = seqair::bam::PileupEngine::new(
-            store,
+            store.prepare_for_pileup().input,
             Pos0::new(start as u32).unwrap(),
             Pos0::new(end as u32).unwrap(),
         );

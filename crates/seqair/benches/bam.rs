@@ -350,7 +350,8 @@ fn pileup_e2e(c: &mut Criterion) {
             let tid = reader.header().tid(CHROM).unwrap();
             reader.fetch_into(tid, START, END, &mut store).unwrap();
 
-            let mut engine = seqair::bam::PileupEngine::new(store, START, END);
+            let mut engine =
+                seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, START, END);
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
             let mut counter = Counter::new();

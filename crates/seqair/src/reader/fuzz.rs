@@ -146,7 +146,7 @@ impl FuzzReaders {
         };
 
         let store = std::mem::take(&mut self.store);
-        let mut engine = PileupEngine::new(store, start, end);
+        let mut engine = PileupEngine::new(store.prepare_for_pileup().input, start, end);
         if let Some(ref_seq) = ref_seq {
             engine.set_reference_seq(ref_seq);
         }

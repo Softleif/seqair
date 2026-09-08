@@ -102,6 +102,43 @@ r[record_store.extras.clear]
 r[record_store.extras.sort_dedup_generic]
 `sort_by_pos` and `dedup` MUST be available on `RecordStore<U>` for any `U`. Each `SlimRecord` carries an `extras_idx` field that indexes into the extras slab, so reordering or removing records does not invalidate the extras mapping. Dead extras entries from `dedup` are left in place (minor waste, same as dead slab data for names, cigar, etc.).
 
+## Pileup preconditions
+
+r[record_store.pileup_input]
+The pileup engine walks records assuming ascending `pos` and reads `mate_idx` to
+surface mate overlap, and it checks neither at use. A store violating either
+produces a silently wrong pileup rather than an error: out-of-order records are
+never reached, so whole reads vanish with no column reporting a gap; and an
+unlinked store reports `mate_idx() == None` and `in_mate_overlap() == false` on
+every alignment, which is exactly what a record with no mate looks like, so a
+consumer that deduplicates overlapping mates keeps both.
+
+Both MUST therefore be unrepresentable rather than documented.
+`PileupEngine::new` and `PileupEngine::with_scratch` MUST take a `PileupInput`,
+not a `RecordStore`. `PileupInput` MUST have no public constructor;
+`RecordStore::prepare_for_pileup(self) -> Prepared` MUST be the only way to
+obtain one. `Prepared` MUST carry the `PileupInput` and the `MateLinkStats`
+linking produced, since callers log the latter and the engine has no use for it.
+
+`prepare_for_pileup` MUST sort by position before linking — a mate index is a
+store index and cannot survive a reorder — and MUST be idempotent: the sort is
+skipped when no push arrived out of order and the linking when nothing has
+invalidated it. The resulting pileup MUST NOT depend on the order records were
+pushed in.
+
+r[record_store.pileup_input.order_tracking]
+The store MUST track whether its records are in ascending `pos` order. A push
+whose position precedes its predecessor's MUST retract that property, as MUST
+`set_alignment` (which moves a record). `sort_by_pos` MUST restore it, and a
+store that is empty or newly cleared MUST have it. Any mutation that appends or
+moves records MUST also mark mate links invalid, and `link_mates` MUST mark them
+valid.
+
+r[record_store.pileup_input.reclaim]
+`PileupEngine::reclaim_allocation` returns the store's slab capacity for reuse
+by the next region and MUST clear its records. It is not a way to read the
+pileup's input back, and MUST NOT be named as though it were.
+
 ## Load-time depth cap
 
 r[record_store.depth_cap.window]

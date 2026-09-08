@@ -38,7 +38,11 @@ fn deletion_positions_have_deletion_op() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(124).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(124).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
 
     // Positions 100-109: Match
@@ -102,7 +106,11 @@ fn refskip_positions_have_refskip_op() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(119).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(0).unwrap(),
+        Pos0::new(119).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
 
     // Should have 120 columns: 10 match + 100 refskip + 10 match
@@ -138,7 +146,11 @@ fn depth_counts_deletions_and_refskips() {
         )
         .unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(0).unwrap(),
+        Pos0::new(19).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
 
     // At deletion positions (5-9): depth should be 2 (one Match + one Deletion)
@@ -163,7 +175,11 @@ fn insertion_reported_at_last_match_before_insert() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(19).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(0).unwrap(),
+        Pos0::new(19).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
     assert_eq!(columns.len(), 20);
 
@@ -224,7 +240,11 @@ fn complex_indel_at_last_deletion_position() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(0).unwrap(),
+        Pos0::new(24).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
 
     // Position 9 (last match before D): should be plain Match, NOT Insertion
@@ -282,7 +302,11 @@ fn insertion_before_deletion() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(0).unwrap(),
+        Pos0::new(24).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
 
     // pos 9: last M before I → should be Insertion with insert_len=3
@@ -329,7 +353,11 @@ fn insertion_with_anchor_and_complex_indel_after_deletion() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(24).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(0).unwrap(),
+        Pos0::new(24).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
 
     // pos 9: last M before first I → Insertion with insert_len=2
@@ -385,7 +413,11 @@ fn minimal_insertion_1m_1i_1m() {
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
 
-    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(1).unwrap());
+    let mut engine = PileupEngine::new(
+        arena.prepare_for_pileup().input,
+        Pos0::new(0).unwrap(),
+        Pos0::new(1).unwrap(),
+    );
     let columns = helpers::collect_columns(&mut engine);
     assert_eq!(columns.len(), 2);
 
@@ -425,7 +457,7 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
-        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let mut engine = PileupEngine::new(arena.prepare_for_pileup().input, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
         let columns = helpers::collect_columns(&mut engine);
 
         // With deletions/refskips included, every position in ref_span should have a column
@@ -442,7 +474,7 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
-        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let mut engine = PileupEngine::new(arena.prepare_for_pileup().input, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
 
         let covered = read.covered_ref_positions();
         while let Some(col) = engine.pileups() {
@@ -473,7 +505,7 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
-        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let mut engine = PileupEngine::new(arena.prepare_for_pileup().input, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
 
         while let Some(col) = engine.pileups() {
             let aln = col.alignments().next().unwrap();
@@ -501,7 +533,7 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
-        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let mut engine = PileupEngine::new(arena.prepare_for_pileup().input, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
 
         while let Some(col) = engine.pileups() {
             let aln = col.alignments().next().unwrap();
@@ -524,7 +556,7 @@ proptest! {
 
         let region_start = read.pos as u32;
         let region_end = region_start + read.ref_span - 1;
-        let mut engine = PileupEngine::new(arena, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
+        let mut engine = PileupEngine::new(arena.prepare_for_pileup().input, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
         let columns = helpers::collect_columns(&mut engine);
 
         // Group consecutive deletion columns and verify they all have the same del_len
