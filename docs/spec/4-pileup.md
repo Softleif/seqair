@@ -104,12 +104,17 @@ mate link computed once per store by
 hash or compare a qname per column.
 
 r[pileup.mate_link_cache]
-When a record enters the active set, the engine MUST cache its mate index, its
-qname hash, and its mate-overlap interval, so that column construction reads
-flat fields only and never looks the mate up in the store. `PileupAlignment`
-MUST expose `mate_idx() -> Option<u32>` (the store index of the mate, `None`
-when unlinked), `in_mate_overlap() -> bool` (true when this column's position
-lies inside the mate-overlap interval), and `qname_hash() -> u64`. When the
+When a record enters the active set, the engine MUST cache its mate index and
+its mate-overlap interval, so that column construction reads flat fields only
+and never looks the mate up in the store. `PileupAlignment` MUST expose
+`mate_idx() -> Option<u32>` (the store index of the mate, `None` when
+unlinked) and `in_mate_overlap() -> bool` (true when this column's position
+lies inside the mate-overlap interval). It MUST NOT carry the qname hash: the
+mate index answers every question the hash was there for, and the entry is
+written once per read per column — 638 M times for 20 Mb of a 26x human
+chromosome — so eight bytes of it are eight bytes of memory traffic per
+alignment. A consumer that wants the identity reads it from the record
+(`store.record(idx).qname_hash()`). When the
 soft-clip overhang is enabled, the cached interval MUST be widened by the
 overhang at both ends, so a projected fringe base is reported as being inside
 the overlap: it is the same molecule as its mate's aligned base at that

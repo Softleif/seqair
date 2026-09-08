@@ -166,7 +166,6 @@ struct ActiveRecord {
     matching_bases: u32,
     indel_bases: u32,
     // r[impl pileup.mate_link_cache]
-    qname_hash: u64,
     /// Store index of the mate, or `u32::MAX` when unlinked.
     mate_idx: u32,
     /// The reference interval both mates cover, resolved once on activation so
@@ -358,6 +357,22 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
         self.store.qname(self.aln.record_idx())
     }
 
+    // r[impl pileup.mate_link_cache]
+    // r[impl record_store.qname_hash.no_name]
+    /// The template's identity: the seed-fixed hash of the read's qname, shared
+    /// by both mates and stable across stores and runs. `None` when the record
+    /// carries no qname (a CRAM written with `RN=false`), which is also why a
+    /// consumer must not treat a missing hash as "one big fragment". See
+    /// [`qname_hash`](crate::bam::record_store::qname_hash).
+    ///
+    /// Resolved through the record rather than cached on the column entry: a
+    /// consumer asks for a fragment identity once per read it *keeps*, while
+    /// the entry is written once per read per column, so carrying it there
+    /// cost eight bytes of memory traffic per alignment to save a load here.
+    pub fn qname_hash(&self) -> Option<u64> {
+        self.store.record(self.aln.record_idx()).qname_hash()
+    }
+
     /// The raw BAM aux bytes for this record.
     pub fn aux(&self) -> &'store [u8] {
         self.store.aux(self.aln.record_idx())
@@ -526,7 +541,6 @@ pub struct PileupAlignment {
     /// The indel anchored at this column for this read (see [`Indel`]).
     indel_after: Indel,
     // r[impl pileup.mate_link_cache]
-    qname_hash: u64,
     mate_idx: u32,
     in_mate_overlap: bool,
 }
@@ -555,18 +569,6 @@ impl PileupAlignment {
     #[must_use]
     pub fn in_mate_overlap(&self) -> bool {
         self.in_mate_overlap
-    }
-
-    // r[impl pileup.mate_link_cache]
-    // r[impl record_store.qname_hash.no_name]
-    /// The template's identity: the seed-fixed hash of the read's qname, shared
-    /// by both mates and stable across stores and runs. `None` when the record
-    /// carries no qname (a CRAM written with `RN=false`), which is also why a
-    /// consumer must not treat a missing hash as "one big fragment". See
-    /// [`qname_hash`](crate::bam::record_store::qname_hash).
-    #[must_use]
-    pub fn qname_hash(&self) -> Option<u64> {
-        (self.qname_hash != 0).then_some(self.qname_hash)
     }
 
     #[must_use]
@@ -1000,7 +1002,6 @@ impl<U> PileupEngine<U> {
                         start..end
                     });
                 let mate_idx = rec.mate_idx().unwrap_or(u32::MAX);
-                let qname_hash = rec.qname_hash_raw();
 
                 self.active_end_pos.push(active_end);
                 self.active.push(ActiveRecord {
@@ -1011,7 +1012,6 @@ impl<U> PileupEngine<U> {
                     seq_len: rec.seq_len,
                     matching_bases: rec.matching_bases,
                     indel_bases: rec.indel_bases,
-                    qname_hash,
                     mate_idx,
                     mate_overlap,
                 });
@@ -1079,7 +1079,6 @@ impl<U> PileupEngine<U> {
                             indel_bases: active.indel_bases,
                             record_idx: active.record_idx,
                             indel_after: Indel::None,
-                            qname_hash: active.qname_hash,
                             mate_idx: active.mate_idx,
                             in_mate_overlap: active.mate_overlap.contains(&pos),
                         });
@@ -1130,7 +1129,6 @@ impl<U> PileupEngine<U> {
                     record_idx: active.record_idx,
                     indel_after,
                     // r[impl pileup.mate_link_cache]
-                    qname_hash: active.qname_hash,
                     mate_idx: active.mate_idx,
                     in_mate_overlap: active.mate_overlap.contains(&pos),
                 });

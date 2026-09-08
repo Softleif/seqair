@@ -41,19 +41,35 @@ impl std::fmt::Display for Base {
     }
 }
 
+/// Table entry for a byte that is not one of the four canonical bases.
+const NOT_KNOWN: u8 = u8::MAX;
+
+/// `Base`'s discriminants are ASCII, so a 256-byte table indexed by the
+/// discriminant covers every representable value. Entries other than A/C/G/T
+/// are unreachable through the enum and map to [`NOT_KNOWN`] regardless.
+const KNOWN_INDEX: [u8; 256] = {
+    let mut table = [NOT_KNOWN; 256];
+    table[Base::A as usize] = 0;
+    table[Base::C as usize] = 1;
+    table[Base::G as usize] = 2;
+    table[Base::T as usize] = 3;
+    table
+};
+
 impl Base {
     /// The four canonical DNA bases: A, C, G, T.
     pub const KNOWN: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
 
     /// Returns the index of this base in [`Base::KNOWN`], or `None` for `Unknown`.
+    ///
+    /// A table lookup rather than a `match`, because callers index per-base
+    /// arrays with this in their innermost loop and the base is data: five
+    /// match arms compile to a branch the predictor gets wrong every time the
+    /// base changes, where the table is one always-resident load.
+    #[inline]
     pub fn known_index(&self) -> Option<usize> {
-        match self {
-            Base::A => Some(0),
-            Base::C => Some(1),
-            Base::G => Some(2),
-            Base::T => Some(3),
-            Base::Unknown => None,
-        }
+        let slot = KNOWN_INDEX.get(*self as usize).copied().unwrap_or(NOT_KNOWN);
+        (slot != NOT_KNOWN).then_some(slot as usize)
     }
 
     /// Get the inverse base (complementary base)
@@ -534,6 +550,28 @@ pub enum BaseError {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    // The index is a lookup table keyed on the ASCII discriminant, so the
+    // property that matters is that *every* byte lands where the match arms
+    // used to put it — including the ones that are not a `Base` at all and can
+    // only be reached through a mis-transmute.
+    #[test]
+    fn known_index_agrees_with_the_variants_for_every_byte() {
+        for byte in 0u8..=255 {
+            let expected = match byte {
+                b'A' | b'a' => Some(0),
+                b'C' | b'c' => Some(1),
+                b'G' | b'g' => Some(2),
+                b'T' | b't' => Some(3),
+                _ => None,
+            };
+            assert_eq!(Base::from(byte).known_index(), expected, "byte {byte}");
+        }
+        for (i, base) in Base::KNOWN.iter().enumerate() {
+            assert_eq!(base.known_index(), Some(i), "{base} must index its own slot in KNOWN");
+        }
+        assert_eq!(Base::Unknown.known_index(), None);
+    }
 
     proptest::proptest! {
         #[test]

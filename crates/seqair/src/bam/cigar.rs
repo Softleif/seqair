@@ -572,6 +572,7 @@ impl CigarMapping {
     /// mirrors htslib's `bam_pileup` reporting a negative `indel` on the base
     /// before a deletion. Insertions are *not* reported here — read those from
     /// [`CigarPosInfo::Insertion`].
+    #[inline]
     pub fn deletion_after_at(&self, pos: Pos0) -> Option<u32> {
         match self {
             // Linear CIGARs are clips-match-clips with no indels.

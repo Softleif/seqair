@@ -725,8 +725,7 @@ fn pileup_tiled(c: &mut Criterion) {
     group.sample_size(20);
 
     let run = |readers: &mut Readers, opts: SegmentOptions| {
-        let segments: Vec<_> =
-            readers.segments((CHROM, T_START, T_END), opts).unwrap().collect();
+        let segments: Vec<_> = readers.segments((CHROM, T_START, T_END), opts).unwrap().collect();
         let cap = DepthLimit::PerColumn(NonZeroU32::new(DEPTH_CAP).unwrap());
         let mut columns: u64 = 0;
         let mut bases: u64 = 0;
@@ -756,9 +755,8 @@ fn pileup_tiled(c: &mut Criterion) {
     assert!(expected.0 > 0, "test BAM should produce columns in this region");
 
     for tile in [1_000u32, 10_000, 100_000] {
-        let opts = SegmentOptions::new(NonZeroU32::new(tile).unwrap())
-            .with_overlap(OVERLAP)
-            .unwrap();
+        let opts =
+            SegmentOptions::new(NonZeroU32::new(tile).unwrap()).with_overlap(OVERLAP).unwrap();
         assert_eq!(
             run(&mut readers, opts),
             expected,

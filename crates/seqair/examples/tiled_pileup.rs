@@ -20,8 +20,8 @@
 
 use anyhow::Context as _;
 use clap::Parser as _;
-use seqair::bam::{IndexedBamReader, RecordStore};
 use seqair::bam::pileup::PileupEngine;
+use seqair::bam::{IndexedBamReader, RecordStore};
 use seqair_types::{Offset, Pos0, RegionString};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -66,10 +66,8 @@ fn main() -> anyhow::Result<()> {
         IndexedBamReader::open(&args.input).context("could not open the alignment file")?;
 
     let (contig, start, end) = resolve_region(&reader, args.region.as_ref())?;
-    let tid = reader
-        .header()
-        .tid(&contig)
-        .with_context(|| format!("{contig} is not in the header"))?;
+    let tid =
+        reader.header().tid(&contig).with_context(|| format!("{contig} is not in the header"))?;
 
     let mut store = RecordStore::<()>::new();
     let mut phases = Phases::default();
@@ -147,8 +145,12 @@ fn resolve_region(
     let last = Pos0::try_from(len.saturating_sub(1)).context("contig longer than Pos0 allows")?;
     let (start, end) = match region {
         Some(r) => (
-            r.start.map_or(Pos0::ZERO, |p| Pos0::new(p.as_u32().saturating_sub(1)).unwrap_or(Pos0::ZERO)),
-            r.end.map_or(last, |p| Pos0::new(p.as_u32().saturating_sub(1)).unwrap_or(last)).min(last),
+            r.start.map_or(Pos0::ZERO, |p| {
+                Pos0::new(p.as_u32().saturating_sub(1)).unwrap_or(Pos0::ZERO)
+            }),
+            r.end
+                .map_or(last, |p| Pos0::new(p.as_u32().saturating_sub(1)).unwrap_or(last))
+                .min(last),
         ),
         None => (Pos0::ZERO, last),
     };

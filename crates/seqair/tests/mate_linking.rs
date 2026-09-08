@@ -524,7 +524,8 @@ fn columns_report_the_overlap_and_can_reach_the_mate() {
             let second = col.find_record(1).expect("record 1 covers the overlap");
             assert_eq!(first.record_idx(), 0);
             assert_eq!(second.record_idx(), 1);
-            assert_eq!(first.qname_hash(), second.qname_hash());
+            // The identity lives on the record, not on the column entry.
+            assert_eq!(col.store().record(0).qname_hash(), col.store().record(1).qname_hash());
         } else {
             // Exactly one of the two records is in the column outside the overlap.
             assert_eq!(col.depth(), 1);
@@ -1108,7 +1109,11 @@ fn link_counts_through_readers(path: &Path) -> (usize, usize, usize) {
                     Some(aln.record_idx()),
                     "mate link must be symmetric through the store"
                 );
-                assert_eq!(mate.qname_hash(), aln.qname_hash(), "linked records share a qname");
+                assert_eq!(
+                    mate.qname_hash(),
+                    col.store().record(aln.record_idx()).qname_hash(),
+                    "linked records share a qname"
+                );
             }
             if aln.in_mate_overlap() {
                 in_overlap += 1;

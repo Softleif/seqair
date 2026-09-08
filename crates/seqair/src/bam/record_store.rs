@@ -280,12 +280,6 @@ impl SlimRecord {
         (self.qname_hash != 0).then_some(self.qname_hash)
     }
 
-    /// The raw stored hash, `0` for a record with no qname. For the pileup
-    /// engine's flat-field cache, which reconstructs the `Option` at the edge.
-    pub(crate) fn qname_hash_raw(&self) -> u64 {
-        self.qname_hash
-    }
-
     /// Read the per-record extra value for this record.
     pub fn extra<'store, U>(
         &self,
