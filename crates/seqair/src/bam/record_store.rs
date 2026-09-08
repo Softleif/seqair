@@ -1167,14 +1167,24 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl record_store.link_mates.unique_records]
-    /// Remove consecutive duplicate records (same position, flags, and read
-    /// name). Must be called after `sort_by_pos` so duplicates are adjacent.
+    /// Remove duplicate records (same position, flags, and read name).
     ///
     /// Nearby and distant BAM index chunks can cover overlapping byte ranges,
     /// causing the same record to be loaded from both sources.
     /// Slab data (including extras) for removed records is left in place (minor waste),
     /// same as dead name/cigar bytes from removed records.
+    ///
+    /// Duplicates are collapsed *consecutively*, so they have to be adjacent —
+    /// which they are once the store is in position order. This used to be the
+    /// caller's job ("must be called after `sort_by_pos`") and failed silently
+    /// when forgotten: the duplicates simply stayed, and the record count was
+    /// wrong in exactly the case the method exists for. It sorts first now.
     pub fn dedup(&mut self) {
+        // Sorting also clears mate links, but do it unconditionally: an already
+        // ordered store skips the sort and still must not keep stale links.
+        if self.order == RecordOrder::Unknown {
+            self.sort_by_pos();
+        }
         self.clear_mate_links();
         let names = &self.names;
         self.records.dedup_by(|a, b| {

@@ -134,6 +134,15 @@ store that is empty or newly cleared MUST have it. Any mutation that appends or
 moves records MUST also mark mate links invalid, and `link_mates` MUST mark them
 valid.
 
+r[record_store.dedup.orders_first]
+`dedup` collapses *consecutive* equal records, so duplicates must be adjacent,
+which they are only once the store is in position order. It MUST establish that
+order itself rather than require it of the caller: an unsorted store otherwise
+keeps the duplicates silently, and the resulting record count is wrong in
+exactly the case the method exists for (overlapping BAM index chunks loading one
+record twice). The sort MUST be skipped when the order already holds, and mate
+links MUST be cleared either way.
+
 r[record_store.pileup_input.reclaim]
 `PileupEngine::reclaim_allocation` returns the store's slab capacity for reuse
 by the next region and MUST clear its records. It is not a way to read the

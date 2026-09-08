@@ -183,3 +183,54 @@ proptest! {
         );
     }
 }
+
+/// `dedup` must establish the order it needs rather than document it.
+///
+/// It collapses *consecutive* equal records, so duplicates are only adjacent
+/// once the store is sorted — which its doc comment used to require of the
+/// caller ("Must be called after `sort_by_pos`"). An unsorted store silently
+/// kept the duplicates: no error, just a record count that is wrong in the one
+/// case the method exists for (overlapping BAM index chunks loading a record
+/// twice).
+#[test]
+fn dedup_collapses_duplicates_that_arrive_out_of_order() {
+    let mut store = RecordStore::new();
+    push(&mut store, b"dup", 10, 10, -1, 0);
+    push(&mut store, b"other", 40, 10, -1, 0); // separates the duplicates
+    push(&mut store, b"dup", 10, 10, -1, 0);
+
+    store.dedup();
+    assert_eq!(store.len(), 2, "the two identical records must collapse to one");
+}
+
+proptest! {
+    /// Whatever order distinct records and their duplicates arrive in, `dedup`
+    /// leaves exactly the distinct ones.
+    ///
+    /// Positions are made distinct per record so that "duplicate" and
+    /// "adjacent after sorting" coincide, which is the contract `dedup`
+    /// documents; it is deliberately not a full-store uniqueness pass.
+    #[test]
+    fn dedup_leaves_exactly_the_distinct_records(
+        count in 1usize..8,
+        copies in prop::collection::vec(1usize..3, 1..8),
+        rotation in 0usize..8,
+    ) {
+        let mut planned: Vec<usize> = Vec::new();
+        for i in 0..count {
+            let n = copies.get(i).copied().unwrap_or(1);
+            planned.extend(std::iter::repeat_n(i, n));
+        }
+        let n = planned.len();
+        planned.rotate_left(rotation % n);
+
+        let mut store = RecordStore::new();
+        for &i in &planned {
+            // Distinct position per record, so duplicates and only duplicates
+            // become adjacent once sorted.
+            push(&mut store, format!("r{i}").as_bytes(), 10 + i as u32 * 20, 10, -1, 0);
+        }
+        store.dedup();
+        prop_assert_eq!(store.len(), count);
+    }
+}
