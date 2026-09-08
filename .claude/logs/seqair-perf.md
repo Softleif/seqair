@@ -126,3 +126,41 @@ everything else measured here.
 | 1.0 % | `deletion_after_at` |
 
 seqair is ~18 % of worker CPU; rastair's per-column consumer is ~48 %.
+
+## Where it ended up
+
+Four changes, three of them here and one in rastair's segment default:
+
+| build | chr12 wall | vs htslib |
+| --- | ---: | ---: |
+| seqair, session start | 30.34 s | 1.09× |
+| **seqair, now** | **17.79 s** | **1.51×** |
+| htslib, now | 26.91 s | — |
+
+The seqair-side share of that: dropping the column entry's `qname_hash`,
+`#[inline]` on `deletion_after_at`, and a lookup table for `Base::known_index`
+took `examples/tiled_pileup` from 5.74 s to 5.10 s over 20 Mb, the column phase
+from 3.80 s to 3.25 s.
+
+`benches/bam.rs::pileup_tiled` reproduces the tiling cost in-repo, on
+`tests/data/test.bam`, without needing a 1.6 GB BAM:
+
+| tile | time | vs one query |
+| ---: | ---: | ---: |
+| 1 kb | 20.8 ms | 2.71× |
+| 10 kb | 9.28 ms | 1.21× |
+| 100 kb | 7.76 ms | 1.01× |
+| one query | 7.68 ms | — |
+
+## What is left, in order
+
+1. **The column entry's remaining per-record fields.** `mapq`, `flags`,
+   `seq_len`, `matching_bases`, `indel_bases`, `record_idx`, `mate_idx` are all
+   in `ActiveRecord` already and get copied into every column entry. Behind
+   `AlignmentView` accessors the entry goes from 48 bytes to ~16;
+   `Vec::push` of it is ~26 % of the pure read+pileup path and the active-set
+   walk another 11 %. Breaking change; rastair follows mechanically.
+2. **Inflate is ~23 % of the path** and the residual over-read is the tiling's,
+   shared with htslib. A small cross-query decompressed-block cache would take
+   the tile-boundary blocks, which is most of what is left.
+3. Nothing else here is above a few percent.
