@@ -140,6 +140,20 @@ The relation MUST be symmetric and irreflexive: each mate of a pair present in
 the column reaches the other, and no alignment reaches itself, so a pairwise
 rule gives the same answer whichever mate the caller starts from.
 
+> **Known limitation: `max_depth` truncation is invisible to pairing.** When
+> truncation drops one mate of a pair from a column, `mate_of` reports `None`
+> there — indistinguishable from a read that has no mate at all. A consumer
+> deduplicating overlapping mates therefore treats the survivor as unpaired and
+> silently makes a different decision than it would at full depth, with no
+> signal that depth is why.
+>
+> Not fixed, and not currently reachable for rastair: the cap is 1000 against
+> ~26x data, so truncation never fires. It becomes real for deep amplicon or
+> targeted panels. The cheap improvement, if it does: count truncation-dropped
+> mates per region and surface the total the way `MateLinkStats` is surfaced, so
+> a consumer can at least tell that pairing was degraded. Distinguishing the two
+> `None`s in the return type would be the thorough fix.
+
 It MUST be an accessor rather than a verdict about the pair. A query that folds
 in a precedence rule (for instance "the view's own indel wins, the mate is never
 consulted") cannot serve a caller that applies its own filters to what it finds:
