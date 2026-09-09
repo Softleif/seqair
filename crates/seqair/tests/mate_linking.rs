@@ -534,6 +534,36 @@ fn columns_report_the_overlap_and_can_reach_the_mate() {
     assert!(checked > 0, "engine produced no columns");
 }
 
+// r[verify pileup.column_position_of]
+#[test]
+fn position_of_and_alignment_at_agree_with_find_record() {
+    let store = linked_pair(Read::mate(100, 50, 130, FIRST), Read::mate(130, 50, 100, SECOND));
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(100).unwrap(),
+        Pos0::new(200).unwrap(),
+    );
+
+    let mut columns = 0;
+    while let Some(col) = engine.pileups() {
+        columns += 1;
+        // Every entry is reachable both ways, and the two agree on which it is.
+        let present: Vec<u32> = col.raw_alignments().map(|a| a.record_idx()).collect();
+        for (index, &record_idx) in present.iter().enumerate() {
+            assert_eq!(col.position_of(record_idx), Some(index));
+            let by_index = col.alignment_at(index).expect("index is within the column");
+            assert_eq!(by_index.record_idx(), record_idx);
+            let by_record = col.find_record(record_idx).expect("record is in the column");
+            assert_eq!(by_record.record_idx(), by_index.record_idx());
+        }
+        for absent in [2, 7, u32::MAX] {
+            assert_eq!(col.position_of(absent), None);
+        }
+        assert!(col.alignment_at(col.depth()).is_none(), "one past the depth is not an entry");
+    }
+    assert!(columns > 0, "engine produced no columns");
+}
+
 // r[verify pileup.column_find_record]
 #[test]
 fn find_record_returns_none_for_a_record_outside_the_column() {

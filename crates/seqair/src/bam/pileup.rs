@@ -287,8 +287,28 @@ impl<'eng, U> PileupColumn<'eng, U> {
     /// ([`PileupAlignment::mate_idx`]) while walking the column once.
     #[must_use]
     pub fn find_record(&self, record_idx: u32) -> Option<AlignmentView<'_, 'eng, U>> {
-        let found = self.alignments.binary_search_by_key(&record_idx, |a| a.record_idx).ok()?;
-        let aln = self.alignments.get(found)?;
+        self.alignment_at(self.position_of(record_idx)?)
+    }
+
+    // r[impl pileup.column_position_of]
+    // r[depends pileup.column_record_order]
+    /// Where `record_idx` sits in this column, in the order
+    /// [`alignments`](Self::alignments) yields.
+    ///
+    /// The index, not the entry: a consumer that keeps its own per-column
+    /// scratch — one slot per alignment, filled as it walks — addresses that
+    /// scratch by position, and a mate reached through
+    /// [`PileupAlignment::mate_idx`] has to land in the same coordinates.
+    #[must_use]
+    pub fn position_of(&self, record_idx: u32) -> Option<usize> {
+        self.alignments.binary_search_by_key(&record_idx, |a| a.record_idx).ok()
+    }
+
+    // r[impl pileup.column_position_of]
+    /// The entry at `index` in this column's order, or `None` past its depth.
+    #[must_use]
+    pub fn alignment_at(&self, index: usize) -> Option<AlignmentView<'_, 'eng, U>> {
+        let aln = self.alignments.get(index)?;
         Some(AlignmentView { aln, store: self.store })
     }
 

@@ -140,6 +140,19 @@ in `O(log depth)` by binary search over
 consumer reaches the other mate of an overlapping pair while walking the column
 exactly once.
 
+r[pileup.column_position_of]
+`PileupColumn::position_of(record_idx)` MUST return the index of that record's
+alignment in this column's order — the order `alignments` yields — or `None`
+when the record has no entry here, and `alignment_at(index)` MUST return the
+view at that index, or `None` past the column's depth. Together they are
+`find_record` split at its result, and `find_record` MUST agree with them.
+
+They exist because a consumer that keeps its own per-column scratch — one slot
+per alignment, filled as it walks — addresses that scratch by position, so a
+mate reached through `PileupAlignment::mate_idx` has to land in the same
+coordinates. Recovering the position from a returned view is not possible
+without a second search.
+
 r[pileup.column_mate_of]
 `PileupColumn::mate_of(view)` MUST return the linked mate of `view` when that
 mate is also an alignment in this column, and `None` otherwise — including when
