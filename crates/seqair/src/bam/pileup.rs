@@ -928,28 +928,18 @@ impl<U> PileupEngine<U> {
 
             // Evict expired records — stable retain, preserves insertion order.
             {
-                let mut write = 0;
-                let len = self.active_end_pos.len();
-                #[allow(
-                    clippy::indexing_slicing,
-                    reason = "going by index to simplify borrowing, 0 <= read < len, 0 <= write < len"
-                )]
-                for read in 0..len {
-                    debug_assert!(read < self.active.len());
-                    if self.active_end_pos[read] >= pos {
-                        if read != write {
-                            self.active_end_pos[write] = self.active_end_pos[read];
-                            // swap(write, read) with write < read moves the survivor left
-                            // without needing Clone on ActiveRecord.
-                            self.active.swap(write, read);
-                        }
-                        write = write
-                            .checked_add(1)
-                            .trace_err("active set size exceeded usize::MAX")?;
-                    }
+                // `retain` backshifts each survivor with one move. Compacting by
+                // `swap(write, read)` instead costs three moves of a 120-byte
+                // `ActiveRecord` for every survivor past the first eviction, which
+                // measured 7.8 % of a variant caller's worker CPU — more than the
+                // column entries the loop below exists to produce.
+                let Self { active, active_end_pos, .. } = self;
+                {
+                    let mut ends = active_end_pos.iter();
+                    active.retain(|_| ends.next().is_some_and(|end| *end >= pos));
                 }
-                self.active_end_pos.truncate(write);
-                self.active.truncate(write);
+                active_end_pos.retain(|end| *end >= pos);
+                debug_assert_eq!(active.len(), active_end_pos.len());
             }
 
             while self.next_entry < self.store.len() {
