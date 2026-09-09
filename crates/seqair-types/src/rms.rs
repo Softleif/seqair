@@ -66,11 +66,28 @@ impl RmsAccumulator {
 
     /// Computes the final RMS from accumulated values.
     pub fn finish(self) -> RootMeanSquare {
-        if self.count == 0 {
-            return RootMeanSquare(0.0);
+        RootMeanSquare::from_sum_of_squares(self.sum_of_squares, self.count)
+    }
+}
+
+impl RootMeanSquare {
+    /// Build from a sum of squares accumulated elsewhere, and how many values
+    /// went into it.
+    ///
+    /// [`RmsAccumulator`] carries its own `count`, which is the right default
+    /// for one accumulator but pure duplication for a caller keeping several
+    /// that necessarily share a count — per-strand and per-allele tallies of the
+    /// same reads, say. Such a caller can keep bare `f64` sums and come here at
+    /// the end, instead of incrementing one counter per sum per value.
+    ///
+    /// A `count` of zero is not an error: it is an empty set, whose RMS is zero.
+    #[must_use]
+    pub fn from_sum_of_squares(sum_of_squares: f64, count: u32) -> Self {
+        if count == 0 {
+            return Self(0.0);
         }
-        let average = self.sum_of_squares.algebraic_div(f64::from(self.count));
-        RootMeanSquare(average.sqrt())
+        let average = sum_of_squares.algebraic_div(f64::from(count));
+        Self(average.sqrt())
     }
 }
 
@@ -143,6 +160,27 @@ impl<I: Iterator> RootMeanSquareExt for I {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The accumulator now *is* this constructor, so the two can only agree —
+    /// but that is the property callers rely on when they mix the styles, and
+    /// it is one refactor away from silently not holding.
+    #[test]
+    fn from_sum_of_squares_agrees_with_the_accumulator() {
+        for values in [&[][..], &[0.0], &[37.0], &[37.0, 41.0, 12.0], &[1e-8, 1e8, 3.5]] {
+            let mut acc = RmsAccumulator::new();
+            let mut sum = 0.0f64;
+            for &v in values {
+                acc.add(v);
+                sum = sum.algebraic_add(v.algebraic_mul(v));
+            }
+            let count = u32::try_from(values.len()).expect("fits");
+            assert_eq!(
+                acc.finish().to_bits(),
+                RootMeanSquare::from_sum_of_squares(sum, count).to_bits(),
+                "diverged on {values:?}"
+            );
+        }
+    }
     use proptest::{collection::vec, prelude::*};
 
     #[test]
