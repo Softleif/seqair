@@ -19,7 +19,7 @@ pub enum Number {
     /// One per genotype combination (G).
     Genotypes,
     /// One per possible base modification (M). **VCF 4.5**: "one value for each
-    /// possible base modification for the corresponding ChEBI ID" — not the
+    /// possible base modification for the corresponding `ChEBI` ID" — not the
     /// "4.2+ extension" this comment used to claim. Headers declare 4.5
     /// ([`VcfHeader::FILE_FORMAT`]), so it is covered.
     ///

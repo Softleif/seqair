@@ -12,6 +12,10 @@ use seqair_types::{Base, Pos0};
 use std::hint::black_box;
 use std::io::Read;
 
+#[path = "support/data.rs"]
+#[allow(dead_code, reason = "each bench target uses a subset")]
+mod data;
+
 const BAM_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam");
 
 const CHROM: &str = "chr19";
@@ -572,12 +576,6 @@ fn pileup_with_reference(c: &mut Criterion) {
     use seqair::reader::{DepthLimit, Readers, SegmentOptions};
     use std::num::NonZeroU32;
 
-    #[path = "support/data.rs"]
-    // This bench only uses `plain_fasta`/`chr19_fastq`; the shared module's
-    // other helpers stay available to the fasta/fastq benches.
-    #[allow(dead_code, reason = "shared bench-data module; not all helpers used here")]
-    mod data;
-
     let bam = std::path::Path::new(BAM_PATH);
     let fasta = data::plain_fasta();
     let fastq = data::chr19_fastq();
@@ -704,10 +702,6 @@ fn pileup_with_reference(c: &mut Criterion) {
 fn pileup_tiled(c: &mut Criterion) {
     use seqair::reader::{DepthLimit, Readers, SegmentOptions};
     use std::num::NonZeroU32;
-
-    #[path = "support/data.rs"]
-    #[allow(dead_code, reason = "shared bench-data module; not all helpers used here")]
-    mod data;
 
     let bam = std::path::Path::new(BAM_PATH);
     let fasta = data::plain_fasta();

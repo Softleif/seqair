@@ -3,6 +3,7 @@
 //! Covers `cigar.aligned_pairs.insertion_qpos` and
 //! `pileup_indel.insertion_at_last_match`.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
 
 use proptest::prelude::*;
 use seqair::bam::aligned_pairs::AlignedPair;
@@ -66,14 +67,19 @@ fn anchor_from_pileup(store: RecordStore, region_end: u32) -> u32 {
         Pos0::new(0).unwrap(),
         Pos0::new(region_end).unwrap(),
     );
-    while let Some(col) = engine.pileups() {
+    let mut anchor = None;
+    while anchor.is_none() {
+        let Some(col) = engine.pileups() else {
+            break;
+        };
         for view in col.alignments() {
             if let PileupOp::Insertion { qpos, .. } = view.op() {
-                return qpos.get();
+                anchor = Some(qpos.get());
+                break;
             }
         }
     }
-    panic!("no insertion column")
+    anchor.expect("no insertion column")
 }
 
 proptest! {

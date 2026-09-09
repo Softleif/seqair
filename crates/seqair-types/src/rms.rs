@@ -81,7 +81,6 @@ impl RootMeanSquare {
     /// the end, instead of incrementing one counter per sum per value.
     ///
     /// A `count` of zero is not an error: it is an empty set, whose RMS is zero.
-    #[must_use]
     #[inline]
     pub fn from_sum_of_squares(sum_of_squares: f64, count: u32) -> Self {
         if count == 0 {

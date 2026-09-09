@@ -3,6 +3,7 @@
 //! Covers `record_store.pileup_input`.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 #![allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
+#![allow(clippy::arithmetic_side_effects, reason = "test code")]
 
 use proptest::prelude::*;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
