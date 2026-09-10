@@ -37,6 +37,34 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
   expecting a genomic position previously compiled and silently resolved bases from the wrong locus.
 - **`BaseModState::mod_at_qpos` / `is_unmodified` take `QPos`** instead of `usize`, so a genomic
   position can no longer be passed where a read offset is expected.
+- **`PileupEngine::new` takes a `PileupInput`, not a `RecordStore`.**
+  The engine assumed ascending position order and linked mates and checked neither; both failures were
+  silent (records after an out-of-order push were never pileuped; an unlinked store reports
+  `mate_idx() == None` *and* `in_mate_overlap() == false`, which is what a read with no mate looks like,
+  so overlap dedup quietly did nothing). `PileupInput` has no public constructor —
+  `RecordStore::prepare_for_pileup()` is the only thing that mints one, returning it alongside
+  `MateLinkStats`. Preparing is idempotent: the sort is skipped when nothing arrived out of order and the
+  linking when nothing invalidated it, and `set_alignment` retracts the ordering property.
+- **`PileupEngine::take_store` renamed to `reclaim_allocation`.**
+  It returns an *empty* store that keeps its slab capacity for the next region; the old name promised
+  the records back.
+- **`PileupEngine::set_max_depth` takes a `NonZeroU32`.**
+  It stored whatever `u32` it was given, so `set_max_depth(0)` meant "emit no alignments anywhere" —
+  which a caller spelling unlimited as `0` asks for by accident. Unset still means no cap.
+- **`AlignedPair::Insertion.qpos` renamed to `first_inserted`** (and likewise on `AlignedPairWithRead`
+  and `AlignedPairWithRef`). An insertion is reported in two frames one base apart —
+  `AlignedPair` points at the first inserted base, `PileupOp` at the matched base *preceding* the run —
+  and both fields being `qpos` meant a pattern copied between them compiled and read one base off.
+  Both frames are `QPos`, so only the name can catch it.
+- **`PileupColumn::pair_indel` and `PairIndel` removed**, replaced by `PileupColumn::mate_of`.
+  `pair_indel` baked in "the view's own indel wins and the mate is never consulted", which is wrong for
+  any consumer whose filters can reject an indel the read does carry — the rule belongs with the filters.
+- **VCF headers always declare `VCFv4.5`.**
+  `VcfHeaderBuilder::file_format()` is removed and `VcfHeader::file_format()` returns `&'static str`;
+  the version is the new `VcfHeader::FILE_FORMAT` constant. A cardinality is versioned (`Number=M` is
+  4.5 and nothing earlier), so a header free to declare an older version could promise a grammar it then
+  violates, undetectably. NB: `Number::BaseModification` is spec-legal under this header but noodles
+  rejects `Number=M` at any declared version — `Number::Unknown` states the same cardinality readably.
 
 ### Added
 
@@ -55,19 +83,36 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
 - Record-store mate linking for overlap-dedup consumers: `RecordStore::link_mates()` pairs a template's
   primary alignments once per store (qname-hash table, verified by qname bytes and reciprocal mate
   positions; secondary/supplementary and nameless reads never link). The pileup exposes
-  `PileupAlignment::mate_idx()` / `in_mate_overlap()` / `qname_hash()`, `PileupColumn::find_record()`,
-  and `PileupColumn::pair_indel()` — which recovers a fragment's indel from its linked mate in the same
-  column when the kept read carries none (own indel always wins). The cached mate overlap is widened by
-  the soft-clip overhang, so rescued soft-clipped fringe bases still count as overlapping.
+  `PileupAlignment::mate_idx()` / `in_mate_overlap()`, `AlignmentView::qname_hash()`,
+  `PileupColumn::find_record()`, and `PileupColumn::mate_of()` — the linked mate of a view when that
+  mate is also in this column, so a consumer can apply its own filters before deciding what the
+  fragment says. The cached mate overlap is widened by the soft-clip overhang, so rescued
+  soft-clipped fringe bases still count as overlapping.
 - Indexed FASTQ references: the FAI parser accepts the sixth `qual_offset` column and `FaiEntry` exposes
   `is_fastq()` / `qual_byte_offset()`. Fetch is byte-correct on wrapped records whose quality lines may
   begin with `@`/`+`. htslib-validated.
+- `PileupColumn::mate_of(view)`: the linked mate of an alignment when it is also in this column. The
+  relation is symmetric and irreflexive, so a pairwise rule gives the same answer from either mate, and
+  the mate is reachable whatever either read carries.
+- `pileup_tiled` bench and `examples/tiled_pileup`, which measure the many-small-queries access pattern a
+  variant caller actually has (per-query BAI lookup, `RegionBuf` setup, store sort and mate link) rather
+  than one large region. `tools/samply_hot.py` symbolicates a `--save-only` samply profile from its
+  `--unstable-presymbolicate` sidecar.
 
 ### Fixed
 
 - CRAM: missing rANS Nx16 validation and allocation-size validation.
 - Region queries no longer error on unplaced reads (`pos = -1` / `AP = 0`).
 - Pileup: always set depth cap; stable `retain` replaces `swap_remove` in eviction.
+- Region queries stop at the query end instead of reading past it. A record starting past the end proves
+  nothing can follow in a coordinate-sorted file, but the loop counted it as merely out of range and kept
+  inflating BGZF blocks from the ancestor bins BAI hands back, whose chunk lists run far beyond the
+  region. On `tests/data/test.bam` a 1 kb query examined 2529 records to keep 313; it now examines 313.
+- `RecordStore::dedup` sorts first instead of documenting that the caller must. `dedup` collapses
+  *consecutive* equal records, so an unsorted store silently kept duplicates — exactly the case the
+  method exists for (overlapping BAM index chunks loading one record twice).
+- BCF genotypes: the first allele of a GT carries its phase bit. It was hardcoded unphased, which VCF 4.3
+  and earlier say to ignore, but 4.4+ readers honour it — htslib rendered a fully phased `0|1` as `/0|1`.
 - Empty-sample BCF missing-value handling.
 - SAM and CRAM region queries could silently lose records overlapping the query by its last base
   (SAM tested half-open `[start, end)` against an exclusive `end_pos`; CRAI compared a 1-based
@@ -83,6 +128,18 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
 
 ### Performance
 
+- Column eviction uses `Vec::retain` instead of a manual swap-compaction: one `copy_nonoverlapping` per
+  survivor instead of three moves of a 120-byte `ActiveRecord`, and no work at all when nothing was
+  evicted (the common case between adjacent columns). 12.6 % of rastair's worker CPU before; 1.06x
+  end-to-end there, byte-identical output.
+- `PileupAlignment` no longer caches the qname hash — eight bytes written once per read per column
+  (638 M times for 20 Mb of a 26x chromosome) to answer a question `mate_idx` already answers.
+  `AlignmentView::qname_hash()` resolves it through the record instead. With `#[inline]` on
+  `CigarMapping::deletion_after_at` (it returns `None` immediately for the ~96 % clips-match-clips reads,
+  but was an out-of-line call costing 5.9 % of the read+pileup path) and `Base::known_index` as a table
+  lookup rather than a data-dependent branch: column phase 3.80 s → 3.25 s on NA12878 chr12, 20 Mb.
+- Region queries decompress about what htslib's iterator does: 45.8 GB → 22.7 GB on chr12 in 10 kb tiles
+  (a single pass is 11.6 GB), from stopping at the query end.
 - Pileup scratch buffers pooled across regions.
 - `CompactOp` shrunk 16 → 12 bytes (len + op type packed into one `u32`).
 - `CigarSlice` enum collapsed to `&[CigarOp]` via zero-cost transmute.
