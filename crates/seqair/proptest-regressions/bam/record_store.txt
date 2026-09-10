@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc c4e0a1f44db67798c149dcb470ceafd9b74be25f129361353ca70bb02674f07c # shrinks to inputs = [PushInput { qname: [1], bases: [A], quals: [30], aux: [], pos: 0, mapq: 0, accept: true }]
+cc 0ae7df26008ed4747d2fdb1d175ec78d1c0c863358b61ae8c10f145b8c9ff0cb # shrinks to reads = [Read { pos: 3804, bases: 9, deletion: 391 }], spans = [(Pos0(4111), Pos0(3804))]
