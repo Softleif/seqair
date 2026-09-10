@@ -142,6 +142,9 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
   lookup rather than a data-dependent branch: column phase 3.80 s → 3.25 s on NA12878 chr12, 20 Mb.
 - Region queries decompress about what htslib's iterator does: 45.8 GB → 22.7 GB on chr12 in 10 kb tiles
   (a single pass is 11.6 GB), from stopping at the query end.
+- Column entries are written into one reserved block instead of pushed one at a time.
+  `Vec::push` cannot hoist its capacity compare, and the loop already knows it emits at
+  most one entry per active record. ~1 % of rastair's wall time on a 26x human chromosome.
 - Pileup scratch buffers pooled across regions.
 - `CompactOp` shrunk 16 → 12 bytes (len + op type packed into one `u32`).
 - `CigarSlice` enum collapsed to `&[CigarOp]` via zero-cost transmute.

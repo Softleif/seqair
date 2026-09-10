@@ -1073,21 +1073,30 @@ impl<U> PileupEngine<U> {
             // r[impl pileup.column_record_order]
             // The active set is appended in store order and compacted stably on
             // eviction, so walking it yields ascending record indices.
+            // r[impl perf.reuse_alignment_vec+2]
+            // One `reserve` for the whole column, then a straight write per
+            // entry. `Vec::push` cannot hoist its capacity compare — it may
+            // reallocate — so it repeats compare, store, len-update per read
+            // per column, which is 1.5 % of a variant caller's worker CPU for
+            // bookkeeping the loop already knows the answer to: at most one
+            // entry per active record.
             self.buf.clear();
-            for active in &self.active {
+            self.buf.reserve(self.active.len());
+            let Self { buf, active: actives, store, soft_clip_overhang, .. } = self;
+            let soft_clip_overhang = *soft_clip_overhang;
+            let mut written = 0usize;
+            let spare = buf.spare_capacity_mut();
+            for active in actives.iter() {
                 let Some(info) = active.cigar.pos_info_at(pos) else {
                     // Outside the aligned span: emit a soft-clip fringe base if
                     // this column falls within the overhang window of a clip.
                     // r[impl pileup.soft_clip_overhang.emit]
-                    if self.soft_clip_overhang > 0
-                        && let Some(qpos) = active.cigar.soft_clip_qpos_at(
-                            pos,
-                            self.soft_clip_overhang,
-                            active.seq_len,
-                        )
+                    if soft_clip_overhang > 0
+                        && let Some(qpos) =
+                            active.cigar.soft_clip_qpos_at(pos, soft_clip_overhang, active.seq_len)
                     {
-                        let (base, qual) = base_qual_at(&self.store, active, qpos);
-                        self.buf.push(PileupAlignment {
+                        let (base, qual) = base_qual_at(store, active, qpos);
+                        let entry = PileupAlignment {
                             op: PileupOp::SoftClip { qpos, base, qual },
                             mapq: active.mapq,
                             flags: active.flags,
@@ -1098,18 +1107,24 @@ impl<U> PileupEngine<U> {
                             indel_after: Indel::None,
                             mate_idx: active.mate_idx,
                             in_mate_overlap: active.mate_overlap.contains(&pos),
-                        });
+                        };
+                        spare
+                            .get_mut(written)
+                            .trace_err("BUG: column entries outran the reserved capacity")?
+                            .write(entry);
+                        written =
+                            written.checked_add(1).trace_err("BUG: column depth overflowed")?;
                     }
                     continue;
                 };
 
                 let op = match info {
                     CigarPosInfo::Match { qpos } => {
-                        let (base, qual) = base_qual_at(&self.store, active, qpos);
+                        let (base, qual) = base_qual_at(store, active, qpos);
                         PileupOp::Match { qpos, base, qual }
                     }
                     CigarPosInfo::Insertion { qpos, insert_len } => {
-                        let (base, qual) = base_qual_at(&self.store, active, qpos);
+                        let (base, qual) = base_qual_at(store, active, qpos);
                         PileupOp::Insertion { qpos, base, qual, insert_len }
                     }
                     CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
@@ -1136,7 +1151,7 @@ impl<U> PileupEngine<U> {
                     | PileupOp::SoftClip { .. } => Indel::None,
                 };
 
-                self.buf.push(PileupAlignment {
+                let entry = PileupAlignment {
                     op,
                     mapq: active.mapq,
                     flags: active.flags,
@@ -1148,8 +1163,20 @@ impl<U> PileupEngine<U> {
                     // r[impl pileup.mate_link_cache]
                     mate_idx: active.mate_idx,
                     in_mate_overlap: active.mate_overlap.contains(&pos),
-                });
+                };
+                spare
+                    .get_mut(written)
+                    .trace_err("BUG: column entries outran the reserved capacity")?
+                    .write(entry);
+                written = written.checked_add(1).trace_err("BUG: column depth overflowed")?;
             }
+            debug_assert!(written <= self.buf.capacity(), "wrote past the reserve");
+            // SAFETY: the loop writes each of `written` slots before advancing
+            // past it, and `get_mut` above has refused every index outside the
+            // reserve, so the first `written` elements are initialised. Leaving
+            // early through `?` leaves the length at 0, which is also sound:
+            // spare capacity is never read and never dropped.
+            unsafe { self.buf.set_len(written) };
 
             // r[impl pileup.max_depth_per_position]
             if let Some(max) = self.max_depth {
