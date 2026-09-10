@@ -347,10 +347,10 @@ impl<E: CustomizeRecordStore> Readers<E> {
         segment: &Segment,
         depth: DepthLimit,
     ) -> Result<PileupGuard<'_, E::Extra>, ReaderError> {
-        self.pileup_impl(segment, depth, None::<fn(&mut RecordStore<E::Extra>)>, None)
+        self.pileup_impl(segment, depth, None::<fn(&mut RecordStore<E::Extra>, &RefSeq)>, None)
     }
 
-    // r[impl unified.readers_pileup_store_mutation]
+    // r[impl unified.readers_pileup_store_mutation+2]
     /// Like [`pileup`](Self::pileup), but runs `mutate` on the freshly fetched
     /// [`RecordStore`] **before** the pileup engine is built, then re-sorts the
     /// store by position. This is the hook for in-place local realignment: the
@@ -362,14 +362,50 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// The mutator must preserve each record's query length (`set_alignment`
     /// enforces this); positions may change freely since the store is re-sorted
     /// afterward.
+    ///
+    /// A mutator that needs the reference — to normalise or rescore
+    /// alignments against it — should use
+    /// [`pileup_mutate`](Self::pileup_mutate), which hands it the same
+    /// [`RefSeq`] the engine will report, instead of loading its own.
     pub fn pileup_with<F>(
+        &mut self,
+        segment: &Segment,
+        depth: DepthLimit,
+        mut mutate: F,
+    ) -> Result<PileupGuard<'_, E::Extra>, ReaderError>
+    where
+        F: FnMut(&mut RecordStore<E::Extra>),
+    {
+        self.pileup_impl(
+            segment,
+            depth,
+            Some(|store: &mut RecordStore<E::Extra>, _: &RefSeq| mutate(store)),
+            None,
+        )
+    }
+
+    // r[impl unified.readers_pileup_mutate]
+    /// Like [`pileup_with`](Self::pileup_with), but the mutator also receives
+    /// the reference: the very [`RefSeq`] the engine is built with, so
+    /// `ref_seq.base_at(pos)` inside the hook is what
+    /// [`PileupColumn::reference_base`] later reports at that column.
+    ///
+    /// The reference covers exactly the segment, not the reads. A record
+    /// reaching past either end has bases the `RefSeq` does not hold; read
+    /// those with [`RefSeq::try_base_at`] and treat `None` as unavailable —
+    /// [`RefSeq::base_at`] returns [`Base::Unknown`] there, which is
+    /// indistinguishable from a genuine `N`.
+    ///
+    /// [`PileupColumn::reference_base`]: crate::bam::pileup::PileupColumn::reference_base
+    /// [`Base::Unknown`]: seqair_types::Base::Unknown
+    pub fn pileup_mutate<F>(
         &mut self,
         segment: &Segment,
         depth: DepthLimit,
         mutate: F,
     ) -> Result<PileupGuard<'_, E::Extra>, ReaderError>
     where
-        F: FnMut(&mut RecordStore<E::Extra>),
+        F: FnMut(&mut RecordStore<E::Extra>, &RefSeq),
     {
         self.pileup_impl(segment, depth, Some(mutate), None)
     }
@@ -395,7 +431,12 @@ impl<E: CustomizeRecordStore> Readers<E> {
         depth: DepthLimit,
         ref_seq: RefSeq,
     ) -> Result<PileupGuard<'_, E::Extra>, ReaderError> {
-        self.pileup_impl(segment, depth, None::<fn(&mut RecordStore<E::Extra>)>, Some(ref_seq))
+        self.pileup_impl(
+            segment,
+            depth,
+            None::<fn(&mut RecordStore<E::Extra>, &RefSeq)>,
+            Some(ref_seq),
+        )
     }
 
     fn pileup_impl<F>(
@@ -406,7 +447,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
         supplied_ref: Option<RefSeq>,
     ) -> Result<PileupGuard<'_, E::Extra>, ReaderError>
     where
-        F: FnMut(&mut RecordStore<E::Extra>),
+        F: FnMut(&mut RecordStore<E::Extra>, &RefSeq),
     {
         let tid = segment.tid();
         let start = segment.start();
@@ -468,13 +509,6 @@ impl<E: CustomizeRecordStore> Readers<E> {
             }
         }
 
-        // In-place realignment hook: rewrite (pos, CIGAR) on the fetched store.
-        // Restoring position order is `prepare_for_pileup`'s job below — the
-        // hook only has to mark the store as reordered, which `set_alignment`
-        // does.
-        if let Some(mut mutate) = mutate {
-            mutate(&mut self.store);
-        }
         let ref_seq = match supplied_ref {
             // r[impl unified.readers_pileup_supplied_reference]
             Some(ref_seq) => {
@@ -515,6 +549,17 @@ impl<E: CustomizeRecordStore> Readers<E> {
                 RefSeq::new(Rc::from(bases), start)
             }
         };
+
+        // r[impl unified.readers_pileup_store_mutation+2]
+        // r[impl unified.readers_pileup_mutate]
+        // In-place realignment hook: rewrite (pos, CIGAR) on the fetched store.
+        // Runs after the reference fetch so the hook can score against the
+        // same bases the engine will report. Restoring position order is
+        // `prepare_for_pileup`'s job below — the hook only has to mark the
+        // store as reordered, which `set_alignment` does.
+        if let Some(mut mutate) = mutate {
+            mutate(&mut self.store, &ref_seq);
+        }
 
         // Move the populated store into the engine. After this `mem::take`,
         // `self.store` holds a default (empty) RecordStore — the slot the
@@ -863,7 +908,7 @@ mod tests {
         ));
     }
 
-    // r[verify unified.readers_pileup_store_mutation]
+    // r[verify unified.readers_pileup_store_mutation+2]
     /// A no-op `pileup_with` must produce exactly the same columns as `pileup`:
     /// the hook is transparent when the mutator changes nothing, and it sees the
     /// fully fetched store.
@@ -892,7 +937,7 @@ mod tests {
         assert_eq!(baseline, mutated, "a no-op mutator must not change the pileup");
     }
 
-    // r[verify unified.readers_pileup_store_mutation]
+    // r[verify unified.readers_pileup_store_mutation+2]
     /// A mutator that soft-clips the first aligned base of every read whose
     /// CIGAR starts with `M` (shifting `pos` right by one) must be reflected in
     /// the pileup — the corrected alignments are what the engine sees.
@@ -944,6 +989,55 @@ mod tests {
 
         assert!(changed > 0, "fixture should have reads with a leading M op to realign");
         assert_ne!(baseline, realigned, "soft-clipping leading bases must change the pileup");
+    }
+
+    // r[verify unified.readers_pileup_mutate]
+    /// The mutator's `RefSeq` is the engine's: the base it reads at every
+    /// position of the segment is the base the column later reports there,
+    /// and it covers the segment exactly — nothing before, nothing after.
+    #[test]
+    fn pileup_mutate_sees_the_engines_reference() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let segment = realign_test_segment(&readers);
+        let (start, end) = (segment.start(), segment.end());
+
+        let mut seen: Vec<(u64, Base)> = Vec::new();
+        let mut seen_records = 0usize;
+        let mut p = readers
+            .pileup_mutate(&segment, DepthLimit::Unlimited, |store, ref_seq| {
+                seen_records = store.len();
+                assert_eq!(ref_seq.start_pos(), start, "reference starts at the segment");
+                assert_eq!(
+                    ref_seq.len() as u64,
+                    end.as_u64() - start.as_u64() + 1,
+                    "reference ends at the segment"
+                );
+                let before = Pos0::new(start.as_u32() - 1).unwrap();
+                let after = Pos0::try_from(end.as_u64() + 1).unwrap();
+                assert_eq!(ref_seq.try_base_at(before), None, "nothing before the segment");
+                assert_eq!(ref_seq.try_base_at(after), None, "nothing after the segment");
+                for pos in start.as_u64()..=end.as_u64() {
+                    let pos = Pos0::try_from(pos).unwrap();
+                    seen.push((pos.as_u64(), ref_seq.base_at(pos)));
+                }
+            })
+            .unwrap();
+
+        let mut columns = 0usize;
+        while let Some(col) = p.pileups() {
+            let idx = usize::try_from(col.pos().as_u64() - start.as_u64()).unwrap();
+            let (pos, base) = seen[idx];
+            assert_eq!(pos, col.pos().as_u64());
+            assert_eq!(base, col.reference_base(), "mutator and column disagree at {pos}");
+            columns += 1;
+        }
+        drop(p);
+        assert!(seen_records > 0, "mutator must observe the fetched records");
+        assert!(columns > 0, "region should pile up some columns");
+        assert!(
+            seen.iter().any(|(_, b)| *b != Base::Unknown),
+            "the fixture reference must not be all N"
+        );
     }
 
     // r[verify pileup.extras.recover_store]
