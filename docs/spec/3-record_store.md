@@ -148,6 +148,51 @@ r[record_store.pileup_input.reclaim]
 by the next region and MUST clear its records. It is not a way to read the
 pileup's input back, and MUST NOT be named as though it were.
 
+## Window query
+
+A caller's slow path re-solves an *active region* — a few hundred bases around
+a cluster of candidate indels — against the reads that span it, using the store
+the pileup engine already holds. It needs the indices of the records
+overlapping a span, and it needs them without walking every record in the
+store.
+
+r[record_store.window_query]
+`PileupInput::records_overlapping(start, end)` MUST yield the index of every
+record whose alignment overlaps the inclusive interval `[start, end]` under
+[`interval.overlap_test`](./0-1-pos.md#intervaloverlap_test) —
+`pos <= end && end_pos >= start` — and no other, in ascending record index.
+`end < start` is the empty interval and MUST yield nothing, as MUST an interval
+past the last record. The yielded values are the store's record indices, valid
+for `RecordStore::record` and for `PileupColumn::find_record` on any column of
+an engine built from that input.
+
+The query MUST NOT be offered on a bare `RecordStore`. It binary-searches on
+`pos`, which is only meaningful once the store is in ascending order, and a raw
+store cannot prove it — the same silent failure `PileupInput` exists to
+prevent (r[`record_store.pileup_input`]). `PileupInput` is the type that
+proves it, and [`PileupEngine::records_overlapping`](./4-pileup.md) MUST
+forward to the same query over the input the engine was built from.
+
+r[record_store.window_query.max_ref_span]
+A record that starts before the interval can still overlap it, so a lower
+bound on `pos` alone is not a lower bound on overlap. The store MUST therefore
+track the largest reference span (`end_pos - pos + 1`) of any record it holds
+— widened on every kept push and on `set_alignment`, reset by `clear` — and
+the query MUST start at the first record with `pos >= start - (max_span - 1)`,
+found by binary search over the ascending `pos`, then scan forward until
+`pos > end`, keeping the records whose `end_pos >= start`. The tracked span MAY
+over-estimate (a rolled-back push or a record `dedup` removed need not lower
+it) but MUST NOT under-estimate, since an under-estimate skips records without
+any symptom.
+
+Tracking the span at push rather than scanning backwards from `start` is a
+decision, not a measurement. A backward scan has no stopping point without a
+span bound — a long enough record arbitrarily far back still overlaps — so the
+bound is needed for correctness either way; given the bound, the backward scan
+and the binary search stop at the same first record, and the binary search
+costs `O(log n)` where the scan costs one record per position of span. The
+push-time cost of the bound is one comparison per kept record.
+
 ## Load-time depth cap
 
 r[record_store.depth_cap.window]

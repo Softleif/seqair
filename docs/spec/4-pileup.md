@@ -101,6 +101,17 @@ r[pileup.alignment_view]
 r[pileup.extras.recover_store]
 `Readers::pileup` MUST return a guard type (`PileupGuard<'_, E::Extra>`) that derefs to `PileupEngine<E::Extra>` and whose `Drop` impl moves the underlying `RecordStore` back into the originating `Readers`, retaining its allocated capacity for the next pileup call. Recovery MUST happen on every drop path — end of scope, `?`-propagated error mid-iteration, `break` out of the loop — so callers do not need an explicit recover step. There MUST NOT be a separate `Readers::recover_store` method on the public API; if extras-stripping is needed it happens inside the guard's drop path.
 
+## Window query on the engine
+
+r[pileup.records_overlapping]
+`PileupEngine::records_overlapping(start, end)` MUST yield exactly what
+[`record_store.window_query`](./3-record_store.md#record_storewindow_query)
+yields for the `PileupInput` the engine was built from, at any point of the
+iteration: the engine never reorders or rewrites its store, so the indices are
+the ones its columns report as `record_idx`, and a caller MAY use them with
+`PileupColumn::find_record` on a later column. After `reclaim_allocation` the
+store is empty and the query MUST yield nothing.
+
 ## Mate links in columns
 
 The pileup engine does not deduplicate overlapping mates itself (see
