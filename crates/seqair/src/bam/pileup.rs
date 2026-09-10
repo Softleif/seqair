@@ -778,6 +778,18 @@ impl<U> PileupEngine<U> {
         &self.store
     }
 
+    // r[impl pileup.records_overlapping]
+    /// Indices of the records whose alignment overlaps `[start, end]` (both
+    /// inclusive), ascending — the same answer
+    /// [`PileupInput::records_overlapping`] gives for the input this engine
+    /// was built from. The engine never reorders its store, so these are the
+    /// `record_idx` values its columns report, and they stay valid for
+    /// [`PileupColumn::find_record`] on any later column. Yields nothing once
+    /// [`reclaim_allocation`](Self::reclaim_allocation) has emptied the store.
+    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + '_ {
+        self.store.records_overlapping_sorted(start, end)
+    }
+
     /// Reclaim the store's heap allocation for the next region. Returns `None`
     /// if it has already been reclaimed.
     ///
@@ -2027,6 +2039,68 @@ mod tests {
                 "max_depth=3 should keep first 3 records in insertion order at pos {:?}",
                 col.pos()
             );
+        }
+    }
+
+    mod window_query {
+        use super::*;
+        use crate::bam::record_store::tests::window_query::{arb_span, arb_store, brute_force};
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+
+        proptest! {
+            // r[verify pileup.records_overlapping]
+            /// The engine's answer is the input's answer, before and during
+            /// iteration — and it agrees with the columns: every alignment a
+            /// column inside the span reports is in the set, and every record
+            /// in the set shows up in some column inside the span. The two
+            /// directions together pin the query to what the engine actually
+            /// emits, not to a second copy of the overlap test.
+            #[test]
+            fn engine_query_agrees_with_columns(reads in arb_store(), (start, end) in arb_span()) {
+                let mut store = RecordStore::new();
+                for read in &reads {
+                    read.push(&mut store);
+                }
+                let input = store.prepare_for_pileup().input;
+                let expected = brute_force(input.store(), start, end);
+
+                let mut engine = PileupEngine::new(input, Pos0::new(0).unwrap(), Pos0::new(7_000).unwrap());
+                let before: Vec<u32> = engine.records_overlapping(start, end).collect();
+                prop_assert_eq!(&before, &expected);
+
+                let set: BTreeSet<u32> = expected.iter().copied().collect();
+                let mut seen = BTreeSet::new();
+                let mut mid: Option<Vec<u32>> = None;
+                while let Some(col) = engine.pileups() {
+                    if col.pos() < start || col.pos() > end {
+                        continue;
+                    }
+                    for view in col.alignments() {
+                        prop_assert!(set.contains(&view.record_idx()), "column {} reports record {} the query does not", col.pos(), view.record_idx());
+                        seen.insert(view.record_idx());
+                    }
+                    if mid.is_none() {
+                        mid = Some(engine_query_snapshot(&col, start, end));
+                    }
+                }
+                if let Some(mid) = mid {
+                    prop_assert_eq!(mid, expected.clone());
+                }
+                // Every record in the span consumes reference there (M or D),
+                // so the engine must have reported it at some column.
+                prop_assert_eq!(seen, set);
+
+                engine.reclaim_allocation();
+                prop_assert_eq!(engine.records_overlapping(start, end).count(), 0);
+            }
+        }
+
+        /// The query during iteration goes through the column's store — the
+        /// same store the engine holds — so this is what a mid-iteration
+        /// caller sees.
+        fn engine_query_snapshot(col: &PileupColumn<'_, ()>, start: Pos0, end: Pos0) -> Vec<u32> {
+            col.store().records_overlapping_sorted(start, end).collect()
         }
     }
 }

@@ -364,6 +364,11 @@ pub struct RecordStore<U = ()> {
     /// [`PileupEngine`]: crate::bam::pileup::PileupEngine
     order: RecordOrder,
     mate_links: MateLinkState,
+    // r[impl record_store.window_query.max_ref_span]
+    /// Widest reference span (`end_pos - pos + 1`) of any record kept so far.
+    /// Never lowered except by `clear`: an over-estimate only widens the
+    /// window query's scan, an under-estimate would skip records silently.
+    max_ref_span: u32,
 }
 
 // r[impl record_store.pileup_input]
@@ -384,6 +389,25 @@ impl<U> PileupInput<U> {
     /// guarantees do not travel with the returned value.
     pub(crate) fn into_store(self) -> RecordStore<U> {
         self.store
+    }
+
+    /// The store, read-only. Indices from
+    /// [`records_overlapping`](Self::records_overlapping) address it.
+    pub fn store(&self) -> &RecordStore<U> {
+        &self.store
+    }
+
+    // r[impl record_store.window_query]
+    /// Indices of the records whose alignment overlaps `[start, end]` — both
+    /// ends inclusive, as everywhere in this API
+    /// (r[`interval.inclusive_ends`]) — in ascending order. `end < start` is
+    /// the empty interval and yields nothing.
+    ///
+    /// Lives here rather than on [`RecordStore`] because it binary-searches
+    /// on `pos`, which means nothing on a store that is not in position
+    /// order — and this is the type that proves the order holds.
+    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + '_ {
+        self.store.records_overlapping_sorted(start, end)
     }
 }
 
@@ -419,6 +443,7 @@ impl<U> RecordStore<U> {
         Self {
             order: RecordOrder::Ascending,
             mate_links: MateLinkState::Unlinked,
+            max_ref_span: 0,
             records: Vec::new(),
             names: Vec::new(),
             bases: Vec::new(),
@@ -456,6 +481,7 @@ impl<U> RecordStore<U> {
         Self {
             order: RecordOrder::Ascending,
             mate_links: MateLinkState::Unlinked,
+            max_ref_span: 0,
             records: Vec::with_capacity(record_count_est),
             names: Vec::with_capacity(names_est),
             bases: Vec::with_capacity(bases_est),
@@ -666,6 +692,7 @@ impl<U> RecordStore<U> {
             self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
             self,
         ) {
+            self.note_kept_span();
             Ok(Some(idx))
         } else {
             self.rollback_last_push();
@@ -822,6 +849,7 @@ impl<U> RecordStore<U> {
 
         // r[impl record_store.pre_filter.rollback]
         if customize.filter(record, self) {
+            self.note_kept_span();
             Ok(Some(idx))
         } else {
             self.rollback_last_push();
@@ -1514,6 +1542,7 @@ impl<U> RecordStore<U> {
         rec.cigar_off = new_cigar_off;
         rec.matching_bases = matching_bases;
         rec.indel_bases = indel_bases;
+        self.max_ref_span = self.max_ref_span.max(ref_span(new_pos, end_pos));
 
         Ok(())
     }
@@ -1550,12 +1579,14 @@ impl<U> RecordStore<U> {
     pub(crate) fn take_contents(&mut self) -> Self {
         // What is taken keeps the state; what is left behind is empty, and an
         // empty store is trivially ordered and has nothing to link.
-        let (order, mate_links) = (self.order, self.mate_links);
+        let (order, mate_links, max_ref_span) = (self.order, self.mate_links, self.max_ref_span);
         self.order = RecordOrder::Ascending;
         self.mate_links = MateLinkState::Unlinked;
+        self.max_ref_span = 0;
         RecordStore {
             order,
             mate_links,
+            max_ref_span,
             records: std::mem::take(&mut self.records),
             names: std::mem::take(&mut self.names),
             bases: std::mem::take(&mut self.bases),
@@ -1614,9 +1645,60 @@ impl<U> RecordStore<U> {
         self.mate_links = MateLinkState::Unlinked;
     }
 
+    // r[impl record_store.window_query.max_ref_span]
+    /// Widen the tracked span to cover the record just kept. Called after
+    /// the keep decision, so a rolled-back record leaves it untouched.
+    fn note_kept_span(&mut self) {
+        if let Some(rec) = self.records.last() {
+            self.max_ref_span = self.max_ref_span.max(ref_span(rec.pos, rec.end_pos));
+        }
+    }
+
+    // r[impl record_store.window_query]
+    // r[impl record_store.window_query.max_ref_span]
+    // r[impl interval.overlap_test]
+    /// Indices of the records overlapping `[start, end]` (both inclusive), in
+    /// ascending order.
+    ///
+    /// Crate-private because it is only correct on a store in ascending
+    /// position order; [`PileupInput`] and [`PileupEngine`] are the types
+    /// that can vouch for that and expose it.
+    ///
+    /// [`PileupEngine`]: crate::bam::pileup::PileupEngine
+    pub(crate) fn records_overlapping_sorted(
+        &self,
+        start: Pos0,
+        end: Pos0,
+    ) -> impl Iterator<Item = u32> + '_ {
+        debug_assert_eq!(
+            self.order,
+            RecordOrder::Ascending,
+            "window query on a store that is not in position order"
+        );
+        // A record starting before `start` overlaps only if it is long enough
+        // to reach it, and no record is longer than the tracked span.
+        let lowest_pos = start.as_u32().saturating_sub(self.max_ref_span.saturating_sub(1));
+        let first = if end < start {
+            self.records.len()
+        } else {
+            self.records.partition_point(|rec| rec.pos.as_u32() < lowest_pos)
+        };
+        self.records
+            .get(first..)
+            .unwrap_or_default()
+            .iter()
+            .zip(first..)
+            .take_while(move |(rec, _)| rec.pos <= end)
+            .filter(move |(rec, _)| rec.end_pos >= start)
+            // Record indices are minted as `u32` at push, so the conversion
+            // cannot fail for an index that exists.
+            .filter_map(|(_, idx)| u32::try_from(idx).ok())
+    }
+
     pub fn clear(&mut self) {
         self.order = RecordOrder::Ascending;
         self.mate_links = MateLinkState::Unlinked;
+        self.max_ref_span = 0;
         self.records.clear();
         self.names.clear();
         self.bases.clear();
@@ -1702,6 +1784,14 @@ fn qname_bytes<'a>(names: &'a [u8], rec: &SlimRecord) -> &'a [u8] {
     names.get(start..end).unwrap_or(&[])
 }
 
+// r[impl record_store.window_query.max_ref_span]
+/// Reference positions a record covers, `end_pos` being inclusive. A
+/// malformed `end_pos < pos` (only reachable through `push_fields`) counts as
+/// one position, which is what the pileup engine treats it as too.
+fn ref_span(pos: Pos0, end_pos: Pos0) -> u32 {
+    end_pos.as_u32().saturating_sub(pos.as_u32()).saturating_add(1)
+}
+
 impl<U> Default for RecordStore<U> {
     fn default() -> Self {
         Self::new()
@@ -1714,7 +1804,7 @@ impl<U> Default for RecordStore<U> {
     clippy::cast_possible_truncation,
     reason = "test code with known small values"
 )]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Drop every record at push time (no-extra customizer).
@@ -2267,6 +2357,224 @@ mod tests {
     // only the accepted records in order with no filter. That is, a rollback
     // must perfectly undo both the records Vec push and all slab extensions,
     // leaving zero dead bytes.
+    pub(crate) mod window_query {
+        use super::super::*;
+        use proptest::prelude::*;
+        use seqair_types::{BamFlags, Base};
+
+        /// A mapped record: `M` over `bases`, optionally followed by a
+        /// deletion so spans vary independently of query length.
+        #[derive(Debug, Clone)]
+        pub(crate) struct Read {
+            pub(crate) pos: u32,
+            pub(crate) bases: u32,
+            pub(crate) deletion: u32,
+        }
+
+        impl Read {
+            pub(crate) fn push(&self, store: &mut RecordStore<()>) -> u32 {
+                let pos = Pos0::new(self.pos).expect("strategy bounds pos");
+                let end_pos = Pos0::new(self.pos + self.bases + self.deletion - 1)
+                    .expect("strategy bounds end");
+                let mut cigar = vec![CigarOp::new(cigar::CigarOpType::Match, self.bases)];
+                if self.deletion > 0 {
+                    cigar.push(CigarOp::new(cigar::CigarOpType::Deletion, self.deletion));
+                }
+                let bases = vec![Base::A; self.bases as usize];
+                let quals = vec![30u8; self.bases as usize];
+                store
+                    .push_fields(
+                        pos,
+                        end_pos,
+                        BamFlags::empty(),
+                        30,
+                        self.bases,
+                        self.deletion,
+                        b"r",
+                        &cigar,
+                        &bases,
+                        &quals,
+                        &[],
+                        0,
+                        -1,
+                        0,
+                        0,
+                        &mut (),
+                    )
+                    .expect("synthetic push")
+                    .expect("no filter")
+            }
+        }
+
+        pub(crate) fn arb_read() -> impl Strategy<Value = Read> {
+            (0u32..5_000, 1u32..=16, prop_oneof![4 => Just(0u32), 1 => 1u32..=400])
+                .prop_map(|(pos, bases, deletion)| Read { pos, bases, deletion })
+        }
+
+        pub(crate) fn arb_store() -> impl Strategy<Value = Vec<Read>> {
+            prop::collection::vec(arb_read(), 0..=80)
+        }
+
+        /// Spans reach past the last possible record (5 400) and are often
+        /// empty (`end < start`), since both ends are drawn independently.
+        pub(crate) fn arb_span() -> impl Strategy<Value = (Pos0, Pos0)> {
+            (0u32..7_000, 0u32..7_000).prop_map(|(a, b)| {
+                (Pos0::new(a).expect("bounded"), Pos0::new(b).expect("bounded"))
+            })
+        }
+
+        /// The definition, applied to every record: no search, no span bound.
+        /// An inverted interval is empty by definition — the raw overlap test
+        /// alone would accept any record spanning the gap.
+        pub(crate) fn brute_force(store: &RecordStore<()>, start: Pos0, end: Pos0) -> Vec<u32> {
+            if end < start {
+                return Vec::new();
+            }
+            store
+                .records()
+                .enumerate()
+                .filter(|(_, rec)| rec.pos <= end && rec.end_pos >= start)
+                .map(|(idx, _)| u32::try_from(idx).expect("small store"))
+                .collect()
+        }
+
+        fn at(v: u32) -> Pos0 {
+            Pos0::new(v).unwrap()
+        }
+
+        // r[verify record_store.window_query]
+        // r[verify record_store.window_query.max_ref_span]
+        /// A read that starts well before the window but reaches into it must
+        /// be found — this is the case a plain lower bound on `pos` misses.
+        #[test]
+        fn long_read_starting_before_window_is_found() {
+            let mut store = RecordStore::new();
+            Read { pos: 10, bases: 5, deletion: 300 }.push(&mut store); // covers 10..=314
+            Read { pos: 200, bases: 5, deletion: 0 }.push(&mut store); // 200..=204
+            Read { pos: 400, bases: 5, deletion: 0 }.push(&mut store); // 400..=404
+            let input = store.prepare_for_pileup().input;
+
+            let hits: Vec<u32> = input.records_overlapping(at(300), at(310)).collect();
+            assert_eq!(hits, vec![0]);
+            let hits: Vec<u32> = input.records_overlapping(at(203), at(400)).collect();
+            assert_eq!(hits, vec![0, 1, 2]);
+        }
+
+        // r[verify record_store.window_query]
+        #[test]
+        fn empty_and_out_of_range_spans_yield_nothing() {
+            let mut store = RecordStore::new();
+            Read { pos: 100, bases: 10, deletion: 0 }.push(&mut store);
+            let input = store.prepare_for_pileup().input;
+
+            assert_eq!(input.records_overlapping(at(105), at(104)).count(), 0, "end < start");
+            assert_eq!(input.records_overlapping(at(110), at(500)).count(), 0, "past the last");
+            assert_eq!(input.records_overlapping(at(0), at(99)).count(), 0, "before the first");
+            assert_eq!(input.records_overlapping(at(109), at(109)).count(), 1, "last base");
+            assert_eq!(input.records_overlapping(at(100), at(100)).count(), 1, "first base");
+        }
+
+        // r[verify record_store.window_query]
+        #[test]
+        fn empty_store_yields_nothing() {
+            let input = RecordStore::<()>::new().prepare_for_pileup().input;
+            assert_eq!(input.records_overlapping(at(0), at(Pos0::max_value().as_u32())).count(), 0);
+        }
+
+        // r[verify record_store.window_query.max_ref_span]
+        /// `set_alignment` can lengthen a record after it was pushed; the
+        /// bound has to follow, or the query misses the moved read.
+        #[test]
+        fn set_alignment_widens_the_span_bound() {
+            let mut store = RecordStore::new();
+            let idx = Read { pos: 10, bases: 5, deletion: 0 }.push(&mut store);
+            Read { pos: 500, bases: 5, deletion: 0 }.push(&mut store);
+            let long = [
+                CigarOp::new(cigar::CigarOpType::Match, 5),
+                CigarOp::new(cigar::CigarOpType::Deletion, 600),
+            ];
+            store.set_alignment(idx, at(10), &long).unwrap();
+            let input = store.prepare_for_pileup().input;
+
+            let hits: Vec<u32> = input.records_overlapping(at(600), at(600)).collect();
+            assert_eq!(hits, brute_force(input.store(), at(600), at(600)));
+            assert_eq!(hits, vec![0]);
+        }
+
+        // r[verify record_store.window_query.max_ref_span]
+        /// A rejected push must not widen the bound (it only has to not
+        /// *narrow* it, but a precise bound is what the test pins).
+        #[test]
+        fn rejected_push_leaves_the_bound_alone() {
+            use super::KeepNone;
+            let mut store = RecordStore::<()>::new();
+            Read { pos: 10, bases: 5, deletion: 0 }.push(&mut store);
+            let before = store.max_ref_span;
+            let cigar = [
+                CigarOp::new(cigar::CigarOpType::Match, 5),
+                CigarOp::new(cigar::CigarOpType::Deletion, 900),
+            ];
+            let rejected = store
+                .push_fields(
+                    at(20),
+                    at(924),
+                    BamFlags::empty(),
+                    30,
+                    5,
+                    900,
+                    b"x",
+                    &cigar,
+                    &[Base::A; 5],
+                    &[30; 5],
+                    &[],
+                    0,
+                    -1,
+                    0,
+                    0,
+                    &mut KeepNone,
+                )
+                .unwrap();
+            assert_eq!(rejected, None);
+            assert_eq!(store.max_ref_span, before);
+            assert_eq!(before, 5);
+        }
+
+        proptest! {
+            // r[verify record_store.window_query]
+            // r[verify record_store.window_query.max_ref_span]
+            /// The binary search plus span bound must return exactly what the
+            /// definition returns, for stores pushed in any order and spans
+            /// that are empty, before, past, or inside the records.
+            #[test]
+            fn matches_brute_force(reads in arb_store(), spans in prop::collection::vec(arb_span(), 1..=8)) {
+                let mut store = RecordStore::new();
+                for read in &reads {
+                    read.push(&mut store);
+                }
+                let input = store.prepare_for_pileup().input;
+                for (start, end) in spans {
+                    let fast: Vec<u32> = input.records_overlapping(start, end).collect();
+                    prop_assert_eq!(fast, brute_force(input.store(), start, end));
+                }
+            }
+
+            // r[verify record_store.window_query.max_ref_span]
+            /// The bound is exactly the widest record after pushes and moves,
+            /// so it is neither stale nor inflated.
+            #[test]
+            fn span_bound_is_the_widest_record(reads in arb_store()) {
+                let mut store = RecordStore::new();
+                for read in &reads {
+                    read.push(&mut store);
+                }
+                let widest = reads.iter().map(|r| r.bases + r.deletion).max().unwrap_or(0);
+                prop_assert_eq!(store.max_ref_span, widest);
+                store.clear();
+                prop_assert_eq!(store.max_ref_span, 0);
+            }
+        }
+    }
+
     mod rollback_props {
         use super::super::*;
         use super::AcceptFlag;
