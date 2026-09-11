@@ -187,7 +187,7 @@ impl BaseModState {
     /// When MM is present but ML is absent, an empty `&[]` is passed to
     /// [`BaseModState::parse`]: that succeeds for delta lists of length 0
     /// (no probabilities needed) and otherwise fails with
-    /// [`BaseModError::MlLengthMismatch`]. This is stricter than [SAM1]
+    /// [`BaseModError::MlLengthMismatch`]. This is stricter than \[SAM1\]
     /// §1.7 (which makes ML optional even when MM contains deltas) — seqair
     /// currently rejects MM-with-deltas records that lack ML.
     ///

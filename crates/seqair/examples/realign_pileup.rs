@@ -11,7 +11,8 @@
 //!
 //! This is the ergonomic counterpart to `realignment.rs`: instead of fetching
 //! into a manual [`RecordStore`], rewriting alignments, and building a
-//! [`PileupEngine`] by hand, [`Pileup::mutate`] runs a caller-supplied
+//! [`PileupEngine`](seqair::bam::pileup::PileupEngine) by hand, [`Pileup::mutate`]
+//! runs a caller-supplied
 //! mutator on the freshly fetched store, re-sorts it, and hands back a pileup
 //! guard — all while preserving the internal buffer reuse of
 //! [`Readers::pileup`]. This is the exact hook a methylation/variant caller

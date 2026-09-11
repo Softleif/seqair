@@ -22,6 +22,20 @@ jobs:
       - run: cargo fmt --all --check
         working-directory: crates/seqair/fuzz
 
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # Broken intra-doc links are silent otherwise: rustdoc reports them as
+      # warnings, and a wall of them hides the next real one. `--examples`
+      # covers the example crates, whose module docs are the crate's tutorial.
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --all-features --examples
+
   test:
     name: test (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}

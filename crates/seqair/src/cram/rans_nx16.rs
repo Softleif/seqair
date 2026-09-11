@@ -72,7 +72,7 @@ impl Default for Nx16Order1Buf {
 }
 
 /// Decode a rANS Nx16 compressed block (allocating path — for callers
-/// without a reusable buffer). Prefer [`decode_with_buf`] on the hot path.
+/// without a reusable buffer). Prefer `decode_with_buf` on the hot path.
 pub fn decode(src: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, CramError> {
     let mut buf = Nx16Order1Buf::new();
     decode_with_buf(src, uncompressed_size, &mut buf)

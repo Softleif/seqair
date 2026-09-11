@@ -50,7 +50,7 @@ pub enum AlignedPairsError {
     },
 
     /// An unmapped record (`pos = None`) carries CIGAR operations.
-    /// Per [SAM1] §1.4, unmapped reads must have an empty CIGAR. Walking
+    /// Per \[SAM1\] §1.4, unmapped reads must have an empty CIGAR. Walking
     /// CIGAR ops without a base reference position would produce nonsense
     /// `rpos` values, so we refuse rather than silently anchor to position 0.
     #[error(

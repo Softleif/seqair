@@ -69,7 +69,7 @@ fn pos_to_bam_i32(p: Option<Pos0>) -> i32 {
 #[derive(Debug, Clone)]
 pub struct OwnedBamRecord {
     /// Reference sequence index. `-1` is the canonical "unmapped" sentinel
-    /// per [SAM1] §1.4 — it is preserved here as a raw `i32` (not wrapped in
+    /// per \[SAM1\] §1.4 — it is preserved here as a raw `i32` (not wrapped in
     /// an `Option`) because reading code uses it as a header-table index and
     /// every check site already handles the -1 case explicitly.
     pub ref_id: i32,

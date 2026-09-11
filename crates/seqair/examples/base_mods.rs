@@ -18,7 +18,7 @@
 //!
 //! 1. Fetch records for a region with [`IndexedReader`] + [`RecordStore`].
 //! 2. Parse `MM`/`ML` tags into a [`BaseModState`] per record.
-//! 3. Walk the record's CIGAR with [`SlimRecord::aligned_pairs`] and join
+//! 3. Walk the record's CIGAR with [`SlimRecord::aligned_pairs`](seqair::bam::record_store::SlimRecord::aligned_pairs) and join
 //!    each `Match { qpos, rpos }` event with `state.mod_at_qpos(qpos)` to
 //!    project per-base modification calls onto the reference.
 //! 4. Aggregate per-position methylation frequency across all reads.

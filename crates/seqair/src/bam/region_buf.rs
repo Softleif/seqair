@@ -3,7 +3,7 @@
 //! Reads compressed bytes for a set of BAM index chunks in a bounded sliding
 //! window (a few large sequential reads), refilling forward on demand as
 //! decompression advances. Peak resident memory is the window budget, not the
-//! whole region — see [`WINDOW_BUDGET`].
+//! whole region — see `WINDOW_BUDGET`.
 
 use super::{
     bgzf::{self, BgzfError, VirtualOffset},
@@ -41,7 +41,7 @@ struct MergedRange {
 ///
 /// Created by [`RegionBuf::new`], which borrows a seekable reader and computes
 /// the merged byte ranges to stream, but reads nothing eagerly. Compressed
-/// bytes are pulled into a bounded [`WINDOW_BUDGET`]-sized window on demand and
+/// bytes are pulled into a bounded `WINDOW_BUDGET`-sized window on demand and
 /// decompressed block-by-block.
 pub struct RegionBuf<'r, R: Read + Seek> {
     /// Reader kept alive to refill the window. Bulk, unbuffered.

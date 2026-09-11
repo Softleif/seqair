@@ -243,7 +243,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     ///
     /// Returns a [`BamQuery`] that yields raw `&[u8]` record bytes (including the
     /// 32-byte BAM fixed header) for records overlapping the inclusive region
-    /// `[start, end]` on `tid` (r[`interval.overlap_test`]).
+    /// `[start, end]` on `tid` (r\[`interval.overlap_test`\]).
     /// Records are pre-filtered by tid and position range — the caller sees only
     /// records that fall within the requested region.
     ///
@@ -370,7 +370,7 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
     /// Like [`for_each`](Self::for_each), but the closure can return an error
     /// that propagates out of the iteration.
     ///
-    /// This is used internally by [`fetch_into_customized`] and is also useful
+    /// This is used internally by [`IndexedBamReader::fetch_into_customized`] and is also useful
     /// for callers that want to short-circuit on their own error conditions.
     pub fn for_each_result<F, E>(&mut self, f: F) -> Result<BamQueryCounts, E>
     where

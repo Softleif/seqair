@@ -242,7 +242,8 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// `target` is anything that implements [`IntoSegmentTarget`] — the
     /// trait is **sealed**, so the closed list of accepted targets is
     /// exactly: a contig name (`&str` / `String` / `SmolStr`), a
-    /// pre-resolved [`Tid`] or `u32`, a parsed [`RegionString`], an
+    /// pre-resolved [`Tid`](crate::reader::Tid) or `u32`, a parsed
+    /// [`RegionString`](seqair_types::RegionString), an
     /// explicit `(resolver, start, end)` tuple, or `()` for a whole-genome
     /// scan. Each yielded `Segment`'s **core** is at most `opts.max_len()`
     /// bases long; the full `[start, end]` includes `opts.overlap()` bases

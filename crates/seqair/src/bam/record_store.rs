@@ -350,7 +350,7 @@ impl SlimRecord {
     /// no template identity at all and never links to a mate.
     ///
     /// Two distinct qnames can in principle share a hash
-    /// (r[`record_store.qname_hash.identity_is_probabilistic`]); mate linking
+    /// (r\[`record_store.qname_hash.identity_is_probabilistic`\]); mate linking
     /// compares the bytes and is unaffected, but a consumer using this as a
     /// fragment id must tolerate the merge.
     #[must_use]
@@ -991,7 +991,7 @@ pub struct FilterRawFields<'a> {
     /// 0-based reference position.
     pub pos: Pos0,
     /// Last reference position the record covers, inclusive
-    /// (r[`interval.end_pos_inclusive`]).
+    /// (r\[`interval.end_pos_inclusive`\]).
     ///
     /// `Some(_)` from `push_fields` (SAM/CRAM) where the CIGAR is pre-parsed.
     /// `None` from `push_raw` (BAM) because the CIGAR hasn't been decoded yet
@@ -1268,7 +1268,7 @@ impl<U> RecordStore<U> {
     /// Safe for any `U` because each record carries its own `extras_idx`,
     /// so reordering the records Vec does not invalidate the extras mapping.
     /// Mate links are *not* safe for reordering and are dropped
-    /// (r[`record_store.link_mates.invalidated`]).
+    /// (r\[`record_store.link_mates.invalidated`\]).
     pub fn sort_by_pos(&mut self) {
         self.clear_mate_links();
         self.records.sort_by_key(|r| r.pos);
@@ -1333,7 +1333,7 @@ impl<U> RecordStore<U> {
     ///
     /// Run this as the *last* mutation before pileup iteration: `sort_by_pos`
     /// and `dedup` clear the links again
-    /// (r[`record_store.link_mates.invalidated`]). [`Readers::pileup`] does this
+    /// (r\[`record_store.link_mates.invalidated`\]). [`Readers::pileup`] does this
     /// for you.
     ///
     /// The returned [`MateLinkStats`] is the only signal that the input broke

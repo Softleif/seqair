@@ -52,7 +52,7 @@ impl Default for Rans4x8Buf {
 
 // r[impl cram.codec.rans4x8]
 /// Decode a rANS 4x8 compressed block (allocating path — for callers
-/// without a reusable buffer). Prefer [`decode_with_buf`] on the hot path.
+/// without a reusable buffer). Prefer `decode_with_buf` on the hot path.
 pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
     let mut buf = Rans4x8Buf::new();
     decode_with_buf(src, &mut buf)

@@ -1,7 +1,7 @@
 //! Layered iterator views over [`AlignedPairs`] that bundle per-event read
 //! and reference data.
 //!
-//! The base [`AlignedPairs`](super::aligned_pairs::AlignedPairs) iterator yields
+//! The base [`AlignedPairs`] iterator yields
 //! position-only events (`(qpos, rpos)` plus op type). Most callers want
 //! richer information at each event — the bases and qualities the read placed
 //! at this position, and the reference base it aligns against.
@@ -129,7 +129,7 @@ pub enum AlignedPairWithRead<'read> {
     },
     /// I — `query` and `qual` are the inserted bases and their Phred scores,
     /// starting at `first_inserted`. See
-    /// [`AlignedPair::Insertion`](super::AlignedPair::Insertion) for why the
+    /// [`AlignedPair::Insertion`] for why the
     /// field is not called `qpos`.
     Insertion { first_inserted: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
     /// D — deletion from the reference. No read data.
@@ -297,7 +297,7 @@ pub enum AlignedPairWithRef<'read, 'ref_seq> {
     },
     /// I — inserted query bases and quals (no reference span), starting at
     /// `first_inserted`. See
-    /// [`AlignedPair::Insertion`](super::AlignedPair::Insertion) for why the
+    /// [`AlignedPair::Insertion`] for why the
     /// field is not called `qpos`.
     Insertion { first_inserted: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
     /// D — deleted reference bases. `ref_bases` is `None` if any position in

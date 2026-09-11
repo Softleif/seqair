@@ -13,11 +13,11 @@
 //! iterator and its two layered adapters. Each adapter pays only for the
 //! data it attaches, so callers compose the view they need:
 //!
-//! 1. **Bare walk** — [`SlimRecord::aligned_pairs(store)`] yields events
+//! 1. **Bare walk** — [`SlimRecord::aligned_pairs`](seqair::bam::record_store::SlimRecord::aligned_pairs) (given the store) yields events
 //!    with positions and op kinds only. Cheapest; useful for things like
 //!    counting indel events per record.
 //! 2. **With read** — `.with_read(seq, qual)` (or the one-shot
-//!    [`SlimRecord::aligned_pairs_with_read`]) attaches the read's bases
+//!    [`SlimRecord::aligned_pairs_with_read`](seqair::bam::record_store::SlimRecord::aligned_pairs_with_read)) attaches the read's bases
 //!    and quality scores. `Match` carries `query: Base` + `qual`; `Insertion`
 //!    and `SoftClip` carry pre-sliced runs (no off-by-one risk for callers).
 //! 3. **With reference** — `.with_reference(&ref_seq)` further attaches

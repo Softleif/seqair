@@ -203,7 +203,7 @@ impl CigarOp {
     /// this is a zero-cost transmute. BAM CIGAR data is **not** guaranteed
     /// aligned — the read name length determines the start offset, and
     /// samtools produces unaligned CIGAR data when `l_read_name` is not a
-    /// multiple of 4. Use [`extend_from_bam_bytes`] if alignment cannot be
+    /// multiple of 4. Use [`extend_from_bam_bytes`](Self::extend_from_bam_bytes) if alignment cannot be
     /// guaranteed (it's always correct, just requires a copy).
     #[inline]
     pub fn slice_from_bam_bytes(bytes: &[u8]) -> Option<&[Self]> {

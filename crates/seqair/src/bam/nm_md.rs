@@ -1,12 +1,12 @@
 //! NM and MD tag computation by walking a record's CIGAR against a reference.
 //!
-//! Per [SAM1] §1.5 (auxiliary fields), the `NM` tag is the *edit distance*
+//! Per \[SAM1\] §1.5 (auxiliary fields), the `NM` tag is the *edit distance*
 //! between the read and the reference: number of mismatches in match
 //! operations + total inserted bases + total deleted bases. The `MD` tag is a
 //! string encoding the reference bases at mismatch positions, used to
 //! reconstruct the reference without re-fetching it.
 //!
-//! Both are derivable from [`AlignedPairsWithRef`](super::aligned_pairs_view::AlignedPairsWithRef).
+//! Both are derivable from [`AlignedPairsWithRef`].
 //! The methods on `AlignedPairsWithRef` consume the iterator and walk it to
 //! completion.
 //!
@@ -29,7 +29,7 @@
 //!
 //! ## MD semantics
 //!
-//! Per [SAM1] §1.5 (MD tag):
+//! Per \[SAM1\] §1.5 (MD tag):
 //! - Numbers: count of consecutive matching reference positions.
 //! - Letters: a single ref base at a mismatch position.
 //! - `^` followed by ref bases: a deletion run (the deleted ref bases).

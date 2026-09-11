@@ -20,7 +20,8 @@
 //! 2. Open the readers with `Readers::open_customized(bam, fasta, customize)`.
 //! 3. Plan the pass with `readers.segments(target, opts)` — pick a `max_len`
 //!    that bounds memory per tile.
-//! 4. For each [`Segment`], call `readers.pileup(&segment, DepthLimit::Unlimited).run()` — this fetches
+//! 4. For each [`Segment`](seqair::reader::Segment), call
+//!    `readers.pileup(&segment, DepthLimit::Unlimited).run()` — this fetches
 //!    records (running `keep_record` at push time), then `compute` once per
 //!    kept record, fetches the reference sequence, and returns a
 //!    `PileupEngine<E::Extra>` ready for iteration.

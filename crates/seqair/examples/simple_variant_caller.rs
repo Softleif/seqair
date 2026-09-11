@@ -20,9 +20,9 @@
 //! to demonstrate the full read → pileup → VCF-write pipeline:
 //!
 //! 1. Open alignment + reference with [`Readers`].
-//! 2. Iterate columns with [`PileupEngine`].
-//! 3. Count bases using [`Base::known_index`].
-//! 4. Build a VCF header from the BAM header with [`VcfHeader::from_bam_header`].
+//! 2. Iterate columns with [`PileupEngine`](seqair::bam::pileup::PileupEngine).
+//! 3. Count bases using [`Base::known_index`](seqair_types::Base::known_index).
+//! 4. Build a VCF header from the BAM header with [`VcfHeaderBuilder::from_bam_header`](seqair::vcf::VcfHeaderBuilder::from_bam_header).
 //! 5. Encode records through the typestate chain:
 //!    `begin_record` → `filter_pass` → `begin_samples` → `emit`.
 
