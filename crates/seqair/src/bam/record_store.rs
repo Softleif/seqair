@@ -365,7 +365,7 @@ pub struct RecordStore<U = ()> {
     order: RecordOrder,
     mate_links: MateLinkState,
     // r[impl record_store.window_query.reach]
-    /// `reach[i]` is the largest `end_pos` among the records at
+    /// `reach[i]` is the largest `end_pos` among the mapped records at
     /// indices `..=i`, in position order — non-decreasing by construction, so
     /// the first record that can overlap a window is one binary search away.
     /// Built by [`prepare_for_pileup`](Self::prepare_for_pileup), which is
@@ -402,9 +402,11 @@ impl<U> PileupInput<U> {
     }
 
     // r[impl record_store.window_query]
-    /// Indices of the records whose alignment overlaps `[start, end]` —
-    /// both ends inclusive, as everywhere in this API — in ascending order.
-    /// `end < start` is the empty interval and yields nothing.
+    /// Indices of the mapped records whose alignment overlaps `[start, end]`
+    /// — both ends inclusive, as everywhere in this API — in ascending
+    /// order. `end < start` is the empty interval and yields nothing, and so
+    /// does a placed-unmapped record, which has no alignment: the pileup
+    /// never reports one, and this query answers for what the pileup reports.
     ///
     /// Lives here rather than on [`RecordStore`] because it binary-searches
     /// an index [`prepare_for_pileup`](RecordStore::prepare_for_pileup)
@@ -1636,12 +1638,16 @@ impl<U> RecordStore<U> {
 
     // r[impl record_store.window_query.reach]
     /// Derive `reach` from the records, which must be in position order.
+    /// Unmapped records carry no alignment and are never yielded by the
+    /// window query, so they contribute nothing here either.
     fn build_reach(&mut self) {
         debug_assert_eq!(self.order, RecordOrder::Ascending, "reach needs position order");
         self.reach.clear();
         let mut furthest = Pos0::ZERO;
         self.reach.extend(self.records.iter().map(|rec| {
-            furthest = furthest.max(rec.end_pos);
+            if !rec.flags.is_unmapped() {
+                furthest = furthest.max(rec.end_pos);
+            }
             furthest
         }));
     }
@@ -1662,7 +1668,7 @@ impl<U> RecordStore<U> {
     /// Index of the first record that can overlap a window starting at
     /// `start`: every record before it ends before `start`, and since `reach`
     /// never decreases, so does nothing after it that the forward scan will
-    /// not see. `len()` when no record reaches `start`.
+    /// not see. `len()` when no mapped record reaches `start`.
     pub(crate) fn first_reaching(&self, start: Pos0) -> usize {
         debug_assert_eq!(
             self.reach.len(),
@@ -1674,7 +1680,7 @@ impl<U> RecordStore<U> {
 
     // r[impl record_store.window_query]
     // r[impl interval.overlap_test]
-    /// Indices of the records overlapping `[start, end]` (both
+    /// Indices of the mapped records overlapping `[start, end]` (both
     /// inclusive), in ascending order.
     ///
     /// Crate-private because it is only correct on a store that
@@ -1705,7 +1711,9 @@ impl<U> RecordStore<U> {
             .iter()
             .zip(first_idx..)
             .take_while(move |(rec, _)| rec.pos <= end)
-            .filter(move |(rec, _)| rec.end_pos >= start)
+            // Unmapped records have no alignment to overlap anything; the
+            // pileup never reports them, and this query answers for it.
+            .filter(move |(rec, _)| rec.end_pos >= start && !rec.flags.is_unmapped())
             .map(|(_, idx)| idx)
     }
 
@@ -2369,12 +2377,16 @@ pub(crate) mod tests {
         use seqair_types::{BamFlags, Base};
 
         /// A record: `M` over `bases`, optionally followed by a deletion so
-        /// spans vary independently of query length.
+        /// spans vary independently of query length. An unmapped one is
+        /// *placed* — it has a position, as a mate placed next to its partner
+        /// does — but `end_pos == pos` and no alignment, which is how
+        /// `push_raw` records such reads.
         #[derive(Debug, Clone)]
         pub(crate) struct Read {
             pub(crate) pos: u32,
             pub(crate) bases: u32,
             pub(crate) deletion: u32,
+            pub(crate) mapped: bool,
         }
 
         impl Read {
@@ -2390,9 +2402,10 @@ pub(crate) mod tests {
             /// sees distinct templates rather than one qname eighty times.
             pub(crate) fn push(&self, store: &mut RecordStore<()>, i: usize) -> u32 {
                 let pos = Pos0::new(self.pos).expect("strategy bounds pos");
-                let end_pos = Pos0::new(self.pos + self.bases + self.deletion - 1)
-                    .expect("strategy bounds end");
-                let flags = BamFlags::empty();
+                let end =
+                    if self.mapped { self.pos + self.bases + self.deletion - 1 } else { self.pos };
+                let end_pos = Pos0::new(end).expect("strategy bounds end");
+                let flags = if self.mapped { BamFlags::empty() } else { BamFlags::from(0x4u16) };
                 let bases = vec![Base::A; self.bases as usize];
                 let quals = vec![30u8; self.bases as usize];
                 store
@@ -2427,8 +2440,14 @@ pub(crate) mod tests {
                 0u32..5_000,
                 1u32..=16,
                 prop_oneof![6 => Just(0u32), 3 => 1u32..=40, 1 => 200u32..=1_500],
+                prop_oneof![9 => Just(true), 1 => Just(false)],
             )
-                .prop_map(|(pos, bases, deletion)| Read { pos, bases, deletion })
+                .prop_map(|(pos, bases, deletion, mapped)| Read {
+                    pos,
+                    bases,
+                    deletion,
+                    mapped,
+                })
         }
 
         pub(crate) fn arb_store() -> impl Strategy<Value = Vec<Read>> {
@@ -2495,14 +2514,14 @@ pub(crate) mod tests {
         }
 
         /// Apply `moves` to a store that `reads` were pushed into, in push
-        /// order.
+        /// order, skipping unmapped records (they have nothing to realign).
         pub(crate) fn apply_moves(store: &mut RecordStore<()>, reads: &[Read], moves: &[Move]) {
             for mv in moves {
                 if reads.is_empty() {
                     break;
                 }
                 let idx = mv.record % reads.len();
-                let Some(read) = reads.get(idx) else { continue };
+                let Some(read) = reads.get(idx).filter(|read| read.mapped) else { continue };
                 let moved = Read { pos: mv.pos, deletion: mv.deletion, ..read.clone() };
                 store
                     .set_alignment(idx as u32, at(mv.pos), &moved.cigar())
@@ -2512,7 +2531,8 @@ pub(crate) mod tests {
 
         /// The definition, applied to every record: no search, no index. An
         /// inverted interval is empty by definition — the raw overlap test
-        /// alone would accept any record spanning the gap.
+        /// alone would accept any record spanning the gap — and an unmapped
+        /// record has no alignment to overlap anything.
         pub(crate) fn brute_force(store: &RecordStore<()>, start: Pos0, end: Pos0) -> Vec<u32> {
             if end < start {
                 return Vec::new();
@@ -2520,7 +2540,9 @@ pub(crate) mod tests {
             store
                 .records()
                 .enumerate()
-                .filter(|(_, rec)| rec.pos <= end && rec.end_pos >= start)
+                .filter(|(_, rec)| {
+                    !rec.flags.is_unmapped() && rec.pos <= end && rec.end_pos >= start
+                })
                 .map(|(idx, _)| u32::try_from(idx).expect("small store"))
                 .collect()
         }
@@ -2530,7 +2552,7 @@ pub(crate) mod tests {
         }
 
         fn mapped(pos: u32, bases: u32, deletion: u32) -> Read {
-            Read { pos, bases, deletion }
+            Read { pos, bases, deletion, mapped: true }
         }
 
         fn prepared(reads: &[Read]) -> PileupInput<()> {
@@ -2576,6 +2598,20 @@ pub(crate) mod tests {
         fn empty_store_yields_nothing() {
             let input = prepared(&[]);
             assert_eq!(input.records_overlapping(at(0), at(Pos0::max_value().as_u32())).count(), 0);
+        }
+
+        // r[verify record_store.window_query]
+        /// A placed-unmapped read sits at a position but aligns to nothing;
+        /// the pileup never reports it, so neither does the query.
+        #[test]
+        fn placed_unmapped_records_are_not_yielded() {
+            let input = prepared(&[
+                mapped(100, 10, 0),
+                Read { pos: 105, bases: 10, deletion: 0, mapped: false },
+                mapped(105, 10, 0),
+            ]);
+            let hits: Vec<u32> = input.records_overlapping(at(105), at(105)).collect();
+            assert_eq!(hits, vec![0, 2]);
         }
 
         // r[verify record_store.window_query.reach]
@@ -2647,7 +2683,7 @@ pub(crate) mod tests {
 
             // r[verify record_store.window_query.reach]
             /// The search lands on the first record that can overlap a window
-            /// starting at `start`: the first record whose `end_pos`
+            /// starting at `start`: the first mapped record whose `end_pos`
             /// reaches it, found here by a linear scan. Nothing before it can
             /// be a hit, and the forward scan sees everything after it.
             #[test]
@@ -2656,7 +2692,7 @@ pub(crate) mod tests {
                 let store = input.store();
                 let expected = store
                     .records()
-                    .position(|rec| rec.end_pos >= at(start))
+                    .position(|rec| !rec.flags.is_unmapped() && rec.end_pos >= at(start))
                     .unwrap_or(store.len());
                 prop_assert_eq!(store.first_reaching(at(start)), expected);
             }

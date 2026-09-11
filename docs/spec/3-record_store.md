@@ -158,11 +158,14 @@ store.
 
 r[record_store.window_query]
 `PileupInput::records_overlapping(start, end)` MUST yield the index of every
-record whose alignment overlaps the inclusive interval `[start, end]`
+mapped record whose alignment overlaps the inclusive interval `[start, end]`
 under [`interval.overlap_test`](./0-1-pos.md#intervaloverlap_test) —
 `pos <= end && end_pos >= start` — and no other, in ascending record index.
 `end < start` is the empty interval and MUST yield nothing, as MUST an interval
-past the last record. The yielded values are the store's
+past the last record. A placed-unmapped record MUST NOT be yielded: it sits at
+a position (`end_pos == pos`, r[`record_store.end_pos_htslib`]) but aligns to
+nothing, the pileup never reports one (r[`pileup.unmapped_excluded`]), and this
+query answers for what the pileup reports. The yielded values are the store's
 record indices, valid for `RecordStore::record` — which `PileupInput::store()`
 exposes read-only for exactly this — and for `PileupColumn::find_record` on any
 column of an engine built from that input.
@@ -180,10 +183,11 @@ bound on `pos` alone is not a lower bound on overlap — and with no bound at
 all a backward scan from `start` has no stopping point, since a long enough
 record arbitrarily far back still overlaps. `prepare_for_pileup` MUST
 therefore build, over the records in position order, the running maximum of
-`end_pos` — `reach[i]`, the furthest any record at index `<= i` extends — which never decreases, so the first record
+`end_pos` among the mapped records — `reach[i]`, the furthest any mapped
+record at index `<= i` extends — which never decreases, so the first record
 that can overlap `[start, ..]` is the first `i` with `reach[i] >= start`,
 found by binary search. The query MUST start there and scan forward until
-`pos > end`, keeping the records whose `end_pos >= start`. Every record
+`pos > end`, keeping the mapped records whose `end_pos >= start`. Every record
 before that point ends before `start` and cannot overlap; nothing after it is
 skipped; and the record at that point is itself a hit or already past `end`.
 

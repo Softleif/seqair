@@ -2082,7 +2082,9 @@ mod tests {
             /// span reports is in the set, and every record in the set shows
             /// up in some column inside the span. The two directions together
             /// pin the query to what the engine actually emits, not to a
-            /// second copy of the overlap test.
+            /// second copy of the overlap test. The generator includes
+            /// placed-unmapped reads, which the engine never reports, so the
+            /// second direction is what keeps them out of the query too.
             ///
             /// The agreement is exact only because nothing here makes a column
             /// differ from alignment overlap: no soft-clip overhang, no depth
@@ -2131,7 +2133,7 @@ mod tests {
                 if let Some(mid) = mid {
                     prop_assert_eq!(mid, expected.clone());
                 }
-                // Every record in the span consumes reference there
+                // Every mapped record in the span consumes reference there
                 // (M or D), so the engine must have reported it at some column.
                 prop_assert_eq!(seen, set);
 
