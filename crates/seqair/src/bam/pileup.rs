@@ -261,6 +261,23 @@ impl<'eng, U> PileupColumn<'eng, U> {
         self.store
     }
 
+    // r[impl pileup.records_overlapping]
+    /// Indices of the mapped records whose alignment overlaps `[start, end]`
+    /// (both inclusive), ascending — the same answer
+    /// [`PileupEngine::records_overlapping`] gives, reachable while this
+    /// column is alive. This is the entry point for a caller that decides at
+    /// a column that the surrounding region needs a second look and wants
+    /// the reads spanning it without letting go of the column.
+    ///
+    /// The indices address the engine's store, so they are the `record_idx`
+    /// values this and every later column report and stay valid for
+    /// [`find_record`](Self::find_record) on any of them. They mean nothing
+    /// once the engine's store has been reclaimed; see
+    /// [`PileupEngine::records_overlapping`].
+    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + 'eng {
+        self.store.records_overlapping_sorted(start, end)
+    }
+
     /// Count of alignments with a query base at this position.
     ///
     /// Unlike [`depth`](Self::depth), deletions and ref-skips are not counted.
@@ -779,13 +796,20 @@ impl<U> PileupEngine<U> {
     }
 
     // r[impl pileup.records_overlapping]
-    /// Indices of the records whose alignment overlaps `[start, end]` (both
-    /// inclusive), ascending — the same answer
+    /// Indices of the mapped records whose alignment overlaps `[start, end]`
+    /// (both inclusive), ascending — the same answer
     /// [`PileupInput::records_overlapping`] gives for the input this engine
     /// was built from. The engine never reorders its store, so these are the
     /// `record_idx` values its columns report, and they stay valid for
-    /// [`PileupColumn::find_record`] on any later column. Yields nothing once
-    /// [`reclaim_allocation`](Self::reclaim_allocation) has emptied the store.
+    /// [`PileupColumn::find_record`] on any later column. Between columns
+    /// call this; while holding a column, which borrows the engine, use
+    /// [`PileupColumn::records_overlapping`] for the same answer.
+    ///
+    /// The indices are only meaningful while this engine holds the store.
+    /// Once [`reclaim_allocation`](Self::reclaim_allocation) — or the drop of
+    /// the [`PileupGuard`] that wraps the engine — has emptied it, this query
+    /// yields nothing, and indices collected earlier no longer name anything:
+    /// resolve them against [`store`](Self::store) before that point.
     pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + '_ {
         self.store.records_overlapping_sorted(start, end)
     }

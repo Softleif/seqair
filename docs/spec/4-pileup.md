@@ -104,13 +104,32 @@ r[pileup.extras.recover_store]
 ## Window query on the engine
 
 r[pileup.records_overlapping]
-`PileupEngine::records_overlapping(start, end)` MUST yield exactly what
+`PileupEngine::records_overlapping(start, end)` and
+`PileupColumn::records_overlapping(start, end)` MUST both yield exactly what
 [`record_store.window_query`](./3-record_store.md#record_storewindow_query)
 yields for the `PileupInput` the engine was built from, at any point of the
 iteration: the engine never reorders or rewrites its store, so the indices are
-the ones its columns report as `record_idx`, and a caller MAY use them with
-`PileupColumn::find_record` on a later column. After `reclaim_allocation` the
-store is empty and the query MUST yield nothing.
+store indices — what a column carries as `record_idx` — and a caller MAY use
+them with `PileupColumn::find_record` on this or any later column. The column
+entry point exists because a column borrows the engine for as long as it
+lives, so the engine's method is unreachable while one is held — and a caller
+who has just seen something at a column is exactly the caller who wants the
+reads around it.
+
+The query answers for alignment overlap, which is what a column reports except
+in three cases a caller MUST expect. A soft-clip overhang
+(`PileupEngine::set_soft_clip_overhang`) projects clipped bases to positions
+outside the alignment, so a column MAY report a record the query does not
+yield for a window that touches only the overhang. A depth cap truncates a
+column, and the engine's region clips which columns exist at all, so a column
+MAY omit — or never show — a record the query does yield. With none of the
+three in play the two agree exactly, and that is the property the tests pin.
+
+The indices are meaningful only while the engine holds the store. After
+`reclaim_allocation` — which the `PileupGuard` drop runs — the store is empty,
+the query MUST yield nothing, and indices collected earlier name nothing;
+`RecordStore::record` on such an index is a programming error, not a lookup
+that fails.
 
 ## Mate links in columns
 
