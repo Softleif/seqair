@@ -338,6 +338,62 @@ impl Counter {
 }
 
 /// Construct pileup, count depth and all bases
+/// The slab-heavy shape: qname + seq + aux for every alignment of every
+/// column, which is what a caller doing per-read work actually does — and what
+/// `pileup_e2e` deliberately does not, since it only reads the column entry.
+///
+/// The two variants differ only in how often the record is resolved: once per
+/// accessor, or once per alignment through `AlignmentView::record`. That
+/// difference is the whole point of the handle, so it is measured rather than
+/// asserted.
+fn pileup_slab_access(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pileup_slab_access");
+
+    let load = || {
+        let path = std::path::Path::new(BAM_PATH);
+        let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
+        let mut store = seqair::bam::RecordStore::new();
+        let tid = reader.header().tid(CHROM).unwrap();
+        reader.fetch_into(tid, START, END, &mut store).unwrap();
+        store
+    };
+
+    group.bench_function("per_accessor", |b| {
+        b.iter(|| {
+            let store = load();
+            let mut engine =
+                seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, START, END);
+            let mut bytes: u64 = 0;
+            while let Some(col) = engine.pileups() {
+                for aln in col.alignments() {
+                    bytes +=
+                        aln.qname().len() as u64 + aln.seq().len() as u64 + aln.aux().len() as u64;
+                }
+            }
+            black_box(bytes)
+        });
+    });
+
+    group.bench_function("via_record", |b| {
+        b.iter(|| {
+            let store = load();
+            let mut engine =
+                seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, START, END);
+            let mut bytes: u64 = 0;
+            while let Some(col) = engine.pileups() {
+                for aln in col.alignments() {
+                    let rec = aln.record();
+                    bytes +=
+                        rec.qname().len() as u64 + rec.seq().len() as u64 + rec.aux().len() as u64;
+                }
+            }
+            black_box(bytes)
+        });
+    });
+
+    group.finish();
+}
+
 fn pileup_e2e(c: &mut Criterion) {
     use noodles::bam as nbam;
     use noodles::sam;
@@ -775,6 +831,7 @@ criterion_group!(
     bam_record_decode,
     bam_roundtrip,
     pileup_e2e,
+    pileup_slab_access,
     aligned_pairs_walk,
     pileup_with_reference,
     pileup_tiled,
