@@ -175,7 +175,7 @@ fn integration_with_real_bam() {
         .expect("fetch");
 
     assert!(count > 0);
-    for i in 0..store.len() as u32 {
+    for i in store.indices() {
         let rec = store.record(i);
         assert!(rec.seq_len > 0);
         assert_eq!(store.qual(i).len(), rec.seq_len as usize);
@@ -266,7 +266,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
 
     // Re-push every record via push_fields and compare
     let mut store2 = RecordStore::new();
-    for i in 0..store.len() as u32 {
+    for i in store.indices() {
         let rec = store.record(i);
         store2.push_fields(
             rec.pos,
@@ -289,7 +289,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
     }
 
     assert_eq!(store.len(), store2.len());
-    for i in 0..store.len() as u32 {
+    for i in store.indices() {
         assert_eq!(store.record(i).pos, store2.record(i).pos, "rec {i}: pos");
         assert_eq!(store.record(i).flags, store2.record(i).flags, "rec {i}: flags");
         assert_eq!(store.record(i).seq_len, store2.record(i).seq_len, "rec {i}: seq_len");

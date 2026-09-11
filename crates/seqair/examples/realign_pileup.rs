@@ -26,6 +26,7 @@
 
 use anyhow::Context;
 use clap::Parser as _;
+use seqair::bam::RecordIdx;
 use seqair::{
     bam::{CigarOp, RecordStore, cigar::CigarOpType},
     reader::{DepthLimit, Readers, SegmentOptions},
@@ -55,8 +56,8 @@ struct Cli {
 /// `M` op of length ≥ 2, shifting `pos` right by one. Returns the number of
 /// records rewritten.
 fn realign_leading_clip(store: &mut RecordStore<()>) -> usize {
-    let mut plan: Vec<(u32, Pos0, Vec<CigarOp>)> = Vec::new();
-    for idx in 0..store.len() as u32 {
+    let mut plan: Vec<(RecordIdx, Pos0, Vec<CigarOp>)> = Vec::new();
+    for idx in store.indices() {
         let rec = store.record(idx);
         if rec.flags.is_unmapped() {
             continue;

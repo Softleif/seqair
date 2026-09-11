@@ -13,6 +13,8 @@
     clippy::format_collect,
     reason = "test code with known small values"
 )]
+mod helpers;
+use helpers::ri;
 use proptest::prelude::*;
 use seqair::bam::Pos0;
 use seqair_types::Base;
@@ -76,7 +78,7 @@ proptest! {
         reader.fetch_into(tid, Pos0::new(1).unwrap(), Pos0::new(100_000_000).unwrap(), &mut store)?;
 
         prop_assert!(!store.is_empty(), "should fetch at least 1 record");
-        let rec = store.record(0);
+        let rec = store.record(ri(0));
 
         // Invariant 1: alignment spans at least one base.
         prop_assert!(rec.end_pos >= rec.pos, "end_pos must be >= pos");
@@ -130,7 +132,7 @@ proptest! {
         reader.fetch_into(tid, Pos0::new(1).unwrap(), Pos0::new(100_000_000).unwrap(), &mut store)?;
 
         prop_assert_eq!(store.len(), 1);
-        let seq = store.seq(0);
+        let seq = store.seq(ri(0));
         prop_assert_eq!(seq.len(), bases.len());
         for (i, (&input_byte, &actual)) in bases.iter().zip(seq.iter()).enumerate() {
             let expected_base = match input_byte {
@@ -175,7 +177,7 @@ proptest! {
         reader.fetch_into(tid, Pos0::new(1).unwrap(), Pos0::new(100_000_000).unwrap(), &mut store)?;
 
         prop_assert_eq!(store.len(), 1);
-        let stored_qual = store.qual(0);
+        let stored_qual = store.qual(ri(0));
         prop_assert_eq!(stored_qual.len(), quals.len());
         for (i, (&expected, &actual)) in quals.iter().zip(stored_qual.iter()).enumerate() {
             prop_assert_eq!(actual.as_byte(), expected, "pos {}", i);

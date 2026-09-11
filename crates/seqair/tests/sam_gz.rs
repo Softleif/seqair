@@ -60,7 +60,8 @@ struct RecordSnapshot {
 }
 
 fn snapshot_store(store: &RecordStore) -> Vec<RecordSnapshot> {
-    (0..store.len() as u32)
+    store
+        .indices()
         .map(|i| {
             let r = store.record(i);
             RecordSnapshot {
@@ -212,7 +213,7 @@ fn sam_gz_sequence_and_quality_match_bam() {
 
     assert_eq!(sam_store.len(), bam_store.len());
 
-    for i in 0..bam_store.len() as u32 {
+    for i in bam_store.indices() {
         assert_eq!(sam_store.seq(i), bam_store.seq(i), "rec {i}: seq mismatch");
         assert_eq!(sam_store.qual(i), bam_store.qual(i), "rec {i}: qual mismatch");
     }

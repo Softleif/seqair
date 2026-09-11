@@ -561,6 +561,7 @@ fn try_qpos(stored_idx: usize, seq_len: usize) -> Result<u32, BaseModError> {
 )]
 mod tests {
     use super::*;
+    use crate::bam::record_store::RecordIdx;
     use seqair_types::Base::{A, C, G, T};
 
     fn seq(bases: &[Base]) -> Vec<Base> {
@@ -868,7 +869,7 @@ mod tests {
 
     /// Push a forward-strand record with the given bases and aux bytes.
     /// Returns the populated `RecordStore` and the record index.
-    fn push_record(bases: &[Base], aux: &[u8]) -> (RecordStore<()>, u32) {
+    fn push_record(bases: &[Base], aux: &[u8]) -> (RecordStore<()>, RecordIdx) {
         let mut store: RecordStore<()> = RecordStore::new();
         let pos = Pos0::new(100).unwrap();
         let qual = vec![30u8; bases.len()];

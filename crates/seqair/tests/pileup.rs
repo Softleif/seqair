@@ -13,6 +13,7 @@
     reason = "test code with known small values"
 )]
 mod helpers;
+use helpers::ri;
 
 use helpers::{cigar_op, collect_columns, make_record, make_record_with_cigar};
 use proptest::prelude::*;
@@ -297,7 +298,7 @@ fn zero_refspan_read_handled_gracefully() {
     let raw = make_record_with_cigar(0, 50, 99, 60, &[cigar_op(10, 4)], 10); // 10S
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
-    assert_eq!(arena.record(0).end_pos, Pos0::new(50).unwrap());
+    assert_eq!(arena.record(ri(0)).end_pos, Pos0::new(50).unwrap());
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
@@ -364,7 +365,7 @@ fn zero_refspan_endpos_equals_pos() {
     let raw = make_record_with_cigar(0, 100, 99, 60, &[cigar_op(10, 4)], 10); // 10S
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
-    let r = arena.record(0);
+    let r = arena.record(ri(0));
     assert_eq!(r.end_pos, Pos0::new(100).unwrap(), "zero-refspan should have end_pos == pos");
 }
 
@@ -719,7 +720,7 @@ proptest! {
         let mut engine = PileupEngine::new(arena.prepare_for_pileup().input, Pos0::new(region_start).unwrap(), Pos0::new(region_end).unwrap());
         while let Some(col) = engine.pileups() {
             for aln in col.alignments() {
-                let read = &reads[aln.record_idx() as usize];
+                let read = &reads[aln.record_idx().as_usize()];
                 let expected_qpos = read.qpos_at(col.pos().as_i64());
                 prop_assert_eq!(aln.qpos(), expected_qpos.map(|q| QPos::new(q as u32)),
                     "qpos mismatch at pos {} for read at pos {} with cigar {:?}",
@@ -833,7 +834,7 @@ proptest! {
                     prop_assert!(qpos.as_usize() < aln.seq_len as usize,
                         "qpos {} >= seq_len {} at pos {} for read with cigar {:?}",
                         qpos, aln.seq_len, col.pos(),
-                        reads[aln.record_idx() as usize].cigar_ops);
+                        reads[aln.record_idx().as_usize()].cigar_ops);
                 }
             }
         }

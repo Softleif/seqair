@@ -5,7 +5,7 @@
 
 use super::header::{BamHeader, BamHeaderError};
 use super::owned_record::{OwnedBamRecord, OwnedRecordError};
-use super::record_store::RecordStore;
+use super::record_store::{RecordIdx, RecordStore};
 use crate::io::{BgzfError, BgzfWriter, IndexBuilder, IndexError};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -208,7 +208,7 @@ impl<W: Write> BamWriter<W> {
     pub fn write_store_record(
         &mut self,
         store: &RecordStore,
-        idx: u32,
+        idx: RecordIdx,
     ) -> Result<(), BamWriteError> {
         if self.poisoned {
             return Err(BamWriteError::Poisoned);
@@ -231,7 +231,7 @@ impl<W: Write> BamWriter<W> {
     fn write_store_record_inner(
         &mut self,
         store: &RecordStore,
-        idx: u32,
+        idx: RecordIdx,
     ) -> Result<(), BamWriteError> {
         let rec = store.record(idx);
         let qname = store.qname(idx);
@@ -788,8 +788,8 @@ mod tests {
         let mut output = Vec::new();
         {
             let mut writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
-            writer.write_store_record(&store, 0).unwrap();
-            writer.write_store_record(&store, 1).unwrap();
+            writer.write_store_record(&store, RecordIdx::ZERO).unwrap();
+            writer.write_store_record(&store, RecordIdx::new(1).unwrap()).unwrap();
             writer.finish().unwrap();
         }
 
@@ -802,7 +802,7 @@ mod tests {
             push_one_record_from_bgzf(&mut reader, &mut store2);
         }
 
-        for i in 0..2u32 {
+        for i in store.indices() {
             let a = store.record(i);
             let b = store2.record(i);
             assert_eq!(a.pos.as_u32(), b.pos.as_u32(), "pos mismatch for record {i}");
@@ -863,8 +863,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mut writer =
             BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
-        #[allow(clippy::cast_possible_truncation, reason = "test data is tiny")]
-        for i in 0..store.len() as u32 {
+        for i in store.indices() {
             writer.write_store_record(&store, i).unwrap();
         }
         let (_inner, index) = writer.finish().unwrap();

@@ -20,6 +20,7 @@ use noodles::cram;
 use noodles::fasta;
 use noodles::sam;
 use noodles::sam::alignment::record::Sequence as _;
+use seqair::bam::RecordIdx;
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::Readers;
 use seqair_types::BaseQuality;
@@ -156,9 +157,8 @@ fn cram_chr19_count_matches_noodles() {
             )
             .unwrap();
 
-        let our_in_range = (0..store.len() as u32)
-            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
-            .count();
+        let our_in_range =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).count();
 
         assert_eq!(
             our_in_range, noodles_in_range,
@@ -196,8 +196,8 @@ fn cram_chr19_records_match_noodles_field_by_field() {
             )
             .unwrap();
 
-        let our_records: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+        let our_records: Vec<RecordIdx> =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
@@ -283,8 +283,8 @@ fn cram_end_pos_matches_noodles_inclusive_convention() {
             )
             .unwrap();
 
-        let our_records: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+        let our_records: Vec<RecordIdx> =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
@@ -332,8 +332,8 @@ fn cram_chr19_sequences_match_noodles() {
             )
             .unwrap();
 
-        let our_records: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+        let our_records: Vec<RecordIdx> =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
@@ -391,8 +391,8 @@ fn cram_chr19_quality_scores_match_noodles() {
             )
             .unwrap();
 
-        let our_records: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+        let our_records: Vec<RecordIdx> =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
@@ -436,8 +436,8 @@ fn cram_chr19_qnames_match_noodles() {
             )
             .unwrap();
 
-        let our_records: Vec<u32> =
-            (0..store.len() as u32).filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+        let our_records: Vec<RecordIdx> =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 

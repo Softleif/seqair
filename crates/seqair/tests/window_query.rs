@@ -11,8 +11,10 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::ri;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
-use seqair::bam::record_store::RecordStore;
+use seqair::bam::record_store::{RecordIdx, RecordStore};
 use seqair::reader::{DepthLimit, Readers, Segment, SegmentOptions};
 use seqair_types::{Base, Pos0};
 use std::collections::BTreeMap;
@@ -37,7 +39,7 @@ fn segment(readers: &Readers) -> Segment {
 }
 
 /// The definition, over the store's public iterator: no search, no index.
-fn brute_force(store: &RecordStore, start: Pos0, end: Pos0) -> Vec<u32> {
+fn brute_force(store: &RecordStore, start: Pos0, end: Pos0) -> Vec<RecordIdx> {
     if end < start {
         return Vec::new();
     }
@@ -45,7 +47,7 @@ fn brute_force(store: &RecordStore, start: Pos0, end: Pos0) -> Vec<u32> {
         .records()
         .enumerate()
         .filter(|(_, rec)| !rec.flags.is_unmapped() && rec.pos <= end && rec.end_pos >= start)
-        .map(|(idx, _)| idx as u32)
+        .map(|(idx, _)| ri(u32::try_from(idx).unwrap()))
         .collect()
 }
 
@@ -75,7 +77,7 @@ fn query_matches_brute_force_on_real_reads() {
             continue;
         }
         let (start, end) = window(col.pos(), 150);
-        let hits: Vec<u32> = col.records_overlapping(start, end).collect();
+        let hits: Vec<RecordIdx> = col.records_overlapping(start, end).collect();
         assert_eq!(hits, brute_force(col.store(), start, end), "window around {}", col.pos());
         for view in col.alignments() {
             assert!(
@@ -97,7 +99,7 @@ fn query_matches_brute_force_on_real_reads() {
     assert!(non_empty > 0, "some window should hold reads");
 
     let (start, end) = window(segment.start(), 300);
-    let hits: Vec<u32> = pileup.records_overlapping(start, end).collect();
+    let hits: Vec<RecordIdx> = pileup.records_overlapping(start, end).collect();
     assert_eq!(hits, brute_force(pileup.store(), start, end));
     assert!(!hits.is_empty());
 }
@@ -108,14 +110,14 @@ fn query_matches_brute_force_on_real_reads() {
 /// alone, and which tells mates of one template apart.
 fn shift_leading_base(store: &mut RecordStore) -> BTreeMap<(Vec<u8>, Pos0), Pos0> {
     struct Planned {
-        idx: u32,
+        idx: RecordIdx,
         key: (Vec<u8>, Pos0),
         old_pos: Pos0,
         new_pos: Pos0,
         cigar: Vec<CigarOp>,
     }
     let mut plan: Vec<Planned> = Vec::new();
-    for idx in 0..store.len() as u32 {
+    for idx in store.indices() {
         let rec = store.record(idx);
         if rec.flags.is_unmapped() {
             continue;
@@ -167,7 +169,7 @@ fn query_after_a_realigning_hook_names_the_moved_reads() {
         .unwrap();
     assert!(!moved.is_empty(), "the fixture has reads with a leading M");
 
-    let hits: Vec<u32> = pileup.records_overlapping(seg_start, seg_end).collect();
+    let hits: Vec<RecordIdx> = pileup.records_overlapping(seg_start, seg_end).collect();
     assert_eq!(hits, brute_force(pileup.store(), seg_start, seg_end));
     let mut found_moved = 0usize;
     for &idx in &hits {

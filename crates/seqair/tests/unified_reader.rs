@@ -12,6 +12,8 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::ri;
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::{IndexedReader, Readers};
 use std::path::Path;
@@ -143,7 +145,7 @@ fn bam_and_sam_produce_same_records() {
             sam_store.len()
         );
 
-        for i in 0..bam_store.len() as u32 {
+        for i in bam_store.indices() {
             assert_eq!(bam_store.record(i).pos, sam_store.record(i).pos, "{contig} rec {i}: pos");
             assert_eq!(
                 bam_store.record(i).flags,
@@ -176,10 +178,10 @@ fn every_format_agrees_on_the_edges_of_a_query() {
     bam_reader
         .fetch_into(tid, Pos0::new(6_103_076).unwrap(), Pos0::new(6_104_000).unwrap(), &mut store)
         .unwrap();
-    let probe = store.record(0);
+    let probe = store.record(ri(0));
     let (first, last) = (probe.pos, probe.end_pos);
     assert!(last > first, "need a record spanning more than one base");
-    let qname = store.qname(0).to_vec();
+    let qname = store.qname(ri(0)).to_vec();
 
     /// A named way to open the same data in one of the three formats.
     type OpenReader<'a> = (&'a str, Box<dyn Fn() -> IndexedReader + 'a>);
@@ -210,7 +212,7 @@ fn every_format_agrees_on_the_edges_of_a_query() {
             let tid = reader.header().tid("chr19").unwrap();
             let mut store = RecordStore::new();
             reader.fetch_into(tid, edge, edge, &mut store).unwrap();
-            let hit = (0..store.len() as u32).any(|i| store.qname(i) == qname.as_slice());
+            let hit = store.indices().any(|i| store.qname(i) == qname.as_slice());
             assert!(
                 hit,
                 "{format}: the record covering its own {label} ({}) must overlap a query there",
@@ -236,7 +238,7 @@ fn every_format_agrees_on_the_edges_of_a_query() {
         reader.fetch_into(tid, past, past, &mut store).unwrap();
         // Other records may cover that position; this one must not be reported
         // as covering it unless it genuinely does.
-        for i in 0..store.len() as u32 {
+        for i in store.indices() {
             if store.qname(i) == qname.as_slice() {
                 assert!(
                     store.record(i).end_pos >= past,
@@ -378,7 +380,7 @@ fn bam_and_cram_produce_same_records() {
             cram_store.len()
         );
 
-        for i in 0..bam_store.len() as u32 {
+        for i in bam_store.indices() {
             assert_eq!(bam_store.record(i).pos, cram_store.record(i).pos, "{contig} rec {i}: pos");
             assert_eq!(
                 bam_store.record(i).flags,
@@ -443,7 +445,7 @@ fn all_three_formats_produce_same_records() {
     assert_eq!(bam_store.len(), sam_store.len(), "BAM vs SAM count");
     assert_eq!(bam_store.len(), cram_store.len(), "BAM vs CRAM count");
 
-    for i in 0..bam_store.len() as u32 {
+    for i in bam_store.indices() {
         let bp = bam_store.record(i).pos;
         let sp = sam_store.record(i).pos;
         let cp = cram_store.record(i).pos;

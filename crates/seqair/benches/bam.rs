@@ -216,8 +216,7 @@ fn bam_roundtrip(c: &mut Criterion) {
             let mut output = Vec::with_capacity(2_000_000);
             let mut writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
 
-            for i in 0..store.len() {
-                let idx = i as u32;
+            for idx in store.indices() {
                 let slim = store.record(idx);
                 let cigar = store.cigar(idx).to_vec();
 
@@ -490,7 +489,7 @@ fn aligned_pairs_walk(c: &mut Criterion) {
     group.bench_function("seqair_bare", |b| {
         b.iter(|| {
             let mut total_pairs: u64 = 0;
-            for idx in 0..seqair_store.len() as u32 {
+            for idx in seqair_store.indices() {
                 let rec = seqair_store.record(idx);
                 for pair in rec.aligned_pairs(&seqair_store).unwrap() {
                     let _ = black_box(pair);
@@ -505,7 +504,7 @@ fn aligned_pairs_walk(c: &mut Criterion) {
     group.bench_function("seqair_with_read", |b| {
         b.iter(|| {
             let mut total_pairs: u64 = 0;
-            for idx in 0..seqair_store.len() as u32 {
+            for idx in seqair_store.indices() {
                 let rec = seqair_store.record(idx);
                 for ev in rec.aligned_pairs_with_read(&seqair_store).unwrap() {
                     let _ = black_box(ev);
@@ -520,7 +519,7 @@ fn aligned_pairs_walk(c: &mut Criterion) {
     group.bench_function("seqair_matches_only", |b| {
         b.iter(|| {
             let mut total: u64 = 0;
-            for idx in 0..seqair_store.len() as u32 {
+            for idx in seqair_store.indices() {
                 let rec = seqair_store.record(idx);
                 for m in rec.aligned_pairs(&seqair_store).unwrap().matches_only() {
                     let _ = black_box(m);

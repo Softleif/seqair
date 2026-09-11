@@ -196,7 +196,7 @@ fn sample_bam(path: &Path, region_size: u64, regions_per_bam: usize) -> Aggregat
         let mut cigar_bytes = 0usize;
         let mut qual_bytes = 0usize;
         let mut aux_bytes = 0usize;
-        for i in 0..store.len() as u32 {
+        for i in store.indices() {
             names_bytes += store.qname(i).len();
             bases_bytes += store.seq(i).len();
             cigar_bytes += store.cigar(i).len();

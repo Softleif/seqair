@@ -19,10 +19,12 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::ri;
 use proptest::prelude::*;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::{Indel, PileupColumn, PileupEngine};
-use seqair::bam::record_store::{RecordStore, qname_hash};
+use seqair::bam::record_store::{RecordIdx, RecordStore, qname_hash};
 use seqair::reader::{DepthLimit, Readers, SegmentOptions};
 use seqair_types::{BamFlags, Base, Pos0};
 use std::collections::HashSet;
@@ -63,7 +65,7 @@ impl Read {
     }
 }
 
-fn push(store: &mut RecordStore, qname: &[u8], read: Read) -> u32 {
+fn push(store: &mut RecordStore, qname: &[u8], read: Read) -> RecordIdx {
     let len = read.len as usize;
     let cigar = [CigarOp::new(CigarOpType::Match, read.len)];
     let bases = vec![Base::A; len];
@@ -100,7 +102,7 @@ fn linked_pair(a: Read, b: Read) -> RecordStore {
     store
 }
 
-fn overlap_of(store: &RecordStore, idx: u32) -> Option<(u64, u64)> {
+fn overlap_of(store: &RecordStore, idx: RecordIdx) -> Option<(u64, u64)> {
     store.mate_overlap(idx).map(|r| (r.start.as_u64(), r.end.as_u64()))
 }
 
@@ -123,8 +125,8 @@ fn qname_hash_is_a_pure_function_of_the_bytes() {
 #[test]
 fn mates_share_the_qname_hash() {
     let store = linked_pair(Read::mate(100, 50, 130, FIRST), Read::mate(130, 50, 100, SECOND));
-    assert_eq!(store.record(0).qname_hash(), store.record(1).qname_hash());
-    assert_eq!(store.record(0).qname_hash(), Some(qname_hash(b"frag")));
+    assert_eq!(store.record(ri(0)).qname_hash(), store.record(ri(1)).qname_hash());
+    assert_eq!(store.record(ri(0)).qname_hash(), Some(qname_hash(b"frag")));
 }
 
 // r[verify record_store.qname_hash]
@@ -222,10 +224,10 @@ fn qname_hash_spreads_realistic_illumina_names() {
 fn overlapping_mates_link_and_share_the_overlap() {
     let store = linked_pair(Read::mate(100, 50, 130, FIRST), Read::mate(130, 50, 100, SECOND));
 
-    assert_eq!(store.record(0).mate_idx(), Some(1));
-    assert_eq!(store.record(1).mate_idx(), Some(0));
-    assert_eq!(overlap_of(&store, 0), Some((130, 150)));
-    assert_eq!(overlap_of(&store, 1), Some((130, 150)));
+    assert_eq!(store.record(ri(0)).mate_idx(), Some(ri(1)));
+    assert_eq!(store.record(ri(1)).mate_idx(), Some(ri(0)));
+    assert_eq!(overlap_of(&store, ri(0)), Some((130, 150)));
+    assert_eq!(overlap_of(&store, ri(1)), Some((130, 150)));
 }
 
 // r[verify record_store.mate_overlap]
@@ -233,8 +235,8 @@ fn overlapping_mates_link_and_share_the_overlap() {
 fn disjoint_mates_link_with_an_empty_overlap() {
     let store = linked_pair(Read::mate(100, 50, 300, FIRST), Read::mate(300, 50, 100, SECOND));
 
-    assert_eq!(store.record(0).mate_idx(), Some(1));
-    let overlap = store.mate_overlap(0).expect("linked");
+    assert_eq!(store.record(ri(0)).mate_idx(), Some(ri(1)));
+    let overlap = store.mate_overlap(ri(0)).expect("linked");
     assert!(overlap.start >= overlap.end, "disjoint mates must yield an empty range");
 }
 
@@ -244,8 +246,8 @@ fn an_unlinked_record_has_no_overlap() {
     let mut store = RecordStore::new();
     push(&mut store, b"frag", Read::mate(100, 50, 130, FIRST));
     let _stats = store.link_mates();
-    assert_eq!(store.record(0).mate_idx(), None);
-    assert_eq!(store.mate_overlap(0), None);
+    assert_eq!(store.record(ri(0)).mate_idx(), None);
+    assert_eq!(store.mate_overlap(ri(0)), None);
 }
 
 // r[verify record_store.link_mates+2]
@@ -263,9 +265,9 @@ fn supplementary_alignments_do_not_link() {
     );
     let _stats = store.link_mates();
 
-    assert_eq!(store.record(0).mate_idx(), Some(1));
-    assert_eq!(store.record(1).mate_idx(), Some(0));
-    assert_eq!(store.record(2).mate_idx(), None);
+    assert_eq!(store.record(ri(0)).mate_idx(), Some(ri(1)));
+    assert_eq!(store.record(ri(1)).mate_idx(), Some(ri(0)));
+    assert_eq!(store.record(ri(2)).mate_idx(), None);
 }
 
 // r[verify record_store.link_mates+2]
@@ -280,8 +282,8 @@ fn secondary_alignments_do_not_link() {
     push(&mut store, b"frag", Read::mate(130, 50, 100, SECOND));
     let _stats = store.link_mates();
 
-    assert_eq!(store.record(0).mate_idx(), None);
-    assert_eq!(store.record(1).mate_idx(), None);
+    assert_eq!(store.record(ri(0)).mate_idx(), None);
+    assert_eq!(store.record(ri(1)).mate_idx(), None);
 }
 
 // r[verify record_store.link_mates+2]
@@ -293,8 +295,8 @@ fn a_mate_outside_the_store_leaves_the_read_unlinked() {
     push(&mut store, b"other", Read::mate(120, 50, 8_000, FIRST));
     let _stats = store.link_mates();
 
-    assert_eq!(store.record(0).mate_idx(), None);
-    assert_eq!(store.record(1).mate_idx(), None);
+    assert_eq!(store.record(ri(0)).mate_idx(), None);
+    assert_eq!(store.record(ri(1)).mate_idx(), None);
 }
 
 // r[verify record_store.link_mates+2]
@@ -304,8 +306,8 @@ fn mates_on_another_contig_do_not_link() {
     let b = Read { tid: 1, ..Read::mate(130, 50, 100, SECOND) };
     let store = linked_pair(a, b);
 
-    assert_eq!(store.record(0).mate_idx(), None);
-    assert_eq!(store.record(1).mate_idx(), None);
+    assert_eq!(store.record(ri(0)).mate_idx(), None);
+    assert_eq!(store.record(ri(1)).mate_idx(), None);
 }
 
 // r[verify record_store.link_mates+2]
@@ -315,8 +317,8 @@ fn unpaired_reads_do_not_link() {
     let b = Read::mate(130, 50, 100, 0).with_flags(0);
     let store = linked_pair(a, b);
 
-    assert_eq!(store.record(0).mate_idx(), None);
-    assert_eq!(store.record(1).mate_idx(), None);
+    assert_eq!(store.record(ri(0)).mate_idx(), None);
+    assert_eq!(store.record(ri(1)).mate_idx(), None);
 }
 
 // r[verify record_store.link_mates+2]
@@ -330,25 +332,25 @@ fn distinct_qnames_at_identical_positions_do_not_cross_link() {
     push(&mut store, b"frag_b", Read::mate(130, 50, 100, SECOND));
     let _stats = store.link_mates();
 
-    assert_eq!(store.record(0).mate_idx(), Some(2));
-    assert_eq!(store.record(2).mate_idx(), Some(0));
-    assert_eq!(store.record(1).mate_idx(), Some(3));
-    assert_eq!(store.record(3).mate_idx(), Some(1));
+    assert_eq!(store.record(ri(0)).mate_idx(), Some(ri(2)));
+    assert_eq!(store.record(ri(2)).mate_idx(), Some(ri(0)));
+    assert_eq!(store.record(ri(1)).mate_idx(), Some(ri(3)));
+    assert_eq!(store.record(ri(3)).mate_idx(), Some(ri(1)));
 }
 
 // r[verify record_store.link_mates.invalidated]
 #[test]
 fn sorting_and_dedup_drop_the_links() {
     let mut store = linked_pair(Read::mate(100, 50, 130, FIRST), Read::mate(130, 50, 100, SECOND));
-    assert!(store.record(0).mate_idx().is_some());
+    assert!(store.record(ri(0)).mate_idx().is_some());
 
     store.sort_by_pos();
-    assert_eq!(store.record(0).mate_idx(), None, "sort_by_pos must invalidate mate indices");
+    assert_eq!(store.record(ri(0)).mate_idx(), None, "sort_by_pos must invalidate mate indices");
 
     let _stats = store.link_mates();
-    assert!(store.record(0).mate_idx().is_some());
+    assert!(store.record(ri(0)).mate_idx().is_some());
     store.dedup();
-    assert_eq!(store.record(0).mate_idx(), None, "dedup must invalidate mate indices");
+    assert_eq!(store.record(ri(0)).mate_idx(), None, "dedup must invalidate mate indices");
 }
 
 // r[verify record_store.qname_hash.no_name]
@@ -364,10 +366,10 @@ fn nameless_records_have_no_identity_and_never_link() {
     push(&mut store, b"", Read::mate(130, 50, 100, SECOND));
     let stats = store.link_mates();
 
-    assert_eq!(store.record(0).qname_hash(), None, "an empty qname is no identity");
-    assert_eq!(store.record(1).qname_hash(), None);
-    assert_eq!(store.record(0).mate_idx(), None, "nameless records must not link");
-    assert_eq!(store.record(1).mate_idx(), None);
+    assert_eq!(store.record(ri(0)).qname_hash(), None, "an empty qname is no identity");
+    assert_eq!(store.record(ri(1)).qname_hash(), None);
+    assert_eq!(store.record(ri(0)).mate_idx(), None, "nameless records must not link");
+    assert_eq!(store.record(ri(1)).mate_idx(), None);
     assert_eq!(stats.pairs, 0);
     assert!(stats.is_clean(), "nameless records are not a qname-uniqueness violation");
 }
@@ -396,16 +398,16 @@ fn a_hash_collision_costs_a_comparison_not_a_link() {
     push(&mut store, b"frag_b", Read::mate(100, 50, 130, FIRST));
     push(&mut store, b"frag_a", Read::mate(130, 50, 100, SECOND));
     push(&mut store, b"frag_b", Read::mate(130, 50, 100, SECOND));
-    for idx in 0..4 {
-        store.set_qname_hash(idx, 0xC0111DEu64).expect("record exists");
+    for n in 0..store.len() {
+        store.set_qname_hash(ri(u32::try_from(n).unwrap()), 0xC0111DEu64).expect("record exists");
     }
 
     let stats = store.link_mates();
 
-    assert_eq!(store.record(0).mate_idx(), Some(2), "frag_a linked across the collision");
-    assert_eq!(store.record(2).mate_idx(), Some(0));
-    assert_eq!(store.record(1).mate_idx(), Some(3), "frag_b linked across the collision");
-    assert_eq!(store.record(3).mate_idx(), Some(1));
+    assert_eq!(store.record(ri(0)).mate_idx(), Some(ri(2)), "frag_a linked across the collision");
+    assert_eq!(store.record(ri(2)).mate_idx(), Some(ri(0)));
+    assert_eq!(store.record(ri(1)).mate_idx(), Some(ri(3)), "frag_b linked across the collision");
+    assert_eq!(store.record(ri(3)).mate_idx(), Some(ri(1)));
     assert_eq!(stats.pairs, 2);
     assert!(stats.is_clean(), "a hash collision is not a qname-uniqueness violation");
 }
@@ -424,10 +426,10 @@ fn repeated_primary_qnames_pair_up_and_are_counted() {
     push(&mut store, b"frag", Read::mate(130, 50, 100, SECOND));
     let stats = store.link_mates();
 
-    assert_eq!(store.record(0).mate_idx(), Some(2));
-    assert_eq!(store.record(2).mate_idx(), Some(0));
-    assert_eq!(store.record(1).mate_idx(), Some(3));
-    assert_eq!(store.record(3).mate_idx(), Some(1));
+    assert_eq!(store.record(ri(0)).mate_idx(), Some(ri(2)));
+    assert_eq!(store.record(ri(2)).mate_idx(), Some(ri(0)));
+    assert_eq!(store.record(ri(1)).mate_idx(), Some(ri(3)));
+    assert_eq!(store.record(ri(3)).mate_idx(), Some(ri(1)));
     assert_eq!(stats.pairs, 2);
     assert_eq!(stats.ambiguous_qnames, 1, "the second copy of the left mate is reported");
     assert!(!stats.is_clean());
@@ -446,9 +448,9 @@ fn a_duplicated_record_is_reported_as_ambiguous() {
     push(&mut store, b"frag", Read::mate(130, 50, 100, SECOND));
     let stats = store.link_mates();
 
-    assert_eq!(store.record(0).mate_idx(), Some(1));
-    assert_eq!(store.record(1).mate_idx(), Some(0));
-    assert_eq!(store.record(2).mate_idx(), None, "the third record has no free partner");
+    assert_eq!(store.record(ri(0)).mate_idx(), Some(ri(1)));
+    assert_eq!(store.record(ri(1)).mate_idx(), Some(ri(0)));
+    assert_eq!(store.record(ri(2)).mate_idx(), None, "the third record has no free partner");
     assert_eq!(stats.pairs, 1);
     assert_eq!(stats.ambiguous_qnames, 1);
 }
@@ -464,8 +466,8 @@ fn non_reciprocal_mate_positions_do_not_link() {
     push(&mut store, b"frag", Read::mate(130, 50, 99, SECOND));
     let stats = store.link_mates();
 
-    assert_eq!(store.record(0).mate_idx(), None);
-    assert_eq!(store.record(1).mate_idx(), None);
+    assert_eq!(store.record(ri(0)).mate_idx(), None);
+    assert_eq!(store.record(ri(1)).mate_idx(), None);
     assert_eq!(stats.pairs, 0);
 }
 
@@ -487,7 +489,7 @@ fn linking_survives_a_sort_of_out_of_order_records() {
 
     assert_eq!(stats.pairs, 2);
     assert!(stats.is_clean());
-    for idx in 0..4 {
+    for idx in store.indices() {
         let mate = store.record(idx).mate_idx().expect("every record is one half of a pair");
         assert_eq!(store.record(mate).mate_idx(), Some(idx), "links must be symmetric");
         assert_eq!(store.qname(idx), store.qname(mate), "linked records share a qname");
@@ -511,7 +513,7 @@ fn columns_report_the_overlap_and_can_reach_the_mate() {
     while let Some(col) = engine.pileups() {
         let pos = col.pos().as_u64();
         for aln in col.raw_alignments() {
-            assert_eq!(aln.mate_idx(), Some(1 - aln.record_idx()));
+            assert_eq!(aln.mate_idx(), Some(ri(1 - aln.record_idx().get())));
             assert_eq!(
                 aln.in_mate_overlap(),
                 (130..150).contains(&pos),
@@ -520,12 +522,15 @@ fn columns_report_the_overlap_and_can_reach_the_mate() {
             checked += 1;
         }
         if (130..150).contains(&pos) {
-            let first = col.find_record(0).expect("record 0 covers the overlap");
-            let second = col.find_record(1).expect("record 1 covers the overlap");
-            assert_eq!(first.record_idx(), 0);
-            assert_eq!(second.record_idx(), 1);
+            let first = col.find_record(ri(0)).expect("record 0 covers the overlap");
+            let second = col.find_record(ri(1)).expect("record 1 covers the overlap");
+            assert_eq!(first.record_idx(), ri(0));
+            assert_eq!(second.record_idx(), ri(1));
             // The identity lives on the record, not on the column entry.
-            assert_eq!(col.store().record(0).qname_hash(), col.store().record(1).qname_hash());
+            assert_eq!(
+                col.store().record(ri(0)).qname_hash(),
+                col.store().record(ri(1)).qname_hash()
+            );
         } else {
             // Exactly one of the two records is in the column outside the overlap.
             assert_eq!(col.depth(), 1);
@@ -548,7 +553,7 @@ fn position_of_and_alignment_at_agree_with_find_record() {
     while let Some(col) = engine.pileups() {
         columns += 1;
         // Every entry is reachable both ways, and the two agree on which it is.
-        let present: Vec<u32> = col.raw_alignments().map(|a| a.record_idx()).collect();
+        let present: Vec<RecordIdx> = col.raw_alignments().map(|a| a.record_idx()).collect();
         for (index, &record_idx) in present.iter().enumerate() {
             assert_eq!(col.position_of(record_idx), Some(index));
             let by_index = col.alignment_at(index).expect("index is within the column");
@@ -556,7 +561,7 @@ fn position_of_and_alignment_at_agree_with_find_record() {
             let by_record = col.find_record(record_idx).expect("record is in the column");
             assert_eq!(by_record.record_idx(), by_index.record_idx());
         }
-        for absent in [2, 7, u32::MAX] {
+        for absent in [ri(2), ri(7), ri(u32::MAX - 1)] {
             assert_eq!(col.position_of(absent), None);
         }
         assert!(col.alignment_at(col.depth()).is_none(), "one past the depth is not an entry");
@@ -574,9 +579,9 @@ fn find_record_returns_none_for_a_record_outside_the_column() {
         Pos0::new(120).unwrap(),
     );
     let col = engine.pileups().expect("a column at 100");
-    assert!(col.find_record(0).is_some());
-    assert!(col.find_record(1).is_none(), "the disjoint mate is not in this column");
-    assert!(col.find_record(99).is_none());
+    assert!(col.find_record(ri(0)).is_some());
+    assert!(col.find_record(ri(1)).is_none(), "the disjoint mate is not in this column");
+    assert!(col.find_record(ri(99)).is_none());
 }
 
 // r[verify pileup.column_record_order]
@@ -595,7 +600,7 @@ fn column_alignments_are_ordered_by_record_idx() {
     );
 
     while let Some(col) = engine.pileups() {
-        let idxs: Vec<u32> = col.raw_alignments().map(|a| a.record_idx()).collect();
+        let idxs: Vec<RecordIdx> = col.raw_alignments().map(|a| a.record_idx()).collect();
         assert!(
             idxs.windows(2).all(|w| w[0] < w[1]),
             "column not ascending by record_idx: {idxs:?}"
@@ -701,10 +706,10 @@ fn mate_of_surfaces_the_linked_mate() {
         Pos0::new(119).unwrap(),
     );
     with_anchor_column(&mut engine, |col| {
-        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
         assert!(view.in_mate_overlap(), "the anchor lies inside the pair overlap");
         let mate = col.mate_of(&view).expect("the mate covers the anchor");
-        assert_eq!(mate.record_idx(), 1);
+        assert_eq!(mate.record_idx(), ri(1));
         assert_eq!(mate.indel_after(), Indel::Insertion(2));
         assert_eq!(mate.inserted_bases(), &[Base::C, Base::G]);
     });
@@ -740,9 +745,9 @@ fn mate_of_surfaces_a_mate_deletion() {
         Pos0::new(119).unwrap(),
     );
     with_anchor_column(&mut engine, |col| {
-        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
         let mate = col.mate_of(&view).expect("the mate covers the anchor");
-        assert_eq!(mate.record_idx(), 1);
+        assert_eq!(mate.record_idx(), ri(1));
         assert_eq!(mate.indel_after(), Indel::Deletion(2));
     });
 }
@@ -766,7 +771,7 @@ fn mate_of_is_symmetric_and_never_self() {
         Pos0::new(119).unwrap(),
     );
     with_anchor_column(&mut engine, |col| {
-        for idx in [0, 1] {
+        for idx in [ri(0), ri(1)] {
             let view = col.alignments().find(|a| a.record_idx() == idx).unwrap();
             let mate = col.mate_of(&view).expect("both mates cover the anchor");
             assert_ne!(mate.record_idx(), idx, "a read is not its own mate");
@@ -815,10 +820,10 @@ fn mate_of_does_not_depend_on_what_either_read_carries() {
         Pos0::new(119).unwrap(),
     );
     with_anchor_column(&mut engine, |col| {
-        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
         assert_eq!(view.indel_after(), Indel::Insertion(2), "the kept read has its own");
         let mate = col.mate_of(&view).expect("the mate is reachable regardless");
-        assert_eq!(mate.record_idx(), 1);
+        assert_eq!(mate.record_idx(), ri(1));
         assert_eq!(mate.indel_after(), Indel::Insertion(2));
     });
 }
@@ -837,7 +842,7 @@ fn mate_of_is_none_without_a_linked_mate() {
         Pos0::new(119).unwrap(),
     );
     with_anchor_column(&mut engine, |col| {
-        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
         assert_eq!(view.mate_idx(), None, "unpaired fixture");
         assert!(col.mate_of(&view).is_none());
     });
@@ -861,10 +866,10 @@ fn mate_of_is_none_when_the_mate_is_absent_from_the_column() {
     );
     engine.set_max_depth(NonZeroU32::new(1).unwrap());
     with_anchor_column(&mut engine, |col| {
-        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
         assert!(view.in_mate_overlap(), "the pair still overlaps at the anchor");
-        assert_eq!(view.mate_idx(), Some(1), "the mate is linked in the store");
-        assert!(col.find_record(1).is_none(), "truncation removed the mate");
+        assert_eq!(view.mate_idx(), Some(ri(1)), "the mate is linked in the store");
+        assert!(col.find_record(ri(1)).is_none(), "truncation removed the mate");
         assert!(col.mate_of(&view).is_none());
     });
 
@@ -883,9 +888,9 @@ fn mate_of_is_none_when_the_mate_is_absent_from_the_column() {
         Pos0::new(219).unwrap(),
     );
     with_anchor_column(&mut engine, |col| {
-        let view = col.alignments().find(|a| a.record_idx() == 0).unwrap();
+        let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
         assert!(!view.in_mate_overlap(), "disjoint mates do not overlap at the anchor");
-        assert!(col.find_record(1).is_none(), "the mate is not in this column");
+        assert!(col.find_record(ri(1)).is_none(), "the mate is not in this column");
         assert!(col.mate_of(&view).is_none());
     });
 }
@@ -971,15 +976,15 @@ proptest! {
         if collide {
             // Every record hashes the same: linking must fall back entirely on
             // the qname bytes.
-            for idx in 0..store.len() as u32 {
-                store.set_qname_hash(idx, 1).expect("record exists");
+            for n in 0..store.len() {
+                store.set_qname_hash(ri(u32::try_from(n).unwrap()), 1).expect("record exists");
             }
         }
 
         let stats = store.link_mates();
 
         let mut linked_count = 0u32;
-        for idx in 0..store.len() as u32 {
+        for idx in store.indices() {
             let rec = store.record(idx);
             let Some(partner) = rec.mate_idx() else { continue };
             linked_count += 1;
@@ -1002,7 +1007,7 @@ proptest! {
     fn linking_is_symmetric_and_exact(templates in templates()) {
         let mut store = RecordStore::new();
         // (record idx, template idx, is the mate half, expected partner idx)
-        let mut expected: Vec<(u32, Option<u32>)> = Vec::new();
+        let mut expected: Vec<(RecordIdx, Option<RecordIdx>)> = Vec::new();
 
         for (t, tpl) in templates.iter().enumerate() {
             let qname = format!("frag{t}");
@@ -1226,7 +1231,7 @@ fn a_fetched_store_holds_each_record_once() {
         // chr19:6105793), which is exactly the kind of thing real files hold and
         // exactly why linking rejects unmapped records outright.
         let mut seen = HashSet::new();
-        for idx in 0..store.len() as u32 {
+        for idx in store.indices() {
             let rec = store.record(idx);
             let flags = rec.flags;
             let linkable = flags.is_paired()

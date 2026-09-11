@@ -7,8 +7,16 @@
 #![cfg(test)]
 
 use super::bgzf::BgzfReader;
-use super::record_store::RecordStore;
+use super::record_store::{RecordIdx, RecordStore};
 use std::io::{Read, Seek};
+
+/// The record index `n`. Tests address records by literal position; this is
+/// the shorthand for the `Option` that `RecordIdx::new` returns.
+#[allow(dead_code, reason = "used by sibling test modules; cfg gates may hide some call sites")]
+#[track_caller]
+pub(crate) fn ri(n: u32) -> RecordIdx {
+    RecordIdx::new(n).expect("u32::MAX is not a record index")
+}
 
 /// Decode a single BAM record (sans the 4-byte `block_size` prefix) into a
 /// fresh `RecordStore` via the production `push_raw` path.
@@ -25,7 +33,7 @@ pub(crate) fn decode_into_store(buf: &[u8]) -> RecordStore {
         .push_raw(buf, &mut ())
         .expect("push_raw returned an error")
         .expect("record was filtered out");
-    assert_eq!(idx, 0, "fresh store must produce index 0");
+    assert_eq!(idx, RecordIdx::ZERO, "fresh store must produce index 0");
     store
 }
 
@@ -38,7 +46,7 @@ pub(crate) fn decode_into_store(buf: &[u8]) -> RecordStore {
 pub(crate) fn push_one_record_from_bgzf<R: Read + Seek>(
     reader: &mut BgzfReader<R>,
     store: &mut RecordStore,
-) -> u32 {
+) -> RecordIdx {
     let block_size: i32 = reader.read_i32().expect("read block_size");
     assert!(block_size > 0, "block_size must be positive, got {block_size}");
     let len = usize::try_from(block_size).expect("block_size fits in usize");

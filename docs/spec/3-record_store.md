@@ -28,6 +28,48 @@ Qual slab:     [qual₀|qual₁|qual₂|...]
 Aux slab:      [aux₀|aux₁|aux₂|...]
 ```
 
+## Record indices
+
+r[record_store.record_idx]
+A record's position in the store MUST be a distinct type, `RecordIdx`, and not
+a bare integer. Store indices otherwise share `u32` with query offsets
+([`qpos.new`](./0-1-pos.md#qposnew)), slab offsets, sequence lengths and column
+depths, none of which is a record index, and the compiler cannot tell them
+apart. `RecordIdx` MUST NOT be constructible from, or convertible to, an
+integer implicitly: `RecordIdx::new(u32) -> Option<Self>` and
+`RecordIdx::from_usize(usize) -> Option<Self>` are the constructors, `get()`
+and `as_usize()` the accessors — the same discipline
+[`pos.explicit_conversion`](./0-1-pos.md#posexplicit_conversion) applies
+to positions.
+
+`u32::MAX` MUST NOT be a representable index. It cannot be a real one — a push
+mints indices with `u32::try_from(len)` and fails with `SlabOverflow` when the
+length does not fit, and every record occupies at least one byte of the
+`u32`-addressed name slab — so excluding it costs nothing and leaves a niche,
+which makes `Option<RecordIdx>` the same four bytes as the index alone. Every
+"no such record" in the crate MUST therefore be spelled `None` rather than a
+sentinel value: `SlimRecord::mate_idx` and `PileupAlignment::mate_idx` were a
+`u32::MAX` sentinel that a caller could read as an index and compare against by
+accident. Ordering MUST be by index, since columns are searched by binary
+search over it (r[`pileup.column_record_order`]).
+
+The store MUST also offer `indices()`, yielding every index in store order, so
+a caller iterating the store never needs to write `0..store.len() as u32`.
+
+r[record_store.record_idx.resolution]
+An index is meaningful only against the store that minted it, and only until
+that store is cleared or refilled. The store MUST therefore offer
+`try_record(idx) -> Option<&SlimRecord>`, which answers `None` for an index
+past its end — the case a bounds check can see, and the one a caller resolving
+an index it kept across regions hits first. `record(idx)` stays the infallible
+spelling for the crate's own hot paths, where the index was minted from the
+same store, and MUST panic (not `debug_assert` and then read a neighbouring
+record) when it is out of range.
+
+Neither form can detect an index that is in range for a *different* population
+of records, which is why the window query's indices are documented as valid
+only while the engine holds its store (r[`pileup.records_overlapping`]).
+
 ## Record fields
 
 r[record_store.slim_record_fields]

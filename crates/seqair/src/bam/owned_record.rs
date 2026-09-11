@@ -409,6 +409,7 @@ impl OwnedBamRecord {
 mod tests {
     use super::super::cigar::CigarOpType;
     use super::*;
+    use crate::bam::test_util::ri;
     use seqair_types::{Pos0, QPos};
 
     fn simple_record() -> OwnedBamRecord {
@@ -433,7 +434,7 @@ mod tests {
         rec.to_bam_bytes(&mut buf).unwrap();
 
         let store = decode_into_store(&buf);
-        let decoded = store.record(0);
+        let decoded = store.record(ri(0));
 
         assert_eq!(decoded.tid, 0);
         assert_eq!(decoded.pos.as_u32(), 100);
@@ -441,7 +442,7 @@ mod tests {
         assert_eq!(decoded.flags, BamFlags::empty());
         assert_eq!(decoded.seq_len, 5);
         assert_eq!(decoded.n_cigar_ops, 1);
-        assert_eq!(store.qname(0), b"read1");
+        assert_eq!(store.qname(ri(0)), b"read1");
     }
 
     #[test]
@@ -462,7 +463,7 @@ mod tests {
         rec.to_bam_bytes(&mut buf).unwrap();
 
         let store = decode_into_store(&buf);
-        let aux = store.aux(0);
+        let aux = store.aux(ri(0));
         let nm = super::super::aux::find_tag(aux, *b"NM");
         assert_eq!(nm, Some(super::super::aux::AuxValue::U8(3)));
 
@@ -569,7 +570,7 @@ mod tests {
         rec.to_bam_bytes(&mut buf).unwrap();
 
         let store = decode_into_store(&buf);
-        assert!(store.qual(0).iter().all(|&q| q == BaseQuality::UNAVAILABLE));
+        assert!(store.qual(ri(0)).iter().all(|&q| q == BaseQuality::UNAVAILABLE));
     }
 
     #[test]
@@ -606,7 +607,7 @@ mod tests {
         rec.to_bam_bytes(&mut buf).unwrap();
 
         let store = decode_into_store(&buf);
-        let decoded = store.record(0);
+        let decoded = store.record(ri(0));
         assert_eq!(decoded.n_cigar_ops, 0);
         assert_eq!(decoded.seq_len, 3);
         assert_eq!(decoded.flags & BamFlags::from(0x4), BamFlags::from(0x4));

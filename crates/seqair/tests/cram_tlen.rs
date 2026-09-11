@@ -105,7 +105,8 @@ fn assert_tlen_via_bam(name: &str) {
     );
 
     // Extract seqair records and sort the same way
-    let mut actual: Vec<_> = (0..store.len() as u32)
+    let mut actual: Vec<_> = store
+        .indices()
         .map(|idx| {
             let r = store.record(idx);
             (store.qname(idx).to_vec(), r.flags.raw(), r.pos.as_i64(), r.template_len)
@@ -161,7 +162,8 @@ fn assert_cram_fields_with_tlen(name: &str) {
 
     assert_eq!(store.len(), expected.len(), "{name}: record count");
 
-    let mut actual: Vec<_> = (0..store.len() as u32)
+    let mut actual: Vec<_> = store
+        .indices()
         .map(|idx| {
             let r = store.record(idx);
             (store.qname(idx).to_vec(), r.flags.raw(), r.pos.as_i64(), r.template_len)

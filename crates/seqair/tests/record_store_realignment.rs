@@ -15,6 +15,8 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::ri;
 use proptest::prelude::*;
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
@@ -357,19 +359,19 @@ fn set_alignment_then_sort_restores_order() {
 
     // Move record at index 2 (pos=300) to pos=50
     let new_cigar = pack_cigar(&[(4, CIGAR_M)]);
-    store.set_alignment(2, Pos0::new(50).unwrap(), &new_cigar).unwrap();
+    store.set_alignment(ri(2), Pos0::new(50).unwrap(), &new_cigar).unwrap();
 
     store.sort_by_pos();
 
     // After sort: pos 50, 100, 200
-    assert_eq!(store.record(0).pos, Pos0::new(50).unwrap());
-    assert_eq!(store.record(1).pos, Pos0::new(100).unwrap());
-    assert_eq!(store.record(2).pos, Pos0::new(200).unwrap());
+    assert_eq!(store.record(ri(0)).pos, Pos0::new(50).unwrap());
+    assert_eq!(store.record(ri(1)).pos, Pos0::new(100).unwrap());
+    assert_eq!(store.record(ri(2)).pos, Pos0::new(200).unwrap());
 
     // Verify qnames survived the sort correctly
-    assert_eq!(store.qname(0), b"read3"); // was at index 2
-    assert_eq!(store.qname(1), b"read1");
-    assert_eq!(store.qname(2), b"read2");
+    assert_eq!(store.qname(ri(0)), b"read3"); // was at index 2
+    assert_eq!(store.qname(ri(1)), b"read1");
+    assert_eq!(store.qname(ri(2)), b"read2");
 }
 
 // r[verify record_store.set_alignment]
@@ -520,7 +522,6 @@ proptest! {
     fn sort_after_set_alignment_is_position_ordered(
         new_positions in prop::collection::vec(0u32..50_000, 3..10),
     ) {
-        let n = new_positions.len();
         let mut store = RecordStore::new();
         for (i, &_) in new_positions.iter().enumerate() {
             let raw = make_simple_record(
@@ -534,7 +535,7 @@ proptest! {
         let cigar = pack_cigar(&[(4, CIGAR_M)]);
         for (i, &new_pos) in new_positions.iter().enumerate() {
             store.set_alignment(
-                i as u32,
+                ri(u32::try_from(i).unwrap()),
                 Pos0::new(new_pos).unwrap(),
                 &cigar,
             ).unwrap();
@@ -543,9 +544,9 @@ proptest! {
         store.sort_by_pos();
 
         // Verify sorted order
-        for i in 1..n {
+        for (prev, rec) in store.records().zip(store.records().skip(1)) {
             prop_assert!(
-                store.record(i as u32).pos >= store.record((i - 1) as u32).pos,
+                rec.pos >= prev.pos,
                 "records not sorted after set_alignment + sort_by_pos"
             );
         }
@@ -596,26 +597,26 @@ fn realignment_workflow_with_real_bam() {
     assert!(!store.is_empty());
 
     // Verify tid is populated for all records
-    for i in 0..store.len() as u32 {
+    for i in store.indices() {
         assert_eq!(store.record(i).tid, tid as i32, "tid mismatch for record {i}");
     }
 
     // "Realign" the first record by shifting it 10bp left with same cigar
-    let orig_cigar = store.cigar(0).to_vec();
-    let orig_seq: Vec<Base> = store.seq(0).to_vec();
-    let orig_qual: Vec<BaseQuality> = store.qual(0).to_vec();
-    let orig_pos = store.record(0).pos;
+    let orig_cigar = store.cigar(ri(0)).to_vec();
+    let orig_seq: Vec<Base> = store.seq(ri(0)).to_vec();
+    let orig_qual: Vec<BaseQuality> = store.qual(ri(0)).to_vec();
+    let orig_pos = store.record(ri(0)).pos;
 
     let new_pos = Pos0::new(orig_pos.as_u32().saturating_sub(10)).unwrap();
-    store.set_alignment(0, new_pos, &orig_cigar).unwrap();
+    store.set_alignment(ri(0), new_pos, &orig_cigar).unwrap();
 
-    assert_eq!(store.record(0).pos, new_pos);
-    assert_eq!(store.seq(0), &orig_seq);
-    assert_eq!(store.qual(0), &orig_qual);
+    assert_eq!(store.record(ri(0)).pos, new_pos);
+    assert_eq!(store.seq(ri(0)), &orig_seq);
+    assert_eq!(store.qual(ri(0)), &orig_qual);
 
     // Sort and verify order
     store.sort_by_pos();
-    for i in 1..store.len() as u32 {
-        assert!(store.record(i).pos >= store.record(i - 1).pos, "sort order broken at index {i}");
+    for (i, (prev, rec)) in store.records().zip(store.records().skip(1)).enumerate() {
+        assert!(rec.pos >= prev.pos, "sort order broken at index {}", i + 1);
     }
 }

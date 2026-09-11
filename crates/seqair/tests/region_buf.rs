@@ -7,6 +7,8 @@
     reason = "test code"
 )]
 #![allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
+mod helpers;
+use helpers::ri;
 use seqair::bam::{
     Pos0, reader::IndexedBamReader, record_store::RecordStore, region_buf::RegionBuf,
 };
@@ -78,7 +80,7 @@ fn region_buf_reads_same_records_as_direct_bgzf() {
     // Verify basic properties that would fail if RegionBuf decompression is wrong
     assert!(count > 0);
     for i in 0..arena.len() {
-        let rec = arena.record(i as u32);
+        let rec = arena.record(ri(u32::try_from(i).unwrap()));
         let _ = rec.pos; // Pos0 is always non-negative by construction
         assert!(rec.seq_len > 0, "record should have a sequence");
     }

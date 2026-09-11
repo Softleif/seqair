@@ -66,7 +66,8 @@ fn fetch_record_positions(
             &mut store,
         )
         .expect("fetch_into");
-    (0..store.len() as u32)
+    store
+        .indices()
         .map(|i| (store.record(i).pos.as_i64(), store.record(i).end_pos.as_i64()))
         .collect()
 }

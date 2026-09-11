@@ -13,7 +13,7 @@ use super::{
 use crate::bam::{
     BamHeader,
     cigar::CigarOp,
-    record_store::{CustomizeRecordStore, RecordStore},
+    record_store::{CustomizeRecordStore, RecordIdx, RecordStore},
 };
 use seqair_types::{BamFlags, Base, Pos0, Pos1, SmallVec, SmolStr};
 use tracing::warn;
@@ -28,7 +28,7 @@ struct SliceMateInfo {
     /// Absolute index of the mate record within this slice, or -1 if detached/no mate.
     mate_line: i32,
     /// Index in the `RecordStore` if this record was pushed, or `None` if filtered out.
-    store_idx: Option<u32>,
+    store_idx: Option<RecordIdx>,
     /// BAM flags (needed for READ1/READ2 tie-breaking).
     bam_flags: u16,
     /// Reference sequence ID for this record (needed for `next_ref_id` resolution).

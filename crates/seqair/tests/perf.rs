@@ -9,6 +9,7 @@
 )]
 #![allow(clippy::arithmetic_side_effects, reason = "test code")]
 mod helpers;
+use helpers::ri;
 
 use helpers::{cigar_op, cigar_ops, make_record, make_record_with_cigar};
 use proptest::prelude::*;
@@ -189,7 +190,7 @@ fn precomputed_matches_indels_accessible_from_record() {
     );
     arena.push_raw(&raw, &mut ()).unwrap();
 
-    let r = arena.record(0);
+    let r = arena.record(ri(0));
     assert_eq!(r.matching_bases, 45);
     assert_eq!(r.indel_bases, 5);
 }
@@ -250,7 +251,7 @@ proptest! {
         let raw = make_record_with_cigar(0, 0, 99, 60, &ops, seq_len);
         let mut arena = RecordStore::new();
         arena.push_raw(&raw, &mut ()).unwrap();
-        let r = arena.record(0);
+        let r = arena.record(ri(0));
 
         prop_assert_eq!(r.matching_bases, exp_matches,
             "matching_bases mismatch for ops={:?}", inner_ops);
@@ -376,9 +377,8 @@ fn arena_with_capacity_avoids_realloc() {
     assert_eq!(arena.len(), 100);
 
     // All records accessible
-    for i in 0..100u32 {
-        let r = arena.record(i);
-        assert_eq!(r.pos, Pos0::new(i * 10).unwrap());
+    for (n, r) in arena.records().enumerate() {
+        assert_eq!(r.pos, Pos0::new(u32::try_from(n).unwrap() * 10).unwrap());
     }
 }
 

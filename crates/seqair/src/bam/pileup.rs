@@ -14,7 +14,7 @@ use crate::utils::TraceErr;
 
 use super::{
     cigar::{CigarMapping, CigarPosInfo},
-    record_store::{PileupInput, RecordStore},
+    record_store::{PileupInput, RecordIdx, RecordStore},
 };
 
 /// Cloning is a pointer clone of the shared bases, so one `RefSeq` can drive
@@ -157,7 +157,7 @@ pub(crate) struct PileupScratch {
 
 #[derive(Debug)]
 struct ActiveRecord {
-    record_idx: u32,
+    record_idx: RecordIdx,
     cigar: CigarMapping,
     // Cached from SlimRecord to avoid store lookups in the hot loop
     flags: BamFlags,
@@ -166,8 +166,8 @@ struct ActiveRecord {
     matching_bases: u32,
     indel_bases: u32,
     // r[impl pileup.mate_link_cache]
-    /// Store index of the mate, or `u32::MAX` when unlinked.
-    mate_idx: u32,
+    /// Store index of the mate, `None` when unlinked.
+    mate_idx: Option<RecordIdx>,
     /// The reference interval both mates cover, resolved once on activation so
     /// the column loop only compares two positions. Empty when unlinked.
     mate_overlap: Range<Pos0>,
@@ -274,7 +274,11 @@ impl<'eng, U> PileupColumn<'eng, U> {
     /// [`find_record`](Self::find_record) on any of them. They mean nothing
     /// once the engine's store has been reclaimed; see
     /// [`PileupEngine::records_overlapping`].
-    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + 'eng {
+    pub fn records_overlapping(
+        &self,
+        start: Pos0,
+        end: Pos0,
+    ) -> impl Iterator<Item = RecordIdx> + 'eng {
         self.store.records_overlapping_sorted(start, end)
     }
 
@@ -303,7 +307,7 @@ impl<'eng, U> PileupColumn<'eng, U> {
     /// how a consumer reaches the other mate of an overlapping pair
     /// ([`PileupAlignment::mate_idx`]) while walking the column once.
     #[must_use]
-    pub fn find_record(&self, record_idx: u32) -> Option<AlignmentView<'_, 'eng, U>> {
+    pub fn find_record(&self, record_idx: RecordIdx) -> Option<AlignmentView<'_, 'eng, U>> {
         self.alignment_at(self.position_of(record_idx)?)
     }
 
@@ -317,7 +321,7 @@ impl<'eng, U> PileupColumn<'eng, U> {
     /// scratch by position, and a mate reached through
     /// [`PileupAlignment::mate_idx`] has to land in the same coordinates.
     #[must_use]
-    pub fn position_of(&self, record_idx: u32) -> Option<usize> {
+    pub fn position_of(&self, record_idx: RecordIdx) -> Option<usize> {
         self.alignments.binary_search_by_key(&record_idx, |a| a.record_idx).ok()
     }
 
@@ -568,7 +572,7 @@ pub enum Indel {
 // r[impl pileup_indel.op_enum]
 #[derive(Clone, Debug)]
 pub struct PileupAlignment {
-    record_idx: u32,
+    record_idx: RecordIdx,
     pub op: PileupOp,
     pub mapq: u8,
     pub flags: BamFlags,
@@ -578,14 +582,14 @@ pub struct PileupAlignment {
     /// The indel anchored at this column for this read (see [`Indel`]).
     indel_after: Indel,
     // r[impl pileup.mate_link_cache]
-    mate_idx: u32,
+    mate_idx: Option<RecordIdx>,
     in_mate_overlap: bool,
 }
 
 // r[impl pileup_indel.accessors]
 impl PileupAlignment {
     #[must_use]
-    pub fn record_idx(&self) -> u32 {
+    pub fn record_idx(&self) -> RecordIdx {
         self.record_idx
     }
 
@@ -595,8 +599,8 @@ impl PileupAlignment {
     /// found both mates in the store. `None` for an unpaired, unlinked, or
     /// secondary/supplementary alignment.
     #[must_use]
-    pub fn mate_idx(&self) -> Option<u32> {
-        (self.mate_idx != u32::MAX).then_some(self.mate_idx)
+    pub fn mate_idx(&self) -> Option<RecordIdx> {
+        self.mate_idx
     }
 
     // r[impl pileup.mate_link_cache]
@@ -810,7 +814,11 @@ impl<U> PileupEngine<U> {
     /// the [`PileupGuard`] that wraps the engine — has emptied it, this query
     /// yields nothing, and indices collected earlier no longer name anything:
     /// resolve them against [`store`](Self::store) before that point.
-    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + '_ {
+    pub fn records_overlapping(
+        &self,
+        start: Pos0,
+        end: Pos0,
+    ) -> impl Iterator<Item = RecordIdx> + '_ {
         self.store.records_overlapping_sorted(start, end)
     }
 
@@ -999,12 +1007,8 @@ impl<U> PileupEngine<U> {
             }
 
             while self.next_entry < self.store.len() {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
-                )]
-                let idx = self.next_entry as u32;
-                debug_assert_eq!(idx as usize, self.next_entry, "next_entry exceeds u32::MAX");
+                let idx =
+                    RecordIdx::from_usize(self.next_entry).trace_err("next_entry has no index")?;
 
                 let rec = self.store.record(idx);
                 // With soft-clip overhang, a record becomes active `overhang`
@@ -1054,8 +1058,6 @@ impl<U> PileupEngine<U> {
                         let end = ov.end.checked_add_offset(offset).unwrap_or(Pos0::max_value());
                         start..end
                     });
-                let mate_idx = rec.mate_idx().unwrap_or(u32::MAX);
-
                 self.active_end_pos.push(active_end);
                 self.active.push(ActiveRecord {
                     record_idx: idx,
@@ -1065,7 +1067,7 @@ impl<U> PileupEngine<U> {
                     seq_len: rec.seq_len,
                     matching_bases: rec.matching_bases,
                     indel_bases: rec.indel_bases,
-                    mate_idx,
+                    mate_idx: rec.mate_idx(),
                     mate_overlap,
                 });
             }
@@ -1076,19 +1078,12 @@ impl<U> PileupEngine<U> {
                 if self.next_entry >= self.store.len() {
                     return None;
                 }
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "RecordStore capacity is bounded by SlabOverflow (u32); debug_assert enforces invariant"
-                )]
-                let next_entry_u32 = self.next_entry as u32;
-                debug_assert_eq!(
-                    next_entry_u32 as usize, self.next_entry,
-                    "next_entry exceeds u32::MAX"
-                );
+                let next =
+                    RecordIdx::from_usize(self.next_entry).trace_err("next_entry has no index")?;
                 // Jump to the next record, but back up by the overhang so the
                 // leading soft-clip columns just before its alignment are not
                 // skipped.
-                let next_pos = self.store.record(next_entry_u32).pos;
+                let next_pos = self.store.record(next).pos;
                 let next_start = match self.soft_clip_overhang {
                     0 => next_pos,
                     n => {
@@ -1401,7 +1396,7 @@ mod tests {
 
         let mut columns = Vec::new();
         while let Some(col) = engine.pileups() {
-            let indices: Vec<u32> = col.alignments().map(|a| a.record_idx()).collect();
+            let indices: Vec<u32> = col.alignments().map(|a| a.record_idx().get()).collect();
             columns.push((col.pos(), indices));
         }
 
@@ -1677,7 +1672,7 @@ mod tests {
                 min_depth = min_depth.min(col.depth());
                 let pos = u32::from(col.pos());
                 for aln in col.alignments() {
-                    let rec = aln.record_idx();
+                    let rec = aln.record_idx().get();
                     match aln.op {
                         PileupOp::Match { qpos, .. } => {
                             aligned.push((pos, rec, KIND_MATCH, i64::from(qpos.get())));
@@ -2056,7 +2051,7 @@ mod tests {
 
         // At every position, only the first 3 records (indices 0,1,2) should be kept.
         while let Some(col) = engine.pileups() {
-            let indices: Vec<u32> = col.alignments().map(|a| a.record_idx()).collect();
+            let indices: Vec<u32> = col.alignments().map(|a| a.record_idx().get()).collect();
             assert_eq!(
                 indices,
                 vec![0, 1, 2],
@@ -2101,12 +2096,12 @@ mod tests {
                 let expected = brute_force(input.store(), start, end);
 
                 let mut engine = PileupEngine::new(input, Pos0::new(0).unwrap(), Pos0::new(7_000).unwrap());
-                let before: Vec<u32> = engine.records_overlapping(start, end).collect();
+                let before: Vec<RecordIdx> = engine.records_overlapping(start, end).collect();
                 prop_assert_eq!(&before, &expected);
 
-                let set: BTreeSet<u32> = expected.iter().copied().collect();
+                let set: BTreeSet<RecordIdx> = expected.iter().copied().collect();
                 let mut seen = BTreeSet::new();
-                let mut mid: Option<Vec<u32>> = None;
+                let mut mid: Option<Vec<RecordIdx>> = None;
                 while let Some(col) = engine.pileups() {
                     if col.pos() < start || col.pos() > end {
                         continue;
@@ -2118,7 +2113,7 @@ mod tests {
                     if mid.is_none() {
                         // Queried through the column, the way a caller who
                         // has just seen something at `col.pos()` does it.
-                        let from_column: Vec<u32> = col.records_overlapping(start, end).collect();
+                        let from_column: Vec<RecordIdx> = col.records_overlapping(start, end).collect();
                         // Every index the query yields is a store index the
                         // column can resolve: found here iff it overlaps
                         // this very position.
@@ -2137,7 +2132,7 @@ mod tests {
                 // (M or D), so the engine must have reported it at some column.
                 prop_assert_eq!(seen, set);
 
-                let after: Vec<u32> = engine.records_overlapping(start, end).collect();
+                let after: Vec<RecordIdx> = engine.records_overlapping(start, end).collect();
                 prop_assert_eq!(&after, &expected);
 
                 engine.reclaim_allocation();

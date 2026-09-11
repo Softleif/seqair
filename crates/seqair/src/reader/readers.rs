@@ -925,6 +925,7 @@ mod tests {
     fn pileup_with_realignment_is_observed() {
         use crate::bam::CigarOp;
         use crate::bam::cigar::CigarOpType;
+        use crate::bam::record_store::RecordIdx;
 
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
         let segment = realign_test_segment(&readers);
@@ -938,8 +939,8 @@ mod tests {
         let realigned = {
             let mut p = readers
                 .pileup_with(&segment, DepthLimit::Unlimited, |store, _| {
-                    let mut plan: Vec<(u32, Pos0, Vec<CigarOp>)> = Vec::new();
-                    for idx in 0..u32::try_from(store.len()).unwrap_or(u32::MAX) {
+                    let mut plan: Vec<(RecordIdx, Pos0, Vec<CigarOp>)> = Vec::new();
+                    for idx in store.indices() {
                         let rec = store.record(idx);
                         if rec.flags.is_unmapped() {
                             continue;

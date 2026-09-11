@@ -246,6 +246,7 @@ mod tests {
     use super::super::pileup::RefSeq;
     use super::super::record_store::RecordStore;
     use super::*;
+    use crate::bam::test_util::ri;
     use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
     use std::rc::Rc;
 
@@ -288,8 +289,12 @@ mod tests {
         let seq: Vec<Base> = b"ACGTA".iter().map(|&b| Base::from(b)).collect();
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(100, b"ACGTA");
-        let nm =
-            store.record(0).aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq).nm();
+        let nm = store
+            .record(ri(0))
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .nm();
         assert_eq!(nm, 0);
     }
 
@@ -301,8 +306,12 @@ mod tests {
         let seq: Vec<Base> = b"ACGTA".iter().map(|&b| Base::from(b)).collect();
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(100, b"ACGAA"); // pos 3 is A vs query T
-        let nm =
-            store.record(0).aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq).nm();
+        let nm = store
+            .record(ri(0))
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .nm();
         assert_eq!(nm, 1);
     }
 
@@ -329,8 +338,12 @@ mod tests {
         // Query M positions: 0,1 → AA vs AA (match), 5,6 → CC vs CC (match),
         //                    7 → A vs A (match). 0 mismatches.
         // NM = 0 + 3 (insert) + 1 (delete) = 4
-        let nm =
-            store.record(0).aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq).nm();
+        let nm = store
+            .record(ri(0))
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .nm();
         assert_eq!(nm, 4);
     }
 
@@ -348,8 +361,12 @@ mod tests {
         // Use a ref that AGREES with the read everywhere — = and X must
         // override, so NM stays 3 regardless.
         let ref_seq = ref_window(100, b"AAACCCC");
-        let nm =
-            store.record(0).aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq).nm();
+        let nm = store
+            .record(ri(0))
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .nm();
         assert_eq!(nm, 3, "X always contributes regardless of ref agreement");
     }
 
@@ -363,8 +380,12 @@ mod tests {
         let seq: Vec<Base> = b"ACGTA".iter().map(|&b| Base::from(b)).collect();
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(200, b"AAAAA");
-        let nm =
-            store.record(0).aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq).nm();
+        let nm = store
+            .record(ri(0))
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .nm();
         assert_eq!(nm, 0);
     }
 
@@ -376,8 +397,12 @@ mod tests {
         let seq = vec![Base::Unknown];
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(100, b"A");
-        let nm =
-            store.record(0).aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq).nm();
+        let nm = store
+            .record(ri(0))
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .nm();
         assert_eq!(nm, 1);
     }
 
@@ -392,7 +417,7 @@ mod tests {
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(100, b"ACGTA");
         let md = store
-            .record(0)
+            .record(ri(0))
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -411,7 +436,7 @@ mod tests {
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(100, b"ACTTA");
         let md = store
-            .record(0)
+            .record(ri(0))
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -431,7 +456,7 @@ mod tests {
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(100, b"TCGGT");
         let md = store
-            .record(0)
+            .record(ri(0))
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -461,7 +486,7 @@ mod tests {
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(100, b"AAACGTT");
         let md = store
-            .record(0)
+            .record(ri(0))
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -485,7 +510,7 @@ mod tests {
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(100, b"AACC");
         let md = store
-            .record(0)
+            .record(ri(0))
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -504,7 +529,7 @@ mod tests {
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(100, b"AGC");
         let md = store
-            .record(0)
+            .record(ri(0))
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -529,7 +554,7 @@ mod tests {
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(100, b"ACGTT");
         let md = store
-            .record(0)
+            .record(ri(0))
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -547,8 +572,12 @@ mod tests {
         let seq: Vec<Base> = b"ACG".iter().map(|&b| Base::from(b)).collect();
         let store = store_with_record(p0(100), cigar, seq);
         let ref_seq = ref_window(200, b"AAA");
-        let result =
-            store.record(0).aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq).md();
+        let result = store
+            .record(ri(0))
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .md();
         assert!(matches!(result, Err(NmMdError::MissingReference { rpos: 100 })));
     }
 
@@ -592,10 +621,14 @@ mod tests {
         // Ref bases at positions 100..108 (8 ref bases for 3M+2M+1D+2M = 8)
         let ref_seq = ref_window(100, b"ACTGGTTT");
 
-        let nm =
-            store.record(0).aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq).nm();
+        let nm = store
+            .record(ri(0))
+            .aligned_pairs_with_read(&store)
+            .unwrap()
+            .with_reference(&ref_seq)
+            .nm();
         let md = store
-            .record(0)
+            .record(ri(0))
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -738,13 +771,13 @@ mod tests {
                 let ref_seq = RefSeq::new(Rc::from(ref_buf), p0(read_pos));
 
                 let nm = store
-                    .record(0)
+                    .record(ri(0))
                     .aligned_pairs_with_read(&store)
                     .unwrap()
                     .with_reference(&ref_seq)
                     .nm();
                 let md = store
-                    .record(0)
+                    .record(ri(0))
                     .aligned_pairs_with_read(&store)
                     .unwrap()
                     .with_reference(&ref_seq)

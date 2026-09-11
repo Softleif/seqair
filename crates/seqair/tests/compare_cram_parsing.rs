@@ -13,6 +13,8 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::ri;
 use seqair::bam::{Pos0, RejectUnmapped};
 use std::path::Path;
 
@@ -270,9 +272,9 @@ fn cram_records_match_bam_records() {
 
     // Compare positions and flags
     for (i, (hts_pos, hts_flags, hts_mapq)) in hts_records.iter().enumerate() {
-        let cram_pos = cram_store.record(i as u32).pos.as_i64();
-        let cram_flags = cram_store.record(i as u32).flags;
-        let cram_mapq = cram_store.record(i as u32).mapq;
+        let cram_pos = cram_store.record(ri(u32::try_from(i).unwrap())).pos.as_i64();
+        let cram_flags = cram_store.record(ri(u32::try_from(i).unwrap())).flags;
+        let cram_mapq = cram_store.record(ri(u32::try_from(i).unwrap())).mapq;
 
         assert_eq!(
             cram_pos, *hts_pos,

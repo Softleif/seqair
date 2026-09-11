@@ -21,6 +21,8 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::ri;
 use seqair::bam::aux::AuxValue;
 use seqair::bam::aux_data::AuxData;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
@@ -120,7 +122,7 @@ fn mm_ml_bam_roundtrip_seqair() {
     assert_eq!(store.len(), 2);
 
     // Record 1: check MM tag
-    let aux1 = AuxData::from_bytes(store.aux(0).to_vec());
+    let aux1 = AuxData::from_bytes(store.aux(ri(0)).to_vec());
     let mm1 = aux1.get(*b"MM").expect("MM tag missing on read1");
     match mm1 {
         AuxValue::String(s) => assert_eq!(s, b"C+m,0,2,5;"),
@@ -135,7 +137,7 @@ fn mm_ml_bam_roundtrip_seqair() {
     }
 
     // Record 2: multi-modification MM string
-    let aux2 = AuxData::from_bytes(store.aux(1).to_vec());
+    let aux2 = AuxData::from_bytes(store.aux(ri(1)).to_vec());
     let mm2 = aux2.get(*b"MM").expect("MM tag missing on read2");
     match mm2 {
         AuxValue::String(s) => assert_eq!(s, b"C+m,1;C+h,0,3;"),
@@ -233,7 +235,7 @@ fn mm_ml_cram_roundtrip() {
     assert_eq!(store.len(), 2);
 
     // Verify MM/ML survived the CRAM round-trip
-    let aux1 = AuxData::from_bytes(store.aux(0).to_vec());
+    let aux1 = AuxData::from_bytes(store.aux(ri(0)).to_vec());
     let mm1 = aux1.get(*b"MM").expect("MM tag lost in CRAM round-trip");
     match mm1 {
         AuxValue::String(s) => assert_eq!(s, b"C+m,0,2,5;"),
@@ -245,7 +247,7 @@ fn mm_ml_cram_roundtrip() {
         other => panic!("ML should be ArrayU8 after CRAM, got {other:?}"),
     }
 
-    let aux2 = AuxData::from_bytes(store.aux(1).to_vec());
+    let aux2 = AuxData::from_bytes(store.aux(ri(1)).to_vec());
     let mm2 = aux2.get(*b"MM").expect("MM tag lost on read2 in CRAM");
     match mm2 {
         AuxValue::String(s) => assert_eq!(s, b"C+h,1,3;"),
@@ -295,7 +297,7 @@ fn mm_ml_empty_values() {
         .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
         .expect("fetch");
 
-    let aux = AuxData::from_bytes(store.aux(0).to_vec());
+    let aux = AuxData::from_bytes(store.aux(ri(0)).to_vec());
     match aux.get(*b"MM").expect("MM tag missing") {
         AuxValue::String(s) => assert!(s.is_empty(), "empty MM should be empty string"),
         other => panic!("MM should be String, got {other:?}"),
@@ -358,7 +360,7 @@ fn mm_ml_large_tags() {
         .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
         .expect("fetch");
 
-    let aux = AuxData::from_bytes(store.aux(0).to_vec());
+    let aux = AuxData::from_bytes(store.aux(ri(0)).to_vec());
 
     let mm = aux.get(*b"MM").expect("MM tag missing");
     match mm {
@@ -423,7 +425,7 @@ fn mm_ml_coexist_with_other_tags() {
         .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
         .expect("fetch");
 
-    let aux = AuxData::from_bytes(store.aux(0).to_vec());
+    let aux = AuxData::from_bytes(store.aux(ri(0)).to_vec());
 
     // All tags must survive
     assert!(matches!(aux.get(*b"NM"), Some(AuxValue::U8(2))));

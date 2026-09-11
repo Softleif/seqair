@@ -15,6 +15,8 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::ri;
 use noodles::bam;
 use noodles::sam;
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
@@ -108,10 +110,10 @@ fn dos_line_endings_in_sam() {
         .expect("fetch");
 
     assert_eq!(store.len(), 2, "should parse 2 records from DOS SAM");
-    assert_eq!(store.record(0).pos.as_i64(), 99); // 0-based
-    assert_eq!(store.record(1).pos.as_i64(), 199);
-    assert_eq!(store.qname(0), b"read1");
-    assert_eq!(store.qname(1), b"read2");
+    assert_eq!(store.record(ri(0)).pos.as_i64(), 99); // 0-based
+    assert_eq!(store.record(ri(1)).pos.as_i64(), 199);
+    assert_eq!(store.qname(ri(0)), b"read1");
+    assert_eq!(store.qname(ri(1)), b"read2");
 }
 
 /// DOS line endings also work when converted to BAM (samtools handles \r\n).
@@ -213,7 +215,7 @@ fn colons_in_contig_names() {
             .map(|c| c.kept)
             .unwrap_or_else(|e| panic!("fetch {contig}: {e}"));
 
-        let qnames: Vec<&[u8]> = (0..store.len() as u32).map(|i| store.qname(i)).collect();
+        let qnames: Vec<&[u8]> = store.indices().map(|i| store.qname(i)).collect();
         let expected_bytes: Vec<&[u8]> = expected_qnames.iter().map(|s| s.as_bytes()).collect();
         assert_eq!(qnames, expected_bytes, "contig '{contig}': qnames mismatch");
     }
@@ -254,9 +256,9 @@ fn sequence_less_mapped_reads() {
 
     // Some records have SEQ=* (seq_len=0), others have actual sequences.
     // Verify seqair handles both correctly.
-    for i in 0..store.len() as u32 {
+    for i in store.indices() {
         let r = store.record(i);
-        let n = &noodles_records[i as usize];
+        let n = &noodles_records[i.as_usize()];
 
         let n_seq_len = n.sequence().len();
         assert_eq!(
@@ -308,9 +310,9 @@ fn seq_qual_presence_combos() {
 
     assert_eq!(store.len(), noodles_mapped.len(), "mapped record count mismatch");
 
-    for i in 0..store.len() as u32 {
+    for i in store.indices() {
         let r = store.record(i);
-        let n = &noodles_mapped[i as usize];
+        let n = &noodles_mapped[i.as_usize()];
         let qname = String::from_utf8_lossy(store.qname(i));
 
         let n_seq_len = n.sequence().len();
@@ -383,8 +385,7 @@ fn supplementary_alignments_included() {
         .expect("fetch");
 
     // Check that supplementary alignments (flag 2048) are present
-    let supp_count =
-        (0..store.len() as u32).filter(|&i| store.record(i).flags.raw() & 0x800 != 0).count();
+    let supp_count = store.indices().filter(|&i| store.record(i).flags.raw() & 0x800 != 0).count();
     assert!(supp_count > 0, "should include supplementary alignments");
 
     // Also verify against noodles
@@ -420,7 +421,8 @@ fn secondary_alignment_without_sequence() {
         .expect("fetch");
 
     // Find the secondary alignment (flag 256)
-    let secondary = (0..store.len() as u32)
+    let secondary = store
+        .indices()
         .find(|&i| store.record(i).flags.raw() & 0x100 != 0)
         .expect("should have a secondary alignment");
 

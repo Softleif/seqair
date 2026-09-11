@@ -127,7 +127,7 @@ fn main() -> anyhow::Result<()> {
     let mut records_with_mods = 0u32;
     let mut total_calls = 0u32;
 
-    for idx in 0..store.len() as u32 {
+    for idx in store.indices() {
         let rec = store.record(idx);
 
         // Skip unmapped reads.

@@ -26,6 +26,7 @@
 
 use anyhow::Context;
 use clap::Parser as _;
+use seqair::bam::RecordIdx;
 use seqair::{
     bam::{BamWriterBuilder, CigarOp, CigarStr, Pos0, RecordStore, cigar::CigarOpType},
     reader::{IndexedReader, ResolveTid},
@@ -77,8 +78,8 @@ fn main() -> anyhow::Result<()> {
 
     // Pass 1: inspect records and plan changes without mutating the store.
     // `set_alignment` needs `&mut self`, so we collect the work first.
-    let mut plan: Vec<(u32, Pos0, Vec<CigarOp>)> = Vec::new();
-    for idx in 0..store.len() as u32 {
+    let mut plan: Vec<(RecordIdx, Pos0, Vec<CigarOp>)> = Vec::new();
+    for idx in store.indices() {
         let rec = store.record(idx);
         // Skip unmapped reads — no alignment to update.
         if rec.flags.is_unmapped() || rec.tid < 0 {
@@ -197,7 +198,7 @@ struct Snapshot {
     cigar_str: SmolStr,
 }
 
-fn snapshot(store: &RecordStore, idx: u32) -> Snapshot {
+fn snapshot(store: &RecordStore, idx: RecordIdx) -> Snapshot {
     let rec = store.record(idx);
     let qname = std::str::from_utf8(store.qname(idx)).unwrap_or("<non-utf8>").to_owned();
     Snapshot { qname, pos: rec.pos, cigar_str: CigarStr(store.cigar(idx)).to_smolstr() }
@@ -211,7 +212,7 @@ fn write_store(
     let mut writer =
         BamWriterBuilder::to_path(path, header).build().context("could not create BAM writer")?;
 
-    for i in 0..store.len() as u32 {
+    for i in store.indices() {
         writer
             .write_store_record(store, i)
             .with_context(|| format!("could not write record {i}"))?;

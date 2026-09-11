@@ -14,6 +14,7 @@
 )]
 use noodles::bam;
 use noodles::sam;
+use seqair::bam::RecordIdx;
 use seqair::bam::{Pos0, RejectUnmapped};
 use seqair_types::BaseQuality;
 use std::path::Path;
@@ -148,9 +149,8 @@ fn bam_record_count_matches_noodles() {
         // seqair's index-based fetch may include records starting before
         // `start` whose alignment span overlaps the region. Filter to match
         // the noodles sequential-read filter (pos >= start).
-        let seqair_count = (0..store.len() as u32)
-            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
-            .count();
+        let seqair_count =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).count();
         assert_eq!(
             seqair_count,
             noodles.len(),
@@ -182,9 +182,8 @@ fn bam_record_fields_match_noodles() {
             .expect("fetch");
 
         // Filter seqair records to match noodles' sequential filter (pos >= start).
-        let seqair_indices: Vec<u32> = (0..store.len() as u32)
-            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
-            .collect();
+        let seqair_indices: Vec<RecordIdx> =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {
@@ -220,9 +219,8 @@ fn bam_sequence_matches_noodles() {
             .map(|c| c.kept)
             .expect("fetch");
 
-        let seqair_indices: Vec<u32> = (0..store.len() as u32)
-            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
-            .collect();
+        let seqair_indices: Vec<RecordIdx> =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {
@@ -273,9 +271,8 @@ fn bam_quality_scores_match_noodles() {
             .map(|c| c.kept)
             .expect("fetch");
 
-        let seqair_indices: Vec<u32> = (0..store.len() as u32)
-            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
-            .collect();
+        let seqair_indices: Vec<RecordIdx> =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {
@@ -309,9 +306,8 @@ fn bam_cigar_matches_noodles() {
             .map(|c| c.kept)
             .expect("fetch");
 
-        let seqair_indices: Vec<u32> = (0..store.len() as u32)
-            .filter(|&i| store.record(i).pos.as_i64() >= start as i64)
-            .collect();
+        let seqair_indices: Vec<RecordIdx> =
+            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {

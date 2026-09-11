@@ -32,6 +32,7 @@
 use anyhow::Context;
 use clap::Parser as _;
 use seqair::{
+    bam::RecordIdx,
     bam::pileup::PileupOp,
     reader::{DepthLimit, Readers, SegmentOptions},
 };
@@ -124,7 +125,7 @@ fn main() -> anyhow::Result<()> {
             .context("window start out of range")?;
         let win_end =
             Pos0::new(col.pos().as_u32() + args.flank).context("window end out of range")?;
-        let spanning: Vec<u32> = col.records_overlapping(win_start, win_end).collect();
+        let spanning: Vec<RecordIdx> = col.records_overlapping(win_start, win_end).collect();
         let fully = spanning
             .iter()
             .filter(|&&idx| {

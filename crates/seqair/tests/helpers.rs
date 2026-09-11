@@ -17,6 +17,13 @@
     reason = "test code with known small values"
 )]
 
+/// The record index `n`. Tests address records by literal position; this is
+/// the shorthand for the `Option` that `RecordIdx::new` returns.
+#[track_caller]
+pub fn ri(n: u32) -> seqair::bam::RecordIdx {
+    seqair::bam::RecordIdx::new(n).expect("u32::MAX is not a record index")
+}
+
 /// Owned snapshot of a [`seqair::bam::pileup::PileupColumn`] for tests that
 /// previously relied on `engine.collect::<Vec<_>>()`. Since the new `pileups()`
 /// API is a lending iterator, tests that need to retain columns past the next

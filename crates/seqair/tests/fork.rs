@@ -40,7 +40,8 @@ fn fetch_record_positions(
             &mut store,
         )
         .expect("fetch_into");
-    (0..store.len() as u32)
+    store
+        .indices()
         .map(|i| (store.record(i).pos.as_i64(), store.record(i).end_pos.as_i64()))
         .collect()
 }
@@ -168,7 +169,7 @@ fn fork_fetches_are_independent() {
 
     assert_eq!(store_a.len(), store_b.len(), "independent forks should produce same count");
 
-    for i in 0..store_a.len() as u32 {
+    for i in store_a.indices() {
         assert_eq!(store_a.record(i).pos, store_b.record(i).pos);
         assert_eq!(store_a.record(i).end_pos, store_b.record(i).end_pos);
         assert_eq!(store_a.record(i).flags, store_b.record(i).flags);

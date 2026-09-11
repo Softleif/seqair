@@ -111,7 +111,7 @@ impl std::ops::AddAssign for Output {
 fn count_segment(store: &RecordStore<()>) -> Output {
     let mut out = Output::default();
 
-    for idx in 0..store.len() as u32 {
+    for idx in store.indices() {
         let rec = store.record(idx);
 
         // Skip reads that can't contribute signal.

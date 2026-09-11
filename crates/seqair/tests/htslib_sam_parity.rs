@@ -17,6 +17,8 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::ri;
 use noodles::bam;
 use noodles::sam;
 use seqair::bam::{Pos0, RecordStore};
@@ -182,7 +184,7 @@ fn assert_bam_parity(sam_name: &str) {
         );
 
         for (i, n) in noodles_records.iter().enumerate() {
-            let idx = i as u32;
+            let idx = ri(u32::try_from(i).unwrap());
             let r = store.record(idx);
             let ctx = format!("{sam_name}/{contig_name}[{i}]");
 

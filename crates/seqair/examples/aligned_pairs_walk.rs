@@ -115,7 +115,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut counts = Counts::default();
 
-    for idx in 0..store.len() as u32 {
+    for idx in store.indices() {
         let rec = store.record(idx);
 
         // Skip records that won't contribute useful evidence. Done inline

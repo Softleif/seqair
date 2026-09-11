@@ -8,8 +8,8 @@
 use anyhow::Context;
 use clap::Parser as _;
 use seqair::Readers;
-use seqair::bam::RecordStore;
 use seqair::bam::pileup::PileupOp;
+use seqair::bam::{RecordIdx, RecordStore};
 use seqair::reader::{Segment, SegmentOptions};
 use seqair_types::{Base, RegionString};
 use std::collections::HashMap;
@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
     // Cache: record_idx → last query-consuming ref position (exclusive,
     // 0-based). Only used in samtools-compat mode. Cleared per-segment
     // because record_idx is only unique within a single fetch.
-    let mut query_end_cache: HashMap<u32, u32> = HashMap::new();
+    let mut query_end_cache: HashMap<RecordIdx, u32> = HashMap::new();
 
     let mut bases = String::new();
     let mut quals = String::new();
@@ -103,7 +103,7 @@ fn main() -> anyhow::Result<()> {
         if args.samtools_compat {
             query_end_cache.clear();
             let store = engine.store();
-            for i in 0..store.len() as u32 {
+            for i in store.indices() {
                 let rec = store.record(i);
                 let qend = query_end_pos(store, i, rec.pos.as_u32());
                 query_end_cache.insert(i, qend);
@@ -187,7 +187,7 @@ fn main() -> anyhow::Result<()> {
 ///
 /// For CIGAR `7M2D2I`: the 2I after the D means the D is NOT trailing → full rlen.
 /// For CIGAR `2D7M2D`: the trailing 2D has nothing after → strip it.
-fn query_end_pos<U>(store: &RecordStore<U>, record_idx: u32, record_pos: u32) -> u32 {
+fn query_end_pos<U>(store: &RecordStore<U>, record_idx: RecordIdx, record_pos: u32) -> u32 {
     let cigar = store.cigar(record_idx);
 
     // Walk backwards to find trailing ref-consuming, non-query-consuming ops
@@ -215,7 +215,7 @@ fn query_end_pos<U>(store: &RecordStore<U>, record_idx: u32, record_pos: u32) ->
 /// Read the inserted bases from a record's sequence.
 fn read_inserted_bases<U>(
     store: &RecordStore<U>,
-    record_idx: u32,
+    record_idx: RecordIdx,
     op: &PileupOp,
 ) -> Option<Vec<u8>> {
     let (qpos, insert_len) = match op {

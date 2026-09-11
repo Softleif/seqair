@@ -13,6 +13,8 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+mod helpers;
+use helpers::ri;
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::sam::reader::IndexedSamReader;
@@ -162,7 +164,7 @@ fn sam_record_fields_match_htslib() {
             .expect("rio fetch");
 
         for (i, h) in hts.iter().enumerate() {
-            let idx = i as u32;
+            let idx = ri(u32::try_from(i).unwrap());
             let r = store.record(idx);
 
             assert_eq!(r.pos.as_i64(), h.pos, "{contig} rec {i}: pos");
@@ -213,7 +215,7 @@ fn sam_aux_tags_present() {
 
     // Every record in the test data should have aux tags (at least RG)
     let mut has_aux = 0;
-    for i in 0..store.len() as u32 {
+    for i in store.indices() {
         if !store.aux(i).is_empty() {
             has_aux += 1;
         }
@@ -251,7 +253,7 @@ fn sam_aux_rg_tag_matches_htslib() {
     assert_eq!(store.len(), hts.len());
 
     for (i, h) in hts.iter().enumerate() {
-        let aux = store.aux(i as u32);
+        let aux = store.aux(ri(u32::try_from(i).unwrap()));
 
         if let Some(hts_rg) = &h.rg {
             let rg_tag_found = find_z_tag(aux, b"RG");

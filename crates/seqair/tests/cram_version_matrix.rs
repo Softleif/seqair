@@ -14,6 +14,8 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::ri;
 use noodles::cram;
 use noodles::fasta;
 use noodles::sam;
@@ -177,7 +179,7 @@ fn assert_cram_parity(cram_path: &Path, fasta_path: &Path, label: &str) {
         );
 
         for (i, n) in noodles_records.iter().enumerate() {
-            let idx = i as u32;
+            let idx = ri(u32::try_from(i).unwrap());
             let r = store.record(idx);
             let ctx = format!("{label}/{contig_name}[{i}]");
 

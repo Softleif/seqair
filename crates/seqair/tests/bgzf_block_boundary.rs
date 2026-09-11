@@ -133,7 +133,7 @@ fn large_records_spanning_blocks() {
     assert_eq!(store.len(), 20, "seqair should find all 20 large records");
 
     // Verify each record's content survived the block boundary
-    for i in 0..20u32 {
+    for i in store.indices() {
         let r = store.record(i);
         assert_eq!(r.seq_len, 8000, "rec {i}: seq_len");
         assert_eq!(r.mapq, 60, "rec {i}: mapq");
@@ -182,7 +182,7 @@ fn long_cigar_records_spanning_blocks() {
 
     assert_eq!(store.len(), 10, "should have all 10 long-cigar records");
 
-    for i in 0..10u32 {
+    for i in store.indices() {
         let r = store.record(i);
         assert_eq!(r.seq_len, 4000, "rec {i}: seq_len should be 4000");
 
@@ -245,13 +245,8 @@ fn mixed_record_sizes_across_boundaries() {
     assert_eq!(store.len(), noodles_count);
 
     // Verify the large records have correct seq_len
-    for i in (0..50u32).step_by(5) {
-        assert_eq!(store.record(i).seq_len, 8000, "rec {i} should be large");
-    }
-    // And the small ones
-    for i in 0..50u32 {
-        if i % 5 != 0 {
-            assert_eq!(store.record(i).seq_len, 50, "rec {i} should be small");
-        }
+    for (n, i) in store.indices().enumerate() {
+        let expected = if n % 5 == 0 { 8000 } else { 50 };
+        assert_eq!(store.record(i).seq_len, expected, "rec {n}");
     }
 }

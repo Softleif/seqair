@@ -12,6 +12,7 @@
     reason = "test code with known small values"
 )]
 mod helpers;
+use helpers::ri;
 
 use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
 use seqair::bam::{
@@ -131,7 +132,7 @@ fn all_contigs_record_fields_match() {
             .expect("fetch");
 
         for (i, h) in hts.iter().enumerate() {
-            let idx = i as u32;
+            let idx = ri(u32::try_from(i).unwrap());
             let r = store.record(idx);
 
             assert_eq!(r.pos.as_i64(), h.pos, "{contig} rec {i}: pos");
@@ -444,7 +445,7 @@ fn all_contigs_aux_tags_match() {
         );
 
         for (i, h) in hts.iter().enumerate() {
-            let idx = i as u32;
+            let idx = ri(u32::try_from(i).unwrap());
             let aux = store.aux(idx);
 
             // RG (read group) — Z-type string

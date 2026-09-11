@@ -91,7 +91,7 @@ pub use reader::{BamError, BamQuery, BamQueryCounts, BamShared, IndexedBamReader
 // path is `RecordStore::push_raw`; the `record` module exposes only shared
 // decode primitives (`parse_header`, `compute_end_pos_from_raw`, `DecodeError`).
 pub use record_store::{
-    CustomizeRecordStore, FilterRawFields, RecordStore, RejectUnmapped, Sequence,
+    CustomizeRecordStore, FilterRawFields, RecordIdx, RecordStore, RejectUnmapped, Sequence,
 };
 pub use seqair_types::bam_flags as flags;
 pub use seqair_types::{Offset, One, Pos, Pos0, Pos1, Zero};

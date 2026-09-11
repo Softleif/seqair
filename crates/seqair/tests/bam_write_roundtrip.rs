@@ -14,6 +14,8 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::ri;
 use noodles::bam;
 use noodles::sam;
 use seqair::bam::aux_data::AuxData;
@@ -139,8 +141,8 @@ fn roundtrip_simple_records() {
         .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 2);
-    assert_eq!(store.qname(0), b"read1");
-    assert_eq!(store.qname(1), b"read2");
+    assert_eq!(store.qname(ri(0)), b"read1");
+    assert_eq!(store.qname(ri(1)), b"read2");
 }
 
 /// Complex CIGARs: soft clips, deletions, insertions, introns.
@@ -366,7 +368,7 @@ fn roundtrip_multiple_contigs() {
         .fetch_into(tid1, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
         .expect("fetch chr1");
     assert_eq!(store.len(), 1);
-    assert_eq!(store.qname(0), b"chr1_read");
+    assert_eq!(store.qname(ri(0)), b"chr1_read");
 
     // chr2
     let tid2 = reader.header().tid("chr2").expect("chr2");
@@ -375,7 +377,7 @@ fn roundtrip_multiple_contigs() {
         .fetch_into(tid2, Pos0::new(0).unwrap(), Pos0::new(50_000).unwrap(), &mut store)
         .expect("fetch chr2");
     assert_eq!(store.len(), 1);
-    assert_eq!(store.qname(0), b"chr2_read");
+    assert_eq!(store.qname(ri(0)), b"chr2_read");
 }
 
 /// Index co-production: write BAM + BAI, then use samtools to query regions
@@ -548,7 +550,7 @@ fn roundtrip_write_store_record() {
     {
         let mut writer =
             BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
-        for i in 0..store.len() as u32 {
+        for i in store.indices() {
             writer.write_store_record(&store, i).unwrap();
         }
         let (_inner, index_builder) = writer.finish().unwrap();
@@ -582,7 +584,7 @@ fn roundtrip_write_store_record() {
     shared.fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(1000).unwrap(), &mut store2).unwrap();
     assert_eq!(store2.len(), 2);
 
-    for i in 0..2u32 {
+    for i in store.indices() {
         let a = store.record(i);
         let b = store2.record(i);
         assert_eq!(a.pos.as_u32(), b.pos.as_u32(), "pos mismatch record {i}");
@@ -679,7 +681,7 @@ mod e2e_oracle {
             let header = make_header();
             {
                 let mut writer = BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
-                for i in 0..store.len() as u32 {
+                for i in store.indices() {
                     writer.write_store_record(&store, i).unwrap();
                 }
                 let (_inner, idx) = writer.finish().unwrap();
@@ -698,7 +700,7 @@ mod e2e_oracle {
             prop_assert_eq!(store2.len(), inputs.len(), "record count round-tripped");
 
             for (i, inp) in inputs.iter().enumerate() {
-                let idx = i as u32;
+                let idx = ri(u32::try_from(i).unwrap());
                 let rec = store2.record(idx);
                 prop_assert_eq!(rec.pos.as_i32() as u32, inp.pos, "pos rec {}", i);
                 prop_assert_eq!(rec.mapq, inp.mapq, "mapq rec {}", i);

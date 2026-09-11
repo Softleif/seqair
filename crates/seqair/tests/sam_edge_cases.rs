@@ -11,6 +11,8 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+mod helpers;
+use helpers::ri;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::sam::reader::IndexedSamReader;
 use std::path::Path;
@@ -117,7 +119,7 @@ fn unmapped_reads_flow_through_to_store() {
     assert!(!store.is_empty());
     // All reads (including unmapped) flow through to filter_raw by default.
     // The pileup engine excludes unmapped from columns per r[pileup.unmapped_excluded].
-    let has_unmapped = (0..store.len() as u32).any(|i| store.record(i).flags.is_unmapped());
+    let has_unmapped = store.indices().any(|i| store.record(i).flags.is_unmapped());
     // In a real BAM, this region may or may not have unmapped reads.
     // The important thing is that the reader doesn't silently drop them.
     let _ = has_unmapped;
@@ -145,9 +147,9 @@ fn missing_seq_produces_zero_length() {
 
     assert_eq!(store.len(), 3);
     // The secondary alignment (index 1) should have seq_len = 0
-    let secondary = store.record(1);
+    let secondary = store.record(ri(1));
     assert_eq!(secondary.seq_len, 0, "SEQ * should produce seq_len=0");
-    assert_eq!(store.seq(1).len(), 0, "SEQ * should produce empty seq slice");
+    assert_eq!(store.seq(ri(1)).len(), 0, "SEQ * should produce empty seq slice");
 }
 
 // r[verify sam.edge.missing_qual]
@@ -168,7 +170,7 @@ fn missing_qual_produces_0xff() {
         .expect("fetch");
 
     assert_eq!(store.len(), 1);
-    let qual = store.qual(0);
+    let qual = store.qual(ri(0));
     assert_eq!(qual.len(), 4, "QUAL * with 4-base SEQ should produce 4 quality bytes");
     assert!(
         qual.iter().all(|q| q.get().is_none()),
@@ -243,9 +245,8 @@ fn records_are_in_sorted_order() {
         .expect("fetch");
 
     // Verify records are sorted by position
-    for i in 1..store.len() as u32 {
-        let prev = store.record(i - 1);
-        let curr = store.record(i);
+    for (i, (prev, curr)) in store.records().zip(store.records().skip(1)).enumerate() {
+        let i = i + 1;
         assert!(
             curr.pos >= prev.pos,
             "records out of order: rec {} pos {} < rec {} pos {}",
