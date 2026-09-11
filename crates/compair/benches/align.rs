@@ -8,12 +8,13 @@
 //! that hoisting has regressed. The `workspace` arms are the shape a caller
 //! has -- one read against eight haplotypes, buffers kept between calls --
 //! and the difference to the plain arms is the cost of allocating per call.
+//! The `strips` arms are the same band through the row-strip traversal.
 
 mod fixture;
 
 use compair::{
     Betas, ConversionModel, StandardEmission, TapsEmission, Workspace, align_banded,
-    align_banded_simd, align_full,
+    align_banded_simd, align_full, align_strips, align_strips_simd,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use fixture::{Fixture, HAPLOTYPES_PER_READ, fixture};
@@ -42,6 +43,22 @@ fn align(c: &mut Criterion) {
         let mut workspace = Workspace::new();
         b.iter(|| workspace.align_banded_simd(black_box(haplotype), black_box(&read), &taps, band));
     });
+    group.bench_function("strips/standard", |b| {
+        b.iter(|| align_strips(black_box(haplotype), black_box(&read), &standard, band));
+    });
+    group.bench_function("strips-simd/standard", |b| {
+        b.iter(|| align_strips_simd(black_box(haplotype), black_box(&read), &standard, band));
+    });
+    group.bench_function("strips/taps", |b| {
+        b.iter(|| align_strips(black_box(haplotype), black_box(&read), &taps, band));
+    });
+    group.bench_function("strips-simd/taps", |b| {
+        b.iter(|| align_strips_simd(black_box(haplotype), black_box(&read), &taps, band));
+    });
+    group.bench_function("strips-simd/taps/workspace", |b| {
+        let mut workspace = Workspace::new();
+        b.iter(|| workspace.align_strips_simd(black_box(haplotype), black_box(&read), &taps, band));
+    });
     group.bench_function("reference/standard", |b| {
         b.iter(|| align_full(black_box(haplotype), black_box(&read), &standard));
     });
@@ -66,6 +83,19 @@ fn align(c: &mut Criterion) {
                 .map(|haplotype| {
                     workspace
                         .align_banded_simd(black_box(haplotype), black_box(&read), &taps, band)
+                        .get()
+                })
+                .sum::<f64>()
+        });
+    });
+    group.bench_function("strips-simd/taps/workspace", |b| {
+        let mut workspace = Workspace::new();
+        b.iter(|| {
+            haplotypes
+                .iter()
+                .map(|haplotype| {
+                    workspace
+                        .align_strips_simd(black_box(haplotype), black_box(&read), &taps, band)
                         .get()
                 })
                 .sum::<f64>()

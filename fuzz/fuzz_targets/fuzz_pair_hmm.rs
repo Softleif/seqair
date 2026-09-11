@@ -1,11 +1,14 @@
 #![no_main]
 
 //! Fuzz the `compair` pair-HMM end to end: arbitrary haplotype, read, quality
-//! tracks, band and emission model through the reference, scalar and SIMD
-//! kernels, with the invariants the crate documents as the oracle.
+//! tracks, band and emission model through the reference, the diagonal
+//! kernels and the strip kernels, with the invariants the crate documents as
+//! the oracle.
 //!
-//! - the scalar and SIMD kernels are bit-identical, fresh or through a
-//!   reused `Workspace`;
+//! - the scalar and SIMD instances of each traversal are bit-identical, fresh
+//!   or through a reused `Workspace`;
+//! - the two traversals agree on whether a path exists, and on the score
+//!   where `f32` holds it;
 //! - no kernel ever returns a `NaN`, only a finite score or `IMPOSSIBLE`;
 //! - a band never beats the unbanded reference, and widening a band never
 //!   lowers the score;
@@ -15,7 +18,7 @@ use arbitrary::Arbitrary;
 use compair::{
     Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood,
     Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded,
-    align_banded_simd, align_full,
+    align_banded_simd, align_full, align_strips, align_strips_simd,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -76,11 +79,37 @@ fn check<E: Emission>(
     let reused = workspace.align_banded_simd(haplotype, read, emission, band);
     check_parity(name, scalar, simd);
     check_parity(name, scalar, reused);
+    let strips = align_strips(haplotype, read, emission, band);
+    let strips_simd = align_strips_simd(haplotype, read, emission, band);
+    let strips_reused = workspace.align_strips_simd(haplotype, read, emission, band);
+    check_parity(name, strips, strips_simd);
+    check_parity(name, strips, strips_reused);
     assert!(!full.get().is_nan(), "{name}: reference NaN");
+    // The strip kernel is the same recurrence over the same band, so the two
+    // traversals agree on whether a path exists at all, and on the score
+    // where `f32` holds it: they renormalise at different points and sum the
+    // last row in different precisions, which is rounding.
+    assert_eq!(
+        scalar.get().is_finite(),
+        strips.get().is_finite(),
+        "{name}: diagonals {scalar:?} vs strips {strips:?}"
+    );
+    if scalar.get().is_finite() && scalar.get() > -30.0 {
+        assert!(
+            (scalar.get() - strips.get()).abs() <= 1e-4 * (1.0 + scalar.get().abs()),
+            "{name}: diagonals {scalar:?} vs strips {strips:?}"
+        );
+    }
     if scalar.get().is_finite() {
         assert!(
             scalar.get() <= full.get() + 1e-3 * (1.0 + full.get().abs()),
             "{name}: banded {scalar:?} beats the reference {full:?}"
+        );
+    }
+    if strips.get().is_finite() {
+        assert!(
+            strips.get() <= full.get() + 1e-3 * (1.0 + full.get().abs()),
+            "{name}: strips {strips:?} beats the reference {full:?}"
         );
     }
     // Widening can only add paths -- where f32 holds the score. A cell the
@@ -96,6 +125,13 @@ fn check<E: Emission>(
             assert!(
                 scalar.get() <= b.get() + 1e-4 * (1.0 + b.get().abs()),
                 "{name}: narrow {scalar:?} beats wider {b:?}"
+            );
+        }
+        let b = align_strips_simd(haplotype, read, emission, wider);
+        if b.get() > -30.0 {
+            assert!(
+                strips.get() <= b.get() + 1e-4 * (1.0 + b.get().abs()),
+                "{name}: strips narrow {strips:?} beats wider {b:?}"
             );
         }
     }
@@ -174,6 +210,21 @@ fuzz_target!(|input: Input| {
             assert!(
                 banded <= full + 1e-3 * (1.0 + full.abs()),
                 "whole-matrix band {banded} over {full}"
+            );
+        }
+        // The strip kernel's dynamic range is eight rows whatever the band,
+        // so it is held to the reference wherever the reference is finite
+        // and within f32's absolute range at all.
+        let strips = align_strips_simd(&haplotype, &read, &standard, whole).get();
+        if full > -30.0 {
+            assert!(
+                (strips - full).abs() < 1e-3 * (1.0 + full.abs()),
+                "whole-matrix strips {strips} against the reference {full}"
+            );
+        } else if strips.is_finite() {
+            assert!(
+                strips <= full + 1e-3 * (1.0 + full.abs()),
+                "whole-matrix strips {strips} over {full}"
             );
         }
     }
