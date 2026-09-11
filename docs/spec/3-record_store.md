@@ -158,40 +158,44 @@ store.
 
 r[record_store.window_query]
 `PileupInput::records_overlapping(start, end)` MUST yield the index of every
-record whose alignment overlaps the inclusive interval `[start, end]` under
-[`interval.overlap_test`](./0-1-pos.md#intervaloverlap_test) —
+record whose alignment overlaps the inclusive interval `[start, end]`
+under [`interval.overlap_test`](./0-1-pos.md#intervaloverlap_test) —
 `pos <= end && end_pos >= start` — and no other, in ascending record index.
 `end < start` is the empty interval and MUST yield nothing, as MUST an interval
-past the last record. The yielded values are the store's record indices, valid
-for `RecordStore::record` and for `PileupColumn::find_record` on any column of
-an engine built from that input.
+past the last record. The yielded values are the store's
+record indices, valid for `RecordStore::record` — which `PileupInput::store()`
+exposes read-only for exactly this — and for `PileupColumn::find_record` on any
+column of an engine built from that input.
 
-The query MUST NOT be offered on a bare `RecordStore`. It binary-searches on
-`pos`, which is only meaningful once the store is in ascending order, and a raw
-store cannot prove it — the same silent failure `PileupInput` exists to
-prevent (r[`record_store.pileup_input`]). `PileupInput` is the type that
-proves it, and [`PileupEngine::records_overlapping`](./4-pileup.md) MUST
-forward to the same query over the input the engine was built from.
+The query MUST NOT be offered on a bare `RecordStore`. It binary-searches an
+index that exists, and means something, only once the store is in ascending
+position order, and a raw store cannot prove either — the same silent failure
+`PileupInput` exists to prevent (r[`record_store.pileup_input`]). `PileupInput`
+is the type that proves it, and [`pileup.records_overlapping`](./4-pileup.md)
+carries the same query to the engine and its columns.
 
-r[record_store.window_query.max_ref_span]
+r[record_store.window_query.reach]
 A record that starts before the interval can still overlap it, so a lower
-bound on `pos` alone is not a lower bound on overlap. The store MUST therefore
-track the largest reference span (`end_pos - pos + 1`) of any record it holds
-— widened on every kept push and on `set_alignment`, reset by `clear` — and
-the query MUST start at the first record with `pos >= start - (max_span - 1)`,
-found by binary search over the ascending `pos`, then scan forward until
-`pos > end`, keeping the records whose `end_pos >= start`. The tracked span MAY
-over-estimate (a rolled-back push or a record `dedup` removed need not lower
-it) but MUST NOT under-estimate, since an under-estimate skips records without
-any symptom.
+bound on `pos` alone is not a lower bound on overlap — and with no bound at
+all a backward scan from `start` has no stopping point, since a long enough
+record arbitrarily far back still overlaps. `prepare_for_pileup` MUST
+therefore build, over the records in position order, the running maximum of
+`end_pos` — `reach[i]`, the furthest any record at index `<= i` extends — which never decreases, so the first record
+that can overlap `[start, ..]` is the first `i` with `reach[i] >= start`,
+found by binary search. The query MUST start there and scan forward until
+`pos > end`, keeping the records whose `end_pos >= start`. Every record
+before that point ends before `start` and cannot overlap; nothing after it is
+skipped; and the record at that point is itself a hit or already past `end`.
 
-Tracking the span at push rather than scanning backwards from `start` is a
-decision, not a measurement. A backward scan has no stopping point without a
-span bound — a long enough record arbitrarily far back still overlaps — so the
-bound is needed for correctness either way; given the bound, the backward scan
-and the binary search stop at the same first record, and the binary search
-costs `O(log n)` where the scan costs one record per position of span. The
-push-time cost of the bound is one comparison per kept record.
+The index is derived at the one point the order is established rather than
+maintained across pushes and moves. The alternative — a store-wide upper bound
+on record span, widened at every push and move — needs a hand in every path
+that adds or moves a record, can only grow, and collapses the search to a full
+scan of the store as soon as one spliced or ultra-long read has been pushed
+(an `N` op consumes reference, so a spliced read's span is its intron). The
+running maximum costs one `u32` per record and one pass in
+`prepare_for_pileup`, is exact, and a long read only ever costs the queries it
+genuinely overlaps.
 
 ## Load-time depth cap
 

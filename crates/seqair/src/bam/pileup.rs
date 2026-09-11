@@ -2068,25 +2068,34 @@ mod tests {
 
     mod window_query {
         use super::*;
-        use crate::bam::record_store::tests::window_query::{arb_span, arb_store, brute_force};
+        use crate::bam::record_store::tests::window_query::{
+            apply_moves, arb_moves, arb_span, arb_store, brute_force,
+        };
         use proptest::prelude::*;
         use std::collections::BTreeSet;
 
         proptest! {
             // r[verify pileup.records_overlapping]
-            /// The engine's answer is the input's answer, before and during
-            /// iteration — and it agrees with the columns: every alignment a
-            /// column inside the span reports is in the set, and every record
-            /// in the set shows up in some column inside the span. The two
-            /// directions together pin the query to what the engine actually
-            /// emits, not to a second copy of the overlap test.
+            /// The engine's answer is the input's answer — before iteration,
+            /// from a column mid-iteration, and after the last column — and it
+            /// agrees with the columns: every alignment a column inside the
+            /// span reports is in the set, and every record in the set shows
+            /// up in some column inside the span. The two directions together
+            /// pin the query to what the engine actually emits, not to a
+            /// second copy of the overlap test.
+            ///
+            /// The agreement is exact only because nothing here makes a column
+            /// differ from alignment overlap: no soft-clip overhang, no depth
+            /// cap, and an engine region containing every read.
             #[test]
-            fn engine_query_agrees_with_columns(reads in arb_store(), (start, end) in arb_span()) {
+            fn engine_query_agrees_with_columns(reads in arb_store(), moves in arb_moves(), span in arb_span()) {
                 let mut store = RecordStore::new();
-                for read in &reads {
-                    read.push(&mut store);
+                for (i, read) in reads.iter().enumerate() {
+                    read.push(&mut store, i);
                 }
+                apply_moves(&mut store, &reads, &moves);
                 let input = store.prepare_for_pileup().input;
+                let (start, end) = span.resolve(input.store());
                 let expected = brute_force(input.store(), start, end);
 
                 let mut engine = PileupEngine::new(input, Pos0::new(0).unwrap(), Pos0::new(7_000).unwrap());
@@ -2105,26 +2114,33 @@ mod tests {
                         seen.insert(view.record_idx());
                     }
                     if mid.is_none() {
-                        mid = Some(engine_query_snapshot(&col, start, end));
+                        // Queried through the column, the way a caller who
+                        // has just seen something at `col.pos()` does it.
+                        let from_column: Vec<u32> = col.records_overlapping(start, end).collect();
+                        // Every index the query yields is a store index the
+                        // column can resolve: found here iff it overlaps
+                        // this very position.
+                        for &idx in &from_column {
+                            let rec = col.store().record(idx);
+                            let covers = rec.pos <= col.pos() && rec.end_pos >= col.pos();
+                            prop_assert_eq!(col.find_record(idx).is_some(), covers, "record {} at column {}", idx, col.pos());
+                        }
+                        mid = Some(from_column);
                     }
                 }
                 if let Some(mid) = mid {
                     prop_assert_eq!(mid, expected.clone());
                 }
-                // Every record in the span consumes reference there (M or D),
-                // so the engine must have reported it at some column.
+                // Every record in the span consumes reference there
+                // (M or D), so the engine must have reported it at some column.
                 prop_assert_eq!(seen, set);
+
+                let after: Vec<u32> = engine.records_overlapping(start, end).collect();
+                prop_assert_eq!(&after, &expected);
 
                 engine.reclaim_allocation();
                 prop_assert_eq!(engine.records_overlapping(start, end).count(), 0);
             }
-        }
-
-        /// The query during iteration goes through the column's store — the
-        /// same store the engine holds — so this is what a mid-iteration
-        /// caller sees.
-        fn engine_query_snapshot(col: &PileupColumn<'_, ()>, start: Pos0, end: Pos0) -> Vec<u32> {
-            col.store().records_overlapping_sorted(start, end).collect()
         }
     }
 }
