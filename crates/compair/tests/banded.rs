@@ -4,7 +4,7 @@ mod support;
 use compair::{
     Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Probability, Read,
     StandardEmission, Strand, TapsEmission, Workspace, align_banded, align_banded_simd, align_full,
-    error_probability,
+    align_strips, align_strips_simd, error_probability,
 };
 use proptest::prelude::*;
 use support::{
@@ -60,6 +60,55 @@ proptest! {
             prop_assert_eq!(
                 banded.get().to_bits(), reused.get().to_bits(),
                 "{}: fresh {:?} vs reused workspace {:?}", name, banded, reused
+            );
+        }
+    }
+
+    /// The same gate for the strip kernel: its scalar and eight-lane
+    /// instances agree to the bit, fresh and through a reused `Workspace`,
+    /// and one workspace serves both traversals in any order.
+    #[test]
+    fn strips_simd_is_bit_identical_to_strips_scalar(
+        case in arbitrary_case(),
+        conversion in any_conversion(),
+        uniform in any_probability(),
+    ) {
+        let band = case.band();
+        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+        let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
+        let mut workspace = Workspace::new();
+        for (name, scalar, simd, reused) in [
+            (
+                "standard",
+                align_strips(&case.haplotype, &case.read, &StandardEmission::default(), band),
+                align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), band),
+                workspace.align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), band),
+            ),
+            (
+                "taps",
+                align_strips(&case.haplotype, &case.read, &taps, band),
+                align_strips_simd(&case.haplotype, &case.read, &taps, band),
+                workspace.align_strips(&case.haplotype, &case.read, &taps, band),
+            ),
+            (
+                "uniform",
+                align_strips(&case.haplotype, &case.read, &uniform, band),
+                align_strips_simd(&case.haplotype, &case.read, &uniform, band),
+                {
+                    // A diagonal alignment in between: the two kernels share
+                    // the workspace's plan and must not share its state.
+                    workspace.align_banded_simd(&case.haplotype, &case.read, &taps, band);
+                    workspace.align_strips_simd(&case.haplotype, &case.read, &uniform, band)
+                },
+            ),
+        ] {
+            prop_assert_eq!(
+                scalar.get().to_bits(), simd.get().to_bits(),
+                "{}: scalar {:?} vs simd {:?}", name, scalar, simd
+            );
+            prop_assert_eq!(
+                scalar.get().to_bits(), reused.get().to_bits(),
+                "{}: fresh {:?} vs reused workspace {:?}", name, scalar, reused
             );
         }
     }
@@ -382,6 +431,16 @@ proptest! {
                 align_banded(&case.haplotype, &case.read, &taps, band).get(),
                 align_masked(&case.haplotype, &case.read, &taps, band),
             ),
+            (
+                "strips/standard",
+                align_strips(&case.haplotype, &case.read, &StandardEmission::default(), band).get(),
+                align_masked(&case.haplotype, &case.read, &StandardEmission::default(), band),
+            ),
+            (
+                "strips/taps",
+                align_strips_simd(&case.haplotype, &case.read, &taps, band).get(),
+                align_masked(&case.haplotype, &case.read, &taps, band),
+            ),
         ] {
             prop_assert_eq!(
                 got.is_finite(), want.is_finite(),
@@ -421,14 +480,25 @@ proptest! {
     ) {
         let narrow = Band::new(width, case.offset).map_err(|_| TestCaseError::reject("w"))?;
         let wider = Band::new(width + 8, case.offset).map_err(|_| TestCaseError::reject("w"))?;
-        let a = align_banded(&case.haplotype, &case.read, &StandardEmission::default(), narrow).get();
-        let b = align_banded(&case.haplotype, &case.read, &StandardEmission::default(), wider).get();
         let full = align_full(&case.haplotype, &case.read, &StandardEmission::default()).get();
-        prop_assert!(!a.is_nan() && !b.is_nan(), "a {} b {}", a, b);
-        if b > -30.0 {
-            prop_assert!(a <= b + 1e-4, "narrow {} beats wider {}", a, b);
+        for (name, a, b) in [
+            (
+                "diagonals",
+                align_banded(&case.haplotype, &case.read, &StandardEmission::default(), narrow).get(),
+                align_banded(&case.haplotype, &case.read, &StandardEmission::default(), wider).get(),
+            ),
+            (
+                "strips",
+                align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), narrow).get(),
+                align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), wider).get(),
+            ),
+        ] {
+            prop_assert!(!a.is_nan() && !b.is_nan(), "{}: a {} b {}", name, a, b);
+            if b > -30.0 {
+                prop_assert!(a <= b + 1e-4, "{}: narrow {} beats wider {}", name, a, b);
+            }
+            prop_assert!(b <= full + 1e-4, "{}: banded {} beats the reference {}", name, b, full);
         }
-        prop_assert!(b <= full + 1e-4, "banded {} beats the reference {}", b, full);
     }
 
     /// The kernel, with the band held fixed: the `f32` band is the `f64`
@@ -442,12 +512,16 @@ proptest! {
     ) {
         let band = case.band();
         let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let got = align_banded(&case.haplotype, &case.read, &taps, band).get();
         let want = align_masked(&case.haplotype, &case.read, &taps, band);
-        prop_assert!(
-            (got - want).abs() < 1e-4 * (1.0 + want.abs()),
-            "f32 {} against the f64 recurrence over the same band {}", got, want
-        );
+        for (name, got) in [
+            ("diagonals", align_banded(&case.haplotype, &case.read, &taps, band).get()),
+            ("strips", align_strips(&case.haplotype, &case.read, &taps, band).get()),
+        ] {
+            prop_assert!(
+                (got - want).abs() < 1e-4 * (1.0 + want.abs()),
+                "{}: f32 {} against the f64 recurrence over the same band {}", name, got, want
+            );
+        }
     }
 
     /// The same, at every width: `the_band_is_the_documented_predicate` above
@@ -463,14 +537,19 @@ proptest! {
     ) {
         let band = Band::new(width, case.offset).map_err(|_| TestCaseError::reject("w"))?;
         let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let got = align_banded_simd(&case.haplotype, &case.read, &taps, band).get();
         let want = align_masked(&case.haplotype, &case.read, &taps, band);
-        prop_assert_eq!(got.is_finite(), want.is_finite(), "kernel {} oracle {}", got, want);
-        if got.is_finite() {
-            prop_assert!(
-                (got - want).abs() < 1e-4 * (1.0 + want.abs()),
-                "width {}: f32 {} against the f64 recurrence over the same band {}", width, got, want
-            );
+        for (name, got) in [
+            ("diagonals", align_banded_simd(&case.haplotype, &case.read, &taps, band).get()),
+            ("strips", align_strips_simd(&case.haplotype, &case.read, &taps, band).get()),
+        ] {
+            prop_assert_eq!(got.is_finite(), want.is_finite(), "{}: kernel {} oracle {}", name, got, want);
+            if got.is_finite() {
+                prop_assert!(
+                    (got - want).abs() < 1e-4 * (1.0 + want.abs()),
+                    "{} at width {}: f32 {} against the f64 recurrence over the same band {}",
+                    name, width, got, want
+                );
+            }
         }
     }
 
@@ -489,6 +568,34 @@ proptest! {
             align_banded(&case.haplotype, &case.read, &taps, band).get().to_bits(),
             align_banded_simd(&case.haplotype, &case.read, &taps, band).get().to_bits()
         );
+        prop_assert_eq!(
+            align_strips(&case.haplotype, &case.read, &taps, band).get().to_bits(),
+            align_strips_simd(&case.haplotype, &case.read, &taps, band).get().to_bits()
+        );
+    }
+
+    /// The two traversals compute the same `f32` recurrence over the same
+    /// band, so they agree wherever `f32` holds the score: to the rounding of
+    /// their different renormalisation points and of the final sum, which the
+    /// strip kernel takes in `f32` and the diagonal kernel in `f64`. Whether a
+    /// path exists at all does not depend on the traversal.
+    #[test]
+    fn strips_and_diagonals_are_the_same_recurrence(
+        case in arbitrary_case(),
+        width in 2u32..64,
+        conversion in any_conversion(),
+    ) {
+        let band = Band::new(width, case.offset).map_err(|_| TestCaseError::reject("w"))?;
+        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+        let diagonals = align_banded_simd(&case.haplotype, &case.read, &taps, band).get();
+        let strips = align_strips_simd(&case.haplotype, &case.read, &taps, band).get();
+        prop_assert_eq!(diagonals.is_finite(), strips.is_finite(), "diagonals {} strips {}", diagonals, strips);
+        if diagonals.is_finite() && diagonals > -30.0 {
+            prop_assert!(
+                (diagonals - strips).abs() < 1e-4 * (1.0 + diagonals.abs()),
+                "width {}: diagonals {} strips {}", width, diagonals, strips
+            );
+        }
     }
 }
 
@@ -528,6 +635,11 @@ fn shifting_the_haplotype_only_moves_the_start_prior() {
             (there - expected).abs() < 1e-4,
             "pad {pad}: {there} against the expected {expected} (unpadded {here})"
         );
+        let strips = align_strips_simd(&shifted, &read, &StandardEmission::default(), band).get();
+        assert!(
+            (strips - expected).abs() < 1e-4,
+            "strips, pad {pad}: {strips} against the expected {expected} (unpadded {here})"
+        );
     }
 }
 
@@ -565,14 +677,23 @@ fn a_long_read_neither_underflows_nor_drifts() {
     .expect("valid");
 
     let full = align_full(&haplotype, &read, &StandardEmission::default()).get();
-    let banded =
-        align_banded(&haplotype, &read, &StandardEmission::default(), Band::anchored(1000)).get();
-    let simd =
-        align_banded_simd(&haplotype, &read, &StandardEmission::default(), Band::anchored(1000))
-            .get();
-    assert!(full.is_finite() && banded.is_finite(), "full {full}, banded {banded}");
-    assert_eq!(banded.to_bits(), simd.to_bits(), "banded {banded}, simd {simd}");
-    assert!((banded - full).abs() < 1e-2, "banded {banded} against the reference {full}");
+    let band = Band::anchored(1000);
+    for (name, scalar, simd) in [
+        (
+            "diagonals",
+            align_banded(&haplotype, &read, &StandardEmission::default(), band).get(),
+            align_banded_simd(&haplotype, &read, &StandardEmission::default(), band).get(),
+        ),
+        (
+            "strips",
+            align_strips(&haplotype, &read, &StandardEmission::default(), band).get(),
+            align_strips_simd(&haplotype, &read, &StandardEmission::default(), band).get(),
+        ),
+    ] {
+        assert!(full.is_finite() && scalar.is_finite(), "{name}: full {full}, banded {scalar}");
+        assert_eq!(scalar.to_bits(), simd.to_bits(), "{name}: scalar {scalar}, simd {simd}");
+        assert!((scalar - full).abs() < 1e-2, "{name}: {scalar} against the reference {full}");
+    }
 }
 
 /// Nothing in the degenerate corners panics, and every one of them is
@@ -621,16 +742,37 @@ fn the_degenerate_corners_are_impossible_not_a_panic() {
                 Band::anchored(0),
             ),
         ),
+        (
+            "strips, no haplotype",
+            align_strips(&empty_haplotype, &read, &StandardEmission::default(), Band::anchored(0)),
+        ),
+        (
+            "strips, no read",
+            align_strips_simd(
+                &haplotype,
+                &empty_read,
+                &StandardEmission::default(),
+                Band::anchored(0),
+            ),
+        ),
     ] {
         assert_eq!(got, compair::Log10Likelihood::IMPOSSIBLE, "{name}: {got:?}");
     }
 
     // Extreme offsets are arithmetic on `i64`, so neither end wraps.
     for offset in [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX] {
-        let got =
-            align_banded(&haplotype, &read, &StandardEmission::default(), Band::anchored(offset))
-                .get();
+        let band = Band::anchored(offset);
+        let got = align_banded(&haplotype, &read, &StandardEmission::default(), band).get();
         assert!(!got.is_nan(), "offset {offset} gave {got}");
+        let strips = align_strips_simd(&haplotype, &read, &StandardEmission::default(), band).get();
+        assert!(!strips.is_nan(), "strips at offset {offset} gave {strips}");
+        assert_eq!(got.is_finite(), strips.is_finite(), "offset {offset}: {got} vs {strips}");
+        if got.is_finite() {
+            assert!(
+                (got - strips).abs() < 1e-4,
+                "offset {offset}: diagonals {got} strips {strips}"
+            );
+        }
     }
 
     // A quality of zero means "this base is certainly wrong", which leaves no
@@ -741,6 +883,70 @@ fn an_unbanded_f32_run_underflows_where_a_real_band_does_not() {
     );
 }
 
+/// The strip kernel's precision does not depend on the band. It renormalises
+/// every eight *rows*, and the cells between two renormalisations are prefix
+/// alignments of eight lengths at most, however wide the band -- where the
+/// diagonal kernel renormalises per anti-diagonal and a diagonal crosses one
+/// row per column of the band. So on the pairs the test above uses to show
+/// the diagonal kernel losing several log10 at width 320, the strip kernel
+/// tracks the `f64` recurrence to rounding at both widths.
+#[test]
+fn the_strip_kernel_tracks_the_recurrence_at_any_width() {
+    let mut state = 0x5151_2323_9999_0f0f_u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let draw = |next: &mut dyn FnMut() -> u64, n: usize| -> Vec<Base> {
+        (0..n)
+            .map(|_| match next() % 4 {
+                0 => Base::A,
+                1 => Base::C,
+                2 => Base::G,
+                _ => Base::T,
+            })
+            .collect()
+    };
+
+    let mut worst = 0.0f64;
+    let mut worst_score = 0.0f64;
+    for _ in 0..200 {
+        let haplotype = Haplotype::new(draw(&mut next, 90));
+        let read = Read::uniform(
+            draw(&mut next, 66),
+            &[BaseQuality::from_byte(30); 66],
+            BaseQuality::from_byte(45),
+            BaseQuality::from_byte(45),
+            BaseQuality::from_byte(10),
+            Strand::OT,
+        )
+        .expect("valid");
+        for width in [Band::DEFAULT_WIDTH, 320] {
+            let band = Band::new(width, 0).expect("width at least two");
+            let got =
+                align_strips_simd(&haplotype, &read, &StandardEmission::default(), band).get();
+            let want = align_masked(&haplotype, &read, &StandardEmission::default(), band);
+            assert_eq!(got.is_finite(), want.is_finite(), "width {width}: f32 {got} f64 {want}");
+            if !want.is_finite() {
+                continue;
+            }
+            assert!(got <= want + 1e-6, "width {width}: f32 {got} over the f64 recurrence {want}");
+            worst = worst.max((got - want).abs());
+            worst_score = worst_score.min(want);
+        }
+    }
+    assert!(
+        worst < 1e-5,
+        "the strip kernel tracks the f64 recurrence at both widths, worst {worst}"
+    );
+    assert!(
+        worst_score < -60.0,
+        "the pairs reach deep into the dynamic range, worst {worst_score}"
+    );
+}
+
 /// A band wide enough to hold the whole matrix is not a constraint, so it must
 /// give back the unbanded reference. Run on GATK's own 164 x 101 vectors, whose
 /// scores are a few log10 and so well inside `f32`'s range -- see
@@ -756,12 +962,19 @@ fn a_band_that_holds_the_whole_matrix_is_not_a_constraint() {
         let band = Band::new(width, 0).expect("width at least two");
         let banded =
             align_banded(&vector.haplotype, &vector.read, &StandardEmission::default(), band).get();
+        let strips =
+            align_strips_simd(&vector.haplotype, &vector.read, &StandardEmission::default(), band)
+                .get();
         let full = align_full(&vector.haplotype, &vector.read, &StandardEmission::default()).get();
         assert!(
             (banded - full).abs() < 1e-5,
             "vector {index}: unconstrained band {banded} against the reference {full}"
         );
-        worst = worst.max((banded - full).abs());
+        assert!(
+            (strips - full).abs() < 1e-5,
+            "vector {index}: unconstrained strips {strips} against the reference {full}"
+        );
+        worst = worst.max((banded - full).abs()).max((strips - full).abs());
     }
     assert!(worst < 1e-5, "worst {worst}");
 }
@@ -793,12 +1006,14 @@ fn the_free_start_is_never_granted_outside_the_band() {
             let band = Band::new(width, offset).expect("width at least two");
             let got = align_banded(&haplotype, &read, &StandardEmission::default(), band);
             let simd = align_banded_simd(&haplotype, &read, &StandardEmission::default(), band);
+            let strips = align_strips_simd(&haplotype, &read, &StandardEmission::default(), band);
             assert_eq!(
                 got,
                 compair::Log10Likelihood::IMPOSSIBLE,
                 "width {width} at offset {offset} holds no (0, j): read {read_length} got {got:?}"
             );
             assert_eq!(got, simd);
+            assert_eq!(got, strips, "strips, width {width} at offset {offset}");
         }
     }
 }
@@ -845,12 +1060,19 @@ fn a_band_with_no_start_cell_is_impossible() {
             &StandardEmission::default(),
             Band::anchored(offset),
         );
+        let strips = align_strips_simd(
+            &haplotype,
+            &read,
+            &StandardEmission::default(),
+            Band::anchored(offset),
+        );
         assert_eq!(
             got,
             compair::Log10Likelihood::IMPOSSIBLE,
             "offset {offset} holds no (0, j) cell, got {got:?}"
         );
         assert_eq!(got, simd);
+        assert_eq!(got, strips, "strips at offset {offset}");
     }
 }
 
@@ -908,6 +1130,17 @@ fn a_collapsing_diagonal_maximum_does_not_overflow_the_lift() {
         assert!(
             (banded - full).abs() < 1e-4,
             "width {width}: banded {banded} against the reference {full}"
+        );
+        // The strip kernel has no lift chain to overflow, but the pair is a
+        // read of three bases against a haplotype of `N`, and worth a pin.
+        let strips = align_strips(&haplotype, &read, &emission, band).get();
+        assert_eq!(
+            strips.to_bits(),
+            align_strips_simd(&haplotype, &read, &emission, band).get().to_bits()
+        );
+        assert!(
+            (strips - full).abs() < 1e-4,
+            "width {width}: strips {strips} against the reference {full}"
         );
     }
 }

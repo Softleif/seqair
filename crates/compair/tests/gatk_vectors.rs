@@ -1,7 +1,10 @@
 #[allow(dead_code, reason = "each integration test uses a different part of this")]
 mod support;
 
-use compair::{Band, StandardEmission, align_banded, align_banded_simd, align_full};
+use compair::{
+    Band, StandardEmission, align_banded, align_banded_simd, align_full, align_strips,
+    align_strips_simd,
+};
 use support::{gatk_vectors, seed_offset};
 
 /// The gate for the reference implementation: GATK's own numbers, to 1e-4 in
@@ -38,10 +41,14 @@ fn gatk_vectors_through_the_band() {
         let band = Band::anchored(seed_offset(&vector.haplotype, &vector.read));
         let banded =
             align_banded(&vector.haplotype, &vector.read, &StandardEmission::default(), band).get();
+        let strips =
+            align_strips_simd(&vector.haplotype, &vector.read, &StandardEmission::default(), band)
+                .get();
         let difference = (banded - vector.expected_log10).abs();
-        if difference < 1e-3 {
+        let strips_difference = (strips - vector.expected_log10).abs();
+        if difference < 1e-3 && strips_difference < 1e-3 {
             inside += 1;
-            worst = worst.max(difference);
+            worst = worst.max(difference).max(strips_difference);
         }
     }
     assert_eq!(
@@ -67,6 +74,15 @@ fn simd_matches_scalar_on_every_gatk_vector() {
             scalar.get().to_bits(),
             simd.get().to_bits(),
             "vector {index}: scalar {scalar:?} simd {simd:?}"
+        );
+        let scalar =
+            align_strips(&vector.haplotype, &vector.read, &StandardEmission::default(), band);
+        let simd =
+            align_strips_simd(&vector.haplotype, &vector.read, &StandardEmission::default(), band);
+        assert_eq!(
+            scalar.get().to_bits(),
+            simd.get().to_bits(),
+            "vector {index}: strips scalar {scalar:?} simd {simd:?}"
         );
     }
 }

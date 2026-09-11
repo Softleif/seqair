@@ -19,7 +19,7 @@
 
 use compair::{
     Band, BaseQuality, Haplotype, Read, StandardEmission, Strand, align_banded, align_banded_simd,
-    align_full,
+    align_full, align_strips, align_strips_simd,
 };
 
 /// `align_full` on `haplotype = ACT`, `read = AC`, written out cell by cell.
@@ -114,6 +114,13 @@ fn the_banded_kernels_use_the_same_recurrence() {
         assert!(
             (scalar - want).abs() < 1e-5,
             "case {index}: align_banded {scalar}, hand-computed {want}"
+        );
+        let scalar = align_strips(&haplotype, &read, &StandardEmission::default(), band).get();
+        let simd = align_strips_simd(&haplotype, &read, &StandardEmission::default(), band).get();
+        assert_eq!(scalar.to_bits(), simd.to_bits(), "case {index}: strips {scalar} simd {simd}");
+        assert!(
+            (scalar - want).abs() < 1e-5,
+            "case {index}: align_strips {scalar}, hand-computed {want}"
         );
     }
 }

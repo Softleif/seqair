@@ -1337,6 +1337,12 @@ mod tests {
                         let fresh = super::align_banded(haplotype, read, &emission, band);
                         let reused = workspace.align_banded(haplotype, read, &emission, band);
                         assert_eq!(fresh.get().to_bits(), reused.get().to_bits());
+                        let fresh = crate::align_strips_simd(haplotype, read, &emission, band);
+                        let reused = workspace.align_strips_simd(haplotype, read, &emission, band);
+                        assert_eq!(fresh.get().to_bits(), reused.get().to_bits());
+                        let fresh = crate::align_strips(haplotype, read, &emission, band);
+                        let reused = workspace.align_strips(haplotype, read, &emission, band);
+                        assert_eq!(fresh.get().to_bits(), reused.get().to_bits());
                     }
                 }
             }
