@@ -180,9 +180,15 @@ fn example_active_region() {
     let output = run_example("active_region", &[&bam, &fasta, "-r", "chr19:6103076-6106500"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("reach past the segment"), "should report the hook's reference coverage");
+    assert!(
+        stderr.contains("reach past the segment"),
+        "should report the hook's reference coverage"
+    );
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines[0], "region\ttrigger_pos\tdepth\tspanning\tfully_spanning", "first line is the header");
+    assert_eq!(
+        lines[0], "region\ttrigger_pos\tdepth\tspanning\tfully_spanning",
+        "first line is the header"
+    );
     assert!(lines.len() > 1, "the fixture region should trigger at least one active region");
     let fields: Vec<&str> = lines[1].split('\t').collect();
     assert_eq!(fields.len(), 5, "data lines have 5 columns, got: {}", lines[1]);
