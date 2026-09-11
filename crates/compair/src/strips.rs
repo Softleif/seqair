@@ -417,6 +417,44 @@ fn live_lanes<L: Lane>(lane_first: L, lane_past: L, d: usize) -> L {
     lane_first.below(now + L::splat(1.0)).both(now.below(lane_past))
 }
 
+/// One phase of a sweep: the steps `from..=to`, masked or not, two at a time
+/// so that the state alternates between two sets of registers rather than
+/// being copied at the end of every step. `false` past the sweep's reach,
+/// which the kernel's phases never are.
+#[inline(always)]
+#[allow(clippy::too_many_arguments, reason = "the sweep's registers, passed as such")]
+fn phase<L: Lane, const MASKED: bool>(
+    strip: &Strip<'_, L>,
+    buffers: &mut Buffers<'_>,
+    state: &mut State<L>,
+    totals: &mut Totals<L>,
+    edges: (L, L),
+    first: usize,
+    from: usize,
+    to: usize,
+) -> bool {
+    let mask = |d: usize| MASKED.then(|| live_lanes(edges.0, edges.1, d));
+    let mut d = from;
+    while d < to {
+        let Some(cells) = step(strip, buffers, state, d - first, mask(d)) else {
+            return false;
+        };
+        totals.absorb(cells);
+        let Some(cells) = step(strip, buffers, state, d + 1 - first, mask(d + 1)) else {
+            return false;
+        };
+        totals.absorb(cells);
+        d += 2;
+    }
+    if d == to {
+        let Some(cells) = step(strip, buffers, state, d - first, mask(d)) else {
+            return false;
+        };
+        totals.absorb(cells);
+    }
+    true
+}
+
 /// Strips of one row per lane, each swept along the haplotype; see the
 /// module docs.
 #[allow(
@@ -579,46 +617,49 @@ pub(crate) fn strip_kernel<L: Lane>(
             total,
             summed: (r0 + L::LANES > r).then(|| offsets.equals(L::splat((r - r0) as f32))),
         };
-        let lane_first = L::load(&sweep.lane_first);
-        let lane_past = L::load(&sweep.lane_past);
+        let edges = (L::load(&sweep.lane_first), L::load(&sweep.lane_past));
 
         // Three phases: the leading edge of the band, where lanes come live
         // one by one; the middle, with nothing to mask; and the trailing
-        // edge, where they go dead again. The middle is unrolled by two so
-        // that the state alternates between two sets of registers rather
-        // than being copied at the end of every step.
-        for d in sweep.first..sweep.full_first.min(sweep.last + 1) {
-            let mask = Some(live_lanes(lane_first, lane_past, d));
-            let Some(cells) = step(&strip, &mut buffers, &mut state, d - sweep.first, mask) else {
-                return Log10Likelihood::IMPOSSIBLE;
-            };
-            totals.absorb(cells);
-        }
-        let mut d = sweep.full_first;
-        while d + 1 <= sweep.full_last {
-            let Some(cells) = step(&strip, &mut buffers, &mut state, d - sweep.first, None) else {
-                return Log10Likelihood::IMPOSSIBLE;
-            };
-            totals.absorb(cells);
-            let Some(cells) = step(&strip, &mut buffers, &mut state, d + 1 - sweep.first, None)
-            else {
-                return Log10Likelihood::IMPOSSIBLE;
-            };
-            totals.absorb(cells);
-            d += 2;
-        }
-        if d <= sweep.full_last {
-            let Some(cells) = step(&strip, &mut buffers, &mut state, d - sweep.first, None) else {
-                return Log10Likelihood::IMPOSSIBLE;
-            };
-            totals.absorb(cells);
-        }
-        for d in (sweep.full_last + 1).max(sweep.first)..=sweep.last {
-            let mask = Some(live_lanes(lane_first, lane_past, d));
-            let Some(cells) = step(&strip, &mut buffers, &mut state, d - sweep.first, mask) else {
-                return Log10Likelihood::IMPOSSIBLE;
-            };
-            totals.absorb(cells);
+        // edge, where they go dead again. Each phase's range is empty, with
+        // `from > to`, where the sweep has no such steps.
+        let Sweep { first, last, full_first, full_last, .. } = sweep;
+        let leading = (first, full_first.min(last + 1).saturating_sub(1));
+        let trailing = ((full_last + 1).max(first), last);
+        let mut ran = phase::<L, true>(
+            &strip,
+            &mut buffers,
+            &mut state,
+            &mut totals,
+            edges,
+            first,
+            leading.0,
+            leading.1,
+        );
+        ran = ran
+            && phase::<L, false>(
+                &strip,
+                &mut buffers,
+                &mut state,
+                &mut totals,
+                edges,
+                first,
+                full_first,
+                full_last,
+            );
+        ran = ran
+            && phase::<L, true>(
+                &strip,
+                &mut buffers,
+                &mut state,
+                &mut totals,
+                edges,
+                first,
+                trailing.0,
+                trailing.1,
+            );
+        if !ran {
+            return Log10Likelihood::IMPOSSIBLE;
         }
         crossing_max = totals.running.last();
         total = totals.total;

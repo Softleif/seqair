@@ -129,6 +129,7 @@ pub(crate) trait Lane:
     fn splat(value: f32) -> Self;
     fn load(source: &Window) -> Self;
     fn store(self, destination: &mut Window);
+    /// The lanewise maximum. Neither operand is ever a `NaN`.
     fn vmax(self, other: Self) -> Self;
     fn horizontal_max(self) -> f32;
     /// Every bit set where the two lanes are equal, no bit set where they are
@@ -235,7 +236,9 @@ impl Lane for f32x8 {
     }
     #[inline]
     fn vmax(self, other: Self) -> Self {
-        self.max(other)
+        // `max` is NaN-preserving, which on x86 is a compare, a blend and
+        // the maximum; nothing the kernels feed a running maximum is a NaN.
+        self.fast_max(other)
     }
     #[inline]
     fn horizontal_max(self) -> f32 {
