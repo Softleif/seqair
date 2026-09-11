@@ -3,8 +3,15 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use seqair::bam::pileup::PileupEngine;
-use seqair::bam::record_store::{RecordIdx, RecordStore};
+use seqair::bam::record_store::RecordStore;
 use seqair_types::{Offset, Pos0};
+use std::num::NonZeroU32;
+
+/// Bound the fuzzer's per-column work; the value only has to be small.
+const MAX_DEPTH: NonZeroU32 = match NonZeroU32::new(200) {
+    Some(n) => n,
+    None => unreachable!(),
+};
 
 // Valid BAM CIGAR op codes (0..=8, skipping 6=P which is rare and adds no coverage)
 // M=0, I=1, D=2, N=3, S=4, H=5, P=6, ==7, X=8
@@ -219,8 +226,8 @@ fuzz_target!(|input: FuzzPileupInput| {
     }
     assert_eq!(linked, stats.pairs.saturating_mul(2), "stats disagree with the links");
 
-    let mut engine = PileupEngine::new(store, region_start, region_end);
-    engine.set_max_depth(200);
+    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region_start, region_end);
+    engine.set_max_depth(MAX_DEPTH);
 
     let mut columns_seen: u32 = 0;
     while let Some(col) = engine.pileups() {

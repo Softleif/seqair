@@ -13,6 +13,13 @@ use seqair::{
 };
 use seqair_fuzz::indexed_reader::{Format, Input};
 use seqair_types::{Offset, Pos0};
+use std::num::NonZeroU32;
+
+/// Bound the fuzzer's per-column work; the value only has to be small.
+const MAX_DEPTH: NonZeroU32 = match NonZeroU32::new(50) {
+    Some(n) => n,
+    None => unreachable!(),
+};
 
 fuzz_target!(|data: &[u8]| {
     let Some(input) = Input::parse(data) else {
@@ -78,8 +85,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let mut engine = PileupEngine::new(store, start, end);
-    engine.set_max_depth(50);
+    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, start, end);
+    engine.set_max_depth(MAX_DEPTH);
     let mut col_count: usize = 0;
     while let Some(col) = engine.pileups() {
         let _depth = col.depth();

@@ -5,6 +5,13 @@ use libfuzzer_sys::fuzz_target;
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::RecordStore;
 use seqair_types::Pos0;
+use std::num::NonZeroU32;
+
+/// Bound the fuzzer's per-column work; the value only has to be small.
+const MAX_DEPTH: NonZeroU32 = match NonZeroU32::new(100) {
+    Some(n) => n,
+    None => unreachable!(),
+};
 
 /// Fuzz input: multiple raw BAM records + a region to pileup over.
 #[derive(Arbitrary, Debug)]
@@ -45,8 +52,8 @@ fuzz_target!(|input: PileupInput| {
     }
 
     // Create pileup engine and iterate all columns
-    let mut engine = PileupEngine::new(store, region_start, region_end);
-    engine.set_max_depth(100);
+    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region_start, region_end);
+    engine.set_max_depth(MAX_DEPTH);
 
     let mut columns = 0u32;
     while let Some(col) = engine.pileups() {

@@ -240,8 +240,8 @@ fn consume_bare(it: AlignedPairs<'_>) {
                     MatchKind::Match | MatchKind::SeqMatch | MatchKind::SeqMismatch
                 ));
             }
-            AlignedPair::Insertion { qpos, insert_len } => {
-                let _ = (qpos, insert_len);
+            AlignedPair::Insertion { first_inserted, insert_len } => {
+                let _ = (first_inserted, insert_len);
                 debug_assert!(insert_len > 0, "zero-len summary leaked");
             }
             AlignedPair::Deletion { rpos, del_len } => {
@@ -276,8 +276,8 @@ fn consume_with_read<'cigar, 'read>(
             AlignedPairWithRead::Match { qpos, rpos, query, qual, kind } => {
                 let _ = (qpos, rpos, query, qual, kind);
             }
-            AlignedPairWithRead::Insertion { qpos, query, qual } => {
-                let _ = qpos;
+            AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
+                let _ = first_inserted;
                 debug_assert_eq!(query.len(), qual.len(), "insert query/qual lengths must match");
                 debug_assert!(!query.is_empty(), "zero-len insertion leaked");
             }
@@ -310,8 +310,8 @@ fn consume_with_ref<'cigar, 'read, 'ref_seq>(
             AlignedPairWithRef::Match { qpos, rpos, query, qual, kind, ref_base } => {
                 let _ = (qpos, rpos, query, qual, kind, ref_base);
             }
-            AlignedPairWithRef::Insertion { qpos, query, qual } => {
-                let _ = (qpos, query, qual);
+            AlignedPairWithRef::Insertion { first_inserted, query, qual } => {
+                let _ = (first_inserted, query, qual);
             }
             AlignedPairWithRef::Deletion { rpos, del_len, ref_bases } => {
                 let _ = (rpos, del_len);

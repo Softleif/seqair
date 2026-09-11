@@ -69,6 +69,13 @@ jobs:
         continue-on-error: true
         working-directory: crates/seqair/fuzz
         run: cargo check
-      - name: Fail if clippy or tests failed
-        if: steps.clippy.outcome == 'failure' || steps.test.outcome == 'failure'
+      # `continue-on-error` above is only there to let every step report before
+      # the job stops, so each one must be named here. The fuzz step was not,
+      # and five targets went unbuildable for several API changes without a
+      # single red run.
+      - name: Fail if clippy, tests or the fuzz targets failed
+        if: >-
+          steps.clippy.outcome == 'failure'
+          || steps.test.outcome == 'failure'
+          || steps.fuzz.outcome == 'failure'
         run: exit 1
