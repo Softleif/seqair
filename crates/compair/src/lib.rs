@@ -27,6 +27,7 @@ mod haplotype;
 mod read;
 mod reference;
 mod scaling;
+mod strips;
 mod transitions;
 
 pub use banded::{Band, Workspace, align_banded, align_banded_simd};
@@ -36,6 +37,7 @@ pub use haplotype::Haplotype;
 pub use read::Read;
 pub use reference::align_full;
 pub use seqair_types::{Base, BaseQuality, Probability, QPos, Strand};
+pub use strips::{align_strips, align_strips_simd};
 pub use types::{CpgRole, HapPos, HapSite, Log10Likelihood, Observation, error_probability};
 
 mod types;

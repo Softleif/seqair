@@ -36,8 +36,8 @@ use seqair_types::Base;
     reason = "`anchored` is const, so it widens with `as` rather than `from`"
 )]
 pub struct Band {
-    half_width: i64,
-    offset: i64,
+    pub(crate) half_width: i64,
+    pub(crate) offset: i64,
 }
 
 impl Band {
@@ -122,7 +122,9 @@ const _: () = assert!(Band::DEFAULT_WIDTH >= 2 && Band::DEFAULT_WIDTH <= Band::M
 /// and add wherever the vector unit has none -- so a `mul_add` on this trait
 /// would round identically on aarch64 and differently on a baseline x86-64,
 /// which is the one kind of parity failure the trait exists to rule out.
-trait Lane: Copy + core::ops::Add<Output = Self> + core::ops::Mul<Output = Self> {
+pub(crate) trait Lane:
+    Copy + core::ops::Add<Output = Self> + core::ops::Mul<Output = Self>
+{
     const LANES: usize;
     fn splat(value: f32) -> Self;
     fn load(source: &Window) -> Self;
@@ -139,13 +141,23 @@ trait Lane: Copy + core::ops::Add<Output = Self> + core::ops::Mul<Output = Self>
     /// `0.0, 1.0, ...` up to [`Lane::LANES`], for turning a live-cell count
     /// into a mask.
     fn offsets() -> Self;
+    /// Bitwise and of two masks.
+    fn both(self, other: Self) -> Self;
     /// `self` is a mask from [`Lane::equals`] or [`Lane::either`].
     fn select(self, if_true: Self, if_false: Self) -> Self;
+    /// Every lane moved up by one: `first` enters at lane 0 and the last lane
+    /// leaves. On one lane, `first`.
+    fn shift_in(self, first: f32) -> Self;
+    /// The lane [`Lane::shift_in`] would drop.
+    fn last(self) -> f32;
+    /// The sum of the lanes. Only ever called with at most one non-zero lane,
+    /// so the order of the additions is not observable.
+    fn horizontal_sum(self) -> f32;
 }
 
 /// What a lanewise comparison reports for "equal". As a number it is a `NaN`;
 /// it is only ever consumed bitwise.
-const MASK_SET: f32 = f32::from_bits(u32::MAX);
+pub(crate) const MASK_SET: f32 = f32::from_bits(u32::MAX);
 
 impl Lane for f32 {
     const LANES: usize = 1;
@@ -186,8 +198,24 @@ impl Lane for f32 {
         0.0
     }
     #[inline]
+    fn both(self, other: Self) -> Self {
+        Self::from_bits(self.to_bits() & other.to_bits())
+    }
+    #[inline]
     fn select(self, if_true: Self, if_false: Self) -> Self {
         if self.to_bits() == 0 { if_false } else { if_true }
+    }
+    #[inline]
+    fn shift_in(self, first: f32) -> Self {
+        first
+    }
+    #[inline]
+    fn last(self) -> f32 {
+        self
+    }
+    #[inline]
+    fn horizontal_sum(self) -> f32 {
+        self
     }
 }
 
@@ -233,8 +261,30 @@ impl Lane for f32x8 {
         Self::from([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
     }
     #[inline]
+    fn both(self, other: Self) -> Self {
+        self & other
+    }
+    #[inline]
     fn select(self, if_true: Self, if_false: Self) -> Self {
         Select::select(self, if_true, if_false)
+    }
+    #[inline]
+    fn shift_in(self, first: f32) -> Self {
+        // Written as a permutation of the array so that it holds by
+        // construction; the compiler recognises the pattern and emits lane
+        // permutes, see `strips_hot_loop_has_no_stack_traffic` in the
+        // profiling notes.
+        let [a, b, c, d, e, f, g, _] = self.to_array();
+        Self::from([first, a, b, c, d, e, f, g])
+    }
+    #[inline]
+    fn last(self) -> f32 {
+        let [_, _, _, _, _, _, _, h] = self.to_array();
+        h
+    }
+    #[inline]
+    fn horizontal_sum(self) -> f32 {
+        self.reduce_add()
     }
 }
 
@@ -248,8 +298,9 @@ impl Lane for f32x8 {
 /// [`align_banded`] and [`align_banded_simd`] build a fresh one each time.
 #[derive(Debug, Default)]
 pub struct Workspace {
-    plan: Plan,
+    pub(crate) plan: Plan,
     ring: Ring,
+    pub(crate) rows: crate::strips::RowBuffer,
 }
 
 impl Workspace {
@@ -365,36 +416,36 @@ fn code(base: Base) -> f32 {
 /// end of the haplotype loads from there, masked, and the window it loads
 /// still has to exist.
 #[derive(Debug, Default)]
-struct Plan {
-    rows: RowTracks,
-    columns: ColumnTracks,
+pub(crate) struct Plan {
+    pub(crate) rows: RowTracks,
+    pub(crate) columns: ColumnTracks,
 }
 
 /// One entry per read row, row 0 being the base-less start row.
 #[derive(Debug, Default)]
-struct RowTracks {
-    base: Vec<f32>,
-    matched: Vec<f32>,
-    mismatched: Vec<f32>,
-    match_to_match: Vec<f32>,
-    match_to_insertion: Vec<f32>,
-    match_to_deletion: Vec<f32>,
-    indel_to_match: Vec<f32>,
-    gap_continuation: Vec<f32>,
+pub(crate) struct RowTracks {
+    pub(crate) base: Vec<f32>,
+    pub(crate) matched: Vec<f32>,
+    pub(crate) mismatched: Vec<f32>,
+    pub(crate) match_to_match: Vec<f32>,
+    pub(crate) match_to_insertion: Vec<f32>,
+    pub(crate) match_to_deletion: Vec<f32>,
+    pub(crate) indel_to_match: Vec<f32>,
+    pub(crate) gap_continuation: Vec<f32>,
 }
 
 /// One entry per haplotype column, reversed; see [`Plan`].
 #[derive(Debug, Default)]
-struct ColumnTracks {
-    base: Vec<f32>,
-    converted: Vec<f32>,
-    plain: Vec<f32>,
-    rate: Vec<f32>,
-    unconverted: Vec<f32>,
+pub(crate) struct ColumnTracks {
+    pub(crate) base: Vec<f32>,
+    pub(crate) converted: Vec<f32>,
+    pub(crate) plain: Vec<f32>,
+    pub(crate) rate: Vec<f32>,
+    pub(crate) unconverted: Vec<f32>,
 }
 
 /// `len` copies of `fill`, reusing the allocation.
-fn reset(track: &mut Vec<f32>, len: usize, fill: f32) {
+pub(crate) fn reset(track: &mut Vec<f32>, len: usize, fill: f32) {
     track.clear();
     track.resize(len, fill);
 }
@@ -407,7 +458,7 @@ impl Plan {
         clippy::cast_possible_truncation,
         reason = "the f32 narrowing is the point of this kernel"
     )]
-    fn fill<E: Emission>(
+    pub(crate) fn fill<E: Emission>(
         &mut self,
         haplotype: &Haplotype,
         read: &Read,
@@ -481,30 +532,30 @@ impl Plan {
 
 /// One haplotype column per lane, in the reversed order the diagonal reads.
 #[derive(Clone, Copy)]
-struct ColumnLanes<L> {
-    base: L,
-    converted: L,
-    plain: L,
-    rate: L,
-    unconverted_rate: L,
+pub(crate) struct ColumnLanes<L> {
+    pub(crate) base: L,
+    pub(crate) converted: L,
+    pub(crate) plain: L,
+    pub(crate) rate: L,
+    pub(crate) unconverted_rate: L,
 }
 
 /// One read row per lane: what the emission needs.
 #[derive(Clone, Copy)]
-struct RowLanes<L> {
-    base: L,
-    matched: L,
-    mismatched: L,
+pub(crate) struct RowLanes<L> {
+    pub(crate) base: L,
+    pub(crate) matched: L,
+    pub(crate) mismatched: L,
 }
 
 /// One read row per lane: what the transitions need.
 #[derive(Clone, Copy)]
-struct TransitionLanes<L> {
-    match_to_match: L,
-    match_to_insertion: L,
-    match_to_deletion: L,
-    indel_to_match: L,
-    gap_continuation: L,
+pub(crate) struct TransitionLanes<L> {
+    pub(crate) match_to_match: L,
+    pub(crate) match_to_insertion: L,
+    pub(crate) match_to_deletion: L,
+    pub(crate) indel_to_match: L,
+    pub(crate) gap_continuation: L,
 }
 
 /// `SiteWeights::probability` in `f32`, one lane per cell.
@@ -517,7 +568,7 @@ struct TransitionLanes<L> {
 /// plain match and `weight = 0` a plain mismatch, exactly, `matched` and
 /// `offset` being non-negative.
 #[inline]
-fn prior<L: Lane>(column: ColumnLanes<L>, row: RowLanes<L>) -> L {
+pub(crate) fn prior<L: Lane>(column: ColumnLanes<L>, row: RowLanes<L>) -> L {
     let unknown = row.base.equals(L::splat(CODE_N)).either(column.base.equals(L::splat(CODE_N)));
     let plain = unknown.either(row.base.equals(column.plain));
     let weight = plain.select(
@@ -531,19 +582,19 @@ fn prior<L: Lane>(column: ColumnLanes<L>, row: RowLanes<L>) -> L {
 }
 
 /// The widest `Lane`, so the per-row tracks can be padded once.
-const LANE_MAX: usize = 8;
+pub(crate) const LANE_MAX: usize = 8;
 
 /// One vector's worth of a track, whatever the `Lane`.
-type Window = [f32; LANE_MAX];
+pub(crate) type Window = [f32; LANE_MAX];
 
 /// Past the last live entry of a plan track: a full chunk of the widest lane
 /// beyond the last cell, and the window that chunk's last lane reads.
-const TRACK_SLACK: usize = 2 * LANE_MAX;
+pub(crate) const TRACK_SLACK: usize = 2 * LANE_MAX;
 
 /// Before the first live entry of a column track: one window of the widest
 /// lane, for a lane that reads up to `LANE_MAX - 1` columns past the end of
 /// the haplotype.
-const COLUMN_FRONT: usize = LANE_MAX;
+pub(crate) const COLUMN_FRONT: usize = LANE_MAX;
 
 /// Slack below slot zero, so that `diag` and `up` at chunk zero of a diagonal
 /// whose predecessor started one row later still address the buffer.
@@ -638,14 +689,14 @@ impl Ring {
 /// Here the check moves to [`View::new`], once per track per diagonal, and
 /// [`Sources::step`] checks the one offset it uses against the shared span.
 #[derive(Clone, Copy)]
-struct View<'a> {
+pub(crate) struct View<'a> {
     track: &'a [f32],
 }
 
 impl<'a> View<'a> {
     /// `None` unless `track[origin..origin + span]` exists.
     #[inline]
-    fn new(track: &'a [f32], origin: usize, span: usize) -> Option<Self> {
+    pub(crate) fn new(track: &'a [f32], origin: usize, span: usize) -> Option<Self> {
         Some(Self { track: track.get(origin..origin.checked_add(span)?)? })
     }
 
@@ -655,7 +706,7 @@ impl<'a> View<'a> {
     ///
     /// `offset + LANE_MAX <= span`, the length `new` was given.
     #[inline(always)]
-    unsafe fn window(self, offset: usize) -> &'a Window {
+    pub(crate) unsafe fn window(self, offset: usize) -> &'a Window {
         debug_assert!(offset + LANE_MAX <= self.track.len());
         // SAFETY: `new` proved `track` holds `span` initialised `f32`s and the
         // caller keeps `offset + LANE_MAX` within it; `[f32; LANE_MAX]` has
@@ -693,9 +744,9 @@ fn ceil_div2(value: i64) -> i64 {
 
 /// The two dimensions of the matrix.
 #[derive(Clone, Copy)]
-struct Shape {
-    haplotype: usize,
-    read: usize,
+pub(crate) struct Shape {
+    pub(crate) haplotype: usize,
+    pub(crate) read: usize,
 }
 
 /// Where one anti-diagonal reads its neighbours from.
@@ -1097,11 +1148,57 @@ fn get(buffer: &[f32], index: usize) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnLanes, Plan, RowLanes, prior};
+    use super::{ColumnLanes, Lane, MASK_SET, Plan, RowLanes, prior};
     use crate::{
         BaseQuality, Betas, ConversionModel, Emission, Haplotype, Probability, Read,
         StandardEmission, Strand, TapsEmission,
     };
+    use proptest::prelude::*;
+    use wide::f32x8;
+
+    proptest! {
+        /// The vector lane operations the strip kernel adds, against the
+        /// scalar lane applied lane by lane: `shift_in` moves every lane up
+        /// by one and drops the one `last` reports, and a mask `both` another
+        /// mask is the lanewise and.
+        #[test]
+        fn vector_lane_ops_are_the_scalar_ops_lanewise(
+            values in proptest::array::uniform8(-1e30f32..1e30),
+            first in -1e30f32..1e30,
+            left in proptest::array::uniform8(any::<bool>()),
+            right in proptest::array::uniform8(any::<bool>()),
+        ) {
+            let vector = f32x8::from(values);
+            let shifted = vector.shift_in(first).to_array();
+            let [v0, v1, v2, v3, v4, v5, v6, v7] = values;
+            prop_assert_eq!(shifted, [first, v0, v1, v2, v3, v4, v5, v6]);
+            prop_assert_eq!(vector.last().to_bits(), v7.to_bits());
+            prop_assert_eq!(<f32 as Lane>::shift_in(v0, first).to_bits(), first.to_bits());
+            prop_assert_eq!(<f32 as Lane>::last(v0).to_bits(), v0.to_bits());
+
+            let mask = |bits: [bool; 8]| f32x8::from(bits.map(|b| if b { MASK_SET } else { 0.0 }));
+            let got = mask(left).both(mask(right)).to_array();
+            for lane in 0..8 {
+                let want = <f32 as Lane>::both(
+                    if left[lane] { MASK_SET } else { 0.0 },
+                    if right[lane] { MASK_SET } else { 0.0 },
+                );
+                prop_assert_eq!(got[lane].to_bits(), want.to_bits(), "lane {}", lane);
+            }
+        }
+
+        /// `horizontal_sum` with one live lane is that lane exactly, which is
+        /// the only way the kernel uses it.
+        #[test]
+        fn horizontal_sum_of_one_live_lane_is_that_lane(
+            value in -1e30f32..1e30,
+            lane in 0usize..8,
+        ) {
+            let mut lanes = [0.0f32; 8];
+            *lanes.get_mut(lane).expect("lane in 0..8") = value;
+            prop_assert_eq!(f32x8::from(lanes).horizontal_sum().to_bits(), value.to_bits());
+        }
+    }
 
     /// The kernel's hoisted tables are a re-encoding of the `Emission` trait,
     /// not a second model. This asserts it cell by cell over the whole matrix:
