@@ -14,7 +14,8 @@ use libfuzzer_sys::fuzz_target;
 use seqair::bam::aligned_pairs::{AlignedPair, AlignedPairs, MatchKind};
 use seqair::bam::aligned_pairs_view::{AlignedPairWithRead, AlignedPairWithRef};
 use seqair::bam::pileup::RefSeq;
-use seqair::bam::record_store::{RecordIdx, RecordStore};
+use seqair::bam::record_idx::RecordIdx;
+use seqair::bam::record_store::RecordStore;
 use seqair_types::{Base, Pos0};
 use std::rc::Rc;
 
@@ -157,8 +158,8 @@ fuzz_target!(|input: FuzzInput| {
     if store.is_empty() {
         return;
     }
-    let rec = store.record(RecordIdx::ZERO);
-    let cigar = match rec.cigar(&store) {
+    let Some(rec) = store.record(RecordIdx::ZERO) else { return };
+    let cigar = match Ok::<_, ()>(rec.cigar()) {
         Ok(c) => c,
         Err(_) => return,
     };

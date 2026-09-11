@@ -51,7 +51,7 @@ fn store_with_insertion(pos: u32, lead: u32, ins: u32, trail: u32) -> RecordStor
 
 /// The aligned-pairs frame: the first inserted base.
 fn first_inserted_from_pairs(store: &RecordStore) -> u32 {
-    let rec = store.record(ri(0));
+    let rec = store.record(ri(0)).unwrap();
     let pairs = rec.aligned_pairs(store).expect("valid cigar");
     pairs
         .filter_map(|p| match p {
@@ -117,7 +117,7 @@ proptest! {
     ) {
         let store = store_with_insertion(10, lead, ins, trail);
         let first_inserted = first_inserted_from_pairs(&store) as usize;
-        let seq: Vec<Base> = store.record(ri(0)).seq(&store).unwrap().to_vec();
+        let seq: Vec<Base> = store.record(ri(0)).unwrap().seq().to_vec();
 
         let mut engine = PileupEngine::new(
             store.prepare_for_pileup().input,

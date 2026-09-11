@@ -116,7 +116,7 @@ fn main() -> anyhow::Result<()> {
     let mut counts = Counts::default();
 
     for idx in store.indices() {
-        let rec = store.record(idx);
+        let Some(rec) = store.record(idx) else { continue };
 
         // Skip records that won't contribute useful evidence. Done inline
         // here rather than via `Readers::open_customized` + a

@@ -157,8 +157,10 @@ fn cram_chr19_count_matches_noodles() {
             )
             .unwrap();
 
-        let our_in_range =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).count();
+        let our_in_range = store
+            .indices()
+            .filter(|&i| store.record(i).unwrap().pos.as_i64() >= start as i64)
+            .count();
 
         assert_eq!(
             our_in_range, noodles_in_range,
@@ -197,12 +199,12 @@ fn cram_chr19_records_match_noodles_field_by_field() {
             .unwrap();
 
         let our_records: Vec<RecordIdx> =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+            store.indices().filter(|&i| store.record(i).unwrap().pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
         for (i, noodles_rec) in noodles_chr19.iter().enumerate() {
-            let our_rec = store.record(our_records[i]);
+            let our_rec = store.record(our_records[i]).unwrap();
             assert_eq!(our_rec.pos.as_i64(), noodles_rec.pos, "{version} rec {i}: pos");
             assert_eq!(our_rec.flags.raw(), noodles_rec.flags, "{version} rec {i}: flags");
             assert_eq!(our_rec.mapq, noodles_rec.mapq, "{version} rec {i}: mapq");
@@ -284,12 +286,12 @@ fn cram_end_pos_matches_noodles_inclusive_convention() {
             .unwrap();
 
         let our_records: Vec<RecordIdx> =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+            store.indices().filter(|&i| store.record(i).unwrap().pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
         for (i, noodles_rec) in noodles_chr19.iter().enumerate() {
-            let our_rec = store.record(our_records[i]);
+            let our_rec = store.record(our_records[i]).unwrap();
             assert_eq!(
                 our_rec.end_pos.as_i64(),
                 noodles_rec.end_pos,
@@ -333,13 +335,13 @@ fn cram_chr19_sequences_match_noodles() {
             .unwrap();
 
         let our_records: Vec<RecordIdx> =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+            store.indices().filter(|&i| store.record(i).unwrap().pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
         for (i, noodles_rec) in noodles_chr19.iter().enumerate() {
             let idx = our_records[i];
-            let our_bases = store.seq(idx);
+            let our_bases = store.record(idx).unwrap().seq();
             // Only compare positions where noodles emits a standard base (A/C/G/T).
             // Noodles preserves IUPAC codes; seqair normalizes ambiguous bases to Unknown.
             for (pos, (&our_base, &noodles_byte)) in
@@ -392,13 +394,13 @@ fn cram_chr19_quality_scores_match_noodles() {
             .unwrap();
 
         let our_records: Vec<RecordIdx> =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+            store.indices().filter(|&i| store.record(i).unwrap().pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
         for (i, noodles_rec) in noodles_chr19.iter().enumerate() {
             let idx = our_records[i];
-            let our_qual = BaseQuality::slice_to_bytes(store.qual(idx));
+            let our_qual = BaseQuality::slice_to_bytes(store.record(idx).unwrap().qual());
             assert_eq!(
                 our_qual,
                 noodles_rec.qual.as_slice(),
@@ -437,13 +439,13 @@ fn cram_chr19_qnames_match_noodles() {
             .unwrap();
 
         let our_records: Vec<RecordIdx> =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start).collect();
+            store.indices().filter(|&i| store.record(i).unwrap().pos.as_i64() >= start).collect();
 
         assert_eq!(our_records.len(), noodles_chr19.len(), "{version}: count mismatch");
 
         for (i, noodles_rec) in noodles_chr19.iter().enumerate() {
             let idx = our_records[i];
-            let our_qname = store.qname(idx);
+            let our_qname = store.record(idx).unwrap().qname();
             assert_eq!(
                 our_qname,
                 noodles_rec.qname.as_slice(),

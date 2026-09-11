@@ -217,8 +217,8 @@ fn bam_roundtrip(c: &mut Criterion) {
             let mut writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
 
             for idx in store.indices() {
-                let slim = store.record(idx);
-                let cigar = store.cigar(idx).to_vec();
+                let slim = store.record(idx).unwrap();
+                let cigar = store.record(idx).unwrap().cigar().to_vec();
 
                 let rec = OwnedBamRecord {
                     ref_id: tid as i32,
@@ -228,11 +228,13 @@ fn bam_roundtrip(c: &mut Criterion) {
                     next_ref_id: -1,
                     next_pos: None,
                     template_len: 0,
-                    qname: store.qname(idx).to_vec(),
+                    qname: store.record(idx).unwrap().qname().to_vec(),
                     cigar,
-                    seq: store.seq(idx).to_vec(),
-                    qual: store.qual(idx).to_vec(),
-                    aux: seqair::bam::AuxData::from_bytes(store.aux(idx).to_vec()),
+                    seq: store.record(idx).unwrap().seq().to_vec(),
+                    qual: store.record(idx).unwrap().qual().to_vec(),
+                    aux: seqair::bam::AuxData::from_bytes(
+                        store.record(idx).unwrap().aux().to_vec(),
+                    ),
                 };
                 writer.write(&rec).unwrap();
             }
@@ -490,7 +492,7 @@ fn aligned_pairs_walk(c: &mut Criterion) {
         b.iter(|| {
             let mut total_pairs: u64 = 0;
             for idx in seqair_store.indices() {
-                let rec = seqair_store.record(idx);
+                let rec = seqair_store.record(idx).unwrap();
                 for pair in rec.aligned_pairs(&seqair_store).unwrap() {
                     let _ = black_box(pair);
                     total_pairs += 1;
@@ -505,7 +507,7 @@ fn aligned_pairs_walk(c: &mut Criterion) {
         b.iter(|| {
             let mut total_pairs: u64 = 0;
             for idx in seqair_store.indices() {
-                let rec = seqair_store.record(idx);
+                let rec = seqair_store.record(idx).unwrap();
                 for ev in rec.aligned_pairs_with_read(&seqair_store).unwrap() {
                     let _ = black_box(ev);
                     total_pairs += 1;
@@ -520,7 +522,7 @@ fn aligned_pairs_walk(c: &mut Criterion) {
         b.iter(|| {
             let mut total: u64 = 0;
             for idx in seqair_store.indices() {
-                let rec = seqair_store.record(idx);
+                let rec = seqair_store.record(idx).unwrap();
                 for m in rec.aligned_pairs(&seqair_store).unwrap().matches_only() {
                     let _ = black_box(m);
                     total += 1;

@@ -69,22 +69,22 @@ fn slim_record_getters_return_slab_data() {
 
     let mut store = RecordStore::new();
     store.push_raw(&raw, &mut ()).unwrap();
-    let rec = store.record(ri(0));
+    let rec = store.record(ri(0)).unwrap();
 
-    let qname = rec.qname(&store).expect("qname slab readable");
+    let qname = rec.qname();
     assert_eq!(qname, b"read");
 
-    let seq = rec.seq(&store).expect("seq slab readable");
+    let seq = rec.seq();
     assert_eq!(seq.len(), 10);
 
-    let qual = rec.qual(&store).expect("qual slab readable");
+    let qual = rec.qual();
     assert_eq!(qual.len(), 10);
 
-    let cigar = rec.cigar(&store).expect("cigar slab readable");
+    let cigar = rec.cigar();
     assert_eq!(cigar.len(), 1); // single typed op
 
-    let aux_bytes = rec.aux(&store).expect("aux slab readable");
-    assert_eq!(aux_bytes.as_bytes(), aux as &[u8]);
+    let aux_bytes = rec.aux();
+    assert_eq!(aux_bytes, aux as &[u8]);
 }
 
 // r[verify record_store.extras.clear]
@@ -113,7 +113,7 @@ fn unit_extras_is_zero_cost() {
     // A RecordStore<()> (the default) should work identically to the old RecordStore.
     let store = store_with_n_records(3);
     assert_eq!(store.len(), 3);
-    assert_eq!(store.record(ri(0)).pos, Pos0::new(100).unwrap());
+    assert_eq!(store.record(ri(0)).unwrap().pos, Pos0::new(100).unwrap());
 }
 
 // r[verify record_store.extras.sort_dedup_generic]
@@ -125,8 +125,8 @@ fn sort_and_dedup_work_on_unit_store() {
     store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
 
     store.sort_by_pos();
-    assert_eq!(store.record(ri(0)).pos, Pos0::new(100).unwrap());
-    assert_eq!(store.record(ri(1)).pos, Pos0::new(200).unwrap());
+    assert_eq!(store.record(ri(0)).unwrap().pos, Pos0::new(100).unwrap());
+    assert_eq!(store.record(ri(1)).unwrap().pos, Pos0::new(200).unwrap());
 }
 
 // r[verify record_store.extras.sort_dedup_generic]
@@ -142,14 +142,14 @@ fn sort_by_pos_preserves_extras_mapping() {
     store.sort_by_pos();
 
     // After sort, records are at positions 100, 200, 300.
-    assert_eq!(store.record(ri(0)).pos, Pos0::new(100).unwrap());
-    assert_eq!(store.record(ri(1)).pos, Pos0::new(200).unwrap());
-    assert_eq!(store.record(ri(2)).pos, Pos0::new(300).unwrap());
+    assert_eq!(store.record(ri(0)).unwrap().pos, Pos0::new(100).unwrap());
+    assert_eq!(store.record(ri(1)).unwrap().pos, Pos0::new(200).unwrap());
+    assert_eq!(store.record(ri(2)).unwrap().pos, Pos0::new(300).unwrap());
 
     // Extras must still match the record they were computed from.
-    assert_eq!(*store.extra(ri(0)), 100);
-    assert_eq!(*store.extra(ri(1)), 200);
-    assert_eq!(*store.extra(ri(2)), 300);
+    assert_eq!(*store.record(ri(0)).unwrap().extra(), 100);
+    assert_eq!(*store.record(ri(1)).unwrap().extra(), 200);
+    assert_eq!(*store.record(ri(2)).unwrap().extra(), 300);
 }
 
 // r[verify record_store.extras.sort_dedup_generic]
@@ -182,12 +182,12 @@ fn dedup_on_typed_store_preserves_extras() {
 
     // Should have 2 records after dedup (one per position).
     assert_eq!(store.len(), 2);
-    assert_eq!(store.record(ri(0)).pos, Pos0::new(100).unwrap());
-    assert_eq!(store.record(ri(1)).pos, Pos0::new(200).unwrap());
+    assert_eq!(store.record(ri(0)).unwrap().pos, Pos0::new(100).unwrap());
+    assert_eq!(store.record(ri(1)).unwrap().pos, Pos0::new(200).unwrap());
 
     // Extras should still be accessible and correspond to the surviving records.
-    let e0 = *store.extra(ri(0));
-    let e1 = *store.extra(ri(1));
+    let e0 = *store.record(ri(0)).unwrap().extra();
+    let e1 = *store.record(ri(1)).unwrap().extra();
     assert_ne!(e0, e1, "surviving records should have distinct extras");
 }
 
@@ -200,10 +200,10 @@ fn set_alignment_then_sort_on_typed_store() {
 
     // Sort — now record at pos=50 comes first.
     store.sort_by_pos();
-    assert_eq!(store.record(ri(0)).pos, Pos0::new(50).unwrap());
-    assert_eq!(store.record(ri(1)).pos, Pos0::new(100).unwrap());
-    assert_eq!(*store.extra(ri(0)), 50);
-    assert_eq!(*store.extra(ri(1)), 100);
+    assert_eq!(store.record(ri(0)).unwrap().pos, Pos0::new(50).unwrap());
+    assert_eq!(store.record(ri(1)).unwrap().pos, Pos0::new(100).unwrap());
+    assert_eq!(*store.record(ri(0)).unwrap().extra(), 50);
+    assert_eq!(*store.record(ri(1)).unwrap().extra(), 100);
 }
 
 // ---- PileupEngine extras ----
@@ -341,8 +341,8 @@ proptest! {
         // After sorting, each record's extra must still equal its position
         // (proving the extras_idx indirection survived reordering).
         for i in store.indices() {
-            let pos = store.record(i).pos.as_i32();
-            let extra = *store.extra(i);
+            let pos = store.record(i).unwrap().pos.as_i32();
+            let extra = *store.record(i).unwrap().extra();
             prop_assert_eq!(pos, extra, "extras_idx broken at record {}", i);
         }
 
@@ -368,8 +368,8 @@ proptest! {
 
         // After dedup, each surviving record's extra must equal its position.
         for i in store.indices() {
-            let pos = store.record(i).pos.as_i32();
-            let extra = *store.extra(i);
+            let pos = store.record(i).unwrap().pos.as_i32();
+            let extra = *store.record(i).unwrap().extra();
             prop_assert_eq!(pos, extra, "extras_idx broken after dedup at record {}", i);
         }
 
@@ -412,8 +412,8 @@ fn pileup_with_sorted_typed_store() {
 
     // Sort — records reorder, extras follow via extras_idx.
     store.sort_by_pos();
-    assert_eq!(store.record(ri(0)).pos, Pos0::new(100).unwrap());
-    assert_eq!(*store.extra(ri(0)), 1); // originally the second record pushed
+    assert_eq!(store.record(ri(0)).unwrap().pos, Pos0::new(100).unwrap());
+    assert_eq!(*store.record(ri(0)).unwrap().extra(), 1); // originally the second record pushed
 
     // Build engine with the sorted typed store.
     let mut engine = PileupEngine::new(
@@ -562,7 +562,7 @@ fn cram_fetch_into_customized_applies_filter_at_push_time() {
     // Snapshot positions of all fetched records — we'll use them as an oracle
     // for the mixed filter below.
     let mut all_positions: Vec<i64> =
-        store.indices().map(|i| store.record(i).pos.as_i64()).collect();
+        store.indices().map(|i| store.record(i).unwrap().pos.as_i64()).collect();
     all_positions.sort_unstable();
 
     // Drop-all: fetched unchanged, kept == 0. The store (including all slabs)
@@ -594,7 +594,11 @@ fn cram_fetch_into_customized_applies_filter_at_push_time() {
     assert_eq!(counts_mixed.kept, expected_kept, "filter result must match oracle");
     assert_eq!(store.len(), expected_kept);
     for i in store.indices() {
-        assert_eq!(store.record(i).pos.as_i64() % 2, 0, "record {i} failed filter predicate");
+        assert_eq!(
+            store.record(i).unwrap().pos.as_i64() % 2,
+            0,
+            "record {i} failed filter predicate"
+        );
     }
 
     let _: FetchCounts = counts_mixed;
@@ -679,14 +683,15 @@ fn read_group_filter_keeps_only_matching_records() {
 
     // Three records had RG1 → exactly three should survive.
     assert_eq!(store.len(), 3, "only RG1 records should remain");
-    let kept_positions: Vec<i32> = store.indices().map(|i| store.record(i).pos.as_i32()).collect();
+    let kept_positions: Vec<i32> =
+        store.indices().map(|i| store.record(i).unwrap().pos.as_i32()).collect();
     assert_eq!(kept_positions, vec![100, 102, 105]);
 
     // Each surviving record's aux must indeed contain RG1.
     for i in store.indices() {
-        let rec = store.record(i);
-        let aux = rec.aux(&store).expect("aux readable");
-        assert_eq!(extract_rg(aux.as_bytes()), Some(b"RG1".as_ref()));
+        let rec = store.record(i).unwrap();
+        let aux = rec.aux();
+        assert_eq!(extract_rg(aux), Some(b"RG1".as_ref()));
     }
 }
 
@@ -717,7 +722,7 @@ fn read_group_filter_rolls_back_rejected_records() {
 
     assert_eq!(a.len(), b.len(), "rollback must yield same record count");
     for i in a.indices() {
-        assert_eq!(a.record(i).pos, b.record(i).pos);
-        assert_eq!(a.aux(i), b.aux(i));
+        assert_eq!(a.record(i).unwrap().pos, b.record(i).unwrap().pos);
+        assert_eq!(a.record(i).unwrap().aux(), b.record(i).unwrap().aux());
     }
 }

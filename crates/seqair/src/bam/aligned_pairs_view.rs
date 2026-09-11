@@ -513,7 +513,7 @@ mod tests {
             BaseQuality::from_byte(32),
         ];
         let store = make_store(p0(100), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
 
         let events: Vec<_> = rec.aligned_pairs_with_read(&store).unwrap().collect();
         assert_eq!(events.len(), 3);
@@ -551,7 +551,7 @@ mod tests {
         let seq = vec![Base::A, Base::C, Base::T, Base::G, Base::T, Base::A, Base::A];
         let qual: Vec<_> = (0..7).map(|i| BaseQuality::from_byte(20 + i)).collect();
         let store = make_store(p0(50), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
 
         let events: Vec<_> = rec.aligned_pairs_with_read(&store).unwrap().collect();
         // 2 Match + 1 Insertion (summary) + 2 Match = 5 events
@@ -576,7 +576,7 @@ mod tests {
         let seq = vec![Base::Unknown, Base::Unknown, Base::A, Base::C, Base::G];
         let qual: Vec<_> = (0..5).map(|_| BaseQuality::from_byte(20)).collect();
         let store = make_store(p0(0), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
 
         let events: Vec<_> =
             rec.aligned_pairs_with_read(&store).unwrap().with_soft_clips().collect();
@@ -601,7 +601,7 @@ mod tests {
         let seq = vec![Base::A; 4];
         let qual = vec![BaseQuality::from_byte(30); 4];
         let store = make_store(p0(100), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
 
         let events: Vec<_> = rec.aligned_pairs_with_read(&store).unwrap().collect();
         // 2M + D(summary) + 2M = 5 events
@@ -624,7 +624,7 @@ mod tests {
         let seq = vec![Base::A, Base::T, Base::G];
         let qual = vec![BaseQuality::from_byte(30); 3];
         let store = make_store(p0(100), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         let ref_seq = make_ref_seq(100, &[Base::A, Base::C, Base::G, Base::T]);
 
         let events: Vec<_> =
@@ -654,7 +654,7 @@ mod tests {
         let seq = vec![Base::A; 2];
         let qual = vec![BaseQuality::from_byte(30); 2];
         let store = make_store(p0(100), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         let ref_seq = make_ref_seq(200, &[Base::A, Base::C, Base::G]);
 
         let events: Vec<_> =
@@ -679,7 +679,7 @@ mod tests {
         let seq = vec![Base::A; 3];
         let qual = vec![BaseQuality::from_byte(30); 3];
         let store = make_store(p0(100), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         // ref bases at positions 100..110 = [A,C,G,T,A,C,G,T,A,C]
         let ref_bases: Vec<Base> = b"ACGTACGTAC".iter().map(|&b| Base::from(b)).collect();
         let ref_seq = make_ref_seq(100, &ref_bases);
@@ -712,7 +712,7 @@ mod tests {
         let seq = vec![Base::A; 3];
         let qual = vec![BaseQuality::from_byte(30); 3];
         let store = make_store(p0(100), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         let ref_seq = make_ref_seq(100, &[Base::A, Base::C, Base::G]);
 
         let events: Vec<_> =
@@ -733,7 +733,7 @@ mod tests {
         let seq = vec![Base::Unknown, Base::Unknown, Base::A, Base::C, Base::G];
         let qual = vec![BaseQuality::from_byte(20); 5];
         let store = make_store(p0(100), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         let ref_seq = make_ref_seq(100, &[Base::A, Base::C, Base::G]);
 
         // Default: SoftClip hidden — 3 events.
@@ -769,7 +769,7 @@ mod tests {
         let seq = vec![Base::A, Base::C];
         let qual = vec![BaseQuality::from_byte(30); 2];
         let store = make_store(p0(50), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         let ref_seq = make_ref_seq(50, &[Base::A, Base::C]);
 
         let events: Vec<_> =
@@ -862,7 +862,7 @@ mod tests {
         let seq = vec![Base::T, Base::A, Base::G];
         let qual = vec![BaseQuality::from_byte(35); 3];
         let store = make_store(p0(100), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         let ref_seq = make_ref_seq(100, &[Base::C, Base::A, Base::G]);
 
         let mut conversions = 0;
@@ -892,7 +892,7 @@ mod tests {
         let seq = vec![Base::A, Base::C, Base::T, Base::G, Base::Unknown];
         let qual = vec![BaseQuality::from_byte(30); 5];
         let store = make_store(p0(50), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
 
         let matches: Vec<_> = rec.aligned_pairs_with_read(&store).unwrap().matches_only().collect();
         assert_eq!(matches.len(), 4, "expected 2M + 2M = 4 match positions");
@@ -910,7 +910,7 @@ mod tests {
         let seq = vec![Base::A, Base::T, Base::G];
         let qual = vec![BaseQuality::from_byte(30); 3];
         let store = make_store(p0(100), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         let ref_seq = make_ref_seq(100, &[Base::A, Base::C, Base::G]);
 
         let matches: Vec<_> = rec
@@ -942,7 +942,7 @@ mod tests {
         let seq = vec![Base::A; 7];
         let qual = vec![BaseQuality::from_byte(30); 7];
         let store = make_store(p0(100), cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         let ref_seq = make_ref_seq(100, &[Base::A; 10]);
 
         let count = rec
@@ -998,7 +998,7 @@ mod tests {
 
         let read_pos = p0(1_000_000);
         let store = make_store(read_pos, cigar, seq, qual);
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
 
         // Reference window: covers exactly the CIGAR's reference span.
         // 95 (M) + 20 (M) + 2 (D) + 28 (M) = 145 reference bases.

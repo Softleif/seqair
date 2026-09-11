@@ -19,6 +19,7 @@ use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::sam::reader::IndexedSamReader;
 use seqair_types::BaseQuality;
+use seqair_types::QPos;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -165,26 +166,31 @@ fn sam_record_fields_match_htslib() {
 
         for (i, h) in hts.iter().enumerate() {
             let idx = ri(u32::try_from(i).unwrap());
-            let r = store.record(idx);
+            let r = store.record(idx).unwrap();
 
             assert_eq!(r.pos.as_i64(), h.pos, "{contig} rec {i}: pos");
             // htslib end_pos is exclusive (past-the-end), ours is inclusive
             assert_eq!(r.end_pos.as_i64(), h.end_pos - 1, "{contig} rec {i}: end_pos");
             assert_eq!(r.flags.raw(), h.flags, "{contig} rec {i}: flags");
             assert_eq!(r.mapq, h.mapq, "{contig} rec {i}: mapq");
-            assert_eq!(store.qname(idx), h.qname.as_slice(), "{contig} rec {i}: qname");
+            assert_eq!(
+                store.record(idx).unwrap().qname(),
+                h.qname.as_slice(),
+                "{contig} rec {i}: qname"
+            );
             assert_eq!(r.seq_len as usize, h.seq_len, "{contig} rec {i}: seq_len");
 
             // Quality scores
             assert_eq!(
-                BaseQuality::slice_to_bytes(store.qual(idx)),
+                BaseQuality::slice_to_bytes(store.record(idx).unwrap().qual()),
                 h.qual.as_slice(),
                 "{contig} rec {i}: qual"
             );
 
             // Sequence (Base vs ASCII)
             for pos in 0..h.seq_len {
-                let base = store.seq_at(idx, pos);
+                let base =
+                    store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()));
                 let hts_base = seqair_types::Base::from(h.seq[pos]);
                 assert_eq!(base, hts_base, "{contig} rec {i} pos {pos}: base");
             }
@@ -216,7 +222,7 @@ fn sam_aux_tags_present() {
     // Every record in the test data should have aux tags (at least RG)
     let mut has_aux = 0;
     for i in store.indices() {
-        if !store.aux(i).is_empty() {
+        if !store.record(i).unwrap().aux().is_empty() {
             has_aux += 1;
         }
     }
@@ -253,7 +259,7 @@ fn sam_aux_rg_tag_matches_htslib() {
     assert_eq!(store.len(), hts.len());
 
     for (i, h) in hts.iter().enumerate() {
-        let aux = store.aux(ri(u32::try_from(i).unwrap()));
+        let aux = store.record(ri(u32::try_from(i).unwrap())).unwrap().aux();
 
         if let Some(hts_rg) = &h.rg {
             let rg_tag_found = find_z_tag(aux, b"RG");

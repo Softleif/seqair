@@ -25,6 +25,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair_types::QPos;
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::Command;
@@ -134,7 +135,7 @@ fn large_records_spanning_blocks() {
 
     // Verify each record's content survived the block boundary
     for i in store.indices() {
-        let r = store.record(i);
+        let r = store.record(i).unwrap();
         assert_eq!(r.seq_len, 8000, "rec {i}: seq_len");
         assert_eq!(r.mapq, 60, "rec {i}: mapq");
 
@@ -147,7 +148,11 @@ fn large_records_spanning_blocks() {
                 2 => b'G',
                 _ => b'T',
             };
-            assert_eq!(store.seq_at(i, pos) as u8, expected, "rec {i} seq[{pos}]");
+            assert_eq!(
+                store.record(i).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap())) as u8,
+                expected,
+                "rec {i} seq[{pos}]"
+            );
         }
     }
 }
@@ -183,11 +188,11 @@ fn long_cigar_records_spanning_blocks() {
     assert_eq!(store.len(), 10, "should have all 10 long-cigar records");
 
     for i in store.indices() {
-        let r = store.record(i);
+        let r = store.record(i).unwrap();
         assert_eq!(r.seq_len, 4000, "rec {i}: seq_len should be 4000");
 
         // Verify CIGAR op count: 4000 typed ops in the slab.
-        let cigar_ops = store.cigar(i);
+        let cigar_ops = store.record(i).unwrap().cigar();
         assert_eq!(cigar_ops.len(), 4000, "rec {i}: cigar op count");
     }
 }
@@ -247,6 +252,6 @@ fn mixed_record_sizes_across_boundaries() {
     // Verify the large records have correct seq_len
     for (n, i) in store.indices().enumerate() {
         let expected = if n % 5 == 0 { 8000 } else { 50 };
-        assert_eq!(store.record(i).seq_len, expected, "rec {n}");
+        assert_eq!(store.record(i).unwrap().seq_len, expected, "rec {n}");
     }
 }

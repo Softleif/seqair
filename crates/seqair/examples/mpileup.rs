@@ -9,7 +9,7 @@ use anyhow::Context;
 use clap::Parser as _;
 use seqair::Readers;
 use seqair::bam::pileup::PileupOp;
-use seqair::bam::{RecordIdx, RecordStore};
+use seqair::bam::{RecordIdx, RecordRef};
 use seqair::reader::{Segment, SegmentOptions};
 use seqair_types::{Base, RegionString};
 use std::collections::HashMap;
@@ -105,8 +105,8 @@ fn main() -> anyhow::Result<()> {
             query_end_cache.clear();
             let store = engine.store();
             for i in store.indices() {
-                let rec = store.record(i);
-                let qend = query_end_pos(store, i, rec.pos.as_u32());
+                let Some(rec) = store.record(i) else { continue };
+                let qend = query_end_pos(rec, rec.pos.as_u32());
                 query_end_cache.insert(i, qend);
             }
         }
@@ -117,7 +117,6 @@ fn main() -> anyhow::Result<()> {
             let pos = column.pos();
             let pos1 = pos.to_one_based().context("position overflow")?;
             let ref_base = column.reference_base();
-            let store = column.store();
 
             let mut depth = 0u32;
             bases.clear();
@@ -134,7 +133,7 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 depth += 1;
-                let rec = store.record(aln.record_idx());
+                let rec = aln.record();
                 let is_reverse = aln.flags.is_reverse();
 
                 // Read-start marker
@@ -148,7 +147,7 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 format_alignment(&mut bases, &aln.op, ref_base, is_reverse, || {
-                    read_inserted_bases(store, aln.record_idx(), &aln.op)
+                    read_inserted_bases(aln.record(), &aln.op)
                 });
 
                 // Read-end marker
@@ -188,8 +187,8 @@ fn main() -> anyhow::Result<()> {
 ///
 /// For CIGAR `7M2D2I`: the 2I after the D means the D is NOT trailing → full rlen.
 /// For CIGAR `2D7M2D`: the trailing 2D has nothing after → strip it.
-fn query_end_pos<U>(store: &RecordStore<U>, record_idx: RecordIdx, record_pos: u32) -> u32 {
-    let cigar = store.cigar(record_idx);
+fn query_end_pos<U>(rec: RecordRef<'_, U>, record_pos: u32) -> u32 {
+    let cigar = rec.cigar();
 
     // Walk backwards to find trailing ref-consuming, non-query-consuming ops
     // (D=2, N=3) that have no query-consuming ops after them.
@@ -214,17 +213,13 @@ fn query_end_pos<U>(store: &RecordStore<U>, record_idx: RecordIdx, record_pos: u
 }
 
 /// Read the inserted bases from a record's sequence.
-fn read_inserted_bases<U>(
-    store: &RecordStore<U>,
-    record_idx: RecordIdx,
-    op: &PileupOp,
-) -> Option<Vec<u8>> {
+fn read_inserted_bases<U>(rec: RecordRef<'_, U>, op: &PileupOp) -> Option<Vec<u8>> {
     let (qpos, insert_len) = match op {
         PileupOp::Insertion { qpos, insert_len, .. } if *insert_len > 0 => (*qpos, *insert_len),
         _ => return None,
     };
     let start = qpos.as_usize() + 1;
-    let seq = store.seq(record_idx);
+    let seq = rec.seq();
     let end = (start + insert_len as usize).min(seq.len());
     Some(seq.get(start..end)?.iter().map(|b| *b as u8).collect())
 }

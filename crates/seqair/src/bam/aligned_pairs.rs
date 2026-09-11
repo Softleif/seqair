@@ -1703,7 +1703,7 @@ mod tests {
         fn slim_record_round_trips_simple_match() {
             let cigar = [m(5)];
             let store = store_with_record(100, &cigar, 5);
-            let rec = store.record(ri(0));
+            let rec = store.record(ri(0)).unwrap();
             let pairs: Vec<_> = rec.aligned_pairs(&store).unwrap().collect();
             assert_eq!(pairs.len(), 5);
             assert_eq!(pairs[0], match_m(0, p0(100)));
@@ -1729,7 +1729,7 @@ mod tests {
             let mut store = RecordStore::<()>::new();
             let _ = store.push_raw(&buf, &mut ()).unwrap();
 
-            let slim = store.record(ri(0));
+            let slim = store.record(ri(0)).unwrap();
             let slim_pairs: Vec<_> = slim.aligned_pairs(&store).unwrap().collect();
             let owned_pairs: Vec<_> = owned.aligned_pairs().unwrap().collect();
             assert_eq!(slim_pairs, owned_pairs);

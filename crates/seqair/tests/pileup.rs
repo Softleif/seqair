@@ -298,7 +298,7 @@ fn zero_refspan_read_handled_gracefully() {
     let raw = make_record_with_cigar(0, 50, 99, 60, &[cigar_op(10, 4)], 10); // 10S
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
-    assert_eq!(arena.record(ri(0)).end_pos, Pos0::new(50).unwrap());
+    assert_eq!(arena.record(ri(0)).unwrap().end_pos, Pos0::new(50).unwrap());
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
@@ -365,7 +365,7 @@ fn zero_refspan_endpos_equals_pos() {
     let raw = make_record_with_cigar(0, 100, 99, 60, &[cigar_op(10, 4)], 10); // 10S
     let mut arena = RecordStore::new();
     arena.push_raw(&raw, &mut ()).unwrap();
-    let r = arena.record(ri(0));
+    let r = arena.record(ri(0)).unwrap();
     assert_eq!(r.end_pos, Pos0::new(100).unwrap(), "zero-refspan should have end_pos == pos");
 }
 

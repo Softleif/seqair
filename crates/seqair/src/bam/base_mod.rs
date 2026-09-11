@@ -561,7 +561,7 @@ fn try_qpos(stored_idx: usize, seq_len: usize) -> Result<u32, BaseModError> {
 )]
 mod tests {
     use super::*;
-    use crate::bam::record_store::RecordIdx;
+    use crate::bam::record_idx::RecordIdx;
     use seqair_types::Base::{A, C, G, T};
 
     fn seq(bases: &[Base]) -> Vec<Base> {
@@ -905,7 +905,8 @@ mod tests {
         aux.set_array_u8(*b"ML", &[200, 180]).unwrap();
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
-        let rec = store.record(idx);
+        let rec = store.record(idx).unwrap();
+        let rec = rec.slim();
 
         let from_rec =
             BaseModState::from_record(rec, &store).unwrap().expect("MM tag present, expected Some");
@@ -929,7 +930,8 @@ mod tests {
         // No ML set.
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
-        let rec = store.record(idx);
+        let rec = store.record(idx).unwrap();
+        let rec = rec.slim();
 
         let err = BaseModState::from_record(rec, &store).unwrap_err();
         assert!(
@@ -941,7 +943,8 @@ mod tests {
         let mut aux2 = AuxData::new();
         aux2.set_string(*b"MM", b"C+m;");
         let (store2, idx2) = push_record(&bases, aux2.as_bytes());
-        let rec2 = store2.record(idx2);
+        let rec2 = store2.record(idx2).unwrap();
+        let rec2 = rec2.slim();
         let state = BaseModState::from_record(rec2, &store2).unwrap().expect("MM present");
         assert!(state.is_empty());
     }
@@ -954,7 +957,8 @@ mod tests {
         aux.set_string(*b"RG", b"grp1");
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
-        let rec = store.record(idx);
+        let rec = store.record(idx).unwrap();
+        let rec = rec.slim();
 
         let state = BaseModState::from_record(rec, &store).unwrap();
         assert!(state.is_none(), "expected None when MM absent, got Some");
@@ -969,7 +973,8 @@ mod tests {
         aux.set_array_u8(*b"ML", &[200]).unwrap();
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
-        let rec = store.record(idx);
+        let rec = store.record(idx).unwrap();
+        let rec = rec.slim();
 
         let err = BaseModState::from_record(rec, &store).unwrap_err();
         assert!(
@@ -986,7 +991,8 @@ mod tests {
         aux.set_int(*b"MM", 42).unwrap();
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
-        let rec = store.record(idx);
+        let rec = store.record(idx).unwrap();
+        let rec = rec.slim();
 
         let err = BaseModState::from_record(rec, &store).unwrap_err();
         assert!(matches!(err, FromRecordError::BadMmTag(_)), "got {err:?}");
@@ -1001,7 +1007,8 @@ mod tests {
         aux.set_array_u16(*b"ML", &[200]).unwrap();
 
         let (store, idx) = push_record(&bases, aux.as_bytes());
-        let rec = store.record(idx);
+        let rec = store.record(idx).unwrap();
+        let rec = rec.slim();
 
         let err = BaseModState::from_record(rec, &store).unwrap_err();
         assert!(matches!(err, FromRecordError::BadMlTag { got: "B:S" }), "got {err:?}");
@@ -1043,7 +1050,8 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let rec = store.record(idx);
+        let rec = store.record(idx).unwrap();
+        let rec = rec.slim();
         let state = BaseModState::from_record(rec, &store).unwrap().expect("MM present");
         assert_eq!(state.mod_at_qpos(QPos::new(5)).unwrap()[0].probability, 200);
         assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability, 210);

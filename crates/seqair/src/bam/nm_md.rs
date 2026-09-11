@@ -291,6 +291,7 @@ mod tests {
         let ref_seq = ref_window(100, b"ACGTA");
         let nm = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -308,6 +309,7 @@ mod tests {
         let ref_seq = ref_window(100, b"ACGAA"); // pos 3 is A vs query T
         let nm = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -340,6 +342,7 @@ mod tests {
         // NM = 0 + 3 (insert) + 1 (delete) = 4
         let nm = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -363,6 +366,7 @@ mod tests {
         let ref_seq = ref_window(100, b"AAACCCC");
         let nm = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -382,6 +386,7 @@ mod tests {
         let ref_seq = ref_window(200, b"AAAAA");
         let nm = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -399,6 +404,7 @@ mod tests {
         let ref_seq = ref_window(100, b"A");
         let nm = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -418,6 +424,7 @@ mod tests {
         let ref_seq = ref_window(100, b"ACGTA");
         let md = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -437,6 +444,7 @@ mod tests {
         let ref_seq = ref_window(100, b"ACTTA");
         let md = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -457,6 +465,7 @@ mod tests {
         let ref_seq = ref_window(100, b"TCGGT");
         let md = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -487,6 +496,7 @@ mod tests {
         let ref_seq = ref_window(100, b"AAACGTT");
         let md = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -511,6 +521,7 @@ mod tests {
         let ref_seq = ref_window(100, b"AACC");
         let md = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -530,6 +541,7 @@ mod tests {
         let ref_seq = ref_window(100, b"AGC");
         let md = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -555,6 +567,7 @@ mod tests {
         let ref_seq = ref_window(100, b"ACGTT");
         let md = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -574,6 +587,7 @@ mod tests {
         let ref_seq = ref_window(200, b"AAA");
         let result = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -623,12 +637,14 @@ mod tests {
 
         let nm = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
             .nm();
         let md = store
             .record(ri(0))
+            .unwrap()
             .aligned_pairs_with_read(&store)
             .unwrap()
             .with_reference(&ref_seq)
@@ -771,13 +787,13 @@ mod tests {
                 let ref_seq = RefSeq::new(Rc::from(ref_buf), p0(read_pos));
 
                 let nm = store
-                    .record(ri(0))
+                    .record(ri(0)).unwrap()
                     .aligned_pairs_with_read(&store)
                     .unwrap()
                     .with_reference(&ref_seq)
                     .nm();
                 let md = store
-                    .record(ri(0))
+                    .record(ri(0)).unwrap()
                     .aligned_pairs_with_read(&store)
                     .unwrap()
                     .with_reference(&ref_seq)

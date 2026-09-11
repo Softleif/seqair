@@ -146,14 +146,26 @@ fn bam_and_sam_produce_same_records() {
         );
 
         for i in bam_store.indices() {
-            assert_eq!(bam_store.record(i).pos, sam_store.record(i).pos, "{contig} rec {i}: pos");
             assert_eq!(
-                bam_store.record(i).flags,
-                sam_store.record(i).flags,
+                bam_store.record(i).unwrap().pos,
+                sam_store.record(i).unwrap().pos,
+                "{contig} rec {i}: pos"
+            );
+            assert_eq!(
+                bam_store.record(i).unwrap().flags,
+                sam_store.record(i).unwrap().flags,
                 "{contig} rec {i}: flags"
             );
-            assert_eq!(bam_store.seq(i), sam_store.seq(i), "{contig} rec {i}: seq");
-            assert_eq!(bam_store.qual(i), sam_store.qual(i), "{contig} rec {i}: qual");
+            assert_eq!(
+                bam_store.record(i).unwrap().seq(),
+                sam_store.record(i).unwrap().seq(),
+                "{contig} rec {i}: seq"
+            );
+            assert_eq!(
+                bam_store.record(i).unwrap().qual(),
+                sam_store.record(i).unwrap().qual(),
+                "{contig} rec {i}: qual"
+            );
         }
     }
 }
@@ -178,10 +190,10 @@ fn every_format_agrees_on_the_edges_of_a_query() {
     bam_reader
         .fetch_into(tid, Pos0::new(6_103_076).unwrap(), Pos0::new(6_104_000).unwrap(), &mut store)
         .unwrap();
-    let probe = store.record(ri(0));
+    let probe = store.record(ri(0)).unwrap();
     let (first, last) = (probe.pos, probe.end_pos);
     assert!(last > first, "need a record spanning more than one base");
-    let qname = store.qname(ri(0)).to_vec();
+    let qname = store.record(ri(0)).unwrap().qname().to_vec();
 
     /// A named way to open the same data in one of the three formats.
     type OpenReader<'a> = (&'a str, Box<dyn Fn() -> IndexedReader + 'a>);
@@ -212,7 +224,7 @@ fn every_format_agrees_on_the_edges_of_a_query() {
             let tid = reader.header().tid("chr19").unwrap();
             let mut store = RecordStore::new();
             reader.fetch_into(tid, edge, edge, &mut store).unwrap();
-            let hit = store.indices().any(|i| store.qname(i) == qname.as_slice());
+            let hit = store.indices().any(|i| store.record(i).unwrap().qname() == qname.as_slice());
             assert!(
                 hit,
                 "{format}: the record covering its own {label} ({}) must overlap a query there",
@@ -239,9 +251,9 @@ fn every_format_agrees_on_the_edges_of_a_query() {
         // Other records may cover that position; this one must not be reported
         // as covering it unless it genuinely does.
         for i in store.indices() {
-            if store.qname(i) == qname.as_slice() {
+            if store.record(i).unwrap().qname() == qname.as_slice() {
                 assert!(
-                    store.record(i).end_pos >= past,
+                    store.record(i).unwrap().end_pos >= past,
                     "{format}: record returned for a position it does not cover"
                 );
             }
@@ -381,15 +393,19 @@ fn bam_and_cram_produce_same_records() {
         );
 
         for i in bam_store.indices() {
-            assert_eq!(bam_store.record(i).pos, cram_store.record(i).pos, "{contig} rec {i}: pos");
             assert_eq!(
-                bam_store.record(i).flags,
-                cram_store.record(i).flags,
+                bam_store.record(i).unwrap().pos,
+                cram_store.record(i).unwrap().pos,
+                "{contig} rec {i}: pos"
+            );
+            assert_eq!(
+                bam_store.record(i).unwrap().flags,
+                cram_store.record(i).unwrap().flags,
                 "{contig} rec {i}: flags"
             );
             assert_eq!(
-                bam_store.record(i).mapq,
-                cram_store.record(i).mapq,
+                bam_store.record(i).unwrap().mapq,
+                cram_store.record(i).unwrap().mapq,
                 "{contig} rec {i}: mapq"
             );
         }
@@ -446,9 +462,9 @@ fn all_three_formats_produce_same_records() {
     assert_eq!(bam_store.len(), cram_store.len(), "BAM vs CRAM count");
 
     for i in bam_store.indices() {
-        let bp = bam_store.record(i).pos;
-        let sp = sam_store.record(i).pos;
-        let cp = cram_store.record(i).pos;
+        let bp = bam_store.record(i).unwrap().pos;
+        let sp = sam_store.record(i).unwrap().pos;
+        let cp = cram_store.record(i).unwrap().pos;
         assert_eq!(bp, sp, "BAM vs SAM pos at {i}");
         assert_eq!(bp, cp, "BAM vs CRAM pos at {i}");
     }

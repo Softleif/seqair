@@ -22,6 +22,7 @@ use noodles::sam;
 use noodles::sam::alignment::record::Sequence as _;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::Readers;
+use seqair_types::QPos;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -180,13 +181,13 @@ fn assert_cram_parity(cram_path: &Path, fasta_path: &Path, label: &str) {
 
         for (i, n) in noodles_records.iter().enumerate() {
             let idx = ri(u32::try_from(i).unwrap());
-            let r = store.record(idx);
+            let r = store.record(idx).unwrap();
             let ctx = format!("{label}/{contig_name}[{i}]");
 
             assert_eq!(r.pos.as_i64(), n.pos, "{ctx}: pos");
             assert_eq!(r.flags.raw(), n.flags, "{ctx}: flags");
             assert_eq!(r.mapq, n.mapq, "{ctx}: mapq");
-            assert_eq!(store.qname(idx), n.qname.as_slice(), "{ctx}: qname");
+            assert_eq!(store.record(idx).unwrap().qname(), n.qname.as_slice(), "{ctx}: qname");
 
             // CRAM may reconstruct the sequence from the reference for
             // secondary alignments that had SEQ=* in the original SAM.
@@ -195,7 +196,9 @@ fn assert_cram_parity(cram_path: &Path, fasta_path: &Path, label: &str) {
                 assert_eq!(r.seq_len as usize, n.seq_len, "{ctx}: seq_len");
 
                 for pos in 0..n.seq_len {
-                    let seqair_base = store.seq_at(idx, pos) as u8;
+                    let seqair_base =
+                        store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()))
+                            as u8;
                     let noodles_base = n.seq[pos];
                     match noodles_base {
                         b'A' | b'C' | b'G' | b'T' => {

@@ -18,6 +18,7 @@ use helpers::ri;
 use rust_htslib::bam::{self, Read as _};
 use seqair::bam::{Pos0, RejectUnmapped};
 use seqair_types::BaseQuality;
+use seqair_types::QPos;
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -236,18 +237,20 @@ fn record_fields_match() {
         .expect("seqair fetch");
 
     for (i, hts) in hts_records.iter().enumerate() {
-        let rio = store.record(ri(u32::try_from(i).unwrap()));
+        let rio = store.record(ri(u32::try_from(i).unwrap())).unwrap();
 
         assert_eq!(rio.pos.as_i64(), hts.pos, "pos mismatch at record {i}");
         assert_eq!(rio.flags.raw(), hts.flags, "flags mismatch at record {i}");
         assert_eq!(rio.mapq, hts.mapq, "mapq mismatch at record {i}");
         assert_eq!(
-            store.qname(ri(u32::try_from(i).unwrap())),
+            store.record(ri(u32::try_from(i).unwrap())).unwrap().qname(),
             hts.qname.as_slice(),
             "qname mismatch at record {i}"
         );
         assert_eq!(
-            BaseQuality::slice_to_bytes(store.qual(ri(u32::try_from(i).unwrap()))),
+            BaseQuality::slice_to_bytes(
+                store.record(ri(u32::try_from(i).unwrap())).unwrap().qual()
+            ),
             hts.qual.as_slice(),
             "qual mismatch at record {i}"
         );
@@ -285,11 +288,14 @@ fn sequence_matches() {
         .expect("seqair fetch");
 
     for (i, hts) in hts_records.iter().enumerate() {
-        let rio = store.record(ri(u32::try_from(i).unwrap()));
+        let rio = store.record(ri(u32::try_from(i).unwrap())).unwrap();
         assert_eq!(rio.seq_len as usize, hts.seq_len, "seq_len mismatch at record {i}");
 
         for pos in 0..hts.seq_len {
-            let base = store.seq_at(ri(u32::try_from(i).unwrap()), pos);
+            let base = store
+                .record(ri(u32::try_from(i).unwrap()))
+                .unwrap()
+                .base_at(QPos::new(u32::try_from(pos).unwrap()));
             let hts_base = seqair_types::Base::from(hts.seq[pos]);
             assert_eq!(
                 base, hts_base,
@@ -321,7 +327,7 @@ fn flag_helpers_match() {
         .expect("seqair fetch");
 
     for (i, hts) in hts_records.iter().enumerate() {
-        let rio = store.record(ri(u32::try_from(i).unwrap()));
+        let rio = store.record(ri(u32::try_from(i).unwrap())).unwrap();
         assert_eq!(
             rio.flags.is_reverse(),
             hts.flags & 0x10 != 0,
@@ -364,7 +370,7 @@ fn aux_tags_accessible() {
 
     let mut found_any_tag = false;
     for i in 0..store.len() {
-        if !store.aux(ri(u32::try_from(i).unwrap())).is_empty() {
+        if !store.record(ri(u32::try_from(i).unwrap())).unwrap().aux().is_empty() {
             found_any_tag = true;
             break;
         }

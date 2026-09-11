@@ -17,6 +17,7 @@ use noodles::sam;
 use seqair::bam::RecordIdx;
 use seqair::bam::{Pos0, RejectUnmapped};
 use seqair_types::BaseQuality;
+use seqair_types::QPos;
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -149,8 +150,10 @@ fn bam_record_count_matches_noodles() {
         // seqair's index-based fetch may include records starting before
         // `start` whose alignment span overlaps the region. Filter to match
         // the noodles sequential-read filter (pos >= start).
-        let seqair_count =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).count();
+        let seqair_count = store
+            .indices()
+            .filter(|&i| store.record(i).unwrap().pos.as_i64() >= start as i64)
+            .count();
         assert_eq!(
             seqair_count,
             noodles.len(),
@@ -182,18 +185,24 @@ fn bam_record_fields_match_noodles() {
             .expect("fetch");
 
         // Filter seqair records to match noodles' sequential filter (pos >= start).
-        let seqair_indices: Vec<RecordIdx> =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).collect();
+        let seqair_indices: Vec<RecordIdx> = store
+            .indices()
+            .filter(|&i| store.record(i).unwrap().pos.as_i64() >= start as i64)
+            .collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {
             let idx = seqair_indices[i];
-            let r = store.record(idx);
+            let r = store.record(idx).unwrap();
 
             assert_eq!(r.pos.as_i64(), n.pos, "{contig} rec {i}: pos");
             assert_eq!(r.flags.raw(), n.flags, "{contig} rec {i}: flags");
             assert_eq!(r.mapq, n.mapq, "{contig} rec {i}: mapq");
-            assert_eq!(store.qname(idx), n.qname.as_slice(), "{contig} rec {i}: qname");
+            assert_eq!(
+                store.record(idx).unwrap().qname(),
+                n.qname.as_slice(),
+                "{contig} rec {i}: qname"
+            );
         }
     }
 }
@@ -219,18 +228,22 @@ fn bam_sequence_matches_noodles() {
             .map(|c| c.kept)
             .expect("fetch");
 
-        let seqair_indices: Vec<RecordIdx> =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).collect();
+        let seqair_indices: Vec<RecordIdx> = store
+            .indices()
+            .filter(|&i| store.record(i).unwrap().pos.as_i64() >= start as i64)
+            .collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {
             let idx = seqair_indices[i];
-            let r = store.record(idx);
+            let r = store.record(idx).unwrap();
 
             assert_eq!(r.seq_len as usize, n.seq_len, "{contig} rec {i}: seq_len");
 
             for pos in 0..n.seq_len {
-                let seqair_byte = store.seq_at(idx, pos) as u8;
+                let seqair_byte =
+                    store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()))
+                        as u8;
                 let noodles_byte = n.seq[pos];
 
                 // Only compare standard bases (A=65, C=67, G=71, T=84).
@@ -271,14 +284,16 @@ fn bam_quality_scores_match_noodles() {
             .map(|c| c.kept)
             .expect("fetch");
 
-        let seqair_indices: Vec<RecordIdx> =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).collect();
+        let seqair_indices: Vec<RecordIdx> = store
+            .indices()
+            .filter(|&i| store.record(i).unwrap().pos.as_i64() >= start as i64)
+            .collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {
             let idx = seqair_indices[i];
             assert_eq!(
-                BaseQuality::slice_to_bytes(store.qual(idx)),
+                BaseQuality::slice_to_bytes(store.record(idx).unwrap().qual()),
                 n.qual.as_slice(),
                 "{contig} rec {i}: quality scores mismatch",
             );
@@ -306,13 +321,15 @@ fn bam_cigar_matches_noodles() {
             .map(|c| c.kept)
             .expect("fetch");
 
-        let seqair_indices: Vec<RecordIdx> =
-            store.indices().filter(|&i| store.record(i).pos.as_i64() >= start as i64).collect();
+        let seqair_indices: Vec<RecordIdx> = store
+            .indices()
+            .filter(|&i| store.record(i).unwrap().pos.as_i64() >= start as i64)
+            .collect();
         assert_eq!(seqair_indices.len(), noodles.len(), "{contig}: record count mismatch");
 
         for (i, n) in noodles.iter().enumerate() {
             let idx = seqair_indices[i];
-            let cigar = store.cigar(idx);
+            let cigar = store.record(idx).unwrap().cigar();
             let seqair_ops: Vec<(u32, u8)> =
                 cigar.iter().map(|op| (op.len(), op.op_code())).collect();
 

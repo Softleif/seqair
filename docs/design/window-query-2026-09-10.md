@@ -222,11 +222,27 @@ from the extra closure argument.
 
 - **The plan** (§2 above) replaced the three entry points and made the
   supplied-reference-plus-hook combination expressible.
-- **`RecordIdx`.** The `u32` store indices this query, `find_record`,
-  `record` and `mate_idx` shared are one newtype now, crate-wide.
-  `u32::MAX` is unrepresentable, so `Option<RecordIdx>` is free and both
-  mate-link sentinels are gone. `try_record` resolves a kept index without
-  panicking; `indices()` replaced `0..store.len() as u32`.
+- **`RecordIdx`,** in its own module with **`RecordRef`**. The `u32` store
+  indices this query, `find_record`, `record` and `mate_idx` shared are one
+  newtype now, crate-wide; `u32::MAX` is unrepresentable, so
+  `Option<RecordIdx>` is free and both mate-link sentinels are gone.
+
+  `RecordStore::record(idx) -> Option<RecordRef<'_>>` is the only way in, and
+  it does not panic. The nine by-index readers that each dereferenced the same
+  untrusted index — and each panicked — are methods on the handle instead. The
+  handle holds the store's borrow, not just a lifetime, which is what makes
+  the guarantee real rather than documented: `clear`, a push, `sort_by_pos`
+  and `dedup` are rejected at compile time while one is alive, and it cannot
+  outlive its store. Four `compile_fail` doctests pin that to E0502/E0515, so
+  the proof fails loudly if the shape ever changes.
+
+  True *uniqueness* branding — a handle from store A rejected by store B — was
+  not attempted: it needs invariant generative lifetimes and a closure-scoped
+  API (`with_store(|s| …)`), which the forked-reader and `PileupGuard` shapes
+  cannot absorb. The handle gets the same effect a different way: the
+  accessors are methods on it, so there is no call that could name a second
+  store. What remains is that two *live* borrows of different stores share a
+  region, which no call site can exploit because none takes both.
 - **`cargo doc -D warnings` in CI**, over the library and the examples. The
   22 + 7 warnings it was hiding were mostly `r[`rule.id`]` and `[SAM1]`
   being read as intra-doc links; one was a real rotted link in

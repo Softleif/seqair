@@ -24,6 +24,7 @@ use noodles::sam;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::IndexedReader;
 use seqair_types::BaseQuality;
+use seqair_types::QPos;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -185,22 +186,24 @@ fn assert_bam_parity(sam_name: &str) {
 
         for (i, n) in noodles_records.iter().enumerate() {
             let idx = ri(u32::try_from(i).unwrap());
-            let r = store.record(idx);
+            let r = store.record(idx).unwrap();
             let ctx = format!("{sam_name}/{contig_name}[{i}]");
 
             assert_eq!(r.pos.as_i64(), n.pos, "{ctx}: pos");
             assert_eq!(r.flags.raw(), n.flags, "{ctx}: flags");
             assert_eq!(r.mapq, n.mapq, "{ctx}: mapq");
-            assert_eq!(store.qname(idx), n.qname.as_slice(), "{ctx}: qname");
+            assert_eq!(store.record(idx).unwrap().qname(), n.qname.as_slice(), "{ctx}: qname");
 
             // CIGAR
-            let seqair_cigar = decode_cigar(store.cigar(idx));
+            let seqair_cigar = decode_cigar(store.record(idx).unwrap().cigar());
             assert_eq!(seqair_cigar, n.cigar_ops, "{ctx}: cigar");
 
             // Sequence (seqair normalises non-ACGT to Unknown/'N')
             assert_eq!(r.seq_len as usize, n.seq_len, "{ctx}: seq_len");
             for pos in 0..n.seq_len {
-                let seqair_base = store.seq_at(idx, pos) as u8;
+                let seqair_base =
+                    store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()))
+                        as u8;
                 let noodles_base = n.seq[pos];
                 match noodles_base {
                     b'A' | b'C' | b'G' | b'T' => {
@@ -222,7 +225,7 @@ fn assert_bam_parity(sam_name: &str) {
 
             // Quality scores — noodles returns empty when all bytes are 0xFF
             // (QUAL=* in SAM); seqair preserves the raw 0xFF bytes.
-            let seqair_qual = store.qual(idx);
+            let seqair_qual = store.record(idx).unwrap().qual();
             if n.qual.is_empty() {
                 assert!(
                     seqair_qual.is_empty() || seqair_qual.iter().all(|q| q.get().is_none()),

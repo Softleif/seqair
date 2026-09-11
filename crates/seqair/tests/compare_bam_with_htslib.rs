@@ -13,6 +13,7 @@
 )]
 mod helpers;
 use helpers::ri;
+use seqair_types::QPos;
 
 use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
 use seqair::bam::{
@@ -133,25 +134,30 @@ fn all_contigs_record_fields_match() {
 
         for (i, h) in hts.iter().enumerate() {
             let idx = ri(u32::try_from(i).unwrap());
-            let r = store.record(idx);
+            let r = store.record(idx).unwrap();
 
             assert_eq!(r.pos.as_i64(), h.pos, "{contig} rec {i}: pos");
             assert_eq!(r.end_pos.as_i64(), h.end_pos - 1, "{contig} rec {i}: end_pos");
             assert_eq!(r.flags.raw(), h.flags, "{contig} rec {i}: flags");
             assert_eq!(r.mapq, h.mapq, "{contig} rec {i}: mapq");
-            assert_eq!(store.qname(idx), h.qname.as_slice(), "{contig} rec {i}: qname");
+            assert_eq!(
+                store.record(idx).unwrap().qname(),
+                h.qname.as_slice(),
+                "{contig} rec {i}: qname"
+            );
             assert_eq!(r.seq_len as usize, h.seq_len, "{contig} rec {i}: seq_len");
 
             // Quality scores
             assert_eq!(
-                BaseQuality::slice_to_bytes(store.qual(idx)),
+                BaseQuality::slice_to_bytes(store.record(idx).unwrap().qual()),
                 h.qual.as_slice(),
                 "{contig} rec {i}: qual"
             );
 
             // Sequence (Base vs ASCII)
             for pos in 0..h.seq_len {
-                let base = store.seq_at(idx, pos);
+                let base =
+                    store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()));
                 let hts_base = seqair_types::Base::from(h.seq[pos]);
                 assert_eq!(base, hts_base, "{contig} rec {i} pos {pos}: base");
             }
@@ -446,7 +452,7 @@ fn all_contigs_aux_tags_match() {
 
         for (i, h) in hts.iter().enumerate() {
             let idx = ri(u32::try_from(i).unwrap());
-            let aux = store.aux(idx);
+            let aux = store.record(idx).unwrap().aux();
 
             // RG (read group) — Z-type string
             let rio_rg = aux_z_tag(aux, b"RG");

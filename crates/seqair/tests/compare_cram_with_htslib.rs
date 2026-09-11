@@ -20,6 +20,7 @@ use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::Readers;
 use seqair_types::BaseQuality;
+use seqair_types::QPos;
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -158,7 +159,7 @@ fn cram_records_match_htslib_for_chr19() {
         );
 
         for (i, hts) in hts_records.iter().enumerate() {
-            let cram = store.record(ri(u32::try_from(i).unwrap()));
+            let cram = store.record(ri(u32::try_from(i).unwrap())).unwrap();
             assert_eq!(cram.pos.as_i64(), hts.pos, "{version} rec {i}: pos");
             assert_eq!(cram.flags.raw(), hts.flags, "{version} rec {i}: flags");
             assert_eq!(cram.mapq, hts.mapq, "{version} rec {i}: mapq");
@@ -208,7 +209,7 @@ fn cram_mate_fields_match_htslib() {
         assert_eq!(store.len(), hts_records.len(), "{version}: record count");
 
         for (i, hts) in hts_records.iter().enumerate() {
-            let cram = store.record(ri(u32::try_from(i).unwrap()));
+            let cram = store.record(ri(u32::try_from(i).unwrap())).unwrap();
             assert_eq!(
                 i64::from(cram.next_pos),
                 hts.next_pos,
@@ -263,7 +264,7 @@ fn cram_end_pos_matches_htslib_inclusive_convention() {
         );
 
         for (i, hts) in hts_records.iter().enumerate() {
-            let cram = store.record(ri(u32::try_from(i).unwrap()));
+            let cram = store.record(ri(u32::try_from(i).unwrap())).unwrap();
             // BAM path: r.end_pos == hts.end_pos - 1 (see
             // compare_bam_with_htslib.rs::all_contigs_record_fields_match).
             // CRAM must agree: same eviction, same pileup depth, same
@@ -310,7 +311,9 @@ fn cram_quality_scores_match_htslib() {
         assert_eq!(store.len(), hts_quals.len(), "{version}: record count");
 
         for (i, hts_qual) in hts_quals.iter().enumerate() {
-            let cram_qual = BaseQuality::slice_to_bytes(store.qual(ri(u32::try_from(i).unwrap())));
+            let cram_qual = BaseQuality::slice_to_bytes(
+                store.record(ri(u32::try_from(i).unwrap())).unwrap().qual(),
+            );
             assert_eq!(cram_qual, hts_qual.as_slice(), "{version} rec {i}: quality mismatch");
         }
     }
@@ -348,19 +351,22 @@ fn cram_sequences_match_htslib() {
         assert_eq!(store.len(), hts_seqs.len(), "{version}: record count");
 
         for (i, hts_seq) in hts_seqs.iter().enumerate() {
-            let cram_bases: Vec<u8> = (0..store.record(ri(u32::try_from(i).unwrap())).seq_len
-                as usize)
-                .map(|pos| {
-                    let base = store.seq_at(ri(u32::try_from(i).unwrap()), pos);
-                    match base {
-                        seqair_types::Base::A => b'A',
-                        seqair_types::Base::C => b'C',
-                        seqair_types::Base::G => b'G',
-                        seqair_types::Base::T => b'T',
-                        seqair_types::Base::Unknown => b'N',
-                    }
-                })
-                .collect();
+            let cram_bases: Vec<u8> =
+                (0..store.record(ri(u32::try_from(i).unwrap())).unwrap().seq_len as usize)
+                    .map(|pos| {
+                        let base = store
+                            .record(ri(u32::try_from(i).unwrap()))
+                            .unwrap()
+                            .base_at(QPos::new(u32::try_from(pos).unwrap()));
+                        match base {
+                            seqair_types::Base::A => b'A',
+                            seqair_types::Base::C => b'C',
+                            seqair_types::Base::G => b'G',
+                            seqair_types::Base::T => b'T',
+                            seqair_types::Base::Unknown => b'N',
+                        }
+                    })
+                    .collect();
 
             assert_eq!(
                 cram_bases,
@@ -412,8 +418,16 @@ fn cram_fork_produces_same_records() {
 
         assert_eq!(store1.len(), store2.len(), "{version}: forked count mismatch");
         for i in store1.indices() {
-            assert_eq!(store1.record(i).pos, store2.record(i).pos, "{version} rec {i}: pos");
-            assert_eq!(store1.record(i).flags, store2.record(i).flags, "{version} rec {i}: flags");
+            assert_eq!(
+                store1.record(i).unwrap().pos,
+                store2.record(i).unwrap().pos,
+                "{version} rec {i}: pos"
+            );
+            assert_eq!(
+                store1.record(i).unwrap().flags,
+                store2.record(i).unwrap().flags,
+                "{version} rec {i}: flags"
+            );
         }
     }
 }

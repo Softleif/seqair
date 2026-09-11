@@ -214,14 +214,16 @@ fuzz_target!(|input: FuzzPileupInput| {
     let stats = store.link_mates();
     let mut linked = 0u32;
     for idx in store.indices() {
-        let Some(mate) = store.record(idx).mate_idx() else { continue };
-        assert!(mate.as_usize() < store.len(), "mate index out of range");
-        assert_ne!(mate, idx, "record linked to itself");
-        assert_eq!(store.record(mate).mate_idx(), Some(idx), "asymmetric mate link");
-        assert_eq!(store.qname(idx), store.qname(mate), "linked records disagree on qname");
-        assert!(!store.qname(idx).is_empty(), "a nameless record must never link");
-        let overlap = store.mate_overlap(idx).expect("a linked record has an overlap");
-        assert_eq!(store.mate_overlap(mate), Some(overlap), "mates disagree on their overlap");
+        let rec = store.record(idx).expect("an index from indices() resolves");
+        // Following the link through the handle *is* the "points at a real
+        // record" check: a dangling index cannot produce one.
+        let Some(mate) = rec.mate() else { continue };
+        assert_ne!(mate.idx(), idx, "record linked to itself");
+        assert_eq!(mate.mate().map(|back| back.idx()), Some(idx), "asymmetric mate link");
+        assert_eq!(rec.qname(), mate.qname(), "linked records disagree on qname");
+        assert!(!rec.qname().is_empty(), "a nameless record must never link");
+        let overlap = rec.mate_overlap().expect("a linked record has an overlap");
+        assert_eq!(mate.mate_overlap(), Some(overlap), "mates disagree on their overlap");
         linked = linked.saturating_add(1);
     }
     assert_eq!(linked, stats.pairs.saturating_mul(2), "stats disagree with the links");

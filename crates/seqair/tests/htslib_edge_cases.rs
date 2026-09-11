@@ -21,6 +21,7 @@ use noodles::bam;
 use noodles::sam;
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::IndexedReader;
+use seqair_types::QPos;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -110,10 +111,10 @@ fn dos_line_endings_in_sam() {
         .expect("fetch");
 
     assert_eq!(store.len(), 2, "should parse 2 records from DOS SAM");
-    assert_eq!(store.record(ri(0)).pos.as_i64(), 99); // 0-based
-    assert_eq!(store.record(ri(1)).pos.as_i64(), 199);
-    assert_eq!(store.qname(ri(0)), b"read1");
-    assert_eq!(store.qname(ri(1)), b"read2");
+    assert_eq!(store.record(ri(0)).unwrap().pos.as_i64(), 99); // 0-based
+    assert_eq!(store.record(ri(1)).unwrap().pos.as_i64(), 199);
+    assert_eq!(store.record(ri(0)).unwrap().qname(), b"read1");
+    assert_eq!(store.record(ri(1)).unwrap().qname(), b"read2");
 }
 
 /// DOS line endings also work when converted to BAM (samtools handles \r\n).
@@ -215,7 +216,8 @@ fn colons_in_contig_names() {
             .map(|c| c.kept)
             .unwrap_or_else(|e| panic!("fetch {contig}: {e}"));
 
-        let qnames: Vec<&[u8]> = store.indices().map(|i| store.qname(i)).collect();
+        let qnames: Vec<&[u8]> =
+            store.indices().map(|i| store.record(i).unwrap().qname()).collect();
         let expected_bytes: Vec<&[u8]> = expected_qnames.iter().map(|s| s.as_bytes()).collect();
         assert_eq!(qnames, expected_bytes, "contig '{contig}': qnames mismatch");
     }
@@ -257,7 +259,7 @@ fn sequence_less_mapped_reads() {
     // Some records have SEQ=* (seq_len=0), others have actual sequences.
     // Verify seqair handles both correctly.
     for i in store.indices() {
-        let r = store.record(i);
+        let r = store.record(i).unwrap();
         let n = &noodles_records[i.as_usize()];
 
         let n_seq_len = n.sequence().len();
@@ -265,14 +267,14 @@ fn sequence_less_mapped_reads() {
             r.seq_len as usize,
             n_seq_len,
             "rec {i} ({}): seq_len mismatch seqair={} noodles={}",
-            String::from_utf8_lossy(store.qname(i)),
+            String::from_utf8_lossy(store.record(i).unwrap().qname()),
             r.seq_len,
             n_seq_len
         );
 
         if r.seq_len == 0 {
             // SEQ=*: sequence and quality should be empty
-            assert!(store.seq(i).is_empty(), "rec {i}: SEQ=* but seq not empty");
+            assert!(store.record(i).unwrap().seq().is_empty(), "rec {i}: SEQ=* but seq not empty");
         }
     }
 }
@@ -311,16 +313,17 @@ fn seq_qual_presence_combos() {
     assert_eq!(store.len(), noodles_mapped.len(), "mapped record count mismatch");
 
     for i in store.indices() {
-        let r = store.record(i);
+        let r = store.record(i).unwrap();
         let n = &noodles_mapped[i.as_usize()];
-        let qname = String::from_utf8_lossy(store.qname(i));
+        let qname = String::from_utf8_lossy(store.record(i).unwrap().qname());
 
         let n_seq_len = n.sequence().len();
         assert_eq!(r.seq_len as usize, n_seq_len, "{qname}: seq_len mismatch");
 
         // For records with sequence, verify bases match
         for pos in 0..n_seq_len {
-            let seqair_base = store.seq_at(i, pos) as u8;
+            let seqair_base =
+                store.record(i).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap())) as u8;
             let noodles_base: u8 = n.sequence().iter().nth(pos).unwrap();
             match noodles_base {
                 b'A' | b'C' | b'G' | b'T' => {
@@ -385,7 +388,8 @@ fn supplementary_alignments_included() {
         .expect("fetch");
 
     // Check that supplementary alignments (flag 2048) are present
-    let supp_count = store.indices().filter(|&i| store.record(i).flags.raw() & 0x800 != 0).count();
+    let supp_count =
+        store.indices().filter(|&i| store.record(i).unwrap().flags.raw() & 0x800 != 0).count();
     assert!(supp_count > 0, "should include supplementary alignments");
 
     // Also verify against noodles
@@ -423,12 +427,12 @@ fn secondary_alignment_without_sequence() {
     // Find the secondary alignment (flag 256)
     let secondary = store
         .indices()
-        .find(|&i| store.record(i).flags.raw() & 0x100 != 0)
+        .find(|&i| store.record(i).unwrap().flags.raw() & 0x100 != 0)
         .expect("should have a secondary alignment");
 
-    let r = store.record(secondary);
+    let r = store.record(secondary).unwrap();
     assert_eq!(r.seq_len, 0, "secondary with SEQ=* should have seq_len=0");
-    assert!(store.seq(secondary).is_empty(), "secondary SEQ should be empty");
+    assert!(store.record(secondary).unwrap().seq().is_empty(), "secondary SEQ should be empty");
 }
 
 // ---- Padding CIGAR operations ----

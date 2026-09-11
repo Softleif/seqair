@@ -128,7 +128,7 @@ fn main() -> anyhow::Result<()> {
     let mut total_calls = 0u32;
 
     for idx in store.indices() {
-        let rec = store.record(idx);
+        let Some(rec) = store.record(idx) else { continue };
 
         // Skip unmapped reads.
         if rec.flags.is_unmapped() || rec.tid < 0 {
@@ -138,11 +138,11 @@ fn main() -> anyhow::Result<()> {
         // Pull MM/ML/seq/is_reverse out of the record in one call. Returns
         // `Ok(None)` when the record carries no MM tag (most reads in a
         // mixed BAM), surfaces malformed payloads as typed errors.
-        let state = match BaseModState::from_record(rec, &store) {
+        let state = match BaseModState::from_record(rec.slim(), &store) {
             Ok(Some(s)) => s,
             Ok(None) => continue,
             Err(e) => {
-                let qname = std::str::from_utf8(store.qname(idx)).unwrap_or("<non-utf8>");
+                let qname = std::str::from_utf8(rec.qname()).unwrap_or("<non-utf8>");
                 eprintln!("warning: skipping {qname}: {e}");
                 continue;
             }
@@ -154,7 +154,7 @@ fn main() -> anyhow::Result<()> {
         records_with_mods += 1;
 
         if args.verbose {
-            let qname = std::str::from_utf8(store.qname(idx)).unwrap_or("<non-utf8>");
+            let qname = std::str::from_utf8(rec.qname()).unwrap_or("<non-utf8>");
             writeln!(
                 output,
                 "# {qname} (pos={}, strand={})",

@@ -15,6 +15,7 @@
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
 use seqair_types::Base;
+use seqair_types::QPos;
 use std::num::NonZeroU32;
 
 // r[verify base_decode.table]
@@ -26,10 +27,10 @@ fn decode_standard_bases() {
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
-    assert_eq!(store.seq_at(idx, 0), Base::A);
-    assert_eq!(store.seq_at(idx, 1), Base::C);
-    assert_eq!(store.seq_at(idx, 2), Base::G);
-    assert_eq!(store.seq_at(idx, 3), Base::T);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::A);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::C);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(2)), Base::G);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(3)), Base::T);
 }
 
 // r[verify base_decode.table]
@@ -41,8 +42,8 @@ fn decode_unknown_and_n() {
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
-    assert_eq!(store.seq_at(idx, 0), Base::Unknown);
-    assert_eq!(store.seq_at(idx, 1), Base::Unknown);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::Unknown);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::Unknown);
 }
 
 // r[verify base_decode.table]
@@ -54,8 +55,8 @@ fn decode_iupac_ambiguity_maps_to_unknown() {
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
-    assert_eq!(store.seq_at(idx, 0), Base::Unknown);
-    assert_eq!(store.seq_at(idx, 1), Base::Unknown);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::Unknown);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::Unknown);
 }
 
 // r[verify base_decode.slab]
@@ -66,7 +67,7 @@ fn bases_stored_in_separate_slab() {
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
     // Access the full base slice — should be 4 Base values
-    let bases = store.seq(idx);
+    let bases = store.record(idx).unwrap().seq();
     assert_eq!(bases.len(), 4);
     assert_eq!(bases, &[Base::A, Base::C, Base::G, Base::T]);
 }

@@ -13,6 +13,7 @@
 )]
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
+use seqair_types::QPos;
 use seqair_types::{BamFlags, Base, BaseQuality};
 
 // r[verify record_store.push_raw+2]
@@ -27,19 +28,19 @@ fn decode_record_into_slabs() {
     let idx = store.push_raw(&raw, &mut ()).expect("decode").expect("kept");
 
     assert_eq!(store.len(), 1);
-    let rec = store.record(idx);
+    let rec = store.record(idx).unwrap();
     assert_eq!(rec.pos, Pos0::new(100).unwrap());
     assert_eq!(rec.mapq, 60);
     assert_eq!(rec.flags, BamFlags::from(0x63));
     assert_eq!(rec.seq_len, 4);
 
-    assert_eq!(store.qname(idx), b"read1");
-    assert_eq!(store.seq_at(idx, 0), Base::A);
-    assert_eq!(store.seq_at(idx, 1), Base::C);
-    assert_eq!(store.seq_at(idx, 2), Base::G);
-    assert_eq!(store.seq_at(idx, 3), Base::T);
-    assert_eq!(store.qual(idx).len(), 4);
-    assert!(store.qual(idx).iter().all(|q| q.get() == Some(30)));
+    assert_eq!(store.record(idx).unwrap().qname(), b"read1");
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::A);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::C);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(2)), Base::G);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(3)), Base::T);
+    assert_eq!(store.record(idx).unwrap().qual().len(), 4);
+    assert!(store.record(idx).unwrap().qual().iter().all(|q| q.get() == Some(30)));
 }
 
 // r[verify record_store.push_raw+2]
@@ -55,12 +56,12 @@ fn multiple_records_share_slabs() {
     let idx2 = store.push_raw(&raw2, &mut ()).unwrap().expect("kept");
 
     assert_eq!(store.len(), 2);
-    assert_eq!(store.record(idx1).pos, Pos0::new(100).unwrap());
-    assert_eq!(store.record(idx2).pos, Pos0::new(200).unwrap());
-    assert_eq!(store.qname(idx1), b"read1");
-    assert_eq!(store.qname(idx2), b"read2");
-    assert_eq!(store.qual(idx1)[0].get(), Some(30));
-    assert_eq!(store.qual(idx2)[0].get(), Some(25));
+    assert_eq!(store.record(idx1).unwrap().pos, Pos0::new(100).unwrap());
+    assert_eq!(store.record(idx2).unwrap().pos, Pos0::new(200).unwrap());
+    assert_eq!(store.record(idx1).unwrap().qname(), b"read1");
+    assert_eq!(store.record(idx2).unwrap().qname(), b"read2");
+    assert_eq!(store.record(idx1).unwrap().qual()[0].get(), Some(30));
+    assert_eq!(store.record(idx2).unwrap().qual()[0].get(), Some(25));
 }
 
 // r[verify record_store.clear+2]
@@ -125,21 +126,27 @@ fn qual_and_aux_are_stored_in_independent_slabs() {
     let i2 = store.push_raw(&raw2, &mut ()).unwrap().expect("kept");
 
     // Round-trip: each accessor returns exactly the bytes that were pushed.
-    assert_eq!(store.qual(i1).len(), 4);
-    assert_eq!(store.qual(i2).len(), 8);
-    assert!(store.qual(i1).iter().all(|q| q.get() == Some(30)));
-    assert!(store.qual(i2).iter().all(|q| q.get() == Some(25)));
-    assert_eq!(store.aux(i1), aux1);
-    assert_eq!(store.aux(i2), aux2);
+    assert_eq!(store.record(i1).unwrap().qual().len(), 4);
+    assert_eq!(store.record(i2).unwrap().qual().len(), 8);
+    assert!(store.record(i1).unwrap().qual().iter().all(|q| q.get() == Some(30)));
+    assert!(store.record(i2).unwrap().qual().iter().all(|q| q.get() == Some(25)));
+    assert_eq!(store.record(i1).unwrap().aux(), aux1);
+    assert_eq!(store.record(i2).unwrap().aux(), aux2);
 
     // Slab independence: record 2's aux starts immediately after record 1's
     // aux (not after record 1's qual + aux combined).
     let combined_aux_len = aux1.len() + aux2.len();
     let combined_qual_len = 4 + 8;
     // qual slab holds only qual bytes
-    assert_eq!(store.qual(i1).len() + store.qual(i2).len(), combined_qual_len);
+    assert_eq!(
+        store.record(i1).unwrap().qual().len() + store.record(i2).unwrap().qual().len(),
+        combined_qual_len
+    );
     // aux slab holds only aux bytes
-    assert_eq!(store.aux(i1).len() + store.aux(i2).len(), combined_aux_len);
+    assert_eq!(
+        store.record(i1).unwrap().aux().len() + store.record(i2).unwrap().aux().len(),
+        combined_aux_len
+    );
 }
 
 // r[verify record_store.field_access]
@@ -153,7 +160,7 @@ fn aux_tag_accessible_from_store() {
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
-    let aux_bytes = store.aux(idx);
+    let aux_bytes = store.record(idx).unwrap().aux();
     assert!(!aux_bytes.is_empty());
     assert!(aux_bytes.starts_with(b"RG"));
 }
@@ -176,9 +183,9 @@ fn integration_with_real_bam() {
 
     assert!(count > 0);
     for i in store.indices() {
-        let rec = store.record(i);
+        let rec = store.record(i).unwrap();
         assert!(rec.seq_len > 0);
-        assert_eq!(store.qual(i).len(), rec.seq_len as usize);
+        assert_eq!(store.record(i).unwrap().qual().len(), rec.seq_len as usize);
     }
 }
 
@@ -209,24 +216,24 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
             Pos0::new(103).unwrap(), // end_pos (pos + 4M - 1)
             BamFlags::from(0x63),
             60,
-            store_raw.record(idx_raw).matching_bases,
-            store_raw.record(idx_raw).indel_bases,
+            store_raw.record(idx_raw).unwrap().matching_bases,
+            store_raw.record(idx_raw).unwrap().indel_bases,
             b"read1",
             &cigar_typed,
             &bases,
             qual,
             aux,
-            store_raw.record(idx_raw).tid,
-            store_raw.record(idx_raw).next_ref_id,
-            store_raw.record(idx_raw).next_pos,
-            store_raw.record(idx_raw).template_len,
+            store_raw.record(idx_raw).unwrap().tid,
+            store_raw.record(idx_raw).unwrap().next_ref_id,
+            store_raw.record(idx_raw).unwrap().next_pos,
+            store_raw.record(idx_raw).unwrap().template_len,
             &mut (),
         )?
         .expect("kept");
 
     // Compare fixed fields
-    let r = store_raw.record(idx_raw);
-    let f = store_fields.record(idx_fields);
+    let r = store_raw.record(idx_raw).unwrap();
+    let f = store_fields.record(idx_fields).unwrap();
     assert_eq!(r.pos, f.pos);
     assert_eq!(r.end_pos, f.end_pos);
     assert_eq!(r.flags, f.flags);
@@ -237,11 +244,26 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(r.indel_bases, f.indel_bases);
 
     // Compare slab contents
-    assert_eq!(store_raw.qname(idx_raw), store_fields.qname(idx_fields));
-    assert_eq!(store_raw.seq(idx_raw), store_fields.seq(idx_fields));
-    assert_eq!(store_raw.qual(idx_raw), store_fields.qual(idx_fields));
-    assert_eq!(store_raw.cigar(idx_raw), store_fields.cigar(idx_fields));
-    assert_eq!(store_raw.aux(idx_raw), store_fields.aux(idx_fields));
+    assert_eq!(
+        store_raw.record(idx_raw).unwrap().qname(),
+        store_fields.record(idx_fields).unwrap().qname()
+    );
+    assert_eq!(
+        store_raw.record(idx_raw).unwrap().seq(),
+        store_fields.record(idx_fields).unwrap().seq()
+    );
+    assert_eq!(
+        store_raw.record(idx_raw).unwrap().qual(),
+        store_fields.record(idx_fields).unwrap().qual()
+    );
+    assert_eq!(
+        store_raw.record(idx_raw).unwrap().cigar(),
+        store_fields.record(idx_fields).unwrap().cigar()
+    );
+    assert_eq!(
+        store_raw.record(idx_raw).unwrap().aux(),
+        store_fields.record(idx_fields).unwrap().aux()
+    );
     Ok(())
 }
 
@@ -267,7 +289,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
     // Re-push every record via push_fields and compare
     let mut store2 = RecordStore::new();
     for i in store.indices() {
-        let rec = store.record(i);
+        let rec = store.record(i).unwrap();
         store2.push_fields(
             rec.pos,
             rec.end_pos,
@@ -275,11 +297,11 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
             rec.mapq,
             rec.matching_bases,
             rec.indel_bases,
-            store.qname(i),
-            store.cigar(i),
-            store.seq(i),
-            BaseQuality::slice_to_bytes(store.qual(i)),
-            store.aux(i),
+            store.record(i).unwrap().qname(),
+            store.record(i).unwrap().cigar(),
+            store.record(i).unwrap().seq(),
+            BaseQuality::slice_to_bytes(store.record(i).unwrap().qual()),
+            store.record(i).unwrap().aux(),
             rec.tid,
             rec.next_ref_id,
             rec.next_pos,
@@ -290,14 +312,34 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
 
     assert_eq!(store.len(), store2.len());
     for i in store.indices() {
-        assert_eq!(store.record(i).pos, store2.record(i).pos, "rec {i}: pos");
-        assert_eq!(store.record(i).flags, store2.record(i).flags, "rec {i}: flags");
-        assert_eq!(store.record(i).seq_len, store2.record(i).seq_len, "rec {i}: seq_len");
-        assert_eq!(store.qname(i), store2.qname(i), "rec {i}: qname");
-        assert_eq!(store.seq(i), store2.seq(i), "rec {i}: seq");
-        assert_eq!(store.qual(i), store2.qual(i), "rec {i}: qual");
-        assert_eq!(store.cigar(i), store2.cigar(i), "rec {i}: cigar");
-        assert_eq!(store.aux(i), store2.aux(i), "rec {i}: aux");
+        assert_eq!(store.record(i).unwrap().pos, store2.record(i).unwrap().pos, "rec {i}: pos");
+        assert_eq!(
+            store.record(i).unwrap().flags,
+            store2.record(i).unwrap().flags,
+            "rec {i}: flags"
+        );
+        assert_eq!(
+            store.record(i).unwrap().seq_len,
+            store2.record(i).unwrap().seq_len,
+            "rec {i}: seq_len"
+        );
+        assert_eq!(
+            store.record(i).unwrap().qname(),
+            store2.record(i).unwrap().qname(),
+            "rec {i}: qname"
+        );
+        assert_eq!(store.record(i).unwrap().seq(), store2.record(i).unwrap().seq(), "rec {i}: seq");
+        assert_eq!(
+            store.record(i).unwrap().qual(),
+            store2.record(i).unwrap().qual(),
+            "rec {i}: qual"
+        );
+        assert_eq!(
+            store.record(i).unwrap().cigar(),
+            store2.record(i).unwrap().cigar(),
+            "rec {i}: cigar"
+        );
+        assert_eq!(store.record(i).unwrap().aux(), store2.record(i).unwrap().aux(), "rec {i}: aux");
     }
     Ok(())
 }

@@ -13,7 +13,8 @@ use super::{
 use crate::bam::{
     BamHeader,
     cigar::CigarOp,
-    record_store::{CustomizeRecordStore, RecordIdx, RecordStore},
+    record_idx::RecordIdx,
+    record_store::{CustomizeRecordStore, RecordStore},
 };
 use seqair_types::{BamFlags, Base, Pos0, Pos1, SmallVec, SmolStr};
 use tracing::warn;

@@ -42,7 +42,7 @@ fn fetch_record_positions(
         .expect("fetch_into");
     store
         .indices()
-        .map(|i| (store.record(i).pos.as_i64(), store.record(i).end_pos.as_i64()))
+        .map(|i| (store.record(i).unwrap().pos.as_i64(), store.record(i).unwrap().end_pos.as_i64()))
         .collect()
 }
 
@@ -170,9 +170,9 @@ fn fork_fetches_are_independent() {
     assert_eq!(store_a.len(), store_b.len(), "independent forks should produce same count");
 
     for i in store_a.indices() {
-        assert_eq!(store_a.record(i).pos, store_b.record(i).pos);
-        assert_eq!(store_a.record(i).end_pos, store_b.record(i).end_pos);
-        assert_eq!(store_a.record(i).flags, store_b.record(i).flags);
+        assert_eq!(store_a.record(i).unwrap().pos, store_b.record(i).unwrap().pos);
+        assert_eq!(store_a.record(i).unwrap().end_pos, store_b.record(i).unwrap().end_pos);
+        assert_eq!(store_a.record(i).unwrap().flags, store_b.record(i).unwrap().flags);
     }
 }
 

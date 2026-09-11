@@ -11,11 +11,11 @@ use super::{
     aux::Aux,
     cigar::{self, CigarOp},
     record::{self, DecodeError},
+    record_idx::{RecordIdx, RecordRef},
     seq,
 };
 use hashbrown::HashTable;
-use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0};
-use std::{num::NonZeroU32, ops::Range};
+use seqair_types::{BamFlags, Base, BaseQuality, Pos0, QPos};
 
 // r[impl record_store.qname_hash]
 // r[impl record_store.qname_hash.identity_is_probabilistic]
@@ -84,87 +84,6 @@ fn fold_mul(a: u64, k: u64) -> u64 {
     )]
     let folded = (product as u64) ^ ((product >> 64) as u64);
     folded
-}
-
-// r[impl record_store.record_idx]
-/// An index into a [`RecordStore`]'s records.
-///
-/// Store indices used to travel as bare `u32`, the same type as query offsets,
-/// slab offsets, lengths and depths — none of which is a record index. This is
-/// the type that says which of those a value is.
-///
-/// `u32::MAX` is deliberately not representable. A store cannot hold that many
-/// records (a push mints indices with `u32::try_from(len)`, and every record
-/// occupies at least one byte of the `u32`-addressed name slab), so nothing is
-/// lost — and the gap left behind is a niche, which makes `Option<RecordIdx>`
-/// four bytes wide, the same as the bare index. That is what lets
-/// [`SlimRecord`] and [`PileupAlignment`] spell "no linked mate" as `None`
-/// rather than as a sentinel a caller could mistake for a real index.
-///
-/// An index means something only against the store that minted it, and only
-/// until that store is cleared or refilled. Resolve one with
-/// [`try_record`](RecordStore::try_record), which answers `None` past the
-/// store's end.
-///
-/// [`PileupAlignment`]: crate::bam::pileup::PileupAlignment
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RecordIdx(NonZeroU32);
-
-impl RecordIdx {
-    /// The first record of a store.
-    pub const ZERO: Self = Self(NonZeroU32::MIN);
-
-    // r[impl record_store.record_idx]
-    /// The index `idx`, or `None` for `u32::MAX` — the one value a record
-    /// index can never take (see the type docs).
-    ///
-    /// The stored form is `idx + 1`, which is order-preserving, so the derived
-    /// [`Ord`] sorts by index. The binary searches in
-    /// [`PileupColumn::position_of`] and in the window query depend on that.
-    ///
-    /// [`PileupColumn::position_of`]: crate::bam::pileup::PileupColumn::position_of
-    #[inline]
-    #[must_use]
-    pub const fn new(idx: u32) -> Option<Self> {
-        match NonZeroU32::new(idx.wrapping_add(1)) {
-            Some(bumped) => Some(Self(bumped)),
-            None => None,
-        }
-    }
-
-    /// The index of the record in slot `n`. The bridge from a `usize` loop
-    /// counter or a `Vec` length, in place of an `as u32` truncation.
-    #[inline]
-    #[must_use]
-    pub fn from_usize(n: usize) -> Option<Self> {
-        Self::new(u32::try_from(n).ok()?)
-    }
-
-    /// The raw index.
-    #[inline]
-    #[must_use]
-    pub const fn get(self) -> u32 {
-        self.0.get().wrapping_sub(1)
-    }
-
-    /// The raw index, for reaching into the store's slabs.
-    #[inline]
-    #[must_use]
-    pub const fn as_usize(self) -> usize {
-        self.get() as usize
-    }
-}
-
-impl std::fmt::Debug for RecordIdx {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RecordIdx({})", self.get())
-    }
-}
-
-impl std::fmt::Display for RecordIdx {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.get())
-    }
 }
 
 /// Compact BAM record with offsets into the store's slabs.
@@ -1436,26 +1355,6 @@ impl<U> RecordStore<U> {
         Some(())
     }
 
-    // r[impl record_store.mate_overlap]
-    /// The half-open reference interval both mates of `idx` cover, or `None`
-    /// when the record has no linked mate. Empty when the two alignments are
-    /// disjoint (mates of a fragment longer than twice the read length).
-    ///
-    /// [`end_pos`](SlimRecord::end_pos) is inclusive, so the last shared
-    /// position is one before the end of the returned range.
-    #[must_use]
-    pub fn mate_overlap(&self, idx: RecordIdx) -> Option<Range<Pos0>> {
-        let rec = self.record(idx);
-        let mate = self.records.get(rec.mate_idx()?.as_usize())?;
-        let start = rec.pos.max(mate.pos);
-        let last = rec.end_pos.min(mate.end_pos);
-        if last < start {
-            return Some(start..start);
-        }
-        let end = last.checked_add_offset(Offset::new(1)).unwrap_or(Pos0::max_value());
-        Some(start..end)
-    }
-
     // --- Accessors ---
 
     pub fn len(&self) -> usize {
@@ -1467,41 +1366,31 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl record_store.record_idx.resolution]
-    /// The record at `idx`, or `None` when this store has none.
+    // r[impl record_store.record_ref]
+    /// The record at `idx`, borrowed from this store, or `None` when this
+    /// store has no such record.
     ///
-    /// The checked way to resolve an index that has been kept: one from
-    /// [`PileupInput::records_overlapping`], from
-    /// [`PileupAlignment::record_idx`], or from a mate link. Such an index
-    /// belongs to the store that minted it and stops meaning anything once
-    /// that store is cleared or refilled — this catches the case where the
-    /// refilled store is *shorter*, which is the one a bounds check can see.
+    /// The one door in. Reading anything about a record goes through the
+    /// [`RecordRef`] this hands back, so the index is checked exactly once and
+    /// everything downstream — fields, slab slices, the mate — is infallible.
     ///
-    /// [`PileupAlignment::record_idx`]: crate::bam::pileup::PileupAlignment::record_idx
+    /// The handle borrows the store, so the store cannot be cleared, refilled
+    /// or reordered while it is alive. That is the half a bounds check cannot
+    /// do: an index kept across regions is *in range* for the next region's
+    /// records and would resolve silently against the wrong read.
+    ///
+    /// ```
+    /// # use seqair::bam::{RecordIdx, RecordStore};
+    /// # fn demo(store: &RecordStore) {
+    /// match store.record(RecordIdx::ZERO) {
+    ///     Some(rec) => println!("{} at {}", rec.qname().len(), rec.pos.as_u64()),
+    ///     None => println!("empty store"),
+    /// }
+    /// # }
+    /// ```
     #[must_use]
-    pub fn try_record(&self, idx: RecordIdx) -> Option<&SlimRecord> {
-        self.records.get(idx.as_usize())
-    }
-
-    // r[impl record_store.record_idx.resolution]
-    /// The record at `idx`.
-    ///
-    /// Every index this crate mints is in range for the store that minted it,
-    /// so the internal callers — the pileup hot loop above all — take this
-    /// form. A caller resolving an index it has been holding across regions
-    /// wants [`try_record`](Self::try_record) instead.
-    ///
-    /// # Panics
-    ///
-    /// If `idx` is not an index of this store.
-    #[must_use]
-    pub fn record(&self, idx: RecordIdx) -> &SlimRecord {
-        #[allow(clippy::panic, reason = "documented; see try_record for the checked form")]
-        match self.try_record(idx) {
-            Some(rec) => rec,
-            None => {
-                panic!("record {idx} is out of range for a store of {} records", self.records.len())
-            }
-        }
+    pub fn record(&self, idx: RecordIdx) -> Option<RecordRef<'_, U>> {
+        Some(RecordRef::new(self, self.records.get(idx.as_usize())?, idx))
     }
 
     // r[impl record_store.iter]
@@ -1543,9 +1432,13 @@ impl<U> RecordStore<U> {
         Some(())
     }
 
+    // The slab readers below take the record rather than its index: the
+    // caller has already proved the pairing (it holds a `&SlimRecord` from
+    // this store), so the only failure left is a slab offset this file wrote
+    // wrongly — an invariant, not an argument. `RecordRef` is the public face
+    // of all of them.
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
-    pub fn qname(&self, idx: RecordIdx) -> &[u8] {
-        let rec = self.record(idx);
+    pub(crate) fn qname_of(&self, rec: &SlimRecord) -> &[u8] {
         let start = rec.name_off as usize;
         let end = start.checked_add(rec.name_len as usize).expect("qname end overflow");
         debug_assert!(end <= self.names.len(), "qname slab overrun: {end} > {}", self.names.len());
@@ -1553,8 +1446,7 @@ impl<U> RecordStore<U> {
     }
 
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
-    pub fn cigar(&self, idx: RecordIdx) -> &[CigarOp] {
-        let rec = self.record(idx);
+    pub(crate) fn cigar_of(&self, rec: &SlimRecord) -> &[CigarOp] {
         let start = rec.cigar_off as usize;
         let end = start.checked_add(rec.cigar_len()).expect("cigar end overflow");
         debug_assert!(end <= self.cigar.len(), "cigar slab overrun: {end} > {}", self.cigar.len());
@@ -1562,8 +1454,7 @@ impl<U> RecordStore<U> {
     }
 
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
-    pub fn seq(&self, idx: RecordIdx) -> &[Base] {
-        let rec = self.record(idx);
+    pub(crate) fn seq_of(&self, rec: &SlimRecord) -> &[Base] {
         let start = rec.bases_off as usize;
         let end = start.checked_add(rec.seq_len as usize).expect("seq end overflow");
         debug_assert!(end <= self.bases.len(), "bases slab overrun: {end} > {}", self.bases.len());
@@ -1571,18 +1462,22 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl bam.record.seq_at]
-    pub fn seq_at(&self, idx: RecordIdx, pos: usize) -> Base {
-        let rec = self.record(idx);
+    pub(crate) fn base_at_of(&self, rec: &SlimRecord, qpos: QPos) -> Base {
+        // Past the record's own bases is `Unknown`, not another record's base:
+        // the slab is shared, so the length has to be checked, not just the
+        // offset.
+        if qpos.as_usize() >= rec.seq_len as usize {
+            return Base::Unknown;
+        }
         self.bases
-            .get((rec.bases_off as usize).checked_add(pos).expect("seq_at offset overflow"))
+            .get((rec.bases_off as usize).saturating_add(qpos.as_usize()))
             .copied()
             .unwrap_or(Base::Unknown)
     }
 
     // r[impl types.base_quality.field_type]
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
-    pub fn qual(&self, idx: RecordIdx) -> &[BaseQuality] {
-        let rec = self.record(idx);
+    pub(crate) fn qual_of(&self, rec: &SlimRecord) -> &[BaseQuality] {
         let start = rec.qual_off as usize;
         let end = start.checked_add(rec.seq_len as usize).expect("qual end overflow");
         debug_assert!(end <= self.qual.len(), "qual slab overrun: {end} > {}", self.qual.len());
@@ -1591,8 +1486,7 @@ impl<U> RecordStore<U> {
 
     // r[impl bam.record.raw_aux]
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
-    pub fn aux(&self, idx: RecordIdx) -> &[u8] {
-        let rec = self.record(idx);
+    pub(crate) fn aux_of(&self, rec: &SlimRecord) -> &[u8] {
         let start = rec.aux_off as usize;
         let end = start.checked_add(rec.aux_len as usize).expect("aux end overflow");
         debug_assert!(end <= self.aux.len(), "aux slab overrun: {end} > {}", self.aux.len());
@@ -1615,8 +1509,9 @@ impl<U> RecordStore<U> {
         new_pos: Pos0,
         new_cigar_ops: &[CigarOp],
     ) -> Result<(), DecodeError> {
-        let rec = self.record(idx);
-        let seq_len = rec.seq_len;
+        let rec =
+            self.record(idx).ok_or(DecodeError::NoSuchRecord { idx, len: self.records.len() })?;
+        let (seq_len, was_unmapped) = (rec.seq_len, rec.flags.is_unmapped());
 
         // ── All validation before any mutation ──
         // If any check fails, the store is unchanged (r[record_store.set_alignment.validation]).
@@ -1634,7 +1529,7 @@ impl<U> RecordStore<U> {
             u16::try_from(n_ops).map_err(|_| DecodeError::CigarOpCountOverflow { count: n_ops })?;
 
         // r[impl record_store.end_pos_htslib]
-        let end_pos = if rec.flags.is_unmapped() {
+        let end_pos = if was_unmapped {
             new_pos
         } else {
             cigar::compute_end_pos(new_pos, new_cigar_ops)
@@ -1665,10 +1560,11 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl record_store.extras.access]
-    /// Access the per-record extra for `idx`.
-    #[allow(clippy::indexing_slicing, reason = "idx is always a valid index returned by push_raw")]
-    pub fn extra(&self, idx: RecordIdx) -> &U {
-        let rec = self.record(idx);
+    #[allow(
+        clippy::indexing_slicing,
+        reason = "extras_idx is written by push_raw alongside the record"
+    )]
+    pub(crate) fn extra_of(&self, rec: &SlimRecord) -> &U {
         let ei = rec.extras_idx as usize;
         debug_assert!(
             ei < self.extras.len(),
@@ -1679,16 +1575,16 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl record_store.extras.access]
-    /// Mutably access the per-record extra for `idx`.
-    #[allow(clippy::indexing_slicing, reason = "idx is always a valid index returned by push_raw")]
-    pub fn extra_mut(&mut self, idx: RecordIdx) -> &mut U {
-        let ei = self.record(idx).extras_idx as usize;
-        debug_assert!(
-            ei < self.extras.len(),
-            "extras_idx {ei} out of bounds (len={})",
-            self.extras.len()
-        );
-        &mut self.extras[ei]
+    // r[impl record_store.record_idx.resolution]
+    /// Mutably access the per-record extra for `idx`, or `None` when this
+    /// store has no such record.
+    ///
+    /// The mutable counterpart of [`RecordRef::extra`]. It cannot go through a
+    /// [`RecordRef`], which borrows the store shared; the index is checked here
+    /// instead.
+    pub fn extra_mut(&mut self, idx: RecordIdx) -> Option<&mut U> {
+        let ei = self.records.get(idx.as_usize())?.extras_idx as usize;
+        self.extras.get_mut(ei)
     }
 
     /// Take all contents out, leaving an empty store with no capacity.
@@ -1990,63 +1886,20 @@ pub(crate) mod tests {
         raw
     }
 
-    // ---- RecordIdx ----
-
-    // r[verify record_store.record_idx]
-    #[test]
-    fn record_idx_round_trips_every_representable_index() {
-        for raw in [0u32, 1, 2, 255, 65_535, u32::MAX - 1] {
-            let idx = RecordIdx::new(raw).expect("representable");
-            assert_eq!(idx.get(), raw);
-            assert_eq!(idx.as_usize(), raw as usize);
-            assert_eq!(RecordIdx::from_usize(raw as usize), Some(idx));
-        }
-        assert_eq!(RecordIdx::ZERO.get(), 0);
-    }
-
-    // r[verify record_store.record_idx]
-    /// The one excluded value, and the niche it buys: the `Option` must cost
-    /// nothing over the index itself, which is what lets `mate_idx` drop its
-    /// sentinel.
-    #[test]
-    fn u32_max_is_not_an_index_and_that_is_the_niche() {
-        assert_eq!(RecordIdx::new(u32::MAX), None);
-        assert_eq!(RecordIdx::from_usize(u32::MAX as usize), None);
-        assert_eq!(RecordIdx::from_usize(usize::MAX), None);
-        assert_eq!(size_of::<Option<RecordIdx>>(), size_of::<RecordIdx>());
-        assert_eq!(size_of::<RecordIdx>(), size_of::<u32>());
-    }
-
-    // r[verify record_store.record_idx]
-    /// Sorting by the stored form must be sorting by the index — the column
-    /// binary searches in `PileupColumn::position_of` rely on it, and the
-    /// stored form is not the index.
-    #[test]
-    fn ordering_follows_the_index_not_the_representation() {
-        let raws = [0u32, 1, 7, 300, 70_000, u32::MAX - 2, u32::MAX - 1];
-        for pair in raws.windows(2) {
-            let (lo, hi) = (pair[0], pair[1]);
-            assert!(ri(lo) < ri(hi), "{lo} must sort before {hi}");
-        }
-        let mut shuffled: Vec<RecordIdx> = [9u32, 2, 40, 0, 7].into_iter().map(ri).collect();
-        shuffled.sort_unstable();
-        assert_eq!(shuffled.iter().map(|i| i.get()).collect::<Vec<_>>(), [0, 2, 7, 9, 40]);
-    }
-
     // r[verify record_store.record_idx.resolution]
-    /// `try_record` answers for the store it is asked, not for the index's
-    /// numeric value: the same index resolves before a `clear` and not after.
+    /// `record` answers for the store it is asked, not for the index's numeric
+    /// value: the same index resolves before a `clear` and not after.
     #[test]
-    fn try_record_is_none_past_the_end_and_after_a_clear() {
+    fn record_is_none_past_the_end_and_after_a_clear() {
         let mut store = RecordStore::new();
         store.push_raw(&make_raw_record(b"read1", 4, 1), &mut ()).unwrap();
         let idx = ri(0);
-        assert!(store.try_record(idx).is_some());
-        assert!(store.try_record(ri(1)).is_none(), "one past the end");
-        assert!(store.try_record(ri(u32::MAX - 1)).is_none());
+        assert!(store.record(idx).is_some());
+        assert!(store.record(ri(1)).is_none(), "one past the end");
+        assert!(store.record(ri(u32::MAX - 1)).is_none());
 
         store.clear();
-        assert!(store.try_record(idx).is_none(), "an index cannot outlive its records");
+        assert!(store.record(idx).is_none(), "an index cannot outlive its records");
     }
 
     // r[verify record_store.record_idx]
@@ -2059,7 +1912,7 @@ pub(crate) mod tests {
         }
         assert_eq!(store.indices().collect::<Vec<_>>(), [ri(0), ri(1), ri(2)]);
         for (idx, rec) in store.indices().zip(store.records()) {
-            assert_eq!(store.record(idx).pos, rec.pos);
+            assert_eq!(store.record(idx).unwrap().pos, rec.pos);
         }
     }
 
@@ -2149,7 +2002,7 @@ pub(crate) mod tests {
         // Write next_ref_id = 7 at BAM offset 20
         raw[20..24].copy_from_slice(&7i32.to_le_bytes());
         store.push_raw(&raw, &mut ()).unwrap();
-        assert_eq!(store.record(ri(0)).next_ref_id, 7);
+        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, 7);
     }
 
     // r[verify record_store.pre_filter.rollback]
@@ -2398,7 +2251,7 @@ pub(crate) mod tests {
                 &mut (),
             )
             .unwrap();
-        assert_eq!(store.record(ri(0)).next_ref_id, 3);
+        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, 3);
     }
 
     // r[verify record_store.end_pos_htslib]
@@ -2426,7 +2279,7 @@ pub(crate) mod tests {
                 &mut (),
             )
             .unwrap();
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         assert_eq!(rec.end_pos, Pos0::new(104).unwrap());
     }
 
@@ -2456,7 +2309,7 @@ pub(crate) mod tests {
                 &mut (),
             )
             .unwrap();
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         assert!(rec.flags.is_unmapped());
         assert_eq!(rec.end_pos, Pos0::new(100).unwrap());
     }
@@ -2496,14 +2349,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let rec = store.record(ri(0));
+        let rec = store.record(ri(0)).unwrap();
         assert!(rec.flags.is_unmapped(), "CRAM unmapped reads must have FLAG_UNMAPPED");
         assert_eq!(rec.mapq, 0, "CRAM unmapped reads must have MAPQ=0");
         assert_eq!(rec.end_pos, pos, "CRAM unmapped reads must have end_pos == pos");
         assert_eq!(rec.seq_len, 4, "CRAM unmapped reads retain decoded sequence");
         assert_eq!(rec.matching_bases, 0, "CRAM unmapped reads have zero matching_bases");
         assert_eq!(rec.indel_bases, 0, "CRAM unmapped reads have zero indel_bases");
-        assert_eq!(rec.qname(&store).unwrap(), b"cram_unmapped_read");
+        assert_eq!(rec.qname(), b"cram_unmapped_read");
     }
 
     // r[verify record_store.end_pos_htslib]
@@ -2521,7 +2374,7 @@ pub(crate) mod tests {
         let mut store = RecordStore::new();
         store.push_raw(&mapped, &mut ()).unwrap();
         assert_eq!(
-            store.record(ri(0)).end_pos,
+            store.record(ri(0)).unwrap().end_pos,
             reader_end,
             "mapped: reader's compute_end_pos_from_raw must agree with push_raw's stored end_pos"
         );
@@ -2535,16 +2388,16 @@ pub(crate) mod tests {
         // After refactor, push_raw stores pos for unmapped reads.
         let mut store2 = RecordStore::new();
         store2.push_raw(&unmapped, &mut ()).unwrap();
-        assert!(store2.record(ri(0)).flags.is_unmapped());
+        assert!(store2.record(ri(0)).unwrap().flags.is_unmapped());
         assert_eq!(
-            store2.record(ri(0)).end_pos,
+            store2.record(ri(0)).unwrap().end_pos,
             Pos0::new(100).unwrap(),
             "unmapped: push_raw stores pos (htslib-compatible), not CIGAR-derived end"
         );
         // Verify they differ: reader's prefilter returns CIGAR-derived (which is fine
         // for overlap checking — it's a loose upper bound), while store is exact.
         assert_ne!(
-            store2.record(ri(0)).end_pos,
+            store2.record(ri(0)).unwrap().end_pos,
             reader_end,
             "reader prefilter end_pos (CIGAR-derived) differs from stored end_pos (pos) for unmapped reads"
         );
@@ -3242,18 +3095,18 @@ pub(crate) mod tests {
 
                 for (i, inp) in kept_inputs.iter().enumerate() {
                     let idx = RecordIdx::from_usize(i).expect("store is small");
-                    prop_assert_eq!(store.qname(idx), inp.qname.as_slice(), "qname rec {}", i);
-                    prop_assert_eq!(store.seq(idx), inp.bases.as_slice(), "seq rec {}", i);
-                    let qual_bytes = BaseQuality::slice_to_bytes(store.qual(idx));
+                    prop_assert_eq!(store.record(idx).unwrap().qname(), inp.qname.as_slice(), "qname rec {}", i);
+                    prop_assert_eq!(store.record(idx).unwrap().seq(), inp.bases.as_slice(), "seq rec {}", i);
+                    let qual_bytes = BaseQuality::slice_to_bytes(store.record(idx).unwrap().qual());
                     prop_assert_eq!(qual_bytes, inp.quals.as_slice(), "qual rec {}", i);
-                    prop_assert_eq!(store.aux(idx), inp.aux.as_slice(), "aux rec {}", i);
-                    let cigar = store.cigar(idx);
+                    prop_assert_eq!(store.record(idx).unwrap().aux(), inp.aux.as_slice(), "aux rec {}", i);
+                    let cigar = store.record(idx).unwrap().cigar();
                     prop_assert_eq!(cigar.len(), 1, "cigar op count rec {}", i);
                     let op = cigar[0];
                     prop_assert_eq!(op.op_type(), cigar::CigarOpType::Match, "cigar op type rec {}", i);
                     prop_assert_eq!(op.len() as usize, inp.bases.len(), "cigar op len rec {}", i);
 
-                    let rec = store.record(idx);
+                    let rec = store.record(idx).unwrap();
                     #[expect(
                         clippy::cast_sign_loss,
                         reason = "PushInput.pos is bounded < 1_000_000 so always nonneg"

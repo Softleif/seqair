@@ -112,7 +112,7 @@ fn count_segment(store: &RecordStore<()>) -> Output {
     let mut out = Output::default();
 
     for idx in store.indices() {
-        let rec = store.record(idx);
+        let Some(rec) = store.record(idx) else { continue };
 
         // Skip reads that can't contribute signal.
         if rec.flags.is_unmapped()

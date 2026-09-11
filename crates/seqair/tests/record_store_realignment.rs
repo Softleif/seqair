@@ -159,7 +159,7 @@ fn push_raw_preserves_tid() {
     let raw = make_simple_record(5, 100, &[pack_cigar_op(4, CIGAR_M)], 4, b"read1");
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
-    assert_eq!(store.record(idx).tid, 5);
+    assert_eq!(store.record(idx).unwrap().tid, 5);
 }
 
 // r[verify record_store.slim_record_fields]
@@ -181,8 +181,8 @@ fn push_raw_preserves_next_pos() {
     );
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
-    assert_eq!(store.record(idx).next_pos, 500);
-    assert_eq!(store.record(idx).template_len, 300);
+    assert_eq!(store.record(idx).unwrap().next_pos, 500);
+    assert_eq!(store.record(idx).unwrap().template_len, 300);
 }
 
 // r[verify record_store.slim_record_fields]
@@ -204,7 +204,7 @@ fn push_raw_preserves_negative_template_len() {
     );
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
-    assert_eq!(store.record(idx).template_len, -300);
+    assert_eq!(store.record(idx).unwrap().template_len, -300);
 }
 
 // ---------------------------------------------------------------------------
@@ -219,10 +219,10 @@ fn cigar_in_own_slab() {
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
     // cigar accessor should return the correct packed bytes
-    assert_eq!(store.cigar(idx), &cigar_packed);
+    assert_eq!(store.record(idx).unwrap().cigar(), &cigar_packed);
     // qual and aux should be unaffected by cigar separation
-    assert_eq!(store.qual(idx).len(), 4);
-    assert!(store.qual(idx).iter().all(|q| q.get() == Some(30)));
+    assert_eq!(store.record(idx).unwrap().qual().len(), 4);
+    assert!(store.record(idx).unwrap().qual().iter().all(|q| q.get() == Some(30)));
 }
 
 // ---------------------------------------------------------------------------
@@ -241,13 +241,13 @@ fn set_alignment_updates_cigar_and_pos() {
     let new_cigar = pack_cigar(&[(2, CIGAR_S), (2, CIGAR_M)]);
     store.set_alignment(idx, Pos0::new(95).unwrap(), &new_cigar).unwrap();
 
-    let rec = store.record(idx);
+    let rec = store.record(idx).unwrap();
     assert_eq!(rec.pos, Pos0::new(95).unwrap());
     assert_eq!(rec.end_pos, Pos0::new(96).unwrap()); // 95 + 2M - 1
     assert_eq!(rec.n_cigar_ops, 2);
     assert_eq!(rec.matching_bases, 2); // only 2M now
     assert_eq!(rec.indel_bases, 0);
-    assert_eq!(store.cigar(idx), &new_cigar);
+    assert_eq!(store.record(idx).unwrap().cigar(), &new_cigar);
 }
 
 // r[verify record_store.set_alignment]
@@ -270,24 +270,24 @@ fn set_alignment_preserves_other_fields() {
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
-    let orig_seq: Vec<Base> = store.seq(idx).to_vec();
-    let orig_qual: Vec<BaseQuality> = store.qual(idx).to_vec();
-    let orig_aux: Vec<u8> = store.aux(idx).to_vec();
-    let orig_qname: Vec<u8> = store.qname(idx).to_vec();
+    let orig_seq: Vec<Base> = store.record(idx).unwrap().seq().to_vec();
+    let orig_qual: Vec<BaseQuality> = store.record(idx).unwrap().qual().to_vec();
+    let orig_aux: Vec<u8> = store.record(idx).unwrap().aux().to_vec();
+    let orig_qname: Vec<u8> = store.record(idx).unwrap().qname().to_vec();
 
     let new_cigar = pack_cigar(&[(2, CIGAR_S), (2, CIGAR_M)]);
     store.set_alignment(idx, Pos0::new(95).unwrap(), &new_cigar).unwrap();
 
     // These must be unchanged
-    assert_eq!(store.seq(idx), &orig_seq);
-    assert_eq!(store.qual(idx), &orig_qual);
-    assert_eq!(store.aux(idx), &orig_aux);
-    assert_eq!(store.qname(idx), &orig_qname);
-    assert_eq!(store.record(idx).tid, 3);
-    assert_eq!(store.record(idx).next_pos, 500);
-    assert_eq!(store.record(idx).template_len, 300);
-    assert_eq!(store.record(idx).flags, BamFlags::from(0x63));
-    assert_eq!(store.record(idx).mapq, 60);
+    assert_eq!(store.record(idx).unwrap().seq(), &orig_seq);
+    assert_eq!(store.record(idx).unwrap().qual(), &orig_qual);
+    assert_eq!(store.record(idx).unwrap().aux(), &orig_aux);
+    assert_eq!(store.record(idx).unwrap().qname(), &orig_qname);
+    assert_eq!(store.record(idx).unwrap().tid, 3);
+    assert_eq!(store.record(idx).unwrap().next_pos, 500);
+    assert_eq!(store.record(idx).unwrap().template_len, 300);
+    assert_eq!(store.record(idx).unwrap().flags, BamFlags::from(0x63));
+    assert_eq!(store.record(idx).unwrap().mapq, 60);
 }
 
 // r[verify record_store.set_alignment]
@@ -299,17 +299,17 @@ fn set_alignment_does_not_corrupt_other_records() {
     let idx1 = store.push_raw(&raw1, &mut ()).unwrap().expect("kept");
     let idx2 = store.push_raw(&raw2, &mut ()).unwrap().expect("kept");
 
-    let orig_cigar2 = store.cigar(idx2).to_vec();
-    let orig_qual2 = store.qual(idx2).to_vec();
+    let orig_cigar2 = store.record(idx2).unwrap().cigar().to_vec();
+    let orig_qual2 = store.record(idx2).unwrap().qual().to_vec();
 
     // Realign only record 1
     let new_cigar = pack_cigar(&[(2, CIGAR_S), (2, CIGAR_M)]);
     store.set_alignment(idx1, Pos0::new(95).unwrap(), &new_cigar).unwrap();
 
     // Record 2 must be untouched
-    assert_eq!(store.record(idx2).pos, Pos0::new(200).unwrap());
-    assert_eq!(store.cigar(idx2), &orig_cigar2);
-    assert_eq!(store.qual(idx2), &orig_qual2);
+    assert_eq!(store.record(idx2).unwrap().pos, Pos0::new(200).unwrap());
+    assert_eq!(store.record(idx2).unwrap().cigar(), &orig_cigar2);
+    assert_eq!(store.record(idx2).unwrap().qual(), &orig_qual2);
 }
 
 // r[verify record_store.set_alignment.validation]
@@ -325,7 +325,7 @@ fn set_alignment_rejects_query_length_mismatch() {
     assert!(result.is_err(), "should reject query length mismatch");
 
     // Record should be unchanged
-    assert_eq!(store.record(idx).pos, Pos0::new(100).unwrap());
+    assert_eq!(store.record(idx).unwrap().pos, Pos0::new(100).unwrap());
 }
 
 // r[verify record_store.set_alignment]
@@ -339,7 +339,7 @@ fn set_alignment_with_indels() {
     let new_cigar = pack_cigar(&[(3, CIGAR_M), (1, CIGAR_I), (2, CIGAR_M)]);
     store.set_alignment(idx, Pos0::new(100).unwrap(), &new_cigar).unwrap();
 
-    let rec = store.record(idx);
+    let rec = store.record(idx).unwrap();
     assert_eq!(rec.end_pos, Pos0::new(104).unwrap()); // 100 + 5 - 1
     assert_eq!(rec.matching_bases, 5); // 3M + 2M
     assert_eq!(rec.indel_bases, 1); // 1I
@@ -364,14 +364,14 @@ fn set_alignment_then_sort_restores_order() {
     store.sort_by_pos();
 
     // After sort: pos 50, 100, 200
-    assert_eq!(store.record(ri(0)).pos, Pos0::new(50).unwrap());
-    assert_eq!(store.record(ri(1)).pos, Pos0::new(100).unwrap());
-    assert_eq!(store.record(ri(2)).pos, Pos0::new(200).unwrap());
+    assert_eq!(store.record(ri(0)).unwrap().pos, Pos0::new(50).unwrap());
+    assert_eq!(store.record(ri(1)).unwrap().pos, Pos0::new(100).unwrap());
+    assert_eq!(store.record(ri(2)).unwrap().pos, Pos0::new(200).unwrap());
 
     // Verify qnames survived the sort correctly
-    assert_eq!(store.qname(ri(0)), b"read3"); // was at index 2
-    assert_eq!(store.qname(ri(1)), b"read1");
-    assert_eq!(store.qname(ri(2)), b"read2");
+    assert_eq!(store.record(ri(0)).unwrap().qname(), b"read3"); // was at index 2
+    assert_eq!(store.record(ri(1)).unwrap().qname(), b"read1");
+    assert_eq!(store.record(ri(2)).unwrap().qname(), b"read2");
 }
 
 // r[verify record_store.set_alignment]
@@ -384,14 +384,14 @@ fn set_alignment_multiple_times_same_record() {
     // First realignment
     let cigar1 = pack_cigar(&[(2, CIGAR_S), (2, CIGAR_M)]);
     store.set_alignment(idx, Pos0::new(90).unwrap(), &cigar1).unwrap();
-    assert_eq!(store.record(idx).pos, Pos0::new(90).unwrap());
+    assert_eq!(store.record(idx).unwrap().pos, Pos0::new(90).unwrap());
 
     // Second realignment — should also work (appends again, more dead cigar bytes)
     let cigar2 = pack_cigar(&[(1, CIGAR_S), (3, CIGAR_M)]);
     store.set_alignment(idx, Pos0::new(80).unwrap(), &cigar2).unwrap();
-    assert_eq!(store.record(idx).pos, Pos0::new(80).unwrap());
-    assert_eq!(store.cigar(idx), &cigar2);
-    assert_eq!(store.record(idx).matching_bases, 3);
+    assert_eq!(store.record(idx).unwrap().pos, Pos0::new(80).unwrap());
+    assert_eq!(store.record(idx).unwrap().cigar(), &cigar2);
+    assert_eq!(store.record(idx).unwrap().matching_bases, 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -478,7 +478,7 @@ proptest! {
         let new_pos_typed = Pos0::new(new_pos).unwrap();
         store.set_alignment(idx, new_pos_typed, &new_cigar_bytes).unwrap();
 
-        let rec = store.record(idx);
+        let rec = store.record(idx).unwrap();
 
         // Oracle: compute expected values independently
         let expected_end = expected_end_pos(new_pos, &new_parts);
@@ -505,16 +505,16 @@ proptest! {
         let mut store = RecordStore::new();
         let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
-        let orig_seq: Vec<Base> = store.seq(idx).to_vec();
-        let orig_qual: Vec<BaseQuality> = store.qual(idx).to_vec();
-        let orig_qname: Vec<u8> = store.qname(idx).to_vec();
+        let orig_seq: Vec<Base> = store.record(idx).unwrap().seq().to_vec();
+        let orig_qual: Vec<BaseQuality> = store.record(idx).unwrap().qual().to_vec();
+        let orig_qname: Vec<u8> = store.record(idx).unwrap().qname().to_vec();
 
         let new_cigar_bytes = pack_cigar(&new_parts);
         store.set_alignment(idx, Pos0::new(pos).unwrap(), &new_cigar_bytes).unwrap();
 
-        prop_assert_eq!(store.seq(idx), &orig_seq[..], "seq changed after set_alignment");
-        prop_assert_eq!(store.qual(idx), &orig_qual[..], "qual changed after set_alignment");
-        prop_assert_eq!(store.qname(idx), &orig_qname[..], "qname changed after set_alignment");
+        prop_assert_eq!(store.record(idx).unwrap().seq(), &orig_seq[..], "seq changed after set_alignment");
+        prop_assert_eq!(store.record(idx).unwrap().qual(), &orig_qual[..], "qual changed after set_alignment");
+        prop_assert_eq!(store.record(idx).unwrap().qname(), &orig_qname[..], "qname changed after set_alignment");
     }
 
     // r[verify record_store.set_alignment]
@@ -598,21 +598,21 @@ fn realignment_workflow_with_real_bam() {
 
     // Verify tid is populated for all records
     for i in store.indices() {
-        assert_eq!(store.record(i).tid, tid as i32, "tid mismatch for record {i}");
+        assert_eq!(store.record(i).unwrap().tid, tid as i32, "tid mismatch for record {i}");
     }
 
     // "Realign" the first record by shifting it 10bp left with same cigar
-    let orig_cigar = store.cigar(ri(0)).to_vec();
-    let orig_seq: Vec<Base> = store.seq(ri(0)).to_vec();
-    let orig_qual: Vec<BaseQuality> = store.qual(ri(0)).to_vec();
-    let orig_pos = store.record(ri(0)).pos;
+    let orig_cigar = store.record(ri(0)).unwrap().cigar().to_vec();
+    let orig_seq: Vec<Base> = store.record(ri(0)).unwrap().seq().to_vec();
+    let orig_qual: Vec<BaseQuality> = store.record(ri(0)).unwrap().qual().to_vec();
+    let orig_pos = store.record(ri(0)).unwrap().pos;
 
     let new_pos = Pos0::new(orig_pos.as_u32().saturating_sub(10)).unwrap();
     store.set_alignment(ri(0), new_pos, &orig_cigar).unwrap();
 
-    assert_eq!(store.record(ri(0)).pos, new_pos);
-    assert_eq!(store.seq(ri(0)), &orig_seq);
-    assert_eq!(store.qual(ri(0)), &orig_qual);
+    assert_eq!(store.record(ri(0)).unwrap().pos, new_pos);
+    assert_eq!(store.record(ri(0)).unwrap().seq(), &orig_seq);
+    assert_eq!(store.record(ri(0)).unwrap().qual(), &orig_qual);
 
     // Sort and verify order
     store.sort_by_pos();

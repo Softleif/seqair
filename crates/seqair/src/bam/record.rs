@@ -217,6 +217,11 @@ pub enum DecodeError {
     #[error("BAM record too short: {len} bytes")]
     TooShort { len: usize },
 
+    // r[impl record_store.record_idx.resolution]
+    /// A store operation was given an index the store does not hold.
+    #[error("no record {idx} in a store of {len} records")]
+    NoSuchRecord { idx: super::record_idx::RecordIdx, len: usize },
+
     #[error("arithmetic overflow computing BAM record field offsets")]
     OffsetOverflow,
 

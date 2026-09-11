@@ -131,7 +131,7 @@ fn main() -> anyhow::Result<()> {
         let fully = spanning
             .iter()
             .filter(|&&idx| {
-                let rec = col.store().record(idx);
+                let rec = col.store().record(idx).unwrap();
                 rec.pos <= win_start && rec.end_pos >= win_end
             })
             .count();

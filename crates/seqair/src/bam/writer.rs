@@ -5,7 +5,8 @@
 
 use super::header::{BamHeader, BamHeaderError};
 use super::owned_record::{OwnedBamRecord, OwnedRecordError};
-use super::record_store::{RecordIdx, RecordStore};
+use super::record_idx::RecordIdx;
+use super::record_store::RecordStore;
 use crate::io::{BgzfError, BgzfWriter, IndexBuilder, IndexError};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -72,6 +73,12 @@ pub enum BamWriteError {
     /// Mapped record (flags & 0x4 == 0) has `ref_id` == -1.
     #[error("mapped record has ref_id == -1 (structurally invalid)")]
     MappedWithoutReference,
+
+    // r[impl record_store.record_idx.resolution]
+    /// [`BamWriter::write_store_record`] was given an index the store does not
+    /// hold.
+    #[error("no record {idx} in the store")]
+    NoSuchRecord { idx: RecordIdx },
 }
 
 // r[impl bam_writer.create_from_path]
@@ -233,12 +240,12 @@ impl<W: Write> BamWriter<W> {
         store: &RecordStore,
         idx: RecordIdx,
     ) -> Result<(), BamWriteError> {
-        let rec = store.record(idx);
-        let qname = store.qname(idx);
-        let cigar = store.cigar(idx);
-        let seq = store.seq(idx);
-        let qual = store.qual(idx);
-        let aux = store.aux(idx);
+        let rec = store.record(idx).ok_or(BamWriteError::NoSuchRecord { idx })?;
+        let qname = rec.qname();
+        let cigar = rec.cigar();
+        let seq = rec.seq();
+        let qual = rec.qual();
+        let aux = rec.aux();
 
         // Validate field limits (matching OwnedBamRecord::to_bam_bytes).
         // n_cigar_ops is u16 (validated at push time), pos is Pos0 (always ≤ i32::MAX).
@@ -584,13 +591,13 @@ mod tests {
         let mut store = RecordStore::new();
 
         let idx0 = push_one_record_from_bgzf(&mut reader, &mut store);
-        assert_eq!(store.qname(idx0), b"read1");
-        assert_eq!(store.record(idx0).pos.as_u32(), 100);
-        assert_eq!(store.record(idx0).mapq, 30);
+        assert_eq!(store.record(idx0).unwrap().qname(), b"read1");
+        assert_eq!(store.record(idx0).unwrap().pos.as_u32(), 100);
+        assert_eq!(store.record(idx0).unwrap().mapq, 30);
 
         let idx1 = push_one_record_from_bgzf(&mut reader, &mut store);
-        assert_eq!(store.qname(idx1), b"read2");
-        assert_eq!(store.record(idx1).pos.as_u32(), 200);
+        assert_eq!(store.record(idx1).unwrap().qname(), b"read2");
+        assert_eq!(store.record(idx1).unwrap().pos.as_u32(), 200);
     }
 
     // r[verify bam_writer.error_poisoning]
@@ -803,8 +810,8 @@ mod tests {
         }
 
         for i in store.indices() {
-            let a = store.record(i);
-            let b = store2.record(i);
+            let a = store.record(i).unwrap();
+            let b = store2.record(i).unwrap();
             assert_eq!(a.pos.as_u32(), b.pos.as_u32(), "pos mismatch for record {i}");
             assert_eq!(a.flags, b.flags, "flags mismatch for record {i}");
             assert_eq!(a.mapq, b.mapq, "mapq mismatch for record {i}");
@@ -814,11 +821,31 @@ mod tests {
             assert_eq!(a.template_len, b.template_len, "template_len mismatch for record {i}");
             assert_eq!(a.seq_len, b.seq_len, "seq_len mismatch for record {i}");
             assert_eq!(a.n_cigar_ops, b.n_cigar_ops, "n_cigar_ops mismatch for record {i}");
-            assert_eq!(store.qname(i), store2.qname(i), "qname mismatch for record {i}");
-            assert_eq!(store.cigar(i), store2.cigar(i), "cigar mismatch for record {i}");
-            assert_eq!(store.seq(i), store2.seq(i), "seq mismatch for record {i}");
-            assert_eq!(store.qual(i), store2.qual(i), "qual mismatch for record {i}");
-            assert_eq!(store.aux(i), store2.aux(i), "aux mismatch for record {i}");
+            assert_eq!(
+                store.record(i).unwrap().qname(),
+                store2.record(i).unwrap().qname(),
+                "qname mismatch for record {i}"
+            );
+            assert_eq!(
+                store.record(i).unwrap().cigar(),
+                store2.record(i).unwrap().cigar(),
+                "cigar mismatch for record {i}"
+            );
+            assert_eq!(
+                store.record(i).unwrap().seq(),
+                store2.record(i).unwrap().seq(),
+                "seq mismatch for record {i}"
+            );
+            assert_eq!(
+                store.record(i).unwrap().qual(),
+                store2.record(i).unwrap().qual(),
+                "qual mismatch for record {i}"
+            );
+            assert_eq!(
+                store.record(i).unwrap().aux(),
+                store2.record(i).unwrap().aux(),
+                "aux mismatch for record {i}"
+            );
         }
     }
 
@@ -904,7 +931,7 @@ mod tests {
         for i in 0..5 {
             let idx = push_one_record_from_bgzf(&mut reader, &mut store);
             let expected = format!("read{i}");
-            assert_eq!(store.qname(idx), expected.as_bytes());
+            assert_eq!(store.record(idx).unwrap().qname(), expected.as_bytes());
         }
     }
 }

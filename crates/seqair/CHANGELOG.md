@@ -21,14 +21,26 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
   and rewrites the store against them — had no spelling before, though the private implementation already
   supported it.
 - **Record-store indices are the `RecordIdx` newtype, not bare `u32`.**
-  Changed: `RecordStore::{record, try_record, qname, cigar, seq, seq_at, qual, aux, extra, extra_mut,
-  set_alignment, set_template_len, set_mate_info, mate_overlap}`, the `Option<RecordIdx>` returned by
-  `push_raw`/`push_fields`, `SlimRecord::mate_idx()`, `PileupAlignment::{record_idx, mate_idx}`,
-  `PileupColumn::{find_record, position_of}`, every `records_overlapping`, and
-  `BamWriter::write_store_record`. `u32::MAX` is not a representable index, which makes
-  `Option<RecordIdx>` free and retires the `u32::MAX` "no mate" sentinel on both mate fields.
-  New: `RecordStore::try_record` (`None` past the store's end — `record` panics there, documented) and
-  `RecordStore::indices()` in place of `0..store.len() as u32`.
+  Changed: `SlimRecord::mate_idx()`, `PileupAlignment::{record_idx, mate_idx}`,
+  `PileupColumn::{find_record, position_of}`, every `records_overlapping`, the `Option<RecordIdx>`
+  returned by `push_raw`/`push_fields`, `RecordStore::{set_alignment, set_template_len,
+  set_mate_info, extra_mut}` and `BamWriter::write_store_record`. `u32::MAX` is not a representable
+  index, which makes `Option<RecordIdx>` free and retires the `u32::MAX` "no mate" sentinel on both
+  mate fields. `RecordIdx` and `RecordRef` live in the new `bam::record_idx` module.
+- **Reading a record goes through `RecordStore::record(idx) -> Option<RecordRef<'_>>`, which does not
+  panic.** The by-index readers are gone — `try_record`, `qname(idx)`, `cigar(idx)`, `seq(idx)`,
+  `seq_at(idx, _)`, `qual(idx)`, `aux(idx)`, `extra(idx)`, `mate_overlap(idx)` — and are methods on
+  the handle: `rec.qname()`, `rec.cigar()`, `rec.seq()`, `rec.base_at(qpos)` (a `QPos` now, not a
+  `usize`), `rec.qual()`, `rec.aux()`, `rec.aux_tags()`, `rec.extra()`, `rec.mate()`,
+  `rec.mate_overlap()`; the record's own fields arrive through `Deref`. Each of those used to be a
+  separate place an untrusted index could be dereferenced, each with its own panic. The handle
+  borrows the store, so a kept index cannot resolve against a refilled one — `clear`, a push,
+  `sort_by_pos` and `dedup` are all rejected while a handle is alive, and a handle cannot outlive its
+  store (proved by `compile_fail` doctests pinned to E0502/E0515).
+  `set_alignment` and `write_store_record` report a missing record as
+  `DecodeError::NoSuchRecord` / `BamWriteError::NoSuchRecord` instead of panicking; `extra_mut`
+  returns `Option`. New: `RecordStore::indices()` in place of `0..store.len() as u32`, and
+  `AlignmentView::record()` for the rest of a column entry's record.
 - **`PileupAlignment`** does not expose `strand` anymore. Use `Strand::from(rec.flags)` (or your own logic) instead.
 - **Unmapped-read filtering unified on `filter_raw`.**
   Removed `IndexedBamReader::keep_unmapped` / `keeps_unmapped`.

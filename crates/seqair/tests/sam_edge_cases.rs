@@ -119,7 +119,7 @@ fn unmapped_reads_flow_through_to_store() {
     assert!(!store.is_empty());
     // All reads (including unmapped) flow through to filter_raw by default.
     // The pileup engine excludes unmapped from columns per r[pileup.unmapped_excluded].
-    let has_unmapped = store.indices().any(|i| store.record(i).flags.is_unmapped());
+    let has_unmapped = store.indices().any(|i| store.record(i).unwrap().flags.is_unmapped());
     // In a real BAM, this region may or may not have unmapped reads.
     // The important thing is that the reader doesn't silently drop them.
     let _ = has_unmapped;
@@ -147,9 +147,9 @@ fn missing_seq_produces_zero_length() {
 
     assert_eq!(store.len(), 3);
     // The secondary alignment (index 1) should have seq_len = 0
-    let secondary = store.record(ri(1));
+    let secondary = store.record(ri(1)).unwrap();
     assert_eq!(secondary.seq_len, 0, "SEQ * should produce seq_len=0");
-    assert_eq!(store.seq(ri(1)).len(), 0, "SEQ * should produce empty seq slice");
+    assert_eq!(store.record(ri(1)).unwrap().seq().len(), 0, "SEQ * should produce empty seq slice");
 }
 
 // r[verify sam.edge.missing_qual]
@@ -170,7 +170,7 @@ fn missing_qual_produces_0xff() {
         .expect("fetch");
 
     assert_eq!(store.len(), 1);
-    let qual = store.qual(ri(0));
+    let qual = store.record(ri(0)).unwrap().qual();
     assert_eq!(qual.len(), 4, "QUAL * with 4-base SEQ should produce 4 quality bytes");
     assert!(
         qual.iter().all(|q| q.get().is_none()),

@@ -97,7 +97,7 @@ fn max_qname_length() {
         .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 1);
-    assert_eq!(store.qname(ri(0)).len(), 254);
+    assert_eq!(store.record(ri(0)).unwrap().qname().len(), 254);
 }
 
 /// Record with a very long sequence (50,000 bases).
@@ -124,7 +124,7 @@ fn large_sequence() {
         .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 1);
-    assert_eq!(store.record(ri(0)).seq_len, seq_len);
+    assert_eq!(store.record(ri(0)).unwrap().seq_len, seq_len);
 }
 
 /// Record with many aux tags (fills the aux data buffer).
@@ -279,7 +279,7 @@ fn fully_unmapped_not_indexed() {
         .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 1, "fetch should only return mapped records");
-    assert_eq!(store.qname(ri(0)), b"mapped");
+    assert_eq!(store.record(ri(0)).unwrap().qname(), b"mapped");
 }
 
 // --- Error poisoning integration ---

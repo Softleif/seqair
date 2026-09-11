@@ -58,17 +58,51 @@ a caller iterating the store never needs to write `0..store.len() as u32`.
 
 r[record_store.record_idx.resolution]
 An index is meaningful only against the store that minted it, and only until
-that store is cleared or refilled. The store MUST therefore offer
-`try_record(idx) -> Option<&SlimRecord>`, which answers `None` for an index
-past its end — the case a bounds check can see, and the one a caller resolving
-an index it kept across regions hits first. `record(idx)` stays the infallible
-spelling for the crate's own hot paths, where the index was minted from the
-same store, and MUST panic (not `debug_assert` and then read a neighbouring
-record) when it is out of range.
+that store is cleared, refilled or reordered. `RecordStore::record(idx) ->
+Option<RecordRef<'_>>` MUST be the only way to resolve one, and MUST NOT panic:
+an index the store does not hold is `None`. No reading accessor may be keyed by
+a bare index — `try_record`, `qname(idx)`, `seq(idx)`, `qual(idx)`, `aux(idx)`,
+`cigar(idx)`, `seq_at(idx, _)`, `extra(idx)` and `mate_overlap(idx)` were each
+a second place the same untrusted index could be dereferenced, and each carried
+its own panic. They belong on the handle
+(r[`record_store.record_ref`]). `extra_mut(idx)` MUST remain on the store
+because it is `&mut`, and MUST return `Option`.
 
-Neither form can detect an index that is in range for a *different* population
-of records, which is why the window query's indices are documented as valid
-only while the engine holds its store (r[`pileup.records_overlapping`]).
+The mutating operations keyed by an index (`set_alignment`, `set_template_len`,
+`set_mate_info`) MUST likewise report a missing record rather than panicking —
+`Option` where they have no error type, and a typed variant
+(`DecodeError::NoSuchRecord`) where they do. So MUST
+`BamWriter::write_store_record` (`BamWriteError::NoSuchRecord`).
+
+r[record_store.record_ref]
+`RecordRef<'store, U>` is an index that has been checked against a particular
+store and borrows it. It MUST hold that borrow, not merely a lifetime: the
+borrow is what makes the handle's guarantees hold rather than merely be
+documented.
+
+* **Checked once.** Construction is the only fallible step. Reading a field,
+  any slab slice, or the mate through the handle MUST be infallible.
+* **Cannot go stale.** While a handle exists the store is immutably borrowed,
+  so `clear`, a push, `sort_by_pos`, `dedup` and a refill are all rejected at
+  compile time. This is the half a bounds check cannot do: an index kept across
+  regions is *in range* for the next region's records, and would resolve
+  silently against the wrong read.
+* **Cannot be crossed with another store.** The accessors are methods on the
+  handle rather than functions taking a store, so no call site can supply a
+  different one. That is exactly the mistake `SlimRecord::qname(&store)` and its
+  siblings return a `RecordAccessError` for.
+* **Cannot outlive its store.** Returning one from a function that owns the
+  store is rejected at compile time.
+
+The handle MUST `Deref` to `SlimRecord`, so a record's own fields read straight
+off it, and MUST expose `idx()` to recover the plain index for storing or
+comparing. It MUST offer `mate()`, since a mate link is a store index and the
+handle is where following one is safe.
+
+The remaining panics inside the slab readers are the crate's own invariants —
+offsets this module wrote — and are unreachable through a handle, because the
+record and the store were paired at construction. The panics that a *caller*
+could reach are the ones this rule removes.
 
 ## Record fields
 

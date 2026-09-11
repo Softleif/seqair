@@ -61,11 +61,11 @@ struct Cli {
 fn realign_leading_clip(store: &mut RecordStore<()>) -> usize {
     let mut plan: Vec<(RecordIdx, Pos0, Vec<CigarOp>)> = Vec::new();
     for idx in store.indices() {
-        let rec = store.record(idx);
+        let rec = store.record(idx).unwrap();
         if rec.flags.is_unmapped() {
             continue;
         }
-        let Ok(cigar) = rec.cigar(store) else { continue };
+        let cigar = rec.cigar();
         let Some(first) = cigar.first() else { continue };
         if first.op_type() != CigarOpType::Match || first.len() < 2 {
             continue;

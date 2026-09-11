@@ -14,7 +14,8 @@
 mod helpers;
 use helpers::ri;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
-use seqair::bam::record_store::{RecordIdx, RecordStore};
+use seqair::bam::record_idx::RecordIdx;
+use seqair::bam::record_store::RecordStore;
 use seqair::reader::{DepthLimit, Readers, Segment, SegmentOptions};
 use seqair_types::{Base, Pos0};
 use std::collections::BTreeMap;
@@ -88,7 +89,7 @@ fn query_matches_brute_force_on_real_reads() {
             );
         }
         for &idx in &hits {
-            let rec = col.store().record(idx);
+            let rec = col.store().record(idx).unwrap();
             let covers = rec.pos <= col.pos() && rec.end_pos >= col.pos();
             assert_eq!(col.find_record(idx).is_some(), covers, "record {idx} at {}", col.pos());
         }
@@ -118,11 +119,11 @@ fn shift_leading_base(store: &mut RecordStore) -> BTreeMap<(Vec<u8>, Pos0), Pos0
     }
     let mut plan: Vec<Planned> = Vec::new();
     for idx in store.indices() {
-        let rec = store.record(idx);
+        let rec = store.record(idx).unwrap();
         if rec.flags.is_unmapped() {
             continue;
         }
-        let Ok(cigar) = rec.cigar(store) else { continue };
+        let cigar = rec.cigar();
         let Some(first) = cigar.first() else { continue };
         if first.op_type() != CigarOpType::Match || first.len() < 2 {
             continue;
@@ -133,7 +134,7 @@ fn shift_leading_base(store: &mut RecordStore) -> BTreeMap<(Vec<u8>, Pos0), Pos0
         ];
         new.extend_from_slice(cigar.get(1..).unwrap_or_default());
         let new_pos = Pos0::new(rec.pos.as_u32() + 1).unwrap();
-        let key = (rec.qname(store).unwrap().to_vec(), rec.end_pos);
+        let key = (rec.qname().to_vec(), rec.end_pos);
         plan.push(Planned { idx, key, old_pos: rec.pos, new_pos, cigar: new });
     }
     let mut moved = BTreeMap::new();
@@ -175,8 +176,8 @@ fn query_after_a_realigning_hook_names_the_moved_reads() {
     assert_eq!(hits, brute_force(pileup.store(), seg_start, seg_end));
     let mut found_moved = 0usize;
     for &idx in &hits {
-        let rec = pileup.store().record(idx);
-        let key = (rec.qname(pileup.store()).unwrap().to_vec(), rec.end_pos);
+        let rec = pileup.store().record(idx).unwrap();
+        let key = (rec.qname().to_vec(), rec.end_pos);
         if let Some(&old_pos) = moved.get(&key) {
             assert_eq!(
                 rec.pos.as_u32(),

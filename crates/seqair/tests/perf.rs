@@ -190,7 +190,7 @@ fn precomputed_matches_indels_accessible_from_record() {
     );
     arena.push_raw(&raw, &mut ()).unwrap();
 
-    let r = arena.record(ri(0));
+    let r = arena.record(ri(0)).unwrap();
     assert_eq!(r.matching_bases, 45);
     assert_eq!(r.indel_bases, 5);
 }
@@ -251,7 +251,7 @@ proptest! {
         let raw = make_record_with_cigar(0, 0, 99, 60, &ops, seq_len);
         let mut arena = RecordStore::new();
         arena.push_raw(&raw, &mut ()).unwrap();
-        let r = arena.record(ri(0));
+        let r = arena.record(ri(0)).unwrap();
 
         prop_assert_eq!(r.matching_bases, exp_matches,
             "matching_bases mismatch for ops={:?}", inner_ops);

@@ -14,7 +14,8 @@ use crate::utils::TraceErr;
 
 use super::{
     cigar::{CigarMapping, CigarPosInfo},
-    record_store::{PileupInput, RecordIdx, RecordStore},
+    record_idx::{RecordIdx, RecordRef},
+    record_store::{PileupInput, RecordStore},
 };
 
 /// Cloning is a pointer clone of the shared bases, so one `RefSeq` can drive
@@ -184,12 +185,14 @@ fn base_qual_at<U>(
     active: &ActiveRecord,
     qpos: QPos,
 ) -> (Base, BaseQuality) {
-    if active.seq_len == 0 {
+    // The index was minted from this store when the record was activated, so
+    // the lookup is a formality — but it is the formality that replaced a
+    // panic, and it now serves both reads where there used to be one each.
+    let Some(rec) = store.record(active.record_idx).filter(|_| active.seq_len != 0) else {
         return (Base::Unknown, BaseQuality::UNAVAILABLE);
-    }
-    let qual = store.qual(active.record_idx);
-    let q = qual.get(qpos.as_usize()).copied().unwrap_or(BaseQuality::UNAVAILABLE);
-    (store.seq_at(active.record_idx, qpos.as_usize()), q)
+    };
+    let q = rec.qual().get(qpos.as_usize()).copied().unwrap_or(BaseQuality::UNAVAILABLE);
+    (rec.base_at(qpos), q)
 }
 
 // r[impl pileup.column_contents]
@@ -244,7 +247,11 @@ impl<'eng, U> PileupColumn<'eng, U> {
     /// [`seq`](AlignmentView::seq), and [`qualities`](AlignmentView::qualities) for slab data.
     pub fn alignments(&self) -> impl Iterator<Item = AlignmentView<'_, 'eng, U>> + '_ {
         let store = self.store;
-        self.alignments.iter().map(move |aln| AlignmentView { aln, store })
+        // Same resolution as `alignment_at`; an entry whose record the store
+        // no longer holds is not a view this column can hand out.
+        self.alignments
+            .iter()
+            .filter_map(move |aln| Some(AlignmentView { aln, rec: store.record(aln.record_idx)? }))
     }
 
     /// Iterate the raw alignments without store access.
@@ -330,7 +337,11 @@ impl<'eng, U> PileupColumn<'eng, U> {
     #[must_use]
     pub fn alignment_at(&self, index: usize) -> Option<AlignmentView<'_, 'eng, U>> {
         let aln = self.alignments.get(index)?;
-        Some(AlignmentView { aln, store: self.store })
+        // The entry's index was minted from this very store while the column
+        // was filled, so this resolves; carrying the handle rather than the
+        // store is what makes every accessor below infallible.
+        let rec = self.store.record(aln.record_idx)?;
+        Some(AlignmentView { aln, rec })
     }
 
     // r[impl pileup.column_mate_of]
@@ -378,7 +389,7 @@ impl<'eng, U> PileupColumn<'eng, U> {
 // r[impl pileup.alignment_view]
 pub struct AlignmentView<'a, 'store, U> {
     aln: &'a PileupAlignment,
-    store: &'store RecordStore<U>,
+    rec: RecordRef<'store, U>,
 }
 
 impl<U> std::fmt::Debug for AlignmentView<'_, '_, U> {
@@ -388,14 +399,24 @@ impl<U> std::fmt::Debug for AlignmentView<'_, '_, U> {
 }
 
 impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
+    // r[impl record_store.record_ref]
+    /// This alignment's record, resolved against the store.
+    ///
+    /// The view's own accessors cover the common fields; this is the way to
+    /// the rest of the record — its `end_pos`, its CIGAR, its mate — without a
+    /// second lookup.
+    pub fn record(&self) -> RecordRef<'store, U> {
+        self.rec
+    }
+
     /// The per-record extra, as computed by the customize value's `compute` method.
     pub fn extra(&self) -> &'store U {
-        self.store.extra(self.aln.record_idx())
+        self.rec.extra()
     }
 
     /// The read's QNAME bytes in the store's name slab.
     pub fn qname(&self) -> &'store [u8] {
-        self.store.qname(self.aln.record_idx())
+        self.rec.qname()
     }
 
     // r[impl pileup.mate_link_cache]
@@ -411,22 +432,22 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
     /// the entry is written once per read per column, so carrying it there
     /// cost eight bytes of memory traffic per alignment to save a load here.
     pub fn qname_hash(&self) -> Option<u64> {
-        self.store.record(self.aln.record_idx()).qname_hash()
+        self.rec.qname_hash()
     }
 
     /// The raw BAM aux bytes for this record.
     pub fn aux(&self) -> &'store [u8] {
-        self.store.aux(self.aln.record_idx())
+        self.rec.aux()
     }
 
     /// The read's full decoded sequence (all bases, not just the pileup position).
     pub fn seq(&self) -> &'store [Base] {
-        self.store.seq(self.aln.record_idx())
+        self.rec.seq()
     }
 
     /// The read's full per-base quality scores (all positions, not just the pileup position).
     pub fn qualities(&self) -> &'store [BaseQuality] {
-        self.store.qual(self.aln.record_idx())
+        self.rec.qual()
     }
 
     /// The inserted bases for a [`PileupOp::Insertion`] at this column — the
@@ -462,7 +483,7 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
 
     /// The store this view references.
     pub fn store(&self) -> &'store RecordStore<U> {
-        self.store
+        self.rec.store()
     }
 }
 
@@ -1010,7 +1031,9 @@ impl<U> PileupEngine<U> {
                 let idx =
                     RecordIdx::from_usize(self.next_entry).trace_err("next_entry has no index")?;
 
-                let rec = self.store.record(idx);
+                // `idx < self.store.len()` by the loop condition, so this
+                // cannot miss; `break` rather than a panic if it ever does.
+                let Some(rec) = self.store.record(idx) else { break };
                 // With soft-clip overhang, a record becomes active `overhang`
                 // columns before its alignment start (to emit the leading clip
                 // partner) and stays active `overhang` columns past its end (for
@@ -1033,7 +1056,7 @@ impl<U> PileupEngine<U> {
                     continue;
                 }
 
-                let cigar = CigarMapping::new(rec.pos, self.store.cigar(idx))
+                let cigar = CigarMapping::new(rec.pos, rec.cigar())
                     .trace_err("failed to generate cigar mapping")?;
 
                 // Bake the trailing overhang into the eviction key so the retain
@@ -1051,15 +1074,15 @@ impl<U> PileupEngine<U> {
                 // the alignment, still counts as being inside the pair's
                 // overlap — it is the same molecule either way. With the
                 // default overhang of 0 this is the store's interval verbatim.
-                let mate_overlap =
-                    self.store.mate_overlap(idx).map_or(Pos0::ZERO..Pos0::ZERO, |ov| {
-                        let offset = Offset::new(i64::from(overhang));
-                        let start = ov.start.checked_sub_offset(offset).unwrap_or(Pos0::ZERO);
-                        let end = ov.end.checked_add_offset(offset).unwrap_or(Pos0::max_value());
-                        start..end
-                    });
-                self.active_end_pos.push(active_end);
-                self.active.push(ActiveRecord {
+                let mate_overlap = rec.mate_overlap().map_or(Pos0::ZERO..Pos0::ZERO, |ov| {
+                    let offset = Offset::new(i64::from(overhang));
+                    let start = ov.start.checked_sub_offset(offset).unwrap_or(Pos0::ZERO);
+                    let end = ov.end.checked_add_offset(offset).unwrap_or(Pos0::max_value());
+                    start..end
+                });
+                // Build it before touching `self.active*`: `rec` borrows
+                // `self.store`, and the pushes need `&mut self`.
+                let active = ActiveRecord {
                     record_idx: idx,
                     cigar,
                     flags: rec.flags,
@@ -1069,7 +1092,9 @@ impl<U> PileupEngine<U> {
                     indel_bases: rec.indel_bases,
                     mate_idx: rec.mate_idx(),
                     mate_overlap,
-                });
+                };
+                self.active_end_pos.push(active_end);
+                self.active.push(active);
             }
 
             // r[impl pileup.empty_positions_skipped]
@@ -1083,7 +1108,8 @@ impl<U> PileupEngine<U> {
                 // Jump to the next record, but back up by the overhang so the
                 // leading soft-clip columns just before its alignment are not
                 // skipped.
-                let next_pos = self.store.record(next).pos;
+                let next_pos =
+                    self.store.record(next).trace_err("next_entry is not in the store")?.pos;
                 let next_start = match self.soft_clip_overhang {
                     0 => next_pos,
                     n => {
@@ -2118,7 +2144,7 @@ mod tests {
                         // column can resolve: found here iff it overlaps
                         // this very position.
                         for &idx in &from_column {
-                            let rec = col.store().record(idx);
+                            let rec = col.store().record(idx).unwrap();
                             let covers = rec.pos <= col.pos() && rec.end_pos >= col.pos();
                             prop_assert_eq!(col.find_record(idx).is_some(), covers, "record {} at column {}", idx, col.pos());
                         }

@@ -80,7 +80,7 @@ fn region_buf_reads_same_records_as_direct_bgzf() {
     // Verify basic properties that would fail if RegionBuf decompression is wrong
     assert!(count > 0);
     for i in 0..arena.len() {
-        let rec = arena.record(ri(u32::try_from(i).unwrap()));
+        let rec = arena.record(ri(u32::try_from(i).unwrap())).unwrap();
         let _ = rec.pos; // Pos0 is always non-negative by construction
         assert!(rec.seq_len > 0, "record should have a sequence");
     }

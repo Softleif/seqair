@@ -63,13 +63,13 @@ fn snapshot_store(store: &RecordStore) -> Vec<RecordSnapshot> {
     store
         .indices()
         .map(|i| {
-            let r = store.record(i);
+            let r = store.record(i).unwrap();
             RecordSnapshot {
                 pos: r.pos.as_i64(),
                 end_pos: r.end_pos.as_i64(),
                 flags: r.flags.raw(),
                 mapq: r.mapq,
-                qname: store.qname(i).to_vec(),
+                qname: store.record(i).unwrap().qname().to_vec(),
                 seq_len: r.seq_len,
             }
         })
@@ -214,8 +214,16 @@ fn sam_gz_sequence_and_quality_match_bam() {
     assert_eq!(sam_store.len(), bam_store.len());
 
     for i in bam_store.indices() {
-        assert_eq!(sam_store.seq(i), bam_store.seq(i), "rec {i}: seq mismatch");
-        assert_eq!(sam_store.qual(i), bam_store.qual(i), "rec {i}: qual mismatch");
+        assert_eq!(
+            sam_store.record(i).unwrap().seq(),
+            bam_store.record(i).unwrap().seq(),
+            "rec {i}: seq mismatch"
+        );
+        assert_eq!(
+            sam_store.record(i).unwrap().qual(),
+            bam_store.record(i).unwrap().qual(),
+            "rec {i}: qual mismatch"
+        );
     }
 }
 

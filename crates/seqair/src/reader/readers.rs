@@ -309,11 +309,23 @@ impl<E: CustomizeRecordStore> Readers<E> {
     // r[impl unified.pileup_plan]
     /// Plan a pileup over `segment`: configure it, then [`run`](Pileup::run).
     ///
-    /// ```ignore
-    /// readers.pileup(&segment, depth).run()?;                       // plain
-    /// readers.pileup(&segment, depth).mutate(realign).run()?;       // + hook
-    /// readers.pileup(&segment, depth).with_reference(r).run()?;     // + reference
-    /// readers.pileup(&segment, depth).with_reference(r).mutate(realign).run()?;
+    /// ```no_run
+    /// # use seqair::bam::RecordStore;
+    /// # use seqair::bam::pileup::RefSeq;
+    /// # use seqair::reader::{DepthLimit, Readers, Segment};
+    /// # fn demo(
+    /// #     readers: &mut Readers,
+    /// #     segment: &Segment,
+    /// #     depth: DepthLimit,
+    /// #     r: RefSeq,
+    /// #     mut realign: impl FnMut(&mut RecordStore, &RefSeq),
+    /// # ) -> Result<(), Box<dyn std::error::Error>> {
+    /// readers.pileup(segment, depth).run()?;                            // plain
+    /// readers.pileup(segment, depth).mutate(&mut realign).run()?;       // + hook
+    /// readers.pileup(segment, depth).with_reference(r.clone()).run()?;  // + reference
+    /// readers.pileup(segment, depth).with_reference(r).mutate(&mut realign).run()?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// Nothing is read until `run`, and the options are independent — which is
@@ -755,7 +767,7 @@ where
 mod tests {
     use super::*;
     use crate::bam::cigar::{CigarOp, CigarOpType};
-    use crate::bam::record_store::RecordIdx;
+    use crate::bam::record_idx::RecordIdx;
     use crate::reader::segment::Segment;
     use seqair_types::{Pos0, SmolStr};
 
@@ -1030,8 +1042,8 @@ mod tests {
                 .collect();
             let mut plan: Vec<(RecordIdx, Pos0, Vec<CigarOp>)> = Vec::new();
             for idx in store.indices() {
-                let rec = store.record(idx);
-                let Ok(cigar) = rec.cigar(store) else { continue };
+                let rec = store.record(idx).unwrap();
+                let cigar = rec.cigar();
                 let Some(first) = cigar.first() else { continue };
                 if rec.flags.is_unmapped()
                     || first.op_type() != CigarOpType::Match
@@ -1328,7 +1340,7 @@ mod tests {
     fn pileup_with_realignment_is_observed() {
         use crate::bam::CigarOp;
         use crate::bam::cigar::CigarOpType;
-        use crate::bam::record_store::RecordIdx;
+        use crate::bam::record_idx::RecordIdx;
 
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
         let segment = realign_test_segment(&readers);
@@ -1345,11 +1357,11 @@ mod tests {
                 .mutate(|store, _| {
                     let mut plan: Vec<(RecordIdx, Pos0, Vec<CigarOp>)> = Vec::new();
                     for idx in store.indices() {
-                        let rec = store.record(idx);
+                        let rec = store.record(idx).unwrap();
                         if rec.flags.is_unmapped() {
                             continue;
                         }
-                        let Ok(cigar) = rec.cigar(store) else { continue };
+                        let cigar = rec.cigar();
                         let Some(first) = cigar.first() else { continue };
                         if first.op_type() != CigarOpType::Match || first.len() < 2 {
                             continue;

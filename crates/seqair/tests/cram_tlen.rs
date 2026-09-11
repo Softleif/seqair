@@ -108,8 +108,13 @@ fn assert_tlen_via_bam(name: &str) {
     let mut actual: Vec<_> = store
         .indices()
         .map(|idx| {
-            let r = store.record(idx);
-            (store.qname(idx).to_vec(), r.flags.raw(), r.pos.as_i64(), r.template_len)
+            let r = store.record(idx).unwrap();
+            (
+                store.record(idx).unwrap().qname().to_vec(),
+                r.flags.raw(),
+                r.pos.as_i64(),
+                r.template_len,
+            )
         })
         .collect();
     actual.sort_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
@@ -165,8 +170,13 @@ fn assert_cram_fields_with_tlen(name: &str) {
     let mut actual: Vec<_> = store
         .indices()
         .map(|idx| {
-            let r = store.record(idx);
-            (store.qname(idx).to_vec(), r.flags.raw(), r.pos.as_i64(), r.template_len)
+            let r = store.record(idx).unwrap();
+            (
+                store.record(idx).unwrap().qname().to_vec(),
+                r.flags.raw(),
+                r.pos.as_i64(),
+                r.template_len,
+            )
         })
         .collect();
     actual.sort_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));

@@ -141,8 +141,8 @@ fn roundtrip_simple_records() {
         .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 2);
-    assert_eq!(store.qname(ri(0)), b"read1");
-    assert_eq!(store.qname(ri(1)), b"read2");
+    assert_eq!(store.record(ri(0)).unwrap().qname(), b"read1");
+    assert_eq!(store.record(ri(1)).unwrap().qname(), b"read2");
 }
 
 /// Complex CIGARs: soft clips, deletions, insertions, introns.
@@ -368,7 +368,7 @@ fn roundtrip_multiple_contigs() {
         .fetch_into(tid1, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
         .expect("fetch chr1");
     assert_eq!(store.len(), 1);
-    assert_eq!(store.qname(ri(0)), b"chr1_read");
+    assert_eq!(store.record(ri(0)).unwrap().qname(), b"chr1_read");
 
     // chr2
     let tid2 = reader.header().tid("chr2").expect("chr2");
@@ -377,7 +377,7 @@ fn roundtrip_multiple_contigs() {
         .fetch_into(tid2, Pos0::new(0).unwrap(), Pos0::new(50_000).unwrap(), &mut store)
         .expect("fetch chr2");
     assert_eq!(store.len(), 1);
-    assert_eq!(store.qname(ri(0)), b"chr2_read");
+    assert_eq!(store.record(ri(0)).unwrap().qname(), b"chr2_read");
 }
 
 /// Index co-production: write BAM + BAI, then use samtools to query regions
@@ -585,19 +585,39 @@ fn roundtrip_write_store_record() {
     assert_eq!(store2.len(), 2);
 
     for i in store.indices() {
-        let a = store.record(i);
-        let b = store2.record(i);
+        let a = store.record(i).unwrap();
+        let b = store2.record(i).unwrap();
         assert_eq!(a.pos.as_u32(), b.pos.as_u32(), "pos mismatch record {i}");
         assert_eq!(a.flags, b.flags, "flags mismatch record {i}");
         assert_eq!(a.mapq, b.mapq, "mapq mismatch record {i}");
         assert_eq!(a.next_ref_id, b.next_ref_id, "next_ref_id mismatch record {i}");
         assert_eq!(a.next_pos, b.next_pos, "next_pos mismatch record {i}");
         assert_eq!(a.template_len, b.template_len, "tlen mismatch record {i}");
-        assert_eq!(store.qname(i), store2.qname(i), "qname mismatch record {i}");
-        assert_eq!(store.cigar(i), store2.cigar(i), "cigar mismatch record {i}");
-        assert_eq!(store.seq(i), store2.seq(i), "seq mismatch record {i}");
-        assert_eq!(store.qual(i), store2.qual(i), "qual mismatch record {i}");
-        assert_eq!(store.aux(i), store2.aux(i), "aux mismatch record {i}");
+        assert_eq!(
+            store.record(i).unwrap().qname(),
+            store2.record(i).unwrap().qname(),
+            "qname mismatch record {i}"
+        );
+        assert_eq!(
+            store.record(i).unwrap().cigar(),
+            store2.record(i).unwrap().cigar(),
+            "cigar mismatch record {i}"
+        );
+        assert_eq!(
+            store.record(i).unwrap().seq(),
+            store2.record(i).unwrap().seq(),
+            "seq mismatch record {i}"
+        );
+        assert_eq!(
+            store.record(i).unwrap().qual(),
+            store2.record(i).unwrap().qual(),
+            "qual mismatch record {i}"
+        );
+        assert_eq!(
+            store.record(i).unwrap().aux(),
+            store2.record(i).unwrap().aux(),
+            "aux mismatch record {i}"
+        );
     }
 }
 
@@ -701,15 +721,15 @@ mod e2e_oracle {
 
             for (i, inp) in inputs.iter().enumerate() {
                 let idx = ri(u32::try_from(i).unwrap());
-                let rec = store2.record(idx);
+                let rec = store2.record(idx).unwrap();
                 prop_assert_eq!(rec.pos.as_i32() as u32, inp.pos, "pos rec {}", i);
                 prop_assert_eq!(rec.mapq, inp.mapq, "mapq rec {}", i);
                 prop_assert_eq!(rec.seq_len as usize, inp.bases.len(), "seq_len rec {}", i);
-                prop_assert_eq!(store2.qname(idx), inp.qname.as_slice(), "qname rec {}", i);
-                prop_assert_eq!(store2.seq(idx), inp.bases.as_slice(), "seq rec {}", i);
-                let quals_back = BaseQuality::slice_to_bytes(store2.qual(idx));
+                prop_assert_eq!(store2.record(idx).unwrap().qname(), inp.qname.as_slice(), "qname rec {}", i);
+                prop_assert_eq!(store2.record(idx).unwrap().seq(), inp.bases.as_slice(), "seq rec {}", i);
+                let quals_back = BaseQuality::slice_to_bytes(store2.record(idx).unwrap().qual());
                 prop_assert_eq!(quals_back, inp.quals.as_slice(), "qual rec {}", i);
-                let cigar = store2.cigar(idx);
+                let cigar = store2.record(idx).unwrap().cigar();
                 prop_assert_eq!(cigar.len(), 1, "cigar op count rec {}", i);
                 prop_assert_eq!(cigar[0].op_type(), CigarOpType::Match, "cigar op type rec {}", i);
                 prop_assert_eq!(cigar[0].len() as usize, inp.bases.len(), "cigar op len rec {}", i);

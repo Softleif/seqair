@@ -7,7 +7,8 @@
 #![cfg(test)]
 
 use super::bgzf::BgzfReader;
-use super::record_store::{RecordIdx, RecordStore};
+use super::record_idx::RecordIdx;
+use super::record_store::RecordStore;
 use std::io::{Read, Seek};
 
 /// The record index `n`. Tests address records by literal position; this is

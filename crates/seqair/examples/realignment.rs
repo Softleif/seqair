@@ -80,13 +80,13 @@ fn main() -> anyhow::Result<()> {
     // `set_alignment` needs `&mut self`, so we collect the work first.
     let mut plan: Vec<(RecordIdx, Pos0, Vec<CigarOp>)> = Vec::new();
     for idx in store.indices() {
-        let rec = store.record(idx);
+        let Some(rec) = store.record(idx) else { continue };
         // Skip unmapped reads — no alignment to update.
         if rec.flags.is_unmapped() || rec.tid < 0 {
             continue;
         }
         let Some((new_pos, new_cigar)) =
-            propose_realignment(store.cigar(idx), rec.pos, args.clip, args.min_match)
+            propose_realignment(rec.cigar(), rec.pos, args.clip, args.min_match)
         else {
             continue;
         };
@@ -103,8 +103,9 @@ fn main() -> anyhow::Result<()> {
             .with_context(|| format!("set_alignment failed for record {idx}"))?;
         applied += 1;
 
-        if i < args.show {
-            let after = snapshot(&store, *idx);
+        if i < args.show
+            && let (Some(before), Some(after)) = (before.as_ref(), snapshot(&store, *idx))
+        {
             println!(
                 "  [{idx}] {:?}  {} @ {}  ->  {} @ {}",
                 before.qname,
@@ -198,10 +199,10 @@ struct Snapshot {
     cigar_str: SmolStr,
 }
 
-fn snapshot(store: &RecordStore, idx: RecordIdx) -> Snapshot {
-    let rec = store.record(idx);
-    let qname = std::str::from_utf8(store.qname(idx)).unwrap_or("<non-utf8>").to_owned();
-    Snapshot { qname, pos: rec.pos, cigar_str: CigarStr(store.cigar(idx)).to_smolstr() }
+fn snapshot(store: &RecordStore, idx: RecordIdx) -> Option<Snapshot> {
+    let rec = store.record(idx)?;
+    let qname = std::str::from_utf8(rec.qname()).unwrap_or("<non-utf8>").to_owned();
+    Some(Snapshot { qname, pos: rec.pos, cigar_str: CigarStr(rec.cigar()).to_smolstr() })
 }
 
 fn write_store(

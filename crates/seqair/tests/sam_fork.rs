@@ -68,7 +68,7 @@ fn fetch_record_positions(
         .expect("fetch_into");
     store
         .indices()
-        .map(|i| (store.record(i).pos.as_i64(), store.record(i).end_pos.as_i64()))
+        .map(|i| (store.record(i).unwrap().pos.as_i64(), store.record(i).unwrap().end_pos.as_i64()))
         .collect()
 }
 
