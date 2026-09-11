@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use seqair::bam::pileup::PileupEngine;
-use seqair::bam::record_store::RecordStore;
+use seqair::bam::record_store::{RecordIdx, RecordStore};
 use seqair_types::{Offset, Pos0};
 
 // Valid BAM CIGAR op codes (0..=8, skipping 6=P which is rare and adds no coverage)
@@ -206,9 +206,9 @@ fuzz_target!(|input: FuzzPileupInput| {
     // qname — the properties the pileup engine's cached overlap relies on.
     let stats = store.link_mates();
     let mut linked = 0u32;
-    for idx in 0..store.len() as u32 {
+    for idx in store.indices() {
         let Some(mate) = store.record(idx).mate_idx() else { continue };
-        assert!((mate as usize) < store.len(), "mate index out of range");
+        assert!(mate.as_usize() < store.len(), "mate index out of range");
         assert_ne!(mate, idx, "record linked to itself");
         assert_eq!(store.record(mate).mate_idx(), Some(idx), "asymmetric mate link");
         assert_eq!(store.qname(idx), store.qname(mate), "linked records disagree on qname");
