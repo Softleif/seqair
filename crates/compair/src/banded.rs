@@ -293,8 +293,9 @@ impl Lane for f32x8 {
 
 /// The buffers a banded alignment works in, kept between calls.
 ///
-/// One alignment needs fifteen small buffers: the hoisted per-row and
-/// per-column tracks of the [`Plan`] and the ring of anti-diagonals. A caller
+/// One alignment needs a dozen or so small buffers: the hoisted per-row and
+/// per-column tracks of the plan, and the diagonal kernel's ring of
+/// anti-diagonals or the strip kernel's row buffer. A caller
 /// scores one read against several haplotypes and many reads in a row, so
 /// allocating them per call was a measurable share of a short alignment.
 /// Reusing a workspace makes an alignment allocation-free; the free functions
