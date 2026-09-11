@@ -9,16 +9,19 @@
 //! scoring it as a free match loses every real `C>T` variant. `TapsEmission`
 //! scores it as a probability at the site's methylation level instead.
 //!
-//! Three implementations of the same recurrence:
+//! Five implementations of the same recurrence:
 //!
 //! - [`align_full`] in `f64` over the whole matrix, the reference,
-//! - [`align_banded`] in `f32` over a diagonal band,
-//! - [`align_banded_simd`], the same band eight lanes at a time.
+//! - [`align_banded`] in `f32` over a diagonal band, one anti-diagonal at a
+//!   time, and [`align_banded_simd`], the same eight lanes at a time,
+//! - [`align_strips`] over the same band, one read row at a time along the
+//!   haplotype, and [`align_strips_simd`], eight rows at a time -- the
+//!   traversal of Intel's Genomics Kernel Library, and the faster of the two.
 //!
-//! The two banded kernels are one generic function over a lane type, so they
-//! are bit-identical by construction rather than by agreement. A [`Workspace`]
-//! keeps their buffers between calls, which makes an alignment
-//! allocation-free.
+//! Each banded pair is one generic function over a lane type, so its scalar
+//! and SIMD kernels are bit-identical by construction rather than by
+//! agreement. A [`Workspace`] keeps every kernel's buffers between calls,
+//! which makes an alignment allocation-free.
 
 mod banded;
 mod emission;

@@ -30,7 +30,13 @@ let log10 = workspace.align_banded_simd(&haplotype, &read, &emission, Band::anch
 `align_full` is the `f64` reference over the whole matrix; `align_banded` and
 `align_banded_simd` are the same `f32` recurrence over a diagonal band, one
 generic function over a lane type, so the two are bit-identical by
-construction. A `Workspace` keeps the kernels' buffers between calls, so
+construction. `align_strips` and `align_strips_simd` are the same band
+through a different traversal, the one Intel's Genomics Kernel Library uses:
+one read row per lane, swept along the haplotype, so the per-row inputs stay
+in registers and the neighbours are the previous two steps' vectors shifted
+by a lane. It is the faster of the two on every target measured so far and
+its precision does not depend on the band width, since it renormalises every
+eight rows rather than per anti-diagonal. A `Workspace` keeps the kernels' buffers between calls, so
 scoring a read against its candidate haplotypes allocates nothing; the free
 functions of the same names build a fresh one per call. A `Read` computes
 every `10^(-Q/10)` it needs at construction, so an alignment does no
@@ -49,11 +55,12 @@ de-novo CpG needs no special case.
 - A stated band contract: a path outside the band scores lower, never wrong;
   no path at all is `Log10Likelihood::IMPOSSIBLE`, and `Band::MAX_WIDTH` bounds
   the allocation
-- 8-wide `f32` SIMD via `wide`, ~10 µs per 150 bp read × 46-wide band on an
-  Apple M4 Pro (~25 µs scalar, ~85 µs for the `f64` reference over the whole
-  matrix), bit-identical to the scalar kernel. The default width is 46 and not
-  48 because a diagonal of `width / 2 + 1` cells fills three vectors of eight
-  exactly at 46 and spills one cell into a fourth at 48
+- 8-wide `f32` SIMD via `wide`: ~8 µs per 150 bp read × 46-wide band on an
+  Apple M4 Pro through the strip kernel and ~10 µs through the diagonal one
+  (~22 and ~27 µs scalar, ~95 µs for the `f64` reference over the whole
+  matrix), each bit-identical to its scalar kernel. The default width is 46
+  and not 48 because a diagonal of `width / 2 + 1` cells fills three vectors
+  of eight exactly at 46 and spills one cell into a fourth at 48
 - Types shared with `seqair-types`: `Base`, `Strand`, `BaseQuality`,
   `Probability`, `QPos`
 
@@ -65,12 +72,13 @@ cargo bench -p compair --bench align
 ```
 
 `tests/gatk_vectors.rs` runs GATK's 104 published test vectors through the
-reference (agreement to 1e-4 in log10, measured 6e-6) and through the band;
-`tests/conventions.rs` pins the conventions those vectors cannot, with a
-hand-computed 3 × 2 matrix. Property tests compare the banded kernels against
-the reference and an independently masked `f64` DP at every width, with `N`
-on both sides, and check the scalar and SIMD kernels bit for bit, fresh and
-through a reused `Workspace`. `tests/read.rs` pins what the constructors
+reference (agreement to 1e-4 in log10, measured 6e-6) and through both
+banded traversals; `tests/conventions.rs` pins the conventions those vectors
+cannot, with a hand-computed 3 × 2 matrix. Property tests compare the banded
+kernels against the reference and an independently masked `f64` DP at every
+width, with `N` on both sides, check each traversal's scalar and SIMD
+kernels bit for bit, fresh and through a reused `Workspace`, and check the
+two traversals against each other. `tests/read.rs` pins what the constructors
 reject and that lowercase is a base, not an `N`. The power-of-two scaling the
 bit-parity rests on has its own property tests in `src/scaling.rs`.
 
@@ -107,6 +115,9 @@ oracle; see the workspace `CLAUDE.md` for how to run it.
   methylation levels
 - The banded `f32` kernel with per-anti-diagonal renormalisation, and the
   lane abstraction that makes the SIMD and scalar kernels one function
+- The strip kernel's traversal is GKL's (Intel, MIT licence), written from
+  the published description; its band handling, per-strip renormalisation
+  and lane abstraction are this crate's
 - The band as a contract rather than a heuristic
 
 ## License
