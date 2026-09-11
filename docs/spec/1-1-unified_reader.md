@@ -264,7 +264,7 @@ chromosome in one call without thinking about tile size.
 > There MUST NOT be a `pileup(tid, start, end)` overload — callers wanting
 > a one-shot region build a `Segment` via `Readers::segments`.
 
-> r[unified.readers_pileup_store_mutation+2]
+> r[unified.readers_pileup_store_mutation+3]
 > `Readers::pileup_with(segment, depth, mutate)` MUST behave exactly as
 > `r[unified.readers_pileup]` except that `mutate` is run on the freshly
 > fetched `RecordStore` after step 3 — once the reference is in hand — and
@@ -274,6 +274,20 @@ chromosome in one call without thinking about tile size.
 > `(pos, CIGAR)` pair — for example from a POA consensus — and the pileup that
 > follows MUST see the rewritten alignments.
 >
+> `mutate` receives `(&mut RecordStore<E::Extra>, &RefSeq)`. The `RefSeq` MUST
+> be the very value attached to the engine in step 4, so `ref_seq.base_at(pos)`
+> inside the mutator equals `PileupColumn::reference_base()` at every column the
+> pileup later yields — a hook that normalises or rescores alignments against
+> the reference reads it from here and never loads its own, and a hook with no
+> use for it ignores the argument. There MUST NOT be a second entry point that
+> withholds the reference: one hook, one signature.
+>
+> The reference covers exactly `[segment.start(), segment.end()]` (step 3), not
+> the reads: a record reaching past either end has bases the `RefSeq` does not
+> hold. A mutator that reads such positions MUST use `RefSeq::try_base_at` and
+> treat `None` as unavailable, since `base_at` returns `Base::Unknown` there,
+> which is indistinguishable from a genuine `N`.
+>
 > Positions may change freely because of the re-sort; query length MUST NOT,
 > and `set_alignment` enforces that. Buffer reuse (`r[unified.readers_pileup]`
 > step 4 and the guard's store recovery) MUST be preserved unchanged: taking
@@ -282,31 +296,12 @@ chromosome in one call without thinking about tile size.
 > A mutator that changes nothing MUST yield exactly the columns `pileup()`
 > yields.
 >
-> The hook used to run between steps 2 and 3, before the reference was
-> fetched. That order was harmless for `pileup_with`, whose mutator never sees
-> the reference, but it is what forced a hook that rescores alignments against
-> the reference to load a second copy of it; running after step 3 costs
-> nothing and lets `r[unified.readers_pileup_mutate]` hand the same `RefSeq`
-> to the mutator and the engine.
-
-> r[unified.readers_pileup_mutate]
-> `Readers::pileup_mutate(segment, depth, mutate)` MUST behave exactly as
-> `r[unified.readers_pileup_store_mutation]` except that `mutate` receives
-> `(&mut RecordStore<E::Extra>, &RefSeq)`. The `RefSeq` MUST be the very value
-> attached to the engine in step 4, so `ref_seq.base_at(pos)` inside the
-> mutator equals `PileupColumn::reference_base()` at every column the pileup
-> later yields — a hook that normalises or rescores alignments against the
-> reference reads it from here and never loads its own.
->
-> The reference covers exactly `[segment.start(), segment.end()]` (step 3), not
-> the reads: a record reaching past either end has bases the `RefSeq` does not
-> hold. A mutator that reads such positions MUST use `RefSeq::try_base_at` and
-> treat `None` as unavailable, since `base_at` returns `Base::Unknown` there,
-> which is indistinguishable from a genuine `N`.
->
-> `pileup_with` MUST remain available with its `FnMut(&mut RecordStore<E::Extra>)`
-> mutator, as a thin wrapper that drops the reference, so existing mutators
-> compile unchanged.
+> Because the hook runs after step 3, it does not run at all when the reference
+> fetch fails: the caller gets the error and a store the hook never touched.
+> Up to `+1` the hook ran between steps 2 and 3, before the reference was
+> fetched, which forced a hook that rescores against the reference to load a
+> second copy of it; `+2` moved the hook after the fetch and added a second
+> entry point that passed the reference, `+3` folded that into the one hook.
 
 > r[unified.readers_pileup_supplied_reference]
 > `Readers::pileup_with_reference(segment, depth, ref_seq: RefSeq)` MUST behave

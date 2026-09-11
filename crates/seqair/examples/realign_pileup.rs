@@ -89,7 +89,7 @@ fn depth_profile(
     let mut count = 0usize;
     if realign {
         let mut guard = readers
-            .pileup_with(segment, DepthLimit::Unlimited, |store| {
+            .pileup_with(segment, DepthLimit::Unlimited, |store, _ref_seq| {
                 count = realign_leading_clip(store);
             })
             .context("pileup_with failed")?;
