@@ -1,0 +1,23 @@
+[package]
+name = "compair"
+version = "0.1.0"
+edition = "2024"
+description = "Banded affine-gap pair-HMM with a pluggable, conversion-aware emission model"
+repository = "https://github.com/Softleif/seqair"
+rust-version = "1.98.1"
+authors = ["Pascal Hertleif <pascal@softleif.se>"]
+license = "MIT OR Apache-2.0"
+exclude = ["fuzz/*", "tests/*", "benches/*"]
+
+[dependencies]
+seqair-types = { version = "^0.3.1", path = "../seqair-types" }
+thiserror = { workspace = true }
+wide = "1.7"
+
+[dev-dependencies]
+proptest = "1.11.0"
+criterion = "0.8.2"
+
+[[bench]]
+name = "align"
+harness = false

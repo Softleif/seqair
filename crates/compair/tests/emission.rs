@@ -1,0 +1,523 @@
+#[allow(dead_code, reason = "each integration test uses a different part of this")]
+mod support;
+
+use compair::{
+    Base, BaseQuality, Betas, ConversionModel, CpgRole, Emission, Haplotype, Observation,
+    Probability, QPos, Read, StandardEmission, Strand, TapsEmission, error_probability,
+};
+use proptest::prelude::*;
+use support::{any_base, any_conversion, any_probability, any_strand, derived_case, mirror};
+
+fn observe(base: Base, qual: BaseQuality, strand: Strand) -> Observation {
+    Observation { index: QPos::new(0), base, error_probability: error_probability(qual), strand }
+}
+
+fn perfect() -> ConversionModel {
+    ConversionModel::new(Probability::ONE, Probability::ZERO)
+}
+
+fn taps(betas: &[Probability], conversion: ConversionModel) -> TapsEmission<'_> {
+    TapsEmission::new(conversion, Betas::PerSite(betas))
+}
+
+/// `CpG` context comes from the haplotype's own sequence, so an allele that
+/// creates one turns the conversion rows on and an allele that destroys one
+/// turns them off. That is the whole of de-novo `CpG` handling.
+#[test]
+fn cpg_context_is_read_from_the_haplotype() {
+    let reference = Haplotype::from_ascii(b"AATGAA");
+    let created = Haplotype::from_ascii(b"AACGAA");
+    let destroyed = Haplotype::from_ascii(b"AACAAA");
+
+    assert_eq!(
+        reference.site(2).map(|site| site.cpg),
+        Some(CpgRole::None),
+        "a T is not a CpG cytosine"
+    );
+    assert_eq!(
+        created.site(2).map(|site| site.cpg),
+        Some(CpgRole::TopC),
+        "a T>C allele creates the CpG"
+    );
+    assert_eq!(created.site(3).map(|site| site.cpg), Some(CpgRole::BottomG), "and its partner G");
+    assert_eq!(
+        destroyed.site(2).map(|site| site.cpg),
+        Some(CpgRole::None),
+        "a G>A allele on the partner destroys it"
+    );
+}
+
+#[test]
+fn beta_zero_makes_a_converted_base_a_mismatch() {
+    let haplotype = Haplotype::from_ascii(b"AACGAA");
+    let site = haplotype.site(2).expect("in range");
+    let betas = vec![Probability::ZERO; 6];
+    let emission = taps(&betas, perfect());
+    let read = observe(Base::T, BaseQuality::from_byte(30), Strand::OT);
+
+    assert!(
+        (emission.match_probability(site, read)
+            - StandardEmission::default().match_probability(site, read))
+        .abs()
+            < f64::EPSILON,
+        "with f = 0 an unmethylated CpG scores a T exactly as a mismatch"
+    );
+}
+
+#[test]
+fn beta_one_makes_a_converted_base_a_near_match() {
+    let haplotype = Haplotype::from_ascii(b"AACGAA");
+    let site = haplotype.site(2).expect("in range");
+    let betas = vec![Probability::ONE; 6];
+    let emission = taps(&betas, perfect());
+    let qual = BaseQuality::from_byte(30);
+    let read = observe(Base::T, qual, Strand::OT);
+
+    assert!(
+        emission.match_probability(site, read) >= 1.0 - error_probability(qual),
+        "with c = 1 a fully methylated CpG scores a T at least as well as a match"
+    );
+    assert!(
+        emission.match_probability(site, observe(Base::C, qual, Strand::OT))
+            < emission.match_probability(site, read),
+        "and the unconverted C is now the unlikely observation"
+    );
+}
+
+/// The leniency is granted only where the model says conversion happens: the
+/// same `C` read on the bottom strand is a plain reference base.
+#[test]
+fn the_other_strand_sees_no_conversion() {
+    let haplotype = Haplotype::from_ascii(b"AACGAA");
+    let site = haplotype.site(2).expect("in range");
+    let betas = vec![Probability::ONE; 6];
+    let emission = taps(&betas, perfect());
+    let read = observe(Base::T, BaseQuality::from_byte(30), Strand::OB);
+
+    assert_eq!(
+        emission.match_probability(site, read),
+        StandardEmission::default().match_probability(site, read)
+    );
+}
+
+proptest! {
+    /// The invariant `joint-model.md` §3 asks for: reverse-complement the
+    /// haplotype and the read, swap the strand, reverse the per-site betas, and
+    /// every emission is the one it mirrors — bit for bit, not to a tolerance.
+    #[test]
+    fn emission_mirrors_between_strands(
+        case in derived_case(3),
+        conversion in any_conversion(),
+    ) {
+        let mirrored = mirror(&case).ok_or(TestCaseError::reject("mirror must build"))?;
+        // No `prop_assume` for a CpG any more: since the conversion rows apply
+        // at every cytosine, `C` on OT mirrors `G` on OB whether or not either
+        // is in a CpG, and the CpG only decides which rate is used.
+        let forward = taps(&case.betas, conversion);
+        let backward = taps(&mirrored.betas, conversion);
+        let (h, r) = (case.haplotype.len(), case.read.len());
+
+        for j in 0..h {
+            for i in 0..r {
+                let site = case.haplotype.site(j).ok_or(TestCaseError::reject("site"))?;
+                let obs = case.read.observation(i).ok_or(TestCaseError::reject("obs"))?;
+                let mirrored_site = mirrored
+                    .haplotype
+                    .site(h - 1 - j)
+                    .ok_or(TestCaseError::reject("site"))?;
+                let mirrored_obs = mirrored
+                    .read
+                    .observation(r - 1 - i)
+                    .ok_or(TestCaseError::reject("obs"))?;
+                prop_assert_eq!(
+                    forward.match_probability(site, obs).to_bits(),
+                    backward.match_probability(mirrored_site, mirrored_obs).to_bits(),
+                    "hap {} read {}: {:?} vs {:?}", j, i, site, mirrored_site
+                );
+            }
+        }
+    }
+
+    /// Where the chemistry cannot act -- the haplotype base is not a cytosine
+    /// on the strand this read reports -- `TapsEmission` is `StandardEmission`
+    /// for every conversion model, not only the perfect one.
+    #[test]
+    fn taps_falls_through_where_the_chemistry_cannot_act(
+        haplotype_base in any_base(),
+        read_base in any_base(),
+        qual in 2u8..=45,
+        strand in any_strand(),
+        beta in any_probability(),
+        conversion in any_conversion(),
+    ) {
+        // A lone base has no partner, so it is never in CpG context; what
+        // matters here is that it is also not a cytosine this read could see
+        // converted.
+        prop_assume!(!matches!(
+            (haplotype_base, strand),
+            (Base::C, Strand::OT) | (Base::G, Strand::OB)
+        ));
+        let haplotype = Haplotype::new(vec![haplotype_base]);
+        let site = haplotype.site(0).ok_or(TestCaseError::reject("site"))?;
+        prop_assert_eq!(site.cpg, CpgRole::None);
+        let betas = vec![beta];
+        let observation = observe(read_base, BaseQuality::from_byte(qual), strand);
+        prop_assert_eq!(
+            taps(&betas, conversion).match_probability(site, observation).to_bits(),
+            StandardEmission::default().match_probability(site, observation).to_bits()
+        );
+    }
+
+    /// And where it can, the rows apply at the false-conversion rate whatever
+    /// the site's `beta`, because a cytosine outside a `CpG` is unmethylated.
+    #[test]
+    fn a_non_cpg_cytosine_reads_t_at_the_false_conversion_rate(
+        read_base in any_base(),
+        qual in 2u8..=45,
+        strand in any_strand(),
+        beta in any_probability(),
+        conversion in any_conversion(),
+    ) {
+        let (haplotype_base, converted, unconverted) = match strand {
+            Strand::OT => (Base::C, Base::T, Base::C),
+            Strand::OB => (Base::G, Base::A, Base::G),
+            Strand::Unknown => return Err(TestCaseError::reject("any_strand yields OT or OB")),
+        };
+        let haplotype = Haplotype::new(vec![haplotype_base]);
+        let site = haplotype.site(0).ok_or(TestCaseError::reject("site"))?;
+        prop_assert_eq!(site.cpg, CpgRole::None);
+        let betas = vec![beta];
+        let emission = taps(&betas, conversion);
+        let observation = observe(read_base, BaseQuality::from_byte(qual), strand);
+        let eps = error_probability(BaseQuality::from_byte(qual));
+        let f = *conversion.false_conversion();
+
+        let want = if read_base == converted {
+            (1.0 - eps) * f + eps / 3.0
+        } else if read_base == unconverted {
+            (1.0 - eps) * (1.0 - f) + eps / 3.0
+        } else {
+            eps / 3.0
+        };
+        prop_assert!(
+            (emission.match_probability(site, observation) - want).abs() < 1e-15,
+            "{:?} over a non-CpG {:?} on {:?}: {} wanted {}",
+            read_base, haplotype_base, strand,
+            emission.match_probability(site, observation), want
+        );
+        // `beta` is ignored outside a CpG, so the answer does not move with it.
+        let other = vec![Probability::ONE];
+        prop_assert_eq!(
+            emission.match_probability(site, observation).to_bits(),
+            taps(&other, conversion).match_probability(site, observation).to_bits()
+        );
+    }
+
+    /// Every emission is a probability, whatever the conversion model.
+    #[test]
+    fn emissions_stay_in_range(
+        case in derived_case(3),
+        conversion in any_conversion(),
+    ) {
+        let emission = taps(&case.betas, conversion);
+        for j in 0..case.haplotype.len() {
+            for i in 0..case.read.len() {
+                let site = case.haplotype.site(j).ok_or(TestCaseError::reject("site"))?;
+                let obs = case.read.observation(i).ok_or(TestCaseError::reject("obs"))?;
+                let value = emission.match_probability(site, obs);
+                prop_assert!((0.0..=1.0).contains(&value), "emission {value} out of range");
+            }
+        }
+    }
+}
+
+/// The exact shape of the joint model's rows, as written in
+/// `rastair3-notes/joint-model.md` §3.
+///
+/// `StandardEmission` is a probability distribution over the four bases; the
+/// converted rows are **not**, and by a stated amount. `joint-model.md` adds
+/// `eps / 3` to both the `T` and the `C` row on top of a split that already
+/// accounts for all the probability, so the row sums to `1 + eps / 3` rather
+/// than to one. That is the specification, not a slip -- the value is used as a
+/// multiplicative weight and never renormalised -- but it is worth pinning,
+/// because the alternative reading (mix the error floor *into* the split,
+/// `rate * (1 - eps) + (1 - rate) * eps / 3`) sums to exactly one and is a
+/// different number.
+#[test]
+fn the_converted_row_sums_to_one_plus_eps_over_three() {
+    let haplotype = Haplotype::from_ascii(b"AACGAA");
+    let cpg_c = haplotype.site(2).expect("in range");
+    let plain_a = haplotype.site(0).expect("in range");
+
+    for qual in [2u8, 10, 20, 30, 40, 93] {
+        let eps = error_probability(BaseQuality::from_byte(qual));
+        let standard: f64 = Base::KNOWN
+            .iter()
+            .map(|base| {
+                StandardEmission::default().match_probability(
+                    plain_a,
+                    observe(*base, BaseQuality::from_byte(qual), Strand::OT),
+                )
+            })
+            .sum();
+        assert!((standard - 1.0).abs() < 1e-12, "q{qual}: standard row sums to {standard}");
+
+        for level in [0.0f64, 0.25, 0.5, 0.75, 1.0] {
+            let betas = vec![Probability::new(level).expect("in [0, 1]"); haplotype.len()];
+            let emission = taps(&betas, ConversionModel::taps_default());
+            let converted: f64 = Base::KNOWN
+                .iter()
+                .map(|base| {
+                    emission.match_probability(
+                        cpg_c,
+                        observe(*base, BaseQuality::from_byte(qual), Strand::OT),
+                    )
+                })
+                .sum();
+            assert!(
+                (converted - (1.0 + eps / 3.0)).abs() < 1e-12,
+                "q{qual} beta {level}: converted row sums to {converted}, expected {}",
+                1.0 + eps / 3.0
+            );
+        }
+    }
+}
+
+/// `N` matches everything at full probability on either side, and the `CpG`
+/// rows do not claim it: an `N` read over a methylated `CpG` is neither the
+/// converted nor the unconverted base, so it falls through to the match row.
+#[test]
+fn n_matches_everything_and_never_takes_a_conversion_row() {
+    let with_n = Haplotype::from_ascii(b"ACNGT");
+    let n_site = with_n.site(2).expect("in range");
+    let qual = BaseQuality::from_byte(30);
+    let matched = 1.0 - error_probability(qual);
+    for base in [Base::A, Base::C, Base::G, Base::T, Base::Unknown] {
+        let got =
+            StandardEmission::default().match_probability(n_site, observe(base, qual, Strand::OT));
+        assert!((got - matched).abs() < 1e-12, "hap N against read {base:?} gave {got}");
+    }
+    let cpg = Haplotype::from_ascii(b"ACGT");
+    let cpg_c = cpg.site(1).expect("in range");
+    let got = StandardEmission::default()
+        .match_probability(cpg_c, observe(Base::Unknown, qual, Strand::OT));
+    assert!((got - matched).abs() < 1e-12, "hap C against read N gave {got}");
+    let betas = vec![Probability::ONE; cpg.len()];
+    let under_taps = taps(&betas, ConversionModel::taps_default())
+        .match_probability(cpg_c, observe(Base::Unknown, qual, Strand::OT));
+    assert!((under_taps - matched).abs() < 1e-12, "a CpG C against read N gave {under_taps}");
+}
+
+/// **A caller contract worth knowing.** `Betas::PerSite` is indexed by
+/// haplotype *position*, and a `CpG` occupies two of them. The `C` reads
+/// `betas[j]` and its partner `G` reads `betas[j + 1]`, so a caller that fills
+/// only one of the pair makes the two strands of one `CpG` disagree about its
+/// methylation. `Betas::Uniform` has no such trap.
+#[test]
+fn the_two_bases_of_one_cpg_read_their_own_betas() {
+    let haplotype = Haplotype::from_ascii(b"AACGAA");
+    let (cytosine, guanine) = (haplotype.site(2).expect("C"), haplotype.site(3).expect("G"));
+    let mut betas = vec![Probability::ZERO; haplotype.len()];
+    let Some(slot) = betas.get_mut(2) else { panic!("six entries") };
+    *slot = Probability::ONE;
+
+    let emission = taps(&betas, perfect());
+    let qual = BaseQuality::from_byte(30);
+    let converted_top = emission.match_probability(cytosine, observe(Base::T, qual, Strand::OT));
+    let converted_bottom = emission.match_probability(guanine, observe(Base::A, qual, Strand::OB));
+    assert!(converted_top > 0.9, "the C reads betas[2] = 1 and sees a T as a near-match");
+    assert!(
+        converted_bottom < 0.01,
+        "its partner G reads betas[3] = 0 and sees an A as a mismatch: {converted_bottom}"
+    );
+
+    // With `Uniform` the pair cannot disagree.
+    let uniform = TapsEmission::new(perfect(), Betas::Uniform(Probability::ONE));
+    assert_eq!(
+        uniform.match_probability(cytosine, observe(Base::T, qual, Strand::OT)).to_bits(),
+        uniform.match_probability(guanine, observe(Base::A, qual, Strand::OB)).to_bits()
+    );
+}
+
+proptest! {
+    /// A converted base only ever gets likelier as the site gets more
+    /// methylated, and its unconverted partner only ever gets unlikelier --
+    /// whenever the chemistry converts methylated bases more often than
+    /// unmethylated ones, which is what `efficiency >= false_conversion` says.
+    #[test]
+    fn a_converted_base_is_monotone_in_beta(
+        (efficiency, false_conversion) in (0.0f64..=1.0, 0.0f64..=1.0)
+            .prop_map(|(a, b)| if a >= b { (a, b) } else { (b, a) }),
+        qual in 0u8..=93,
+        levels in proptest::collection::vec(0.0f64..=1.0, 2),
+    ) {
+        let conversion = ConversionModel::new(
+            Probability::new(efficiency).map_err(|_| TestCaseError::reject("c"))?,
+            Probability::new(false_conversion).map_err(|_| TestCaseError::reject("f"))?,
+        );
+        let mut levels = levels;
+        levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+        let (low, high) = (
+            *levels.first().ok_or(TestCaseError::reject("two"))?,
+            *levels.last().ok_or(TestCaseError::reject("two"))?,
+        );
+        let haplotype = Haplotype::from_ascii(b"AACGAA");
+        let site = haplotype.site(2).ok_or(TestCaseError::reject("site"))?;
+        let read = observe(Base::T, BaseQuality::from_byte(qual), Strand::OT);
+        let unconverted = observe(Base::C, BaseQuality::from_byte(qual), Strand::OT);
+
+        let at = |level: f64| -> Result<(f64, f64), TestCaseError> {
+            let betas = vec![
+                Probability::new(level).map_err(|_| TestCaseError::reject("beta"))?;
+                haplotype.len()
+            ];
+            let emission = taps(&betas, conversion);
+            Ok((
+                emission.match_probability(site, read),
+                emission.match_probability(site, unconverted),
+            ))
+        };
+        let (t_low, c_low) = at(low)?;
+        let (t_high, c_high) = at(high)?;
+        prop_assert!(t_high >= t_low, "T: {} at beta {} but {} at beta {}", t_low, low, t_high, high);
+        prop_assert!(c_high <= c_low, "C: {} at beta {} but {} at beta {}", c_low, low, c_high, high);
+    }
+}
+
+/// And the same through the whole dynamic program: a read whose every `CpG`
+/// cytosine is converted scores higher as the haplotype's methylation rises.
+#[test]
+fn the_dp_is_monotone_in_beta() {
+    let haplotype = Haplotype::from_ascii(
+        b"TCATTGGCTATCCTAACCCGACCCTAGGAGCGGTTGGCGTGTATGCCGTGAATTTTCTCATTTCCGCTAGACATAATCGTTCTGCCTATA",
+    );
+    let mut bases = haplotype.bases().get(20..60).expect("in range").to_vec();
+    for (offset, base) in bases.iter_mut().enumerate() {
+        if haplotype.site(20 + offset).map(|site| site.cpg) == Some(CpgRole::TopC) {
+            *base = Base::T;
+        }
+    }
+    let read = Read::uniform(
+        bases,
+        &[BaseQuality::from_byte(30); 40],
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(10),
+        Strand::OT,
+    )
+    .expect("valid");
+
+    let mut previous = f64::NEG_INFINITY;
+    for level in [0.0f64, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
+        let betas = vec![Probability::new(level).expect("in [0, 1]"); haplotype.len()];
+        let score =
+            compair::align_full(&haplotype, &read, &taps(&betas, ConversionModel::taps_default()))
+                .get();
+        assert!(score >= previous - 1e-12, "beta {level} scored {score} under {previous}");
+        previous = score;
+    }
+}
+
+/// Design §4.1's row, at the numbers the project measured, with the size of the
+/// correction spelled out.
+///
+/// `f` was measured on the unmethylated pUC19 spike-in's cytosines, so it is
+/// the chemistry acting on any unmethylated `C` -- nothing about false
+/// conversion is `CpG`-specific. Scoring a non-`CpG` `C`-to-`T` as a plain
+/// sequencing error puts it at `eps / 3`, which at Q40 is 120 times too
+/// confident that the read carries a real `C>T` allele.
+#[test]
+fn a_non_cpg_c_to_t_is_a_hundred_times_likelier_than_a_sequencing_error() {
+    let haplotype = Haplotype::from_ascii(b"AACAAA");
+    let site = haplotype.site(2).expect("in range");
+    assert_eq!(site.cpg, CpgRole::None, "no G after it, so no CpG");
+    let betas = vec![Probability::ONE; haplotype.len()];
+    let emission = taps(&betas, ConversionModel::taps_default());
+    let qual = BaseQuality::from_byte(40);
+    let eps = error_probability(qual);
+
+    let converted = emission.match_probability(site, observe(Base::T, qual, Strand::OT));
+    let as_error =
+        StandardEmission::default().match_probability(site, observe(Base::T, qual, Strand::OT));
+    assert!((converted - ((1.0 - eps) * 0.004 + eps / 3.0)).abs() < 1e-15);
+    assert!((as_error - eps / 3.0).abs() < 1e-15);
+    assert!(
+        converted / as_error > 100.0,
+        "the f row is {}x the sequencing-error row, not ~1x",
+        converted / as_error
+    );
+
+    // And it is still a long way from a match, which is the specificity the
+    // symbol scoring lost: f is small, the row is not absent.
+    let matched = emission.match_probability(site, observe(Base::C, qual, Strand::OT));
+    assert!(
+        matched / converted > 200.0,
+        "a real C still beats a converted T by {}x",
+        matched / converted
+    );
+
+    // On the other strand the chemistry cannot act and nothing changes.
+    assert_eq!(
+        emission.match_probability(site, observe(Base::T, qual, Strand::OB)).to_bits(),
+        StandardEmission::default()
+            .match_probability(site, observe(Base::T, qual, Strand::OB))
+            .to_bits()
+    );
+}
+
+/// The artifact floor is `eps = max(eps_from_qual, floor)` and nothing else.
+///
+/// Default zero, so it changes no number that existed before it; above the
+/// quality's own `eps` it takes over, and below it is inert. Design §8's E7
+/// measured mate-disagreement at ~0.01 against `eps / 3 = 3.3e-5` at Q40, which
+/// is the gap it exists to close.
+#[test]
+fn the_artifact_floor_is_a_lower_bound_on_eps() {
+    let haplotype = Haplotype::from_ascii(b"AACGAA");
+    let plain = haplotype.site(0).expect("A");
+    let cpg = haplotype.site(2).expect("C");
+    let betas = vec![Probability::ONE; haplotype.len()];
+    let floor = Probability::new(0.01).expect("in [0, 1]");
+
+    assert_eq!(StandardEmission::default().artifact_floor(), Probability::ZERO);
+    assert_eq!(
+        TapsEmission::new(ConversionModel::taps_default(), Betas::PerSite(&betas)).artifact_floor(),
+        Probability::ZERO
+    );
+
+    let floored_standard = StandardEmission::default().with_artifact_floor(floor);
+    let floored_taps = taps(&betas, ConversionModel::taps_default()).with_artifact_floor(floor);
+
+    // Q40: eps = 1e-4, well under the floor, so the floor decides.
+    for (site, read) in [(plain, Base::A), (cpg, Base::T)] {
+        let high = observe(read, BaseQuality::from_byte(40), Strand::OT);
+        let at_floor = observe(read, BaseQuality::from_byte(20), Strand::OT); // eps = 0.01 exactly
+        assert!(
+            (floored_standard.match_probability(site, high)
+                - StandardEmission::default().match_probability(site, at_floor))
+            .abs()
+                < 1e-15,
+            "a floored Q40 scores as an unfloored Q20"
+        );
+        assert!(
+            (floored_taps.match_probability(site, high)
+                - taps(&betas, ConversionModel::taps_default()).match_probability(site, at_floor))
+            .abs()
+                < 1e-15,
+            "and the same through the conversion rows"
+        );
+    }
+
+    // Q10: eps = 0.1, above the floor, so the floor is inert.
+    for base in Base::KNOWN {
+        let low = observe(base, BaseQuality::from_byte(10), Strand::OT);
+        assert_eq!(
+            floored_standard.match_probability(plain, low).to_bits(),
+            StandardEmission::default().match_probability(plain, low).to_bits()
+        );
+        assert_eq!(
+            floored_taps.match_probability(cpg, low).to_bits(),
+            taps(&betas, ConversionModel::taps_default()).match_probability(cpg, low).to_bits()
+        );
+    }
+}

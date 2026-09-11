@@ -8,10 +8,11 @@ I/O backend for [rastair](https://github.com/bsblabludwig/rastair).
 > While it seems that it works as expected,
 > it has not undergone the extensive real-world testing needed to be confident.
 
-This repo has two crates:
+This repo has three crates:
 
 - [`seqair`](crates/seqair): Indexed readers, pileup engine, VCF/BCF/BAM writer
 - [`seqair-types`](crates/seqair-types): Core types: `Base`, `Strand`, `Phred`, `Probability`, `RegionString`
+- [`compair`](crates/compair): Banded pair-HMM read likelihoods with a conversion-aware emission
 
 ## Highlights
 
