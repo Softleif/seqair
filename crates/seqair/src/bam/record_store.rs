@@ -1404,6 +1404,26 @@ impl<U> RecordStore<U> {
         self.records.iter()
     }
 
+    // r[impl record_store.record_ref]
+    /// The record at `idx`, for a caller that minted `idx` from this very
+    /// store and has held it ever since — the pileup engine, which owns its
+    /// store and walks `0..len` to activate records, is the only one.
+    ///
+    /// Crate-private, and deliberately not an `Option`: a caller that cannot
+    /// prove the pairing has [`record`](Self::record) instead. Returning
+    /// `Option` here pushed the impossible case onto call sites that then had
+    /// to invent an answer for it — and `PileupColumn::alignments` invented
+    /// "silently skip the entry", which would have hidden exactly the bug this
+    /// panics on.
+    ///
+    /// # Panics
+    ///
+    /// If `idx` is not an index of this store, which means the invariant above
+    /// was broken.
+    pub(crate) fn record_at(&self, idx: RecordIdx) -> RecordRef<'_, U> {
+        self.record(idx).expect("record index was minted by this store")
+    }
+
     // r[impl record_store.record_idx]
     /// Every index of this store, in store order — the typed replacement for
     /// `0..store.len() as u32`. Pair it with [`record`](Self::record), which

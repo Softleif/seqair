@@ -104,6 +104,20 @@ offsets this module wrote — and are unreachable through a handle, because the
 record and the store were paired at construction. The panics that a *caller*
 could reach are the ones this rule removes.
 
+The crate MAY resolve an index it minted itself through an infallible
+crate-private path (`record_at`), which MUST panic rather than return `Option`
+when the invariant is broken. Handing `Option` to a caller that cannot fail
+forces it to invent an answer for the impossible case, and the answer
+`PileupColumn::alignments` invented — skip the entry — would have made a column
+quietly shorter than its own `depth()` and hidden the very bug the `Option` was
+meant to surface. The public door stays checked; only a caller that minted the
+index from the store it still holds may use the internal one.
+
+Resolving MUST also stay lazy where a column hands out entries:
+`PileupColumn::alignments` MUST NOT read a record per entry, because a consumer
+that only reads `op`, `mapq` or `flags` would touch the records vector once per
+alignment per column for a record it never looks at.
+
 ## Record fields
 
 r[record_store.slim_record_fields]

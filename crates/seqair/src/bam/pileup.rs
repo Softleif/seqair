@@ -185,12 +185,12 @@ fn base_qual_at<U>(
     active: &ActiveRecord,
     qpos: QPos,
 ) -> (Base, BaseQuality) {
-    // The index was minted from this store when the record was activated, so
-    // the lookup is a formality — but it is the formality that replaced a
-    // panic, and it now serves both reads where there used to be one each.
-    let Some(rec) = store.record(active.record_idx).filter(|_| active.seq_len != 0) else {
+    if active.seq_len == 0 {
         return (Base::Unknown, BaseQuality::UNAVAILABLE);
-    };
+    }
+    // Activation minted this index from this store, so one resolution serves
+    // both reads where there used to be one each.
+    let rec = store.record_at(active.record_idx);
     let q = rec.qual().get(qpos.as_usize()).copied().unwrap_or(BaseQuality::UNAVAILABLE);
     (rec.base_at(qpos), q)
 }
@@ -247,11 +247,11 @@ impl<'eng, U> PileupColumn<'eng, U> {
     /// [`seq`](AlignmentView::seq), and [`qualities`](AlignmentView::qualities) for slab data.
     pub fn alignments(&self) -> impl Iterator<Item = AlignmentView<'_, 'eng, U>> + '_ {
         let store = self.store;
-        // Same resolution as `alignment_at`; an entry whose record the store
-        // no longer holds is not a view this column can hand out.
-        self.alignments
-            .iter()
-            .filter_map(move |aln| Some(AlignmentView { aln, rec: store.record(aln.record_idx)? }))
+        // Deliberately does not resolve the record here. A consumer that only
+        // reads `op`/`mapq`/`flags` — the common case — would pay a touch of
+        // the records Vec per alignment per column for a `SlimRecord` it never
+        // looks at. `AlignmentView::record` resolves on demand instead.
+        self.alignments.iter().map(move |aln| AlignmentView { aln, store })
     }
 
     /// Iterate the raw alignments without store access.
@@ -336,12 +336,11 @@ impl<'eng, U> PileupColumn<'eng, U> {
     /// The entry at `index` in this column's order, or `None` past its depth.
     #[must_use]
     pub fn alignment_at(&self, index: usize) -> Option<AlignmentView<'_, 'eng, U>> {
+        // `None` here means one thing only: `index` is past this column's
+        // depth. The record behind the entry is not in question — the engine
+        // minted its index from the store it still holds.
         let aln = self.alignments.get(index)?;
-        // The entry's index was minted from this very store while the column
-        // was filled, so this resolves; carrying the handle rather than the
-        // store is what makes every accessor below infallible.
-        let rec = self.store.record(aln.record_idx)?;
-        Some(AlignmentView { aln, rec })
+        Some(AlignmentView { aln, store: self.store })
     }
 
     // r[impl pileup.column_mate_of]
@@ -389,7 +388,7 @@ impl<'eng, U> PileupColumn<'eng, U> {
 // r[impl pileup.alignment_view]
 pub struct AlignmentView<'a, 'store, U> {
     aln: &'a PileupAlignment,
-    rec: RecordRef<'store, U>,
+    store: &'store RecordStore<U>,
 }
 
 impl<U> std::fmt::Debug for AlignmentView<'_, '_, U> {
@@ -406,17 +405,17 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
     /// the rest of the record — its `end_pos`, its CIGAR, its mate — without a
     /// second lookup.
     pub fn record(&self) -> RecordRef<'store, U> {
-        self.rec
+        self.store.record_at(self.aln.record_idx())
     }
 
     /// The per-record extra, as computed by the customize value's `compute` method.
     pub fn extra(&self) -> &'store U {
-        self.rec.extra()
+        self.record().extra()
     }
 
     /// The read's QNAME bytes in the store's name slab.
     pub fn qname(&self) -> &'store [u8] {
-        self.rec.qname()
+        self.record().qname()
     }
 
     // r[impl pileup.mate_link_cache]
@@ -432,22 +431,22 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
     /// the entry is written once per read per column, so carrying it there
     /// cost eight bytes of memory traffic per alignment to save a load here.
     pub fn qname_hash(&self) -> Option<u64> {
-        self.rec.qname_hash()
+        self.record().qname_hash()
     }
 
     /// The raw BAM aux bytes for this record.
     pub fn aux(&self) -> &'store [u8] {
-        self.rec.aux()
+        self.record().aux()
     }
 
     /// The read's full decoded sequence (all bases, not just the pileup position).
     pub fn seq(&self) -> &'store [Base] {
-        self.rec.seq()
+        self.record().seq()
     }
 
     /// The read's full per-base quality scores (all positions, not just the pileup position).
     pub fn qualities(&self) -> &'store [BaseQuality] {
-        self.rec.qual()
+        self.record().qual()
     }
 
     /// The inserted bases for a [`PileupOp::Insertion`] at this column — the
@@ -483,7 +482,7 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
 
     /// The store this view references.
     pub fn store(&self) -> &'store RecordStore<U> {
-        self.rec.store()
+        self.store
     }
 }
 
@@ -2084,6 +2083,59 @@ mod tests {
                 "max_depth=3 should keep first 3 records in insertion order at pos {:?}",
                 col.pos()
             );
+        }
+    }
+
+    mod column_entries {
+        use super::*;
+        use crate::bam::record_store::tests::window_query::{apply_moves, arb_moves, arb_store};
+        use proptest::prelude::*;
+
+        proptest! {
+            // r[verify pileup.column_contents]
+            // r[verify record_store.record_ref]
+            /// Every entry a column holds is reachable, both ways round.
+            ///
+            /// `alignments()` used to `filter_map` an entry whose record could
+            /// not be resolved, which would have made a column quietly shorter
+            /// than its own `depth()` rather than failing — a bug-hider, since
+            /// the engine mints those indices from the store it still owns.
+            /// This pins the three counts together.
+            #[test]
+            fn every_entry_is_reachable_and_counts_agree(
+                reads in arb_store(),
+                moves in arb_moves(),
+            ) {
+                let mut store = RecordStore::new();
+                for (i, read) in reads.iter().enumerate() {
+                    read.push(&mut store, i);
+                }
+                apply_moves(&mut store, &reads, &moves);
+
+                let mut engine = PileupEngine::new(
+                    store.prepare_for_pileup().input,
+                    Pos0::new(0).unwrap(),
+                    Pos0::new(7_000).unwrap(),
+                );
+                let mut columns = 0usize;
+                while let Some(col) = engine.pileups() {
+                    columns += 1;
+                    let depth = col.depth();
+                    prop_assert_eq!(col.alignments().count(), depth, "an entry went missing");
+                    prop_assert_eq!(col.raw_alignments().count(), depth);
+
+                    // Each position resolves, and resolves to its own entry.
+                    for (i, view) in col.alignments().enumerate() {
+                        let at = col.alignment_at(i).expect("i < depth");
+                        prop_assert_eq!(at.record_idx(), view.record_idx());
+                        // The record behind the entry is always there.
+                        prop_assert_eq!(view.record().idx(), view.record_idx());
+                    }
+                    // One past the depth is the only `None`.
+                    prop_assert!(col.alignment_at(depth).is_none());
+                }
+                prop_assert!(columns > 0 || reads.iter().all(|r| !r.mapped));
+            }
         }
     }
 
