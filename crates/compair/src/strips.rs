@@ -248,14 +248,89 @@ struct Strip<'a, L> {
     reach: usize,
 }
 
-/// The row buffer's slice for one strip, from `FRONT + first - LANE_MAX + 1`.
+/// The row buffer's slice for one strip, from `FRONT + first - LANE_MAX + 1`,
+/// exactly `reach + LANE_MAX` entries long so that every step's offsets have
+/// been proven in bounds once; the same reasoning as `View` in `banded`.
 ///
 /// A step at `at = d - first` reads column `d`, at offset `at + LANE_MAX - 1`,
-/// and stores column `d - LANES + 1`, at offset `at + LANE_MAX - LANES`.
+/// and stores column `d - LANES + 1`, at offset `at + LANE_MAX - LANES`. Both
+/// are below `reach + LANE_MAX` whenever `at <= reach`.
 struct Buffers<'a> {
     m: &'a mut [f32],
     i: &'a mut [f32],
     d: &'a mut [f32],
+}
+
+impl<'a> Buffers<'a> {
+    /// `None` unless each buffer holds `from..from + reach + LANE_MAX`.
+    fn new(rows: &'a mut RowBuffer, from: usize, reach: usize) -> Option<Self> {
+        let span = reach.checked_add(LANE_MAX)?;
+        let end = from.checked_add(span)?;
+        Some(Self {
+            m: rows.m.get_mut(from..end)?,
+            i: rows.i.get_mut(from..end)?,
+            d: rows.d.get_mut(from..end)?,
+        })
+    }
+
+    /// The row above the strip at the column step `at` reads.
+    ///
+    /// # Safety
+    ///
+    /// `at <= reach`, the reach `new` was given.
+    #[inline(always)]
+    unsafe fn above(&self, at: usize) -> (f32, f32, f32) {
+        let offset = at + LANE_MAX - 1;
+        debug_assert!(offset < self.m.len());
+        // SAFETY: `new` proved every buffer holds `reach + LANE_MAX` entries
+        // and the caller keeps `at <= reach`.
+        unsafe {
+            (
+                *self.m.as_ptr().add(offset),
+                *self.i.as_ptr().add(offset),
+                *self.d.as_ptr().add(offset),
+            )
+        }
+    }
+
+    /// The last lane's cells, into the column step `at` stores.
+    ///
+    /// # Safety
+    ///
+    /// `at <= reach`, the reach `new` was given.
+    #[inline(always)]
+    unsafe fn store<L: Lane>(&mut self, at: usize, cells: (L, L, L)) {
+        let offset = at + LANE_MAX - L::LANES;
+        debug_assert!(offset < self.m.len());
+        // SAFETY: as for `above`, through a unique borrow.
+        unsafe {
+            *self.m.as_mut_ptr().add(offset) = cells.0.last();
+            *self.i.as_mut_ptr().add(offset) = cells.1.last();
+            *self.d.as_mut_ptr().add(offset) = cells.2.last();
+        }
+    }
+}
+
+/// What every step feeds: the running maximum the next renormalisation
+/// reads, and the read's last row where this strip holds it.
+struct Totals<L> {
+    /// The lanewise maximum of every step's cells; only its last lane, the
+    /// row that crosses into the next strip, is read.
+    running: L,
+    /// `m + i` of the read's last row, accumulated in that row's lane.
+    total: L,
+    /// That lane, as a mask, in the strip that holds the last row.
+    summed: Option<L>,
+}
+
+impl<L: Lane> Totals<L> {
+    #[inline(always)]
+    fn absorb(&mut self, (m, i, d): (L, L, L)) {
+        self.running = self.running.vmax(m).vmax(i).vmax(d);
+        if let Some(keep) = self.summed {
+            self.total = self.total + keep.select(m + i, L::splat(0.0));
+        }
+    }
 }
 
 /// The vectors that carry from one step to the next.
@@ -281,8 +356,7 @@ fn flush<L: Lane>(value: L) -> L {
 /// One step of the sweep: the cells `(r0 + l, first + at - l)` for every lane.
 ///
 /// `mask` is `None` where every lane is live and the lanewise mask otherwise.
-/// `None` only if a buffer offset is out of range, which the kernel's sizing
-/// rules out.
+/// `None` only past the sweep's reach, which the kernel's loops never are.
 #[inline(always)]
 fn step<L: Lane>(
     strip: &Strip<'_, L>,
@@ -291,15 +365,16 @@ fn step<L: Lane>(
     at: usize,
     mask: Option<L>,
 ) -> Option<(L, L, L)> {
-    let read_at = at + LANE_MAX - 1;
-    let above_m = *buffers.m.get(read_at)?;
-    let above_i = *buffers.i.get(read_at)?;
-    let above_d = *buffers.d.get(read_at)?;
+    // The one check a step makes: `at <= reach` is what every unchecked
+    // access below rests on.
+    let window = strip.reach.checked_sub(at)?;
+    // SAFETY: the buffers were built with this strip's reach and `at <=
+    // reach` was just checked.
+    let (above_m, above_i, above_d) = unsafe { buffers.above(at) };
     let up_m = state.m.shift_in(above_m);
     let up_i = state.i.shift_in(above_i);
     let up_indel = (state.i + state.d).shift_in(above_i + above_d);
 
-    let window = strip.reach.checked_sub(at)?;
     // SAFETY: every view was built with `reach + LANE_MAX` entries and
     // `window <= reach`.
     let load = |view: View<'_>| unsafe { L::load(view.window(window)) };
@@ -327,13 +402,19 @@ fn step<L: Lane>(
         None => (m, i, d),
     };
 
-    let store_at = at + LANE_MAX - L::LANES;
-    *buffers.m.get_mut(store_at)? = m.last();
-    *buffers.i.get_mut(store_at)? = i.last();
-    *buffers.d.get_mut(store_at)? = d.last();
+    // SAFETY: as for `above`.
+    unsafe { buffers.store::<L>(at, (m, i, d)) };
 
     *state = State { m, i, d, m_diag: up_m, indel_diag: up_indel };
     Some((m, i, d))
+}
+
+/// The lanewise mask for step `d`: every lane whose live steps include it.
+#[inline(always)]
+fn live_lanes<L: Lane>(lane_first: L, lane_past: L, d: usize) -> L {
+    #[allow(clippy::cast_precision_loss, reason = "a step is a few hundred")]
+    let now = L::splat(d as f32);
+    lane_first.below(now + L::splat(1.0)).both(now.below(lane_past))
 }
 
 /// Strips of one row per lane, each swept along the haplotype; see the
@@ -389,9 +470,6 @@ pub(crate) fn strip_kernel<L: Lane>(
         } else {
             0
         };
-        // The lanewise maximum of every step's cells; only its last lane, the
-        // row that crosses into the next strip, is read.
-        let mut running = zero;
 
         let Some(sweep) = Sweep::new(shape, band, r0, L::LANES) else {
             // No cell of these rows is inside the band. The row buffer is
@@ -459,16 +537,9 @@ pub(crate) fn strip_kernel<L: Lane>(
 
         // The buffer slice this sweep touches, from the column the first step
         // stores to the column the last step reads.
-        let buffer_from = sweep.first;
-        let buffer_span = reach + LANE_MAX;
-        let (Some(m), Some(i), Some(d)) = (
-            rows.m.get_mut(buffer_from..buffer_from + buffer_span),
-            rows.i.get_mut(buffer_from..buffer_from + buffer_span),
-            rows.d.get_mut(buffer_from..buffer_from + buffer_span),
-        ) else {
+        let Some(mut buffers) = Buffers::new(rows, sweep.first, reach) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        let mut buffers = Buffers { m, i, d };
 
         // Bring the row above onto this strip's scale. The strip reads
         // columns `first - 1..=last`, at offsets `LANE_MAX - 2..`; whatever
@@ -503,37 +574,54 @@ pub(crate) fn strip_kernel<L: Lane>(
 
         // The last strip holds the read's last row in one lane; its match
         // and insertion cells are the total.
-        let summed = (r0 + L::LANES > r).then(|| offsets.equals(L::splat((r - r0) as f32)));
+        let mut totals = Totals {
+            running: zero,
+            total,
+            summed: (r0 + L::LANES > r).then(|| offsets.equals(L::splat((r - r0) as f32))),
+        };
         let lane_first = L::load(&sweep.lane_first);
         let lane_past = L::load(&sweep.lane_past);
 
         // Three phases: the leading edge of the band, where lanes come live
         // one by one; the middle, with nothing to mask; and the trailing
-        // edge, where they go dead again.
-        let mut d = sweep.first;
-        loop {
-            let full = (sweep.full_first..=sweep.full_last).contains(&d);
-            let mask = if full {
-                None
-            } else {
-                let now = L::splat(d as f32);
-                Some(lane_first.below(now + L::splat(1.0)).both(now.below(lane_past)))
+        // edge, where they go dead again. The middle is unrolled by two so
+        // that the state alternates between two sets of registers rather
+        // than being copied at the end of every step.
+        for d in sweep.first..sweep.full_first.min(sweep.last + 1) {
+            let mask = Some(live_lanes(lane_first, lane_past, d));
+            let Some(cells) = step(&strip, &mut buffers, &mut state, d - sweep.first, mask) else {
+                return Log10Likelihood::IMPOSSIBLE;
             };
-            let Some((m, i, d_cells)) =
-                step(&strip, &mut buffers, &mut state, d - sweep.first, mask)
+            totals.absorb(cells);
+        }
+        let mut d = sweep.full_first;
+        while d + 1 <= sweep.full_last {
+            let Some(cells) = step(&strip, &mut buffers, &mut state, d - sweep.first, None) else {
+                return Log10Likelihood::IMPOSSIBLE;
+            };
+            totals.absorb(cells);
+            let Some(cells) = step(&strip, &mut buffers, &mut state, d + 1 - sweep.first, None)
             else {
                 return Log10Likelihood::IMPOSSIBLE;
             };
-            running = running.vmax(m).vmax(i).vmax(d_cells);
-            if let Some(keep) = summed {
-                total = total + keep.select(m + i, zero);
-            }
-            if d == sweep.last {
-                break;
-            }
-            d += 1;
+            totals.absorb(cells);
+            d += 2;
         }
-        crossing_max = running.last();
+        if d <= sweep.full_last {
+            let Some(cells) = step(&strip, &mut buffers, &mut state, d - sweep.first, None) else {
+                return Log10Likelihood::IMPOSSIBLE;
+            };
+            totals.absorb(cells);
+        }
+        for d in (sweep.full_last + 1).max(sweep.first)..=sweep.last {
+            let mask = Some(live_lanes(lane_first, lane_past, d));
+            let Some(cells) = step(&strip, &mut buffers, &mut state, d - sweep.first, mask) else {
+                return Log10Likelihood::IMPOSSIBLE;
+            };
+            totals.absorb(cells);
+        }
+        crossing_max = totals.running.last();
+        total = totals.total;
 
         // Column 0 belongs to the free start alone: every row below row 0 is
         // zero there. The eight-lane strip's last lane stores it, as a
