@@ -78,10 +78,20 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
   O(1) duplicate-field detection with htslib-compatible in-place overwrite.
 - `Writer::finish` returns a self-serializing `CoordinateIndex`.
 - `Readers::pileup_with(mutator)` runs a caller-supplied mutation on the freshly fetched `RecordStore`
-  (then re-sorts by position) — the hook for in-place local realignment via `RecordStore::set_alignment`;
+  (then re-sorts by position) — the hook for in-place local realignment via `RecordStore::set_alignment`.
+  The mutator also receives the segment's `RefSeq`, the very one the engine later reports through
+  `PileupColumn::reference_base`, so a hook that rescores or normalises alignments against the reference
+  never loads its own copy; it covers the segment, not the reads, so read past its ends with
+  `RefSeq::try_base_at`. The hook runs after the reference fetch, so it does not run when that fetch fails.
   `Readers::pileup_with_reference(&RefSeq)` drives the engine from a reference the caller already holds
   instead of re-reading the FASTA per segment, rejecting one that doesn't cover the segment
   (`ReaderError::SuppliedReferenceTooSmall`).
+- Window query over a prepared store: `PileupInput::records_overlapping(start, end)`, and the same on
+  `PileupEngine` (between columns) and `PileupColumn` (while holding one), yield the indices of the mapped
+  records whose alignment overlaps an inclusive span, ascending — a binary search over a running maximum
+  of `end_pos` that `prepare_for_pileup` builds, so one long read only costs the windows it overlaps.
+  Not offered on a bare `RecordStore`, which cannot prove it is in position order. `PileupInput::store()`
+  gives read-only access to the store the indices address.
 - Record-store mate linking for overlap-dedup consumers: `RecordStore::link_mates()` pairs a template's
   primary alignments once per store (qname-hash table, verified by qname bytes and reciprocal mate
   positions; secondary/supplementary and nameless reads never link). The pileup exposes

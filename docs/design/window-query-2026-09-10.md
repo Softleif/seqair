@@ -1,8 +1,9 @@
-# Window query over a prepared store; load-time mutator sees the reference
+# Window query over a prepared store; the load-time hook sees the reference
 
-2026-09-10, branch `feature/window-query`. Two small features the rastair 3
-design asks for (`docs/plans/rastair3-design-2026-09-10.md` §7 row C3, §11.2,
-and §12 E6 in the rastair repo).
+2026-09-10, revised 2026-09-11 after review, branch `feature/window-query`.
+Two small features the rastair 3 design asks for
+(`docs/plans/rastair3-design-2026-09-10.md` §7 row C3, §11.2, and §12 E6 in
+the rastair repo).
 
 ## 1. `records_overlapping`
 
@@ -22,86 +23,132 @@ impl<U> PileupInput<U> {
 impl<U> PileupEngine<U> {
     pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + '_;
 }
+
+impl<'eng, U> PileupColumn<'eng, U> {
+    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + 'eng;
+}
 ```
 
 - `[start, end]` is **inclusive at both ends**, like every other interval in
   the API (`r[interval.inclusive_ends]`); overlap is
   `r[interval.overlap_test]`: `pos <= end && end_pos >= start`, `end_pos`
   being inclusive. `end < start` is the empty interval and yields nothing.
+- Only **mapped** records are yielded. A placed-unmapped read sits at its
+  mate's position with `end_pos == pos` and no alignment; the pileup never
+  reports one (`r[pileup.unmapped_excluded]`), and the query answers for
+  what the pileup reports. Review caught this: the first version yielded
+  them, and nothing in the tests could tell, because the generator never
+  made one.
 - Indices come out ascending and are the store's record indices, valid for
   `RecordStore::record` and for `PileupColumn::find_record` on any column of
-  an engine built from the input.
+  an engine built from the input. They mean nothing once the engine's store
+  has been reclaimed (guard drop): resolve them before that.
 - There is deliberately no such method on `RecordStore`. The query
-  binary-searches on `pos`, which means nothing on an unsorted store, and a
-  raw store cannot prove it is sorted — the same silent failure `PileupInput`
-  was introduced to close. The crate-private `records_overlapping_sorted` on
-  the store carries a `debug_assert` on the order flag; the two public
-  entry points are the types that can vouch for it. The engine never
-  reorders its store, so its answer is the input's; after
-  `reclaim_allocation` the store is empty and the query yields nothing.
+  binary-searches an index that only exists on a store
+  `prepare_for_pileup` has ordered, and a raw store cannot prove it has been
+  — the same silent failure `PileupInput` was introduced to close. The
+  crate-private `records_overlapping_sorted` on the store carries a
+  `debug_assert` on the order flag; the three public entry points are the
+  types that can vouch for it.
+- The **column** entry point exists because `pileups(&mut self)` hands out a
+  column that borrows the engine for as long as it lives, so
+  `engine.records_overlapping` does not borrow-check while a column is held
+  — and a caller who has just seen a trigger at a column is exactly the
+  caller who wants the reads around it. Review found the first version
+  promised "at any point of the iteration" while only an in-crate test could
+  reach it.
+- What a column reports and what the query yields agree on alignment overlap
+  and differ in three documented cases: soft-clip overhang (column reports
+  more), depth cap and engine region (column shows less).
 
-### Lower bound: tracked `max_ref_span`, not a backward scan
+### Lower bound: a running maximum of `end_pos`, built at `prepare_for_pileup`
 
 A record starting before `start` can still overlap the window, so the first
-record with `pos >= start` is not the first candidate. The store now tracks
-`max_ref_span`, the widest `end_pos - pos + 1` it has kept, widened on every
-kept push and on `set_alignment`, reset by `clear`, carried by
-`take_contents`. The query starts at `partition_point(pos < start - (max_span - 1))`
-and scans forward while `pos <= end`, keeping records with `end_pos >= start`.
+record with `pos >= start` is not the first candidate, and with no bound at
+all a backward scan has no stopping point — a long enough record arbitrarily
+far back still overlaps. The bound is needed for correctness; the only
+question was its shape.
 
-This was a decision by reasoning, not a measurement (the instruction changed
-mid-task to run no timings on the machine):
+The first version tracked one `u32` per store, `max_ref_span`, the widest
+`end_pos - pos + 1` ever kept, widened on every kept push and on
+`set_alignment`, reset by `clear`, carried by `take_contents`, and searched
+`pos >= start - (max_span - 1)`. Review (adversarial probing, mutation
+testing) confirmed it was a sound upper bound on every path — and found two
+things wrong with it as a design:
 
-- A backward scan from `partition_point(pos < start)` has **no stopping
-  point without a span bound** — a record arbitrarily far back overlaps if
-  it is long enough. So the bound is needed for correctness either way, and
-  the only question is whether to walk to it or jump to it.
-- Given the bound, the backward scan and the binary search stop at the same
-  first record. At ~4k records per 10 kb region with 150 bp reads, the
-  records inside one span's width are ~60 either way; the binary search is
-  `O(log n)` regardless of span and is one `partition_point` call, which is
-  the simpler thing to reason about.
-- The bound may over-estimate (a rolled-back push does not widen it — it is
-  updated after the keep decision — and a record `dedup` removes does not
-  lower it) but never under-estimates. Over-estimating only widens the scan
-  prefix; under-estimating would skip records with no symptom. One long
-  record (a spliced read with a large `N`) widens the prefix for the whole
-  store; acceptable, and the alternative is a per-query `max` over the
-  records.
-- Cost: one `max` per kept push, a `u32` on the store.
+- **One spliced read collapses it.** `N` consumes reference, so a spliced
+  read's span is its intron; after one 100 kb intron, `start - max_span`
+  saturates to 0 for every realistic query and the binary search lands on
+  record 0 — a full scan of the store, silently, forever (the bound never
+  shrinks). RNA-seq is not rastair's input today, but a design that
+  degrades to O(n) on one read is the wrong one.
+- **It is an invariant maintained by hand** across five sites, and mutation
+  testing showed one of them (`push_raw`, the real BAM path) was never
+  exercised by a query in the test suite.
+
+The revision keeps `reach: Vec<Pos0>` on the store, `reach[i]` = the largest
+`end_pos` among the mapped records at indices `..= i`, built in one pass by
+`prepare_for_pileup` after the sort. It never decreases, so
+`partition_point(reach[i] < start)` is exactly the first record that can
+overlap — the record at that index is itself a hit or is already past `end`,
+nothing before it reaches `start`, nothing after it is skipped. The forward
+scan then runs to `pos > end` as before.
+
+- Exact, not an over-estimate: a long read costs only the queries it
+  genuinely overlaps (where it is a hit, and the records between it and the
+  window must be inspected by any list-shaped structure anyway).
+- Nothing to maintain: derived at the one point the order is established,
+  cleared with the records, moved with them. `set_alignment` and pushes
+  after that point already flip the order flag, which the query asserts.
+- Cost: 4 bytes per record, one pass per prepared store. The alternative was
+  an interval tree, which is the right answer if the slow path ever queries
+  thousands of windows per tile and the forward scan shows up in a profile.
 
 ### Spec rules
 
-- `r[record_store.window_query]` — the contract, and why it is not on
-  `RecordStore`.
-- `r[record_store.window_query.max_ref_span]` — the bound, its monotonicity,
-  and the decision above.
-- `r[pileup.records_overlapping]` — the engine forwards to the same query.
+- `r[record_store.window_query]` — the contract, mapped-only, and why it is
+  not on `RecordStore`.
+- `r[record_store.window_query.reach]` — the index, its exactness, and why
+  it replaced the tracked span.
+- `r[pileup.records_overlapping]` — engine and column entry points, the
+  three ways a column may differ, and index validity.
 
 ### Tests
 
-- `record_store::tests::window_query::matches_brute_force` (proptest): random
-  stores of 0–80 records with `pos` in `0..5000`, 1–16 query bases and, one
-  time in five, a trailing deletion of 1–400 so spans vary independently of
-  query length; pushed in random order (`prepare_for_pileup` sorts); 1–8
-  spans per case with both ends drawn from `0..7000`, so spans are often
-  inverted, before the first record, or past the last. Property: the index
-  set equals a brute-force filter of every record by the overlap test (with
-  `end < start` defined as empty).
-- `span_bound_is_the_widest_record` (proptest): the tracked bound equals the
-  widest generated record and resets on `clear`.
-- Unit tests: a 300 bp-deletion read starting before the window is found; the
-  first/last covered base; empty, before-first and past-last spans; an empty
-  store; `set_alignment` lengthening a record widens the bound; a rejected
-  push leaves it alone.
+- `record_store::tests::window_query::matches_brute_force` (proptest):
+  random stores of 0–80 records with `pos` in `0..5000`, 1–16 query bases,
+  deletions bimodal (none, 1–40, or one long 200–1500 so a single record
+  sets how far back a window must look), one in ten placed-unmapped; pushed
+  in random order with unique qnames; 0–6 `set_alignment` moves before
+  `prepare_for_pileup`; 1–8 spans per case, absolute (both ends from
+  `0..7000`, so often inverted or past the last record) or anchored a base
+  or two off a record's own start or end. Property: the index set equals a
+  brute-force filter of every record by the definition.
+- `first_reaching_is_where_the_linear_scan_stops` (proptest): the binary
+  search lands where a linear scan for the first mapped record with
+  `end_pos >= start` stops.
+- Unit tests: a 300 bp-deletion read starting before the window is found;
+  first/last covered base; empty, before-first, past-last spans; empty
+  store; a placed-unmapped record is not yielded; `set_alignment`
+  lengthening a record is seen; a store cleared and refilled answers for its
+  new records, not a stale index.
 - `pileup::tests::window_query::engine_query_agrees_with_columns` (proptest):
-  the engine's answer equals the brute force before iteration and from a
-  column mid-iteration; every alignment a column inside the span reports is
-  in the set, and every record in the set is reported by some column inside
-  the span (records consume reference by construction); after
-  `reclaim_allocation` the query is empty.
+  the engine's answer equals the brute force before iteration, from a column
+  mid-iteration (through `PileupColumn::records_overlapping`), and after the
+  last column; every alignment a column inside the span reports is in the
+  set, and every record in the set is reported by some column inside the
+  span — the direction that keeps unmapped records out without a second copy
+  of the rule; each yielded index resolves with `find_record` exactly at the
+  columns it covers; after `reclaim_allocation` the query is empty.
+- `tests/window_query.rs` (integration, public API only, real reads through
+  `push_raw`): sampled columns of the fixture segment match brute force from
+  the column and from the engine; and the two features composed — a hook
+  that soft-clips leading bases, then the query names the moved reads where
+  they now lie, and the hook's reference bases equal the columns'.
+- `examples/active_region.rs`, smoke-tested: triggers on indel columns,
+  gathers the spanning reads from the column, prints one line per region.
 
-## 2. The load-time mutator sees the reference
+## 2. The load-time hook sees the reference
 
 rastair's E6 prototype found that the `Readers::pileup_with` hook ran before
 seqair fetched the engine's `RefSeq`, so a hook that wanted to score against
@@ -111,94 +158,69 @@ the reference had to load a second copy.
 
 ```rust
 impl<E: CustomizeRecordStore> Readers<E> {
-    // unchanged signature; now runs after the reference fetch
     pub fn pileup_with<F>(&mut self, segment: &Segment, depth: DepthLimit, mutate: F)
-        -> Result<PileupGuard<'_, E::Extra>, ReaderError>
-    where F: FnMut(&mut RecordStore<E::Extra>);
-
-    // new
-    pub fn pileup_mutate<F>(&mut self, segment: &Segment, depth: DepthLimit, mutate: F)
         -> Result<PileupGuard<'_, E::Extra>, ReaderError>
     where F: FnMut(&mut RecordStore<E::Extra>, &RefSeq);
 }
 ```
 
-`pileup_impl` now fetches (or validates the supplied) reference first and
-runs the mutator with `&ref_seq` before `prepare_for_pileup`; `pileup_with`
-is a wrapper closure that drops the reference. The `RefSeq` handed to the
-mutator is the very value attached to the engine, so
+`pileup_impl` fetches (or validates the supplied) reference first and runs
+the mutator with `&ref_seq` before `prepare_for_pileup`. The `RefSeq` handed
+to the mutator is the very value attached to the engine, so
 `ref_seq.base_at(pos)` in the hook equals `column.reference_base()` later.
 
-One limitation worth knowing: the reference covers **exactly the segment**
-(`r[unified.readers_pileup]` step 3), not the reads. A record reaching past
-either end has bases the `RefSeq` does not hold; read those with
-`try_base_at` and treat `None` as unavailable, because `base_at` returns
-`Base::Unknown` there, indistinguishable from an `N`. Widening the fetch to
-the store's extent is a possible follow-up if the slow path needs it.
+The first version kept `pileup_with` with its old one-argument signature and
+added `pileup_mutate` for the two-argument one. seqair has no stable API to
+protect, so the revision has one hook with one signature; a mutator that
+does not need the reference ignores the argument. rastair's E6 hook gains a
+`, _` when it moves to this seqair.
+
+Two consequences worth knowing:
+
+- The reference covers **exactly the segment** (`r[unified.readers_pileup]`
+  step 3), not the reads. A record reaching past either end has bases the
+  `RefSeq` does not hold; read those with `try_base_at` and treat `None` as
+  unavailable, because `base_at` returns `Base::Unknown` there,
+  indistinguishable from an `N`. Widening the fetch to the store's extent is
+  a possible follow-up if the slow path needs it.
+- Because the hook runs after the fetch, it does not run when the fetch
+  fails: the caller gets the error and an untouched store. The next
+  `pileup` clears the store before refilling, so nothing leaks across.
 
 ### Spec rules
 
-- `r[unified.readers_pileup_store_mutation]` bumped to `+2`: the hook runs
-  after step 3 now, with a paragraph on why the order moved.
-- `r[unified.readers_pileup_mutate]` — the new entry point, the identity of
-  the reference, the segment-only coverage, and that `pileup_with` stays.
+- `r[unified.readers_pileup_store_mutation+3]`: the hook runs after step 3,
+  receives the reference, the coverage caveat, the error-path behaviour, and
+  the version history.
 
-### Test
+### Tests
 
-`reader::readers::tests::pileup_mutate_sees_the_engines_reference`: the
+`reader::readers::tests::pileup_with_sees_the_engines_reference`: the
 mutator asserts the reference starts and ends at the segment (`try_base_at`
 is `None` one base outside either end), records `base_at` for every segment
 position, and the pileup loop asserts `reference_base()` at every column
-equals the recorded base. The two existing `pileup_with` tests (no-op is
+equals the recorded base. The two older `pileup_with` tests (no-op is
 transparent; a soft-clipping realignment is observed) are unchanged apart
-from their annotation version.
+from the extra closure argument.
 
-## Verification
+## Not done, on purpose
 
-- `cargo nextest run`: 1490 passed, 1 skipped.
-- `cargo test --doc --quiet`: 9 passed.
-- `cargo clippy --all-targets -- -D warnings`: clean.
-- rastair build against this branch: see below.
+- **`pileup_with_reference` + a mutator.** `pileup_impl` supports the
+  combination; no public method exposes it. If a caller needs both, the
+  clean shape is one builder (`readers.pileup(segment, depth).reference(r)
+  .mutate(f).run()`) replacing the three entry points, not a fourth method.
+- **Reference beyond the segment for the hook.** See above; decide in
+  rastair.
+- **A `RecordIdx` newtype** for the `u32` indices this query, `find_record`
+  and `record` share. Worth doing crate-wide, not here.
 
-### rastair against this branch
+## Next step
 
-Scratch rastair worktree at the `feature/phasing` tip (`44c09c14`), with
-`seqair`/`seqair-types` pointed at this worktree by path and
-`rust-version = "1.98.1"` (cargo `-v` confirms both crates resolve from
-`.claude/worktrees/window-query`):
-
-- `cargo build --release --features experimental-seqair`: **builds**.
-- `cargo test --features experimental-seqair --test call_cli`: **37 passed,
-  0 failed**, with `Using experimental seqair backend` in the log, so the
-  seqair reading path was the one exercised.
-
-Both features are additive — `pileup_with` keeps its signature and the
-store's new `max_ref_span` field is private — so rastair compiles without a
-source change. Nothing in rastair calls the new entry points yet.
-
-Tracey (`tracey query status` / `stale`): every new rule has impl and verify
-references; no stale references against the `+2` bump.
-
-## Done / Half-done / Next step
-
-**Done.** Both features, their spec rules, unit tests and proptests, the
-rastair build check, this note. Four commits on `feature/window-query`, not
-pushed; the worktree is clean.
-
-**Half-done.** Nothing.
-
-**Next step.** In rastair (the rastair 3 slow path, design doc §7 row C3 /
-§11.2 / §12 E6): call `engine.records_overlapping(start, end)` to gather the
-reads spanning an active region and `Readers::pileup_mutate` where the
-realignment hook needs the reference. Two things to decide there, both
-recorded above rather than solved here:
-
-- Whether the slow path needs reference bases beyond the segment for reads
-  reaching past its ends. If so, widen the fetch in `pileup_impl` to the
-  store's extent (`min pos`, `max end_pos`) — a seqair change, spec rule
-  `r[unified.readers_pileup_mutate]` would need its coverage paragraph
-  amended.
-- Before merging into seqair `main`: rebase onto the current `main` (other
-  sessions commit there concurrently), re-run `cargo nextest run`,
-  `cargo test --doc --quiet` and `cargo clippy --all-targets -- -D warnings`,
-  then push and move rastair's `Cargo.lock` seqair pin.
+In rastair (the rastair 3 slow path, design doc §7 row C3 / §11.2 / §12 E6):
+`col.records_overlapping(start, end)` at a triggering column to gather the
+reads spanning the active region, resolved with `col.store().record(idx)`
+or `find_record` on later columns; `Readers::pileup_with` for the hook, with
+the reference. Before merging into seqair `main`: rebase, run
+`cargo nextest run`, `cargo test --doc --quiet` and
+`cargo clippy --all-targets -- -D warnings`, push, and move rastair's
+`Cargo.lock` seqair pin (its E6 hook needs the extra closure argument).
