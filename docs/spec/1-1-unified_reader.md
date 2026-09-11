@@ -240,6 +240,7 @@ chromosome in one call without thinking about tile size.
 >
 > - `with_reference(RefSeq)` — r[`unified.readers_pileup_supplied_reference+1`]
 > - `mutate(F)` — r[`unified.readers_pileup_store_mutation+4`]
+> - `reference_covers_reads()` — r[`unified.pileup_reference_covers_reads`]
 >
 > This is why it is a plan. The three separate methods it replaces
 > (`pileup`, `pileup_with`, `pileup_with_reference`) covered three of the four
@@ -357,6 +358,45 @@ chromosome in one call without thinking about tile size.
 > (`r[unified.readers_pileup_store_mutation+4]`). Up to `+0` this was the
 > `pileup_with_reference` method, which could not be combined with a hook.
 
+
+> r[unified.pileup_reference_covers_reads]
+> `Pileup::reference_covers_reads()` MUST make step 3 read the reference over
+> the span every fetched record covers, rather than over the segment: the union
+> of `[segment.start(), segment.end()]` with `min(pos)`..`max(end_pos)` over
+> every record in the store, clamped to the contig's last position. The span
+> MUST NOT be narrower than the segment, since the engine reports a column for
+> every position in it.
+>
+> A read at a tile's edge reaches past it, so without this its outer bases have
+> no reference: `RefSeq::try_base_at` answers `None` and `RefSeq::base_at`
+> answers `Base::Unknown`, which any comparison reads as a mismatch. The share
+> of reads affected is a function of read length over tile length — on this
+> crate's 80 bp fixture, 27 % at a 500 bp tile, 14 % at 1 kb, 3 % at 5 kb — and
+> they are exactly the reads at the edges, where a hook that realigns or
+> rescores whole reads needs the bases.
+>
+> The widening MUST be derived from the records, not from a padding constant:
+> the fetch happens after step 2, so the span the reads occupy is known
+> exactly, and a tile whose reads all stop inside it MUST fetch exactly what it
+> would have without the option. Unmapped records are included — they carry a
+> position, and excluding them would make the span turn on a distinction a
+> caller walking `store.records()` cannot see.
+>
+> Columns MUST NOT change. `RefSeq` resolves absolute positions, so
+> `PileupColumn::reference_base()` reports the same base at every column of the
+> segment with or without this option; only positions *outside* the segment go
+> from absent to present.
+>
+> Combined with `r[unified.readers_pileup_supplied_reference+1]` there is
+> nothing to widen, so the option MUST become a requirement on the supplied
+> reference: one that does not cover the records MUST be rejected with
+> `ReaderError::SuppliedReferenceMissesReads`. Ignoring it there would restore
+> the silent short read this option exists to prevent. The segment-coverage
+> check (`SuppliedReferenceTooSmall`) still applies first and independently.
+>
+> This is opt-in. A hook that only scores within the tile wants the segment and
+> the smaller fetch; the wider one costs the FASTA read of at most the longest
+> record's span on each side, which one spliced read can make large.
 
 r[unified.fetch_into_customized]
 Each format reader (`IndexedBamReader`, `IndexedSamReader`, `IndexedCramReader`, and the format-agnostic `IndexedReader`) MUST expose `fetch_into_customized<E: CustomizeRecordStore>(tid, start, end, store, customize) -> Result<FetchCounts>` in addition to `fetch_into`. The reader MUST forward `customize` to `RecordStore::push_raw`/`push_fields` so its `keep_record` runs at push time. `FetchCounts { fetched, kept }` reports records produced by the reader's built-in overlap/unmapped checks (`fetched`) vs those that also passed `keep_record` (`kept`). Existing `fetch_into` MUST remain a thin wrapper passing `&mut ()` (whose default `keep_record` returns `true`) so its signature and behavior are unchanged.

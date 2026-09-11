@@ -353,7 +353,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// moved back, so subsequent pileups keep the ~39 MB allocation. No
     /// explicit recover step is needed.
     pub fn pileup<'a>(&'a mut self, segment: &'a Segment, depth: DepthLimit) -> Pileup<'a, E> {
-        Pileup { readers: self, segment, depth, reference: None, mutate: None }
+        Pileup { readers: self, segment, depth, reference: None, mutate: None, cover_reads: false }
     }
 
     fn pileup_impl<F>(
@@ -362,6 +362,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
         depth: DepthLimit,
         mutate: Option<F>,
         supplied_ref: Option<RefSeq>,
+        cover_reads: bool,
     ) -> Result<PileupGuard<'_, E::Extra>, ReaderError>
     where
         F: FnMut(&mut RecordStore<E::Extra>, &RefSeq),
@@ -426,44 +427,73 @@ impl<E: CustomizeRecordStore> Readers<E> {
             }
         }
 
+        // r[impl unified.pileup_reference_covers_reads]
+        // The records are in hand, so the span they actually cover is known
+        // exactly — no padding constant, and a read that stops inside the
+        // segment widens nothing.
+        let (ref_start, ref_end) = if cover_reads {
+            span_covering_records(&self.store, start, end, segment.contig_last_pos())
+        } else {
+            (start, end)
+        };
+
         let ref_seq = match supplied_ref {
             // r[impl unified.readers_pileup_supplied_reference+1]
             Some(ref_seq) => {
                 // An uncovered position reads as `Base::Unknown`, which is
                 // indistinguishable from a genuine `N` in the reference — every
                 // comparison against it would silently become a mismatch.
-                let ref_start = ref_seq.start_pos().as_u64();
-                let ref_last = ref_start.saturating_add(ref_seq.len() as u64).saturating_sub(1);
-                if ref_start > start.as_u64() || ref_last < end.as_u64() {
+                let have_start = ref_seq.start_pos().as_u64();
+                let have_last = have_start.saturating_add(ref_seq.len() as u64).saturating_sub(1);
+                if have_start > start.as_u64() || have_last < end.as_u64() {
                     return Err(ReaderError::SuppliedReferenceTooSmall {
                         contig: segment.contig().clone(),
-                        ref_start,
-                        ref_end: ref_last,
+                        ref_start: have_start,
+                        ref_end: have_last,
                         segment_start: start.as_u64(),
                         segment_end: end.as_u64(),
                     });
                 }
+                // r[impl unified.pileup_reference_covers_reads]
+                // Nothing can be widened here, so the option becomes the
+                // requirement it always was: silently handing the hook a
+                // reference that stops short is the failure it exists to close.
+                if cover_reads && (have_start > ref_start.as_u64() || have_last < ref_end.as_u64())
+                {
+                    return Err(ReaderError::SuppliedReferenceMissesReads {
+                        contig: segment.contig().clone(),
+                        ref_start: have_start,
+                        ref_end: have_last,
+                        reads_start: ref_start.as_u64(),
+                        reads_end: ref_end.as_u64(),
+                    });
+                }
                 ref_seq
             }
-            // Fetch `[start, end]` (inclusive). FASTA APIs expect half-open [start, stop).
-            // Use the u64 path so `end == Pos0::max_value()` doesn't truncate the
-            // last reference base — `stop = end + 1` is i32::MAX + 1, which doesn't
-            // fit in a Pos0 but does fit comfortably in a u64.
+            // Fetch `[ref_start, ref_end]` (inclusive). FASTA APIs expect half-open
+            // [start, stop). Use the u64 path so `end == Pos0::max_value()` doesn't
+            // truncate the last reference base — `stop = end + 1` is i32::MAX + 1,
+            // which doesn't fit in a Pos0 but does fit comfortably in a u64.
             None => {
                 let contig_name = segment.contig();
-                let stop_u64 = end.as_u64().saturating_add(1);
+                let stop_u64 = ref_end.as_u64().saturating_add(1);
                 self.fasta
-                    .fetch_seq_into_u64(contig_name, start.as_u64(), stop_u64, &mut self.fasta_buf)
+                    .fetch_seq_into_u64(
+                        contig_name,
+                        ref_start.as_u64(),
+                        stop_u64,
+                        &mut self.fasta_buf,
+                    )
                     .map_err(|source| ReaderError::FastaFetch {
                         contig: contig_name.clone(),
-                        start: start.as_u64(),
-                        end: end.as_u64(),
+                        start: ref_start.as_u64(),
+                        end: ref_end.as_u64(),
                         source,
                     })?;
                 // Convert in-place and copy into the Rc<[Base]> while keeping
                 // `fasta_buf` (and its capacity) for the next pileup call.
                 let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);
-                RefSeq::new(Rc::from(bases), start)
+                RefSeq::new(Rc::from(bases), ref_start)
             }
         };
 
@@ -545,6 +575,33 @@ impl<E: CustomizeRecordStore> Readers<E> {
     }
 }
 
+// r[impl unified.pileup_reference_covers_reads]
+/// The span a reference must cover for every record in `store` to have its
+/// bases: the segment `[start, end]`, widened to the records' own extent and
+/// clamped to the contig's last position.
+///
+/// Never narrower than the segment — the engine reports a column for every
+/// position in it — and never past the contig, where the FASTA has nothing.
+/// Unmapped records are included: they carry a position too, and excluding
+/// them would make the span depend on a distinction the caller cannot see
+/// while walking `store.records()`.
+fn span_covering_records<U>(
+    store: &RecordStore<U>,
+    start: Pos0,
+    end: Pos0,
+    contig_last: Pos0,
+) -> (Pos0, Pos0) {
+    let mut first = start;
+    let mut last = end;
+    for rec in store.records() {
+        first = first.min(rec.pos);
+        last = last.max(rec.end_pos);
+    }
+    // `end <= contig_last` for any segment the header produced, so clamping
+    // `last` can never pull it back inside the segment.
+    (first, last.min(contig_last))
+}
+
 /// A planned pileup: what [`Readers::pileup`] returns, configured by
 /// [`with_reference`](Self::with_reference) and [`mutate`](Self::mutate) and
 /// executed by [`run`](Self::run).
@@ -568,6 +625,7 @@ pub struct Pileup<
     depth: DepthLimit,
     reference: Option<RefSeq>,
     mutate: Option<F>,
+    cover_reads: bool,
 }
 
 impl<'a, E: CustomizeRecordStore, F> Pileup<'a, E, F>
@@ -594,6 +652,42 @@ where
     /// [`Base::Unknown`]: seqair_types::Base::Unknown
     pub fn with_reference(mut self, ref_seq: RefSeq) -> Self {
         self.reference = Some(ref_seq);
+        self
+    }
+
+    // r[impl unified.pileup_reference_covers_reads]
+    /// Make the reference cover every record that was fetched, not just the
+    /// segment.
+    ///
+    /// A read at a tile's edge reaches past it, and its outer bases then have
+    /// no reference: [`RefSeq::try_base_at`] answers `None` there, and
+    /// [`RefSeq::base_at`] answers [`Base::Unknown`], which a comparison reads
+    /// as a mismatch. On this crate's 80 bp fixture that is 27 % of the reads
+    /// at a 500 bp tile and 3 % at 5 kb — small per tile, but it is the reads
+    /// at the edges, and a hook that realigns or rescores whole reads needs
+    /// their bases.
+    ///
+    /// The widening is exact rather than a padding constant: the records are
+    /// already loaded when the reference is read, so the span is their own
+    /// `min(pos)`..`max(end_pos)`, unioned with the segment and clamped to the
+    /// contig. A tile whose reads all stop inside it fetches exactly what it
+    /// would have without this.
+    ///
+    /// Columns are unaffected. [`RefSeq`] resolves absolute positions, so
+    /// [`PileupColumn::reference_base`] reports the same base at every column
+    /// of the segment either way; only what lies *outside* the segment changes
+    /// from absent to present.
+    ///
+    /// With [`with_reference`](Self::with_reference) there is nothing to
+    /// widen, so this becomes a requirement on the reference the caller
+    /// supplied: one that stops short of the records is rejected with
+    /// [`ReaderError::SuppliedReferenceMissesReads`] rather than quietly
+    /// handing the hook a reference that does not reach.
+    ///
+    /// [`PileupColumn::reference_base`]: crate::bam::pileup::PileupColumn::reference_base
+    /// [`Base::Unknown`]: seqair_types::Base::Unknown
+    pub fn reference_covers_reads(mut self) -> Self {
+        self.cover_reads = true;
         self
     }
 
@@ -638,6 +732,7 @@ where
             depth: self.depth,
             reference: self.reference,
             mutate: Some(mutate),
+            cover_reads: self.cover_reads,
         }
     }
 
@@ -650,8 +745,8 @@ where
     /// See [`Readers::pileup`] for what is validated here and what is reused
     /// between calls.
     pub fn run(self) -> Result<PileupGuard<'a, E::Extra>, ReaderError> {
-        let Self { readers, segment, depth, reference, mutate } = self;
-        readers.pileup_impl(segment, depth, mutate, reference)
+        let Self { readers, segment, depth, reference, mutate, cover_reads } = self;
+        readers.pileup_impl(segment, depth, mutate, reference, cover_reads)
     }
 }
 
@@ -988,6 +1083,164 @@ mod tests {
         assert_eq!(
             from_supplied, from_fasta,
             "the columns must not depend on where the bases came from"
+        );
+    }
+
+    // r[verify unified.pileup_reference_covers_reads]
+    /// The widened reference must reach every read's ends — and must be
+    /// exactly as wide as the reads are, not a padding guess. The fixture's
+    /// reads are 80 bp, so a small tile has reads hanging off both edges.
+    #[test]
+    fn reference_covers_reads_reaches_every_read() {
+        use std::num::NonZeroU32;
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let (from, to) = (Pos0::new(6_103_500).unwrap(), Pos0::new(6_104_500).unwrap());
+        let opts = SegmentOptions::new(NonZeroU32::new(500).unwrap());
+        let segments: Vec<Segment> = readers.segments(("chr19", from, to), opts).unwrap().collect();
+
+        let mut checked = 0usize;
+        for segment in &segments {
+            let (seg_start, seg_end) = (segment.start(), segment.end());
+            let mut overhanging = 0usize;
+            let mut want = None;
+            let mut holds = None;
+            let mut p = readers
+                .pileup(segment, DepthLimit::Unlimited)
+                .reference_covers_reads()
+                .mutate(|store, ref_seq| {
+                    // Every record's own ends must resolve, which is the whole
+                    // point: without the option these are `None`.
+                    for rec in store.records() {
+                        assert!(
+                            ref_seq.try_base_at(rec.pos).is_some(),
+                            "read start {} has no reference",
+                            rec.pos.as_u64()
+                        );
+                        assert!(
+                            ref_seq.try_base_at(rec.end_pos).is_some(),
+                            "read end {} has no reference",
+                            rec.end_pos.as_u64()
+                        );
+                        if rec.pos < seg_start || rec.end_pos > seg_end {
+                            overhanging += 1;
+                        }
+                    }
+                    // Exact, not padded: the span is the records' own extent
+                    // unioned with the segment.
+                    let lo = store.records().map(|r| r.pos).min().unwrap_or(seg_start);
+                    let hi = store.records().map(|r| r.end_pos).max().unwrap_or(seg_end);
+                    want = Some((lo.min(seg_start).as_u64(), hi.max(seg_end).as_u64()));
+                    let first = ref_seq.start_pos().as_u64();
+                    holds = Some((first, first + ref_seq.len() as u64 - 1));
+                })
+                .run()
+                .unwrap();
+            let _ = pileup_profile(&mut p);
+            drop(p);
+
+            assert_eq!(holds, want, "segment at {}", seg_start.as_u64());
+            checked += overhanging;
+        }
+        assert!(checked > 0, "500 bp tiles over 80 bp reads must produce overhanging reads");
+
+        // The option is doing the work: without it, the same reads have ends
+        // the hook cannot read.
+        let mut unreachable_ends = 0usize;
+        for segment in &segments {
+            let mut p = readers
+                .pileup(segment, DepthLimit::Unlimited)
+                .mutate(|store, ref_seq| {
+                    unreachable_ends += store
+                        .records()
+                        .filter(|rec| {
+                            ref_seq.try_base_at(rec.pos).is_none()
+                                || ref_seq.try_base_at(rec.end_pos).is_none()
+                        })
+                        .count();
+                })
+                .run()
+                .unwrap();
+            let _ = pileup_profile(&mut p);
+        }
+        assert_eq!(
+            unreachable_ends, checked,
+            "every overhanging read must be unreachable without the option"
+        );
+    }
+
+    // r[verify unified.pileup_reference_covers_reads]
+    /// The columns are the same either way — `RefSeq` resolves absolute
+    /// positions, so only what lies outside the segment changes.
+    #[test]
+    fn reference_covers_reads_does_not_change_any_column() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let segment = realign_test_segment(&readers);
+
+        let bases = |p: &mut PileupGuard<'_, ()>| {
+            let mut out = Vec::new();
+            while let Some(col) = p.pileups() {
+                out.push((col.pos().as_u64(), col.reference_base(), col.depth()));
+            }
+            out
+        };
+        let narrow = {
+            let mut p = readers.pileup(&segment, DepthLimit::Unlimited).run().unwrap();
+            bases(&mut p)
+        };
+        let wide = {
+            let mut p = readers
+                .pileup(&segment, DepthLimit::Unlimited)
+                .reference_covers_reads()
+                .run()
+                .unwrap();
+            bases(&mut p)
+        };
+        assert_eq!(wide, narrow);
+    }
+
+    // r[verify unified.pileup_reference_covers_reads]
+    /// With a supplied reference nothing can be widened, so the option is a
+    /// requirement: one that covers the segment but stops short of the reads
+    /// is a typed error, not a silent `None` inside the hook.
+    #[test]
+    fn reference_covers_reads_rejects_a_supplied_reference_that_stops_at_the_segment() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let segment = realign_test_segment(&readers);
+        let exactly_the_segment =
+            whole_span_reference(&mut readers, "chr19", segment.start(), segment.end());
+
+        // It covers the segment, so the plain path accepts it...
+        assert!(
+            readers
+                .pileup(&segment, DepthLimit::Unlimited)
+                .with_reference(exactly_the_segment.clone())
+                .run()
+                .is_ok()
+        );
+        // ...and asking for the reads' coverage rejects the same reference.
+        assert!(matches!(
+            readers
+                .pileup(&segment, DepthLimit::Unlimited)
+                .with_reference(exactly_the_segment)
+                .reference_covers_reads()
+                .run(),
+            Err(ReaderError::SuppliedReferenceMissesReads { .. })
+        ));
+
+        // A reference that does reach the reads is accepted.
+        let wide = whole_span_reference(
+            &mut readers,
+            "chr19",
+            Pos0::new(segment.start().as_u32().saturating_sub(1_000)).unwrap(),
+            Pos0::try_from(segment.end().as_u64().saturating_add(1_000)).unwrap(),
+        );
+        assert!(
+            readers
+                .pileup(&segment, DepthLimit::Unlimited)
+                .with_reference(wide)
+                .reference_covers_reads()
+                .run()
+                .is_ok()
         );
     }
 

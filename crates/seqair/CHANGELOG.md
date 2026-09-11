@@ -99,6 +99,13 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
   instead of re-reading the FASTA per segment, rejecting one that doesn't cover the segment
   (`ReaderError::SuppliedReferenceTooSmall`) — and a hook set alongside it reads that reference, not a
   second fetch.
+  `Pileup::reference_covers_reads()` widens the reference to the span the fetched records cover, so a
+  read hanging off a tile's edge still has bases the hook can read. Exact, not padded: the records are
+  loaded before the reference, so the span is their own `min(pos)`..`max(end_pos)` unioned with the
+  segment and clamped to the contig, and a tile whose reads all stop inside it fetches what it always
+  did. Columns are unchanged — `RefSeq` resolves absolute positions. Alongside `with_reference` there is
+  nothing to widen, so it becomes a requirement on the caller's reference
+  (`ReaderError::SuppliedReferenceMissesReads`).
 - Window query over a prepared store: `PileupInput::records_overlapping(start, end)`, and the same on
   `PileupEngine` (between columns) and `PileupColumn` (while holding one), yield the indices of the mapped
   records whose alignment overlaps an inclusive span, ascending — a binary search over a running maximum

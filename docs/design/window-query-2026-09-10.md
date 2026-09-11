@@ -231,24 +231,32 @@ from the extra closure argument.
   22 + 7 warnings it was hiding were mostly `r[`rule.id`]` and `[SAM1]`
   being read as intra-doc links; one was a real rotted link in
   `simple_variant_caller`'s tutorial.
+- **Reference beyond the segment for the hook**, as
+  `Pileup::reference_covers_reads()`. Measured on `tests/data/test.bam`
+  (80 bp reads, chr19:6.1–6.2 Mb), the share of reads reaching past their
+  tile — and so with bases the hook's `RefSeq` did not hold — was 27.2 % at
+  a 500 bp tile, 13.9 % at 1 kb, 3.0 % at 5 kb and 0 % at 50 kb, with the
+  overhang bounded by the longest read (79 bases) at both ends at every tile
+  size.
 
-## Not done, on purpose
+  The widening is exact rather than a padding constant, because step 2 runs
+  before step 3: the span is the records' own `min(pos)`..`max(end_pos)`,
+  unioned with the segment and clamped to the contig, so a tile whose reads
+  all stop inside it fetches exactly what it fetched before. Columns cannot
+  change — `RefSeq` resolves absolute positions — which is its own test.
 
-- **Reference beyond the segment for the hook.** Measured on
-  `tests/data/test.bam` (80 bp reads, chr19:6.1–6.2 Mb), the share of reads
-  reaching past their tile — and so with bases the hook's `RefSeq` does not
-  hold — is 27.2 % at a 500 bp tile, 13.9 % at 1 kb, 3.0 % at 5 kb and 0 %
-  at 50 kb. The overhang itself is bounded by the longest read: 79 bases
-  here, at both ends, at every tile size. So the exact fix is known and
-  cheap — after step 2 the store's extent is `min(pos)`/`max(end_pos)`, and
-  widening step 3's fetch to that (clamped to the contig) costs a few
-  hundred bases of FASTA per tile and nothing else; the columns cannot
-  change, because `RefSeq` resolves absolute positions.
-  It is not built because the *policy* is rastair's: a hook that only
-  rescores within the tile wants today's behaviour, and one that realigns
-  whole reads wants the wider fetch. When rastair decides, it is one more
-  option on the plan (`.reference_covers_reads()`), which is exactly the
-  shape the plan exists to accommodate.
+  Opt-in, because the policy is the caller's: a hook that only scores within
+  the tile wants the segment and the smaller fetch, and one spliced read can
+  make the wider one large. Combined with `with_reference` there is nothing
+  to widen, so it becomes a requirement on the supplied reference
+  (`ReaderError::SuppliedReferenceMissesReads`) rather than silently doing
+  nothing.
+
+- **The fuzz crate builds again**, and its CI step gates. `PileupInput`, the
+  `NonZeroU32` max-depth and the `AlignedPair::Insertion` field rename all
+  landed before this branch and left five targets unbuildable; nobody was
+  told because the "Fuzz compiles" step is `continue-on-error` and was not
+  named in the job's failure condition. Both are fixed here.
 
 ## Next step
 

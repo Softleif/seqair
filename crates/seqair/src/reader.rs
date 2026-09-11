@@ -114,6 +114,21 @@ pub enum ReaderError {
         segment_end: u64,
     },
 
+    // r[impl unified.pileup_reference_covers_reads]
+    /// A supplied reference does not reach the ends of the records that were
+    /// fetched, and the plan asked for one that does.
+    #[error(
+        "supplied reference covers [{ref_start}, {ref_end}] but the records fetched for \
+         '{contig}' reach [{reads_start}, {reads_end}]"
+    )]
+    SuppliedReferenceMissesReads {
+        contig: SmolStr,
+        ref_start: u64,
+        ref_end: u64,
+        reads_start: u64,
+        reads_end: u64,
+    },
+
     #[error("BAM header target count {count} does not fit in u32")]
     HeaderTargetCountOverflow { count: usize },
 }
