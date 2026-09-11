@@ -3,7 +3,6 @@ use crate::{
     haplotype::Haplotype,
     read::Read,
     scaling::{exp2_f64, normalising_shift_f64},
-    transitions::transitions,
     types::Log10Likelihood,
 };
 
@@ -33,8 +32,6 @@ pub fn align_full<E: Emission>(
     if h == 0 || r == 0 {
         return Log10Likelihood::IMPOSSIBLE;
     }
-    let trans = transitions(read);
-
     let mut prev_m = vec![0.0f64; h + 1];
     let mut prev_i = vec![0.0f64; h + 1];
     #[allow(
@@ -52,7 +49,7 @@ pub fn align_full<E: Emission>(
         let Some(observation) = read.observation(i - 1) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        let Some(t) = trans.get(i) else {
+        let Some(t) = read.transition(i - 1) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
         cur_m[0] = 0.0;

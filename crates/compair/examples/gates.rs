@@ -5,7 +5,7 @@ include!("../tests/support/mod.rs");
 use compair::{StandardEmission, align_banded, align_full};
 
 fn main() {
-    let vectors = gatk_vectors().expect("data");
+    let vectors = gatk_vectors().expect("the bundled test data parses");
     let mut worst_ref = 0.0f64;
     let mut worst_band = 0.0f64;
     let mut narrow_lower = 0usize;

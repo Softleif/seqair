@@ -28,8 +28,9 @@ impl Haplotype {
         Self { bases, roles }
     }
 
-    /// Anything that is not one of the four nucleotides -- soft-masked
-    /// lowercase included -- becomes `Unknown`, which matches every base.
+    /// Upper- and lowercase `ACGT` are the four nucleotides -- a soft-masked
+    /// reference base is still that base -- and anything else, `N` and IUPAC
+    /// codes included, becomes `Unknown`, which matches every base.
     #[must_use]
     pub fn from_ascii(sequence: &[u8]) -> Self {
         Self::new(sequence.iter().copied().map(Base::from).collect::<Vec<_>>())

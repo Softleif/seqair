@@ -6,7 +6,6 @@ use crate::{
     haplotype::Haplotype,
     read::Read,
     scaling::{exp2_f32, exp2_f64, normalising_shift_f32},
-    transitions::transitions,
     types::Log10Likelihood,
 };
 use seqair_types::Base;
@@ -42,20 +41,27 @@ pub struct Band {
 }
 
 impl Band {
-    /// The width §6.4 of the design budgets for: 150 bp of read against 48
-    /// columns is ~7,200 cells.
-    pub const DEFAULT_WIDTH: u32 = 48;
+    /// The width §6.4 of the design budgets for: 150 bp of read against ~48
+    /// columns is ~7,000 cells.
+    ///
+    /// It is 46 and not 48 because of how the SIMD kernel fills its lanes. An
+    /// anti-diagonal holds at most `width / 2 + 1` cells, and the kernel
+    /// computes them eight at a time: at a half-width of 23 that is exactly
+    /// three vectors, while 24 spills one cell into a fourth and costs ~8% for
+    /// one more column on each side. Widths of the form `16n - 2` fill every
+    /// vector; widths of the form `16n` waste one per diagonal.
+    pub const DEFAULT_WIDTH: u32 = 46;
 
     /// The widest band either kernel will build, for two reasons that are the
     /// same reason.
     ///
     /// The banded kernels allocate nine buffers of `width / 2 + O(1)` floats,
     /// so an unbounded `width` is an unbounded allocation inside a safe
-    /// function — `u32::MAX` would ask for ~77 GB.
+    /// function -- `u32::MAX` would ask for ~77 GB.
     ///
     /// And a wide band is not a better answer, it is a worse one. The `f32`
     /// kernels renormalise per **anti-diagonal**, and a diagonal holds one cell
-    /// per read row it crosses — prefix alignments of that many lengths, whose
+    /// per read row it crosses -- prefix alignments of that many lengths, whose
     /// magnitudes span the whole alignment's dynamic range. The band is what
     /// bounds that span: at `DEFAULT_WIDTH` the `f32` kernel reproduces the
     /// `f64` recurrence over the same band to rounding even at
@@ -99,6 +105,10 @@ impl Band {
         self.offset as i32
     }
 }
+
+// `anchored` builds a band without going through `new`, so the default has to
+// satisfy `new`'s checks by construction.
+const _: () = assert!(Band::DEFAULT_WIDTH >= 2 && Band::DEFAULT_WIDTH <= Band::MAX_WIDTH);
 
 /// One scalar or one vector of the DP's cells.
 ///
@@ -201,7 +211,10 @@ impl Lane for f32x8 {
     }
     #[inline]
     fn horizontal_max(self) -> f32 {
-        self.to_array().into_iter().fold(f32::NEG_INFINITY, f32::max)
+        // A tree, not a fold: three dependent `fmaxnm` instead of seven, on
+        // the one reduction that sits on every diagonal's critical path.
+        let [a, b, c, d, e, f, g, h] = self.to_array();
+        a.max(b).max(c.max(d)).max(e.max(f).max(g.max(h)))
     }
     #[inline]
     fn equals(self, other: Self) -> Self {
@@ -225,6 +238,69 @@ impl Lane for f32x8 {
     }
 }
 
+/// The buffers a banded alignment works in, kept between calls.
+///
+/// One alignment needs fifteen small buffers: the hoisted per-row and
+/// per-column tracks of the [`Plan`] and the ring of anti-diagonals. A caller
+/// scores one read against several haplotypes and many reads in a row, so
+/// allocating them per call was a measurable share of a short alignment.
+/// Reusing a workspace makes an alignment allocation-free; the free functions
+/// [`align_banded`] and [`align_banded_simd`] build a fresh one each time.
+#[derive(Debug, Default)]
+pub struct Workspace {
+    plan: Plan,
+    ring: Ring,
+}
+
+impl Workspace {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Scalar `f32` over the band, in this workspace.
+    pub fn align_banded<E: Emission>(
+        &mut self,
+        haplotype: &Haplotype,
+        read: &Read,
+        emission: &E,
+        band: Band,
+    ) -> Log10Likelihood {
+        self.align::<f32, E>(haplotype, read, emission, band)
+    }
+
+    /// Eight `f32` lanes of one anti-diagonal at a time, in this workspace.
+    pub fn align_banded_simd<E: Emission>(
+        &mut self,
+        haplotype: &Haplotype,
+        read: &Read,
+        emission: &E,
+        band: Band,
+    ) -> Log10Likelihood {
+        self.align::<f32x8, E>(haplotype, read, emission, band)
+    }
+
+    fn align<L: Lane, E: Emission>(
+        &mut self,
+        haplotype: &Haplotype,
+        read: &Read,
+        emission: &E,
+        band: Band,
+    ) -> Log10Likelihood {
+        let (h, r) = (haplotype.len(), read.len());
+        if h == 0 || r == 0 {
+            return Log10Likelihood::IMPOSSIBLE;
+        }
+        if self.plan.fill(haplotype, read, emission).is_none() {
+            return Log10Likelihood::IMPOSSIBLE;
+        }
+        // The emission is folded into the plan, so from here on the kernel is
+        // generic over the lane type only: one hot loop per lane, not one per
+        // emission model.
+        banded_kernel::<L>(&self.plan, &mut self.ring, Shape { haplotype: h, read: r }, band)
+    }
+}
+
 /// Scalar `f32` over the band.
 pub fn align_banded<E: Emission>(
     haplotype: &Haplotype,
@@ -232,7 +308,7 @@ pub fn align_banded<E: Emission>(
     emission: &E,
     band: Band,
 ) -> Log10Likelihood {
-    banded_kernel::<f32, E>(haplotype, read, emission, band)
+    Workspace::new().align_banded(haplotype, read, emission, band)
 }
 
 /// Eight `f32` lanes of one anti-diagonal at a time.
@@ -244,7 +320,7 @@ pub fn align_banded_simd<E: Emission>(
     emission: &E,
     band: Band,
 ) -> Log10Likelihood {
-    banded_kernel::<f32x8, E>(haplotype, read, emission, band)
+    Workspace::new().align_banded_simd(haplotype, read, emission, band)
 }
 
 /// A base as a small integer in `f32`, so a whole lane of them is one vector
@@ -275,85 +351,127 @@ fn code(base: Base) -> f32 {
 /// are the split that makes the per-cell work a handful of lanewise selects.
 ///
 /// The row tracks are indexed by read row, which is the axis an anti-diagonal
-/// runs along. The column tracks are **reversed** -- index `h - j` holds the
-/// column a cell at haplotype position `j` reads -- because `j` runs down an
-/// anti-diagonal while `i` runs up, and reversing is what makes the haplotype a
-/// second ascending contiguous load rather than a gather. Index `h` is the
-/// `j == 0` boundary column, which has no site; the kernel zeroes that cell
-/// after computing it, so the padding there only has to be finite.
+/// runs along. The column tracks are **reversed** -- index `h - 1 - j` holds
+/// the column a cell at haplotype position `j` reads -- because `j` runs down
+/// an anti-diagonal while `i` runs up, and reversing is what makes the
+/// haplotype a second ascending contiguous load rather than a gather. Index
+/// `h` is the `j == 0` boundary column, which has no site; the kernel masks
+/// that cell to zero, so the padding there only has to be finite.
 ///
-/// Every track carries a vector of slack past its live range so that a load at
-/// the last live index is still in bounds.
+/// Every track carries [`TRACK_SLACK`] entries past its live range so that
+/// the last window a diagonal loads is still in bounds.
+#[derive(Debug, Default)]
 struct Plan {
-    row_base: Vec<f32>,
-    row_matched: Vec<f32>,
-    row_mismatched: Vec<f32>,
+    rows: RowTracks,
+    columns: ColumnTracks,
+}
+
+/// One entry per read row, row 0 being the base-less start row.
+#[derive(Debug, Default)]
+struct RowTracks {
+    base: Vec<f32>,
+    matched: Vec<f32>,
+    mismatched: Vec<f32>,
     match_to_match: Vec<f32>,
     match_to_insertion: Vec<f32>,
     match_to_deletion: Vec<f32>,
     indel_to_match: Vec<f32>,
     gap_continuation: Vec<f32>,
-    column_base: Vec<f32>,
-    column_converted: Vec<f32>,
-    column_plain: Vec<f32>,
-    column_rate: Vec<f32>,
-    column_unconverted: Vec<f32>,
+}
+
+/// One entry per haplotype column, reversed; see [`Plan`].
+#[derive(Debug, Default)]
+struct ColumnTracks {
+    base: Vec<f32>,
+    converted: Vec<f32>,
+    plain: Vec<f32>,
+    rate: Vec<f32>,
+    unconverted: Vec<f32>,
+}
+
+/// `len` copies of `fill`, reusing the allocation.
+fn reset(track: &mut Vec<f32>, len: usize, fill: f32) {
+    track.clear();
+    track.resize(len, fill);
 }
 
 impl Plan {
+    /// Rebuilds every track for this pair, reusing the allocations. `None`
+    /// only if the read or haplotype cannot be addressed, which their
+    /// constructors rule out.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "the f32 narrowing is the point of this kernel"
     )]
-    fn build<E: Emission>(haplotype: &Haplotype, read: &Read, emission: &E) -> Option<Self> {
+    fn fill<E: Emission>(
+        &mut self,
+        haplotype: &Haplotype,
+        read: &Read,
+        emission: &E,
+    ) -> Option<()> {
         let (h, r) = (haplotype.len(), read.len());
-        let rows = r + 1 + LANE_MAX;
-        let columns = h + 1 + LANE_MAX;
-        let mut plan = Self {
-            row_base: vec![0.0; rows],
-            row_matched: vec![0.0; rows],
-            row_mismatched: vec![0.0; rows],
-            match_to_match: vec![0.0; rows],
-            match_to_insertion: vec![0.0; rows],
-            match_to_deletion: vec![0.0; rows],
-            indel_to_match: vec![0.0; rows],
-            gap_continuation: vec![0.0; rows],
-            column_base: vec![CODE_NO_PLAIN_MATCH; columns],
-            column_converted: vec![CODE_NO_CONVERSION; columns],
-            column_plain: vec![CODE_NO_PLAIN_MATCH; columns],
-            column_rate: vec![0.0; columns],
-            column_unconverted: vec![0.0; columns],
-        };
-        let transitions = transitions(read);
+        let rows = r + 1 + TRACK_SLACK;
+        let columns = h + 1 + TRACK_SLACK;
+
+        let RowTracks {
+            base,
+            matched,
+            mismatched,
+            match_to_match,
+            match_to_insertion,
+            match_to_deletion,
+            indel_to_match,
+            gap_continuation,
+        } = &mut self.rows;
+        for track in [
+            &mut *base,
+            matched,
+            mismatched,
+            match_to_match,
+            match_to_insertion,
+            match_to_deletion,
+            indel_to_match,
+            gap_continuation,
+        ] {
+            reset(track, rows, 0.0);
+        }
         for index in 0..r {
             let observation = read.observation(index)?;
             let eps = emission.epsilon(observation);
-            *plan.row_base.get_mut(index + 1)? = code(observation.base);
-            *plan.row_matched.get_mut(index + 1)? = (1.0 - eps) as f32;
-            *plan.row_mismatched.get_mut(index + 1)? = (eps / 3.0) as f32;
-            let t = transitions.get(index + 1)?;
-            *plan.match_to_match.get_mut(index + 1)? = t.match_to_match as f32;
-            *plan.match_to_insertion.get_mut(index + 1)? = t.match_to_insertion as f32;
-            *plan.match_to_deletion.get_mut(index + 1)? = t.match_to_deletion as f32;
-            *plan.indel_to_match.get_mut(index + 1)? = t.indel_to_match as f32;
-            *plan.gap_continuation.get_mut(index + 1)? = t.gap_continuation as f32;
+            let t = read.transition(index)?;
+            let row = index + 1;
+            *base.get_mut(row)? = code(observation.base);
+            *matched.get_mut(row)? = (1.0 - eps) as f32;
+            *mismatched.get_mut(row)? = (eps / 3.0) as f32;
+            *match_to_match.get_mut(row)? = t.match_to_match as f32;
+            *match_to_insertion.get_mut(row)? = t.match_to_insertion as f32;
+            *match_to_deletion.get_mut(row)? = t.match_to_deletion as f32;
+            *indel_to_match.get_mut(row)? = t.indel_to_match as f32;
+            *gap_continuation.get_mut(row)? = t.gap_continuation as f32;
         }
+
+        let ColumnTracks { base, converted, plain, rate, unconverted } = &mut self.columns;
+        reset(base, columns, CODE_NO_PLAIN_MATCH);
+        reset(converted, columns, CODE_NO_CONVERSION);
+        reset(plain, columns, CODE_NO_PLAIN_MATCH);
+        reset(rate, columns, 0.0);
+        reset(unconverted, columns, 0.0);
         let strand = read.strand();
         for index in 0..h {
             let weights = emission.site_weights(haplotype.site(index)?, strand);
-            let base = code(weights.base);
+            let site_base = code(weights.base);
             let reversed = h - 1 - index;
-            *plan.column_base.get_mut(reversed)? = base;
+            *base.get_mut(reversed)? = site_base;
             match weights.converted {
-                Some(converted) => {
-                    *plan.column_converted.get_mut(reversed)? = code(converted);
-                    *plan.column_rate.get_mut(reversed)? = weights.rate as f32;
-                    *plan.column_unconverted.get_mut(reversed)? = (1.0 - weights.rate) as f32;
+                Some(converted_base) => {
+                    *converted.get_mut(reversed)? = code(converted_base);
+                    *rate.get_mut(reversed)? = weights.rate as f32;
+                    *unconverted.get_mut(reversed)? = (1.0 - weights.rate) as f32;
                 }
-                None => *plan.column_plain.get_mut(reversed)? = base,
+                None => *plain.get_mut(reversed)? = site_base,
             }
         }
-        Some(plan)
+        Some(())
     }
 }
 
@@ -367,7 +485,7 @@ struct ColumnLanes<L> {
     unconverted_rate: L,
 }
 
-/// One read row per lane.
+/// One read row per lane: what the emission needs.
 #[derive(Clone, Copy)]
 struct RowLanes<L> {
     base: L,
@@ -375,28 +493,14 @@ struct RowLanes<L> {
     mismatched: L,
 }
 
-impl<L: Lane> ColumnLanes<L> {
-    #[inline]
-    fn load(plan: &Plan, index: usize) -> Self {
-        Self {
-            base: L::load(window(&plan.column_base, index)),
-            converted: L::load(window(&plan.column_converted, index)),
-            plain: L::load(window(&plan.column_plain, index)),
-            rate: L::load(window(&plan.column_rate, index)),
-            unconverted_rate: L::load(window(&plan.column_unconverted, index)),
-        }
-    }
-}
-
-impl<L: Lane> RowLanes<L> {
-    #[inline]
-    fn load(plan: &Plan, index: usize) -> Self {
-        Self {
-            base: L::load(window(&plan.row_base, index)),
-            matched: L::load(window(&plan.row_matched, index)),
-            mismatched: L::load(window(&plan.row_mismatched, index)),
-        }
-    }
+/// One read row per lane: what the transitions need.
+#[derive(Clone, Copy)]
+struct TransitionLanes<L> {
+    match_to_match: L,
+    match_to_insertion: L,
+    match_to_deletion: L,
+    indel_to_match: L,
+    gap_continuation: L,
 }
 
 /// `SiteWeights::probability` in `f32`, one lane per cell.
@@ -428,49 +532,373 @@ const LANE_MAX: usize = 8;
 /// One vector's worth of a track, whatever the `Lane`.
 type Window = [f32; LANE_MAX];
 
-/// Every buffer the kernel reads carries [`LANE_MAX`] slots of slack past the
-/// largest index it can reach, so the zero fallback here is unreachable.
-///
-/// It is a fixed-size window rather than a slice because the fallback has to be
-/// a *pointer*: hand `Lane::load` an `Option<&[f32]>` and the loaded vector
-/// becomes the merge of two control-flow paths, which the register allocator
-/// resolves by spilling a `q` pair to the stack -- once for each of the twenty
-/// loads an eight-wide chunk takes.
-#[inline]
-fn window(track: &[f32], index: usize) -> &Window {
-    static ZEROS: Window = [0.0; LANE_MAX];
-    track.get(index..).and_then(|rest| rest.first_chunk::<LANE_MAX>()).unwrap_or(&ZEROS)
-}
+/// Past the last live entry of a plan track: a full chunk of the widest lane
+/// beyond the last cell, and the window that chunk's last lane reads.
+const TRACK_SLACK: usize = 2 * LANE_MAX;
 
-/// [`window`] for a store. There is no fallback: a store past the end of a DP
-/// buffer would be a lost cell, not a harmless zero, so it is skipped instead.
-#[inline]
-fn window_mut(track: &mut [f32], index: usize) -> Option<&mut Window> {
-    track.get_mut(index..).and_then(|rest| rest.first_chunk_mut::<LANE_MAX>())
-}
-
+/// Slack below slot zero, so that `diag` and `up` at chunk zero of a diagonal
+/// whose predecessor started one row later still address the buffer.
 const PAD: usize = 2;
 
 /// The anti-diagonals a cell can reach back to, and so the length of the ring.
 const RING: usize = 3;
 
-/// `M`, `I` and `D`, and where each one's [`RING`] slots start in the kernel's
-/// single allocation.
+/// `M`, `I` and `D`.
 const MATRICES: usize = 3;
-const MATCH: usize = 0;
-const INSERTION: usize = RING;
-const DELETION: usize = 2 * RING;
 
+/// Three matrices over three anti-diagonals, in one allocation rather than
+/// nine, laid out phase-major: the three matrices of one diagonal are one
+/// contiguous region, so a diagonal borrows its own region mutably and the two
+/// before it immutably.
+#[derive(Debug, Default)]
+struct Ring {
+    cells: Vec<f32>,
+    capacity: usize,
+}
+
+/// The three matrices of one finished anti-diagonal.
+#[derive(Clone, Copy)]
+struct Phase<'a> {
+    m: &'a [f32],
+    i: &'a [f32],
+    d: &'a [f32],
+}
+
+/// The three matrices of the anti-diagonal being computed.
+struct PhaseMut<'a> {
+    m: &'a mut [f32],
+    i: &'a mut [f32],
+    d: &'a mut [f32],
+}
+
+impl<'a> Phase<'a> {
+    fn split(region: &'a [f32], capacity: usize) -> Option<Self> {
+        let (m, rest) = region.split_at_checked(capacity)?;
+        let (i, d) = rest.split_at_checked(capacity)?;
+        Some(Self { m, i, d })
+    }
+}
+
+impl<'a> PhaseMut<'a> {
+    fn split(region: &'a mut [f32], capacity: usize) -> Option<Self> {
+        let (m, rest) = region.split_at_mut_checked(capacity)?;
+        let (i, d) = rest.split_at_mut_checked(capacity)?;
+        Some(Self { m, i, d })
+    }
+}
+
+impl Ring {
+    /// Zeroes the ring at a new per-diagonal capacity, reusing the allocation.
+    fn reset(&mut self, capacity: usize) {
+        self.capacity = capacity;
+        reset(&mut self.cells, MATRICES * RING * capacity, 0.0);
+    }
+
+    /// The diagonal at ring phase `cur`, to write, and the two before it.
+    ///
+    /// `reset` sizes `cells` to exactly `MATRICES * RING * capacity`, so the
+    /// `None` is unreachable; it is typed rather than asserted so that the
+    /// kernel returns `IMPOSSIBLE` instead of panicking should that ever stop
+    /// being true.
+    #[inline(always)]
+    fn phases(&mut self, cur: usize) -> Option<(PhaseMut<'_>, Phase<'_>, Phase<'_>)> {
+        let region = MATRICES * self.capacity;
+        let (first, rest) = self.cells.split_at_mut_checked(region)?;
+        let (second, third) = rest.split_at_mut_checked(region)?;
+        let (current, previous, before) = match cur {
+            0 => (first, third, second),
+            1 => (second, first, third),
+            _ => (third, second, first),
+        };
+        Some((
+            PhaseMut::split(current, self.capacity)?,
+            Phase::split(previous, self.capacity)?,
+            Phase::split(before, self.capacity)?,
+        ))
+    }
+}
+
+/// A track from one origin, exactly `span` entries long, so that every window
+/// a diagonal will load from it has been proven in bounds once.
+///
+/// This is why the kernel has an `unsafe` block at all. With a checked
+/// `get(..).first_chunk()` per window, the compiler emitted, for each of the
+/// twenty loads a chunk takes, a compare, a conditional compare and a select
+/// on a pointer and a length it had spilled to the stack -- two thirds of the
+/// inner loop's instructions were bounds checks on loads that cannot fail.
+/// Here the check moves to [`View::new`], once per track per diagonal, and
+/// [`Sources::step`] checks the one offset it uses against the shared span.
+#[derive(Clone, Copy)]
+struct View<'a> {
+    track: &'a [f32],
+}
+
+impl<'a> View<'a> {
+    /// `None` unless `track[origin..origin + span]` exists.
+    #[inline]
+    fn new(track: &'a [f32], origin: usize, span: usize) -> Option<Self> {
+        Some(Self { track: track.get(origin..origin.checked_add(span)?)? })
+    }
+
+    /// The window at `offset`.
+    ///
+    /// # Safety
+    ///
+    /// `offset + LANE_MAX <= span`, the length `new` was given.
+    #[inline(always)]
+    unsafe fn window(self, offset: usize) -> &'a Window {
+        debug_assert!(offset + LANE_MAX <= self.track.len());
+        // SAFETY: `new` proved `track` holds `span` initialised `f32`s and the
+        // caller keeps `offset + LANE_MAX` within it; `[f32; LANE_MAX]` has
+        // the alignment of `f32` and no invalid bit patterns.
+        unsafe { &*self.track.as_ptr().add(offset).cast::<Window>() }
+    }
+}
+
+/// [`View`] for the diagonal being written.
+struct ViewMut<'a> {
+    track: &'a mut [f32],
+}
+
+impl<'a> ViewMut<'a> {
+    #[inline]
+    fn new(track: &'a mut [f32], origin: usize, span: usize) -> Option<Self> {
+        Some(Self { track: track.get_mut(origin..origin.checked_add(span)?)? })
+    }
+
+    /// # Safety
+    ///
+    /// `offset + LANE_MAX <= span`, the length `new` was given.
+    #[inline(always)]
+    unsafe fn window(&mut self, offset: usize) -> &mut Window {
+        debug_assert!(offset + LANE_MAX <= self.track.len());
+        // SAFETY: as for `View::window`, through a unique borrow.
+        unsafe { &mut *self.track.as_mut_ptr().add(offset).cast::<Window>() }
+    }
+}
+
+#[inline]
 fn ceil_div2(value: i64) -> i64 {
     (value + 1).div_euclid(2)
+}
+
+/// The two dimensions of the matrix.
+#[derive(Clone, Copy)]
+struct Shape {
+    haplotype: usize,
+    read: usize,
+}
+
+/// Where one anti-diagonal reads its neighbours from.
+#[derive(Clone, Copy)]
+struct Diagonal {
+    /// The lowest read row on this diagonal.
+    lo: usize,
+    /// How many slots later than this diagonal the previous one started.
+    back1: usize,
+    /// The same for the one before it.
+    back2: usize,
+    /// The plan's reversed column index of the cell at `lo`.
+    column_origin: usize,
+    /// The chunk offsets this diagonal visits are `0..extent` in steps of the
+    /// lane count; `extent` is the live length rounded up to a whole chunk.
+    extent: usize,
+}
+
+/// Everything one anti-diagonal loads, each track viewed from the origin its
+/// chunk offset zero reads, all with one span.
+struct Sources<'a> {
+    span: usize,
+    m_diag: View<'a>,
+    i_diag: View<'a>,
+    d_diag: View<'a>,
+    m_up: View<'a>,
+    i_up: View<'a>,
+    m_left: View<'a>,
+    d_left: View<'a>,
+    row_base: View<'a>,
+    row_matched: View<'a>,
+    row_mismatched: View<'a>,
+    match_to_match: View<'a>,
+    match_to_insertion: View<'a>,
+    match_to_deletion: View<'a>,
+    indel_to_match: View<'a>,
+    gap_continuation: View<'a>,
+    column_base: View<'a>,
+    column_converted: View<'a>,
+    column_plain: View<'a>,
+    column_rate: View<'a>,
+    column_unconverted: View<'a>,
+}
+
+impl<'a> Sources<'a> {
+    /// `None` if any track is too short for this diagonal, which the plan's
+    /// and the ring's slack rule out.
+    ///
+    /// `inline(always)`, like `Ring::phases` and `Sink::new`: left to itself
+    /// the compiler kept this out of line, wrote the twenty views to the
+    /// stack and read them back inside the chunk loop, which was most of the
+    /// per-diagonal overhead.
+    #[inline(always)]
+    fn new(plan: &'a Plan, prev1: Phase<'a>, prev2: Phase<'a>, diagonal: Diagonal) -> Option<Self> {
+        let Diagonal { lo, back1, back2, column_origin, extent } = diagonal;
+        let span = extent + LANE_MAX;
+        let diag = PAD + back2 - 1;
+        let up = PAD + back1 - 1;
+        let left = PAD + back1;
+        let rows = &plan.rows;
+        let columns = &plan.columns;
+        Some(Self {
+            span,
+            m_diag: View::new(prev2.m, diag, span)?,
+            i_diag: View::new(prev2.i, diag, span)?,
+            d_diag: View::new(prev2.d, diag, span)?,
+            m_up: View::new(prev1.m, up, span)?,
+            i_up: View::new(prev1.i, up, span)?,
+            m_left: View::new(prev1.m, left, span)?,
+            d_left: View::new(prev1.d, left, span)?,
+            row_base: View::new(&rows.base, lo, span)?,
+            row_matched: View::new(&rows.matched, lo, span)?,
+            row_mismatched: View::new(&rows.mismatched, lo, span)?,
+            match_to_match: View::new(&rows.match_to_match, lo, span)?,
+            match_to_insertion: View::new(&rows.match_to_insertion, lo, span)?,
+            match_to_deletion: View::new(&rows.match_to_deletion, lo, span)?,
+            indel_to_match: View::new(&rows.indel_to_match, lo, span)?,
+            gap_continuation: View::new(&rows.gap_continuation, lo, span)?,
+            column_base: View::new(&columns.base, column_origin, span)?,
+            column_converted: View::new(&columns.converted, column_origin, span)?,
+            column_plain: View::new(&columns.plain, column_origin, span)?,
+            column_rate: View::new(&columns.rate, column_origin, span)?,
+            column_unconverted: View::new(&columns.unconverted, column_origin, span)?,
+        })
+    }
+
+    /// One vector of cells at chunk offset `chunk`: the recurrence, with
+    /// nothing masked yet. `None` past the span, which the kernel's chunk loop
+    /// never reaches.
+    ///
+    /// `lift1` brings the previous diagonal onto this diagonal's scale and
+    /// `lift_before` brings the one before it onto the previous diagonal's;
+    /// see `banded_kernel` for why the scaling is applied on the way in
+    /// rather than in place. They are two factors and not their product on
+    /// purpose: each is at most `2^126`, but a diagonal whose maximum
+    /// collapses -- the free-start cell leaving the band with only a long
+    /// deletion chain behind -- can ask for a shift of over a hundred, and
+    /// the product of two such shifts is not an `f32`. Applied one at a
+    /// time, every intermediate is a value some diagonal already held.
+    #[inline(always)]
+    fn step<L: Lane>(&self, chunk: usize, lift1: L, lift_before: L) -> Option<(L, L, L)> {
+        if chunk.checked_add(LANE_MAX)? > self.span {
+            return None;
+        }
+        // SAFETY: every view was built with `self.span` entries and
+        // `chunk + LANE_MAX <= self.span` was just checked.
+        let load = |view: View<'a>| unsafe { L::load(view.window(chunk)) };
+
+        let m_diag = load(self.m_diag);
+        let i_diag = load(self.i_diag);
+        let d_diag = load(self.d_diag);
+        let m_up = load(self.m_up);
+        let i_up = load(self.i_up);
+        let m_left = load(self.m_left);
+        let d_left = load(self.d_left);
+
+        // `i = lo + chunk + lane` runs upwards over the lanes, so every per-row
+        // track is one contiguous load, and the reversed column tracks are too.
+        let prior_v = prior::<L>(
+            ColumnLanes {
+                base: load(self.column_base),
+                converted: load(self.column_converted),
+                plain: load(self.column_plain),
+                rate: load(self.column_rate),
+                unconverted_rate: load(self.column_unconverted),
+            },
+            RowLanes {
+                base: load(self.row_base),
+                matched: load(self.row_matched),
+                mismatched: load(self.row_mismatched),
+            },
+        );
+        let t = TransitionLanes {
+            match_to_match: load(self.match_to_match),
+            match_to_insertion: load(self.match_to_insertion),
+            match_to_deletion: load(self.match_to_deletion),
+            indel_to_match: load(self.indel_to_match),
+            gap_continuation: load(self.gap_continuation),
+        };
+
+        let new_m = prior_v
+            * (m_diag * t.match_to_match + i_diag * t.indel_to_match + d_diag * t.indel_to_match)
+            * lift_before
+            * lift1;
+        let new_i = (m_up * t.match_to_insertion + i_up * t.gap_continuation) * lift1;
+        let new_d = (m_left * t.match_to_deletion + d_left * t.gap_continuation) * lift1;
+        Some((new_m, new_i, new_d))
+    }
+}
+
+/// The three matrices of the diagonal being written, from slot `PAD`, with
+/// room for every chunk plus the three vectors of zeros cleared past them.
+struct Sink<'a> {
+    span: usize,
+    m: ViewMut<'a>,
+    i: ViewMut<'a>,
+    d: ViewMut<'a>,
+}
+
+impl<'a> Sink<'a> {
+    #[inline(always)]
+    fn new<L: Lane>(cur: PhaseMut<'a>, diagonal: Diagonal) -> Option<Self> {
+        let span = diagonal.extent + 3 * L::LANES + LANE_MAX;
+        Some(Self {
+            span,
+            m: ViewMut::new(cur.m, PAD, span)?,
+            i: ViewMut::new(cur.i, PAD, span)?,
+            d: ViewMut::new(cur.d, PAD, span)?,
+        })
+    }
+
+    /// Stores one vector of each matrix at `offset`, subnormals flushed to
+    /// zero; `false` past the span, which the kernel never reaches.
+    ///
+    /// The flush is what makes "the band under-estimates, never
+    /// over-estimates" a property of the kernel rather than an observation:
+    /// a cell more than `2^-126` below its diagonal's maximum would be stored
+    /// with fewer mantissa bits than a normal `f32` and round either way, and
+    /// its share of the total is far below anything a caller could act on.
+    /// Zero only ever removes mass. It also makes the kernel's numbers the
+    /// same on a target that flushes denormals in hardware and one that does
+    /// not.
+    #[inline(always)]
+    fn store<L: Lane>(&mut self, offset: usize, cells: (L, L, L)) -> bool {
+        let Some(end) = offset.checked_add(LANE_MAX) else { return false };
+        if end > self.span {
+            return false;
+        }
+        let (m, i, d) = cells;
+        let (tiny, zero) = (L::splat(f32::MIN_POSITIVE), L::splat(0.0));
+        let (m, i, d) = (
+            m.below(tiny).select(zero, m),
+            i.below(tiny).select(zero, i),
+            d.below(tiny).select(zero, d),
+        );
+        // SAFETY: every view was built with `self.span` entries and
+        // `offset + LANE_MAX <= self.span` was just checked.
+        unsafe {
+            m.store(self.m.window(offset));
+            i.store(self.i.window(offset));
+            d.store(self.d.window(offset));
+        }
+        true
+    }
 }
 
 /// Cells on one anti-diagonal `k = i + j` depend only on diagonals `k - 1` and
 /// `k - 2`, so a whole diagonal is computed in parallel. Within a diagonal the
 /// row index `i` runs over a contiguous range, which is what makes the read
-/// qualities and the three neighbour buffers contiguous loads rather than
-/// gathers; only the haplotype bases run backwards, and those reach the kernel
-/// through the scalar emission call anyway.
+/// tracks and the three neighbour buffers contiguous loads rather than
+/// gathers; the haplotype runs the other way, and the plan holds it reversed
+/// so that it is a contiguous load too.
 #[allow(
     clippy::too_many_lines,
     reason = "one traversal; splitting it would hide the index algebra it exists to get right"
@@ -482,46 +910,42 @@ fn ceil_div2(value: i64) -> i64 {
     clippy::cast_possible_wrap,
     reason = "the f32 narrowing is the point of this kernel, and every index cast is clamped above"
 )]
-#[allow(
-    clippy::indexing_slicing,
-    reason = "every literal index here is a ring-buffer slot in 0..9 or a lane in 0..8; the DP's own buffers are reached through `get`"
-)]
-fn banded_kernel<L: Lane, E: Emission>(
-    haplotype: &Haplotype,
-    read: &Read,
-    emission: &E,
+fn banded_kernel<L: Lane>(
+    plan: &Plan,
+    ring: &mut Ring,
+    shape: Shape,
     band: Band,
 ) -> Log10Likelihood {
-    let (h, r) = (haplotype.len(), read.len());
-    if h == 0 || r == 0 {
-        return Log10Likelihood::IMPOSSIBLE;
-    }
-    let Some(plan) = Plan::build(haplotype, read, emission) else {
-        return Log10Likelihood::IMPOSSIBLE;
-    };
+    let Shape { haplotype: h, read: r } = shape;
     let (hi64, ri64) = (h as i64, r as i64);
     let (w, o) = (band.half_width, band.offset);
 
     // A diagonal holds `hi - lo + 1` cells with `lo, hi` in `0..=r` and
     // `hi - lo <= half_width`, so this bound is tight at both ends.
     let max_len = (w.min(ri64) as usize) + 2;
-    let capacity = 2 * PAD + max_len + 4 * L::LANES + 8;
-    // Three matrices over three anti-diagonals, in one allocation rather than
-    // nine. They are a few hundred bytes each and C5 scores one read against up
-    // to eight haplotypes, so nine `malloc`/`free` pairs per alignment were
-    // most of what a short one spent outside the loop.
-    let mut cells = vec![0.0f32; MATRICES * RING * capacity];
-    let mut ring = cells.chunks_exact_mut(capacity);
-    let slots: [&mut [f32]; MATRICES * RING] =
-        core::array::from_fn(|_| ring.next().unwrap_or_default());
+    // Room for the widest diagonal rounded up to whole chunks, the three
+    // vectors of zeros cleared past it, and the window the last lane reads.
+    let capacity = 2 * PAD + max_len + 4 * L::LANES + LANE_MAX;
+    ring.reset(capacity);
     let mut lo_history = [0usize; RING];
 
+    // Renormalisation is lazy. Each diagonal is computed and stored in one
+    // scale, `2^exponent`, chosen before it is computed as the previous
+    // diagonal's scale plus the shift that would have put *that* diagonal's
+    // maximum into `[1, 2)`. The two diagonals a cell reads are then brought
+    // onto the current scale by a power of two on the way in -- exact in
+    // binary floating point -- rather than rewritten in place, so nothing
+    // between one diagonal and the next waits on a store: no rescale pass,
+    // and no branch on whether one is needed.
     let init = 1.0f32 / h as f32;
     let mut init_scaled = init;
     let mut exponent = 0i32;
-    let mut previous_shift = 0i32;
+    let (mut shift1, mut shift2) = (0i32, 0i32);
     let mut accumulator = 0.0f64;
     let mut reference_exponent: Option<i32> = None;
+
+    let zero = L::splat(0.0);
+    let offsets = L::offsets();
 
     for k in 0..=(r + h) {
         let ki = k as i64;
@@ -531,78 +955,84 @@ fn banded_kernel<L: Lane, E: Emission>(
         let lo_in_band = ceil_div2(ki - o - w).max(ki - hi64).max(0);
         let lo = lo_in_band.min(ri64.min(ki)) as usize;
         let hi_signed = (ki - o + w).div_euclid(2).min(ri64).min(ki);
-        let len = if hi_signed < lo as i64 { 0 } else { (hi_signed - lo as i64 + 1) as usize }
-            .min(max_len);
+        let len = if hi_signed < lo as i64 { 0 } else { (hi_signed - lo as i64 + 1) as usize };
+        debug_assert!(len <= max_len, "diagonal {k} holds {len} cells, over the bound {max_len}");
+        let len = len.min(max_len);
 
-        let cur = k % 3;
-        let prev1 = (k + 2) % 3;
-        let prev2 = (k + 1) % 3;
-        let back1 = lo - lo_history[prev1].min(lo);
-        let back2 = lo - lo_history[prev2].min(lo);
+        let phase = k % RING;
+        let Some((cur, prev1, prev2)) = ring.phases(phase) else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        // `lo` grows by at most one per diagonal, so these are 0..=1 and
+        // 0..=2, which is what `PAD` is sized for.
+        let back1 = lo - lo_history[(k + RING - 1) % RING].min(lo);
+        let back2 = lo - lo_history[(k + RING - 2) % RING].min(lo);
+        debug_assert!(back1 <= 1 && back2 <= PAD);
 
         // The cells this diagonal owns. A diagonal that reaches `j == 0` has a
         // topmost cell with no haplotype column behind it, and that cell is not
-        // one of them: masking it out here is what used to be a `set` to zero
-        // after the fact.
+        // one of them: it is masked to zero rather than skipped, so that the
+        // slot it occupies reads as zero for the diagonals that load across it.
         let live = if len > 0 && lo + len - 1 == k { len - 1 } else { len };
 
         // Cell `(i, j)` on this diagonal reads haplotype column `j - 1`, which
         // the plan holds reversed at `h - j = h - k + i`. `i` ascends with the
-        // lane, so this index does too: the haplotype is a contiguous load and
-        // not a gather.
+        // lane, so this index does too.
         let column_origin = (hi64 + lo as i64 - ki).max(0) as usize;
 
-        let lift = L::splat(exp2_f32(previous_shift));
-        let zero = L::splat(0.0);
-        let offsets = L::offsets();
-        let mut running = zero;
+        let extent = len.div_ceil(L::LANES) * L::LANES;
+        let diagonal = Diagonal { lo, back1, back2, column_origin, extent };
+        let Some(sources) = Sources::new(plan, prev1, prev2, diagonal) else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        let Some(mut sink) = Sink::new::<L>(cur, diagonal) else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        // This diagonal's scale, and the lifts onto it from the two before.
+        exponent += shift1;
+        init_scaled *= exp2_f32(shift1);
+        let lift1 = L::splat(exp2_f32(shift1));
+        let lift_before = L::splat(exp2_f32(shift2));
+        // One running maximum per matrix: three short dependency chains
+        // rather than one three times as long.
+        let (mut running_m, mut running_i, mut running_d) = (zero, zero, zero);
+
+        // Full vectors first, with nothing to mask.
         let mut chunk = 0usize;
-        while chunk < len {
-            let diag = PAD + chunk + back2 - 1;
-            let up = PAD + chunk + back1 - 1;
-            let left = PAD + chunk + back1;
-            let m_diag = L::load(window(slots[MATCH + prev2], diag));
-            let i_diag = L::load(window(slots[INSERTION + prev2], diag));
-            let d_diag = L::load(window(slots[DELETION + prev2], diag));
-            let m_up = L::load(window(slots[MATCH + prev1], up));
-            let i_up = L::load(window(slots[INSERTION + prev1], up));
-            let m_left = L::load(window(slots[MATCH + prev1], left));
-            let d_left = L::load(window(slots[DELETION + prev1], left));
-
-            // `i = lo + chunk + lane` runs upwards over the lanes, so every
-            // per-row track is one contiguous load.
-            let row = lo + chunk;
-            let prior_v = prior::<L>(
-                ColumnLanes::load(&plan, column_origin + chunk),
-                RowLanes::load(&plan, row),
-            );
-            let m2m_v = L::load(window(&plan.match_to_match, row));
-            let m2i_v = L::load(window(&plan.match_to_insertion, row));
-            let m2d_v = L::load(window(&plan.match_to_deletion, row));
-            let i2m_v = L::load(window(&plan.indel_to_match, row));
-            let gap_v = L::load(window(&plan.gap_continuation, row));
-
-            let new_m = prior_v * (m_diag * m2m_v + i_diag * i2m_v + d_diag * i2m_v) * lift;
-            let new_i = m_up * m2i_v + i_up * gap_v;
-            let new_d = m_left * m2d_v + d_left * gap_v;
-
+        while chunk + L::LANES <= live {
+            let Some(cells) = sources.step::<L>(chunk, lift1, lift_before) else {
+                return Log10Likelihood::IMPOSSIBLE;
+            };
+            running_m = running_m.vmax(cells.0);
+            running_i = running_i.vmax(cells.1);
+            running_d = running_d.vmax(cells.2);
+            if !sink.store(chunk, cells) {
+                return Log10Likelihood::IMPOSSIBLE;
+            }
+            chunk += L::LANES;
+        }
+        // Then the one partial vector, its lanes past `live` zeroed. That
+        // includes the `j == 0` cell, and it is what the scalar lane goes
+        // through for that cell alone.
+        if chunk < len {
+            let Some((m, i, d)) = sources.step::<L>(chunk, lift1, lift_before) else {
+                return Log10Likelihood::IMPOSSIBLE;
+            };
             #[allow(
                 clippy::cast_precision_loss,
                 reason = "a diagonal holds at most `half_width + 1` cells"
             )]
-            let keep = offsets.below(L::splat(live.saturating_sub(chunk) as f32));
-            let (new_m, new_i, new_d) =
-                (keep.select(new_m, zero), keep.select(new_i, zero), keep.select(new_d, zero));
-            running = running.vmax(new_m).vmax(new_i).vmax(new_d);
-
-            let slot = PAD + chunk;
-            for (matrix, value) in [(MATCH, new_m), (INSERTION, new_i), (DELETION, new_d)] {
-                if let Some(destination) = window_mut(slots[matrix + cur], slot) {
-                    value.store(destination);
-                }
+            let keep = offsets.below(L::splat((live - chunk) as f32));
+            let cells = (keep.select(m, zero), keep.select(i, zero), keep.select(d, zero));
+            running_m = running_m.vmax(cells.0);
+            running_i = running_i.vmax(cells.1);
+            running_d = running_d.vmax(cells.2);
+            if !sink.store(chunk, cells) {
+                return Log10Likelihood::IMPOSSIBLE;
             }
             chunk += L::LANES;
         }
+        debug_assert_eq!(chunk, extent);
 
         // Above the live range the buffer has to read as zero for the two
         // diagonals that will load across it: they reach one vector past their
@@ -610,12 +1040,9 @@ fn banded_kernel<L: Lane, E: Emission>(
         // most one per diagonal. A constant three vectors covers that, and
         // being constant is the point -- the variable-length clear this
         // replaces was a `memset` call per matrix per diagonal.
-        for step in 0..3 {
-            let slot = PAD + chunk + step * L::LANES;
-            for matrix in [MATCH, INSERTION, DELETION] {
-                if let Some(destination) = window_mut(slots[matrix + cur], slot) {
-                    zero.store(destination);
-                }
+        for vector in 0..3 {
+            if !sink.store(extent + vector * L::LANES, (zero, zero, zero)) {
+                return Log10Likelihood::IMPOSSIBLE;
             }
         }
 
@@ -624,38 +1051,26 @@ fn banded_kernel<L: Lane, E: Emission>(
         // prior is zero, and its five transitions are zero too -- which is also
         // why the running maximum above could be taken before this write.
         if len > 0 && lo_in_band == 0 {
-            set(slots[DELETION + cur], PAD, init_scaled);
-            running = running.vmax(L::splat(init_scaled));
+            if let Some(start) = sink.d.track.first_mut() {
+                *start = init_scaled;
+            }
+            running_d = running_d.vmax(L::splat(init_scaled));
         }
 
-        let shift = normalising_shift_f32(running.horizontal_max());
-        if shift != 0 {
-            let factor = L::splat(exp2_f32(shift));
-            let mut slot = PAD;
-            while slot < PAD + chunk {
-                for matrix in [MATCH, INSERTION, DELETION] {
-                    if let Some(destination) = window_mut(slots[matrix + cur], slot) {
-                        (L::load(destination) * factor).store(destination);
-                    }
-                }
-                slot += L::LANES;
-            }
-            exponent += shift;
-            if lo_in_band == 0 {
-                init_scaled *= exp2_f32(shift);
-            }
-        }
-        previous_shift = shift;
+        // The shift this diagonal's maximum asks for is applied to the next
+        // one's scale, not to this one's cells.
+        let running = running_m.vmax(running_i).vmax(running_d);
+        shift2 = shift1;
+        shift1 = normalising_shift_f32(running.horizontal_max());
 
         if len > 0 && lo + len - 1 == r {
-            let slot = PAD + (r - lo);
-            let value =
-                f64::from(get(slots[MATCH + cur], slot) + get(slots[INSERTION + cur], slot));
+            let slot = r - lo;
+            let value = f64::from(get(sink.m.track, slot) + get(sink.i.track, slot));
             let base = *reference_exponent.get_or_insert(exponent);
             accumulator += value * exp2_f64(base - exponent);
         }
 
-        lo_history[cur] = lo;
+        lo_history[phase] = lo;
     }
 
     match reference_exponent {
@@ -663,13 +1078,6 @@ fn banded_kernel<L: Lane, E: Emission>(
             Log10Likelihood::new(accumulator.log10() - f64::from(base) * core::f64::consts::LOG10_2)
         }
         _ => Log10Likelihood::IMPOSSIBLE,
-    }
-}
-
-#[inline]
-fn set(buffer: &mut [f32], index: usize, value: f32) {
-    if let Some(slot) = buffer.get_mut(index) {
-        *slot = value;
     }
 }
 
@@ -736,8 +1144,33 @@ mod tests {
         }
     }
 
+    /// The scalar lanes of one cell, read straight off the plan's tracks.
+    fn lanes_at(
+        plan: &Plan,
+        column: usize,
+        row: usize,
+    ) -> Option<(ColumnLanes<f32>, RowLanes<f32>)> {
+        let at = |track: &[f32], index: usize| track.get(index).copied();
+        let (columns, rows) = (&plan.columns, &plan.rows);
+        Some((
+            ColumnLanes {
+                base: at(&columns.base, column)?,
+                converted: at(&columns.converted, column)?,
+                plain: at(&columns.plain, column)?,
+                rate: at(&columns.rate, column)?,
+                unconverted_rate: at(&columns.unconverted, column)?,
+            },
+            RowLanes {
+                base: at(&rows.base, row)?,
+                matched: at(&rows.matched, row)?,
+                mismatched: at(&rows.mismatched, row)?,
+            },
+        ))
+    }
+
     fn check<E: Emission>(haplotype: &Haplotype, read: &Read, emission: &E) -> bool {
-        let plan = Plan::build(haplotype, read, emission).expect("the fixture is well formed");
+        let mut plan = Plan::default();
+        plan.fill(haplotype, read, emission).expect("the fixture is well formed");
         let Some(last) = haplotype.len().checked_sub(1) else {
             return false;
         };
@@ -753,10 +1186,10 @@ mod tests {
                     reason = "the narrowing is what is under test"
                 )]
                 let want = emission.match_probability(site, observation) as f32;
-                let got = prior::<f32>(
-                    ColumnLanes::load(&plan, last - column_index),
-                    RowLanes::load(&plan, row_index),
-                );
+                let Some((column, row)) = lanes_at(&plan, last - column_index, row_index) else {
+                    return false;
+                };
+                let got = prior::<f32>(column, row);
                 let slack = 4.0 * f32::EPSILON * want.abs();
                 if (got - want).abs() > slack {
                     return false;
@@ -764,5 +1197,41 @@ mod tests {
             }
         }
         true
+    }
+
+    /// A workspace reused across pairs of different sizes gives the same
+    /// numbers as a fresh one: nothing from a previous alignment leaks.
+    #[test]
+    fn a_reused_workspace_is_a_fresh_workspace() {
+        let long = Haplotype::from_ascii(b"ACGTTAGCATCGGATCCGATTACAGGCATTACGGATCCAGT");
+        let short = Haplotype::from_ascii(b"TTAGCAT");
+        let make = |bases: &[u8]| {
+            Read::uniform(
+                Haplotype::from_ascii(bases).bases().to_vec(),
+                &vec![BaseQuality::from_byte(30); bases.len()],
+                BaseQuality::from_byte(45),
+                BaseQuality::from_byte(45),
+                BaseQuality::from_byte(10),
+                Strand::OT,
+            )
+            .expect("valid")
+        };
+        let reads = [make(b"TAGCATCGGATCCGATTACAGG"), make(b"AGCAT"), make(b"GGATCCAGTAAAA")];
+        let emission = StandardEmission::default();
+        let mut workspace = super::Workspace::new();
+        for _ in 0..2 {
+            for haplotype in [&long, &short, &long] {
+                for read in &reads {
+                    for band in [super::Band::anchored(2), super::Band::anchored(20)] {
+                        let fresh = super::align_banded_simd(haplotype, read, &emission, band);
+                        let reused = workspace.align_banded_simd(haplotype, read, &emission, band);
+                        assert_eq!(fresh.get().to_bits(), reused.get().to_bits());
+                        let fresh = super::align_banded(haplotype, read, &emission, band);
+                        let reused = workspace.align_banded(haplotype, read, &emission, band);
+                        assert_eq!(fresh.get().to_bits(), reused.get().to_bits());
+                    }
+                }
+            }
+        }
     }
 }

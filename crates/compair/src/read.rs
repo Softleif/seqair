@@ -1,10 +1,16 @@
 use crate::{
     error::Error,
+    transitions::Transition,
     types::{Observation, error_probability},
 };
 use seqair_types::{Base, BaseQuality, QPos, Strand};
 
 /// A read with the four per-base quality tracks GATK's pair-HMM needs.
+///
+/// Every `10^(-Q/10)` the kernels need -- the base error probabilities and
+/// the five transition probabilities per base -- is computed here, once, so
+/// that scoring the read against a haplotype does no transcendental
+/// arithmetic at all.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Read {
     bases: Box<[Base]>,
@@ -13,6 +19,7 @@ pub struct Read {
     insertion_quals: Box<[BaseQuality]>,
     deletion_quals: Box<[BaseQuality]>,
     gap_quals: Box<[BaseQuality]>,
+    transitions: Box<[Transition]>,
     strand: Strand,
 }
 
@@ -44,6 +51,14 @@ impl Read {
                 return Err(Error::MissingQuality { field, index });
             }
         }
+        let transitions = insertion_quals
+            .iter()
+            .zip(deletion_quals)
+            .zip(gap_quals)
+            .map(|((insertion, deletion), gap)| {
+                Transition::from_qualities(*insertion, *deletion, *gap)
+            })
+            .collect();
         Ok(Self {
             bases,
             base_quals: base_quals.into(),
@@ -51,6 +66,7 @@ impl Read {
             insertion_quals: insertion_quals.into(),
             deletion_quals: deletion_quals.into(),
             gap_quals: gap_quals.into(),
+            transitions,
             strand,
         })
     }
@@ -114,6 +130,12 @@ impl Read {
     #[must_use]
     pub fn gap_quals(&self) -> &[BaseQuality] {
         &self.gap_quals
+    }
+
+    /// The transitions out of read base `index`, which the DP applies on row
+    /// `index + 1`.
+    pub(crate) fn transition(&self, index: usize) -> Option<Transition> {
+        self.transitions.get(index).copied()
     }
 
     #[must_use]

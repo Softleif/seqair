@@ -27,6 +27,9 @@ features = ["fuzz"]
 [dependencies.seqair-types]
 path = "../crates/seqair-types"
 
+[dependencies.compair]
+path = "../crates/compair"
+
 # Prevent this from interfering with workspaces
 [workspace]
 members = ["."]
@@ -206,6 +209,12 @@ doc = false
 [[bin]]
 name = "fuzz_aligned_pairs"
 path = "fuzz_targets/fuzz_aligned_pairs.rs"
+doc = false
+
+# compair pair-HMM: reference, scalar and SIMD kernels against each other
+[[bin]]
+name = "fuzz_pair_hmm"
+path = "fuzz_targets/fuzz_pair_hmm.rs"
 doc = false
 
 [dev-dependencies]

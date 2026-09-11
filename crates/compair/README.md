@@ -11,7 +11,7 @@ Read-likelihood engine for [rastair](https://github.com/bsblabludwig/rastair).
 > but it has not yet been used outside rastair.
 
 ```rust
-use compair::{Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Probability, Read, Strand, TapsEmission, align_banded_simd};
+use compair::{Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Probability, Read, Strand, TapsEmission, Workspace};
 
 let haplotype = Haplotype::from_ascii(b"ACGTTAGCATCGGATCC...");
 let read = Read::uniform(
@@ -23,13 +23,18 @@ let read = Read::uniform(
     Strand::OT,
 )?;
 let emission = TapsEmission::new(ConversionModel::taps_default(), Betas::Uniform(Probability::new(0.5)?));
-let log10 = align_banded_simd(&haplotype, &read, &emission, Band::anchored(3));
+let mut workspace = Workspace::new();
+let log10 = workspace.align_banded_simd(&haplotype, &read, &emission, Band::anchored(3));
 ```
 
 `align_full` is the `f64` reference over the whole matrix; `align_banded` and
 `align_banded_simd` are the same `f32` recurrence over a diagonal band, one
 generic function over a lane type, so the two are bit-identical by
-construction. `StandardEmission` is GATK's plain emission; `TapsEmission`
+construction. A `Workspace` keeps the kernels' buffers between calls, so
+scoring a read against its candidate haplotypes allocates nothing; the free
+functions of the same names build a fresh one per call. A `Read` computes
+every `10^(-Q/10)` it needs at construction, so an alignment does no
+transcendental arithmetic at all. `StandardEmission` is GATK's plain emission; `TapsEmission`
 scores an OT `T` over a haplotype `C` (and an OB `A` over a `G`) at the site's
 methylation level, reading CpG context off the haplotype's own sequence so a
 de-novo CpG needs no special case.
@@ -44,8 +49,11 @@ de-novo CpG needs no special case.
 - A stated band contract: a path outside the band scores lower, never wrong;
   no path at all is `Log10Likelihood::IMPOSSIBLE`, and `Band::MAX_WIDTH` bounds
   the allocation
-- 8-wide `f32` SIMD via `wide`, ~17 µs per 150 bp read × 48-wide band on an
-  Apple M4 Pro, bit-identical to the scalar kernel
+- 8-wide `f32` SIMD via `wide`, ~10 µs per 150 bp read × 46-wide band on an
+  Apple M4 Pro (~25 µs scalar, ~85 µs for the `f64` reference over the whole
+  matrix), bit-identical to the scalar kernel. The default width is 46 and not
+  48 because a diagonal of `width / 2 + 1` cells fills three vectors of eight
+  exactly at 46 and spills one cell into a fourth at 48
 - Types shared with `seqair-types`: `Base`, `Strand`, `BaseQuality`,
   `Probability`, `QPos`
 
@@ -60,8 +68,28 @@ cargo bench -p compair --bench align
 reference (agreement to 1e-4 in log10, measured 6e-6) and through the band;
 `tests/conventions.rs` pins the conventions those vectors cannot, with a
 hand-computed 3 × 2 matrix. Property tests compare the banded kernels against
-the reference and an independently masked `f64` DP, and check the scalar and
-SIMD kernels bit for bit.
+the reference and an independently masked `f64` DP at every width, with `N`
+on both sides, and check the scalar and SIMD kernels bit for bit, fresh and
+through a reused `Workspace`. `tests/read.rs` pins what the constructors
+reject and that lowercase is a base, not an `N`. The power-of-two scaling the
+bit-parity rests on has its own property tests in `src/scaling.rs`.
+
+`tests/rust_bio.rs` scores the same pairs through
+[rust-bio](https://github.com/rust-bio/rust-bio)'s `PairHMM`, an
+implementation that shares no code with this one. The two conventions map
+onto each other exactly once rust-bio's `x` is the haplotype and its free
+start carries the `1 / h` prior; the one term that does not map, rust-bio
+summing the deletion matrix at the free end, is bounded in closed form and
+asserted as a rigorous upper bound. Below that bound the agreement is
+empirical, because rust-bio's three-term log-sum shortcut mis-sorts its
+arguments and drops gap mass on reads that need an indel (the test documents
+the measurement). `benches/rust_bio.rs` times it on the same fixture:
+rust-bio takes ~900 µs where `align_full` takes ~85 µs and the SIMD band
+~10 µs.
+
+A fuzz target, `fuzz_pair_hmm` in `crates/seqair/fuzz`, drives arbitrary
+input through all three kernels with the crate's documented invariants as the
+oracle; see the workspace `CLAUDE.md` for how to run it.
 
 ## What's adapted from existing projects
 

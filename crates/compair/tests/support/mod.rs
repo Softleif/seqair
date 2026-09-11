@@ -84,8 +84,19 @@ pub fn seed_offset(haplotype: &Haplotype, read: &Read) -> i32 {
 use compair::{Band, ConversionModel, Probability};
 use proptest::prelude::*;
 
+/// One of the four nucleotides.
 pub fn any_base() -> impl Strategy<Value = Base> {
     prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T)]
+}
+
+/// A nucleotide, or every so often an `N`: the kernels have a code for it and
+/// the reference has a branch, and the two have to agree through the whole
+/// DP, not only per cell.
+pub fn any_base_or_n() -> impl Strategy<Value = Base> {
+    prop_oneof![
+        8 => any_base(),
+        1 => Just(Base::Unknown),
+    ]
 }
 
 pub fn any_strand() -> impl Strategy<Value = Strand> {
@@ -143,8 +154,8 @@ pub enum Edit {
 
 pub fn any_edit() -> impl Strategy<Value = Edit> {
     prop_oneof![
-        (0usize..4096, any_base()).prop_map(|(at, to)| Edit::Substitute { at, to }),
-        (0usize..4096, any_base()).prop_map(|(at, base)| Edit::Insert { at, base }),
+        (0usize..4096, any_base_or_n()).prop_map(|(at, to)| Edit::Substitute { at, to }),
+        (0usize..4096, any_base_or_n()).prop_map(|(at, base)| Edit::Insert { at, base }),
         (0usize..4096).prop_map(|at| Edit::Delete { at }),
     ]
 }
@@ -159,7 +170,7 @@ pub fn any_edit() -> impl Strategy<Value = Edit> {
 )]
 pub fn derived_case(max_edits: usize) -> impl Strategy<Value = Case> {
     (
-        proptest::collection::vec(any_base(), 80..160),
+        proptest::collection::vec(any_base_or_n(), 80..160),
         0usize..25,
         40usize..90,
         proptest::collection::vec(any_edit(), 0..=max_edits),
@@ -224,8 +235,8 @@ pub fn derived_case(max_edits: usize) -> impl Strategy<Value = Case> {
 )]
 pub fn arbitrary_case() -> impl Strategy<Value = Case> {
     (
-        proptest::collection::vec(any_base(), 1..90),
-        proptest::collection::vec(any_base(), 1..70),
+        proptest::collection::vec(any_base_or_n(), 1..90),
+        proptest::collection::vec(any_base_or_n(), 1..70),
         proptest::collection::vec(2u8..=45, 70),
         proptest::collection::vec(2u8..=45, 70),
         any_strand(),

@@ -17,7 +17,12 @@ wide = "1.7"
 [dev-dependencies]
 proptest = "1.11.0"
 criterion = "0.8.2"
+bio = { version = "4.0.1", default-features = false }
 
 [[bench]]
 name = "align"
+harness = false
+
+[[bench]]
+name = "rust_bio"
 harness = false

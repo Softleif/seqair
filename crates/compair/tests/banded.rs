@@ -3,44 +3,69 @@ mod support;
 
 use compair::{
     Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Probability, Read,
-    StandardEmission, Strand, TapsEmission, align_banded, align_banded_simd, align_full,
+    StandardEmission, Strand, TapsEmission, Workspace, align_banded, align_banded_simd, align_full,
     error_probability,
 };
 use proptest::prelude::*;
-use support::{any_conversion, arbitrary_case, derived_case, plausible_conversion};
+use support::{
+    any_conversion, any_probability, arbitrary_case, derived_case, plausible_conversion,
+};
 
 proptest! {
     // The bit-parity gate is the cheapest of these and the one most worth
-    // running hard, so it does not take the default 256.
+    // running hard, so it alone does not take the default 256. The other
+    // properties live in their own blocks below: `proptest_config` is
+    // block-wide, and a full-matrix oracle at 2048 cases was most of the
+    // suite's wall-clock.
     #![proptest_config(ProptestConfig { cases: 2048, ..ProptestConfig::default() })]
 
     /// The C4 gate: the scalar and the eight-wide kernels agree to the bit, on
     /// inputs that include bands missing the alignment entirely, because parity
-    /// has to hold there too.
+    /// has to hold there too. And a reused `Workspace` is the same kernel:
+    /// nothing from the previous pair leaks into the next.
     #[test]
     fn simd_is_bit_identical_to_scalar(
         case in arbitrary_case(),
         conversion in any_conversion(),
+        uniform in any_probability(),
     ) {
         let band = case.band();
-        let standard_scalar = align_banded(&case.haplotype, &case.read, &StandardEmission::default(), band);
-        let standard_simd = align_banded_simd(&case.haplotype, &case.read, &StandardEmission::default(), band);
-        prop_assert_eq!(
-            standard_scalar.get().to_bits(),
-            standard_simd.get().to_bits(),
-            "standard: {:?} vs {:?}", standard_scalar, standard_simd
-        );
-
         let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let taps_scalar = align_banded(&case.haplotype, &case.read, &taps, band);
-        let taps_simd = align_banded_simd(&case.haplotype, &case.read, &taps, band);
-        prop_assert_eq!(
-            taps_scalar.get().to_bits(),
-            taps_simd.get().to_bits(),
-            "taps: {:?} vs {:?}", taps_scalar, taps_simd
-        );
+        let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
+        let mut workspace = Workspace::new();
+        for (name, banded, simd, reused) in [
+            (
+                "standard",
+                align_banded(&case.haplotype, &case.read, &StandardEmission::default(), band),
+                align_banded_simd(&case.haplotype, &case.read, &StandardEmission::default(), band),
+                workspace.align_banded_simd(&case.haplotype, &case.read, &StandardEmission::default(), band),
+            ),
+            (
+                "taps",
+                align_banded(&case.haplotype, &case.read, &taps, band),
+                align_banded_simd(&case.haplotype, &case.read, &taps, band),
+                workspace.align_banded(&case.haplotype, &case.read, &taps, band),
+            ),
+            (
+                "uniform",
+                align_banded(&case.haplotype, &case.read, &uniform, band),
+                align_banded_simd(&case.haplotype, &case.read, &uniform, band),
+                workspace.align_banded_simd(&case.haplotype, &case.read, &uniform, band),
+            ),
+        ] {
+            prop_assert_eq!(
+                banded.get().to_bits(), simd.get().to_bits(),
+                "{}: scalar {:?} vs simd {:?}", name, banded, simd
+            );
+            prop_assert_eq!(
+                banded.get().to_bits(), reused.get().to_bits(),
+                "{}: fresh {:?} vs reused workspace {:?}", name, banded, reused
+            );
+        }
     }
+}
 
+proptest! {
     /// The other C4 gate: where the optimal path is inside the band, the f32
     /// band agrees with the f64 full matrix. The reads here are cut out of the
     /// haplotype and given at most three edits, so a 48-column band contains the
@@ -380,6 +405,15 @@ proptest! {
 
     /// Widening a band can only add paths, so it can only raise the score, and
     /// no band can beat the unbanded reference.
+    ///
+    /// The second half is unconditional: the `f32` kernel only ever loses
+    /// mass, to rounding and to the subnormals it flushes. The first half
+    /// holds where `f32` holds the score. A flushed cell is below `2^-126`
+    /// of its diagonal's maximum, so below ~1e-38 in absolute terms, and
+    /// cannot move a total of 1e-30 or more; below that a wider band's
+    /// diagonals span more dynamic range and can flush mass a narrower band
+    /// kept -- the fuzzer found a pair at `-133` where eight more columns
+    /// cost 0.16 -- which is the regime `Band::MAX_WIDTH` documents.
     #[test]
     fn a_band_is_monotone_in_its_width_and_never_beats_the_reference(
         case in arbitrary_case(),
@@ -391,7 +425,9 @@ proptest! {
         let b = align_banded(&case.haplotype, &case.read, &StandardEmission::default(), wider).get();
         let full = align_full(&case.haplotype, &case.read, &StandardEmission::default()).get();
         prop_assert!(!a.is_nan() && !b.is_nan(), "a {} b {}", a, b);
-        prop_assert!(a <= b + 1e-4, "narrow {} beats wider {}", a, b);
+        if b > -30.0 {
+            prop_assert!(a <= b + 1e-4, "narrow {} beats wider {}", a, b);
+        }
         prop_assert!(b <= full + 1e-4, "banded {} beats the reference {}", b, full);
     }
 
@@ -412,6 +448,30 @@ proptest! {
             (got - want).abs() < 1e-4 * (1.0 + want.abs()),
             "f32 {} against the f64 recurrence over the same band {}", got, want
         );
+    }
+
+    /// The same, at every width: `the_band_is_the_documented_predicate` above
+    /// only compares *values* where a random read scores above `-30`, which
+    /// is short reads. Reads cut from the haplotype score near zero at any
+    /// length, so this is where a 100-base read meets a 3-column band and
+    /// the `f32` numbers still have to be the `f64` recurrence's.
+    #[test]
+    fn the_f32_band_is_the_f64_recurrence_at_every_width(
+        case in derived_case(3),
+        width in 2u32..64,
+        conversion in any_conversion(),
+    ) {
+        let band = Band::new(width, case.offset).map_err(|_| TestCaseError::reject("w"))?;
+        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+        let got = align_banded_simd(&case.haplotype, &case.read, &taps, band).get();
+        let want = align_masked(&case.haplotype, &case.read, &taps, band);
+        prop_assert_eq!(got.is_finite(), want.is_finite(), "kernel {} oracle {}", got, want);
+        if got.is_finite() {
+            prop_assert!(
+                (got - want).abs() < 1e-4 * (1.0 + want.abs()),
+                "width {}: f32 {} against the f64 recurrence over the same band {}", width, got, want
+            );
+        }
     }
 
     /// Bit-parity is a property of the `Lane` trait, so it must hold at every
@@ -605,6 +665,7 @@ fn band_new_truncates_odd_widths() {
     assert_eq!(Band::new(2, 0).ok(), Band::new(3, 0).ok());
     assert_eq!(Band::anchored(7).width(), Band::DEFAULT_WIDTH);
     assert_eq!(Band::anchored(7).offset(), 7);
+    assert_eq!(Band::anchored(7), Band::new(Band::DEFAULT_WIDTH, 7).expect("the default is valid"));
 }
 
 /// The one place the `f32` kernel is not the `f64` recurrence, and the band is
@@ -790,6 +851,64 @@ fn a_band_with_no_start_cell_is_impossible() {
             "offset {offset} holds no (0, j) cell, got {got:?}"
         );
         assert_eq!(got, simd);
+    }
+}
+
+/// Found by `fuzz_pair_hmm`: a read at Phred 0 whose last base is `N`, so
+/// every match emission is exactly zero and the last row is reached through
+/// the insertion state alone, against a haplotype that is mostly `N`.
+///
+/// On the diagonal where the free-start cell leaves the band, the only cell
+/// left is the tail of a long deletion chain, `gap^n`, and the diagonal's
+/// maximum collapses from `~1` to `~1e-37` in one step. That diagonal asks
+/// the scaling for a shift of 123, the next one for 10, and a kernel that
+/// composed the two shifts into one factor for the diagonal two back
+/// computed `2^133`: infinity, then `0 * inf = NaN`, then `IMPOSSIBLE` for a
+/// pair the reference scores at `-5.7`. The two lifts are applied one at a
+/// time now, and this pins it at every width that holds a path.
+#[test]
+fn a_collapsing_diagonal_maximum_does_not_overflow_the_lift() {
+    let mut sequence = b"gg0gg".to_vec();
+    sequence.extend([255u8; 13]);
+    sequence.extend(b"U");
+    sequence.extend([255u8; 3]);
+    sequence.extend(b"g;g(gggg");
+    sequence.extend([255u8; 5]);
+    sequence.extend(b"G");
+    sequence.extend([255u8; 3]);
+    sequence.extend([3u8]);
+    sequence.extend(b"cc");
+    sequence.extend([248u8]);
+    sequence.extend([255u8; 9]);
+    sequence.extend(b"GGG");
+    let haplotype = Haplotype::from_ascii(&sequence);
+    assert_eq!(haplotype.len(), 55);
+    let read = Read::uniform(
+        vec![Base::G, Base::G, Base::Unknown],
+        &[BaseQuality::from_byte(0); 3],
+        BaseQuality::from_byte(30),
+        BaseQuality::from_byte(30),
+        BaseQuality::from_byte(30),
+        Strand::OB,
+    )
+    .expect("valid");
+    let emission = StandardEmission::default();
+    let full = align_full(&haplotype, &read, &emission).get();
+    assert!((full - -5.6933).abs() < 1e-3, "the reference scores this pair at -5.69, got {full}");
+    // The path ends at columns 41 and 42, so a band at offset 0 needs a
+    // half-width of at least 39 to hold it at all; at 40 it holds the path
+    // but not everything around it, and scores a little under the reference.
+    let narrow = Band::new(80, 0).expect("valid width");
+    assert!(align_banded(&haplotype, &read, &emission, narrow).get().is_finite());
+    for width in [124u32, 200, Band::MAX_WIDTH] {
+        let band = Band::new(width, 0).expect("valid width");
+        let banded = align_banded(&haplotype, &read, &emission, band).get();
+        let simd = align_banded_simd(&haplotype, &read, &emission, band).get();
+        assert_eq!(banded.to_bits(), simd.to_bits());
+        assert!(
+            (banded - full).abs() < 1e-4,
+            "width {width}: banded {banded} against the reference {full}"
+        );
     }
 }
 

@@ -274,9 +274,9 @@ impl<'a> TapsEmission<'a> {
 ///
 /// Anchored on the haplotype base, so every known base belongs to exactly one
 /// strand and the two are mirror images.
-#[inline]
 /// `Strand::Unknown` is unreachable here -- [`crate::Read`] rejects it at
 /// construction -- and falls through to the plain, non-converting rows.
+#[inline]
 fn converted_base(site: HapSite, strand: Strand) -> Option<(Base, bool)> {
     match (site.base, strand) {
         (Base::C, Strand::OT) => Some((Base::T, site.cpg == CpgRole::TopC)),

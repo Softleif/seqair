@@ -98,6 +98,24 @@ Frequent CI-only failures to watch for: `clippy::cast_possible_truncation`, `cli
 
 **Reader/writer limit parity** (`r[io.writer_limits]`): writers enforce the same field-size limits as readers. BAM header: l_text ≤ 256 MiB, n_ref ≤ 1M, l_name ≤ 256 KiB. BAI index: n_ref ≤ 100K, n_bin ≤ 100K, n_chunk ≤ 1M, n_intv ≤ 500K. Record size ≤ 2 MiB.
 
+## compair (pair-HMM)
+
+**Three kernels, one recurrence**: `align_full` (`f64`, whole matrix, the oracle), `align_banded` (`f32` scalar) and `align_banded_simd` (`f32x8` via `wide`). The two banded kernels are one generic `banded_kernel<L: Lane>`; bit-parity is by construction. No `mul_add` in `Lane` — `wide` falls back to separate mul+add on targets without FMA, which would break parity.
+
+**Emission is hoisted, not called per cell**: `Plan::fill<E: Emission>` folds `site_weights` (per column, reversed) and `epsilon` (per row) into `f32` tracks; the hot loop is generic over `L` only and never sees `E`. `prior()` reconstructs `SiteWeights::probability` with lanewise selects; `emission_table_matches_the_trait` pins the two to 4 ulp.
+
+**`Read` precomputes every `powf`**: base error probabilities and the five `Transition` values per base are computed in `Read::new`. An alignment does no transcendental arithmetic.
+
+**`Workspace`** owns the `Plan` tracks and the `Ring` (three matrices × three anti-diagonals, phase-major so one diagonal's matrices are a contiguous region borrowed via `split_at_mut`). Reuse it across haplotypes; the free functions build a fresh one per call.
+
+**`Band::DEFAULT_WIDTH` is 46, not 48**: a diagonal holds `width / 2 + 1` cells; 24 cells fill three 8-lane vectors exactly, 25 spill into a fourth (~8% slower). Widths `16n - 2` fill every vector.
+
+**Scaling is lazy**: each anti-diagonal is computed and stored in one scale, chosen as the previous diagonal's scale plus the shift *that* diagonal's maximum asked for; the two diagonals a cell reads are lifted onto the current scale by powers of two on load (`lift1`, `lift_before`), applied as two factors, never their product: a collapsing diagonal maximum can ask for a shift over 100 and `2^(s1+s2)` overflows f32 (fuzzer-found; pinned by `a_collapsing_diagonal_maximum_does_not_overflow_the_lift`). No in-place rescale pass, no branch on the shift. Subnormals are flushed to zero on store (`Sink::store`), which is what makes "a band under-estimates, never over-estimates" a guarantee. `normalising_shift_f32` reports no shift for subnormals and `exp2_f32(-127)` is 0 — unreachable in the kernel, pinned by proptests, not handled.
+
+**Hot-loop shape** (what the profile taught): the chunk loop loads 20 windows of 8 `f32`; per-window `get(..).first_chunk()` bounds checks were two thirds of its instructions, so `Sources`/`Sink` prove every track's span once per diagonal (`View::new`) and load unchecked (`View::window`, the crate's only `unsafe`). `Ring::phases`, `Sources::new`, `Sink::new` are `#[inline(always)]` because LLVM otherwise kept them out of line and spilled the twenty views to the stack (12.6 → 9.9 µs). Per-diagonal cost is instruction count, not the shift→lift latency chain (measured by breaking the chain: no gain). Width sweep (`examples/profile_150x48.rs` style) separates per-diagonal from per-chunk cost.
+
+**Tests**: GATK's 104 vectors (`tests/gatk_vectors.rs`), a hand-computed 3×2 matrix pinning conventions the vectors cannot (`tests/conventions.rs`), an independent masked `f64` DP oracle in `tests/banded.rs`, and `fuzz_pair_hmm` in `crates/seqair/fuzz`. Proptest case generators (`tests/support/mod.rs`) include `N`; `derived_case` reads score near zero (use for value checks at any length), `arbitrary_case` reads score far below `-30` (geometry checks only past ~40 bases).
+
 ## Fuzzing
 
 Fuzz targets live in `fuzz/fuzz_targets/`. CI runs them nightly via `fuzz/run_all.sh`. No nightly toolchain: `RUSTC_BOOTSTRAP=1` lets the pinned stable accept cargo-fuzz's `-Z` flags (`run_all.sh` sets it).

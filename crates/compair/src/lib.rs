@@ -16,7 +16,9 @@
 //! - [`align_banded_simd`], the same band eight lanes at a time.
 //!
 //! The two banded kernels are one generic function over a lane type, so they
-//! are bit-identical by construction rather than by agreement.
+//! are bit-identical by construction rather than by agreement. A [`Workspace`]
+//! keeps their buffers between calls, which makes an alignment
+//! allocation-free.
 
 mod banded;
 mod emission;
@@ -27,7 +29,7 @@ mod reference;
 mod scaling;
 mod transitions;
 
-pub use banded::{Band, align_banded, align_banded_simd};
+pub use banded::{Band, Workspace, align_banded, align_banded_simd};
 pub use emission::{Betas, ConversionModel, Emission, SiteWeights, StandardEmission, TapsEmission};
 pub use error::Error;
 pub use haplotype::Haplotype;
