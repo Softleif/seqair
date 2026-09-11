@@ -543,9 +543,19 @@ pub(crate) struct ColumnLanes<L> {
 /// One read row per lane: what the emission needs.
 #[derive(Clone, Copy)]
 pub(crate) struct RowLanes<L> {
-    pub(crate) base: L,
-    pub(crate) matched: L,
-    pub(crate) mismatched: L,
+    base: L,
+    matched: L,
+    mismatched: L,
+    /// `base` is `N`: a mask, computed here so that a kernel whose rows are
+    /// fixed for many cells computes it once.
+    unknown: L,
+}
+
+impl<L: Lane> RowLanes<L> {
+    #[inline(always)]
+    pub(crate) fn new(base: L, matched: L, mismatched: L) -> Self {
+        Self { base, matched, mismatched, unknown: base.equals(L::splat(CODE_N)) }
+    }
 }
 
 /// One read row per lane: what the transitions need.
@@ -569,7 +579,7 @@ pub(crate) struct TransitionLanes<L> {
 /// `offset` being non-negative.
 #[inline]
 pub(crate) fn prior<L: Lane>(column: ColumnLanes<L>, row: RowLanes<L>) -> L {
-    let unknown = row.base.equals(L::splat(CODE_N)).either(column.base.equals(L::splat(CODE_N)));
+    let unknown = row.unknown.either(column.base.equals(L::splat(CODE_N)));
     let plain = unknown.either(row.base.equals(column.plain));
     let weight = plain.select(
         L::splat(1.0),
@@ -873,11 +883,7 @@ impl<'a> Sources<'a> {
                 rate: load(self.column_rate),
                 unconverted_rate: load(self.column_unconverted),
             },
-            RowLanes {
-                base: load(self.row_base),
-                matched: load(self.row_matched),
-                mismatched: load(self.row_mismatched),
-            },
+            RowLanes::new(load(self.row_base), load(self.row_matched), load(self.row_mismatched)),
         );
         let t = TransitionLanes {
             match_to_match: load(self.match_to_match),
@@ -1266,11 +1272,11 @@ mod tests {
                 rate: at(&columns.rate, column)?,
                 unconverted_rate: at(&columns.unconverted, column)?,
             },
-            RowLanes {
-                base: at(&rows.base, row)?,
-                matched: at(&rows.matched, row)?,
-                mismatched: at(&rows.mismatched, row)?,
-            },
+            RowLanes::new(
+                at(&rows.base, row)?,
+                at(&rows.matched, row)?,
+                at(&rows.mismatched, row)?,
+            ),
         ))
     }
 

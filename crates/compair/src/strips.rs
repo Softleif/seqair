@@ -27,10 +27,11 @@
 //! renormalisations rather than a diagonal's one.
 //!
 //! Renormalisation happens between strips, on the row that crosses from one to
-//! the next: the shift that would put that row's maximum into `[1, 2)` is
-//! applied to its values as they enter the next strip's lane 0, which is the
-//! only way any value enters a strip. It is a power of two, so it is exact, and
-//! it is applied every eight rows whatever the lane count -- the scalar
+//! the next: the row buffer is multiplied by the power of two that puts that
+//! row's maximum into `[1, 2)` before the next strip reads it, and since the
+//! row buffer is the only way any value enters a strip, that rescales
+//! everything the strip will compute. It is a power of two, so it is exact,
+//! and it is applied every eight rows whatever the lane count -- the scalar
 //! instance's strip is one row, and renormalising every row instead would put
 //! the flush-to-zero threshold at a different place. That, and every operation
 //! on a cell being lanewise, is what makes the scalar and the eight-lane
@@ -245,8 +246,6 @@ struct Strip<'a, L> {
     unconverted: View<'a>,
     /// `last - first`: the window a step reads is at `reach - at`.
     reach: usize,
-    /// The power of two that brings the row above onto this strip's scale.
-    lift: f32,
 }
 
 /// The row buffer's slice for one strip, from `FRONT + first - LANE_MAX + 1`.
@@ -265,10 +264,12 @@ struct State<L> {
     m: L,
     i: L,
     d: L,
-    /// The previous step's `up`, which is this step's `diag`.
+    /// The previous step's `up`, which is this step's `diag`. The insertion
+    /// and deletion diagonals enter a match through the same transition, so
+    /// they are carried as one sum: a lane shift is linear, and adding before
+    /// it is adding after it.
     m_diag: L,
-    i_diag: L,
-    d_diag: L,
+    indel_diag: L,
 }
 
 /// Subnormals to zero, for the reason `Sink::store` in `banded` gives.
@@ -291,12 +292,12 @@ fn step<L: Lane>(
     mask: Option<L>,
 ) -> Option<(L, L, L)> {
     let read_at = at + LANE_MAX - 1;
-    let above_m = *buffers.m.get(read_at)? * strip.lift;
-    let above_i = *buffers.i.get(read_at)? * strip.lift;
-    let above_d = *buffers.d.get(read_at)? * strip.lift;
+    let above_m = *buffers.m.get(read_at)?;
+    let above_i = *buffers.i.get(read_at)?;
+    let above_d = *buffers.d.get(read_at)?;
     let up_m = state.m.shift_in(above_m);
     let up_i = state.i.shift_in(above_i);
-    let up_d = state.d.shift_in(above_d);
+    let up_indel = (state.i + state.d).shift_in(above_i + above_d);
 
     let window = strip.reach.checked_sub(at)?;
     // SAFETY: every view was built with `reach + LANE_MAX` entries and
@@ -314,10 +315,7 @@ fn step<L: Lane>(
     );
     let t = strip.transitions;
 
-    let m = prior_v
-        * (state.m_diag * t.match_to_match
-            + state.i_diag * t.indel_to_match
-            + state.d_diag * t.indel_to_match);
+    let m = prior_v * (state.m_diag * t.match_to_match + state.indel_diag * t.indel_to_match);
     let i = up_m * t.match_to_insertion + up_i * t.gap_continuation;
     let d = state.m * t.match_to_deletion + state.d * t.gap_continuation;
     let (m, i, d) = (flush(m), flush(i), flush(d));
@@ -334,7 +332,7 @@ fn step<L: Lane>(
     *buffers.i.get_mut(store_at)? = i.last();
     *buffers.d.get_mut(store_at)? = d.last();
 
-    *state = State { m, i, d, m_diag: up_m, i_diag: up_i, d_diag: up_d };
+    *state = State { m, i, d, m_diag: up_m, indel_diag: up_indel };
     Some((m, i, d))
 }
 
@@ -384,14 +382,16 @@ pub(crate) fn strip_kernel<L: Lane>(
         let r0 = 1 + s * L::LANES;
         // The row above this strip, `r0 - 1`, is where the scale changes
         // every `STRIP_ROWS` rows; `crossing_max` is that row's maximum.
-        let lift = if (r0 - 1) % STRIP_ROWS == 0 {
+        let shift = if (r0 - 1) % STRIP_ROWS == 0 {
             let shift = normalising_shift_f32(crossing_max);
             exponent += shift;
-            exp2_f32(shift)
+            shift
         } else {
-            1.0
+            0
         };
-        crossing_max = 0.0;
+        // The lanewise maximum of every step's cells; only its last lane, the
+        // row that crosses into the next strip, is read.
+        let mut running = zero;
 
         let Some(sweep) = Sweep::new(shape, band, r0, L::LANES) else {
             // No cell of these rows is inside the band. The row buffer is
@@ -441,7 +441,7 @@ pub(crate) fn strip_kernel<L: Lane>(
             return Log10Likelihood::IMPOSSIBLE;
         };
         let strip = Strip {
-            row: RowLanes { base: row_base, matched, mismatched },
+            row: RowLanes::new(row_base, matched, mismatched),
             transitions: TransitionLanes {
                 match_to_match,
                 match_to_insertion,
@@ -455,7 +455,6 @@ pub(crate) fn strip_kernel<L: Lane>(
             rate,
             unconverted,
             reach,
-            lift,
         };
 
         // The buffer slice this sweep touches, from the column the first step
@@ -470,6 +469,18 @@ pub(crate) fn strip_kernel<L: Lane>(
             return Log10Likelihood::IMPOSSIBLE;
         };
         let mut buffers = Buffers { m, i, d };
+
+        // Bring the row above onto this strip's scale. The strip reads
+        // columns `first - 1..=last`, at offsets `LANE_MAX - 2..`; whatever
+        // lies outside is zero or never read again.
+        if shift != 0 {
+            let lift = exp2_f32(shift);
+            for buffer in [&mut *buffers.m, &mut *buffers.i, &mut *buffers.d] {
+                for cell in buffer.iter_mut().skip(LANE_MAX - 2) {
+                    *cell *= lift;
+                }
+            }
+        }
 
         // Before the first step, `diag` is the row above at column `first -
         // 1` in lane 0 and zero elsewhere: every other lane's diagonal
@@ -486,9 +497,8 @@ pub(crate) fn strip_kernel<L: Lane>(
             m: zero,
             i: zero,
             d: zero,
-            m_diag: zero.shift_in(above_m * lift),
-            i_diag: zero.shift_in(above_i * lift),
-            d_diag: zero.shift_in(above_d * lift),
+            m_diag: zero.shift_in(above_m),
+            indel_diag: zero.shift_in(above_i + above_d),
         };
 
         // The last strip holds the read's last row in one lane; its match
@@ -514,7 +524,7 @@ pub(crate) fn strip_kernel<L: Lane>(
             else {
                 return Log10Likelihood::IMPOSSIBLE;
             };
-            crossing_max = crossing_max.max(m.last()).max(i.last()).max(d_cells.last());
+            running = running.vmax(m).vmax(i).vmax(d_cells);
             if let Some(keep) = summed {
                 total = total + keep.select(m + i, zero);
             }
@@ -523,6 +533,7 @@ pub(crate) fn strip_kernel<L: Lane>(
             }
             d += 1;
         }
+        crossing_max = running.last();
 
         // Column 0 belongs to the free start alone: every row below row 0 is
         // zero there. The eight-lane strip's last lane stores it, as a
