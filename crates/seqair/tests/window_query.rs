@@ -68,7 +68,7 @@ fn window(around: Pos0, flank: u32) -> (Pos0, Pos0) {
 fn query_matches_brute_force_on_real_reads() {
     let mut readers = open();
     let segment = segment(&readers);
-    let mut pileup = readers.pileup(&segment, DepthLimit::Unlimited).unwrap();
+    let mut pileup = readers.pileup(&segment, DepthLimit::Unlimited).run().unwrap();
 
     let mut sampled = 0usize;
     let mut non_empty = 0usize;
@@ -144,7 +144,7 @@ fn shift_leading_base(store: &mut RecordStore) -> BTreeMap<(Vec<u8>, Pos0), Pos0
     moved
 }
 
-// r[verify unified.readers_pileup_store_mutation+3]
+// r[verify unified.readers_pileup_store_mutation+4]
 // r[verify record_store.window_query]
 /// The two features composed: a hook that moves reads and reads the
 /// reference, then the query over the re-sorted store. The indices name the
@@ -159,13 +159,15 @@ fn query_after_a_realigning_hook_names_the_moved_reads() {
     let mut moved = BTreeMap::new();
     let mut reference: Vec<Base> = Vec::new();
     let mut pileup = readers
-        .pileup_with(&segment, DepthLimit::Unlimited, |store, ref_seq| {
+        .pileup(&segment, DepthLimit::Unlimited)
+        .mutate(|store, ref_seq| {
             moved = shift_leading_base(store);
             assert_eq!(ref_seq.start_pos(), seg_start, "the hook sees the segment's reference");
             reference = (seg_start.as_u32()..=seg_end.as_u32())
                 .map(|p| ref_seq.base_at(Pos0::new(p).unwrap()))
                 .collect();
         })
+        .run()
         .unwrap();
     assert!(!moved.is_empty(), "the fixture has reads with a leading M");
 

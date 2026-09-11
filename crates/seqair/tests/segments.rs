@@ -61,7 +61,7 @@ fn pileup_single(
     let mut plan = readers.segments((contig, start, end), opts).unwrap();
     let segment = plan.next().expect("at least one segment");
     assert!(plan.next().is_none(), "single-tile setup should yield exactly one segment");
-    let mut engine = readers.pileup(&segment, DepthLimit::Unlimited).unwrap();
+    let mut engine = readers.pileup(&segment, DepthLimit::Unlimited).run().unwrap();
     let mut out = Vec::new();
     while let Some(col) = engine.pileups() {
         out.push(ColumnSnapshot {
@@ -95,7 +95,7 @@ fn pileup_segmented(
     let mut out = Vec::new();
     for segment in &plan {
         let core = segment.core_range();
-        let mut engine = readers.pileup(segment, DepthLimit::Unlimited).unwrap();
+        let mut engine = readers.pileup(segment, DepthLimit::Unlimited).run().unwrap();
         while let Some(col) = engine.pileups() {
             if !core.contains(&col.pos()) {
                 continue;
@@ -116,7 +116,7 @@ const REGION_START: u32 = 6_103_500;
 const REGION_END: u32 = 6_106_500;
 
 // r[verify unified.readers_segments]
-// r[verify unified.readers_pileup]
+// r[verify unified.readers_pileup+1]
 #[test]
 fn segmented_pileup_equals_single_pileup_no_overlap() {
     let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
@@ -128,7 +128,7 @@ fn segmented_pileup_equals_single_pileup_no_overlap() {
 }
 
 // r[verify unified.readers_segments]
-// r[verify unified.readers_pileup]
+// r[verify unified.readers_pileup+1]
 #[test]
 fn segmented_pileup_equals_single_pileup_with_overlap() {
     let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();

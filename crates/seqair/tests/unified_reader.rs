@@ -299,7 +299,7 @@ fn indexed_reader_open_rejects_cram_without_fasta() {
 
 // r[verify unified.readers_struct]
 // r[verify unified.readers_open]
-// r[verify unified.readers_accessors]
+// r[verify unified.readers_accessors+1]
 #[test]
 fn readers_open_bam() {
     let readers =

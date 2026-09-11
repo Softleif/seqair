@@ -228,9 +228,34 @@ chromosome in one call without thinking about tile size.
 >   `Readers`, so callers can build the plan once and re-acquire `&mut self`
 >   for each `pileup(&segment)` call.
 
-> r[unified.readers_pileup]
-> `Readers::pileup(segment: &Segment) -> Result<PileupEngine<E::Extra>, ReaderError>`
-> is the only entry point for driving a pileup. It MUST:
+> r[unified.pileup_plan]
+> `Readers::pileup(segment: &Segment, depth: DepthLimit) -> Pileup<'_, E>` MUST
+> return a *plan* rather than a started pileup: it records the borrow and the
+> arguments and reads nothing. `Pileup::run()` MUST be the only thing that
+> executes it, and the plan MUST be `#[must_use]` so a caller who forgets is
+> told.
+>
+> The plan MUST carry two independent options, either, both, or neither of
+> which may be set, in any order:
+>
+> - `with_reference(RefSeq)` — r[`unified.readers_pileup_supplied_reference+1`]
+> - `mutate(F)` — r[`unified.readers_pileup_store_mutation+4`]
+>
+> This is why it is a plan. The three separate methods it replaces
+> (`pileup`, `pileup_with`, `pileup_with_reference`) covered three of the four
+> combinations; the fourth — a caller that both holds the region's bases and
+> rewrites the store against them, which is exactly what a tiled slow path
+> does — had no spelling at all, even though the private implementation
+> already supported it. A fourth method would have been the wrong fix: the
+> options are independent, so they belong on a plan, not in a method name.
+>
+> Setting an option twice MUST keep the last value; `mutate` MUST be generic
+> over the mutator's type rather than boxing it, so a hook costs no
+> indirection and a plan without one costs no allocation.
+
+> r[unified.readers_pileup+1]
+> `Pileup::run() -> Result<PileupGuard<'_, E::Extra>, ReaderError>` is the only
+> path that drives a pileup. It MUST:
 >
 > 1. **Validate header consistency.** Look up `segment.contig()` against the
 >    current header. If `header.tid(segment.contig().as_str())` does not
@@ -259,14 +284,14 @@ chromosome in one call without thinking about tile size.
 >    construct a `PileupEngine<E::Extra>` with the fetched reference
 >    sequence pre-attached via `set_reference_seq`.
 >
-> No separate `apply_customize` pass is needed. The returned engine is
-> ready for `pileups()` iteration with no further configuration required.
-> There MUST NOT be a `pileup(tid, start, end)` overload — callers wanting
-> a one-shot region build a `Segment` via `Readers::segments`.
+> No separate `apply_customize` pass is needed. The returned guard derefs to
+> an engine ready for `pileups()` iteration with no further configuration
+> required. There MUST NOT be a `pileup(tid, start, end)` overload — callers
+> wanting a one-shot region build a `Segment` via `Readers::segments`.
 
-> r[unified.readers_pileup_store_mutation+3]
-> `Readers::pileup_with(segment, depth, mutate)` MUST behave exactly as
-> `r[unified.readers_pileup]` except that `mutate` is run on the freshly
+> r[unified.readers_pileup_store_mutation+4]
+> `Pileup::mutate(f)` MUST make `run` behave exactly as
+> `r[unified.readers_pileup+1]` except that `f` is run on the freshly
 > fetched `RecordStore` after step 3 — once the reference is in hand — and
 > before the engine is constructed in step 4, and the store MUST be re-sorted
 > by position afterwards. This is the hook for in-place local realignment: the
@@ -274,8 +299,11 @@ chromosome in one call without thinking about tile size.
 > `(pos, CIGAR)` pair — for example from a POA consensus — and the pileup that
 > follows MUST see the rewritten alignments.
 >
-> `mutate` receives `(&mut RecordStore<E::Extra>, &RefSeq)`. The `RefSeq` MUST
-> be the very value attached to the engine in step 4, so `ref_seq.base_at(pos)`
+> The mutator receives `(&mut RecordStore<E::Extra>, &RefSeq)`. The `RefSeq`
+> MUST be the very value attached to the engine in step 4 — whether it was
+> fetched in step 3 or supplied by
+> `r[unified.readers_pileup_supplied_reference+1]`, which composes with this
+> option — so `ref_seq.base_at(pos)`
 > inside the mutator equals `PileupColumn::reference_base()` at every column the
 > pileup later yields — a hook that normalises or rescores alignments against
 > the reference reads it from here and never loads its own, and a hook with no
@@ -289,24 +317,27 @@ chromosome in one call without thinking about tile size.
 > which is indistinguishable from a genuine `N`.
 >
 > Positions may change freely because of the re-sort; query length MUST NOT,
-> and `set_alignment` enforces that. Buffer reuse (`r[unified.readers_pileup]`
-> step 4 and the guard's store recovery) MUST be preserved unchanged: taking
-> the mutation hook MUST NOT cost an allocation that `pileup()` avoids.
+> and `set_alignment` enforces that. Buffer reuse
+> (`r[unified.readers_pileup+1]` step 4 and the guard's store recovery) MUST be
+> preserved unchanged: taking the mutation hook MUST NOT cost an allocation a
+> plan without one avoids.
 >
-> A mutator that changes nothing MUST yield exactly the columns `pileup()`
-> yields.
+> A mutator that changes nothing MUST yield exactly the columns a plan without
+> one yields.
 >
 > Because the hook runs after step 3, it does not run at all when the reference
 > fetch fails: the caller gets the error and a store the hook never touched.
 > Up to `+1` the hook ran between steps 2 and 3, before the reference was
 > fetched, which forced a hook that rescores against the reference to load a
 > second copy of it; `+2` moved the hook after the fetch and added a second
-> entry point that passed the reference, `+3` folded that into the one hook.
+> entry point that passed the reference, `+3` folded that into the one hook,
+> `+4` moved it from the `pileup_with` method onto the plan, where it composes
+> with a supplied reference.
 
-> r[unified.readers_pileup_supplied_reference]
-> `Readers::pileup_with_reference(segment, depth, ref_seq: RefSeq)` MUST behave
-> exactly as `r[unified.readers_pileup]` except that step 3 — the FASTA fetch —
-> is skipped and `ref_seq` is attached to the engine instead. A caller that
+> r[unified.readers_pileup_supplied_reference+1]
+> `Pileup::with_reference(ref_seq: RefSeq)` MUST make `run` behave exactly as
+> `r[unified.readers_pileup+1]` except that step 3 — the FASTA fetch — is
+> skipped and `ref_seq` is attached to the engine instead. A caller that
 > already holds the region's bases (typically because its own analysis needs
 > them) can then drive every sub-segment pileup of that region from a single
 > fetch, rather than re-reading and re-decoding the same interval once per
@@ -321,6 +352,10 @@ chromosome in one call without thinking about tile size.
 >
 > Because `RefSeq` resolves absolute positions, one reference spanning a whole
 > region is valid for every sub-segment within it — no per-segment slicing.
+>
+> The supplied reference is also the one a `mutate` hook sees
+> (`r[unified.readers_pileup_store_mutation+4]`). Up to `+0` this was the
+> `pileup_with_reference` method, which could not be combined with a hook.
 
 
 r[unified.fetch_into_customized]
@@ -329,12 +364,12 @@ Each format reader (`IndexedBamReader`, `IndexedSamReader`, `IndexedCramReader`,
 r[unified.fetch_counts]
 `FetchCounts` MUST be `#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]` with `fetched: usize` and `kept: usize` fields. `kept <= fetched` MUST always hold. The struct is re-exported from `crate::reader::FetchCounts` for callers that need to report filter statistics.
 
-> r[unified.readers_accessors]
+> r[unified.readers_accessors+1]
 > `Readers` MUST expose:
 >
 > - `header() -> &BamHeader` — delegates to the alignment reader's header.
 > - `segments(target, opts) -> Result<impl Iterator<Item = Segment>>` — see `r[unified.readers_segments]`. The only way to obtain a `Segment`.
-> - `pileup(&Segment) -> Result<PileupEngine<E::Extra>>` — see `r[unified.readers_pileup]`.
+> - `pileup(&Segment, DepthLimit) -> Pileup` — the pileup plan; see `r[unified.pileup_plan]` and `r[unified.readers_pileup+1]`.
 > - `fetch_into(tid, start, end, store) -> Result<usize>` — delegates to the alignment reader. Always loads into a `RecordStore<()>` (for custom extras, use `pileup` directly — extras are populated inline at push time).
 > - `fasta() -> &IndexedFastaReader` and `fasta_mut() -> &mut IndexedFastaReader` — direct access for callers that need reference sequences independently of the alignment reader (e.g., the call pipeline's segment fetching).
 > - `alignment() -> &IndexedReader` and `alignment_mut() -> &mut IndexedReader` — direct access when needed.

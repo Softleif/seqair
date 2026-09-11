@@ -17,7 +17,7 @@
 //! hands back their indices without a second fetch, and
 //! [`PileupColumn::find_record`] resolves any of them on the column.
 //!
-//! The hook passed to [`Readers::pileup_with`] sees the same reference the
+//! The hook passed to [`Pileup::mutate`] sees the same reference the
 //! columns will report. It covers the segment, not the reads, so the hook
 //! here counts the reads reaching past either end — the ones whose outer
 //! bases a reference-aware realignment could not score from this `RefSeq`.
@@ -27,7 +27,7 @@
 //!
 //! [`PileupColumn::records_overlapping`]: seqair::bam::pileup::PileupColumn::records_overlapping
 //! [`PileupColumn::find_record`]: seqair::bam::pileup::PileupColumn::find_record
-//! [`Readers::pileup_with`]: seqair::reader::Readers::pileup_with
+//! [`Pileup::mutate`]: seqair::reader::Pileup::mutate
 
 use anyhow::Context;
 use clap::Parser as _;
@@ -84,7 +84,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut past_segment = 0usize;
     let mut pileup = readers
-        .pileup_with(&segment, DepthLimit::Unlimited, |store, ref_seq| {
+        .pileup(&segment, DepthLimit::Unlimited)
+        .mutate(|store, ref_seq| {
             past_segment = store
                 .records()
                 .filter(|rec| !rec.flags.is_unmapped())
@@ -94,7 +95,8 @@ fn main() -> anyhow::Result<()> {
                 })
                 .count();
         })
-        .context("pileup_with failed")?;
+        .run()
+        .context("the pileup failed")?;
     eprintln!(
         "{past_segment} read(s) reach past the segment; the hook's reference does not hold their outer bases"
     );

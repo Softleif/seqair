@@ -7,11 +7,11 @@
     reason = "example"
 )]
 
-//! Realign-then-pileup in a single call via [`Readers::pileup_with`].
+//! Realign-then-pileup in a single call via [`Pileup::mutate`].
 //!
 //! This is the ergonomic counterpart to `realignment.rs`: instead of fetching
 //! into a manual [`RecordStore`], rewriting alignments, and building a
-//! [`PileupEngine`] by hand, [`Readers::pileup_with`] runs a caller-supplied
+//! [`PileupEngine`] by hand, [`Pileup::mutate`] runs a caller-supplied
 //! mutator on the freshly fetched store, re-sorts it, and hands back a pileup
 //! guard — all while preserving the internal buffer reuse of
 //! [`Readers::pileup`]. This is the exact hook a methylation/variant caller
@@ -23,6 +23,8 @@
 //! `pos` right by one — so the example stays focused on the *workflow*, not the
 //! alignment math. It prints the per-column depth before and after so the
 //! effect of the rewrite is visible.
+//!
+//! [`Pileup::mutate`]: seqair::reader::Pileup::mutate
 
 use anyhow::Context;
 use clap::Parser as _;
@@ -34,7 +36,7 @@ use seqair::{
 use seqair_types::{Pos0, RegionString};
 use std::{num::NonZeroU32, path::PathBuf};
 
-/// seqair realign-then-pileup — demonstrates `Readers::pileup_with`.
+/// seqair realign-then-pileup — demonstrates `Pileup::mutate`.
 #[derive(Debug, clap::Parser)]
 struct Cli {
     /// BAM/CRAM file to read (must be indexed).
@@ -90,16 +92,19 @@ fn depth_profile(
     let mut count = 0usize;
     if realign {
         let mut guard = readers
-            .pileup_with(segment, DepthLimit::Unlimited, |store, _ref_seq| {
+            .pileup(segment, DepthLimit::Unlimited)
+            .mutate(|store, _ref_seq| {
                 count = realign_leading_clip(store);
             })
-            .context("pileup_with failed")?;
+            .run()
+            .context("the realigning pileup failed")?;
         while let Some(col) = guard.pileups() {
             profile.push((col.pos().as_u64(), col.depth()));
         }
         eprintln!("realigned {count} record(s)");
     } else {
-        let mut guard = readers.pileup(segment, DepthLimit::Unlimited).context("pileup failed")?;
+        let mut guard =
+            readers.pileup(segment, DepthLimit::Unlimited).run().context("pileup failed")?;
         while let Some(col) = guard.pileups() {
             profile.push((col.pos().as_u64(), col.depth()));
         }

@@ -14,9 +14,21 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
 - **`RegionBuf` streams a bounded sliding window** instead of loading whole regions.
   It now borrows the reader, so it gained a lifetime and a required generic type parameter (`RegionBuf<'a, _>`),
   no longer implements `UnwindSafe`, and `RegionBuf::load` was removed (use `ensure_available` / `advance_range`).
-- **`Readers::pileup` now takes a `DepthLimit`** (it previously took just the `Segment`).
-  Supplying reference bases or rewriting the store first moved to the new `pileup_with_reference` /
-  `pileup_with` methods instead.
+- **`Readers::pileup(segment, depth)` returns a `Pileup` plan, not a started pileup** — finish it with
+  `.run()`. It previously took just the `Segment` and returned the guard directly.
+  `pileup_with` and `pileup_with_reference` are gone: they are `.mutate(f)` and `.with_reference(r)` on the
+  plan, in any order and in any combination. The combination — a caller that both holds the region's bases
+  and rewrites the store against them — had no spelling before, though the private implementation already
+  supported it.
+- **Record-store indices are the `RecordIdx` newtype, not bare `u32`.**
+  Changed: `RecordStore::{record, try_record, qname, cigar, seq, seq_at, qual, aux, extra, extra_mut,
+  set_alignment, set_template_len, set_mate_info, mate_overlap}`, the `Option<RecordIdx>` returned by
+  `push_raw`/`push_fields`, `SlimRecord::mate_idx()`, `PileupAlignment::{record_idx, mate_idx}`,
+  `PileupColumn::{find_record, position_of}`, every `records_overlapping`, and
+  `BamWriter::write_store_record`. `u32::MAX` is not a representable index, which makes
+  `Option<RecordIdx>` free and retires the `u32::MAX` "no mate" sentinel on both mate fields.
+  New: `RecordStore::try_record` (`None` past the store's end — `record` panics there, documented) and
+  `RecordStore::indices()` in place of `0..store.len() as u32`.
 - **`PileupAlignment`** does not expose `strand` anymore. Use `Strand::from(rec.flags)` (or your own logic) instead.
 - **Unmapped-read filtering unified on `filter_raw`.**
   Removed `IndexedBamReader::keep_unmapped` / `keeps_unmapped`.
@@ -77,15 +89,16 @@ Highlights: a streaming-window rewrite of the BAM region reader, a unified filte
 - VCF FORMAT parity: `FormatInts`, `FormatString`, array-of-floats; percent-encode FORMAT string values;
   O(1) duplicate-field detection with htslib-compatible in-place overwrite.
 - `Writer::finish` returns a self-serializing `CoordinateIndex`.
-- `Readers::pileup_with(mutator)` runs a caller-supplied mutation on the freshly fetched `RecordStore`
+- `Pileup::mutate(mutator)` runs a caller-supplied mutation on the freshly fetched `RecordStore`
   (then re-sorts by position) — the hook for in-place local realignment via `RecordStore::set_alignment`.
   The mutator also receives the segment's `RefSeq`, the very one the engine later reports through
   `PileupColumn::reference_base`, so a hook that rescores or normalises alignments against the reference
   never loads its own copy; it covers the segment, not the reads, so read past its ends with
   `RefSeq::try_base_at`. The hook runs after the reference fetch, so it does not run when that fetch fails.
-  `Readers::pileup_with_reference(&RefSeq)` drives the engine from a reference the caller already holds
+  `Pileup::with_reference(RefSeq)` drives the engine from a reference the caller already holds
   instead of re-reading the FASTA per segment, rejecting one that doesn't cover the segment
-  (`ReaderError::SuppliedReferenceTooSmall`).
+  (`ReaderError::SuppliedReferenceTooSmall`) — and a hook set alongside it reads that reference, not a
+  second fetch.
 - Window query over a prepared store: `PileupInput::records_overlapping(start, end)`, and the same on
   `PileupEngine` (between columns) and `PileupColumn` (while holding one), yield the indices of the mapped
   records whose alignment overlaps an inclusive span, ascending — a binary search over a running maximum

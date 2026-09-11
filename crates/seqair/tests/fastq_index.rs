@@ -404,7 +404,7 @@ fn readers_pileup_with_a_fastq_reference_matches_the_fasta() {
         let segments: Vec<_> =
             readers.segments("chr1", SegmentOptions::default()).unwrap().collect();
         for segment in segments {
-            let mut pileup = readers.pileup(&segment, DepthLimit::Unlimited).unwrap();
+            let mut pileup = readers.pileup(&segment, DepthLimit::Unlimited).run().unwrap();
             while let Some(col) = pileup.pileups() {
                 out.push((col.pos().as_u64(), col.reference_base()));
             }

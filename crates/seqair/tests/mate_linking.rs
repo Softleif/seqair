@@ -1130,7 +1130,7 @@ fn link_counts_through_readers(path: &Path) -> (usize, usize, usize) {
         .expect("one segment");
 
     let (mut alignments, mut linked, mut in_overlap) = (0, 0, 0);
-    let mut engine = readers.pileup(&segment, DepthLimit::Unlimited).expect("pileup");
+    let mut engine = readers.pileup(&segment, DepthLimit::Unlimited).run().expect("pileup");
     while let Some(col) = engine.pileups() {
         for aln in col.raw_alignments() {
             alignments += 1;

@@ -598,7 +598,7 @@ fn pileup_with_reference(c: &mut Criterion) {
         let mut total_depth: u64 = 0;
         let mut mismatches: u64 = 0;
         for seg in &segments {
-            let mut p = readers.pileup(seg, DepthLimit::Unlimited).unwrap();
+            let mut p = readers.pileup(seg, DepthLimit::Unlimited).run().unwrap();
             while let Some(col) = p.pileups() {
                 total_depth += col.depth() as u64;
                 let ref_base = col.reference_base();
@@ -723,7 +723,7 @@ fn pileup_tiled(c: &mut Criterion) {
         let mut columns: u64 = 0;
         let mut bases: u64 = 0;
         for seg in &segments {
-            let mut p = readers.pileup(seg, cap).unwrap();
+            let mut p = readers.pileup(seg, cap).run().unwrap();
             while let Some(col) = p.pileups() {
                 // Tiles overlap, so count each column once — the totals have to
                 // be identical across tile sizes for the comparison to mean

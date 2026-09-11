@@ -19,7 +19,7 @@ mod fuzz;
 pub use crate::bam::depth_cap::{DepthCap, DepthLimit};
 pub use formats::FormatDetectionError;
 pub use indexed::{FetchCounts, IndexedReader};
-pub use readers::Readers;
+pub use readers::{Pileup, Readers};
 pub use resolve::{ResolveTid, Tid, TidError};
 pub use segment::{IntoSegmentTarget, Segment, SegmentOptions, SegmentOptionsError, Segments};
 
