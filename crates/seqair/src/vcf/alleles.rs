@@ -79,13 +79,7 @@ impl Alleles {
         if ref_base == alt_base {
             return Err(AllelesError::SnvAltEqualsRef);
         }
-        Ok(Self::Snv {
-            ref_base,
-            alt_bases: {
-                use seqair_types::smallvec::smallvec;
-                smallvec![alt_base]
-            },
-        })
+        Ok(Self::Snv { ref_base, alt_bases: SmallVec::from([alt_base]) })
     }
 
     /// Multi-allelic SNV. Returns error if empty, any alt equals ref, or duplicates.
@@ -163,15 +157,9 @@ impl Alleles {
                 for b in inserted {
                     s.push(b.as_char());
                 }
-                {
-                    use seqair_types::smallvec::smallvec;
-                    smallvec![SmolStr::from(s)]
-                }
+                SmallVec::from([SmolStr::from(s)])
             }
-            Self::Deletion { anchor, .. } => {
-                use seqair_types::smallvec::smallvec;
-                smallvec![SmolStr::from(anchor.as_str())]
-            }
+            Self::Deletion { anchor, .. } => SmallVec::from([SmolStr::from(anchor.as_str())]),
             Self::Complex { alt_alleles, .. } => alt_alleles.clone(),
         }
     }
@@ -264,7 +252,6 @@ impl Alleles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seqair_types::smallvec::smallvec;
 
     // r[verify vcf_record.alleles_typed]
     #[test]
@@ -354,7 +341,7 @@ mod tests {
     fn complex_alleles() {
         let a = Alleles::complex(
             SmolStr::from("ACG"),
-            smallvec![SmolStr::from("TCC"), SmolStr::from("A")],
+            SmallVec::from([SmolStr::from("TCC"), SmolStr::from("A")]),
         );
         assert_eq!(a.ref_text(), "ACG");
         assert_eq!(a.alt_texts().len(), 2);
@@ -369,7 +356,7 @@ mod tests {
         assert_eq!(Alleles::snv(Base::A, Base::T).unwrap().rlen(), 1);
         assert_eq!(Alleles::insertion(Base::A, &[Base::C, Base::G]).unwrap().rlen(), 1);
         assert_eq!(Alleles::deletion(Base::A, &[Base::C, Base::G]).unwrap().rlen(), 3);
-        assert_eq!(Alleles::complex(SmolStr::from("ACGT"), smallvec![]).rlen(), 4);
+        assert_eq!(Alleles::complex(SmolStr::from("ACGT"), SmallVec::new()).rlen(), 4);
     }
 
     // r[verify vcf_record.alleles_serialization]
@@ -384,7 +371,7 @@ mod tests {
             Alleles::deletion(Base::T, &[Base::A, Base::C]).unwrap(),
             Alleles::complex(
                 SmolStr::from("ACG"),
-                smallvec![SmolStr::from("T"), SmolStr::from("GG")],
+                SmallVec::from([SmolStr::from("T"), SmolStr::from("GG")]),
             ),
         ];
         for alleles in &cases {

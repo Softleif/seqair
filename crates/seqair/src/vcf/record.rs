@@ -17,26 +17,28 @@ pub struct Genotype {
 impl Genotype {
     /// Unphased diploid genotype (e.g., 0/1).
     pub fn unphased(allele0: u16, allele1: u16) -> Self {
-        use seqair_types::smallvec::smallvec;
-        Self { alleles: smallvec![Some(allele0), Some(allele1)], phased: smallvec![false] }
+        Self {
+            alleles: SmallVec::from([Some(allele0), Some(allele1)]),
+            phased: SmallVec::from([false]),
+        }
     }
 
     /// Phased diploid genotype (e.g., 0|1).
     pub fn phased_diploid(allele0: u16, allele1: u16) -> Self {
-        use seqair_types::smallvec::smallvec;
-        Self { alleles: smallvec![Some(allele0), Some(allele1)], phased: smallvec![true] }
+        Self {
+            alleles: SmallVec::from([Some(allele0), Some(allele1)]),
+            phased: SmallVec::from([true]),
+        }
     }
 
     /// Haploid genotype (e.g., 0).
     pub fn haploid(allele: u16) -> Self {
-        use seqair_types::smallvec::smallvec;
-        Self { alleles: smallvec![Some(allele)], phased: smallvec![] }
+        Self { alleles: SmallVec::from([Some(allele)]), phased: SmallVec::new() }
     }
 
     /// Missing genotype (./.  ).
     pub fn missing_diploid() -> Self {
-        use seqair_types::smallvec::smallvec;
-        Self { alleles: smallvec![None, None], phased: smallvec![false] }
+        Self { alleles: SmallVec::from([None, None]), phased: SmallVec::from([false]) }
     }
 }
 
