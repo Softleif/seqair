@@ -174,6 +174,25 @@ fn example_realign_pileup() {
 }
 
 #[test]
+fn example_active_region() {
+    let bam = test_data("tests/data/test.bam");
+    let fasta = test_data("tests/data/test.fasta.gz");
+    let output = run_example("active_region", &[&bam, &fasta, "-r", "chr19:6103076-6106500"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("reach past the segment"), "should report the hook's reference coverage");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "region\ttrigger_pos\tdepth\tspanning\tfully_spanning", "first line is the header");
+    assert!(lines.len() > 1, "the fixture region should trigger at least one active region");
+    let fields: Vec<&str> = lines[1].split('\t').collect();
+    assert_eq!(fields.len(), 5, "data lines have 5 columns, got: {}", lines[1]);
+    let spanning: usize = fields[3].parse().expect("spanning is a count");
+    let fully: usize = fields[4].parse().expect("fully_spanning is a count");
+    assert!(spanning >= fully, "fully spanning reads are a subset of spanning reads");
+    assert!(spanning > 0, "a triggered column has at least the triggering read in its window");
+}
+
+#[test]
 fn example_base_mods() {
     let bam = test_data("tests/data/test.bam");
     // base_mods needs a region with MM/ML tags — the test BAM has them
