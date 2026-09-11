@@ -92,24 +92,28 @@ fn samtools_faidx(path: &Path) {
 /// copied rather than rebuilt.
 pub fn plain_fasta() -> PathBuf {
     let out = scratch("test.fasta");
-    if out.exists() {
+    let fai = scratch("test.fasta.fai");
+    // Both halves are checked, not just the FASTA: a scratch directory holding
+    // the FASTA without its index used to satisfy the early return and then
+    // fail at open, which is not a state the bench can recover from and not
+    // one the error names.
+    if out.exists() && fai.exists() {
         return out;
     }
     std::fs::create_dir_all(scratch_root()).unwrap();
-    let src = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.gz");
-    let dest = std::fs::File::create(&out).unwrap();
-    let status = Command::new("bgzip")
-        .arg("-dc")
-        .arg(src)
-        .stdout(dest)
-        .status()
-        .expect("bgzip must be on PATH");
-    assert!(status.success(), "bgzip decompress failed");
-    std::fs::copy(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.fai"),
-        scratch("test.fasta.fai"),
-    )
-    .unwrap();
+    if !out.exists() {
+        let src = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.gz");
+        let dest = std::fs::File::create(&out).unwrap();
+        let status = Command::new("bgzip")
+            .arg("-dc")
+            .arg(src)
+            .stdout(dest)
+            .status()
+            .expect("bgzip must be on PATH");
+        assert!(status.success(), "bgzip decompress failed");
+    }
+    std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.fai"), &fai)
+        .unwrap();
     out
 }
 
