@@ -351,15 +351,19 @@ fn code(base: Base) -> f32 {
 /// are the split that makes the per-cell work a handful of lanewise selects.
 ///
 /// The row tracks are indexed by read row, which is the axis an anti-diagonal
-/// runs along. The column tracks are **reversed** -- index `h - 1 - j` holds
-/// the column a cell at haplotype position `j` reads -- because `j` runs down
-/// an anti-diagonal while `i` runs up, and reversing is what makes the
-/// haplotype a second ascending contiguous load rather than a gather. Index
-/// `h` is the `j == 0` boundary column, which has no site; the kernel masks
-/// that cell to zero, so the padding there only has to be finite.
+/// runs along. The column tracks are **reversed** -- index `COLUMN_FRONT + h -
+/// 1 - j` holds the column a cell at haplotype position `j` reads -- because
+/// `j` runs down an anti-diagonal while `i` runs up, and reversing is what
+/// makes the haplotype a second ascending contiguous load rather than a
+/// gather. Index `COLUMN_FRONT + h` is the `j == 0` boundary column, which has
+/// no site; the kernel masks that cell to zero, so the padding there only has
+/// to be finite.
 ///
 /// Every track carries [`TRACK_SLACK`] entries past its live range so that
-/// the last window a diagonal loads is still in bounds.
+/// the last window a diagonal loads is still in bounds, and the column tracks
+/// carry [`COLUMN_FRONT`] entries before it: a lane that has run past the
+/// end of the haplotype loads from there, masked, and the window it loads
+/// still has to exist.
 #[derive(Debug, Default)]
 struct Plan {
     rows: RowTracks,
@@ -411,7 +415,7 @@ impl Plan {
     ) -> Option<()> {
         let (h, r) = (haplotype.len(), read.len());
         let rows = r + 1 + TRACK_SLACK;
-        let columns = h + 1 + TRACK_SLACK;
+        let columns = COLUMN_FRONT + h + 1 + TRACK_SLACK;
 
         let RowTracks {
             base,
@@ -460,7 +464,7 @@ impl Plan {
         for index in 0..h {
             let weights = emission.site_weights(haplotype.site(index)?, strand);
             let site_base = code(weights.base);
-            let reversed = h - 1 - index;
+            let reversed = COLUMN_FRONT + h - 1 - index;
             *base.get_mut(reversed)? = site_base;
             match weights.converted {
                 Some(converted_base) => {
@@ -535,6 +539,11 @@ type Window = [f32; LANE_MAX];
 /// Past the last live entry of a plan track: a full chunk of the widest lane
 /// beyond the last cell, and the window that chunk's last lane reads.
 const TRACK_SLACK: usize = 2 * LANE_MAX;
+
+/// Before the first live entry of a column track: one window of the widest
+/// lane, for a lane that reads up to `LANE_MAX - 1` columns past the end of
+/// the haplotype.
+const COLUMN_FRONT: usize = LANE_MAX;
 
 /// Slack below slot zero, so that `diag` and `up` at chunk zero of a diagonal
 /// whose predecessor started one row later still address the buffer.
@@ -976,9 +985,9 @@ fn banded_kernel<L: Lane>(
         let live = if len > 0 && lo + len - 1 == k { len - 1 } else { len };
 
         // Cell `(i, j)` on this diagonal reads haplotype column `j - 1`, which
-        // the plan holds reversed at `h - j = h - k + i`. `i` ascends with the
-        // lane, so this index does too.
-        let column_origin = (hi64 + lo as i64 - ki).max(0) as usize;
+        // the plan holds reversed at `COLUMN_FRONT + h - j`, with `h - j = h -
+        // k + i`. `i` ascends with the lane, so this index does too.
+        let column_origin = COLUMN_FRONT + (hi64 + lo as i64 - ki).max(0) as usize;
 
         let extent = len.div_ceil(L::LANES) * L::LANES;
         let diagonal = Diagonal { lo, back1, back2, column_origin, extent };
@@ -1186,7 +1195,9 @@ mod tests {
                     reason = "the narrowing is what is under test"
                 )]
                 let want = emission.match_probability(site, observation) as f32;
-                let Some((column, row)) = lanes_at(&plan, last - column_index, row_index) else {
+                let Some((column, row)) =
+                    lanes_at(&plan, super::COLUMN_FRONT + last - column_index, row_index)
+                else {
                     return false;
                 };
                 let got = prior::<f32>(column, row);
