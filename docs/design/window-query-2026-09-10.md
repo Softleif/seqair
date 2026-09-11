@@ -1,6 +1,7 @@
 # Window query over a prepared store; the load-time hook sees the reference
 
-2026-09-10, revised 2026-09-11 after review, branch `feature/window-query`.
+2026-09-10, revised 2026-09-11 after review and again after the second
+review round, branch `feature/window-query`.
 Two small features the rastair 3 design asks for
 (`docs/plans/rastair3-design-2026-09-10.md` §7 row C3, §11.2, and §12 E6 in
 the rastair repo).
@@ -17,15 +18,15 @@ overlapping a span without walking the store.
 ```rust
 impl<U> PileupInput<U> {
     pub fn store(&self) -> &RecordStore<U>;
-    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + '_;
+    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = RecordIdx> + '_;
 }
 
 impl<U> PileupEngine<U> {
-    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + '_;
+    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = RecordIdx> + '_;
 }
 
 impl<'eng, U> PileupColumn<'eng, U> {
-    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = u32> + 'eng;
+    pub fn records_overlapping(&self, start: Pos0, end: Pos0) -> impl Iterator<Item = RecordIdx> + 'eng;
 }
 ```
 
@@ -39,10 +40,11 @@ impl<'eng, U> PileupColumn<'eng, U> {
   what the pileup reports. Review caught this: the first version yielded
   them, and nothing in the tests could tell, because the generator never
   made one.
-- Indices come out ascending and are the store's record indices, valid for
-  `RecordStore::record` and for `PileupColumn::find_record` on any column of
-  an engine built from the input. They mean nothing once the engine's store
-  has been reclaimed (guard drop): resolve them before that.
+- Indices come out ascending and are the store's record indices (`RecordIdx`
+  since the second review round), valid for `RecordStore::record` /
+  `try_record` and for `PileupColumn::find_record` on any column of an engine
+  built from the input. They mean nothing once the engine's store has been
+  reclaimed (guard drop): resolve them before that.
 - There is deliberately no such method on `RecordStore`. The query
   binary-searches an index that only exists on a store
   `prepare_for_pileup` has ordered, and a raw store cannot prove it has been
@@ -158,22 +160,35 @@ the reference had to load a second copy.
 
 ```rust
 impl<E: CustomizeRecordStore> Readers<E> {
-    pub fn pileup_with<F>(&mut self, segment: &Segment, depth: DepthLimit, mutate: F)
-        -> Result<PileupGuard<'_, E::Extra>, ReaderError>
-    where F: FnMut(&mut RecordStore<E::Extra>, &RefSeq);
+    pub fn pileup<'a>(&'a mut self, segment: &'a Segment, depth: DepthLimit)
+        -> Pileup<'a, E>;
+}
+
+impl<'a, E: CustomizeRecordStore, F> Pileup<'a, E, F>
+where F: FnMut(&mut RecordStore<E::Extra>, &RefSeq) {
+    pub fn with_reference(self, ref_seq: RefSeq) -> Self;
+    pub fn mutate<G>(self, f: G) -> Pileup<'a, E, G>;
+    pub fn run(self) -> Result<PileupGuard<'a, E::Extra>, ReaderError>;
 }
 ```
 
-`pileup_impl` fetches (or validates the supplied) reference first and runs
-the mutator with `&ref_seq` before `prepare_for_pileup`. The `RefSeq` handed
-to the mutator is the very value attached to the engine, so
+`run` fetches (or validates the supplied) reference first and runs the
+mutator with `&ref_seq` before `prepare_for_pileup`. The `RefSeq` handed to
+the mutator is the very value attached to the engine, so
 `ref_seq.base_at(pos)` in the hook equals `column.reference_base()` later.
 
 The first version kept `pileup_with` with its old one-argument signature and
 added `pileup_mutate` for the two-argument one. seqair has no stable API to
 protect, so the revision has one hook with one signature; a mutator that
-does not need the reference ignores the argument. rastair's E6 hook gains a
-`, _` when it moves to this seqair.
+does not need the reference ignores the argument.
+
+The second review round replaced the three entry points with the plan above.
+`pileup`, `pileup_with` and `pileup_with_reference` covered three of the four
+combinations of the two options; the fourth — hold the region's bases *and*
+realign against them, which is what a tiled slow path does — had no spelling,
+though `pileup_impl` already took both arguments. The options are
+independent, so a fourth method would have been the wrong fix. rastair's E6
+hook becomes `.pileup(seg, depth).mutate(|store, _| …).run()`.
 
 Two consequences worth knowing:
 
@@ -203,24 +218,48 @@ equals the recorded base. The two older `pileup_with` tests (no-op is
 transparent; a soft-clipping realignment is observed) are unchanged apart
 from the extra closure argument.
 
+## 3. Done in the second review round
+
+- **The plan** (§2 above) replaced the three entry points and made the
+  supplied-reference-plus-hook combination expressible.
+- **`RecordIdx`.** The `u32` store indices this query, `find_record`,
+  `record` and `mate_idx` shared are one newtype now, crate-wide.
+  `u32::MAX` is unrepresentable, so `Option<RecordIdx>` is free and both
+  mate-link sentinels are gone. `try_record` resolves a kept index without
+  panicking; `indices()` replaced `0..store.len() as u32`.
+- **`cargo doc -D warnings` in CI**, over the library and the examples. The
+  22 + 7 warnings it was hiding were mostly `r[`rule.id`]` and `[SAM1]`
+  being read as intra-doc links; one was a real rotted link in
+  `simple_variant_caller`'s tutorial.
+
 ## Not done, on purpose
 
-- **`pileup_with_reference` + a mutator.** `pileup_impl` supports the
-  combination; no public method exposes it. If a caller needs both, the
-  clean shape is one builder (`readers.pileup(segment, depth).reference(r)
-  .mutate(f).run()`) replacing the three entry points, not a fourth method.
-- **Reference beyond the segment for the hook.** See above; decide in
-  rastair.
-- **A `RecordIdx` newtype** for the `u32` indices this query, `find_record`
-  and `record` share. Worth doing crate-wide, not here.
+- **Reference beyond the segment for the hook.** Measured on
+  `tests/data/test.bam` (80 bp reads, chr19:6.1–6.2 Mb), the share of reads
+  reaching past their tile — and so with bases the hook's `RefSeq` does not
+  hold — is 27.2 % at a 500 bp tile, 13.9 % at 1 kb, 3.0 % at 5 kb and 0 %
+  at 50 kb. The overhang itself is bounded by the longest read: 79 bases
+  here, at both ends, at every tile size. So the exact fix is known and
+  cheap — after step 2 the store's extent is `min(pos)`/`max(end_pos)`, and
+  widening step 3's fetch to that (clamped to the contig) costs a few
+  hundred bases of FASTA per tile and nothing else; the columns cannot
+  change, because `RefSeq` resolves absolute positions.
+  It is not built because the *policy* is rastair's: a hook that only
+  rescores within the tile wants today's behaviour, and one that realigns
+  whole reads wants the wider fetch. When rastair decides, it is one more
+  option on the plan (`.reference_covers_reads()`), which is exactly the
+  shape the plan exists to accommodate.
 
 ## Next step
 
 In rastair (the rastair 3 slow path, design doc §7 row C3 / §11.2 / §12 E6):
 `col.records_overlapping(start, end)` at a triggering column to gather the
 reads spanning the active region, resolved with `col.store().record(idx)`
-or `find_record` on later columns; `Readers::pileup_with` for the hook, with
-the reference. Before merging into seqair `main`: rebase, run
-`cargo nextest run`, `cargo test --doc --quiet` and
-`cargo clippy --all-targets -- -D warnings`, push, and move rastair's
-`Cargo.lock` seqair pin (its E6 hook needs the extra closure argument).
+or `find_record` on later columns; `.pileup(seg, depth).mutate(f).run()` for
+the hook, with the reference. Before merging into seqair `main`: rebase, run
+`cargo nextest run`, `cargo test --doc --quiet`,
+`cargo clippy --all-targets -- -D warnings` and
+`RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps --all-features --examples`,
+push, and move rastair's `Cargo.lock` seqair pin (its E6 hook needs the
+extra closure argument, `.run()`, and `RecordIdx` wherever it holds a store
+index).
