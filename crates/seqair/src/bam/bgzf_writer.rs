@@ -232,6 +232,7 @@ impl<W: Write> Drop for BgzfWriter<W> {
 
 #[allow(clippy::cast_possible_truncation, reason = "tests")]
 #[allow(clippy::indexing_slicing, reason = "tests")]
+#[allow(clippy::arithmetic_side_effects, reason = "tests")]
 #[cfg(test)]
 mod tests {
     use super::*;
