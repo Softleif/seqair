@@ -85,16 +85,17 @@ impl<W: Write> BgzfWriter<W> {
         reason = "inherent method is the concrete impl; BgzfWrite trait delegates to it for dyn dispatch"
     )]
     pub fn virtual_offset(&self) -> VirtualOffset {
-        debug_assert!(
-            self.buf.len() <= MAX_UNCOMPRESSED_SIZE,
-            "buffer overflow: {} bytes (should never happen)",
-            self.buf.len()
-        );
-        // Buffer can be at most MAX_UNCOMPRESSED_SIZE (65536) which doesn't fit u16.
-        // When buffer is exactly full, flush_block hasn't run yet — cap at 65535.
-        // This is safe: a full buffer will be flushed on the next write_all/flush_if_needed.
-        #[allow(clippy::cast_possible_truncation, reason = "min")]
-        let within = self.buf.len().min(u16::MAX as usize) as u16;
+        // `write_all` flushes the moment the buffer reaches MAX_UNCOMPRESSED_SIZE, so
+        // the length is always representable. Clamping instead would name the block's
+        // last byte — a position one short of the true one, and in the middle of the
+        // record that just ended.
+        let within = u16::try_from(self.buf.len()).unwrap_or_else(|_| {
+            warn!(
+                "BgzfWriter: {} buffered bytes exceed a BGZF block; virtual offset clamped",
+                self.buf.len()
+            );
+            u16::MAX
+        });
         VirtualOffset::new(self.block_offset, within)
     }
 
@@ -121,20 +122,28 @@ impl<W: Write> BgzfWriter<W> {
     )]
     pub fn write_all(&mut self, data: &[u8]) -> Result<(), BgzfError> {
         let mut remaining = data;
-        while !remaining.is_empty() {
+        loop {
             let space = MAX_UNCOMPRESSED_SIZE.saturating_sub(self.buf.len());
-            if space == 0 {
-                self.flush_block()?;
-                continue;
-            }
             let take = remaining.len().min(space);
             #[allow(clippy::indexing_slicing, reason = "take <= remaining.len()")]
             {
                 self.buf.extend_from_slice(&remaining[..take]);
                 remaining = &remaining[take..];
             }
+            // r[impl bgzf.writer.buffer]
+            // Flush the instant the buffer is full, before returning to the caller:
+            // a within-block offset of 65536 does not exist, and the position after
+            // that byte is the *next* block's (offset, 0). Leaving the buffer full
+            // would make `virtual_offset()` name a byte inside the record just
+            // written. Block boundaries are unchanged — the next write would have
+            // flushed here anyway.
+            if self.buf.len() >= MAX_UNCOMPRESSED_SIZE {
+                self.flush_block()?;
+            }
+            if remaining.is_empty() {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 
     /// Compress and emit the current buffer as a BGZF block.
@@ -294,16 +303,90 @@ mod tests {
         assert_eq!(voff1.block_offset(), 0);
         assert_eq!(voff1.within_block(), 9);
 
-        // Fill the block and write one more byte to force a flush
+        // Fill the block exactly; the writer flushes at once (see below)
         let fill = vec![0u8; MAX_UNCOMPRESSED_SIZE - 9];
         writer.write_all(&fill).unwrap();
-        // Buffer is full (64KB) but not yet flushed — flush happens on next write
         writer.write_all(&[0x42]).unwrap();
         let voff2 = writer.virtual_offset();
         assert!(voff2.block_offset() > 0, "should have advanced to a new block");
         assert_eq!(voff2.within_block(), 1, "one byte in the new block");
 
         writer.finish().unwrap();
+    }
+
+    // r[verify bgzf.writer.buffer]
+    // r[verify bgzf.writer.virtual_offset]
+    #[test]
+    fn exactly_full_buffer_flushes_before_returning() {
+        let mut output = Vec::new();
+        let mut writer = BgzfWriter::new(&mut output);
+
+        writer.write_all(&vec![0u8; MAX_UNCOMPRESSED_SIZE]).unwrap();
+
+        let voff = writer.virtual_offset();
+        assert!(voff.block_offset() > 0, "an exactly-full buffer must have been flushed");
+        assert_eq!(
+            voff.within_block(),
+            0,
+            "the position after a block's last byte is the next block's (offset, 0), \
+             never 65535 — that names a byte inside the record just written"
+        );
+
+        writer.finish().unwrap();
+    }
+
+    // r[verify bgzf.writer.virtual_offset]
+    /// Every offset the writer hands out must resolve to the uncompressed byte
+    /// count at that moment. This is what an index co-produced during writing
+    /// records as a record boundary.
+    #[test]
+    fn virtual_offsets_resolve_to_the_uncompressed_position() {
+        // Sizes chosen so one write lands exactly on the 64 KiB boundary.
+        let sizes = [40_000usize, 25_536, 1, 70_000, 300, MAX_UNCOMPRESSED_SIZE];
+        let mut output = Vec::new();
+        let mut writer = BgzfWriter::new(&mut output);
+
+        let mut observed = Vec::new();
+        let mut written = 0usize;
+        let mut payload = Vec::new();
+        for (i, &n) in sizes.iter().enumerate() {
+            let chunk: Vec<u8> = (0..n).map(|j| (j.wrapping_add(i) & 0xFF) as u8).collect();
+            writer.write_all(&chunk).unwrap();
+            payload.extend_from_slice(&chunk);
+            written += n;
+            observed.push((writer.virtual_offset(), written));
+        }
+        writer.finish().unwrap();
+
+        let block_starts = uncompressed_offsets_of_blocks(&output);
+        for (voff, expected) in observed {
+            let base = block_starts
+                .get(&voff.block_offset())
+                .copied()
+                .unwrap_or_else(|| panic!("{voff:?} names no BGZF block in the output"));
+            assert_eq!(
+                base + usize::from(voff.within_block()),
+                expected,
+                "{voff:?} resolves to the wrong uncompressed position"
+            );
+        }
+        assert_eq!(read_all(&output), payload);
+    }
+
+    /// Map each block's compressed file offset to its first uncompressed byte.
+    fn uncompressed_offsets_of_blocks(data: &[u8]) -> std::collections::HashMap<u64, usize> {
+        let mut map = std::collections::HashMap::new();
+        let mut pos = 0usize;
+        let mut uncompressed = 0usize;
+        while pos + 18 <= data.len() {
+            let bsize = u16::from_le_bytes([data[pos + 16], data[pos + 17]]) as usize + 1;
+            let isize_val =
+                u32::from_le_bytes(data[pos + bsize - 4..pos + bsize].try_into().unwrap()) as usize;
+            map.insert(pos as u64, uncompressed);
+            uncompressed += isize_val;
+            pos += bsize;
+        }
+        map
     }
 
     // r[verify bgzf.writer.flush_if_needed]

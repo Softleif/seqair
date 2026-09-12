@@ -78,7 +78,7 @@ r[bgzf.writer]
 The writer MUST accept arbitrary byte sequences and emit valid BGZF blocks. Each block MUST contain a complete gzip member with the `BC` extra subfield, DEFLATE-compressed payload, CRC32 checksum, and ISIZE footer.
 
 r[bgzf.writer.buffer]
-The writer MUST accumulate uncompressed data in an internal buffer (up to 64 KB). When the buffer is full or `flush()` is called, the buffer MUST be compressed into a BGZF block and written to the underlying stream.
+The writer MUST accumulate uncompressed data in an internal buffer (up to 64 KB). When the buffer is full or `flush()` is called, the buffer MUST be compressed into a BGZF block and written to the underlying stream. A write that fills the buffer exactly MUST flush before it returns, so the buffer is never observably full: 65536 is not a within-block offset, and the stream position after a block's last byte is the *next* block's `(offset, 0)`.
 
 r[bgzf.writer.compression]
 Compression MUST use the `libdeflater` crate (matching the reader's decompression backend) with configurable compression level. The default compression level SHOULD be 6 (matching htslib's default).
@@ -87,7 +87,7 @@ r[bgzf.writer.eof_marker]
 `finish()` MUST write the standard 28-byte BGZF EOF marker block after flushing any remaining buffered data. The EOF marker is a valid gzip member with ISIZE=0.
 
 r[bgzf.writer.virtual_offset]
-The writer MUST track virtual offsets. After each block is written, the writer MUST record the compressed file offset of that block. A `virtual_offset()` method MUST return the current write position as a `VirtualOffset` (block offset + within-block offset). The within-block offset MUST be strictly less than 65536; converting buffer length to u16 MUST use checked conversion to prevent silent truncation when the buffer is exactly full.
+The writer MUST track virtual offsets. After each block is written, the writer MUST record the compressed file offset of that block. A `virtual_offset()` method MUST return the current write position as a `VirtualOffset` (block offset + within-block offset). The within-block offset MUST be strictly less than 65536; converting buffer length to u16 MUST use checked conversion, never a clamp, because clamping a full buffer to 65535 names a byte *inside* the record that just ended, and an index built from such an offset seeks readers into the middle of a record (see `r[bgzf.writer.buffer]`).
 
 r[bgzf.writer.flush_if_needed]
 The writer MUST provide a `flush_if_needed(upcoming_bytes)` method that flushes the current block if the upcoming data would exceed the 64 KB uncompressed block limit. This allows callers (e.g., VCF/BCF writers) to keep records from spanning block boundaries when possible, improving seek granularity for index-based random access.
