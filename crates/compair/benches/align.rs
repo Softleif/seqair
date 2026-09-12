@@ -80,8 +80,7 @@ fn align(c: &mut Criterion) {
     // per-alignment cost is the reported time over `n`. The batch arm computes
     // eight lanes whatever `n` is, so this is where its fill shows.
     for count in [2usize, 3, 4, 8] {
-        let group_haplotypes: Vec<&_> =
-            haplotypes.iter().take(count).collect::<Vec<_>>();
+        let group_haplotypes: Vec<&_> = haplotypes.iter().take(count).collect::<Vec<_>>();
         let mut group = c.benchmark_group(format!("align/150x46/{count}-haplotypes"));
         group.bench_function("strips-simd/taps/workspace", |b| {
             let mut workspace = Workspace::new();
@@ -125,6 +124,21 @@ fn align(c: &mut Criterion) {
                             .get()
                     })
                     .sum::<f64>()
+            });
+        });
+        group.bench_function("batch/taps/workspace", |b| {
+            let mut workspace = Workspace::new();
+            let mut out = Vec::with_capacity(count);
+            b.iter(|| {
+                out.clear();
+                workspace.align_batch(
+                    black_box(&group_haplotypes),
+                    black_box(&read),
+                    &taps,
+                    band,
+                    &mut out,
+                );
+                out.iter().map(|s| s.get()).sum::<f64>()
             });
         });
         group.finish();

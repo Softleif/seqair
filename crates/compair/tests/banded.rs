@@ -2,9 +2,10 @@
 mod support;
 
 use compair::{
-    Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, MatchProbability, Probability,
-    Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded, align_banded_simd,
-    align_full, align_strips, align_strips_intrinsics, align_strips_simd, error_probability,
+    BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, MatchProbability,
+    Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded,
+    align_banded_simd, align_full, align_strips, align_strips_intrinsics, align_strips_simd,
+    error_probability,
 };
 use proptest::prelude::*;
 use support::{
@@ -1215,4 +1216,163 @@ fn band_new_rejects_a_width_it_would_have_to_allocate() {
         );
     }
     const { assert!(Band::DEFAULT_WIDTH <= Band::MAX_WIDTH) };
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 1024, ..ProptestConfig::default() })]
+
+    /// The batched kernel's gate: scoring a haplotype in a batch of eight is
+    /// bit-identical to scoring it alone through the scalar strip kernel.
+    ///
+    /// It is a different traversal -- row-wise, one haplotype per lane -- so
+    /// this is not parity by construction the way the two strip lanes are; it
+    /// asserts that the row-wise band, the free start, the flush to zero and
+    /// the renormalisation cadence all land on the strip kernel's numbers.
+    /// The one-lane instance is carried as well, because it and the eight-lane
+    /// one *are* parity by construction and a divergence there would be a lane
+    /// bug rather than a traversal bug.
+    #[test]
+    fn a_batch_is_bit_identical_to_one_alignment_at_a_time(
+        case in arbitrary_case(),
+        conversion in any_conversion(),
+        uniform in any_probability(),
+        spread in 0usize..4,
+    ) {
+        let band = case.band();
+        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+        let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
+        // A ragged batch: each next haplotype is the same one with a few bases
+        // cut off the end, so the lanes do not share a length.
+        let bases = case.haplotype.bases().to_vec();
+        let batch: Vec<Haplotype> = (0..BATCH)
+            .map(|k| Haplotype::new(bases[..bases.len().saturating_sub(k * spread)].to_vec()))
+            .collect();
+        let refs: Vec<&Haplotype> = batch.iter().collect();
+        let mut workspace = Workspace::new();
+        for (name, emission) in [
+            ("standard", &StandardEmission::default() as &dyn ErasedEmission),
+            ("taps", &taps),
+            ("uniform", &uniform),
+        ] {
+            let one_at_a_time: Vec<u64> =
+                refs.iter().map(|h| emission.strips(h, &case.read, band).get().to_bits()).collect();
+            let wide = emission.batch(&mut workspace, &refs, &case.read, band);
+            let scalar = emission.batch_scalar(&mut workspace, &refs, &case.read, band);
+            prop_assert_eq!(
+                &one_at_a_time,
+                &wide.iter().map(|s| s.get().to_bits()).collect::<Vec<_>>(),
+                "{}: strips vs eight-lane batch", name
+            );
+            prop_assert_eq!(
+                &one_at_a_time,
+                &scalar.iter().map(|s| s.get().to_bits()).collect::<Vec<_>>(),
+                "{}: strips vs one-lane batch", name
+            );
+        }
+    }
+}
+
+/// The three emissions the parity test sweeps, behind one object so the test
+/// body is written once. `Emission` is generic, not a trait object, because
+/// the kernels monomorphise on it; this is the test's own indirection.
+trait ErasedEmission {
+    fn strips(&self, haplotype: &Haplotype, read: &Read, band: Band) -> compair::Log10Likelihood;
+    fn batch(
+        &self,
+        workspace: &mut Workspace,
+        haplotypes: &[&Haplotype],
+        read: &Read,
+        band: Band,
+    ) -> Vec<compair::Log10Likelihood>;
+    fn batch_scalar(
+        &self,
+        workspace: &mut Workspace,
+        haplotypes: &[&Haplotype],
+        read: &Read,
+        band: Band,
+    ) -> Vec<compair::Log10Likelihood>;
+}
+
+impl<E: compair::Emission> ErasedEmission for E {
+    fn strips(&self, haplotype: &Haplotype, read: &Read, band: Band) -> compair::Log10Likelihood {
+        align_strips(haplotype, read, self, band)
+    }
+    fn batch(
+        &self,
+        workspace: &mut Workspace,
+        haplotypes: &[&Haplotype],
+        read: &Read,
+        band: Band,
+    ) -> Vec<compair::Log10Likelihood> {
+        let mut out = Vec::new();
+        workspace.align_batch(haplotypes, read, self, band, &mut out);
+        out
+    }
+    fn batch_scalar(
+        &self,
+        workspace: &mut Workspace,
+        haplotypes: &[&Haplotype],
+        read: &Read,
+        band: Band,
+    ) -> Vec<compair::Log10Likelihood> {
+        let mut out = Vec::new();
+        workspace.align_batch_scalar(haplotypes, read, self, band, &mut out);
+        out
+    }
+}
+
+/// The bench's own shape -- a 150 bp read against eight 200 bp candidates --
+/// through the batch, against one strip alignment each. The property test's
+/// reads are under 70 bases, i.e. nine renormalisations; this one runs
+/// nineteen and is the size the shadow path actually scores.
+#[test]
+fn the_bench_shape_batches_to_the_same_bits() {
+    let bases: Vec<Base> = (0..200u32)
+        .scan(0x9e37_79b9_7f4a_7c15u64, |state, _| {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            Some(match *state % 4 {
+                0 => Base::A,
+                1 => Base::C,
+                2 => Base::G,
+                _ => Base::T,
+            })
+        })
+        .collect();
+    let read_bases = bases[25..175].to_vec();
+    let quals: Vec<BaseQuality> =
+        (0..read_bases.len()).map(|i| BaseQuality::from_byte(25 + (i % 15) as u8)).collect();
+    let read = Read::uniform(
+        read_bases,
+        &quals,
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(10),
+        Strand::OT,
+    )
+    .expect("the fixture read must build");
+    let betas: Vec<Probability> = (0..200)
+        .map(|i| Probability::new(f64::from(i % 11) / 10.0).unwrap_or(Probability::ZERO))
+        .collect();
+    let taps = TapsEmission::new(ConversionModel::taps_default(), Betas::PerSite(&betas));
+    let band = Band::anchored(25);
+    let batch: Vec<Haplotype> = (0..BATCH)
+        .map(|variant| {
+            let mut alternative = bases.clone();
+            for edit in 0..variant {
+                if let Some(base) = alternative.get_mut(35 + edit * 17) {
+                    *base = base.inverse();
+                }
+            }
+            Haplotype::new(alternative)
+        })
+        .collect();
+    let refs: Vec<&Haplotype> = batch.iter().collect();
+    let one_at_a_time: Vec<u64> =
+        refs.iter().map(|h| align_strips(h, &read, &taps, band).get().to_bits()).collect();
+    let batched: Vec<u64> =
+        compair::align_batch(&refs, &read, &taps, band).iter().map(|s| s.get().to_bits()).collect();
+    assert_eq!(one_at_a_time, batched);
+    assert!(one_at_a_time.iter().all(|bits| f64::from_bits(*bits).is_finite()));
 }

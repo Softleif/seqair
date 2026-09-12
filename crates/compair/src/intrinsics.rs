@@ -38,9 +38,9 @@ pub(crate) struct Simd8 {
 )]
 mod aarch64 {
     use core::arch::aarch64::{
-        float32x4_t, vaddq_f32, vaddvq_f32, vandq_u32, vbslq_f32, vceqq_f32, vcltq_f32, vdupq_n_f32,
-        vextq_f32, vgetq_lane_f32, vld1q_f32, vmaxq_f32, vmaxvq_f32, vmulq_f32, vorrq_u32,
-        vreinterpretq_f32_u32, vreinterpretq_u32_f32, vsetq_lane_f32, vst1q_f32,
+        float32x4_t, vaddq_f32, vaddvq_f32, vandq_u32, vbslq_f32, vceqq_f32, vcltq_f32,
+        vdupq_n_f32, vextq_f32, vgetq_lane_f32, vld1q_f32, vmaxq_f32, vmaxvq_f32, vmulq_f32,
+        vorrq_u32, vreinterpretq_f32_u32, vreinterpretq_u32_f32, vsetq_lane_f32, vst1q_f32,
     };
 
     use super::Simd8;
@@ -199,9 +199,8 @@ pub(crate) struct Simd8 {
 mod x86 {
     use core::arch::x86_64::{
         _CMP_EQ_OQ, _CMP_LT_OQ, _mm256_add_ps, _mm256_and_ps, _mm256_blendv_ps, _mm256_cmp_ps,
-        _mm256_loadu_ps, _mm256_max_ps, _mm256_mul_ps, _mm256_or_ps,
-        _mm256_permutevar8x32_ps, _mm256_set1_ps, _mm256_setr_epi32, _mm256_setr_ps,
-        _mm256_storeu_ps,
+        _mm256_loadu_ps, _mm256_max_ps, _mm256_mul_ps, _mm256_or_ps, _mm256_permutevar8x32_ps,
+        _mm256_set1_ps, _mm256_setr_epi32, _mm256_setr_ps, _mm256_storeu_ps,
     };
 
     use super::Simd8;
@@ -288,10 +287,8 @@ mod x86 {
         #[inline(always)]
         fn shift_in(self, first: f32) -> Self {
             unsafe {
-                let rotated = _mm256_permutevar8x32_ps(
-                    self.ymm,
-                    _mm256_setr_epi32(7, 0, 1, 2, 3, 4, 5, 6),
-                );
+                let rotated =
+                    _mm256_permutevar8x32_ps(self.ymm, _mm256_setr_epi32(7, 0, 1, 2, 3, 4, 5, 6));
                 let head = _mm256_set1_ps(first);
                 // Lane 0 from `head`, the rest from the rotation.
                 let mask = _mm256_cmp_ps::<_CMP_LT_OQ>(

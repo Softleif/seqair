@@ -1,0 +1,516 @@
+//! One alignment per lane: a batch of haplotypes scored against one read in
+//! lockstep, row by row.
+//!
+//! The two banded kernels put eight *cells of one alignment* in a vector, so
+//! every lane of every step belongs to the same pair -- and pays for it: the
+//! neighbours are lane shifts, the band's edges cross a vector diagonally and
+//! have to be masked lane by lane, and ~23 % of the cells a strip computes are
+//! outside the band. This kernel puts eight *alignments* in a vector instead.
+//! Lane `k` holds candidate haplotype `k` at the same `(row, column)` as every
+//! other lane, so:
+//!
+//! - the three neighbours are the same lane of the previous column and of the
+//!   row buffer -- no shifts at all;
+//! - the band is a property of the row, not of the lane, so the column loop
+//!   *is* the band and there is no per-lane edge mask. What stays is one
+//!   lanewise mask for haplotypes shorter than the longest in the batch;
+//! - the read's row is the same for every lane, so its base, its two emission
+//!   terms and its five transitions are splats held for the whole row;
+//! - the haplotype columns are interleaved across the batch, so lane `k`'s
+//!   column `j` is element `j * BATCH + k` and a column is one contiguous
+//!   load, as in the strip kernel.
+//!
+//! The arithmetic, the order of the operations, the flush to zero, the
+//! power-of-two renormalisation every [`STRIP_ROWS`] rows and the free start
+//! are the strip kernel's, cell for cell. So a batch is bit-identical to
+//! running [`align_strips`] once per haplotype, which is the gate this kernel
+//! is worth nothing without.
+//!
+//! What it does *not* do is make a lane free. A batch of `n < BATCH`
+//! haplotypes computes the full eight lanes and throws `8 - n` away, so the
+//! per-alignment cost falls only with the fill. See the crate's notes for the
+//! step-count algebra.
+//!
+//! [`align_strips`]: crate::align_strips
+//! [`STRIP_ROWS`]: crate::batch::STRIP_ROWS
+
+use wide::f32x8;
+
+use crate::{
+    banded::{
+        Band, CODE_NO_CONVERSION, CODE_NO_PLAIN_MATCH, ColumnLanes, LANE_MAX, Lane, RowLanes,
+        TransitionLanes, Window, Workspace, code, prior, reset,
+    },
+    emission::Emission,
+    haplotype::Haplotype,
+    read::Read,
+    scaling::{exp2_f32, normalising_shift_f32},
+    types::Log10Likelihood,
+};
+
+/// Alignments per batch: the lane count, which is what the whole kernel is.
+pub const BATCH: usize = LANE_MAX;
+
+/// Rows between two renormalisations. The strip kernel's constant, and it has
+/// to be, or the two would not round the same way.
+const STRIP_ROWS: usize = LANE_MAX;
+
+/// Per read row, exactly the strip kernel's row tracks; every lane reads the
+/// same entry, so they are scalars here rather than vectors.
+#[derive(Debug, Default)]
+struct Rows {
+    base: Vec<f32>,
+    /// `(1 - eps) - eps / 3`, as in `banded::RowTracks`.
+    spread: Vec<f32>,
+    mismatched: Vec<f32>,
+    match_to_match: Vec<f32>,
+    match_to_insertion: Vec<f32>,
+    match_to_deletion: Vec<f32>,
+    indel_to_match: Vec<f32>,
+    gap_continuation: Vec<f32>,
+}
+
+/// Per haplotype column, interleaved across the batch: index `j * BATCH + k`
+/// is lane `k`'s column `j`, one-based, so `j = 0` is the free-start column
+/// and `j = width + 1` the pad the last row's `up` reads.
+#[derive(Debug, Default)]
+struct Columns {
+    base: Vec<f32>,
+    converted: Vec<f32>,
+    plain: Vec<f32>,
+    rate: Vec<f32>,
+    unconverted: Vec<f32>,
+}
+
+/// The three matrices of one read row, interleaved across the batch.
+#[derive(Debug, Default)]
+pub(crate) struct BatchBuffer {
+    m: Vec<f32>,
+    i: Vec<f32>,
+    d: Vec<f32>,
+}
+
+/// Everything one batch hoists out of its loops.
+#[derive(Debug, Default)]
+pub(crate) struct BatchPlan {
+    rows: Rows,
+    columns: Columns,
+    /// `1 / h` per lane, the read's free start; zero for an absent or empty
+    /// haplotype, which then scores [`Log10Likelihood::IMPOSSIBLE`].
+    init: Window,
+    /// `h + 1` per lane, so `column < lengths[k]` is `column <= h`.
+    past_end: Window,
+    /// The longest haplotype in the batch.
+    width: usize,
+}
+
+impl BatchPlan {
+    /// `None` only if the read or a haplotype cannot be addressed, which their
+    /// constructors rule out.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "the f32 narrowing is the point of this kernel, and a haplotype is a few hundred bases"
+    )]
+    fn fill<E: Emission>(
+        &mut self,
+        haplotypes: &[&Haplotype],
+        read: &Read,
+        emission: &E,
+    ) -> Option<()> {
+        let r = read.len();
+        self.width = haplotypes.iter().map(|h| h.len()).max().unwrap_or(0);
+        let Self { rows, columns, init, past_end, width } = self;
+        let width = *width;
+
+        let Rows {
+            base,
+            spread,
+            mismatched,
+            match_to_match,
+            match_to_insertion,
+            match_to_deletion,
+            indel_to_match,
+            gap_continuation,
+        } = rows;
+        for track in [
+            &mut *base,
+            spread,
+            mismatched,
+            match_to_match,
+            match_to_insertion,
+            match_to_deletion,
+            indel_to_match,
+            gap_continuation,
+        ] {
+            reset(track, r + 1, 0.0);
+        }
+        for index in 0..r {
+            let observation = read.observation(index)?;
+            let eps = emission.epsilon(observation);
+            let t = read.transition(index)?;
+            let row = index + 1;
+            *base.get_mut(row)? = code(observation.base);
+            *spread.get_mut(row)? = ((1.0 - eps) - eps / 3.0) as f32;
+            *mismatched.get_mut(row)? = (eps / 3.0) as f32;
+            *match_to_match.get_mut(row)? = t.match_to_match as f32;
+            *match_to_insertion.get_mut(row)? = t.match_to_insertion as f32;
+            *match_to_deletion.get_mut(row)? = t.match_to_deletion as f32;
+            *indel_to_match.get_mut(row)? = t.indel_to_match as f32;
+            *gap_continuation.get_mut(row)? = t.gap_continuation as f32;
+        }
+
+        let span = (width + 2) * BATCH;
+        let Columns { base, converted, plain, rate, unconverted } = columns;
+        reset(base, span, CODE_NO_PLAIN_MATCH);
+        reset(converted, span, CODE_NO_CONVERSION);
+        reset(plain, span, CODE_NO_PLAIN_MATCH);
+        reset(rate, span, 0.0);
+        reset(unconverted, span, 0.0);
+        *init = [0.0; BATCH];
+        *past_end = [0.0; BATCH];
+
+        let strand = read.strand();
+        for (lane, haplotype) in haplotypes.iter().enumerate().take(BATCH) {
+            let h = haplotype.len();
+            if h == 0 {
+                continue;
+            }
+            *init.get_mut(lane)? = 1.0 / h as f32;
+            *past_end.get_mut(lane)? = (h + 1) as f32;
+            for index in 0..h {
+                let weights = emission.site_weights(haplotype.site(index)?, strand);
+                let site_base = code(weights.base);
+                let at = (index + 1) * BATCH + lane;
+                *base.get_mut(at)? = site_base;
+                match weights.converted {
+                    Some(converted_base) => {
+                        *converted.get_mut(at)? = code(converted_base);
+                        *rate.get_mut(at)? = weights.rate as f32;
+                        *unconverted.get_mut(at)? = (1.0 - weights.rate) as f32;
+                    }
+                    None => *plain.get_mut(at)? = site_base,
+                }
+            }
+        }
+        Some(())
+    }
+}
+
+impl Workspace {
+    /// Up to [`BATCH`] haplotypes against one read, one haplotype per lane.
+    ///
+    /// The results are appended to `out` in the haplotypes' order. More than
+    /// [`BATCH`] haplotypes are scored in successive batches; a batch short of
+    /// [`BATCH`] still computes every lane, so the cost per alignment falls
+    /// only with the fill.
+    pub fn align_batch<E: Emission>(
+        &mut self,
+        haplotypes: &[&Haplotype],
+        read: &Read,
+        emission: &E,
+        band: Band,
+        out: &mut Vec<Log10Likelihood>,
+    ) {
+        self.batch::<f32x8, E>(haplotypes, read, emission, band, out);
+    }
+
+    /// [`Workspace::align_batch`] with one lane, the bit-parity oracle.
+    pub fn align_batch_scalar<E: Emission>(
+        &mut self,
+        haplotypes: &[&Haplotype],
+        read: &Read,
+        emission: &E,
+        band: Band,
+        out: &mut Vec<Log10Likelihood>,
+    ) {
+        self.batch::<f32, E>(haplotypes, read, emission, band, out);
+    }
+
+    fn batch<L: Lane, E: Emission>(
+        &mut self,
+        haplotypes: &[&Haplotype],
+        read: &Read,
+        emission: &E,
+        band: Band,
+        out: &mut Vec<Log10Likelihood>,
+    ) {
+        for group in haplotypes.chunks(L::LANES.min(BATCH)) {
+            let scores = if read.is_empty() || self.batch_plan.fill(group, read, emission).is_none()
+            {
+                [Log10Likelihood::IMPOSSIBLE; BATCH]
+            } else {
+                batch_kernel::<L>(&self.batch_plan, &mut self.batch_rows, read.len(), band)
+            };
+            out.extend(scores.iter().take(group.len()).copied());
+        }
+    }
+}
+
+/// Up to [`BATCH`] haplotypes against one read, one haplotype per lane.
+pub fn align_batch<E: Emission>(
+    haplotypes: &[&Haplotype],
+    read: &Read,
+    emission: &E,
+    band: Band,
+) -> Vec<Log10Likelihood> {
+    let mut out = Vec::with_capacity(haplotypes.len());
+    Workspace::new().align_batch(haplotypes, read, emission, band, &mut out);
+    out
+}
+
+/// The three matrices of the previous read row, plus the diagonal carried
+/// across a column step.
+struct Carry<L> {
+    left_m: L,
+    left_d: L,
+    diag_m: L,
+    diag_indel: L,
+}
+
+/// Subnormals to zero, as in the strip kernel and for the same reason.
+#[inline(always)]
+fn flush<L: Lane>(value: L) -> L {
+    value.below(L::splat(f32::MIN_POSITIVE)).select(L::splat(0.0), value)
+}
+
+/// One row at a time along the haplotype, every lane a different haplotype.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one traversal, and splitting it would hide the band algebra it exists to get right"
+)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "the f32 narrowing is the point of this kernel, and every count here is a few hundred"
+)]
+fn batch_kernel<L: Lane>(
+    plan: &BatchPlan,
+    buffer: &mut BatchBuffer,
+    read_len: usize,
+    band: Band,
+) -> [Log10Likelihood; BATCH] {
+    let impossible = [Log10Likelihood::IMPOSSIBLE; BATCH];
+    let width = plan.width;
+    if width == 0 {
+        return impossible;
+    }
+    let span = (width + 2) * BATCH;
+    for track in [&mut buffer.m, &mut buffer.i, &mut buffer.d] {
+        reset(track, span, 0.0);
+    }
+
+    let zero = L::splat(0.0);
+    let past_end = L::load(&plan.past_end);
+    let init = L::load(&plan.init);
+    let (o, w) = (band.offset, band.half_width);
+
+    // Row 0, the read's free start: `1 / h` in the deletion matrix at every
+    // column of the band that the lane's own haplotype reaches.
+    let mut crossing = zero;
+    for column in 0..=width {
+        if (column as i64 - o).abs() > w {
+            continue;
+        }
+        let live = L::splat(column as f32).below(past_end);
+        let cell = live.select(init, zero);
+        let at = column * BATCH;
+        let Some(slot) = buffer.d.get_mut(at..at + LANE_MAX) else {
+            return impossible;
+        };
+        let Some(slot) = slot.first_chunk_mut::<LANE_MAX>() else {
+            return impossible;
+        };
+        cell.store(slot);
+        crossing = crossing.vmax(cell);
+    }
+
+    let mut exponent = [0i32; BATCH];
+    let mut total = zero;
+    let mut scratch = [0.0f32; LANE_MAX];
+
+    for row in 1..=read_len {
+        if (row - 1) % STRIP_ROWS == 0 {
+            crossing.store(&mut scratch);
+            let mut lift = [0.0f32; LANE_MAX];
+            let mut any = false;
+            for lane in 0..L::LANES.min(BATCH) {
+                let shift = scratch.get(lane).copied().map_or(0, normalising_shift_f32);
+                any |= shift != 0;
+                if let (Some(slot), Some(sum)) = (lift.get_mut(lane), exponent.get_mut(lane)) {
+                    *slot = exp2_f32(shift);
+                    *sum += shift;
+                }
+            }
+            if any {
+                let lift = L::load(&lift);
+                for track in [&mut buffer.m, &mut buffer.i, &mut buffer.d] {
+                    for chunk in track.as_chunks_mut::<LANE_MAX>().0 {
+                        (L::load(chunk) * lift).store(chunk);
+                    }
+                }
+            }
+        }
+
+        let Some(row_base) = plan.rows.base.get(row).copied() else {
+            return impossible;
+        };
+        let (Some(spread), Some(mismatched)) =
+            (plan.rows.spread.get(row).copied(), plan.rows.mismatched.get(row).copied())
+        else {
+            return impossible;
+        };
+        let lanes = RowLanes::new(L::splat(row_base), L::splat(spread), L::splat(mismatched));
+        let (
+            Some(match_to_match),
+            Some(match_to_insertion),
+            Some(match_to_deletion),
+            Some(indel_to_match),
+            Some(gap_continuation),
+        ) = (
+            plan.rows.match_to_match.get(row).copied(),
+            plan.rows.match_to_insertion.get(row).copied(),
+            plan.rows.match_to_deletion.get(row).copied(),
+            plan.rows.indel_to_match.get(row).copied(),
+            plan.rows.gap_continuation.get(row).copied(),
+        )
+        else {
+            return impossible;
+        };
+        let t = TransitionLanes {
+            match_to_match: L::splat(match_to_match),
+            match_to_insertion: L::splat(match_to_insertion),
+            match_to_deletion: L::splat(match_to_deletion),
+            indel_to_match: L::splat(indel_to_match),
+            gap_continuation: L::splat(gap_continuation),
+        };
+
+        let first = (row as i64 + o - w).max(1);
+        let last = (row as i64 + o + w).min(width as i64);
+        let summing = row == read_len;
+        let mut running = zero;
+        if first <= last {
+            let (first, last) = (first as usize, last as usize);
+            // The row's own left neighbour at its first column is outside the
+            // band, and the diagonal there is the previous row's `first - 1`.
+            let mut carry = Carry { left_m: zero, left_d: zero, diag_m: zero, diag_indel: zero };
+            let at = (first - 1) * BATCH;
+            let (Some(m), Some(i), Some(d)) = (
+                buffer.m.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                buffer.i.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                buffer.d.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+            ) else {
+                return impossible;
+            };
+            carry.diag_m = L::load(m);
+            carry.diag_indel = L::load(i) + L::load(d);
+
+            for column in first..=last {
+                let at = column * BATCH;
+                let (Some(up_m), Some(up_i), Some(up_d)) = (
+                    buffer.m.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                    buffer.i.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                    buffer.d.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                ) else {
+                    return impossible;
+                };
+                let (up_m, up_i, up_d) = (L::load(up_m), L::load(up_i), L::load(up_d));
+
+                let (Some(base), Some(converted), Some(plain), Some(rate), Some(unconverted)) = (
+                    plan.columns.base.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
+                    plan.columns.converted.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
+                    plan.columns.plain.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
+                    plan.columns.rate.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
+                    plan.columns.unconverted.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
+                ) else {
+                    return impossible;
+                };
+                let prior_v = prior::<L>(
+                    ColumnLanes {
+                        base: L::load(base),
+                        converted: L::load(converted),
+                        plain: L::load(plain),
+                        rate: L::load(rate),
+                        unconverted_rate: L::load(unconverted),
+                    },
+                    lanes,
+                );
+
+                let m = prior_v
+                    * (carry.diag_m * t.match_to_match + carry.diag_indel * t.indel_to_match);
+                let i = up_m * t.match_to_insertion + up_i * t.gap_continuation;
+                let d = carry.left_m * t.match_to_deletion + carry.left_d * t.gap_continuation;
+                let (m, i, d) = (flush(m), flush(i), flush(d));
+                let keep = L::splat(column as f32).below(past_end);
+                let (m, i, d) = (keep.select(m, zero), keep.select(i, zero), keep.select(d, zero));
+
+                let (Some(mm), Some(ii), Some(dd)) = (
+                    buffer
+                        .m
+                        .get_mut(at..at + LANE_MAX)
+                        .and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
+                    buffer
+                        .i
+                        .get_mut(at..at + LANE_MAX)
+                        .and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
+                    buffer
+                        .d
+                        .get_mut(at..at + LANE_MAX)
+                        .and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
+                ) else {
+                    return impossible;
+                };
+                m.store(mm);
+                i.store(ii);
+                d.store(dd);
+
+                running = running.vmax(m).vmax(i).vmax(d);
+                if summing {
+                    // `(m + i)` and not `total + m + i`: the strip kernel adds
+                    // the pair before the accumulator, and `f32` addition is
+                    // not associative, so the parentheses are the parity.
+                    total = total + (m + i);
+                }
+                carry.left_m = m;
+                carry.left_d = d;
+                carry.diag_m = up_m;
+                carry.diag_indel = up_i + up_d;
+            }
+
+            // The two cells the next row reads that this one did not write:
+            // its own `first - 1`, where the band was clamped at column 1, and
+            // `last + 1`, where the band still has room to move right.
+            for at in [(first - 1) * BATCH, (last + 1) * BATCH] {
+                for track in [&mut buffer.m, &mut buffer.i, &mut buffer.d] {
+                    if let Some(slot) = track.get_mut(at..at + LANE_MAX) {
+                        slot.fill(0.0);
+                    }
+                }
+            }
+        }
+        if row % STRIP_ROWS == 0 {
+            crossing = running;
+        }
+    }
+
+    total.store(&mut scratch);
+    let mut out = impossible;
+    for lane in 0..L::LANES.min(BATCH) {
+        let Some(sum) = scratch.get(lane).copied() else {
+            continue;
+        };
+        let Some(shift) = exponent.get(lane).copied() else {
+            continue;
+        };
+        if sum > 0.0
+            && let Some(slot) = out.get_mut(lane)
+        {
+            *slot = Log10Likelihood::new(
+                f64::from(sum).log10() - f64::from(shift) * core::f64::consts::LOG10_2,
+            );
+        }
+    }
+    out
+}

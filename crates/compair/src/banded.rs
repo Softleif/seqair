@@ -305,6 +305,8 @@ pub struct Workspace {
     pub(crate) plan: Plan,
     ring: Ring,
     pub(crate) rows: crate::strips::RowBuffer,
+    pub(crate) batch_plan: crate::batch::BatchPlan,
+    pub(crate) batch_rows: crate::batch::BatchBuffer,
 }
 
 impl Workspace {
@@ -385,15 +387,15 @@ pub fn align_banded_simd<E: Emission>(
 /// base, and two further codes -- impossible as a read base, so never equal to
 /// anything -- stand for "this column does not convert" and "this column has no
 /// plain match row".
-const CODE_N: f32 = 4.0;
-const CODE_NO_CONVERSION: f32 = 6.0;
-const CODE_NO_PLAIN_MATCH: f32 = 7.0;
+pub(crate) const CODE_N: f32 = 4.0;
+pub(crate) const CODE_NO_CONVERSION: f32 = 6.0;
+pub(crate) const CODE_NO_PLAIN_MATCH: f32 = 7.0;
 
 /// The code of each of [`Base::KNOWN`], in that order.
 const CODE_KNOWN: [f32; 4] = [0.0, 1.0, 2.0, 3.0];
 
 #[inline]
-fn code(base: Base) -> f32 {
+pub(crate) fn code(base: Base) -> f32 {
     base.known_index().and_then(|index| CODE_KNOWN.get(index).copied()).unwrap_or(CODE_N)
 }
 
