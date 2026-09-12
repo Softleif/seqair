@@ -108,6 +108,32 @@ impl Workspace {
         self.strips::<f32x8, E>(haplotype, read, emission, band)
     }
 
+    /// Eight read rows at a time through the target's own intrinsics rather
+    /// than through `wide`, where there is such a lane; the `wide` kernel
+    /// otherwise. Bit-identical to [`Workspace::align_strips`] either way.
+    ///
+    /// This is an experiment (see the `intrinsics` module), not a second
+    /// production path.
+    #[cfg(feature = "intrinsics")]
+    pub fn align_strips_intrinsics<E: Emission>(
+        &mut self,
+        haplotype: &Haplotype,
+        read: &Read,
+        emission: &E,
+        band: Band,
+    ) -> Log10Likelihood {
+        #[cfg(any(
+            all(target_arch = "aarch64", target_feature = "neon"),
+            all(target_arch = "x86_64", target_feature = "avx2")
+        ))]
+        return self.strips::<crate::intrinsics::Simd8, E>(haplotype, read, emission, band);
+        #[cfg(not(any(
+            all(target_arch = "aarch64", target_feature = "neon"),
+            all(target_arch = "x86_64", target_feature = "avx2")
+        )))]
+        return self.strips::<f32x8, E>(haplotype, read, emission, band);
+    }
+
     fn strips<L: Lane, E: Emission>(
         &mut self,
         haplotype: &Haplotype,
@@ -155,6 +181,26 @@ pub fn align_strips_simd<E: Emission>(
     band: Band,
 ) -> Log10Likelihood {
     Workspace::new().align_strips_simd(haplotype, read, emission, band)
+}
+
+/// Eight read rows at a time through the target's own intrinsics.
+///
+/// Bit-identical to [`align_strips`]; see [`Workspace::align_strips_intrinsics`].
+#[cfg(feature = "intrinsics")]
+pub fn align_strips_intrinsics<E: Emission>(
+    haplotype: &Haplotype,
+    read: &Read,
+    emission: &E,
+    band: Band,
+) -> Log10Likelihood {
+    Workspace::new().align_strips_intrinsics(haplotype, read, emission, band)
+}
+
+/// Whether this build has an intrinsics lane, or falls back to `wide`.
+#[cfg(feature = "intrinsics")]
+#[must_use]
+pub fn intrinsics_lane_available() -> bool {
+    crate::intrinsics::AVAILABLE
 }
 
 /// Where one strip's sweep begins and ends, and where every lane is live.

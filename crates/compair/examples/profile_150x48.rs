@@ -52,6 +52,12 @@ fn main() {
                     workspace.align_strips_simd(haplotype, &read, &standard, band)
                 }
                 "strips-simd-taps" => workspace.align_strips_simd(haplotype, &read, &taps, band),
+                "strips-intrinsics-standard" => {
+                    workspace.align_strips_intrinsics(haplotype, &read, &standard, band)
+                }
+                "strips-intrinsics-taps" => {
+                    workspace.align_strips_intrinsics(haplotype, &read, &taps, band)
+                }
                 _ => workspace.align_banded_simd(haplotype, &read, &taps, band),
             };
             checksum += score.get();

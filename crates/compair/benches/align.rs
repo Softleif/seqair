@@ -14,10 +14,10 @@ mod fixture;
 
 use compair::{
     Betas, ConversionModel, StandardEmission, TapsEmission, Workspace, align_banded,
-    align_banded_simd, align_full, align_strips, align_strips_simd,
+    align_banded_simd, align_full, align_strips, align_strips_intrinsics, align_strips_simd,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
-use fixture::{Fixture, HAPLOTYPES_PER_READ, fixture};
+use fixture::{Fixture, fixture};
 use std::hint::black_box;
 
 fn align(c: &mut Criterion) {
@@ -59,49 +59,76 @@ fn align(c: &mut Criterion) {
         let mut workspace = Workspace::new();
         b.iter(|| workspace.align_strips_simd(black_box(haplotype), black_box(&read), &taps, band));
     });
+    group.bench_function("strips-intrinsics/standard", |b| {
+        b.iter(|| align_strips_intrinsics(black_box(haplotype), black_box(&read), &standard, band));
+    });
+    group.bench_function("strips-intrinsics/taps", |b| {
+        b.iter(|| align_strips_intrinsics(black_box(haplotype), black_box(&read), &taps, band));
+    });
+    group.bench_function("strips-intrinsics/taps/workspace", |b| {
+        let mut workspace = Workspace::new();
+        b.iter(|| {
+            workspace.align_strips_intrinsics(black_box(haplotype), black_box(&read), &taps, band)
+        });
+    });
     group.bench_function("reference/standard", |b| {
         b.iter(|| align_full(black_box(haplotype), black_box(&read), &standard));
     });
     group.finish();
 
-    let mut group = c.benchmark_group(format!("align/150x46/{HAPLOTYPES_PER_READ}-haplotypes"));
-    group.bench_function("simd/taps", |b| {
-        b.iter(|| {
-            haplotypes
-                .iter()
-                .map(|haplotype| {
-                    align_banded_simd(black_box(haplotype), black_box(&read), &taps, band).get()
-                })
-                .sum::<f64>()
+    // One read against `n` candidates, the shape the shadow path has: the
+    // per-alignment cost is the reported time over `n`. The batch arm computes
+    // eight lanes whatever `n` is, so this is where its fill shows.
+    for count in [2usize, 3, 4, 8] {
+        let group_haplotypes: Vec<&_> =
+            haplotypes.iter().take(count).collect::<Vec<_>>();
+        let mut group = c.benchmark_group(format!("align/150x46/{count}-haplotypes"));
+        group.bench_function("strips-simd/taps/workspace", |b| {
+            let mut workspace = Workspace::new();
+            b.iter(|| {
+                group_haplotypes
+                    .iter()
+                    .map(|haplotype| {
+                        workspace
+                            .align_strips_simd(black_box(haplotype), black_box(&read), &taps, band)
+                            .get()
+                    })
+                    .sum::<f64>()
+            });
         });
-    });
-    group.bench_function("simd/taps/workspace", |b| {
-        let mut workspace = Workspace::new();
-        b.iter(|| {
-            haplotypes
-                .iter()
-                .map(|haplotype| {
-                    workspace
-                        .align_banded_simd(black_box(haplotype), black_box(&read), &taps, band)
-                        .get()
-                })
-                .sum::<f64>()
+        group.bench_function("strips-intrinsics/taps/workspace", |b| {
+            let mut workspace = Workspace::new();
+            b.iter(|| {
+                group_haplotypes
+                    .iter()
+                    .map(|haplotype| {
+                        workspace
+                            .align_strips_intrinsics(
+                                black_box(haplotype),
+                                black_box(&read),
+                                &taps,
+                                band,
+                            )
+                            .get()
+                    })
+                    .sum::<f64>()
+            });
         });
-    });
-    group.bench_function("strips-simd/taps/workspace", |b| {
-        let mut workspace = Workspace::new();
-        b.iter(|| {
-            haplotypes
-                .iter()
-                .map(|haplotype| {
-                    workspace
-                        .align_strips_simd(black_box(haplotype), black_box(&read), &taps, band)
-                        .get()
-                })
-                .sum::<f64>()
+        group.bench_function("simd/taps/workspace", |b| {
+            let mut workspace = Workspace::new();
+            b.iter(|| {
+                group_haplotypes
+                    .iter()
+                    .map(|haplotype| {
+                        workspace
+                            .align_banded_simd(black_box(haplotype), black_box(&read), &taps, band)
+                            .get()
+                    })
+                    .sum::<f64>()
+            });
         });
-    });
-    group.finish();
+        group.finish();
+    }
 }
 
 criterion_group!(benches, align);
