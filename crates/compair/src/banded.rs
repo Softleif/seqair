@@ -104,6 +104,29 @@ impl Band {
     pub const fn offset(self) -> i32 {
         self.offset as i32
     }
+
+    /// The inclusive range of haplotype columns any row of the band can reach,
+    /// clipped to a haplotype of `h` bases and a read of `r`, or `None` when
+    /// the band misses the haplotype entirely.
+    ///
+    /// A cell `(i, j)` is in the band when `|j - i - offset| <= half_width`, so
+    /// over `i` in `0..r` the columns run from `offset - half_width` to
+    /// `r - 1 + offset + half_width`. The span is `r + width`, which does not
+    /// grow with `h` -- the reason a plan that derives every one of `h`
+    /// columns is doing unbounded work for a bounded band.
+    pub(crate) fn columns(self, h: usize, r: usize) -> Option<(usize, usize)> {
+        if h == 0 || r == 0 {
+            return None;
+        }
+        let last = i64::try_from(h).ok()?.checked_sub(1)?;
+        let rows = i64::try_from(r).ok()?.checked_sub(1)?;
+        let low = self.offset.checked_sub(self.half_width)?.max(0);
+        let high = rows.checked_add(self.offset)?.checked_add(self.half_width)?.min(last);
+        if low > high {
+            return None;
+        }
+        Some((usize::try_from(low).ok()?, usize::try_from(high).ok()?))
+    }
 }
 
 // `anchored` builds a band without going through `new`, so the default has to
@@ -348,7 +371,7 @@ impl Workspace {
         if h == 0 || r == 0 {
             return Log10Likelihood::IMPOSSIBLE;
         }
-        if self.plan.fill(haplotype, read, emission).is_none() {
+        if self.plan.fill(haplotype, read, emission, band).is_none() {
             return Log10Likelihood::IMPOSSIBLE;
         }
         // The emission is folded into the plan, so from here on the kernel is
@@ -471,6 +494,7 @@ impl Plan {
         haplotype: &Haplotype,
         read: &Read,
         emission: &E,
+        band: Band,
     ) -> Option<()> {
         let (h, r) = (haplotype.len(), read.len());
         let rows = r + 1 + TRACK_SLACK;
@@ -520,7 +544,13 @@ impl Plan {
         reset(rate, columns, 0.0);
         reset(unconverted, columns, 0.0);
         let strand = read.strand();
-        for index in 0..h {
+        // Only the columns the band can reach; the rest keep the sentinels
+        // `reset` just wrote and are never read, because the kernels visit the
+        // band and nothing else. The band's column span is `read + width`
+        // whatever `h` is, so deriving all `h` of them was work that grew
+        // without bound against a bounded kernel.
+        let (lo, hi) = band.columns(h, r)?;
+        for index in lo..=hi {
             let weights = emission.site_weights(haplotype.site(index)?, strand);
             let site_base = code(weights.base);
             let reversed = COLUMN_FRONT + h - 1 - index;
@@ -1163,7 +1193,7 @@ fn get(buffer: &[f32], index: usize) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnLanes, Lane, MASK_SET, Plan, RowLanes, prior};
+    use super::{Band, ColumnLanes, Lane, MASK_SET, Plan, RowLanes, prior};
     use crate::{
         BaseQuality, Betas, ConversionModel, Emission, Haplotype, MatchProbability, Probability,
         Read, StandardEmission, Strand, TapsEmission,
@@ -1292,7 +1322,10 @@ mod tests {
 
     fn check<E: Emission>(haplotype: &Haplotype, read: &Read, emission: &E) -> bool {
         let mut plan = Plan::default();
-        plan.fill(haplotype, read, emission).expect("the fixture is well formed");
+        // The widest band there is, so every column is derived: this is testing
+        // the emission encoding, not the band.
+        let everything = Band::new(Band::MAX_WIDTH, 0).expect("MAX_WIDTH is a legal width");
+        plan.fill(haplotype, read, emission, everything).expect("the fixture is well formed");
         let Some(last) = haplotype.len().checked_sub(1) else {
             return false;
         };

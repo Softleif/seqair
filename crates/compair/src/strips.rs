@@ -145,7 +145,7 @@ impl Workspace {
         if h == 0 || r == 0 {
             return Log10Likelihood::IMPOSSIBLE;
         }
-        if self.plan.fill(haplotype, read, emission).is_none() {
+        if self.plan.fill(haplotype, read, emission, band).is_none() {
             return Log10Likelihood::IMPOSSIBLE;
         }
         strip_kernel::<L>(&self.plan, &mut self.rows, Shape { haplotype: h, read: r }, band)

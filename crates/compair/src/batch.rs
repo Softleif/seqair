@@ -117,6 +117,7 @@ impl BatchPlan {
         haplotypes: &[&Haplotype],
         read: &Read,
         emission: &E,
+        band: Band,
     ) -> Option<()> {
         let r = read.len();
         self.width = haplotypes.iter().map(|h| h.len()).max().unwrap_or(0);
@@ -178,7 +179,14 @@ impl BatchPlan {
             }
             *init.get_mut(lane)? = 1.0 / h as f32;
             *past_end.get_mut(lane)? = (h + 1) as f32;
-            for index in 0..h {
+            // Only the columns the band can reach. Everything else keeps the
+            // sentinels `reset` just wrote, which is what an unvisited column
+            // holds anyway -- the kernel's column loop is the band, so it never
+            // reads them. Deriving them cost ~29% of a call at 200 bp
+            // haplotypes and grew without bound with haplotype length, because
+            // the band's span is `read + width` however long the haplotype is.
+            let Some((lo, hi)) = band.columns(h, r) else { continue };
+            for index in lo..=hi {
                 let weights = emission.site_weights(haplotype.site(index)?, strand);
                 let site_base = code(weights.base);
                 let at = (index + 1) * BATCH + lane;
@@ -236,12 +244,12 @@ impl Workspace {
         out: &mut Vec<Log10Likelihood>,
     ) {
         for group in haplotypes.chunks(L::LANES.min(BATCH)) {
-            let scores = if read.is_empty() || self.batch_plan.fill(group, read, emission).is_none()
-            {
-                [Log10Likelihood::IMPOSSIBLE; BATCH]
-            } else {
-                batch_kernel::<L>(&self.batch_plan, &mut self.batch_rows, read.len(), band)
-            };
+            let scores =
+                if read.is_empty() || self.batch_plan.fill(group, read, emission, band).is_none() {
+                    [Log10Likelihood::IMPOSSIBLE; BATCH]
+                } else {
+                    batch_kernel::<L>(&self.batch_plan, &mut self.batch_rows, read.len(), band)
+                };
             out.extend(scores.iter().take(group.len()).copied());
         }
     }
