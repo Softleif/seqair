@@ -57,20 +57,31 @@ pub const BATCH: usize = LANE_MAX;
 ///
 /// A batch computes all [`BATCH`] lanes whatever the caller asked for, so its
 /// cost is nearly flat in the group size and the per-alignment cost falls only
-/// with the fill. Measured on an M4 Pro against `align_strips_simd`, over a 200
-/// bp haplotype through the default band, for both emissions and at both read
-/// lengths -- the crossover sat at six every time, and the two read lengths
-/// agreed to within 0.02x at every point:
+/// with the fill. Measured against the strip kernel *on the same lane*, over a
+/// 200 bp haplotype through the default band, at both read lengths (the two
+/// agreed to within 0.02x at every point):
 ///
 /// | haplotypes | 1 | 2 | 3 | 4 | 5 | **6** | 7 | 8 |
 /// |---|---|---|---|---|---|---|---|---|
-/// | speedup | 0.18x | 0.36x | 0.53x | 0.69x | 0.85x | **1.02x** | 1.17x | 1.32x |
+/// | M4 Pro (NEON) | 0.18x | 0.36x | 0.53x | 0.70x | 0.86x | **1.03x** | 1.18x | 1.33x |
+/// | 3950X (AVX2) | 0.28x | 0.54x | 0.79x | **1.02x** | 1.25x | 1.48x | 1.69x | 1.90x |
 ///
-/// `examples/batchfill.rs` regenerates the table. The number is a property of
-/// the ratio between the two kernels' per-cell costs, so it is worth
-/// re-measuring on a machine whose SIMD differs from this one -- but it is
-/// bounded: the batch kernel cannot win below `BATCH / 2` lanes, because at
-/// that fill it is doing more than twice the work for the same answers.
+/// **The two machines disagree -- the M4 crosses at six, the 3950X at four --
+/// and six is the number that is safe on both.** Four would put the M4 into the
+/// batch kernel at half fill, where its strip kernel is 1.4x faster; six leaves
+/// the 3950X's half-full groups about 1.15x on the table. The number is the
+/// ratio between the two kernels' per-cell costs and nothing else, so a
+/// per-target constant is defensible -- but not on two machines. See §9.5 of
+/// `docs/notes/benchmarking.md`.
+///
+/// `examples/batchfill.rs` regenerates the table, and races the two kernels on
+/// the *same* lane: raced against `align_strips_simd` on a target where the
+/// batch kernel has intrinsics and that one does not, the crossover it reports
+/// is the gap between two lanes rather than the cost of an empty lane.
+///
+/// Whatever a machine says, the number is bounded below: the batch kernel
+/// cannot be worth running below `BATCH / 2` lanes, because at that fill it is
+/// doing more than twice the work for the same answers.
 pub const BATCH_BREAK_EVEN: usize = 6;
 
 // A break-even above `BATCH` would mean the batch kernel never runs, and one at
