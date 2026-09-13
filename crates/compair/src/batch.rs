@@ -34,6 +34,7 @@
 //! [`align_strips`]: crate::align_strips
 //! [`STRIP_ROWS`]: crate::batch::STRIP_ROWS
 
+#[cfg(not(feature = "intrinsics"))]
 use wide::f32x8;
 
 use crate::{
@@ -79,6 +80,42 @@ const _: () = assert!(
     BATCH_BREAK_EVEN > BATCH / 2 && BATCH_BREAK_EVEN <= BATCH,
     "the break-even has to be reachable and above half fill"
 );
+
+/// One batch of haplotypes scored, plus how many lanes that kernel fills --
+/// which is how many haplotypes a group may hold, so it travels with it.
+///
+/// A function pointer rather than a type parameter because the lane is not a
+/// property of the *call* on x86-64: [`batch_kernel`] over the intrinsics lane
+/// exists only inside a `#[target_feature]` wrapper, which is an ordinary
+/// function and cannot be a generic argument. One indirect call per batch is
+/// nothing, and every caller passes a constant.
+#[derive(Clone, Copy)]
+pub(crate) struct BatchKernel {
+    lanes: usize,
+    run: fn(&BatchPlan, &mut BatchBuffer, usize, Band) -> [Log10Likelihood; BATCH],
+}
+
+impl BatchKernel {
+    /// [`batch_kernel`] over one lane type, for the paths that can name it.
+    const fn over<L: Lane>() -> Self {
+        Self { lanes: if L::LANES < BATCH { L::LANES } else { BATCH }, run: batch_kernel::<L> }
+    }
+}
+
+/// The batch kernel over the widest lane this build has: the hand-written
+/// eight-lane intrinsics one where the crate was built with it -- and, on
+/// x86-64, only where the CPU turns out to have AVX2, which that wrapper
+/// checks -- and `wide`'s `f32x8` otherwise.
+///
+/// `wide::f32x8` on a default x86-64 build is *two* SSE vectors, because its
+/// representation is a `cfg` decided when `wide` itself was compiled. Routing
+/// the entry point through here is what lets a default build reach AVX2 at
+/// all; see `intrinsics.rs`.
+#[cfg(feature = "intrinsics")]
+const FASTEST_BATCH_KERNEL: BatchKernel =
+    BatchKernel { lanes: BATCH, run: crate::intrinsics::batch_kernel_intrinsics };
+#[cfg(not(feature = "intrinsics"))]
+const FASTEST_BATCH_KERNEL: BatchKernel = BatchKernel::over::<f32x8>();
 
 /// Rows between two renormalisations. The strip kernel's constant, and it has
 /// to be, or the two would not round the same way.
@@ -261,10 +298,10 @@ impl Workspace {
         out.clear();
         for group in haplotypes.chunks(BATCH) {
             if group.len() >= BATCH_BREAK_EVEN {
-                self.batch_group::<f32x8, E>(group, read, emission, band, out);
+                self.batch_group::<E>(group, read, emission, band, out, FASTEST_BATCH_KERNEL);
             } else {
                 for haplotype in group {
-                    out.push(self.align_strips_simd(haplotype, read, emission, band));
+                    out.push(self.strips_fastest(haplotype, read, emission, band));
                 }
             }
         }
@@ -285,7 +322,7 @@ impl Workspace {
         band: Band,
         out: &mut Vec<Log10Likelihood>,
     ) {
-        self.batch::<f32x8, E>(haplotypes, read, emission, band, out);
+        self.batch::<E>(haplotypes, read, emission, band, out, FASTEST_BATCH_KERNEL);
     }
 
     /// [`Workspace::align_batch`] with one lane, the bit-parity oracle.
@@ -297,37 +334,39 @@ impl Workspace {
         band: Band,
         out: &mut Vec<Log10Likelihood>,
     ) {
-        self.batch::<f32, E>(haplotypes, read, emission, band, out);
+        self.batch::<E>(haplotypes, read, emission, band, out, BatchKernel::over::<f32>());
     }
 
-    fn batch<L: Lane, E: Emission>(
+    fn batch<E: Emission>(
         &mut self,
         haplotypes: &[&Haplotype],
         read: &Read,
         emission: &E,
         band: Band,
         out: &mut Vec<Log10Likelihood>,
+        kernel: BatchKernel,
     ) {
         out.clear();
-        for group in haplotypes.chunks(L::LANES.min(BATCH)) {
-            self.batch_group::<L, E>(group, read, emission, band, out);
+        for group in haplotypes.chunks(kernel.lanes) {
+            self.batch_group::<E>(group, read, emission, band, out, kernel);
         }
     }
 
     /// One batch of at most [`BATCH`] haplotypes, appended to `out`.
-    fn batch_group<L: Lane, E: Emission>(
+    fn batch_group<E: Emission>(
         &mut self,
         group: &[&Haplotype],
         read: &Read,
         emission: &E,
         band: Band,
         out: &mut Vec<Log10Likelihood>,
+        kernel: BatchKernel,
     ) {
         let scores =
             if read.is_empty() || self.batch_plan.fill(group, read, emission, band).is_none() {
                 [Log10Likelihood::IMPOSSIBLE; BATCH]
             } else {
-                batch_kernel::<L>(&self.batch_plan, &mut self.batch_rows, read.len(), band)
+                (kernel.run)(&self.batch_plan, &mut self.batch_rows, read.len(), band)
             };
         out.extend(scores.iter().take(group.len()).copied());
     }
@@ -388,7 +427,8 @@ fn flush<L: Lane>(value: L) -> L {
     clippy::cast_sign_loss,
     reason = "the f32 narrowing is the point of this kernel, and every count here is a few hundred"
 )]
-fn batch_kernel<L: Lane>(
+#[inline(always)]
+pub(crate) fn batch_kernel<L: Lane>(
     plan: &BatchPlan,
     buffer: &mut BatchBuffer,
     read_len: usize,

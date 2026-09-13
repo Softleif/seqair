@@ -27,6 +27,7 @@
 
 use crate::{
     banded::{Band, LANE_MAX, Plan, Shape},
+    batch::{BATCH, BatchBuffer, BatchPlan, batch_kernel},
     strips::{RowBuffer, strip_kernel},
     types::Log10Likelihood,
 };
@@ -435,6 +436,62 @@ unsafe fn strip_kernel_avx2(
     band: Band,
 ) -> Log10Likelihood {
     strip_kernel::<Simd8>(plan, rows, shape, band)
+}
+
+/// The batch kernel over the intrinsics lane where this CPU has one, over
+/// `wide`'s where it has not -- [`strip_kernel_intrinsics`]'s dispatch for the
+/// other traversal, and it has to exist for the same reason: `wide::f32x8` is
+/// two SSE vectors on a default x86-64 build, and nothing a caller does can
+/// widen it.
+///
+/// Bit-identical to the `wide` kernel and so to the strip kernel, which is
+/// what lets `align_candidates` choose per batch without moving a score.
+pub(crate) fn batch_kernel_intrinsics(
+    plan: &BatchPlan,
+    buffer: &mut BatchBuffer,
+    read_len: usize,
+    band: Band,
+) -> [Log10Likelihood; BATCH] {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        batch_kernel::<Simd8>(plan, buffer, read_len, band)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the runtime check is the wrapper's one precondition.
+            return unsafe { batch_kernel_avx2(plan, buffer, read_len, band) };
+        }
+        batch_kernel::<wide::f32x8>(plan, buffer, read_len, band)
+    }
+    #[cfg(not(any(
+        all(target_arch = "aarch64", target_feature = "neon"),
+        target_arch = "x86_64"
+    )))]
+    {
+        batch_kernel::<wide::f32x8>(plan, buffer, read_len, band)
+    }
+}
+
+/// The batch kernel over [`Simd8`], compiled with AVX2 enabled.
+///
+/// [`batch_kernel`] is `#[inline(always)]` for this wrapper's sake: an
+/// out-of-line copy would be compiled for the *baseline* and every intrinsic
+/// in it would become a call to an SSE2 function, which on the strip kernel
+/// cost 9x.
+///
+/// # Safety
+///
+/// The CPU must have AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn batch_kernel_avx2(
+    plan: &BatchPlan,
+    buffer: &mut BatchBuffer,
+    read_len: usize,
+    band: Band,
+) -> [Log10Likelihood; BATCH] {
+    batch_kernel::<Simd8>(plan, buffer, read_len, band)
 }
 
 const _: () = assert!(LANE_MAX == 8, "the intrinsics lanes are eight wide");

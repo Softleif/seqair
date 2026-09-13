@@ -45,6 +45,7 @@ mod batch;
 mod emission;
 mod error;
 mod haplotype;
+#[cfg(feature = "intrinsics")]
 mod intrinsics;
 mod read;
 mod reference;

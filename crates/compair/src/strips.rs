@@ -139,6 +139,27 @@ impl Workspace {
         )
     }
 
+    /// One haplotype through the widest strip lane this build has: the
+    /// intrinsics kernel where the crate was built with it -- which itself
+    /// falls back to `wide` on a CPU without AVX2 -- and `wide`'s otherwise.
+    /// The remainder of [`Workspace::align_candidates`] comes through here.
+    pub(crate) fn strips_fastest<E: Emission>(
+        &mut self,
+        haplotype: &Haplotype,
+        read: &Read,
+        emission: &E,
+        band: Band,
+    ) -> Log10Likelihood {
+        #[cfg(feature = "intrinsics")]
+        {
+            self.align_strips_intrinsics(haplotype, read, emission, band)
+        }
+        #[cfg(not(feature = "intrinsics"))]
+        {
+            self.align_strips_simd(haplotype, read, emission, band)
+        }
+    }
+
     fn strips<L: Lane, E: Emission>(
         &mut self,
         haplotype: &Haplotype,
