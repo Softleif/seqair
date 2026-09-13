@@ -316,21 +316,23 @@ mod x86 {
             unsafe { Self { ymm: _mm256_andnot_ps(self.ymm, value.ymm) } }
         }
 
-        /// One cross-lane permute plus a blend of the shifted-in scalar:
-        /// AVX2 has no whole-register byte shift, so this is the shape the
-        /// array permutation `wide` forces the compiler to recognise.
+        /// One cross-lane permute, a broadcast and an *immediate* blend:
+        /// AVX2 has no whole-register byte shift, so the rotation is a
+        /// `vpermps` and lane 0 is then overwritten.
+        ///
+        /// The blend is `_mm256_blend_ps`, not `_mm256_blendv_ps`. Which lane
+        /// the shifted-in scalar lands in is a constant, so a variable blend
+        /// costs a whole register to hold a mask the loop already knows -- and
+        /// at three shifts a step, under this much register pressure, LLVM
+        /// spilled that mask and reloaded it on every one of them. `vblendps`
+        /// takes the lane as an immediate and is one uop on Zen 2 where
+        /// `vblendvps` is two.
         #[inline(always)]
         fn shift_in(self, first: f32) -> Self {
             unsafe {
                 let rotated =
                     _mm256_permutevar8x32_ps(self.ymm, _mm256_setr_epi32(7, 0, 1, 2, 3, 4, 5, 6));
-                let head = _mm256_set1_ps(first);
-                // Lane 0 from `head`, the rest from the rotation.
-                let mask = _mm256_cmp_ps::<_CMP_LT_OQ>(
-                    _mm256_setr_ps(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0),
-                    _mm256_set1_ps(1.0),
-                );
-                Self { ymm: _mm256_blendv_ps(rotated, head, mask) }
+                Self { ymm: _mm256_blend_ps::<0b0000_0001>(rotated, _mm256_set1_ps(first)) }
             }
         }
 
