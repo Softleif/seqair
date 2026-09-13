@@ -14,10 +14,37 @@ seqair-types = { version = "^0.3.1", path = "../seqair-types" }
 thiserror = { workspace = true }
 wide = "1.7"
 
+[features]
+# Benchmark only. gkl's `c-avx`/`c-avx512` features do not *add* the original
+# Intel C++ kernels beside the Rust ports -- they **replace** them, because
+# `forward_f32x8` and friends are one `cfg_if` over the same name and gkl's Rust
+# AVX module is `#[cfg(not(feature = "c-avx"))]`. So the two cannot coexist in
+# one binary, and comparing them means two runs of the same bench over the same
+# vendored C++ source:
+#
+#     cargo bench -p compair --bench tenspeed                     # Rust ports
+#     cargo bench -p compair --bench tenspeed --features gkl-cpp  # Intel C++
+#
+# The arms rename themselves to `gkl-rust/...` or `gkl-cpp/...` so the two runs
+# do not overwrite each other's criterion baselines.
+gkl-cpp = ["gkl/c-avx", "gkl/c-avx512"]
+
 [dev-dependencies]
 proptest = "1.11.0"
 criterion = "0.8.2"
 bio = { version = "4.0.1", default-features = false }
+
+# The benchmark target: a Rust port of the kernel GATK actually calls through
+# JNI. Pinned to git rather than crates.io because 0.1.1 is FFI-only to the C++
+# AVX build and has no scalar arm, while the repository HEAD reimplements the
+# kernels in Rust (`forward_f32x8`, `f64x4`, `f32x1`, `f64x1`) with the C++ kept
+# behind an off-by-default feature. Rust-vs-Rust is the comparison worth having:
+# same compiler, same codegen, no C++ toolchain variance in the middle of it.
+#
+# Its `build.rs` compiles x86 C++ unconditionally, so it can only be a
+# dependency where that compiles; on aarch64 the gkl arms cfg out.
+[target.'cfg(target_arch = "x86_64")'.dev-dependencies]
+gkl = { git = "https://github.com/philipc/gkl-rs", rev = "9eec44205839fc9e77a4acbe3740e0dab92254af" }
 
 [[bench]]
 name = "align"
@@ -25,4 +52,8 @@ harness = false
 
 [[bench]]
 name = "rust_bio"
+harness = false
+
+[[bench]]
+name = "tenspeed"
 harness = false

@@ -508,6 +508,7 @@ version = "0.1.0"
 dependencies = [
  "bio",
  "criterion",
+ "gkl",
  "proptest",
  "seqair-types",
  "thiserror 2.0.21",
@@ -933,6 +934,17 @@ dependencies = [
  "proc-macro2 1.0.107",
  "quote 1.0.47",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "gkl"
+version = "0.1.0"
+source = "git+https://github.com/philipc/gkl-rs?rev=9eec44205839fc9e77a4acbe3740e0dab92254af#9eec44205839fc9e77a4acbe3740e0dab92254af"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "lazy_static",
+ "num-traits",
 ]
 
 [[package]]
