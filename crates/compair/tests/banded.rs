@@ -4,8 +4,8 @@ mod support;
 use compair::{
     BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, MatchProbability,
     Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded,
-    align_banded_simd, align_full, align_strips, align_strips_intrinsics, align_strips_simd,
-    error_probability,
+    align_banded_simd, align_candidates, align_full, align_strips, align_strips_intrinsics,
+    align_strips_simd, error_probability,
 };
 use proptest::prelude::*;
 use support::{
@@ -1375,4 +1375,113 @@ fn the_bench_shape_batches_to_the_same_bits() {
         compair::align_batch(&refs, &read, &taps, band).iter().map(|s| s.get().to_bits()).collect();
     assert_eq!(one_at_a_time, batched);
     assert!(one_at_a_time.iter().all(|bits| f64::from_bits(*bits).is_finite()));
+}
+
+/// `align_candidates` picks a kernel per batch, so at nine haplotypes it uses
+/// both of them for one call. Whichever it picks, the scores have to be the
+/// ones the strip kernel gives -- that is what makes the dispatch a pure
+/// performance decision rather than a second set of semantics.
+///
+/// Every group size from nothing to three full batches is checked, because the
+/// interesting sizes are the boundaries: `BATCH_BREAK_EVEN - 1` and
+/// `BATCH_BREAK_EVEN` take different paths, and `BATCH + 1` is the case that
+/// was slower than `BATCH` before the dispatch existed.
+#[test]
+fn the_dispatch_never_changes_a_score() {
+    let bases: Vec<Base> = (0..200u32)
+        .scan(0x9e37_79b9_7f4a_7c15u64, |state, _| {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            Some(match *state % 4 {
+                0 => Base::A,
+                1 => Base::C,
+                2 => Base::G,
+                _ => Base::T,
+            })
+        })
+        .collect();
+    let read_bases = bases.get(25..175).map(<[Base]>::to_vec).expect("200 bases were built");
+    let quals: Vec<BaseQuality> = (0..read_bases.len())
+        .map(|index| BaseQuality::from_byte(25 + u8::try_from(index % 15).unwrap_or(0)))
+        .collect();
+    let read = Read::uniform(
+        read_bases,
+        &quals,
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(10),
+        Strand::OT,
+    )
+    .expect("the fixture read must build");
+    let betas: Vec<Probability> = (0..200)
+        .map(|index| {
+            Probability::new(f64::from(u32::try_from(index % 11).unwrap_or(0)) / 10.0)
+                .unwrap_or(Probability::ZERO)
+        })
+        .collect();
+    let taps = TapsEmission::new(ConversionModel::taps_default(), Betas::PerSite(&betas));
+    let band = Band::anchored(25);
+
+    let haplotypes: Vec<Haplotype> = (0..3 * BATCH)
+        .map(|variant| {
+            let mut alternative = bases.clone();
+            for edit in 0..variant {
+                if let Some(base) = alternative.get_mut(35 + edit * 5) {
+                    *base = base.inverse();
+                }
+            }
+            Haplotype::new(alternative)
+        })
+        .collect();
+
+    let mut workspace = Workspace::new();
+    let mut out = Vec::new();
+    for count in 0..=3 * BATCH {
+        let refs: Vec<&Haplotype> = haplotypes.iter().take(count).collect();
+        let one_at_a_time: Vec<u64> = refs
+            .iter()
+            .map(|haplotype| align_strips_simd(haplotype, &read, &taps, band).get().to_bits())
+            .collect();
+
+        workspace.align_candidates(&refs, &read, &taps, band, &mut out);
+        let dispatched: Vec<u64> = out.iter().map(|score| score.get().to_bits()).collect();
+        assert_eq!(dispatched, one_at_a_time, "{count} haplotypes through the workspace");
+
+        let free: Vec<u64> = align_candidates(&refs, &read, &taps, band)
+            .iter()
+            .map(|score| score.get().to_bits())
+            .collect();
+        assert_eq!(free, one_at_a_time, "{count} haplotypes through the free function");
+    }
+}
+
+/// Both entry points replace what is in `out` rather than appending to it.
+/// Reusing the buffer is the reason it is passed in, and a version that
+/// appended silently returned a previous call's scores.
+#[test]
+fn a_reused_output_buffer_holds_only_this_call() {
+    let haplotype = Haplotype::from_ascii(b"ACGTACGTACGTACGTACGT");
+    let read = Read::uniform(
+        vec![Base::A, Base::C, Base::G, Base::T],
+        &[BaseQuality::from_byte(30); 4],
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(10),
+        Strand::OT,
+    )
+    .expect("a four base read must build");
+    let band = Band::anchored(0);
+    let refs = [&haplotype, &haplotype, &haplotype];
+
+    let mut workspace = Workspace::new();
+    let mut out = Vec::new();
+    for _ in 0..3 {
+        workspace.align_candidates(&refs, &read, &StandardEmission::default(), band, &mut out);
+        assert_eq!(out.len(), refs.len(), "align_candidates must not accumulate");
+    }
+    for _ in 0..3 {
+        workspace.align_batch(&refs, &read, &StandardEmission::default(), band, &mut out);
+        assert_eq!(out.len(), refs.len(), "align_batch must not accumulate");
+    }
 }

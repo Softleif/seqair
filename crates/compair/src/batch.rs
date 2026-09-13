@@ -51,6 +51,35 @@ use crate::{
 /// Alignments per batch: the lane count, which is what the whole kernel is.
 pub const BATCH: usize = LANE_MAX;
 
+/// How many haplotypes a batch needs before it beats scoring them one at a
+/// time through the strip kernel.
+///
+/// A batch computes all [`BATCH`] lanes whatever the caller asked for, so its
+/// cost is nearly flat in the group size and the per-alignment cost falls only
+/// with the fill. Measured on an M4 Pro against `align_strips_simd`, over a 200
+/// bp haplotype through the default band, for both emissions and at both read
+/// lengths -- the crossover sat at six every time, and the two read lengths
+/// agreed to within 0.02x at every point:
+///
+/// | haplotypes | 1 | 2 | 3 | 4 | 5 | **6** | 7 | 8 |
+/// |---|---|---|---|---|---|---|---|---|
+/// | speedup | 0.18x | 0.36x | 0.53x | 0.69x | 0.85x | **1.02x** | 1.17x | 1.32x |
+///
+/// `examples/batchfill.rs` regenerates the table. The number is a property of
+/// the ratio between the two kernels' per-cell costs, so it is worth
+/// re-measuring on a machine whose SIMD differs from this one -- but it is
+/// bounded: the batch kernel cannot win below `BATCH / 2` lanes, because at
+/// that fill it is doing more than twice the work for the same answers.
+pub const BATCH_BREAK_EVEN: usize = 6;
+
+// A break-even above `BATCH` would mean the batch kernel never runs, and one at
+// or below `BATCH / 2` would mean it runs where it is doing more than twice the
+// work for the same answers.
+const _: () = assert!(
+    BATCH_BREAK_EVEN > BATCH / 2 && BATCH_BREAK_EVEN <= BATCH,
+    "the break-even has to be reachable and above half fill"
+);
+
 /// Rows between two renormalisations. The strip kernel's constant, and it has
 /// to be, or the two would not round the same way.
 const STRIP_ROWS: usize = LANE_MAX;
@@ -206,12 +235,48 @@ impl BatchPlan {
 }
 
 impl Workspace {
+    /// One read against its candidate haplotypes, through whichever kernel is
+    /// faster for the number of them. **This is the entry point a caller
+    /// wants**; [`Workspace::align_batch`] and [`Workspace::align_strips_simd`]
+    /// are the two kernels it chooses between.
+    ///
+    /// The scores replace `out`'s contents, in the haplotypes' order.
+    ///
+    /// The choice is per batch, not per call, and it has to be: a caller with
+    /// nine haplotypes gets one full batch and a remainder of one, and running
+    /// the remainder through eight lanes to score a single haplotype is what
+    /// made nine haplotypes *slower* than eight before this existed. Full
+    /// batches go through the batch kernel, a remainder shorter than
+    /// [`BATCH_BREAK_EVEN`] goes through the strip kernel one haplotype at a
+    /// time, and because the two kernels are bit-identical the split cannot
+    /// change a score.
+    pub fn align_candidates<E: Emission>(
+        &mut self,
+        haplotypes: &[&Haplotype],
+        read: &Read,
+        emission: &E,
+        band: Band,
+        out: &mut Vec<Log10Likelihood>,
+    ) {
+        out.clear();
+        for group in haplotypes.chunks(BATCH) {
+            if group.len() >= BATCH_BREAK_EVEN {
+                self.batch_group::<f32x8, E>(group, read, emission, band, out);
+            } else {
+                for haplotype in group {
+                    out.push(self.align_strips_simd(haplotype, read, emission, band));
+                }
+            }
+        }
+    }
+
     /// Up to [`BATCH`] haplotypes against one read, one haplotype per lane.
     ///
-    /// The results are appended to `out` in the haplotypes' order. More than
+    /// The scores replace `out`'s contents, in the haplotypes' order. More than
     /// [`BATCH`] haplotypes are scored in successive batches; a batch short of
     /// [`BATCH`] still computes every lane, so the cost per alignment falls
-    /// only with the fill.
+    /// only with the fill. Prefer [`Workspace::align_candidates`], which is
+    /// this kernel where it wins and the strip kernel where it does not.
     pub fn align_batch<E: Emission>(
         &mut self,
         haplotypes: &[&Haplotype],
@@ -243,15 +308,28 @@ impl Workspace {
         band: Band,
         out: &mut Vec<Log10Likelihood>,
     ) {
+        out.clear();
         for group in haplotypes.chunks(L::LANES.min(BATCH)) {
-            let scores =
-                if read.is_empty() || self.batch_plan.fill(group, read, emission, band).is_none() {
-                    [Log10Likelihood::IMPOSSIBLE; BATCH]
-                } else {
-                    batch_kernel::<L>(&self.batch_plan, &mut self.batch_rows, read.len(), band)
-                };
-            out.extend(scores.iter().take(group.len()).copied());
+            self.batch_group::<L, E>(group, read, emission, band, out);
         }
+    }
+
+    /// One batch of at most [`BATCH`] haplotypes, appended to `out`.
+    fn batch_group<L: Lane, E: Emission>(
+        &mut self,
+        group: &[&Haplotype],
+        read: &Read,
+        emission: &E,
+        band: Band,
+        out: &mut Vec<Log10Likelihood>,
+    ) {
+        let scores =
+            if read.is_empty() || self.batch_plan.fill(group, read, emission, band).is_none() {
+                [Log10Likelihood::IMPOSSIBLE; BATCH]
+            } else {
+                batch_kernel::<L>(&self.batch_plan, &mut self.batch_rows, read.len(), band)
+            };
+        out.extend(scores.iter().take(group.len()).copied());
     }
 }
 
@@ -264,6 +342,22 @@ pub fn align_batch<E: Emission>(
 ) -> Vec<Log10Likelihood> {
     let mut out = Vec::with_capacity(haplotypes.len());
     Workspace::new().align_batch(haplotypes, read, emission, band, &mut out);
+    out
+}
+
+/// One read against its candidate haplotypes, through whichever kernel is
+/// faster for the number of them.
+///
+/// Allocates a [`Workspace`] per call; keep one and call
+/// [`Workspace::align_candidates`] when scoring more than one read.
+pub fn align_candidates<E: Emission>(
+    haplotypes: &[&Haplotype],
+    read: &Read,
+    emission: &E,
+    band: Band,
+) -> Vec<Log10Likelihood> {
+    let mut out = Vec::with_capacity(haplotypes.len());
+    Workspace::new().align_candidates(haplotypes, read, emission, band, &mut out);
     out
 }
 

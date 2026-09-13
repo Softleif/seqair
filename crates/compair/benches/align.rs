@@ -130,8 +130,25 @@ fn align(c: &mut Criterion) {
             let mut workspace = Workspace::new();
             let mut out = Vec::with_capacity(count);
             b.iter(|| {
-                out.clear();
                 workspace.align_batch(
+                    black_box(&group_haplotypes),
+                    black_box(&read),
+                    &taps,
+                    band,
+                    &mut out,
+                );
+                out.iter().map(|s| s.get()).sum::<f64>()
+            });
+        });
+        // What a caller actually calls: the batch kernel at this fill, the
+        // strip kernel below `BATCH_BREAK_EVEN`. At eight haplotypes this
+        // should sit on top of the arm above; the arms diverge at a partial
+        // batch, which `examples/batchfill.rs` sweeps.
+        group.bench_function("candidates/taps/workspace", |b| {
+            let mut workspace = Workspace::new();
+            let mut out = Vec::with_capacity(count);
+            b.iter(|| {
+                workspace.align_candidates(
                     black_box(&group_haplotypes),
                     black_box(&read),
                     &taps,
