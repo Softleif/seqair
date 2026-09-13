@@ -1,14 +1,24 @@
 //! The same eight lanes, written as target intrinsics rather than through
 //! `wide`.
 //!
-//! This exists to answer one question by measurement: does the strip kernel's
-//! remaining cost come from what `wide` emits, or from what the loop asks the
-//! register allocator for? Every operation the [`Lane`] trait needs maps onto
-//! one NEON or AVX2 instruction, so an intrinsics lane can differ from `wide`
-//! only in the shapes `wide` has no way to spell -- the lane shift, the pair
-//! load, and whatever the extra `#[repr]` buys the allocator. It is an
-//! experiment, not a second production path: `strip_kernel` is generic over
-//! the lane, so plugging this in changes no arithmetic and no order.
+//! This began as a measurement -- does the strip kernel's remaining cost come
+//! from what `wide` emits, or from what the loop asks the register allocator
+//! for? -- and is now the path a caller gets. Every operation the [`Lane`]
+//! trait needs maps onto one NEON or AVX2 instruction, so this lane can differ
+//! from `wide` only in the shapes `wide` has no way to spell: the lane shift,
+//! the pair load, the mask-and-zero pair, and whatever the extra `#[repr]`
+//! buys the allocator. `strip_kernel` is generic over the lane, so plugging
+//! this in changes no arithmetic and no order.
+//!
+//! On x86-64 it is reached through `strip_kernel_avx2`, a
+//! `#[target_feature(enable = "avx2")]` wrapper selected by
+//! `is_x86_feature_detected!` -- AVX2 is not in the baseline, and `wide`
+//! cannot be widened from outside because `f32x8` picks its representation by
+//! `cfg` at crate compile time. See §8 of `docs/notes/benchmarking.md` for
+//! what that is worth (10s on a 3950X, default build: 28.3 ms through `wide`,
+//! 15.8 ms through here) and for the one trap it sets -- anything the kernel
+//! calls must be `#[inline(always)]`, because an out-of-line copy inside a
+//! `target_feature` function is compiled for the *baseline*.
 //!
 //! Bit-parity is by construction for the same reason the `wide` lane's is --
 //! every lane operation is the IEEE operation on the same values in the same
