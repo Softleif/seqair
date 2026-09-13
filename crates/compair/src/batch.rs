@@ -560,6 +560,14 @@ pub(crate) fn batch_kernel<L: Lane>(
             carry.diag_m = L::load(m);
             carry.diag_indel = L::load(i) + L::load(d);
 
+            // The column index as a lane, carried and incremented rather than
+            // converted per step. `column as f32` is a `vcvtsi2ss` -- two uops,
+            // a false dependency on the destination register and ~5 cycles --
+            // plus a broadcast; one `vaddps` replaces both, and integers this
+            // small are exact in `f32`, so the value is the same bit for bit.
+            let one = L::splat(1.0);
+            let mut column_lane = L::splat(first as f32);
+
             for column in first..=last {
                 let at = column * BATCH;
                 let (Some(up_m), Some(up_i), Some(up_d)) = (
@@ -596,7 +604,8 @@ pub(crate) fn batch_kernel<L: Lane>(
                 let i = up_m * t.match_to_insertion + up_i * t.gap_continuation;
                 let d = carry.left_m * t.match_to_deletion + carry.left_d * t.gap_continuation;
                 let (m, i, d) = (flush(m), flush(i), flush(d));
-                let keep = L::splat(column as f32).below(past_end);
+                let keep = column_lane.below(past_end);
+                column_lane = column_lane + one;
                 let (m, i, d) = (keep.masked(m), keep.masked(i), keep.masked(d));
 
                 let (Some(mm), Some(ii), Some(dd)) = (
