@@ -8,10 +8,16 @@
 //!
 //! The first argument picks the kernel: `scalar-standard`, `scalar-taps`,
 //! `simd-standard`, `simd-taps` (the default), `strips-standard`,
-//! `strips-taps`, `strips-simd-standard`, `strips-simd-taps`, or any of those
+//! `strips-taps`, `strips-simd-standard`, `strips-simd-taps`,
+//! `strips-intrinsics-standard`, `strips-intrinsics-taps`, or any of those
 //! with a `-workspace` suffix to reuse buffers between calls. Every round
 //! scores the read against the fixture's eight candidate haplotypes, as a
 //! caller does.
+//!
+//! `batch-standard`, `batch-taps`, `candidates-standard` and `candidates-taps`
+//! take the whole group in one call rather than one haplotype at a time, which
+//! is the only way to sample the batch kernel -- the per-haplotype loop above
+//! can never fill its lanes from the outside.
 #![allow(clippy::print_stdout, reason = "this example exists to print a checksum")]
 
 #[path = "../benches/fixture.rs"]
@@ -19,7 +25,9 @@ mod fixture;
 
 use std::hint::black_box;
 
-use compair::{Betas, ConversionModel, StandardEmission, TapsEmission, Workspace};
+use compair::{
+    Betas, ConversionModel, Haplotype, Log10Likelihood, StandardEmission, TapsEmission, Workspace,
+};
 use fixture::{Fixture, fixture};
 
 fn main() {
@@ -37,6 +45,33 @@ fn main() {
 
     let mut workspace = Workspace::new();
     let mut checksum = 0.0f64;
+
+    if let Some(group_kernel) = kernel.strip_prefix("batch-").map(|e| ("batch", e)).or_else(|| {
+        kernel.strip_prefix("candidates-").map(|emission| ("candidates", emission))
+    }) {
+        let (which_kernel, which_emission) = group_kernel;
+        let refs: Vec<&Haplotype> = haplotypes.iter().collect();
+        let mut out: Vec<Log10Likelihood> = Vec::new();
+        for _ in 0..rounds {
+            let mut fresh = Workspace::new();
+            let workspace = if reuse { &mut workspace } else { &mut fresh };
+            let refs = black_box(&refs);
+            match (which_kernel, which_emission) {
+                ("batch", "standard") => {
+                    workspace.align_batch(refs, &read, &standard, band, &mut out);
+                }
+                ("batch", _) => workspace.align_batch(refs, &read, &taps, band, &mut out),
+                (_, "standard") => {
+                    workspace.align_candidates(refs, &read, &standard, band, &mut out);
+                }
+                _ => workspace.align_candidates(refs, &read, &taps, band, &mut out),
+            }
+            checksum += out.iter().map(|score| score.get()).sum::<f64>();
+        }
+        println!("{which}: {rounds} rounds, checksum {checksum}");
+        return;
+    }
+
     for _ in 0..rounds {
         for haplotype in &haplotypes {
             let haplotype = black_box(haplotype);

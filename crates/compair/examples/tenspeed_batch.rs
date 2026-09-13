@@ -10,7 +10,7 @@
 
 use compair::{
     Band, Base, BaseQuality, Haplotype, Log10Likelihood, Read, StandardEmission, Strand, Workspace,
-    align_strips_simd,
+    align_strips_intrinsics,
 };
 use std::time::Instant;
 
@@ -55,7 +55,7 @@ fn main() {
             out.clear();
             workspace.align_batch(&refs, read, &standard, band, &mut out);
             for (haplotype, got) in group.haplotypes.iter().zip(&out) {
-                let reference = align_strips_simd(haplotype, read, &standard, band).get();
+                let reference = align_strips_intrinsics(haplotype, read, &standard, band).get();
                 worst = worst.max((got.get() - reference).abs());
             }
         }
@@ -69,7 +69,7 @@ fn main() {
             let band = Band::anchored(*offset);
             workspace.align_candidates(&refs, read, &standard, band, &mut out);
             for (haplotype, got) in group.haplotypes.iter().zip(&out) {
-                let reference = align_strips_simd(haplotype, read, &standard, band).get();
+                let reference = align_strips_intrinsics(haplotype, read, &standard, band).get();
                 worst_dispatch = worst_dispatch.max((got.get() - reference).abs());
             }
         }
@@ -83,7 +83,7 @@ fn main() {
             for (read, offset) in group.reads.iter().zip(&group.offsets) {
                 let band = Band::anchored(*offset);
                 for haplotype in &group.haplotypes {
-                    sum += workspace.align_strips_simd(haplotype, read, &standard, band).get();
+                    sum += workspace.align_strips_intrinsics(haplotype, read, &standard, band).get();
                 }
             }
         }
@@ -120,7 +120,7 @@ fn main() {
 
     println!("\n{:<28} {:>10} {:>12}", "arm", "ms / pass", "us / pair");
     for (name, ms) in [
-        ("strips-simd, per haplotype", strips),
+        ("strips-intrinsics, per hap", strips),
         ("align_batch (forced)", batch),
         ("align_candidates (dispatch)", dispatch),
     ] {
@@ -148,7 +148,7 @@ fn main() {
             for (read, offset) in group.reads.iter().zip(&group.offsets) {
                 let band = Band::anchored(*offset);
                 for haplotype in &group.haplotypes {
-                    sum += workspace.align_strips_simd(haplotype, read, &standard, band).get();
+                    sum += workspace.align_strips_intrinsics(haplotype, read, &standard, band).get();
                 }
             }
             sum

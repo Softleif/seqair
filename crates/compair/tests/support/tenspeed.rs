@@ -125,6 +125,66 @@ pub fn pairs() -> Result<Vec<Pair>, Error> {
     Ok(out)
 }
 
+/// One region of the benchmark: its reads and the candidate haplotypes they
+/// are all scored against.
+///
+/// [`pairs`] flattens this away, which is right for a kernel that takes one
+/// pair -- but `align_candidates` takes a whole group, and how full its
+/// batches are is the thing that decides what it costs. Group 5 alone is 110
+/// reads x 24 haplotypes.
+#[derive(Debug)]
+pub struct Group {
+    pub reads: Vec<Read>,
+    /// One band anchor per read, seeded against the first haplotype, in
+    /// `reads` order.
+    pub offsets: Vec<i32>,
+    pub haplotypes: Vec<Haplotype>,
+}
+
+/// The benchmark as the caller-shaped groups it is written in.
+pub fn groups() -> Result<Vec<Group>, Error> {
+    let mut out = Vec::new();
+    let mut lines = INPUT.lines().enumerate();
+    while let Some((index, header)) = lines.next() {
+        if header.trim().is_empty() {
+            continue;
+        }
+        let mut counts = header.split_whitespace();
+        let [Some(reads), Some(haplotypes)] = [counts.next(), counts.next()] else {
+            return Err(Error::Header { line: index + 1 });
+        };
+        let [reads, haplotypes] = [reads, haplotypes]
+            .map(|count| count.parse::<usize>().map_err(|_| Error::Header { line: index + 1 }));
+        let (reads, haplotypes) = (reads?, haplotypes?);
+
+        let mut group_reads = Vec::with_capacity(reads);
+        for _ in 0..reads {
+            let (number, line) = lines.next().ok_or(Error::Truncated { line: index + 1 })?;
+            let raw = parse_read(line, number + 1)?;
+            group_reads.push(Read::new(
+                raw.read.iter().copied().map(Base::from).collect::<Vec<_>>(),
+                &quals(&raw.base_quals),
+                &quals(&raw.insertion_quals),
+                &quals(&raw.deletion_quals),
+                &quals(&raw.gap_quals),
+                Strand::OT,
+            )?);
+        }
+        let mut group_haplotypes = Vec::with_capacity(haplotypes);
+        for _ in 0..haplotypes {
+            let (_, line) = lines.next().ok_or(Error::Truncated { line: index + 1 })?;
+            let bases = line.split_whitespace().next().unwrap_or("").as_bytes();
+            group_haplotypes.push(Haplotype::from_ascii(bases));
+        }
+        let offsets = group_reads
+            .iter()
+            .map(|read| group_haplotypes.first().map_or(0, |h| seed_offset(h, read)))
+            .collect();
+        out.push(Group { reads: group_reads, offsets, haplotypes: group_haplotypes });
+    }
+    Ok(out)
+}
+
 fn parse_read(line: &str, number: usize) -> Result<Raw, Error> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     let [read, base, insertion, deletion, gap] = fields[..] else {

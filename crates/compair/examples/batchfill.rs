@@ -4,7 +4,13 @@
 //! `align_batch` computes all eight lanes whatever the caller asked for, so a
 //! group of `n < 8` throws `8 - n` away and the per-alignment cost falls only
 //! with the fill. This finds the crossover, which is the number the dispatch in
-//! `Workspace::align_haplotypes` has to know.
+//! `Workspace::align_candidates` has to know -- `BATCH_BREAK_EVEN`.
+//!
+//! Both sides race through the *same* lane: `align_strips_intrinsics` against
+//! `align_batch`, which now routes through the intrinsics lane too. Racing the
+//! `wide` strip kernel instead would move the crossover by whatever the lanes
+//! differ by rather than by what the fill costs, which is not the number the
+//! dispatch needs.
 //!
 //! `cargo run -p compair --release --example batchfill`
 
@@ -59,7 +65,7 @@ fn race<E: compair::Emission>(
     let strips = time(|| {
         let mut sum = 0.0;
         for haplotype in haplotypes {
-            sum += workspace.align_strips_simd(haplotype, read, emission, band).get();
+            sum += workspace.align_strips_intrinsics(haplotype, read, emission, band).get();
         }
         sum
     });

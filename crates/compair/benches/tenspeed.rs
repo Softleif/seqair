@@ -54,7 +54,7 @@
 //! Do not read numbers off a laptop, and do not read the gkl arms off Apple
 //! Silicon at all: they compile out. This wants the Linux box.
 
-use compair::{Band, StandardEmission, Workspace, align_full};
+use compair::{Band, Haplotype, Log10Likelihood, StandardEmission, Workspace, align_full};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -63,6 +63,7 @@ mod tenspeed;
 
 fn tenspeed(c: &mut Criterion) {
     let pairs = tenspeed::pairs().expect("10s.in and 10s.out parse");
+    let groups = tenspeed::groups().expect("10s.in parses into its groups");
     let matrix = tenspeed::matrix_cells(&pairs);
     let banded = tenspeed::band_cells(&pairs, |pair| Band::anchored(pair.offset));
     #[allow(clippy::cast_precision_loss, reason = "reporting a ratio of cell counts")]
@@ -118,6 +119,52 @@ fn tenspeed(c: &mut Criterion) {
             });
         });
     }
+    // The entry point a caller has: a whole group of candidate haplotypes per
+    // read, scored through whichever kernel the fill deserves. The same pairs
+    // and the same total, so it is directly comparable to the arms above --
+    // what it adds is that the batch kernel gets to fill its lanes.
+    group.bench_function("compair/candidates/banded", |b| {
+        let mut workspace = Workspace::new();
+        let mut out: Vec<Log10Likelihood> = Vec::new();
+        b.iter(|| {
+            let mut sum = 0.0;
+            for group in &groups {
+                let refs: Vec<&Haplotype> = group.haplotypes.iter().collect();
+                for (read, offset) in group.reads.iter().zip(&group.offsets) {
+                    workspace.align_candidates(
+                        black_box(&refs),
+                        black_box(read),
+                        &standard,
+                        Band::anchored(*offset),
+                        &mut out,
+                    );
+                    sum += out.iter().map(|score| score.get()).sum::<f64>();
+                }
+            }
+            sum
+        });
+    });
+    group.bench_function("compair/batch/banded", |b| {
+        let mut workspace = Workspace::new();
+        let mut out: Vec<Log10Likelihood> = Vec::new();
+        b.iter(|| {
+            let mut sum = 0.0;
+            for group in &groups {
+                let refs: Vec<&Haplotype> = group.haplotypes.iter().collect();
+                for (read, offset) in group.reads.iter().zip(&group.offsets) {
+                    workspace.align_batch(
+                        black_box(&refs),
+                        black_box(read),
+                        &standard,
+                        Band::anchored(*offset),
+                        &mut out,
+                    );
+                    sum += out.iter().map(|score| score.get()).sum::<f64>();
+                }
+            }
+            sum
+        });
+    });
     group.bench_function("compair/banded-simd/banded", |b| {
         let mut workspace = Workspace::new();
         b.iter(|| {
