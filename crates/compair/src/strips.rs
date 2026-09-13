@@ -381,7 +381,7 @@ impl<L: Lane> Totals<L> {
     fn absorb(&mut self, (m, i, d): (L, L, L)) {
         self.running = self.running.vmax(m).vmax(i).vmax(d);
         if let Some(keep) = self.summed {
-            self.total = self.total + keep.select(m + i, L::splat(0.0));
+            self.total = self.total + keep.masked(m + i);
         }
     }
 }
@@ -403,7 +403,7 @@ struct State<L> {
 /// Subnormals to zero, for the reason `Sink::store` in `banded` gives.
 #[inline(always)]
 fn flush<L: Lane>(value: L) -> L {
-    value.below(L::splat(f32::MIN_POSITIVE)).select(L::splat(0.0), value)
+    value.below(L::splat(f32::MIN_POSITIVE)).masked_out(value)
 }
 
 /// One step of the sweep: the cells `(r0 + l, first + at - l)` for every lane.
@@ -448,10 +448,7 @@ fn step<L: Lane>(
     let d = state.m * t.match_to_deletion + state.d * t.gap_continuation;
     let (m, i, d) = (flush(m), flush(i), flush(d));
     let (m, i, d) = match mask {
-        Some(keep) => {
-            let zero = L::splat(0.0);
-            (keep.select(m, zero), keep.select(i, zero), keep.select(d, zero))
-        }
+        Some(keep) => (keep.masked(m), keep.masked(i), keep.masked(d)),
         None => (m, i, d),
     };
 

@@ -169,6 +169,17 @@ pub(crate) trait Lane:
     fn both(self, other: Self) -> Self;
     /// `self` is a mask from [`Lane::equals`] or [`Lane::either`].
     fn select(self, if_true: Self, if_false: Self) -> Self;
+    /// `value` where this mask is set, zero where it is not.
+    ///
+    /// `select(value, splat(0.0))` computes the same thing, but a `select` is
+    /// a *sign-bit* blend, so a mask that a comparison already made whole has
+    /// to be sign-extended back into one before it can be `and`ed: LLVM emits
+    /// a `vpcmpgtd` against zero for every such site, and there are four per
+    /// step of the strip kernel. Asking for the `and` directly drops them.
+    fn masked(self, value: Self) -> Self;
+    /// `value` where this mask is *not* set, zero where it is; see
+    /// [`Lane::masked`].
+    fn masked_out(self, value: Self) -> Self;
     /// Every lane moved up by one: `first` enters at lane 0 and the last lane
     /// leaves. On one lane, `first`.
     fn shift_in(self, first: f32) -> Self;
@@ -228,6 +239,14 @@ impl Lane for f32 {
     #[inline]
     fn select(self, if_true: Self, if_false: Self) -> Self {
         if self.to_bits() == 0 { if_false } else { if_true }
+    }
+    #[inline]
+    fn masked(self, value: Self) -> Self {
+        Self::from_bits(self.to_bits() & value.to_bits())
+    }
+    #[inline]
+    fn masked_out(self, value: Self) -> Self {
+        Self::from_bits(!self.to_bits() & value.to_bits())
     }
     #[inline]
     fn shift_in(self, first: f32) -> Self {
@@ -293,6 +312,20 @@ impl Lane for f32x8 {
     #[inline]
     fn select(self, if_true: Self, if_false: Self) -> Self {
         Select::select(self, if_true, if_false)
+    }
+    // Blends, not `&` and `!&`. The point of these two is the *x86* codegen
+    // (see the trait), and `wide::f32x8` cannot reach it: on a baseline build
+    // it is two `f32x4`, and on aarch64 -- the target this lane actually runs
+    // on -- a blend is already one `bsl` while `!self & value` costs an extra
+    // complement for want of an `andnot` in `wide`'s API. Measured on the 10s
+    // dataset, M4 Pro: bitwise 13.80 ms, blends 13.48 ms.
+    #[inline]
+    fn masked(self, value: Self) -> Self {
+        Select::select(self, value, Self::splat(0.0))
+    }
+    #[inline]
+    fn masked_out(self, value: Self) -> Self {
+        Select::select(self, Self::splat(0.0), value)
     }
     #[inline]
     fn shift_in(self, first: f32) -> Self {
@@ -626,10 +659,9 @@ pub(crate) fn prior<L: Lane>(column: ColumnLanes<L>, row: RowLanes<L>) -> L {
     let plain = unknown.either(row.base.equals(column.plain));
     let weight = plain.select(
         L::splat(1.0),
-        row.base.equals(column.converted).select(
-            column.rate,
-            row.base.equals(column.base).select(column.unconverted_rate, L::splat(0.0)),
-        ),
+        row.base
+            .equals(column.converted)
+            .select(column.rate, row.base.equals(column.base).masked(column.unconverted_rate)),
     );
     row.mismatched + weight * row.spread
 }
@@ -985,12 +1017,9 @@ impl<'a> Sink<'a> {
             return false;
         }
         let (m, i, d) = cells;
-        let (tiny, zero) = (L::splat(f32::MIN_POSITIVE), L::splat(0.0));
-        let (m, i, d) = (
-            m.below(tiny).select(zero, m),
-            i.below(tiny).select(zero, i),
-            d.below(tiny).select(zero, d),
-        );
+        let tiny = L::splat(f32::MIN_POSITIVE);
+        let (m, i, d) =
+            (m.below(tiny).masked_out(m), i.below(tiny).masked_out(i), d.below(tiny).masked_out(d));
         // SAFETY: every view was built with `self.span` entries and
         // `offset + LANE_MAX <= self.span` was just checked.
         unsafe {
@@ -1132,7 +1161,7 @@ fn banded_kernel<L: Lane>(
                 reason = "a diagonal holds at most `half_width + 1` cells"
             )]
             let keep = offsets.below(L::splat((live - chunk) as f32));
-            let cells = (keep.select(m, zero), keep.select(i, zero), keep.select(d, zero));
+            let cells = (keep.masked(m), keep.masked(i), keep.masked(d));
             running_m = running_m.vmax(cells.0);
             running_i = running_i.vmax(cells.1);
             running_d = running_d.vmax(cells.2);

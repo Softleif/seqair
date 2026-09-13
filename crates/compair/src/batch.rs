@@ -373,7 +373,7 @@ struct Carry<L> {
 /// Subnormals to zero, as in the strip kernel and for the same reason.
 #[inline(always)]
 fn flush<L: Lane>(value: L) -> L {
-    value.below(L::splat(f32::MIN_POSITIVE)).select(L::splat(0.0), value)
+    value.below(L::splat(f32::MIN_POSITIVE)).masked_out(value)
 }
 
 /// One row at a time along the haplotype, every lane a different haplotype.
@@ -417,7 +417,7 @@ fn batch_kernel<L: Lane>(
             continue;
         }
         let live = L::splat(column as f32).below(past_end);
-        let cell = live.select(init, zero);
+        let cell = live.masked(init);
         let at = column * BATCH;
         let Some(slot) = buffer.d.get_mut(at..at + LANE_MAX) else {
             return impossible;
@@ -546,7 +546,7 @@ fn batch_kernel<L: Lane>(
                 let d = carry.left_m * t.match_to_deletion + carry.left_d * t.gap_continuation;
                 let (m, i, d) = (flush(m), flush(i), flush(d));
                 let keep = L::splat(column as f32).below(past_end);
-                let (m, i, d) = (keep.select(m, zero), keep.select(i, zero), keep.select(d, zero));
+                let (m, i, d) = (keep.masked(m), keep.masked(i), keep.masked(d));
 
                 let (Some(mm), Some(ii), Some(dd)) = (
                     buffer
