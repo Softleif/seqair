@@ -429,7 +429,9 @@ pub(crate) struct Plan {
 #[derive(Debug, Default)]
 pub(crate) struct RowTracks {
     pub(crate) base: Vec<f32>,
-    pub(crate) matched: Vec<f32>,
+    /// `(1 - eps) - eps / 3`: what a matching latent base adds over a
+    /// mismatching one, see [`prior`].
+    pub(crate) spread: Vec<f32>,
     pub(crate) mismatched: Vec<f32>,
     pub(crate) match_to_match: Vec<f32>,
     pub(crate) match_to_insertion: Vec<f32>,
@@ -474,7 +476,7 @@ impl Plan {
 
         let RowTracks {
             base,
-            matched,
+            spread,
             mismatched,
             match_to_match,
             match_to_insertion,
@@ -484,7 +486,7 @@ impl Plan {
         } = &mut self.rows;
         for track in [
             &mut *base,
-            matched,
+            spread,
             mismatched,
             match_to_match,
             match_to_insertion,
@@ -500,7 +502,7 @@ impl Plan {
             let t = read.transition(index)?;
             let row = index + 1;
             *base.get_mut(row)? = code(observation.base);
-            *matched.get_mut(row)? = (1.0 - eps) as f32;
+            *spread.get_mut(row)? = ((1.0 - eps) - eps / 3.0) as f32;
             *mismatched.get_mut(row)? = (eps / 3.0) as f32;
             *match_to_match.get_mut(row)? = t.match_to_match as f32;
             *match_to_insertion.get_mut(row)? = t.match_to_insertion as f32;
@@ -548,7 +550,7 @@ pub(crate) struct ColumnLanes<L> {
 #[derive(Clone, Copy)]
 pub(crate) struct RowLanes<L> {
     base: L,
-    matched: L,
+    spread: L,
     mismatched: L,
     /// `base` is `N`: a mask, computed here so that a kernel whose rows are
     /// fixed for many cells computes it once.
@@ -557,8 +559,8 @@ pub(crate) struct RowLanes<L> {
 
 impl<L: Lane> RowLanes<L> {
     #[inline(always)]
-    pub(crate) fn new(base: L, matched: L, mismatched: L) -> Self {
-        Self { base, matched, mismatched, unknown: base.equals(L::splat(CODE_N)) }
+    pub(crate) fn new(base: L, spread: L, mismatched: L) -> Self {
+        Self { base, spread, mismatched, unknown: base.equals(L::splat(CODE_N)) }
     }
 }
 
@@ -577,10 +579,11 @@ pub(crate) struct TransitionLanes<L> {
 ///
 /// Selects, not branches: whether a column converts is a property of the
 /// haplotype, so a branch on it mispredicts once per cytosine -- and the vector
-/// kernel has no branch to take at all. `matched * weight + offset` covers all
-/// five rows of the emission because `weight = 1, offset = 0` reproduces a
-/// plain match and `weight = 0` a plain mismatch, exactly, `matched` and
-/// `offset` being non-negative.
+/// kernel has no branch to take at all. `mismatched + weight * spread`, with
+/// `spread = (1 - eps) - eps / 3` per row, is the trait's `w * (1 - eps) +
+/// (1 - w) * eps / 3` rearranged so that one multiply and one add cover all
+/// five rows: `weight = 0` is a plain mismatch exactly and `weight = 1` a plain
+/// match to within the one rounding `spread` took.
 #[inline]
 pub(crate) fn prior<L: Lane>(column: ColumnLanes<L>, row: RowLanes<L>) -> L {
     let unknown = row.unknown.either(column.base.equals(L::splat(CODE_N)));
@@ -592,7 +595,7 @@ pub(crate) fn prior<L: Lane>(column: ColumnLanes<L>, row: RowLanes<L>) -> L {
             row.base.equals(column.base).select(column.unconverted_rate, L::splat(0.0)),
         ),
     );
-    row.matched * weight + plain.select(L::splat(0.0), row.mismatched)
+    row.mismatched + weight * row.spread
 }
 
 /// The widest `Lane`, so the per-row tracks can be padded once.
@@ -791,7 +794,7 @@ struct Sources<'a> {
     m_left: View<'a>,
     d_left: View<'a>,
     row_base: View<'a>,
-    row_matched: View<'a>,
+    row_spread: View<'a>,
     row_mismatched: View<'a>,
     match_to_match: View<'a>,
     match_to_insertion: View<'a>,
@@ -832,7 +835,7 @@ impl<'a> Sources<'a> {
             m_left: View::new(prev1.m, left, span)?,
             d_left: View::new(prev1.d, left, span)?,
             row_base: View::new(&rows.base, lo, span)?,
-            row_matched: View::new(&rows.matched, lo, span)?,
+            row_spread: View::new(&rows.spread, lo, span)?,
             row_mismatched: View::new(&rows.mismatched, lo, span)?,
             match_to_match: View::new(&rows.match_to_match, lo, span)?,
             match_to_insertion: View::new(&rows.match_to_insertion, lo, span)?,
@@ -887,7 +890,7 @@ impl<'a> Sources<'a> {
                 rate: load(self.column_rate),
                 unconverted_rate: load(self.column_unconverted),
             },
-            RowLanes::new(load(self.row_base), load(self.row_matched), load(self.row_mismatched)),
+            RowLanes::new(load(self.row_base), load(self.row_spread), load(self.row_mismatched)),
         );
         let t = TransitionLanes {
             match_to_match: load(self.match_to_match),
@@ -1215,12 +1218,17 @@ mod tests {
     /// `prior` in the scalar lane is `match_probability` narrowed to `f32`, to
     /// within the rounding that narrowing the factors first can cost.
     ///
-    /// Four ulp rather than one, and only for the conversion rows: the trait
-    /// computes `(1 - eps) * rate + eps / 3` in `f64` and rounds once, while the
-    /// kernel rounds `1 - eps`, `rate` and `eps / 3` first and then multiplies
-    /// and adds them unfused -- unfused because a fused vector multiply-add is
-    /// not available on every target and bit-parity has to be. Every other row
-    /// is exact.
+    /// Four ulp of the larger of the kernel's two terms rather than one ulp
+    /// of the result: the trait computes `w * (1 - eps) + (1 - w) * eps / 3`
+    /// in `f64` and rounds once, while the kernel rounds `spread` (that is
+    /// `(1 - eps) - eps / 3`), `eps / 3` and `w` first and then multiplies and
+    /// adds them unfused -- unfused because a fused vector multiply-add is not available
+    /// on every target and bit-parity has to be. A plain mismatch is exact and
+    /// a plain match is one rounding off. The two terms have the same sign
+    /// whenever `eps <= 3/4`, so there the bound is four ulp of the result;
+    /// above that a base is evidence against itself, `spread` is negative,
+    /// and the terms cancel -- the absolute error is still four ulp of the
+    /// larger term, which is what this pins.
     #[test]
     fn emission_table_matches_the_trait() {
         let haplotype = Haplotype::from_ascii(b"ACGTNCGGCGATCGATTACGNNCGATCGGGCCATCGAT");
@@ -1276,11 +1284,7 @@ mod tests {
                 rate: at(&columns.rate, column)?,
                 unconverted_rate: at(&columns.unconverted, column)?,
             },
-            RowLanes::new(
-                at(&rows.base, row)?,
-                at(&rows.matched, row)?,
-                at(&rows.mismatched, row)?,
-            ),
+            RowLanes::new(at(&rows.base, row)?, at(&rows.spread, row)?, at(&rows.mismatched, row)?),
         ))
     }
 
@@ -1308,7 +1312,11 @@ mod tests {
                     return false;
                 };
                 let got = prior::<f32>(column, row);
-                let slack = 4.0 * f32::EPSILON * want.abs();
+                let weight =
+                    emission.site_weights(site, read.strand()).latent_weight(observation.base);
+                #[allow(clippy::cast_possible_truncation, reason = "the bound is stated in f32")]
+                let larger_term = (weight as f32 * row.spread).abs().max(row.mismatched);
+                let slack = 4.0 * f32::EPSILON * larger_term;
                 if (got - want).abs() > slack {
                     return false;
                 }

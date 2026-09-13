@@ -32,19 +32,53 @@ impl SiteWeights {
 
     /// `P(observed | this site)` at this error probability.
     ///
-    /// An unknown base on either side matches at full probability, as GATK's
-    /// pair-HMM does.
+    /// The chemistry acts before the sequencer reads, so this marginalises
+    /// over the base the site carried *after* conversion: the observation is
+    /// either that base read correctly, or one of the other three misread as
+    /// it.
+    ///
+    /// ```text
+    /// P(observed) = w * (1 - eps) + (1 - w) * eps / 3
+    ///           w = P(post-conversion base == observed), see `latent_weight`
+    /// ```
+    ///
+    /// Every row sums to one over the four bases, and a site the chemistry
+    /// does not touch gives `1 - eps` on a match and `eps / 3` on a mismatch
+    /// exactly, so a conversion model with nothing to convert is
+    /// [`StandardEmission`] bit for bit. An unknown base on either side matches
+    /// at full probability, as GATK's pair-HMM does.
+    ///
+    /// **Not** the form Bis-SNP (Liu et al. 2012, eq. 5) and the joint model's
+    /// first draft wrote, `(1 - eps) * w + eps / 3`, which adds the error term
+    /// unweighted and so sums to `1 + eps / 3`: that scores a cytosine the
+    /// chemistry leaves alone as *likelier* than any other matching base, by
+    /// `eps / 3`, at every cytosine on the read's strand. `tests/emission.rs`
+    /// pins both the marginalisation (against bsgenova's three-stage model,
+    /// Feng & Gao 2024) and the size of the difference.
     #[inline]
     #[must_use]
     pub fn probability(self, observed: Base, eps: f64) -> f64 {
+        let weight = self.latent_weight(observed);
+        weight * (1.0 - eps) + (1.0 - weight) * (eps / 3.0)
+    }
+
+    /// The chance the base the chemistry left at this site is `observed`:
+    /// the half of the emission that knows nothing about sequencing error.
+    ///
+    /// `rate` for the converted base, `1 - rate` for the site's own base, and
+    /// one or zero where nothing converts; an unknown base on either side
+    /// counts as the observed one.
+    #[inline]
+    #[must_use]
+    pub fn latent_weight(self, observed: Base) -> f64 {
         if observed == Base::Unknown || self.base == Base::Unknown {
-            return 1.0 - eps;
+            return 1.0;
         }
         match self.converted {
-            Some(converted) if observed == converted => (1.0 - eps) * self.rate + eps / 3.0,
-            Some(_) if observed == self.base => (1.0 - eps) * (1.0 - self.rate) + eps / 3.0,
-            _ if observed == self.base => 1.0 - eps,
-            _ => eps / 3.0,
+            Some(converted) if observed == converted => self.rate,
+            Some(_) if observed == self.base => 1.0 - self.rate,
+            _ if observed == self.base => 1.0,
+            _ => 0.0,
         }
     }
 }
@@ -60,11 +94,10 @@ impl SiteWeights {
 /// row and compose the tracks lanewise. Nothing an implementation can write
 /// makes the two disagree.
 ///
-/// The result is used as a multiplicative weight and is never renormalised, so
-/// an implementation may return a row that does not sum to one over the four
-/// bases. `TapsEmission`'s converted rows do not: they carry the `eps / 3`
-/// error floor on top of the conversion split, exactly as the joint model
-/// writes them.
+/// The result is used as a multiplicative weight and is never renormalised,
+/// so a row that summed to more than one over the four bases would favour
+/// every haplotype column it applied to, by the excess, in every alignment.
+/// The composition keeps every row a distribution.
 ///
 /// [`site_weights`]: Self::site_weights
 /// [`epsilon`]: Self::epsilon
@@ -237,12 +270,19 @@ impl Betas<'_> {
 /// the rate, not whether the rows apply:
 ///
 /// ```text
-/// P(T | C, OT, beta) = (1 - eps) * rate + eps / 3
-/// P(C | C, OT, beta) = (1 - eps) * (1 - rate) + eps / 3
+/// P(T | C, OT, beta) = rate * (1 - eps) + (1 - rate) * eps / 3
+/// P(C | C, OT, beta) = (1 - rate) * (1 - eps) + rate * eps / 3
 ///
 ///   in a CpG:  rate = beta * c + (1 - beta) * f
 ///   otherwise: rate = f
 /// ```
+///
+/// `rate` is the mixture Bis-SNP writes for bisulfite with the chemistry's
+/// roles swapped: bisulfite converts the *unmethylated* cytosine, so its
+/// converted-`T` probability is `beta * gamma + (1 - beta) * (1 - alpha)` with
+/// `gamma` the over-conversion and `alpha` the under-conversion rate, and TAPS
+/// is the same expression at `c = gamma`, `f = 1 - alpha`. The composition
+/// with sequencing error is not Bis-SNP's; see [`SiteWeights::probability`].
 ///
 /// **Why a non-`CpG` `C` is not a plain mismatch.** `f` is the false-conversion
 /// rate, and it was measured on the unmethylated pUC19 spike-in's cytosines --

@@ -1,4 +1,6 @@
-use compair::{Base, BaseQuality, Error, Haplotype, Read, Strand};
+use compair::{
+    Base, BaseQuality, Error, HapSite, Haplotype, Observation, Read, Strand, error_probability,
+};
 
 /// The strand a mirrored case reports. `compair::Strand` has no `mirror`:
 /// `Unknown` has no mirror image, and a `Read` cannot carry it anyway.
@@ -291,4 +293,59 @@ pub fn mirror(case: &Case) -> Option<Case> {
 
 fn reversed(quals: &[BaseQuality]) -> Vec<BaseQuality> {
     quals.iter().rev().copied().collect()
+}
+
+/// GATK's forward recurrence in `f64` over the whole matrix, with the prior
+/// supplied per cell instead of by an `Emission`: the way to score a
+/// composition the crate does not offer, since `MatchProbability` cannot be
+/// overridden. Written out rather than derived from `align_full`, and without
+/// its rescaling, so reads of a few hundred bases at most. `None` if the pair
+/// cannot be scored at all.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "every index is in 0..=h and every row is allocated with h + 1 entries"
+)]
+pub fn forward_with(
+    haplotype: &Haplotype,
+    read: &Read,
+    prior: impl Fn(HapSite, Observation) -> f64,
+) -> Option<f64> {
+    let (h, r) = (haplotype.len(), read.len());
+    if h == 0 || r == 0 {
+        return None;
+    }
+    let quality = |track: &[BaseQuality], index: usize| {
+        error_probability(track.get(index).copied().unwrap_or(BaseQuality::from_byte(0)))
+    };
+    #[allow(clippy::cast_precision_loss, reason = "test haplotypes are short")]
+    let init = 1.0 / h as f64;
+    let mut prev_m = vec![0.0f64; h + 1];
+    let mut prev_i = vec![0.0f64; h + 1];
+    let mut prev_d = vec![init; h + 1];
+    let (mut cur_m, mut cur_i, mut cur_d) =
+        (vec![0.0f64; h + 1], vec![0.0f64; h + 1], vec![0.0f64; h + 1]);
+
+    for i in 1..=r {
+        let observation = read.observation(i - 1)?;
+        let p_ins = quality(read.insertion_quals(), i - 1);
+        let p_del = quality(read.deletion_quals(), i - 1);
+        let gap = quality(read.gap_quals(), i - 1);
+        let m2m = 1.0 - (p_ins + p_del).min(1.0);
+        let i2m = 1.0 - gap;
+        cur_m[0] = 0.0;
+        cur_i[0] = 0.0;
+        cur_d[0] = 0.0;
+        for j in 1..=h {
+            let site = haplotype.site(j - 1)?;
+            let p = prior(site, observation);
+            cur_m[j] = p * (prev_m[j - 1] * m2m + prev_i[j - 1] * i2m + prev_d[j - 1] * i2m);
+            cur_i[j] = prev_m[j] * p_ins + prev_i[j] * gap;
+            cur_d[j] = cur_m[j - 1] * p_del + cur_d[j - 1] * gap;
+        }
+        core::mem::swap(&mut prev_m, &mut cur_m);
+        core::mem::swap(&mut prev_i, &mut cur_i);
+        core::mem::swap(&mut prev_d, &mut cur_d);
+    }
+    let total: f64 = prev_m.iter().zip(prev_i.iter()).skip(1).map(|(m, i)| m + i).sum();
+    (total > 0.0).then(|| total.log10())
 }

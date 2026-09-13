@@ -522,8 +522,8 @@ pub(crate) fn strip_kernel<L: Lane>(
             Some(L::load(track.get(r0..r0.checked_add(LANE_MAX)?)?.first_chunk()?))
         };
         let tracks = &plan.rows;
-        let (Some(row_base), Some(matched), Some(mismatched)) =
-            (row_lanes(&tracks.base), row_lanes(&tracks.matched), row_lanes(&tracks.mismatched))
+        let (Some(row_base), Some(spread), Some(mismatched)) =
+            (row_lanes(&tracks.base), row_lanes(&tracks.spread), row_lanes(&tracks.mismatched))
         else {
             return Log10Likelihood::IMPOSSIBLE;
         };
@@ -557,7 +557,7 @@ pub(crate) fn strip_kernel<L: Lane>(
             return Log10Likelihood::IMPOSSIBLE;
         };
         let strip = Strip {
-            row: RowLanes::new(row_base, matched, mismatched),
+            row: RowLanes::new(row_base, spread, mismatched),
             transitions: TransitionLanes {
                 match_to_match,
                 match_to_insertion,
