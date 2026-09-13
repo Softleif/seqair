@@ -9,10 +9,31 @@
 //! `cargo run -p compair --release --example tenspeed_batch`
 
 use compair::{
-    Band, Base, BaseQuality, Haplotype, Log10Likelihood, Read, StandardEmission, Strand, Workspace,
-    align_strips_intrinsics,
+    Band, Base, BaseQuality, Emission, Haplotype, Log10Likelihood, Read, StandardEmission, Strand,
+    Workspace,
 };
 use std::time::Instant;
+
+/// The strip kernel over the widest lane this *build* has: the hand-written
+/// intrinsics one where the `intrinsics` feature is on -- which itself falls
+/// back to `wide` on a CPU without AVX2 -- and `wide`'s otherwise. Keeps this
+/// example building and meaningful under `--no-default-features`.
+fn strips_lane<E: Emission>(
+    workspace: &mut Workspace,
+    haplotype: &Haplotype,
+    read: &Read,
+    emission: &E,
+    band: Band,
+) -> Log10Likelihood {
+    #[cfg(feature = "intrinsics")]
+    {
+        workspace.align_strips_intrinsics(haplotype, read, emission, band)
+    }
+    #[cfg(not(feature = "intrinsics"))]
+    {
+        workspace.align_strips_simd(haplotype, read, emission, band)
+    }
+}
 
 struct Group {
     reads: Vec<Read>,
@@ -55,7 +76,8 @@ fn main() {
             out.clear();
             workspace.align_batch(&refs, read, &standard, band, &mut out);
             for (haplotype, got) in group.haplotypes.iter().zip(&out) {
-                let reference = align_strips_intrinsics(haplotype, read, &standard, band).get();
+                let reference =
+                    strips_lane(&mut Workspace::new(), haplotype, read, &standard, band).get();
                 worst = worst.max((got.get() - reference).abs());
             }
         }
@@ -69,7 +91,8 @@ fn main() {
             let band = Band::anchored(*offset);
             workspace.align_candidates(&refs, read, &standard, band, &mut out);
             for (haplotype, got) in group.haplotypes.iter().zip(&out) {
-                let reference = align_strips_intrinsics(haplotype, read, &standard, band).get();
+                let reference =
+                    strips_lane(&mut Workspace::new(), haplotype, read, &standard, band).get();
                 worst_dispatch = worst_dispatch.max((got.get() - reference).abs());
             }
         }
@@ -83,7 +106,7 @@ fn main() {
             for (read, offset) in group.reads.iter().zip(&group.offsets) {
                 let band = Band::anchored(*offset);
                 for haplotype in &group.haplotypes {
-                    sum += workspace.align_strips_intrinsics(haplotype, read, &standard, band).get();
+                    sum += strips_lane(&mut workspace, haplotype, read, &standard, band).get();
                 }
             }
         }
@@ -148,7 +171,7 @@ fn main() {
             for (read, offset) in group.reads.iter().zip(&group.offsets) {
                 let band = Band::anchored(*offset);
                 for haplotype in &group.haplotypes {
-                    sum += workspace.align_strips_intrinsics(haplotype, read, &standard, band).get();
+                    sum += strips_lane(&mut workspace, haplotype, read, &standard, band).get();
                 }
             }
             sum

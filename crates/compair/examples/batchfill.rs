@@ -15,10 +15,31 @@
 //! `cargo run -p compair --release --example batchfill`
 
 use compair::{
-    Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Log10Likelihood, Probability, Read,
-    StandardEmission, Strand, TapsEmission, Workspace,
+    Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood,
+    Probability, Read, StandardEmission, Strand, TapsEmission, Workspace,
 };
 use std::time::Instant;
+
+/// The strip kernel over the widest lane this *build* has: the hand-written
+/// intrinsics one where the `intrinsics` feature is on -- which itself falls
+/// back to `wide` on a CPU without AVX2 -- and `wide`'s otherwise. Keeps this
+/// example building and meaningful under `--no-default-features`.
+fn strips_lane<E: Emission>(
+    workspace: &mut Workspace,
+    haplotype: &Haplotype,
+    read: &Read,
+    emission: &E,
+    band: Band,
+) -> Log10Likelihood {
+    #[cfg(feature = "intrinsics")]
+    {
+        workspace.align_strips_intrinsics(haplotype, read, emission, band)
+    }
+    #[cfg(not(feature = "intrinsics"))]
+    {
+        workspace.align_strips_simd(haplotype, read, emission, band)
+    }
+}
 
 const HAPLOTYPE_LEN: usize = 200;
 const READ_OFFSET: usize = 25;
@@ -65,7 +86,7 @@ fn race<E: compair::Emission>(
     let strips = time(|| {
         let mut sum = 0.0;
         for haplotype in haplotypes {
-            sum += workspace.align_strips_intrinsics(haplotype, read, emission, band).get();
+            sum += strips_lane(&mut workspace, haplotype, read, emission, band).get();
         }
         sum
     });

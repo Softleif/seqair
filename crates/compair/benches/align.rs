@@ -14,7 +14,7 @@ mod fixture;
 
 use compair::{
     Betas, ConversionModel, StandardEmission, TapsEmission, Workspace, align_banded,
-    align_banded_simd, align_full, align_strips, align_strips_intrinsics, align_strips_simd,
+    align_banded_simd, align_full, align_strips, align_strips_simd,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use fixture::{Fixture, fixture};
@@ -59,18 +59,29 @@ fn align(c: &mut Criterion) {
         let mut workspace = Workspace::new();
         b.iter(|| workspace.align_strips_simd(black_box(haplotype), black_box(&read), &taps, band));
     });
-    group.bench_function("strips-intrinsics/standard", |b| {
-        b.iter(|| align_strips_intrinsics(black_box(haplotype), black_box(&read), &standard, band));
-    });
-    group.bench_function("strips-intrinsics/taps", |b| {
-        b.iter(|| align_strips_intrinsics(black_box(haplotype), black_box(&read), &taps, band));
-    });
-    group.bench_function("strips-intrinsics/taps/workspace", |b| {
-        let mut workspace = Workspace::new();
-        b.iter(|| {
-            workspace.align_strips_intrinsics(black_box(haplotype), black_box(&read), &taps, band)
+    #[cfg(feature = "intrinsics")]
+    {
+        use compair::align_strips_intrinsics;
+        group.bench_function("strips-intrinsics/standard", |b| {
+            b.iter(|| {
+                align_strips_intrinsics(black_box(haplotype), black_box(&read), &standard, band)
+            });
         });
-    });
+        group.bench_function("strips-intrinsics/taps", |b| {
+            b.iter(|| align_strips_intrinsics(black_box(haplotype), black_box(&read), &taps, band));
+        });
+        group.bench_function("strips-intrinsics/taps/workspace", |b| {
+            let mut workspace = Workspace::new();
+            b.iter(|| {
+                workspace.align_strips_intrinsics(
+                    black_box(haplotype),
+                    black_box(&read),
+                    &taps,
+                    band,
+                )
+            });
+        });
+    }
     group.bench_function("reference/standard", |b| {
         b.iter(|| align_full(black_box(haplotype), black_box(&read), &standard));
     });
@@ -95,6 +106,7 @@ fn align(c: &mut Criterion) {
                     .sum::<f64>()
             });
         });
+        #[cfg(feature = "intrinsics")]
         group.bench_function("strips-intrinsics/taps/workspace", |b| {
             let mut workspace = Workspace::new();
             b.iter(|| {

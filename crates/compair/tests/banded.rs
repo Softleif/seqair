@@ -1,11 +1,13 @@
 #[allow(dead_code, reason = "each integration test uses a different part of this")]
 mod support;
 
+#[cfg(feature = "intrinsics")]
+use compair::align_strips_intrinsics;
 use compair::{
     BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, MatchProbability,
     Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded,
-    align_banded_simd, align_candidates, align_full, align_strips, align_strips_intrinsics,
-    align_strips_simd, error_probability,
+    align_banded_simd, align_candidates, align_full, align_strips, align_strips_simd,
+    error_probability,
 };
 use proptest::prelude::*;
 use support::{
@@ -119,6 +121,7 @@ proptest! {
     /// operation, so this asserts what the `Lane` trait already makes true --
     /// which is the point: an intrinsics lane that needed a tolerance would
     /// not be the experiment it claims to be.
+    #[cfg(feature = "intrinsics")]
     #[test]
     fn strips_intrinsics_are_bit_identical_to_strips_scalar(
         case in arbitrary_case(),
