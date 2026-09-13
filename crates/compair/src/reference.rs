@@ -1,5 +1,5 @@
 use crate::{
-    emission::Emission,
+    emission::{Emission, MatchProbability},
     haplotype::Haplotype,
     read::Read,
     scaling::{exp2_f64, normalising_shift_f64},

@@ -34,7 +34,9 @@ mod strips;
 mod transitions;
 
 pub use banded::{Band, Workspace, align_banded, align_banded_simd};
-pub use emission::{Betas, ConversionModel, Emission, SiteWeights, StandardEmission, TapsEmission};
+pub use emission::{
+    Betas, ConversionModel, Emission, MatchProbability, SiteWeights, StandardEmission, TapsEmission,
+};
 pub use error::Error;
 pub use haplotype::Haplotype;
 pub use read::Read;

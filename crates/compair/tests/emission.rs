@@ -2,7 +2,7 @@
 mod support;
 
 use compair::{
-    Base, BaseQuality, Betas, ConversionModel, CpgRole, Emission, Haplotype, Observation,
+    Base, BaseQuality, Betas, ConversionModel, CpgRole, Haplotype, MatchProbability, Observation,
     Probability, QPos, Read, StandardEmission, Strand, TapsEmission, error_probability,
 };
 use proptest::prelude::*;

@@ -2,9 +2,9 @@
 mod support;
 
 use compair::{
-    Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Probability, Read,
-    StandardEmission, Strand, TapsEmission, Workspace, align_banded, align_banded_simd, align_full,
-    align_strips, align_strips_simd, error_probability,
+    Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, MatchProbability, Probability,
+    Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded, align_banded_simd,
+    align_full, align_strips, align_strips_simd, error_probability,
 };
 use proptest::prelude::*;
 use support::{

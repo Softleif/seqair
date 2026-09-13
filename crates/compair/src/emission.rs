@@ -49,12 +49,16 @@ impl SiteWeights {
     }
 }
 
-/// `P(observed read base | haplotype base)` for the pair-HMM's match state.
+/// `P(observed read base | haplotype base)` for the pair-HMM's match state,
+/// in two halves.
 ///
-/// An implementation supplies the two halves and gets [`match_probability`] for
-/// free; that default is the specification, and the banded kernels reach the
-/// same numbers by calling [`site_weights`] once per haplotype column and
-/// [`epsilon`] once per read row rather than the pair once per cell.
+/// An implementation supplies what it knows about a haplotype column and what
+/// it knows about a read base; [`SiteWeights::probability`] composes them,
+/// and that composition is the only one there is. The reference DP asks for it
+/// per cell through [`MatchProbability`]; the banded kernels call
+/// [`site_weights`] once per haplotype column and [`epsilon`] once per read
+/// row and compose the tracks lanewise. Nothing an implementation can write
+/// makes the two disagree.
 ///
 /// The result is used as a multiplicative weight and is never renormalised, so
 /// an implementation may return a row that does not sum to one over the four
@@ -62,7 +66,6 @@ impl SiteWeights {
 /// error floor on top of the conversion split, exactly as the joint model
 /// writes them.
 ///
-/// [`match_probability`]: Self::match_probability
 /// [`site_weights`]: Self::site_weights
 /// [`epsilon`]: Self::epsilon
 pub trait Emission {
@@ -72,7 +75,20 @@ pub trait Emission {
     /// The error probability this model assigns one observation, which is the
     /// base quality's unless something floors it.
     fn epsilon(&self, observation: Observation) -> f64;
+}
 
+/// `P(observed | site)`: an [`Emission`]'s two halves composed by
+/// [`SiteWeights::probability`].
+///
+/// Implemented for every `Emission` and for nothing else, so it cannot be
+/// overridden. An earlier draft had this as a provided method of `Emission`,
+/// which let an implementation override it -- and the banded kernels, which
+/// never call it, would silently score something else.
+pub trait MatchProbability {
+    fn match_probability(&self, site: HapSite, observation: Observation) -> f64;
+}
+
+impl<E: Emission + ?Sized> MatchProbability for E {
     #[inline]
     fn match_probability(&self, site: HapSite, observation: Observation) -> f64 {
         self.site_weights(site, observation.strand)

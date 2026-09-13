@@ -1160,8 +1160,8 @@ fn get(buffer: &[f32], index: usize) -> f32 {
 mod tests {
     use super::{ColumnLanes, Lane, MASK_SET, Plan, RowLanes, prior};
     use crate::{
-        BaseQuality, Betas, ConversionModel, Emission, Haplotype, Probability, Read,
-        StandardEmission, Strand, TapsEmission,
+        BaseQuality, Betas, ConversionModel, Emission, Haplotype, MatchProbability, Probability,
+        Read, StandardEmission, Strand, TapsEmission,
     };
     use proptest::prelude::*;
     use wide::f32x8;
