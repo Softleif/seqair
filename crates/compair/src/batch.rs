@@ -606,7 +606,13 @@ pub(crate) fn batch_kernel<L: Lane>(
                 let (m, i, d) = (flush(m), flush(i), flush(d));
                 let keep = column_lane.below(past_end);
                 column_lane = column_lane + one;
-                let (m, i, d) = (keep.masked(m), keep.masked(i), keep.masked(d));
+                // `i` needs no mask: past a lane's haplotype its `m` is masked
+                // to zero at every row, and `i` reads only the cell above --
+                // `up_m * match_to_insertion + up_i * gap_continuation` -- so a
+                // dead lane's `i` starts at zero and stays there. `d` does need
+                // one: it reads the cell to its *left*, which at the column
+                // just past the haplotype is still live.
+                let (m, d) = (keep.masked(m), keep.masked(d));
 
                 let (Some(mm), Some(ii), Some(dd)) = (
                     buffer
