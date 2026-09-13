@@ -96,6 +96,28 @@ fn tenspeed(c: &mut Criterion) {
                 .sum::<f64>()
         });
     });
+    #[cfg(feature = "intrinsics")]
+    {
+        println!("intrinsics lane available: {}", compair::intrinsics_lane_available());
+        group.bench_function("compair/strips-intrinsics/banded", |b| {
+            let mut workspace = Workspace::new();
+            b.iter(|| {
+                pairs
+                    .iter()
+                    .map(|pair| {
+                        workspace
+                            .align_strips_intrinsics(
+                                black_box(&pair.haplotype),
+                                black_box(&pair.read),
+                                &standard,
+                                Band::anchored(pair.offset),
+                            )
+                            .get()
+                    })
+                    .sum::<f64>()
+            });
+        });
+    }
     group.bench_function("compair/banded-simd/banded", |b| {
         let mut workspace = Workspace::new();
         b.iter(|| {

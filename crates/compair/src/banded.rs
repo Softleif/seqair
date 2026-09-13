@@ -616,7 +616,11 @@ pub(crate) struct TransitionLanes<L> {
 /// (1 - w) * eps / 3` rearranged so that one multiply and one add cover all
 /// five rows: `weight = 0` is a plain mismatch exactly and `weight = 1` a plain
 /// match to within the one rounding `spread` took.
-#[inline]
+/// `#[inline(always)]`, not `#[inline]`: inside a `#[target_feature]` kernel
+/// an out-of-line copy is compiled for the *baseline*, and on x86-64 that
+/// turns every lane operation of the emission into a call to an out-of-line
+/// `__mm256_*` (measured: 163 ms on the 10s dataset against 28 ms inlined).
+#[inline(always)]
 pub(crate) fn prior<L: Lane>(column: ColumnLanes<L>, row: RowLanes<L>) -> L {
     let unknown = row.unknown.either(column.base.equals(L::splat(CODE_N)));
     let plain = unknown.either(row.base.equals(column.plain));

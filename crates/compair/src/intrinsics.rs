@@ -15,7 +15,11 @@
 //! order -- and is asserted against the scalar kernel by the same property
 //! test.
 
-use crate::banded::LANE_MAX;
+use crate::{
+    banded::{Band, LANE_MAX, Plan, Shape},
+    strips::{RowBuffer, strip_kernel},
+    types::Log10Likelihood,
+};
 
 /// Eight `f32` as two 128-bit vectors, the NEON register pair `wide`'s
 /// `f32x8` already is on this target -- but with the lane shift as `vextq`
@@ -182,19 +186,21 @@ mod aarch64 {
 }
 
 /// Eight `f32` as one AVX2 register.
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
 #[repr(C, align(32))]
 pub(crate) struct Simd8 {
     ymm: core::arch::x86_64::__m256,
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "every block is one AVX2 intrinsic on values this type owns; the only\
-              safety condition any of them has is the target feature, which the\
-              module's cfg is"
+              safety condition any of them has is the target feature, and every one\
+              of these is `#[inline(always)]` into `strip_kernel_avx2`, which carries\
+              `#[target_feature(enable = \"avx2\")]` and is only reached through the\
+              runtime check in `available`"
 )]
 mod x86 {
     use core::arch::x86_64::{
@@ -320,10 +326,74 @@ mod x86 {
     }
 }
 
-/// Whether this build has an intrinsics lane at all.
-pub(crate) const AVAILABLE: bool = cfg!(any(
-    all(target_arch = "aarch64", target_feature = "neon"),
-    all(target_arch = "x86_64", target_feature = "avx2")
-));
+/// Whether *this run* has an intrinsics lane: a compile-time fact on aarch64,
+/// where NEON is in the baseline, and a runtime one on x86-64, where AVX2 is
+/// not and [`strip_kernel_intrinsics`] dispatches on it.
+pub(crate) fn available() -> bool {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        true
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(any(
+        all(target_arch = "aarch64", target_feature = "neon"),
+        target_arch = "x86_64"
+    )))]
+    {
+        false
+    }
+}
+
+/// The strip kernel over the intrinsics lane where this CPU has one, over
+/// `wide`'s where it has not. Bit-identical either way -- the lane is the
+/// only thing that changes, and every lane is the same IEEE operation on the
+/// same values in the same order.
+pub(crate) fn strip_kernel_intrinsics(
+    plan: &Plan,
+    rows: &mut RowBuffer,
+    shape: Shape,
+    band: Band,
+) -> Log10Likelihood {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        strip_kernel::<Simd8>(plan, rows, shape, band)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the runtime check is the wrapper's one precondition.
+            return unsafe { strip_kernel_avx2(plan, rows, shape, band) };
+        }
+        strip_kernel::<wide::f32x8>(plan, rows, shape, band)
+    }
+    #[cfg(not(any(
+        all(target_arch = "aarch64", target_feature = "neon"),
+        target_arch = "x86_64"
+    )))]
+    {
+        strip_kernel::<wide::f32x8>(plan, rows, shape, band)
+    }
+}
+
+/// The kernel over [`Simd8`], compiled with AVX2 enabled so that every
+/// intrinsic inlines into it rather than staying a call to a baseline-SSE2
+/// function. A default x86-64 build reaches AVX2 only through here.
+///
+/// # Safety
+///
+/// The CPU must have AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn strip_kernel_avx2(
+    plan: &Plan,
+    rows: &mut RowBuffer,
+    shape: Shape,
+    band: Band,
+) -> Log10Likelihood {
+    strip_kernel::<Simd8>(plan, rows, shape, band)
+}
 
 const _: () = assert!(LANE_MAX == 8, "the intrinsics lanes are eight wide");
