@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v0.2.0 (Unreleased)
+## v0.2.0 (2026-09-14)
 
 A streaming-window BAM region reader, newtyped record and query indices, a unified
 pileup API, and VCF/BCF encoder ergonomics.
@@ -20,7 +20,7 @@ pileup API, and VCF/BCF encoder ergonomics.
 - `PileupEngine::new` takes a `PileupInput`, minted only by `RecordStore::prepare_for_pileup()`
   (which also returns `MateLinkStats`). The engine used to silently assume position order and
   linked mates.
-- `PileupEngine::take_store` → `reclaim_allocation` — it returns an *empty* store that keeps its
+- `PileupEngine::take_store` → `reclaim_allocation` — it returns an _empty_ store that keeps its
   slab capacity, not the records.
 - `PileupEngine::set_max_depth` takes `NonZeroU32`; `0` used to mean "emit nothing".
 - `PileupAlignment::strand` removed — use `Strand::from(rec.flags)`.
@@ -46,8 +46,8 @@ pileup API, and VCF/BCF encoder ergonomics.
   `PileupAlignment::qpos()`, `CigarMapping::soft_clip_qpos_at`, and
   `BaseModState::mod_at_qpos` / `is_unmodified`.
 - `AlignedPair::Insertion.qpos` → `first_inserted` (also on `AlignedPairWithRead` / `WithRef`):
-  it names the *first inserted* base, while `PileupOp::Insertion.qpos` names the matched base
-  *before* the run.
+  it names the _first inserted_ base, while `PileupOp::Insertion.qpos` names the matched base
+  _before_ the run.
 
 **Readers and writers**
 
@@ -95,7 +95,7 @@ pileup API, and VCF/BCF encoder ergonomics.
 
 ### Fixed
 
-- **`BgzfWriter::virtual_offset()` could name a byte *inside* a record** when a write filled a block
+- **`BgzfWriter::virtual_offset()` could name a byte _inside_ a record** when a write filled a block
   exactly, corrupting every co-produced CSI/BAI/TBI offset that landed there — htslib rejected such
   files outright. ~0.4 % of blocks fill exactly. Compressed bytes are unchanged; only the recorded
   offsets differ.
@@ -104,7 +104,7 @@ pileup API, and VCF/BCF encoder ergonomics.
 - **SAM and CRAM region queries lost records overlapping by the query's last base** (SAM tested a
   half-open range against an exclusive `end_pos`; CRAI compared a 1-based start to a 0-based query).
   All readers now share one convention — 0-based, both ends inclusive.
-- **`RecordStore::dedup` sorts first.** It collapses *consecutive* equal records, so an unsorted store
+- **`RecordStore::dedup` sorts first.** It collapses _consecutive_ equal records, so an unsorted store
   silently kept the duplicates the method exists to remove.
 - **BCF genotypes carry the phase bit on the first allele.** Hardcoded unphased, so htslib rendered a
   fully phased `0|1` as `/0|1`.
