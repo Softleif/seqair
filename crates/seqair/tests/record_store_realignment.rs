@@ -18,7 +18,7 @@
 mod helpers;
 use hegel::prelude::*;
 use helpers::ri;
-use seqair::bam::Pos0;
+use seqair::bam::{DecodeError, Pos0};
 use seqair::bam::record_store::RecordStore;
 use seqair_types::{BamFlags, Base, BaseQuality};
 
@@ -589,13 +589,13 @@ fn set_alignment_rejects_wrong_query_len(tc: TestCase) {
     let err = store
         .set_alignment(idx, Pos0::new(200).unwrap(), &wrong_cigar)
         .expect_err("a CIGAR that spends a different number of query bases must be refused");
-    // `DecodeError` is not re-exported, so the variant is checked through the
-    // message, which must name both lengths rather than say "invalid CIGAR".
-    let message = err.to_string();
     assert!(
-        message.contains(&(qlen + delta).to_string()) && message.contains(&qlen.to_string()),
-        "{message:?} does not name the CIGAR query length {} or the seq_len {qlen}",
-        qlen + delta,
+        matches!(
+            err,
+            DecodeError::CigarQueryLenMismatch { cigar_query_len, seq_len }
+                if cigar_query_len == qlen + delta && seq_len == qlen
+        ),
+        "rejected with {err:?}, which does not name the mismatch"
     );
 
     // A refused realignment must leave the record exactly as it was — the
