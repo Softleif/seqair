@@ -871,6 +871,7 @@ fn read_rle_alphabet(src: &mut &[u8]) -> Result<[bool; ALPHABET_SIZE], CramError
 #[allow(clippy::arithmetic_side_effects, reason = "test code")]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
 
     // r[verify cram.codec.rans_nx16]
 
@@ -1032,35 +1033,36 @@ mod tests {
         );
     }
 
-    proptest::proptest! {
-        // For all (start, len) where the first symbol is `start-1` (so the
-        // run trigger fires), the decoder must accept iff `start + len <= 255`
-        // and reject with `MalformedAlphabetRun` otherwise. Mirrors the
-        // boundary in htscodecs `decode_alphabet`.
-        #[test]
-        fn read_alphabet_run_bounds_match_spec(start in 1u8..=255, len in 0u8..=255) {
-            // Stream: [start-1, start, len, 0]. The first byte is needed
-            // because the run-trigger requires `sym == prev_sym+1`.
-            let prev = start.checked_sub(1).expect("start >= 1");
-            let stream = [prev, start, len, 0];
-            let mut cur: &[u8] = &stream;
-            let result = read_alphabet(&mut cur);
+    // For all (start, len) where the first symbol is `start-1` (so the
+    // run trigger fires), the decoder must accept iff `start + len <= 255`
+    // and reject with `MalformedAlphabetRun` otherwise. Mirrors the
+    // boundary in htscodecs `decode_alphabet`.
+    #[hegel::test]
+    fn read_alphabet_run_bounds_match_spec(tc: TestCase) {
+        let start = tc.draw(gs::integers::<u8>().min_value(1));
+        let len = tc.draw(gs::integers::<u8>());
+        // Stream: [start-1, start, len, 0]. The first byte is needed
+        // because the run-trigger requires `sym == prev_sym+1`.
+        let prev = start.checked_sub(1).expect("start >= 1");
+        let stream = [prev, start, len, 0];
+        let mut cur: &[u8] = &stream;
+        let result = read_alphabet(&mut cur);
 
-            let end = u32::from(start) + u32::from(len);
-            if end > 255 {
-                proptest::prop_assert!(
-                    matches!(result, Err(CramError::MalformedAlphabetRun { start: s, len: l })
+        let end = u32::from(start) + u32::from(len);
+        if end > 255 {
+            assert!(
+                matches!(result, Err(CramError::MalformedAlphabetRun { start: s, len: l })
                                  if s == start && l == len),
-                    "expected MalformedAlphabetRun for start={start}, len={len}, got: {result:?}",
-                );
-            } else {
-                let alphabet = result.expect("valid bounds should not error");
-                proptest::prop_assert!(alphabet[usize::from(prev)], "alphabet[{prev}] must be set");
-                if len > 0 {
-                    let last = start.checked_add(len.checked_sub(1).expect("len>0"))
-                        .expect("end ≤ 255 so add fits in u8");
-                    proptest::prop_assert!(alphabet[usize::from(last)], "alphabet[{last}] must be set");
-                }
+                "expected MalformedAlphabetRun for start={start}, len={len}, got: {result:?}",
+            );
+        } else {
+            let alphabet = result.expect("valid bounds should not error");
+            assert!(alphabet[usize::from(prev)], "alphabet[{prev}] must be set");
+            if len > 0 {
+                let last = start
+                    .checked_add(len.checked_sub(1).expect("len>0"))
+                    .expect("end ≤ 255 so add fits in u8");
+                assert!(alphabet[usize::from(last)], "alphabet[{last}] must be set");
             }
         }
     }
@@ -1104,7 +1106,7 @@ mod tests {
         // (htslib/htscodecs/htscodecs/varint.h:206, BIG_END / MSB-first).
         // These are an independent oracle: a future refactor that flips
         // MSB↔LSB byte order in `read_uint7` would silently keep the
-        // round-trip proptest passing (because the encoder is in the same
+        // round-trip property passing (because the encoder is in the same
         // file), but would break against these fixed bytes.
         let cases: &[(u32, &[u8])] = &[
             (0, &[0x00]),
@@ -1131,71 +1133,67 @@ mod tests {
         }
     }
 
-    proptest::proptest! {
-        // r[verify cram.codec.rans_nx16]
-        // Direct test of state_renormalize. Models the spec exactly:
-        // - if state >= 1<<15, no bytes consumed, state unchanged.
-        // - else, repeatedly shift-left-16 and OR a u16 LE from src
-        //   until state >= 1<<15.
-        #[test]
-        fn state_renormalize_matches_spec(
-            initial_state in 0u32..=u32::MAX,
-            bytes in proptest::collection::vec(0u8..=255, 0..=16),
-        ) {
-            let mut src: &[u8] = &bytes;
-            let initial_src_len = src.len();
-            let result = state_renormalize(initial_state, &mut src);
+    // r[verify cram.codec.rans_nx16]
+    // Direct test of state_renormalize. Models the spec exactly:
+    // - if state >= 1<<15, no bytes consumed, state unchanged.
+    // - else, repeatedly shift-left-16 and OR a u16 LE from src
+    //   until state >= 1<<15.
+    #[hegel::test]
+    fn state_renormalize_matches_spec(tc: TestCase) {
+        let initial_state = tc.draw(gs::integers::<u32>());
+        let bytes = tc.draw(gs::binary().max_size(16));
+        let mut src: &[u8] = &bytes;
+        let initial_src_len = src.len();
+        let result = state_renormalize(initial_state, &mut src);
 
-            if initial_state >= (1 << 15) {
-                // Fast path: no bytes consumed, state unchanged.
-                proptest::prop_assert_eq!(result, Some(initial_state));
-                proptest::prop_assert_eq!(src.len(), initial_src_len);
-                return Ok(());
-            }
-
-            // Slow path: build the expected result by replaying the spec.
-            let mut expected_state = initial_state;
-            let mut expected_src: &[u8] = &bytes;
-            while expected_state < (1 << 15) {
-                let Some((head, rest)) = expected_src.split_first_chunk::<2>() else {
-                    proptest::prop_assert_eq!(result, None,
-                        "expected None when src exhausted mid-renorm");
-                    return Ok(());
-                };
-                let lo = u32::from(u16::from_le_bytes(*head));
-                expected_state = expected_state.wrapping_shl(16) | lo;
-                expected_src = rest;
-            }
-            proptest::prop_assert_eq!(result, Some(expected_state));
-            proptest::prop_assert_eq!(src.len(), expected_src.len());
+        if initial_state >= (1 << 15) {
+            // Fast path: no bytes consumed, state unchanged.
+            assert_eq!(result, Some(initial_state));
+            assert_eq!(src.len(), initial_src_len);
+            return;
         }
 
-        #[test]
-        fn read_uint7_roundtrip(val in 0u32..=u32::MAX) {
-            let mut stream = Vec::with_capacity(256);
-            encode_uint7_prv(&mut stream, val);
-            let mut cur: &[u8] = &stream;
-            let decoded = read_uint7(&mut cur).unwrap();
-            proptest::prop_assert_eq!(decoded, val);
-            // Encoder and decoder must consume exactly the same number of bytes.
-            proptest::prop_assert!(cur.is_empty(), "undecoded trailing bytes");
+        // Slow path: build the expected result by replaying the spec.
+        let mut expected_state = initial_state;
+        let mut expected_src: &[u8] = &bytes;
+        while expected_state < (1 << 15) {
+            let Some((head, rest)) = expected_src.split_first_chunk::<2>() else {
+                assert_eq!(result, None, "expected None when src exhausted mid-renorm");
+                return;
+            };
+            let lo = u32::from(u16::from_le_bytes(*head));
+            expected_state = expected_state.wrapping_shl(16) | lo;
+            expected_src = rest;
         }
-
-        #[test]
-        fn read_uint7_roundtrip_max_continuation(val in (1u32 << 28)..=u32::MAX) {
-            // Values requiring 5 continuation bytes (the maximum).
-            let mut stream = Vec::with_capacity(256);
-            encode_uint7_prv(&mut stream, val);
-            // Must produce exactly 5 bytes (all continuation except last).
-            proptest::prop_assert_eq!(stream.len(), 5, "max-continuation encodes to 5 bytes");
-            let mut cur: &[u8] = &stream;
-            let decoded = read_uint7(&mut cur).unwrap();
-            proptest::prop_assert_eq!(decoded, val);
-        }
+        assert_eq!(result, Some(expected_state));
+        assert_eq!(src.len(), expected_src.len());
     }
 
-    // r[verify cram.codec.normalize_checked]
-    // r[verify cram.codec.rans_nx16_bits_validation]
+    #[hegel::test]
+    fn read_uint7_roundtrip(tc: TestCase) {
+        let val = tc.draw(gs::integers::<u32>());
+        let mut stream = Vec::with_capacity(256);
+        encode_uint7_prv(&mut stream, val);
+        let mut cur: &[u8] = &stream;
+        let decoded = read_uint7(&mut cur).unwrap();
+        assert_eq!(decoded, val);
+        // Encoder and decoder must consume exactly the same number of bytes.
+        assert!(cur.is_empty(), "undecoded trailing bytes");
+    }
+
+    #[hegel::test]
+    fn read_uint7_roundtrip_max_continuation(tc: TestCase) {
+        // Values requiring 5 continuation bytes (the maximum).
+        let val = tc.draw(gs::integers::<u32>().min_value(1 << 28));
+        let mut stream = Vec::with_capacity(256);
+        encode_uint7_prv(&mut stream, val);
+        // Must produce exactly 5 bytes (all continuation except last).
+        assert_eq!(stream.len(), 5, "max-continuation encodes to 5 bytes");
+        let mut cur: &[u8] = &stream;
+        let decoded = read_uint7(&mut cur).unwrap();
+        assert_eq!(decoded, val);
+    }
+
     #[test]
     fn invalid_bits_returns_error() {
         // rANS Nx16 symbol tables are 4096 entries (1 << 12). If the
@@ -1278,45 +1276,45 @@ mod tests {
         }
     }
 
-    proptest::proptest! {
-        // For arbitrary cumulative-frequency distributions summing to 4096,
-        // the precomputed table must agree with the linear-scan oracle on
-        // every f in [0, 4096).
-        #[test]
-        fn build_symbol_table_proptest(seeds in proptest::collection::vec(0u32..=4096, 8)) {
-            // Build a frequency table from the seed weights, normalized to sum 4096.
-            let total: u64 = seeds.iter().map(|&s| u64::from(s)).sum();
-            proptest::prop_assume!(total > 0);
-            let mut freq = [0u32; 256];
-            for (i, &s) in seeds.iter().enumerate() {
-                let scaled = (u64::from(s) * 4096 / total) as u32;
-                freq[i % 256] = freq[i % 256].saturating_add(scaled);
-            }
-            // Normalize residual to symbol 0.
-            let sum: u32 = freq.iter().sum();
-            if sum < 4096 {
-                freq[0] = freq[0].saturating_add(4096 - sum);
-            }
-            // Skip if normalization overflow — only valid distributions matter.
-            proptest::prop_assume!(freq.iter().sum::<u32>() == 4096);
+    // For arbitrary cumulative-frequency distributions summing to 4096,
+    // the precomputed table must agree with the linear-scan oracle on
+    // every f in [0, 4096).
+    #[hegel::test]
+    fn build_symbol_table_agrees_with_linear_scan(tc: TestCase) {
+        let seeds =
+            tc.draw(gs::vecs(gs::integers::<u32>().max_value(4096)).min_size(8).max_size(8));
+        // Build a frequency table from the seed weights, normalized to sum 4096.
+        let total: u64 = seeds.iter().map(|&s| u64::from(s)).sum();
+        tc.assume(total > 0);
+        let mut freq = [0u32; 256];
+        for (i, &s) in seeds.iter().enumerate() {
+            let scaled = (u64::from(s) * 4096 / total) as u32;
+            freq[i % 256] = freq[i % 256].saturating_add(scaled);
+        }
+        // Normalize residual to symbol 0.
+        let sum: u32 = freq.iter().sum();
+        if sum < 4096 {
+            freq[0] = freq[0].saturating_add(4096 - sum);
+        }
+        // Skip if normalization overflow — only valid distributions matter.
+        tc.assume(freq.iter().sum::<u32>() == 4096);
 
-            let cum = build_cumulative_frequencies(&freq);
-            let table = build_symbol_table_nx16(&cum);
+        let cum = build_cumulative_frequencies(&freq);
+        let table = build_symbol_table_nx16(&cum);
 
-            // Verify the in-place form populates identically.
-            let mut table_into = [0u8; 4096];
-            build_symbol_table_nx16_into(&cum, &mut table_into);
-            proptest::prop_assert_eq!(table, table_into);
+        // Verify the in-place form populates identically.
+        let mut table_into = [0u8; 4096];
+        build_symbol_table_nx16_into(&cum, &mut table_into);
+        assert_eq!(table, table_into);
 
-            for f_val in 0u32..4096 {
-                let expected = cumulative_frequencies_symbol(&cum, f_val);
-                let actual = table[f_val as usize];
-                proptest::prop_assert_eq!(actual, expected, "mismatch at f={}", f_val);
-            }
+        for f_val in 0u32..4096 {
+            let expected = cumulative_frequencies_symbol(&cum, f_val);
+            let actual = table[f_val as usize];
+            assert_eq!(actual, expected, "mismatch at f={f_val}");
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, reason = "len bounded by proptest range")]
+    #[allow(clippy::cast_possible_truncation, reason = "len bounded by the generator")]
     #[test]
     fn order0_32state_and_generic_produce_same_output() {
         // Minimal 32-state order-0 stream: symbol 0 with freq=4096
@@ -1427,152 +1425,141 @@ mod tests {
         assert!(dst.iter().all(|&b| b == 0), "decode_order_0_32state produced non-zero output");
     }
 
-    proptest::proptest! {
-        #[test]
-        fn simd_matches_scalar_order0_32state(
-            len in 0usize..1024,
-        ) {
-            // Stream decoding to `len` zero bytes. Symbol 0 has freq=4096
-            // (covers the full 12-bit range), all other symbols freq=0.
-            // With freq[sym0]=4096 the state is invariant — no renorm needed.
-            let mut stream = Vec::with_capacity(256);
-            stream.push(FLAG_N32);
-            encode_uint7_prv(&mut stream, len as u32);
-            // Alphabet: sym 0 only
-            stream.extend_from_slice(&[0, 0]);
-            // Frequency: 4096 for sym 0 (2-byte uint7), 0 for all others (single 0 byte each)
+    #[hegel::test]
+    fn simd_matches_scalar_order0_32state(tc: TestCase) {
+        let len = tc.draw(gs::integers::<usize>().max_value(1023));
+        // Stream decoding to `len` zero bytes. Symbol 0 has freq=4096
+        // (covers the full 12-bit range), all other symbols freq=0.
+        // With freq[sym0]=4096 the state is invariant — no renorm needed.
+        let mut stream = Vec::with_capacity(256);
+        stream.push(FLAG_N32);
+        encode_uint7_prv(&mut stream, len as u32);
+        // Alphabet: sym 0 only
+        stream.extend_from_slice(&[0, 0]);
+        // Frequency: 4096 for sym 0 (2-byte uint7), 0 for all others (single 0 byte each)
         stream.push(0x80);
         stream.push(0x20); // freq[0] = 4096 (uint7: 0x1000 → 0x80, 0x20)
-            // 32 initial states
-            for _ in 0..32 {
-                stream.extend_from_slice(&0x01000000u32.to_le_bytes());
-            }
-
-            let simd_result = decode(&stream, 0).unwrap();
-            assert_eq!(simd_result.len(), len);
-
-            let mut cur: &[u8] = &stream;
-            read_u8(&mut cur).unwrap();
-            read_uint7(&mut cur).unwrap();
-            let mut scalar_dst = vec![0u8; len];
-            decode_order_0_generic(&mut cur, &mut scalar_dst, 32).unwrap();
-            assert_eq!(simd_result, scalar_dst);
+        // 32 initial states
+        for _ in 0..32 {
+            stream.extend_from_slice(&0x0100_0000u32.to_le_bytes());
         }
 
-        // Exercises the renormalization path that the other two SIMD/scalar
-        // proptests miss. With initial state = 0x8001 (just above the 1<<15
-        // renorm threshold) and freq[sym0]=2048, the first decode step
-        // produces new_state = 2048 * 8 + 1 = 0x4001, below the threshold,
-        // forcing a renorm read for every lane on every outer iteration.
-        // The trailing renorm bytes vary across the proptest's seed space.
-        #[test]
-        fn simd_matches_scalar_with_renorm(
-            renorm_bytes in proptest::collection::vec(0u8..=255, 256..512),
-            len in 32usize..=128,
-        ) {
-            // Round len down to a multiple of 32 so the test exercises only
-            // the full-chunk path (the remainder path is covered separately).
-            let len = (len / 32).checked_mul(32).expect("len ≤ 128 → fits in usize");
-            let mut stream = Vec::with_capacity(256);
-            stream.push(FLAG_N32);
-            encode_uint7_prv(&mut stream, len as u32);
-            // Alphabet: sym 0 only.
-            stream.extend_from_slice(&[0, 0]);
-            // freq[0] = 2048 (uint7: 0x90, 0x00). With one symbol active
-            // and sum=2048, normalize_frequencies will scale to 4096 by
-            // doubling (shift=1), giving an effective freq[0] = 4096
-            // — but we want renorm, so use TWO symbols with freq=2048 each.
-            stream.clear();
-            stream.push(FLAG_N32);
-            encode_uint7_prv(&mut stream, len as u32);
-            stream.push(0); // sym 0
-            stream.push(1); // sym 1 (consecutive triggers run-compress, but len=0 is fine)
-            stream.push(0); // run len = 0 (no run)
-            stream.push(0); // terminator
-            encode_uint7_prv(&mut stream, 2048); // freq[0]
-            encode_uint7_prv(&mut stream, 2048); // freq[1]
-            // 32 initial states all at 0x8001 — first step drops state to
-            // 0x4001 (< 1<<15) and forces renorm on every lane.
-            for _ in 0..32 {
-                stream.extend_from_slice(&0x0000_8001u32.to_le_bytes());
+        let simd_result = decode(&stream, 0).unwrap();
+        assert_eq!(simd_result.len(), len);
+
+        let mut cur: &[u8] = &stream;
+        read_u8(&mut cur).unwrap();
+        read_uint7(&mut cur).unwrap();
+        let mut scalar_dst = vec![0u8; len];
+        decode_order_0_generic(&mut cur, &mut scalar_dst, 32).unwrap();
+        assert_eq!(simd_result, scalar_dst);
+    }
+
+    // Exercises the renormalization path that the other two SIMD/scalar
+    // properties miss. With initial state = 0x8001 (just above the 1<<15
+    // renorm threshold) and freq[sym0]=2048, the first decode step
+    // produces new_state = 2048 * 8 + 1 = 0x4001, below the threshold,
+    // forcing a renorm read for every lane on every outer iteration.
+    // The trailing renorm bytes vary across the generator's seed space.
+    #[hegel::test]
+    fn simd_matches_scalar_with_renorm(tc: TestCase) {
+        let renorm_bytes = tc.draw(gs::binary().min_size(256).max_size(511));
+        let len = tc.draw(gs::integers::<usize>().min_value(32).max_value(128));
+        // Round len down to a multiple of 32 so the test exercises only
+        // the full-chunk path (the remainder path is covered separately).
+        let len = (len / 32).checked_mul(32).expect("len ≤ 128 → fits in usize");
+        let mut stream = Vec::with_capacity(256);
+        stream.push(FLAG_N32);
+        encode_uint7_prv(&mut stream, len as u32);
+        // Alphabet: sym 0 only.
+        stream.extend_from_slice(&[0, 0]);
+        // freq[0] = 2048 (uint7: 0x90, 0x00). With one symbol active
+        // and sum=2048, normalize_frequencies will scale to 4096 by
+        // doubling (shift=1), giving an effective freq[0] = 4096
+        // — but we want renorm, so use TWO symbols with freq=2048 each.
+        stream.clear();
+        stream.push(FLAG_N32);
+        encode_uint7_prv(&mut stream, len as u32);
+        stream.push(0); // sym 0
+        stream.push(1); // sym 1 (consecutive triggers run-compress, but len=0 is fine)
+        stream.push(0); // run len = 0 (no run)
+        stream.push(0); // terminator
+        encode_uint7_prv(&mut stream, 2048); // freq[0]
+        encode_uint7_prv(&mut stream, 2048); // freq[1]
+        // 32 initial states all at 0x8001 — first step drops state to
+        // 0x4001 (< 1<<15) and forces renorm on every lane.
+        for _ in 0..32 {
+            stream.extend_from_slice(&0x0000_8001u32.to_le_bytes());
+        }
+        // Renorm-fodder bytes: each renorm consumes 2 bytes (u16 LE).
+        // Provide enough for several renorms per lane × 32 lanes.
+        stream.extend_from_slice(&renorm_bytes);
+
+        // Scalar path runs first as the oracle. Whatever scalar
+        // produces (Ok+output OR Err), SIMD must match exactly. Now
+        // that the SIMD dispatch propagates errors instead of falling
+        // back to scalar, a SIMD-only failure surfaces as a test
+        // failure rather than being silently masked.
+        let mut cur: &[u8] = &stream;
+        read_u8(&mut cur).unwrap();
+        read_uint7(&mut cur).unwrap();
+        let mut scalar_dst = vec![0u8; len];
+        let scalar_result = decode_order_0_generic(&mut cur, &mut scalar_dst, 32);
+
+        let simd_result = decode(&stream, 0);
+
+        match (simd_result, scalar_result) {
+            (Ok(simd_dst), Ok(())) => {
+                assert_eq!(simd_dst, scalar_dst);
             }
-            // Renorm-fodder bytes: each renorm consumes 2 bytes (u16 LE).
-            // Provide enough for several renorms per lane × 32 lanes.
-            stream.extend_from_slice(&renorm_bytes);
-
-            // Scalar path runs first as the oracle. Whatever scalar
-            // produces (Ok+output OR Err), SIMD must match exactly. Now
-            // that the SIMD dispatch propagates errors instead of falling
-            // back to scalar, a SIMD-only failure surfaces as a proptest
-            // failure rather than being silently masked.
-            let mut cur: &[u8] = &stream;
-            read_u8(&mut cur).unwrap();
-            read_uint7(&mut cur).unwrap();
-            let mut scalar_dst = vec![0u8; len];
-            let scalar_result = decode_order_0_generic(&mut cur, &mut scalar_dst, 32);
-
-            let simd_result = decode(&stream, 0);
-
-            match (simd_result, scalar_result) {
-                (Ok(simd_dst), Ok(())) => {
-                    proptest::prop_assert_eq!(simd_dst, scalar_dst);
-                }
-                (Err(_), Err(_)) => {
-                    // Both paths agreed by erroring — fine.
-                }
-                (Ok(_), Err(scalar_err)) => {
-                    proptest::prop_assert!(
-                        false,
-                        "SIMD succeeded where scalar failed: {:?}",
-                        scalar_err,
-                    );
-                }
-                (Err(simd_err), Ok(())) => {
-                    proptest::prop_assert!(
-                        false,
-                        "SIMD failed ({:?}) where scalar succeeded — SIMD bug",
-                        simd_err,
-                    );
-                }
+            (Err(_), Err(_)) => {
+                // Both paths agreed by erroring — fine.
+            }
+            (Ok(_), Err(scalar_err)) => {
+                panic!("SIMD succeeded where scalar failed: {scalar_err:?}");
+            }
+            (Err(simd_err), Ok(())) => {
+                panic!("SIMD failed ({simd_err:?}) where scalar succeeded — SIMD bug");
             }
         }
+    }
 
-        #[test]
-        fn simd_remainder_uses_correct_lanes(len in 0usize..256) {
-            // Two symbols with equal frequencies so states diverge on
-            // different s&0xFFF values. Initial states start large enough
-            // that no renormalization is needed for ≤256 rounds.
-            let mut stream = Vec::with_capacity(512);
-            stream.push(FLAG_N32);
-            encode_uint7_prv(&mut stream, len as u32);
-            // Alphabet: sym 5 and sym 100. Non-consecutive to avoid the
-            // run-compression path in read_alphabet (5→100 is not a run).
-            stream.push(5);
-            stream.push(100);
-            stream.push(0); // terminator
-            // freq[5]=2048, freq[100]=2048 (sum = 4096 → no normalization)
-            encode_uint7_prv(&mut stream, 2048);
-            encode_uint7_prv(&mut stream, 2048);
-            // 32 initial states. Start at (4096 << 12) | (j * 80) so lanes
-            // differ in their s&0xFFF, producing different decoded symbols.
-            for j in 0u32..32 {
-                let s = (4096 << 12) | (j * 80);
-                stream.extend_from_slice(&s.to_le_bytes());
-            }
-
-            let mut cur_simd: &[u8] = &stream;
-            read_u8(&mut cur_simd).unwrap();
-            let _ = read_uint7(&mut cur_simd).unwrap();
-            let mut dst_simd = vec![0u8; len];
-            decode_order_0_32state(&mut cur_simd, &mut dst_simd).unwrap();
-
-            let mut cur_gen: &[u8] = &stream;
-            read_u8(&mut cur_gen).unwrap();
-            let _ = read_uint7(&mut cur_gen).unwrap();
-            let mut dst_gen = vec![0u8; len];
-            decode_order_0_generic(&mut cur_gen, &mut dst_gen, 32).unwrap();
-
-            assert_eq!(dst_simd, dst_gen, "SIMD and scalar diverge for len={len}");
+    #[hegel::test]
+    fn simd_remainder_uses_correct_lanes(tc: TestCase) {
+        let len = tc.draw(gs::integers::<usize>().max_value(255));
+        // Two symbols with equal frequencies so states diverge on
+        // different s&0xFFF values. Initial states start large enough
+        // that no renormalization is needed for ≤256 rounds.
+        let mut stream = Vec::with_capacity(512);
+        stream.push(FLAG_N32);
+        encode_uint7_prv(&mut stream, len as u32);
+        // Alphabet: sym 5 and sym 100. Non-consecutive to avoid the
+        // run-compression path in read_alphabet (5→100 is not a run).
+        stream.push(5);
+        stream.push(100);
+        stream.push(0); // terminator
+        // freq[5]=2048, freq[100]=2048 (sum = 4096 → no normalization)
+        encode_uint7_prv(&mut stream, 2048);
+        encode_uint7_prv(&mut stream, 2048);
+        // 32 initial states. Start at (4096 << 12) | (j * 80) so lanes
+        // differ in their s&0xFFF, producing different decoded symbols.
+        for j in 0u32..32 {
+            let s = (4096 << 12) | (j * 80);
+            stream.extend_from_slice(&s.to_le_bytes());
         }
+
+        let mut cur_simd: &[u8] = &stream;
+        read_u8(&mut cur_simd).unwrap();
+        let _ = read_uint7(&mut cur_simd).unwrap();
+        let mut dst_simd = vec![0u8; len];
+        decode_order_0_32state(&mut cur_simd, &mut dst_simd).unwrap();
+
+        let mut cur_gen: &[u8] = &stream;
+        read_u8(&mut cur_gen).unwrap();
+        let _ = read_uint7(&mut cur_gen).unwrap();
+        let mut dst_gen = vec![0u8; len];
+        decode_order_0_generic(&mut cur_gen, &mut dst_gen, 32).unwrap();
+
+        assert_eq!(dst_simd, dst_gen, "SIMD and scalar diverge for len={len}");
     }
 }

@@ -700,6 +700,7 @@ fn decode_subexp(reader: &mut BitReader<'_>, k: u32) -> Option<i32> {
 )]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
 
     // r[verify cram.encoding.huffman]
     #[test]
@@ -873,42 +874,44 @@ mod tests {
         assert!(matches!(err, CramError::ExternalByteArrayNeedsLength { content_id: 42 }));
     }
 
-    proptest::proptest! {
-        // Verify Beta decoding with varying bit widths and offsets: decoded value must
-        // equal the raw bit pattern minus the offset, as per the CRAM spec.
-        #[test]
-        #[allow(clippy::cast_possible_truncation, reason = "intentional byte extraction; val is clamped to ≤16 bits")]
-        #[allow(clippy::cast_possible_wrap, reason = "val is clamped to ≤16 bits so fits in i32")]
-        fn beta_decode_with_varying_params(
-            bits in 1u32..=16,
-            offset in -100i32..=100,
-            val in 0u32..=(u32::MAX),
-        ) {
-            // Clamp val to the valid range for this bit width
-            let max_val = (1u32 << bits) - 1;
-            let val = val % (max_val + 1);
+    // Verify Beta decoding with varying bit widths and offsets: decoded value must
+    // equal the raw bit pattern minus the offset, as per the CRAM spec.
+    #[hegel::test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "intentional byte extraction; val is clamped to ≤16 bits"
+    )]
+    #[allow(clippy::cast_possible_wrap, reason = "val is clamped to ≤16 bits so fits in i32")]
+    fn beta_decode_with_varying_params(tc: TestCase) {
+        let bits = tc.draw(gs::integers::<u32>().min_value(1).max_value(16));
+        let offset = tc.draw(gs::integers::<i32>().min_value(-100).max_value(100));
+        let val = tc.draw(gs::integers::<u32>());
 
-            // Pack `val` MSB-first into 3 bytes (enough for up to 16 bits)
-            let shift = 24u32.saturating_sub(bits);
-            let packed = val << shift;
-            let data = [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8];
+        // Clamp val to the valid range for this bit width
+        let max_val = (1u32 << bits) - 1;
+        let val = val % (max_val + 1);
 
-            let mut ctx = DecodeContext::new(&data, SmallVec::new());
-            let enc = IntEncoding::Beta { offset, bits };
-            let decoded = enc.decode(&mut ctx).unwrap();
-            proptest::prop_assert_eq!(decoded, val.cast_signed() - offset);
-        }
+        // Pack `val` MSB-first into 3 bytes (enough for up to 16 bits)
+        let shift = 24u32.saturating_sub(bits);
+        let packed = val << shift;
+        let data = [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8];
 
-        #[test]
-        fn external_byte_roundtrip(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..32)) {
-            let mut external = SmallVec::new();
-            external.push((0, ExternalCursor::new(bytes.clone())));
-            let mut ctx = DecodeContext::new(&[], external);
-            let enc = ByteEncoding::External { content_id: 0 };
-            for &expected in &bytes {
-                let got = enc.decode(&mut ctx).unwrap();
-                proptest::prop_assert_eq!(got, expected);
-            }
+        let mut ctx = DecodeContext::new(&data, SmallVec::new());
+        let enc = IntEncoding::Beta { offset, bits };
+        let decoded = enc.decode(&mut ctx).unwrap();
+        assert_eq!(decoded, val.cast_signed() - offset);
+    }
+
+    #[hegel::test]
+    fn external_byte_roundtrip(tc: TestCase) {
+        let bytes = tc.draw(gs::binary().min_size(1).max_size(31));
+        let mut external = SmallVec::new();
+        external.push((0, ExternalCursor::new(bytes.clone())));
+        let mut ctx = DecodeContext::new(&[], external);
+        let enc = ByteEncoding::External { content_id: 0 };
+        for &expected in &bytes {
+            let got = enc.decode(&mut ctx).unwrap();
+            assert_eq!(got, expected);
         }
     }
 }

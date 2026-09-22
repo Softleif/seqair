@@ -236,6 +236,7 @@ fn encode_itf8_to(buf: &mut Vec<u8>, val: u32) {
 #[allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
 
     // r[verify cram.block.structure]
     // r[verify cram.codec.raw]
@@ -573,30 +574,29 @@ mod tests {
         assert_eq!(consumed2, buf2.len());
     }
 
-    proptest::proptest! {
+    #[hegel::test]
+    fn gzip_block_roundtrip(tc: TestCase) {
+        let data = tc.draw(gs::binary().min_size(1).max_size(255));
+        let mut compressor =
+            libdeflater::Compressor::new(libdeflater::CompressionLvl::new(1).unwrap());
+        let max_len = compressor.gzip_compress_bound(data.len());
+        let mut compressed = vec![0u8; max_len];
+        let actual_len = compressor.gzip_compress(&data, &mut compressed).unwrap();
+        compressed.truncate(actual_len);
 
-        #[test]
-        fn gzip_block_roundtrip(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..256)) {
-            let mut compressor = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(1).unwrap());
-            let max_len = compressor.gzip_compress_bound(data.len());
-            let mut compressed = vec![0u8; max_len];
-            let actual_len = compressor.gzip_compress(&data, &mut compressed).unwrap();
-            compressed.truncate(actual_len);
+        let mut buf = Vec::new();
+        buf.push(1); // gzip
+        buf.push(4); // ExternalData
+        encode_itf8_to(&mut buf, 0);
+        encode_itf8_to(&mut buf, compressed.len() as u32);
+        encode_itf8_to(&mut buf, data.len() as u32);
+        buf.extend_from_slice(&compressed);
+        let mut crc = libdeflater::Crc::new();
+        crc.update(&buf);
+        buf.extend_from_slice(&crc.sum().to_le_bytes());
 
-            let mut buf = Vec::new();
-            buf.push(1); // gzip
-            buf.push(4); // ExternalData
-            encode_itf8_to(&mut buf, 0);
-            encode_itf8_to(&mut buf, compressed.len() as u32);
-            encode_itf8_to(&mut buf, data.len() as u32);
-            buf.extend_from_slice(&compressed);
-            let mut crc = libdeflater::Crc::new();
-            crc.update(&buf);
-            buf.extend_from_slice(&crc.sum().to_le_bytes());
-
-            let (block, _) = parse_block(&buf).unwrap();
-            proptest::prop_assert_eq!(&block.data, &data);
-        }
+        let (block, _) = parse_block(&buf).unwrap();
+        assert_eq!(&block.data, &data);
     }
 
     #[test]

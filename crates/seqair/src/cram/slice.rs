@@ -1305,7 +1305,7 @@ fn read_ltf8(cursor: &mut &[u8]) -> Result<u64, CramError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
     fn load_test_cram() -> Vec<u8> {
         std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.cram")).unwrap()
@@ -1318,17 +1318,14 @@ mod tests {
         md5::compute(&upper).into()
     }
 
-    proptest! {
-        // r[verify cram.edge.reference_mismatch]
-        // Streaming MD5 must produce identical output to the allocating
-        // form across input lengths spanning sub-block, single-block,
-        // multi-block, and unaligned-tail cases.
-        #[test]
-        fn md5_uppercase_streaming_matches_alloc(
-            bytes in proptest::collection::vec(0u8..=255, 0..16_384),
-        ) {
-            prop_assert_eq!(md5_uppercase_streaming(&bytes), md5_uppercase_alloc(&bytes));
-        }
+    // r[verify cram.edge.reference_mismatch]
+    // Streaming MD5 must produce identical output to the allocating
+    // form across input lengths spanning sub-block, single-block,
+    // multi-block, and unaligned-tail cases.
+    #[hegel::test]
+    fn md5_uppercase_streaming_matches_alloc(tc: TestCase) {
+        let bytes = tc.draw(gs::binary().max_size(16_383));
+        assert_eq!(md5_uppercase_streaming(&bytes), md5_uppercase_alloc(&bytes));
     }
 
     #[test]

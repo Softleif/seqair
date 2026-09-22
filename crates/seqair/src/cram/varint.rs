@@ -289,7 +289,7 @@ pub(super) fn encode_itf8(val: u32, buf: &mut [u8; 5]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
     // ── ITF8 known values ──────────────────────────────────────────────
 
@@ -363,74 +363,73 @@ mod tests {
         assert_eq!(read_itf8_from(&mut cursor), None); // exhausted
     }
 
-    // ── ITF8 proptest roundtrip ────────────────────────────────────────
+    // ── ITF8 roundtrip properties ──────────────────────────────────────
 
-    proptest! {
-        // Verify that encode_itf8 produces wire bytes that match the ITF8 spec bit patterns,
-        // and that decode_itf8 recovers the original value.
-        #[test]
-        #[allow(clippy::cast_possible_truncation, reason = "val < 0x80 is checked before the cast")]
-        fn itf8_wire_format_matches_spec(val: u32) {
-            let mut buf = [0u8; 5];
-            let n = encode_itf8(val, &mut buf);
+    // Verify that encode_itf8 produces wire bytes that match the ITF8 spec bit patterns,
+    // and that decode_itf8 recovers the original value.
+    #[hegel::test]
+    #[allow(clippy::cast_possible_truncation, reason = "val < 0x80 is checked before the cast")]
+    fn itf8_wire_format_matches_spec(tc: TestCase) {
+        let val = tc.draw(gs::integers::<u32>());
+        let mut buf = [0u8; 5];
+        let n = encode_itf8(val, &mut buf);
 
-            if val < 0x80 {
-                prop_assert_eq!(n, 1);
-                prop_assert_eq!(buf[0], val as u8, "1-byte: high bit must be 0");
-                prop_assert_eq!(buf[0] & 0x80, 0);
-            } else if val < 0x4000 {
-                prop_assert_eq!(n, 2);
-                prop_assert_eq!(buf[0] & 0xC0, 0x80, "2-byte: top 2 bits must be 10");
-                let recovered = (u32::from(buf[0] & 0x3F) << 8) | u32::from(buf[1]);
-                prop_assert_eq!(recovered, val);
-            } else if val < 0x20_0000 {
-                prop_assert_eq!(n, 3);
-                prop_assert_eq!(buf[0] & 0xE0, 0xC0, "3-byte: top 3 bits must be 110");
-                let recovered = (u32::from(buf[0] & 0x1F) << 16)
-                    | (u32::from(buf[1]) << 8)
-                    | u32::from(buf[2]);
-                prop_assert_eq!(recovered, val);
-            } else if val < 0x1000_0000 {
-                prop_assert_eq!(n, 4);
-                prop_assert_eq!(buf[0] & 0xF0, 0xE0, "4-byte: top 4 bits must be 1110");
-                let recovered = (u32::from(buf[0] & 0x0F) << 24)
-                    | (u32::from(buf[1]) << 16)
-                    | (u32::from(buf[2]) << 8)
-                    | u32::from(buf[3]);
-                prop_assert_eq!(recovered, val);
-            } else {
-                prop_assert_eq!(n, 5);
-                prop_assert_eq!(buf[0] & 0xF0, 0xF0, "5-byte: top 4 bits must be 1111");
-                let recovered = (u32::from(buf[0] & 0x0F) << 28)
-                    | (u32::from(buf[1]) << 20)
-                    | (u32::from(buf[2]) << 12)
-                    | (u32::from(buf[3]) << 4)
-                    | u32::from(buf[4] & 0x0F);
-                prop_assert_eq!(recovered, val);
-            }
-
-            // decode_itf8 must also recover the original value
-            let (decoded, consumed) = decode_itf8(&buf).unwrap();
-            prop_assert_eq!(decoded, val);
-            prop_assert_eq!(consumed, n);
+        if val < 0x80 {
+            assert_eq!(n, 1);
+            assert_eq!(buf[0], val as u8, "1-byte: high bit must be 0");
+            assert_eq!(buf[0] & 0x80, 0);
+        } else if val < 0x4000 {
+            assert_eq!(n, 2);
+            assert_eq!(buf[0] & 0xC0, 0x80, "2-byte: top 2 bits must be 10");
+            let recovered = (u32::from(buf[0] & 0x3F) << 8) | u32::from(buf[1]);
+            assert_eq!(recovered, val);
+        } else if val < 0x20_0000 {
+            assert_eq!(n, 3);
+            assert_eq!(buf[0] & 0xE0, 0xC0, "3-byte: top 3 bits must be 110");
+            let recovered =
+                (u32::from(buf[0] & 0x1F) << 16) | (u32::from(buf[1]) << 8) | u32::from(buf[2]);
+            assert_eq!(recovered, val);
+        } else if val < 0x1000_0000 {
+            assert_eq!(n, 4);
+            assert_eq!(buf[0] & 0xF0, 0xE0, "4-byte: top 4 bits must be 1110");
+            let recovered = (u32::from(buf[0] & 0x0F) << 24)
+                | (u32::from(buf[1]) << 16)
+                | (u32::from(buf[2]) << 8)
+                | u32::from(buf[3]);
+            assert_eq!(recovered, val);
+        } else {
+            assert_eq!(n, 5);
+            assert_eq!(buf[0] & 0xF0, 0xF0, "5-byte: top 4 bits must be 1111");
+            let recovered = (u32::from(buf[0] & 0x0F) << 28)
+                | (u32::from(buf[1]) << 20)
+                | (u32::from(buf[2]) << 12)
+                | (u32::from(buf[3]) << 4)
+                | u32::from(buf[4] & 0x0F);
+            assert_eq!(recovered, val);
         }
 
-        // All three decode paths must agree on the same encoded bytes.
-        #[test]
-        fn itf8_all_decoders_agree(val: u32) {
-            let mut buf = [0u8; 5];
-            let n = encode_itf8(val, &mut buf);
-            let encoded = buf.get(..n).unwrap();
+        // decode_itf8 must also recover the original value
+        let (decoded, consumed) = decode_itf8(&buf).unwrap();
+        assert_eq!(decoded, val);
+        assert_eq!(consumed, n);
+    }
 
-            let (slice_val, _) = decode_itf8(encoded).unwrap();
-            let stream_val = read_itf8(&mut &*encoded).unwrap();
-            let mut cursor: &[u8] = encoded;
-            let cursor_val = read_itf8_from(&mut cursor).unwrap();
+    // All three decode paths must agree on the same encoded bytes.
+    #[hegel::test]
+    fn itf8_all_decoders_agree(tc: TestCase) {
+        let val = tc.draw(gs::integers::<u32>());
+        let mut buf = [0u8; 5];
+        let n = encode_itf8(val, &mut buf);
+        let encoded = buf.get(..n).unwrap();
 
-            prop_assert_eq!(slice_val, val);
-            prop_assert_eq!(stream_val, val);
-            prop_assert_eq!(cursor_val, val);
-        }
+        let (slice_val, _) = decode_itf8(encoded).unwrap();
+        let stream_val = read_itf8(&mut &*encoded).unwrap();
+        let mut cursor: &[u8] = encoded;
+        let cursor_val = read_itf8_from(&mut cursor).unwrap();
+
+        assert_eq!(slice_val, val);
+        assert_eq!(stream_val, val);
+        assert_eq!(cursor_val, val);
     }
 
     // ── LTF8 known values ──────────────────────────────────────────────
@@ -474,40 +473,40 @@ mod tests {
         assert_eq!(read_ltf8_from(&mut cursor), None);
     }
 
-    // ── LTF8 proptest ──────────────────────────────────────────────────
+    // ── LTF8 properties ────────────────────────────────────────────────
 
-    proptest! {
-        #[test]
-        #[allow(clippy::cast_possible_truncation, reason = "val in 0..0x80 is checked by proptest range")]
-        fn ltf8_small_values_match_itf8(val in 0u32..0x80) {
-            // Values < 128 should encode identically in ITF8 and LTF8
-            let (itf8_val, itf8_len) = decode_itf8(&[val as u8]).unwrap();
-            let (ltf8_val, ltf8_len) = decode_ltf8(&[val as u8]).unwrap();
-            prop_assert_eq!(u64::from(itf8_val), ltf8_val);
-            prop_assert_eq!(itf8_len, ltf8_len);
-        }
+    #[hegel::test]
+    #[allow(clippy::cast_possible_truncation, reason = "the generator bounds val below 0x80")]
+    fn ltf8_small_values_match_itf8(tc: TestCase) {
+        let val = tc.draw(gs::integers::<u32>().max_value(0x7F));
+        // Values < 128 should encode identically in ITF8 and LTF8
+        let (itf8_val, itf8_len) = decode_itf8(&[val as u8]).unwrap();
+        let (ltf8_val, ltf8_len) = decode_ltf8(&[val as u8]).unwrap();
+        assert_eq!(u64::from(itf8_val), ltf8_val);
+        assert_eq!(itf8_len, ltf8_len);
+    }
 
-        // For values that fit in 1–4 ITF8 bytes (< 0x10000000), ITF8 and LTF8 use
-        // the same prefix bit patterns, so both decoders must decode the same bytes
-        // to the same value. decode_ltf8 and read_ltf8 must also agree with each other.
-        // (Values >= 0x10000000 use a 5-byte ITF8 encoding whose wire format overlaps
-        // with LTF8's 5-byte range but represents different values — not tested here.)
-        #[test]
-        fn ltf8_matches_itf8_for_small_values_and_decoders_agree(val in 0u32..0x1000_0000u32) {
-            let mut itf8_buf = [0u8; 5];
-            let n = encode_itf8(val, &mut itf8_buf);
-            let encoded = itf8_buf.get(..n).unwrap();
+    // For values that fit in 1–4 ITF8 bytes (< 0x10000000), ITF8 and LTF8 use
+    // the same prefix bit patterns, so both decoders must decode the same bytes
+    // to the same value. decode_ltf8 and read_ltf8 must also agree with each other.
+    // (Values >= 0x10000000 use a 5-byte ITF8 encoding whose wire format overlaps
+    // with LTF8's 5-byte range but represents different values — not tested here.)
+    #[hegel::test]
+    fn ltf8_matches_itf8_for_small_values_and_decoders_agree(tc: TestCase) {
+        let val = tc.draw(gs::integers::<u32>().max_value(0x0FFF_FFFF));
+        let mut itf8_buf = [0u8; 5];
+        let n = encode_itf8(val, &mut itf8_buf);
+        let encoded = itf8_buf.get(..n).unwrap();
 
-            // ITF8 and LTF8 share the 1-4 byte prefix scheme; both must give the same value.
-            let (itf8_val, _) = decode_itf8(encoded).unwrap();
-            let (ltf8_val, ltf8_n) = decode_ltf8(encoded).unwrap();
-            prop_assert_eq!(u64::from(itf8_val), ltf8_val);
-            prop_assert_eq!(ltf8_n, n);
+        // ITF8 and LTF8 share the 1-4 byte prefix scheme; both must give the same value.
+        let (itf8_val, _) = decode_itf8(encoded).unwrap();
+        let (ltf8_val, ltf8_n) = decode_ltf8(encoded).unwrap();
+        assert_eq!(u64::from(itf8_val), ltf8_val);
+        assert_eq!(ltf8_n, n);
 
-            // decode_ltf8 and read_ltf8 must agree on the same encoded bytes.
-            let read_val = read_ltf8(&mut &*encoded).unwrap();
-            prop_assert_eq!(ltf8_val, read_val);
-        }
+        // decode_ltf8 and read_ltf8 must agree on the same encoded bytes.
+        let read_val = read_ltf8(&mut &*encoded).unwrap();
+        assert_eq!(ltf8_val, read_val);
     }
 
     // ── Comparison with noodles ─────────────────────────────────────────

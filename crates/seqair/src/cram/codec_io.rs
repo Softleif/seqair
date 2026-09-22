@@ -83,6 +83,7 @@ pub fn read_uint7(src: &mut &[u8]) -> Result<u32, Uint7Error> {
 )]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
 
     // r[verify cram.codec.uint7_bounded]
     #[test]
@@ -154,31 +155,30 @@ mod tests {
         assert_eq!(cur, saved);
     }
 
-    proptest::proptest! {
-        #[test]
-        fn read_uint7_decode_matches_msb_first_assembly(val: u32) {
-            // MSB-first assembly: take the value's 5x 7-bit groups from
-            // most significant down, set continuation bit on all but the
-            // last non-leading byte, then verify decoder produces val.
-            // Skip leading zero groups (canonical encoding).
-            let mut groups: [u8; 5] = [
-                ((val >> 28) & 0x7F) as u8,
-                ((val >> 21) & 0x7F) as u8,
-                ((val >> 14) & 0x7F) as u8,
-                ((val >>  7) & 0x7F) as u8,
-                ( val        & 0x7F) as u8,
-            ];
-            // Drop leading-zero groups, but keep at least one group.
-            let start = groups.iter().position(|&g| g != 0).unwrap_or(4);
-            let n = 5 - start;
-            // Set continuation bit on all but the last byte.
-            for g in groups.iter_mut().skip(start).take(n - 1) {
-                *g |= 0x80;
-            }
-            let encoded = &groups[start..];
-            let mut cur: &[u8] = encoded;
-            proptest::prop_assert_eq!(read_uint7(&mut cur).unwrap(), val);
-            proptest::prop_assert!(cur.is_empty());
+    #[hegel::test]
+    fn read_uint7_decode_matches_msb_first_assembly(tc: TestCase) {
+        let val = tc.draw(gs::integers::<u32>());
+        // MSB-first assembly: take the value's 5x 7-bit groups from
+        // most significant down, set continuation bit on all but the
+        // last non-leading byte, then verify decoder produces val.
+        // Skip leading zero groups (canonical encoding).
+        let mut groups: [u8; 5] = [
+            ((val >> 28) & 0x7F) as u8,
+            ((val >> 21) & 0x7F) as u8,
+            ((val >> 14) & 0x7F) as u8,
+            ((val >> 7) & 0x7F) as u8,
+            (val & 0x7F) as u8,
+        ];
+        // Drop leading-zero groups, but keep at least one group.
+        let start = groups.iter().position(|&g| g != 0).unwrap_or(4);
+        let n = 5 - start;
+        // Set continuation bit on all but the last byte.
+        for g in groups.iter_mut().skip(start).take(n - 1) {
+            *g |= 0x80;
         }
+        let encoded = &groups[start..];
+        let mut cur: &[u8] = encoded;
+        assert_eq!(read_uint7(&mut cur).unwrap(), val);
+        assert!(cur.is_empty());
     }
 }

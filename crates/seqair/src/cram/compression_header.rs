@@ -384,6 +384,7 @@ fn parse_tag_encoding_map(
 )]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
 
     fn load_first_data_container_compression_header() -> CompressionHeader {
         let data =
@@ -516,35 +517,32 @@ mod tests {
         assert_eq!(sm.substitute(b'N', 3), b'A');
     }
 
-    proptest::proptest! {
-        #[test]
-        fn substitution_matrix_code_in_bounds(ref_idx in 0u8..5, code in 0u8..4) {
-            let sm = SubstitutionMatrix {
-                matrix: [
-                    *b"CGTN",
-                    *b"AGTN",
-                    *b"ACTN",
-                    *b"ACGN",
-                    *b"ACGT",
-                ],
-            };
-            let ref_base = match ref_idx {
-                0 => b'A', 1 => b'C', 2 => b'G', 3 => b'T', _ => b'N',
-            };
-            let result = sm.substitute(ref_base, code);
-            proptest::prop_assert!(
-                matches!(result, b'A' | b'C' | b'G' | b'T' | b'N'),
-                "substitute(ref={}, code={}) = 0x{:02x} '{}', must be in {{A,C,G,T,N}}",
-                ref_base as char, code, result, result as char
-            );
-            // A substitution must differ from the reference base.
-            // For ref A/C/G/T, READ_BASES excludes the ref itself.
-            // For ref N, READ_BASES is [A,C,G,T], so N is never returned.
-            proptest::prop_assert_ne!(
-                result, ref_base,
-                "substitute(ref={}, code={}) returned ref base itself",
-                ref_base as char, code
-            );
-        }
+    #[hegel::test]
+    fn substitution_matrix_code_in_bounds(tc: TestCase) {
+        let ref_idx = tc.draw(gs::integers::<u8>().max_value(4));
+        let code = tc.draw(gs::integers::<u8>().max_value(3));
+        let sm = SubstitutionMatrix { matrix: [*b"CGTN", *b"AGTN", *b"ACTN", *b"ACGN", *b"ACGT"] };
+        let ref_base = match ref_idx {
+            0 => b'A',
+            1 => b'C',
+            2 => b'G',
+            3 => b'T',
+            _ => b'N',
+        };
+        let result = sm.substitute(ref_base, code);
+        assert!(
+            matches!(result, b'A' | b'C' | b'G' | b'T' | b'N'),
+            "substitute(ref={}, code={code}) = 0x{result:02x} '{}', must be in {{A,C,G,T,N}}",
+            ref_base as char,
+            result as char
+        );
+        // A substitution must differ from the reference base.
+        // For ref A/C/G/T, READ_BASES excludes the ref itself.
+        // For ref N, READ_BASES is [A,C,G,T], so N is never returned.
+        assert_ne!(
+            result, ref_base,
+            "substitute(ref={}, code={code}) returned ref base itself",
+            ref_base as char
+        );
     }
 }

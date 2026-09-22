@@ -63,7 +63,7 @@ impl<'a> BitReader<'a> {
 )]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
     // r[verify cram.bitstream]
     #[test]
@@ -140,52 +140,55 @@ mod tests {
         assert_eq!(reader.read_bits(9), None); // only 8 bits available
     }
 
-    proptest! {
-        // Read each bit individually and check it matches (byte >> (7 - i)) & 1,
-        // verifying that bits are read MSB-first.
-        #[test]
-        fn individual_bits_match_msb_order(byte: u8) {
-            let data = [byte];
-            let mut reader = BitReader::new(&data);
-            for i in 0u8..8 {
-                let expected = (byte >> (7 - i)) & 1;
-                let got = reader.read_bit().unwrap();
-                prop_assert_eq!(got, expected, "bit {} of byte {:#010b}", i, byte);
-            }
-            prop_assert_eq!(reader.read_bit(), None);
+    // Read each bit individually and check it matches (byte >> (7 - i)) & 1,
+    // verifying that bits are read MSB-first.
+    #[hegel::test]
+    fn individual_bits_match_msb_order(tc: TestCase) {
+        let byte = tc.draw(gs::integers::<u8>());
+        let data = [byte];
+        let mut reader = BitReader::new(&data);
+        for i in 0u8..8 {
+            let expected = (byte >> (7 - i)) & 1;
+            let got = reader.read_bit().unwrap();
+            assert_eq!(got, expected, "bit {i} of byte {byte:#010b}");
         }
+        assert_eq!(reader.read_bit(), None);
+    }
 
-        // Read 16 individual bits from a 2-byte buffer and verify the MSB-first bit pattern.
-        #[test]
-        fn u16_individual_bits_match_msb_order(hi: u8, lo: u8) {
-            let data = [hi, lo];
-            let mut reader = BitReader::new(&data);
-            for i in 0u8..8 {
-                let expected = (hi >> (7 - i)) & 1;
-                let got = reader.read_bit().unwrap();
-                prop_assert_eq!(got, expected, "hi bit {} of {:#010b}", i, hi);
-            }
-            for i in 0u8..8 {
-                let expected = (lo >> (7 - i)) & 1;
-                let got = reader.read_bit().unwrap();
-                prop_assert_eq!(got, expected, "lo bit {} of {:#010b}", i, lo);
-            }
-            prop_assert_eq!(reader.read_bit(), None);
+    // Read 16 individual bits from a 2-byte buffer and verify the MSB-first bit pattern.
+    #[hegel::test]
+    fn u16_individual_bits_match_msb_order(tc: TestCase) {
+        let hi = tc.draw(gs::integers::<u8>());
+        let lo = tc.draw(gs::integers::<u8>());
+        let data = [hi, lo];
+        let mut reader = BitReader::new(&data);
+        for i in 0u8..8 {
+            let expected = (hi >> (7 - i)) & 1;
+            let got = reader.read_bit().unwrap();
+            assert_eq!(got, expected, "hi bit {i} of {hi:#010b}");
         }
-
-        #[test]
-        fn split_read_equals_combined(byte: u8, split in 0u32..=8) {
-            let data = [byte];
-            let mut reader1 = BitReader::new(&data);
-            let mut reader2 = BitReader::new(&data);
-
-            let combined = reader1.read_bits(8).unwrap();
-
-            let hi = reader2.read_bits(split).unwrap();
-            let lo = reader2.read_bits(8 - split).unwrap();
-            let reassembled = (hi << (8 - split)) | lo;
-
-            prop_assert_eq!(combined, reassembled, "split={}", split);
+        for i in 0u8..8 {
+            let expected = (lo >> (7 - i)) & 1;
+            let got = reader.read_bit().unwrap();
+            assert_eq!(got, expected, "lo bit {i} of {lo:#010b}");
         }
+        assert_eq!(reader.read_bit(), None);
+    }
+
+    #[hegel::test]
+    fn split_read_equals_combined(tc: TestCase) {
+        let byte = tc.draw(gs::integers::<u8>());
+        let split = tc.draw(gs::integers::<u32>().max_value(8));
+        let data = [byte];
+        let mut reader1 = BitReader::new(&data);
+        let mut reader2 = BitReader::new(&data);
+
+        let combined = reader1.read_bits(8).unwrap();
+
+        let hi = reader2.read_bits(split).unwrap();
+        let lo = reader2.read_bits(8 - split).unwrap();
+        let reassembled = (hi << (8 - split)) | lo;
+
+        assert_eq!(combined, reassembled, "split={split}");
     }
 }

@@ -362,6 +362,7 @@ fn read_itf8_u16(src: &mut &[u8]) -> Option<u16> {
 )]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
 
     #[test]
     fn invalid_rans_order_returns_error() {
@@ -444,31 +445,28 @@ mod tests {
         assert_eq!(freq[0], 0, "freq[0] should be 0 (no wraparound)");
     }
 
-    proptest::proptest! {
-        // Mirror of rans_nx16's bounds proptest. Only tests the rejection
-        // path — constructing a fully valid 4x8 freq stream needs an extra
-        // freq byte after the run for the trailing sym, which is fiddly to
-        // get right at the boundary; the valid path is covered by the fixed
-        // test above and integration round-trips.
-        #[test]
-        fn read_frequencies_0_invalid_run_rejected(
-            start in 1u8..=255,
-            len in 0u8..=255,
-        ) {
-            proptest::prop_assume!(u32::from(start) + u32::from(len) > 255);
-            let prev = start.checked_sub(1).expect("start >= 1");
-            // Provide enough freq bytes that truncation can't fire before the
-            // bounds check: prev + start are 2 reads; the run-len byte is 1
-            // read; we don't need run payload because the check fires first.
-            let stream = [prev, 0x01, start, len];
-            let mut cur: &[u8] = &stream;
-            let err = read_frequencies_0(&mut cur).unwrap_err();
-            proptest::prop_assert!(
-                matches!(err, CramError::MalformedAlphabetRun { start: s, len: l }
+    // Mirror of rans_nx16's bounds property. Only tests the rejection
+    // path — constructing a fully valid 4x8 freq stream needs an extra
+    // freq byte after the run for the trailing sym, which is fiddly to
+    // get right at the boundary; the valid path is covered by the fixed
+    // test above and integration round-trips.
+    #[hegel::test]
+    fn read_frequencies_0_invalid_run_rejected(tc: TestCase) {
+        let start = tc.draw(gs::integers::<u8>().min_value(1));
+        let len = tc.draw(gs::integers::<u8>());
+        tc.assume(u32::from(start) + u32::from(len) > 255);
+        let prev = start.checked_sub(1).expect("start >= 1");
+        // Provide enough freq bytes that truncation can't fire before the
+        // bounds check: prev + start are 2 reads; the run-len byte is 1
+        // read; we don't need run payload because the check fires first.
+        let stream = [prev, 0x01, start, len];
+        let mut cur: &[u8] = &stream;
+        let err = read_frequencies_0(&mut cur).unwrap_err();
+        assert!(
+            matches!(err, CramError::MalformedAlphabetRun { start: s, len: l }
                              if s == start && l == len),
-                "expected MalformedAlphabetRun for start={start}, len={len}, got: {err:?}",
-            );
-        }
+            "expected MalformedAlphabetRun for start={start}, len={len}, got: {err:?}",
+        );
     }
 
     // r[verify cram.codec.alphabet_run_bounded]
