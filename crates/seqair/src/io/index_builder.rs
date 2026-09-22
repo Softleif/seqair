@@ -117,6 +117,57 @@ impl IndexBuilder {
         Self::new(n_refs, 14, 5, header_end_offset)
     }
 
+    // r[impl index_builder.csi_depth]
+    /// Create a CSI builder deep enough to address `max_ref_len`.
+    ///
+    /// `max_ref_len` is the length of the longest reference in the header.
+    /// Pass `None` when no contig declares one; that takes htslib's fallback
+    /// of assuming `i32::MAX`, which is what it does for a header whose contig
+    /// lines carry no length.
+    pub fn csi(
+        n_refs: usize,
+        min_shift: u32,
+        max_ref_len: Option<u64>,
+        header_end_offset: VirtualOffset,
+    ) -> Self {
+        Self::new(n_refs, min_shift, Self::csi_depth_for(min_shift, max_ref_len), header_end_offset)
+    }
+
+    // r[impl index_builder.csi_depth]
+    /// The binning depth that covers `max_ref_len` at this `min_shift`.
+    ///
+    /// Depth `d` addresses positions below `2^(min_shift + 3d)`, so this is
+    /// htslib's `hts_adjust_csi_settings` loop: raise `d` until the bound
+    /// clears the longest reference, with htslib's same 256-base margin and
+    /// its same ceiling of 9 (past which bin numbers would overflow).
+    ///
+    /// It differs from htslib in one way, deliberately. htslib starts its
+    /// search at 0, so a small genome gets a shallower index than BAI's; this
+    /// starts at [`Self::BAI_DEPTH`], so an index that fits inside the BAI
+    /// scheme is laid out the way BAI would lay it out. Any depth that covers
+    /// the references is correct — CSI stores the depth it used and every
+    /// reader takes it from the file — so this costs nothing but keeps the
+    /// common case identical to what seqair wrote before.
+    #[must_use]
+    pub fn csi_depth_for(min_shift: u32, max_ref_len: Option<u64>) -> u32 {
+        /// Past this, bin ids overflow. htslib's `max_n_lvls`.
+        const MAX_DEPTH: u32 = 9;
+        /// htslib's fallback for a header that declares no contig length.
+        const ASSUMED_LEN: u64 = (1 << 31) - 1;
+
+        // htslib's `max_len_in + 256`: a record may start at the last base and
+        // extend past the declared length, and the index still has to hold it.
+        let need = max_ref_len.unwrap_or(ASSUMED_LEN).saturating_add(256);
+        let mut depth = Self::BAI_DEPTH;
+        while depth < MAX_DEPTH && maxpos(min_shift, depth) < need {
+            depth = depth.saturating_add(1);
+        }
+        depth
+    }
+
+    /// The depth BAI and TBI are fixed at, and the floor for CSI.
+    pub const BAI_DEPTH: u32 = 5;
+
     // r[impl index_builder.bai_constructor]
     /// Create a BAI-compatible builder (`min_shift=14`, depth=5).
     pub fn bai(n_refs: usize, header_end_offset: VirtualOffset) -> Self {
@@ -528,6 +579,16 @@ fn write_ref_index(buf: &mut Vec<u8>, r: &RefIndexBuilder) -> Result<(), IndexEr
 
 // r[impl index_builder.binning]
 /// Compute the bin for a genomic interval.
+/// The first position a `(min_shift, depth)` binning scheme cannot address:
+/// `2^(min_shift + 3 * depth)`, htslib's `hts_bin_maxpos`.
+///
+/// Saturates at `u64::MAX` rather than wrapping, so an absurd depth reports
+/// "covers everything" instead of silently reporting zero.
+fn maxpos(min_shift: u32, depth: u32) -> u64 {
+    let shift = min_shift.saturating_add(depth.saturating_mul(3));
+    1u64.checked_shl(shift).unwrap_or(u64::MAX)
+}
+
 /// Matches htslib's `hts_reg2bin(beg, end, min_shift, n_lvls)`.
 #[expect(
     clippy::cast_possible_truncation,

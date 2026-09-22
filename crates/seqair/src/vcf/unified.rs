@@ -192,6 +192,15 @@ impl<W: Write> Writer<W> {
             reason = "sample count bounded by VcfHeader builder; realistic files have <100 samples"
         )]
         let header_n_samples = header.samples().len() as u32;
+        // The longest reference decides how deep the CSI has to bin. A header
+        // with contigs but no declared lengths is `None`, which takes htslib's
+        // assumption rather than a guess of ours; an empty header indexes
+        // nothing, so its depth is immaterial and stays at the BAI default.
+        let max_ref_len: Option<u64> = if header.contigs().is_empty() {
+            Some(0)
+        } else {
+            header.contigs().values().filter_map(|contig| contig.length).max()
+        };
 
         match &mut self.inner {
             WriterInner::Vcf { output, n_samples, .. } => {
@@ -200,7 +209,7 @@ impl<W: Write> Writer<W> {
             }
             WriterInner::VcfGz { bgzf, index, n_samples, .. } => {
                 bgzf.write_all(header_text.as_bytes())?;
-                *index = Some(IndexBuilder::tbi(n_refs, bgzf.virtual_offset()));
+                *index = Some(IndexBuilder::csi(n_refs, 14, max_ref_len, bgzf.virtual_offset()));
                 *n_samples = header_n_samples;
             }
             WriterInner::Bcf { bgzf, index, n_samples, .. } => {
@@ -211,7 +220,7 @@ impl<W: Write> Writer<W> {
                 bgzf.write_all(&l_text_u32.to_le_bytes())?;
                 bgzf.write_all(header_text.as_bytes())?;
                 bgzf.write_all(&[0u8])?;
-                *index = Some(IndexBuilder::new(n_refs, 14, 5, bgzf.virtual_offset()));
+                *index = Some(IndexBuilder::csi(n_refs, 14, max_ref_len, bgzf.virtual_offset()));
                 *n_samples = header_n_samples;
             }
         }

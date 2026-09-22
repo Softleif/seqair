@@ -38,7 +38,9 @@ CSI output MUST be BGZF-compressed with magic `CSI\x01`, followed by: min_shift,
 r[index_builder.csi_depth]
 A CSI builder's `depth` MUST be large enough to address the longest reference in the header. With a given `min_shift`, depth `d` covers positions below `2^(min_shift + 3d)`; a record beyond that bound is assigned a bin that no region query ever asks for, so it stays in the file but becomes unreachable through the index — a silent loss, not an error. The builder MUST therefore raise `depth` until the bound exceeds the longest contig, the way htslib's `hts_adjust_csi_settings` does. This is what CSI is for: TBI and BAI are fixed at min_shift=14, depth=5 and stop at 2^29, which several real assemblies exceed.
 
-This rule is not met today. `Writer` builds its index with `min_shift=14, depth=5` for every output format and every header, so a contig over 512 Mbp is written, indexed, and then invisible to `bcftools view -r`. `csi_cannot_index_past_the_depth_5_bin_limit` in `vcf_csi_properties.rs` reproduces it and is marked `#[ignore]` until the builder picks its depth from the header.
+seqair deviates from htslib in one direction only: htslib starts its search at depth 0, so a small genome gets a shallower index than BAI would use, while seqair floors the depth at 5. Any depth that covers the references is correct — a CSI records the depth it was built with and every reader takes it from the file — so the floor costs nothing and keeps an index that fits the BAI scheme laid out the way BAI lays it out.
+
+`IndexBuilder::csi` MUST be given the longest reference length from the header. A header whose contigs declare no length at all MUST fall back to htslib's assumption of `i32::MAX` rather than guessing something narrower, because a narrow guess is the silent-loss case again.
 
 ## BAI output
 
