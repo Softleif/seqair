@@ -333,7 +333,10 @@ fn csi_header_and_pseudo_bin_match_the_record_set(tc: TestCase) {
     assert!(depth >= 5, "depth {depth} is shallower than BAI's");
     let longest = u64::from(layout.contigs.iter().map(|(_, len)| *len).max().unwrap());
     let reach = 1u64 << (14 + 3 * depth);
-    assert!(reach > longest, "depth {depth} reaches {reach}, short of the longest contig {longest}");
+    assert!(
+        reach > longest,
+        "depth {depth} reaches {reach}, short of the longest contig {longest}"
+    );
     // The deep band is the one this file exists for, so make it visible that
     // the generator gets there rather than assuming it does.
     tc.event_value("csi depth", f64::from(depth));
@@ -442,4 +445,94 @@ fn a_contig_past_the_depth_5_bin_limit_is_still_reachable() {
         vec![("big".to_owned(), BIN_LIMIT + 1)],
         "a record above 2^29 must still be reachable through seqair's CSI"
     );
+}
+
+// ── The tabix aux block, read back by tabix ─────────────────────────────
+
+/// `tabix -l <file>` — the sequence names, listed straight out of the index's
+/// aux block.
+fn tabix_list(path: &Path) -> Vec<String> {
+    let out = std::process::Command::new("tabix")
+        .arg("-l")
+        .arg(path)
+        .output()
+        .expect("tabix not found");
+    assert!(out.status.success(), "tabix -l failed: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// `tabix <file> <region>`, as `(CHROM, POS)` pairs in file order.
+fn tabix_query(path: &Path, region: &str) -> Vec<(String, u32)> {
+    let out = std::process::Command::new("tabix")
+        .arg(path)
+        .arg(region)
+        .output()
+        .expect("tabix not found");
+    assert!(
+        out.status.success(),
+        "tabix {region} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let mut f = l.split('\t');
+            let chrom = f.next().unwrap().to_owned();
+            let pos = f.next().unwrap().parse().unwrap();
+            (chrom, pos)
+        })
+        .collect()
+}
+
+// r[verify csi.write_tabix_aux]
+/// The aux block, read back by the tool it exists for.
+///
+/// Everything else here checks the aux block by looking at the bytes seqair
+/// wrote, which cannot catch a layout that is self-consistent and wrong. This
+/// hands the index to `tabix` instead, which is where the format's name comes
+/// from and which reaches it through htslib's own reader rather than ours.
+///
+/// `tabix -l` prints the sequence-name dictionary directly out of the aux
+/// block, so it is the read-back the rule asks for; the region queries then
+/// need the column configuration (`format=2`, `col_seq=1`, `col_beg=2`) to be
+/// right as well, since tabix uses it to decide which fields of a line are the
+/// coordinates. A name dictionary in the wrong order still lists the right
+/// names, and a wrong `col_beg` still lists them too — only the queries catch
+/// those.
+#[hegel::test(test_cases = 25)]
+fn tabix_reads_the_regions_through_seqairs_aux_block(tc: TestCase) {
+    let layout = tc.draw(arb_layout().print_as_debug());
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_indexed(dir.path(), &layout, OutputFormat::VcfGz);
+
+    let mut with_records: Vec<usize> = layout.records.iter().map(|r| r.contig).collect();
+    with_records.sort_unstable();
+    with_records.dedup();
+    let want_names: Vec<String> =
+        with_records.iter().map(|&c| layout.contigs[c].0.clone()).collect();
+    assert_eq!(tabix_list(&path), want_names, "tabix -l reads the aux block's name dictionary");
+
+    // One whole-contig query per named contig: the records tabix returns must
+    // be exactly the ones generated for it, in position order.
+    for (&contig, name) in with_records.iter().zip(&want_names) {
+        let len = layout.contigs[contig].1;
+        let region = format!("{name}:1-{len}");
+        let mut want: Vec<(String, u32)> = layout
+            .records
+            .iter()
+            .filter(|r| r.contig == contig)
+            .map(|r| (name.clone(), r.pos))
+            .collect();
+        want.sort_by_key(|&(_, pos)| pos);
+        assert_eq!(tabix_query(&path, &region), want, "tabix {region}");
+    }
+    tc.event_value("named contigs", with_records.len() as f64);
 }
