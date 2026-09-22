@@ -1,73 +1,89 @@
 //! VCF text formatting helpers used by the unified writer.
 
-/// Format a float like C's `%g` with 6 significant digits — no trailing zeros,
-/// no trailing decimal point. This matches htslib/bcftools VCF text output.
+/// Format a float as C's `%g` with 6 significant digits — no trailing zeros,
+/// no trailing decimal point — which is what htslib and bcftools write into
+/// VCF text, so seqair's output can be diffed against theirs.
 ///
-/// Examples: 35.89775 → "35.8978", 60.0 → "60", 0.777778 → "0.777778"
+/// `%g` picks the shorter of the two forms by the value's decimal exponent
+/// `e`: scientific when `e < -4` or `e >= 6`, fixed otherwise. The exponent
+/// itself is written C's way, signed and at least two digits.
 ///
-/// Magnitudes too small for the fixed form to fit six significant digits in
-/// 32 bytes (below about `1e-25`) fall back to scientific notation, the way
-/// `%g` does — `5.16988e-26`. Those values are not quality scores, but they
-/// do turn up in INFO fields carrying p-values, and refusing to write them
-/// would lose the record.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::indexing_slicing,
-    reason = "magnitude is log10 of f64 (range -308..=308), precision is a literal 6, cursor position is bounded by the 32-byte tmp buffer; all casts and slices are safe"
-)]
+/// Examples: 35.89775 → `35.8978`, 60.0 → `60`, 0.777778 → `0.777778`,
+/// 0.0001 → `0.0001`, 0.00001 → `1e-05`, 999999 → `999999`,
+/// 1234567 → `1.23457e+06`.
 pub(crate) fn write_float_g(buf: &mut Vec<u8>, v: f32) -> Result<(), WriteError> {
     let v = f64::from(v);
-    let precision = 6usize;
 
     if v == 0.0 {
+        // `-0.0 == 0.0`, but C prints `-0` and so must this: the sign is the
+        // difference between a value that round-trips and one that does not.
+        if v.is_sign_negative() {
+            buf.push(b'-');
+        }
         buf.push(b'0');
         return Ok(());
     }
+    if !v.is_finite() {
+        // VCF has no spelling for these; write what `Display` would and let
+        // the caller's validation deal with it rather than silently dropping
+        // the value.
+        buf.extend_from_slice(v.to_string().as_bytes());
+        return Ok(());
+    }
 
-    let magnitude = v.abs().log10().floor() as i32;
-    let decimal_places = (precision as i32).saturating_sub(magnitude).saturating_sub(1);
-    let decimal_places = decimal_places.max(0) as usize;
-
-    // Format into a small stack buffer
+    // `%g` chooses on the exponent of the value *as rounded to `PRECISION`
+    // significant digits*, not of the value itself: `0.0001f32` is a hair
+    // below `1e-4`, but it rounds to `1.00000e-04`, so C prints `0.0001` and
+    // not `1e-04`. Rendering the scientific form first and reading the
+    // exponent back off it is that rounding, done once.
     let mut tmp = [0u8; 32];
     let mut cursor = std::io::Cursor::new(&mut tmp[..]);
-    if std::io::Write::write_fmt(&mut cursor, format_args!("{v:.decimal_places$}")).is_err() {
-        // The fixed form did not fit. Scientific notation always does: an
-        // `f64` mantissa of six significant digits plus `e-308` is 13 bytes.
-        return write_float_exponential(buf, v);
-    }
+    std::io::Write::write_fmt(&mut cursor, format_args!("{v:.*e}", SIG_DECIMALS))
+        .map_err(|_source| WriteError::FormattedFloatLongerThan32Chars)?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the cursor cannot pass the 32-byte buffer it was built from"
+    )]
     let end = cursor.position() as usize;
+    let scientific = tmp.get(..end).ok_or(WriteError::FormattedFloatLongerThan32Chars)?;
 
-    // Strip trailing zeros after decimal point, then trailing dot
-    debug_assert!(end <= tmp.len(), "cursor position must not exceed buffer size");
-    let formatted = &tmp[..end];
-    let trimmed = if formatted.contains(&b'.') {
-        let without_zeros = formatted
-            .strip_suffix(b"0")
-            .map(|s| {
-                let mut s = s;
-                while let Some(stripped) = s.strip_suffix(b"0") {
-                    s = stripped;
-                }
-                s
-            })
-            .unwrap_or(formatted);
-        without_zeros.strip_suffix(b".").unwrap_or(without_zeros)
+    let split =
+        scientific.iter().position(|&b| b == b'e').ok_or(WriteError::FailedToStripTrailingZeros)?;
+    let (mantissa, exponent_text) =
+        scientific.split_at_checked(split).ok_or(WriteError::FailedToStripTrailingZeros)?;
+    let exponent_text = exponent_text.get(1..).ok_or(WriteError::FailedToStripTrailingZeros)?;
+    let exponent: i32 = std::str::from_utf8(exponent_text)
+        .map_err(|_source| WriteError::FailedToStripTrailingZeros)?
+        .parse()
+        .map_err(|_source| WriteError::FailedToStripTrailingZeros)?;
+
+    if !(-4..PRECISION).contains(&exponent) {
+        write_exponential(buf, mantissa, exponent);
+        Ok(())
     } else {
-        formatted
-    };
-
-    buf.extend_from_slice(trimmed);
-    Ok(())
+        write_fixed(buf, v, exponent)
+    }
 }
 
-/// The scientific fallback of [`write_float_g`]: six significant digits, with
-/// the mantissa's trailing zeros stripped the same way.
-fn write_float_exponential(buf: &mut Vec<u8>, v: f64) -> Result<(), WriteError> {
+/// Significant digits, as C's `%g` counts them, and the decimals that leaves
+/// after the leading one in the scientific form.
+const PRECISION: i32 = 6;
+const SIG_DECIMALS: usize = 5;
+
+/// `%f` with the decimals `%g` would use at this exponent, trailing zeros and
+/// a bare decimal point stripped.
+fn write_fixed(buf: &mut Vec<u8>, v: f64, exponent: i32) -> Result<(), WriteError> {
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "the caller only takes this path for exponent in -4..6, so the difference is 1..=10"
+    )]
+    let decimals = PRECISION.saturating_sub(exponent).saturating_sub(1).max(0) as usize;
+
+    // The widest form this path can produce is one integer digit plus a point
+    // plus ten decimals.
     let mut tmp = [0u8; 32];
     let mut cursor = std::io::Cursor::new(&mut tmp[..]);
-    std::io::Write::write_fmt(&mut cursor, format_args!("{v:.5e}"))
+    std::io::Write::write_fmt(&mut cursor, format_args!("{v:.decimals$}"))
         .map_err(|_source| WriteError::FormattedFloatLongerThan32Chars)?;
     #[expect(
         clippy::cast_possible_truncation,
@@ -75,23 +91,35 @@ fn write_float_exponential(buf: &mut Vec<u8>, v: f64) -> Result<(), WriteError> 
     )]
     let end = cursor.position() as usize;
     let formatted = tmp.get(..end).ok_or(WriteError::FormattedFloatLongerThan32Chars)?;
-
-    let Some(e) = formatted.iter().position(|&b| b == b'e') else {
-        buf.extend_from_slice(formatted);
-        return Ok(());
-    };
-    let (mantissa, exponent) =
-        formatted.split_at_checked(e).ok_or(WriteError::FailedToStripTrailingZeros)?;
-    let mut mantissa = mantissa;
-    if mantissa.contains(&b'.') {
-        while let Some(stripped) = mantissa.strip_suffix(b"0") {
-            mantissa = stripped;
-        }
-        mantissa = mantissa.strip_suffix(b".").unwrap_or(mantissa);
-    }
-    buf.extend_from_slice(mantissa);
-    buf.extend_from_slice(exponent);
+    buf.extend_from_slice(strip_trailing_zeros(formatted));
     Ok(())
+}
+
+/// The scientific form, with the mantissa's trailing zeros stripped and the
+/// exponent written C's way: a sign, and at least two digits.
+fn write_exponential(buf: &mut Vec<u8>, mantissa: &[u8], exponent: i32) {
+    buf.extend_from_slice(strip_trailing_zeros(mantissa));
+    buf.push(b'e');
+    buf.push(if exponent < 0 { b'-' } else { b'+' });
+    let magnitude = exponent.unsigned_abs();
+    if magnitude < 10 {
+        buf.push(b'0');
+    }
+    let mut itoa = itoa::Buffer::new();
+    buf.extend_from_slice(itoa.format(magnitude).as_bytes());
+}
+
+/// Drop trailing zeros after a decimal point, then the point itself. A number
+/// with no point is returned untouched — `100` must not become `1`.
+fn strip_trailing_zeros(formatted: &[u8]) -> &[u8] {
+    if !formatted.contains(&b'.') {
+        return formatted;
+    }
+    let mut trimmed = formatted;
+    while let Some(stripped) = trimmed.strip_suffix(b"0") {
+        trimmed = stripped;
+    }
+    trimmed.strip_suffix(b".").unwrap_or(trimmed)
 }
 
 /// Percent-encode special characters per VCF spec §1.0.2.
@@ -134,16 +162,29 @@ mod tests {
     }
 
     // r[verify vcf_writer.float_precision]
+    /// Pinned against what `bcftools query` prints for the same values, which
+    /// is C's `%g` with six significant digits.
     #[test]
     fn float_format_known_vectors() {
         assert_eq!(formatted(0.0), "0");
+        assert_eq!(formatted(-0.0), "-0");
         assert_eq!(formatted(60.0), "60");
+        assert_eq!(formatted(0.5), "0.5");
         assert_eq!(formatted(35.897_75), "35.8978");
         assert_eq!(formatted(0.777_778), "0.777778");
-        // Small enough that the fixed form no longer fits six significant
-        // digits in the buffer, so the writer switches to `%g`'s other half.
+        // The boundaries `%g` switches on: `e < -4` or `e >= 6`.
+        assert_eq!(formatted(0.0001), "0.0001");
+        assert_eq!(formatted(0.000_123_456), "0.000123456");
+        assert_eq!(formatted(0.00001), "1e-05");
+        assert_eq!(formatted(6.103_515_6e-5), "6.10352e-05");
+        assert_eq!(formatted(999_999.0), "999999");
+        assert_eq!(formatted(1_234_567.0), "1.23457e+06");
+        assert_eq!(formatted(1.234_567_9e8), "1.23457e+08");
+        // Three-digit exponents, and the smallest and largest finite f32.
         assert_eq!(formatted(5.169_879e-26), "5.16988e-26");
         assert_eq!(formatted(f32::MIN_POSITIVE), "1.17549e-38");
+        assert_eq!(formatted(f32::MAX), "3.40282e+38");
+        assert_eq!(formatted(-0.00001), "-1e-05");
     }
 
     // r[verify vcf_writer.float_precision]

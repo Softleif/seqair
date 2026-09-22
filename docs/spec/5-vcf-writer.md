@@ -27,7 +27,7 @@ r[vcf_writer.genotype_serialization]
 GT values MUST be serialized as allele indices separated by `/` (unphased) or `|` (phased). Missing alleles MUST be `.`. Examples: `0/1`, `1|0`, `./.`, `0|0|1` (triploid).
 
 r[vcf_writer.float_precision]
-Float values MUST be written with sufficient precision to round-trip through parsing (at least 6 significant digits). Trailing zeros after the decimal point SHOULD be omitted for compactness. Every finite value MUST be writable: a magnitude whose fixed-point form cannot hold six significant digits in the writer's fixed-size buffer MUST fall back to scientific notation (`5.16988e-26`), as C's `%g` does, rather than fail. p-values in INFO fields reach those magnitudes even though quality scores do not.
+Float values MUST be written exactly as C's `%g` with 6 significant digits writes them, which is what htslib and bcftools emit, so seqair's VCF text can be diffed against theirs. Concretely: trailing zeros after the decimal point and a bare trailing decimal point MUST be omitted; the form is scientific when the value's decimal exponent — *after* rounding to 6 significant digits, so `0.0001` is `0.0001` and not `1e-04` — is below `-4` or at least `6`, and fixed otherwise; and a scientific exponent MUST carry a sign and at least two digits (`1e-05`, `1.23457e+06`). Negative zero MUST be written `-0`. Every finite value MUST be writable — p-values in INFO fields reach magnitudes whose fixed form would not fit six significant digits in any fixed-size buffer, and the scientific form always does.
 
 r[vcf_writer.integer_format]
 Integer values MUST be written as decimal without leading zeros. Negative values MUST use `-` prefix. The `itoa` crate or equivalent fast formatting SHOULD be used for performance.

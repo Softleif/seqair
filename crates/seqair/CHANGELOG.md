@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **VCF float text now matches `bcftools` exactly.** `write_float_g` claimed to write C's `%g`
+  with six significant digits — the format htslib emits — but only ever produced the fixed form,
+  so a value outside `1e-4 .. 1e6` came out as `0.0000610352` or `1234567` where bcftools writes
+  `6.10352e-05` and `1.23457e+06`. It now switches forms on the value's exponent *after* rounding
+  to six significant digits (so `0.0001` stays `0.0001` and does not become `1e-04`), writes the
+  exponent C's way with a sign and at least two digits, and writes negative zero as `-0`. Values
+  in `1e-4 .. 1e6` are unchanged, which is every quality score and most everything else.
 - **A float below about `1e-25` could not be written to VCF at all.** `write_float_g` sized its
   decimal places from the value's magnitude and formatted into a 32-byte buffer, so six significant
   digits of `5.169879e-26` overflowed it and the write failed with `FormattedFloatLongerThan32Chars`,
