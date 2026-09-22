@@ -6,8 +6,12 @@ The pileup engine is the innermost loop of Rastair's processing pipeline: for a 
 
 ## Allocation avoidance
 
-r[perf.reuse_alignment_vec+2]
-The pileup engine allocates a `Vec<PileupAlignment>` per column using `Vec::with_capacity(active.len())`. Reusing a buffer via clone was measured to be slower than fresh allocation due to the copy cost of entries. The allocator efficiently reuses recently-freed blocks of the same size.
+r[perf.reuse_alignment_vec+3]
+The pileup engine MUST hold one `Vec<PileupAlignment>` on the engine and reuse it for every column: `clear`, one `reserve` for the whole column, then a straight write per entry into the spare capacity. It MUST NOT allocate a fresh `Vec` per column, and it MUST NOT `push` per entry.
+
+The earlier version of this rule said the opposite — allocate per column, because "reusing a buffer via clone was measured to be slower". That measured the wrong thing: it compared a fresh allocation against *cloning* into a reused buffer, which pays the copy the clone implies, rather than against clearing and writing in place. Against the in-place form the reuse wins twice, once on the allocator and once in the loop: `Vec::push` cannot hoist its capacity compare, because it may reallocate, so it repeats compare, store and length update per read per column — 1.5 % of a variant caller's worker CPU spent rediscovering a bound the loop already knows, namely at most one entry per active record.
+
+`internal_buf_retains_capacity` pins the reuse: it is the observable half, and an engine that went back to allocating per column would fail it.
 
 r[perf.avoid_redundant_arena_get+2]
 When a record enters the pileup active set, the engine MUST retrieve the record data once and cache what it needs (cigar, flags, strand, mapq, etc.) in the `ActiveRecord` — NOT perform repeated store lookups for the same record in the hot loop.

@@ -118,7 +118,7 @@ impl RefSeq {
 // r[impl perf.no_sorted_indices]
 // r[impl perf.avoid_redundant_arena_get+2]
 // r[impl perf.cigar_no_to_vec]
-// r[impl perf.reuse_alignment_vec+2]
+// r[impl perf.reuse_alignment_vec+3]
 // r[impl pileup.extras.generic_param]
 pub struct PileupEngine<U = ()> {
     store: RecordStore<U>,
@@ -1125,11 +1125,11 @@ impl<U> PileupEngine<U> {
             // r[impl pileup_indel.deletions_included]
             // r[impl pileup_indel.refskips_included]
             // r[related record_store.field_access]
-            // r[impl perf.reuse_alignment_vec+2]
+            // r[impl perf.reuse_alignment_vec+3]
             // r[impl pileup.column_record_order]
             // The active set is appended in store order and compacted stably on
             // eviction, so walking it yields ascending record indices.
-            // r[impl perf.reuse_alignment_vec+2]
+            // r[impl perf.reuse_alignment_vec+3]
             // One `reserve` for the whole column, then a straight write per
             // entry. `Vec::push` cannot hoist its capacity compare — it may
             // reallocate — so it repeats compare, store, len-update per read
@@ -1326,7 +1326,7 @@ mod tests {
         assert_eq!(ref_seq.base_at(Pos0::new(100).unwrap()), Base::Unknown);
     }
 
-    // r[verify perf.reuse_alignment_vec+2]
+    // r[verify perf.reuse_alignment_vec+3]
     /// The internal buffer must retain capacity across columns so the
     /// engine doesn't keep re-allocating.
     #[test]

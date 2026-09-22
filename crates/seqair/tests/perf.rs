@@ -22,7 +22,7 @@ use seqair_types::QPos;
 // still be correct. This test ensures correctness is maintained after the
 // optimization.
 
-// r[verify perf.reuse_alignment_vec+2]
+// r[verify perf.reuse_alignment_vec+3]
 #[hegel::test]
 fn reused_vec_depth_matches_sweep_line(tc: TestCase) {
     let records = tc.draw(
