@@ -397,7 +397,7 @@ fn arb_test_record_inner(tc: &TestCase) -> TestRecord {
         has_db_flag: tc.draw_silent(gs::booleans()),
         gt: arb_genotype(tc, max_allele),
         sample_dp: tc.draw_silent(gs::integers::<i32>().min_value(1).max_value(999)),
-        sample_gq: tc.draw_silent(gs::integers::<i32>().max_value(98)),
+        sample_gq: tc.draw_silent(gs::integers::<i32>().min_value(0).max_value(98)),
     }
 }
 
