@@ -78,6 +78,23 @@ impl GenRead {
         out
     }
 
+    /// Reference bases consumed — `M` and `D`, not the clips or insertions.
+    fn ref_span(&self) -> u32 {
+        self.cigar.iter().filter(|(_, op)| matches!(op, 'M' | 'D')).map(|(l, _)| l).sum()
+    }
+
+    fn start0(&self) -> u32 {
+        self.pos - 1
+    }
+
+    /// Last reference position covered, 0-based inclusive.
+    fn last0(&self) -> u32 {
+        self.start0() + self.ref_span() - 1
+    }
+
+    fn overlaps(&self, start0: u32, end0: u32) -> bool {
+        self.start0() <= end0 && self.last0() >= start0
+    }
 }
 
 /// A reference, the reads aligned to it, and some reads aligned to nothing.
@@ -173,6 +190,12 @@ fn arb_read(tc: &TestCase, contig: usize, reference: &str) -> GenRead {
 #[hegel::composite]
 fn arb_many_contig_sample(tc: &TestCase) -> Sample {
     arb_sample_sized(tc, 3, 6, 1, 2, 0, 1)
+}
+
+/// Guarantees reads that align nowhere, so the file gets an unmapped slice.
+#[hegel::composite]
+fn arb_sample_with_unmapped(tc: &TestCase) -> Sample {
+    arb_sample_sized(tc, 2, 3, 1, 3, 1, 3)
 }
 
 fn qual_string(len: usize) -> impl PrintableGenerator<String> {
@@ -451,6 +474,26 @@ fn fetch_all(path: &Path, fasta: &Path, sample: &Sample) -> Vec<Decoded> {
         out.extend(decode_store(&store));
     }
     out
+}
+
+/// The qnames the generator gave the reads a region should return, sorted.
+fn expected_qnames(sample: &Sample, contig: usize, start0: u32, end0: u32) -> Vec<String> {
+    let mut names: Vec<String> = sample
+        .reads
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.contig == contig && r.overlaps(start0, end0))
+        .map(|(i, _)| format!("r{i}"))
+        .collect();
+    names.sort();
+    names
+}
+
+fn qnames_of(decoded: &[Decoded]) -> Vec<String> {
+    let mut names: Vec<String> =
+        decoded.iter().map(|d| String::from_utf8(d.qname.clone()).expect("ASCII")).collect();
+    names.sort();
+    names
 }
 
 /// Check every decoded record against the read the generator wrote, matched on
@@ -813,6 +856,189 @@ fn multi_ref_containers_use_every_slices_reference_range() {
         "c1 needs two index entries in one container: {entries:?}"
     );
     assert_eq!(fetch_all(&cram, &fasta, &sample), fetch_all(&bam, &fasta, &sample));
+}
+
+// r[verify cram.index.query+2]
+// r[verify cram.index.parse]
+// r[verify cram.index.crai_per_slice]
+// r[verify unified.fetch_equivalence]
+/// A region query returns exactly the reads that overlap it.
+///
+/// The CRAI decides which containers and slices are even opened, so a query is
+/// where an index bug shows up as missing records rather than as a parse
+/// error. `seqs_per_slice` is kept small so the index has several entries to
+/// route between, and the region is drawn to land anywhere on the contig,
+/// including past the last read.
+#[hegel::test(test_cases = 48)]
+fn region_queries_return_exactly_the_overlapping_reads(tc: TestCase) {
+    let sample = tc.draw(arb_sample().print_as_debug());
+    let opts = tc.draw(arb_opts().print_as_debug());
+    let contig =
+        tc.draw(gs::integers::<usize>().max_value(sample.contigs.len() - 1).print_as_debug());
+    let start0 = tc.draw(gs::integers::<u32>().max_value(CONTIG_LEN - 1).print_as_debug());
+    let end0 =
+        tc.draw(gs::integers::<u32>().min_value(start0).max_value(CONTIG_LEN - 1).print_as_debug());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fasta = write_reference(dir.path(), &sample);
+    let bam = write_bam(dir.path(), &sample);
+    let cram = write_cram(dir.path(), &bam, &fasta, opts);
+
+    let from_cram = fetch(&cram, &fasta, contig, start0, end0);
+    let from_bam = fetch(&bam, &fasta, contig, start0, end0);
+    let want = expected_qnames(&sample, contig, start0, end0);
+
+    assert_eq!(qnames_of(&from_cram), want, "{}: c{contig}:{start0}-{end0}", opts.label());
+    assert_eq!(from_cram, from_bam, "{}: CRAM and BAM disagree", opts.label());
+    assert_matches_generator(&from_cram, &sample, &opts.label());
+
+    // The index must not be more selective than the records are: every entry
+    // the query keeps has to be one a decoded record could live in.
+    let kept = CramIndex::from_path(&cram.with_extension("cram.crai"))
+        .expect("read CRAI")
+        .query(contig as i32, u64::from(start0), u64::from(end0))
+        .len();
+    assert!(kept > 0 || want.is_empty(), "index pruned every slice but reads overlap");
+
+    tc.event_value("reads in region", want.len() as f64);
+    if want.is_empty() {
+        tc.event("empty region");
+    }
+    if want.len() == sample.reads_on(contig).count() {
+        tc.event("whole contig");
+    }
+}
+
+// r[verify cram.index.zero_span+2]
+// r[verify cram.index.query+2]
+/// A CRAI that reports no extent still returns every record.
+///
+/// Writers that do not compute a span emit `alignment_span == 0`, which means
+/// "unknown extent", not "covers nothing". Treating it as zero-width would
+/// prune the slice and lose its records silently, so this rewrites a real
+/// index into that shape — the entries stay, only their spans go to zero — and
+/// asks for the same regions again. Over-inclusive pruning is harmless;
+/// `decode_slice` re-filters every record.
+#[hegel::test(test_cases = 24)]
+fn zero_span_index_entries_still_return_every_record(tc: TestCase) {
+    let sample = tc.draw(arb_sample().print_as_debug());
+    let opts = CramOpts {
+        version: tc.draw(gs::sampled_from(&["3.0", "3.1"])),
+        embed_ref: 0,
+        seqs_per_slice: tc.draw(gs::sampled_from(&[1u32, 2, 10_000])),
+        slices_per_container: tc.draw(gs::sampled_from(&[1u32, 2])),
+        multi_seq: Some(false),
+    };
+    let contig =
+        tc.draw(gs::integers::<usize>().max_value(sample.contigs.len() - 1).print_as_debug());
+    let start0 = tc.draw(gs::integers::<u32>().max_value(CONTIG_LEN - 1).print_as_debug());
+    let end0 =
+        tc.draw(gs::integers::<u32>().min_value(start0).max_value(CONTIG_LEN - 1).print_as_debug());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fasta = write_reference(dir.path(), &sample);
+    let bam = write_bam(dir.path(), &sample);
+    let cram = write_cram(dir.path(), &bam, &fasta, opts);
+
+    let before = fetch(&cram, &fasta, contig, start0, end0);
+
+    let rewritten = zero_the_spans(&cram);
+    assert!(rewritten > 0, "no mapped CRAI entry to rewrite");
+    let entries = crai_entries(&cram);
+    assert!(
+        entries.iter().any(|e| e.ref_id >= 0 && e.alignment_span == 0 && e.alignment_start > 0),
+        "rewrite did not produce a span=0 entry with a start: {entries:?}"
+    );
+
+    let after = fetch(&cram, &fasta, contig, start0, end0);
+    assert_eq!(after, before, "{}: span=0 index dropped records", opts.label());
+    assert_eq!(qnames_of(&after), expected_qnames(&sample, contig, start0, end0));
+
+    tc.event_value("entries rewritten", rewritten as f64);
+}
+
+/// Rewrite the CRAI so every mapped entry reports `alignment_span == 0`,
+/// keeping the byte offsets intact. Returns how many entries changed.
+fn zero_the_spans(cram: &Path) -> usize {
+    use std::io::Read as _;
+
+    let crai = cram.with_extension("cram.crai");
+    let compressed = std::fs::read(&crai).expect("read CRAI");
+    let mut text = String::new();
+    flate2::read::MultiGzDecoder::new(&compressed[..])
+        .read_to_string(&mut text)
+        .expect("decompress CRAI");
+
+    let mut rewritten = 0;
+    let mut out = String::new();
+    for line in text.lines() {
+        let mut fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 6, "CRAI line has 6 fields: {line}");
+        let ref_id: i32 = fields[0].parse().expect("CRAI ref id");
+        if ref_id >= 0 && fields[2] != "0" {
+            fields[2] = "0";
+            rewritten += 1;
+        }
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+    }
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(out.as_bytes()).expect("compress CRAI");
+    std::fs::write(&crai, encoder.finish().expect("finish CRAI")).expect("write CRAI");
+    rewritten
+}
+
+// r[verify cram.index.unmapped]
+// r[verify cram.edge.unmapped_reads]
+// r[verify cram.index.parse]
+/// Unmapped reads get their own index entry, and it stays out of the way.
+///
+/// samtools writes reads with no reference into slices with `ref_seq_id == -1`
+/// and indexes them as `-1 0 0` — start and span both zero. From CRAM v3.1 the
+/// span really is zero (v3.0 rounds it up to one), which is the one place a
+/// zero span means "nothing here" rather than "extent unknown": these entries
+/// must be skipped, and the mapped reads must come back unaffected.
+#[hegel::test(test_cases = 16)]
+fn unmapped_reads_are_indexed_apart_from_the_mapped_ones(tc: TestCase) {
+    let sample = tc.draw(arb_sample_with_unmapped().print_as_debug());
+    let opts = CramOpts {
+        version: "3.1",
+        embed_ref: 0,
+        seqs_per_slice: tc.draw(gs::sampled_from(&[2u32, 4])),
+        slices_per_container: 1,
+        multi_seq: Some(false),
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fasta = write_reference(dir.path(), &sample);
+    let bam = write_bam(dir.path(), &sample);
+    let cram = write_cram(dir.path(), &bam, &fasta, opts);
+
+    let entries = crai_entries(&cram);
+    let unmapped_entries: Vec<&CraiEntry> = entries.iter().filter(|e| e.ref_id < 0).collect();
+    assert!(!unmapped_entries.is_empty(), "no unmapped CRAI entry: {entries:?}");
+    assert!(
+        unmapped_entries.iter().any(|e| e.alignment_span == 0 && e.alignment_start == 0),
+        "v3.1 writes the unmapped slice as start=0 span=0: {unmapped_entries:?}"
+    );
+
+    let index = CramIndex::from_path(&cram.with_extension("cram.crai")).expect("read CRAI");
+    for contig in 0..sample.contigs.len() {
+        assert!(
+            index
+                .query(contig as i32, 0, u64::from(CONTIG_LEN) - 1)
+                .iter()
+                .all(|e| e.ref_id == contig as i32),
+            "a whole-contig query pulled in an entry for another reference"
+        );
+        let from_cram = fetch(&cram, &fasta, contig, 0, CONTIG_LEN - 1);
+        let from_bam = fetch(&bam, &fasta, contig, 0, CONTIG_LEN - 1);
+        assert_eq!(from_cram.len(), sample.reads_on(contig).count(), "unmapped reads leaked in");
+        assert_eq!(from_cram, from_bam, "contig {contig}: CRAM and BAM disagree");
+    }
+
+    tc.event_value("unmapped reads", sample.unmapped.len() as f64);
 }
 
 // r[verify cram.scope.versions]
