@@ -43,15 +43,50 @@ pub struct WithSamples;
 ///
 /// See the [module documentation](self) for complete usage examples.
 ///
+/// The legal order — and the guard for the two rejections below. Every name
+/// they mention appears here in a use that has to compile, so renaming one
+/// fails *this* example instead of quietly making them free:
+///
+/// ```
+/// use seqair::vcf::{Alleles, ContigDef, OutputFormat, VcfHeader, Writer};
+/// use seqair_types::{Base, Pos1};
+/// use std::sync::Arc;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = VcfHeader::builder();
+/// let chr1 = builder.register_contig("chr1", ContigDef { length: Some(1_000) })?;
+/// let header = Arc::new(builder.build()?);
+///
+/// let mut buf = Vec::new();
+/// let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+/// let mut writer = writer.write_header(&header)?;
+///
+/// let alleles = Alleles::snv(Base::A, Base::T)?;
+/// let pos = Pos1::new(100).expect("100 is a valid 1-based position");
+/// let enc = writer.begin_record(&chr1, pos, &alleles, None)?;
+/// enc.filter_pass().begin_samples().emit()?;
+/// # Ok(())
+/// # }
+/// ```
+///
 /// `begin_record` is only available after the header has been written:
 ///
 /// ```compile_fail
-/// use seqair::vcf::{OutputFormat, Writer};
+/// use seqair::vcf::{Alleles, ContigDef, OutputFormat, VcfHeader, Writer};
+/// use seqair_types::{Base, Pos1};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut builder = VcfHeader::builder();
+/// let chr1 = builder.register_contig("chr1", ContigDef { length: Some(1_000) })?;
+/// let alleles = Alleles::snv(Base::A, Base::T)?;
+/// let pos = Pos1::new(100).expect("100 is a valid 1-based position");
 ///
 /// let mut buf = Vec::new();
 /// let mut writer = Writer::new(&mut buf, OutputFormat::Vcf);
 /// // ERROR: begin_record requires Writer<_, Ready>, not Unstarted
-/// writer.begin_record(todo!(), todo!(), todo!(), None).unwrap();
+/// writer.begin_record(&chr1, pos, &alleles, None)?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// `write_header` cannot be called twice:
@@ -60,12 +95,15 @@ pub struct WithSamples;
 /// use seqair::vcf::{OutputFormat, VcfHeader, Writer};
 /// use std::sync::Arc;
 ///
-/// let header = Arc::new(VcfHeader::builder().build().unwrap());
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let header = Arc::new(VcfHeader::builder().build()?);
 /// let mut buf = Vec::new();
 /// let writer = Writer::new(&mut buf, OutputFormat::Vcf);
-/// let writer = writer.write_header(&header).unwrap();
+/// let writer = writer.write_header(&header)?;
 /// // ERROR: write_header is on Unstarted, not Ready
-/// writer.write_header(&header).unwrap();
+/// writer.write_header(&header)?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct Writer<W: Write, S = Unstarted> {
     inner: WriterInner<W>,
@@ -538,39 +576,68 @@ fn begin_vcf_record<'a>(
 /// Record encoder with typestate enforcement of the
 /// `Begun` → `Filtered` → `WithSamples` → `emit()` chain.
 ///
+/// The three rejections below are written against the handles a caller
+/// actually holds — `InfoKey::encode` and `FormatKey::encode` — rather than
+/// the `InfoEncoder`/`FormatEncoder` methods, whose [`FieldId`] argument has
+/// no public constructor. This example is their guard: it uses every name
+/// they use, legally, so a rename breaks it loudly instead of leaving three
+/// tests that pass because their `use` no longer resolves.
+///
+/// [`FieldId`]: super::record_encoder::FieldId
+///
+/// ```
+/// use seqair::vcf::{Begun, Filtered, FormatInt, InfoInt, RecordEncoder, VcfError, WithSamples};
+///
+/// fn filter_comes_first<'a>(enc: RecordEncoder<'a, Begun>) -> RecordEncoder<'a, Filtered> {
+///     enc.filter_pass()
+/// }
+///
+/// fn info_belongs_to_filtered(enc: &mut RecordEncoder<'_, Filtered>, dp: &InfoInt) {
+///     dp.encode(enc, 42);
+/// }
+///
+/// fn samples_come_next<'a>(enc: RecordEncoder<'a, Filtered>) -> RecordEncoder<'a, WithSamples> {
+///     enc.begin_samples()
+/// }
+///
+/// fn format_belongs_to_with_samples(
+///     enc: &mut RecordEncoder<'_, WithSamples>,
+///     dp: &FormatInt,
+/// ) -> Result<(), VcfError> {
+///     dp.encode(enc, &[42])
+/// }
+/// ```
+///
 /// INFO fields cannot be encoded before the filter is set:
 ///
 /// ```compile_fail
-/// use seqair::vcf::{Begun, RecordEncoder};
-/// use seqair::vcf::record_encoder::InfoEncoder;
+/// use seqair::vcf::{Begun, InfoInt, RecordEncoder};
 ///
-/// fn check(enc: &mut RecordEncoder<'_, Begun>) {
+/// fn check(enc: &mut RecordEncoder<'_, Begun>, dp: &InfoInt) {
 ///     // ERROR: InfoEncoder is not implemented for RecordEncoder<Begun>
-///     enc.info_int(todo!(), 42);
+///     dp.encode(enc, 42);
 /// }
 /// ```
 ///
 /// FORMAT fields cannot be encoded before `begin_samples`:
 ///
 /// ```compile_fail
-/// use seqair::vcf::{Filtered, RecordEncoder};
-/// use seqair::vcf::record_encoder::FormatEncoder;
+/// use seqair::vcf::{Filtered, FormatInt, RecordEncoder, VcfError};
 ///
-/// fn check(enc: &mut RecordEncoder<'_, Filtered>) {
+/// fn check(enc: &mut RecordEncoder<'_, Filtered>, dp: &FormatInt) -> Result<(), VcfError> {
 ///     // ERROR: FormatEncoder is not implemented for RecordEncoder<Filtered>
-///     enc.format_int(todo!(), &[42]).unwrap();
+///     dp.encode(enc, &[42])
 /// }
 /// ```
 ///
 /// INFO fields cannot be encoded after `begin_samples`:
 ///
 /// ```compile_fail
-/// use seqair::vcf::{WithSamples, RecordEncoder};
-/// use seqair::vcf::record_encoder::InfoEncoder;
+/// use seqair::vcf::{InfoInt, RecordEncoder, WithSamples};
 ///
-/// fn check(enc: &mut RecordEncoder<'_, WithSamples>) {
+/// fn check(enc: &mut RecordEncoder<'_, WithSamples>, dp: &InfoInt) {
 ///     // ERROR: InfoEncoder is not implemented for RecordEncoder<WithSamples>
-///     enc.info_int(todo!(), 42);
+///     dp.encode(enc, 42);
 /// }
 /// ```
 #[must_use = "record is silently discarded if emit() is not called"]

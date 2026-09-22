@@ -361,17 +361,39 @@ pub struct Samples;
 /// straight to `Infos`).  [`build`](VcfHeaderBuilder::build) is
 /// available from every phase.
 ///
+/// In order, it compiles — and this example is the guard for the rejection
+/// below it, which uses the same names. Without it, renaming
+/// `register_info` or `InfoFieldDef` would leave a `compile_fail` block that
+/// passes for the wrong reason:
+///
+/// ```
+/// use seqair::vcf::{VcfHeader, Number, ValueType};
+/// use seqair::vcf::record_encoder::{InfoFieldDef, Scalar};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let builder = VcfHeader::builder();
+/// let mut builder = builder.infos();
+/// let _dp: seqair::vcf::InfoInt = builder.register_info(&InfoFieldDef::<Scalar<i32>>::new(
+///     "DP", Number::Count(1), ValueType::Integer, "Depth",
+/// ))?;
+/// # Ok(())
+/// # }
+/// ```
+///
 /// Out-of-order registration is a compile error:
 ///
 /// ```compile_fail
 /// use seqair::vcf::{VcfHeader, Number, ValueType};
 /// use seqair::vcf::record_encoder::{InfoFieldDef, Scalar};
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut builder = VcfHeader::builder();
 /// // ERROR: register_info is not available in the Contigs phase
 /// builder.register_info(&InfoFieldDef::<Scalar<i32>>::new(
 ///     "DP", Number::Count(1), ValueType::Integer, "Depth",
-/// )).unwrap();
+/// ))?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct VcfHeaderBuilder<Phase = Contigs> {
     infos: IndexMap<SmolStr, InfoDef>,
