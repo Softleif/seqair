@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `I` feature, so those reads came back one base too long and were refused with
   `QualLenMismatch`. It needs no option to reach: htslib drops into no-reference mode by itself when
   `embed_ref` meets `multi_seq_per_slice`.
+- **A CSI could silently drop records from a region query.** A bin's `loffset` was written as
+  that bin's own first chunk offset. htslib derives it from the linear index instead — the first
+  record at or after the start of the bin's leftmost leaf window — and the two differ whenever a
+  record in another bin begins earlier inside that window, which a record straddling a window
+  boundary does routinely. The bin's own chunk is then the larger of the two, and that is the
+  dangerous direction: a reader takes `min_off` from `loffset` and discards every chunk ending
+  before it, so `tabix` and `bcftools view -r` both returned short, with exit status 0. The record
+  was never lost from the file and a query for its exact position still found it; only a query
+  whose range started earlier missed it. Smallest case: a record at 0-based 16384 with a second
+  straddling the next window, queried from position 1.
 - **The VCF/BCF writer could not index a contig over 512 Mbp.** Its index was built with
   `min_shift=14, depth=5` whatever the header said, so bins ran out at 2^29 — a record above that
   was written to the file, pushed to the index, and then unreachable, with `bcftools view -r`
@@ -124,8 +134,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The six bare `compile_fail` blocks in the VCF writer each gained a passing twin that uses every
   name the rejection uses, so a rename fails the guard rather than silently making the rejection
   free; each was mutated into its legal form to confirm it rejects for the reason it claims.
-- The nightly workflow (renamed `fuzz.yml` → `nightly.yml`) now also runs the property suite at the
-  `thorough` profile, 10000 cases, which nothing ran before.
+- The nightly workflow (renamed `fuzz.yml` → `nightly.yml`) grew from one job to three, because
+  there are three axes and they do not substitute for one another: `fuzz` as before, `thorough` at
+  the 50000-case profile, and `deep-oracles` with `HEGEL_TEST_CASES=500`. The last is the only
+  thing that reaches the 83 tests which pin their own case count — the subprocess round-trips
+  against samtools, bcftools, htslib and noodles — and it found the CSI `loffset` bug above on its
+  first outing. Both numbers are measured, not guessed, and the curves are recorded in `hegel.toml`
+  and the workflow comments.
 
 ## v0.2.0 (2026-09-14)
 
