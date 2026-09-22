@@ -767,10 +767,7 @@ fn a_resize_without_its_qual_refuses_to_serialize() {
     buf.clear();
     let err = rec.to_bam_bytes(&mut buf).expect_err("seq and qual no longer agree");
     assert!(
-        matches!(
-            err,
-            OwnedRecordError::SeqQualLengthMismatch { seq_len: 5, qual_len: 4 }
-        ),
+        matches!(err, OwnedRecordError::SeqQualLengthMismatch { seq_len: 5, qual_len: 4 }),
         "expected the same mismatch the builder raises, got {err:?}"
     );
 
