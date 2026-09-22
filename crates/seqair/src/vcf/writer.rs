@@ -23,11 +23,22 @@ pub(crate) fn write_float_g(buf: &mut Vec<u8>, v: f32) -> Result<(), WriteError>
         buf.push(b'0');
         return Ok(());
     }
+    // r[impl vcf_writer.float_non_finite]
     if !v.is_finite() {
-        // VCF has no spelling for these; write what `Display` would and let
-        // the caller's validation deal with it rather than silently dropping
-        // the value.
-        buf.extend_from_slice(v.to_string().as_bytes());
+        // VCF does have a spelling for these. §1.3 admits
+        // `^[-+]?(INF|INFINITY|NAN)$`, case-insensitively, as a Float, and
+        // §6.3.3 gives quiet NaN first-class status *alongside* the missing
+        // sentinel rather than as a synonym for it. htslib hands non-finite
+        // values to C's `%g`, which lowercases them; `Display` writes `NaN`,
+        // and a case difference is exactly what this function exists to
+        // avoid.
+        buf.extend_from_slice(if v.is_nan() {
+            b"nan".as_slice()
+        } else if v.is_sign_negative() {
+            b"-inf".as_slice()
+        } else {
+            b"inf".as_slice()
+        });
         return Ok(());
     }
 
@@ -185,6 +196,38 @@ mod tests {
         assert_eq!(formatted(f32::MIN_POSITIVE), "1.17549e-38");
         assert_eq!(formatted(f32::MAX), "3.40282e+38");
         assert_eq!(formatted(-0.00001), "-1e-05");
+    }
+
+    // r[verify vcf_writer.float_non_finite]
+    /// The non-finite spellings, pinned against what `bcftools view` prints
+    /// for the same values. `Display` would write `NaN`; C's `%g`, and so
+    /// htslib, writes `nan`.
+    ///
+    /// NaN is deliberately *not* `.`: the missing sentinel is the signaling
+    /// NaN `0x7F800001`, a quiet NaN is `0x7FC00000`, and htslib's own
+    /// `bcf_float_is_missing` is an exact bit compare rather than `isnan`.
+    /// Collapsing the two here would also put this arm at odds with the BCF
+    /// arm, which writes the caller's bits through untouched.
+    #[test]
+    fn float_format_non_finite() {
+        assert_eq!(formatted(f32::NAN), "nan");
+        assert_eq!(formatted(-f32::NAN), "nan");
+        assert_eq!(formatted(f32::INFINITY), "inf");
+        assert_eq!(formatted(f32::NEG_INFINITY), "-inf");
+    }
+
+    // r[verify vcf_writer.float_non_finite]
+    /// Whatever it emits for a non-finite value has to parse back to an equal
+    /// value, the same round-trip the finite case owes — and `bcftools` uses
+    /// `strtod`, which accepts exactly these three spellings.
+    #[test]
+    fn non_finite_text_parses_back() {
+        assert!(formatted(f32::NAN).parse::<f32>().expect("`nan` parses").is_nan());
+        assert_eq!(formatted(f32::INFINITY).parse::<f32>().expect("`inf` parses"), f32::INFINITY);
+        assert_eq!(
+            formatted(f32::NEG_INFINITY).parse::<f32>().expect("`-inf` parses"),
+            f32::NEG_INFINITY
+        );
     }
 
     // r[verify vcf_writer.float_precision]

@@ -29,6 +29,13 @@ GT values MUST be serialized as allele indices separated by `/` (unphased) or `|
 r[vcf_writer.float_precision]
 Float values MUST be written exactly as C's `%g` with 6 significant digits writes them, which is what htslib and bcftools emit, so seqair's VCF text can be diffed against theirs. Concretely: trailing zeros after the decimal point and a bare trailing decimal point MUST be omitted; the form is scientific when the value's decimal exponent — *after* rounding to 6 significant digits, so `0.0001` is `0.0001` and not `1e-04` — is below `-4` or at least `6`, and fixed otherwise; and a scientific exponent MUST carry a sign and at least two digits (`1e-05`, `1.23457e+06`). Negative zero MUST be written `-0`. Every finite value MUST be writable — p-values in INFO fields reach magnitudes whose fixed form would not fit six significant digits in any fixed-size buffer, and the scientific form always does.
 
+> _[VCF43] §1.3 "Data types" — Float matches `^[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$` or `^[-+]?(INF|INFINITY|NAN)$` case-insensitively; §6.3.3 "Type encoding" — "BCF2 supports the full range of values from -Infinity to +Infinity, including NaN", NaN being `0x7FC00000` and MISSING the signaling NaN `0x7F800001`_
+
+r[vcf_writer.float_non_finite]
+A non-finite Float is a value, not an error and not a missing value. NaN MUST be written `nan`, positive infinity `inf`, and negative infinity `-inf` — lowercase, because htslib passes these to C's `%g` and `r[vcf_writer.float_precision]` exists so the two outputs can be diffed. A NaN MUST NOT be written as `.`: the spec keeps NaN (`0x7FC00000`) and MISSING (`0x7F800001`) distinct, htslib's `bcf_float_is_missing` is an exact bit compare rather than an `isnan` test, and the BCF arm writes the caller's bits through unchanged — so collapsing them in the text arm would break `r[record_encoder]`'s requirement that the two renderings of a record read back as the same values.
+
+> One caveat, for anyone diffing byte-for-byte: htslib is not itself stable across platforms for a *negative* NaN, because `kputd`'s `d < 0` test is false for every NaN and `%g` then prints `-nan` under glibc and `nan` under macOS. seqair writes `nan` for either sign. Every real producer emits the positive quiet NaN, where all three agree.
+
 r[vcf_writer.integer_format]
 Integer values MUST be written as decimal without leading zeros. Negative values MUST use `-` prefix. The `itoa` crate or equivalent fast formatting SHOULD be used for performance.
 
