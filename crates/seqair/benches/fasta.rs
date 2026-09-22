@@ -5,6 +5,7 @@
 #![allow(clippy::cast_possible_truncation, reason = "benches")]
 #![allow(clippy::arithmetic_side_effects, reason = "benches")]
 
+use core::range::RangeInclusive;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -23,6 +24,12 @@ const START: u64 = 6_100_000;
 
 fn pos(v: u64) -> seqair::bam::Pos0 {
     seqair::bam::Pos0::new(v as u32).unwrap()
+}
+
+/// The closed span covering the same bases as the half-open `[start, end)`
+/// the htslib and noodles calls below are given.
+fn span(start: u64, end: u64) -> RangeInclusive<seqair::bam::Pos0> {
+    (pos(start)..=pos(end - 1)).into()
 }
 
 fn region(chrom: &str, start: u64, end: u64) -> noodles::core::Region {
@@ -50,7 +57,7 @@ fn fasta_open_and_fetch(c: &mut Criterion) {
         b.iter(|| {
             let path = std::path::Path::new(FASTA_PATH);
             let mut reader = seqair::fasta::IndexedFastaReader::open(path).unwrap();
-            let seq = reader.fetch_seq(CHROM, pos(FASTA_START), pos(FASTA_END)).unwrap();
+            let seq = reader.fetch_seq(CHROM, span(FASTA_START, FASTA_END)).unwrap();
             black_box(seq.len())
         });
     });
@@ -134,14 +141,14 @@ fn fasta_fetch_steady(c: &mut Criterion) {
             // Allocates a fresh Vec per call.
             group.bench_with_input(BenchmarkId::new("seqair_fetch_seq", size), &size, |b, _| {
                 b.iter(|| {
-                    black_box(seqair_reader.fetch_seq(CHROM, pos(START), pos(end)).unwrap().len())
+                    black_box(seqair_reader.fetch_seq(CHROM, span(START, end)).unwrap().len())
                 });
             });
 
             // Reuses the caller's buffer — seqair's zero-alloc path.
             group.bench_with_input(BenchmarkId::new("seqair_fetch_into", size), &size, |b, _| {
                 b.iter(|| {
-                    seqair_reader.fetch_seq_into(CHROM, pos(START), pos(end), &mut reuse).unwrap();
+                    seqair_reader.fetch_seq_into(CHROM, span(START, end), &mut reuse).unwrap();
                     black_box(reuse.len())
                 });
             });
@@ -196,7 +203,7 @@ fn fasta_name_lookup(c: &mut Criterion) {
 
     group.bench_function("seqair_fetch_into", |b| {
         b.iter(|| {
-            seqair_reader.fetch_seq_into(last, pos(0), pos(1_000), &mut reuse).unwrap();
+            seqair_reader.fetch_seq_into(last, span(0, 1_000), &mut reuse).unwrap();
             black_box(reuse.len())
         });
     });

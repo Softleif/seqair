@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
 
     for segment in &plan {
         let mut store = RecordStore::<()>::new();
-        readers.fetch_into(segment.tid().as_u32(), segment.start(), segment.end(), &mut store)?;
+        readers.fetch_into(segment.tid().as_u32(), segment.span(), &mut store)?;
         total += count_segment(&store);
     }
 

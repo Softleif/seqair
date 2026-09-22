@@ -5,6 +5,7 @@ use crate::{
     reader::{ReaderError, indexed::CursorReader},
     sam::reader::IndexedSamReader,
 };
+use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0};
 use std::rc::Rc;
 
@@ -119,13 +120,12 @@ impl FuzzReaders {
     pub fn pileup(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
     ) -> Result<PileupGuard<'_, ()>, ReaderError> {
         match &mut self.alignment {
-            AlignmentBackend::Indexed(r) => r.fetch_into(tid, start, end, &mut self.store)?,
+            AlignmentBackend::Indexed(r) => r.fetch_into(tid, span, &mut self.store)?,
             AlignmentBackend::PlainSam(r) => {
-                r.fetch_plain_into(tid, start, end, &mut self.store).map_err(ReaderError::from)?
+                r.fetch_plain_into(tid, span, &mut self.store).map_err(ReaderError::from)?
             }
         };
 
@@ -134,10 +134,10 @@ impl FuzzReaders {
         // `self.store`.
         let ref_seq = if let Some(name) = self.header().target_name(tid) {
             let name = name.to_owned();
-            if self.fasta.fetch_seq_into(&name, start, end, &mut self.fasta_buf).is_ok() {
+            if self.fasta.fetch_seq_into(&name, span, &mut self.fasta_buf).is_ok() {
                 let buf = std::mem::take(&mut self.fasta_buf);
                 let bases = Base::from_ascii_vec(buf);
-                Some(crate::bam::pileup::RefSeq::new(Rc::from(bases), start))
+                Some(crate::bam::pileup::RefSeq::new(Rc::from(bases), span.start))
             } else {
                 None
             }
@@ -146,7 +146,7 @@ impl FuzzReaders {
         };
 
         let store = std::mem::take(&mut self.store);
-        let mut engine = PileupEngine::new(store.prepare_for_pileup().input, start, end);
+        let mut engine = PileupEngine::new(store.prepare_for_pileup().input, span);
         if let Some(ref_seq) = ref_seq {
             engine.set_reference_seq(ref_seq);
         }
@@ -156,14 +156,13 @@ impl FuzzReaders {
     fn fetch_records(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
         match &mut self.alignment {
-            AlignmentBackend::Indexed(r) => r.fetch_into(tid, start, end, store),
+            AlignmentBackend::Indexed(r) => r.fetch_into(tid, span, store),
             AlignmentBackend::PlainSam(r) => {
-                r.fetch_plain_into(tid, start, end, store).map_err(ReaderError::from)
+                r.fetch_plain_into(tid, span, store).map_err(ReaderError::from)
             }
         }
     }
@@ -171,10 +170,9 @@ impl FuzzReaders {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
-        self.fetch_records(tid, start, end, store)
+        self.fetch_records(tid, span, store)
     }
 }

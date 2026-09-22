@@ -132,7 +132,7 @@ fn main() -> anyhow::Result<()> {
 
     let opts = SegmentOptions::new(NonZeroU32::new(1_000_000).unwrap());
     let segment = readers
-        .segments((args.region.chromosome.as_str(), start, end), opts)
+        .segments((args.region.chromosome.as_str(), (start..=end).into()), opts)
         .context("planning segment failed")?
         .next()
         .context("region produced no segment")?;

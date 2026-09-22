@@ -21,6 +21,7 @@
 //! `r[unified.readers_segments]`, `r[unified.readers_pileup]`.
 
 use crate::bam::BamHeader;
+use core::range::RangeInclusive;
 use seqair_types::{Pos0, RegionString, SmolStr};
 use std::num::{NonZeroU32, NonZeroU64};
 
@@ -91,7 +92,7 @@ impl Segment {
     ///
     /// * `start > end`
     /// * `end > contig_last_pos`
-    /// * `overlap_start + overlap_end >= len()` — would make `core_range()`
+    /// * `overlap_start + overlap_end >= len()` — would make `core_span()`
     ///   cover the entire tile, breaking neighbor-dedupe downstream.
     pub(crate) fn new(
         tid: Tid,
@@ -153,10 +154,27 @@ impl Segment {
     }
 
     // r[impl interval.inclusive_ends]
-    /// Inclusive 0-based end of the tile (last pileup position).
+    /// The last pileup position of the tile — a position that exists, unlike
+    /// the `end` of a half-open range.
     #[must_use]
-    pub fn end(&self) -> Pos0 {
+    pub fn last(&self) -> Pos0 {
         self.end
+    }
+
+    // r[impl interval.inclusive_ends]
+    // r[impl interval.span_type]
+    /// The tile as the closed interval `start..=last`.
+    ///
+    /// This is what every query in the crate takes — [`Readers::fetch_into`],
+    /// the FASTA fetch, [`Readers::estimate_region_bytes`] — so a tile is
+    /// handed on whole rather than as two positions whose end convention the
+    /// receiver has to know.
+    ///
+    /// [`Readers::fetch_into`]: super::Readers::fetch_into
+    /// [`Readers::estimate_region_bytes`]: super::Readers::estimate_region_bytes
+    #[must_use]
+    pub fn span(&self) -> RangeInclusive<Pos0> {
+        RangeInclusive { start: self.start, last: self.end }
     }
 
     /// Number of bases covered by this tile (= `end - start + 1`). Always >= 1.
@@ -209,14 +227,15 @@ impl Segment {
     }
 
     // r[impl unified.segment_overlap]
-    /// The inclusive sub-range "owned" by this tile — `[start, end]` shrunk
-    /// by `overlap_start` on the left and `overlap_end` on the right.
+    // r[impl interval.span_type]
+    /// The closed sub-interval "owned" by this tile — [`span`](Self::span)
+    /// shrunk by `overlap_start` on the left and `overlap_end` on the right.
     ///
     /// Downstream tools that emit per-position output should restrict their
-    /// emission to this range to avoid double-counting positions that
+    /// emission to this interval to avoid double-counting positions that
     /// neighboring tiles also cover.
     #[must_use]
-    pub fn core_range(&self) -> std::ops::RangeInclusive<Pos0> {
+    pub fn core_span(&self) -> RangeInclusive<Pos0> {
         // The constructor enforces `overlap_start + overlap_end < len` and
         // `end <= i32::MAX` (Pos0 invariant), so:
         //   * `start + overlap_start <= end - overlap_end <= i32::MAX`
@@ -241,7 +260,7 @@ impl Segment {
             core_start <= core_end,
             "constructor invariant: overlap_start + overlap_end < len => core_start <= core_end"
         );
-        core_start..=core_end
+        RangeInclusive { start: core_start, last: core_end }
     }
 }
 
@@ -282,7 +301,7 @@ impl SegmentOptions {
     /// default 256 MiB byte budget (see [`with_max_bytes`](Self::with_max_bytes)).
     ///
     /// `max_len` caps the **core** length of each tile
-    /// (`Segment::core_range()`). With
+    /// (`Segment::core_span()`). With
     /// [`with_overlap(o)`](Self::with_overlap), an internal tile's full
     /// `[start, end]` is the core expanded by `o` bases on each side, so
     /// internal tiles can be up to `max_len + 2 * o` bases. Edge tiles
@@ -532,9 +551,11 @@ impl private::IntoSegmentTargetSealed for &RegionString {
     }
 }
 
-impl<R: ResolveTid> private::IntoSegmentTargetSealed for (R, Pos0, Pos0) {
+// r[impl interval.span_type]
+/// A closed interval on a contig: `("chr1", (p(1000)..=p(1999)).into())`.
+impl<R: ResolveTid> private::IntoSegmentTargetSealed for (R, RangeInclusive<Pos0>) {
     fn resolve_target(self, header: &BamHeader) -> Result<Vec<ResolvedRange>, ReaderError> {
-        let (resolver, start, end) = self;
+        let (resolver, RangeInclusive { start, last: end }) = self;
         let tid = resolver.resolve_tid(header)?;
         let mut range = whole_contig(header, tid)?;
         if start > end {
@@ -583,7 +604,7 @@ impl private::IntoSegmentTargetSealed for () {
 /// Built by [`Readers::segments`](super::Readers::segments). Encapsulates the
 /// slightly fiddly tile arithmetic so callers can't get it wrong:
 ///
-/// * The union of `core_range()` over consecutive tiles equals the input
+/// * The union of `core_span()` over consecutive tiles equals the input
 ///   range exactly (no overlap, no gap).
 /// * Internal tile **cores** are exactly `max_len` bases long; the last
 ///   core of a range may be shorter. The full `[start, end]` of an
@@ -758,7 +779,7 @@ pub(crate) fn split_segment_by_bytes(
     seg: &Segment,
     overlap: u32,
     budget: u64,
-    estimate: &mut dyn FnMut(u32, Pos0, Pos0) -> u64,
+    estimate: &mut dyn FnMut(u32, RangeInclusive<Pos0>) -> u64,
     out: &mut Vec<Segment>,
 ) {
     let ctx = SplitCtx {
@@ -766,12 +787,12 @@ pub(crate) fn split_segment_by_bytes(
         contig: seg.contig(),
         contig_last_pos: seg.contig_last_pos(),
         clamp_start: seg.start().as_u64(),
-        clamp_end: seg.end().as_u64(),
+        clamp_end: seg.last().as_u64(),
         overlap: u64::from(overlap),
     };
-    let core = seg.core_range();
-    let total_end = core.end().as_u64();
-    let mut core_start = core.start().as_u64();
+    let core = seg.core_span();
+    let total_end = core.last.as_u64();
+    let mut core_start = core.start.as_u64();
 
     // Greedy forward growth: each segment grows its core to the largest end
     // still within budget, then the next starts after it. This is robust to the
@@ -802,7 +823,7 @@ fn largest_core_end(
     core_start: u64,
     total_end: u64,
     threshold: u64,
-    estimate: &mut dyn FnMut(u32, Pos0, Pos0) -> u64,
+    estimate: &mut dyn FnMut(u32, RangeInclusive<Pos0>) -> u64,
 ) -> u64 {
     let mut lo = core_start;
     let mut hi = total_end;
@@ -843,10 +864,10 @@ fn estimate_full(
     ctx: &SplitCtx<'_>,
     core_start: u64,
     core_end: u64,
-    estimate: &mut dyn FnMut(u32, Pos0, Pos0) -> u64,
+    estimate: &mut dyn FnMut(u32, RangeInclusive<Pos0>) -> u64,
 ) -> u64 {
     let (full_start, full_end) = full_range(ctx, core_start, core_end);
-    estimate(ctx.tid.as_u32(), full_start, full_end)
+    estimate(ctx.tid.as_u32(), RangeInclusive { start: full_start, last: full_end })
 }
 
 fn emit_segment(ctx: &SplitCtx<'_>, core_start: u64, core_end: u64, out: &mut Vec<Segment>) {
@@ -883,6 +904,11 @@ mod tests {
 
     fn p(n: u32) -> Pos0 {
         Pos0::new(n).expect("test position")
+    }
+
+    /// The closed interval `start..=last`, the shape every query takes.
+    fn span(start: u32, last: u32) -> RangeInclusive<Pos0> {
+        RangeInclusive { start: p(start), last: p(last) }
     }
 
     fn tid(n: u32) -> Tid {
@@ -967,12 +993,12 @@ mod tests {
     // r[verify unified.segment_struct]
     // r[verify unified.segment_overlap]
     #[test]
-    fn segment_core_range_excludes_overlap() {
+    fn segment_core_span_excludes_overlap() {
         let seg = Segment::new(tid(0), "c0".into(), p(100), p(199), 10, 5, p(999)).unwrap();
         assert_eq!(seg.len(), 100);
-        let core = seg.core_range();
-        assert_eq!(*core.start(), p(110));
-        assert_eq!(*core.end(), p(194));
+        let core = seg.core_span();
+        assert_eq!(core.start, p(110));
+        assert_eq!(core.last, p(194));
     }
 
     // r[verify unified.segment_struct]
@@ -1013,8 +1039,8 @@ mod tests {
         // Boundary: total == len - 1 is allowed (leaves 1 base of core).
         let ok = Segment::new(tid(0), "c0".into(), p(0), p(99), 50, 49, p(999)).unwrap();
         assert_eq!(ok.len(), 100);
-        assert_eq!(*ok.core_range().start(), p(50));
-        assert_eq!(*ok.core_range().end(), p(50));
+        assert_eq!(ok.core_span().start, p(50));
+        assert_eq!(ok.core_span().last, p(50));
     }
 
     // r[verify unified.segment_struct]
@@ -1034,12 +1060,12 @@ mod tests {
     fn segments_single_tile_when_range_fits() {
         let header = header_with_contigs(&[("chr1", 500)]);
         let opts = SegmentOptions::new(NonZeroU32::new(1000).unwrap());
-        let ranges = ("chr1", p(0), p(99)).resolve_target(&header).unwrap();
+        let ranges = ("chr1", span(0, 99)).resolve_target(&header).unwrap();
         let segs: Vec<_> = Segments::new(ranges, opts).collect();
         assert_eq!(segs.len(), 1);
         let s = &segs[0];
         assert_eq!(s.start(), p(0));
-        assert_eq!(s.end(), p(99));
+        assert_eq!(s.last(), p(99));
         assert_eq!(s.overlap_start(), 0);
         assert_eq!(s.overlap_end(), 0);
         assert!(s.starts_at_contig_start());
@@ -1050,13 +1076,13 @@ mod tests {
     fn segments_many_tiles_no_overlap() {
         let header = header_with_contigs(&[("chr1", 1_000_000)]);
         let opts = SegmentOptions::new(NonZeroU32::new(100).unwrap());
-        let ranges = ("chr1", p(0), p(249)).resolve_target(&header).unwrap();
+        let ranges = ("chr1", span(0, 249)).resolve_target(&header).unwrap();
         let segs: Vec<_> = Segments::new(ranges, opts).collect();
         // Cores: [0..99], [100..199], [200..249] → 3 tiles.
         assert_eq!(segs.len(), 3);
-        assert_eq!((segs[0].start(), segs[0].end()), (p(0), p(99)));
-        assert_eq!((segs[1].start(), segs[1].end()), (p(100), p(199)));
-        assert_eq!((segs[2].start(), segs[2].end()), (p(200), p(249)));
+        assert_eq!((segs[0].start(), segs[0].last()), (p(0), p(99)));
+        assert_eq!((segs[1].start(), segs[1].last()), (p(100), p(199)));
+        assert_eq!((segs[2].start(), segs[2].last()), (p(200), p(249)));
         // No overlaps requested.
         for s in &segs {
             assert_eq!(s.overlap_start(), 0);
@@ -1068,7 +1094,7 @@ mod tests {
     fn segments_with_overlap() {
         let header = header_with_contigs(&[("chr1", 1000)]);
         let opts = SegmentOptions::new(NonZeroU32::new(100).unwrap()).with_overlap(10).unwrap();
-        let ranges = ("chr1", p(0), p(249)).resolve_target(&header).unwrap();
+        let ranges = ("chr1", span(0, 249)).resolve_target(&header).unwrap();
         let segs: Vec<_> = Segments::new(ranges, opts).collect();
 
         // Cores: [0..99], [100..199], [200..249]
@@ -1077,26 +1103,26 @@ mod tests {
         // Last tile:  [190..249] (overlap_start=10, overlap_end=0)
         assert_eq!(segs.len(), 3);
         assert_eq!(
-            (segs[0].start(), segs[0].end(), segs[0].overlap_start(), segs[0].overlap_end()),
+            (segs[0].start(), segs[0].last(), segs[0].overlap_start(), segs[0].overlap_end()),
             (p(0), p(109), 0, 10)
         );
         assert_eq!(
-            (segs[1].start(), segs[1].end(), segs[1].overlap_start(), segs[1].overlap_end()),
+            (segs[1].start(), segs[1].last(), segs[1].overlap_start(), segs[1].overlap_end()),
             (p(90), p(209), 10, 10)
         );
         assert_eq!(
-            (segs[2].start(), segs[2].end(), segs[2].overlap_start(), segs[2].overlap_end()),
+            (segs[2].start(), segs[2].last(), segs[2].overlap_start(), segs[2].overlap_end()),
             (p(190), p(249), 10, 0)
         );
 
-        // core_range() of all tiles must tile [0..249] exactly.
-        let cores: Vec<_> = segs.iter().map(|s| s.core_range()).collect();
-        assert_eq!(*cores[0].start(), p(0));
-        assert_eq!(*cores[0].end(), p(99));
-        assert_eq!(*cores[1].start(), p(100));
-        assert_eq!(*cores[1].end(), p(199));
-        assert_eq!(*cores[2].start(), p(200));
-        assert_eq!(*cores[2].end(), p(249));
+        // core_span() of all tiles must tile [0..249] exactly.
+        let cores: Vec<_> = segs.iter().map(|s| s.core_span()).collect();
+        assert_eq!(cores[0].start, p(0));
+        assert_eq!(cores[0].last, p(99));
+        assert_eq!(cores[1].start, p(100));
+        assert_eq!(cores[1].last, p(199));
+        assert_eq!(cores[2].start, p(200));
+        assert_eq!(cores[2].last, p(249));
     }
 
     // r[verify unified.readers_segments]
@@ -1132,7 +1158,7 @@ mod tests {
         let opts = SegmentOptions::new(NonZeroU32::new(1_000_000).unwrap());
         let segs: Vec<_> = Segments::new(vec![range], opts).collect();
         assert_eq!(segs.len(), 1);
-        assert_eq!(segs[0].end(), last);
+        assert_eq!(segs[0].last(), last);
         assert_eq!(segs[0].start(), near_max);
     }
 
@@ -1196,7 +1222,7 @@ mod tests {
     #[test]
     fn into_segment_target_start_after_end_errors() {
         let header = header_with_contigs(&[("chr1", 1000)]);
-        let err = ("chr1", p(100), p(50)).resolve_target(&header).unwrap_err();
+        let err = ("chr1", span(100, 50)).resolve_target(&header).unwrap_err();
         assert!(matches!(err, ReaderError::RegionStartAfterEnd { .. }));
     }
 
@@ -1204,15 +1230,15 @@ mod tests {
     #[test]
     fn into_segment_target_end_past_contig_errors() {
         let header = header_with_contigs(&[("chr1", 100)]);
-        let err = ("chr1", p(0), p(500)).resolve_target(&header).unwrap_err();
+        let err = ("chr1", span(0, 500)).resolve_target(&header).unwrap_err();
         assert!(matches!(err, ReaderError::RegionEndPastContig { .. }));
     }
 
     // ── Byte-aware subdivision (split_segment_by_bytes) ──────────────────────
 
     /// Mock byte oracle: `bpb` compressed bytes per base of the *full* range.
-    fn span_estimate(bpb: u64) -> impl FnMut(u32, Pos0, Pos0) -> u64 {
-        move |_tid, s, e| (e.as_u64() - s.as_u64() + 1) * bpb
+    fn span_estimate(bpb: u64) -> impl FnMut(u32, RangeInclusive<Pos0>) -> u64 {
+        move |_tid, sp: RangeInclusive<Pos0>| (sp.last.as_u64() - sp.start.as_u64() + 1) * bpb
     }
 
     /// Mirror `Readers::segments`: positional tiling, then byte-aware split of
@@ -1222,10 +1248,10 @@ mod tests {
         range: std::ops::RangeInclusive<u32>,
         opts: SegmentOptions,
         budget: u64,
-        mut estimate: impl FnMut(u32, Pos0, Pos0) -> u64,
+        mut estimate: impl FnMut(u32, RangeInclusive<Pos0>) -> u64,
     ) -> Vec<Segment> {
         let header = header_with_contigs(&[("chr1", contig_len)]);
-        let ranges = ("chr1", p(*range.start()), p(*range.end())).resolve_target(&header).unwrap();
+        let ranges = ("chr1", span(*range.start(), *range.end())).resolve_target(&header).unwrap();
         let mut out = Vec::new();
         for seg in Segments::new(ranges, opts) {
             split_segment_by_bytes(&seg, opts.overlap(), budget, &mut estimate, &mut out);
@@ -1237,12 +1263,12 @@ mod tests {
     /// no gap, no overlap).
     fn assert_cores_tile(segs: &[Segment], start: Pos0, end: Pos0) {
         assert!(!segs.is_empty(), "no segments produced");
-        assert_eq!(*segs.first().unwrap().core_range().start(), start, "first core start");
-        assert_eq!(*segs.last().unwrap().core_range().end(), end, "last core end");
+        assert_eq!(segs.first().unwrap().core_span().start, start, "first core start");
+        assert_eq!(segs.last().unwrap().core_span().last, end, "last core end");
         for w in segs.windows(2) {
             assert_eq!(
-                w[0].core_range().end().as_u64() + 1,
-                w[1].core_range().start().as_u64(),
+                w[0].core_span().last.as_u64() + 1,
+                w[1].core_span().start.as_u64(),
                 "cores must be contiguous"
             );
         }
@@ -1254,7 +1280,7 @@ mod tests {
         let opts = SegmentOptions::new(NonZeroU32::new(1000).unwrap());
         let segs = byte_aware(2000, 0..=99, opts, 1_000_000, span_estimate(10));
         assert_eq!(segs.len(), 1, "a small segment should not be split");
-        assert_eq!((segs[0].start(), segs[0].end()), (p(0), p(99)));
+        assert_eq!((segs[0].start(), segs[0].last()), (p(0), p(99)));
         assert_eq!((segs[0].overlap_start(), segs[0].overlap_end()), (0, 0));
     }
 
@@ -1267,11 +1293,11 @@ mod tests {
         let segs = byte_aware(2000, 0..=999, opts, budget, span_estimate(10));
         assert!(segs.len() > 1, "expected the segment to be split");
         for s in &segs {
-            let bytes = (s.end().as_u64() - s.start().as_u64() + 1) * 10;
+            let bytes = (s.last().as_u64() - s.start().as_u64() + 1) * 10;
             assert!(
                 bytes <= budget,
                 "segment {:?} = {bytes} B exceeds {budget}",
-                (s.start(), s.end())
+                (s.start(), s.last())
             );
         }
         assert_cores_tile(&segs, p(0), p(999));
@@ -1304,9 +1330,9 @@ mod tests {
     fn byte_split_irreducible_region_emits_one_segment() {
         let opts = SegmentOptions::new(NonZeroU32::new(10_000).unwrap());
         // Constant estimate for every range → splitting can never help.
-        let segs = byte_aware(2000, 100..=109, opts, 1, |_t, _s, _e| 1_000_000);
+        let segs = byte_aware(2000, 100..=109, opts, 1, |_t, _span| 1_000_000);
         assert_eq!(segs.len(), 1, "irreducible region must not be bisected");
-        assert_eq!((segs[0].start(), segs[0].end()), (p(100), p(109)));
+        assert_eq!((segs[0].start(), segs[0].last()), (p(100), p(109)));
         assert_cores_tile(&segs, p(100), p(109));
     }
 
@@ -1319,8 +1345,8 @@ mod tests {
         let opts = SegmentOptions::new(NonZeroU32::new(10_000).unwrap());
         // A 100-base "leaf bin" [200,299] reports 1 MB for ANY overlapping query;
         // everywhere else costs 10 B/base.
-        let estimate = |_t: u32, s: Pos0, e: Pos0| {
-            let (s, e) = (s.as_u64(), e.as_u64());
+        let estimate = |_t: u32, sp: RangeInclusive<Pos0>| {
+            let (s, e) = (sp.start.as_u64(), sp.last.as_u64());
             if s <= 299 && e >= 200 { 1_000_000 } else { (e - s + 1) * 10 }
         };
         let segs = byte_aware(2000, 0..=399, opts, 5_000, estimate);
@@ -1329,7 +1355,7 @@ mod tests {
         // Far fewer than the ~400 single-base pieces a naive bisect would make.
         assert!(segs.len() < 20, "got {} segments, expected a handful", segs.len());
         let bin_segments =
-            segs.iter().filter(|s| s.start().as_u64() <= 299 && s.end().as_u64() >= 200).count();
+            segs.iter().filter(|s| s.start().as_u64() <= 299 && s.last().as_u64() >= 200).count();
         assert_eq!(bin_segments, 1, "the irreducible bin must sit in exactly one segment");
     }
 
@@ -1348,12 +1374,12 @@ mod tests {
             SegmentOptions::new(NonZeroU32::new(max_len).unwrap()).with_overlap(overlap).unwrap();
 
         let header = header_with_contigs(&[("chr1", 2_000_000)]);
-        let ranges = ("chr1", p(range_start), p(range_end)).resolve_target(&header).unwrap();
+        let ranges = ("chr1", span(range_start, range_end)).resolve_target(&header).unwrap();
         let actual: Vec<(u32, u32, u32, u32)> = Segments::new(ranges, opts)
             .map(|s| {
                 (
                     u32::try_from(s.start().as_u64()).unwrap(),
-                    u32::try_from(s.end().as_u64()).unwrap(),
+                    u32::try_from(s.last().as_u64()).unwrap(),
                     s.overlap_start(),
                     s.overlap_end(),
                 )
@@ -1376,19 +1402,19 @@ mod tests {
         let opts =
             SegmentOptions::new(NonZeroU32::new(max_len).unwrap()).with_overlap(overlap).unwrap();
         let header = header_with_contigs(&[("chr1", 200_000)]);
-        let ranges = ("chr1", p(range_start), p(range_end)).resolve_target(&header).unwrap();
+        let ranges = ("chr1", span(range_start, range_end)).resolve_target(&header).unwrap();
         let segs: Vec<_> = Segments::new(ranges, opts).collect();
 
-        // Each core_range must be contiguous with the next; first must
+        // Each core_span must be contiguous with the next; first must
         // start at range_start; last must end at range_end.
         assert!(!segs.is_empty());
         let first = &segs[0];
         let last = segs.last().unwrap();
-        assert_eq!(*first.core_range().start(), p(range_start));
-        assert_eq!(*last.core_range().end(), p(range_end));
+        assert_eq!(first.core_span().start, p(range_start));
+        assert_eq!(last.core_span().last, p(range_end));
         for w in segs.windows(2) {
-            let a_end = w[0].core_range().end().as_u64();
-            let b_start = w[1].core_range().start().as_u64();
+            let a_end = w[0].core_span().last.as_u64();
+            let b_start = w[1].core_span().start.as_u64();
             assert_eq!(a_end + 1, b_start, "core ranges must be contiguous");
         }
         // No tile is empty; tile length is bounded by core (≤ max_len)
@@ -1425,7 +1451,7 @@ mod tests {
         let opts =
             SegmentOptions::new(NonZeroU32::new(max_len).unwrap()).with_overlap(overlap).unwrap();
         let header = header_with_contigs(&[("chr1", contig_len_u32)]);
-        let ranges = ("chr1", p(range_start), p(range_end)).resolve_target(&header).unwrap();
+        let ranges = ("chr1", span(range_start, range_end)).resolve_target(&header).unwrap();
         let segs: Vec<_> = Segments::new(ranges, opts).collect();
         assert!(!segs.is_empty());
         // Range-edge invariants: first segment of the *requested range*
@@ -1436,11 +1462,11 @@ mod tests {
         // last segment's tile_end equals the requested range_end. This
         // is a non-trivial check now that range_start != 0.
         assert_eq!(segs.first().unwrap().start(), p(range_start));
-        assert_eq!(segs.last().unwrap().end(), p(range_end));
+        assert_eq!(segs.last().unwrap().last(), p(range_end));
         // Every tile sits entirely inside the requested range.
         for s in &segs {
             assert!(s.start() >= p(range_start));
-            assert!(s.end() <= p(range_end));
+            assert!(s.last() <= p(range_end));
         }
     }
 
@@ -1467,10 +1493,10 @@ mod tests {
         );
 
         // Cores tile the requested range exactly.
-        assert_eq!(*segs.first().unwrap().core_range().start(), p(range_start));
-        assert_eq!(*segs.last().unwrap().core_range().end(), p(range_end));
+        assert_eq!(segs.first().unwrap().core_span().start, p(range_start));
+        assert_eq!(segs.last().unwrap().core_span().last, p(range_end));
         for w in segs.windows(2) {
-            assert_eq!(w[0].core_range().end().as_u64() + 1, w[1].core_range().start().as_u64());
+            assert_eq!(w[0].core_span().last.as_u64() + 1, w[1].core_span().start.as_u64());
         }
         // Each segment fits the budget, or it can't be made cheaper: the
         // greedy floor is one core position expanded by overlap on each
@@ -1478,11 +1504,11 @@ mod tests {
         // costs at most that floor.
         let floor = (1 + 2 * u64::from(overlap)) * bytes_per_base;
         for s in &segs {
-            let bytes = (s.end().as_u64() - s.start().as_u64() + 1) * bytes_per_base;
+            let bytes = (s.last().as_u64() - s.start().as_u64() + 1) * bytes_per_base;
             assert!(
                 bytes <= budget.max(floor),
                 "segment {:?} = {} B exceeds max(budget {}, floor {})",
-                (s.start().as_u64(), s.end().as_u64()),
+                (s.start().as_u64(), s.last().as_u64()),
                 bytes,
                 budget,
                 floor

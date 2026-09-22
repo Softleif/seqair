@@ -8,6 +8,7 @@ use super::{
     strip::strip_newlines_uppercase,
 };
 use crate::bam::bgzf::{BgzfError, BgzfReader};
+use core::range::RangeInclusive;
 use seqair_types::{Pos0, SmolStr};
 use std::{
     fs::File,
@@ -84,8 +85,8 @@ pub enum FastaError {
     #[error("sequence not found: {name:?}{}", format_available_sequences(.available))]
     SequenceNotFound { name: SmolStr, available: Vec<SmolStr> },
 
-    #[error("FASTA region {name:?}:{start}-{end} is out of bounds (sequence length: {seq_len})")]
-    RegionOutOfBounds { name: SmolStr, start: u64, end: u64, seq_len: u64 },
+    #[error("FASTA region {name:?}:{start}..={last} is out of bounds (sequence length: {seq_len})")]
+    RegionOutOfBounds { name: SmolStr, start: u64, last: u64, seq_len: u64 },
 
     #[error("BGZF FASTA missing GZI index (internal error)")]
     MissingGzi,
@@ -141,8 +142,9 @@ enum FileHandle<R: Read + Seek> {
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut reader = IndexedFastaReader::open(Path::new("reference.fa"))?;
 ///
-/// // Fetch raw ASCII bytes for a region (half-open: start inclusive, end exclusive)
-/// let seq = reader.fetch_seq("chr1", Pos0::new(1000).unwrap(), Pos0::new(2000).unwrap())?;
+/// // Fetch raw ASCII bytes for a closed region: both ends are included
+/// let span = (Pos0::new(1000).unwrap()..=Pos0::new(1999).unwrap()).into();
+/// let seq = reader.fetch_seq("chr1", span)?;
 ///
 /// // Convert to typed Base values (A/C/G/T/Unknown) for downstream use
 /// let bases = Base::from_ascii_vec(seq);
@@ -293,41 +295,47 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
 
     // r[impl fasta.fetch.raw_bytes]
     // r[impl fasta.fetch.buffer_reuse]
-    #[instrument(level = "debug", skip(self), fields(name, start, stop))]
+    // r[impl fasta.fetch.coordinates]
+    // r[impl interval.span_type]
+    /// The bases of `name` over the closed interval `span`, uppercased.
+    ///
+    /// A span of `p(0)..=p(3)` is the first four bases. This is the same
+    /// interval a [`Segment`](crate::reader::Segment) or a query names, so a
+    /// reference can be fetched for exactly the region that was piled up
+    /// without a `+ 1` anywhere.
+    #[instrument(level = "debug", skip(self))]
     pub fn fetch_seq(
         &mut self,
         name: &str,
-        start: Pos0,
-        stop: Pos0,
+        span: RangeInclusive<Pos0>,
     ) -> Result<Vec<u8>, FastaError> {
         let mut buf = Vec::new();
-        self.fetch_seq_into(name, start, stop, &mut buf)?;
+        self.fetch_seq_into(name, span, &mut buf)?;
         Ok(buf)
     }
 
     // r[impl fasta.fetch.raw_bytes]
-    #[instrument(level = "debug", skip(self, out), fields(name, start, stop))]
+    // r[impl fasta.fetch.coordinates]
+    /// [`fetch_seq`](Self::fetch_seq) into a caller-owned buffer, which is
+    /// cleared first.
+    #[instrument(level = "debug", skip(self, out))]
     pub fn fetch_seq_into(
         &mut self,
         name: &str,
-        start: Pos0,
-        stop: Pos0,
+        span: RangeInclusive<Pos0>,
         out: &mut Vec<u8>,
     ) -> Result<(), FastaError> {
-        self.fetch_seq_into_u64(name, start.as_u64(), stop.as_u64(), out)
+        self.fetch_closed_u64(name, span.start.as_u64(), span.last.as_u64(), out)
     }
 
-    /// Same as [`fetch_seq_into`] but accepts raw `u64` bounds so callers
-    /// can express `end + 1 == i32::MAX + 1` (one past the last representable
-    /// `Pos0`). Used by the pileup path to handle a segment whose inclusive
-    /// `end` is `Pos0::MAX` without losing the last base.
-    ///
-    /// [`fetch_seq_into`]: Self::fetch_seq_into
-    pub fn fetch_seq_into_u64(
+    /// The fetch itself, over `start..=last` as the index addresses bases.
+    /// The public entry points are typed as `Pos0` spans; the arithmetic below
+    /// is in `u64` because the byte offsets it produces are.
+    fn fetch_closed_u64(
         &mut self,
         name: &str,
         start: u64,
-        stop: u64,
+        last: u64,
         out: &mut Vec<u8>,
     ) -> Result<(), FastaError> {
         out.clear();
@@ -344,19 +352,14 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
             .clone();
 
         // r[impl fasta.fetch.bounds_check]
-        if start >= stop {
+        // A reversed span names no bases, and the last base asked for has to
+        // exist. `last < entry.length` is the whole of the upper check: with a
+        // closed interval there is no `end + 1` to overflow.
+        if start > last || last >= entry.length {
             return Err(FastaError::RegionOutOfBounds {
                 name: SmolStr::new(name),
                 start,
-                end: stop,
-                seq_len: entry.length,
-            });
-        }
-        if stop > entry.length {
-            return Err(FastaError::RegionOutOfBounds {
-                name: SmolStr::new(name),
-                start,
-                end: stop,
+                last,
                 seq_len: entry.length,
             });
         }
@@ -365,15 +368,12 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
             clippy::cast_possible_truncation,
             reason = "FASTA sequences fit in usize on supported platforms; 32-bit addressable memory bounds the read size"
         )]
-        let num_bases =
-            stop.checked_sub(start).expect("stop > start is guaranteed by bounds check above")
-                as usize;
-        // Derived from `stop` directly (== start + num_bases - 1), not by
-        // round-tripping `num_bases` through `usize` and back: on a 32-bit
-        // target that cast truncates a range wider than `u32::MAX`, which
-        // would make a non-empty range look empty and panic the `expect`
-        // below instead of reaching the checked-arithmetic error paths.
-        let last_pos = stop.checked_sub(1).expect("stop > start >= 0 is guaranteed above");
+        let num_bases = last
+            .checked_sub(start)
+            .and_then(|span| span.checked_add(1))
+            .expect("start <= last < u64::MAX is guaranteed by the bounds check above")
+            as usize;
+        let last_pos = last;
         // r[impl fasta.index.terminator_bound]
         // `byte_offset` uses checked arithmetic, so a near-`u64::MAX` index
         // offset surfaces here as `None` rather than wrapping into a small,
@@ -590,6 +590,11 @@ mod tests {
         Pos0::new(v).unwrap()
     }
 
+    /// The closed span `first..=last`, the shape `fetch_seq` takes.
+    fn span(first: u32, last: u32) -> RangeInclusive<Pos0> {
+        RangeInclusive { start: p(first), last: p(last) }
+    }
+
     fn make_plain_fasta(dir: &TempDir) -> (PathBuf, PathBuf) {
         let fasta_path = dir.path().join("test.fa");
         let fai_path = dir.path().join("test.fa.fai");
@@ -626,7 +631,7 @@ mod tests {
         let (fasta_path, _) = make_plain_fasta(&dir);
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let seq = reader.fetch_seq("seq1", p(0), p(8)).unwrap();
+        let seq = reader.fetch_seq("seq1", span(0, 7)).unwrap();
         assert_eq!(seq, b"ACGTTGCA");
     }
 
@@ -636,8 +641,8 @@ mod tests {
         let (fasta_path, _) = make_plain_fasta(&dir);
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        // Fetch positions 2-6 (0-based half-open), crossing the line boundary
-        let seq = reader.fetch_seq("seq1", p(2), p(6)).unwrap();
+        // Fetch positions 2..=5, crossing the line boundary
+        let seq = reader.fetch_seq("seq1", span(2, 5)).unwrap();
         assert_eq!(seq, b"GTTG");
     }
 
@@ -647,7 +652,7 @@ mod tests {
         let (fasta_path, _) = make_plain_fasta(&dir);
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let seq = reader.fetch_seq("seq2", p(0), p(4)).unwrap();
+        let seq = reader.fetch_seq("seq2", span(0, 3)).unwrap();
         assert_eq!(seq, b"GGCC");
     }
 
@@ -657,7 +662,7 @@ mod tests {
         let (fasta_path, _) = make_plain_fasta(&dir);
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let seq = reader.fetch_seq("seq1", p(0), p(1)).unwrap();
+        let seq = reader.fetch_seq("seq1", span(0, 0)).unwrap();
         assert_eq!(seq, b"A");
     }
 
@@ -673,7 +678,7 @@ mod tests {
         idx.write_all(b"seq1\t6\t6\t6\t7\n").unwrap();
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let seq = reader.fetch_seq("seq1", p(0), p(6)).unwrap();
+        let seq = reader.fetch_seq("seq1", span(0, 5)).unwrap();
         assert_eq!(seq, b"ACGTNN");
     }
 
@@ -685,7 +690,7 @@ mod tests {
         let (fasta_path, _) = make_plain_fasta(&dir);
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let err = reader.fetch_seq("seq1", p(0), p(100)).unwrap_err();
+        let err = reader.fetch_seq("seq1", span(0, 99)).unwrap_err();
         assert!(matches!(err, FastaError::RegionOutOfBounds { .. }));
     }
 
@@ -697,7 +702,7 @@ mod tests {
         let (fasta_path, _) = make_plain_fasta(&dir);
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let err = reader.fetch_seq("nonexistent", p(0), p(4)).unwrap_err();
+        let err = reader.fetch_seq("nonexistent", span(0, 3)).unwrap_err();
         match &err {
             FastaError::SequenceNotFound { name, available } => {
                 assert_eq!(name, "nonexistent");
@@ -762,8 +767,8 @@ mod tests {
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
         let mut forked = reader.fork().unwrap();
 
-        let seq_orig = reader.fetch_seq("seq1", p(0), p(8)).unwrap();
-        let seq_fork = forked.fetch_seq("seq1", p(0), p(8)).unwrap();
+        let seq_orig = reader.fetch_seq("seq1", span(0, 7)).unwrap();
+        let seq_fork = forked.fetch_seq("seq1", span(0, 7)).unwrap();
         assert_eq!(seq_orig, seq_fork);
     }
 
@@ -789,10 +794,10 @@ mod tests {
         let mut forked = reader.fork().unwrap();
 
         // Interleaved reads on different sequences
-        let s1 = reader.fetch_seq("seq1", p(0), p(4)).unwrap();
-        let s2 = forked.fetch_seq("seq2", p(0), p(4)).unwrap();
-        let s3 = reader.fetch_seq("seq2", p(0), p(4)).unwrap();
-        let s4 = forked.fetch_seq("seq1", p(0), p(4)).unwrap();
+        let s1 = reader.fetch_seq("seq1", span(0, 3)).unwrap();
+        let s2 = forked.fetch_seq("seq2", span(0, 3)).unwrap();
+        let s3 = reader.fetch_seq("seq2", span(0, 3)).unwrap();
+        let s4 = forked.fetch_seq("seq1", span(0, 3)).unwrap();
 
         assert_eq!(s1, b"ACGT");
         assert_eq!(s2, b"GGCC");
@@ -816,9 +821,9 @@ mod tests {
             std::thread::spawn(move || {
                 let mut ok = true;
                 for _ in 0..256 {
-                    ok &= forked.fetch_seq("seq1", p(0), p(8)).unwrap() == b"ACGTTGCA";
-                    ok &= forked.fetch_seq("seq1", p(2), p(6)).unwrap() == b"GTTG";
-                    ok &= forked.fetch_seq("seq2", p(0), p(4)).unwrap() == b"GGCC";
+                    ok &= forked.fetch_seq("seq1", span(0, 7)).unwrap() == b"ACGTTGCA";
+                    ok &= forked.fetch_seq("seq1", span(2, 5)).unwrap() == b"GTTG";
+                    ok &= forked.fetch_seq("seq2", span(0, 3)).unwrap() == b"GGCC";
                 }
                 ok
             })
@@ -837,11 +842,11 @@ mod tests {
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
         let mut buf = Vec::new();
 
-        reader.fetch_seq_into("seq1", p(0), p(4), &mut buf).unwrap();
+        reader.fetch_seq_into("seq1", span(0, 3), &mut buf).unwrap();
         assert_eq!(buf, b"ACGT");
 
         // Reuse the same buffer
-        reader.fetch_seq_into("seq2", p(0), p(4), &mut buf).unwrap();
+        reader.fetch_seq_into("seq2", span(0, 3), &mut buf).unwrap();
         assert_eq!(buf, b"GGCC");
     }
 
@@ -861,13 +866,13 @@ mod tests {
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
 
         // Full sequence
-        assert_eq!(reader.fetch_seq("seq1", p(0), p(10)).unwrap(), b"ACGTACGTAC");
+        assert_eq!(reader.fetch_seq("seq1", span(0, 9)).unwrap(), b"ACGTACGTAC");
 
-        // Cross first boundary: pos 2-4
-        assert_eq!(reader.fetch_seq("seq1", p(2), p(5)).unwrap(), b"GTA");
+        // Cross first boundary: pos 2..=4
+        assert_eq!(reader.fetch_seq("seq1", span(2, 4)).unwrap(), b"GTA");
 
         // Last base
-        assert_eq!(reader.fetch_seq("seq1", p(9), p(10)).unwrap(), b"C");
+        assert_eq!(reader.fetch_seq("seq1", span(9, 9)).unwrap(), b"C");
     }
 
     // r[verify fasta.fetch.bounds_check]
@@ -877,8 +882,8 @@ mod tests {
         let (fasta_path, _) = make_plain_fasta(&dir);
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        // start == stop → empty range, should error
-        let err = reader.fetch_seq("seq1", p(5), p(5)).unwrap_err();
+        // A closed span whose last is before its start names no bases.
+        let err = reader.fetch_seq("seq1", span(5, 4)).unwrap_err();
         assert!(matches!(err, FastaError::RegionOutOfBounds { .. }));
     }
 
@@ -889,8 +894,8 @@ mod tests {
         let (fasta_path, _) = make_plain_fasta(&dir);
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        // start > stop
-        let err = reader.fetch_seq("seq1", p(6), p(3)).unwrap_err();
+        // start > last
+        let err = reader.fetch_seq("seq1", span(6, 3)).unwrap_err();
         assert!(matches!(err, FastaError::RegionOutOfBounds { .. }));
     }
 
@@ -916,11 +921,11 @@ mod tests {
         idx.write_all(b"seq1\t8\t6\t8\t8\n").unwrap();
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let seq = reader.fetch_seq("seq1", p(0), p(8)).unwrap();
+        let seq = reader.fetch_seq("seq1", span(0, 7)).unwrap();
         assert_eq!(seq, b"ACGTACGT");
 
         // Sub-range
-        let seq = reader.fetch_seq("seq1", p(2), p(6)).unwrap();
+        let seq = reader.fetch_seq("seq1", span(2, 5)).unwrap();
         assert_eq!(seq, b"GTAC");
     }
 
@@ -942,16 +947,16 @@ mod tests {
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
 
         // Full sequence
-        assert_eq!(reader.fetch_seq("seq1", p(0), p(7)).unwrap(), b"ACGTTGC");
+        assert_eq!(reader.fetch_seq("seq1", span(0, 6)).unwrap(), b"ACGTTGC");
 
         // Just the last line
-        assert_eq!(reader.fetch_seq("seq1", p(4), p(7)).unwrap(), b"TGC");
+        assert_eq!(reader.fetch_seq("seq1", span(4, 6)).unwrap(), b"TGC");
 
         // Last single base
-        assert_eq!(reader.fetch_seq("seq1", p(6), p(7)).unwrap(), b"C");
+        assert_eq!(reader.fetch_seq("seq1", span(6, 6)).unwrap(), b"C");
 
         // Cross boundary into short last line
-        assert_eq!(reader.fetch_seq("seq1", p(3), p(6)).unwrap(), b"TTG");
+        assert_eq!(reader.fetch_seq("seq1", span(3, 5)).unwrap(), b"TTG");
     }
 
     // r[verify fasta.fetch.raw_bytes]
@@ -969,7 +974,7 @@ mod tests {
         idx.write_all(b"seq1\t13\t6\t13\t14\n").unwrap();
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let seq = reader.fetch_seq("seq1", p(0), p(13)).unwrap();
+        let seq = reader.fetch_seq("seq1", span(0, 12)).unwrap();
         assert_eq!(seq, b"ACMRWSYKVHDBN", "IUPAC codes must be preserved as raw bytes");
 
         // Lowercase IUPAC must be uppercased but not converted
@@ -983,7 +988,7 @@ mod tests {
         idx2.write_all(b"seq1\t13\t6\t13\t14\n").unwrap();
 
         let mut reader2 = IndexedFastaReader::open(&fasta_path2).unwrap();
-        let seq2 = reader2.fetch_seq("seq1", p(0), p(13)).unwrap();
+        let seq2 = reader2.fetch_seq("seq1", span(0, 12)).unwrap();
         assert_eq!(
             seq2, b"ACMRWSYKVHDBN",
             "lowercase IUPAC must be uppercased, not converted to N"

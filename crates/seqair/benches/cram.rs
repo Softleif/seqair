@@ -6,6 +6,7 @@
 #![allow(clippy::cast_possible_truncation, reason = "benches")]
 #![allow(clippy::cast_possible_wrap, reason = "benches")]
 
+use core::range::RangeInclusive;
 use criterion::{Criterion, criterion_group, criterion_main};
 use seqair_types::{Base, Pos0};
 use std::hint::black_box;
@@ -17,6 +18,8 @@ const FASTA_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/
 const CHROM: &str = "chr19";
 const START: Pos0 = Pos0::new(0).unwrap();
 const END: Pos0 = Pos0::new(6_140_000).unwrap();
+/// The closed region every `fetch_into` below asks for.
+const SPAN: RangeInclusive<Pos0> = RangeInclusive { start: START, last: END };
 
 // ---------------------------------------------------------------------------
 // Group 1: CRAM indexed record decode
@@ -42,7 +45,7 @@ fn cram_record_decode(c: &mut Criterion) {
             .unwrap();
             let mut store = seqair::bam::RecordStore::new();
             let tid = reader.header().tid(CHROM).unwrap();
-            reader.fetch_into(tid, START, END, &mut store).unwrap();
+            reader.fetch_into(tid, SPAN, &mut store).unwrap();
             black_box(store.len())
         });
     });
@@ -144,10 +147,9 @@ fn cram_pileup_e2e(c: &mut Criterion) {
             .unwrap();
             let mut store = seqair::bam::RecordStore::new();
             let tid = reader.header().tid(CHROM).unwrap();
-            reader.fetch_into(tid, START, END, &mut store).unwrap();
+            reader.fetch_into(tid, SPAN, &mut store).unwrap();
 
-            let mut engine =
-                seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, START, END);
+            let mut engine = seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, SPAN);
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
             let mut counter = Counter::new();
@@ -226,7 +228,7 @@ fn cram_full_decode(c: &mut Criterion) {
             let full_start = Pos0::new(0).unwrap();
             let full_end = Pos0::new(u32::try_from(chr_len).unwrap()).unwrap();
             let mut store = seqair::bam::RecordStore::new();
-            reader.fetch_into(tid, full_start, full_end, &mut store).unwrap();
+            reader.fetch_into(tid, (full_start..=full_end).into(), &mut store).unwrap();
             black_box(store.len())
         });
     });

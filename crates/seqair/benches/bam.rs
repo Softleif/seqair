@@ -7,6 +7,7 @@
 #![allow(clippy::cast_possible_truncation, reason = "benches")]
 #![allow(clippy::cast_possible_wrap, reason = "benches")]
 
+use core::range::RangeInclusive;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use seqair_types::{Base, Pos0};
 use std::hint::black_box;
@@ -21,6 +22,8 @@ const BAM_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/te
 const CHROM: &str = "chr19";
 const START: Pos0 = Pos0::new(0).unwrap();
 const END: Pos0 = Pos0::new(6_140_000).unwrap();
+/// The closed region every `fetch_into` below asks for.
+const SPAN: RangeInclusive<Pos0> = RangeInclusive { start: START, last: END };
 
 // ---------------------------------------------------------------------------
 // Group 1: BGZF decompression throughput
@@ -114,7 +117,7 @@ fn bam_record_decode(c: &mut Criterion) {
             let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
             let mut store = seqair::bam::RecordStore::new();
             let tid = reader.header().tid(CHROM).unwrap();
-            reader.fetch_into(tid, START, END, &mut store).unwrap();
+            reader.fetch_into(tid, SPAN, &mut store).unwrap();
             black_box(store.len())
         });
     });
@@ -211,7 +214,7 @@ fn bam_roundtrip(c: &mut Criterion) {
             let header = BamHeader::from_template(reader.header());
             let tid = reader.header().tid(CHROM).unwrap();
             let mut store = seqair::bam::RecordStore::new();
-            reader.fetch_into(tid, START, END, &mut store).unwrap();
+            reader.fetch_into(tid, SPAN, &mut store).unwrap();
 
             let mut output = Vec::with_capacity(2_000_000);
             let mut writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
@@ -354,15 +357,14 @@ fn pileup_slab_access(c: &mut Criterion) {
         let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(CHROM).unwrap();
-        reader.fetch_into(tid, START, END, &mut store).unwrap();
+        reader.fetch_into(tid, SPAN, &mut store).unwrap();
         store
     };
 
     group.bench_function("per_accessor", |b| {
         b.iter(|| {
             let store = load();
-            let mut engine =
-                seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, START, END);
+            let mut engine = seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, SPAN);
             let mut bytes: u64 = 0;
             while let Some(col) = engine.pileups() {
                 for aln in col.alignments() {
@@ -377,8 +379,7 @@ fn pileup_slab_access(c: &mut Criterion) {
     group.bench_function("via_record", |b| {
         b.iter(|| {
             let store = load();
-            let mut engine =
-                seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, START, END);
+            let mut engine = seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, SPAN);
             let mut bytes: u64 = 0;
             while let Some(col) = engine.pileups() {
                 for aln in col.alignments() {
@@ -409,10 +410,9 @@ fn pileup_e2e(c: &mut Criterion) {
             let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
             let mut store = seqair::bam::RecordStore::new();
             let tid = reader.header().tid(CHROM).unwrap();
-            reader.fetch_into(tid, START, END, &mut store).unwrap();
+            reader.fetch_into(tid, SPAN, &mut store).unwrap();
 
-            let mut engine =
-                seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, START, END);
+            let mut engine = seqair::bam::PileupEngine::new(store.prepare_for_pileup().input, SPAN);
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
             let mut counter = Counter::new();
@@ -526,7 +526,7 @@ fn aligned_pairs_walk(c: &mut Criterion) {
         let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
         let mut store = seqair::bam::RecordStore::new();
         let tid = reader.header().tid(CHROM).unwrap();
-        reader.fetch_into(tid, START, END, &mut store).unwrap();
+        reader.fetch_into(tid, SPAN, &mut store).unwrap();
         store
     };
 
@@ -652,7 +652,8 @@ fn pileup_with_reference(c: &mut Criterion) {
     // the next `segments()` call.
     let bench_seqair = |ref_path: &std::path::Path| {
         let mut readers = Readers::open(bam, ref_path).unwrap();
-        let segments: Vec<_> = readers.segments((CHROM, P_START, P_END), opts).unwrap().collect();
+        let segments: Vec<_> =
+            readers.segments((CHROM, (P_START..=P_END).into()), opts).unwrap().collect();
         let mut total_depth: u64 = 0;
         let mut mismatches: u64 = 0;
         for seg in &segments {
@@ -776,7 +777,8 @@ fn pileup_tiled(c: &mut Criterion) {
     group.sample_size(20);
 
     let run = |readers: &mut Readers, opts: SegmentOptions| {
-        let segments: Vec<_> = readers.segments((CHROM, T_START, T_END), opts).unwrap().collect();
+        let segments: Vec<_> =
+            readers.segments((CHROM, (T_START..=T_END).into()), opts).unwrap().collect();
         let cap = DepthLimit::PerColumn(NonZeroU32::new(DEPTH_CAP).unwrap());
         let mut columns: u64 = 0;
         let mut bases: u64 = 0;
@@ -786,7 +788,7 @@ fn pileup_tiled(c: &mut Criterion) {
                 // Tiles overlap, so count each column once — the totals have to
                 // be identical across tile sizes for the comparison to mean
                 // anything.
-                if !seg.core_range().contains(&col.pos()) {
+                if !seg.core_span().contains(&col.pos()) {
                     continue;
                 }
                 columns += 1;

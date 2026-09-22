@@ -107,10 +107,10 @@ fn main() -> anyhow::Result<()> {
     // column iteration — just per-record CIGAR walks. So we keep the data
     // flow visible by calling each step directly.
     let mut store = RecordStore::<()>::new();
-    readers.fetch_into(tid, start, end, &mut store)?;
+    let span = (start..=end).into();
+    readers.fetch_into(tid, span, &mut store)?;
 
-    let ref_bases: Rc<[Base]> =
-        readers.fetch_base_seq(args.region.chromosome.as_str(), start, end)?;
+    let ref_bases: Rc<[Base]> = readers.fetch_base_seq(args.region.chromosome.as_str(), span)?;
     let ref_seq = RefSeq::new(ref_bases, start);
 
     let mut counts = Counts::default();

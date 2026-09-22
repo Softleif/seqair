@@ -9,6 +9,7 @@ use crate::bam::{
     record_store::RecordStore,
     region_buf::RegionBuf,
 };
+use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0, Pos1};
 use std::{
     fs::File,
@@ -263,8 +264,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
     pub fn fetch_plain_into(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, SamError> {
         store.clear();
@@ -274,8 +274,8 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
         std::io::Read::read_to_end(&mut self.bulk_reader, &mut all_data)
             .map_err(|source| SamError::Open { path: PathBuf::from("<fuzz-plain>"), source })?;
 
-        let start_i64 = start.as_i64();
-        let end_i64 = end.as_i64();
+        let start_i64 = span.start.as_i64();
+        let end_i64 = span.last.as_i64();
         let tid_i32 = tid.cast_signed();
 
         let mut cigar_buf = Vec::with_capacity(256);
@@ -327,45 +327,43 @@ impl<R: Read + Seek> IndexedSamReader<R> {
     /// Estimate the compressed bytes a `[start, end]` region query would load,
     /// for byte-aware segmentation. See
     /// [`IndexedBamReader::estimate_region_bytes`](crate::bam::IndexedBamReader::estimate_region_bytes).
-    pub fn estimate_region_bytes(&self, tid: u32, start: Pos0, end: Pos0) -> u64 {
-        let chunks = self.shared.index.query(tid, start, end);
+    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> u64 {
+        let chunks = self.shared.index.query(tid, span.start, span.last);
         crate::bam::region_buf::merged_byte_size(&chunks) as u64
     }
 
     // r[impl sam.reader.fetch_into]
     // r[impl sam.reader.sorted_order]
-    #[instrument(level = "debug", skip(self, store), fields(tid, start, end))]
+    #[instrument(level = "debug", skip(self, store))]
     // r[impl sam.perf.bulk_read]
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, SamError> {
-        self.fetch_into_customized(tid, start, end, store, &mut ()).map(|c| c.kept)
+        self.fetch_into_customized(tid, span, store, &mut ()).map(|c| c.kept)
     }
 
     // r[impl unified.fetch_into_customized]
     pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,
     ) -> Result<crate::reader::FetchCounts, SamError> {
         store.clear();
 
-        let chunks = self.shared.index.query(tid, start, end);
+        let chunks = self.shared.index.query(tid, span.start, span.last);
         if chunks.is_empty() {
             return Ok(crate::reader::FetchCounts::default());
         }
 
         let mut region = RegionBuf::new(&mut self.bulk_reader, &chunks)?;
 
-        let start_i64 = start.as_i64();
-        let end_i64 = end.as_i64();
+        let start_i64 = span.start.as_i64();
+        let end_i64 = span.last.as_i64();
         let tid_i32 = tid.cast_signed();
 
         // Buffer for accumulating lines that span BGZF block boundaries

@@ -52,7 +52,8 @@ fuzz_target!(|input: PileupInput| {
     }
 
     // Create pileup engine and iterate all columns
-    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region_start, region_end);
+    let mut engine =
+        PileupEngine::new(store.prepare_for_pileup().input, (region_start..=region_end).into());
     engine.set_max_depth(MAX_DEPTH);
 
     let mut columns = 0u32;

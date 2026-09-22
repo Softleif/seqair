@@ -119,7 +119,7 @@ fn main() -> anyhow::Result<()> {
             .pileup(segment, seqair::reader::DepthLimit::Unlimited)
             .run()
             .context("could not build pileup")?;
-        let core = segment.core_range();
+        let core = segment.core_span();
 
         while let Some(column) = engine.pileups() {
             // Skip overlap regions so neighboring segments don't double-print.

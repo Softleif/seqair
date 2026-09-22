@@ -14,6 +14,7 @@ use super::{
     record_store::{CustomizeRecordStore, RecordStore},
     region_buf::{self, RegionBuf},
 };
+use core::range::RangeInclusive;
 use seqair_types::{Pos0, SmolStr};
 use std::{
     fs::File,
@@ -176,8 +177,8 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     /// This is what byte-aware segmentation budgets against. It's only as fine
     /// as the index (~16 kb leaf bins), so a sub-bin range still reports its
     /// whole leaf bin's size.
-    pub fn estimate_region_bytes(&self, tid: u32, start: Pos0, end: Pos0) -> u64 {
-        let chunks = self.shared.index.query(tid, start, end);
+    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> u64 {
+        let chunks = self.shared.index.query(tid, span.start, span.last);
         region_buf::merged_byte_size(&chunks) as u64
     }
 
@@ -187,15 +188,14 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     // r[impl bam.reader.secondary_supplementary_included+2]
     // r[impl region_buf.fetch_into+2]
     // r[impl region_buf.no_bin0]
-    #[instrument(level = "debug", skip(self, store), fields(tid, start, end))]
+    #[instrument(level = "debug", skip(self, store))]
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, BamError> {
-        let mut query = self.query(tid, start, end)?;
+        let mut query = self.query(tid, span)?;
         store.clear();
 
         let mut kept = 0usize;
@@ -219,14 +219,13 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,
     ) -> Result<FetchCounts, BamError> {
         store.clear();
 
-        let mut query = self.query(tid, start, end)?;
+        let mut query = self.query(tid, span)?;
         let mut kept_count: usize = 0;
         query.for_each_result::<_, BamError>(|raw| {
             if store.push_raw(raw, customize)?.is_some() {
@@ -254,14 +253,19 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     /// # Example
     ///
     /// ```ignore
-    /// let mut query = reader.query(tid, start, end)?;
+    /// let mut query = reader.query(tid, span)?;
     /// query.for_each(|raw| {
     ///     let ref_id = i32::from_le_bytes(raw[0..4].try_into().unwrap());
     ///     // ... process raw bytes ...
     /// })?;
     /// let counts = query.counts();
     /// ```
-    pub fn query(&mut self, tid: u32, start: Pos0, end: Pos0) -> Result<BamQuery<'_, R>, BamError> {
+    pub fn query(
+        &mut self,
+        tid: u32,
+        span: RangeInclusive<Pos0>,
+    ) -> Result<BamQuery<'_, R>, BamError> {
+        let RangeInclusive { start, last: end } = span;
         let chunks = self.shared.index.query(tid, start, end);
         let tid_i32 = validate_tid(tid)?;
 

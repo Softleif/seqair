@@ -17,6 +17,7 @@ use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
+use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0, Pos1, SmallVec, SmolStr};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -474,15 +475,14 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     // r[impl cram.perf.slice_granularity]
     // r[impl cram.perf.reference_caching]
     // r[impl cram.perf.codec_overhead]
-    /// Fetch records overlapping `[start, end)` (0-based) for the given tid.
+    /// Fetch records overlapping the closed interval `span` (0-based) on `tid`.
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, CramError> {
-        self.fetch_into_customized(tid, start, end, store, &mut ()).map(|c| c.kept)
+        self.fetch_into_customized(tid, span, store, &mut ()).map(|c| c.kept)
     }
 
     // r[impl unified.fetch_into_customized]
@@ -497,15 +497,14 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,
     ) -> Result<crate::reader::FetchCounts, CramError> {
         store.clear();
 
-        let start_u64 = start.as_u64();
-        let end_u64 = end.as_u64();
+        let start_u64 = span.start.as_u64();
+        let end_u64 = span.last.as_u64();
 
         #[expect(
             clippy::cast_possible_wrap,
@@ -665,27 +664,30 @@ impl<R: Read + Seek> IndexedCramReader<R> {
 
             self.ref_seq_buf.clear();
             if ref_start < ref_end_clamped {
+                // `ref_end_clamped` is one past the last base the slices
+                // reach, and it is above `ref_start`, so the last base is
+                // `ref_end_clamped - 1`. Fetching that closed span means a
+                // container reaching the last representable position gets its
+                // last base — the half-open `end` there is `i32::MAX + 1`,
+                // which is not a `Pos0`, and clamping it silently dropped one.
+                let position = |value: u64| {
+                    Pos0::try_from(value).map_err(|_| CramError::InvalidPosition {
+                        value: i64::try_from(value).unwrap_or(i64::MAX),
+                    })
+                };
+                let ref_span = RangeInclusive {
+                    start: position(ref_start)?,
+                    last: position(ref_end_clamped.saturating_sub(1))?,
+                };
                 // r[impl cram.edge.missing_reference]
-                self.fasta
-                    .fetch_seq_into(
-                        ref_name,
-                        Pos0::try_from(ref_start)
-                            .map_err(|_| CramError::InvalidPosition {
-                            #[expect(
-                                clippy::cast_possible_wrap,
-                                reason = "error reporting only; value may exceed i64::MAX but is only used for diagnostics"
-                            )]
-                            value: ref_start as i64,
-                        })?,
-                        Pos0::try_from(ref_end_clamped).unwrap_or(Pos0::MAX),
-                        &mut self.ref_seq_buf,
-                    )
-                    .map_err(|e| match &e {
+                self.fasta.fetch_seq_into(ref_name, ref_span, &mut self.ref_seq_buf).map_err(
+                    |e| match &e {
                         FastaError::SequenceNotFound { .. } => {
                             CramError::MissingReference { contig: SmolStr::new(ref_name) }
                         }
                         _ => CramError::from(e),
-                    })?;
+                    },
+                )?;
             }
 
             // Decode each slice listed by CRAI as overlapping our query.
@@ -714,8 +716,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &self.shared.header,
                     &self.shared.read_group_ids,
                     tid,
-                    start,
-                    end,
+                    span.start,
+                    span.last,
                     store,
                     &mut self.cigar_buf,
                     &mut self.bases_buf,
@@ -823,7 +825,7 @@ mod tests {
         // Fetch from first reference
         let tid = 0;
         let count =
-            reader.fetch_into(tid, Pos0::new(0).unwrap(), Pos0::MAX, &mut store).unwrap();
+            reader.fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store).unwrap();
         assert!(count > 0, "should fetch records from tid={tid}");
     }
 
@@ -848,7 +850,7 @@ mod tests {
         // Querying chr1 decodes the multi-ref slice that also holds the unplaced
         // read; before the fix this errored with InvalidPosition { value: 0 }.
         let count = reader
-            .fetch_into(0, Pos0::new(0).unwrap(), Pos0::MAX, &mut store)
+            .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store)
             .expect("query must not error on an unplaced read in a multi-ref slice");
         assert!(count >= 1, "the mapped chr1 read must be returned");
     }

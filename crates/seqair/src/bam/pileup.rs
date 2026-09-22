@@ -6,6 +6,7 @@
 //! not in this engine. Records that should not pollute the pileup never enter
 //! the store in the first place.
 
+use core::range::RangeInclusive;
 use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0, QPos};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 use std::{num::NonZeroU32, ops::Range, rc::Rc};
@@ -731,16 +732,18 @@ impl<U> PileupEngine<U> {
     /// an unsorted store loses whole reads without reporting a gap, and an
     /// unlinked one makes every alignment look like it has no mate. Only
     /// [`RecordStore::prepare_for_pileup`] mints that type.
-    pub fn new(input: PileupInput<U>, region_start: Pos0, region_end: Pos0) -> Self {
-        Self::with_scratch(input, region_start, region_end, PileupScratch::default())
+    ///
+    /// `region` is the closed interval of positions to report columns for.
+    // r[impl interval.span_type]
+    pub fn new(input: PileupInput<U>, region: RangeInclusive<Pos0>) -> Self {
+        Self::with_scratch(input, region, PileupScratch::default())
     }
 
     /// Build an engine reusing pooled scratch buffers. The buffers are cleared
     /// (capacity retained) so no stale alignments leak from a previous region.
     pub(crate) fn with_scratch(
         input: PileupInput<U>,
-        region_start: Pos0,
-        region_end: Pos0,
+        region: RangeInclusive<Pos0>,
         mut scratch: PileupScratch,
     ) -> Self {
         scratch.buf.clear();
@@ -749,8 +752,8 @@ impl<U> PileupEngine<U> {
         PileupEngine {
             store: input.into_store(),
             buf: scratch.buf,
-            current_pos: region_start,
-            region_end,
+            current_pos: region.start,
+            region_end: region.last,
             next_entry: 0,
             active_end_pos: scratch.active_end_pos,
             active: scratch.active,
@@ -1296,6 +1299,11 @@ impl<U> Drop for PileupEngine<U> {
 mod tests {
     use super::*;
 
+    /// The closed region `first..=last`, the shape `PileupEngine::new` takes.
+    fn region(first: u32, last: u32) -> RangeInclusive<Pos0> {
+        RangeInclusive { start: Pos0::new(first).unwrap(), last: Pos0::new(last).unwrap() }
+    }
+
     #[test]
     fn ref_seq_base_at_within_range() {
         let ref_seq =
@@ -1356,11 +1364,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut engine = PileupEngine::new(
-            store.prepare_for_pileup().input,
-            Pos0::new(100).unwrap(),
-            Pos0::new(104).unwrap(),
-        );
+        let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region(100, 104));
 
         // First column — buf grows to accommodate alignments.
         let depth = engine.pileups().unwrap().depth();
@@ -1413,11 +1417,7 @@ mod tests {
                 .unwrap();
         }
 
-        let mut engine = PileupEngine::new(
-            store.prepare_for_pileup().input,
-            Pos0::new(0).unwrap(),
-            Pos0::new(49).unwrap(),
-        );
+        let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region(0, 49));
 
         let mut columns = Vec::new();
         while let Some(col) = engine.pileups() {
@@ -1486,11 +1486,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut engine = PileupEngine::new(
-            store.prepare_for_pileup().input,
-            Pos0::new(98).unwrap(),
-            Pos0::new(107).unwrap(),
-        );
+        let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region(98, 107));
         engine.set_soft_clip_overhang(1);
 
         let mut soft: Vec<(u32, u32, Base)> = Vec::new();
@@ -1548,11 +1544,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut engine = PileupEngine::new(
-            store.prepare_for_pileup().input,
-            Pos0::new(98).unwrap(),
-            Pos0::new(106).unwrap(),
-        );
+        let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region(98, 106));
         // Default overhang 0: behaves exactly as before, no SoftClip columns.
         let mut positions: Vec<u32> = Vec::new();
         while let Some(col) = engine.pileups() {
@@ -1568,6 +1560,7 @@ mod tests {
     /// column stream a baseline (overhang-0) run produces.
     mod overhang_properties {
         use super::super::*;
+        use super::region;
         use crate::bam::cigar::{CigarOp, CigarOpType};
         use hegel::prelude::*;
         use seqair_types::{BamFlags, Base};
@@ -1681,11 +1674,7 @@ mod tests {
                     .unwrap();
             }
 
-            let mut engine = PileupEngine::new(
-                store.prepare_for_pileup().input,
-                Pos0::new(0).unwrap(),
-                Pos0::new(220).unwrap(),
-            );
+            let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region(0, 220));
             engine.set_soft_clip_overhang(overhang);
 
             let mut aligned = Vec::new();
@@ -1815,11 +1804,9 @@ mod tests {
             )
             .unwrap();
 
-        let mut engine = PileupEngine::new(
-            store.prepare_for_pileup().input,
-            Pos0::new(max_pos - 5).unwrap(),
-            Pos0::new(max_pos - 1).unwrap(), // region_end <= i32::MAX - 1
-        );
+        // region last <= i32::MAX - 1
+        let mut engine =
+            PileupEngine::new(store.prepare_for_pileup().input, region(max_pos - 5, max_pos - 1));
         engine.set_soft_clip_overhang(3);
 
         let mut trailing: Vec<(u32, Base)> = Vec::new();
@@ -1878,11 +1865,7 @@ mod tests {
         // 2 <= 5, so the record activates at position 0. The leading clip base is
         // at qpos 2 (Base::T) at reference position 1. At position 0, the first
         // leading clip base (qpos 0 = Base::C) also emits.
-        let mut engine = PileupEngine::new(
-            store.prepare_for_pileup().input,
-            Pos0::new(0).unwrap(),
-            Pos0::new(5).unwrap(),
-        );
+        let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region(0, 5));
         engine.set_soft_clip_overhang(5);
 
         let mut leading: Vec<(u32, Base)> = Vec::new();
@@ -1935,11 +1918,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut engine = PileupEngine::new(
-            store.prepare_for_pileup().input,
-            Pos0::new(0).unwrap(),
-            Pos0::new(5).unwrap(),
-        );
+        let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region(0, 5));
 
         let mut saw_insertion = false;
         while let Some(col) = engine.pileups() {
@@ -1987,11 +1966,8 @@ mod tests {
                     &mut (),
                 )
                 .unwrap();
-            let mut engine = PileupEngine::new(
-                store.prepare_for_pileup().input,
-                Pos0::new(0).unwrap(),
-                Pos0::new(last_ref_pos).unwrap(),
-            );
+            let mut engine =
+                PileupEngine::new(store.prepare_for_pileup().input, region(0, last_ref_pos));
             let mut out = Vec::new();
             while let Some(col) = engine.pileups() {
                 let pos = col.pos().as_u32();
@@ -2067,11 +2043,7 @@ mod tests {
                 .unwrap();
         }
 
-        let mut engine = PileupEngine::new(
-            store.prepare_for_pileup().input,
-            Pos0::new(0).unwrap(),
-            Pos0::new(49).unwrap(),
-        );
+        let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region(0, 49));
         engine.set_max_depth(NonZeroU32::new(3).expect("3 is non-zero"));
 
         // At every position, only the first 3 records (indices 0,1,2) should be kept.
@@ -2110,11 +2082,7 @@ mod tests {
             }
             apply_moves(&mut store, &reads, &moves);
 
-            let mut engine = PileupEngine::new(
-                store.prepare_for_pileup().input,
-                Pos0::new(0).unwrap(),
-                Pos0::new(7_000).unwrap(),
-            );
+            let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region(0, 7_000));
             let mut columns = 0usize;
             while let Some(col) = engine.pileups() {
                 columns += 1;
@@ -2172,8 +2140,7 @@ mod tests {
             let (start, end) = span.resolve(input.store());
             let expected = brute_force(input.store(), start, end);
 
-            let mut engine =
-                PileupEngine::new(input, Pos0::new(0).unwrap(), Pos0::new(7_000).unwrap());
+            let mut engine = PileupEngine::new(input, region(0, 7_000));
             let before: Vec<RecordIdx> = engine.records_overlapping(start, end).collect();
             assert_eq!(&before, &expected);
 

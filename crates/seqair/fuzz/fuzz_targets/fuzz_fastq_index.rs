@@ -120,6 +120,6 @@ fuzz_target!(|input: Input| {
         };
         // Errors are fine and expected; a panic, an abort, or an unbounded
         // allocation is not.
-        let _ = reader.fetch_seq_into(name, a, b, &mut buf);
+        let _ = reader.fetch_seq_into(name, (a..=b).into(), &mut buf);
     }
 });

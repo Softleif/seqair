@@ -233,7 +233,7 @@ fn main() -> anyhow::Result<()> {
         // adjacent overlapping segments don't double-call the same site.
         // (See `.claude/plans/core-pre-filter.md` — once that lands, this
         // becomes `engine.core_pileups()` with no manual gate.)
-        let core = segment.core_range();
+        let core = segment.core_span();
 
         while let Some(column) = pileup.pileups() {
             if !core.contains(&column.pos()) {

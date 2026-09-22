@@ -228,7 +228,8 @@ fuzz_target!(|input: FuzzPileupInput| {
     }
     assert_eq!(linked, stats.pairs.saturating_mul(2), "stats disagree with the links");
 
-    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region_start, region_end);
+    let mut engine =
+        PileupEngine::new(store.prepare_for_pileup().input, (region_start..=region_end).into());
     engine.set_max_depth(MAX_DEPTH);
 
     let mut columns_seen: u32 = 0;

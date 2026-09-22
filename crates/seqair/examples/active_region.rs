@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
     };
     let opts = SegmentOptions::new(NonZeroU32::new(1_000_000).unwrap());
     let segment = readers
-        .segments((contig, start, end), opts)
+        .segments((contig, (start..=end).into()), opts)
         .context("planning segment failed")?
         .next()
         .context("region produced no segment")?;

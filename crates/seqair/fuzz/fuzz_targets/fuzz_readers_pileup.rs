@@ -67,7 +67,7 @@ fuzz_target!(|data: &[u8]| {
         None => return,
     };
 
-    let mut engine = match readers.pileup(0, start, end) {
+    let mut engine = match readers.pileup(0, (start..=end).into()) {
         Ok(e) => e,
         Err(_) => return,
     };

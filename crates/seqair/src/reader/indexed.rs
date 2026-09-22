@@ -10,6 +10,7 @@ use crate::{
     fasta::IndexedFastaReader,
     sam::reader::IndexedSamReader,
 };
+use core::range::RangeInclusive;
 use seqair_types::Pos0;
 use std::{
     io::{Read, Seek},
@@ -70,23 +71,24 @@ impl<R: Read + Seek> IndexedReader<R> {
     /// for byte-aware segmentation. Returns `None` for CRAM, whose slice-based
     /// reader bounds memory differently (there is no `RegionBuf` bulk-load), so
     /// callers should skip byte-budget subdivision for it.
-    pub fn estimate_region_bytes(&self, tid: u32, start: Pos0, end: Pos0) -> Option<u64> {
+    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> Option<u64> {
         match self {
-            Self::Bam(r) => Some(r.estimate_region_bytes(tid, start, end)),
-            Self::Sam(r) => Some(r.estimate_region_bytes(tid, start, end)),
+            Self::Bam(r) => Some(r.estimate_region_bytes(tid, span)),
+            Self::Sam(r) => Some(r.estimate_region_bytes(tid, span)),
             Self::Cram(_) => None,
         }
     }
 
     // r[impl unified.fetch_equivalence]
+    // r[impl interval.span_type]
+    /// Load every record overlapping the closed interval `span` on `tid`.
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
-        self.fetch_into_customized(tid, start, end, store, &mut ()).map(|c| c.kept)
+        self.fetch_into_customized(tid, span, store, &mut ()).map(|c| c.kept)
     }
 
     // r[impl unified.fetch_into_customized]
@@ -99,21 +101,20 @@ impl<R: Read + Seek> IndexedReader<R> {
     pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,
     ) -> Result<FetchCounts, ReaderError> {
         match self {
-            Self::Bam(r) => r
-                .fetch_into_customized(tid, start, end, store, customize)
-                .map_err(ReaderError::from),
-            Self::Sam(r) => r
-                .fetch_into_customized(tid, start, end, store, customize)
-                .map_err(ReaderError::from),
-            Self::Cram(r) => r
-                .fetch_into_customized(tid, start, end, store, customize)
-                .map_err(ReaderError::from),
+            Self::Bam(r) => {
+                r.fetch_into_customized(tid, span, store, customize).map_err(ReaderError::from)
+            }
+            Self::Sam(r) => {
+                r.fetch_into_customized(tid, span, store, customize).map_err(ReaderError::from)
+            }
+            Self::Cram(r) => {
+                r.fetch_into_customized(tid, span, store, customize).map_err(ReaderError::from)
+            }
         }
     }
 }
@@ -165,8 +166,8 @@ impl IndexedReader<std::fs::File> {
     ///     IndexedReader::open_with_reference(Path::new("sample.cram"), Path::new("ref.fa"))?;
     /// let tid = reader.header().tid("chr1").expect("chr1 in header");
     /// let mut store = RecordStore::default();
-    /// let (start, end) = (Pos0::new(1_000).unwrap(), Pos0::new(2_000).unwrap());
-    /// reader.fetch_into(tid, start, end, &mut store)?;
+    /// let span = (Pos0::new(1_000).unwrap()..=Pos0::new(2_000).unwrap()).into();
+    /// reader.fetch_into(tid, span, &mut store)?;
     /// # Ok(())
     /// # }
     /// ```

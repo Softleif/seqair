@@ -77,6 +77,7 @@
 #![allow(clippy::arithmetic_side_effects, reason = "benches")]
 #![allow(clippy::print_stdout, reason = "benches report to the console")]
 
+use core::range::RangeInclusive;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::fs::File;
 use std::hint::black_box;
@@ -93,6 +94,12 @@ const SIZES: [u64; 3] = [1_000, 10_000, 100_000];
 
 fn pos(v: u64) -> seqair::bam::Pos0 {
     seqair::bam::Pos0::new(v as u32).unwrap()
+}
+
+/// The closed span covering the same bases as the half-open `[start, end)`
+/// the htslib and noodles calls below are given.
+fn span(start: u64, end: u64) -> RangeInclusive<seqair::bam::Pos0> {
+    (pos(start)..=pos(end - 1)).into()
 }
 
 fn region(chrom: &str, start: u64, end: u64) -> noodles::core::Region {
@@ -125,7 +132,7 @@ fn fastq_indexed_fetch(c: &mut Criterion) {
     // Correctness cross-check before timing: all three paths must agree.
     // seqair uppercases per `r[fasta.fetch.uppercase]`; htslib preserves the
     // soft-mask case, so normalise before comparing.
-    seqair_reader.fetch_seq_into(CTG, pos(START), pos(START + 1_000), &mut reuse).unwrap();
+    seqair_reader.fetch_seq_into(CTG, span(START, START + 1_000), &mut reuse).unwrap();
     if let Ok(ref h) = htslib_reader {
         let mut hs = h.fetch_seq(CTG, START as usize, (START + 1_000) as usize - 1).unwrap();
         hs.make_ascii_uppercase();
@@ -140,7 +147,7 @@ fn fastq_indexed_fetch(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("seqair_fetch_into", size), &size, |b, _| {
             b.iter(|| {
-                seqair_reader.fetch_seq_into(CTG, pos(START), pos(end), &mut reuse).unwrap();
+                seqair_reader.fetch_seq_into(CTG, span(START, end), &mut reuse).unwrap();
                 black_box(reuse.len())
             });
         });
@@ -148,7 +155,7 @@ fn fastq_indexed_fetch(c: &mut Criterion) {
         // seqair's allocating API, for a like-for-like comparison with the
         // other two (neither offers a caller-supplied buffer).
         group.bench_with_input(BenchmarkId::new("seqair_fetch_seq", size), &size, |b, _| {
-            b.iter(|| black_box(seqair_reader.fetch_seq(CTG, pos(START), pos(end)).unwrap().len()));
+            b.iter(|| black_box(seqair_reader.fetch_seq(CTG, span(START, end)).unwrap().len()));
         });
 
         if let Ok(ref h) = htslib_reader {
@@ -192,7 +199,7 @@ fn fastq_indexed_fetch_real(c: &mut Criterion) {
 
     // chr19 carries soft-masked (lowercase) repeat regions; seqair uppercases
     // them per `r[fasta.fetch.uppercase]` while htslib returns them verbatim.
-    seqair_reader.fetch_seq_into(CHR, pos(CHR_START), pos(CHR_START + 1_000), &mut reuse).unwrap();
+    seqair_reader.fetch_seq_into(CHR, span(CHR_START, CHR_START + 1_000), &mut reuse).unwrap();
     if let Ok(ref h) = htslib_reader {
         let mut hs =
             h.fetch_seq(CHR, CHR_START as usize, (CHR_START + 1_000) as usize - 1).unwrap();
@@ -206,7 +213,7 @@ fn fastq_indexed_fetch_real(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("seqair_fetch_into", size), &size, |b, _| {
             b.iter(|| {
-                seqair_reader.fetch_seq_into(CHR, pos(CHR_START), pos(end), &mut reuse).unwrap();
+                seqair_reader.fetch_seq_into(CHR, span(CHR_START, end), &mut reuse).unwrap();
                 black_box(reuse.len())
             });
         });
@@ -250,7 +257,7 @@ fn fastq_pileup_walk(c: &mut Criterion) {
             let mut total = 0usize;
             for i in 0..STEPS {
                 let s = i * WINDOW;
-                seqair_reader.fetch_seq_into(CTG, pos(s), pos(s + WINDOW), &mut reuse).unwrap();
+                seqair_reader.fetch_seq_into(CTG, span(s, s + WINDOW), &mut reuse).unwrap();
                 total += reuse.len();
             }
             black_box(total)

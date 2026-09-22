@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
     let (tid, start, end, contig) = resolve_region(args.region.as_ref(), reader.header())?;
 
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, start, end, &mut store).with_context(|| {
+    reader.fetch_into(tid, (start..=end).into(), &mut store).with_context(|| {
         format!("fetch failed for {contig}:{}-{}", start.as_u32(), end.as_u32())
     })?;
 

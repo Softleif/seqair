@@ -83,8 +83,10 @@ fn main() -> anyhow::Result<()> {
         let tile_end =
             tile_start.checked_add_offset(Offset::new(span)).unwrap_or(Pos0::MAX).min(end);
 
+        let tile_span = (tile_start..=tile_end).into();
+
         let t = Instant::now();
-        records += reader.fetch_into(tid, tile_start, tile_end, &mut store)? as u64;
+        records += reader.fetch_into(tid, tile_span, &mut store)? as u64;
         phases.fetch += t.elapsed();
 
         let t = Instant::now();
@@ -92,7 +94,7 @@ fn main() -> anyhow::Result<()> {
         phases.prepare += t.elapsed();
 
         let t = Instant::now();
-        let mut engine = PileupEngine::new(input, tile_start, tile_end);
+        let mut engine = PileupEngine::new(input, tile_span);
         while let Some(col) = engine.pileups() {
             cols += 1;
             if args.columns_only {

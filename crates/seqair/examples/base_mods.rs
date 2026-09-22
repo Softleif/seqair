@@ -108,7 +108,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let mut store = RecordStore::new();
-    reader.fetch_into(tid, start, end, &mut store).with_context(|| {
+    reader.fetch_into(tid, (start..=end).into(), &mut store).with_context(|| {
         format!("fetch failed for {contig_name}:{}-{}", start.as_u32(), end.as_u32())
     })?;
 

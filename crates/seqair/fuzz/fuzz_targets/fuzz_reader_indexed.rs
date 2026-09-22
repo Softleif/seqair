@@ -79,13 +79,13 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let mut store = RecordStore::new();
-    let _ = readers.fetch_into(0, start, end, &mut store);
+    let _ = readers.fetch_into(0, (start..=end).into(), &mut store);
 
     if store.is_empty() {
         return;
     }
 
-    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, start, end);
+    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, (start..=end).into());
     engine.set_max_depth(MAX_DEPTH);
     let mut col_count: usize = 0;
     while let Some(col) = engine.pileups() {

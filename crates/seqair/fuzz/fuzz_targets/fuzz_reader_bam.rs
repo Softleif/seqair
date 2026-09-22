@@ -67,7 +67,8 @@ fuzz_target!(|data: &[u8]| {
         None => return,
     };
 
-    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, region_start, region_end);
+    let mut engine =
+        PileupEngine::new(store.prepare_for_pileup().input, (region_start..=region_end).into());
     engine.set_max_depth(MAX_DEPTH);
     let mut col_count: usize = 0;
     while let Some(col) = engine.pileups() {

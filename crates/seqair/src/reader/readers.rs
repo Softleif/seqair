@@ -12,6 +12,7 @@ use crate::{
     },
     fasta::{FastaError, IndexedFastaReader},
 };
+use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0};
 use std::path::Path;
 use std::rc::Rc;
@@ -213,16 +214,16 @@ impl<E: CustomizeRecordStore> Readers<E> {
         self.alignment.header()
     }
 
+    // r[impl interval.span_type]
+    /// Load every record overlapping the closed interval `span` on `tid`,
+    /// filtered through this reader's customize value.
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos0,
-        end: Pos0,
+        span: RangeInclusive<Pos0>,
         store: &mut RecordStore<E::Extra>,
     ) -> Result<usize, ReaderError> {
-        self.alignment
-            .fetch_into_customized(tid, start, end, store, &mut self.customize)
-            .map(|c| c.kept)
+        self.alignment.fetch_into_customized(tid, span, store, &mut self.customize).map(|c| c.kept)
     }
 
     /// Access the customize value, e.g. to inspect any internal counters it carries.
@@ -244,9 +245,10 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// exactly: a contig name (`&str` / `String` / `SmolStr`), a
     /// pre-resolved [`Tid`](crate::reader::Tid) or `u32`, a parsed
     /// [`RegionString`](seqair_types::RegionString), an
-    /// explicit `(resolver, start, end)` tuple, or `()` for a whole-genome
-    /// scan. Each yielded `Segment`'s **core** is at most `opts.max_len()`
-    /// bases long; the full `[start, end]` includes `opts.overlap()` bases
+    /// explicit `(resolver, span)` tuple with a closed
+    /// `RangeInclusive<Pos0>`, or `()` for a whole-genome scan. Each yielded
+    /// `Segment`'s **core** is at most `opts.max_len()` bases long; the full
+    /// `start..=last` includes `opts.overlap()` bases
     /// of context on each side (clipped to the requested range at edges),
     /// so internal tiles can be up to `max_len + 2 * overlap` bases.
     ///
@@ -287,8 +289,8 @@ impl<E: CustomizeRecordStore> Readers<E> {
         };
         let budget = budget.get();
         let overlap = opts.overlap();
-        let mut estimate = |tid: u32, start: Pos0, end: Pos0| {
-            self.alignment.estimate_region_bytes(tid, start, end).unwrap_or(0)
+        let mut estimate = |tid: u32, span: RangeInclusive<Pos0>| {
+            self.alignment.estimate_region_bytes(tid, span).unwrap_or(0)
         };
         let mut out = Vec::new();
         for seg in Segments::new(ranges, opts) {
@@ -301,8 +303,8 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// load. `None` for CRAM (its slice reader bounds memory differently). This
     /// is the same estimate [`segments`](Self::segments) budgets against.
     #[must_use]
-    pub fn estimate_region_bytes(&self, tid: u32, start: Pos0, end: Pos0) -> Option<u64> {
-        self.alignment.estimate_region_bytes(tid, start, end)
+    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> Option<u64> {
+        self.alignment.estimate_region_bytes(tid, span)
     }
 
     // r[impl unified.readers_pileup+1]
@@ -380,8 +382,8 @@ impl<E: CustomizeRecordStore> Readers<E> {
         F: FnMut(&mut RecordStore<E::Extra>, &RefSeq),
     {
         let tid = segment.tid();
-        let start = segment.start();
-        let end = segment.end();
+        let span = segment.span();
+        let RangeInclusive { start, last: end } = span;
 
         // Header-consistency check: the segment's contig name MUST resolve to
         // the same tid against this Readers' header AND the segment's
@@ -420,7 +422,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
                 let alignment = &mut self.alignment;
                 let store = &mut self.store;
                 let customize = &mut self.customize;
-                alignment.fetch_into_customized(tid.as_u32(), start, end, store, customize)?;
+                alignment.fetch_into_customized(tid.as_u32(), span, store, customize)?;
             }
             Some(cap) => {
                 // Cap reads overlapping any column at load time so an
@@ -430,8 +432,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
                 let mut capped = DepthCap::with_cap(self.customize.clone(), Some(cap));
                 self.alignment.fetch_into_customized(
                     tid.as_u32(),
-                    start,
-                    end,
+                    span,
                     &mut self.store,
                     &mut capped,
                 )?;
@@ -443,11 +444,12 @@ impl<E: CustomizeRecordStore> Readers<E> {
         // The records are in hand, so the span they actually cover is known
         // exactly — no padding constant, and a read that stops inside the
         // segment widens nothing.
-        let (ref_start, ref_end) = if cover_reads {
-            span_covering_records(&self.store, start, end, segment.contig_last_pos())
+        let ref_span = if cover_reads {
+            span_covering_records(&self.store, span, segment.contig_last_pos())
         } else {
-            (start, end)
+            span
         };
+        let RangeInclusive { start: ref_start, last: ref_end } = ref_span;
 
         let ref_seq = match supplied_ref {
             // r[impl unified.readers_pileup_supplied_reference+1]
@@ -482,26 +484,20 @@ impl<E: CustomizeRecordStore> Readers<E> {
                 }
                 ref_seq
             }
-            // Fetch `[ref_start, ref_end]` (inclusive). FASTA APIs expect half-open
-            // [start, stop). Use the u64 path so `end == Pos0::MAX` doesn't
-            // truncate the last reference base — `stop = end + 1` is i32::MAX + 1,
-            // which doesn't fit in a Pos0 but does fit comfortably in a u64.
+            // The reference fetch takes the same closed interval the query
+            // did, so the buffer covers exactly `ref_span` — including a span
+            // that ends on the last representable position, which a half-open
+            // `end + 1` could not have named.
             None => {
                 let contig_name = segment.contig();
-                let stop_u64 = ref_end.as_u64().saturating_add(1);
-                self.fasta
-                    .fetch_seq_into_u64(
-                        contig_name,
-                        ref_start.as_u64(),
-                        stop_u64,
-                        &mut self.fasta_buf,
-                    )
-                    .map_err(|source| ReaderError::FastaFetch {
+                self.fasta.fetch_seq_into(contig_name, ref_span, &mut self.fasta_buf).map_err(
+                    |source| ReaderError::FastaFetch {
                         contig: contig_name.clone(),
                         start: ref_start.as_u64(),
                         end: ref_end.as_u64(),
                         source,
-                    })?;
+                    },
+                )?;
                 // Convert in-place and copy into the Rc<[Base]> while keeping
                 // `fasta_buf` (and its capacity) for the next pileup call.
                 let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);
@@ -544,7 +540,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
             );
         }
 
-        let mut engine = PileupEngine::with_scratch(input, start, end, scratch);
+        let mut engine = PileupEngine::with_scratch(input, span, scratch);
         engine.set_reference_seq(ref_seq);
         Ok(PileupGuard::new(engine, &mut self.store, Some(&mut self.pileup_scratch)))
     }
@@ -565,13 +561,13 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// buffer is converted in place and the slice is copied into the `Rc`
     /// allocation, so we pay one allocation for the `Rc` and zero for the
     /// buffer on subsequent calls.
+    // r[impl interval.span_type]
     pub fn fetch_base_seq(
         &mut self,
         name: &str,
-        start: Pos0,
-        stop: Pos0,
+        span: RangeInclusive<Pos0>,
     ) -> Result<Rc<[Base]>, FastaError> {
-        self.fasta.fetch_seq_into(name, start, stop, &mut self.fasta_buf)?;
+        self.fasta.fetch_seq_into(name, span, &mut self.fasta_buf)?;
         // Convert ASCII → Base in place; the &[Base] borrow keeps fasta_buf
         // alive (and its capacity).
         let bases: &[Base] = Base::convert_ascii_in_place_as_slice(&mut self.fasta_buf);
@@ -599,19 +595,18 @@ impl<E: CustomizeRecordStore> Readers<E> {
 /// while walking `store.records()`.
 fn span_covering_records<U>(
     store: &RecordStore<U>,
-    start: Pos0,
-    end: Pos0,
+    span: RangeInclusive<Pos0>,
     contig_last: Pos0,
-) -> (Pos0, Pos0) {
-    let mut first = start;
-    let mut last = end;
+) -> RangeInclusive<Pos0> {
+    let mut first = span.start;
+    let mut last = span.last;
     for rec in store.records() {
         first = first.min(rec.pos);
         last = last.max(rec.end_pos);
     }
-    // `end <= contig_last` for any segment the header produced, so clamping
-    // `last` can never pull it back inside the segment.
-    (first, last.min(contig_last))
+    // `span.last <= contig_last` for any segment the header produced, so
+    // clamping `last` can never pull it back inside the segment.
+    RangeInclusive { start: first, last: last.min(contig_last) }
 }
 
 /// A planned pileup: what [`Readers::pileup`] returns, configured by
@@ -779,6 +774,11 @@ mod tests {
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.gz"))
     }
 
+    /// The closed interval `start..=last`, the shape every query takes.
+    fn span(start: u32, last: u32) -> RangeInclusive<Pos0> {
+        RangeInclusive { start: Pos0::new(start).unwrap(), last: Pos0::new(last).unwrap() }
+    }
+
     // r[verify unified.segment_byte_budget]
     /// `segments()` with a byte budget subdivides a region (spanning several
     /// index leaf bins) so each emitted segment's estimated load stays within
@@ -788,16 +788,16 @@ mod tests {
         use std::num::{NonZeroU32, NonZeroU64};
         let readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
         // chr19 reads span ~6.10–6.14 Mb (several 16 kb leaf bins).
-        let start = Pos0::new(6_100_000).unwrap();
-        let end = Pos0::new(6_145_000).unwrap();
+        let region = span(6_100_000, 6_145_000);
+        let (start, end) = (region.start, region.last);
         let tid = readers.header().tid("chr19").expect("chr19 in header");
-        let total = readers.estimate_region_bytes(tid, start, end).expect("BAM estimate");
+        let total = readers.estimate_region_bytes(tid, region).expect("BAM estimate");
         assert!(total > 0, "test region should contain reads");
 
         // One positional tile over the whole region (no byte budget).
         let big = NonZeroU32::new(1_000_000).unwrap();
         let positional: Vec<_> = readers
-            .segments(("chr19", start, end), SegmentOptions::new(big).without_byte_budget())
+            .segments(("chr19", region), SegmentOptions::new(big).without_byte_budget())
             .unwrap()
             .collect();
         assert_eq!(positional.len(), 1, "without a budget the region is one tile");
@@ -806,18 +806,18 @@ mod tests {
         // must subdivide it into several smaller, in-budget segments.
         let budget = NonZeroU64::new((total / 2).max(1)).unwrap();
         let budgeted: Vec<_> = readers
-            .segments(("chr19", start, end), SegmentOptions::new(big).with_max_bytes(budget))
+            .segments(("chr19", region), SegmentOptions::new(big).with_max_bytes(budget))
             .unwrap()
             .collect();
         assert!(budgeted.len() > 1, "budget {budget} (of {total}) must split the region");
 
         // Cores tile [start, end] exactly.
-        assert_eq!(*budgeted.first().unwrap().core_range().start(), start);
-        assert_eq!(*budgeted.last().unwrap().core_range().end(), end);
+        assert_eq!(budgeted.first().unwrap().core_span().start, start);
+        assert_eq!(budgeted.last().unwrap().core_span().last, end);
         for w in budgeted.windows(2) {
             assert_eq!(
-                w[0].core_range().end().as_u64() + 1,
-                w[1].core_range().start().as_u64(),
+                w[0].core_span().last.as_u64() + 1,
+                w[1].core_span().start.as_u64(),
                 "cores must be contiguous"
             );
         }
@@ -826,12 +826,12 @@ mod tests {
         // point of subdivision), and no segment exceeds the budget unless a
         // single index leaf bin alone does (none here — budget > one bin).
         for s in &budgeted {
-            let bytes = readers.estimate_region_bytes(tid, s.start(), s.end()).unwrap();
+            let bytes = readers.estimate_region_bytes(tid, s.span()).unwrap();
             assert!(bytes < total, "segment {bytes} B not below whole-region {total} B");
             assert!(
                 bytes <= budget.get(),
                 "segment {:?} = {bytes} B over budget {budget}",
-                (s.start().as_u64(), s.end().as_u64())
+                (s.start().as_u64(), s.last().as_u64())
             );
         }
     }
@@ -843,15 +843,15 @@ mod tests {
     #[test]
     fn fetch_base_seq_retains_buffer_capacity() {
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
-        let start = Pos0::new(6_100_000).unwrap();
-        let stop = Pos0::new(6_101_000).unwrap();
-        let _first = readers.fetch_base_seq("chr19", start, stop).unwrap();
+        // The same 1000 bases the half-open `[6_100_000, 6_101_000)` named.
+        let region = span(6_100_000, 6_100_999);
+        let _first = readers.fetch_base_seq("chr19", region).unwrap();
         let cap_after_first = readers.fasta_buf.capacity();
         assert!(cap_after_first > 0, "buffer should have grown to hold the fetched region");
 
         // Second call: capacity must not drop. (Could grow if region is bigger,
         // but for the same region must stay equal.)
-        let _second = readers.fetch_base_seq("chr19", start, stop).unwrap();
+        let _second = readers.fetch_base_seq("chr19", region).unwrap();
         assert_eq!(
             cap_after_first,
             readers.fasta_buf.capacity(),
@@ -876,10 +876,8 @@ mod tests {
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
         let opts = SegmentOptions::new(NonZeroU32::new(3_000).unwrap());
         // Known-populated region from `tests/segments.rs`.
-        let segments: Vec<_> = readers
-            .segments(("chr19", Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap()), opts)
-            .unwrap()
-            .collect();
+        let segments: Vec<_> =
+            readers.segments(("chr19", span(6_103_500, 6_106_500)), opts).unwrap().collect();
         assert!(!segments.is_empty(), "test BAM should yield at least one segment");
 
         // Full loop: drain the engine, then drop.
@@ -925,7 +923,7 @@ mod tests {
         use std::num::NonZeroU32;
         let opts = SegmentOptions::new(NonZeroU32::new(5_000).unwrap());
         readers
-            .segments(("chr19", Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap()), opts)
+            .segments(("chr19", span(6_103_500, 6_106_500)), opts)
             .unwrap()
             .next()
             .expect("test BAM should yield a segment")
@@ -943,12 +941,16 @@ mod tests {
     /// Fetch the reference for a whole span as a single `RefSeq`, the way a
     /// caller that already needs those bases would hold them.
     ///
-    /// `end` is inclusive, matching `Segment::end()`; `fetch_base_seq` is
-    /// half-open, hence the `+ 1`.
+    /// The span is closed at both ends, matching `Segment::span()` and what
+    /// `fetch_base_seq` takes.
     #[cfg(test)]
-    fn whole_span_reference(readers: &mut Readers, contig: &str, start: Pos0, end: Pos0) -> RefSeq {
-        let stop = Pos0::try_from(end.as_u64().saturating_add(1)).unwrap();
-        let bases = readers.fetch_base_seq(contig, start, stop).unwrap();
+    fn whole_span_reference(
+        readers: &mut Readers,
+        contig: &str,
+        span: RangeInclusive<Pos0>,
+    ) -> RefSeq {
+        let start = span.start;
+        let bases = readers.fetch_base_seq(contig, span).unwrap();
         RefSeq::new(bases, start)
     }
 
@@ -973,7 +975,7 @@ mod tests {
             out
         };
 
-        let ref_seq = whole_span_reference(&mut readers, "chr19", segment.start(), segment.end());
+        let ref_seq = whole_span_reference(&mut readers, "chr19", segment.span());
         let mut p =
             readers.pileup(&segment, DepthLimit::Unlimited).with_reference(ref_seq).run().unwrap();
         let mut actual = Vec::new();
@@ -994,12 +996,11 @@ mod tests {
     fn one_reference_serves_every_segment_in_the_span() {
         use std::num::NonZeroU32;
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
-        let (start, end) = (Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap());
+        let region = span(6_103_500, 6_106_500);
 
         // Tile the span finely enough that several segments come out of it.
         let opts = SegmentOptions::new(NonZeroU32::new(500).unwrap());
-        let segments: Vec<Segment> =
-            readers.segments(("chr19", start, end), opts).unwrap().collect();
+        let segments: Vec<Segment> = readers.segments(("chr19", region), opts).unwrap().collect();
         assert!(segments.len() > 1, "span should tile into several segments");
 
         let expected: Vec<Vec<(u64, usize)>> = segments
@@ -1010,7 +1011,7 @@ mod tests {
             })
             .collect();
 
-        let ref_seq = whole_span_reference(&mut readers, "chr19", start, end);
+        let ref_seq = whole_span_reference(&mut readers, "chr19", region);
         for (seg, want) in segments.iter().zip(&expected) {
             let mut p = readers
                 .pileup(seg, DepthLimit::Unlimited)
@@ -1032,7 +1033,7 @@ mod tests {
     fn a_supplied_reference_and_a_hook_compose() {
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
         let segment = realign_test_segment(&readers);
-        let (start, end) = (segment.start(), segment.end());
+        let (start, end) = (segment.start(), segment.last());
 
         // The same realignment, run once with the FASTA fetch and once with a
         // reference the caller already holds.
@@ -1078,7 +1079,7 @@ mod tests {
         };
         assert!(fetched_moved > 0, "the fixture has reads with a leading M");
 
-        let supplied = whole_span_reference(&mut readers, "chr19", start, end);
+        let supplied = whole_span_reference(&mut readers, "chr19", segment.span());
         let (mut hook_ref, mut hook_moved) = (Vec::new(), 0);
         let from_supplied = {
             let mut p = readers
@@ -1106,13 +1107,13 @@ mod tests {
     fn reference_covers_reads_reaches_every_read() {
         use std::num::NonZeroU32;
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
-        let (from, to) = (Pos0::new(6_103_500).unwrap(), Pos0::new(6_104_500).unwrap());
+        let region = span(6_103_500, 6_104_500);
         let opts = SegmentOptions::new(NonZeroU32::new(500).unwrap());
-        let segments: Vec<Segment> = readers.segments(("chr19", from, to), opts).unwrap().collect();
+        let segments: Vec<Segment> = readers.segments(("chr19", region), opts).unwrap().collect();
 
         let mut checked = 0usize;
         for segment in &segments {
-            let (seg_start, seg_end) = (segment.start(), segment.end());
+            let (seg_start, seg_end) = (segment.start(), segment.last());
             let mut overhanging = 0usize;
             let mut want = None;
             let mut holds = None;
@@ -1218,8 +1219,7 @@ mod tests {
     fn reference_covers_reads_rejects_a_supplied_reference_that_stops_at_the_segment() {
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
         let segment = realign_test_segment(&readers);
-        let exactly_the_segment =
-            whole_span_reference(&mut readers, "chr19", segment.start(), segment.end());
+        let exactly_the_segment = whole_span_reference(&mut readers, "chr19", segment.span());
 
         // It covers the segment, so the plain path accepts it...
         assert!(
@@ -1243,8 +1243,10 @@ mod tests {
         let wide = whole_span_reference(
             &mut readers,
             "chr19",
-            Pos0::new(segment.start().as_u32().saturating_sub(1_000)).unwrap(),
-            Pos0::try_from(segment.end().as_u64().saturating_add(1_000)).unwrap(),
+            RangeInclusive {
+                start: Pos0::new(segment.start().as_u32().saturating_sub(1_000)).unwrap(),
+                last: Pos0::try_from(segment.last().as_u64().saturating_add(1_000)).unwrap(),
+            },
         );
         assert!(
             readers
@@ -1286,7 +1288,11 @@ mod tests {
 
         // Starts where the segment starts but stops well before its end.
         let short_end = Pos0::try_from(segment.start().as_u64().saturating_add(10)).unwrap();
-        let short = whole_span_reference(&mut readers, "chr19", segment.start(), short_end);
+        let short = whole_span_reference(
+            &mut readers,
+            "chr19",
+            RangeInclusive { start: segment.start(), last: short_end },
+        );
         assert!(matches!(
             readers.pileup(&segment, DepthLimit::Unlimited).with_reference(short).run(),
             Err(ReaderError::SuppliedReferenceTooSmall { .. })
@@ -1294,7 +1300,11 @@ mod tests {
 
         // Covers the segment's end but begins after its start.
         let late_start = Pos0::try_from(segment.start().as_u64().saturating_add(10)).unwrap();
-        let late = whole_span_reference(&mut readers, "chr19", late_start, segment.end());
+        let late = whole_span_reference(
+            &mut readers,
+            "chr19",
+            RangeInclusive { start: late_start, last: segment.last() },
+        );
         assert!(matches!(
             readers.pileup(&segment, DepthLimit::Unlimited).with_reference(late).run(),
             Err(ReaderError::SuppliedReferenceTooSmall { .. })
@@ -1397,7 +1407,7 @@ mod tests {
     fn pileup_with_sees_the_engines_reference() {
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
         let segment = realign_test_segment(&readers);
-        let (start, end) = (segment.start(), segment.end());
+        let (start, end) = (segment.start(), segment.last());
 
         let mut seen: Vec<(u64, Base)> = Vec::new();
         let mut seen_records = 0usize;
@@ -1453,10 +1463,8 @@ mod tests {
         use std::num::NonZeroU32;
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
         let opts = SegmentOptions::new(NonZeroU32::new(3_000).unwrap());
-        let segments: Vec<_> = readers
-            .segments(("chr19", Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap()), opts)
-            .unwrap()
-            .collect();
+        let segments: Vec<_> =
+            readers.segments(("chr19", span(6_103_500, 6_106_500)), opts).unwrap().collect();
         assert!(!segments.is_empty());
 
         // Misuse: drain the store through Deref before the guard drops.
@@ -1615,14 +1623,7 @@ mod tests {
             IndexedReader::open_with_reference(test_bam_path(), test_fasta_path()).unwrap();
         let tid = reader.header().tid("chr19").expect("test BAM has chr19");
         let mut store = RecordStore::default();
-        let n = reader
-            .fetch_into(
-                tid,
-                Pos0::new(6_103_500).unwrap(),
-                Pos0::new(6_106_500).unwrap(),
-                &mut store,
-            )
-            .unwrap();
+        let n = reader.fetch_into(tid, span(6_103_500, 6_106_500), &mut store).unwrap();
         assert!(n > 0, "known-covered region must yield records");
         assert_eq!(n, store.len(), "fetch_into return value must match records pushed");
     }
@@ -1662,7 +1663,7 @@ mod tests {
         }
 
         let opts = SegmentOptions::new(NonZeroU32::new(3_000).unwrap());
-        let region = ("chr19", Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap());
+        let region = ("chr19", span(6_103_500, 6_106_500));
 
         // Path A: the canonical Readers::open.
         let mut via_open = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
