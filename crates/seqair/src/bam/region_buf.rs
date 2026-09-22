@@ -464,10 +464,23 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
     ///
     /// The returned slice is valid for the lifetime of whichever buffer it
     /// points into, expressed here as `'a` covering both `self` and `scratch`.
-    pub fn read_record<'a>(&'a mut self, scratch: &'a mut Vec<u8>) -> Result<&'a [u8], BgzfError> {
+    ///
+    /// # Returns
+    ///
+    /// `Ok(None)` when every planned byte range is exhausted *at a record
+    /// boundary* — there is no next record and there never will be. That is a
+    /// different fact from `Err(UnexpectedEof)`, which means the data ran out
+    /// partway through a record and so the file is truncated. Returning both as
+    /// the same error let a caller mistake the first for "refill and retry" and
+    /// spin forever; see `r[region_buf.record_boundary_eof]`.
+    // r[impl region_buf.record_boundary_eof]
+    pub fn read_record<'a>(
+        &'a mut self,
+        scratch: &'a mut Vec<u8>,
+    ) -> Result<Option<&'a [u8]>, BgzfError> {
         // Ensure the decompressed buffer has data to read the 4-byte length from.
         if self.buf_pos >= self.buf.len() && !self.read_block()? {
-            return Err(BgzfError::UnexpectedEof);
+            return Ok(None);
         }
 
         // Fast-path u32 read: all 4 bytes in the current block.
@@ -499,7 +512,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
                 .get(self.buf_pos..self.buf_pos.wrapping_add(block_size))
                 .ok_or(BgzfError::TruncatedBlock)?;
             self.buf_pos = self.buf_pos.wrapping_add(block_size);
-            return Ok(slice);
+            return Ok(Some(slice));
         }
 
         // Slow path: record spans a block boundary — copy into scratch.
@@ -507,7 +520,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         // Safety: read_exact_into overwrites every byte before any are read.
         unsafe { super::bgzf::resize_uninit(scratch, block_size) };
         self.read_exact_into(scratch)?;
-        Ok(scratch)
+        Ok(Some(scratch))
     }
 }
 
@@ -1174,7 +1187,7 @@ mod tests {
         let mut scratch: Vec<u8> = Vec::new();
         let result = region.read_record(&mut scratch).unwrap();
 
-        assert_eq!(result, body.as_slice());
+        assert_eq!(result, Some(body.as_slice()));
         // scratch untouched — fast path never fills it
         assert!(scratch.is_empty());
     }
@@ -1209,7 +1222,7 @@ mod tests {
         let mut scratch: Vec<u8> = Vec::new();
         let result = region.read_record(&mut scratch).unwrap();
 
-        assert_eq!(result, body.as_slice());
+        assert_eq!(result, Some(body.as_slice()));
         // Slow path: scratch was used.
         assert_eq!(scratch.as_slice(), body.as_slice());
     }
@@ -1244,7 +1257,7 @@ mod tests {
         let mut scratch: Vec<u8> = Vec::new();
         let result = region.read_record(&mut scratch).unwrap();
 
-        assert_eq!(result, body.as_slice());
+        assert_eq!(result, Some(body.as_slice()));
     }
 
     /// Multiple sequential records, all within a single BGZF block.
@@ -1273,7 +1286,7 @@ mod tests {
         let mut scratch = Vec::new();
         for expected in &records {
             let got = region.read_record(&mut scratch).unwrap();
-            assert_eq!(got, expected.as_slice());
+            assert_eq!(got, Some(expected.as_slice()));
         }
     }
 
@@ -1313,7 +1326,7 @@ mod tests {
                 let got = region
                     .read_record(&mut scratch)
                     .unwrap_or_else(|e| panic!("record {i} failed: {e}"));
-                assert_eq!(got, expected.as_slice());
+                assert_eq!(got, Some(expected.as_slice()));
             }
         }
     }
@@ -1336,7 +1349,7 @@ mod tests {
 
         let mut scratch = Vec::new();
         let result = region.read_record(&mut scratch).unwrap();
-        assert_eq!(result, &[] as &[u8]);
+        assert_eq!(result, Some(&[] as &[u8]));
     }
 
     /// A truncated stream (length prefix present but body cut short) must

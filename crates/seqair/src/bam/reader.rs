@@ -392,6 +392,26 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
     ///
     /// The phases are mutually exclusive per iteration; each ends in `continue`
     /// (or `break`) so the next iteration re-evaluates from the top.
+    /// Step to the next BAI chunk, seeking the region buffer to its start.
+    ///
+    /// `Ok(false)` when there is no next chunk — the query is finished.
+    ///
+    /// Every path that cannot read another record from the current chunk goes
+    /// through here, so each turn of `run_loop` either consumes a record or
+    /// consumes a chunk. That is what bounds the loop: see
+    /// `r[region_buf.record_boundary_eof]` for the shape of the hang that
+    /// existed while one of those paths merely looped back and hoped.
+    // r[impl region_buf.record_boundary_eof]
+    fn advance_chunk(&mut self) -> Result<bool, BamError> {
+        self.chunk_idx = self.chunk_idx.saturating_add(1);
+        let Some(&chunk) = self.chunks.get(self.chunk_idx) else {
+            return Ok(false);
+        };
+        self.region.seek_virtual(chunk.begin).map_err(BamError::from)?;
+        self.chunk_end = chunk.end;
+        Ok(true)
+    }
+
     fn run_loop<F, E>(&mut self, mut f: F) -> Result<BamQueryCounts, E>
     where
         F: FnMut(&[u8]) -> Result<(), E>,
@@ -404,24 +424,39 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
 
             // ── Phase 1: cursor reached this chunk's end → advance ───────────
             if self.region.virtual_offset() >= self.chunk_end {
-                self.chunk_idx = self.chunk_idx.saturating_add(1);
-                let Some(chunk) = self.chunks.get(self.chunk_idx) else {
-                    break; // no more chunks
-                };
-                let chunk = *chunk;
-                self.region.seek_virtual(chunk.begin).map_err(|e| E::from(BamError::from(e)))?;
-                self.chunk_end = chunk.end;
-                continue;
+                if self.advance_chunk().map_err(E::from)? {
+                    continue;
+                }
+                break; // no more chunks
             }
 
             // ── Phase 2: read one record from the streaming buffer ───────────
             // r[impl bam.reader.propagate_errors]
             let current_voff = self.region.virtual_offset();
             let raw = match self.region.read_record(&mut self.scratch) {
-                Ok(s) => s,
-                // Buffer exhausted before chunk_end (e.g. a record straddling the
-                // loaded range's tail): loop back so phase 2 advances the chunk.
-                Err(BgzfError::UnexpectedEof) => continue,
+                Ok(Some(s)) => s,
+                // r[impl region_buf.record_boundary_eof]
+                // The planned ranges are exhausted at a record boundary: this
+                // chunk has no more records, whether because it ended or
+                // because the file did. Step to the next chunk *explicitly*.
+                //
+                // This used to `continue`, on the stated assumption that phase
+                // 1 would then do the stepping. It only does so when the cursor
+                // has reached `chunk_end`, and at the end of the planned ranges
+                // the cursor stops advancing — `read_block` clears the buffer
+                // and leaves the offset on the last block it read. On a BAM
+                // truncated under its own index the comparison therefore never
+                // became true and the loop span forever: no panic, no
+                // allocation, no error, which is why the fuzzers never saw it.
+                //
+                // Advancing here makes progress unconditional, so the loop is
+                // bounded by the chunk count however the file is damaged.
+                Ok(None) => {
+                    if self.advance_chunk().map_err(E::from)? {
+                        continue;
+                    }
+                    break;
+                }
                 Err(e) => return Err(E::from(BamError::from(e))),
             };
 

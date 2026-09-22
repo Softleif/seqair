@@ -64,6 +64,13 @@ The fast-path header parsing (XLEN=6, BC at fixed offset) MUST be used when appl
 r[region_buf.read_exact]
 The region buffer MUST support reading an exact number of bytes, transparently crossing block boundaries, with the same API as `BgzfReader::read_exact_into`.
 
+r[region_buf.record_boundary_eof]
+`read_record` MUST distinguish two facts that are not the same. Running out of planned bytes **at a record boundary** — there is no next record and there never will be — MUST be reported as `Ok(None)`. Running out **partway through a record** MUST stay `Err(BgzfError::UnexpectedEof)`, because that is a truncated record and the file is malformed.
+
+A caller MUST NOT retry on the first. Once every planned range is exhausted, nothing can refill the window, the cursor stops advancing, and a virtual offset compared against a chunk end will never reach it — so a loop that treats "nothing left" as "refill and try again" does not terminate. `BamQuery::run_loop` did exactly that, and a BAM truncated anywhere past its header, with its index left intact, sent it into an unbounded spin: no panic, no allocation, no error, so the fuzzers could only ever have reported it as a timeout.
+
+The reader MUST therefore advance to the next chunk *explicitly* on `Ok(None)`, so that every turn of the query loop consumes either a record or a chunk and the loop is bounded by the chunk count however the file is damaged. A truncated file then yields the records that precede the cut, which is what htslib does with one.
+
 r[region_buf.drop_no_panic]
 The `Drop` implementation MUST never panic. Gap-size calculations between ranges MUST use saturating arithmetic to handle overlapping or malformed range boundaries safely.
 
