@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A query on a truncated BAM never returned.** Not slowly — never. `IndexedBamReader::fetch_into`
+  on a file truncated anywhere past its header, with its index left intact, spun forever with no
+  panic, no allocation and no error, which is why 26 fuzz targets never saw it: libFuzzer could
+  only ever have reported it as a timeout. `RegionBuf::read_record` reported two different facts as
+  the same `BgzfError::UnexpectedEof` — "the window ran out mid-chunk, refill" and "the file ended
+  here" — and the query loop read every one as the first, looping back on the assumption that the
+  chunk step would happen on the next turn. At the end of the planned ranges the cursor stops
+  advancing, so it never did. `read_record` now returns `Ok(None)` when the ranges are exhausted at
+  a record boundary and keeps `UnexpectedEof` for running out partway through a record, and the
+  chunk step is explicit, so every turn of the loop consumes either a record or a chunk. A
+  truncated file now yields the records before the cut, as htslib does with one.
+- **CRAM: a multi-reference container could decode reads as `N` with no error.** Such a container
+  holds one index entry per slice per reference, and the reference window was taken from the first
+  entry whose container offset matched. When a later slice reached further along the reference, the
+  window stopped short and the tail of those reads came back as `N` — silently, since running past
+  the fetched reference is only a warning. It is the union of every matching entry now. htslib turns
+  multi-reference slices on by itself once a container would hold few records per reference, so an
+  ordinary file with short contigs reaches this; two slices one base apart are enough.
+- **CRAM: `embed_ref=2` files could not be opened at all.** The slice-header MD5 was checked against
+  the FASTA whether or not the slice carried its own reference. Under `embed_ref=2` htslib embeds a
+  *consensus* computed from the reads and digests that, so it matches the external reference only
+  where the reads happen to agree with it — every such file with low coverage or a real difference
+  failed with `ReferenceMd5Mismatch`. A slice with an embedded reference is now exempt.
+- **CRAM: a no-reference file mis-decoded any read with an insertion.** The `Q` and `q` features
+  carry quality and nothing else, but both were decoded as an anchoring reference match, adding a
+  base and an `M` operation. In no-reference mode htslib emits one `Q` per *inserted* base next to
+  the `I` feature, so those reads came back one base too long and were refused with
+  `QualLenMismatch`. It needs no option to reach: htslib drops into no-reference mode by itself when
+  `embed_ref` meets `multi_seq_per_slice`.
+- **The VCF/BCF writer could not index a contig over 512 Mbp.** Its index was built with
+  `min_shift=14, depth=5` whatever the header said, so bins ran out at 2^29 — a record above that
+  was written to the file, pushed to the index, and then unreachable, with `bcftools view -r`
+  returning nothing while the same query over `bcftools index -c`'s CSI returned it. Nothing
+  errored. The depth is now derived from the longest reference, as htslib's
+  `hts_adjust_csi_settings` does. This is the case CSI exists for; TBI and BAI cannot express it.
+  Indexes that already fitted the depth-5 scheme are byte-identical, since the search floors at 5.
+- **`OwnedBamRecord::to_bam_bytes` accepted a record whose quality no longer matched its sequence.**
+  `set_seq` validates the new sequence against the CIGAR and deliberately leaves `qual` alone, so
+  `set_seq` with no following `set_qual` was a reachable state where the two disagreed. It
+  serialized: `l_seq` governs how many quality bytes a reader consumes, so the record did not
+  bounce, it was misread from the sequence onwards. It now raises the same `SeqQualLengthMismatch`
+  the builder and `set_qual` raise. An empty `qual` remains legal at any length.
+- **Non-finite floats in VCF text now match htslib's spelling.** `write_float_g` sent NaN and the
+  infinities through `Display`, writing `NaN` where C's `%g` — and so htslib — writes `nan`. VCF 4.3
+  §1.3 admits `INF`/`INFINITY`/`NAN` case-insensitively as Float values and §6.3.3 gives quiet NaN
+  first-class status, distinct from the missing sentinel, so these are values rather than errors and
+  are deliberately *not* written as `.`: that would turn a value into a missing value and put the
+  text output at odds with the BCF output, which writes the caller's bits through unchanged.
+
 - **The SAM reader rejected every negative element of a signed `B` array.** `B:c`, `B:s` and
   `B:i` are the signed subtypes, but all three were converted through the unsigned type of the
   same width, so `XX:B:c,-1` failed the whole record with `InvalidAuxValue`. Each subtype is now
@@ -30,9 +79,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `IndexBuilder::csi` builds a CSI whose depth covers a given longest-reference length, and
+  `IndexBuilder::csi_depth_for` exposes that calculation on its own. `IndexBuilder::BAI_DEPTH` names
+  the 5 that BAI and TBI are fixed at and that CSI now treats as a floor.
 - `seqair::bam::DecodeError` is re-exported. `RecordStore::set_alignment`, `push_raw` and
   `push_fields` are public and return it, but it was only reachable through a private module, so
   a caller outside the crate could not match on the error.
+
+### Changed
+
+- `RegionBuf::read_record` returns `Result<Option<&[u8]>, BgzfError>`. `Ok(None)` means the planned
+  ranges are exhausted at a record boundary — there is no next record; `Err(UnexpectedEof)` now
+  means only that a record was cut in half. Callers that treated the old single error as "retry"
+  must handle `Ok(None)` as an end, not a hiccup; see the truncation fix above for why.
 
 ### Internal
 
@@ -48,6 +107,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records; CRAM against BAM decodes of the same reads; multi-sample FORMAT arrays against
   bcftools; SAM through the reader and `write_store_record` and back out through samtools; and
   records built with `OwnedBamRecord::builder` through `BamWriter` and back.
+- Generated coverage now reaches the corners that were fixture-only, and found the six bugs listed
+  above: the CRAM writer-option matrix (version × `embed_ref` × `seqs_per_slice` ×
+  `slices_per_container`, with multi-reference slices and span-0 index entries asserted *per case*
+  rather than counted across the run), `OwnedBamRecord` under sequences of mutations refereed by
+  samtools, reader-level filtering compared field by field against the unfiltered fetch, extras
+  through the pileup, INFO types and missing-value integer arrays against bcftools, CSI output
+  including contigs past 2^29, mate fields refereed by `samtools fixmate`, and which typed error a
+  corrupt or truncated file actually surfaces.
+- Spec traceability: 13 dangling rule ids resolved to zero — six were renames, seven rules the code
+  was annotated against but nobody had written — one stale reference fixed, and 28 rules in the
+  `bcf_writer.*` and `csi.*` namespaces annotated against round-trips that already pinned them.
+  Five rules were deliberately left unverified rather than annotated on tests that would not fail if
+  they broke. Three rules whose prose had drifted from the code (`record_store.customize.trait`,
+  `perf.reuse_alignment_vec`, `unified.segment_options`) were retold to match it.
+- The six bare `compile_fail` blocks in the VCF writer each gained a passing twin that uses every
+  name the rejection uses, so a rename fails the guard rather than silently making the rejection
+  free; each was mutated into its legal form to confirm it rejects for the reason it claims.
+- The nightly workflow (renamed `fuzz.yml` → `nightly.yml`) now also runs the property suite at the
+  `thorough` profile, 10000 cases, which nothing ran before.
 
 ## v0.2.0 (2026-09-14)
 
