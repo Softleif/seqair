@@ -75,6 +75,9 @@ r[bam.owned_record.set_seq]
 r[bam.owned_record.set_qual]
 `OwnedBamRecord` MUST support replacing quality scores. The new array length MUST equal `seq.len()`. An empty array is the one exception: it is always accepted and means the record carries no quality scores, which `to_bam_bytes` serializes as `seq.len()` bytes of `0xFF` per [SAM1] §4.2 and SAM text spells `*`.
 
+r[bam.owned_record.seq_qual_length_at_serialization]
+`to_bam_bytes` MUST reject a record whose non-empty `qual` is not the same length as its `seq`, with the same `SeqQualLengthMismatch` the builder and `set_qual` raise. The builder cannot be the only gate: `set_seq` validates the new sequence against the CIGAR and deliberately leaves `qual` alone, so `set_seq` followed by no `set_qual` is a reachable state in which the two disagree. `l_seq` is what a reader uses to decide how many quality bytes to consume, so an unchecked record does not fail loudly — it serializes, and is misread from the sequence onwards. Resizing a record is therefore `set_seq` and `set_qual` as a pair, and the record is serializable only once both have run.
+
 r[bam.owned_record.failed_mutation_is_inert]
 A mutation method that returns an error MUST leave the record exactly as it was. This holds for `set_alignment`, `set_seq`, `set_qual`, and every fallible `AuxData` setter: validation happens before any buffer is touched, so a rejected call cannot leave a half-written tag or a length field that no longer describes the data behind it. The historical failure mode is `set_int` appending its two tag-name bytes and only then discovering the value is outside the range BAM can spell — the orphaned bytes are then parsed as the start of the next tag, corrupting every tag after them. A record whose mutation was refused MUST still serialize to the same bytes it would have before the call.
 

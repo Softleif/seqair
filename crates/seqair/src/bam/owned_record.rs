@@ -338,6 +338,18 @@ impl OwnedBamRecord {
         if self.seq.len() > i32::MAX as usize {
             return Err(OwnedRecordError::SeqLengthOverflow { len: self.seq.len() });
         }
+        // r[impl bam.owned_record.seq_qual_length_at_serialization]
+        // `set_seq` does not touch `qual`, so a caller that resizes the
+        // sequence and does not follow with `set_qual` leaves the two out of
+        // step. `l_seq` governs how many quality bytes a reader consumes, so
+        // without this check the record would serialize into the stream and be
+        // misread from the sequence onwards.
+        if !self.qual.is_empty() && self.qual.len() != self.seq.len() {
+            return Err(OwnedRecordError::SeqQualLengthMismatch {
+                seq_len: self.seq.len(),
+                qual_len: self.qual.len(),
+            });
+        }
 
         #[expect(
             clippy::cast_possible_truncation,

@@ -738,3 +738,52 @@ fn the_serialized_bin_is_the_one_htslib_computes(tc: TestCase) {
     }
     tc.event_value("records", records.len() as f64);
 }
+
+// r[verify bam.owned_record.seq_qual_length_at_serialization]
+/// `set_seq` validates the new sequence against the CIGAR and deliberately
+/// leaves `qual` alone, so a caller that resizes without a matching `set_qual`
+/// holds a record whose two halves disagree. That used to serialize: `l_seq`
+/// said one thing and the quality block was another length, so a reader
+/// consumed the wrong number of bytes and every field after SEQ came back
+/// wrong — no error anywhere. The builder checked it; the serializer did not.
+///
+/// Resizing is `set_seq` and `set_qual` as a pair, and nothing in between is
+/// serializable.
+#[test]
+fn a_resize_without_its_qual_refuses_to_serialize() {
+    let mut rec = seed_record();
+    rec.set_seq(vec![Base::A, Base::C, Base::G, Base::T]).expect("no CIGAR to disagree with");
+    rec.set_qual(vec![BaseQuality::from_byte(30); 4]).expect("matches the sequence");
+
+    let mut buf = Vec::new();
+    let before = {
+        rec.to_bam_bytes(&mut buf).expect("consistent record serializes");
+        buf.clone()
+    };
+
+    // Grow the sequence and stop there, which is the state `set_seq` leaves.
+    rec.set_seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A]).expect("still no CIGAR");
+
+    buf.clear();
+    let err = rec.to_bam_bytes(&mut buf).expect_err("seq and qual no longer agree");
+    assert!(
+        matches!(
+            err,
+            OwnedRecordError::SeqQualLengthMismatch { seq_len: 5, qual_len: 4 }
+        ),
+        "expected the same mismatch the builder raises, got {err:?}"
+    );
+
+    // Finishing the pair makes it serializable again, and the refusal did not
+    // leave anything behind in the record.
+    rec.set_qual(vec![BaseQuality::from_byte(30); 5]).expect("matches the new sequence");
+    buf.clear();
+    rec.to_bam_bytes(&mut buf).expect("the pair is consistent again");
+    assert_ne!(buf, before, "the record did grow");
+
+    // An empty qual stays the documented exception: no scores at all is legal
+    // at any sequence length.
+    rec.set_qual(Vec::new()).expect("empty is always accepted");
+    buf.clear();
+    rec.to_bam_bytes(&mut buf).expect("an empty qual serializes as 0xFF fill");
+}
