@@ -328,18 +328,21 @@ fn arb_opts(tc: &TestCase) -> CramOpts {
         version: tc.draw_silent(gs::sampled_from(&["3.0", "3.1"])),
         embed_ref,
         seqs_per_slice: tc.draw_silent(gs::sampled_from(&[1u32, 2, 5, 10_000])),
-        slices_per_container: arb_slices_per_container(tc, multi_seq),
+        slices_per_container: arb_slices_per_container(tc),
         multi_seq,
     }
 }
 
-/// Several slices per container are only drawn when multi-reference slices are
-/// ruled out. A multi-ref container with two slices for the same reference
-/// decodes the second one's tail as `N` — see
-/// `multi_ref_containers_use_every_slices_reference_range` — and leaving that
-/// in the matrix would fail every property here for the same one reason.
-fn arb_slices_per_container(tc: &TestCase, multi_seq: Option<bool>) -> u32 {
-    if multi_seq == Some(false) { tc.draw_silent(gs::sampled_from(&[1u32, 2])) } else { 1 }
+/// Several slices per container, whatever the multi-reference setting.
+///
+/// This used to be pinned to 1 unless multi-reference slices were ruled out: a
+/// multi-ref container with two slices for the same reference decoded the
+/// second one's tail as `N`, so leaving it in the matrix failed every property
+/// here for the same one reason. That is fixed
+/// (`r[cram.slice.multi_ref_reference_window]`), and the combination is the
+/// interesting one, so it is back in.
+fn arb_slices_per_container(tc: &TestCase) -> u32 {
+    tc.draw_silent(gs::sampled_from(&[1u32, 2]))
 }
 
 /// `embed_ref` and `multi_seq_per_slice` together make htslib fall back to
@@ -800,25 +803,23 @@ fn no_ref_cram_decodes_reads_with_insertions() {
 
 /// Two slices for the same reference inside one multi-ref container.
 ///
-/// The reference window a container is decoded against is taken from *the
-/// first* CRAI entry whose `container_offset` matches, but a multi-ref
-/// container holds one entry per slice per reference — and htslib turns
-/// multi-reference slices on by itself once a container would hold very few
-/// records per reference, so this needs no option to ask for. When a later
-/// slice
-/// reaches further along the reference than the first one does, the window
-/// stops short and the bases past its end are reconstructed as `N` — silently,
-/// since falling off the end of the reference is only a warning
-/// (`r[cram.slice.ref_bounds_warning]`). The window needs to be the union of
-/// every matching entry, not the first one.
+/// The reference window used to be taken from *the first* CRAI entry whose
+/// `container_offset` matched. A multi-ref container holds one entry per slice
+/// per reference — and htslib turns multi-reference slices on by itself once a
+/// container would hold very few records per reference, so this needs no option
+/// to ask for — and when a later slice reached further along the reference than
+/// the first one did, the window stopped short and the bases past its end came
+/// back as `N`. Silently: falling off the end of the fetched reference is only
+/// a warning (`r[cram.slice.ref_bounds_warning]`), so the reads decoded, they
+/// were just wrong. The window is the union of every matching entry now.
 ///
 /// Both reads below are 8M on `c1`, one base apart, so the second slice needs
-/// exactly one base more than the first entry's span reports.
+/// exactly one base more than the first entry's span reports — the smallest
+/// version of the bug there is, which is the version a wider test would miss.
 // r[verify cram.index.multi_ref_slices]
 // r[verify cram.record.sequence]
+// r[verify cram.slice.multi_ref_reference_window]
 #[test]
-#[ignore = "the reference window for a multi-ref container comes from the first matching \
-            CRAI entry only, so later slices decode their tail as N"]
 fn multi_ref_containers_use_every_slices_reference_range() {
     let reference = "ACGT".repeat(CONTIG_LEN as usize / 4);
     let read = |contig: usize, pos: u32| GenRead {
