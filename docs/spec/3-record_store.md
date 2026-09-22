@@ -177,6 +177,12 @@ r[record_store.extras.push_unit]
 r[record_store.customize.trait]
 The customize trait MUST be defined as `trait CustomizeRecordStore: Clone { type Extra; fn keep_record(&mut self, rec: &SlimRecord, store: &RecordStore<Self::Extra>) -> bool { true } fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<Self::Extra>) -> Self::Extra; }`. The `Clone` bound allows `Readers::fork` to duplicate the customize value into the forked reader. The default `keep_record` returns `true` so simple extras-only customizers do not need to override it. A blanket `impl CustomizeRecordStore for ()` MUST exist with `type Extra = ()` and `compute` returning `()` so the default no-customize case costs zero at runtime (`Vec<()>` is a ZST vector). `RecordStore` MUST NOT expose closure-based filter or extras APIs — the trait is the only API, so customize values are always reusable and clone-forwardable. Both methods run inline during push: `compute` runs FIRST (producing the extra for the just-pushed record), then `keep_record` decides retention. If `keep_record` returns `false`, the just-computed extra is rolled back alongside all other slab writes, so `compute` should be cheap (heavy computation on records likely to be dropped wastes work). Both methods receive `&SlimRecord` and `&RecordStore<Self::Extra>` — callers can use `SlimRecord::seq/qual/cigar/aux` getters directly, and in `compute` they can also read previously-pushed records' extras via `RecordStore::extra(idx)`.
 
+r[record_store.filter_raw]
+`CustomizeRecordStore::filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool` MUST run in both `push_raw` and `push_fields` before any slab is extended and before any sequence is decoded. Returning `false` MUST abandon the record there and then: no bytes copied into any slab, no bases decoded, no `compute` call, and no index minted — `push_raw`/`push_fields` return `Ok(None)` exactly as for a `filter` rejection. The default MUST return `true`. `filter_raw` and `filter` (r[`record_store.pre_filter.rollback`]) MUST be interchangeable in outcome: the same decision taken at either hook MUST leave every slab byte-identical and MUST hand back the same indices. They differ only in how much work a rejection wastes, which is why `filter_raw` is the hook a reader-level filter belongs in (r[`bam.reader.unmapped_skipped`]).
+
+r[record_store.filter_raw_fields]
+`FilterRawFields` MUST carry every fixed field of the record that is about to be pushed, plus the raw qname, quality, aux and CIGAR slices, so a customize value can decide without the slabs. It MUST be `#[non_exhaustive]`, and the qname MUST be NUL-stripped. Fields the calling path has not computed yet MUST be reported as unknown rather than guessed: from `push_raw` (BAM binary), `end_pos` is `None` and `matching_bases`/`indel_bases` are `0` because the CIGAR has not been decoded at that point; from `push_fields` (SAM/CRAM) all three carry their pre-computed values. `seq` MUST be `Sequence::Packed` from `push_raw` and `Sequence::Bases` from `push_fields`; `cigar` MUST be raw BAM CIGAR bytes on both paths. Every field MUST describe the record that the next successful push appends — a filter deciding on a stale or mis-sliced view rejects the wrong reads, and nothing downstream notices, because every record that survives is well-formed either way.
+
 r[record_store.pre_filter.rollback]
 `push_raw` and `push_fields` on any `RecordStore<U>` MUST accept `&mut E` (`E: CustomizeRecordStore<Extra = U>`) as their last argument and return `Result<Option<u32>, DecodeError>`. After parsing and writing the record's slab data they MUST call `customize.keep_record(rec, &self)`; if it returns `false`, the record just pushed MUST be rolled back so that every slab (names/bases/cigar/qual/aux/records/extras) is byte-identical to its pre-push state. Rollback uses the just-pushed `SlimRecord`'s `*_off` offsets as pre-push slab lengths, since push is append-only. The returned `Option<u32>` is `Some(idx)` when kept, `None` when rejected — rejected records MUST NOT consume an index. Passing `&mut ()` (whose default `keep_record` is `true`) is the no-filter form. A property test verifies that pushing a mixed accept/reject sequence produces byte-identical state to pushing only the accepted inputs with no filter.
 
@@ -364,6 +370,15 @@ without adding entropy. Both ends of the value matter — the low bits select th
 bucket and the top bits form the SIMD control byte — so the spread of realistic
 qnames through both is a property worth testing directly, not just avalanche
 under bit flips.
+
+r[record_store.link_mates.htslib_agreement]
+The pairs `link_mates()` reports MUST be the pairs htslib recognises, not merely
+the pairs that follow from seqair's own reading of the mate fields — a
+systematic misreading of `next_ref_id`/`next_pos` would be reproduced on both
+sides of such a check and pass it. On a file whose mate fields `samtools
+fixmate` leaves unchanged, the templates that MUST link are exactly those with
+two records in `samtools view -f 0x1 -F 0x90c` (paired, mapped, mate mapped,
+primary) whose `RNEXT` is `=`. Every other template MUST stay unlinked.
 
 r[record_store.link_mates.qname_uniqueness]
 Linking assumes what `[SAM1] §1.4` requires: a qname identifies one template, so
