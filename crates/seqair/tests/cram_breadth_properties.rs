@@ -604,6 +604,103 @@ fn multi_reference_slices_decode_per_reference(tc: TestCase) {
     tc.event_value("contigs", sample.contigs.len() as f64);
 }
 
+// r[verify cram.slice.embedded_ref]
+// r[verify unified.fetch_equivalence]
+/// A slice that carries its own reference bases decodes to the same records.
+///
+/// `embed_ref=1` stores the reference segment the slice spans; `embed_ref=2`
+/// stores a consensus computed from the reads, which is *not* the FASTA — so
+/// the decoder must reconstruct against the embedded block and not against the
+/// reference it was handed.
+#[hegel::test(test_cases = 24)]
+fn embedded_reference_slices_decode_to_the_same_records(tc: TestCase) {
+    let sample = tc.draw(arb_sample().print_as_debug());
+    let opts = CramOpts {
+        version: tc.draw(gs::sampled_from(&["3.0", "3.1"])),
+        embed_ref: 1,
+        seqs_per_slice: tc.draw(gs::sampled_from(&[2u32, 10_000])),
+        slices_per_container: tc.draw(gs::sampled_from(&[1u32, 2])),
+        multi_seq: Some(false),
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fasta = write_reference(dir.path(), &sample);
+    let bam = write_bam(dir.path(), &sample);
+    let cram = write_cram(dir.path(), &bam, &fasta, opts);
+
+    let headers = slice_headers(&cram);
+    let embedded = headers.iter().filter(|h| h.embedded_reference >= 0).count();
+    assert!(
+        embedded > 0,
+        "{}: no slice embedded a reference; embedded_reference ids were {:?}",
+        opts.label(),
+        headers.iter().map(|h| h.embedded_reference).collect::<Vec<_>>()
+    );
+
+    let from_bam = fetch_all(&bam, &fasta, &sample);
+    let from_cram = fetch_all(&cram, &fasta, &sample);
+    assert_eq!(from_cram, from_bam, "{}: CRAM and BAM disagree", opts.label());
+    assert_matches_generator(&from_cram, &sample, &opts.label());
+
+    tc.event(format!("embed_ref={}", opts.embed_ref));
+    tc.event_value("slices with an embedded reference", embedded as f64);
+}
+
+/// A slice whose embedded reference is a *consensus* rather than the FASTA.
+///
+/// `embed_ref=2` makes samtools compute a consensus from the reads and store
+/// that as the slice's reference; htslib then MD5s the consensus into the
+/// slice header. seqair compares that MD5 against the FASTA regardless of
+/// whether the slice brought its own reference, so every such file whose
+/// consensus differs from the reference — which is any file with low coverage
+/// or mismatching reads — fails to open with `ReferenceMd5Mismatch`.
+///
+/// The reads below are one per contig with substitutions, so the consensus is
+/// guaranteed to differ. Un-ignore this once the MD5 check learns to skip
+/// slices with `embedded_reference >= 0`.
+// r[verify cram.slice.embedded_ref]
+// r[verify cram.edge.reference_mismatch]
+#[test]
+#[ignore = "seqair MD5-checks the FASTA even when the slice embeds its own reference; \
+            embed_ref=2 files whose consensus differs from the reference cannot be opened"]
+fn embed_ref_consensus_slices_decode_to_the_same_records() {
+    let reference = "ACGT".repeat(CONTIG_LEN as usize / 4);
+    let mut seq: Vec<u8> = reference.as_bytes()[10..60].to_vec();
+    for at in [3usize, 17, 29, 41] {
+        seq[at] = if seq[at] == b'A' { b'C' } else { b'A' };
+    }
+    let sample = Sample {
+        contigs: vec![reference.clone(), reference],
+        reads: (0..2)
+            .map(|contig| GenRead {
+                contig,
+                pos: 11,
+                cigar: vec![(50, 'M')],
+                seq: String::from_utf8(seq.clone()).expect("ACGT is ASCII"),
+                qual: "I".repeat(50),
+                flags: 0,
+                mapq: 60,
+            })
+            .collect(),
+        unmapped: Vec::new(),
+    };
+    let opts = CramOpts {
+        version: "3.0",
+        embed_ref: 2,
+        seqs_per_slice: 10_000,
+        slices_per_container: 1,
+        multi_seq: Some(false),
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fasta = write_reference(dir.path(), &sample);
+    let bam = write_bam(dir.path(), &sample);
+    let cram = write_cram(dir.path(), &bam, &fasta, opts);
+
+    assert!(slice_headers(&cram).iter().any(|h| h.embedded_reference >= 0));
+    assert_eq!(fetch_all(&cram, &fasta, &sample), fetch_all(&bam, &fasta, &sample));
+}
+
 /// A CRAM written with no reference at all, holding a read with an insertion.
 ///
 /// `no_ref=1` makes samtools store every base literally instead of as edits
