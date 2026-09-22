@@ -879,7 +879,7 @@ fn emit_segment(ctx: &SplitCtx<'_>, core_start: u64, core_end: u64, out: &mut Ve
 mod tests {
     use super::private::IntoSegmentTargetSealed as _;
     use super::*;
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
     fn p(n: u32) -> Pos0 {
         Pos0::new(n).expect("test position")
@@ -1333,162 +1333,160 @@ mod tests {
         assert_eq!(bin_segments, 1, "the irreducible bin must sit in exactly one segment");
     }
 
-    proptest! {
-        // r[verify unified.readers_segments]
-        #[test]
-        fn segments_match_oracle(
-            range_start in 0u32..1_000_000,
-            len in 1u32..1_000_000,
-            max_len in 1u32..2_000,
-            overlap in 0u32..2_000,
-        ) {
-            // Constrain combinations the iterator's contract requires.
-            prop_assume!(overlap < max_len);
-            let range_end = range_start.saturating_add(len - 1).min(1_999_999);
+    // r[verify unified.readers_segments]
+    #[hegel::test]
+    fn segments_match_oracle(tc: TestCase) {
+        let range_start = tc.draw(gs::integers::<u32>().max_value(999_999));
+        let len = tc.draw(gs::integers::<u32>().min_value(1).max_value(999_999));
+        let max_len = tc.draw(gs::integers::<u32>().min_value(1).max_value(1_999));
+        // The iterator's contract requires `overlap < max_len`; drawing it
+        // relative to `max_len` keeps every case useful.
+        let overlap = tc.draw(gs::integers::<u32>().max_value(max_len - 1));
+        let range_end = range_start.saturating_add(len - 1).min(1_999_999);
 
-            let opts = SegmentOptions::new(NonZeroU32::new(max_len).unwrap())
-                .with_overlap(overlap).unwrap();
+        let opts =
+            SegmentOptions::new(NonZeroU32::new(max_len).unwrap()).with_overlap(overlap).unwrap();
 
-            let header = header_with_contigs(&[("chr1", 2_000_000)]);
-            let ranges = ("chr1", p(range_start), p(range_end)).resolve_target(&header).unwrap();
-            let actual: Vec<(u32, u32, u32, u32)> = Segments::new(ranges, opts)
-                .map(|s| (
+        let header = header_with_contigs(&[("chr1", 2_000_000)]);
+        let ranges = ("chr1", p(range_start), p(range_end)).resolve_target(&header).unwrap();
+        let actual: Vec<(u32, u32, u32, u32)> = Segments::new(ranges, opts)
+            .map(|s| {
+                (
                     u32::try_from(s.start().as_u64()).unwrap(),
                     u32::try_from(s.end().as_u64()).unwrap(),
                     s.overlap_start(),
                     s.overlap_end(),
-                ))
-                .collect();
+                )
+            })
+            .collect();
 
-            let expected = oracle_tiles(range_start, range_end, max_len, overlap);
-            prop_assert_eq!(actual, expected);
+        let expected = oracle_tiles(range_start, range_end, max_len, overlap);
+        assert_eq!(actual, expected);
+    }
+
+    // r[verify unified.segment_overlap]
+    #[hegel::test]
+    fn cores_tile_input_exactly(tc: TestCase) {
+        let range_start = tc.draw(gs::integers::<u32>().max_value(99_999));
+        let len = tc.draw(gs::integers::<u32>().min_value(1).max_value(99_999));
+        let max_len = tc.draw(gs::integers::<u32>().min_value(1).max_value(499));
+        let overlap = tc.draw(gs::integers::<u32>().max_value(max_len - 1));
+        let range_end = range_start.saturating_add(len - 1).min(199_999);
+
+        let opts =
+            SegmentOptions::new(NonZeroU32::new(max_len).unwrap()).with_overlap(overlap).unwrap();
+        let header = header_with_contigs(&[("chr1", 200_000)]);
+        let ranges = ("chr1", p(range_start), p(range_end)).resolve_target(&header).unwrap();
+        let segs: Vec<_> = Segments::new(ranges, opts).collect();
+
+        // Each core_range must be contiguous with the next; first must
+        // start at range_start; last must end at range_end.
+        assert!(!segs.is_empty());
+        let first = &segs[0];
+        let last = segs.last().unwrap();
+        assert_eq!(*first.core_range().start(), p(range_start));
+        assert_eq!(*last.core_range().end(), p(range_end));
+        for w in segs.windows(2) {
+            let a_end = w[0].core_range().end().as_u64();
+            let b_start = w[1].core_range().start().as_u64();
+            assert_eq!(a_end + 1, b_start, "core ranges must be contiguous");
         }
-
-        // r[verify unified.segment_overlap]
-        #[test]
-        fn cores_tile_input_exactly(
-            range_start in 0u32..100_000,
-            len in 1u32..100_000,
-            max_len in 1u32..500,
-            overlap in 0u32..500,
-        ) {
-            prop_assume!(overlap < max_len);
-            let range_end = range_start.saturating_add(len - 1).min(199_999);
-
-            let opts = SegmentOptions::new(NonZeroU32::new(max_len).unwrap())
-                .with_overlap(overlap).unwrap();
-            let header = header_with_contigs(&[("chr1", 200_000)]);
-            let ranges = ("chr1", p(range_start), p(range_end)).resolve_target(&header).unwrap();
-            let segs: Vec<_> = Segments::new(ranges, opts).collect();
-
-            // Each core_range must be contiguous with the next; first must
-            // start at range_start; last must end at range_end.
-            prop_assert!(!segs.is_empty());
-            let first = &segs[0];
-            let last = segs.last().unwrap();
-            prop_assert_eq!(*first.core_range().start(), p(range_start));
-            prop_assert_eq!(*last.core_range().end(), p(range_end));
-            for w in segs.windows(2) {
-                let a_end = w[0].core_range().end().as_u64();
-                let b_start = w[1].core_range().start().as_u64();
-                prop_assert_eq!(a_end + 1, b_start, "core ranges must be contiguous");
-            }
-            // No tile is empty; tile length is bounded by core (≤ max_len)
-            // plus overlap on each side (so ≤ max_len + 2*overlap).
-            for s in &segs {
-                prop_assert!(s.len() >= 1);
-                prop_assert!(s.len() <= max_len + 2 * overlap);
-            }
+        // No tile is empty; tile length is bounded by core (≤ max_len)
+        // plus overlap on each side (so ≤ max_len + 2*overlap).
+        for s in &segs {
+            assert!(s.len() >= 1);
+            assert!(s.len() <= max_len + 2 * overlap);
         }
+    }
 
-        // r[verify unified.segment_overlap]
-        #[test]
-        fn first_and_last_overlaps_are_zero(
-            // Vary range_start so the test isn't asserting a property about
-            // contig boundaries; the range edge is what counts. The original
-            // test pinned range_start=0 and built `total = n_tiles*max_len`,
-            // making the inner-tile claim "overlap == overlap" tautological.
-            range_start in 0u32..100_000,
-            // `extra_len` is added to a deliberate non-multiple of max_len so
-            // the last core may be short and the last tile must clip its
-            // overlap_end to range_end without producing the requested overlap.
-            n_full_cores in 1u32..20,
-            extra_len in 0u32..200,
-            max_len in 10u32..200,
-            overlap in 0u32..9,
-        ) {
-            prop_assume!(overlap < max_len);
-            // total bases = n_full_cores * max_len + extra_len, then -1 for inclusive.
-            let total = u64::from(n_full_cores) * u64::from(max_len) + u64::from(extra_len);
-            // Build the range somewhere in the middle of the contig.
-            let range_end_u64 = u64::from(range_start).saturating_add(total).saturating_sub(1);
-            let contig_len = range_end_u64.saturating_add(10);
-            let contig_len_u32 = u32::try_from(contig_len).unwrap_or(u32::MAX);
-            let range_end = u32::try_from(range_end_u64).unwrap_or(u32::MAX / 2);
+    // r[verify unified.segment_overlap]
+    #[hegel::test]
+    fn first_and_last_overlaps_are_zero(tc: TestCase) {
+        // Vary range_start so the test isn't asserting a property about
+        // contig boundaries; the range edge is what counts. The original
+        // test pinned range_start=0 and built `total = n_tiles*max_len`,
+        // making the inner-tile claim "overlap == overlap" tautological.
+        let range_start = tc.draw(gs::integers::<u32>().max_value(99_999));
+        // `extra_len` is added to a deliberate non-multiple of max_len so
+        // the last core may be short and the last tile must clip its
+        // overlap_end to range_end without producing the requested overlap.
+        let n_full_cores = tc.draw(gs::integers::<u32>().min_value(1).max_value(19));
+        let extra_len = tc.draw(gs::integers::<u32>().max_value(199));
+        let max_len = tc.draw(gs::integers::<u32>().min_value(10).max_value(199));
+        let overlap = tc.draw(gs::integers::<u32>().max_value(8));
+        // total bases = n_full_cores * max_len + extra_len, then -1 for inclusive.
+        let total = u64::from(n_full_cores) * u64::from(max_len) + u64::from(extra_len);
+        // Build the range somewhere in the middle of the contig.
+        let range_end_u64 = u64::from(range_start).saturating_add(total).saturating_sub(1);
+        let contig_len = range_end_u64.saturating_add(10);
+        let contig_len_u32 = u32::try_from(contig_len).unwrap_or(u32::MAX);
+        let range_end = u32::try_from(range_end_u64).unwrap_or(u32::MAX / 2);
 
-            let opts = SegmentOptions::new(NonZeroU32::new(max_len).unwrap())
-                .with_overlap(overlap).unwrap();
-            let header = header_with_contigs(&[("chr1", contig_len_u32)]);
-            let ranges =
-                ("chr1", p(range_start), p(range_end)).resolve_target(&header).unwrap();
-            let segs: Vec<_> = Segments::new(ranges, opts).collect();
-            prop_assert!(!segs.is_empty());
-            // Range-edge invariants: first segment of the *requested range*
-            // has overlap_start == 0; last segment has overlap_end == 0.
-            prop_assert_eq!(segs.first().unwrap().overlap_start(), 0);
-            prop_assert_eq!(segs.last().unwrap().overlap_end(), 0);
-            // First segment's tile_start equals the requested range_start;
-            // last segment's tile_end equals the requested range_end. This
-            // is a non-trivial check now that range_start != 0.
-            prop_assert_eq!(segs.first().unwrap().start(), p(range_start));
-            prop_assert_eq!(segs.last().unwrap().end(), p(range_end));
-            // Every tile sits entirely inside the requested range.
-            for s in &segs {
-                prop_assert!(s.start() >= p(range_start));
-                prop_assert!(s.end() <= p(range_end));
-            }
+        let opts =
+            SegmentOptions::new(NonZeroU32::new(max_len).unwrap()).with_overlap(overlap).unwrap();
+        let header = header_with_contigs(&[("chr1", contig_len_u32)]);
+        let ranges = ("chr1", p(range_start), p(range_end)).resolve_target(&header).unwrap();
+        let segs: Vec<_> = Segments::new(ranges, opts).collect();
+        assert!(!segs.is_empty());
+        // Range-edge invariants: first segment of the *requested range*
+        // has overlap_start == 0; last segment has overlap_end == 0.
+        assert_eq!(segs.first().unwrap().overlap_start(), 0);
+        assert_eq!(segs.last().unwrap().overlap_end(), 0);
+        // First segment's tile_start equals the requested range_start;
+        // last segment's tile_end equals the requested range_end. This
+        // is a non-trivial check now that range_start != 0.
+        assert_eq!(segs.first().unwrap().start(), p(range_start));
+        assert_eq!(segs.last().unwrap().end(), p(range_end));
+        // Every tile sits entirely inside the requested range.
+        for s in &segs {
+            assert!(s.start() >= p(range_start));
+            assert!(s.end() <= p(range_end));
         }
+    }
 
-        // r[verify unified.segment_byte_budget]
-        /// Byte-aware subdivision must (a) keep cores tiling the range exactly
-        /// and (b) keep every segment under budget unless its core is a single
-        /// base (the irreducible leaf-bin case).
-        #[test]
-        fn byte_split_stays_under_budget_and_tiles(
-            range_start in 0u32..50_000,
-            len in 1u32..2_000,
-            bytes_per_base in 1u64..1_000,
-            budget in 1u64..200_000,
-            overlap in 0u32..50,
-        ) {
-            let range_end = range_start.saturating_add(len - 1).min(99_999);
-            let max_len = NonZeroU32::new(10_000).unwrap();
-            let opts = SegmentOptions::new(max_len).with_overlap(overlap).unwrap();
-            let segs =
-                byte_aware(100_000, range_start..=range_end, opts, budget, span_estimate(bytes_per_base));
+    // r[verify unified.segment_byte_budget]
+    /// Byte-aware subdivision must (a) keep cores tiling the range exactly
+    /// and (b) keep every segment under budget unless its core is a single
+    /// base (the irreducible leaf-bin case).
+    #[hegel::test]
+    fn byte_split_stays_under_budget_and_tiles(tc: TestCase) {
+        let range_start = tc.draw(gs::integers::<u32>().max_value(49_999));
+        let len = tc.draw(gs::integers::<u32>().min_value(1).max_value(1_999));
+        let bytes_per_base = tc.draw(gs::integers::<u64>().min_value(1).max_value(999));
+        let budget = tc.draw(gs::integers::<u64>().min_value(1).max_value(199_999));
+        let overlap = tc.draw(gs::integers::<u32>().max_value(49));
+        let range_end = range_start.saturating_add(len - 1).min(99_999);
+        let max_len = NonZeroU32::new(10_000).unwrap();
+        let opts = SegmentOptions::new(max_len).with_overlap(overlap).unwrap();
+        let segs = byte_aware(
+            100_000,
+            range_start..=range_end,
+            opts,
+            budget,
+            span_estimate(bytes_per_base),
+        );
 
-            // Cores tile the requested range exactly.
-            prop_assert_eq!(*segs.first().unwrap().core_range().start(), p(range_start));
-            prop_assert_eq!(*segs.last().unwrap().core_range().end(), p(range_end));
-            for w in segs.windows(2) {
-                prop_assert_eq!(
-                    w[0].core_range().end().as_u64() + 1,
-                    w[1].core_range().start().as_u64()
-                );
-            }
-            // Each segment fits the budget, or it can't be made cheaper: the
-            // greedy floor is one core position expanded by overlap on each
-            // side (the smallest range it can emit), so an over-budget segment
-            // costs at most that floor.
-            let floor = (1 + 2 * u64::from(overlap)) * bytes_per_base;
-            for s in &segs {
-                let bytes = (s.end().as_u64() - s.start().as_u64() + 1) * bytes_per_base;
-                prop_assert!(
-                    bytes <= budget.max(floor),
-                    "segment {:?} = {} B exceeds max(budget {}, floor {})",
-                    (s.start().as_u64(), s.end().as_u64()), bytes, budget, floor
-                );
-            }
+        // Cores tile the requested range exactly.
+        assert_eq!(*segs.first().unwrap().core_range().start(), p(range_start));
+        assert_eq!(*segs.last().unwrap().core_range().end(), p(range_end));
+        for w in segs.windows(2) {
+            assert_eq!(w[0].core_range().end().as_u64() + 1, w[1].core_range().start().as_u64());
+        }
+        // Each segment fits the budget, or it can't be made cheaper: the
+        // greedy floor is one core position expanded by overlap on each
+        // side (the smallest range it can emit), so an over-budget segment
+        // costs at most that floor.
+        let floor = (1 + 2 * u64::from(overlap)) * bytes_per_base;
+        for s in &segs {
+            let bytes = (s.end().as_u64() - s.start().as_u64() + 1) * bytes_per_base;
+            assert!(
+                bytes <= budget.max(floor),
+                "segment {:?} = {} B exceeds max(budget {}, floor {})",
+                (s.start().as_u64(), s.end().as_u64()),
+                bytes,
+                budget,
+                floor
+            );
         }
     }
 }

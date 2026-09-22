@@ -261,20 +261,19 @@ mod tests {
 }
 
 #[cfg(test)]
-mod proptests {
+mod properties {
     use super::*;
-    use proptest::prelude::*;
+    use hegel::prelude::*;
     use std::io::Write as _;
     use tempfile::NamedTempFile;
 
-    proptest! {
-        #[test]
-        fn fuzz_detect_format(data in proptest::collection::vec(any::<u8>(), 0..256 * 1024)) {
-            // Just ensure detect_format doesn't panic on arbitrary input data.
-            let mut f = NamedTempFile::new().expect("tempfile");
-            f.write_all(data.as_slice()).expect("write");
-            f.flush().expect("flush");
-            let _ = detect(f.path());
-        }
+    #[hegel::test]
+    fn fuzz_detect_format(tc: TestCase) {
+        let data = tc.draw(gs::binary().max_size(256 * 1024));
+        // Just ensure detect_format doesn't panic on arbitrary input data.
+        let mut f = NamedTempFile::new().expect("tempfile");
+        f.write_all(data.as_slice()).expect("write");
+        f.flush().expect("flush");
+        let _ = detect(f.path());
     }
 }

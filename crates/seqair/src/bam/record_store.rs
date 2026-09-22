@@ -1861,7 +1861,7 @@ pub(crate) mod tests {
         fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
     }
 
-    /// Decide accept/reject from a runtime flag — used by proptests.
+    /// Decide accept/reject from a runtime flag — used by the properties below.
     #[derive(Clone)]
     struct AcceptFlag(bool);
     impl CustomizeRecordStore for AcceptFlag {

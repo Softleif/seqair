@@ -1249,7 +1249,7 @@ mod tests {
 
     // ── Random CIGAR walk matches oracle ─────────────────────────────────
 
-    mod proptests {
+    mod properties {
         use super::*;
         use hegel::prelude::*;
 
@@ -1537,7 +1537,7 @@ mod tests {
         }
 
         // r[verify cigar.aligned_pairs.htslib_equivalence]
-        mod htslib_proptests {
+        mod htslib_properties {
             use super::*;
             use hegel::prelude::*;
 

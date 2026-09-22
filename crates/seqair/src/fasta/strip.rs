@@ -327,7 +327,7 @@ unsafe fn uppercase_neon(bytes: &mut [u8]) {
 #[allow(clippy::arithmetic_side_effects, reason = "test arithmetic is not safety-critical")]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
     /// Independent scalar oracle: the exact semantics of the loop this
     /// replaced, written as plainly as possible.
@@ -390,13 +390,12 @@ mod tests {
 
     // r[verify fasta.fetch.newline_stripping]
     // r[verify fasta.fetch.uppercase]
-    proptest! {
-        /// Every byte value at every length, covering the vector bodies, their
-        /// scalar tails, and delimiters at arbitrary positions: the dispatched
-        /// SIMD path must equal the oracle bit-for-bit.
-        #[test]
-        fn simd_matches_scalar_reference(raw in proptest::collection::vec(any::<u8>(), 0..4096)) {
-            prop_assert_eq!(run(&raw), strip_upper_reference(&raw));
-        }
+    /// Every byte value at every length, covering the vector bodies, their
+    /// scalar tails, and delimiters at arbitrary positions: the dispatched
+    /// SIMD path must equal the oracle bit-for-bit.
+    #[hegel::test]
+    fn simd_matches_scalar_reference(tc: TestCase) {
+        let raw = tc.draw(gs::binary().max_size(4096));
+        assert_eq!(run(&raw), strip_upper_reference(&raw));
     }
 }

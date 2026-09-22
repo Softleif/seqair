@@ -708,7 +708,7 @@ mod tests {
         assert_eq!(parse_md_for_counts(b"2T2^T2"), (1, 1));
     }
 
-    mod proptests {
+    mod properties {
         use super::super::super::cigar::CigarOp;
         use super::*;
         use hegel::prelude::*;

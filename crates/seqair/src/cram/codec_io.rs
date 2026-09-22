@@ -79,7 +79,7 @@ pub fn read_uint7(src: &mut &[u8]) -> Result<u32, Uint7Error> {
 #[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
-    reason = "test code: bounded by proptest ranges and fixed inputs"
+    reason = "test code: bounded by generator ranges and fixed inputs"
 )]
 mod tests {
     use super::*;

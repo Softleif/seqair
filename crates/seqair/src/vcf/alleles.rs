@@ -401,65 +401,66 @@ mod tests {
 }
 
 #[cfg(test)]
-mod proptests {
+mod properties {
     use super::*;
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
-    fn arb_base() -> impl Strategy<Value = Base> {
-        prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T),]
-    }
+    const ACGT: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
 
-    fn arb_alleles() -> impl Strategy<Value = Alleles> {
-        prop_oneof![
-            // Reference
-            arb_base().prop_map(Alleles::reference),
-            // SNV — pick ref and alt that differ
-            (arb_base(), arb_base())
-                .prop_filter("ref != alt", |(r, a)| r != a)
-                .prop_map(|(r, a)| Alleles::snv(r, a).unwrap()),
-            // Insertion — 1-8 inserted bases
-            (arb_base(), proptest::collection::vec(arb_base(), 1..8))
-                .prop_map(|(anchor, ins)| Alleles::insertion(anchor, &ins).unwrap()),
-            // Deletion — 1-8 deleted bases
-            (arb_base(), proptest::collection::vec(arb_base(), 1..8))
-                .prop_map(|(anchor, del)| Alleles::deletion(anchor, &del).unwrap()),
-        ]
+    #[hegel::composite]
+    fn arb_alleles(tc: &TestCase) -> Alleles {
+        let base = || gs::sampled_from(&ACGT);
+        let bases = || gs::vecs(gs::sampled_from(&ACGT)).min_size(1).max_size(7);
+        match tc.draw_silent(gs::integers::<u8>().max_value(3)) {
+            0 => Alleles::reference(tc.draw_silent(base())),
+            1 => {
+                // SNV — pick ref and alt that differ
+                let r = tc.draw_silent(base());
+                let alt = gs::sampled_from(&ACGT).filter(move |a| *a != r);
+                Alleles::snv(r, tc.draw_silent(alt)).unwrap()
+            }
+            // Insertion / deletion — 1-7 inserted or deleted bases
+            2 => Alleles::insertion(tc.draw_silent(base()), &tc.draw_silent(bases())).unwrap(),
+            _ => Alleles::deletion(tc.draw_silent(base()), &tc.draw_silent(bases())).unwrap(),
+        }
     }
 
     // r[verify vcf_record.alleles_serialization]
-    proptest! {
-        #[test]
-        fn write_into_consistent_with_text_methods(alleles in arb_alleles()) {
-            let mut ref_buf = Vec::new();
-            alleles.write_ref_into(&mut ref_buf);
-            let ref_str = String::from_utf8(ref_buf).unwrap();
-            let ref_text = alleles.ref_text();
-            prop_assert_eq!(ref_str.as_str(), ref_text.as_str());
+    #[hegel::test]
+    fn write_into_consistent_with_text_methods(tc: TestCase) {
+        let alleles = tc.draw(arb_alleles().print_as_debug());
+        let mut ref_buf = Vec::new();
+        alleles.write_ref_into(&mut ref_buf);
+        let ref_str = String::from_utf8(ref_buf).unwrap();
+        let ref_text = alleles.ref_text();
+        assert_eq!(ref_str.as_str(), ref_text.as_str());
 
-            let mut alt_buf = Vec::new();
-            let n = alleles.write_alts_into(&mut alt_buf);
-            let alt_texts = alleles.alt_texts();
-            prop_assert_eq!(n, alt_texts.len());
-            if !alt_texts.is_empty() {
-                let expected: String = alt_texts.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",");
-                let alt_str = String::from_utf8(alt_buf).unwrap();
-                prop_assert_eq!(alt_str, expected);
-            }
+        let mut alt_buf = Vec::new();
+        let n = alleles.write_alts_into(&mut alt_buf);
+        let alt_texts = alleles.alt_texts();
+        assert_eq!(n, alt_texts.len());
+        if !alt_texts.is_empty() {
+            let expected: String =
+                alt_texts.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",");
+            let alt_str = String::from_utf8(alt_buf).unwrap();
+            assert_eq!(alt_str, expected);
         }
+    }
 
-        // r[verify vcf_record.alleles_rlen]
-        #[test]
-        fn rlen_matches_ref_text_length(alleles in arb_alleles()) {
-            let ref_text = alleles.ref_text();
-            prop_assert_eq!(alleles.rlen(), ref_text.len());
-        }
+    // r[verify vcf_record.alleles_rlen]
+    #[hegel::test]
+    fn rlen_matches_ref_text_length(tc: TestCase) {
+        let alleles = tc.draw(arb_alleles().print_as_debug());
+        let ref_text = alleles.ref_text();
+        assert_eq!(alleles.rlen(), ref_text.len());
+    }
 
-        // r[verify vcf_record.allele_count]
-        #[test]
-        fn n_allele_equals_one_plus_alts(alleles in arb_alleles()) {
-            let alts = alleles.alt_texts();
-            let expected = 1usize.saturating_add(alts.len());
-            prop_assert_eq!(alleles.n_allele(), expected);
-        }
+    // r[verify vcf_record.allele_count]
+    #[hegel::test]
+    fn n_allele_equals_one_plus_alts(tc: TestCase) {
+        let alleles = tc.draw(arb_alleles().print_as_debug());
+        let alts = alleles.alt_texts();
+        let expected = 1usize.saturating_add(alts.len());
+        assert_eq!(alleles.n_allele(), expected);
     }
 }

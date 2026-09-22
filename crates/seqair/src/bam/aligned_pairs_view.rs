@@ -1084,7 +1084,7 @@ mod tests {
 
     // ── Property: with_read pass-through ──────────────────────────────────
 
-    mod proptests {
+    mod properties {
         use super::super::super::aligned_pairs::AlignedPairs;
         use super::*;
         use hegel::prelude::*;
