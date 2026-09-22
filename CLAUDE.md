@@ -66,11 +66,11 @@ Frequent CI-only failures to watch for: `clippy::cast_possible_truncation`, `cli
 
 ## VCF/BCF writing
 
-**Two encoding paths**: `BcfWriter::write_record(&VcfRecord)` (generic, allocates per record) and `BcfRecordEncoder` with typed handles (zero-alloc, pre-resolved dict indices). Both must produce BCF that noodles and bcftools parse identically.
+**Two output paths, one encoder**: `Writer` takes an `OutputFormat` (`Vcf` text, `VcfGz`, `Bcf`) and records go through the same typestate `RecordEncoder` chain (`Begun` → `Filtered` → `WithSamples` → `emit()`), but VCF text and BCF binary are serialized by entirely separate code below that. The two must render the same logical record to the same field values — that is `r[record_encoder.vcf_bcf_equivalence]`, and the float printers in particular share nothing. (There is no `BcfWriter` and no `VcfRecord`; both were removed.)
 
 **Type-safe Alleles**: `Reference`/`Snv`/`Insertion`/`Deletion`/`Complex` — enforces VCF structural invariants at construction. `write_ref_into`/`write_alts_into` for zero-alloc serialization. `begin_record()` on the encoder writes the BCF fixed header + alleles directly.
 
-**Typed field handles**: `ScalarInfoHandle<T>`, `PerAlleleInfoHandle<T>`, `FlagInfoHandle`, `GtFormatHandle`, etc. Pre-resolved from header at setup. `handle.encode(&mut enc, value)` writes directly into BCF buffers. `BcfValue` trait: `scalar_type_code()` selects smallest int type for i32; arrays scan all values for uniform type.
+**Typed field handles**: `InfoKey<V>`/`FormatKey<V>` with the value kind as the parameter (`Scalar<i32>`, `Arr<f32>`, `OptArr<i32>`, `Flag`, `Str`, `Gt`), and an alias per combination — `InfoInt`, `InfoFloats`, `InfoIntOpts`, `FormatGt`, `FormatString`, etc. Pre-resolved from the header at setup; the `FieldId` inside is `pub(crate)`, so the `InfoEncoder`/`FormatEncoder` trait methods are not reachable from outside the crate and `handle.encode(&mut enc, value)` is the whole public surface. `BcfValue` trait: `scalar_type_code()` selects smallest int type for i32; arrays scan all values for uniform type.
 
 **BCF format pitfalls** (caught by tests):
 
