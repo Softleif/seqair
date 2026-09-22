@@ -278,7 +278,9 @@ fn arb_region(tc: &TestCase, reads: Vec<Read>) -> (usize, u32, u32) {
 }
 
 // r[verify bam.reader.overlap_filter]
-// r[verify bam_writer.bai_coproduction]
+// r[verify index_builder.bai_format]
+// r[verify index_builder.bai_all_refs]
+// r[verify index_builder.binning]
 /// seqair's reader, samtools through seqair's index, and the generated truth
 /// must name the same records for the same region.
 #[hegel::test(test_cases = 48)]
