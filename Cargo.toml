@@ -10,6 +10,7 @@ thiserror = "2.0.18"
 bytemuck = { version = "1.25", features = ["derive"] }
 insta = { version = "1.47.2", features = ["filters"] }
 proptest = "1.11.0"
+hegeltest = "0.46.2"
 rust-htslib = { version = "1.0.0", default-features = false }
 
 [workspace.lints.rust]
@@ -69,6 +70,7 @@ format_in_format_args = "warn"
 [profile.dev.package]
 rand_chacha.opt-level = 3
 proptest.opt-level = 3
+hegeltest.opt-level = 3
 insta.opt-level = 3
 similar.opt-level = 3
 libdeflater.opt-level = 3
