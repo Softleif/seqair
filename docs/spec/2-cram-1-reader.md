@@ -513,6 +513,13 @@ CRAI entries with `alignment_span == 0` (but `alignment_start > 0`) indicate unk
 r[cram.index.multi_ref_slices]
 Multi-ref slices produce multiple index entries (one per reference they span). A query for one reference may hit a multi-ref slice that also contains records from other references. The reader MUST filter records by reference ID after decoding.
 
+r[cram.feature.quality_only]
+The `Q` (quality score) and `q` (quality scores) features carry quality and nothing else. A reader MUST consume their payload, to keep the codec streams aligned, and MUST NOT emit a read base, a CIGAR operation, or advance either the read or the reference position for them. They are not anchors for a reference match.
+
+> _[CRAM3] §10.2 — feature `Q` is a quality score at a position; htslib's decoder writes `qual[pos-1]` and leaves `seq_pos` and the CIGAR untouched (`cram_decode.c:1605`)._
+
+This is reachable without asking for it. In no-reference mode htslib emits one `Q` feature per inserted base alongside the `I` feature (`cram_encode.c`, `BAM_CINS` under `no_ref`), and htslib falls into no-reference mode on its own when `embed_ref` meets `multi_seq_per_slice`. A reader that treats `Q` as a base then produces one extra base per inserted base, and the record fails its own sequence/quality length check rather than decoding wrongly — which is the good outcome, but only by luck.
+
 r[cram.slice.multi_ref_reference_window]
 A multi-reference container holds one CRAI entry per slice per reference, so for any one reference there may be several. The reference window a multi-ref container is decoded against MUST be the union of every entry matching that container and that reference — the lowest start and the highest end — and MUST NOT be taken from the first matching entry alone.
 

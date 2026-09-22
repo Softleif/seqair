@@ -1113,37 +1113,19 @@ fn decode_features_and_reconstruct(
                 read_pos = read_pos.wrapping_add(len);
                 ref_pos = ref_pos.wrapping_add(len);
             }
-            // q — quality block: data is consumed (so the codec stream stays
-            // aligned), value discarded. Anchors a 1-base reference match.
+            // r[impl cram.feature.quality_only]
+            // q — quality block: consumed so the codec stream stays aligned,
+            // value discarded. It carries no base and moves nothing.
             // r[unimpl cram.feature.quality_block]
             b'q' => {
                 feature_byte_buf.clear();
                 ds.quality_block.decode_into(ctx, feature_byte_buf)?;
-                emit_ref_match(
-                    reference_seq,
-                    ref_offset,
-                    &mut ref_pos,
-                    &mut read_pos,
-                    &mut ref_warned,
-                    bases_buf,
-                    cigar_ops_buf,
-                    &mut matching_bases,
-                );
             }
+            // r[impl cram.feature.quality_only]
             // Q — single quality score: same shape as q but no payload.
             // r[unimpl cram.feature.quality_score]
             b'Q' => {
                 let _qual = ds.quality_score.decode(ctx)?;
-                emit_ref_match(
-                    reference_seq,
-                    ref_offset,
-                    &mut ref_pos,
-                    &mut read_pos,
-                    &mut ref_warned,
-                    bases_buf,
-                    cigar_ops_buf,
-                    &mut matching_bases,
-                );
             }
             _ => return Err(CramError::UnknownFeatureCode { feature_code: fc }),
         }
@@ -1261,16 +1243,14 @@ fn scan_features_for_refspan(
                 read_pos = read_pos.wrapping_add(len);
                 ref_pos = ref_pos.wrapping_add(len);
             }
+            // r[impl cram.feature.quality_only]
             b'q' => {
                 feature_byte_buf.clear();
                 ds.quality_block.decode_into(ctx, feature_byte_buf)?;
-                read_pos = read_pos.wrapping_add(1);
-                ref_pos = ref_pos.wrapping_add(1);
             }
+            // r[impl cram.feature.quality_only]
             b'Q' => {
                 let _qual = ds.quality_score.decode(ctx)?;
-                read_pos = read_pos.wrapping_add(1);
-                ref_pos = ref_pos.wrapping_add(1);
             }
             _ => return Err(CramError::UnknownFeatureCode { feature_code: fc }),
         }
