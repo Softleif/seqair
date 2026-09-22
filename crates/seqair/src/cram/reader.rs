@@ -617,26 +617,37 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             // For multi-ref containers (ref_seq_id=-2), the container's alignment
             // range covers multiple references — use the CRAI entry's range for our tid instead.
             let (ref_start, ref_end_clamped) = if container_header.ref_seq_id == -2 {
-                // Multi-ref: find the CRAI entry for this container + our tid
-                let crai_entry = entries.iter().find(|e| e.container_offset == container_offset);
-                match crai_entry {
-                    Some(e) if e.alignment_span > 0 => {
+                // r[impl cram.slice.multi_ref_reference_window]
+                // Multi-ref: a container holds one CRAI entry per slice per
+                // reference, so there is not *a* entry for this container and
+                // this tid — there are as many as it has slices touching the
+                // tid, and `entries` is already narrowed to the ones this query
+                // wants. The window has to span all of them. Taking only the
+                // first stops the reference short of whatever a later slice
+                // reaches, and the tail of those reads decodes as `N` with no
+                // error at all, because running past the end of the fetched
+                // reference is only a warning (r[`cram.slice.ref_bounds_warning`]).
+                let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
+                let span = entries
+                    .iter()
+                    .filter(|e| e.container_offset == container_offset && e.alignment_span > 0)
+                    .try_fold(None::<(u64, u64)>, |window, e| {
                         let s = Pos1::try_from(e.alignment_start.max(1))
                             .map_err(|_| CramError::InvalidPosition { value: e.alignment_start })?
                             .to_zero_based()
                             .as_u64();
-                        let e_end =
-                            s.checked_add(e.alignment_span as u64).ok_or(CramError::Truncated {
-                                context: "crai alignment end overflow",
-                            })?;
-                        let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
-                        (s, e_end.min(ref_len))
-                    }
-                    _ => {
-                        // No CRAI span info — fetch the full contig
-                        let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
-                        (start_u64.min(ref_len), end_u64.min(ref_len))
-                    }
+                        let e_end = s.checked_add(e.alignment_span.unsigned_abs()).ok_or(
+                            CramError::Truncated { context: "crai alignment end overflow" },
+                        )?;
+                        Ok::<_, CramError>(Some(match window {
+                            Some((lo, hi)) => (lo.min(s), hi.max(e_end)),
+                            None => (s, e_end),
+                        }))
+                    })?;
+                match span {
+                    Some((s, e_end)) => (s, e_end.min(ref_len)),
+                    // No CRAI span info — fetch the full contig
+                    None => (start_u64.min(ref_len), end_u64.min(ref_len)),
                 }
             } else {
                 let ref_start = Pos1::try_from(container_header.alignment_start.max(1))

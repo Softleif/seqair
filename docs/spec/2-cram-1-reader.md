@@ -513,6 +513,11 @@ CRAI entries with `alignment_span == 0` (but `alignment_start > 0`) indicate unk
 r[cram.index.multi_ref_slices]
 Multi-ref slices produce multiple index entries (one per reference they span). A query for one reference may hit a multi-ref slice that also contains records from other references. The reader MUST filter records by reference ID after decoding.
 
+r[cram.slice.multi_ref_reference_window]
+A multi-reference container holds one CRAI entry per slice per reference, so for any one reference there may be several. The reference window a multi-ref container is decoded against MUST be the union of every entry matching that container and that reference — the lowest start and the highest end — and MUST NOT be taken from the first matching entry alone.
+
+This fails quietly if it is got wrong, which is why it is a rule rather than a comment. A window that stops short does not error: bases past the end of the fetched reference are reconstructed as `N` and running off the end is only a warning (`r[cram.slice.ref_bounds_warning+2]`), so the records decode and are simply wrong. Two slices for the same reference one base apart is enough to trigger it, and htslib enables multi-reference slices on its own once a container would hold few records per reference, so no writer option has to ask for the layout.
+
 r[cram.index.unmapped]
 Unmapped records (ref ID = -1) have start=0, span=0. They are only returned if explicitly queried. For `fetch_into`, unmapped records MUST flow through to the `filter_raw` customizer; the pileup engine is responsible for excluding them per `r[pileup.unmapped_excluded]`.
 
