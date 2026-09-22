@@ -1,0 +1,73 @@
+name: Nightly
+
+on:
+  schedule:
+    # Run nightly at 03:00 UTC
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Seconds per fuzz target"
+        required: false
+        default: "20"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_BOOSTRAP: 1
+
+jobs:
+  fuzz:
+    name: Fuzz all targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run all fuzz targets
+        working-directory: crates/seqair
+        run: ./fuzz/run_all.sh ${{ github.event.inputs.duration || '20' }}
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzzing-artifacts--${{ github.sha }}
+          path: crates/seqair/fuzz/artifacts
+
+  thorough:
+    name: Property tests (thorough profile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install htslib build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool pkg-config \
+            zlib1g-dev libbz2-dev liblzma-dev \
+            libssl-dev libcurl4-openssl-dev \
+            samtools tabix bcftools
+
+      # The `thorough` profile in hegel.toml is 10000 cases against the CI
+      # profile's 1000. Nothing ran it before, so the rare paths a property
+      # only reaches once in a few thousand draws were generated and never
+      # executed. It belongs on the nightly schedule rather than in PR CI:
+      # the same reasoning as the fuzz job above, for the same cost.
+      #
+      # `HEGEL_TEST_CASES` is deliberately *not* set — it would override the
+      # per-test counts that the expensive subprocess round-trips against
+      # bcftools, htslib and samtools pin for themselves, and those exist
+      # because they are minutes, not seconds, at four figures.
+      - name: Test
+        env:
+          HEGEL_DEFAULT_PROFILE: thorough
+        run: cargo test --all
