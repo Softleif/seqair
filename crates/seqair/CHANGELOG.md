@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **A float below about `1e-25` could not be written to VCF at all.** `write_float_g` sized its
+  decimal places from the value's magnitude and formatted into a 32-byte buffer, so six significant
+  digits of `5.169879e-26` overflowed it and the write failed with `FormattedFloatLongerThan32Chars`,
+  taking the whole record with it. Those magnitudes do not occur in QUAL, but they do in a p-value
+  carried in INFO. The writer now falls back to scientific notation there, which is what `%g` and
+  htslib emit. Values that already fit are byte-identical to before.
+
+### Internal
+
+- Property-based tests moved from `proptest` to [hegel](https://hegel.dev/) (`hegeltest`). Case
+  counts live in `hegel.toml` at the workspace root: 256 locally, 1000 on CI, and a `thorough`
+  profile at 10000. No public API change; `proptest` is gone from the dev-dependencies.
+
 ## v0.2.0 (2026-09-14)
 
 A streaming-window BAM region reader, newtyped record and query indices, a unified
