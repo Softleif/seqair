@@ -143,6 +143,7 @@ impl<W: Write> BamWriter<W> {
     }
 
     // r[impl bam_writer.record_size_limit]
+    // r[impl bam_writer.validate_before_write]
     // r[impl bam_writer.index_record_dispatch]
     // r[impl bam_writer.flush_before_record]
     // r[impl bam_writer.insertion_order]

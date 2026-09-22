@@ -23,13 +23,18 @@
 use hegel::prelude::*;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
-use seqair::bam::owned_record::OwnedBamRecord;
-use seqair::bam::writer::BamWriterBuilder;
-use seqair::bam::{BamError, BamHeaderError, BgzfError, IndexedBamReader, Pos0, RecordStore};
+use seqair::bam::owned_record::{OwnedBamRecord, OwnedRecordError};
+use seqair::bam::writer::{BamWriteError, BamWriter, BamWriterBuilder};
+use seqair::bam::{
+    BamError, BamHeaderError, BgzfError, IndexedBamReader, Pos0, RecordIdx, RecordStore,
+};
+use seqair::io::IndexError;
 use seqair_types::bam_flags::BamFlags;
 use seqair_types::{Base, BaseQuality};
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ── A BAM that spans several BGZF blocks ────────────────────────────────
 
@@ -381,4 +386,354 @@ fn a_corrupted_block_always_arrives_with_its_bgzf_cause_intact(tc: TestCase) {
         "{corruption:?} at block {idx} gave {variant}, expected one of {:?} ({err:?})",
         corruption.expected(),
     );
+}
+
+// ── BamWriter: which error, and whether the stream was touched ──────────
+
+/// A `Write` sink that accepts `limit` bytes and then fails, so the writer's
+/// poisoning can be driven by a real I/O failure rather than a validation one.
+#[derive(Debug, Clone)]
+struct FailAfter {
+    state: Arc<Mutex<SinkState>>,
+    limit: usize,
+}
+
+#[derive(Debug, Default)]
+struct SinkState {
+    written: usize,
+    failed: bool,
+}
+
+impl FailAfter {
+    fn new(limit: usize) -> Self {
+        Self { state: Arc::new(Mutex::new(SinkState::default())), limit }
+    }
+    fn written(&self) -> usize {
+        self.state.lock().unwrap().written
+    }
+}
+
+impl Write for FailAfter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut state = self.state.lock().unwrap();
+        if state.written + buf.len() > self.limit {
+            state.failed = true;
+            return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+        }
+        state.written += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn writer_header() -> BamHeader {
+    BamHeader::from_sam_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:100000\n").unwrap()
+}
+
+/// A minimal mapped record. `len` bases of `A` with matching qualities.
+fn mapped_record(ref_id: i32, pos: u32, name: &str, len: usize) -> OwnedBamRecord {
+    OwnedBamRecord::builder(ref_id, Some(Pos0::new(pos).unwrap()), name.as_bytes().to_vec())
+        .flags(BamFlags::empty())
+        .mapq(60)
+        .cigar(vec![CigarOp::new(CigarOpType::Match, len as u32)])
+        .seq(vec![Base::A; len])
+        .qual(vec![BaseQuality::from_byte(30); len])
+        .build()
+        .unwrap()
+}
+
+/// Bytes of a BAM that got a header and nothing else — the baseline a write
+/// that was rejected before reaching BGZF must leave behind.
+fn header_only_bytes(dir: &std::path::Path) -> Vec<u8> {
+    let header = writer_header();
+    let path = dir.join("control.bam");
+    let writer = BamWriterBuilder::to_path(&path, &header).write_index(true).build().unwrap();
+    writer.finish().unwrap();
+    std::fs::read(&path).unwrap()
+}
+
+/// Run `attempt` against a fresh indexed path-target writer and return the
+/// error it produced together with the file that was left behind.
+fn rejected_write(
+    dir: &std::path::Path,
+    attempt: impl FnOnce(&mut BamWriter<BufWriter<File>>) -> BamWriteError,
+) -> (BamWriteError, Vec<u8>) {
+    let header = writer_header();
+    let path = dir.join("subject.bam");
+    let mut writer = BamWriterBuilder::to_path(&path, &header).write_index(true).build().unwrap();
+    let err = attempt(&mut writer);
+    writer.finish().unwrap();
+    (err, std::fs::read(&path).unwrap())
+}
+
+// r[verify bam_writer.error_type]
+// r[verify bam_writer.index_record_dispatch]
+// r[verify bam_writer.validate_before_write]
+/// A mapped record with `ref_id == -1` is structurally unindexable. The
+/// validation runs *before* the BGZF write, so the rejection must leave a file
+/// byte-identical to one that never saw the record — the part a test that only
+/// checks the error variant would miss.
+#[test]
+fn a_mapped_record_without_a_reference_is_rejected_before_the_stream_is_touched() {
+    let dir = tempfile::tempdir().unwrap();
+    let control = header_only_bytes(dir.path());
+
+    let (err, actual) = rejected_write(dir.path(), |writer| {
+        let record = mapped_record(-1, 100, "orphan", 10);
+        writer.write(&record).expect_err("a mapped record with ref_id == -1 must be refused")
+    });
+
+    assert!(
+        matches!(err, BamWriteError::MappedWithoutReference),
+        "expected MappedWithoutReference, got {err:?}",
+    );
+    assert_eq!(actual, control, "the rejected record must not have reached the BGZF stream");
+}
+
+// r[verify bam_writer.error_type]
+// r[verify bam_writer.record_size_limit]
+// r[verify bam_writer.validate_before_write]
+/// The 2 MiB record limit is checked against the serialized bytes, before the
+/// stream. `size` must be the real serialized length, not a guess.
+#[test]
+fn an_oversized_record_reports_its_serialized_size_and_leaves_the_stream_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let control = header_only_bytes(dir.path());
+
+    let record = mapped_record(0, 100, "huge", 3_000_000);
+    let mut serialized = Vec::new();
+    record.to_bam_bytes(&mut serialized).unwrap();
+    let serialized_len = serialized.len();
+    assert!(serialized_len > 2 * 1024 * 1024, "the fixture must exceed the limit");
+
+    let (err, actual) = rejected_write(dir.path(), |writer| {
+        writer.write(&record).expect_err("a record past the 2 MiB limit must be refused")
+    });
+
+    let BamWriteError::RecordTooLarge { size } = err else {
+        panic!("expected RecordTooLarge, got {err:?}");
+    };
+    assert_eq!(size, serialized_len, "`size` must be the serialized record length");
+    assert_eq!(actual, control, "the oversized record must not have reached the BGZF stream");
+}
+
+// r[verify bam_writer.error_type]
+// r[verify bam_writer.validate_before_write]
+// r[verify bam.owned_record.seq_qual_length_at_serialization]
+/// Serialization failures arrive wrapped as `BamWriteError::Record`, carrying
+/// the `OwnedRecordError` that caused them — and the record never reaches BGZF,
+/// because `to_bam_bytes` validates before the writer emits anything.
+#[test]
+fn a_record_whose_qual_no_longer_matches_its_seq_is_refused_with_both_lengths() {
+    let dir = tempfile::tempdir().unwrap();
+    let control = header_only_bytes(dir.path());
+
+    // An unmapped record has no CIGAR to contradict, so `set_seq` accepts a
+    // shorter sequence and leaves the ten quality scores behind it.
+    let mut record = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
+        .flags(BamFlags::from(4))
+        .seq(vec![Base::A; 10])
+        .qual(vec![BaseQuality::from_byte(30); 10])
+        .build()
+        .unwrap();
+    record.set_seq(vec![Base::C; 4]).expect("no CIGAR to contradict the new length");
+
+    let (err, actual) = rejected_write(dir.path(), |writer| {
+        writer.write(&record).expect_err("seq/qual must agree at serialization time")
+    });
+
+    let BamWriteError::Record {
+        source: OwnedRecordError::SeqQualLengthMismatch { seq_len, qual_len },
+    } = err
+    else {
+        panic!("expected Record(SeqQualLengthMismatch), got {err:?}");
+    };
+    assert_eq!((seq_len, qual_len), (4, 10), "both lengths must be reported as they are");
+    assert_eq!(actual, control, "a record that failed to serialize must not reach the stream");
+}
+
+// r[verify bam_writer.error_type]
+// r[verify bam_writer.index_sort_order]
+/// Out-of-order input fails in the index builder, which runs *after* the BGZF
+/// write — so unlike the validations above, this record is already in the
+/// stream when the error comes back. Pinning both halves of that asymmetry is
+/// what keeps `r[bam_writer.index_record_dispatch]`'s ordering honest.
+#[test]
+fn an_out_of_order_record_fails_in_the_index_after_it_was_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let header = writer_header();
+    let path = dir.path().join("unsorted.bam");
+    let mut writer = BamWriterBuilder::to_path(&path, &header).write_index(true).build().unwrap();
+    writer.write(&mapped_record(0, 5_000, "first", 10)).unwrap();
+    let err = writer
+        .write(&mapped_record(0, 1_000, "backwards", 10))
+        .expect_err("a record before the previous one must be refused");
+    writer.finish().unwrap();
+    let with_both = std::fs::read(&path).unwrap();
+
+    let BamWriteError::Index { source: IndexError::UnsortedInput { tid, pos } } = err else {
+        panic!("expected Index(UnsortedInput), got {err:?}");
+    };
+    assert_eq!((tid, pos), (0, 1_000), "the offending record's tid and position");
+
+    // The same writer without the second record produces a strictly shorter
+    // file: the rejected record really did go into the stream first.
+    let control_path = dir.path().join("sorted.bam");
+    let mut control =
+        BamWriterBuilder::to_path(&control_path, &header).write_index(true).build().unwrap();
+    control.write(&mapped_record(0, 5_000, "first", 10)).unwrap();
+    control.finish().unwrap();
+    let with_one = std::fs::read(&control_path).unwrap();
+    assert_ne!(with_both, with_one, "the unsorted record was written before the index refused it");
+}
+
+// r[verify bam_writer.error_type]
+// r[verify record_store.record_idx.resolution]
+/// `write_store_record` with an index the store does not hold reports the index
+/// it was handed, not a generic failure.
+#[test]
+fn writing_a_record_the_store_does_not_hold_names_the_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let header = writer_header();
+    let path = dir.path().join("empty-store.bam");
+    let mut writer = BamWriterBuilder::to_path(&path, &header).write_index(true).build().unwrap();
+    let store = RecordStore::default();
+    let idx = RecordIdx::new(7).unwrap();
+
+    let err = writer.write_store_record(&store, idx).expect_err("an empty store holds no record 7");
+    let BamWriteError::NoSuchRecord { idx: reported } = err else {
+        panic!("expected NoSuchRecord, got {err:?}");
+    };
+    assert_eq!(reported, idx, "the error must name the index it was given");
+}
+
+// r[verify bam_writer.error_poisoning]
+/// A real I/O failure poisons the writer: the first error carries the BGZF
+/// write failure, and every later write returns `Poisoned` without reaching
+/// the sink at all.
+#[test]
+fn an_io_failure_poisons_the_writer_and_later_writes_never_reach_the_sink() {
+    let header = writer_header();
+    // Enough room for the header block, not enough for a flush of record data.
+    let sink = FailAfter::new(4096);
+    let mut writer = BamWriterBuilder::to_writer(sink.clone(), &header).build().unwrap();
+
+    let mut first_error = None;
+    for i in 0..4000u32 {
+        let record = mapped_record(0, i * 10 + 1, "read", 100);
+        if let Err(e) = writer.write(&record) {
+            first_error = Some(e);
+            break;
+        }
+    }
+    let first_error = first_error.expect("the sink must run out of room");
+    assert!(
+        matches!(
+            first_error,
+            BamWriteError::Bgzf { source: BgzfError::WriteFailed { .. } }
+                | BamWriteError::Io { .. }
+        ),
+        "the first failure must carry the I/O cause, got {first_error:?}",
+    );
+
+    let after_failure = sink.written();
+    for i in 0..5u32 {
+        let record = mapped_record(0, 900_000 + i, "later", 10);
+        let err = writer.write(&record).expect_err("a poisoned writer accepts nothing");
+        assert!(matches!(err, BamWriteError::Poisoned), "expected Poisoned, got {err:?}");
+    }
+    let store = RecordStore::default();
+    let err = writer
+        .write_store_record(&store, RecordIdx::new(0).unwrap())
+        .expect_err("a poisoned writer accepts nothing");
+    assert!(
+        matches!(err, BamWriteError::Poisoned),
+        "write_store_record must report Poisoned before NoSuchRecord, got {err:?}",
+    );
+    assert_eq!(sink.written(), after_failure, "a poisoned writer must not write to the sink");
+}
+
+/// The ways a `write()` can fail that this file drives from outside the crate.
+#[derive(Debug, Clone, Copy)]
+enum WriteFailure {
+    MappedWithoutReference,
+    RecordTooLarge,
+    SeqQualMismatch,
+    Unsorted,
+}
+
+impl WriteFailure {
+    const ALL: [Self; 4] =
+        [Self::MappedWithoutReference, Self::RecordTooLarge, Self::SeqQualMismatch, Self::Unsorted];
+
+    fn record(self) -> OwnedBamRecord {
+        match self {
+            Self::MappedWithoutReference => mapped_record(-1, 100, "orphan", 10),
+            // Large enough to pass the 2 MiB limit, small enough to build fast.
+            Self::RecordTooLarge => mapped_record(0, 100, "huge", 3_000_000),
+            Self::SeqQualMismatch => {
+                let mut record =
+                    OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
+                        .flags(BamFlags::from(4))
+                        .seq(vec![Base::A; 10])
+                        .qual(vec![BaseQuality::from_byte(30); 10])
+                        .build()
+                        .unwrap();
+                record.set_seq(vec![Base::C; 4]).unwrap();
+                record
+            }
+            // Position 1 is behind whatever the property already wrote.
+            Self::Unsorted => mapped_record(0, 1, "backwards", 10),
+        }
+    }
+
+    fn matches(self, err: &BamWriteError) -> bool {
+        match self {
+            Self::MappedWithoutReference => matches!(err, BamWriteError::MappedWithoutReference),
+            Self::RecordTooLarge => matches!(err, BamWriteError::RecordTooLarge { .. }),
+            Self::SeqQualMismatch => matches!(
+                err,
+                BamWriteError::Record { source: OwnedRecordError::SeqQualLengthMismatch { .. } }
+            ),
+            Self::Unsorted => {
+                matches!(err, BamWriteError::Index { source: IndexError::UnsortedInput { .. } })
+            }
+        }
+    }
+}
+
+// r[verify bam_writer.error_poisoning]
+/// Whichever way the first write fails, and however many records preceded it,
+/// every subsequent write returns `Poisoned` — never the original error again,
+/// and never a success.
+#[hegel::test(test_cases = 24)]
+fn the_first_failure_wins_and_everything_after_it_is_poisoned(tc: TestCase) {
+    let good = tc.draw(gs::integers::<u32>().min_value(1).max_value(6));
+    let which = tc.draw(gs::integers::<usize>().max_value(WriteFailure::ALL.len() - 1));
+    let failure = WriteFailure::ALL[which];
+    let later = tc.draw(gs::integers::<u32>().min_value(1).max_value(4));
+    tc.event(format!("{failure:?}"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let header = writer_header();
+    let path = dir.path().join("poison.bam");
+    let mut writer = BamWriterBuilder::to_path(&path, &header).write_index(true).build().unwrap();
+    for i in 0..good {
+        writer.write(&mapped_record(0, 1_000 + i * 100, "ok", 10)).expect("sorted and valid");
+    }
+
+    let err = writer.write(&failure.record()).expect_err("the failing record must be refused");
+    assert!(failure.matches(&err), "{failure:?} produced the wrong variant: {err:?}");
+
+    for i in 0..later {
+        // A record that would be perfectly acceptable on a healthy writer.
+        let record = mapped_record(0, 50_000 + i * 100, "after", 10);
+        let err = writer.write(&record).expect_err("the writer is poisoned");
+        assert!(
+            matches!(err, BamWriteError::Poisoned),
+            "write {i} after {failure:?} gave {err:?}, expected Poisoned",
+        );
+    }
 }

@@ -89,6 +89,9 @@ The writer MUST support co-producing a BAI index during writing. When enabled (v
 >
 > A mapped record with ref_id == -1 is structurally invalid (mapped flag set but no reference assigned). The writer MUST return a `BamWriteError` for such records when index co-production is enabled, since the IndexBuilder cannot index a record with no valid tid.
 
+r[bam_writer.validate_before_write]
+Every check a record can fail on its way into the stream — the 2 MiB size limit of `r[bam_writer.record_size_limit]`, the mapped-without-reference rejection above, and the field-limit checks `OwnedBamRecord::to_bam_bytes()` performs — MUST run before any of the record's bytes are handed to the BGZF writer. A check that ran afterwards would leave the rejected record in the output *and* poison the writer (`r[bam_writer.error_poisoning]`), so the caller could neither trust the file nor write past the failure. Sort-order validation is the deliberate exception: `IndexBuilder::push` is keyed by the virtual offset after the record, which does not exist until the record has been written, so an unsorted record is already in the stream when `r[bam_writer.index_sort_order]`'s error comes back.
+
 r[bam_writer.index_finish]
 When `finish()` is called and index co-production is enabled, the writer MUST call `index.finish(final_virtual_offset)` after flushing all record data and before writing the BGZF EOF block. The finished IndexBuilder is returned via `finish()` (see `r[bam_writer.finish]`). The caller is responsible for writing the `.bai` file via `index.write_bai()`. The writer itself MUST NOT write the index file — the caller controls the output path. This separation is important for atomic-rename workflows (write index to a temp file, then rename) and because stdout output has no sidecar path.
 
