@@ -88,6 +88,15 @@ QUAL characters MUST have 33 subtracted (Phred+33 encoding). The string `*` mean
 > - `Z` (string): `[tag0, tag1, 'Z', string_bytes, 0x00]`
 > - `H` (hex): `[tag0, tag1, 'H', hex_bytes, 0x00]`
 > - `B` (array): `[tag0, tag1, 'B', subtype, count_le32, values...]`
+>
+> Unlike a scalar `i`, a `B` array's element type is written down: `c`/`s`/`i`
+> are signed and `C`/`S`/`I` unsigned, and each element MUST be converted
+> through the type the subtype names. Converting a signed array through the
+> unsigned type of the same width rejects every negative element it holds,
+> which is most of what a signed array is for. An element outside the
+> subtype's range, and a subtype that is not one of `cCsSiIf`, MUST both
+> return an error — the element count is written before the elements, so
+> skipping one would leave a `B` tag promising more bytes than follow it.
 
 Note: the integer type selected here may differ from the type used by the original BAM writer, since SAM text loses the specific width information. This is an inherent limitation — see `r[unified.push_fields_equivalence]`.
 

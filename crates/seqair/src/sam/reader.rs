@@ -95,6 +95,9 @@ pub enum SamRecordError {
 
     #[error("aux B-array has {len} elements, exceeding u32::MAX")]
     AuxArrayTooLarge { len: usize },
+
+    #[error("aux B-array subtype {subtype:?} is not one of cCsSiIf")]
+    InvalidAuxSubtype { subtype: u8 },
 }
 
 #[non_exhaustive]
@@ -673,6 +676,16 @@ fn parse_cigar(cigar_str: &[u8], buf: &mut Vec<CigarOp>) -> Result<bool, SamErro
     Ok(true)
 }
 
+/// The integer value of a `B` array element. Float arrays parse their elements
+/// separately, so `f` yields a placeholder the caller ignores.
+fn parse_i64_or_float(v: &[u8], tag: &[u8], subtype: u8) -> Result<i64, SamError> {
+    if subtype == b'f' {
+        return Ok(0);
+    }
+    parse_i64(v)
+        .ok_or_else(|| SamRecordError::InvalidAuxValue { tag: tag.into(), value: v.into() }.into())
+}
+
 // r[impl sam.record.aux_tags]
 // r[impl sam.record.aux_parse_strict]
 fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
@@ -730,48 +743,55 @@ fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
                     .map_err(|_| SamRecordError::AuxArrayTooLarge { len: values.len() })?;
                 buf.extend_from_slice(&values_len_u32.to_le_bytes());
                 for v in &values {
+                    let raw = parse_i64_or_float(v, tag, subtype)?;
                     match subtype {
-                        b'c' | b'C' => {
-                            let raw =
-                                parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
+                        // The signed subtypes are `c`/`s`/`i` and the unsigned
+                        // ones `C`/`S`/`I`; converting a signed array through
+                        // the unsigned type rejects every negative value it
+                        // holds, which is most of what a signed array is for.
+                        b'c' => buf.push(
+                            i8::try_from(raw)
+                                .map_err(|_| SamRecordError::InvalidAuxValue {
                                     tag: tag.into(),
                                     value: (*v).into(),
-                                })?;
-                            let n =
-                                u8::try_from(raw).map_err(|_| SamRecordError::InvalidAuxValue {
+                                })?
+                                .cast_unsigned(),
+                        ),
+                        b'C' => buf.push(u8::try_from(raw).map_err(|_| {
+                            SamRecordError::InvalidAuxValue { tag: tag.into(), value: (*v).into() }
+                        })?),
+                        b's' => buf.extend_from_slice(
+                            &i16::try_from(raw)
+                                .map_err(|_| SamRecordError::InvalidAuxValue {
                                     tag: tag.into(),
                                     value: (*v).into(),
-                                })?;
-                            buf.push(n);
-                        }
-                        b's' | b'S' => {
-                            let raw =
-                                parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
+                                })?
+                                .to_le_bytes(),
+                        ),
+                        b'S' => buf.extend_from_slice(
+                            &u16::try_from(raw)
+                                .map_err(|_| SamRecordError::InvalidAuxValue {
                                     tag: tag.into(),
                                     value: (*v).into(),
-                                })?;
-                            let n = u16::try_from(raw).map_err(|_| {
-                                SamRecordError::InvalidAuxValue {
+                                })?
+                                .to_le_bytes(),
+                        ),
+                        b'i' => buf.extend_from_slice(
+                            &i32::try_from(raw)
+                                .map_err(|_| SamRecordError::InvalidAuxValue {
                                     tag: tag.into(),
                                     value: (*v).into(),
-                                }
-                            })?;
-                            buf.extend_from_slice(&n.to_le_bytes());
-                        }
-                        b'i' | b'I' => {
-                            let raw =
-                                parse_i64(v).ok_or_else(|| SamRecordError::InvalidAuxValue {
+                                })?
+                                .to_le_bytes(),
+                        ),
+                        b'I' => buf.extend_from_slice(
+                            &u32::try_from(raw)
+                                .map_err(|_| SamRecordError::InvalidAuxValue {
                                     tag: tag.into(),
                                     value: (*v).into(),
-                                })?;
-                            let n = u32::try_from(raw).map_err(|_| {
-                                SamRecordError::InvalidAuxValue {
-                                    tag: tag.into(),
-                                    value: (*v).into(),
-                                }
-                            })?;
-                            buf.extend_from_slice(&n.to_le_bytes());
-                        }
+                                })?
+                                .to_le_bytes(),
+                        ),
                         b'f' => {
                             let f: f32 = std::str::from_utf8(v)
                                 .ok()
@@ -782,7 +802,12 @@ fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
                             })?;
                             buf.extend_from_slice(&f.to_le_bytes());
                         }
-                        _ => {}
+                        // The element count is already written, so skipping an
+                        // unrecognised subtype would leave a `B` tag promising
+                        // more bytes than follow it.
+                        other => {
+                            return Err(SamRecordError::InvalidAuxSubtype { subtype: other }.into());
+                        }
                     }
                 }
             }
@@ -978,6 +1003,66 @@ mod tests {
     use crate::bam::record_store::RecordStore;
     use seqair_types::Base;
     use std::io::Write;
+
+    /// The aux bytes `parse_aux_tags` produces for one `TAG:TYPE:VALUE` field.
+    fn aux_bytes(field: &str) -> Result<Vec<u8>, SamError> {
+        let mut buf = Vec::new();
+        parse_aux_tags(field.as_bytes(), &mut buf)?;
+        Ok(buf)
+    }
+
+    // r[verify sam.record.aux_tags]
+    /// A `B` array's subtype says whether its elements are signed. Reading a
+    /// signed one through the unsigned type of the same width refuses every
+    /// negative element, which is most of what a signed array is for.
+    #[test]
+    fn signed_b_arrays_keep_their_negative_elements() {
+        assert_eq!(
+            aux_bytes("Xa:B:c,-1,-128,127").unwrap(),
+            b"XaBc\x03\x00\x00\x00\xff\x80\x7f".to_vec()
+        );
+        assert_eq!(
+            aux_bytes("Xa:B:s,-1,-32768").unwrap(),
+            b"XaBs\x02\x00\x00\x00\xff\xff\x00\x80".to_vec()
+        );
+        assert_eq!(
+            aux_bytes("Xa:B:i,-1").unwrap(),
+            b"XaBi\x01\x00\x00\x00\xff\xff\xff\xff".to_vec()
+        );
+        // The unsigned subtypes keep their full positive range.
+        assert_eq!(aux_bytes("Xa:B:C,255").unwrap(), b"XaBC\x01\x00\x00\x00\xff".to_vec());
+        assert_eq!(
+            aux_bytes("Xa:B:I,4294967295").unwrap(),
+            b"XaBI\x01\x00\x00\x00\xff\xff\xff\xff".to_vec()
+        );
+    }
+
+    // r[verify sam.record.aux_tags]
+    /// Out of range for the subtype, and a subtype that is not one at all: the
+    /// element count is written before the elements, so neither may be skipped.
+    #[test]
+    fn b_arrays_reject_what_their_subtype_cannot_hold() {
+        for field in ["Xa:B:c,128", "Xa:B:C,-1", "Xa:B:s,32768", "Xa:B:I,-1"] {
+            let err = aux_bytes(field).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    SamError::MalformedRecord { source: SamRecordError::InvalidAuxValue { .. } }
+                ),
+                "{field}: {err:?}"
+            );
+        }
+        let err = aux_bytes("Xa:B:q,1").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SamError::MalformedRecord {
+                    source: SamRecordError::InvalidAuxSubtype { subtype: b'q' }
+                }
+            ),
+            "{err:?}"
+        );
+    }
 
     fn make_header() -> BamHeader {
         BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:1000\n").expect("failed to build test header")

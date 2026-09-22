@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The SAM reader rejected every negative element of a signed `B` array.** `B:c`, `B:s` and
+  `B:i` are the signed subtypes, but all three were converted through the unsigned type of the
+  same width, so `XX:B:c,-1` failed the whole record with `InvalidAuxValue`. Each subtype is now
+  converted through the type it names. An unrecognised subtype is also an error rather than a
+  `B` tag whose element count promises more bytes than follow it.
 - **VCF float text now matches `bcftools` exactly.** `write_float_g` claimed to write C's `%g`
   with six significant digits — the format htslib emits — but only ever produced the fixed form,
   so a value outside `1e-4 .. 1e6` came out as `0.0000610352` or `1234567` where bcftools writes
