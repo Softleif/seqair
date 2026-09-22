@@ -95,6 +95,9 @@ impl Sample {
         format!("c{i}")
     }
 
+    fn reads_on(&self, contig: usize) -> impl Iterator<Item = &GenRead> {
+        self.reads.iter().filter(move |r| r.contig == contig)
+    }
 }
 
 fn bases(len: usize) -> impl PrintableGenerator<String> {
@@ -163,6 +166,13 @@ fn arb_read(tc: &TestCase, contig: usize, reference: &str) -> GenRead {
         flags: tc.draw_silent(gs::sampled_from(&[0u32, 16])),
         mapq: tc.draw_silent(gs::integers::<u32>().max_value(60)),
     }
+}
+
+/// More contigs, fewer reads on each: the shape that gives samtools a reason
+/// to merge references into one slice.
+#[hegel::composite]
+fn arb_many_contig_sample(tc: &TestCase) -> Sample {
+    arb_sample_sized(tc, 3, 6, 1, 2, 0, 1)
 }
 
 fn qual_string(len: usize) -> impl PrintableGenerator<String> {
@@ -389,6 +399,25 @@ struct Decoded {
     qual: Vec<u8>,
 }
 
+/// Everything seqair returns for `[start0, end0]` on one contig.
+///
+/// `RejectUnmapped` is the customizer the other CRAM comparison tests use, and
+/// it is what makes BAM a fair oracle here: a BAM index cannot reach an
+/// unplaced read from a contig query at all, while a CRAM multi-ref slice
+/// decodes its unplaced records alongside the mapped ones and hands them to
+/// `filter_raw` to decide on (`r[cram.index.unmapped]`). Rejecting them puts
+/// both formats on the same footing.
+fn fetch(path: &Path, fasta: &Path, contig: usize, start0: u32, end0: u32) -> Vec<Decoded> {
+    let mut readers = Readers::open_customized(path, fasta, RejectUnmapped).expect("open");
+    let name = Sample::contig_name(contig);
+    let tid = readers.header().tid(&name).expect("contig in header");
+    let mut store = RecordStore::new();
+    readers
+        .fetch_into(tid, Pos0::new(start0).unwrap(), Pos0::new(end0).unwrap(), &mut store)
+        .expect("fetch");
+    decode_store(&store)
+}
+
 fn decode_store<E: Default>(store: &RecordStore<E>) -> Vec<Decoded> {
     store
         .indices()
@@ -522,6 +551,57 @@ fn cram_matches_bam_across_the_writer_option_matrix(tc: TestCase) {
     tc.event(format!("embed_ref={}", opts.embed_ref));
     tc.event_value("slices", slice_headers(&cram).len() as f64);
     tc.event_value("reads", sample.reads.len() as f64);
+}
+
+// r[verify cram.slice.multi_ref]
+// r[verify cram.slice.multi_ref_skip]
+// r[verify cram.index.multi_ref_slices]
+// r[verify unified.fetch_equivalence]
+/// A slice holding records from several references decodes per reference.
+///
+/// With `multi_seq_per_slice=1` and every contig carrying at least one read,
+/// samtools puts records from different references in one slice and marks it
+/// `ref_seq_id == -2`; the `RI` series then decides which reference each
+/// record belongs to. The assertion that such a slice exists is part of the
+/// property: without it this is just the matrix test again.
+#[hegel::test(test_cases = 24)]
+fn multi_reference_slices_decode_per_reference(tc: TestCase) {
+    let sample = tc.draw(arb_many_contig_sample().print_as_debug());
+    let opts = CramOpts {
+        version: tc.draw(gs::sampled_from(&["3.0", "3.1"])),
+        embed_ref: 0,
+        seqs_per_slice: 10_000,
+        slices_per_container: 1,
+        multi_seq: Some(true),
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fasta = write_reference(dir.path(), &sample);
+    let bam = write_bam(dir.path(), &sample);
+    let cram = write_cram(dir.path(), &bam, &fasta, opts);
+
+    let headers = slice_headers(&cram);
+    let multi_ref = headers.iter().filter(|h| h.ref_seq_id == -2).count();
+    assert!(
+        multi_ref > 0,
+        "{}: no multi-ref slice was written; slice ref ids were {:?}",
+        opts.label(),
+        headers.iter().map(|h| h.ref_seq_id).collect::<Vec<_>>()
+    );
+
+    // Per contig, not just in bulk: a multi-ref slice is decoded once per
+    // query and must hand back only the records for the queried reference.
+    for contig in 0..sample.contigs.len() {
+        let from_cram = fetch(&cram, &fasta, contig, 0, CONTIG_LEN - 1);
+        let from_bam = fetch(&bam, &fasta, contig, 0, CONTIG_LEN - 1);
+        let want = sample.reads_on(contig).count();
+        assert_eq!(from_cram.len(), want, "contig {contig}: record count");
+        assert_eq!(from_cram, from_bam, "contig {contig}: CRAM and BAM disagree");
+        assert_matches_generator(&from_cram, &sample, &format!("c{contig}"));
+    }
+
+    tc.event_value("multi-ref slices", multi_ref as f64);
+    tc.event_value("contigs", sample.contigs.len() as f64);
 }
 
 /// A CRAM written with no reference at all, holding a read with an insertion.
