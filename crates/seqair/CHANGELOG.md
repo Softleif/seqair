@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Property-based tests moved from `proptest` to [hegel](https://hegel.dev/) (`hegeltest`). Case
   counts live in `hegel.toml` at the workspace root: 256 locally, 1000 on CI, and a `thorough`
   profile at 10000. No public API change; `proptest` is gone from the dev-dependencies.
+- `BgzfWriter`'s virtual offsets, the two `CustomizeRecordStore` filter hooks, and the
+  `Pos`/`QPos` type walls all gained property tests. The BGZF ones were checked against the
+  offset bug fixed in the previous release: reverting it makes them fail on a two-write case.
 - Six cross-implementation comparisons that ran on fixed fixtures now run on generated inputs:
   the pileup against htslib's `bam_plp_auto` (and now comparing per-alignment `qpos`, not only
   depth); the write → index → query round-trip against both `samtools view` and the generated
