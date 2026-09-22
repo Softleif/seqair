@@ -43,7 +43,7 @@ The unified reader MUST be an enum dispatching to format-specific readers, not a
 > The unified reader MUST expose:
 >
 > - `header() -> &BamHeader` — all formats produce the same header type (target names, lengths, tid lookup). The SAM and CRAM parsers convert their native header representations to `BamHeader`.
-> - `fetch_into(tid, start, end, store) -> Result<usize>` — populates a `RecordStore` with records overlapping the region, identically to the BAM path.
+> - `fetch_into(tid, span, store) -> Result<usize>` — populates a `RecordStore` with records overlapping the region, identically to the BAM path.
 > - `fork() -> Result<Self>` — creates a lightweight copy sharing immutable state.
 > - `shared() -> &Arc<_>` — access to shared state for `Arc::ptr_eq` testing.
 
@@ -162,10 +162,12 @@ chromosome in one call without thinking about tile size.
 >   `tile_end - core_end`, which is `< requested_overlap`. Same on the left
 >   for `overlap_start`.
 >
-> `Segment` MUST expose `core_range() -> RangeInclusive<Pos0>` returning the
-> inclusive sub-range of `[start, end]` excluding both overlaps — this is
-> the part of the segment a downstream tool should treat as "owned" by this
-> tile when deduplicating against neighbors.
+> `Segment` MUST expose `span() -> RangeInclusive<Pos0>`, the tile's own
+> closed `start..=last`, and `core_span() -> RangeInclusive<Pos0>`, that span
+> excluding both overlaps — the part of the segment a downstream tool should
+> treat as "owned" by this tile when deduplicating against neighbors. Both are
+> `core::range::RangeInclusive` per `r[interval.span_type]`, so they are handed
+> straight to `fetch_into`, `fetch_base_seq` and `estimate_region_bytes`.
 
 > r[unified.segment_options+1]
 > `SegmentOptions` MUST expose:
@@ -199,8 +201,8 @@ chromosome in one call without thinking about tile size.
 >   `[0, contig_len)` mapped to inclusive `[Pos0::ZERO, contig_last_pos]`.
 > - `&RegionString` — parsed `chrom:start-end`, with missing start defaulting
 >   to position 1 (0-based 0) and missing end to the contig's last base.
-> - `(R, Pos0, Pos0)` where `R: ResolveTid` — explicit inclusive range
->   `[start, end]` against the resolved tid.
+> - `(R, RangeInclusive<Pos0>)` where `R: ResolveTid` — an explicit closed
+>   span against the resolved tid.
 > - `()` — every contig in header order whose length is non-zero.
 >
 > An empty contig (length 0) MUST return `ReaderError::EmptyContig` for
@@ -214,10 +216,10 @@ chromosome in one call without thinking about tile size.
 > MUST return `Result<impl Iterator<Item = Segment>, ReaderError>`. The
 > iterator MUST:
 >
-> - Cover every base of every input range exactly once across `core_range()`
->   of consecutive tiles — i.e. the union of `core_range()` of all yielded
+> - Cover every base of every input range exactly once across `core_span()`
+>   of consecutive tiles — i.e. the union of `core_span()` of all yielded
 >   segments equals the union of input ranges, with no overlap and no gap.
-> - Produce tile **cores** (`Segment::core_range()`) of length `<= max_len`,
+> - Produce tile **cores** (`Segment::core_span()`) of length `<= max_len`,
 >   never splitting a tile across contigs. Each tile's full `[start, end]`
 >   is its core expanded by `overlap` bases on each side, clipped to the
 >   requested target range; internal tiles therefore have
@@ -318,17 +320,16 @@ planner can ask before committing.
 >    [`Readers`] whose header doesn't match — both contig-order and
 >    contig-length differences across reference panels are surfaced as
 >    typed errors instead of silent zero-record fetches.
-> 2. Call `fetch_into_customized` with `segment.tid().as_u32()`,
->    `segment.start()`, `segment.end()` to load records into the internal
+> 2. Call `fetch_into_customized` with `segment.tid().as_u32()` and
+>    `segment.span()` to load records into the internal
 >    `RecordStore<E::Extra>`, passing the customize value through. `compute`
 >    and `keep_record` both run inline during push: rejected records are
 >    rolled back with zero slab waste and kept records already have their
 >    extras populated.
-> 3. Fetch the reference sequence for `[segment.start(), segment.end()]`
->    inclusive via the FASTA reader, using the contig name carried by the
->    segment (no header lookup). The fetch MUST use a u64-bounded path so
->    `segment.end() == Pos0::max_value()` does not silently truncate the
->    last base.
+> 3. Fetch the reference sequence for the same closed span via the FASTA
+>    reader, using the contig name carried by the segment (no header lookup).
+>    Because the fetch takes the span itself, a segment ending on
+>    `Pos0::MAX` gets its last base without any `+ 1` side door.
 > 4. Take the store (now `RecordStore<E::Extra>` with populated extras) and
 >    construct a `PileupEngine<E::Extra>` with the fetched reference
 >    sequence pre-attached via `set_reference_seq`.
@@ -359,7 +360,7 @@ planner can ask before committing.
 > use for it ignores the argument. There MUST NOT be a second entry point that
 > withholds the reference: one hook, one signature.
 >
-> The reference covers exactly `[segment.start(), segment.end()]` (step 3), not
+> The reference covers exactly `segment.span()` (step 3), not
 > the reads: a record reaching past either end has bases the `RefSeq` does not
 > hold. A mutator that reads such positions MUST use `RefSeq::try_base_at` and
 > treat `None` as unavailable, since `base_at` returns `Base::Unknown` there,
@@ -394,7 +395,7 @@ planner can ask before committing.
 >
 > The supplied reference MUST cover the segment: `ref_seq.start_pos()` MUST be
 > at or before `segment.start()`, and the reference MUST extend to at least
-> `segment.end()`. A reference that does not cover the segment MUST be rejected
+> `segment.last()`. A reference that does not cover the segment MUST be rejected
 > with `ReaderError::SuppliedReferenceTooSmall`. Accepting it is not an option:
 > `RefSeq::base_at` reads an uncovered position as `Base::Unknown`, which turns
 > every reference comparison there into a silent mismatch rather than an error.
@@ -410,7 +411,7 @@ planner can ask before committing.
 > r[unified.pileup_reference_covers_reads]
 > `Pileup::reference_covers_reads()` MUST make step 3 read the reference over
 > the span every fetched record covers, rather than over the segment: the union
-> of `[segment.start(), segment.end()]` with `min(pos)`..`max(end_pos)` over
+> of `segment.span()` with `min(pos)`..`max(end_pos)` over
 > every record in the store, clamped to the contig's last position. The span
 > MUST NOT be narrower than the segment, since the engine reports a column for
 > every position in it.
@@ -447,7 +448,7 @@ planner can ask before committing.
 > record's span on each side, which one spliced read can make large.
 
 r[unified.fetch_into_customized]
-Each format reader (`IndexedBamReader`, `IndexedSamReader`, `IndexedCramReader`, and the format-agnostic `IndexedReader`) MUST expose `fetch_into_customized<E: CustomizeRecordStore>(tid, start, end, store, customize) -> Result<FetchCounts>` in addition to `fetch_into`. The reader MUST forward `customize` to `RecordStore::push_raw`/`push_fields` so its `keep_record` runs at push time. `FetchCounts { fetched, kept }` reports records produced by the reader's built-in overlap/unmapped checks (`fetched`) vs those that also passed `keep_record` (`kept`). Existing `fetch_into` MUST remain a thin wrapper passing `&mut ()` (whose default `keep_record` returns `true`) so its signature and behavior are unchanged.
+Each format reader (`IndexedBamReader`, `IndexedSamReader`, `IndexedCramReader`, and the format-agnostic `IndexedReader`) MUST expose `fetch_into_customized<E: CustomizeRecordStore>(tid, span, store, customize) -> Result<FetchCounts>` in addition to `fetch_into`. The reader MUST forward `customize` to `RecordStore::push_raw`/`push_fields` so its `keep_record` runs at push time. `FetchCounts { fetched, kept }` reports records produced by the reader's built-in overlap/unmapped checks (`fetched`) vs those that also passed `keep_record` (`kept`). Existing `fetch_into` MUST remain a thin wrapper passing `&mut ()` (whose default `keep_record` returns `true`) so its signature and behavior are unchanged.
 
 r[unified.fetch_counts]
 `FetchCounts` MUST be `#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]` with `fetched: usize` and `kept: usize` fields. `kept <= fetched` MUST always hold. The struct is re-exported from `crate::reader::FetchCounts` for callers that need to report filter statistics.
@@ -458,7 +459,7 @@ r[unified.fetch_counts]
 > - `header() -> &BamHeader` — delegates to the alignment reader's header.
 > - `segments(target, opts) -> Result<impl Iterator<Item = Segment>>` — see `r[unified.readers_segments]`. The only way to obtain a `Segment`.
 > - `pileup(&Segment, DepthLimit) -> Pileup` — the pileup plan; see `r[unified.pileup_plan]` and `r[unified.readers_pileup+1]`.
-> - `fetch_into(tid, start, end, store) -> Result<usize>` — delegates to the alignment reader. Always loads into a `RecordStore<()>` (for custom extras, use `pileup` directly — extras are populated inline at push time).
+> - `fetch_into(tid, span, store) -> Result<usize>` — delegates to the alignment reader. Always loads into a `RecordStore<()>` (for custom extras, use `pileup` directly — extras are populated inline at push time).
 > - `fasta() -> &IndexedFastaReader` and `fasta_mut() -> &mut IndexedFastaReader` — direct access for callers that need reference sequences independently of the alignment reader (e.g., the call pipeline's segment fetching).
 > - `alignment() -> &IndexedReader` and `alignment_mut() -> &mut IndexedReader` — direct access when needed.
 > - `customize() -> &E` / `customize_mut() -> &mut E` — direct access to inspect or reset the customize value's state between regions.

@@ -50,10 +50,16 @@ The offset formula is correct for all valid positions including those on the las
 ## Sequence fetching
 
 r[fasta.fetch.coordinates]
-`fetch_seq(name, start, stop)` MUST use 0-based half-open coordinates `[start, stop)`. A request for `(name, 0, 4)` returns the first 4 bases of the named sequence.
+`fetch_seq(name, span)` MUST take the closed, 0-based `RangeInclusive<Pos0>` of
+`r[interval.span_type]` — the same interval a `Segment` or a query names, so
+the reference for a region is fetched with the value that queried it and no
+`+ 1` appears at the boundary. A request for `p(0)..=p(3)` returns the first 4
+bases of the named sequence.
 
 r[fasta.fetch.bounds_check]
-The reader MUST verify that `start < stop` (zero-length and reversed ranges are invalid) and `stop <= sequence_length`. Out-of-bounds requests MUST produce an error naming the sequence, the requested range, and the actual sequence length.
+The reader MUST verify that `start <= last` (a reversed span names no bases)
+and `last < sequence_length`. Out-of-bounds requests MUST produce an error
+naming the sequence, the requested span, and the actual sequence length.
 
 r[fasta.fetch.uppercase]
 Returned sequence bytes MUST be uppercased. FASTA files may contain lowercase bases (indicating soft-masking), but Seqair always works with uppercase bases.
@@ -72,7 +78,7 @@ r[fasta.fetch.raw_bytes]
 ### Buffer reuse
 
 r[fasta.fetch.buffer_reuse]
-`fetch_seq_into(name, start, stop, buf)` MUST accept a caller-provided `&mut Vec<u8>` buffer, clear it, and write the fetched sequence into it. This avoids per-call allocation when fetching many segments. The `fetch_seq` convenience method MAY allocate a new `Vec<u8>` internally.
+`fetch_seq_into(name, span, buf)` MUST accept a caller-provided `&mut Vec<u8>` buffer, clear it, and write the fetched sequence into it. This avoids per-call allocation when fetching many segments. The `fetch_seq` convenience method MAY allocate a new `Vec<u8>` internally.
 
 ## Plain FASTA reading
 

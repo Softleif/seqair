@@ -109,7 +109,7 @@ SAM aux integer values (type `i`) are serialized into the smallest BAM integer t
 ## Region fetching
 
 > r[sam.reader.fetch_into]
-> `fetch_into(tid, start, end, store)` MUST:
+> `fetch_into(tid, span, store)` MUST:
 >
 > 1. Query the tabix/CSI index for BGZF virtual offset ranges overlapping the region.
 > 2. Use `RegionBuf` (or equivalent bulk read) to load compressed bytes.

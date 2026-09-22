@@ -202,11 +202,37 @@ one internally and converts at the format boundary.
 
 r[interval.inclusive_ends]
 A reference interval in seqair's API is 0-based with **both ends inclusive**:
-`[start, end]` covers `end - start + 1` positions. This applies to the range
-passed to `fetch_into`/`fetch_into_customized`, to `Segment`, and to the pileup
-engine's region. A half-open interval MUST NOT be used at these boundaries;
-where an external format needs one, the conversion happens in the format's
-own reader.
+`[start, last]` covers `last - start + 1` positions. This applies to the span
+passed to `fetch_into`/`fetch_into_customized`, to `Segment`, to the pileup
+engine's region, and to the FASTA fetch. A half-open interval MUST NOT be used
+at these boundaries; where an external format needs one (htslib's `bam_endpos`,
+a BED line), the conversion happens in the format's own reader or writer.
+
+r[interval.span_type]
+An interval that crosses an API boundary MUST be carried by one value of
+`core::range::RangeInclusive<Pos0>`, not by two loose positions. Every query
+(`fetch_into`, `fetch_into_customized`, `estimate_region_bytes`,
+`IndexedBamReader::query`, `PileupEngine::new`, the `(resolver, span)` segment
+target) and every reference fetch (`fetch_seq`, `fetch_seq_into`,
+`fetch_base_seq`) takes one, and `Segment::span()` / `core_span()` produce one,
+so a tile is handed to a fetch whole and the reference for a region is fetched
+with the very value that queried it. There MUST NOT be a half-open
+`Range<Pos0>` anywhere in the public API, and a loose-position form MUST NOT be
+offered alongside the span form: as long as `fetch_seq(name, start, stop)`
+exists it is what gets called, and the type carries nothing.
+
+One convention buys two things. There is no `± 1` at the boundary for a caller
+to get wrong — the historical bug class here is a half-open reference buffer
+handed to code that treats the segment's `end` as inclusive, one base short and
+silent. And a closed span can name the last representable position, where the
+half-open `end = i32::MAX + 1` is not a `Pos0` and every reader had grown its
+own `u64` side door to reach it.
+
+`core::range::RangeInclusive` is preferred over `std::ops::RangeInclusive`: it
+is `Copy`, 8 bytes rather than 12 (no exhaustion flag), does not implement
+`Iterator` so a position span cannot be walked by accident, and names its
+inclusive end `last`, which is what it is. `(a..=b).into()` converts from the
+`..=` literal.
 
 r[interval.end_pos_inclusive]
 A record's `end_pos` is the **last reference position it covers**
