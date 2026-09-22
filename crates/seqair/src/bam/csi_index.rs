@@ -620,50 +620,44 @@ mod tests {
 
     // --- Proptest: CSI reg2bins matches BAI reg2bins at BAI-compatible params ---
 
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
-    proptest! {
-        #[test]
-        fn csi_reg2bins_matches_bai_for_all_positions(
-            beg in 0u64..536_870_000u64,
-            len in 1u64..100_000u64,
-        ) {
-            let end = beg.saturating_add(len).min(536_870_912);
-            if beg >= end { return Ok(()); }
+    /// A non-empty region inside the 2^29 BAI-compatible coordinate space.
+    #[hegel::composite]
+    fn arb_region(tc: &TestCase) -> (u64, u64) {
+        let beg = tc.draw(gs::integers::<u64>().max_value(536_869_999));
+        let len = tc.draw(gs::integers::<u64>().min_value(1).max_value(99_999));
+        let end = beg.saturating_add(len).min(536_870_912);
+        (beg, end)
+    }
 
-            let csi_bins = csi_reg2bins(beg, end, 14, 5).expect("BAI-compat params don't overflow");
+    #[hegel::test]
+    fn csi_reg2bins_matches_bai_for_all_positions(tc: TestCase) {
+        let (beg, end) = tc.draw(arb_region());
+        let csi_bins = csi_reg2bins(beg, end, 14, 5).expect("BAI-compat params don't overflow");
 
-            // Reproduce BAI's hardcoded algorithm
-            let mut bai_bins = Vec::with_capacity(32);
-            bai_bins.push(0);
-            let levels: [(u32, u32); 5] = [(1, 26), (9, 23), (73, 20), (585, 17), (4681, 14)];
-            for &(offset, shift) in &levels {
-                let mut k = offset + (beg >> shift) as u32;
-                let end_k = offset + ((end - 1) >> shift) as u32;
-                while k <= end_k {
-                    bai_bins.push(k);
-                    k += 1;
-                }
+        // Reproduce BAI's hardcoded algorithm
+        let mut bai_bins = Vec::with_capacity(32);
+        bai_bins.push(0);
+        let levels: [(u32, u32); 5] = [(1, 26), (9, 23), (73, 20), (585, 17), (4681, 14)];
+        for &(offset, shift) in &levels {
+            let mut k = offset + (beg >> shift) as u32;
+            let end_k = offset + ((end - 1) >> shift) as u32;
+            while k <= end_k {
+                bai_bins.push(k);
+                k += 1;
             }
-
-            prop_assert_eq!(csi_bins, bai_bins, "CSI != BAI for [{}, {})", beg, end);
         }
 
-        #[test]
-        fn reg2bin_always_in_reg2bins(
-            beg in 0u64..536_870_000u64,
-            len in 1u64..100_000u64,
-        ) {
-            let end = beg.saturating_add(len).min(536_870_912);
-            if beg >= end { return Ok(()); }
+        assert_eq!(csi_bins, bai_bins, "CSI != BAI for [{beg}, {end})");
+    }
 
-            let single = reg2bin(beg, end, 14, 5);
-            let all = csi_reg2bins(beg, end, 14, 5).expect("BAI-compat params don't overflow");
-            prop_assert!(
-                all.contains(&single),
-                "reg2bin({},{})={} not in reg2bins={:?}", beg, end, single, all
-            );
-        }
+    #[hegel::test]
+    fn reg2bin_always_in_reg2bins(tc: TestCase) {
+        let (beg, end) = tc.draw(arb_region());
+        let single = reg2bin(beg, end, 14, 5);
+        let all = csi_reg2bins(beg, end, 14, 5).expect("BAI-compat params don't overflow");
+        assert!(all.contains(&single), "reg2bin({beg},{end})={single} not in reg2bins={all:?}");
     }
 
     // --- CSI parsing tests ---
@@ -910,52 +904,49 @@ mod tests {
         VirtualOffset(0)
     }
 
-    proptest! {
-        /// `csi_min_offset` (HashMap-based) must agree with a linear-scan
-        /// oracle that walks the same leaf→root path. Uses BAI-compatible
-        /// params (depth=5, min_shift=14) so coordinates and bin ids fit
-        /// comfortably and the test stays fast.
-        ///
-        /// Generates a random subset of bins drawn from every level of the
-        /// tree (not just leaves) with arbitrary loffsets, then queries random
-        /// positions across the addressable coordinate space.
-        #[test]
-        fn csi_min_offset_matches_linear_scan(
-            // Up to 50 bins, each an arbitrary valid bin id (0..=37449), with
-            // an arbitrary u64 loffset. Bins may be ancestors or cousins of
-            // the query's leaf — the oracle handles whichever hits first.
-            bin_ids in prop::collection::vec(0u32..37450, 0..=50),
-            loffsets in prop::collection::vec(any::<u64>(), 0..=50),
-            pos in 0u64..536_870_912,
-        ) {
-            let n = bin_ids.len().min(loffsets.len());
-            // Deduplicate bin ids so both impls see the same first-wins
-            // semantics regardless of iteration order.
-            let mut seen = std::collections::HashSet::new();
-            let bins_raw: Vec<(u32, u64, Vec<(u64, u64)>)> = bin_ids
-                .iter()
-                .zip(loffsets.iter())
-                .take(n)
-                .filter_map(|(&id, &lo)| seen.insert(id).then_some((id, lo, Vec::new())))
-                .collect();
+    /// `csi_min_offset` (HashMap-based) must agree with a linear-scan
+    /// oracle that walks the same leaf→root path. Uses BAI-compatible
+    /// params (`depth = 5`, `min_shift = 14`) so coordinates and bin ids fit
+    /// comfortably and the test stays fast.
+    ///
+    /// Generates a random subset of bins drawn from every level of the
+    /// tree (not just leaves) with arbitrary loffsets, then queries random
+    /// positions across the addressable coordinate space.
+    #[hegel::test]
+    fn csi_min_offset_matches_linear_scan(tc: TestCase) {
+        // Up to 50 bins, each an arbitrary valid bin id (0..=37449), with
+        // an arbitrary u64 loffset. Bins may be ancestors or cousins of
+        // the query's leaf — the oracle handles whichever hits first.
+        let bins_drawn = tc.draw(
+            gs::vecs(gs::tuples!(gs::integers::<u32>().max_value(37_449), gs::integers::<u64>(),))
+                .max_size(50),
+        );
+        let pos = tc.draw(gs::integers::<u64>().max_value(536_870_911));
 
-            // Build both the production index (with HashMap) and a plain Vec
-            // for the oracle. Both are fed the same bin sequence.
-            let bins_for_oracle: Vec<CsiBin> = bins_raw
-                .iter()
-                .map(|(id, lo, _)| CsiBin {
-                    bin_id: *id,
-                    loffset: VirtualOffset(*lo),
-                    chunks: Vec::new(),
-                })
-                .collect();
-            let idx = make_csi_index(bins_raw);
-            let ref_idx = &idx.references[0];
+        // Deduplicate bin ids so both impls see the same first-wins
+        // semantics regardless of iteration order.
+        let mut seen = std::collections::HashSet::new();
+        let bins_raw: Vec<(u32, u64, Vec<(u64, u64)>)> = bins_drawn
+            .into_iter()
+            .filter_map(|(id, lo)| seen.insert(id).then_some((id, lo, Vec::new())))
+            .collect();
 
-            let got = csi_min_offset(ref_idx, pos, 14, 5).expect("BAI-compat params");
-            let want = oracle_min_offset(&bins_for_oracle, pos, 14, 5);
-            prop_assert_eq!(got.0, want.0, "HashMap lookup disagrees with linear scan at pos={}", pos);
-        }
+        // Build both the production index (with HashMap) and a plain Vec
+        // for the oracle. Both are fed the same bin sequence.
+        let bins_for_oracle: Vec<CsiBin> = bins_raw
+            .iter()
+            .map(|(id, lo, _)| CsiBin {
+                bin_id: *id,
+                loffset: VirtualOffset(*lo),
+                chunks: Vec::new(),
+            })
+            .collect();
+        let idx = make_csi_index(bins_raw);
+        let ref_idx = &idx.references[0];
+
+        let got = csi_min_offset(ref_idx, pos, 14, 5).expect("BAI-compat params");
+        let want = oracle_min_offset(&bins_for_oracle, pos, 14, 5);
+        assert_eq!(got.0, want.0, "HashMap lookup disagrees with linear scan at pos={pos}");
     }
 
     #[test]

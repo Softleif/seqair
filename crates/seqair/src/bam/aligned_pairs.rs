@@ -1247,90 +1247,81 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    // ── Proptest: random CIGAR walk matches oracle ────────────────────────
+    // ── Random CIGAR walk matches oracle ─────────────────────────────────
 
     mod proptests {
         use super::*;
-        use proptest::prelude::*;
+        use hegel::prelude::*;
 
-        fn arb_cigar_op() -> impl Strategy<Value = CigarOp> {
-            // Generate valid CIGAR ops within reasonable bounds.
-            // Includes len=0 to exercise the zero-length-skip behavior.
-            (0u8..=14u8, 0u32..=50u32).prop_map(|(code, len)| {
-                // Map codes 9..=14 to Unknown variant (reserved codes)
-                let op_type = CigarOpType::from_bam(code);
-                CigarOp::new(op_type, len)
-            })
+        /// A CIGAR op within reasonable bounds, including `len = 0` to
+        /// exercise the zero-length-skip behaviour and codes 9..=14, which
+        /// map to the reserved `Unknown` variant.
+        #[hegel::composite]
+        fn arb_cigar_op(tc: &TestCase) -> CigarOp {
+            let code = tc.draw_silent(gs::integers::<u8>().max_value(14));
+            let len = tc.draw_silent(gs::integers::<u32>().max_value(50));
+            CigarOp::new(CigarOpType::from_bam(code), len)
         }
 
-        fn arb_cigar() -> impl Strategy<Value = Vec<CigarOp>> {
-            proptest::collection::vec(arb_cigar_op(), 0..20)
+        fn arb_cigar() -> impl PrintableGenerator<Vec<CigarOp>> {
+            gs::vecs(arb_cigar_op().print_as_debug()).max_size(19)
         }
 
-        fn arb_pos0() -> impl Strategy<Value = Pos0> {
-            (0u32..=100_000u32).prop_map(|v| Pos0::new(v).unwrap())
+        fn arb_pos0() -> impl PrintableGenerator<Pos0> {
+            gs::integers::<u32>().max_value(100_000).map(|v| Pos0::new(v).unwrap()).print_as_debug()
         }
 
         // r[verify cigar.aligned_pairs.default_mode]
-        proptest! {
-            #[test]
-            fn matches_oracle_default(
-                cigar in arb_cigar(),
-                pos in arb_pos0(),
-            ) {
-                let actual: Vec<_> = AlignedPairs::new(pos, &cigar).collect();
-                let expected = oracle_walk(&cigar, pos, AlignedPairsOptions::default());
-                prop_assert_eq!(actual, expected);
-            }
+        #[hegel::test]
+        fn matches_oracle_default(tc: TestCase) {
+            let cigar = tc.draw(arb_cigar());
+            let pos = tc.draw(arb_pos0());
+            let actual: Vec<_> = AlignedPairs::new(pos, &cigar).collect();
+            let expected = oracle_walk(&cigar, pos, AlignedPairsOptions::default());
+            assert_eq!(actual, expected);
         }
 
-        proptest! {
-            #[test]
-            fn matches_oracle_full(
-                cigar in arb_cigar(),
-                pos in arb_pos0(),
-            ) {
-                let actual: Vec<_> = AlignedPairs::new(pos, &cigar).full().collect();
-                let opts = AlignedPairsOptions {
-                    soft_clips: true,
-                    padding_and_unknown: true,
-                };
-                let expected = oracle_walk(&cigar, pos, opts);
-                prop_assert_eq!(actual, expected);
-            }
+        #[hegel::test]
+        fn matches_oracle_full(tc: TestCase) {
+            let cigar = tc.draw(arb_cigar());
+            let pos = tc.draw(arb_pos0());
+            let actual: Vec<_> = AlignedPairs::new(pos, &cigar).full().collect();
+            let opts = AlignedPairsOptions { soft_clips: true, padding_and_unknown: true };
+            let expected = oracle_walk(&cigar, pos, opts);
+            assert_eq!(actual, expected);
         }
 
         // r[verify cigar.aligned_pairs.position_monotonicity]
-        proptest! {
-            #[test]
-            fn ref_pos_monotone_nondecreasing(
-                cigar in arb_cigar(),
-            ) {
-                let pairs: Vec<_> = AlignedPairs::new(Pos0::ZERO, &cigar).collect();
-                let rposes: Vec<u32> = pairs.iter().filter_map(|p| match p {
+        #[hegel::test]
+        fn ref_pos_monotone_nondecreasing(tc: TestCase) {
+            let cigar = tc.draw(arb_cigar());
+            let pairs: Vec<_> = AlignedPairs::new(Pos0::ZERO, &cigar).collect();
+            let rposes: Vec<u32> = pairs
+                .iter()
+                .filter_map(|p| match p {
                     AlignedPair::Match { rpos, .. } => Some(rpos.as_u32()),
                     AlignedPair::Deletion { rpos, .. } => Some(rpos.as_u32()),
                     AlignedPair::RefSkip { rpos, .. } => Some(rpos.as_u32()),
                     _ => None,
-                }).collect();
-                prop_assert!(rposes.windows(2).all(|w| w[0] <= w[1]));
-            }
+                })
+                .collect();
+            assert!(rposes.windows(2).all(|w| w[0] <= w[1]));
         }
 
-        proptest! {
-            #[test]
-            fn qpos_monotone_nondecreasing(
-                cigar in arb_cigar(),
-            ) {
-                let pairs: Vec<_> = AlignedPairs::new(Pos0::ZERO, &cigar).full().collect();
-                let qposes: Vec<u32> = pairs.iter().filter_map(|p| match p {
+        #[hegel::test]
+        fn qpos_monotone_nondecreasing(tc: TestCase) {
+            let cigar = tc.draw(arb_cigar());
+            let pairs: Vec<_> = AlignedPairs::new(Pos0::ZERO, &cigar).full().collect();
+            let qposes: Vec<u32> = pairs
+                .iter()
+                .filter_map(|p| match p {
                     AlignedPair::Match { qpos, .. } => Some(qpos.get()),
                     AlignedPair::Insertion { first_inserted, .. } => Some(first_inserted.get()),
                     AlignedPair::SoftClip { qpos, .. } => Some(qpos.get()),
                     _ => None,
-                }).collect();
-                prop_assert!(qposes.windows(2).all(|w| w[0] <= w[1]));
-            }
+                })
+                .collect();
+            assert!(qposes.windows(2).all(|w| w[0] <= w[1]));
         }
     }
 
@@ -1548,7 +1539,7 @@ mod tests {
         // r[verify cigar.aligned_pairs.htslib_equivalence]
         mod htslib_proptests {
             use super::*;
-            use proptest::prelude::*;
+            use hegel::prelude::*;
 
             /// Generate a CIGAR fragment as `(char, len)`. Excludes `P` because
             /// rust-htslib's `aligned_pairs_full` panics on `Cigar::Pad`. Excludes
@@ -1558,65 +1549,50 @@ mod tests {
             /// expansion explicitly drops len=0 events; testing both produces the
             /// same empty contribution but the `assert_eq!` on `Vec<...>` would
             /// pass trivially. Keeping len > 0 stresses the actual walking logic.
-            fn arb_op_char_len() -> impl Strategy<Value = (char, u32)> {
-                let chars = prop_oneof![
-                    Just('M'),
-                    Just('I'),
-                    Just('D'),
-                    Just('N'),
-                    Just('S'),
-                    Just('H'),
-                    Just('='),
-                    Just('X'),
-                ];
-                (chars, 1u32..=20u32)
+            #[hegel::composite]
+            fn arb_op_char_len(tc: &TestCase) -> (char, u32) {
+                let c = tc.draw_silent(gs::sampled_from(&['M', 'I', 'D', 'N', 'S', 'H', '=', 'X']));
+                let n = tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(20));
+                (c, n)
             }
 
-            fn arb_cigar_string() -> impl Strategy<Value = String> {
-                proptest::collection::vec(arb_op_char_len(), 1..=10).prop_map(|ops| {
-                    let mut s = String::new();
-                    for (c, n) in ops {
-                        s.push_str(&n.to_string());
-                        s.push(c);
-                    }
-                    s
-                })
-            }
-
-            proptest! {
-                /// For random valid CIGARs (M/I/D/N/S/H/=/X with non-zero
-                /// lengths) at random positions, seqair's expanded
-                /// `AlignedPairs` output MUST match rust-htslib's
-                /// `aligned_pairs_full()` exactly.
-                ///
-                /// This is the strongest possible parity test we can build:
-                /// rust-htslib is the htslib-binding ground truth, and the
-                /// proptest exercises the full CIGAR-walk state machine on
-                /// inputs we never hand-wrote.
-                #[test]
-                fn matches_htslib_random_cigars(
-                    cigar_str in arb_cigar_string(),
-                    pos in 0i64..=100_000i64,
-                ) {
-                    #[expect(
-                        clippy::cast_sign_loss,
-                        clippy::cast_possible_truncation,
-                        reason = "proptest range 0..=100_000 fits in u32"
-                    )]
-                    let pos_u32 = pos as u32;
-                    let our_pairs = expand_iterator(
-                        &parse_cigar_string(&cigar_str),
-                        Pos0::new(pos_u32).unwrap(),
-                    );
-                    let hts_pairs = htslib_pairs(&cigar_str, pos);
-                    prop_assert_eq!(
-                        our_pairs,
-                        hts_pairs,
-                        "CIGAR '{}' at pos {} diverges from rust-htslib",
-                        cigar_str,
-                        pos,
-                    );
+            #[hegel::composite]
+            fn arb_cigar_string(tc: &TestCase) -> String {
+                let ops = tc.draw_silent(gs::vecs(arb_op_char_len()).min_size(1).max_size(10));
+                let mut s = String::new();
+                for (c, n) in ops {
+                    s.push_str(&n.to_string());
+                    s.push(c);
                 }
+                s
+            }
+
+            /// For random valid CIGARs (M/I/D/N/S/H/=/X with non-zero
+            /// lengths) at random positions, seqair's expanded
+            /// `AlignedPairs` output MUST match rust-htslib's
+            /// `aligned_pairs_full()` exactly.
+            ///
+            /// This is the strongest possible parity test we can build:
+            /// rust-htslib is the htslib-binding ground truth, and the
+            /// property exercises the full CIGAR-walk state machine on
+            /// inputs we never hand-wrote.
+            #[hegel::test]
+            fn matches_htslib_random_cigars(tc: TestCase) {
+                let cigar_str = tc.draw(arb_cigar_string());
+                let pos = tc.draw(gs::integers::<i64>().min_value(0).max_value(100_000));
+                #[expect(
+                    clippy::cast_sign_loss,
+                    clippy::cast_possible_truncation,
+                    reason = "the generator bounds pos to 0..=100_000, which fits in u32"
+                )]
+                let pos_u32 = pos as u32;
+                let our_pairs =
+                    expand_iterator(&parse_cigar_string(&cigar_str), Pos0::new(pos_u32).unwrap());
+                let hts_pairs = htslib_pairs(&cigar_str, pos);
+                assert_eq!(
+                    our_pairs, hts_pairs,
+                    "CIGAR '{cigar_str}' at pos {pos} diverges from rust-htslib",
+                );
             }
         }
 

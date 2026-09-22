@@ -1082,204 +1082,213 @@ mod tests {
         assert!(conversions < 143, "conversions can't exceed total match positions");
     }
 
-    // ── Property test: with_read pass-through ─────────────────────────────
+    // ── Property: with_read pass-through ──────────────────────────────────
 
     mod proptests {
         use super::super::super::aligned_pairs::AlignedPairs;
         use super::*;
-        use proptest::prelude::*;
+        use hegel::prelude::*;
 
-        fn arb_cigar_op() -> impl Strategy<Value = CigarOp> {
-            // Match the bare-iterator proptest: full op-code range (0..=14
-            // covers M/I/D/N/S/H/P/=/X plus reserved Unknown variants) and
-            // include zero-length ops (0..=10) so zero-length skip behavior is
-            // exercised through the with_read layer too.
-            (0u8..=14u8, 0u32..=10u32).prop_map(|(code, len)| {
-                let t = CigarOpType::from_bam(code);
-                CigarOp::new(t, len)
-            })
+        /// Match the bare-iterator property: full op-code range (0..=14
+        /// covers M/I/D/N/S/H/P/=/X plus reserved Unknown variants) and
+        /// include zero-length ops (0..=10) so zero-length skip behavior is
+        /// exercised through the `with_read` layer too.
+        #[hegel::composite]
+        fn arb_cigar_op(tc: &TestCase) -> CigarOp {
+            let code = tc.draw_silent(gs::integers::<u8>().max_value(14));
+            let len = tc.draw_silent(gs::integers::<u32>().max_value(10));
+            CigarOp::new(CigarOpType::from_bam(code), len)
         }
 
-        proptest! {
-            /// `with_read` must yield exactly the same number of events as the
-            /// underlying iterator, in the same order — it only enriches.
-            #[test]
-            fn with_read_preserves_event_sequence(
-                ops in proptest::collection::vec(arb_cigar_op(), 0..15),
-                start in 0u32..=10_000u32,
-            ) {
-                // Build a synthetic seq/qual sized to the query-consuming length.
-                let qlen: u32 = ops
-                    .iter()
-                    .filter(|o| matches!(
+        fn arb_cigar(max: usize) -> impl PrintableGenerator<Vec<CigarOp>> {
+            gs::vecs(arb_cigar_op().print_as_debug()).max_size(max)
+        }
+
+        /// `with_read` must yield exactly the same number of events as the
+        /// underlying iterator, in the same order — it only enriches.
+        #[hegel::test]
+        fn with_read_preserves_event_sequence(tc: TestCase) {
+            let ops = tc.draw(arb_cigar(14));
+            let start = tc.draw(gs::integers::<u32>().max_value(10_000));
+            // Build a synthetic seq/qual sized to the query-consuming length.
+            let qlen: u32 = ops
+                .iter()
+                .filter(|o| {
+                    matches!(
                         o.op_type(),
                         CigarOpType::Match
                             | CigarOpType::Insertion
                             | CigarOpType::SoftClip
                             | CigarOpType::SeqMatch
                             | CigarOpType::SeqMismatch
-                    ))
-                    .map(|o| o.len())
-                    .sum();
-                let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
-                let qual: Vec<BaseQuality> = (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
+                    )
+                })
+                .map(|o| o.len())
+                .sum();
+            let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
+            let qual: Vec<BaseQuality> = (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
 
-                let pos = Pos0::new(start).unwrap();
-                let bare: Vec<_> = AlignedPairs::new(pos, &ops).with_soft_clips().collect();
-                let rich_iter = AlignedPairs::new(pos, &ops)
-                    .with_soft_clips()
-                    .with_read(&seq, &qual);
-                let rich = match rich_iter {
-                    Ok(it) => it.collect::<Vec<_>>(),
-                    Err(e) => {
-                        // We sized seq/qual to qlen exactly, so validation
-                        // should always pass. If it ever fails, surface the
-                        // diagnostic loudly rather than silently skipping.
-                        prop_assert!(false, "with_read validation failed unexpectedly: {e}");
-                        return Ok(());
-                    }
-                };
-
-                prop_assert_eq!(bare.len(), rich.len());
-                for (b, r) in bare.iter().zip(rich.iter()) {
-                    let consistent = match (b, r) {
-                        (
-                            AlignedPair::Match { qpos: bq, rpos: br, kind: bk },
-                            AlignedPairWithRead::Match { qpos: rq, rpos: rr, kind: rk, .. },
-                        ) => bq == rq && br == rr && bk == rk,
-                        (
-                            AlignedPair::Insertion { first_inserted: bq, insert_len: bl },
-                            AlignedPairWithRead::Insertion { first_inserted: rq, query, .. },
-                        ) => bq == rq && (*bl) as usize == query.len(),
-                        (
-                            AlignedPair::Deletion { rpos: br, del_len: bl },
-                            AlignedPairWithRead::Deletion { rpos: rr, del_len: rl },
-                        ) => br == rr && bl == rl,
-                        (
-                            AlignedPair::RefSkip { rpos: br, skip_len: bl },
-                            AlignedPairWithRead::RefSkip { rpos: rr, skip_len: rl },
-                        ) => br == rr && bl == rl,
-                        (
-                            AlignedPair::SoftClip { qpos: bq, len: bl },
-                            AlignedPairWithRead::SoftClip { qpos: rq, query, .. },
-                        ) => bq == rq && (*bl) as usize == query.len(),
-                        (
-                            AlignedPair::Padding { len: bl },
-                            AlignedPairWithRead::Padding { len: rl },
-                        ) => bl == rl,
-                        (
-                            AlignedPair::Unknown { code: bc, len: bl },
-                            AlignedPairWithRead::Unknown { code: rc, len: rl },
-                        ) => bc == rc && bl == rl,
-                        _ => false,
-                    };
-                    prop_assert!(consistent, "variant mismatch: bare={:?} rich={:?}", b, r);
+            let pos = Pos0::new(start).unwrap();
+            let bare: Vec<_> = AlignedPairs::new(pos, &ops).with_soft_clips().collect();
+            let rich_iter = AlignedPairs::new(pos, &ops).with_soft_clips().with_read(&seq, &qual);
+            let rich = match rich_iter {
+                Ok(it) => it.collect::<Vec<_>>(),
+                Err(e) => {
+                    // We sized seq/qual to qlen exactly, so validation
+                    // should always pass. If it ever fails, surface the
+                    // diagnostic loudly rather than silently skipping.
+                    panic!("with_read validation failed unexpectedly: {e}");
                 }
+            };
+
+            assert_eq!(bare.len(), rich.len());
+            for (b, r) in bare.iter().zip(rich.iter()) {
+                let consistent = match (b, r) {
+                    (
+                        AlignedPair::Match { qpos: bq, rpos: br, kind: bk },
+                        AlignedPairWithRead::Match { qpos: rq, rpos: rr, kind: rk, .. },
+                    ) => bq == rq && br == rr && bk == rk,
+                    (
+                        AlignedPair::Insertion { first_inserted: bq, insert_len: bl },
+                        AlignedPairWithRead::Insertion { first_inserted: rq, query, .. },
+                    ) => bq == rq && (*bl) as usize == query.len(),
+                    (
+                        AlignedPair::Deletion { rpos: br, del_len: bl },
+                        AlignedPairWithRead::Deletion { rpos: rr, del_len: rl },
+                    ) => br == rr && bl == rl,
+                    (
+                        AlignedPair::RefSkip { rpos: br, skip_len: bl },
+                        AlignedPairWithRead::RefSkip { rpos: rr, skip_len: rl },
+                    ) => br == rr && bl == rl,
+                    (
+                        AlignedPair::SoftClip { qpos: bq, len: bl },
+                        AlignedPairWithRead::SoftClip { qpos: rq, query, .. },
+                    ) => bq == rq && (*bl) as usize == query.len(),
+                    (
+                        AlignedPair::Padding { len: bl },
+                        AlignedPairWithRead::Padding { len: rl },
+                    ) => bl == rl,
+                    (
+                        AlignedPair::Unknown { code: bc, len: bl },
+                        AlignedPairWithRead::Unknown { code: rc, len: rl },
+                    ) => bc == rc && bl == rl,
+                    _ => false,
+                };
+                assert!(consistent, "variant mismatch: bare={:?} rich={:?}", b, r);
             }
         }
 
         // ── with_read slice CONTENT (not just length) ─────────────────────
 
-        proptest! {
-            /// `with_read` slices for Insertion/SoftClip MUST be byte-identical
-            /// to `seq[qpos..qpos+len]` and `qual[qpos..qpos+len]`.
-            /// Match's `query`/`qual` MUST equal `seq[qpos]`/`qual[qpos]`.
-            ///
-            /// This catches off-by-one in the slice computation that the
-            /// pass-through proptest only verifies as length-equal.
-            ///
-            /// We seed seq with a position-encoding pattern (each byte =
-            /// (qpos % 5) → A/C/G/T/N) so any indexing slip surfaces as a
-            /// distinct base mismatch rather than silently coinciding.
-            #[test]
-            fn with_read_slice_contents_match_seq_at_qpos(
-                ops in proptest::collection::vec(arb_cigar_op(), 0..10),
-                start in 0u32..=10_000u32,
-            ) {
-                let qlen: u32 = ops
-                    .iter()
-                    .filter(|o| matches!(
+        /// `with_read` slices for Insertion/SoftClip MUST be byte-identical
+        /// to `seq[qpos..qpos+len]` and `qual[qpos..qpos+len]`.
+        /// Match's `query`/`qual` MUST equal `seq[qpos]`/`qual[qpos]`.
+        ///
+        /// This catches off-by-one in the slice computation that the
+        /// pass-through property only verifies as length-equal.
+        ///
+        /// We seed seq with a position-encoding pattern (each byte =
+        /// (qpos % 5) → A/C/G/T/N) so any indexing slip surfaces as a
+        /// distinct base mismatch rather than silently coinciding.
+        #[hegel::test]
+        fn with_read_slice_contents_match_seq_at_qpos(tc: TestCase) {
+            let ops = tc.draw(arb_cigar(9));
+            let start = tc.draw(gs::integers::<u32>().max_value(10_000));
+            let qlen: u32 = ops
+                .iter()
+                .filter(|o| {
+                    matches!(
                         o.op_type(),
                         CigarOpType::Match
                             | CigarOpType::Insertion
                             | CigarOpType::SoftClip
                             | CigarOpType::SeqMatch
                             | CigarOpType::SeqMismatch
-                    ))
-                    .map(|o| o.len())
-                    .sum();
-                // Position-encoding seq: byte at qpos i = bases[i % 5].
-                // bases[5] = [A, C, G, T, Unknown].
-                let bases = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
-                let seq: Vec<Base> =
-                    (0..qlen).map(|i| bases[(i % 5) as usize]).collect();
-                let qual: Vec<BaseQuality> = (0..qlen)
-                    .map(|i| BaseQuality::from_byte(u8::try_from(i % 60).unwrap_or(0)))
-                    .collect();
+                    )
+                })
+                .map(|o| o.len())
+                .sum();
+            // Position-encoding seq: byte at qpos i = bases[i % 5].
+            // bases[5] = [A, C, G, T, Unknown].
+            let bases = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
+            let seq: Vec<Base> = (0..qlen).map(|i| bases[(i % 5) as usize]).collect();
+            let qual: Vec<BaseQuality> = (0..qlen)
+                .map(|i| BaseQuality::from_byte(u8::try_from(i % 60).unwrap_or(0)))
+                .collect();
 
-                let pos = Pos0::new(start).unwrap();
-                let it = AlignedPairs::new(pos, &ops)
-                    .with_soft_clips()
-                    .with_read(&seq, &qual);
-                let it = match it {
-                    Ok(x) => x,
-                    Err(e) => {
-                        prop_assert!(false, "with_read validation failed: {e}");
-                        return Ok(());
-                    }
-                };
+            let pos = Pos0::new(start).unwrap();
+            let it = AlignedPairs::new(pos, &ops).with_soft_clips().with_read(&seq, &qual);
+            let it = match it {
+                Ok(x) => x,
+                Err(e) => {
+                    panic!("with_read validation failed: {e}");
+                }
+            };
 
-                for ev in it {
-                    match ev {
-                        AlignedPairWithRead::Match { qpos, query, qual, .. } => {
-                            let expected_base = bases[(qpos.get() % 5) as usize];
-                            prop_assert_eq!(
-                                query, expected_base,
-                                "Match query at qpos={} != seq[qpos]", qpos
-                            );
-                            let expected_qual = BaseQuality::from_byte((qpos.get() % 60) as u8);
-                            prop_assert_eq!(
-                                qual, expected_qual,
-                                "Match qual at qpos={} != qual[qpos]", qpos
-                            );
-                        }
-                        AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
-                            for (offset, &b) in query.iter().enumerate() {
-                                let q = first_inserted.as_usize() + offset;
-                                prop_assert_eq!(
-                                    b, bases[q % 5],
-                                    "Insertion query[{}] (abs qpos={}) mismatch", offset, q
-                                );
-                            }
-                            for (offset, &q_val) in qual.iter().enumerate() {
-                                let q = first_inserted.as_usize() + offset;
-                                let q_byte = u8::try_from(q % 60).unwrap_or(0);
-                                prop_assert_eq!(
-                                    q_val, BaseQuality::from_byte(q_byte),
-                                    "Insertion qual[{}] (abs qpos={}) mismatch", offset, q
-                                );
-                            }
-                        }
-                        AlignedPairWithRead::SoftClip { qpos, query, qual } => {
-                            for (offset, &b) in query.iter().enumerate() {
-                                let q = qpos.as_usize() + offset;
-                                prop_assert_eq!(
-                                    b, bases[q % 5],
-                                    "SoftClip query[{}] (abs qpos={}) mismatch", offset, q
-                                );
-                            }
-                            for (offset, &q_val) in qual.iter().enumerate() {
-                                let q = qpos.as_usize() + offset;
-                                let q_byte = u8::try_from(q % 60).unwrap_or(0);
-                                prop_assert_eq!(
-                                    q_val, BaseQuality::from_byte(q_byte),
-                                    "SoftClip qual[{}] (abs qpos={}) mismatch", offset, q
-                                );
-                            }
-                        }
-                        // Other variants have no read data to verify.
-                        _ => {}
+            for ev in it {
+                match ev {
+                    AlignedPairWithRead::Match { qpos, query, qual, .. } => {
+                        let expected_base = bases[(qpos.get() % 5) as usize];
+                        assert_eq!(
+                            query, expected_base,
+                            "Match query at qpos={} != seq[qpos]",
+                            qpos
+                        );
+                        let expected_qual = BaseQuality::from_byte((qpos.get() % 60) as u8);
+                        assert_eq!(
+                            qual, expected_qual,
+                            "Match qual at qpos={} != qual[qpos]",
+                            qpos
+                        );
                     }
+                    AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
+                        for (offset, &b) in query.iter().enumerate() {
+                            let q = first_inserted.as_usize() + offset;
+                            assert_eq!(
+                                b,
+                                bases[q % 5],
+                                "Insertion query[{}] (abs qpos={}) mismatch",
+                                offset,
+                                q
+                            );
+                        }
+                        for (offset, &q_val) in qual.iter().enumerate() {
+                            let q = first_inserted.as_usize() + offset;
+                            let q_byte = u8::try_from(q % 60).unwrap_or(0);
+                            assert_eq!(
+                                q_val,
+                                BaseQuality::from_byte(q_byte),
+                                "Insertion qual[{}] (abs qpos={}) mismatch",
+                                offset,
+                                q
+                            );
+                        }
+                    }
+                    AlignedPairWithRead::SoftClip { qpos, query, qual } => {
+                        for (offset, &b) in query.iter().enumerate() {
+                            let q = qpos.as_usize() + offset;
+                            assert_eq!(
+                                b,
+                                bases[q % 5],
+                                "SoftClip query[{}] (abs qpos={}) mismatch",
+                                offset,
+                                q
+                            );
+                        }
+                        for (offset, &q_val) in qual.iter().enumerate() {
+                            let q = qpos.as_usize() + offset;
+                            let q_byte = u8::try_from(q % 60).unwrap_or(0);
+                            assert_eq!(
+                                q_val,
+                                BaseQuality::from_byte(q_byte),
+                                "SoftClip qual[{}] (abs qpos={}) mismatch",
+                                offset,
+                                q
+                            );
+                        }
+                    }
+                    // Other variants have no read data to verify.
+                    _ => {}
                 }
             }
         }
@@ -1288,140 +1297,129 @@ mod tests {
 
         use std::rc::Rc;
 
-        proptest! {
-            /// For every `Match` event, `ref_base` MUST equal
-            /// `RefSeq::try_base_at(rpos)` (not `base_at` — we want the
-            /// `Option` distinction). For every `Deletion`, `ref_bases` MUST
-            /// equal `RefSeq::range(rpos, del_len)`. Direct contract
-            /// verification — the iterator is just a cache of these lookups,
-            /// so they should agree exactly.
-            #[test]
-            fn with_reference_contract_matches_refseq_lookups(
-                ops in proptest::collection::vec(arb_cigar_op(), 0..8),
-                pos_offset in 0u32..=200u32,
-                ref_start in 0u32..=200u32,
-                ref_len in 0u32..=300u32,
-            ) {
-                // Bound parameters into Pos0's range. Larger than test
-                // arithmetic warrants but keeps things obvious.
-                let pos_offset = pos_offset.min(1_000);
-                let ref_start = ref_start.min(1_000);
-                let ref_len = ref_len.min(500);
+        /// For every `Match` event, `ref_base` MUST equal
+        /// `RefSeq::try_base_at(rpos)` (not `base_at` — we want the
+        /// `Option` distinction). For every `Deletion`, `ref_bases` MUST
+        /// equal `RefSeq::range(rpos, del_len)`. Direct contract
+        /// verification — the iterator is just a cache of these lookups,
+        /// so they should agree exactly.
+        #[hegel::test]
+        fn with_reference_contract_matches_refseq_lookups(tc: TestCase) {
+            let ops = tc.draw(arb_cigar(7));
+            let pos_offset = tc.draw(gs::integers::<u32>().max_value(200));
+            let ref_start = tc.draw(gs::integers::<u32>().max_value(200));
+            let ref_len = tc.draw(gs::integers::<u32>().max_value(300));
+            // Bound parameters into Pos0's range. Larger than test
+            // arithmetic warrants but keeps things obvious.
+            let pos_offset = pos_offset.min(1_000);
+            let ref_start = ref_start.min(1_000);
+            let ref_len = ref_len.min(500);
 
-                let qlen: u32 = ops
-                    .iter()
-                    .filter(|o| matches!(
+            let qlen: u32 = ops
+                .iter()
+                .filter(|o| {
+                    matches!(
                         o.op_type(),
                         CigarOpType::Match
                             | CigarOpType::Insertion
                             | CigarOpType::SoftClip
                             | CigarOpType::SeqMatch
                             | CigarOpType::SeqMismatch
-                    ))
-                    .map(|o| o.len())
-                    .sum();
-                let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
-                let qual: Vec<BaseQuality> =
-                    (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
+                    )
+                })
+                .map(|o| o.len())
+                .sum();
+            let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
+            let qual: Vec<BaseQuality> = (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
 
-                // Build a RefSeq with arbitrary bases and start position. Use
-                // a position-encoded pattern so any indexing slip would surface
-                // as a distinct ref_base mismatch.
-                let ref_bases_kinds = [Base::A, Base::C, Base::G, Base::T];
-                let ref_buf: Vec<Base> = (0..ref_len)
-                    .map(|i| ref_bases_kinds[(i % 4) as usize])
-                    .collect();
-                let ref_seq = RefSeq::new(Rc::from(ref_buf), Pos0::new(ref_start).unwrap());
+            // Build a RefSeq with arbitrary bases and start position. Use
+            // a position-encoded pattern so any indexing slip would surface
+            // as a distinct ref_base mismatch.
+            let ref_bases_kinds = [Base::A, Base::C, Base::G, Base::T];
+            let ref_buf: Vec<Base> =
+                (0..ref_len).map(|i| ref_bases_kinds[(i % 4) as usize]).collect();
+            let ref_seq = RefSeq::new(Rc::from(ref_buf), Pos0::new(ref_start).unwrap());
 
-                let read_pos = Pos0::new(pos_offset).unwrap();
-                let it = AlignedPairs::new(read_pos, &ops)
-                    .with_soft_clips()
-                    .with_read(&seq, &qual);
-                let it = match it {
-                    Ok(x) => x.with_reference(&ref_seq),
-                    Err(e) => {
-                        prop_assert!(false, "with_read validation failed: {e}");
-                        return Ok(());
+            let read_pos = Pos0::new(pos_offset).unwrap();
+            let it = AlignedPairs::new(read_pos, &ops).with_soft_clips().with_read(&seq, &qual);
+            let it = match it {
+                Ok(x) => x.with_reference(&ref_seq),
+                Err(e) => {
+                    panic!("with_read validation failed: {e}");
+                }
+            };
+
+            for ev in it {
+                match ev {
+                    AlignedPairWithRef::Match { rpos, ref_base, .. } => {
+                        let expected = ref_seq.try_base_at(rpos);
+                        assert_eq!(
+                            ref_base, expected,
+                            "Match ref_base at rpos={:?} disagrees with try_base_at",
+                            rpos,
+                        );
                     }
-                };
-
-                for ev in it {
-                    match ev {
-                        AlignedPairWithRef::Match { rpos, ref_base, .. } => {
-                            let expected = ref_seq.try_base_at(rpos);
-                            prop_assert_eq!(
-                                ref_base, expected,
-                                "Match ref_base at rpos={:?} disagrees with try_base_at",
-                                rpos,
-                            );
-                        }
-                        AlignedPairWithRef::Deletion { rpos, del_len, ref_bases } => {
-                            let expected = ref_seq.range(rpos, del_len);
-                            prop_assert_eq!(
-                                ref_bases, expected,
-                                "Deletion ref_bases at rpos={:?}, len={} disagrees with range",
-                                rpos, del_len,
-                            );
-                        }
-                        _ => {}
+                    AlignedPairWithRef::Deletion { rpos, del_len, ref_bases } => {
+                        let expected = ref_seq.range(rpos, del_len);
+                        assert_eq!(
+                            ref_bases, expected,
+                            "Deletion ref_bases at rpos={:?}, len={} disagrees with range",
+                            rpos, del_len,
+                        );
                     }
+                    _ => {}
                 }
             }
         }
 
         // ── matches_only equivalence ─────────────────────────────────────
 
-        proptest! {
-            /// `matches_only` MUST yield exactly the Match events from the
-            /// underlying iterator, in order, with the same field values.
-            /// Equivalent to `.filter_map` on Match — naming it shouldn't
-            /// change semantics.
-            #[test]
-            fn with_read_matches_only_equals_manual_filter(
-                ops in proptest::collection::vec(arb_cigar_op(), 0..10),
-                start in 0u32..=10_000u32,
-            ) {
-                let qlen: u32 = ops
-                    .iter()
-                    .filter(|o| matches!(
+        /// `matches_only` MUST yield exactly the Match events from the
+        /// underlying iterator, in order, with the same field values.
+        /// Equivalent to `.filter_map` on Match — naming it shouldn't
+        /// change semantics.
+        #[hegel::test]
+        fn with_read_matches_only_equals_manual_filter(tc: TestCase) {
+            let ops = tc.draw(arb_cigar(9));
+            let start = tc.draw(gs::integers::<u32>().max_value(10_000));
+            let qlen: u32 = ops
+                .iter()
+                .filter(|o| {
+                    matches!(
                         o.op_type(),
                         CigarOpType::Match
                             | CigarOpType::Insertion
                             | CigarOpType::SoftClip
                             | CigarOpType::SeqMatch
                             | CigarOpType::SeqMismatch
-                    ))
-                    .map(|o| o.len())
-                    .sum();
-                let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
-                let qual: Vec<BaseQuality> =
-                    (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
+                    )
+                })
+                .map(|o| o.len())
+                .sum();
+            let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
+            let qual: Vec<BaseQuality> = (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
 
-                let pos = Pos0::new(start).unwrap();
-                let it = AlignedPairs::new(pos, &ops)
-                    .with_soft_clips()
-                    .with_read(&seq, &qual);
-                let it = match it {
-                    Ok(x) => x,
-                    Err(e) => {
-                        prop_assert!(false, "with_read validation failed: {e}");
-                        return Ok(());
+            let pos = Pos0::new(start).unwrap();
+            let it = AlignedPairs::new(pos, &ops).with_soft_clips().with_read(&seq, &qual);
+            let it = match it {
+                Ok(x) => x,
+                Err(e) => {
+                    panic!("with_read validation failed: {e}");
+                }
+            };
+
+            // Snapshot via clone so we can iterate twice.
+            let manual: Vec<MatchedBase> = it
+                .clone()
+                .filter_map(|ev| match ev {
+                    AlignedPairWithRead::Match { qpos, rpos, kind, query, qual } => {
+                        Some(MatchedBase { qpos, rpos, kind, query, qual })
                     }
-                };
-
-                // Snapshot via clone so we can iterate twice.
-                let manual: Vec<MatchedBase> = it
-                    .clone()
-                    .filter_map(|ev| match ev {
-                        AlignedPairWithRead::Match { qpos, rpos, kind, query, qual } => {
-                            Some(MatchedBase { qpos, rpos, kind, query, qual })
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let via_adapter: Vec<MatchedBase> = it.matches_only().collect();
-                prop_assert_eq!(manual, via_adapter);
-            }
+                    _ => None,
+                })
+                .collect();
+            let via_adapter: Vec<MatchedBase> = it.matches_only().collect();
+            assert_eq!(manual, via_adapter);
         }
     }
 }

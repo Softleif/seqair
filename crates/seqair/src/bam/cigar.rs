@@ -827,7 +827,7 @@ fn pos_info_bsearch(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
 #[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
     fn op(op_type: CigarOpType, len: u32) -> CigarOp {
         CigarOp::new(op_type, len)
@@ -1078,92 +1078,89 @@ mod tests {
         assert_eq!(m.soft_clip_qpos_at(p(1023), 3, query_len), None);
     }
 
-    proptest::proptest! {
-        /// For an arbitrary clips-match-clips CIGAR, `soft_clip_qpos_at` MUST be
-        /// the exact complement of `pos_info_at` over the flanking windows:
-        /// never both `Some` at one position, every hit indexes the correct
-        /// clip run, and the number of hits per side is exactly
-        /// `min(overhang, clip_len)`.
-        // r[verify cigar.soft_clip_qpos]
-        #[test]
-        fn soft_clip_qpos_windows(
-            rec_pos in 100u32..1_000,
-            lead in 0u32..5,
-            mlen in 1u32..10,
-            trail in 0u32..5,
-            overhang in 0u32..6,
-        ) {
-            let mut ops = Vec::new();
-            if lead > 0 {
-                ops.push(op(CigarOpType::SoftClip, lead));
-            }
-            ops.push(op(CigarOpType::Match, mlen));
-            if trail > 0 {
-                ops.push(op(CigarOpType::SoftClip, trail));
-            }
-            let query_len = lead + mlen + trail;
-            let m = CigarMapping::new(p(rec_pos), &ops).unwrap();
+    /// For an arbitrary clips-match-clips CIGAR, `soft_clip_qpos_at` MUST be
+    /// the exact complement of `pos_info_at` over the flanking windows:
+    /// never both `Some` at one position, every hit indexes the correct
+    /// clip run, and the number of hits per side is exactly
+    /// `min(overhang, clip_len)`.
+    // r[verify cigar.soft_clip_qpos]
+    #[hegel::test]
+    fn soft_clip_qpos_windows(tc: TestCase) {
+        let rec_pos = tc.draw(gs::integers::<u32>().min_value(100).max_value(999));
+        let lead = tc.draw(gs::integers::<u32>().max_value(4));
+        let mlen = tc.draw(gs::integers::<u32>().min_value(1).max_value(9));
+        let trail = tc.draw(gs::integers::<u32>().max_value(4));
+        let overhang = tc.draw(gs::integers::<u32>().max_value(5));
 
-            let aln_start = rec_pos;
-            let aln_end = rec_pos + mlen; // one past the last aligned base
+        let mut ops = Vec::new();
+        if lead > 0 {
+            ops.push(op(CigarOpType::SoftClip, lead));
+        }
+        ops.push(op(CigarOpType::Match, mlen));
+        if trail > 0 {
+            ops.push(op(CigarOpType::SoftClip, trail));
+        }
+        let query_len = lead + mlen + trail;
+        let m = CigarMapping::new(p(rec_pos), &ops).unwrap();
 
-            let lo = aln_start.saturating_sub(overhang + 2);
-            let hi = aln_end + overhang + 2;
-            let mut lead_hits = 0u32;
-            let mut trail_hits = 0u32;
-            for pos in lo..hi {
-                let pp = p(pos);
-                let sc = m.soft_clip_qpos_at(pp, overhang, query_len);
-                let aligned = m.pos_info_at(pp);
-                prop_assert!(
-                    !(sc.is_some() && aligned.is_some()),
-                    "soft clip and aligned base cannot coexist at one position"
-                );
-                if let Some(q) = sc {
-                    prop_assert!(q.get() < query_len);
-                    if pos < aln_start {
-                        prop_assert!(q.get() < lead, "leading hit must index the leading clip run");
-                        lead_hits += 1;
-                    } else {
-                        prop_assert!(
-                            q.get() >= lead + mlen,
-                            "trailing hit must index the trailing clip run"
-                        );
-                        trail_hits += 1;
-                    }
+        let aln_start = rec_pos;
+        let aln_end = rec_pos + mlen; // one past the last aligned base
+
+        let lo = aln_start.saturating_sub(overhang + 2);
+        let hi = aln_end + overhang + 2;
+        let mut lead_hits = 0u32;
+        let mut trail_hits = 0u32;
+        for pos in lo..hi {
+            let pp = p(pos);
+            let sc = m.soft_clip_qpos_at(pp, overhang, query_len);
+            let aligned = m.pos_info_at(pp);
+            assert!(
+                !(sc.is_some() && aligned.is_some()),
+                "soft clip and aligned base cannot coexist at one position"
+            );
+            if let Some(q) = sc {
+                assert!(q.get() < query_len);
+                if pos < aln_start {
+                    assert!(q.get() < lead, "leading hit must index the leading clip run");
+                    lead_hits += 1;
+                } else {
+                    assert!(
+                        q.get() >= lead + mlen,
+                        "trailing hit must index the trailing clip run"
+                    );
+                    trail_hits += 1;
                 }
             }
-            prop_assert_eq!(lead_hits, overhang.min(lead));
-            prop_assert_eq!(trail_hits, overhang.min(trail));
         }
+        assert_eq!(lead_hits, overhang.min(lead));
+        assert_eq!(trail_hits, overhang.min(trail));
     }
 
-    // r[verify cigar.slice_from_bam_bytes]
-    proptest::proptest! {
-        /// Round-trip: encode CigarOp → BAM LE bytes → slice_from_bam_bytes → same ops.
-        #[test]
-        fn roundtrip_slice_from_bam_bytes(
-            ops in proptest::collection::vec(
-                (0u32..=8u32, 1u32..1000u32),
-                1..20,
-            ).prop_map(|pairs| {
-                pairs.into_iter()
-                    .map(|(code, len)| CigarOp::from_bam_u32((len << 4) | code))
-                    .collect::<Vec<_>>()
-            })
-        ) {
-            let bytes: Vec<u8> = ops.iter()
-                .flat_map(|op| op.to_bam_u32().to_le_bytes())
-                .collect();
-            // 8 bytes padding ensures 8-byte alignment (≥ 4-byte for CigarOp)
-            let mut buf = vec![0u8; 8];
-            buf.extend_from_slice(&bytes);
-            let aligned = &buf[8..];
+    /// Round-trip: encode `CigarOp` → BAM LE bytes → `slice_from_bam_bytes` → same ops.
+    #[hegel::test]
+    fn roundtrip_slice_from_bam_bytes(tc: TestCase) {
+        let ops: Vec<CigarOp> = tc
+            .draw(
+                gs::vecs(gs::tuples!(
+                    gs::integers::<u32>().max_value(8),
+                    gs::integers::<u32>().min_value(1).max_value(999),
+                ))
+                .min_size(1)
+                .max_size(19),
+            )
+            .into_iter()
+            .map(|(code, len)| CigarOp::from_bam_u32((len << 4) | code))
+            .collect();
 
-            let result = CigarOp::slice_from_bam_bytes(aligned);
-            prop_assert!(result.is_some(), "aligned buffer must succeed");
-            prop_assert_eq!(result.unwrap(), ops.as_slice());
-        }
+        let bytes: Vec<u8> = ops.iter().flat_map(|op| op.to_bam_u32().to_le_bytes()).collect();
+        // 8 bytes padding ensures 8-byte alignment (≥ 4-byte for CigarOp)
+        let mut buf = vec![0u8; 8];
+        buf.extend_from_slice(&bytes);
+        let aligned = &buf[8..];
+
+        let result = CigarOp::slice_from_bam_bytes(aligned);
+        assert!(result.is_some(), "aligned buffer must succeed");
+        assert_eq!(result.unwrap(), ops.as_slice());
     }
 
     #[test]

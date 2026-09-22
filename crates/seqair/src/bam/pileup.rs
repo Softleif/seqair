@@ -1566,10 +1566,10 @@ mod tests {
     /// invariant is `r[pileup.soft_clip_overhang.additive]`: enabling the
     /// overhang only *adds* `SoftClip` entries and never perturbs the aligned
     /// column stream a baseline (overhang-0) run produces.
-    mod overhang_proptest {
+    mod overhang_properties {
         use super::super::*;
         use crate::bam::cigar::{CigarOp, CigarOpType};
-        use proptest::prelude::*;
+        use hegel::prelude::*;
         use seqair_types::{BamFlags, Base};
 
         const BASES: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
@@ -1612,22 +1612,24 @@ mod tests {
             }
         }
 
-        fn read_spec() -> impl Strategy<Value = ReadSpec> {
-            (50u32..150, 0u32..4, any::<bool>(), 1u32..6, 1u32..4, 1u32..6, 0u32..4).prop_flat_map(
-                |(pos, lead, has_del, a, d, b, trail)| {
-                    let (d, b) = if has_del { (d, b) } else { (0, 0) };
-                    let qlen = (lead + a + b + trail) as usize;
-                    proptest::collection::vec(0u8..4, qlen..=qlen).prop_map(move |idxs| ReadSpec {
-                        pos,
-                        lead,
-                        a,
-                        d,
-                        b,
-                        trail,
-                        seq: idxs.into_iter().map(|i| BASES[i as usize]).collect(),
-                    })
-                },
-            )
+        #[hegel::composite]
+        fn read_spec(tc: &TestCase) -> ReadSpec {
+            let pos = tc.draw_silent(gs::integers::<u32>().min_value(50).max_value(149));
+            let lead = tc.draw_silent(gs::integers::<u32>().max_value(3));
+            let has_del = tc.draw_silent(gs::booleans());
+            let a = tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(5));
+            let trail = tc.draw_silent(gs::integers::<u32>().max_value(3));
+            let (d, b) = if has_del {
+                (
+                    tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(3)),
+                    tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(5)),
+                )
+            } else {
+                (0, 0)
+            };
+            let qlen = (lead + a + b + trail) as usize;
+            let seq = (0..qlen).map(|_| tc.draw_silent(gs::sampled_from(&BASES))).collect();
+            ReadSpec { pos, lead, a, d, b, trail, seq }
         }
 
         const KIND_MATCH: u8 = 0;
@@ -1739,32 +1741,30 @@ mod tests {
             RunResult { aligned, softclips, softclips_valid, min_depth, saw_column }
         }
 
-        proptest! {
-            // r[verify pileup.soft_clip_overhang.additive]
-            // r[verify pileup.soft_clip_overhang.default_off]
-            // r[verify pileup.soft_clip_overhang.emit]
-            #[test]
-            fn overhang_only_adds_soft_clips(
-                reads in proptest::collection::vec(read_spec(), 1..6),
-                overhang in 1u32..4,
-            ) {
-                let baseline = run_engine(&reads, 0);
-                let with_oh = run_engine(&reads, overhang);
+        // r[verify pileup.soft_clip_overhang.additive]
+        // r[verify pileup.soft_clip_overhang.default_off]
+        // r[verify pileup.soft_clip_overhang.emit]
+        #[hegel::test]
+        fn overhang_only_adds_soft_clips(tc: TestCase) {
+            let reads = tc.draw(gs::vecs(read_spec().print_as_debug()).min_size(1).max_size(5));
+            let overhang = tc.draw(gs::integers::<u32>().min_value(1).max_value(3));
 
-                // Baseline never produces soft clips.
-                prop_assert!(baseline.softclips.is_empty());
+            let baseline = run_engine(&reads, 0);
+            let with_oh = run_engine(&reads, overhang);
 
-                // The aligned column stream is byte-identical with the overhang on.
-                prop_assert_eq!(&with_oh.aligned, &baseline.aligned);
+            // Baseline never produces soft clips.
+            assert!(baseline.softclips.is_empty());
 
-                // Every emitted soft clip references a real clipped SEQ base inside
-                // the overhang window.
-                prop_assert!(with_oh.softclips_valid);
+            // The aligned column stream is byte-identical with the overhang on.
+            assert_eq!(&with_oh.aligned, &baseline.aligned);
 
-                // No empty columns are ever emitted.
-                if with_oh.saw_column {
-                    prop_assert!(with_oh.min_depth >= 1);
-                }
+            // Every emitted soft clip references a real clipped SEQ base inside
+            // the overhang window.
+            assert!(with_oh.softclips_valid);
+
+            // No empty columns are ever emitted.
+            if with_oh.saw_column {
+                assert!(with_oh.min_depth >= 1);
             }
         }
     }
@@ -2089,53 +2089,50 @@ mod tests {
     mod column_entries {
         use super::*;
         use crate::bam::record_store::tests::window_query::{apply_moves, arb_moves, arb_store};
-        use proptest::prelude::*;
+        use hegel::prelude::*;
 
-        proptest! {
-            // r[verify pileup.column_contents]
-            // r[verify record_store.record_ref]
-            /// Every entry a column holds is reachable, both ways round.
-            ///
-            /// `alignments()` used to `filter_map` an entry whose record could
-            /// not be resolved, which would have made a column quietly shorter
-            /// than its own `depth()` rather than failing — a bug-hider, since
-            /// the engine mints those indices from the store it still owns.
-            /// This pins the three counts together.
-            #[test]
-            fn every_entry_is_reachable_and_counts_agree(
-                reads in arb_store(),
-                moves in arb_moves(),
-            ) {
-                let mut store = RecordStore::new();
-                for (i, read) in reads.iter().enumerate() {
-                    read.push(&mut store, i);
-                }
-                apply_moves(&mut store, &reads, &moves);
-
-                let mut engine = PileupEngine::new(
-                    store.prepare_for_pileup().input,
-                    Pos0::new(0).unwrap(),
-                    Pos0::new(7_000).unwrap(),
-                );
-                let mut columns = 0usize;
-                while let Some(col) = engine.pileups() {
-                    columns += 1;
-                    let depth = col.depth();
-                    prop_assert_eq!(col.alignments().count(), depth, "an entry went missing");
-                    prop_assert_eq!(col.raw_alignments().count(), depth);
-
-                    // Each position resolves, and resolves to its own entry.
-                    for (i, view) in col.alignments().enumerate() {
-                        let at = col.alignment_at(i).expect("i < depth");
-                        prop_assert_eq!(at.record_idx(), view.record_idx());
-                        // The record behind the entry is always there.
-                        prop_assert_eq!(view.record().idx(), view.record_idx());
-                    }
-                    // One past the depth is the only `None`.
-                    prop_assert!(col.alignment_at(depth).is_none());
-                }
-                prop_assert!(columns > 0 || reads.iter().all(|r| !r.mapped));
+        // r[verify pileup.column_contents]
+        // r[verify record_store.record_ref]
+        /// Every entry a column holds is reachable, both ways round.
+        ///
+        /// `alignments()` used to `filter_map` an entry whose record could
+        /// not be resolved, which would have made a column quietly shorter
+        /// than its own `depth()` rather than failing — a bug-hider, since
+        /// the engine mints those indices from the store it still owns.
+        /// This pins the three counts together.
+        #[hegel::test]
+        fn every_entry_is_reachable_and_counts_agree(tc: TestCase) {
+            let reads = tc.draw(arb_store());
+            let moves = tc.draw(arb_moves());
+            let mut store = RecordStore::new();
+            for (i, read) in reads.iter().enumerate() {
+                read.push(&mut store, i);
             }
+            apply_moves(&mut store, &reads, &moves);
+
+            let mut engine = PileupEngine::new(
+                store.prepare_for_pileup().input,
+                Pos0::new(0).unwrap(),
+                Pos0::new(7_000).unwrap(),
+            );
+            let mut columns = 0usize;
+            while let Some(col) = engine.pileups() {
+                columns += 1;
+                let depth = col.depth();
+                assert_eq!(col.alignments().count(), depth, "an entry went missing");
+                assert_eq!(col.raw_alignments().count(), depth);
+
+                // Each position resolves, and resolves to its own entry.
+                for (i, view) in col.alignments().enumerate() {
+                    let at = col.alignment_at(i).expect("i < depth");
+                    assert_eq!(at.record_idx(), view.record_idx());
+                    // The record behind the entry is always there.
+                    assert_eq!(view.record().idx(), view.record_idx());
+                }
+                // One past the depth is the only `None`.
+                assert!(col.alignment_at(depth).is_none());
+            }
+            assert!(columns > 0 || reads.iter().all(|r| !r.mapped));
         }
     }
 
@@ -2144,78 +2141,91 @@ mod tests {
         use crate::bam::record_store::tests::window_query::{
             apply_moves, arb_moves, arb_span, arb_store, brute_force,
         };
-        use proptest::prelude::*;
+        use hegel::prelude::*;
         use std::collections::BTreeSet;
 
-        proptest! {
-            // r[verify pileup.records_overlapping]
-            /// The engine's answer is the input's answer — before iteration,
-            /// from a column mid-iteration, and after the last column — and it
-            /// agrees with the columns: every alignment a column inside the
-            /// span reports is in the set, and every record in the set shows
-            /// up in some column inside the span. The two directions together
-            /// pin the query to what the engine actually emits, not to a
-            /// second copy of the overlap test. The generator includes
-            /// placed-unmapped reads, which the engine never reports, so the
-            /// second direction is what keeps them out of the query too.
-            ///
-            /// The agreement is exact only because nothing here makes a column
-            /// differ from alignment overlap: no soft-clip overhang, no depth
-            /// cap, and an engine region containing every read.
-            #[test]
-            fn engine_query_agrees_with_columns(reads in arb_store(), moves in arb_moves(), span in arb_span()) {
-                let mut store = RecordStore::new();
-                for (i, read) in reads.iter().enumerate() {
-                    read.push(&mut store, i);
-                }
-                apply_moves(&mut store, &reads, &moves);
-                let input = store.prepare_for_pileup().input;
-                let (start, end) = span.resolve(input.store());
-                let expected = brute_force(input.store(), start, end);
-
-                let mut engine = PileupEngine::new(input, Pos0::new(0).unwrap(), Pos0::new(7_000).unwrap());
-                let before: Vec<RecordIdx> = engine.records_overlapping(start, end).collect();
-                prop_assert_eq!(&before, &expected);
-
-                let set: BTreeSet<RecordIdx> = expected.iter().copied().collect();
-                let mut seen = BTreeSet::new();
-                let mut mid: Option<Vec<RecordIdx>> = None;
-                while let Some(col) = engine.pileups() {
-                    if col.pos() < start || col.pos() > end {
-                        continue;
-                    }
-                    for view in col.alignments() {
-                        prop_assert!(set.contains(&view.record_idx()), "column {} reports record {} the query does not", col.pos(), view.record_idx());
-                        seen.insert(view.record_idx());
-                    }
-                    if mid.is_none() {
-                        // Queried through the column, the way a caller who
-                        // has just seen something at `col.pos()` does it.
-                        let from_column: Vec<RecordIdx> = col.records_overlapping(start, end).collect();
-                        // Every index the query yields is a store index the
-                        // column can resolve: found here iff it overlaps
-                        // this very position.
-                        for &idx in &from_column {
-                            let rec = col.store().record(idx).unwrap();
-                            let covers = rec.pos <= col.pos() && rec.end_pos >= col.pos();
-                            prop_assert_eq!(col.find_record(idx).is_some(), covers, "record {} at column {}", idx, col.pos());
-                        }
-                        mid = Some(from_column);
-                    }
-                }
-                if let Some(mid) = mid {
-                    prop_assert_eq!(mid, expected.clone());
-                }
-                // Every mapped record in the span consumes reference there
-                // (M or D), so the engine must have reported it at some column.
-                prop_assert_eq!(seen, set);
-
-                let after: Vec<RecordIdx> = engine.records_overlapping(start, end).collect();
-                prop_assert_eq!(&after, &expected);
-
-                engine.reclaim_allocation();
-                prop_assert_eq!(engine.records_overlapping(start, end).count(), 0);
+        // r[verify pileup.records_overlapping]
+        /// The engine's answer is the input's answer — before iteration,
+        /// from a column mid-iteration, and after the last column — and it
+        /// agrees with the columns: every alignment a column inside the
+        /// span reports is in the set, and every record in the set shows
+        /// up in some column inside the span. The two directions together
+        /// pin the query to what the engine actually emits, not to a
+        /// second copy of the overlap test. The generator includes
+        /// placed-unmapped reads, which the engine never reports, so the
+        /// second direction is what keeps them out of the query too.
+        ///
+        /// The agreement is exact only because nothing here makes a column
+        /// differ from alignment overlap: no soft-clip overhang, no depth
+        /// cap, and an engine region containing every read.
+        #[hegel::test]
+        fn engine_query_agrees_with_columns(tc: TestCase) {
+            let reads = tc.draw(arb_store());
+            let moves = tc.draw(arb_moves());
+            let span = tc.draw(arb_span());
+            let mut store = RecordStore::new();
+            for (i, read) in reads.iter().enumerate() {
+                read.push(&mut store, i);
             }
+            apply_moves(&mut store, &reads, &moves);
+            let input = store.prepare_for_pileup().input;
+            let (start, end) = span.resolve(input.store());
+            let expected = brute_force(input.store(), start, end);
+
+            let mut engine =
+                PileupEngine::new(input, Pos0::new(0).unwrap(), Pos0::new(7_000).unwrap());
+            let before: Vec<RecordIdx> = engine.records_overlapping(start, end).collect();
+            assert_eq!(&before, &expected);
+
+            let set: BTreeSet<RecordIdx> = expected.iter().copied().collect();
+            let mut seen = BTreeSet::new();
+            let mut mid: Option<Vec<RecordIdx>> = None;
+            while let Some(col) = engine.pileups() {
+                if col.pos() < start || col.pos() > end {
+                    continue;
+                }
+                for view in col.alignments() {
+                    assert!(
+                        set.contains(&view.record_idx()),
+                        "column {} reports record {} the query does not",
+                        col.pos(),
+                        view.record_idx()
+                    );
+                    seen.insert(view.record_idx());
+                }
+                if mid.is_none() {
+                    // Queried through the column, the way a caller who
+                    // has just seen something at `col.pos()` does it.
+                    let from_column: Vec<RecordIdx> = col.records_overlapping(start, end).collect();
+                    // Every index the query yields is a store index the
+                    // column can resolve: found here iff it overlaps
+                    // this very position.
+                    for &idx in &from_column {
+                        let rec = col.store().record(idx).unwrap();
+                        let covers = rec.pos <= col.pos() && rec.end_pos >= col.pos();
+                        assert_eq!(
+                            col.find_record(idx).is_some(),
+                            covers,
+                            "record {} at column {}",
+                            idx,
+                            col.pos()
+                        );
+                    }
+                    mid = Some(from_column);
+                }
+            }
+            if let Some(mid) = mid {
+                assert_eq!(mid, expected.clone());
+            }
+            // Every mapped record in the span consumes reference there
+            // (M or D), so the engine must have reported it at some column.
+            assert_eq!(seen, set);
+
+            let after: Vec<RecordIdx> = engine.records_overlapping(start, end).collect();
+            assert_eq!(&after, &expected);
+
+            engine.reclaim_allocation();
+            assert_eq!(engine.records_overlapping(start, end).count(), 0);
         }
     }
 }

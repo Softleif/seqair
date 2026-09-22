@@ -711,125 +711,116 @@ mod tests {
     mod proptests {
         use super::super::super::cigar::CigarOp;
         use super::*;
-        use proptest::prelude::*;
+        use hegel::prelude::*;
 
-        /// Generate a CIGAR using only ops that work cleanly with NM/MD.
+        /// Generate a CIGAR op using only types that work cleanly with NM/MD.
         /// Avoids `H` (zero contribution but complicates query length),
         /// `P`/Unknown (filtered out by default), `B` (back).
-        fn arb_cigar_op() -> impl Strategy<Value = CigarOp> {
+        #[hegel::composite]
+        fn arb_cigar_op(tc: &TestCase) -> CigarOp {
             // Op types that consume query and/or ref. Lengths 1..=8 to keep
             // cigars tractable.
-            let ops = prop_oneof![
-                Just(CigarOpType::Match),
-                Just(CigarOpType::Insertion),
-                Just(CigarOpType::Deletion),
-                Just(CigarOpType::SoftClip),
-                Just(CigarOpType::SeqMatch),
-                Just(CigarOpType::SeqMismatch),
-            ];
-            (ops, 1u32..=8u32).prop_map(|(t, len)| CigarOp::new(t, len))
+            let op_type = tc.draw_silent(gs::sampled_from(&[
+                CigarOpType::Match,
+                CigarOpType::Insertion,
+                CigarOpType::Deletion,
+                CigarOpType::SoftClip,
+                CigarOpType::SeqMatch,
+                CigarOpType::SeqMismatch,
+            ]));
+            let len = tc.draw(gs::integers::<u32>().min_value(1).max_value(8));
+            CigarOp::new(op_type, len)
         }
 
-        proptest! {
-            /// **NM/MD consistency.** For any record where the reference covers
-            /// the full alignment, computed NM must equal the sum of:
-            /// - mismatches encoded in MD (letter count, excluding `^` deletions)
-            /// - deletions encoded in MD (bases after `^`)
-            /// - insertions in the CIGAR
-            ///
-            /// This is a cross-validation: if NM and MD ever disagree, one of
-            /// them is wrong. Both are implemented in this file by walking the
-            /// same iterator, so this catches divergent bugs that fixture tests
-            /// might miss.
-            #[test]
-            fn nm_equals_md_mismatches_plus_md_deletions_plus_cigar_insertions(
-                ops in proptest::collection::vec(arb_cigar_op(), 1..=8),
-                read_pos in 0u32..=1_000u32,
-            ) {
-                let qlen: u32 = ops
-                    .iter()
-                    .filter(|o| o.op_type().consumes_query())
-                    .map(|o| o.len())
-                    .sum();
-                let rlen: u32 = ops
-                    .iter()
-                    .filter(|o| o.op_type().consumes_ref())
-                    .map(|o| o.len())
-                    .sum();
-                if qlen == 0 {
-                    return Ok(()); // need at least 1 query base for OwnedBamRecord
-                }
+        /// **NM/MD consistency.** For any record where the reference covers
+        /// the full alignment, computed NM must equal the sum of:
+        /// - mismatches encoded in MD (letter count, excluding `^` deletions)
+        /// - deletions encoded in MD (bases after `^`)
+        /// - insertions in the CIGAR
+        ///
+        /// This is a cross-validation: if NM and MD ever disagree, one of
+        /// them is wrong. Both are implemented in this file by walking the
+        /// same iterator, so this catches divergent bugs that fixture tests
+        /// might miss.
+        #[hegel::test]
+        fn nm_equals_md_mismatches_plus_md_deletions_plus_cigar_insertions(tc: TestCase) {
+            let ops = tc.draw(gs::vecs(arb_cigar_op().print_as_debug()).min_size(1).max_size(8));
+            let read_pos = tc.draw(gs::integers::<u32>().max_value(1_000));
 
-                // Synthetic seq: rotate through ACGT so we get realistic mismatches.
-                let bases = [Base::A, Base::C, Base::G, Base::T];
-                let seq: Vec<Base> =
-                    (0..qlen).map(|i| bases[(i % 4) as usize]).collect();
-                let qual: Vec<BaseQuality> =
-                    (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
+            let qlen: u32 =
+                ops.iter().filter(|o| o.op_type().consumes_query()).map(|o| o.len()).sum();
+            let rlen: u32 =
+                ops.iter().filter(|o| o.op_type().consumes_ref()).map(|o| o.len()).sum();
+            // OwnedBamRecord needs at least one query base.
+            tc.assume(qlen > 0);
 
-                let owned = OwnedBamRecord::builder(0, Some(p0(read_pos)), b"r".to_vec())
-                    .flags(BamFlags::empty())
-                    .cigar(ops.clone())
-                    .seq(seq)
-                    .qual(qual)
-                    .build()
-                    .unwrap();
-                let mut buf = Vec::new();
-                owned.to_bam_bytes(&mut buf).unwrap();
-                let mut store = RecordStore::<()>::new();
-                let _ = store.push_raw(&buf, &mut ()).unwrap();
+            // Synthetic seq: rotate through ACGT so we get realistic mismatches.
+            let bases = [Base::A, Base::C, Base::G, Base::T];
+            let seq: Vec<Base> = (0..qlen).map(|i| bases[(i % 4) as usize]).collect();
+            let qual: Vec<BaseQuality> = (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
 
-                // Reference window covering the full ref span. Different
-                // pattern (CGTA rotation) so M-op mismatches actually happen.
-                let ref_pat = [Base::C, Base::G, Base::T, Base::A];
-                let ref_buf: Vec<Base> =
-                    (0..rlen).map(|i| ref_pat[(i % 4) as usize]).collect();
-                let ref_seq = RefSeq::new(Rc::from(ref_buf), p0(read_pos));
+            let owned = OwnedBamRecord::builder(0, Some(p0(read_pos)), b"r".to_vec())
+                .flags(BamFlags::empty())
+                .cigar(ops.clone())
+                .seq(seq)
+                .qual(qual)
+                .build()
+                .unwrap();
+            let mut buf = Vec::new();
+            owned.to_bam_bytes(&mut buf).unwrap();
+            let mut store = RecordStore::<()>::new();
+            let _ = store.push_raw(&buf, &mut ()).unwrap();
 
-                let nm = store
-                    .record(ri(0)).unwrap()
-                    .aligned_pairs_with_read(&store)
-                    .unwrap()
-                    .with_reference(&ref_seq)
-                    .nm();
-                let md = store
-                    .record(ri(0)).unwrap()
-                    .aligned_pairs_with_read(&store)
-                    .unwrap()
-                    .with_reference(&ref_seq)
-                    .md()
-                    .unwrap();
+            // Reference window covering the full ref span. Different
+            // pattern (CGTA rotation) so M-op mismatches actually happen.
+            let ref_pat = [Base::C, Base::G, Base::T, Base::A];
+            let ref_buf: Vec<Base> = (0..rlen).map(|i| ref_pat[(i % 4) as usize]).collect();
+            let ref_seq = RefSeq::new(Rc::from(ref_buf), p0(read_pos));
 
-                let (md_mismatches, md_deletions) = parse_md_for_counts(&md);
-                let cigar_insertions: u32 = ops
-                    .iter()
-                    .filter(|o| matches!(o.op_type(), CigarOpType::Insertion))
-                    .map(|o| o.len())
-                    .sum();
+            let nm = store
+                .record(ri(0))
+                .unwrap()
+                .aligned_pairs_with_read(&store)
+                .unwrap()
+                .with_reference(&ref_seq)
+                .nm();
+            let md = store
+                .record(ri(0))
+                .unwrap()
+                .aligned_pairs_with_read(&store)
+                .unwrap()
+                .with_reference(&ref_seq)
+                .md()
+                .unwrap();
 
-                let derived_nm = md_mismatches
-                    .saturating_add(md_deletions)
-                    .saturating_add(cigar_insertions);
-                prop_assert_eq!(
-                    nm, derived_nm,
-                    "NM ({}) != mismatches({}) + deletions({}) + insertions({}); MD={:?}",
-                    nm, md_mismatches, md_deletions, cigar_insertions, std::str::from_utf8(&md)
-                );
+            let (md_mismatches, md_deletions) = parse_md_for_counts(&md);
+            let cigar_insertions: u32 = ops
+                .iter()
+                .filter(|o| matches!(o.op_type(), CigarOpType::Insertion))
+                .map(|o| o.len())
+                .sum();
 
-                // Also: MD must always start with a digit and end with a digit.
-                prop_assert!(!md.is_empty(), "MD must never be empty");
-                prop_assert!(
-                    md[0].is_ascii_digit(),
-                    "MD must start with a digit: {:?}",
-                    std::str::from_utf8(&md),
-                );
-                prop_assert!(
-                    md[md.len() - 1].is_ascii_digit(),
-                    "MD must end with a digit: {:?}",
-                    std::str::from_utf8(&md),
-                );
+            let derived_nm =
+                md_mismatches.saturating_add(md_deletions).saturating_add(cigar_insertions);
+            assert_eq!(
+                nm,
+                derived_nm,
+                "NM ({nm}) != mismatches({md_mismatches}) + deletions({md_deletions}) + insertions({cigar_insertions}); MD={:?}",
+                std::str::from_utf8(&md)
+            );
 
-            }
+            // Also: MD must always start with a digit and end with a digit.
+            assert!(!md.is_empty(), "MD must never be empty");
+            assert!(
+                md[0].is_ascii_digit(),
+                "MD must start with a digit: {:?}",
+                std::str::from_utf8(&md),
+            );
+            assert!(
+                md[md.len() - 1].is_ascii_digit(),
+                "MD must end with a digit: {:?}",
+                std::str::from_utf8(&md),
+            );
         }
     }
 

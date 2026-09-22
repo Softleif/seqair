@@ -1057,119 +1057,119 @@ mod tests {
         assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability, 210);
     }
 
-    // ---------------- proptest oracles for the validation paths ----------------
+    // ---------------- oracles for the validation paths ----------------
 
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
-    proptest! {
-        // r[verify base_mod.validation]
-        /// Any byte that decodes (case-folded) to `n` MUST yield
-        /// `UnsupportedUnknownBase`, not `InvalidCanonicalBase` and not a panic.
-        /// Only `b'N'` and `b'n'` satisfy `byte | 0x20 == b'n'`, but the parser
-        /// reaches that branch via the same `byte | 0x20` mask, so testing both
-        /// covers the case-insensitive contract.
-        #[test]
-        fn proptest_n_canonical_rejected(case in prop_oneof![Just(b'N'), Just(b'n')]) {
-            let s = seq(&[A, C, G]);
-            let mm = [case, b'+', b'm', b',', b'0', b';'];
-            let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
-            prop_assert!(matches!(err, BaseModError::UnsupportedUnknownBase), "got {:?}", err);
-        }
+    // r[verify base_mod.validation]
+    /// Any byte that decodes (case-folded) to `n` MUST yield
+    /// `UnsupportedUnknownBase`, not `InvalidCanonicalBase` and not a panic.
+    /// Only `b'N'` and `b'n'` satisfy `byte | 0x20 == b'n'`, but the parser
+    /// reaches that branch via the same `byte | 0x20` mask, so testing both
+    /// covers the case-insensitive contract.
+    #[hegel::test]
+    fn n_canonical_rejected(tc: TestCase) {
+        let case = tc.draw(gs::sampled_from(&b"Nn"[..]));
+        let s = seq(&[A, C, G]);
+        let mm = [case, b'+', b'm', b',', b'0', b';'];
+        let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
+        assert!(matches!(err, BaseModError::UnsupportedUnknownBase), "got {err:?}");
+    }
 
-        // r[verify base_mod.validation]
-        /// Any non-ACGTN ASCII byte at the canonical-base position MUST yield
-        /// `InvalidCanonicalBase(byte)`. Excludes ACGT/acgt and N/n; also
-        /// excludes `;` because it terminates the entry early (the parser then
-        /// sees the *next* byte as the canonical base, exercising a different
-        /// path than this proptest is meant to cover).
-        #[test]
-        fn proptest_invalid_canonical_base_byte(byte in any::<u8>().prop_filter(
-            "exclude valid ACGT/N (any case) and the entry terminator",
-            |b| !matches!(b | 0x20, b'a' | b'c' | b'g' | b't' | b'n') && *b != b';',
-        )) {
-            let s = seq(&[A, C, G]);
-            let mm = [byte, b'+', b'm', b',', b'0', b';'];
-            let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
-            prop_assert!(
-                matches!(err, BaseModError::InvalidCanonicalBase(b) if b == byte),
-                "expected InvalidCanonicalBase({byte:#x}), got {err:?}",
-            );
-        }
+    // r[verify base_mod.validation]
+    /// Any non-ACGTN ASCII byte at the canonical-base position MUST yield
+    /// `InvalidCanonicalBase(byte)`. Excludes ACGT/acgt and N/n; also
+    /// excludes `;` because it terminates the entry early (the parser then
+    /// sees the *next* byte as the canonical base, exercising a different
+    /// path than this property is meant to cover).
+    #[hegel::test]
+    fn invalid_canonical_base_byte(tc: TestCase) {
+        let byte = tc.draw(
+            gs::integers::<u8>()
+                .filter(|b| !matches!(b | 0x20, b'a' | b'c' | b'g' | b't' | b'n') && *b != b';'),
+        );
+        let s = seq(&[A, C, G]);
+        let mm = [byte, b'+', b'm', b',', b'0', b';'];
+        let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
+        assert!(
+            matches!(err, BaseModError::InvalidCanonicalBase(b) if b == byte),
+            "expected InvalidCanonicalBase({byte:#x}), got {err:?}",
+        );
+    }
 
-        // r[verify base_mod.validation]
-        /// Any non-alpha, non-delimiter, non-digit byte appearing where a mod
-        /// code is expected (after `BASE+STRAND`) MUST yield `InvalidModCode`.
-        /// Digits trigger the ChEBI branch; `,`, `;`, `.`, `?` are delimiters;
-        /// alphabetic bytes are valid single-char codes.
-        #[test]
-        fn proptest_invalid_mod_code_byte(byte in any::<u8>().prop_filter(
-            "exclude alpha, digits, and mod-body delimiters",
-            |b| !b.is_ascii_alphabetic()
+    // r[verify base_mod.validation]
+    /// Any non-alpha, non-delimiter, non-digit byte appearing where a mod
+    /// code is expected (after `BASE+STRAND`) MUST yield `InvalidModCode`.
+    /// Digits trigger the `ChEBI` branch; `,`, `;`, `.`, `?` are delimiters;
+    /// alphabetic bytes are valid single-char codes.
+    #[hegel::test]
+    fn invalid_mod_code_byte(tc: TestCase) {
+        let byte = tc.draw(gs::integers::<u8>().filter(|b| {
+            !b.is_ascii_alphabetic()
                 && !b.is_ascii_digit()
-                && !matches!(*b, b',' | b';' | b'.' | b'?'),
-        )) {
-            let s = seq(&[A, C, G]);
-            let mm = [b'C', b'+', byte, b',', b'0', b';'];
-            let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
-            prop_assert!(
-                matches!(err, BaseModError::InvalidModCode(b) if b == byte),
-                "expected InvalidModCode({byte:#x}), got {err:?}",
-            );
-        }
+                && !matches!(*b, b',' | b';' | b'.' | b'?')
+        }));
+        let s = seq(&[A, C, G]);
+        let mm = [b'C', b'+', byte, b',', b'0', b';'];
+        let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
+        assert!(
+            matches!(err, BaseModError::InvalidModCode(b) if b == byte),
+            "expected InvalidModCode({byte:#x}), got {err:?}",
+        );
+    }
 
-        // r[verify base_mod.validation]
-        /// A non-digit byte in the delta position (right after `,`) MUST yield
-        /// `InvalidDelta`. `;` is excluded because it terminates the entry
-        /// before the delta parser sees it (the empty-delta case is covered by
-        /// `validation_invalid_delta_empty`).
-        #[test]
-        fn proptest_invalid_delta_non_numeric(byte in any::<u8>().prop_filter(
-            "non-digit, not the entry terminator",
-            |b| !b.is_ascii_digit() && *b != b';',
-        )) {
-            let s = seq(&[A, C, G]);
-            let mm = [b'C', b'+', b'm', b',', byte, b';'];
-            let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
-            prop_assert!(matches!(err, BaseModError::InvalidDelta), "got {err:?}");
-        }
+    // r[verify base_mod.validation]
+    /// A non-digit byte in the delta position (right after `,`) MUST yield
+    /// `InvalidDelta`. `;` is excluded because it terminates the entry
+    /// before the delta parser sees it (the empty-delta case is covered by
+    /// `validation_invalid_delta_empty`).
+    #[hegel::test]
+    fn invalid_delta_non_numeric(tc: TestCase) {
+        let byte = tc.draw(gs::integers::<u8>().filter(|b| !b.is_ascii_digit() && *b != b';'));
+        let s = seq(&[A, C, G]);
+        let mm = [b'C', b'+', b'm', b',', byte, b';'];
+        let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
+        assert!(matches!(err, BaseModError::InvalidDelta), "got {err:?}");
+    }
 
-        // r[verify base_mod.validation]
-        /// `try_qpos` MUST reject `stored_idx > u32::MAX` with `SeqTooLong`,
-        /// where `seq_len` is the length the caller would have observed when
-        /// the cast failed. We exercise this directly because allocating a
-        /// >4 GiB `Vec<Base>` to drive `parse` is impractical. Gated to 64-bit
-        /// targets — on 32-bit `usize <= u32::MAX` so the failure path is
-        /// unreachable and `usize as u64 + 1` may overflow the value range.
-        #[cfg(target_pointer_width = "64")]
-        #[test]
-        fn proptest_try_qpos_rejects_overflow(
-            // `stored_idx > u32::MAX` and `seq_len >= stored_idx + 1`.
-            stored_idx in (u64::from(u32::MAX) + 1)..=u64::from(u32::MAX) + 1_000_000,
-            extra in 0u64..=1_000_000,
-        ) {
-            let seq_len = (stored_idx + extra) as usize;
-            let stored_idx = stored_idx as usize;
-            match try_qpos(stored_idx, seq_len) {
-                Err(BaseModError::SeqTooLong { len }) => prop_assert_eq!(len, seq_len),
-                other => prop_assert!(false, "expected SeqTooLong, got {:?}", other),
-            }
+    // r[verify base_mod.validation]
+    /// `try_qpos` MUST reject `stored_idx > u32::MAX` with `SeqTooLong`,
+    /// where `seq_len` is the length the caller would have observed when
+    /// the cast failed. We exercise this directly because allocating a
+    /// >4 GiB `Vec<Base>` to drive `parse` is impractical. Gated to 64-bit
+    /// targets — on 32-bit `usize <= u32::MAX` so the failure path is
+    /// unreachable and `usize as u64 + 1` may overflow the value range.
+    #[cfg(target_pointer_width = "64")]
+    #[hegel::test]
+    fn try_qpos_rejects_overflow(tc: TestCase) {
+        // `stored_idx > u32::MAX` and `seq_len >= stored_idx + 1`.
+        let stored_idx = tc.draw(
+            gs::integers::<u64>()
+                .min_value(u64::from(u32::MAX) + 1)
+                .max_value(u64::from(u32::MAX) + 1_000_000),
+        );
+        let extra = tc.draw(gs::integers::<u64>().max_value(1_000_000));
+        let seq_len = (stored_idx + extra) as usize;
+        let stored_idx = stored_idx as usize;
+        match try_qpos(stored_idx, seq_len) {
+            Err(BaseModError::SeqTooLong { len }) => assert_eq!(len, seq_len),
+            other => panic!("expected SeqTooLong, got {other:?}"),
         }
+    }
 
-        // r[verify base_mod.parse_mm]
-        /// Any decimal ChEBI id that exceeds `u32::MAX` MUST be rejected with
-        /// `InvalidChebi`. `str::parse::<u32>` returns `Err` for the entire
-        /// `(u32::MAX as u64 + 1)..=u64::MAX` range, so generating a `u64` in
-        /// that range covers the overflow contract.
-        #[test]
-        fn proptest_chebi_overflow_rejected(
-            id in (u64::from(u32::MAX) + 1)..=u64::MAX,
-        ) {
-            let s = seq(&[A, C, G]);
-            let mut mm: Vec<u8> = b"C+".to_vec();
-            mm.extend_from_slice(id.to_string().as_bytes());
-            mm.extend_from_slice(b",0;");
-            let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
-            prop_assert!(matches!(err, BaseModError::InvalidChebi), "got {err:?}");
-        }
+    // r[verify base_mod.parse_mm]
+    /// Any decimal `ChEBI` id that exceeds `u32::MAX` MUST be rejected with
+    /// `InvalidChebi`. `str::parse::<u32>` returns `Err` for the entire
+    /// `(u32::MAX as u64 + 1)..=u64::MAX` range, so generating a `u64` in
+    /// that range covers the overflow contract.
+    #[hegel::test]
+    fn chebi_overflow_rejected(tc: TestCase) {
+        let id = tc.draw(gs::integers::<u64>().min_value(u64::from(u32::MAX) + 1));
+        let s = seq(&[A, C, G]);
+        let mut mm: Vec<u8> = b"C+".to_vec();
+        mm.extend_from_slice(id.to_string().as_bytes());
+        mm.extend_from_slice(b",0;");
+        let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
+        assert!(matches!(err, BaseModError::InvalidChebi), "got {err:?}");
     }
 }

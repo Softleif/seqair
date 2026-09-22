@@ -894,7 +894,7 @@ mod tests {
         );
     }
 
-    // --- BGZF round-trip proptests ---
+    // --- BGZF round-trip properties ---
 
     /// Build a single BGZF block from uncompressed data. Returns the full
     /// block bytes (header + compressed payload + footer).
@@ -957,138 +957,163 @@ mod tests {
         (file, offsets)
     }
 
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
-    proptest! {
-        /// Single contiguous range: load all blocks, read them sequentially,
-        /// verify decompressed content matches original.
-        #[test]
-        fn proptest_single_range_roundtrip(
-            n_blocks in 1usize..8,
-            block_size in 10usize..500,
-            seed in 0u8..255,
-        ) {
-            // Build blocks with deterministic content
-            let blocks: Vec<Vec<u8>> = (0..n_blocks)
-                .map(|i| {
-                    (0..block_size)
-                        .map(|j| seed.wrapping_add(i as u8).wrapping_add(j as u8))
-                        .collect()
-                })
-                .collect();
+    /// Single contiguous range: load all blocks, read them sequentially,
+    /// verify decompressed content matches original.
+    #[hegel::test]
+    fn single_range_roundtrip(tc: TestCase) {
+        let n_blocks = tc.draw(gs::integers::<usize>().min_value(1).max_value(7));
+        let block_size = tc.draw(gs::integers::<usize>().min_value(10).max_value(499));
+        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        // Build blocks with deterministic content
+        let blocks: Vec<Vec<u8>> = (0..n_blocks)
+            .map(|i| {
+                (0..block_size).map(|j| seed.wrapping_add(i as u8).wrapping_add(j as u8)).collect()
+            })
+            .collect();
 
-            let (file, offsets) = make_bgzf_file(&blocks);
-            let last_offset = *offsets.last().unwrap();
+        let (file, offsets) = make_bgzf_file(&blocks);
+        let last_offset = *offsets.last().unwrap();
 
-            // One chunk covering all blocks
-            let chunks = vec![Chunk {
-                begin: VirtualOffset::new(offsets[0], 0),
-                end: VirtualOffset::new(last_offset + 1, 0),
-            }];
+        // One chunk covering all blocks
+        let chunks = vec![Chunk {
+            begin: VirtualOffset::new(offsets[0], 0),
+            end: VirtualOffset::new(last_offset + 1, 0),
+        }];
 
-            let mut cursor = std::io::Cursor::new(file);
-            let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
+        let mut cursor = std::io::Cursor::new(file);
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
 
-            // Seek to the first block and read all data
-            buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
+        // Seek to the first block and read all data
+        buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
 
-            let total_bytes: usize = blocks.iter().map(|b| b.len()).sum();
-            let mut output = vec![0u8; total_bytes];
-            buf.read_exact_into(&mut output).unwrap();
+        let total_bytes: usize = blocks.iter().map(|b| b.len()).sum();
+        let mut output = vec![0u8; total_bytes];
+        buf.read_exact_into(&mut output).unwrap();
 
-            // Verify
-            let expected: Vec<u8> = blocks.iter().flatten().copied().collect();
-            prop_assert_eq!(output, expected);
+        // Verify
+        let expected: Vec<u8> = blocks.iter().flatten().copied().collect();
+        assert_eq!(output, expected);
+    }
+
+    /// Disjoint ranges: create blocks in two groups separated by padding,
+    /// load both groups, seek to each and verify content.
+    #[hegel::test]
+    fn disjoint_ranges_roundtrip(tc: TestCase) {
+        let group = || gs::integers::<usize>().min_value(1).max_value(3);
+        let n_blocks_a = tc.draw(group());
+        let n_blocks_b = tc.draw(group());
+        let block_size = tc.draw(gs::integers::<usize>().min_value(10).max_value(299));
+        let padding = tc.draw(gs::integers::<usize>().min_value(100_000).max_value(199_999));
+        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let blocks_a: Vec<Vec<u8>> = (0..n_blocks_a)
+            .map(|i| {
+                (0..block_size).map(|j| seed.wrapping_add(i as u8).wrapping_add(j as u8)).collect()
+            })
+            .collect();
+        let blocks_b: Vec<Vec<u8>> = (0..n_blocks_b)
+            .map(|i| {
+                (0..block_size)
+                    .map(|j| seed.wrapping_add(100).wrapping_add(i as u8).wrapping_add(j as u8))
+                    .collect()
+            })
+            .collect();
+
+        // Build group A
+        let (mut file, offsets_a) = make_bgzf_file(&blocks_a);
+
+        // Add padding to create a gap > CHUNK_END_PAD so chunks are disjoint
+        let pad_start = file.len();
+        file.resize(pad_start + padding, 0);
+
+        // Build group B at the padded offset
+        let group_b_start = file.len() as u64;
+        let mut offsets_b = Vec::new();
+        for block_data in &blocks_b {
+            offsets_b.push(file.len() as u64);
+            file.extend_from_slice(&make_bgzf_block(block_data));
         }
+        file.extend_from_slice(&make_bgzf_eof());
 
-        /// Disjoint ranges: create blocks in two groups separated by padding,
-        /// load both groups, seek to each and verify content.
-        #[test]
-        fn proptest_disjoint_ranges_roundtrip(
-            n_blocks_a in 1usize..4,
-            n_blocks_b in 1usize..4,
-            block_size in 10usize..300,
-            padding in 100_000usize..200_000,
-            seed in 0u8..255,
-        ) {
-            let blocks_a: Vec<Vec<u8>> = (0..n_blocks_a)
-                .map(|i| {
-                    (0..block_size)
-                        .map(|j| seed.wrapping_add(i as u8).wrapping_add(j as u8))
-                        .collect()
-                })
-                .collect();
-            let blocks_b: Vec<Vec<u8>> = (0..n_blocks_b)
-                .map(|i| {
-                    (0..block_size)
-                        .map(|j| seed.wrapping_add(100).wrapping_add(i as u8).wrapping_add(j as u8))
-                        .collect()
-                })
-                .collect();
+        // Two disjoint chunks
+        let last_a = *offsets_a.last().unwrap();
+        let last_b = *offsets_b.last().unwrap();
+        let chunk_a = Chunk {
+            begin: VirtualOffset::new(offsets_a[0], 0),
+            end: VirtualOffset::new(last_a + 1, 0),
+        };
+        let chunk_b = Chunk {
+            begin: VirtualOffset::new(group_b_start, 0),
+            end: VirtualOffset::new(last_b + 1, 0),
+        };
 
-            // Build group A
-            let (mut file, offsets_a) = make_bgzf_file(&blocks_a);
+        let ranges = merge_chunks(&[chunk_a, chunk_b]);
+        assert_eq!(ranges.len(), 2);
 
-            // Add padding to create a gap > CHUNK_END_PAD so chunks are disjoint
-            let pad_start = file.len();
-            file.resize(pad_start + padding, 0);
+        let mut cursor = std::io::Cursor::new(file);
+        let mut buf = RegionBuf::new(&mut cursor, &[chunk_a, chunk_b]).unwrap();
 
-            // Build group B at the padded offset
-            let group_b_start = file.len() as u64;
-            let mut offsets_b = Vec::new();
-            for block_data in &blocks_b {
-                offsets_b.push(file.len() as u64);
-                file.extend_from_slice(&make_bgzf_block(block_data));
-            }
-            file.extend_from_slice(&make_bgzf_eof());
+        // Read group A
+        buf.seek_virtual(VirtualOffset::new(offsets_a[0], 0)).unwrap();
+        let total_a: usize = blocks_a.iter().map(|b| b.len()).sum();
+        let mut out_a = vec![0u8; total_a];
+        buf.read_exact_into(&mut out_a).unwrap();
+        let expected_a: Vec<u8> = blocks_a.iter().flatten().copied().collect();
+        assert_eq!(out_a, expected_a, "group A content mismatch");
 
-            // Two disjoint chunks
-            let last_a = *offsets_a.last().unwrap();
-            let last_b = *offsets_b.last().unwrap();
-            let chunk_a = Chunk {
-                begin: VirtualOffset::new(offsets_a[0], 0),
-                end: VirtualOffset::new(last_a + 1, 0),
-            };
-            let chunk_b = Chunk {
-                begin: VirtualOffset::new(group_b_start, 0),
-                end: VirtualOffset::new(last_b + 1, 0),
-            };
+        // Read group B
+        buf.seek_virtual(VirtualOffset::new(group_b_start, 0)).unwrap();
+        let total_b: usize = blocks_b.iter().map(|b| b.len()).sum();
+        let mut out_b = vec![0u8; total_b];
+        buf.read_exact_into(&mut out_b).unwrap();
+        let expected_b: Vec<u8> = blocks_b.iter().flatten().copied().collect();
+        assert_eq!(out_b, expected_b, "group B content mismatch");
+    }
 
-            let ranges = merge_chunks(&[chunk_a, chunk_b]);
-            prop_assert_eq!(ranges.len(), 2);
+    /// Seek to mid-block positions (`within_block > 0`) should work correctly.
+    #[hegel::test]
+    fn within_block_seek(tc: TestCase) {
+        let block_size = tc.draw(gs::integers::<usize>().min_value(20).max_value(499));
+        // at most block_size-1, capped at 18 for simplicity
+        let within = tc.draw(gs::integers::<usize>().min_value(1).max_value(18));
+        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let data: Vec<u8> = (0..block_size).map(|j| seed.wrapping_add(j as u8)).collect();
 
-            let mut cursor = std::io::Cursor::new(file);
-            let mut buf = RegionBuf::new(&mut cursor, &[chunk_a, chunk_b]).unwrap();
+        let (file, offsets) = make_bgzf_file(std::slice::from_ref(&data));
 
-            // Read group A
-            buf.seek_virtual(VirtualOffset::new(offsets_a[0], 0)).unwrap();
-            let total_a: usize = blocks_a.iter().map(|b| b.len()).sum();
-            let mut out_a = vec![0u8; total_a];
-            buf.read_exact_into(&mut out_a).unwrap();
-            let expected_a: Vec<u8> = blocks_a.iter().flatten().copied().collect();
-            prop_assert_eq!(out_a, expected_a, "group A content mismatch");
+        let chunks = vec![Chunk {
+            begin: VirtualOffset::new(offsets[0], 0),
+            end: VirtualOffset::new(offsets[0] + 1, 0),
+        }];
 
-            // Read group B
-            buf.seek_virtual(VirtualOffset::new(group_b_start, 0)).unwrap();
-            let total_b: usize = blocks_b.iter().map(|b| b.len()).sum();
-            let mut out_b = vec![0u8; total_b];
-            buf.read_exact_into(&mut out_b).unwrap();
-            let expected_b: Vec<u8> = blocks_b.iter().flatten().copied().collect();
-            prop_assert_eq!(out_b, expected_b, "group B content mismatch");
-        }
+        let mut cursor = std::io::Cursor::new(file);
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
 
-        /// Seek to mid-block positions (within_block > 0) should work correctly.
-        #[test]
-        fn proptest_within_block_seek(
-            block_size in 20usize..500,
-            within in 1usize..19, // at most block_size-1, capped at 19 for simplicity
-            seed in 0u8..255,
-        ) {
-            let data: Vec<u8> = (0..block_size)
-                .map(|j| seed.wrapping_add(j as u8))
-                .collect();
+        let within_clamped = within.min(block_size - 1);
+        buf.seek_virtual(VirtualOffset::new(offsets[0], within_clamped as u16)).unwrap();
 
-            let (file, offsets) = make_bgzf_file(std::slice::from_ref(&data));
+        let remaining = block_size - within_clamped;
+        let mut output = vec![0u8; remaining];
+        buf.read_exact_into(&mut output).unwrap();
+
+        assert_eq!(output, data[within_clamped..].to_vec());
+    }
+
+    /// CRC32 mismatch detection: corrupt a byte in the compressed data
+    /// and verify decompression or CRC check fails.
+    #[hegel::test]
+    fn crc32_detects_corruption(tc: TestCase) {
+        let block_size = tc.draw(gs::integers::<usize>().min_value(20).max_value(199));
+        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let data: Vec<u8> = (0..block_size).map(|j| seed.wrapping_add(j as u8)).collect();
+
+        let (mut file, offsets) = make_bgzf_file(&[data]);
+
+        // Corrupt a byte in the compressed payload (after the 18-byte header)
+        let corrupt_pos = offsets[0] as usize + 18;
+        if corrupt_pos < file.len() - 8 {
+            file[corrupt_pos] ^= 0xFF;
 
             let chunks = vec![Chunk {
                 begin: VirtualOffset::new(offsets[0], 0),
@@ -1097,49 +1122,12 @@ mod tests {
 
             let mut cursor = std::io::Cursor::new(file);
             let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
+            buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
 
-            let within_clamped = within.min(block_size - 1);
-            buf.seek_virtual(VirtualOffset::new(offsets[0], within_clamped as u16)).unwrap();
-
-            let remaining = block_size - within_clamped;
-            let mut output = vec![0u8; remaining];
-            buf.read_exact_into(&mut output).unwrap();
-
-            prop_assert_eq!(output, data[within_clamped..].to_vec());
-        }
-
-        /// CRC32 mismatch detection: corrupt a byte in the compressed data
-        /// and verify decompression or CRC check fails.
-        #[test]
-        fn proptest_crc32_detects_corruption(
-            block_size in 20usize..200,
-            seed in 0u8..255,
-        ) {
-            let data: Vec<u8> = (0..block_size)
-                .map(|j| seed.wrapping_add(j as u8))
-                .collect();
-
-            let (mut file, offsets) = make_bgzf_file(&[data]);
-
-            // Corrupt a byte in the compressed payload (after the 18-byte header)
-            let corrupt_pos = offsets[0] as usize + 18;
-            if corrupt_pos < file.len() - 8 {
-                file[corrupt_pos] ^= 0xFF;
-
-                let chunks = vec![Chunk {
-                    begin: VirtualOffset::new(offsets[0], 0),
-                    end: VirtualOffset::new(offsets[0] + 1, 0),
-                }];
-
-                let mut cursor = std::io::Cursor::new(file);
-                let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
-                buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
-
-                let mut output = vec![0u8; block_size];
-                let result = buf.read_exact_into(&mut output);
-                // Should fail with either DecompressionFailed or ChecksumMismatch
-                prop_assert!(result.is_err(), "corrupted block should fail");
-            }
+            let mut output = vec![0u8; block_size];
+            let result = buf.read_exact_into(&mut output);
+            // Should fail with either DecompressionFailed or ChecksumMismatch
+            assert!(result.is_err(), "corrupted block should fail");
         }
     }
 
@@ -1278,17 +1266,14 @@ mod tests {
         }
     }
 
-    /// Proptest: varied record counts and body sizes, all packed into a single
+    /// Varied record counts and body sizes, all packed into a single
     /// BGZF block. Every record must round-trip correctly.
-    #[test]
-    fn proptest_read_record_roundtrip() {
-        use proptest::prelude::*;
-
-        proptest!(|(
-            n_records in 1usize..10,
-            body_size in 4usize..200,
-            seed in 0u8..255,
-        )| {
+    #[hegel::test]
+    fn read_record_roundtrip(tc: TestCase) {
+        let n_records = tc.draw(gs::integers::<usize>().min_value(1).max_value(9));
+        let body_size = tc.draw(gs::integers::<usize>().min_value(4).max_value(199));
+        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        {
             let records: Vec<Vec<u8>> = (0..n_records)
                 .map(|i| {
                     (0..body_size)
@@ -1314,11 +1299,12 @@ mod tests {
 
             let mut scratch = Vec::new();
             for (i, expected) in records.iter().enumerate() {
-                let got = region.read_record(&mut scratch)
+                let got = region
+                    .read_record(&mut scratch)
                     .unwrap_or_else(|e| panic!("record {i} failed: {e}"));
-                prop_assert_eq!(got, expected.as_slice());
+                assert_eq!(got, expected.as_slice());
             }
-        });
+        }
     }
 
     /// Zero-length body: a record with `block_size=0` should be read back as
@@ -1492,101 +1478,106 @@ mod tests {
         out
     }
 
-    proptest! {
-        /// Decoded output (and per-block virtual offsets) must be byte-identical
-        /// no matter the window budget — windowing only changes *when* bytes are
-        /// read, never *what* is produced. The oracle is the original payloads.
-        #[test]
-        fn proptest_window_budget_parity(
-            n_blocks in 1usize..12,
-            block_size in 1usize..4000,
-            seed in 0u8..255,
-        ) {
-            let blocks: Vec<Vec<u8>> = (0..n_blocks)
-                .map(|i| (0..block_size)
+    /// Decoded output (and per-block virtual offsets) must be byte-identical
+    /// no matter the window budget — windowing only changes *when* bytes are
+    /// read, never *what* is produced. The oracle is the original payloads.
+    #[hegel::test]
+    fn window_budget_parity(tc: TestCase) {
+        let n_blocks = tc.draw(gs::integers::<usize>().min_value(1).max_value(11));
+        let block_size = tc.draw(gs::integers::<usize>().min_value(1).max_value(3_999));
+        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let blocks: Vec<Vec<u8>> = (0..n_blocks)
+            .map(|i| {
+                (0..block_size)
                     .map(|j| seed.wrapping_add(i as u8).wrapping_mul(31).wrapping_add(j as u8))
-                    .collect())
-                .collect();
-            let (file, offsets) = make_bgzf_file(&blocks);
-            let last = *offsets.last().unwrap();
-            let chunks = vec![Chunk {
-                begin: VirtualOffset::new(offsets[0], 0),
-                end: VirtualOffset::new(last + 1, 0),
-            }];
-            let oracle: Vec<u8> = blocks.iter().flatten().copied().collect();
+                    .collect()
+            })
+            .collect();
+        let (file, offsets) = make_bgzf_file(&blocks);
+        let last = *offsets.last().unwrap();
+        let chunks = vec![Chunk {
+            begin: VirtualOffset::new(offsets[0], 0),
+            end: VirtualOffset::new(last + 1, 0),
+        }];
+        let oracle: Vec<u8> = blocks.iter().flatten().copied().collect();
 
-            for budget in PARITY_BUDGETS {
-                let got = stream_all_bytes(&file, &chunks, budget, oracle.len());
-                prop_assert_eq!(&got, &oracle, "budget {} mismatch", budget);
-            }
-
-            // Per-block virtual offset (= true file offset) must be stable across
-            // budgets: read block-by-block and compare the recorded block_offset.
-            let mut cursor = std::io::Cursor::new(file.clone());
-            let mut buf = RegionBuf::with_budget(&mut cursor, &chunks, MAX_BLOCK_SIZE).unwrap();
-            buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
-            for &expected_off in &offsets {
-                prop_assert!(buf.read_block().unwrap());
-                prop_assert_eq!(buf.block_offset, expected_off, "block_offset drift across refill");
-            }
+        for budget in PARITY_BUDGETS {
+            let got = stream_all_bytes(&file, &chunks, budget, oracle.len());
+            assert_eq!(&got, &oracle, "budget {} mismatch", budget);
         }
 
-        /// Disjoint ranges with a tiny budget must still decode both groups
-        /// correctly (each range refills independently).
-        #[test]
-        fn proptest_disjoint_budget_parity(
-            n_a in 1usize..4,
-            n_b in 1usize..4,
-            block_size in 10usize..300,
-            padding in 100_000usize..200_000,
-            seed in 0u8..255,
-        ) {
-            let mk = |base: u8, n: usize| -> Vec<Vec<u8>> {
-                (0..n).map(|i| (0..block_size)
-                    .map(|j| seed.wrapping_add(base).wrapping_add(i as u8).wrapping_add(j as u8))
-                    .collect()).collect()
-            };
-            let blocks_a = mk(0, n_a);
-            let blocks_b = mk(100, n_b);
-
-            let (mut file, offsets_a) = make_bgzf_file(&blocks_a);
-            let pad_start = file.len();
-            file.resize(pad_start + padding, 0);
-            let group_b_start = file.len() as u64;
-            let mut offsets_b = Vec::new();
-            for block in &blocks_b {
-                offsets_b.push(file.len() as u64);
-                file.extend_from_slice(&make_bgzf_block(block));
-            }
-            file.extend_from_slice(&make_bgzf_eof());
-
-            let chunk_a = Chunk {
-                begin: VirtualOffset::new(offsets_a[0], 0),
-                end: VirtualOffset::new(*offsets_a.last().unwrap() + 1, 0),
-            };
-            let chunk_b = Chunk {
-                begin: VirtualOffset::new(group_b_start, 0),
-                end: VirtualOffset::new(*offsets_b.last().unwrap() + 1, 0),
-            };
-            prop_assert_eq!(merge_chunks(&[chunk_a, chunk_b]).len(), 2);
-
-            let mut cursor = std::io::Cursor::new(file);
-            let mut buf = RegionBuf::with_budget(&mut cursor, &[chunk_a, chunk_b], MAX_BLOCK_SIZE)
-                .unwrap();
-
-            buf.seek_virtual(VirtualOffset::new(offsets_a[0], 0)).unwrap();
-            let total_a: usize = blocks_a.iter().map(|b| b.len()).sum();
-            let mut out_a = vec![0u8; total_a];
-            buf.read_exact_into(&mut out_a).unwrap();
-            let exp_a: Vec<u8> = blocks_a.iter().flatten().copied().collect();
-            prop_assert_eq!(out_a, exp_a, "group A");
-
-            buf.seek_virtual(VirtualOffset::new(group_b_start, 0)).unwrap();
-            let total_b: usize = blocks_b.iter().map(|b| b.len()).sum();
-            let mut out_b = vec![0u8; total_b];
-            buf.read_exact_into(&mut out_b).unwrap();
-            let exp_b: Vec<u8> = blocks_b.iter().flatten().copied().collect();
-            prop_assert_eq!(out_b, exp_b, "group B");
+        // Per-block virtual offset (= true file offset) must be stable across
+        // budgets: read block-by-block and compare the recorded block_offset.
+        let mut cursor = std::io::Cursor::new(file.clone());
+        let mut buf = RegionBuf::with_budget(&mut cursor, &chunks, MAX_BLOCK_SIZE).unwrap();
+        buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
+        for &expected_off in &offsets {
+            assert!(buf.read_block().unwrap());
+            assert_eq!(buf.block_offset, expected_off, "block_offset drift across refill");
         }
+    }
+
+    /// Disjoint ranges with a tiny budget must still decode both groups
+    /// correctly (each range refills independently).
+    #[hegel::test]
+    fn disjoint_budget_parity(tc: TestCase) {
+        let group = || gs::integers::<usize>().min_value(1).max_value(3);
+        let n_a = tc.draw(group());
+        let n_b = tc.draw(group());
+        let block_size = tc.draw(gs::integers::<usize>().min_value(10).max_value(299));
+        let padding = tc.draw(gs::integers::<usize>().min_value(100_000).max_value(199_999));
+        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let mk = |base: u8, n: usize| -> Vec<Vec<u8>> {
+            (0..n)
+                .map(|i| {
+                    (0..block_size)
+                        .map(|j| {
+                            seed.wrapping_add(base).wrapping_add(i as u8).wrapping_add(j as u8)
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let blocks_a = mk(0, n_a);
+        let blocks_b = mk(100, n_b);
+
+        let (mut file, offsets_a) = make_bgzf_file(&blocks_a);
+        let pad_start = file.len();
+        file.resize(pad_start + padding, 0);
+        let group_b_start = file.len() as u64;
+        let mut offsets_b = Vec::new();
+        for block in &blocks_b {
+            offsets_b.push(file.len() as u64);
+            file.extend_from_slice(&make_bgzf_block(block));
+        }
+        file.extend_from_slice(&make_bgzf_eof());
+
+        let chunk_a = Chunk {
+            begin: VirtualOffset::new(offsets_a[0], 0),
+            end: VirtualOffset::new(*offsets_a.last().unwrap() + 1, 0),
+        };
+        let chunk_b = Chunk {
+            begin: VirtualOffset::new(group_b_start, 0),
+            end: VirtualOffset::new(*offsets_b.last().unwrap() + 1, 0),
+        };
+        assert_eq!(merge_chunks(&[chunk_a, chunk_b]).len(), 2);
+
+        let mut cursor = std::io::Cursor::new(file);
+        let mut buf =
+            RegionBuf::with_budget(&mut cursor, &[chunk_a, chunk_b], MAX_BLOCK_SIZE).unwrap();
+
+        buf.seek_virtual(VirtualOffset::new(offsets_a[0], 0)).unwrap();
+        let total_a: usize = blocks_a.iter().map(|b| b.len()).sum();
+        let mut out_a = vec![0u8; total_a];
+        buf.read_exact_into(&mut out_a).unwrap();
+        let exp_a: Vec<u8> = blocks_a.iter().flatten().copied().collect();
+        assert_eq!(out_a, exp_a, "group A");
+
+        buf.seek_virtual(VirtualOffset::new(group_b_start, 0)).unwrap();
+        let total_b: usize = blocks_b.iter().map(|b| b.len()).sum();
+        let mut out_b = vec![0u8; total_b];
+        buf.read_exact_into(&mut out_b).unwrap();
+        let exp_b: Vec<u8> = blocks_b.iter().flatten().copied().collect();
+        assert_eq!(out_b, exp_b, "group B");
     }
 }

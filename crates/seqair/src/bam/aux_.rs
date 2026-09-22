@@ -971,16 +971,16 @@ mod tests {
 #[cfg(test)]
 mod prop_tests {
     use super::*;
-    use proptest::prelude::*;
+    use hegel::prelude::*;
+
+    /// The characters a SAM tag name may be built from.
+    const TAG_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     /// Generate a valid 2-byte tag name from [A-Za-z0-9].
-    fn tag_name() -> impl Strategy<Value = [u8; 2]> {
-        let ch = proptest::strategy::Union::new(vec![
-            proptest::char::range('A', 'Z'),
-            proptest::char::range('a', 'z'),
-            proptest::char::range('0', '9'),
-        ]);
-        (ch.clone(), ch).prop_map(|(a, b)| [a as u8, b as u8])
+    #[hegel::composite]
+    fn tag_name(tc: &TestCase) -> [u8; 2] {
+        let ch = || gs::sampled_from(TAG_CHARS);
+        [tc.draw_silent(ch()), tc.draw_silent(ch())]
     }
 
     /// Encode an i64 into the smallest BAM integer type and return the raw type+value bytes.
@@ -1026,286 +1026,270 @@ mod prop_tests {
         buf
     }
 
-    proptest! {
-            // r[verify bam.record.aux_get]
-            #[test]
-            fn aux_get_roundtrips_ints(
-                tag in tag_name(),
-                value in i64::from(i32::MIN)..=i64::from(u32::MAX),
-            ) {
-                let raw = encode_int(value);
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let got: i64 = aux.get(tag).unwrap();
-                assert_eq!(got, value);
+    // r[verify bam.record.aux_get]
+    #[hegel::test]
+    fn aux_get_roundtrips_ints(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value = tc.draw(
+            gs::integers::<i64>().min_value(i64::from(i32::MIN)).max_value(i64::from(u32::MAX)),
+        );
+        let raw = encode_int(value);
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let got: i64 = aux.get(tag).unwrap();
+        assert_eq!(got, value);
+    }
+
+    // r[verify bam.record.aux_widening]
+    #[hegel::test]
+    fn aux_get_widens_u8_to_u64(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value = tc.draw(gs::integers::<u8>());
+        let raw = [b'C', value];
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let got: u64 = aux.get(tag).unwrap();
+        assert_eq!(got, u64::from(value));
+    }
+
+    #[hegel::test]
+    fn aux_get_widens_u16_to_u64(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value = tc.draw(gs::integers::<u16>());
+        let mut raw = vec![b'S'];
+        raw.extend_from_slice(&value.to_le_bytes());
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let got: u64 = aux.get(tag).unwrap();
+        assert_eq!(got, u64::from(value));
+    }
+
+    // r[verify bam.record.aux_from_aux_value]
+    #[hegel::test]
+    fn aux_get_string_roundtrip(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value = tc.draw(gs::from_regex("[a-zA-Z0-9]{1,20}"));
+        let mut raw = vec![b'Z'];
+        raw.extend_from_slice(value.as_bytes());
+        raw.push(0);
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+
+        let got: &str = aux.get(tag).unwrap();
+        assert_eq!(got, value);
+
+        let owned: String = aux.get(tag).unwrap();
+        assert_eq!(owned, value);
+
+        let smol: SmolStr = aux.get(tag).unwrap();
+        assert_eq!(smol, value);
+    }
+
+    #[hegel::test]
+    fn tag_not_found_is_error(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let other = tc.draw(tag_name());
+        let value = tc.draw(gs::integers::<u8>());
+        tc.assume(tag != other);
+        let raw = [b'C', value];
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let err = aux.get::<u8>(&other).unwrap_err();
+        assert!(matches!(err, GetAuxError::TagNotFound { .. }));
+    }
+
+    #[hegel::test]
+    fn type_mismatch_is_error(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value = tc.draw(gs::integers::<u8>());
+        // Tag is U8 (C type), request as &str (Z type)
+        let raw = [b'C', value];
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let err = aux.get::<&str>(&tag).unwrap_err();
+        assert!(matches!(err, GetAuxError::TypeMismatch { .. }));
+    }
+
+    // r[verify bam.record.aux_widening]
+    #[hegel::test]
+    fn signed_int_to_unsigned_widening(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value = tc.draw(gs::integers::<i8>().min_value(0));
+        // I8 non-negative → u64
+        let raw = [b'c', value as u8];
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let got: u64 = aux.get(tag).unwrap();
+        assert_eq!(got, u64::from(value as u8));
+    }
+
+    #[hegel::test]
+    fn f64_accepts_f32_and_f64(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        // Float → f64 widening. Bounds keep the draw finite.
+        let value = tc.draw(gs::floats::<f32>().min_value(f32::MIN).max_value(f32::MAX));
+        let mut raw = vec![b'f'];
+        raw.extend_from_slice(&value.to_le_bytes());
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let got: f64 = aux.get(tag).unwrap();
+        assert_eq!(got, f64::from(value));
+    }
+
+    #[hegel::test]
+    fn char_roundtrip(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value =
+            tc.draw(gs::characters().min_codepoint(u32::from(b'!')).max_codepoint(u32::from(b'~')));
+        let raw = [b'A', value as u8];
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let got: char = aux.get(tag).unwrap();
+        assert_eq!(got, value);
+    }
+
+    // r[verify bam.record.aux_from_aux_value]
+    // U32 values that don't fit i32 surface as `OutOfRange` (NOT
+    // `TypeMismatch`: the tag IS an integer, just too large).
+    #[hegel::test]
+    #[allow(clippy::arithmetic_side_effects, reason = "test: i32::MAX is a constant")]
+    fn i32_narrowing_overflow_from_u32_is_out_of_range(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value = tc.draw(gs::integers::<u32>().min_value(i32::MAX as u32 + 1));
+        let mut raw = vec![b'I'];
+        raw.extend_from_slice(&value.to_le_bytes());
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let err = aux.get::<i32>(&tag).unwrap_err();
+        match err {
+            GetAuxError::OutOfRange { value: v, target } => {
+                assert_eq!(v, i64::from(value));
+                assert_eq!(target, "i32");
             }
+            other => panic!("expected OutOfRange, got {other:?}"),
+        }
+    }
 
-            // r[verify bam.record.aux_widening]
-            #[test]
-            fn aux_get_widens_u8_to_u64(
-                tag in tag_name(),
-                value in prop::num::u8::ANY,
-            ) {
-                let raw = [b'C', value];
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let got: u64 = aux.get(tag).unwrap();
-                assert_eq!(got, u64::from(value));
+    // Negative I32 → u32 must be `OutOfRange`.
+    #[hegel::test]
+    fn negative_i32_to_u32_is_out_of_range(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value = tc.draw(gs::integers::<i32>().max_value(-1));
+        let mut raw = vec![b'i'];
+        raw.extend_from_slice(&value.to_le_bytes());
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let err = aux.get::<u32>(&tag).unwrap_err();
+        assert!(
+            matches!(err, GetAuxError::OutOfRange { target: "u32", .. }),
+            "expected OutOfRange, got {err:?}"
+        );
+    }
+
+    // Non-integer requested as integer is `TypeMismatch` (not OutOfRange).
+    #[hegel::test]
+    fn string_to_i32_is_type_mismatch(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value = tc.draw(gs::from_regex("[a-z]{1,8}"));
+        let mut raw = vec![b'Z'];
+        raw.extend_from_slice(value.as_bytes());
+        raw.push(0);
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let err = aux.get::<i32>(&tag).unwrap_err();
+        assert!(
+            matches!(err, GetAuxError::TypeMismatch { actual: "Z", .. }),
+            "expected TypeMismatch with actual=Z, got {err:?}"
+        );
+    }
+
+    #[hegel::test]
+    fn invalid_utf8_in_z_string(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        // Build a Z-type tag with invalid UTF-8 bytes
+        let raw = vec![b'Z', 0xC3, 0x28, 0]; // 0xC3 0x28 is invalid UTF-8
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
+        let err = aux.get::<&str>(&tag).unwrap_err();
+        assert!(matches!(err, GetAuxError::InvalidUtf8));
+    }
+
+    // HexBytes::decode is the inverse of "format every byte as two
+    // ASCII hex digits". Generated against arbitrary byte arrays of
+    // any practical size.
+    #[hegel::test]
+    fn hex_bytes_decode_roundtrip_arbitrary(tc: TestCase) {
+        let bytes = tc.draw(gs::binary().max_size(255));
+        let mut hex = Vec::with_capacity(bytes.len().saturating_mul(2));
+        for b in &bytes {
+            hex.extend_from_slice(format!("{b:02X}").as_bytes());
+        }
+        let decoded = HexBytes(&hex).decode().expect("valid hex string");
+        assert_eq!(decoded, bytes);
+    }
+
+    // Mixed-case hex digits decode the same as upper-case.
+    #[hegel::test]
+    fn hex_bytes_decode_case_insensitive(tc: TestCase) {
+        let bytes = tc.draw(gs::binary().max_size(63));
+        let lower_mask = tc.draw(gs::vecs(gs::booleans()).max_size(127));
+        let mut hex = Vec::with_capacity(bytes.len().saturating_mul(2));
+        for b in &bytes {
+            hex.extend_from_slice(format!("{b:02X}").as_bytes());
+        }
+        let mut mixed = hex.clone();
+        for (i, slot) in mixed.iter_mut().enumerate() {
+            if lower_mask.get(i).copied().unwrap_or(false) && slot.is_ascii_uppercase() {
+                *slot = slot.to_ascii_lowercase();
             }
+        }
+        assert_eq!(HexBytes(&hex).decode().unwrap(), HexBytes(&mixed).decode().unwrap());
+    }
 
-            #[test]
-            fn aux_get_widens_u16_to_u64(
-                tag in tag_name(),
-                value in prop::num::u16::ANY,
-            ) {
-                let mut raw = vec![b'S'];
-                raw.extend_from_slice(&value.to_le_bytes());
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let got: u64 = aux.get(tag).unwrap();
-                assert_eq!(got, u64::from(value));
-            }
+    // Tightened &[u8] impl: H tags MUST be rejected (not silently
+    // returned as raw hex digits). Pre-PR this returned Ok.
+    #[hegel::test]
+    fn byte_slice_rejects_h_tag(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let bytes = tc.draw(gs::binary().max_size(63));
+        let mut hex = Vec::with_capacity(bytes.len().saturating_mul(2));
+        for b in &bytes {
+            hex.extend_from_slice(format!("{b:02X}").as_bytes());
+        }
+        let mut raw = vec![b'H'];
+        raw.extend_from_slice(&hex);
+        raw.push(0);
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
 
-            // r[verify bam.record.aux_from_aux_value]
-            #[test]
-            fn aux_get_string_roundtrip(
-                tag in tag_name(),
-                value in "[a-zA-Z0-9]{1,20}",
-            ) {
-                let mut raw = vec![b'Z'];
-                raw.extend_from_slice(value.as_bytes());
-                raw.push(0);
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
+        let err = aux.get::<&[u8]>(&tag).unwrap_err();
+        let is_z_h_mismatch =
+            matches!(err, GetAuxError::TypeMismatch { expected: "Z", actual: "H" });
+        assert!(is_z_h_mismatch);
 
-                let got: &str = aux.get(tag).unwrap();
-                assert_eq!(got, value);
+        let hexbytes = aux.get::<HexBytes>(&tag).expect("H tag → HexBytes");
+        assert_eq!(hexbytes.as_bytes(), hex.as_slice());
+        assert_eq!(hexbytes.decode().unwrap(), bytes);
+    }
 
-                let owned: String = aux.get(tag).unwrap();
-                assert_eq!(owned, value);
+    // Symmetric: HexBytes MUST reject Z tags.
+    #[hegel::test]
+    fn hex_bytes_rejects_z_tag(tc: TestCase) {
+        let tag = tc.draw(tag_name());
+        let value =
+            tc.draw(gs::vecs(gs::integers::<u8>().min_value(b'!').max_value(b'~')).max_size(31));
+        let mut raw = vec![b'Z'];
+        raw.extend_from_slice(&value);
+        raw.push(0);
+        let aux_bytes = build_aux(&[(tag, &raw)]);
+        let aux = Aux::new(&aux_bytes);
 
-                let smol: SmolStr = aux.get(tag).unwrap();
-                assert_eq!(smol, value);
-            }
+        let err = aux.get::<HexBytes>(&tag).unwrap_err();
+        let is_h_z_mismatch =
+            matches!(err, GetAuxError::TypeMismatch { expected: "H", actual: "Z" });
+        assert!(is_h_z_mismatch);
 
-            #[test]
-            fn tag_not_found_is_error(
-                tag in tag_name(),
-                other in tag_name(),
-                value in prop::num::u8::ANY,
-            ) {
-                prop_assume!(tag != other);
-                let raw = [b'C', value];
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let err = aux.get::<u8>(&other).unwrap_err();
-                assert!(matches!(err, GetAuxError::TagNotFound { .. }));
-            }
-
-            #[test]
-            fn type_mismatch_is_error(
-                tag in tag_name(),
-                value in prop::num::u8::ANY,
-            ) {
-                // Tag is U8 (C type), request as &str (Z type)
-                let raw = [b'C', value];
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let err = aux.get::<&str>(&tag).unwrap_err();
-                assert!(matches!(err, GetAuxError::TypeMismatch { .. }));
-            }
-
-            // r[verify bam.record.aux_widening]
-            #[test]
-            fn signed_int_to_unsigned_widening(
-                tag in tag_name(),
-                value in 0i8..=i8::MAX,
-            ) {
-                // I8 non-negative → u64
-                let raw = [b'c', value as u8];
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let got: u64 = aux.get(tag).unwrap();
-                assert_eq!(got, u64::from(value as u8));
-            }
-
-            #[test]
-            fn f64_accepts_f32_and_f64(
-                tag in tag_name(),
-                value in prop::num::f32::ANY,
-            ) {
-                // Float → f64 widening
-                prop_assume!(value.is_finite());
-                let mut raw = vec![b'f'];
-                raw.extend_from_slice(&value.to_le_bytes());
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let got: f64 = aux.get(tag).unwrap();
-                assert!((got - f64::from(value)).abs() < 1e-6);
-            }
-
-            #[test]
-            fn char_roundtrip(
-                tag in tag_name(),
-                value in prop::char::range('!', '~'),
-            ) {
-                let raw = [b'A', value as u8];
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let got: char = aux.get(tag).unwrap();
-                assert_eq!(got, value);
-            }
-
-            // r[verify bam.record.aux_from_aux_value]
-            // U32 values that don't fit i32 surface as `OutOfRange` (NOT
-            // `TypeMismatch`: the tag IS an integer, just too large).
-            #[test]
-            #[allow(clippy::arithmetic_side_effects, reason = "prop test: i32::MAX is a constant")]
-            fn i32_narrowing_overflow_from_u32_is_out_of_range(
-                tag in tag_name(),
-                value in (i32::MAX as u32 + 1)..=u32::MAX,
-            ) {
-                let mut raw = vec![b'I'];
-                raw.extend_from_slice(&value.to_le_bytes());
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let err = aux.get::<i32>(&tag).unwrap_err();
-                match err {
-                    GetAuxError::OutOfRange { value: v, target } => {
-                        assert_eq!(v, i64::from(value));
-                        assert_eq!(target, "i32");
-                    }
-                    other => panic!("expected OutOfRange, got {other:?}"),
-                }
-            }
-
-            // Negative I32 → u32 must be `OutOfRange`.
-            #[test]
-            fn negative_i32_to_u32_is_out_of_range(
-                tag in tag_name(),
-                value in i32::MIN..0i32,
-            ) {
-                let mut raw = vec![b'i'];
-                raw.extend_from_slice(&value.to_le_bytes());
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let err = aux.get::<u32>(&tag).unwrap_err();
-                assert!(matches!(err, GetAuxError::OutOfRange { target: "u32", .. }),
-                    "expected OutOfRange, got {err:?}");
-            }
-
-            // Non-integer requested as integer is `TypeMismatch` (not OutOfRange).
-            #[test]
-            fn string_to_i32_is_type_mismatch(
-                tag in tag_name(),
-                value in "[a-z]{1,8}",
-            ) {
-                let mut raw = vec![b'Z'];
-                raw.extend_from_slice(value.as_bytes());
-                raw.push(0);
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let err = aux.get::<i32>(&tag).unwrap_err();
-                assert!(matches!(err, GetAuxError::TypeMismatch { actual: "Z", .. }),
-                    "expected TypeMismatch with actual=Z, got {err:?}");
-            }
-
-            #[test]
-            fn invalid_utf8_in_z_string(
-                tag in tag_name(),
-            ) {
-                // Build a Z-type tag with invalid UTF-8 bytes
-                let raw = vec![b'Z', 0xC3, 0x28, 0]; // 0xC3 0x28 is invalid UTF-8
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-                let err = aux.get::<&str>(&tag).unwrap_err();
-                assert!(matches!(err, GetAuxError::InvalidUtf8));
-            }
-
-            // HexBytes::decode is the inverse of "format every byte as two
-            // ASCII hex digits". Generated against arbitrary byte arrays of
-            // any practical size.
-            #[test]
-            fn hex_bytes_decode_roundtrip_arbitrary(
-                bytes in proptest::collection::vec(any::<u8>(), 0..256),
-            ) {
-                let mut hex = Vec::with_capacity(bytes.len().saturating_mul(2));
-                for b in &bytes {
-                    hex.extend_from_slice(format!("{b:02X}").as_bytes());
-                }
-                let decoded = HexBytes(&hex).decode().expect("valid hex string");
-                prop_assert_eq!(decoded, bytes);
-            }
-
-            // Mixed-case hex digits decode the same as upper-case.
-            #[test]
-            fn hex_bytes_decode_case_insensitive(
-                bytes in proptest::collection::vec(any::<u8>(), 0..64),
-                lower_mask in proptest::collection::vec(any::<bool>(), 0..128),
-            ) {
-                let mut hex = Vec::with_capacity(bytes.len().saturating_mul(2));
-                for b in &bytes {
-                    hex.extend_from_slice(format!("{b:02X}").as_bytes());
-                }
-                let mut mixed = hex.clone();
-                for (i, slot) in mixed.iter_mut().enumerate() {
-                    if lower_mask.get(i).copied().unwrap_or(false) && slot.is_ascii_uppercase() {
-                        *slot = slot.to_ascii_lowercase();
-                    }
-                }
-                prop_assert_eq!(HexBytes(&hex).decode().unwrap(), HexBytes(&mixed).decode().unwrap());
-            }
-
-            // Tightened &[u8] impl: H tags MUST be rejected (not silently
-            // returned as raw hex digits). Pre-PR this returned Ok.
-            #[test]
-            fn byte_slice_rejects_h_tag(
-                tag in tag_name(),
-                bytes in proptest::collection::vec(any::<u8>(), 0..64),
-            ) {
-                let mut hex = Vec::with_capacity(bytes.len().saturating_mul(2));
-                for b in &bytes {
-                    hex.extend_from_slice(format!("{b:02X}").as_bytes());
-                }
-                let mut raw = vec![b'H'];
-                raw.extend_from_slice(&hex);
-                raw.push(0);
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-
-                let err = aux.get::<&[u8]>(&tag).unwrap_err();
-                let is_z_h_mismatch = matches!(
-                    err,
-                    GetAuxError::TypeMismatch { expected: "Z", actual: "H" }
-                );
-                prop_assert!(is_z_h_mismatch);
-
-                let hexbytes = aux.get::<HexBytes>(&tag).expect("H tag → HexBytes");
-                prop_assert_eq!(hexbytes.as_bytes(), hex.as_slice());
-                prop_assert_eq!(hexbytes.decode().unwrap(), bytes);
-            }
-
-            // Symmetric: HexBytes MUST reject Z tags.
-            #[test]
-            fn hex_bytes_rejects_z_tag(
-                tag in tag_name(),
-                value in proptest::collection::vec(b'!'..=b'~', 0..32),
-            ) {
-                let mut raw = vec![b'Z'];
-                raw.extend_from_slice(&value);
-                raw.push(0);
-                let aux_bytes = build_aux(&[(tag, &raw)]);
-                let aux = Aux::new(&aux_bytes);
-
-                let err = aux.get::<HexBytes>(&tag).unwrap_err();
-                let is_h_z_mismatch = matches!(
-                    err,
-                    GetAuxError::TypeMismatch { expected: "H", actual: "Z" }
-                );
-                prop_assert!(is_h_z_mismatch);
-
-                let bytes = aux.get::<&[u8]>(&tag).unwrap();
-                prop_assert_eq!(bytes, value.as_slice());
-            }
+        let bytes = aux.get::<&[u8]>(&tag).unwrap();
+        assert_eq!(bytes, value.as_slice());
     }
 }

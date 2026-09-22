@@ -2433,7 +2433,7 @@ pub(crate) mod tests {
     pub(crate) mod window_query {
         use super::super::*;
         use crate::bam::test_util::ri;
-        use proptest::prelude::*;
+        use hegel::prelude::*;
         use seqair_types::{BamFlags, Base};
 
         /// An expected index list, written with literals.
@@ -2466,10 +2466,10 @@ pub(crate) mod tests {
             /// Push with a qname unique to `i`, so the store's mate linking
             /// sees distinct templates rather than one qname eighty times.
             pub(crate) fn push(&self, store: &mut RecordStore<()>, i: usize) -> RecordIdx {
-                let pos = Pos0::new(self.pos).expect("strategy bounds pos");
+                let pos = Pos0::new(self.pos).expect("the generator bounds pos");
                 let end =
                     if self.mapped { self.pos + self.bases + self.deletion - 1 } else { self.pos };
-                let end_pos = Pos0::new(end).expect("strategy bounds end");
+                let end_pos = Pos0::new(end).expect("the generator bounds end");
                 let flags = if self.mapped { BamFlags::empty() } else { BamFlags::from(0x4u16) };
                 let bases = vec![Base::A; self.bases as usize];
                 let quals = vec![30u8; self.bases as usize];
@@ -2500,23 +2500,23 @@ pub(crate) mod tests {
         /// Deletions are bimodal: mostly none or short, occasionally one long
         /// enough to reach far past its neighbours, so a single record sets
         /// how far back a window must look — the case the index exists for.
-        pub(crate) fn arb_read() -> impl Strategy<Value = Read> {
-            (
-                0u32..5_000,
-                1u32..=16,
-                prop_oneof![6 => Just(0u32), 3 => 1u32..=40, 1 => 200u32..=1_500],
-                prop_oneof![9 => Just(true), 1 => Just(false)],
-            )
-                .prop_map(|(pos, bases, deletion, mapped)| Read {
-                    pos,
-                    bases,
-                    deletion,
-                    mapped,
-                })
+        #[hegel::composite]
+        pub(crate) fn arb_read(tc: &TestCase) -> Read {
+            let pos = tc.draw_silent(gs::integers::<u32>().max_value(4_999));
+            let bases = tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(16));
+            // 6 : 3 : 1 — none, short, or long enough to reach far past its
+            // neighbours.
+            let deletion = match tc.draw_silent(gs::integers::<u8>().max_value(9)) {
+                0..=5 => 0,
+                6..=8 => tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(40)),
+                _ => tc.draw_silent(gs::integers::<u32>().min_value(200).max_value(1_500)),
+            };
+            let mapped = tc.draw_silent(gs::weighted_booleans(0.9));
+            Read { pos, bases, deletion, mapped }
         }
 
-        pub(crate) fn arb_store() -> impl Strategy<Value = Vec<Read>> {
-            prop::collection::vec(arb_read(), 0..=80)
+        pub(crate) fn arb_store() -> impl PrintableGenerator<Vec<Read>> {
+            gs::vecs(arb_read().print_as_debug()).max_size(80)
         }
 
         /// A window, either absolute — reaching past the last possible record
@@ -2529,18 +2529,23 @@ pub(crate) mod tests {
             Anchored { record: usize, at_end: bool, start_off: i8, len: u8 },
         }
 
-        pub(crate) fn arb_span() -> impl Strategy<Value = Span> {
-            prop_oneof![
-                (0u32..7_000, 0u32..7_000).prop_map(|(a, b)| Span::Absolute(a, b)),
-                (any::<usize>(), any::<bool>(), -2i8..=2, 0u8..=8).prop_map(
-                    |(record, at_end, start_off, len)| Span::Anchored {
-                        record,
-                        at_end,
-                        start_off,
-                        len
-                    }
-                ),
-            ]
+        #[hegel::composite]
+        fn arb_span_inner(tc: &TestCase) -> Span {
+            if tc.draw_silent(gs::booleans()) {
+                let coord = || gs::integers::<u32>().max_value(6_999);
+                Span::Absolute(tc.draw_silent(coord()), tc.draw_silent(coord()))
+            } else {
+                Span::Anchored {
+                    record: tc.draw_silent(gs::integers::<usize>()),
+                    at_end: tc.draw_silent(gs::booleans()),
+                    start_off: tc.draw_silent(gs::integers::<i8>().min_value(-2).max_value(2)),
+                    len: tc.draw_silent(gs::integers::<u8>().max_value(8)),
+                }
+            }
+        }
+
+        pub(crate) fn arb_span() -> impl PrintableGenerator<Span> {
+            arb_span_inner().print_as_debug()
         }
 
         impl Span {
@@ -2570,12 +2575,21 @@ pub(crate) mod tests {
             pub(crate) deletion: u32,
         }
 
-        pub(crate) fn arb_moves() -> impl Strategy<Value = Vec<Move>> {
-            prop::collection::vec(
-                (any::<usize>(), 0u32..5_000, prop_oneof![3 => Just(0u32), 1 => 1u32..=1_500])
-                    .prop_map(|(record, pos, deletion)| Move { record, pos, deletion }),
-                0..=6,
-            )
+        #[hegel::composite]
+        fn arb_move(tc: &TestCase) -> Move {
+            let record = tc.draw_silent(gs::integers::<usize>());
+            let pos = tc.draw_silent(gs::integers::<u32>().max_value(4_999));
+            // 3 : 1 — no deletion, or one long enough to matter.
+            let deletion = if tc.draw_silent(gs::weighted_booleans(0.75)) {
+                0
+            } else {
+                tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(1_500))
+            };
+            Move { record, pos, deletion }
+        }
+
+        pub(crate) fn arb_moves() -> impl PrintableGenerator<Vec<Move>> {
+            gs::vecs(arb_move().print_as_debug()).max_size(6)
         }
 
         /// Apply `moves` to a store that `reads` were pushed into, in push
@@ -2725,58 +2739,64 @@ pub(crate) mod tests {
             assert_eq!(hits, idxs([1]));
         }
 
-        proptest! {
-            // r[verify record_store.window_query]
-            // r[verify record_store.window_query.reach]
-            /// The binary search must return exactly what the definition
-            /// returns, for stores pushed in any order, realigned after the
-            /// fact, and spans that are empty, before, past, inside, or a base
-            /// off a record's edge.
-            #[test]
-            fn matches_brute_force(
-                reads in arb_store(),
-                moves in arb_moves(),
-                spans in prop::collection::vec(arb_span(), 1..=8),
-            ) {
-                let mut store = RecordStore::new();
-                for (i, read) in reads.iter().enumerate() {
-                    read.push(&mut store, i);
-                }
-                apply_moves(&mut store, &reads, &moves);
-                let input = store.prepare_for_pileup().input;
-                for span in spans {
-                    let (start, end) = span.resolve(input.store());
-                    let fast: Vec<RecordIdx> = input.records_overlapping(start, end).collect();
-                    prop_assert_eq!(fast, brute_force(input.store(), start, end), "span {:?} = {:?}..={:?}", span, start, end);
-                }
+        // r[verify record_store.window_query]
+        // r[verify record_store.window_query.reach]
+        /// The binary search must return exactly what the definition
+        /// returns, for stores pushed in any order, realigned after the
+        /// fact, and spans that are empty, before, past, inside, or a base
+        /// off a record's edge.
+        #[hegel::test]
+        fn matches_brute_force(tc: TestCase) {
+            let reads = tc.draw(arb_store());
+            let moves = tc.draw(arb_moves());
+            let spans = tc.draw(gs::vecs(arb_span()).min_size(1).max_size(8));
+            let mut store = RecordStore::new();
+            for (i, read) in reads.iter().enumerate() {
+                read.push(&mut store, i);
             }
+            apply_moves(&mut store, &reads, &moves);
+            let input = store.prepare_for_pileup().input;
+            for span in spans {
+                let (start, end) = span.resolve(input.store());
+                let fast: Vec<RecordIdx> = input.records_overlapping(start, end).collect();
+                assert_eq!(
+                    fast,
+                    brute_force(input.store(), start, end),
+                    "span {:?} = {:?}..={:?}",
+                    span,
+                    start,
+                    end
+                );
+            }
+        }
 
-            // r[verify record_store.window_query.reach]
-            /// The search lands on the first record that can overlap a window
-            /// starting at `start`: the first mapped record whose `end_pos`
-            /// reaches it, found here by a linear scan. Nothing before it can
-            /// be a hit, and the forward scan sees everything after it.
-            #[test]
-            fn first_reaching_is_where_the_linear_scan_stops(reads in arb_store(), start in 0u32..7_000) {
-                let input = prepared(&reads);
-                let store = input.store();
-                let expected = store
-                    .records()
-                    .position(|rec| !rec.flags.is_unmapped() && rec.end_pos >= at(start))
-                    .unwrap_or(store.len());
-                prop_assert_eq!(store.first_reaching(at(start)), expected);
-            }
+        // r[verify record_store.window_query.reach]
+        /// The search lands on the first record that can overlap a window
+        /// starting at `start`: the first mapped record whose `end_pos`
+        /// reaches it, found here by a linear scan. Nothing before it can
+        /// be a hit, and the forward scan sees everything after it.
+        #[hegel::test]
+        fn first_reaching_is_where_the_linear_scan_stops(tc: TestCase) {
+            let reads = tc.draw(arb_store());
+            let start = tc.draw(gs::integers::<u32>().max_value(6_999));
+            let input = prepared(&reads);
+            let store = input.store();
+            let expected = store
+                .records()
+                .position(|rec| !rec.flags.is_unmapped() && rec.end_pos >= at(start))
+                .unwrap_or(store.len());
+            assert_eq!(store.first_reaching(at(start)), expected);
         }
     }
 
     mod rollback_props {
         use super::super::*;
         use super::AcceptFlag;
-        use proptest::prelude::*;
+        use hegel::prelude::*;
         use seqair_types::{BamFlags, Base};
 
         /// A synthetic push input covering every slab. Fields are bounded to
-        /// small sizes so proptest can generate long sequences without
+        /// small sizes so the generator can produce long sequences without
         /// exhausting memory.
         #[derive(Debug, Clone)]
         struct PushInput {
@@ -2796,7 +2816,7 @@ pub(crate) mod tests {
             fn cigar_op(&self) -> CigarOp {
                 #[expect(
                     clippy::cast_possible_truncation,
-                    reason = "bases.len() is bounded by strategy (≤ 16)"
+                    reason = "bases.len() is bounded by the generator (≤ 16)"
                 )]
                 let len = self.bases.len() as u32;
                 CigarOp::new(cigar::CigarOpType::Match, len)
@@ -2813,36 +2833,32 @@ pub(crate) mod tests {
                     reason = "bases.len() ≥ 1 ≤ 16, pos < 1_000_000; sum fits in u32"
                 )]
                 let end = self.pos + self.bases.len() as u32 - 1;
-                Pos0::new(end).expect("bounded by strategy to < i32::MAX")
+                Pos0::new(end).expect("bounded by the generator to < i32::MAX")
             }
         }
 
-        fn arb_base() -> impl Strategy<Value = Base> {
-            prop_oneof![
-                Just(Base::A),
-                Just(Base::C),
-                Just(Base::G),
-                Just(Base::T),
-                Just(Base::Unknown),
-            ]
+        const ALL_BASES: [Base; 5] = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
+
+        #[hegel::composite]
+        fn arb_push_input(tc: &TestCase) -> PushInput {
+            // qname: 1..16 ASCII bytes without NUL
+            let qname = tc.draw_silent(
+                gs::vecs(gs::integers::<u8>().min_value(1).max_value(126)).min_size(1).max_size(16),
+            );
+            // bases: 1..16 bases (non-empty so qual len matches)
+            let bases =
+                tc.draw_silent(gs::vecs(gs::sampled_from(&ALL_BASES)).min_size(1).max_size(16));
+            // aux: 0..32 bytes (NOT parsed, so any bytes OK)
+            let aux = tc.draw_silent(gs::binary().max_size(32));
+            let pos = tc.draw_silent(gs::integers::<u32>().max_value(999_999));
+            let mapq = tc.draw_silent(gs::integers::<u8>().max_value(60));
+            let accept = tc.draw_silent(gs::booleans());
+            let quals = bases.iter().map(|_| 30u8).collect();
+            PushInput { qname, bases, quals, aux, pos, mapq, accept }
         }
 
-        fn arb_push_input() -> impl Strategy<Value = PushInput> {
-            (
-                // qname: 1..16 ASCII bytes without NUL
-                prop::collection::vec(1u8..=126, 1..=16),
-                // bases: 1..16 bases (non-empty so qual len matches)
-                prop::collection::vec(arb_base(), 1..=16),
-                // aux: 0..32 bytes (NOT parsed, so any bytes OK)
-                prop::collection::vec(any::<u8>(), 0..=32),
-                0u32..1_000_000,
-                0u8..=60,
-                any::<bool>(),
-            )
-                .prop_map(|(qname, bases, aux, pos, mapq, accept)| {
-                    let quals = bases.iter().map(|_| 30u8).collect();
-                    PushInput { qname, bases, quals, aux, pos, mapq, accept }
-                })
+        fn arb_push_inputs(max: usize) -> impl PrintableGenerator<Vec<PushInput>> {
+            gs::vecs(arb_push_input().print_as_debug()).max_size(max)
         }
 
         /// Push one `PushInput` into the store via `push_fields`, honoring its
@@ -2850,7 +2866,7 @@ pub(crate) mod tests {
         #[allow(
             clippy::expect_used,
             clippy::unwrap_in_result,
-            reason = "proptest synthetic input bounded by strategy; panic on violation is informative"
+            reason = "synthetic input bounded by the generator; panic on violation is informative"
         )]
         fn push_one(store: &mut RecordStore<()>, input: &PushInput) -> Option<RecordIdx> {
             let cigar = [input.cigar_op()];
@@ -2858,7 +2874,7 @@ pub(crate) mod tests {
             let matching = input.bases.len() as u32;
             store
                 .push_fields(
-                    Pos0::new(input.pos).expect("strategy bounds pos < 1_000_000"),
+                    Pos0::new(input.pos).expect("the generator bounds pos < 1_000_000"),
                     input.end_pos(),
                     BamFlags::empty(),
                     input.mapq,
@@ -2887,7 +2903,7 @@ pub(crate) mod tests {
         }
 
         /// Snapshot of all slab contents + record/extras counts — used by the
-        /// rollback proptest as the equivalence model.
+        /// rollback property as the equivalence model.
         type SlabSnapshot = (usize, Vec<u8>, Vec<Base>, Vec<CigarOp>, Vec<u8>, Vec<u8>, usize);
 
         fn dump_slabs(store: &RecordStore<()>) -> SlabSnapshot {
@@ -2902,115 +2918,110 @@ pub(crate) mod tests {
             )
         }
 
-        proptest! {
-            // r[verify record_store.pre_filter.rollback]
-            /// Self-consistency check: pushing a mixed accept/reject sequence
-            /// produces the same state as pushing only the accepted inputs
-            /// with no filter. This catches divergence between the rollback
-            /// path and the always-keep path inside `push_fields`, but does
-            /// NOT catch bugs that affect both paths (`push_fields` is its
-            /// own oracle here). For independent byte-correctness oracles
-            /// see `push_fields_matches_owned_bam_round_trip` (A) and
-            /// `push_fields_input_is_readable_via_getters` (B) below.
-            #[test]
-            fn push_fields_rollback_self_consistency(
-                inputs in prop::collection::vec(arb_push_input(), 0..=60),
-            ) {
-                // Store A: push all inputs with per-record filter (rollback path).
-                let mut a = RecordStore::new();
-                for inp in &inputs {
-                    push_one(&mut a, inp);
-                }
-
-                // Store B: push only accepted inputs with always-keep filter.
-                let mut b = RecordStore::new();
-                for inp in inputs.iter().filter(|i| i.accept) {
-                    push_kept(&mut b, inp);
-                }
-
-                // Every slab must be byte-identical. Records too — we compare
-                // their individual fields since SlimRecord doesn't derive Eq.
-                prop_assert_eq!(a.records.len(), b.records.len(), "records len");
-                for (ra, rb) in a.records.iter().zip(b.records.iter()) {
-                    prop_assert_eq!(ra.pos, rb.pos);
-                    prop_assert_eq!(ra.end_pos, rb.end_pos);
-                    prop_assert_eq!(ra.flags, rb.flags);
-                    prop_assert_eq!(ra.mapq, rb.mapq);
-                    prop_assert_eq!(ra.seq_len, rb.seq_len);
-                    prop_assert_eq!(ra.name_off, rb.name_off, "name_off");
-                    prop_assert_eq!(ra.name_len, rb.name_len, "name_len");
-                    prop_assert_eq!(ra.bases_off, rb.bases_off, "bases_off");
-                    prop_assert_eq!(ra.cigar_off, rb.cigar_off, "cigar_off");
-                    prop_assert_eq!(ra.qual_off, rb.qual_off, "qual_off");
-                    prop_assert_eq!(ra.aux_off, rb.aux_off, "aux_off");
-                    prop_assert_eq!(ra.aux_len, rb.aux_len, "aux_len");
-                    prop_assert_eq!(ra.extras_idx, rb.extras_idx, "extras_idx");
-                }
-                prop_assert_eq!(dump_slabs(&a), dump_slabs(&b), "slab bytes");
+        // r[verify record_store.pre_filter.rollback]
+        /// Self-consistency check: pushing a mixed accept/reject sequence
+        /// produces the same state as pushing only the accepted inputs
+        /// with no filter. This catches divergence between the rollback
+        /// path and the always-keep path inside `push_fields`, but does
+        /// NOT catch bugs that affect both paths (`push_fields` is its
+        /// own oracle here). For independent byte-correctness oracles
+        /// see `push_fields_matches_owned_bam_round_trip` (A) and
+        /// `push_fields_input_is_readable_via_getters` (B) below.
+        #[hegel::test]
+        fn push_fields_rollback_self_consistency(tc: TestCase) {
+            let inputs = tc.draw(arb_push_inputs(60));
+            // Store A: push all inputs with per-record filter (rollback path).
+            let mut a = RecordStore::new();
+            for inp in &inputs {
+                push_one(&mut a, inp);
             }
 
-            // r[verify record_store.pre_filter.rollback]
-            /// Per-step invariant: slab lengths track exactly the running
-            /// total of accepted inputs. Catches cases where rollback leaves
-            /// trailing garbage in one slab but not others.
-            #[test]
-            fn push_fields_slab_lengths_track_accepted_prefix(
-                inputs in prop::collection::vec(arb_push_input(), 0..=40),
-            ) {
-                let mut store = RecordStore::new();
-                let mut expected_names = 0usize;
-                let mut expected_bases = 0usize;
-                let mut expected_cigar = 0usize;
-                let mut expected_qual = 0usize;
-                let mut expected_aux = 0usize;
-                let mut expected_records = 0usize;
-
-                for inp in &inputs {
-                    let before = dump_slabs(&store);
-                    let result = push_one(&mut store, inp);
-
-                    if inp.accept {
-                        prop_assert!(result.is_some(), "accept=true must return Some");
-                        expected_records += 1;
-                        expected_names += inp.qname.len();
-                        expected_bases += inp.bases.len();
-                        expected_cigar += 1; // one CigarOp slot per kept record
-                        expected_qual += inp.quals.len();
-                        expected_aux += inp.aux.len();
-                    } else {
-                        prop_assert!(result.is_none(), "accept=false must return None");
-                        // Reject path: state must be untouched.
-                        prop_assert_eq!(before, dump_slabs(&store), "rollback left state altered");
-                    }
-
-                    prop_assert_eq!(store.records.len(), expected_records, "records len");
-                    prop_assert_eq!(store.names.len(), expected_names, "names len");
-                    prop_assert_eq!(store.bases.len(), expected_bases, "bases len");
-                    prop_assert_eq!(store.cigar.len(), expected_cigar, "cigar len");
-                    prop_assert_eq!(store.qual.len(), expected_qual, "qual len");
-                    prop_assert_eq!(store.aux.len(), expected_aux, "aux len");
-                    prop_assert_eq!(store.extras.len(), expected_records, "extras len");
-                }
+            // Store B: push only accepted inputs with always-keep filter.
+            let mut b = RecordStore::new();
+            for inp in inputs.iter().filter(|i| i.accept) {
+                push_kept(&mut b, inp);
             }
 
-            // r[verify record_store.pre_filter.rollback]
-            /// Indices returned by push_fields across a filtered run must be
-            /// dense and sequential — a rejected record must NOT burn an index.
-            #[test]
-            fn push_fields_indices_are_dense_for_accepted(
-                inputs in prop::collection::vec(arb_push_input(), 0..=40),
-            ) {
-                let mut store = RecordStore::new();
-                let mut kept: Vec<RecordIdx> = Vec::new();
-                for inp in &inputs {
-                    if let Some(idx) = push_one(&mut store, inp) {
-                        kept.push(idx);
-                    }
-                }
-                let expected: Vec<RecordIdx> =
-                    (0..kept.len()).filter_map(RecordIdx::from_usize).collect();
-                prop_assert_eq!(kept, expected);
+            // Every slab must be byte-identical. Records too — we compare
+            // their individual fields since SlimRecord doesn't derive Eq.
+            assert_eq!(a.records.len(), b.records.len(), "records len");
+            for (ra, rb) in a.records.iter().zip(b.records.iter()) {
+                assert_eq!(ra.pos, rb.pos);
+                assert_eq!(ra.end_pos, rb.end_pos);
+                assert_eq!(ra.flags, rb.flags);
+                assert_eq!(ra.mapq, rb.mapq);
+                assert_eq!(ra.seq_len, rb.seq_len);
+                assert_eq!(ra.name_off, rb.name_off, "name_off");
+                assert_eq!(ra.name_len, rb.name_len, "name_len");
+                assert_eq!(ra.bases_off, rb.bases_off, "bases_off");
+                assert_eq!(ra.cigar_off, rb.cigar_off, "cigar_off");
+                assert_eq!(ra.qual_off, rb.qual_off, "qual_off");
+                assert_eq!(ra.aux_off, rb.aux_off, "aux_off");
+                assert_eq!(ra.aux_len, rb.aux_len, "aux_len");
+                assert_eq!(ra.extras_idx, rb.extras_idx, "extras_idx");
             }
+            assert_eq!(dump_slabs(&a), dump_slabs(&b), "slab bytes");
+        }
+
+        // r[verify record_store.pre_filter.rollback]
+        /// Per-step invariant: slab lengths track exactly the running
+        /// total of accepted inputs. Catches cases where rollback leaves
+        /// trailing garbage in one slab but not others.
+        #[hegel::test]
+        fn push_fields_slab_lengths_track_accepted_prefix(tc: TestCase) {
+            let inputs = tc.draw(arb_push_inputs(40));
+            let mut store = RecordStore::new();
+            let mut expected_names = 0usize;
+            let mut expected_bases = 0usize;
+            let mut expected_cigar = 0usize;
+            let mut expected_qual = 0usize;
+            let mut expected_aux = 0usize;
+            let mut expected_records = 0usize;
+
+            for inp in &inputs {
+                let before = dump_slabs(&store);
+                let result = push_one(&mut store, inp);
+
+                if inp.accept {
+                    assert!(result.is_some(), "accept=true must return Some");
+                    expected_records += 1;
+                    expected_names += inp.qname.len();
+                    expected_bases += inp.bases.len();
+                    expected_cigar += 1; // one CigarOp slot per kept record
+                    expected_qual += inp.quals.len();
+                    expected_aux += inp.aux.len();
+                } else {
+                    assert!(result.is_none(), "accept=false must return None");
+                    // Reject path: state must be untouched.
+                    assert_eq!(before, dump_slabs(&store), "rollback left state altered");
+                }
+
+                assert_eq!(store.records.len(), expected_records, "records len");
+                assert_eq!(store.names.len(), expected_names, "names len");
+                assert_eq!(store.bases.len(), expected_bases, "bases len");
+                assert_eq!(store.cigar.len(), expected_cigar, "cigar len");
+                assert_eq!(store.qual.len(), expected_qual, "qual len");
+                assert_eq!(store.aux.len(), expected_aux, "aux len");
+                assert_eq!(store.extras.len(), expected_records, "extras len");
+            }
+        }
+
+        // r[verify record_store.pre_filter.rollback]
+        /// Indices returned by `push_fields` across a filtered run must be
+        /// dense and sequential — a rejected record must NOT burn an index.
+        #[hegel::test]
+        fn push_fields_indices_are_dense_for_accepted(tc: TestCase) {
+            let inputs = tc.draw(arb_push_inputs(40));
+            let mut store = RecordStore::new();
+            let mut kept: Vec<RecordIdx> = Vec::new();
+            for inp in &inputs {
+                if let Some(idx) = push_one(&mut store, inp) {
+                    kept.push(idx);
+                }
+            }
+            let expected: Vec<RecordIdx> =
+                (0..kept.len()).filter_map(RecordIdx::from_usize).collect();
+            assert_eq!(kept, expected);
         }
 
         // ---- Independent oracle (A): BAM round-trip ----
@@ -3023,7 +3034,7 @@ pub(crate) mod tests {
         //
         // The two stores must end up with byte-identical slabs. A bug shared
         // by both call paths in `push_fields` is invisible to the rollback
-        // self-consistency proptest above, but here it would diverge from
+        // self-consistency property above, but here it would diverge from
         // the BAM-encode/decode round-trip.
 
         use crate::bam::aux_data::AuxData;
@@ -3034,7 +3045,7 @@ pub(crate) mod tests {
         fn build_owned_bam(input: &PushInput) -> OwnedBamRecord {
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "bases.len() bounded ≤ 16 by strategy; fits in u32"
+                reason = "bases.len() bounded ≤ 16 by the generator; fits in u32"
             )]
             let len = input.bases.len() as u32;
             OwnedBamRecord::builder(0, Some(Pos0::new(input.pos).unwrap()), input.qname.clone())
@@ -3048,45 +3059,43 @@ pub(crate) mod tests {
                 .expect("synthetic OwnedBamRecord must build")
         }
 
-        proptest! {
-            // r[verify unified.push_fields_equivalence]
-            #[test]
-            fn push_fields_matches_owned_bam_round_trip(
-                inputs in prop::collection::vec(arb_push_input(), 0..=20),
-            ) {
-                // Store A: BAM-binary encode then push_raw (independent path).
-                let mut a = RecordStore::new();
-                let mut raw_buf = Vec::new();
-                for inp in inputs.iter().filter(|i| i.accept) {
-                    let owned = build_owned_bam(inp);
-                    raw_buf.clear();
-                    owned.to_bam_bytes(&mut raw_buf)
-                        .expect("to_bam_bytes must succeed on synthetic input");
-                    a.push_raw(&raw_buf, &mut ())
-                        .expect("push_raw must accept BAM bytes from to_bam_bytes")
-                        .expect("default filter returns true");
-                }
-
-                // Store B: push_fields directly (system under test).
-                let mut b = RecordStore::new();
-                for inp in inputs.iter().filter(|i| i.accept) {
-                    push_kept(&mut b, inp);
-                }
-
-                // Both must produce byte-identical slabs and matching record fields.
-                prop_assert_eq!(a.records.len(), b.records.len(), "records len");
-                for (ra, rb) in a.records.iter().zip(b.records.iter()) {
-                    prop_assert_eq!(ra.pos, rb.pos, "pos");
-                    prop_assert_eq!(ra.end_pos, rb.end_pos, "end_pos");
-                    prop_assert_eq!(ra.flags, rb.flags, "flags");
-                    prop_assert_eq!(ra.mapq, rb.mapq, "mapq");
-                    prop_assert_eq!(ra.seq_len, rb.seq_len, "seq_len");
-                    prop_assert_eq!(ra.n_cigar_ops, rb.n_cigar_ops, "n_cigar_ops");
-                    prop_assert_eq!(ra.matching_bases, rb.matching_bases, "matching_bases");
-                    prop_assert_eq!(ra.indel_bases, rb.indel_bases, "indel_bases");
-                }
-                prop_assert_eq!(dump_slabs(&a), dump_slabs(&b), "slab bytes");
+        // r[verify unified.push_fields_equivalence]
+        #[hegel::test]
+        fn push_fields_matches_owned_bam_round_trip(tc: TestCase) {
+            let inputs = tc.draw(arb_push_inputs(20));
+            // Store A: BAM-binary encode then push_raw (independent path).
+            let mut a = RecordStore::new();
+            let mut raw_buf = Vec::new();
+            for inp in inputs.iter().filter(|i| i.accept) {
+                let owned = build_owned_bam(inp);
+                raw_buf.clear();
+                owned
+                    .to_bam_bytes(&mut raw_buf)
+                    .expect("to_bam_bytes must succeed on synthetic input");
+                a.push_raw(&raw_buf, &mut ())
+                    .expect("push_raw must accept BAM bytes from to_bam_bytes")
+                    .expect("default filter returns true");
             }
+
+            // Store B: push_fields directly (system under test).
+            let mut b = RecordStore::new();
+            for inp in inputs.iter().filter(|i| i.accept) {
+                push_kept(&mut b, inp);
+            }
+
+            // Both must produce byte-identical slabs and matching record fields.
+            assert_eq!(a.records.len(), b.records.len(), "records len");
+            for (ra, rb) in a.records.iter().zip(b.records.iter()) {
+                assert_eq!(ra.pos, rb.pos, "pos");
+                assert_eq!(ra.end_pos, rb.end_pos, "end_pos");
+                assert_eq!(ra.flags, rb.flags, "flags");
+                assert_eq!(ra.mapq, rb.mapq, "mapq");
+                assert_eq!(ra.seq_len, rb.seq_len, "seq_len");
+                assert_eq!(ra.n_cigar_ops, rb.n_cigar_ops, "n_cigar_ops");
+                assert_eq!(ra.matching_bases, rb.matching_bases, "matching_bases");
+                assert_eq!(ra.indel_bases, rb.indel_bases, "indel_bases");
+            }
+            assert_eq!(dump_slabs(&a), dump_slabs(&b), "slab bytes");
         }
 
         // ---- Independent oracle (B): read-back via getters ----
@@ -3097,61 +3106,63 @@ pub(crate) mod tests {
         // "encoded the wrong length" without depending on the encoding logic
         // itself. The input is the source of truth.
 
-        proptest! {
-            #[test]
-            fn push_fields_input_is_readable_via_getters(
-                inputs in prop::collection::vec(arb_push_input(), 0..=40),
-            ) {
-                let mut store = RecordStore::new();
-                let mut kept_inputs: Vec<&PushInput> = Vec::new();
-                for inp in &inputs {
-                    if let Some(idx) = push_one(&mut store, inp) {
-                        prop_assert_eq!(idx.as_usize(), kept_inputs.len(), "dense indices");
-                        kept_inputs.push(inp);
-                    }
+        #[hegel::test]
+        fn push_fields_input_is_readable_via_getters(tc: TestCase) {
+            let inputs = tc.draw(arb_push_inputs(40));
+            let mut store = RecordStore::new();
+            let mut kept_inputs: Vec<&PushInput> = Vec::new();
+            for inp in &inputs {
+                if let Some(idx) = push_one(&mut store, inp) {
+                    assert_eq!(idx.as_usize(), kept_inputs.len(), "dense indices");
+                    kept_inputs.push(inp);
                 }
+            }
 
-                prop_assert_eq!(store.len(), kept_inputs.len(), "store len matches kept count");
+            assert_eq!(store.len(), kept_inputs.len(), "store len matches kept count");
 
-                for (i, inp) in kept_inputs.iter().enumerate() {
-                    let idx = RecordIdx::from_usize(i).expect("store is small");
-                    prop_assert_eq!(store.record(idx).unwrap().qname(), inp.qname.as_slice(), "qname rec {}", i);
-                    prop_assert_eq!(store.record(idx).unwrap().seq(), inp.bases.as_slice(), "seq rec {}", i);
-                    let qual_bytes = BaseQuality::slice_to_bytes(store.record(idx).unwrap().qual());
-                    prop_assert_eq!(qual_bytes, inp.quals.as_slice(), "qual rec {}", i);
-                    prop_assert_eq!(store.record(idx).unwrap().aux(), inp.aux.as_slice(), "aux rec {}", i);
-                    let cigar = store.record(idx).unwrap().cigar();
-                    prop_assert_eq!(cigar.len(), 1, "cigar op count rec {}", i);
-                    let op = cigar[0];
-                    prop_assert_eq!(op.op_type(), cigar::CigarOpType::Match, "cigar op type rec {}", i);
-                    prop_assert_eq!(op.len() as usize, inp.bases.len(), "cigar op len rec {}", i);
+            for (i, inp) in kept_inputs.iter().enumerate() {
+                let idx = RecordIdx::from_usize(i).expect("store is small");
+                assert_eq!(
+                    store.record(idx).unwrap().qname(),
+                    inp.qname.as_slice(),
+                    "qname rec {}",
+                    i
+                );
+                assert_eq!(store.record(idx).unwrap().seq(), inp.bases.as_slice(), "seq rec {}", i);
+                let qual_bytes = BaseQuality::slice_to_bytes(store.record(idx).unwrap().qual());
+                assert_eq!(qual_bytes, inp.quals.as_slice(), "qual rec {}", i);
+                assert_eq!(store.record(idx).unwrap().aux(), inp.aux.as_slice(), "aux rec {}", i);
+                let cigar = store.record(idx).unwrap().cigar();
+                assert_eq!(cigar.len(), 1, "cigar op count rec {}", i);
+                let op = cigar[0];
+                assert_eq!(op.op_type(), cigar::CigarOpType::Match, "cigar op type rec {}", i);
+                assert_eq!(op.len() as usize, inp.bases.len(), "cigar op len rec {}", i);
 
-                    let rec = store.record(idx).unwrap();
-                    #[expect(
-                        clippy::cast_sign_loss,
-                        reason = "PushInput.pos is bounded < 1_000_000 so always nonneg"
-                    )]
-                    let rec_pos_u32 = rec.pos.as_i32() as u32;
-                    prop_assert_eq!(rec_pos_u32, inp.pos, "pos rec {}", i);
-                    prop_assert_eq!(rec.mapq, inp.mapq, "mapq rec {}", i);
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "bases.len() bounded ≤ 16; fits in u32"
-                    )]
-                    let expected_seq_len = inp.bases.len() as u32;
-                    prop_assert_eq!(rec.seq_len, expected_seq_len, "seq_len rec {}", i);
-                }
+                let rec = store.record(idx).unwrap();
+                #[expect(
+                    clippy::cast_sign_loss,
+                    reason = "PushInput.pos is bounded < 1_000_000 so always nonneg"
+                )]
+                let rec_pos_u32 = rec.pos.as_i32() as u32;
+                assert_eq!(rec_pos_u32, inp.pos, "pos rec {}", i);
+                assert_eq!(rec.mapq, inp.mapq, "mapq rec {}", i);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "bases.len() bounded ≤ 16; fits in u32"
+                )]
+                let expected_seq_len = inp.bases.len() as u32;
+                assert_eq!(rec.seq_len, expected_seq_len, "seq_len rec {}", i);
             }
         }
 
-        // Same three proptests, but for push_raw. We build synthetic BAM
+        // Same three properties, but for push_raw. We build synthetic BAM
         // records so parse_header accepts them; the slab invariants are
         // identical but the decode path is different (qname NUL-termination,
         // packed seq decoding, cigar slicing).
 
         /// Build a minimal BAM record with the given qname, `seq_len`, and a
         /// single M op. Mirrors the helper in the outer test module but
-        /// adapted for proptest inputs.
+        /// adapted for generated inputs.
         fn build_bam_raw(qname: &[u8], seq_len: u32, pos: i32, mapq: u8) -> Vec<u8> {
             let mut name_with_nul: Vec<u8> = qname.to_vec();
             name_with_nul.push(0);
@@ -3168,7 +3179,7 @@ pub(crate) mod tests {
             raw[4..8].copy_from_slice(&pos.to_le_bytes());
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "name_len bounded ≤ 20 by strategy"
+                reason = "name_len bounded ≤ 20 by the generator"
             )]
             {
                 raw[8] = name_len as u8;
@@ -3200,21 +3211,19 @@ pub(crate) mod tests {
             accept: bool,
         }
 
-        fn arb_raw_input() -> impl Strategy<Value = RawInput> {
-            (
-                prop::collection::vec(b'a'..=b'z', 1..=10), // ASCII-safe qname
-                1u32..=16,
-                0i32..=1_000,
-                0u8..=60,
-                any::<bool>(),
-            )
-                .prop_map(|(qname, seq_len, pos, mapq, accept)| RawInput {
-                    qname,
-                    seq_len,
-                    pos,
-                    mapq,
-                    accept,
-                })
+        #[hegel::composite]
+        fn arb_raw_input(tc: &TestCase) -> RawInput {
+            // ASCII-safe qname
+            let qname = tc.draw_silent(
+                gs::vecs(gs::integers::<u8>().min_value(b'a').max_value(b'z'))
+                    .min_size(1)
+                    .max_size(10),
+            );
+            let seq_len = tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(16));
+            let pos = tc.draw_silent(gs::integers::<i32>().min_value(0).max_value(1_000));
+            let mapq = tc.draw_silent(gs::integers::<u8>().max_value(60));
+            let accept = tc.draw_silent(gs::booleans());
+            RawInput { qname, seq_len, pos, mapq, accept }
         }
 
         fn push_raw_one(store: &mut RecordStore<()>, input: &RawInput) -> Option<RecordIdx> {
@@ -3230,24 +3239,21 @@ pub(crate) mod tests {
             push_raw_one(store, &forced_keep).expect("accept=true always yields Some")
         }
 
-        proptest! {
-            // r[verify record_store.pre_filter.rollback]
-            #[test]
-            fn push_raw_rollback_matches_filtered_replay(
-                inputs in prop::collection::vec(arb_raw_input(), 0..=40),
-            ) {
-                let mut a = RecordStore::new();
-                for inp in &inputs {
-                    push_raw_one(&mut a, inp);
-                }
-
-                let mut b = RecordStore::new();
-                for inp in inputs.iter().filter(|i| i.accept) {
-                    push_raw_kept(&mut b, inp);
-                }
-
-                prop_assert_eq!(dump_slabs(&a), dump_slabs(&b), "slab bytes");
+        // r[verify record_store.pre_filter.rollback]
+        #[hegel::test]
+        fn push_raw_rollback_matches_filtered_replay(tc: TestCase) {
+            let inputs = tc.draw(gs::vecs(arb_raw_input().print_as_debug()).max_size(40));
+            let mut a = RecordStore::new();
+            for inp in &inputs {
+                push_raw_one(&mut a, inp);
             }
+
+            let mut b = RecordStore::new();
+            for inp in inputs.iter().filter(|i| i.accept) {
+                push_raw_kept(&mut b, inp);
+            }
+
+            assert_eq!(dump_slabs(&a), dump_slabs(&b), "slab bytes");
         }
     }
 }

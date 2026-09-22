@@ -940,44 +940,43 @@ mod tests {
         assert_eq!(merge(&[(10, 20), (10, 20), (10, 20)]), vec![(10, 20)]);
     }
 
-    // --- proptest: merge output is non-overlapping and covers the same range ---
+    // --- merge output is non-overlapping and covers the same range ---
 
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
-    fn chunk_strategy() -> impl Strategy<Value = (u64, u64)> {
-        (0u64..10_000).prop_flat_map(|begin| (Just(begin), begin + 1..begin + 5_000))
+    /// A chunk `(begin, end)` with `begin < end`, spanning up to 5000 units.
+    #[hegel::composite]
+    fn arb_chunk(tc: &TestCase) -> (u64, u64) {
+        let begin = tc.draw(gs::integers::<u64>().max_value(9_999));
+        let end = tc.draw(gs::integers::<u64>().min_value(begin + 1).max_value(begin + 4_999));
+        (begin, end)
     }
 
-    proptest! {
-        #[test]
-        fn merge_output_is_sorted_and_non_overlapping(
-            chunks in prop::collection::vec(chunk_strategy(), 0..20)
-        ) {
-            let merged = merge(&chunks);
-            // Sorted
-            for w in merged.windows(2) {
-                prop_assert!(w[0].0 < w[1].0, "not sorted: {:?}", merged);
-            }
-            // Non-overlapping: each chunk's begin is strictly after the previous end
-            for w in merged.windows(2) {
-                prop_assert!(w[1].0 > w[0].1, "overlapping after merge: {:?}", merged);
-            }
+    #[hegel::test]
+    fn merge_output_is_sorted_and_non_overlapping(tc: TestCase) {
+        let chunks = tc.draw(gs::vecs(arb_chunk()).max_size(19));
+        let merged = merge(&chunks);
+        // Sorted
+        for w in merged.windows(2) {
+            assert!(w[0].0 < w[1].0, "not sorted: {merged:?}");
         }
+        // Non-overlapping: each chunk's begin is strictly after the previous end
+        for w in merged.windows(2) {
+            assert!(w[1].0 > w[0].1, "overlapping after merge: {merged:?}");
+        }
+    }
 
-        #[test]
-        fn merge_covers_same_positions(
-            chunks in prop::collection::vec(chunk_strategy(), 1..20)
-        ) {
-            let merged = merge(&chunks);
-            // Every point in any input chunk must be in some merged chunk
-            for &(b, e) in &chunks {
-                let mid = b + (e - b) / 2;
-                prop_assert!(
-                    merged.iter().any(|&(mb, me)| mb <= mid && mid <= me),
-                    "midpoint {} of [{}, {}] not covered by merged {:?}",
-                    mid, b, e, merged
-                );
-            }
+    #[hegel::test]
+    fn merge_covers_same_positions(tc: TestCase) {
+        let chunks = tc.draw(gs::vecs(arb_chunk()).min_size(1).max_size(19));
+        let merged = merge(&chunks);
+        // Every point in any input chunk must be in some merged chunk
+        for &(b, e) in &chunks {
+            let mid = b + (e - b) / 2;
+            assert!(
+                merged.iter().any(|&(mb, me)| mb <= mid && mid <= me),
+                "midpoint {mid} of [{b}, {e}] not covered by merged {merged:?}"
+            );
         }
     }
 }

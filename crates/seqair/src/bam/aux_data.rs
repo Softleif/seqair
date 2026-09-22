@@ -348,7 +348,7 @@ fn advance_past_value(data: &[u8], mut pos: usize, typ: u8) -> Option<usize> {
 #[allow(clippy::cast_possible_truncation, reason = "test code")]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
     // r[verify bam.owned_record.aux_data]
     #[test]
@@ -692,305 +692,308 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Proptests: round-trip, uniqueness, and removal properties
+    // Properties: round-trip, uniqueness, and removal
     // ═══════════════════════════════════════════════════════════════
 
-    proptest::proptest! {
-        // r[verify bam.owned_record.aux_data]
-        /// Parse random bytes → rebuild via `AuxData` → verify tags match.
-        ///
-        /// This is an independent oracle: the parser (`aux::iter_tags`) and the
-        /// builder (`AuxData::set_*`) use separate code paths. Round-tripping
-        /// catches both encoding bugs and parse/skip divergence.
-        ///
-        /// `Char` tags whose byte falls outside the printable-ASCII grammar
-        /// `[!-~]` are intentionally skipped — `set_char` rejects them by
-        /// design, and that path is covered by `set_char_rejects_non_printable`.
-        #[test]
-        fn roundtrip_random_bytes(raw in proptest::collection::vec(0u8..=255, 0..=512)) {
-            // Parse: extract all well-formed tags
-            let parsed: Vec<_> = aux::iter_tags(&raw).collect();
+    /// A two-letter upper-case tag name.
+    #[hegel::composite]
+    fn upper_tag(tc: &TestCase) -> [u8; 2] {
+        let letter = || gs::integers::<u8>().min_value(b'A').max_value(b'Z');
+        [tc.draw_silent(letter()), tc.draw_silent(letter())]
+    }
 
-            // Rebuild via AuxData using only the typed setters that match each variant.
-            let mut built = AuxData::new();
-            let mut skipped_char_tags = std::collections::BTreeSet::new();
-            for (tag, value) in &parsed {
-                match value {
-                    AuxValue::Char(v) => {
-                        // Random bytes are usually not printable ASCII; the writer
-                        // rejects them. Track these so we don't expect them to round-trip.
-                        if built.set_char(*tag, *v).is_err() {
-                            skipped_char_tags.insert(*tag);
-                        }
-                    }
-                    AuxValue::String(s) => built.set_string(*tag, s),
-                    AuxValue::Hex(h) => built.set_hex(*tag, h),
-                    AuxValue::I8(v) => drop(built.set_int(*tag, i64::from(*v))),
-                    AuxValue::U8(v) => drop(built.set_int(*tag, i64::from(*v))),
-                    AuxValue::I16(v) => drop(built.set_int(*tag, i64::from(*v))),
-                    AuxValue::U16(v) => drop(built.set_int(*tag, i64::from(*v))),
-                    AuxValue::I32(v) => drop(built.set_int(*tag, i64::from(*v))),
-                    AuxValue::U32(v) => drop(built.set_int(*tag, i64::from(*v))),
-                    AuxValue::Float(v) => built.set_float(*tag, *v),
-                    AuxValue::Double(v) => built.set_double(*tag, *v),
-                    AuxValue::ArrayI8(a) => {
-                        let typed: Vec<i8> = a.iter().map(|&b| b.cast_signed()).collect();
-                        drop(built.set_array_i8(*tag, &typed));
-                    }
-                    AuxValue::ArrayU8(a) => drop(built.set_array_u8(*tag, a)),
-                    AuxValue::ArrayI16(a) => {
-                        debug_assert!(a.len().is_multiple_of(2), "ArrayI16 len {} not 2-aligned", a.len());
-                        let typed: Vec<i16> = a.as_chunks::<2>().0
-                            .iter()
-                            .map(|c| i16::from_le_bytes(*c))
-                            .collect();
-                        drop(built.set_array_i16(*tag, &typed));
-                    }
-                    AuxValue::ArrayU16(a) => {
-                        debug_assert!(a.len().is_multiple_of(2), "ArrayU16 len {} not 2-aligned", a.len());
-                        let typed: Vec<u16> = a.as_chunks::<2>().0
-                            .iter()
-                            .map(|c| u16::from_le_bytes(*c))
-                            .collect();
-                        drop(built.set_array_u16(*tag, &typed));
-                    }
-                    AuxValue::ArrayI32(a) => {
-                        debug_assert!(a.len().is_multiple_of(4), "ArrayI32 len {} not 4-aligned", a.len());
-                        let typed: Vec<i32> = a.as_chunks::<4>().0
-                            .iter()
-                            .map(|c| i32::from_le_bytes(*c))
-                            .collect();
-                        drop(built.set_array_i32(*tag, &typed));
-                    }
-                    AuxValue::ArrayU32(a) => {
-                        debug_assert!(a.len().is_multiple_of(4), "ArrayU32 len {} not 4-aligned", a.len());
-                        let typed: Vec<u32> = a.as_chunks::<4>().0
-                            .iter()
-                            .map(|c| u32::from_le_bytes(*c))
-                            .collect();
-                        drop(built.set_array_u32(*tag, &typed));
-                    }
-                    AuxValue::ArrayFloat(a) => {
-                        debug_assert!(a.len().is_multiple_of(4), "ArrayFloat len {} not 4-aligned", a.len());
-                        let typed: Vec<f32> = a.as_chunks::<4>().0
-                            .iter()
-                            .map(|c| f32::from_le_bytes(*c))
-                            .collect();
-                        drop(built.set_array_f32(*tag, &typed));
+    // r[verify bam.owned_record.aux_data]
+    /// Parse random bytes → rebuild via `AuxData` → verify tags match.
+    ///
+    /// This is an independent oracle: the parser (`aux::iter_tags`) and the
+    /// builder (`AuxData::set_*`) use separate code paths. Round-tripping
+    /// catches both encoding bugs and parse/skip divergence.
+    ///
+    /// `Char` tags whose byte falls outside the printable-ASCII grammar
+    /// `[!-~]` are intentionally skipped — `set_char` rejects them by
+    /// design, and that path is covered by `set_char_rejects_non_printable`.
+    #[hegel::test]
+    fn roundtrip_random_bytes(tc: TestCase) {
+        let raw = tc.draw(gs::binary().max_size(512));
+        // Parse: extract all well-formed tags
+        let parsed: Vec<_> = aux::iter_tags(&raw).collect();
+
+        // Rebuild via AuxData using only the typed setters that match each variant.
+        let mut built = AuxData::new();
+        let mut skipped_char_tags = std::collections::BTreeSet::new();
+        for (tag, value) in &parsed {
+            match value {
+                AuxValue::Char(v) => {
+                    // Random bytes are usually not printable ASCII; the writer
+                    // rejects them. Track these so we don't expect them to round-trip.
+                    if built.set_char(*tag, *v).is_err() {
+                        skipped_char_tags.insert(*tag);
                     }
                 }
-            }
-
-            // Re-parse the built bytes
-            let rebuilt: Vec<_> = aux::iter_tags(built.as_bytes()).collect();
-
-            // Tag count must match (after dedup-by-name and after dropping skipped chars).
-            let mut expected_tags: std::collections::BTreeSet<[u8; 2]> = parsed.iter()
-                .map(|(t, _)| *t)
-                .collect();
-            for t in &skipped_char_tags { expected_tags.remove(t); }
-            prop_assert_eq!(rebuilt.len(), expected_tags.len(),
-                "tag count mismatch: parsed (deduped, minus rejected chars) vs rebuilt");
-
-            // Verify each tag round-trips. For repeated-tag inputs, the LAST occurrence wins;
-            // walk forward and let later writes overwrite the expected value.
-            let mut expected: std::collections::BTreeMap<[u8; 2], &AuxValue<'_>> =
-                std::collections::BTreeMap::new();
-            for (tag, value) in &parsed {
-                if matches!(value, AuxValue::Char(_)) && skipped_char_tags.contains(tag) {
-                    expected.remove(tag);
-                    continue;
+                AuxValue::String(s) => built.set_string(*tag, s),
+                AuxValue::Hex(h) => built.set_hex(*tag, h),
+                AuxValue::I8(v) => drop(built.set_int(*tag, i64::from(*v))),
+                AuxValue::U8(v) => drop(built.set_int(*tag, i64::from(*v))),
+                AuxValue::I16(v) => drop(built.set_int(*tag, i64::from(*v))),
+                AuxValue::U16(v) => drop(built.set_int(*tag, i64::from(*v))),
+                AuxValue::I32(v) => drop(built.set_int(*tag, i64::from(*v))),
+                AuxValue::U32(v) => drop(built.set_int(*tag, i64::from(*v))),
+                AuxValue::Float(v) => built.set_float(*tag, *v),
+                AuxValue::Double(v) => built.set_double(*tag, *v),
+                AuxValue::ArrayI8(a) => {
+                    let typed: Vec<i8> = a.iter().map(|&b| b.cast_signed()).collect();
+                    drop(built.set_array_i8(*tag, &typed));
                 }
-                expected.insert(*tag, value);
+                AuxValue::ArrayU8(a) => drop(built.set_array_u8(*tag, a)),
+                AuxValue::ArrayI16(a) => {
+                    debug_assert!(
+                        a.len().is_multiple_of(2),
+                        "ArrayI16 len {} not 2-aligned",
+                        a.len()
+                    );
+                    let typed: Vec<i16> =
+                        a.as_chunks::<2>().0.iter().map(|c| i16::from_le_bytes(*c)).collect();
+                    drop(built.set_array_i16(*tag, &typed));
+                }
+                AuxValue::ArrayU16(a) => {
+                    debug_assert!(
+                        a.len().is_multiple_of(2),
+                        "ArrayU16 len {} not 2-aligned",
+                        a.len()
+                    );
+                    let typed: Vec<u16> =
+                        a.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+                    drop(built.set_array_u16(*tag, &typed));
+                }
+                AuxValue::ArrayI32(a) => {
+                    debug_assert!(
+                        a.len().is_multiple_of(4),
+                        "ArrayI32 len {} not 4-aligned",
+                        a.len()
+                    );
+                    let typed: Vec<i32> =
+                        a.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect();
+                    drop(built.set_array_i32(*tag, &typed));
+                }
+                AuxValue::ArrayU32(a) => {
+                    debug_assert!(
+                        a.len().is_multiple_of(4),
+                        "ArrayU32 len {} not 4-aligned",
+                        a.len()
+                    );
+                    let typed: Vec<u32> =
+                        a.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+                    drop(built.set_array_u32(*tag, &typed));
+                }
+                AuxValue::ArrayFloat(a) => {
+                    debug_assert!(
+                        a.len().is_multiple_of(4),
+                        "ArrayFloat len {} not 4-aligned",
+                        a.len()
+                    );
+                    let typed: Vec<f32> =
+                        a.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+                    drop(built.set_array_f32(*tag, &typed));
+                }
             }
-            for (tag, original) in &expected {
-                let rt = built.get(*tag);
-                prop_assert!(rt.is_some(), "tag missing after rebuild");
-                let rt = rt.unwrap();
-                match original {
-                    AuxValue::I8(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
-                    AuxValue::U8(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
-                    AuxValue::I16(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
-                    AuxValue::U16(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
-                    AuxValue::I32(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
-                    AuxValue::U32(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
-                    // Float/Double: NaN != NaN with PartialEq, so compare bits.
-                    AuxValue::Float(v) => {
-                        let rt_bits = match rt {
-                            AuxValue::Float(f) => f.to_bits(),
-                            AuxValue::Double(d) => (d as f32).to_bits(),
-                            ref other => panic!("expected float/double, got {other:?}"),
-                        };
-                        prop_assert_eq!(rt_bits, v.to_bits(),
-                            "tag mismatch after rebuild (Float)");
-                    }
-                    AuxValue::Double(v) => {
-                        let rt_bits = match rt {
-                            AuxValue::Double(d) => d.to_bits(),
-                            AuxValue::Float(f) => f64::from(f).to_bits(),
-                            ref other => panic!("expected float/double, got {other:?}"),
-                        };
-                        prop_assert_eq!(rt_bits, v.to_bits(),
-                            "tag mismatch after rebuild (Double)");
-                    }
-                    _ => prop_assert_eq!(&rt, *original, "tag mismatch after rebuild"),
+        }
+
+        // Re-parse the built bytes
+        let rebuilt: Vec<_> = aux::iter_tags(built.as_bytes()).collect();
+
+        // Tag count must match (after dedup-by-name and after dropping skipped chars).
+        let mut expected_tags: std::collections::BTreeSet<[u8; 2]> =
+            parsed.iter().map(|(t, _)| *t).collect();
+        for t in &skipped_char_tags {
+            expected_tags.remove(t);
+        }
+        assert_eq!(
+            rebuilt.len(),
+            expected_tags.len(),
+            "tag count mismatch: parsed (deduped, minus rejected chars) vs rebuilt"
+        );
+
+        // Verify each tag round-trips. For repeated-tag inputs, the LAST occurrence wins;
+        // walk forward and let later writes overwrite the expected value.
+        let mut expected: std::collections::BTreeMap<[u8; 2], &AuxValue<'_>> =
+            std::collections::BTreeMap::new();
+        for (tag, value) in &parsed {
+            if matches!(value, AuxValue::Char(_)) && skipped_char_tags.contains(tag) {
+                expected.remove(tag);
+                continue;
+            }
+            expected.insert(*tag, value);
+        }
+        for (tag, original) in &expected {
+            let rt = built.get(*tag);
+            assert!(rt.is_some(), "tag missing after rebuild");
+            let rt = rt.unwrap();
+            match original {
+                AuxValue::I8(v) => assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                AuxValue::U8(v) => assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                AuxValue::I16(v) => assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                AuxValue::U16(v) => assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                AuxValue::I32(v) => assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                AuxValue::U32(v) => assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                // Float/Double: NaN != NaN with PartialEq, so compare bits.
+                AuxValue::Float(v) => {
+                    let rt_bits = match rt {
+                        AuxValue::Float(f) => f.to_bits(),
+                        AuxValue::Double(d) => (d as f32).to_bits(),
+                        ref other => panic!("expected float/double, got {other:?}"),
+                    };
+                    assert_eq!(rt_bits, v.to_bits(), "tag mismatch after rebuild (Float)");
+                }
+                AuxValue::Double(v) => {
+                    let rt_bits = match rt {
+                        AuxValue::Double(d) => d.to_bits(),
+                        AuxValue::Float(f) => f64::from(f).to_bits(),
+                        ref other => panic!("expected float/double, got {other:?}"),
+                    };
+                    assert_eq!(rt_bits, v.to_bits(), "tag mismatch after rebuild (Double)");
+                }
+                _ => assert_eq!(&rt, *original, "tag mismatch after rebuild"),
             }
         }
     }
 
-        // r[verify bam.owned_record.aux_uniqueness]
-        /// Setting the same tag name multiple times MUST NOT create duplicates.
-        #[test]
-        fn set_replaces_always_unique(
-            tag_names in proptest::collection::vec(
-                (b'A'..=b'Z', b'A'..=b'Z'), 1..=30
-            ),
-            values in proptest::collection::vec(1u8..=255, 0..=256),
-        ) {
-            let mut aux = AuxData::new();
-            for &(hi, lo) in &tag_names {
-                let tag = [hi, lo];
-                aux.set_string(tag, &values);
-            }
-            // Deduplicated count must equal unique tag count
-            let unique_count = tag_names.iter().collect::<std::collections::BTreeSet<_>>().len();
-            let actual_count = aux::iter_tags(aux.as_bytes()).count();
-            prop_assert_eq!(actual_count, unique_count,
-                "duplicate tags after set_replace");
+    // r[verify bam.owned_record.aux_uniqueness]
+    /// Setting the same tag name multiple times MUST NOT create duplicates.
+    #[hegel::test]
+    fn set_replaces_always_unique(tc: TestCase) {
+        let tag_names = tc.draw(gs::vecs(upper_tag()).min_size(1).max_size(30));
+        let values = tc.draw(gs::vecs(gs::integers::<u8>().min_value(1)).max_size(256));
+        let mut aux = AuxData::new();
+        for &tag in &tag_names {
+            aux.set_string(tag, &values);
         }
+        // Deduplicated count must equal unique tag count
+        let unique_count = tag_names.iter().collect::<std::collections::BTreeSet<_>>().len();
+        let actual_count = aux::iter_tags(aux.as_bytes()).count();
+        assert_eq!(actual_count, unique_count, "duplicate tags after set_replace");
+    }
 
-        // r[verify bam.owned_record.aux_data]
-        /// Sequential removal must leave `AuxData` empty.
-        #[test]
-        fn remove_all_tags_leaves_empty(
-            pairs in proptest::collection::vec((b'A'..=b'Z', b'A'..=b'Z', 0u8..=255), 0..=20),
-        ) {
-            let mut aux = AuxData::new();
-            let tags: Vec<[u8; 2]> = pairs.iter().map(|&(t0, t1, _v)| [t0, t1]).collect();
-            for &(t0, t1, v) in &pairs {
-                aux.set_int([t0, t1], i64::from(v)).ok();
-            }
-            for tag in &tags {
-                aux.remove(*tag);
-            }
-            prop_assert!(aux.is_empty());
-            prop_assert_eq!(aux::iter_tags(aux.as_bytes()).count(), 0);
+    // r[verify bam.owned_record.aux_data]
+    /// Sequential removal must leave `AuxData` empty.
+    #[hegel::test]
+    fn remove_all_tags_leaves_empty(tc: TestCase) {
+        let pairs = tc.draw(gs::vecs(gs::tuples!(upper_tag(), gs::integers::<u8>())).max_size(20));
+        let mut aux = AuxData::new();
+        let tags: Vec<[u8; 2]> = pairs.iter().map(|&(tag, _v)| tag).collect();
+        for &(tag, v) in &pairs {
+            aux.set_int(tag, i64::from(v)).ok();
         }
-
-        // r[verify bam.owned_record.aux_int_encoding]
-        /// Integer set_int → get round-trip preserves the value, even
-        /// though the BAM type code may differ.
-        #[test]
-        fn int_set_get_roundtrip(
-            v in (i64::from(i32::MIN)..=i64::from(u32::MAX)),
-        ) {
-            let mut aux = AuxData::new();
-            aux.set_int(*b"XX", v).unwrap();
-            let rt = aux.get(*b"XX");
-            prop_assert!(rt.is_some());
-            prop_assert_eq!(rt.unwrap().as_i64(), Some(v));
+        for tag in &tags {
+            aux.remove(*tag);
         }
+        assert!(aux.is_empty());
+        assert_eq!(aux::iter_tags(aux.as_bytes()).count(), 0);
+    }
 
-        // r[verify bam.owned_record.aux_array_setters]
-        /// B-array setters produce bytes that the parser reads back correctly.
-        #[test]
-        fn array_roundtrip_u8(
-            values in proptest::collection::vec(0u8..=255, 0..=64),
-        ) {
-            let mut aux = AuxData::new();
-            aux.set_array_u8(*b"XA", &values).unwrap();
-            let rt = aux.get(*b"XA");
-            prop_assert_eq!(rt, Some(AuxValue::ArrayU8(&values)));
-        }
+    // r[verify bam.owned_record.aux_int_encoding]
+    /// Integer `set_int` → `get` round-trip preserves the value, even
+    /// though the BAM type code may differ.
+    #[hegel::test]
+    fn int_set_get_roundtrip(tc: TestCase) {
+        let v = tc.draw(
+            gs::integers::<i64>().min_value(i64::from(i32::MIN)).max_value(i64::from(u32::MAX)),
+        );
+        let mut aux = AuxData::new();
+        aux.set_int(*b"XX", v).unwrap();
+        let rt = aux.get(*b"XX");
+        assert!(rt.is_some());
+        assert_eq!(rt.unwrap().as_i64(), Some(v));
+    }
 
-        #[test]
-        fn array_roundtrip_i8(
-            values in proptest::collection::vec(i8::MIN..=i8::MAX, 0..=64),
-        ) {
-            let mut aux = AuxData::new();
-            aux.set_array_i8(*b"XA", &values).unwrap();
-            let raw: Vec<u8> = values.iter().map(|&v| v.cast_unsigned()).collect();
-            let rt = aux.get(*b"XA");
-            prop_assert_eq!(rt, Some(AuxValue::ArrayI8(&raw)));
-        }
+    // r[verify bam.owned_record.aux_array_setters]
+    /// B-array setters produce bytes that the parser reads back correctly.
+    #[hegel::test]
+    fn array_roundtrip_u8(tc: TestCase) {
+        let values = tc.draw(gs::binary().max_size(64));
+        let mut aux = AuxData::new();
+        aux.set_array_u8(*b"XA", &values).unwrap();
+        let rt = aux.get(*b"XA");
+        assert_eq!(rt, Some(AuxValue::ArrayU8(&values)));
+    }
 
-        #[test]
-        fn array_roundtrip_i16(
-            values in proptest::collection::vec(i16::MIN..=i16::MAX, 0..=32),
-        ) {
-            let mut aux = AuxData::new();
-            aux.set_array_i16(*b"XB", &values).unwrap();
-            let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let rt = aux.get(*b"XB");
-            prop_assert_eq!(rt, Some(AuxValue::ArrayI16(&raw)));
-        }
+    #[hegel::test]
+    fn array_roundtrip_i8(tc: TestCase) {
+        let values = tc.draw(gs::vecs(gs::integers::<i8>()).max_size(64));
+        let mut aux = AuxData::new();
+        aux.set_array_i8(*b"XA", &values).unwrap();
+        let raw: Vec<u8> = values.iter().map(|&v| v.cast_unsigned()).collect();
+        let rt = aux.get(*b"XA");
+        assert_eq!(rt, Some(AuxValue::ArrayI8(&raw)));
+    }
 
-        #[test]
-        fn array_roundtrip_u16(
-            values in proptest::collection::vec(u16::MIN..=u16::MAX, 0..=32),
-        ) {
-            let mut aux = AuxData::new();
-            aux.set_array_u16(*b"XC", &values).unwrap();
-            let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let rt = aux.get(*b"XC");
-            prop_assert_eq!(rt, Some(AuxValue::ArrayU16(&raw)));
-        }
+    #[hegel::test]
+    fn array_roundtrip_i16(tc: TestCase) {
+        let values = tc.draw(gs::vecs(gs::integers::<i16>()).max_size(32));
+        let mut aux = AuxData::new();
+        aux.set_array_i16(*b"XB", &values).unwrap();
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let rt = aux.get(*b"XB");
+        assert_eq!(rt, Some(AuxValue::ArrayI16(&raw)));
+    }
 
-        #[test]
-        fn array_roundtrip_i32(
-            values in proptest::collection::vec(i32::MIN..=i32::MAX, 0..=16),
-        ) {
-            let mut aux = AuxData::new();
-            aux.set_array_i32(*b"XD", &values).unwrap();
-            let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let rt = aux.get(*b"XD");
-            prop_assert_eq!(rt, Some(AuxValue::ArrayI32(&raw)));
-        }
+    #[hegel::test]
+    fn array_roundtrip_u16(tc: TestCase) {
+        let values = tc.draw(gs::vecs(gs::integers::<u16>()).max_size(32));
+        let mut aux = AuxData::new();
+        aux.set_array_u16(*b"XC", &values).unwrap();
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let rt = aux.get(*b"XC");
+        assert_eq!(rt, Some(AuxValue::ArrayU16(&raw)));
+    }
 
-        #[test]
-        fn array_roundtrip_u32(
-            values in proptest::collection::vec(u32::MIN..=u32::MAX, 0..=16),
-        ) {
-            let mut aux = AuxData::new();
-            aux.set_array_u32(*b"XE", &values).unwrap();
-            let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let rt = aux.get(*b"XE");
-            prop_assert_eq!(rt, Some(AuxValue::ArrayU32(&raw)));
-        }
+    #[hegel::test]
+    fn array_roundtrip_i32(tc: TestCase) {
+        let values = tc.draw(gs::vecs(gs::integers::<i32>()).max_size(16));
+        let mut aux = AuxData::new();
+        aux.set_array_i32(*b"XD", &values).unwrap();
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let rt = aux.get(*b"XD");
+        assert_eq!(rt, Some(AuxValue::ArrayI32(&raw)));
+    }
 
-        #[test]
-        fn array_roundtrip_f32(
-            values in proptest::collection::vec(
-                proptest::num::f32::ANY, 0..=16
-            ),
-        ) {
-            let mut aux = AuxData::new();
-            aux.set_array_f32(*b"XF", &values).unwrap();
-            let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let rt = aux.get(*b"XF");
-            prop_assert_eq!(rt, Some(AuxValue::ArrayFloat(&raw)));
-        }
+    #[hegel::test]
+    fn array_roundtrip_u32(tc: TestCase) {
+        let values = tc.draw(gs::vecs(gs::integers::<u32>()).max_size(16));
+        let mut aux = AuxData::new();
+        aux.set_array_u32(*b"XE", &values).unwrap();
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let rt = aux.get(*b"XE");
+        assert_eq!(rt, Some(AuxValue::ArrayU32(&raw)));
+    }
 
-        // r[verify bam.record.aux_truncated]
-        /// Garbage after a valid tag stops iteration after the valid tag —
-        /// the valid tag is still collected and round-tripped correctly.
-        #[test]
-        fn valid_tag_before_garbage_roundtrips(
-            garbage in proptest::collection::vec(0u8..=255, 0..=32),
-        ) {
-            let mut raw = Vec::new();
-            // Build a valid NM:i:42 tag
-            raw.extend_from_slice(b"NM");
-            raw.push(b'i');
-            raw.extend_from_slice(&42i32.to_le_bytes());
-            // Append garbage
-            raw.extend_from_slice(&garbage);
+    #[hegel::test]
+    fn array_roundtrip_f32(tc: TestCase) {
+        let values = tc.draw(gs::vecs(gs::floats::<f32>()).max_size(16));
+        let mut aux = AuxData::new();
+        aux.set_array_f32(*b"XF", &values).unwrap();
+        let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let rt = aux.get(*b"XF");
+        assert_eq!(rt, Some(AuxValue::ArrayFloat(&raw)));
+    }
 
-            let parsed: Vec<_> = aux::iter_tags(&raw).collect();
-            // At minimum the valid NM tag should be parsed
-            prop_assert!(!parsed.is_empty(), "valid tag before garbage not parsed");
-            prop_assert_eq!(parsed[0].0, *b"NM");
-            prop_assert_eq!(parsed[0].1.as_i64(), Some(42));
-        }
+    // r[verify bam.record.aux_truncated]
+    /// Garbage after a valid tag stops iteration after the valid tag —
+    /// the valid tag is still collected and round-tripped correctly.
+    #[hegel::test]
+    fn valid_tag_before_garbage_roundtrips(tc: TestCase) {
+        let garbage = tc.draw(gs::binary().max_size(32));
+        let mut raw = Vec::new();
+        // Build a valid NM:i:42 tag
+        raw.extend_from_slice(b"NM");
+        raw.push(b'i');
+        raw.extend_from_slice(&42i32.to_le_bytes());
+        // Append garbage
+        raw.extend_from_slice(&garbage);
+
+        let parsed: Vec<_> = aux::iter_tags(&raw).collect();
+        // At minimum the valid NM tag should be parsed
+        assert!(!parsed.is_empty(), "valid tag before garbage not parsed");
+        assert_eq!(parsed[0].0, *b"NM");
+        assert_eq!(parsed[0].1.as_i64(), Some(42));
     }
 }
