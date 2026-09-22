@@ -1136,6 +1136,7 @@ mod tests {
         assert_eq!(trail_hits, overhang.min(trail));
     }
 
+    // r[verify cigar.slice_from_bam_bytes]
     /// Round-trip: encode `CigarOp` → BAM LE bytes → `slice_from_bam_bytes` → same ops.
     #[hegel::test]
     fn roundtrip_slice_from_bam_bytes(tc: TestCase) {

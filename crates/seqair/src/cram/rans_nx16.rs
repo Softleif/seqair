@@ -1194,6 +1194,8 @@ mod tests {
         assert_eq!(decoded, val);
     }
 
+    // r[verify cram.codec.normalize_checked]
+    // r[verify cram.codec.rans_nx16_bits_validation]
     #[test]
     fn invalid_bits_returns_error() {
         // rANS Nx16 symbol tables are 4096 entries (1 << 12). If the
