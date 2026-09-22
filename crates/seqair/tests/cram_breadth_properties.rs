@@ -696,19 +696,18 @@ fn embedded_reference_slices_decode_to_the_same_records(tc: TestCase) {
 ///
 /// `embed_ref=2` makes samtools compute a consensus from the reads and store
 /// that as the slice's reference; htslib then MD5s the consensus into the
-/// slice header. seqair compares that MD5 against the FASTA regardless of
-/// whether the slice brought its own reference, so every such file whose
-/// consensus differs from the reference — which is any file with low coverage
-/// or mismatching reads — fails to open with `ReferenceMd5Mismatch`.
+/// slice header. seqair used to compare that MD5 against the FASTA whether or
+/// not the slice had brought its own reference, so every such file whose
+/// consensus differed from the reference — which is any file with low coverage
+/// or a real difference in the reads — failed to open with
+/// `ReferenceMd5Mismatch`. The one fixture covering embedded references passed
+/// only because its consensus happened to equal the reference.
 ///
 /// The reads below are one per contig with substitutions, so the consensus is
-/// guaranteed to differ. Un-ignore this once the MD5 check learns to skip
-/// slices with `embedded_reference >= 0`.
+/// guaranteed to differ: this file cannot open at all under the old check.
 // r[verify cram.slice.embedded_ref]
 // r[verify cram.edge.reference_mismatch]
 #[test]
-#[ignore = "seqair MD5-checks the FASTA even when the slice embeds its own reference; \
-            embed_ref=2 files whose consensus differs from the reference cannot be opened"]
 fn embed_ref_consensus_slices_decode_to_the_same_records() {
     let reference = "ACGT".repeat(CONTIG_LEN as usize / 4);
     let mut seq: Vec<u8> = reference.as_bytes()[10..60].to_vec();
