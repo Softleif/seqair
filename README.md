@@ -30,7 +30,7 @@ cargo test
 ```
 
 Comparison tests in `crates/seqair/tests/` validate against `rust-htslib` (and sometimes `noodles`).
-Property tests use `proptest`.
+Property tests use [hegel](https://hegel.dev/) (`hegeltest`); `hegel.toml` at the workspace root sets the case counts.
 
 ## Why?
 

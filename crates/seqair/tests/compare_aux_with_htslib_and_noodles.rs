@@ -6,7 +6,7 @@
 //!
 //! This is the strongest validation we have for the aux API: it pins down the
 //! BAM wire format against two independent oracles. Bugs that escape the
-//! seqair-internal proptests (e.g. wrong subtype byte, wrong endianness, wrong
+//! seqair-internal property tests (e.g. wrong subtype byte, wrong endianness, wrong
 //! NUL handling) show up here as a divergence between seqair-as-writer and
 //! either reader.
 #![allow(

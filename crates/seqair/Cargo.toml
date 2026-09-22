@@ -35,7 +35,6 @@ md5 = "0.8.0"
 
 [dev-dependencies]
 insta = { workspace = true }
-proptest = { workspace = true }
 hegeltest = { workspace = true }
 tempfile = "3.27.0"
 criterion = { version = "0.8", features = ["html_reports"] }

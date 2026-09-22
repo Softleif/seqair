@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(f, g);
     }
 
-    mod proptests {
+    mod properties {
         use super::*;
         use hegel::prelude::*;
 

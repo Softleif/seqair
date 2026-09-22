@@ -1,7 +1,7 @@
 # Hegel property-based testing settings. See `hegel::docs::settings`.
 #
-# 256 cases matches the case count the suite ran under proptest, so the
-# migration did not quietly reduce coverage. Individual tests that are
+# 256 cases is what the suite ran at before the hegel migration, so the
+# move did not quietly reduce coverage. Individual tests that are
 # expensive (subprocess round-trips against bcftools, htslib or noodles)
 # lower it with `#[hegel::test(test_cases = N)]`.
 #
