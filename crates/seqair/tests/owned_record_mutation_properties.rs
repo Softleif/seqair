@@ -14,7 +14,10 @@
 //! notice. `set_seq` has to keep the 4-bit packing honest across an odd/even
 //! length change; `set_qual` has to stay pinned to `seq.len()`; the aux
 //! setters remove-and-re-append, so a tag written twice must leave exactly
-//! one copy and no orphaned bytes behind.
+//! one copy and no orphaned bytes behind. `set_int` once wrote its tag bytes
+//! *before* validating the value's range, which left half a tag in the slab
+//! whenever the value was out of range — a property here drives it to that
+//! boundary and insists the record comes out unchanged.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -31,9 +34,9 @@
 
 use hegel::prelude::*;
 use seqair::bam::Pos0;
-use seqair::bam::aux_data::AuxData;
+use seqair::bam::aux_data::{AuxData, AuxDataError};
 use seqair::bam::header::BamHeader;
-use seqair::bam::owned_record::OwnedBamRecord;
+use seqair::bam::owned_record::{OwnedBamRecord, OwnedRecordError};
 use seqair::bam::writer::BamWriterBuilder;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::collections::{BTreeMap, BTreeSet};
@@ -423,4 +426,119 @@ fn mutation_sequences_agree_with_the_model_at_every_step(tc: TestCase) {
             tc.event("a tag was set twice");
         }
     }
+}
+
+// r[verify bam.owned_record.aux_int_encoding]
+// r[verify bam.owned_record.failed_mutation_is_inert]
+/// `set_int` outside the i32/u32 union must fail without leaving a trace: the
+/// historical bug wrote the two tag-name bytes first and validated after,
+/// which left an orphan that corrupted every tag following it.
+#[hegel::test(test_cases = 32)]
+fn a_rejected_set_int_leaves_the_aux_block_byte_identical(tc: TestCase) {
+    // Build up a real aux block first, so an orphan would have something to
+    // corrupt behind it.
+    let existing: Vec<(usize, Aux)> = (0..tc.draw_silent(gs::integers::<usize>().max_value(3)))
+        .map(|_| {
+            (
+                tc.draw_silent(gs::integers::<usize>().max_value(TAGS.len() - 1)),
+                tc.draw_silent(arb_aux()),
+            )
+        })
+        .collect();
+    let mut model: BTreeMap<[u8; 2], Aux> = BTreeMap::new();
+    let mut aux = AuxData::new();
+    for (idx, value) in &existing {
+        value.write_into(&mut aux, TAGS[*idx]);
+        model.insert(TAGS[*idx], value.clone());
+    }
+
+    // An out-of-range value, constructed rather than filtered: one step past
+    // either end of the union BAM can spell.
+    let overshoot = tc.draw_silent(gs::integers::<i64>().min_value(1).max_value(1 << 40));
+    let bad = if tc.draw_silent(gs::booleans()) {
+        i64::from(u32::MAX) + overshoot
+    } else {
+        i64::from(i32::MIN) - overshoot
+    };
+    let tag = TAGS[tc.draw_silent(gs::integers::<usize>().max_value(TAGS.len() - 1))];
+    tc.event(if model.contains_key(&tag) { "clobbers a live tag" } else { "fresh tag" });
+
+    let before = aux.as_bytes().to_vec();
+    let err = aux.set_int(tag, bad).expect_err("outside the i32/u32 union");
+    assert!(
+        matches!(err, AuxDataError::IntegerOutOfRange { value } if value == bad),
+        "expected IntegerOutOfRange, got {err:?}"
+    );
+    assert_eq!(aux.as_bytes(), before.as_slice(), "a rejected set_int must not touch the slab");
+
+    // The boundary values themselves are inside the union and must work.
+    let mut edges = aux.clone();
+    for (i, value) in [i64::from(i32::MIN), -1, 0, i64::from(u32::MAX)].into_iter().enumerate() {
+        let edge_tag = TAGS[i % TAGS.len()];
+        edges.set_int(edge_tag, value).expect("the union's own edges are representable");
+        model.insert(edge_tag, Aux::Int(value));
+    }
+
+    // And the record still serializes to something samtools reads as exactly
+    // the tags the model holds.
+    let rec = OwnedBamRecord::builder(0, Some(Pos0::new(500).unwrap()), b"s0".to_vec())
+        .flags(BamFlags::from(0x4))
+        .aux(edges)
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_records(dir.path(), &header(SHORT_CONTIG_LEN), &[rec]);
+
+    let lines = samtools_lines(&path);
+    assert_eq!(lines.len(), 1, "record count");
+    assert_eq!(lines[0].n_aux, model.len(), "no orphaned or duplicated tags");
+    let want: BTreeMap<String, String> = model
+        .iter()
+        .map(|(tag, value)| (String::from_utf8(tag.to_vec()).expect("ASCII"), value.expected()))
+        .collect();
+    assert_eq!(lines[0].aux, want, "tags after a rejected set_int");
+}
+
+// r[verify bam.owned_record.set_qual]
+// r[verify bam.owned_record.failed_mutation_is_inert]
+/// `set_qual` with anything but `seq.len()` scores (or none at all) must be
+/// refused, and the refusal must leave the old array in place.
+#[hegel::test]
+fn a_rejected_set_qual_leaves_the_old_scores_in_place(tc: TestCase) {
+    let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(12));
+    let seq: Vec<Base> = (0..n).map(|_| base_of(&tc)).collect();
+    let qual: Vec<u8> =
+        (0..n).map(|_| tc.draw_silent(gs::integers::<u8>().max_value(40))).collect();
+
+    let mut rec = seed_record();
+    rec.set_seq(seq).expect("no CIGAR to contradict it");
+    rec.set_qual(qual.iter().copied().map(BaseQuality::from_byte).collect()).expect("matching");
+
+    // A wrong length, built rather than rejected: grow, or shrink when there
+    // is room to shrink without hitting the always-allowed empty array.
+    let grow = n < 2 || tc.draw(gs::booleans());
+    let wrong =
+        if grow { n + tc.draw(gs::integers::<usize>().min_value(1).max_value(4)) } else { n - 1 };
+    assert_ne!(wrong, n, "the generator must not hand back the legal length");
+    tc.event(if grow { "too many scores" } else { "too few scores" });
+
+    let before = rec.clone();
+    let err = rec
+        .set_qual((0..wrong).map(|_| BaseQuality::from_byte(30)).collect())
+        .expect_err("length must equal seq.len()");
+    assert!(
+        matches!(
+            err,
+            OwnedRecordError::SeqQualLengthMismatch { seq_len, qual_len }
+                if seq_len == n && qual_len == wrong
+        ),
+        "expected SeqQualLengthMismatch, got {err:?}"
+    );
+    assert_eq!(BaseQuality::slice_to_bytes(&rec.qual), qual.as_slice(), "qual must be untouched");
+
+    let mut want = Vec::new();
+    let mut got = Vec::new();
+    before.to_bam_bytes(&mut want).expect("serialize");
+    rec.to_bam_bytes(&mut got).expect("serialize");
+    assert_eq!(got, want, "a rejected set_qual must not change a single byte of the record");
 }
