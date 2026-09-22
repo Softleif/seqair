@@ -1119,3 +1119,73 @@ fn a_field_written_twice_overwrites_rather_than_erroring() {
     assert_eq!(fields[8], "GT:DP", "the FORMAT keys must list DP once");
     assert_eq!(fields[9], "0/1:44", "the second FORMAT write must replace the first in place");
 }
+
+// ── Truncation: the loop has to end ─────────────────────────────────────
+
+/// `open_and_fetch` on another thread, with a deadline.
+///
+/// The deadline *is* the assertion. A truncated BAM used to send
+/// `BamQuery::run_loop` into an unbounded spin — no panic, no allocation, no
+/// error, so a plain call here would hang the whole test binary rather than
+/// fail it, and a fuzzer would only ever have reported it as a timeout. The
+/// worker thread is deliberately leaked on timeout; there is nothing to join.
+fn fetch_with_deadline(bam: Vec<u8>) -> Option<Result<usize, BamError>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // A send failure means the receiver already gave up: nothing to do.
+        drop(tx.send(open_and_fetch(&bam)));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(30)).ok()
+}
+
+// r[verify region_buf.record_boundary_eof]
+// r[verify bam.reader.propagate_errors]
+/// A BAM truncated anywhere, with its index left intact, must come back —
+/// with records or with a typed error, but it must come back.
+///
+/// The index still promises records past the new end of the file, so the
+/// query walks off it. `RegionBuf` reports that at a record boundary, which is
+/// a different fact from running out of bytes partway through a record: the
+/// first used to arrive as the same `UnexpectedEof` as the second, `run_loop`
+/// read it as "window exhausted, refill and retry", and at real EOF the cursor
+/// stops advancing, so it never reached `chunk_end` and never stepped to the
+/// next chunk. Every truncation past the header hung.
+///
+/// Truncations are drawn from the last 90% of the file so `open()` mostly
+/// succeeds and the failure has to come from the query itself; the statistic
+/// below records how often it did.
+#[hegel::test(test_cases = 32)]
+fn a_truncated_bam_always_terminates(tc: TestCase) {
+    let bam = &corpus().bam;
+    let lo = bam.len() / 10;
+    let at = tc.draw(gs::integers::<usize>().min_value(lo).max_value(bam.len() - 1));
+    let truncated = bam.get(..at).expect("at < bam.len()").to_vec();
+
+    let outcome = fetch_with_deadline(truncated)
+        .unwrap_or_else(|| panic!("fetch on a BAM truncated at {at} never returned"));
+
+    match outcome {
+        // A short read is the honest outcome for a file that has been cut: the
+        // records before the cut are all there are, and it must never be *more*
+        // than the corpus holds.
+        Ok(n) => {
+            assert!(n <= 1500, "a cut file cannot yield more records than the whole one: {n}");
+            tc.event_value("records before the cut", n as f64);
+        }
+        Err(err) => {
+            // The error has to name what went wrong, not just that something
+            // did: either the query walked off the end of the file
+            // (`TruncatedRecord`) or a BGZF layer refused the bytes the cut
+            // left behind, in which case the cause must still be attached.
+            let named = matches!(err, BamError::TruncatedRecord { .. })
+                || matches!(err, BamError::Open { .. })
+                || bgzf_cause(&err).is_some();
+            assert!(named, "a truncated BAM must fail with a variant that says why, got {err:?}");
+            tc.event(match &err {
+                BamError::TruncatedRecord { .. } => "walked off the end",
+                BamError::Open { .. } => "refused at open",
+                _ => "a bgzf layer refused it",
+            });
+        }
+    }
+}
