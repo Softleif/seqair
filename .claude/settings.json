@@ -11,16 +11,6 @@
           }
         ]
       }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo '{\"systemMessage\": \"Consider whether the work you just completed revealed any new non-obvious information about the codebase (architecture, patterns, debugging tips, workflows) that is not already in CLAUDE.md. If so, update CLAUDE.md before finishing.\"}'"
-          }
-        ]
-      }
     ]
   }
 }
