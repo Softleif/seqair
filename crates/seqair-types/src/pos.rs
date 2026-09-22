@@ -63,6 +63,88 @@ pub type Pos1 = Pos<One>;
 /// let from_bam = Pos0::try_from(42i32).unwrap();
 /// assert_eq!(from_bam.as_i32(), 42);
 /// ```
+///
+/// # What the compiler must reject
+///
+/// These are the guarantees the phantom parameter exists for, and the only way
+/// to test a compile error is to fail to compile. Note what that does and does
+/// not buy: rustdoc checks that the block *fails*, but it does not check the
+/// error code — `compile_fail,E0999` passes just as happily. So a block goes
+/// vacuous the moment its example stops compiling for some unrelated reason,
+/// a renamed constructor being the obvious one.
+///
+/// The twin below is the guard against that: it uses every name these blocks
+/// use, and it has to compile. If `Pos0::new` or `QPos::new` is renamed, it
+/// fails rather than the rejections silently becoming free.
+///
+/// ```
+/// use seqair_types::pos::{Pos0, Pos1, QPos};
+/// let zero = Pos0::new(100).unwrap();
+/// let one = Pos1::new(100).unwrap();
+/// let offset = QPos::new(5);
+/// fn takes_a_position(_: Pos0) {}
+/// fn takes_an_offset(_: QPos) {}
+/// takes_a_position(one.to_zero_based());
+/// takes_an_offset(offset);
+/// assert_eq!(zero.as_u32(), 100);
+/// ```
+///
+/// A 0-based and a 1-based position are different types
+/// (r[`pos.incompatible`]):
+///
+/// ```compile_fail,E0308
+/// use seqair_types::pos::{Pos0, Pos1};
+/// let zero = Pos0::new(100).unwrap();
+/// let one: Pos1 = zero;
+/// ```
+///
+/// and they do not compare (r[`pos.incompatible`]):
+///
+/// ```compile_fail,E0308
+/// use seqair_types::pos::{Pos0, Pos1};
+/// let _ = Pos0::new(100).unwrap() == Pos1::new(100).unwrap();
+/// ```
+///
+/// Conversion is only ever explicit (r[`pos.explicit_conversion`]):
+///
+/// ```compile_fail,E0277
+/// use seqair_types::pos::{Pos0, Pos1};
+/// let one: Pos1 = Pos0::new(100).unwrap().into();
+/// ```
+///
+/// Two positions do not add — the sum of two locations is not a location
+/// (r[`pos.no_add_pos`]):
+///
+/// ```compile_fail,E0369
+/// use seqair_types::pos::Pos0;
+/// let _ = Pos0::new(100).unwrap() + Pos0::new(1).unwrap();
+/// ```
+///
+/// and a position is not an integer (r[`pos.explicit_conversion`]):
+///
+/// ```compile_fail,E0308
+/// use seqair_types::pos::Pos0;
+/// let n: u32 = Pos0::new(100).unwrap();
+/// ```
+///
+/// A query offset indexes a read, not the reference, so it is not a position
+/// either way round (r[`qpos.not_a_pos`]):
+///
+/// ```compile_fail,E0308
+/// use seqair_types::pos::{Pos0, QPos};
+/// fn takes_a_position(_: Pos0) {}
+/// takes_a_position(QPos::new(5));
+/// ```
+///
+/// ```compile_fail,E0308
+/// use seqair_types::pos::{Pos0, QPos};
+/// fn takes_an_offset(_: QPos) {}
+/// takes_an_offset(Pos0::new(5).unwrap());
+/// ```
+// r[verify pos.incompatible]
+// r[verify pos.explicit_conversion]
+// r[verify pos.no_add_pos]
+// r[verify qpos.not_a_pos]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Pos<S> {
