@@ -121,15 +121,13 @@ fn fetch_seqair_pileup_region(
     reader
         .fetch_into(
             tid,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
+            (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
             &mut store,
         )
         .expect("seqair fetch");
     let mut engine = seqair::bam::PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(start as u32).unwrap(),
-        Pos0::new(end as u32).unwrap(),
+        (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
     );
     helpers::collect_columns(&mut engine)
 }
@@ -148,16 +146,14 @@ fn pileup_positions_match() {
     reader
         .fetch_into(
             tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
+            (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
             &mut store,
         )
         .expect("seqair fetch");
 
     let mut engine = seqair::bam::PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(TEST_START as u32).unwrap(),
-        Pos0::new(TEST_END as u32).unwrap(),
+        (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
     );
     let columns = helpers::collect_columns(&mut engine);
 
@@ -191,16 +187,14 @@ fn pileup_depth_matches() {
     reader
         .fetch_into(
             tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
+            (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
             &mut store,
         )
         .expect("seqair fetch");
 
     let mut engine = seqair::bam::PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(TEST_START as u32).unwrap(),
-        Pos0::new(TEST_END as u32).unwrap(),
+        (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
     );
     let columns = helpers::collect_columns(&mut engine);
 
@@ -240,16 +234,14 @@ fn pileup_qpos_matches() {
     reader
         .fetch_into(
             tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
+            (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
             &mut store,
         )
         .expect("seqair fetch");
 
     let mut engine = seqair::bam::PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(TEST_START as u32).unwrap(),
-        Pos0::new(TEST_END as u32).unwrap(),
+        (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
     );
     let columns = helpers::collect_columns(&mut engine);
 
@@ -500,12 +492,11 @@ fn pileup_empty_seq_matches_htslib() {
     let mut store = seqair::bam::RecordStore::new();
     let tid = reader.header().tid("c1").expect("seqair tid for c1");
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(10).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(10).unwrap()).into(), &mut store)
         .expect("seqair fetch");
     let mut engine = seqair::bam::PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(10).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(10).unwrap()).into(),
     );
     let cols = helpers::collect_columns(&mut engine);
 

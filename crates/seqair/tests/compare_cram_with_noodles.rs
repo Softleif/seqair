@@ -151,8 +151,7 @@ fn cram_chr19_count_matches_noodles() {
         readers
             .fetch_into(
                 chr19_tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
             )
             .unwrap();
@@ -192,8 +191,7 @@ fn cram_chr19_records_match_noodles_field_by_field() {
         readers
             .fetch_into(
                 chr19_tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
             )
             .unwrap();
@@ -279,8 +277,7 @@ fn cram_end_pos_matches_noodles_inclusive_convention() {
         readers
             .fetch_into(
                 chr19_tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
             )
             .unwrap();
@@ -328,8 +325,7 @@ fn cram_chr19_sequences_match_noodles() {
         readers
             .fetch_into(
                 chr19_tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
             )
             .unwrap();
@@ -387,8 +383,7 @@ fn cram_chr19_quality_scores_match_noodles() {
         readers
             .fetch_into(
                 chr19_tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
             )
             .unwrap();
@@ -432,8 +427,7 @@ fn cram_chr19_qnames_match_noodles() {
         readers
             .fetch_into(
                 chr19_tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
             )
             .unwrap();

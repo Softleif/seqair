@@ -61,8 +61,7 @@ fn fetch_record_positions(
     reader
         .fetch_into(
             tid,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
+            (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
             &mut store,
         )
         .expect("fetch_into");

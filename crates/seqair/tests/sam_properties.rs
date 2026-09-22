@@ -78,7 +78,11 @@ fn cigar_end_pos_invariants(tc: TestCase) {
     let tid = reader.header().tid("chr1").unwrap();
     let mut store = seqair::bam::RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(1).unwrap(), Pos0::new(100_000_000).unwrap(), &mut store)
+        .fetch_into(
+            tid,
+            (Pos0::new(1).unwrap()..=Pos0::new(100_000_000).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert!(!store.is_empty(), "should fetch at least 1 record");
@@ -127,7 +131,11 @@ fn seq_decode_maps_iupac_to_unknown(tc: TestCase) {
     let tid = reader.header().tid("chr1").unwrap();
     let mut store = seqair::bam::RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(1).unwrap(), Pos0::new(100_000_000).unwrap(), &mut store)
+        .fetch_into(
+            tid,
+            (Pos0::new(1).unwrap()..=Pos0::new(100_000_000).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert_eq!(store.len(), 1);
@@ -176,7 +184,11 @@ fn qual_decode_roundtrip(tc: TestCase) {
     let tid = reader.header().tid("chr1").unwrap();
     let mut store = seqair::bam::RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(1).unwrap(), Pos0::new(100_000_000).unwrap(), &mut store)
+        .fetch_into(
+            tid,
+            (Pos0::new(1).unwrap()..=Pos0::new(100_000_000).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert_eq!(store.len(), 1);

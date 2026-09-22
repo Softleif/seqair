@@ -12,6 +12,7 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+use core::range::RangeInclusive;
 use hegel::prelude::*;
 use noodles::core::{Position, Region};
 use noodles::fasta;
@@ -31,7 +32,8 @@ fn noodles_fetch(name: &str, start: u64, stop: u64) -> Vec<u8> {
     let mut reader = fasta::io::indexed_reader::Builder::default()
         .build_from_path(test_fasta_path())
         .expect("noodles fasta open");
-    // seqair uses 0-based half-open [start, stop); noodles uses 1-based closed [start+1, stop]
+    // This helper's own (start, stop) args are half-open [start, stop), like
+    // seqair_fetch's; noodles uses 1-based closed [start+1, stop].
     let region = Region::new(
         name,
         Position::try_from(start as usize + 1).unwrap()
@@ -41,10 +43,12 @@ fn noodles_fetch(name: &str, start: u64, stop: u64) -> Vec<u8> {
     record.sequence().as_ref().to_ascii_uppercase()
 }
 
+/// `start` inclusive, `stop` exclusive — converted to seqair's closed
+/// `[start, stop - 1]` span here.
 fn seqair_fetch(reader: &mut IndexedFastaReader, name: &str, start: u64, stop: u64) -> Vec<u8> {
     let start = Pos0::try_from(start).expect("start fits in u32");
-    let stop = Pos0::try_from(stop).expect("stop fits in u32");
-    reader.fetch_seq(name, start, stop).expect("seqair fetch_seq")
+    let last = Pos0::try_from(stop - 1).expect("last fits in u32");
+    reader.fetch_seq(name, RangeInclusive { start, last }).expect("seqair fetch_seq")
 }
 
 // ---- Full sequence comparison for small sequences ----

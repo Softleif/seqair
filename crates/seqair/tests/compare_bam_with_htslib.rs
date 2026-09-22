@@ -90,8 +90,7 @@ fn all_contigs_record_count_matches() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -124,8 +123,7 @@ fn all_contigs_record_fields_match() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -219,8 +217,7 @@ fn all_contigs_pileup_positions_and_depth_match() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -229,8 +226,7 @@ fn all_contigs_pileup_positions_and_depth_match() {
 
         let mut engine = seqair::bam::PileupEngine::new(
             store.prepare_for_pileup().input,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
+            (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
         );
         let rio = helpers::collect_columns(&mut engine);
 
@@ -272,8 +268,7 @@ fn all_contigs_pileup_qpos_and_flags_match() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -282,8 +277,7 @@ fn all_contigs_pileup_qpos_and_flags_match() {
 
         let mut engine = seqair::bam::PileupEngine::new(
             store.prepare_for_pileup().input,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
+            (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
         );
         let rio = helpers::collect_columns(&mut engine);
 
@@ -333,8 +327,7 @@ fn all_contigs_pileup_bases_match() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -343,8 +336,7 @@ fn all_contigs_pileup_bases_match() {
 
         let mut engine = seqair::bam::PileupEngine::new(
             store.prepare_for_pileup().input,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
+            (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
         );
         let rio = helpers::collect_columns(&mut engine);
 
@@ -434,8 +426,7 @@ fn all_contigs_aux_tags_match() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )

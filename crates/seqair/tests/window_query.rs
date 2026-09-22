@@ -33,7 +33,10 @@ fn open() -> Readers {
 fn segment(readers: &Readers) -> Segment {
     let opts = SegmentOptions::new(NonZeroU32::new(5_000).unwrap());
     readers
-        .segments(("chr19", Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap()), opts)
+        .segments(
+            ("chr19", (Pos0::new(6_103_500).unwrap()..=Pos0::new(6_106_500).unwrap()).into()),
+            opts,
+        )
         .unwrap()
         .next()
         .expect("the fixture yields a segment")
@@ -155,7 +158,7 @@ fn shift_leading_base(store: &mut RecordStore) -> BTreeMap<(Vec<u8>, Pos0), Pos0
 fn query_after_a_realigning_hook_names_the_moved_reads() {
     let mut readers = open();
     let segment = segment(&readers);
-    let (seg_start, seg_end) = (segment.start(), segment.end());
+    let (seg_start, seg_end) = (segment.start(), segment.last());
 
     let mut moved = BTreeMap::new();
     let mut reference: Vec<Base> = Vec::new();

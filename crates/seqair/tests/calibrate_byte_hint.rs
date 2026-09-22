@@ -179,7 +179,7 @@ fn sample_bam(path: &Path, region_size: u64, regions_per_bam: usize) -> Aggregat
         };
 
         store.clear();
-        let n = match reader.fetch_into(tid, start, end, &mut store) {
+        let n = match reader.fetch_into(tid, (start..=end).into(), &mut store) {
             Ok(n) => n,
             Err(e) => {
                 println!("    [skip] fetch {start_bp}..{end_bp}: {e}");

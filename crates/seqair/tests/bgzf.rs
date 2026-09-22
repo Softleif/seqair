@@ -86,7 +86,11 @@ fn read_bam_verifies_crc32_and_tracks_offsets() {
     let mut store = RecordStore::new();
     use seqair::bam::Pos0;
     let count = reader
-        .fetch_into(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store)
+        .fetch_into(
+            tid,
+            (Pos0::new(6_105_700).unwrap()..=Pos0::new(6_105_800).unwrap()).into(),
+            &mut store,
+        )
         .expect("CRC32 verification should pass on valid BAM data");
 
     // If CRC32 verification failed, fetch_into would have returned an error.

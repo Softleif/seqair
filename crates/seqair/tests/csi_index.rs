@@ -352,7 +352,7 @@ fn indexed_reader_finds_csi_without_bam_infix() {
     let mut reader = IndexedBamReader::open(&bam_path).expect("should find multi.csi");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
+        .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(), &mut store)
         .expect("fetch");
     assert!(!store.is_empty(), "should find records via multi.csi");
 }
@@ -372,7 +372,7 @@ fn indexed_reader_prefers_csi_over_bai() {
     let mut reader = IndexedBamReader::open(&bam_path).expect("open with CSI");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
+        .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 30, "chr1 should have 30 records");
 }
@@ -389,7 +389,7 @@ fn indexed_reader_with_csi_only() {
     let mut reader = IndexedBamReader::open(&bam_path).expect("open with CSI only");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
+        .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 30);
 }
@@ -415,7 +415,11 @@ fn seqair_csi_fetch_matches_samtools_counts() {
     for &(name, tid, start, end, samtools_region) in regions {
         let mut store = RecordStore::new();
         reader
-            .fetch_into(tid, Pos0::new(start).unwrap(), Pos0::new(end).unwrap(), &mut store)
+            .fetch_into(
+                tid,
+                (Pos0::new(start).unwrap()..=Pos0::new(end).unwrap()).into(),
+                &mut store,
+            )
             .expect("fetch");
 
         let st_count = samtools_count(&bam_path, samtools_region);

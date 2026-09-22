@@ -12,6 +12,7 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+use core::range::RangeInclusive;
 use hegel::prelude::*;
 use rust_htslib::faidx;
 use seqair::bam::Pos0;
@@ -21,6 +22,16 @@ use tempfile::TempDir;
 
 fn test_fasta_path() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.gz"))
+}
+
+/// `start` inclusive, `stop` exclusive, the half-open convention every fetch
+/// in this file is expressed in — converted to seqair's closed
+/// `[start, stop - 1]` span here.
+fn span(start: u64, stop: u64) -> RangeInclusive<Pos0> {
+    RangeInclusive {
+        start: Pos0::try_from(start).unwrap(),
+        last: Pos0::try_from(stop - 1).unwrap(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,9 +225,7 @@ fn plain_fasta_roundtrip(tc: TestCase) {
     writeln!(fai, "seq1\t{}\t{}\t{}\t{}", seq_len, offset, linebases, linewidth).unwrap();
 
     let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-    let start_pos = Pos0::try_from(start).unwrap();
-    let stop_pos = Pos0::try_from(stop).unwrap();
-    let fetched = reader.fetch_seq("seq1", start_pos, stop_pos).unwrap();
+    let fetched = reader.fetch_seq("seq1", span(start, stop)).unwrap();
 
     let expected: Vec<u8> =
         bases[start as usize..stop as usize].iter().map(|b| b.to_ascii_uppercase()).collect();
@@ -249,7 +258,7 @@ fn wrapped_byte_span_is_an_error_not_a_panic() {
 
     let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
     let err = reader
-        .fetch_seq("seq1", Pos0::new(0).unwrap(), Pos0::new(100).unwrap())
+        .fetch_seq("seq1", span(0, 100))
         .expect_err("an overflowing offset must not be served");
     assert!(
         matches!(err, seqair::fasta::FastaError::IndexOffsetOverflow { .. }),
@@ -284,7 +293,7 @@ fn wraparound_offset_is_rejected_not_served_from_wrong_location() {
 
     let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
     let err = reader
-        .fetch_seq("seq1", Pos0::new(10).unwrap(), Pos0::new(21).unwrap())
+        .fetch_seq("seq1", span(10, 21))
         .expect_err("an overflowing offset must not be served");
     assert!(
         matches!(err, seqair::fasta::FastaError::IndexOffsetOverflow { .. }),
@@ -314,7 +323,7 @@ fn plain_fasta_span_beyond_file_is_rejected_before_allocation() {
 
     let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
     let err = reader
-        .fetch_seq("seq1", Pos0::new(1_999_999_900).unwrap(), Pos0::new(1_999_999_950).unwrap())
+        .fetch_seq("seq1", span(1_999_999_900, 1_999_999_950))
         .expect_err("a span past the real file size must not be served");
     assert!(
         matches!(err, seqair::fasta::FastaError::SpanBeyondData { .. }),
@@ -353,7 +362,7 @@ fn bgzf_fasta_span_beyond_gzi_bound_is_rejected_before_allocation() {
 
     let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
     let err = reader
-        .fetch_seq("seq1", Pos0::new(100_000).unwrap(), Pos0::new(100_050).unwrap())
+        .fetch_seq("seq1", span(100_000, 100_050))
         .expect_err("a span past the GZI-derived bound must not be served");
     assert!(
         matches!(err, seqair::fasta::FastaError::SpanBeyondData { .. }),
@@ -434,9 +443,7 @@ fn out_of_order_fetches_on_one_reader_are_independent(tc: TestCase) {
 
     let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
     let fetch = |reader: &mut IndexedFastaReader, start: u64, stop: u64| {
-        reader
-            .fetch_seq("seq1", Pos0::try_from(start).unwrap(), Pos0::try_from(stop).unwrap())
-            .unwrap()
+        reader.fetch_seq("seq1", span(start, stop)).unwrap()
     };
 
     let mut first_answer = None;
@@ -492,9 +499,7 @@ fn bgzf_random_regions_match_htslib(tc: TestCase) {
     let stop = start + fetch_len;
 
     let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-    let start_pos = Pos0::try_from(start).unwrap();
-    let stop_pos = Pos0::try_from(stop).unwrap();
-    let seq = rio.fetch_seq(name, start_pos, stop_pos).expect("rio fetch");
+    let seq = rio.fetch_seq(name, span(start, stop)).expect("rio fetch");
     let hts_seq = htslib_fetch(name, start, stop);
 
     assert!(
@@ -521,10 +526,8 @@ fn fork_matches_original_at_random_positions(tc: TestCase) {
     let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
     let mut forked = rio.fork().expect("fork");
 
-    let start_pos = Pos0::try_from(start).unwrap();
-    let stop_pos = Pos0::try_from(stop).unwrap();
-    let orig = rio.fetch_seq("chr19", start_pos, stop_pos).expect("orig fetch");
-    let fork_result = forked.fetch_seq("chr19", start_pos, stop_pos).expect("fork fetch");
+    let orig = rio.fetch_seq("chr19", span(start, stop)).expect("orig fetch");
+    let fork_result = forked.fetch_seq("chr19", span(start, stop)).expect("fork fetch");
 
     assert_eq!(orig, fork_result, "fork mismatch at chr19:{}-{}", start, stop);
 }
@@ -545,9 +548,7 @@ fn fetch_base_seq_reuses_buffer() {
     .unwrap();
 
     // First call: buffer starts empty, gets allocated
-    let seq1 = readers
-        .fetch_base_seq("bacteriophage_lambda_CpG", Pos0::new(0).unwrap(), Pos0::new(100).unwrap())
-        .unwrap();
+    let seq1 = readers.fetch_base_seq("bacteriophage_lambda_CpG", span(0, 100)).unwrap();
     assert_eq!(seq1.len(), 100);
     // Every element must be a valid Base
     for &b in seq1.iter() {
@@ -556,26 +557,16 @@ fn fetch_base_seq_reuses_buffer() {
 
     // Second call: should reuse the internal buffer (no way to observe capacity
     // directly, but we can verify correctness across calls)
-    let seq2 = readers
-        .fetch_base_seq(
-            "bacteriophage_lambda_CpG",
-            Pos0::new(100).unwrap(),
-            Pos0::new(300).unwrap(),
-        )
-        .unwrap();
+    let seq2 = readers.fetch_base_seq("bacteriophage_lambda_CpG", span(100, 300)).unwrap();
     assert_eq!(seq2.len(), 200);
 
     // Third call: same region as first, must produce identical result
-    let seq3 = readers
-        .fetch_base_seq("bacteriophage_lambda_CpG", Pos0::new(0).unwrap(), Pos0::new(100).unwrap())
-        .unwrap();
+    let seq3 = readers.fetch_base_seq("bacteriophage_lambda_CpG", span(0, 100)).unwrap();
     assert_eq!(seq1, seq3, "repeated fetch must produce identical results");
 
     // Verify against raw fetch + manual conversion
     let mut raw_reader = IndexedFastaReader::open(test_fasta_path()).unwrap();
-    let raw = raw_reader
-        .fetch_seq("bacteriophage_lambda_CpG", Pos0::new(0).unwrap(), Pos0::new(100).unwrap())
-        .unwrap();
+    let raw = raw_reader.fetch_seq("bacteriophage_lambda_CpG", span(0, 100)).unwrap();
     let expected: Vec<Base> = Base::from_ascii_vec(raw);
     assert_eq!(&*seq1, &expected[..], "fetch_base_seq must match from_ascii_vec on raw fetch");
 }
@@ -598,11 +589,9 @@ fn fetch_into_matches_fetch_at_random_positions(tc: TestCase) {
     let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
     let mut buf = Vec::new();
 
-    let start_pos = Pos0::try_from(start).unwrap();
-    let stop_pos = Pos0::try_from(stop).unwrap();
-    let alloc = rio.fetch_seq("bacteriophage_lambda_CpG", start_pos, stop_pos).expect("fetch_seq");
-    rio.fetch_seq_into("bacteriophage_lambda_CpG", start_pos, stop_pos, &mut buf)
-        .expect("fetch_seq_into");
+    let region = span(start, stop);
+    let alloc = rio.fetch_seq("bacteriophage_lambda_CpG", region).expect("fetch_seq");
+    rio.fetch_seq_into("bacteriophage_lambda_CpG", region, &mut buf).expect("fetch_seq_into");
 
     assert_eq!(alloc.clone(), buf, "fetch vs fetch_into mismatch at {}-{}", start, stop);
     let hts = htslib_fetch("bacteriophage_lambda_CpG", start, stop);

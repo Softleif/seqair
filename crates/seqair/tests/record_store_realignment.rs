@@ -620,7 +620,11 @@ fn realignment_workflow_with_real_bam() {
 
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store)
+        .fetch_into(
+            tid,
+            (Pos0::new(6_105_700).unwrap()..=Pos0::new(6_105_800).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert!(!store.is_empty());

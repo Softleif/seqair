@@ -120,8 +120,7 @@ fn sam_record_count_matches_htslib() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -156,8 +155,7 @@ fn sam_record_fields_match_htslib() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -211,8 +209,7 @@ fn sam_aux_tags_present() {
     reader
         .fetch_into_customized(
             tid,
-            Pos0::new(6_105_700).unwrap(),
-            Pos0::new(6_105_800).unwrap(),
+            (Pos0::new(6_105_700).unwrap()..=Pos0::new(6_105_800).unwrap()).into(),
             &mut store,
             &mut RejectUnmapped,
         )
@@ -248,8 +245,7 @@ fn sam_aux_rg_tag_matches_htslib() {
     reader
         .fetch_into_customized(
             tid,
-            Pos0::new(6_105_700).unwrap(),
-            Pos0::new(6_105_800).unwrap(),
+            (Pos0::new(6_105_700).unwrap()..=Pos0::new(6_105_800).unwrap()).into(),
             &mut store,
             &mut RejectUnmapped,
         )

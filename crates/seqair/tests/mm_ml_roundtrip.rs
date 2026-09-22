@@ -116,7 +116,7 @@ fn mm_ml_bam_roundtrip_seqair() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(100_000).unwrap()).into(), &mut store)
         .expect("fetch");
 
     assert_eq!(store.len(), 2);
@@ -229,7 +229,7 @@ fn mm_ml_cram_roundtrip() {
     let tid = readers.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     readers
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(100_000).unwrap()).into(), &mut store)
         .expect("fetch");
 
     assert_eq!(store.len(), 2);
@@ -294,7 +294,7 @@ fn mm_ml_empty_values() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(100_000).unwrap()).into(), &mut store)
         .expect("fetch");
 
     let aux = AuxData::from_bytes(store.record(ri(0)).unwrap().aux().to_vec());
@@ -357,7 +357,7 @@ fn mm_ml_large_tags() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(100_000).unwrap()).into(), &mut store)
         .expect("fetch");
 
     let aux = AuxData::from_bytes(store.record(ri(0)).unwrap().aux().to_vec());
@@ -422,7 +422,7 @@ fn mm_ml_coexist_with_other_tags() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(100_000).unwrap()).into(), &mut store)
         .expect("fetch");
 
     let aux = AuxData::from_bytes(store.record(ri(0)).unwrap().aux().to_vec());

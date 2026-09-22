@@ -229,9 +229,8 @@ fn seqair_query(bam_path: &Path, tid_name: &str, start: u32, end: u32) -> Vec<us
     let mut reader = IndexedBamReader::open(bam_path).expect("open");
     let tid = reader.header().tid(tid_name).expect("contig");
     let mut store = RecordStore::new();
-    reader
-        .fetch_into(tid, Pos0::new(start).unwrap(), Pos0::new(end).unwrap(), &mut store)
-        .expect("fetch");
+    let span = (Pos0::new(start).unwrap()..=Pos0::new(end).unwrap()).into();
+    reader.fetch_into(tid, span, &mut store).expect("fetch");
     let mut ids: Vec<usize> = store
         .indices()
         .map(|idx| {

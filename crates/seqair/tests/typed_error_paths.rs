@@ -166,7 +166,7 @@ fn open_and_fetch(bam: &[u8]) -> Result<usize, BamError> {
     std::fs::write(dir.path().join("t.bam.bai"), &corpus().bai).unwrap();
     let mut reader = IndexedBamReader::open(&path)?;
     let mut store = RecordStore::default();
-    reader.fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(1_999_999).unwrap(), &mut store)
+    reader.fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::new(1_999_999).unwrap()).into(), &mut store)
 }
 
 /// The `BgzfError` at the bottom of a `BamError`, whichever way it was wrapped,

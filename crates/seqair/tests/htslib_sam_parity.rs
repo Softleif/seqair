@@ -173,7 +173,11 @@ fn assert_bam_parity(sam_name: &str) {
 
         let mut store = RecordStore::new();
         reader
-            .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(contig_len).unwrap(), &mut store)
+            .fetch_into(
+                tid,
+                (Pos0::new(0).unwrap()..=Pos0::new(contig_len).unwrap()).into(),
+                &mut store,
+            )
             .unwrap_or_else(|e| panic!("{sam_name}/{contig_name}: fetch failed: {e}"));
 
         assert_eq!(

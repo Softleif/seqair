@@ -42,7 +42,8 @@ fn push(store: &mut RecordStore, qname: &[u8], pos: u32, len: u32, mate_pos: i32
 
 /// Depth at every column the engine yields, keyed by position.
 fn depths(input: seqair::bam::record_store::PileupInput, end: u32) -> Vec<(u64, usize)> {
-    let mut engine = PileupEngine::new(input, Pos0::new(0).unwrap(), Pos0::new(end).unwrap());
+    let mut engine =
+        PileupEngine::new(input, (Pos0::new(0).unwrap()..=Pos0::new(end).unwrap()).into());
     let mut out = Vec::new();
     while let Some(col) = engine.pileups() {
         out.push((col.pos().as_u64(), col.depth()));
@@ -89,7 +90,7 @@ fn a_store_reaching_the_engine_has_its_mates_linked() {
     assert_eq!(prepared.stats.pairs, 1, "preparing must link the pair");
 
     let mut engine =
-        PileupEngine::new(prepared.input, Pos0::new(0).unwrap(), Pos0::new(60).unwrap());
+        PileupEngine::new(prepared.input, (Pos0::new(0).unwrap()..=Pos0::new(60).unwrap()).into());
     let mut checked = 0;
     while let Some(col) = engine.pileups() {
         if col.pos().as_u64() != 25 {

@@ -9,7 +9,7 @@
 //!    if it broke, every downstream caller that switches to segmentation
 //!    would silently miss or duplicate columns.
 //!
-//! 2. `core_range()` of consecutive segments tiles the input range exactly
+//! 2. `core_span()` of consecutive segments tiles the input range exactly
 //!    (no gap, no overlap), matching `r[unified.segment_overlap]`.
 
 #![allow(
@@ -58,7 +58,7 @@ fn pileup_single(
     // Use a max_len that comfortably covers the whole region in one tile.
     let max_len = NonZeroU32::new(2_000_000).unwrap();
     let opts = SegmentOptions::new(max_len);
-    let mut plan = readers.segments((contig, start, end), opts).unwrap();
+    let mut plan = readers.segments((contig, (start..=end).into()), opts).unwrap();
     let segment = plan.next().expect("at least one segment");
     assert!(plan.next().is_none(), "single-tile setup should yield exactly one segment");
     let mut engine = readers.pileup(&segment, DepthLimit::Unlimited).run().unwrap();
@@ -89,12 +89,12 @@ fn pileup_segmented(
     let opts = SegmentOptions::new(NonZeroU32::new(max_len).unwrap())
         .with_overlap(overlap)
         .expect("overlap < max_len");
-    let plan: Vec<_> = readers.segments((contig, start, end), opts).unwrap().collect();
+    let plan: Vec<_> = readers.segments((contig, (start..=end).into()), opts).unwrap().collect();
     assert!(!plan.is_empty(), "segments() must produce at least one tile for non-empty range");
 
     let mut out = Vec::new();
     for segment in &plan {
-        let core = segment.core_range();
+        let core = segment.core_span();
         let mut engine = readers.pileup(segment, DepthLimit::Unlimited).run().unwrap();
         while let Some(col) = engine.pileups() {
             if !core.contains(&col.pos()) {
@@ -149,13 +149,13 @@ fn cores_partition_input_with_overlap() {
     let start = Pos0::new(REGION_START).unwrap();
     let end = Pos0::new(REGION_END).unwrap();
     let opts = SegmentOptions::new(NonZeroU32::new(400).unwrap()).with_overlap(75).unwrap();
-    let plan: Vec<_> = readers.segments(("chr19", start, end), opts).unwrap().collect();
+    let plan: Vec<_> = readers.segments(("chr19", (start..=end).into()), opts).unwrap().collect();
     assert!(!plan.is_empty());
-    assert_eq!(*plan.first().unwrap().core_range().start(), start);
-    assert_eq!(*plan.last().unwrap().core_range().end(), end);
+    assert_eq!(plan.first().unwrap().core_span().start, start);
+    assert_eq!(plan.last().unwrap().core_span().last, end);
     for w in plan.windows(2) {
-        let prev_end = *w[0].core_range().end();
-        let next_start = *w[1].core_range().start();
+        let prev_end = w[0].core_span().last;
+        let next_start = w[1].core_span().start;
         let prev_u32: u32 = prev_end.as_u32();
         let next_u32: u32 = next_start.as_u32();
         assert_eq!(

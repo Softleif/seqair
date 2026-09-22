@@ -22,6 +22,10 @@ const TEST_REGION: &str = "chr19";
 const TEST_START: u64 = 6_105_700;
 const TEST_END: u64 = 6_105_800;
 
+fn test_span() -> core::range::RangeInclusive<Pos0> {
+    (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into()
+}
+
 // r[verify region_buf.empty]
 #[test]
 fn empty_chunks_returns_eof() {
@@ -43,14 +47,7 @@ fn overlapping_chunks_are_merged() {
     let tid = reader.header().tid(TEST_REGION).expect("tid");
 
     let mut arena = RecordStore::new();
-    let count = reader
-        .fetch_into(
-            tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
-            &mut arena,
-        )
-        .expect("fetch");
+    let count = reader.fetch_into(tid, test_span(), &mut arena).expect("fetch");
     assert!(count > 0, "should read records from test region");
 }
 
@@ -68,14 +65,7 @@ fn region_buf_reads_same_records_as_direct_bgzf() {
     let tid = reader.header().tid(TEST_REGION).expect("tid");
 
     let mut arena = RecordStore::new();
-    let count = reader
-        .fetch_into(
-            tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
-            &mut arena,
-        )
-        .expect("fetch");
+    let count = reader.fetch_into(tid, test_span(), &mut arena).expect("fetch");
 
     // Verify basic properties that would fail if RegionBuf decompression is wrong
     assert!(count > 0);
@@ -95,25 +85,11 @@ fn seek_within_loaded_region() {
 
     // Fetch once to verify seeking within the loaded region works
     let mut arena1 = RecordStore::new();
-    let count1 = reader
-        .fetch_into(
-            tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
-            &mut arena1,
-        )
-        .expect("fetch 1");
+    let count1 = reader.fetch_into(tid, test_span(), &mut arena1).expect("fetch 1");
 
     // Fetch same region again — exercises seek within the RegionBuf
     let mut arena2 = RecordStore::new();
-    let count2 = reader
-        .fetch_into(
-            tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
-            &mut arena2,
-        )
-        .expect("fetch 2");
+    let count2 = reader.fetch_into(tid, test_span(), &mut arena2).expect("fetch 2");
 
     assert_eq!(count1, count2, "same region should yield same record count");
 }
@@ -137,14 +113,7 @@ fn fetch_into_uses_region_buf_and_matches_htslib() {
     let mut reader = IndexedBamReader::open(bam_path).expect("open BAM");
     let tid = reader.header().tid(TEST_REGION).expect("tid");
     let mut arena = RecordStore::new();
-    let count = reader
-        .fetch_into(
-            tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
-            &mut arena,
-        )
-        .expect("fetch");
+    let count = reader.fetch_into(tid, test_span(), &mut arena).expect("fetch");
 
     // Both should find records (exact count may differ due to filtering differences,
     // but both should be non-zero and in the same ballpark)

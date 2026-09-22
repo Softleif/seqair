@@ -66,8 +66,7 @@ fn first_inserted_from_pairs(store: &RecordStore) -> u32 {
 fn anchor_from_pileup(store: RecordStore, region_end: u32) -> u32 {
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(region_end).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(region_end).unwrap()).into(),
     );
     let mut anchor = None;
     while anchor.is_none() {
@@ -118,8 +117,7 @@ fn inserted_bases_start_at_the_aligned_pairs_frame(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(10 + lead + trail + 10).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(10 + lead + trail + 10).unwrap()).into(),
     );
     let mut checked = false;
     while let Some(col) = engine.pileups() {

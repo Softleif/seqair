@@ -294,7 +294,11 @@ fn round_trip(dir: &Path, sam: &str) -> String {
     let tid = reader.header().tid(CONTIG).expect("contig");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(CONTIG_LEN - 1).unwrap(), &mut store)
+        .fetch_into(
+            tid,
+            (Pos0::new(0).unwrap()..=Pos0::new(CONTIG_LEN - 1).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
 
     let bam = dir.join("generated.bam");

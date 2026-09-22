@@ -28,6 +28,7 @@
 #![allow(clippy::unwrap_in_result, reason = "test helper propagates only the parse error")]
 #![allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 
+use core::range::RangeInclusive;
 use hegel::prelude::*;
 use rust_htslib::faidx;
 use seqair::bam::Pos0;
@@ -182,9 +183,11 @@ fn quality_lines_beginning_with_at_and_plus_do_not_confuse_indexed_access() {
 
     let mut reader = IndexedFastaReader::open(&path).unwrap();
     for r in &recs {
-        let got = reader
-            .fetch_seq(&r.name, Pos0::new(0).unwrap(), Pos0::new(r.seq.len() as u32).unwrap())
-            .unwrap();
+        let span = RangeInclusive {
+            start: Pos0::new(0).unwrap(),
+            last: Pos0::new(r.seq.len() as u32 - 1).unwrap(),
+        };
+        let got = reader.fetch_seq(&r.name, span).unwrap();
         assert_eq!(got, r.seq, "{} misread", r.name);
     }
 }
@@ -238,13 +241,11 @@ fn indexed_fetch_matches_htslib(tc: TestCase) {
             if start >= stop {
                 continue;
             }
-            let got = seqair_reader
-                .fetch_seq(
-                    &r.name,
-                    Pos0::new(start as u32).unwrap(),
-                    Pos0::new(stop as u32).unwrap(),
-                )
-                .unwrap();
+            let span = RangeInclusive {
+                start: Pos0::new(start as u32).unwrap(),
+                last: Pos0::new(stop as u32 - 1).unwrap(),
+            };
+            let got = seqair_reader.fetch_seq(&r.name, span).unwrap();
 
             let mut want = htslib_reader.fetch_seq(&r.name, start, stop - 1).unwrap();
             want.make_ascii_uppercase();

@@ -102,8 +102,7 @@ fn dos_line_endings_in_sam() {
     reader
         .fetch_into_customized(
             tid,
-            Pos0::new(0).unwrap(),
-            Pos0::new(1000).unwrap(),
+            (Pos0::new(0).unwrap()..=Pos0::new(1000).unwrap()).into(),
             &mut store,
             &mut RejectUnmapped,
         )
@@ -133,8 +132,7 @@ fn dos_line_endings_via_bam() {
     reader
         .fetch_into_customized(
             tid,
-            Pos0::new(0).unwrap(),
-            Pos0::new(1_009_800).unwrap(),
+            (Pos0::new(0).unwrap()..=Pos0::new(1_009_800).unwrap()).into(),
             &mut store,
             &mut RejectUnmapped,
         )
@@ -170,8 +168,7 @@ fn dos_line_endings_via_bam() {
             reader
                 .fetch_into_customized(
                     tid,
-                    Pos0::new(0).unwrap(),
-                    Pos0::new(5000).unwrap(),
+                    (Pos0::new(0).unwrap()..=Pos0::new(5000).unwrap()).into(),
                     &mut store,
                     &mut RejectUnmapped,
                 )
@@ -208,8 +205,7 @@ fn colons_in_contig_names() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(0).unwrap(),
-                Pos0::new(len).unwrap(),
+                (Pos0::new(0).unwrap()..=Pos0::new(len).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -246,8 +242,7 @@ fn sequence_less_mapped_reads() {
     reader
         .fetch_into_customized(
             tid,
-            Pos0::new(0).unwrap(),
-            Pos0::new(10).unwrap(),
+            (Pos0::new(0).unwrap()..=Pos0::new(10).unwrap()).into(),
             &mut store,
             &mut RejectUnmapped,
         )
@@ -302,8 +297,7 @@ fn seq_qual_presence_combos() {
     reader
         .fetch_into_customized(
             tid,
-            Pos0::new(0).unwrap(),
-            Pos0::new(10).unwrap(),
+            (Pos0::new(0).unwrap()..=Pos0::new(10).unwrap()).into(),
             &mut store,
             &mut RejectUnmapped,
         )
@@ -379,8 +373,7 @@ fn supplementary_alignments_included() {
     reader
         .fetch_into_customized(
             tid,
-            Pos0::new(0).unwrap(),
-            Pos0::new(1_009_800).unwrap(),
+            (Pos0::new(0).unwrap()..=Pos0::new(1_009_800).unwrap()).into(),
             &mut store,
             &mut RejectUnmapped,
         )
@@ -416,8 +409,7 @@ fn secondary_alignment_without_sequence() {
     reader
         .fetch_into_customized(
             tid,
-            Pos0::new(0).unwrap(),
-            Pos0::new(5000).unwrap(),
+            (Pos0::new(0).unwrap()..=Pos0::new(5000).unwrap()).into(),
             &mut store,
             &mut RejectUnmapped,
         )
@@ -451,8 +443,7 @@ fn padding_cigar_operations() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(0).unwrap(),
-                Pos0::new(10).unwrap(),
+                (Pos0::new(0).unwrap()..=Pos0::new(10).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )

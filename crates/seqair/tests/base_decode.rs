@@ -83,8 +83,7 @@ fn pileup_alignment_has_base_type() {
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(103).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(103).unwrap()).into(),
     );
     engine.set_max_depth(NonZeroU32::new(1000).unwrap());
 

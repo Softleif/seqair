@@ -139,8 +139,7 @@ fn bam_record_count_matches_noodles() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -176,8 +175,7 @@ fn bam_record_fields_match_noodles() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -220,8 +218,7 @@ fn bam_sequence_matches_noodles() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -276,8 +273,7 @@ fn bam_quality_scores_match_noodles() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -313,8 +309,7 @@ fn bam_cigar_matches_noodles() {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
                 &mut store,
                 &mut RejectUnmapped,
             )

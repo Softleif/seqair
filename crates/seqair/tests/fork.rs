@@ -35,8 +35,7 @@ fn fetch_record_positions(
     reader
         .fetch_into(
             tid,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
+            (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
             &mut store,
         )
         .expect("fetch_into");
@@ -138,8 +137,7 @@ fn fork_fetches_are_independent() {
     fork_a
         .fetch_into(
             tid,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
+            (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
             &mut store_a,
         )
         .expect("fetch_a");
@@ -151,8 +149,7 @@ fn fork_fetches_are_independent() {
     fork_b
         .fetch_into(
             tid2,
-            Pos0::new(start2 as u32).unwrap(),
-            Pos0::new(end2 as u32).unwrap(),
+            (Pos0::new(start2 as u32).unwrap()..=Pos0::new(end2 as u32).unwrap()).into(),
             &mut store_b,
         )
         .expect("fetch_b different region");
@@ -161,8 +158,7 @@ fn fork_fetches_are_independent() {
     fork_b
         .fetch_into(
             tid,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
+            (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
             &mut store_b,
         )
         .expect("fetch_b same region");

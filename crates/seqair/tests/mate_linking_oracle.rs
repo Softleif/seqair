@@ -431,7 +431,11 @@ fn fetch_all(path: &Path) -> Vec<RecordStore> {
             let tid = reader.header().tid(name).expect("contig in header");
             let mut store = RecordStore::new();
             reader
-                .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(*len).unwrap(), &mut store)
+                .fetch_into(
+                    tid,
+                    (Pos0::new(0).unwrap()..=Pos0::new(*len).unwrap()).into(),
+                    &mut store,
+                )
                 .expect("fetch");
             store
         })

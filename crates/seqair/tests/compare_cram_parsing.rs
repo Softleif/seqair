@@ -245,8 +245,7 @@ fn cram_records_match_bam_records() {
     let cram_count = cram_reader
         .fetch_into_customized(
             tid,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
+            (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
             &mut cram_store,
             &mut RejectUnmapped,
         )

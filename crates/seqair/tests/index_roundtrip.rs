@@ -177,7 +177,7 @@ fn seqair_reads_own_bai() {
         let tid = reader.header().tid(name).expect(name);
         let mut store = RecordStore::new();
         reader
-            .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(len).unwrap(), &mut store)
+            .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(len).unwrap()).into(), &mut store)
             .expect("fetch");
         assert_eq!(store.len(), expected, "{name}: record count");
     }
@@ -207,7 +207,11 @@ fn seqair_and_samtools_agree_on_regions() {
         let tid = reader.header().tid(contig).expect(contig);
         let mut store = RecordStore::new();
         reader
-            .fetch_into(tid, Pos0::new(start).unwrap(), Pos0::new(end).unwrap(), &mut store)
+            .fetch_into(
+                tid,
+                (Pos0::new(start).unwrap()..=Pos0::new(end).unwrap()).into(),
+                &mut store,
+            )
             .expect("fetch");
 
         let st_count = samtools_count(&bam_path, samtools_region);

@@ -98,8 +98,7 @@ fn record_count_matches() {
     reader
         .fetch_into_customized(
             tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
+            (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
             &mut store,
             &mut RejectUnmapped,
         )
@@ -132,8 +131,9 @@ fn fetch_count(reject_unmapped: bool) -> usize {
         reader
             .fetch_into_customized(
                 tid,
-                Pos0::new(UNMAPPED_START as u32).unwrap(),
-                Pos0::new(UNMAPPED_END as u32).unwrap(),
+                (Pos0::new(UNMAPPED_START as u32).unwrap()
+                    ..=Pos0::new(UNMAPPED_END as u32).unwrap())
+                    .into(),
                 &mut store,
                 &mut RejectUnmapped,
             )
@@ -143,8 +143,9 @@ fn fetch_count(reject_unmapped: bool) -> usize {
         reader
             .fetch_into(
                 tid,
-                Pos0::new(UNMAPPED_START as u32).unwrap(),
-                Pos0::new(UNMAPPED_END as u32).unwrap(),
+                (Pos0::new(UNMAPPED_START as u32).unwrap()
+                    ..=Pos0::new(UNMAPPED_END as u32).unwrap())
+                    .into(),
                 &mut store,
             )
             .expect("fetch");
@@ -200,16 +201,16 @@ fn fork_produces_identical_results() {
     parent
         .fetch_into(
             tid,
-            Pos0::new(UNMAPPED_START as u32).unwrap(),
-            Pos0::new(UNMAPPED_END as u32).unwrap(),
+            (Pos0::new(UNMAPPED_START as u32).unwrap()..=Pos0::new(UNMAPPED_END as u32).unwrap())
+                .into(),
             &mut ps,
         )
         .expect("parent");
     child
         .fetch_into(
             tid,
-            Pos0::new(UNMAPPED_START as u32).unwrap(),
-            Pos0::new(UNMAPPED_END as u32).unwrap(),
+            (Pos0::new(UNMAPPED_START as u32).unwrap()..=Pos0::new(UNMAPPED_END as u32).unwrap())
+                .into(),
             &mut cs,
         )
         .expect("child");
@@ -230,8 +231,7 @@ fn record_fields_match() {
     reader
         .fetch_into(
             tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
+            (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
             &mut store,
         )
         .expect("seqair fetch");
@@ -281,8 +281,7 @@ fn sequence_matches() {
     reader
         .fetch_into(
             tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
+            (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
             &mut store,
         )
         .expect("seqair fetch");
@@ -320,8 +319,7 @@ fn flag_helpers_match() {
     reader
         .fetch_into(
             tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
+            (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
             &mut store,
         )
         .expect("seqair fetch");
@@ -362,8 +360,7 @@ fn aux_tags_accessible() {
     reader
         .fetch_into(
             tid,
-            Pos0::new(TEST_START as u32).unwrap(),
-            Pos0::new(TEST_END as u32).unwrap(),
+            (Pos0::new(TEST_START as u32).unwrap()..=Pos0::new(TEST_END as u32).unwrap()).into(),
             &mut store,
         )
         .expect("seqair fetch");

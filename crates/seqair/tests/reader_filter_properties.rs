@@ -469,8 +469,8 @@ fn snapshot(store: &RecordStore) -> Vec<Snapshot> {
 }
 
 /// The whole contig, which is every record in the file.
-fn whole_contig() -> (Pos0, Pos0) {
-    (Pos0::new(0u32).unwrap(), Pos0::new(CONTIG.1 - 1).unwrap())
+fn whole_contig() -> core::range::RangeInclusive<Pos0> {
+    (Pos0::new(0u32).unwrap()..=Pos0::new(CONTIG.1 - 1).unwrap()).into()
 }
 
 /// Fetch with a customize value, returning both what the store holds and what
@@ -478,10 +478,10 @@ fn whole_contig() -> (Pos0, Pos0) {
 fn fetch_filtered(bam: &Path, pred: Predicate, gate: Gate) -> (Vec<Snapshot>, FetchCounts) {
     let mut reader = IndexedBamReader::open(bam).expect("open");
     let tid = reader.header().tid(CONTIG.0).expect("contig");
-    let (start, end) = whole_contig();
+    let span = whole_contig();
     let mut store = RecordStore::new();
     let counts = reader
-        .fetch_into_customized(tid, start, end, &mut store, &mut ClauseFilter { pred, gate })
+        .fetch_into_customized(tid, span, &mut store, &mut ClauseFilter { pred, gate })
         .expect("fetch_into_customized");
     (snapshot(&store), counts)
 }
@@ -490,9 +490,9 @@ fn fetch_filtered(bam: &Path, pred: Predicate, gate: Gate) -> (Vec<Snapshot>, Fe
 fn fetch_plain(bam: &Path) -> (Vec<Snapshot>, usize) {
     let mut reader = IndexedBamReader::open(bam).expect("open");
     let tid = reader.header().tid(CONTIG.0).expect("contig");
-    let (start, end) = whole_contig();
+    let span = whole_contig();
     let mut store = RecordStore::new();
-    let kept = reader.fetch_into(tid, start, end, &mut store).expect("fetch_into");
+    let kept = reader.fetch_into(tid, span, &mut store).expect("fetch_into");
     (snapshot(&store), kept)
 }
 
@@ -502,9 +502,9 @@ fn fetch_through_readers(bam: &Path, fasta: &Path, pred: Predicate) -> Vec<Snaps
     let mut readers =
         Readers::open_customized(bam, fasta, ClauseFilter::raw(pred)).expect("open_customized");
     let tid = readers.header().tid(CONTIG.0).expect("contig");
-    let (start, end) = whole_contig();
+    let span = whole_contig();
     let mut store = RecordStore::new();
-    readers.fetch_into(tid, start, end, &mut store).expect("Readers::fetch_into");
+    readers.fetch_into(tid, span, &mut store).expect("Readers::fetch_into");
     snapshot(&store)
 }
 
@@ -647,17 +647,11 @@ fn an_always_false_filter_empties_the_store_without_breaking_it(tc: TestCase) {
 
     let mut reader = IndexedBamReader::open(&bam).expect("open");
     let tid = reader.header().tid(CONTIG.0).expect("contig");
-    let (start, end) = whole_contig();
+    let span = whole_contig();
     let mut store = RecordStore::new();
 
     let counts = reader
-        .fetch_into_customized(
-            tid,
-            start,
-            end,
-            &mut store,
-            &mut ClauseFilter::late(Predicate::never()),
-        )
+        .fetch_into_customized(tid, span, &mut store, &mut ClauseFilter::late(Predicate::never()))
         .expect("fetch_into_customized");
 
     assert!(counts.fetched > 0, "the region holds records");
@@ -668,7 +662,7 @@ fn an_always_false_filter_empties_the_store_without_breaking_it(tc: TestCase) {
     assert_eq!(store.records().len(), 0);
 
     // Refilling the rolled-back store must give what a fresh store gives.
-    reader.fetch_into(tid, start, end, &mut store).expect("fetch_into");
+    reader.fetch_into(tid, span, &mut store).expect("fetch_into");
     let (fresh, _) = fetch_plain(&bam);
     assert_eq!(snapshot(&store), fresh, "a reused store must refill like a fresh one");
 
@@ -677,20 +671,13 @@ fn an_always_false_filter_empties_the_store_without_breaking_it(tc: TestCase) {
     // `prepare_for_pileup` consumes the store, so this runs on its own.
     let mut emptied = RecordStore::new();
     reader
-        .fetch_into_customized(
-            tid,
-            start,
-            end,
-            &mut emptied,
-            &mut ClauseFilter::late(Predicate::never()),
-        )
+        .fetch_into_customized(tid, span, &mut emptied, &mut ClauseFilter::late(Predicate::never()))
         .expect("fetch_into_customized");
     let prepared = emptied.prepare_for_pileup();
     assert_eq!(prepared.stats, seqair::bam::record_store::MateLinkStats::default());
     let mut engine = seqair::bam::pileup::PileupEngine::new(
         prepared.input,
-        Pos0::ZERO,
-        Pos0::new(99u32).unwrap(),
+        (Pos0::ZERO..=Pos0::new(99u32).unwrap()).into(),
     );
     assert!(engine.pileups().is_none(), "an empty store has no columns");
 

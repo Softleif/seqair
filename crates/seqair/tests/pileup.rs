@@ -67,8 +67,7 @@ fn depth_matches_sweep_line_count(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(600).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(600).unwrap()).into(),
     );
     while let Some(col) = engine.pileups() {
         let pos = col.pos().as_usize();
@@ -119,8 +118,7 @@ fn columns_match_sweep_line_coverage(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(600).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(600).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
     let col_positions: std::collections::HashSet<u32> =
@@ -162,8 +160,7 @@ fn keep_record_called_once_per_pushed_record() {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(19).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(19).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
     assert_eq!(columns.len(), 20);
@@ -195,8 +192,7 @@ fn keep_record_by_flags_excludes_correct_reads(tc: TestCase) {
     let expected = pass_flags.iter().filter(|&&p| p).count();
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(0).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(0).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
 
@@ -222,8 +218,7 @@ fn max_depth_never_exceeded(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(len - 1).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(len - 1).unwrap()).into(),
     );
     engine.set_max_depth(NonZeroU32::new(max).unwrap());
     while let Some(col) = engine.pileups() {
@@ -245,8 +240,7 @@ fn reads_available_at_lower_coverage_despite_cap(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(99).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(99).unwrap()).into(),
     );
     engine.set_max_depth(NonZeroU32::new(3).unwrap());
     let columns = collect_columns(&mut engine);
@@ -272,8 +266,7 @@ fn qpos_for_simple_cigar_is_offset_from_start(tc: TestCase) {
     let end_u32 = start_u32 + len - 1;
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(start_u32).unwrap(),
-        Pos0::new(end_u32).unwrap(),
+        (Pos0::new(start_u32).unwrap()..=Pos0::new(end_u32).unwrap()).into(),
     );
 
     while let Some(col) = engine.pileups() {
@@ -300,8 +293,7 @@ fn no_empty_columns(tc: TestCase) {
     let end = pos2 as u32 + len2 + 10;
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(pos1 as u32).unwrap(),
-        Pos0::new(end).unwrap(),
+        (Pos0::new(pos1 as u32).unwrap()..=Pos0::new(end).unwrap()).into(),
     );
     while let Some(col) = engine.pileups() {
         assert!(col.depth() > 0, "empty column at {}", col.pos());
@@ -320,8 +312,7 @@ fn unmapped_reads_excluded_from_pileup() {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(149).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(149).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
     assert_eq!(columns[0].depth(), 2, "unmapped should be excluded");
@@ -339,8 +330,7 @@ fn zero_refspan_read_handled_gracefully() {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(48).unwrap(),
-        Pos0::new(52).unwrap(),
+        (Pos0::new(48).unwrap()..=Pos0::new(52).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
     // Pure soft-clip has no ref-consuming ops → no qpos → no column
@@ -362,8 +352,7 @@ fn leading_softclip_does_not_extend_ref_range() {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(95).unwrap(),
-        Pos0::new(125).unwrap(),
+        (Pos0::new(95).unwrap()..=Pos0::new(125).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
     let positions: Vec<u32> = columns.iter().map(|c| c.pos().as_u32()).collect();
@@ -387,8 +376,7 @@ fn secondary_and_supplementary_reads_in_arena() {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(149).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(149).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
     assert_eq!(columns[0].depth(), 3, "secondary+supplementary should appear by default");
@@ -429,8 +417,7 @@ fn column_positions_are_strictly_increasing(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(300).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(300).unwrap()).into(),
     );
     let mut prev_pos: Option<u32> = None;
     while let Some(col) = engine.pileups() {
@@ -457,8 +444,7 @@ fn qpos_within_read_length(tc: TestCase) {
     let end_u32 = start_u32 + len - 1;
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(start_u32).unwrap(),
-        Pos0::new(end_u32).unwrap(),
+        (Pos0::new(start_u32).unwrap()..=Pos0::new(end_u32).unwrap()).into(),
     );
 
     while let Some(col) = engine.pileups() {
@@ -491,8 +477,7 @@ fn all_alignments_have_valid_base_and_qual(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(len - 1).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(len - 1).unwrap()).into(),
     );
     while let Some(col) = engine.pileups() {
         assert!(col.depth() > 0);
@@ -529,8 +514,7 @@ fn trailing_empty_positions_terminate_early(tc: TestCase) {
     let region_end = start_u32 + len + trailing;
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(start_u32).unwrap(),
-        Pos0::new(region_end).unwrap(),
+        (Pos0::new(start_u32).unwrap()..=Pos0::new(region_end).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
 
@@ -567,8 +551,7 @@ fn reference_base_matches_ref_seq() {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(109).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(109).unwrap()).into(),
     );
     engine.set_reference_seq(ref_seq);
     let columns = collect_columns(&mut engine);
@@ -592,8 +575,7 @@ fn reference_base_unknown_without_ref_seq() {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(4).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(4).unwrap()).into(),
     );
     while let Some(col) = engine.pileups() {
         assert_eq!(col.reference_base(), Base::Unknown, "should be Unknown when no ref_seq set");
@@ -610,8 +592,7 @@ fn reclaim_allocation_reuse_across_regions() {
     // Drive the engine to completion without consuming it via collect().
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(9).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(9).unwrap()).into(),
     );
     let mut count = 0usize;
     while engine.pileups().is_some() {
@@ -626,8 +607,7 @@ fn reclaim_allocation_reuse_across_regions() {
     store.push_raw(&make_record(0, 100, 99, 60, 5), &mut ()).unwrap();
     let mut engine2 = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(104).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(104).unwrap()).into(),
     );
     let columns2 = collect_columns(&mut engine2);
     assert_eq!(columns2.len(), 5);
@@ -641,8 +621,7 @@ fn reclaim_allocation_returns_none_after_second_take() {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(4).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(4).unwrap()).into(),
     );
     while engine.pileups().is_some() {}
 
@@ -668,8 +647,7 @@ fn read_starting_before_region_contributes_within(tc: TestCase) {
     let region_end = read_start as u32 + read_len - 1;
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(region_start).unwrap(),
-        Pos0::new(region_end).unwrap(),
+        (Pos0::new(region_start).unwrap()..=Pos0::new(region_end).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
 
@@ -695,8 +673,7 @@ fn read_extending_past_region_end_is_truncated() {
     // Region only covers positions 0-9, but read covers 0-99
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(9).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(9).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
     assert_eq!(columns.len(), 10);
@@ -720,8 +697,7 @@ fn unmapped_reads_never_appear_in_columns(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(0).unwrap(),
-        Pos0::new(19).unwrap(),
+        (Pos0::new(0).unwrap()..=Pos0::new(19).unwrap()).into(),
     );
     while let Some(col) = engine.pileups() {
         assert_eq!(
@@ -756,8 +732,7 @@ fn depth_matches_cigar_derived_coverage(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(region_start).unwrap(),
-        Pos0::new(region_end).unwrap(),
+        (Pos0::new(region_start).unwrap()..=Pos0::new(region_end).unwrap()).into(),
     );
     while let Some(col) = engine.pileups() {
         // Only count M/=/X alignments (those with a qpos) — D/N are now included
@@ -790,8 +765,7 @@ fn qpos_matches_independent_cigar_walk(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(region_start).unwrap(),
-        Pos0::new(region_end).unwrap(),
+        (Pos0::new(region_start).unwrap()..=Pos0::new(region_end).unwrap()).into(),
     );
     while let Some(col) = engine.pileups() {
         for aln in col.alignments() {
@@ -826,8 +800,7 @@ fn deletions_cause_absent_alignment(tc: TestCase) {
     let region_end = region_start + read.ref_span;
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(region_start).unwrap(),
-        Pos0::new(region_end).unwrap(),
+        (Pos0::new(region_start).unwrap()..=Pos0::new(region_end).unwrap()).into(),
     );
 
     let covered = read.covered_ref_positions();
@@ -871,8 +844,7 @@ fn insertions_shift_qpos_but_not_depth(tc: TestCase) {
     let region_end = region_start + read.ref_span;
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(region_start).unwrap(),
-        Pos0::new(region_end).unwrap(),
+        (Pos0::new(region_start).unwrap()..=Pos0::new(region_end).unwrap()).into(),
     );
 
     while let Some(col) = engine.pileups() {
@@ -905,8 +877,7 @@ fn no_zero_depth_columns_with_complex_cigars(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(region_start).unwrap(),
-        Pos0::new(region_end).unwrap(),
+        (Pos0::new(region_start).unwrap()..=Pos0::new(region_end).unwrap()).into(),
     );
     while let Some(col) = engine.pileups() {
         assert!(col.depth() > 0, "empty column at pos {} with complex CIGARs", col.pos());
@@ -928,8 +899,7 @@ fn qpos_always_within_seq_bounds(tc: TestCase) {
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
-        Pos0::new(region_start).unwrap(),
-        Pos0::new(region_end).unwrap(),
+        (Pos0::new(region_start).unwrap()..=Pos0::new(region_end).unwrap()).into(),
     );
     while let Some(col) = engine.pileups() {
         for aln in col.alignments() {
@@ -976,8 +946,7 @@ fn pileup_includes_out_of_order_records() {
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(80).unwrap(),
-        Pos0::new(280).unwrap(),
+        (Pos0::new(80).unwrap()..=Pos0::new(280).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
 
@@ -1028,8 +997,7 @@ fn pileup_deduplicates_cross_category_records() {
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(170).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(170).unwrap()).into(),
     );
     let columns = collect_columns(&mut engine);
 

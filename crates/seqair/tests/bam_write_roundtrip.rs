@@ -138,7 +138,7 @@ fn roundtrip_simple_records() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(100_000).unwrap()).into(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 2);
     assert_eq!(store.record(ri(0)).unwrap().qname(), b"read1");
@@ -293,7 +293,7 @@ fn roundtrip_complex_cigars() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(100_000).unwrap()).into(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 3);
 }
@@ -365,7 +365,7 @@ fn roundtrip_multiple_contigs() {
     let tid1 = reader.header().tid("chr1").expect("chr1");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid1, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
+        .fetch_into(tid1, (Pos0::new(0).unwrap()..=Pos0::new(100_000).unwrap()).into(), &mut store)
         .expect("fetch chr1");
     assert_eq!(store.len(), 1);
     assert_eq!(store.record(ri(0)).unwrap().qname(), b"chr1_read");
@@ -374,7 +374,7 @@ fn roundtrip_multiple_contigs() {
     let tid2 = reader.header().tid("chr2").expect("chr2");
     store.clear();
     reader
-        .fetch_into(tid2, Pos0::new(0).unwrap(), Pos0::new(50_000).unwrap(), &mut store)
+        .fetch_into(tid2, (Pos0::new(0).unwrap()..=Pos0::new(50_000).unwrap()).into(), &mut store)
         .expect("fetch chr2");
     assert_eq!(store.len(), 1);
     assert_eq!(store.record(ri(0)).unwrap().qname(), b"chr2_read");
@@ -434,7 +434,7 @@ fn index_coproduction_matches_samtools() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(100_000).unwrap()).into(), &mut store)
         .expect("fetch");
 
     assert_eq!(
@@ -581,7 +581,9 @@ fn roundtrip_write_store_record() {
     // Read back via seqair and compare field-by-field with original store
     let mut store2 = RecordStore::new();
     let mut shared = IndexedBamReader::open(&bam_path).unwrap();
-    shared.fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(1000).unwrap(), &mut store2).unwrap();
+    shared
+        .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::new(1000).unwrap()).into(), &mut store2)
+        .unwrap();
     assert_eq!(store2.len(), 2);
 
     for i in store.indices() {
@@ -710,7 +712,11 @@ mod e2e_oracle {
         let mut store2 = RecordStore::new();
         let mut reader = IndexedBamReader::open(&bam_path).unwrap();
         reader
-            .fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(100_000).unwrap(), &mut store2)
+            .fetch_into(
+                0,
+                (Pos0::new(0).unwrap()..=Pos0::new(100_000).unwrap()).into(),
+                &mut store2,
+            )
             .unwrap();
 
         assert_eq!(store2.len(), inputs.len(), "record count round-tripped");

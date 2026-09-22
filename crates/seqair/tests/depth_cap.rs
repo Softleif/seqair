@@ -110,21 +110,10 @@ fn seqair_depths(
     let tid = reader.header().tid(contig).expect("contig not found");
     let mut store = RecordStore::new();
     let mut customize = DepthCap::with_cap((), cap);
-    reader
-        .fetch_into_customized(
-            tid,
-            Pos0::new(start).unwrap(),
-            Pos0::new(end).unwrap(),
-            &mut store,
-            &mut customize,
-        )
-        .expect("fetch");
+    let span = (Pos0::new(start).unwrap()..=Pos0::new(end).unwrap()).into();
+    reader.fetch_into_customized(tid, span, &mut store, &mut customize).expect("fetch");
 
-    let mut engine = PileupEngine::new(
-        store.prepare_for_pileup().input,
-        Pos0::new(start).unwrap(),
-        Pos0::new(end).unwrap(),
-    );
+    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, span);
     let mut out = Vec::new();
     while let Some(col) = engine.pileups() {
         out.push((u32::from(col.pos()), col.depth() as u32));

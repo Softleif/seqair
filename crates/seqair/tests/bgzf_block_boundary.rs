@@ -128,7 +128,11 @@ fn large_records_spanning_blocks() {
     let tid = seqair_reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     seqair_reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(10_000_000).unwrap(), &mut store)
+        .fetch_into(
+            tid,
+            (Pos0::new(0).unwrap()..=Pos0::new(10_000_000).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert_eq!(store.len(), 20, "seqair should find all 20 large records");
@@ -182,7 +186,11 @@ fn long_cigar_records_spanning_blocks() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(10_000_000).unwrap(), &mut store)
+        .fetch_into(
+            tid,
+            (Pos0::new(0).unwrap()..=Pos0::new(10_000_000).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert_eq!(store.len(), 10, "should have all 10 long-cigar records");
@@ -243,7 +251,11 @@ fn mixed_record_sizes_across_boundaries() {
     let tid = seqair_reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     seqair_reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(10_000_000).unwrap(), &mut store)
+        .fetch_into(
+            tid,
+            (Pos0::new(0).unwrap()..=Pos0::new(10_000_000).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
 
     assert_eq!(store.len(), 50);

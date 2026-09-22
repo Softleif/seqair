@@ -224,8 +224,7 @@ fn engine_accepts_typed_store() {
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(109).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(109).unwrap()).into(),
     );
     engine.set_max_depth(NonZeroU32::new(10).unwrap());
 
@@ -244,8 +243,7 @@ fn pileups_yields_same_columns_on_unit_and_typed_store() {
     let store_copy = store_with_n_records(5);
     let mut engine = PileupEngine::new(
         store_copy.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(109).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(109).unwrap()).into(),
     );
     let iter_columns: Vec<_> =
         collect_columns(&mut engine).into_iter().map(|c| (c.pos(), c.depth())).collect();
@@ -253,8 +251,7 @@ fn pileups_yields_same_columns_on_unit_and_typed_store() {
     // Collect columns via pileups() on a typed store.
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(109).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(109).unwrap()).into(),
     );
     let mut cws_columns = Vec::new();
     while let Some(col) = engine.pileups() {
@@ -271,8 +268,7 @@ fn pileups_column_exposes_store_access_via_alignment_view() {
     let store = store_with_n_records_customized(3, ExtractPos);
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(109).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(109).unwrap()).into(),
     );
 
     let mut saw_extras = false;
@@ -307,8 +303,7 @@ fn engine_reclaim_allocation_clears_records_and_keeps_capacity() {
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(109).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(109).unwrap()).into(),
     );
 
     // Consume all columns.
@@ -416,8 +411,7 @@ fn pileup_with_sorted_typed_store() {
     // Build engine with the sorted typed store.
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(114).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(114).unwrap()).into(),
     );
     let mut column_count = 0;
     while let Some(col) = engine.pileups() {
@@ -495,14 +489,11 @@ fn keep_record_drops_low_mapq_records_via_fetch_into_customized() {
     let mut store = RecordStore::new();
 
     // Always-keep: kept == fetched.
+    let region_span: core::range::RangeInclusive<Pos0> =
+        (Pos0::new(6_103_000).unwrap()..=Pos0::new(6_104_000).unwrap()).into();
+
     let counts_all = reader
-        .fetch_into_customized(
-            tid,
-            Pos0::new(6_103_000).unwrap(),
-            Pos0::new(6_104_000).unwrap(),
-            &mut store,
-            &mut (),
-        )
+        .fetch_into_customized(tid, region_span, &mut store, &mut ())
         .expect("fetch_into_customized");
     assert!(counts_all.fetched > 0, "test region should produce records");
     assert_eq!(counts_all.kept, counts_all.fetched);
@@ -511,13 +502,7 @@ fn keep_record_drops_low_mapq_records_via_fetch_into_customized() {
 
     // Drop-all: kept == 0 but fetched unchanged.
     let counts_none = reader
-        .fetch_into_customized(
-            tid,
-            Pos0::new(6_103_000).unwrap(),
-            Pos0::new(6_104_000).unwrap(),
-            &mut store,
-            &mut DropAll,
-        )
+        .fetch_into_customized(tid, region_span, &mut store, &mut DropAll)
         .expect("fetch_into_customized");
     assert_eq!(counts_none.fetched, counts_all.fetched);
     assert_eq!(counts_none.kept, 0);
@@ -545,13 +530,13 @@ fn cram_fetch_into_customized_applies_filter_at_push_time() {
 
     let mut reader = IndexedCramReader::open(&cram_path, &fasta_path).expect("open CRAM");
     let tid = reader.header().tid("chr19").expect("chr19 missing from CRAM header");
-    let region_start = Pos0::new(6_103_076).unwrap();
-    let region_end = Pos0::new(6_143_229).unwrap();
+    let region_span: core::range::RangeInclusive<Pos0> =
+        (Pos0::new(6_103_076).unwrap()..=Pos0::new(6_143_229).unwrap()).into();
     let mut store = RecordStore::new();
 
     // Baseline: always-keep — kept == fetched and matches the sparse fetch_into count.
     let counts_all = reader
-        .fetch_into_customized(tid, region_start, region_end, &mut store, &mut ())
+        .fetch_into_customized(tid, region_span, &mut store, &mut ())
         .expect("fetch_into_customized all");
     assert!(counts_all.fetched > 0, "test region should produce records");
     assert_eq!(counts_all.kept, counts_all.fetched, "always-keep must keep everything");
@@ -566,7 +551,7 @@ fn cram_fetch_into_customized_applies_filter_at_push_time() {
     // Drop-all: fetched unchanged, kept == 0. The store (including all slabs)
     // must be empty after rollback — this is the zero-waste guarantee.
     let counts_none = reader
-        .fetch_into_customized(tid, region_start, region_end, &mut store, &mut DropAll)
+        .fetch_into_customized(tid, region_span, &mut store, &mut DropAll)
         .expect("fetch_into_customized none");
     assert_eq!(counts_none.fetched, counts_all.fetched, "fetched must be filter-independent");
     assert_eq!(counts_none.kept, 0, "drop-all must yield no kept records");
@@ -585,7 +570,7 @@ fn cram_fetch_into_customized_applies_filter_at_push_time() {
     }
 
     let counts_mixed = reader
-        .fetch_into_customized(tid, region_start, region_end, &mut store, &mut EvenPos)
+        .fetch_into_customized(tid, region_span, &mut store, &mut EvenPos)
         .expect("fetch_into_customized mixed");
     assert_eq!(counts_mixed.fetched, counts_all.fetched, "fetched must be filter-independent");
     let expected_kept: usize = all_positions.iter().filter(|p| *p % 2 == 0).count();

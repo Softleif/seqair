@@ -94,7 +94,7 @@ fn max_qname_length() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 1);
     assert_eq!(store.record(ri(0)).unwrap().qname().len(), 254);
@@ -121,7 +121,7 @@ fn large_sequence() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 1);
     assert_eq!(store.record(ri(0)).unwrap().seq_len, seq_len);
@@ -276,7 +276,7 @@ fn fully_unmapped_not_indexed() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 1, "fetch should only return mapped records");
     assert_eq!(store.record(ri(0)).unwrap().qname(), b"mapped");
@@ -373,7 +373,7 @@ fn dense_records_same_position() {
     let tid = reader.header().tid("chr1").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(), &mut store)
         .expect("fetch");
     assert_eq!(store.len(), 100, "should find all 100 records at same pos");
 }

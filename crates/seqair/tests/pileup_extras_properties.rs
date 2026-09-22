@@ -165,7 +165,7 @@ fn column_stream<U>(
     store: RecordStore<U>,
 ) -> Vec<(Pos0, Base, Vec<Entry>)> {
     let (start, end) = region(reads);
-    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, start, end);
+    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, (start..=end).into());
     let mut out = Vec::new();
     while let Some(col) = engine.pileups() {
         let entries =
@@ -217,7 +217,7 @@ fn every_alignment_carries_its_own_records_extra(tc: TestCase) {
 
     let store = store_with(&reads, &mut TagByQname::default());
     let (start, end) = region(&reads);
-    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, start, end);
+    let mut engine = PileupEngine::new(store.prepare_for_pileup().input, (start..=end).into());
 
     let mut checked = 0usize;
     let mut without_base = 0usize;

@@ -131,7 +131,11 @@ fn read_all(path: &Path, fasta: &Path) -> Vec<Decoded> {
     let tid = readers.header().tid(CONTIG).expect("contig");
     let mut store = RecordStore::new();
     readers
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(CONTIG_LEN - 1).unwrap(), &mut store)
+        .fetch_into(
+            tid,
+            (Pos0::new(0).unwrap()..=Pos0::new(CONTIG_LEN - 1).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
 
     store

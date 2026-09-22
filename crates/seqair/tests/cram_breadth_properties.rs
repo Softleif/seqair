@@ -437,7 +437,7 @@ fn fetch(path: &Path, fasta: &Path, contig: usize, start0: u32, end0: u32) -> Ve
     let tid = readers.header().tid(&name).expect("contig in header");
     let mut store = RecordStore::new();
     readers
-        .fetch_into(tid, Pos0::new(start0).unwrap(), Pos0::new(end0).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(start0).unwrap()..=Pos0::new(end0).unwrap()).into(), &mut store)
         .expect("fetch");
     decode_store(&store)
 }
@@ -470,7 +470,7 @@ fn fetch_all(path: &Path, fasta: &Path, sample: &Sample) -> Vec<Decoded> {
         let tid = readers.header().tid(&name).expect("contig in header");
         store.clear();
         readers
-            .fetch_into(tid, Pos0::ZERO, Pos0::new(CONTIG_LEN - 1).unwrap(), &mut store)
+            .fetch_into(tid, (Pos0::ZERO..=Pos0::new(CONTIG_LEN - 1).unwrap()).into(), &mut store)
             .expect("fetch");
         out.extend(decode_store(&store));
     }

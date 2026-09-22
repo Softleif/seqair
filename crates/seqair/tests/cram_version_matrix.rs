@@ -168,7 +168,11 @@ fn assert_cram_parity(cram_path: &Path, fasta_path: &Path, label: &str) {
 
         let mut store = RecordStore::new();
         readers
-            .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(contig_len).unwrap(), &mut store)
+            .fetch_into(
+                tid,
+                (Pos0::new(0).unwrap()..=Pos0::new(contig_len).unwrap()).into(),
+                &mut store,
+            )
             .unwrap_or_else(|e| panic!("{label}/{contig_name}: fetch failed: {e:?}"));
 
         assert_eq!(
@@ -345,7 +349,7 @@ fn cram_embedded_reference() {
     let tid = readers.header().tid("c1").expect("tid");
     let mut store = RecordStore::new();
     readers
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(10).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(10).unwrap()).into(), &mut store)
         .expect("fetch");
 
     assert_eq!(

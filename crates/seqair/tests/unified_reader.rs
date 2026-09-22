@@ -37,6 +37,10 @@ const CONTIGS: &[(&str, u64, u64)] = &[
     ("bacteriophage_lambda_CpG", 1, 48_502),
 ];
 
+fn span(start: u64, end: u64) -> core::range::RangeInclusive<Pos0> {
+    (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into()
+}
+
 fn create_sam_gz(dir: &Path) -> std::path::PathBuf {
     let sam_gz = dir.join("test.sam.gz");
     let status = Command::new("samtools")
@@ -118,24 +122,10 @@ fn bam_and_sam_produce_same_records() {
         let sam_tid = sam_reader.header().tid(contig).unwrap();
 
         let mut bam_store = RecordStore::new();
-        bam_reader
-            .fetch_into(
-                bam_tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
-                &mut bam_store,
-            )
-            .unwrap();
+        bam_reader.fetch_into(bam_tid, span(start, end), &mut bam_store).unwrap();
 
         let mut sam_store = RecordStore::new();
-        sam_reader
-            .fetch_into(
-                sam_tid,
-                Pos0::new(start as u32).unwrap(),
-                Pos0::new(end as u32).unwrap(),
-                &mut sam_store,
-            )
-            .unwrap();
+        sam_reader.fetch_into(sam_tid, span(start, end), &mut sam_store).unwrap();
 
         assert_eq!(
             bam_store.len(),
@@ -187,9 +177,7 @@ fn every_format_agrees_on_the_edges_of_a_query() {
     let mut bam_reader = IndexedReader::open(test_bam_path()).expect("bam");
     let tid = bam_reader.header().tid("chr19").unwrap();
     let mut store = RecordStore::new();
-    bam_reader
-        .fetch_into(tid, Pos0::new(6_103_076).unwrap(), Pos0::new(6_104_000).unwrap(), &mut store)
-        .unwrap();
+    bam_reader.fetch_into(tid, span(6_103_076, 6_104_000), &mut store).unwrap();
     let probe = store.record(ri(0)).unwrap();
     let (first, last) = (probe.pos, probe.end_pos);
     assert!(last > first, "need a record spanning more than one base");
@@ -223,7 +211,7 @@ fn every_format_agrees_on_the_edges_of_a_query() {
             let mut reader = open();
             let tid = reader.header().tid("chr19").unwrap();
             let mut store = RecordStore::new();
-            reader.fetch_into(tid, edge, edge, &mut store).unwrap();
+            reader.fetch_into(tid, (edge..=edge).into(), &mut store).unwrap();
             let hit = store.indices().any(|i| store.record(i).unwrap().qname() == qname.as_slice());
             assert!(
                 hit,
@@ -247,7 +235,7 @@ fn every_format_agrees_on_the_edges_of_a_query() {
         let mut reader = open();
         let tid = reader.header().tid("chr19").unwrap();
         let mut store = RecordStore::new();
-        reader.fetch_into(tid, past, past, &mut store).unwrap();
+        reader.fetch_into(tid, (past..=past).into(), &mut store).unwrap();
         // Other records may cover that position; this one must not be reported
         // as covering it unless it genuinely does.
         for i in store.indices() {
@@ -276,20 +264,11 @@ fn fork_works_for_both_formats() {
 
     let tid = bam_fork.header().tid("chr19").unwrap();
     let mut store = RecordStore::new();
-    bam_fork
-        .fetch_into(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store)
-        .unwrap();
+    bam_fork.fetch_into(tid, span(6_105_700, 6_105_800), &mut store).unwrap();
     assert!(!store.is_empty(), "bam fork should fetch records");
 
     let sam_tid = sam_fork.header().tid("chr19").unwrap();
-    sam_fork
-        .fetch_into(
-            sam_tid,
-            Pos0::new(6_105_700).unwrap(),
-            Pos0::new(6_105_800).unwrap(),
-            &mut store,
-        )
-        .unwrap();
+    sam_fork.fetch_into(sam_tid, span(6_105_700, 6_105_800), &mut store).unwrap();
     assert!(!store.is_empty(), "sam fork should fetch records");
 }
 
@@ -348,9 +327,7 @@ fn readers_fork_cram() {
     let mut forked = readers.fork().unwrap();
     let tid = forked.header().tid("chr19").unwrap();
     let mut store = RecordStore::new();
-    forked
-        .fetch_into(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store)
-        .unwrap();
+    forked.fetch_into(tid, span(6_105_700, 6_105_800), &mut store).unwrap();
     assert!(!store.is_empty(), "cram fork should fetch records");
 }
 
@@ -367,22 +344,10 @@ fn bam_and_cram_produce_same_records() {
         let cram_tid = cram.header().tid(contig).unwrap();
 
         let mut bam_store = RecordStore::new();
-        bam.fetch_into(
-            bam_tid,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
-            &mut bam_store,
-        )
-        .unwrap();
+        bam.fetch_into(bam_tid, span(start, end), &mut bam_store).unwrap();
 
         let mut cram_store = RecordStore::new();
-        cram.fetch_into(
-            cram_tid,
-            Pos0::new(start as u32).unwrap(),
-            Pos0::new(end as u32).unwrap(),
-            &mut cram_store,
-        )
-        .unwrap();
+        cram.fetch_into(cram_tid, span(start, end), &mut cram_store).unwrap();
 
         assert_eq!(
             bam_store.len(),
@@ -436,27 +401,9 @@ fn all_three_formats_produce_same_records() {
     let mut sam_store = RecordStore::new();
     let mut cram_store = RecordStore::new();
 
-    bam.fetch_into(
-        bam_tid,
-        Pos0::new(start as u32).unwrap(),
-        Pos0::new(end as u32).unwrap(),
-        &mut bam_store,
-    )
-    .unwrap();
-    sam.fetch_into(
-        sam_tid,
-        Pos0::new(start as u32).unwrap(),
-        Pos0::new(end as u32).unwrap(),
-        &mut sam_store,
-    )
-    .unwrap();
-    cram.fetch_into(
-        cram_tid,
-        Pos0::new(start as u32).unwrap(),
-        Pos0::new(end as u32).unwrap(),
-        &mut cram_store,
-    )
-    .unwrap();
+    bam.fetch_into(bam_tid, span(start, end), &mut bam_store).unwrap();
+    sam.fetch_into(sam_tid, span(start, end), &mut sam_store).unwrap();
+    cram.fetch_into(cram_tid, span(start, end), &mut cram_store).unwrap();
 
     assert_eq!(bam_store.len(), sam_store.len(), "BAM vs SAM count");
     assert_eq!(bam_store.len(), cram_store.len(), "BAM vs CRAM count");

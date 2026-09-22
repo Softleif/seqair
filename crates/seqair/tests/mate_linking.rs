@@ -530,8 +530,7 @@ fn columns_report_the_overlap_and_can_reach_the_mate() {
     let store = linked_pair(Read::mate(100, 50, 130, FIRST), Read::mate(130, 50, 100, SECOND));
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(200).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(200).unwrap()).into(),
     );
 
     let mut checked = 0;
@@ -570,8 +569,7 @@ fn position_of_and_alignment_at_agree_with_find_record() {
     let store = linked_pair(Read::mate(100, 50, 130, FIRST), Read::mate(130, 50, 100, SECOND));
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(200).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(200).unwrap()).into(),
     );
 
     let mut columns = 0;
@@ -600,8 +598,7 @@ fn find_record_returns_none_for_a_record_outside_the_column() {
     let store = linked_pair(Read::mate(100, 50, 300, FIRST), Read::mate(300, 50, 100, SECOND));
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(120).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(120).unwrap()).into(),
     );
     let col = engine.pileups().expect("a column at 100");
     assert!(col.find_record(ri(0)).is_some());
@@ -620,8 +617,7 @@ fn column_alignments_are_ordered_by_record_idx() {
     let _stats = store.link_mates();
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(160).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(160).unwrap()).into(),
     );
 
     while let Some(col) = engine.pileups() {
@@ -727,8 +723,7 @@ fn mate_of_surfaces_the_linked_mate() {
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(119).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(119).unwrap()).into(),
     );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
@@ -766,8 +761,7 @@ fn mate_of_surfaces_a_mate_deletion() {
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(119).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(119).unwrap()).into(),
     );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
@@ -792,8 +786,7 @@ fn mate_of_is_symmetric_and_never_self() {
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(119).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(119).unwrap()).into(),
     );
     with_anchor_column(&mut engine, |col| {
         for idx in [ri(0), ri(1)] {
@@ -841,8 +834,7 @@ fn mate_of_does_not_depend_on_what_either_read_carries() {
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(119).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(119).unwrap()).into(),
     );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
@@ -863,8 +855,7 @@ fn mate_of_is_none_without_a_linked_mate() {
     assert_eq!(stats.pairs, 0);
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(119).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(119).unwrap()).into(),
     );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
@@ -886,8 +877,7 @@ fn mate_of_is_none_when_the_mate_is_absent_from_the_column() {
     assert_eq!(stats.pairs, 1, "fixture must link");
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(119).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(119).unwrap()).into(),
     );
     engine.set_max_depth(NonZeroU32::new(1).unwrap());
     with_anchor_column(&mut engine, |col| {
@@ -909,8 +899,7 @@ fn mate_of_is_none_when_the_mate_is_absent_from_the_column() {
     assert_eq!(stats.pairs, 1, "fixture must link");
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,
-        Pos0::new(100).unwrap(),
-        Pos0::new(219).unwrap(),
+        (Pos0::new(100).unwrap()..=Pos0::new(219).unwrap()).into(),
     );
     with_anchor_column(&mut engine, |col| {
         let view = col.alignments().find(|a| a.record_idx() == ri(0)).unwrap();
@@ -1141,7 +1130,7 @@ fn link_counts_through_readers(path: &Path) -> (usize, usize, usize) {
     let start = Pos0::new(REGION.0).unwrap();
     let end = Pos0::new(REGION.1).unwrap();
     let segment = readers
-        .segments((contig.as_str(), start, end), opts)
+        .segments((contig.as_str(), (start..=end).into()), opts)
         .expect("segment plan")
         .next()
         .expect("one segment");
@@ -1238,7 +1227,11 @@ fn a_fetched_store_holds_each_record_once() {
         let tid = readers.header().tid("chr19").expect("chr19 in header");
         let mut store = RecordStore::new();
         readers
-            .fetch_into(tid, Pos0::new(REGION.0).unwrap(), Pos0::new(REGION.1).unwrap(), &mut store)
+            .fetch_into(
+                tid,
+                (Pos0::new(REGION.0).unwrap()..=Pos0::new(REGION.1).unwrap()).into(),
+                &mut store,
+            )
             .expect("fetch");
         assert!(!store.is_empty(), "{name}: no records fetched");
         let stats = store.link_mates();

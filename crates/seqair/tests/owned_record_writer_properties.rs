@@ -545,7 +545,11 @@ fn built_records_read_back_through_seqair(tc: TestCase) {
         let tid = reader.header().tid(name).expect("contig");
         let mut store = RecordStore::new();
         reader
-            .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(len - 1).unwrap(), &mut store)
+            .fetch_into(
+                tid,
+                (Pos0::new(0).unwrap()..=Pos0::new(len - 1).unwrap()).into(),
+                &mut store,
+            )
             .expect("fetch");
         for idx in store.indices() {
             let r = store.record(idx).unwrap();

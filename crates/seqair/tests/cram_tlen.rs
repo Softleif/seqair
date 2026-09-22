@@ -93,7 +93,7 @@ fn assert_tlen_via_bam(name: &str) {
     let tid = reader.header().tid("ref").expect("contig 'ref'");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(20).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(20).unwrap()).into(), &mut store)
         .expect("fetch");
 
     assert_eq!(
@@ -162,7 +162,7 @@ fn assert_cram_fields_with_tlen(name: &str) {
     let tid = readers.header().tid("ref").expect("contig 'ref'");
     let mut store = RecordStore::new();
     readers
-        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(20).unwrap(), &mut store)
+        .fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::new(20).unwrap()).into(), &mut store)
         .unwrap_or_else(|e| panic!("{name}: fetch failed: {e:#}"));
 
     assert_eq!(store.len(), expected.len(), "{name}: record count");

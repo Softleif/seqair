@@ -11,6 +11,7 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+use core::range::RangeInclusive;
 use rust_htslib::faidx;
 use seqair::fasta::{FastaError, IndexedFastaReader};
 use seqair_types::Pos0;
@@ -32,10 +33,12 @@ fn htslib_fetch(name: &str, start: u64, stop: u64) -> Vec<u8> {
     reader.fetch_seq(name, begin, end).expect("htslib fetch_seq").to_ascii_uppercase()
 }
 
+/// `start` inclusive, `stop` exclusive — matches `htslib_fetch`'s half-open
+/// convention; converted to seqair's closed `[start, stop - 1]` span here.
 fn fetch(reader: &mut IndexedFastaReader, name: &str, start: u64, stop: u64) -> Vec<u8> {
     let start = Pos0::try_from(start).expect("start fits in u32");
-    let stop = Pos0::try_from(stop).expect("stop fits in u32");
-    reader.fetch_seq(name, start, stop).expect("rio fetch_seq")
+    let last = Pos0::try_from(stop.saturating_sub(1)).expect("stop fits in u32");
+    reader.fetch_seq(name, RangeInclusive { start, last }).expect("rio fetch_seq")
 }
 
 // ---- Full sequence comparison for small sequences ----
@@ -152,10 +155,11 @@ fn fetch_into_matches_fetch() {
     let mut buf = Vec::new();
 
     for &(name, length) in SEQUENCES {
-        let stop = Pos0::try_from(length.min(500)).expect("stop fits in u32");
+        let last = Pos0::try_from(length.min(500).saturating_sub(1)).expect("last fits in u32");
         let zero = Pos0::new(0).unwrap();
-        let alloc = rio.fetch_seq(name, zero, stop).expect("fetch_seq");
-        rio.fetch_seq_into(name, zero, stop, &mut buf).expect("fetch_seq_into");
+        let span = RangeInclusive { start: zero, last };
+        let alloc = rio.fetch_seq(name, span).expect("fetch_seq");
+        rio.fetch_seq_into(name, span, &mut buf).expect("fetch_seq_into");
         assert_eq!(alloc, buf, "fetch_seq vs fetch_seq_into mismatch for {name}");
     }
 }
@@ -167,8 +171,8 @@ fn fetch_into_matches_fetch() {
 #[test]
 fn unknown_sequence_error() {
     let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-    let err =
-        rio.fetch_seq("nonexistent", Pos0::new(0).unwrap(), Pos0::new(100).unwrap()).unwrap_err();
+    let span = RangeInclusive { start: Pos0::new(0).unwrap(), last: Pos0::new(99).unwrap() };
+    let err = rio.fetch_seq("nonexistent", span).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("nonexistent"), "error should name the sequence: {msg}");
     assert!(msg.contains("chr19"), "error should list available: {msg}");
@@ -179,9 +183,8 @@ fn unknown_sequence_error() {
 #[test]
 fn out_of_bounds_error() {
     let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-    let err = rio
-        .fetch_seq("2kb_3_Unmodified", Pos0::new(0).unwrap(), Pos0::new(999999).unwrap())
-        .unwrap_err();
+    let span = RangeInclusive { start: Pos0::new(0).unwrap(), last: Pos0::new(999_998).unwrap() };
+    let err = rio.fetch_seq("2kb_3_Unmodified", span).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("out of bounds"), "error: {msg}");
 }
@@ -189,7 +192,9 @@ fn out_of_bounds_error() {
 #[test]
 fn empty_range_error() {
     let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-    let err = rio.fetch_seq("chr19", Pos0::new(100).unwrap(), Pos0::new(100).unwrap()).unwrap_err();
+    // Reversed closed span — the empty-range equivalent of the old half-open [100, 100).
+    let span = RangeInclusive { start: Pos0::new(100).unwrap(), last: Pos0::new(99).unwrap() };
+    let err = rio.fetch_seq("chr19", span).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("out of bounds"), "error: {msg}");
 }
@@ -234,8 +239,10 @@ fn concurrent_forks() {
                     let start = (i as u64) * 10000;
                     let stop = start + 10000;
                     let start_pos = Pos0::try_from(start).expect("start fits");
-                    let stop_pos = Pos0::try_from(stop).expect("stop fits");
-                    forked.fetch_seq("chr19", start_pos, stop_pos).expect("fetch")
+                    let last_pos = Pos0::try_from(stop - 1).expect("last fits");
+                    forked
+                        .fetch_seq("chr19", RangeInclusive { start: start_pos, last: last_pos })
+                        .expect("fetch")
                 })
             })
             .collect();
