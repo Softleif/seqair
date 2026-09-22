@@ -268,6 +268,10 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
         store: &mut RecordStore,
     ) -> Result<usize, SamError> {
         store.clear();
+        // r[impl interval.empty_span]
+        if span.is_empty() {
+            return Ok(0);
+        }
 
         self.bulk_reader.set_position(0);
         let mut all_data = Vec::new();
@@ -355,6 +359,10 @@ impl<R: Read + Seek> IndexedSamReader<R> {
     ) -> Result<crate::reader::FetchCounts, SamError> {
         store.clear();
 
+        // r[impl interval.empty_span]
+        if span.is_empty() {
+            return Ok(crate::reader::FetchCounts::default());
+        }
         let chunks = self.shared.index.query(tid, span.start, span.last);
         if chunks.is_empty() {
             return Ok(crate::reader::FetchCounts::default());

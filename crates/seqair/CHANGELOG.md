@@ -36,6 +36,12 @@ and a span ending on `Pos0::MAX` names its last base where a half-open `end` cou
 
 ### Fixed
 
+- **A reversed query returned the reads spanning it.** `fetch_into` with `start > end` handed the
+  overlap test an interval that names no positions, and the test — `pos <= end && end_pos >= start`
+  — is satisfied by exactly the records covering the whole gap. Every reader now treats a span with
+  `last < start` as what it is, empty, and returns nothing. Found by a property test written for the
+  new span API; the behaviour predates it.
+
 - **A query on a truncated BAM never returned.** Not slowly — never. `IndexedBamReader::fetch_into`
   on a file truncated anywhere past its header, with its index left intact, spun forever with no
   panic, no allocation and no error, which is why 26 fuzz targets never saw it: libFuzzer could

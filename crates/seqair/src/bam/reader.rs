@@ -266,7 +266,12 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         span: RangeInclusive<Pos0>,
     ) -> Result<BamQuery<'_, R>, BamError> {
         let RangeInclusive { start, last: end } = span;
-        let chunks = self.shared.index.query(tid, start, end);
+        // r[impl interval.empty_span]
+        // A reversed span names no positions. The overlap test alone would
+        // not say so: `rec.pos <= last && rec.end_pos >= start` holds for a
+        // record that covers the whole gap between the two ends.
+        let chunks =
+            if span.is_empty() { Vec::new() } else { self.shared.index.query(tid, start, end) };
         let tid_i32 = validate_tid(tid)?;
 
         // One streaming RegionBuf spans all chunks: the sliding window bounds

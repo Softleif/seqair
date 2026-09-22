@@ -502,6 +502,10 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         customize: &mut E,
     ) -> Result<crate::reader::FetchCounts, CramError> {
         store.clear();
+        // r[impl interval.empty_span]
+        if span.is_empty() {
+            return Ok(crate::reader::FetchCounts::default());
+        }
 
         let start_u64 = span.start.as_u64();
         let end_u64 = span.last.as_u64();

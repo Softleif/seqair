@@ -234,6 +234,13 @@ is `Copy`, 8 bytes rather than 12 (no exhaustion flag), does not implement
 inclusive end `last`, which is what it is. `(a..=b).into()` converts from the
 `..=` literal.
 
+r[interval.empty_span]
+A span whose `last` is before its `start` is empty, as it is for Rust's own
+ranges, and every query over it MUST return no records and no error. The
+overlap test alone does not give this: `record.pos <= last && record.end_pos
+>= start` holds for a record that covers the whole gap between the two ends,
+which is how a reversed span used to fetch exactly the reads spanning it.
+
 r[interval.end_pos_inclusive]
 A record's `end_pos` is the **last reference position it covers**
 (`pos + ref_len - 1`), not one past it. A record with a CIGAR that consumes no

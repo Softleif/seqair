@@ -277,6 +277,26 @@ fn arb_region(tc: &TestCase, reads: Vec<Read>) -> (usize, u32, u32) {
 }
 
 // r[verify bam.reader.overlap_filter]
+// r[verify interval.span_type]
+/// A span whose `last` is before its `start` names no positions, so it names
+/// no records — quietly, the same as a window that happens to be empty. The
+/// window is anchored on real reads so the bins the index would visit are not
+/// empty; only the span is.
+#[hegel::test(test_cases = 24)]
+fn a_reversed_span_names_no_records(tc: TestCase) {
+    let reads = tc.draw(arb_reads().print_as_debug());
+    let (contig_idx, start, end) = tc.draw(arb_region(reads.clone()).print_as_debug());
+    let (contig, _) = CONTIGS[contig_idx];
+    // Cross the ends by at least one base; `start == end` is a real window.
+    let gap = tc.draw(gs::integers::<u32>().min_value(1).max_value(3));
+    let (start, last) = (end.saturating_add(gap), start);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bam_path = write_bam(dir.path(), &reads);
+    assert_eq!(seqair_query(&bam_path, contig, start, last), Vec::<usize>::new());
+}
+
+// r[verify bam.reader.overlap_filter]
 // r[verify index_builder.bai_format]
 // r[verify index_builder.bai_all_refs]
 // r[verify index_builder.binning]

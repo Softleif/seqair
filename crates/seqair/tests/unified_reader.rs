@@ -249,6 +249,42 @@ fn every_format_agrees_on_the_edges_of_a_query() {
     }
 }
 
+// r[verify interval.empty_span]
+/// A reversed span inside a record — `last` one base before `start`, both
+/// covered by the same read — names no positions, so every format returns
+/// nothing. The overlap test alone would return exactly that read: it covers
+/// the whole gap between the two ends.
+#[test]
+fn every_format_fetches_nothing_for_a_reversed_span() {
+    let dir = tempfile::tempdir().unwrap();
+    let sam_gz = create_sam_gz(dir.path());
+
+    let mut bam_reader = IndexedReader::open(test_bam_path()).expect("bam");
+    let tid = bam_reader.header().tid("chr19").unwrap();
+    let mut store = RecordStore::new();
+    bam_reader.fetch_into(tid, span(6_103_076, 6_104_000), &mut store).unwrap();
+    let probe = store.record(ri(0)).unwrap();
+    let (first, last) = (probe.pos, probe.end_pos);
+    assert!(last > first, "need a record spanning more than one base");
+    let reversed = core::range::RangeInclusive { start: last, last: first };
+    assert!(reversed.is_empty());
+
+    let mut readers: [(&str, IndexedReader); 3] = [
+        ("bam", IndexedReader::open(test_bam_path()).expect("bam")),
+        ("sam", IndexedReader::open(&sam_gz).expect("sam")),
+        (
+            "cram",
+            IndexedReader::open_with_reference(test_cram_path(), test_fasta_path()).expect("cram"),
+        ),
+    ];
+    for (format, reader) in &mut readers {
+        let tid = reader.header().tid("chr19").unwrap();
+        let mut store = RecordStore::new();
+        let kept = reader.fetch_into(tid, reversed, &mut store).unwrap();
+        assert_eq!((kept, store.len()), (0, 0), "{format}: a reversed span fetched records");
+    }
+}
+
 // r[verify unified.fork_bam]
 // r[verify unified.fork_sam]
 #[test]
