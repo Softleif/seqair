@@ -12,9 +12,9 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+use hegel::prelude::*;
 use noodles::core::{Position, Region};
 use noodles::fasta;
-use proptest::prelude::*;
 use seqair::fasta::IndexedFastaReader;
 use seqair_types::Pos0;
 use std::path::Path;
@@ -107,32 +107,32 @@ fn chr19_windowed_comparison_noodles() {
     }
 }
 
-// ---- Random region comparison via proptest ----
+// ---- Random region comparison ----
 
 // r[verify fasta.bgzf.decompress]
 // r[verify fasta.bgzf.sequential_read]
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
 
-    #[test]
-    fn random_regions_match_noodles(
-        seq_idx in 0usize..3,
-        start_frac in 0.0f64..0.99,
-        len_frac in 0.001f64..0.01,
-    ) {
-        let (name, length) = SEQUENCES[seq_idx];
-        let start = (start_frac * length as f64) as u64;
-        let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
-        let stop = start + fetch_len;
+#[hegel::test(test_cases = 100)]
+fn random_regions_match_noodles(tc: TestCase) {
+    let seq_idx = tc.draw(gs::integers::<usize>().max_value(2));
+    let start_frac = tc.draw(gs::floats::<f64>().min_value(0.0).max_value_exclusive(0.99));
+    let len_frac = tc.draw(gs::floats::<f64>().min_value(0.001).max_value_exclusive(0.01));
+    let (name, length) = SEQUENCES[seq_idx];
+    let start = (start_frac * length as f64) as u64;
+    let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
+    let stop = start + fetch_len;
 
-        let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-        let seq = seqair_fetch(&mut rio, name, start, stop);
-        let noodles = noodles_fetch(name, start, stop);
+    let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
+    let seq = seqair_fetch(&mut rio, name, start, stop);
+    let noodles = noodles_fetch(name, start, stop);
 
-        prop_assert!(
-            seq == noodles,
-            "mismatch for {}:{}-{} (len seqair={}, noodles={})",
-            name, start, stop, seq.len(), noodles.len()
-        );
-    }
+    assert!(
+        seq == noodles,
+        "mismatch for {}:{}-{} (len seqair={}, noodles={})",
+        name,
+        start,
+        stop,
+        seq.len(),
+        noodles.len()
+    );
 }

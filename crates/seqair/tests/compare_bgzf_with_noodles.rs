@@ -6,8 +6,8 @@
     clippy::indexing_slicing,
     reason = "test code"
 )]
+use hegel::prelude::*;
 use noodles_bgzf::VirtualPosition as NoodlesVP;
-use proptest::prelude::*;
 use seqair::bam::bgzf::{BgzfReader, VirtualOffset};
 
 fn test_bam_path() -> &'static std::path::Path {
@@ -18,57 +18,48 @@ fn test_bam_path() -> &'static std::path::Path {
 // Both crates encode the BAI spec bit layout identically: upper 48 bits = compressed block
 // offset, lower 16 bits = uncompressed within-block offset. Assert raw u64 and field accessors
 // agree across both implementations.
-proptest! {
-    #[test]
-    fn virtual_offset_encoding_matches_noodles(
-        block_offset in 0u64..=(1u64 << 48) - 1,
-        within_block in 0u16..=u16::MAX,
-    ) {
-        let vo = VirtualOffset::new(block_offset, within_block);
-        // noodles VirtualPosition::new returns Option; the range constraint guarantees Some.
-        let noodles_vp = NoodlesVP::new(block_offset, within_block)
-            .expect("block_offset is within 48-bit range");
+#[hegel::test]
+fn virtual_offset_encoding_matches_noodles(tc: TestCase) {
+    let block_offset = tc.draw(gs::integers::<u64>().max_value((1u64 << 48) - 1));
+    let within_block = tc.draw(gs::integers::<u16>());
+    let vo = VirtualOffset::new(block_offset, within_block);
+    // noodles VirtualPosition::new returns Option; the range constraint guarantees Some.
+    let noodles_vp =
+        NoodlesVP::new(block_offset, within_block).expect("block_offset is within 48-bit range");
 
-        prop_assert_eq!(
-            vo.0,
-            u64::from(noodles_vp),
-            "raw u64 must agree: seqair={:#x}, noodles={:#x}",
-            vo.0,
-            u64::from(noodles_vp),
-        );
-        prop_assert_eq!(
-            vo.block_offset(),
-            noodles_vp.compressed(),
-            "block_offset / compressed must agree",
-        );
-        prop_assert_eq!(
-            vo.within_block(),
-            noodles_vp.uncompressed(),
-            "within_block / uncompressed must agree",
-        );
-    }
+    assert_eq!(
+        vo.0,
+        u64::from(noodles_vp),
+        "raw u64 must agree: seqair={:#x}, noodles={:#x}",
+        vo.0,
+        u64::from(noodles_vp),
+    );
+    assert_eq!(vo.block_offset(), noodles_vp.compressed(), "block_offset / compressed must agree",);
+    assert_eq!(
+        vo.within_block(),
+        noodles_vp.uncompressed(),
+        "within_block / uncompressed must agree",
+    );
 }
 
 // r[verify bgzf.virtual_offset]
 // Both crates must produce the same Ord result for arbitrary raw u64 virtual offsets.
-proptest! {
-    #[test]
-    fn virtual_offset_ordering_matches_noodles(
-        raw1 in 0u64..=u64::MAX,
-        raw2 in 0u64..=u64::MAX,
-    ) {
-        let vo1 = VirtualOffset(raw1);
-        let vo2 = VirtualOffset(raw2);
-        let nv1 = NoodlesVP::from(raw1);
-        let nv2 = NoodlesVP::from(raw2);
+#[hegel::test]
+fn virtual_offset_ordering_matches_noodles(tc: TestCase) {
+    let raw1 = tc.draw(gs::integers::<u64>());
+    let raw2 = tc.draw(gs::integers::<u64>());
+    let vo1 = VirtualOffset(raw1);
+    let vo2 = VirtualOffset(raw2);
+    let nv1 = NoodlesVP::from(raw1);
+    let nv2 = NoodlesVP::from(raw2);
 
-        prop_assert_eq!(
-            vo1.cmp(&vo2),
-            nv1.cmp(&nv2),
-            "ordering must agree for raw1={:#x}, raw2={:#x}",
-            raw1, raw2,
-        );
-    }
+    assert_eq!(
+        vo1.cmp(&vo2),
+        nv1.cmp(&nv2),
+        "ordering must agree for raw1={:#x}, raw2={:#x}",
+        raw1,
+        raw2,
+    );
 }
 
 // r[verify bgzf.decompression]

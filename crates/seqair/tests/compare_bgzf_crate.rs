@@ -13,7 +13,7 @@
     reason = "test code with known small values"
 )]
 use bgzf::{CompressionLevel, Reader as BgzfReader, Writer as BgzfWriter};
-use proptest::prelude::*;
+use hegel::prelude::*;
 use seqair::bam::{bgzf::VirtualOffset, index::Chunk, region_buf::RegionBuf};
 use std::io::{Read, Write};
 
@@ -156,33 +156,30 @@ fn tiny_window_budget_matches_oracle() {
     assert_eq!(bgzf_out, out, "cross-crate mismatch");
 }
 
-proptest! {
-    // this is slow!
-    #![proptest_config(ProptestConfig { cases: 20, .. ProptestConfig::default() })]
+// this is slow!
 
-    /// Both decompressors must produce identical output for arbitrary data
-    /// compressed by the bgzf crate's Writer — checked at both the default
-    /// window budget and a tiny one that forces repeated refills.
-    // r[verify bgzf.decompression]
-    // r[verify bgzf.crc32]
-    // r[verify region_buf.decompress]
-    // r[verify region_buf.window_budget]
-    #[test]
-    fn proptest_both_decompressors_match(
-        data in prop::collection::vec(0..255u8, 1..1_000_000),
-        level in 1u8..10,
-    ) {
-        let compressed = bgzf_compress(&data, level);
+/// Both decompressors must produce identical output for arbitrary data
+/// compressed by the bgzf crate's Writer — checked at both the default
+/// window budget and a tiny one that forces repeated refills.
+// r[verify bgzf.decompression]
+// r[verify bgzf.crc32]
+// r[verify region_buf.decompress]
+// r[verify region_buf.window_budget]
+#[hegel::test(test_cases = 20)]
+fn both_decompressors_match(tc: TestCase) {
+    let data =
+        tc.draw(gs::vecs(gs::integers::<u8>().max_value(254)).min_size(1).max_size(1_000_000 - 1));
+    let level = tc.draw(gs::integers::<u8>().min_value(1).max_value(9));
+    let compressed = bgzf_compress(&data, level);
 
-        let bgzf_out = bgzf_decompress(&compressed);
-        let out = seqair_decompress(&compressed, data.len());
-        let out_tiny = seqair_decompress_budget(&compressed, data.len(), 1);
+    let bgzf_out = bgzf_decompress(&compressed);
+    let out = seqair_decompress(&compressed, data.len());
+    let out_tiny = seqair_decompress_budget(&compressed, data.len(), 1);
 
-        prop_assert_eq!(bgzf_out.len(), data.len());
-        prop_assert_eq!(out.len(), data.len());
-        prop_assert_eq!(&bgzf_out, &data);
-        prop_assert_eq!(&out, &data);
-        prop_assert_eq!(&bgzf_out, &out);
-        prop_assert_eq!(&out_tiny, &data, "tiny-budget streaming mismatch");
-    }
+    assert_eq!(bgzf_out.len(), data.len());
+    assert_eq!(out.len(), data.len());
+    assert_eq!(&bgzf_out, &data);
+    assert_eq!(&out, &data);
+    assert_eq!(&bgzf_out, &out);
+    assert_eq!(&out_tiny, &data, "tiny-budget streaming mismatch");
 }

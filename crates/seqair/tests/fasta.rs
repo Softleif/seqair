@@ -12,7 +12,7 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
-use proptest::prelude::*;
+use hegel::prelude::*;
 use rust_htslib::faidx;
 use seqair::bam::Pos0;
 use seqair::fasta::{FaiEntry, IndexedFastaReader};
@@ -28,60 +28,60 @@ fn test_fasta_path() -> &'static Path {
 // ---------------------------------------------------------------------------
 
 // r[verify fasta.index.offset_calculation]
-proptest! {
-    /// True end-to-end oracle: build an in-memory FASTA content string from
-    /// generated parameters, then verify that `byte_offset(pos)` points to
-    /// the correct character in the actual FASTA bytes.
-    #[test]
-    fn byte_offset_indexes_correct_character_in_fasta(
-        linebases in 1u64..=80u64,
-        extra in 1u64..=2u64,  // 1 = \n, 2 = \r\n
-        bases in prop::collection::vec(
-            prop::sample::select(vec![b'A', b'C', b'G', b'T']),
-            1..=200usize,
-        ),
-    ) {
-        let n_bases = bases.len() as u64;
-        let linewidth = linebases + extra;
+/// True end-to-end oracle: build an in-memory FASTA content string from
+/// generated parameters, then verify that `byte_offset(pos)` points to
+/// the correct character in the actual FASTA bytes.
+#[hegel::test]
+fn byte_offset_indexes_correct_character_in_fasta(tc: TestCase) {
+    let linebases = tc.draw(gs::integers::<u64>().min_value(1).max_value(80u64));
+    let extra = tc.draw(gs::integers::<u64>().min_value(1).max_value(2u64));
+    let bases = tc.draw(gs::vecs(gs::sampled_from(ACGT)).min_size(1).max_size(200));
+    let n_bases = bases.len() as u64;
+    let linewidth = linebases + extra;
 
-        // Build the FASTA sequence body: bases with newlines every `linebases`
-        // characters. extra=1 means \n, extra=2 means \r\n.
-        let mut content: Vec<u8> = Vec::new();
-        for (i, &b) in bases.iter().enumerate() {
-            content.push(b);
-            let pos_in_line = (i as u64 + 1) % linebases;
-            // After every `linebases` bases (but not after the very last base),
-            // insert the line ending.
-            if pos_in_line == 0 && (i as u64 + 1) < n_bases {
-                if extra == 2 {
-                    content.push(b'\r');
-                }
-                content.push(b'\n');
+    // Build the FASTA sequence body: bases with newlines every `linebases`
+    // characters. extra=1 means \n, extra=2 means \r\n.
+    let mut content: Vec<u8> = Vec::new();
+    for (i, &b) in bases.iter().enumerate() {
+        content.push(b);
+        let pos_in_line = (i as u64 + 1) % linebases;
+        // After every `linebases` bases (but not after the very last base),
+        // insert the line ending.
+        if pos_in_line == 0 && (i as u64 + 1) < n_bases {
+            if extra == 2 {
+                content.push(b'\r');
             }
+            content.push(b'\n');
         }
+    }
 
-        // The FaiEntry has offset=0 (sequence starts at byte 0 of content).
-        let entry = FaiEntry {
-            name: "test".into(),
-            length: n_bases,
-            offset: 0,
+    // The FaiEntry has offset=0 (sequence starts at byte 0 of content).
+    let entry = FaiEntry {
+        name: "test".into(),
+        length: n_bases,
+        offset: 0,
+        linebases,
+        linewidth,
+        qual_offset: None,
+    };
+
+    for pos in 0..n_bases {
+        let byte_off = entry.byte_offset(pos).expect("small test offsets never overflow u64");
+        let actual_byte = content.get(byte_off as usize).copied();
+        let expected_byte = bases.get(pos as usize).copied();
+        assert_eq!(
+            actual_byte,
+            expected_byte,
+            "byte_offset({}) = {} indexes {:?} but expected {:?} \
+             (linebases={}, linewidth={}, content_len={})",
+            pos,
+            byte_off,
+            actual_byte,
+            expected_byte,
             linebases,
             linewidth,
-            qual_offset: None,
-        };
-
-        for pos in 0..n_bases {
-            let byte_off = entry.byte_offset(pos).expect("small test offsets never overflow u64");
-            let actual_byte = content.get(byte_off as usize).copied();
-            let expected_byte = bases.get(pos as usize).copied();
-            prop_assert_eq!(
-                actual_byte, expected_byte,
-                "byte_offset({}) = {} indexes {:?} but expected {:?} \
-                 (linebases={}, linewidth={}, content_len={})",
-                pos, byte_off, actual_byte, expected_byte,
-                linebases, linewidth, content.len()
-            );
-        }
+            content.len()
+        );
     }
 }
 
@@ -100,139 +100,127 @@ fn make_gzi_data(entries: &[(u64, u64)]) -> Vec<u8> {
 }
 
 // r[verify fasta.gzi.translate]
-proptest! {
-    /// Translating offsets within a block (≤ u16::MAX from block start) must
-    /// produce the correct compressed_offset and within_block_offset.
-    #[test]
-    fn gzi_translate_same_block_valid(
-        block_start_compressed in 0u64..1_000_000,
-        block_start_uncompressed in 1u64..1_000_000,
-        offset_a in 0u16..=u16::MAX,
-        offset_b in 0u16..=u16::MAX,
-    ) {
-        let entries = vec![(block_start_compressed, block_start_uncompressed)];
-        let data = make_gzi_data(&entries);
-        let gzi = seqair::fasta::GziIndex::parse_test(&data);
+/// Translating offsets within a block (≤ `u16::MAX` from block start) must
+/// produce the correct `compressed_offset` and `within_block_offset`.
+#[hegel::test]
+fn gzi_translate_same_block_valid(tc: TestCase) {
+    let block_start_compressed = tc.draw(gs::integers::<u64>().max_value(999999));
+    let block_start_uncompressed = tc.draw(gs::integers::<u64>().min_value(1).max_value(999999));
+    let offset_a = tc.draw(gs::integers::<u16>());
+    let offset_b = tc.draw(gs::integers::<u16>());
+    let entries = vec![(block_start_compressed, block_start_uncompressed)];
+    let data = make_gzi_data(&entries);
+    let gzi = seqair::fasta::GziIndex::parse_test(&data);
 
-        let target_a = block_start_uncompressed + u64::from(offset_a);
-        let target_b = block_start_uncompressed + u64::from(offset_b);
+    let target_a = block_start_uncompressed + u64::from(offset_a);
+    let target_b = block_start_uncompressed + u64::from(offset_b);
 
-        let loc_a = gzi.translate(target_a).unwrap();
-        let loc_b = gzi.translate(target_b).unwrap();
+    let loc_a = gzi.translate(target_a).unwrap();
+    let loc_b = gzi.translate(target_b).unwrap();
 
-        prop_assert_eq!(loc_a.compressed_offset, block_start_compressed);
-        prop_assert_eq!(loc_b.compressed_offset, block_start_compressed);
-        prop_assert_eq!(loc_a.within_block_offset, offset_a);
-        prop_assert_eq!(loc_b.within_block_offset, offset_b);
-    }
+    assert_eq!(loc_a.compressed_offset, block_start_compressed);
+    assert_eq!(loc_b.compressed_offset, block_start_compressed);
+    assert_eq!(loc_a.within_block_offset, offset_a);
+    assert_eq!(loc_b.within_block_offset, offset_b);
+}
 
-    /// For offsets before the first GZI entry, translation must map to
-    /// compressed offset 0 with the uncompressed offset as within_block.
-    #[test]
-    fn gzi_translate_before_first_entry(
-        block_start in 1000u64..1_000_000,
-        target in 0u64..999,
-    ) {
-        let entries = vec![(block_start, 1000)];
-        let data = make_gzi_data(&entries);
-        let gzi = seqair::fasta::GziIndex::parse_test(&data);
+/// For offsets before the first GZI entry, translation must map to
+/// compressed offset 0 with the uncompressed offset as `within_block`.
+#[hegel::test]
+fn gzi_translate_before_first_entry(tc: TestCase) {
+    let block_start = tc.draw(gs::integers::<u64>().min_value(1000).max_value(999999));
+    let target = tc.draw(gs::integers::<u64>().max_value(998));
+    let entries = vec![(block_start, 1000)];
+    let data = make_gzi_data(&entries);
+    let gzi = seqair::fasta::GziIndex::parse_test(&data);
 
-        let loc = gzi.translate(target).unwrap();
-        prop_assert_eq!(loc.compressed_offset, 0);
-        prop_assert_eq!(loc.within_block_offset, target as u16);
-    }
+    let loc = gzi.translate(target).unwrap();
+    assert_eq!(loc.compressed_offset, 0);
+    assert_eq!(loc.within_block_offset, target as u16);
+}
 
-    /// Within-block offset exceeding u16::MAX must be rejected.
-    #[test]
-    fn gzi_translate_rejects_overflow(
-        overflow in 1u64..100_000,
-    ) {
-        let data = make_gzi_data(&[]);
-        let gzi = seqair::fasta::GziIndex::parse_test(&data);
+/// Within-block offset exceeding `u16::MAX` must be rejected.
+#[hegel::test]
+fn gzi_translate_rejects_overflow(tc: TestCase) {
+    let overflow = tc.draw(gs::integers::<u64>().min_value(1).max_value(99999));
+    let data = make_gzi_data(&[]);
+    let gzi = seqair::fasta::GziIndex::parse_test(&data);
 
-        let target = u64::from(u16::MAX) + overflow;
-        let result = gzi.translate(target);
-        prop_assert!(result.is_err(),
-            "translate({}) should fail but returned {:?}", target, result);
-    }
+    let target = u64::from(u16::MAX) + overflow;
+    let result = gzi.translate(target);
+    assert!(result.is_err(), "translate({}) should fail but returned {:?}", target, result);
 }
 
 // ---------------------------------------------------------------------------
 // Plain FASTA roundtrip: generate, write, read back, verify
 // ---------------------------------------------------------------------------
 
-/// Strategy for generating a valid FASTA sequence with known content.
-fn fasta_sequence_strategy() -> impl Strategy<Value = (Vec<u8>, u64)> {
-    // linebases between 3 and 80, sequence length between 1 and 500
-    (3u64..80, 1usize..500)
-        .prop_flat_map(|(linebases, seq_len)| {
-            let bases = prop::collection::vec(
-                prop::sample::select(vec![b'A', b'C', b'G', b'T', b'N']),
-                seq_len,
-            );
-            (bases, Just(linebases))
-        })
-        .prop_map(|(bases, linebases)| (bases, linebases))
+/// The bases a generated FASTA sequence is drawn from.
+const ACGT: &[u8] = b"ACGT";
+const ACGTN: &[u8] = b"ACGTN";
+
+/// A valid FASTA sequence with known content, as `(bases, linebases)`.
+#[hegel::composite]
+fn fasta_sequence(tc: &TestCase) -> (Vec<u8>, u64) {
+    // linebases between 3 and 79, sequence length between 1 and 499
+    let linebases = tc.draw_silent(gs::integers::<u64>().min_value(3).max_value(79));
+    let seq_len = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(499));
+    let bases =
+        tc.draw_silent(gs::vecs(gs::sampled_from(ACGTN)).min_size(seq_len).max_size(seq_len));
+    (bases, linebases)
 }
 
 // r[verify fasta.plain.read]
 // r[verify fasta.fetch.newline_stripping]
 // r[verify fasta.fetch.uppercase]
 // r[verify fasta.fetch.coordinates]
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// Write a random FASTA, read it back at a random position, verify content.
-    #[test]
-    fn plain_fasta_roundtrip(
-        (bases, linebases) in fasta_sequence_strategy(),
-        // We'll pick a random sub-range to fetch
-        range_start_frac in 0.0f64..1.0,
-        range_len_frac in 0.01f64..1.0,
-    ) {
-        let seq_len = bases.len() as u64;
-        let start = (range_start_frac * seq_len as f64) as u64;
-        let remaining = seq_len - start;
-        let fetch_len = ((range_len_frac * remaining as f64) as u64).max(1).min(remaining);
-        let stop = start + fetch_len;
+/// Write a random FASTA, read it back at a random position, verify content.
+#[hegel::test(test_cases = 64)]
+fn plain_fasta_roundtrip(tc: TestCase) {
+    let (bases, linebases) = tc.draw(fasta_sequence());
+    let range_start_frac = tc.draw(gs::floats::<f64>().min_value(0.0).max_value_exclusive(1.0));
+    let range_len_frac = tc.draw(gs::floats::<f64>().min_value(0.01).max_value_exclusive(1.0));
+    let seq_len = bases.len() as u64;
+    let start = (range_start_frac * seq_len as f64) as u64;
+    let remaining = seq_len - start;
+    let fetch_len = ((range_len_frac * remaining as f64) as u64).max(1).min(remaining);
+    let stop = start + fetch_len;
 
-        let dir = TempDir::new().unwrap();
-        let fasta_path = dir.path().join("test.fa");
-        let fai_path = dir.path().join("test.fa.fai");
+    let dir = TempDir::new().unwrap();
+    let fasta_path = dir.path().join("test.fa");
+    let fai_path = dir.path().join("test.fa.fai");
 
-        // Write FASTA with the given line length
-        let linewidth = linebases + 1; // +1 for \n
-        let mut f = std::fs::File::create(&fasta_path).unwrap();
-        writeln!(f, ">seq1").unwrap();
-        for (i, &base) in bases.iter().enumerate() {
-            f.write_all(&[base]).unwrap();
-            if ((i + 1) as u64).is_multiple_of(linebases) && (i + 1) < bases.len() {
-                f.write_all(b"\n").unwrap();
-            }
+    // Write FASTA with the given line length
+    let linewidth = linebases + 1; // +1 for \n
+    let mut f = std::fs::File::create(&fasta_path).unwrap();
+    writeln!(f, ">seq1").unwrap();
+    for (i, &base) in bases.iter().enumerate() {
+        f.write_all(&[base]).unwrap();
+        if ((i + 1) as u64).is_multiple_of(linebases) && (i + 1) < bases.len() {
+            f.write_all(b"\n").unwrap();
         }
-        f.write_all(b"\n").unwrap();
-
-        // Compute FAI offset: ">seq1\n" = 6 bytes
-        let offset = 6u64;
-        let mut fai = std::fs::File::create(&fai_path).unwrap();
-        writeln!(fai, "seq1\t{}\t{}\t{}\t{}", seq_len, offset, linebases, linewidth).unwrap();
-
-        let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let start_pos = Pos0::try_from(start).unwrap();
-        let stop_pos = Pos0::try_from(stop).unwrap();
-        let fetched = reader.fetch_seq("seq1", start_pos, stop_pos).unwrap();
-
-        let expected: Vec<u8> = bases[start as usize..stop as usize]
-            .iter()
-            .map(|b| b.to_ascii_uppercase())
-            .collect();
-
-        prop_assert_eq!(
-            fetched, expected,
-            "roundtrip failed: start={}, stop={}, linebases={}, seq_len={}",
-            start, stop, linebases, seq_len
-        );
     }
+    f.write_all(b"\n").unwrap();
+
+    // Compute FAI offset: ">seq1\n" = 6 bytes
+    let offset = 6u64;
+    let mut fai = std::fs::File::create(&fai_path).unwrap();
+    writeln!(fai, "seq1\t{}\t{}\t{}\t{}", seq_len, offset, linebases, linewidth).unwrap();
+
+    let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
+    let start_pos = Pos0::try_from(start).unwrap();
+    let stop_pos = Pos0::try_from(stop).unwrap();
+    let fetched = reader.fetch_seq("seq1", start_pos, stop_pos).unwrap();
+
+    let expected: Vec<u8> =
+        bases[start as usize..stop as usize].iter().map(|b| b.to_ascii_uppercase()).collect();
+
+    assert_eq!(
+        fetched, expected,
+        "roundtrip failed: start={}, stop={}, linebases={}, seq_len={}",
+        start, stop, linebases, seq_len
+    );
 }
 
 // r[verify fasta.index.terminator_bound]
@@ -401,78 +389,71 @@ fn absurd_line_width_is_rejected_at_open() {
 }
 
 // r[verify fasta.plain.positional_read]
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
 
-    /// The plain-FASTA fetch is a positional read, so one reader must answer an
-    /// arbitrarily ordered stream of overlapping requests without any of them
-    /// perturbing the next. Each is checked against the generated bases, and the
-    /// last request is repeated at the end so a drifting file position would
-    /// show up as a disagreement with its own earlier answer.
-    #[test]
-    fn out_of_order_fetches_on_one_reader_are_independent(
-        (bases, linebases) in fasta_sequence_strategy(),
-        raw_ranges in prop::collection::vec((0.0f64..1.0, 0.0f64..1.0), 2..12),
-    ) {
-        let seq_len = bases.len() as u64;
-        let dir = TempDir::new().unwrap();
-        let fasta_path = dir.path().join("plain.fa");
-        let linewidth = linebases + 1;
+/// The plain-FASTA fetch is a positional read, so one reader must answer an
+/// arbitrarily ordered stream of overlapping requests without any of them
+/// perturbing the next. Each is checked against the generated bases, and the
+/// last request is repeated at the end so a drifting file position would
+/// show up as a disagreement with its own earlier answer.
+#[hegel::test(test_cases = 48)]
+fn out_of_order_fetches_on_one_reader_are_independent(tc: TestCase) {
+    let (bases, linebases) = tc.draw(fasta_sequence());
+    let frac = || gs::floats::<f64>().min_value(0.0).max_value_exclusive(1.0);
+    let raw_ranges = tc.draw(gs::vecs(gs::tuples!(frac(), frac())).min_size(2).max_size(11));
+    let seq_len = bases.len() as u64;
+    let dir = TempDir::new().unwrap();
+    let fasta_path = dir.path().join("plain.fa");
+    let linewidth = linebases + 1;
 
-        let mut f = std::fs::File::create(&fasta_path).unwrap();
-        writeln!(f, ">seq1").unwrap();
-        for chunk in bases.chunks(linebases as usize) {
-            f.write_all(chunk).unwrap();
-            f.write_all(b"\n").unwrap();
-        }
-        drop(f);
-        let mut fai = std::fs::File::create(dir.path().join("plain.fa.fai")).unwrap();
-        writeln!(fai, "seq1\t{}\t6\t{}\t{}", seq_len, linebases, linewidth).unwrap();
-        drop(fai);
-
-        // Map the generated fractions onto in-bounds, non-empty ranges.
-        let ranges: Vec<(u64, u64)> = raw_ranges
-            .iter()
-            .map(|(a, b)| {
-                let x = ((a * seq_len as f64) as u64).min(seq_len - 1);
-                let y = ((b * seq_len as f64) as u64).min(seq_len - 1);
-                let (lo, hi) = if x <= y { (x, y) } else { (y, x) };
-                (lo, hi + 1)
-            })
-            .collect();
-
-        let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let fetch = |reader: &mut IndexedFastaReader, start: u64, stop: u64| {
-            reader
-                .fetch_seq(
-                    "seq1",
-                    Pos0::try_from(start).unwrap(),
-                    Pos0::try_from(stop).unwrap(),
-                )
-                .unwrap()
-        };
-
-        let mut first_answer = None;
-        for (i, &(start, stop)) in ranges.iter().enumerate() {
-            let got = fetch(&mut reader, start, stop);
-            let mut expected = bases[start as usize..stop as usize].to_vec();
-            expected.make_ascii_uppercase();
-            prop_assert_eq!(&got, &expected, "request {} [{}, {})", i, start, stop);
-            if i == 0 {
-                first_answer = Some(got);
-            }
-        }
-
-        // Re-issue the first request last: every intervening read must have
-        // left the reader able to answer it identically.
-        let (start, stop) = ranges[0];
-        prop_assert_eq!(
-            fetch(&mut reader, start, stop),
-            first_answer.unwrap(),
-            "repeating the first request after {} others changed its answer",
-            ranges.len() - 1
-        );
+    let mut f = std::fs::File::create(&fasta_path).unwrap();
+    writeln!(f, ">seq1").unwrap();
+    for chunk in bases.chunks(linebases as usize) {
+        f.write_all(chunk).unwrap();
+        f.write_all(b"\n").unwrap();
     }
+    drop(f);
+    let mut fai = std::fs::File::create(dir.path().join("plain.fa.fai")).unwrap();
+    writeln!(fai, "seq1\t{}\t6\t{}\t{}", seq_len, linebases, linewidth).unwrap();
+    drop(fai);
+
+    // Map the generated fractions onto in-bounds, non-empty ranges.
+    let ranges: Vec<(u64, u64)> = raw_ranges
+        .iter()
+        .map(|(a, b)| {
+            let x = ((a * seq_len as f64) as u64).min(seq_len - 1);
+            let y = ((b * seq_len as f64) as u64).min(seq_len - 1);
+            let (lo, hi) = if x <= y { (x, y) } else { (y, x) };
+            (lo, hi + 1)
+        })
+        .collect();
+
+    let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
+    let fetch = |reader: &mut IndexedFastaReader, start: u64, stop: u64| {
+        reader
+            .fetch_seq("seq1", Pos0::try_from(start).unwrap(), Pos0::try_from(stop).unwrap())
+            .unwrap()
+    };
+
+    let mut first_answer = None;
+    for (i, &(start, stop)) in ranges.iter().enumerate() {
+        let got = fetch(&mut reader, start, stop);
+        let mut expected = bases[start as usize..stop as usize].to_vec();
+        expected.make_ascii_uppercase();
+        assert_eq!(&got, &expected, "request {} [{}, {})", i, start, stop);
+        if i == 0 {
+            first_answer = Some(got);
+        }
+    }
+
+    // Re-issue the first request last: every intervening read must have
+    // left the reader able to answer it identically.
+    let (start, stop) = ranges[0];
+    assert_eq!(
+        fetch(&mut reader, start, stop),
+        first_answer.unwrap(),
+        "repeating the first request after {} others changed its answer",
+        ranges.len() - 1
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -493,56 +474,54 @@ fn htslib_fetch(name: &str, start: u64, stop: u64) -> Vec<u8> {
 // r[verify fasta.bgzf.decompress]
 // r[verify fasta.bgzf.sequential_read]
 // r[verify fasta.fork.equivalence]
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
 
-    /// Fetch random regions from the bgzip test FASTA and compare to htslib.
-    #[test]
-    fn bgzf_random_regions_match_htslib(
-        seq_idx in 0usize..3,
-        start_frac in 0.0f64..0.99,
-        len_frac in 0.001f64..0.01,
-    ) {
-        let (name, length) = SEQUENCES[seq_idx];
-        let start = (start_frac * length as f64) as u64;
-        let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
-        let stop = start + fetch_len;
+/// Fetch random regions from the bgzip test FASTA and compare to htslib.
+#[hegel::test(test_cases = 100)]
+fn bgzf_random_regions_match_htslib(tc: TestCase) {
+    let seq_idx = tc.draw(gs::integers::<usize>().max_value(2));
+    let start_frac = tc.draw(gs::floats::<f64>().min_value(0.0).max_value_exclusive(0.99));
+    let len_frac = tc.draw(gs::floats::<f64>().min_value(0.001).max_value_exclusive(0.01));
+    let (name, length) = SEQUENCES[seq_idx];
+    let start = (start_frac * length as f64) as u64;
+    let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
+    let stop = start + fetch_len;
 
-        let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-        let start_pos = Pos0::try_from(start).unwrap();
-        let stop_pos = Pos0::try_from(stop).unwrap();
-        let seq = rio.fetch_seq(name, start_pos, stop_pos).expect("rio fetch");
-        let hts_seq = htslib_fetch(name, start, stop);
+    let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
+    let start_pos = Pos0::try_from(start).unwrap();
+    let stop_pos = Pos0::try_from(stop).unwrap();
+    let seq = rio.fetch_seq(name, start_pos, stop_pos).expect("rio fetch");
+    let hts_seq = htslib_fetch(name, start, stop);
 
-        prop_assert!(
-            seq == hts_seq,
-            "mismatch for {}:{}-{} (len rio={}, hts={})",
-            name, start, stop, seq.len(), hts_seq.len()
-        );
-    }
+    assert!(
+        seq == hts_seq,
+        "mismatch for {}:{}-{} (len rio={}, hts={})",
+        name,
+        start,
+        stop,
+        seq.len(),
+        hts_seq.len()
+    );
+}
 
-    /// Forked readers must produce identical results to the original at any position.
-    #[test]
-    fn fork_matches_original_at_random_positions(
-        start_frac in 0.0f64..0.99,
-        len_frac in 0.001f64..0.01,
-    ) {
-        let length = 61_431_566u64; // chr19
-        let start = (start_frac * length as f64) as u64;
-        let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
-        let stop = start + fetch_len;
+/// Forked readers must produce identical results to the original at any position.
+#[hegel::test(test_cases = 100)]
+fn fork_matches_original_at_random_positions(tc: TestCase) {
+    let start_frac = tc.draw(gs::floats::<f64>().min_value(0.0).max_value_exclusive(0.99));
+    let len_frac = tc.draw(gs::floats::<f64>().min_value(0.001).max_value_exclusive(0.01));
+    let length = 61_431_566u64; // chr19
+    let start = (start_frac * length as f64) as u64;
+    let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
+    let stop = start + fetch_len;
 
-        let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-        let mut forked = rio.fork().expect("fork");
+    let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
+    let mut forked = rio.fork().expect("fork");
 
-        let start_pos = Pos0::try_from(start).unwrap();
-        let stop_pos = Pos0::try_from(stop).unwrap();
-        let orig = rio.fetch_seq("chr19", start_pos, stop_pos).expect("orig fetch");
-        let fork_result = forked.fetch_seq("chr19", start_pos, stop_pos).expect("fork fetch");
+    let start_pos = Pos0::try_from(start).unwrap();
+    let stop_pos = Pos0::try_from(stop).unwrap();
+    let orig = rio.fetch_seq("chr19", start_pos, stop_pos).expect("orig fetch");
+    let fork_result = forked.fetch_seq("chr19", start_pos, stop_pos).expect("fork fetch");
 
-        prop_assert_eq!(orig, fork_result,
-            "fork mismatch at chr19:{}-{}", start, stop);
-    }
+    assert_eq!(orig, fork_result, "fork mismatch at chr19:{}-{}", start, stop);
 }
 
 // ---------------------------------------------------------------------------
@@ -601,33 +580,26 @@ fn fetch_base_seq_reuses_buffer() {
 // ---------------------------------------------------------------------------
 
 // r[verify fasta.fetch.buffer_reuse]
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
 
-    #[test]
-    fn fetch_into_matches_fetch_at_random_positions(
-        start_frac in 0.0f64..0.99,
-        len_frac in 0.001f64..0.01,
-    ) {
-        let length = 48502u64; // bacteriophage_lambda_CpG
-        let start = (start_frac * length as f64) as u64;
-        let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
-        let stop = start + fetch_len;
+#[hegel::test(test_cases = 50)]
+fn fetch_into_matches_fetch_at_random_positions(tc: TestCase) {
+    let start_frac = tc.draw(gs::floats::<f64>().min_value(0.0).max_value_exclusive(0.99));
+    let len_frac = tc.draw(gs::floats::<f64>().min_value(0.001).max_value_exclusive(0.01));
+    let length = 48502u64; // bacteriophage_lambda_CpG
+    let start = (start_frac * length as f64) as u64;
+    let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
+    let stop = start + fetch_len;
 
-        let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-        let mut buf = Vec::new();
+    let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
+    let mut buf = Vec::new();
 
-        let start_pos = Pos0::try_from(start).unwrap();
-        let stop_pos = Pos0::try_from(stop).unwrap();
-        let alloc = rio.fetch_seq("bacteriophage_lambda_CpG", start_pos, stop_pos).expect("fetch_seq");
-        rio.fetch_seq_into("bacteriophage_lambda_CpG", start_pos, stop_pos, &mut buf)
-            .expect("fetch_seq_into");
+    let start_pos = Pos0::try_from(start).unwrap();
+    let stop_pos = Pos0::try_from(stop).unwrap();
+    let alloc = rio.fetch_seq("bacteriophage_lambda_CpG", start_pos, stop_pos).expect("fetch_seq");
+    rio.fetch_seq_into("bacteriophage_lambda_CpG", start_pos, stop_pos, &mut buf)
+        .expect("fetch_seq_into");
 
-        prop_assert_eq!(alloc.clone(), buf, "fetch vs fetch_into mismatch at {}-{}", start, stop);
-        let hts = htslib_fetch("bacteriophage_lambda_CpG", start, stop);
-        prop_assert_eq!(
-            alloc, hts,
-            "seqair vs htslib mismatch at {}-{}", start, stop
-        );
-    }
+    assert_eq!(alloc.clone(), buf, "fetch vs fetch_into mismatch at {}-{}", start, stop);
+    let hts = htslib_fetch("bacteriophage_lambda_CpG", start, stop);
+    assert_eq!(alloc, hts, "seqair vs htslib mismatch at {}-{}", start, stop);
 }

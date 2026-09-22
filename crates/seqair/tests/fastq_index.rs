@@ -28,7 +28,7 @@
 #![allow(clippy::unwrap_in_result, reason = "test helper propagates only the parse error")]
 #![allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 
-use proptest::prelude::*;
+use hegel::prelude::*;
 use rust_htslib::faidx;
 use seqair::bam::Pos0;
 use seqair::fasta::{FaiEntry, FaiEntryError, FaiError, FastaIndex, IndexedFastaReader};
@@ -195,123 +195,104 @@ fn quality_lines_beginning_with_at_and_plus_do_not_confuse_indexed_access() {
 
 /// Bases include lowercase so the uppercasing rule is exercised, and `N` so
 /// the generator is not limited to unambiguous calls.
-fn base_strategy() -> impl Strategy<Value = u8> {
-    prop::sample::select(vec![b'A', b'C', b'G', b'T', b'N', b'a', b'c', b'g', b't', b'n'])
-}
+/// The bases a generated read is drawn from.
+const BASES: &[u8] = b"ACGTNacgtn";
 
 /// The full Sanger quality range, `!` (33) through `~` (126) — `@` and `+`
 /// included, which is the whole point.
-fn qual_strategy() -> impl Strategy<Value = u8> {
-    (33u8..=126u8).boxed()
+fn quals() -> impl PrintableGenerator<u8> {
+    gs::integers::<u8>().min_value(33).max_value(126)
 }
 
-fn rec_strategy(idx: usize) -> impl Strategy<Value = Rec> {
-    (1usize..=200, 1usize..=60).prop_flat_map(move |(len, linebases)| {
-        (
-            prop::collection::vec(base_strategy(), len..=len),
-            prop::collection::vec(qual_strategy(), len..=len),
-            Just(linebases.min(len)),
-        )
-            .prop_map(move |(seq, qual, linebases)| Rec {
-                name: format!("ctg{idx}"),
-                seq,
-                qual,
-                linebases,
-            })
-    })
+fn rec(tc: &TestCase, idx: usize) -> Rec {
+    let len = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(200));
+    let linebases = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(60));
+    let seq = tc.draw_silent(gs::vecs(gs::sampled_from(BASES)).min_size(len).max_size(len));
+    let qual = tc.draw_silent(gs::vecs(quals()).min_size(len).max_size(len));
+    Rec { name: format!("ctg{idx}"), seq, qual, linebases: linebases.min(len) }
 }
 
-fn recs_strategy() -> impl Strategy<Value = Vec<Rec>> {
-    (1usize..=3).prop_flat_map(|n| {
-        let parts: Vec<_> = (0..n).map(rec_strategy).collect();
-        parts
-    })
+#[hegel::composite]
+fn recs(tc: &TestCase) -> Vec<Rec> {
+    let n = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(3));
+    (0..n).map(|idx| rec(tc, idx)).collect()
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+// r[verify fastq.access.indexed_seq]
+/// Every subrange of every record must match what htslib returns from the
+/// same file and the same index — modulo case, which seqair normalises per
+/// `r[fasta.fetch.uppercase]` and htslib does not.
+#[hegel::test(test_cases = 64)]
+fn indexed_fetch_matches_htslib(tc: TestCase) {
+    let recs = tc.draw(recs().print_as_debug());
+    let (_dir, path) = write_and_index(&recs);
+    let mut seqair_reader = IndexedFastaReader::open(&path).unwrap();
+    let htslib_reader = faidx::Reader::from_path(&path).unwrap();
 
-    // r[verify fastq.access.indexed_seq]
-    /// Every subrange of every record must match what htslib returns from the
-    /// same file and the same index — modulo case, which seqair normalises per
-    /// `r[fasta.fetch.uppercase]` and htslib does not.
-    #[test]
-    fn indexed_fetch_matches_htslib(recs in recs_strategy()) {
-        let (_dir, path) = write_and_index(&recs);
-        let mut seqair_reader = IndexedFastaReader::open(&path).unwrap();
-        let htslib_reader = faidx::Reader::from_path(&path).unwrap();
-
-        for r in &recs {
-            let len = r.seq.len();
-            // Whole record, a prefix, a suffix, and an interior window.
-            let ranges = [
-                (0usize, len),
-                (0, len.div_ceil(2)),
-                (len / 2, len),
-                (len / 3, (2 * len) / 3),
-            ];
-            for (start, stop) in ranges {
-                if start >= stop {
-                    continue;
-                }
-                let got = seqair_reader
-                    .fetch_seq(
-                        &r.name,
-                        Pos0::new(start as u32).unwrap(),
-                        Pos0::new(stop as u32).unwrap(),
-                    )
-                    .unwrap();
-
-                let mut want = htslib_reader.fetch_seq(&r.name, start, stop - 1).unwrap();
-                want.make_ascii_uppercase();
-                prop_assert_eq!(&got, &want, "{} [{}, {})", r.name, start, stop);
-
-                // Independent of htslib: it must also equal the generated bases.
-                let mut expected = r.seq[start..stop].to_vec();
-                expected.make_ascii_uppercase();
-                prop_assert_eq!(&got, &expected, "{} [{}, {}) vs source", r.name, start, stop);
+    for r in &recs {
+        let len = r.seq.len();
+        // Whole record, a prefix, a suffix, and an interior window.
+        let ranges =
+            [(0usize, len), (0, len.div_ceil(2)), (len / 2, len), (len / 3, (2 * len) / 3)];
+        for (start, stop) in ranges {
+            if start >= stop {
+                continue;
             }
+            let got = seqair_reader
+                .fetch_seq(
+                    &r.name,
+                    Pos0::new(start as u32).unwrap(),
+                    Pos0::new(stop as u32).unwrap(),
+                )
+                .unwrap();
+
+            let mut want = htslib_reader.fetch_seq(&r.name, start, stop - 1).unwrap();
+            want.make_ascii_uppercase();
+            assert_eq!(&got, &want, "{} [{}, {})", r.name, start, stop);
+
+            // Independent of htslib: it must also equal the generated bases.
+            let mut expected = r.seq[start..stop].to_vec();
+            expected.make_ascii_uppercase();
+            assert_eq!(&got, &expected, "{} [{}, {}) vs source", r.name, start, stop);
         }
     }
+}
 
-    // r[verify fastq.access.index_parse]
-    /// seqair's parse of htslib's own index must agree with htslib's geometry:
-    /// same sequence names, lengths, and a `qual_offset` on every entry.
-    #[test]
-    fn parsed_index_matches_htslib_geometry(recs in recs_strategy()) {
-        let (_dir, path) = write_and_index(&recs);
-        let idx = FastaIndex::from_file(&fai_path(&path)).unwrap();
-        let htslib_reader = faidx::Reader::from_path(&path).unwrap();
+// r[verify fastq.access.index_parse]
+/// seqair's parse of htslib's own index must agree with htslib's geometry:
+/// same sequence names, lengths, and a `qual_offset` on every entry.
+#[hegel::test(test_cases = 64)]
+fn parsed_index_matches_htslib_geometry(tc: TestCase) {
+    let recs = tc.draw(recs().print_as_debug());
+    let (_dir, path) = write_and_index(&recs);
+    let idx = FastaIndex::from_file(&fai_path(&path)).unwrap();
+    let htslib_reader = faidx::Reader::from_path(&path).unwrap();
 
-        prop_assert_eq!(idx.len(), recs.len());
-        for r in &recs {
-            let e = idx.get(&r.name).expect("name present");
-            prop_assert_eq!(e.length, r.seq.len() as u64);
-            prop_assert_eq!(e.length, htslib_reader.fetch_seq_len(&r.name));
-            prop_assert!(e.is_fastq(), "FASTQ index entry must carry qual_offset");
-        }
+    assert_eq!(idx.len(), recs.len());
+    for r in &recs {
+        let e = idx.get(&r.name).expect("name present");
+        assert_eq!(e.length, r.seq.len() as u64);
+        assert_eq!(e.length, htslib_reader.fetch_seq_len(&r.name));
+        assert!(e.is_fastq(), "FASTQ index entry must carry qual_offset");
     }
+}
 
-    // r[verify fastq.access.indexed_qual]
-    /// `qual_byte_offset` must land on the right quality character. The oracle
-    /// is the raw file: read the byte at the computed offset and compare it to
-    /// the quality value that was generated for that position.
-    #[test]
-    fn qual_byte_offset_locates_the_right_character(recs in recs_strategy()) {
-        let (_dir, path) = write_and_index(&recs);
-        let raw = std::fs::read(&path).unwrap();
-        let idx = FastaIndex::from_file(&fai_path(&path)).unwrap();
+// r[verify fastq.access.indexed_qual]
+/// `qual_byte_offset` must land on the right quality character. The oracle
+/// is the raw file: read the byte at the computed offset and compare it to
+/// the quality value that was generated for that position.
+#[hegel::test(test_cases = 64)]
+fn qual_byte_offset_locates_the_right_character(tc: TestCase) {
+    let recs = tc.draw(recs().print_as_debug());
+    let (_dir, path) = write_and_index(&recs);
+    let raw = std::fs::read(&path).unwrap();
+    let idx = FastaIndex::from_file(&fai_path(&path)).unwrap();
 
-        for r in &recs {
-            let e = idx.get(&r.name).unwrap();
-            for pos in 0..r.qual.len() {
-                let off = e.qual_byte_offset(pos as u64).expect("FASTQ entry") as usize;
-                prop_assert_eq!(
-                    raw.get(off).copied(),
-                    Some(r.qual[pos]),
-                    "{} qual pos {}", r.name, pos
-                );
-            }
+    for r in &recs {
+        let e = idx.get(&r.name).unwrap();
+        for pos in 0..r.qual.len() {
+            let off = e.qual_byte_offset(pos as u64).expect("FASTQ entry") as usize;
+            assert_eq!(raw.get(off).copied(), Some(r.qual[pos]), "{} qual pos {}", r.name, pos);
         }
     }
 }

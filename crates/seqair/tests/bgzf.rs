@@ -6,7 +6,7 @@
     clippy::indexing_slicing,
     reason = "test code"
 )]
-use proptest::prelude::*;
+use hegel::prelude::*;
 use seqair::bam::{
     BamError, BamHeaderError, BgzfError,
     bgzf::VirtualOffset,
@@ -16,40 +16,34 @@ use seqair::bam::{
 // r[verify bgzf.virtual_offset]
 // Verifies the BAI spec (SAM1 §4.1): upper 48 bits = compressed block offset,
 // lower 16 bits = uncompressed offset within block.
-proptest! {
-    #[test]
-    fn virtual_offset_bit_layout_matches_spec(
-        block_offset in 0u64..=(1u64 << 48) - 1,
-        within_block in 0u16..=u16::MAX,
-    ) {
-        let vo = VirtualOffset::new(block_offset, within_block);
-        let expected_raw = (block_offset << 16) | u64::from(within_block);
-        prop_assert_eq!(vo.0, expected_raw, "raw u64 must match BAI spec bit layout");
-        prop_assert_eq!(vo.block_offset(), block_offset);
-        prop_assert_eq!(vo.within_block(), within_block);
-    }
+#[hegel::test]
+fn virtual_offset_bit_layout_matches_spec(tc: TestCase) {
+    let block_offset = tc.draw(gs::integers::<u64>().max_value((1u64 << 48) - 1));
+    let within_block = tc.draw(gs::integers::<u16>());
+    let vo = VirtualOffset::new(block_offset, within_block);
+    let expected_raw = (block_offset << 16) | u64::from(within_block);
+    assert_eq!(vo.0, expected_raw, "raw u64 must match BAI spec bit layout");
+    assert_eq!(vo.block_offset(), block_offset);
+    assert_eq!(vo.within_block(), within_block);
 }
 
 // r[verify bgzf.virtual_offset]
 // Verifies that VirtualOffsets constructed from raw BAI u64 values sort in the
 // same order as their raw u64 representations, and that block_offset is the
 // primary sort key per the BAI spec.
-proptest! {
-    #[test]
-    fn virtual_offset_ordering_consistent_with_raw_u64(
-        raw1 in 0u64..=u64::MAX,
-        raw2 in 0u64..=u64::MAX,
-    ) {
-        let vo1 = VirtualOffset(raw1);
-        let vo2 = VirtualOffset(raw2);
-        // Ordering must be identical to the raw u64 ordering (since the struct
-        // is a transparent u64 newtype and block_offset occupies the high bits).
-        prop_assert_eq!(vo1.cmp(&vo2), raw1.cmp(&raw2));
-        // When vo1 < vo2, block_offset of vo1 must be <= block_offset of vo2,
-        // confirming block_offset is the primary sort key.
-        if vo1 < vo2 {
-            prop_assert!(vo1.block_offset() <= vo2.block_offset());
-        }
+#[hegel::test]
+fn virtual_offset_ordering_consistent_with_raw_u64(tc: TestCase) {
+    let raw1 = tc.draw(gs::integers::<u64>());
+    let raw2 = tc.draw(gs::integers::<u64>());
+    let vo1 = VirtualOffset(raw1);
+    let vo2 = VirtualOffset(raw2);
+    // Ordering must be identical to the raw u64 ordering (since the struct
+    // is a transparent u64 newtype and block_offset occupies the high bits).
+    assert_eq!(vo1.cmp(&vo2), raw1.cmp(&raw2));
+    // When vo1 < vo2, block_offset of vo1 must be <= block_offset of vo2,
+    // confirming block_offset is the primary sort key.
+    if vo1 < vo2 {
+        assert!(vo1.block_offset() <= vo2.block_offset());
     }
 }
 
