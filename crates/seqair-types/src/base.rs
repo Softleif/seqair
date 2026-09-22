@@ -549,7 +549,11 @@ pub enum BaseError {
 #[allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
     use std::str::FromStr;
+
+    /// The characters `Base::from_str` accepts.
+    const BASE_CHARS: [char; 10] = ['A', 'C', 'G', 'T', 'N', 'a', 'c', 'g', 't', 'n'];
 
     // The index is a lookup table keyed on the ASCII discriminant, so the
     // property that matters is that *every* byte lands where the match arms
@@ -573,69 +577,75 @@ mod tests {
         assert_eq!(Base::Unknown.known_index(), None);
     }
 
-    proptest::proptest! {
-        #[test]
-        fn proptest_from_u8_maps_correctly(input: u8) {
-            let base = Base::from(input);
-            let expected = match input {
-                b'A' | b'a' => Base::A,
-                b'C' | b'c' => Base::C,
-                b'G' | b'g' => Base::G,
-                b'T' | b't' => Base::T,
-                _ => Base::Unknown,
-            };
-            proptest::prop_assert_eq!(base, expected);
-        }
+    #[hegel::test]
+    fn from_u8_maps_correctly(tc: TestCase) {
+        let input = tc.draw(gs::integers::<u8>());
+        let base = Base::from(input);
+        let expected = match input {
+            b'A' | b'a' => Base::A,
+            b'C' | b'c' => Base::C,
+            b'G' | b'g' => Base::G,
+            b'T' | b't' => Base::T,
+            _ => Base::Unknown,
+        };
+        assert_eq!(base, expected);
+    }
 
-        #[test]
-        fn proptest_from_str_maps_to_correct_variant(input in "[ACGTNacgtn]") {
-            let base = Base::from_str(&input).expect("valid single base char");
-            let ch = input.chars().next().expect("non-empty string");
-            let expected = match ch {
-                'A' | 'a' => Base::A,
-                'C' | 'c' => Base::C,
-                'G' | 'g' => Base::G,
-                'T' | 't' => Base::T,
-                'N' | 'n' => Base::Unknown,
-                _ => unreachable!("regex guarantees only ACGTNacgtn"),
-            };
-            proptest::prop_assert_eq!(base, expected);
-        }
+    #[hegel::test]
+    fn from_str_maps_to_correct_variant(tc: TestCase) {
+        let input = tc.draw(gs::sampled_from(&BASE_CHARS));
+        let base = Base::from_str(&input.to_string()).expect("valid single base char");
+        let expected = match input {
+            'A' | 'a' => Base::A,
+            'C' | 'c' => Base::C,
+            'G' | 'g' => Base::G,
+            'T' | 't' => Base::T,
+            'N' | 'n' => Base::Unknown,
+            _ => unreachable!("BASE_CHARS holds only ACGTNacgtn"),
+        };
+        assert_eq!(base, expected);
+    }
 
-        #[test]
-        fn proptest_from_str_rejects_multi_char(a in "[ACGTNacgtn]", b in "[ACGTNacgtn]") {
-            let multi = format!("{a}{b}");
-            proptest::prop_assert!(Base::from_str(&multi).is_err());
-        }
+    #[hegel::test]
+    fn from_str_rejects_multi_char(tc: TestCase) {
+        let a = tc.draw(gs::sampled_from(&BASE_CHARS));
+        let b = tc.draw(gs::sampled_from(&BASE_CHARS));
+        let multi = format!("{a}{b}");
+        assert!(Base::from_str(&multi).is_err());
+    }
 
-        #[test]
-        fn proptest_from_str_never_panics(input in r"\PC{0,10}") {
-            // Just ensure no panic; errors are fine
-            let _ = Base::from_str(&input);
-        }
+    #[hegel::test]
+    fn from_str_never_panics(tc: TestCase) {
+        let input = tc.draw(gs::text().max_size(10));
+        // Just ensure no panic; errors are fine
+        let _ = Base::from_str(&input);
+    }
 
-        // r[verify base_decode.ascii_simd]
-        // r[verify base_decode.ascii_scalar_equivalence]
-        #[test]
-        fn proptest_from_ascii_vec_equivalence(input: Vec<u8>) {
-            let expected: Vec<Base> = input.iter().map(|&b| Base::from(b)).collect();
-            let actual = Base::from_ascii_vec(input);
-            proptest::prop_assert_eq!(actual, expected);
-        }
+    // r[verify base_decode.ascii_simd]
+    // r[verify base_decode.ascii_scalar_equivalence]
+    #[hegel::test]
+    fn from_ascii_vec_equivalence(tc: TestCase) {
+        let input = tc.draw(gs::binary());
+        let expected: Vec<Base> = input.iter().map(|&b| Base::from(b)).collect();
+        let actual = Base::from_ascii_vec(input);
+        assert_eq!(actual, expected);
+    }
 
-        // r[verify base_decode.ascii_scalar_equivalence]
-        #[test]
-        fn proptest_from_ascii_vec_all_byte_values(prefix_len in 0usize..32, suffix_len in 0usize..32) {
-            // All 256 byte values, but with varying-length padding to exercise
-            // different SIMD alignment boundaries and tail lengths.
-            let all_bytes: Vec<u8> = (0u16..=255).map(|b| b as u8).collect();
-            let prefix: Vec<u8> = vec![b'N'; prefix_len];
-            let suffix: Vec<u8> = vec![b'A'; suffix_len];
-            let input: Vec<u8> = [&prefix[..], &all_bytes, &suffix[..]].concat();
-            let expected: Vec<Base> = input.iter().map(|&b| Base::from(b)).collect();
-            let actual = Base::from_ascii_vec(input);
-            proptest::prop_assert_eq!(actual, expected);
-        }
+    // r[verify base_decode.ascii_scalar_equivalence]
+    #[hegel::test]
+    fn from_ascii_vec_all_byte_values(tc: TestCase) {
+        // All 256 byte values, but with varying-length padding to exercise
+        // different SIMD alignment boundaries and tail lengths.
+        let pad = || gs::integers::<usize>().min_value(0).max_value(31);
+        let prefix_len = tc.draw(pad());
+        let suffix_len = tc.draw(pad());
+        let all_bytes: Vec<u8> = (0u16..=255).map(|b| b as u8).collect();
+        let prefix: Vec<u8> = vec![b'N'; prefix_len];
+        let suffix: Vec<u8> = vec![b'A'; suffix_len];
+        let input: Vec<u8> = [&prefix[..], &all_bytes, &suffix[..]].concat();
+        let expected: Vec<Base> = input.iter().map(|&b| Base::from(b)).collect();
+        let actual = Base::from_ascii_vec(input);
+        assert_eq!(actual, expected);
     }
 
     #[test]

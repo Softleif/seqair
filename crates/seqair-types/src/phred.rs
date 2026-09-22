@@ -89,6 +89,7 @@ impl fmt::Display for Phred {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
 
     #[test]
     fn test_wikipedia_examples() {
@@ -124,41 +125,46 @@ mod tests {
         assert_eq!(p.as_int(), 0);
     }
 
-    proptest::proptest! {
-        // r[verify types.phred.non_negative]
-        #[test]
-        fn proptest_from_phred_produces_valid(q: u8) {
-            let p = Phred::from_phred(q);
-            let i = p.as_int();
-            proptest::prop_assert!((0..=99).contains(&i), "as_int out of range: {i}");
-        }
+    // r[verify types.phred.non_negative]
+    #[hegel::test]
+    fn from_phred_produces_valid(tc: TestCase) {
+        let q = tc.draw(gs::integers::<u8>());
+        let p = Phred::from_phred(q);
+        let i = p.as_int();
+        assert!((0..=99).contains(&i), "as_int out of range: {i}");
+    }
 
-        // r[verify types.phred.non_negative]
-        #[test]
-        fn proptest_from_phred_matches_from_probability(q in 0u8..=93) {
-            // Cross-validate: from_phred and From<Probability> must agree
-            let via_int = Phred::from_phred(q).as_int();
-            proptest::prop_assert_eq!(via_int, i32::from(q));
-            let prob = Probability::new(10f64.powf(-f64::from(q) / 10.0))
-                .expect("valid probability");
-            let via_prob = Phred::from(prob).as_int();
-            proptest::prop_assert_eq!(via_int, via_prob,
-                "construction paths disagree for q={}: from_phred gives {}, from_prob gives {}", q, via_int, via_prob);
-        }
+    // r[verify types.phred.non_negative]
+    #[hegel::test]
+    fn from_phred_matches_from_probability(tc: TestCase) {
+        // Cross-validate: from_phred and From<Probability> must agree
+        let q = tc.draw(gs::integers::<u8>().max_value(93));
+        let via_int = Phred::from_phred(q).as_int();
+        assert_eq!(via_int, i32::from(q));
+        let prob = Probability::new(10f64.powf(-f64::from(q) / 10.0)).expect("valid probability");
+        let via_prob = Phred::from(prob).as_int();
+        assert_eq!(
+            via_int, via_prob,
+            "construction paths disagree for q={q}: from_phred gives {via_int}, from_prob gives {via_prob}"
+        );
+    }
 
-        #[test]
-        fn proptest_phred_monotonic_with_quality(q1 in 0u8..=93, q2 in 0u8..=93) {
-            proptest::prop_assume!(q1 != q2);
-            let (lo, hi) = if q1 < q2 { (q1, q2) } else { (q2, q1) };
-            // Higher quality score → lower error probability
-            let prob_lo = Probability::new(10f64.powf(-f64::from(lo) / 10.0))
-                .expect("valid probability");
-            let prob_hi = Probability::new(10f64.powf(-f64::from(hi) / 10.0))
-                .expect("valid probability");
-            proptest::prop_assert!(
-                *prob_lo >= *prob_hi,
-                "expected prob(q={lo}) >= prob(q={hi}) but got {} < {}", *prob_lo, *prob_hi
-            );
-        }
+    #[hegel::test]
+    fn phred_monotonic_with_quality(tc: TestCase) {
+        let q1 = tc.draw(gs::integers::<u8>().max_value(93));
+        let q2 = tc.draw(gs::integers::<u8>().max_value(93));
+        tc.assume(q1 != q2);
+        let (lo, hi) = if q1 < q2 { (q1, q2) } else { (q2, q1) };
+        // Higher quality score -> lower error probability
+        let prob_lo =
+            Probability::new(10f64.powf(-f64::from(lo) / 10.0)).expect("valid probability");
+        let prob_hi =
+            Probability::new(10f64.powf(-f64::from(hi) / 10.0)).expect("valid probability");
+        assert!(
+            *prob_lo >= *prob_hi,
+            "expected prob(q={lo}) >= prob(q={hi}) but got {} < {}",
+            *prob_lo,
+            *prob_hi
+        );
     }
 }

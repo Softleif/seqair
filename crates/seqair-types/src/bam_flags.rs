@@ -565,81 +565,90 @@ mod tests {
 
     mod proptests {
         use super::*;
-        use proptest::prelude::*;
+        use hegel::prelude::*;
 
         // r[verify flags.from]
         // r[verify flags.raw]
         // r[verify flags.roundtrip]
-        proptest! {
-            #[test]
-            fn roundtrip(v: u16) {
-                prop_assert_eq!(BamFlags::from(v).raw(), v);
-            }
+        #[hegel::test]
+        fn roundtrip(tc: TestCase) {
+            let v = tc.draw(gs::integers::<u16>());
+            assert_eq!(BamFlags::from(v).raw(), v);
+        }
 
-            /// `with` and `set` are two code paths to the same result.
-            #[test]
-            fn with_equals_set(v: u16, bit: u16) {
-                let f = BamFlags::from(v);
-                let via_with = f.with(bit);
-                let mut via_set = f;
-                via_set.set(bit);
-                prop_assert_eq!(via_with, via_set);
-            }
+        /// `with` and `set` are two code paths to the same result.
+        #[hegel::test]
+        fn with_equals_set(tc: TestCase) {
+            let v = tc.draw(gs::integers::<u16>());
+            let bit = tc.draw(gs::integers::<u16>());
+            let f = BamFlags::from(v);
+            let via_with = f.with(bit);
+            let mut via_set = f;
+            via_set.set(bit);
+            assert_eq!(via_with, via_set);
+        }
 
-            /// `without` and `unset` are two code paths to the same result.
-            #[test]
-            fn without_equals_unset(v: u16, bit: u16) {
-                let f = BamFlags::from(v);
-                let via_without = f.without(bit);
-                let mut via_unset = f;
-                via_unset.unset(bit);
-                prop_assert_eq!(via_without, via_unset);
-            }
+        /// `without` and `unset` are two code paths to the same result.
+        #[hegel::test]
+        fn without_equals_unset(tc: TestCase) {
+            let v = tc.draw(gs::integers::<u16>());
+            let bit = tc.draw(gs::integers::<u16>());
+            let f = BamFlags::from(v);
+            let via_without = f.without(bit);
+            let mut via_unset = f;
+            via_unset.unset(bit);
+            assert_eq!(via_without, via_unset);
+        }
 
-            /// set then unset clears only the target bit, leaves others unchanged.
-            #[test]
-            fn set_then_unset_clears_only_target(v: u16, bit: u16) {
-                let mut f = BamFlags::from(v);
-                f.set(bit);
-                f.unset(bit);
-                prop_assert_eq!(f.raw(), v & !bit);
-            }
+        /// set then unset clears only the target bit, leaves others unchanged.
+        #[hegel::test]
+        fn set_then_unset_clears_only_target(tc: TestCase) {
+            let v = tc.draw(gs::integers::<u16>());
+            let bit = tc.draw(gs::integers::<u16>());
+            let mut f = BamFlags::from(v);
+            f.set(bit);
+            f.unset(bit);
+            assert_eq!(f.raw(), v & !bit);
+        }
 
-            /// with(bit).without(bit) on a value where bit was clear restores original.
-            #[test]
-            fn with_without_roundtrip_when_bit_was_clear(v: u16, bit_idx in 0u16..16) {
-                let bit = 1u16 << bit_idx;
-                let cleared = BamFlags::from(v & !bit);
-                let toggled = cleared.with(bit).without(bit);
-                prop_assert_eq!(toggled, cleared);
-            }
+        /// with(bit).without(bit) on a value where bit was clear restores original.
+        #[hegel::test]
+        fn with_without_roundtrip_when_bit_was_clear(tc: TestCase) {
+            let v = tc.draw(gs::integers::<u16>());
+            let bit_idx = tc.draw(gs::integers::<u16>().max_value(15));
+            let bit = 1u16 << bit_idx;
+            let cleared = BamFlags::from(v & !bit);
+            let toggled = cleared.with(bit).without(bit);
+            assert_eq!(toggled, cleared);
+        }
 
-            /// Display roundtrips through decimal parse.
-            #[test]
-            fn display_roundtrips_through_parse(v: u16) {
-                let s = format!("{}", BamFlags::from(v));
-                let parsed = s.parse::<u16>();
-                prop_assert!(parsed.is_ok(), "failed to parse {:?}", s);
-                prop_assert_eq!(parsed.unwrap(), v);
-            }
+        /// Display roundtrips through decimal parse.
+        #[hegel::test]
+        fn display_roundtrips_through_parse(tc: TestCase) {
+            let v = tc.draw(gs::integers::<u16>());
+            let s = format!("{}", BamFlags::from(v));
+            let parsed = s.parse::<u16>();
+            assert!(parsed.is_ok(), "failed to parse {s:?}");
+            assert_eq!(parsed.unwrap(), v);
+        }
 
-            /// Undefined bits above 0x800 don't trigger any named predicate.
-            #[test]
-            fn undefined_bits_dont_trigger_predicates(extra_bits in 0u16..=0xF000) {
-                let f = BamFlags::from(extra_bits & 0xF000);
-                prop_assert!(!f.is_paired());
-                prop_assert!(!f.is_proper_pair());
-                prop_assert!(!f.is_unmapped());
-                prop_assert!(!f.is_mate_unmapped());
-                prop_assert!(!f.is_reverse());
-                prop_assert!(!f.is_mate_reverse());
-                prop_assert!(!f.is_first_in_template());
-                prop_assert!(!f.is_second_in_template());
-                prop_assert!(!f.is_secondary());
-                prop_assert!(!f.is_failed_qc());
-                prop_assert!(!f.is_duplicate());
-                prop_assert!(!f.is_supplementary());
-            }
+        /// Undefined bits above 0x800 don't trigger any named predicate.
+        #[hegel::test]
+        fn undefined_bits_dont_trigger_predicates(tc: TestCase) {
+            let extra_bits = tc.draw(gs::integers::<u16>().max_value(0xF000));
+            let f = BamFlags::from(extra_bits & 0xF000);
+            assert!(!f.is_paired());
+            assert!(!f.is_proper_pair());
+            assert!(!f.is_unmapped());
+            assert!(!f.is_mate_unmapped());
+            assert!(!f.is_reverse());
+            assert!(!f.is_mate_reverse());
+            assert!(!f.is_first_in_template());
+            assert!(!f.is_second_in_template());
+            assert!(!f.is_secondary());
+            assert!(!f.is_failed_qc());
+            assert!(!f.is_duplicate());
+            assert!(!f.is_supplementary());
         }
     }
 }

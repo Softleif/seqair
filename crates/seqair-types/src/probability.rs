@@ -118,6 +118,12 @@ impl<'de> serde::Deserialize<'de> for Probability {
 mod tests {
     use super::*;
     use crate::Phred;
+    use hegel::prelude::*;
+
+    /// The closed range `Probability` accepts.
+    fn unit_interval() -> gs::FloatGenerator<f64> {
+        gs::floats::<f64>().min_value(0.0).max_value(1.0)
+    }
 
     #[test]
     fn fails_outside_range() {
@@ -158,59 +164,61 @@ mod tests {
         assert!(matches!(err, crate::ProbabilityError::OutOfRange { .. }));
     }
 
-    proptest::proptest! {
-        #[test]
-        fn proptest_valid_range_accepted(v in 0.0f64..=1.0) {
-            proptest::prop_assert!(Probability::new(v).is_ok());
-        }
+    #[hegel::test]
+    fn valid_range_accepted(tc: TestCase) {
+        let v = tc.draw(unit_interval());
+        assert!(Probability::new(v).is_ok());
+    }
 
-        #[test]
-        fn proptest_above_range_rejected(v in 1.001f64..1e10) {
-            proptest::prop_assert!(Probability::new(v).is_err());
-        }
+    #[hegel::test]
+    fn above_range_rejected(tc: TestCase) {
+        let v = tc.draw(gs::floats::<f64>().min_value(1.001).max_value(1e10));
+        assert!(Probability::new(v).is_err());
+    }
 
-        #[test]
-        fn proptest_below_range_rejected(v in -1e10f64..-0.001) {
-            proptest::prop_assert!(Probability::new(v).is_err());
-        }
+    #[hegel::test]
+    fn below_range_rejected(tc: TestCase) {
+        let v = tc.draw(gs::floats::<f64>().min_value(-1e10).max_value(-0.001));
+        assert!(Probability::new(v).is_err());
+    }
 
-        #[test]
-        fn proptest_inverted_stays_in_range(v in 0.0f64..=1.0) {
-            let p = Probability::new(v).expect("valid");
-            let inv = p.inverted();
-            let sum = *p + *inv;
-            proptest::prop_assert!(
-                (sum - 1.0).abs() <= f64::EPSILON * 4.0,
-                "p + inverted(p) = {sum}, expected 1.0 (v={v})"
-            );
-        }
+    #[hegel::test]
+    fn inverted_stays_in_range(tc: TestCase) {
+        let v = tc.draw(unit_interval());
+        let p = Probability::new(v).expect("valid");
+        let inv = p.inverted();
+        let sum = *p + *inv;
+        assert!(
+            (sum - 1.0).abs() <= f64::EPSILON * 4.0,
+            "p + inverted(p) = {sum}, expected 1.0 (v={v})"
+        );
+    }
 
-        #[test]
-        fn proptest_phred_monotonic_with_probability(
-            v1 in 0.001f64..=0.999,
-            v2 in 0.001f64..=0.999
-        ) {
-            proptest::prop_assume!(v1 != v2);
-            let (lo, hi) = if v1 < v2 { (v1, v2) } else { (v2, v1) };
-            let p_lo = Probability::new(lo).expect("valid");
-            let p_hi = Probability::new(hi).expect("valid");
-            // Higher error probability → lower Phred quality score
-            proptest::prop_assert!(
-                Phred::from(p_lo).as_int() >= Phred::from(p_hi).as_int(),
-                "expected Phred({lo}) >= Phred({hi}) but got {} < {}",
-                Phred::from(p_lo).as_int(),
-                Phred::from(p_hi).as_int()
-            );
-        }
+    #[hegel::test]
+    fn phred_monotonic_with_probability(tc: TestCase) {
+        let bounded = || gs::floats::<f64>().min_value(0.001).max_value(0.999);
+        let v1 = tc.draw(bounded());
+        let v2 = tc.draw(bounded());
+        tc.assume(v1 != v2);
+        let (lo, hi) = if v1 < v2 { (v1, v2) } else { (v2, v1) };
+        let p_lo = Probability::new(lo).expect("valid");
+        let p_hi = Probability::new(hi).expect("valid");
+        // Higher error probability -> lower Phred quality score
+        assert!(
+            Phred::from(p_lo).as_int() >= Phred::from(p_hi).as_int(),
+            "expected Phred({lo}) >= Phred({hi}) but got {} < {}",
+            Phred::from(p_lo).as_int(),
+            Phred::from(p_hi).as_int()
+        );
+    }
 
-        #[test]
-        fn proptest_from_str_roundtrip(v in 0.0f64..=1.0) {
-            let p = Probability::new(v).expect("valid");
-            let s = format!("{p:.10}");
-            let p2: Probability = s.parse().expect("roundtrip parse");
-            let diff = (*p - *p2).abs();
-            proptest::prop_assert!(diff < 1e-9,
-                "FromStr roundtrip error: {v} -> \"{s}\" -> {}, diff={diff}", *p2);
-        }
+    #[hegel::test]
+    fn from_str_roundtrip(tc: TestCase) {
+        let v = tc.draw(unit_interval());
+        let p = Probability::new(v).expect("valid");
+        let s = format!("{p:.10}");
+        let p2: Probability = s.parse().expect("roundtrip parse");
+        let diff = (*p - *p2).abs();
+        assert!(diff < 1e-9, "FromStr roundtrip error: {v} -> \"{s}\" -> {}, diff={diff}", *p2);
     }
 }

@@ -375,7 +375,7 @@ mod tests {
             );
         }
     }
-    use proptest::{collection::vec, prelude::*};
+    use hegel::prelude::*;
 
     #[test]
     fn test_empty_accumulator_gives_zero() {
@@ -384,54 +384,59 @@ mod tests {
         assert_eq!(*rms, 0.0);
     }
 
-    proptest! {
-        #[test]
-        fn test_rms_constant_value(value: u8) {
-            let data = vec![value; 100];
-            let rms = RootMeanSquare::from_iter(data);
-            prop_assert_eq!(*rms, f64::from(value));
-        }
+    #[hegel::test]
+    fn rms_constant_value(tc: TestCase) {
+        let value = tc.draw(gs::integers::<u8>());
+        let data = vec![value; 100];
+        let rms = RootMeanSquare::from_iter(data);
+        assert_eq!(*rms, f64::from(value));
+    }
 
-        #[test]
-        fn test_rms_accumulator_identical_values(value in 0u8..=255, count in 1usize..200) {
-            let mut acc = RmsAccumulator::new();
-            for _ in 0..count {
-                acc.add(f64::from(value));
-            }
-            let rms = acc.finish();
-            // RMS of N identical values v is v
-            let diff = (*rms - f64::from(value)).abs();
-            prop_assert!(diff < 1e-10, "RMS of {} identical {value} = {}, expected {value}", count, *rms);
+    #[hegel::test]
+    fn rms_accumulator_identical_values(tc: TestCase) {
+        let value = tc.draw(gs::integers::<u8>());
+        let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(199));
+        let mut acc = RmsAccumulator::new();
+        for _ in 0..count {
+            acc.add(f64::from(value));
         }
+        let rms = acc.finish();
+        // RMS of N identical values v is v
+        let diff = (*rms - f64::from(value)).abs();
+        assert!(diff < 1e-10, "RMS of {count} identical {value} = {}, expected {value}", *rms);
+    }
 
-        #[test]
-        fn test_rms_never_negative(data: Vec<u8>) {
-            let rms = RootMeanSquare::from_iter(data);
-            prop_assert!(*rms >= 0.0);
-        }
+    #[hegel::test]
+    fn rms_never_negative(tc: TestCase) {
+        let data = tc.draw(gs::binary());
+        let rms = RootMeanSquare::from_iter(data);
+        assert!(*rms >= 0.0);
+    }
 
-        #[test]
-        fn test_rms_zero_iff_all_zeros(data: Vec<u8>) {
-            let rms = RootMeanSquare::from_iter(data.clone());
-            if data.iter().all(|&x| x == 0) {
-                prop_assert_eq!(rms.0, 0.0);
-            } else if !data.is_empty() {
-                prop_assert!(*rms > 0.0);
-            }
+    #[hegel::test]
+    fn rms_zero_iff_all_zeros(tc: TestCase) {
+        let data = tc.draw(gs::binary());
+        let rms = RootMeanSquare::from_iter(data.clone());
+        if data.iter().all(|&x| x == 0) {
+            assert_eq!(rms.0, 0.0);
+        } else if !data.is_empty() {
+            assert!(*rms > 0.0);
         }
+    }
 
-        #[test]
-        fn test_rms_greater_than_or_equal_to_mean(data in vec(any::<u8>(), 1..300)) {
-            let mean = data.iter().map(|&x| f64::from(x)).sum::<f64>() / data.len() as f64;
-            let rms = RootMeanSquare::from_iter(data);
-            prop_assert!(*rms >= mean);
-        }
+    #[hegel::test]
+    fn rms_greater_than_or_equal_to_mean(tc: TestCase) {
+        let data = tc.draw(gs::binary().min_size(1).max_size(299));
+        let mean = data.iter().map(|&x| f64::from(x)).sum::<f64>() / data.len() as f64;
+        let rms = RootMeanSquare::from_iter(data);
+        assert!(*rms >= mean);
+    }
 
-        #[test]
-        fn test_rms_less_than_or_equal_to_max(data in vec(any::<u8>(), 1..300)) {
-            let max = f64::from(*data.iter().max().unwrap());
-            let rms = RootMeanSquare::from_iter(data);
-            prop_assert!(*rms <= max);
-        }
+    #[hegel::test]
+    fn rms_less_than_or_equal_to_max(tc: TestCase) {
+        let data = tc.draw(gs::binary().min_size(1).max_size(299));
+        let max = f64::from(*data.iter().max().unwrap());
+        let rms = RootMeanSquare::from_iter(data);
+        assert!(*rms <= max);
     }
 }

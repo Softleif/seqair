@@ -568,7 +568,7 @@ impl Pos<One> {
 #[cfg(test)]
 #[allow(clippy::arithmetic_side_effects, reason = "tests")]
 mod tests {
-    use proptest::prelude::*;
+    use hegel::prelude::*;
 
     use super::*;
 
@@ -813,78 +813,81 @@ mod tests {
         assert_eq!(back, 12345);
     }
 
-    proptest! {
-        // r[verify pos.to_one_based]
-        // r[verify pos.to_zero_based]
-        #[test]
-        fn roundtrip_zero_to_one_and_back(v in 0u32..I32_MAX_U32) {
-            // i32::MAX itself can't round-trip (to_one_based would overflow).
-            let z = Pos0::new(v).unwrap();
-            let o = z.to_one_based().unwrap();
-            prop_assert_eq!(o.to_zero_based(), z);
-        }
+    // r[verify pos.to_one_based]
+    // r[verify pos.to_zero_based]
+    #[hegel::test]
+    fn roundtrip_zero_to_one_and_back(tc: TestCase) {
+        // i32::MAX itself can't round-trip (to_one_based would overflow).
+        let v = tc.draw(gs::integers::<u32>().max_value(I32_MAX_U32 - 1));
+        let z = Pos0::new(v).unwrap();
+        let o = z.to_one_based().unwrap();
+        assert_eq!(o.to_zero_based(), z);
+    }
 
-        // r[verify pos.to_zero_based]
-        // r[verify pos.to_one_based]
-        #[test]
-        fn roundtrip_one_to_zero_and_back(v in 1u32..=I32_MAX_U32) {
-            let o = Pos1::new(v).unwrap();
-            let z = o.to_zero_based();
-            prop_assert_eq!(z.to_one_based().unwrap(), o);
-        }
+    // r[verify pos.to_zero_based]
+    // r[verify pos.to_one_based]
+    #[hegel::test]
+    fn roundtrip_one_to_zero_and_back(tc: TestCase) {
+        let v = tc.draw(gs::integers::<u32>().min_value(1).max_value(I32_MAX_U32));
+        let o = Pos1::new(v).unwrap();
+        let z = o.to_zero_based();
+        assert_eq!(z.to_one_based().unwrap(), o);
+    }
 
-        // r[verify pos.add_offset]
-        // r[verify pos.sub_offset]
-        #[test]
-        fn pos_plus_minus_offset_roundtrip(
-            v in 0u32..1_000_000,
-            off in -500_000i64..=500_000,
-        ) {
-            let result = i64::from(v) + off;
-            if result >= 0 && result <= i64::from(I32_MAX_U32) {
-                let p = Pos0::new(v).unwrap();
-                let q = p.checked_add_offset(Offset::new(off)).unwrap();
-                let r = q.checked_sub_offset(Offset::new(off)).unwrap();
-                prop_assert_eq!(r, p);
-            }
-        }
-
-        // r[verify pos.sub_pos]
-        #[test]
-        fn pos_sub_pos_is_offset(a in 0u32..1_000_000, b in 0u32..1_000_000) {
-            let pa = Pos0::new(a).unwrap();
-            let pb = Pos0::new(b).unwrap();
-            let off = pa - pb;
-            prop_assert_eq!(off.get(), i64::from(a) - i64::from(b));
-        }
-
-        #[test]
-        fn new_never_accepts_above_i32_max(v in (I32_MAX_U32 + 1)..=u32::MAX) {
-            prop_assert!(Pos0::new(v).is_none());
-            prop_assert!(Pos1::new(v).is_none());
-        }
-
-        // r[verify pos.add_offset]
-        #[test]
-        fn checked_add_never_exceeds_i32_max(
-            v in 0u32..=I32_MAX_U32,
-            off in 0i64..=100,
-        ) {
-            if let Some(p) = Pos0::new(v)
-                && let Some(result) = p.checked_add_offset(Offset::new(off))
-            {
-                prop_assert!(result.as_u32() <= I32_MAX_U32, "checked_add must not exceed i32::MAX");
-            }
-        }
-
-        // r[verify pos.as_i32]
-        #[test]
-        fn as_i32_always_valid(v in 0u32..=I32_MAX_U32) {
+    // r[verify pos.add_offset]
+    // r[verify pos.sub_offset]
+    #[hegel::test]
+    fn pos_plus_minus_offset_roundtrip(tc: TestCase) {
+        let v = tc.draw(gs::integers::<u32>().max_value(999_999));
+        let off = tc.draw(gs::integers::<i64>().min_value(-500_000).max_value(500_000));
+        let result = i64::from(v) + off;
+        if result >= 0 && result <= i64::from(I32_MAX_U32) {
             let p = Pos0::new(v).unwrap();
-            let i = p.as_i32();
-            prop_assert!(i >= 0);
-            prop_assert_eq!(i as u32, v);
+            let q = p.checked_add_offset(Offset::new(off)).unwrap();
+            let r = q.checked_sub_offset(Offset::new(off)).unwrap();
+            assert_eq!(r, p);
         }
+    }
+
+    // r[verify pos.sub_pos]
+    #[hegel::test]
+    fn pos_sub_pos_is_offset(tc: TestCase) {
+        let coord = || gs::integers::<u32>().max_value(999_999);
+        let a = tc.draw(coord());
+        let b = tc.draw(coord());
+        let pa = Pos0::new(a).unwrap();
+        let pb = Pos0::new(b).unwrap();
+        let off = pa - pb;
+        assert_eq!(off.get(), i64::from(a) - i64::from(b));
+    }
+
+    #[hegel::test]
+    fn new_never_accepts_above_i32_max(tc: TestCase) {
+        let v = tc.draw(gs::integers::<u32>().min_value(I32_MAX_U32 + 1));
+        assert!(Pos0::new(v).is_none());
+        assert!(Pos1::new(v).is_none());
+    }
+
+    // r[verify pos.add_offset]
+    #[hegel::test]
+    fn checked_add_never_exceeds_i32_max(tc: TestCase) {
+        let v = tc.draw(gs::integers::<u32>().max_value(I32_MAX_U32));
+        let off = tc.draw(gs::integers::<i64>().min_value(0).max_value(100));
+        if let Some(p) = Pos0::new(v)
+            && let Some(result) = p.checked_add_offset(Offset::new(off))
+        {
+            assert!(result.as_u32() <= I32_MAX_U32, "checked_add must not exceed i32::MAX");
+        }
+    }
+
+    // r[verify pos.as_i32]
+    #[hegel::test]
+    fn as_i32_always_valid(tc: TestCase) {
+        let v = tc.draw(gs::integers::<u32>().max_value(I32_MAX_U32));
+        let p = Pos0::new(v).unwrap();
+        let i = p.as_i32();
+        assert!(i >= 0);
+        assert_eq!(i as u32, v);
     }
 
     // ---- QPos ----

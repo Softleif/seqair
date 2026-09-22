@@ -153,6 +153,7 @@ mod hts {
 #[allow(clippy::arithmetic_side_effects, reason = "tests")]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
     use std::str::FromStr;
 
     #[cfg(feature = "hts-compat")]
@@ -259,73 +260,65 @@ mod tests {
         insta::assert_snapshot!(region, @"chr3:100-200");
     }
 
-    proptest::proptest! {
-        #[test]
-        fn proptest_roundtrip_region_string(
-            // Generate chromosome names with "chr" prefix and some alphanumeric characters
-            chrom in "chr[0-9A-Za-z]{1,10}",
-            // Ensure start is between 1 and 1,000,000
-            start in 1u32..1_000_000u32,
-            // Ensure end is >= start and within reasonable bounds
-            end_offset in 0u32..1_000_000u32
-        ) {
-            let end = start + end_offset;
+    #[hegel::test]
+    fn roundtrip_region_string(tc: TestCase) {
+        // Chromosome names with a "chr" prefix and some alphanumeric characters
+        let chrom = tc.draw(gs::from_regex("chr[0-9A-Za-z]{1,10}"));
+        let start = tc.draw(gs::integers::<u32>().min_value(1).max_value(999_999));
+        let end_offset = tc.draw(gs::integers::<u32>().max_value(999_999));
+        let end = start + end_offset;
 
-            // chromosome only
-            let region_str = chrom.clone();
-            let parsed = RegionString::from_str(&region_str)?;
-            assert_eq!(parsed.chromosome, chrom);
-            assert_eq!(parsed.start, None);
-            assert_eq!(parsed.end, None);
-            #[cfg(feature = "hts-compat")]
-            let _ = FetchDefinition::from(&parsed);
+        // chromosome only
+        let parsed = RegionString::from_str(&chrom).expect("chromosome alone parses");
+        assert_eq!(parsed.chromosome, chrom);
+        assert_eq!(parsed.start, None);
+        assert_eq!(parsed.end, None);
+        #[cfg(feature = "hts-compat")]
+        let _ = FetchDefinition::from(&parsed);
 
-            // chromosome with start
-            let region_str = format!("{chrom}:{start}");
-            let parsed = RegionString::from_str(&region_str)?;
-            assert_eq!(parsed.chromosome, chrom);
-            assert_eq!(parsed.start, Pos1::new(start));
-            assert_eq!(parsed.end, None);
-            #[cfg(feature = "hts-compat")]
-            let _ = FetchDefinition::from(&parsed);
+        // chromosome with start
+        let region_str = format!("{chrom}:{start}");
+        let parsed = RegionString::from_str(&region_str).expect("chromosome:start parses");
+        assert_eq!(parsed.chromosome, chrom);
+        assert_eq!(parsed.start, Pos1::new(start));
+        assert_eq!(parsed.end, None);
+        #[cfg(feature = "hts-compat")]
+        let _ = FetchDefinition::from(&parsed);
 
-            // chromosome with start and end
-            let region_str = format!("{chrom}:{start}-{end}");
-            let parsed = RegionString::from_str(&region_str)?;
-            assert_eq!(parsed.chromosome, chrom);
-            assert_eq!(parsed.start, Pos1::new(start));
-            assert_eq!(parsed.end, Pos1::new(end));
-            #[cfg(feature = "hts-compat")]
-            let _ = FetchDefinition::from(&parsed);
+        // chromosome with start and end
+        let region_str = format!("{chrom}:{start}-{end}");
+        let parsed = RegionString::from_str(&region_str).expect("chromosome:start-end parses");
+        assert_eq!(parsed.chromosome, chrom);
+        assert_eq!(parsed.start, Pos1::new(start));
+        assert_eq!(parsed.end, Pos1::new(end));
+        #[cfg(feature = "hts-compat")]
+        let _ = FetchDefinition::from(&parsed);
+    }
+
+    #[hegel::test]
+    fn roundtrip_random_string(tc: TestCase) {
+        let random_str = tc.draw(gs::text().max_size(100));
+        let Ok(parsed) = RegionString::from_str(&random_str) else {
+            // We're just checking that there is no panic, but errors are fine!
+            return;
+        };
+        let display = parsed.to_string();
+        if let Some(start) = parsed.start {
+            assert!(display.contains(':'), "display missing ':': {display}");
+            let after_colon = display.split(':').nth(1).unwrap_or("");
+            let start_str = after_colon.split('-').next().unwrap_or("");
+            let parsed_start: u32 = start_str.parse().expect("start in display must be numeric");
+            assert_eq!(parsed_start, start.as_u32());
         }
-
-        #[test]
-        fn proptest_roundtrip_random_string(
-            // Generate random strings with up to 100 printable characters
-            random_str in r"\PC{0,100}"
-        ) {
-            let Ok(parsed) = RegionString::from_str(&random_str) else {
-                // We're just checking that there is no panic, but errors are fine!
-                return Ok(());
-            };
-            let display = parsed.to_string();
-            if let Some(start) = parsed.start {
-                proptest::prop_assert!(display.contains(':'), "display missing ':': {display}");
-                let after_colon = display.split(':').nth(1).unwrap_or("");
-                let start_str = after_colon.split('-').next().unwrap_or("");
-                let parsed_start: u32 = start_str.parse().expect("start in display must be numeric");
-                proptest::prop_assert_eq!(parsed_start, start.as_u32());
-            }
-            if let Some(end) = parsed.end {
-                proptest::prop_assert!(display.contains('-'), "display missing '-': {display}");
-                let after_dash = display.split('-').nth(1).unwrap_or("");
-                let parsed_end: u32 = after_dash.parse().expect("end in display must be numeric");
-                proptest::prop_assert_eq!(parsed_end, end.as_u32());
-            }
-            // can be used as a FetchDefinition for bam
-            #[cfg(feature = "hts-compat")]
-            let _ = FetchDefinition::from(&parsed);
+        if let Some(end) = parsed.end {
+            assert!(display.contains('-'), "display missing '-': {display}");
+            let after_dash = display.split('-').nth(1).unwrap_or("");
+            let parsed_end: u32 = after_dash.parse().expect("end in display must be numeric");
+            assert_eq!(parsed_end, end.as_u32());
         }
+        // can be used as a FetchDefinition for bam
+        #[cfg(feature = "hts-compat")]
+        let _ = FetchDefinition::from(&parsed);
     }
 
     #[test]

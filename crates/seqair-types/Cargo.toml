@@ -24,7 +24,6 @@ hts-compat = ["dep:rust-htslib"]
 
 [dev-dependencies]
 insta = { workspace = true }
-proptest = { workspace = true }
 hegeltest = { workspace = true }
 
 [lints]
