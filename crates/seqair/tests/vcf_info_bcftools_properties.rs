@@ -9,11 +9,17 @@
 //! the combinations — a `Number=R` array on a four-allele site, a `Character`
 //! field next to a `Flag`, an `int8` array whose width is decided by one value
 //! in the middle of it. Those are where this writer's bugs have been.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test code")]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
 
 use hegel::prelude::*;
 use seqair::vcf::record_encoder::{
-    InfoFieldDef, InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoInts, InfoString,
+    InfoFieldDef, InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoString,
 };
 use seqair::vcf::{
     Alleles, ContigDef, ContigId, Number, OutputFormat, ValueType, VcfHeader, Writer,
@@ -543,4 +549,305 @@ fn vcf_text_and_bcf_render_the_same_record(tc: TestCase) {
 
     assert_eq!(direct.len(), records.len(), "seqair wrote a record per input");
     assert_eq!(direct, via_bcf, "VCF text and BCF disagree");
+}
+
+// ── Missing values inside integer arrays ───────────────────────────────
+//
+// The documented bug in this corner: BCF stores one integer width for a whole
+// array, and the width must be decided from the *concrete* values alone. A
+// missing element then uses that width's own sentinel — 0x80, 0x8000 or
+// 0x80000000 — and never `i32::MIN` as a universal marker. Getting either half
+// wrong writes bytes a reader silently misreads, so bcftools is the referee.
+
+/// A separate header for the missing-value work: one `Number=.` Integer field
+/// written through the `Option` API, so a record is nothing but the array under
+/// test.
+struct OptSetup {
+    header: Arc<VcfHeader>,
+    contig: ContigId,
+    opts: InfoIntOpts,
+}
+
+fn opt_setup() -> OptSetup {
+    let mut builder = VcfHeader::builder();
+    let contig = builder.register_contig("chr1", ContigDef { length: Some(CONTIG_LEN) }).unwrap();
+    let mut b = builder.infos();
+    let opts = b
+        .register_info(&InfoFieldDef::new(
+            "OI",
+            Number::Unknown,
+            ValueType::Integer,
+            "integers, some missing",
+        ))
+        .unwrap();
+    OptSetup { header: Arc::new(b.samples().build().unwrap()), contig, opts }
+}
+
+/// The BCF integer width a generated array is built to force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Width {
+    Int8,
+    Int16,
+    Int32,
+}
+
+impl Width {
+    /// The whole usable range for the width, sentinels excluded.
+    fn range(self) -> (i32, i32) {
+        match self {
+            Self::Int8 => (-120, 127),
+            Self::Int16 => (-32_760, 32_767),
+            Self::Int32 => (i32::MIN + 8, i32::MAX),
+        }
+    }
+
+    /// A value this width needs and the next narrower one cannot hold. Placed
+    /// at one concrete position so the array really does select the width.
+    fn forcing(self, tc: &TestCase) -> i32 {
+        match self {
+            Self::Int8 => tc.draw_silent(gs::sampled_from(vec![-120i32, 127])),
+            Self::Int16 => tc.draw_silent(hegel::one_of!(
+                gs::integers::<i32>().min_value(128).max_value(32_767),
+                gs::integers::<i32>().min_value(-32_760).max_value(-121),
+            )),
+            Self::Int32 => tc.draw_silent(hegel::one_of!(
+                gs::integers::<i32>().min_value(32_768).max_value(i32::MAX),
+                gs::integers::<i32>().min_value(i32::MIN + 8).max_value(-32_761),
+            )),
+        }
+    }
+}
+
+/// Where the missing elements sit. Each of these has its own way of going
+/// wrong: a leading run decides the width before any concrete value is seen, a
+/// trailing run can be confused with end-of-vector padding, and all-but-one
+/// leaves a single value to carry the whole column.
+#[derive(Debug, Clone, Copy)]
+enum Pattern {
+    Leading,
+    Middle,
+    Trailing,
+    AllButOne,
+    Scattered,
+}
+
+#[derive(Debug, Clone)]
+struct OptRecord {
+    pos: u32,
+    width: Width,
+    pattern: Pattern,
+    values: Vec<Option<i32>>,
+}
+
+#[hegel::composite]
+fn arb_opt_records(tc: &TestCase) -> Vec<OptRecord> {
+    let n_records = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(4));
+    let mut positions: Vec<u32> = (0..n_records)
+        .map(|_| tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(MAX_POS)))
+        .collect();
+    positions.sort_unstable();
+
+    positions
+        .into_iter()
+        .map(|pos| {
+            let width =
+                tc.draw_silent(gs::sampled_from(&[Width::Int8, Width::Int16, Width::Int32]));
+            let pattern = tc.draw_silent(gs::sampled_from(&[
+                Pattern::Leading,
+                Pattern::Middle,
+                Pattern::Trailing,
+                Pattern::AllButOne,
+                Pattern::Scattered,
+            ]));
+            // `Middle` needs an interior slot, so the length is drawn to fit
+            // the pattern rather than drawn first and the case rejected.
+            let min_len = if matches!(pattern, Pattern::Middle) { 3 } else { 2 };
+            let len = tc.draw_silent(gs::integers::<usize>().min_value(min_len).max_value(8));
+
+            let mut missing = vec![false; len];
+            match pattern {
+                Pattern::Leading => {
+                    let k = tc.draw_silent(
+                        gs::integers::<usize>().min_value(1).max_value(len.saturating_sub(1)),
+                    );
+                    missing[..k].fill(true);
+                }
+                Pattern::Trailing => {
+                    let k = tc.draw_silent(
+                        gs::integers::<usize>().min_value(1).max_value(len.saturating_sub(1)),
+                    );
+                    missing[len.saturating_sub(k)..].fill(true);
+                }
+                Pattern::Middle => {
+                    let start = tc.draw_silent(
+                        gs::integers::<usize>().min_value(1).max_value(len.saturating_sub(2)),
+                    );
+                    let end = tc.draw_silent(
+                        gs::integers::<usize>()
+                            .min_value(start.saturating_add(1))
+                            .max_value(len.saturating_sub(1)),
+                    );
+                    missing[start..end].fill(true);
+                }
+                Pattern::AllButOne => {
+                    let keep =
+                        tc.draw_silent(gs::integers::<usize>().max_value(len.saturating_sub(1)));
+                    missing.fill(true);
+                    missing[keep] = false;
+                }
+                Pattern::Scattered => {
+                    for slot in &mut missing {
+                        *slot = tc.draw_silent(gs::booleans());
+                    }
+                    // Keep at least one concrete value: an all-missing INFO
+                    // array has no VCF spelling distinct from an absent field.
+                    if missing.iter().all(|m| *m) {
+                        let keep = tc
+                            .draw_silent(gs::integers::<usize>().max_value(len.saturating_sub(1)));
+                        missing[keep] = false;
+                    }
+                }
+            }
+
+            let (lo, hi) = width.range();
+            let mut values: Vec<Option<i32>> = missing
+                .iter()
+                .map(|&m| {
+                    if m {
+                        None
+                    } else {
+                        Some(tc.draw_silent(gs::integers::<i32>().min_value(lo).max_value(hi)))
+                    }
+                })
+                .collect();
+            let concrete: Vec<usize> = missing
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| if *m { None } else { Some(i) })
+                .collect();
+            let forced = tc.draw_silent(gs::sampled_from(&concrete));
+            values[forced] = Some(width.forcing(tc));
+
+            OptRecord { pos, width, pattern, values }
+        })
+        .collect()
+}
+
+fn write_opts(s: &OptSetup, records: &[OptRecord], format: OutputFormat) -> Vec<u8> {
+    let mut out = Vec::new();
+    let writer = Writer::new(&mut out, format);
+    let mut writer = writer.write_header(&s.header).unwrap();
+    for rec in records {
+        let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+        let mut enc = writer
+            .begin_record(&s.contig, Pos1::new(rec.pos).unwrap(), &alleles, None)
+            .unwrap()
+            .filter_pass();
+        s.opts.encode(&mut enc, &rec.values);
+        enc.emit().unwrap();
+    }
+    writer.finish().unwrap();
+    out
+}
+
+/// How bcftools prints the array: values comma-separated, a missing element
+/// as `.`.
+fn expect_opts(values: &[Option<i32>]) -> String {
+    values
+        .iter()
+        .map(|v| v.map_or_else(|| ".".to_owned(), |n| n.to_string()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Size of the BGZF payload — the encoded BCF before compression.
+fn uncompressed_len(bcf: &[u8]) -> usize {
+    let mut reader = seqair::bam::bgzf::BgzfReader::from_reader(std::io::Cursor::new(bcf.to_vec()));
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data).unwrap();
+    data.len()
+}
+
+// r[verify bcf_writer.smallest_int_type]
+// r[verify bcf_writer.missing_sentinels]
+/// An integer array with missing elements comes back from bcftools with every
+/// concrete value intact and `.` in exactly the positions that were missing —
+/// at each of the three BCF widths, and with the gaps leading, interior,
+/// trailing, scattered, or everywhere but one slot.
+#[hegel::test(test_cases = 60)]
+fn info_int_arrays_with_missing_values_round_trip(tc: TestCase) {
+    let records = tc.draw(arb_opt_records().print_as_debug());
+    let s = opt_setup();
+    let bcf = write_opts(&s, &records, OutputFormat::Bcf);
+    let lines = bcftools_query(&bcf, "%INFO/OI\\n");
+
+    assert_eq!(lines.len(), records.len(), "record count");
+    for (line, rec) in lines.iter().zip(&records) {
+        assert_eq!(
+            line,
+            &expect_opts(&rec.values),
+            "OI at pos {} ({:?}, {:?})",
+            rec.pos,
+            rec.width,
+            rec.pattern
+        );
+    }
+
+    for rec in &records {
+        tc.event(match rec.width {
+            Width::Int8 => "int8 column",
+            Width::Int16 => "int16 column",
+            Width::Int32 => "int32 column",
+        });
+    }
+}
+
+// r[verify bcf_writer.smallest_int_type]
+/// A missing element must not widen the column. Replacing every missing slot
+/// with a concrete value already in the array — same width band, by
+/// construction — must encode to the same number of BCF bytes.
+///
+/// This is the half of the rule bcftools cannot see: an encoder that folded the
+/// missing slots into the width scan as `i32::MIN` would still round-trip, it
+/// would just quietly spend four bytes per element on an `int8` array.
+#[hegel::test(test_cases = 60)]
+fn missing_elements_do_not_widen_the_column(tc: TestCase) {
+    let records = tc.draw(arb_opt_records().print_as_debug());
+    let s = opt_setup();
+
+    let filled: Vec<OptRecord> = records
+        .iter()
+        .map(|rec| {
+            let first = rec.values.iter().flatten().next().copied().unwrap_or(0);
+            OptRecord {
+                values: rec.values.iter().map(|v| Some(v.unwrap_or(first))).collect(),
+                ..rec.clone()
+            }
+        })
+        .collect();
+
+    let with_missing = uncompressed_len(&write_opts(&s, &records, OutputFormat::Bcf));
+    let all_concrete = uncompressed_len(&write_opts(&s, &filled, OutputFormat::Bcf));
+    assert_eq!(with_missing, all_concrete, "a missing element changed the encoded width");
+}
+
+// r[verify record_encoder.vcf_bcf_equivalence]
+// r[verify vcf_writer.missing_dot]
+/// The VCF text path spells a missing element `.` in the same place the BCF
+/// path puts the sentinel: the two renderings of the same array agree.
+#[hegel::test(test_cases = 60)]
+fn vcf_text_and_bcf_agree_on_missing_elements(tc: TestCase) {
+    let records = tc.draw(arb_opt_records().print_as_debug());
+    let s = opt_setup();
+
+    let direct: Vec<String> = String::from_utf8(write_opts(&s, &records, OutputFormat::Vcf))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(str::to_owned)
+        .collect();
+    let via_bcf = bcftools_query(&write_opts(&s, &records, OutputFormat::Bcf), "%LINE\\n");
+
+    assert_eq!(direct.len(), records.len(), "seqair wrote a record per input");
+    assert_eq!(direct, via_bcf, "VCF text and BCF disagree about the missing elements");
 }
