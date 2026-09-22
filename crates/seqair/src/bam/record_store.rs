@@ -1875,6 +1875,63 @@ pub(crate) mod tests {
         fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
     }
 
+    /// The same decision taken at the *other* hook: before any slab is
+    /// touched, rather than after, with a rollback.
+    #[derive(Clone)]
+    struct AcceptFlagEarly(bool);
+    impl CustomizeRecordStore for AcceptFlagEarly {
+        type Extra = ();
+        fn filter_raw(&mut self, _: &FilterRawFields<'_>) -> bool {
+            self.0
+        }
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+    }
+
+    /// Records what `filter_raw` was shown, so it can be checked against the
+    /// record that ends up in the store.
+    #[derive(Clone, Default)]
+    struct ObserveRaw {
+        seen: std::rc::Rc<std::cell::RefCell<Vec<SeenFields>>>,
+    }
+
+    /// The subset of `FilterRawFields` that must describe the record that
+    /// follows it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SeenFields {
+        pos: u32,
+        flags: u16,
+        mapq: u8,
+        n_cigar_ops: u16,
+        seq_len: u32,
+        tid: i32,
+        next_ref_id: i32,
+        next_pos: i32,
+        template_len: i32,
+        qname: Vec<u8>,
+        aux: Vec<u8>,
+    }
+
+    impl CustomizeRecordStore for ObserveRaw {
+        type Extra = ();
+        fn filter_raw(&mut self, f: &FilterRawFields<'_>) -> bool {
+            self.seen.borrow_mut().push(SeenFields {
+                pos: f.pos.as_u32(),
+                flags: f.flags.raw(),
+                mapq: f.mapq,
+                n_cigar_ops: f.n_cigar_ops,
+                seq_len: f.seq_len,
+                tid: f.tid,
+                next_ref_id: f.next_ref_id,
+                next_pos: f.next_pos,
+                template_len: f.template_len,
+                qname: f.qname.to_vec(),
+                aux: f.aux_bytes.to_vec(),
+            });
+            true
+        }
+        fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+    }
+
     /// Build a minimal valid BAM record raw bytes.
     fn make_raw_record(qname: &[u8], seq_len: u32, n_cigar_ops: u16) -> Vec<u8> {
         let name_len = qname.len() as u8 + 1; // includes NUL
@@ -2814,7 +2871,7 @@ pub(crate) mod tests {
 
     mod rollback_props {
         use super::super::*;
-        use super::AcceptFlag;
+        use super::{AcceptFlag, AcceptFlagEarly, ObserveRaw, SeenFields};
         use hegel::prelude::*;
         use seqair_types::{BamFlags, Base};
 
@@ -3186,7 +3243,7 @@ pub(crate) mod tests {
         /// Build a minimal BAM record with the given qname, `seq_len`, and a
         /// single M op. Mirrors the helper in the outer test module but
         /// adapted for generated inputs.
-        fn build_bam_raw(qname: &[u8], seq_len: u32, pos: i32, mapq: u8) -> Vec<u8> {
+        fn build_bam_raw(qname: &[u8], seq_len: u32, pos: i32, mapq: u8, aux: &[u8]) -> Vec<u8> {
             let mut name_with_nul: Vec<u8> = qname.to_vec();
             name_with_nul.push(0);
             while !name_with_nul.len().is_multiple_of(4) {
@@ -3195,7 +3252,7 @@ pub(crate) mod tests {
             let name_len = name_with_nul.len();
             let cigar_bytes = 4usize; // one op
             let seq_bytes = (seq_len as usize).div_ceil(2);
-            let total = 32 + name_len + cigar_bytes + seq_bytes + seq_len as usize;
+            let total = 32 + name_len + cigar_bytes + seq_bytes + seq_len as usize + aux.len();
 
             let mut raw = vec![0u8; total];
             raw[0..4].copy_from_slice(&0i32.to_le_bytes());
@@ -3222,6 +3279,11 @@ pub(crate) mod tests {
             raw[cigar_start..cigar_start + 4].copy_from_slice(&op.to_le_bytes());
 
             // Seq bytes already zeroed (all Unknown after decode); leave qual zero.
+            // Aux last, so the record covers every slab the rollback has to undo —
+            // without it the aux slab is always empty and a rollback that forgets
+            // it is invisible.
+            let aux_start = total - aux.len();
+            raw[aux_start..].copy_from_slice(aux);
             raw
         }
 
@@ -3232,6 +3294,8 @@ pub(crate) mod tests {
             pos: i32,
             mapq: u8,
             accept: bool,
+            /// Raw BAM aux bytes, so the record reaches the aux slab too.
+            aux: Vec<u8>,
         }
 
         #[hegel::composite]
@@ -3246,11 +3310,18 @@ pub(crate) mod tests {
             let pos = tc.draw_silent(gs::integers::<i32>().min_value(0).max_value(1_000));
             let mapq = tc.draw_silent(gs::integers::<u8>().max_value(60));
             let accept = tc.draw_silent(gs::booleans());
-            RawInput { qname, seq_len, pos, mapq, accept }
+            // A well-formed `NM:i:<u8>` tag, or nothing.
+            let aux = if tc.draw_silent(gs::booleans()) {
+                let value = tc.draw_silent(gs::integers::<u8>());
+                vec![b'N', b'M', b'C', value]
+            } else {
+                Vec::new()
+            };
+            RawInput { qname, seq_len, pos, mapq, accept, aux }
         }
 
         fn push_raw_one(store: &mut RecordStore<()>, input: &RawInput) -> Option<RecordIdx> {
-            let raw = build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq);
+            let raw = build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq, &input.aux);
             store
                 .push_raw(&raw, &mut AcceptFlag(input.accept))
                 .expect("synthetic BAM record is always parseable")
@@ -3260,6 +3331,88 @@ pub(crate) mod tests {
             let mut forced_keep = input.clone();
             forced_keep.accept = true;
             push_raw_one(store, &forced_keep).expect("accept=true always yields Some")
+        }
+
+        // r[verify record_store.filter_raw]
+        // r[verify record_store.customize.trait]
+        /// `filter_raw` and `filter` are the same decision taken in two places:
+        /// one before any slab is touched, one after, with a rollback. They
+        /// exist for performance, not for semantics, so the stores they leave
+        /// behind must be byte-identical — down to the slab tails, which no
+        /// record-level read can see. A rollback that forgets one slab leaves
+        /// every record readable and correct and the store quietly growing.
+        #[hegel::test]
+        fn rejecting_early_and_rejecting_late_leave_the_same_store(tc: TestCase) {
+            let inputs = tc.draw(gs::vecs(arb_raw_input().print_as_debug()).max_size(40));
+
+            let mut early = RecordStore::new();
+            let mut late = RecordStore::new();
+            let mut early_idx = Vec::new();
+            let mut late_idx = Vec::new();
+
+            for input in &inputs {
+                let raw =
+                    build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq, &input.aux);
+                early_idx.push(
+                    early
+                        .push_raw(&raw, &mut AcceptFlagEarly(input.accept))
+                        .expect("synthetic BAM record is always parseable"),
+                );
+                late_idx.push(
+                    late.push_raw(&raw, &mut AcceptFlag(input.accept))
+                        .expect("synthetic BAM record is always parseable"),
+                );
+            }
+
+            assert_eq!(early_idx, late_idx, "which records were kept, and their indices");
+            assert_eq!(dump_slabs(&early), dump_slabs(&late), "slab bytes");
+
+            let kept = early_idx.iter().filter(|k| k.is_some()).count();
+            if kept > 0 && kept < inputs.len() {
+                tc.event("the run was a mix of kept and rejected");
+            }
+        }
+
+        // r[verify record_store.filter_raw]
+        /// The fields `filter_raw` is shown must describe the record that is
+        /// about to be pushed. A filter deciding on a stale or mis-sliced view
+        /// would reject the wrong reads, and nothing downstream would notice —
+        /// the records that survive are all well-formed either way.
+        #[hegel::test]
+        fn filter_raw_sees_the_record_that_follows_it(tc: TestCase) {
+            let inputs =
+                tc.draw(gs::vecs(arb_raw_input().print_as_debug()).min_size(1).max_size(20));
+
+            let observer = ObserveRaw::default();
+            let mut customize = observer.clone();
+            let mut store = RecordStore::new();
+            for input in &inputs {
+                let raw =
+                    build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq, &input.aux);
+                store.push_raw(&raw, &mut customize).expect("push");
+            }
+
+            let seen = observer.seen.borrow();
+            assert_eq!(seen.len(), inputs.len(), "filter_raw runs once per record");
+            assert_eq!(store.len(), inputs.len(), "this observer keeps everything");
+
+            for (i, (shown, idx)) in seen.iter().zip(store.indices()).enumerate() {
+                let rec = store.record(idx).expect("just pushed");
+                let stored = SeenFields {
+                    pos: rec.pos.as_u32(),
+                    flags: rec.flags.raw(),
+                    mapq: rec.mapq,
+                    n_cigar_ops: rec.n_cigar_ops,
+                    seq_len: rec.seq_len,
+                    tid: rec.tid,
+                    next_ref_id: rec.next_ref_id,
+                    next_pos: rec.next_pos,
+                    template_len: rec.template_len,
+                    qname: rec.qname().to_vec(),
+                    aux: rec.aux().to_vec(),
+                };
+                assert_eq!(*shown, stored, "record {i}");
+            }
         }
 
         // r[verify record_store.pre_filter.rollback]
