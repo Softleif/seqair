@@ -27,8 +27,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// The largest contig a `depth=5`, `min_shift=14` index can address: bins run
-/// out at `2^(14 + 3*5)`. Everything generated here stays below it — see
-/// `csi_cannot_index_past_the_depth_5_bin_limit` for what happens above.
+/// out at `2^(14 + 3*5)`, so a longer contig forces a deeper index — see
+/// `a_contig_past_the_depth_5_bin_limit_is_still_reachable`.
 const BIN_LIMIT: u32 = 1 << 29;
 
 const ACGT: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
@@ -69,11 +69,17 @@ fn arb_layout(tc: &TestCase) -> Layout {
     let n_contigs = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(3));
     let contigs: Vec<(String, u32)> = (0..n_contigs)
         .map(|i| {
-            // Lengths spread across the range a depth-5 index can address, so
-            // the bin levels a record lands on actually vary.
+            // Lengths spread across the bin levels a record can land on, and
+            // over the depth-5 limit as well: past `BIN_LIMIT` the index has
+            // to deepen, and that is the band this file exists for. The top
+            // band straddles the boundary rather than sitting clear of it,
+            // because the off-by-one there is real — a contig of exactly
+            // `BIN_LIMIT - 256` still needs depth 6, since a record may end
+            // past the declared length.
             let len = tc.draw_silent(hegel::one_of!(
                 gs::integers::<u32>().min_value(100_000).max_value(5_000_000),
                 gs::integers::<u32>().min_value(5_000_000).max_value(BIN_LIMIT - 1),
+                gs::integers::<u32>().min_value(BIN_LIMIT - 1_000).max_value(700_000_000),
             ));
             (format!("chr{}", i.saturating_add(1)), len)
         })
@@ -318,7 +324,19 @@ fn csi_header_and_pseudo_bin_match_the_record_set(tc: TestCase) {
     let min_shift = i32_at(4);
     let depth = i32_at(8);
     assert_eq!(min_shift, 14, "min_shift");
-    assert_eq!(depth, 5, "depth");
+    // Not a fixed number any more, and not re-derived with a copy of the
+    // builder's formula either: what the rule actually demands is that the
+    // depth *reaches* the longest contig. Bins at depth `d` run out at
+    // `2^(14 + 3d)`, so that bound must clear the longest reference, and the
+    // depth must never drop below BAI's 5.
+    let depth = u32::try_from(depth).expect("depth is small and positive");
+    assert!(depth >= 5, "depth {depth} is shallower than BAI's");
+    let longest = u64::from(layout.contigs.iter().map(|(_, len)| *len).max().unwrap());
+    let reach = 1u64 << (14 + 3 * depth);
+    assert!(reach > longest, "depth {depth} reaches {reach}, short of the longest contig {longest}");
+    // The deep band is the one this file exists for, so make it visible that
+    // the generator gets there rather than assuming it does.
+    tc.event_value("csi depth", f64::from(depth));
     let l_aux = usize::try_from(i32_at(12)).unwrap();
 
     // A tabix aux block: format=2 (VCF), col_seq=1, col_beg=2, col_end=0,
@@ -350,8 +368,9 @@ fn csi_header_and_pseudo_bin_match_the_record_set(tc: TestCase) {
     );
     off += 4;
 
-    // depth=5 puts the pseudo-bin at ((1 << 18) - 1) / 7 + 1.
-    let pseudo_bin: u32 = ((1u32 << 18) - 1) / 7 + 1;
+    // One past the last real bin: ((1 << 3(depth+1)) - 1) / 7. At depth 5 that
+    // is 37450, the number BAI uses.
+    let pseudo_bin: u32 = ((1u32 << (3 * (depth + 1))) - 1) / 7 + 1;
     for &contig in &with_records {
         let n_bin = i32_at(off);
         off += 4;
@@ -385,21 +404,19 @@ fn csi_header_and_pseudo_bin_match_the_record_set(tc: TestCase) {
 }
 
 // r[verify index_builder.csi_depth]
-/// The case CSI exists for, and the one seqair does not yet handle: a contig
-/// past `2^29`.
+/// The case CSI exists for: a contig past `2^29`.
 ///
-/// `Writer` builds its index with `min_shift=14, depth=5` whatever the header
-/// says, so bins run out at 512 Mbp. A record above that is written to the
-/// file and pushed to the index, and then no region query can reach it — the
-/// same query answered through the CSI `bcftools index -c` builds (which picks
-/// its depth from the header) returns it. The record is not lost, the index is.
+/// `Writer` used to build its index with `min_shift=14, depth=5` whatever the
+/// header said, so bins ran out at 512 Mbp. A record above that was written to
+/// the file and pushed to the index, and then no region query could reach it —
+/// while the same query answered through the CSI `bcftools index -c` builds
+/// returned it. The record was never lost; the index was. Nothing errored.
 ///
-/// Ignored rather than deleted: it is the acceptance test for
-/// `r[index_builder.csi_depth]`, and it should start passing the day the
-/// builder derives its depth from the longest contig.
+/// This is the acceptance test for `r[index_builder.csi_depth]`, kept as a
+/// fixture with hard-coded coordinates because the boundary is the point: a
+/// generated case that happens to land below `2^29` proves nothing here.
 #[test]
-#[ignore = "seqair hardcodes CSI depth=5; contigs over 512 Mbp are unreachable through the index"]
-fn csi_cannot_index_past_the_depth_5_bin_limit() {
+fn a_contig_past_the_depth_5_bin_limit_is_still_reachable() {
     let layout = Layout {
         contigs: vec![("big".to_owned(), 600_000_000)],
         records: vec![
