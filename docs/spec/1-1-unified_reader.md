@@ -167,7 +167,7 @@ chromosome in one call without thinking about tile size.
 > the part of the segment a downstream tool should treat as "owned" by this
 > tile when deduplicating against neighbors.
 
-> r[unified.segment_options]
+> r[unified.segment_options+1]
 > `SegmentOptions` MUST expose:
 >
 > - `SegmentOptions::new(max_len: NonZeroU32) -> Self` — sets `overlap = 0`.
@@ -176,9 +176,18 @@ chromosome in one call without thinking about tile size.
 >   when `overlap >= max_len.get()` (would produce zero forward progress).
 > - `max_len() -> NonZeroU32`, `overlap() -> u32` accessors.
 >
-> `SegmentOptions` MUST NOT implement `Default` — every caller is required to
-> commit to a `max_len`, since the absence of a sensible universal default is
-> the whole point of forcing a planning step.
+> `SegmentOptions` MUST implement `Default` as 10 kb tiles, no overlap, and the
+> 256 MiB byte budget of `r[unified.segment_byte_budget]`.
+>
+> This rule used to forbid `Default`, on the grounds that no universal `max_len`
+> exists and every caller should be made to commit to one. The argument does not
+> survive contact with the byte budget. Since a segment is subdivided until it
+> fits that budget, `max_len` is an upper bound on a tile rather than the thing
+> that decides how much memory a tile costs — so a caller who has no opinion
+> about tile size is not making a dangerous choice by deferring, and a caller who
+> does have one still has to say so. Refusing a default only moved the same
+> arbitrary 10 kb into every call site, where it is harder to find and harder to
+> change.
 
 > r[unified.into_segment_target]
 > `IntoSegmentTarget` MUST be a **sealed** trait (external crates cannot

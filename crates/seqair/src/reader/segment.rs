@@ -17,7 +17,7 @@
 //! `pileup` on each.
 //!
 //! See `r[unified.segment_struct]`, `r[unified.segment_overlap]`,
-//! `r[unified.segment_options]`, `r[unified.into_segment_target]`,
+//! `r[unified.segment_options+1]`, `r[unified.into_segment_target]`,
 //! `r[unified.readers_segments]`, `r[unified.readers_pileup]`.
 
 use crate::bam::BamHeader;
@@ -247,7 +247,7 @@ impl Segment {
 
 // ── SegmentOptions ────────────────────────────────────────────────────────
 
-// r[impl unified.segment_options]
+// r[impl unified.segment_options+1]
 /// Tile-size policy for [`Readers::segments`](super::Readers::segments).
 ///
 /// `Default` returns 10 kb tiles with no overlap — a conservative choice
@@ -952,7 +952,7 @@ mod tests {
         out
     }
 
-    // r[verify unified.segment_options]
+    // r[verify unified.segment_options+1]
     #[test]
     fn segment_options_rejects_too_large_overlap() {
         let opts = SegmentOptions::new(NonZeroU32::new(100).unwrap());
