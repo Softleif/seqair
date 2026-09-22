@@ -76,6 +76,7 @@ fn vcf_text_ragged_and_empty_format_ints() {
     assert!(data_line.ends_with("0/1:12,3\t0/1:40\t0/1:."), "samples: {data_line}");
 }
 
+// r[verify bcf_writer.end_of_vector]
 // r[verify record_encoder.format_methods]
 #[test]
 fn bcf_ragged_and_empty_format_ints_roundtrips_through_bcftools() {
@@ -111,6 +112,7 @@ fn bcf_ragged_and_empty_format_ints_roundtrips_through_bcftools() {
     assert_eq!(ad.trim(), "12,3\t40\t.", "bcftools read AD back as: {ad}");
 }
 
+// r[verify bcf_writer.smallest_int_type]
 // r[verify record_encoder.format_methods]
 /// The BCF integer type for the whole column must fit the largest value across
 /// *all* samples — not just the first. Sample a holds a value that fits INT8;

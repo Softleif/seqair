@@ -457,7 +457,7 @@ impl CustomizeRecordStore for DropAll {
     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
 }
 
-// r[verify record_store.pre_filter.rollback]
+// r[verify record_store.pre_filter.rollback+1]
 #[test]
 fn keep_record_drops_low_mapq_records_via_push_raw() {
     let mut store = RecordStore::new();
@@ -475,7 +475,7 @@ fn keep_record_drops_low_mapq_records_via_push_raw() {
     }
 }
 
-// r[verify record_store.pre_filter.rollback]
+// r[verify record_store.pre_filter.rollback+1]
 #[test]
 fn keep_record_drops_low_mapq_records_via_fetch_into_customized() {
     use seqair::bam::IndexedBamReader;
@@ -654,7 +654,7 @@ impl CustomizeRecordStore for ReadGroupFilter {
     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
 }
 
-// r[verify record_store.pre_filter.rollback]
+// r[verify record_store.pre_filter.rollback+1]
 // r[verify record_store.slim_record.field_getters]
 #[test]
 fn read_group_filter_keeps_only_matching_records() {
@@ -693,7 +693,7 @@ fn read_group_filter_keeps_only_matching_records() {
     }
 }
 
-// r[verify record_store.pre_filter.rollback]
+// r[verify record_store.pre_filter.rollback+1]
 #[test]
 fn read_group_filter_rolls_back_rejected_records() {
     // Drop everything but RG1; verify the store ends up byte-identical to

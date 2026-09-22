@@ -174,6 +174,7 @@ fn vcf_text_ragged_and_empty_format_floats() {
     assert!(data_line.ends_with("0/1:0.25,0.75\t0/1:0.5\t0/1:."), "samples: {data_line}");
 }
 
+// r[verify bcf_writer.end_of_vector]
 // r[verify record_encoder.format_methods]
 #[test]
 fn bcf_ragged_and_empty_format_floats_roundtrips_through_bcftools() {

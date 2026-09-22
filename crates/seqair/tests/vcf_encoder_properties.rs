@@ -133,6 +133,7 @@ fn arb_base() -> impl PrintableGenerator<Base> {
 
 // ── Deterministic test ─────────────────────────────────────────────────
 
+// r[verify bcf_writer.coordinate_system]
 #[test]
 fn bcf_snv_parseable_by_noodles() {
     let setup = make_setup();

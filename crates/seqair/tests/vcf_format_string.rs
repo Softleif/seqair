@@ -74,6 +74,7 @@ fn vcf_text_format_string() {
     assert!(data_line.ends_with("0/1:pass\t0/1:lo\t0/1:."), "samples: {data_line}");
 }
 
+// r[verify bcf_writer.string_encoding]
 // r[verify record_encoder.format_methods]
 #[test]
 fn bcf_format_string_roundtrips_through_bcftools() {

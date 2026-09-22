@@ -691,6 +691,8 @@ mod tests {
         buf
     }
 
+    // r[verify csi.magic]
+    // r[verify csi.header]
     #[test]
     fn parse_minimal_csi() {
         let data = build_csi_bytes(14, 5, &[], &[]);
@@ -701,6 +703,9 @@ mod tests {
         assert!(idx.references.is_empty());
     }
 
+    // r[verify csi.n_ref]
+    // r[verify csi.bins]
+    // r[verify csi.no_linear_index]
     #[test]
     fn parse_csi_with_bins() {
         let data = build_csi_bytes(14, 5, &[], &[vec![(4681, 100, vec![(200, 300)])]]);
@@ -712,6 +717,7 @@ mod tests {
         assert_eq!(idx.references[0].bins[0].chunks.len(), 1);
     }
 
+    // r[verify csi.aux_data]
     #[test]
     fn parse_csi_with_aux() {
         let aux = vec![1, 2, 3, 4, 5];
@@ -720,6 +726,7 @@ mod tests {
         assert_eq!(idx.aux, aux);
     }
 
+    // r[verify csi.pseudo_bin]
     #[test]
     fn parse_csi_skips_pseudo_bin() {
         // Pseudo-bin for depth=5 is 37450
@@ -737,6 +744,7 @@ mod tests {
         assert_eq!(idx.references[0].bins[0].bin_id, 4681);
     }
 
+    // r[verify csi.magic]
     #[test]
     fn invalid_csi_magic() {
         let data = b"BAI\x01\x00\x00\x00\x00";
@@ -859,6 +867,7 @@ mod tests {
         }
     }
 
+    // r[verify csi.query]
     #[test]
     fn query_returns_matching_chunks() {
         let idx = make_csi_index(vec![(4681, 0, vec![(100, 500)])]);
@@ -867,6 +876,7 @@ mod tests {
         assert_eq!(chunks[0].begin.0, 100);
     }
 
+    // r[verify csi.query_split]
     #[test]
     fn query_split_separates_by_level() {
         let idx = make_csi_index(vec![(0, 0, vec![(9000, 9500)]), (4681, 0, vec![(100, 500)])]);
@@ -949,6 +959,7 @@ mod tests {
         assert_eq!(got.0, want.0, "HashMap lookup disagrees with linear scan at pos={pos}");
     }
 
+    // r[verify csi.loffset]
     #[test]
     fn loffset_filters_chunks() {
         // bin 4681 has loffset=400, so chunks ending before 400 should be skipped
@@ -984,6 +995,7 @@ mod tests {
 
     // --- Non-default min_shift/depth tests ---
 
+    // r[verify csi.reg2bins]
     #[test]
     fn csi_reg2bins_different_params() {
         // With min_shift=15, depth=6: larger coordinate space

@@ -134,6 +134,8 @@ fn samtools_count(bam_path: &Path, region: &str) -> usize {
 
 // --- Round-trip: seqair writes CSI, seqair reads it back ---
 
+// r[verify csi.write]
+// r[verify csi.header]
 #[test]
 fn csi_roundtrip_parse() {
     let dir = tempfile::tempdir().unwrap();
@@ -163,6 +165,7 @@ fn write_csi_is_bgzf_compressed() {
     );
 }
 
+// r[verify csi.query]
 #[test]
 fn csi_roundtrip_query_matches_bai() {
     let dir = tempfile::tempdir().unwrap();
@@ -211,6 +214,8 @@ fn csi_roundtrip_query_matches_bai() {
 
 // --- samtools can read seqair's CSI index ---
 
+// r[verify csi.write]
+// r[verify csi.magic]
 #[test]
 fn samtools_reads_seqair_csi() {
     let dir = tempfile::tempdir().unwrap();
@@ -354,6 +359,7 @@ fn indexed_reader_finds_csi_without_bam_infix() {
 
 // --- IndexedBamReader with CSI (format detection) ---
 
+// r[verify csi.unified_enum]
 #[test]
 fn indexed_reader_prefers_csi_over_bai() {
     let dir = tempfile::tempdir().unwrap();
@@ -371,6 +377,7 @@ fn indexed_reader_prefers_csi_over_bai() {
     assert_eq!(store.len(), 30, "chr1 should have 30 records");
 }
 
+// r[verify csi.query_interface]
 #[test]
 fn indexed_reader_with_csi_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -418,6 +425,7 @@ fn seqair_csi_fetch_matches_samtools_counts() {
 
 // --- query_split tests ---
 
+// r[verify csi.query_split]
 #[test]
 fn csi_query_split_union_equals_query() {
     let dir = tempfile::tempdir().unwrap();

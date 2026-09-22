@@ -205,6 +205,7 @@ impl CigarOp {
     /// samtools produces unaligned CIGAR data when `l_read_name` is not a
     /// multiple of 4. Use [`extend_from_bam_bytes`](Self::extend_from_bam_bytes) if alignment cannot be
     /// guaranteed (it's always correct, just requires a copy).
+    // r[impl cigar.slice_from_bam_bytes]
     #[inline]
     pub fn slice_from_bam_bytes(bytes: &[u8]) -> Option<&[Self]> {
         if bytes.is_empty() {

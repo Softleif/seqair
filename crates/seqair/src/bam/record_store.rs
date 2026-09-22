@@ -502,7 +502,7 @@ impl<U> RecordStore<U> {
 }
 
 impl<U> RecordStore<U> {
-    // r[impl record_store.pre_filter.rollback]
+    // r[impl record_store.pre_filter.rollback+1]
     /// Undo the most recent `push_raw`/`push_fields` by truncating every slab
     /// to the offsets recorded on the last `SlimRecord`. Only valid when the
     /// last record is the freshly-pushed one (no subsequent `sort`/`dedup`).
@@ -519,7 +519,7 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl record_store.extras.push_unit]
-    // r[impl record_store.pre_filter.rollback]
+    // r[impl record_store.pre_filter.rollback+1]
     /// Decode a raw BAM record, append it, then consult
     /// `customize.filter_raw` (pre-extend) and `customize.filter` (post-compute)
     /// to decide whether to commit or roll back.
@@ -552,7 +552,7 @@ impl<U> RecordStore<U> {
         let cigar_bytes = &raw[h.var_start..h.cigar_end];
 
         // --- filter_raw: pre-filter before any slab extension or base decode ---
-        // r[impl record_store.pre_filter.rollback]
+        // r[impl record_store.pre_filter.rollback+1]
         {
             #[allow(clippy::indexing_slicing, reason = "qname_actual_len <= qname_raw.len()")]
             let qname_stripped = &qname_raw[..qname_actual_len];
@@ -695,7 +695,7 @@ impl<U> RecordStore<U> {
             self,
         ));
 
-        // r[impl record_store.pre_filter.rollback]
+        // r[impl record_store.pre_filter.rollback+1]
         if customize.filter(
             self.records.last().expect("just pushed a SlimRecord above; records.last() is Some"),
             self,
@@ -711,7 +711,7 @@ impl<U> RecordStore<U> {
     // r[impl record_store.push_fields]
     // r[impl unified.push_fields_equivalence]
     // r[impl record_store.checked_offsets]
-    // r[impl record_store.pre_filter.rollback]
+    // r[impl record_store.pre_filter.rollback+1]
     /// Append a record from pre-parsed fields (for SAM/CRAM readers), then
     /// consult `customize.filter_raw` (pre-extend) and `customize.filter`
     /// (post-compute) to decide whether to commit or roll back.
@@ -854,7 +854,7 @@ impl<U> RecordStore<U> {
         // r[impl record_store.extras.generic_param]
         self.extras.push(customize.compute(record, self));
 
-        // r[impl record_store.pre_filter.rollback]
+        // r[impl record_store.pre_filter.rollback+1]
         if customize.filter(record, self) {
             Ok(Some(idx))
         } else {
@@ -951,7 +951,7 @@ pub struct FilterRawFields<'a> {
     /// [`Sequence::Bases`] from `push_fields` (SAM/CRAM).
     pub seq: Sequence<'a>,
 }
-// r[impl record_store.customize.trait]
+// r[impl record_store.customize.trait+1]
 /// Customize how records flow into a [`RecordStore`]: filter and compute
 /// per-record extras, both inline at push time.
 ///
@@ -1073,7 +1073,7 @@ pub trait CustomizeRecordStore: Clone {
     fn filter_raw(&mut self, _fields: &FilterRawFields<'_>) -> bool {
         true
     }
-    // r[impl record_store.customize.trait]
+    // r[impl record_store.customize.trait+1]
     /// Post-compute filter: called on each freshly-pushed record after
     /// [`compute`](Self::compute). Returning `false` rolls back the slab
     /// writes for this record — it is as if the record was never fetched.
@@ -1097,7 +1097,7 @@ pub trait CustomizeRecordStore: Clone {
     fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<Self::Extra>) -> Self::Extra;
 }
 
-// r[impl record_store.customize.trait]
+// r[impl record_store.customize.trait+1]
 /// Blanket no-op implementation for the default `()` case.
 ///
 /// `RecordStore<()>` does not need extras; `Readers<()>` uses this so
@@ -2085,7 +2085,7 @@ pub(crate) mod tests {
         assert_eq!(store.record(ri(0)).unwrap().next_ref_id, 7);
     }
 
-    // r[verify record_store.pre_filter.rollback]
+    // r[verify record_store.pre_filter.rollback+1]
     #[test]
     fn push_raw_with_rejecting_filter_truncates_all_slabs() {
         let mut store = RecordStore::new();
@@ -2220,7 +2220,7 @@ pub(crate) mod tests {
         assert_eq!(before, after, "filter_raw rejection must not extend any slab");
     }
 
-    // r[verify record_store.pre_filter.rollback]
+    // r[verify record_store.pre_filter.rollback+1]
     #[test]
     fn push_raw_filter_can_read_slim_record_and_store() {
         // Customizer that asserts the freshly-pushed record's fields are
@@ -2244,7 +2244,7 @@ pub(crate) mod tests {
         assert_eq!(kept_idx, Some(ri(0)));
     }
 
-    // r[verify record_store.pre_filter.rollback]
+    // r[verify record_store.pre_filter.rollback+1]
     #[test]
     fn push_fields_with_rejecting_filter_rolls_back() {
         use seqair_types::Base;
@@ -2998,7 +2998,7 @@ pub(crate) mod tests {
             )
         }
 
-        // r[verify record_store.pre_filter.rollback]
+        // r[verify record_store.pre_filter.rollback+1]
         /// Self-consistency check: pushing a mixed accept/reject sequence
         /// produces the same state as pushing only the accepted inputs
         /// with no filter. This catches divergence between the rollback
@@ -3043,7 +3043,7 @@ pub(crate) mod tests {
             assert_eq!(dump_slabs(&a), dump_slabs(&b), "slab bytes");
         }
 
-        // r[verify record_store.pre_filter.rollback]
+        // r[verify record_store.pre_filter.rollback+1]
         /// Per-step invariant: slab lengths track exactly the running
         /// total of accepted inputs. Catches cases where rollback leaves
         /// trailing garbage in one slab but not others.
@@ -3086,7 +3086,7 @@ pub(crate) mod tests {
             }
         }
 
-        // r[verify record_store.pre_filter.rollback]
+        // r[verify record_store.pre_filter.rollback+1]
         /// Indices returned by `push_fields` across a filtered run must be
         /// dense and sequential — a rejected record must NOT burn an index.
         #[hegel::test]
@@ -3334,7 +3334,7 @@ pub(crate) mod tests {
         }
 
         // r[verify record_store.filter_raw]
-        // r[verify record_store.customize.trait]
+        // r[verify record_store.customize.trait+1]
         /// `filter_raw` and `filter` are the same decision taken in two places:
         /// one before any slab is touched, one after, with a rollback. They
         /// exist for performance, not for semantics, so the stores they leave
@@ -3415,7 +3415,7 @@ pub(crate) mod tests {
             }
         }
 
-        // r[verify record_store.pre_filter.rollback]
+        // r[verify record_store.pre_filter.rollback+1]
         #[hegel::test]
         fn push_raw_rollback_matches_filtered_replay(tc: TestCase) {
             let inputs = tc.draw(gs::vecs(arb_raw_input().print_as_debug()).max_size(40));

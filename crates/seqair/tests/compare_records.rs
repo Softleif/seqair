@@ -75,7 +75,7 @@ fn fetch_htslib_records() -> Vec<HtsRecord> {
 // r[verify bam.reader.fetch_into+2]
 // r[verify bam.reader.overlap_filter]
 // r[verify bam.reader.sorted_order+2]
-// r[verify bam.reader.unmapped_skipped+2]
+// r[verify bam.reader.unmapped_skipped]
 // r[verify record_store.push_raw+2]
 // r[verify record_store.field_access]
 // r[verify record_store.region_scoped]

@@ -136,6 +136,21 @@ r[record_store.push_raw+2]
 r[record_store.checked_offsets]
 Slab offsets (name_off, bases_off, cigar_off, qual_off, aux_off) MUST be checked for u32 overflow before storing in both `push_raw` and `push_fields`. If any slab exceeds `u32::MAX` bytes, the store MUST return an error rather than silently truncating the offset.
 
+r[record_store.end_pos_htslib]
+The `end_pos` a record is stored with MUST be derived from its flags, not from
+its CIGAR alone: a record with flag 0x4 set MUST get `end_pos == pos`, whatever
+CIGAR it carries, and every other record MUST get the CIGAR-derived inclusive
+end of `r[bam.record.end_pos]`. This holds in `push_raw`, in `push_fields`, in
+`set_alignment`, and in the BAM reader's pre-push overlap filter, which computes
+the same value from raw bytes and MUST agree with what the store ends up
+holding.
+
+An unmapped record's CIGAR is meaningless — it is usually absent, and when a
+placed-unmapped read carries one it describes no alignment — so walking it would
+place the read across a span it does not occupy. htslib's `bam_endpos` makes the
+same choice, and matching it is what keeps a placed-unmapped record at exactly
+one position for `r[record_store.window_query]` and the pileup's eviction check.
+
 r[record_store.push_fields]
 `push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as `&[CigarOp]`, sequence as `&[Base]`, quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing.
 
@@ -174,8 +189,39 @@ r[record_store.extras.generic_param]
 r[record_store.extras.push_unit]
 `push_raw` and `push_fields` MUST be available on any `RecordStore<U>`. They MUST push `customize.compute(rec, &self)` into the extras slab for each record. When `U = ()`, `Vec<()>` is a ZST vector with no heap allocation — the extras slab MUST be zero-cost. Readers hold a `RecordStore<E::Extra>` matching the attached customize value, not a `RecordStore<()>`.
 
-r[record_store.customize.trait]
-The customize trait MUST be defined as `trait CustomizeRecordStore: Clone { type Extra; fn keep_record(&mut self, rec: &SlimRecord, store: &RecordStore<Self::Extra>) -> bool { true } fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<Self::Extra>) -> Self::Extra; }`. The `Clone` bound allows `Readers::fork` to duplicate the customize value into the forked reader. The default `keep_record` returns `true` so simple extras-only customizers do not need to override it. A blanket `impl CustomizeRecordStore for ()` MUST exist with `type Extra = ()` and `compute` returning `()` so the default no-customize case costs zero at runtime (`Vec<()>` is a ZST vector). `RecordStore` MUST NOT expose closure-based filter or extras APIs — the trait is the only API, so customize values are always reusable and clone-forwardable. Both methods run inline during push: `compute` runs FIRST (producing the extra for the just-pushed record), then `keep_record` decides retention. If `keep_record` returns `false`, the just-computed extra is rolled back alongside all other slab writes, so `compute` should be cheap (heavy computation on records likely to be dropped wastes work). Both methods receive `&SlimRecord` and `&RecordStore<Self::Extra>` — callers can use `SlimRecord::seq/qual/cigar/aux` getters directly, and in `compute` they can also read previously-pushed records' extras via `RecordStore::extra(idx)`.
+r[record_store.customize.trait+1]
+The customize trait MUST be `trait CustomizeRecordStore: Clone` with an
+associated `type Extra` and three methods, which run inline during a push in
+this order:
+
+1. `fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool` — defaulting
+   to `true`, specified by r[`record_store.filter_raw`].
+2. `fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<Self::Extra>) -> Self::Extra`
+   — no default; it is the reason the trait exists.
+3. `fn filter(&mut self, rec: &SlimRecord, store: &RecordStore<Self::Extra>) -> bool`
+   — defaulting to `true`, specified by r[`record_store.pre_filter.rollback`].
+
+`compute` MUST run before `filter`, so the extra exists for the record `filter`
+is deciding about; a `false` there rolls the extra back with every other slab
+write. That ordering is what makes `compute` the expensive half and `filter` the
+wrong place to reject on something `filter_raw` could already see.
+
+Both `compute` and `filter` receive `&SlimRecord` and
+`&RecordStore<Self::Extra>`, so an implementation reads variable-length data
+through the `SlimRecord::seq/qual/cigar/aux` getters, and `compute` may read
+previously-pushed records' extras via `RecordStore::extra(idx)`.
+
+Only `compute` is required: the two filters default to keeping everything, so an
+extras-only customize value overrides one method, and a filter-only one
+overrides `filter_raw` (or `filter`) and returns `()` from `compute`. A blanket
+`impl CustomizeRecordStore for ()` MUST exist with `type Extra = ()` and a
+no-op `compute`, so the no-customize case costs nothing at runtime (`Vec<()>` is
+a ZST vector) and `&mut ()` is the argument that means "no customization".
+
+The `Clone` bound is what lets `Readers::fork` hand each forked reader its own
+customize value. `RecordStore` MUST NOT offer closure-based filter or extras
+APIs alongside the trait — a closure cannot be cloned into a fork or reused
+across regions, which is the whole reason the trait is the only door.
 
 r[record_store.filter_raw]
 `CustomizeRecordStore::filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool` MUST run in both `push_raw` and `push_fields` before any slab is extended and before any sequence is decoded. Returning `false` MUST abandon the record there and then: no bytes copied into any slab, no bases decoded, no `compute` call, and no index minted — `push_raw`/`push_fields` return `Ok(None)` exactly as for a `filter` rejection. The default MUST return `true`. `filter_raw` and `filter` (r[`record_store.pre_filter.rollback`]) MUST be interchangeable in outcome: the same decision taken at either hook MUST leave every slab byte-identical and MUST hand back the same indices. They differ only in how much work a rejection wastes, which is why `filter_raw` is the hook a reader-level filter belongs in (r[`bam.reader.unmapped_skipped`]).
@@ -183,8 +229,8 @@ r[record_store.filter_raw]
 r[record_store.filter_raw_fields]
 `FilterRawFields` MUST carry every fixed field of the record that is about to be pushed, plus the raw qname, quality, aux and CIGAR slices, so a customize value can decide without the slabs. It MUST be `#[non_exhaustive]`, and the qname MUST be NUL-stripped. Fields the calling path has not computed yet MUST be reported as unknown rather than guessed: from `push_raw` (BAM binary), `end_pos` is `None` and `matching_bases`/`indel_bases` are `0` because the CIGAR has not been decoded at that point; from `push_fields` (SAM/CRAM) all three carry their pre-computed values. `seq` MUST be `Sequence::Packed` from `push_raw` and `Sequence::Bases` from `push_fields`; `cigar` MUST be raw BAM CIGAR bytes on both paths. Every field MUST describe the record that the next successful push appends — a filter deciding on a stale or mis-sliced view rejects the wrong reads, and nothing downstream notices, because every record that survives is well-formed either way.
 
-r[record_store.pre_filter.rollback]
-`push_raw` and `push_fields` on any `RecordStore<U>` MUST accept `&mut E` (`E: CustomizeRecordStore<Extra = U>`) as their last argument and return `Result<Option<u32>, DecodeError>`. After parsing and writing the record's slab data they MUST call `customize.keep_record(rec, &self)`; if it returns `false`, the record just pushed MUST be rolled back so that every slab (names/bases/cigar/qual/aux/records/extras) is byte-identical to its pre-push state. Rollback uses the just-pushed `SlimRecord`'s `*_off` offsets as pre-push slab lengths, since push is append-only. The returned `Option<u32>` is `Some(idx)` when kept, `None` when rejected — rejected records MUST NOT consume an index. Passing `&mut ()` (whose default `keep_record` is `true`) is the no-filter form. A property test verifies that pushing a mixed accept/reject sequence produces byte-identical state to pushing only the accepted inputs with no filter.
+r[record_store.pre_filter.rollback+1]
+`push_raw` and `push_fields` on any `RecordStore<U>` MUST accept `&mut E` (`E: CustomizeRecordStore<Extra = U>`) as their last argument and return `Result<Option<RecordIdx>, DecodeError>`. After parsing and writing the record's slab data they MUST call `customize.filter(rec, &self)`; if it returns `false`, the record just pushed MUST be rolled back so that every slab (names/bases/cigar/qual/aux/records/extras) is byte-identical to its pre-push state. Rollback uses the just-pushed `SlimRecord`'s `*_off` offsets as pre-push slab lengths, since push is append-only. The returned `Option<RecordIdx>` is `Some(idx)` when kept, `None` when rejected — rejected records MUST NOT consume an index. Passing `&mut ()` (whose default `filter` is `true`) is the no-filter form. A property test verifies that pushing a mixed accept/reject sequence produces byte-identical state to pushing only the accepted inputs with no filter.
 
 r[record_store.slim_record.field_getters]
 `SlimRecord` MUST provide getter methods `seq(&store) -> Result<&[Base]>`, `qual(&store) -> Result<&[BaseQuality]>`, `cigar(&store) -> Result<&[CigarOp]>`, and `aux(&store) -> Result<&[u8]>` that take `&RecordStore<U>` for any `U` and return slab-backed slices using the record's offset fields. They MUST validate offsets and return a typed `RecordAccessError` on overflow rather than panic. `extra(&store) -> Result<&U>` follows the same shape but reads the extras slab. These getters are the canonical way for `CustomizeRecordStore` impls to access a record's variable-length data without going through `RecordStore::record(idx)` first.

@@ -119,7 +119,7 @@ use tracing::instrument;
 /// # Ok(())
 /// # }
 /// ```
-// r[impl unified.readers_struct]
+// r[impl unified.readers_struct+1]
 pub struct Readers<E: CustomizeRecordStore = ()> {
     pub(crate) alignment: IndexedReader,
     pub(crate) fasta: IndexedFastaReader,

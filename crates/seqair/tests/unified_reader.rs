@@ -309,7 +309,7 @@ fn indexed_reader_open_rejects_cram_without_fasta() {
 
 // ── Readers struct tests ─────────────────────────────────────────────
 
-// r[verify unified.readers_struct]
+// r[verify unified.readers_struct+1]
 // r[verify unified.readers_open]
 // r[verify unified.readers_accessors+1]
 #[test]

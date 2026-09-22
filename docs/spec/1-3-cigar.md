@@ -30,6 +30,26 @@ This determines how to translate between reference positions and read positions 
 > - = (7): sequence match (consumes query and reference)
 > - X (8): sequence mismatch (consumes query and reference)
 
+## Reading CIGAR data out of a BAM record
+
+`CigarOp` is `#[repr(transparent)]` over the packed `u32` (`r[bam.owned_record.cigar_op]`),
+so on a little-endian host a run of BAM CIGAR bytes and a `&[CigarOp]` are the
+same bytes. Viewing one as the other without copying is therefore tempting — but
+BAM does not align the CIGAR: it starts right after the read name, whose length
+is only a multiple of 4 by accident, and samtools emits records where it is not.
+
+r[cigar.slice_from_bam_bytes]
+`CigarOp::slice_from_bam_bytes(bytes) -> Option<&[CigarOp]>` MUST return a
+borrowed, zero-copy view of BAM-on-disk CIGAR bytes, and MUST return `None`
+rather than a view whenever that reinterpretation would be wrong: when
+`bytes.len()` is not a multiple of 4, when the pointer is not 4-byte aligned
+(`align_of::<CigarOp>()`), or on a big-endian target, where the in-memory u32
+byte order does not match BAM's little-endian on-disk order. Empty input MUST
+return `Some(&[])`. Callers that cannot guarantee alignment MUST use
+`extend_from_bam_bytes`, which copies and is always correct. Returning `None` is
+the whole contract: a caller that treats it as "no CIGAR" would silently drop
+operations, so `None` means "ask for the copying path", never "there are none".
+
 ## Matches and indels
 
 These aggregate statistics are used downstream for read quality metrics (e.g. fraction of matching bases, indel rate).

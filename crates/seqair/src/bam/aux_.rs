@@ -174,7 +174,7 @@ pub trait FromAuxValue<'a>: Sized {
     fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError>;
 }
 
-// r[impl bam.record.aux_widening]
+// r[impl bam.record.aux_from_aux_value] - integer widening
 impl<'a> FromAuxValue<'a> for i64 {
     fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError> {
         value.as_i64().ok_or_else(|| GetAuxError::TypeMismatch {
@@ -967,7 +967,6 @@ mod tests {
 
 // r[verify bam.record.aux_from_aux_value]
 // r[verify bam.record.aux_get]
-// r[verify bam.record.aux_widening]
 #[cfg(test)]
 mod prop_tests {
     use super::*;
@@ -1040,7 +1039,7 @@ mod prop_tests {
         assert_eq!(got, value);
     }
 
-    // r[verify bam.record.aux_widening]
+    // r[verify bam.record.aux_from_aux_value]
     #[hegel::test]
     fn aux_get_widens_u8_to_u64(tc: TestCase) {
         let tag = tc.draw(tag_name());
@@ -1110,7 +1109,7 @@ mod prop_tests {
         assert!(matches!(err, GetAuxError::TypeMismatch { .. }));
     }
 
-    // r[verify bam.record.aux_widening]
+    // r[verify bam.record.aux_from_aux_value]
     #[hegel::test]
     fn signed_int_to_unsigned_widening(tc: TestCase) {
         let tag = tc.draw(tag_name());

@@ -139,7 +139,7 @@ fn columns_match_sweep_line_coverage(tc: TestCase) {
 
 // ---- record-store push-time filtering (the engine no longer has its own filter) ----
 
-// r[verify record_store.pre_filter.rollback]
+// r[verify record_store.pre_filter.rollback+1]
 // r[verify flags.field_type]
 #[test]
 fn keep_record_called_once_per_pushed_record() {
@@ -170,7 +170,7 @@ fn keep_record_called_once_per_pushed_record() {
     assert_eq!(count.get(), 1, "keep_record called once per record, not per column");
 }
 
-// r[verify record_store.pre_filter.rollback]
+// r[verify record_store.pre_filter.rollback+1]
 #[hegel::test]
 fn keep_record_by_flags_excludes_correct_reads(tc: TestCase) {
     let pass_flags = tc.draw(gs::vecs(gs::booleans()).min_size(1).max_size(20));

@@ -489,6 +489,7 @@ fn multi_sample_vcf_readable_by_noodles() {
     assert_eq!(cols[11], "1/1:38", "sample S3");
 }
 
+// r[verify bcf_writer.indiv_field_major]
 // r[verify bcf_encoder.format_field_major]
 #[test]
 fn multi_sample_bcf_readable_by_bcftools() {

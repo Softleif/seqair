@@ -464,7 +464,7 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
                 compute_end_pos_from_raw(raw).unwrap_or(rec_pos)
             };
             // r[impl bam.reader.early_exit]
-            // r[depends bam.reader.sorted_order]
+            // r[depends bam.reader.sorted_order+2]
             if rec_pos > self.end {
                 break;
             }

@@ -1326,7 +1326,7 @@ mod tests {
         assert_eq!(ref_seq.base_at(Pos0::new(100).unwrap()), Base::Unknown);
     }
 
-    // r[verify pileup.internal_buf]
+    // r[verify perf.reuse_alignment_vec+2]
     /// The internal buffer must retain capacity across columns so the
     /// engine doesn't keep re-allocating.
     #[test]
@@ -1373,7 +1373,7 @@ mod tests {
         assert_eq!(engine.buf.capacity(), cap_after_first, "buffer capacity retained across calls");
     }
 
-    // r[verify pileup.eviction_preserves_order]
+    // r[verify pileup.column_record_order]
     /// After eviction of expired records, survivors must remain in insertion order.
     /// With the old `swap_remove` eviction, removing the shortest-lived record would
     /// swap in the last record, scrambling the order (e.g. [0,1,2,3,4] → [4,1,2,3]).
@@ -2032,7 +2032,7 @@ mod tests {
         assert_eq!(at(&ins, 3), Indel::None);
     }
 
-    // r[verify pileup.max_depth_order]
+    // r[verify pileup.column_record_order]
     /// `max_depth` truncation must keep the first N alignments in insertion order,
     /// not arbitrary ones. After the stable-retain fix, the insertion order is
     /// preserved through eviction, so truncation drops predictable (last N) entries.

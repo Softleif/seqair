@@ -166,6 +166,7 @@ fn bcftools_reads_snv() {
     assert_eq!(result.trim(), "chr1\t100\tA\tT\t42");
 }
 
+// r[verify bcf_writer.smallest_int_type]
 /// Integer type boundaries: values at int8/int16/int32 edges.
 /// BCF uses the smallest integer type that fits.
 #[test]
@@ -204,6 +205,7 @@ fn bcftools_integer_boundaries() {
     }
 }
 
+// r[verify bcf_writer.typed_values]
 /// Multi-allelic record: 3+ alleles with per-allele INFO fields.
 #[test]
 fn bcftools_multi_allelic() {
@@ -232,6 +234,7 @@ fn bcftools_multi_allelic() {
     assert_eq!(fields[5], "60,40");
 }
 
+// r[verify bcf_writer.gt_encoding]
 /// Genotype encoding: het, hom-ref, hom-alt, missing.
 #[test]
 fn bcftools_genotype_encoding() {
@@ -346,6 +349,7 @@ fn bcftools_multiple_records_ordered() {
     assert_eq!(positions, vec!["100", "500", "1000", "5000", "10000"]);
 }
 
+// r[verify bcf_writer.magic]
 /// BCF magic validation: bcftools stats should succeed (implicitly validates magic bytes).
 #[test]
 fn bcftools_stats_succeeds() {

@@ -356,6 +356,25 @@ Unknown codec methods MUST produce a clear error naming the method ID and sugges
 r[cram.record.position]
 `AP` (alignment position): if the preservation map `AP=true` (delta mode), each record's position is a delta from the previous record's position within the slice. The reader MUST maintain a running position accumulator and convert to absolute 0-based coordinates (CRAM positions are 1-based). Delta-coded positions can be negative (valid for supplementary alignments in coordinate-sorted CRAM).
 
+r[cram.record.end_pos]
+A CRAM record's reference span comes out of the feature walk as `ref_consumed`,
+a length. The slice decoder MUST convert it to the same `end_pos` convention
+every other reader uses before storing it: the 0-based **inclusive** last
+reference position, `pos + ref_consumed - 1`, and `pos` itself when
+`ref_consumed == 0` — the identical fallback the BAM path takes for a
+zero-refspan read (`r[bam.record.zero_refspan]`). The exclusive form
+(`pos + ref_consumed`) MUST NOT reach `SlimRecord::end_pos`; it is the natural
+shape for the TLEN arithmetic of `r[cram.record.mate_tlen_reconstruction]`
+(`aright - aleft`) and MUST stay confined to it.
+
+Storing the exclusive value makes every CRAM record one base wider than its BAM
+equivalent, which the pileup engine — evicting on `end_pos < pos`, per
+`r[interval.end_pos_inclusive]` — turns into one extra alignment in the column
+after every read. That is a depth error of +1 everywhere rather than a decode
+failure anywhere, so it MUST be cross-validated against an external reader
+(htslib's exclusive `cigar.end_pos()` or noodles' 1-based inclusive
+`alignment_end`, each converted) and not against seqair's own BAM path alone.
+
 r[cram.record.read_length]
 `RL` (read length): the number of bases in the read. Used to allocate sequence and quality arrays. Long reads (PacBio/ONT) can be 10,000-1,000,000+ bases — buffer pre-allocation MUST NOT assume short-read sizes.
 
@@ -555,6 +574,17 @@ The rANS `state_step` function computes `f * (s >> bits) + (s & mask) - g`. For 
 
 r[cram.codec.normalize_checked]
 Frequency normalization (`normalize_frequencies`) sums all 256 frequency entries and doubles the sum in a loop. Both the sum and the doubling MUST use checked arithmetic to detect overflow from malformed frequency tables. Overflow MUST produce an error, not silent wraparound.
+
+r[cram.codec.rans_nx16_bits_validation]
+The rANS Nx16 order-1 frequency-table header encodes `bits` in its top nibble.
+The symbol tables are always 4096 entries (`1 << 12`), and
+`state_cumulative_frequency` masks the state with `(1 << bits) - 1`, so any
+`bits > 12` produces a table index past the end. `read_frequencies_1` MUST
+reject `bits > 12` with a typed error (`InvalidRansNx16Bits { bits }`) before
+reading the table, so the decode loop can index the tables directly. The
+validation MUST live at the read, not at the use: the decode loop runs once per
+output symbol and cannot afford to re-check, and a `debug_assert!` there would
+panic in fuzz builds on input that is merely corrupt.
 
 r[cram.codec.uint7_bounded]
 The uint7 variable-length integer decoding loop MUST be bounded to at most 5 iterations. A u32 can hold at most 32 bits; 5 iterations of 7-bit groups produce 35 bits, which is the maximum meaningful input. More than 5 continuation bytes indicate malformed data and MUST produce an error.

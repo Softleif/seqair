@@ -143,6 +143,9 @@ fn has_bcftools() -> bool {
 
 // ── Deterministic tests ────────────────────────────────────────────────
 
+// r[verify bcf_writer.fixed_fields]
+// r[verify bcf_writer.shared_variable]
+// r[verify bcf_writer.filter_pass]
 #[test]
 fn bcftools_reads_seqair_simple_snv() {
     if !has_bcftools() {
@@ -200,6 +203,7 @@ fn bcftools_reads_a_partially_phased_gt() {
     );
 }
 
+// r[verify bcf_writer.gt_encoding]
 #[test]
 fn bcftools_reads_seqair_phased_gt() {
     if !has_bcftools() {

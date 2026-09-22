@@ -135,6 +135,10 @@ fn record_starts(bcf: &[u8]) -> BTreeSet<usize> {
         let l_indiv = u32::from_le_bytes(plain[pos + 4..pos + 8].try_into().unwrap()) as usize;
         pos += 8 + l_shared + l_indiv;
     }
+    // r[verify bcf_writer.record_layout]
+    // Walking the body purely by `l_shared` + `l_indiv` has to land exactly on
+    // the end of the stream: any record whose two length prefixes disagree with
+    // the bytes that follow desynchronises the walk and this fails.
     assert_eq!(pos, plain.len(), "BCF body did not decode to a whole number of records");
     assert_eq!(starts.len(), N_RECORDS as usize, "unexpected record count");
     starts
@@ -193,6 +197,10 @@ fn csi_offsets_always_name_a_record_start() {
         assert_chunk_starts_are_records(&w, pad);
         saw_exactly_full_block |= blocks_of(&w.bcf).iter().any(|b| b.uncompressed_len == 65_536);
     }
+    // r[verify bcf_writer.bgzf_blocks]
+    // Also pins the flush threshold: a writer that flushed early (say every
+    // 1 KiB) would still produce a readable file, but no block would ever reach
+    // 64 KiB and this assertion would fail.
     assert!(
         saw_exactly_full_block,
         "no file in the sweep had a block filled to exactly 64 KiB — the case this test exists \

@@ -526,7 +526,7 @@ fn report_selectivity(tc: &TestCase, kept: usize, total: usize) {
 
 // r[verify unified.fetch_into_customized]
 // r[verify unified.readers_open_customized]
-// r[verify record_store.pre_filter.rollback]
+// r[verify record_store.pre_filter.rollback+1]
 // r[verify record_store.filter_raw]
 // r[verify record_store.filter_raw_fields]
 /// A filtered fetch is the unfiltered fetch restricted to the records the
@@ -565,7 +565,7 @@ fn a_filtered_fetch_is_the_unfiltered_fetch_restricted(tc: TestCase) {
 }
 
 // r[verify unified.fetch_into_customized]
-// r[verify record_store.pre_filter.rollback]
+// r[verify record_store.pre_filter.rollback+1]
 // r[verify record_store.filter_raw]
 /// The two rejection hooks are a performance choice, not a semantic one: the
 /// same decision taken in `filter_raw` (before any slab is written) and in
@@ -626,7 +626,7 @@ fn an_always_true_filter_matches_plain_fetch_into(tc: TestCase) {
 }
 
 // r[verify unified.fetch_into_customized]
-// r[verify record_store.pre_filter.rollback]
+// r[verify record_store.pre_filter.rollback+1]
 /// An always-false filter leaves an empty store that is still a working store:
 /// nothing to iterate, nothing to pile up, and the next fetch into it refills
 /// it exactly as a fresh store would be filled.

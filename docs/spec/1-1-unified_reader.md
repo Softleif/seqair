@@ -94,8 +94,8 @@ CRAM fork: shares `Arc` holding CRAI index + header, opens fresh `File` handle f
 
 ## Readers: alignment + reference bundle
 
-r[unified.readers_struct]
-The `Readers` struct bundles an `IndexedReader` (alignment) with an `IndexedFastaReader` (reference) in a single type. This eliminates the need for separate FASTA path passing — CRAM can access the reference it needs for sequence reconstruction, and all formats have uniform open/fork semantics. `Readers` is parameterized on `E: CustomizeRecordStore = ()` so callers can attach a per-record customize value at open time (see `r[record_store.customize.trait]`); the customize value's `keep_record` runs at fetch time and `compute` runs by `pileup()` after every fetch.
+r[unified.readers_struct+1]
+The `Readers` struct bundles an `IndexedReader` (alignment) with an `IndexedFastaReader` (reference) in a single type. This eliminates the need for separate FASTA path passing — CRAM can access the reference it needs for sequence reconstruction, and all formats have uniform open/fork semantics. `Readers` is parameterized on `E: CustomizeRecordStore = ()` so callers can attach a per-record customize value at open time (see `r[record_store.customize.trait+1]`); the customize value's two filters and its `compute` all run at fetch time, inline in the push that produced the record — not in a later pass by `pileup()`.
 
 r[unified.readers_open]
 `Readers::open(alignment_path, fasta_path)` MUST auto-detect the alignment format (via `r[unified.detect_format]`), open the appropriate reader, and open the FASTA reader. For CRAM, the fasta_path is passed to `IndexedCramReader::open()` for sequence reconstruction. For BAM/SAM, the FASTA reader is opened but not used by the alignment reader. `Readers::open` is only available when `E = ()`; for non-trivial customizers use `open_customized`.
@@ -227,6 +227,45 @@ chromosome in one call without thinking about tile size.
 > - Borrow `&self` only — building the iterator MUST NOT mutably borrow
 >   `Readers`, so callers can build the plan once and re-acquire `&mut self`
 >   for each `pileup(&segment)` call.
+
+A tile of `max_len` bases is a promise about coordinates, not about memory: a
+500 kb window of a 30× exome and the same window of an amplicon panel differ by
+orders of magnitude in bytes. A caller that sizes its tiles for the quiet parts
+of a genome then hits a pile-up region and loads gigabytes into one
+`RecordStore`. The index already knows roughly how much a region costs, so the
+planner can ask before committing.
+
+> r[unified.segment_byte_budget]
+> `SegmentOptions` MUST carry an optional per-segment **compressed**-byte budget
+> alongside `max_len`, defaulting to 256 MiB (the `RegionBuf` bulk-load guard),
+> settable with `with_max_bytes(NonZeroU64)`, cleared with
+> `without_byte_budget()`, and readable as `max_bytes() -> Option<NonZeroU64>`.
+> The budget is in compressed bytes because that is what the index can estimate;
+> the decoded store is a few times larger.
+>
+> When a budget is set, `Readers::segments` MUST subdivide each positional tile
+> so that every emitted `Segment`'s estimated load stays within it, using
+> `Readers::estimate_region_bytes` (the same estimate it exposes to callers) over
+> the segment's full `[start, end]`. Subdivision MUST preserve everything
+> `r[unified.readers_segments]` guarantees: the emitted cores still tile the
+> requested range exactly once, in order, with no gap and no overlap, and each
+> sub-segment's `[start, end]` is its core expanded by `overlap` and clamped to
+> the parent tile — which reproduces the edge rules of
+> `r[unified.segment_overlap]` without restating them.
+>
+> Subdivision MUST grow greedily forward — each sub-segment takes the largest
+> core still within budget, the next starts after it — rather than bisecting.
+> The index cannot address finer than its leaf bin (~16 kb), so the estimate is
+> flat across a bin and a midpoint split inside one would not lower it. Greedy
+> growth stops at the bin's end instead, which bounds the irreducible case: a
+> single leaf bin larger than the budget MUST be emitted as ONE over-budget
+> segment, not bisected down to per-base segments that each reload it. Emitting
+> an over-budget segment is the correct outcome there; `RegionBuf` warns and
+> loads it.
+>
+> A backend that cannot estimate bytes (CRAM, which bounds memory per slice
+> instead) MUST report no estimate, and the subdivision MUST then be a no-op
+> that passes tiles through unchanged.
 
 > r[unified.pileup_plan]
 > `Readers::pileup(segment: &Segment, depth: DepthLimit) -> Pileup<'_, E>` MUST

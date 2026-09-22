@@ -118,7 +118,7 @@ pub(crate) fn decode_with_buf(
         None
     };
 
-    // r[impl cram.codec.alloc_bounds]
+    // r[impl io.fuzz.alloc_limits]
     // Re-check after PACK/RLE transforms may have updated uncompressed_size.
     super::reader::check_alloc_size(uncompressed_size, "rANS Nx16 output (post-transform)")?;
     let mut dst = vec![0u8; uncompressed_size];
@@ -626,7 +626,7 @@ fn read_frequencies_1(src: &mut &[u8], frequencies: &mut Frequencies1) -> Result
         let uncompressed_size = read_uint7(src)? as usize;
         let compressed_size = read_uint7(src)? as usize;
         let mut compressed_data = split_off(src, compressed_size)?;
-        // r[impl cram.codec.alloc_bounds]
+        // r[impl io.fuzz.alloc_limits]
         super::reader::check_alloc_size(uncompressed_size, "rans_nx16 freq1 compressed")?;
         let mut tmp = vec![0u8; uncompressed_size];
         decode_order_0(&mut compressed_data, &mut tmp, 4)?;
@@ -800,7 +800,7 @@ fn read_rle_context(
 ) -> Result<(RleContext, usize), CramError> {
     let header = read_uint7(src)?;
     let context_size = (header >> 1) as usize;
-    // r[impl cram.codec.alloc_bounds]
+    // r[impl io.fuzz.alloc_limits]
     super::reader::check_alloc_size(context_size, "rans_nx16 rle context")?;
     let is_compressed = (header & 0x01) == 0;
 

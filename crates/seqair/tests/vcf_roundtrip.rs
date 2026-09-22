@@ -527,6 +527,7 @@ fn bcf_roundtrip_multiple_records_sorted() {
 
 // ── Proptests ──────────────────────────────────────────────────────────
 
+// r[verify bcf_writer.flag_encoding]
 /// BCF round-trip: write → noodles read → all fields match.
 #[hegel::test(test_cases = 50)]
 fn bcf_deep_roundtrip(tc: TestCase) {
