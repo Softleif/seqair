@@ -153,6 +153,23 @@ impl AlleleSpec {
         }
     }
 
+    /// The REF column, spelled out from the draw rather than read back out of
+    /// the [`Alleles`] the writer was handed.
+    fn ref_text(&self) -> String {
+        let s = |b: &Base| b.as_str().to_owned();
+        match self {
+            Self::Reference(r) | Self::Snv(r, _) | Self::Insertion(r, _) => s(r),
+            Self::Deletion(anchor, deleted) => {
+                let mut t = s(anchor);
+                for b in deleted {
+                    t.push_str(b.as_str());
+                }
+                t
+            }
+            Self::Complex(r, _) => r.clone(),
+        }
+    }
+
     /// The ALT column, spelled out from the draw. Empty means `.`.
     fn alt_texts(&self) -> Vec<String> {
         let s = |b: &Base| b.as_str().to_owned();
@@ -454,4 +471,76 @@ fn info_number_cardinalities_survive_bcftools(tc: TestCase) {
         1 => "bi-allelic only",
         _ => "multi-allelic",
     });
+}
+
+// r[verify vcf_record.alleles_serialization]
+// r[verify bcf_writer.shared_variable]
+/// Every allele kind the type-safe `Alleles` API can build — a reference-only
+/// site, a 1..3-ALT SNV, an insertion, a deletion and a complex site — spells
+/// the REF and ALT columns that the draw implies, as bcftools reads them back
+/// out of the BCF.
+///
+/// The expectation is built from the drawn bases, not from `Alleles::ref_text`,
+/// so this is not the writer checked against its own accessor.
+#[hegel::test(test_cases = 50)]
+fn allele_kinds_spell_ref_and_alt_for_bcftools(tc: TestCase) {
+    let records = tc.draw(arb_records().print_as_debug());
+    let s = setup();
+    let bcf = write(&s, &records, OutputFormat::Bcf);
+    let lines = bcftools_query(&bcf, "%CHROM\\t%POS\\t%REF\\t%ALT\\n");
+
+    assert_eq!(lines.len(), records.len(), "record count");
+    for (line, rec) in lines.iter().zip(&records) {
+        let f: Vec<&str> = line.split('\t').collect();
+        assert_eq!(f.len(), 4, "field count in {line:?}");
+        assert_eq!(f[0], "chr1", "CHROM");
+        assert_eq!(f[1], rec.pos.to_string(), "POS");
+        assert_eq!(f[2], rec.alleles.ref_text(), "REF at pos {}", rec.pos);
+        let alts = rec.alleles.alt_texts();
+        let want = if alts.is_empty() { ".".to_owned() } else { alts.join(",") };
+        assert_eq!(f[3], want, "ALT at pos {}", rec.pos);
+    }
+
+    let kinds = records
+        .iter()
+        .map(|r| match r.alleles {
+            AlleleSpec::Reference(_) => "reference-only",
+            AlleleSpec::Snv(_, ref a) if a.len() > 1 => "multi-allelic SNV",
+            AlleleSpec::Snv(..) => "bi-allelic SNV",
+            AlleleSpec::Insertion(..) => "insertion",
+            AlleleSpec::Deletion(..) => "deletion",
+            AlleleSpec::Complex(..) => "complex",
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for kind in kinds {
+        tc.event(kind);
+    }
+}
+
+// r[verify record_encoder.vcf_bcf_equivalence]
+// r[verify vcf_writer.info_serialization]
+/// seqair writes each record twice over, through two encoders that share no
+/// serialization code: straight to VCF text, and to BCF that bcftools then
+/// renders back as VCF text. Every column of the two renderings must agree.
+///
+/// This is the three-way agreement the writer's contract asks for — if the two
+/// seqair paths can disagree about the same logical record, one of them is
+/// wrong, and bcftools says which.
+#[hegel::test(test_cases = 50)]
+fn vcf_text_and_bcf_render_the_same_record(tc: TestCase) {
+    let records = tc.draw(arb_records().print_as_debug());
+    let s = setup();
+
+    let direct: Vec<String> = String::from_utf8(write(&s, &records, OutputFormat::Vcf))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(str::to_owned)
+        .collect();
+
+    let bcf = write(&s, &records, OutputFormat::Bcf);
+    let via_bcf = bcftools_query(&bcf, "%LINE\\n");
+
+    assert_eq!(direct.len(), records.len(), "seqair wrote a record per input");
+    assert_eq!(direct, via_bcf, "VCF text and BCF disagree");
 }
