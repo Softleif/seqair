@@ -144,7 +144,7 @@ r[record_encoder.format_single_sample]
 The multi-valued array FORMAT keys (`FormatKey<Arr<i32>>`, `FormatKey<Arr<f32>>`) MUST provide an `encode_single_sample` convenience that takes one sample's values as a flat `&[T]` (rather than `&[&[T]]`) and encodes them for a single-sample record. It MUST return [`VcfError::SampleCountMismatch`] if the header declares anything other than exactly one sample.
 
 r[record_encoder.format_state_queries]
-`FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
+`FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record, and `n_samples()` returning the sample count the header declares — the same count the per-sample slice length is validated against in `r[record_encoder.format_methods]`.
 
 r[record_encoder.format_dedup]
 If the same FORMAT field (identified by `FieldId`) is encoded more than once within a single record, the encoder SHOULD overwrite the previously-written value. The final output MUST contain at most one entry per distinct FORMAT field. The replacement MUST keep the field's original column position (overwrite in place), matching htslib's `bcf_update_format_*` semantics — for VCF text this means rewriting the corresponding colon-delimited subfield of every sample. The deduplication tracker SHOULD reuse its allocations across records.

@@ -31,8 +31,16 @@ use seqair::bam::{
     BamError, BamHeaderError, BgzfError, IndexedBamReader, Pos0, RecordIdx, RecordStore,
 };
 use seqair::io::IndexError;
+use seqair::vcf::record_encoder::{
+    FilterFieldDef, FormatEncoder, FormatFieldDef, FormatGt, FormatInt, InfoEncoder, InfoFieldDef,
+    InfoInt,
+};
+use seqair::vcf::{
+    Alleles, ContigDef, ContigId, Genotype, Number, OutputFormat, ValueType, VcfError, VcfHeader,
+    VcfHeaderError, Writer,
+};
 use seqair_types::bam_flags::BamFlags;
-use seqair_types::{Base, BaseQuality};
+use seqair_types::{Base, BaseQuality, Pos1};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -852,4 +860,262 @@ fn set_int_is_exactly_as_permissive_as_the_bam_integer_types(tc: TestCase) {
             assert_eq!(aux.as_bytes(), before, "a refused set_int must not move the block");
         }
     }
+}
+
+// ── RecordEncoder: state queries and the VcfError they guard ────────────
+
+/// A two-sample header with one INFO field, GT, and one scalar FORMAT field.
+struct VcfSetup {
+    header: Arc<VcfHeader>,
+    contig: ContigId,
+    dp_info: InfoInt,
+    gt: FormatGt,
+    dp_format: FormatInt,
+}
+
+fn vcf_setup(samples: &[&str]) -> VcfSetup {
+    let mut builder = VcfHeader::builder();
+    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let mut builder = builder.infos();
+    let dp_info = builder
+        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
+        .unwrap();
+    let mut builder = builder.formats();
+    let gt = builder
+        .register_format(&FormatFieldDef::new("GT", Number::Count(1), ValueType::String, "GT"))
+        .unwrap();
+    let dp_format = builder
+        .register_format(&FormatFieldDef::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Read Depth",
+        ))
+        .unwrap();
+    let mut builder = builder.samples();
+    for name in samples {
+        builder.add_sample(*name).unwrap();
+    }
+    VcfSetup { header: Arc::new(builder.build().unwrap()), contig, dp_info, gt, dp_format }
+}
+
+// r[verify record_encoder.info_state_queries]
+// r[verify record_encoder.format_state_queries]
+/// `n_allele`, `n_alt` and `n_samples` must report the record and header they
+/// are actually encoding, in both encoder states and for every allele shape.
+/// `n_allele` is `n_alt + 1` — the reference allele is always one of them.
+#[hegel::test]
+fn the_encoder_state_queries_report_the_record_being_encoded(tc: TestCase) {
+    let n_samples = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
+    let names: Vec<String> = (0..n_samples).map(|i| format!("s{i}")).collect();
+    let setup = vcf_setup(&names.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let n_alt = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
+    // Built, not filtered: distinct alt bases picked off a rotation of ACGT.
+    let alts: Vec<Base> = [Base::C, Base::G, Base::T, Base::A].into_iter().take(n_alt).collect();
+    let alleles = Alleles::snv_multi(Base::A, &alts).unwrap();
+    assert_eq!(alleles.n_allele(), n_alt + 1, "the fixture must have the shape it claims");
+
+    let mut out = Vec::new();
+    let writer = Writer::new(&mut out, OutputFormat::Vcf);
+    let mut writer = writer.write_header(&setup.header).unwrap();
+    let mut enc = writer
+        .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(50.0))
+        .unwrap()
+        .filter_pass();
+
+    assert_eq!(InfoEncoder::n_alt(&enc), n_alt, "n_alt in the Filtered state");
+    assert_eq!(InfoEncoder::n_allele(&enc), n_alt + 1, "n_allele in the Filtered state");
+    setup.dp_info.encode(&mut enc, 30);
+
+    let mut enc = enc.begin_samples();
+    assert_eq!(FormatEncoder::n_alt(&enc), n_alt, "n_alt in the WithSamples state");
+    assert_eq!(FormatEncoder::n_allele(&enc), n_alt + 1, "n_allele in the WithSamples state");
+    assert_eq!(enc.n_samples(), n_samples, "n_samples must match the header");
+
+    let gts: Vec<Genotype> = (0..n_samples).map(|_| Genotype::unphased(0, 1)).collect();
+    setup.gt.encode(&mut enc, &gts).unwrap();
+    enc.emit().unwrap();
+}
+
+// r[verify record_encoder.format_methods]
+/// A per-sample slice of the wrong length is refused by value: the error says
+/// how many samples the header declares and how many values it was handed.
+#[hegel::test]
+fn a_format_slice_of_the_wrong_length_reports_both_counts(tc: TestCase) {
+    let n_samples = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
+    let names: Vec<String> = (0..n_samples).map(|i| format!("s{i}")).collect();
+    let setup = vcf_setup(&names.iter().map(String::as_str).collect::<Vec<_>>());
+
+    // A wrong count, constructed rather than rejected: grow, or shrink when
+    // there is room to shrink.
+    let grow = n_samples == 1 || tc.draw(gs::booleans());
+    let got = if grow {
+        n_samples + tc.draw(gs::integers::<usize>().min_value(1).max_value(3))
+    } else {
+        n_samples - 1
+    };
+    assert_ne!(got, n_samples, "the generator must not hand back the legal count");
+    tc.event(if grow { "too many values" } else { "too few values" });
+
+    let alleles = Alleles::snv(Base::A, Base::C).unwrap();
+    let mut out = Vec::new();
+    let writer = Writer::new(&mut out, OutputFormat::Vcf);
+    let mut writer = writer.write_header(&setup.header).unwrap();
+    let enc = writer
+        .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(50.0))
+        .unwrap()
+        .filter_pass();
+    let mut enc = enc.begin_samples();
+
+    let values: Vec<i32> = (0..got).map(|i| i as i32).collect();
+    let err = setup
+        .dp_format
+        .encode(&mut enc, &values)
+        .expect_err("one value per sample, no more and no less");
+    let VcfError::SampleCountMismatch { expected, got: reported } = err else {
+        panic!("expected SampleCountMismatch, got {err:?}");
+    };
+    assert_eq!(expected, n_samples, "`expected` must be the header's sample count");
+    assert_eq!(reported, got, "`got` must be the slice length that was passed");
+}
+
+// r[verify record_encoder.format_methods]
+/// Genotypes of differing ploidy cannot share one BCF column. The error names
+/// the first sample's ploidy, the index of the sample that disagreed, and its
+/// ploidy — three fields, all of which a wrongly-built variant would get wrong.
+#[test]
+fn mixed_ploidy_names_the_sample_that_disagreed() {
+    let setup = vcf_setup(&["a", "b", "c"]);
+    let alleles = Alleles::snv(Base::A, Base::C).unwrap();
+    let mut out = Vec::new();
+    let writer = Writer::new(&mut out, OutputFormat::Bcf);
+    let mut writer = writer.write_header(&setup.header).unwrap();
+    let enc = writer
+        .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(50.0))
+        .unwrap()
+        .filter_pass();
+    let mut enc = enc.begin_samples();
+
+    let gts = [Genotype::unphased(0, 1), Genotype::unphased(0, 0), Genotype::haploid(1)];
+    let err = setup.gt.encode(&mut enc, &gts).expect_err("ploidy must be uniform");
+    let VcfError::MixedPloidy { first_ploidy, mismatch_index, mismatch_ploidy } = err else {
+        panic!("expected MixedPloidy, got {err:?}");
+    };
+    assert_eq!(
+        (first_ploidy, mismatch_index, mismatch_ploidy),
+        (2, 2, 1),
+        "the diploid first sample, and the haploid third one",
+    );
+}
+
+// r[verify vcf_header.no_duplicates]
+/// Every duplicate registration has its own variant naming its own id — one
+/// shared `Duplicate` would read the same until the name is checked.
+#[test]
+fn each_kind_of_duplicate_header_entry_has_its_own_variant() {
+    let mut builder = VcfHeader::builder();
+    builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+    let err = builder
+        .register_contig("chr1", ContigDef { length: Some(1000) })
+        .expect_err("chr1 is already declared");
+    let VcfHeaderError::DuplicateContig { name } = err else {
+        panic!("expected DuplicateContig, got {err:?}");
+    };
+    assert_eq!(name, "chr1");
+
+    let mut builder = builder.filters();
+    let q10 = FilterFieldDef::new("q10", "Low quality");
+    builder.register_filter(&q10).unwrap();
+    let err = builder.register_filter(&q10).expect_err("q10 is declared");
+    let VcfHeaderError::DuplicateFilter { id } = err else {
+        panic!("expected DuplicateFilter, got {err:?}");
+    };
+    assert_eq!(id, "q10");
+
+    let mut builder = builder.infos();
+    let def: InfoFieldDef<i32> =
+        InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth");
+    builder.register_info(&def).unwrap();
+    let err = builder.register_info(&def).expect_err("DP is declared");
+    let VcfHeaderError::DuplicateInfo { id } = err else {
+        panic!("expected DuplicateInfo, got {err:?}");
+    };
+    assert_eq!(id, "DP");
+
+    let mut builder = builder.formats();
+    let def: FormatFieldDef<Genotype> =
+        FormatFieldDef::new("GT", Number::Count(1), ValueType::String, "Genotype");
+    builder.register_format(&def).unwrap();
+    let err = builder.register_format(&def).expect_err("GT is declared");
+    let VcfHeaderError::DuplicateFormat { id } = err else {
+        panic!("expected DuplicateFormat, got {err:?}");
+    };
+    assert_eq!(id, "GT");
+
+    let mut builder = builder.samples();
+    builder.add_sample("NA12878").unwrap();
+    let err = builder.add_sample("NA12878").expect_err("NA12878 is declared");
+    let VcfHeaderError::DuplicateSample { name } = err else {
+        panic!("expected DuplicateSample, got {err:?}");
+    };
+    assert_eq!(name, "NA12878");
+}
+
+// r[verify vcf_header.contig_required]
+/// A contig the header never declared is reported by name, and the same error
+/// keeps its identity once wrapped into a [`VcfError`].
+#[test]
+fn an_undeclared_contig_is_reported_by_name_through_both_error_types() {
+    let setup = vcf_setup(&["s0"]);
+    assert_eq!(setup.header.contig_id("chr1").unwrap(), 0, "the declared contig resolves");
+
+    let err = setup.header.contig_id("chrM").expect_err("chrM was never declared");
+    let VcfHeaderError::MissingContig { name } = err else {
+        panic!("expected MissingContig, got {err:?}");
+    };
+    assert_eq!(name, "chrM");
+
+    let wrapped: VcfError = setup.header.contig_id("chrM").unwrap_err().into();
+    assert!(
+        matches!(
+            wrapped,
+            VcfError::Header { 0: VcfHeaderError::MissingContig { ref name } } if name == "chrM"
+        ),
+        "wrapping into VcfError must keep the cause, got {wrapped:?}",
+    );
+}
+
+// r[verify record_encoder.info_dedup]
+// r[verify record_encoder.format_dedup]
+/// A field encoded twice in one record is *not* an error: the second write
+/// overwrites the first in place, and the output carries exactly one column.
+/// Pinning that keeps the dedup path from quietly turning into a rejection.
+#[test]
+fn a_field_written_twice_overwrites_rather_than_erroring() {
+    let setup = vcf_setup(&["s0"]);
+    let alleles = Alleles::snv(Base::A, Base::C).unwrap();
+    let mut out = Vec::new();
+    {
+        let writer = Writer::new(&mut out, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let mut enc = writer
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(50.0))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, 11);
+        setup.dp_info.encode(&mut enc, 22);
+        let mut enc = enc.begin_samples();
+        setup.gt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
+        setup.dp_format.encode(&mut enc, &[33]).unwrap();
+        setup.dp_format.encode(&mut enc, &[44]).unwrap();
+        enc.emit().unwrap();
+    }
+
+    let text = String::from_utf8(out).unwrap();
+    let line = text.lines().last().expect("one record line");
+    let fields: Vec<&str> = line.split('\t').collect();
+    assert_eq!(fields[7], "DP=22", "the second INFO write must replace the first in place");
+    assert_eq!(fields[8], "GT:DP", "the FORMAT keys must list DP once");
+    assert_eq!(fields[9], "0/1:44", "the second FORMAT write must replace the first in place");
 }

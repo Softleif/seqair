@@ -40,7 +40,7 @@ Headers MUST be constructed via a typestate builder that enforces field registra
 > _[VCF43] §1.1.7 "Contig field format" — `##contig=<ID=name,length=N>`. [BCF2] — contig lines required for BCF, define integer mapping_
 
 r[vcf_header.contig_required]
-Every contig referenced by a record MUST be declared in the header via `##contig=<ID=name[,length=N]>`. For BCF output, contig declarations define the integer-to-name mapping (index = insertion order, 0-based).
+Every contig referenced by a record MUST be declared in the header via `##contig=<ID=name[,length=N]>`. For BCF output, contig declarations define the integer-to-name mapping (index = insertion order, 0-based). Looking up a contig that was never declared MUST return `VcfHeaderError::MissingContig` naming the contig that was asked for, not a generic lookup failure — the caller's next move is usually to add that contig, so the name has to survive the error.
 
 > _[VCF43] §1.1.2 "Information field format" — ID, Number (A/R/G/./integer), Type (Integer/Float/Flag/Character/String), Description_
 
