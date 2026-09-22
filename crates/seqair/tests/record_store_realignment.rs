@@ -18,8 +18,8 @@
 mod helpers;
 use hegel::prelude::*;
 use helpers::ri;
-use seqair::bam::{DecodeError, Pos0};
 use seqair::bam::record_store::RecordStore;
+use seqair::bam::{DecodeError, Pos0};
 use seqair_types::{BamFlags, Base, BaseQuality};
 
 // ---------------------------------------------------------------------------
