@@ -18,6 +18,12 @@
 //! *before* validating the value's range, which left half a tag in the slab
 //! whenever the value was out of range — a property here drives it to that
 //! boundary and insists the record comes out unchanged.
+//!
+//! The BAM bin is checked without a second copy of `reg2bin` living in this
+//! file. The record is written, a plain multi-member gzip decoder reads the
+//! `bin` field straight back off the wire, and htslib — which recomputes
+//! `core.bin` from POS and CIGAR every time it reads a BAM record that has
+//! one — says what the number should have been.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -33,25 +39,34 @@
 )]
 
 use hegel::prelude::*;
+use rust_htslib::bam::Read as _;
 use seqair::bam::Pos0;
 use seqair::bam::aux_data::{AuxData, AuxDataError};
+use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::{OwnedBamRecord, OwnedRecordError};
 use seqair::bam::writer::BamWriterBuilder;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CONTIG: &str = "chr1";
 /// The mutation sequences never move the record, so a short contig is enough.
 const SHORT_CONTIG_LEN: u32 = 100_000;
+/// The bin property needs room: a BAI bin's level is decided by how far an
+/// alignment reaches, and only a chromosome-sized contig lets a record land
+/// anywhere but the leaf level.
+const LONG_CONTIG_LEN: u32 = 250_000_000;
 /// The three tags every aux mutation draws from. Keeping the pool small is
 /// the point — collisions are what `aux_replace_semantics` is about.
 const TAGS: [[u8; 2]; 3] = [*b"Xa", *b"Xb", *b"Xc"];
 /// Flag words a real BAM carries: unpaired, reverse, placed-unmapped, the two
 /// halves of a proper pair, secondary, duplicate.
 const FLAGS: [u16; 8] = [0x0, 0x10, 0x4, 0x14, 0x63, 0x93, 0x100, 0x400];
+/// The largest bin number the BAI scheme (`min_shift=14`, depth 5) can name.
+const MAX_BAI_BIN: u16 = 37449;
 
 fn header(contig_len: u32) -> BamHeader {
     let text = format!("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:{CONTIG}\tLN:{contig_len}\n");
@@ -541,4 +556,185 @@ fn a_rejected_set_qual_leaves_the_old_scores_in_place(tc: TestCase) {
     before.to_bam_bytes(&mut want).expect("serialize");
     rec.to_bam_bytes(&mut got).expect("serialize");
     assert_eq!(got, want, "a rejected set_qual must not change a single byte of the record");
+}
+
+// ── the bin, refereed by htslib ─────────────────────────────────────────
+
+/// A pos/CIGAR pair that keeps a fixed query length, so `set_alignment`
+/// accepts it as a replacement for any other pair with the same length.
+#[derive(Debug, Clone)]
+struct Alignment {
+    pos: u32,
+    cigar: Vec<CigarOp>,
+}
+
+impl Alignment {
+    fn ref_span(&self) -> u32 {
+        self.cigar.iter().filter(|op| op.consumes_ref()).map(|op| op.len()).sum()
+    }
+}
+
+/// Query length `qlen` laid out as soft clip + match + gap + match. The gap's
+/// size is drawn on a log scale so the alignment reaches across every level of
+/// the bin tree, not just the 16 kbp leaves.
+fn draw_alignment(tc: &TestCase, qlen: u32) -> Alignment {
+    let n = |lo: u32, hi: u32| gs::integers::<u32>().min_value(lo).max_value(hi);
+    let soft = tc.draw_silent(n(0, (qlen - 2).min(3)));
+    let rest = qlen - soft;
+    let m1 = tc.draw_silent(n(1, rest - 1));
+    let m2 = rest - m1;
+
+    let exponent = tc.draw_silent(gs::integers::<u32>().max_value(24));
+    let gap = tc.draw_silent(n(0, 1u32 << exponent));
+    let gap_op =
+        if tc.draw_silent(gs::booleans()) { CigarOpType::Deletion } else { CigarOpType::RefSkip };
+
+    let mut cigar = Vec::new();
+    if soft > 0 {
+        cigar.push(CigarOp::new(CigarOpType::SoftClip, soft));
+    }
+    if gap > 0 {
+        cigar.push(CigarOp::new(CigarOpType::Match, m1));
+        cigar.push(CigarOp::new(gap_op, gap));
+        cigar.push(CigarOp::new(CigarOpType::Match, m2));
+    } else {
+        cigar.push(CigarOp::new(CigarOpType::Match, m1 + m2));
+    }
+
+    let span = m1 + gap + m2;
+    let pos = tc.draw_silent(n(0, LONG_CONTIG_LEN - span - 1));
+    Alignment { pos, cigar }
+}
+
+/// A record and the realignment it is about to be given.
+#[derive(Debug, Clone)]
+struct Realignment {
+    seq: Vec<Base>,
+    before: Alignment,
+    after: Alignment,
+}
+
+#[hegel::composite]
+fn arb_realignment(tc: &TestCase) -> Realignment {
+    let qlen = tc.draw_silent(gs::integers::<u32>().min_value(2).max_value(20));
+    Realignment {
+        seq: (0..qlen).map(|_| base_of(tc)).collect(),
+        before: draw_alignment(tc, qlen),
+        after: draw_alignment(tc, qlen),
+    }
+}
+
+/// Which level of the BAI bin tree a bin id sits on. Derived from the tree's
+/// shape (`bin_first(l) = ((1 << 3l) - 1) / 7`), not from `reg2bin` — it only
+/// labels the statistics anyway.
+fn bin_level(bin: u32) -> u32 {
+    match bin {
+        0 => 0,
+        1..=8 => 1,
+        9..=72 => 2,
+        73..=584 => 3,
+        585..=4680 => 4,
+        _ => 5,
+    }
+}
+
+/// The `bin` field of every record in a BAM, straight off the wire.
+///
+/// BGZF is a sequence of gzip members, so a plain multi-member gzip decoder
+/// reads the whole file; from there the layout is [SAM1] §4.2 and `bin` is the
+/// top half of `bin_mq_nl`. Going through a real BAM reader would be no use
+/// here — htslib recomputes `core.bin` on read, and seqair's own reader would
+/// be marking its own homework.
+fn stored_bins(path: &Path) -> Vec<u16> {
+    let file = std::fs::File::open(path).expect("open BAM");
+    let mut raw = Vec::new();
+    flate2::read::MultiGzDecoder::new(file).read_to_end(&mut raw).expect("inflate BGZF");
+
+    let u32_at = |off: usize| u32::from_le_bytes(raw[off..off + 4].try_into().unwrap());
+    assert_eq!(&raw[0..4], b"BAM\x01".as_slice(), "BAM magic");
+    let mut off = 8 + u32_at(4) as usize; // magic + l_text + the header text
+    let n_ref = u32_at(off) as usize;
+    off += 4;
+    for _ in 0..n_ref {
+        off += 4 + u32_at(off) as usize + 4; // l_name + name + l_ref
+    }
+
+    let mut bins = Vec::new();
+    while off < raw.len() {
+        let block_size = u32_at(off) as usize;
+        // bin_mq_nl sits 8 bytes into the 32-byte fixed header.
+        bins.push((u32_at(off + 4 + 8) >> 16) as u16);
+        off += 4 + block_size;
+    }
+    bins
+}
+
+// r[verify bam.owned_record.bin]
+// r[verify bam.owned_record.to_bam_bin_field]
+// r[verify bam.owned_record.set_alignment]
+/// After `set_alignment` moves a record, the bin it serializes must be the
+/// bin htslib computes for the new alignment — nothing of the old one left
+/// over, and no agreement with a second copy of `reg2bin` living in this file.
+#[hegel::test(test_cases = 32)]
+fn the_serialized_bin_is_the_one_htslib_computes(tc: TestCase) {
+    let mut plans = tc.draw(gs::vecs(arb_realignment()).min_size(1).max_size(6).print_as_debug());
+    // Coordinate order, which is what a BAM this shape would really be in.
+    plans.sort_by_key(|p| p.after.pos);
+
+    let mut records = Vec::with_capacity(plans.len());
+    for (i, plan) in plans.iter().enumerate() {
+        let mut rec = OwnedBamRecord::builder(
+            0,
+            Some(Pos0::new(plan.before.pos).unwrap()),
+            format!("r{i}").into_bytes(),
+        )
+        .cigar(plan.before.cigar.clone())
+        .seq(plan.seq.clone())
+        .qual(plan.seq.iter().map(|_| BaseQuality::from_byte(30)).collect())
+        .build()
+        .unwrap();
+
+        rec.set_alignment(Some(Pos0::new(plan.after.pos).unwrap()), plan.after.cigar.clone())
+            .expect("the query length is unchanged");
+        assert_eq!(rec.pos.unwrap().as_u32(), plan.after.pos, "pos after set_alignment");
+        assert_eq!(
+            rec.end_pos().unwrap().as_u32(),
+            plan.after.pos + plan.after.ref_span(),
+            "end_pos must be recomputed from the new CIGAR"
+        );
+        assert!(rec.bin() <= MAX_BAI_BIN, "bin {} exceeds the BAI maximum", rec.bin());
+        if plan.before.pos != plan.after.pos || plan.before.ref_span() != plan.after.ref_span() {
+            tc.event("the alignment actually moved");
+        }
+        records.push(rec);
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_records(dir.path(), &header(LONG_CONTIG_LEN), &records);
+
+    // The byte we actually wrote, read by a decoder that does nothing but
+    // unpack `bin_mq_nl`.
+    let stored = stored_bins(&path);
+    let want: Vec<u16> = records.iter().map(OwnedBamRecord::bin).collect();
+    assert_eq!(stored, want, "serialized bin field");
+
+    // htslib recomputes `core.bin` from POS and CIGAR whenever it reads a BAM
+    // record that has a CIGAR, so what it reports is its own `hts_reg2bin`
+    // answer and not an echo of our bytes.
+    let mut reader = rust_htslib::bam::Reader::from_path(&path).expect("htslib open");
+    let mut htslib_record = rust_htslib::bam::Record::new();
+    let mut seen = 0usize;
+    while let Some(result) = reader.read(&mut htslib_record) {
+        result.expect("htslib read");
+        let expected = &records[seen];
+        assert_eq!(htslib_record.pos(), i64::from(expected.pos.unwrap().as_i32()), "pos");
+        assert_eq!(htslib_record.bin(), expected.bin(), "bin htslib computed for record {seen}");
+        seen += 1;
+    }
+    assert_eq!(seen, records.len(), "record count");
+
+    for bin in &want {
+        tc.event_value("bin level", f64::from(bin_level(u32::from(*bin))));
+    }
+    tc.event_value("records", records.len() as f64);
 }
