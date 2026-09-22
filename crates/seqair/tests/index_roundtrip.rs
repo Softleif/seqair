@@ -191,9 +191,12 @@ fn seqair_and_samtools_agree_on_regions() {
 
     let mut reader = IndexedBamReader::open(&bam_path).expect("open");
 
-    // Test whole-contig regions where seqair and samtools must agree exactly.
-    // (Sub-region queries can differ because seqair's BAI fetch returns all
-    // records in overlapping bins, which may include extras near boundaries.)
+    // Whole contigs here; sub-regions are covered exhaustively, against
+    // samtools and against the generated records both, by
+    // `bam_index_query_properties`. `r[bam.reader.overlap_filter]` requires
+    // the extra records an index chunk carries to be filtered out, so a
+    // sub-region query agrees with samtools exactly — an earlier comment here
+    // claimed otherwise.
     let regions: &[(&str, u32, u32, &str)] = &[
         ("chr1", 0, 1_000_000, "chr1"),
         ("chr2", 0, 500_000, "chr2"),
