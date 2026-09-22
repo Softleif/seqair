@@ -533,3 +533,40 @@ fn tabix_reads_the_regions_through_seqairs_aux_block(tc: TestCase) {
     }
     tc.event_value("named contigs", with_records.len() as f64);
 }
+
+// r[verify csi.loffset_from_linear_index]
+/// The smallest case where a bin's own first chunk is the wrong `loffset`.
+///
+/// Two records on one contig: one at 0-based 16384, the first base of linear
+/// window 1, and one at 32764 whose 5-base REF runs to 32768 and so straddles
+/// windows 1 and 2, putting it in a bin one level up. A query starting before
+/// window 1 resolves `min_off` through that higher bin, and while `loffset`
+/// was the bin's *own* first chunk it pointed past the record at 16384 — which
+/// was then dropped, silently, by both `tabix` and `bcftools view -r`.
+/// Querying the record's exact position still found it, which is what made
+/// this survive the generated region queries for as long as it did.
+///
+/// Kept as a fixture rather than a seed: the coordinates are the boundary, and
+/// a generated case that lands one base either side proves nothing here.
+#[test]
+fn a_record_at_a_window_boundary_survives_a_query_that_starts_before_it() {
+    let layout = Layout {
+        contigs: vec![("chr1".to_owned(), 100_000)],
+        records: vec![
+            Rec { contig: 0, pos: 16_385, ref_len: 1, deleted: Vec::new() },
+            Rec { contig: 0, pos: 32_765, ref_len: 5, deleted: vec![Base::A; 4] },
+        ],
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_indexed(dir.path(), &layout, OutputFormat::VcfGz);
+
+    let both = vec![("chr1".to_owned(), 16_385), ("chr1".to_owned(), 32_765)];
+    assert_eq!(tabix_query(&path, "chr1:1-100000"), both, "tabix, whole contig");
+    assert_eq!(query(&path, "chr1:1-100000"), both, "bcftools, whole contig");
+    assert_eq!(
+        tabix_query(&path, "chr1:1-20000"),
+        vec![("chr1".to_owned(), 16_385)],
+        "tabix, a range starting before the boundary record's window"
+    );
+}
