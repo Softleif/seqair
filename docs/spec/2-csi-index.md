@@ -109,6 +109,13 @@ The CSI writer MUST emit the full binary format: magic, `min_shift`, `depth`, `l
 r[csi.write_loffset]
 When building a CSI index, the builder MUST track the `loffset` for each bin — the virtual file offset of the first record that starts in the bin's genomic window. In the single-pass `IndexBuilder`, this is the `begin` of the bin's first chunk (i.e. `save_off` when the bin was first entered), which matches htslib's `hts_idx_push` behavior for coordinate-sorted input. For standard parameters (depth=5, min_shift=14), this is equivalent to the linear-index value at the corresponding window. The approximation is conservative: queries may scan a few extra records at the start of a bin, but will never miss valid records.
 
+r[csi.loffset_from_linear_index]
+A bin's `loffset` MUST be the virtual offset the linear index holds for the bin's leftmost leaf window — htslib's `lidx->offset[hts_bin_bot(bin, depth)]`, after unset linear-index slots have been back-filled from the right (`r[index_builder.linear_backfill]`). It MUST NOT be the bin's own first chunk offset, and the pseudo-bin's `loffset` MUST be 0.
+
+The two differ whenever a record in some *other* bin begins earlier inside that window, which a record spanning a window boundary does routinely — and the bin's own first chunk is then the larger of the two. That direction is the dangerous one: a reader takes `min_off` from `loffset` and discards every chunk that ends before it, so a `loffset` that is too large drops records from a query with no error from either end. The record stays in the file and a query for its exact position still finds it; only a query whose range starts earlier loses it.
+
+A CSI carries no linear index of its own, so this is the only place that information survives into the file. The builder must therefore keep a linear index while building even though it never writes one.
+
 r[csi.write_tabix_aux]
 When building a CSI index for tabix (VCF/BED/GFF), the builder MUST write the tabix metadata into the `aux` block. The `format`, `col_seq`, `col_beg`, `col_end`, `meta`, `skip`, and sequence name dictionary MUST be serialized in the standard tabix header layout.
 

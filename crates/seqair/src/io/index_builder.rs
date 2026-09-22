@@ -451,7 +451,7 @@ impl IndexBuilder {
 
         for tid in 0..n_refs {
             match self.refs.get(tid) {
-                Some(r) if !r.bins.is_empty() => write_csi_ref_index(&mut buf, r)?,
+                Some(r) if !r.bins.is_empty() => write_csi_ref_index(&mut buf, r, self.depth)?,
                 _ => {
                     write_i32(&mut buf, 0); // n_bin
                 }
@@ -516,7 +516,7 @@ impl IndexBuilder {
         write_i32(&mut buf, count_i32(active_refs.len(), "n_ref")?);
 
         for &(_, r) in &active_refs {
-            write_csi_ref_index(&mut buf, r)?;
+            write_csi_ref_index(&mut buf, r, self.depth)?;
         }
 
         bgzf.write_all(&buf)?;
@@ -537,15 +537,49 @@ fn count_i32(n: usize, field: &'static str) -> Result<i32, IndexError> {
     i32::try_from(n).map_err(|_| IndexError::CountOverflow { field, value: n })
 }
 
+/// htslib's `hts_bin_bot`: the linear-index window that a bin's leftmost leaf
+/// covers. Walking `(b - 1) >> 3` to the root gives the bin's level; the offset
+/// within that level, shifted down to the leaf level, is the window.
+fn bin_bot(bin: u32, depth: u32) -> u64 {
+    let mut level = 0u32;
+    let mut b = bin;
+    while b != 0 {
+        level = level.saturating_add(1);
+        b = b.saturating_sub(1) >> 3;
+    }
+    let first = (1u64 << level.saturating_mul(3)).saturating_sub(1) / 7;
+    let shift = depth.saturating_sub(level).saturating_mul(3);
+    u64::from(bin).saturating_sub(first).checked_shl(shift).unwrap_or(u64::MAX)
+}
+
 // r[impl csi.write_loffset]
+// r[impl csi.loffset_from_linear_index]
 /// Write one reference's bin data in CSI format (with per-bin loffset, no linear index).
-fn write_csi_ref_index(buf: &mut Vec<u8>, r: &RefIndexBuilder) -> Result<(), IndexError> {
+fn write_csi_ref_index(
+    buf: &mut Vec<u8>,
+    r: &RefIndexBuilder,
+    depth: u32,
+) -> Result<(), IndexError> {
+    let pseudo = pseudo_bin(depth);
     write_i32(buf, count_i32(r.bins.len(), "n_bin")?);
 
     for (&bin_id, chunks) in &r.bins {
         write_u32(buf, bin_id);
-        // loffset: virtual offset of the first record in this bin
-        let loffset = chunks.first().map_or(0, |c| c.begin.0);
+        // `loffset` is not this bin's own first chunk. It is the offset of the
+        // first record at or after the start of the bin's *leftmost leaf
+        // window*, which is what the linear index holds — and it can be far
+        // smaller, because a record in another bin may begin earlier inside
+        // that window. A reader takes `min_off` from here and discards every
+        // chunk ending before it, so a `loffset` that is too large silently
+        // drops records from a query. See `r[csi.loffset_from_linear_index]`.
+        let loffset = if bin_id >= pseudo {
+            0
+        } else {
+            usize::try_from(bin_bot(bin_id, depth))
+                .ok()
+                .and_then(|window| r.linear_index.get(window))
+                .map_or(0, |offset| offset.0)
+        };
         write_u64(buf, loffset);
         write_i32(buf, count_i32(chunks.len(), "n_chunk")?);
         for chunk in chunks {
