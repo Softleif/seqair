@@ -159,7 +159,18 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     }
 
     // r[impl cram.edge.reference_mismatch]
-    if !is_multi_ref && sh.reference_md5 != [0u8; 16] && !reference_seq.is_empty() {
+    // A slice carrying its own reference is not making a claim about the FASTA.
+    // Under `embed_ref=2` htslib embeds a *consensus* computed from the reads
+    // and MD5s that, so the digest matches the external reference only where
+    // the two happen to agree — which is to say, not at low coverage and not
+    // wherever the reads carry a real difference. Checking it there rejects
+    // perfectly good files.
+    let claims_the_fasta = sh.embedded_reference < 0;
+    if !is_multi_ref
+        && claims_the_fasta
+        && sh.reference_md5 != [0u8; 16]
+        && !reference_seq.is_empty()
+    {
         let slice_start_0based = Pos1::try_from(sh.alignment_start.max(1))
             .map_err(|_| CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
             .to_zero_based()
