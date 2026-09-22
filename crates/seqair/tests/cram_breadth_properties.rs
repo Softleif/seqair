@@ -323,7 +323,7 @@ impl CramOpts {
 #[hegel::composite]
 fn arb_opts(tc: &TestCase) -> CramOpts {
     let embed_ref = tc.draw_silent(gs::sampled_from(&[0u8, 1]));
-    let multi_seq = arb_multi_seq(tc, embed_ref);
+    let multi_seq = arb_multi_seq(tc);
     CramOpts {
         version: tc.draw_silent(gs::sampled_from(&["3.0", "3.1"])),
         embed_ref,
@@ -346,15 +346,13 @@ fn arb_slices_per_container(tc: &TestCase) -> u32 {
 }
 
 /// `embed_ref` and `multi_seq_per_slice` together make htslib fall back to
-/// *no-reference* mode — it warns about changing from `embed_ref` to `no_ref`
-/// — and seqair cannot currently decode a no-reference read that has an
-/// insertion; see `no_ref_cram_decodes_reads_with_insertions`. Until that is
-/// fixed, pin `multi_seq_per_slice=0` whenever the reference is embedded, so
-/// this matrix stays about the layouts it means to cover.
-fn arb_multi_seq(tc: &TestCase, embed_ref: u8) -> Option<bool> {
-    if embed_ref > 0 {
-        return Some(false);
-    }
+/// *no-reference* mode — it warns about changing from `embed_ref` to `no_ref`.
+/// That used to be pinned out of the matrix, because a no-reference read with
+/// an insertion decoded one base too many; see
+/// `r[cram.feature.quality_only]` and
+/// `no_ref_cram_decodes_reads_with_insertions`. It is drawn freely now, which
+/// is how the matrix reaches no-reference mode without asking for it.
+fn arb_multi_seq(tc: &TestCase) -> Option<bool> {
     tc.draw_silent(gs::sampled_from(&[None, Some(false), Some(true)]))
 }
 
@@ -751,15 +749,16 @@ fn embed_ref_consensus_slices_decode_to_the_same_records() {
 /// `no_ref=1` makes samtools store every base literally instead of as edits
 /// against a reference — and htslib falls into the same mode on its own when
 /// `embed_ref` meets `multi_seq_per_slice`, which is how the option matrix
-/// found this. seqair then reconstructs one base too many for any read with an
-/// `I` op and refuses the record with `QualLenMismatch`; `D`, `S` and `H` are
-/// fine, and so is the same read written against a reference. samtools reads
-/// the file back without complaint.
+/// found this. In that mode htslib emits one `Q` feature per *inserted* base
+/// next to the `I` feature, and seqair used to treat `Q` as an anchoring
+/// reference match, so it reconstructed one extra base per inserted base and
+/// refused the record with `QualLenMismatch`. `D`, `S` and `H` were fine, and
+/// so was the same read written against a reference, which is what made it
+/// look like an insertion bug rather than a feature-semantics one.
 // r[verify cram.scope.reference_required]
 // r[verify cram.record.sequence]
+// r[verify cram.feature.quality_only]
 #[test]
-#[ignore = "seqair adds the insertion length twice when decoding a no-reference CRAM, \
-            so any read with an I op fails with QualLenMismatch"]
 fn no_ref_cram_decodes_reads_with_insertions() {
     let sample = Sample {
         contigs: vec!["ACGT".repeat(CONTIG_LEN as usize / 4)],
