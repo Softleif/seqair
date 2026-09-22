@@ -44,6 +44,9 @@ r[bam_writer.write_record]
 r[bam_writer.write_store_record]
 `write_store_record(store: &RecordStore, idx: u32)` MUST serialize a record directly from RecordStore slabs into the BGZF stream without constructing an intermediate `OwnedBamRecord`. The method MUST write the 32-byte BAM fixed header from SlimRecord fields, then append variable-length data: NUL-terminated qname from the name slab, the typed cigar slab reinterpreted as wire bytes via `CigarOp::ops_as_bytes` (zero-copy on little-endian hosts because `CigarOp` is `#[repr(transparent)]` over the on-disk packed `u32`), 4-bit packed sequence re-encoded from the bases slab, quality bytes from the data slab, and raw aux bytes from the data slab. The BAI bin MUST be recomputed from pos and end_pos at serialization time. Index co-production, error poisoning, flush-before-record, and record-size-limit rules apply identically to `write()`.
 
+r[bam_writer.mate_fields_verbatim]
+Both `write()` and `write_store_record()` MUST emit `next_ref_id`, `next_pos` and `template_len` exactly as the record carries them (see r[`bam.record.mate_fields`]), with no sign flip, no re-derivation from the alignment, and no dependence on the order records are written in. Running `samtools fixmate` over a BAM seqair wrote from records it read back MUST therefore leave every mate field and every mate flag bit untouched; anything it rewrites is a place where seqair and htslib disagree about what a mate is.
+
 r[bam_writer.insertion_order]
 Records MUST appear in the output file in the exact order that `write()` / `write_store_record()` is called. The writer MUST NOT reorder, buffer, or batch records.
 

@@ -22,6 +22,9 @@ Variable-length field offset calculations (var_start, cigar_end, seq_end, qual_e
 r[bam.record.fields]
 The decoder MUST extract: tid (i32), pos (i32→i64), mapq (u8), flags (u16), seq_len (u32), n_cigar_ops (u16), qname (NUL-terminated, stored without NUL), packed sequence (4-bit), quality scores, CIGAR operations (packed u32), and raw auxiliary data.
 
+r[bam.record.mate_fields]
+The decoder MUST also extract the three mate fields — `next_ref_id` (i32), `next_pos` (i32) and `template_len` (i32, signed) — and MUST store them verbatim. It MUST NOT recompute TLEN from the alignment, and MUST NOT normalise `next_ref_id`/`next_pos` against the record's own placement. TLEN has no single producer-independent definition: `samtools fixmate` writes the signed distance between the two fragments' 5' ends (the leftmost base of a forward fragment, one past the rightmost base of a reverse one), while htslib's CRAM mate-chain reconstruction (see r[`cram.record.mate_tlen_reconstruction`]) writes the leftmost-to-rightmost span of the whole template. The two disagree whenever one fragment contains the other, so a reader that recomputed either would silently rewrite files produced by the other.
+
 r[bam.record.end_pos]
 The decoder MUST precompute the reference end position from the CIGAR. Reference-consuming operations are: M(0), D(2), N(3), =(7), X(8). The end position is `pos + ref_consumed - 1` (inclusive).
 
