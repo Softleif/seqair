@@ -73,7 +73,10 @@ r[bam.owned_record.set_seq]
 `OwnedBamRecord` MUST support replacing the sequence. For mapped reads, the new sequence length MUST match the CIGAR's query-consuming length. A `seq_mut() -> &mut [Base]` accessor MUST also be provided for in-place base modification (e.g. T->C rewriting in the TAPS BAM rewrite pipeline).
 
 r[bam.owned_record.set_qual]
-`OwnedBamRecord` MUST support replacing quality scores. The new array length MUST equal `seq.len()`.
+`OwnedBamRecord` MUST support replacing quality scores. The new array length MUST equal `seq.len()`. An empty array is the one exception: it is always accepted and means the record carries no quality scores, which `to_bam_bytes` serializes as `seq.len()` bytes of `0xFF` per [SAM1] §4.2 and SAM text spells `*`.
+
+r[bam.owned_record.failed_mutation_is_inert]
+A mutation method that returns an error MUST leave the record exactly as it was. This holds for `set_alignment`, `set_seq`, `set_qual`, and every fallible `AuxData` setter: validation happens before any buffer is touched, so a rejected call cannot leave a half-written tag or a length field that no longer describes the data behind it. The historical failure mode is `set_int` appending its two tag-name bytes and only then discovering the value is outside the range BAM can spell — the orphaned bytes are then parsed as the start of the next tag, corrupting every tag after them. A record whose mutation was refused MUST still serialize to the same bytes it would have before the call.
 
 **`OwnedBamRecord::aligned_pairs()`** is the owned-record counterpart to `SlimRecord::aligned_pairs(store)`. Both return the typed `AlignedPairs` iterator from [CIGAR Operations](./1-3-cigar.md). See `r[cigar.aligned_pairs.owned_record]` for the integration contract and `r[cigar.aligned_pairs.types]` for the variant set. For unmapped reads (empty CIGAR), the iterator is empty.
 

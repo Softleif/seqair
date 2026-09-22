@@ -258,6 +258,7 @@ impl OwnedBamRecord {
     }
 
     // r[impl bam.owned_record.set_alignment]
+    // r[impl bam.owned_record.failed_mutation_is_inert]
     /// Replace alignment (pos + cigar). Validates CIGAR query length == seq length for mapped reads.
     pub fn set_alignment(
         &mut self,
@@ -284,6 +285,7 @@ impl OwnedBamRecord {
     }
 
     // r[impl bam.owned_record.set_seq]
+    // r[impl bam.owned_record.failed_mutation_is_inert]
     /// Replace the sequence. For mapped reads, validates length matches CIGAR query length.
     pub fn set_seq(&mut self, seq: Vec<Base>) -> Result<(), OwnedRecordError> {
         if !self.is_unmapped() && !self.cigar.is_empty() {
@@ -305,6 +307,7 @@ impl OwnedBamRecord {
     }
 
     // r[impl bam.owned_record.set_qual]
+    // r[impl bam.owned_record.failed_mutation_is_inert]
     /// Replace quality scores. Length must equal seq length.
     pub fn set_qual(&mut self, qual: Vec<BaseQuality>) -> Result<(), OwnedRecordError> {
         if !qual.is_empty() && qual.len() != self.seq.len() {
