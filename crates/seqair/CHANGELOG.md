@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Breaking
+
+Every genomic interval in the API is now one closed span, `core::range::RangeInclusive<Pos0>`,
+instead of two loose positions (see `r[interval.span_type]`). The reference for a region is fetched
+with the very value that queried it, so there is no `+ 1` at any boundary for a caller to get wrong,
+and a span ending on `Pos0::MAX` names its last base where a half-open `end` could not.
+
+- `fetch_into(tid, start, end, store)` → `fetch_into(tid, span, store)`, on `Readers`,
+  `IndexedReader` and every format reader; same for `fetch_into_customized`,
+  `estimate_region_bytes`, `IndexedBamReader::query` and `PileupEngine::new`. These were already
+  inclusive on both ends: `(start..=end).into()` is the whole migration.
+- **`IndexedFastaReader::fetch_seq` / `fetch_seq_into` and `Readers::fetch_base_seq` were half-open
+  and are now closed.** `fetch_seq(name, p(0), p(4))` becomes `fetch_seq(name, (p(0)..=p(3)).into())`.
+  `fetch_seq_into_u64`, the side door for reaching the last representable base, is gone — the
+  closed span reaches it. `FastaError::RegionOutOfBounds` reports `last` (inclusive) instead of
+  `end`, and fires for `start > last` or `last >= seq_len`.
+- The segment target `(resolver, start, end)` is `(resolver, span)`.
+- `Segment::end()` → `Segment::last()`: it returned the last covered position under a name that
+  reads as one past it. `Segment::core_range()` → `core_span()`, now a `core::range::RangeInclusive`
+  (`.start` / `.last`; `Copy`, 8 bytes, not an iterator). New `Segment::span()`.
+- `Pos0::max_value()` → `Pos0::MAX`.
+- MSRV 1.92.0 → 1.98.1. It was already effectively 1.98.1 via `seqair-types`; `core::range` needs
+  1.96.
+- `seqair-types` is depended on with `default-features = false` and a forwarding `serde` feature was
+  added. seqair serializes nothing itself, so its users no longer compile serde for nothing; enable
+  `seqair/serde` to serialize seqair-types values.
+
 ### Fixed
 
 - **A query on a truncated BAM never returned.** Not slowly — never. `IndexedBamReader::fetch_into`
