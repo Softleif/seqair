@@ -58,7 +58,8 @@ plus property tests and fuzzing.
 - RecordStore: slab-based BAM storage packing variable-length into contiguous buffers; zero per-record heap allocation
 - RegionBuf: bulk-reads all compressed bytes for a genomic region in one I/O call, then decompresses from memory; designed for high-latency filesystems (NFS/Lustre)
 - ChunkCache: loads wide-spanning BAI bins (L0–L2) once per chromosome per thread instead of re-reading them per query
-- `Pos<S>`: compile-time zero-based vs one-based positions instead of manual `+1`/`-1`
+- `Pos0`/`Pos1`: distinct zero-based and one-based position types instead of manual `+1`/`-1`, and every
+  interval in the API is one closed `RangeInclusive<Pos0>`, so a query and its reference fetch take the same value
 - Type-safe `Alleles`: `Reference`/`Snv`/`Insertion`/`Deletion`/`Complex` enum enforcing VCF structural invariants at construction
 - Zero-alloc BCF encoder: pre-resolved typed handles (`ScalarInfoHandle<T>`, `GtFormatHandle`, etc.) write directly into BCF buffers in hot loops
 - Forkable readers: shared index and header, `fork()` gives a fresh file handle per thread with no lock contention
