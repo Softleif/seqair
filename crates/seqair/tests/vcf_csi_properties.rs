@@ -452,11 +452,8 @@ fn a_contig_past_the_depth_5_bin_limit_is_still_reachable() {
 /// `tabix -l <file>` — the sequence names, listed straight out of the index's
 /// aux block.
 fn tabix_list(path: &Path) -> Vec<String> {
-    let out = std::process::Command::new("tabix")
-        .arg("-l")
-        .arg(path)
-        .output()
-        .expect("tabix not found");
+    let out =
+        std::process::Command::new("tabix").arg("-l").arg(path).output().expect("tabix not found");
     assert!(out.status.success(), "tabix -l failed: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8(out.stdout)
         .unwrap()
