@@ -13,6 +13,9 @@
 //! oracle — seqair must read back exactly what htslib computed, and a BAM
 //! seqair writes from those records must give a second `fixmate` nothing to do.
 //!
+//! `samtools view -f/-F` and `samtools flagstat` referee the other half: which
+//! records a mate-related flag selects, and the aggregate tallies over them.
+//!
 //! TLEN is the subtle field, and `tlen_is_the_signed_distance_between_five_prime_ends`
 //! pins what htslib actually does rather than what the SAM prose suggests.
 //! `cram_tlen.rs` is the neighbouring test; it replays htslib's own tlen/
@@ -684,4 +687,228 @@ fn link_mates_pairs_exactly_the_templates_samtools_calls_pairs(tc: TestCase) {
     let linked_refs: BTreeSet<&String> = linked.iter().collect();
     assert_eq!(linked_refs, expected, "linked templates");
     assert_eq!(pairs as usize, expected.len(), "one pair per linked template");
+}
+
+// ── the flag-selection oracle ─────────────────────────────────────────────
+
+/// The twelve SAM flag bits, which is exactly what `-f`/`-F` select on.
+const ALL_BITS: [u16; 12] =
+    [0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800];
+
+/// Queries a caller actually writes. Drawing each bit independently into
+/// require/exclude looks more thorough and is not: two thirds of such masks
+/// demand READ1 and READ2 at once, or a record that is both mapped and
+/// unmapped, and select nothing on either side.
+const QUERIES: [(u16, u16); 10] = [
+    (0x000, 0x000), // everything
+    (0x001, 0x000), // paired
+    (0x001, 0x004), // paired and mapped
+    (0x003, 0x004), // properly paired
+    (0x001, 0x90c), // paired, primary, both halves mapped
+    (0x009, 0x004), // singletons: this half mapped, the mate not
+    (0x041, 0x900), // primary read 1
+    (0x081, 0x900), // primary read 2
+    (0x021, 0x000), // mate on the reverse strand
+    (0x001, 0x020), // mate on the forward strand
+];
+
+/// A `samtools view -f <require> -F <exclude>` selection: either one of the
+/// queries above, or an arbitrary single bit on each side, which is where a
+/// predicate reading the neighbouring bit would show up.
+#[hegel::composite]
+fn arb_masks(tc: &TestCase) -> (u16, u16) {
+    if tc.draw_silent(gs::booleans()) {
+        return tc.draw_silent(gs::sampled_from(&QUERIES));
+    }
+    let maybe_bit = |tc: &TestCase| {
+        if tc.draw_silent(gs::booleans()) { tc.draw_silent(gs::sampled_from(&ALL_BITS)) } else { 0 }
+    };
+    (maybe_bit(tc), maybe_bit(tc))
+}
+
+// r[verify flags.predicates]
+// r[verify flags.is_set]
+/// Which records a mate-related flag selects, refereed by `samtools view`.
+/// seqair's predicates and htslib's `-f`/`-F` must pick out the same records,
+/// not merely the same number of them — so the sets are compared, not counts.
+#[hegel::test(test_cases = 20)]
+fn flag_selection_matches_samtools_view(tc: TestCase) {
+    let templates = tc.draw(templates());
+    let masks = tc.draw(gs::vecs(arb_masks().print_as_debug()).min_size(1).max_size(3));
+    let oracle = Oracle::build(&templates);
+    let stores = fetch_all(&oracle.sorted_bam);
+
+    for (require, exclude) in masks {
+        // The region arguments restrict samtools to the records a seqair
+        // region query can reach: an unplaced record is in neither.
+        let selected = samtools(&[
+            "view",
+            "-f",
+            &format!("{require}"),
+            "-F",
+            &format!("{exclude}"),
+            path_str(&oracle.sorted_bam),
+            "chr1",
+            "chr2",
+        ]);
+        let expected: BTreeSet<Key> = parse_sam(&selected).into_keys().collect();
+
+        let mut got: BTreeSet<Key> = BTreeSet::new();
+        for store in &stores {
+            for idx in store.indices() {
+                let rec = store.record(idx).expect("index came from the store");
+                let flags = rec.flags;
+                let keep = ALL_BITS.iter().all(|bit| {
+                    (require & bit == 0 || flags.is_set(*bit))
+                        && (exclude & bit == 0 || !flags.is_set(*bit))
+                });
+                if keep {
+                    let qname = std::str::from_utf8(rec.qname()).expect("ASCII qnames");
+                    got.insert((qname.to_owned(), role_of(flags.raw())));
+                }
+            }
+        }
+
+        if expected.is_empty() {
+            tc.event("a mask selected nothing");
+        } else {
+            tc.event("a mask selected something");
+        }
+        assert_eq!(got, expected, "-f {require} -F {exclude}");
+    }
+}
+
+// ── the aggregate oracle ──────────────────────────────────────────────────
+
+/// `samtools flagstat`'s QC-passed column, in the order it prints. A label that
+/// appears twice — `with mate mapped to a different chr`, once plain and once
+/// for mapQ>=5 — resolves to its first, unqualified occurrence.
+fn parse_flagstat(text: &str) -> Vec<(String, u64)> {
+    text.lines()
+        .filter_map(|line| {
+            let (counts, label) = line.split_once(" + ")?;
+            let (_qc_failed, label) = label.split_once(' ')?;
+            let label = label.split(" (").next().unwrap_or(label);
+            Some((label.to_owned(), counts.parse().ok()?))
+        })
+        .collect()
+}
+
+fn flagstat_value(rows: &[(String, u64)], label: &str) -> u64 {
+    rows.iter()
+        .find(|(l, _)| l == label)
+        .map(|(_, n)| *n)
+        .unwrap_or_else(|| panic!("flagstat printed no `{label}` line: {rows:?}"))
+}
+
+// r[verify flags.predicates]
+// r[verify record_store.slim_record_fields]
+/// The aggregate tally, as an independent count of the same records. This is
+/// the check that catches a mate bit that is right per record but wrong in
+/// aggregate — a singleton counted as a proper pair, a cross-reference template
+/// that never shows up under `with mate mapped to a different chr`.
+///
+/// The branch structure below is htslib's, not a re-derivation: `flagstat`
+/// counts the pairing statistics in an `else` arm after secondary and
+/// supplementary, so a supplementary alignment is *not* "paired in sequencing"
+/// however its 0x1 bit reads.
+#[hegel::test(test_cases = 20)]
+fn flagstat_tallies_match_samtools(tc: TestCase) {
+    let templates = tc.draw(templates());
+    let oracle = Oracle::build(&templates);
+    let stores = fetch_all(&oracle.sorted_bam);
+
+    let placed = oracle.dir.join("placed.bam");
+    samtools(&[
+        "view",
+        "-b",
+        "-o",
+        path_str(&placed),
+        path_str(&oracle.sorted_bam),
+        "chr1",
+        "chr2",
+    ]);
+    let rows = parse_flagstat(&samtools(&["flagstat", path_str(&placed)]));
+
+    let (mut total, mut secondary, mut supplementary, mut duplicates) = (0u64, 0u64, 0u64, 0u64);
+    let (mut mapped, mut primary_mapped, mut primary_dup) = (0u64, 0u64, 0u64);
+    let (mut paired, mut read1, mut read2, mut proper) = (0u64, 0u64, 0u64, 0u64);
+    let (mut both_mapped, mut singletons, mut diff_chr) = (0u64, 0u64, 0u64);
+
+    for store in &stores {
+        for idx in store.indices() {
+            let rec = store.record(idx).expect("index came from the store");
+            let f = rec.flags;
+            total += 1;
+            if f.is_duplicate() {
+                duplicates += 1;
+            }
+            if !f.is_unmapped() {
+                mapped += 1;
+            }
+            if f.is_secondary() {
+                secondary += 1;
+                continue;
+            }
+            if f.is_supplementary() {
+                supplementary += 1;
+                continue;
+            }
+            if !f.is_unmapped() {
+                primary_mapped += 1;
+            }
+            if f.is_duplicate() {
+                primary_dup += 1;
+            }
+            if !f.is_paired() {
+                continue;
+            }
+            paired += 1;
+            if f.is_proper_pair() && !f.is_unmapped() {
+                proper += 1;
+            }
+            if f.is_first_in_template() {
+                read1 += 1;
+            }
+            if f.is_second_in_template() {
+                read2 += 1;
+            }
+            if f.is_mate_unmapped() && !f.is_unmapped() {
+                singletons += 1;
+            }
+            if !f.is_unmapped() && !f.is_mate_unmapped() {
+                both_mapped += 1;
+                if rec.next_ref_id != rec.tid {
+                    diff_chr += 1;
+                }
+            }
+        }
+    }
+
+    if diff_chr > 0 {
+        tc.event("a template spans two references");
+    }
+    if singletons > 0 {
+        tc.event("a template has an unmapped half");
+    }
+
+    for (label, got) in [
+        ("in total", total),
+        ("primary", total - secondary - supplementary),
+        ("secondary", secondary),
+        ("supplementary", supplementary),
+        ("duplicates", duplicates),
+        ("primary duplicates", primary_dup),
+        ("mapped", mapped),
+        ("primary mapped", primary_mapped),
+        ("paired in sequencing", paired),
+        ("read1", read1),
+        ("read2", read2),
+        ("properly paired", proper),
+        ("with itself and mate mapped", both_mapped),
+        ("singletons", singletons),
+        ("with mate mapped to a different chr", diff_chr),
+    ] {
+        assert_eq!(got, flagstat_value(&rows, label), "flagstat `{label}`");
+    }
 }
