@@ -1371,7 +1371,7 @@ mod tests {
     /// its own. The risk that buys is a property checked for one type and not
     /// the other, which is exactly what this trait puts back, in the only
     /// place where a shared abstraction cannot leak into a signature.
-    trait Position: Copy + Ord + fmt::Debug + Sized {
+    trait Position: Copy + Ord + fmt::Debug + fmt::Display + Sized {
         /// The first value this type admits.
         const FLOOR: u32;
         /// How the type names itself, for assertion messages.
@@ -1394,6 +1394,8 @@ mod tests {
         fn from_i32(value: i32) -> Result<Self, PosOverflow>;
         fn from_i64(value: i64) -> Result<Self, PosOverflow>;
         fn from_u64(value: u64) -> Result<Self, PosOverflow>;
+        /// The `Sub` impl.
+        fn distance(self, other: Self) -> Offset;
     }
 
     impl Position for Pos0 {
@@ -1437,6 +1439,9 @@ mod tests {
         }
         fn from_u64(value: u64) -> Result<Self, PosOverflow> {
             Self::try_from(value)
+        }
+        fn distance(self, other: Self) -> Offset {
+            self - other
         }
     }
 
@@ -1482,6 +1487,9 @@ mod tests {
         fn from_u64(value: u64) -> Result<Self, PosOverflow> {
             Self::try_from(value)
         }
+        fn distance(self, other: Self) -> Offset {
+            self - other
+        }
     }
 
     /// A position anywhere in `P`'s range, biased towards the two ends so the
@@ -1511,6 +1519,60 @@ mod tests {
 
     fn in_range<P: Position>(value: i64) -> bool {
         (i64::from(P::FLOOR)..=i64::from(POS_MAX)).contains(&value)
+    }
+
+    // r[verify pos.derives]
+    // r[verify pos.type]
+    /// Ordering and equality are those of the values. This is where the
+    /// stored representation would show if it were not monotone in the
+    /// value — `Pos0` keeps `value + 1`, and the derives compare that.
+    fn ordering_follows_the_values<P: Position>(a: P, b: P) {
+        assert_eq!(a.cmp(&b), a.raw().cmp(&b.raw()), "{a:?} vs {b:?}");
+        assert_eq!(a == b, a.raw() == b.raw(), "{a:?} vs {b:?}");
+        assert_eq!(a.max(b).raw(), a.raw().max(b.raw()));
+    }
+
+    #[hegel::test]
+    fn ordering_follows_the_values_in_both_types(tc: TestCase) {
+        ordering_follows_the_values(any_position::<Pos0>(&tc), any_position::<Pos0>(&tc));
+        ordering_follows_the_values(any_position::<Pos1>(&tc), any_position::<Pos1>(&tc));
+    }
+
+    // r[verify pos.sub_pos]
+    // r[verify pos.add_offset]
+    /// `a - b` is the distance between the values, and applying it to `b`
+    /// lands on `a` — for both types, since `Sub` is written twice.
+    fn a_distance_applied_to_its_origin_returns_the_target<P: Position>(a: P, b: P) {
+        let distance = a.distance(b);
+        assert_eq!(distance.get(), a.raw_i64() - b.raw_i64(), "{a:?} - {b:?}");
+        assert_eq!(b.add_offset(distance), Some(a), "{b:?} + ({a:?} - {b:?})");
+        assert_eq!(a.sub_offset(distance), Some(b), "{a:?} - ({a:?} - {b:?})");
+    }
+
+    #[hegel::test]
+    fn a_distance_applied_to_its_origin_returns_the_target_in_both_types(tc: TestCase) {
+        a_distance_applied_to_its_origin_returns_the_target(
+            any_position::<Pos0>(&tc),
+            any_position::<Pos0>(&tc),
+        );
+        a_distance_applied_to_its_origin_returns_the_target(
+            any_position::<Pos1>(&tc),
+            any_position::<Pos1>(&tc),
+        );
+    }
+
+    // r[verify pos.derives]
+    /// `Display` is the value and `Debug` is the type's name around the
+    /// value — never the stored number, which for `Pos0` is one higher.
+    fn formatting_shows_the_value<P: Position>(pos: P) {
+        assert_eq!(pos.to_string(), pos.raw().to_string());
+        assert_eq!(format!("{pos:?}"), format!("{}({})", P::NAME, pos.raw()));
+    }
+
+    #[hegel::test]
+    fn formatting_shows_the_value_in_both_types(tc: TestCase) {
+        formatting_shows_the_value(any_position::<Pos0>(&tc));
+        formatting_shows_the_value(any_position::<Pos1>(&tc));
     }
 
     // r[verify pos.zero_new]

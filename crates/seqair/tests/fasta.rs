@@ -204,25 +204,7 @@ fn plain_fasta_roundtrip(tc: TestCase) {
     let stop = start + fetch_len;
 
     let dir = TempDir::new().unwrap();
-    let fasta_path = dir.path().join("test.fa");
-    let fai_path = dir.path().join("test.fa.fai");
-
-    // Write FASTA with the given line length
-    let linewidth = linebases + 1; // +1 for \n
-    let mut f = std::fs::File::create(&fasta_path).unwrap();
-    writeln!(f, ">seq1").unwrap();
-    for (i, &base) in bases.iter().enumerate() {
-        f.write_all(&[base]).unwrap();
-        if ((i + 1) as u64).is_multiple_of(linebases) && (i + 1) < bases.len() {
-            f.write_all(b"\n").unwrap();
-        }
-    }
-    f.write_all(b"\n").unwrap();
-
-    // Compute FAI offset: ">seq1\n" = 6 bytes
-    let offset = 6u64;
-    let mut fai = std::fs::File::create(&fai_path).unwrap();
-    writeln!(fai, "seq1\t{}\t{}\t{}\t{}", seq_len, offset, linebases, linewidth).unwrap();
+    let fasta_path = write_plain_fasta(dir.path(), &bases, linebases);
 
     let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
     let fetched = reader.fetch_seq("seq1", span(start, stop)).unwrap();
@@ -235,6 +217,81 @@ fn plain_fasta_roundtrip(tc: TestCase) {
         "roundtrip failed: start={}, stop={}, linebases={}, seq_len={}",
         start, stop, linebases, seq_len
     );
+}
+
+/// Write `bases` as a one-sequence FASTA named `seq1`, wrapped every
+/// `linebases`, with its `.fai` beside it. Returns the FASTA path.
+fn write_plain_fasta(dir: &Path, bases: &[u8], linebases: u64) -> std::path::PathBuf {
+    let fasta_path = dir.join("test.fa");
+    let fai_path = dir.join("test.fa.fai");
+
+    let linewidth = linebases + 1; // +1 for \n
+    let mut f = std::fs::File::create(&fasta_path).unwrap();
+    writeln!(f, ">seq1").unwrap();
+    for (i, &base) in bases.iter().enumerate() {
+        f.write_all(&[base]).unwrap();
+        if ((i + 1) as u64).is_multiple_of(linebases) && (i + 1) < bases.len() {
+            f.write_all(b"\n").unwrap();
+        }
+    }
+    f.write_all(b"\n").unwrap();
+
+    // FAI offset: ">seq1\n" = 6 bytes
+    let offset = 6u64;
+    let mut fai = std::fs::File::create(&fai_path).unwrap();
+    writeln!(fai, "seq1\t{}\t{}\t{}\t{}", bases.len(), offset, linebases, linewidth).unwrap();
+    fasta_path
+}
+
+// r[verify fasta.fetch.coordinates]
+// r[verify fasta.fetch.bounds_check]
+// r[verify interval.span_type]
+/// The closed span is the whole contract: a request is served iff
+/// `start <= last < len`, and then it is exactly `bases[start..=last]`.
+/// Spans are drawn around every edge — the first base, the last base, one
+/// past it, and reversed — because that is where a `+ 1` would hide.
+#[hegel::test(test_cases = 64)]
+fn fetch_seq_serves_exactly_the_closed_span_inside_the_sequence(tc: TestCase) {
+    let (bases, linebases) = tc.draw(fasta_sequence());
+    let len = bases.len() as u64;
+    // Either end lands anywhere in `0..=len + 2`, biased to the edges.
+    let edge = |tc: &TestCase| -> u64 {
+        match tc.draw(gs::integers::<u8>().max_value(2)) {
+            0 => tc.draw(gs::integers::<u64>().max_value(2)),
+            1 => tc.draw(gs::integers::<u64>().min_value(len.saturating_sub(2)).max_value(len + 2)),
+            _ => tc.draw(gs::integers::<u64>().max_value(len + 2)),
+        }
+    };
+    let (start, last) = (edge(&tc), edge(&tc));
+    let request = RangeInclusive {
+        start: Pos0::try_from(start).unwrap(),
+        last: Pos0::try_from(last).unwrap(),
+    };
+
+    let dir = TempDir::new().unwrap();
+    let mut reader =
+        IndexedFastaReader::open(&write_plain_fasta(dir.path(), &bases, linebases)).unwrap();
+
+    match reader.fetch_seq("seq1", request) {
+        Ok(fetched) => {
+            assert!(start <= last && last < len, "{start}..={last} served from {len} bases");
+            let expected: Vec<u8> =
+                bases[start as usize..=last as usize].iter().map(u8::to_ascii_uppercase).collect();
+            assert_eq!(fetched, expected, "{start}..={last} of {len}");
+            tc.event("served");
+        }
+        Err(seqair::fasta::FastaError::RegionOutOfBounds {
+            start: reported_start,
+            last: reported_last,
+            seq_len,
+            ..
+        }) => {
+            assert!(start > last || last >= len, "{start}..={last} refused from {len} bases");
+            assert_eq!((reported_start, reported_last, seq_len), (start, last, len));
+            tc.event(if start > last { "reversed" } else { "past the end" });
+        }
+        Err(other) => panic!("{start}..={last} of {len}: unexpected error {other}"),
+    }
 }
 
 // r[verify fasta.index.terminator_bound]
