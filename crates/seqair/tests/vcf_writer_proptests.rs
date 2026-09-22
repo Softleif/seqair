@@ -9,27 +9,36 @@
     reason = "test code"
 )]
 
-use proptest::prelude::*;
+use hegel::prelude::*;
 use seqair::vcf::record_encoder::{FilterFieldDef, InfoFieldDef, InfoInt};
 use seqair::vcf::{Alleles, ContigDef, Number, OutputFormat, ValueType, VcfHeader, Writer};
 use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
-fn arb_base() -> impl Strategy<Value = Base> {
-    prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T),]
+/// The four concrete bases a REF or ALT allele can hold.
+const ACGT: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
+
+fn arb_base() -> impl PrintableGenerator<Base> {
+    gs::sampled_from(&ACGT).print_as_debug()
 }
 
-fn arb_alleles() -> impl Strategy<Value = Alleles> {
-    prop_oneof![
-        arb_base().prop_map(Alleles::reference),
-        (arb_base(), arb_base())
-            .prop_filter("ref != alt", |(r, a)| r != a)
-            .prop_map(|(r, a)| Alleles::snv(r, a).unwrap()),
-        (arb_base(), proptest::collection::vec(arb_base(), 1..6))
-            .prop_map(|(anchor, ins)| Alleles::insertion(anchor, &ins).unwrap()),
-        (arb_base(), proptest::collection::vec(arb_base(), 1..6))
-            .prop_map(|(anchor, del)| Alleles::deletion(anchor, &del).unwrap()),
-    ]
+#[hegel::composite]
+fn arb_alleles_inner(tc: &TestCase) -> Alleles {
+    let bases = || gs::vecs(gs::sampled_from(&ACGT)).min_size(1).max_size(5);
+    match tc.draw_silent(gs::integers::<u8>().max_value(3)) {
+        0 => Alleles::reference(tc.draw_silent(arb_base())),
+        1 => {
+            let r = tc.draw_silent(arb_base());
+            let alt = gs::sampled_from(&ACGT).filter(move |a| *a != r);
+            Alleles::snv(r, tc.draw_silent(alt)).unwrap()
+        }
+        2 => Alleles::insertion(tc.draw_silent(arb_base()), &tc.draw_silent(bases())).unwrap(),
+        _ => Alleles::deletion(tc.draw_silent(arb_base()), &tc.draw_silent(bases())).unwrap(),
+    }
+}
+
+fn arb_alleles() -> impl PrintableGenerator<Alleles> {
+    arb_alleles_inner().print_as_debug()
 }
 
 struct SimpleSetup {
@@ -49,196 +58,183 @@ fn make_simple_setup() -> SimpleSetup {
     SimpleSetup { header, contig, dp_info }
 }
 
-proptest! {
-    /// Any record serialized to VCF text must produce exactly 8 tab-separated fields
-    /// (plus newline) for records without samples.
-    #[test]
-    fn vcf_text_has_eight_columns(
-        pos in 1u32..100_000_000,
-        alleles in arb_alleles(),
-        qual in proptest::option::of(0.0f32..10000.0),
-        dp in 0i32..10000,
-    ) {
-        let setup = make_simple_setup();
-        let pos_typed = Pos1::new(pos).unwrap();
+/// Any record serialized to VCF text must produce exactly 8 tab-separated fields
+/// (plus newline) for records without samples.
+#[hegel::test]
+fn vcf_text_has_eight_columns(tc: TestCase) {
+    let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(99999999));
+    let alleles = tc.draw(arb_alleles());
+    let qual =
+        tc.draw(gs::optional(gs::floats::<f32>().min_value(0.0).max_value_exclusive(10_000.0)));
+    let dp = tc.draw(gs::integers::<i32>().min_value(0).max_value(9999));
+    let setup = make_simple_setup();
+    let pos_typed = Pos1::new(pos).unwrap();
 
-        let mut output = Vec::new();
-        let writer = Writer::new(&mut output, OutputFormat::Vcf);
+    let mut output = Vec::new();
+    let writer = Writer::new(&mut output, OutputFormat::Vcf);
+    let mut writer = writer.write_header(&setup.header).unwrap();
+    {
+        let mut enc =
+            writer.begin_record(&setup.contig, pos_typed, &alleles, qual).unwrap().filter_pass();
+        setup.dp_info.encode(&mut enc, dp);
+        enc.emit().unwrap();
+    }
+    writer.finish().unwrap();
+
+    let text = String::from_utf8(output).unwrap();
+
+    // Find the last line (the data line)
+    let data_line = text.lines().last().unwrap();
+    let fields: Vec<&str> = data_line.split('\t').collect();
+    assert_eq!(fields.len(), 8);
+
+    // POS field must match
+    assert_eq!(fields[1], pos.to_string());
+
+    // CHROM must be chr1
+    assert_eq!(fields[0], "chr1");
+}
+
+/// VCF lines must end with exactly one newline and contain no embedded carriage returns.
+#[hegel::test]
+fn vcf_lines_properly_terminated(tc: TestCase) {
+    let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(999999));
+    let alleles = tc.draw(arb_alleles());
+    let setup = make_simple_setup();
+    let pos_typed = Pos1::new(pos).unwrap();
+
+    let mut output = Vec::new();
+    let writer = Writer::new(&mut output, OutputFormat::Vcf);
+    let mut writer = writer.write_header(&setup.header).unwrap();
+    writer
+        .begin_record(&setup.contig, pos_typed, &alleles, None)
+        .unwrap()
+        .filter_pass()
+        .emit()
+        .unwrap();
+    writer.finish().unwrap();
+
+    let text = String::from_utf8(output).unwrap();
+
+    for line in text.split('\n') {
+        if !line.is_empty() {
+            assert!(!line.contains('\r'), "line contains CR: {line}");
+        }
+    }
+    assert!(text.ends_with('\n'));
+}
+
+/// BGZF round-trip: write VCF to BGZF, decompress, verify content matches plain write.
+#[hegel::test]
+fn bgzf_roundtrip_matches_plain(tc: TestCase) {
+    let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(999999));
+    let alleles = tc.draw(arb_alleles());
+    let dp = tc.draw(gs::integers::<i32>().min_value(0).max_value(999));
+    let setup = make_simple_setup();
+    let pos_typed = Pos1::new(pos).unwrap();
+
+    // Write plain VCF
+    let mut plain_output = Vec::new();
+    {
+        let writer = Writer::new(&mut plain_output, OutputFormat::Vcf);
         let mut writer = writer.write_header(&setup.header).unwrap();
         {
             let mut enc = writer
-                .begin_record(&setup.contig, pos_typed, &alleles, qual)
+                .begin_record(&setup.contig, pos_typed, &alleles, None)
                 .unwrap()
                 .filter_pass();
             setup.dp_info.encode(&mut enc, dp);
             enc.emit().unwrap();
         }
         writer.finish().unwrap();
-
-        let text = String::from_utf8(output).unwrap();
-
-        // Find the last line (the data line)
-        let data_line = text.lines().last().unwrap();
-        let fields: Vec<&str> = data_line.split('\t').collect();
-        prop_assert_eq!(fields.len(), 8);
-
-        // POS field must match
-        prop_assert_eq!(fields[1], pos.to_string());
-
-        // CHROM must be chr1
-        prop_assert_eq!(fields[0], "chr1");
     }
 
-    /// VCF lines must end with exactly one newline and contain no embedded carriage returns.
-    #[test]
-    fn vcf_lines_properly_terminated(
-        pos in 1u32..1_000_000,
-        alleles in arb_alleles(),
-    ) {
-        let setup = make_simple_setup();
-        let pos_typed = Pos1::new(pos).unwrap();
-
-        let mut output = Vec::new();
-        let writer = Writer::new(&mut output, OutputFormat::Vcf);
+    // Write BGZF-compressed VCF
+    let mut bgzf_output = Vec::new();
+    {
+        let writer = Writer::new(&mut bgzf_output, OutputFormat::VcfGz);
         let mut writer = writer.write_header(&setup.header).unwrap();
-        writer
-            .begin_record(&setup.contig, pos_typed, &alleles, None)
-            .unwrap()
-            .filter_pass()
-            .emit()
-            .unwrap();
-        writer.finish().unwrap();
-
-        let text = String::from_utf8(output).unwrap();
-
-        for line in text.split('\n') {
-            if !line.is_empty() {
-                prop_assert!(!line.contains('\r'), "line contains CR: {line}");
-            }
-        }
-        prop_assert!(text.ends_with('\n'));
-    }
-
-    /// BGZF round-trip: write VCF to BGZF, decompress, verify content matches plain write.
-    #[test]
-    fn bgzf_roundtrip_matches_plain(
-        pos in 1u32..1_000_000,
-        alleles in arb_alleles(),
-        dp in 0i32..1000,
-    ) {
-        let setup = make_simple_setup();
-        let pos_typed = Pos1::new(pos).unwrap();
-
-        // Write plain VCF
-        let mut plain_output = Vec::new();
         {
-            let writer = Writer::new(&mut plain_output, OutputFormat::Vcf);
-            let mut writer = writer.write_header(&setup.header).unwrap();
-            {
-                let mut enc = writer
-                    .begin_record(&setup.contig, pos_typed, &alleles, None)
-                    .unwrap()
-                    .filter_pass();
-                setup.dp_info.encode(&mut enc, dp);
-                enc.emit().unwrap();
-            }
-            writer.finish().unwrap();
+            let mut enc = writer
+                .begin_record(&setup.contig, pos_typed, &alleles, None)
+                .unwrap()
+                .filter_pass();
+            setup.dp_info.encode(&mut enc, dp);
+            enc.emit().unwrap();
         }
-
-        // Write BGZF-compressed VCF
-        let mut bgzf_output = Vec::new();
-        {
-            let writer = Writer::new(&mut bgzf_output, OutputFormat::VcfGz);
-            let mut writer = writer.write_header(&setup.header).unwrap();
-            {
-                let mut enc = writer
-                    .begin_record(&setup.contig, pos_typed, &alleles, None)
-                    .unwrap()
-                    .filter_pass();
-                setup.dp_info.encode(&mut enc, dp);
-                enc.emit().unwrap();
-            }
-            writer.finish().unwrap();
-        }
-
-        // Decompress BGZF
-        let mut reader = seqair::bam::bgzf::BgzfReader::from_reader(
-            std::io::Cursor::new(bgzf_output),
-        );
-        let mut decompressed = Vec::new();
-        reader.read_to_end(&mut decompressed).unwrap();
-
-        // Content must match
-        prop_assert_eq!(
-            String::from_utf8(decompressed).unwrap(),
-            String::from_utf8(plain_output).unwrap()
-        );
-    }
-
-    /// Filter serialization: Pass=PASS, NotApplied=., Failed=filter name.
-    #[test]
-    fn filter_serialization_correct(
-        pos in 1u32..1_000_000,
-        filter_state in 0u8..3,
-    ) {
-        let mut builder = VcfHeader::builder();
-        let contig =
-            builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
-        // Register filters before info (BCF string dict order: PASS, filters, info, format).
-        let mut builder = builder.filters();
-        let q20 = builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
-        let mut builder = builder.infos();
-        let _dp: InfoInt = builder
-            .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
-            .unwrap();
-        let header = Arc::new(builder.build().unwrap());
-
-        let pos_typed = Pos1::new(pos).unwrap();
-        let alleles = Alleles::reference(Base::A);
-
-        let mut output = Vec::new();
-        let writer = Writer::new(&mut output, OutputFormat::Vcf);
-        let mut writer = writer.write_header(&header).unwrap();
-
-        let expected_filter = match filter_state {
-            0 => {
-                writer
-                    .begin_record(&contig, pos_typed, &alleles, None)
-                    .unwrap()
-                    .filter_pass()
-                    .emit()
-                    .unwrap();
-                "PASS"
-            }
-            1 => {
-                // No filter applied — emit with filter_pass to get a valid record;
-                // we test NotApplied by using "." which is represented as missing filter.
-                // Since the unified API only has filter_pass/filter_fail, use filter_pass
-                // and check that PASS is output.
-                writer
-                    .begin_record(&contig, pos_typed, &alleles, None)
-                    .unwrap()
-                    .filter_pass()
-                    .emit()
-                    .unwrap();
-                "PASS"
-            }
-            _ => {
-                writer
-                    .begin_record(&contig, pos_typed, &alleles, None)
-                    .unwrap()
-                    .filter_fail([&q20])
-                    .emit()
-                    .unwrap();
-                "q20"
-            }
-        };
-
         writer.finish().unwrap();
-        let text = String::from_utf8(output).unwrap();
-        let data_line = text.lines().last().unwrap();
-        let fields: Vec<&str> = data_line.split('\t').collect();
-
-        prop_assert_eq!(fields[6], expected_filter);
     }
+
+    // Decompress BGZF
+    let mut reader = seqair::bam::bgzf::BgzfReader::from_reader(std::io::Cursor::new(bgzf_output));
+    let mut decompressed = Vec::new();
+    reader.read_to_end(&mut decompressed).unwrap();
+
+    // Content must match
+    assert_eq!(String::from_utf8(decompressed).unwrap(), String::from_utf8(plain_output).unwrap());
+}
+
+/// Filter serialization: `Pass` = `PASS`, `NotApplied` = `.`, `Failed` = filter name.
+#[hegel::test]
+fn filter_serialization_correct(tc: TestCase) {
+    let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(999999));
+    let filter_state = tc.draw(gs::integers::<u8>().max_value(2));
+    let mut builder = VcfHeader::builder();
+    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    // Register filters before info (BCF string dict order: PASS, filters, info, format).
+    let mut builder = builder.filters();
+    let q20 = builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
+    let mut builder = builder.infos();
+    let _dp: InfoInt = builder
+        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
+        .unwrap();
+    let header = Arc::new(builder.build().unwrap());
+
+    let pos_typed = Pos1::new(pos).unwrap();
+    let alleles = Alleles::reference(Base::A);
+
+    let mut output = Vec::new();
+    let writer = Writer::new(&mut output, OutputFormat::Vcf);
+    let mut writer = writer.write_header(&header).unwrap();
+
+    let expected_filter = match filter_state {
+        0 => {
+            writer
+                .begin_record(&contig, pos_typed, &alleles, None)
+                .unwrap()
+                .filter_pass()
+                .emit()
+                .unwrap();
+            "PASS"
+        }
+        1 => {
+            // No filter applied — emit with filter_pass to get a valid record;
+            // we test NotApplied by using "." which is represented as missing filter.
+            // Since the unified API only has filter_pass/filter_fail, use filter_pass
+            // and check that PASS is output.
+            writer
+                .begin_record(&contig, pos_typed, &alleles, None)
+                .unwrap()
+                .filter_pass()
+                .emit()
+                .unwrap();
+            "PASS"
+        }
+        _ => {
+            writer
+                .begin_record(&contig, pos_typed, &alleles, None)
+                .unwrap()
+                .filter_fail([&q20])
+                .emit()
+                .unwrap();
+            "q20"
+        }
+    };
+
+    writer.finish().unwrap();
+    let text = String::from_utf8(output).unwrap();
+    let data_line = text.lines().last().unwrap();
+    let fields: Vec<&str> = data_line.split('\t').collect();
+
+    assert_eq!(fields[6], expected_filter);
 }

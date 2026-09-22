@@ -304,23 +304,29 @@ fn seqair_tbi_matches_bcftools_tbi_structure() {
 
 // ── Proptests ──────────────────────────────────────────────────────────
 
-use proptest::prelude::*;
+use hegel::prelude::*;
 
-fn arb_base() -> impl Strategy<Value = Base> {
-    prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T)]
+/// The four concrete bases a REF or ALT allele can hold.
+const ACGT: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
+
+fn arb_base() -> impl PrintableGenerator<Base> {
+    gs::sampled_from(&ACGT).print_as_debug()
 }
 
 /// Generate a sorted list of unique positions within [1, `max_pos`].
-fn arb_sorted_positions(max_count: usize, max_pos: u32) -> impl Strategy<Value = Vec<u32>> {
-    proptest::collection::hash_set(1u32..max_pos, 1..max_count).prop_map(|set| {
-        let mut v: Vec<u32> = set.into_iter().collect();
-        v.sort_unstable();
-        v
-    })
+fn arb_sorted_positions(max_count: usize, max_pos: u32) -> impl PrintableGenerator<Vec<u32>> {
+    gs::vecs(gs::integers::<u32>().min_value(1).max_value(max_pos - 1))
+        .min_size(1)
+        .max_size(max_count - 1)
+        .unique(true)
+        .map(|mut v: Vec<u32>| {
+            v.sort_unstable();
+            v
+        })
 }
 
 /// Write a VCF.gz with the given sorted positions, produce TBI, return paths.
-fn write_proptest_vcf(
+fn write_generated_vcf(
     dir: &std::path::Path,
     positions: &[u32],
     ref_base: Base,
@@ -374,115 +380,119 @@ fn write_proptest_vcf(
     (vcf_path, tbi_path)
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(20))]
-
-    /// bcftools can query any region of a seqair-produced VCF.gz using seqair's TBI
-    /// and returns exactly the records whose positions fall in the query range.
-    #[test]
-    fn bcftools_region_query_matches_expected(
-        positions in arb_sorted_positions(50, 1_000_000),
-        ref_base in arb_base(),
-        alt_base in arb_base(),
-        query_start in 1u32..500_000,
-        query_span in 1u32..500_000,
-    ) {
-        prop_assume!(ref_base != alt_base);
-        if !has_bcftools() {
-            return Ok(());
-        }
-
-        let query_end = query_start.saturating_add(query_span).min(1_000_000);
-
-        let dir = tempfile::tempdir().unwrap();
-        let (vcf_path, _tbi_path) = write_proptest_vcf(dir.path(), &positions, ref_base, alt_base);
-
-        let output = std::process::Command::new("bcftools")
-            .args(["view", "-H", "-r", &format!("chr1:{query_start}-{query_end}")])
-            .arg(&vcf_path)
-            .output()
-            .unwrap();
-
-        prop_assert!(output.status.success(),
-            "bcftools failed: {}", String::from_utf8_lossy(&output.stderr));
-
-        let text = String::from_utf8(output.stdout).unwrap();
-        let found_positions: Vec<u32> = text.lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| l.split('\t').nth(1).unwrap().parse::<u32>().unwrap())
-            .collect();
-
-        let expected: Vec<u32> = positions.iter()
-            .copied()
-            .filter(|&p| p >= query_start && p <= query_end)
-            .collect();
-
-        prop_assert_eq!(&found_positions, &expected);
+/// bcftools can query any region of a seqair-produced VCF.gz using seqair's TBI
+/// and returns exactly the records whose positions fall in the query range.
+#[hegel::test(test_cases = 20)]
+fn bcftools_region_query_matches_expected(tc: TestCase) {
+    let positions = tc.draw(arb_sorted_positions(50, 1_000_000));
+    let ref_base = tc.draw(arb_base());
+    let alt_base = tc.draw(arb_base());
+    let query_start = tc.draw(gs::integers::<u32>().min_value(1).max_value(499999));
+    let query_span = tc.draw(gs::integers::<u32>().min_value(1).max_value(499999));
+    tc.assume(ref_base != alt_base);
+    if !has_bcftools() {
+        return;
     }
 
-    /// TBI header structure matches bcftools output for any random record set.
-    #[test]
-    fn tbi_header_matches_bcftools(
-        positions in arb_sorted_positions(30, 500_000),
-        ref_base in arb_base(),
-        alt_base in arb_base(),
-    ) {
-        prop_assume!(ref_base != alt_base);
-        if !has_bcftools() {
-            return Ok(());
-        }
+    let query_end = query_start.saturating_add(query_span).min(1_000_000);
 
-        let dir = tempfile::tempdir().unwrap();
-        let (vcf_path, seqair_tbi_path) = write_proptest_vcf(dir.path(), &positions, ref_base, alt_base);
+    let dir = tempfile::tempdir().unwrap();
+    let (vcf_path, _tbi_path) = write_generated_vcf(dir.path(), &positions, ref_base, alt_base);
 
-        let bcftools_tbi_path = dir.path().join("bcftools.tbi");
-        let output = std::process::Command::new("bcftools")
-            .args(["index", "-t"])
-            .arg(&vcf_path)
-            .arg("-o")
-            .arg(&bcftools_tbi_path)
-            .output()
-            .unwrap();
-        prop_assert!(output.status.success());
+    let output = std::process::Command::new("bcftools")
+        .args(["view", "-H", "-r", &format!("chr1:{query_start}-{query_end}")])
+        .arg(&vcf_path)
+        .output()
+        .unwrap();
 
-        let seqair_data = decompress_tbi(&seqair_tbi_path);
-        let bcftools_data = decompress_tbi(&bcftools_tbi_path);
+    assert!(
+        output.status.success(),
+        "bcftools failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-        prop_assert!(seqair_data.len() >= 32, "seqair TBI too short");
-        prop_assert!(bcftools_data.len() >= 32, "bcftools TBI too short");
-        prop_assert_eq!(&seqair_data[..32], &bcftools_data[..32],
-            "TBI header mismatch (magic + n_ref + format + columns + meta + skip)");
+    let text = String::from_utf8(output.stdout).unwrap();
+    let found_positions: Vec<u32> = text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.split('\t').nth(1).unwrap().parse::<u32>().unwrap())
+        .collect();
 
-        let seqair_l_nm = i32::from_le_bytes(
-            [seqair_data[28], seqair_data[29], seqair_data[30], seqair_data[31]]
-        ) as usize;
-        let names_end = 32 + seqair_l_nm;
-        prop_assert_eq!(
-            &seqair_data[32..names_end],
-            &bcftools_data[32..names_end],
-            "sequence names mismatch"
-        );
+    let expected: Vec<u32> =
+        positions.iter().copied().filter(|&p| p >= query_start && p <= query_end).collect();
+
+    assert_eq!(&found_positions, &expected);
+}
+
+/// TBI header structure matches bcftools output for any random record set.
+#[hegel::test(test_cases = 20)]
+fn tbi_header_matches_bcftools(tc: TestCase) {
+    let positions = tc.draw(arb_sorted_positions(30, 500_000));
+    let ref_base = tc.draw(arb_base());
+    let alt_base = tc.draw(arb_base());
+    tc.assume(ref_base != alt_base);
+    if !has_bcftools() {
+        return;
     }
 
-    /// An empty VCF (header only, no records) produces a valid TBI that bcftools accepts.
-    #[test]
-    fn empty_vcf_produces_valid_tbi(_dummy in 0u8..1) {
-        if !has_bcftools() {
-            return Ok(());
-        }
+    let dir = tempfile::tempdir().unwrap();
+    let (vcf_path, seqair_tbi_path) =
+        write_generated_vcf(dir.path(), &positions, ref_base, alt_base);
 
-        let dir = tempfile::tempdir().unwrap();
-        let (vcf_path, _tbi_path) = write_proptest_vcf(dir.path(), &[], Base::A, Base::T);
+    let bcftools_tbi_path = dir.path().join("bcftools.tbi");
+    let output = std::process::Command::new("bcftools")
+        .args(["index", "-t"])
+        .arg(&vcf_path)
+        .arg("-o")
+        .arg(&bcftools_tbi_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
 
-        let output = std::process::Command::new("bcftools")
-            .args(["view", "-H"])
-            .arg(&vcf_path)
-            .output()
-            .unwrap();
+    let seqair_data = decompress_tbi(&seqair_tbi_path);
+    let bcftools_data = decompress_tbi(&bcftools_tbi_path);
 
-        prop_assert!(output.status.success(),
-            "bcftools can't read empty VCF: {}", String::from_utf8_lossy(&output.stderr));
-        let text = String::from_utf8(output.stdout).unwrap();
-        prop_assert_eq!(text.trim(), "", "empty VCF should have no records");
+    assert!(seqair_data.len() >= 32, "seqair TBI too short");
+    assert!(bcftools_data.len() >= 32, "bcftools TBI too short");
+    assert_eq!(
+        &seqair_data[..32],
+        &bcftools_data[..32],
+        "TBI header mismatch (magic + n_ref + format + columns + meta + skip)"
+    );
+
+    let seqair_l_nm =
+        i32::from_le_bytes([seqair_data[28], seqair_data[29], seqair_data[30], seqair_data[31]])
+            as usize;
+    let names_end = 32 + seqair_l_nm;
+    assert_eq!(
+        &seqair_data[32..names_end],
+        &bcftools_data[32..names_end],
+        "sequence names mismatch"
+    );
+}
+
+/// An empty VCF (header only, no records) produces a valid TBI that bcftools accepts.
+#[hegel::test(test_cases = 20)]
+fn empty_vcf_produces_valid_tbi(tc: TestCase) {
+    let _dummy = tc.draw(gs::integers::<u8>().max_value(0));
+    if !has_bcftools() {
+        return;
     }
+
+    let dir = tempfile::tempdir().unwrap();
+    let (vcf_path, _tbi_path) = write_generated_vcf(dir.path(), &[], Base::A, Base::T);
+
+    let output = std::process::Command::new("bcftools")
+        .args(["view", "-H"])
+        .arg(&vcf_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "bcftools can't read empty VCF: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(text.trim(), "", "empty VCF should have no records");
 }

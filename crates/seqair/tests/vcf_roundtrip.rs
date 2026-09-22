@@ -17,8 +17,8 @@
     reason = "test code with known small values"
 )]
 
+use hegel::prelude::*;
 use noodles::vcf::variant::record_buf::info::field::Value as InfoBufValue;
-use proptest::prelude::*;
 use seqair::vcf::record_encoder::{
     FilterFieldDef, FormatFieldDef, FormatGt, FormatInt, InfoFieldDef, InfoFlag, InfoFloat,
     InfoFloats, InfoInt, InfoInts,
@@ -332,68 +332,77 @@ fn assert_record_matches(input: &TestRecord, parsed: &ParsedRecord, format: &str
 
 // ── Proptest strategies ────────────────────────────────────────────────
 
-fn arb_base() -> impl Strategy<Value = Base> {
-    prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T)]
+/// The four concrete bases a REF or ALT allele can hold.
+const ACGT: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
+
+fn arb_base() -> impl PrintableGenerator<Base> {
+    gs::sampled_from(&ACGT).print_as_debug()
 }
 
-fn arb_alleles() -> impl Strategy<Value = Alleles> {
-    prop_oneof![
-        4 => arb_base().prop_map(Alleles::reference),
-        10 => (arb_base(), arb_base())
-            .prop_filter("ref != alt", |(r, a)| r != a)
-            .prop_map(|(r, a)| Alleles::snv(r, a).unwrap()),
-        2 => (arb_base(), arb_base(), arb_base())
-            .prop_filter("all different", |(r, a1, a2)| r != a1 && r != a2 && a1 != a2)
-            .prop_map(|(r, a1, a2)| Alleles::snv_multi(r, &[a1, a2]).unwrap()),
-        3 => (arb_base(), proptest::collection::vec(arb_base(), 1..6))
-            .prop_map(|(anchor, ins)| Alleles::insertion(anchor, &ins).unwrap()),
-        3 => (arb_base(), proptest::collection::vec(arb_base(), 1..6))
-            .prop_map(|(anchor, del)| Alleles::deletion(anchor, &del).unwrap()),
-    ]
+/// Weighted 4 : 10 : 2 : 3 : 3 over reference / SNV / multi-allelic SNV /
+/// insertion / deletion, so the common shapes dominate the way real callsets do.
+#[hegel::composite]
+fn arb_alleles_inner(tc: &TestCase) -> Alleles {
+    let indel = || gs::vecs(gs::sampled_from(&ACGT)).min_size(1).max_size(5);
+    let distinct = move |tc: &TestCase, seen: &[Base]| {
+        let seen: Vec<Base> = seen.to_vec();
+        tc.draw_silent(gs::sampled_from(&ACGT).filter(move |b| !seen.contains(b)))
+    };
+    match tc.draw_silent(gs::integers::<u8>().max_value(21)) {
+        0..=3 => Alleles::reference(tc.draw_silent(arb_base())),
+        4..=13 => {
+            let r = tc.draw_silent(arb_base());
+            Alleles::snv(r, distinct(tc, &[r])).unwrap()
+        }
+        14..=15 => {
+            let r = tc.draw_silent(arb_base());
+            let a1 = distinct(tc, &[r]);
+            let a2 = distinct(tc, &[r, a1]);
+            Alleles::snv_multi(r, &[a1, a2]).unwrap()
+        }
+        16..=18 => {
+            Alleles::insertion(tc.draw_silent(arb_base()), &tc.draw_silent(indel())).unwrap()
+        }
+        _ => Alleles::deletion(tc.draw_silent(arb_base()), &tc.draw_silent(indel())).unwrap(),
+    }
 }
 
-fn arb_genotype(max_allele: u16) -> impl Strategy<Value = Genotype> {
-    prop_oneof![
-        (0..=max_allele, 0..=max_allele).prop_map(|(a, b)| Genotype::unphased(a, b)),
-        (0..=max_allele, 0..=max_allele).prop_map(|(a, b)| Genotype::phased_diploid(a, b)),
-        (0..=max_allele).prop_map(Genotype::haploid),
-        Just(Genotype::missing_diploid()),
-    ]
+fn arb_alleles() -> impl PrintableGenerator<Alleles> {
+    arb_alleles_inner().print_as_debug()
 }
 
-fn arb_test_record() -> impl Strategy<Value = TestRecord> {
-    arb_alleles()
-        .prop_flat_map(|alleles| {
-            let max_allele = alleles.n_allele().saturating_sub(1).max(1) as u16;
-            (
-                Just(alleles),
-                1u32..10_000_000,
-                proptest::option::of(0.1f32..10000.0),
-                proptest::bool::ANY,
-                1i32..10000,
-                0.1f32..60.0,
-                proptest::bool::ANY,
-                arb_genotype(max_allele),
-                1i32..1000,
-                0i32..99,
-            )
-        })
-        .prop_map(
-            |(alleles, pos, qual, filter_pass, dp, mq, has_db_flag, gt, sample_dp, sample_gq)| {
-                TestRecord {
-                    pos,
-                    alleles,
-                    qual,
-                    filter_pass,
-                    dp,
-                    mq,
-                    has_db_flag,
-                    gt,
-                    sample_dp,
-                    sample_gq,
-                }
-            },
-        )
+fn arb_genotype(tc: &TestCase, max_allele: u16) -> Genotype {
+    let allele = move || gs::integers::<u16>().max_value(max_allele);
+    match tc.draw_silent(gs::integers::<u8>().max_value(3)) {
+        0 => Genotype::unphased(tc.draw_silent(allele()), tc.draw_silent(allele())),
+        1 => Genotype::phased_diploid(tc.draw_silent(allele()), tc.draw_silent(allele())),
+        2 => Genotype::haploid(tc.draw_silent(allele())),
+        _ => Genotype::missing_diploid(),
+    }
+}
+
+#[hegel::composite]
+fn arb_test_record_inner(tc: &TestCase) -> TestRecord {
+    let alleles = tc.draw_silent(arb_alleles());
+    let max_allele = alleles.n_allele().saturating_sub(1).max(1) as u16;
+    TestRecord {
+        pos: tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(9_999_999)),
+        alleles,
+        qual: tc.draw_silent(gs::optional(
+            gs::floats::<f32>().min_value(0.1).max_value_exclusive(10_000.0),
+        )),
+        filter_pass: tc.draw_silent(gs::booleans()),
+        dp: tc.draw_silent(gs::integers::<i32>().min_value(1).max_value(9_999)),
+        mq: tc.draw_silent(gs::floats::<f32>().min_value(0.1).max_value_exclusive(60.0)),
+        has_db_flag: tc.draw_silent(gs::booleans()),
+        gt: arb_genotype(tc, max_allele),
+        sample_dp: tc.draw_silent(gs::integers::<i32>().min_value(1).max_value(999)),
+        sample_gq: tc.draw_silent(gs::integers::<i32>().max_value(98)),
+    }
+}
+
+fn arb_test_record() -> impl PrintableGenerator<TestRecord> {
+    arb_test_record_inner().print_as_debug()
 }
 
 // ── Deterministic tests ────────────────────────────────────────────────
@@ -518,71 +527,71 @@ fn bcf_roundtrip_multiple_records_sorted() {
 
 // ── Proptests ──────────────────────────────────────────────────────────
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
+/// BCF round-trip: write → noodles read → all fields match.
+#[hegel::test(test_cases = 50)]
+fn bcf_deep_roundtrip(tc: TestCase) {
+    let input = tc.draw(arb_test_record());
+    let setup = make_setup();
+    let data = write_bcf(&setup, std::slice::from_ref(&input));
+    let parsed = parse_bcf_records(&data);
+    assert_eq!(parsed.len(), 1);
 
-    /// BCF round-trip: write → noodles read → all fields match.
-    #[test]
-    fn bcf_deep_roundtrip(input in arb_test_record()) {
-        let setup = make_setup();
-        let data = write_bcf(&setup, std::slice::from_ref(&input));
-        let parsed = parse_bcf_records(&data);
-        prop_assert_eq!(parsed.len(), 1);
+    let p = &parsed[0];
+    assert_eq!(p.pos, input.pos, "POS");
+    let ref_text = input.alleles.ref_text();
+    assert_eq!(&p.ref_allele, ref_text.as_str(), "REF");
 
-        let p = &parsed[0];
-        prop_assert_eq!(p.pos, input.pos, "POS");
-        let ref_text = input.alleles.ref_text();
-        prop_assert_eq!(&p.ref_allele, ref_text.as_str(), "REF");
+    let expected_alts: Vec<String> =
+        input.alleles.alt_texts().iter().map(|s| s.to_string()).collect();
+    assert_eq!(&p.alt_alleles, &expected_alts, "ALT");
 
-        let expected_alts: Vec<String> = input.alleles.alt_texts().iter().map(|s| s.to_string()).collect();
-        prop_assert_eq!(&p.alt_alleles, &expected_alts, "ALT");
-
-        if let Some(q) = input.qual {
-            prop_assert_eq!(p.qual_bits, Some(q.to_bits()), "QUAL");
-        }
-        prop_assert_eq!(p.is_pass, input.filter_pass, "FILTER");
-        prop_assert_eq!(p.info_dp, Some(input.dp), "INFO DP");
-        prop_assert_eq!(p.info_db, input.has_db_flag, "INFO DB");
+    if let Some(q) = input.qual {
+        assert_eq!(p.qual_bits, Some(q.to_bits()), "QUAL");
     }
+    assert_eq!(p.is_pass, input.filter_pass, "FILTER");
+    assert_eq!(p.info_dp, Some(input.dp), "INFO DP");
+    assert_eq!(p.info_db, input.has_db_flag, "INFO DB");
+}
 
-    /// VCF text round-trip: write → noodles read → site-level fields match.
-    #[test]
-    fn vcf_text_deep_roundtrip(input in arb_test_record()) {
-        prop_assume!(input.alleles.n_allele() > 1);
+/// VCF text round-trip: write → noodles read → site-level fields match.
+#[hegel::test(test_cases = 50)]
+fn vcf_text_deep_roundtrip(tc: TestCase) {
+    let input = tc.draw(arb_test_record());
+    tc.assume(input.alleles.n_allele() > 1);
 
-        let setup = make_setup();
-        let data = write_vcf(&setup, std::slice::from_ref(&input));
-        let parsed = parse_vcf_records(&data);
-        prop_assert_eq!(parsed.len(), 1);
+    let setup = make_setup();
+    let data = write_vcf(&setup, std::slice::from_ref(&input));
+    let parsed = parse_vcf_records(&data);
+    assert_eq!(parsed.len(), 1);
 
-        let p = &parsed[0];
-        prop_assert_eq!(p.pos, input.pos, "POS");
-        let ref_text = input.alleles.ref_text();
-        prop_assert_eq!(&p.ref_allele, ref_text.as_str(), "REF");
-        prop_assert_eq!(p.info_dp, Some(input.dp), "INFO DP");
-    }
+    let p = &parsed[0];
+    assert_eq!(p.pos, input.pos, "POS");
+    let ref_text = input.alleles.ref_text();
+    assert_eq!(&p.ref_allele, ref_text.as_str(), "REF");
+    assert_eq!(p.info_dp, Some(input.dp), "INFO DP");
+}
 
-    // r[verify record_encoder.vcf_bcf_equivalence]
-    /// BCF + VCF produce records that noodles parses to the same site-level fields.
-    #[test]
-    fn bcf_and_vcf_match(input in arb_test_record()) {
-        prop_assume!(input.alleles.n_allele() > 1);
+// r[verify record_encoder.vcf_bcf_equivalence]
+/// BCF + VCF produce records that noodles parses to the same site-level fields.
+#[hegel::test(test_cases = 50)]
+fn bcf_and_vcf_match(tc: TestCase) {
+    let input = tc.draw(arb_test_record());
+    tc.assume(input.alleles.n_allele() > 1);
 
-        let setup = make_setup();
-        let bcf_data = write_bcf(&setup, std::slice::from_ref(&input));
-        let vcf_data = write_vcf(&setup, std::slice::from_ref(&input));
-        let bcf_parsed = parse_bcf_records(&bcf_data);
-        let vcf_parsed = parse_vcf_records(&vcf_data);
+    let setup = make_setup();
+    let bcf_data = write_bcf(&setup, std::slice::from_ref(&input));
+    let vcf_data = write_vcf(&setup, std::slice::from_ref(&input));
+    let bcf_parsed = parse_bcf_records(&bcf_data);
+    let vcf_parsed = parse_vcf_records(&vcf_data);
 
-        prop_assert_eq!(bcf_parsed.len(), 1);
-        prop_assert_eq!(vcf_parsed.len(), 1);
+    assert_eq!(bcf_parsed.len(), 1);
+    assert_eq!(vcf_parsed.len(), 1);
 
-        let b = &bcf_parsed[0];
-        let v = &vcf_parsed[0];
+    let b = &bcf_parsed[0];
+    let v = &vcf_parsed[0];
 
-        prop_assert_eq!(b.pos, v.pos, "POS: BCF vs VCF");
-        prop_assert_eq!(&b.ref_allele, &v.ref_allele, "REF: BCF vs VCF");
-        prop_assert_eq!(&b.alt_alleles, &v.alt_alleles, "ALT: BCF vs VCF");
-        prop_assert_eq!(b.info_dp, v.info_dp, "INFO DP: BCF vs VCF");
-    }
+    assert_eq!(b.pos, v.pos, "POS: BCF vs VCF");
+    assert_eq!(&b.ref_allele, &v.ref_allele, "REF: BCF vs VCF");
+    assert_eq!(&b.alt_alleles, &v.alt_alleles, "ALT: BCF vs VCF");
+    assert_eq!(b.info_dp, v.info_dp, "INFO DP: BCF vs VCF");
 }

@@ -12,7 +12,7 @@
 //! and fields are parsed correctly. This is the strongest validation available:
 //! bcftools IS the reference BCF implementation.
 
-use proptest::prelude::*;
+use hegel::prelude::*;
 use seqair::vcf::alleles::Alleles;
 use seqair::vcf::header::{ContigDef, Number, ValueType};
 use seqair::vcf::record::Genotype;
@@ -235,43 +235,39 @@ fn bcftools_reads_seqair_hom_ref() {
 
 // ── Proptest: bcftools validates random seqair BCF ─────────────────────
 
-fn arb_base() -> impl Strategy<Value = Base> {
-    prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T)]
+/// The four concrete bases a REF or ALT allele can hold.
+const ACGT: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
+
+fn arb_base() -> impl PrintableGenerator<Base> {
+    gs::sampled_from(&ACGT).print_as_debug()
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(20))]
+/// Write random SNVs with seqair, validate with bcftools (the reference implementation).
+#[hegel::test(test_cases = 20)]
+fn bcftools_validates_random_seqair_bcf(tc: TestCase) {
+    let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(9999999));
+    let ref_base = tc.draw(arb_base());
+    let alt_base = tc.draw(arb_base());
+    let qual = tc.draw(gs::floats::<f32>().min_value(1.0).max_value_exclusive(1000.0));
+    let depth = tc.draw(gs::integers::<i32>().min_value(1).max_value(9999));
+    let gt_a0 = tc.draw(gs::integers::<u16>().max_value(1));
+    let gt_a1 = tc.draw(gs::integers::<u16>().max_value(1));
+    let phased = tc.draw(gs::booleans());
+    tc.assume(ref_base != alt_base);
 
-    /// Write random SNVs with seqair, validate with bcftools (the reference implementation).
-    #[test]
-    fn bcftools_validates_random_seqair_bcf(
-        pos in 1u32..10_000_000,
-        ref_base in arb_base(),
-        alt_base in arb_base(),
-        qual in 1.0f32..1000.0,
-        depth in 1i32..10000,
-        gt_a0 in 0u16..2,
-        gt_a1 in 0u16..2,
-        phased in proptest::bool::ANY,
-    ) {
-        prop_assume!(ref_base != alt_base);
-
-        if !has_bcftools() {
-            return Ok(());
-        }
-
-        let setup = shared_setup();
-        let tmp = write_seqair_bcf(
-            &setup, pos, ref_base, alt_base, qual, depth, gt_a0, gt_a1, phased,
-        );
-
-        // bcftools must parse without error and produce correct POS
-        let vcf_text = bcftools_view(tmp.path()).unwrap();
-        let fields: Vec<&str> = vcf_text.trim().split('\t').collect();
-
-        prop_assert_eq!(fields[0], "chr1");
-        prop_assert_eq!(fields[1], &pos.to_string());
-        prop_assert_eq!(fields[3], &format!("{}", ref_base.as_char()));
-        prop_assert_eq!(fields[4], &format!("{}", alt_base.as_char()));
+    if !has_bcftools() {
+        return;
     }
+
+    let setup = shared_setup();
+    let tmp = write_seqair_bcf(&setup, pos, ref_base, alt_base, qual, depth, gt_a0, gt_a1, phased);
+
+    // bcftools must parse without error and produce correct POS
+    let vcf_text = bcftools_view(tmp.path()).unwrap();
+    let fields: Vec<&str> = vcf_text.trim().split('\t').collect();
+
+    assert_eq!(fields[0], "chr1");
+    assert_eq!(fields[1], &pos.to_string());
+    assert_eq!(fields[3], &format!("{}", ref_base.as_char()));
+    assert_eq!(fields[4], &format!("{}", alt_base.as_char()));
 }

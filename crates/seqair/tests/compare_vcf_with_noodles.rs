@@ -13,7 +13,7 @@
     reason = "test code with known small values"
 )]
 
-use proptest::prelude::*;
+use hegel::prelude::*;
 use seqair::vcf::alleles::Alleles;
 use seqair::vcf::header::{ContigDef, Number, ValueType};
 use seqair::vcf::record::Genotype;
@@ -214,115 +214,120 @@ fn bcf_encoder_readable_by_noodles() {
 
 // ── Proptest strategies ────────────────────────────────────────────────
 
-fn arb_base() -> impl Strategy<Value = Base> {
-    prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T),]
+/// The four concrete bases a REF or ALT allele can hold.
+const ACGT: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
+
+fn arb_base() -> impl PrintableGenerator<Base> {
+    gs::sampled_from(&ACGT).print_as_debug()
 }
 
-fn arb_alleles() -> impl Strategy<Value = Alleles> {
-    prop_oneof![
-        arb_base().prop_map(Alleles::reference),
-        (arb_base(), arb_base())
-            .prop_filter("ref != alt", |(r, a)| r != a)
-            .prop_map(|(r, a)| Alleles::snv(r, a).unwrap()),
-        (arb_base(), proptest::collection::vec(arb_base(), 1..4))
-            .prop_map(|(anchor, ins)| Alleles::insertion(anchor, &ins).unwrap()),
-        (arb_base(), proptest::collection::vec(arb_base(), 1..4))
-            .prop_map(|(anchor, del)| Alleles::deletion(anchor, &del).unwrap()),
-    ]
+#[hegel::composite]
+fn arb_alleles_inner(tc: &TestCase) -> Alleles {
+    let bases = || gs::vecs(gs::sampled_from(&ACGT)).min_size(1).max_size(3);
+    match tc.draw_silent(gs::integers::<u8>().max_value(3)) {
+        0 => Alleles::reference(tc.draw_silent(arb_base())),
+        1 => {
+            let r = tc.draw_silent(arb_base());
+            let alt = gs::sampled_from(&ACGT).filter(move |a| *a != r);
+            Alleles::snv(r, tc.draw_silent(alt)).unwrap()
+        }
+        2 => Alleles::insertion(tc.draw_silent(arb_base()), &tc.draw_silent(bases())).unwrap(),
+        _ => Alleles::deletion(tc.draw_silent(arb_base()), &tc.draw_silent(bases())).unwrap(),
+    }
+}
+
+fn arb_alleles() -> impl PrintableGenerator<Alleles> {
+    arb_alleles_inner().print_as_debug()
 }
 
 #[allow(dead_code, reason = "may be used in future test expansions")]
-fn arb_genotype() -> impl Strategy<Value = Genotype> {
-    prop_oneof![
-        (0u16..4, 0u16..4).prop_map(|(a, b)| Genotype::unphased(a, b)),
-        (0u16..4, 0u16..4).prop_map(|(a, b)| Genotype::phased_diploid(a, b)),
-        (0u16..4).prop_map(Genotype::haploid),
-        Just(Genotype::missing_diploid()),
-    ]
+#[hegel::composite]
+fn arb_genotype_inner(tc: &TestCase) -> Genotype {
+    let allele = || gs::integers::<u16>().max_value(3);
+    match tc.draw_silent(gs::integers::<u8>().max_value(3)) {
+        0 => Genotype::unphased(tc.draw_silent(allele()), tc.draw_silent(allele())),
+        1 => Genotype::phased_diploid(tc.draw_silent(allele()), tc.draw_silent(allele())),
+        2 => Genotype::haploid(tc.draw_silent(allele())),
+        _ => Genotype::missing_diploid(),
+    }
 }
 
-// ── Proptest: BCF via writer round-trips through noodles ───────────────
+fn arb_genotype() -> impl PrintableGenerator<Genotype> {
+    arb_genotype_inner().print_as_debug()
+}
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
+// ── BCF via writer round-trips through noodles ─────────────────────────
 
-    #[test]
-    fn bcf_write_record_roundtrip(
-        pos in 1u32..10_000_000,
-        alleles in arb_alleles(),
-        qual in proptest::option::of(0.1f32..1000.0),
-        dp in 0i32..10000,
-    ) {
-        let setup = rich_setup();
-        let pos = Pos1::new(pos).unwrap();
+#[hegel::test(test_cases = 50)]
+fn bcf_write_record_roundtrip(tc: TestCase) {
+    let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(9999999));
+    let alleles = tc.draw(arb_alleles());
+    let qual =
+        tc.draw(gs::optional(gs::floats::<f32>().min_value(0.1).max_value_exclusive(1000.0)));
+    let dp = tc.draw(gs::integers::<i32>().min_value(0).max_value(9999));
+    // The header this writes against declares a sample, so the record carries
+    // a GT too — the field most likely to disagree with another implementation.
+    let gt = tc.draw(arb_genotype());
+    let setup = rich_setup();
+    let pos = Pos1::new(pos).unwrap();
 
-        let mut bcf_output = Vec::new();
-        {
-            let writer = Writer::new(&mut bcf_output, OutputFormat::Bcf);
-            let mut writer = writer.write_header(&setup.header).unwrap();
-            let mut enc = writer
-                .begin_record(&setup.contig_chr1, pos, &alleles, qual)
-                .unwrap()
-                .filter_pass();
-            setup.dp_info.encode(&mut enc, dp);
-            enc.emit().unwrap();
-            writer.finish().unwrap();
-        }
-
-        // Must be parseable by noodles
-        let mut reader = noodles::bcf::io::Reader::new(Cursor::new(&bcf_output));
-        let noodles_header = reader.read_header().unwrap();
-        let mut records = Vec::new();
-        for result in reader.record_bufs(&noodles_header) {
-            records.push(result.unwrap());
-        }
-        prop_assert_eq!(records.len(), 1, "noodles should parse exactly 1 record");
+    let mut bcf_output = Vec::new();
+    {
+        let writer = Writer::new(&mut bcf_output, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let mut enc =
+            writer.begin_record(&setup.contig_chr1, pos, &alleles, qual).unwrap().filter_pass();
+        setup.dp_info.encode(&mut enc, dp);
+        let mut enc = enc.begin_samples();
+        setup.gt_fmt.encode(&mut enc, &[gt]).unwrap();
+        setup.dp_fmt.encode(&mut enc, &[dp]).unwrap();
+        enc.emit().unwrap();
+        writer.finish().unwrap();
     }
 
-    #[test]
-    fn vcf_text_roundtrip_through_noodles(
-        pos in 1u32..10_000_000,
-        alleles in arb_alleles(),
-        dp in 0i32..10000,
-    ) {
-        // Sites-only header (no samples) to avoid FORMAT column requirement
-        let mut builder = VcfHeader::builder();
-        let contig =
-            builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
-        let mut builder = builder.infos();
-        let dp_info: InfoInt = builder
-            .register_info(&InfoFieldDef::new(
-                "DP",
-                Number::Count(1),
-                ValueType::Integer,
-                "Depth",
-            ))
-            .unwrap();
-        let header = Arc::new(builder.build().unwrap());
-
-        let pos = Pos1::new(pos).unwrap();
-
-        let mut output = Vec::new();
-        {
-            let writer = Writer::new(&mut output, OutputFormat::Vcf);
-            let mut writer = writer.write_header(&header).unwrap();
-            let mut enc = writer
-                .begin_record(&contig, pos, &alleles, None)
-                .unwrap()
-                .filter_pass();
-            dp_info.encode(&mut enc, dp);
-            enc.emit().unwrap();
-            writer.finish().unwrap();
-        }
-
-        let mut reader = noodles::vcf::io::Reader::new(Cursor::new(&output));
-        let noodles_header = reader.read_header().unwrap();
-        let mut records = Vec::new();
-        for result in reader.record_bufs(&noodles_header) {
-            records.push(result.unwrap());
-        }
-        prop_assert_eq!(records.len(), 1, "noodles VCF reader should parse exactly 1 record");
+    // Must be parseable by noodles
+    let mut reader = noodles::bcf::io::Reader::new(Cursor::new(&bcf_output));
+    let noodles_header = reader.read_header().unwrap();
+    let mut records = Vec::new();
+    for result in reader.record_bufs(&noodles_header) {
+        records.push(result.unwrap());
     }
+    assert_eq!(records.len(), 1, "noodles should parse exactly 1 record");
+}
+
+#[hegel::test(test_cases = 50)]
+fn vcf_text_roundtrip_through_noodles(tc: TestCase) {
+    let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(9999999));
+    let alleles = tc.draw(arb_alleles());
+    let dp = tc.draw(gs::integers::<i32>().min_value(0).max_value(9999));
+    // Sites-only header (no samples) to avoid FORMAT column requirement
+    let mut builder = VcfHeader::builder();
+    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let mut builder = builder.infos();
+    let dp_info: InfoInt = builder
+        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
+        .unwrap();
+    let header = Arc::new(builder.build().unwrap());
+
+    let pos = Pos1::new(pos).unwrap();
+
+    let mut output = Vec::new();
+    {
+        let writer = Writer::new(&mut output, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&header).unwrap();
+        let mut enc = writer.begin_record(&contig, pos, &alleles, None).unwrap().filter_pass();
+        dp_info.encode(&mut enc, dp);
+        enc.emit().unwrap();
+        writer.finish().unwrap();
+    }
+
+    let mut reader = noodles::vcf::io::Reader::new(Cursor::new(&output));
+    let noodles_header = reader.read_header().unwrap();
+    let mut records = Vec::new();
+    for result in reader.record_bufs(&noodles_header) {
+        records.push(result.unwrap());
+    }
+    assert_eq!(records.len(), 1, "noodles VCF reader should parse exactly 1 record");
 }
 
 // ── Multi-sample round-trip tests ────────────────────────────────────

@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use proptest::prelude::*;
+use hegel::prelude::*;
 use seqair::vcf::record_encoder::{Arr, Scalar, Str};
 use seqair::vcf::{
     Alleles, ContigDef, ContigId, FormatFloats, FormatInt, InfoFieldDef, InfoFlag, InfoFloat,
@@ -150,14 +150,23 @@ fn encode_info(
     buf
 }
 
-fn arb_info_op() -> impl Strategy<Value = InfoOp> {
-    prop_oneof![
-        (-5000i32..5000).prop_map(InfoOp::Dp),
-        (-1000.0f32..1000.0).prop_map(InfoOp::Bq),
-        proptest::collection::vec(-300i32..300, 1..4).prop_map(InfoOp::Ad),
-        "[A-Za-z0-9]{1,6}".prop_map(InfoOp::Sc),
-        Just(InfoOp::Flag),
-    ]
+#[hegel::composite]
+fn arb_info_op_inner(tc: &TestCase) -> InfoOp {
+    match tc.draw_silent(gs::integers::<u8>().max_value(4)) {
+        0 => InfoOp::Dp(tc.draw_silent(gs::integers::<i32>().min_value(-5000).max_value(4999))),
+        1 => InfoOp::Bq(
+            tc.draw_silent(gs::floats::<f32>().min_value(-1000.0).max_value_exclusive(1000.0)),
+        ),
+        2 => InfoOp::Ad(tc.draw_silent(
+            gs::vecs(gs::integers::<i32>().min_value(-300).max_value(299)).min_size(1).max_size(3),
+        )),
+        3 => InfoOp::Sc(tc.draw_silent(gs::from_regex("[A-Za-z0-9]{1,6}"))),
+        _ => InfoOp::Flag,
+    }
+}
+
+fn arb_info_op() -> impl PrintableGenerator<InfoOp> {
+    arb_info_op_inner().print_as_debug()
 }
 
 // ── FORMAT (3 samples — exercises the per-sample VCF splice) ─────────────
@@ -256,44 +265,55 @@ fn encode_fmt(
     buf
 }
 
-fn arb_fmt_op() -> impl Strategy<Value = FmtOp> {
-    prop_oneof![
-        proptest::array::uniform3(-5000i32..5000).prop_map(FmtOp::Dp),
-        proptest::array::uniform3(-1000.0f32..1000.0).prop_map(FmtOp::Q),
-        proptest::array::uniform3(proptest::collection::vec(-100.0f32..100.0, 1..4))
-            .prop_map(FmtOp::Pl),
-    ]
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 400, ..ProptestConfig::default() })]
-
-    /// INFO: a duplicate-laden write sequence encodes byte-for-byte identically
-    /// to its de-duplicated form, for both BCF and VCF text.
-    #[test]
-    fn info_in_place_overwrite_matches_dedup_oracle(
-        ops in proptest::collection::vec(arb_info_op(), 1..14)
-    ) {
-        let (header, contig, keys) = info_header();
-        let oracle = dedup(&ops, InfoOp::field);
-        for format in [OutputFormat::Bcf, OutputFormat::Vcf] {
-            let with_dups = encode_info(format, &keys, &contig, &header, &ops);
-            let once = encode_info(format, &keys, &contig, &header, &oracle);
-            prop_assert_eq!(with_dups, once, "format={:?} ops={:?}", format, ops);
+#[hegel::composite]
+fn arb_fmt_op_inner(tc: &TestCase) -> FmtOp {
+    match tc.draw_silent(gs::integers::<u8>().max_value(2)) {
+        0 => {
+            let n = || gs::integers::<i32>().min_value(-5000).max_value(4999);
+            FmtOp::Dp([tc.draw_silent(n()), tc.draw_silent(n()), tc.draw_silent(n())])
+        }
+        1 => {
+            let q = || gs::floats::<f32>().min_value(-1000.0).max_value_exclusive(1000.0);
+            FmtOp::Q([tc.draw_silent(q()), tc.draw_silent(q()), tc.draw_silent(q())])
+        }
+        _ => {
+            let pl = || {
+                gs::vecs(gs::floats::<f32>().min_value(-100.0).max_value_exclusive(100.0))
+                    .min_size(1)
+                    .max_size(3)
+            };
+            FmtOp::Pl([tc.draw_silent(pl()), tc.draw_silent(pl()), tc.draw_silent(pl())])
         }
     }
+}
 
-    /// FORMAT (3 samples): same property, exercising the per-sample colon splice.
-    #[test]
-    fn format_in_place_overwrite_matches_dedup_oracle(
-        ops in proptest::collection::vec(arb_fmt_op(), 1..12)
-    ) {
-        let (header, contig, keys) = fmt_header();
-        let oracle = dedup(&ops, FmtOp::field);
-        for format in [OutputFormat::Bcf, OutputFormat::Vcf] {
-            let with_dups = encode_fmt(format, &keys, &contig, &header, &ops);
-            let once = encode_fmt(format, &keys, &contig, &header, &oracle);
-            prop_assert_eq!(with_dups, once, "format={:?} ops={:?}", format, ops);
-        }
+fn arb_fmt_op() -> impl PrintableGenerator<FmtOp> {
+    arb_fmt_op_inner().print_as_debug()
+}
+
+/// INFO: a duplicate-laden write sequence encodes byte-for-byte identically
+/// to its de-duplicated form, for both BCF and VCF text.
+#[hegel::test(test_cases = 400)]
+fn info_in_place_overwrite_matches_dedup_oracle(tc: TestCase) {
+    let ops = tc.draw(gs::vecs(arb_info_op()).min_size(1).max_size(14 - 1));
+    let (header, contig, keys) = info_header();
+    let oracle = dedup(&ops, InfoOp::field);
+    for format in [OutputFormat::Bcf, OutputFormat::Vcf] {
+        let with_dups = encode_info(format, &keys, &contig, &header, &ops);
+        let once = encode_info(format, &keys, &contig, &header, &oracle);
+        assert_eq!(with_dups, once, "format={:?} ops={:?}", format, ops);
+    }
+}
+
+/// FORMAT (3 samples): same property, exercising the per-sample colon splice.
+#[hegel::test(test_cases = 400)]
+fn format_in_place_overwrite_matches_dedup_oracle(tc: TestCase) {
+    let ops = tc.draw(gs::vecs(arb_fmt_op()).min_size(1).max_size(12 - 1));
+    let (header, contig, keys) = fmt_header();
+    let oracle = dedup(&ops, FmtOp::field);
+    for format in [OutputFormat::Bcf, OutputFormat::Vcf] {
+        let with_dups = encode_fmt(format, &keys, &contig, &header, &ops);
+        let once = encode_fmt(format, &keys, &contig, &header, &oracle);
+        assert_eq!(with_dups, once, "format={:?} ops={:?}", format, ops);
     }
 }
