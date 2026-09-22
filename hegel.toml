@@ -10,8 +10,18 @@
 # `#[hegel::test(test_cases = N)]`, which wins over the profile.
 #
 # For a deeper run: `HEGEL_DEFAULT_PROFILE=thorough cargo nextest run`, or
-# `HEGEL_TEST_CASES=10000 cargo nextest run` to override the per-test counts
-# too.
+# `HEGEL_TEST_CASES=500 cargo nextest run` to override the per-test counts too.
+# Those are different axes and the nightly workflow runs both as separate jobs:
+# the profile reaches the ~200 tests that scale with it, `HEGEL_TEST_CASES`
+# reaches the 83 that pin their own count, and neither substitutes for the
+# other.
+#
+# `thorough` is 50000 because that is where the curve stops being free.
+# Measured on the whole suite under nextest: 1000 cases 14s, 10000 42s,
+# 50000 180s, 200000 700s. The first jump is 10x the cases for 3x the time —
+# fixed overhead and the pinned tests dominate at low counts — but from 50000
+# on it is linear, so more cases buy proportionally more time and nothing
+# structural. 200000 was run once and found nothing 50000 had not.
 
 [profiles.development]
 test_cases = 256
@@ -20,4 +30,4 @@ test_cases = 256
 test_cases = 1000
 
 [profiles.thorough]
-test_cases = 10000
+test_cases = 50000

@@ -16,6 +16,17 @@ env:
   RUST_BACKTRACE: 1
   RUST_BOOSTRAP: 1
 
+# Three jobs, because there are three different things a nightly run can go
+# deeper on and they do not substitute for one another:
+#
+#   fuzz       — unstructured bytes against the parsers, looking for panics.
+#   thorough   — the ~200 property tests that scale with the hegel profile,
+#                at 50000 cases instead of PR CI's 1000.
+#   deep-oracles — the ~83 property tests that pin their own case count,
+#                which the profile cannot reach. These are the subprocess
+#                round-trips against bcftools, samtools, htslib and noodles:
+#                the strongest validation in the repo, and the ones that have
+#                actually found bugs.
 jobs:
   fuzz:
     name: Fuzz all targets
@@ -57,17 +68,58 @@ jobs:
             libssl-dev libcurl4-openssl-dev \
             samtools tabix bcftools
 
-      # The `thorough` profile in hegel.toml is 10000 cases against the CI
+      # The `thorough` profile in hegel.toml is 50000 cases against the CI
       # profile's 1000. Nothing ran it before, so the rare paths a property
       # only reaches once in a few thousand draws were generated and never
-      # executed. It belongs on the nightly schedule rather than in PR CI:
-      # the same reasoning as the fuzz job above, for the same cost.
+      # executed.
       #
-      # `HEGEL_TEST_CASES` is deliberately *not* set — it would override the
-      # per-test counts that the expensive subprocess round-trips against
-      # bcftools, htslib and samtools pin for themselves, and those exist
-      # because they are minutes, not seconds, at four figures.
+      # 50000 is where the curve stops being free. Measured locally under
+      # nextest: 1000 cases 14s, 10000 42s, 50000 180s. The first jump is 10x
+      # the cases for 3x the time, because fixed overhead and the pinned tests
+      # dominate at low counts; by 50000 the profile-scaled properties dominate
+      # and the cost is linear, so going further buys more of the same draws at
+      # full price. `cargo test --all` is roughly 2.5x the nextest wall.
+      #
+      # `HEGEL_TEST_CASES` is deliberately *not* set here — it would override
+      # the per-test counts, which is a different axis with a different cost.
+      # That is the `deep-oracles` job below.
       - name: Test
         env:
           HEGEL_DEFAULT_PROFILE: thorough
+        run: cargo test --all
+
+  deep-oracles:
+    name: Property tests (pinned counts overridden)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install htslib build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool pkg-config \
+            zlib1g-dev libbz2-dev liblzma-dev \
+            libssl-dev libcurl4-openssl-dev \
+            samtools tabix bcftools
+
+      # 83 of the 283 property tests pin their own `test_cases` and ignore the
+      # profile entirely, so the `thorough` job above never goes deeper on them
+      # however high it is set. Those 83 are the expensive ones — a samtools,
+      # bcftools or htslib subprocess per case — which is exactly why they pin
+      # themselves, and also exactly why they are worth running deep on a
+      # schedule where nobody is waiting: every bug this suite has found came
+      # from one of them, not from an in-process property.
+      #
+      # `HEGEL_TEST_CASES` is the only thing that overrides a pinned count. 500
+      # is roughly 10x what most of them pin (16-64 for the subprocess
+      # round-trips, 100-400 for the cheaper ones) and costs 68s on the whole
+      # suite under nextest, against 14s at the PR-CI profile — cheaper than
+      # the `thorough` job above, because the expensive tests are expensive per
+      # *case* and there are only 83 of them. There is room to raise this.
+      - name: Test
+        env:
+          HEGEL_TEST_CASES: "500"
         run: cargo test --all
