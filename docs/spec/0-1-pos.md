@@ -171,6 +171,27 @@ invent the same `unwrap_or` fallback. A caller that needs to *know* the bound
 was hit MUST use the checked form; these MUST NOT be used to paper over a
 position that should have been validated.
 
+## Serialization
+
+r[pos.serde]
+Under the `serde` feature, `Pos0` and `Pos1` MUST each implement `Serialize`
+and `Deserialize`. Both MUST use the identical wire format: the bare logical
+value as a `u32`, with no wrapper and no coordinate-system tag — which system a
+field is in is the field's type, not something the document restates. In
+particular `Pos0` MUST serialize its logical value, never the stored
+`value + 1`. Deserialization MUST re-check the bound on the way in and reject
+exactly what that type's `new` rejects — above `i32::MAX` for either, `0` for
+`Pos1` — so a round trip cannot introduce a position the type says is
+impossible, and the error MUST name the offending value and the range it was
+expected in.
+
+r[pos.serde_optional]
+The serde impls MUST live behind a `serde` feature, so a caller that only
+reads BAM can drop the dependency with `default-features = false`. The feature
+MUST be **on by default**: the impls on every other value type existed
+unconditionally through 0.2, and removing them from a default build would
+break callers that never asked for a feature at all.
+
 ## Reference intervals
 
 Every reader and the pileup engine work on the same kind of interval, and the

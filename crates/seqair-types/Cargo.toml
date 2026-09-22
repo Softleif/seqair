@@ -9,22 +9,31 @@ rust-version = "1.98.1"
 readme = "README.md"
 
 [dependencies]
-serde = { workspace = true }
+serde = { workspace = true, optional = true }
 thiserror = { workspace = true }
 bytemuck = { workspace = true }
 winnow = "1.0.2"
-smallvec = { version = "2.0.0-alpha.12", features = ["serde", "std"] }
-smol_str = { version = "0.3.6", features = ["serde"] }
+smallvec = { version = "2.0.0-alpha.12", features = ["std"] }
+smol_str = "0.3.6"
 
 rust-htslib = { workspace = true, optional = true, default-features = false }
 
 [features]
+# On by default: the impls existed unconditionally through 0.2, so turning
+# them off here would break every caller that serializes a `Base`. A caller
+# that wants neither serde nor its compile time opts out with
+# `default-features = false`.
+default = ["serde"]
 # Adds conversion traits to convert between seqair-types and rust-htslib types
 hts-compat = ["dep:rust-htslib"]
+# `Serialize`/`Deserialize` for the value types, including the re-exported
+# `SmolStr` and `SmallVec`.
+serde = ["dep:serde", "smallvec/serde", "smol_str/serde"]
 
 [dev-dependencies]
 insta = { workspace = true }
 hegeltest = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

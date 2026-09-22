@@ -1696,6 +1696,7 @@ dependencies = [
  "insta",
  "rust-htslib",
  "serde",
+ "serde_json",
  "smallvec 2.0.0-alpha.13",
  "smol_str",
  "thiserror 2.0.20",

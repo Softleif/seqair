@@ -2,17 +2,8 @@ use crate::SmolStr;
 use thiserror::Error;
 
 /// Represents a DNA base (A, C, G, T, or Unknown)
-#[derive(
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    bytemuck::NoUninit,
-)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, bytemuck::NoUninit)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]
 #[must_use]
 pub enum Base {

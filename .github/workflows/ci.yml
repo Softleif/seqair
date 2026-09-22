@@ -69,13 +69,23 @@ jobs:
         continue-on-error: true
         working-directory: crates/seqair/fuzz
         run: cargo check
+      # Every other step runs `--all-features`, so nothing would compile the
+      # serde-off path: `r[pos.serde_optional]` requires it to keep working,
+      # and the next forgotten `#[cfg(feature = "serde")]` would ship green.
+      - name: Default features off
+        id: nodefault
+        continue-on-error: true
+        run: |
+          cargo check -p seqair-types --no-default-features --all-targets
+          cargo check -p seqair --no-default-features --all-targets
       # `continue-on-error` above is only there to let every step report before
       # the job stops, so each one must be named here. The fuzz step was not,
       # and five targets went unbuildable for several API changes without a
       # single red run.
-      - name: Fail if clippy, tests or the fuzz targets failed
+      - name: Fail if clippy, tests, the fuzz targets or the no-default build failed
         if: >-
           steps.clippy.outcome == 'failure'
           || steps.test.outcome == 'failure'
           || steps.fuzz.outcome == 'failure'
+          || steps.nodefault.outcome == 'failure'
         run: exit 1

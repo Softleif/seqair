@@ -19,7 +19,8 @@ use std::{
 /// // you can use the value as a float
 /// assert_eq!(rms.round(), 3.0);
 /// ```
-#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[must_use]
 pub struct RootMeanSquare(f64);
 

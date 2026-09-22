@@ -2,7 +2,8 @@ use crate::bam_flags::{BamFlags, consts::*};
 use std::fmt;
 
 /// Original top or bottom strand of a read
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[must_use]
 pub enum Strand {
     /// Original top

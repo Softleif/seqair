@@ -28,6 +28,10 @@ const POS_MAX: u32 = i32::MAX as u32;
 /// and one less than the representation of [`Pos0::MAX`].
 const POS_MAX_NZ: NonZeroU32 = NonZeroU32::new(POS_MAX).expect("i32::MAX is not zero");
 
+/// The serde "expected" text depends on `POS_MAX` being spelled out, since a
+/// `&'static str` cannot interpolate a constant.
+const _: () = assert!(POS_MAX == 2_147_483_647);
+
 // r[impl pos.type]
 // r[impl pos.size]
 // r[impl pos.systems]
@@ -863,6 +867,72 @@ impl fmt::Display for Offset {
     }
 }
 
+// ---- Serde ----
+
+/// The "expected" half of a serde range error. Spelled out rather than built
+/// from `POS_MAX`, which a `const _` above pins to the same number.
+#[cfg(feature = "serde")]
+const EXPECTED_POS0: &str = "a 0-based position in 0..=2147483647";
+
+/// The 1-based counterpart of [`EXPECTED_POS0`].
+#[cfg(feature = "serde")]
+const EXPECTED_POS1: &str = "a 1-based position in 1..=2147483647";
+
+// r[impl pos.serde]
+// r[impl pos.two_types]
+/// The wire format is the bare `u32`. Which coordinate system a field is in is
+/// the field's type, not something the document restates.
+#[cfg(feature = "serde")]
+impl serde::Serialize for Pos0 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.as_u32())
+    }
+}
+
+// r[impl pos.serde]
+// r[impl pos.two_types]
+/// Identical wire format to [`Pos0`]: the bare number.
+#[cfg(feature = "serde")]
+impl serde::Serialize for Pos1 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.as_u32())
+    }
+}
+
+// r[impl pos.serde]
+// r[impl pos.two_types]
+/// The bound is re-checked on the way in, so a hand-edited or foreign document
+/// cannot produce a position above `i32::MAX`.
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Pos0 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Unsigned(u64::from(value)),
+                &EXPECTED_POS0,
+            )
+        })
+    }
+}
+
+// r[impl pos.serde]
+// r[impl pos.two_types]
+/// The bound is re-checked on the way in, so a hand-edited or foreign document
+/// cannot produce a `Pos1` of `0`.
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Pos1 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Unsigned(u64::from(value)),
+                &EXPECTED_POS1,
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 impl Pos0 {
     /// Test-only convenience: panics if value is out of range.
@@ -1597,6 +1667,76 @@ mod tests {
         assert_eq!(zero.checked_sub_offset(Offset::new(i64::MIN)), None);
         assert_eq!(one.saturating_sub_offset(Offset::new(i64::MIN)), Pos1::MAX);
         assert_eq!(one.checked_sub_offset(Offset::new(i64::MIN)), None);
+    }
+
+    #[cfg(feature = "serde")]
+    mod serde_tests {
+        use serde::Serialize;
+        use serde::de::DeserializeOwned;
+
+        use super::*;
+
+        // r[verify pos.serde]
+        #[test]
+        fn a_position_serializes_as_its_bare_number() {
+            assert_eq!(serde_json::to_string(&Pos0::new(41).unwrap()).unwrap(), "41");
+            assert_eq!(serde_json::to_string(&Pos1::new(42).unwrap()).unwrap(), "42");
+            // The two share a representation; the wire format is the logical
+            // value, so the same base serializes differently in each system.
+            assert_eq!(serde_json::to_string(&Pos0::ZERO).unwrap(), "0");
+            assert_eq!(serde_json::to_string(&Pos1::MIN).unwrap(), "1");
+        }
+
+        // r[verify pos.serde]
+        #[test]
+        fn deserialization_rejects_what_the_constructor_rejects() {
+            assert!(serde_json::from_str::<Pos1>("0").is_err(), "1-based has no zero");
+            assert!(serde_json::from_str::<Pos0>("0").is_ok());
+            let too_big = u64::from(POS_MAX) + 1;
+            assert!(serde_json::from_str::<Pos0>(&too_big.to_string()).is_err());
+            assert!(serde_json::from_str::<Pos1>(&too_big.to_string()).is_err());
+
+            let err = serde_json::from_str::<Pos1>("0").unwrap_err().to_string();
+            assert!(err.contains("1-based position in 1..=2147483647"), "{err}");
+            let err = serde_json::from_str::<Pos0>(&too_big.to_string()).unwrap_err().to_string();
+            assert!(err.contains("0-based position in 0..=2147483647"), "{err}");
+        }
+
+        // r[verify pos.serde]
+        /// The wire format is the number and nothing else, and deserialization
+        /// admits exactly what `new` admits — the two checks cannot drift.
+        fn serde_matches_construction<P: Position + Serialize + DeserializeOwned>(value: u32) {
+            let parsed = serde_json::from_str::<P>(&value.to_string()).ok();
+            assert_eq!(parsed, P::build(value), "{value} for {}", P::NAME);
+            let Some(pos) = parsed else { return };
+            let json = serde_json::to_string(&pos).expect("a number always serializes");
+            assert_eq!(json, value.to_string(), "no wrapper, no system tag");
+            assert_eq!(serde_json::from_str::<P>(&json).ok(), Some(pos));
+        }
+
+        #[hegel::test]
+        fn serde_admits_exactly_what_new_does(tc: TestCase) {
+            let value = tc.draw(gs::integers::<u32>());
+            serde_matches_construction::<Pos0>(value);
+            serde_matches_construction::<Pos1>(value);
+        }
+
+        // r[verify pos.serde]
+        /// `"5"`, `5.0` and `-1` are not positions; none is coerced.
+        #[hegel::test]
+        fn serde_rejects_anything_but_a_bare_unsigned_integer(tc: TestCase) {
+            let value = tc.draw(gs::integers::<u32>().max_value(POS_MAX));
+            for text in [format!("\"{value}\""), format!("{value}.0"), format!("-{}", value + 1)] {
+                assert!(
+                    serde_json::from_str::<Pos0>(&text).is_err(),
+                    "{text} parsed as a position"
+                );
+                assert!(
+                    serde_json::from_str::<Pos1>(&text).is_err(),
+                    "{text} parsed as a position"
+                );
+            }
+        }
     }
 
     // ---- QPos ----

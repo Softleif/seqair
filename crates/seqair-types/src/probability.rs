@@ -95,6 +95,7 @@ impl Default for Probability {
     }
 }
 
+#[cfg(feature = "serde")]
 impl serde::Serialize for Probability {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -104,6 +105,7 @@ impl serde::Serialize for Probability {
     }
 }
 
+#[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Probability {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
