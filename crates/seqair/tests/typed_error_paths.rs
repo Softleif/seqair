@@ -21,6 +21,8 @@
 )]
 
 use hegel::prelude::*;
+use seqair::bam::aux::AuxValue;
+use seqair::bam::aux_data::{AuxData, AuxDataError};
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::{OwnedBamRecord, OwnedRecordError};
@@ -735,5 +737,119 @@ fn the_first_failure_wins_and_everything_after_it_is_poisoned(tc: TestCase) {
             matches!(err, BamWriteError::Poisoned),
             "write {i} after {failure:?} gave {err:?}, expected Poisoned",
         );
+    }
+}
+
+// ── AuxData: which error, and whether the block moved ───────────────────
+
+/// An aux block with a few tags already in it, so a setter that wrote before it
+/// validated would have something behind it to corrupt.
+fn populated_aux() -> AuxData {
+    let mut aux = AuxData::new();
+    aux.set_string(*b"RG", b"group-1");
+    aux.set_int(*b"NM", 3).unwrap();
+    aux.set_float(*b"XF", 1.5);
+    aux.set_int(*b"AS", -120).unwrap();
+    aux
+}
+
+/// The two ends of what a BAM aux integer can spell: `c`/`s`/`i` reach down to
+/// `i32::MIN`, `C`/`S`/`I` up to `u32::MAX`, and nothing outside that union has
+/// a type byte ([SAM1] §4.2.5).
+const AUX_INT_MAX: i64 = u32::MAX as i64;
+const AUX_INT_MIN: i64 = i32::MIN as i64;
+
+// r[verify bam.owned_record.aux_int_encoding]
+// r[verify bam.owned_record.failed_mutation_is_inert]
+/// One step past either end of the aux integer range is refused, the error
+/// names the value it was handed, and the block is byte-identical afterwards.
+#[test]
+fn set_int_past_either_end_of_the_aux_range_names_the_value_and_changes_nothing() {
+    for (label, value) in [("above u32::MAX", AUX_INT_MAX + 1), ("below i32::MIN", AUX_INT_MIN - 1)]
+    {
+        let mut aux = populated_aux();
+        let before = aux.as_bytes().to_vec();
+
+        let err = aux
+            .set_int(*b"ZZ", value)
+            .expect_err("a value with no BAM integer type must be refused");
+        let AuxDataError::IntegerOutOfRange { value: reported } = err else {
+            panic!("{label}: expected IntegerOutOfRange, got {err:?}");
+        };
+        assert_eq!(reported, value, "{label}: the error must carry the rejected value");
+        assert_eq!(aux.as_bytes(), before, "{label}: the aux block must be untouched");
+        assert_eq!(aux.get(*b"ZZ"), None, "{label}: no partial tag may be left behind");
+    }
+}
+
+// r[verify bam.owned_record.aux_int_encoding]
+/// The last accepted value at each end really is accepted — without this the
+/// test above would still pass if `set_int` rejected the whole range.
+#[test]
+fn set_int_accepts_both_ends_of_the_aux_range() {
+    let mut aux = AuxData::new();
+    aux.set_int(*b"HI", AUX_INT_MAX).expect("u32::MAX has type I");
+    aux.set_int(*b"LO", AUX_INT_MIN).expect("i32::MIN has type i");
+    assert_eq!(aux.get(*b"HI"), Some(AuxValue::U32(u32::MAX)));
+    assert_eq!(aux.get(*b"LO"), Some(AuxValue::I32(i32::MIN)));
+}
+
+// r[verify bam.owned_record.aux_data]
+// r[verify bam.owned_record.failed_mutation_is_inert]
+/// `set_char` is the other fallible setter that validates ahead of writing: a
+/// byte outside the SAM `A`-type grammar `[!-~]` is refused by value, and the
+/// block does not move.
+#[test]
+fn set_char_outside_the_printable_ascii_grammar_names_the_byte_and_changes_nothing() {
+    for value in [0x00u8, 0x20, 0x7f, 0xff] {
+        let mut aux = populated_aux();
+        let before = aux.as_bytes().to_vec();
+
+        let err = aux.set_char(*b"ZC", value).expect_err("A-type takes printable ASCII only");
+        let AuxDataError::InvalidCharByte { value: reported } = err else {
+            panic!("byte {value:#04x}: expected InvalidCharByte, got {err:?}");
+        };
+        assert_eq!(reported, value, "the error must carry the rejected byte");
+        assert_eq!(aux.as_bytes(), before, "byte {value:#04x}: the aux block must be untouched");
+    }
+}
+
+// r[verify bam.owned_record.aux_int_encoding]
+// r[verify bam.owned_record.failed_mutation_is_inert]
+/// Across the whole i64 domain, `set_int` splits exactly at the aux integer
+/// range: inside it the tag round-trips, outside it the call reports the value
+/// and leaves the block byte-identical. Testing both directions from one
+/// generator is what rules out a setter that simply refuses everything.
+#[hegel::test]
+fn set_int_is_exactly_as_permissive_as_the_bam_integer_types(tc: TestCase) {
+    let value = tc.draw(gs::integers::<i64>());
+    let mut aux = populated_aux();
+    let before = aux.as_bytes().to_vec();
+
+    let in_range = (AUX_INT_MIN..=AUX_INT_MAX).contains(&value);
+    tc.event(if in_range { "in range" } else { "out of range" });
+
+    match aux.set_int(*b"ZZ", value) {
+        Ok(()) => {
+            assert!(in_range, "{value} is outside the BAM integer types but was accepted");
+            let round_tripped = match aux.get(*b"ZZ") {
+                Some(AuxValue::U8(v)) => i64::from(v),
+                Some(AuxValue::U16(v)) => i64::from(v),
+                Some(AuxValue::U32(v)) => i64::from(v),
+                Some(AuxValue::I8(v)) => i64::from(v),
+                Some(AuxValue::I16(v)) => i64::from(v),
+                Some(AuxValue::I32(v)) => i64::from(v),
+                other => panic!("set_int stored a non-integer tag: {other:?}"),
+            };
+            assert_eq!(round_tripped, value, "the stored tag must read back as the value set");
+        }
+        Err(err) => {
+            assert!(!in_range, "{value} fits a BAM integer type but was refused: {err:?}");
+            let AuxDataError::IntegerOutOfRange { value: reported } = err else {
+                panic!("expected IntegerOutOfRange, got {err:?}");
+            };
+            assert_eq!(reported, value, "the error must carry the rejected value");
+            assert_eq!(aux.as_bytes(), before, "a refused set_int must not move the block");
+        }
     }
 }

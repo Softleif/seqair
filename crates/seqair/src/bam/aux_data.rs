@@ -79,6 +79,7 @@ impl AuxData {
     /// 0x21..=0x7E). Bytes outside that range return
     /// [`AuxDataError::InvalidCharByte`] and the underlying buffer is left
     /// untouched (no orphaned bytes — validation runs before any mutation).
+    // r[impl bam.owned_record.failed_mutation_is_inert]
     pub fn set_char(&mut self, tag: [u8; 2], value: u8) -> Result<(), AuxDataError> {
         if !matches!(value, 0x21..=0x7E) {
             return Err(AuxDataError::InvalidCharByte { value });
@@ -105,6 +106,7 @@ impl AuxData {
     }
 
     // r[impl bam.owned_record.aux_int_encoding]
+    // r[impl bam.owned_record.failed_mutation_is_inert]
     /// Add or replace an integer tag, auto-selecting the smallest BAM type.
     ///
     /// Unsigned types are preferred for non-negative values (matching htslib behavior):
