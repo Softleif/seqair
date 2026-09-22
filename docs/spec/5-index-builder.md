@@ -35,6 +35,11 @@ TBI output MUST be BGZF-compressed with magic `TBI\x01`, followed by: n_ref (onl
 r[index_builder.csi_format]
 CSI output MUST be BGZF-compressed with magic `CSI\x01`, followed by: min_shift, depth, l_aux, aux data; then per-reference bin data with per-bin loffset (computed from linear index), no separate linear index array.
 
+r[index_builder.csi_depth]
+A CSI builder's `depth` MUST be large enough to address the longest reference in the header. With a given `min_shift`, depth `d` covers positions below `2^(min_shift + 3d)`; a record beyond that bound is assigned a bin that no region query ever asks for, so it stays in the file but becomes unreachable through the index — a silent loss, not an error. The builder MUST therefore raise `depth` until the bound exceeds the longest contig, the way htslib's `hts_adjust_csi_settings` does. This is what CSI is for: TBI and BAI are fixed at min_shift=14, depth=5 and stop at 2^29, which several real assemblies exceed.
+
+This rule is not met today. `Writer` builds its index with `min_shift=14, depth=5` for every output format and every header, so a contig over 512 Mbp is written, indexed, and then invisible to `bcftools view -r`. `csi_cannot_index_past_the_depth_5_bin_limit` in `vcf_csi_properties.rs` reproduces it and is marked `#[ignore]` until the builder picks its depth from the header.
+
 ## BAI output
 
 The IndexBuilder already accumulates the same bin/chunk/linear data structures that BAI requires — the internal representation is format-agnostic. BAI, TBI, and CSI differ only in their serialization: BAI is uncompressed with a simpler header; TBI adds BGZF compression and column config; CSI replaces the linear index with per-bin loffsets.
