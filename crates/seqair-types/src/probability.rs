@@ -165,9 +165,11 @@ mod tests {
     }
 
     #[hegel::test]
-    fn valid_range_accepted(tc: TestCase) {
+    fn valid_range_accepted_and_preserved(tc: TestCase) {
         let v = tc.draw(unit_interval());
-        assert!(Probability::new(v).is_ok());
+        let p = Probability::new(v).expect("0..=1 is the accepted range");
+        // The newtype stores the value, so it comes back bit-for-bit.
+        assert_eq!((*p).to_bits(), v.to_bits());
     }
 
     #[hegel::test]

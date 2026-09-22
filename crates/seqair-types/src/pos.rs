@@ -870,13 +870,25 @@ mod tests {
 
     // r[verify pos.add_offset]
     #[hegel::test]
-    fn checked_add_never_exceeds_i32_max(tc: TestCase) {
+    /// `checked_add_offset` returns `Some` exactly when the sum is a position,
+    /// and then it is the sum. Drawing the offset on both sides of zero, and
+    /// far enough past `i32::MAX` to leave the range, covers both answers —
+    /// the `if let` this used to be could not tell a correct `None` from a
+    /// missing position.
+    fn checked_add_is_exact_and_bounded(tc: TestCase) {
         let v = tc.draw(gs::integers::<u32>().max_value(I32_MAX_U32));
-        let off = tc.draw(gs::integers::<i64>().min_value(0).max_value(100));
-        if let Some(p) = Pos0::new(v)
-            && let Some(result) = p.checked_add_offset(Offset::new(off))
-        {
-            assert!(result.as_u32() <= I32_MAX_U32, "checked_add must not exceed i32::MAX");
+        let off = tc.draw(gs::integers::<i64>().min_value(-1000).max_value(1000));
+        let p = Pos0::new(v).expect("v <= i32::MAX");
+        let sum = i64::from(v) + off;
+        let representable = (0..=i64::from(I32_MAX_U32)).contains(&sum);
+
+        match p.checked_add_offset(Offset::new(off)) {
+            Some(result) => {
+                assert!(representable, "{v} + {off} = {sum} is not a position, but got {result:?}");
+                assert_eq!(i64::from(result.as_u32()), sum);
+                assert!(result.as_u32() <= I32_MAX_U32, "checked_add must not exceed i32::MAX");
+            }
+            None => assert!(!representable, "{v} + {off} = {sum} is a position, but got None"),
         }
     }
 

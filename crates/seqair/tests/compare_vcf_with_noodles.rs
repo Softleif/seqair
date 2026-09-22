@@ -285,7 +285,7 @@ fn bcf_write_record_roundtrip(tc: TestCase) {
         writer.finish().unwrap();
     }
 
-    // Must be parseable by noodles
+    // noodles must parse it, and read back what we wrote.
     let mut reader = noodles::bcf::io::Reader::new(Cursor::new(&bcf_output));
     let noodles_header = reader.read_header().unwrap();
     let mut records = Vec::new();
@@ -293,6 +293,20 @@ fn bcf_write_record_roundtrip(tc: TestCase) {
         records.push(result.unwrap());
     }
     assert_eq!(records.len(), 1, "noodles should parse exactly 1 record");
+    let rec = &records[0];
+
+    assert_eq!(rec.reference_sequence_name(), "chr1");
+    assert_eq!(rec.variant_start().map(|p| p.get()), Some(pos.as_u32() as usize), "POS");
+    assert_eq!(rec.reference_bases(), alleles.ref_text().as_str(), "REF");
+    let alts: Vec<&str> = rec.alternate_bases().as_ref().iter().map(String::as_str).collect();
+    let alt_texts = alleles.alt_texts();
+    let expected_alts: Vec<&str> = alt_texts.iter().map(|s| s.as_str()).collect();
+    assert_eq!(alts, expected_alts, "ALT");
+    match (rec.quality_score(), qual) {
+        (Some(got), Some(want)) => assert_eq!(got, want, "QUAL"),
+        (None, None) => {}
+        (got, want) => panic!("QUAL: noodles read {got:?}, we wrote {want:?}"),
+    }
 }
 
 #[hegel::test(test_cases = 50)]
@@ -328,6 +342,15 @@ fn vcf_text_roundtrip_through_noodles(tc: TestCase) {
         records.push(result.unwrap());
     }
     assert_eq!(records.len(), 1, "noodles VCF reader should parse exactly 1 record");
+    let rec = &records[0];
+
+    assert_eq!(rec.reference_sequence_name(), "chr1");
+    assert_eq!(rec.variant_start().map(|p| p.get()), Some(pos.as_u32() as usize), "POS");
+    assert_eq!(rec.reference_bases(), alleles.ref_text().as_str(), "REF");
+    let alts: Vec<&str> = rec.alternate_bases().as_ref().iter().map(String::as_str).collect();
+    let alt_texts = alleles.alt_texts();
+    let expected_alts: Vec<&str> = alt_texts.iter().map(|s| s.as_str()).collect();
+    assert_eq!(alts, expected_alts, "ALT");
 }
 
 // ── Multi-sample round-trip tests ────────────────────────────────────

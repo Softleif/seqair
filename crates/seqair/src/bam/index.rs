@@ -966,17 +966,38 @@ mod tests {
         }
     }
 
+    /// The merged list must be the input's union — the same bytes, no more.
+    ///
+    /// The oracle marks every byte each input chunk covers in a flat array and
+    /// reads the runs back off it, which shares no arithmetic with the in-place
+    /// two-pointer sweep under test. Checking only that the input is *covered*
+    /// (as this test used to) passes for a `merge` that returns one chunk
+    /// spanning everything and reads the whole file back.
     #[hegel::test]
-    fn merge_covers_same_positions(tc: TestCase) {
+    fn merge_is_exactly_the_union_of_its_input(tc: TestCase) {
         let chunks = tc.draw(gs::vecs(arb_chunk()).min_size(1).max_size(19));
-        let merged = merge(&chunks);
-        // Every point in any input chunk must be in some merged chunk
+
+        // `arb_chunk` bounds begin < 10_000 and end < begin + 5_000.
+        const SPAN: usize = 15_000;
+        let mut covered = vec![false; SPAN];
         for &(b, e) in &chunks {
-            let mid = b + (e - b) / 2;
-            assert!(
-                merged.iter().any(|&(mb, me)| mb <= mid && mid <= me),
-                "midpoint {mid} of [{b}, {e}] not covered by merged {merged:?}"
-            );
+            for byte in covered.get_mut(b as usize..e as usize).expect("bounded by arb_chunk") {
+                *byte = true;
+            }
         }
+        let mut expected: Vec<(u64, u64)> = Vec::new();
+        let mut run_start: Option<usize> = None;
+        for i in 0..=SPAN {
+            match (run_start, covered.get(i).copied().unwrap_or(false)) {
+                (None, true) => run_start = Some(i),
+                (Some(start), false) => {
+                    expected.push((start as u64, i as u64));
+                    run_start = None;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(merge(&chunks), expected);
     }
 }

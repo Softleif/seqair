@@ -147,8 +147,13 @@ fn gzi_translate_rejects_overflow(tc: TestCase) {
     let gzi = seqair::fasta::GziIndex::parse_test(&data);
 
     let target = u64::from(u16::MAX) + overflow;
-    let result = gzi.translate(target);
-    assert!(result.is_err(), "translate({}) should fail but returned {:?}", target, result);
+    let err = gzi
+        .translate(target)
+        .expect_err("an offset past u16::MAX inside one block cannot be addressed");
+    assert!(
+        matches!(err, seqair::fasta::GziError::WithinBlockOverflow { .. }),
+        "translate({target}) failed with {err:?}, not WithinBlockOverflow"
+    );
 }
 
 // ---------------------------------------------------------------------------

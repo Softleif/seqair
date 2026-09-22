@@ -614,11 +614,21 @@ mod tests {
         assert!(Base::from_str(&multi).is_err());
     }
 
+    /// `from_str` accepts exactly the one-character strings in `BASE_CHARS`
+    /// and rejects everything else — including the empty string, multi-byte
+    /// characters, and control characters — without panicking.
     #[hegel::test]
-    fn from_str_never_panics(tc: TestCase) {
+    fn from_str_accepts_exactly_the_base_characters(tc: TestCase) {
         let input = tc.draw(gs::text().max_size(10));
-        // Just ensure no panic; errors are fine
-        let _ = Base::from_str(&input);
+        let parsed = Base::from_str(&input);
+        let is_single_base = matches!(input.chars().next(), Some(c) if BASE_CHARS.contains(&c))
+            && input.chars().count() == 1;
+        assert_eq!(
+            parsed.is_ok(),
+            is_single_base,
+            "from_str({input:?}) = {parsed:?}, but {input:?} is{} a single base character",
+            if is_single_base { "" } else { " not" },
+        );
     }
 
     // r[verify base_decode.ascii_simd]

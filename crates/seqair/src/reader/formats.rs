@@ -267,13 +267,83 @@ mod properties {
     use std::io::Write as _;
     use tempfile::NamedTempFile;
 
-    #[hegel::test]
-    fn fuzz_detect_format(tc: TestCase) {
-        let data = tc.draw(gs::binary().max_size(256 * 1024));
-        // Just ensure detect_format doesn't panic on arbitrary input data.
+    /// Write `data` to a temporary file and detect its format.
+    fn detect_bytes(data: &[u8]) -> (NamedTempFile, Result<Format, ReaderError>) {
         let mut f = NamedTempFile::new().expect("tempfile");
-        f.write_all(data.as_slice()).expect("write");
+        f.write_all(data).expect("write");
         f.flush().expect("flush");
-        let _ = detect(f.path());
+        let outcome = detect(f.path());
+        (f, outcome)
+    }
+
+    // r[verify unified.detect_format]
+    /// The first four bytes decide everything but the BGZF branch, whatever
+    /// follows them: too short, `CRAM`, a leading `@`, and "none of the above"
+    /// each have one answer, and only `1f 8b` makes the answer depend on the
+    /// rest of the file. Arbitrary bytes are overwhelmingly that last case, so
+    /// this is mostly the `UnrecognizedFormat` arm — the one a detector is
+    /// most likely to get wrong by reaching for content it should not read.
+    #[hegel::test]
+    fn detect_classifies_by_magic_alone(tc: TestCase) {
+        let data = tc.draw(gs::binary().max_size(256 * 1024));
+        let (_file, outcome) = detect_bytes(&data);
+
+        match data.get(..4) {
+            None => assert!(
+                matches!(
+                    outcome,
+                    Err(ReaderError::Format { source: FormatDetectionError::FileTooShort { .. } })
+                ),
+                "{} bytes: {outcome:?}",
+                data.len()
+            ),
+            Some(b"CRAM") => assert!(matches!(outcome, Ok(Format::Cram)), "{outcome:?}"),
+            Some([0x1f, 0x8b, ..]) => {
+                // The BGZF branch reads on; either answer is the content's.
+            }
+            Some([b'@', ..]) => assert!(
+                matches!(
+                    outcome,
+                    Err(ReaderError::Format {
+                        source: FormatDetectionError::UncompressedSam { .. }
+                    })
+                ),
+                "{outcome:?}"
+            ),
+            Some(magic) => assert!(
+                matches!(
+                    outcome,
+                    Err(ReaderError::Format {
+                        source: FormatDetectionError::UnrecognizedFormat { magic: m, .. }
+                    }) if m == magic
+                ),
+                "{magic:?}: {outcome:?}"
+            ),
+        }
+    }
+
+    // r[verify unified.detect_format]
+    /// The accept direction the arbitrary-bytes property almost never reaches:
+    /// a file whose first four bytes are a format's magic is that format, no
+    /// matter what trails them.
+    #[hegel::test]
+    fn detect_accepts_any_file_behind_a_known_magic(tc: TestCase) {
+        let trailing = tc.draw(gs::binary().max_size(1024));
+
+        let mut cram = b"CRAM".to_vec();
+        cram.extend_from_slice(&trailing);
+        let (_f, outcome) = detect_bytes(&cram);
+        assert!(matches!(outcome, Ok(Format::Cram)), "CRAM magic: {outcome:?}");
+
+        let mut sam = b"@HD\t".to_vec();
+        sam.extend_from_slice(&trailing);
+        let (_f, outcome) = detect_bytes(&sam);
+        assert!(
+            matches!(
+                outcome,
+                Err(ReaderError::Format { source: FormatDetectionError::UncompressedSam { .. } })
+            ),
+            "plain SAM: {outcome:?}"
+        );
     }
 }

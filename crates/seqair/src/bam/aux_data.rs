@@ -905,6 +905,57 @@ mod tests {
         assert_eq!(rt.unwrap().as_i64(), Some(v));
     }
 
+    // r[verify bam.owned_record.aux_int_encoding]
+    /// The type `set_int` picks is the one the rule's table names: the
+    /// smallest that fits, unsigned first for a non-negative value. Reading
+    /// the value back cannot see this — every type decodes to the same `i64` —
+    /// so the variant is checked directly, against the table rather than
+    /// against the writer's own branches.
+    #[hegel::test]
+    fn int_set_picks_the_smallest_type_unsigned_first(tc: TestCase) {
+        let v = tc.draw(
+            gs::integers::<i64>().min_value(i64::from(i32::MIN)).max_value(i64::from(u32::MAX)),
+        );
+        let mut aux = AuxData::new();
+        aux.set_int(*b"XX", v).unwrap();
+        let stored = aux.get(*b"XX").expect("just written");
+
+        let expected = match v {
+            0..=255 => "C",
+            256..=65_535 => "S",
+            65_536.. => "I",
+            -128..=-1 => "c",
+            -32_768..=-129 => "s",
+            _ => "i",
+        };
+        let actual = match stored {
+            AuxValue::U8(_) => "C",
+            AuxValue::U16(_) => "S",
+            AuxValue::U32(_) => "I",
+            AuxValue::I8(_) => "c",
+            AuxValue::I16(_) => "s",
+            AuxValue::I32(_) => "i",
+            ref other => panic!("set_int wrote a non-integer tag: {other:?}"),
+        };
+        assert_eq!(actual, expected, "set_int({v}) chose `{actual}`, the table says `{expected}`");
+    }
+
+    // r[verify bam.owned_record.aux_int_encoding]
+    /// "Values outside the union of i32 and u32 ranges MUST return a typed
+    /// error" — the reject direction of the same rule.
+    #[hegel::test]
+    fn int_set_rejects_values_outside_i32_and_u32(tc: TestCase) {
+        let v = tc.draw(hegel::one_of!(
+            gs::integers::<i64>().max_value(i64::from(i32::MIN) - 1),
+            gs::integers::<i64>().min_value(i64::from(u32::MAX) + 1),
+        ));
+        let mut aux = AuxData::new();
+        let err = aux.set_int(*b"XX", v).unwrap_err();
+        assert!(matches!(err, AuxDataError::IntegerOutOfRange { .. }), "{v}: {err:?}");
+        // The rejected write must leave no orphaned bytes behind.
+        assert!(aux.is_empty(), "a rejected set_int left {} bytes", aux.as_bytes().len());
+    }
+
     // r[verify bam.owned_record.aux_array_setters]
     /// B-array setters produce bytes that the parser reads back correctly.
     #[hegel::test]

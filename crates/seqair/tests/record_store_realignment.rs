@@ -579,10 +579,29 @@ fn set_alignment_rejects_wrong_query_len(tc: TestCase) {
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
+    let before = {
+        let rec = store.record(idx).unwrap();
+        (rec.pos, rec.end_pos, rec.cigar().to_vec())
+    };
+
     // Build a cigar with wrong query length (qlen + delta)
     let wrong_cigar = pack_cigar(&[(qlen + delta, CIGAR_M)]);
-    let result = store.set_alignment(idx, Pos0::new(100).unwrap(), &wrong_cigar);
-    assert!(result.is_err(), "should reject query length {} != seq_len {}", qlen + delta, qlen);
+    let err = store
+        .set_alignment(idx, Pos0::new(200).unwrap(), &wrong_cigar)
+        .expect_err("a CIGAR that spends a different number of query bases must be refused");
+    // `DecodeError` is not re-exported, so the variant is checked through the
+    // message, which must name both lengths rather than say "invalid CIGAR".
+    let message = err.to_string();
+    assert!(
+        message.contains(&(qlen + delta).to_string()) && message.contains(&qlen.to_string()),
+        "{message:?} does not name the CIGAR query length {} or the seq_len {qlen}",
+        qlen + delta,
+    );
+
+    // A refused realignment must leave the record exactly as it was — the
+    // position it was asked to move to is a different one on purpose.
+    let rec = store.record(idx).unwrap();
+    assert_eq!((rec.pos, rec.end_pos, rec.cigar().to_vec()), before, "partially applied");
 }
 
 // ---------------------------------------------------------------------------

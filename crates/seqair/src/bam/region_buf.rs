@@ -1108,27 +1108,38 @@ mod tests {
         let seed = tc.draw(gs::integers::<u8>());
         let data: Vec<u8> = (0..block_size).map(|j| seed.wrapping_add(j as u8)).collect();
 
-        let (mut file, offsets) = make_bgzf_file(&[data]);
+        let (mut file, offsets) = make_bgzf_file(std::slice::from_ref(&data));
 
         // Corrupt a byte in the compressed payload (after the 18-byte header)
         let corrupt_pos = offsets[0] as usize + 18;
-        if corrupt_pos < file.len() - 8 {
-            file[corrupt_pos] ^= 0xFF;
+        tc.assume(corrupt_pos < file.len() - 8);
+        file[corrupt_pos] ^= 0xFF;
 
-            let chunks = vec![Chunk {
-                begin: VirtualOffset::new(offsets[0], 0),
-                end: VirtualOffset::new(offsets[0] + 1, 0),
-            }];
+        let chunks = vec![Chunk {
+            begin: VirtualOffset::new(offsets[0], 0),
+            end: VirtualOffset::new(offsets[0] + 1, 0),
+        }];
 
-            let mut cursor = std::io::Cursor::new(file);
-            let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
-            buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
+        let mut cursor = std::io::Cursor::new(file);
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
+        buf.seek_virtual(VirtualOffset::new(offsets[0], 0)).unwrap();
 
-            let mut output = vec![0u8; block_size];
-            let result = buf.read_exact_into(&mut output);
-            // Should fail with either DecompressionFailed or ChecksumMismatch
-            assert!(result.is_err(), "corrupted block should fail");
-        }
+        let mut output = vec![0u8; block_size];
+        let err = buf
+            .read_exact_into(&mut output)
+            .expect_err("a corrupted deflate payload must not decode silently");
+        // The flipped byte either breaks the deflate stream or survives it and
+        // fails the block's CRC32. Anything else — a short read, a truncation
+        // error — would mean the corruption was noticed for the wrong reason.
+        assert!(
+            matches!(
+                err,
+                BgzfError::DecompressionFailed { .. } | BgzfError::ChecksumMismatch { .. }
+            ),
+            "corrupt payload reported as {err:?}"
+        );
+        // Whatever it decoded, it must not be the original data.
+        assert_ne!(output, data, "a corrupted block decoded to the original bytes");
     }
 
     // --- read_record tests ---
