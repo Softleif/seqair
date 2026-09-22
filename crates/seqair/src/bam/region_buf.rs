@@ -965,7 +965,7 @@ mod tests {
     fn single_range_roundtrip(tc: TestCase) {
         let n_blocks = tc.draw(gs::integers::<usize>().min_value(1).max_value(7));
         let block_size = tc.draw(gs::integers::<usize>().min_value(10).max_value(499));
-        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let seed = tc.draw(gs::integers::<u8>());
         // Build blocks with deterministic content
         let blocks: Vec<Vec<u8>> = (0..n_blocks)
             .map(|i| {
@@ -1006,7 +1006,7 @@ mod tests {
         let n_blocks_b = tc.draw(group());
         let block_size = tc.draw(gs::integers::<usize>().min_value(10).max_value(299));
         let padding = tc.draw(gs::integers::<usize>().min_value(100_000).max_value(199_999));
-        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let seed = tc.draw(gs::integers::<u8>());
         let blocks_a: Vec<Vec<u8>> = (0..n_blocks_a)
             .map(|i| {
                 (0..block_size).map(|j| seed.wrapping_add(i as u8).wrapping_add(j as u8)).collect()
@@ -1077,7 +1077,7 @@ mod tests {
         let block_size = tc.draw(gs::integers::<usize>().min_value(20).max_value(499));
         // at most block_size-1, capped at 18 for simplicity
         let within = tc.draw(gs::integers::<usize>().min_value(1).max_value(18));
-        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let seed = tc.draw(gs::integers::<u8>());
         let data: Vec<u8> = (0..block_size).map(|j| seed.wrapping_add(j as u8)).collect();
 
         let (file, offsets) = make_bgzf_file(std::slice::from_ref(&data));
@@ -1105,7 +1105,7 @@ mod tests {
     #[hegel::test]
     fn crc32_detects_corruption(tc: TestCase) {
         let block_size = tc.draw(gs::integers::<usize>().min_value(20).max_value(199));
-        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let seed = tc.draw(gs::integers::<u8>());
         let data: Vec<u8> = (0..block_size).map(|j| seed.wrapping_add(j as u8)).collect();
 
         let (mut file, offsets) = make_bgzf_file(&[data]);
@@ -1272,7 +1272,7 @@ mod tests {
     fn read_record_roundtrip(tc: TestCase) {
         let n_records = tc.draw(gs::integers::<usize>().min_value(1).max_value(9));
         let body_size = tc.draw(gs::integers::<usize>().min_value(4).max_value(199));
-        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let seed = tc.draw(gs::integers::<u8>());
         {
             let records: Vec<Vec<u8>> = (0..n_records)
                 .map(|i| {
@@ -1485,7 +1485,7 @@ mod tests {
     fn window_budget_parity(tc: TestCase) {
         let n_blocks = tc.draw(gs::integers::<usize>().min_value(1).max_value(11));
         let block_size = tc.draw(gs::integers::<usize>().min_value(1).max_value(3_999));
-        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let seed = tc.draw(gs::integers::<u8>());
         let blocks: Vec<Vec<u8>> = (0..n_blocks)
             .map(|i| {
                 (0..block_size)
@@ -1526,7 +1526,7 @@ mod tests {
         let n_b = tc.draw(group());
         let block_size = tc.draw(gs::integers::<usize>().min_value(10).max_value(299));
         let padding = tc.draw(gs::integers::<usize>().min_value(100_000).max_value(199_999));
-        let seed = tc.draw(gs::integers::<u8>().max_value(254));
+        let seed = tc.draw(gs::integers::<u8>());
         let mk = |base: u8, n: usize| -> Vec<Vec<u8>> {
             (0..n)
                 .map(|i| {

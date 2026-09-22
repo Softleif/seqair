@@ -537,7 +537,7 @@ fn set_alignment_preserves_seq_and_qual(tc: TestCase) {
 #[hegel::test(test_cases = 200)]
 fn sort_after_set_alignment_is_position_ordered(tc: TestCase) {
     let new_positions =
-        tc.draw(gs::vecs(gs::integers::<u32>().max_value(49999)).min_size(3).max_size(10 - 1));
+        tc.draw(gs::vecs(gs::integers::<u32>().max_value(49999)).min_size(3).max_size(9));
     let mut store = RecordStore::new();
     for (i, &_) in new_positions.iter().enumerate() {
         let raw = make_simple_record(

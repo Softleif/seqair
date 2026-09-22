@@ -328,9 +328,8 @@ use hegel::prelude::*;
 // r[verify record_store.extras.sort_dedup_generic]
 #[hegel::test]
 fn sort_preserves_extras_mapping(tc: TestCase) {
-    let positions = tc.draw(
-        gs::vecs(gs::integers::<i32>().min_value(0).max_value(999)).min_size(2).max_size(50 - 1),
-    );
+    let positions = tc
+        .draw(gs::vecs(gs::integers::<i32>().min_value(0).max_value(999)).min_size(2).max_size(49));
     let mut store = RecordStore::new();
     for &pos in &positions {
         store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ExtractPos).unwrap();
@@ -355,9 +354,8 @@ fn sort_preserves_extras_mapping(tc: TestCase) {
 // r[verify record_store.extras.sort_dedup_generic]
 #[hegel::test]
 fn dedup_preserves_extras_on_typed_store(tc: TestCase) {
-    let positions = tc.draw(
-        gs::vecs(gs::integers::<i32>().min_value(0).max_value(19)).min_size(2).max_size(30 - 1),
-    );
+    let positions = tc
+        .draw(gs::vecs(gs::integers::<i32>().min_value(0).max_value(19)).min_size(2).max_size(29));
     let mut store = RecordStore::new();
     for &pos in &positions {
         // Same flags/mapq/seq_len so duplicates at same pos are detected.

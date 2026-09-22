@@ -134,7 +134,7 @@ fn profile(reads: &[Placed]) -> Vec<(u64, usize)> {
 /// failed silently otherwise, dropping every record that arrived early.
 #[hegel::test]
 fn the_pileup_does_not_depend_on_push_order(tc: TestCase) {
-    let reads = tc.draw(gs::vecs(placed().print_as_debug()).min_size(1).max_size(12 - 1));
+    let reads = tc.draw(gs::vecs(placed().print_as_debug()).min_size(1).max_size(11));
     let rotation = tc.draw(gs::integers::<usize>().max_value(11));
     let mut sorted = reads.clone();
     sorted.sort_by_key(|r| r.pos);
@@ -154,7 +154,7 @@ fn the_pileup_does_not_depend_on_push_order(tc: TestCase) {
 /// no columns at all.
 #[hegel::test]
 fn every_pushed_read_is_wholly_pileuped(tc: TestCase) {
-    let reads = tc.draw(gs::vecs(placed().print_as_debug()).min_size(1).max_size(12 - 1));
+    let reads = tc.draw(gs::vecs(placed().print_as_debug()).min_size(1).max_size(11));
     let expected: usize = reads.iter().map(|r| r.len as usize).sum();
     let observed: usize = profile(&reads).iter().map(|&(_, depth)| depth).sum();
     assert_eq!(observed, expected);
@@ -168,7 +168,7 @@ fn every_pushed_read_is_wholly_pileuped(tc: TestCase) {
 /// a raw one. Both must reach the same pileup.
 #[hegel::test]
 fn preparing_an_already_prepared_store_is_a_no_op(tc: TestCase) {
-    let reads = tc.draw(gs::vecs(placed().print_as_debug()).min_size(1).max_size(8 - 1));
+    let reads = tc.draw(gs::vecs(placed().print_as_debug()).min_size(1).max_size(7));
     let build = || {
         let mut store = RecordStore::new();
         for (i, r) in reads.iter().enumerate() {
@@ -214,9 +214,8 @@ fn dedup_collapses_duplicates_that_arrive_out_of_order() {
 #[hegel::test]
 fn dedup_leaves_exactly_the_distinct_records(tc: TestCase) {
     let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(7));
-    let copies = tc.draw(
-        gs::vecs(gs::integers::<usize>().min_value(1).max_value(2)).min_size(1).max_size(8 - 1),
-    );
+    let copies = tc
+        .draw(gs::vecs(gs::integers::<usize>().min_value(1).max_value(2)).min_size(1).max_size(7));
     let rotation = tc.draw(gs::integers::<usize>().max_value(7));
     let mut planned: Vec<usize> = Vec::new();
     for i in 0..count {

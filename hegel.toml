@@ -1,19 +1,23 @@
 # Hegel property-based testing settings. See `hegel::docs::settings`.
 #
-# 256 cases is what the suite ran at before the hegel migration, so the
-# move did not quietly reduce coverage. Individual tests that are
-# expensive (subprocess round-trips against bcftools, htslib or noodles)
-# lower it with `#[hegel::test(test_cases = N)]`.
+# `development` (local runs) keeps 256 cases, which is what the suite ran at
+# before the hegel migration — fast enough to stay in the edit loop. `ci`
+# takes 1000: the whole workspace still finishes in under ten seconds, and
+# the extra cases are where the rare paths live.
 #
-# For a deeper run, either `HEGEL_DEFAULT_PROFILE=thorough cargo nextest run`
-# or `HEGEL_TEST_CASES=10000 cargo nextest run` (the latter overrides the
-# per-test counts too).
+# Individual tests that are expensive — the subprocess round-trips against
+# bcftools, htslib and noodles — pin their own count with
+# `#[hegel::test(test_cases = N)]`, which wins over the profile.
+#
+# For a deeper run: `HEGEL_DEFAULT_PROFILE=thorough cargo nextest run`, or
+# `HEGEL_TEST_CASES=10000 cargo nextest run` to override the per-test counts
+# too.
 
 [profiles.development]
 test_cases = 256
 
 [profiles.ci]
-test_cases = 256
+test_cases = 1000
 
 [profiles.thorough]
 test_cases = 10000

@@ -167,8 +167,7 @@ fn tiny_window_budget_matches_oracle() {
 // r[verify region_buf.window_budget]
 #[hegel::test(test_cases = 20)]
 fn both_decompressors_match(tc: TestCase) {
-    let data =
-        tc.draw(gs::vecs(gs::integers::<u8>().max_value(254)).min_size(1).max_size(1_000_000 - 1));
+    let data = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(1).max_size(999_999));
     let level = tc.draw(gs::integers::<u8>().min_value(1).max_value(9));
     let compressed = bgzf_compress(&data, level);
 

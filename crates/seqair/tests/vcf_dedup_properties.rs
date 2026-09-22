@@ -295,7 +295,7 @@ fn arb_fmt_op() -> impl PrintableGenerator<FmtOp> {
 /// to its de-duplicated form, for both BCF and VCF text.
 #[hegel::test(test_cases = 400)]
 fn info_in_place_overwrite_matches_dedup_oracle(tc: TestCase) {
-    let ops = tc.draw(gs::vecs(arb_info_op()).min_size(1).max_size(14 - 1));
+    let ops = tc.draw(gs::vecs(arb_info_op()).min_size(1).max_size(13));
     let (header, contig, keys) = info_header();
     let oracle = dedup(&ops, InfoOp::field);
     for format in [OutputFormat::Bcf, OutputFormat::Vcf] {
@@ -308,7 +308,7 @@ fn info_in_place_overwrite_matches_dedup_oracle(tc: TestCase) {
 /// FORMAT (3 samples): same property, exercising the per-sample colon splice.
 #[hegel::test(test_cases = 400)]
 fn format_in_place_overwrite_matches_dedup_oracle(tc: TestCase) {
-    let ops = tc.draw(gs::vecs(arb_fmt_op()).min_size(1).max_size(12 - 1));
+    let ops = tc.draw(gs::vecs(arb_fmt_op()).min_size(1).max_size(11));
     let (header, contig, keys) = fmt_header();
     let oracle = dedup(&ops, FmtOp::field);
     for format in [OutputFormat::Bcf, OutputFormat::Vcf] {
