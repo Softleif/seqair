@@ -271,21 +271,26 @@ fn arb_cigar(tc: &TestCase) -> Vec<(u32, u8)> {
         _ => (tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(20)), 1u8), // I
     };
 
-    loop {
-        let lead = clip(tc);
-        let n_inner = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(8));
-        let inner: Vec<(u32, u8)> = (0..n_inner).map(|_| inner_op(tc)).collect();
-        let trail = clip(tc);
+    let lead = clip(tc);
+    let n_inner = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(8));
+    let mut inner: Vec<(u32, u8)> = (0..n_inner).map(|_| inner_op(tc)).collect();
+    let trail = clip(tc);
 
-        let mut ops = Vec::new();
-        ops.extend(lead);
-        ops.extend(inner);
-        ops.extend(trail);
-        // Need at least one ref-consuming op.
-        if ops.iter().any(|(_, op)| matches!(op, 0 | 2 | 3 | 7 | 8)) {
-            return ops;
-        }
+    // At least one op must consume reference, or there is no position to look
+    // up. An all-`I` draw is repaired by turning one op into a match rather
+    // than redrawing the whole CIGAR: a rejection loop here would make the
+    // smallest CIGAR the generator can produce large, and shrinking useless.
+    if !inner.iter().any(|(_, op)| matches!(op, 0 | 2 | 3 | 7 | 8)) {
+        let which = tc.draw_silent(gs::integers::<usize>().max_value(inner.len() - 1));
+        let op = tc.draw_silent(gs::sampled_from(&MATCH_OPS[..]));
+        inner[which].1 = op;
     }
+
+    let mut ops = Vec::new();
+    ops.extend(lead);
+    ops.extend(inner);
+    ops.extend(trail);
+    ops
 }
 
 // r[verify cigar.qpos_at]
@@ -346,13 +351,15 @@ fn arb_cigar_parts(tc: &TestCase) -> Vec<(u32, char)> {
         let max = if matches!(op, 'M' | '=' | 'X') { 200 } else { 20 };
         (tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(max)), op)
     };
-    loop {
-        let n = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(8));
-        let parts: Vec<(u32, char)> = (0..n).map(|_| part(tc)).collect();
-        if parts.iter().any(|(_, op)| matches!(op, 'M' | '=' | 'X' | 'D' | 'N')) {
-            return parts;
-        }
+    let n = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(8));
+    let mut parts: Vec<(u32, char)> = (0..n).map(|_| part(tc)).collect();
+    // As in `arb_cigar`: repair an all-`I` draw in place instead of rejecting
+    // it, so the smallest CIGAR the generator can produce stays small.
+    if !parts.iter().any(|(_, op)| matches!(op, 'M' | '=' | 'X' | 'D' | 'N')) {
+        let which = tc.draw_silent(gs::integers::<usize>().max_value(parts.len() - 1));
+        parts[which].1 = tc.draw_silent(gs::sampled_from(&['M', '=', 'X', 'D', 'N']));
     }
+    parts
 }
 
 // r[verify cigar.qpos_at]

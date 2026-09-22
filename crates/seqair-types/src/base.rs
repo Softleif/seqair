@@ -614,21 +614,41 @@ mod tests {
         assert!(Base::from_str(&multi).is_err());
     }
 
-    /// `from_str` accepts exactly the one-character strings in `BASE_CHARS`
-    /// and rejects everything else — including the empty string, multi-byte
-    /// characters, and control characters — without panicking.
+    // r[verify types.base.from_str_validation+2]
+    /// The whole grammar the rule states, on arbitrary text: trim, then
+    /// nothing is `Empty`, one byte is that base or `InvalidBase(byte)`, and
+    /// anything longer is `MultipleChars`. The expected base comes from the
+    /// rule's own list rather than the implementation's `| 0x20` case fold.
     #[hegel::test]
-    fn from_str_accepts_exactly_the_base_characters(tc: TestCase) {
+    fn from_str_matches_the_documented_grammar(tc: TestCase) {
         let input = tc.draw(gs::text().max_size(10));
         let parsed = Base::from_str(&input);
-        let is_single_base = matches!(input.chars().next(), Some(c) if BASE_CHARS.contains(&c))
-            && input.chars().count() == 1;
-        assert_eq!(
-            parsed.is_ok(),
-            is_single_base,
-            "from_str({input:?}) = {parsed:?}, but {input:?} is{} a single base character",
-            if is_single_base { "" } else { " not" },
-        );
+
+        match input.trim().as_bytes() {
+            [] => assert!(matches!(parsed, Err(BaseError::Empty)), "{input:?} -> {parsed:?}"),
+            [byte] => {
+                let expected = match *byte {
+                    b'A' | b'a' => Some(Base::A),
+                    b'C' | b'c' => Some(Base::C),
+                    b'G' | b'g' => Some(Base::G),
+                    b'T' | b't' => Some(Base::T),
+                    b'N' | b'n' => Some(Base::Unknown),
+                    _ => None,
+                };
+                match expected {
+                    Some(base) => {
+                        assert!(matches!(parsed, Ok(b) if b == base), "{input:?} -> {parsed:?}");
+                    }
+                    None => assert!(
+                        matches!(parsed, Err(BaseError::InvalidBase(b)) if b == *byte),
+                        "{input:?} -> {parsed:?}, expected InvalidBase({byte:#04x})"
+                    ),
+                }
+            }
+            _ => {
+                assert!(matches!(parsed, Err(BaseError::MultipleChars)), "{input:?} -> {parsed:?}")
+            }
+        }
     }
 
     // r[verify base_decode.ascii_simd]

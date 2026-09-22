@@ -53,7 +53,7 @@ The SIMD ASCII converter MUST produce identical output to applying `Base::from(u
 ## FromStr validation
 
 r[types.base.from_str_validation+2]
-`FromStr for Base` MUST accept only a single character A, C, G, T, or N (case-insensitive) after trimming whitespace. Multi-character input (after trimming) MUST return `Err(BaseError::MultipleChars)`. Any single character that is not A/C/G/T/N MUST return `Err(BaseError::InvalidBase(byte))` where `byte` is the first byte of the trimmed input. Empty input MUST return `Err(BaseError::Empty)`.
+`FromStr for Base` MUST accept only a single character A, C, G, T, or N (case-insensitive) after trimming whitespace. Input that is more than one *byte* after trimming MUST return `Err(BaseError::MultipleChars)` — that includes a single non-ASCII character, whose leading byte would name nothing useful in an `InvalidBase`. Any single byte that is not A/C/G/T/N MUST return `Err(BaseError::InvalidBase(byte))` where `byte` is that byte. Empty input MUST return `Err(BaseError::Empty)`.
 
 ## Error display
 
