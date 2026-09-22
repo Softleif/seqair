@@ -20,8 +20,8 @@
 )]
 
 mod helpers;
+use hegel::prelude::*;
 use helpers::ri;
-use proptest::prelude::*;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::{Indel, PileupColumn, PileupEngine};
 use seqair::bam::record_idx::RecordIdx;
@@ -920,7 +920,7 @@ fn mate_of_is_none_when_the_mate_is_absent_from_the_column() {
     });
 }
 
-// ── proptest ──────────────────────────────────────────────────────────────
+// ── properties ────────────────────────────────────────────────────────────
 
 /// One generated template: two mates, optionally with a supplementary copy of
 /// the first mate, optionally with the second mate missing from the store.
@@ -935,188 +935,180 @@ struct Template {
     same_contig: bool,
 }
 
-fn templates() -> impl Strategy<Value = Vec<Template>> {
-    prop::collection::vec(
-        (
-            100i32..400,
-            20u32..80,
-            100i32..400,
-            20u32..80,
-            any::<bool>(),
-            any::<bool>(),
-            any::<bool>(),
-        )
-            .prop_map(
-                |(a_pos, a_len, b_pos, b_len, supplementary, mate_present, same_contig)| Template {
-                    a_pos,
-                    a_len,
-                    b_pos,
-                    b_len,
-                    supplementary,
-                    mate_present,
-                    same_contig,
-                },
-            ),
-        0..8,
-    )
+#[hegel::composite]
+fn arb_template(tc: &TestCase) -> Template {
+    let pos = || gs::integers::<i32>().min_value(100).max_value(399);
+    let len = || gs::integers::<u32>().min_value(20).max_value(79);
+    Template {
+        a_pos: tc.draw_silent(pos()),
+        a_len: tc.draw_silent(len()),
+        b_pos: tc.draw_silent(pos()),
+        b_len: tc.draw_silent(len()),
+        supplementary: tc.draw_silent(gs::booleans()),
+        mate_present: tc.draw_silent(gs::booleans()),
+        same_contig: tc.draw_silent(gs::booleans()),
+    }
 }
 
-proptest! {
-    // r[verify record_store.link_mates+2]
-    // r[verify record_store.link_mates.stats]
-    /// Whatever the input, these hold: a link is symmetric, both ends carry the
-    /// same qname and reciprocal positions, no nameless or non-primary record is
-    /// ever linked, and every record is claimed by at most one partner. The
-    /// generator deliberately produces repeated qnames, nameless records, and
-    /// forced hash collisions.
-    #[test]
-    fn links_are_always_well_formed(
-        reads in prop::collection::vec(
-            (
-                0usize..4,        // qname index, so qnames repeat
-                100i32..300,      // pos
-                20u32..60,        // len
-                100i32..300,      // mate pos
-                0usize..5,        // flag shape
-                any::<bool>(),    // nameless
-            ),
-            0..12,
-        ),
-        collide in any::<bool>(),
-    ) {
-        const NAMES: [&[u8]; 4] = [b"a", b"bb", b"ccc", b"dddd"];
-        let mut store = RecordStore::new();
-        for &(name_idx, pos, len, mate_pos, shape, nameless) in &reads {
-            let flags = match shape {
-                0 => PAIRED | FIRST,
-                1 => PAIRED | SECOND,
-                2 => PAIRED | FIRST | SUPPLEMENTARY,
-                3 => PAIRED | SECOND | SECONDARY,
-                _ => 0,
-            };
-            let read = Read::mate(pos, len, mate_pos, 0).with_flags(flags);
-            let name: &[u8] = if nameless { b"" } else { NAMES[name_idx] };
-            push(&mut store, name, read);
-        }
-        if collide {
-            // Every record hashes the same: linking must fall back entirely on
-            // the qname bytes.
-            for n in 0..store.len() {
-                store.set_qname_hash(ri(u32::try_from(n).unwrap()), 1).expect("record exists");
-            }
-        }
+fn templates() -> impl PrintableGenerator<Vec<Template>> {
+    gs::vecs(arb_template().print_as_debug()).max_size(7)
+}
 
-        let stats = store.link_mates();
-
-        let mut linked_count = 0u32;
-        for idx in store.indices() {
-            let rec = store.record(idx).unwrap();
-            let Some(partner) = rec.mate_idx() else { continue };
-            linked_count += 1;
-            prop_assert_ne!(partner, idx, "a record must not link to itself");
-            prop_assert_eq!(store.record(partner).unwrap().mate_idx(), Some(idx), "links are symmetric");
-            prop_assert_eq!(store.record(idx).unwrap().qname(), store.record(partner).unwrap().qname());
-            prop_assert!(!store.record(idx).unwrap().qname().is_empty(), "a nameless record must never link");
-            prop_assert!(rec.qname_hash().is_some());
-            prop_assert_eq!(rec.pos.as_i32(), store.record(partner).unwrap().next_pos);
-            prop_assert_eq!(store.record(partner).unwrap().pos.as_i32(), rec.next_pos);
-            prop_assert!(rec.flags.is_paired() && !rec.flags.is_unmapped());
-            prop_assert!(!rec.flags.is_secondary() && !rec.flags.is_supplementary());
+// r[verify record_store.link_mates+2]
+// r[verify record_store.link_mates.stats]
+/// Whatever the input, these hold: a link is symmetric, both ends carry the
+/// same qname and reciprocal positions, no nameless or non-primary record is
+/// ever linked, and every record is claimed by at most one partner. The
+/// generator deliberately produces repeated qnames, nameless records, and
+/// forced hash collisions.
+#[hegel::test]
+fn links_are_always_well_formed(tc: TestCase) {
+    let reads = tc.draw(
+        gs::vecs(gs::tuples!(
+            gs::integers::<usize>().max_value(3), // name index
+            gs::integers::<i32>().min_value(100).max_value(299), // pos
+            gs::integers::<u32>().min_value(20).max_value(59), // len
+            gs::integers::<i32>().min_value(100).max_value(299), // mate pos
+            gs::integers::<usize>().max_value(4), // flag shape
+            gs::booleans(),                       // nameless
+        ))
+        .max_size(11),
+    );
+    let collide = tc.draw(gs::booleans());
+    const NAMES: [&[u8]; 4] = [b"a", b"bb", b"ccc", b"dddd"];
+    let mut store = RecordStore::new();
+    for &(name_idx, pos, len, mate_pos, shape, nameless) in &reads {
+        let flags = match shape {
+            0 => PAIRED | FIRST,
+            1 => PAIRED | SECOND,
+            2 => PAIRED | FIRST | SUPPLEMENTARY,
+            3 => PAIRED | SECOND | SECONDARY,
+            _ => 0,
+        };
+        let read = Read::mate(pos, len, mate_pos, 0).with_flags(flags);
+        let name: &[u8] = if nameless { b"" } else { NAMES[name_idx] };
+        push(&mut store, name, read);
+    }
+    if collide {
+        // Every record hashes the same: linking must fall back entirely on
+        // the qname bytes.
+        for n in 0..store.len() {
+            store.set_qname_hash(ri(u32::try_from(n).unwrap()), 1).expect("record exists");
         }
-        prop_assert_eq!(linked_count, stats.pairs * 2, "stats must count each pair once");
     }
 
-    // r[verify record_store.link_mates+2]
-    // r[verify record_store.mate_overlap]
-    #[test]
-    fn linking_is_symmetric_and_exact(templates in templates()) {
-        let mut store = RecordStore::new();
-        // (record idx, template idx, is the mate half, expected partner idx)
-        let mut expected: Vec<(RecordIdx, Option<RecordIdx>)> = Vec::new();
+    let stats = store.link_mates();
 
-        for (t, tpl) in templates.iter().enumerate() {
-            let qname = format!("frag{t}");
-            let mate_tid = if tpl.same_contig { 0 } else { 1 };
-            let a = Read {
-                mate_tid,
-                ..Read::mate(tpl.a_pos, tpl.a_len, tpl.b_pos, FIRST)
+    let mut linked_count = 0u32;
+    for idx in store.indices() {
+        let rec = store.record(idx).unwrap();
+        let Some(partner) = rec.mate_idx() else { continue };
+        linked_count += 1;
+        assert_ne!(partner, idx, "a record must not link to itself");
+        assert_eq!(store.record(partner).unwrap().mate_idx(), Some(idx), "links are symmetric");
+        assert_eq!(store.record(idx).unwrap().qname(), store.record(partner).unwrap().qname());
+        assert!(
+            !store.record(idx).unwrap().qname().is_empty(),
+            "a nameless record must never link"
+        );
+        assert!(rec.qname_hash().is_some());
+        assert_eq!(rec.pos.as_i32(), store.record(partner).unwrap().next_pos);
+        assert_eq!(store.record(partner).unwrap().pos.as_i32(), rec.next_pos);
+        assert!(rec.flags.is_paired() && !rec.flags.is_unmapped());
+        assert!(!rec.flags.is_secondary() && !rec.flags.is_supplementary());
+    }
+    assert_eq!(linked_count, stats.pairs * 2, "stats must count each pair once");
+}
+
+// r[verify record_store.link_mates+2]
+// r[verify record_store.mate_overlap]
+#[hegel::test]
+fn linking_is_symmetric_and_exact(tc: TestCase) {
+    let templates = tc.draw(templates());
+    let mut store = RecordStore::new();
+    // (record idx, template idx, is the mate half, expected partner idx)
+    let mut expected: Vec<(RecordIdx, Option<RecordIdx>)> = Vec::new();
+
+    for (t, tpl) in templates.iter().enumerate() {
+        let qname = format!("frag{t}");
+        let mate_tid = if tpl.same_contig { 0 } else { 1 };
+        let a = Read { mate_tid, ..Read::mate(tpl.a_pos, tpl.a_len, tpl.b_pos, FIRST) };
+        let a_idx = push(&mut store, qname.as_bytes(), a);
+
+        let b_idx = tpl.mate_present.then(|| {
+            let b = Read {
+                tid: if tpl.same_contig { 0 } else { 1 },
+                ..Read::mate(tpl.b_pos, tpl.b_len, tpl.a_pos, SECOND)
             };
-            let a_idx = push(&mut store, qname.as_bytes(), a);
+            push(&mut store, qname.as_bytes(), b)
+        });
 
-            let b_idx = tpl.mate_present.then(|| {
-                let b = Read {
-                    tid: if tpl.same_contig { 0 } else { 1 },
-                    ..Read::mate(tpl.b_pos, tpl.b_len, tpl.a_pos, SECOND)
-                };
-                push(&mut store, qname.as_bytes(), b)
-            });
-
-            if tpl.supplementary {
-                // A supplementary copy at a position that is nobody's next_pos.
-                let s = Read::mate(tpl.a_pos, tpl.a_len, tpl.b_pos, FIRST)
-                    .with_flags(PAIRED | FIRST | SUPPLEMENTARY);
-                let s_idx = push(&mut store, qname.as_bytes(), s);
-                expected.push((s_idx, None));
-            }
-
-            // A pair links only when both halves are present on the same contig.
-            match b_idx {
-                Some(b_idx) if tpl.same_contig => {
-                    expected.push((a_idx, Some(b_idx)));
-                    expected.push((b_idx, Some(a_idx)));
-                }
-                Some(b_idx) => {
-                    expected.push((a_idx, None));
-                    expected.push((b_idx, None));
-                }
-                None => expected.push((a_idx, None)),
-            }
+        if tpl.supplementary {
+            // A supplementary copy at a position that is nobody's next_pos.
+            let s = Read::mate(tpl.a_pos, tpl.a_len, tpl.b_pos, FIRST)
+                .with_flags(PAIRED | FIRST | SUPPLEMENTARY);
+            let s_idx = push(&mut store, qname.as_bytes(), s);
+            expected.push((s_idx, None));
         }
 
-        let _stats = store.link_mates();
-
-        for (idx, partner) in expected {
-            prop_assert_eq!(
-                store.record(idx).unwrap().mate_idx(),
-                partner,
-                "record {} linked to {:?}, expected {:?}",
-                idx,
-                store.record(idx).unwrap().mate_idx(),
-                partner
-            );
-
-            // Symmetry and the interval, computed independently from the two records.
-            if let Some(partner) = partner {
-                prop_assert_eq!(store.record(partner).unwrap().mate_idx(), Some(idx));
-                prop_assert_eq!(store.record(idx).unwrap().qname(), store.record(partner).unwrap().qname(), "links need equal qnames");
-                prop_assert_eq!(
-                    store.record(idx).unwrap().pos.as_i32(),
-                    store.record(partner).unwrap().next_pos,
-                    "links need reciprocal mate positions"
-                );
-                prop_assert_eq!(
-                    store.record(partner).unwrap().pos.as_i32(),
-                    store.record(idx).unwrap().next_pos
-                );
-                prop_assert_eq!(
-                    store.record(idx).unwrap().tid,
-                    store.record(partner).unwrap().tid,
-                    "links never cross contigs"
-                );
-                let a = store.record(idx).unwrap();
-                let b = store.record(partner).unwrap();
-                let start = a.pos.max(b.pos);
-                let last = a.end_pos.min(b.end_pos);
-                let end = if last < start {
-                    start
-                } else {
-                    Pos0::new(last.as_u64() as u32 + 1).unwrap()
-                };
-                prop_assert_eq!(store.record(idx).unwrap().mate_overlap(), Some(start..end));
-                prop_assert_eq!(store.record(partner).unwrap().mate_overlap(), Some(start..end));
-            } else {
-                prop_assert_eq!(store.record(idx).unwrap().mate_overlap(), None);
+        // A pair links only when both halves are present on the same contig.
+        match b_idx {
+            Some(b_idx) if tpl.same_contig => {
+                expected.push((a_idx, Some(b_idx)));
+                expected.push((b_idx, Some(a_idx)));
             }
+            Some(b_idx) => {
+                expected.push((a_idx, None));
+                expected.push((b_idx, None));
+            }
+            None => expected.push((a_idx, None)),
+        }
+    }
+
+    let _stats = store.link_mates();
+
+    for (idx, partner) in expected {
+        assert_eq!(
+            store.record(idx).unwrap().mate_idx(),
+            partner,
+            "record {} linked to {:?}, expected {:?}",
+            idx,
+            store.record(idx).unwrap().mate_idx(),
+            partner
+        );
+
+        // Symmetry and the interval, computed independently from the two records.
+        if let Some(partner) = partner {
+            assert_eq!(store.record(partner).unwrap().mate_idx(), Some(idx));
+            assert_eq!(
+                store.record(idx).unwrap().qname(),
+                store.record(partner).unwrap().qname(),
+                "links need equal qnames"
+            );
+            assert_eq!(
+                store.record(idx).unwrap().pos.as_i32(),
+                store.record(partner).unwrap().next_pos,
+                "links need reciprocal mate positions"
+            );
+            assert_eq!(
+                store.record(partner).unwrap().pos.as_i32(),
+                store.record(idx).unwrap().next_pos
+            );
+            assert_eq!(
+                store.record(idx).unwrap().tid,
+                store.record(partner).unwrap().tid,
+                "links never cross contigs"
+            );
+            let a = store.record(idx).unwrap();
+            let b = store.record(partner).unwrap();
+            let start = a.pos.max(b.pos);
+            let last = a.end_pos.min(b.end_pos);
+            let end =
+                if last < start { start } else { Pos0::new(last.as_u64() as u32 + 1).unwrap() };
+            assert_eq!(store.record(idx).unwrap().mate_overlap(), Some(start..end));
+            assert_eq!(store.record(partner).unwrap().mate_overlap(), Some(start..end));
+        } else {
+            assert_eq!(store.record(idx).unwrap().mate_overlap(), None);
         }
     }
 }

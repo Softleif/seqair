@@ -15,8 +15,8 @@
 )]
 mod helpers;
 
+use hegel::prelude::*;
 use helpers::{cigar_op, cigar_ops};
-use proptest::prelude::*;
 use seqair::bam::Pos0;
 use seqair::bam::cigar::{CigarMapping, CigarPosInfo, calc_matches_indels};
 use seqair_types::QPos;
@@ -251,79 +251,107 @@ fn cigar_op_type_consumes_ref_and_query() {
 const MATCH_OPS: [u8; 3] = [0, 7, 8];
 const REF_ONLY_OPS: [u8; 2] = [2, 3];
 
-fn arb_cigar() -> impl Strategy<Value = Vec<(u32, u8)>> {
-    prop::option::of((1u32..=20, Just(4u8)))
-        .prop_flat_map(|leading_clip| {
-            let inner_ops = prop::collection::vec(
-                prop_oneof![
-                    (1u32..=200, prop::sample::select(&MATCH_OPS[..])),
-                    (1u32..=20, prop::sample::select(&REF_ONLY_OPS[..])),
-                    (1u32..=20, Just(1u8)), // I
-                ],
-                1..=8,
-            );
-            let trailing_clip = prop::option::of((1u32..=20, Just(4u8)));
-            (Just(leading_clip), inner_ops, trailing_clip)
-        })
-        .prop_map(|(lead, inner, trail)| {
-            let mut ops = Vec::new();
-            if let Some(clip) = lead {
-                ops.push(clip);
-            }
-            ops.extend(inner);
-            if let Some(clip) = trail {
-                ops.push(clip);
-            }
-            ops
-        })
-        .prop_filter("need at least one ref-consuming op", |ops| {
-            ops.iter().any(|(_, op)| matches!(op, 0 | 2 | 3 | 7 | 8))
-        })
+/// A CIGAR as `(len, op)` pairs: an optional soft clip, one to eight inner
+/// ops, an optional trailing soft clip, and at least one ref-consuming op.
+#[hegel::composite]
+fn arb_cigar(tc: &TestCase) -> Vec<(u32, u8)> {
+    let clip = |tc: &TestCase| {
+        tc.draw_silent(gs::booleans())
+            .then(|| (tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(20)), 4u8))
+    };
+    let inner_op = |tc: &TestCase| match tc.draw_silent(gs::integers::<u8>().max_value(2)) {
+        0 => (
+            tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(200)),
+            tc.draw_silent(gs::sampled_from(&MATCH_OPS[..])),
+        ),
+        1 => (
+            tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(20)),
+            tc.draw_silent(gs::sampled_from(&REF_ONLY_OPS[..])),
+        ),
+        _ => (tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(20)), 1u8), // I
+    };
+
+    loop {
+        let lead = clip(tc);
+        let n_inner = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(8));
+        let inner: Vec<(u32, u8)> = (0..n_inner).map(|_| inner_op(tc)).collect();
+        let trail = clip(tc);
+
+        let mut ops = Vec::new();
+        ops.extend(lead);
+        ops.extend(inner);
+        ops.extend(trail);
+        // Need at least one ref-consuming op.
+        if ops.iter().any(|(_, op)| matches!(op, 0 | 2 | 3 | 7 | 8)) {
+            return ops;
+        }
+    }
 }
 
 // r[verify cigar.qpos_at]
-proptest! {
-    #[test]
-    fn qpos_monotonically_increasing(ops in arb_cigar(), start in 0u32..1_000_000) {
-        let packed: Vec<u32> = ops.iter().map(|&(len, op)| cigar_op(len, op)).collect();
-        let typed = cigar_ops(&packed);
-        let mapping = CigarMapping::new(Pos0::new(start).unwrap(), &typed).unwrap();
+#[hegel::test]
+fn qpos_monotonically_increasing(tc: TestCase) {
+    let ops = tc.draw(arb_cigar().print_as_debug());
+    let start = tc.draw(gs::integers::<u32>().max_value(999999));
+    let packed: Vec<u32> = ops.iter().map(|&(len, op)| cigar_op(len, op)).collect();
+    let typed = cigar_ops(&packed);
+    let mapping = CigarMapping::new(Pos0::new(start).unwrap(), &typed).unwrap();
 
-        let ref_span: u32 = ops.iter().map(|&(len, op)| match op {
+    let ref_span: u32 = ops
+        .iter()
+        .map(|&(len, op)| match op {
             0 | 2 | 3 | 7 | 8 => len,
             _ => 0,
-        }).sum();
+        })
+        .sum();
 
-        let mut last_qpos: Option<QPos> = None;
-        for ref_pos in start..start + ref_span {
-            let qpos = match mapping.pos_info_at(Pos0::new(ref_pos).unwrap()) {
-                Some(CigarPosInfo::Match { qpos }) => Some(qpos),
-                Some(CigarPosInfo::Insertion { qpos, .. }) => Some(qpos),
-                _ => None,
-            };
-            if let Some(q) = qpos {
-                if let Some(prev) = last_qpos {
-                    prop_assert!(q > prev, "not monotonic at ref {ref_pos}");
-                }
-                last_qpos = Some(q);
+    let mut last_qpos: Option<QPos> = None;
+    for ref_pos in start..start + ref_span {
+        let qpos = match mapping.pos_info_at(Pos0::new(ref_pos).unwrap()) {
+            Some(CigarPosInfo::Match { qpos }) => Some(qpos),
+            Some(CigarPosInfo::Insertion { qpos, .. }) => Some(qpos),
+            _ => None,
+        };
+        if let Some(q) = qpos {
+            if let Some(prev) = last_qpos {
+                assert!(q > prev, "not monotonic at ref {ref_pos}");
             }
+            last_qpos = Some(q);
         }
     }
 }
 
 // r[verify cigar.qpos_accuracy]
-proptest! {
-    #[test]
-    fn pure_match_qpos_is_offset(len in 1u32..=500, start in 0u32..1_000_000) {
-        let typed = cigar_ops(&[cigar_op(len, 0)]);
-        let mapping = CigarMapping::new(Pos0::new(start).unwrap(), &typed).unwrap();
-        for offset in 0..len {
-            prop_assert_eq!(
-                mapping.pos_info_at(Pos0::new(start + offset).unwrap()),
-                Some(CigarPosInfo::Match { qpos: QPos::new(offset) })
-            );
+#[hegel::test]
+fn pure_match_qpos_is_offset(tc: TestCase) {
+    let len = tc.draw(gs::integers::<u32>().min_value(1).max_value(500));
+    let start = tc.draw(gs::integers::<u32>().max_value(999999));
+    let typed = cigar_ops(&[cigar_op(len, 0)]);
+    let mapping = CigarMapping::new(Pos0::new(start).unwrap(), &typed).unwrap();
+    for offset in 0..len {
+        assert_eq!(
+            mapping.pos_info_at(Pos0::new(start + offset).unwrap()),
+            Some(CigarPosInfo::Match { qpos: QPos::new(offset) })
+        );
+    }
+    assert_eq!(mapping.pos_info_at(Pos0::new(start + len).unwrap()), None);
+}
+
+/// Each part is `(length, op_char)` drawn from the SAM alphabet, with at
+/// least one ref-consuming op so the CIGAR is valid.
+#[hegel::composite]
+fn arb_cigar_parts(tc: &TestCase) -> Vec<(u32, char)> {
+    let part = |tc: &TestCase| {
+        let op = tc.draw_silent(gs::sampled_from(&['M', '=', 'X', 'D', 'N', 'I']));
+        let max = if matches!(op, 'M' | '=' | 'X') { 200 } else { 20 };
+        (tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(max)), op)
+    };
+    loop {
+        let n = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(8));
+        let parts: Vec<(u32, char)> = (0..n).map(|_| part(tc)).collect();
+        if parts.iter().any(|(_, op)| matches!(op, 'M' | '=' | 'X' | 'D' | 'N')) {
+            return parts;
         }
-        prop_assert_eq!(mapping.pos_info_at(Pos0::new(start + len).unwrap()), None);
     }
 }
 
@@ -332,127 +360,137 @@ proptest! {
 // Builds CIGARs from human-readable strings and derives expected Some/None
 // from the string form — not from numeric op-code constants — so the test
 // cannot be tautological.
-proptest! {
-    #[test]
-    fn qpos_none_for_deletions_some_for_matches_from_strings(
-        // Each part is (length, op_char) drawn from the SAM alphabet.
-        // At least one ref-consuming op must be present so the CIGAR is valid.
-        parts in prop::collection::vec(
-            prop_oneof![
-                (1u32..=200u32, Just('M')),
-                (1u32..=200u32, Just('=')),
-                (1u32..=200u32, Just('X')),
-                (1u32..=20u32,  Just('D')),
-                (1u32..=20u32,  Just('N')),
-                (1u32..=20u32,  Just('I')),
-            ],
-            1..=8,
-        ).prop_filter("need at least one ref-consuming op", |parts| {
-            parts.iter().any(|(_, op)| matches!(op, 'M' | '=' | 'X' | 'D' | 'N'))
-        }),
-        start in 0u32..1_000_000,
-    ) {
-        // Build the byte representation from the human-readable string.
-        let cigar_str: String = parts.iter().map(|(len, op)| format!("{len}{op}")).collect();
-        let op_char_to_code = |c: char| -> u8 {
-            match c {
-                'M' => 0, 'I' => 1, 'D' => 2, 'N' => 3, 'S' => 4,
-                'H' => 5, 'P' => 6, '=' => 7, 'X' => 8, _ => 0,
-            }
-        };
-        let packed: Vec<u32> = parts.iter()
-            .map(|&(len, op)| cigar_op(len, op_char_to_code(op)))
-            .collect();
-        let typed = cigar_ops(&packed);
-        let mapping = CigarMapping::new(Pos0::new(start).unwrap(), &typed).unwrap();
+#[hegel::test]
+fn qpos_none_for_deletions_some_for_matches_from_strings(tc: TestCase) {
+    let parts = tc.draw(arb_cigar_parts().print_as_debug());
+    let start = tc.draw(gs::integers::<u32>().max_value(999_999));
+    // Build the byte representation from the human-readable string.
+    let cigar_str: String = parts.iter().map(|(len, op)| format!("{len}{op}")).collect();
+    let op_char_to_code = |c: char| -> u8 {
+        match c {
+            'M' => 0,
+            'I' => 1,
+            'D' => 2,
+            'N' => 3,
+            'S' => 4,
+            'H' => 5,
+            'P' => 6,
+            '=' => 7,
+            'X' => 8,
+            _ => 0,
+        }
+    };
+    let packed: Vec<u32> =
+        parts.iter().map(|&(len, op)| cigar_op(len, op_char_to_code(op))).collect();
+    let typed = cigar_ops(&packed);
+    let mapping = CigarMapping::new(Pos0::new(start).unwrap(), &typed).unwrap();
 
-        // Walk the string-form parts to derive expectations independently.
-        let mut ref_pos = start;
-        for (part_idx, &(len, op)) in parts.iter().enumerate() {
-            // Compute trailing insertion length after this op (skipping P ops), for D/N complex-indel check.
-            let following_insert_len = {
-                let mut total = 0u32;
-                let mut j = part_idx + 1;
-                while j < parts.len() {
-                    match parts[j].1 {
-                        'P' => { j += 1; }
-                        'I' => { total += parts[j].0; j += 1; }
-                        _ => break,
+    // Walk the string-form parts to derive expectations independently.
+    let mut ref_pos = start;
+    for (part_idx, &(len, op)) in parts.iter().enumerate() {
+        // Compute trailing insertion length after this op (skipping P ops), for D/N complex-indel check.
+        let following_insert_len = {
+            let mut total = 0u32;
+            let mut j = part_idx + 1;
+            while j < parts.len() {
+                match parts[j].1 {
+                    'P' => {
+                        j += 1;
                     }
+                    'I' => {
+                        total += parts[j].0;
+                        j += 1;
+                    }
+                    _ => break,
                 }
-                total
-            };
-            match op {
-                // M / = / X consume ref+query → every covered ref position must
-                // return Some(Match) or Some(Insertion).
-                'M' | '=' | 'X' => {
-                    for i in 0..len {
-                        let pos = ref_pos + i;
-                        let result = mapping.pos_info_at(Pos0::new(pos).unwrap());
-                        prop_assert!(
-                            matches!(
-                                result,
-                                Some(CigarPosInfo::Match { .. }) | Some(CigarPosInfo::Insertion { .. })
-                            ),
-                            "cigar={}: ref {} under {} op should be Match or Insertion, got {:?}",
-                            cigar_str, pos, op, result
+            }
+            total
+        };
+        match op {
+            // M / = / X consume ref+query → every covered ref position must
+            // return Some(Match) or Some(Insertion).
+            'M' | '=' | 'X' => {
+                for i in 0..len {
+                    let pos = ref_pos + i;
+                    let result = mapping.pos_info_at(Pos0::new(pos).unwrap());
+                    assert!(
+                        matches!(
+                            result,
+                            Some(CigarPosInfo::Match { .. }) | Some(CigarPosInfo::Insertion { .. })
+                        ),
+                        "cigar={}: ref {} under {} op should be Match or Insertion, got {:?}",
+                        cigar_str,
+                        pos,
+                        op,
+                        result
+                    );
+                }
+                ref_pos += len;
+            }
+            // D consumes ref only → interior positions are Deletion; the last position is
+            // ComplexIndel if a following insertion exists, otherwise Deletion.
+            'D' => {
+                for i in 0..len {
+                    let pos = ref_pos + i;
+                    let result = mapping.pos_info_at(Pos0::new(pos).unwrap());
+                    let is_last = i == len - 1;
+                    if is_last && following_insert_len > 0 {
+                        assert_eq!(
+                            result,
+                            Some(CigarPosInfo::ComplexIndel {
+                                del_len: len,
+                                insert_len: following_insert_len,
+                                is_refskip: false
+                            }),
+                            "cigar={}: ref {} (last D pos) should be ComplexIndel",
+                            cigar_str,
+                            pos
+                        );
+                    } else {
+                        assert_eq!(
+                            result,
+                            Some(CigarPosInfo::Deletion { del_len: len }),
+                            "cigar={}: ref {} under D op should be Deletion",
+                            cigar_str,
+                            pos
                         );
                     }
-                    ref_pos += len;
                 }
-                // D consumes ref only → interior positions are Deletion; the last position is
-                // ComplexIndel if a following insertion exists, otherwise Deletion.
-                'D' => {
-                    for i in 0..len {
-                        let pos = ref_pos + i;
-                        let result = mapping.pos_info_at(Pos0::new(pos).unwrap());
-                        let is_last = i == len - 1;
-                        if is_last && following_insert_len > 0 {
-                            prop_assert_eq!(
-                                result,
-                                Some(CigarPosInfo::ComplexIndel { del_len: len, insert_len: following_insert_len, is_refskip: false }),
-                                "cigar={}: ref {} (last D pos) should be ComplexIndel",
-                                cigar_str, pos
-                            );
-                        } else {
-                            prop_assert_eq!(
-                                result,
-                                Some(CigarPosInfo::Deletion { del_len: len }),
-                                "cigar={}: ref {} under D op should be Deletion",
-                                cigar_str, pos
-                            );
-                        }
-                    }
-                    ref_pos += len;
-                }
-                // N consumes ref only → interior positions are RefSkip; the last position is
-                // ComplexIndel if a following insertion exists, otherwise RefSkip.
-                'N' => {
-                    for i in 0..len {
-                        let pos = ref_pos + i;
-                        let result = mapping.pos_info_at(Pos0::new(pos).unwrap());
-                        let is_last = i == len - 1;
-                        if is_last && following_insert_len > 0 {
-                            prop_assert_eq!(
-                                result,
-                                Some(CigarPosInfo::ComplexIndel { del_len: len, insert_len: following_insert_len, is_refskip: true }),
-                                "cigar={}: ref {} (last N pos) should be ComplexIndel",
-                                cigar_str, pos
-                            );
-                        } else {
-                            prop_assert_eq!(
-                                result,
-                                Some(CigarPosInfo::RefSkip),
-                                "cigar={}: ref {} under N op should be RefSkip",
-                                cigar_str, pos
-                            );
-                        }
-                    }
-                    ref_pos += len;
-                }
-                // I consumes query only — no ref positions to check.
-                _ => {}
+                ref_pos += len;
             }
+            // N consumes ref only → interior positions are RefSkip; the last position is
+            // ComplexIndel if a following insertion exists, otherwise RefSkip.
+            'N' => {
+                for i in 0..len {
+                    let pos = ref_pos + i;
+                    let result = mapping.pos_info_at(Pos0::new(pos).unwrap());
+                    let is_last = i == len - 1;
+                    if is_last && following_insert_len > 0 {
+                        assert_eq!(
+                            result,
+                            Some(CigarPosInfo::ComplexIndel {
+                                del_len: len,
+                                insert_len: following_insert_len,
+                                is_refskip: true
+                            }),
+                            "cigar={}: ref {} (last N pos) should be ComplexIndel",
+                            cigar_str,
+                            pos
+                        );
+                    } else {
+                        assert_eq!(
+                            result,
+                            Some(CigarPosInfo::RefSkip),
+                            "cigar={}: ref {} under N op should be RefSkip",
+                            cigar_str,
+                            pos
+                        );
+                    }
+                }
+                ref_pos += len;
+            }
+            // I consumes query only — no ref positions to check.
+            _ => {}
         }
     }
 }

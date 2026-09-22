@@ -323,63 +323,63 @@ fn engine_reclaim_allocation_clears_records_and_keeps_capacity() {
 
 // ---- Proptests ----
 
-use proptest::prelude::*;
+use hegel::prelude::*;
 
-proptest! {
-    // r[verify record_store.extras.sort_dedup_generic]
-    #[test]
-    fn proptest_sort_preserves_extras_mapping(
-        positions in proptest::collection::vec(0i32..1000, 2..50),
-    ) {
-        let mut store = RecordStore::new();
-        for &pos in &positions {
-            store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ExtractPos).unwrap();
-        }
-
-        store.sort_by_pos();
-
-        // After sorting, each record's extra must still equal its position
-        // (proving the extras_idx indirection survived reordering).
-        for i in store.indices() {
-            let pos = store.record(i).unwrap().pos.as_i32();
-            let extra = *store.record(i).unwrap().extra();
-            prop_assert_eq!(pos, extra, "extras_idx broken at record {}", i);
-        }
-
-        // Records must be sorted.
-        for (i, (prev, rec)) in store.records().zip(store.records().skip(1)).enumerate() {
-            prop_assert!(rec.pos >= prev.pos, "not sorted at {}", i + 1);
-        }
+// r[verify record_store.extras.sort_dedup_generic]
+#[hegel::test]
+fn sort_preserves_extras_mapping(tc: TestCase) {
+    let positions = tc.draw(
+        gs::vecs(gs::integers::<i32>().min_value(0).max_value(999)).min_size(2).max_size(50 - 1),
+    );
+    let mut store = RecordStore::new();
+    for &pos in &positions {
+        store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ExtractPos).unwrap();
     }
 
-    // r[verify record_store.extras.sort_dedup_generic]
-    #[test]
-    fn proptest_dedup_preserves_extras_on_typed_store(
-        positions in proptest::collection::vec(0i32..20, 2..30),
-    ) {
-        let mut store = RecordStore::new();
-        for &pos in &positions {
-            // Same flags/mapq/seq_len so duplicates at same pos are detected.
-            store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ExtractPos).unwrap();
-        }
+    store.sort_by_pos();
 
-        store.sort_by_pos();
-        store.dedup();
+    // After sorting, each record's extra must still equal its position
+    // (proving the extras_idx indirection survived reordering).
+    for i in store.indices() {
+        let pos = store.record(i).unwrap().pos.as_i32();
+        let extra = *store.record(i).unwrap().extra();
+        assert_eq!(pos, extra, "extras_idx broken at record {}", i);
+    }
 
-        // After dedup, each surviving record's extra must equal its position.
-        for i in store.indices() {
-            let pos = store.record(i).unwrap().pos.as_i32();
-            let extra = *store.record(i).unwrap().extra();
-            prop_assert_eq!(pos, extra, "extras_idx broken after dedup at record {}", i);
-        }
+    // Records must be sorted.
+    for (i, (prev, rec)) in store.records().zip(store.records().skip(1)).enumerate() {
+        assert!(rec.pos >= prev.pos, "not sorted at {}", i + 1);
+    }
+}
 
-        // No consecutive duplicates.
-        for (a, b) in store.records().zip(store.records().skip(1)) {
-            if a.pos == b.pos {
-                // Same position is OK if flags differ (different records).
-                // Our test uses identical flags, so this shouldn't happen.
-                prop_assert!(a.flags != b.flags, "dedup missed a duplicate at pos {}", a.pos.as_i32());
-            }
+// r[verify record_store.extras.sort_dedup_generic]
+#[hegel::test]
+fn dedup_preserves_extras_on_typed_store(tc: TestCase) {
+    let positions = tc.draw(
+        gs::vecs(gs::integers::<i32>().min_value(0).max_value(19)).min_size(2).max_size(30 - 1),
+    );
+    let mut store = RecordStore::new();
+    for &pos in &positions {
+        // Same flags/mapq/seq_len so duplicates at same pos are detected.
+        store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ExtractPos).unwrap();
+    }
+
+    store.sort_by_pos();
+    store.dedup();
+
+    // After dedup, each surviving record's extra must equal its position.
+    for i in store.indices() {
+        let pos = store.record(i).unwrap().pos.as_i32();
+        let extra = *store.record(i).unwrap().extra();
+        assert_eq!(pos, extra, "extras_idx broken after dedup at record {}", i);
+    }
+
+    // No consecutive duplicates.
+    for (a, b) in store.records().zip(store.records().skip(1)) {
+        if a.pos == b.pos {
+            // Same position is OK if flags differ (different records).
+            // Our test uses identical flags, so this shouldn't happen.
+            assert!(a.flags != b.flags, "dedup missed a duplicate at pos {}", a.pos.as_i32());
         }
     }
 }

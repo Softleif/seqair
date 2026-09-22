@@ -16,8 +16,8 @@
 )]
 
 mod helpers;
+use hegel::prelude::*;
 use helpers::ri;
-use proptest::prelude::*;
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
 use seqair_types::{BamFlags, Base, BaseQuality};
@@ -400,179 +400,189 @@ fn set_alignment_multiple_times_same_record() {
 
 /// Generate a valid CIGAR as (len, `op_type`) parts with a guaranteed minimum
 /// query length. Returns parts and the total query-consuming length.
-fn arb_cigar_parts_with_query_len(min_query: u32) -> impl Strategy<Value = Vec<(u32, u8)>> {
-    // Generate 1..8 ops, M/I/D/S only (keeping it simple for tests)
-    prop::collection::vec(
-        (1..50u32, prop::sample::select(vec![CIGAR_M, CIGAR_I, CIGAR_D, CIGAR_S])),
-        1..8,
-    )
-    .prop_filter_map("need query-consuming ops", move |parts| {
-        let qlen: u32 = parts
-            .iter()
-            .filter(|(_, op)| matches!(*op, CIGAR_M | CIGAR_I | CIGAR_S | 7 | 8))
-            .map(|(len, _)| len)
-            .sum();
-        if qlen >= min_query && qlen <= 500 { Some(parts) } else { None }
-    })
+#[hegel::composite]
+fn arb_cigar_parts_with_query_len(tc: &TestCase) -> Vec<(u32, u8)> {
+    // 1..8 ops, M/I/D/S only (keeping it simple for tests). Seven ops of at
+    // most 49 bases cannot exceed the 500-base ceiling callers rely on, and a
+    // short draw is topped up with one M rather than rejected — rejecting here
+    // makes the smallest input the generator can produce enormous, which in
+    // turn makes shrinking useless.
+    let mut parts: Vec<(u32, u8)> = tc.draw_silent(
+        gs::vecs(gs::tuples!(
+            gs::integers::<u32>().min_value(1).max_value(49),
+            gs::sampled_from(&[CIGAR_M, CIGAR_I, CIGAR_D, CIGAR_S]),
+        ))
+        .min_size(1)
+        .max_size(7),
+    );
+    let qlen = query_len_from_parts(&parts);
+    if qlen < MIN_QUERY_LEN {
+        parts.push((MIN_QUERY_LEN - qlen, CIGAR_M));
+    }
+    parts
 }
+
+/// The minimum query length `set_alignment` callers here need.
+const MIN_QUERY_LEN: u32 = 4;
 
 /// Generate a pair of CIGARs with the same query length (for `set_alignment`).
 /// The second cigar is constructed to have exactly the right query length
 /// by splitting it into a random number of M/I/S ops that sum to the target.
-fn arb_cigar_pair() -> impl Strategy<Value = (Vec<(u32, u8)>, Vec<(u32, u8)>)> {
-    arb_cigar_parts_with_query_len(4).prop_flat_map(|original| {
-        let qlen = query_len_from_parts(&original);
-        // Generate 1..6 D ops (don't consume query) and 1..4 query-consuming splits
-        let n_splits = 1..4usize;
-        let n_deletions = 0..3usize;
-        (prop::collection::vec(1..20u32, n_deletions), prop::collection::vec(1..100u32, n_splits))
-            .prop_map(move |(del_lens, weights)| {
-                // Distribute qlen across the weights proportionally
-                let total_weight: u32 = weights.iter().sum();
-                let mut new_parts: Vec<(u32, u8)> = Vec::new();
-                let mut remaining = qlen;
-                let query_ops = [CIGAR_M, CIGAR_S]; // query-consuming ops
-                for (i, &w) in weights.iter().enumerate() {
-                    let portion = if i == weights.len() - 1 {
-                        remaining // last one gets the remainder
-                    } else {
-                        let p = (u64::from(qlen) * u64::from(w) / u64::from(total_weight)) as u32;
-                        p.max(1).min(remaining.saturating_sub(
-                            (weights.len() - i - 1) as u32, // reserve 1 for each remaining
-                        ))
-                    };
-                    if portion > 0 {
-                        new_parts.push((portion, query_ops[i % query_ops.len()]));
-                        remaining -= portion;
-                    }
-                }
-                // Interleave D ops
-                for &d in &del_lens {
-                    new_parts.push((d, CIGAR_D));
-                }
-                (original.clone(), new_parts)
-            })
-    })
+#[hegel::composite]
+fn arb_cigar_pair(tc: &TestCase) -> (Vec<(u32, u8)>, Vec<(u32, u8)>) {
+    let original = tc.draw_silent(arb_cigar_parts_with_query_len());
+    let qlen = query_len_from_parts(&original);
+    // Generate 0..2 D ops (don't consume query) and 1..3 query-consuming splits
+    let del_lens: Vec<u32> =
+        tc.draw_silent(gs::vecs(gs::integers::<u32>().min_value(1).max_value(19)).max_size(2));
+    let weights: Vec<u32> = tc.draw_silent(
+        gs::vecs(gs::integers::<u32>().min_value(1).max_value(99)).min_size(1).max_size(3),
+    );
+
+    // Distribute qlen across the weights proportionally
+    let total_weight: u32 = weights.iter().sum();
+    let mut new_parts: Vec<(u32, u8)> = Vec::new();
+    let mut remaining = qlen;
+    let query_ops = [CIGAR_M, CIGAR_S]; // query-consuming ops
+    for (i, &w) in weights.iter().enumerate() {
+        let portion = if i == weights.len() - 1 {
+            remaining // last one gets the remainder
+        } else {
+            let p = (u64::from(qlen) * u64::from(w) / u64::from(total_weight)) as u32;
+            p.max(1).min(remaining.saturating_sub(
+                (weights.len() - i - 1) as u32, // reserve 1 for each remaining
+            ))
+        };
+        if portion > 0 {
+            new_parts.push((portion, query_ops[i % query_ops.len()]));
+            remaining -= portion;
+        }
+    }
+    // Interleave D ops
+    for &d in &del_lens {
+        new_parts.push((d, CIGAR_D));
+    }
+    (original, new_parts)
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(200))]
+// r[verify record_store.set_alignment]
+#[hegel::test(test_cases = 200)]
+fn set_alignment_end_pos_matches_oracle(tc: TestCase) {
+    let (orig_parts, new_parts) = tc.draw(arb_cigar_pair().print_as_debug());
+    let pos = tc.draw(gs::integers::<u32>().max_value(9999));
+    let new_pos = tc.draw(gs::integers::<u32>().max_value(9999));
+    let qlen = query_len_from_parts(&orig_parts);
+    let orig_cigar_packed: Vec<u32> =
+        orig_parts.iter().map(|&(len, op)| pack_cigar_op(len, op)).collect();
 
-    // r[verify record_store.set_alignment]
-    #[test]
-    fn set_alignment_end_pos_matches_oracle(
-        (orig_parts, new_parts) in arb_cigar_pair(),
-        pos in 0u32..10_000,
-        new_pos in 0u32..10_000,
-    ) {
-        let qlen = query_len_from_parts(&orig_parts);
-        let orig_cigar_packed: Vec<u32> = orig_parts.iter()
-            .map(|&(len, op)| pack_cigar_op(len, op))
-            .collect();
+    let raw = make_simple_record(0, pos as i32, &orig_cigar_packed, qlen, b"read1");
+    let mut store = RecordStore::new();
+    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
-        let raw = make_simple_record(0, pos as i32, &orig_cigar_packed, qlen, b"read1");
-        let mut store = RecordStore::new();
-        let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let new_cigar_bytes = pack_cigar(&new_parts);
+    let new_pos_typed = Pos0::new(new_pos).unwrap();
+    store.set_alignment(idx, new_pos_typed, &new_cigar_bytes).unwrap();
 
-        let new_cigar_bytes = pack_cigar(&new_parts);
-        let new_pos_typed = Pos0::new(new_pos).unwrap();
-        store.set_alignment(idx, new_pos_typed, &new_cigar_bytes).unwrap();
+    let rec = store.record(idx).unwrap();
 
-        let rec = store.record(idx).unwrap();
+    // Oracle: compute expected values independently
+    let expected_end = expected_end_pos(new_pos, &new_parts);
+    assert_eq!(
+        rec.end_pos,
+        Pos0::new(expected_end).unwrap(),
+        "end_pos mismatch for cigar {:?} at pos {}",
+        new_parts,
+        new_pos
+    );
 
-        // Oracle: compute expected values independently
-        let expected_end = expected_end_pos(new_pos, &new_parts);
-        prop_assert_eq!(rec.end_pos, Pos0::new(expected_end).unwrap(),
-            "end_pos mismatch for cigar {:?} at pos {}", new_parts, new_pos);
+    assert_eq!(rec.matching_bases, expected_matching_bases(&new_parts));
+    assert_eq!(rec.indel_bases, expected_indel_bases(&new_parts));
+    assert_eq!(rec.n_cigar_ops, new_parts.len() as u16);
+}
 
-        prop_assert_eq!(rec.matching_bases, expected_matching_bases(&new_parts));
-        prop_assert_eq!(rec.indel_bases, expected_indel_bases(&new_parts));
-        prop_assert_eq!(rec.n_cigar_ops, new_parts.len() as u16);
+// r[verify record_store.set_alignment]
+#[hegel::test(test_cases = 200)]
+fn set_alignment_preserves_seq_and_qual(tc: TestCase) {
+    let (orig_parts, new_parts) = tc.draw(arb_cigar_pair().print_as_debug());
+    let pos = tc.draw(gs::integers::<u32>().max_value(9999));
+    let qlen = query_len_from_parts(&orig_parts);
+    let orig_cigar_packed: Vec<u32> =
+        orig_parts.iter().map(|&(len, op)| pack_cigar_op(len, op)).collect();
+
+    let raw = make_simple_record(0, pos as i32, &orig_cigar_packed, qlen, b"testread");
+    let mut store = RecordStore::new();
+    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+
+    let orig_seq: Vec<Base> = store.record(idx).unwrap().seq().to_vec();
+    let orig_qual: Vec<BaseQuality> = store.record(idx).unwrap().qual().to_vec();
+    let orig_qname: Vec<u8> = store.record(idx).unwrap().qname().to_vec();
+
+    let new_cigar_bytes = pack_cigar(&new_parts);
+    store.set_alignment(idx, Pos0::new(pos).unwrap(), &new_cigar_bytes).unwrap();
+
+    assert_eq!(store.record(idx).unwrap().seq(), &orig_seq[..], "seq changed after set_alignment");
+    assert_eq!(
+        store.record(idx).unwrap().qual(),
+        &orig_qual[..],
+        "qual changed after set_alignment"
+    );
+    assert_eq!(
+        store.record(idx).unwrap().qname(),
+        &orig_qname[..],
+        "qname changed after set_alignment"
+    );
+}
+
+// r[verify record_store.set_alignment]
+#[hegel::test(test_cases = 200)]
+fn sort_after_set_alignment_is_position_ordered(tc: TestCase) {
+    let new_positions =
+        tc.draw(gs::vecs(gs::integers::<u32>().max_value(49999)).min_size(3).max_size(10 - 1));
+    let mut store = RecordStore::new();
+    for (i, &_) in new_positions.iter().enumerate() {
+        let raw = make_simple_record(
+            0,
+            (i * 100) as i32,
+            &[pack_cigar_op(4, CIGAR_M)],
+            4,
+            format!("r{i}").as_bytes(),
+        );
+        store.push_raw(&raw, &mut ()).unwrap();
     }
 
-    // r[verify record_store.set_alignment]
-    #[test]
-    fn set_alignment_preserves_seq_and_qual(
-        (orig_parts, new_parts) in arb_cigar_pair(),
-        pos in 0u32..10_000,
-    ) {
-        let qlen = query_len_from_parts(&orig_parts);
-        let orig_cigar_packed: Vec<u32> = orig_parts.iter()
-            .map(|&(len, op)| pack_cigar_op(len, op))
-            .collect();
-
-        let raw = make_simple_record(0, pos as i32, &orig_cigar_packed, qlen, b"testread");
-        let mut store = RecordStore::new();
-        let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
-
-        let orig_seq: Vec<Base> = store.record(idx).unwrap().seq().to_vec();
-        let orig_qual: Vec<BaseQuality> = store.record(idx).unwrap().qual().to_vec();
-        let orig_qname: Vec<u8> = store.record(idx).unwrap().qname().to_vec();
-
-        let new_cigar_bytes = pack_cigar(&new_parts);
-        store.set_alignment(idx, Pos0::new(pos).unwrap(), &new_cigar_bytes).unwrap();
-
-        prop_assert_eq!(store.record(idx).unwrap().seq(), &orig_seq[..], "seq changed after set_alignment");
-        prop_assert_eq!(store.record(idx).unwrap().qual(), &orig_qual[..], "qual changed after set_alignment");
-        prop_assert_eq!(store.record(idx).unwrap().qname(), &orig_qname[..], "qname changed after set_alignment");
+    // Realign each record to its new position
+    let cigar = pack_cigar(&[(4, CIGAR_M)]);
+    for (i, &new_pos) in new_positions.iter().enumerate() {
+        store
+            .set_alignment(ri(u32::try_from(i).unwrap()), Pos0::new(new_pos).unwrap(), &cigar)
+            .unwrap();
     }
 
-    // r[verify record_store.set_alignment]
-    #[test]
-    fn sort_after_set_alignment_is_position_ordered(
-        new_positions in prop::collection::vec(0u32..50_000, 3..10),
-    ) {
-        let mut store = RecordStore::new();
-        for (i, &_) in new_positions.iter().enumerate() {
-            let raw = make_simple_record(
-                0, (i * 100) as i32, &[pack_cigar_op(4, CIGAR_M)], 4,
-                format!("r{i}").as_bytes(),
-            );
-            store.push_raw(&raw, &mut ()).unwrap();
-        }
+    store.sort_by_pos();
 
-        // Realign each record to its new position
-        let cigar = pack_cigar(&[(4, CIGAR_M)]);
-        for (i, &new_pos) in new_positions.iter().enumerate() {
-            store.set_alignment(
-                ri(u32::try_from(i).unwrap()),
-                Pos0::new(new_pos).unwrap(),
-                &cigar,
-            ).unwrap();
-        }
-
-        store.sort_by_pos();
-
-        // Verify sorted order
-        for (prev, rec) in store.records().zip(store.records().skip(1)) {
-            prop_assert!(
-                rec.pos >= prev.pos,
-                "records not sorted after set_alignment + sort_by_pos"
-            );
-        }
+    // Verify sorted order
+    for (prev, rec) in store.records().zip(store.records().skip(1)) {
+        assert!(rec.pos >= prev.pos, "records not sorted after set_alignment + sort_by_pos");
     }
+}
 
-    // r[verify record_store.set_alignment.validation]
-    #[test]
-    fn set_alignment_rejects_wrong_query_len(
-        orig_parts in arb_cigar_parts_with_query_len(4),
-        delta in 1u32..10,
-    ) {
-        let qlen = query_len_from_parts(&orig_parts);
-        let orig_cigar_packed: Vec<u32> = orig_parts.iter()
-            .map(|&(len, op)| pack_cigar_op(len, op))
-            .collect();
+// r[verify record_store.set_alignment.validation]
+#[hegel::test(test_cases = 200)]
+fn set_alignment_rejects_wrong_query_len(tc: TestCase) {
+    let orig_parts = tc.draw(arb_cigar_parts_with_query_len().print_as_debug());
+    let delta = tc.draw(gs::integers::<u32>().min_value(1).max_value(9));
+    let qlen = query_len_from_parts(&orig_parts);
+    let orig_cigar_packed: Vec<u32> =
+        orig_parts.iter().map(|&(len, op)| pack_cigar_op(len, op)).collect();
 
-        let raw = make_simple_record(0, 100, &orig_cigar_packed, qlen, b"read1");
-        let mut store = RecordStore::new();
-        let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let raw = make_simple_record(0, 100, &orig_cigar_packed, qlen, b"read1");
+    let mut store = RecordStore::new();
+    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
 
-        // Build a cigar with wrong query length (qlen + delta)
-        let wrong_cigar = pack_cigar(&[(qlen + delta, CIGAR_M)]);
-        let result = store.set_alignment(idx, Pos0::new(100).unwrap(), &wrong_cigar);
-        prop_assert!(result.is_err(), "should reject query length {} != seq_len {}",
-            qlen + delta, qlen);
-    }
+    // Build a cigar with wrong query length (qlen + delta)
+    let wrong_cigar = pack_cigar(&[(qlen + delta, CIGAR_M)]);
+    let result = store.set_alignment(idx, Pos0::new(100).unwrap(), &wrong_cigar);
+    assert!(result.is_err(), "should reject query length {} != seq_len {}", qlen + delta, qlen);
 }
 
 // ---------------------------------------------------------------------------

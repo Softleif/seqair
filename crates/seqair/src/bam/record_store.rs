@@ -1698,7 +1698,10 @@ impl<U> RecordStore<U> {
     /// Index of the first record that can overlap a window starting at
     /// `start`: every record before it ends before `start`, and since `reach`
     /// never decreases, so does nothing after it that the forward scan will
-    /// not see. `len()` when no mapped record reaches `start`.
+    /// not see. `len()` when no mapped record reaches `start` — except at
+    /// `start == 0`, which the zero-seeded running maximum reaches at index 0
+    /// whether or not any record is mapped. A lower bound either way, and the
+    /// forward scan drops the unmapped records it hands back.
     pub(crate) fn first_reaching(&self, start: Pos0) -> usize {
         debug_assert_eq!(
             self.reach.len(),
@@ -2781,11 +2784,31 @@ pub(crate) mod tests {
             let start = tc.draw(gs::integers::<u32>().max_value(6_999));
             let input = prepared(&reads);
             let store = input.store();
+
+            // The oracle walks the running maximum the spec defines — over the
+            // mapped records, seeded at zero — and stops where a linear scan
+            // would, which is what the binary search must agree with.
+            let mut furthest = Pos0::ZERO;
             let expected = store
                 .records()
-                .position(|rec| !rec.flags.is_unmapped() && rec.end_pos >= at(start))
+                .position(|rec| {
+                    if !rec.flags.is_unmapped() {
+                        furthest = furthest.max(rec.end_pos);
+                    }
+                    furthest >= at(start)
+                })
                 .unwrap_or(store.len());
-            assert_eq!(store.first_reaching(at(start)), expected);
+            let first = store.first_reaching(at(start));
+            assert_eq!(first, expected);
+
+            // Whatever that index is, it is a sound lower bound: nothing
+            // before it can overlap a window starting at `start`.
+            for rec in store.records().take(first) {
+                assert!(
+                    rec.flags.is_unmapped() || rec.end_pos < at(start),
+                    "a record before first_reaching can still overlap"
+                );
+            }
         }
     }
 

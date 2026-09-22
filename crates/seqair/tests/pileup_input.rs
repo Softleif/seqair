@@ -5,7 +5,7 @@
 #![allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 #![allow(clippy::arithmetic_side_effects, reason = "test code")]
 
-use proptest::prelude::*;
+use hegel::prelude::*;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::RecordStore;
@@ -111,8 +111,12 @@ struct Placed {
     len: u32,
 }
 
-fn placed() -> impl Strategy<Value = Placed> {
-    (0u32..200, 1u32..40).prop_map(|(pos, len)| Placed { pos, len })
+#[hegel::composite]
+fn placed(tc: &TestCase) -> Placed {
+    Placed {
+        pos: tc.draw_silent(gs::integers::<u32>().max_value(199)),
+        len: tc.draw_silent(gs::integers::<u32>().min_value(1).max_value(39)),
+    }
 }
 
 /// Column depths for `reads` pushed in the given order, after preparation.
@@ -124,65 +128,62 @@ fn profile(reads: &[Placed]) -> Vec<(u64, usize)> {
     depths(store.prepare_for_pileup().input, 260)
 }
 
-proptest! {
-    /// A pileup is a function of the record *set*, not of the order the records
-    /// were pushed in. The engine only walks ascending positions, so before
-    /// `PileupInput` this held exactly when the caller remembered to sort — and
-    /// failed silently otherwise, dropping every record that arrived early.
-    #[test]
-    fn the_pileup_does_not_depend_on_push_order(
-        reads in prop::collection::vec(placed(), 1..12),
-        rotation in 0usize..12,
-    ) {
-        let mut sorted = reads.clone();
-        sorted.sort_by_key(|r| r.pos);
+/// A pileup is a function of the record *set*, not of the order the records
+/// were pushed in. The engine only walks ascending positions, so before
+/// `PileupInput` this held exactly when the caller remembered to sort — and
+/// failed silently otherwise, dropping every record that arrived early.
+#[hegel::test]
+fn the_pileup_does_not_depend_on_push_order(tc: TestCase) {
+    let reads = tc.draw(gs::vecs(placed().print_as_debug()).min_size(1).max_size(12 - 1));
+    let rotation = tc.draw(gs::integers::<usize>().max_value(11));
+    let mut sorted = reads.clone();
+    sorted.sort_by_key(|r| r.pos);
 
-        let mut rotated = reads.clone();
-        let n = rotated.len();
-        rotated.rotate_left(rotation % n);
+    let mut rotated = reads.clone();
+    let n = rotated.len();
+    rotated.rotate_left(rotation % n);
 
-        let expected = profile(&sorted);
-        prop_assert_eq!(profile(&reads), expected.clone(), "as generated");
-        prop_assert_eq!(profile(&rotated), expected, "rotated");
-    }
+    let expected = profile(&sorted);
+    assert_eq!(profile(&reads), expected.clone(), "as generated");
+    assert_eq!(profile(&rotated), expected, "rotated");
+}
 
-    /// Total observations are conserved: every read contributes exactly its
-    /// length in covered columns, whatever order it arrived in. This is the
-    /// property the old behaviour broke outright — reads pushed early produced
-    /// no columns at all.
-    #[test]
-    fn every_pushed_read_is_wholly_pileuped(reads in prop::collection::vec(placed(), 1..12)) {
-        let expected: usize = reads.iter().map(|r| r.len as usize).sum();
-        let observed: usize = profile(&reads).iter().map(|&(_, depth)| depth).sum();
-        prop_assert_eq!(observed, expected);
-    }
+/// Total observations are conserved: every read contributes exactly its
+/// length in covered columns, whatever order it arrived in. This is the
+/// property the old behaviour broke outright — reads pushed early produced
+/// no columns at all.
+#[hegel::test]
+fn every_pushed_read_is_wholly_pileuped(tc: TestCase) {
+    let reads = tc.draw(gs::vecs(placed().print_as_debug()).min_size(1).max_size(12 - 1));
+    let expected: usize = reads.iter().map(|r| r.len as usize).sum();
+    let observed: usize = profile(&reads).iter().map(|&(_, depth)| depth).sum();
+    assert_eq!(observed, expected);
+}
 
-    /// Preparing a store whose properties already hold must be a no-op.
-    ///
-    /// `prepare_for_pileup` skips the sort when no push arrived out of order
-    /// and skips linking when nothing invalidated it, so a store the caller
-    /// already sorted and linked by hand takes a different path through it than
-    /// a raw one. Both must reach the same pileup.
-    #[test]
-    fn preparing_an_already_prepared_store_is_a_no_op(
-        reads in prop::collection::vec(placed(), 1..8),
-    ) {
-        let build = || {
-            let mut store = RecordStore::new();
-            for (i, r) in reads.iter().enumerate() {
-                push(&mut store, format!("r{i}").as_bytes(), r.pos, r.len, -1, 0);
-            }
-            store
-        };
-        let mut warm = build();
-        warm.sort_by_pos();
-        let _ = warm.link_mates();
+/// Preparing a store whose properties already hold must be a no-op.
+///
+/// `prepare_for_pileup` skips the sort when no push arrived out of order
+/// and skips linking when nothing invalidated it, so a store the caller
+/// already sorted and linked by hand takes a different path through it than
+/// a raw one. Both must reach the same pileup.
+#[hegel::test]
+fn preparing_an_already_prepared_store_is_a_no_op(tc: TestCase) {
+    let reads = tc.draw(gs::vecs(placed().print_as_debug()).min_size(1).max_size(8 - 1));
+    let build = || {
+        let mut store = RecordStore::new();
+        for (i, r) in reads.iter().enumerate() {
+            push(&mut store, format!("r{i}").as_bytes(), r.pos, r.len, -1, 0);
+        }
+        store
+    };
+    let mut warm = build();
+    warm.sort_by_pos();
+    let _ = warm.link_mates();
 
-        prop_assert_eq!(
-            depths(warm.prepare_for_pileup().input, 260),
-            depths(build().prepare_for_pileup().input, 260)
-        );
-    }
+    assert_eq!(
+        depths(warm.prepare_for_pileup().input, 260),
+        depths(build().prepare_for_pileup().input, 260)
+    );
 }
 
 /// `dedup` must establish the order it needs rather than document it.
@@ -204,34 +205,33 @@ fn dedup_collapses_duplicates_that_arrive_out_of_order() {
     assert_eq!(store.len(), 2, "the two identical records must collapse to one");
 }
 
-proptest! {
-    /// Whatever order distinct records and their duplicates arrive in, `dedup`
-    /// leaves exactly the distinct ones.
-    ///
-    /// Positions are made distinct per record so that "duplicate" and
-    /// "adjacent after sorting" coincide, which is the contract `dedup`
-    /// documents; it is deliberately not a full-store uniqueness pass.
-    #[test]
-    fn dedup_leaves_exactly_the_distinct_records(
-        count in 1usize..8,
-        copies in prop::collection::vec(1usize..3, 1..8),
-        rotation in 0usize..8,
-    ) {
-        let mut planned: Vec<usize> = Vec::new();
-        for i in 0..count {
-            let n = copies.get(i).copied().unwrap_or(1);
-            planned.extend(std::iter::repeat_n(i, n));
-        }
-        let n = planned.len();
-        planned.rotate_left(rotation % n);
-
-        let mut store = RecordStore::new();
-        for &i in &planned {
-            // Distinct position per record, so duplicates and only duplicates
-            // become adjacent once sorted.
-            push(&mut store, format!("r{i}").as_bytes(), 10 + i as u32 * 20, 10, -1, 0);
-        }
-        store.dedup();
-        prop_assert_eq!(store.len(), count);
+/// Whatever order distinct records and their duplicates arrive in, `dedup`
+/// leaves exactly the distinct ones.
+///
+/// Positions are made distinct per record so that "duplicate" and
+/// "adjacent after sorting" coincide, which is the contract `dedup`
+/// documents; it is deliberately not a full-store uniqueness pass.
+#[hegel::test]
+fn dedup_leaves_exactly_the_distinct_records(tc: TestCase) {
+    let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(7));
+    let copies = tc.draw(
+        gs::vecs(gs::integers::<usize>().min_value(1).max_value(2)).min_size(1).max_size(8 - 1),
+    );
+    let rotation = tc.draw(gs::integers::<usize>().max_value(7));
+    let mut planned: Vec<usize> = Vec::new();
+    for i in 0..count {
+        let n = copies.get(i).copied().unwrap_or(1);
+        planned.extend(std::iter::repeat_n(i, n));
     }
+    let n = planned.len();
+    planned.rotate_left(rotation % n);
+
+    let mut store = RecordStore::new();
+    for &i in &planned {
+        // Distinct position per record, so duplicates and only duplicates
+        // become adjacent once sorted.
+        push(&mut store, format!("r{i}").as_bytes(), 10 + i as u32 * 20, 10, -1, 0);
+    }
+    store.dedup();
+    assert_eq!(store.len(), count);
 }

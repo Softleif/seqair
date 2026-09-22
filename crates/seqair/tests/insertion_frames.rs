@@ -6,8 +6,8 @@
 #![allow(clippy::arithmetic_side_effects, reason = "test code")]
 
 mod helpers;
+use hegel::prelude::*;
 use helpers::ri;
-use proptest::prelude::*;
 use seqair::bam::aligned_pairs::AlignedPair;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::{PileupEngine, PileupOp};
@@ -84,57 +84,53 @@ fn anchor_from_pileup(store: RecordStore, region_end: u32) -> u32 {
     anchor.expect("no insertion column")
 }
 
-proptest! {
-    /// One insertion, two frames, one base apart — always.
-    ///
-    /// `AlignedPair::Insertion` reports the first *inserted* base;
-    /// `PileupOp::Insertion` reports the matched base that *precedes* the run,
-    /// because a pileup column has to sit on a reference position and an
-    /// insertion consumes none. Nothing pinned the relationship between them,
-    /// so a consumer moving between the two APIs had only prose to go on.
-    #[test]
-    fn the_pileup_anchor_is_one_before_the_first_inserted_base(
-        pos in 0u32..50,
-        lead in 1u32..20,
-        ins in 1u32..8,
-        trail in 1u32..20,
-    ) {
-        let store = store_with_insertion(pos, lead, ins, trail);
-        let first_inserted = first_inserted_from_pairs(&store);
-        let anchor = anchor_from_pileup(store, pos + lead + trail + 10);
+/// One insertion, two frames, one base apart — always.
+///
+/// `AlignedPair::Insertion` reports the first *inserted* base;
+/// `PileupOp::Insertion` reports the matched base that *precedes* the run,
+/// because a pileup column has to sit on a reference position and an
+/// insertion consumes none. Nothing pinned the relationship between them,
+/// so a consumer moving between the two APIs had only prose to go on.
+#[hegel::test]
+fn the_pileup_anchor_is_one_before_the_first_inserted_base(tc: TestCase) {
+    let pos = tc.draw(gs::integers::<u32>().max_value(49));
+    let lead = tc.draw(gs::integers::<u32>().min_value(1).max_value(19));
+    let ins = tc.draw(gs::integers::<u32>().min_value(1).max_value(7));
+    let trail = tc.draw(gs::integers::<u32>().min_value(1).max_value(19));
+    let store = store_with_insertion(pos, lead, ins, trail);
+    let first_inserted = first_inserted_from_pairs(&store);
+    let anchor = anchor_from_pileup(store, pos + lead + trail + 10);
 
-        prop_assert_eq!(first_inserted, anchor + 1, "the frames differ by exactly one base");
-        prop_assert_eq!(anchor, lead - 1, "the anchor is the last leading matched base");
-    }
+    assert_eq!(first_inserted, anchor + 1, "the frames differ by exactly one base");
+    assert_eq!(anchor, lead - 1, "the anchor is the last leading matched base");
+}
 
-    /// The inserted run the pileup exposes starts at the aligned-pairs frame,
-    /// so a caller never has to reconstruct it from the anchor.
-    #[test]
-    fn inserted_bases_start_at_the_aligned_pairs_frame(
-        lead in 1u32..20,
-        ins in 1u32..8,
-        trail in 1u32..20,
-    ) {
-        let store = store_with_insertion(10, lead, ins, trail);
-        let first_inserted = first_inserted_from_pairs(&store) as usize;
-        let seq: Vec<Base> = store.record(ri(0)).unwrap().seq().to_vec();
+/// The inserted run the pileup exposes starts at the aligned-pairs frame,
+/// so a caller never has to reconstruct it from the anchor.
+#[hegel::test]
+fn inserted_bases_start_at_the_aligned_pairs_frame(tc: TestCase) {
+    let lead = tc.draw(gs::integers::<u32>().min_value(1).max_value(19));
+    let ins = tc.draw(gs::integers::<u32>().min_value(1).max_value(7));
+    let trail = tc.draw(gs::integers::<u32>().min_value(1).max_value(19));
+    let store = store_with_insertion(10, lead, ins, trail);
+    let first_inserted = first_inserted_from_pairs(&store) as usize;
+    let seq: Vec<Base> = store.record(ri(0)).unwrap().seq().to_vec();
 
-        let mut engine = PileupEngine::new(
-            store.prepare_for_pileup().input,
-            Pos0::new(0).unwrap(),
-            Pos0::new(10 + lead + trail + 10).unwrap(),
-        );
-        let mut checked = false;
-        while let Some(col) = engine.pileups() {
-            for view in col.alignments() {
-                if !matches!(view.op(), PileupOp::Insertion { .. }) {
-                    continue;
-                }
-                let run = &seq[first_inserted..first_inserted + ins as usize];
-                prop_assert_eq!(view.inserted_bases(), run);
-                checked = true;
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        Pos0::new(0).unwrap(),
+        Pos0::new(10 + lead + trail + 10).unwrap(),
+    );
+    let mut checked = false;
+    while let Some(col) = engine.pileups() {
+        for view in col.alignments() {
+            if !matches!(view.op(), PileupOp::Insertion { .. }) {
+                continue;
             }
+            let run = &seq[first_inserted..first_inserted + ins as usize];
+            assert_eq!(view.inserted_bases(), run);
+            checked = true;
         }
-        prop_assert!(checked, "the fixture must produce an insertion column");
     }
+    assert!(checked, "the fixture must produce an insertion column");
 }

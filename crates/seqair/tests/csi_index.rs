@@ -523,53 +523,54 @@ fn real_bam_samtools_csi_matches_bai() {
 
 // --- Proptest: write + parse round-trip preserves query results ---
 
-use proptest::prelude::*;
+use hegel::prelude::*;
 
-proptest! {
-    #[test]
-    fn roundtrip_csi_preserves_query_chunks(
-        n_records in 1usize..50,
-        seed in 0u64..10_000,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let header = BamHeader::from_sam_text(
-            "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:10000000\n",
-        )
-        .unwrap();
-        let bam_path = dir.path().join("prop.bam");
-        let mut writer = BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
+#[hegel::test]
+fn roundtrip_csi_preserves_query_chunks(tc: TestCase) {
+    let n_records = tc.draw(gs::integers::<usize>().min_value(1).max_value(49));
+    let seed = tc.draw(gs::integers::<u64>().max_value(9999));
+    let dir = tempfile::tempdir().unwrap();
+    let header =
+        BamHeader::from_sam_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:10000000\n")
+            .unwrap();
+    let bam_path = dir.path().join("prop.bam");
+    let mut writer =
+        BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
 
-        for i in 0..n_records {
-            let pos = ((seed + (i as u64) * 1000) % 9_000_000) as u32;
-            let rec = OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), format!("r{i}").into_bytes())
+    for i in 0..n_records {
+        let pos = ((seed + (i as u64) * 1000) % 9_000_000) as u32;
+        let rec =
+            OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), format!("r{i}").into_bytes())
                 .mapq(60)
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
                 .seq(cyclic_seq(100))
                 .qual(vec![BaseQuality::from_byte(30); 100])
                 .build()
                 .unwrap();
-            writer.write(&rec).unwrap();
-        }
-
-        let (_inner, index_builder) = writer.finish().unwrap();
-        let ib = index_builder.unwrap();
-
-        // Write both BAI and CSI
-        let bai_path = bam_path.with_extension("bam.bai");
-        let csi_path = bam_path.with_extension("bam.csi");
-        ib.write_bai(std::fs::File::create(&bai_path).unwrap(), 1).unwrap();
-        ib.write_csi(std::fs::File::create(&csi_path).unwrap(), 1, &[]).unwrap();
-
-        // Parse both and compare queries
-        let bai = BamIndex::from_path(&bai_path).unwrap();
-        let csi = CsiIndex::from_path(&csi_path).unwrap();
-
-        let bai_chunks = bai.query(0, Pos0::new(0).unwrap(), Pos0::new(10_000_000).unwrap());
-        let csi_chunks = csi.query(0, Pos0::new(0).unwrap(), Pos0::new(10_000_000).unwrap());
-
-        prop_assert_eq!(
-            csi_chunks.len(), bai_chunks.len(),
-            "chunk count mismatch: csi={}, bai={}", csi_chunks.len(), bai_chunks.len()
-        );
+        writer.write(&rec).unwrap();
     }
+
+    let (_inner, index_builder) = writer.finish().unwrap();
+    let ib = index_builder.unwrap();
+
+    // Write both BAI and CSI
+    let bai_path = bam_path.with_extension("bam.bai");
+    let csi_path = bam_path.with_extension("bam.csi");
+    ib.write_bai(std::fs::File::create(&bai_path).unwrap(), 1).unwrap();
+    ib.write_csi(std::fs::File::create(&csi_path).unwrap(), 1, &[]).unwrap();
+
+    // Parse both and compare queries
+    let bai = BamIndex::from_path(&bai_path).unwrap();
+    let csi = CsiIndex::from_path(&csi_path).unwrap();
+
+    let bai_chunks = bai.query(0, Pos0::new(0).unwrap(), Pos0::new(10_000_000).unwrap());
+    let csi_chunks = csi.query(0, Pos0::new(0).unwrap(), Pos0::new(10_000_000).unwrap());
+
+    assert_eq!(
+        csi_chunks.len(),
+        bai_chunks.len(),
+        "chunk count mismatch: csi={}, bai={}",
+        csi_chunks.len(),
+        bai_chunks.len()
+    );
 }

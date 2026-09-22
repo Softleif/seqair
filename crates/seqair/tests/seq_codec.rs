@@ -12,7 +12,7 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
-use proptest::prelude::*;
+use hegel::prelude::*;
 use seqair::bam::seq::{decode_seq, decode_seq_scalar, encode_seq};
 
 // ---- seq.decode_scalar ----
@@ -68,24 +68,20 @@ fn decode_pair_table_exhaustive() {
 // r[verify seq.decode_simd]
 // r[verify seq.decode_dispatch]
 // r[verify io.platform_optimizations]
-proptest! {
-    #[test]
-    fn simd_matches_scalar_arbitrary(
-        len in 0usize..=300,
-        seed in 0u64..=u64::MAX,
-    ) {
-        let n_bytes = len.div_ceil(2);
-        // Generate deterministic encoded bytes from seed
-        let encoded: Vec<u8> = (0..n_bytes)
-            .map(|i| ((seed.wrapping_mul(6364136223846793005).wrapping_add(i as u64)) >> 33) as u8)
-            .collect();
+#[hegel::test]
+fn simd_matches_scalar_arbitrary(tc: TestCase) {
+    let len = tc.draw(gs::integers::<usize>().max_value(300));
+    let seed = tc.draw(gs::integers::<u64>());
+    let n_bytes = len.div_ceil(2);
+    // Generate deterministic encoded bytes from seed
+    let encoded: Vec<u8> = (0..n_bytes)
+        .map(|i| ((seed.wrapping_mul(6364136223846793005).wrapping_add(i as u64)) >> 33) as u8)
+        .collect();
 
-        let scalar = decode_seq_scalar(&encoded, len);
-        let dispatched = decode_seq(&encoded, len);
+    let scalar = decode_seq_scalar(&encoded, len);
+    let dispatched = decode_seq(&encoded, len);
 
-        prop_assert_eq!(&dispatched, &scalar,
-            "SIMD/scalar mismatch for len={}", len);
-    }
+    assert_eq!(&dispatched, &scalar, "SIMD/scalar mismatch for len={}", len);
 }
 
 // r[verify seq.simd_scalar_equivalence]
@@ -143,58 +139,52 @@ fn encode_odd_length() {
 // r[verify seq.encode_scalar]
 // Verifies the BAM spec (SAM1 §4.2.4) nibble encoding table:
 // =ACMGRSVTWYHKDBN → nibble values 0–15, so A=1, C=2, G=4, T=8, N=15.
-proptest! {
-    #[test]
-    fn encode_produces_spec_nibble_values(
-        bases in prop::collection::vec(
-            prop::sample::select(vec![b'A', b'C', b'G', b'T', b'N']),
-            0..=200,
-        ),
-    ) {
-        fn spec_nibble(b: u8) -> u8 {
-            match b {
-                b'A' => 1,
-                b'C' => 2,
-                b'G' => 4,
-                b'T' => 8,
-                b'N' => 15,
-                _ => panic!("unexpected base {b}"),
-            }
+#[hegel::test]
+fn encode_produces_spec_nibble_values(tc: TestCase) {
+    let bases = tc.draw(gs::vecs(gs::sampled_from(&b"ACGTN"[..])).max_size(200));
+    fn spec_nibble(b: u8) -> u8 {
+        match b {
+            b'A' => 1,
+            b'C' => 2,
+            b'G' => 4,
+            b'T' => 8,
+            b'N' => 15,
+            _ => panic!("unexpected base {b}"),
         }
-
-        let encoded = encode_seq(&bases);
-
-        // Verify each encoded byte has the correct nibble values per the BAM spec.
-        for i in 0..bases.len() / 2 {
-            let byte = encoded.get(i).copied().unwrap();
-            let hi = byte >> 4;
-            let lo = byte & 0x0F;
-            prop_assert_eq!(
-                hi,
-                spec_nibble(*bases.get(i * 2).unwrap()),
-                "high nibble mismatch at pair {}",
-                i
-            );
-            prop_assert_eq!(
-                lo,
-                spec_nibble(*bases.get(i * 2 + 1).unwrap()),
-                "low nibble mismatch at pair {}",
-                i
-            );
-        }
-        // For odd-length sequences the last byte's high nibble encodes the final base.
-        if bases.len() % 2 == 1 {
-            let last_byte = encoded.get(bases.len() / 2).copied().unwrap();
-            prop_assert_eq!(
-                last_byte >> 4,
-                spec_nibble(*bases.last().unwrap()),
-                "high nibble mismatch for final odd base"
-            );
-            prop_assert_eq!(last_byte & 0x0F, 0u8, "low nibble of padding byte must be 0");
-        }
-
-        // Secondary: roundtrip check.
-        let decoded = decode_seq(&encoded, bases.len());
-        prop_assert_eq!(&decoded, &bases);
     }
+
+    let encoded = encode_seq(&bases);
+
+    // Verify each encoded byte has the correct nibble values per the BAM spec.
+    for i in 0..bases.len() / 2 {
+        let byte = encoded.get(i).copied().unwrap();
+        let hi = byte >> 4;
+        let lo = byte & 0x0F;
+        assert_eq!(
+            hi,
+            spec_nibble(*bases.get(i * 2).unwrap()),
+            "high nibble mismatch at pair {}",
+            i
+        );
+        assert_eq!(
+            lo,
+            spec_nibble(*bases.get(i * 2 + 1).unwrap()),
+            "low nibble mismatch at pair {}",
+            i
+        );
+    }
+    // For odd-length sequences the last byte's high nibble encodes the final base.
+    if bases.len() % 2 == 1 {
+        let last_byte = encoded.get(bases.len() / 2).copied().unwrap();
+        assert_eq!(
+            last_byte >> 4,
+            spec_nibble(*bases.last().unwrap()),
+            "high nibble mismatch for final odd base"
+        );
+        assert_eq!(last_byte & 0x0F, 0u8, "low nibble of padding byte must be 0");
+    }
+
+    // Secondary: roundtrip check.
+    let decoded = decode_seq(&encoded, bases.len());
+    assert_eq!(&decoded, &bases);
 }

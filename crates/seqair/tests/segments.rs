@@ -21,7 +21,7 @@
     reason = "test code"
 )]
 
-use proptest::prelude::*;
+use hegel::prelude::*;
 use seqair::reader::{DepthLimit, Readers, SegmentOptions};
 use seqair_types::Pos0;
 use std::num::NonZeroU32;
@@ -185,28 +185,23 @@ fn whole_genome_target_yields_all_nonempty_contigs() {
     }
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(16))]
-
-    // For a random `(max_len, overlap)` pair the segmented pileup must match
-    // the single-pileup baseline column-for-column.
-    //
-    // Using the real BAM as the oracle: the single-tile pileup is the
-    // independent ground truth (it's what users had pre-segmentation), and
-    // the segmented version is the new code path — they must agree on
-    // every position and depth.
-    // r[verify unified.readers_segments]
-    #[test]
-    fn segmented_matches_single(
-        max_len in 100u32..1_000,
-        overlap in 0u32..100,
-    ) {
-        prop_assume!(overlap < max_len);
-        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
-        let start = Pos0::new(REGION_START).unwrap();
-        let end = Pos0::new(REGION_END).unwrap();
-        let single = pileup_single(&mut readers, "chr19", start, end);
-        let segmented = pileup_segmented(&mut readers, "chr19", start, end, max_len, overlap);
-        prop_assert_eq!(single, segmented);
-    }
+// For a random `(max_len, overlap)` pair the segmented pileup must match
+// the single-pileup baseline column-for-column.
+//
+// Using the real BAM as the oracle: the single-tile pileup is the
+// independent ground truth (it's what users had pre-segmentation), and
+// the segmented version is the new code path — they must agree on
+// every position and depth.
+// r[verify unified.readers_segments]
+#[hegel::test(test_cases = 16)]
+fn segmented_matches_single(tc: TestCase) {
+    let max_len = tc.draw(gs::integers::<u32>().min_value(100).max_value(999));
+    let overlap = tc.draw(gs::integers::<u32>().max_value(99));
+    tc.assume(overlap < max_len);
+    let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+    let start = Pos0::new(REGION_START).unwrap();
+    let end = Pos0::new(REGION_END).unwrap();
+    let single = pileup_single(&mut readers, "chr19", start, end);
+    let segmented = pileup_segmented(&mut readers, "chr19", start, end, max_len, overlap);
+    assert_eq!(single, segmented);
 }
