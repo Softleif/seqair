@@ -1,54 +1,54 @@
-//! Genomic position newtype parameterized by coordinate system.
+//! Genomic positions, in the two coordinate systems the formats use.
 //!
-//! `Pos<Zero>` is 0-based (BAM, BED, internal engine). `Pos<One>` is 1-based
-//! (SAM, VCF, CRAM, user-facing). The type system prevents mixing coordinate
-//! systems at compile time. `Offset` represents a signed distance between positions.
+//! [`Pos0`] is 0-based (BAM, BED, internal engine). [`Pos1`] is 1-based
+//! (SAM, VCF, CRAM, user-facing). They are two separate types carrying the
+//! same API rather than one type parameterized by a marker: mixing them is a
+//! compile error, and neither can inherit the other's floor. [`Offset`]
+//! represents a signed distance between positions.
 //!
 //! # Range and niche optimization
 //!
-//! Valid positions are `0..=i32::MAX` (for `Pos<Zero>`) or `1..=i32::MAX`
-//! (for `Pos<One>`). This cap matches BAM/CRAM/BCF which store positions as
-//! `i32`, and makes `as_i32()` infallible.
+//! Valid positions are `0..=i32::MAX` (for [`Pos0`]) or `1..=i32::MAX`
+//! (for [`Pos1`]). This cap matches BAM/CRAM/BCF which store positions as
+//! `i32`, and makes `as_i32()` infallible. Both types store a
+//! [`NonZeroU32`], so `Option<Pos0>` and `Option<Pos1>` are four bytes.
 
 use std::fmt;
-use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::ops::Sub;
 
-/// Maximum valid raw value for any `Pos`: `i32::MAX` (2,147,483,647).
+/// Maximum valid raw value for either position type: `i32::MAX`
+/// (2,147,483,647).
 ///
 /// We cap at `i32::MAX` rather than `u32::MAX - 1` because BAM, CRAM, and BCF
 /// all store positions as `i32`.  This lets `as_i32()` be infallible.
 const POS_MAX: u32 = i32::MAX as u32;
 
-// r[impl pos.systems]
-/// 0-based coordinate system (BAM binary, BED, internal engine).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Zero;
-
-// r[impl pos.systems]
-/// 1-based coordinate system (SAM text, VCF, CRAM, user-facing).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct One;
-
-/// 0-based position (BAM, BED). Alias for `Pos<Zero>`.
-pub type Pos0 = Pos<Zero>;
-/// 1-based position (SAM, VCF). Alias for `Pos<One>`.
-pub type Pos1 = Pos<One>;
+/// `POS_MAX` as the stored `NonZeroU32`: the representation of [`Pos1::MAX`],
+/// and one less than the representation of [`Pos0::MAX`].
+const POS_MAX_NZ: NonZeroU32 = NonZeroU32::new(POS_MAX).expect("i32::MAX is not zero");
 
 // r[impl pos.type]
 // r[impl pos.size]
+// r[impl pos.systems]
 // r[impl pos.incompatible]
 // r[impl pos.derives]
 // r[impl pos.niche]
-/// A genomic position parameterized by coordinate system.
+/// A 0-based position: BAM binary, BED, and everything internal to the engine.
 ///
-/// Zero runtime overhead: identical layout to `u32` via `#[repr(transparent)]`.
-/// The phantom type parameter prevents mixing 0-based and 1-based positions
-/// at compile time.
+/// Valid values are `0..=i32::MAX`.
 ///
-/// Valid range is `0..=i32::MAX` for `Pos<Zero>` and `1..=i32::MAX` for
-/// `Pos<One>`. `u32::MAX` is reserved as the niche so `Option<Pos<S>>` is
-/// 4 bytes.
+/// # Representation
+///
+/// The field holds the position **plus one**, so that the niche of
+/// [`NonZeroU32`] makes `Option<Pos0>` four bytes rather than eight. Storing
+/// `value + 1` rather than `value` is what lets a `Pos0` and the [`Pos1`] of
+/// the same genomic base have the identical bit pattern: [`Pos1`] stores its
+/// value as it is, and the 1-based value of a base *is* its 0-based value plus
+/// one. [`Self::to_one_based`] is therefore a reinterpretation plus the
+/// `i32::MAX` bound check, and [`Pos1::to_zero_based`] a bare reinterpretation.
+/// Adding one is monotone, so the derived `Ord` on the stored number is the
+/// ordering of the positions.
 ///
 /// # Construction
 ///
@@ -62,11 +62,16 @@ pub type Pos1 = Pos<One>;
 /// // From i32 (BAM wire format):
 /// let from_bam = Pos0::try_from(42i32).unwrap();
 /// assert_eq!(from_bam.as_i32(), 42);
+///
+/// // Each type knows its own floor: there is no 1-based zero.
+/// assert_eq!(Pos1::new(0), None);
+/// assert_eq!(Pos1::MIN, Pos1::new(1).unwrap());
+/// assert_eq!(Pos0::MIN, Pos0::ZERO);
 /// ```
 ///
 /// # What the compiler must reject
 ///
-/// These are the guarantees the phantom parameter exists for, and the only way
+/// These are the guarantees the two separate types exist for, and the only way
 /// to test a compile error is to fail to compile. Note what that does and does
 /// not buy: rustdoc checks that the block *fails*, but it does not check the
 /// error code — `compile_fail,E0999` passes just as happily. So a block goes
@@ -147,10 +152,31 @@ pub type Pos1 = Pos<One>;
 // r[verify qpos.not_a_pos]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct Pos<S> {
-    value: u32,
-    _system: PhantomData<S>,
-}
+pub struct Pos0(NonZeroU32);
+
+// r[impl pos.type]
+// r[impl pos.size]
+// r[impl pos.systems]
+// r[impl pos.incompatible]
+// r[impl pos.derives]
+// r[impl pos.niche]
+/// A 1-based position: SAM text, VCF, CRAM, and everything user-facing.
+///
+/// Valid values are `1..=i32::MAX`. The field holds the value as it is; the
+/// [`NonZeroU32`] is both the niche that makes `Option<Pos1>` four bytes and
+/// the reason no runtime check can ever produce the 1-based zero. See
+/// [`Pos0`]'s representation note for why the two types share a bit pattern.
+///
+/// ```
+/// use seqair_types::pos::Pos1;
+///
+/// assert_eq!(Pos1::new(0), None);
+/// assert_eq!(Pos1::MIN.as_u32(), 1);
+/// assert_eq!(Pos1::new(1).unwrap().to_zero_based().as_u32(), 0);
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct Pos1(NonZeroU32);
 
 // r[impl pos.offset]
 /// Signed distance between two positions.
@@ -160,7 +186,7 @@ pub struct Pos<S> {
 #[repr(transparent)]
 pub struct Offset(i64);
 
-/// Error returned when a value cannot be converted to a [`Pos`].
+/// Error returned when a value cannot be converted to a [`Pos0`] or [`Pos1`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PosOverflow;
 
@@ -172,87 +198,49 @@ impl fmt::Display for PosOverflow {
 
 impl std::error::Error for PosOverflow {}
 
-// ---- Pos<Zero> construction ----
+// ---- Pos0: construction, accessors, arithmetic ----
 
-impl Pos<Zero> {
+impl Pos0 {
     /// Zero position (0-based). Valid and commonly used, so provided as a constant.
-    pub const ZERO: Self = Self::new(0).unwrap();
+    pub const ZERO: Self = Self::MIN;
+
+    // r[impl pos.min_max]
+    // r[impl pos.two_types]
+    /// The first position this type admits, `Pos0(0)`.
+    pub const MIN: Self = Self(NonZeroU32::MIN);
+
+    // r[impl pos.min_max]
+    // r[impl pos.two_types]
+    /// The last representable position, `i32::MAX`.
+    /// Used as the "end of contig" sentinel in queries.
+    pub const MAX: Self = Self(NonZeroU32::MIN.saturating_add(POS_MAX));
 
     // r[impl pos.zero_new]
-    /// Create a 0-based position from a `u32`. Returns `None` if `value > i32::MAX`.
+    // r[impl pos.two_types]
+    /// Create a 0-based position from a `u32`, rejecting anything above
+    /// `i32::MAX`. Every value in `0..=i32::MAX` is a 0-based position.
     #[inline]
     pub const fn new(value: u32) -> Option<Self> {
         if value > POS_MAX {
             return None;
         }
-        Some(Self { value, _system: PhantomData })
+        // The stored number is `value + 1`, built as "one, plus the value" so
+        // it is a `NonZeroU32` by construction. Nothing saturates: `value` is
+        // at most `i32::MAX`.
+        Some(Self(NonZeroU32::MIN.saturating_add(value)))
     }
 
-    // r[impl pos.to_one_based]
-    // r[impl pos.explicit_conversion]
-    /// Convert to 1-based. Fails only at `i32::MAX` (0-based) where the
-    /// 1-based result would exceed `i32::MAX`.
-    #[inline]
-    pub const fn to_one_based(self) -> Result<Pos<One>, PosOverflow> {
-        let Some(new_val) = self.value.checked_add(1) else {
-            // impossible by construction
-            return Err(PosOverflow);
-        };
-        match Pos::<One>::new(new_val) {
-            Some(v) => Ok(v),
-            None => Err(PosOverflow),
-        }
-    }
-
-    /// Maximum valid 0-based position (`i32::MAX`).
-    /// Used as "end of contig" sentinel in queries.
-    pub const fn max_value() -> Self {
-        match Self::new(POS_MAX) {
-            Some(v) => v,
-            None => unreachable!(),
-        }
-    }
-}
-
-// ---- Pos<One> construction ----
-
-impl Pos<One> {
-    // r[impl pos.one_new]
-    /// Create a 1-based position from a `u32`. Returns `None` if value is 0 or > `i32::MAX`.
-    #[inline]
-    pub const fn new(value: u32) -> Option<Self> {
-        if value == 0 || value > POS_MAX {
-            return None;
-        }
-        Some(Self { value, _system: PhantomData })
-    }
-
-    // r[impl pos.to_zero_based]
-    // r[impl pos.explicit_conversion]
-    /// Convert to 0-based. Infallible: 1-based values are in `1..=i32::MAX`,
-    /// so subtracting 1 gives `0..=i32::MAX - 1`, always valid.
+    // r[impl pos.as_u32]
+    // r[impl pos.must_use]
+    /// The 0-based value.
     #[inline]
     #[must_use]
-    pub const fn to_zero_based(self) -> Pos<Zero> {
-        let Some(new_val) = self.value.checked_sub(1) else {
-            // always >0 by construction
-            unreachable!()
-        };
-        Pos { value: new_val, _system: PhantomData }
+    pub const fn as_u32(self) -> u32 {
+        // The stored number is the value plus one and therefore at least one;
+        // `wrapping_sub` cannot wrap. `-` would trip `arithmetic_side_effects`.
+        self.0.get().wrapping_sub(1)
     }
 
-    /// Maximum valid 1-based position (`i32::MAX`).
-    pub const fn max_value() -> Self {
-        match Self::new(POS_MAX) {
-            Some(v) => v,
-            None => unreachable!(),
-        }
-    }
-}
-
-// ---- Common methods (both systems) ----
-
-impl<S> Pos<S> {
     // r[impl pos.as_i32]
     // r[impl pos.must_use]
     /// Raw value as `i32`. Infallible because all valid positions are `<= i32::MAX`.
@@ -260,65 +248,257 @@ impl<S> Pos<S> {
     #[must_use]
     #[expect(clippy::cast_possible_wrap, reason = "value ≤ i32::MAX by construction")]
     pub const fn as_i32(self) -> i32 {
-        self.value as i32
+        self.as_u32() as i32
     }
 
     // r[impl pos.as_usize]
+    // r[impl pos.must_use]
     /// Convenience for indexing: returns the raw value as usize.
     #[inline]
     #[must_use]
     pub const fn as_usize(self) -> usize {
-        self.value as usize
+        self.as_u32() as usize
     }
 
     // r[impl pos.as_i64]
+    // r[impl pos.must_use]
     /// Convenience for wider arithmetic: returns the raw value as i64.
     #[inline]
     #[must_use]
     pub const fn as_i64(self) -> i64 {
-        self.value as i64
+        self.as_u32() as i64
     }
 
+    // r[impl pos.must_use]
     /// Convenience for 64-bit arithmetic: returns the raw value as u64.
     #[inline]
     #[must_use]
     pub const fn as_u64(self) -> u64 {
-        self.value as u64
+        self.as_u32() as u64
     }
 
-    // r[impl pos.as_u32]
-    /// The raw value. Infallible; this is the representation.
+    // r[impl pos.to_one_based]
+    // r[impl pos.explicit_conversion]
+    /// Convert to 1-based. Fails only at `i32::MAX` (0-based) where the
+    /// 1-based result would exceed `i32::MAX`.
+    ///
+    /// A reinterpretation: a `Pos0` already stores `value + 1`, which is the
+    /// 1-based value. Only the bound differs between the two types.
     #[inline]
-    #[must_use]
-    pub const fn as_u32(self) -> u32 {
-        self.value
+    pub const fn to_one_based(self) -> Result<Pos1, PosOverflow> {
+        if self.0.get() > POS_MAX {
+            return Err(PosOverflow);
+        }
+        Ok(Pos1(self.0))
     }
 
     // r[impl pos.add_offset]
-    /// Checked position + offset. Returns `None` if result is negative or > `i32::MAX`.
+    // r[impl pos.two_types]
+    /// Checked `position + offset`. `None` if the result leaves this type's
+    /// range: below [`Pos0::MIN`] — so below zero — or above `i32::MAX`.
+    #[inline]
+    #[must_use]
+    pub fn checked_add_offset(self, offset: Offset) -> Option<Self> {
+        let result = i64::from(self.as_u32()).checked_add(offset.0)?;
+        u32::try_from(result).ok().and_then(Self::new)
+    }
+
+    // r[impl pos.sub_offset]
+    // r[impl pos.two_types]
+    /// Checked `position - offset`. Same bounds as [`Self::checked_add_offset`].
+    ///
+    /// `Offset::new(i64::MIN)` has no negation, so subtracting it is `None`
+    /// whatever the position.
+    #[inline]
+    #[must_use]
+    pub fn checked_sub_offset(self, offset: Offset) -> Option<Self> {
+        self.checked_add_offset(Offset(offset.0.checked_neg()?))
+    }
+
+    // r[impl pos.saturating_offset]
+    // r[impl pos.two_types]
+    /// `position + offset`, clamped to this type's range instead of failing:
+    /// a result below [`Pos0::MIN`] becomes `MIN`, one above `i32::MAX`
+    /// becomes [`Pos0::MAX`].
+    ///
+    /// For padding and trimming, where running off the start of a contig means
+    /// the start of the contig. A caller that needs to *know* the bound was hit
+    /// wants [`Self::checked_add_offset`].
     #[inline]
     #[must_use]
     #[expect(
         clippy::cast_sign_loss,
         clippy::cast_possible_truncation,
-        reason = "result is checked to be in 0..=i32::MAX"
+        reason = "clamped into 0..=POS_MAX before the cast"
     )]
-    pub fn checked_add_offset(self, offset: Offset) -> Option<Self> {
-        let result = i64::from(self.value).wrapping_add(offset.0);
-        if result < 0 || result > i64::from(POS_MAX) {
+    pub fn saturating_add_offset(self, offset: Offset) -> Self {
+        let result = i64::from(self.as_u32()).saturating_add(offset.0);
+        let clamped = result.clamp(0, i64::from(POS_MAX));
+        // Same construction as `new`, minus the check `clamp` made redundant.
+        Self(NonZeroU32::MIN.saturating_add(clamped as u32))
+    }
+
+    // r[impl pos.saturating_offset]
+    // r[impl pos.two_types]
+    /// `position - offset`, clamped to this type's range instead of failing.
+    ///
+    /// `Offset::new(i64::MIN)` has no negation; subtracting it saturates
+    /// to [`Pos0::MAX`], since the most negative offset really does run off
+    /// the far end.
+    #[inline]
+    #[must_use]
+    pub fn saturating_sub_offset(self, offset: Offset) -> Self {
+        self.saturating_add_offset(Offset(offset.0.saturating_neg()))
+    }
+}
+
+// ---- Pos1: construction, accessors, arithmetic ----
+
+impl Pos1 {
+    // r[impl pos.min_max]
+    // r[impl pos.two_types]
+    /// The first position this type admits, `Pos1(1)`.
+    pub const MIN: Self = Self(NonZeroU32::MIN);
+
+    // r[impl pos.min_max]
+    // r[impl pos.two_types]
+    /// The last representable position, `i32::MAX`.
+    /// Used as the "end of contig" sentinel in queries.
+    pub const MAX: Self = Self(POS_MAX_NZ);
+
+    // r[impl pos.one_new]
+    // r[impl pos.two_types]
+    /// Create a 1-based position from a `u32`, rejecting `0` and anything
+    /// above `i32::MAX`. The zero is not a runtime check that could be
+    /// forgotten: the representation cannot hold it.
+    #[inline]
+    pub const fn new(value: u32) -> Option<Self> {
+        if value > POS_MAX {
             return None;
         }
-        // result is in 0..=i32::MAX
-        Some(Self { value: result as u32, _system: PhantomData })
+        match NonZeroU32::new(value) {
+            Some(stored) => Some(Self(stored)),
+            None => None,
+        }
+    }
+
+    // r[impl pos.as_u32]
+    // r[impl pos.must_use]
+    /// The 1-based value. Infallible; this is the representation.
+    #[inline]
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self.0.get()
+    }
+
+    // r[impl pos.as_i32]
+    // r[impl pos.must_use]
+    /// Raw value as `i32`. Infallible because all valid positions are `<= i32::MAX`.
+    #[inline]
+    #[must_use]
+    #[expect(clippy::cast_possible_wrap, reason = "value ≤ i32::MAX by construction")]
+    pub const fn as_i32(self) -> i32 {
+        self.as_u32() as i32
+    }
+
+    // r[impl pos.as_usize]
+    // r[impl pos.must_use]
+    /// Convenience for indexing: returns the raw value as usize.
+    #[inline]
+    #[must_use]
+    pub const fn as_usize(self) -> usize {
+        self.as_u32() as usize
+    }
+
+    // r[impl pos.as_i64]
+    // r[impl pos.must_use]
+    /// Convenience for wider arithmetic: returns the raw value as i64.
+    #[inline]
+    #[must_use]
+    pub const fn as_i64(self) -> i64 {
+        self.as_u32() as i64
+    }
+
+    // r[impl pos.must_use]
+    /// Convenience for 64-bit arithmetic: returns the raw value as u64.
+    #[inline]
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self.as_u32() as u64
+    }
+
+    // r[impl pos.to_zero_based]
+    // r[impl pos.explicit_conversion]
+    /// Convert to 0-based. Infallible: 1-based values are in `1..=i32::MAX`,
+    /// so subtracting 1 gives `0..=i32::MAX - 1`, always valid.
+    ///
+    /// A reinterpretation: a `Pos0` stores its value plus one, which is
+    /// exactly the number a `Pos1` stores for the same base.
+    #[inline]
+    #[must_use]
+    pub const fn to_zero_based(self) -> Pos0 {
+        Pos0(self.0)
+    }
+
+    // r[impl pos.add_offset]
+    // r[impl pos.two_types]
+    /// Checked `position + offset`. `None` if the result leaves this type's
+    /// range: below [`Pos1::MIN`] — so `Pos1(1) + (-1)` is `None`, not a
+    /// 1-based zero — or above `i32::MAX`.
+    #[inline]
+    #[must_use]
+    pub fn checked_add_offset(self, offset: Offset) -> Option<Self> {
+        let result = i64::from(self.as_u32()).checked_add(offset.0)?;
+        u32::try_from(result).ok().and_then(Self::new)
     }
 
     // r[impl pos.sub_offset]
-    /// Checked position - offset. Returns `None` if result is negative or > `i32::MAX`.
+    // r[impl pos.two_types]
+    /// Checked `position - offset`. Same bounds as [`Self::checked_add_offset`].
+    ///
+    /// `Offset::new(i64::MIN)` has no negation, so subtracting it is `None`
+    /// whatever the position.
     #[inline]
     #[must_use]
     pub fn checked_sub_offset(self, offset: Offset) -> Option<Self> {
-        let negated = Offset(offset.0.checked_neg()?);
-        self.checked_add_offset(negated)
+        self.checked_add_offset(Offset(offset.0.checked_neg()?))
+    }
+
+    // r[impl pos.saturating_offset]
+    // r[impl pos.two_types]
+    /// `position + offset`, clamped to this type's range instead of failing:
+    /// a result below [`Pos1::MIN`] becomes `MIN`, one above `i32::MAX`
+    /// becomes [`Pos1::MAX`].
+    ///
+    /// For padding and trimming, where running off the start of a contig means
+    /// the start of the contig. A caller that needs to *know* the bound was hit
+    /// wants [`Self::checked_add_offset`].
+    #[inline]
+    #[must_use]
+    #[expect(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "clamped into 0..=POS_MAX - 1 before the cast"
+    )]
+    pub fn saturating_add_offset(self, offset: Offset) -> Self {
+        // Clamp the distance above `MIN`, then build "one, plus that": a
+        // `NonZeroU32` by construction, with no `Option` to resolve.
+        let result = i64::from(self.as_u32()).saturating_add(offset.0);
+        let above_min = result.saturating_sub(1).clamp(0, i64::from(POS_MAX).saturating_sub(1));
+        Self(NonZeroU32::MIN.saturating_add(above_min as u32))
+    }
+
+    // r[impl pos.saturating_offset]
+    // r[impl pos.two_types]
+    /// `position - offset`, clamped to this type's range instead of failing.
+    ///
+    /// `Offset::new(i64::MIN)` has no negation; subtracting it saturates
+    /// to [`Pos1::MAX`], since the most negative offset really does run off
+    /// the far end.
+    #[inline]
+    #[must_use]
+    pub fn saturating_sub_offset(self, offset: Offset) -> Self {
+        self.saturating_add_offset(Offset(offset.0.saturating_neg()))
     }
 }
 
@@ -326,12 +506,23 @@ impl<S> Pos<S> {
 
 // r[impl pos.sub_pos]
 // r[impl pos.no_add_pos]
-// Pos - Pos = Offset (same system only); Add<Pos> is deliberately not implemented.
-impl<S> Sub for Pos<S> {
+// Pos0 - Pos0 = Offset; Add<Pos0> is deliberately not implemented.
+impl Sub for Pos0 {
     type Output = Offset;
     #[inline]
     fn sub(self, rhs: Self) -> Offset {
-        Offset(i64::from(self.value).wrapping_sub(i64::from(rhs.value)))
+        Offset(i64::from(self.as_u32()).wrapping_sub(i64::from(rhs.as_u32())))
+    }
+}
+
+// r[impl pos.sub_pos]
+// r[impl pos.no_add_pos]
+// Pos1 - Pos1 = Offset; Add<Pos1> is deliberately not implemented.
+impl Sub for Pos1 {
+    type Output = Offset;
+    #[inline]
+    fn sub(self, rhs: Self) -> Offset {
+        Offset(i64::from(self.as_u32()).wrapping_sub(i64::from(rhs.as_u32())))
     }
 }
 
@@ -381,73 +572,84 @@ impl Offset {
 
 // ---- From / TryFrom impls ----
 
-impl<S> From<Pos<S>> for u32 {
+impl From<Pos0> for u32 {
     #[inline]
-    fn from(pos: Pos<S>) -> u32 {
-        pos.value
+    fn from(pos: Pos0) -> u32 {
+        pos.as_u32()
     }
 }
 
-impl<S> From<Pos<S>> for i32 {
+impl From<Pos0> for i32 {
     #[inline]
-    #[expect(clippy::cast_possible_wrap, reason = "value ≤ i32::MAX by construction")]
-    fn from(pos: Pos<S>) -> i32 {
-        pos.value as i32
+    fn from(pos: Pos0) -> i32 {
+        pos.as_i32()
     }
 }
 
-impl<S> From<Pos<S>> for u64 {
+impl From<Pos0> for u64 {
     #[inline]
-    fn from(pos: Pos<S>) -> u64 {
-        u64::from(pos.value)
+    fn from(pos: Pos0) -> u64 {
+        pos.as_u64()
     }
 }
 
-impl<S> From<Pos<S>> for i64 {
+impl From<Pos0> for i64 {
     #[inline]
-    fn from(pos: Pos<S>) -> i64 {
-        i64::from(pos.value)
+    fn from(pos: Pos0) -> i64 {
+        pos.as_i64()
     }
 }
 
-impl<S> From<Pos<S>> for usize {
+impl From<Pos0> for usize {
     #[inline]
-    fn from(pos: Pos<S>) -> usize {
-        pos.value as usize
+    fn from(pos: Pos0) -> usize {
+        pos.as_usize()
     }
 }
+
+impl From<Pos1> for u32 {
+    #[inline]
+    fn from(pos: Pos1) -> u32 {
+        pos.as_u32()
+    }
+}
+
+impl From<Pos1> for i32 {
+    #[inline]
+    fn from(pos: Pos1) -> i32 {
+        pos.as_i32()
+    }
+}
+
+impl From<Pos1> for u64 {
+    #[inline]
+    fn from(pos: Pos1) -> u64 {
+        pos.as_u64()
+    }
+}
+
+impl From<Pos1> for i64 {
+    #[inline]
+    fn from(pos: Pos1) -> i64 {
+        pos.as_i64()
+    }
+}
+
+impl From<Pos1> for usize {
+    #[inline]
+    fn from(pos: Pos1) -> usize {
+        pos.as_usize()
+    }
+}
+
+// Every integer entry point below is `new` behind a widening or narrowing that
+// cannot itself invent a position: a value that does not fit `u32` is out of
+// range, and one that does is handed to that type's own check.
 
 // r[impl pos.try_from]
-impl TryFrom<i32> for Pos<Zero> {
+impl TryFrom<u32> for Pos0 {
     type Error = PosOverflow;
-    /// Create a 0-based position from an `i32`. Fails if negative.
-    #[inline]
-    fn try_from(value: i32) -> Result<Self, PosOverflow> {
-        if value < 0 {
-            return Err(PosOverflow);
-        }
-        // 0..=i32::MAX always valid.
-        Ok(Self { value: value as u32, _system: PhantomData })
-    }
-}
-
-// r[impl pos.try_from]
-impl TryFrom<i32> for Pos<One> {
-    type Error = PosOverflow;
-    /// Create a 1-based position from an `i32`. Fails if < 1.
-    #[inline]
-    fn try_from(value: i32) -> Result<Self, PosOverflow> {
-        if value < 1 {
-            return Err(PosOverflow);
-        }
-        Ok(Self { value: value as u32, _system: PhantomData })
-    }
-}
-
-// r[impl pos.try_from]
-impl TryFrom<u32> for Pos<Zero> {
-    type Error = PosOverflow;
-    /// Create a 0-based position from a `u32`. Fails if > `i32::MAX`.
+    /// Fails above `i32::MAX`.
     #[inline]
     fn try_from(value: u32) -> Result<Self, PosOverflow> {
         Self::new(value).ok_or(PosOverflow)
@@ -455,9 +657,39 @@ impl TryFrom<u32> for Pos<Zero> {
 }
 
 // r[impl pos.try_from]
-impl TryFrom<u32> for Pos<One> {
+impl TryFrom<i32> for Pos0 {
     type Error = PosOverflow;
-    /// Create a 1-based position from a `u32`. Fails if 0 or > `i32::MAX`.
+    /// Fails below the floor: negative values are not 0-based positions.
+    #[inline]
+    fn try_from(value: i32) -> Result<Self, PosOverflow> {
+        u32::try_from(value).ok().and_then(Self::new).ok_or(PosOverflow)
+    }
+}
+
+// r[impl pos.try_from]
+impl TryFrom<i64> for Pos0 {
+    type Error = PosOverflow;
+    /// Fails below zero or above `i32::MAX`.
+    #[inline]
+    fn try_from(value: i64) -> Result<Self, PosOverflow> {
+        u32::try_from(value).ok().and_then(Self::new).ok_or(PosOverflow)
+    }
+}
+
+// r[impl pos.try_from]
+impl TryFrom<u64> for Pos0 {
+    type Error = PosOverflow;
+    /// Fails above `i32::MAX`.
+    #[inline]
+    fn try_from(value: u64) -> Result<Self, PosOverflow> {
+        u32::try_from(value).ok().and_then(Self::new).ok_or(PosOverflow)
+    }
+}
+
+// r[impl pos.try_from]
+impl TryFrom<u32> for Pos1 {
+    type Error = PosOverflow;
+    /// Fails at `0` and above `i32::MAX`.
     #[inline]
     fn try_from(value: u32) -> Result<Self, PosOverflow> {
         Self::new(value).ok_or(PosOverflow)
@@ -465,46 +697,32 @@ impl TryFrom<u32> for Pos<One> {
 }
 
 // r[impl pos.try_from]
-impl TryFrom<i64> for Pos<Zero> {
+impl TryFrom<i32> for Pos1 {
     type Error = PosOverflow;
-    /// Create a 0-based position from an `i64`. Fails if negative or > `i32::MAX`.
+    /// Fails below the floor: `0` and every negative value.
+    #[inline]
+    fn try_from(value: i32) -> Result<Self, PosOverflow> {
+        u32::try_from(value).ok().and_then(Self::new).ok_or(PosOverflow)
+    }
+}
+
+// r[impl pos.try_from]
+impl TryFrom<i64> for Pos1 {
+    type Error = PosOverflow;
+    /// Fails below `1` or above `i32::MAX`.
     #[inline]
     fn try_from(value: i64) -> Result<Self, PosOverflow> {
-        let v = i32::try_from(value).map_err(|_| PosOverflow)?;
-        Self::try_from(v)
+        u32::try_from(value).ok().and_then(Self::new).ok_or(PosOverflow)
     }
 }
 
 // r[impl pos.try_from]
-impl TryFrom<i64> for Pos<One> {
+impl TryFrom<u64> for Pos1 {
     type Error = PosOverflow;
-    /// Create a 1-based position from an `i64`. Fails if < 1 or > `i32::MAX`.
-    #[inline]
-    fn try_from(value: i64) -> Result<Self, PosOverflow> {
-        let v = i32::try_from(value).map_err(|_| PosOverflow)?;
-        Self::try_from(v)
-    }
-}
-
-// r[impl pos.try_from]
-impl TryFrom<u64> for Pos<Zero> {
-    type Error = PosOverflow;
-    /// Create a 0-based position from a `u64`. Fails if > `i32::MAX`.
+    /// Fails at `0` and above `i32::MAX`.
     #[inline]
     fn try_from(value: u64) -> Result<Self, PosOverflow> {
-        let v = i32::try_from(value).map_err(|_| PosOverflow)?;
-        Self::try_from(v)
-    }
-}
-
-// r[impl pos.try_from]
-impl TryFrom<u64> for Pos<One> {
-    type Error = PosOverflow;
-    /// Create a 1-based position from a `u64`. Fails if 0 or > `i32::MAX`.
-    #[inline]
-    fn try_from(value: u64) -> Result<Self, PosOverflow> {
-        let v = i32::try_from(value).map_err(|_| PosOverflow)?;
-        Self::try_from(v)
+        u32::try_from(value).ok().and_then(Self::new).ok_or(PosOverflow)
     }
 }
 
@@ -514,15 +732,16 @@ impl TryFrom<u64> for Pos<One> {
 // r[impl qpos.not_a_pos]
 /// A 0-based offset into a read's sequence (query coordinates).
 ///
-/// Deliberately **not** a [`Pos`]. A [`Pos`] names a place on the reference; a
-/// `QPos` indexes a read. They are different spaces, and code that resolves
-/// reference bases from a segment or window needs the former — handed the
-/// latter it computes a wrong answer that still type-checks. Keeping the two
-/// apart at the type level is the entire purpose of this newtype.
+/// Deliberately **not** a [`Pos0`] or [`Pos1`]. Those name a place on the
+/// reference; a `QPos` indexes a read. They are different spaces, and code
+/// that resolves reference bases from a segment or window needs the former —
+/// handed the latter it computes a wrong answer that still type-checks.
+/// Keeping the two apart at the type level is the entire purpose of this
+/// newtype.
 ///
-/// Unlike [`Pos`] there is no `i32::MAX` cap: a query offset is bounded by the
-/// read length, and no format constrains it further. Construction is therefore
-/// infallible.
+/// Unlike a reference position there is no `i32::MAX` cap: a query offset is
+/// bounded by the read length, and no format constrains it further.
+/// Construction is therefore infallible.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct QPos(u32);
@@ -601,21 +820,34 @@ impl fmt::Display for QPos {
 
 // ---- Display / Debug ----
 
-impl fmt::Debug for Pos<Zero> {
+// r[impl pos.derives]
+// r[impl pos.two_types]
+impl fmt::Debug for Pos0 {
+    /// The logical value, never the stored one.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Pos0({})", self.value)
+        write!(f, "Pos0({})", self.as_u32())
     }
 }
 
-impl fmt::Debug for Pos<One> {
+// r[impl pos.derives]
+// r[impl pos.two_types]
+impl fmt::Debug for Pos1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Pos1({})", self.value)
+        write!(f, "Pos1({})", self.as_u32())
     }
 }
 
-impl<S> fmt::Display for Pos<S> {
+// r[impl pos.derives]
+impl fmt::Display for Pos0 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.value)
+        write!(f, "{}", self.as_u32())
+    }
+}
+
+// r[impl pos.derives]
+impl fmt::Display for Pos1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_u32())
     }
 }
 
@@ -632,7 +864,7 @@ impl fmt::Display for Offset {
 }
 
 #[cfg(test)]
-impl Pos<Zero> {
+impl Pos0 {
     /// Test-only convenience: panics if value is out of range.
     pub fn at(value: u32) -> Self {
         Self::new(value).expect("test position out of range")
@@ -640,7 +872,7 @@ impl Pos<Zero> {
 }
 
 #[cfg(test)]
-impl Pos<One> {
+impl Pos1 {
     /// Test-only convenience: panics if value is out of range.
     pub fn at(value: u32) -> Self {
         Self::new(value).expect("test position out of range")
@@ -676,6 +908,19 @@ mod tests {
         assert_eq!(z.to_one_based().unwrap(), o);
     }
 
+    // r[verify pos.type]
+    /// The one non-obvious thing about the representation: a `Pos0` and the
+    /// `Pos1` of the same base store the same number, which is what makes
+    /// both conversions a reinterpretation.
+    #[test]
+    fn the_same_base_has_the_same_representation() {
+        let z = Pos0::new(100).unwrap();
+        let o = Pos1::new(101).unwrap();
+        assert_eq!(z.0, o.0);
+        assert_eq!(z.to_one_based().unwrap().0, z.0);
+        assert_eq!(o.to_zero_based().0, o.0);
+    }
+
     // r[verify pos.sub_pos]
     // r[verify pos.add_offset]
     #[test]
@@ -694,6 +939,15 @@ mod tests {
         let b = Pos0::new(50).unwrap();
         let off = a - b;
         assert_eq!(off.get(), -40);
+    }
+
+    // r[verify pos.sub_pos]
+    #[test]
+    fn one_based_pos_minus_pos_is_offset() {
+        let a = Pos1::new(100).unwrap();
+        let b = Pos1::new(50).unwrap();
+        assert_eq!((a - b).get(), 50);
+        assert_eq!((b - a).get(), -50);
     }
 
     // r[verify pos.add_offset]
@@ -780,8 +1034,9 @@ mod tests {
         assert_eq!(p.as_i32(), 42);
         assert_eq!(Pos0::try_from(p.as_i32()).unwrap(), p);
 
-        let max = Pos0::max_value();
+        let max = Pos0::MAX;
         assert_eq!(max.as_i32(), i32::MAX);
+        assert_eq!(Pos1::MAX.as_i32(), i32::MAX);
     }
 
     // r[verify pos.derives]
@@ -791,6 +1046,10 @@ mod tests {
         let b = Pos0::new(20).unwrap();
         assert!(a < b);
         assert!(b > a);
+        // Storing `value + 1` is monotone, so the derived `Ord` on the stored
+        // number is the ordering of the positions — including at the floor.
+        assert!(Pos0::ZERO < a);
+        assert!(Pos1::MIN < Pos1::new(2).unwrap());
     }
 
     // r[verify pos.as_usize]
@@ -798,6 +1057,7 @@ mod tests {
     fn as_usize() {
         let p = Pos0::new(42).unwrap();
         assert_eq!(p.as_usize(), 42);
+        assert_eq!(Pos1::new(42).unwrap().as_usize(), 42);
     }
 
     // r[verify pos.as_i64]
@@ -805,13 +1065,19 @@ mod tests {
     fn as_i64() {
         let p = Pos0::new(100).unwrap();
         assert_eq!(p.as_i64(), 100);
+        assert_eq!(Pos1::new(100).unwrap().as_i64(), 100);
+        assert_eq!(p.as_u64(), 100);
     }
 
     // r[verify pos.size]
+    // r[verify pos.niche]
     #[test]
     fn size_is_u32() {
-        assert_eq!(std::mem::size_of::<Pos0>(), std::mem::size_of::<u32>());
-        assert_eq!(std::mem::size_of::<Pos1>(), std::mem::size_of::<u32>());
+        assert_eq!(size_of::<Pos0>(), size_of::<u32>());
+        assert_eq!(size_of::<Pos1>(), size_of::<u32>());
+        // The `NonZeroU32` niche: an absent position costs nothing.
+        assert_eq!(size_of::<Option<Pos0>>(), 4);
+        assert_eq!(size_of::<Option<Pos1>>(), 4);
     }
 
     // r[verify pos.derives]
@@ -821,20 +1087,22 @@ mod tests {
         let o = Pos1::new(43).unwrap();
         assert_eq!(format!("{z:?}"), "Pos0(42)");
         assert_eq!(format!("{o:?}"), "Pos1(43)");
+        // The logical value, not the stored one: these two share a
+        // representation and must still print differently.
+        assert_eq!(format!("{:?}", Pos0::ZERO), "Pos0(0)");
+        assert_eq!(format!("{:?}", Pos1::MIN), "Pos1(1)");
+        assert_eq!(format!("{z}"), "42");
+        assert_eq!(format!("{o}"), "43");
     }
 
-    // r[verify pos.zero_new]
+    // r[verify pos.min_max]
     #[test]
-    fn max_value_zero() {
-        let m = Pos0::max_value();
-        assert_eq!(m.as_u32(), I32_MAX_U32);
-    }
-
-    // r[verify pos.one_new]
-    #[test]
-    fn max_value_one() {
-        let m = Pos1::max_value();
-        assert_eq!(m.as_u32(), I32_MAX_U32);
+    fn min_and_max_are_the_types_bounds() {
+        assert_eq!(Pos0::MIN, Pos0::ZERO);
+        assert_eq!(Pos0::MIN.as_u32(), 0);
+        assert_eq!(Pos1::MIN.as_u32(), 1);
+        assert_eq!(Pos0::MAX.as_u32(), I32_MAX_U32);
+        assert_eq!(Pos1::MAX.as_u32(), I32_MAX_U32);
     }
 
     #[test]
@@ -860,7 +1128,7 @@ mod tests {
     // r[verify pos.to_one_based]
     #[test]
     fn to_one_based_returns_err_at_max() {
-        let p = Pos0::max_value();
+        let p = Pos0::MAX;
         assert!(p.to_one_based().is_err(), "i32::MAX + 1 would exceed i32::MAX");
     }
 
@@ -893,6 +1161,9 @@ mod tests {
         let p = Pos0::try_from(12345i32).unwrap();
         let back: i32 = p.into();
         assert_eq!(back, 12345);
+        let q = Pos1::try_from(12345i32).unwrap();
+        let back: i32 = q.into();
+        assert_eq!(back, 12345);
     }
 
     // r[verify pos.to_one_based]
@@ -914,6 +1185,38 @@ mod tests {
         let o = Pos1::new(v).unwrap();
         let z = o.to_zero_based();
         assert_eq!(z.to_one_based().unwrap(), o);
+    }
+
+    // r[verify pos.to_one_based]
+    // r[verify pos.to_zero_based]
+    // r[verify pos.type]
+    #[hegel::test]
+    /// Both conversions are reinterpretations of the stored number, so what is
+    /// worth checking is that they still agree with the `± 1` they replaced,
+    /// and that the two types really do share a representation. A stored zero
+    /// is not among the things that can go wrong: `NonZeroU32` has no such
+    /// value, so no reinterpretation can produce one.
+    fn conversion_agrees_with_the_arithmetic(tc: TestCase) {
+        let v = tc.draw(gs::integers::<u32>().max_value(I32_MAX_U32));
+
+        let zero = Pos0::new(v).expect("v <= i32::MAX");
+        match zero.to_one_based() {
+            Ok(one) => {
+                assert_eq!(i64::from(one.as_u32()), i64::from(v) + 1);
+                assert_eq!(one.0, zero.0, "same base, same representation");
+                assert_eq!(one.to_zero_based(), zero);
+            }
+            Err(PosOverflow) => assert_eq!(v, I32_MAX_U32, "only the last position has no twin"),
+        }
+
+        if let Some(one) = Pos1::new(v) {
+            let back = one.to_zero_based();
+            assert_eq!(i64::from(back.as_u32()), i64::from(v) - 1);
+            assert_eq!(back.0, one.0, "same base, same representation");
+            assert_eq!(back.to_one_based(), Ok(one));
+        } else {
+            assert_eq!(v, 0, "only zero is not a 1-based position");
+        }
     }
 
     // r[verify pos.add_offset]
@@ -984,6 +1287,318 @@ mod tests {
         assert_eq!(i as u32, v);
     }
 
+    // ---- The two types, one property at a time ----
+    //
+    // Each property is stated once for `P: Position` and run against both
+    // types, so nothing can hold for `Pos0` and quietly not for `Pos1`.
+    // That is how the 1-based floor went unenforced in `checked_add_offset`:
+    // every test of it used `Pos0`, where the floor and "negative" coincide.
+
+    /// The two position types, as one thing a property can be stated about.
+    ///
+    /// Test-only, and deliberately so: the library has no trait over `Pos0`
+    /// and `Pos1` — writing the two out in full is what keeps each one's floor
+    /// its own. The risk that buys is a property checked for one type and not
+    /// the other, which is exactly what this trait puts back, in the only
+    /// place where a shared abstraction cannot leak into a signature.
+    trait Position: Copy + Ord + fmt::Debug + Sized {
+        /// The first value this type admits.
+        const FLOOR: u32;
+        /// How the type names itself, for assertion messages.
+        const NAME: &'static str;
+        /// The type's own `MIN`.
+        const FIRST: Self;
+        /// The type's own `MAX`.
+        const LAST: Self;
+
+        fn build(value: u32) -> Option<Self>;
+        fn raw(self) -> u32;
+        fn raw_i64(self) -> i64;
+        /// The `From<Self> for u32` impl, which must agree with `raw`.
+        fn into_raw(self) -> u32;
+        fn add_offset(self, offset: Offset) -> Option<Self>;
+        fn sub_offset(self, offset: Offset) -> Option<Self>;
+        fn sat_add_offset(self, offset: Offset) -> Self;
+        fn sat_sub_offset(self, offset: Offset) -> Self;
+        fn from_u32(value: u32) -> Result<Self, PosOverflow>;
+        fn from_i32(value: i32) -> Result<Self, PosOverflow>;
+        fn from_i64(value: i64) -> Result<Self, PosOverflow>;
+        fn from_u64(value: u64) -> Result<Self, PosOverflow>;
+    }
+
+    impl Position for Pos0 {
+        const FLOOR: u32 = 0;
+        const NAME: &'static str = "Pos0";
+        const FIRST: Self = Pos0::MIN;
+        const LAST: Self = Pos0::MAX;
+
+        fn build(value: u32) -> Option<Self> {
+            Pos0::new(value)
+        }
+        fn raw(self) -> u32 {
+            self.as_u32()
+        }
+        fn raw_i64(self) -> i64 {
+            self.as_i64()
+        }
+        fn into_raw(self) -> u32 {
+            u32::from(self)
+        }
+        fn add_offset(self, offset: Offset) -> Option<Self> {
+            self.checked_add_offset(offset)
+        }
+        fn sub_offset(self, offset: Offset) -> Option<Self> {
+            self.checked_sub_offset(offset)
+        }
+        fn sat_add_offset(self, offset: Offset) -> Self {
+            self.saturating_add_offset(offset)
+        }
+        fn sat_sub_offset(self, offset: Offset) -> Self {
+            self.saturating_sub_offset(offset)
+        }
+        fn from_u32(value: u32) -> Result<Self, PosOverflow> {
+            Self::try_from(value)
+        }
+        fn from_i32(value: i32) -> Result<Self, PosOverflow> {
+            Self::try_from(value)
+        }
+        fn from_i64(value: i64) -> Result<Self, PosOverflow> {
+            Self::try_from(value)
+        }
+        fn from_u64(value: u64) -> Result<Self, PosOverflow> {
+            Self::try_from(value)
+        }
+    }
+
+    impl Position for Pos1 {
+        const FLOOR: u32 = 1;
+        const NAME: &'static str = "Pos1";
+        const FIRST: Self = Pos1::MIN;
+        const LAST: Self = Pos1::MAX;
+
+        fn build(value: u32) -> Option<Self> {
+            Pos1::new(value)
+        }
+        fn raw(self) -> u32 {
+            self.as_u32()
+        }
+        fn raw_i64(self) -> i64 {
+            self.as_i64()
+        }
+        fn into_raw(self) -> u32 {
+            u32::from(self)
+        }
+        fn add_offset(self, offset: Offset) -> Option<Self> {
+            self.checked_add_offset(offset)
+        }
+        fn sub_offset(self, offset: Offset) -> Option<Self> {
+            self.checked_sub_offset(offset)
+        }
+        fn sat_add_offset(self, offset: Offset) -> Self {
+            self.saturating_add_offset(offset)
+        }
+        fn sat_sub_offset(self, offset: Offset) -> Self {
+            self.saturating_sub_offset(offset)
+        }
+        fn from_u32(value: u32) -> Result<Self, PosOverflow> {
+            Self::try_from(value)
+        }
+        fn from_i32(value: i32) -> Result<Self, PosOverflow> {
+            Self::try_from(value)
+        }
+        fn from_i64(value: i64) -> Result<Self, PosOverflow> {
+            Self::try_from(value)
+        }
+        fn from_u64(value: u64) -> Result<Self, PosOverflow> {
+            Self::try_from(value)
+        }
+    }
+
+    /// A position anywhere in `P`'s range, biased towards the two ends so the
+    /// boundary cases are drawn often rather than once in four billion.
+    fn any_position<P: Position>(tc: &TestCase) -> P {
+        let near_min = P::FLOOR.saturating_add(3);
+        let near_max = POS_MAX.saturating_sub(3);
+        let value = match tc.draw(gs::integers::<u8>().max_value(2)) {
+            0 => tc.draw(gs::integers::<u32>().min_value(P::FLOOR).max_value(near_min)),
+            1 => tc.draw(gs::integers::<u32>().min_value(near_max).max_value(POS_MAX)),
+            _ => tc.draw(gs::integers::<u32>().min_value(P::FLOOR).max_value(POS_MAX)),
+        };
+        P::build(value).expect("drawn inside the type's range")
+    }
+
+    /// An offset that is small enough to land next to a boundary from
+    /// `any_position` about half the time, and large enough to overshoot
+    /// the whole range the rest of the time.
+    fn any_offset(tc: &TestCase) -> Offset {
+        let magnitude = if tc.draw(gs::booleans()) {
+            tc.draw(gs::integers::<i64>().min_value(-8).max_value(8))
+        } else {
+            tc.draw(gs::integers::<i64>())
+        };
+        Offset::new(magnitude)
+    }
+
+    fn in_range<P: Position>(value: i64) -> bool {
+        (i64::from(P::FLOOR)..=i64::from(POS_MAX)).contains(&value)
+    }
+
+    // r[verify pos.zero_new]
+    // r[verify pos.one_new]
+    // r[verify pos.two_types]
+    fn new_admits_exactly_the_types_range<P: Position>(value: u32) {
+        let pos = P::build(value);
+        assert_eq!(pos.is_some(), in_range::<P>(i64::from(value)), "{value} for {}", P::NAME);
+        if let Some(pos) = pos {
+            assert_eq!(pos.raw(), value);
+            assert_eq!(pos.into_raw(), value);
+        }
+    }
+
+    #[hegel::test]
+    fn new_admits_exactly_the_types_range_in_both_types(tc: TestCase) {
+        let value = tc.draw(gs::integers::<u32>());
+        new_admits_exactly_the_types_range::<Pos0>(value);
+        new_admits_exactly_the_types_range::<Pos1>(value);
+    }
+
+    // r[verify pos.try_from]
+    /// Every integer entry point agrees with `new` on the same number.
+    fn try_from_agrees_with_new<P: Position>(value: i64) {
+        let expected = u32::try_from(value).ok().and_then(P::build);
+        assert_eq!(P::from_i64(value).ok(), expected, "i64 {value} for {}", P::NAME);
+        if let Ok(v) = i32::try_from(value) {
+            assert_eq!(P::from_i32(v).ok(), expected, "i32 {value} for {}", P::NAME);
+        }
+        if let Ok(v) = u32::try_from(value) {
+            assert_eq!(P::from_u32(v).ok(), expected, "u32 {value} for {}", P::NAME);
+        }
+        if let Ok(v) = u64::try_from(value) {
+            assert_eq!(P::from_u64(v).ok(), expected, "u64 {value} for {}", P::NAME);
+        }
+    }
+
+    #[hegel::test]
+    fn try_from_agrees_with_new_in_both_types(tc: TestCase) {
+        // Around the two floors and the shared ceiling, plus anywhere at all.
+        let value = match tc.draw(gs::integers::<u8>().max_value(2)) {
+            0 => tc.draw(gs::integers::<i64>().min_value(-3).max_value(3)),
+            1 => tc.draw(
+                gs::integers::<i64>()
+                    .min_value(i64::from(POS_MAX) - 3)
+                    .max_value(i64::from(POS_MAX) + 3),
+            ),
+            _ => tc.draw(gs::integers::<i64>()),
+        };
+        try_from_agrees_with_new::<Pos0>(value);
+        try_from_agrees_with_new::<Pos1>(value);
+    }
+
+    // r[verify pos.add_offset]
+    // r[verify pos.sub_offset]
+    /// `checked_add_offset` is plain integer arithmetic followed by the type's
+    /// own range check — `Some` exactly when the sum is a position of that
+    /// type, and then it is the sum.
+    fn checked_offset_is_arithmetic_then_a_range_check<P: Position>(pos: P, offset: Offset) {
+        let sum = pos.raw_i64().checked_add(offset.get());
+        match pos.add_offset(offset) {
+            Some(moved) => {
+                assert_eq!(Some(moved.raw_i64()), sum, "{pos:?} + {offset:?}");
+                assert!(in_range::<P>(moved.raw_i64()), "{moved:?} left {}'s range", P::NAME);
+            }
+            None => assert!(
+                !sum.is_some_and(in_range::<P>),
+                "{pos:?} + {offset:?} = {sum:?} is a position, but got None"
+            ),
+        }
+
+        // Subtracting is adding the negation, where the negation exists.
+        let via_add = offset.get().checked_neg().and_then(|n| pos.add_offset(Offset::new(n)));
+        assert_eq!(pos.sub_offset(offset), via_add);
+    }
+
+    #[hegel::test]
+    fn checked_offset_is_arithmetic_then_a_range_check_in_both_types(tc: TestCase) {
+        let offset = any_offset(&tc);
+        checked_offset_is_arithmetic_then_a_range_check(any_position::<Pos0>(&tc), offset);
+        checked_offset_is_arithmetic_then_a_range_check(any_position::<Pos1>(&tc), offset);
+    }
+
+    // r[verify pos.add_offset]
+    // r[verify pos.two_types]
+    /// The regression the generic property exists for: a 1-based position
+    /// at its floor, moved down by one, is not a position.
+    #[test]
+    fn checked_offset_respects_the_one_based_floor() {
+        let first = Pos1::new(1).unwrap();
+        assert_eq!(first.checked_add_offset(Offset::new(-1)), None);
+        assert_eq!(first.checked_sub_offset(Offset::new(1)), None);
+        assert_eq!(first.checked_add_offset(Offset::new(0)), Some(first));
+        // The 0-based floor is where "negative" starts, so the same move is fine.
+        assert_eq!(Pos0::new(1).unwrap().checked_sub_offset(Offset::new(1)), Some(Pos0::ZERO));
+    }
+
+    // r[verify pos.saturating_offset]
+    /// Wherever the checked form succeeds the saturating form agrees with it;
+    /// where it fails, the saturating form lands on the bound that was crossed.
+    fn saturating_agrees_with_checked_or_lands_on_the_bound<P: Position>(pos: P, offset: Offset) {
+        let saturated = pos.sat_add_offset(offset);
+        match pos.add_offset(offset) {
+            Some(checked) => assert_eq!(saturated, checked, "{pos:?} + {offset:?}"),
+            None if offset.get() < 0 => assert_eq!(saturated, P::FIRST, "{pos:?} + {offset:?}"),
+            None => assert_eq!(saturated, P::LAST, "{pos:?} + {offset:?}"),
+        }
+        assert!(in_range::<P>(saturated.raw_i64()));
+
+        // The same for subtraction, whose one extra case is the offset with
+        // no negation: subtracting it runs off the far end.
+        let saturated = pos.sat_sub_offset(offset);
+        match pos.sub_offset(offset) {
+            Some(checked) => assert_eq!(saturated, checked, "{pos:?} - {offset:?}"),
+            None if offset.get() > 0 => assert_eq!(saturated, P::FIRST, "{pos:?} - {offset:?}"),
+            None => assert_eq!(saturated, P::LAST, "{pos:?} - {offset:?}"),
+        }
+    }
+
+    #[hegel::test]
+    fn saturating_agrees_with_checked_or_lands_on_the_bound_in_both_types(tc: TestCase) {
+        let offset = any_offset(&tc);
+        saturating_agrees_with_checked_or_lands_on_the_bound(any_position::<Pos0>(&tc), offset);
+        saturating_agrees_with_checked_or_lands_on_the_bound(any_position::<Pos1>(&tc), offset);
+    }
+
+    // r[verify pos.saturating_offset]
+    /// Moving further never lands earlier.
+    fn saturating_is_monotone_in_the_offset<P: Position>(pos: P, a: Offset, b: Offset) {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        assert!(pos.sat_add_offset(lo) <= pos.sat_add_offset(hi));
+    }
+
+    #[hegel::test]
+    fn saturating_is_monotone_in_the_offset_in_both_types(tc: TestCase) {
+        let (a, b) = (any_offset(&tc), any_offset(&tc));
+        saturating_is_monotone_in_the_offset(any_position::<Pos0>(&tc), a, b);
+        saturating_is_monotone_in_the_offset(any_position::<Pos1>(&tc), a, b);
+    }
+
+    // r[verify pos.saturating_offset]
+    // r[verify pos.min_max]
+    #[test]
+    fn saturating_offset_clamps_at_each_types_own_floor() {
+        let zero = Pos0::new(2).unwrap();
+        let one = Pos1::new(2).unwrap();
+        assert_eq!(zero.saturating_sub_offset(Offset::new(10)), Pos0::ZERO);
+        assert_eq!(one.saturating_sub_offset(Offset::new(10)), Pos1::MIN);
+        assert_eq!(zero.saturating_add_offset(Offset::new(i64::MAX)), Pos0::MAX);
+        assert_eq!(one.saturating_add_offset(Offset::new(i64::MAX)), Pos1::MAX);
+        // `i64::MIN` has no negation: subtracting it saturates upwards, where
+        // the checked form gives up.
+        assert_eq!(zero.saturating_sub_offset(Offset::new(i64::MIN)), Pos0::MAX);
+        assert_eq!(zero.checked_sub_offset(Offset::new(i64::MIN)), None);
+        assert_eq!(one.saturating_sub_offset(Offset::new(i64::MIN)), Pos1::MAX);
+        assert_eq!(one.checked_sub_offset(Offset::new(i64::MIN)), None);
+    }
+
     // ---- QPos ----
 
     // r[verify pos.as_u32]
@@ -991,13 +1606,15 @@ mod tests {
     fn as_u32_returns_raw_value() {
         assert_eq!(Pos0::new(I32_MAX_U32).unwrap().as_u32(), I32_MAX_U32);
         assert_eq!(Pos0::ZERO.as_u32(), 0);
+        assert_eq!(Pos1::new(I32_MAX_U32).unwrap().as_u32(), I32_MAX_U32);
+        assert_eq!(Pos1::MIN.as_u32(), 1);
     }
 
     // r[verify qpos.type]
     #[test]
     fn qpos_is_transparent_u32() {
-        assert_eq!(std::mem::size_of::<QPos>(), 4);
-        assert_eq!(std::mem::align_of::<QPos>(), 4);
+        assert_eq!(size_of::<QPos>(), 4);
+        assert_eq!(align_of::<QPos>(), 4);
     }
 
     // r[verify qpos.new]
@@ -1010,9 +1627,9 @@ mod tests {
     }
 
     // r[verify qpos.new]
-    // Contrast with `Pos`: no format caps a query offset, so construction is
-    // infallible even above `i32::MAX` — the cap lives in the read length,
-    // which the iterator layers check, not the type.
+    // Contrast with a reference position: no format caps a query offset, so
+    // construction is infallible even above `i32::MAX` — the cap lives in the
+    // read length, which the iterator layers check, not the type.
     #[test]
     fn qpos_accepts_above_i32_max() {
         assert_eq!(QPos::new(u32::MAX).get(), u32::MAX);

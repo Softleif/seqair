@@ -1065,7 +1065,7 @@ impl<U> PileupEngine<U> {
                     n => rec
                         .end_pos
                         .checked_add_offset(Offset::new(i64::from(n)))
-                        .unwrap_or(Pos0::max_value()),
+                        .unwrap_or(Pos0::MAX),
                 };
                 // r[impl pileup.mate_link_cache]
                 // Widen by the overhang so a rescued soft-clip fringe base,
@@ -1076,7 +1076,7 @@ impl<U> PileupEngine<U> {
                 let mate_overlap = rec.mate_overlap().map_or(Pos0::ZERO..Pos0::ZERO, |ov| {
                     let offset = Offset::new(i64::from(overhang));
                     let start = ov.start.checked_sub_offset(offset).unwrap_or(Pos0::ZERO);
-                    let end = ov.end.checked_add_offset(offset).unwrap_or(Pos0::max_value());
+                    let end = ov.end.checked_add_offset(offset).unwrap_or(Pos0::MAX);
                     start..end
                 });
                 // Build it before touching `self.active*`: `rec` borrows

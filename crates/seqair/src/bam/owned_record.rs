@@ -227,7 +227,7 @@ impl OwnedBamRecord {
         let ref_len: u64 =
             self.cigar.iter().filter(|op| op.consumes_ref()).map(|op| u64::from(op.len())).sum();
         let end = pos.as_u64().saturating_add(ref_len);
-        let clamped = end.min(Pos0::max_value().as_u64());
+        let clamped = end.min(Pos0::MAX.as_u64());
         #[expect(
             clippy::cast_possible_truncation,
             reason = "clamped <= i32::MAX < u32::MAX; fits in u32"

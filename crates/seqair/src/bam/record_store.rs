@@ -2741,7 +2741,7 @@ pub(crate) mod tests {
         #[test]
         fn empty_store_yields_nothing() {
             let input = prepared(&[]);
-            assert_eq!(input.records_overlapping(at(0), at(Pos0::max_value().as_u32())).count(), 0);
+            assert_eq!(input.records_overlapping(at(0), at(Pos0::MAX.as_u32())).count(), 0);
         }
 
         // r[verify record_store.window_query]

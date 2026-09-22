@@ -97,5 +97,5 @@ pub use record_store::{
     CustomizeRecordStore, FilterRawFields, RecordStore, RejectUnmapped, Sequence,
 };
 pub use seqair_types::bam_flags as flags;
-pub use seqair_types::{Offset, One, Pos, Pos0, Pos1, Zero};
+pub use seqair_types::{Offset, Pos0, Pos1};
 pub use writer::{BamWriteError, BamWriter, BamWriterBuilder, ToPath, ToWriter};

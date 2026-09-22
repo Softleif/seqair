@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
         }
         let span = i64::from(args.tile).saturating_add(i64::from(args.overlap));
         let tile_end =
-            tile_start.checked_add_offset(Offset::new(span)).unwrap_or(Pos0::max_value()).min(end);
+            tile_start.checked_add_offset(Offset::new(span)).unwrap_or(Pos0::MAX).min(end);
 
         let t = Instant::now();
         records += reader.fetch_into(tid, tile_start, tile_end, &mut store)? as u64;

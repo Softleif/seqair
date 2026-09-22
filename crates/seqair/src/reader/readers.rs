@@ -483,7 +483,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
                 ref_seq
             }
             // Fetch `[ref_start, ref_end]` (inclusive). FASTA APIs expect half-open
-            // [start, stop). Use the u64 path so `end == Pos0::max_value()` doesn't
+            // [start, stop). Use the u64 path so `end == Pos0::MAX` doesn't
             // truncate the last reference base — `stop = end + 1` is i32::MAX + 1,
             // which doesn't fit in a Pos0 but does fit comfortably in a u64.
             None => {

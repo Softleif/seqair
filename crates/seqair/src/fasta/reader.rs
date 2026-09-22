@@ -320,7 +320,7 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
     /// Same as [`fetch_seq_into`] but accepts raw `u64` bounds so callers
     /// can express `end + 1 == i32::MAX + 1` (one past the last representable
     /// `Pos0`). Used by the pileup path to handle a segment whose inclusive
-    /// `end` is `Pos0::max_value()` without losing the last base.
+    /// `end` is `Pos0::MAX` without losing the last base.
     ///
     /// [`fetch_seq_into`]: Self::fetch_seq_into
     pub fn fetch_seq_into_u64(

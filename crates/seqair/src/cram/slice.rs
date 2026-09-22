@@ -1404,7 +1404,7 @@ mod tests {
             &[],
             0,
             Pos0::new(0).unwrap(),
-            Pos0::max_value(),
+            Pos0::MAX,
             &mut crate::bam::record_store::RecordStore::new(),
             &mut Vec::new(),
             &mut Vec::new(),

@@ -710,8 +710,8 @@ impl PlannedSegments {
             // Advance to the next range explicitly when this tile reached the
             // last base of the current range. We can't rely on the
             // `next_core_start > range.end` check at the top of the loop
-            // because `range.end == Pos0::max_value()` would saturate
-            // `core_end + 1` back to `Pos0::max_value()` (Pos0 caps at
+            // because `range.end == Pos0::MAX` would saturate
+            // `core_end + 1` back to `Pos0::MAX` (Pos0 caps at
             // i32::MAX), keeping the loop alive forever.
             if core_end_u64 >= range_end_u64 {
                 self.advance_to_next_range();
@@ -1101,8 +1101,8 @@ mod tests {
 
     // r[verify unified.readers_segments]
     /// Regression: an iterator over a `ResolvedRange` whose `end ==
-    /// Pos0::max_value()` must terminate. Before the fix, advancing past
-    /// the last tile saturated `core_end + 1` back to `Pos0::max_value()`,
+    /// Pos0::MAX` must terminate. Before the fix, advancing past
+    /// the last tile saturated `core_end + 1` back to `Pos0::MAX`,
     /// failed the `next_core_start > range.end` check, and re-emitted the
     /// same single-base tile forever.
     ///
@@ -1110,12 +1110,12 @@ mod tests {
     /// <= i32::MAX - 1`, so this scenario is currently unreachable from
     /// outside the crate. The defence is still load-bearing: a future
     /// `IntoSegmentTarget` impl, an internal caller, or a fuzz harness
-    /// could construct a `ResolvedRange` with `end == Pos0::max_value()`,
+    /// could construct a `ResolvedRange` with `end == Pos0::MAX`,
     /// and the iterator must not hang.
     #[test]
     fn segments_terminate_at_pos0_max() {
-        let last = Pos0::max_value();
-        // Build a ResolvedRange directly that ends at Pos0::max_value() and
+        let last = Pos0::MAX;
+        // Build a ResolvedRange directly that ends at Pos0::MAX and
         // is short enough that we expect exactly one tile.
         let near_max = Pos0::new(u32::try_from(last.as_u64()).unwrap() - 5).unwrap();
         let mut header_text = String::from("@HD\tVN:1.6\n");

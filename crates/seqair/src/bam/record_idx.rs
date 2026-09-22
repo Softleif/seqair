@@ -323,7 +323,7 @@ impl<'store, U> RecordRef<'store, U> {
             return Some(start..start);
         }
         let end =
-            last.checked_add_offset(seqair_types::Offset::new(1)).unwrap_or_else(Pos0::max_value);
+            last.checked_add_offset(seqair_types::Offset::new(1)).unwrap_or(Pos0::MAX);
         Some(start..end)
     }
 }

@@ -677,7 +677,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                             )]
                             value: ref_start as i64,
                         })?,
-                        Pos0::try_from(ref_end_clamped).unwrap_or(Pos0::max_value()),
+                        Pos0::try_from(ref_end_clamped).unwrap_or(Pos0::MAX),
                         &mut self.ref_seq_buf,
                     )
                     .map_err(|e| match &e {
@@ -823,7 +823,7 @@ mod tests {
         // Fetch from first reference
         let tid = 0;
         let count =
-            reader.fetch_into(tid, Pos0::new(0).unwrap(), Pos0::max_value(), &mut store).unwrap();
+            reader.fetch_into(tid, Pos0::new(0).unwrap(), Pos0::MAX, &mut store).unwrap();
         assert!(count > 0, "should fetch records from tid={tid}");
     }
 
@@ -848,7 +848,7 @@ mod tests {
         // Querying chr1 decodes the multi-ref slice that also holds the unplaced
         // read; before the fix this errored with InvalidPosition { value: 0 }.
         let count = reader
-            .fetch_into(0, Pos0::new(0).unwrap(), Pos0::max_value(), &mut store)
+            .fetch_into(0, Pos0::new(0).unwrap(), Pos0::MAX, &mut store)
             .expect("query must not error on an unplaced read in a multi-ref slice");
         assert!(count >= 1, "the mapped chr1 read must be returned");
     }

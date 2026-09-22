@@ -91,8 +91,8 @@ const CTG: &str = "ctg_a";
 const START: u64 = 5_000_000;
 const SIZES: [u64; 3] = [1_000, 10_000, 100_000];
 
-fn pos(v: u64) -> seqair::bam::Pos<seqair::bam::Zero> {
-    seqair::bam::Pos::<seqair::bam::Zero>::new(v as u32).unwrap()
+fn pos(v: u64) -> seqair::bam::Pos0 {
+    seqair::bam::Pos0::new(v as u32).unwrap()
 }
 
 fn region(chrom: &str, start: u64, end: u64) -> noodles::core::Region {
