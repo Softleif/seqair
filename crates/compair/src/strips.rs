@@ -449,20 +449,19 @@ fn step<L: Lane>(
     let up_i = state.i.shift_in(above_i);
     let up_indel = (state.i + state.d).shift_in(above_i + above_d);
 
+    let token = state.m.token();
     // SAFETY: every view was built with `reach + LANE_MAX` entries and
     // `window <= reach`.
-    let token = state.m.token();
-    let load = |view: View<'_>| unsafe { L::load(token, view.window(window)) };
-    let prior_v = prior::<L>(
+    let columns = unsafe {
         ColumnLanes {
-            base: load(strip.base),
-            converted: load(strip.converted),
-            plain: load(strip.plain),
-            rate: load(strip.rate),
-            unconverted_rate: load(strip.unconverted),
-        },
-        strip.row,
-    );
+            base: strip.base.lane(token, window),
+            converted: strip.converted.lane(token, window),
+            plain: strip.plain.lane(token, window),
+            rate: strip.rate.lane(token, window),
+            unconverted_rate: strip.unconverted.lane(token, window),
+        }
+    };
+    let prior_v = prior::<L>(columns, strip.row);
     let t = strip.transitions;
 
     let m = prior_v * (state.m_diag * t.match_to_match + state.indel_diag * t.indel_to_match);
@@ -490,6 +489,20 @@ fn live_lanes<L: Lane>(lane_first: L, lane_past: L, d: usize) -> L::Mask {
     lane_first.below(now + L::splat(token, 1.0)).both(now.below(lane_past))
 }
 
+/// The mask a step of a phase applies: the live lanes in a masked phase,
+/// none in an unmasked one.
+#[inline(always)]
+fn phase_mask<L: Lane, const MASKED: bool>(edges: (L, L), d: usize) -> Option<L::Mask> {
+    if MASKED { Some(live_lanes(edges.0, edges.1, d)) } else { None }
+}
+
+/// Lanes `r0..r0 + LANE_MAX` of a per-row plan track; `None` if the track is
+/// short, which `Plan::fill` rules out.
+#[inline(always)]
+fn row_lanes<L: Lane>(token: L::Token, track: &[f32], r0: usize) -> Option<L> {
+    Some(L::load(token, track.get(r0..r0.checked_add(LANE_MAX)?)?.first_chunk()?))
+}
+
 /// One phase of a sweep: the steps `from..=to`, masked or not, two at a time
 /// so that the state alternates between two sets of registers rather than
 /// being copied at the end of every step. `false` past the sweep's reach,
@@ -506,21 +519,24 @@ fn phase<L: Lane, const MASKED: bool>(
     from: usize,
     to: usize,
 ) -> bool {
-    let mask = |d: usize| MASKED.then(|| live_lanes(edges.0, edges.1, d));
     let mut d = from;
     while d < to {
-        let Some(cells) = step(strip, buffers, state, d - first, mask(d)) else {
+        let Some(cells) = step(strip, buffers, state, d - first, phase_mask::<L, MASKED>(edges, d))
+        else {
             return false;
         };
         totals.absorb(cells);
-        let Some(cells) = step(strip, buffers, state, d + 1 - first, mask(d + 1)) else {
+        let Some(cells) =
+            step(strip, buffers, state, d + 1 - first, phase_mask::<L, MASKED>(edges, d + 1))
+        else {
             return false;
         };
         totals.absorb(cells);
         d += 2;
     }
     if d == to {
-        let Some(cells) = step(strip, buffers, state, d - first, mask(d)) else {
+        let Some(cells) = step(strip, buffers, state, d - first, phase_mask::<L, MASKED>(edges, d))
+        else {
             return false;
         };
         totals.absorb(cells);
@@ -598,25 +614,25 @@ pub(crate) fn strip_kernel<L: Lane>(
         let reach = sweep.last - sweep.first;
         let span = reach + LANE_MAX;
 
-        let row_lanes = |track: &[f32]| -> Option<L> {
-            Some(L::load(token, track.get(r0..r0.checked_add(LANE_MAX)?)?.first_chunk()?))
-        };
         let tracks = &plan.rows;
-        let (Some(row_base), Some(spread), Some(mismatched)) =
-            (row_lanes(&tracks.base), row_lanes(&tracks.spread), row_lanes(&tracks.mismatched))
-        else {
-            return Log10Likelihood::IMPOSSIBLE;
-        };
-        let (Some(match_to_match), Some(match_to_insertion), Some(match_to_deletion)) = (
-            row_lanes(&tracks.match_to_match),
-            row_lanes(&tracks.match_to_insertion),
-            row_lanes(&tracks.match_to_deletion),
+        let (Some(row_base), Some(spread), Some(mismatched)) = (
+            row_lanes::<L>(token, &tracks.base, r0),
+            row_lanes::<L>(token, &tracks.spread, r0),
+            row_lanes::<L>(token, &tracks.mismatched, r0),
         ) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        let (Some(indel_to_match), Some(gap_continuation)) =
-            (row_lanes(&tracks.indel_to_match), row_lanes(&tracks.gap_continuation))
-        else {
+        let (Some(match_to_match), Some(match_to_insertion), Some(match_to_deletion)) = (
+            row_lanes::<L>(token, &tracks.match_to_match, r0),
+            row_lanes::<L>(token, &tracks.match_to_insertion, r0),
+            row_lanes::<L>(token, &tracks.match_to_deletion, r0),
+        ) else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        let (Some(indel_to_match), Some(gap_continuation)) = (
+            row_lanes::<L>(token, &tracks.indel_to_match, r0),
+            row_lanes::<L>(token, &tracks.gap_continuation, r0),
+        ) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
 
@@ -695,7 +711,11 @@ pub(crate) fn strip_kernel<L: Lane>(
         let mut totals = Totals {
             running: zero,
             total,
-            summed: (r0 + L::LANES > r).then(|| offsets.equals(L::splat(token, (r - r0) as f32))),
+            summed: if r0 + L::LANES > r {
+                Some(offsets.equals(L::splat(token, (r - r0) as f32)))
+            } else {
+                None
+            },
         };
         let edges = (L::load(token, &sweep.lane_first), L::load(token, &sweep.lane_past));
 

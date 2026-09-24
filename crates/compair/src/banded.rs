@@ -832,6 +832,22 @@ impl<'a> View<'a> {
         // the alignment of `f32` and no invalid bit patterns.
         unsafe { &*self.track.as_ptr().add(offset).cast::<Window>() }
     }
+
+    /// The window at `offset`, as a lane.
+    ///
+    /// A method and not a closure in the kernels that use it: a closure does
+    /// not inherit the target features of the `#[simd]` function it is
+    /// written in, so a vector load inside one that LLVM declines to inline is
+    /// compiled for the baseline.
+    ///
+    /// # Safety
+    ///
+    /// As for [`View::window`].
+    #[inline(always)]
+    pub(crate) unsafe fn lane<L: Lane>(self, token: L::Token, offset: usize) -> L {
+        // SAFETY: the caller's contract is `window`'s.
+        L::load(token, unsafe { self.window(offset) })
+    }
 }
 
 /// [`View`] for the diagonal being written.
@@ -973,35 +989,44 @@ impl<'a> Sources<'a> {
         }
         // SAFETY: every view was built with `self.span` entries and
         // `chunk + LANE_MAX <= self.span` was just checked.
-        let load = |view: View<'a>| unsafe { L::load(token, view.window(chunk)) };
-
-        let m_diag = load(self.m_diag);
-        let i_diag = load(self.i_diag);
-        let d_diag = load(self.d_diag);
-        let m_up = load(self.m_up);
-        let i_up = load(self.i_up);
-        let m_left = load(self.m_left);
-        let d_left = load(self.d_left);
+        let (neighbours, columns, rows, t) = unsafe {
+            (
+                [
+                    self.m_diag.lane::<L>(token, chunk),
+                    self.i_diag.lane(token, chunk),
+                    self.d_diag.lane(token, chunk),
+                    self.m_up.lane(token, chunk),
+                    self.i_up.lane(token, chunk),
+                    self.m_left.lane(token, chunk),
+                    self.d_left.lane(token, chunk),
+                ],
+                ColumnLanes {
+                    base: self.column_base.lane(token, chunk),
+                    converted: self.column_converted.lane(token, chunk),
+                    plain: self.column_plain.lane(token, chunk),
+                    rate: self.column_rate.lane(token, chunk),
+                    unconverted_rate: self.column_unconverted.lane(token, chunk),
+                },
+                [
+                    self.row_base.lane(token, chunk),
+                    self.row_spread.lane(token, chunk),
+                    self.row_mismatched.lane(token, chunk),
+                ],
+                TransitionLanes {
+                    match_to_match: self.match_to_match.lane(token, chunk),
+                    match_to_insertion: self.match_to_insertion.lane(token, chunk),
+                    match_to_deletion: self.match_to_deletion.lane(token, chunk),
+                    indel_to_match: self.indel_to_match.lane(token, chunk),
+                    gap_continuation: self.gap_continuation.lane(token, chunk),
+                },
+            )
+        };
+        let [m_diag, i_diag, d_diag, m_up, i_up, m_left, d_left] = neighbours;
+        let [row_base, row_spread, row_mismatched] = rows;
 
         // `i = lo + chunk + lane` runs upwards over the lanes, so every per-row
         // track is one contiguous load, and the reversed column tracks are too.
-        let prior_v = prior::<L>(
-            ColumnLanes {
-                base: load(self.column_base),
-                converted: load(self.column_converted),
-                plain: load(self.column_plain),
-                rate: load(self.column_rate),
-                unconverted_rate: load(self.column_unconverted),
-            },
-            RowLanes::new(load(self.row_base), load(self.row_spread), load(self.row_mismatched)),
-        );
-        let t = TransitionLanes {
-            match_to_match: load(self.match_to_match),
-            match_to_insertion: load(self.match_to_insertion),
-            match_to_deletion: load(self.match_to_deletion),
-            indel_to_match: load(self.indel_to_match),
-            gap_continuation: load(self.gap_continuation),
-        };
+        let prior_v = prior::<L>(columns, RowLanes::new(row_base, row_spread, row_mismatched));
 
         let new_m = prior_v
             * (m_diag * t.match_to_match + i_diag * t.indel_to_match + d_diag * t.indel_to_match)
