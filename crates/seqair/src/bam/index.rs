@@ -48,8 +48,28 @@ pub struct BamIndex {
 
 #[derive(Debug)]
 struct RefIndex {
+    /// Sorted by `bin_id` (stable, so duplicate ids in a malformed file keep
+    /// file order), so a query looks up its handful of candidate bins by
+    /// binary search instead of testing every bin of the reference against
+    /// the candidate list — which, per 10 kb tile on a human chromosome, cost
+    /// thousands of bins × ~8 candidates on every query.
     bins: Vec<Bin>,
     linear_index: Vec<VirtualOffset>,
+}
+
+impl RefIndex {
+    fn new(mut bins: Vec<Bin>, linear_index: Vec<VirtualOffset>) -> Self {
+        bins.sort_by_key(|b| b.bin_id);
+        RefIndex { bins, linear_index }
+    }
+
+    /// The bins whose id is in `candidates`, skipping the pseudo-bin.
+    fn candidate_bins<'a>(&'a self, candidates: &'a [u32]) -> impl Iterator<Item = &'a Bin> + 'a {
+        candidates.iter().filter(|&&id| id != PSEUDO_BIN).flat_map(move |&id| {
+            let lo = self.bins.partition_point(|b| b.bin_id < id);
+            self.bins.get(lo..).unwrap_or(&[]).iter().take_while(move |b| b.bin_id == id)
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -236,15 +256,10 @@ impl BamIndex {
         let candidate_bins = reg2bins(start_u64, end_u64.wrapping_add(1));
         let linear_min = linear_index_min(ref_idx, start_u64);
         let mut result = Vec::new();
-        for bin in &ref_idx.bins {
-            if bin.bin_id == PSEUDO_BIN {
-                continue;
-            }
-            if candidate_bins.contains(&bin.bin_id) {
-                for chunk in &bin.chunks {
-                    if chunk.end > linear_min {
-                        result.push(AnnotatedChunk { chunk: *chunk, bin_id: bin.bin_id });
-                    }
+        for bin in ref_idx.candidate_bins(&candidate_bins) {
+            for chunk in &bin.chunks {
+                if chunk.end > linear_min {
+                    result.push(AnnotatedChunk { chunk: *chunk, bin_id: bin.bin_id });
                 }
             }
         }
@@ -271,21 +286,16 @@ impl BamIndex {
 
         let mut nearby = Vec::new();
         let mut distant = Vec::new();
-        for bin in &ref_idx.bins {
-            if bin.bin_id == PSEUDO_BIN {
-                continue;
-            }
-            if candidate_bins.contains(&bin.bin_id) {
-                let target = if bin_level(bin.bin_id) <= CACHE_LEVEL_THRESHOLD {
-                    &mut distant
-                } else {
-                    &mut nearby
-                };
-                for chunk in &bin.chunks {
-                    // Skip chunks entirely before the linear index minimum
-                    if chunk.end > linear_min {
-                        target.push(*chunk);
-                    }
+        for bin in ref_idx.candidate_bins(&candidate_bins) {
+            let target = if bin_level(bin.bin_id) <= CACHE_LEVEL_THRESHOLD {
+                &mut distant
+            } else {
+                &mut nearby
+            };
+            for chunk in &bin.chunks {
+                // Skip chunks entirely before the linear index minimum
+                if chunk.end > linear_min {
+                    target.push(*chunk);
                 }
             }
         }
@@ -425,7 +435,7 @@ fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<B
             linear_index.push(VirtualOffset(read_u64(data, pos)?));
         }
 
-        references.push(RefIndex { bins, linear_index });
+        references.push(RefIndex::new(bins, linear_index));
     }
 
     Ok(BamIndex { references })
@@ -632,10 +642,10 @@ mod tests {
     /// Build a minimal `BamIndex` with specific bins populated.
     fn index_with_bins(bins: Vec<(u32, Vec<Chunk>)>) -> BamIndex {
         BamIndex {
-            references: vec![RefIndex {
-                bins: bins.into_iter().map(|(bin_id, chunks)| Bin { bin_id, chunks }).collect(),
-                linear_index: vec![VirtualOffset(0); 64],
-            }],
+            references: vec![RefIndex::new(
+                bins.into_iter().map(|(bin_id, chunks)| Bin { bin_id, chunks }).collect(),
+                vec![VirtualOffset(0); 64],
+            )],
         }
     }
 
@@ -999,5 +1009,63 @@ mod tests {
         }
 
         assert_eq!(merge(&chunks), expected);
+    }
+
+    /// A bin id near a region's candidates: any level-0..5 bin over the
+    /// first 4 Mbp, or the pseudo-bin.
+    #[hegel::composite]
+    fn arb_bin_id(tc: &TestCase) -> u32 {
+        let pick = tc.draw(gs::integers::<u8>().max_value(6));
+        let (offset, shift): (u32, u32) = match pick {
+            0 => return 0,
+            1 => (1, 26),
+            2 => (9, 23),
+            3 => (73, 20),
+            4 => (585, 17),
+            5 => (4681, 14),
+            _ => return PSEUDO_BIN,
+        };
+        offset + tc.draw(gs::integers::<u32>().max_value((1 << 22) >> shift))
+    }
+
+    // r[verify bam.index.chunk_separation+2]
+    /// The sorted-bin lookup returns what testing every bin of the reference
+    /// against the candidate list returns — bins in any file order, duplicate
+    /// ids included.
+    #[hegel::test]
+    fn query_split_matches_full_bin_scan(tc: TestCase) {
+        let bins: Vec<(u32, Vec<Chunk>)> = tc.draw(
+            gs::vecs(gs::tuples!(arb_bin_id(), gs::vecs(arb_chunk()).max_size(3))).max_size(40),
+        )
+        .into_iter()
+        .map(|(id, cs)| (id, cs.into_iter().map(|(b, e)| chunk(b, e)).collect()))
+        .collect();
+        let start = tc.draw(gs::integers::<u32>().max_value(1 << 22));
+        let end = tc.draw(gs::integers::<u32>().min_value(start).max_value(start + 200_000));
+
+        let candidates = reg2bins(u64::from(start), u64::from(end) + 1);
+        let (mut nearby, mut distant) = (Vec::new(), Vec::new());
+        for (id, chunks) in &bins {
+            if *id == PSEUDO_BIN || !candidates.contains(id) {
+                continue;
+            }
+            let target =
+                if bin_level(*id) <= CACHE_LEVEL_THRESHOLD { &mut distant } else { &mut nearby };
+            target.extend(chunks.iter().filter(|c| c.end > VirtualOffset(0)).copied());
+        }
+        let key = |v: &mut Vec<Chunk>| {
+            v.sort_by_key(|c| c.begin);
+            merge_overlapping_chunks(v);
+            v.iter().map(|c| (c.begin.0, c.end.0)).collect::<Vec<_>>()
+        };
+
+        let got = index_with_bins(bins).query_split(
+            0,
+            Pos0::new(start).unwrap(),
+            Pos0::new(end).unwrap(),
+        );
+        let (mut got_near, mut got_far) = (got.nearby, got.distant);
+        assert_eq!(key(&mut got_near), key(&mut nearby));
+        assert_eq!(key(&mut got_far), key(&mut distant));
     }
 }
