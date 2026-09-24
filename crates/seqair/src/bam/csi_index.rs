@@ -139,12 +139,36 @@ struct CsiRefIndex {
     /// `n_bin` is capped at `MAX_BINS_PER_REF` (100k) so the worst-case
     /// quadratic blowup from a maliciously crafted file is bounded.
     by_bin_id: FxHashMap<u32, usize>,
+    /// `(bin_id, index into bins)` for every bin, sorted — duplicate ids in a
+    /// malformed file included, in file order — so a query looks up its few
+    /// candidate bins by binary search instead of testing every bin of the
+    /// reference against the candidate list.
+    sorted_ids: Vec<(u32, usize)>,
 }
 
 impl CsiRefIndex {
     fn new(bins: Vec<CsiBin>) -> Self {
         let by_bin_id = bins.iter().enumerate().map(|(i, b)| (b.bin_id, i)).collect();
-        CsiRefIndex { bins, by_bin_id }
+        let mut sorted_ids: Vec<(u32, usize)> =
+            bins.iter().enumerate().map(|(i, b)| (b.bin_id, i)).collect();
+        sorted_ids.sort_unstable();
+        CsiRefIndex { bins, by_bin_id, sorted_ids }
+    }
+
+    /// The bins whose id is in `candidates`.
+    fn candidate_bins<'a>(
+        &'a self,
+        candidates: &'a [u32],
+    ) -> impl Iterator<Item = &'a CsiBin> + 'a {
+        candidates.iter().flat_map(move |&id| {
+            let lo = self.sorted_ids.partition_point(|&(b, _)| b < id);
+            self.sorted_ids
+                .get(lo..)
+                .unwrap_or(&[])
+                .iter()
+                .take_while(move |&&(b, _)| b == id)
+                .filter_map(|&(_, i)| self.bins.get(i))
+        })
     }
 }
 
@@ -370,24 +394,22 @@ impl CsiIndex {
 
         let mut nearby = Vec::new();
         let mut distant = Vec::new();
-        for bin in &ref_idx.bins {
-            if candidate_bins.contains(&bin.bin_id) {
-                let level = match csi_bin_level(bin.bin_id, self.depth) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            bin = bin.bin_id,
-                            "csi_bin_level failed; skipping bin"
-                        );
-                        continue;
-                    }
-                };
-                let target = if level <= cache_threshold { &mut distant } else { &mut nearby };
-                for chunk in &bin.chunks {
-                    if chunk.end > min_offset {
-                        target.push(*chunk);
-                    }
+        for bin in ref_idx.candidate_bins(&candidate_bins) {
+            let level = match csi_bin_level(bin.bin_id, self.depth) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        bin = bin.bin_id,
+                        "csi_bin_level failed; skipping bin"
+                    );
+                    continue;
+                }
+            };
+            let target = if level <= cache_threshold { &mut distant } else { &mut nearby };
+            for chunk in &bin.chunks {
+                if chunk.end > min_offset {
+                    target.push(*chunk);
                 }
             }
         }
@@ -1038,5 +1060,63 @@ mod tests {
         let dummy = CsiRefIndex::new(Vec::new());
         let err = csi_min_offset(&dummy, 0, 14, 22).unwrap_err();
         assert!(matches!(err, CsiError::BinArithmeticOverflow { .. }), "got {err:?}");
+    }
+
+    // r[verify csi.query_split]
+    /// The sorted-id lookup returns what testing every bin of the reference
+    /// against the candidate list returns — bins in any file order, duplicate
+    /// ids included, arbitrary loffsets.
+    #[hegel::test]
+    fn query_split_matches_full_bin_scan(tc: TestCase) {
+        let arb_chunk = || {
+            gs::tuples!(gs::integers::<u64>().max_value(5_000), gs::integers::<u64>().max_value(400))
+        };
+        let drawn = tc.draw(
+            gs::vecs(gs::tuples!(
+                gs::integers::<u32>().max_value(37_449),
+                gs::integers::<u64>().max_value(5_000),
+                gs::vecs(arb_chunk()).max_size(3),
+            ))
+            .max_size(40),
+        );
+        // Half the bins sit near the query so that some are candidates.
+        let start = tc.draw(gs::integers::<u32>().max_value(1 << 22));
+        let end = tc.draw(gs::integers::<u32>().min_value(start).max_value(start + 200_000));
+        let near = tc.draw(gs::booleans());
+        let bins: Vec<(u32, u64, Vec<(u64, u64)>)> = drawn
+            .into_iter()
+            .map(|(id, loff, cs)| {
+                let id = if near { 4681 + (start >> 14) + id % 4 } else { id };
+                (id, loff, cs.into_iter().map(|(b, len)| (b, b + len)).collect())
+            })
+            .collect();
+        let idx = make_csi_index(bins.clone());
+
+        let (s, e) = (u64::from(start), u64::from(end));
+        let candidates = csi_reg2bins(s, e + 1, 14, 5).unwrap();
+        let min_offset = csi_min_offset(&idx.references[0], s, 14, 5).unwrap();
+        let (mut nearby, mut distant) = (Vec::new(), Vec::new());
+        for (id, _, chunks) in &bins {
+            if !candidates.contains(id) {
+                continue;
+            }
+            let target =
+                if csi_bin_level(*id, 5).unwrap() <= 2 { &mut distant } else { &mut nearby };
+            for &(b, e) in chunks {
+                if VirtualOffset(e) > min_offset {
+                    target.push(Chunk { begin: VirtualOffset(b), end: VirtualOffset(e) });
+                }
+            }
+        }
+        let key = |v: &mut Vec<Chunk>| {
+            v.sort_by_key(|c| c.begin);
+            merge_overlapping_chunks(v);
+            v.iter().map(|c| (c.begin.0, c.end.0)).collect::<Vec<_>>()
+        };
+
+        let got = idx.query_split(0, Pos0::new(start).unwrap(), Pos0::new(end).unwrap());
+        let (mut got_near, mut got_far) = (got.nearby, got.distant);
+        assert_eq!(key(&mut got_near), key(&mut nearby));
+        assert_eq!(key(&mut got_far), key(&mut distant));
     }
 }
