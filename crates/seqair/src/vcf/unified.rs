@@ -3,7 +3,7 @@
 use super::OutputFormat;
 use super::alleles::Alleles;
 use super::bcf_encoding::*;
-use super::encoder::{BcfRecordEncoder, BcfValue, BgzfWrite, ContigHandle, FieldTracker};
+use super::encoder::{BcfRecordEncoder, BcfValue, BgzfWrite, ContigHandle, FieldTracker, dict_bit};
 use super::error::VcfError;
 use super::header::VcfHeader;
 use super::record::Genotype;
@@ -497,6 +497,9 @@ struct VcfEncoderFields<'a> {
     n_samples: u32,
     filter_written: bool,
     info_tracker: &'a mut FieldTracker,
+    /// FORMAT fields in `fmt_keys`, as a bitset keyed by `dict_idx`, so the
+    /// common first-write path needs no name comparison.
+    fmt_seen: u64,
 }
 
 // r[impl record_encoder.buffer_reuse]
@@ -581,6 +584,7 @@ fn begin_vcf_record<'a>(
         n_samples,
         filter_written: false,
         info_tracker,
+        fmt_seen: 0,
     })
 }
 
@@ -800,6 +804,13 @@ impl VcfEncoderFields<'_> {
     /// last colon-field in each sample buffer) is moved over the previous
     /// occurrence in place, preserving key order to match the BCF/htslib path.
     fn commit_format_field(&mut self, id: &FieldId) {
+        let bit = dict_bit(id.dict_idx());
+        if self.fmt_seen & bit == 0 {
+            self.fmt_seen |= bit;
+            // A clone shares or copies the header's name; no re-validation.
+            self.fmt_keys.push(id.name.clone());
+            return;
+        }
         match self.fmt_keys.iter().position(|k| k.as_str() == id.name()) {
             Some(idx) => {
                 tracing::warn!(
@@ -812,7 +823,7 @@ impl VcfEncoderFields<'_> {
                     move_last_colon_field_to(buf, idx, total);
                 }
             }
-            None => self.fmt_keys.push(id.name().into()),
+            None => self.fmt_keys.push(id.name.clone()),
         }
     }
 }

@@ -131,7 +131,7 @@ pub(crate) struct FieldTracker {
 /// Bit for `dict_idx` in the membership set. `dict_idx < 64` is guaranteed by
 /// the header builder; the mask keeps the shift defined even if that is violated
 /// (the worst case is a spurious scan, never UB).
-fn dict_bit(dict_idx: u32) -> u64 {
+pub(crate) fn dict_bit(dict_idx: u32) -> u64 {
     debug_assert!(dict_idx < 64, "dict_idx must be < 64 (enforced by the header builder)");
     1u64 << (dict_idx & 63)
 }
