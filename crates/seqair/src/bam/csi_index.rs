@@ -1069,7 +1069,10 @@ mod tests {
     #[hegel::test]
     fn query_split_matches_full_bin_scan(tc: TestCase) {
         let arb_chunk = || {
-            gs::tuples!(gs::integers::<u64>().max_value(5_000), gs::integers::<u64>().max_value(400))
+            gs::tuples!(
+                gs::integers::<u64>().max_value(5_000),
+                gs::integers::<u64>().max_value(400)
+            )
         };
         let drawn = tc.draw(
             gs::vecs(gs::tuples!(

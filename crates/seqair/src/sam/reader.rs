@@ -7,7 +7,7 @@ use crate::bam::{
     flags::BamFlags,
     record::DecodeError,
     record_store::RecordStore,
-    region_buf::RegionBuf,
+    region_buf::{BlockCache, RegionBuf},
 };
 use crate::io::text_scan;
 use core::range::RangeInclusive;
@@ -166,6 +166,8 @@ pub struct SamShared {
 pub struct IndexedSamReader<R = File> {
     bulk_reader: R,
     shared: Arc<SamShared>,
+    /// Decompressed blocks kept between queries; see `r[region_buf.block_cache]`.
+    block_cache: BlockCache,
 }
 
 impl<R> std::fmt::Debug for IndexedSamReader<R> {
@@ -204,6 +206,7 @@ impl IndexedSamReader<File> {
         Ok(IndexedSamReader {
             bulk_reader: bulk_file,
             shared: Arc::new(SamShared { index, header, sam_path: path.to_path_buf() }),
+            block_cache: BlockCache::new(),
         })
     }
 
@@ -211,7 +214,11 @@ impl IndexedSamReader<File> {
         let bulk_file = File::open(&self.shared.sam_path)
             .map_err(|source| SamError::Open { path: self.shared.sam_path.clone(), source })?;
 
-        Ok(IndexedSamReader { bulk_reader: bulk_file, shared: Arc::clone(&self.shared) })
+        Ok(IndexedSamReader {
+            bulk_reader: bulk_file,
+            shared: Arc::clone(&self.shared),
+            block_cache: BlockCache::new(),
+        })
     }
 }
 
@@ -228,6 +235,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
         Ok(IndexedSamReader {
             bulk_reader: std::io::Cursor::new(sam_data),
             shared: Arc::new(SamShared { index, header, sam_path: PathBuf::from("<fuzz>") }),
+            block_cache: BlockCache::new(),
         })
     }
 
@@ -258,6 +266,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
         Ok(IndexedSamReader {
             bulk_reader: std::io::Cursor::new(sam_data),
             shared: Arc::new(SamShared { index, header, sam_path: PathBuf::from("<fuzz-plain>") }),
+            block_cache: BlockCache::new(),
         })
     }
 
@@ -369,7 +378,8 @@ impl<R: Read + Seek> IndexedSamReader<R> {
             return Ok(crate::reader::FetchCounts::default());
         }
 
-        let mut region = RegionBuf::new(&mut self.bulk_reader, &chunks)?;
+        let mut region =
+            RegionBuf::with_cache(&mut self.bulk_reader, &chunks, &mut self.block_cache)?;
 
         let start_i64 = span.start.as_i64();
         let end_i64 = span.last.as_i64();

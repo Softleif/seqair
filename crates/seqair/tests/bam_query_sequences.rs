@@ -1,4 +1,5 @@
-//! Many queries on one reader give what each would give on its own.
+//! Many queries on one reader give what each would give on its own, for BAM
+//! and for bgzipped SAM.
 //!
 //! `IndexedBamReader` keeps decompressed BGZF blocks between queries
 //! (`r[region_buf.block_cache]`) and starts a query where the previous one
@@ -28,9 +29,11 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair::sam::reader::IndexedSamReader;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 /// One query: reference index, first and last position (0-based inclusive).
@@ -287,6 +290,80 @@ fn query_sequence_matches_whole_reference_scan(tc: TestCase) {
 
     let contigs: Vec<(u32, u32)> = TEST_CONTIGS.iter().map(|&(_, lo, hi)| (lo, hi)).collect();
     let n_queries = tc.draw(gs::integers::<usize>().min_value(1).max_value(40));
+    let mut prev = None;
+    for _ in 0..n_queries {
+        let query @ (idx, start, last) = draw_query(&tc, prev, &contigs);
+        prev = Some(query);
+        let tid = reader.header().tid(TEST_CONTIGS[idx].0).unwrap();
+        let span = (Pos0::new(start).unwrap()..=Pos0::new(last).unwrap()).into();
+        reader.fetch_into(tid, span, &mut store).unwrap();
+
+        let expected: Vec<Rec> =
+            whole[idx].iter().filter(|r| r.1 <= last && r.2 >= start).cloned().collect();
+        assert_eq!(records(&store), expected, "query {query:?}");
+    }
+}
+
+// ── tests/data/test.bam as bgzipped SAM ─────────────────────────────────
+
+/// `test.bam` as tabix-indexed SAM, written once for the whole test binary.
+fn test_sam_gz() -> &'static Path {
+    static CELL: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
+    &CELL
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let sam_gz = dir.path().join("test.sam.gz");
+            let status = Command::new("samtools")
+                .args(["view", "-h", "--output-fmt", "SAM,level=6", "-o"])
+                .arg(&sam_gz)
+                .arg(test_bam_path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("samtools not found");
+            assert!(status.success());
+            let status = Command::new("tabix")
+                .args(["-p", "sam"])
+                .arg(&sam_gz)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("tabix not found");
+            assert!(status.success());
+            (dir, sam_gz)
+        })
+        .1
+}
+
+fn sam_whole_references() -> &'static [Vec<Rec>] {
+    static CELL: OnceLock<Vec<Vec<Rec>>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        TEST_CONTIGS
+            .iter()
+            .map(|&(name, _, _)| {
+                let mut reader = IndexedSamReader::open(test_sam_gz()).unwrap();
+                let tid = reader.header().tid(name).unwrap();
+                let len = reader.header().target_len(tid).unwrap() as u32;
+                let span = (Pos0::new(0).unwrap()..=Pos0::new(len - 1).unwrap()).into();
+                let mut store = RecordStore::new();
+                reader.fetch_into(tid, span, &mut store).unwrap();
+                records(&store)
+            })
+            .collect()
+    })
+}
+
+// r[verify region_buf.block_cache]
+/// The SAM reader shares the block cache; a random query sequence on one
+/// reader matches a fresh whole-reference read, filtered, in order.
+#[hegel::test(test_cases = 32)]
+fn sam_query_sequence_matches_whole_reference_scan(tc: TestCase) {
+    let whole = sam_whole_references();
+    let mut reader = IndexedSamReader::open(test_sam_gz()).unwrap();
+    let mut store = RecordStore::new();
+
+    let contigs: Vec<(u32, u32)> = TEST_CONTIGS.iter().map(|&(_, lo, hi)| (lo, hi)).collect();
+    let n_queries = tc.draw(gs::integers::<usize>().min_value(1).max_value(20));
     let mut prev = None;
     for _ in 0..n_queries {
         let query @ (idx, start, last) = draw_query(&tc, prev, &contigs);
