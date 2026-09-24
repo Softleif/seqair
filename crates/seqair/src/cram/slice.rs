@@ -137,8 +137,15 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
         .ok_or(CramError::Truncated { context: "slice offset" })?;
 
     // Parse slice header block
-    let (slice_header_block, mut pos) =
-        block::parse_block_with_buf(slice_data, rans_4x8_buf.as_mut(), nx16_order1_buf.as_mut())?;
+    // The codec buffers live on the reader so every block of every slice
+    // reuses one set of order-1 tables instead of allocating its own.
+    let rans_4x8_buf = rans_4x8_buf.get_or_insert_with(super::rans::Rans4x8Buf::new);
+    let nx16_order1_buf = nx16_order1_buf.get_or_insert_with(super::rans_nx16::Nx16Order1Buf::new);
+    let (slice_header_block, mut pos) = block::parse_block_with_buf(
+        slice_data,
+        Some(&mut *rans_4x8_buf),
+        Some(&mut *nx16_order1_buf),
+    )?;
     if slice_header_block.content_type != ContentType::SliceHeader {
         return Err(CramError::ExpectedSliceHeader { found: slice_header_block.content_type });
     }
@@ -203,8 +210,8 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
             slice_data.get(pos..).ok_or(CramError::Truncated { context: "slice block" })?;
         let (blk, consumed) = block::parse_block_with_buf(
             remaining,
-            rans_4x8_buf.as_mut(),
-            nx16_order1_buf.as_mut(),
+            Some(&mut *rans_4x8_buf),
+            Some(&mut *nx16_order1_buf),
         )?;
         pos = pos.wrapping_add(consumed);
 
