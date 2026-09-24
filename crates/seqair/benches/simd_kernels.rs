@@ -10,6 +10,7 @@
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, reason = "benches")]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use seqair::bam::BaseModState;
 use seqair::bam::seq::{decode_bases_into, decode_seq};
 use seqair::cram::rans_nx16;
 use seqair_types::Base;
@@ -100,5 +101,64 @@ fn rans_nx16_order0(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bam_seq_decode, ascii_to_base, rans_nx16_order0);
+/// A random read with an ONT-style `C+h?;C+m?;` pair over the Cs a caller
+/// picked with probability `1 / every`: `every = 4` is about what a CpG-only
+/// caller does on random sequence, `every = 20` on CpG-depleted human DNA.
+fn modbam_record(len: usize, every: u8, seed: u64) -> (Vec<Base>, Vec<u8>, Vec<u8>) {
+    let seq: Vec<Base> = bytes(len, seed)
+        .iter()
+        .map(|b| [Base::A, Base::C, Base::G, Base::T][*b as usize % 4])
+        .collect();
+    let pick = bytes(len, seed ^ 0x55);
+    let mut deltas = Vec::new();
+    let mut skipped = 0u32;
+    for (b, p) in seq.iter().zip(&pick) {
+        if *b != Base::C {
+            continue;
+        }
+        if p % every == 0 {
+            deltas.push(skipped);
+            skipped = 0;
+        } else {
+            skipped += 1;
+        }
+    }
+    let list = deltas.iter().fold(String::new(), |mut list, d| {
+        use std::fmt::Write as _;
+        write!(list, ",{d}").unwrap();
+        list
+    });
+    let mm = format!("C+h?{list};C+m?{list};").into_bytes();
+    let ml = bytes(deltas.len() * 2, seed ^ 0xAA);
+    (seq, mm, ml)
+}
+
+fn base_mod_parse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("base_mod_parse");
+    for len in [150usize, 10_000, 100_000] {
+        for every in [4u8, 20] {
+            let (seq, mm, ml) = modbam_record(len, every, 7);
+            group.throughput(Throughput::Elements(len as u64));
+            let id = format!("{len}/1in{every}");
+            group.bench_with_input(BenchmarkId::new("forward", &id), &(), |b, _| {
+                b.iter(|| {
+                    BaseModState::parse(black_box(&mm), black_box(&ml), black_box(&seq), false)
+                        .unwrap()
+                });
+            });
+            // The same deltas resolved against the reverse complement: the
+            // walk runs from the end of the stored read towards its start.
+            let rc: Vec<Base> = seq.iter().rev().map(Base::inverse).collect();
+            group.bench_with_input(BenchmarkId::new("reverse", &id), &(), |b, _| {
+                b.iter(|| {
+                    BaseModState::parse(black_box(&mm), black_box(&ml), black_box(&rc), true)
+                        .unwrap()
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bam_seq_decode, ascii_to_base, rans_nx16_order0, base_mod_parse);
 criterion_main!(benches);
