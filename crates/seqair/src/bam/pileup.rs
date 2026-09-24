@@ -14,7 +14,7 @@ use std::{num::NonZeroU32, ops::Range, rc::Rc};
 use crate::utils::TraceErr;
 
 use super::{
-    cigar::{CigarCursor, CigarPosInfo, ClipFlanks},
+    cigar::{CigarCursor, CigarPosInfo, ClipFlanks, PlainGap},
     record_idx::{RecordIdx, RecordRef},
     record_store::{PileupInput, RecordStore},
 };
@@ -1175,11 +1175,17 @@ impl<U> PileupEngine<U> {
             let slab = store.cigar_slab();
             let pos_u32 = pos.as_u32();
             for active in actives.iter_mut() {
-                // The common column first: inside a match op, nothing
-                // anchored. Everything else takes the out-of-line step.
+                // The common column first: inside an op, nothing anchored.
+                // Everything else takes the out-of-line step.
                 let (op, indel_after) = if let Some(qpos) = active.cigar.plain_match(pos_u32) {
                     let (base, qual) = base_qual_at(store, active, qpos);
                     (PileupOp::Match { qpos, base, qual }, Indel::None)
+                } else if let Some(gap) = active.cigar.plain_gap(pos_u32) {
+                    let op = match gap {
+                        PlainGap::Deletion(del_len) => PileupOp::Deletion { del_len },
+                        PlainGap::RefSkip => PileupOp::RefSkip,
+                    };
+                    (op, Indel::None)
                 } else {
                     let Some((info, deletion_after)) = active.cigar.step(slab, pos_u32) else {
                         // Outside the aligned span: emit a soft-clip fringe base if

@@ -834,6 +834,23 @@ enum SegKind {
     Done,
 }
 
+/// A column inside a `D` or `N` with nothing anchored at it: the answer
+/// [`CigarCursor::plain_gap`] gives without walking or looking ahead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlainGap {
+    Deletion(u32),
+    RefSkip,
+}
+
+impl From<PlainGap> for CigarPosInfo {
+    fn from(gap: PlainGap) -> Self {
+        match gap {
+            PlainGap::Deletion(del_len) => Self::Deletion { del_len },
+            PlainGap::RefSkip => Self::RefSkip,
+        }
+    }
+}
+
 /// `del_after` when no deletion follows. A real `D` op may have length 0,
 /// which htslib (and [`CigarMapping::deletion_after_at`]) still report.
 const NO_DELETION: u32 = u32::MAX;
@@ -846,9 +863,9 @@ const NO_DELETION: u32 = u32::MAX;
 /// The cursor stands on one reference-consuming op at a time and has already
 /// looked past it: the insertion or deletion that follows is resolved once,
 /// when the cursor arrives on the op, not re-derived at every column. So the
-/// common column — inside a match op, not its indel anchor — is one compare
-/// and one add in [`plain_match`](Self::plain_match), whatever the CIGAR looks
-/// like. Everything else goes through [`step`](Self::step), which walks
+/// common column — inside an op, not its indel anchor — is one compare (and,
+/// for a match, one add) in [`plain_match`](Self::plain_match) or
+/// [`plain_gap`](Self::plain_gap), whatever the CIGAR looks like. Everything else goes through [`step`](Self::step), which walks
 /// forward at most to the op covering the column.
 ///
 /// Answers match [`CigarMapping::pos_info_at`] and
@@ -859,10 +876,14 @@ const NO_DELETION: u32 = u32::MAX;
 pub(crate) struct CigarCursor {
     /// First reference position of the op the cursor stands on.
     seg_start: u32,
-    /// How many columns from `seg_start` are a plain match: the whole op for
-    /// a match op with nothing anchored at its end, one fewer when an indel
-    /// is, and 0 for any other op.
+    /// How many columns from `seg_start` are a plain match: the whole op
+    /// for a match op with nothing anchored at its end, one fewer when an
+    /// indel is, and 0 for any other op.
     plain_len: u32,
+    /// The same for a `D` or `N` op (anchored: a following insertion makes
+    /// the last column a `ComplexIndel`), 0 for any other op. Kept apart from
+    /// `plain_len` so the match test stays one compare with no kind check.
+    gap_len: u32,
     /// Query offset at `seg_start` (match ops only).
     qstart: u32,
     /// One past the op's last reference position. 0 before the first step,
@@ -890,6 +911,7 @@ impl CigarCursor {
         Self {
             seg_start: 0,
             plain_len: 0,
+            gap_len: 0,
             qstart: 0,
             seg_end: 0,
             op_len: 0,
@@ -903,15 +925,30 @@ impl CigarCursor {
         }
     }
 
-    /// The query offset at `pos` when `pos` is a plain match column of the op
-    /// the cursor stands on — no advance, no indel anchored — else `None`,
-    /// and the caller asks [`step`](Self::step).
+    /// The query offset at `pos` when `pos` is a plain match column of the
+    /// op the cursor stands on — no advance, no indel anchored — else `None`.
     #[inline(always)]
     pub(crate) fn plain_match(&self, pos: u32) -> Option<QPos> {
         // Below `seg_start` the difference wraps past any `plain_len`.
         let offset = pos.wrapping_sub(self.seg_start);
         // `advance` only opens a plain run whose query offsets fit in u32.
         (offset < self.plain_len).then(|| QPos::new(self.qstart.wrapping_add(offset)))
+    }
+
+    /// The same for a `D` or `N` op: spliced reads spend most of their span
+    /// inside an `N`. Asked only after [`plain_match`](Self::plain_match)
+    /// said no, and followed by [`step`](Self::step) when this says no too.
+    #[inline(always)]
+    pub(crate) fn plain_gap(&self, pos: u32) -> Option<PlainGap> {
+        let offset = pos.wrapping_sub(self.seg_start);
+        if offset >= self.gap_len {
+            return None;
+        }
+        match self.kind {
+            SegKind::Deletion => Some(PlainGap::Deletion(self.op_len)),
+            SegKind::RefSkip => Some(PlainGap::RefSkip),
+            SegKind::Match | SegKind::Done => None,
+        }
     }
 
     /// What the read shows at `pos`, and the deletion anchored there (for a
@@ -999,14 +1036,15 @@ impl CigarCursor {
             let (ins_after, del_after) = self.peek_indel_after(slab);
             let del_after = if kind == SegKind::Match { del_after } else { NO_DELETION };
             let anchored = ins_after > 0 || del_after != NO_DELETION;
-            let plain_len = match kind {
-                SegKind::Match if qstart.checked_add(len).is_some() => {
-                    len.wrapping_sub(u32::from(anchored))
-                }
-                _ => 0,
+            let run = len.wrapping_sub(u32::from(anchored));
+            let (plain_len, gap_len) = match kind {
+                SegKind::Match if qstart.checked_add(len).is_some() => (run, 0),
+                SegKind::Deletion | SegKind::RefSkip => (0, run),
+                SegKind::Match | SegKind::Done => (0, 0),
             };
             self.seg_start = start;
             self.plain_len = plain_len;
+            self.gap_len = gap_len;
             self.qstart = qstart;
             self.seg_end = end;
             self.op_len = len;
@@ -1017,6 +1055,7 @@ impl CigarCursor {
         }
         self.seg_start = u32::MAX;
         self.plain_len = 0;
+        self.gap_len = 0;
         self.seg_end = u32::MAX;
         self.kind = SegKind::Done;
     }
@@ -1534,7 +1573,7 @@ mod tests {
     /// Walking the cursor over any non-decreasing sequence of positions —
     /// including jumps over several ops, which a pileup starting mid-read
     /// makes — gives the stateless lookups' answers at every one of them, and
-    /// the plain-match fast path never answers where they would say more.
+    /// the plain fast path never answers where they would say more.
     #[hegel::test]
     fn cursor_agrees_with_stateless_lookup(tc: TestCase) {
         let ops = tc.draw(arb_ops().print_as_debug());
@@ -1559,11 +1598,12 @@ mod tests {
                 };
                 (info, del)
             });
-            match cursor.plain_match(pos) {
-                Some(qpos) => {
-                    assert_eq!(expected, Some((CigarPosInfo::Match { qpos }, None)), "pos {pos}");
-                }
-                None => assert_eq!(cursor.step(&slab, pos), expected, "pos {pos}"),
+            if let Some(qpos) = cursor.plain_match(pos) {
+                assert_eq!(expected, Some((CigarPosInfo::Match { qpos }, None)), "pos {pos}");
+            } else if let Some(gap) = cursor.plain_gap(pos) {
+                assert_eq!(expected, Some((gap.into(), None)), "pos {pos}");
+            } else {
+                assert_eq!(cursor.step(&slab, pos), expected, "pos {pos}");
             }
         }
     }
