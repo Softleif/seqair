@@ -111,7 +111,7 @@ fn all_contigs_record_count_matches() {
 // r[verify bam.record.end_pos]
 // r[verify bam.record.seq_4bit]
 // r[verify record_store.field_access]
-// r[verify base_decode.decode]
+// r[verify base_decode.decode+2]
 #[test]
 fn all_contigs_record_fields_match() {
     for &(contig, start, end) in CONTIGS {
@@ -311,7 +311,7 @@ fn all_contigs_pileup_qpos_and_flags_match() {
     }
 }
 
-// r[verify base_decode.decode]
+// r[verify base_decode.decode+2]
 // r[verify pileup.htslib_compat]
 #[test]
 fn all_contigs_pileup_bases_match() {

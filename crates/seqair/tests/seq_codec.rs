@@ -65,8 +65,8 @@ fn decode_pair_table_exhaustive() {
 // ---- seq.decode_simd + seq.simd_scalar_equivalence ----
 
 // r[verify seq.simd_scalar_equivalence]
-// r[verify seq.decode_simd]
-// r[verify seq.decode_dispatch]
+// r[verify seq.decode_simd+2]
+// r[verify seq.decode_dispatch+2]
 // r[verify io.platform_optimizations]
 #[hegel::test]
 fn simd_matches_scalar_arbitrary(tc: TestCase) {

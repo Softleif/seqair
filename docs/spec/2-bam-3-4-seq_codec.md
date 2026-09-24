@@ -14,11 +14,11 @@ The scalar decoder MUST use a 16-entry lookup table mapping 4-bit codes to ASCII
 r[seq.decode_pair_table]
 For bulk decoding, a 256-entry pair table (`DECODE_PAIR[byte] → [high_base, low_base]`) SHOULD be used to decode two bases per byte lookup, avoiding repeated shift-and-mask operations.
 
-r[seq.decode_simd]
-On platforms with SIMD support (SSSE3 on x86_64, NEON on aarch64), bulk sequence decoding MUST use SIMD table-lookup instructions (`pshufb` / `vqtbl1q_u8`) to decode 32 bases per iteration from 16 packed bytes. A scalar tail MUST handle the remaining bytes.
+r[seq.decode_simd+2]
+Bulk sequence decoding MUST be one native-width SIMD kernel (`r[io.simd_portable]`) that looks each nibble up with a byte shuffle against the 16-entry table (`swizzle_dyn_within_blocks`: `pshufb` on x86, `tbl` on aarch64) and interleaves the high- and low-nibble results back into read order, decoding `2 × LEN` bases from `LEN` packed bytes per iteration. The remaining whole bytes MUST go through the pair table, and an odd final base through the high nibble of the last byte. The ASCII (`=ACMGRSVTWYHKDBN`) and `Base`-valued decoders MUST be this one kernel with a different table.
 
-r[seq.decode_dispatch]
-Runtime dispatch MUST select the fastest available decoder: SSSE3 on x86_64 (with feature detection), NEON on aarch64 (always available), scalar fallback on all other platforms.
+r[seq.decode_dispatch+2]
+Runtime dispatch MUST go through `dispatch!(Level::new(), ..)`, which selects the widest level the CPU supports: AVX-512, AVX2, SSE4.2 or SSE2 on x86_64, NEON on aarch64, and the scalar `Fallback` elsewhere.
 
 ## Encoding (ASCII → 4-bit)
 

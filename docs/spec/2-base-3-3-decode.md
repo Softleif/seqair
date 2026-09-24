@@ -24,8 +24,8 @@ Every entry in `DECODE_BASE_TYPED` (16 entries) and `DECODE_PAIR_TYPED` (256 × 
 
 ## Decoding function
 
-r[base_decode.decode]
-`decode_bases(packed_seq, seq_len)` MUST decode a 4-bit packed BAM sequence into a `Vec<Base>`. The function SHOULD use the SIMD-accelerated decode path (SSSE3/NEON) with a Base-valued lookup table for identical throughput to the ASCII decoder.
+r[base_decode.decode+2]
+`decode_bases(packed_seq, seq_len)` MUST decode a 4-bit packed BAM sequence into a `Vec<Base>`. It MUST be the same SIMD kernel as the ASCII decoder (`r[seq.decode_simd]`) with a `Base`-valued lookup table, for identical throughput.
 
 ## Storage in RecordStore
 

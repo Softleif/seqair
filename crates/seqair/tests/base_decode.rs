@@ -19,7 +19,7 @@ use seqair_types::QPos;
 use std::num::NonZeroU32;
 
 // r[verify base_decode.table]
-// r[verify base_decode.decode]
+// r[verify base_decode.decode+2]
 #[test]
 fn decode_standard_bases() {
     // packed_seq: 0x12 = A(1)|C(2), 0x48 = G(4)|T(8) → ACGT

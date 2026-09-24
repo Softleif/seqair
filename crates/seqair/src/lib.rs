@@ -14,6 +14,8 @@ pub mod fasta;
 pub mod io;
 pub mod reader;
 pub mod sam;
+#[cfg(test)]
+mod simd_levels;
 pub(crate) mod utils;
 pub mod vcf;
 

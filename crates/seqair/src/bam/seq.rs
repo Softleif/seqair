@@ -1,10 +1,14 @@
-//! Encode and decode BAM 4-bit packed sequences. [`decode_seq`] and [`encode_seq`] dispatch to
-//! SSSE3 (`x86_64`), NEON (aarch64), or scalar paths; all produce identical output.
+//! Encode and decode BAM 4-bit packed sequences. [`decode_seq`] runs one
+//! `fearless_simd` kernel at the best SIMD level the CPU has; every level,
+//! the scalar fallback included, produces identical output.
+
+use fearless_simd::{Level, dispatch, prelude::*, u8x16};
+use fearless_simd_macros::simd;
 
 // r[impl seq.decode_scalar]
 // r[impl seq.decode_pair_table]
-// r[impl seq.decode_simd]
-// r[impl seq.decode_dispatch]
+// r[impl seq.decode_simd+2]
+// r[impl seq.decode_dispatch+2]
 // r[impl seq.encode_scalar]
 // r[impl seq.simd_scalar_equivalence]
 // r[impl io.platform_optimizations]
@@ -88,30 +92,11 @@ pub fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
 
 /// Decode a 4-bit packed BAM sequence using the best available implementation.
 pub fn decode_seq(encoded: &[u8], len: usize) -> Vec<u8> {
-    let required = len.div_ceil(2);
-    if encoded.len() < required {
-        return vec![b'N'; len];
+    let mut out = vec![0u8; len];
+    if !decode_nibbles(Level::new(), DECODE_BASE, &DECODE_PAIR, encoded, &mut out) {
+        out.fill(b'N');
     }
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("ssse3") {
-            // Safety: we just verified SSSE3 is available.
-            return unsafe { decode_seq_ssse3(encoded, len) };
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Safety: NEON is always available on aarch64.
-        return unsafe { decode_seq_neon(encoded, len) };
-    }
-
-    #[cfg_attr(
-        target_arch = "aarch64",
-        expect(unreachable_code, reason = "NEON return above makes this dead on aarch64")
-    )]
-    decode_seq_scalar(encoded, len)
+    out
 }
 
 /// BAM 4-bit encoding → Base discriminant lookup.
@@ -162,189 +147,81 @@ static DECODE_PAIR_TYPED: [[u8; 2]; 256] = {
 // r[impl bam.record.seq_4bit]
 pub fn decode_bases_into(encoded: &[u8], len: usize, out: &mut [u8]) {
     debug_assert!(out.len() >= len, "output buffer too small: {} < {}", out.len(), len);
-    let required = len.div_ceil(2);
-    if encoded.len() < required || out.len() < len {
-        if let Some(s) = out.get_mut(..len) {
-            s.fill(b'N')
-        }
-        return;
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("ssse3") {
-            // Safety: SSSE3 verified.
-            unsafe {
-                decode_bases_into_ssse3(encoded, len, out);
-            }
-            return;
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Safety: NEON always available on aarch64.
-        unsafe {
-            decode_bases_into_neon(encoded, len, out);
-        }
-        return;
-    }
-
-    #[cfg_attr(
-        target_arch = "aarch64",
-        expect(unreachable_code, reason = "NEON return above makes this dead on aarch64")
-    )]
-    decode_bases_into_scalar(encoded, len, out);
-}
-
-fn decode_bases_into_scalar(encoded: &[u8], len: usize, out: &mut [u8]) {
-    let full_bytes = len / 2;
-
-    #[allow(clippy::indexing_slicing, reason = "bounds ensured by zip + as_chunks")]
-    for (chunk, &byte) in out.as_chunks_mut::<2>().0.iter_mut().zip(&encoded[..full_bytes]) {
-        let pair = DECODE_PAIR_TYPED[byte as usize];
-        chunk[0] = pair[0];
-        chunk[1] = pair[1];
-    }
-
-    if len % 2 == 1
-        && let Some(byte) = encoded.get(full_bytes)
-        && let Some(slot) = out.get_mut(len.saturating_sub(1))
-    {
-        #[allow(clippy::indexing_slicing, reason = "byte < 256")]
-        {
-            *slot = DECODE_PAIR_TYPED[*byte as usize][0];
-        }
+    let Some(out) = out.get_mut(..len) else { return };
+    if !decode_nibbles(Level::new(), DECODE_BASE_TYPED, &DECODE_PAIR_TYPED, encoded, out) {
+        out.fill(b'N');
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "ssse3")]
+/// Decode `out.len()` nibbles of `encoded` through `lut`, the 16-entry nibble
+/// table, and `pairs`, the same table two nibbles at a time for the scalar
+/// tail. Returns `false`, having written nothing, when `encoded` is too short.
+// r[impl io.simd_portable]
+fn decode_nibbles(
+    level: Level,
+    lut: &[u8; 16],
+    pairs: &[[u8; 2]; 256],
+    encoded: &[u8],
+    out: &mut [u8],
+) -> bool {
+    let Some(packed) = encoded.get(..out.len().div_ceil(2)) else { return false };
+    dispatch!(level, simd => decode_nibbles_simd(simd, lut, pairs, packed, out));
+    true
+}
+
+/// One native-width vector of packed bytes per iteration — two vectors of
+/// bases out. Each nibble is looked up with a byte shuffle against `lut`
+/// (`pshufb` / `tbl`), the high-nibble and low-nibble results are
+/// interleaved back into read order, and whatever does not fill a vector goes
+/// through `pairs`. `packed.len()` is `out.len().div_ceil(2)`.
+#[simd]
 #[allow(
-    clippy::indexing_slicing,
-    reason = "scalar tail bounds guaranteed by loop invariants; debug_asserts verify"
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
 )]
-unsafe fn decode_bases_into_ssse3(encoded: &[u8], len: usize, out: &mut [u8]) {
-    use std::arch::x86_64::*;
+#[allow(clippy::indexing_slicing, reason = "a `u8` index is < 256 = pairs.len()")]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "a lanewise shift by 4 of a `u8` cannot overflow"
+)]
+fn decode_nibbles_simd<S: Simd>(
+    simd: S,
+    lut: &[u8; 16],
+    pairs: &[[u8; 2]; 256],
+    packed: &[u8],
+    out: &mut [u8],
+) {
+    let n = S::u8s::LEN;
+    // `swizzle_dyn_within_blocks` shuffles within each 128-bit block, so the
+    // table is repeated into every block of a wider vector.
+    let table = S::u8s::block_splat(u8x16::from_slice(simd, lut));
+    let (out_pairs, odd) = out.as_chunks_mut::<2>();
+    let (whole, last) = packed.split_at(out_pairs.len().min(packed.len()));
 
-    let full_bytes = len / 2;
+    let mut vec_in = whole.chunks_exact(n);
+    let mut vec_out = out_pairs.chunks_exact_mut(n);
+    for (p, o) in (&mut vec_in).zip(&mut vec_out) {
+        let p = S::u8s::from_slice(simd, p);
+        let hi = table.swizzle_dyn_within_blocks(p >> 4);
+        let lo = table.swizzle_dyn_within_blocks(p & 0x0F);
+        let (first, second) = hi.interleave(lo);
+        let (o_first, o_second) = o.as_flattened_mut().split_at_mut(n);
+        first.store_slice(o_first);
+        second.store_slice(o_second);
+    }
 
-    // Safety: SSSE3 availability is guaranteed by #[target_feature(enable = "ssse3")].
-    // Pointer offsets stay within bounds: i + 16 <= full_bytes <= encoded.len(),
-    // and o + 32 <= len <= out.len() (guaranteed by debug_assert in decode_bases_into).
-    let (lut, mask_lo) = unsafe {
-        (_mm_loadu_si128(DECODE_BASE_TYPED.as_ptr() as *const __m128i), _mm_set1_epi8(0x0F))
-    };
-
-    let mut i: usize = 0;
-    let mut o: usize = 0;
-
-    while let Some(next) = i.checked_add(16)
-        && next <= full_bytes
+    for (o, &b) in vec_out.into_remainder().iter_mut().zip(vec_in.remainder()) {
+        *o = pairs[usize::from(b)];
+    }
+    if let [o] = odd
+        && let Some(&b) = last.first()
     {
-        // Safety: see above; i + 16 <= full_bytes and o + 32 <= len are loop invariants.
-        unsafe {
-            let packed = _mm_loadu_si128(encoded.as_ptr().add(i) as *const __m128i);
-            let hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask_lo);
-            let lo = _mm_and_si128(packed, mask_lo);
-            let decoded_hi = _mm_shuffle_epi8(lut, hi);
-            let decoded_lo = _mm_shuffle_epi8(lut, lo);
-            let out_a = _mm_unpacklo_epi8(decoded_hi, decoded_lo);
-            let out_b = _mm_unpackhi_epi8(decoded_hi, decoded_lo);
-            _mm_storeu_si128(out.as_mut_ptr().add(o) as *mut __m128i, out_a);
-            _mm_storeu_si128(out.as_mut_ptr().add(o.wrapping_add(16)) as *mut __m128i, out_b);
-        }
-        i = i.wrapping_add(16); // already verified above
-        o = o.wrapping_add(32); // already verified above
-    }
-
-    debug_assert!(i <= full_bytes, "SSSE3 base loop overshot: i={i}, full_bytes={full_bytes}");
-    debug_assert!(
-        Some(o) == i.checked_mul(2),
-        "cursor invariant broken: o={o}, i*2={:?}",
-        i.checked_mul(2)
-    );
-    debug_assert!(
-        full_bytes <= encoded.len(),
-        "full_bytes={full_bytes} > encoded.len()={}",
-        encoded.len()
-    );
-    debug_assert!(len <= out.len(), "len={len} > out.len()={}", out.len());
-
-    while i < full_bytes {
-        let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
-        out[o] = pair[0];
-        out[o.wrapping_add(1)] = pair[1];
-        i = i.wrapping_add(1);
-        o = o.wrapping_add(2);
-    }
-
-    if len % 2 == 1 {
-        out[o] = DECODE_PAIR_TYPED[encoded[i] as usize][0];
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn decode_bases_into_neon(encoded: &[u8], len: usize, out: &mut [u8]) {
-    use std::arch::aarch64::*;
-
-    let full_bytes = len / 2;
-
-    // Safety: DECODE_BASE_TYPED is a &[u8; 16] static; out has at least len bytes
-    // (guaranteed by debug_assert in decode_bases_into).
-    // Pointer offsets stay within the allocated ranges enforced by the loop bounds.
-    unsafe {
-        let lut = vld1q_u8(DECODE_BASE_TYPED.as_ptr());
-        let mask_lo = vdupq_n_u8(0x0F);
-
-        let mut i: usize = 0;
-        let mut o: usize = 0;
-
-        while i.saturating_add(16) <= full_bytes {
-            let packed = vld1q_u8(encoded.as_ptr().add(i));
-            let hi = vshrq_n_u8(packed, 4);
-            let lo = vandq_u8(packed, mask_lo);
-            let decoded_hi = vqtbl1q_u8(lut, hi);
-            let decoded_lo = vqtbl1q_u8(lut, lo);
-            let out_a = vzip1q_u8(decoded_hi, decoded_lo);
-            let out_b = vzip2q_u8(decoded_hi, decoded_lo);
-            vst1q_u8(out.as_mut_ptr().add(o), out_a);
-            vst1q_u8(out.as_mut_ptr().add(o.wrapping_add(16)), out_b);
-            i = i.wrapping_add(16);
-            o = o.wrapping_add(32);
-        }
-
-        debug_assert!(i <= full_bytes, "NEON base loop overshot: i={i}, full_bytes={full_bytes}");
-        debug_assert!(
-            o == i.saturating_mul(2),
-            "cursor invariant broken: o={o}, i*2={}",
-            i.saturating_mul(2)
-        );
-        debug_assert!(
-            full_bytes <= encoded.len(),
-            "full_bytes={full_bytes} > encoded.len()={}",
-            encoded.len()
-        );
-        debug_assert!(len <= out.len(), "len={len} > out.len()={}", out.len());
-
-        #[allow(clippy::indexing_slicing, reason = "bounds ensured by loop")]
-        {
-            while i < full_bytes {
-                let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
-                out[o] = pair[0];
-                out[o.wrapping_add(1)] = pair[1];
-                i = i.wrapping_add(1);
-                o = o.wrapping_add(2);
-            }
-            if len % 2 == 1 {
-                out[o] = DECODE_PAIR_TYPED[encoded[i] as usize][0];
-            }
-        }
+        *o = pairs[usize::from(b)][0];
     }
 }
 
 /// Decode a 4-bit packed BAM sequence directly into `Base` values.
-// r[impl base_decode.decode]
+// r[impl base_decode.decode+2]
 pub fn decode_bases(encoded: &[u8], len: usize) -> Vec<seqair_types::Base> {
     let bytes = decode_bases_raw(encoded, len);
     // Safety: DECODE_BASE_TYPED/DECODE_PAIR_TYPED only produce valid Base
@@ -356,32 +233,12 @@ pub fn decode_bases(encoded: &[u8], len: usize) -> Vec<seqair_types::Base> {
 /// Raw byte decode using the Base-typed lookup table.
 // r[depends seq.simd_scalar_equivalence]
 fn decode_bases_raw(encoded: &[u8], len: usize) -> Vec<u8> {
-    let required = len.div_ceil(2);
-    if encoded.len() < required {
-        return vec![b'N'; len];
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("ssse3") {
-            // Safety: SSSE3 verified.
-            return unsafe { decode_bases_ssse3(encoded, len) };
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Safety: NEON always available on aarch64.
-        return unsafe { decode_bases_neon(encoded, len) };
-    }
-
-    #[cfg_attr(
-        target_arch = "aarch64",
-        expect(unreachable_code, reason = "NEON return above makes this dead on aarch64")
-    )]
-    decode_bases_scalar(encoded, len)
+    let mut out = vec![0u8; len];
+    decode_bases_into(encoded, len, &mut out);
+    out
 }
 
+#[cfg(test)]
 fn decode_bases_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
     let full_bytes = len / 2;
     let mut result = vec![0u8; len];
@@ -400,137 +257,6 @@ fn decode_bases_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
         #[allow(clippy::indexing_slicing, reason = "byte < 256")]
         {
             *slot = DECODE_PAIR_TYPED[*byte as usize][0];
-        }
-    }
-
-    result
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "ssse3")]
-#[allow(
-    clippy::indexing_slicing,
-    reason = "scalar tail bounds guaranteed by loop invariants; debug_asserts verify"
-)]
-unsafe fn decode_bases_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
-    use std::arch::x86_64::*;
-
-    let full_bytes = len / 2;
-    let mut result = vec![0u8; len];
-
-    // Safety: SSSE3 availability is guaranteed by #[target_feature(enable = "ssse3")].
-    // Pointer offsets stay within bounds: i + 16 <= full_bytes <= encoded.len(),
-    // and o + 32 <= len = result.len().
-    let (lut, mask_lo) = unsafe {
-        (_mm_loadu_si128(DECODE_BASE_TYPED.as_ptr() as *const __m128i), _mm_set1_epi8(0x0F))
-    };
-
-    let mut i: usize = 0;
-    let mut o: usize = 0;
-
-    while let Some(next) = i.checked_add(16)
-        && next <= full_bytes
-    {
-        // Safety: see above; i + 16 <= full_bytes and o + 32 <= len are loop invariants.
-        unsafe {
-            let packed = _mm_loadu_si128(encoded.as_ptr().add(i) as *const __m128i);
-            let hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask_lo);
-            let lo = _mm_and_si128(packed, mask_lo);
-            let decoded_hi = _mm_shuffle_epi8(lut, hi);
-            let decoded_lo = _mm_shuffle_epi8(lut, lo);
-            let out_a = _mm_unpacklo_epi8(decoded_hi, decoded_lo);
-            let out_b = _mm_unpackhi_epi8(decoded_hi, decoded_lo);
-            _mm_storeu_si128(result.as_mut_ptr().add(o) as *mut __m128i, out_a);
-            _mm_storeu_si128(result.as_mut_ptr().add(o.wrapping_add(16)) as *mut __m128i, out_b);
-        }
-        i = i.wrapping_add(16);
-        o = o.wrapping_add(32);
-    }
-
-    debug_assert!(i <= full_bytes, "SSSE3 base loop overshot: i={i}, full_bytes={full_bytes}");
-    debug_assert!(
-        Some(o) == i.checked_mul(2),
-        "cursor invariant broken: o={o}, i*2={:?}",
-        i.checked_mul(2)
-    );
-    debug_assert!(
-        full_bytes <= encoded.len(),
-        "full_bytes={full_bytes} > encoded.len()={}",
-        encoded.len()
-    );
-    debug_assert!(len <= result.len(), "len={len} > result.len()={}", result.len());
-
-    while i < full_bytes {
-        let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
-        result[o] = pair[0];
-        result[o.wrapping_add(1)] = pair[1];
-        i = i.wrapping_add(1);
-        o = o.wrapping_add(2);
-    }
-
-    if len % 2 == 1 {
-        result[o] = DECODE_PAIR_TYPED[encoded[i] as usize][0];
-    }
-
-    result
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn decode_bases_neon(encoded: &[u8], len: usize) -> Vec<u8> {
-    use std::arch::aarch64::*;
-
-    let full_bytes = len / 2;
-    let mut result = vec![0u8; len];
-
-    // Safety: DECODE_BASE_TYPED is a &[u8; 16] static; result is allocated above with len bytes.
-    // Pointer offsets stay within the allocated ranges enforced by the loop bounds.
-    unsafe {
-        let lut = vld1q_u8(DECODE_BASE_TYPED.as_ptr());
-        let mask_lo = vdupq_n_u8(0x0F);
-
-        let mut i: usize = 0;
-        let mut o: usize = 0;
-
-        while i.saturating_add(16) <= full_bytes {
-            let packed = vld1q_u8(encoded.as_ptr().add(i));
-            let hi = vshrq_n_u8(packed, 4);
-            let lo = vandq_u8(packed, mask_lo);
-            let decoded_hi = vqtbl1q_u8(lut, hi);
-            let decoded_lo = vqtbl1q_u8(lut, lo);
-            let out_a = vzip1q_u8(decoded_hi, decoded_lo);
-            let out_b = vzip2q_u8(decoded_hi, decoded_lo);
-            vst1q_u8(result.as_mut_ptr().add(o), out_a);
-            vst1q_u8(result.as_mut_ptr().add(o.wrapping_add(16)), out_b);
-            i = i.wrapping_add(16);
-            o = o.wrapping_add(32);
-        }
-
-        debug_assert!(i <= full_bytes, "NEON base loop overshot: i={i}, full_bytes={full_bytes}");
-        debug_assert!(
-            o == i.saturating_mul(2),
-            "cursor invariant broken: o={o}, i*2={}",
-            i.saturating_mul(2)
-        );
-        debug_assert!(
-            full_bytes <= encoded.len(),
-            "full_bytes={full_bytes} > encoded.len()={}",
-            encoded.len()
-        );
-        debug_assert!(len <= result.len(), "len={len} > result.len()={}", result.len());
-
-        #[allow(clippy::indexing_slicing, reason = "bounds ensured by loop")]
-        {
-            while i < full_bytes {
-                let pair = DECODE_PAIR_TYPED[encoded[i] as usize];
-                result[o] = pair[0];
-                result[o.wrapping_add(1)] = pair[1];
-                i = i.wrapping_add(1);
-                o = o.wrapping_add(2);
-            }
-            if len % 2 == 1 {
-                result[o] = DECODE_PAIR_TYPED[encoded[i] as usize][0];
-            }
         }
     }
 
@@ -586,156 +312,6 @@ pub fn encode_seq(bases: &[u8]) -> Vec<u8> {
     encoded
 }
 
-// ---- SSSE3 (x86_64) ----
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "ssse3")]
-#[allow(
-    clippy::indexing_slicing,
-    reason = "scalar tail bounds guaranteed by loop invariants; debug_asserts verify"
-)]
-unsafe fn decode_seq_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
-    use std::arch::x86_64::*;
-
-    let full_bytes = len / 2;
-    let mut result = vec![0u8; len];
-
-    // Safety: SSSE3 availability is guaranteed by #[target_feature(enable = "ssse3")].
-    // Pointer offsets stay within bounds: i + 16 <= full_bytes <= encoded.len(),
-    // and o + 32 <= len = result.len().
-    let (lut, mask_lo) =
-        unsafe { (_mm_loadu_si128(DECODE_BASE.as_ptr() as *const __m128i), _mm_set1_epi8(0x0F)) };
-
-    let mut i: usize = 0;
-    let mut o: usize = 0;
-
-    // 16 packed bytes → 32 decoded bases per iteration
-    while let Some(next) = i.checked_add(16)
-        && next <= full_bytes
-    {
-        // Safety: see above; i + 16 <= full_bytes and o + 32 <= len are loop invariants.
-        unsafe {
-            let packed = _mm_loadu_si128(encoded.as_ptr().add(i) as *const __m128i);
-
-            let hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask_lo);
-            let lo = _mm_and_si128(packed, mask_lo);
-
-            let decoded_hi = _mm_shuffle_epi8(lut, hi);
-            let decoded_lo = _mm_shuffle_epi8(lut, lo);
-
-            let out_a = _mm_unpacklo_epi8(decoded_hi, decoded_lo);
-            let out_b = _mm_unpackhi_epi8(decoded_hi, decoded_lo);
-
-            _mm_storeu_si128(result.as_mut_ptr().add(o) as *mut __m128i, out_a);
-            _mm_storeu_si128(result.as_mut_ptr().add(o.wrapping_add(16)) as *mut __m128i, out_b);
-        }
-        i = i.wrapping_add(16); // already verified above
-        o = o.wrapping_add(32); // already verified above
-    }
-
-    debug_assert!(i <= full_bytes, "SSSE3 seq loop overshot: i={i}, full_bytes={full_bytes}");
-    debug_assert!(
-        Some(o) == i.checked_mul(2),
-        "cursor invariant broken: o={o}, i*2={:?}",
-        i.checked_mul(2)
-    );
-    debug_assert!(
-        full_bytes <= encoded.len(),
-        "full_bytes={full_bytes} > encoded.len()={}",
-        encoded.len()
-    );
-    debug_assert!(len <= result.len(), "len={len} > result.len()={}", result.len());
-
-    // Scalar tail
-    while i < full_bytes {
-        let pair = DECODE_PAIR[encoded[i] as usize];
-        result[o] = pair[0];
-        result[o.wrapping_add(1)] = pair[1];
-        i = i.wrapping_add(1);
-        o = o.wrapping_add(2);
-    }
-
-    if len % 2 == 1 {
-        result[o] = DECODE_PAIR[encoded[i] as usize][0];
-    }
-
-    result
-}
-
-// ---- NEON (aarch64) ----
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn decode_seq_neon(encoded: &[u8], len: usize) -> Vec<u8> {
-    use std::arch::aarch64::*;
-
-    let full_bytes = len / 2;
-    let mut result = vec![0u8; len];
-
-    // Safety: DECODE_BASE is a &[u8; 16] static; result is allocated above with len bytes.
-    // Pointer offsets stay within the allocated ranges enforced by the loop bounds.
-    unsafe {
-        let lut = vld1q_u8(DECODE_BASE.as_ptr());
-        let mask_lo = vdupq_n_u8(0x0F);
-
-        let mut i: usize = 0;
-        let mut o: usize = 0;
-
-        // 16 packed bytes → 32 decoded bases per iteration
-        while i.saturating_add(16) <= full_bytes {
-            let packed = vld1q_u8(encoded.as_ptr().add(i));
-
-            let hi = vshrq_n_u8(packed, 4);
-            let lo = vandq_u8(packed, mask_lo);
-
-            let decoded_hi = vqtbl1q_u8(lut, hi);
-            let decoded_lo = vqtbl1q_u8(lut, lo);
-
-            let out_a = vzip1q_u8(decoded_hi, decoded_lo);
-            let out_b = vzip2q_u8(decoded_hi, decoded_lo);
-
-            vst1q_u8(result.as_mut_ptr().add(o), out_a);
-            vst1q_u8(result.as_mut_ptr().add(o.wrapping_add(16)), out_b);
-
-            i = i.wrapping_add(16);
-            o = o.wrapping_add(32);
-        }
-
-        debug_assert!(i <= full_bytes, "NEON seq loop overshot: i={i}, full_bytes={full_bytes}");
-        debug_assert!(
-            o == i.saturating_mul(2),
-            "cursor invariant broken: o={o}, i*2={}",
-            i.saturating_mul(2)
-        );
-        debug_assert!(
-            full_bytes <= encoded.len(),
-            "full_bytes={full_bytes} > encoded.len()={}",
-            encoded.len()
-        );
-        debug_assert!(len <= result.len(), "len={len} > result.len()={}", result.len());
-
-        #[allow(
-            clippy::indexing_slicing,
-            reason = "i < full_bytes ≤ encoded.len(), o/o+1 < len = result.len()"
-        )]
-        {
-            while i < full_bytes {
-                let pair = DECODE_PAIR[encoded[i] as usize];
-                result[o] = pair[0];
-                result[o.wrapping_add(1)] = pair[1];
-                i = i.wrapping_add(1);
-                o = o.wrapping_add(2);
-            }
-
-            if len % 2 == 1 {
-                result[o] = DECODE_PAIR[encoded[i] as usize][0];
-            }
-        }
-    }
-
-    result
-}
-
 #[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
@@ -744,6 +320,7 @@ unsafe fn decode_seq_neon(encoded: &[u8], len: usize) -> Vec<u8> {
 )]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
 
     /// Valid `Base` discriminants, derived from the enum so the test stays correct
     /// if discriminant values ever change.
@@ -801,7 +378,7 @@ mod tests {
         assert_eq!(actual, expected, "SIMD and scalar paths diverge for all-byte-values input");
     }
 
-    // r[verify base_decode.decode]
+    // r[verify base_decode.decode+2]
     #[test]
     fn decode_bases_into_matches_decode_bases() {
         for seq_len in [0usize, 1, 2, 15, 16, 17, 31, 32, 33, 63, 64, 65, 128, 150] {
@@ -815,6 +392,44 @@ mod tests {
             let actual = unsafe { seqair_types::Base::vec_u8_into_vec_base(out) };
             assert_eq!(actual, expected, "mismatch at seq_len={seq_len}");
         }
+    }
+
+    /// Nibble `i` of `packed` through `lut`, one nibble at a time: shares
+    /// neither the pair table nor the vector loop with the kernel.
+    fn nibble_oracle(lut: &[u8; 16], packed: &[u8], len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| {
+                let byte = packed[i / 2];
+                let nibble = if i % 2 == 0 { byte >> 4 } else { byte & 0x0F };
+                lut[usize::from(nibble)]
+            })
+            .collect()
+    }
+
+    // r[verify seq.decode_simd+2]
+    // r[verify seq.decode_dispatch+2]
+    // r[verify seq.simd_scalar_equivalence]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn every_level_matches_nibble_oracle(tc: TestCase) {
+        let packed = tc.draw(gs::binary().max_size(300));
+        // Up to one nibble fewer than `packed` holds, so an odd `len` leaves
+        // the low nibble of the last byte unread.
+        let len = tc.draw(gs::integers::<usize>().max_value(packed.len() * 2));
+        for (lut, pairs) in [(DECODE_BASE, &DECODE_PAIR), (DECODE_BASE_TYPED, &DECODE_PAIR_TYPED)] {
+            let expected = nibble_oracle(lut, &packed, len);
+            for level in crate::simd_levels::levels() {
+                let mut out = vec![0u8; len];
+                assert!(decode_nibbles(level, lut, pairs, &packed, &mut out));
+                assert_eq!(out, expected, "{level:?}, len={len}");
+            }
+        }
+    }
+
+    #[test]
+    fn short_input_decodes_to_n() {
+        assert_eq!(decode_seq(&[0x12], 3), b"NNN");
+        assert_eq!(decode_bases_raw(&[0x12], 3), b"NNN");
     }
 
     // r[verify seq.simd_scalar_equivalence]

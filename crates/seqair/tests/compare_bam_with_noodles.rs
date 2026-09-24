@@ -206,7 +206,7 @@ fn bam_record_fields_match_noodles() {
 }
 
 // r[verify bam.record.seq_4bit]
-// r[verify base_decode.decode]
+// r[verify base_decode.decode+2]
 #[test]
 fn bam_sequence_matches_noodles() {
     for &(contig, start, end) in CONTIGS {
