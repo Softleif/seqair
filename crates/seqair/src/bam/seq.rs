@@ -199,25 +199,49 @@ fn decode_nibbles_simd<S: Simd>(
     let (whole, last) = packed.split_at(out_pairs.len().min(packed.len()));
 
     let mut vec_in = whole.chunks_exact(n);
-    let mut vec_out = out_pairs.chunks_exact_mut(n);
-    for (p, o) in (&mut vec_in).zip(&mut vec_out) {
-        let p = S::u8s::from_slice(simd, p);
-        let hi = table.swizzle_dyn_within_blocks(p >> 4);
-        let lo = table.swizzle_dyn_within_blocks(p & 0x0F);
-        let (first, second) = hi.interleave(lo);
-        let (o_first, o_second) = o.as_flattened_mut().split_at_mut(n);
-        first.store_slice(o_first);
-        second.store_slice(o_second);
+    for (p, o) in (&mut vec_in).zip(out_pairs.chunks_exact_mut(n)) {
+        decode_vector(simd, table, p, o);
     }
 
-    for (o, &b) in vec_out.into_remainder().iter_mut().zip(vec_in.remainder()) {
-        *o = pairs[usize::from(b)];
+    // A ragged tail is one more vector overlapping the last whole one: the
+    // output is a pure function of the input, and the input is never written,
+    // so recomputing the overlap is harmless. A 150 bp read leaves 11 of its
+    // 75 packed bytes to the tail, which a byte loop would pay for.
+    let tail = vec_in.remainder();
+    let overlap = whole.len().checked_sub(n).filter(|_| !tail.is_empty());
+    match overlap.and_then(|t| Some((whole.get(t..)?, out_pairs.get_mut(t..)?))) {
+        Some((p, o)) => decode_vector(simd, table, p, o),
+        // Shorter than one vector: every byte is tail.
+        None => {
+            for (o, &b) in out_pairs.iter_mut().zip(tail) {
+                *o = pairs[usize::from(b)];
+            }
+        }
     }
     if let [o] = odd
         && let Some(&b) = last.first()
     {
         *o = pairs[usize::from(b)][0];
     }
+}
+
+/// One vector of packed bytes through `table` into two vectors of bases, in
+/// read order. A function, not a closure: a closure does not get the
+/// enclosing `#[simd]` level's target features, so on x86 every vector op in
+/// it becomes an out-of-line call.
+#[inline(always)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "a lanewise shift by 4 of a `u8` cannot overflow"
+)]
+fn decode_vector<S: Simd>(simd: S, table: S::u8s, packed: &[u8], out: &mut [[u8; 2]]) {
+    let p = S::u8s::from_slice(simd, packed);
+    let hi = table.swizzle_dyn_within_blocks(p >> 4);
+    let lo = table.swizzle_dyn_within_blocks(p & 0x0F);
+    let (first, second) = hi.interleave(lo);
+    let (o_first, o_second) = out.as_flattened_mut().split_at_mut(S::u8s::LEN);
+    first.store_slice(o_first);
+    second.store_slice(o_second);
 }
 
 /// Decode a 4-bit packed BAM sequence directly into `Base` values.
