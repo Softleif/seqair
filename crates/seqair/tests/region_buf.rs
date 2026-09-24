@@ -51,7 +51,7 @@ fn overlapping_chunks_are_merged() {
     assert!(count > 0, "should read records from test region");
 }
 
-// r[verify region_buf.new]
+// r[verify region_buf.new+2]
 // r[verify region_buf.decompress]
 // r[verify region_buf.read_exact]
 // r[verify region_buf.virtual_offset+2]

@@ -31,6 +31,18 @@ pub(super) const CHUNK_END_PAD: usize = MAX_BLOCK_SIZE;
 /// block always fits.
 pub(super) const WINDOW_BUDGET: usize = 64 * 1024 * 1024; // 64 MiB
 
+// r[impl region_buf.refill_growth]
+/// Size of a [`RegionBuf`]'s first refill — one maximum BGZF block — which
+/// each later refill doubles, up to the window budget.
+///
+/// A query stops at the first record past its end, and with the block cache
+/// it often needs only the one or two blocks the previous query didn't. A
+/// budget-sized first read fetched the rest of the planned range regardless:
+/// 1 bp queries every 1 kb on 30× WGS read 13.6× the bytes their blocks
+/// span, and 5.5× with this first read. Doubling keeps a large query at a
+/// logarithmic number of extra refills.
+const FIRST_READ: usize = MAX_BLOCK_SIZE;
+
 /// Largest compressed-window allocation a [`BlockCache`] keeps for the next
 /// query; a larger one (a big query's) is freed with its `RegionBuf`.
 const WINDOW_KEEP: usize = 4 * 1024 * 1024;
@@ -186,6 +198,8 @@ pub struct RegionBuf<'r, R: Read + Seek> {
     file_size: u64,
     /// Per-window compressed-byte budget (floored at `MAX_BLOCK_SIZE`).
     budget: usize,
+    /// Size of the next refill: `FIRST_READ`, doubling per refill up to `budget`.
+    read_size: usize,
     /// Decompressed block buffer (reused across blocks).
     buf: Vec<u8>,
     /// Current position within `buf`.
@@ -220,7 +234,7 @@ impl<R: Read + Seek> std::fmt::Debug for RegionBuf<'_, R> {
 }
 
 impl<'r, R: Read + Seek> RegionBuf<'r, R> {
-    // r[impl region_buf.new]
+    // r[impl region_buf.new+2]
     // r[impl region_buf.empty]
     // r[related region_buf.merge_chunks]
     /// Plan a streaming read over the given chunks.
@@ -301,6 +315,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             cursor: 0,
             file_size,
             budget,
+            read_size: FIRST_READ.min(budget),
             buf,
             buf_pos: 0,
             block_offset: window_file_start,
@@ -343,11 +358,15 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             if range_remaining == 0 {
                 break;
             }
-            // Grow to at least `need`, but prefer a full budget-sized read so
-            // refills stay rare. Never read past the range (clamped to EOF).
+            // r[impl region_buf.refill_growth]
+            // Grow to at least `need`, reading `read_size` (doubling per
+            // refill, up to the budget) so refills stay rare without reading
+            // far past where a query stops. Never read past the range
+            // (clamped to EOF).
             let want = need
                 .saturating_sub(self.window.len())
-                .max(self.budget.saturating_sub(self.window.len()));
+                .max(self.read_size.min(self.budget.saturating_sub(self.window.len())));
+            self.read_size = self.read_size.saturating_mul(2).min(self.budget);
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "min(want, range_remaining) ≤ want ≤ budget+block, fits usize on 64-bit"
@@ -947,6 +966,7 @@ mod tests {
             cursor: 0,
             file_size: 100,
             budget: WINDOW_BUDGET,
+            read_size: FIRST_READ,
             buf: Vec::new(),
             buf_pos: 0,
             block_offset: 0,
@@ -1925,6 +1945,66 @@ mod tests {
             assert_eq!(out, full);
             assert_eq!(buf.virtual_offset(), VirtualOffset::new(offsets[1], 0), "pass {pass}");
         }
+    }
+
+    /// A `Cursor` that records the length of every read asked of it.
+    struct LoggingReader {
+        inner: std::io::Cursor<Vec<u8>>,
+        reads: Vec<usize>,
+    }
+
+    impl Read for LoggingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads.push(buf.len());
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for LoggingReader {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    // r[verify region_buf.refill_growth]
+    /// Streaming a long range reads one 64 KiB block first, then twice as much
+    /// each time, capped at the budget and at the range's end.
+    #[test]
+    fn refills_start_at_one_block_and_double() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let blocks: Vec<Vec<u8>> = (0..40)
+            .map(|_| {
+                (0..30_000)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        state as u8
+                    })
+                    .collect()
+            })
+            .collect();
+        let (file, offsets) = make_bgzf_file(&blocks);
+        let chunks = [Chunk {
+            begin: VirtualOffset::new(offsets[0], 0),
+            end: VirtualOffset::new(*offsets.last().unwrap(), 10),
+        }];
+        let budget = 300_000;
+        let mut reader = LoggingReader { inner: std::io::Cursor::new(file), reads: Vec::new() };
+        let mut buf = RegionBuf::with_budget(&mut reader, &chunks, budget).unwrap();
+        buf.seek_virtual(chunks[0].begin).unwrap();
+        let total: usize = blocks.iter().map(Vec::len).sum();
+        let mut out = vec![0u8; total];
+        buf.read_exact_into(&mut out).unwrap();
+        drop(buf);
+
+        let reads = reader.reads;
+        assert_eq!(reads.first(), Some(&MAX_BLOCK_SIZE), "reads {reads:?}");
+        assert_eq!(reads.get(1), Some(&(2 * MAX_BLOCK_SIZE)), "reads {reads:?}");
+        // Later refills top the window up to the budget or stop at the range
+        // end; none asks for more than the budget.
+        assert!(reads.iter().all(|&n| n <= budget), "reads {reads:?}");
+        assert!(reads.len() < blocks.len(), "one read per block: {reads:?}");
     }
 
     // --- Block cache: cached queries against uncached ones ---

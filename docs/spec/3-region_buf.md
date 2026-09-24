@@ -18,7 +18,7 @@ The flow:
 
 1. Query the BAM index → get a list of chunks (compressed byte ranges)
 2. Merge overlapping/adjacent chunks into larger contiguous ranges (the read plan)
-3. Pull compressed bytes for the current position into a window, reading up to `WINDOW_BUDGET` per refill; refill forward (or advance to the next range) as the cursor consumes the window
+3. Pull compressed bytes for the current position into a window, starting with one 64 KiB read and doubling per refill up to `WINDOW_BUDGET`; refill forward (or advance to the next range) as the cursor consumes the window
 4. Decompress BGZF blocks from the resident window (zero network I/O between refills)
 
 ## Chunk merging
@@ -33,8 +33,11 @@ r[region_buf.no_bin0]
 
 ## Construction
 
-r[region_buf.new]
-`RegionBuf::new` MUST accept a seekable reader (borrowed for the buffer's lifetime) and a slice of index chunks. It MUST merge chunks into the ranges to stream, but MUST NOT eagerly read the region; compressed bytes are pulled into the window lazily on the first decode (or on a `seek_virtual` with a non-zero intra-block offset). Each refill MUST be a large sequential read (up to the window budget), targeting roughly one read per `WINDOW_BUDGET` of compressed data rather than one read per block.
+r[region_buf.new+2]
+`RegionBuf::new` MUST accept a seekable reader (borrowed for the buffer's lifetime) and a slice of index chunks. It MUST merge chunks into the ranges to stream, but MUST NOT eagerly read the region; compressed bytes are pulled into the window lazily on the first decode (or on a `seek_virtual` with a non-zero intra-block offset). Refills MUST be sequential reads sized per `r[region_buf.refill_growth]`, not one read per block.
+
+r[region_buf.refill_growth]
+The first refill MUST read one maximum BGZF block (64 KiB, or what `need` requires if more), and each later refill of the same buffer MUST read twice the previous one, up to the window budget. A query stops at the first record past its end, often far short of its planned range, and with the block cache (`r[region_buf.block_cache]`) it may need only a block or two: a budget-sized first read fetched the whole rest of the range regardless — 13.6× the bytes their blocks span for 1 bp queries every 1 kb on 30× WGS, 5.5× with this rule. Doubling keeps a large region at about one read per `WINDOW_BUDGET` plus a logarithmic number of smaller ones.
 
 r[region_buf.window_budget]
 The resident compressed window MUST be bounded by `WINDOW_BUDGET` (64 MiB), with the effective budget floored at one maximum BGZF block (64 KiB) so any single block always fits. A single block — or a record assembled across blocks — larger than the budget MUST still be readable by growing the window just enough to hold it. Refills MUST be clamped to the actual file length so a corrupt index pointing past EOF cannot trigger an oversized allocation.
