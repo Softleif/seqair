@@ -1474,6 +1474,18 @@ impl<U> RecordStore<U> {
         &self.cigar[start..end]
     }
 
+    /// The whole CIGAR slab, for a walker that keeps its own slab indices
+    /// (the pileup engine's cursor) instead of re-slicing per column.
+    pub(crate) fn cigar_slab(&self) -> &[CigarOp] {
+        &self.cigar
+    }
+
+    /// Where `rec`'s ops sit in [`cigar_slab`](Self::cigar_slab), as
+    /// `(start, end)`.
+    pub(crate) fn cigar_span(rec: &SlimRecord) -> (u32, u32) {
+        (rec.cigar_off, rec.cigar_off.saturating_add(u32::from(rec.n_cigar_ops)))
+    }
+
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
     pub(crate) fn seq_of(&self, rec: &SlimRecord) -> &[Base] {
         let start = rec.bases_off as usize;

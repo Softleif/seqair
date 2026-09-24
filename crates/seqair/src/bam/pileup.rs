@@ -14,7 +14,7 @@ use std::{num::NonZeroU32, ops::Range, rc::Rc};
 use crate::utils::TraceErr;
 
 use super::{
-    cigar::{CigarMapping, CigarPosInfo},
+    cigar::{CigarCursor, CigarPosInfo, ClipFlanks},
     record_idx::{RecordIdx, RecordRef},
     record_store::{PileupInput, RecordStore},
 };
@@ -164,7 +164,10 @@ pub(crate) struct PileupScratch {
 #[derive(Debug)]
 struct ActiveRecord {
     record_idx: RecordIdx,
-    cigar: CigarMapping,
+    // r[impl perf.cigar_cursor]
+    cigar: CigarCursor,
+    /// Alignment start, for resolving soft-clip flanks on demand.
+    rec_pos: Pos0,
     // Cached from SlimRecord to avoid store lookups in the hot loop
     flags: BamFlags,
     mapq: u8,
@@ -1077,8 +1080,8 @@ impl<U> PileupEngine<U> {
                     continue;
                 }
 
-                let cigar = CigarMapping::new(rec.pos, rec.cigar())
-                    .trace_err("failed to generate cigar mapping")?;
+                let (ops_start, ops_end) = RecordStore::<U>::cigar_span(&rec);
+                let cigar = CigarCursor::new(rec.pos, ops_start, ops_end);
 
                 // Bake the trailing overhang into the eviction key so the retain
                 // loop keeps the record active through its trailing soft clip.
@@ -1107,6 +1110,7 @@ impl<U> PileupEngine<U> {
                 let active = ActiveRecord {
                     record_idx: idx,
                     cigar,
+                    rec_pos: rec.pos,
                     flags: rec.flags,
                     mapq: rec.mapq,
                     seq_len: rec.seq_len,
@@ -1168,69 +1172,82 @@ impl<U> PileupEngine<U> {
             let soft_clip_overhang = *soft_clip_overhang;
             let mut written = 0usize;
             let spare = buf.spare_capacity_mut();
-            for active in actives.iter() {
-                let Some(info) = active.cigar.pos_info_at(pos) else {
-                    // Outside the aligned span: emit a soft-clip fringe base if
-                    // this column falls within the overhang window of a clip.
-                    // r[impl pileup.soft_clip_overhang.emit]
-                    if soft_clip_overhang > 0
-                        && let Some(qpos) =
-                            active.cigar.soft_clip_qpos_at(pos, soft_clip_overhang, active.seq_len)
-                    {
-                        let (base, qual) = base_qual_at(store, active, qpos);
-                        let entry = PileupAlignment {
-                            op: PileupOp::SoftClip { qpos, base, qual },
-                            mapq: active.mapq,
-                            flags: active.flags,
-                            seq_len: active.seq_len,
-                            matching_bases: active.matching_bases,
-                            indel_bases: active.indel_bases,
-                            record_idx: active.record_idx,
-                            indel_after: Indel::None,
-                            mate_idx: active.mate_idx,
-                            in_mate_overlap: active.mate_overlap.contains(&pos),
-                        };
-                        spare
-                            .get_mut(written)
-                            .trace_err("BUG: column entries outran the reserved capacity")?
-                            .write(entry);
-                        written =
-                            written.checked_add(1).trace_err("BUG: column depth overflowed")?;
-                    }
-                    continue;
-                };
-
-                let op = match info {
-                    CigarPosInfo::Match { qpos } => {
-                        let (base, qual) = base_qual_at(store, active, qpos);
-                        PileupOp::Match { qpos, base, qual }
-                    }
-                    CigarPosInfo::Insertion { qpos, insert_len } => {
-                        let (base, qual) = base_qual_at(store, active, qpos);
-                        PileupOp::Insertion { qpos, base, qual, insert_len }
-                    }
-                    CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
-                    // r[impl pileup_indel.complex_indel]
-                    CigarPosInfo::ComplexIndel { del_len, insert_len, is_refskip } => {
-                        PileupOp::ComplexIndel { del_len, insert_len, is_refskip }
-                    }
-                    CigarPosInfo::RefSkip => PileupOp::RefSkip,
-                };
-
-                // Anchor-addressed indel (htslib `a.indel()` parity). Insertions
-                // are already encoded in the op; deletions are not (seqair emits
-                // `PileupOp::Deletion` at the deleted positions, not the anchor),
-                // so resolve them from the CIGAR at the anchor Match column.
-                let indel_after = match op {
-                    PileupOp::Insertion { insert_len, .. } => Indel::Insertion(insert_len),
-                    PileupOp::Match { .. } => match active.cigar.deletion_after_at(pos) {
-                        Some(del_len) => Indel::Deletion(del_len),
-                        None => Indel::None,
-                    },
-                    PileupOp::Deletion { .. }
-                    | PileupOp::ComplexIndel { .. }
-                    | PileupOp::RefSkip
-                    | PileupOp::SoftClip { .. } => Indel::None,
+            let slab = store.cigar_slab();
+            let pos_u32 = pos.as_u32();
+            for active in actives.iter_mut() {
+                // The common column first: inside a match op, nothing
+                // anchored. Everything else takes the out-of-line step.
+                let (op, indel_after) = if let Some(qpos) = active.cigar.plain_match(pos_u32) {
+                    let (base, qual) = base_qual_at(store, active, qpos);
+                    (PileupOp::Match { qpos, base, qual }, Indel::None)
+                } else {
+                    let Some((info, deletion_after)) = active.cigar.step(slab, pos_u32) else {
+                        // Outside the aligned span: emit a soft-clip fringe base if
+                        // this column falls within the overhang window of a clip.
+                        // The flanks are resolved here rather than kept per read:
+                        // only the overhang's few columns either side ever ask.
+                        // r[impl pileup.soft_clip_overhang.emit]
+                        if soft_clip_overhang > 0
+                            && let Some(rec) = store.record(active.record_idx)
+                            && let Some(qpos) =
+                                ClipFlanks::new(active.rec_pos, rec.cigar(), active.seq_len)
+                                    .qpos_at(pos, soft_clip_overhang)
+                        {
+                            let (base, qual) = base_qual_at(store, active, qpos);
+                            let entry = PileupAlignment {
+                                op: PileupOp::SoftClip { qpos, base, qual },
+                                mapq: active.mapq,
+                                flags: active.flags,
+                                seq_len: active.seq_len,
+                                matching_bases: active.matching_bases,
+                                indel_bases: active.indel_bases,
+                                record_idx: active.record_idx,
+                                indel_after: Indel::None,
+                                mate_idx: active.mate_idx,
+                                in_mate_overlap: active.mate_overlap.contains(&pos),
+                            };
+                            spare
+                                .get_mut(written)
+                                .trace_err("BUG: column entries outran the reserved capacity")?
+                                .write(entry);
+                            written =
+                                written.checked_add(1).trace_err("BUG: column depth overflowed")?;
+                        }
+                        continue;
+                    };
+                    let op = match info {
+                        CigarPosInfo::Match { qpos } => {
+                            let (base, qual) = base_qual_at(store, active, qpos);
+                            PileupOp::Match { qpos, base, qual }
+                        }
+                        CigarPosInfo::Insertion { qpos, insert_len } => {
+                            let (base, qual) = base_qual_at(store, active, qpos);
+                            PileupOp::Insertion { qpos, base, qual, insert_len }
+                        }
+                        CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
+                        // r[impl pileup_indel.complex_indel]
+                        CigarPosInfo::ComplexIndel { del_len, insert_len, is_refskip } => {
+                            PileupOp::ComplexIndel { del_len, insert_len, is_refskip }
+                        }
+                        CigarPosInfo::RefSkip => PileupOp::RefSkip,
+                    };
+                    // Anchor-addressed indel (htslib `a.indel()` parity).
+                    // Insertions are already encoded in the op; deletions are
+                    // not (seqair emits `PileupOp::Deletion` at the deleted
+                    // positions, not the anchor), so the cursor resolves them
+                    // at the anchor Match column.
+                    let indel_after = match op {
+                        PileupOp::Insertion { insert_len, .. } => Indel::Insertion(insert_len),
+                        PileupOp::Match { .. } => match deletion_after {
+                            Some(del_len) => Indel::Deletion(del_len),
+                            None => Indel::None,
+                        },
+                        PileupOp::Deletion { .. }
+                        | PileupOp::ComplexIndel { .. }
+                        | PileupOp::RefSkip
+                        | PileupOp::SoftClip { .. } => Indel::None,
+                    };
+                    (op, indel_after)
                 };
 
                 let entry = PileupAlignment {

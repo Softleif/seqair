@@ -28,5 +28,10 @@ Matches and indels counts MUST be computed once per record during decode and sto
 r[perf.cigar_binary_search]
 For records with more than 4 CIGAR operations, `qpos_at` SHOULD use binary search on `ref_start` instead of linear scan. For 1–4 ops, linear scan is acceptable.
 
+r[perf.cigar_cursor]
+The pileup engine MUST resolve each active read's column from an incremental cursor over the read's CIGAR — htslib `resolve_cigar2`'s shape: the current reference-consuming op with its reference and query start — advanced forward as the pileup moves right, NOT from a stateless per-column lookup. The indel anchored at the end of an op (the insertion or deletion that follows it, skipping `P`) MUST be resolved once when the cursor steps onto the op, not re-derived at every column. A column inside a match op with nothing anchored MUST cost one compare and one add, whatever the CIGAR. The cursor reads the ops from the store's CIGAR slab by index; it MUST NOT copy them. Its answers MUST equal `CigarMapping::pos_info_at` and `CigarMapping::deletion_after_at` for every non-decreasing sequence of positions.
+
+The stateless lookup paid on every column what only changes at op boundaries: a scan (or binary search) for the covering op, then a second scan for the deletion after it, which together were a fifth of the engine's time; its per-read `SmallVec` of pre-computed ops was also most of the 128-byte active record the eviction pass moves (92 bytes without it).
+
 r[perf.arena_capacity_hint+2]
 The RecordStore MUST support a capacity hint so that the first region's allocation can be pre-sized based on an estimate (e.g., from the BAI index chunk sizes), avoiding repeated reallocation during the first `fetch_into`. This is provided by `RecordStore::with_byte_hint()`.
