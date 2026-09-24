@@ -44,6 +44,7 @@ fearless_simd = { workspace = true, features = ["force_support_fallback"] }
 insta = { workspace = true }
 hegeltest = { workspace = true }
 tempfile = "3.27.0"
+libc = "0.2"
 criterion = { version = "0.8", features = ["html_reports"] }
 
 # to compare with:

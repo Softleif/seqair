@@ -1689,6 +1689,7 @@ dependencies = [
  "indexmap",
  "insta",
  "itoa",
+ "libc",
  "libdeflater",
  "md5",
  "needletail",
