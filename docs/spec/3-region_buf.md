@@ -74,8 +74,10 @@ The reader MUST therefore advance to the next chunk *explicitly* on `Ok(None)`, 
 r[region_buf.drop_no_panic]
 The `Drop` implementation MUST never panic. Gap-size calculations between ranges MUST use saturating arithmetic to handle overlapping or malformed range boundaries safely.
 
-r[region_buf.virtual_offset]
+r[region_buf.virtual_offset+2]
 The region buffer MUST track virtual offsets correctly: the block offset corresponds to the file position of the current block, computed as `window_file_start + cursor` at the block's start. This MUST remain exact across window compaction (dropping the consumed prefix advances `window_file_start` in lockstep) and range advances, so virtual offset comparisons with the BAM index chunk boundaries work correctly.
+
+A block may hold the full 65,536 bytes BGZF allows, and a within-block offset of 65,536 does not exist. Once such a block is read to its end, the position MUST be reported as the next block's `(offset, 0)` — the name a writer gives the same position (see `r[bgzf.writer.buffer]`) — never truncated to `(current block, 0)`, which points back at the block's first byte and would let a query read on past its chunk's end.
 
 ## Integration
 

@@ -54,7 +54,7 @@ fn overlapping_chunks_are_merged() {
 // r[verify region_buf.new]
 // r[verify region_buf.decompress]
 // r[verify region_buf.read_exact]
-// r[verify region_buf.virtual_offset]
+// r[verify region_buf.virtual_offset+2]
 // r[verify region_buf.fast_header]
 #[test]
 fn region_buf_reads_same_records_as_direct_bgzf() {

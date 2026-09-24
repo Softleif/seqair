@@ -259,15 +259,17 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         Ok(())
     }
 
-    // r[impl region_buf.virtual_offset]
+    // r[impl region_buf.virtual_offset+2]
     pub fn virtual_offset(&self) -> VirtualOffset {
-        debug_assert!(self.buf_pos <= u16::MAX as usize, "BGZF block position exceeds 65535");
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "BGZF block size is capped at 65535 bytes by spec; debug_assert enforces invariant"
-        )]
-        let buf_pos_u16 = self.buf_pos as u16;
-        VirtualOffset::new(self.block_offset, buf_pos_u16)
+        match u16::try_from(self.buf_pos) {
+            Ok(within) => VirtualOffset::new(self.block_offset, within),
+            // The end of a full 64 KiB block: the same position is the next
+            // block's first byte, and `window_file_start + cursor` is where the
+            // next block starts once this one has been read.
+            Err(_) => {
+                VirtualOffset::new(self.window_file_start.wrapping_add(self.cursor as u64), 0)
+            }
+        }
     }
 
     // r[impl region_buf.decompress]
@@ -1621,5 +1623,25 @@ mod tests {
         buf.read_exact_into(&mut out_b).unwrap();
         let exp_b: Vec<u8> = blocks_b.iter().flatten().copied().collect();
         assert_eq!(out_b, exp_b, "group B");
+    }
+
+    // r[verify region_buf.virtual_offset+2]
+    /// Reading a full 64 KiB block to its end leaves the cursor at the next
+    /// block's first byte — the offset `BgzfWriter` gives the same position.
+    #[test]
+    fn end_of_full_block_is_next_block_start() {
+        let full: Vec<u8> = (0..MAX_BLOCK_SIZE).map(|i| (i % 251) as u8).collect();
+        let (file, offsets) = make_bgzf_file(&[full.clone(), vec![7u8; 100]]);
+        let chunks = [Chunk {
+            begin: VirtualOffset::new(offsets[0], 0),
+            end: VirtualOffset::new(offsets[1], 50),
+        }];
+        let mut cursor = std::io::Cursor::new(file);
+        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
+        buf.seek_virtual(chunks[0].begin).unwrap();
+        let mut out = vec![0u8; full.len()];
+        buf.read_exact_into(&mut out).unwrap();
+        assert_eq!(out, full);
+        assert_eq!(buf.virtual_offset(), VirtualOffset::new(offsets[1], 0));
     }
 }
