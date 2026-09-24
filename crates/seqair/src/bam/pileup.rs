@@ -209,6 +209,123 @@ fn base_qual_at<U>(
     )
 }
 
+/// Write one column entry per read of `actives` that has one at `pos`,
+/// starting at `spare[*written]`. Inlined into both of the engine's column
+/// loops — the uncapped one, and the capped one that calls it per pass — so
+/// the uncapped loop is exactly this loop and nothing else.
+#[inline(always)]
+fn fill_entries<U>(
+    actives: &mut [ActiveRecord],
+    store: &RecordStore<U>,
+    spare: &mut [std::mem::MaybeUninit<PileupAlignment>],
+    written: &mut usize,
+    pos: Pos0,
+    soft_clip_overhang: u32,
+) -> Option<()> {
+    let slab = store.cigar_slab();
+    let pos_u32 = pos.as_u32();
+    for active in actives {
+        // The common column first: inside an op, nothing anchored.
+        // Everything else takes the out-of-line step.
+        let (op, indel_after) = if let Some(qpos) = active.cigar.plain_match(pos_u32) {
+            let (base, qual) = base_qual_at(store, active, qpos);
+            (PileupOp::Match { qpos, base, qual }, Indel::None)
+        } else if let Some(gap) = active.cigar.plain_gap(pos_u32) {
+            let op = match gap {
+                PlainGap::Deletion(del_len) => PileupOp::Deletion { del_len },
+                PlainGap::RefSkip => PileupOp::RefSkip,
+            };
+            (op, Indel::None)
+        } else {
+            let Some((info, deletion_after)) = active.cigar.step(slab, pos_u32) else {
+                // Outside the aligned span: emit a soft-clip fringe base if
+                // this column falls within the overhang window of a clip.
+                // The flanks are resolved here rather than kept per read:
+                // only the overhang's few columns either side ever ask.
+                // r[impl pileup.soft_clip_overhang.emit]
+                if soft_clip_overhang > 0
+                    && let Some(rec) = store.record(active.record_idx)
+                    && let Some(qpos) = ClipFlanks::new(active.rec_pos, rec.cigar(), active.seq_len)
+                        .qpos_at(pos, soft_clip_overhang)
+                {
+                    let (base, qual) = base_qual_at(store, active, qpos);
+                    let entry = PileupAlignment {
+                        op: PileupOp::SoftClip { qpos, base, qual },
+                        mapq: active.mapq,
+                        flags: active.flags,
+                        seq_len: active.seq_len,
+                        matching_bases: active.matching_bases,
+                        indel_bases: active.indel_bases,
+                        record_idx: active.record_idx,
+                        indel_after: Indel::None,
+                        mate_idx: active.mate_idx,
+                        in_mate_overlap: active.mate_overlap.contains(&pos),
+                    };
+                    spare
+                        .get_mut(*written)
+                        .trace_err("BUG: column entries outran the reserved capacity")?
+                        .write(entry);
+                    *written = written.checked_add(1).trace_err("BUG: column depth overflowed")?;
+                }
+                continue;
+            };
+            let op = match info {
+                CigarPosInfo::Match { qpos } => {
+                    let (base, qual) = base_qual_at(store, active, qpos);
+                    PileupOp::Match { qpos, base, qual }
+                }
+                CigarPosInfo::Insertion { qpos, insert_len } => {
+                    let (base, qual) = base_qual_at(store, active, qpos);
+                    PileupOp::Insertion { qpos, base, qual, insert_len }
+                }
+                CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
+                // r[impl pileup_indel.complex_indel]
+                CigarPosInfo::ComplexIndel { del_len, insert_len, is_refskip } => {
+                    PileupOp::ComplexIndel { del_len, insert_len, is_refskip }
+                }
+                CigarPosInfo::RefSkip => PileupOp::RefSkip,
+            };
+            // Anchor-addressed indel (htslib `a.indel()` parity).
+            // Insertions are already encoded in the op; deletions are
+            // not (seqair emits `PileupOp::Deletion` at the deleted
+            // positions, not the anchor), so the cursor resolves them
+            // at the anchor Match column.
+            let indel_after = match op {
+                PileupOp::Insertion { insert_len, .. } => Indel::Insertion(insert_len),
+                PileupOp::Match { .. } => match deletion_after {
+                    Some(del_len) => Indel::Deletion(del_len),
+                    None => Indel::None,
+                },
+                PileupOp::Deletion { .. }
+                | PileupOp::ComplexIndel { .. }
+                | PileupOp::RefSkip
+                | PileupOp::SoftClip { .. } => Indel::None,
+            };
+            (op, indel_after)
+        };
+
+        let entry = PileupAlignment {
+            op,
+            mapq: active.mapq,
+            flags: active.flags,
+            seq_len: active.seq_len,
+            matching_bases: active.matching_bases,
+            indel_bases: active.indel_bases,
+            record_idx: active.record_idx,
+            indel_after,
+            // r[impl pileup.mate_link_cache]
+            mate_idx: active.mate_idx,
+            in_mate_overlap: active.mate_overlap.contains(&pos),
+        };
+        spare
+            .get_mut(*written)
+            .trace_err("BUG: column entries outran the reserved capacity")?
+            .write(entry);
+        *written = written.checked_add(1).trace_err("BUG: column depth overflowed")?;
+    }
+    Some(())
+}
+
 // r[impl pileup.column_contents]
 // r[impl pileup.htslib_compat]
 // r[impl pileup.lending_iterator]
@@ -1166,115 +1283,43 @@ impl<U> PileupEngine<U> {
             // per column, which is 1.5 % of a variant caller's worker CPU for
             // bookkeeping the loop already knows the answer to: at most one
             // entry per active record.
+            // r[impl pileup.max_depth_per_position]
+            // The cap keeps the first `max` entries in column order, so the
+            // loop never visits the reads past it rather than building the
+            // rest of the column to truncate it — a deep amplicon column under
+            // a small cap would otherwise pay for every read it then drops.
+            // It walks the active set in passes, each taking as many reads as
+            // entries are still missing: almost every read yields one entry,
+            // so one pass is the rule, and a read that yields none (outside
+            // its span under a soft-clip overhang, or no reference span at
+            // all) only makes the next pass start where this one stopped.
+            // Keeping the test out of the per-read body leaves the uncapped
+            // loop exactly what it was. The reads it skips need no
+            // bookkeeping: their cursors catch up on the next column that asks.
+            let cap = self.max_depth.map_or(usize::MAX, |max| max.get() as usize);
             self.buf.clear();
-            self.buf.reserve(self.active.len());
+            self.buf.reserve(self.active.len().min(cap));
             let Self { buf, active: actives, store, soft_clip_overhang, .. } = self;
             let soft_clip_overhang = *soft_clip_overhang;
             let mut written = 0usize;
             let spare = buf.spare_capacity_mut();
-            let slab = store.cigar_slab();
-            let pos_u32 = pos.as_u32();
-            for active in actives.iter_mut() {
-                // The common column first: inside an op, nothing anchored.
-                // Everything else takes the out-of-line step.
-                let (op, indel_after) = if let Some(qpos) = active.cigar.plain_match(pos_u32) {
-                    let (base, qual) = base_qual_at(store, active, qpos);
-                    (PileupOp::Match { qpos, base, qual }, Indel::None)
-                } else if let Some(gap) = active.cigar.plain_gap(pos_u32) {
-                    let op = match gap {
-                        PlainGap::Deletion(del_len) => PileupOp::Deletion { del_len },
-                        PlainGap::RefSkip => PileupOp::RefSkip,
-                    };
-                    (op, Indel::None)
-                } else {
-                    let Some((info, deletion_after)) = active.cigar.step(slab, pos_u32) else {
-                        // Outside the aligned span: emit a soft-clip fringe base if
-                        // this column falls within the overhang window of a clip.
-                        // The flanks are resolved here rather than kept per read:
-                        // only the overhang's few columns either side ever ask.
-                        // r[impl pileup.soft_clip_overhang.emit]
-                        if soft_clip_overhang > 0
-                            && let Some(rec) = store.record(active.record_idx)
-                            && let Some(qpos) =
-                                ClipFlanks::new(active.rec_pos, rec.cigar(), active.seq_len)
-                                    .qpos_at(pos, soft_clip_overhang)
-                        {
-                            let (base, qual) = base_qual_at(store, active, qpos);
-                            let entry = PileupAlignment {
-                                op: PileupOp::SoftClip { qpos, base, qual },
-                                mapq: active.mapq,
-                                flags: active.flags,
-                                seq_len: active.seq_len,
-                                matching_bases: active.matching_bases,
-                                indel_bases: active.indel_bases,
-                                record_idx: active.record_idx,
-                                indel_after: Indel::None,
-                                mate_idx: active.mate_idx,
-                                in_mate_overlap: active.mate_overlap.contains(&pos),
-                            };
-                            spare
-                                .get_mut(written)
-                                .trace_err("BUG: column entries outran the reserved capacity")?
-                                .write(entry);
-                            written =
-                                written.checked_add(1).trace_err("BUG: column depth overflowed")?;
-                        }
-                        continue;
-                    };
-                    let op = match info {
-                        CigarPosInfo::Match { qpos } => {
-                            let (base, qual) = base_qual_at(store, active, qpos);
-                            PileupOp::Match { qpos, base, qual }
-                        }
-                        CigarPosInfo::Insertion { qpos, insert_len } => {
-                            let (base, qual) = base_qual_at(store, active, qpos);
-                            PileupOp::Insertion { qpos, base, qual, insert_len }
-                        }
-                        CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
-                        // r[impl pileup_indel.complex_indel]
-                        CigarPosInfo::ComplexIndel { del_len, insert_len, is_refskip } => {
-                            PileupOp::ComplexIndel { del_len, insert_len, is_refskip }
-                        }
-                        CigarPosInfo::RefSkip => PileupOp::RefSkip,
-                    };
-                    // Anchor-addressed indel (htslib `a.indel()` parity).
-                    // Insertions are already encoded in the op; deletions are
-                    // not (seqair emits `PileupOp::Deletion` at the deleted
-                    // positions, not the anchor), so the cursor resolves them
-                    // at the anchor Match column.
-                    let indel_after = match op {
-                        PileupOp::Insertion { insert_len, .. } => Indel::Insertion(insert_len),
-                        PileupOp::Match { .. } => match deletion_after {
-                            Some(del_len) => Indel::Deletion(del_len),
-                            None => Indel::None,
-                        },
-                        PileupOp::Deletion { .. }
-                        | PileupOp::ComplexIndel { .. }
-                        | PileupOp::RefSkip
-                        | PileupOp::SoftClip { .. } => Indel::None,
-                    };
-                    (op, indel_after)
-                };
-
-                let entry = PileupAlignment {
-                    op,
-                    mapq: active.mapq,
-                    flags: active.flags,
-                    seq_len: active.seq_len,
-                    matching_bases: active.matching_bases,
-                    indel_bases: active.indel_bases,
-                    record_idx: active.record_idx,
-                    indel_after,
-                    // r[impl pileup.mate_link_cache]
-                    mate_idx: active.mate_idx,
-                    in_mate_overlap: active.mate_overlap.contains(&pos),
-                };
-                spare
-                    .get_mut(written)
-                    .trace_err("BUG: column entries outran the reserved capacity")?
-                    .write(entry);
-                written = written.checked_add(1).trace_err("BUG: column depth overflowed")?;
+            let n_active = actives.len();
+            if n_active <= cap {
+                fill_entries(actives, store, spare, &mut written, pos, soft_clip_overhang)?;
+            } else {
+                let mut pass_start = 0usize;
+                let mut pass_end = cap;
+                loop {
+                    let pass = actives.get_mut(pass_start..pass_end).unwrap_or_default();
+                    fill_entries(pass, store, spare, &mut written, pos, soft_clip_overhang)?;
+                    if written >= cap || pass_end >= n_active {
+                        break;
+                    }
+                    pass_start = pass_end;
+                    pass_end = pass_end.saturating_add(cap.saturating_sub(written)).min(n_active);
+                }
             }
+            debug_assert!(written <= cap, "wrote past the depth cap");
             debug_assert!(written <= self.buf.capacity(), "wrote past the reserve");
             // SAFETY: the loop writes each of `written` slots before advancing
             // past it, and `get_mut` above has refused every index outside the
@@ -1282,11 +1327,6 @@ impl<U> PileupEngine<U> {
             // early through `?` leaves the length at 0, which is also sound:
             // spare capacity is never read and never dropped.
             unsafe { self.buf.set_len(written) };
-
-            // r[impl pileup.max_depth_per_position]
-            if let Some(max) = self.max_depth {
-                self.buf.truncate(max.get() as usize);
-            }
 
             if !self.buf.is_empty() {
                 self.columns_produced = self.columns_produced.saturating_add(1);
