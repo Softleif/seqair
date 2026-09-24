@@ -8,6 +8,8 @@
 //! positions into stored-sequence coordinates up front — subsequent queries
 //! never re-read the strand.
 
+use fearless_simd::{Level, dispatch, prelude::*};
+use fearless_simd_macros::simd;
 use seqair_types::{Base, QPos};
 use thiserror::Error;
 
@@ -142,6 +144,7 @@ impl BaseModState {
         // the end by qpos with a stable sort.
         let mut pending: Vec<(u32, Modification)> = Vec::new();
         let mut ml_cursor: usize = 0;
+        let mut bits = TargetBits::default();
 
         // Tolerate a trailing NUL (Z-type strings are sometimes handed in with
         // the NUL included) and an optional trailing empty segment.
@@ -155,7 +158,16 @@ impl BaseModState {
                 // Stray `;` — skip.
                 continue;
             }
-            parse_entry(entry, seq, is_reverse, ml, &mut ml_cursor, &mut pending, &mut state)?;
+            parse_entry(
+                entry,
+                seq,
+                is_reverse,
+                ml,
+                &mut ml_cursor,
+                &mut pending,
+                &mut state,
+                &mut bits,
+            )?;
         }
 
         if ml_cursor != ml.len() {
@@ -300,6 +312,7 @@ fn parse_entry(
     ml_cursor: &mut usize,
     pending: &mut Vec<(u32, Modification)>,
     state: &mut BaseModState,
+    bits: &mut TargetBits,
 ) -> Result<(), BaseModError> {
     // [BASE][STRAND][MOD_CODES][MODE]?(,DELTA)*
     let canonical = parse_canonical_base(*entry.first().ok_or(BaseModError::MissingModCode)?)?;
@@ -329,6 +342,7 @@ fn parse_entry(
     // Resolve positions and emit Modifications.
     resolve_and_emit(
         canonical, strand, &mod_types, mode, &deltas, ml_slice, seq, is_reverse, pending, state,
+        bits,
     )?;
     Ok(())
 }
@@ -430,6 +444,7 @@ fn resolve_and_emit(
     is_reverse: bool,
     pending: &mut Vec<(u32, Modification)>,
     state: &mut BaseModState,
+    bits: &mut TargetBits,
 ) -> Result<(), BaseModError> {
     // Track the Unmodified flag per canonical base for is_unmodified().
     if let Some(idx) = canonical.known_index()
@@ -445,90 +460,158 @@ fn resolve_and_emit(
         return Ok(());
     }
 
-    // Target base to match while iterating stored sequence.
+    // Deltas count occurrences of the canonical base in the *original* read;
+    // a reverse read stores its reverse complement, so count the complement
+    // from the end of the stored sequence.
     let target = if is_reverse { canonical.inverse() } else { canonical };
-
-    // Iterate stored indices in the correct order.
-    //
-    // Forward: i = 0, 1, 2, ..., seq.len()-1
-    // Reverse: i = seq.len()-1, ..., 0  (so the i-th match in the original
-    //          sequence corresponds to the stored index we hit).
-    let seq_len = seq.len();
-    let mut delta_idx: usize = 0;
-    let mut remaining: u32 = *deltas.first().ok_or(BaseModError::InvalidDelta)?;
+    let words = bits.of(seq, target);
+    let mut walk = BitWalk::new(words, is_reverse);
     let num_mods = mod_types.len();
 
-    let mut stored_idx: usize = if is_reverse { seq_len.saturating_sub(1) } else { 0 };
-    let mut steps: usize = 0;
-    while steps < seq_len && delta_idx < deltas.len() {
-        #[allow(
-            clippy::indexing_slicing,
-            reason = "stored_idx < seq_len by the while guard / decrement logic"
-        )]
-        let b = seq[stored_idx];
-        if b == target {
-            if remaining == 0 {
-                let qp = try_qpos(stored_idx, seq_len)?;
-                // Push one Modification per mod_type (combined codes interleaved in ML).
-                let base_offset = delta_idx
-                    .checked_mul(num_mods)
-                    .ok_or(BaseModError::MlLengthMismatch { ml: ml_slice.len(), mm: usize::MAX })?;
-                for (k, mt) in mod_types.iter().enumerate() {
-                    let ml_idx =
-                        base_offset.checked_add(k).ok_or(BaseModError::MlLengthMismatch {
-                            ml: ml_slice.len(),
-                            mm: usize::MAX,
-                        })?;
-                    let prob = *ml_slice.get(ml_idx).ok_or(BaseModError::MlLengthMismatch {
-                        ml: ml_slice.len(),
-                        mm: usize::MAX,
-                    })?;
-                    pending.push((
-                        qp,
-                        Modification {
-                            mod_type: *mt,
-                            probability: prob,
-                            canonical_base: canonical,
-                            strand,
-                        },
-                    ));
-                }
-                // Signal match/mode for is_unmodified bookkeeping unaffected;
-                // modifications themselves are recorded as mod calls.
-                let _ = mode;
-
-                delta_idx = delta_idx.saturating_add(1);
-                if delta_idx >= deltas.len() {
-                    break;
-                }
-                #[allow(clippy::indexing_slicing, reason = "delta_idx < deltas.len()")]
-                {
-                    remaining = deltas[delta_idx];
-                }
-            } else {
-                remaining = remaining.saturating_sub(1);
-            }
+    for (delta_idx, &delta) in deltas.iter().enumerate() {
+        let Some(stored_idx) = walk.skip_then_take(delta) else {
+            return Err(BaseModError::DeltaOutOfRange { delta, base: canonical, is_reverse });
+        };
+        let qp = try_qpos(stored_idx, seq.len())?;
+        // Push one Modification per mod_type (combined codes interleaved in ML).
+        let base_offset = delta_idx
+            .checked_mul(num_mods)
+            .ok_or(BaseModError::MlLengthMismatch { ml: ml_slice.len(), mm: usize::MAX })?;
+        for (k, mt) in mod_types.iter().enumerate() {
+            let prob = base_offset
+                .checked_add(k)
+                .and_then(|i| ml_slice.get(i))
+                .ok_or(BaseModError::MlLengthMismatch { ml: ml_slice.len(), mm: usize::MAX })?;
+            pending.push((
+                qp,
+                Modification {
+                    mod_type: *mt,
+                    probability: *prob,
+                    canonical_base: canonical,
+                    strand,
+                },
+            ));
         }
-        steps = steps.saturating_add(1);
-        if is_reverse {
-            if stored_idx == 0 {
-                break;
-            }
-            stored_idx = stored_idx.saturating_sub(1);
-        } else {
-            stored_idx = stored_idx.saturating_add(1);
-        }
-    }
-
-    if delta_idx < deltas.len() {
-        #[allow(clippy::indexing_slicing, reason = "delta_idx < deltas.len() by the guard")]
-        return Err(BaseModError::DeltaOutOfRange {
-            delta: deltas[delta_idx],
-            base: canonical,
-            is_reverse,
-        });
     }
     Ok(())
+}
+
+/// One bit per stored base, set where the base is the entry's target: bit
+/// `i % 64` of word `i / 64`. Kept across the entries of one MM tag, so the
+/// usual `C+h?;C+m?;` pair scans the read once.
+#[derive(Default)]
+struct TargetBits {
+    target: Option<Base>,
+    words: Vec<u64>,
+}
+
+impl TargetBits {
+    fn of(&mut self, seq: &[Base], target: Base) -> &[u64] {
+        if self.target != Some(target) {
+            target_bits(Level::new(), bytemuck::cast_slice(seq), target as u8, &mut self.words);
+            self.target = Some(target);
+        }
+        &self.words
+    }
+}
+
+// r[impl io.simd_portable]
+fn target_bits(level: Level, seq: &[u8], target: u8, out: &mut Vec<u64>) {
+    out.clear();
+    out.reserve(seq.len().div_ceil(64));
+    dispatch!(level, simd => target_bits_simd(simd, seq, target, out));
+}
+
+/// Compare a native-width vector of bases against `target` per iteration and
+/// append the lane mask to the current 64-bit word. `S::u8s::LEN` (16, 32 or
+/// 64) divides 64, so a vector's mask never straddles two words; the tail
+/// that does not fill a vector is compared one byte at a time.
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "`shift` stays below 64: it steps by LEN, which divides 64, and resets at 64"
+)]
+fn target_bits_simd<S: Simd>(simd: S, seq: &[u8], target: u8, out: &mut Vec<u64>) {
+    let n = S::u8s::LEN;
+    let t = S::u8s::splat(simd, target);
+    let mut word = 0u64;
+    let mut shift = 0usize;
+    let mut chunks = seq.chunks_exact(n);
+    for c in &mut chunks {
+        word |= S::u8s::from_slice(simd, c).simd_eq(t).to_bitmask() << shift;
+        shift += n;
+        if shift == 64 {
+            out.push(word);
+            word = 0;
+            shift = 0;
+        }
+    }
+    for (i, &b) in chunks.remainder().iter().enumerate() {
+        word |= u64::from(b == target) << (shift + i);
+    }
+    if shift > 0 || !chunks.remainder().is_empty() {
+        out.push(word);
+    }
+}
+
+/// Walks the set bits of a [`TargetBits`] word list forward (from base 0) or
+/// backward (from the last base), `count_ones` skipping whole words.
+struct BitWalk<'a> {
+    words: &'a [u64],
+    /// Index of `cur` in `words`.
+    at: usize,
+    /// The bits of `words[at]` not yet walked past.
+    cur: u64,
+    backward: bool,
+}
+
+impl<'a> BitWalk<'a> {
+    fn new(words: &'a [u64], backward: bool) -> Self {
+        let at = if backward { words.len().saturating_sub(1) } else { 0 };
+        BitWalk { words, at, cur: words.get(at).copied().unwrap_or(0), backward }
+    }
+
+    /// Skip `n` set bits, then take the next one: the base index of the
+    /// `n + 1`-th target from the walk's position, or `None` when fewer
+    /// remain.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "cur != 0 whenever a bit is cleared or its index taken; at * 64 + bit indexes a base"
+    )]
+    fn skip_then_take(&mut self, mut n: u32) -> Option<usize> {
+        loop {
+            let ones = self.cur.count_ones();
+            if n < ones {
+                for _ in 0..n {
+                    self.cur &= !self.next_bit();
+                }
+                let bit = self.next_bit();
+                self.cur &= !bit;
+                return Some(self.at * 64 + bit.trailing_zeros() as usize);
+            }
+            n -= ones;
+            if self.backward {
+                self.at = self.at.checked_sub(1)?;
+            } else {
+                self.at += 1;
+            }
+            self.cur = *self.words.get(self.at)?;
+        }
+    }
+
+    /// The next bit of `cur` in walk order, as a one-bit mask. `cur != 0`.
+    #[allow(clippy::arithmetic_side_effects, reason = "cur != 0, so leading_zeros < 64")]
+    fn next_bit(&self) -> u64 {
+        if self.backward {
+            1 << (63 - self.cur.leading_zeros())
+        } else {
+            self.cur & self.cur.wrapping_neg()
+        }
+    }
 }
 
 /// Convert a stored-sequence index into the `u32` we keep in `qpos`.
@@ -1171,5 +1254,104 @@ mod tests {
         mm.extend_from_slice(b",0;");
         let err = BaseModState::parse(&mm, &[200], &s, false).unwrap_err();
         assert!(matches!(err, BaseModError::InvalidChebi), "got {err:?}");
+    }
+
+    // ---------------- target bitmask kernel and walk ----------------
+
+    // r[verify io.simd_portable]
+    /// Every SIMD level builds the same bitmask as comparing one byte at a
+    /// time. The alphabet is small so targets are dense, and lengths cross
+    /// several vector widths and 64-bit words.
+    #[hegel::test]
+    fn target_bits_every_level_matches_bytewise(tc: TestCase) {
+        let seq: Vec<u8> = tc.draw(gs::vecs(gs::sampled_from(&b"ACGTN"[..])).max_size(300));
+        let target = tc.draw(gs::sampled_from(&b"ACGTN"[..]));
+        let mut expected = vec![0u64; seq.len().div_ceil(64)];
+        for (i, &b) in seq.iter().enumerate() {
+            if b == target {
+                expected[i / 64] |= 1 << (i % 64);
+            }
+        }
+        for level in crate::simd_levels::levels() {
+            let mut out = vec![u64::MAX; 3]; // stale contents must not survive
+            target_bits(level, &seq, target, &mut out);
+            assert_eq!(out, expected, "{level:?}, len={}", seq.len());
+        }
+    }
+
+    // r[verify base_mod.resolve_positions]
+    // r[verify base_mod.reverse_complement]
+    /// Deltas built by picking a subset of the canonical base's occurrences
+    /// resolve to exactly those occurrences: listed in the original read's
+    /// order, which for a reverse read is the stored complement read from
+    /// the end. A `C+h?;C+m?;G+o?;` tag exercises the reuse of one bitmask
+    /// across entries and its replacement when the target changes. An extra
+    /// delta past the last occurrence must fail with `DeltaOutOfRange`.
+    #[hegel::test]
+    fn resolved_positions_match_occurrence_oracle(tc: TestCase) {
+        use std::fmt::Write as _;
+        let seq: Vec<Base> = tc
+            .draw(gs::vecs(gs::integers::<u8>().max_value(4)).max_size(300))
+            .into_iter()
+            .map(|i| [A, C, G, T, Base::Unknown][usize::from(i)])
+            .collect();
+        let is_reverse = tc.draw(gs::booleans());
+        let overflow = tc.draw(gs::booleans());
+
+        // Occurrences of `canonical` in original-read order, as stored indices.
+        let occurrences = |canonical: Base| -> Vec<usize> {
+            let target = if is_reverse { canonical.inverse() } else { canonical };
+            let hits = seq.iter().enumerate().filter(|(_, b)| **b == target).map(|(i, _)| i);
+            if is_reverse { hits.rev().collect() } else { hits.collect() }
+        };
+        let picks = |canonical: Base| -> (Vec<usize>, String) {
+            let occ = occurrences(canonical);
+            let chosen: Vec<bool> =
+                tc.draw(gs::vecs(gs::booleans()).min_size(occ.len()).max_size(occ.len()));
+            let (mut list, mut skipped, mut picked) = (String::new(), 0u32, Vec::new());
+            for (&i, &c) in occ.iter().zip(&chosen) {
+                if c {
+                    write!(list, ",{skipped}").unwrap();
+                    picked.push(i);
+                    skipped = 0;
+                } else {
+                    skipped += 1;
+                }
+            }
+            (picked, list)
+        };
+        let (c_picked, c_list) = picks(C);
+        let (g_picked, mut g_list) = picks(G);
+        if overflow {
+            write!(g_list, ",{}", occurrences(G).len()).unwrap();
+        }
+        let mm = format!("C+h?{c_list};C+m?{c_list};G+o?{g_list};");
+        let n_ml = 2 * c_picked.len() + g_picked.len() + usize::from(overflow);
+        let ml: Vec<u8> = (0..n_ml).map(|i| i as u8).collect();
+
+        let result = BaseModState::parse(mm.as_bytes(), &ml, &seq, is_reverse);
+        if overflow {
+            assert!(
+                matches!(result, Err(BaseModError::DeltaOutOfRange { base: G, .. })),
+                "{result:?}"
+            );
+            return;
+        }
+        let state = result.unwrap();
+        let mut expected: Vec<(u32, u8)> = Vec::new();
+        let n_c = c_picked.len();
+        for (k, &i) in c_picked.iter().enumerate() {
+            expected.push((i as u32, k as u8));
+        }
+        for (k, &i) in c_picked.iter().enumerate() {
+            expected.push((i as u32, (n_c + k) as u8));
+        }
+        for (k, &i) in g_picked.iter().enumerate() {
+            expected.push((i as u32, (2 * n_c + k) as u8));
+        }
+        expected.sort_by_key(|&(q, _)| q); // stable: same-qpos order is entry order
+        let got: Vec<(u32, u8)> =
+            state.qpos.iter().zip(&state.mods).map(|(&q, m)| (q, m.probability)).collect();
+        assert_eq!(got, expected);
     }
 }
