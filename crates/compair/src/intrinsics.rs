@@ -59,7 +59,7 @@ mod aarch64 {
     };
 
     use super::Simd8;
-    use crate::banded::{Lane, Window};
+    use crate::banded::{Lane, LaneMask, Window};
 
     impl core::ops::Add for Simd8 {
         type Output = Self;
@@ -99,18 +99,35 @@ mod aarch64 {
         }
     }
 
-    impl Lane for Simd8 {
-        const LANES: usize = 8;
+    impl LaneMask for Simd8 {
+        #[inline(always)]
+        fn either(self, other: Self) -> Self {
+            Self { lo: or(self.lo, other.lo), hi: or(self.hi, other.hi) }
+        }
 
         #[inline(always)]
-        fn splat(value: f32) -> Self {
+        fn both(self, other: Self) -> Self {
+            Self { lo: and(self.lo, other.lo), hi: and(self.hi, other.hi) }
+        }
+    }
+
+    impl Lane for Simd8 {
+        const LANES: usize = 8;
+        type Token = ();
+        type Mask = Self;
+
+        #[inline(always)]
+        fn token(self) {}
+
+        #[inline(always)]
+        fn splat((): (), value: f32) -> Self {
             unsafe { Self { lo: vdupq_n_f32(value), hi: vdupq_n_f32(value) } }
         }
 
         /// One `vld1q` per half. `wide` spells this as `f32x8::from([f32; 8])`,
         /// which the compiler has to see through to reach the same `ldp`.
         #[inline(always)]
-        fn load(source: &Window) -> Self {
+        fn load((): (), source: &Window) -> Self {
             let base = source.as_ptr();
             unsafe { Self { lo: vld1q_f32(base), hi: vld1q_f32(base.add(4)) } }
         }
@@ -145,11 +162,6 @@ mod aarch64 {
         }
 
         #[inline(always)]
-        fn either(self, other: Self) -> Self {
-            Self { lo: or(self.lo, other.lo), hi: or(self.hi, other.hi) }
-        }
-
-        #[inline(always)]
         fn below(self, other: Self) -> Self {
             unsafe {
                 Self {
@@ -160,33 +172,28 @@ mod aarch64 {
         }
 
         #[inline(always)]
-        fn offsets() -> Self {
-            Self::load(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+        fn offsets((): ()) -> Self {
+            Self::load((), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
         }
 
         #[inline(always)]
-        fn both(self, other: Self) -> Self {
-            Self { lo: and(self.lo, other.lo), hi: and(self.hi, other.hi) }
-        }
-
-        #[inline(always)]
-        fn select(self, if_true: Self, if_false: Self) -> Self {
+        fn select(mask: Self, if_true: Self, if_false: Self) -> Self {
             unsafe {
                 Self {
-                    lo: vbslq_f32(vreinterpretq_u32_f32(self.lo), if_true.lo, if_false.lo),
-                    hi: vbslq_f32(vreinterpretq_u32_f32(self.hi), if_true.hi, if_false.hi),
+                    lo: vbslq_f32(vreinterpretq_u32_f32(mask.lo), if_true.lo, if_false.lo),
+                    hi: vbslq_f32(vreinterpretq_u32_f32(mask.hi), if_true.hi, if_false.hi),
                 }
             }
         }
 
         #[inline(always)]
-        fn masked(self, value: Self) -> Self {
-            Self { lo: and(self.lo, value.lo), hi: and(self.hi, value.hi) }
+        fn masked(mask: Self, value: Self) -> Self {
+            Self { lo: and(mask.lo, value.lo), hi: and(mask.hi, value.hi) }
         }
 
         #[inline(always)]
-        fn masked_out(self, value: Self) -> Self {
-            Self { lo: and_not(self.lo, value.lo), hi: and_not(self.hi, value.hi) }
+        fn masked_out(mask: Self, value: Self) -> Self {
+            Self { lo: and_not(mask.lo, value.lo), hi: and_not(mask.hi, value.hi) }
         }
 
         /// Two `vextq` and one `vsetq_lane`: the upper half takes lane 3 of the
@@ -240,7 +247,7 @@ mod x86 {
     };
 
     use super::Simd8;
-    use crate::banded::{Lane, Window};
+    use crate::banded::{Lane, LaneMask, Window};
 
     impl core::ops::Add for Simd8 {
         type Output = Self;
@@ -258,16 +265,33 @@ mod x86 {
         }
     }
 
-    impl Lane for Simd8 {
-        const LANES: usize = 8;
+    impl LaneMask for Simd8 {
+        #[inline(always)]
+        fn either(self, other: Self) -> Self {
+            unsafe { Self { ymm: _mm256_or_ps(self.ymm, other.ymm) } }
+        }
 
         #[inline(always)]
-        fn splat(value: f32) -> Self {
+        fn both(self, other: Self) -> Self {
+            unsafe { Self { ymm: _mm256_and_ps(self.ymm, other.ymm) } }
+        }
+    }
+
+    impl Lane for Simd8 {
+        const LANES: usize = 8;
+        type Token = ();
+        type Mask = Self;
+
+        #[inline(always)]
+        fn token(self) {}
+
+        #[inline(always)]
+        fn splat((): (), value: f32) -> Self {
             unsafe { Self { ymm: _mm256_set1_ps(value) } }
         }
 
         #[inline(always)]
-        fn load(source: &Window) -> Self {
+        fn load((): (), source: &Window) -> Self {
             unsafe { Self { ymm: _mm256_loadu_ps(source.as_ptr()) } }
         }
 
@@ -293,38 +317,28 @@ mod x86 {
         }
 
         #[inline(always)]
-        fn either(self, other: Self) -> Self {
-            unsafe { Self { ymm: _mm256_or_ps(self.ymm, other.ymm) } }
-        }
-
-        #[inline(always)]
         fn below(self, other: Self) -> Self {
             unsafe { Self { ymm: _mm256_cmp_ps::<_CMP_LT_OQ>(self.ymm, other.ymm) } }
         }
 
         #[inline(always)]
-        fn offsets() -> Self {
+        fn offsets((): ()) -> Self {
             unsafe { Self { ymm: _mm256_setr_ps(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0) } }
         }
 
         #[inline(always)]
-        fn both(self, other: Self) -> Self {
-            unsafe { Self { ymm: _mm256_and_ps(self.ymm, other.ymm) } }
+        fn select(mask: Self, if_true: Self, if_false: Self) -> Self {
+            unsafe { Self { ymm: _mm256_blendv_ps(if_false.ymm, if_true.ymm, mask.ymm) } }
         }
 
         #[inline(always)]
-        fn select(self, if_true: Self, if_false: Self) -> Self {
-            unsafe { Self { ymm: _mm256_blendv_ps(if_false.ymm, if_true.ymm, self.ymm) } }
+        fn masked(mask: Self, value: Self) -> Self {
+            unsafe { Self { ymm: _mm256_and_ps(mask.ymm, value.ymm) } }
         }
 
         #[inline(always)]
-        fn masked(self, value: Self) -> Self {
-            unsafe { Self { ymm: _mm256_and_ps(self.ymm, value.ymm) } }
-        }
-
-        #[inline(always)]
-        fn masked_out(self, value: Self) -> Self {
-            unsafe { Self { ymm: _mm256_andnot_ps(self.ymm, value.ymm) } }
+        fn masked_out(mask: Self, value: Self) -> Self {
+            unsafe { Self { ymm: _mm256_andnot_ps(mask.ymm, value.ymm) } }
         }
 
         /// One cross-lane permute, a broadcast and an *immediate* blend:
@@ -401,7 +415,7 @@ pub(crate) fn strip_kernel_intrinsics(
 ) -> Log10Likelihood {
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        strip_kernel::<Simd8>(plan, rows, shape, band)
+        strip_kernel::<Simd8>((), plan, rows, shape, band)
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -409,14 +423,14 @@ pub(crate) fn strip_kernel_intrinsics(
             // SAFETY: the runtime check is the wrapper's one precondition.
             return unsafe { strip_kernel_avx2(plan, rows, shape, band) };
         }
-        strip_kernel::<wide::f32x8>(plan, rows, shape, band)
+        strip_kernel::<wide::f32x8>((), plan, rows, shape, band)
     }
     #[cfg(not(any(
         all(target_arch = "aarch64", target_feature = "neon"),
         target_arch = "x86_64"
     )))]
     {
-        strip_kernel::<wide::f32x8>(plan, rows, shape, band)
+        strip_kernel::<wide::f32x8>((), plan, rows, shape, band)
     }
 }
 
@@ -435,7 +449,7 @@ unsafe fn strip_kernel_avx2(
     shape: Shape,
     band: Band,
 ) -> Log10Likelihood {
-    strip_kernel::<Simd8>(plan, rows, shape, band)
+    strip_kernel::<Simd8>((), plan, rows, shape, band)
 }
 
 /// The batch kernel over the intrinsics lane where this CPU has one, over
@@ -454,7 +468,7 @@ pub(crate) fn batch_kernel_intrinsics(
 ) -> [Log10Likelihood; BATCH] {
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        batch_kernel::<Simd8>(plan, buffer, read_len, band)
+        batch_kernel::<Simd8>((), plan, buffer, read_len, band)
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -462,14 +476,14 @@ pub(crate) fn batch_kernel_intrinsics(
             // SAFETY: the runtime check is the wrapper's one precondition.
             return unsafe { batch_kernel_avx2(plan, buffer, read_len, band) };
         }
-        batch_kernel::<wide::f32x8>(plan, buffer, read_len, band)
+        batch_kernel::<wide::f32x8>((), plan, buffer, read_len, band)
     }
     #[cfg(not(any(
         all(target_arch = "aarch64", target_feature = "neon"),
         target_arch = "x86_64"
     )))]
     {
-        batch_kernel::<wide::f32x8>(plan, buffer, read_len, band)
+        batch_kernel::<wide::f32x8>((), plan, buffer, read_len, band)
     }
 }
 
@@ -491,7 +505,7 @@ unsafe fn batch_kernel_avx2(
     read_len: usize,
     band: Band,
 ) -> [Log10Likelihood; BATCH] {
-    batch_kernel::<Simd8>(plan, buffer, read_len, band)
+    batch_kernel::<Simd8>((), plan, buffer, read_len, band)
 }
 
 const _: () = assert!(LANE_MAX == 8, "the intrinsics lanes are eight wide");

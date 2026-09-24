@@ -108,8 +108,11 @@ pub(crate) struct BatchKernel {
 
 impl BatchKernel {
     /// [`batch_kernel`] over one lane type, for the paths that can name it.
-    const fn over<L: Lane>() -> Self {
-        Self { lanes: if L::LANES < BATCH { L::LANES } else { BATCH }, run: batch_kernel::<L> }
+    const fn over<L: Lane<Token = ()>>() -> Self {
+        Self {
+            lanes: if L::LANES < BATCH { L::LANES } else { BATCH },
+            run: |plan, buffer, read_len, band| batch_kernel::<L>((), plan, buffer, read_len, band),
+        }
     }
 }
 
@@ -423,7 +426,7 @@ struct Carry<L> {
 /// Subnormals to zero, as in the strip kernel and for the same reason.
 #[inline(always)]
 fn flush<L: Lane>(value: L) -> L {
-    value.below(L::splat(f32::MIN_POSITIVE)).masked_out(value)
+    L::masked_out(value.below(L::splat(value.token(), f32::MIN_POSITIVE)), value)
 }
 
 /// One row at a time along the haplotype, every lane a different haplotype.
@@ -440,6 +443,7 @@ fn flush<L: Lane>(value: L) -> L {
 )]
 #[inline(always)]
 pub(crate) fn batch_kernel<L: Lane>(
+    token: L::Token,
     plan: &BatchPlan,
     buffer: &mut BatchBuffer,
     read_len: usize,
@@ -455,9 +459,9 @@ pub(crate) fn batch_kernel<L: Lane>(
         reset(track, span, 0.0);
     }
 
-    let zero = L::splat(0.0);
-    let past_end = L::load(&plan.past_end);
-    let init = L::load(&plan.init);
+    let zero = L::splat(token, 0.0);
+    let past_end = L::load(token, &plan.past_end);
+    let init = L::load(token, &plan.init);
     let (o, w) = (band.offset, band.half_width);
 
     // Row 0, the read's free start: `1 / h` in the deletion matrix at every
@@ -467,8 +471,8 @@ pub(crate) fn batch_kernel<L: Lane>(
         if (column as i64 - o).abs() > w {
             continue;
         }
-        let live = L::splat(column as f32).below(past_end);
-        let cell = live.masked(init);
+        let live = L::splat(token, column as f32).below(past_end);
+        let cell = L::masked(live, init);
         let at = column * BATCH;
         let Some(slot) = buffer.d.get_mut(at..at + LANE_MAX) else {
             return impossible;
@@ -498,10 +502,10 @@ pub(crate) fn batch_kernel<L: Lane>(
                 }
             }
             if any {
-                let lift = L::load(&lift);
+                let lift = L::load(token, &lift);
                 for track in [&mut buffer.m, &mut buffer.i, &mut buffer.d] {
                     for chunk in track.as_chunks_mut::<LANE_MAX>().0 {
-                        (L::load(chunk) * lift).store(chunk);
+                        (L::load(token, chunk) * lift).store(chunk);
                     }
                 }
             }
@@ -515,7 +519,11 @@ pub(crate) fn batch_kernel<L: Lane>(
         else {
             return impossible;
         };
-        let lanes = RowLanes::new(L::splat(row_base), L::splat(spread), L::splat(mismatched));
+        let lanes = RowLanes::new(
+            L::splat(token, row_base),
+            L::splat(token, spread),
+            L::splat(token, mismatched),
+        );
         let (
             Some(match_to_match),
             Some(match_to_insertion),
@@ -533,11 +541,11 @@ pub(crate) fn batch_kernel<L: Lane>(
             return impossible;
         };
         let t = TransitionLanes {
-            match_to_match: L::splat(match_to_match),
-            match_to_insertion: L::splat(match_to_insertion),
-            match_to_deletion: L::splat(match_to_deletion),
-            indel_to_match: L::splat(indel_to_match),
-            gap_continuation: L::splat(gap_continuation),
+            match_to_match: L::splat(token, match_to_match),
+            match_to_insertion: L::splat(token, match_to_insertion),
+            match_to_deletion: L::splat(token, match_to_deletion),
+            indel_to_match: L::splat(token, indel_to_match),
+            gap_continuation: L::splat(token, gap_continuation),
         };
 
         let first = (row as i64 + o - w).max(1);
@@ -557,16 +565,16 @@ pub(crate) fn batch_kernel<L: Lane>(
             ) else {
                 return impossible;
             };
-            carry.diag_m = L::load(m);
-            carry.diag_indel = L::load(i) + L::load(d);
+            carry.diag_m = L::load(token, m);
+            carry.diag_indel = L::load(token, i) + L::load(token, d);
 
             // The column index as a lane, carried and incremented rather than
             // converted per step. `column as f32` is a `vcvtsi2ss` -- two uops,
             // a false dependency on the destination register and ~5 cycles --
             // plus a broadcast; one `vaddps` replaces both, and integers this
             // small are exact in `f32`, so the value is the same bit for bit.
-            let one = L::splat(1.0);
-            let mut column_lane = L::splat(first as f32);
+            let one = L::splat(token, 1.0);
+            let mut column_lane = L::splat(token, first as f32);
 
             for column in first..=last {
                 let at = column * BATCH;
@@ -577,7 +585,8 @@ pub(crate) fn batch_kernel<L: Lane>(
                 ) else {
                     return impossible;
                 };
-                let (up_m, up_i, up_d) = (L::load(up_m), L::load(up_i), L::load(up_d));
+                let (up_m, up_i, up_d) =
+                    (L::load(token, up_m), L::load(token, up_i), L::load(token, up_d));
 
                 let (Some(base), Some(converted), Some(plain), Some(rate), Some(unconverted)) = (
                     plan.columns.base.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
@@ -590,11 +599,11 @@ pub(crate) fn batch_kernel<L: Lane>(
                 };
                 let prior_v = prior::<L>(
                     ColumnLanes {
-                        base: L::load(base),
-                        converted: L::load(converted),
-                        plain: L::load(plain),
-                        rate: L::load(rate),
-                        unconverted_rate: L::load(unconverted),
+                        base: L::load(token, base),
+                        converted: L::load(token, converted),
+                        plain: L::load(token, plain),
+                        rate: L::load(token, rate),
+                        unconverted_rate: L::load(token, unconverted),
                     },
                     lanes,
                 );
@@ -612,7 +621,7 @@ pub(crate) fn batch_kernel<L: Lane>(
                 // dead lane's `i` starts at zero and stays there. `d` does need
                 // one: it reads the cell to its *left*, which at the column
                 // just past the haplotype is still live.
-                let (m, d) = (keep.masked(m), keep.masked(d));
+                let (m, d) = (L::masked(keep, m), L::masked(keep, d));
 
                 let (Some(mm), Some(ii), Some(dd)) = (
                     buffer

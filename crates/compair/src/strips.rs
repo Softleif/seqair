@@ -41,8 +41,8 @@ use wide::f32x8;
 
 use crate::{
     banded::{
-        Band, COLUMN_FRONT, ColumnLanes, LANE_MAX, Lane, Plan, RowLanes, Shape, TransitionLanes,
-        View, Window, Workspace, prior, reset,
+        Band, COLUMN_FRONT, ColumnLanes, LANE_MAX, Lane, LaneMask, Plan, RowLanes, Shape,
+        TransitionLanes, View, Window, Workspace, prior, reset,
     },
     emission::Emission,
     haplotype::Haplotype,
@@ -160,7 +160,7 @@ impl Workspace {
         }
     }
 
-    fn strips<L: Lane, E: Emission>(
+    fn strips<L: Lane<Token = ()>, E: Emission>(
         &mut self,
         haplotype: &Haplotype,
         read: &Read,
@@ -174,7 +174,7 @@ impl Workspace {
         if self.plan.fill(haplotype, read, emission, band).is_none() {
             return Log10Likelihood::IMPOSSIBLE;
         }
-        strip_kernel::<L>(&self.plan, &mut self.rows, Shape { haplotype: h, read: r }, band)
+        strip_kernel::<L>((), &self.plan, &mut self.rows, Shape { haplotype: h, read: r }, band)
     }
 }
 
@@ -308,7 +308,7 @@ impl Sweep {
 }
 
 /// What a strip holds in registers for its whole sweep.
-struct Strip<'a, L> {
+struct Strip<'a, L: Lane> {
     row: RowLanes<L>,
     transitions: TransitionLanes<L>,
     /// The five column tracks, viewed from the origin the sweep's *last* step
@@ -387,14 +387,14 @@ impl<'a> Buffers<'a> {
 
 /// What every step feeds: the running maximum the next renormalisation
 /// reads, and the read's last row where this strip holds it.
-struct Totals<L> {
+struct Totals<L: Lane> {
     /// The lanewise maximum of every step's cells; only its last lane, the
     /// row that crosses into the next strip, is read.
     running: L,
     /// `m + i` of the read's last row, accumulated in that row's lane.
     total: L,
     /// That lane, as a mask, in the strip that holds the last row.
-    summed: Option<L>,
+    summed: Option<L::Mask>,
 }
 
 impl<L: Lane> Totals<L> {
@@ -402,7 +402,7 @@ impl<L: Lane> Totals<L> {
     fn absorb(&mut self, (m, i, d): (L, L, L)) {
         self.running = self.running.vmax(m).vmax(i).vmax(d);
         if let Some(keep) = self.summed {
-            self.total = self.total + keep.masked(m + i);
+            self.total = self.total + L::masked(keep, m + i);
         }
     }
 }
@@ -424,7 +424,7 @@ struct State<L> {
 /// Subnormals to zero, for the reason `Sink::store` in `banded` gives.
 #[inline(always)]
 fn flush<L: Lane>(value: L) -> L {
-    value.below(L::splat(f32::MIN_POSITIVE)).masked_out(value)
+    L::masked_out(value.below(L::splat(value.token(), f32::MIN_POSITIVE)), value)
 }
 
 /// One step of the sweep: the cells `(r0 + l, first + at - l)` for every lane.
@@ -437,7 +437,7 @@ fn step<L: Lane>(
     buffers: &mut Buffers<'_>,
     state: &mut State<L>,
     at: usize,
-    mask: Option<L>,
+    mask: Option<L::Mask>,
 ) -> Option<(L, L, L)> {
     // The one check a step makes: `at <= reach` is what every unchecked
     // access below rests on.
@@ -451,7 +451,8 @@ fn step<L: Lane>(
 
     // SAFETY: every view was built with `reach + LANE_MAX` entries and
     // `window <= reach`.
-    let load = |view: View<'_>| unsafe { L::load(view.window(window)) };
+    let token = state.m.token();
+    let load = |view: View<'_>| unsafe { L::load(token, view.window(window)) };
     let prior_v = prior::<L>(
         ColumnLanes {
             base: load(strip.base),
@@ -469,7 +470,7 @@ fn step<L: Lane>(
     let d = state.m * t.match_to_deletion + state.d * t.gap_continuation;
     let (m, i, d) = (flush(m), flush(i), flush(d));
     let (m, i, d) = match mask {
-        Some(keep) => (keep.masked(m), keep.masked(i), keep.masked(d)),
+        Some(keep) => (L::masked(keep, m), L::masked(keep, i), L::masked(keep, d)),
         None => (m, i, d),
     };
 
@@ -482,10 +483,11 @@ fn step<L: Lane>(
 
 /// The lanewise mask for step `d`: every lane whose live steps include it.
 #[inline(always)]
-fn live_lanes<L: Lane>(lane_first: L, lane_past: L, d: usize) -> L {
+fn live_lanes<L: Lane>(lane_first: L, lane_past: L, d: usize) -> L::Mask {
+    let token = lane_first.token();
     #[allow(clippy::cast_precision_loss, reason = "a step is a few hundred")]
-    let now = L::splat(d as f32);
-    lane_first.below(now + L::splat(1.0)).both(now.below(lane_past))
+    let now = L::splat(token, d as f32);
+    lane_first.below(now + L::splat(token, 1.0)).both(now.below(lane_past))
 }
 
 /// One phase of a sweep: the steps `from..=to`, masked or not, two at a time
@@ -545,6 +547,7 @@ fn phase<L: Lane, const MASKED: bool>(
     reason = "the f32 narrowing is the point of this kernel, and every count here is a few hundred"
 )]
 pub(crate) fn strip_kernel<L: Lane>(
+    token: L::Token,
     plan: &Plan,
     rows: &mut RowBuffer,
     shape: Shape,
@@ -569,8 +572,8 @@ pub(crate) fn strip_kernel<L: Lane>(
     }
 
     let mut exponent = 0i32;
-    let zero = L::splat(0.0);
-    let offsets = L::offsets();
+    let zero = L::splat(token, 0.0);
+    let offsets = L::offsets(token);
     let mut total = zero;
 
     let strips = r.div_ceil(L::LANES);
@@ -596,7 +599,7 @@ pub(crate) fn strip_kernel<L: Lane>(
         let span = reach + LANE_MAX;
 
         let row_lanes = |track: &[f32]| -> Option<L> {
-            Some(L::load(track.get(r0..r0.checked_add(LANE_MAX)?)?.first_chunk()?))
+            Some(L::load(token, track.get(r0..r0.checked_add(LANE_MAX)?)?.first_chunk()?))
         };
         let tracks = &plan.rows;
         let (Some(row_base), Some(spread), Some(mismatched)) =
@@ -692,9 +695,9 @@ pub(crate) fn strip_kernel<L: Lane>(
         let mut totals = Totals {
             running: zero,
             total,
-            summed: (r0 + L::LANES > r).then(|| offsets.equals(L::splat((r - r0) as f32))),
+            summed: (r0 + L::LANES > r).then(|| offsets.equals(L::splat(token, (r - r0) as f32))),
         };
-        let edges = (L::load(&sweep.lane_first), L::load(&sweep.lane_past));
+        let edges = (L::load(token, &sweep.lane_first), L::load(token, &sweep.lane_past));
 
         // Three phases: the leading edge of the band, where lanes come live
         // one by one; the middle, with nothing to mask; and the trailing

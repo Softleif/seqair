@@ -149,37 +149,45 @@ pub(crate) trait Lane:
     Copy + core::ops::Add<Output = Self> + core::ops::Mul<Output = Self>
 {
     const LANES: usize;
-    fn splat(value: f32) -> Self;
-    fn load(source: &Window) -> Self;
+    /// What it takes to build a lane from nothing. `()` for a lane whose
+    /// target features are a property of the build; a `fearless_simd` token
+    /// for one whose features are proven at run time.
+    type Token: Copy;
+    /// The result of a lanewise comparison. `Self` -- bit patterns in the
+    /// lane's own `f32`s -- for every lane whose target has no separate mask
+    /// registers; its own type where a backend's masks are opaque (AVX-512's
+    /// are `k` registers, not vectors).
+    type Mask: LaneMask;
+    /// The token this lane was built with, so that a helper handed a lane can
+    /// build another without being handed a token too.
+    fn token(self) -> Self::Token;
+    fn splat(token: Self::Token, value: f32) -> Self;
+    fn load(token: Self::Token, source: &Window) -> Self;
     fn store(self, destination: &mut Window);
     /// The lanewise maximum. Neither operand is ever a `NaN`.
     fn vmax(self, other: Self) -> Self;
     fn horizontal_max(self) -> f32;
-    /// Every bit set where the two lanes are equal, no bit set where they are
-    /// not: a mask for [`Lane::select`], not a number.
-    fn equals(self, other: Self) -> Self;
-    /// Bitwise or of two masks.
-    fn either(self, other: Self) -> Self;
-    /// Every bit set where `self` is strictly below `other`.
-    fn below(self, other: Self) -> Self;
+    /// Set where the two lanes are equal, clear where they are not.
+    fn equals(self, other: Self) -> Self::Mask;
+    /// Set where `self` is strictly below `other`.
+    fn below(self, other: Self) -> Self::Mask;
     /// `0.0, 1.0, ...` up to [`Lane::LANES`], for turning a live-cell count
     /// into a mask.
-    fn offsets() -> Self;
-    /// Bitwise and of two masks.
-    fn both(self, other: Self) -> Self;
-    /// `self` is a mask from [`Lane::equals`] or [`Lane::either`].
-    fn select(self, if_true: Self, if_false: Self) -> Self;
-    /// `value` where this mask is set, zero where it is not.
+    fn offsets(token: Self::Token) -> Self;
+    /// `if_true` where `mask` is set, `if_false` where it is not.
+    fn select(mask: Self::Mask, if_true: Self, if_false: Self) -> Self;
+    /// `value` where `mask` is set, zero where it is not.
     ///
-    /// `select(value, splat(0.0))` computes the same thing, but a `select` is
-    /// a *sign-bit* blend, so a mask that a comparison already made whole has
-    /// to be sign-extended back into one before it can be `and`ed: LLVM emits
-    /// a `vpcmpgtd` against zero for every such site, and there are four per
-    /// step of the strip kernel. Asking for the `and` directly drops them.
-    fn masked(self, value: Self) -> Self;
-    /// `value` where this mask is *not* set, zero where it is; see
+    /// `select(mask, value, splat(0.0))` computes the same thing, but a
+    /// `select` is a *sign-bit* blend, so a mask that a comparison already made
+    /// whole has to be sign-extended back into one before it can be `and`ed:
+    /// LLVM emits a `vpcmpgtd` against zero for every such site, and there are
+    /// four per step of the strip kernel. Asking for the `and` directly drops
+    /// them.
+    fn masked(mask: Self::Mask, value: Self) -> Self;
+    /// `value` where `mask` is *not* set, zero where it is; see
     /// [`Lane::masked`].
-    fn masked_out(self, value: Self) -> Self;
+    fn masked_out(mask: Self::Mask, value: Self) -> Self;
     /// Every lane moved up by one: `first` enters at lane 0 and the last lane
     /// leaves. On one lane, `first`.
     fn shift_in(self, first: f32) -> Self;
@@ -190,18 +198,41 @@ pub(crate) trait Lane:
     fn horizontal_sum(self) -> f32;
 }
 
+/// A lanewise comparison's result, combined without looking at it.
+pub(crate) trait LaneMask: Copy {
+    /// Lanewise or.
+    fn either(self, other: Self) -> Self;
+    /// Lanewise and.
+    fn both(self, other: Self) -> Self;
+}
+
 /// What a lanewise comparison reports for "equal". As a number it is a `NaN`;
 /// it is only ever consumed bitwise.
 pub(crate) const MASK_SET: f32 = f32::from_bits(u32::MAX);
 
+impl LaneMask for f32 {
+    #[inline]
+    fn either(self, other: Self) -> Self {
+        Self::from_bits(self.to_bits() | other.to_bits())
+    }
+    #[inline]
+    fn both(self, other: Self) -> Self {
+        Self::from_bits(self.to_bits() & other.to_bits())
+    }
+}
+
 impl Lane for f32 {
     const LANES: usize = 1;
+    type Token = ();
+    type Mask = Self;
     #[inline]
-    fn splat(value: f32) -> Self {
+    fn token(self) {}
+    #[inline]
+    fn splat((): (), value: f32) -> Self {
         value
     }
     #[inline]
-    fn load(source: &Window) -> Self {
+    fn load((): (), source: &Window) -> Self {
         source[0]
     }
     #[inline]
@@ -221,32 +252,24 @@ impl Lane for f32 {
         if self == other { MASK_SET } else { 0.0 }
     }
     #[inline]
-    fn either(self, other: Self) -> Self {
-        Self::from_bits(self.to_bits() | other.to_bits())
-    }
-    #[inline]
     fn below(self, other: Self) -> Self {
         if self < other { MASK_SET } else { 0.0 }
     }
     #[inline]
-    fn offsets() -> Self {
+    fn offsets((): ()) -> Self {
         0.0
     }
     #[inline]
-    fn both(self, other: Self) -> Self {
-        Self::from_bits(self.to_bits() & other.to_bits())
+    fn select(mask: Self, if_true: Self, if_false: Self) -> Self {
+        if mask.to_bits() == 0 { if_false } else { if_true }
     }
     #[inline]
-    fn select(self, if_true: Self, if_false: Self) -> Self {
-        if self.to_bits() == 0 { if_false } else { if_true }
+    fn masked(mask: Self, value: Self) -> Self {
+        Self::from_bits(mask.to_bits() & value.to_bits())
     }
     #[inline]
-    fn masked(self, value: Self) -> Self {
-        Self::from_bits(self.to_bits() & value.to_bits())
-    }
-    #[inline]
-    fn masked_out(self, value: Self) -> Self {
-        Self::from_bits(!self.to_bits() & value.to_bits())
+    fn masked_out(mask: Self, value: Self) -> Self {
+        Self::from_bits(!mask.to_bits() & value.to_bits())
     }
     #[inline]
     fn shift_in(self, first: f32) -> Self {
@@ -262,14 +285,29 @@ impl Lane for f32 {
     }
 }
 
+impl LaneMask for f32x8 {
+    #[inline]
+    fn either(self, other: Self) -> Self {
+        self | other
+    }
+    #[inline]
+    fn both(self, other: Self) -> Self {
+        self & other
+    }
+}
+
 impl Lane for f32x8 {
     const LANES: usize = 8;
+    type Token = ();
+    type Mask = Self;
     #[inline]
-    fn splat(value: f32) -> Self {
+    fn token(self) {}
+    #[inline]
+    fn splat((): (), value: f32) -> Self {
         Self::splat(value)
     }
     #[inline]
-    fn load(source: &Window) -> Self {
+    fn load((): (), source: &Window) -> Self {
         Self::from(*source)
     }
     #[inline]
@@ -294,24 +332,16 @@ impl Lane for f32x8 {
         self.simd_eq(other)
     }
     #[inline]
-    fn either(self, other: Self) -> Self {
-        self | other
-    }
-    #[inline]
     fn below(self, other: Self) -> Self {
         self.simd_lt(other)
     }
     #[inline]
-    fn offsets() -> Self {
+    fn offsets((): ()) -> Self {
         Self::from([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
     }
     #[inline]
-    fn both(self, other: Self) -> Self {
-        self & other
-    }
-    #[inline]
-    fn select(self, if_true: Self, if_false: Self) -> Self {
-        Select::select(self, if_true, if_false)
+    fn select(mask: Self, if_true: Self, if_false: Self) -> Self {
+        Select::select(mask, if_true, if_false)
     }
     // Blends, not `&` and `!&`. The point of these two is the *x86* codegen
     // (see the trait), and `wide::f32x8` cannot reach it: on a baseline build
@@ -320,12 +350,12 @@ impl Lane for f32x8 {
     // complement for want of an `andnot` in `wide`'s API. Measured on the 10s
     // dataset, M4 Pro: bitwise 13.80 ms, blends 13.48 ms.
     #[inline]
-    fn masked(self, value: Self) -> Self {
-        Select::select(self, value, Self::splat(0.0))
+    fn masked(mask: Self, value: Self) -> Self {
+        Select::select(mask, value, Self::splat(0.0))
     }
     #[inline]
-    fn masked_out(self, value: Self) -> Self {
-        Select::select(self, Self::splat(0.0), value)
+    fn masked_out(mask: Self, value: Self) -> Self {
+        Select::select(mask, Self::splat(0.0), value)
     }
     #[inline]
     fn shift_in(self, first: f32) -> Self {
@@ -393,7 +423,7 @@ impl Workspace {
         self.align::<f32x8, E>(haplotype, read, emission, band)
     }
 
-    fn align<L: Lane, E: Emission>(
+    fn align<L: Lane<Token = ()>, E: Emission>(
         &mut self,
         haplotype: &Haplotype,
         read: &Read,
@@ -410,7 +440,7 @@ impl Workspace {
         // The emission is folded into the plan, so from here on the kernel is
         // generic over the lane type only: one hot loop per lane, not one per
         // emission model.
-        banded_kernel::<L>(&self.plan, &mut self.ring, Shape { haplotype: h, read: r }, band)
+        banded_kernel::<L>((), &self.plan, &mut self.ring, Shape { haplotype: h, read: r }, band)
     }
 }
 
@@ -613,19 +643,19 @@ pub(crate) struct ColumnLanes<L> {
 
 /// One read row per lane: what the emission needs.
 #[derive(Clone, Copy)]
-pub(crate) struct RowLanes<L> {
+pub(crate) struct RowLanes<L: Lane> {
     base: L,
     spread: L,
     mismatched: L,
     /// `base` is `N`: a mask, computed here so that a kernel whose rows are
     /// fixed for many cells computes it once.
-    unknown: L,
+    unknown: L::Mask,
 }
 
 impl<L: Lane> RowLanes<L> {
     #[inline(always)]
     pub(crate) fn new(base: L, spread: L, mismatched: L) -> Self {
-        Self { base, spread, mismatched, unknown: base.equals(L::splat(CODE_N)) }
+        Self { base, spread, mismatched, unknown: base.equals(L::splat(base.token(), CODE_N)) }
     }
 }
 
@@ -655,13 +685,17 @@ pub(crate) struct TransitionLanes<L> {
 /// `__mm256_*` (measured: 163 ms on the 10s dataset against 28 ms inlined).
 #[inline(always)]
 pub(crate) fn prior<L: Lane>(column: ColumnLanes<L>, row: RowLanes<L>) -> L {
-    let unknown = row.unknown.either(column.base.equals(L::splat(CODE_N)));
+    let token = row.base.token();
+    let unknown = row.unknown.either(column.base.equals(L::splat(token, CODE_N)));
     let plain = unknown.either(row.base.equals(column.plain));
-    let weight = plain.select(
-        L::splat(1.0),
-        row.base
-            .equals(column.converted)
-            .select(column.rate, row.base.equals(column.base).masked(column.unconverted_rate)),
+    let weight = L::select(
+        plain,
+        L::splat(token, 1.0),
+        L::select(
+            row.base.equals(column.converted),
+            column.rate,
+            L::masked(row.base.equals(column.base), column.unconverted_rate),
+        ),
     );
     row.mismatched + weight * row.spread
 }
@@ -933,12 +967,13 @@ impl<'a> Sources<'a> {
     /// time, every intermediate is a value some diagonal already held.
     #[inline(always)]
     fn step<L: Lane>(&self, chunk: usize, lift1: L, lift_before: L) -> Option<(L, L, L)> {
+        let token = lift1.token();
         if chunk.checked_add(LANE_MAX)? > self.span {
             return None;
         }
         // SAFETY: every view was built with `self.span` entries and
         // `chunk + LANE_MAX <= self.span` was just checked.
-        let load = |view: View<'a>| unsafe { L::load(view.window(chunk)) };
+        let load = |view: View<'a>| unsafe { L::load(token, view.window(chunk)) };
 
         let m_diag = load(self.m_diag);
         let i_diag = load(self.i_diag);
@@ -1017,9 +1052,12 @@ impl<'a> Sink<'a> {
             return false;
         }
         let (m, i, d) = cells;
-        let tiny = L::splat(f32::MIN_POSITIVE);
-        let (m, i, d) =
-            (m.below(tiny).masked_out(m), i.below(tiny).masked_out(i), d.below(tiny).masked_out(d));
+        let tiny = L::splat(m.token(), f32::MIN_POSITIVE);
+        let (m, i, d) = (
+            L::masked_out(m.below(tiny), m),
+            L::masked_out(i.below(tiny), i),
+            L::masked_out(d.below(tiny), d),
+        );
         // SAFETY: every view was built with `self.span` entries and
         // `offset + LANE_MAX <= self.span` was just checked.
         unsafe {
@@ -1049,6 +1087,7 @@ impl<'a> Sink<'a> {
     reason = "the f32 narrowing is the point of this kernel, and every index cast is clamped above"
 )]
 fn banded_kernel<L: Lane>(
+    token: L::Token,
     plan: &Plan,
     ring: &mut Ring,
     shape: Shape,
@@ -1082,8 +1121,8 @@ fn banded_kernel<L: Lane>(
     let mut accumulator = 0.0f64;
     let mut reference_exponent: Option<i32> = None;
 
-    let zero = L::splat(0.0);
-    let offsets = L::offsets();
+    let zero = L::splat(token, 0.0);
+    let offsets = L::offsets(token);
 
     for k in 0..=(r + h) {
         let ki = k as i64;
@@ -1129,8 +1168,8 @@ fn banded_kernel<L: Lane>(
         // This diagonal's scale, and the lifts onto it from the two before.
         exponent += shift1;
         init_scaled *= exp2_f32(shift1);
-        let lift1 = L::splat(exp2_f32(shift1));
-        let lift_before = L::splat(exp2_f32(shift2));
+        let lift1 = L::splat(token, exp2_f32(shift1));
+        let lift_before = L::splat(token, exp2_f32(shift2));
         // One running maximum per matrix: three short dependency chains
         // rather than one three times as long.
         let (mut running_m, mut running_i, mut running_d) = (zero, zero, zero);
@@ -1160,8 +1199,8 @@ fn banded_kernel<L: Lane>(
                 clippy::cast_precision_loss,
                 reason = "a diagonal holds at most `half_width + 1` cells"
             )]
-            let keep = offsets.below(L::splat((live - chunk) as f32));
-            let cells = (keep.masked(m), keep.masked(i), keep.masked(d));
+            let keep = offsets.below(L::splat(token, (live - chunk) as f32));
+            let cells = (L::masked(keep, m), L::masked(keep, i), L::masked(keep, d));
             running_m = running_m.vmax(cells.0);
             running_i = running_i.vmax(cells.1);
             running_d = running_d.vmax(cells.2);
@@ -1192,7 +1231,7 @@ fn banded_kernel<L: Lane>(
             if let Some(start) = sink.d.track.first_mut() {
                 *start = init_scaled;
             }
-            running_d = running_d.vmax(L::splat(init_scaled));
+            running_d = running_d.vmax(L::splat(token, init_scaled));
         }
 
         // The shift this diagonal's maximum asks for is applied to the next
@@ -1226,7 +1265,7 @@ fn get(buffer: &[f32], index: usize) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Band, ColumnLanes, Lane, MASK_SET, Plan, RowLanes, prior};
+    use super::{Band, ColumnLanes, Lane, LaneMask, MASK_SET, Plan, RowLanes, prior};
     use crate::{
         BaseQuality, Betas, ConversionModel, Emission, Haplotype, MatchProbability, Probability,
         Read, StandardEmission, Strand, TapsEmission,
@@ -1257,7 +1296,7 @@ mod tests {
             let mask = |bits: [bool; 8]| f32x8::from(bits.map(|b| if b { MASK_SET } else { 0.0 }));
             let got = mask(left).both(mask(right)).to_array();
             for lane in 0..8 {
-                let want = <f32 as Lane>::both(
+                let want = <f32 as LaneMask>::both(
                     if left[lane] { MASK_SET } else { 0.0 },
                     if right[lane] { MASK_SET } else { 0.0 },
                 );
