@@ -510,19 +510,17 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
             #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
             let rec_flags = BamFlags::from(u16::from_le_bytes([raw[14], raw[15]]));
 
-            // r[impl record_store.end_pos_htslib]
-            let rec_end = if rec_flags.is_unmapped() {
-                rec_pos
-            } else {
-                compute_end_pos_from_raw(raw).unwrap_or(rec_pos)
-            };
             // r[impl bam.reader.early_exit]
             // r[depends bam.reader.sorted_order+2]
             if rec_pos > self.end {
                 break;
             }
             // r[impl interval.overlap_test]
-            if rec_end < self.start {
+            // `rec_pos <= end` holds here, so a record starting inside the
+            // window overlaps it whatever its CIGAR says: only one starting
+            // before the window needs its end, which is also the only kind a
+            // small query skips many of.
+            if rec_pos < self.start && !reaches(raw, rec_pos, rec_flags, self.start) {
                 self.skipped_out_of_range = self.skipped_out_of_range.saturating_add(1);
                 continue;
             }
@@ -545,6 +543,16 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
             skipped_out_of_range: self.skipped_out_of_range as usize,
         }
     }
+}
+
+/// Whether a record starting at `pos` reaches `start`: its end — the
+/// CIGAR's, or `pos` when the record has none it can give — is at or past
+/// it (`r[interval.overlap_test]`).
+#[inline]
+fn reaches(raw: &[u8], pos: Pos0, flags: BamFlags, start: Pos0) -> bool {
+    // r[impl record_store.end_pos_htslib]
+    let end = if flags.is_unmapped() { pos } else { compute_end_pos_from_raw(raw).unwrap_or(pos) };
+    end >= start
 }
 
 // r[impl unified.detect_index]
@@ -688,4 +696,61 @@ mod tests {
     }
 
     use super::super::bgzf::VirtualOffset;
+
+    // r[verify interval.overlap_test]
+    // r[verify record_store.end_pos_htslib]
+    /// `reaches` answers what the whole-record rule answers — end from the
+    /// CIGAR when the header parses, else `pos`; `pos` for unmapped — on
+    /// valid records, and on the same records cut short anywhere. The oracle
+    /// decodes the CIGAR into ops rather than walking the packed bytes.
+    #[hegel::test]
+    fn reaches_matches_whole_record_end(tc: hegel::TestCase) {
+        use super::super::cigar::{CigarOp, CigarOpType, compute_end_pos};
+        use super::super::owned_record::OwnedBamRecord;
+        use hegel::generators as gs;
+        use seqair_types::Base;
+
+        let pos = tc.draw(gs::integers::<u32>().max_value(1_000));
+        let n_ops = tc.draw(gs::integers::<usize>().max_value(4));
+        let ops: Vec<CigarOp> = (0..n_ops)
+            .map(|_| {
+                let kind = [
+                    CigarOpType::Match,
+                    CigarOpType::Insertion,
+                    CigarOpType::Deletion,
+                    CigarOpType::RefSkip,
+                    CigarOpType::SoftClip,
+                ][tc.draw(gs::integers::<usize>().max_value(4))];
+                CigarOp::new(kind, tc.draw(gs::integers::<u32>().min_value(1).max_value(500)))
+            })
+            .collect();
+        let seq_len: u32 =
+            ops.iter().filter(|op| op.consumes_query()).map(|op| op.len()).sum::<u32>().max(1);
+        let unmapped = tc.draw(gs::booleans());
+        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), b"q".to_vec())
+            .flags(BamFlags::from(if unmapped { 0x4u16 } else { 0 }))
+            .cigar(ops)
+            .seq(vec![Base::A; seq_len as usize])
+            .build()
+            .unwrap();
+        let mut raw = Vec::new();
+        rec.to_bam_bytes(&mut raw).unwrap();
+        if tc.draw(gs::booleans()) {
+            let cut = tc.draw(gs::integers::<usize>().min_value(32).max_value(raw.len()));
+            raw.truncate(cut);
+        }
+        let start = Pos0::new(tc.draw(gs::integers::<u32>().max_value(3_000))).unwrap();
+        let rec_pos = Pos0::new(pos).unwrap();
+        let flags = BamFlags::from(u16::from_le_bytes([raw[14], raw[15]]));
+
+        let whole_end = match super::super::record::parse_header(&raw) {
+            Ok(h) if !flags.is_unmapped() => {
+                let mut decoded = Vec::new();
+                CigarOp::extend_from_bam_bytes(&mut decoded, &raw[h.var_start..h.cigar_end]);
+                compute_end_pos(rec_pos, &decoded).unwrap_or(rec_pos)
+            }
+            _ => rec_pos,
+        };
+        assert_eq!(reaches(&raw, rec_pos, flags, start), whole_end >= start);
+    }
 }
