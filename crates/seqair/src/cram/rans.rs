@@ -216,10 +216,11 @@ fn decode_order_1_buf(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> 
 // step table, 5 KiB a context where a packed slot table takes 16 KiB, so a
 // quality stream's few dozen contexts stay in L1/L2. The step is the
 // reference decoder's own arithmetic, so any table decodes exactly as there.
-// What the fast loop adds is a branch-free renormalization of 0, 1 or 2
-// bytes, all four states' taken from one big-endian load. That is exact
-// when a step leaves x ≥ 2^11 (x ≥ 2^23 before, and the symbol's frequency
-// ≥ 1); a round where some state falls below runs checked instead.
+// What the fast loop adds is the order-0 renormalization ([`renorm_cmov`]:
+// one 8-byte window per round, the first byte branch-free, the rare second
+// behind a branch). That is exact when a step leaves x ≥ 2^11 (x ≥ 2^23
+// before, and the symbol's frequency ≥ 1); a round where some state falls
+// below runs checked instead.
 
 /// The unpacked decoder's step inputs for one symbol, `cum << 16 | freq`.
 fn step_entry(freq: u16, cum: u16) -> u32 {
@@ -263,27 +264,6 @@ fn fill_symbol_table(freq: &[u16; ALPHABET_SIZE], cum: &[u16; ALPHABET_SIZE], sy
         sym = sym.wrapping_add(1);
     }
     syms[total as usize..].fill(255);
-}
-
-/// Renormalize four stepped states (each ≥ 2^11) from the next 8 bytes,
-/// in state order; returns how many bytes they took.
-#[inline(always)]
-#[allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    reason = "n ≤ 2 per state; the top 16 bits of a u64 fit a u32"
-)]
-fn renorm4(xs: &mut [u32; 4], next8: &[u8; 8]) -> usize {
-    let mut w = u64::from_be_bytes(*next8);
-    let mut used = 0;
-    for x in xs {
-        let n = u32::from(*x < LOWER_BOUND) + u32::from(*x < 1 << 15);
-        let shift = 8 * n;
-        *x = (*x << shift) | ((w >> 48) as u32 >> (16 - shift));
-        w <<= shift;
-        used += n as usize;
-    }
-    used
 }
 
 /// The next 8 stream bytes at `pos`, if there are 8.
@@ -495,7 +475,7 @@ fn build_order_1_rows(active: &[bool; ALPHABET_SIZE], buf: &mut Rans4x8Buf) {
     }
 }
 
-// r[impl cram.codec.rans4x8_fast]
+// r[impl cram.codec.rans4x8_fast+2]
 #[allow(
     clippy::indexing_slicing,
     clippy::cast_possible_truncation,
@@ -550,7 +530,11 @@ fn decode_order_1_fast(
                 i += 1;
                 continue;
             }
-            pos = pos.wrapping_add(renorm4(&mut next, w));
+            let mut k = 0usize;
+            for x in &mut next {
+                *x = renorm_cmov(*x, w, &mut k);
+            }
+            pos = pos.wrapping_add(k);
             for (q, &sym) in quarters.iter_mut().zip(&s) {
                 q[i] = sym;
             }
@@ -1028,7 +1012,7 @@ mod tests {
         assert_same("fast", run(decode_order_0_fast), &run(decode_order_0));
     }
 
-    // r[verify cram.codec.rans4x8_fast]
+    // r[verify cram.codec.rans4x8_fast+2]
     /// Order-1: the split-table decoder against the reference one, and a
     /// reused buffer against a fresh one.
     #[hegel::test]
