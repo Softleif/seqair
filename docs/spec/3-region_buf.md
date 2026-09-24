@@ -66,6 +66,8 @@ A query starts reading at the linear-index minimum of the 16 kb window holding i
 r[region_buf.block_cache]
 An `IndexedBamReader` MUST keep a cache of decompressed BGZF blocks, keyed by the block's compressed file offset, that its successive queries share; a fork MUST start with an empty cache of its own. The cache MUST be bounded (64 blocks, ≤ 4 MiB, least recently used evicted first), and a block MUST enter it only after it decompressed and passed its CRC check. When a query reaches a block that is cached and lies wholly inside the current planned range, it MUST use the cached bytes without reading or decompressing the block again. Anything else takes the uncached path unchanged, so a query MUST return the same records in the same order whatever queries came before it. `RegionBuf::new` stays uncached.
 
+The same cache carries a query's setup over to the next: the file length, the decompressor, and the compressed window's allocation when it is at most 4 MiB. A reader therefore holds up to ~8 MiB between queries.
+
 ## Reading
 
 r[region_buf.read_exact]

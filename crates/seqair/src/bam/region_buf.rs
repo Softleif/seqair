@@ -31,6 +31,10 @@ pub(super) const CHUNK_END_PAD: usize = MAX_BLOCK_SIZE;
 /// block always fits.
 pub(super) const WINDOW_BUDGET: usize = 64 * 1024 * 1024; // 64 MiB
 
+/// Largest compressed-window allocation a [`BlockCache`] keeps for the next
+/// query; a larger one (a big query's) is freed with its `RegionBuf`.
+const WINDOW_KEEP: usize = 4 * 1024 * 1024;
+
 /// How many decompressed BGZF blocks a [`BlockCache`] keeps.
 ///
 /// A query starts at the linear-index minimum of its first 16 kb window, so
@@ -54,7 +58,6 @@ pub(crate) const BLOCK_CACHE_BLOCKS: usize = 64;
 ///
 /// Only blocks that decompressed and passed their CRC check get in, so a hit
 /// skips both. Forks start with an empty cache of their own.
-#[derive(Debug)]
 pub(crate) struct BlockCache {
     entries: Vec<CachedBlock>,
     /// Most entries kept; [`BLOCK_CACHE_BLOCKS`] outside tests.
@@ -63,6 +66,12 @@ pub(crate) struct BlockCache {
     clock: u64,
     /// An empty buffer to hand out while the cache is still filling.
     spare: Vec<u8>,
+    /// Per-query setup kept for the next query: the file length (one
+    /// `seek(End)` per reader instead of per query), a decompressor, and the
+    /// compressed window's allocation.
+    file_size: Option<u64>,
+    decompressor: Option<libdeflater::Decompressor>,
+    window: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -75,13 +84,30 @@ struct CachedBlock {
     last_used: u64,
 }
 
+impl std::fmt::Debug for BlockCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockCache")
+            .field("blocks", &self.entries.len())
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
+}
+
 impl BlockCache {
     pub(crate) fn new() -> Self {
         Self::with_capacity(BLOCK_CACHE_BLOCKS)
     }
 
     fn with_capacity(capacity: usize) -> Self {
-        BlockCache { entries: Vec::new(), capacity, clock: 0, spare: Vec::new() }
+        BlockCache {
+            entries: Vec::new(),
+            capacity,
+            clock: 0,
+            spare: Vec::new(),
+            file_size: None,
+            decompressor: None,
+            window: Vec::new(),
+        }
     }
 
     /// Compressed length of the cached block at `offset`.
@@ -167,7 +193,9 @@ pub struct RegionBuf<'r, R: Read + Seek> {
     /// True file offset of the current BGZF block.
     block_offset: u64,
     eof: bool,
-    decompressor: libdeflater::Decompressor,
+    /// Created on the first block that needs inflating; a query served from
+    /// the cache never pays for one.
+    decompressor: Option<libdeflater::Decompressor>,
     blocks_decompressed: u32,
     decompressed_bytes: u64,
     /// Blocks shared with the reader's other queries, when it lent one.
@@ -242,7 +270,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         reader: &'r mut R,
         chunks: &[Chunk],
         budget: usize,
-        cache: Option<&'r mut BlockCache>,
+        mut cache: Option<&'r mut BlockCache>,
     ) -> Result<Self, BgzfError> {
         let budget = budget.max(MAX_BLOCK_SIZE);
         let ranges = merge_chunks(chunks);
@@ -251,21 +279,33 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         // r[impl io.fuzz.alloc_limits]
         // Capture the real file length so refills never over-allocate when a
         // corrupt index points a chunk's end far past EOF.
-        let file_size = reader.seek(SeekFrom::End(0)).map_err(|_| BgzfError::SeekFailed)?;
+        let file_size = match cache.as_deref().and_then(|c| c.file_size) {
+            Some(size) => size,
+            None => reader.seek(SeekFrom::End(0)).map_err(|_| BgzfError::SeekFailed)?,
+        };
+        let (window, buf, decompressor) = match cache {
+            Some(ref mut c) => {
+                c.file_size = Some(file_size);
+                let mut window = std::mem::take(&mut c.window);
+                window.clear();
+                (window, std::mem::take(&mut c.spare), c.decompressor.take())
+            }
+            None => (Vec::new(), Vec::with_capacity(MAX_BLOCK_SIZE), None),
+        };
         Ok(RegionBuf {
             reader,
             ranges,
             range_idx: 0,
-            window: Vec::new(),
+            window,
             window_file_start,
             cursor: 0,
             file_size,
             budget,
-            buf: Vec::with_capacity(MAX_BLOCK_SIZE),
+            buf,
             buf_pos: 0,
             block_offset: window_file_start,
             eof,
-            decompressor: libdeflater::Decompressor::new(),
+            decompressor,
             blocks_decompressed: 0,
             decompressed_bytes: 0,
             cache,
@@ -539,6 +579,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             unsafe { bgzf::resize_uninit(&mut self.buf, uncompressed_size) };
             let actual = self
                 .decompressor
+                .get_or_insert_with(libdeflater::Decompressor::new)
                 .deflate_decompress(deflate_data, &mut self.buf)
                 .map_err(|source| BgzfError::DecompressionFailed { source })?;
             self.buf.truncate(actual);
@@ -749,6 +790,17 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
 impl<R: Read + Seek> Drop for RegionBuf<'_, R> {
     fn drop(&mut self) {
         self.release_block();
+        if let Some(cache) = self.cache.as_deref_mut() {
+            if let Some(d) = self.decompressor.take() {
+                cache.decompressor = Some(d);
+            }
+            cache.recycle(std::mem::take(&mut self.buf));
+            // Keep a window worth reusing, not one a large query grew to the
+            // full budget.
+            if self.window.capacity() <= WINDOW_KEEP {
+                cache.window = std::mem::take(&mut self.window);
+            }
+        }
         if self.blocks_decompressed > 0 {
             let max_gap = self
                 .ranges
@@ -901,7 +953,7 @@ mod tests {
             eof: false,
             blocks_decompressed: 1,
             decompressed_bytes: 100,
-            decompressor: libdeflater::Decompressor::new(),
+            decompressor: None,
             cache: None,
             buf_block: None,
         };
