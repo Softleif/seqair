@@ -47,5 +47,8 @@ Special characters in field values MUST be percent-encoded per the VCF spec: `:`
 r[vcf_writer.buffer_reuse]
 The writer MUST reuse an internal line buffer across records to avoid per-record allocation. The buffer is cleared (not deallocated) before each record.
 
+r[vcf_writer.buffered_output]
+Plain (uncompressed) VCF output MUST reach the caller's writer through an internal buffer of at least 64 KiB, not one `write_all` per record. Callers commonly hand the writer an unbuffered file (rastair wraps a `File` in `Box<dyn Write>`) or a line-buffered stdout, and a write per line then costs one system call per record — 78 % of the time of writing a whole-chromosome VCF. The bytes written are unchanged; only when they reach the sink changes. `finish()` MUST flush the buffer and then the sink, and dropping the writer without `finish()` SHOULD flush it on a best-effort basis, as the BGZF formats do (`r[bgzf.writer.finish]`).
+
 r[vcf_writer.finish]
 `finish()` MUST flush all buffered data and, for BGZF output, write the EOF marker block and finalize the TBI index.

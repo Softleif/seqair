@@ -113,9 +113,13 @@ pub struct Writer<W: Write, S = Unstarted> {
     _state: PhantomData<S>,
 }
 
+// r[impl vcf_writer.buffered_output]
+/// Capacity of the plain-VCF output buffer.
+const PLAIN_OUTPUT_BUFFER: usize = 128 * 1024;
+
 enum WriterInner<W: Write> {
     Vcf {
-        output: W,
+        output: std::io::BufWriter<W>,
         buf: Vec<u8>,
         fmt_keys: Vec<SmolStr>,
         sample_bufs: Vec<Vec<u8>>,
@@ -148,7 +152,7 @@ impl<W: Write> Writer<W> {
     pub fn new(inner: W, format: OutputFormat) -> Self {
         let inner = match format {
             OutputFormat::Vcf => WriterInner::Vcf {
-                output: inner,
+                output: std::io::BufWriter::with_capacity(PLAIN_OUTPUT_BUFFER, inner),
                 buf: Vec::with_capacity(4096),
                 fmt_keys: Vec::with_capacity(8),
                 sample_bufs: Vec::new(),
@@ -328,7 +332,9 @@ impl<W: Write> Writer<W, Ready> {
     pub fn finish(self) -> Result<(W, Option<CoordinateIndex>), VcfError> {
         let contig_names = self.contig_names;
         match self.inner {
-            WriterInner::Vcf { mut output, .. } => {
+            WriterInner::Vcf { output, .. } => {
+                // r[impl vcf_writer.buffered_output]
+                let mut output = output.into_inner().map_err(|e| VcfError::Io(e.into_error()))?;
                 output.flush().map_err(VcfError::Io)?;
                 Ok((output, None))
             }

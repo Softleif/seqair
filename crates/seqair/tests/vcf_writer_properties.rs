@@ -238,3 +238,63 @@ fn filter_serialization_correct(tc: TestCase) {
 
     assert_eq!(fields[6], expected_filter);
 }
+
+/// Counts `write` calls; shares its bytes so they can be read after the
+/// writer that owns the sink is dropped.
+#[derive(Clone, Default)]
+struct CountingSink {
+    writes: std::rc::Rc<std::cell::Cell<usize>>,
+    bytes: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+}
+
+impl std::io::Write for CountingSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writes.set(self.writes.get() + 1);
+        self.bytes.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// r[verify vcf_writer.buffered_output]
+/// Plain VCF reaches an unbuffered sink in large writes, not one per record,
+/// and every record arrives whether the writer is finished or just dropped.
+#[hegel::test(test_cases = 40)]
+fn plain_vcf_is_buffered_and_complete(tc: TestCase) {
+    let n = tc.draw(gs::integers::<u32>().min_value(1).max_value(20_000));
+    let finish = tc.draw(gs::booleans());
+    let setup = make_simple_setup();
+    let alleles = Alleles::snv(Base::A, Base::C).unwrap();
+
+    let sink = CountingSink::default();
+    let mut writer =
+        Writer::new(sink.clone(), OutputFormat::Vcf).write_header(&setup.header).unwrap();
+    for i in 0..n {
+        let pos = Pos1::new(i + 1).unwrap();
+        let mut enc =
+            writer.begin_record(&setup.contig, pos, &alleles, None).unwrap().filter_pass();
+        setup.dp_info.encode(&mut enc, 7);
+        enc.emit().unwrap();
+    }
+    if finish {
+        writer.finish().unwrap();
+    } else {
+        drop(writer);
+    }
+
+    let bytes = sink.bytes.borrow();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    let records: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+    assert_eq!(records.len(), n as usize, "every record reaches the sink");
+    assert!(records.iter().enumerate().all(|(i, l)| l.starts_with(&format!("chr1\t{}\t", i + 1))));
+    // One write per 64 KiB at most, plus slack for the final partial buffer.
+    let max_writes = bytes.len() / (64 * 1024) + 2;
+    assert!(
+        sink.writes.get() <= max_writes,
+        "{} writes for {} bytes ({n} records)",
+        sink.writes.get(),
+        bytes.len()
+    );
+}
