@@ -250,8 +250,17 @@ impl ExternalCursor {
         Some(b)
     }
 
+    #[inline]
     pub fn read_itf8(&mut self) -> Option<u32> {
         let remaining = self.data.get(self.pos..)?;
+        // Most values in per-record series are one byte; decode those
+        // here rather than through the out-of-line general decoder.
+        if let Some(&b0) = remaining.first()
+            && b0 < 0x80
+        {
+            self.pos = self.pos.checked_add(1)?;
+            return Some(u32::from(b0));
+        }
         let (val, n) = varint::decode_itf8(remaining)?;
         self.pos = self.pos.checked_add(n)?;
         Some(val)
