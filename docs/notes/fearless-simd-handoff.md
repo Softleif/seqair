@@ -4,13 +4,14 @@ Handoff note for picking this work up again. **Drop this file before merging.**
 
 ## TL;DR
 
-- Branch `fearless-simd` (worktree `../seqair-fearless-simd`, head `288df641`, 28 commits on `main`) replaces every hand-written `core::arch` kernel with one `fearless_simd` kernel. It also merges three rounds of profiling-driven work: CRAM, text/writers and BAM/pileup. Nothing is pushed.
+- Branch `fearless-simd` (worktree `../seqair-fearless-simd`, head `670c5313`, 30 perf commits on `main` plus this note) replaces every hand-written `core::arch` kernel with one `fearless_simd` kernel. It also merges three rounds of profiling-driven work: CRAM, text/writers and BAM/pileup. Nothing is pushed.
 - Tests: 1637 pass on the M4 and 1690 on the 3950X (samtools/bcftools round trips included). Every-level tests pass at 5000 cases. Clippy `-D warnings` and tracey are clean, and there are 0 out-of-line fearless calls in the x86 asm.
-- **Blocker before a PR:** a real rastair run (chr12, `--gpu`, experimental-seqair) is **~10% more cycles** with compair + `fearless-simd@53caf6e0` than with compair + `main`:
-  - 374.4 G vs 339.5 G cycles, with instructions flat (+0.8%) and byte-identical output.
-  - The extra time lands in rastair's `ColumnDraft::accumulate` and seqair's per-alignment accessors, none of which changed.
-  - Suspects: a code layout or inlining side effect.
-  - Not bisected yet, and `288df641` hasn't been measured on rastair yet.
+- **rastair end to end** (chr12, `--gpu`, experimental-seqair, M4 cycles, byte-identical output):
+  - Before: 341 G.
+  - An intermediate state, `53caf6e0`, was **+10%** (374 G, with flat instructions).
+  - **The current head at `288df641` is −5%** (322.7 G, −4.3% instructions). The regression is gone.
+  - Bisect points `eefd6910`, `0080e40a` and `716ed125` all equal "before". So the +10% came from somewhere in `5f09de16…53caf6e0`, and was likely layout-only.
+  - Still to do: confirm with aligned builds, and measure the current head (`670c5313`).
 - The final consolidated 3950X criterion run (`bench-base` vs `fearless-simd`, aligned builds) was stopped after round 1 of the base side. Rerun it (see below) to get the PR table.
 
 ## Numbers we have
@@ -38,18 +39,16 @@ The 3950X figures are from interleaved criterion runs, taking the min of medians
 
 ## Next steps, in order
 
-1. **Bisect the rastair regression.** Scratch setup, made by the profiling agent:
+1. **Confirm rastair at the current head.** The scratch setup:
+   - Branch `scratch/fearless-profile` (commit 7ee70c4e) has the rastair port fixes, `bench.sh`/`bench2.sh`, TSVs and profile summaries under `tmp-profiling/`.
    - `scratch/compair-fearless` is compair + fearless.
-   - `scratch/compair-main` is compair + main.
-   - The rastair copies point at those. They were made from the `rastair2-secondary` worktree (c4a8bc6a), which predates rastair's own port. **rastair `main` already uses seqair 0.3**, so redo the scratch rastair from rastair `main` rather than the agent's hand port. The agent's port tripped on `fetch_base_seq`, whose end is now **inclusive**.
-   - Workload, run from `rastair2-secondary`: `<bin> call -r tmp/taps/hg38.fa.gz -l chr12 -@ 8 --gpu --experimental-indels=ml -o X.bcf --bed X.bed.gz tmp/taps/NA12878_aa_chr12.bam`.
-   - Compare cycles (`/usr/bin/time -l`), interleaved.
-   - Measure `288df641` first; its pileup offset caching targets the hot accessors.
-   - Then bisect `d4ca9536..53caf6e0`, starting with `0080e40a` (seqair-types) and `716ed125` (bam decode).
-   - Also try building both sides with `-C llvm-args=-align-loops=64` / `-align-all-functions=6`.
+   - `scratch/bisect` holds the bisect state.
+   - **rastair `main` already uses seqair 0.3**, so build the next scratch rastair from rastair `main` instead of the hand port. That port tripped on `fetch_base_seq`, whose end is now inclusive.
+   - Workload, run from `rastair2-secondary`: `<bin> call -r tmp/taps/hg38.fa.gz -l chr12 -@ 8 --gpu --experimental-indels=ml -o X.bcf --bed X.bed.gz tmp/taps/NA12878_aa_chr12.bam`. Compare cycles (`/usr/bin/time -l`), interleaved.
+   - Optionally, find what made `53caf6e0` slow: bisect `5f09de16…53caf6e0`, and try `-C llvm-args=-align-loops=64`.
 2. **Rerun the final PR table on the 3950X.** Scripts are saved on the box in `~/seqair-bench-logs/box-final.sh` and `ab_table2.py`. The `bench-base` branch is `main` + the kernel benches (`eefd6910`) + the base-mod bench, so both sides run identical benches. Run it from the Mac. It bundles both branches and builds with `-align-loops=64`.
 3. **Merge the leftovers:**
-   - `explore/cram-2`, from the CRAM round 2 agent. Check which commits are measured wins and which are `wip:`.
+   - `explore/cram-2` is **already merged** (the two commits after this note): lazy `CramError` construction, and split-table rANS 4x8 order-1. On the 3950X, cycles vs `53caf6e0` are c20_31 −9%, c20_30 −13%. Its leftovers are listed under follow-ups.
    - compair: the branch **`compair-fearless`** (off `compair` 21ff717c, head `53cb5807`) is a clean series that makes fearless_simd the only SIMD lane. It drops `wide` and the hand intrinsics lane, and moves the diagonal kernel over too. `experiment/fearless-compair` is the exploratory history. This goes into `compair`, not `fearless-simd`, and needs a separate PR.
      - 3950X, aligned builds, cycles vs `compair` head: strips +0.8%, batch +0.1%, candidates +0.5%, diagonal −32%.
      - Criterion 10s: strips 17.22→17.41 ms, candidates 8.84→8.82 ms, diagonal 58.5→38.7 ms.
@@ -66,7 +65,12 @@ The 3950X figures are from interleaved criterion runs, taking the min of medians
    - rastair-side accessor costs (19–23% of rastair CPU):
      - `extra_of` / `record` random loads: hoist one lookup per alignment.
      - A mate binary search per column: needs an O(1) per-column map.
-   - CRAM: PACK unpack SIMD, RLE, eager `CramError` construction (6–10%), tok3 allocations, 4-state Nx16 x86 codegen, 4x8 o1 split table, MD5 caching.
+   - CRAM:
+     - Resolve external-block content ids to slots at compression-header time. The linear scan is about 1/4 of `IntEncoding::decode`.
+     - Pre-resolved tag lines instead of a per-tag `FxHashMap` lookup (3.8% on x86).
+     - tok3 and `apply_rle` rewrites.
+     - x86 4x8 register spills; order-0 4x8 runs at 416 MB/s vs htscodecs 819.
+     - PACK unpack SIMD, MD5 caching, and Nx16 4-state x86 codegen.
    - SAM: `parse_aux_tags` (11% of SAM fetch).
    - VCF: a `SmolStr` per FORMAT field, and a float digit table.
 
