@@ -5,8 +5,14 @@ use super::bgzf::{BgzfError, VirtualOffset};
 use std::io::Write;
 use tracing::warn;
 
-/// Maximum uncompressed data per BGZF block (64 KiB).
-const MAX_UNCOMPRESSED_SIZE: usize = 65536;
+// r[impl bgzf.writer.block_size]
+/// Maximum uncompressed data per BGZF block: htslib's `BGZF_BLOCK_SIZE`.
+///
+/// Not 64 KiB. A block, header and footer included, must fit in 64 KiB, and
+/// 64 KiB of data that does not compress (level 0 always, random bytes at any
+/// level) stores as 64 KiB plus DEFLATE's stored-block overhead — no room for
+/// the 26 bytes of gzip framing. At `0xff00` the worst case fits.
+const MAX_UNCOMPRESSED_SIZE: usize = 0xff00;
 
 /// Gzip member header (with the BC subfield) and footer (CRC32 + ISIZE) sizes.
 const HEADER_LEN: usize = 18;
@@ -37,7 +43,7 @@ const EOF_BLOCK: [u8; 28] = [
 ];
 
 /// Length of a buffer that holds any block `compressor` can produce from a
-/// full 64 KiB buffer: header, worst-case payload, footer.
+/// full buffer: header, worst-case payload, footer.
 fn max_block_len(compressor: &mut libdeflater::Compressor) -> usize {
     HEADER_LEN
         .saturating_add(compressor.deflate_compress_bound(MAX_UNCOMPRESSED_SIZE))
@@ -90,7 +96,7 @@ fn compress_block(
 // r[impl bgzf.writer.virtual_offset]
 /// BGZF block writer that compresses data into independent gzip blocks.
 ///
-/// Accumulates up to 64 KB of uncompressed data, then compresses and emits a
+/// Accumulates up to 65280 bytes of uncompressed data, then compresses and emits a
 /// BGZF block. Tracks virtual offsets for index co-production.
 pub struct BgzfWriter<W: Write> {
     inner: Option<W>,
@@ -157,7 +163,7 @@ impl<W: Write> BgzfWriter<W> {
     }
 
     // r[impl bgzf.writer.flush_if_needed]
-    /// Flush the current block if `upcoming_bytes` would exceed the 64 KB limit.
+    /// Flush the current block if `upcoming_bytes` would exceed the block limit.
     ///
     /// Call this before writing a record to keep it from spanning block boundaries,
     /// improving seek granularity for index-based random access.
@@ -393,8 +399,9 @@ mod tests {
     /// records as a record boundary.
     #[test]
     fn virtual_offsets_resolve_to_the_uncompressed_position() {
-        // Sizes chosen so one write lands exactly on the 64 KiB boundary.
-        let sizes = [40_000usize, 25_536, 1, 70_000, 300, MAX_UNCOMPRESSED_SIZE];
+        // Sizes chosen so one write lands exactly on the block boundary.
+        let sizes =
+            [40_000usize, MAX_UNCOMPRESSED_SIZE - 40_000, 1, 70_000, 300, MAX_UNCOMPRESSED_SIZE];
         let mut output = Vec::new();
         let mut writer = BgzfWriter::new(&mut output);
 
@@ -502,5 +509,33 @@ mod tests {
         let writer = BgzfWriter::new(&mut output);
         writer.finish().unwrap();
         assert_eq!(output.len(), 28);
+    }
+
+    // r[verify bgzf.writer.block_size]
+    /// Data that does not compress still makes valid blocks: level 0 stores
+    /// every block, and noise does not shrink at level 6.
+    #[test]
+    fn incompressible_blocks_fit() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let data: Vec<u8> = (0..300_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect();
+        for level in [0, 6] {
+            let mut out = Vec::new();
+            let mut writer = BgzfWriter::with_compression_level(&mut out, level);
+            writer.write_all(&data).unwrap();
+            writer.finish().unwrap();
+            assert_eq!(read_all(&out), data, "level {level}");
+            for &start in uncompressed_offsets_of_blocks(&out).keys() {
+                let bsize =
+                    u16::from_le_bytes([out[start as usize + 16], out[start as usize + 17]]);
+                assert!(usize::from(bsize) < 65536);
+            }
+        }
     }
 }

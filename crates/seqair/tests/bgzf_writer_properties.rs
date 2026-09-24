@@ -13,6 +13,13 @@
 //! noodles reads the result, so the offsets are checked by an implementation
 //! that had no part in producing them.
 //!
+//! The bytes and the compression level are drawn too. A block of data that
+//! does not compress is *stored*, a little larger than it went in, and the
+//! writer once filled blocks to 64 KiB — which stored came to more than a BGZF
+//! block may hold, so every level-0 file and every block of noise failed to
+//! write (`r[bgzf.writer.block_size]`). Text-like bytes at the default level
+//! never get near that, which is all these properties used to write.
+//!
 //! The case counts are pinned. Each case deflates up to 40 chunks, some of them
 //! larger than a block, which is dear enough that the suite default would make
 //! this file most of the wall time; and the generator reaches the boundary
@@ -25,6 +32,7 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
     reason = "test code"
 )]
 
@@ -34,8 +42,26 @@ use seqair::io::BgzfWriter;
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read as _};
 
-/// The uncompressed payload of one BGZF block.
-const BLOCK: usize = 65_536;
+/// The uncompressed payload of a full BGZF block: htslib's `BGZF_BLOCK_SIZE`,
+/// which `r[bgzf.writer.block_size]` adopts. The generator aims writes at this
+/// boundary, so it has to be the writer's, not the format's 64 KiB ceiling.
+const BLOCK: usize = 0xff00;
+
+/// What the bytes of a case look like to DEFLATE.
+#[derive(Debug, Clone, Copy)]
+enum Content {
+    /// A byte ramp: compresses to almost nothing at any level above 0.
+    Ramp,
+    /// xorshift output: does not compress at all, so every block is stored.
+    Noise,
+    /// Each write picks one, so blocks are part noise.
+    Mixed,
+}
+
+/// A libdeflate level, 0 (store only) through 12.
+fn arb_level() -> impl PrintableGenerator<i32> {
+    gs::integers::<i32>().min_value(0).max_value(12)
+}
 
 /// A run of writes, each one a record as far as the writer is concerned.
 ///
@@ -45,6 +71,8 @@ const BLOCK: usize = 65_536;
 /// uniform size distribution reaches about once in 65 536 tries.
 #[hegel::composite]
 fn arb_writes(tc: &TestCase) -> Vec<Vec<u8>> {
+    let content =
+        tc.draw_silent(gs::sampled_from(&[Content::Ramp, Content::Noise, Content::Mixed]));
     let n = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(40));
     let mut writes = Vec::with_capacity(n);
     let mut fill = 0usize;
@@ -69,21 +97,41 @@ fn arb_writes(tc: &TestCase) -> Vec<Vec<u8>> {
 
         // Bytes that differ between writes, so landing on the wrong record is
         // visible rather than a coincidence of identical content.
-        let seed = tc.draw_silent(gs::integers::<u8>());
-        writes.push(
-            (0..len).map(|i| seed.wrapping_add(u8::try_from(i % 256).unwrap_or(0))).collect(),
-        );
+        let seed = tc.draw_silent(gs::integers::<u64>());
+        let noise = match content {
+            Content::Ramp => false,
+            Content::Noise => true,
+            Content::Mixed => tc.draw_silent(gs::booleans()),
+        };
+        writes.push(if noise { noise_bytes(seed, len) } else { ramp_bytes(seed as u8, len) });
 
         fill = if len >= remaining { (fill + len) % BLOCK } else { fill + len };
     }
     writes
 }
 
+fn ramp_bytes(seed: u8, len: usize) -> Vec<u8> {
+    (0..len).map(|i| seed.wrapping_add(i as u8)).collect()
+}
+
+fn noise_bytes(seed: u64, len: usize) -> Vec<u8> {
+    // xorshift64 has no zero state; any other seed gives a full-period stream.
+    let mut x = seed | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 32) as u8
+        })
+        .collect()
+}
+
 /// Write each chunk, taking the offset the way `BamWriter` does: ask whether
 /// the block has room first, then record where the write will land.
-fn write_all(writes: &[Vec<u8>], flush_first: bool) -> (Vec<u8>, Vec<u64>) {
+fn write_all(writes: &[Vec<u8>], level: i32, flush_first: bool) -> (Vec<u8>, Vec<u64>) {
     let mut out = Vec::new();
-    let mut writer = BgzfWriter::new(&mut out);
+    let mut writer = BgzfWriter::with_compression_level(&mut out, level);
     let mut offsets = Vec::with_capacity(writes.len());
 
     for chunk in writes {
@@ -103,8 +151,9 @@ fn write_all(writes: &[Vec<u8>], flush_first: bool) -> (Vec<u8>, Vec<u64>) {
 #[hegel::test(test_cases = 150)]
 fn a_reported_offset_names_the_write_that_followed_it(tc: TestCase) {
     let writes = tc.draw(arb_writes().print_as_debug());
+    let level = tc.draw(arb_level());
     let flush_first = tc.draw(gs::booleans());
-    let (bgzf, offsets) = write_all(&writes, flush_first);
+    let (bgzf, offsets) = write_all(&writes, level, flush_first);
 
     let mut reader = noodles_bgzf::io::Reader::new(Cursor::new(&bgzf));
     for (i, (offset, chunk)) in offsets.iter().zip(&writes).enumerate() {
@@ -138,8 +187,9 @@ fn a_reported_offset_names_the_write_that_followed_it(tc: TestCase) {
 #[hegel::test(test_cases = 150)]
 fn an_offset_decodes_to_the_writes_own_byte_position(tc: TestCase) {
     let writes = tc.draw(arb_writes().print_as_debug());
+    let level = tc.draw(arb_level());
     let flush_first = tc.draw(gs::booleans());
-    let (bgzf, offsets) = write_all(&writes, flush_first);
+    let (bgzf, offsets) = write_all(&writes, level, flush_first);
 
     // Where each block starts, in the file and in the uncompressed stream.
     // Read from the gzip trailers, so nothing here comes from the writer's
@@ -171,13 +221,15 @@ fn an_offset_decodes_to_the_writes_own_byte_position(tc: TestCase) {
 }
 
 // r[verify bgzf.writer.buffer]
-/// Whatever the writes were, the bytes come back out of an independent
-/// decompressor in one piece.
+// r[verify bgzf.writer.block_size]
+/// Whatever the writes were, at whatever level, the writer accepts them and
+/// the bytes come back out of an independent decompressor in one piece.
 #[hegel::test(test_cases = 150)]
 fn the_stream_decompresses_to_what_was_written(tc: TestCase) {
     let writes = tc.draw(arb_writes().print_as_debug());
+    let level = tc.draw(arb_level());
     let flush_first = tc.draw(gs::booleans());
-    let (bgzf, _) = write_all(&writes, flush_first);
+    let (bgzf, _) = write_all(&writes, level, flush_first);
 
     let expected: Vec<u8> = writes.concat();
     let mut got = Vec::with_capacity(expected.len());
@@ -188,14 +240,22 @@ fn the_stream_decompresses_to_what_was_written(tc: TestCase) {
     assert_eq!(got.len(), expected.len(), "decompressed length");
     assert_eq!(got, expected, "decompressed bytes");
 
-    // Every block must stay inside BGZF's 64 KiB uncompressed limit, or htslib
-    // refuses the file however well it round-trips here.
-    for block in blocks(&bgzf) {
+    // Every block stays within htslib's block size, and `blocks` walking the
+    // whole file by BSIZE means every block's framing is sound.
+    let found = blocks(&bgzf);
+    for block in &found {
         assert!(
             block.uncompressed_len <= BLOCK,
-            "a block holds {} uncompressed bytes, over the 64 KiB limit",
+            "a block holds {} uncompressed bytes, over htslib's {BLOCK}",
             block.uncompressed_len
         );
+    }
+    let covered: usize = found.iter().map(|b| b.uncompressed_len).sum();
+    assert_eq!(covered, expected.len(), "blocks found by BSIZE cover the stream");
+
+    let full = found.iter().filter(|b| b.uncompressed_len == BLOCK).count();
+    if level == 0 && full > 0 {
+        tc.event("a full block stored at level 0");
     }
 }
 

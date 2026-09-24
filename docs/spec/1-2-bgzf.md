@@ -78,7 +78,10 @@ r[bgzf.writer]
 The writer MUST accept arbitrary byte sequences and emit valid BGZF blocks. Each block MUST contain a complete gzip member with the `BC` extra subfield, DEFLATE-compressed payload, CRC32 checksum, and ISIZE footer.
 
 r[bgzf.writer.buffer]
-The writer MUST accumulate uncompressed data in an internal buffer (up to 64 KB). When the buffer is full or `flush()` is called, the buffer MUST be compressed into a BGZF block and written to the underlying stream. A write that fills the buffer exactly MUST flush before it returns, so the buffer is never observably full: 65536 is not a within-block offset, and the stream position after a block's last byte is the *next* block's `(offset, 0)`.
+The writer MUST accumulate uncompressed data in an internal buffer (up to the block size of `r[bgzf.writer.block_size]`). When the buffer is full or `flush()` is called, the buffer MUST be compressed into a BGZF block and written to the underlying stream. A write that fills the buffer exactly MUST flush before it returns, so the buffer is never observably full: 65536 is not a within-block offset, and the stream position after a block's last byte is the *next* block's `(offset, 0)`.
+
+r[bgzf.writer.block_size]
+A block MUST hold at most 65280 (`0xff00`) uncompressed bytes — htslib's `BGZF_BLOCK_SIZE`. The whole block, gzip header and footer included, must fit in 65536 bytes (BSIZE is a u16 of size − 1), and data that does not compress is *stored*: 65536 bytes would need 65546 bytes of DEFLATE plus 26 of framing, which does not fit, so every level-0 file and every block of random bytes would fail to write. 65280 leaves room for the worst case; it is the limit htslib writes with.
 
 r[bgzf.writer.compression]
 Compression MUST use the `libdeflater` crate (matching the reader's decompression backend) with configurable compression level. The default compression level SHOULD be 6 (matching htslib's default).
@@ -93,7 +96,7 @@ r[bgzf.writer.virtual_offset]
 The writer MUST track virtual offsets. After each block is written, the writer MUST record the compressed file offset of that block. A `virtual_offset()` method MUST return the current write position as a `VirtualOffset` (block offset + within-block offset). The within-block offset MUST be strictly less than 65536; converting buffer length to u16 MUST use checked conversion, never a clamp, because clamping a full buffer to 65535 names a byte *inside* the record that just ended, and an index built from such an offset seeks readers into the middle of a record (see `r[bgzf.writer.buffer]`).
 
 r[bgzf.writer.flush_if_needed]
-The writer MUST provide a `flush_if_needed(upcoming_bytes)` method that flushes the current block if the upcoming data would exceed the 64 KB uncompressed block limit. This allows callers (e.g., VCF/BCF writers) to keep records from spanning block boundaries when possible, improving seek granularity for index-based random access.
+The writer MUST provide a `flush_if_needed(upcoming_bytes)` method that flushes the current block if the upcoming data would exceed the uncompressed block limit (`r[bgzf.writer.block_size]`). This allows callers (e.g., VCF/BCF writers) to keep records from spanning block boundaries when possible, improving seek granularity for index-based random access.
 
 r[bgzf.writer.finish]
 `finish()` MUST consume the writer and return the inner `io::Write` stream, allowing the caller to perform additional operations (e.g., syncing, closing). Calling `finish()` or writing to a writer that has already been finished MUST return `BgzfError::AlreadyFinished` (a typed error variant, never `io::Error::other`). Dropping the writer without calling `finish()` SHOULD flush on drop (best-effort, logging failures with `warn!`).

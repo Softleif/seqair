@@ -6,7 +6,7 @@
 //! record starts recovered by decoding the file sequentially. The offsets are
 //! only ever as good as the BGZF writer's `virtual_offset()`, so this is the
 //! end-to-end form of `r[bgzf.writer.virtual_offset]`: before that rule was
-//! implemented correctly, a record ending exactly on a 64 KiB block boundary
+//! implemented correctly, a record ending exactly on a block boundary
 //! made the writer report the block's last byte, and htslib rejected the file
 //! with "shared section malformed or too short" for any region query that
 //! entered the affected bin.
@@ -46,8 +46,11 @@ struct Written {
     csi: Vec<u8>,
 }
 
+/// Uncompressed bytes in a full BGZF block (`r[bgzf.writer.block_size]`).
+const FULL_BLOCK: usize = 0xff00;
+
 /// Write a BCF whose records each carry a `pad`-byte INFO string, so the sweep
-/// below walks record sizes past every residue mod 64 KiB.
+/// below walks record sizes past every residue mod the block size.
 fn write_bcf(pad: usize) -> Written {
     let mut builder = VcfHeader::builder();
     let contig =
@@ -189,30 +192,32 @@ fn assert_chunk_starts_are_records(w: &Written, pad: usize) -> usize {
 #[test]
 fn csi_offsets_always_name_a_record_start() {
     // Whether a record lands exactly on a block boundary is a question of record
-    // size against 65536, so one size proves nothing: sweep them. The assertion
+    // size against the block size, so one size proves nothing: sweep them. The assertion
     // at the end is what keeps the sweep honest if the record shape changes.
     let mut saw_exactly_full_block = false;
     for pad in 0..96 {
         let w = write_bcf(pad);
         assert_chunk_starts_are_records(&w, pad);
-        saw_exactly_full_block |= blocks_of(&w.bcf).iter().any(|b| b.uncompressed_len == 65_536);
+        saw_exactly_full_block |=
+            blocks_of(&w.bcf).iter().any(|b| b.uncompressed_len == FULL_BLOCK);
     }
     // r[verify bcf_writer.bgzf_blocks]
     // Also pins the flush threshold: a writer that flushed early (say every
-    // 1 KiB) would still produce a readable file, but no block would ever reach
-    // 64 KiB and this assertion would fail.
+    // 1 KiB) would still produce a readable file, but no block would ever be
+    // full and this assertion would fail.
     assert!(
         saw_exactly_full_block,
-        "no file in the sweep had a block filled to exactly 64 KiB — the case this test exists \
+        "no file in the sweep had a block filled exactly — the case this test exists \
          for was never exercised; widen the sweep or change the record shape"
     );
 }
 
-/// The first record size in the sweep whose file has a block filled to exactly
-/// 64 KiB — the shape that used to corrupt the index.
+/// The first record size in the sweep whose file has a block filled exactly — the shape that used to corrupt the index.
 fn block_aligned_pad() -> usize {
     (0..96)
-        .find(|&pad| blocks_of(&write_bcf(pad).bcf).iter().any(|b| b.uncompressed_len == 65_536))
+        .find(|&pad| {
+            blocks_of(&write_bcf(pad).bcf).iter().any(|b| b.uncompressed_len == FULL_BLOCK)
+        })
         .expect("no record size in 0..96 fills a block exactly")
 }
 
