@@ -7,6 +7,9 @@
 //! `a..=z` (0x61..=0x7A) — every other byte, including `>= 0x80`, passes
 //! through unchanged, matching `u8::to_ascii_uppercase` exactly.
 
+use fearless_simd::{Level, dispatch, prelude::*};
+use fearless_simd_macros::simd;
+
 /// Strip `\n`/`\r` from `raw`, appending the rest ASCII-uppercased to `out`.
 ///
 /// Byte-for-byte equivalent to the scalar loop this replaced: a byte equal to
@@ -14,83 +17,86 @@
 /// `to_ascii_uppercase`. Consecutive delimiters (`\r\n`) yield empty runs,
 /// which the copy turns into the no-op the old loop's skip was.
 pub(super) fn strip_newlines_uppercase(raw: &[u8], out: &mut Vec<u8>) {
+    strip_at(Level::new(), raw, out);
+}
+
+/// One dispatch per fetch, not per line: the whole pass runs inside the
+/// kernel the level selects.
+// r[impl io.simd_portable]
+fn strip_at(level: Level, raw: &[u8], out: &mut Vec<u8>) {
+    dispatch!(level, simd => strip_simd(simd, raw, out));
+}
+
+#[simd]
+fn strip_simd<S: Simd>(simd: S, raw: &[u8], out: &mut Vec<u8>) {
     let mut search = 0usize;
-    while let Some(hit) = find_newline(raw, search) {
+    while let Some(hit) = find_newline(simd, raw, search) {
         if let Some(run) = raw.get(search..hit) {
-            append_uppercased(run, out);
+            append_uppercased(simd, run, out);
         }
         search = hit.saturating_add(1);
     }
     if let Some(tail) = raw.get(search..) {
-        append_uppercased(tail, out);
+        append_uppercased(simd, tail, out);
     }
 }
 
 /// Copy `run` onto `out` and uppercase the copy in place, so the vector
 /// kernel writes each byte once and `raw` is never mutated.
-fn append_uppercased(run: &[u8], out: &mut Vec<u8>) {
+#[simd]
+fn append_uppercased<S: Simd>(simd: S, run: &[u8], out: &mut Vec<u8>) {
     let start = out.len();
     out.extend_from_slice(run);
     if let Some(appended) = out.get_mut(start..) {
-        uppercase_in_place(appended);
+        uppercase_in_place(simd, appended);
     }
 }
 
-/// Index of the first `\n` or `\r` at or after `from`, if any.
-fn find_newline(raw: &[u8], from: usize) -> Option<usize> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            // Safety: AVX2 verified by feature detection.
-            return unsafe { find_newline_avx2(raw, from) };
+/// Index of the first `\n` or `\r` at or after `from`, if any: memchr2, one
+/// native-width vector per iteration. `any_true` gates the loop because it is
+/// one instruction everywhere, while a bitmask costs four on NEON — so the
+/// bitmask is built only for the vector that has the hit.
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+fn find_newline<S: Simd>(simd: S, raw: &[u8], from: usize) -> Option<usize> {
+    let mut chunks = raw.get(from..)?.chunks_exact(S::u8s::LEN);
+    let mut offset = from;
+    for chunk in &mut chunks {
+        let v = S::u8s::from_slice(simd, chunk);
+        let hit = v.simd_eq(b'\n') | v.simd_eq(b'\r');
+        if hit.any_true() {
+            // A set lane makes the bitmask nonzero, so this is < LEN.
+            let lane = hit.to_bitmask().trailing_zeros() as usize;
+            return Some(offset.saturating_add(lane));
         }
-        if is_x86_feature_detected!("ssse3") {
-            // Safety: SSSE3 verified by feature detection.
-            return unsafe { find_newline_ssse3(raw, from) };
-        }
+        offset = offset.saturating_add(S::u8s::LEN);
     }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Safety: NEON is always available on aarch64.
-        return unsafe { find_newline_neon(raw, from) };
-    }
-
-    #[cfg_attr(
-        target_arch = "aarch64",
-        expect(unreachable_code, reason = "NEON return above makes this dead on aarch64")
-    )]
-    find_newline_scalar(raw, from)
+    find_newline_scalar(raw, offset)
 }
 
-/// Uppercase `a..=z` in place, leaving every other byte unchanged.
-fn uppercase_in_place(bytes: &mut [u8]) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            // Safety: AVX2 verified by feature detection.
-            unsafe { uppercase_avx2(bytes) };
-            return;
-        }
-        if is_x86_feature_detected!("ssse3") {
-            // Safety: SSSE3 verified by feature detection.
-            unsafe { uppercase_ssse3(bytes) };
-            return;
-        }
+/// Uppercase `a..=z` in place, leaving every other byte unchanged. Only that
+/// range earns the 0x20 flip — NOT the `& 0xDF` blanket uppercase, which
+/// would also mangle `[`, `{`, `~` and bytes >= 0x80. The flip is `xor`ed in
+/// from a `select` against zero rather than `select`ing between the byte and
+/// its flip: the latter is a blend on x86, the former an `and`.
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+fn uppercase_in_place<S: Simd>(simd: S, bytes: &mut [u8]) {
+    let flip = S::u8s::splat(simd, 0x20);
+    let keep = S::u8s::splat(simd, 0);
+    let mut chunks = bytes.chunks_exact_mut(S::u8s::LEN);
+    for chunk in &mut chunks {
+        let v = S::u8s::from_slice(simd, chunk);
+        let lower = v.simd_ge(b'a') & v.simd_le(b'z');
+        (v ^ lower.select(flip, keep)).store_slice(chunk);
     }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Safety: NEON is always available on aarch64.
-        unsafe { uppercase_neon(bytes) };
-        return;
-    }
-
-    #[cfg_attr(
-        target_arch = "aarch64",
-        expect(unreachable_code, reason = "NEON return above makes this dead on aarch64")
-    )]
-    uppercase_scalar(bytes);
+    uppercase_scalar(chunks.into_remainder());
 }
 
 /// Scalar fallback: the exact predicate of the loop this replaced.
@@ -103,223 +109,6 @@ fn find_newline_scalar(raw: &[u8], from: usize) -> Option<usize> {
 fn uppercase_scalar(bytes: &mut [u8]) {
     for b in bytes.iter_mut() {
         b.make_ascii_uppercase();
-    }
-}
-
-/// AVX2 memchr2: 32 bytes per iteration, `movemask` + trailing-zeros locate
-/// the first `\n`/`\r`.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn find_newline_avx2(raw: &[u8], from: usize) -> Option<usize> {
-    use std::arch::x86_64::*;
-
-    // Safety: AVX2 intrinsics require AVX2 availability (ensured by #[target_feature]).
-    let v_lf = _mm256_set1_epi8(b'\n'.cast_signed());
-    let v_cr = _mm256_set1_epi8(b'\r'.cast_signed());
-
-    let len = raw.len();
-    let ptr = raw.as_ptr();
-    let mut i = from;
-
-    while let Some(next) = i.checked_add(32)
-        && next <= len
-    {
-        // Safety: `i + 32 <= len` keeps the load inside the slice.
-        let mask = unsafe {
-            let chunk = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
-            let hit =
-                _mm256_or_si256(_mm256_cmpeq_epi8(chunk, v_lf), _mm256_cmpeq_epi8(chunk, v_cr));
-            _mm256_movemask_epi8(hit)
-        };
-        if mask != 0 {
-            // mask != 0 ⇒ trailing_zeros() < 32, so the hit is inside the chunk.
-            return Some(i.saturating_add(mask.trailing_zeros() as usize));
-        }
-        i = next;
-    }
-
-    find_newline_scalar(raw, i)
-}
-
-/// SSSE3 memchr2: 16 bytes per iteration. Every instruction used is actually
-/// SSE2-era; gating on SSSE3 matches the rest of the codebase's dispatch.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "ssse3")]
-unsafe fn find_newline_ssse3(raw: &[u8], from: usize) -> Option<usize> {
-    use std::arch::x86_64::*;
-
-    // Safety: SSSE3 intrinsics require SSSE3 availability (ensured by #[target_feature]).
-    let v_lf = _mm_set1_epi8(b'\n'.cast_signed());
-    let v_cr = _mm_set1_epi8(b'\r'.cast_signed());
-
-    let len = raw.len();
-    let ptr = raw.as_ptr();
-    let mut i = from;
-
-    while let Some(next) = i.checked_add(16)
-        && next <= len
-    {
-        // Safety: `i + 16 <= len` keeps the load inside the slice.
-        let mask = unsafe {
-            let chunk = _mm_loadu_si128(ptr.add(i) as *const __m128i);
-            let hit = _mm_or_si128(_mm_cmpeq_epi8(chunk, v_lf), _mm_cmpeq_epi8(chunk, v_cr));
-            _mm_movemask_epi8(hit)
-        };
-        if mask != 0 {
-            // mask != 0 ⇒ trailing_zeros() < 16, so the hit is inside the chunk.
-            return Some(i.saturating_add(mask.trailing_zeros() as usize));
-        }
-        i = next;
-    }
-
-    find_newline_scalar(raw, i)
-}
-
-/// NEON memchr2: 16 bytes per iteration. NEON has no `movemask`, so the
-/// 0x00/0xFF compare lanes are narrowed one nibble per byte into a u64 —
-/// bit `4k` set ⇔ byte `k` hit — and trailing-zeros recovers the index.
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn find_newline_neon(raw: &[u8], from: usize) -> Option<usize> {
-    use std::arch::aarch64::*;
-
-    let v_lf = vdupq_n_u8(b'\n');
-    let v_cr = vdupq_n_u8(b'\r');
-
-    let len = raw.len();
-    let ptr = raw.as_ptr();
-    let mut i = from;
-
-    while let Some(next) = i.checked_add(16)
-        && next <= len
-    {
-        // Safety: `i + 16 <= len` keeps the load inside the slice.
-        let mask = unsafe {
-            let chunk = vld1q_u8(ptr.add(i));
-            let hit = vorrq_u8(vceqq_u8(chunk, v_lf), vceqq_u8(chunk, v_cr));
-            let nibbles = vshrn_n_u16::<4>(vreinterpretq_u16_u8(hit));
-            vget_lane_u64::<0>(vreinterpret_u64_u8(nibbles))
-        };
-        if mask != 0 {
-            // Each byte became 4 bits, so the byte index is bit_index / 4.
-            // mask != 0 ⇒ trailing_zeros() < 64 ⇒ the quotient is < 16.
-            #[allow(
-                clippy::arithmetic_side_effects,
-                reason = "trailing_zeros of a nonzero u64 is < 64, so >> 2 cannot overflow"
-            )]
-            let offset = (mask.trailing_zeros() >> 2) as usize;
-            return Some(i.saturating_add(offset));
-        }
-        i = next;
-    }
-
-    find_newline_scalar(raw, i)
-}
-
-/// AVX2 uppercase: 32 bytes per iteration, range-masked to `a..=z`.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn uppercase_avx2(bytes: &mut [u8]) {
-    use std::arch::x86_64::*;
-
-    // Safety: AVX2 intrinsics require AVX2 availability (ensured by #[target_feature]).
-    let v_a = _mm256_set1_epi8(b'a'.cast_signed());
-    let v_z = _mm256_set1_epi8(b'z'.cast_signed());
-    let v_flip = _mm256_set1_epi8(0x20);
-
-    let len = bytes.len();
-    let ptr = bytes.as_mut_ptr();
-    let mut i = 0usize;
-
-    while let Some(next) = i.checked_add(32)
-        && next <= len
-    {
-        // Safety: `i + 32 <= len` keeps the load and store inside the slice.
-        unsafe {
-            let chunk = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
-            // Unsigned range test: max(chunk,'a') == chunk ⇔ chunk >= 'a',
-            // min(chunk,'z') == chunk ⇔ chunk <= 'z'. Only that range earns
-            // the 0x20 flip — NOT the `& 0xDF` blanket uppercase, which would
-            // also mangle `[`, `{`, `~` and bytes >= 0x80.
-            let ge_a = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, v_a), chunk);
-            let le_z = _mm256_cmpeq_epi8(_mm256_min_epu8(chunk, v_z), chunk);
-            let flip = _mm256_and_si256(_mm256_and_si256(ge_a, le_z), v_flip);
-            _mm256_storeu_si256(ptr.add(i) as *mut __m256i, _mm256_xor_si256(chunk, flip));
-        }
-        i = next;
-    }
-
-    if let Some(tail) = bytes.get_mut(i..) {
-        uppercase_scalar(tail);
-    }
-}
-
-/// SSSE3 uppercase: 16 bytes per iteration, range-masked to `a..=z`.
-/// (SSE2-era instructions only; SSSE3 gating matches the codebase.)
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "ssse3")]
-unsafe fn uppercase_ssse3(bytes: &mut [u8]) {
-    use std::arch::x86_64::*;
-
-    // Safety: SSSE3 intrinsics require SSSE3 availability (ensured by #[target_feature]).
-    let v_a = _mm_set1_epi8(b'a'.cast_signed());
-    let v_z = _mm_set1_epi8(b'z'.cast_signed());
-    let v_flip = _mm_set1_epi8(0x20);
-
-    let len = bytes.len();
-    let ptr = bytes.as_mut_ptr();
-    let mut i = 0usize;
-
-    while let Some(next) = i.checked_add(16)
-        && next <= len
-    {
-        // Safety: `i + 16 <= len` keeps the load and store inside the slice.
-        unsafe {
-            let chunk = _mm_loadu_si128(ptr.add(i) as *const __m128i);
-            // Same unsigned range test as the AVX2 kernel above.
-            let ge_a = _mm_cmpeq_epi8(_mm_max_epu8(chunk, v_a), chunk);
-            let le_z = _mm_cmpeq_epi8(_mm_min_epu8(chunk, v_z), chunk);
-            let flip = _mm_and_si128(_mm_and_si128(ge_a, le_z), v_flip);
-            _mm_storeu_si128(ptr.add(i) as *mut __m128i, _mm_xor_si128(chunk, flip));
-        }
-        i = next;
-    }
-
-    if let Some(tail) = bytes.get_mut(i..) {
-        uppercase_scalar(tail);
-    }
-}
-
-/// NEON uppercase: 16 bytes per iteration, range-masked to `a..=z`.
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn uppercase_neon(bytes: &mut [u8]) {
-    use std::arch::aarch64::*;
-
-    let v_a = vdupq_n_u8(b'a');
-    let v_z = vdupq_n_u8(b'z');
-    let v_flip = vdupq_n_u8(0x20);
-
-    let len = bytes.len();
-    let ptr = bytes.as_mut_ptr();
-    let mut i = 0usize;
-
-    while let Some(next) = i.checked_add(16)
-        && next <= len
-    {
-        // Safety: `i + 16 <= len` keeps the load and store inside the slice.
-        unsafe {
-            let chunk = vld1q_u8(ptr.add(i));
-            // Unsigned range test, same shape as the x86 kernels: only
-            // 0x61..=0x7A earns the 0x20 flip, all other bytes pass through.
-            let is_lower = vandq_u8(vcgeq_u8(chunk, v_a), vcgeq_u8(v_z, chunk));
-            vst1q_u8(ptr.add(i), veorq_u8(chunk, vandq_u8(is_lower, v_flip)));
-        }
-        i = next;
-    }
-
-    if let Some(tail) = bytes.get_mut(i..) {
-        uppercase_scalar(tail);
     }
 }
 
@@ -385,6 +174,20 @@ mod tests {
         }
         for case in &cases {
             assert_eq!(run(case), strip_upper_reference(case), "input: {case:?}");
+        }
+    }
+
+    // r[verify fasta.fetch.newline_stripping]
+    // r[verify fasta.fetch.uppercase]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn every_level_matches_scalar_reference(tc: TestCase) {
+        let raw = tc.draw(gs::binary().max_size(1024));
+        let expected = strip_upper_reference(&raw);
+        for level in crate::simd_levels::levels() {
+            let mut out = Vec::new();
+            strip_at(level, &raw, &mut out);
+            assert_eq!(out, expected, "{level:?}");
         }
     }
 
