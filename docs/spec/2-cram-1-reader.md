@@ -305,6 +305,9 @@ Method 5 (rANS Nx16): v3.1 codec. rANS with N-way interleaving (N=4 or 32), 16-b
 r[cram.codec.rans_nx16_pack]
 The PACK transform packs 8, 4 or 2 symbols a byte (2, 3–4 or 5–16 distinct symbols), the first symbol in the lowest bits, each an index into the block's symbol map; one distinct symbol is a run of it. An index past the map decodes to 0, and output past what the packed bytes cover stays 0. Past a small output size, unpacking takes htscodecs' `hts_unpack` shape — a 256-entry table from packed byte to its symbols, one store a byte — and the 2-a-byte case the BAM nibble kernel (`r[io.simd_portable]`) with the nibble order swapped. Output MUST equal the per-symbol loop's.
 
+r[cram.codec.rans_nx16_rle]
+The RLE transform reads literals from the entropy-decoded bytes; a literal that is one of the block's run symbols is followed by a run of that many more copies, its length a uint7 from the RLE metadata. A run is cut at the output's end, a run symbol at the very end still takes its length, and running out of literals before the output is full is `Truncated`. Decoding copies each stretch of literals up to the next run symbol at once and fills each run at once, without zeroing the output first (htscodecs' `hts_rle_decode`). Output and error-or-not MUST equal the per-byte loop's.
+
 r[cram.codec.arith]
 Method 6 (arithmetic coder): v3.1 adaptive arithmetic coder. SHOULD be supported.
 

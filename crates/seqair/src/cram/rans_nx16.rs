@@ -1403,33 +1403,82 @@ fn read_rle_context(
     Ok((RleContext { rle_meta, output_len: uncompressed_size }, rle_encoded_len))
 }
 
-#[allow(
-    clippy::indexing_slicing,
-    reason = "sym is u8 so usize::from(sym) ≤ 255 < ALPHABET_SIZE=256"
-)]
+/// Runs and literal stretches up to this long are written as one fixed-size
+/// store into slack past the output, which later writes overwrite.
+const RLE_SHORT: usize = 16;
+
+// r[impl cram.codec.rans_nx16_rle]
+/// htscodecs' `hts_rle_decode`: a stretch of literals up to the next run
+/// symbol is one copy, a run one fill. Short ones are one fixed-size store
+/// each into [`RLE_SHORT`] bytes of slack, so a quality stream's many short
+/// runs never reach `memset`/`memcpy`.
+#[allow(clippy::indexing_slicing, reason = "b is u8 so usize::from(b) ≤ 255 < ALPHABET_SIZE=256")]
 fn apply_rle(src: &[u8], ctx: &RleContext) -> Result<Vec<u8>, CramError> {
+    let truncated = || CramError::Truncated { context: "rans_nx16 rle src" };
     let mut meta_cur: &[u8] = &ctx.rle_meta;
-
     let rle_alphabet = read_rle_alphabet(&mut meta_cur)?;
+    let n = ctx.output_len;
+    let mut dst = vec![0u8; n.saturating_add(RLE_SHORT)];
+    let mut o = 0usize;
+    let mut rest = src;
 
-    let mut dst = vec![0u8; ctx.output_len];
-    let mut dst_iter = dst.iter_mut();
-    let mut src_iter = src.iter();
-
-    while let Some(d) = dst_iter.next() {
-        let &sym =
-            src_iter.next().ok_or_else(|| CramError::Truncated { context: "rans_nx16 rle src" })?;
-        *d = sym;
-
-        if rle_alphabet[usize::from(sym)] {
-            let len = read_uint7(&mut meta_cur)? as usize;
-            for e in dst_iter.by_ref().take(len) {
-                *e = sym;
+    while o < n {
+        let room = n.wrapping_sub(o);
+        let window = rest.get(..room).unwrap_or(rest);
+        let Some(p) = window.iter().position(|&b| rle_alphabet[usize::from(b)]) else {
+            copy_into(&mut dst, o, rest, window.len());
+            if window.len() < room {
+                return Err(truncated());
             }
-        }
+            break;
+        };
+        // `window` holds `p + 1` bytes and `o + p < n`.
+        let Some((&sym, after)) = rest.get(p..).and_then(<[u8]>::split_first) else {
+            return Err(truncated());
+        };
+        copy_into(&mut dst, o, rest, p);
+        o = o.wrapping_add(p);
+        rest = after;
+        let len = read_uint7(&mut meta_cur)? as usize;
+        let run = len.min(n.wrapping_sub(o).wrapping_sub(1)).wrapping_add(1);
+        fill_into(&mut dst, o, run, sym);
+        o = o.wrapping_add(run);
     }
 
+    dst.truncate(n);
     Ok(dst)
+}
+
+/// `dst[o..o + len] = src[..len]`, as one `RLE_SHORT`-byte copy when `len`
+/// is short and `src` has the bytes to spare. `o + len ≤ n`, and `dst` has
+/// `RLE_SHORT` bytes past `n`.
+#[inline(always)]
+fn copy_into(dst: &mut [u8], o: usize, src: &[u8], len: usize) {
+    if len <= RLE_SHORT
+        && let Some(d) = dst.get_mut(o..).and_then(|d| d.first_chunk_mut::<RLE_SHORT>())
+        && let Some(s) = src.first_chunk::<RLE_SHORT>()
+    {
+        *d = *s;
+        return;
+    }
+    if let (Some(d), Some(s)) = (dst.get_mut(o..o.wrapping_add(len)), src.get(..len)) {
+        d.copy_from_slice(s);
+    }
+}
+
+/// `dst[o..o + run] = sym`, as one `RLE_SHORT`-byte fill when `run` is
+/// short. `o + run ≤ n`, and `dst` has `RLE_SHORT` bytes past `n`.
+#[inline(always)]
+fn fill_into(dst: &mut [u8], o: usize, run: usize, sym: u8) {
+    if run <= RLE_SHORT
+        && let Some(d) = dst.get_mut(o..).and_then(|d| d.first_chunk_mut::<RLE_SHORT>())
+    {
+        *d = [sym; RLE_SHORT];
+        return;
+    }
+    if let Some(d) = dst.get_mut(o..o.wrapping_add(run)) {
+        d.fill(sym);
+    }
 }
 
 #[allow(
@@ -1590,6 +1639,71 @@ mod tests {
             0x00,
         ];
         assert_eq!(decode(&src, 0).unwrap(), b"noooooooodles");
+    }
+
+    /// The per-byte RLE decode `apply_rle` replaced, as its oracle.
+    #[allow(clippy::indexing_slicing, reason = "test oracle")]
+    fn rle_oracle(src: &[u8], ctx: &RleContext) -> Result<Vec<u8>, CramError> {
+        let mut meta_cur: &[u8] = &ctx.rle_meta;
+        let rle_alphabet = read_rle_alphabet(&mut meta_cur)?;
+        let mut dst = vec![0u8; ctx.output_len];
+        let mut dst_iter = dst.iter_mut();
+        let mut src_iter = src.iter();
+        while let Some(d) = dst_iter.next() {
+            let &sym = src_iter
+                .next()
+                .ok_or_else(|| CramError::Truncated { context: "rans_nx16 rle src" })?;
+            *d = sym;
+            if rle_alphabet[usize::from(sym)] {
+                let len = read_uint7(&mut meta_cur)? as usize;
+                for e in dst_iter.by_ref().take(len) {
+                    *e = sym;
+                }
+            }
+        }
+        Ok(dst)
+    }
+
+    // r[verify cram.codec.rans_nx16_rle]
+    /// RLE against the per-byte decode: runs that stop short of, reach and
+    /// overrun the output, literal stretches, and run lengths or literals
+    /// that run out.
+    #[hegel::test]
+    fn rle_matches_oracle(tc: TestCase) {
+        let run_syms = tc.draw(gs::vecs(gs::integers::<u8>().max_value(7)).min_size(1).max_size(4));
+        let src = tc.draw(gs::vecs(gs::integers::<u8>().max_value(15)).max_size(300));
+        let mut rle_meta = vec![u8::try_from(run_syms.len()).unwrap()];
+        rle_meta.extend(&run_syms);
+        // Up to one length per run symbol in `src`, so the lengths often
+        // run out; `natural` is how long the output would be uncut.
+        let runs = src.iter().filter(|b| run_syms.contains(b)).count();
+        let lengths: Vec<u32> = (0..tc.draw(gs::integers::<usize>().max_value(runs + 1)))
+            .map(|_| tc.draw(gs::integers::<u32>().max_value(300)))
+            .collect();
+        for &l in &lengths {
+            encode_uint7_prv(&mut rle_meta, l);
+        }
+        let mut natural = 0usize;
+        let mut next_len = lengths.iter();
+        for b in &src {
+            natural += 1;
+            if run_syms.contains(b) {
+                natural += next_len.next().map_or(0, |&l| l as usize);
+            }
+        }
+        let output_len = if tc.draw(gs::booleans()) {
+            tc.draw(
+                gs::integers::<usize>().min_value(natural.saturating_sub(3)).max_value(natural + 3),
+            )
+        } else {
+            tc.draw(gs::integers::<usize>().max_value(3000))
+        };
+        let ctx = RleContext { rle_meta, output_len };
+        let (got, want) = (apply_rle(&src, &ctx), rle_oracle(&src, &ctx));
+        assert_eq!(got.is_ok(), want.is_ok(), "{got:?} vs {want:?}");
+        if let (Ok(got), Ok(want)) = (got, want) {
+            assert_eq!(got, want);
+        }
     }
 
     // r[verify cram.codec.rans_nx16_pack]
