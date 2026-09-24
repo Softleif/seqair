@@ -88,5 +88,9 @@ harness = false
 name = "cram"
 harness = false
 
+[[bench]]
+name = "simd_kernels"
+harness = false
+
 [lints]
 workspace = true
