@@ -10,6 +10,9 @@ A single `Writer<W, S>` type MUST support all output formats (VCF text, BGZF-com
 r[record_encoder.writer_new]
 `Writer::new(inner: W, format: OutputFormat)` MUST create a writer in the `Unstarted` state. No header is required at construction time. Index co-production MUST be automatic for compressed formats (`VcfGz` → TBI, `Bcf` → CSI).
 
+r[record_encoder.compression_threads]
+`Writer<W, Unstarted>::compression_threads(n)` MUST switch the `VcfGz`/`Bcf` BGZF stream to `n` compression worker threads (`n = 0`, the default, compresses on the calling thread) and return the writer, still `Unstarted`; it returns `Result` because starting a thread can fail. Plain VCF is not compressed and MUST ignore it. Output and coordinate index MUST be byte-identical to the single-threaded writer's (see `r[bgzf.writer.parallel]`).
+
 r[record_encoder.writer_typestate]
 The writer MUST use a typestate pattern: `Writer<W, Unstarted>` only exposes `write_header()`, which consumes the writer and returns `Writer<W, Ready>`. `Writer<W, Ready>` exposes `begin_record()` and `finish()`.
 

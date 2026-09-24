@@ -8,11 +8,11 @@
 //! ```text
 //! # BCF/VCF: replay the records of a rastair BCF (default field set) through
 //! # seqair's encoder. `fmt` is bcf | vcf | vcfgz.
-//! prof_writers bcf-replay <in.bcf> <fmt> <iters> [out]
+//! prof_writers bcf-replay <in.bcf> <fmt> <iters> [out] [compression threads]
 //!
 //! # BAM rewrite: preload a region, add MM/ML-like tags, write.
 //! # level -1: serialize only (to_bam_bytes, no BGZF)
-//! prof_writers bam-seqair <in.bam> <contig> <start> <end> <level> <index 0|1> <iters> [out]
+//! prof_writers bam-seqair <in.bam> <contig> <start> <end> <level> <index 0|1> <iters> [out] [threads]
 //! prof_writers bam-htslib <in.bam> <contig> <start> <end> <level> <threads> <iters> [out]
 //! ```
 #![allow(
@@ -527,14 +527,22 @@ fn bcf_replay(args: &[String]) {
     let (contigs, recs) = load_bcf(path);
     println!("loaded {} records in {:.1} s", recs.len(), t.elapsed().as_secs_f64());
     let (header, schema) = build_schema(&contigs);
-    timed("bcf-replay", iters, || write_vcf(&out, fmt, &header, &schema, &recs));
+    let threads: usize = args.get(6).map_or(0, |s| s.parse().unwrap());
+    timed("bcf-replay", iters, || write_vcf(&out, fmt, threads, &header, &schema, &recs));
 }
 
 #[inline(never)]
-fn write_vcf(out: &Path, fmt: OutputFormat, header: &VcfHeader, schema: &Schema, recs: &[Rec]) {
+fn write_vcf(
+    out: &Path,
+    fmt: OutputFormat,
+    threads: usize,
+    header: &VcfHeader,
+    schema: &Schema,
+    recs: &[Rec],
+) {
     // rastair writes through a `Box<dyn Write + Send>` over an unbuffered file.
     let file: Box<dyn Write + Send> = Box::new(std::fs::File::create(out).unwrap());
-    let w = Writer::new(file, fmt);
+    let w = Writer::new(file, fmt).compression_threads(threads).unwrap();
     let mut w = w.write_header(header).unwrap();
     for r in recs {
         encode_rec(&mut w, schema, r);
@@ -627,7 +635,8 @@ fn bam_seqair(args: &[String]) {
         timed("bam-serialize", iters, || serialize_bam(&recs));
         return;
     }
-    timed("bam-seqair", iters, || write_bam_seqair(&out, &header, level, index, &recs));
+    let threads: usize = args.get(10).map_or(0, |s| s.parse().unwrap());
+    timed("bam-seqair", iters, || write_bam_seqair(&out, &header, level, index, threads, &recs));
 }
 
 #[inline(never)]
@@ -648,10 +657,12 @@ fn write_bam_seqair(
     header: &seqair::bam::BamHeader,
     level: i32,
     index: bool,
+    threads: usize,
     recs: &[seqair::bam::OwnedBamRecord],
 ) {
     let mut writer = seqair::bam::BamWriterBuilder::to_path(out, header)
         .compression_level(level)
+        .compression_threads(threads)
         .write_index(index)
         .build()
         .unwrap();

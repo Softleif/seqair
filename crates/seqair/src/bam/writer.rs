@@ -350,6 +350,7 @@ pub struct BamWriterBuilder<'a, T> {
     header: &'a BamHeader,
     write_index: bool,
     compression_level: i32,
+    compression_threads: usize,
 }
 
 impl<'a> BamWriterBuilder<'a, ToPath<'a>> {
@@ -375,7 +376,7 @@ impl<'a, W: Write> BamWriterBuilder<'a, ToWriter<W>> {
 
 impl<'a, T> BamWriterBuilder<'a, T> {
     fn with_target(target: T, header: &'a BamHeader) -> Self {
-        Self { target, header, write_index: false, compression_level: 6 }
+        Self { target, header, write_index: false, compression_level: 6, compression_threads: 0 }
     }
 
     /// Co-produce a BAI index during writing. Defaults to `false`.
@@ -397,6 +398,20 @@ impl<'a, T> BamWriterBuilder<'a, T> {
         self.compression_level = level;
         self
     }
+
+    // r[impl bam_writer.multithreaded_compression]
+    /// Compress BGZF blocks on `threads` worker threads. Defaults to `0`:
+    /// compress on the calling thread.
+    ///
+    /// The calling thread keeps serializing records and writes the compressed
+    /// blocks in order, so the output — BAM and co-produced BAI — is
+    /// byte-identical to the single-threaded writer's at the same level. This
+    /// is htslib's `hts_set_threads`: rastair's `set_threads(3)` is `3` here.
+    #[must_use]
+    pub fn compression_threads(mut self, threads: usize) -> Self {
+        self.compression_threads = threads;
+        self
+    }
 }
 
 impl<'a> BamWriterBuilder<'a, ToPath<'a>> {
@@ -405,7 +420,7 @@ impl<'a> BamWriterBuilder<'a, ToPath<'a>> {
     pub fn build(self) -> Result<BamWriter<BufWriter<File>>, BamWriteError> {
         let file = File::create(self.target.path)?;
         let inner = BufWriter::new(file);
-        let bgzf = BgzfSink::new(inner, self.compression_level, 0)?;
+        let bgzf = BgzfSink::new(inner, self.compression_level, self.compression_threads)?;
         BamWriter::from_bgzf(bgzf, self.header, self.write_index)
     }
 }
@@ -425,7 +440,8 @@ impl<W: Write> BamWriterBuilder<'_, ToWriter<W>> {
                  skipping index construction"
             );
         }
-        let bgzf = BgzfSink::new(self.target.writer, self.compression_level, 0)?;
+        let bgzf =
+            BgzfSink::new(self.target.writer, self.compression_level, self.compression_threads)?;
         BamWriter::from_bgzf(bgzf, self.header, false)
     }
 }

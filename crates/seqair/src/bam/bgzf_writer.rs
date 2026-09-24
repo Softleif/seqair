@@ -223,6 +223,14 @@ impl<W: Write> BgzfWriter<W> {
         Ok(())
     }
 
+    /// The inner writer back, provided nothing has been written to it yet.
+    fn into_unwritten_inner(mut self) -> Result<W, BgzfError> {
+        if !self.buf.is_empty() || self.block_offset != 0 {
+            return Err(BgzfError::AlreadyFinished);
+        }
+        self.inner.take().ok_or(BgzfError::AlreadyFinished)
+    }
+
     // r[impl bgzf.writer.eof_marker]
     // r[impl bgzf.writer.finish]
     /// Flush remaining data, write the EOF marker, and return the inner writer.
@@ -502,6 +510,16 @@ impl<W: Write> ParallelBgzfWriter<W> {
         Ok(w)
     }
 
+    /// The inner writer back, provided nothing has been written to it yet.
+    fn into_unwritten_inner(mut self) -> Result<W, BgzfError> {
+        if !self.buf.is_empty() || self.next_submit != 0 {
+            return Err(BgzfError::AlreadyFinished);
+        }
+        let inner = self.inner.take().ok_or(BgzfError::AlreadyFinished)?;
+        self.shutdown();
+        Ok(inner)
+    }
+
     /// Close the job queue and wait for the workers to exit.
     fn shutdown(&mut self) {
         *self.jobs = None;
@@ -568,6 +586,15 @@ impl<W: Write> BgzfSink<W> {
         } else {
             ParallelBgzfWriter::new(inner, level, threads).map(Self::Parallel)
         }
+    }
+
+    /// The same stream with `threads` workers instead, before anything is written.
+    pub(crate) fn with_threads(self, level: i32, threads: usize) -> Result<Self, BgzfError> {
+        let inner = match self {
+            Self::Serial(w) => w.into_unwritten_inner()?,
+            Self::Parallel(w) => w.into_unwritten_inner()?,
+        };
+        Self::new(inner, level, threads)
     }
 
     #[expect(

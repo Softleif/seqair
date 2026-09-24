@@ -185,6 +185,56 @@ impl<W: Write> Writer<W> {
         Writer { inner, contig_names: Vec::new(), _state: PhantomData }
     }
 
+    // r[impl record_encoder.compression_threads]
+    /// Compress BGZF blocks (`VcfGz`, `Bcf`) on `threads` worker threads.
+    /// Defaults to `0`: compress on the calling thread. Plain VCF is not
+    /// compressed and ignores this.
+    ///
+    /// The calling thread keeps encoding records and writes the compressed
+    /// blocks in order, so the output — and the coordinate index — is
+    /// byte-identical to the single-threaded writer's.
+    pub fn compression_threads(self, threads: usize) -> Result<Self, VcfError> {
+        let Writer { inner, contig_names, _state } = self;
+        let inner = match inner {
+            WriterInner::Vcf { .. } => inner,
+            WriterInner::VcfGz {
+                bgzf,
+                index,
+                buf,
+                fmt_keys,
+                sample_bufs,
+                n_samples,
+                info_tracker,
+            } => WriterInner::VcfGz {
+                bgzf: bgzf.with_threads(DEFAULT_LEVEL, threads)?,
+                index,
+                buf,
+                fmt_keys,
+                sample_bufs,
+                n_samples,
+                info_tracker,
+            },
+            WriterInner::Bcf {
+                bgzf,
+                index,
+                shared_buf,
+                indiv_buf,
+                n_samples,
+                info_tracker,
+                fmt_tracker,
+            } => WriterInner::Bcf {
+                bgzf: bgzf.with_threads(DEFAULT_LEVEL, threads)?,
+                index,
+                shared_buf,
+                indiv_buf,
+                n_samples,
+                info_tracker,
+                fmt_tracker,
+            },
+        };
+        Ok(Writer { inner, contig_names, _state })
+    }
+
     // r[impl record_encoder.write_header]
     /// Write the file header. Consumes the `Unstarted` writer and returns `Ready`.
     pub fn write_header(mut self, header: &VcfHeader) -> Result<Writer<W, Ready>, VcfError> {
