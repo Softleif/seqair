@@ -616,12 +616,14 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             let avail = self.buf.len().wrapping_sub(self.buf_pos);
             let need = out.len().wrapping_sub(written);
             let n = avail.min(need);
-            let dst =
-                out.get_mut(written..written.wrapping_add(n)).ok_or(BgzfError::TruncatedBlock)?;
-            let src = self
-                .buf
-                .get(self.buf_pos..self.buf_pos.wrapping_add(n))
-                .ok_or(BgzfError::TruncatedBlock)?;
+            // Bounds are checked here rather than with `get().ok_or(..)`: an
+            // eagerly built error is dropped on every call that succeeds.
+            let (Some(dst), Some(src)) = (
+                out.get_mut(written..written.wrapping_add(n)),
+                self.buf.get(self.buf_pos..self.buf_pos.wrapping_add(n)),
+            ) else {
+                return Err(BgzfError::TruncatedBlock);
+            };
             dst.copy_from_slice(src);
             self.buf_pos = self.buf_pos.wrapping_add(n);
             written = written.wrapping_add(n);
@@ -652,7 +654,9 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         if self.buf_pos >= self.buf.len() && !self.read_block()? {
             return Err(BgzfError::UnexpectedEof);
         }
-        let b = self.buf.get(self.buf_pos).copied().ok_or(BgzfError::TruncatedBlock)?;
+        let Some(&b) = self.buf.get(self.buf_pos) else {
+            return Err(BgzfError::TruncatedBlock);
+        };
         self.buf_pos = self.buf_pos.wrapping_add(1);
         Ok(b)
     }
@@ -696,16 +700,13 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             return Ok(None);
         }
 
-        // Fast-path u32 read: all 4 bytes in the current block.
-        let block_size = if self.buf_pos.wrapping_add(4) <= self.buf.len() {
-            let bytes = self
-                .buf
-                .get(self.buf_pos..self.buf_pos.wrapping_add(4))
-                .ok_or(BgzfError::TruncatedBlock)?;
-            let val = u32::from_le_bytes(bytes.try_into().map_err(|_| BgzfError::TruncatedBlock)?)
-                as usize;
+        // Fast-path u32 read: all 4 bytes in the current block. No eagerly
+        // built `BgzfError` on this path: dropping the unused one on every
+        // record showed up in profiles.
+        let head = self.buf.get(self.buf_pos..).and_then(<[u8]>::first_chunk::<4>).copied();
+        let block_size = if let Some(bytes) = head {
             self.buf_pos = self.buf_pos.wrapping_add(4);
-            val
+            u32::from_le_bytes(bytes) as usize
         } else {
             let mut len_buf = [0u8; 4];
             self.read_exact_into(&mut len_buf)?;
@@ -719,12 +720,19 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         }
 
         // Fast path: the entire record body is already in the decompressed buffer.
-        if self.buf_pos.wrapping_add(block_size) <= self.buf.len() {
-            let slice = self
-                .buf
-                .get(self.buf_pos..self.buf_pos.wrapping_add(block_size))
-                .ok_or(BgzfError::TruncatedBlock)?;
-            self.buf_pos = self.buf_pos.wrapping_add(block_size);
+        let body_end = self.buf_pos.wrapping_add(block_size);
+        if body_end <= self.buf.len() {
+            debug_assert!(
+                self.buf_pos <= body_end,
+                "buf_pos {} > body_end {body_end}",
+                self.buf_pos
+            );
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "buf_pos ≤ body_end ≤ buf.len() checked above"
+            )]
+            let slice = &self.buf[self.buf_pos..body_end];
+            self.buf_pos = body_end;
             return Ok(Some(slice));
         }
 
