@@ -25,18 +25,18 @@ const LOWER_BOUND: u32 = 1 << 23;
 
 /// Reusable allocations for rANS 4x8 order-1 decoding.
 ///
-/// Order-1 needs three large tables per block: frequency array (128 KB),
-/// cumulative frequency array (128 KB), and symbol lookup table (1 MB).
-/// Allocating them fresh for every block dominated CRAM decode profiles.
-/// This struct holds one of each; zero it or overwrite it per block.
+/// Order-1 keeps two tables per context: the slot → symbol table (4 KiB)
+/// and the symbol → step table (1 KiB, see [`step_entry`]). Allocating
+/// them fresh for every block dominated CRAM decode profiles, so the
+/// reader keeps one set; a block rebuilds only the rows it can reach.
 pub(crate) struct Rans4x8Buf {
-    pub freq: Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>,
-    pub cum_freq: Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>,
-    pub sym_tables: Box<[[u8; 4096]; ALPHABET_SIZE]>,
-    /// Packed rows (see `rans_nx16::pack_row`) of the active contexts;
-    /// 4 MiB of zeroed memory of which a block touches only those rows.
-    packed: Box<[PackedRow; ALPHABET_SIZE]>,
+    freq: Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>,
+    sym_tables: Box<[SymRow; ALPHABET_SIZE]>,
+    steps: Box<[StepRow; ALPHABET_SIZE]>,
 }
+
+type SymRow = [u8; 4096];
+type StepRow = [u32; ALPHABET_SIZE];
 
 /// A zeroed `Box<[T; N]>` straight from the allocator, never staged on the stack.
 fn zeroed_box<T: Clone, const N: usize>(zero: T) -> Box<[T; N]> {
@@ -50,9 +50,8 @@ impl Rans4x8Buf {
     pub fn new() -> Self {
         Self {
             freq: zeroed_box([0u16; ALPHABET_SIZE]),
-            cum_freq: zeroed_box([0u16; ALPHABET_SIZE]),
             sym_tables: zeroed_box([0u8; 4096]),
-            packed: zeroed_box([0u32; ROW]),
+            steps: zeroed_box([0u32; ALPHABET_SIZE]),
         }
     }
 }
@@ -138,37 +137,31 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     Ok(())
 }
 
+#[cfg(test)]
+struct Tables {
+    freq: Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>,
+    cum_freq: Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>,
+    sym_tables: Box<[[u8; 4096]; ALPHABET_SIZE]>,
+}
+
+/// The reference order-1 decoder the fast one is tested against: every
+/// row built, inactive ones from all-zero frequencies.
+#[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
     reason = "indices are bounded: ctx/sym ≤ 255 (u8), f ≤ 4095 (12-bit mask)"
 )]
-fn decode_order_1_buf(
-    src: &mut &[u8],
-    dst: &mut [u8],
-    buf: &mut Rans4x8Buf,
-) -> Result<(), CramError> {
-    // See decode_order_0 for the lazy-CramError pattern.
+fn decode_order_1_buf(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     let truncated = || CramError::Truncated { context: "rans order-1 truncated" };
-    // Inactive rows are zeroed so a reused buffer's earlier blocks cannot
-    // leak into this one.
-    let active = read_frequencies_1_into(src, &mut buf.freq)?;
-    for (a, row) in active.iter().zip(buf.freq.iter_mut()) {
-        if !a {
-            row.fill(0);
-        }
+    let mut freq = zeroed_box([0u16; ALPHABET_SIZE]);
+    read_frequencies_1_into(src, &mut freq)?;
+    let mut cum_freq = zeroed_box([0u16; ALPHABET_SIZE]);
+    let mut sym_tables = zeroed_box([0u8; 4096]);
+    for ((f, cum), table) in freq.iter().zip(cum_freq.iter_mut()).zip(sym_tables.iter_mut()) {
+        *cum = build_cumulative_frequencies(f);
+        *table = build_symbol_table(cum);
     }
-
-    for (((a, freq), cum), table) in active
-        .iter()
-        .zip(buf.freq.iter())
-        .zip(buf.cum_freq.iter_mut())
-        .zip(buf.sym_tables.iter_mut())
-    {
-        *cum = build_cumulative_frequencies(freq);
-        // An inactive (zeroed) row decodes every slot to 255, which is what
-        // the scan would compute, without the scan.
-        *table = if *a { build_symbol_table(cum) } else { [255; 4096] };
-    }
+    let buf = Tables { freq, cum_freq, sym_tables };
 
     let mut states = read_states(src).ok_or_else(truncated)?;
     let mut prev_syms = [0u8; 4];
@@ -216,15 +209,92 @@ fn decode_order_1_buf(
     Ok(())
 }
 
-// ── Packed fast path ─────────────────────────────────────────────────
+// ── Fast path ────────────────────────────────────────────────────────
 //
-// The rANS Nx16 packed tables (`rans_nx16::pack_row`) with byte-wise
-// renormalization. A table packs only if its frequencies sum to exactly
-// 4096; then a step leaves a state ≥ `LOWER_BOUND` at ≥ 2^11, and at most
-// two renorm bytes lift it back, which `renorm_branchless` does without a
-// branch. The fast loop runs while every initial state was ≥ `LOWER_BOUND`
-// and 8 bytes remain; the rest runs the checked `renormalize`. Tables that
-// do not pack take the unpacked decoders, which stay the reference.
+// htscodecs' layout: per context a slot → symbol table (u8) and a symbol →
+// step table, 5 KiB a context where a packed slot table takes 16 KiB, so a
+// quality stream's few dozen contexts stay in L1/L2. The step is the
+// reference decoder's own arithmetic, so any table decodes exactly as there.
+// What the fast loop adds is a branch-free renormalization of 0, 1 or 2
+// bytes, all four states' taken from one big-endian load. That is exact
+// when a step leaves x ≥ 2^11 (x ≥ 2^23 before, and the symbol's frequency
+// ≥ 1); a round where some state falls below runs checked instead.
+
+/// The unpacked decoder's step inputs for one symbol, `cum << 16 | freq`.
+fn step_entry(freq: u16, cum: u16) -> u32 {
+    (u32::from(cum) << 16) | u32::from(freq)
+}
+
+/// `freq · (x >> 12) + (x & 0xFFF) − cum`, the reference decoder's step.
+#[inline(always)]
+fn step(x: u32, entry: u32) -> u32 {
+    (entry & 0xFFFF).wrapping_mul(x >> 12).wrapping_add(x & 0x0FFF).wrapping_sub(entry >> 16)
+}
+
+/// The rows a context's frequencies give the reference decoder: the scan's
+/// slot → symbol table, and [`step_entry`] per symbol.
+fn build_row(freq: &[u16; ALPHABET_SIZE], syms: &mut SymRow, steps: &mut StepRow) {
+    let cum = build_cumulative_frequencies(freq);
+    fill_symbol_table(freq, &cum, syms);
+    for ((e, &f), &c) in steps.iter_mut().zip(freq).zip(&cum) {
+        *e = step_entry(f, c);
+    }
+}
+
+/// [`build_symbol_table`] without the per-slot scan when the frequencies
+/// total at most 4096: each symbol then owns `cum..cum + freq`, and the
+/// slots past the total fall through to 255, as the scan finds.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "cum + freq ≤ total ≤ 4096 is checked first"
+)]
+fn fill_symbol_table(freq: &[u16; ALPHABET_SIZE], cum: &[u16; ALPHABET_SIZE], syms: &mut SymRow) {
+    let total: u32 = freq.iter().map(|&f| u32::from(f)).sum();
+    if total > 4096 {
+        *syms = build_symbol_table(cum);
+        return;
+    }
+    let mut sym = 0u8;
+    for (&f, &c) in freq.iter().zip(cum) {
+        let c = usize::from(c);
+        syms[c..c + usize::from(f)].fill(sym);
+        sym = sym.wrapping_add(1);
+    }
+    syms[total as usize..].fill(255);
+}
+
+/// Renormalize four stepped states (each ≥ 2^11) from the next 8 bytes,
+/// in state order; returns how many bytes they took.
+#[inline(always)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "n ≤ 2 per state; the top 16 bits of a u64 fit a u32"
+)]
+fn renorm4(xs: &mut [u32; 4], next8: &[u8; 8]) -> usize {
+    let mut w = u64::from_be_bytes(*next8);
+    let mut used = 0;
+    for x in xs {
+        let n = u32::from(*x < LOWER_BOUND) + u32::from(*x < 1 << 15);
+        let shift = 8 * n;
+        *x = (*x << shift) | ((w >> 48) as u32 >> (16 - shift));
+        w <<= shift;
+        used += n as usize;
+    }
+    used
+}
+
+/// The next 8 stream bytes at `pos`, if there are 8.
+#[inline(always)]
+fn next8(bytes: &[u8], pos: usize) -> Option<&[u8; 8]> {
+    bytes.get(pos..)?.first_chunk::<8>()
+}
+
+// ── Order 0: packed table ────────────────────────────────────────────
+//
+// One 16 KiB table fits L1, so order 0 keeps the rANS Nx16 packed slots
+// (`rans_nx16::pack_row`); see `r[cram.codec.rans4x8_packed]`.
 
 /// Up to two renorm bytes in one go: `n` = how many the scalar loop would
 /// read (0, 1 or 2, given x ≥ 2^11), then `x << 8n` takes the next `n`
@@ -334,118 +404,108 @@ fn decode_order_0_fast(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError>
     Ok(())
 }
 
-// r[impl cram.codec.rans4x8_packed]
+/// Builds the rows of every context the block can reach — 0, the symbols
+/// its active contexts decode, and 255, which a slot past a row's total
+/// and every inactive row decode to — inactive ones from all-zero
+/// frequencies, as the reference decoder does. Other rows keep stale
+/// contents that the stream never reads.
+fn build_order_1_rows(active: &[bool; ALPHABET_SIZE], buf: &mut Rans4x8Buf) {
+    let mut reachable = [false; ALPHABET_SIZE];
+    let [first, .., last] = &mut reachable;
+    (*first, *last) = (true, true);
+    for (row, _) in buf.freq.iter().zip(active).filter(|(_, a)| **a) {
+        for (r, &f) in reachable.iter_mut().zip(row) {
+            *r |= f != 0;
+        }
+    }
+    let rows = buf.freq.iter().zip(buf.sym_tables.iter_mut()).zip(buf.steps.iter_mut());
+    for (((freq, syms), steps), (&a, &r)) in rows.zip(active.iter().zip(&reachable)) {
+        if a {
+            build_row(freq, syms, steps);
+        } else if r {
+            syms.fill(255);
+            steps.fill(step_entry(0, 0));
+        }
+    }
+}
+
+// r[impl cram.codec.rans4x8_fast]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    clippy::arithmetic_side_effects,
+    reason = "contexts are u8 < 256 rows, x & 0xFFF < 4096; i < chunk, the length of each quarter"
+)]
 fn decode_order_1_fast(
     src: &mut &[u8],
     dst: &mut [u8],
     buf: &mut Rans4x8Buf,
 ) -> Result<(), CramError> {
-    let mut cur = *src;
-    let active = read_frequencies_1_into(&mut cur, &mut buf.freq)?;
-    let packs = active
-        .iter()
-        .zip(buf.freq.iter())
-        .zip(buf.packed.iter_mut())
-        .filter(|((a, _), _)| **a)
-        .all(|((_, f), row)| read_packed_row(f, row));
-    if !packs {
-        return decode_order_1_buf(src, dst, buf);
-    }
-    // Unlike Nx16, each 4x8 context has its own symbol set, so a decoded
-    // symbol need not be an active context. Every context the stream can
-    // reach — 0, any symbol with a frequency, and 255 behind a SLOW_SLOT —
-    // that is not active gets the unpacked decoder's all-zero row, decoded
-    // exactly via SLOW_SLOT.
-    let mut reachable = [false; ALPHABET_SIZE];
-    for ((row, packed), _) in
-        buf.freq.iter().zip(buf.packed.iter()).zip(&active).filter(|(_, a)| **a)
-    {
-        for (r, &f) in reachable.iter_mut().zip(row) {
-            *r |= f != 0;
-        }
-        if packed.last() == Some(&SLOW_SLOT)
-            && let Some(r) = reachable.last_mut()
-        {
-            *r = true;
-        }
-    }
-    if let Some(r) = reachable.first_mut() {
-        *r = true;
-    }
-    // A reached inactive row decodes to 255 everywhere, so 255 is reached too.
-    if reachable.iter().zip(&active).any(|(r, a)| *r && !*a)
-        && let Some(r) = reachable.last_mut()
-    {
-        *r = true;
-    }
-    for (((r, a), f), row) in
-        reachable.iter().zip(&active).zip(buf.freq.iter_mut()).zip(buf.packed.iter_mut())
-    {
-        if *r && !*a {
-            f.fill(0);
-            row.fill(SLOW_SLOT);
-        }
-    }
     let truncated = || CramError::Truncated { context: "rans order-1 truncated" };
-    let (table, freq) = (&buf.packed, &buf.freq);
-    let mut states = read_states(&mut cur).ok_or_else(truncated)?;
-    let bytes = cur;
+    let active = read_frequencies_1_into(src, &mut buf.freq)?;
+    build_order_1_rows(&active, buf);
+    let (syms, steps) = (&*buf.sym_tables, &*buf.steps);
+    let mut xs = read_states(src).ok_or_else(truncated)?;
+    let bytes = *src;
     let mut pos = 0usize;
     let chunk = dst.len() / 4;
+    let (q0, rest) = dst.split_at_mut(chunk);
+    let (q1, rest) = rest.split_at_mut(chunk);
+    let (q2, rest) = rest.split_at_mut(chunk);
+    let (q3, leftover) = rest.split_at_mut(chunk);
+    let mut quarters = [q0, q1, q2, q3];
     let mut ctx = [0u8; 4];
     let mut i = 0usize;
+    // One checked step of state `j`.
+    let checked = |x: &mut u32, c: &mut u8, rest: &mut &[u8], renorm: bool| {
+        let row = usize::from(*c);
+        *c = syms[row][(*x & 0xFFF) as usize];
+        *x = step(*x, steps[row][usize::from(*c)]);
+        if renorm {
+            renormalize(x, rest).ok_or_else(truncated)?;
+        }
+        Ok::<u8, CramError>(*c)
+    };
 
-    #[allow(
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        clippy::cast_possible_truncation,
-        reason = "ctx: u8 < 256 rows, x & 0xFFF < ROW; j·chunk + i < 4·chunk ≤ dst.len(); the low byte of a slot is its symbol"
-    )]
-    {
-        if states.iter().all(|&x| x >= LOWER_BOUND) {
-            while i < chunk && bytes.len().saturating_sub(pos) >= 8 {
-                let slots: [u32; 4] = std::array::from_fn(|j| {
-                    table[usize::from(ctx[j])][(states[j] & 0xFFF) as usize]
-                });
-                if slots.contains(&SLOW_SLOT) {
-                    break;
+    if xs.iter().all(|&x| x >= LOWER_BOUND) {
+        while i < chunk
+            && let Some(w) = next8(bytes, pos)
+        {
+            let s: [u8; 4] =
+                std::array::from_fn(|j| syms[usize::from(ctx[j])][(xs[j] & 0xFFF) as usize]);
+            let mut next: [u32; 4] =
+                std::array::from_fn(|j| step(xs[j], steps[usize::from(ctx[j])][usize::from(s[j])]));
+            if next.iter().any(|&x| x < 1 << 11) {
+                let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
+                for ((q, x), c) in quarters.iter_mut().zip(&mut xs).zip(&mut ctx) {
+                    q[i] = checked(x, c, &mut rest, true)?;
                 }
-                for (j, ((c, x), slot)) in ctx.iter_mut().zip(&mut states).zip(slots).enumerate() {
-                    *c = slot as u8;
-                    dst[j * chunk + i] = *c;
-                    *x = renorm_branchless(packed_step(*x, slot, 12), bytes, &mut pos);
-                }
+                pos = bytes.len().wrapping_sub(rest.len());
                 i += 1;
+                continue;
             }
-        }
-        let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
-        for i in i..chunk {
-            for (j, (c, x)) in ctx.iter_mut().zip(&mut states).enumerate() {
-                let row = usize::from(*c);
-                let (sym, next) = checked_step(*x, table[row][(*x & 0xFFF) as usize], &freq[row]);
-                *c = sym;
-                dst[j * chunk + i] = sym;
-                *x = next;
-                renormalize(x, &mut rest).ok_or_else(truncated)?;
+            pos = pos.wrapping_add(renorm4(&mut next, w));
+            for (q, &sym) in quarters.iter_mut().zip(&s) {
+                q[i] = sym;
             }
+            ctx = s;
+            xs = next;
+            i += 1;
         }
-        // The last state decodes the leftover bytes and skips the renorm
-        // after the very last one, as the unpacked decoder does.
-        let leftover = &mut dst[chunk * 4..];
-        let last = leftover.len().wrapping_sub(1);
-        for (k, d) in leftover.iter_mut().enumerate() {
-            let row = usize::from(ctx[3]);
-            let (sym, next) =
-                checked_step(states[3], table[row][(states[3] & 0xFFF) as usize], &freq[row]);
-            ctx[3] = sym;
-            *d = sym;
-            states[3] = next;
-            if k != last {
-                renormalize(&mut states[3], &mut rest).ok_or_else(truncated)?;
-            }
-        }
-        *src = rest;
     }
+    let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
+    for i in i..chunk {
+        for ((q, x), c) in quarters.iter_mut().zip(&mut xs).zip(&mut ctx) {
+            q[i] = checked(x, c, &mut rest, true)?;
+        }
+    }
+    // The last state decodes the leftover bytes and skips the renorm
+    // after the very last one, as the reference decoder does.
+    let last = leftover.len().wrapping_sub(1);
+    for (k, d) in leftover.iter_mut().enumerate() {
+        *d = checked(&mut xs[3], &mut ctx[3], &mut rest, k != last)?;
+    }
+    *src = rest;
     Ok(())
 }
 
@@ -781,7 +841,7 @@ mod tests {
         assert_eq!(result, b"noodles");
     }
 
-    // ── Packed fast path vs the unpacked decoders ───────────────────────
+    // ── Fast paths vs the reference decoders ────────────────────────────
 
     #[allow(clippy::cast_possible_truncation, reason = "v < 0x4000")]
     fn itf8_u16(v: u32) -> Vec<u8> {
@@ -902,11 +962,11 @@ mod tests {
         assert_same("packed", run(decode_order_0_fast), &run(decode_order_0));
     }
 
-    // r[verify cram.codec.rans4x8_packed]
-    /// Order-1: the packed decoder against the unpacked one, and a reused
-    /// buffer against a fresh one.
+    // r[verify cram.codec.rans4x8_fast]
+    /// Order-1: the split-table decoder against the reference one, and a
+    /// reused buffer against a fresh one.
     #[hegel::test]
-    fn packed_order1_matches_unpacked(tc: TestCase) {
+    fn fast_order1_matches_reference(tc: TestCase) {
         let mut reused = Rans4x8Buf::new();
         for _ in 0..2 {
             let len = tc.draw(gs::integers::<usize>().max_value(400));
@@ -927,9 +987,9 @@ mod tests {
                 let r = f(&mut src, &mut dst, buf);
                 (r, dst, src.len())
             };
-            let want = run(decode_order_1_buf, &mut Rans4x8Buf::new());
-            assert_same("packed", run(decode_order_1_fast, &mut Rans4x8Buf::new()), &want);
-            assert_same("packed, reused buffer", run(decode_order_1_fast, &mut reused), &want);
+            let want = run(|src, dst, _| decode_order_1_buf(src, dst), &mut Rans4x8Buf::new());
+            assert_same("fast", run(decode_order_1_fast, &mut Rans4x8Buf::new()), &want);
+            assert_same("fast, reused buffer", run(decode_order_1_fast, &mut reused), &want);
         }
     }
 }
