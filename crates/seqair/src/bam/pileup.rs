@@ -169,6 +169,10 @@ struct ActiveRecord {
     flags: BamFlags,
     mapq: u8,
     seq_len: u32,
+    /// Slab offsets of this read's bases and qualities, so a column resolves
+    /// its base without a dependent load of the `SlimRecord`.
+    bases_off: u32,
+    qual_off: u32,
     matching_bases: u32,
     indel_bases: u32,
     // r[impl pileup.mate_link_cache]
@@ -190,14 +194,16 @@ fn base_qual_at<U>(
     active: &ActiveRecord,
     qpos: QPos,
 ) -> (Base, BaseQuality) {
-    if active.seq_len == 0 {
+    // Past the read's own bases (which covers `SEQ=*`) is not another read's
+    // base: the slabs are shared, so check against the read's length.
+    if qpos.get() >= active.seq_len {
         return (Base::Unknown, BaseQuality::UNAVAILABLE);
     }
-    // Activation minted this index from this store, so one resolution serves
-    // both reads where there used to be one each.
-    let rec = store.record_at(active.record_idx);
-    let q = rec.qual().get(qpos.as_usize()).copied().unwrap_or(BaseQuality::UNAVAILABLE);
-    (rec.base_at(qpos), q)
+    let q = qpos.as_usize();
+    store.base_qual_at_offsets(
+        (active.bases_off as usize).wrapping_add(q),
+        (active.qual_off as usize).wrapping_add(q),
+    )
 }
 
 // r[impl pileup.column_contents]
@@ -1097,12 +1103,15 @@ impl<U> PileupEngine<U> {
                 });
                 // Build it before touching `self.active*`: `rec` borrows
                 // `self.store`, and the pushes need `&mut self`.
+                let (bases_off, qual_off) = RecordStore::<U>::seq_qual_offsets(&rec);
                 let active = ActiveRecord {
                     record_idx: idx,
                     cigar,
                     flags: rec.flags,
                     mapq: rec.mapq,
                     seq_len: rec.seq_len,
+                    bases_off,
+                    qual_off,
                     matching_bases: rec.matching_bases,
                     indel_bases: rec.indel_bases,
                     mate_idx: rec.mate_idx(),

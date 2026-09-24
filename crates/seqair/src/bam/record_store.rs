@@ -1482,6 +1482,24 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl bam.record.seq_at]
+    /// The slab offsets of `rec`'s bases and qualities, for a caller that
+    /// resolves many positions of the same read (the pileup engine caches
+    /// them per active read so a column never re-reads the `SlimRecord`).
+    pub(crate) fn seq_qual_offsets(rec: &SlimRecord) -> (u32, u32) {
+        (rec.bases_off, rec.qual_off)
+    }
+
+    /// Base and quality at `i` of the bases and qual slabs; `i` comes from
+    /// [`Self::seq_qual_offsets`] plus a `qpos` the caller checked against
+    /// the read's `seq_len`.
+    #[inline]
+    pub(crate) fn base_qual_at_offsets(&self, base_i: usize, qual_i: usize) -> (Base, BaseQuality) {
+        let base = self.bases.get(base_i).copied().unwrap_or(Base::Unknown);
+        let qual =
+            self.qual.get(qual_i).map_or(BaseQuality::UNAVAILABLE, |&q| BaseQuality::from_byte(q));
+        (base, qual)
+    }
+
     pub(crate) fn base_at_of(&self, rec: &SlimRecord, qpos: QPos) -> Base {
         // Past the record's own bases is `Unknown`, not another record's base:
         // the slab is shared, so the length has to be checked, not just the

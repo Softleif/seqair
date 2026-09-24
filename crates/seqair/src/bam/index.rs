@@ -1034,12 +1034,13 @@ mod tests {
     /// ids included.
     #[hegel::test]
     fn query_split_matches_full_bin_scan(tc: TestCase) {
-        let bins: Vec<(u32, Vec<Chunk>)> = tc.draw(
-            gs::vecs(gs::tuples!(arb_bin_id(), gs::vecs(arb_chunk()).max_size(3))).max_size(40),
-        )
-        .into_iter()
-        .map(|(id, cs)| (id, cs.into_iter().map(|(b, e)| chunk(b, e)).collect()))
-        .collect();
+        let bins: Vec<(u32, Vec<Chunk>)> = tc
+            .draw(
+                gs::vecs(gs::tuples!(arb_bin_id(), gs::vecs(arb_chunk()).max_size(3))).max_size(40),
+            )
+            .into_iter()
+            .map(|(id, cs)| (id, cs.into_iter().map(|(b, e)| chunk(b, e)).collect()))
+            .collect();
         let start = tc.draw(gs::integers::<u32>().max_value(1 << 22));
         let end = tc.draw(gs::integers::<u32>().min_value(start).max_value(start + 200_000));
 
