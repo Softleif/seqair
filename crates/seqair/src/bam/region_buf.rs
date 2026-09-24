@@ -47,6 +47,15 @@ const FIRST_READ: usize = MAX_BLOCK_SIZE;
 /// query; a larger one (a big query's) is freed with its `RegionBuf`.
 const WINDOW_KEEP: usize = 4 * 1024 * 1024;
 
+/// Most new entries one query adds to a [`BlockCache`]; past that it evicts.
+///
+/// Every new entry is a fresh 64 KiB buffer. A reader opened for a single
+/// large query would otherwise fault in all [`BLOCK_CACHE_BLOCKS`] of them
+/// (+7% on the `bam_record_decode` bench, which opens a reader per
+/// iteration) for blocks no later query will read. Growing by at most this
+/// many per query still fills the cache within a handful of small queries.
+const GROWTH_PER_QUERY: usize = 8;
+
 /// How many decompressed BGZF blocks a [`BlockCache`] keeps.
 ///
 /// A query starts at the linear-index minimum of its first 16 kb window, so
@@ -76,6 +85,10 @@ pub(crate) struct BlockCache {
     capacity: usize,
     /// Recency clock: bumped on every `put`, stamped on the entry.
     clock: u64,
+    /// Most entries the current query may leave: the count it started
+    /// with plus [`GROWTH_PER_QUERY`], within `capacity`. Blocks it takes and
+    /// hands back don't count against it.
+    query_limit: usize,
     /// An empty buffer to hand out while the cache is still filling.
     spare: Vec<u8>,
     /// Per-query setup kept for the next query: the file length (one
@@ -115,11 +128,17 @@ impl BlockCache {
             entries: Vec::new(),
             capacity,
             clock: 0,
+            query_limit: 0,
             spare: Vec::new(),
             file_size: None,
             decompressor: None,
             window: Vec::new(),
         }
+    }
+
+    /// Start a query: it may add up to [`GROWTH_PER_QUERY`] new entries.
+    fn begin_query(&mut self) {
+        self.query_limit = self.entries.len().saturating_add(GROWTH_PER_QUERY).min(self.capacity);
     }
 
     /// Compressed length of the cached block at `offset`.
@@ -143,7 +162,7 @@ impl BlockCache {
         // used entry once full.
         let slot = match self.entries.iter().position(|e| e.offset == offset) {
             Some(i) => self.entries.get_mut(i),
-            None if self.entries.len() < self.capacity => None,
+            None if self.entries.len() < self.query_limit => None,
             None => self.entries.iter_mut().min_by_key(|e| e.last_used),
         };
         let mut recycled = match slot {
@@ -299,6 +318,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         };
         let (window, buf, decompressor) = match cache {
             Some(ref mut c) => {
+                c.begin_query();
                 c.file_size = Some(file_size);
                 let mut window = std::mem::take(&mut c.window);
                 window.clear();
