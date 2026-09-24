@@ -33,6 +33,46 @@ use crate::{
     types::Log10Likelihood,
 };
 
+/// The one escape hatch: `masked` and `masked_out` as a plain `and` and
+/// `andnot` on the AVX2 level, each a safe `fearless_simd::kernel!`.
+///
+/// The portable spelling, `mask.select(value, zero)`, is a `vblendvps`, which
+/// reads only each lane's sign bit. LLVM folds the zero operand into an `and`
+/// but cannot see through `vcmpps` that the mask is already whole, so it
+/// sign-extends it first with a `vpcmpgtb` -- one per site, four per strip
+/// step, five per batch step. On the 3950X that was 11% more cycles on the
+/// strip kernel and 11% on the batch kernel (notes §11). NEON needs no hatch:
+/// the portable spelling already lowers to `and`/`bic` there. Nor does
+/// AVX-512, whose masks are `k` registers, where a `select` against zero is a
+/// zero-masked move and already the best spelling.
+///
+/// Other hatches were measured and dropped: the hand-written lane's `vpermps`
+/// lane shift, and a `vperm2f128` + `vpalignr` one, each fewer instructions
+/// than the portable `shift_elements_right` and each 1-2% slower with loops
+/// aligned (§11).
+#[cfg(target_arch = "x86_64")]
+mod x86 {
+    use core::arch::x86_64::{__m256, __m256i};
+
+    fearless_simd::kernel!(
+        /// `value` where `mask` is set, as one `vandps`.
+        #[inline(always)]
+        pub(super) fn and(_avx2: Avx2, mask: __m256i, value: __m256) -> __m256 {
+            use core::arch::x86_64::{_mm256_and_ps, _mm256_castsi256_ps};
+            _mm256_and_ps(_mm256_castsi256_ps(mask), value)
+        }
+    );
+
+    fearless_simd::kernel!(
+        /// `value` where `mask` is clear, as one `vandnps`.
+        #[inline(always)]
+        pub(super) fn and_not(_avx2: Avx2, mask: __m256i, value: __m256) -> __m256 {
+            use core::arch::x86_64::{_mm256_andnot_ps, _mm256_castsi256_ps};
+            _mm256_andnot_ps(_mm256_castsi256_ps(mask), value)
+        }
+    );
+}
+
 impl<S: Simd> LaneMask for mask32x8<S> {
     #[inline(always)]
     fn either(self, other: Self) -> Self {
@@ -104,11 +144,19 @@ impl<S: Simd> Lane for f32x8<S> {
 
     #[inline(always)]
     fn masked(mask: mask32x8<S>, value: Self) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        if let Level::Avx2(avx2) = value.simd.level() {
+            return Self::simd_from(value.simd, x86::and(avx2, mask.into(), value.into()));
+        }
         mask.select(value, <Self as SimdBase<S>>::splat(value.simd, 0.0))
     }
 
     #[inline(always)]
     fn masked_out(mask: mask32x8<S>, value: Self) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        if let Level::Avx2(avx2) = value.simd.level() {
+            return Self::simd_from(value.simd, x86::and_not(avx2, mask.into(), value.into()));
+        }
         mask.select(<Self as SimdBase<S>>::splat(value.simd, 0.0), value)
     }
 
