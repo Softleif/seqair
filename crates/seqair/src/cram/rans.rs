@@ -17,7 +17,6 @@
     reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
 )]
 
-use super::rans_nx16::{PackedRow, ROW, pack_row_to, packed_step};
 use super::reader::CramError;
 
 const ALPHABET_SIZE: usize = 256;
@@ -105,6 +104,8 @@ pub(crate) fn decode_with_buf(src: &[u8], buf: &mut Rans4x8Buf) -> Result<Vec<u8
     Ok(dst)
 }
 
+/// The reference order-0 decoder the fast one is tested against.
+#[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
     reason = "indices are bounded: f ≤ 4095 (12-bit mask), sym/i ≤ 255 (u8)"
@@ -291,117 +292,182 @@ fn next8(bytes: &[u8], pos: usize) -> Option<&[u8; 8]> {
     bytes.get(pos..)?.first_chunk::<8>()
 }
 
-// ── Order 0: packed table ────────────────────────────────────────────
+// ── Order 0: split slot tables ───────────────────────────────────────
 //
-// One 16 KiB table fits L1, so order 0 keeps the rANS Nx16 packed slots
-// (`rans_nx16::pack_row`); see `r[cram.codec.rans4x8_packed]`.
+// htscodecs' `rans_uncompress_O0` layout: per slot the symbol, its
+// frequency and the slot's offset into the symbol's range, in three
+// tables, so a step is `f·(x >> 12) + bias` with all three loads
+// independent and no field extraction. Built from the reference decoder's
+// scan, the tables give its step bit for bit, whatever the total.
 
-/// Up to two renorm bytes in one go: `n` = how many the scalar loop would
-/// read (0, 1 or 2, given x ≥ 2^11), then `x << 8n` takes the next `n`
-/// bytes big-endian. The caller guarantees two readable bytes at `pos`.
-#[inline(always)]
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "n ≤ 2; x < 2^15 when shifted by 16, < 2^23 by 8"
-)]
-fn renorm_branchless(x: u32, bytes: &[u8], pos: &mut usize) -> u32 {
-    let w = bytes
-        .get(*pos..)
-        .and_then(|w| w.first_chunk::<2>())
-        .map_or(0, |w| u32::from(u16::from_be_bytes(*w)));
-    let n = u32::from(x < LOWER_BOUND) + u32::from(x < 1 << 15);
-    *pos += n as usize;
-    let shift = 8 * n;
-    (x << shift) | (w >> (16 - shift))
+/// Slots per order-0 table.
+const SLOTS: usize = 4096;
+
+/// The order-0 slot tables, and the first slot whose step may leave a
+/// state below 2^11 (`SLOTS` if none).
+struct Order0Tables {
+    sym: [u8; SLOTS],
+    freq: [u16; SLOTS],
+    bias: [u16; SLOTS],
+    fast_limit: usize,
 }
 
-/// Slot value that sends a step to [`exact_step`]; see [`read_packed_row`].
-const SLOW_SLOT: u32 = u32::MAX;
-
-/// Packs a 4x8 table. htscodecs' 4x8 encoder normalizes to 4095, not 4096,
-/// leaving slot 4095 to no symbol; the unpacked decoder's scan gives that
-/// slot symbol 255 with whatever frequency 255 has, zero included, which a
-/// packed slot cannot express. So a 4095 table packs with slot 4095 set to
-/// [`SLOW_SLOT`], and the decoders compute that slot exactly. (A real slot
-/// equal to `SLOW_SLOT` — symbol 255 at 4096 — gets the same exact answer.)
-#[allow(clippy::indexing_slicing, reason = "ROW − 1 is the last slot")]
-fn read_packed_row(freq: &[u16; ALPHABET_SIZE], row: &mut PackedRow) -> bool {
-    let freqs = || freq.iter().map(|&f| u32::from(f));
-    if pack_row_to(freqs(), 4096, row) {
-        return true;
-    }
-    if pack_row_to(freqs(), 4095, row) {
-        row[ROW - 1] = SLOW_SLOT;
-        return true;
-    }
-    false
-}
-
-/// The unpacked decoder's step at [`SLOW_SLOT`]: symbol 255, with its
-/// frequency and cumulative frequency, whatever they are.
-#[allow(clippy::indexing_slicing, reason = "255 < ALPHABET_SIZE")]
-fn exact_step(x: u32, freq: &[u16; ALPHABET_SIZE]) -> (u8, u32) {
-    let g = freq[..255].iter().fold(0u16, |a, &f| a.wrapping_add(f));
-    let x = u32::from(freq[255])
-        .wrapping_mul(x >> 12)
-        .wrapping_add(x & 0x0FFF)
-        .wrapping_sub(u32::from(g));
-    (255, x)
-}
-
-/// One checked step: the packed step, or the exact one at [`SLOW_SLOT`].
-#[inline(always)]
-#[allow(clippy::cast_possible_truncation, reason = "the low byte of a slot is its symbol")]
-fn checked_step(x: u32, slot: u32, freq: &[u16; ALPHABET_SIZE]) -> (u8, u32) {
-    if slot == SLOW_SLOT { exact_step(x, freq) } else { (slot as u8, packed_step(x, slot, 12)) }
-}
-
-// r[impl cram.codec.rans4x8_packed]
-fn decode_order_0_fast(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
-    let mut cur = *src;
-    let freq = read_frequencies_0(&mut cur)?;
-    let mut table = [0u32; ROW];
-    if !read_packed_row(&freq, &mut table) {
-        return decode_order_0(src, dst);
-    }
-    let truncated = || CramError::Truncated { context: "rans order-0 truncated" };
-    let mut states = read_states(&mut cur).ok_or_else(truncated)?;
-    let bytes = cur;
-    let mut pos = 0usize;
-    let (chunks, remainder) = dst.as_chunks_mut::<4>();
-    let mut chunks = chunks.iter_mut().peekable();
-
+impl Order0Tables {
+    /// The reference decoder's slot → (symbol, frequency, `slot − cum`).
+    /// Each symbol owns `cum..cum + freq`; the slots past the total go to
+    /// symbol 255, as the scan finds, and so does every slot past a total
+    /// over 4096, which takes the scan itself.
     #[allow(
         clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
         clippy::cast_possible_truncation,
-        reason = "x & 0xFFF < ROW; j < 4; the low byte of a slot is its symbol"
+        reason = "cum + freq ≤ total ≤ SLOTS is checked first; slot − cum[sym] ∈ [0, 4096) \
+                  because the scan only moves past a symbol whose range ends at or before the slot"
     )]
-    {
-        if states.iter().all(|&x| x >= LOWER_BOUND) {
-            while bytes.len().saturating_sub(pos) >= 8 {
-                let slots = states.map(|x| table[(x & 0xFFF) as usize]);
-                if slots.contains(&SLOW_SLOT) {
-                    break;
-                }
-                let Some(chunk) = chunks.next() else { break };
-                for ((d, x), slot) in chunk.iter_mut().zip(&mut states).zip(slots) {
-                    *d = slot as u8;
-                    *x = renorm_branchless(packed_step(*x, slot, 12), bytes, &mut pos);
-                }
+    fn new(freq: &[u16; ALPHABET_SIZE]) -> Self {
+        let mut t = Self { sym: [0; SLOTS], freq: [0; SLOTS], bias: [0; SLOTS], fast_limit: SLOTS };
+        let cum = build_cumulative_frequencies(freq);
+        let total: u32 = freq.iter().map(|&f| u32::from(f)).sum();
+        if total > SLOTS as u32 {
+            t.sym = build_symbol_table(&cum);
+            for (m, &s) in t.sym.iter().enumerate() {
+                t.freq[m] = freq[usize::from(s)];
+                t.bias[m] = (m as u16).wrapping_sub(cum[usize::from(s)]);
             }
+            // Frequencies over 4096 can wrap the step: nothing is fast.
+            t.fast_limit = 0;
+            return t;
         }
-
-        let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
-        let tail = chunks.flat_map(|c| c.iter_mut().zip(0usize..));
-        for (d, j) in tail.chain(remainder.iter_mut().zip(0usize..)) {
-            let (sym, x) = checked_step(states[j], table[(states[j] & 0xFFF) as usize], &freq);
-            *d = sym;
-            states[j] = x;
-            renormalize(&mut states[j], &mut rest).ok_or_else(truncated)?;
+        let mut s = 0u8;
+        for (&f, &c) in freq.iter().zip(&cum) {
+            let c = usize::from(c);
+            let range = c..c + usize::from(f);
+            t.sym[range.clone()].fill(s);
+            t.freq[range.clone()].fill(f);
+            for (b, y) in t.bias[range].iter_mut().zip(0u16..) {
+                *b = y;
+            }
+            s = s.wrapping_add(1);
         }
-        *src = rest;
+        let total = total as usize;
+        let (f255, c255) = (freq[255], usize::from(cum[255]));
+        t.sym[total..].fill(255);
+        t.freq[total..].fill(f255);
+        for (m, b) in t.bias.iter_mut().enumerate().skip(total) {
+            *b = (m - c255) as u16;
+        }
+        // A zero frequency leaves `bias < 2^12` alone, which may need more
+        // than two renorm bytes.
+        if f255 == 0 {
+            t.fast_limit = total;
+        }
+        t
     }
+
+    /// The reference decoder's step at slot `m = x & 0xFFF`.
+    #[inline(always)]
+    #[allow(clippy::indexing_slicing, reason = "m < SLOTS")]
+    fn step_at(&self, x: u32, m: usize) -> u32 {
+        u32::from(self.freq[m]).wrapping_mul(x >> 12).wrapping_add(u32::from(self.bias[m]))
+    }
+
+    /// The reference decoder's symbol and step at slot `x & 0xFFF`.
+    #[inline(always)]
+    #[allow(clippy::indexing_slicing, reason = "x & 0xFFF < SLOTS")]
+    fn step(&self, x: u32) -> (u8, u32) {
+        let m = (x & 0xFFF) as usize;
+        (self.sym[m], self.step_at(x, m))
+    }
+}
+
+/// htscodecs' `RansDecRenorm`: the first renorm byte taken branch-free (a
+/// cmov and a carry into the cursor), the rare second one behind a branch.
+/// Reads `w[k]`, `w[k + 1]` at most; the caller guarantees `x ≥ 2^7`, so
+/// two bytes lift it to 2^23, and that `k + 2 ≤ 8` for the reads it makes
+/// (the mask keeps the index in the window, and is exact under that bound).
+#[inline(always)]
+#[allow(clippy::indexing_slicing, reason = "k & 7 < 8")]
+fn renorm_cmov(x: u32, w: &[u8; 8], k: &mut usize) -> u32 {
+    let low = x < LOWER_BOUND;
+    let y = (x << 8) | u32::from(w[*k & 7]);
+    let x = core::hint::select_unpredictable(low, y, x);
+    *k = k.wrapping_add(usize::from(low));
+    if x < LOWER_BOUND {
+        let x = (x << 8) | u32::from(w[*k & 7]);
+        *k = k.wrapping_add(1);
+        x
+    } else {
+        x
+    }
+}
+
+// r[impl cram.codec.rans4x8_packed+2]
+fn decode_order_0_fast(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
+    let truncated = || CramError::Truncated { context: "rans order-0 truncated" };
+    let freq = read_frequencies_0(src)?;
+    let t = Order0Tables::new(&freq);
+    let mut states = read_states(src).ok_or_else(truncated)?;
+    let bytes = *src;
+    let (chunks, remainder) = dst.as_chunks_mut::<4>();
+    let (done, pos) = if states.iter().all(|&x| x >= LOWER_BOUND) {
+        order_0_rounds(&t, bytes, &mut states, chunks)
+    } else {
+        (0, 0)
+    };
+
+    let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
+    let tail = chunks.get_mut(done..).unwrap_or_default().iter_mut();
+    let tail = tail.flat_map(|c| c.iter_mut().zip(0usize..));
+    for (d, j) in tail.chain(remainder.iter_mut().zip(0usize..)) {
+        let x = states.get_mut(j).ok_or_else(truncated)?;
+        let (sym, next) = t.step(*x);
+        *d = sym;
+        *x = next;
+        renormalize(x, &mut rest).ok_or_else(truncated)?;
+    }
+    *src = rest;
     Ok(())
+}
+
+/// The fast order-0 rounds, four symbols each, from states all ≥ 2^23:
+/// one 8-byte window per round (each state takes at most two bytes, a
+/// step at a slot below `fast_limit` leaving x ≥ 2^11), so the stream needs
+/// no per-state bounds check. Stops before a round that meets a slot at or
+/// past `fast_limit` or lacks 8 bytes; returns the rounds done and the
+/// bytes taken.
+#[allow(clippy::indexing_slicing, clippy::cast_possible_truncation, reason = "x & 0xFFF < SLOTS")]
+fn order_0_rounds(
+    t: &Order0Tables,
+    bytes: &[u8],
+    states: &mut [u32; 4],
+    chunks: &mut [[u8; 4]],
+) -> (usize, usize) {
+    let [mut x0, mut x1, mut x2, mut x3] = *states;
+    let mut rest = bytes;
+    let n = chunks.len();
+    let mut out = chunks.iter_mut();
+    let limit = t.fast_limit;
+    while let Some(w) = rest.first_chunk::<8>() {
+        let (m0, m1, m2, m3) = (
+            (x0 & 0xFFF) as usize,
+            (x1 & 0xFFF) as usize,
+            (x2 & 0xFFF) as usize,
+            (x3 & 0xFFF) as usize,
+        );
+        if m0 >= limit || m1 >= limit || m2 >= limit || m3 >= limit {
+            break;
+        }
+        let Some(chunk) = out.next() else { break };
+        *chunk = [t.sym[m0], t.sym[m1], t.sym[m2], t.sym[m3]];
+        let mut k = 0usize;
+        x0 = renorm_cmov(t.step_at(x0, m0), w, &mut k);
+        x1 = renorm_cmov(t.step_at(x1, m1), w, &mut k);
+        x2 = renorm_cmov(t.step_at(x2, m2), w, &mut k);
+        x3 = renorm_cmov(t.step_at(x3, m3), w, &mut k);
+        rest = rest.get(k..).unwrap_or_default();
+    }
+    *states = [x0, x1, x2, x3];
+    (n.wrapping_sub(out.len()), bytes.len().wrapping_sub(rest.len()))
 }
 
 /// Builds the rows of every context the block can reach — 0, the symbols
@@ -945,10 +1011,10 @@ mod tests {
         }
     }
 
-    // r[verify cram.codec.rans4x8_packed]
-    /// Order-0: the packed decoder against the unpacked one.
+    // r[verify cram.codec.rans4x8_packed+2]
+    /// Order-0: the split-table decoder against the reference one.
     #[hegel::test]
-    fn packed_order0_matches_unpacked(tc: TestCase) {
+    fn fast_order0_matches_reference(tc: TestCase) {
         let len = tc.draw(gs::integers::<usize>().max_value(400));
         let syms = draw_syms(&tc, tc.draw(gs::booleans()));
         let mut stream = order0_table(&tc, &syms);
@@ -959,7 +1025,7 @@ mod tests {
             let r = f(&mut src, &mut dst);
             (r, dst, src.len())
         };
-        assert_same("packed", run(decode_order_0_fast), &run(decode_order_0));
+        assert_same("fast", run(decode_order_0_fast), &run(decode_order_0));
     }
 
     // r[verify cram.codec.rans4x8_fast]
