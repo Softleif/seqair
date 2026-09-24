@@ -361,17 +361,46 @@ fn encode_bases_simd<S: Simd>(simd: S, bases: &[u8], out: &mut [u8]) {
     let table = S::u8s::block_splat(u8x16::from_slice(simd, ENCODE_BASE_LO_NIBBLE));
     let vec_in = bases.chunks_exact(2 * n);
     let tail_in = vec_in.remainder();
-    // Split `out` by the count of *whole input* vectors: its own `chunks_exact`
-    // remainder would miss a tail that happens to fill a whole output vector.
-    let (vec_out, tail_out) = out.split_at_mut(bases.len().saturating_sub(tail_in.len()) / 2);
-    for (b, o) in vec_in.zip(vec_out.chunks_exact_mut(n)) {
-        let (b0, b1) = b.split_at(n);
-        let c0 = table.swizzle_dyn_within_blocks(S::u8s::from_slice(simd, b0) & 0x0F);
-        let c1 = table.swizzle_dyn_within_blocks(S::u8s::from_slice(simd, b1) & 0x0F);
-        let (even, odd) = c0.deinterleave(c1);
-        ((even << 4) | odd).store_slice(o);
+    for (b, o) in vec_in.zip(out.chunks_exact_mut(n)) {
+        encode_vector(simd, table, b, o);
     }
-    encode_seq_scalar_into(tail_in, tail_out);
+    if tail_in.is_empty() {
+        return;
+    }
+    // A ragged tail is one more vector overlapping the last whole one — the
+    // output is a pure function of the input, which is never written. It
+    // must start on a pair boundary, so an odd final base is left over for
+    // the scalar encoder. Shorter than two vectors: all scalar.
+    let pairs = bases.len() / 2;
+    let overlap = pairs.checked_sub(n).map(|p| (p * 2, p));
+    match overlap.and_then(|(b, o)| Some((bases.get(b..b + 2 * n)?, out.get_mut(o..o + n)?))) {
+        Some((b, o)) => {
+            encode_vector(simd, table, b, o);
+            if bases.len() % 2 == 1 {
+                let last = bases.len() - 1;
+                encode_seq_scalar_into(
+                    bases.get(last..).unwrap_or_default(),
+                    out.get_mut(last / 2..).unwrap_or_default(),
+                );
+            }
+        }
+        None => {
+            let done = bases.len() - tail_in.len();
+            encode_seq_scalar_into(tail_in, out.get_mut(done / 2..).unwrap_or_default());
+        }
+    }
+}
+
+/// One step of [`encode_bases_simd`]: `2 * LEN` bases into `LEN` packed
+/// bytes. A function, not a closure, so it keeps the level's target features.
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects, reason = "a 4-bit code shifted by 4 fits a u8")]
+fn encode_vector<S: Simd>(simd: S, table: S::u8s, bases: &[u8], out: &mut [u8]) {
+    let (b0, b1) = bases.split_at(S::u8s::LEN);
+    let c0 = table.swizzle_dyn_within_blocks(S::u8s::from_slice(simd, b0) & 0x0F);
+    let c1 = table.swizzle_dyn_within_blocks(S::u8s::from_slice(simd, b1) & 0x0F);
+    let (even, odd) = c0.deinterleave(c1);
+    ((even << 4) | odd).store_slice(out);
 }
 
 /// The 256-entry-table encoder over a pre-sized `out` of
