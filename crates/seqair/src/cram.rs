@@ -11,6 +11,13 @@ pub mod encoding;
 pub mod index;
 pub mod rans;
 pub mod rans_nx16;
+// The per-ISA Nx16 kernels became one `fearless_simd` kernel in `rans_nx16`.
+// These were public (with only crate-private items) in 0.3.0; keep the paths
+// so 0.3.1 stays semver-compatible.
+#[doc(hidden)]
+pub mod rans_nx16_avx2 {}
+#[doc(hidden)]
+pub mod rans_nx16_neon {}
 pub mod reader;
 pub mod slice;
 pub mod tok3;
