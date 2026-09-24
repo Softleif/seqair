@@ -395,14 +395,7 @@ impl OwnedBamRecord {
         }
 
         // Sequence: encode Base values to 4-bit packed
-        if !self.seq.is_empty() {
-            // Base is #[repr(u8)] with ASCII discriminants (A=0x41, C=0x43, G=0x47, T=0x54, N=0x4E).
-            // The compile-time assert in seqair-types guarantees size_of::<Base>() == 1.
-            // We collect to a byte vec rather than using unsafe transmute.
-            let seq_bytes: Vec<u8> = self.seq.iter().map(|b| *b as u8).collect();
-            let encoded = seq::encode_seq(&seq_bytes);
-            buf.extend_from_slice(&encoded);
-        }
+        seq::encode_bases_into(&self.seq, buf);
 
         // Quality scores
         if self.qual.is_empty() {

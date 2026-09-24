@@ -311,6 +311,85 @@ pub fn encode_seq_into(bases: &[u8], buf: &mut Vec<u8>) {
     }
 }
 
+/// `Base` discriminant low nibble → 4-bit BAM code. The five discriminants
+/// (A=0x41, C=0x43, G=0x47, T=0x54, N=0x4E) have distinct low nibbles, so a
+/// 16-entry table indexed by `byte & 0x0F` is exact for every `Base`; the
+/// unused slots are never read for a valid `Base`.
+static ENCODE_BASE_LO_NIBBLE: &[u8; 16] = &{
+    let mut table = [15u8; 16];
+    table[0x1] = 1; // A
+    table[0x3] = 2; // C
+    table[0x7] = 4; // G
+    table[0x4] = 8; // T
+    table[0xE] = 15; // N
+    table
+};
+
+/// Encode `Base`s to 4-bit packed BAM format, appending `bases.len().div_ceil(2)`
+/// bytes to `buf`. Byte-identical to [`encode_seq_into`] on the same bases.
+// r[impl seq.encode_bases_simd]
+pub fn encode_bases_into(bases: &[seqair_types::Base], buf: &mut Vec<u8>) {
+    encode_bases_at(Level::new(), bytemuck::cast_slice(bases), buf);
+}
+
+/// `bases` MUST hold only `Base` discriminants: the low-nibble table is exact
+/// for those five bytes and nothing else.
+// r[impl io.simd_portable]
+fn encode_bases_at(level: Level, bases: &[u8], buf: &mut Vec<u8>) {
+    let start = buf.len();
+    buf.resize(start.saturating_add(bases.len().div_ceil(2)), 0);
+    if let Some(out) = buf.get_mut(start..) {
+        dispatch!(level, simd => encode_bases_simd(simd, bases, out));
+    }
+}
+
+/// Two native-width vectors of bases in, one vector of packed bytes out: each
+/// base is looked up by its low nibble (`pshufb` / `tbl`), the codes are
+/// deinterleaved into even and odd positions, and packed `even << 4 | odd`.
+/// `out.len()` is `bases.len().div_ceil(2)`.
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "lanewise shift of a 4-bit code by 4 cannot overflow a u8; LEN * 2 is a small constant"
+)]
+fn encode_bases_simd<S: Simd>(simd: S, bases: &[u8], out: &mut [u8]) {
+    let n = S::u8s::LEN;
+    let table = S::u8s::block_splat(u8x16::from_slice(simd, ENCODE_BASE_LO_NIBBLE));
+    let vec_in = bases.chunks_exact(2 * n);
+    let tail_in = vec_in.remainder();
+    // Split `out` by the count of *whole input* vectors: its own `chunks_exact`
+    // remainder would miss a tail that happens to fill a whole output vector.
+    let (vec_out, tail_out) = out.split_at_mut(bases.len().saturating_sub(tail_in.len()) / 2);
+    for (b, o) in vec_in.zip(vec_out.chunks_exact_mut(n)) {
+        let (b0, b1) = b.split_at(n);
+        let c0 = table.swizzle_dyn_within_blocks(S::u8s::from_slice(simd, b0) & 0x0F);
+        let c1 = table.swizzle_dyn_within_blocks(S::u8s::from_slice(simd, b1) & 0x0F);
+        let (even, odd) = c0.deinterleave(c1);
+        ((even << 4) | odd).store_slice(o);
+    }
+    encode_seq_scalar_into(tail_in, tail_out);
+}
+
+/// The 256-entry-table encoder over a pre-sized `out` of
+/// `bases.len().div_ceil(2)` bytes: the tail of the vector kernel.
+#[allow(clippy::indexing_slicing, reason = "a `u8` index is < 256 = ENCODE_BASE.len()")]
+#[allow(clippy::arithmetic_side_effects, reason = "a 4-bit code shifted by 4 fits a u8")]
+fn encode_seq_scalar_into(bases: &[u8], out: &mut [u8]) {
+    let (pairs, odd) = bases.as_chunks::<2>();
+    for (o, &[hi, lo]) in out.iter_mut().zip(pairs) {
+        *o = (ENCODE_BASE[usize::from(hi)] << 4) | ENCODE_BASE[usize::from(lo)];
+    }
+    if let [last] = odd
+        && let Some(o) = out.get_mut(pairs.len())
+    {
+        *o = ENCODE_BASE[usize::from(*last)] << 4;
+    }
+}
+
 /// Encode ASCII bases to 4-bit packed BAM format.
 pub fn encode_seq(bases: &[u8]) -> Vec<u8> {
     let n_bytes = bases.len().div_ceil(2);
@@ -447,6 +526,58 @@ mod tests {
                 assert!(decode_nibbles(level, lut, pairs, &packed, &mut out));
                 assert_eq!(out, expected, "{level:?}, len={len}");
             }
+        }
+    }
+
+    fn to_bases(codes: Vec<u8>) -> Vec<seqair_types::Base> {
+        use seqair_types::Base;
+        codes
+            .into_iter()
+            .map(|c| [Base::A, Base::C, Base::G, Base::T, Base::Unknown][usize::from(c)])
+            .collect()
+    }
+
+    /// Independent oracle: the spec's nibble values per base, packed one pair
+    /// at a time — shares neither table with the kernel.
+    fn encode_oracle(bases: &[seqair_types::Base]) -> Vec<u8> {
+        use seqair_types::Base;
+        let code = |b: &Base| match b {
+            Base::A => 1u8,
+            Base::C => 2,
+            Base::G => 4,
+            Base::T => 8,
+            Base::Unknown => 15,
+        };
+        bases.chunks(2).map(|p| (code(&p[0]) << 4) | p.get(1).map_or(0, code)).collect()
+    }
+
+    // r[verify seq.encode_bases_simd]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn encode_bases_every_level_matches_oracle(tc: TestCase) {
+        let seq = to_bases(tc.draw(gs::vecs(gs::integers::<u8>().max_value(4)).max_size(400)));
+        let expected = encode_oracle(&seq);
+        let bytes: &[u8] = bytemuck::cast_slice(&seq);
+        assert_eq!(encode_seq(bytes), expected, "256-entry table");
+        for level in crate::simd_levels::levels() {
+            // A non-empty prefix proves the kernel appends rather than overwrites.
+            let mut buf = vec![0xAB];
+            encode_bases_at(level, bytes, &mut buf);
+            assert_eq!(buf[0], 0xAB);
+            assert_eq!(&buf[1..], expected.as_slice(), "{level:?}, len={}", seq.len());
+        }
+    }
+
+    // r[verify seq.encode_bases_simd]
+    #[test]
+    fn encode_bases_boundary_lengths_round_trip() {
+        use seqair_types::Base;
+        let cycle = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
+        for len in [0usize, 1, 2, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 150] {
+            let seq: Vec<Base> = cycle.iter().copied().cycle().take(len).collect();
+            let mut buf = Vec::new();
+            encode_bases_into(&seq, &mut buf);
+            assert_eq!(decode_bases(&buf, len), seq, "len={len}");
         }
     }
 

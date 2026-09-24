@@ -25,6 +25,9 @@ Runtime dispatch MUST go through `dispatch!(Level::new(), ..)`, which selects th
 r[seq.encode_scalar]
 The scalar encoder MUST use a 256-entry lookup table mapping ASCII bytes to 4-bit codes. Unknown bases MUST map to 15 (`N`). Two bases MUST be packed per byte (high nibble first).
 
+r[seq.encode_bases_simd]
+Encoding a `&[Base]` (the write path's `OwnedBamRecord::to_bam_bytes`) MUST be one native-width SIMD kernel (`r[io.simd_portable]`) that maps each base through a 16-entry table indexed by the *low nibble* of its discriminant (A=0x41→1, C=0x43→2, G=0x47→4, T=0x54→8, N=0x4E→15 — the five low nibbles are distinct, so one `swizzle_dyn_within_blocks` does the lookup), deinterleaves even and odd positions, and packs them `even << 4 | odd`, encoding `2 × LEN` bases into `LEN` bytes per iteration. The tail MUST go through the 256-entry table of `r[seq.encode_scalar]`, and the output MUST equal that table's for every `Base` sequence. It MUST append into the caller's buffer without an intermediate allocation.
+
 ## Correctness
 
 r[seq.simd_scalar_equivalence]
