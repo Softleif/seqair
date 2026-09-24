@@ -109,6 +109,18 @@ pub struct IndexedBamReader<R: Read + Seek = File> {
     shared: Arc<BamShared>,
     /// Decompressed blocks kept between queries; see `r[region_buf.block_cache]`.
     block_cache: BlockCache,
+    /// The latest query, for `r[bam.reader.resume]`.
+    last_query: Option<LastQuery>,
+}
+
+/// What a query leaves behind for the next one (`r[bam.reader.resume]`).
+#[derive(Debug, Clone, Copy)]
+struct LastQuery {
+    tid: u32,
+    start: Pos0,
+    /// Virtual offset of the first record the query found overlapping its
+    /// window; `None` until it finds one.
+    first_hit: Option<VirtualOffset>,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for IndexedBamReader<R> {
@@ -133,6 +145,7 @@ impl IndexedBamReader<File> {
             bulk_reader: bulk_file,
             shared: Arc::new(BamShared { index, header, bam_path: path.to_path_buf() }),
             block_cache: BlockCache::new(),
+            last_query: None,
         })
     }
 
@@ -149,6 +162,7 @@ impl IndexedBamReader<File> {
             bulk_reader: bulk_file,
             shared: Arc::clone(&self.shared),
             block_cache: BlockCache::new(),
+            last_query: None,
         })
     }
 }
@@ -165,6 +179,7 @@ impl IndexedBamReader<std::io::Cursor<Vec<u8>>> {
             bulk_reader: std::io::Cursor::new(bam_data),
             shared: Arc::new(BamShared { index, header, bam_path: PathBuf::from("<fuzz>") }),
             block_cache: BlockCache::new(),
+            last_query: None,
         })
     }
 }
@@ -278,9 +293,20 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         // A reversed span names no positions. The overlap test alone would
         // not say so: `rec.pos <= last && rec.end_pos >= start` holds for a
         // record that covers the whole gap between the two ends.
-        let chunks =
+        let mut chunks =
             if span.is_empty() { Vec::new() } else { self.shared.index.query(tid, start, end) };
         let tid_i32 = validate_tid(tid)?;
+
+        // r[impl bam.reader.resume]
+        if let Some(LastQuery { tid: last_tid, start: last_start, first_hit: Some(hit) }) =
+            self.last_query
+            && last_tid == tid
+            && last_start <= start
+        {
+            skip_before(&mut chunks, hit);
+        }
+        let first_hit =
+            &mut self.last_query.insert(LastQuery { tid, start, first_hit: None }).first_hit;
 
         // One streaming RegionBuf spans all chunks: the sliding window bounds
         // peak memory, so there's no need to pre-partition into batches.
@@ -306,7 +332,17 @@ impl<R: Read + Seek> IndexedBamReader<R> {
             accepted: 0,
             skipped_tid: 0,
             skipped_out_of_range: 0,
+            first_hit,
         })
+    }
+}
+
+/// Drop what lies before `hit` from sorted, disjoint `chunks`: whole chunks
+/// that end at or before it, and the front of the one that contains it.
+fn skip_before(chunks: &mut Vec<Chunk>, hit: VirtualOffset) {
+    chunks.retain(|c| c.end > hit);
+    for c in chunks.iter_mut() {
+        c.begin = c.begin.max(hit);
     }
 }
 
@@ -335,6 +371,9 @@ pub struct BamQuery<'r, R: Read + Seek> {
     accepted: u32,
     skipped_tid: u32,
     skipped_out_of_range: u32,
+    /// Where the reader keeps this query's first overlapping record for the
+    /// next query (`r[bam.reader.resume]`).
+    first_hit: &'r mut Option<VirtualOffset>,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for BamQuery<'_, R> {
@@ -525,6 +564,10 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
                 continue;
             }
 
+            // r[impl bam.reader.resume]
+            if self.first_hit.is_none() {
+                *self.first_hit = Some(current_voff);
+            }
             self.accepted = self.accepted.saturating_add(1);
             f(raw)?;
         }
@@ -683,6 +726,7 @@ mod tests {
             accepted: 0,
             skipped_tid: 0,
             skipped_out_of_range: 0,
+            first_hit: &mut None,
         };
 
         let mut seen = 0usize;

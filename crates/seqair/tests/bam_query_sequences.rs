@@ -1,8 +1,9 @@
 //! Many queries on one reader give what each would give on its own.
 //!
 //! `IndexedBamReader` keeps decompressed BGZF blocks between queries
-//! (`r[region_buf.block_cache]`), so a query's answer could in principle
-//! depend on the queries before it. These tests run random query sequences —
+//! (`r[region_buf.block_cache]`) and starts a query where the previous one
+//! first found a record (`r[bam.reader.resume]`), so a query's answer could
+//! in principle depend on the queries before it. These tests run random query sequences —
 //! repeats, small steps, backward jumps, switches between references — on one
 //! long-lived reader and check every answer against a truth that has no
 //! history: the generated reads themselves, or one whole-reference scan per
@@ -197,6 +198,7 @@ fn indices(store: &RecordStore) -> Vec<usize> {
 }
 
 // r[verify region_buf.block_cache]
+// r[verify bam.reader.resume]
 // r[verify bam.reader.overlap_filter]
 // r[verify bam.reader.sorted_order+2]
 /// Every query of a random sequence on one reader returns exactly the
@@ -273,6 +275,7 @@ fn whole_references() -> &'static [Vec<Rec>] {
 }
 
 // r[verify region_buf.block_cache]
+// r[verify bam.reader.resume]
 /// Every query of a random sequence on one reader of real data returns what
 /// filtering a fresh whole-reference read for the window returns, in the
 /// same order.

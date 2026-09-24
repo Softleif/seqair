@@ -37,6 +37,9 @@ past the region — on a 10 kb query against a 26x human chromosome, continuing
 through them inflated ~4x the BAM instead of ~2x. A record before the region
 (`end_pos < start`) is still a skip, not a stop; only the far end terminates.
 
+r[bam.reader.resume]
+A query starts at the linear-index minimum of the 16 kb window holding its start, and so reads every record from there, however close its start is to the previous query's. When a query follows one on the same reader and the same reference whose start is at or before its own, it MUST instead begin at the virtual offset of the first record that previous query found overlapping its window: index chunks that end at or before that offset are dropped, and the one containing it starts there. Nothing before that offset can overlap: in a coordinate-sorted file a record before it starts no later than that first record, which starts no later than the previous window's end; so if such a record reached the new start — at or past the previous start — it overlapped the previous window, and the previous query found every record that did, the first of them at that offset. The query MUST return the same records in the same order as without it. A query on another reference, one that starts before the previous start, or one after a query that found nothing, takes no such shortcut. On 1 bp queries every 100 bp over 30× WGS this cut the records scanned per query from ~1,800 to ~54 (31 of them overlapping).
+
 ## Edge cases
 
 r[bam.reader.unmapped_skipped]
