@@ -643,5 +643,8 @@ Reference sequence lookups happen per-slice (to reconstruct all records in the s
 r[cram.perf.tag_lines_resolved]
 A record's tags are decoded from its tag line (TL). The reader SHOULD resolve each tag line's tags to their encodings once per slice rather than hash-looking-up every tag of every record; a tag the compression header has no encoding for is skipped either way.
 
+r[cram.perf.external_order]
+Each read of an external block finds the block by a linear scan over the slice's content ids. The reader SHOULD order a slice's external blocks by when a record first reads them — the data series in decode order, then the tags, then the per-base series — so the per-record series are found in a step or two. The order MUST NOT change what is decoded: content ids are unique within a slice, so a lookup finds the same block whatever the order.
+
 r[cram.perf.codec_overhead]
 rANS and arithmetic decoders have higher per-byte CPU cost than zlib. The reader SHOULD pre-allocate decode buffers and reuse them across blocks within a slice.

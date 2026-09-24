@@ -13,7 +13,7 @@ use std::ops::Neg;
 use super::{
     block::{self, Block, ContentType},
     compression_header::CompressionHeader,
-    encoding::{ByteArrayEncoding, DecodeContext, ExternalCursor},
+    encoding::{ByteArrayEncoding, ByteEncoding, DecodeContext, ExternalCursor, IntEncoding},
     reader::CramError,
     varint,
 };
@@ -255,6 +255,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
 
     let core_data = core_block.ok_or_else(|| CramError::MissingCoreDataBlock)?;
 
+    order_external_blocks(ch, &mut external_blocks);
     let mut ctx = DecodeContext::new(&core_data.data, external_blocks);
     let tag_lines = resolve_tag_lines(ch);
 
@@ -315,6 +316,82 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     resolve_mate_tlen(&mate_infos, store);
 
     Ok((fetched_count, kept_count))
+}
+
+// r[impl cram.perf.external_order]
+/// Orders a slice's external blocks by when a record first reads them —
+/// the data series in decode order, then the tags — so that
+/// [`DecodeContext`]'s linear content-id scan finds the per-record series
+/// in a step or two instead of wading through every tag's block.
+fn order_external_blocks(ch: &CompressionHeader, blocks: &mut [(i32, ExternalCursor)]) {
+    let ds = &ch.data_series;
+    let mut order: SmallVec<i32, 64> = SmallVec::new();
+    for e in [
+        &ds.bam_flags,
+        &ds.cram_flags,
+        &ds.ref_id,
+        &ds.read_length,
+        &ds.alignment_pos,
+        &ds.read_group,
+    ] {
+        int_ids(e, &mut order);
+    }
+    byte_array_ids(&ds.read_name, &mut order);
+    for e in [
+        &ds.mate_flags,
+        &ds.next_segment_ref,
+        &ds.next_mate_pos,
+        &ds.template_size,
+        &ds.next_fragment,
+        &ds.tag_line,
+    ] {
+        int_ids(e, &mut order);
+    }
+    for enc in ch.preservation.tag_dictionary.iter().flatten().filter_map(|entry| {
+        let key = (i32::from(entry.tag[0]) << 16)
+            | (i32::from(entry.tag[1]) << 8)
+            | i32::from(entry.bam_type);
+        ch.tag_encodings.get(&key)
+    }) {
+        byte_array_ids(enc, &mut order);
+    }
+    int_ids(&ds.feature_count, &mut order);
+    byte_ids(&ds.feature_code, &mut order);
+    int_ids(&ds.feature_pos, &mut order);
+    for e in [&ds.mapping_quality, &ds.deletion_length, &ds.ref_skip, &ds.padding, &ds.hard_clip] {
+        int_ids(e, &mut order);
+    }
+    for e in [&ds.base, &ds.quality_score, &ds.base_sub] {
+        byte_ids(e, &mut order);
+    }
+    for e in [&ds.insertion, &ds.soft_clip, &ds.bases_block, &ds.quality_block] {
+        byte_array_ids(e, &mut order);
+    }
+    blocks.sort_by_key(|(id, _)| order.iter().position(|o| o == id).unwrap_or(usize::MAX));
+}
+
+fn int_ids(e: &IntEncoding, order: &mut SmallVec<i32, 64>) {
+    if let IntEncoding::External { content_id } = e {
+        order.push(*content_id);
+    }
+}
+
+fn byte_ids(e: &ByteEncoding, order: &mut SmallVec<i32, 64>) {
+    if let ByteEncoding::External { content_id } = e {
+        order.push(*content_id);
+    }
+}
+
+fn byte_array_ids(e: &ByteArrayEncoding, order: &mut SmallVec<i32, 64>) {
+    match e {
+        ByteArrayEncoding::External { content_id }
+        | ByteArrayEncoding::ByteArrayStop { content_id, .. } => order.push(*content_id),
+        ByteArrayEncoding::ByteArrayLen { len_encoding, val_encoding } => {
+            int_ids(len_encoding, order);
+            byte_ids(val_encoding, order);
+        }
+        ByteArrayEncoding::Null => {}
+    }
 }
 
 /// A tag dictionary line with each tag's BAM head (`tag[0] tag[1] type`)
