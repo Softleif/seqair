@@ -444,31 +444,36 @@ fn decode_o0_packed<S: Simd, const N: usize>(
     Ok(())
 }
 
-/// Order-1 decode with `N` interleaved states over packed per-context rows:
-/// state `j` fills `dst[j·len/N ..][..len/N]`, its context is the symbol it
-/// decoded last, and the last state also decodes the `len % N` leftover
+/// Order-1 decode with 32 interleaved states over packed per-context rows:
+/// state `j` fills `dst[j·len/32 ..][..len/32]`, its context is the symbol
+/// it decoded last, and the last state also decodes the `len % 32` leftover
 /// bytes. Same vector/scalar split as [`decode_o0_packed`]. Only rows of
 /// contexts reachable from context 0 are read, and the caller has packed
-/// all of them.
+/// all of them. The vector loop writes each step's 32 symbols as one row of
+/// a 32×32 tile and every 32 steps transposes it into 32-byte runs of the
+/// states' stripes (htscodecs' `transpose_and_copy`), rather than 32
+/// stores to 32 stripes a step.
+// r[impl cram.codec.rans_nx16_o1_tile]
 #[simd]
 #[allow(
     clippy::indexing_slicing,
-    reason = "ctx: u8 < 256 rows, x & mask ≤ 0xFFF < ROW; j·chunk + i < N·chunk ≤ dst.len()"
+    reason = "ctx: u8 < 256 rows, x & mask ≤ 0xFFF < ROW; j·chunk + i < 32·chunk ≤ dst.len(); \
+              i % TILE < 32 and j < 32 index the tile"
 )]
 #[allow(clippy::cast_possible_truncation, reason = "the low byte of a slot is its symbol")]
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "vector lanes wrap, as state_step's do; j·chunk + i < dst.len(); pos within the checked headroom"
 )]
-fn decode_o1_packed<S: Simd, const N: usize>(
+fn decode_o1_packed<S: Simd>(
     simd: S,
     src: &mut &[u8],
     dst: &mut [u8],
     table: &[PackedRow; ALPHABET_SIZE],
     bits: u32,
-    states: &mut [u32; N],
+    states: &mut [u32; 32],
 ) -> Result<(), CramError> {
-    debug_assert_eq!(N % 4, 0);
+    const N: usize = 32;
     let truncated = || CramError::Truncated { context: "rans_nx16 order-1 truncated" };
     let mask = ((1u32 << bits) - 1) & 0xFFF;
     let chunk = dst.len() / N;
@@ -476,14 +481,17 @@ fn decode_o1_packed<S: Simd, const N: usize>(
     let mut pos = 0usize;
     let mut ctx = [0u8; N];
     let mut i = 0usize;
+    let mut tile = [[0u8; N]; TILE];
 
     if states.iter().all(|&x| x >= 1 << 15) {
         while i < chunk && bytes.len().saturating_sub(pos) >= vector_headroom(N) {
             let mut slots = [0u32; N];
-            for (j, ((s, c), &x)) in slots.iter_mut().zip(&mut ctx).zip(states.iter()).enumerate() {
-                *s = table[usize::from(*c)][(x & mask) as usize];
-                *c = *s as u8;
-                dst[j * chunk + i] = *c;
+            // The previous step's row holds each state's context; the
+            // tile starts zeroed, so step 0 reads context 0 from row 31.
+            let (row, prev) = (i % TILE, (i + TILE - 1) % TILE);
+            for (j, (s, &x)) in slots.iter_mut().zip(states.iter()).enumerate() {
+                *s = table[usize::from(tile[prev][j])][(x & mask) as usize];
+                tile[row][j] = *s as u8;
             }
             for (x4, s4) in states.as_chunks_mut::<4>().0.iter_mut().zip(slots.as_chunks::<4>().0) {
                 let x = u32x4::from_slice(simd, x4);
@@ -497,7 +505,12 @@ fn decode_o1_packed<S: Simd, const N: usize>(
                 x.store_slice(x4);
             }
             i += 1;
+            if i.is_multiple_of(TILE) {
+                flush_tile(simd, &tile, dst, chunk, i - TILE);
+            }
         }
+        flush_tile_rows(&tile, i % TILE, dst, chunk, i - i % TILE);
+        ctx = tile[(i + TILE - 1) % TILE];
     }
 
     let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
@@ -520,6 +533,64 @@ fn decode_o1_packed<S: Simd, const N: usize>(
     }
     *src = rest;
     Ok(())
+}
+
+/// Steps per order-1 output tile: one row per step, one column per state.
+const TILE: usize = 32;
+
+/// Writes the first `rows` rows of `tile` — steps `i0..i0 + rows` — into the
+/// 32 stripes of `dst`, a byte at a time: the partial tile a vector loop
+/// leaves.
+#[allow(clippy::arithmetic_side_effects, reason = "j·chunk + i0 + r < 32·chunk ≤ dst.len()")]
+fn flush_tile_rows(tile: &[[u8; 32]; TILE], rows: usize, dst: &mut [u8], chunk: usize, i0: usize) {
+    for (r, row) in tile.iter().take(rows).enumerate() {
+        for (j, &c) in row.iter().enumerate() {
+            if let Some(d) = dst.get_mut(j * chunk + i0 + r) {
+                *d = c;
+            }
+        }
+    }
+}
+
+/// Writes a full tile — steps `i0..i0 + 32` — into the 32 stripes of `dst`,
+/// 16 bytes at a time: each 16×16 quarter transposed in registers.
+#[inline(always)]
+#[allow(clippy::indexing_slicing, reason = "a, b < 2 and k < 16 index a 32×32 tile")]
+#[allow(clippy::arithmetic_side_effects, reason = "j·chunk + i0 + 32 ≤ 32·chunk ≤ dst.len()")]
+fn flush_tile<S: Simd>(simd: S, tile: &[[u8; 32]; TILE], dst: &mut [u8], chunk: usize, i0: usize) {
+    for a in 0..2 {
+        for b in 0..2 {
+            let mut r = [u8x16::splat(simd, 0); 16];
+            for (k, v) in r.iter_mut().enumerate() {
+                *v = u8x16::from_slice(simd, &tile[a * 16 + k][b * 16..b * 16 + 16]);
+            }
+            let r = transpose16(r);
+            for (k, v) in r.iter().enumerate() {
+                let start = (b * 16 + k) * chunk + i0 + a * 16;
+                if let Some(d) = dst.get_mut(start..start + 16) {
+                    v.store_slice(d);
+                }
+            }
+        }
+    }
+}
+
+/// Transposes a 16×16 byte matrix held as 16 row vectors: four rounds of
+/// pairing row `i` with row `i + 8` by byte interleave, each of which
+/// rotates an element's (row, column) bit string by one.
+#[inline(always)]
+#[allow(clippy::indexing_slicing, reason = "i < 8, so i + 8 and 2i + 1 < 16")]
+#[allow(clippy::arithmetic_side_effects, reason = "i < 8")]
+fn transpose16<S: Simd>(mut r: [u8x16<S>; 16]) -> [u8x16<S>; 16] {
+    for _ in 0..4 {
+        let mut out = r;
+        for i in 0..8 {
+            out[2 * i] = r[i].zip_low(r[i + 8]);
+            out[2 * i + 1] = r[i].zip_high(r[i + 8]);
+        }
+        r = out;
+    }
+    r
 }
 
 /// One branch-free renorm read: `x` takes the u16 at `pos` if it is below
@@ -2528,6 +2599,7 @@ mod tests {
     }
 
     // r[verify cram.codec.simd_dispatch+3]
+    // r[verify cram.codec.rans_nx16_o1_tile]
     // r[verify io.simd_portable]
     /// Order-1, 4 and 32 states, 10 and 12 bits: the packed decoders at every
     /// SIMD level (and the scalar packed kernel at 32 states) against the
@@ -2537,7 +2609,12 @@ mod tests {
     fn packed_order1_matches_unpacked(tc: TestCase) {
         let n = if tc.draw(gs::booleans()) { 32 } else { 4 };
         let bits = if tc.draw(gs::booleans()) { 12 } else { 10 };
-        let len = tc.draw(gs::integers::<usize>().max_value(600));
+        // At 32 states, sometimes several full 32-step output tiles.
+        let len = if n == 32 && tc.draw(gs::booleans()) {
+            tc.draw(gs::integers::<usize>().min_value(1024).max_value(4200))
+        } else {
+            tc.draw(gs::integers::<usize>().max_value(600))
+        };
         let syms = draw_alphabet(&tc, tc.draw(gs::integers::<u8>().max_value(7)) != 0);
         let mut stream =
             encode_order1_table(&tc, &syms, bits, tc.draw(gs::integers::<u8>().max_value(7)) != 0);
