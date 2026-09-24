@@ -50,6 +50,7 @@ mod intrinsics;
 mod read;
 mod reference;
 mod scaling;
+mod simd;
 mod strips;
 mod transitions;
 
@@ -63,6 +64,7 @@ pub use haplotype::Haplotype;
 pub use read::Read;
 pub use reference::align_full;
 pub use seqair_types::{Base, BaseQuality, Probability, QPos, Strand};
+pub use simd::simd_level;
 pub use strips::{align_strips, align_strips_simd};
 #[cfg(feature = "intrinsics")]
 pub use strips::{align_strips_intrinsics, intrinsics_lane_available};

@@ -349,3 +349,21 @@ pub fn forward_with(
     let total: f64 = prev_m.iter().zip(prev_i.iter()).skip(1).map(|(m, i)| m + i).sum();
     (total > 0.0).then(|| total.log10())
 }
+
+/// Every SIMD level this CPU can run, the scalar `Fallback` included (the
+/// dev-dependency compiles it in on every target), named for failure
+/// messages. The kernels are tested at each of them, not only at the one
+/// `Level::new()` picks: on x86-64 each is a separate instantiation.
+pub fn levels() -> Vec<(&'static str, fearless_simd::Level)> {
+    use fearless_simd::Level;
+    let best = Level::new();
+    #[allow(unused_mut, reason = "only x86 has levels below the best one")]
+    let mut levels = vec![("fallback", Level::fallback()), ("best", best)];
+    #[cfg(target_arch = "x86_64")]
+    {
+        levels.extend(best.as_sse2().map(|token| ("sse2", Level::Sse2(token))));
+        levels.extend(best.as_sse4_2().map(|token| ("sse4.2", Level::Sse4_2(token))));
+        levels.extend(best.as_avx2().map(|token| ("avx2", Level::Avx2(token))));
+    }
+    levels
+}

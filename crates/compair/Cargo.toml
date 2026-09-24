@@ -12,7 +12,8 @@ exclude = ["fuzz/*", "tests/*", "benches/*"]
 [dependencies]
 seqair-types = { version = "^0.3.1", path = "../seqair-types" }
 thiserror = { workspace = true }
-wide = "1.7"
+fearless_simd = "1.0"
+fearless_simd_macros = "0.1"
 
 [features]
 default = ["intrinsics"]
@@ -33,6 +34,9 @@ intrinsics = []
 gkl-cpp = ["gkl/c-avx", "gkl/c-avx512"]
 
 [dev-dependencies]
+# Compiles fearless_simd's scalar `Fallback` level on SIMD targets too, so the
+# parity tests can run it next to every vector level the CPU has.
+fearless_simd = { version = "1.0", features = ["force_support_fallback"] }
 proptest = "1.11.0"
 criterion = "0.8.2"
 bio = { version = "4.0.1", default-features = false }

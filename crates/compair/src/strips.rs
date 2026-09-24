@@ -37,7 +37,7 @@
 //! on a cell being lanewise, is what makes the scalar and the eight-lane
 //! instances bit-identical by construction, as the diagonal kernels are.
 
-use wide::f32x8;
+use fearless_simd::Level;
 
 use crate::{
     banded::{
@@ -97,7 +97,8 @@ impl Workspace {
         self.strips::<f32, E>(haplotype, read, emission, band)
     }
 
-    /// Eight read rows at a time along the haplotype, in this workspace.
+    /// Eight read rows at a time along the haplotype, in this workspace, at
+    /// the best SIMD level this CPU has.
     pub fn align_strips_simd<E: Emission>(
         &mut self,
         haplotype: &Haplotype,
@@ -105,7 +106,24 @@ impl Workspace {
         emission: &E,
         band: Band,
     ) -> Log10Likelihood {
-        self.strips::<f32x8, E>(haplotype, read, emission, band)
+        self.align_strips_simd_at(Level::new(), haplotype, read, emission, band)
+    }
+
+    /// [`Workspace::align_strips_simd`] at a given `fearless_simd` level, so
+    /// the parity tests can hold every level the CPU has to the scalar kernel.
+    #[doc(hidden)]
+    pub fn align_strips_simd_at<E: Emission>(
+        &mut self,
+        level: Level,
+        haplotype: &Haplotype,
+        read: &Read,
+        emission: &E,
+        band: Band,
+    ) -> Log10Likelihood {
+        let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        crate::simd::strip_kernel_at(level, &self.plan, &mut self.rows, shape, band)
     }
 
     /// Eight read rows at a time through the target's own intrinsics rather
@@ -167,14 +185,10 @@ impl Workspace {
         emission: &E,
         band: Band,
     ) -> Log10Likelihood {
-        let (h, r) = (haplotype.len(), read.len());
-        if h == 0 || r == 0 {
+        let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
-        }
-        if self.plan.fill(haplotype, read, emission, band).is_none() {
-            return Log10Likelihood::IMPOSSIBLE;
-        }
-        strip_kernel::<L>((), &self.plan, &mut self.rows, Shape { haplotype: h, read: r }, band)
+        };
+        strip_kernel::<L>((), &self.plan, &mut self.rows, shape, band)
     }
 }
 

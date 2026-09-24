@@ -423,14 +423,14 @@ pub(crate) fn strip_kernel_intrinsics(
             // SAFETY: the runtime check is the wrapper's one precondition.
             return unsafe { strip_kernel_avx2(plan, rows, shape, band) };
         }
-        strip_kernel::<wide::f32x8>((), plan, rows, shape, band)
+        crate::simd::strip_kernel_at(fearless_simd::Level::new(), plan, rows, shape, band)
     }
     #[cfg(not(any(
         all(target_arch = "aarch64", target_feature = "neon"),
         target_arch = "x86_64"
     )))]
     {
-        strip_kernel::<wide::f32x8>((), plan, rows, shape, band)
+        crate::simd::strip_kernel_at(fearless_simd::Level::new(), plan, rows, shape, band)
     }
 }
 
@@ -476,14 +476,14 @@ pub(crate) fn batch_kernel_intrinsics(
             // SAFETY: the runtime check is the wrapper's one precondition.
             return unsafe { batch_kernel_avx2(plan, buffer, read_len, band) };
         }
-        batch_kernel::<wide::f32x8>((), plan, buffer, read_len, band)
+        crate::simd::batch_kernel_at(fearless_simd::Level::new(), plan, buffer, read_len, band)
     }
     #[cfg(not(any(
         all(target_arch = "aarch64", target_feature = "neon"),
         target_arch = "x86_64"
     )))]
     {
-        batch_kernel::<wide::f32x8>((), plan, buffer, read_len, band)
+        crate::simd::batch_kernel_at(fearless_simd::Level::new(), plan, buffer, read_len, band)
     }
 }
 

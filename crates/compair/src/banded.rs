@@ -1,4 +1,4 @@
-use wide::{Select, f32x8};
+use fearless_simd::Level;
 
 use crate::{
     emission::Emission,
@@ -141,10 +141,11 @@ const _: () = assert!(Band::DEFAULT_WIDTH >= 2 && Band::DEFAULT_WIDTH <= Band::M
 /// could quietly stop holding.
 ///
 /// There is deliberately no fused multiply-add here. `f32::mul_add` fuses on
-/// every target, while `wide`'s vector one falls back to a separate multiply
-/// and add wherever the vector unit has none -- so a `mul_add` on this trait
-/// would round identically on aarch64 and differently on a baseline x86-64,
-/// which is the one kind of parity failure the trait exists to rule out.
+/// every target, while `fearless_simd`'s vector one fuses only on the levels
+/// that have FMA -- AVX2 and up, and NEON -- and is a separate multiply and
+/// add at SSE2 and SSE4.2, so a `mul_add` on this trait would make a score
+/// depend on the CPU it ran on, which is the one kind of parity failure the
+/// trait exists to rule out.
 pub(crate) trait Lane:
     Copy + core::ops::Add<Output = Self> + core::ops::Mul<Output = Self>
 {
@@ -285,98 +286,6 @@ impl Lane for f32 {
     }
 }
 
-impl LaneMask for f32x8 {
-    #[inline]
-    fn either(self, other: Self) -> Self {
-        self | other
-    }
-    #[inline]
-    fn both(self, other: Self) -> Self {
-        self & other
-    }
-}
-
-impl Lane for f32x8 {
-    const LANES: usize = 8;
-    type Token = ();
-    type Mask = Self;
-    #[inline]
-    fn token(self) {}
-    #[inline]
-    fn splat((): (), value: f32) -> Self {
-        Self::splat(value)
-    }
-    #[inline]
-    fn load((): (), source: &Window) -> Self {
-        Self::from(*source)
-    }
-    #[inline]
-    fn store(self, destination: &mut Window) {
-        *destination = self.to_array();
-    }
-    #[inline]
-    fn vmax(self, other: Self) -> Self {
-        // `max` is NaN-preserving, which on x86 is a compare, a blend and
-        // the maximum; nothing the kernels feed a running maximum is a NaN.
-        self.fast_max(other)
-    }
-    #[inline]
-    fn horizontal_max(self) -> f32 {
-        // A tree, not a fold: three dependent `fmaxnm` instead of seven, on
-        // the one reduction that sits on every diagonal's critical path.
-        let [a, b, c, d, e, f, g, h] = self.to_array();
-        a.max(b).max(c.max(d)).max(e.max(f).max(g.max(h)))
-    }
-    #[inline]
-    fn equals(self, other: Self) -> Self {
-        self.simd_eq(other)
-    }
-    #[inline]
-    fn below(self, other: Self) -> Self {
-        self.simd_lt(other)
-    }
-    #[inline]
-    fn offsets((): ()) -> Self {
-        Self::from([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
-    }
-    #[inline]
-    fn select(mask: Self, if_true: Self, if_false: Self) -> Self {
-        Select::select(mask, if_true, if_false)
-    }
-    // Blends, not `&` and `!&`. The point of these two is the *x86* codegen
-    // (see the trait), and `wide::f32x8` cannot reach it: on a baseline build
-    // it is two `f32x4`, and on aarch64 -- the target this lane actually runs
-    // on -- a blend is already one `bsl` while `!self & value` costs an extra
-    // complement for want of an `andnot` in `wide`'s API. Measured on the 10s
-    // dataset, M4 Pro: bitwise 13.80 ms, blends 13.48 ms.
-    #[inline]
-    fn masked(mask: Self, value: Self) -> Self {
-        Select::select(mask, value, Self::splat(0.0))
-    }
-    #[inline]
-    fn masked_out(mask: Self, value: Self) -> Self {
-        Select::select(mask, Self::splat(0.0), value)
-    }
-    #[inline]
-    fn shift_in(self, first: f32) -> Self {
-        // Written as a permutation of the array so that it holds by
-        // construction; the compiler recognises the pattern and emits lane
-        // permutes, see `strips_hot_loop_has_no_stack_traffic` in the
-        // profiling notes.
-        let [a, b, c, d, e, f, g, _] = self.to_array();
-        Self::from([first, a, b, c, d, e, f, g])
-    }
-    #[inline]
-    fn last(self) -> f32 {
-        let [_, _, _, _, _, _, _, h] = self.to_array();
-        h
-    }
-    #[inline]
-    fn horizontal_sum(self) -> f32 {
-        self.reduce_add()
-    }
-}
-
 /// The buffers a banded alignment works in, kept between calls.
 ///
 /// One alignment needs a dozen or so small buffers: the hoisted per-row and
@@ -412,7 +321,8 @@ impl Workspace {
         self.align::<f32, E>(haplotype, read, emission, band)
     }
 
-    /// Eight `f32` lanes of one anti-diagonal at a time, in this workspace.
+    /// Eight `f32` lanes of one anti-diagonal at a time, in this workspace,
+    /// at the best SIMD level this CPU has.
     pub fn align_banded_simd<E: Emission>(
         &mut self,
         haplotype: &Haplotype,
@@ -420,7 +330,24 @@ impl Workspace {
         emission: &E,
         band: Band,
     ) -> Log10Likelihood {
-        self.align::<f32x8, E>(haplotype, read, emission, band)
+        self.align_banded_simd_at(Level::new(), haplotype, read, emission, band)
+    }
+
+    /// [`Workspace::align_banded_simd`] at a given `fearless_simd` level, so
+    /// the parity tests can hold every level the CPU has to the scalar kernel.
+    #[doc(hidden)]
+    pub fn align_banded_simd_at<E: Emission>(
+        &mut self,
+        level: Level,
+        haplotype: &Haplotype,
+        read: &Read,
+        emission: &E,
+        band: Band,
+    ) -> Log10Likelihood {
+        let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        crate::simd::banded_kernel_at(level, &self.plan, &mut self.ring, shape, band)
     }
 
     fn align<L: Lane<Token = ()>, E: Emission>(
@@ -430,17 +357,28 @@ impl Workspace {
         emission: &E,
         band: Band,
     ) -> Log10Likelihood {
+        let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        banded_kernel::<L>((), &self.plan, &mut self.ring, shape, band)
+    }
+
+    /// Folds the emission into the plan, so that from here on a kernel is
+    /// generic over the lane type only: one hot loop per lane, not one per
+    /// emission model. `None` where no alignment is possible.
+    pub(crate) fn fill_plan<E: Emission>(
+        &mut self,
+        haplotype: &Haplotype,
+        read: &Read,
+        emission: &E,
+        band: Band,
+    ) -> Option<Shape> {
         let (h, r) = (haplotype.len(), read.len());
         if h == 0 || r == 0 {
-            return Log10Likelihood::IMPOSSIBLE;
+            return None;
         }
-        if self.plan.fill(haplotype, read, emission, band).is_none() {
-            return Log10Likelihood::IMPOSSIBLE;
-        }
-        // The emission is folded into the plan, so from here on the kernel is
-        // generic over the lane type only: one hot loop per lane, not one per
-        // emission model.
-        banded_kernel::<L>((), &self.plan, &mut self.ring, Shape { haplotype: h, read: r }, band)
+        self.plan.fill(haplotype, read, emission, band)?;
+        Some(Shape { haplotype: h, read: r })
     }
 }
 
@@ -730,7 +668,7 @@ const MATRICES: usize = 3;
 /// contiguous region, so a diagonal borrows its own region mutably and the two
 /// before it immutably.
 #[derive(Debug, Default)]
-struct Ring {
+pub(crate) struct Ring {
     cells: Vec<f32>,
     capacity: usize,
 }
@@ -1100,6 +1038,10 @@ impl<'a> Sink<'a> {
 /// tracks and the three neighbour buffers contiguous loads rather than
 /// gathers; the haplotype runs the other way, and the plan holds it reversed
 /// so that it is a contiguous load too.
+///
+/// `#[inline(always)]` because its eight-lane instance is compiled inside a
+/// `#[simd]` function (see `simd`), and an out-of-line copy there would be
+/// compiled for the baseline.
 #[allow(
     clippy::too_many_lines,
     reason = "one traversal; splitting it would hide the index algebra it exists to get right"
@@ -1111,7 +1053,8 @@ impl<'a> Sink<'a> {
     clippy::cast_possible_wrap,
     reason = "the f32 narrowing is the point of this kernel, and every index cast is clamped above"
 )]
-fn banded_kernel<L: Lane>(
+#[inline(always)]
+pub(crate) fn banded_kernel<L: Lane>(
     token: L::Token,
     plan: &Plan,
     ring: &mut Ring,
@@ -1296,49 +1239,23 @@ mod tests {
         Read, StandardEmission, Strand, TapsEmission,
     };
     use proptest::prelude::*;
-    use wide::f32x8;
 
     proptest! {
-        /// The vector lane operations the strip kernel adds, against the
-        /// scalar lane applied lane by lane: `shift_in` moves every lane up
-        /// by one and drops the one `last` reports, and a mask `both` another
-        /// mask is the lanewise and.
+        /// The scalar lane's side of the operations the strip kernel adds:
+        /// one lane shifts in `first` and drops itself, and its masks combine
+        /// bitwise. The eight-lane side is `simd::tests`.
         #[test]
-        fn vector_lane_ops_are_the_scalar_ops_lanewise(
-            values in proptest::array::uniform8(-1e30f32..1e30),
-            first in -1e30f32..1e30,
-            left in proptest::array::uniform8(any::<bool>()),
-            right in proptest::array::uniform8(any::<bool>()),
-        ) {
-            let vector = f32x8::from(values);
-            let shifted = vector.shift_in(first).to_array();
-            let [v0, v1, v2, v3, v4, v5, v6, v7] = values;
-            prop_assert_eq!(shifted, [first, v0, v1, v2, v3, v4, v5, v6]);
-            prop_assert_eq!(vector.last().to_bits(), v7.to_bits());
-            prop_assert_eq!(<f32 as Lane>::shift_in(v0, first).to_bits(), first.to_bits());
-            prop_assert_eq!(<f32 as Lane>::last(v0).to_bits(), v0.to_bits());
-
-            let mask = |bits: [bool; 8]| f32x8::from(bits.map(|b| if b { MASK_SET } else { 0.0 }));
-            let got = mask(left).both(mask(right)).to_array();
-            for lane in 0..8 {
-                let want = <f32 as LaneMask>::both(
-                    if left[lane] { MASK_SET } else { 0.0 },
-                    if right[lane] { MASK_SET } else { 0.0 },
-                );
-                prop_assert_eq!(got[lane].to_bits(), want.to_bits(), "lane {}", lane);
-            }
-        }
-
-        /// `horizontal_sum` with one live lane is that lane exactly, which is
-        /// the only way the kernel uses it.
-        #[test]
-        fn horizontal_sum_of_one_live_lane_is_that_lane(
+        fn scalar_lane_ops_are_the_one_lane_case(
             value in -1e30f32..1e30,
-            lane in 0usize..8,
+            first in -1e30f32..1e30,
+            left in any::<bool>(),
+            right in any::<bool>(),
         ) {
-            let mut lanes = [0.0f32; 8];
-            *lanes.get_mut(lane).expect("lane in 0..8") = value;
-            prop_assert_eq!(f32x8::from(lanes).horizontal_sum().to_bits(), value.to_bits());
+            prop_assert_eq!(<f32 as Lane>::shift_in(value, first).to_bits(), first.to_bits());
+            prop_assert_eq!(<f32 as Lane>::last(value).to_bits(), value.to_bits());
+            let mask = |set: bool| if set { MASK_SET } else { 0.0 };
+            let want = if left && right { u32::MAX } else { 0 };
+            prop_assert_eq!(<f32 as LaneMask>::both(mask(left), mask(right)).to_bits(), want);
         }
     }
 

@@ -170,6 +170,48 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+
+    /// The three eight-lane kernels at every SIMD level this CPU has, the
+    /// scalar `Fallback` included, against their scalar oracles: the diagonal
+    /// and strip kernels against their own scalar instances, and a ragged
+    /// batch against the scalar strip kernel one haplotype at a time. One
+    /// workspace serves every level in turn, so nothing a level leaves behind
+    /// may leak into the next.
+    #[test]
+    fn every_simd_level_is_bit_identical_to_scalar(
+        case in arbitrary_case(),
+        conversion in any_conversion(),
+        spread in 0usize..4,
+    ) {
+        let band = case.band();
+        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+        let bases = case.haplotype.bases().to_vec();
+        let batch: Vec<Haplotype> = (0..BATCH)
+            .map(|k| Haplotype::new(bases[..bases.len().saturating_sub(k * spread)].to_vec()))
+            .collect();
+        let refs: Vec<&Haplotype> = batch.iter().collect();
+        let banded = align_banded(&case.haplotype, &case.read, &taps, band).get().to_bits();
+        let strips = align_strips(&case.haplotype, &case.read, &taps, band).get().to_bits();
+        let one_at_a_time: Vec<u64> =
+            refs.iter().map(|h| align_strips(h, &case.read, &taps, band).get().to_bits()).collect();
+        let mut workspace = Workspace::new();
+        let mut out = Vec::new();
+        for (name, level) in support::levels() {
+            let simd =
+                workspace.align_banded_simd_at(level, &case.haplotype, &case.read, &taps, band);
+            prop_assert_eq!(banded, simd.get().to_bits(), "diagonal at {}", name);
+            let simd =
+                workspace.align_strips_simd_at(level, &case.haplotype, &case.read, &taps, band);
+            prop_assert_eq!(strips, simd.get().to_bits(), "strips at {}", name);
+            workspace.align_batch_at(level, &refs, &case.read, &taps, band, &mut out);
+            let batched: Vec<u64> = out.iter().map(|score| score.get().to_bits()).collect();
+            prop_assert_eq!(&one_at_a_time, &batched, "batch at {}", name);
+        }
+    }
+}
+
+proptest! {
     /// The other C4 gate: where the optimal path is inside the band, the f32
     /// band agrees with the f64 full matrix. The reads here are cut out of the
     /// haplotype and given at most three edits, so a 48-column band contains the

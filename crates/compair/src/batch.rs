@@ -34,8 +34,7 @@
 //! [`align_strips`]: crate::align_strips
 //! [`STRIP_ROWS`]: crate::batch::STRIP_ROWS
 
-#[cfg(not(feature = "intrinsics"))]
-use wide::f32x8;
+use fearless_simd::Level;
 
 use crate::{
     banded::{
@@ -129,7 +128,19 @@ impl BatchKernel {
 const FASTEST_BATCH_KERNEL: BatchKernel =
     BatchKernel { lanes: BATCH, run: crate::intrinsics::batch_kernel_intrinsics };
 #[cfg(not(feature = "intrinsics"))]
-const FASTEST_BATCH_KERNEL: BatchKernel = BatchKernel::over::<f32x8>();
+const FASTEST_BATCH_KERNEL: BatchKernel = BatchKernel { lanes: BATCH, run: batch_kernel_simd };
+
+/// The batch kernel at the best SIMD level this CPU has, in [`BatchKernel`]'s
+/// shape.
+#[cfg(not(feature = "intrinsics"))]
+fn batch_kernel_simd(
+    plan: &BatchPlan,
+    buffer: &mut BatchBuffer,
+    read_len: usize,
+    band: Band,
+) -> [Log10Likelihood; BATCH] {
+    crate::simd::batch_kernel_at(Level::new(), plan, buffer, read_len, band)
+}
 
 /// Rows between two renormalisations. The strip kernel's constant, and it has
 /// to be, or the two would not round the same way.
@@ -337,6 +348,36 @@ impl Workspace {
         out: &mut Vec<Log10Likelihood>,
     ) {
         self.batch::<E>(haplotypes, read, emission, band, out, FASTEST_BATCH_KERNEL);
+    }
+
+    /// [`Workspace::align_batch`] at a given `fearless_simd` level, so the
+    /// parity tests can hold every level the CPU has to the scalar kernel.
+    #[doc(hidden)]
+    pub fn align_batch_at<E: Emission>(
+        &mut self,
+        level: Level,
+        haplotypes: &[&Haplotype],
+        read: &Read,
+        emission: &E,
+        band: Band,
+        out: &mut Vec<Log10Likelihood>,
+    ) {
+        out.clear();
+        for group in haplotypes.chunks(BATCH) {
+            let scores =
+                if read.is_empty() || self.batch_plan.fill(group, read, emission, band).is_none() {
+                    [Log10Likelihood::IMPOSSIBLE; BATCH]
+                } else {
+                    crate::simd::batch_kernel_at(
+                        level,
+                        &self.batch_plan,
+                        &mut self.batch_rows,
+                        read.len(),
+                        band,
+                    )
+                };
+            out.extend(scores.iter().take(group.len()).copied());
+        }
     }
 
     /// [`Workspace::align_batch`] with one lane, the bit-parity oracle.
