@@ -13,7 +13,7 @@ use std::ops::Neg;
 use super::{
     block::{self, Block, ContentType},
     compression_header::CompressionHeader,
-    encoding::{DecodeContext, ExternalCursor},
+    encoding::{ByteArrayEncoding, DecodeContext, ExternalCursor},
     reader::CramError,
     varint,
 };
@@ -256,6 +256,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     let core_data = core_block.ok_or_else(|| CramError::MissingCoreDataBlock)?;
 
     let mut ctx = DecodeContext::new(&core_data.data, external_blocks);
+    let tag_lines = resolve_tag_lines(ch);
 
     // Decode records, collecting mate cross-reference info for TLEN reconstruction.
     let mut alignment_pos = i64::from(sh.alignment_start);
@@ -278,6 +279,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
 
         let (fetched, mate_info) = decode_record(
             ch,
+            &tag_lines,
             &sh,
             is_multi_ref,
             &mut ctx,
@@ -315,6 +317,32 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     Ok((fetched_count, kept_count))
 }
 
+/// A tag dictionary line with each tag's BAM head (`tag[0] tag[1] type`)
+/// and encoding, looked up once per slice; a tag without an encoding is
+/// left out, as the per-record lookup skipped it.
+type ResolvedTagLine<'a> = SmallVec<([u8; 3], &'a ByteArrayEncoding), 8>;
+
+// r[impl cram.perf.tag_lines_resolved]
+/// The compression header's tag lines with their encodings resolved, so a
+/// record's tags cost no hash lookups.
+fn resolve_tag_lines(ch: &CompressionHeader) -> Vec<ResolvedTagLine<'_>> {
+    ch.preservation
+        .tag_dictionary
+        .iter()
+        .map(|line| {
+            line.iter()
+                .filter_map(|entry| {
+                    let key = (i32::from(entry.tag[0]) << 16)
+                        | (i32::from(entry.tag[1]) << 8)
+                        | i32::from(entry.bam_type);
+                    let enc = ch.tag_encodings.get(&key)?;
+                    Some(([entry.tag[0], entry.tag[1], entry.bam_type], enc))
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Decode a single CRAM record from the decode context.
 ///
 /// Returns `(fetched, mate_info)` where `fetched` is `true` if the record
@@ -331,6 +359,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
 )]
 fn decode_record<E: CustomizeRecordStore>(
     ch: &CompressionHeader,
+    tag_lines: &[ResolvedTagLine<'_>],
     sh: &SliceHeader,
     is_multi_ref: bool,
     ctx: &mut DecodeContext<'_>,
@@ -470,21 +499,14 @@ fn decode_record<E: CustomizeRecordStore>(
     //   reconstructed BAM aux block as the encoded `tag_value` bytes.
     // 10. Decode tag values
     aux_buf.clear();
-    if let Some(tag_set) = ch.preservation.tag_dictionary.get(tag_line_idx) {
-        for entry in tag_set {
-            let tag_key = (i32::from(entry.tag[0]) << 16)
-                | (i32::from(entry.tag[1]) << 8)
-                | i32::from(entry.bam_type);
-            if let Some(enc) = ch.tag_encodings.get(&tag_key) {
-                // Serialize to BAM binary aux format: tag[0] tag[1] type value_bytes.
-                // Decoding the value directly into `aux_buf` skips the
-                // per-tag `Vec<u8>` allocation that the old `decode` API
-                // forced.
-                aux_buf.push(entry.tag[0]);
-                aux_buf.push(entry.tag[1]);
-                aux_buf.push(entry.bam_type);
-                enc.decode_into(ctx, aux_buf)?;
-            }
+    if let Some(line) = tag_lines.get(tag_line_idx) {
+        for (head, enc) in line {
+            // Serialize to BAM binary aux format: tag[0] tag[1] type value_bytes.
+            // Decoding the value directly into `aux_buf` skips the
+            // per-tag `Vec<u8>` allocation that the old `decode` API
+            // forced.
+            aux_buf.extend_from_slice(head);
+            enc.decode_into(ctx, aux_buf)?;
         }
     }
 

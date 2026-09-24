@@ -640,5 +640,8 @@ CRAM random access is slice-granular, not record-granular. A region query may de
 r[cram.perf.reference_caching]
 Reference sequence lookups happen per-slice (to reconstruct all records in the slice). The reader SHOULD cache the most recently used reference region to avoid repeated FASTA lookups for consecutive slices on the same contig. This cache MUST be per-fork, not shared across threads.
 
+r[cram.perf.tag_lines_resolved]
+A record's tags are decoded from its tag line (TL). The reader SHOULD resolve each tag line's tags to their encodings once per slice rather than hash-looking-up every tag of every record; a tag the compression header has no encoding for is skipped either way.
+
 r[cram.perf.codec_overhead]
 rANS and arithmetic decoders have higher per-byte CPU cost than zlib. The reader SHOULD pre-allocate decode buffers and reuse them across blocks within a slice.
