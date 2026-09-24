@@ -14,7 +14,7 @@
 
 use super::codec_io::{self, Uint7Error};
 use super::reader::CramError;
-use fearless_simd::{Level, dispatch, prelude::*};
+use fearless_simd::{Level, dispatch, prelude::*, u8x16, u32x4};
 use fearless_simd_macros::simd;
 
 /// Bridge `Uint7Error` (narrow, hot-path-friendly) to the rich `CramError`.
@@ -40,36 +40,52 @@ type CumulativeFrequencies1 = Box<[[u32; ALPHABET_SIZE]; ALPHABET_SIZE]>;
 /// 256 contexts x 4096-entry symbol-decode table. ~1 MiB.
 type SymTables1 = Box<[[u8; 4096]; ALPHABET_SIZE]>;
 
-/// Reusable allocations for rANS Nx16 order-1 decoding (~1.5 MB).
+/// Reusable allocations for rANS Nx16 order-1 decoding.
 ///
-/// Holds the per-context frequency, cumulative-frequency, and symbol-decode tables
-/// so they aren't `Box::new`'d for every order-1 block.
+/// Allocated on the first order-1 block, so a buffer that only ever sees
+/// order-0 streams costs nothing. The packed rows are 4 MiB of zeroed
+/// (lazily mapped) memory of which a block touches only its active
+/// contexts' rows; the unpacked tables serve malformed frequency tables only.
+#[derive(Default)]
 pub(crate) struct Nx16Order1Buf {
-    pub frequencies: Frequencies1,
-    pub cumulative_frequencies: CumulativeFrequencies1,
-    /// Per-context symbol-decode tables. Mirrors `Rans4x8Buf::sym_tables`;
-    /// avoids the linear scan that `cumulative_frequencies_symbol` did
-    /// inside the order-1 hot loop.
-    pub sym_tables: SymTables1,
-    pub states: Vec<u32>,
-    pub prev_syms: Vec<u8>,
+    tables: Option<Order1Tables>,
 }
 
-impl Nx16Order1Buf {
-    pub fn new() -> Self {
+struct Order1Tables {
+    frequencies: Frequencies1,
+    packed: Box<[PackedRow; ALPHABET_SIZE]>,
+    /// The unpacked path's tables, for frequency tables that do not pack.
+    cumulative_frequencies: CumulativeFrequencies1,
+    sym_tables: SymTables1,
+    states: Vec<u32>,
+    prev_syms: Vec<u8>,
+}
+
+/// A zeroed `Box<[T; N]>` straight from the allocator (`vec!` of a zero
+/// value is a `calloc`), never staged on the stack.
+fn zeroed_box<T: Clone, const N: usize>(zero: T) -> Box<[T; N]> {
+    let Ok(b) = vec![zero; N].into_boxed_slice().try_into() else {
+        unreachable!("a Vec of N elements converts to [T; N]")
+    };
+    b
+}
+
+impl Order1Tables {
+    fn new() -> Self {
         Self {
-            frequencies: Box::new([[0u32; ALPHABET_SIZE]; ALPHABET_SIZE]),
-            cumulative_frequencies: Box::new([[0u32; ALPHABET_SIZE]; ALPHABET_SIZE]),
-            sym_tables: Box::new([[0u8; 4096]; ALPHABET_SIZE]),
+            frequencies: zeroed_box([0; ALPHABET_SIZE]),
+            packed: zeroed_box([0; ROW]),
+            cumulative_frequencies: zeroed_box([0; ALPHABET_SIZE]),
+            sym_tables: zeroed_box([0; 4096]),
             states: Vec::with_capacity(32),
             prev_syms: Vec::with_capacity(32),
         }
     }
 }
 
-impl Default for Nx16Order1Buf {
-    fn default() -> Self {
-        Self::new()
+impl Nx16Order1Buf {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -239,6 +255,373 @@ pub(crate) fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Option<u32> {
     Some(s)
 }
 
+// ── Packed fast path ─────────────────────────────────────────────────
+//
+// htscodecs' layout: one `u32` per table slot holding everything a decode
+// step needs, so a step is one load instead of three dependent ones
+// (`sym_table[x]`, then `freq[sym]` and `cum[sym]`). A slot is
+// `(f − 1) << 20 | bias << 8 | sym`, where `bias` is the slot's offset into
+// its symbol's range, so the step is `f·(x >> bits) + bias`. Only tables
+// whose frequencies sum to exactly `1 << bits` are packed: then every slot
+// belongs to a symbol with f ≥ 1, `f − 1` and `bias` fit 12 bits, and the
+// packed step equals `state_step` bit for bit. Any other table takes the
+// unpacked scalar path, which keeps whatever it does on malformed tables.
+
+const PACK_F_SHIFT: u32 = 20;
+const PACK_BIAS_MASK: u32 = 0xFFF;
+/// Slots per packed row: the table width at the largest allowed `bits` (12).
+const ROW: usize = 1 << ORDER_0_BITS;
+type PackedRow = [u32; ROW];
+
+/// Pack one context's frequencies into `row[..1 << bits]`. False unless the
+/// frequencies sum to exactly `1 << bits`; `row` is then partly written and
+/// must not be used.
+#[allow(clippy::indexing_slicing, reason = "x + f ≤ total ≤ ROW is checked before the slice")]
+#[allow(clippy::arithmetic_side_effects, reason = "f ≥ 1 in the subtraction")]
+fn pack_row(freqs: &[u32; ALPHABET_SIZE], bits: u32, row: &mut PackedRow) -> bool {
+    let total = 1u32 << bits;
+    let mut x = 0u32;
+    for (sym, &f) in (0u32..).zip(freqs) {
+        if f == 0 {
+            continue;
+        }
+        let Some(end) = x.checked_add(f).filter(|&end| end <= total) else {
+            return false;
+        };
+        let base = ((f - 1) << PACK_F_SHIFT) | sym;
+        for (y, slot) in (0u32..).zip(&mut row[x as usize..end as usize]) {
+            *slot = base | (y << 8);
+        }
+        x = end;
+    }
+    x == total
+}
+
+/// The scalar packed step, for the scalar tails of the packed kernels.
+#[inline(always)]
+fn packed_step(x: u32, slot: u32, bits: u32) -> u32 {
+    ((slot >> PACK_F_SHIFT).wrapping_add(1))
+        .wrapping_mul(x >> bits)
+        .wrapping_add((slot >> 8) & PACK_BIAS_MASK)
+}
+
+/// For each 4-bit "lane needs a renorm" mask, the byte shuffle that moves
+/// the next u16s of the stream into the low halves of exactly those lanes,
+/// in lane order. The other bytes are don't-care (0x80): what a swizzle
+/// makes of an out-of-range index differs by level (zero on NEON and x86,
+/// a wrapped index on the fallback), so the caller masks the low halves
+/// and keeps the old state in lanes that do not renormalize.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "const table build, m < 16, lane < 4, k < 4"
+)]
+const RENORM_SHUFFLE: [[u8; 16]; 16] = {
+    let mut t = [[0x80u8; 16]; 16];
+    let mut m = 0;
+    while m < 16 {
+        let mut k = 0u8;
+        let mut lane = 0;
+        while lane < 4 {
+            if m & (1 << lane) != 0 {
+                t[m][lane * 4] = 2 * k;
+                t[m][lane * 4 + 1] = 2 * k + 1;
+                k += 1;
+            }
+            lane += 1;
+        }
+        m += 1;
+    }
+    t
+};
+
+/// Renormalize four states at once: every lane below `1 << 15` takes the
+/// next u16 of the stream, in lane order, like four scalar
+/// `state_renormalize` calls that each read at most once. Returns the new
+/// states and the number of bytes consumed. `window` is the next 16 bytes.
+#[inline(always)]
+#[allow(clippy::indexing_slicing, reason = "the bitmask of 4 lanes is < 16")]
+#[allow(clippy::cast_possible_truncation, reason = "the bitmask of 4 lanes is < 16")]
+#[allow(clippy::arithmetic_side_effects, reason = "count_ones ≤ 4")]
+fn renorm4<S: Simd>(simd: S, x: u32x4<S>, window: &[u8; 16]) -> (u32x4<S>, usize) {
+    let low = x.simd_lt(u32x4::splat(simd, 1 << 15));
+    let m = (low.to_bitmask() & 0xF) as usize;
+    let raw = u8x16::from_slice(simd, window);
+    let norm: u32x4<S> = raw.swizzle_dyn(u8x16::from_slice(simd, &RENORM_SHUFFLE[m])).bitcast();
+    (low.select((x << 16) | (norm & 0xFFFF), x), 2 * m.count_ones() as usize)
+}
+
+/// Bytes the vector loop must have left before a step: at most 2 per lane,
+/// plus the 16-byte window of the last group, which starts at most
+/// `2·(n − 4)` bytes in.
+#[allow(clippy::arithmetic_side_effects, reason = "n ≤ 32")]
+const fn vector_headroom(n: usize) -> usize {
+    2 * n + 16
+}
+
+/// Order-0 decode with `N` interleaved states (4 or 32) over a packed
+/// table. The vector loop needs every state ≥ `1 << 15`, so that one
+/// renorm read per step suffices, exactly as in the scalar decoder (a
+/// packed slot has f ≥ 1, so a step leaves x ≥ `x >> 12` ≥ 8 and one u16
+/// lifts it past `1 << 15`); near the end of the stream, or with a state
+/// below that, it hands over to the scalar steps, which renormalize with
+/// bounds checks.
+#[simd]
+#[allow(clippy::indexing_slicing, reason = "x & 0xFFF < ROW indexes the table")]
+#[allow(clippy::cast_possible_truncation, reason = "the low byte of a slot is its symbol")]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "vector lanes wrap, as state_step's do; pos advances by ≤ 2 per lane within the checked headroom"
+)]
+fn decode_o0_packed<S: Simd, const N: usize>(
+    simd: S,
+    src: &mut &[u8],
+    dst: &mut [u8],
+    table: &PackedRow,
+    states: &mut [u32; N],
+) -> Result<(), CramError> {
+    debug_assert_eq!(N % 4, 0);
+    let truncated = || CramError::Truncated { context: "rans_nx16 order-0 truncated" };
+    let bytes: &[u8] = src;
+    let mut pos = 0usize;
+    let (chunks, remainder) = dst.as_chunks_mut::<N>();
+    let mut chunks = chunks.iter_mut();
+
+    if states.iter().all(|&x| x >= 1 << 15) {
+        while bytes.len().saturating_sub(pos) >= vector_headroom(N) {
+            let Some(chunk) = chunks.next() else { break };
+            let mut slots = [0u32; N];
+            for ((d, s), &x) in chunk.iter_mut().zip(&mut slots).zip(states.iter()) {
+                *s = table[(x & 0xFFF) as usize];
+                *d = *s as u8;
+            }
+            for (x4, s4) in states.as_chunks_mut::<4>().0.iter_mut().zip(slots.as_chunks::<4>().0) {
+                let x = u32x4::from_slice(simd, x4);
+                let s = u32x4::from_slice(simd, s4);
+                let x =
+                    ((s >> PACK_F_SHIFT) + 1) * (x >> ORDER_0_BITS) + ((s >> 8) & PACK_BIAS_MASK);
+                let Some(window) = bytes.get(pos..).and_then(|w| w.first_chunk::<16>()) else {
+                    return Err(truncated());
+                };
+                let (x, used) = renorm4(simd, x, window);
+                pos += used;
+                x.store_slice(x4);
+            }
+        }
+    }
+
+    let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
+    for chunk in chunks {
+        for (d, x) in chunk.iter_mut().zip(states.iter_mut()) {
+            let slot = table[(*x & 0xFFF) as usize];
+            *d = slot as u8;
+            *x = state_renormalize(packed_step(*x, slot, ORDER_0_BITS), &mut rest)
+                .ok_or_else(truncated)?;
+        }
+    }
+    for (d, x) in remainder.iter_mut().zip(states.iter_mut()) {
+        let slot = table[(*x & 0xFFF) as usize];
+        *d = slot as u8;
+        *x = state_renormalize(packed_step(*x, slot, ORDER_0_BITS), &mut rest)
+            .ok_or_else(truncated)?;
+    }
+    *src = rest;
+    Ok(())
+}
+
+/// Order-1 decode with `N` interleaved states over packed per-context rows:
+/// state `j` fills `dst[j·len/N ..][..len/N]`, its context is the symbol it
+/// decoded last, and the last state also decodes the `len % N` leftover
+/// bytes. Same vector/scalar split as [`decode_o0_packed`]. Only rows of
+/// contexts reachable from context 0 are read, and the caller has packed
+/// all of them.
+#[simd]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "ctx: u8 < 256 rows, x & mask ≤ 0xFFF < ROW; j·chunk + i < N·chunk ≤ dst.len()"
+)]
+#[allow(clippy::cast_possible_truncation, reason = "the low byte of a slot is its symbol")]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "vector lanes wrap, as state_step's do; j·chunk + i < dst.len(); pos within the checked headroom"
+)]
+fn decode_o1_packed<S: Simd, const N: usize>(
+    simd: S,
+    src: &mut &[u8],
+    dst: &mut [u8],
+    table: &[PackedRow; ALPHABET_SIZE],
+    bits: u32,
+    states: &mut [u32; N],
+) -> Result<(), CramError> {
+    debug_assert_eq!(N % 4, 0);
+    let truncated = || CramError::Truncated { context: "rans_nx16 order-1 truncated" };
+    let mask = ((1u32 << bits) - 1) & 0xFFF;
+    let chunk = dst.len() / N;
+    let bytes: &[u8] = src;
+    let mut pos = 0usize;
+    let mut ctx = [0u8; N];
+    let mut i = 0usize;
+
+    if states.iter().all(|&x| x >= 1 << 15) {
+        while i < chunk && bytes.len().saturating_sub(pos) >= vector_headroom(N) {
+            let mut slots = [0u32; N];
+            for (j, ((s, c), &x)) in slots.iter_mut().zip(&mut ctx).zip(states.iter()).enumerate() {
+                *s = table[usize::from(*c)][(x & mask) as usize];
+                *c = *s as u8;
+                dst[j * chunk + i] = *c;
+            }
+            for (x4, s4) in states.as_chunks_mut::<4>().0.iter_mut().zip(slots.as_chunks::<4>().0) {
+                let x = u32x4::from_slice(simd, x4);
+                let s = u32x4::from_slice(simd, s4);
+                let x = ((s >> PACK_F_SHIFT) + 1) * (x >> bits) + ((s >> 8) & PACK_BIAS_MASK);
+                let Some(window) = bytes.get(pos..).and_then(|w| w.first_chunk::<16>()) else {
+                    return Err(truncated());
+                };
+                let (x, used) = renorm4(simd, x, window);
+                pos += used;
+                x.store_slice(x4);
+            }
+            i += 1;
+        }
+    }
+
+    let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
+    for i in i..chunk {
+        for (j, (c, x)) in ctx.iter_mut().zip(states.iter_mut()).enumerate() {
+            let slot = table[usize::from(*c)][(*x & mask) as usize];
+            *c = slot as u8;
+            dst[j * chunk + i] = *c;
+            *x = state_renormalize(packed_step(*x, slot, bits), &mut rest).ok_or_else(truncated)?;
+        }
+    }
+    let (Some(c), Some(x)) = (ctx.last_mut(), states.last_mut()) else {
+        return Err(truncated());
+    };
+    for d in &mut dst[chunk * N..] {
+        let slot = table[usize::from(*c)][(*x & mask) as usize];
+        *c = slot as u8;
+        *d = *c;
+        *x = state_renormalize(packed_step(*x, slot, bits), &mut rest).ok_or_else(truncated)?;
+    }
+    *src = rest;
+    Ok(())
+}
+
+/// One branch-free renorm read: `x` takes the u16 at `pos` if it is below
+/// `1 << 15`. The caller guarantees two readable bytes at `pos`.
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects, reason = "pos + 2 within the caller's headroom")]
+fn renorm_branchless(x: u32, bytes: &[u8], pos: &mut usize) -> u32 {
+    let y =
+        bytes.get(*pos..).and_then(|w| w.first_chunk::<2>()).map_or(0, |w| u16::from_le_bytes(*w));
+    let low = x < 1 << 15;
+    *pos += 2 * usize::from(low);
+    if low { (x << 16) | u32::from(y) } else { x }
+}
+
+/// [`decode_o0_packed`] without vectors: the same packed step and the same
+/// one-read renorm, branch-free. For few states, where moving four lanes
+/// in and out of a vector costs more than it saves.
+#[allow(clippy::indexing_slicing, reason = "x & 0xFFF < ROW indexes the table")]
+#[allow(clippy::cast_possible_truncation, reason = "the low byte of a slot is its symbol")]
+fn decode_o0_packed_scalar<const N: usize>(
+    src: &mut &[u8],
+    dst: &mut [u8],
+    table: &PackedRow,
+    states: &mut [u32; N],
+) -> Result<(), CramError> {
+    let truncated = || CramError::Truncated { context: "rans_nx16 order-0 truncated" };
+    let bytes: &[u8] = src;
+    let mut pos = 0usize;
+    let (chunks, remainder) = dst.as_chunks_mut::<N>();
+    let mut chunks = chunks.iter_mut();
+
+    if states.iter().all(|&x| x >= 1 << 15) {
+        while bytes.len().saturating_sub(pos) >= N.saturating_mul(2) {
+            let Some(chunk) = chunks.next() else { break };
+            for (d, x) in chunk.iter_mut().zip(states.iter_mut()) {
+                let slot = table[(*x & 0xFFF) as usize];
+                *d = slot as u8;
+                *x = renorm_branchless(packed_step(*x, slot, ORDER_0_BITS), bytes, &mut pos);
+            }
+        }
+    }
+
+    let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
+    for chunk in chunks {
+        for (d, x) in chunk.iter_mut().zip(states.iter_mut()) {
+            let slot = table[(*x & 0xFFF) as usize];
+            *d = slot as u8;
+            *x = state_renormalize(packed_step(*x, slot, ORDER_0_BITS), &mut rest)
+                .ok_or_else(truncated)?;
+        }
+    }
+    for (d, x) in remainder.iter_mut().zip(states.iter_mut()) {
+        let slot = table[(*x & 0xFFF) as usize];
+        *d = slot as u8;
+        *x = state_renormalize(packed_step(*x, slot, ORDER_0_BITS), &mut rest)
+            .ok_or_else(truncated)?;
+    }
+    *src = rest;
+    Ok(())
+}
+
+/// [`decode_o1_packed`] without vectors; see [`decode_o0_packed_scalar`].
+#[allow(
+    clippy::indexing_slicing,
+    reason = "ctx: u8 < 256 rows, x & mask ≤ 0xFFF < ROW; j·chunk + i < N·chunk ≤ dst.len()"
+)]
+#[allow(clippy::cast_possible_truncation, reason = "the low byte of a slot is its symbol")]
+#[allow(clippy::arithmetic_side_effects, reason = "j·chunk + i < dst.len()")]
+fn decode_o1_packed_scalar<const N: usize>(
+    src: &mut &[u8],
+    dst: &mut [u8],
+    table: &[PackedRow; ALPHABET_SIZE],
+    bits: u32,
+    states: &mut [u32; N],
+) -> Result<(), CramError> {
+    let truncated = || CramError::Truncated { context: "rans_nx16 order-1 truncated" };
+    let mask = ((1u32 << bits) - 1) & 0xFFF;
+    let chunk = dst.len() / N;
+    let bytes: &[u8] = src;
+    let mut pos = 0usize;
+    let mut ctx = [0u8; N];
+    let mut i = 0usize;
+
+    if states.iter().all(|&x| x >= 1 << 15) {
+        while i < chunk && bytes.len().saturating_sub(pos) >= 2 * N {
+            for (j, (c, x)) in ctx.iter_mut().zip(states.iter_mut()).enumerate() {
+                let slot = table[usize::from(*c)][(*x & mask) as usize];
+                *c = slot as u8;
+                dst[j * chunk + i] = *c;
+                *x = renorm_branchless(packed_step(*x, slot, bits), bytes, &mut pos);
+            }
+            i += 1;
+        }
+    }
+
+    let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
+    for i in i..chunk {
+        for (j, (c, x)) in ctx.iter_mut().zip(states.iter_mut()).enumerate() {
+            let slot = table[usize::from(*c)][(*x & mask) as usize];
+            *c = slot as u8;
+            dst[j * chunk + i] = *c;
+            *x = state_renormalize(packed_step(*x, slot, bits), &mut rest).ok_or_else(truncated)?;
+        }
+    }
+    let (Some(c), Some(x)) = (ctx.last_mut(), states.last_mut()) else {
+        return Err(truncated());
+    };
+    for d in &mut dst[chunk * N..] {
+        let slot = table[usize::from(*c)][(*x & mask) as usize];
+        *c = slot as u8;
+        *d = *c;
+        *x = state_renormalize(packed_step(*x, slot, bits), &mut rest).ok_or_else(truncated)?;
+    }
+    *src = rest;
+    Ok(())
+}
+
 // ── Alphabet reading ─────────────────────────────────────────────────
 
 // r[impl cram.codec.alphabet_run_bounded]
@@ -290,18 +673,60 @@ fn read_alphabet(src: &mut &[u8]) -> Result<[bool; ALPHABET_SIZE], CramError> {
 pub(crate) const ORDER_0_BITS: u32 = 12;
 
 fn decode_order_0(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result<(), CramError> {
+    decode_order_0_at(Level::new(), src, dst, state_count)
+}
+
+/// Frequency tables that pack take the packed kernels; the rest re-read the
+/// table from the start through the unpacked paths.
+// r[impl cram.codec.simd_dispatch+3]
+fn decode_order_0_at(
+    level: Level,
+    src: &mut &[u8],
+    dst: &mut [u8],
+    state_count: usize,
+) -> Result<(), CramError> {
+    let mut cur = *src;
+    let frequencies = read_frequencies_0(&mut cur)?;
+    let mut table = [0u32; ROW];
+    if pack_row(&frequencies, ORDER_0_BITS, &mut table) {
+        match state_count {
+            32 => {
+                let mut states = read_state_array::<32>(&mut cur)?;
+                dispatch!(level, simd => decode_o0_packed(simd, &mut cur, dst, &table, &mut states))?;
+                *src = cur;
+                return Ok(());
+            }
+            // Four states: moving one vector's worth of lanes in and out
+            // costs more than the vector step saves (measured).
+            4 => {
+                let mut states = read_state_array::<4>(&mut cur)?;
+                decode_o0_packed_scalar(&mut cur, dst, &table, &mut states)?;
+                *src = cur;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
     if state_count == 32 {
-        return decode_order_0_32state(src, dst);
+        return decode_order_0_32state_at(level, src, dst);
     }
     decode_order_0_generic(src, dst, state_count)
 }
 
-/// The 32-state order-0 decode, through the SIMD kernel.
+fn read_state_array<const N: usize>(src: &mut &[u8]) -> Result<[u32; N], CramError> {
+    let mut states = [0u32; N];
+    for x in &mut states {
+        *x = read_u32_le(src).ok_or_else(|| CramError::Truncated { context: "rans_nx16 state" })?;
+    }
+    Ok(states)
+}
+
+/// The 32-state order-0 decode, through the unpacked SIMD kernel.
+#[cfg(test)]
 fn decode_order_0_32state(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     decode_order_0_32state_at(Level::new(), src, dst)
 }
 
-// r[impl cram.codec.simd_dispatch+2]
 // r[impl io.simd_portable]
 fn decode_order_0_32state_at(
     level: Level,
@@ -523,14 +948,77 @@ fn decode_order_1_with_buf(
     state_count: usize,
     buf: &mut Nx16Order1Buf,
 ) -> Result<(), CramError> {
-    let bits = read_frequencies_1(src, &mut buf.frequencies)?;
+    decode_order_1_at(Level::new(), src, dst, state_count, buf)
+}
+
+/// Packs the rows of the active contexts — the only ones a stream can reach
+/// when context 0 is among them, since every decoded symbol is in the
+/// alphabet — and takes the packed kernels if all of them pack; otherwise
+/// the unpacked scalar path, with the inactive rows zeroed so a reused
+/// buffer's earlier blocks cannot leak into this one.
+// r[impl cram.codec.simd_dispatch+3]
+fn decode_order_1_at(
+    level: Level,
+    src: &mut &[u8],
+    dst: &mut [u8],
+    state_count: usize,
+    buf: &mut Nx16Order1Buf,
+) -> Result<(), CramError> {
+    let buf = buf.tables.get_or_insert_with(Order1Tables::new);
+    let (bits, alphabet) = read_frequencies_1(src, &mut buf.frequencies)?;
+
+    let packs = alphabet[0]
+        && alphabet
+            .iter()
+            .zip(buf.frequencies.iter())
+            .zip(buf.packed.iter_mut())
+            .filter(|((active, _), _)| **active)
+            .all(|((_, freqs), row)| pack_row(freqs, bits, row));
+    if packs {
+        match state_count {
+            32 => {
+                let mut states = read_state_array::<32>(src)?;
+                return dispatch!(level, simd => decode_o1_packed(simd, src, dst, &buf.packed, bits, &mut states));
+            }
+            4 => {
+                let mut states = read_state_array::<4>(src)?;
+                return decode_o1_packed_scalar(src, dst, &buf.packed, bits, &mut states);
+            }
+            _ => {}
+        }
+    }
+
+    // r[impl cram.codec.order1_table_reset]
+    for (active, row) in alphabet.iter().zip(buf.frequencies.iter_mut()) {
+        if !active {
+            row.fill(0);
+        }
+    }
+    decode_order_1_unpacked(src, dst, state_count, buf, bits)
+}
+
+/// The scalar order-1 decode over unpacked tables: the path for frequency
+/// tables that do not pack, and the oracle the packed kernels are tested
+/// against.
+fn decode_order_1_unpacked(
+    src: &mut &[u8],
+    dst: &mut [u8],
+    state_count: usize,
+    buf: &mut Order1Tables,
+    bits: u32,
+) -> Result<(), CramError> {
     build_cumulative_frequencies_1_into(&buf.frequencies, &mut buf.cumulative_frequencies);
-    // Pre-compute per-context symbol-decode tables (256 ctx * 4096 entries
-    // = 1 MiB). Replaces the O(256) `cumulative_frequencies_symbol` linear
-    // scan with a single index in the per-byte hot loop below — mirrors
-    // what `Rans4x8Buf` already does for the 4x8 codec.
-    for (cum, table) in buf.cumulative_frequencies.iter().zip(buf.sym_tables.iter_mut()) {
-        build_symbol_table_nx16_into(cum, table);
+    // Pre-compute per-context symbol-decode tables. A row of zero
+    // frequencies (every inactive context) decodes every slot to 255, which
+    // is what the scan would compute, without the scan.
+    for ((freqs, cum), table) in
+        buf.frequencies.iter().zip(buf.cumulative_frequencies.iter()).zip(buf.sym_tables.iter_mut())
+    {
+        if freqs.iter().all(|&f| f == 0) {
+            table.fill(255);
+        } else {
+            build_symbol_table_nx16_into(cum, table);
+        }
     }
 
     let states = &mut buf.states;
@@ -630,7 +1118,12 @@ fn build_cumulative_frequencies_1_into(
     }
 }
 
-fn read_frequencies_1(src: &mut &[u8], frequencies: &mut Frequencies1) -> Result<u32, CramError> {
+/// Reads the order-1 frequency tables into the rows of the active contexts
+/// (every other row is left as it was) and returns `bits` and the alphabet.
+fn read_frequencies_1(
+    src: &mut &[u8],
+    frequencies: &mut Frequencies1,
+) -> Result<(u32, [bool; ALPHABET_SIZE]), CramError> {
     let n =
         read_u8(src).ok_or_else(|| CramError::Truncated { context: "rans_nx16 freq1 header" })?;
     let bits = u32::from(n >> 4);
@@ -651,12 +1144,12 @@ fn read_frequencies_1(src: &mut &[u8], frequencies: &mut Frequencies1) -> Result
         super::reader::check_alloc_size(uncompressed_size, "rans_nx16 freq1 compressed")?;
         let mut tmp = vec![0u8; uncompressed_size];
         decode_order_0(&mut compressed_data, &mut tmp, 4)?;
-        read_frequencies_1_inner(&mut &tmp[..], frequencies, bits)?;
+        let alphabet = read_frequencies_1_inner(&mut &tmp[..], frequencies, bits)?;
+        Ok((bits, alphabet))
     } else {
-        read_frequencies_1_inner(src, frequencies, bits)?;
+        let alphabet = read_frequencies_1_inner(src, frequencies, bits)?;
+        Ok((bits, alphabet))
     }
-
-    Ok(bits)
 }
 
 #[allow(
@@ -667,7 +1160,7 @@ fn read_frequencies_1_inner(
     src: &mut &[u8],
     frequencies: &mut Frequencies1,
     bits: u32,
-) -> Result<(), CramError> {
+) -> Result<[bool; ALPHABET_SIZE], CramError> {
     let alphabet = read_alphabet(src)?;
 
     for (ctx_idx, ctx_active) in alphabet.iter().enumerate() {
@@ -676,6 +1169,10 @@ fn read_frequencies_1_inner(
         }
 
         let fs = &mut frequencies[ctx_idx];
+        // r[impl cram.codec.order1_table_reset]
+        // Symbols the stream skips (outside the alphabet, or in a run of
+        // zeros) are zero, not whatever an earlier block left in a reused row.
+        fs.fill(0);
         let mut sym_iter = alphabet.iter().enumerate().filter(|(_, b)| **b).peekable();
 
         while let Some((sym_idx, _)) = sym_iter.next() {
@@ -695,7 +1192,7 @@ fn read_frequencies_1_inner(
         normalize_frequencies(fs, bits)?;
     }
 
-    Ok(())
+    Ok(alphabet)
 }
 
 // ── Stripe transform ─────────────────────────────────────────────────
@@ -1478,7 +1975,7 @@ mod tests {
         assert_eq!(simd_result, scalar_dst);
     }
 
-    // r[verify cram.codec.simd_dispatch+2]
+    // r[verify cram.codec.simd_dispatch+3]
     // r[verify io.simd_portable]
     /// Every level against the generic scalar decoder, including a partial
     /// last chunk: two symbols at 2048 each, so each state's low 12 bits pick
@@ -1635,5 +2132,258 @@ mod tests {
         decode_order_0_generic(&mut cur_gen, &mut dst_gen, 32).unwrap();
 
         assert_eq!(dst_simd, dst_gen, "SIMD and scalar diverge for len={len}");
+    }
+
+    // ── Packed kernels vs the unpacked scalar decoders ──────────────────
+
+    /// The alphabet encoding `read_alphabet` reads: symbols ascending, a
+    /// symbol one above its predecessor followed by the count of further
+    /// consecutive ones, a 0 terminator.
+    fn encode_alphabet(syms: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < syms.len() {
+            out.push(syms[i]);
+            if i + 1 < syms.len() && syms[i + 1] == syms[i] + 1 {
+                out.push(syms[i + 1]);
+                let mut k = i + 2;
+                while k < syms.len() && syms[k] == syms[k - 1] + 1 && k - i - 2 < 255 {
+                    k += 1;
+                }
+                // The run marks syms[i+1] .. syms[k-2]; syms[k-1] is marked
+                // when the loop comes round.
+                out.push((k - i - 2) as u8);
+                i = k;
+            } else {
+                i += 1;
+            }
+        }
+        out.push(0);
+        out
+    }
+
+    /// Frequencies for `n` symbols: all ≥ 1 and summing to exactly `total`
+    /// (so the table packs), unless `exact` is false, when one is nudged
+    /// off so the sum misses (and the decoders take the unpacked path).
+    fn draw_frequencies(tc: &TestCase, n: usize, total: u32, exact: bool) -> Vec<u32> {
+        let mut cuts: Vec<u32> = (0..n - 1)
+            .map(|_| tc.draw(gs::integers::<u32>().min_value(1).max_value(total - 1)))
+            .collect();
+        cuts.push(0);
+        cuts.push(total);
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut f: Vec<u32> = cuts.windows(2).map(|w| w[1] - w[0]).collect();
+        f.resize(n, 1); // dedup may have merged cuts; a surplus 1 breaks the sum
+        if !exact {
+            f[0] += 1;
+        }
+        f
+    }
+
+    /// A draw of the stream after the frequency table: `n` states (mostly
+    /// above the renorm threshold, sometimes not) and renorm bytes, maybe
+    /// cut short.
+    fn draw_states_and_payload(tc: &TestCase, n: usize, len: usize) -> Vec<u8> {
+        let low_states = tc.draw(gs::booleans());
+        let mut out = Vec::new();
+        for _ in 0..n {
+            let x = if low_states {
+                tc.draw(gs::integers::<u32>().max_value(1 << 20))
+            } else {
+                tc.draw(gs::integers::<u32>().min_value(1 << 15).max_value(1 << 31))
+            };
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+        // ~1 byte per symbol covers a decode; a short cut covers truncation.
+        let mut payload = tc.draw(gs::binary().min_size(len + 64).max_size(len + 128));
+        if tc.draw(gs::booleans()) {
+            payload.truncate(tc.draw(gs::integers::<usize>().max_value(len + 64)));
+        }
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    fn draw_alphabet(tc: &TestCase, with_zero: bool) -> Vec<u8> {
+        let mut syms = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(1).max_size(40));
+        if with_zero {
+            syms.push(0);
+        }
+        syms.sort_unstable();
+        syms.dedup();
+        syms
+    }
+
+    // r[verify cram.codec.simd_dispatch+3]
+    // r[verify io.simd_portable]
+    /// Order-0, 4 and 32 states: the packed decoders — at every SIMD level,
+    /// and the scalar packed kernel at 32 states too — against the unpacked
+    /// scalar decoder, on exact and inexact tables, high and low initial
+    /// states, whole and truncated streams.
+    #[hegel::test]
+    fn packed_order0_matches_unpacked(tc: TestCase) {
+        let n = if tc.draw(gs::booleans()) { 32 } else { 4 };
+        let len = tc.draw(gs::integers::<usize>().max_value(600));
+        let syms = draw_alphabet(&tc, false);
+        let freqs = draw_frequencies(&tc, syms.len(), 4096, tc.draw(gs::booleans()));
+        let mut stream = encode_alphabet(&syms);
+        for &f in &freqs {
+            encode_uint7_prv(&mut stream, f);
+        }
+        stream.extend(draw_states_and_payload(&tc, n, len));
+
+        let mut oracle_src: &[u8] = &stream;
+        let mut oracle_dst = vec![0u8; len];
+        let oracle = decode_order_0_generic(&mut oracle_src, &mut oracle_dst, n);
+
+        let check = |name: &str, got: Result<(), CramError>, dst: &[u8], src: &[u8]| {
+            assert_eq!(got.is_ok(), oracle.is_ok(), "{name}: {got:?} vs {oracle:?}");
+            if got.is_ok() {
+                assert_eq!(dst, oracle_dst, "{name}");
+                assert_eq!(src.len(), oracle_src.len(), "{name} consumed differently");
+            }
+        };
+        for level in crate::simd_levels::levels() {
+            let mut src: &[u8] = &stream;
+            let mut dst = vec![0u8; len];
+            let got = decode_order_0_at(level, &mut src, &mut dst, n);
+            check(&format!("{level:?}"), got, &dst, src);
+        }
+        if n == 32 {
+            let mut src: &[u8] = &stream;
+            let mut dst = vec![0u8; len];
+            let frequencies = read_frequencies_0(&mut src).unwrap();
+            let mut table = [0u32; ROW];
+            if pack_row(&frequencies, ORDER_0_BITS, &mut table) {
+                let mut states = read_state_array::<32>(&mut src).unwrap();
+                let got = decode_o0_packed_scalar(&mut src, &mut dst, &table, &mut states);
+                check("scalar packed", got, &dst, src);
+            }
+        }
+    }
+
+    /// An order-1 frequency table in `read_frequencies_1`'s uncompressed
+    /// form: every alphabet symbol is a context, and each context's row over
+    /// the alphabet has some zero entries (each followed by a run length of
+    /// 0) and sums to `1 << bits` unless `exact` is false for that row.
+    fn encode_order1_table(tc: &TestCase, syms: &[u8], bits: u32, exact_rows: bool) -> Vec<u8> {
+        let mut out = vec![(bits as u8) << 4];
+        out.extend(encode_alphabet(syms));
+        let broken_row = if exact_rows {
+            usize::MAX
+        } else {
+            tc.draw(gs::integers::<usize>().max_value(syms.len() - 1))
+        };
+        for row in 0..syms.len() {
+            let live: Vec<bool> =
+                syms.iter().map(|_| tc.draw(gs::integers::<u8>().max_value(3)) != 0).collect();
+            let live_count = live.iter().filter(|&&l| l).count().max(1);
+            let freqs = draw_frequencies(tc, live_count, 1 << bits, row != broken_row);
+            let mut next = freqs.iter();
+            for (k, &l) in live.iter().enumerate() {
+                // At least one live symbol per row: the first, if none drew.
+                if l || (k == 0 && !live.iter().any(|&l| l)) {
+                    encode_uint7_prv(&mut out, *next.next().unwrap());
+                } else {
+                    out.push(0); // f = 0
+                    out.push(0); // skip no further symbols
+                }
+            }
+        }
+        out
+    }
+
+    fn decode_order_1_oracle(src: &mut &[u8], dst: &mut [u8], n: usize) -> Result<(), CramError> {
+        let mut t = Order1Tables::new();
+        let (bits, alphabet) = read_frequencies_1(src, &mut t.frequencies)?;
+        for (active, row) in alphabet.iter().zip(t.frequencies.iter_mut()) {
+            if !active {
+                row.fill(0);
+            }
+        }
+        decode_order_1_unpacked(src, dst, n, &mut t, bits)
+    }
+
+    // r[verify cram.codec.simd_dispatch+3]
+    // r[verify io.simd_portable]
+    /// Order-1, 4 and 32 states, 10 and 12 bits: the packed decoders at every
+    /// SIMD level (and the scalar packed kernel at 32 states) against the
+    /// unpacked scalar decoder, with tables that pack, rows that do not, and
+    /// alphabets without context 0.
+    #[hegel::test]
+    fn packed_order1_matches_unpacked(tc: TestCase) {
+        let n = if tc.draw(gs::booleans()) { 32 } else { 4 };
+        let bits = if tc.draw(gs::booleans()) { 12 } else { 10 };
+        let len = tc.draw(gs::integers::<usize>().max_value(600));
+        let syms = draw_alphabet(&tc, tc.draw(gs::integers::<u8>().max_value(7)) != 0);
+        let mut stream =
+            encode_order1_table(&tc, &syms, bits, tc.draw(gs::integers::<u8>().max_value(7)) != 0);
+        stream.extend(draw_states_and_payload(&tc, n, len));
+
+        let mut oracle_src: &[u8] = &stream;
+        let mut oracle_dst = vec![0u8; len];
+        let oracle = decode_order_1_oracle(&mut oracle_src, &mut oracle_dst, n);
+
+        let check = |name: &str, got: Result<(), CramError>, dst: &[u8], src: &[u8]| {
+            assert_eq!(got.is_ok(), oracle.is_ok(), "{name}: {got:?} vs {oracle:?}");
+            if got.is_ok() {
+                assert_eq!(dst, oracle_dst, "{name}");
+                assert_eq!(src.len(), oracle_src.len(), "{name} consumed differently");
+            }
+        };
+        for level in crate::simd_levels::levels() {
+            let mut src: &[u8] = &stream;
+            let mut dst = vec![0u8; len];
+            let got = decode_order_1_at(level, &mut src, &mut dst, n, &mut Nx16Order1Buf::new());
+            check(&format!("{level:?}"), got, &dst, src);
+        }
+        if n == 32 {
+            let mut t = Order1Tables::new();
+            let mut src: &[u8] = &stream;
+            let (bits, alphabet) = read_frequencies_1(&mut src, &mut t.frequencies).unwrap();
+            let packs = alphabet[0]
+                && alphabet
+                    .iter()
+                    .zip(t.frequencies.iter())
+                    .zip(t.packed.iter_mut())
+                    .filter(|((a, _), _)| **a)
+                    .all(|((_, f), row)| pack_row(f, bits, row));
+            if packs {
+                let mut dst = vec![0u8; len];
+                let mut states = read_state_array::<32>(&mut src).unwrap();
+                let got = decode_o1_packed_scalar(&mut src, &mut dst, &t.packed, bits, &mut states);
+                check("scalar packed", got, &dst, src);
+            }
+        }
+    }
+
+    // r[verify cram.codec.order1_table_reset]
+    /// A reused buffer decodes a block exactly as a fresh one does, whatever
+    /// an earlier block with a different alphabet left in it.
+    #[hegel::test]
+    fn order1_buffer_reuse_matches_fresh(tc: TestCase) {
+        let n = 4;
+        let blocks: Vec<(Vec<u8>, usize)> = (0..2)
+            .map(|_| {
+                let len = tc.draw(gs::integers::<usize>().max_value(300));
+                let syms = draw_alphabet(&tc, true);
+                let mut stream = encode_order1_table(&tc, &syms, 12, tc.draw(gs::booleans()));
+                stream.extend(draw_states_and_payload(&tc, n, len));
+                (stream, len)
+            })
+            .collect();
+        let mut reused = Nx16Order1Buf::new();
+        for (stream, len) in &blocks {
+            let mut src: &[u8] = stream;
+            let mut got = vec![0u8; *len];
+            let r1 = decode_order_1_with_buf(&mut src, &mut got, n, &mut reused);
+            let mut src: &[u8] = stream;
+            let mut want = vec![0u8; *len];
+            let r2 = decode_order_1_with_buf(&mut src, &mut want, n, &mut Nx16Order1Buf::new());
+            assert_eq!(r1.is_ok(), r2.is_ok());
+            if r1.is_ok() {
+                assert_eq!(got, want);
+            }
+        }
     }
 }
