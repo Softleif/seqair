@@ -12,7 +12,7 @@ use super::{
     index::{AlignmentIndex, BaiError, BamIndex, Chunk},
     record::{DecodeError, compute_end_pos_from_raw},
     record_store::{CustomizeRecordStore, RecordStore},
-    region_buf::{self, RegionBuf},
+    region_buf::{self, BlockCache, RegionBuf},
 };
 use core::range::RangeInclusive;
 use seqair_types::{Pos0, SmolStr};
@@ -107,6 +107,8 @@ pub struct IndexedBamReader<R: Read + Seek = File> {
     /// large sequential reads that don't benefit from `BufReader`).
     bulk_reader: R,
     shared: Arc<BamShared>,
+    /// Decompressed blocks kept between queries; see `r[region_buf.block_cache]`.
+    block_cache: BlockCache,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for IndexedBamReader<R> {
@@ -130,6 +132,7 @@ impl IndexedBamReader<File> {
         Ok(IndexedBamReader {
             bulk_reader: bulk_file,
             shared: Arc::new(BamShared { index, header, bam_path: path.to_path_buf() }),
+            block_cache: BlockCache::new(),
         })
     }
 
@@ -142,7 +145,11 @@ impl IndexedBamReader<File> {
         let bulk_file = File::open(&self.shared.bam_path)
             .map_err(|source| BamError::Open { path: self.shared.bam_path.clone(), source })?;
 
-        Ok(IndexedBamReader { bulk_reader: bulk_file, shared: Arc::clone(&self.shared) })
+        Ok(IndexedBamReader {
+            bulk_reader: bulk_file,
+            shared: Arc::clone(&self.shared),
+            block_cache: BlockCache::new(),
+        })
     }
 }
 
@@ -157,6 +164,7 @@ impl IndexedBamReader<std::io::Cursor<Vec<u8>>> {
         Ok(IndexedBamReader {
             bulk_reader: std::io::Cursor::new(bam_data),
             shared: Arc::new(BamShared { index, header, bam_path: PathBuf::from("<fuzz>") }),
+            block_cache: BlockCache::new(),
         })
     }
 }
@@ -276,7 +284,8 @@ impl<R: Read + Seek> IndexedBamReader<R> {
 
         // One streaming RegionBuf spans all chunks: the sliding window bounds
         // peak memory, so there's no need to pre-partition into batches.
-        let mut region = RegionBuf::new(&mut self.bulk_reader, &chunks)?;
+        let mut region =
+            RegionBuf::with_cache(&mut self.bulk_reader, &chunks, &mut self.block_cache)?;
         let chunk_end = match chunks.first() {
             Some(first) => {
                 region.seek_virtual(first.begin)?;

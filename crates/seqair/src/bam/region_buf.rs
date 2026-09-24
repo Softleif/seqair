@@ -31,6 +31,103 @@ pub(super) const CHUNK_END_PAD: usize = MAX_BLOCK_SIZE;
 /// block always fits.
 pub(super) const WINDOW_BUDGET: usize = 64 * 1024 * 1024; // 64 MiB
 
+/// How many decompressed BGZF blocks a [`BlockCache`] keeps.
+///
+/// A query starts at the linear-index minimum of its first 16 kb window, so
+/// neighbouring small queries re-read the same blocks: at ~30× short-read
+/// coverage a 16 kb window is ~24 blocks, and a read with a long deletion or
+/// skip can pull a query's start back further. Measured on 1 bp queries every
+/// 100 bp over 10 Mb of 30× WGS, 32 blocks still re-inflated 1.4× the blocks
+/// touched (the LRU thrashes on a query longer than the cache); 64 re-inflated
+/// none. That is ≤ 4 MiB per reader, allocated only as blocks arrive.
+pub(crate) const BLOCK_CACHE_BLOCKS: usize = 64;
+
+// r[impl region_buf.block_cache]
+/// Decompressed BGZF blocks kept across the queries of one reader, keyed by
+/// the block's compressed file offset.
+///
+/// A [`RegionBuf`] borrows the cache for one query. Each block it decompresses
+/// is handed back when it moves past the block, and a block that is already
+/// here is taken instead of decompressed again. Buffers move between the
+/// cache and the `RegionBuf` by swapping `Vec`s, so a cold scan pays no copy
+/// for it, only the bookkeeping.
+///
+/// Only blocks that decompressed and passed their CRC check get in, so a hit
+/// skips both. Forks start with an empty cache of their own.
+#[derive(Debug)]
+pub(crate) struct BlockCache {
+    entries: Vec<CachedBlock>,
+    /// Most entries kept; [`BLOCK_CACHE_BLOCKS`] outside tests.
+    capacity: usize,
+    /// Recency clock: bumped on every `put`, stamped on the entry.
+    clock: u64,
+    /// An empty buffer to hand out while the cache is still filling.
+    spare: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct CachedBlock {
+    /// File offset of the block's first compressed byte.
+    offset: u64,
+    /// Total compressed length (`BSIZE + 1`), checked on lookup.
+    block_len: usize,
+    data: Vec<u8>,
+    last_used: u64,
+}
+
+impl BlockCache {
+    pub(crate) fn new() -> Self {
+        Self::with_capacity(BLOCK_CACHE_BLOCKS)
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        BlockCache { entries: Vec::new(), capacity, clock: 0, spare: Vec::new() }
+    }
+
+    /// Compressed length of the cached block at `offset`.
+    fn block_len(&self, offset: u64) -> Option<usize> {
+        self.entries.iter().find(|e| e.offset == offset).map(|e| e.block_len)
+    }
+
+    /// Remove and return the decompressed block at `offset`, if cached.
+    fn take(&mut self, offset: u64, block_len: usize) -> Option<Vec<u8>> {
+        let i = self.entries.iter().position(|e| e.offset == offset)?;
+        let entry = self.entries.swap_remove(i);
+        (entry.block_len == block_len).then_some(entry.data)
+    }
+
+    /// Store `data` as the block at `offset`, returning an empty buffer to
+    /// decompress the next block into (the evicted entry's, when full).
+    fn put(&mut self, offset: u64, block_len: usize, data: Vec<u8>) -> Vec<u8> {
+        self.clock = self.clock.wrapping_add(1);
+        let entry = CachedBlock { offset, block_len, data, last_used: self.clock };
+        // Replace a stale copy of the same block, else the least recently
+        // used entry once full.
+        let slot = match self.entries.iter().position(|e| e.offset == offset) {
+            Some(i) => self.entries.get_mut(i),
+            None if self.entries.len() < self.capacity => None,
+            None => self.entries.iter_mut().min_by_key(|e| e.last_used),
+        };
+        let mut recycled = match slot {
+            Some(slot) => std::mem::replace(slot, entry).data,
+            None => {
+                self.entries.push(entry);
+                std::mem::take(&mut self.spare)
+            }
+        };
+        recycled.clear();
+        recycled
+    }
+
+    /// Keep an unused buffer for the next `put` that doesn't evict.
+    fn recycle(&mut self, mut buf: Vec<u8>) {
+        if self.spare.capacity() < buf.capacity() {
+            buf.clear();
+            self.spare = buf;
+        }
+    }
+}
+
 /// Pre-computed byte range covering one or more merged index chunks.
 struct MergedRange {
     file_start: u64,
@@ -73,6 +170,11 @@ pub struct RegionBuf<'r, R: Read + Seek> {
     decompressor: libdeflater::Decompressor,
     blocks_decompressed: u32,
     decompressed_bytes: u64,
+    /// Blocks shared with the reader's other queries, when it lent one.
+    cache: Option<&'r mut BlockCache>,
+    /// `(file offset, compressed length)` of the verified block in `buf`,
+    /// while it is one the cache should get back.
+    buf_block: Option<(u64, usize)>,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for RegionBuf<'_, R> {
@@ -112,6 +214,36 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         chunks: &[Chunk],
         budget: usize,
     ) -> Result<Self, BgzfError> {
+        Self::build(reader, chunks, budget, None)
+    }
+
+    /// Like [`new`](Self::new), keeping decompressed blocks in `cache` so the
+    /// reader's next query can reuse them.
+    pub(crate) fn with_cache(
+        reader: &'r mut R,
+        chunks: &[Chunk],
+        cache: &'r mut BlockCache,
+    ) -> Result<Self, BgzfError> {
+        Self::build(reader, chunks, WINDOW_BUDGET, Some(cache))
+    }
+
+    /// [`with_cache`](Self::with_cache) with an explicit window budget, for tests.
+    #[cfg(test)]
+    pub(crate) fn with_cache_and_budget(
+        reader: &'r mut R,
+        chunks: &[Chunk],
+        cache: &'r mut BlockCache,
+        budget: usize,
+    ) -> Result<Self, BgzfError> {
+        Self::build(reader, chunks, budget, Some(cache))
+    }
+
+    fn build(
+        reader: &'r mut R,
+        chunks: &[Chunk],
+        budget: usize,
+        cache: Option<&'r mut BlockCache>,
+    ) -> Result<Self, BgzfError> {
         let budget = budget.max(MAX_BLOCK_SIZE);
         let ranges = merge_chunks(chunks);
         let eof = ranges.is_empty();
@@ -136,6 +268,8 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             decompressor: libdeflater::Decompressor::new(),
             blocks_decompressed: 0,
             decompressed_bytes: 0,
+            cache,
+            buf_block: None,
         })
     }
 
@@ -214,6 +348,11 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         true
     }
 
+    /// Empty `buf`, handing the block it holds back to the cache first.
+    fn release_block(&mut self) {
+        release_block(self.cache.as_deref_mut(), &mut self.buf_block, &mut self.buf);
+    }
+
     // r[impl region_buf.seek_virtual]
     /// Seek to a virtual offset within the planned ranges.
     ///
@@ -247,7 +386,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         }
 
         self.block_offset = block_off;
-        self.buf.clear();
+        self.release_block();
         self.buf_pos = 0;
         self.eof = false;
 
@@ -276,6 +415,10 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
     // r[impl region_buf.fast_header]
     fn read_block(&mut self) -> Result<bool, BgzfError> {
         loop {
+            if self.take_cached_block() {
+                return Ok(true);
+            }
+
             // Ensure the 18-byte header is resident (refilling if needed).
             let avail = self.ensure_available(BGZF_HEADER_SIZE)?;
             if avail < BGZF_HEADER_SIZE {
@@ -283,7 +426,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
                     continue;
                 }
                 self.eof = true;
-                self.buf.clear();
+                self.release_block();
                 self.buf_pos = 0;
                 return Ok(false);
             }
@@ -340,7 +483,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
                     continue;
                 }
                 self.eof = true;
-                self.buf.clear();
+                self.release_block();
                 self.buf_pos = 0;
                 return Ok(false);
             }
@@ -379,10 +522,15 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
 
             if uncompressed_size == 0 {
                 self.eof = true;
-                self.buf.clear();
+                self.release_block();
                 self.buf_pos = 0;
                 return Ok(false);
             }
+
+            // The block we are leaving goes back to the cache before `buf` is
+            // overwritten.
+            let block_file_offset = self.block_offset;
+            release_block(self.cache.as_deref_mut(), &mut self.buf_block, &mut self.buf);
 
             #[allow(clippy::indexing_slicing, reason = "footer_start ≤ remaining.len()")]
             let deflate_data = &remaining[..footer_start];
@@ -406,10 +554,55 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             }
 
             self.buf_pos = 0;
+            if self.cache.is_some() {
+                self.buf_block = Some((block_file_offset, total_block_size));
+            }
             self.blocks_decompressed = self.blocks_decompressed.wrapping_add(1);
             self.decompressed_bytes = self.decompressed_bytes.wrapping_add(actual as u64);
             return Ok(true);
         }
+    }
+
+    // r[impl region_buf.block_cache]
+    /// Make the cached block at the cursor current, without reading or
+    /// decompressing anything. `false` when there is no cache, the block isn't
+    /// in it, or the block would not lie wholly inside the current range —
+    /// the uncached path then reads it, and decides as it always has.
+    fn take_cached_block(&mut self) -> bool {
+        let Some(cache) = self.cache.as_deref_mut() else {
+            return false;
+        };
+        let Some(range) = self.ranges.get(self.range_idx) else {
+            return false;
+        };
+        let offset = self.window_file_start.wrapping_add(self.cursor as u64);
+        let Some(block_len) = cache.block_len(offset) else {
+            return false;
+        };
+        let range_end = range.file_end.min(self.file_size);
+        if offset.saturating_add(block_len as u64) > range_end {
+            return false;
+        }
+        release_block(Some(&mut *cache), &mut self.buf_block, &mut self.buf);
+        let Some(data) = cache.take(offset, block_len) else {
+            return false;
+        };
+        cache.recycle(std::mem::replace(&mut self.buf, data));
+        self.buf_block = Some((offset, block_len));
+        self.buf_pos = 0;
+        self.block_offset = offset;
+
+        // Step past the block's compressed bytes, which may not be resident:
+        // `window_file_start + cursor` stays the true file offset either way.
+        let next = self.cursor.saturating_add(block_len);
+        if next <= self.window.len() {
+            self.cursor = next;
+        } else {
+            self.window.clear();
+            self.window_file_start = offset.wrapping_add(block_len as u64);
+            self.cursor = 0;
+        }
+        true
     }
 
     // r[impl region_buf.read_exact]
@@ -547,6 +740,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
 // r[impl region_buf.drop_no_panic]
 impl<R: Read + Seek> Drop for RegionBuf<'_, R> {
     fn drop(&mut self) {
+        self.release_block();
         if self.blocks_decompressed > 0 {
             let max_gap = self
                 .ranges
@@ -570,6 +764,24 @@ impl<R: Read + Seek> Drop for RegionBuf<'_, R> {
                 "region_buf summary",
             );
         }
+    }
+}
+
+/// Empty `buf`, handing the verified block it holds back to `cache` first.
+///
+/// Free-standing so `read_block` can call it while it still borrows the window.
+fn release_block(
+    cache: Option<&mut BlockCache>,
+    buf_block: &mut Option<(u64, usize)>,
+    buf: &mut Vec<u8>,
+) {
+    if let Some((offset, block_len)) = buf_block.take()
+        && let Some(cache) = cache
+    {
+        let data = std::mem::take(buf);
+        *buf = cache.put(offset, block_len, data);
+    } else {
+        buf.clear();
     }
 }
 
@@ -682,6 +894,8 @@ mod tests {
             blocks_decompressed: 1,
             decompressed_bytes: 100,
             decompressor: libdeflater::Decompressor::new(),
+            cache: None,
+            buf_block: None,
         };
         // If Drop panics, the test will fail.
         drop(buf);
@@ -1627,7 +1841,8 @@ mod tests {
 
     // r[verify region_buf.virtual_offset+2]
     /// Reading a full 64 KiB block to its end leaves the cursor at the next
-    /// block's first byte — the offset `BgzfWriter` gives the same position.
+    /// block's first byte — the offset `BgzfWriter` gives the same position —
+    /// with or without a cache, and whether or not the next block is resident.
     #[test]
     fn end_of_full_block_is_next_block_start() {
         let full: Vec<u8> = (0..MAX_BLOCK_SIZE).map(|i| (i % 251) as u8).collect();
@@ -1636,12 +1851,127 @@ mod tests {
             begin: VirtualOffset::new(offsets[0], 0),
             end: VirtualOffset::new(offsets[1], 50),
         }];
-        let mut cursor = std::io::Cursor::new(file);
-        let mut buf = RegionBuf::new(&mut cursor, &chunks).unwrap();
-        buf.seek_virtual(chunks[0].begin).unwrap();
-        let mut out = vec![0u8; full.len()];
-        buf.read_exact_into(&mut out).unwrap();
-        assert_eq!(out, full);
-        assert_eq!(buf.virtual_offset(), VirtualOffset::new(offsets[1], 0));
+        let mut cache = BlockCache::new();
+        for pass in 0..3 {
+            let mut cursor = std::io::Cursor::new(file.clone());
+            let mut buf = if pass == 0 {
+                RegionBuf::new(&mut cursor, &chunks).unwrap()
+            } else {
+                RegionBuf::with_cache(&mut cursor, &chunks, &mut cache).unwrap()
+            };
+            buf.seek_virtual(chunks[0].begin).unwrap();
+            let mut out = vec![0u8; full.len()];
+            buf.read_exact_into(&mut out).unwrap();
+            assert_eq!(out, full);
+            assert_eq!(buf.virtual_offset(), VirtualOffset::new(offsets[1], 0), "pass {pass}");
+        }
+    }
+
+    // --- Block cache: cached queries against uncached ones ---
+
+    /// A virtual offset strictly inside one of `blocks`.
+    #[hegel::composite]
+    fn arb_point(tc: &TestCase, lens: Vec<usize>) -> (usize, usize) {
+        let block = tc.draw(gs::integers::<usize>().max_value(lens.len() - 1));
+        let within = tc.draw(gs::integers::<usize>().max_value(lens[block] - 1));
+        (block, within)
+    }
+
+    /// Read `chunks` the way `BamQuery` walks them: seek to each begin, take
+    /// bytes until the cursor reaches the end. Returns every `(virtual offset,
+    /// bytes)` piece handed out.
+    fn read_chunks<R: Read + Seek>(
+        buf: &mut RegionBuf<'_, R>,
+        chunks: &[Chunk],
+    ) -> Vec<(VirtualOffset, Vec<u8>)> {
+        let mut out = Vec::new();
+        for c in chunks {
+            buf.seek_virtual(c.begin).unwrap();
+            loop {
+                let (voff, data) = buf.fill_buf().unwrap();
+                if data.is_empty() || voff >= c.end {
+                    break;
+                }
+                let n = if voff.block_offset() == c.end.block_offset() {
+                    usize::from(c.end.within_block() - voff.within_block())
+                } else {
+                    data.len()
+                };
+                let n = n.min(data.len());
+                out.push((voff, data[..n].to_vec()));
+                buf.consume(n);
+            }
+        }
+        out
+    }
+
+    // r[verify region_buf.block_cache]
+    /// A sequence of queries sharing one cache — repeats, backward jumps,
+    /// disjoint ranges, a cache small enough to evict — hands out exactly the
+    /// pieces a fresh uncached buffer hands out for each query, and those
+    /// pieces are the original payloads.
+    #[hegel::test]
+    fn cached_queries_match_uncached(tc: TestCase) {
+        let n_blocks = tc.draw(gs::integers::<usize>().min_value(1).max_value(24));
+        let seed = tc.draw(gs::integers::<u64>());
+        let mut state = seed | 1;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Incompressible payloads, some large, so that blocks far apart in the
+        // file land in disjoint planned ranges.
+        let blocks: Vec<Vec<u8>> = (0..n_blocks)
+            .map(|_| {
+                let len = if next() % 4 == 0 { 20_000 } else { 1 + (next() % 3_000) as usize };
+                (0..len).map(|_| next() as u8).collect()
+            })
+            .collect();
+        let lens: Vec<usize> = blocks.iter().map(Vec::len).collect();
+        let (file, offsets) = make_bgzf_file(&blocks);
+        let voff = |(b, w): (usize, usize)| VirtualOffset::new(offsets[b], w as u16);
+
+        let budget = PARITY_BUDGETS[tc.draw(gs::integers::<usize>().max_value(2))];
+        let capacity = tc.draw(gs::integers::<usize>().min_value(1).max_value(8));
+        let mut cache = BlockCache::with_capacity(capacity);
+        let mut cached_file = std::io::Cursor::new(file.clone());
+
+        let n_queries = tc.draw(gs::integers::<usize>().min_value(1).max_value(10));
+        for _ in 0..n_queries {
+            // Sorted, non-overlapping chunks: pair up consecutive sorted points.
+            let n_chunks = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
+            let mut points: Vec<(usize, usize)> =
+                (0..2 * n_chunks).map(|_| tc.draw(arb_point(lens.clone()))).collect();
+            points.sort_unstable();
+            let pairs = points.as_chunks::<2>().0;
+            let chunks: Vec<Chunk> =
+                pairs.iter().map(|&[a, b]| Chunk { begin: voff(a), end: voff(b) }).collect();
+
+            let mut uncached_file = std::io::Cursor::new(file.clone());
+            let mut plain = RegionBuf::with_budget(&mut uncached_file, &chunks, budget).unwrap();
+            let expected = read_chunks(&mut plain, &chunks);
+            drop(plain);
+
+            let mut buf =
+                RegionBuf::with_cache_and_budget(&mut cached_file, &chunks, &mut cache, budget)
+                    .unwrap();
+            let got = read_chunks(&mut buf, &chunks);
+            drop(buf);
+            assert_eq!(got, expected, "chunks {chunks:?}");
+
+            let mut oracle: Vec<u8> = Vec::new();
+            for &[(b0, w0), (b1, w1)] in pairs {
+                for (b, block) in blocks.iter().enumerate().take(b1 + 1).skip(b0) {
+                    let from = if b == b0 { w0 } else { 0 };
+                    let to = if b == b1 { w1 } else { block.len() };
+                    oracle.extend_from_slice(&block[from..to]);
+                }
+            }
+            let flat: Vec<u8> = got.into_iter().flat_map(|(_, bytes)| bytes).collect();
+            assert_eq!(flat, oracle, "payload bytes for {chunks:?}");
+            assert!(cache.entries.len() <= capacity);
+        }
     }
 }

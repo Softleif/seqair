@@ -59,6 +59,13 @@ Block decompression from the in-memory buffer MUST follow the same BGZF format r
 r[region_buf.fast_header]
 The fast-path header parsing (XLEN=6, BC at fixed offset) MUST be used when applicable, with fallback to searching extra fields.
 
+## Block cache
+
+A query starts reading at the linear-index minimum of the 16 kb window holding its start, so neighbouring small queries — one position per variant, a BED file of short targets — decompress the same blocks again and again. Measured on 1 bp queries every 1 kb over 30× WGS, about 80% of each query's time was libdeflate re-inflating the ~8 blocks it shared with the previous query.
+
+r[region_buf.block_cache]
+An `IndexedBamReader` MUST keep a cache of decompressed BGZF blocks, keyed by the block's compressed file offset, that its successive queries share; a fork MUST start with an empty cache of its own. The cache MUST be bounded (64 blocks, ≤ 4 MiB, least recently used evicted first), and a block MUST enter it only after it decompressed and passed its CRC check. When a query reaches a block that is cached and lies wholly inside the current planned range, it MUST use the cached bytes without reading or decompressing the block again. Anything else takes the uncached path unchanged, so a query MUST return the same records in the same order whatever queries came before it. `RegionBuf::new` stays uncached.
+
 ## Reading
 
 r[region_buf.read_exact]
