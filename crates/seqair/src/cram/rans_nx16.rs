@@ -14,6 +14,8 @@
 
 use super::codec_io::{self, Uint7Error};
 use super::reader::CramError;
+use fearless_simd::{Level, dispatch, prelude::*};
+use fearless_simd_macros::simd;
 
 /// Bridge `Uint7Error` (narrow, hot-path-friendly) to the rich `CramError`.
 fn uint7_to_cram_error(e: Uint7Error) -> CramError {
@@ -294,81 +296,100 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
     decode_order_0_generic(src, dst, state_count)
 }
 
-/// Scalar 32-state order-0 decode. Separated from the generic path so
-/// SIMD dispatch (NEON / AVX2) has a clear insertion point.
-#[allow(clippy::indexing_slicing, reason = "sym ≤ 255 (u8), f < 4096 (12-bit mask)")]
+/// The 32-state order-0 decode, through the SIMD kernel.
 fn decode_order_0_32state(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
+    decode_order_0_32state_at(Level::new(), src, dst)
+}
+
+// r[impl cram.codec.simd_dispatch+2]
+// r[impl io.simd_portable]
+fn decode_order_0_32state_at(
+    level: Level,
+    src: &mut &[u8],
+    dst: &mut [u8],
+) -> Result<(), CramError> {
     let frequencies = read_frequencies_0(src)?;
     let cumulative_frequencies = build_cumulative_frequencies(&frequencies);
     let sym_table = build_symbol_table_nx16(&cumulative_frequencies);
-    let mut states = read_states(src, 32)?;
+    let Ok(mut states) = <[u32; 32]>::try_from(read_states(src, 32)?) else {
+        return Err(CramError::Truncated { context: "rans_nx16 order-0 states" });
+    };
+    dispatch!(level, simd => decode_32state_simd(
+        simd,
+        src,
+        dst,
+        &frequencies,
+        &cumulative_frequencies,
+        &sym_table,
+        &mut states,
+    ))
+}
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        let states_snapshot = states.clone();
-        let src_snapshot = *src;
-        // Safety: NEON is always available on aarch64.
-        unsafe {
-            if super::rans_nx16_neon::decode_32state_loop(
-                src,
-                dst,
-                &frequencies,
-                &cumulative_frequencies,
-                &sym_table,
-                &mut states,
-            )
-            .is_ok()
-            {
-                return Ok(());
-            }
-        }
-        // NEON failed — restore pre-NEON state and fall through to scalar.
-        states = states_snapshot;
-        *src = src_snapshot;
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            let states_snapshot = states.clone();
-            let src_snapshot = *src;
-            // Safety: AVX2 availability verified above.
-            unsafe {
-                if super::rans_nx16_avx2::decode_32state_loop(
-                    src,
-                    dst,
-                    &frequencies,
-                    &cumulative_frequencies,
-                    &sym_table,
-                    &mut states,
-                )
-                .is_ok()
-                {
-                    return Ok(());
-                }
-            }
-            // AVX2 failed — restore pre-AVX2 state and fall through to scalar.
-            states = states_snapshot;
-            *src = src_snapshot;
-        }
-    }
-
-    // Scalar fallback
+/// Per 32-byte chunk: a scalar symbol lookup per state (a gather has no
+/// portable spelling, and `sym_table` is 4 KiB), then the state step
+/// `f·(x >> 12) + (x & 0xFFF) − g` on native-width vectors of states, then
+/// the shared scalar `state_renormalize`, so this path cannot drift from the
+/// scalar one. The tail cycles through the states like the scalar decoder
+/// does: the stream interleaves bytes across all 32.
+#[simd]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "sym ≤ 255 (u8) indexes the 256-entry tables, f < 4096 (12-bit mask) indexes sym_table"
+)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "vector lanes wrap, as state_step's wrapping_* ops do"
+)]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u32s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+fn decode_32state_simd<S: Simd>(
+    simd: S,
+    src: &mut &[u8],
+    dst: &mut [u8],
+    frequencies: &[u32; ALPHABET_SIZE],
+    cumulative_frequencies: &[u32; ALPHABET_SIZE],
+    sym_table: &[u8; 4096],
+    states: &mut [u32; 32],
+) -> Result<(), CramError> {
+    let lanes = S::u32s::LEN;
+    debug_assert_eq!(32 % lanes, 0, "32 states split into whole vectors");
     let truncated = || CramError::Truncated { context: "rans_nx16 order-0 truncated" };
-    for chunk in dst.chunks_mut(32) {
-        for (d, state) in chunk.iter_mut().zip(states.iter_mut()) {
-            let f = state_cumulative_frequency(*state, ORDER_0_BITS);
-            let sym = sym_table[f as usize];
+    let (chunks, remainder) = dst.as_chunks_mut::<32>();
+
+    for chunk in chunks {
+        let mut freq = [0u32; 32];
+        let mut cum = [0u32; 32];
+        for (((d, &x), f), g) in chunk.iter_mut().zip(states.iter()).zip(&mut freq).zip(&mut cum) {
+            let sym = sym_table[(x & 0xFFF) as usize];
             *d = sym;
-            let i = usize::from(sym);
-            *state = state_step(
-                *state,
-                *frequencies.get(i).unwrap_or(&0),
-                *cumulative_frequencies.get(i).unwrap_or(&0),
-                ORDER_0_BITS,
-            );
-            *state = state_renormalize(*state, src).ok_or_else(truncated)?;
+            *f = frequencies[usize::from(sym)];
+            *g = cumulative_frequencies[usize::from(sym)];
         }
+
+        for ((x, f), g) in states
+            .chunks_exact_mut(lanes)
+            .zip(freq.chunks_exact(lanes))
+            .zip(cum.chunks_exact(lanes))
+        {
+            let v = S::u32s::from_slice(simd, x);
+            let f = S::u32s::from_slice(simd, f);
+            let g = S::u32s::from_slice(simd, g);
+            (f * (v >> ORDER_0_BITS) + (v & 0xFFF) - g).store_slice(x);
+        }
+
+        for x in states.iter_mut() {
+            *x = state_renormalize(*x, src).ok_or_else(truncated)?;
+        }
+    }
+
+    for (d, x) in remainder.iter_mut().zip(states.iter_mut()) {
+        let sym = sym_table[(*x & 0xFFF) as usize];
+        *d = sym;
+        let i = usize::from(sym);
+        *x = state_step(*x, frequencies[i], cumulative_frequencies[i], ORDER_0_BITS);
+        *x = state_renormalize(*x, src).ok_or_else(truncated)?;
     }
 
     Ok(())
@@ -1455,6 +1476,57 @@ mod tests {
         let mut scalar_dst = vec![0u8; len];
         decode_order_0_generic(&mut cur, &mut scalar_dst, 32).unwrap();
         assert_eq!(simd_result, scalar_dst);
+    }
+
+    // r[verify cram.codec.simd_dispatch+2]
+    // r[verify io.simd_portable]
+    /// Every level against the generic scalar decoder, including a partial
+    /// last chunk: two symbols at 2048 each, so each state's low 12 bits pick
+    /// the symbol, arbitrary initial states and arbitrary renorm bytes, which
+    /// may run out, in which case every level must fail exactly where the
+    /// scalar decoder does.
+    #[hegel::test]
+    fn every_level_matches_scalar_order0_32state(tc: TestCase) {
+        // At least one whole 32-byte chunk, so the vector step always runs,
+        // plus a partial one.
+        let chunks = tc.draw(gs::integers::<usize>().min_value(1).max_value(8));
+        let len = chunks * 32 + tc.draw(gs::integers::<usize>().max_value(31));
+        // Small enough that each state halves below 1 << 15 within a few
+        // chunks, so renormalization — and running out of bytes — happens.
+        let states =
+            tc.draw(gs::vecs(gs::integers::<u32>().max_value(1 << 20)).min_size(32).max_size(32));
+        // A state renormalizes at most once per 16 steps, so 256 bytes cover
+        // every renorm of 9 chunks; a short cut covers truncation.
+        let mut renorm_bytes = tc.draw(gs::binary().min_size(256).max_size(512));
+        if tc.draw(gs::booleans()) {
+            renorm_bytes.truncate(tc.draw(gs::integers::<usize>().max_value(64)));
+        }
+        // Alphabet {0, 1}: sym 0, sym 1, a zero-length run, the terminator.
+        let mut stream = vec![0, 1, 0, 0];
+        encode_uint7_prv(&mut stream, 2048);
+        encode_uint7_prv(&mut stream, 2048);
+        for s in &states {
+            stream.extend_from_slice(&s.to_le_bytes());
+        }
+        stream.extend_from_slice(&renorm_bytes);
+
+        let mut scalar_src: &[u8] = &stream;
+        let mut scalar_dst = vec![0u8; len];
+        let scalar = decode_order_0_generic(&mut scalar_src, &mut scalar_dst, 32);
+
+        for level in crate::simd_levels::levels() {
+            let mut src: &[u8] = &stream;
+            let mut dst = vec![0u8; len];
+            let simd = decode_order_0_32state_at(level, &mut src, &mut dst);
+            assert_eq!(simd.is_ok(), scalar.is_ok(), "{level:?}: {simd:?} vs {scalar:?}");
+            // On a truncation the partial output may differ: the kernel
+            // writes a whole chunk before renormalizing, the scalar decoder
+            // one byte at a time.
+            if simd.is_ok() {
+                assert_eq!(dst, scalar_dst, "{level:?}");
+                assert_eq!(src.len(), scalar_src.len(), "{level:?} consumed differently");
+            }
+        }
     }
 
     // Exercises the renormalization path that the other two SIMD/scalar
