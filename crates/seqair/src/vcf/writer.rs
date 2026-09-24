@@ -12,6 +12,18 @@
 /// 0.0001 → `0.0001`, 0.00001 → `1e-05`, 999999 → `999999`,
 /// 1234567 → `1.23457e+06`.
 pub(crate) fn write_float_g(buf: &mut Vec<u8>, v: f32) -> Result<(), WriteError> {
+    if write_float_g_exact(buf, v) {
+        return Ok(());
+    }
+    write_float_g_fmt(buf, v)
+}
+
+/// `%g` through `core::fmt`: the fallback for what the integer path does not
+/// cover (zero, non-finite, subnormal), and the oracle it is tested against.
+/// `core::fmt`'s exact-precision printing falls back to bignum arithmetic
+/// (Dragon4) for most inputs, and it runs twice here, which made this the
+/// largest cost of writing VCF text.
+fn write_float_g_fmt(buf: &mut Vec<u8>, v: f32) -> Result<(), WriteError> {
     let v = f64::from(v);
 
     if v == 0.0 {
@@ -74,6 +86,151 @@ pub(crate) fn write_float_g(buf: &mut Vec<u8>, v: f32) -> Result<(), WriteError>
     } else {
         write_fixed(buf, v, exponent)
     }
+}
+
+/// `5^k` for `k` in `0..=MAX_POW5`.
+const POW5: [u128; MAX_POW5 as usize + 1] = {
+    let mut t = [1u128; MAX_POW5 as usize + 1];
+    let mut i = 1;
+    while i < t.len() {
+        t[i] = t[i - 1] * 5;
+        i += 1;
+    }
+    t
+};
+/// A 24-bit mantissa times `5^44` still fits a `u128` (2^24 · 5^44 < 2^127),
+/// which covers every normal `f32`: the smallest, 1.18e-38, needs `k = 43`.
+const MAX_POW5: u32 = 44;
+
+/// `%g` of a normal, nonzero `f32` from its exact binary value, with integer
+/// arithmetic only. Returns `false`, having written nothing, for zero,
+/// non-finite and subnormal values, which take the `core::fmt` path.
+///
+/// `|v| = m · 2^q` exactly. With `E = floor(log10 |v|)`, the six significant
+/// digits are `D = round_half_even(m · 2^q · 10^(5 - E))`, `10^5 <= D < 10^6`
+/// — computed exactly, so it is the rounding C's `printf` does, not an
+/// approximation of it.
+// r[impl vcf_writer.float_precision]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "exponents are within ±150 and digit counts within 0..=6; nothing here nears overflow"
+)]
+fn write_float_g_exact(buf: &mut Vec<u8>, v: f32) -> bool {
+    let bits = v.to_bits();
+    let biased = (bits >> 23) & 0xFF;
+    if biased == 0 || biased == 0xFF {
+        return false;
+    }
+    let m = u128::from((bits & 0x7F_FFFF) | 0x80_0000);
+    #[expect(clippy::cast_possible_wrap, reason = "biased < 255")]
+    let q = biased as i32 - 150;
+    // floor(log2 |v|) = q + 23; times log10(2) ≈ 1233 / 4096 gives E or E - 1.
+    let mut e = ((q + 23) * 1233) >> 12;
+    let Some((mut d, round_up)) = scaled(m, q, 5 - e).and_then(|first| {
+        if first.0 >= 1_000_000 {
+            e = e.saturating_add(1);
+            scaled(m, q, 5 - e)
+        } else {
+            Some(first)
+        }
+    }) else {
+        return false;
+    };
+    debug_assert!((100_000..1_000_000).contains(&d), "d={d} for {v}");
+    if round_up {
+        d = d.saturating_add(1);
+        if d == 1_000_000 {
+            d = 100_000;
+            e = e.saturating_add(1);
+        }
+    }
+
+    let mut digits = [0u8; 6];
+    let mut rest = d;
+    for slot in digits.iter_mut().rev() {
+        let digit = u8::try_from(rest % 10).unwrap_or_default();
+        *slot = b'0'.saturating_add(digit);
+        rest /= 10;
+    }
+    // Significant digits after trailing zeros are stripped: at least one.
+    let sig = digits.iter().rposition(|&c| c != b'0').map_or(1, |i| i.saturating_add(1));
+    let sig_digits = digits.get(..sig).unwrap_or_default();
+
+    if bits >> 31 == 1 {
+        buf.push(b'-');
+    }
+    if (-4..PRECISION).contains(&e) {
+        #[expect(clippy::cast_sign_loss, reason = "e is in -4..6 here")]
+        if e >= 0 {
+            let int_len = e as usize + 1;
+            buf.extend_from_slice(digits.get(..int_len).unwrap_or_default());
+            if sig > int_len {
+                buf.push(b'.');
+                buf.extend_from_slice(sig_digits.get(int_len..).unwrap_or_default());
+            }
+        } else {
+            buf.extend_from_slice(b"0.");
+            let zeros = (-e - 1) as usize;
+            buf.extend_from_slice(b"000".get(..zeros).unwrap_or_default());
+            buf.extend_from_slice(sig_digits);
+        }
+    } else {
+        let (lead, frac) = sig_digits.split_at(1);
+        buf.extend_from_slice(lead);
+        if !frac.is_empty() {
+            buf.push(b'.');
+            buf.extend_from_slice(frac);
+        }
+        buf.push(b'e');
+        buf.push(if e < 0 { b'-' } else { b'+' });
+        let magnitude = e.unsigned_abs();
+        if magnitude < 10 {
+            buf.push(b'0');
+        }
+        let mut itoa = itoa::Buffer::new();
+        buf.extend_from_slice(itoa.format(magnitude).as_bytes());
+    }
+    true
+}
+
+/// `floor(m · 2^q · 10^k)` and whether rounding it half-to-even goes up, or
+/// `None` outside the range the fixed-width arithmetic covers exactly.
+fn scaled(m: u128, q: i32, k: i32) -> Option<(u64, bool)> {
+    let (quotient, round_up) = if k >= 0 {
+        // m · 5^k · 2^(q + k): multiply by the odd part, shift by the rest.
+        let num = m.checked_mul(*POW5.get(k.unsigned_abs() as usize)?)?;
+        let shift = q.checked_add(k)?;
+        if shift >= 0 {
+            (
+                num.checked_shl(shift.unsigned_abs())
+                    .filter(|n| n >> shift.unsigned_abs() == num)?,
+                false,
+            )
+        } else {
+            let s = shift.unsigned_abs();
+            if s >= 128 {
+                return Some((0, false));
+            }
+            let quotient = num >> s;
+            let rem = num & ((1u128 << s).wrapping_sub(1));
+            let half = 1u128 << s.saturating_sub(1);
+            (quotient, rem > half || (rem == half && quotient & 1 == 1))
+        }
+    } else {
+        // m · 2^q / 10^j with j = -k: exact integer division.
+        let j = k.unsigned_abs();
+        let pow10 = POW5.get(j as usize)?.checked_shl(j)?;
+        let (num, den) = if q >= 0 {
+            (m.checked_shl(q.unsigned_abs())?, pow10)
+        } else {
+            (m, pow10.checked_shl(q.unsigned_abs())?)
+        };
+        let quotient = num.checked_div(den)?;
+        let rem = num.checked_rem(den)?;
+        let twice = rem.checked_mul(2)?;
+        (quotient, twice > den || (twice == den && quotient & 1 == 1))
+    };
+    Some((u64::try_from(quotient).ok()?, round_up))
 }
 
 /// Significant digits, as C's `%g` counts them, and the decimals that leaves
@@ -247,6 +404,107 @@ mod tests {
             relative <= 1e-5,
             "{v} -> {text:?} -> {back} is off by {relative}, more than six digits allows"
         );
+    }
+
+    fn fmt_path(v: f32) -> String {
+        let mut buf = Vec::new();
+        write_float_g_fmt(&mut buf, v).expect("every finite float must be writable");
+        String::from_utf8(buf).expect("ASCII")
+    }
+
+    /// C's own `%g`, which is what htslib falls back to and what
+    /// `r[vcf_writer.float_precision]` names: an oracle that shares nothing
+    /// with either Rust path. macOS's libc keeps the trailing zeros when a
+    /// scientific-form value is an exact tie that rounds down (`1000005.0` →
+    /// `1.00000e+06`, where glibc and C99 say `1e+06`), so the mantissa is
+    /// normalized before comparing.
+    fn c_printf_g(v: f32) -> String {
+        unsafe extern "C" {
+            fn snprintf(
+                buf: *mut std::ffi::c_char,
+                n: usize,
+                fmt: *const std::ffi::c_char,
+                ...
+            ) -> i32;
+        }
+        let mut out = [0u8; 64];
+        // SAFETY: the buffer is 64 bytes and `%g` of a double writes at most ~15.
+        let n =
+            unsafe { snprintf(out.as_mut_ptr().cast(), out.len(), c"%g".as_ptr(), f64::from(v)) };
+        let n = usize::try_from(n).expect("snprintf succeeds");
+        let text = String::from_utf8(out[..n].to_vec()).expect("ASCII");
+        match text.split_once('e') {
+            Some((mantissa, exp)) if mantissa.contains('.') => {
+                format!("{}e{exp}", mantissa.trim_end_matches('0').trim_end_matches('.'))
+            }
+            _ => text,
+        }
+    }
+
+    // r[verify vcf_writer.float_precision]
+    #[hegel::test(test_cases = 2000)]
+    fn exact_path_matches_c_printf_and_fmt(tc: TestCase) {
+        let v = f32::from_bits(tc.draw(gs::integers::<u32>()));
+        if !v.is_finite() {
+            return;
+        }
+        let got = formatted(v);
+        assert_eq!(got, fmt_path(v), "{v:e} ({:#x})", v.to_bits());
+        assert_eq!(got, c_printf_g(v), "{v:e} ({:#x})", v.to_bits());
+    }
+
+    // r[verify vcf_writer.float_precision]
+    /// Ties and near-ties at every decimal scale: the values rounding to six
+    /// digits is most likely to get wrong, which uniform bit patterns rarely hit.
+    #[test]
+    fn exact_path_matches_c_printf_at_ties() {
+        for exp in -40i32..=38 {
+            for digits in [100_000u64, 123_455, 999_995, 999_999, 500_005, 250_000] {
+                let v = (digits as f64 + 0.5) * 10f64.powi(exp - 5);
+                #[expect(clippy::cast_possible_truncation, reason = "test inputs")]
+                let v = v as f32;
+                for w in [
+                    v,
+                    f32::from_bits(v.to_bits().wrapping_add(1)),
+                    f32::from_bits(v.to_bits().wrapping_sub(1)),
+                ] {
+                    if w.is_finite() {
+                        assert_eq!(formatted(w), c_printf_g(w), "{w:e}");
+                    }
+                }
+            }
+        }
+        // Exactly representable ties: 0.5 steps at the sixth digit.
+        for v in [1_000_000.5f32, 1_234_567.5, 999_999.5, 0.125, 1.000_005, 2.5e-5, 8_388_609.0] {
+            assert_eq!(formatted(v), c_printf_g(v), "{v:e}");
+        }
+    }
+
+    /// Every positive finite `f32` against the `core::fmt` path — about 2.1
+    /// billion values, a few minutes across all cores. Run by hand:
+    /// `cargo test --release -p seqair --lib exhaustive_f32 -- --ignored`.
+    #[test]
+    #[ignore = "exhaustive; minutes in release mode"]
+    fn exhaustive_f32_matches_fmt_path() {
+        let threads = std::thread::available_parallelism().map_or(8, |n| n.get());
+        let threads = u32::try_from(threads).unwrap_or(8);
+        let end = f32::INFINITY.to_bits();
+        let step = end.div_ceil(threads);
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                scope.spawn(move || {
+                    let (mut a, mut b) = (Vec::new(), Vec::new());
+                    for bits in t * step..((t + 1) * step).min(end) {
+                        let v = f32::from_bits(bits);
+                        a.clear();
+                        b.clear();
+                        write_float_g(&mut a, v).expect("finite");
+                        write_float_g_fmt(&mut b, v).expect("finite");
+                        assert_eq!(a, b, "{v:e} ({bits:#x})");
+                    }
+                });
+            }
+        });
     }
 
     #[test]
