@@ -93,7 +93,14 @@ pub fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
 /// Decode a 4-bit packed BAM sequence using the best available implementation.
 pub fn decode_seq(encoded: &[u8], len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
-    if !decode_nibbles(Level::new(), DECODE_BASE, &DECODE_PAIR, encoded, &mut out) {
+    if !decode_nibbles(
+        Level::new(),
+        NibbleOrder::HighFirst,
+        DECODE_BASE,
+        &DECODE_PAIR,
+        encoded,
+        &mut out,
+    ) {
         out.fill(b'N');
     }
     out
@@ -148,24 +155,41 @@ static DECODE_PAIR_TYPED: [[u8; 2]; 256] = {
 pub fn decode_bases_into(encoded: &[u8], len: usize, out: &mut [u8]) {
     debug_assert!(out.len() >= len, "output buffer too small: {} < {}", out.len(), len);
     let Some(out) = out.get_mut(..len) else { return };
-    if !decode_nibbles(Level::new(), DECODE_BASE_TYPED, &DECODE_PAIR_TYPED, encoded, out) {
+    if !decode_nibbles(
+        Level::new(),
+        NibbleOrder::HighFirst,
+        DECODE_BASE_TYPED,
+        &DECODE_PAIR_TYPED,
+        encoded,
+        out,
+    ) {
         out.fill(b'N');
     }
 }
 
+/// Which nibble of a packed byte comes first: BAM's high one, or the low
+/// one of CRAM's rANS Nx16 PACK transform.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum NibbleOrder {
+    HighFirst,
+    LowFirst,
+}
+
 /// Decode `out.len()` nibbles of `encoded` through `lut`, the 16-entry nibble
-/// table, and `pairs`, the same table two nibbles at a time for the scalar
-/// tail. Returns `false`, having written nothing, when `encoded` is too short.
+/// table, and `pairs`, the same table two nibbles at a time (in `order`) for
+/// the scalar tail. Returns `false`, having written nothing, when `encoded`
+/// is too short.
 // r[impl io.simd_portable]
-fn decode_nibbles(
+pub(crate) fn decode_nibbles(
     level: Level,
+    order: NibbleOrder,
     lut: &[u8; 16],
     pairs: &[[u8; 2]; 256],
     encoded: &[u8],
     out: &mut [u8],
 ) -> bool {
     let Some(packed) = encoded.get(..out.len().div_ceil(2)) else { return false };
-    dispatch!(level, simd => decode_nibbles_simd(simd, lut, pairs, packed, out));
+    dispatch!(level, simd => decode_nibbles_simd(simd, order, lut, pairs, packed, out));
     true
 }
 
@@ -186,6 +210,7 @@ fn decode_nibbles(
 )]
 fn decode_nibbles_simd<S: Simd>(
     simd: S,
+    order: NibbleOrder,
     lut: &[u8; 16],
     pairs: &[[u8; 2]; 256],
     packed: &[u8],
@@ -200,7 +225,7 @@ fn decode_nibbles_simd<S: Simd>(
 
     let mut vec_in = whole.chunks_exact(n);
     for (p, o) in (&mut vec_in).zip(out_pairs.chunks_exact_mut(n)) {
-        decode_vector(simd, table, p, o);
+        decode_vector(simd, order, table, p, o);
     }
 
     // A ragged tail is one more vector overlapping the last whole one: the
@@ -210,7 +235,7 @@ fn decode_nibbles_simd<S: Simd>(
     let tail = vec_in.remainder();
     let overlap = whole.len().checked_sub(n).filter(|_| !tail.is_empty());
     match overlap.and_then(|t| Some((whole.get(t..)?, out_pairs.get_mut(t..)?))) {
-        Some((p, o)) => decode_vector(simd, table, p, o),
+        Some((p, o)) => decode_vector(simd, order, table, p, o),
         // Shorter than one vector: every byte is tail.
         None => {
             for (o, &b) in out_pairs.iter_mut().zip(tail) {
@@ -234,11 +259,20 @@ fn decode_nibbles_simd<S: Simd>(
     clippy::arithmetic_side_effects,
     reason = "a lanewise shift by 4 of a `u8` cannot overflow"
 )]
-fn decode_vector<S: Simd>(simd: S, table: S::u8s, packed: &[u8], out: &mut [[u8; 2]]) {
+fn decode_vector<S: Simd>(
+    simd: S,
+    order: NibbleOrder,
+    table: S::u8s,
+    packed: &[u8],
+    out: &mut [[u8; 2]],
+) {
     let p = S::u8s::from_slice(simd, packed);
     let hi = table.swizzle_dyn_within_blocks(p >> 4);
     let lo = table.swizzle_dyn_within_blocks(p & 0x0F);
-    let (first, second) = hi.interleave(lo);
+    let (first, second) = match order {
+        NibbleOrder::HighFirst => hi.interleave(lo),
+        NibbleOrder::LowFirst => lo.interleave(hi),
+    };
     let (o_first, o_second) = out.as_flattened_mut().split_at_mut(S::u8s::LEN);
     first.store_slice(o_first);
     second.store_slice(o_second);
@@ -552,9 +586,37 @@ mod tests {
             let expected = nibble_oracle(lut, &packed, len);
             for level in crate::simd_levels::levels() {
                 let mut out = vec![0u8; len];
-                assert!(decode_nibbles(level, lut, pairs, &packed, &mut out));
+                assert!(decode_nibbles(
+                    level,
+                    NibbleOrder::HighFirst,
+                    lut,
+                    pairs,
+                    &packed,
+                    &mut out
+                ));
                 assert_eq!(out, expected, "{level:?}, len={len}");
             }
+        }
+    }
+
+    // r[verify io.simd_portable]
+    /// Low nibble first (CRAM's PACK), through an arbitrary table.
+    #[hegel::test]
+    fn every_level_matches_nibble_oracle_low_first(tc: TestCase) {
+        let packed = tc.draw(gs::binary().max_size(300));
+        let len = tc.draw(gs::integers::<usize>().max_value(packed.len() * 2));
+        let lut: [u8; 16] = std::array::from_fn(|_| tc.draw(gs::integers::<u8>()));
+        let pairs: [[u8; 2]; 256] = std::array::from_fn(|b| [lut[b & 0x0F], lut[b >> 4]]);
+        let expected: Vec<u8> = (0..len)
+            .map(|i| {
+                let byte = packed[i / 2];
+                lut[usize::from(if i % 2 == 0 { byte & 0x0F } else { byte >> 4 })]
+            })
+            .collect();
+        for level in crate::simd_levels::levels() {
+            let mut out = vec![0u8; len];
+            assert!(decode_nibbles(level, NibbleOrder::LowFirst, &lut, &pairs, &packed, &mut out));
+            assert_eq!(out, expected, "{level:?}, len={len}");
         }
     }
 

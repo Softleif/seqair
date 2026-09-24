@@ -1285,20 +1285,20 @@ fn read_bit_pack_context(
     Ok((BitPackContext { symbol_count, mapping_table, uncompressed_size }, packed_len))
 }
 
+// r[impl cram.codec.rans_nx16_pack]
 fn apply_bit_unpack(src: &[u8], ctx: &BitPackContext) -> Result<Vec<u8>, CramError> {
     let mut dst = vec![0u8; ctx.uncompressed_size];
+    let map = &ctx.mapping_table;
 
     match ctx.symbol_count {
         1 => {
-            let sym = *ctx
-                .mapping_table
-                .first()
-                .ok_or_else(|| CramError::Truncated { context: "bit_pack mapping" })?;
+            let sym =
+                *map.first().ok_or_else(|| CramError::Truncated { context: "bit_pack mapping" })?;
             dst.fill(sym);
         }
-        2 => unpack(src, &ctx.mapping_table, 8, &mut dst),
-        3..=4 => unpack(src, &ctx.mapping_table, 4, &mut dst),
-        5..=16 => unpack(src, &ctx.mapping_table, 2, &mut dst),
+        2 => unpack_bytes::<8>(src, map, &mut dst),
+        3..=4 => unpack_bytes::<4>(src, map, &mut dst),
+        5..=16 => unpack_nibbles(src, map, &mut dst),
         n => {
             return Err(CramError::RansBitPackTooManySymbols { symbol_count: n });
         }
@@ -1307,20 +1307,67 @@ fn apply_bit_unpack(src: &[u8], ctx: &BitPackContext) -> Result<Vec<u8>, CramErr
     Ok(dst)
 }
 
-fn unpack(src: &[u8], mapping_table: &[u8], chunk_size: usize, dst: &mut [u8]) {
-    let bits = u8::BITS as usize;
-    let shift = bits
-        .checked_div(chunk_size)
-        .expect("chunk_size is always 2, 4, or 8 from the match in apply_bit_unpack");
-    let mask: u8 = (1u8 << shift).wrapping_sub(1);
+/// Below this many output bytes a table costs more than the loop it saves.
+const UNPACK_TABLE_MIN: usize = 1024;
 
-    for (mut s, chunk) in src.iter().copied().zip(dst.chunks_mut(chunk_size)) {
+/// The reference unpack: `K` symbols a byte, lowest bits first, each an
+/// index into `mapping_table` (0 past its end). Output past what `src`
+/// covers is left alone.
+#[allow(clippy::arithmetic_side_effects, reason = "K is 2, 4 or 8")]
+fn unpack<const K: usize>(src: &[u8], mapping_table: &[u8], dst: &mut [u8]) {
+    let shift = 8 / K;
+    let mask: u8 = (1u8 << shift).wrapping_sub(1);
+    for (mut s, chunk) in src.iter().copied().zip(dst.chunks_mut(K)) {
         for d in chunk {
-            let idx = usize::from(s & mask);
-            *d = mapping_table.get(idx).copied().unwrap_or(0);
+            *d = mapping_table.get(usize::from(s & mask)).copied().unwrap_or(0);
             s >>= shift;
         }
     }
+}
+
+/// htscodecs' `hts_unpack`: each packed byte's `K` symbols from a 256-entry
+/// table, one `K`-byte store a byte.
+#[allow(clippy::indexing_slicing, reason = "a u8 index is < 256 = table.len()")]
+fn unpack_bytes<const K: usize>(src: &[u8], mapping_table: &[u8], dst: &mut [u8]) {
+    if dst.len() < UNPACK_TABLE_MIN {
+        return unpack::<K>(src, mapping_table, dst);
+    }
+    let mut table = [[0u8; K]; 256];
+    for (b, e) in (0u8..=255).zip(&mut table) {
+        unpack::<K>(&[b], mapping_table, e);
+    }
+    let (whole, tail) = dst.as_chunks_mut::<K>();
+    for (d, &b) in whole.iter_mut().zip(src) {
+        *d = table[usize::from(b)];
+    }
+    if let Some(&b) = src.get(whole.len()) {
+        let e = &table[usize::from(b)];
+        tail.copy_from_slice(e.get(..tail.len()).unwrap_or_default());
+    }
+}
+
+/// Two symbols a byte, low nibble first: the BAM nibble kernel with its
+/// order swapped.
+fn unpack_nibbles(src: &[u8], mapping_table: &[u8], dst: &mut [u8]) {
+    if dst.len() < UNPACK_TABLE_MIN {
+        return unpack::<2>(src, mapping_table, dst);
+    }
+    let lut: [u8; 16] = std::array::from_fn(|i| mapping_table.get(i).copied().unwrap_or(0));
+    let mut pairs = [[0u8; 2]; 256];
+    for (b, e) in (0u8..=255).zip(&mut pairs) {
+        unpack::<2>(&[b], mapping_table, e);
+    }
+    let covered = dst.len().min(src.len().saturating_mul(2));
+    let out = dst.get_mut(..covered).unwrap_or_default();
+    let written = crate::bam::seq::decode_nibbles(
+        Level::new(),
+        crate::bam::seq::NibbleOrder::LowFirst,
+        &lut,
+        &pairs,
+        src,
+        out,
+    );
+    debug_assert!(written, "src holds covered.div_ceil(2) bytes");
 }
 
 // ── RLE transform ────────────────────────────────────────────────────
@@ -1543,6 +1590,48 @@ mod tests {
             0x00,
         ];
         assert_eq!(decode(&src, 0).unwrap(), b"noooooooodles");
+    }
+
+    // r[verify cram.codec.rans_nx16_pack]
+    /// PACK against a per-symbol oracle, around the table threshold and with
+    /// output past what the packed bytes cover.
+    #[hegel::test]
+    fn bit_unpack_matches_oracle(tc: TestCase) {
+        let symbol_count = tc.draw(gs::integers::<usize>().min_value(1).max_value(16));
+        let mapping_table =
+            tc.draw(gs::vecs(gs::integers::<u8>()).min_size(symbol_count).max_size(symbol_count));
+        let per_byte = match symbol_count {
+            1 => 0,
+            2 => 8,
+            3..=4 => 4,
+            _ => 2,
+        };
+        // Both sides of UNPACK_TABLE_MIN, and an output length from well
+        // short of what the bytes cover to past it.
+        let n = if tc.draw(gs::booleans()) {
+            tc.draw(gs::integers::<usize>().min_value(520).max_value(1200))
+        } else {
+            tc.draw(gs::integers::<usize>().max_value(64))
+        };
+        let src = tc.draw(gs::binary().min_size(n).max_size(n));
+        let covered = src.len() * per_byte;
+        let len = tc.draw(
+            gs::integers::<usize>().min_value(covered.saturating_sub(20)).max_value(covered + 20),
+        );
+        let expected: Vec<u8> = (0..len)
+            .map(|i| {
+                if per_byte == 0 {
+                    return mapping_table[0];
+                }
+                let bits = 8 / per_byte;
+                src.get(i / per_byte).map_or(0, |&b| {
+                    let idx = (b >> ((i % per_byte) * bits)) & ((1 << bits) - 1);
+                    mapping_table.get(usize::from(idx)).copied().unwrap_or(0)
+                })
+            })
+            .collect();
+        let ctx = BitPackContext { symbol_count, mapping_table, uncompressed_size: len };
+        assert_eq!(apply_bit_unpack(&src, &ctx).unwrap(), expected);
     }
 
     #[test]
