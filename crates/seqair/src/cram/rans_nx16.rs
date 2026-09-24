@@ -270,18 +270,32 @@ pub(crate) fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Option<u32> {
 const PACK_F_SHIFT: u32 = 20;
 const PACK_BIAS_MASK: u32 = 0xFFF;
 /// Slots per packed row: the table width at the largest allowed `bits` (12).
-const ROW: usize = 1 << ORDER_0_BITS;
-type PackedRow = [u32; ROW];
+pub(crate) const ROW: usize = 1 << ORDER_0_BITS;
+pub(crate) type PackedRow = [u32; ROW];
 
 /// Pack one context's frequencies into `row[..1 << bits]`. False unless the
 /// frequencies sum to exactly `1 << bits`; `row` is then partly written and
 /// must not be used.
 #[allow(clippy::indexing_slicing, reason = "x + f ≤ total ≤ ROW is checked before the slice")]
 #[allow(clippy::arithmetic_side_effects, reason = "f ≥ 1 in the subtraction")]
-fn pack_row(freqs: &[u32; ALPHABET_SIZE], bits: u32, row: &mut PackedRow) -> bool {
-    let total = 1u32 << bits;
+pub(crate) fn pack_row(
+    freqs: impl IntoIterator<Item = u32>,
+    bits: u32,
+    row: &mut PackedRow,
+) -> bool {
+    pack_row_to(freqs, 1 << bits, row)
+}
+
+/// [`pack_row`] for a table that must sum to exactly `total` (≤ `ROW`).
+#[allow(clippy::indexing_slicing, reason = "x + f ≤ total ≤ ROW is checked before the slice")]
+#[allow(clippy::arithmetic_side_effects, reason = "f ≥ 1 in the subtraction")]
+pub(crate) fn pack_row_to(
+    freqs: impl IntoIterator<Item = u32>,
+    total: u32,
+    row: &mut PackedRow,
+) -> bool {
     let mut x = 0u32;
-    for (sym, &f) in (0u32..).zip(freqs) {
+    for (sym, f) in (0u32..=255).zip(freqs) {
         if f == 0 {
             continue;
         }
@@ -299,7 +313,7 @@ fn pack_row(freqs: &[u32; ALPHABET_SIZE], bits: u32, row: &mut PackedRow) -> boo
 
 /// The scalar packed step, for the scalar tails of the packed kernels.
 #[inline(always)]
-fn packed_step(x: u32, slot: u32, bits: u32) -> u32 {
+pub(crate) fn packed_step(x: u32, slot: u32, bits: u32) -> u32 {
     ((slot >> PACK_F_SHIFT).wrapping_add(1))
         .wrapping_mul(x >> bits)
         .wrapping_add((slot >> 8) & PACK_BIAS_MASK)
@@ -688,7 +702,7 @@ fn decode_order_0_at(
     let mut cur = *src;
     let frequencies = read_frequencies_0(&mut cur)?;
     let mut table = [0u32; ROW];
-    if pack_row(&frequencies, ORDER_0_BITS, &mut table) {
+    if pack_row(frequencies, ORDER_0_BITS, &mut table) {
         match state_count {
             32 => {
                 let mut states = read_state_array::<32>(&mut cur)?;
@@ -973,7 +987,7 @@ fn decode_order_1_at(
             .zip(buf.frequencies.iter())
             .zip(buf.packed.iter_mut())
             .filter(|((active, _), _)| **active)
-            .all(|((_, freqs), row)| pack_row(freqs, bits, row));
+            .all(|((_, freqs), row)| pack_row(freqs.iter().copied(), bits, row));
     if packs {
         match state_count {
             32 => {
@@ -2254,7 +2268,7 @@ mod tests {
             let mut dst = vec![0u8; len];
             let frequencies = read_frequencies_0(&mut src).unwrap();
             let mut table = [0u32; ROW];
-            if pack_row(&frequencies, ORDER_0_BITS, &mut table) {
+            if pack_row(frequencies, ORDER_0_BITS, &mut table) {
                 let mut states = read_state_array::<32>(&mut src).unwrap();
                 let got = decode_o0_packed_scalar(&mut src, &mut dst, &table, &mut states);
                 check("scalar packed", got, &dst, src);
@@ -2347,7 +2361,7 @@ mod tests {
                     .zip(t.frequencies.iter())
                     .zip(t.packed.iter_mut())
                     .filter(|((a, _), _)| **a)
-                    .all(|((_, f), row)| pack_row(f, bits, row));
+                    .all(|((_, f), row)| pack_row(f.iter().copied(), bits, row));
             if packs {
                 let mut dst = vec![0u8; len];
                 let mut states = read_state_array::<32>(&mut src).unwrap();
