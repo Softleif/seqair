@@ -324,6 +324,36 @@ impl IndexBuilder {
         Ok(())
     }
 
+    // r[impl bgzf.writer.parallel.index_offsets]
+    /// Rewrite every virtual offset the builder holds through `f`.
+    ///
+    /// A parallel BGZF writer builds the index from block *numbers* and
+    /// translates them to file offsets here, once every block is written. The
+    /// pseudo-bin's second chunk holds mapped/unmapped counts, not offsets, and
+    /// unset sentinels stay unset.
+    pub(crate) fn map_offsets(&mut self, mut f: impl FnMut(VirtualOffset) -> VirtualOffset) {
+        let mut map = |v: &mut VirtualOffset| {
+            if v.0 != UNSET {
+                *v = f(*v);
+            }
+        };
+        let pseudo = pseudo_bin(self.depth);
+        for r in &mut self.refs {
+            for (&bin, chunks) in &mut r.bins {
+                let n_offsets = if bin == pseudo { 1 } else { chunks.len() };
+                for chunk in chunks.iter_mut().take(n_offsets) {
+                    map(&mut chunk.begin);
+                    map(&mut chunk.end);
+                }
+            }
+            r.linear_index.iter_mut().for_each(&mut map);
+            map(&mut r.off_beg);
+            map(&mut r.off_end);
+        }
+        map(&mut self.last_off);
+        map(&mut self.save_off);
+    }
+
     // r[impl index_builder.tbi_format]
     /// Write TBI format to a writer. The output is BGZF-compressed.
     /// Only references with actual records are included (matching bcftools behavior).

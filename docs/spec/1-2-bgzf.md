@@ -89,6 +89,15 @@ Compression MUST use the `libdeflater` crate (matching the reader's decompressio
 r[bgzf.writer.single_write]
 Each block SHOULD be assembled contiguously — header, DEFLATE payload, footer — in one buffer that is allocated once, at the largest size a block can compress to, and never zero-filled again, and it SHOULD reach the inner stream as a single `write_all`. The payload is compressed straight into its place after the header. An unbuffered sink (rastair hands the VCF writer a `Box<dyn Write>` over a file) otherwise pays four `write` calls per block, and a per-block zero fill of the compressed buffer is 64 KiB of memset that the compressor overwrites anyway.
 
+r[bgzf.writer.parallel]
+The BAM and VCF/BCF writers MAY compress BGZF blocks on a pool of worker threads (`compression_threads(n)`, `n = 0` meaning the calling thread). The calling thread keeps producing uncompressed data, hands each full block to a worker, and writes finished blocks to the inner stream strictly in block order. At most a small multiple of `n` blocks MAY be outstanding, so memory stays bounded when the sink is slower than the workers. A block that fails to compress or write poisons the stream: every later write, flush or finish MUST return an error rather than wait for that block, and dropping the writer MUST NOT block on it. Worker threads MUST be joined by `finish` and by drop.
+
+r[bgzf.writer.parallel.identical_output]
+Parallel compression MUST produce the same bytes as the single-threaded writer at the same level. Block boundaries depend only on the uncompressed data and the `flush_if_needed` calls, never on compressed sizes or timing, and every worker compresses at the writer's level with the same libdeflate settings.
+
+r[bgzf.writer.parallel.index_offsets]
+A block's file offset is only known once every earlier block is compressed, so index co-production MUST NOT wait for it per record. The parallel writer hands out *index offsets* instead — the current block's sequence number where a virtual offset has the block's file offset, `(block_number << 16) | within_block` — which order exactly as the virtual offsets do. The writer MUST record every written block's file offset, and `finish` MUST, once all blocks are written, translate every offset the index builder holds to its virtual offset (the pseudo-bin's mapped/unmapped counts are not offsets and MUST be left alone). The resulting index MUST be byte-identical to the one the single-threaded writer co-produces.
+
 r[bgzf.writer.eof_marker]
 `finish()` MUST write the standard 28-byte BGZF EOF marker block after flushing any remaining buffered data. The EOF marker is a valid gzip member with ISIZE=0.
 

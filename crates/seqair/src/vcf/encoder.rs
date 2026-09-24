@@ -3,7 +3,8 @@
 
 use super::bcf_encoding::*;
 use super::error::VcfError;
-use crate::io::{BgzfWriter, IndexBuilder, VirtualOffset};
+use crate::bam::bgzf_writer::BgzfSink;
+use crate::io::{IndexBuilder, VirtualOffset};
 use std::io::Write;
 
 // ── BcfValue trait ──────────────────────────────────────────────────────
@@ -250,19 +251,22 @@ pub struct BcfRecordEncoder<'a> {
 }
 
 // r[impl bcf_writer.bgzf_blocks]
-/// Trait to abstract over `BgzfWriter`<W> for different W types.
+/// Trait to abstract over the BGZF sink for different W types.
 pub(crate) trait BgzfWrite {
+    /// The offset an index records for the current position: the virtual
+    /// offset, or a block-number offset that `finish` translates when blocks
+    /// are compressed in parallel (`r[bgzf.writer.parallel.index_offsets]`).
     #[allow(dead_code, reason = "called through dyn BgzfWrite in unified.rs")]
-    fn virtual_offset(&self) -> VirtualOffset;
+    fn index_offset(&self) -> VirtualOffset;
     #[allow(dead_code, reason = "called through dyn BgzfWrite in unified.rs")]
     fn flush_if_needed(&mut self, upcoming: usize) -> Result<(), crate::io::BgzfError>;
     #[allow(dead_code, reason = "called through dyn BgzfWrite in unified.rs")]
     fn write_all(&mut self, data: &[u8]) -> Result<(), crate::io::BgzfError>;
 }
 
-impl<W: Write> BgzfWrite for BgzfWriter<W> {
-    fn virtual_offset(&self) -> VirtualOffset {
-        self.virtual_offset()
+impl<W: Write> BgzfWrite for BgzfSink<W> {
+    fn index_offset(&self) -> VirtualOffset {
+        self.index_offset()
     }
     fn flush_if_needed(&mut self, upcoming: usize) -> Result<(), crate::io::BgzfError> {
         self.flush_if_needed(upcoming)
@@ -310,7 +314,7 @@ impl<'a> BcfRecordEncoder<'a> {
         if let Some(ref mut index) = self.index {
             let beg = self.pos_0based as u64;
             let end = beg.saturating_add(self.rlen as u64);
-            index.push(self.tid, beg, end, self.bgzf.virtual_offset())?;
+            index.push(self.tid, beg, end, self.bgzf.index_offset())?;
         }
 
         Ok(())
@@ -471,7 +475,7 @@ mod tests {
     }
 
     impl BgzfWrite for TestBgzf {
-        fn virtual_offset(&self) -> VirtualOffset {
+        fn index_offset(&self) -> VirtualOffset {
             VirtualOffset(self.data.len() as u64)
         }
         fn flush_if_needed(&mut self, _upcoming: usize) -> Result<(), crate::io::BgzfError> {

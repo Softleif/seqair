@@ -3,11 +3,12 @@
 //! [`BamWriter`] serializes [`OwnedBamRecord`] values
 //! into BGZF-compressed BAM format and optionally co-produces a BAI index during writing.
 
+use super::bgzf_writer::BgzfSink;
 use super::header::{BamHeader, BamHeaderError};
 use super::owned_record::{OwnedBamRecord, OwnedRecordError};
 use super::record_idx::RecordIdx;
 use super::record_store::RecordStore;
-use crate::io::{BgzfError, BgzfWriter, IndexBuilder, IndexError};
+use crate::io::{BgzfError, IndexBuilder, IndexError};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -89,16 +90,16 @@ pub enum BamWriteError {
 /// at a time via [`write`](Self::write). Call [`finish`](Self::finish) to flush
 /// and retrieve the inner writer and optional index builder.
 pub struct BamWriter<W: Write> {
-    bgzf: BgzfWriter<W>,
+    bgzf: BgzfSink<W>,
     index: Option<IndexBuilder>,
     buf: Vec<u8>,
     poisoned: bool,
 }
 
 impl<W: Write> BamWriter<W> {
-    /// Construct from a `BgzfWriter` and write the BAM header eagerly.
+    /// Construct from a BGZF sink and write the BAM header eagerly.
     fn from_bgzf(
-        mut bgzf: BgzfWriter<W>,
+        mut bgzf: BgzfSink<W>,
         header: &BamHeader,
         build_index: bool,
     ) -> Result<Self, BamWriteError> {
@@ -106,7 +107,7 @@ impl<W: Write> BamWriter<W> {
 
         // r[impl bam_writer.index_coproduction]
         let index = if build_index {
-            let voff = bgzf.virtual_offset();
+            let voff = bgzf.index_offset();
             Some(IndexBuilder::bai(header.target_count(), voff))
         } else {
             None
@@ -191,7 +192,7 @@ impl<W: Write> BamWriter<W> {
         if let Some(ref mut index) = self.index
             && ref_id != -1
         {
-            let voff = self.bgzf.virtual_offset();
+            let voff = self.bgzf.index_offset();
             // Placed unmapped: beg = end = pos. Mapped: end = end_pos.
             let end = if is_unmapped { beg } else { end_pos };
             let end = end.max(beg.saturating_add(1));
@@ -316,10 +317,10 @@ impl<W: Write> BamWriter<W> {
     /// the inner writer and optional finished `IndexBuilder`.
     pub fn finish(mut self) -> Result<(W, Option<IndexBuilder>), BamWriteError> {
         if let Some(ref mut index) = self.index {
-            let voff = self.bgzf.virtual_offset();
+            let voff = self.bgzf.index_offset();
             index.finish(voff)?;
         }
-        let inner = self.bgzf.finish()?;
+        let inner = self.bgzf.finish(self.index.as_mut())?;
         Ok((inner, self.index))
     }
 }
@@ -404,7 +405,7 @@ impl<'a> BamWriterBuilder<'a, ToPath<'a>> {
     pub fn build(self) -> Result<BamWriter<BufWriter<File>>, BamWriteError> {
         let file = File::create(self.target.path)?;
         let inner = BufWriter::new(file);
-        let bgzf = BgzfWriter::with_compression_level(inner, self.compression_level);
+        let bgzf = BgzfSink::new(inner, self.compression_level, 0)?;
         BamWriter::from_bgzf(bgzf, self.header, self.write_index)
     }
 }
@@ -424,7 +425,7 @@ impl<W: Write> BamWriterBuilder<'_, ToWriter<W>> {
                  skipping index construction"
             );
         }
-        let bgzf = BgzfWriter::with_compression_level(self.target.writer, self.compression_level);
+        let bgzf = BgzfSink::new(self.target.writer, self.compression_level, 0)?;
         BamWriter::from_bgzf(bgzf, self.header, false)
     }
 }
@@ -434,7 +435,7 @@ impl<W: Write> BamWriterBuilder<'_, ToWriter<W>> {
 // r[impl bam_writer.header_references]
 /// Write the BAM binary header (magic + text + references) to a BGZF stream.
 fn write_bam_header<W: Write>(
-    bgzf: &mut BgzfWriter<W>,
+    bgzf: &mut BgzfSink<W>,
     header: &BamHeader,
 ) -> Result<(), BamWriteError> {
     let mut buf = Vec::new();

@@ -2,7 +2,12 @@
 //! via libdeflate, tracking virtual offsets for index co-production.
 
 use super::bgzf::{BgzfError, VirtualOffset};
+use crate::io::IndexBuilder;
+use std::collections::VecDeque;
 use std::io::Write;
+use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use tracing::warn;
 
 // r[impl bgzf.writer.block_size]
@@ -143,10 +148,6 @@ impl<W: Write> BgzfWriter<W> {
     ///
     /// Upper 48 bits = compressed offset of the current block.
     /// Lower 16 bits = bytes written into the current (unflushed) block.
-    #[expect(
-        clippy::same_name_method,
-        reason = "inherent method is the concrete impl; BgzfWrite trait delegates to it for dyn dispatch"
-    )]
     pub fn virtual_offset(&self) -> VirtualOffset {
         // `write_all` flushes the moment the buffer reaches MAX_UNCOMPRESSED_SIZE, so
         // the length is always representable. Clamping instead would name the block's
@@ -167,10 +168,6 @@ impl<W: Write> BgzfWriter<W> {
     ///
     /// Call this before writing a record to keep it from spanning block boundaries,
     /// improving seek granularity for index-based random access.
-    #[expect(
-        clippy::same_name_method,
-        reason = "inherent method is the concrete impl; BgzfWrite trait delegates to it for dyn dispatch"
-    )]
     pub fn flush_if_needed(&mut self, upcoming_bytes: usize) -> Result<(), BgzfError> {
         if self.buf.len().saturating_add(upcoming_bytes) > MAX_UNCOMPRESSED_SIZE {
             self.flush_block()?;
@@ -179,10 +176,6 @@ impl<W: Write> BgzfWriter<W> {
     }
 
     /// Write data into the BGZF stream. Flushes blocks as needed.
-    #[expect(
-        clippy::same_name_method,
-        reason = "inherent method is the concrete impl; BgzfWrite trait delegates to it for dyn dispatch"
-    )]
     pub fn write_all(&mut self, data: &[u8]) -> Result<(), BgzfError> {
         let mut remaining = data;
         loop {
@@ -255,6 +248,372 @@ impl<W: Write> Drop for BgzfWriter<W> {
     }
 }
 
+// ── Parallel compression ────────────────────────────────────────────────
+
+/// A block handed to a compression worker, with the buffer to compress it into.
+struct Job {
+    index: u64,
+    data: Vec<u8>,
+    block: Vec<u8>,
+}
+
+/// A worker's answer: both buffers come back so the writer can reuse them.
+struct Done {
+    index: u64,
+    data: Vec<u8>,
+    block: Vec<u8>,
+    len: Result<usize, BgzfError>,
+}
+
+// r[impl bgzf.writer.parallel]
+// r[impl bgzf.writer.parallel.identical_output]
+/// BGZF writer that compresses blocks on `threads` worker threads and writes
+/// them to the inner stream in order, from the calling thread.
+///
+/// Blocks are cut exactly where [`BgzfWriter`] cuts them — the cuts depend on
+/// uncompressed sizes only — and every worker compresses at the same level, so
+/// the output is byte-identical to the serial writer's.
+///
+/// A block's file offset is only known once every block before it has been
+/// compressed, so this writer hands out *index offsets* instead of virtual
+/// offsets: `(block number << 16) | within`. They order exactly as the real
+/// ones do, which is all [`IndexBuilder`](crate::io::IndexBuilder) relies on
+/// while it builds; [`finish`](Self::finish) translates them once every block
+/// is on disk (see `r[bgzf.writer.parallel.index_offsets]`).
+pub(crate) struct ParallelBgzfWriter<W: Write> {
+    inner: Option<W>,
+    buf: Vec<u8>,
+    // The channels and thread handles are wrapped in `AssertUnwindSafe` so the
+    // writers keep the auto traits they had before the pool existed; nothing a
+    // panic could leave half-updated lives in them.
+    jobs: AssertUnwindSafe<Option<mpsc::SyncSender<Job>>>,
+    /// Behind a `Mutex` only so the writer stays `Sync`, as the serial one is;
+    /// just the owning thread ever locks it.
+    done: AssertUnwindSafe<Mutex<mpsc::Receiver<Done>>>,
+    workers: AssertUnwindSafe<Vec<thread::JoinHandle<()>>>,
+    /// Compressed blocks that arrived before an earlier one; slot `i` holds
+    /// block `next_write + i`.
+    ready: VecDeque<Option<(Vec<u8>, usize)>>,
+    /// Number of the block `buf` will become.
+    next_submit: u64,
+    /// Number of the next block to write to `inner`.
+    next_write: u64,
+    max_in_flight: u64,
+    spare_data: Vec<Vec<u8>>,
+    spare_blocks: Vec<Vec<u8>>,
+    block_len: usize,
+    /// File offset after the last block written.
+    written: u64,
+    // r[impl bgzf.writer.parallel.index_offsets]
+    /// File offset of every block written so far, by block number.
+    block_starts: Vec<u64>,
+    /// Set once a block failed to compress or write. Its place in the stream
+    /// is lost for good, so nothing may be written — or waited for — after it.
+    failed: bool,
+}
+
+impl<W: Write> ParallelBgzfWriter<W> {
+    /// Start `threads` (≥ 1) compression workers at `level`.
+    pub(crate) fn new(inner: W, level: i32, threads: usize) -> Result<Self, BgzfError> {
+        let threads = threads.max(1);
+        let lvl = libdeflater::CompressionLvl::new(level).unwrap_or_default();
+        let block_len = max_block_len(&mut libdeflater::Compressor::new(lvl));
+        // Enough blocks queued that no worker waits while the writer thread
+        // is busy writing, without holding more than a few MiB.
+        let max_in_flight = u64::try_from(threads.saturating_mul(4)).unwrap_or(u64::MAX);
+        let (job_tx, job_rx) = mpsc::sync_channel::<Job>(threads.saturating_mul(4));
+        let (done_tx, done_rx) = mpsc::channel::<Done>();
+        let job_rx = Arc::new(Mutex::new(job_rx));
+        let mut workers = Vec::with_capacity(threads);
+        for i in 0..threads {
+            let jobs = Arc::clone(&job_rx);
+            let done = done_tx.clone();
+            let handle = thread::Builder::new()
+                .name(format!("seqair-bgzf-{i}"))
+                .spawn(move || compress_worker(lvl, &jobs, &done))
+                .map_err(|source| BgzfError::ThreadSpawn { source })?;
+            workers.push(handle);
+        }
+        Ok(Self {
+            inner: Some(inner),
+            buf: Vec::with_capacity(MAX_UNCOMPRESSED_SIZE),
+            jobs: AssertUnwindSafe(Some(job_tx)),
+            done: AssertUnwindSafe(Mutex::new(done_rx)),
+            workers: AssertUnwindSafe(workers),
+            ready: VecDeque::new(),
+            next_submit: 0,
+            next_write: 0,
+            max_in_flight,
+            spare_data: Vec::new(),
+            spare_blocks: Vec::new(),
+            block_len,
+            written: 0,
+            block_starts: Vec::new(),
+            failed: false,
+        })
+    }
+
+    /// The position after the last byte written, as an index offset: the
+    /// current block's *number* in the upper 48 bits.
+    pub(crate) fn index_offset(&self) -> VirtualOffset {
+        // Same invariant as `BgzfWriter::virtual_offset`: the buffer is flushed
+        // the moment it fills, so its length fits a within-block offset.
+        let within = u16::try_from(self.buf.len()).unwrap_or(u16::MAX);
+        debug_assert!(self.buf.len() < MAX_UNCOMPRESSED_SIZE, "buffer is flushed when full");
+        VirtualOffset::new(self.next_submit, within)
+    }
+
+    pub(crate) fn flush_if_needed(&mut self, upcoming_bytes: usize) -> Result<(), BgzfError> {
+        if self.buf.len().saturating_add(upcoming_bytes) > MAX_UNCOMPRESSED_SIZE {
+            self.flush_block()?;
+        }
+        Ok(())
+    }
+
+    /// Same block cutting as [`BgzfWriter::write_all`].
+    pub(crate) fn write_all(&mut self, data: &[u8]) -> Result<(), BgzfError> {
+        let mut remaining = data;
+        loop {
+            let space = MAX_UNCOMPRESSED_SIZE.saturating_sub(self.buf.len());
+            let (now, later) = remaining.split_at(remaining.len().min(space));
+            self.buf.extend_from_slice(now);
+            remaining = later;
+            if self.buf.len() >= MAX_UNCOMPRESSED_SIZE {
+                self.flush_block()?;
+            }
+            if remaining.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Hand the buffer to a worker, then write whatever has come back in order.
+    fn flush_block(&mut self) -> Result<(), BgzfError> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        if self.failed {
+            return Err(BgzfError::CompressionWorkerLost);
+        }
+        let fresh =
+            self.spare_data.pop().unwrap_or_else(|| Vec::with_capacity(MAX_UNCOMPRESSED_SIZE));
+        let data = std::mem::replace(&mut self.buf, fresh);
+        let block = self.spare_blocks.pop().unwrap_or_else(|| vec![0; self.block_len]);
+        let jobs = self.jobs.as_ref().ok_or(BgzfError::AlreadyFinished)?;
+        jobs.send(Job { index: self.next_submit, data, block })
+            .map_err(|_| BgzfError::CompressionWorkerLost)?;
+        self.next_submit = self.next_submit.saturating_add(1);
+        self.pump(false)
+    }
+
+    /// Collect finished blocks and write the in-order prefix. Waits while more
+    /// than `max_in_flight` blocks are outstanding, or — with `all` — until
+    /// every submitted block is written.
+    fn pump(&mut self, all: bool) -> Result<(), BgzfError> {
+        let result = self.pump_inner(all);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
+    fn pump_inner(&mut self, all: bool) -> Result<(), BgzfError> {
+        if self.failed {
+            return Err(BgzfError::CompressionWorkerLost);
+        }
+        loop {
+            let outstanding = self.next_submit.saturating_sub(self.next_write);
+            let wait = if all { outstanding > 0 } else { outstanding >= self.max_in_flight };
+            let rx = self.done.get_mut().map_err(|_| BgzfError::CompressionWorkerLost)?;
+            let done = if wait {
+                rx.recv().map_err(|_| BgzfError::CompressionWorkerLost)?
+            } else {
+                match rx.try_recv() {
+                    Ok(done) => done,
+                    Err(mpsc::TryRecvError::Empty) => return Ok(()),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err(BgzfError::CompressionWorkerLost);
+                    }
+                }
+            };
+            self.accept(done)?;
+        }
+    }
+
+    fn accept(&mut self, done: Done) -> Result<(), BgzfError> {
+        let Done { index, mut data, block, len } = done;
+        let len = len?;
+        data.clear();
+        self.spare_data.push(data);
+        let slot = usize::try_from(index.saturating_sub(self.next_write))
+            .map_err(|_| BgzfError::CorruptHeader)?;
+        if self.ready.len() <= slot {
+            self.ready.resize_with(slot.saturating_add(1), || None);
+        }
+        let entry = self.ready.get_mut(slot).ok_or(BgzfError::CorruptHeader)?;
+        *entry = Some((block, len));
+
+        while let Some(Some(_)) = self.ready.front() {
+            let Some(Some((block, len))) = self.ready.pop_front() else { break };
+            let bytes = block.get(..len).ok_or(BgzfError::CorruptHeader)?;
+            let w = self.inner.as_mut().ok_or(BgzfError::AlreadyFinished)?;
+            w.write_all(bytes).map_err(|source| BgzfError::WriteFailed { source })?;
+            self.block_starts.push(self.written);
+            self.written = self.written.checked_add(len as u64).ok_or(BgzfError::CorruptHeader)?;
+            self.next_write = self.next_write.saturating_add(1);
+            self.spare_blocks.push(block);
+        }
+        Ok(())
+    }
+
+    // r[impl bgzf.writer.parallel.index_offsets]
+    /// The virtual offset an index offset stands for, once its block is written.
+    fn resolve(&self, offset: VirtualOffset) -> Option<VirtualOffset> {
+        let block = usize::try_from(offset.block_offset()).ok()?;
+        let start = match self.block_starts.get(block) {
+            Some(&start) => start,
+            // The position just past the last block written: where the next
+            // block (or the EOF marker) starts.
+            None if block == self.block_starts.len() => self.written,
+            None => return None,
+        };
+        Some(VirtualOffset::new(start, offset.within_block()))
+    }
+
+    // r[impl bgzf.writer.eof_marker]
+    // r[impl bgzf.writer.finish]
+    // r[impl bgzf.writer.parallel.index_offsets]
+    /// Flush and write every block, translate `index`'s offsets to file
+    /// offsets, write the EOF marker and return the inner writer.
+    pub(crate) fn finish(mut self, index: Option<&mut IndexBuilder>) -> Result<W, BgzfError> {
+        self.flush_block()?;
+        self.pump(true)?;
+        if let Some(index) = index {
+            index.map_offsets(|offset| {
+                let resolved = self.resolve(offset);
+                debug_assert!(resolved.is_some(), "{offset:?} names a block not yet written");
+                resolved.unwrap_or(offset)
+            });
+        }
+        let mut w = self.inner.take().ok_or(BgzfError::AlreadyFinished)?;
+        w.write_all(&EOF_BLOCK).map_err(|source| BgzfError::WriteFailed { source })?;
+        w.flush().map_err(|source| BgzfError::WriteFailed { source })?;
+        self.shutdown();
+        Ok(w)
+    }
+
+    /// Close the job queue and wait for the workers to exit.
+    fn shutdown(&mut self) {
+        *self.jobs = None;
+        for worker in self.workers.drain(..) {
+            if worker.join().is_err() {
+                warn!("BGZF compression worker panicked");
+            }
+        }
+    }
+}
+
+impl<W: Write> Drop for ParallelBgzfWriter<W> {
+    fn drop(&mut self) {
+        // Best-effort, like `BgzfWriter`: write out what was buffered and queued.
+        if self.inner.is_some()
+            && !self.failed
+            && let Err(e) = self.flush_block().and_then(|()| self.pump(true))
+        {
+            warn!("ParallelBgzfWriter::drop: failed to flush buffered blocks: {e}");
+        }
+        self.shutdown();
+    }
+}
+
+fn compress_worker(
+    level: libdeflater::CompressionLvl,
+    jobs: &Mutex<mpsc::Receiver<Job>>,
+    done: &mpsc::Sender<Done>,
+) {
+    let mut compressor = libdeflater::Compressor::new(level);
+    loop {
+        let job = match jobs.lock() {
+            Ok(rx) => rx.recv(),
+            Err(_) => return,
+        };
+        let Ok(Job { index, data, mut block }) = job else { return };
+        // A panic here must not leave the writer waiting for this block forever.
+        let len = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            compress_block(&mut compressor, &data, &mut block)
+        }))
+        .unwrap_or(Err(BgzfError::CompressionWorkerLost));
+        if done.send(Done { index, data, block, len }).is_err() {
+            return;
+        }
+    }
+}
+
+// ── Serial or parallel ─────────────────────────────────────────────────
+
+/// The BGZF stream behind the BAM and VCF/BCF writers: one thread, or a pool.
+///
+/// Offsets for index co-production come from [`index_offset`](Self::index_offset)
+/// and are only final after [`finish`](Self::finish) has translated them.
+pub(crate) enum BgzfSink<W: Write> {
+    Serial(BgzfWriter<W>),
+    Parallel(ParallelBgzfWriter<W>),
+}
+
+impl<W: Write> BgzfSink<W> {
+    /// Serial for `threads == 0`, else a pool of `threads` workers.
+    pub(crate) fn new(inner: W, level: i32, threads: usize) -> Result<Self, BgzfError> {
+        if threads == 0 {
+            Ok(Self::Serial(BgzfWriter::with_compression_level(inner, level)))
+        } else {
+            ParallelBgzfWriter::new(inner, level, threads).map(Self::Parallel)
+        }
+    }
+
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; BgzfWrite trait delegates to it for dyn dispatch"
+    )]
+    pub(crate) fn index_offset(&self) -> VirtualOffset {
+        match self {
+            Self::Serial(w) => w.virtual_offset(),
+            Self::Parallel(w) => w.index_offset(),
+        }
+    }
+
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; BgzfWrite trait delegates to it for dyn dispatch"
+    )]
+    pub(crate) fn flush_if_needed(&mut self, upcoming_bytes: usize) -> Result<(), BgzfError> {
+        match self {
+            Self::Serial(w) => w.flush_if_needed(upcoming_bytes),
+            Self::Parallel(w) => w.flush_if_needed(upcoming_bytes),
+        }
+    }
+
+    #[expect(
+        clippy::same_name_method,
+        reason = "inherent method is the concrete impl; BgzfWrite trait delegates to it for dyn dispatch"
+    )]
+    pub(crate) fn write_all(&mut self, data: &[u8]) -> Result<(), BgzfError> {
+        match self {
+            Self::Serial(w) => w.write_all(data),
+            Self::Parallel(w) => w.write_all(data),
+        }
+    }
+
+    /// Finish the stream. `index`, built from [`index_offset`](Self::index_offset)s
+    /// and already [`finish`](IndexBuilder::finish)ed, has its offsets translated
+    /// to file offsets.
+    pub(crate) fn finish(self, index: Option<&mut IndexBuilder>) -> Result<W, BgzfError> {
+        match self {
+            Self::Serial(w) => w.finish(),
+            Self::Parallel(w) => w.finish(index),
+        }
+    }
+}
+
 #[allow(clippy::cast_possible_truncation, reason = "tests")]
 #[allow(clippy::indexing_slicing, reason = "tests")]
 #[allow(clippy::arithmetic_side_effects, reason = "tests")]
@@ -262,6 +621,7 @@ impl<W: Write> Drop for BgzfWriter<W> {
 mod tests {
     use super::*;
     use crate::bam::bgzf::BgzfReader;
+    use hegel::prelude::*;
     use std::io::Cursor;
 
     fn write_and_finish(data: &[u8]) -> Vec<u8> {
@@ -537,5 +897,130 @@ mod tests {
                 assert!(usize::from(bsize) < 65536);
             }
         }
+    }
+
+    /// One step of a write stream: a record-sized write, preceded (as the BAM
+    /// and BCF writers do) by `flush_if_needed` when `keep_whole`.
+    #[derive(Debug, Clone)]
+    struct Step {
+        len: usize,
+        fill: u8,
+        keep_whole: bool,
+    }
+
+    #[hegel::composite]
+    fn arb_step_inner(tc: &TestCase) -> Step {
+        // Mostly record-sized, now and then more than a whole block.
+        let len = if tc.draw(gs::integers::<u8>().max_value(9)) == 0 {
+            tc.draw(gs::integers::<usize>().min_value(60_000).max_value(140_000))
+        } else {
+            tc.draw(gs::integers::<usize>().max_value(3_000))
+        };
+        Step { len, fill: tc.draw(gs::integers::<u8>()), keep_whole: tc.draw(gs::booleans()) }
+    }
+
+    fn arb_step() -> impl PrintableGenerator<Step> {
+        arb_step_inner().print_as_debug()
+    }
+
+    /// Bytes for a step: half a repeated byte, half noise, so blocks neither
+    /// vanish nor refuse to compress.
+    fn step_bytes(step: &Step, seed: &mut u64) -> Vec<u8> {
+        (0..step.len)
+            .map(|i| {
+                if i % 2 == 0 {
+                    step.fill
+                } else {
+                    *seed ^= *seed << 13;
+                    *seed ^= *seed >> 7;
+                    *seed ^= *seed << 17;
+                    (*seed >> 40) as u8 & 0x3f
+                }
+            })
+            .collect()
+    }
+
+    // r[verify bgzf.writer.parallel]
+    // r[verify bgzf.writer.parallel.identical_output]
+    // r[verify bgzf.writer.parallel.index_offsets]
+    /// The parallel writer produces the serial writer's bytes, and every index
+    /// offset it handed out resolves to the virtual offset the serial writer
+    /// reported at the same point of the stream.
+    #[hegel::test(test_cases = 60)]
+    fn parallel_writer_matches_serial(tc: TestCase) {
+        let steps = tc.draw(gs::vecs(arb_step()).max_size(60));
+        let threads = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
+        let level = tc.draw(gs::sampled_from(&[0, 1, 6]));
+
+        let mut serial = BgzfWriter::with_compression_level(Vec::new(), level);
+        let mut parallel = ParallelBgzfWriter::new(Vec::new(), level, threads).unwrap();
+        let mut expected = vec![serial.virtual_offset()];
+        let mut logical = vec![parallel.index_offset()];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for step in &steps {
+            let bytes = step_bytes(step, &mut seed);
+            if step.keep_whole {
+                serial.flush_if_needed(bytes.len()).unwrap();
+                parallel.flush_if_needed(bytes.len()).unwrap();
+            }
+            serial.write_all(&bytes).unwrap();
+            parallel.write_all(&bytes).unwrap();
+            expected.push(serial.virtual_offset());
+            logical.push(parallel.index_offset());
+        }
+
+        parallel.flush_block().unwrap();
+        parallel.pump(true).unwrap();
+        let resolved: Vec<VirtualOffset> =
+            logical.iter().map(|&v| parallel.resolve(v).expect("block written")).collect();
+        assert_eq!(resolved, expected, "index offsets resolve to the serial virtual offsets");
+
+        let serial_bytes = serial.finish().unwrap();
+        let parallel_bytes = parallel.finish(None).unwrap();
+        assert_eq!(parallel_bytes, serial_bytes, "parallel output is byte-identical");
+    }
+
+    // r[verify bgzf.writer.parallel]
+    /// Dropping the parallel writer without `finish` still writes every block.
+    #[test]
+    fn parallel_writer_drop_flushes() {
+        let data: Vec<u8> = (0..300_000).map(|i| (i % 251) as u8).collect();
+        let mut serial = BgzfWriter::new(Vec::new());
+        serial.write_all(&data).unwrap();
+        let mut expected = serial.finish().unwrap();
+        expected.truncate(expected.len() - EOF_BLOCK.len());
+
+        let mut sink = Vec::new();
+        {
+            let mut parallel = ParallelBgzfWriter::new(&mut sink, 6, 3).unwrap();
+            parallel.write_all(&data).unwrap();
+        }
+        assert_eq!(sink, expected);
+    }
+
+    /// A sink whose every write fails.
+    struct BrokenSink;
+
+    impl Write for BrokenSink {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // r[verify bgzf.writer.parallel]
+    /// A failed block stops the stream for good: later calls fail instead of
+    /// waiting for a block that will never be written, and drop returns.
+    #[test]
+    fn parallel_writer_fails_fast_after_an_error() {
+        let data = vec![7u8; 1_000_000];
+        let mut parallel = ParallelBgzfWriter::new(BrokenSink, 6, 2).unwrap();
+        let first = parallel.write_all(&data).and_then(|()| parallel.flush_block());
+        let err = first.and_then(|()| parallel.pump(true));
+        assert!(matches!(err, Err(BgzfError::WriteFailed { .. })), "{err:?}");
+        assert!(parallel.write_all(&data).is_err(), "writes after a failure fail");
+        drop(parallel);
     }
 }

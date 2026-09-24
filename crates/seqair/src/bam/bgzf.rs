@@ -87,6 +87,14 @@ pub enum BgzfError {
     // r[impl bgzf.writer.finish]
     #[error("BgzfWriter already finished")]
     AlreadyFinished,
+
+    // r[impl bgzf.writer.parallel]
+    #[error("could not start a BGZF compression thread")]
+    ThreadSpawn { source: std::io::Error },
+
+    // r[impl bgzf.writer.parallel]
+    #[error("a BGZF compression worker stopped before finishing its block")]
+    CompressionWorkerLost,
 }
 
 // r[impl bgzf.libdeflate]

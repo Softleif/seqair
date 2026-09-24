@@ -9,6 +9,7 @@ use super::header::VcfHeader;
 use super::record::Genotype;
 use super::record_encoder::{ContigId, FieldId, FilterId, FormatEncoder, InfoEncoder};
 use super::writer::{percent_encode_into, write_float_g};
+use crate::bam::bgzf_writer::BgzfSink;
 use crate::io::BgzfWriter;
 use crate::io::IndexBuilder;
 use seqair_types::{Pos1, SmallVec, SmolStr};
@@ -113,6 +114,9 @@ pub struct Writer<W: Write, S = Unstarted> {
     _state: PhantomData<S>,
 }
 
+/// BGZF level for `VcfGz` and `Bcf` (`BgzfWriter::new`'s default).
+const DEFAULT_LEVEL: i32 = 6;
+
 // r[impl vcf_writer.buffered_output]
 /// Capacity of the plain-VCF output buffer.
 const PLAIN_OUTPUT_BUFFER: usize = 128 * 1024;
@@ -127,7 +131,7 @@ enum WriterInner<W: Write> {
         info_tracker: FieldTracker,
     },
     VcfGz {
-        bgzf: BgzfWriter<W>,
+        bgzf: BgzfSink<W>,
         index: Option<IndexBuilder>,
         buf: Vec<u8>,
         fmt_keys: Vec<SmolStr>,
@@ -136,7 +140,7 @@ enum WriterInner<W: Write> {
         info_tracker: FieldTracker,
     },
     Bcf {
-        bgzf: BgzfWriter<W>,
+        bgzf: BgzfSink<W>,
         index: Option<IndexBuilder>,
         shared_buf: Vec<u8>,
         indiv_buf: Vec<u8>,
@@ -160,7 +164,7 @@ impl<W: Write> Writer<W> {
                 info_tracker: FieldTracker::default(),
             },
             OutputFormat::VcfGz => WriterInner::VcfGz {
-                bgzf: BgzfWriter::new(inner),
+                bgzf: BgzfSink::Serial(BgzfWriter::with_compression_level(inner, DEFAULT_LEVEL)),
                 index: None,
                 buf: Vec::with_capacity(4096),
                 fmt_keys: Vec::with_capacity(8),
@@ -169,7 +173,7 @@ impl<W: Write> Writer<W> {
                 info_tracker: FieldTracker::default(),
             },
             OutputFormat::Bcf => WriterInner::Bcf {
-                bgzf: BgzfWriter::new(inner),
+                bgzf: BgzfSink::Serial(BgzfWriter::with_compression_level(inner, DEFAULT_LEVEL)),
                 index: None,
                 shared_buf: Vec::with_capacity(4096),
                 indiv_buf: Vec::with_capacity(4096),
@@ -213,7 +217,7 @@ impl<W: Write> Writer<W> {
             }
             WriterInner::VcfGz { bgzf, index, n_samples, .. } => {
                 bgzf.write_all(header_text.as_bytes())?;
-                *index = Some(IndexBuilder::csi(n_refs, 14, max_ref_len, bgzf.virtual_offset()));
+                *index = Some(IndexBuilder::csi(n_refs, 14, max_ref_len, bgzf.index_offset()));
                 *n_samples = header_n_samples;
             }
             WriterInner::Bcf { bgzf, index, n_samples, .. } => {
@@ -224,7 +228,7 @@ impl<W: Write> Writer<W> {
                 bgzf.write_all(&l_text_u32.to_le_bytes())?;
                 bgzf.write_all(header_text.as_bytes())?;
                 bgzf.write_all(&[0u8])?;
-                *index = Some(IndexBuilder::csi(n_refs, 14, max_ref_len, bgzf.virtual_offset()));
+                *index = Some(IndexBuilder::csi(n_refs, 14, max_ref_len, bgzf.index_offset()));
                 *n_samples = header_n_samples;
             }
         }
@@ -340,11 +344,11 @@ impl<W: Write> Writer<W, Ready> {
             }
             WriterInner::VcfGz { bgzf, mut index, .. } => {
                 // r[impl vcf_writer.finish]
-                let voff = bgzf.virtual_offset();
+                let voff = bgzf.index_offset();
                 if let Some(ref mut idx) = index {
                     idx.finish(voff)?;
                 }
-                let inner = bgzf.finish()?;
+                let inner = bgzf.finish(index.as_mut())?;
                 let index = index.map(|builder| CoordinateIndex {
                     builder,
                     format: OutputFormat::VcfGz,
@@ -354,11 +358,11 @@ impl<W: Write> Writer<W, Ready> {
             }
             WriterInner::Bcf { bgzf, mut index, .. } => {
                 // r[impl bcf_writer.finish]
-                let voff = bgzf.virtual_offset();
+                let voff = bgzf.index_offset();
                 if let Some(ref mut idx) = index {
                     idx.finish(voff)?;
                 }
-                let inner = bgzf.finish()?;
+                let inner = bgzf.finish(index.as_mut())?;
                 let index = index.map(|builder| CoordinateIndex {
                     builder,
                     format: OutputFormat::Bcf,
@@ -473,7 +477,7 @@ impl VcfOutput<'_> {
             VcfOutput::Plain(_) => Ok(()),
             VcfOutput::Bgzf { bgzf, index } => {
                 if let Some(idx) = index {
-                    idx.push(tid, beg, end, bgzf.virtual_offset())?;
+                    idx.push(tid, beg, end, bgzf.index_offset())?;
                 }
                 Ok(())
             }
