@@ -27,6 +27,9 @@ fn strip_at(level: Level, raw: &[u8], out: &mut Vec<u8>) {
     dispatch!(level, simd => strip_simd(simd, raw, out));
 }
 
+/// The helpers below are `#[inline(always)]` rather than `#[simd]`: they run
+/// inside this function's SIMD context, and a `#[simd]` helper that stays out
+/// of line is a call (through its own dispatcher) per line.
 #[simd]
 fn strip_simd<S: Simd>(simd: S, raw: &[u8], out: &mut Vec<u8>) {
     let mut search = 0usize;
@@ -46,7 +49,7 @@ fn strip_simd<S: Simd>(simd: S, raw: &[u8], out: &mut Vec<u8>) {
 /// vector is *loaded from `run`*: reading back what the copy just wrote would
 /// stall on store-to-load forwarding, and the ragged tail — one vector
 /// overlapping the last whole one — would stall on the kernel's own store.
-#[simd]
+#[inline(always)]
 fn append_uppercased<S: Simd>(simd: S, run: &[u8], out: &mut Vec<u8>) {
     let start = out.len();
     out.extend_from_slice(run);
@@ -59,7 +62,7 @@ fn append_uppercased<S: Simd>(simd: S, run: &[u8], out: &mut Vec<u8>) {
 /// native-width vector per iteration. `any_true` gates the loop because it is
 /// one instruction everywhere, while a bitmask costs four on NEON — so the
 /// bitmask is built only for the vector that has the hit.
-#[simd]
+#[inline(always)]
 #[allow(
     clippy::chunks_exact_to_as_chunks,
     reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
@@ -82,11 +85,11 @@ fn find_newline<S: Simd>(simd: S, raw: &[u8], from: usize) -> Option<usize> {
 
 /// `dst = src` with `a..=z` uppercased, every other byte unchanged; the two
 /// have the same length. Only that range earns the 0x20 flip — NOT the
-/// `& 0xDF` blanket uppercase, which would also mangle `[`, `{`, `~` and bytes
-/// >= 0x80. The flip is `xor`ed in from a `select` against zero rather than
+/// `& 0xDF` blanket uppercase, which would also mangle `[`, `{`, `~` and
+/// bytes `>= 0x80`. The flip is `xor`ed in from a `select` against zero rather than
 /// `select`ing between the byte and its flip: the latter is a blend on x86,
 /// the former an `and`.
-#[simd]
+#[inline(always)]
 #[allow(
     clippy::chunks_exact_to_as_chunks,
     reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
