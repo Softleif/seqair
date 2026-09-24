@@ -827,6 +827,124 @@ fn pileup_tiled(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Group: the pileup engine alone, on synthetic reads
+// No I/O in the timed loop: the store is built in the batch setup, so this
+// isolates column construction. `spliced` is RNA-seq shaped — every read is
+// split by one or two `N` introns — which is where a stateless per-column
+// CIGAR lookup costs the most.
+// ---------------------------------------------------------------------------
+
+/// Deterministic xorshift, so every run piles up the same reads.
+struct XorShift(u64);
+
+impl XorShift {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: u64) -> u32 {
+        (self.next() % n) as u32
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReadShape {
+    /// 150 bp reads; one in 25 carries a 1–3 bp insertion or deletion.
+    Dna,
+    /// Two or three exons of 150 aligned bases in total, split by introns of
+    /// 100–5000 bp.
+    Spliced,
+}
+
+fn synthetic_input(shape: ReadShape) -> seqair::bam::record_store::PileupInput<()> {
+    use seqair::bam::cigar::{CigarOp, CigarOpType, calc_matches_indels, compute_end_pos};
+    const N_READS: u32 = 200_000;
+    const CONTIG: u32 = 1_000_000;
+    let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+    let mut starts: Vec<u32> = (0..N_READS).map(|_| rng.below(u64::from(CONTIG))).collect();
+    starts.sort_unstable();
+    let bases = [Base::A, Base::C, Base::G, Base::T];
+    let mut store = seqair::bam::RecordStore::<()>::new();
+    let m = |len| CigarOp::new(CigarOpType::Match, len);
+    for (i, &start) in starts.iter().enumerate() {
+        let ops: Vec<CigarOp> = match shape {
+            ReadShape::Dna => match rng.below(50) {
+                0 => vec![m(70), CigarOp::new(CigarOpType::Insertion, 1 + rng.below(3)), m(78)],
+                1 => vec![m(70), CigarOp::new(CigarOpType::Deletion, 1 + rng.below(3)), m(80)],
+                _ => vec![m(150)],
+            },
+            ReadShape::Spliced => {
+                let intron =
+                    |rng: &mut XorShift| CigarOp::new(CigarOpType::RefSkip, 100 + rng.below(4900));
+                if rng.below(3) == 0 {
+                    vec![m(40), intron(&mut rng), m(70), intron(&mut rng), m(40)]
+                } else {
+                    let a = 20 + rng.below(110);
+                    vec![m(a), intron(&mut rng), m(150 - a)]
+                }
+            }
+        };
+        let qlen = seqair::bam::cigar::calc_query_len(&ops) as usize;
+        let seq: Vec<Base> = (0..qlen).map(|_| bases[rng.below(4) as usize]).collect();
+        let qual: Vec<u8> = (0..qlen).map(|_| 20 + rng.below(20) as u8).collect();
+        let pos = Pos0::new(start).unwrap();
+        let (matching, indels) = calc_matches_indels(&ops);
+        store
+            .push_fields(
+                pos,
+                compute_end_pos(pos, &ops).unwrap(),
+                seqair_types::BamFlags::from(if i % 2 == 0 { 0 } else { 16 }),
+                60,
+                matching,
+                indels,
+                format!("r{i}").as_bytes(),
+                &ops,
+                &seq,
+                &qual,
+                &[],
+                0,
+                -1,
+                -1,
+                0,
+                &mut (),
+            )
+            .unwrap();
+    }
+    store.prepare_for_pileup().input
+}
+
+fn pileup_synthetic(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pileup_synthetic");
+    for (name, shape) in [("dna", ReadShape::Dna), ("spliced", ReadShape::Spliced)] {
+        group.bench_function(name, |b| {
+            b.iter_batched(
+                || synthetic_input(shape),
+                |input| {
+                    let span = RangeInclusive {
+                        start: Pos0::new(0).unwrap(),
+                        last: Pos0::new(1_010_000).unwrap(),
+                    };
+                    let mut engine = seqair::bam::PileupEngine::new(input, span);
+                    let mut counter = Counter::new();
+                    let mut mapq: u64 = 0;
+                    while let Some(col) = engine.pileups() {
+                        for aln in col.alignments() {
+                            mapq += u64::from(aln.mapq);
+                            counter.count(aln.base().unwrap_or_default());
+                        }
+                    }
+                    black_box((counter, mapq))
+                },
+                criterion::BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bgzf_decompress,
@@ -837,5 +955,6 @@ criterion_group!(
     aligned_pairs_walk,
     pileup_with_reference,
     pileup_tiled,
+    pileup_synthetic,
 );
 criterion_main!(benches);
