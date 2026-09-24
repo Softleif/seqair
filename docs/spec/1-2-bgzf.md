@@ -83,6 +83,9 @@ The writer MUST accumulate uncompressed data in an internal buffer (up to 64 KB)
 r[bgzf.writer.compression]
 Compression MUST use the `libdeflater` crate (matching the reader's decompression backend) with configurable compression level. The default compression level SHOULD be 6 (matching htslib's default).
 
+r[bgzf.writer.single_write]
+Each block SHOULD be assembled contiguously — header, DEFLATE payload, footer — in one buffer that is allocated once, at the largest size a block can compress to, and never zero-filled again, and it SHOULD reach the inner stream as a single `write_all`. The payload is compressed straight into its place after the header. An unbuffered sink (rastair hands the VCF writer a `Box<dyn Write>` over a file) otherwise pays four `write` calls per block, and a per-block zero fill of the compressed buffer is 64 KiB of memset that the compressor overwrites anyway.
+
 r[bgzf.writer.eof_marker]
 `finish()` MUST write the standard 28-byte BGZF EOF marker block after flushing any remaining buffered data. The EOF marker is a valid gzip member with ISIZE=0.
 

@@ -8,6 +8,10 @@ use tracing::warn;
 /// Maximum uncompressed data per BGZF block (64 KiB).
 const MAX_UNCOMPRESSED_SIZE: usize = 65536;
 
+/// Gzip member header (with the BC subfield) and footer (CRC32 + ISIZE) sizes.
+const HEADER_LEN: usize = 18;
+const FOOTER_LEN: usize = 8;
+
 /// BGZF header template: gzip magic + DEFLATE + FEXTRA, then BC subfield.
 /// Bytes 16-17 (BSIZE) are filled per block.
 const BGZF_HEADER: [u8; 18] = [
@@ -32,6 +36,54 @@ const EOF_BLOCK: [u8; 28] = [
     0x00, 0x00, 0x00, 0x00, // ISIZE = 0
 ];
 
+/// Length of a buffer that holds any block `compressor` can produce from a
+/// full 64 KiB buffer: header, worst-case payload, footer.
+fn max_block_len(compressor: &mut libdeflater::Compressor) -> usize {
+    HEADER_LEN
+        .saturating_add(compressor.deflate_compress_bound(MAX_UNCOMPRESSED_SIZE))
+        .saturating_add(FOOTER_LEN)
+}
+
+// r[impl bgzf.writer.single_write]
+/// Compress `data` into one complete BGZF block at the front of `block` —
+/// the payload straight after the header, then the footer — and return the
+/// block's length. `block` must be at least [`max_block_len`] long.
+fn compress_block(
+    compressor: &mut libdeflater::Compressor,
+    data: &[u8],
+    block: &mut [u8],
+) -> Result<usize, BgzfError> {
+    let payload_end = block.len().saturating_sub(FOOTER_LEN);
+    let payload = block.get_mut(HEADER_LEN..payload_end).ok_or(BgzfError::CorruptHeader)?;
+    let compressed_len = compressor
+        .deflate_compress(data, payload)
+        .map_err(|source| BgzfError::CompressionFailed { source })?;
+
+    let mut crc = libdeflater::Crc::new();
+    crc.update(data);
+    let isize_val = u32::try_from(data.len()).map_err(|_| BgzfError::CorruptHeader)?;
+
+    // total = header(18) + compressed_len + footer(8); BSIZE = total - 1
+    let footer_start = HEADER_LEN.checked_add(compressed_len).ok_or(BgzfError::CorruptHeader)?;
+    let total_block_size = footer_start.checked_add(FOOTER_LEN).ok_or(BgzfError::CorruptHeader)?;
+    let bsize = total_block_size.checked_sub(1).ok_or(BgzfError::CorruptHeader)?;
+    let bsize_bytes = u16::try_from(bsize).map_err(|_| BgzfError::CorruptHeader)?.to_le_bytes();
+
+    let header = block.get_mut(..HEADER_LEN).ok_or(BgzfError::CorruptHeader)?;
+    header.copy_from_slice(&BGZF_HEADER);
+    // Bytes 16-17 are the BSIZE field
+    #[allow(clippy::indexing_slicing, reason = "fixed-size header with known offsets")]
+    {
+        header[16] = bsize_bytes[0];
+        header[17] = bsize_bytes[1];
+    }
+    let footer = block.get_mut(footer_start..total_block_size).ok_or(BgzfError::CorruptHeader)?;
+    let (crc_bytes, isize_bytes) = footer.split_at_mut(4);
+    crc_bytes.copy_from_slice(&crc.sum().to_le_bytes());
+    isize_bytes.copy_from_slice(&isize_val.to_le_bytes());
+    Ok(total_block_size)
+}
+
 // r[impl bgzf.writer]
 // r[impl bgzf.writer.buffer]
 // r[impl bgzf.writer.compression]
@@ -44,8 +96,11 @@ pub struct BgzfWriter<W: Write> {
     inner: Option<W>,
     /// Uncompressed data buffer (up to `MAX_UNCOMPRESSED_SIZE`).
     buf: Vec<u8>,
-    /// Reusable buffer for compressed output.
-    compressed_buf: Vec<u8>,
+    // r[impl bgzf.writer.single_write]
+    /// One whole block — header, DEFLATE payload, footer — assembled in place.
+    /// Sized once for the largest payload a full buffer can compress to and
+    /// never shrunk, so no block pays for zero-filling it.
+    block: Vec<u8>,
     compressor: libdeflater::Compressor,
     /// Compressed file offset of the current (not yet flushed) block.
     block_offset: u64,
@@ -59,13 +114,15 @@ impl<W: Write> BgzfWriter<W> {
 
     /// Create a new BGZF writer with the specified compression level (0-12).
     pub fn with_compression_level(inner: W, level: i32) -> Self {
+        let mut compressor = libdeflater::Compressor::new(
+            libdeflater::CompressionLvl::new(level).unwrap_or_default(),
+        );
+        let block_len = max_block_len(&mut compressor);
         Self {
             inner: Some(inner),
             buf: Vec::with_capacity(MAX_UNCOMPRESSED_SIZE),
-            compressed_buf: Vec::with_capacity(MAX_UNCOMPRESSED_SIZE),
-            compressor: libdeflater::Compressor::new(
-                libdeflater::CompressionLvl::new(level).unwrap_or_default(),
-            ),
+            block: vec![0; block_len],
+            compressor,
             block_offset: 0,
         }
     }
@@ -146,54 +203,16 @@ impl<W: Write> BgzfWriter<W> {
         }
     }
 
+    // r[impl bgzf.writer.single_write]
     /// Compress and emit the current buffer as a BGZF block.
     fn flush_block(&mut self) -> Result<(), BgzfError> {
         if self.buf.is_empty() {
             return Ok(());
         }
-
-        // Compress the data
-        let max_compressed = self.compressor.deflate_compress_bound(self.buf.len());
-        self.compressed_buf.clear();
-        self.compressed_buf.resize(max_compressed, 0);
-        let compressed_len = self
-            .compressor
-            .deflate_compress(&self.buf, &mut self.compressed_buf)
-            .map_err(|source| BgzfError::CompressionFailed { source })?;
-        self.compressed_buf.truncate(compressed_len);
-
-        // Compute CRC32
-        let mut crc = libdeflater::Crc::new();
-        crc.update(&self.buf);
-        let crc32 = crc.sum();
-
-        // BSIZE = total block size - 1
-        // total = header(18) + compressed_len + footer(8)
-        let total_block_size = 18usize
-            .checked_add(compressed_len)
-            .and_then(|n| n.checked_add(8))
-            .ok_or(BgzfError::CorruptHeader)?;
-        let bsize = total_block_size.checked_sub(1).ok_or(BgzfError::CorruptHeader)?;
-
-        // Write header with BSIZE filled in
-        let mut header = BGZF_HEADER;
-        let bsize_bytes = u16::try_from(bsize).map_err(|_| BgzfError::CorruptHeader)?.to_le_bytes();
-        // Bytes 16-17 are the BSIZE field
-        #[allow(clippy::indexing_slicing, reason = "fixed-size header with known offsets")]
-        {
-            header[16] = bsize_bytes[0];
-            header[17] = bsize_bytes[1];
-        }
-
-        let isize_val = u32::try_from(self.buf.len()).map_err(|_| BgzfError::CorruptHeader)?;
-
-        // Borrow inner writer directly to avoid conflicting borrow with self.compressed_buf/buf
+        let total_block_size = compress_block(&mut self.compressor, &self.buf, &mut self.block)?;
+        let block = self.block.get(..total_block_size).ok_or(BgzfError::CorruptHeader)?;
         let w = self.inner.as_mut().ok_or(BgzfError::AlreadyFinished)?;
-        w.write_all(&header).map_err(|source| BgzfError::WriteFailed { source })?;
-        w.write_all(&self.compressed_buf).map_err(|source| BgzfError::WriteFailed { source })?;
-        w.write_all(&crc32.to_le_bytes()).map_err(|source| BgzfError::WriteFailed { source })?;
-        w.write_all(&isize_val.to_le_bytes())
-            .map_err(|source| BgzfError::WriteFailed { source })?;
+        w.write_all(block).map_err(|source| BgzfError::WriteFailed { source })?;
 
         // Advance block_offset by the total compressed block size
         self.block_offset = self
@@ -277,6 +296,38 @@ mod tests {
         let data: Vec<u8> = (0..200_000).map(|i| (i % 251) as u8).collect();
         let output = write_and_finish(&data);
         assert_eq!(read_all(&output), data);
+    }
+
+    /// Counts `write` calls and keeps the bytes.
+    #[derive(Default)]
+    struct CountingSink {
+        writes: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for CountingSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // r[verify bgzf.writer.single_write]
+    /// An unbuffered sink sees one `write` per block (plus one for the EOF
+    /// marker), and the stream still decodes.
+    #[test]
+    fn one_write_per_block() {
+        let data: Vec<u8> = (0..200_000).map(|i| (i % 251) as u8).collect();
+        let mut writer = BgzfWriter::new(CountingSink::default());
+        writer.write_all(&data).unwrap();
+        let sink = writer.finish().unwrap();
+        let blocks = data.len().div_ceil(MAX_UNCOMPRESSED_SIZE);
+        assert_eq!(sink.writes, blocks + 1, "one write per block plus the EOF marker");
+        assert_eq!(read_all(&sink.bytes), data);
     }
 
     // r[verify bgzf.writer.eof_marker]
