@@ -189,3 +189,6 @@ Text parsing is inherently slower than BAM binary decoding. The SAM reader is ex
 - Avoid allocations during parsing (reuse line buffers).
 - Parse integers without going through `String` (direct byte-to-int conversion).
 - Decode SEQ characters to Base with a lookup table (not per-char branching).
+
+r[sam.perf.text_parsing]
+Line splitting MUST scan the decompressed block for `\n` one native-width SIMD vector at a time (`r[io.simd_portable]`), not a byte at a time, and a line that lies wholly inside one block MUST be parsed in place, without copying it; only a line spanning blocks is assembled in the line buffer (`r[sam.edge.line_spanning_blocks]`). The scan MUST stop at the chunk's end virtual offset, treating the end of one block and the start of the next as the same position. Field splitting MUST NOT allocate per line: it walks the TAB bitmask of each vector and yields exactly what `splitn(12, TAB)` would. A BGZF error while scanning MUST be returned, not taken for the end of the chunk.

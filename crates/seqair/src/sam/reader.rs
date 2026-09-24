@@ -9,6 +9,7 @@ use crate::bam::{
     record_store::RecordStore,
     region_buf::RegionBuf,
 };
+use crate::io::text_scan;
 use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0, Pos1};
 use std::{
@@ -373,94 +374,93 @@ impl<R: Read + Seek> IndexedSamReader<R> {
         let start_i64 = span.start.as_i64();
         let end_i64 = span.last.as_i64();
         let tid_i32 = tid.cast_signed();
+        let header = &self.shared.header;
 
-        // Buffer for accumulating lines that span BGZF block boundaries
+        // Lines that span BGZF block boundaries are assembled here; a line
+        // inside one block is parsed straight out of the block.
         let mut line_buf = Vec::with_capacity(1024);
         // Scratch buffers reused across records
         let mut cigar_buf = Vec::with_capacity(256);
-        let mut bases_buf = Vec::with_capacity(256);
+        let mut seq_buf = Vec::with_capacity(256);
         let mut qual_buf = Vec::with_capacity(256);
         let mut aux_buf = Vec::with_capacity(256);
         let mut fetched: usize = 0;
         let mut kept: usize = 0;
 
+        // r[impl sam.edge.empty_lines]
+        let mut on_line = |line: &[u8]| -> Result<(), SamError> {
+            // Strip \r for Windows line endings
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.is_empty() || line.first() == Some(&b'@') {
+                return Ok(());
+            }
+            if let Some(outcome) = parse_sam_line(
+                line,
+                header,
+                tid_i32,
+                start_i64,
+                end_i64,
+                store,
+                &mut cigar_buf,
+                &mut seq_buf,
+                &mut qual_buf,
+                &mut aux_buf,
+                customize,
+            )? {
+                fetched = fetched.saturating_add(1);
+                if outcome {
+                    kept = kept.saturating_add(1);
+                }
+            }
+            Ok(())
+        };
+
         for chunk in &chunks {
             region.seek_virtual(chunk.begin)?;
             line_buf.clear();
 
-            // TODO(perf): r[sam.perf.text_parsing] — use memchr for TAB/newline scanning instead of byte-at-a-time
+            // r[impl sam.perf.text_parsing]
+            // r[impl sam.edge.line_spanning_blocks]
             loop {
-                let current_voff = region.virtual_offset();
-                if current_voff >= chunk.end {
+                if region.virtual_offset() >= chunk.end {
                     break;
                 }
-
-                // Read one byte at a time, accumulating into line_buf until newline
-                let Ok(byte) = region.read_byte() else { break };
-
-                if byte == b'\n' {
-                    // Strip \r for Windows line endings
-                    if line_buf.last() == Some(&b'\r') {
-                        line_buf.pop();
-                    }
-
-                    // r[impl sam.edge.empty_lines]
-                    if line_buf.is_empty() || line_buf.first() == Some(&b'@') {
-                        line_buf.clear();
-                        continue;
-                    }
-
-                    // Parse the SAM line
-                    if let Some(outcome) = parse_sam_line(
-                        &line_buf,
-                        &self.shared.header,
-                        tid_i32,
-                        start_i64,
-                        end_i64,
-                        store,
-                        &mut cigar_buf,
-                        &mut bases_buf,
-                        &mut qual_buf,
-                        &mut aux_buf,
-                        customize,
-                    )? {
-                        fetched = fetched.saturating_add(1);
-                        if outcome {
-                            kept = kept.saturating_add(1);
-                        }
-                    }
-
-                    line_buf.clear();
-                } else {
-                    line_buf.push(byte);
+                // `fill_buf` may load the next block, so the chunk end is
+                // checked again against where the returned bytes start: the
+                // end of one block and the start of the next are one place.
+                let (voff, block) = region.fill_buf()?;
+                if block.is_empty() || voff >= chunk.end {
+                    break;
                 }
+                let limit = if voff.block_offset() == chunk.end.block_offset() {
+                    usize::from(chunk.end.within_block().saturating_sub(voff.within_block()))
+                } else {
+                    block.len()
+                };
+                let window = block.get(..limit).unwrap_or(block);
+                let consumed = match text_scan::find_byte(window, b'\n') {
+                    Some(nl) => {
+                        let rest = window.get(..nl).unwrap_or_default();
+                        if line_buf.is_empty() {
+                            on_line(rest)?;
+                        } else {
+                            line_buf.extend_from_slice(rest);
+                            on_line(&line_buf)?;
+                            line_buf.clear();
+                        }
+                        nl.saturating_add(1)
+                    }
+                    None => {
+                        line_buf.extend_from_slice(window);
+                        window.len()
+                    }
+                };
+                region.consume(consumed);
             }
 
             // Handle partial line at end of chunk (line without trailing newline)
-            if !line_buf.is_empty() && line_buf.first() != Some(&b'@') {
-                if line_buf.last() == Some(&b'\r') {
-                    line_buf.pop();
-                }
-                if !line_buf.is_empty()
-                    && let Some(outcome) = parse_sam_line(
-                        &line_buf,
-                        &self.shared.header,
-                        tid_i32,
-                        start_i64,
-                        end_i64,
-                        store,
-                        &mut cigar_buf,
-                        &mut bases_buf,
-                        &mut qual_buf,
-                        &mut aux_buf,
-                        customize,
-                    )?
-                {
-                    fetched = fetched.saturating_add(1);
-                    if outcome {
-                        kept = kept.saturating_add(1);
-                    }
-                }
+            if !line_buf.is_empty() {
+                on_line(&line_buf)?;
                 line_buf.clear();
             }
         }
@@ -482,12 +482,13 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     end: i64,
     store: &mut RecordStore<E::Extra>,
     cigar_buf: &mut Vec<CigarOp>,
-    bases_buf: &mut Vec<Base>,
+    seq_buf: &mut Vec<u8>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
     customize: &mut E,
 ) -> Result<Option<bool>, SamError> {
-    let fields: Vec<&[u8]> = line.splitn(12, |&b| b == b'\t').collect();
+    let (fields, n_fields) = text_scan::split_tabs(line);
+    let fields = fields.get(..n_fields).unwrap_or_default();
     if fields.len() < 11 {
         return Err(SamRecordError::TooFewFields { found: fields.len() }.into());
     }
@@ -559,23 +560,20 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     // r[impl sam.record.seq_decode]
     // r[impl sam.edge.missing_seq]
     let seq_field = fields.get(9).copied().unwrap_or(b"*");
-    if seq_field == b"*" {
-        bases_buf.clear();
-    } else {
-        *bases_buf = Base::from_ascii_vec(seq_field.to_vec());
+    seq_buf.clear();
+    if seq_field != b"*" {
+        seq_buf.extend_from_slice(seq_field);
     }
+    let bases = Base::convert_ascii_in_place_as_slice(seq_buf);
 
     // r[impl sam.record.qual_decode]
     // r[impl sam.edge.missing_qual]
     let qual_field = fields.get(10).copied().unwrap_or(b"*");
     qual_buf.clear();
     if qual_field == b"*" {
-        qual_buf.resize(bases_buf.len(), 0xFF);
+        qual_buf.resize(bases.len(), 0xFF);
     } else {
-        qual_buf.reserve(qual_field.len());
-        for &b in qual_field {
-            qual_buf.push(b.wrapping_sub(33));
-        }
+        qual_buf.extend(qual_field.iter().map(|b| b.wrapping_sub(33)));
     }
 
     // Optional fields (12+): aux tags
@@ -629,7 +627,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
             indel_bases,
             qname,
             cigar_buf,
-            bases_buf,
+            bases,
             qual_buf,
             aux_buf,
             rec_tid,
@@ -1007,7 +1005,6 @@ fn parse_i64(bytes: &[u8]) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::bam::record_store::RecordStore;
-    use seqair_types::Base;
     use std::io::Write;
 
     /// The aux bytes `parse_aux_tags` produces for one `TAG:TYPE:VALUE` field.
@@ -1074,7 +1071,7 @@ mod tests {
         BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:1000\n").expect("failed to build test header")
     }
 
-    fn make_store_and_bufs() -> (RecordStore, Vec<CigarOp>, Vec<Base>, Vec<u8>, Vec<u8>) {
+    fn make_store_and_bufs() -> (RecordStore, Vec<CigarOp>, Vec<u8>, Vec<u8>, Vec<u8>) {
         (RecordStore::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
     }
 

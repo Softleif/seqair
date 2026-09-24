@@ -5,6 +5,7 @@
 //! [`crate::vcf::Writer`] output.
 
 mod index_builder;
+pub(crate) mod text_scan;
 
 // BGZF compression layer
 pub use crate::bam::bgzf::{BgzfError, VirtualOffset};

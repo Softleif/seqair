@@ -434,6 +434,24 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         Ok(())
     }
 
+    /// The unread rest of the current decompressed block and the virtual
+    /// offset of its first byte, loading the next block first when this one
+    /// is exhausted. Empty only once every planned range is exhausted. Pair
+    /// with [`Self::consume`].
+    #[inline]
+    pub fn fill_buf(&mut self) -> Result<(VirtualOffset, &[u8]), BgzfError> {
+        if self.buf_pos >= self.buf.len() && !self.read_block()? {
+            return Ok((self.virtual_offset(), &[]));
+        }
+        Ok((self.virtual_offset(), self.buf.get(self.buf_pos..).unwrap_or_default()))
+    }
+
+    /// Mark `n` bytes of what [`Self::fill_buf`] returned as read.
+    #[inline]
+    pub fn consume(&mut self, n: usize) {
+        self.buf_pos = self.buf_pos.saturating_add(n).min(self.buf.len());
+    }
+
     #[inline]
     pub fn read_byte(&mut self) -> Result<u8, BgzfError> {
         if self.buf_pos >= self.buf.len() && !self.read_block()? {
