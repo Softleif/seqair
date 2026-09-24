@@ -131,6 +131,10 @@ pub struct PileupEngine<U = ()> {
     /// Hot field: checked every column during retain. Stored separately so the
     /// retain loop strides 4 bytes instead of the full `ActiveRecord` size (~144 bytes).
     active_end_pos: Vec<Pos0>,
+    /// The smallest of `active_end_pos` (`Pos0::MAX` when empty). A column at
+    /// or below it evicts nothing, so the two `retain` scans are skipped —
+    /// most columns, since only about depth ÷ read length reads expire per column.
+    min_active_end: Pos0,
     /// Cold fields: only accessed for records that survive retain.
     active: Vec<ActiveRecord>,
     max_depth: Option<NonZeroU32>,
@@ -756,6 +760,7 @@ impl<U> PileupEngine<U> {
             region_end: region.last,
             next_entry: 0,
             active_end_pos: scratch.active_end_pos,
+            min_active_end: Pos0::MAX,
             active: scratch.active,
             max_depth: None,
             ref_seq: None,
@@ -1014,18 +1019,26 @@ impl<U> PileupEngine<U> {
                 .trace_err("BUG: current_pos + 1 overflowed despite being <= region_end")?;
 
             // Evict expired records — stable retain, preserves insertion order.
-            {
+            if pos > self.min_active_end {
                 // `retain` backshifts each survivor with one move. Compacting by
                 // `swap(write, read)` instead costs three moves of a 120-byte
                 // `ActiveRecord` for every survivor past the first eviction, which
                 // measured 7.8 % of a variant caller's worker CPU — more than the
                 // column entries the loop below exists to produce.
-                let Self { active, active_end_pos, .. } = self;
+                let Self { active, active_end_pos, min_active_end, .. } = self;
                 {
                     let mut ends = active_end_pos.iter();
                     active.retain(|_| ends.next().is_some_and(|end| *end >= pos));
                 }
-                active_end_pos.retain(|end| *end >= pos);
+                let mut min_end = Pos0::MAX;
+                active_end_pos.retain(|&end| {
+                    let keep = end >= pos;
+                    if keep {
+                        min_end = min_end.min(end);
+                    }
+                    keep
+                });
+                *min_active_end = min_end;
                 debug_assert_eq!(active.len(), active_end_pos.len());
             }
 
@@ -1095,6 +1108,7 @@ impl<U> PileupEngine<U> {
                     mate_idx: rec.mate_idx(),
                     mate_overlap,
                 };
+                self.min_active_end = self.min_active_end.min(active_end);
                 self.active_end_pos.push(active_end);
                 self.active.push(active);
             }
