@@ -546,7 +546,8 @@ impl<U> RecordStore<U> {
         debug_assert!(h.qual_end <= raw.len(), "qual_end overrun: {} > {}", h.qual_end, raw.len());
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let qname_raw = &raw[32..h.var_start];
-        let qname_actual_len = qname_raw.iter().position(|&b| b == 0).unwrap_or(qname_raw.len());
+        let qname_actual_len =
+            crate::io::text_scan::find_byte(qname_raw, 0).unwrap_or(qname_raw.len());
 
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let cigar_bytes = &raw[h.var_start..h.cigar_end];

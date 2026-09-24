@@ -593,9 +593,9 @@ impl<'a> AuxIter<'a> {
             }
             b'Z' | b'H' => {
                 let start = self.pos;
-                while self.pos < self.data.len() && *self.data.get(self.pos)? != 0 {
-                    self.pos = self.pos.checked_add(1)?;
-                }
+                let rest = self.data.get(start..)?;
+                self.pos = start
+                    .checked_add(crate::io::text_scan::find_byte(rest, 0).unwrap_or(rest.len()))?;
                 let slice = self.data.get(start..self.pos)?;
                 self.pos = self.pos.checked_add(1)?; // skip null terminator
                 let v = if typ == b'Z' { AuxValue::String(slice) } else { AuxValue::Hex(slice) };
