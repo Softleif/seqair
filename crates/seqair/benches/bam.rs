@@ -918,7 +918,13 @@ fn synthetic_input(shape: ReadShape) -> seqair::bam::record_store::PileupInput<(
 
 fn pileup_synthetic(c: &mut Criterion) {
     let mut group = c.benchmark_group("pileup_synthetic");
-    for (name, shape) in [("dna", ReadShape::Dna), ("spliced", ReadShape::Spliced)] {
+    // The capped arm is an amplicon-style deep column under `max_depth`: the
+    // spliced columns hold ~1000 entries, of which it keeps 50.
+    for (name, shape, cap) in [
+        ("dna", ReadShape::Dna, None),
+        ("spliced", ReadShape::Spliced, None),
+        ("spliced_max_depth_50", ReadShape::Spliced, std::num::NonZeroU32::new(50)),
+    ] {
         group.bench_function(name, |b| {
             b.iter_batched(
                 || synthetic_input(shape),
@@ -928,6 +934,9 @@ fn pileup_synthetic(c: &mut Criterion) {
                         last: Pos0::new(1_010_000).unwrap(),
                     };
                     let mut engine = seqair::bam::PileupEngine::new(input, span);
+                    if let Some(cap) = cap {
+                        engine.set_max_depth(cap);
+                    }
                     let mut counter = Counter::new();
                     let mut mapq: u64 = 0;
                     while let Some(col) = engine.pileups() {
