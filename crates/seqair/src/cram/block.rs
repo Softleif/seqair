@@ -1,6 +1,13 @@
 //! Parse and decompress CRAM blocks. [`parse_block`] handles all compression methods
 //! defined by CRAM v3: raw, gzip, bzip2, lzma, rANS order-0/1, NX16, and tok3.
 
+// See rans.rs: lazy `ok_or_else(|| CramError::...)` keeps error construction and its
+// `drop_in_place<CramError>` off the per-record path.
+#![allow(
+    clippy::unnecessary_lazy_evaluations,
+    reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
+)]
+
 use super::{reader::CramError, varint};
 
 /// Block content types as defined in the CRAM spec.
@@ -59,50 +66,59 @@ fn parse_block_inner(
 ) -> Result<(Block, usize), CramError> {
     let mut pos = 0;
 
-    let &method = buf.get(pos).ok_or(CramError::Truncated { context: "block method" })?;
-    pos = pos.checked_add(1).ok_or(CramError::Truncated { context: "block method pos" })?;
+    let &method = buf.get(pos).ok_or_else(|| CramError::Truncated { context: "block method" })?;
+    pos = pos.checked_add(1).ok_or_else(|| CramError::Truncated { context: "block method pos" })?;
 
     let &content_type_byte =
-        buf.get(pos).ok_or(CramError::Truncated { context: "block content type" })?;
+        buf.get(pos).ok_or_else(|| CramError::Truncated { context: "block content type" })?;
     let content_type = ContentType::from_byte(content_type_byte)?;
-    pos = pos.checked_add(1).ok_or(CramError::Truncated { context: "block content type pos" })?;
+    pos = pos
+        .checked_add(1)
+        .ok_or_else(|| CramError::Truncated { context: "block content type pos" })?;
 
     let (content_id_u32, n) = varint::decode_itf8(
-        buf.get(pos..).ok_or(CramError::Truncated { context: "block content id" })?,
+        buf.get(pos..).ok_or_else(|| CramError::Truncated { context: "block content id" })?,
     )
-    .ok_or(CramError::Truncated { context: "block content id" })?;
+    .ok_or_else(|| CramError::Truncated { context: "block content id" })?;
     let content_id = content_id_u32.cast_signed();
-    pos = pos.checked_add(n).ok_or(CramError::Truncated { context: "block content id pos" })?;
-
-    let (compressed_size, n) = varint::decode_itf8(
-        buf.get(pos..).ok_or(CramError::Truncated { context: "block compressed size" })?,
-    )
-    .ok_or(CramError::Truncated { context: "block compressed size" })?;
-    pos =
-        pos.checked_add(n).ok_or(CramError::Truncated { context: "block compressed size pos" })?;
-
-    let (uncompressed_size, n) = varint::decode_itf8(
-        buf.get(pos..).ok_or(CramError::Truncated { context: "block uncompressed size" })?,
-    )
-    .ok_or(CramError::Truncated { context: "block uncompressed size" })?;
     pos = pos
         .checked_add(n)
-        .ok_or(CramError::Truncated { context: "block uncompressed size pos" })?;
+        .ok_or_else(|| CramError::Truncated { context: "block content id pos" })?;
+
+    let (compressed_size, n) = varint::decode_itf8(
+        buf.get(pos..).ok_or_else(|| CramError::Truncated { context: "block compressed size" })?,
+    )
+    .ok_or_else(|| CramError::Truncated { context: "block compressed size" })?;
+    pos = pos
+        .checked_add(n)
+        .ok_or_else(|| CramError::Truncated { context: "block compressed size pos" })?;
+
+    let (uncompressed_size, n) = varint::decode_itf8(
+        buf.get(pos..)
+            .ok_or_else(|| CramError::Truncated { context: "block uncompressed size" })?,
+    )
+    .ok_or_else(|| CramError::Truncated { context: "block uncompressed size" })?;
+    pos = pos
+        .checked_add(n)
+        .ok_or_else(|| CramError::Truncated { context: "block uncompressed size pos" })?;
 
     // CRC32 covers everything from the method byte through the end of compressed data
     let crc_start = 0;
 
     let compressed_end = pos
         .checked_add(compressed_size as usize)
-        .ok_or(CramError::Truncated { context: "block compressed end overflow" })?;
-    let compressed_data =
-        buf.get(pos..compressed_end).ok_or(CramError::Truncated { context: "block data" })?;
+        .ok_or_else(|| CramError::Truncated { context: "block compressed end overflow" })?;
+    let compressed_data = buf
+        .get(pos..compressed_end)
+        .ok_or_else(|| CramError::Truncated { context: "block data" })?;
     pos = compressed_end;
 
     // CRC32 is 4 bytes after the compressed data
-    let crc_end =
-        pos.checked_add(4).ok_or(CramError::Truncated { context: "block CRC32 pos overflow" })?;
-    let crc_bytes = buf.get(pos..crc_end).ok_or(CramError::Truncated { context: "block CRC32" })?;
+    let crc_end = pos
+        .checked_add(4)
+        .ok_or_else(|| CramError::Truncated { context: "block CRC32 pos overflow" })?;
+    let crc_bytes =
+        buf.get(pos..crc_end).ok_or_else(|| CramError::Truncated { context: "block CRC32" })?;
     let expected_crc = u32::from_le_bytes(
         crc_bytes.try_into().map_err(|_| CramError::Truncated { context: "block CRC32" })?,
     );
@@ -110,7 +126,7 @@ fn parse_block_inner(
     // Verify CRC32 over [method .. compressed_data] (excludes the CRC32 itself)
     let crc_data = buf
         .get(crc_start..compressed_end)
-        .ok_or(CramError::Truncated { context: "block CRC32 range" })?;
+        .ok_or_else(|| CramError::Truncated { context: "block CRC32 range" })?;
     let mut crc = libdeflater::Crc::new();
     crc.update(crc_data);
     if crc.sum() != expected_crc {
@@ -121,7 +137,9 @@ fn parse_block_inner(
         });
     }
 
-    pos = pos.checked_add(4).ok_or(CramError::Truncated { context: "block pos after CRC" })?;
+    pos = pos
+        .checked_add(4)
+        .ok_or_else(|| CramError::Truncated { context: "block pos after CRC" })?;
 
     let uncompressed_size = uncompressed_size as usize;
     super::reader::check_alloc_size(uncompressed_size, "block uncompressed size")?;

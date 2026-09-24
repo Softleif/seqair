@@ -1,6 +1,13 @@
 //! Decode CRAM slices into records. Reads data series blocks, applies the encodings from
 //! [`CompressionHeader`], and pushes decoded records into a [`RecordStore`].
 
+// See rans.rs: lazy `ok_or_else(|| CramError::...)` keeps error construction and its
+// `drop_in_place<CramError>` off the per-record path.
+#![allow(
+    clippy::unnecessary_lazy_evaluations,
+    reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
+)]
+
 use std::ops::Neg;
 
 use super::{
@@ -74,8 +81,9 @@ impl SliceHeader {
 
         let embedded_reference = read_itf8(&mut cursor)?.cast_signed();
 
-        let md5_bytes =
-            cursor.get(..16).ok_or(CramError::Truncated { context: "slice reference MD5" })?;
+        let md5_bytes = cursor
+            .get(..16)
+            .ok_or_else(|| CramError::Truncated { context: "slice reference MD5" })?;
         let mut reference_md5 = [0u8; 16];
         reference_md5.copy_from_slice(md5_bytes);
 
@@ -134,7 +142,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
 ) -> Result<(usize, usize), CramError> {
     let slice_data = container_data
         .get(slice_offset..)
-        .ok_or(CramError::Truncated { context: "slice offset" })?;
+        .ok_or_else(|| CramError::Truncated { context: "slice offset" })?;
 
     // Parse slice header block
     // The codec buffers live on the reader so every block of every slice
@@ -207,7 +215,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
 
     for _ in 0..sh.num_blocks {
         let remaining =
-            slice_data.get(pos..).ok_or(CramError::Truncated { context: "slice block" })?;
+            slice_data.get(pos..).ok_or_else(|| CramError::Truncated { context: "slice block" })?;
         let (blk, consumed) = block::parse_block_with_buf(
             remaining,
             Some(&mut *rans_4x8_buf),
@@ -245,7 +253,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     let effective_ref = Base::from_ascii_vec(effective_ref.to_vec());
     let effective_ref: &[Base] = &effective_ref;
 
-    let core_data = core_block.ok_or(CramError::MissingCoreDataBlock)?;
+    let core_data = core_block.ok_or_else(|| CramError::MissingCoreDataBlock)?;
 
     let mut ctx = DecodeContext::new(&core_data.data, external_blocks);
 
@@ -1318,7 +1326,8 @@ fn scan_features_for_refspan(
 }
 
 fn read_itf8(cursor: &mut &[u8]) -> Result<u32, CramError> {
-    varint::read_itf8_from(cursor).ok_or(CramError::Truncated { context: "slice header itf8" })
+    varint::read_itf8_from(cursor)
+        .ok_or_else(|| CramError::Truncated { context: "slice header itf8" })
 }
 
 /// MD5 of `bytes` after ASCII-uppercasing, computed without allocating
@@ -1339,7 +1348,8 @@ fn md5_uppercase_streaming(bytes: &[u8]) -> [u8; 16] {
 }
 
 fn read_ltf8(cursor: &mut &[u8]) -> Result<u64, CramError> {
-    varint::read_ltf8_from(cursor).ok_or(CramError::Truncated { context: "slice header ltf8" })
+    varint::read_ltf8_from(cursor)
+        .ok_or_else(|| CramError::Truncated { context: "slice header ltf8" })
 }
 
 #[cfg(test)]

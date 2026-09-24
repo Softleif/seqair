@@ -5,6 +5,13 @@
 //! compressed data (via rANS Nx16). The decoder reconstructs names by
 //! iterating over the tokens.
 
+// See rans.rs: lazy `ok_or_else(|| CramError::...)` keeps error construction and its
+// `drop_in_place<CramError>` off the per-record path.
+#![allow(
+    clippy::unnecessary_lazy_evaluations,
+    reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
+)]
+
 use std::io::{BufRead, Cursor, Read, Write};
 
 use super::codec_io::{Uint7Error, read_u8, read_u32_le, read_uint7, split_off};
@@ -253,10 +260,11 @@ impl TokenReader {
                     .map_err(|_| CramError::Truncated { context: "tok3 delta" })?;
                 let delta = u32::from(buf[0]);
                 match prev_token {
-                    Some(Token::Digits(n)) => Ok(Some(Token::Digits(
-                        n.checked_add(delta)
-                            .ok_or(CramError::Truncated { context: "tok3 delta overflow" })?,
-                    ))),
+                    Some(Token::Digits(n)) => {
+                        Ok(Some(Token::Digits(n.checked_add(delta).ok_or_else(|| {
+                            CramError::Truncated { context: "tok3 delta overflow" }
+                        })?)))
+                    }
                     _ => Err(CramError::Tok3DeltaRequiresDigits {
                         found: token_discriminant(prev_token),
                     }),
@@ -270,8 +278,9 @@ impl TokenReader {
                 let delta = u32::from(buf[0]);
                 match prev_token {
                     Some(Token::PaddedDigits(n, width)) => Ok(Some(Token::PaddedDigits(
-                        n.checked_add(delta)
-                            .ok_or(CramError::Truncated { context: "tok3 delta0 overflow" })?,
+                        n.checked_add(delta).ok_or_else(|| CramError::Truncated {
+                            context: "tok3 delta0 overflow",
+                        })?,
                         *width,
                     ))),
                     _ => Err(CramError::Tok3Delta0RequiresPaddedDigits {
@@ -312,7 +321,8 @@ fn decode_token_byte_streams(
     let mut t: Option<usize> = None;
 
     while !src.is_empty() {
-        let ttype = read_u8(src).ok_or(CramError::Truncated { context: "tok3 token type" })?;
+        let ttype =
+            read_u8(src).ok_or_else(|| CramError::Truncated { context: "tok3 token type" })?;
 
         let tok_new = ttype & 0x80 != 0;
         let tok_dup = ttype & 0x40 != 0;
@@ -330,13 +340,14 @@ fn decode_token_byte_streams(
                     *first = ty.to_byte();
                 }
                 b.get_mut(new_t)
-                    .ok_or(CramError::Truncated { context: "tok3 new token position" })?
+                    .ok_or_else(|| CramError::Truncated { context: "tok3 new token position" })?
                     .set(TokenType::Type, buf);
             }
         }
 
-        let t_idx =
-            t.ok_or(CramError::Truncated { context: "tok3 token index before first new token" })?;
+        let t_idx = t.ok_or_else(|| CramError::Truncated {
+            context: "tok3 token index before first new token",
+        })?;
 
         if tok_dup {
             let truncated_dup = || CramError::Truncated { context: "tok3 dup metadata" };
@@ -345,20 +356,22 @@ fn decode_token_byte_streams(
 
             let buf = b
                 .get(dup_pos)
-                .ok_or(CramError::Tok3DupPositionOutOfRange { dup_pos })?
+                .ok_or_else(|| CramError::Tok3DupPositionOutOfRange { dup_pos })?
                 .get(dup_type)
                 .get_ref()
                 .clone();
 
-            b.get_mut(t_idx).ok_or(CramError::Truncated { context: "tok3 dup set" })?.set(ty, buf);
+            b.get_mut(t_idx)
+                .ok_or_else(|| CramError::Truncated { context: "tok3 dup set" })?
+                .set(ty, buf);
         } else {
             let compressed_size = read_uint7(src).map_err(uint7_to_cram_error)? as usize;
             let buf = split_off(src, compressed_size)
-                .ok_or(CramError::Truncated { context: "tok3 compressed payload" })?;
+                .ok_or_else(|| CramError::Truncated { context: "tok3 compressed payload" })?;
             let decompressed = super::rans_nx16::decode(buf, 0)?;
 
             b.get_mut(t_idx)
-                .ok_or(CramError::Truncated { context: "tok3 stream set" })?
+                .ok_or_else(|| CramError::Truncated { context: "tok3 stream set" })?
                 .set(ty, decompressed);
         }
     }
@@ -373,19 +386,20 @@ fn decode_single_name(
     n: usize,
 ) -> Result<Vec<u8>, CramError> {
     let first_reader =
-        b.first_mut().ok_or(CramError::Truncated { context: "tok3 no token readers" })?;
+        b.first_mut().ok_or_else(|| CramError::Truncated { context: "tok3 no token readers" })?;
 
     let ty = first_reader.read_type()?;
     let dist = first_reader.read_distance(ty)?;
 
     let m = n
         .checked_sub(dist)
-        .ok_or(CramError::Tok3DistanceExceedsIndex { distance: dist, name_index: n })?;
+        .ok_or_else(|| CramError::Tok3DistanceExceedsIndex { distance: dist, name_index: n })?;
 
     if ty == TokenType::Dup {
-        let prev_name = names.get(m).ok_or(CramError::Tok3DupRefOutOfRange { index: m })?.clone();
+        let prev_name =
+            names.get(m).ok_or_else(|| CramError::Tok3DupRefOutOfRange { index: m })?.clone();
         let prev_tokens =
-            tokens.get(m).ok_or(CramError::Tok3DupRefOutOfRange { index: m })?.clone();
+            tokens.get(m).ok_or_else(|| CramError::Tok3DupRefOutOfRange { index: m })?.clone();
 
         if let Some(slot) = names.get_mut(n) {
             *slot = prev_name;
@@ -396,21 +410,23 @@ fn decode_single_name(
 
         return Ok(names
             .get(n)
-            .ok_or(CramError::Truncated { context: "tok3 dup result" })?
+            .ok_or_else(|| CramError::Truncated { context: "tok3 dup result" })?
             .clone());
     }
 
     let mut t = 1;
 
     loop {
-        let reader =
-            b.get_mut(t).ok_or(CramError::Truncated { context: "tok3 token reader position" })?;
+        let reader = b
+            .get_mut(t)
+            .ok_or_else(|| CramError::Truncated { context: "tok3 token reader position" })?;
 
         let prev_token = tokens.get(m).and_then(|ts| ts.get(t)).and_then(|tok| tok.as_ref());
 
         if let Some(token) = reader.read_token(prev_token)? {
-            let name =
-                names.get_mut(n).ok_or(CramError::Truncated { context: "tok3 name index" })?;
+            let name = names
+                .get_mut(n)
+                .ok_or_else(|| CramError::Truncated { context: "tok3 name index" })?;
 
             match &token {
                 Token::Char(c) => name.push(*c),
@@ -426,9 +442,9 @@ fn decode_single_name(
 
             if let Some(ts) = tokens.get_mut(n) {
                 if t >= ts.len() {
-                    let new_len = t
-                        .checked_add(1)
-                        .ok_or(CramError::Truncated { context: "tok3 token index overflow" })?;
+                    let new_len = t.checked_add(1).ok_or_else(|| CramError::Truncated {
+                        context: "tok3 token index overflow",
+                    })?;
                     ts.resize(new_len, None);
                 }
                 if let Some(slot) = ts.get_mut(t) {
@@ -441,10 +457,10 @@ fn decode_single_name(
 
         t = t
             .checked_add(1)
-            .ok_or(CramError::Truncated { context: "tok3 token index overflow" })?;
+            .ok_or_else(|| CramError::Truncated { context: "tok3 token index overflow" })?;
     }
 
-    Ok(names.get(n).ok_or(CramError::Truncated { context: "tok3 final name" })?.clone())
+    Ok(names.get(n).ok_or_else(|| CramError::Truncated { context: "tok3 final name" })?.clone())
 }
 
 // Primitive readers (`read_u8`, `read_u32_le`, `read_uint7`, `split_off`)

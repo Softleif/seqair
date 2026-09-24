@@ -179,7 +179,8 @@ fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
 
 #[inline]
 fn split_off<'a>(src: &mut &'a [u8], len: usize) -> Result<&'a [u8], CramError> {
-    codec_io::split_off(src, len).ok_or(CramError::Truncated { context: "rans_nx16 split_off" })
+    codec_io::split_off(src, len)
+        .ok_or_else(|| CramError::Truncated { context: "rans_nx16 split_off" })
 }
 
 fn read_states(src: &mut &[u8], state_count: usize) -> Result<Vec<u32>, CramError> {
@@ -898,12 +899,12 @@ fn normalize_frequencies(
     let mut running = sum;
     let mut shift = 0u32;
     while running < (1 << bits) {
-        running = running
-            .checked_mul(2)
-            .ok_or(CramError::FrequencyNormalizationOverflow { sum: u64::from(sum) << shift })?;
+        running = running.checked_mul(2).ok_or_else(|| {
+            CramError::FrequencyNormalizationOverflow { sum: u64::from(sum) << shift }
+        })?;
         shift = shift
             .checked_add(1)
-            .ok_or(CramError::FrequencyNormalizationOverflow { sum: u64::from(sum) })?;
+            .ok_or_else(|| CramError::FrequencyNormalizationOverflow { sum: u64::from(sum) })?;
     }
 
     for f in frequencies {
@@ -1226,8 +1227,12 @@ fn decode_stripe_with_buf(
     let compressed_sizes: Vec<usize> =
         (0..chunk_count).map(|_| read_uint7(src).map(|n| n as usize)).collect::<Result<_, _>>()?;
 
-    let q = uncompressed_size.checked_div(chunk_count).ok_or(CramError::RansStripeZeroChunks)?;
-    let r = uncompressed_size.checked_rem(chunk_count).ok_or(CramError::RansStripeZeroChunks)?;
+    let q = uncompressed_size
+        .checked_div(chunk_count)
+        .ok_or_else(|| CramError::RansStripeZeroChunks)?;
+    let r = uncompressed_size
+        .checked_rem(chunk_count)
+        .ok_or_else(|| CramError::RansStripeZeroChunks)?;
     let uncompressed_sizes: Vec<usize> =
         (0..chunk_count).map(|i| if r > i { q.saturating_add(1) } else { q }).collect();
 
@@ -1243,10 +1248,10 @@ fn decode_stripe_with_buf(
     let mut dst = vec![0u8; uncompressed_size];
     for (i, chunk) in chunks.iter().enumerate() {
         for (j, &s) in chunk.iter().enumerate() {
-            let idx = j
-                .checked_mul(chunk_count)
-                .and_then(|v| v.checked_add(i))
-                .ok_or(CramError::Truncated { context: "rans_nx16 stripe index overflow" })?;
+            let idx =
+                j.checked_mul(chunk_count).and_then(|v| v.checked_add(i)).ok_or_else(|| {
+                    CramError::Truncated { context: "rans_nx16 stripe index overflow" }
+                })?;
             if let Some(d) = dst.get_mut(idx) {
                 *d = s;
             }
@@ -1288,7 +1293,7 @@ fn apply_bit_unpack(src: &[u8], ctx: &BitPackContext) -> Result<Vec<u8>, CramErr
             let sym = *ctx
                 .mapping_table
                 .first()
-                .ok_or(CramError::Truncated { context: "bit_pack mapping" })?;
+                .ok_or_else(|| CramError::Truncated { context: "bit_pack mapping" })?;
             dst.fill(sym);
         }
         2 => unpack(src, &ctx.mapping_table, 8, &mut dst),
@@ -1365,7 +1370,8 @@ fn apply_rle(src: &[u8], ctx: &RleContext) -> Result<Vec<u8>, CramError> {
     let mut src_iter = src.iter();
 
     while let Some(d) = dst_iter.next() {
-        let &sym = src_iter.next().ok_or(CramError::Truncated { context: "rans_nx16 rle src" })?;
+        let &sym =
+            src_iter.next().ok_or_else(|| CramError::Truncated { context: "rans_nx16 rle src" })?;
         *d = sym;
 
         if rle_alphabet[usize::from(sym)] {
