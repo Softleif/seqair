@@ -1,5 +1,6 @@
-//! Vectorized byte scans for text formats: the next newline in a block, and
-//! the TAB-separated fields of a line.
+//! Vectorized byte scans: the next occurrence of a byte (a newline in a SAM
+//! block, a CRAM `BYTE_ARRAY_STOP` terminator), and the TAB-separated fields
+//! of a line.
 //!
 //! Both are written once over `fearless_simd` (`r[io.simd_portable]`) and
 //! compare one native-width vector per iteration. `find_byte` gates on

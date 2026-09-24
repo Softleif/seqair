@@ -11,6 +11,7 @@
 )]
 
 use super::{bitstream::BitReader, reader::CramError, varint};
+use crate::io::text_scan::find_byte;
 use seqair_types::SmallVec;
 
 /// Integer encoding (for data series like BF, CF, RL, AP, etc.)
@@ -272,17 +273,11 @@ impl ExternalCursor {
     /// `buf`, advancing `pos` past the stop byte. Replaces the allocating
     /// `read_bytes_until`.
     pub fn read_bytes_until_into(&mut self, stop: u8, buf: &mut Vec<u8>) -> Option<()> {
-        let start = self.pos;
-        while self.pos < self.data.len() {
-            if *self.data.get(self.pos)? == stop {
-                let slice = self.data.get(start..self.pos)?;
-                buf.extend_from_slice(slice);
-                self.pos = self.pos.checked_add(1)?; // skip stop byte
-                return Some(());
-            }
-            self.pos = self.pos.checked_add(1)?;
-        }
-        None
+        let rest = self.data.get(self.pos..)?;
+        let len = find_byte(rest, stop)?;
+        buf.extend_from_slice(rest.get(..len)?);
+        self.pos = self.pos.checked_add(len)?.checked_add(1)?; // skip stop byte
+        Some(())
     }
 
     pub fn into_data(self) -> Vec<u8> {
