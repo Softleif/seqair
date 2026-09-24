@@ -16,9 +16,6 @@ fearless_simd = "1.0"
 fearless_simd_macros = "0.1"
 
 [features]
-default = ["intrinsics"]
-# The hand-written NEON/AVX2 lane beside the `wide` one; see `src/intrinsics.rs`.
-intrinsics = []
 # Benchmark only. gkl's `c-avx`/`c-avx512` features do not *add* the original
 # Intel C++ kernels beside the Rust ports -- they **replace** them, because
 # `forward_f32x8` and friends are one `cfg_if` over the same name and gkl's Rust

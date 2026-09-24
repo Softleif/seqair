@@ -59,29 +59,6 @@ fn align(c: &mut Criterion) {
         let mut workspace = Workspace::new();
         b.iter(|| workspace.align_strips_simd(black_box(haplotype), black_box(&read), &taps, band));
     });
-    #[cfg(feature = "intrinsics")]
-    {
-        use compair::align_strips_intrinsics;
-        group.bench_function("strips-intrinsics/standard", |b| {
-            b.iter(|| {
-                align_strips_intrinsics(black_box(haplotype), black_box(&read), &standard, band)
-            });
-        });
-        group.bench_function("strips-intrinsics/taps", |b| {
-            b.iter(|| align_strips_intrinsics(black_box(haplotype), black_box(&read), &taps, band));
-        });
-        group.bench_function("strips-intrinsics/taps/workspace", |b| {
-            let mut workspace = Workspace::new();
-            b.iter(|| {
-                workspace.align_strips_intrinsics(
-                    black_box(haplotype),
-                    black_box(&read),
-                    &taps,
-                    band,
-                )
-            });
-        });
-    }
     group.bench_function("reference/standard", |b| {
         b.iter(|| align_full(black_box(haplotype), black_box(&read), &standard));
     });
@@ -101,25 +78,6 @@ fn align(c: &mut Criterion) {
                     .map(|haplotype| {
                         workspace
                             .align_strips_simd(black_box(haplotype), black_box(&read), &taps, band)
-                            .get()
-                    })
-                    .sum::<f64>()
-            });
-        });
-        #[cfg(feature = "intrinsics")]
-        group.bench_function("strips-intrinsics/taps/workspace", |b| {
-            let mut workspace = Workspace::new();
-            b.iter(|| {
-                group_haplotypes
-                    .iter()
-                    .map(|haplotype| {
-                        workspace
-                            .align_strips_intrinsics(
-                                black_box(haplotype),
-                                black_box(&read),
-                                &taps,
-                                band,
-                            )
                             .get()
                     })
                     .sum::<f64>()

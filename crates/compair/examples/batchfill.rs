@@ -6,40 +6,18 @@
 //! with the fill. This finds the crossover, which is the number the dispatch in
 //! `Workspace::align_candidates` has to know -- `BATCH_BREAK_EVEN`.
 //!
-//! Both sides race through the *same* lane: `align_strips_intrinsics` against
-//! `align_batch`, which now routes through the intrinsics lane too. Racing the
-//! `wide` strip kernel instead would move the crossover by whatever the lanes
-//! differ by rather than by what the fill costs, which is not the number the
-//! dispatch needs.
+//! Both sides race through the *same* lane, `align_strips_simd` against
+//! `align_batch`: racing two different lanes would move the crossover by
+//! whatever the lanes differ by rather than by what the fill costs, which is
+//! not the number the dispatch needs.
 //!
 //! `cargo run -p compair --release --example batchfill`
 
 use compair::{
-    Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood,
-    Probability, Read, StandardEmission, Strand, TapsEmission, Workspace,
+    Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Log10Likelihood, Probability, Read,
+    StandardEmission, Strand, TapsEmission, Workspace,
 };
 use std::time::Instant;
-
-/// The strip kernel over the widest lane this *build* has: the hand-written
-/// intrinsics one where the `intrinsics` feature is on -- which itself falls
-/// back to `wide` on a CPU without AVX2 -- and `wide`'s otherwise. Keeps this
-/// example building and meaningful under `--no-default-features`.
-fn strips_lane<E: Emission>(
-    workspace: &mut Workspace,
-    haplotype: &Haplotype,
-    read: &Read,
-    emission: &E,
-    band: Band,
-) -> Log10Likelihood {
-    #[cfg(feature = "intrinsics")]
-    {
-        workspace.align_strips_intrinsics(haplotype, read, emission, band)
-    }
-    #[cfg(not(feature = "intrinsics"))]
-    {
-        workspace.align_strips_simd(haplotype, read, emission, band)
-    }
-}
 
 const HAPLOTYPE_LEN: usize = 200;
 const READ_OFFSET: usize = 25;
@@ -86,7 +64,7 @@ fn race<E: compair::Emission>(
     let strips = time(|| {
         let mut sum = 0.0;
         for haplotype in haplotypes {
-            sum += strips_lane(&mut workspace, haplotype, read, emission, band).get();
+            sum += workspace.align_strips_simd(haplotype, read, emission, band).get();
         }
         sum
     });

@@ -79,6 +79,7 @@ fn tenspeed(c: &mut Criterion) {
     group.throughput(Throughput::Elements(matrix));
     group.sample_size(20);
 
+    println!("SIMD level: {}", compair::simd_level());
     group.bench_function("compair/strips-simd/banded", |b| {
         let mut workspace = Workspace::new();
         b.iter(|| {
@@ -97,28 +98,6 @@ fn tenspeed(c: &mut Criterion) {
                 .sum::<f64>()
         });
     });
-    #[cfg(feature = "intrinsics")]
-    {
-        println!("intrinsics lane available: {}", compair::intrinsics_lane_available());
-        group.bench_function("compair/strips-intrinsics/banded", |b| {
-            let mut workspace = Workspace::new();
-            b.iter(|| {
-                pairs
-                    .iter()
-                    .map(|pair| {
-                        workspace
-                            .align_strips_intrinsics(
-                                black_box(&pair.haplotype),
-                                black_box(&pair.read),
-                                &standard,
-                                Band::anchored(pair.offset),
-                            )
-                            .get()
-                    })
-                    .sum::<f64>()
-            });
-        });
-    }
     // The entry point a caller has: a whole group of candidate haplotypes per
     // read, scored through whichever kernel the fill deserves. The same pairs
     // and the same total, so it is directly comparable to the arms above --

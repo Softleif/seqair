@@ -126,58 +126,6 @@ impl Workspace {
         crate::simd::strip_kernel_at(level, &self.plan, &mut self.rows, shape, band)
     }
 
-    /// Eight read rows at a time through the target's own intrinsics rather
-    /// than through `wide`, where this CPU has such a lane; the `wide` kernel
-    /// otherwise. Bit-identical to [`Workspace::align_strips`] either way.
-    ///
-    /// On x86-64 the choice is made at *run* time: AVX2 is not in the
-    /// baseline, so a default build compiles the intrinsics kernel inside a
-    /// `#[target_feature(enable = "avx2")]` wrapper and calls it only where
-    /// `is_x86_feature_detected!` says it may.
-    #[cfg(feature = "intrinsics")]
-    pub fn align_strips_intrinsics<E: Emission>(
-        &mut self,
-        haplotype: &Haplotype,
-        read: &Read,
-        emission: &E,
-        band: Band,
-    ) -> Log10Likelihood {
-        let (h, r) = (haplotype.len(), read.len());
-        if h == 0 || r == 0 {
-            return Log10Likelihood::IMPOSSIBLE;
-        }
-        if self.plan.fill(haplotype, read, emission, band).is_none() {
-            return Log10Likelihood::IMPOSSIBLE;
-        }
-        crate::intrinsics::strip_kernel_intrinsics(
-            &self.plan,
-            &mut self.rows,
-            Shape { haplotype: h, read: r },
-            band,
-        )
-    }
-
-    /// One haplotype through the widest strip lane this build has: the
-    /// intrinsics kernel where the crate was built with it -- which itself
-    /// falls back to `wide` on a CPU without AVX2 -- and `wide`'s otherwise.
-    /// The remainder of [`Workspace::align_candidates`] comes through here.
-    pub(crate) fn strips_fastest<E: Emission>(
-        &mut self,
-        haplotype: &Haplotype,
-        read: &Read,
-        emission: &E,
-        band: Band,
-    ) -> Log10Likelihood {
-        #[cfg(feature = "intrinsics")]
-        {
-            self.align_strips_intrinsics(haplotype, read, emission, band)
-        }
-        #[cfg(not(feature = "intrinsics"))]
-        {
-            self.align_strips_simd(haplotype, read, emission, band)
-        }
-    }
-
     fn strips<L: Lane<Token = ()>, E: Emission>(
         &mut self,
         haplotype: &Haplotype,
@@ -221,28 +169,6 @@ pub fn align_strips_simd<E: Emission>(
     band: Band,
 ) -> Log10Likelihood {
     Workspace::new().align_strips_simd(haplotype, read, emission, band)
-}
-
-/// Eight read rows at a time through the target's own intrinsics.
-///
-/// Bit-identical to [`align_strips`]; see [`Workspace::align_strips_intrinsics`].
-#[cfg(feature = "intrinsics")]
-pub fn align_strips_intrinsics<E: Emission>(
-    haplotype: &Haplotype,
-    read: &Read,
-    emission: &E,
-    band: Band,
-) -> Log10Likelihood {
-    Workspace::new().align_strips_intrinsics(haplotype, read, emission, band)
-}
-
-/// Whether this run has an intrinsics lane, or falls back to `wide`.
-///
-/// On x86-64 this is a runtime CPU check, not a property of the build.
-#[cfg(feature = "intrinsics")]
-#[must_use]
-pub fn intrinsics_lane_available() -> bool {
-    crate::intrinsics::available()
 }
 
 /// Where one strip's sweep begins and ends, and where every lane is live.
@@ -561,10 +487,9 @@ fn phase<L: Lane, const MASKED: bool>(
 /// Strips of one row per lane, each swept along the haplotype; see the
 /// module docs.
 ///
-/// `#[inline(always)]` because one of its three instantiations lives inside a
-/// `#[target_feature(enable = "avx2")]` wrapper (see `intrinsics`), and a
-/// kernel that stays out of line there is compiled for the baseline instead:
-/// every lane operation becomes a call to an SSE2 function.
+/// `#[inline(always)]` because its eight-lane instances are compiled inside a
+/// `#[simd]` function (see `simd`), and a kernel that stays out of line there
+/// is compiled for the baseline instead: every lane operation becomes a call.
 #[inline(always)]
 #[allow(
     clippy::too_many_lines,

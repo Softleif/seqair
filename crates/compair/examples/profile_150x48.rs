@@ -8,8 +8,7 @@
 //!
 //! The first argument picks the kernel: `scalar-standard`, `scalar-taps`,
 //! `simd-standard`, `simd-taps` (the default), `strips-standard`,
-//! `strips-taps`, `strips-simd-standard`, `strips-simd-taps`,
-//! `strips-intrinsics-standard`, `strips-intrinsics-taps`, or any of those
+//! `strips-taps`, `strips-simd-standard`, `strips-simd-taps`, or any of those
 //! with a `-workspace` suffix to reuse buffers between calls. Every round
 //! scores the read against the fixture's eight candidate haplotypes, as a
 //! caller does.
@@ -26,30 +25,8 @@ mod fixture;
 use std::hint::black_box;
 
 use compair::{
-    Band, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood, Read, StandardEmission,
-    TapsEmission, Workspace,
+    Betas, ConversionModel, Haplotype, Log10Likelihood, StandardEmission, TapsEmission, Workspace,
 };
-
-/// The strip kernel over the widest lane this *build* has: the hand-written
-/// intrinsics one where the `intrinsics` feature is on -- which itself falls
-/// back to `wide` on a CPU without AVX2 -- and `wide`'s otherwise. Keeps this
-/// example building and meaningful under `--no-default-features`.
-fn strips_lane<E: Emission>(
-    workspace: &mut Workspace,
-    haplotype: &Haplotype,
-    read: &Read,
-    emission: &E,
-    band: Band,
-) -> Log10Likelihood {
-    #[cfg(feature = "intrinsics")]
-    {
-        workspace.align_strips_intrinsics(haplotype, read, emission, band)
-    }
-    #[cfg(not(feature = "intrinsics"))]
-    {
-        workspace.align_strips_simd(haplotype, read, emission, band)
-    }
-}
 
 use fixture::{Fixture, fixture};
 
@@ -112,10 +89,6 @@ fn main() {
                     workspace.align_strips_simd(haplotype, &read, &standard, band)
                 }
                 "strips-simd-taps" => workspace.align_strips_simd(haplotype, &read, &taps, band),
-                "strips-intrinsics-standard" => {
-                    strips_lane(workspace, haplotype, &read, &standard, band)
-                }
-                "strips-intrinsics-taps" => strips_lane(workspace, haplotype, &read, &taps, band),
                 _ => workspace.align_banded_simd(haplotype, &read, &taps, band),
             };
             checksum += score.get();

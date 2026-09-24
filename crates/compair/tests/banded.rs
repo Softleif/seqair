@@ -1,8 +1,6 @@
 #[allow(dead_code, reason = "each integration test uses a different part of this")]
 mod support;
 
-#[cfg(feature = "intrinsics")]
-use compair::align_strips_intrinsics;
 use compair::{
     BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, MatchProbability,
     Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded,
@@ -108,58 +106,6 @@ proptest! {
             prop_assert_eq!(
                 scalar.get().to_bits(), simd.get().to_bits(),
                 "{}: scalar {:?} vs simd {:?}", name, scalar, simd
-            );
-            prop_assert_eq!(
-                scalar.get().to_bits(), reused.get().to_bits(),
-                "{}: fresh {:?} vs reused workspace {:?}", name, scalar, reused
-            );
-        }
-    }
-
-    /// The same gate again for the intrinsics lane. It is the same generic
-    /// kernel over a lane type whose every operation is the same IEEE
-    /// operation, so this asserts what the `Lane` trait already makes true --
-    /// which is the point: an intrinsics lane that needed a tolerance would
-    /// not be the experiment it claims to be.
-    #[cfg(feature = "intrinsics")]
-    #[test]
-    fn strips_intrinsics_are_bit_identical_to_strips_scalar(
-        case in arbitrary_case(),
-        conversion in any_conversion(),
-        uniform in any_probability(),
-    ) {
-        let band = case.band();
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
-        let mut workspace = Workspace::new();
-        for (name, scalar, intrinsics, reused) in [
-            (
-                "standard",
-                align_strips(&case.haplotype, &case.read, &StandardEmission::default(), band),
-                align_strips_intrinsics(&case.haplotype, &case.read, &StandardEmission::default(), band),
-                workspace.align_strips_intrinsics(&case.haplotype, &case.read, &StandardEmission::default(), band),
-            ),
-            (
-                "taps",
-                align_strips(&case.haplotype, &case.read, &taps, band),
-                align_strips_intrinsics(&case.haplotype, &case.read, &taps, band),
-                {
-                    // A `wide` alignment in between: the two lanes share the
-                    // workspace's plan and row buffer and must not share state.
-                    workspace.align_strips_simd(&case.haplotype, &case.read, &uniform, band);
-                    workspace.align_strips_intrinsics(&case.haplotype, &case.read, &taps, band)
-                },
-            ),
-            (
-                "uniform",
-                align_strips(&case.haplotype, &case.read, &uniform, band),
-                align_strips_intrinsics(&case.haplotype, &case.read, &uniform, band),
-                workspace.align_strips_intrinsics(&case.haplotype, &case.read, &uniform, band),
-            ),
-        ] {
-            prop_assert_eq!(
-                scalar.get().to_bits(), intrinsics.get().to_bits(),
-                "{}: scalar {:?} vs intrinsics {:?}", name, scalar, intrinsics
             );
             prop_assert_eq!(
                 scalar.get().to_bits(), reused.get().to_bits(),

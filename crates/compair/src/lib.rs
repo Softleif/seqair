@@ -45,8 +45,6 @@ mod batch;
 mod emission;
 mod error;
 mod haplotype;
-#[cfg(feature = "intrinsics")]
-mod intrinsics;
 mod read;
 mod reference;
 mod scaling;
@@ -66,8 +64,6 @@ pub use reference::align_full;
 pub use seqair_types::{Base, BaseQuality, Probability, QPos, Strand};
 pub use simd::simd_level;
 pub use strips::{align_strips, align_strips_simd};
-#[cfg(feature = "intrinsics")]
-pub use strips::{align_strips_intrinsics, intrinsics_lane_available};
 pub use types::{CpgRole, HapPos, HapSite, Log10Likelihood, Observation, error_probability};
 
 mod types;

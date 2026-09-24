@@ -73,10 +73,11 @@ pub const BATCH: usize = LANE_MAX;
 /// per-target constant is defensible -- but not on two machines. See §9.5 of
 /// `docs/notes/benchmarking.md`.
 ///
-/// `examples/batchfill.rs` regenerates the table, and races the two kernels on
-/// the *same* lane: raced against `align_strips_simd` on a target where the
-/// batch kernel has intrinsics and that one does not, the crossover it reports
-/// is the gap between two lanes rather than the cost of an empty lane.
+/// `examples/batchfill.rs` regenerates the table, racing the two kernels on
+/// the same lane, so the crossover it reports is the cost of an empty lane and
+/// not the gap between two lanes. (The table was measured on the hand-written
+/// intrinsics lane that `fearless_simd` replaced; §11 of the notes has the
+/// replacement at parity on both kernels.)
 ///
 /// Whatever a machine says, the number is bounded below: the batch kernel
 /// cannot be worth running below `BATCH / 2` lanes, because at that fill it is
@@ -94,11 +95,10 @@ const _: () = assert!(
 /// One batch of haplotypes scored, plus how many lanes that kernel fills --
 /// which is how many haplotypes a group may hold, so it travels with it.
 ///
-/// A function pointer rather than a type parameter because the lane is not a
-/// property of the *call* on x86-64: [`batch_kernel`] over the intrinsics lane
-/// exists only inside a `#[target_feature]` wrapper, which is an ordinary
-/// function and cannot be a generic argument. One indirect call per batch is
-/// nothing, and every caller passes a constant.
+/// A function pointer rather than a type parameter because the eight-lane
+/// kernel is not one type: it is an instance per SIMD level, chosen at run
+/// time by `dispatch!` inside the function this points to. One indirect call
+/// per batch is nothing, and every caller passes a constant.
 #[derive(Clone, Copy)]
 pub(crate) struct BatchKernel {
     lanes: usize,
@@ -115,24 +115,10 @@ impl BatchKernel {
     }
 }
 
-/// The batch kernel over the widest lane this build has: the hand-written
-/// eight-lane intrinsics one where the crate was built with it -- and, on
-/// x86-64, only where the CPU turns out to have AVX2, which that wrapper
-/// checks -- and `wide`'s `f32x8` otherwise.
-///
-/// `wide::f32x8` on a default x86-64 build is *two* SSE vectors, because its
-/// representation is a `cfg` decided when `wide` itself was compiled. Routing
-/// the entry point through here is what lets a default build reach AVX2 at
-/// all; see `intrinsics.rs`.
-#[cfg(feature = "intrinsics")]
-const FASTEST_BATCH_KERNEL: BatchKernel =
-    BatchKernel { lanes: BATCH, run: crate::intrinsics::batch_kernel_intrinsics };
-#[cfg(not(feature = "intrinsics"))]
-const FASTEST_BATCH_KERNEL: BatchKernel = BatchKernel { lanes: BATCH, run: batch_kernel_simd };
+/// The batch kernel at the best SIMD level this CPU has.
+const SIMD_BATCH_KERNEL: BatchKernel = BatchKernel { lanes: BATCH, run: batch_kernel_simd };
 
-/// The batch kernel at the best SIMD level this CPU has, in [`BatchKernel`]'s
-/// shape.
-#[cfg(not(feature = "intrinsics"))]
+/// [`SIMD_BATCH_KERNEL`]'s function, in [`BatchKernel`]'s shape.
 fn batch_kernel_simd(
     plan: &BatchPlan,
     buffer: &mut BatchBuffer,
@@ -323,10 +309,10 @@ impl Workspace {
         out.clear();
         for group in haplotypes.chunks(BATCH) {
             if group.len() >= BATCH_BREAK_EVEN {
-                self.batch_group::<E>(group, read, emission, band, out, FASTEST_BATCH_KERNEL);
+                self.batch_group::<E>(group, read, emission, band, out, SIMD_BATCH_KERNEL);
             } else {
                 for haplotype in group {
-                    out.push(self.strips_fastest(haplotype, read, emission, band));
+                    out.push(self.align_strips_simd(haplotype, read, emission, band));
                 }
             }
         }
@@ -347,7 +333,7 @@ impl Workspace {
         band: Band,
         out: &mut Vec<Log10Likelihood>,
     ) {
-        self.batch::<E>(haplotypes, read, emission, band, out, FASTEST_BATCH_KERNEL);
+        self.batch::<E>(haplotypes, read, emission, band, out, SIMD_BATCH_KERNEL);
     }
 
     /// [`Workspace::align_batch`] at a given `fearless_simd` level, so the
