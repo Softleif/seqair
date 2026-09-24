@@ -240,6 +240,10 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     };
     let effective_ref: &[u8] =
         if sh.embedded_reference >= 0 { &embedded_ref_data } else { reference_seq };
+    // Converted once, so reconstruction copies runs of reference bases
+    // instead of converting base by base.
+    let effective_ref = Base::from_ascii_vec(effective_ref.to_vec());
+    let effective_ref: &[Base] = &effective_ref;
 
     let core_data = core_block.ok_or(CramError::MissingCoreDataBlock)?;
 
@@ -323,7 +327,7 @@ fn decode_record<E: CustomizeRecordStore>(
     is_multi_ref: bool,
     ctx: &mut DecodeContext<'_>,
     prev_alignment_pos: &mut i64,
-    reference_seq: &[u8],
+    reference_seq: &[Base],
     ref_start_0based: i64,
     read_group_ids: &[SmolStr],
     tid: u32,
@@ -883,21 +887,48 @@ struct ReconstructResult {
 // r[impl cram.slice.ref_bounds_warning+2]
 /// Look up a reference base by index, logging a warning on the first out-of-bounds access
 /// per slice and falling back to `b'N'`.
-fn ref_base_at(reference_seq: &[u8], index: usize, warned: &mut bool) -> u8 {
-    match reference_seq.get(index) {
+fn ref_base_at(reference: &[Base], index: usize, warned: &mut bool) -> Base {
+    match reference.get(index) {
         Some(&b) => b,
         None => {
-            if !*warned {
-                warn!(
-                    index,
-                    ref_len = reference_seq.len(),
-                    "reference shorter than expected during CRAM sequence reconstruction; \
-                     substituting N (may indicate reference/CRAM mismatch)"
-                );
-                *warned = true;
-            }
-            b'N'
+            warn_ref_short(reference, index, warned);
+            Base::Unknown
         }
+    }
+}
+
+fn warn_ref_short(reference: &[Base], index: usize, warned: &mut bool) {
+    if !*warned {
+        warn!(
+            index,
+            ref_len = reference.len(),
+            "reference shorter than expected during CRAM sequence reconstruction; \
+             substituting N (may indicate reference/CRAM mismatch)"
+        );
+        *warned = true;
+    }
+}
+
+/// Append the `n` reference bases from `start` as read bases — one copy of
+/// the already-converted reference instead of a lookup and push per base —
+/// with `N` for any past the reference's end, as [`ref_base_at`] gives.
+fn extend_from_reference(
+    reference: &[Base],
+    start: usize,
+    n: usize,
+    warned: &mut bool,
+    bases_buf: &mut Vec<Base>,
+) {
+    let have = reference.get(start..).unwrap_or_default();
+    let (have, missing) = if have.len() >= n {
+        (have.get(..n).unwrap_or_default(), 0)
+    } else {
+        (have, n.wrapping_sub(have.len()))
+    };
+    bases_buf.extend_from_slice(have);
+    if missing > 0 {
+        warn_ref_short(reference, start.wrapping_add(have.len()), warned);
+        bases_buf.resize(bases_buf.len().wrapping_add(missing), Base::Unknown);
     }
 }
 
@@ -928,7 +959,7 @@ fn decode_features_and_reconstruct(
     read_length: usize,
     pos_0based: i64,
     slice_start_0based: i64,
-    reference_seq: &[u8],
+    reference_seq: &[Base],
     cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
     feature_byte_buf: &mut Vec<u8>,
@@ -961,13 +992,13 @@ fn decode_features_and_reconstruct(
         ops.push((len, op));
     }
 
-    /// Emit one matching base copied from the reference, advancing both
-    /// `read_pos` and `ref_pos`. Used both for fill-up-to-next-feature
-    /// and for quality-only features (which don't modify the sequence).
+    /// Emit `n` matching bases copied from the reference, advancing both
+    /// `read_pos` and `ref_pos`: the fill up to the next feature and the tail.
     #[expect(clippy::too_many_arguments, reason = "shared helper for ref-match emit")]
-    fn emit_ref_match(
-        reference_seq: &[u8],
+    fn emit_ref_run(
+        reference: &[Base],
         ref_offset: usize,
+        n: usize,
         ref_pos: &mut usize,
         read_pos: &mut usize,
         ref_warned: &mut bool,
@@ -975,12 +1006,21 @@ fn decode_features_and_reconstruct(
         cigar_ops: &mut Vec<(u32, u8)>,
         matching_bases: &mut u32,
     ) {
-        let ref_base = ref_base_at(reference_seq, ref_offset.wrapping_add(*ref_pos), ref_warned);
-        bases_buf.push(Base::from(ref_base));
-        push_cigar_op(cigar_ops, 1, 0); // M
-        *matching_bases = matching_bases.saturating_add(1);
-        *read_pos = read_pos.wrapping_add(1);
-        *ref_pos = ref_pos.wrapping_add(1);
+        if n == 0 {
+            return;
+        }
+        extend_from_reference(
+            reference,
+            ref_offset.wrapping_add(*ref_pos),
+            n,
+            ref_warned,
+            bases_buf,
+        );
+        let n32 = u32::try_from(n).unwrap_or(u32::MAX);
+        push_cigar_op(cigar_ops, n32, 0); // M
+        *matching_bases = matching_bases.saturating_add(n32);
+        *read_pos = read_pos.wrapping_add(n);
+        *ref_pos = ref_pos.wrapping_add(n);
     }
 
     let mut feature_read_pos = 0u32; // 1-based, accumulator for delta-encoded positions
@@ -994,10 +1034,11 @@ fn decode_features_and_reconstruct(
         let feat_target = (feature_read_pos as usize).saturating_sub(1);
 
         // Fill reference matches until read_pos reaches the feature's anchor.
-        while read_pos < feat_target && read_pos < read_length {
-            emit_ref_match(
+        {
+            emit_ref_run(
                 reference_seq,
                 ref_offset,
+                feat_target.min(read_length).saturating_sub(read_pos),
                 &mut ref_pos,
                 &mut read_pos,
                 &mut ref_warned,
@@ -1016,7 +1057,7 @@ fn decode_features_and_reconstruct(
                 let bs = ds.base_sub.decode(ctx)?;
                 let ref_base =
                     ref_base_at(reference_seq, ref_offset.wrapping_add(ref_pos), &mut ref_warned);
-                let read_base = ch.preservation.substitution_matrix.substitute(ref_base, bs);
+                let read_base = ch.preservation.substitution_matrix.substitute(ref_base as u8, bs);
                 bases_buf.push(Base::from(read_base));
                 push_cigar_op(cigar_ops_buf, 1, 0); // M
                 matching_bases = matching_bases.saturating_add(1);
@@ -1139,10 +1180,11 @@ fn decode_features_and_reconstruct(
     }
 
     // Tail: fill reference matches until the read length is reached.
-    while read_pos < read_length {
-        emit_ref_match(
+    {
+        emit_ref_run(
             reference_seq,
             ref_offset,
+            read_length.saturating_sub(read_pos),
             &mut ref_pos,
             &mut read_pos,
             &mut ref_warned,
@@ -1474,23 +1516,23 @@ mod tests {
     fn ref_base_at_warns_on_out_of_bounds() {
         // When requesting a base beyond the reference length, ref_base_at should
         // return b'N' and log a warning.
-        let reference = b"ACGT";
+        let reference = &[Base::A, Base::C, Base::G, Base::T];
         let mut warned = false;
 
         // In-bounds access should return the actual base
         let base = ref_base_at(reference, 0, &mut warned);
-        assert_eq!(base, b'A');
+        assert_eq!(base, Base::A);
         assert!(!warned, "should not warn for in-bounds access");
 
         // Out-of-bounds access should return b'N' and set warned flag
         let base = ref_base_at(reference, 10, &mut warned);
-        assert_eq!(base, b'N');
+        assert_eq!(base, Base::Unknown);
         assert!(warned, "should warn for out-of-bounds access");
 
         // Second out-of-bounds access should still return b'N' but not re-warn
         // (warned is already true, so the warn! is skipped)
         let base = ref_base_at(reference, 20, &mut warned);
-        assert_eq!(base, b'N');
+        assert_eq!(base, Base::Unknown);
     }
 
     // r[verify cram.slice.validated_lengths]
