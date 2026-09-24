@@ -58,10 +58,13 @@ Parsers MUST NOT panic on any input. Arithmetic overflow, out-of-bounds access, 
 r[io.fuzz.seeds]
 Fuzz targets SHOULD be seeded with structurally valid inputs derived from real test data files. Seeds dramatically improve coverage by letting the fuzzer start from valid file structures and mutate from there.
 
-r[io.fuzz.simd]
-Platform-specific SIMD code paths (NEON, SSSE3) SHOULD be fuzz-tested on their respective architectures to catch buffer overruns and alignment issues specific to vectorized implementations.
+r[io.fuzz.simd+2]
+SIMD code paths SHOULD be fuzz-tested on both aarch64 and x86_64, since the level `Level::new()` picks (and so the vector width) differs between them.
 
 ## Platform portability
 
 r[io.platform_optimizations]
 Every platform-specific optimization (SIMD, architecture-specific intrinsics) MUST have a scalar fallback that produces identical results on all platforms. The optimized and fallback paths MUST be tested with property-based tests that verify equivalence for arbitrary inputs.
+
+r[io.simd_portable]
+SIMD kernels MUST be written once, generic over `fearless_simd::Simd`, and reached through `dispatch!(Level::new(), ..)` from a `#[fearless_simd_macros::simd]` function — not as per-ISA copies over `core::arch` intrinsics. The crate picks the level at run time (SSE2, SSE4.2, AVX2, AVX-512 on x86_64; NEON on aarch64; a scalar `Fallback` elsewhere), so a kernel needs no `unsafe` and no `is_x86_feature_detected!`. Byte-wise kernels SHOULD use the native vector width (`S::u8s`) so AVX2 and AVX-512 get their wider registers. Where one side of a `select` is zero, spell it as `and`/`xor` against a `select`ed constant: a blend costs more than a mask on x86. Tests MUST run each kernel at every level the CPU supports, the scalar `Fallback` included (the dev-dependency enables `force_support_fallback` for that), rather than only at the level `Level::new()` picks.

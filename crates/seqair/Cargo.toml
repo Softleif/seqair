@@ -34,8 +34,13 @@ flate2 = "1.1.9"
 bzip2 = "0.6.1"
 xz2 = "0.1.7"
 md5 = "0.8.0"
+fearless_simd = { workspace = true }
+fearless_simd_macros = { workspace = true }
 
 [dev-dependencies]
+# Compiles fearless_simd's scalar `Fallback` level on SIMD targets too, so the
+# kernel tests can run it next to every vector level the CPU has.
+fearless_simd = { workspace = true, features = ["force_support_fallback"] }
 insta = { workspace = true }
 hegeltest = { workspace = true }
 tempfile = "3.27.0"

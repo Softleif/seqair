@@ -1,4 +1,6 @@
 use crate::SmolStr;
+use fearless_simd::{Level, dispatch, prelude::*};
+use fearless_simd_macros::simd;
 use thiserror::Error;
 
 /// Represents a DNA base (A, C, G, T, or Unknown)
@@ -91,7 +93,7 @@ impl Base {
     }
 
     // r[impl base_decode.ascii_batch]
-    // r[impl base_decode.ascii_simd]
+    // r[impl base_decode.ascii_simd+2]
     /// Convert ASCII bytes to `Base` values in-place using SIMD acceleration.
     ///
     /// Reuses the input allocation — no new vector is allocated.
@@ -149,199 +151,44 @@ impl Base {
 /// Dispatch to the best available ASCII→Base converter.
 // r[impl base_decode.ascii_scalar_equivalence]
 fn from_ascii_dispatch(bytes: &mut [u8]) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            // Safety: AVX2 verified by feature detection.
-            unsafe { from_ascii_avx2(bytes) };
-            return;
-        }
-        if is_x86_feature_detected!("ssse3") {
-            // Safety: SSSE3 verified by feature detection.
-            unsafe { from_ascii_ssse3(bytes) };
-            return;
-        }
-    }
+    from_ascii_at(Level::new(), bytes);
+}
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Safety: NEON is always available on aarch64.
-        unsafe { from_ascii_neon(bytes) };
-        return;
-    }
+// r[impl io.simd_portable]
+fn from_ascii_at(level: Level, bytes: &mut [u8]) {
+    dispatch!(level, simd => from_ascii_simd(simd, bytes));
+}
 
-    #[allow(unreachable_code, reason = "fallback for unsupported architectures")]
-    from_ascii_scalar(bytes);
+/// One native-width vector per iteration (16 bytes on SSE/NEON, 32 on AVX2,
+/// 64 on AVX-512):
+/// 1. Uppercase: `byte & 0xDF` (clears bit 5, mapping a–z → A–Z)
+/// 2. Compare uppercased byte against A(65), C(67), G(71), T(84)
+/// 3. OR masks → `valid`
+/// 4. Select: valid bytes keep their uppercased value, others become N(78)
+///
+/// The scalar tail goes through `BASE_LUT`, the same table `Base::from(u8)`
+/// uses, so the two halves cannot disagree on a byte.
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+fn from_ascii_simd<S: Simd>(simd: S, bytes: &mut [u8]) {
+    let n = S::u8s::splat(simd, b'N');
+    let mut chunks = bytes.chunks_exact_mut(S::u8s::LEN);
+    for chunk in &mut chunks {
+        let upper = S::u8s::from_slice(simd, chunk) & 0xDF;
+        let valid =
+            upper.simd_eq(b'A') | upper.simd_eq(b'C') | upper.simd_eq(b'G') | upper.simd_eq(b'T');
+        valid.select(upper, n).store_slice(chunk);
+    }
+    from_ascii_scalar(chunks.into_remainder());
 }
 
 /// Scalar fallback: uses the existing `BASE_LUT` per byte.
 #[allow(clippy::indexing_slicing, reason = "byte < 256 = BASE_LUT.len()")]
 fn from_ascii_scalar(bytes: &mut [u8]) {
     for b in bytes.iter_mut() {
-        *b = BASE_LUT[*b as usize] as u8;
-    }
-}
-
-/// AVX2 implementation: processes 32 bytes per iteration.
-///
-/// Algorithm per chunk (same as SSSE3, using 256-bit registers):
-/// 1. Uppercase: `byte & 0xDF` (clears bit 5, mapping a–z → A–Z)
-/// 2. Compare uppercased byte against A(65), C(67), G(71), T(84)
-/// 3. OR masks → `valid` (0xFF where ACGT, 0x00 elsewhere)
-/// 4. Select: valid bytes keep their uppercased value, others become N(78)
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn from_ascii_avx2(bytes: &mut [u8]) {
-    use std::arch::x86_64::*;
-
-    // Safety: AVX2 intrinsics require AVX2 availability (ensured by #[target_feature]).
-    let (upper_mask, v_a, v_c, v_g, v_t, v_n) = (
-        _mm256_set1_epi8(0xDFu8.cast_signed()),
-        _mm256_set1_epi8(b'A'.cast_signed()),
-        _mm256_set1_epi8(b'C'.cast_signed()),
-        _mm256_set1_epi8(b'G'.cast_signed()),
-        _mm256_set1_epi8(b'T'.cast_signed()),
-        _mm256_set1_epi8(b'N'.cast_signed()),
-    );
-
-    let len = bytes.len();
-    let ptr = bytes.as_mut_ptr();
-    let mut i: usize = 0;
-
-    while let Some(next) = i.checked_add(32)
-        && next <= len
-    {
-        // Safety: pointer ops below are valid because `i + 32 <= len` guarantees
-        // we never read/write past the end of the slice.
-        unsafe {
-            let chunk = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
-            let upper = _mm256_and_si256(chunk, upper_mask);
-
-            let is_a = _mm256_cmpeq_epi8(upper, v_a);
-            let is_c = _mm256_cmpeq_epi8(upper, v_c);
-            let is_g = _mm256_cmpeq_epi8(upper, v_g);
-            let is_t = _mm256_cmpeq_epi8(upper, v_t);
-
-            let valid = _mm256_or_si256(_mm256_or_si256(is_a, is_c), _mm256_or_si256(is_g, is_t));
-            let result =
-                _mm256_or_si256(_mm256_and_si256(valid, upper), _mm256_andnot_si256(valid, v_n));
-
-            _mm256_storeu_si256(ptr.add(i) as *mut __m256i, result);
-        }
-        i = i.saturating_add(32); // already verified above
-    }
-
-    debug_assert!(i <= bytes.len(), "AVX2 loop overshot: i={i}, len={}", bytes.len());
-    #[allow(
-        clippy::indexing_slicing,
-        reason = "i..len is in bounds, byte value < 256 = BASE_LUT.len()"
-    )]
-    for b in &mut bytes[i..] {
-        *b = BASE_LUT[*b as usize] as u8;
-    }
-}
-
-/// SSSE3 implementation: processes 16 bytes per iteration.
-///
-/// Algorithm per chunk:
-/// 1. Uppercase: `byte & 0xDF` (clears bit 5, mapping a–z → A–Z)
-/// 2. Compare uppercased byte against A(65), C(67), G(71), T(84)
-/// 3. OR masks → `valid` (0xFF where ACGT, 0x00 elsewhere)
-/// 4. Select: valid bytes keep their uppercased value, others become N(78)
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "ssse3")]
-unsafe fn from_ascii_ssse3(bytes: &mut [u8]) {
-    use std::arch::x86_64::*;
-
-    // Safety: SSE2 intrinsics require SSSE3 availability (ensured by #[target_feature]).
-    let (upper_mask, v_a, v_c, v_g, v_t, v_n) = (
-        _mm_set1_epi8(0xDFu8.cast_signed()),
-        _mm_set1_epi8(b'A'.cast_signed()),
-        _mm_set1_epi8(b'C'.cast_signed()),
-        _mm_set1_epi8(b'G'.cast_signed()),
-        _mm_set1_epi8(b'T'.cast_signed()),
-        _mm_set1_epi8(b'N'.cast_signed()),
-    );
-
-    let len = bytes.len();
-    let ptr = bytes.as_mut_ptr();
-    let mut i: usize = 0;
-
-    while let Some(next) = i.checked_add(16)
-        && next <= len
-    {
-        // Safety: pointer ops below are valid because `i + 16 <= len` guarantees
-        // we never read/write past the end of the slice.
-        unsafe {
-            let chunk = _mm_loadu_si128(ptr.add(i) as *const __m128i);
-            let upper = _mm_and_si128(chunk, upper_mask);
-
-            let is_a = _mm_cmpeq_epi8(upper, v_a);
-            let is_c = _mm_cmpeq_epi8(upper, v_c);
-            let is_g = _mm_cmpeq_epi8(upper, v_g);
-            let is_t = _mm_cmpeq_epi8(upper, v_t);
-
-            let valid = _mm_or_si128(_mm_or_si128(is_a, is_c), _mm_or_si128(is_g, is_t));
-            let result = _mm_or_si128(_mm_and_si128(valid, upper), _mm_andnot_si128(valid, v_n));
-
-            _mm_storeu_si128(ptr.add(i) as *mut __m128i, result);
-        }
-        i = i.saturating_add(16); // already verified above
-    }
-
-    debug_assert!(i <= bytes.len(), "SSSE3 loop overshot: i={i}, len={}", bytes.len());
-    #[allow(
-        clippy::indexing_slicing,
-        reason = "i..len is in bounds, byte value < 256 = BASE_LUT.len()"
-    )]
-    for b in &mut bytes[i..] {
-        *b = BASE_LUT[*b as usize] as u8;
-    }
-}
-
-/// NEON implementation: processes 16 bytes per iteration.
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn from_ascii_neon(bytes: &mut [u8]) {
-    use std::arch::aarch64::*;
-
-    let upper_mask = vdupq_n_u8(0xDF);
-    let v_a = vdupq_n_u8(b'A');
-    let v_c = vdupq_n_u8(b'C');
-    let v_g = vdupq_n_u8(b'G');
-    let v_t = vdupq_n_u8(b'T');
-    let v_n = vdupq_n_u8(b'N');
-
-    let len = bytes.len();
-    let ptr = bytes.as_mut_ptr();
-    let mut i: usize = 0;
-
-    while i.wrapping_add(16) <= len {
-        // Safety: pointer ops below are valid because `i + 16 <= len` guarantees
-        // we never read/write past the end of the slice.
-        unsafe {
-            let chunk = vld1q_u8(ptr.add(i));
-            let upper = vandq_u8(chunk, upper_mask);
-
-            let is_a = vceqq_u8(upper, v_a);
-            let is_c = vceqq_u8(upper, v_c);
-            let is_g = vceqq_u8(upper, v_g);
-            let is_t = vceqq_u8(upper, v_t);
-
-            let valid = vorrq_u8(vorrq_u8(is_a, is_c), vorrq_u8(is_g, is_t));
-            let result = vbslq_u8(valid, upper, v_n);
-
-            vst1q_u8(ptr.add(i), result);
-        }
-        i = i.wrapping_add(16);
-    }
-
-    debug_assert!(i <= bytes.len(), "NEON loop overshot: i={i}, len={}", bytes.len());
-    #[allow(
-        clippy::indexing_slicing,
-        reason = "i..len is in bounds, byte value < 256 = BASE_LUT.len()"
-    )]
-    for b in &mut bytes[i..] {
         *b = BASE_LUT[*b as usize] as u8;
     }
 }
@@ -642,7 +489,7 @@ mod tests {
         }
     }
 
-    // r[verify base_decode.ascii_simd]
+    // r[verify base_decode.ascii_simd+2]
     // r[verify base_decode.ascii_scalar_equivalence]
     #[hegel::test]
     fn from_ascii_vec_equivalence(tc: TestCase) {
@@ -650,6 +497,35 @@ mod tests {
         let expected: Vec<Base> = input.iter().map(|&b| Base::from(b)).collect();
         let actual = Base::from_ascii_vec(input);
         assert_eq!(actual, expected);
+    }
+
+    /// Every SIMD level this CPU can run, the scalar fallback included, so
+    /// each one is tested — not only the one `Level::new()` picks.
+    fn levels() -> Vec<Level> {
+        let best = Level::new();
+        #[allow(unused_mut, reason = "only x86 has levels below the best one")]
+        let mut levels = vec![Level::fallback(), best];
+        #[cfg(target_arch = "x86_64")]
+        {
+            levels.extend(best.as_sse2().map(Level::Sse2));
+            levels.extend(best.as_sse4_2().map(Level::Sse4_2));
+            levels.extend(best.as_avx2().map(Level::Avx2));
+        }
+        levels
+    }
+
+    // r[verify base_decode.ascii_simd+2]
+    // r[verify base_decode.ascii_scalar_equivalence]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn from_ascii_every_level_matches_scalar(tc: TestCase) {
+        let input = tc.draw(gs::binary().max_size(300));
+        let expected: Vec<u8> = input.iter().map(|&b| Base::from(b) as u8).collect();
+        for level in levels() {
+            let mut actual = input.clone();
+            from_ascii_at(level, &mut actual);
+            assert_eq!(actual, expected, "{level:?}");
+        }
     }
 
     // r[verify base_decode.ascii_scalar_equivalence]
@@ -712,7 +588,7 @@ mod tests {
     }
 
     // r[verify base_decode.ascii_scalar_equivalence]
-    // r[verify base_decode.ascii_simd]
+    // r[verify base_decode.ascii_simd+2]
     #[test]
     fn test_from_ascii_vec_simd_boundary_lengths() {
         for len in [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 128] {

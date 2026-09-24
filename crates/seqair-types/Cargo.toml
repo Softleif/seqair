@@ -15,6 +15,8 @@ bytemuck = { workspace = true }
 winnow = "1.0.2"
 smallvec = { version = "2.0.0-alpha.12", features = ["std"] }
 smol_str = "0.3.6"
+fearless_simd = { workspace = true }
+fearless_simd_macros = { workspace = true }
 
 rust-htslib = { workspace = true, optional = true, default-features = false }
 
@@ -31,6 +33,9 @@ hts-compat = ["dep:rust-htslib"]
 serde = ["dep:serde", "smallvec/serde", "smol_str/serde"]
 
 [dev-dependencies]
+# Compiles fearless_simd's scalar `Fallback` level on SIMD targets too, so the
+# kernel tests can run it next to every vector level the CPU has.
+fearless_simd = { workspace = true, features = ["force_support_fallback"] }
 insta = { workspace = true }
 hegeltest = { workspace = true }
 serde_json = { workspace = true }

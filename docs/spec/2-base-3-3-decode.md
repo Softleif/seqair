@@ -44,8 +44,8 @@ Reference sequences (FASTA) and SAM text sequences arrive as ASCII bytes, not 4-
 r[base_decode.ascii_batch]
 `Base::from_ascii_vec(Vec<u8>) -> Vec<Base>` MUST convert a vector of ASCII bytes to `Base` values in-place (reusing the allocation). Maps A/a→A, C/c→C, G/g→G, T/t→T, all other bytes→Unknown. The function MUST NOT allocate a new vector — it operates on the input's buffer and transmutes the result. This is safe because `Base` is `repr(u8)` and the function only writes valid `Base` discriminant bytes (65, 67, 71, 78, 84).
 
-r[base_decode.ascii_simd]
-The ASCII batch converter MUST use SIMD acceleration (SSSE3 on x86_64, NEON on aarch64) with a scalar fallback, following the same dispatch pattern as `decode_bases`. This is the required path for all bulk u8→Base conversions outside BAM 4-bit decoding: FASTA reference sequences, SAM text sequences, and any other ASCII-encoded base data.
+r[base_decode.ascii_simd+2]
+The ASCII batch converter MUST be a native-width SIMD kernel per `r[io.simd_portable]`, following the same dispatch pattern as `decode_bases`. This is the required path for all bulk u8→Base conversions outside BAM 4-bit decoding: FASTA reference sequences, SAM text sequences, and any other ASCII-encoded base data.
 
 r[base_decode.ascii_scalar_equivalence]
 The SIMD ASCII converter MUST produce identical output to applying `Base::from(u8)` element-wise. This MUST be verified by property-based tests covering arbitrary byte values and lengths including SIMD boundary lengths (0, 1, 15, 16, 31, 32, 33, 63, 64, 65, 128).
