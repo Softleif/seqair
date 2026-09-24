@@ -174,15 +174,38 @@ fn from_ascii_at(level: Level, bytes: &mut [u8]) {
     reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
 )]
 fn from_ascii_simd<S: Simd>(simd: S, bytes: &mut [u8]) {
-    let n = S::u8s::splat(simd, b'N');
-    let mut chunks = bytes.chunks_exact_mut(S::u8s::LEN);
+    let n = S::u8s::LEN;
+    let big_n = S::u8s::splat(simd, b'N');
+    // The conversion is idempotent (A/C/G/T/N map to themselves), so a ragged
+    // tail is one more vector overlapping the last whole one. It is loaded
+    // *before* the loop stores anything: loading it afterwards would read
+    // bytes the last whole store just wrote, and stall on store forwarding.
+    let tail_start = (!bytes.len().is_multiple_of(n)).then(|| bytes.len().checked_sub(n)).flatten();
+    let tail = tail_start.and_then(|t| bytes.get(t..)).map(|t| S::u8s::from_slice(simd, t));
+    let mut chunks = bytes.chunks_exact_mut(n);
     for chunk in &mut chunks {
-        let upper = S::u8s::from_slice(simd, chunk) & 0xDF;
-        let valid =
-            upper.simd_eq(b'A') | upper.simd_eq(b'C') | upper.simd_eq(b'G') | upper.simd_eq(b'T');
-        valid.select(upper, n).store_slice(chunk);
+        ascii_to_base::<S>(S::u8s::from_slice(simd, chunk), big_n).store_slice(chunk);
     }
-    from_ascii_scalar(chunks.into_remainder());
+    let remainder = chunks.into_remainder();
+    match (tail, tail_start) {
+        (Some(v), Some(t)) => {
+            if let Some(to) = bytes.get_mut(t..) {
+                ascii_to_base::<S>(v, big_n).store_slice(to);
+            }
+        }
+        _ => from_ascii_scalar(remainder),
+    }
+}
+
+/// One vector of [`from_ascii_simd`]. A function, not a closure: a closure
+/// in a `#[simd]` body does not get the level's target features, so on x86
+/// every vector op in it becomes an out-of-line call.
+#[inline(always)]
+fn ascii_to_base<S: Simd>(v: S::u8s, big_n: S::u8s) -> S::u8s {
+    let upper = v & 0xDF;
+    let valid =
+        upper.simd_eq(b'A') | upper.simd_eq(b'C') | upper.simd_eq(b'G') | upper.simd_eq(b'T');
+    valid.select(upper, big_n)
 }
 
 /// Scalar fallback: uses the existing `BASE_LUT` per byte.

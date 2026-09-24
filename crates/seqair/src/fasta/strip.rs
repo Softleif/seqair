@@ -41,14 +41,17 @@ fn strip_simd<S: Simd>(simd: S, raw: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-/// Copy `run` onto `out` and uppercase the copy in place, so the vector
-/// kernel writes each byte once and `raw` is never mutated.
+/// Append `run` to `out`, uppercased. The bytes are copied first (a
+/// `memcpy`) so the vector stores below land on initialised memory, but every
+/// vector is *loaded from `run`*: reading back what the copy just wrote would
+/// stall on store-to-load forwarding, and the ragged tail — one vector
+/// overlapping the last whole one — would stall on the kernel's own store.
 #[simd]
 fn append_uppercased<S: Simd>(simd: S, run: &[u8], out: &mut Vec<u8>) {
     let start = out.len();
     out.extend_from_slice(run);
     if let Some(appended) = out.get_mut(start..) {
-        uppercase_in_place(simd, appended);
+        uppercase_into(simd, run, appended);
     }
 }
 
@@ -77,26 +80,50 @@ fn find_newline<S: Simd>(simd: S, raw: &[u8], from: usize) -> Option<usize> {
     find_newline_scalar(raw, offset)
 }
 
-/// Uppercase `a..=z` in place, leaving every other byte unchanged. Only that
-/// range earns the 0x20 flip — NOT the `& 0xDF` blanket uppercase, which
-/// would also mangle `[`, `{`, `~` and bytes >= 0x80. The flip is `xor`ed in
-/// from a `select` against zero rather than `select`ing between the byte and
-/// its flip: the latter is a blend on x86, the former an `and`.
+/// `dst = src` with `a..=z` uppercased, every other byte unchanged; the two
+/// have the same length. Only that range earns the 0x20 flip — NOT the
+/// `& 0xDF` blanket uppercase, which would also mangle `[`, `{`, `~` and bytes
+/// >= 0x80. The flip is `xor`ed in from a `select` against zero rather than
+/// `select`ing between the byte and its flip: the latter is a blend on x86,
+/// the former an `and`.
 #[simd]
 #[allow(
     clippy::chunks_exact_to_as_chunks,
     reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
 )]
-fn uppercase_in_place<S: Simd>(simd: S, bytes: &mut [u8]) {
+fn uppercase_into<S: Simd>(simd: S, src: &[u8], dst: &mut [u8]) {
+    debug_assert_eq!(src.len(), dst.len());
+    let n = S::u8s::LEN;
     let flip = S::u8s::splat(simd, 0x20);
     let keep = S::u8s::splat(simd, 0);
-    let mut chunks = bytes.chunks_exact_mut(S::u8s::LEN);
-    for chunk in &mut chunks {
-        let v = S::u8s::from_slice(simd, chunk);
-        let lower = v.simd_ge(b'a') & v.simd_le(b'z');
-        (v ^ lower.select(flip, keep)).store_slice(chunk);
+    let mut to = dst.chunks_exact_mut(n);
+    for (from, to) in src.chunks_exact(n).zip(&mut to) {
+        uppercase_vector(simd, from, to, flip, keep);
     }
-    uppercase_scalar(chunks.into_remainder());
+    if to.into_remainder().is_empty() {
+        return;
+    }
+    // Uppercasing is idempotent, so a ragged tail is one more vector that
+    // overlaps the last whole one rather than a byte loop: FASTA lines are
+    // 60–80 bytes, so the tail is a large share of every run.
+    let tail = src.len().checked_sub(n);
+    match tail.and_then(|t| Some((src.get(t..)?, dst.get_mut(t..)?))) {
+        Some((from, to)) => uppercase_vector(simd, from, to, flip, keep),
+        None => {
+            dst.copy_from_slice(src);
+            uppercase_scalar(dst);
+        }
+    }
+}
+
+/// One vector of [`uppercase_into`]. A function, not a closure: a closure
+/// does not get the enclosing `#[simd]` level's target features, so on x86
+/// every vector op in it becomes an out-of-line call.
+#[inline(always)]
+fn uppercase_vector<S: Simd>(simd: S, from: &[u8], to: &mut [u8], flip: S::u8s, keep: S::u8s) {
+    let v = S::u8s::from_slice(simd, from);
+    let lower = v.simd_ge(b'a') & v.simd_le(b'z');
+    (v ^ lower.select(flip, keep)).store_slice(to);
 }
 
 /// Scalar fallback: the exact predicate of the loop this replaced.
