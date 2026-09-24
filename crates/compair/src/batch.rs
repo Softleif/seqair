@@ -486,6 +486,46 @@ pub(crate) fn batch_kernel<L: Lane>(
         reset(track, span, 0.0);
     }
 
+    // Slices from here on, not the `Vec`s behind `buffer` and `plan`, and all
+    // eight cut to the same `span`. On the SIMD lane this kernel is
+    // inlined into a `#[simd]` closure, where `buffer` and `plan` arrive as
+    // fields of the closure rather than as `noalias` arguments: LLVM then has
+    // to assume every store into a row may have moved a `Vec`, and reloaded
+    // the headers every column -- ten instructions a step. Locals cannot move.
+    // One length for all eight is what lets it bounds-check a column once.
+    let (Some(buffer_m), Some(buffer_i), Some(buffer_d)) =
+        (buffer.m.get_mut(..span), buffer.i.get_mut(..span), buffer.d.get_mut(..span))
+    else {
+        return impossible;
+    };
+    let columns = &plan.columns;
+    let (
+        Some(column_base),
+        Some(column_converted),
+        Some(column_plain),
+        Some(column_rate),
+        Some(column_unconverted),
+    ) = (
+        columns.base.get(..span),
+        columns.converted.get(..span),
+        columns.plain.get(..span),
+        columns.rate.get(..span),
+        columns.unconverted.get(..span),
+    )
+    else {
+        return impossible;
+    };
+    let Rows {
+        base: rows_base,
+        spread: rows_spread,
+        mismatched: rows_mismatched,
+        match_to_match: rows_match_to_match,
+        match_to_insertion: rows_match_to_insertion,
+        match_to_deletion: rows_match_to_deletion,
+        indel_to_match: rows_indel_to_match,
+        gap_continuation: rows_gap_continuation,
+    } = &plan.rows;
+
     let zero = L::splat(token, 0.0);
     let past_end = L::load(token, &plan.past_end);
     let init = L::load(token, &plan.init);
@@ -501,7 +541,7 @@ pub(crate) fn batch_kernel<L: Lane>(
         let live = L::splat(token, column as f32).below(past_end);
         let cell = L::masked(live, init);
         let at = column * BATCH;
-        let Some(slot) = buffer.d.get_mut(at..at + LANE_MAX) else {
+        let Some(slot) = buffer_d.get_mut(at..at + LANE_MAX) else {
             return impossible;
         };
         let Some(slot) = slot.first_chunk_mut::<LANE_MAX>() else {
@@ -530,7 +570,7 @@ pub(crate) fn batch_kernel<L: Lane>(
             }
             if any {
                 let lift = L::load(token, &lift);
-                for track in [&mut buffer.m, &mut buffer.i, &mut buffer.d] {
+                for track in [&mut *buffer_m, &mut *buffer_i, &mut *buffer_d] {
                     for chunk in track.as_chunks_mut::<LANE_MAX>().0 {
                         (L::load(token, chunk) * lift).store(chunk);
                     }
@@ -538,11 +578,11 @@ pub(crate) fn batch_kernel<L: Lane>(
             }
         }
 
-        let Some(row_base) = plan.rows.base.get(row).copied() else {
+        let Some(row_base) = rows_base.get(row).copied() else {
             return impossible;
         };
         let (Some(spread), Some(mismatched)) =
-            (plan.rows.spread.get(row).copied(), plan.rows.mismatched.get(row).copied())
+            (rows_spread.get(row).copied(), rows_mismatched.get(row).copied())
         else {
             return impossible;
         };
@@ -558,11 +598,11 @@ pub(crate) fn batch_kernel<L: Lane>(
             Some(indel_to_match),
             Some(gap_continuation),
         ) = (
-            plan.rows.match_to_match.get(row).copied(),
-            plan.rows.match_to_insertion.get(row).copied(),
-            plan.rows.match_to_deletion.get(row).copied(),
-            plan.rows.indel_to_match.get(row).copied(),
-            plan.rows.gap_continuation.get(row).copied(),
+            rows_match_to_match.get(row).copied(),
+            rows_match_to_insertion.get(row).copied(),
+            rows_match_to_deletion.get(row).copied(),
+            rows_indel_to_match.get(row).copied(),
+            rows_gap_continuation.get(row).copied(),
         )
         else {
             return impossible;
@@ -586,9 +626,9 @@ pub(crate) fn batch_kernel<L: Lane>(
             let mut carry = Carry { left_m: zero, left_d: zero, diag_m: zero, diag_indel: zero };
             let at = (first - 1) * BATCH;
             let (Some(m), Some(i), Some(d)) = (
-                buffer.m.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
-                buffer.i.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
-                buffer.d.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                buffer_m.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                buffer_i.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                buffer_d.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
             ) else {
                 return impossible;
             };
@@ -606,9 +646,9 @@ pub(crate) fn batch_kernel<L: Lane>(
             for column in first..=last {
                 let at = column * BATCH;
                 let (Some(up_m), Some(up_i), Some(up_d)) = (
-                    buffer.m.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
-                    buffer.i.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
-                    buffer.d.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                    buffer_m.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                    buffer_i.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+                    buffer_d.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
                 ) else {
                     return impossible;
                 };
@@ -616,11 +656,11 @@ pub(crate) fn batch_kernel<L: Lane>(
                     (L::load(token, up_m), L::load(token, up_i), L::load(token, up_d));
 
                 let (Some(base), Some(converted), Some(plain), Some(rate), Some(unconverted)) = (
-                    plan.columns.base.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
-                    plan.columns.converted.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
-                    plan.columns.plain.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
-                    plan.columns.rate.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
-                    plan.columns.unconverted.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
+                    column_base.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
+                    column_converted.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
+                    column_plain.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
+                    column_rate.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
+                    column_unconverted.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
                 ) else {
                     return impossible;
                 };
@@ -651,16 +691,13 @@ pub(crate) fn batch_kernel<L: Lane>(
                 let (m, d) = (L::masked(keep, m), L::masked(keep, d));
 
                 let (Some(mm), Some(ii), Some(dd)) = (
-                    buffer
-                        .m
+                    buffer_m
                         .get_mut(at..at + LANE_MAX)
                         .and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
-                    buffer
-                        .i
+                    buffer_i
                         .get_mut(at..at + LANE_MAX)
                         .and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
-                    buffer
-                        .d
+                    buffer_d
                         .get_mut(at..at + LANE_MAX)
                         .and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
                 ) else {
@@ -687,7 +724,7 @@ pub(crate) fn batch_kernel<L: Lane>(
             // its own `first - 1`, where the band was clamped at column 1, and
             // `last + 1`, where the band still has room to move right.
             for at in [(first - 1) * BATCH, (last + 1) * BATCH] {
-                for track in [&mut buffer.m, &mut buffer.i, &mut buffer.d] {
+                for track in [&mut *buffer_m, &mut *buffer_i, &mut *buffer_d] {
                     if let Some(slot) = track.get_mut(at..at + LANE_MAX) {
                         slot.fill(0.0);
                     }
