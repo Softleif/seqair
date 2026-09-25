@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- New dependencies `fearless_simd` and `fearless_simd_macros`.
+
+### Performance
+
+- The ASCII→`Base` kernel behind `Base::from_ascii_vec`, `convert_ascii_in_place` and
+  `convert_ascii_in_place_as_slice` is one portable `fearless_simd` kernel instead of AVX2, SSSE3
+  and NEON copies with their `unsafe` blocks. It picks the widest level the CPU has at run time, so
+  AVX-512 machines get 64-byte vectors, and handles a ragged tail as one overlapping vector: 0.70–0.78×
+  the time of 0.3.0 on a Ryzen 3950X.
+
 ## v0.3.0 (2026-09-22)
 
 ### Breaking

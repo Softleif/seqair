@@ -5,6 +5,93 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+A performance release. Every hand-written `core::arch` kernel is now one portable `fearless_simd`
+kernel, and the readers, pileup engine, CRAM codecs and writers were profiled and tightened around
+it. Nothing public is removed or changed (`cargo semver-checks` against 0.3.0 is clean), and the
+additions are opt-in. In rastair (chr12, byte-identical output) end-to-end cycles dropped 12 % on
+a Ryzen 3950X and 1 % on an Apple M4, measured before the last rounds of CRAM, query and pileup
+work.
+
+### Fixed
+
+- **BGZF writing failed on data that does not compress.** A block, gzip framing included, must fit
+  in 64 KiB, and the writer filled blocks with 65,536 bytes of data. Data that does not compress is
+  *stored*, a little larger than it went in, so every full block at `compression_level(0)` — any
+  level-0 BAM, BCF or VCF.gz over 64 KiB — and any full block of random-looking bytes at other
+  levels failed with `BgzfError::CorruptHeader`. Blocks now hold at most 65,280 bytes, htslib's
+  `BGZF_BLOCK_SIZE`, which fits the worst case; a compile-time check keeps it that way. **Block
+  boundaries move, so output is no longer byte-identical to 0.3.0's** (still valid, ~0.4 % more
+  blocks).
+- **Reading a block filled to exactly 64 KiB could read past the query's chunk.** Once such a block
+  was read to its end, `RegionBuf` named the position as the block's own first byte — the
+  within-block offset 65,536 wrapped to 0 — so the chunk-end check compared a position one block
+  behind and kept going; a debug build panicked. 0.3.0's own writer produces such blocks. The
+  position is now the next block's `(offset, 0)`, as the writer names it.
+- **Bgzipped SAM queries took a BGZF error inside a chunk for the end of data** and returned short
+  without an error. The error is returned now. They also no longer read one byte past a chunk end
+  that falls on a block boundary.
+
+### Added
+
+- `BamWriterBuilder::compression_threads(n)` and `vcf::Writer::compression_threads(n)` compress
+  BGZF blocks on `n` worker threads (`0`, the default, compresses on the calling thread), like
+  htslib's `hts_set_threads`. The calling thread keeps serializing and writes blocks in order, so
+  the data and the co-produced BAI/CSI are byte-identical to the single-threaded writer's. Writing
+  10 Mb of 30x chr12 as BAM at level 6 with 3 threads: 4.0 → 1.34 s wall on the M4.
+- `vcf::Writer::compression_level(level)` for `VcfGz` and `Bcf` (default 6), matching
+  `BamWriterBuilder::compression_level`. Plain VCF ignores both settings.
+- `BgzfError::ThreadSpawn`, `CompressionWorkerLost` and `BlockTooLarge`.
+- `bam::seq::encode_bases_into`, and `RegionBuf::fill_buf` / `consume` for reading a region's
+  decompressed bytes a block at a time.
+
+### Changed
+
+- **Plain VCF output is buffered** (128 KiB) instead of written with one `write_all` per record, so
+  records reach the sink in large writes. `finish()` flushes; a writer dropped without it flushes
+  best-effort and logs a failure with `warn!`.
+- A BGZF block that cannot fit is reported as `BgzfError::BlockTooLarge { size }`, not
+  `CorruptHeader`.
+- New dependencies `fearless_simd` and `fearless_simd_macros`. The kernels pick the widest level
+  the CPU has at run time, so AVX-512 machines now get 64-byte vectors, and the `unsafe` blocks of
+  the old AVX2/SSSE3/NEON copies are gone. `cram::rans_nx16_avx2` and `cram::rans_nx16_neon` are
+  now empty and hidden; they only ever held crate-private items.
+
+### Performance
+
+- **SIMD kernels** (3950X, time vs 0.3.0): ASCII→Base 0.70–0.78×, 4-bit sequence decode
+  0.69–0.76×, plain-FASTA fetch 0.80–0.85×, the rANS Nx16 32-state order-0 kernel 0.29×.
+  `OwnedBamRecord::to_bam_bytes` encodes the sequence in place (1.9× fewer cycles serialize-only).
+  MM/ML base-modification resolution walks a SIMD bitmask of the target base: 5.7–7.6× faster on
+  sparse calls, 1.8–2.4× on dense ones.
+- **CRAM**, chr20:10–30 Mb (813k reads) end to end: CRAM 3.1 2.13 → 1.15 s on the 3950X (M4 1.08 →
+  0.54 s), CRAM 3.0 1.86 → 1.34 s (M4 1.07 → 0.69 s) — before the last round of codec work, which
+  took off several percent more. The rANS 4x8 and Nx16 decoders, PACK and RLE now use htscodecs'
+  table layouts and loop shapes (rANS 4x8 order-0 331 → 513 MB/s, order-1 292 → 338; PACK up to
+  2.1×). Reference runs are copied instead of converted base by base, codec buffers are reused, tag
+  encodings are resolved once per slice, and external blocks are ordered by first use.
+- **Small region queries**: a reader keeps a 64-block cache of decompressed BGZF blocks and its
+  per-query setup between queries, starts a query where the previous one first found a record,
+  and grows its reads from one block instead of the whole remaining range. BAI and CSI look up
+  candidate bins instead of scanning every bin. chr12, M4, per query: 1 bp every 100 bp 277 →
+  6.7 µs, 1 bp every 1 kb 293 → 43 µs, 1 kb tiles 334 → 53 µs; 1 Mb tiles unchanged. Bgzipped SAM
+  shares the cache (1 kb tiles 1.30 → 0.50 ms) and scans lines and fields with SIMD (2.7× fewer
+  cycles per fetch).
+- **Pileup**: each read's CIGAR is walked with an incremental cursor (as htslib's `resolve_cigar2`),
+  D and N columns take the fast path, columns where nothing expires skip eviction, and a column
+  stops at `max_depth` instead of being built and truncated. Spliced synthetic pileup 2.81 →
+  2.35 s; ~1000-deep columns capped at 50 1.85 → 0.29 s; a rastair-shaped TAPS pileup −16.5 %
+  cycles on the M4.
+- **Writers**: plain VCF of 2.76 M rastair-shaped records 5.2 → 0.83 s on the M4, from the
+  buffering above and an O(1) FORMAT duplicate check. That is on top of `%g` floats printed with
+  integer math instead of `core::fmt`'s Dragon4 fallback, which had already cut VCF text to 3.8×
+  fewer cycles and VCF.gz to 2.1× fewer on the 3950X. Each BGZF block is assembled in place and
+  written with one call.
+- **Decoding**: BAM read-name and Z/H aux terminators are found with a vector scan (−2.8 % cycles
+  decode-only), and BAM and CRAM errors are built only on failure instead of on every call (−8 %
+  per small BAM query, −9 % on CRAM 3.1).
+
 ## v0.3.0 (2026-09-22)
 
 ### Breaking
