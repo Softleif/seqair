@@ -320,13 +320,44 @@ r[cram.codec.arith]
 Method 6 (arithmetic coder): v3.1 adaptive arithmetic coder. SHOULD be supported.
 
 r[cram.codec.fqzcomp]
-Method 7 (fqzcomp): v3.1 quality-score-specific compressor. SHOULD be supported.
+Method 7 (fqzcomp): v3.1 quality-score compressor. MUST be supported — htslib compresses the QS block with it under the v3.1 `small` and `archive` profiles. The stream is a uint7 output size, the parameter block (`r[cram.codec.fqzcomp.params]`), and the range-coded data (`r[cram.codec.range_coder]`); the output is every record's qualities concatenated, as CRAM stores the QS external block. Where the [CRAMcodecs] §6 pseudocode and htscodecs' `fqzcomp_qual.c` disagree, the decoder follows htscodecs, which writes the files (see the rules below). The decoded size MUST equal the block's uncompressed size (htslib takes fqzcomp's own size without checking; a mismatch only happens in a corrupt block).
 
 r[cram.codec.tok3]
 Method 8 (tok3): v3.1 read-name tokeniser. MUST be supported for v3.1 files — samtools uses tok3 for read name blocks by default in v3.1 output. Without tok3 support, v3.1 CRAM files produced by `samtools view -C` cannot be read.
 
 r[cram.codec.unknown]
 Unknown codec methods MUST produce a clear error naming the method ID and suggesting conversion to BAM (`samtools view -b`).
+
+### fqzcomp
+
+> _[CRAMcodecs] §6 "FQZComp quality codec"; htscodecs `fqzcomp_qual.c` (`fqz_read_parameters`, `decompress_new_read`, `uncompress_block_fqz2f`)_
+
+r[cram.codec.fqzcomp.params]
+The global parameters are: a version byte, which MUST be 5; `gflags` (1 `multi_param`, 2 `have_stab`, 4 `do_rev`); `nparam` as a byte if `multi_param`, else 1 — 0 is an error; `max_sel` = `nparam` if `nparam > 1`, else 0; if `have_stab`, `max_sel` as a byte and `stab` as an array of 256 (`r[cram.codec.fqzcomp.array]`); then `nparam` parameter blocks (`r[cram.codec.fqzcomp.param_block]`). A parameter block with `do_sel` while `max_sel` is 0 is an error. As in htscodecs, fewer than 10 bytes after the output size is `Truncated` before anything is parsed, and an output size of 0 decodes to nothing without reading the range coder.
+
+r[cram.codec.fqzcomp.param_block]
+A parameter block is: the starting context (u16 LE); `pflags` (2 `do_dedup`, 4 fixed length, 8 `do_sel`, 16 `have_qmap`, 32 `have_ptab`, 64 `have_dtab`, 128 `have_qtab`; bit 1 is ignored); `max_sym`; then three bytes of nibbles, high then low: `qbits`/`qshift`, `qloc`/`sloc`, `ploc`/`dloc`. Fewer than 7 bytes is `Truncated`. If `have_qmap`, `max_sym` bytes of `qmap` follow — symbol `k` outputs `qmap[k]`, and a symbol at or past `max_sym` outputs 0xFF (htscodecs' unset `INT_MAX` entry cast to a byte); otherwise `qmap` is the identity. `qtab` (256) is read only if `have_qtab` *and* `qbits > 0` (the spec reads it on the flag alone; htscodecs' writer and reader both also require `qbits`), else the identity; `ptab` (1024) and `dtab` (256) are read if their flag is set, else all zero. `ptab` and `dtab` entries are pre-shifted left by `ploc` / `dloc`. Flag 4 means the *record length is stored once* (htscodecs' `fixed_len`): the [CRAMcodecs] pseudocode names it `do_len` and decodes a length when it is set, the opposite of what htscodecs writes.
+
+r[cram.codec.fqzcomp.array]
+A table (`stab`, `qtab`, `ptab`, `dtab`) is stored as htscodecs' `read_array` two-level run length: the first level expands bytes into run lengths — a byte equal to the previous one is followed by a count of extra copies — until the run lengths sum to at least the table size or the input ends; the second level assigns value `v` to the next `R` entries, where `R` sums successive run bytes while they are 255. More than 1023 first-level entries, a repeat byte with no count after it, or running out of run lengths before the table is full is an error. The first level stops adding copies once the sum passes the table size, as htscodecs does. Values are at most 1023.
+
+r[cram.codec.fqzcomp.models]
+The models are: 2^16 quality models over `max_sym + 1` symbols, `max_sym` the largest over all parameter blocks; four 256-symbol length models, one per length byte (little-endian); 2-symbol `rev` and `dup` models; and, if `max_sel > 0`, a selector model over `max_sel + 1` symbols. All are `r[cram.codec.adaptive_model]` models driven by one range decoder. A quality model is created the first time its context is used, so memory and set-up time scale with the contexts a block reaches, not with 2^16 × `max_sym`.
+
+r[cram.codec.fqzcomp.selector]
+At each record's start the selector `s` is decoded if the *first* parameter block has `do_sel`, else it is 0 (htscodecs tests the first block, not `max_sel > 0` as the pseudocode does). The parameter block is `x = stab[s]` if `have_stab`, else `x = s`; `x >= nparam` is an error.
+
+r[cram.codec.fqzcomp.record]
+A record starts with its length, decoded from the four length models, unless the selected block has the fixed-length flag and a length was already decoded (then the last decoded length is reused; `first_len` is global, not per block as in the pseudocode). A length of 0, or longer than the output still to fill, is an error. If `gflags.do_rev`, a `rev` flag is decoded (`do_rev` is global, not per block). If the selected block has `do_dedup`, a `dup` flag is decoded; a duplicate copies the `len` bytes before it — an error if fewer have been decoded — and decodes no qualities. Otherwise `qctx`, `delta` and `prevq` reset to 0, the remaining count `p` to `len`, and the context to the selected block's starting context.
+
+r[cram.codec.fqzcomp.context]
+Each quality `q` is decoded with the current context's model, then — using the *first* parameter block's tables, whichever block the selector chose (htscodecs passes the first block to `fqz_update_ctx` and its `qmap`; the selected block only supplies the starting context, fixed-length and dedup flags) — the next context is `((qctx & (2^qbits - 1)) << qloc) + ptab[min(p, 1023)] + dtab[min(delta, 255)] + (s << sloc)`, masked to 16 bits, after `qctx = (qctx << qshift) + qtab[q]`. Then `delta` grows by one if `q != prevq`, `prevq = q`, and `p` drops by one. `p` is the count *before* this quality is taken off, so the second quality of a record sees `p = len`. The output byte is `qmap[q]`. Arithmetic wraps at 32 bits, as in C; only the low 16 bits reach the context.
+
+r[cram.codec.fqzcomp.reverse]
+With `gflags.do_rev`, once every record is decoded each record flagged `rev` has its qualities reversed in place. A duplicate copies the bytes as decoded, before any reversal (the [CRAMcodecs] `ReverseQualities` pseudocode only advances past reversed records; htscodecs walks every record).
+
+r[cram.codec.fqzcomp.alloc]
+The output size is untrusted: it MUST pass `check_alloc_size`, and the output buffer starts at a capacity bounded by a multiple of the input size and grows, so a short stream claiming a large output does not allocate it up front. Parameter memory is bounded by `nparam <= 255`, and quality models are created on first use (`r[cram.codec.fqzcomp.models]`).
 
 ## Record decoding
 
