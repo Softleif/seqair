@@ -217,7 +217,7 @@ fn level_3_matches_htslib() {
     assert_level_matches_htslib(3);
 }
 
-// r[verify cram.codec.arith]
+// r[verify cram.codec.arith+2]
 // r[verify cram.codec.lzma]
 #[test]
 fn level_4_matches_htslib() {

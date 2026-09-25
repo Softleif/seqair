@@ -331,7 +331,7 @@ const CRAM_31_PROFILES: &[&[&str]] = &[
     &["version=3.1", "archive", "level=9"],
 ];
 
-// r[verify cram.codec.arith]
+// r[verify cram.codec.arith+2]
 // r[verify cram.codec.fqzcomp]
 /// The same reads written under every CRAM 3.1 compression profile decode
 /// to what the BAM holds, whichever codecs htslib picked for each block.
