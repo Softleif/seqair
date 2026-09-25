@@ -1,6 +1,6 @@
 //! Parse and decompress CRAM blocks. [`parse_block`] handles all compression methods
-//! defined by CRAM v3: raw, gzip, bzip2, lzma, rANS order-0/1, NX16, the arithmetic coder, and
-//! tok3.
+//! defined by CRAM v3: raw, gzip, bzip2, lzma, rANS order-0/1, NX16, the arithmetic coder,
+//! fqzcomp, and tok3.
 
 // See rans.rs: lazy `ok_or_else(|| CramError::...)` keeps error construction and its
 // `drop_in_place<CramError>` off the per-record path.

@@ -42,10 +42,7 @@ impl<'a> RangeDecoder<'a> {
     }
 
     /// The bytes after what the decoder has consumed so far.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the arithmetic coder uses it; fqzcomp ignores trailing bytes")
-    )]
+    #[cfg(test)]
     pub(crate) fn remaining(&self) -> &'a [u8] {
         self.src
     }
