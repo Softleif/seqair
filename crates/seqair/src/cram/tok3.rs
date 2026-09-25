@@ -374,30 +374,73 @@ impl<'a> Cursor<'a> {
 
 /// What a token holds, for a later name's MATCH, DELTA and DELTA0.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
 enum Kind {
-    /// CHAR or STRING.
-    Text = 1,
-    /// DIGITS or DELTA.
-    Digits = 2,
-    /// DIGITS0 or DELTA0.
-    Digits0 = 3,
     /// NOP or END.
-    Empty = 4,
+    Empty,
+    /// CHAR or STRING.
+    Text,
+    /// DIGITS or DELTA.
+    Digits,
+    /// DIGITS0 or DELTA0.
+    Digits0,
 }
 
-/// A decoded token: its kind, its numeric value, and where its text is in
-/// the output.
+/// A decoded token in 12 bytes (every name's are kept): its numeric value,
+/// where its text is in the output, and the text's length with the kind in
+/// the top two bits.
 #[derive(Clone, Copy)]
 struct Token {
-    kind: Kind,
     value: u32,
     start: u32,
-    len: u32,
+    len_kind: u32,
 }
 
+/// Lengths are below the output bound, at most `MAX_ALLOC_SIZE` plus
+/// [`OUTPUT_SLACK`], which fits in 30 bits.
+const LEN_BITS: u32 = 30;
+const LEN_MASK: u32 = (1 << LEN_BITS) - 1;
+const _: () = assert!(MAX_ALLOC_SIZE + OUTPUT_SLACK <= LEN_MASK as usize);
+
 impl Token {
-    const EMPTY: Self = Self { kind: Kind::Empty, value: 0, start: 0, len: 0 };
+    const EMPTY: Self = Self { value: 0, start: 0, len_kind: 0 };
+
+    #[inline(always)]
+    fn new(kind: Kind, value: u32, start: u32, len: u32) -> Self {
+        let kind = match kind {
+            Kind::Empty => 0,
+            Kind::Text => 1,
+            Kind::Digits => 2,
+            Kind::Digits0 => 3,
+        };
+        Self { value, start, len_kind: (len & LEN_MASK) | (kind << LEN_BITS) }
+    }
+
+    #[inline(always)]
+    fn kind(self) -> Kind {
+        match self.len_kind >> LEN_BITS {
+            1 => Kind::Text,
+            2 => Kind::Digits,
+            3 => Kind::Digits0,
+            _ => Kind::Empty,
+        }
+    }
+
+    #[inline(always)]
+    fn len(self) -> u32 {
+        self.len_kind & LEN_MASK
+    }
+}
+
+/// The token kind an error reports: 0 none, 1 text, 2 digits, 3
+/// zero-padded digits, 4 empty.
+fn found(token: Option<Token>) -> u8 {
+    match token.map(Token::kind) {
+        None => 0,
+        Some(Kind::Text) => 1,
+        Some(Kind::Digits) => 2,
+        Some(Kind::Digits0) => 3,
+        Some(Kind::Empty) => 4,
+    }
 }
 
 /// Token `t` (from 1) of a name whose tokens start at `first` and number
@@ -478,7 +521,7 @@ impl<'a> Names<'a> {
     fn put_text(&mut self, bytes: &[u8]) -> Result<Token, CramError> {
         let start = to_u32(self.len)?;
         self.reserve(bytes.len())?.copy_from_slice(bytes);
-        Ok(Token { kind: Kind::Text, value: 0, start, len: to_u32(bytes.len())? })
+        Ok(Token::new(Kind::Text, 0, start, to_u32(bytes.len())?))
     }
 
     /// Write `value` in decimal, left-padded with zeros to `width`.
@@ -496,7 +539,7 @@ impl<'a> Names<'a> {
             pad.fill(b'0');
             rest.copy_from_slice(chunk.get(..digits).unwrap_or_default());
         }
-        Ok(Token { kind, value, start: to_u32(start)?, len: to_u32(self.len.wrapping_sub(start))? })
+        Ok(Token::new(kind, value, to_u32(start)?, to_u32(self.len.wrapping_sub(start))?))
     }
 
     /// Write the first `len` bytes of `chunk` (`len <= CHUNK`): all of it
@@ -522,10 +565,10 @@ impl<'a> Names<'a> {
         Ok(())
     }
 
-    /// Write again the text of `token`, from an earlier name.
+    /// Write again the `len` bytes of earlier output at `start`.
     #[inline(always)]
-    fn put_copy(&mut self, token: Token) -> Result<(), CramError> {
-        let (start, len) = (token.start as usize, token.len as usize);
+    fn put_copy(&mut self, start: u32, len: u32) -> Result<(), CramError> {
+        let (start, len) = (start as usize, len as usize);
         // Short text: one 16-byte load and store. The load may run past
         // the written bytes; what it brings along lands past `len`.
         if len <= CHUNK
@@ -562,7 +605,7 @@ impl<'a> Names<'a> {
 
         if ty == DUP {
             let previous = previous.ok_or_else(|| CramError::Tok3DupRefOutOfRange { index: m })?;
-            self.put_copy(Token { len: previous.len, start: previous.start, ..Token::EMPTY })?;
+            self.put_copy(previous.start, previous.len)?;
             self.reserve(1)?.fill(0);
             self.names.push(Name { start, ..previous });
             return Ok(());
@@ -600,36 +643,32 @@ impl<'a> Names<'a> {
                 DELTA => {
                     let delta = position.stream(DELTA)?.u8()?;
                     match prev() {
-                        Some(p) if p.kind == Kind::Digits => self.put_digits(
+                        Some(p) if p.kind() == Kind::Digits => self.put_digits(
                             Kind::Digits,
                             p.value.wrapping_add(u32::from(delta)),
                             0,
                         )?,
-                        p => {
-                            return Err(CramError::Tok3DeltaRequiresDigits {
-                                found: p.map_or(0, |p| p.kind as u8),
-                            });
-                        }
+                        p => return Err(CramError::Tok3DeltaRequiresDigits { found: found(p) }),
                     }
                 }
                 DELTA0 => {
                     let delta = position.stream(DELTA0)?.u8()?;
                     match prev() {
-                        Some(p) if p.kind == Kind::Digits0 => self.put_digits(
+                        Some(p) if p.kind() == Kind::Digits0 => self.put_digits(
                             Kind::Digits0,
                             p.value.wrapping_add(u32::from(delta)),
-                            p.len as usize,
+                            p.len() as usize,
                         )?,
                         p => {
                             return Err(CramError::Tok3Delta0RequiresPaddedDigits {
-                                found: p.map_or(0, |p| p.kind as u8),
+                                found: found(p),
                             });
                         }
                     }
                 }
                 MATCH => match prev() {
-                    Some(p) if p.kind != Kind::Empty => {
-                        self.put_copy(p)?;
+                    Some(p) if p.kind() != Kind::Empty => {
+                        self.put_copy(p.start, p.len())?;
                         p
                     }
                     _ => return Err(CramError::Tok3MatchWithoutValue { position: t }),
