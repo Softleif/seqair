@@ -641,7 +641,6 @@ mod tests {
     /// what. They share no code, so this pins the production decoder's error
     /// paths (and its output for streams htscodecs would never write) to the
     /// pseudocode's.
-    // r[verify cram.codec.fqzcomp.alloc]
     #[hegel::test(test_cases = 500)]
     fn decoders_agree_on_damaged_streams(tc: TestCase) {
         let stream = if tc.draw(gs::booleans()) { builtin_stream(&tc) } else { custom_stream(&tc) };

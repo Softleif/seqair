@@ -70,7 +70,6 @@ fn record_lengths_past_two_bytes() {
     }
 }
 
-// r[verify cram.codec.fqzcomp.alloc]
 #[hegel::test(test_cases = 100)]
 fn truncated_streams_are_errors(tc: TestCase) {
     let stream = builtin_stream(&tc);

@@ -652,4 +652,44 @@ mod tests {
         let src = [0, 5, 0, 0, 0, 0, 1, 0, 0, 0, 0];
         assert_eq!(decode(&src).unwrap(), Vec::<u8>::new());
     }
+
+    // r[verify cram.codec.fqzcomp.alloc]
+    #[test]
+    fn output_size_is_bounded() {
+        // 300 000 000 as uint7: past the allocation limit.
+        let src = [0x81, 0x8f, 0x86, 0xc6, 0x00, 5, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(matches!(decode(&src), Err(CramError::AllocationTooLarge { .. })));
+
+        // 200 MiB claimed by a 20-byte stream: only a small buffer up front.
+        let src = [0xe4, 0x80, 0x80, 0x00, 5, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut cur = &src[..];
+        assert_eq!(read_uint7(&mut cur), Ok(200 << 20));
+        let params = Params::parse(&mut cur).unwrap();
+        let mut rc = RangeDecoder::new(cur).unwrap();
+        let mut out = Vec::with_capacity(MIN_OUTPUT_CAPACITY);
+        assert!(Decoder::new(&params).run(&mut rc, 200 << 20, &mut out).is_err());
+        assert!(out.capacity() < 1 << 20, "grew to {}", out.capacity());
+    }
+
+    // r[verify cram.codec.fqzcomp.models]
+    #[test]
+    fn quality_models_are_created_on_first_use() {
+        let src = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/hts-specs/cram/codecs/fqzcomp/q40+dir.0"
+        ))
+        .unwrap();
+        let mut cur = src.as_slice();
+        let out_len = read_uint7(&mut cur).unwrap() as usize;
+        let params = Params::parse(&mut cur).unwrap();
+        let mut rc = RangeDecoder::new(cur).unwrap();
+        let mut decoder = Decoder::new(&params);
+        let mut out = Vec::new();
+        decoder.run(&mut rc, out_len, &mut out).unwrap();
+
+        let stride = usize::from(params.max_sym) + 2;
+        let created = decoder.qual.ends.iter().filter(|&&e| e != 0).count();
+        assert_eq!(decoder.qual.arena.len(), created * stride);
+        assert!(created < CONTEXTS / 2, "{created} of {CONTEXTS} contexts");
+    }
 }
