@@ -117,9 +117,42 @@ fn format_padded(value: u32, width: usize) -> ([u8; CHUNK], usize) {
 const TYPE_BYTES: [u8; N_TYPES] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
 /// Decode a tok3 compressed block.
+///
+/// Builds rANS Nx16 order-1 tables afresh for every block that needs them;
+/// a [`Decoder`] keeps them.
 pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
+    Decoder::new().decode(src)
+}
+
+/// A tok3 decoder that keeps its rANS Nx16 order-1 tables (about 5 MiB,
+/// allocated on the first block that needs them) from one block to the
+/// next, as the CRAM reader does. Building them per block costs more than
+/// decoding a small block.
+// r[impl cram.codec.tok3.table_reuse]
+#[derive(Default)]
+pub struct Decoder {
+    rans_buf: Nx16Order1Buf,
+}
+
+impl Decoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Decode a tok3 compressed block.
+    pub fn decode(&mut self, src: &[u8]) -> Result<Vec<u8>, CramError> {
+        decode_with_buf(src, &mut self.rans_buf)
+    }
+}
+
+/// [`decode`], reusing the caller's rANS Nx16 order-1 tables.
+// r[impl cram.codec.tok3.table_reuse]
+pub(crate) fn decode_with_buf(
+    src: &[u8],
+    rans_buf: &mut Nx16Order1Buf,
+) -> Result<Vec<u8>, CramError> {
     // Every stream stores its length, so the size passed is unused.
-    decode_with(src, |stream| super::arith::decode(stream, 0))
+    decode_with(src, |stream| super::arith::decode(stream, 0), rans_buf)
 }
 
 /// [`decode`] with the arithmetic coder's streams decoded by
@@ -128,16 +161,22 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
 #[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]
 pub fn decode_with_arith_reference(src: &[u8]) -> Result<Vec<u8>, CramError> {
-    decode_with(src, |stream| {
-        super::arith::reference::decode(stream, 0)
-            .ok_or(CramError::ArithCorruptData { context: "arith reference decoder" })
-    })
+    decode_with(
+        src,
+        |stream| {
+            super::arith::reference::decode(stream, 0)
+                .ok_or(CramError::ArithCorruptData { context: "arith reference decoder" })
+        },
+        &mut Nx16Order1Buf::new(),
+    )
 }
 
-/// Decode a tok3 block, decoding arith-coded streams with `arith`.
+/// Decode a tok3 block, decoding arith-coded streams with `arith` and
+/// rANS Nx16 ones with `rans_buf`'s order-1 tables.
 fn decode_with(
     src: &[u8],
     arith: impl Fn(&[u8]) -> Result<Vec<u8>, CramError>,
+    rans_buf: &mut Nx16Order1Buf,
 ) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
     let truncated = || CramError::Truncated { context: "tok3 header" };
@@ -160,7 +199,7 @@ fn decode_with(
         return Err(CramError::Tok3NameCountExceedsLength { count: name_count, length: ulen });
     }
 
-    let streams = Streams::read(&mut cur, use_arith.then_some(&arith))?;
+    let streams = Streams::read(&mut cur, use_arith.then_some(&arith), rans_buf)?;
     let mut names = Names::new(streams.cursors(name_count), max_output, name_count);
     for n in 0..name_count {
         names.decode_name(n)?;
@@ -189,14 +228,14 @@ struct Streams {
 impl Streams {
     // r[impl cram.codec.tok3.streams]
     /// Read and decode every token stream; `arith` decodes them when the
-    /// block uses the arithmetic coder, else they are rANS Nx16.
+    /// block uses the arithmetic coder, else they are rANS Nx16, decoded
+    /// with `rans_buf`'s order-1 tables.
     fn read(
         src: &mut &[u8],
         arith: Option<&impl Fn(&[u8]) -> Result<Vec<u8>, CramError>>,
+        rans_buf: &mut Nx16Order1Buf,
     ) -> Result<Self, CramError> {
         let mut streams = Self { decoded: Vec::new(), positions: Vec::new() };
-        // One order-1 table buffer for all of the block's rANS streams.
-        let mut rans_buf = Nx16Order1Buf::new();
 
         while let Some(ttype) = read_u8(src) {
             let ty = ttype & 0x3f;
@@ -237,7 +276,7 @@ impl Streams {
                 // r[impl cram.codec.tok3_arith]
                 let decoded = match arith {
                     Some(arith) => arith(data)?,
-                    None => rans_nx16::decode_with_buf(data, 0, &mut rans_buf)?,
+                    None => rans_nx16::decode_with_buf(data, 0, rans_buf)?,
                 };
                 streams.decoded.push(decoded);
                 Source::Decoded(streams.decoded.len().saturating_sub(1))

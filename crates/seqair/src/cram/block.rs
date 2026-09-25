@@ -224,7 +224,10 @@ fn decompress_block(
             Ok(data)
         }
         // r[impl cram.codec.tok3]
-        8 => super::tok3::decode(compressed),
+        8 => match nx16_order1_buf {
+            Some(buf) => super::tok3::decode_with_buf(compressed, buf),
+            None => super::tok3::decode(compressed),
+        },
         // r[impl cram.codec.unknown]
         _ => Err(CramError::UnsupportedCodec { method, content_type, content_id }),
     }

@@ -373,10 +373,13 @@ fn cram_tok3_decode(c: &mut Criterion) {
         }
         group.throughput(Throughput::Bytes(decoded as u64));
 
+        // Tables kept from block to block, as the CRAM reader keeps them
+        // (and htscodecs, in thread-local memory).
+        let mut decoder = seqair::cram::tok3::Decoder::new();
         group.bench_function(format!("seqair/{name}"), |b| {
             b.iter(|| {
                 for block in blocks {
-                    black_box(seqair::cram::tok3::decode(black_box(block)).unwrap());
+                    black_box(decoder.decode(black_box(block)).unwrap());
                 }
             });
         });

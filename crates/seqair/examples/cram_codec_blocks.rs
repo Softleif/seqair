@@ -35,10 +35,16 @@ const ROUNDS: usize = 7;
 /// Enough repeats that a round of the smallest set takes a few milliseconds.
 const REPEATS: usize = 20;
 
+/// What seqair's decoders keep between blocks, as the CRAM reader keeps it.
+#[derive(Default)]
+struct Seqair {
+    tok3: seqair::cram::tok3::Decoder,
+}
+
 struct Codec {
     name: &'static str,
     method: u8,
-    seqair: fn(&RawBlock) -> Vec<u8>,
+    seqair: fn(&mut Seqair, &RawBlock) -> Vec<u8>,
     htscodecs: fn(&RawBlock) -> htscodecs::MallocBuf,
 }
 
@@ -46,19 +52,19 @@ const CODECS: [Codec; 3] = [
     Codec {
         name: "arith",
         method: ARITH,
-        seqair: |b| seqair::cram::arith::decode(&b.data, b.uncompressed_len).unwrap(),
+        seqair: |_, b| seqair::cram::arith::decode(&b.data, b.uncompressed_len).unwrap(),
         htscodecs: |b| htscodecs::arith_uncompress(&b.data).unwrap(),
     },
     Codec {
         name: "fqzcomp",
         method: FQZCOMP,
-        seqair: |b| seqair::cram::fqzcomp::decode(&b.data).unwrap(),
+        seqair: |_, b| seqair::cram::fqzcomp::decode(&b.data).unwrap(),
         htscodecs: |b| htscodecs::fqz_decompress(&b.data).unwrap(),
     },
     Codec {
         name: "tok3",
         method: TOK3,
-        seqair: |b| seqair::cram::tok3::decode(&b.data).unwrap(),
+        seqair: |s, b| s.tok3.decode(&b.data).unwrap(),
         htscodecs: |b| htscodecs::tok3_decode_names(&b.data).unwrap(),
     },
 ];
@@ -75,6 +81,7 @@ fn main() {
         }
     }
     let blocks = raw_blocks(&std::fs::read(&path).unwrap());
+    let mut state = Seqair::default();
 
     for codec in CODECS.iter().filter(|c| only.as_deref().is_none_or(|o| o == c.name)) {
         let set: Vec<&RawBlock> = blocks.iter().filter(|b| b.method == codec.method).collect();
@@ -82,7 +89,7 @@ fn main() {
             continue;
         }
         for (i, block) in set.iter().enumerate() {
-            let ours = (codec.seqair)(block);
+            let ours = (codec.seqair)(&mut state, block);
             assert_eq!(ours.len(), block.uncompressed_len, "{} block {i}: length", codec.name);
             let theirs = (codec.htscodecs)(block);
             assert!(
@@ -99,7 +106,7 @@ fn main() {
         for _ in 0..ROUNDS {
             best_ours = best_ours.min(time(|| {
                 for block in &set {
-                    black_box((codec.seqair)(black_box(block)));
+                    black_box((codec.seqair)(&mut state, black_box(block)));
                 }
             }));
             best_theirs = best_theirs.min(time(|| {

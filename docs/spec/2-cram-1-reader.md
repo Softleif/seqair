@@ -361,6 +361,9 @@ Exactly the header's name count is decoded ([CRAMcodecs] `DecodeNames`; htscodec
 r[cram.codec.tok3.limits]
 The header is untrusted: the name count MUST be at most 10 million (`r[cram.tok3.name_count_limit]`), the uncompressed length MUST pass the codec output cap (`r[io.fuzz.codec_output_cap]`), and the output MUST NOT exceed the uncompressed length by more than 1 KiB — htscodecs' own margin: its encoder writes the exact length, but noodles' leaves out the last name's NUL — so a name count above that bound, which leaves less than a NUL per name, is rejected before anything is allocated for the names.
 
+r[cram.codec.tok3.table_reuse]
+A tok3 block's rANS Nx16 streams share one set of order-1 tables, and the CRAM reader passes in its own (`r[cram.codec.rans_nx16]`'s reusable buffer), so blocks after the first build none: at about 5 MiB they cost more to allocate and clear than a small name block takes to decode. A public `tok3::Decoder` keeps them the same way; `tok3::decode` builds them per call.
+
 r[cram.codec.tok3.reference]
 A spec-literal reference decoder (`cram::tok3_reference`, test and fuzz builds only) transliterates the [CRAMcodecs] pseudocode with the choices above and shares no tok3 code with the production decoder. Over the same arithmetic decoder, the production decoder's output and error-or-not MUST equal the reference's for every input.
 
