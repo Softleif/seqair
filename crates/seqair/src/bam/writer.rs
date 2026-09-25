@@ -415,8 +415,10 @@ impl<'a, T> BamWriterBuilder<'a, T> {
 }
 
 impl<'a> BamWriterBuilder<'a, ToPath<'a>> {
-    /// Create the file, wrap it in [`BufWriter`] + [`BgzfWriter`], and write
-    /// the BAM header eagerly.
+    /// Create the file, wrap it in [`BufWriter`] and a BGZF compressor
+    /// ([`BgzfWriter`](crate::io::BgzfWriter), or a pool of workers under
+    /// [`compression_threads`](Self::compression_threads)), and write the BAM
+    /// header eagerly.
     pub fn build(self) -> Result<BamWriter<BufWriter<File>>, BamWriteError> {
         let file = File::create(self.target.path)?;
         let inner = BufWriter::new(file);
@@ -426,8 +428,10 @@ impl<'a> BamWriterBuilder<'a, ToPath<'a>> {
 }
 
 impl<W: Write> BamWriterBuilder<'_, ToWriter<W>> {
-    /// Wrap the supplied writer in a [`BgzfWriter`] and write the BAM header
-    /// eagerly.
+    /// Wrap the supplied writer in a BGZF compressor
+    /// ([`BgzfWriter`](crate::io::BgzfWriter), or a pool of workers under
+    /// [`compression_threads`](Self::compression_threads)), and write the BAM
+    /// header eagerly.
     ///
     /// `write_index(true)` is honoured only on path targets; for an arbitrary
     /// writer there is no sidecar `.bai` location, and BAI virtual offsets
