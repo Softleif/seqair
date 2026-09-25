@@ -209,6 +209,17 @@ fn decompress_block(
             Some(buf) => super::rans_nx16::decode_with_buf(compressed, uncompressed_size, buf),
             None => super::rans_nx16::decode(compressed, uncompressed_size),
         },
+        // r[impl cram.codec.fqzcomp]
+        7 => {
+            let data = super::fqzcomp::decode(compressed)?;
+            if data.len() != uncompressed_size {
+                return Err(CramError::FqzcompSizeMismatch {
+                    expected: uncompressed_size,
+                    found: data.len(),
+                });
+            }
+            Ok(data)
+        }
         // r[impl cram.codec.tok3]
         8 => super::tok3::decode(compressed),
         // r[impl cram.codec.unknown]

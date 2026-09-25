@@ -65,3 +65,51 @@ fn truncated_vectors_error_instead_of_panicking() {
         assert!(fqzcomp::decode(prefix).is_err(), "decoded a stream cut at {cut}");
     }
 }
+
+/// ITF8 as in CRAM3 §2.3, for values below 2^28.
+fn itf8(v: u32) -> Vec<u8> {
+    let [b0, b1, b2, b3] = v.to_be_bytes();
+    match v {
+        0..0x80 => vec![b3],
+        0x80..0x4000 => vec![0x80 | b2, b3],
+        0x4000..0x20_0000 => vec![0xC0 | b1, b2, b3],
+        0x20_0000..0x1000_0000 => vec![0xE0 | b0, b1, b2, b3],
+        _ => panic!("test values stay below 2^28"),
+    }
+}
+
+/// An external-data CRAM block holding `data` compressed with method 7.
+fn fqzcomp_block(data: &[u8], uncompressed_size: u32) -> Vec<u8> {
+    let mut block = vec![7, 4];
+    block.extend(itf8(11)); // content id
+    block.extend(itf8(u32::try_from(data.len()).unwrap()));
+    block.extend(itf8(uncompressed_size));
+    block.extend_from_slice(data);
+    let mut crc = libdeflater::Crc::new();
+    crc.update(&block);
+    block.extend(crc.sum().to_le_bytes());
+    block
+}
+
+// r[verify cram.codec.fqzcomp]
+#[test]
+fn block_method_7_decodes_and_checks_the_header_size() {
+    use seqair::cram::{CramError, block::parse_block};
+
+    let data = fs::read(codecs_dir().join("fqzcomp").join("q8.2")).unwrap();
+    let want = expected("q8");
+    let size = u32::try_from(want.len()).unwrap();
+
+    let bytes = fqzcomp_block(&data, size);
+    let (block, used) = parse_block(&bytes).unwrap();
+    assert_eq!(block.content_id, 11);
+    assert_eq!(block.data, want);
+    assert_eq!(used, bytes.len());
+
+    let err = parse_block(&fqzcomp_block(&data, size - 1)).unwrap_err();
+    assert!(
+        matches!(err, CramError::FqzcompSizeMismatch { expected, found }
+            if expected == want.len() - 1 && found == want.len()),
+        "{err:?}"
+    );
+}
