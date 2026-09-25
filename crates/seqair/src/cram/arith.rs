@@ -3,7 +3,7 @@
 //! "range").
 //!
 //! An adaptive order-0 or order-1 model over the byte-wise range coder of
-//! [`super::range_coder`], optionally with run lengths coded alongside, and
+//! the crate-private `range_coder` module, optionally with run lengths coded alongside, and
 //! wrapped in the same transforms as rANS Nx16: STRIPE, PACK, CAT, plus EXT
 //! (bzip2). Follows htscodecs' `arith_dynamic.c` where the spec's pseudocode
 //! differs; `docs/spec/2-cram-1-reader.md` names each place.

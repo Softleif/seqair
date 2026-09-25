@@ -10,8 +10,6 @@ pub mod compression_header;
 pub mod container;
 pub mod encoding;
 pub mod fqzcomp;
-/// A plain, spec-literal fqzcomp decoder that tests and fuzz targets check
-/// [`fqzcomp`] against.
 #[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]
 pub mod fqzcomp_reference;
@@ -29,8 +27,6 @@ pub mod rans_nx16_neon {}
 pub mod reader;
 pub mod slice;
 pub mod tok3;
-/// A plain, spec-literal tok3 decoder that tests and fuzz targets check
-/// [`tok3`] against.
 #[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]
 pub mod tok3_reference;
