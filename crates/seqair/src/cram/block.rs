@@ -143,7 +143,7 @@ fn parse_block_inner(
         .ok_or_else(|| CramError::Truncated { context: "block pos after CRC" })?;
 
     let uncompressed_size = uncompressed_size as usize;
-    super::reader::check_alloc_size(uncompressed_size, "block uncompressed size")?;
+    super::reader::check_codec_output(uncompressed_size, "block uncompressed size")?;
 
     let data = decompress_block(
         method,

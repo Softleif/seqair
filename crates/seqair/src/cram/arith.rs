@@ -19,7 +19,7 @@ pub mod reference;
 use super::codec_io::{self, Uint7Error, read_u8};
 use super::range_coder::{AdaptiveModel, RangeDecoder};
 use super::rans_nx16::{apply_bit_unpack, read_bit_pack_context};
-use super::reader::{CramError, check_alloc_size};
+use super::reader::{CramError, check_codec_output};
 
 /// The ORDER field: order-1 when it is exactly 1 (htscodecs decodes the
 /// reserved 2 and 3 as order-0).
@@ -76,7 +76,7 @@ fn decode_nested(src: &[u8], uncompressed_size: usize, depth: u8) -> Result<Vec<
 
     let len = if flags & FLAG_NO_SIZE != 0 { uncompressed_size } else { read_uint7(&mut cur)? };
     // r[impl io.fuzz.alloc_limits]
-    check_alloc_size(len, "arith output")?;
+    check_codec_output(len, "arith output")?;
 
     let pack = if flags & FLAG_PACK != 0 {
         let (ctx, packed_len) = read_bit_pack_context(&mut cur, len)?;
@@ -231,7 +231,7 @@ fn decode_stripe(mut cur: &[u8], depth: u8) -> Result<Vec<u8>, CramError> {
     // The length is stored whatever NOSZ says.
     let len = read_uint7(&mut cur)?;
     // r[impl io.fuzz.alloc_limits]
-    check_alloc_size(len, "arith stripe output")?;
+    check_codec_output(len, "arith stripe output")?;
     let n = usize::from(
         read_u8(&mut cur).ok_or(CramError::Truncated { context: "arith stripe count" })?,
     );

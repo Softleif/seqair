@@ -127,7 +127,7 @@ fn decode_nested(
     if flags & FLAG_NO_SIZE == 0 {
         uncompressed_size = read_uint7(&mut cur)? as usize;
     }
-    super::reader::check_alloc_size(uncompressed_size, "rANS Nx16 output")?;
+    super::reader::check_codec_output(uncompressed_size, "rANS Nx16 output")?;
 
     if flags & FLAG_STRIPE != 0 {
         return decode_stripe_with_buf(&mut cur, uncompressed_size, buf, depth);
@@ -151,7 +151,7 @@ fn decode_nested(
 
     // r[impl io.fuzz.alloc_limits]
     // Re-check after PACK/RLE transforms may have updated uncompressed_size.
-    super::reader::check_alloc_size(uncompressed_size, "rANS Nx16 output (post-transform)")?;
+    super::reader::check_codec_output(uncompressed_size, "rANS Nx16 output (post-transform)")?;
     let mut dst = vec![0u8; uncompressed_size];
 
     if flags & FLAG_CAT != 0 {

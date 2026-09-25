@@ -287,6 +287,26 @@ pub(crate) fn check_alloc_size(size: usize, context: &'static str) -> Result<(),
     Ok(())
 }
 
+/// The largest output one codec call may produce. `MAX_ALLOC_SIZE` in normal
+/// builds. Under `cfg(fuzzing)` (cargo-fuzz) it is 4 MiB: a few bytes of a
+/// valid rANS, arith or fqzcomp stream can expand to the full limit, and
+/// filling 256 MiB per input starves the fuzzer without reaching new code.
+/// htscodecs caps at 100 000 bytes in its fuzzing builds; 4 MiB keeps the
+/// seeds' real blocks (up to ~2.3 MB) decodable.
+#[cfg(not(fuzzing))]
+const MAX_CODEC_OUTPUT: usize = MAX_ALLOC_SIZE;
+#[cfg(fuzzing)]
+const MAX_CODEC_OUTPUT: usize = 4 * 1024 * 1024;
+
+// r[impl io.fuzz.codec_output_cap]
+/// Check a codec's claimed output size against [`MAX_CODEC_OUTPUT`].
+pub(crate) fn check_codec_output(size: usize, context: &'static str) -> Result<(), CramError> {
+    if size > MAX_CODEC_OUTPUT {
+        return Err(CramError::AllocationTooLarge { size, limit: MAX_CODEC_OUTPUT, context });
+    }
+    Ok(())
+}
+
 pub struct CramShared {
     pub index: CramIndex,
     pub header: BamHeader,

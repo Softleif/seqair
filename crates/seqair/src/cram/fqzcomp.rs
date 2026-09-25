@@ -19,7 +19,7 @@
 
 use super::codec_io::{Uint7Error, read_u8, read_u16_le, read_uint7, split_off};
 use super::range_coder::{AdaptiveModel, RangeDecoder, SymFreq, decode_symbol};
-use super::reader::{CramError, check_alloc_size};
+use super::reader::{CramError, check_codec_output};
 
 /// The only fqzcomp stream version htscodecs reads or writes (`FQZ_VERS`).
 const VERSION: u8 = 5;
@@ -72,7 +72,7 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
     })?;
     let out_len = out_len as usize;
     // r[impl cram.codec.fqzcomp.alloc]
-    check_alloc_size(out_len, "fqzcomp output")?;
+    check_codec_output(out_len, "fqzcomp output")?;
 
     let params = Params::parse(&mut cur)?;
     if out_len == 0 {

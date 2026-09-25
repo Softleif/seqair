@@ -92,7 +92,7 @@ pub(crate) fn decode_with_buf(src: &[u8], buf: &mut Rans4x8Buf) -> Result<Vec<u8
         });
     }
 
-    super::reader::check_alloc_size(uncompressed_size, "rANS 4x8 output")?;
+    super::reader::check_codec_output(uncompressed_size, "rANS 4x8 output")?;
     let mut dst = vec![0u8; uncompressed_size];
 
     match order {

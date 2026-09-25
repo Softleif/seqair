@@ -64,7 +64,7 @@ fn decode_with(
     }
 
     // Each name slot needs ~48 bytes (two Vecs), plus the output buffer.
-    super::reader::check_alloc_size(
+    super::reader::check_codec_output(
         name_count.saturating_mul(48).saturating_add(uncompressed_size),
         "tok3 output",
     )?;
