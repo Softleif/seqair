@@ -38,8 +38,8 @@
 //! Beyond the format it applies the crate's resource policy, so it fails
 //! exactly where the production decoder does: at most 10 million names
 //! (htscodecs' limit), the codec output cap on the header's uncompressed
-//! length, and no more output than that length (htscodecs allows about
-//! 1 KiB more; its encoder writes the exact length).
+//! length, and no more output than that length plus 1 KiB (htscodecs'
+//! margin: its encoder writes the exact length, noodles' one byte less).
 //!
 //! Every failure is `None`: the reference only has to say *whether* a block
 //! decodes, and to what.
@@ -74,6 +74,10 @@ const MAX_TOKENS: usize = 128;
 
 /// Not in the spec: htscodecs' limit on the name count.
 const MAX_NAMES: usize = 10_000_000;
+
+/// Not in the spec: how far past the header's uncompressed length the
+/// output may run (htscodecs' margin).
+const OUTPUT_SLACK: usize = 1024;
 
 /// Decode a tok3 block, arithmetic-coded streams with
 /// [`super::arith::reference::decode`]. `None` for an invalid block.
@@ -231,13 +235,17 @@ fn decode_names(
 
     // Not in the spec: the resource policy (see the module docs). Every name
     // adds at least its NUL, so more names than output bytes cannot decode.
-    if nnames > MAX_NAMES || check_codec_output(ulen, "tok3 reference").is_err() || nnames > ulen {
+    let max_output = ulen + OUTPUT_SLACK;
+    if nnames > MAX_NAMES
+        || check_codec_output(ulen, "tok3 reference").is_err()
+        || nnames > max_output
+    {
         return None;
     }
 
     let mut b = decode_token_byte_streams(input, use_arith, nnames, arith_decode)?;
 
-    let mut names = Names { n: Vec::new(), t: Vec::new(), out: Vec::new(), ulen };
+    let mut names = Names { n: Vec::new(), t: Vec::new(), out: Vec::new(), max_output };
     for n in 0..nnames {
         names.decode_single_name(&mut b, n)?;
     }
@@ -310,7 +318,7 @@ struct Names {
     /// `T[n][t - 1]` is `T_{n,t}`: positions start at 1.
     t: Vec<Vec<Token>>,
     out: Vec<u8>,
-    ulen: usize,
+    max_output: usize,
 }
 
 impl Names {
@@ -388,8 +396,9 @@ impl Names {
             };
             name.extend(token.text());
             tokens.push(token);
-            // Not in the spec: stop as soon as the output would pass ulen.
-            if self.out.len() + name.len() + 1 > self.ulen {
+            // Not in the spec: stop as soon as the output would pass its
+            // bound.
+            if self.out.len() + name.len() + 1 > self.max_output {
                 return None;
             }
             if ty == END {
@@ -403,7 +412,7 @@ impl Names {
     /// Record `N_n` and `T_n`, and append the name and its NUL ("END: a nul
     /// byte is added to the name output buffer") to the output.
     fn finish(&mut self, name: Vec<u8>, tokens: Vec<Token>) -> Option<()> {
-        if self.out.len() + name.len() + 1 > self.ulen {
+        if self.out.len() + name.len() + 1 > self.max_output {
             return None;
         }
         self.out.extend(&name);
@@ -514,6 +523,7 @@ mod tests {
     /// The production decoder and the reference, over the same arithmetic
     /// decoder, agree on whether `block` decodes and to what — both with the
     /// production arithmetic decoder and with the reference one.
+    // r[verify cram.codec.tok3.reference]
     fn assert_agree(block: &[u8]) {
         let production = tok3::decode(block).ok();
         let reference = super::decode_with(block, |s| arith::decode(s, 0).ok());
