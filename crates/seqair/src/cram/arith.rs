@@ -10,6 +10,10 @@
 
 use std::io::Read;
 
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod reference;
+
 use super::codec_io::{self, Uint7Error, read_u8};
 use super::range_coder::{AdaptiveModel, RangeDecoder};
 use super::rans_nx16::{apply_bit_unpack, read_bit_pack_context};
@@ -563,6 +567,7 @@ mod tests {
         tc.note(&format!("layout: {layout:?}"));
         let stream = encode(&layout, &data);
         assert_eq!(decode(&stream, data.len()).unwrap(), data);
+        assert_eq!(reference::decode(&stream, data.len()), Some(data), "reference decoder");
     }
 
     // r[verify cram.codec.arith.order]
@@ -576,6 +581,7 @@ mod tests {
             Layout::Plain { coder: Coder::Range { order, rle }, pack: false, no_size: false };
         let stream = encode(&layout, &data);
         assert_eq!(decode(&stream, 0).unwrap(), data);
+        assert_eq!(reference::decode(&stream, 0), Some(data), "reference decoder");
     }
 
     // r[verify cram.codec.arith.stripe]
@@ -691,14 +697,25 @@ mod tests {
         }
     }
 
+    /// Where the production and reference decoders both accept a stream they
+    /// agree on its bytes. Their verdicts can differ on invalid streams; the
+    /// reference's module docs list where.
+    fn assert_agree(stream: &[u8], size: usize) {
+        if let (Ok(ours), Some(theirs)) = (decode(stream, size), reference::decode(stream, size)) {
+            assert!(ours == theirs, "production and reference decoders disagree");
+        }
+    }
+
+    // r[verify cram.codec.arith+2]
     #[hegel::test]
     fn arbitrary_input_never_panics(tc: TestCase) {
         let bytes = tc.draw(gs::binary().max_size(512));
         let size = tc.draw(gs::integers::<usize>().max_value(4096));
-        let _ = decode(&bytes, size);
+        assert_agree(&bytes, size);
     }
 
     /// Corrupting a valid stream reaches deeper paths than random bytes.
+    // r[verify cram.codec.arith+2]
     #[hegel::test]
     fn corrupted_streams_never_panic(tc: TestCase) {
         let data = tc.draw(arb_data());
@@ -712,6 +729,6 @@ mod tests {
             let len = stream.len();
             stream[at % len] ^= x;
         }
-        let _ = decode(&stream, data.len());
+        assert_agree(&stream, data.len());
     }
 }
