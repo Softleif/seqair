@@ -121,9 +121,66 @@ const DEFAULT_LEVEL: i32 = 6;
 /// Capacity of the plain-VCF output buffer.
 const PLAIN_OUTPUT_BUFFER: usize = 128 * 1024;
 
+// r[impl vcf_writer.buffered_output]
+/// Plain VCF's buffered sink. Dropped without [`into_inner`](Self::into_inner),
+/// it flushes and logs a failure — `BufWriter`'s own drop would discard the
+/// error, and with it up to a buffer's worth of records, without a word.
+struct PlainOutput<W: Write>(Option<std::io::BufWriter<W>>);
+
+impl<W: Write> PlainOutput<W> {
+    fn new(inner: W) -> Self {
+        Self(Some(std::io::BufWriter::with_capacity(PLAIN_OUTPUT_BUFFER, inner)))
+    }
+
+    /// Flush the buffer and then the sink, and hand the sink back.
+    fn into_inner(mut self) -> Result<W, VcfError> {
+        let Some(buffered) = self.0.take() else {
+            return Err(VcfError::Io(std::io::ErrorKind::NotConnected.into()));
+        };
+        let mut inner = buffered.into_inner().map_err(|e| VcfError::Io(e.into_error()))?;
+        inner.flush().map_err(VcfError::Io)?;
+        Ok(inner)
+    }
+}
+
+// The `None` arms are unreachable: only `into_inner` empties the option, and it
+// consumes `self`.
+impl<W: Write> Write for PlainOutput<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match &mut self.0 {
+            Some(w) => w.write(buf),
+            None => Err(std::io::ErrorKind::NotConnected.into()),
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        match &mut self.0 {
+            Some(w) => w.write_all(buf),
+            None => Err(std::io::ErrorKind::NotConnected.into()),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match &mut self.0 {
+            Some(w) => w.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<W: Write> Drop for PlainOutput<W> {
+    fn drop(&mut self) {
+        if let Some(w) = &mut self.0
+            && let Err(e) = w.flush()
+        {
+            tracing::warn!("vcf::Writer dropped without finish(): flushing VCF output failed: {e}");
+        }
+    }
+}
+
 enum WriterInner<W: Write> {
     Vcf {
-        output: std::io::BufWriter<W>,
+        output: PlainOutput<W>,
         buf: Vec<u8>,
         fmt_keys: Vec<SmolStr>,
         sample_bufs: Vec<Vec<u8>>,
@@ -156,7 +213,7 @@ impl<W: Write> Writer<W> {
     pub fn new(inner: W, format: OutputFormat) -> Self {
         let inner = match format {
             OutputFormat::Vcf => WriterInner::Vcf {
-                output: std::io::BufWriter::with_capacity(PLAIN_OUTPUT_BUFFER, inner),
+                output: PlainOutput::new(inner),
                 buf: Vec::with_capacity(4096),
                 fmt_keys: Vec::with_capacity(8),
                 sample_bufs: Vec::new(),
@@ -388,9 +445,7 @@ impl<W: Write> Writer<W, Ready> {
         match self.inner {
             WriterInner::Vcf { output, .. } => {
                 // r[impl vcf_writer.buffered_output]
-                let mut output = output.into_inner().map_err(|e| VcfError::Io(e.into_error()))?;
-                output.flush().map_err(VcfError::Io)?;
-                Ok((output, None))
+                Ok((output.into_inner()?, None))
             }
             WriterInner::VcfGz { bgzf, mut index, .. } => {
                 // r[impl vcf_writer.finish]

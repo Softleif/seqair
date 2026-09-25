@@ -298,3 +298,66 @@ fn plain_vcf_is_buffered_and_complete(tc: TestCase) {
         bytes.len()
     );
 }
+
+/// A sink every write to which fails.
+struct FailingSink;
+
+impl std::io::Write for FailingSink {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Counts WARN events; nothing else about tracing matters here.
+struct WarnCounter(Arc<std::sync::atomic::AtomicUsize>);
+
+impl tracing::Subscriber for WarnCounter {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// A plain-VCF writer holding one buffered record over a sink that fails.
+fn writer_over_failing_sink() -> Writer<FailingSink, seqair::vcf::Ready> {
+    let setup = make_simple_setup();
+    let alleles = Alleles::snv(Base::A, Base::C).unwrap();
+    // The header and the record fit the buffer, so nothing reaches the sink yet.
+    let mut writer =
+        Writer::new(FailingSink, OutputFormat::Vcf).write_header(&setup.header).unwrap();
+    let mut enc = writer
+        .begin_record(&setup.contig, Pos1::new(1).unwrap(), &alleles, None)
+        .unwrap()
+        .filter_pass();
+    setup.dp_info.encode(&mut enc, 7);
+    enc.emit().unwrap();
+    writer
+}
+
+// r[verify vcf_writer.buffered_output]
+/// Buffering must not make a failed write silent: `finish` returns it, and a
+/// writer dropped without `finish` logs it.
+#[test]
+fn a_failed_flush_of_buffered_vcf_is_reported() {
+    assert!(writer_over_failing_sink().finish().is_err(), "finish reports the failed write");
+
+    let warns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tracing::subscriber::with_default(WarnCounter(Arc::clone(&warns)), || {
+        drop(writer_over_failing_sink());
+    });
+    assert_eq!(warns.load(std::sync::atomic::Ordering::Relaxed), 1, "drop logs the failed flush");
+}
