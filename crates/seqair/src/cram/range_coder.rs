@@ -419,4 +419,51 @@ mod tests {
             }
         }
     }
+
+    /// Against the `CRAMcodecs` §4 pseudocode, transliterated in
+    /// `fqzcomp_reference`: several models of different sizes interleaved
+    /// over one coder give the same symbols and fail at the same point, on
+    /// encoded streams and on noise.
+    // r[verify cram.codec.range_coder]
+    // r[verify cram.codec.adaptive_model]
+    #[hegel::test]
+    fn matches_the_spec_pseudocode(tc: TestCase) {
+        use super::super::fqzcomp_reference as spec;
+
+        let sizes: Vec<usize> = tc.draw(
+            gs::vecs(gs::integers::<usize>().min_value(1).max_value(256)).min_size(1).max_size(4),
+        );
+        let n = tc.draw(gs::integers::<usize>().max_value(5_000));
+        let bytes = if tc.draw(gs::booleans()) {
+            // Skewed symbols, so models renormalise and reorder.
+            let hot = tc.draw(gs::integers::<usize>().min_value(1).max_value(256));
+            let picks = tc.draw(gs::binary().min_size(n).max_size(n));
+            let mut enc = RangeEncoder::new();
+            let mut ms: Vec<_> = sizes.iter().map(|&s| AdaptiveModel::<256>::new(s)).collect();
+            for (i, &b) in picks.iter().enumerate() {
+                let k = i % sizes.len();
+                ms[k].encode(&mut enc, (usize::from(b) % hot % sizes[k]) as u16);
+            }
+            enc.finish()
+        } else {
+            tc.draw(gs::binary().max_size(64))
+        };
+
+        let (Ok(mut rc), Some(mut spec_rc)) =
+            (RangeDecoder::new(&bytes), spec::RangeDecoder::new(&bytes))
+        else {
+            assert!(bytes.len() < 5, "both need exactly five bytes to start");
+            return;
+        };
+        let mut ms: Vec<_> = sizes.iter().map(|&s| AdaptiveModel::<256>::new(s)).collect();
+        let mut spec_ms: Vec<_> = sizes.iter().map(|&s| spec::Model::new(s)).collect();
+        for i in 0..n.max(64) {
+            let k = i % sizes.len();
+            let got = ms[k].decode(&mut rc);
+            assert_eq!(got, spec_ms[k].decode(&mut spec_rc), "symbol {i}");
+            if got.is_none() {
+                break;
+            }
+        }
+    }
 }

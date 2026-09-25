@@ -9,6 +9,11 @@ pub mod compression_header;
 pub mod container;
 pub mod encoding;
 pub mod fqzcomp;
+/// A plain, spec-literal fqzcomp decoder that tests and fuzz targets check
+/// [`fqzcomp`] against.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod fqzcomp_reference;
 pub mod index;
 pub(crate) mod range_coder;
 pub mod rans;
