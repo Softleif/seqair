@@ -282,5 +282,64 @@ fn cram_full_decode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, cram_record_decode, cram_pileup_e2e, cram_full_decode,);
+// ---------------------------------------------------------------------------
+// Group 4: the arithmetic coder (method 6)
+// hts-specs range vectors decoded by seqair and by htscodecs'
+// `arith_uncompress_to` (in the htslib rust-htslib links); throughput is
+// decoded bytes.
+// ---------------------------------------------------------------------------
+
+mod htscodecs {
+    unsafe extern "C" {
+        pub fn arith_uncompress_to(
+            input: *mut u8,
+            in_size: std::ffi::c_uint,
+            out: *mut u8,
+            out_size: *mut std::ffi::c_uint,
+        ) -> *mut u8;
+    }
+}
+
+const RANGE_VECTORS: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/hts-specs/cram/codecs/range/");
+
+fn cram_arith_decode(c: &mut Criterion) {
+    use criterion::Throughput;
+
+    let mut group = c.benchmark_group("cram_arith_decode");
+    // Order-0/1, RLE, PACK+RLE and STRIPE, over binned, unbinned and
+    // long-read qualities and u32s.
+    for name in ["q4.1", "q8.193", "q40+dir.0", "q40+dir.1", "q40+dir.65", "qvar.1", "u32.9"] {
+        let src = std::fs::read(format!("{RANGE_VECTORS}{name}")).unwrap();
+        let len = seqair::cram::arith::decode(&src, 0).unwrap().len();
+        group.throughput(Throughput::Bytes(len as u64));
+
+        group.bench_function(format!("seqair/{name}"), |b| {
+            b.iter(|| black_box(seqair::cram::arith::decode(black_box(&src), 0).unwrap()));
+        });
+
+        group.bench_function(format!("htscodecs/{name}"), |b| {
+            let mut input = src.clone();
+            let mut out = vec![0u8; len];
+            b.iter(|| {
+                let mut out_size = std::ffi::c_uint::try_from(len).unwrap();
+                // SAFETY: `input` and `out` are live for the call and hold
+                // `in_size` and `out_size` bytes.
+                let p = unsafe {
+                    htscodecs::arith_uncompress_to(
+                        input.as_mut_ptr(),
+                        std::ffi::c_uint::try_from(input.len()).unwrap(),
+                        out.as_mut_ptr(),
+                        &raw mut out_size,
+                    )
+                };
+                assert!(!p.is_null());
+                black_box(out_size)
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, cram_record_decode, cram_pileup_e2e, cram_full_decode, cram_arith_decode);
 criterion_main!(benches);
