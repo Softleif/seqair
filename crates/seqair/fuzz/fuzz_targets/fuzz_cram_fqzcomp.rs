@@ -9,8 +9,9 @@ use seqair::cram::{fqzcomp, fqzcomp_reference};
 
 /// Streams claiming more output than this are skipped: a few input bytes can
 /// legitimately expand to the full claimed size (duplicate records cost
-/// almost nothing), and decoding hundreds of MiB per input starves the fuzzer.
-const MAX_CLAIMED_OUTPUT: u64 = 1 << 20;
+/// almost nothing), and the reference decoder is slow on large outputs.
+/// htscodecs caps its fuzzing builds at the same 100 000 bytes.
+const MAX_CLAIMED_OUTPUT: u64 = 100_000;
 
 /// The uint7 output size at the start of the stream, if it has one.
 fn claimed_output(data: &[u8]) -> Option<u64> {
