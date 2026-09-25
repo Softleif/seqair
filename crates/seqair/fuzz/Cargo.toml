@@ -78,7 +78,7 @@ name = "fuzz_cram_container"
 path = "fuzz_targets/fuzz_cram_container.rs"
 doc = false
 
-# CRAM compression codecs (rANS 4x8, Nx16, tok3, fqzcomp)
+# CRAM compression codecs (rANS 4x8, Nx16, arith, tok3, fqzcomp)
 [[bin]]
 name = "fuzz_cram_codecs"
 path = "fuzz_targets/fuzz_cram_codecs.rs"
@@ -88,6 +88,12 @@ doc = false
 [[bin]]
 name = "fuzz_cram_fqzcomp"
 path = "fuzz_targets/fuzz_cram_fqzcomp.rs"
+doc = false
+
+# CRAM arithmetic coder: production vs reference decoder, alone and in tok3
+[[bin]]
+name = "fuzz_cram_arith"
+path = "fuzz_targets/fuzz_cram_arith.rs"
 doc = false
 
 # CRAM variable-length integer decoding
