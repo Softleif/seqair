@@ -254,8 +254,10 @@ Encoding ID 4 (BYTE_ARRAY_LEN): a length encoding followed by a value encoding. 
 r[cram.encoding.byte_array_stop]
 Encoding ID 5 (BYTE_ARRAY_STOP): reads bytes from an external block until a stop byte is encountered. Used for read names (stop=0x00) and variable-length strings.
 
-r[cram.encoding.beta]
-Encoding ID 6 (BETA): fixed-width integer. Parameters: offset and number of bits. Reads from core bit stream.
+r[cram.encoding.beta+2]
+Encoding ID 6 (BETA): fixed-width integer. Parameters: `offset` (itf8) and number of bits (itf8). Reads `bits` bits MSB-first from the core bit stream (0 bits reads nothing); the value is `raw - offset`. A bit width above 32 MUST be rejected at parse time, as htslib does. BETA is valid for integer data series and for byte data series (`FC`, `BA`, `QS`, `BS`, and the value encoding of `BYTE_ARRAY_LEN`). For a byte series the decoded byte is the low 8 bits of `raw - offset` — htslib's `cram_beta_decode_char` assigns the difference to a `char`, so out-of-range values wrap rather than fail.
+
+SUBEXP and GAMMA are integer-only: htslib's decoders reject them for byte series, so a byte series is NULL, EXTERNAL, HUFFMAN or BETA.
 
 > r[cram.encoding.subexp]
 > Encoding ID 7 (SUBEXP): sub-exponential code. Parameters: `offset` (itf8) and `K` (itf8). Reads from core bit stream. Decode procedure:
