@@ -262,19 +262,25 @@ fn decode_stripe(level: Level, mut cur: &[u8], depth: u8) -> Result<Vec<u8>, Cra
     let r = len.checked_rem(n).ok_or(CramError::ArithStripeZeroStreams)?;
     let clens = (0..n).map(|_| read_uint7(&mut cur)).collect::<Result<Vec<_>, _>>()?;
 
+    let parts = clens
+        .iter()
+        .enumerate()
+        .map(|(j, &clen)| {
+            let sub = codec_io::split_off(&mut cur, clen)
+                .ok_or(CramError::Truncated { context: "arith stripe substream" })?;
+            let part_len = q.saturating_add(usize::from(j < r));
+            let part = decode_nested(level, sub, part_len, depth.saturating_add(1))?;
+            if part.len() != part_len {
+                return Err(CramError::ArithLengthMismatch {
+                    expected: part_len,
+                    actual: part.len(),
+                });
+            }
+            Ok(part)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut out = vec![0u8; len];
-    for (j, &clen) in clens.iter().enumerate() {
-        let sub = codec_io::split_off(&mut cur, clen)
-            .ok_or(CramError::Truncated { context: "arith stripe substream" })?;
-        let part_len = q.saturating_add(usize::from(j < r));
-        let part = decode_nested(level, sub, part_len, depth.saturating_add(1))?;
-        if part.len() != part_len {
-            return Err(CramError::ArithLengthMismatch { expected: part_len, actual: part.len() });
-        }
-        for (d, &s) in out.iter_mut().skip(j).step_by(n).zip(&part) {
-            *d = s;
-        }
-    }
+    codec_io::interleave_stripes(&parts, &mut out);
     Ok(out)
 }
 

@@ -1335,18 +1335,7 @@ fn decode_stripe_with_buf(
         .collect::<Result<_, _>>()?;
 
     let mut dst = vec![0u8; uncompressed_size];
-    for (i, chunk) in chunks.iter().enumerate() {
-        for (j, &s) in chunk.iter().enumerate() {
-            let idx =
-                j.checked_mul(chunk_count).and_then(|v| v.checked_add(i)).ok_or_else(|| {
-                    CramError::Truncated { context: "rans_nx16 stripe index overflow" }
-                })?;
-            if let Some(d) = dst.get_mut(idx) {
-                *d = s;
-            }
-        }
-    }
-
+    super::codec_io::interleave_stripes(&chunks, &mut dst);
     Ok(dst)
 }
 

@@ -76,6 +76,39 @@ pub fn read_uint7(src: &mut &[u8]) -> Result<u32, Uint7Error> {
     Err(Uint7Error::Overflow)
 }
 
+/// Interleave STRIPE substreams, as rANS Nx16 and the arithmetic coder
+/// both lay them out: `out[i * n + j] = parts[j][i]` for the `n` parts, as
+/// far as each part reaches (a well-formed part `j` holds `out.len() / n`
+/// bytes, plus one if `j < out.len() % n`; bytes past its slots are
+/// ignored and slots past its end left alone). Four parts — a stream of
+/// `u32`s — take a path LLVM vectorizes when every part fills its rows.
+pub(crate) fn interleave_stripes(parts: &[Vec<u8>], out: &mut [u8]) {
+    let n = parts.len();
+    if let [a, b, c, d] = parts {
+        let rows = out.len().div_euclid(4);
+        if let (Some(a), Some(b), Some(c), Some(d)) =
+            (a.get(..rows), b.get(..rows), c.get(..rows), d.get(..rows))
+        {
+            let (full, tail) = out.split_at_mut(rows.saturating_mul(4));
+            let (full, _) = full.as_chunks_mut::<4>();
+            for ((((dst, &a), &b), &c), &d) in full.iter_mut().zip(a).zip(b).zip(c).zip(d) {
+                *dst = [a, b, c, d];
+            }
+            for (dst, part) in tail.iter_mut().zip(parts) {
+                if let Some(&s) = part.get(rows) {
+                    *dst = s;
+                }
+            }
+            return;
+        }
+    }
+    for (j, part) in parts.iter().enumerate() {
+        for (dst, &s) in out.iter_mut().skip(j).step_by(n).zip(part) {
+            *dst = s;
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
@@ -84,6 +117,39 @@ pub fn read_uint7(src: &mut &[u8]) -> Result<u32, Uint7Error> {
 mod tests {
     use super::*;
     use hegel::prelude::*;
+
+    /// Stripe layouts: 1 to 8 parts, each the length the layout gives it or,
+    /// now and then, a few bytes more or fewer (a malformed substream).
+    #[hegel::composite]
+    fn arb_stripes(tc: &TestCase) -> (Vec<Vec<u8>>, usize) {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(8));
+        let len = tc.draw(gs::integers::<usize>().max_value(300));
+        let parts = (0..n)
+            .map(|j| {
+                let mut part_len = len / n + usize::from(j < len % n);
+                if tc.draw(gs::integers::<u8>().max_value(7)) == 0 {
+                    part_len = (part_len + tc.draw(gs::integers::<usize>().max_value(4)))
+                        .saturating_sub(tc.draw(gs::integers::<usize>().max_value(4)));
+                }
+                tc.draw(gs::binary().min_size(part_len).max_size(part_len))
+            })
+            .collect();
+        (parts, len)
+    }
+
+    /// Every output byte comes from the part and row its index names, or
+    /// stays as it was when that part is too short.
+    #[hegel::test]
+    fn interleave_stripes_matches_the_layout(tc: TestCase) {
+        let (parts, len) = tc.draw(arb_stripes());
+        let mut out = vec![0xAA; len];
+        interleave_stripes(&parts, &mut out);
+        let n = parts.len();
+        for (idx, &b) in out.iter().enumerate() {
+            let expected = parts[idx % n].get(idx / n).copied().unwrap_or(0xAA);
+            assert_eq!(b, expected, "byte {idx} of {len}, {n} parts");
+        }
+    }
 
     // r[verify cram.codec.uint7_bounded]
     #[test]
