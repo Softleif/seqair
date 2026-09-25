@@ -350,9 +350,11 @@ fn find_vector<S: Simd>(simd: S, syms: &[SymFreq], cum: u32, target: u32) -> Opt
 /// frequencies' running sums within the block (three shift-and-adds) plus
 /// everything before it, compared against `target` all at once. The sums
 /// only grow, so the lanes at or below `target` are the entries before the
-/// symbol and their count is its index in the block; the largest of those
-/// sums is its `cum`, and the smallest sum past `target` is `cum + freq`.
-/// Neither needs the index, which leaves the vector last.
+/// symbol and their count is its index; the largest of those sums is its
+/// `cum`, and the smallest sum past `target` is `cum + freq`. Blocks go in
+/// pairs, with one exit test on the second: if the symbol is in the first,
+/// no lane of the second is at or below `target`, so the same three
+/// reductions over both blocks give the answer without a branch on which.
 ///
 /// `Ok` with the index into `blocks`, or `Err` with the running sum after
 /// the last block when `target` lies past them.
@@ -376,14 +378,32 @@ fn find_in_blocks<S: Simd>(
     let last =
         u8x16::from_slice(simd, &[14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15]);
     let mut carry = u16x8::splat(simd, u16::try_from(start).ok()?);
-    for (b, block) in blocks.iter().enumerate() {
-        let raw: &[u16; 2 * BLOCK] = bytemuck::cast_ref(block);
-        let (lo, hi) = raw.split_at(BLOCK);
-        // `SymFreq` is `repr(C)` with `freq` first: the even halves.
-        let f = u16x8::from_slice(simd, lo).unzip_low(u16x8::from_slice(simd, hi));
-        let mut p = f + zero.slide::<7>(f);
-        p = p + zero.slide::<6>(p);
-        p = p + zero.slide::<4>(p);
+    let (pairs, rest) = blocks.as_chunks::<2>();
+    for (b, [first, second]) in pairs.iter().enumerate() {
+        let p0 = block_sums(simd, first, zero);
+        let p1 = block_sums(simd, second, zero);
+        let sums0 = p0 + carry;
+        let carry1 = carry + p0.swizzle_dyn(last);
+        let sums1 = p1 + carry1;
+        let before1 = sums1.simd_le(t);
+        let bits1 = before1.to_bitmask() & 0xFF;
+        if bits1 != 0xFF {
+            let before0 = sums0.simd_le(t);
+            let bits0 = before0.to_bitmask() & 0xFF;
+            let below = before0.select(sums0, carry).max(before1.select(sums1, carry));
+            let above = before0.select(top, sums0).min(before1.select(top, sums1));
+            let cum = below.reduce_max();
+            let end = above.reduce_min();
+            return Some(Ok(Found {
+                index: 2 * b * BLOCK + (bits0 | (bits1 << BLOCK)).trailing_ones() as usize,
+                cum: u32::from(cum),
+                freq: u32::from(end - cum),
+            }));
+        }
+        carry = carry1 + p1.swizzle_dyn(last);
+    }
+    if let Some(block) = rest.first() {
+        let p = block_sums(simd, block, zero);
         let sums = p + carry;
         let before = sums.simd_le(t);
         let bits = before.to_bitmask() & 0xFF;
@@ -391,7 +411,7 @@ fn find_in_blocks<S: Simd>(
             let cum = before.select(sums, carry).reduce_max();
             let end = before.select(top, sums).reduce_min();
             return Some(Ok(Found {
-                index: b * BLOCK + bits.trailing_ones() as usize,
+                index: 2 * pairs.len() * BLOCK + bits.trailing_ones() as usize,
                 cum: u32::from(cum),
                 freq: u32::from(end - cum),
             }));
@@ -400,6 +420,20 @@ fn find_in_blocks<S: Simd>(
     }
     // Every lane of `carry` holds the running sum.
     Some(Err(u32::from(carry.reduce_max())))
+}
+
+/// The running sums of one block's frequencies, lane `i` holding the sum of
+/// entries `0..=i`.
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects, reason = "a model's frequencies sum to < 2^16")]
+fn block_sums<S: Simd>(simd: S, block: &[SymFreq; BLOCK], zero: u16x8<S>) -> u16x8<S> {
+    let raw: &[u16; 2 * BLOCK] = bytemuck::cast_ref(block);
+    let (lo, hi) = raw.split_at(BLOCK);
+    // `SymFreq` is `repr(C)` with `freq` first: the even halves.
+    let f = u16x8::from_slice(simd, lo).unzip_low(u16x8::from_slice(simd, hi));
+    let p = f + zero.slide::<7>(f);
+    let p = p + zero.slide::<6>(p);
+    p + zero.slide::<4>(p)
 }
 
 /// Halve every frequency, rounding up so none reaches zero; returns the new total.
