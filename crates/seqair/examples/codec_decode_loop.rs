@@ -1,6 +1,7 @@
 //! Profiling/A-B harness for single CRAM codec streams (not a benchmark).
 //!
-//! `codec_decode_loop <nx16|r4x8> <compressed file> <uncompressed len> <iters>`
+//! `codec_decode_loop <nx16|r4x8|arith|fqz|tok3> <compressed file> <uncompressed len> <iters>`
+//! (`arith`, `fqz` and `tok3` read the length from the stream; pass 0.)
 //! Prints the best and median MB/s (uncompressed bytes) over `iters` decodes.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout, reason = "example")]
 #![allow(
@@ -15,7 +16,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let codec = &args[1];
     let src = std::fs::read(&args[2]).unwrap();
-    let len: usize = args[3].parse().unwrap();
+    let mut len: usize = args[3].parse().unwrap();
     let iters: usize = args[4].parse().unwrap();
     let expected = args.get(5).map(|p| std::fs::read(p).unwrap());
     let mut times = Vec::with_capacity(iters);
@@ -25,9 +26,15 @@ fn main() {
         let out = match codec.as_str() {
             "nx16" => seqair::cram::rans_nx16::decode(&src, len).unwrap(),
             "r4x8" => seqair::cram::rans::decode(&src).unwrap(),
+            "arith" => seqair::cram::arith::decode(&src, len).unwrap(),
+            "fqz" => seqair::cram::fqzcomp::decode(&src).unwrap(),
+            "tok3" => seqair::cram::tok3::decode(&src).unwrap(),
             _ => panic!("codec"),
         };
         times.push(t.elapsed().as_secs_f64());
+        if len == 0 {
+            len = out.len();
+        }
         assert_eq!(out.len(), len);
         if let Some(e) = &expected {
             assert!(out == *e, "decoded bytes differ from the expected file");
