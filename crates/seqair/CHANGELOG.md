@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CRAM 3.1 blocks compressed with the adaptive arithmetic coder (method 6) decode**, as do tok3
+  read-name blocks whose streams use it — samtools writes both at `-O cram,version=3.1,archive`.
+  Every transform htscodecs writes is covered (order-0/1, RLE, PACK, STRIPE, CAT and bzip2 EXT),
+  checked against the hts-specs vectors and against htscodecs' own encoder, at about htscodecs'
+  speed. `cram::arith::decode`, and `CramError::ArithCorruptData`, `ArithStripeZeroStreams`,
+  `ArithStripeTooDeep`, `ArithLengthMismatch`, `ArithPackedLengthTooLarge` and
+  `ArithExtUnknownCodec`.
 - **CRAM 3.1 fqzcomp quality blocks (method 7) decode.** htslib writes them under the v3.1 `small`
   and `archive` profiles; such files failed with `UnsupportedCodec` before. The decoder is a
   pure-Rust port of htscodecs' `fqzcomp_qual`, which it follows where the CRAMcodecs pseudocode
@@ -30,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MissingReference`. Only a slice that needs the FASTA fails now.
 - **CRAM records carried htslib's private `cF:C` tag.** htslib stores CRAM flags in a one-byte `cF`
   tag and strips it on decode; seqair now strips it too.
+
+### Removed
+
+- `CramError::Tok3ArithmeticCoderUnsupported`: such blocks decode now.
 
 ## v0.3.1 (2026-09-25)
 
