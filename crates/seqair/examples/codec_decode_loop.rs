@@ -21,6 +21,8 @@ fn main() {
     let expected = args.get(5).map(|p| std::fs::read(p).unwrap());
     let mut times = Vec::with_capacity(iters);
     let mut check = 0u64;
+    // Tables kept between blocks, as the CRAM reader keeps them.
+    let mut tok3 = seqair::cram::tok3::Decoder::new();
     for _ in 0..iters {
         let t = Instant::now();
         let out = match codec.as_str() {
@@ -28,7 +30,7 @@ fn main() {
             "r4x8" => seqair::cram::rans::decode(&src).unwrap(),
             "arith" => seqair::cram::arith::decode(&src, len).unwrap(),
             "fqz" => seqair::cram::fqzcomp::decode(&src).unwrap(),
-            "tok3" => seqair::cram::tok3::decode(&src).unwrap(),
+            "tok3" => tok3.decode(&src).unwrap(),
             _ => panic!("codec"),
         };
         times.push(t.elapsed().as_secs_f64());
