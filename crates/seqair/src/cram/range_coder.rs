@@ -136,66 +136,90 @@ impl<const N: usize> AdaptiveModel<N> {
     /// the model's total) or truncated.
     #[inline]
     pub(crate) fn decode(&mut self, rc: &mut RangeDecoder<'_>) -> Option<u16> {
-        let target = rc.get_freq(self.total);
-        // All live frequencies sum to `total`, so a target inside it always
-        // lands on a live entry.
-        if target >= self.total {
-            return None;
-        }
         let live = self.syms.get_mut(..usize::from(self.len))?;
-        let mut cum = 0u32;
-        let mut i = 0usize;
-        loop {
-            let f = u32::from(live.get(i)?.freq);
-            #[allow(clippy::arithmetic_side_effects, reason = "cum <= total <= MAX_FREQ + STEP")]
-            if cum + f > target {
-                break;
-            }
-            #[allow(clippy::arithmetic_side_effects, reason = "as above; i < len")]
-            {
-                cum += f;
-                i += 1;
-            }
-        }
-        let entry = live.get_mut(i)?;
-        rc.decode(cum, u32::from(entry.freq))?;
-        let sym = entry.sym;
-
-        #[allow(
-            clippy::arithmetic_side_effects,
-            reason = "freq <= total <= MAX_FREQ < u16::MAX - STEP"
-        )]
-        {
-            entry.freq += STEP;
-            self.total += u32::from(STEP);
-        }
-        if self.total > MAX_FREQ {
-            self.renormalize();
-        }
-        if let Some(prev) = i.checked_sub(1)
-            && let (Some(&p), Some(&c)) = (self.syms.get(prev), self.syms.get(i))
-            && c.freq > p.freq
-        {
-            self.syms.swap(prev, i);
-        }
-        Some(sym)
+        decode_symbol(rc, &mut self.total, live)
     }
 
     /// Halve every frequency, rounding up so none reaches zero.
+    #[cfg(test)]
     fn renormalize(&mut self) {
-        let mut total = 0u32;
-        for s in self.syms.iter_mut().take(usize::from(self.len)) {
-            #[allow(
-                clippy::arithmetic_side_effects,
-                reason = "freq >> 1 <= freq; N * u16::MAX fits in u32"
-            )]
-            {
-                s.freq -= s.freq >> 1;
-                total += u32::from(s.freq);
-            }
+        if let Some(live) = self.syms.get_mut(..usize::from(self.len)) {
+            self.total = renormalize(live);
         }
-        self.total = total;
     }
+}
+
+/// Decode one symbol of the adaptive model whose live entries are `syms` and
+/// whose frequencies sum to `total`, and update the model — the body of
+/// [`AdaptiveModel::decode`], for callers that store many models of a
+/// run-time size in one arena (fqzcomp's 2^16 quality contexts).
+///
+/// Returns `None` if the input is corrupt (the coded value lies outside
+/// `total`) or truncated.
+#[inline]
+pub(crate) fn decode_symbol(
+    rc: &mut RangeDecoder<'_>,
+    total: &mut u32,
+    syms: &mut [SymFreq],
+) -> Option<u16> {
+    let target = rc.get_freq(*total);
+    // All live frequencies sum to `total`, so a target inside it always
+    // lands on a live entry.
+    if target >= *total {
+        return None;
+    }
+    let mut cum = 0u32;
+    let mut i = 0usize;
+    loop {
+        let f = u32::from(syms.get(i)?.freq);
+        #[allow(clippy::arithmetic_side_effects, reason = "cum <= total <= MAX_FREQ + STEP")]
+        if cum + f > target {
+            break;
+        }
+        #[allow(clippy::arithmetic_side_effects, reason = "as above; i < len")]
+        {
+            cum += f;
+            i += 1;
+        }
+    }
+    let entry = syms.get_mut(i)?;
+    rc.decode(cum, u32::from(entry.freq))?;
+    let sym = entry.sym;
+
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "freq <= total <= MAX_FREQ < u16::MAX - STEP"
+    )]
+    {
+        entry.freq += STEP;
+        *total += u32::from(STEP);
+    }
+    if *total > MAX_FREQ {
+        *total = renormalize(syms);
+    }
+    if let Some(prev) = i.checked_sub(1)
+        && let (Some(&p), Some(&c)) = (syms.get(prev), syms.get(i))
+        && c.freq > p.freq
+    {
+        syms.swap(prev, i);
+    }
+    Some(sym)
+}
+
+/// Halve every frequency, rounding up so none reaches zero; returns the new total.
+fn renormalize(syms: &mut [SymFreq]) -> u32 {
+    let mut total = 0u32;
+    for s in syms {
+        #[allow(
+            clippy::arithmetic_side_effects,
+            reason = "freq >> 1 <= freq; a model has far fewer than 2^16 entries, so the sum fits"
+        )]
+        {
+            s.freq -= s.freq >> 1;
+            total += u32::from(s.freq);
+        }
+    }
+    total
 }
 
 #[cfg(test)]
