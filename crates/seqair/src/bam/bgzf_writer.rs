@@ -23,6 +23,25 @@ const MAX_UNCOMPRESSED_SIZE: usize = 0xff00;
 const HEADER_LEN: usize = 18;
 const FOOTER_LEN: usize = 8;
 
+/// Largest whole block, framing included: BSIZE is a u16 holding size − 1.
+const MAX_BLOCK_LEN: usize = 1 << 16;
+
+/// libdeflate's worst case for `n` input bytes, as
+/// `libdeflate_deflate_compress_bound` computes it: all stored blocks, each of
+/// at least 5000 bytes and with 5 bytes of framing.
+#[allow(clippy::arithmetic_side_effects, reason = "const-evaluated; overflow fails the build")]
+const fn deflate_bound(n: usize) -> usize {
+    let blocks = n.div_ceil(5000);
+    n + 5 * if blocks == 0 { 1 } else { blocks }
+}
+
+// r[impl bgzf.writer.block_size]
+// Whatever the data and level, a full buffer compresses into a block that fits.
+const _: () = assert!(
+    HEADER_LEN + deflate_bound(MAX_UNCOMPRESSED_SIZE) + FOOTER_LEN <= MAX_BLOCK_LEN,
+    "a full block's worst case must fit in 64 KiB"
+);
+
 /// BGZF header template: gzip magic + DEFLATE + FEXTRA, then BC subfield.
 /// Bytes 16-17 (BSIZE) are filled per block.
 const BGZF_HEADER: [u8; 18] = [
@@ -899,6 +918,20 @@ mod tests {
         let writer = BgzfWriter::new(&mut output);
         writer.finish().unwrap();
         assert_eq!(output.len(), 28);
+    }
+
+    // r[verify bgzf.writer.block_size]
+    /// The compile-time bound models libdeflate's own: at no level can the
+    /// library's worst case for a full buffer exceed it, or overflow a block.
+    #[test]
+    fn libdeflates_bound_for_a_full_block_fits_at_every_level() {
+        let modelled = HEADER_LEN + deflate_bound(MAX_UNCOMPRESSED_SIZE) + FOOTER_LEN;
+        for level in 0..=12 {
+            let lvl = libdeflater::CompressionLvl::new(level).unwrap();
+            let actual = max_block_len(&mut libdeflater::Compressor::new(lvl));
+            assert!(actual <= modelled, "level {level}: libdeflate bound {actual} > {modelled}");
+            assert!(actual <= MAX_BLOCK_LEN, "level {level}: {actual}");
+        }
     }
 
     // r[verify bgzf.writer.block_size]
