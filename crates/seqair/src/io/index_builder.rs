@@ -331,6 +331,11 @@ impl IndexBuilder {
     /// translates them to file offsets here, once every block is written. The
     /// pseudo-bin's second chunk holds mapped/unmapped counts, not offsets, and
     /// unset sentinels stay unset.
+    ///
+    /// Until then the builder may compare offsets for order and block identity
+    /// only: anything that depends on the distance between two offsets (such as
+    /// htslib's merging of nearby chunks) has to run after this, or parallel and
+    /// serial indexes differ.
     pub(crate) fn map_offsets(&mut self, mut f: impl FnMut(VirtualOffset) -> VirtualOffset) {
         let mut map = |v: &mut VirtualOffset| {
             if v.0 != UNSET {
