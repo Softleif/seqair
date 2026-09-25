@@ -111,11 +111,23 @@ pub struct Writer<W: Write, S = Unstarted> {
     /// Contig names in rid order, captured from the header. Empty for plain
     /// VCF; used to label the coordinate index returned by [`Writer::finish`].
     contig_names: Vec<SmolStr>,
+    /// BGZF settings for `VcfGz` and `Bcf`, applied by `write_header`.
+    compression: Compression,
     _state: PhantomData<S>,
 }
 
 /// BGZF level for `VcfGz` and `Bcf` (`BgzfWriter::new`'s default).
 const DEFAULT_LEVEL: i32 = 6;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Compression {
+    level: i32,
+    threads: usize,
+}
+
+impl Compression {
+    const DEFAULT: Self = Self { level: DEFAULT_LEVEL, threads: 0 };
+}
 
 // r[impl vcf_writer.buffered_output]
 /// Capacity of the plain-VCF output buffer.
@@ -239,7 +251,22 @@ impl<W: Write> Writer<W> {
                 fmt_tracker: FieldTracker::default(),
             },
         };
-        Writer { inner, contig_names: Vec::new(), _state: PhantomData }
+        Writer {
+            inner,
+            contig_names: Vec::new(),
+            compression: Compression::DEFAULT,
+            _state: PhantomData,
+        }
+    }
+
+    // r[impl record_encoder.compression_level]
+    /// BGZF compression level for `VcfGz` and `Bcf`: 0 (stored) through 12.
+    /// Defaults to 6, htslib's default. Plain VCF is not compressed and
+    /// ignores this.
+    #[must_use]
+    pub fn compression_level(mut self, level: i32) -> Self {
+        self.compression.level = level;
+        self
     }
 
     // r[impl record_encoder.compression_threads]
@@ -249,9 +276,22 @@ impl<W: Write> Writer<W> {
     ///
     /// The calling thread keeps encoding records and writes the compressed
     /// blocks in order, so the output — and the coordinate index — is
-    /// byte-identical to the single-threaded writer's.
-    pub fn compression_threads(self, threads: usize) -> Result<Self, VcfError> {
-        let Writer { inner, contig_names, _state } = self;
+    /// byte-identical to the single-threaded writer's. The threads start
+    /// with [`write_header`](Self::write_header), which reports a failure to
+    /// start them.
+    #[must_use]
+    pub fn compression_threads(mut self, threads: usize) -> Self {
+        self.compression.threads = threads;
+        self
+    }
+
+    /// Rebuild the BGZF sink, still unwritten, with the configured settings.
+    fn apply_compression(self) -> Result<Self, VcfError> {
+        if self.compression == Compression::DEFAULT {
+            return Ok(self);
+        }
+        let Writer { inner, contig_names, compression, _state } = self;
+        let Compression { level, threads } = compression;
         let inner = match inner {
             WriterInner::Vcf { .. } => inner,
             WriterInner::VcfGz {
@@ -263,7 +303,7 @@ impl<W: Write> Writer<W> {
                 n_samples,
                 info_tracker,
             } => WriterInner::VcfGz {
-                bgzf: bgzf.with_threads(DEFAULT_LEVEL, threads)?,
+                bgzf: bgzf.with_compression(level, threads)?,
                 index,
                 buf,
                 fmt_keys,
@@ -280,7 +320,7 @@ impl<W: Write> Writer<W> {
                 info_tracker,
                 fmt_tracker,
             } => WriterInner::Bcf {
-                bgzf: bgzf.with_threads(DEFAULT_LEVEL, threads)?,
+                bgzf: bgzf.with_compression(level, threads)?,
                 index,
                 shared_buf,
                 indiv_buf,
@@ -289,16 +329,17 @@ impl<W: Write> Writer<W> {
                 fmt_tracker,
             },
         };
-        Ok(Writer { inner, contig_names, _state })
+        Ok(Writer { inner, contig_names, compression, _state })
     }
 
     // r[impl record_encoder.write_header]
     /// Write the file header. Consumes the `Unstarted` writer and returns `Ready`.
-    pub fn write_header(mut self, header: &VcfHeader) -> Result<Writer<W, Ready>, VcfError> {
+    pub fn write_header(self, header: &VcfHeader) -> Result<Writer<W, Ready>, VcfError> {
+        let mut writer = self.apply_compression()?;
         let header_text = header.to_vcf_text();
         let n_refs = header.contigs().len();
         // Only compressed output is indexed; plain VCF needs no contig names.
-        let contig_names: Vec<SmolStr> = match self.inner {
+        let contig_names: Vec<SmolStr> = match writer.inner {
             WriterInner::Vcf { .. } => Vec::new(),
             _ => header.contigs().keys().cloned().collect(),
         };
@@ -317,7 +358,7 @@ impl<W: Write> Writer<W> {
             header.contigs().values().filter_map(|contig| contig.length).max()
         };
 
-        match &mut self.inner {
+        match &mut writer.inner {
             WriterInner::Vcf { output, n_samples, .. } => {
                 output.write_all(header_text.as_bytes()).map_err(VcfError::Io)?;
                 *n_samples = header_n_samples;
@@ -340,7 +381,12 @@ impl<W: Write> Writer<W> {
             }
         }
 
-        Ok(Writer { inner: self.inner, contig_names, _state: PhantomData })
+        Ok(Writer {
+            inner: writer.inner,
+            contig_names,
+            compression: writer.compression,
+            _state: PhantomData,
+        })
     }
 }
 

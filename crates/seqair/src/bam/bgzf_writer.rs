@@ -616,8 +616,9 @@ impl<W: Write> BgzfSink<W> {
         }
     }
 
-    /// The same stream with `threads` workers instead, before anything is written.
-    pub(crate) fn with_threads(self, level: i32, threads: usize) -> Result<Self, BgzfError> {
+    /// The same stream at `level` with `threads` workers, before anything is
+    /// written.
+    pub(crate) fn with_compression(self, level: i32, threads: usize) -> Result<Self, BgzfError> {
         let inner = match self {
             Self::Serial(w) => w.into_unwritten_inner()?,
             Self::Parallel(w) => w.into_unwritten_inner()?,

@@ -11,7 +11,10 @@ r[record_encoder.writer_new]
 `Writer::new(inner: W, format: OutputFormat)` MUST create a writer in the `Unstarted` state. No header is required at construction time. Index co-production MUST be automatic for compressed formats (`VcfGz` → TBI, `Bcf` → CSI).
 
 r[record_encoder.compression_threads]
-`Writer<W, Unstarted>::compression_threads(n)` MUST switch the `VcfGz`/`Bcf` BGZF stream to `n` compression worker threads (`n = 0`, the default, compresses on the calling thread) and return the writer, still `Unstarted`; it returns `Result` because starting a thread can fail. Plain VCF is not compressed and MUST ignore it. Output and coordinate index MUST be byte-identical to the single-threaded writer's (see `r[bgzf.writer.parallel]`).
+`Writer<W, Unstarted>::compression_threads(n)` MUST switch the `VcfGz`/`Bcf` BGZF stream to `n` compression worker threads (`n = 0`, the default, compresses on the calling thread) and return the writer, still `Unstarted`. It cannot fail: the threads start in `write_header`, which reports a failure to start them — as `BamWriterBuilder::build` does for BAM. Plain VCF is not compressed and MUST ignore it. Output and coordinate index MUST be byte-identical to the single-threaded writer's (see `r[bgzf.writer.parallel]`).
+
+r[record_encoder.compression_level]
+`Writer<W, Unstarted>::compression_level(level)` MUST set the `VcfGz`/`Bcf` BGZF compression level (libdeflate's 0–12; default 6, htslib's default) and return the writer, still `Unstarted`, taking effect from the header on, like `BamWriterBuilder::compression_level`. It combines with `compression_threads` in either order. Plain VCF MUST ignore it.
 
 r[record_encoder.writer_typestate]
 The writer MUST use a typestate pattern: `Writer<W, Unstarted>` only exposes `write_header()`, which consumes the writer and returns `Writer<W, Ready>`. `Writer<W, Ready>` exposes `begin_record()` and `finish()`.

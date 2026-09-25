@@ -214,15 +214,18 @@ fn vcf_setup() -> VcfSetup {
     VcfSetup { header: b.build().unwrap(), contig, ad, mq, gt, dp }
 }
 
-/// Data and CSI bytes from writing the stream with `threads` compression threads.
+/// Data and CSI bytes from writing the stream at `level` with `threads`
+/// compression threads.
 fn write_vcf(
     setup: &VcfSetup,
     stream: &VcfStream,
     format: OutputFormat,
+    level: i32,
     threads: usize,
 ) -> (Vec<u8>, Vec<u8>) {
     let mut noise = Noise(stream.seed);
-    let writer = Writer::new(Vec::new(), format).compression_threads(threads).unwrap();
+    let writer =
+        Writer::new(Vec::new(), format).compression_level(level).compression_threads(threads);
     let mut writer = writer.write_header(&setup.header).unwrap();
     let mut pos = 0u32;
     for _ in 0..stream.records {
@@ -255,26 +258,82 @@ fn write_vcf(
 fn parallel_bcf_and_vcf_gz_match_serial(tc: TestCase) {
     let stream = tc.draw(arb_vcf_stream());
     let threads = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
+    let level = tc.draw(gs::sampled_from(&[0, 1, 6]));
     let format =
         tc.draw(gs::sampled_from(&[OutputFormat::Bcf, OutputFormat::VcfGz]).print_as_debug());
     let setup = vcf_setup();
 
-    let (data, csi) = write_vcf(&setup, &stream, format, 0);
-    let (par_data, par_csi) = write_vcf(&setup, &stream, format, threads);
-    assert!(par_data == data, "{format:?} bytes differ with {threads} threads");
-    assert!(par_csi == csi, "{format:?} index bytes differ with {threads} threads");
+    let (data, csi) = write_vcf(&setup, &stream, format, level, 0);
+    let (par_data, par_csi) = write_vcf(&setup, &stream, format, level, threads);
+    assert!(par_data == data, "{format:?} bytes differ with {threads} threads at level {level}");
+    assert!(
+        par_csi == csi,
+        "{format:?} index bytes differ with {threads} threads at level {level}"
+    );
 }
 
-// r[verify record_encoder.compression_threads]
-/// Plain VCF is not compressed; asking for threads changes nothing.
+/// The DEFLATE block type of every BGZF block's first DEFLATE block, read from
+/// the file: `0` is stored, `1` fixed Huffman, `2` dynamic Huffman.
+fn first_deflate_block_types(bgzf: &[u8]) -> Vec<u8> {
+    let mut types = Vec::new();
+    let mut at = 0;
+    while at + 18 < bgzf.len() {
+        let bsize = usize::from(u16::from_le_bytes([bgzf[at + 16], bgzf[at + 17]])) + 1;
+        let isize = u32::from_le_bytes(bgzf[at + bsize - 4..at + bsize].try_into().unwrap());
+        if isize > 0 {
+            // BFINAL is bit 0 of the first payload byte, BTYPE bits 1–2.
+            types.push((bgzf[at + 18] >> 1) & 0b11);
+        }
+        at += bsize;
+    }
+    types
+}
+
+// r[verify record_encoder.compression_level]
+/// The level reaches the BGZF stream: level 0 stores every block, the default
+/// compresses them, and both decompress to the same bytes.
 #[test]
-fn plain_vcf_ignores_compression_threads() {
+fn compression_level_reaches_the_bgzf_stream() {
+    let setup = vcf_setup();
+    let stream = VcfStream { records: 20_000, seed: 11 };
+    for format in [OutputFormat::Bcf, OutputFormat::VcfGz] {
+        let (stored, _) = write_vcf(&setup, &stream, format, 0, 0);
+        let (packed, _) = write_vcf(&setup, &stream, format, 6, 0);
+
+        let stored_types = first_deflate_block_types(&stored);
+        assert!(stored_types.len() > 1, "{format:?}: several blocks");
+        assert!(stored_types.iter().all(|&t| t == 0), "{format:?} level 0: {stored_types:?}");
+        assert!(
+            first_deflate_block_types(&packed).iter().all(|&t| t != 0),
+            "{format:?} level 6 stores a block"
+        );
+
+        let decompress = |bgzf: &[u8]| {
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(
+                &mut noodles_bgzf::io::Reader::new(std::io::Cursor::new(bgzf)),
+                &mut out,
+            )
+            .unwrap();
+            out
+        };
+        assert!(decompress(&stored) == decompress(&packed), "{format:?}: same payload");
+    }
+}
+
+// r[verify record_encoder.compression_level]
+// r[verify record_encoder.compression_threads]
+/// Plain VCF is not compressed; asking for a level or threads changes nothing.
+#[test]
+fn plain_vcf_ignores_compression_settings() {
     let setup = vcf_setup();
     let stream = VcfStream { records: 50, seed: 7 };
     let mut outputs = Vec::new();
-    for threads in [0, 3] {
-        let writer = Writer::new(Vec::new(), OutputFormat::Vcf).compression_threads(threads);
-        let mut writer = writer.unwrap().write_header(&setup.header).unwrap();
+    for (level, threads) in [(6, 0), (0, 3)] {
+        let writer = Writer::new(Vec::new(), OutputFormat::Vcf)
+            .compression_level(level)
+            .compression_threads(threads);
+        let mut writer = writer.write_header(&setup.header).unwrap();
         for i in 0..stream.records {
             let alleles = Alleles::reference(Base::A);
             let pos = Pos1::new(u32::try_from(i).unwrap() + 1).unwrap();

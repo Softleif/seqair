@@ -542,7 +542,7 @@ fn write_vcf(
 ) {
     // rastair writes through a `Box<dyn Write + Send>` over an unbuffered file.
     let file: Box<dyn Write + Send> = Box::new(std::fs::File::create(out).unwrap());
-    let w = Writer::new(file, fmt).compression_threads(threads).unwrap();
+    let w = Writer::new(file, fmt).compression_threads(threads);
     let mut w = w.write_header(header).unwrap();
     for r in recs {
         encode_rec(&mut w, schema, r);
