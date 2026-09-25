@@ -308,6 +308,12 @@ The PACK transform packs 8, 4 or 2 symbols a byte (2, 3–4 or 5–16 distinct s
 r[cram.codec.rans_nx16_rle]
 The RLE transform reads literals from the entropy-decoded bytes; a literal that is one of the block's run symbols is followed by a run of that many more copies, its length a uint7 from the RLE metadata. A run is cut at the output's end, a run symbol at the very end still takes its length, and running out of literals before the output is full is `Truncated`. Decoding copies each stretch of literals up to the next run symbol at once and fills each run at once, without zeroing the output first (htscodecs' `hts_rle_decode`). Output and error-or-not MUST equal the per-byte loop's.
 
+r[cram.codec.range_coder]
+The arithmetic coder and fqzcomp share one byte-wise range coder ([CRAMcodecs] §4 "Range coding", htscodecs' `c_range_coder.h`): decoding starts with `range = 2^32 - 1` and `code` the first five input bytes shifted through a 32-bit register; each symbol divides `range` by the model total, subtracts `cum * range` from `code`, multiplies `range` by the symbol frequency, and renormalises a byte at a time while `range < 2^24`. Needing a byte past the end of the input is `Truncated`.
+
+r[cram.codec.adaptive_model]
+The range coder's adaptive model ([CRAMcodecs] §4 "Adaptive Modelling", htscodecs' `c_simple_model.h`) starts every symbol `0..max_sym` at frequency 1. Decoding scans entries in their current order to the one whose cumulative range holds the coded value, adds 16 to its frequency and the total, halves every frequency (rounding up) once the total exceeds `2^16 - 17`, and swaps the entry with its predecessor if it now has the higher frequency. A coded value at or past the total is corrupt input and MUST be an error, not a panic or a guessed symbol.
+
 r[cram.codec.arith]
 Method 6 (arithmetic coder): v3.1 adaptive arithmetic coder. SHOULD be supported.
 

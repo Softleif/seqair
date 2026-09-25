@@ -9,6 +9,7 @@ pub mod compression_header;
 pub mod container;
 pub mod encoding;
 pub mod index;
+pub(crate) mod range_coder;
 pub mod rans;
 pub mod rans_nx16;
 // The per-ISA Nx16 kernels became one `fearless_simd` kernel in `rans_nx16`.
