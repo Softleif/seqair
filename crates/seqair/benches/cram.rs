@@ -321,5 +321,82 @@ fn cram_arith_decode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, cram_record_decode, cram_pileup_e2e, cram_full_decode, cram_arith_decode);
+// ---------------------------------------------------------------------------
+// Group 5: the name tokeniser (method 8)
+// The name blocks of the hts-specs CRAM 3.1 conformance files (20000 names:
+// tok3 over rANS Nx16 at levels 2 and 3, over the arithmetic coder at level
+// 4) and a few hts-specs tok3 vectors (1000 names each; `.1`/`.9` over rANS
+// Nx16, `.11`/`.19` over the arithmetic coder), decoded by seqair and by
+// htscodecs' `tok3_decode_names`; throughput is decoded bytes.
+// ---------------------------------------------------------------------------
+
+#[path = "../tests/support/cram_raw_blocks.rs"]
+#[allow(dead_code, reason = "only the tok3 blocks are timed")]
+mod cram_raw_blocks;
+
+const TOK3_VECTORS: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/hts-specs/cram/codecs/tok3/");
+const LEVELS: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/hts-specs/cram/3.1/passed/");
+
+fn cram_tok3_decode(c: &mut Criterion) {
+    use criterion::Throughput;
+
+    let mut inputs: Vec<(String, Vec<Vec<u8>>)> = (2..=4)
+        .map(|level| {
+            let file = std::fs::read(format!("{LEVELS}level-{level}.cram")).unwrap();
+            let blocks = cram_raw_blocks::raw_blocks(&file)
+                .into_iter()
+                .filter(|b| b.method == cram_raw_blocks::TOK3)
+                .map(|b| b.data)
+                .collect();
+            (format!("level-{level}"), blocks)
+        })
+        .collect();
+    for name in
+        ["01.names.1", "01.names.9", "01.names.11", "01.names.19", "nv.names.9", "nv.names.19"]
+    {
+        inputs
+            .push((name.to_owned(), vec![std::fs::read(format!("{TOK3_VECTORS}{name}")).unwrap()]));
+    }
+
+    let mut group = c.benchmark_group("cram_tok3_decode");
+    for (name, blocks) in &inputs {
+        // Both decoders must agree before either is timed (the tests check
+        // them against the originals and against htslib).
+        let mut decoded = 0;
+        for block in blocks {
+            let ours = seqair::cram::tok3::decode(block).unwrap();
+            let theirs = htscodecs::tok3_decode_names(block).expect("htscodecs rejects a block");
+            assert!(ours == theirs.as_slice(), "{name}: seqair and htscodecs decode differently");
+            decoded += ours.len();
+        }
+        group.throughput(Throughput::Bytes(decoded as u64));
+
+        group.bench_function(format!("seqair/{name}"), |b| {
+            b.iter(|| {
+                for block in blocks {
+                    black_box(seqair::cram::tok3::decode(black_box(block)).unwrap());
+                }
+            });
+        });
+        group.bench_function(format!("htscodecs/{name}"), |b| {
+            b.iter(|| {
+                for block in blocks {
+                    black_box(htscodecs::tok3_decode_names(black_box(block)).unwrap());
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    cram_record_decode,
+    cram_pileup_e2e,
+    cram_full_decode,
+    cram_arith_decode,
+    cram_tok3_decode
+);
 criterion_main!(benches);

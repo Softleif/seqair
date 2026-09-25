@@ -12,7 +12,7 @@ use std::ptr::NonNull;
 // Pulls in hts-sys' static libhts, which contains htscodecs.
 use rust_htslib as _;
 
-/// `arith_dynamic.h` and `fqzcomp_qual.h`.
+/// `arith_dynamic.h`, `fqzcomp_qual.h` and `tokenise_name3.h`.
 mod ffi {
     use std::ffi::{c_char, c_int, c_uint};
 
@@ -31,6 +31,12 @@ mod ffi {
             lengths: *mut c_int,
             nlengths: c_int,
         ) -> *mut c_char;
+
+        pub(super) fn tok3_decode_names(
+            input: *mut u8,
+            sz: c_uint,
+            out_len: *mut c_uint,
+        ) -> *mut u8;
     }
 }
 
@@ -99,4 +105,16 @@ pub fn fqz_decompress(input: &[u8]) -> Option<MallocBuf> {
     };
     // SAFETY: a non-null return is the malloc'd output of `out_size` bytes.
     unsafe { MallocBuf::from_raw(ptr.cast(), out_size) }
+}
+
+/// `tok3_decode_names`; `None` if it rejects the block.
+pub fn tok3_decode_names(input: &[u8]) -> Option<MallocBuf> {
+    let size = c_uint::try_from(input.len()).ok()?;
+    let mut out_len: c_uint = 0;
+    // SAFETY: `input` is live for the call and `size` bytes long; htscodecs
+    // only reads it despite the non-const signature.
+    let ptr = unsafe { ffi::tok3_decode_names(input.as_ptr().cast_mut(), size, &raw mut out_len) };
+    let len = usize::try_from(out_len).expect("a u32 fits a usize");
+    // SAFETY: a non-null return is the malloc'd output of `out_len` bytes.
+    unsafe { MallocBuf::from_raw(ptr, len) }
 }
