@@ -96,6 +96,12 @@ name = "fuzz_cram_arith"
 path = "fuzz_targets/fuzz_cram_arith.rs"
 doc = false
 
+# CRAM name tokeniser: production vs spec-literal reference decoder
+[[bin]]
+name = "fuzz_cram_tok3"
+path = "fuzz_targets/fuzz_cram_tok3.rs"
+doc = false
+
 # CRAM variable-length integer decoding
 [[bin]]
 name = "fuzz_cram_varint"
