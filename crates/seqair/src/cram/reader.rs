@@ -192,9 +192,6 @@ pub enum CramError {
     #[error("invalid tok3 token type: {token_type}")]
     InvalidTok3TokenType { token_type: u8 },
 
-    #[error("tok3 adaptive arithmetic coder not supported")]
-    Tok3ArithmeticCoderUnsupported,
-
     #[error("tok3 dup position {dup_pos} out of range")]
     Tok3DupPositionOutOfRange { dup_pos: usize },
 

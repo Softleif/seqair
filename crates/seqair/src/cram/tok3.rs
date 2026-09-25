@@ -2,7 +2,7 @@
 //! tok3 / Name Tokenizer codec (CRAM compression method 8).
 //!
 //! Tokenizes read names by position. Each position stores a token type and
-//! compressed data (via rANS Nx16). The decoder reconstructs names by
+//! compressed data (via rANS Nx16 or the arithmetic coder). The decoder reconstructs names by
 //! iterating over the tokens.
 
 // See rans.rs: lazy `ok_or_else(|| CramError::...)` keeps error construction and its
@@ -313,10 +313,6 @@ fn decode_token_byte_streams(
     use_arith: bool,
     n_names: usize,
 ) -> Result<Vec<TokenReader>, CramError> {
-    if use_arith {
-        return Err(CramError::Tok3ArithmeticCoderUnsupported);
-    }
-
     let mut b: Vec<TokenReader> = Vec::new();
     let mut t: Option<usize> = None;
 
@@ -368,7 +364,13 @@ fn decode_token_byte_streams(
             let compressed_size = read_uint7(src).map_err(uint7_to_cram_error)? as usize;
             let buf = split_off(src, compressed_size)
                 .ok_or_else(|| CramError::Truncated { context: "tok3 compressed payload" })?;
-            let decompressed = super::rans_nx16::decode(buf, 0)?;
+            // Every stream stores its length, so the size passed is unused.
+            // r[impl cram.codec.tok3_arith]
+            let decompressed = if use_arith {
+                super::arith::decode(buf, 0)?
+            } else {
+                super::rans_nx16::decode(buf, 0)?
+            };
 
             b.get_mut(t_idx)
                 .ok_or_else(|| CramError::Truncated { context: "tok3 stream set" })?
@@ -487,19 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn tok3_arithmetic_coder_unsupported() {
-        // If method != 0, use_arith = true → Tok3ArithmeticCoderUnsupported
-        // Header: uncompressed_size(u32) + name_count(u32) + method(u8)
-        let mut src = Vec::new();
-        src.extend_from_slice(&10u32.to_le_bytes()); // uncompressed_size
-        src.extend_from_slice(&1u32.to_le_bytes()); // name_count
-        src.push(1u8); // method = 1 → use_arith = true
-
-        let err = decode(&src).unwrap_err();
-        assert!(matches!(err, CramError::Tok3ArithmeticCoderUnsupported));
-    }
-
-    #[test]
     fn tok3_dup_position_out_of_range() {
         // Tok3DupPositionOutOfRange is returned in decode_token_byte_streams when
         // tok_dup is set and dup_pos references an index beyond the current b vec.
@@ -571,6 +560,7 @@ mod tests {
         assert!(matches!(err, CramError::Tok3Delta0RequiresPaddedDigits { .. }));
     }
 
+    // r[verify cram.codec.tok3_arith]
     #[test]
     fn decode_tok3_noodles_test_vector() {
         let src = [
@@ -644,6 +634,52 @@ I17_08765:2:124:45613:16161#9\0\
 ";
 
         assert_eq!(result, expected);
+
+        // The same block with every stream re-coded as an arith CAT stream
+        // and `use_arith` set decodes to the same names.
+        let arith = recode_streams_as_arith_cat(&src);
+        assert_eq!(decode(&arith).unwrap(), expected);
+    }
+
+    #[allow(
+        clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation,
+        reason = "g < 5, and the masked group fits a byte"
+    )]
+    fn put_uint7(out: &mut Vec<u8>, v: usize) {
+        let v = u32::try_from(v).unwrap();
+        let groups = (0..5u32).rev().skip_while(|&g| g > 0 && v >> (7 * g) == 0);
+        for g in groups {
+            let bits = ((v >> (7 * g)) & 0x7f) as u8;
+            out.push(if g == 0 { bits } else { bits | 0x80 });
+        }
+    }
+
+    /// Rewrite a rANS-coded tok3 block's streams as arith CAT streams
+    /// (flags 0x20, the length, the bytes) and set `use_arith`.
+    #[allow(clippy::indexing_slicing, reason = "test input is a known-valid block")]
+    fn recode_streams_as_arith_cat(src: &[u8]) -> Vec<u8> {
+        let (header, mut cur) = src.split_at(9);
+        let mut out = header.to_vec();
+        out[8] = 1;
+        while let Some((&ttype, rest)) = cur.split_first() {
+            out.push(ttype);
+            cur = rest;
+            if ttype & 0x40 != 0 {
+                out.extend(&cur[..2]);
+                cur = &cur[2..];
+                continue;
+            }
+            let clen = read_uint7(&mut cur).unwrap() as usize;
+            let data = super::super::rans_nx16::decode(&cur[..clen], 0).unwrap();
+            cur = &cur[clen..];
+            let mut stream = vec![0x20];
+            put_uint7(&mut stream, data.len());
+            stream.extend(data);
+            put_uint7(&mut out, stream.len());
+            out.extend(stream);
+        }
+        out
     }
 
     // r[verify cram.tok3.dz_len_reader]
