@@ -30,6 +30,27 @@ const TOK3_NAME_COUNT_LIMIT: usize = 10_000_000;
 
 /// Decode a tok3 compressed block.
 pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
+    // Every stream stores its length, so the size passed is unused.
+    decode_with(src, |stream| super::arith::decode(stream, 0))
+}
+
+/// [`decode`] with the arithmetic coder's streams decoded by
+/// [`super::arith::reference`], so tests and the fuzzer can compare it with
+/// [`decode`].
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub fn decode_with_arith_reference(src: &[u8]) -> Result<Vec<u8>, CramError> {
+    decode_with(src, |stream| {
+        super::arith::reference::decode(stream, 0)
+            .ok_or(CramError::ArithCorruptData { context: "arith reference decoder" })
+    })
+}
+
+/// Decode a tok3 block, decoding arith-coded streams with `arith`.
+fn decode_with(
+    src: &[u8],
+    arith: impl Fn(&[u8]) -> Result<Vec<u8>, CramError>,
+) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
 
     let (uncompressed_size, name_count, use_arith) = read_header(&mut cur)?;
@@ -48,7 +69,7 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
         "tok3 output",
     )?;
 
-    let mut b = decode_token_byte_streams(&mut cur, use_arith, name_count)?;
+    let mut b = decode_token_byte_streams(&mut cur, use_arith.then_some(&arith), name_count)?;
 
     let mut names: Vec<Vec<u8>> = vec![Vec::new(); name_count];
     let mut tokens: Vec<Vec<Option<Token>>> = vec![Vec::new(); name_count];
@@ -308,9 +329,11 @@ fn read_header(src: &mut &[u8]) -> Result<(usize, usize, bool), CramError> {
 
 // ── Decode sub-streams ───────────────────────────────────────────────
 
+/// `arith` decodes a stream when the block uses the arithmetic coder;
+/// without it streams are rANS Nx16.
 fn decode_token_byte_streams(
     src: &mut &[u8],
-    use_arith: bool,
+    arith: Option<&impl Fn(&[u8]) -> Result<Vec<u8>, CramError>>,
     n_names: usize,
 ) -> Result<Vec<TokenReader>, CramError> {
     let mut b: Vec<TokenReader> = Vec::new();
@@ -364,12 +387,10 @@ fn decode_token_byte_streams(
             let compressed_size = read_uint7(src).map_err(uint7_to_cram_error)? as usize;
             let buf = split_off(src, compressed_size)
                 .ok_or_else(|| CramError::Truncated { context: "tok3 compressed payload" })?;
-            // Every stream stores its length, so the size passed is unused.
             // r[impl cram.codec.tok3_arith]
-            let decompressed = if use_arith {
-                super::arith::decode(buf, 0)?
-            } else {
-                super::rans_nx16::decode(buf, 0)?
+            let decompressed = match arith {
+                Some(arith) => arith(buf)?,
+                None => super::rans_nx16::decode(buf, 0)?,
             };
 
             b.get_mut(t_idx)
@@ -695,6 +716,21 @@ I17_08765:2:124:45613:16161#9\0\
 
         let mutable = reader.get_mut(TokenType::DZLen);
         assert_eq!(mutable.get_ref(), &test_data);
+    }
+
+    /// Arbitrary arith-coded blocks never panic, and tok3 over the
+    /// production and the reference arithmetic decoder agree on whatever
+    /// both accept.
+    // r[verify cram.codec.tok3_arith]
+    #[hegel::test]
+    fn arbitrary_arith_blocks_never_panic(tc: hegel::TestCase) {
+        use hegel::generators as gs;
+        let mut src = tc.draw(gs::binary().min_size(9).max_size(1024));
+        // A small name count, and `use_arith`.
+        src.splice(4..9, [3, 0, 0, 0, 1]);
+        if let (Ok(ours), Ok(theirs)) = (decode(&src), decode_with_arith_reference(&src)) {
+            assert_eq!(ours, theirs);
+        }
     }
 
     // r[verify cram.tok3.name_count_limit]
