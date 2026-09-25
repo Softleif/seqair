@@ -98,5 +98,9 @@ harness = false
 name = "simd_kernels"
 harness = false
 
+[[bench]]
+name = "fqzcomp"
+harness = false
+
 [lints]
 workspace = true
