@@ -81,7 +81,7 @@ fn eight_digits(v: u32) -> u64 {
     clippy::cast_possible_truncation,
     reason = "len <= CHUNK; below 8 the shift is under 64; value / 10^8 is at most 42"
 )]
-#[inline]
+#[inline(always)]
 fn format_padded(value: u32, width: usize) -> ([u8; CHUNK], usize) {
     let digits = value.checked_ilog10().map_or(1, |l| l as usize + 1);
     let len = width.max(digits).min(CHUNK);
