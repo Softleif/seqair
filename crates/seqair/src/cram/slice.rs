@@ -121,7 +121,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
-    reference_seq: &[u8],
+    reference_seq: Option<&[u8]>,
     ref_start_0based: i64,
     header: &BamHeader,
     read_group_ids: &[SmolStr],
@@ -158,6 +158,17 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
         return Err(CramError::ExpectedSliceHeader { found: slice_header_block.content_type });
     }
     let sh = SliceHeader::parse(&slice_header_block.data)?;
+
+    // r[impl cram.edge.missing_reference+2]
+    let reference_seq: &[u8] = match reference_seq {
+        Some(seq) => seq,
+        None if sh.embedded_reference >= 0 => &[],
+        None => {
+            return Err(CramError::MissingReference {
+                contig: header.target_name(tid).unwrap_or("?").into(),
+            });
+        }
+    };
 
     let is_multi_ref = sh.ref_seq_id == -2;
 
@@ -1556,7 +1567,7 @@ mod tests {
             &ch,
             container_data,
             first_landmark as usize,
-            &fake_ref,
+            Some(&fake_ref),
             ref_start,
             &bam_header,
             &[],

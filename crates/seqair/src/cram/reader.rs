@@ -667,6 +667,9 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             };
 
             self.ref_seq_buf.clear();
+            // A contig the FASTA lacks is only an error for a slice that
+            // needs it; one that embeds its reference does not.
+            let mut reference_missing = false;
             if ref_start < ref_end_clamped {
                 // `ref_end_clamped` is one past the last base the slices
                 // reach, and it is above `ref_start`, so the last base is
@@ -683,16 +686,14 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     start: position(ref_start)?,
                     last: position(ref_end_clamped.saturating_sub(1))?,
                 };
-                // r[impl cram.edge.missing_reference]
-                self.fasta.fetch_seq_into(ref_name, ref_span, &mut self.ref_seq_buf).map_err(
-                    |e| match &e {
-                        FastaError::SequenceNotFound { .. } => {
-                            CramError::MissingReference { contig: SmolStr::new(ref_name) }
-                        }
-                        _ => CramError::from(e),
-                    },
-                )?;
+                // r[impl cram.edge.missing_reference+2]
+                match self.fasta.fetch_seq_into(ref_name, ref_span, &mut self.ref_seq_buf) {
+                    Ok(()) => {}
+                    Err(FastaError::SequenceNotFound { .. }) => reference_missing = true,
+                    Err(e) => return Err(e.into()),
+                }
             }
+            let reference = (!reference_missing).then_some(self.ref_seq_buf.as_slice());
 
             // Decode each slice listed by CRAI as overlapping our query.
             // CRAI's `slice_offset` matches the container's landmark value
@@ -715,7 +716,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &ch,
                     &self.container_buf,
                     slice_offset,
-                    &self.ref_seq_buf,
+                    reference,
                     ref_start.cast_signed(),
                     &self.shared.header,
                     &self.shared.read_group_ids,
@@ -859,7 +860,24 @@ mod tests {
         assert!(count >= 1, "the mapped chr1 read must be returned");
     }
 
-    // r[verify cram.edge.missing_reference]
+    // r[verify cram.edge.missing_reference+2]
+    /// `test.cram` does not embed its reference, so a FASTA without its
+    /// contigs fails the fetch — per slice, once decoding needs the bases.
+    #[test]
+    fn fasta_without_the_contig_fails_a_slice_that_needs_it() {
+        let other_fasta = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/hts-specs/cram/ce.fa"
+        ));
+        let mut reader = IndexedCramReader::open(cram_path(), other_fasta).unwrap();
+        let mut store = RecordStore::new();
+        let err = reader
+            .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store)
+            .unwrap_err();
+        assert!(matches!(err, CramError::MissingReference { .. }), "{err:?}");
+    }
+
+    // r[verify cram.edge.missing_reference+2]
     #[test]
     fn missing_reference_gives_helpful_error() {
         let err = CramError::MissingReference { contig: SmolStr::new("chr19") };

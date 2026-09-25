@@ -550,8 +550,8 @@ If the reference MD5 in the slice header does not match the MD5 of the FASTA seq
 
 The check applies only to a slice that is making a claim about the FASTA. A slice with `embedded_reference >= 0` (`r[cram.slice.embedded_ref]`) MUST be exempt: its digest covers the reference it carries, not the external one. Under `embed_ref=2` htslib embeds a *consensus* computed from the reads and digests that, so the two agree only where the reads happen to agree with the reference — which is to say, not at low coverage and not wherever the reads carry a real difference. Checking such a slice against the FASTA rejects files that are entirely well-formed.
 
-r[cram.edge.missing_reference]
-If the FASTA reader cannot provide the reference sequence for a slice's region (e.g., contig not in FASTA), the reader MUST return an error unless the slice has an embedded reference. The error SHOULD mention `REF_PATH`/`REF_CACHE` as alternatives.
+r[cram.edge.missing_reference+2]
+If the FASTA reader cannot provide the reference sequence for a slice's region (e.g., contig not in FASTA), the reader MUST return an error unless the slice has an embedded reference. The decision is per slice: a container whose slices all embed their reference (as the hts-specs `3.1/passed/level-*.cram` files do) MUST decode with a FASTA that lacks the contig. The error SHOULD mention `REF_PATH`/`REF_CACHE` as alternatives.
 
 r[cram.edge.unknown_read_names]
 When `RN=false` in the preservation map, read names are not available. The reader MUST log a warning (once per slice). Records without read names are stored with empty qnames. The pileup engine's overlapping-pair dedup MUST skip records with empty or `*` qnames, since mate matching requires real qnames.
