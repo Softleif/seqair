@@ -217,13 +217,18 @@ fn decode_rle<S: Simd, const ORDER1: bool>(
     let (max_sym, mut rc) = start(body)?;
     let mut literals = literal_models::<ORDER1>(max_sym);
     let mut runs = vec![RunModel::new(RUN_SYMBOLS); RUN_CONTEXTS];
-    let mut out = Vec::with_capacity(len);
+    // Room for a short run's fixed-size fill past the end.
+    let mut out = vec![0u8; len.saturating_add(SHORT_RUN)];
+    let mut o = 0usize;
     let mut ctx = 0usize;
-    while out.len() < len {
+    while o < len {
         let model = literals.get_mut(ctx).ok_or_else(corrupt("arith literal context"))?;
         let sym = model.decode_vectored(simd, &mut rc).ok_or_else(corrupt("arith literal"))?;
         let lit = byte(sym);
-        out.push(lit);
+        if let Some(d) = out.get_mut(o) {
+            *d = lit;
+        }
+        o = o.wrapping_add(1);
         if ORDER1 {
             ctx = usize::from(sym);
         }
@@ -240,11 +245,24 @@ fn decode_rle<S: Simd, const ORDER1: bool>(
                 break;
             }
         }
-        let room = len.saturating_sub(out.len());
-        out.resize(out.len().saturating_add(run.min(room)), lit);
+        let run = run.min(len.saturating_sub(o));
+        // Most runs are short: one fixed-size store, its excess overwritten
+        // by what follows or cut off below.
+        if run <= SHORT_RUN
+            && let Some(d) = out.get_mut(o..).and_then(|d| d.first_chunk_mut::<SHORT_RUN>())
+        {
+            *d = [lit; SHORT_RUN];
+        } else if let Some(d) = out.get_mut(o..o.saturating_add(run)) {
+            d.fill(lit);
+        }
+        o = o.saturating_add(run);
     }
+    out.truncate(len);
     Ok(out)
 }
+
+/// Runs up to this long are filled with one fixed-size store.
+const SHORT_RUN: usize = 16;
 
 // r[impl cram.codec.arith.stripe]
 fn decode_stripe(level: Level, mut cur: &[u8], depth: u8) -> Result<Vec<u8>, CramError> {
