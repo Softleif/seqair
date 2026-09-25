@@ -31,9 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **tok3 read-name blocks decode about 3× faster** (1.0× htscodecs on the hts-specs CRAM 3.1
-  conformance files, from 0.32× over rANS Nx16 and 0.46× over the arithmetic coder). Names are
-  decoded straight into the output instead of through per-name `Vec`s and `format!`. The decoder
+- **tok3 read-name blocks decode 3–6× faster**: on the hts-specs CRAM 3.1 conformance files about
+  2.0× htscodecs' speed over rANS Nx16 and 1.3× over the arithmetic coder, from 0.32× and 0.46×.
+  Names are decoded straight into the output instead of through per-name `Vec`s and `format!`,
+  numbers are formatted eight digits at a time, the CRAM reader's rANS order-1 tables are reused
+  across blocks (`tok3::Decoder` does the same for direct callers), and STRIPE substreams (rANS
+  Nx16 and arith) interleave four at a time. The decoder
   now follows written rules for blocks no encoder writes and is checked against a spec-literal
   reference decoder on every input: a MATCH, DELTA or DELTA0 without a suitable token in the
   previous name, an unterminated string, a token type that cannot occur inside a name, a stream
