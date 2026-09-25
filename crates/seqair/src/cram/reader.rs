@@ -138,6 +138,9 @@ pub enum CramError {
     #[error("external byte array encoding for content_id={content_id} requires explicit length")]
     ExternalByteArrayNeedsLength { content_id: i32 },
 
+    #[error("BETA encoding bit width {bits} exceeds 32")]
+    InvalidBetaBits { bits: u32 },
+
     // ── rANS ─────────────────────────────────────────────────────────────────
     #[error("invalid rANS 4x8 order: {order}")]
     InvalidRansOrder { order: u8 },

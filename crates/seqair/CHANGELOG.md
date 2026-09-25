@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **CRAM byte data series may use the BETA encoding.** `FC`, `BA`, `QS`, `BS` and the values of
+  `BYTE_ARRAY_LEN` accept `ByteEncoding::Beta`, as htslib does; the byte is the low 8 bits of
+  `raw - offset`, matching htslib. BETA widths above 32 bits are now rejected with
+  `CramError::InvalidBetaBits` for integer series too, as htslib rejects them.
+
 ## v0.3.1 (2026-09-25)
 
 A performance release. Every hand-written `core::arch` kernel is now one portable `fearless_simd`
