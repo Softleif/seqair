@@ -75,10 +75,13 @@ fn compress_block(
     let isize_val = u32::try_from(data.len()).map_err(|_| BgzfError::CorruptHeader)?;
 
     // total = header(18) + compressed_len + footer(8); BSIZE = total - 1
-    let footer_start = HEADER_LEN.checked_add(compressed_len).ok_or(BgzfError::CorruptHeader)?;
-    let total_block_size = footer_start.checked_add(FOOTER_LEN).ok_or(BgzfError::CorruptHeader)?;
-    let bsize = total_block_size.checked_sub(1).ok_or(BgzfError::CorruptHeader)?;
-    let bsize_bytes = u16::try_from(bsize).map_err(|_| BgzfError::CorruptHeader)?.to_le_bytes();
+    let footer_start = HEADER_LEN.saturating_add(compressed_len);
+    let total_block_size = footer_start.saturating_add(FOOTER_LEN);
+    let bsize = total_block_size.saturating_sub(1);
+    // r[impl bgzf.writer.block_size]
+    let bsize_bytes = u16::try_from(bsize)
+        .map_err(|_| BgzfError::BlockTooLarge { size: total_block_size })?
+        .to_le_bytes();
 
     let header = block.get_mut(..HEADER_LEN).ok_or(BgzfError::CorruptHeader)?;
     header.copy_from_slice(&BGZF_HEADER);
@@ -896,6 +899,21 @@ mod tests {
         let writer = BgzfWriter::new(&mut output);
         writer.finish().unwrap();
         assert_eq!(output.len(), 28);
+    }
+
+    // r[verify bgzf.writer.block_size]
+    /// A block that cannot fit says so. 64 KiB stored at level 0 is two stored
+    /// DEFLATE blocks (65535 + 1 bytes, 5 bytes of framing each): 65546 bytes
+    /// of payload, 65572 with the gzip header and footer.
+    #[test]
+    fn a_block_that_cannot_fit_is_block_too_large() {
+        let mut compressor =
+            libdeflater::Compressor::new(libdeflater::CompressionLvl::new(0).unwrap());
+        let data = vec![0u8; 65536];
+        let mut block =
+            vec![0; HEADER_LEN + compressor.deflate_compress_bound(data.len()) + FOOTER_LEN];
+        let err = compress_block(&mut compressor, &data, &mut block).unwrap_err();
+        assert!(matches!(err, BgzfError::BlockTooLarge { size: 65572 }), "{err:?}");
     }
 
     // r[verify bgzf.writer.block_size]

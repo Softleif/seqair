@@ -95,6 +95,11 @@ pub enum BgzfError {
     // r[impl bgzf.writer.parallel]
     #[error("a BGZF compression worker stopped before finishing its block")]
     CompressionWorkerLost,
+
+    // Last, so no earlier variant's discriminant moves.
+    // r[impl bgzf.writer.block_size]
+    #[error("BGZF block of {size} bytes does not fit BGZF's 65536-byte limit")]
+    BlockTooLarge { size: usize },
 }
 
 // r[impl bgzf.libdeflate]
