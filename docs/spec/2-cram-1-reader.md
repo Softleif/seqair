@@ -316,14 +316,35 @@ The arithmetic coder and fqzcomp share one byte-wise range coder ([CRAMcodecs] �
 r[cram.codec.adaptive_model]
 The range coder's adaptive model ([CRAMcodecs] §4 "Adaptive Modelling", htscodecs' `c_simple_model.h`) starts every symbol `0..max_sym` at frequency 1. Decoding scans entries in their current order to the one whose cumulative range holds the coded value, adds 16 to its frequency and the total, halves every frequency (rounding up) once the total exceeds `2^16 - 17`, and swaps the entry with its predecessor if it now has the higher frequency. A coded value at or past the total is corrupt input and MUST be an error, not a panic or a guessed symbol.
 
-r[cram.codec.arith]
-Method 6 (arithmetic coder): v3.1 adaptive arithmetic coder. SHOULD be supported.
+r[cram.codec.arith+2]
+Method 6 (arithmetic coder, "range"): the v3.1 adaptive arithmetic coder ([CRAMcodecs] §4 "Range coding", htscodecs' `arith_dynamic.c`). MUST be supported — samtools writes it at `-O cram,version=3.1,archive`, and tok3 name blocks can use it (`r[cram.codec.tok3_arith]`). Where the spec's pseudocode and htscodecs disagree, the decoder follows htscodecs, which writes the files; each such place is named in the rules below.
+
+r[cram.codec.arith.wrapper]
+A stream starts with a flags byte: ORDER (the low two bits), EXT (4), STRIPE (8), NOSZ (16), CAT (32), RLE (64), PACK (128). Unless NOSZ is set a uint7 uncompressed length follows; with NOSZ the caller's length is used. (The spec's `ArithDecode` reads the length when NOSZ *is* set — a typo; htscodecs reads it when it is not.) STRIPE is checked first and ignores every other flag (`r[cram.codec.arith.stripe]`). Otherwise the PACK metadata follows (`r[cram.codec.arith.pack]`), and the rest of the stream is the body, decoded to the packed length if PACK is set or else the uncompressed length: an empty body decodes to nothing (htscodecs); else CAT copies the body's first bytes (the body MUST hold at least that many); else EXT decodes it with bzip2 (`r[cram.codec.arith.ext]`); else RLE selects the run-length decoders (`r[cram.codec.arith.rle]`); else the plain order-0/1 decoders (`r[cram.codec.arith.order]`). The body is then unpacked if PACK is set. The result MUST be exactly the uncompressed length — htscodecs returns a shorter result and leaves the check to its callers, which all make it — and every other malformed stream MUST be a typed error, never a panic. Lengths from the stream are checked against the allocation limit (`r[io.fuzz.alloc_limits]`) before anything is allocated.
+
+r[cram.codec.arith.order]
+The order-0 and order-1 decoders read a byte `max_sym` (0 meaning 256) and then run the range coder (`r[cram.codec.range_coder]`) over the rest of the body with adaptive models (`r[cram.codec.adaptive_model]`) over the symbols `0..max_sym`. Order-0 uses one model; order-1 one per previous byte, starting from context 0. Every decoded byte is below `max_sym`, so only `max_sym` order-1 models are reachable, and only those are built (the spec builds `max_sym`, htscodecs 256). Order-1 applies when the ORDER bits are exactly 1: htscodecs decodes the reserved values 2 and 3 as order-0 (its encoder writes order-0 data under them), and so does this decoder. A decoded length of zero reads nothing.
+
+r[cram.codec.arith.rle]
+The run-length decoders decode a literal (order-1: in the context of the previous literal, starting from 0), then its run of extra copies in parts of 0..3 from 258 four-symbol models: the first part in the context of the literal, the second in context 256, every further part in 257. A part of 3 continues the run while the run so far is below the decoded length (htscodecs' bound; the spec's pseudocode has none), and a run past the end of the output is cut there.
+
+r[cram.codec.arith.stripe]
+A STRIPE stream holds, after the flags byte, a uint7 total length (always present — htscodecs reads it whatever NOSZ says, and its encoder clears NOSZ here), a byte N ≥ 1, N uint7 compressed lengths, and the N substreams. Substream j is a complete arith stream of `len / N + (j < len % N)` bytes, decoded from exactly its compressed length (htscodecs lets it read on into the next, which no valid stream needs), and output byte `i·N + j` is its byte `i`. A substream decoding to any other length is an error. A substream may itself be striped; htscodecs' encoder never writes one, and the decoder MUST bound the nesting (here 4 levels) so a crafted stream cannot exhaust the stack.
+
+r[cram.codec.arith.pack]
+PACK uses the rANS Nx16 bit-packing metadata and unpacking (`r[cram.codec.rans_nx16_pack]`): a symbol count, the symbol map, and a uint7 packed length, which MUST NOT exceed the uncompressed length. The decoded body MUST hold enough packed bytes for the uncompressed length (none when there is one symbol, which repeats it), as htscodecs' `hts_unpack` requires.
+
+r[cram.codec.arith.ext]
+EXT hands the body to an external codec, identified by its magic number; bzip2 (`BZh`) is the only one defined, and anything else MUST be an error. The bzip2 output MUST fit in the length it decodes to.
 
 r[cram.codec.fqzcomp]
 Method 7 (fqzcomp): v3.1 quality-score compressor. MUST be supported — htslib compresses the QS block with it under the v3.1 `small` and `archive` profiles. The stream is a uint7 output size, the parameter block (`r[cram.codec.fqzcomp.params]`), and the range-coded data (`r[cram.codec.range_coder]`); the output is every record's qualities concatenated, as CRAM stores the QS external block. Where the [CRAMcodecs] §6 pseudocode and htscodecs' `fqzcomp_qual.c` disagree, the decoder follows htscodecs, which writes the files (see the rules below). The decoded size MUST equal the block's uncompressed size (htslib takes fqzcomp's own size without checking; a mismatch only happens in a corrupt block).
 
 r[cram.codec.tok3]
 Method 8 (tok3): v3.1 read-name tokeniser. MUST be supported for v3.1 files — samtools uses tok3 for read name blocks by default in v3.1 output. Without tok3 support, v3.1 CRAM files produced by `samtools view -C` cannot be read.
+
+r[cram.codec.tok3_arith]
+A tok3 block whose header byte 8 (`use_arith`) is non-zero codes each token stream with the arithmetic coder instead of rANS Nx16: the stream is still a uint7 compressed length and that many bytes, which decode with `r[cram.codec.arith+2]` to the length stored in them. Everything else about the block is unchanged.
 
 r[cram.codec.unknown]
 Unknown codec methods MUST produce a clear error naming the method ID and suggesting conversion to BAM (`samtools view -b`).
