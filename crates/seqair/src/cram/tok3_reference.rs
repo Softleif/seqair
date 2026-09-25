@@ -642,6 +642,22 @@ mod tests {
         assert!(tok3::decode(&block).unwrap() == expected, "production");
     }
 
+    /// Blocks whose names end near the bound on the output (the declared
+    /// length plus 1 KiB), where the decoders' writes take their slow paths:
+    /// they decode exactly when the names fit, and alike.
+    // r[verify cram.codec.tok3.limits]
+    #[hegel::test(test_cases = 300)]
+    fn decoders_agree_near_the_output_bound(tc: TestCase) {
+        let names = tc.draw(arb_names());
+        let Some(mut block) = encode(&tc, &names) else { return };
+        let len = joined(&names).len();
+        let short = tc.draw(gs::integers::<usize>().max_value(40));
+        let ulen = (len + short).saturating_sub(1024 + 20);
+        block[..4].copy_from_slice(&u32::try_from(ulen).unwrap().to_le_bytes());
+        assert_agree(&block);
+        assert_eq!(tok3::decode(&block).is_ok(), len <= ulen + 1024 && names.len() <= ulen + 1024);
+    }
+
     /// Damaged blocks: whatever both decoders accept, they decode alike.
     #[hegel::test(test_cases = 500)]
     fn decoders_agree_on_damaged_blocks(tc: TestCase) {

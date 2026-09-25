@@ -55,6 +55,63 @@ const NOP: u8 = 11;
 const END: u8 = 12;
 const N_TYPES: usize = 13;
 
+/// The fixed-size store short tokens are written with.
+const CHUNK: usize = 16;
+
+/// "00" to "99".
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "i < 100: indices below 200, digits below 10"
+)]
+const DIGIT_PAIRS: [u8; 200] = {
+    let mut pairs = [0; 200];
+    let mut i = 0;
+    while i < 100 {
+        pairs[2 * i] = b'0' + (i / 10) as u8;
+        pairs[2 * i + 1] = b'0' + (i % 10) as u8;
+        i += 1;
+    }
+    pairs
+};
+
+/// `value` in decimal, left-padded with zeros to `width` (at most
+/// [`CHUNK`]), at the start of a chunk; and its length.
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "v < 2^32 and its remainders below 100: pair indices below 200, a digit below 10"
+)]
+#[inline]
+fn format_padded(value: u32, width: usize) -> ([u8; CHUNK], usize) {
+    let digits = value.checked_ilog10().map_or(1, |l| l as usize + 1);
+    let len = width.max(digits).min(CHUNK);
+    let mut chunk = [b'0'; CHUNK];
+    let mut end = len;
+    let mut v = value as usize;
+    while v >= 100 {
+        let pair = (v % 100) * 2;
+        v /= 100;
+        end = end.wrapping_sub(2);
+        if let (Some(dst), Some(src)) =
+            (chunk.get_mut(end..end.wrapping_add(2)), DIGIT_PAIRS.get(pair..pair + 2))
+        {
+            dst.copy_from_slice(src);
+        }
+    }
+    if v >= 10 {
+        end = end.wrapping_sub(2);
+        if let (Some(dst), Some(src)) =
+            (chunk.get_mut(end..end.wrapping_add(2)), DIGIT_PAIRS.get(v * 2..v * 2 + 2))
+        {
+            dst.copy_from_slice(src);
+        }
+    } else if let Some(d) = chunk.get_mut(end.wrapping_sub(1)) {
+        *d = b'0' + v as u8;
+    }
+    (chunk, len)
+}
+
 /// Each token type as a byte, so a regenerated type stream's first byte
 /// can be a slice of it.
 const TYPE_BYTES: [u8; N_TYPES] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
@@ -305,6 +362,16 @@ impl Token {
     const EMPTY: Self = Self { kind: Kind::Empty, value: 0, start: 0, len: 0 };
 }
 
+/// Token `t` (from 1) of a name whose tokens start at `first` and number
+/// `count`.
+#[inline]
+fn token_at(tokens: &[Token], first: usize, count: usize, t: usize) -> Option<Token> {
+    if t > count {
+        return None;
+    }
+    tokens.get(first.wrapping_add(t).wrapping_sub(1)).copied()
+}
+
 /// A decoded name: its text in the output (without the NUL) and its tokens
 /// in the arena.
 #[derive(Clone, Copy)]
@@ -371,21 +438,55 @@ impl<'a> Names<'a> {
     /// Write `value` in decimal, left-padded with zeros to `width`.
     #[inline]
     fn put_digits(&mut self, kind: Kind, value: u32, width: usize) -> Result<Token, CramError> {
-        let mut buf = itoa::Buffer::new();
-        let digits = buf.format(value).as_bytes();
-        let zeros = width.saturating_sub(digits.len());
         let start = self.len;
-        let dst = self.reserve(zeros.saturating_add(digits.len()))?;
-        let (pad, rest) = dst.split_at_mut(zeros);
-        pad.fill(b'0');
-        rest.copy_from_slice(digits);
+        if width <= CHUNK {
+            let (chunk, len) = format_padded(value, width);
+            self.put_chunk(&chunk, len)?;
+        } else {
+            // DZLEN up to 255: a rare, slow path.
+            let (chunk, digits) = format_padded(value, 0);
+            let dst = self.reserve(width)?;
+            let (pad, rest) = dst.split_at_mut(width.saturating_sub(digits));
+            pad.fill(b'0');
+            rest.copy_from_slice(chunk.get(..digits).unwrap_or_default());
+        }
         Ok(Token { kind, value, start: to_u32(start)?, len: to_u32(self.len.wrapping_sub(start))? })
+    }
+
+    /// Write the first `len` bytes of `chunk` (`len <= CHUNK`): all of it
+    /// in one store when there is room (bytes past `len` are overwritten
+    /// by what comes next, or cut off at the end).
+    #[inline]
+    fn put_chunk(&mut self, chunk: &[u8; CHUNK], len: usize) -> Result<(), CramError> {
+        let end = self.len.wrapping_add(len);
+        if let Some(dst) = self.out.get_mut(self.len..).and_then(|d| d.first_chunk_mut::<CHUNK>()) {
+            *dst = *chunk;
+            if end > self.out.len() {
+                return Err(CramError::Tok3OutputOverflow { limit: self.out.len() });
+            }
+        } else {
+            let limit = self.out.len();
+            let dst = self
+                .out
+                .get_mut(self.len..end)
+                .ok_or_else(|| CramError::Tok3OutputOverflow { limit })?;
+            dst.copy_from_slice(chunk.get(..len).unwrap_or_default());
+        }
+        self.len = end;
+        Ok(())
     }
 
     /// Write again the text of `token`, from an earlier name.
     #[inline]
     fn put_copy(&mut self, token: Token) -> Result<(), CramError> {
         let (start, len) = (token.start as usize, token.len as usize);
+        // Short text: one 16-byte load and store. The load may run past
+        // the written bytes; what it brings along lands past `len`.
+        if len <= CHUNK
+            && let Some(&chunk) = self.out.get(start..).and_then(|s| s.first_chunk::<CHUNK>())
+        {
+            return self.put_chunk(&chunk, len);
+        }
         let (written, free) = self.out.split_at_mut(self.len);
         let src = written.get(start..start.wrapping_add(len));
         let dst = free.get_mut(..len);
@@ -431,11 +532,7 @@ impl<'a> Names<'a> {
             })?;
             let ty = position.stream(TYPE)?.u8()?;
             // The previous name's token at this position.
-            let prev = || {
-                (t <= prev_count)
-                    .then(|| self.tokens.get(prev_first.wrapping_add(t).wrapping_sub(1)).copied())
-                    .flatten()
-            };
+            let prev = || token_at(&self.tokens, prev_first, prev_count, t);
             let token = match ty {
                 CHAR => {
                     let c = position.stream(CHAR)?.u8()?;
@@ -565,6 +662,23 @@ mod tests {
         }));
         parts.push(Part::Stream(NEW | TYPE, &[END; 3]));
         block(ulen, 2, &parts)
+    }
+
+    /// The fixed-width digit writer is `format!`'s zero padding, at every
+    /// width it takes.
+    #[hegel::test]
+    fn format_padded_matches_format(tc: hegel::TestCase) {
+        use hegel::generators as gs;
+        let value = if tc.draw(gs::booleans()) {
+            tc.draw(gs::integers::<u32>())
+        } else {
+            tc.draw(gs::sampled_from(
+                &[0, 9, 10, 99, 100, 999_999_999, 1_000_000_000, u32::MAX][..],
+            ))
+        };
+        let width = tc.draw(gs::integers::<usize>().max_value(CHUNK));
+        let (chunk, len) = format_padded(value, width);
+        assert_eq!(&chunk[..len], format!("{value:0width$}").as_bytes());
     }
 
     // r[verify cram.codec.tok3.names]
