@@ -155,12 +155,35 @@ fn block_methods(cram: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The file's records as SAM text, from the samtools on `PATH`.
+fn samtools_sam(cram: &Path) -> Vec<u8> {
+    let out = Command::new("samtools")
+        .args(["view", "--no-PG", "--input-fmt-option", "decode_md=0"])
+        .arg(cram)
+        .output()
+        .expect("samtools view");
+    assert!(out.status.success(), "samtools view {}", cram.display());
+    out.stdout
+}
+
+/// Level `level` decodes to htslib's records. The rust-htslib we link bundles
+/// htslib 1.19, which fails on `level-4.cram` (`BamTruncatedRecord`) while
+/// current samtools reads it; so the records come from htslib's decode of
+/// `level-1.cram`, and samtools confirms that level `level` holds exactly
+/// those records.
 fn assert_level_matches_htslib(level: u8) {
     let dir = tempfile::tempdir().expect("tempdir");
     let cram = indexed_copy(dir.path(), level);
+    let baseline = if level == 1 { cram.clone() } else { indexed_copy(dir.path(), 1) };
+    if level != 1 {
+        assert!(
+            samtools_sam(&cram) == samtools_sam(&baseline),
+            "samtools: level-{level} and level-1 hold different records"
+        );
+    }
 
     let ours = read_seqair(&cram);
-    let theirs = read_htslib(&cram);
+    let theirs = read_htslib(&baseline);
     assert_eq!(ours.len(), theirs.len(), "level-{level}: record count");
     assert_eq!(ours.len(), 20_000, "level-{level}: every record");
     for (i, (a, b)) in ours.iter().zip(&theirs).enumerate() {
@@ -183,4 +206,25 @@ fn level_2_matches_htslib() {
     let methods = block_methods(&level_path(2));
     assert!(methods.iter().any(|m| m == "tok3-rans"), "{methods:?}");
     assert_level_matches_htslib(2);
+}
+
+// r[verify cram.codec.fqzcomp]
+// r[verify cram.codec.bzip2]
+#[test]
+fn level_3_matches_htslib() {
+    let methods = block_methods(&level_path(3));
+    assert!(methods.iter().any(|m| m == "fqzcomp"), "{methods:?}");
+    assert_level_matches_htslib(3);
+}
+
+// r[verify cram.codec.arith]
+// r[verify cram.codec.lzma]
+#[test]
+fn level_4_matches_htslib() {
+    let methods = block_methods(&level_path(4));
+    assert!(methods.iter().any(|m| m == "fqzcomp"), "{methods:?}");
+    assert!(methods.iter().any(|m| m == "tok3-arith"), "{methods:?}");
+    assert!(methods.iter().any(|m| m.starts_with("arith-")), "{methods:?}");
+    assert!(methods.iter().any(|m| m == "lzma"), "{methods:?}");
+    assert_level_matches_htslib(4);
 }
