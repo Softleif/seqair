@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A crafted rANS Nx16 block could exhaust the stack.** STRIPE substreams nested without limit;
+  more than 4 levels is now `CramError::RansStripeTooDeep` (htscodecs writes one).
 - **CRAM files that embed their reference failed when the FASTA lacked the contig.** The reader
   fetched each container's reference before looking at its slices, so a file whose slices all carry
   their own reference (such as the hts-specs CRAM 3.1 conformance files) failed with

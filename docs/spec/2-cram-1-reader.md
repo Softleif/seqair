@@ -304,6 +304,9 @@ Order-1 interleaving is chunk-based, not round-robin: the output is split into 4
 r[cram.codec.rans_nx16]
 Method 5 (rANS Nx16): v3.1 codec. rANS with N-way interleaving (N=4 or 32), 16-bit renormalization (L=2^15), and optional transforms controlled by an 8-bit flags byte: ORDER(1), N32(4), STRIPE(8), NoSize(16), CAT(32), RLE(64), PACK(128). Transforms are applied in order: decode entropy → unRLE → unPack. MUST be supported for v3.1 files — samtools uses this for most data blocks in v3.1 output.
 
+r[cram.codec.rans_nx16_stripe_depth]
+A STRIPE substream is itself a complete Nx16 stream and may be striped again. htscodecs' encoder writes one level; the decoder MUST bound the nesting (here 4 levels) and reject deeper streams with a typed error, so a crafted block cannot recurse until the stack is exhausted.
+
 r[cram.codec.rans_nx16_pack]
 The PACK transform packs 8, 4 or 2 symbols a byte (2, 3–4 or 5–16 distinct symbols), the first symbol in the lowest bits, each an index into the block's symbol map; one distinct symbol is a run of it. An index past the map decodes to 0, and output past what the packed bytes cover stays 0. Past a small output size, unpacking takes htscodecs' `hts_unpack` shape — a 256-entry table from packed byte to its symbols, one store a byte — and the 2-a-byte case the BAM nibble kernel (`r[io.simd_portable]`) with the nibble order swapped. Output MUST equal the per-symbol loop's.
 

@@ -157,6 +157,9 @@ pub enum CramError {
     #[error("rANS Nx16 stripe chunk_count must be > 0")]
     RansStripeZeroChunks,
 
+    #[error("rANS Nx16 STRIPE substreams nest deeper than {limit} levels")]
+    RansStripeTooDeep { limit: u8 },
+
     #[error("rANS Nx16 bit-pack symbol_count must be > 0")]
     RansBitPackZeroSymbols,
 
