@@ -1,5 +1,6 @@
 //! Parse and decompress CRAM blocks. [`parse_block`] handles all compression methods
-//! defined by CRAM v3: raw, gzip, bzip2, lzma, rANS order-0/1, NX16, and tok3.
+//! defined by CRAM v3: raw, gzip, bzip2, lzma, rANS order-0/1, NX16, the arithmetic coder,
+//! fqzcomp, and tok3.
 
 // See rans.rs: lazy `ok_or_else(|| CramError::...)` keeps error construction and its
 // `drop_in_place<CramError>` off the per-record path.
@@ -142,7 +143,7 @@ fn parse_block_inner(
         .ok_or_else(|| CramError::Truncated { context: "block pos after CRC" })?;
 
     let uncompressed_size = uncompressed_size as usize;
-    super::reader::check_alloc_size(uncompressed_size, "block uncompressed size")?;
+    super::reader::check_codec_output(uncompressed_size, "block uncompressed size")?;
 
     let data = decompress_block(
         method,
@@ -209,8 +210,24 @@ fn decompress_block(
             Some(buf) => super::rans_nx16::decode_with_buf(compressed, uncompressed_size, buf),
             None => super::rans_nx16::decode(compressed, uncompressed_size),
         },
+        // r[impl cram.codec.arith+2]
+        6 => super::arith::decode(compressed, uncompressed_size),
+        // r[impl cram.codec.fqzcomp]
+        7 => {
+            let data = super::fqzcomp::decode(compressed)?;
+            if data.len() != uncompressed_size {
+                return Err(CramError::FqzcompSizeMismatch {
+                    expected: uncompressed_size,
+                    found: data.len(),
+                });
+            }
+            Ok(data)
+        }
         // r[impl cram.codec.tok3]
-        8 => super::tok3::decode(compressed),
+        8 => match nx16_order1_buf {
+            Some(buf) => super::tok3::decode_with_buf(compressed, buf),
+            None => super::tok3::decode(compressed),
+        },
         // r[impl cram.codec.unknown]
         _ => Err(CramError::UnsupportedCodec { method, content_type, content_id }),
     }
@@ -344,6 +361,29 @@ mod tests {
         assert_eq!(block.data, original);
     }
 
+    // r[verify cram.codec.arith+2]
+    #[test]
+    fn parse_arith_block() {
+        // The range-coded bytes of hts-specs' `range/q4.1` would do too; a
+        // CAT stream keeps the block's own framing the thing under test.
+        let original = b"arith";
+        let compressed = [0x20, 5, b'a', b'r', b'i', b't', b'h'];
+
+        let mut buf = Vec::new();
+        buf.push(6); // method = arith
+        buf.push(4); // ExternalData
+        encode_itf8_to(&mut buf, 0);
+        encode_itf8_to(&mut buf, compressed.len() as u32);
+        encode_itf8_to(&mut buf, original.len() as u32);
+        buf.extend_from_slice(&compressed);
+        let mut crc = libdeflater::Crc::new();
+        crc.update(&buf);
+        buf.extend_from_slice(&crc.sum().to_le_bytes());
+
+        let (block, _) = parse_block(&buf).unwrap();
+        assert_eq!(block.data, original);
+    }
+
     // r[verify cram.codec.lzma]
     #[test]
     fn parse_lzma_block() {
@@ -391,7 +431,7 @@ mod tests {
     #[test]
     fn unsupported_codec_detected() {
         let mut buf = Vec::new();
-        buf.push(6); // method = 6 (not supported)
+        buf.push(200); // method = 200 (not defined)
         buf.push(4); // ExternalData
         encode_itf8_to(&mut buf, 0);
         encode_itf8_to(&mut buf, 0); // compressed size = 0
@@ -403,7 +443,7 @@ mod tests {
 
         let err = parse_block(&buf).unwrap_err();
         match err {
-            CramError::UnsupportedCodec { method, .. } => assert_eq!(method, 6),
+            CramError::UnsupportedCodec { method, .. } => assert_eq!(method, 200),
             other => panic!("expected UnsupportedCodec, got {other:?}"),
         }
     }

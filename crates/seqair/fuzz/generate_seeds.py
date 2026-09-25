@@ -177,6 +177,14 @@ def main():
     # Wrap as Rans4x8 Arbitrary enum variant (discriminant 0)
     write_seed("fuzz_cram_codecs", "rans4x8_order0", bytes([0]) + rans)
 
+    # --- fqzcomp seeds: the hts-specs vectors, one per parameter set ---
+    fqz_dir = os.path.join(DATA_DIR, "hts-specs", "cram", "codecs", "fqzcomp")
+    for variant in range(4):
+        vector = open(os.path.join(fqz_dir, f"q4.{variant}"), "rb").read()
+        write_seed("fuzz_cram_fqzcomp", f"q4.{variant}", vector)
+    qvar = open(os.path.join(fqz_dir, "qvar.0"), "rb").read()
+    write_seed("fuzz_cram_fqzcomp", "qvar.0", qvar)
+
     # --- fuzz_reader_bam: concatenate BAM + BAI as one blob for Arbitrary ---
     # Arbitrary will split this into bam_data/bai_data/region fields;
     # the fuzzer mutates from there. Also symlink the raw files.

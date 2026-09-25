@@ -2,13 +2,19 @@
 //! [`crate::bam::RecordStore`]; the sub-modules handle the compression codec stack underneath.
 
 // r[impl io.minimal_public_api]
+pub mod arith;
 pub mod bitstream;
 pub mod block;
 pub(crate) mod codec_io;
 pub mod compression_header;
 pub mod container;
 pub mod encoding;
+pub mod fqzcomp;
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod fqzcomp_reference;
 pub mod index;
+pub(crate) mod range_coder;
 pub mod rans;
 pub mod rans_nx16;
 // The per-ISA Nx16 kernels became one `fearless_simd` kernel in `rans_nx16`.
@@ -21,6 +27,9 @@ pub mod rans_nx16_neon {}
 pub mod reader;
 pub mod slice;
 pub mod tok3;
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod tok3_reference;
 pub mod varint;
 
 pub use index::CramIndexError;

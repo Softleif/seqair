@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **CRAM 3.1 blocks compressed with the adaptive arithmetic coder (method 6) decode**, as do tok3
+  read-name blocks whose streams use it — samtools writes both at `-O cram,version=3.1,archive`.
+  Every transform htscodecs writes is covered (order-0/1, RLE, PACK, STRIPE, CAT and bzip2 EXT),
+  checked against the hts-specs vectors and against htscodecs' own encoder, at about htscodecs'
+  speed. `cram::arith::decode`, and `CramError::ArithCorruptData`, `ArithStripeZeroStreams`,
+  `ArithStripeTooDeep`, `ArithLengthMismatch`, `ArithPackedLengthTooLarge` and
+  `ArithExtUnknownCodec`.
+- **CRAM 3.1 fqzcomp quality blocks (method 7) decode.** htslib writes them under the v3.1 `small`
+  and `archive` profiles; such files failed with `UnsupportedCodec` before. The decoder is a
+  pure-Rust port of htscodecs' `fqzcomp_qual`, which it follows where the CRAMcodecs pseudocode
+  differs (the spec's rules list where). It is checked against the hts-specs vectors, against
+  htscodecs' encoder on generated records and parameter sets, and against a spec-literal reference
+  decoder. Quality models are created as contexts are first used, so a block allocates for the
+  contexts it reaches rather than htscodecs' 2^16 up front. New `CramError` variants cover the
+  codec's failure modes.
+- **CRAM byte data series may use the BETA encoding.** `FC`, `BA`, `QS`, `BS` and the values of
+  `BYTE_ARRAY_LEN` accept `ByteEncoding::Beta`, as htslib does; the byte is the low 8 bits of
+  `raw - offset`, matching htslib. BETA widths above 32 bits are now rejected with
+  `CramError::InvalidBetaBits` for integer series too, as htslib rejects them.
+
+### Changed
+
+- **tok3 read-name blocks decode 3–6× faster**: on the hts-specs CRAM 3.1 conformance files about
+  2.0× htscodecs' speed over rANS Nx16 and 1.3× over the arithmetic coder, from 0.32× and 0.46×.
+  Names are decoded straight into the output instead of through per-name `Vec`s and `format!`,
+  numbers are formatted eight digits at a time, the CRAM reader's rANS order-1 tables are reused
+  across blocks (`tok3::Decoder` does the same for direct callers), and STRIPE substreams (rANS
+  Nx16 and arith) interleave four at a time. The decoder
+  now follows written rules for blocks no encoder writes and is checked against a spec-literal
+  reference decoder on every input: a MATCH, DELTA or DELTA0 without a suitable token in the
+  previous name, an unterminated string, a token type that cannot occur inside a name, a stream
+  copied from one never set, more than 128 token positions, and names past the declared
+  uncompressed length (plus htscodecs' 1 KiB margin) are errors; DELTA sums wrap at 32 bits as in
+  htscodecs. New `CramError` variants `Tok3DupStreamUnset`, `Tok3TooManyPositions`,
+  `Tok3MatchWithoutValue`, `Tok3OutputOverflow` and `Tok3NameCountExceedsLength`;
+  `Tok3DupPositionOutOfRange` is gone.
+
+### Fixed
+
+- **A crafted rANS Nx16 block could exhaust the stack.** STRIPE substreams nested without limit;
+  more than 4 levels is now `CramError::RansStripeTooDeep` (htscodecs writes one).
+- **CRAM files that embed their reference failed when the FASTA lacked the contig.** The reader
+  fetched each container's reference before looking at its slices, so a file whose slices all carry
+  their own reference (such as the hts-specs CRAM 3.1 conformance files) failed with
+  `MissingReference`. Only a slice that needs the FASTA fails now.
+- **CRAM records carried htslib's private `cF:C` tag.** htslib stores CRAM flags in a one-byte `cF`
+  tag and strips it on decode; seqair now strips it too.
+
+### Removed
+
+- `CramError::Tok3ArithmeticCoderUnsupported`: such blocks decode now.
+
 ## v0.3.1 (2026-09-25)
 
 A performance release. Every hand-written `core::arch` kernel is now one portable `fearless_simd`

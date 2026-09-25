@@ -4,8 +4,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use seqair::cram::{
     bitstream::BitReader,
-    encoding::{ExternalCursor, HuffmanTable},
+    encoding::{ByteEncoding, DecodeContext, ExternalCursor, HuffmanTable},
 };
+use seqair_types::SmallVec;
 
 #[derive(Arbitrary, Debug)]
 struct EncodingInput {
@@ -14,6 +15,9 @@ struct EncodingInput {
     core_data: Vec<u8>,
     external_data: Vec<u8>,
     external_ops: Vec<ExternalOp>,
+    beta_offset: i32,
+    beta_bits: u8,
+    beta_count: u8,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -38,6 +42,15 @@ fuzz_target!(|input: EncodingInput| {
             }
         }
     }
+
+    // Fuzz BETA byte decoding from the core bit stream; widths above 32 are
+    // rejected at parse time, so construct only what parsing would accept.
+    let beta =
+        ByteEncoding::Beta { offset: input.beta_offset, bits: u32::from(input.beta_bits % 33) };
+    let mut ctx = DecodeContext::new(&input.core_data, SmallVec::new());
+    let _ = beta.decode(&mut ctx);
+    let mut buf = Vec::new();
+    let _ = beta.decode_n_into(&mut ctx, usize::from(input.beta_count), &mut buf);
 
     // Fuzz ExternalCursor operations
     let mut cursor = ExternalCursor::new(input.external_data);

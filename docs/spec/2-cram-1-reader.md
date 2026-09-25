@@ -254,8 +254,10 @@ Encoding ID 4 (BYTE_ARRAY_LEN): a length encoding followed by a value encoding. 
 r[cram.encoding.byte_array_stop]
 Encoding ID 5 (BYTE_ARRAY_STOP): reads bytes from an external block until a stop byte is encountered. Used for read names (stop=0x00) and variable-length strings.
 
-r[cram.encoding.beta]
-Encoding ID 6 (BETA): fixed-width integer. Parameters: offset and number of bits. Reads from core bit stream.
+r[cram.encoding.beta+2]
+Encoding ID 6 (BETA): fixed-width integer. Parameters: `offset` (itf8) and number of bits (itf8). Reads `bits` bits MSB-first from the core bit stream (0 bits reads nothing); the value is `raw - offset`. A bit width above 32 MUST be rejected at parse time, as htslib does. BETA is valid for integer data series and for byte data series (`FC`, `BA`, `QS`, `BS`, and the value encoding of `BYTE_ARRAY_LEN`). For a byte series the decoded byte is the low 8 bits of `raw - offset` — htslib's `cram_beta_decode_char` assigns the difference to a `char`, so out-of-range values wrap rather than fail.
+
+SUBEXP and GAMMA are integer-only: htslib's decoders reject them for byte series, so a byte series is NULL, EXTERNAL, HUFFMAN or BETA.
 
 > r[cram.encoding.subexp]
 > Encoding ID 7 (SUBEXP): sub-exponential code. Parameters: `offset` (itf8) and `K` (itf8). Reads from core bit stream. Decode procedure:
@@ -302,23 +304,102 @@ Order-1 interleaving is chunk-based, not round-robin: the output is split into 4
 r[cram.codec.rans_nx16]
 Method 5 (rANS Nx16): v3.1 codec. rANS with N-way interleaving (N=4 or 32), 16-bit renormalization (L=2^15), and optional transforms controlled by an 8-bit flags byte: ORDER(1), N32(4), STRIPE(8), NoSize(16), CAT(32), RLE(64), PACK(128). Transforms are applied in order: decode entropy → unRLE → unPack. MUST be supported for v3.1 files — samtools uses this for most data blocks in v3.1 output.
 
+r[cram.codec.rans_nx16_stripe_depth]
+A STRIPE substream is itself a complete Nx16 stream and may be striped again. htscodecs' encoder writes one level; the decoder MUST bound the nesting (here 4 levels) and reject deeper streams with a typed error, so a crafted block cannot recurse until the stack is exhausted.
+
 r[cram.codec.rans_nx16_pack]
 The PACK transform packs 8, 4 or 2 symbols a byte (2, 3–4 or 5–16 distinct symbols), the first symbol in the lowest bits, each an index into the block's symbol map; one distinct symbol is a run of it. An index past the map decodes to 0, and output past what the packed bytes cover stays 0. Past a small output size, unpacking takes htscodecs' `hts_unpack` shape — a 256-entry table from packed byte to its symbols, one store a byte — and the 2-a-byte case the BAM nibble kernel (`r[io.simd_portable]`) with the nibble order swapped. Output MUST equal the per-symbol loop's.
 
 r[cram.codec.rans_nx16_rle]
 The RLE transform reads literals from the entropy-decoded bytes; a literal that is one of the block's run symbols is followed by a run of that many more copies, its length a uint7 from the RLE metadata. A run is cut at the output's end, a run symbol at the very end still takes its length, and running out of literals before the output is full is `Truncated`. Decoding copies each stretch of literals up to the next run symbol at once and fills each run at once, without zeroing the output first (htscodecs' `hts_rle_decode`). Output and error-or-not MUST equal the per-byte loop's.
 
-r[cram.codec.arith]
-Method 6 (arithmetic coder): v3.1 adaptive arithmetic coder. SHOULD be supported.
+r[cram.codec.range_coder]
+The arithmetic coder and fqzcomp share one byte-wise range coder ([CRAMcodecs] §4 "Range coding", htscodecs' `c_range_coder.h`): decoding starts with `range = 2^32 - 1` and `code` the first five input bytes shifted through a 32-bit register; each symbol divides `range` by the model total, subtracts `cum * range` from `code`, multiplies `range` by the symbol frequency, and renormalises a byte at a time while `range < 2^24`. Needing a byte past the end of the input is `Truncated`.
+
+r[cram.codec.adaptive_model]
+The range coder's adaptive model ([CRAMcodecs] §4 "Adaptive Modelling", htscodecs' `c_simple_model.h`) starts every symbol `0..max_sym` at frequency 1. Decoding scans entries in their current order to the one whose cumulative range holds the coded value, adds 16 to its frequency and the total, halves every frequency (rounding up) once the total exceeds `2^16 - 17`, and swaps the entry with its predecessor if it now has the higher frequency. A coded value at or past the total is corrupt input and MUST be an error, not a panic or a guessed symbol.
+
+r[cram.codec.adaptive_model.simd_search]
+The arithmetic coder's literal models (`r[cram.codec.arith.order]`, `r[cram.codec.arith.rle]`) find the entry with a SIMD kernel (`r[io.simd_portable]`) once the scan is deep: the first 4 entries are checked one at a time; past them, a model whose recent symbols sat on average 32 or more entries deep (a moving average kept per model) takes the rest in blocks of 8 — each block's frequencies deinterleaved into `u16` lanes, their running sums formed with three shift-and-adds on top of everything before the block and compared against the coded value at once; the entries whose sum is at or below it precede the symbol, so their count is its index, the largest such sum its cumulative frequency and the smallest sum past it that plus its frequency — and the entries past the last whole block one at a time again; any other model keeps scanning one entry at a time, which beats the vector search while symbols sit near the front. Run-length, fqzcomp and every other model scan one entry at a time. The kernel's entry, cumulative frequency and frequency, or finding none, MUST equal the one-at-a-time scan's for every model and coded value at every SIMD level, the scalar `Fallback` included.
+
+r[cram.codec.arith+2]
+Method 6 (arithmetic coder, "range"): the v3.1 adaptive arithmetic coder ([CRAMcodecs] §4 "Range coding", htscodecs' `arith_dynamic.c`). MUST be supported — samtools writes it at `-O cram,version=3.1,archive`, and tok3 name blocks can use it (`r[cram.codec.tok3_arith]`). Where the spec's pseudocode and htscodecs disagree, the decoder follows htscodecs, which writes the files; each such place is named in the rules below.
+
+r[cram.codec.arith.wrapper]
+A stream starts with a flags byte: ORDER (the low two bits), EXT (4), STRIPE (8), NOSZ (16), CAT (32), RLE (64), PACK (128). Unless NOSZ is set a uint7 uncompressed length follows; with NOSZ the caller's length is used. (The spec's `ArithDecode` reads the length when NOSZ *is* set — a typo; htscodecs reads it when it is not.) STRIPE is checked first and ignores every other flag (`r[cram.codec.arith.stripe]`). Otherwise the PACK metadata follows (`r[cram.codec.arith.pack]`), and the rest of the stream is the body, decoded to the packed length if PACK is set or else the uncompressed length: an empty body decodes to nothing (htscodecs); else CAT copies the body's first bytes (the body MUST hold at least that many); else EXT decodes it with bzip2 (`r[cram.codec.arith.ext]`); else RLE selects the run-length decoders (`r[cram.codec.arith.rle]`); else the plain order-0/1 decoders (`r[cram.codec.arith.order]`). The body is then unpacked if PACK is set. The result MUST be exactly the uncompressed length — htscodecs returns a shorter result and leaves the check to its callers, which all make it — and every other malformed stream MUST be a typed error, never a panic. Lengths from the stream are checked against the allocation limit (`r[io.fuzz.alloc_limits]`) before anything is allocated.
+
+r[cram.codec.arith.order]
+The order-0 and order-1 decoders read a byte `max_sym` (0 meaning 256) and then run the range coder (`r[cram.codec.range_coder]`) over the rest of the body with adaptive models (`r[cram.codec.adaptive_model]`) over the symbols `0..max_sym`. Order-0 uses one model; order-1 one per previous byte, starting from context 0. Every decoded byte is below `max_sym`, so only `max_sym` order-1 models are reachable, and only those are built (the spec builds `max_sym`, htscodecs 256). Order-1 applies when the ORDER bits are exactly 1: htscodecs' decoder reads the reserved values 2 and 3 as order-0, and so does this decoder. (Its encoder, asked for them, writes order-0 data without RLE but order-1 data with RLE, which its own decoder then misreads; no writer asks for them.) A decoded length of zero reads nothing.
+
+r[cram.codec.arith.rle]
+The run-length decoders decode a literal (order-1: in the context of the previous literal, starting from 0), then its run of extra copies in parts of 0..3 from 258 four-symbol models: the first part in the context of the literal, the second in context 256, every further part in 257. A part of 3 continues the run while the run so far is below the decoded length (htscodecs' bound; the spec's pseudocode has none), and a run past the end of the output is cut there.
+
+r[cram.codec.arith.stripe]
+A STRIPE stream holds, after the flags byte, a uint7 total length (always present — htscodecs reads it whatever NOSZ says, and its encoder clears NOSZ here), a byte N ≥ 1, N uint7 compressed lengths, and the N substreams. Substream j is a complete arith stream of `len / N + (j < len % N)` bytes, decoded from exactly its compressed length (htscodecs lets it read on into the next, which no valid stream needs), and output byte `i·N + j` is its byte `i`. A substream decoding to any other length is an error. A substream may itself be striped; htscodecs' encoder never writes one, and the decoder MUST bound the nesting (here 4 levels) so a crafted stream cannot exhaust the stack.
+
+r[cram.codec.arith.pack]
+PACK uses the rANS Nx16 bit-packing metadata and unpacking (`r[cram.codec.rans_nx16_pack]`): a symbol count, the symbol map, and a uint7 packed length, which MUST NOT exceed the uncompressed length. The decoded body MUST hold enough packed bytes for the uncompressed length (none when there is one symbol, which repeats it), as htscodecs' `hts_unpack` requires.
+
+r[cram.codec.arith.ext]
+EXT hands the body to an external codec, identified by its magic number; bzip2 (`BZh`) is the only one defined, and anything else MUST be an error. The bzip2 output MUST fit in the length it decodes to.
 
 r[cram.codec.fqzcomp]
-Method 7 (fqzcomp): v3.1 quality-score-specific compressor. SHOULD be supported.
+Method 7 (fqzcomp): v3.1 quality-score compressor. MUST be supported — htslib compresses the QS block with it under the v3.1 `small` and `archive` profiles. The stream is a uint7 output size, the parameter block (`r[cram.codec.fqzcomp.params]`), and the range-coded data (`r[cram.codec.range_coder]`); the output is every record's qualities concatenated, as CRAM stores the QS external block. Where the [CRAMcodecs] §6 pseudocode and htscodecs' `fqzcomp_qual.c` disagree, the decoder follows htscodecs, which writes the files (see the rules below). The decoded size MUST equal the block's uncompressed size (htslib takes fqzcomp's own size without checking; a mismatch only happens in a corrupt block).
 
 r[cram.codec.tok3]
 Method 8 (tok3): v3.1 read-name tokeniser. MUST be supported for v3.1 files — samtools uses tok3 for read name blocks by default in v3.1 output. Without tok3 support, v3.1 CRAM files produced by `samtools view -C` cannot be read.
 
+r[cram.codec.tok3_arith]
+A tok3 block whose header byte 8 (`use_arith`) is non-zero codes each token stream with the arithmetic coder instead of rANS Nx16: the stream is still a uint7 compressed length and that many bytes, which decode with `r[cram.codec.arith+2]` to the length stored in them. Everything else about the block is unchanged.
+
+r[cram.codec.tok3.streams]
+A tok3 block is a 9-byte header — the uncompressed length (u32 LE), the name count (u32 LE), `use_arith` (u8) — and then token streams to the end of the block. Each starts with `ttype`: bits 0–5 the token type, which MUST be one of the 13 types (0..=12; htscodecs masks with 15 and keeps streams for 13–15 it never reads), bit 7 "first stream of a new token position", bit 6 "duplicate". Positions count up from 0 and there are at most 128 of them (htscodecs' `MAX_TOKENS`); a stream before the first new position is an error. A new position whose first stream is not a TYPE stream gets its TYPE stream regenerated: that type, then MATCH for every other name. A duplicate stream is `dup_pos` and `dup_type` bytes and copies that stream, which MUST have been set earlier (htscodecs also requires it to sort before the target and adds the type byte to the position unmasked); any other stream is a uint7 compressed length and that many bytes, decoded with rANS Nx16 or, under `use_arith`, the arithmetic coder (htscodecs hands the entropy decoder the rest of the block instead). A stream set twice keeps the later one.
+
+r[cram.codec.tok3.names]
+Exactly the header's name count is decoded ([CRAMcodecs] `DecodeNames`; htscodecs decodes until the position-0 TYPE stream runs out and rejects a count of 0). Name `n` reads its type from position 0's TYPE stream and a u32 distance from position 0's stream of that type; the distance MUST NOT exceed `n`, and "the previous name" is name `n - distance`. A DUP name (distance ≥ 1, as in htscodecs) copies the previous name and its tokens. Any other name decodes tokens at positions 1, 2, … from each position's TYPE stream until END: CHAR (a byte), STRING (bytes up to a NUL, which MUST be there — htscodecs takes an unterminated string and drops its last byte), DIGITS (a u32 in decimal), DIGITS0 (a u32 and a DZLEN byte, in decimal left-padded with zeros to that length and never truncated — htscodecs writes at most 9 digits and cuts high digits off a value longer than its length), DELTA and DELTA0 (a byte added, wrapping at 32 bits as in htscodecs, to the previous name's token at the same position, which MUST be a DIGITS resp. DIGITS0 value; DELTA0 pads to that token's length — htscodecs adds to whatever integer the token holds), MATCH (the previous name's token at the same position, which MUST be a CHAR, STRING, DIGITS or DIGITS0 value — a matched MATCH, DELTA or DELTA0 counts as the value it produced — and not NOP, END or missing), NOP (nothing) and END. Any other type inside a name — TYPE, DZLEN, DUP, DIFF, or not a token type — is an error ([CRAMcodecs] makes it an empty token, htscodecs ends the name), as is reading from a stream that was never set or has run out. Each name is followed by a NUL in the output.
+
+r[cram.codec.tok3.limits]
+The header is untrusted: the name count MUST be at most 10 million (`r[cram.tok3.name_count_limit]`), the uncompressed length MUST pass the codec output cap (`r[io.fuzz.codec_output_cap]`), and the output MUST NOT exceed the uncompressed length by more than 1 KiB — htscodecs' own margin: its encoder writes the exact length, but noodles' leaves out the last name's NUL — so a name count above that bound, which leaves less than a NUL per name, is rejected before anything is allocated for the names.
+
+r[cram.codec.tok3.table_reuse]
+A tok3 block's rANS Nx16 streams share one set of order-1 tables, and the CRAM reader passes in its own (`r[cram.codec.rans_nx16]`'s reusable buffer), so blocks after the first build none: at about 5 MiB they cost more to allocate and clear than a small name block takes to decode. A public `tok3::Decoder` keeps them the same way; `tok3::decode` builds them per call.
+
+r[cram.codec.tok3.reference]
+A spec-literal reference decoder (`cram::tok3_reference`, test and fuzz builds only) transliterates the [CRAMcodecs] pseudocode with the choices above and shares no tok3 code with the production decoder. Over the same arithmetic decoder, the production decoder's output and error-or-not MUST equal the reference's for every input.
+
 r[cram.codec.unknown]
 Unknown codec methods MUST produce a clear error naming the method ID and suggesting conversion to BAM (`samtools view -b`).
+
+### fqzcomp
+
+> _[CRAMcodecs] §6 "FQZComp quality codec"; htscodecs `fqzcomp_qual.c` (`fqz_read_parameters`, `decompress_new_read`, `uncompress_block_fqz2f`)_
+
+r[cram.codec.fqzcomp.params]
+The global parameters are: a version byte, which MUST be 5; `gflags` (1 `multi_param`, 2 `have_stab`, 4 `do_rev`); `nparam` as a byte if `multi_param`, else 1 — 0 is an error; `max_sel` = `nparam` if `nparam > 1`, else 0; if `have_stab`, `max_sel` as a byte and `stab` as an array of 256 (`r[cram.codec.fqzcomp.array]`); then `nparam` parameter blocks (`r[cram.codec.fqzcomp.param_block]`). A parameter block with `do_sel` while `max_sel` is 0 is an error. As in htscodecs, fewer than 10 bytes after the output size is `Truncated` before anything is parsed, and an output size of 0 decodes to nothing without reading the range coder.
+
+r[cram.codec.fqzcomp.param_block]
+A parameter block is: the starting context (u16 LE); `pflags` (2 `do_dedup`, 4 fixed length, 8 `do_sel`, 16 `have_qmap`, 32 `have_ptab`, 64 `have_dtab`, 128 `have_qtab`; bit 1 is ignored); `max_sym`; then three bytes of nibbles, high then low: `qbits`/`qshift`, `qloc`/`sloc`, `ploc`/`dloc`. Fewer than 7 bytes is `Truncated`. If `have_qmap`, `max_sym` bytes of `qmap` follow — symbol `k` outputs `qmap[k]`, and a symbol at or past `max_sym` outputs 0xFF (htscodecs' unset `INT_MAX` entry cast to a byte); otherwise `qmap` is the identity. `qtab` (256) is read only if `have_qtab` *and* `qbits > 0` (the spec reads it on the flag alone; htscodecs' writer and reader both also require `qbits`), else the identity; `ptab` (1024) and `dtab` (256) are read if their flag is set, else all zero. `ptab` and `dtab` entries are pre-shifted left by `ploc` / `dloc`. Flag 4 means the *record length is stored once* (htscodecs' `fixed_len`): the [CRAMcodecs] pseudocode names it `do_len` and decodes a length when it is set, the opposite of what htscodecs writes.
+
+r[cram.codec.fqzcomp.array]
+A table (`stab`, `qtab`, `ptab`, `dtab`) is stored as htscodecs' `read_array` two-level run length: the first level expands bytes into run lengths — a byte equal to the previous one is followed by a count of extra copies — until the run lengths sum to at least the table size or the input ends; the second level assigns value `v` to the next `R` entries, where `R` sums successive run bytes while they are 255. More than 1023 first-level entries, a repeat byte with no count after it, or running out of run lengths before the table is full is an error. The first level stops adding copies once the sum passes the table size, as htscodecs does. Values are at most 1023. htscodecs' `store_array` cannot write a table whose last run is a multiple of 255: it ends the run with a 0 continuation byte that `read_array`, having counted the whole table, never reads, so its own reader rejects the table; its built-in strategies never produce one.
+
+r[cram.codec.fqzcomp.models]
+The models are: 2^16 quality models over `max_sym + 1` symbols, `max_sym` the largest over all parameter blocks; four 256-symbol length models, one per length byte (little-endian); 2-symbol `rev` and `dup` models; and, if `max_sel > 0`, a selector model over `max_sel + 1` symbols. All are `r[cram.codec.adaptive_model]` models driven by one range decoder. A quality model is created the first time its context is used, so memory and set-up time scale with the contexts a block reaches, not with 2^16 × `max_sym`.
+
+r[cram.codec.fqzcomp.selector]
+At each record's start the selector `s` is decoded if the *first* parameter block has `do_sel`, else it is 0 (htscodecs tests the first block, not `max_sel > 0` as the pseudocode does). The parameter block is `x = stab[s]` if `have_stab`, else `x = s`; `x >= nparam` is an error.
+
+r[cram.codec.fqzcomp.record]
+A record starts with its length, decoded from the four length models, unless the selected block has the fixed-length flag and a length was already decoded (then the last decoded length is reused; `first_len` is global, not per block as in the pseudocode). A length of 0, or longer than the output still to fill, is an error. If `gflags.do_rev`, a `rev` flag is decoded (`do_rev` is global, not per block). If the selected block has `do_dedup`, a `dup` flag is decoded; a duplicate copies the `len` bytes before it — an error if fewer have been decoded — and decodes no qualities. Otherwise `qctx`, `delta` and `prevq` reset to 0, the remaining count `p` to `len`, and the context to the selected block's starting context.
+
+r[cram.codec.fqzcomp.context]
+Each quality `q` is decoded with the current context's model, then — using the *first* parameter block's tables, whichever block the selector chose (htscodecs passes the first block to `fqz_update_ctx` and its `qmap`; the selected block only supplies the starting context, fixed-length and dedup flags) — the next context is `((qctx & (2^qbits - 1)) << qloc) + ptab[min(p, 1023)] + dtab[min(delta, 255)] + (s << sloc)`, masked to 16 bits, after `qctx = (qctx << qshift) + qtab[q]`. The starting context only seeds a record's first quality: the pseudocode's `FQZUpdateContext` starts every update from `params.context`, htscodecs from 0. Then `delta` grows by one if `q != prevq`, `prevq = q`, and `p` drops by one. `p` is the count *before* this quality is taken off, so the second quality of a record sees `p = len`. The output byte is `qmap[q]`. Arithmetic wraps at 32 bits, as in C; only the low 16 bits reach the context.
+
+r[cram.codec.fqzcomp.reverse]
+With `gflags.do_rev`, once every record is decoded each record flagged `rev` has its qualities reversed in place. A duplicate copies the bytes as decoded, before any reversal (the [CRAMcodecs] `ReverseQualities` pseudocode only advances past reversed records; htscodecs walks every record).
+
+r[cram.codec.fqzcomp.alloc]
+The output size is untrusted: it MUST pass `check_alloc_size`, and the output buffer starts at a capacity bounded by a multiple of the input size and grows, so a short stream claiming a large output does not allocate it up front. Parameter memory is bounded by `nparam <= 255`, and quality models are created on first use (`r[cram.codec.fqzcomp.models]`).
 
 ## Record decoding
 
@@ -491,6 +572,9 @@ Only records that were pushed to the RecordStore (i.e., overlapping the query re
 r[cram.record.aux_tags]
 `TL` (tag line index) selects which tag combination this record has from the tag dictionary in the preservation map. For each tag in the combination, the tag encoding map provides the encoding for its value. Tag values MUST be decoded and serialized to BAM binary aux format for storage in the aux slab.
 
+r[cram.record.cf_tag]
+A one-byte `cF:C` tag is htslib's private CRAM 3 flag field (bit 1: MD is stored verbatim, bit 2: NM is), not record data: htslib writes it when a record's MD/NM would not regenerate from the sequence, and removes it again on decode (`cram_decode.c`). The reader MUST drop it from the aux data likewise. seqair never generates MD/NM, so the flags themselves need no action.
+
 r[cram.record.rg_tag]
 The `RG` data series is separate from aux tags. If a read group is present, the reader MUST emit an `RG:Z:<id>` aux tag using the read group ID from the header's `@RG` entries. This tag MUST be included in the aux slab alongside dictionary-decoded tags.
 
@@ -544,8 +628,8 @@ If the reference MD5 in the slice header does not match the MD5 of the FASTA seq
 
 The check applies only to a slice that is making a claim about the FASTA. A slice with `embedded_reference >= 0` (`r[cram.slice.embedded_ref]`) MUST be exempt: its digest covers the reference it carries, not the external one. Under `embed_ref=2` htslib embeds a *consensus* computed from the reads and digests that, so the two agree only where the reads happen to agree with the reference — which is to say, not at low coverage and not wherever the reads carry a real difference. Checking such a slice against the FASTA rejects files that are entirely well-formed.
 
-r[cram.edge.missing_reference]
-If the FASTA reader cannot provide the reference sequence for a slice's region (e.g., contig not in FASTA), the reader MUST return an error unless the slice has an embedded reference. The error SHOULD mention `REF_PATH`/`REF_CACHE` as alternatives.
+r[cram.edge.missing_reference+2]
+If the FASTA reader cannot provide the reference sequence for a slice's region (e.g., contig not in FASTA), the reader MUST return an error unless the slice has an embedded reference. The decision is per slice: a container whose slices all embed their reference (as the hts-specs `3.1/passed/level-*.cram` files do) MUST decode with a FASTA that lacks the contig. The error SHOULD mention `REF_PATH`/`REF_CACHE` as alternatives.
 
 r[cram.edge.unknown_read_names]
 When `RN=false` in the preservation map, read names are not available. The reader MUST log a warning (once per slice). Records without read names are stored with empty qnames. The pileup engine's overlapping-pair dedup MUST skip records with empty or `*` qnames, since mate matching requires real qnames.
@@ -624,11 +708,8 @@ The uint7 variable-length integer decoding loop MUST be bounded to at most 5 ite
 r[cram.slice.validated_lengths]
 Length fields decoded from ITF8 (e.g., `num_content_ids`, `num_blocks`, `alignment_span`) may be negative when interpreted as i32. Before using such values as `usize` for allocation or iteration, the reader MUST validate they are non-negative via `i32::try_from` or equivalent. Negative values MUST produce an error, not wrap to huge `usize` values causing OOM.
 
-r[cram.tok3.dz_len_reader]
-The `TokenReader::get()` and `get_mut()` methods MUST return the same reader for every `TokenType` variant. In particular, `DZLen` MUST map to `dz_len_reader` in both methods. A mismatch causes the dup-copy path (which uses `get()`) to read from the wrong stream.
-
 r[cram.tok3.name_count_limit]
-The `name_count` field in tok3 headers comes from untrusted data. Allocation based on `name_count` MUST be bounded to a reasonable limit (e.g., 10,000,000 names). The per-name token vector MUST be grown dynamically rather than pre-allocated to a fixed size, since the number of token positions varies per name.
+The `name_count` field in tok3 headers comes from untrusted data. Allocation based on `name_count` MUST be bounded to a reasonable limit (e.g., 10,000,000 names). Token storage MUST grow with the tokens decoded rather than be pre-allocated per name to the 128-position maximum.
 
 ## Performance considerations
 

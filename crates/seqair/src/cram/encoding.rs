@@ -29,8 +29,16 @@ pub enum IntEncoding {
 #[derive(Debug, Clone)]
 pub enum ByteEncoding {
     Null,
-    External { content_id: i32 },
+    External {
+        content_id: i32,
+    },
     Huffman(HuffmanTable),
+    /// Fixed-width value from the core bit stream. The byte is the low 8 bits of
+    /// `raw - offset`, as htslib stores it into a `char`.
+    Beta {
+        offset: i32,
+        bits: u32,
+    },
 }
 
 /// Byte array encoding (for data series like RN, IN, SC, BB, QQ)
@@ -347,7 +355,7 @@ impl IntEncoding {
             Self::Huffman(table) => table
                 .decode(&mut ctx.core)
                 .ok_or_else(|| CramError::Truncated { context: "huffman int" }),
-            // r[impl cram.encoding.beta]
+            // r[impl cram.encoding.beta+2]
             Self::Beta { offset, bits } => {
                 let raw = ctx
                     .core
@@ -402,11 +410,7 @@ impl IntEncoding {
                 Ok(Self::Huffman(table))
             }
             6 => {
-                let offset = varint::read_itf8_from(&mut pcur)
-                    .ok_or_else(|| CramError::Truncated { context: "beta offset" })?
-                    .cast_signed();
-                let bits = varint::read_itf8_from(&mut pcur)
-                    .ok_or_else(|| CramError::Truncated { context: "beta bits" })?;
+                let (offset, bits) = parse_beta_params(&mut pcur)?;
                 Ok(Self::Beta { offset, bits })
             }
             7 => {
@@ -452,6 +456,7 @@ impl ByteEncoding {
                 )]
                 Ok(val as u8)
             }
+            Self::Beta { offset, bits } => decode_beta_byte(&mut ctx.core, *offset, *bits),
         }
     }
 
@@ -466,8 +471,8 @@ impl ByteEncoding {
     /// because the `quality_score` and the inner `val_encoding` of
     /// `ByteArrayLen` were called per byte through that path.
     ///
-    /// For `Null` we extend with zeros; for `Huffman` we still loop
-    /// (each symbol's bit length is data-dependent).
+    /// For `Null` we extend with zeros; for `Huffman` and `Beta` we still
+    /// loop, reading each value from the core bit stream.
     #[inline]
     pub fn decode_n_into(
         &self,
@@ -501,6 +506,13 @@ impl ByteEncoding {
                 }
                 Ok(())
             }
+            Self::Beta { offset, bits } => {
+                buf.reserve(n);
+                for _ in 0..n {
+                    buf.push(decode_beta_byte(&mut ctx.core, *offset, *bits)?);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -529,6 +541,10 @@ impl ByteEncoding {
                 let (alphabet, bit_lengths) = parse_huffman_params(&mut pcur)?;
                 let table = HuffmanTable::new(&alphabet, &bit_lengths)?;
                 Ok(Self::Huffman(table))
+            }
+            6 => {
+                let (offset, bits) = parse_beta_params(&mut pcur)?;
+                Ok(Self::Beta { offset, bits })
             }
             _ => Err(CramError::UnsupportedEncoding { encoding_id }),
         };
@@ -673,6 +689,36 @@ fn parse_huffman_params(cursor: &mut &[u8]) -> Result<(Vec<i32>, Vec<u32>), Cram
     Ok((alphabet, bit_lengths))
 }
 
+// r[impl cram.encoding.beta+2]
+/// Parse BETA's `offset` and bit-width parameters. htslib rejects widths above 32
+/// (the width of its `int`), for integer and byte series alike.
+fn parse_beta_params(cursor: &mut &[u8]) -> Result<(i32, u32), CramError> {
+    let offset = varint::read_itf8_from(cursor)
+        .ok_or_else(|| CramError::Truncated { context: "beta offset" })?
+        .cast_signed();
+    let bits = varint::read_itf8_from(cursor)
+        .ok_or_else(|| CramError::Truncated { context: "beta bits" })?;
+    if bits > 32 {
+        return Err(CramError::InvalidBetaBits { bits });
+    }
+    Ok((offset, bits))
+}
+
+// r[impl cram.encoding.beta+2]
+/// Decode one BETA value for a byte data series.
+#[inline]
+fn decode_beta_byte(core: &mut BitReader<'_>, offset: i32, bits: u32) -> Result<u8, CramError> {
+    let raw = core.read_bits(bits).ok_or_else(|| CramError::Truncated { context: "beta byte" })?;
+    // htslib's `cram_beta_decode_char` assigns `raw - offset` to a `char`, so an
+    // out-of-range value wraps rather than failing; the low 8 bits of the
+    // two's-complement difference are the same in u32 as in i32.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "keeping the low byte is the htslib semantics"
+    )]
+    Ok(raw.wrapping_sub(offset.cast_unsigned()) as u8)
+}
+
 /// Decode Elias gamma code from a bit stream.
 fn decode_gamma(reader: &mut BitReader<'_>) -> Option<i32> {
     let mut n = 0u32;
@@ -785,7 +831,7 @@ mod tests {
         assert!(cursor.read_bytes_until_into(0, &mut buf).is_none());
     }
 
-    // r[verify cram.encoding.beta]
+    // r[verify cram.encoding.beta+2]
     #[test]
     fn beta_encoding_decode() {
         let data = [0b10110000]; // bits: 1011 = 11
@@ -910,6 +956,115 @@ mod tests {
         let enc = IntEncoding::Beta { offset, bits };
         let decoded = enc.decode(&mut ctx).unwrap();
         assert_eq!(decoded, val.cast_signed() - offset);
+    }
+
+    /// Pack `values` as `bits`-wide fields, MSB-first per `r[cram.bitstream]`.
+    /// Deliberately independent of `BitReader`: expand to a bit list, then
+    /// fill each byte from 0x80 downwards, zero-padding the tail.
+    fn pack_msb_first(values: &[u32], bits: u32) -> Vec<u8> {
+        let stream: Vec<bool> = values
+            .iter()
+            .flat_map(|&v| (0..bits).rev().map(move |i| (u64::from(v) >> i) & 1 == 1))
+            .collect();
+        stream
+            .chunks(8)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0u8, |byte, (i, &bit)| if bit { byte | (0x80 >> i) } else { byte })
+            })
+            .collect()
+    }
+
+    // r[verify cram.encoding.beta+2]
+    #[hegel::test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rem_euclid(256) is in 0..=255"
+    )]
+    fn beta_byte_decode_matches_bit_writer(tc: TestCase) {
+        let bits = tc.draw(gs::integers::<u32>().max_value(32));
+        let offset = tc.draw(gs::integers::<i32>());
+        let max_raw = if bits == 0 { 0 } else { u32::MAX >> (32 - bits) };
+        let raws: Vec<u32> =
+            tc.draw(gs::vecs(gs::integers::<u32>().max_value(max_raw)).max_size(64));
+        let data = pack_msb_first(&raws, bits);
+        // htslib stores `raw - offset` into a `char`: the value modulo 256.
+        let expected: Vec<u8> = raws
+            .iter()
+            .map(|&raw| (i64::from(raw) - i64::from(offset)).rem_euclid(256) as u8)
+            .collect();
+        let enc = ByteEncoding::Beta { offset, bits };
+
+        let mut ctx = DecodeContext::new(&data, SmallVec::new());
+        let got: Vec<u8> = raws.iter().map(|_| enc.decode(&mut ctx).unwrap()).collect();
+        assert_eq!(got, expected);
+        assert_eq!(ctx.core.remaining_bits(), data.len() * 8 - raws.len() * bits as usize);
+
+        let mut ctx = DecodeContext::new(&data, SmallVec::new());
+        let mut buf = vec![0xAA];
+        enc.decode_n_into(&mut ctx, raws.len(), &mut buf).unwrap();
+        assert_eq!(buf.first(), Some(&0xAA), "decode_n_into appends");
+        assert_eq!(buf.get(1..), Some(expected.as_slice()));
+    }
+
+    #[test]
+    fn beta_byte_past_end_of_core_is_truncated() {
+        let enc = ByteEncoding::Beta { offset: 0, bits: 8 };
+        let mut ctx = DecodeContext::new(&[0x41], SmallVec::new());
+        assert_eq!(enc.decode(&mut ctx).unwrap(), 0x41);
+        assert!(matches!(enc.decode(&mut ctx), Err(CramError::Truncated { .. })));
+        let mut buf = Vec::new();
+        let mut ctx = DecodeContext::new(&[0x41], SmallVec::new());
+        assert!(matches!(
+            enc.decode_n_into(&mut ctx, 2, &mut buf),
+            Err(CramError::Truncated { .. })
+        ));
+    }
+
+    // r[verify cram.encoding.beta+2]
+    #[test]
+    fn byte_encoding_parses_beta() {
+        // id 6, 6 param bytes: offset -5 as 5-byte ITF8 (0xFFFF_FFFB), bits 7;
+        // then a trailing byte the cursor must stop at.
+        let bytes = [6, 6, 0xFF, 0xFF, 0xFF, 0xFF, 0x0B, 7, 0x99];
+        let mut cursor: &[u8] = &bytes;
+        let enc = ByteEncoding::parse(&mut cursor).unwrap();
+        assert!(matches!(enc, ByteEncoding::Beta { offset: -5, bits: 7 }), "{enc:?}");
+        assert_eq!(cursor, &[0x99]);
+    }
+
+    // r[verify cram.encoding.beta+2]
+    #[test]
+    fn beta_wider_than_32_bits_is_rejected() {
+        let bytes = [6, 2, 0, 33];
+        let mut cursor: &[u8] = &bytes;
+        assert!(matches!(
+            ByteEncoding::parse(&mut cursor),
+            Err(CramError::InvalidBetaBits { bits: 33 })
+        ));
+        let mut cursor: &[u8] = &bytes;
+        assert!(matches!(
+            IntEncoding::parse(&mut cursor),
+            Err(CramError::InvalidBetaBits { bits: 33 })
+        ));
+        let mut cursor: &[u8] = &[6, 2, 0, 32];
+        assert!(matches!(IntEncoding::parse(&mut cursor), Ok(IntEncoding::Beta { bits: 32, .. })));
+    }
+
+    // r[verify cram.encoding.beta+2]
+    // r[verify cram.encoding.byte_array_len]
+    #[test]
+    fn byte_array_len_with_beta_values() {
+        // BYTE_ARRAY_LEN(len = HUFFMAN single symbol 3, val = BETA(offset 0, 8 bits)).
+        let bytes = [4, 10, 3, 4, 1, 3, 1, 0, 6, 2, 0, 8];
+        let mut cursor: &[u8] = &bytes;
+        let enc = ByteArrayEncoding::parse(&mut cursor).unwrap();
+        assert!(cursor.is_empty());
+        let mut ctx = DecodeContext::new(b"ABC", SmallVec::new());
+        assert_eq!(enc.decode(&mut ctx).unwrap(), b"ABC");
     }
 
     #[hegel::test]

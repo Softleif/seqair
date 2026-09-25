@@ -52,6 +52,9 @@ All file format readers (BAM, SAM, CRAM, FASTA, BAI, FAI, GZI) and their sub-par
 r[io.fuzz.alloc_limits]
 Parsers MUST NOT allocate memory proportional to an untrusted parsed size without a cap. All `Vec::with_capacity(n)` and `vec![0u8; n]` calls where `n` comes from parsed data MUST validate `n` against a reasonable upper bound and return an error if exceeded. This prevents OOM on corrupt files.
 
+r[io.fuzz.codec_output_cap]
+A few bytes of a valid entropy-coded stream (rANS, the arithmetic coder, fqzcomp, tok3) can legitimately expand to the full allocation limit, so under `cfg(fuzzing)` — set by cargo-fuzz — every codec's claimed output size MUST be checked against a smaller cap (4 MiB, above the seeds' largest real block) instead, as htscodecs does in its fuzzing builds. Normal builds keep the allocation limit of `r[io.fuzz.alloc_limits]`; the cap changes only which inputs a fuzzer spends its time on.
+
 r[io.fuzz.no_panic]
 Parsers MUST NOT panic on any input. Arithmetic overflow, out-of-bounds access, and shift overflow MUST be handled gracefully (via checked/saturating ops, `.get()` bounds checks, or early error returns). Fuzz targets SHOULD run with AddressSanitizer enabled to catch memory safety violations.
 

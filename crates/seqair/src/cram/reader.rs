@@ -138,6 +138,9 @@ pub enum CramError {
     #[error("external byte array encoding for content_id={content_id} requires explicit length")]
     ExternalByteArrayNeedsLength { content_id: i32 },
 
+    #[error("BETA encoding bit width {bits} exceeds 32")]
+    InvalidBetaBits { bits: u32 },
+
     // ── rANS ─────────────────────────────────────────────────────────────────
     #[error("invalid rANS 4x8 order: {order}")]
     InvalidRansOrder { order: u8 },
@@ -154,6 +157,9 @@ pub enum CramError {
     #[error("rANS Nx16 stripe chunk_count must be > 0")]
     RansStripeZeroChunks,
 
+    #[error("rANS Nx16 STRIPE substreams nest deeper than {limit} levels")]
+    RansStripeTooDeep { limit: u8 },
+
     #[error("rANS Nx16 bit-pack symbol_count must be > 0")]
     RansBitPackZeroSymbols,
 
@@ -166,21 +172,55 @@ pub enum CramError {
     )]
     MalformedAlphabetRun { start: u8, len: u8 },
 
+    // ── Arithmetic coder ─────────────────────────────────────────────────────
+    #[error("arith: corrupt range-coded data in {context}")]
+    ArithCorruptData { context: &'static str },
+
+    #[error("arith stripe stream count must be > 0")]
+    ArithStripeZeroStreams,
+
+    #[error("arith stripe streams nested deeper than {limit} levels")]
+    ArithStripeTooDeep { limit: u8 },
+
+    #[error("arith decoded {actual} bytes where the stream needs {expected}")]
+    ArithLengthMismatch { expected: usize, actual: usize },
+
+    #[error("arith packed length {packed} exceeds the uncompressed length {unpacked}")]
+    ArithPackedLengthTooLarge { packed: usize, unpacked: usize },
+
+    #[error("arith EXT data is not bzip2 (unknown magic number)")]
+    ArithExtUnknownCodec,
+
     // ── tok3 ─────────────────────────────────────────────────────────────────
     #[error("invalid tok3 token type: {token_type}")]
     InvalidTok3TokenType { token_type: u8 },
 
-    #[error("tok3 adaptive arithmetic coder not supported")]
-    Tok3ArithmeticCoderUnsupported,
+    #[error("tok3 stream copies position {position} type {token_type}, which was never set")]
+    Tok3DupStreamUnset { position: usize, token_type: u8 },
 
-    #[error("tok3 dup position {dup_pos} out of range")]
-    Tok3DupPositionOutOfRange { dup_pos: usize },
+    #[error("tok3 block has more than {limit} token positions")]
+    Tok3TooManyPositions { limit: usize },
 
-    #[error("tok3 Delta token requires Digits predecessor, got token discriminant {found}")]
+    #[error(
+        "tok3 DELTA token requires a DIGITS value in the previous name, got token kind {found} \
+         (0 none, 1 text, 2 digits, 3 zero-padded digits, 4 empty)"
+    )]
     Tok3DeltaRequiresDigits { found: u8 },
 
-    #[error("tok3 Delta0 token requires PaddedDigits predecessor, got token discriminant {found}")]
+    #[error(
+        "tok3 DELTA0 token requires a DIGITS0 value in the previous name, got token kind {found} \
+         (0 none, 1 text, 2 digits, 3 zero-padded digits, 4 empty)"
+    )]
     Tok3Delta0RequiresPaddedDigits { found: u8 },
+
+    #[error("tok3 MATCH at token position {position} has no value in the previous name to copy")]
+    Tok3MatchWithoutValue { position: usize },
+
+    #[error("tok3 names exceed the block's uncompressed length of {limit} bytes")]
+    Tok3OutputOverflow { limit: usize },
+
+    #[error("tok3 name_count {count} exceeds the uncompressed length {length}")]
+    Tok3NameCountExceedsLength { count: usize, length: usize },
 
     #[error("tok3 distance {distance} exceeds name index {name_index}")]
     Tok3DistanceExceedsIndex { distance: usize, name_index: usize },
@@ -190,6 +230,34 @@ pub enum CramError {
 
     #[error("tok3 name_count {count} exceeds limit {limit}")]
     Tok3NameCountExceedsLimit { count: usize, limit: usize },
+
+    // ── fqzcomp ──────────────────────────────────────────────────────────────
+    #[error("unsupported fqzcomp format version {version} (expected 5)")]
+    FqzcompVersion { version: u8 },
+
+    #[error("fqzcomp stream declares zero parameter blocks")]
+    FqzcompNoParams,
+
+    #[error("fqzcomp parameter block {block} uses the selector, but max_sel is 0")]
+    FqzcompSelectorWithoutRange { block: u8 },
+
+    #[error("malformed fqzcomp {table} table")]
+    FqzcompMalformedTable { table: &'static str },
+
+    #[error("fqzcomp selector picks parameter block {index}, but there are only {nparam}")]
+    FqzcompParamOutOfRange { index: u16, nparam: usize },
+
+    #[error("fqzcomp record length {len} is zero or exceeds the {remaining} output bytes left")]
+    FqzcompRecordLength { len: u32, remaining: usize },
+
+    #[error("fqzcomp duplicate record of length {len} with only {available} bytes decoded")]
+    FqzcompDuplicateTooLong { len: u32, available: usize },
+
+    #[error("fqzcomp range-coded data is corrupt or truncated")]
+    FqzcompRangeCoder,
+
+    #[error("fqzcomp block decoded to {found} bytes, but its header says {expected}")]
+    FqzcompSizeMismatch { expected: usize, found: usize },
 
     // ── Codec safety ─────────────────────────────────────────────────────────
     #[error("uint7 overflow: more than 5 continuation bytes")]
@@ -233,6 +301,26 @@ pub const MAX_ALLOC_SIZE: usize = 256 * 1024 * 1024;
 pub(crate) fn check_alloc_size(size: usize, context: &'static str) -> Result<(), CramError> {
     if size > MAX_ALLOC_SIZE {
         return Err(CramError::AllocationTooLarge { size, limit: MAX_ALLOC_SIZE, context });
+    }
+    Ok(())
+}
+
+/// The largest output one codec call may produce. `MAX_ALLOC_SIZE` in normal
+/// builds. Under `cfg(fuzzing)` (cargo-fuzz) it is 4 MiB: a few bytes of a
+/// valid rANS, arith or fqzcomp stream can expand to the full limit, and
+/// filling 256 MiB per input starves the fuzzer without reaching new code.
+/// htscodecs caps at 100 000 bytes in its fuzzing builds; 4 MiB keeps the
+/// seeds' real blocks (up to ~2.3 MB) decodable.
+#[cfg(not(fuzzing))]
+const MAX_CODEC_OUTPUT: usize = MAX_ALLOC_SIZE;
+#[cfg(fuzzing)]
+const MAX_CODEC_OUTPUT: usize = 4 * 1024 * 1024;
+
+// r[impl io.fuzz.codec_output_cap]
+/// Check a codec's claimed output size against [`MAX_CODEC_OUTPUT`].
+pub(crate) fn check_codec_output(size: usize, context: &'static str) -> Result<(), CramError> {
+    if size > MAX_CODEC_OUTPUT {
+        return Err(CramError::AllocationTooLarge { size, limit: MAX_CODEC_OUTPUT, context });
     }
     Ok(())
 }
@@ -667,6 +755,9 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             };
 
             self.ref_seq_buf.clear();
+            // A contig the FASTA lacks is only an error for a slice that
+            // needs it; one that embeds its reference does not.
+            let mut reference_missing = false;
             if ref_start < ref_end_clamped {
                 // `ref_end_clamped` is one past the last base the slices
                 // reach, and it is above `ref_start`, so the last base is
@@ -683,16 +774,14 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     start: position(ref_start)?,
                     last: position(ref_end_clamped.saturating_sub(1))?,
                 };
-                // r[impl cram.edge.missing_reference]
-                self.fasta.fetch_seq_into(ref_name, ref_span, &mut self.ref_seq_buf).map_err(
-                    |e| match &e {
-                        FastaError::SequenceNotFound { .. } => {
-                            CramError::MissingReference { contig: SmolStr::new(ref_name) }
-                        }
-                        _ => CramError::from(e),
-                    },
-                )?;
+                // r[impl cram.edge.missing_reference+2]
+                match self.fasta.fetch_seq_into(ref_name, ref_span, &mut self.ref_seq_buf) {
+                    Ok(()) => {}
+                    Err(FastaError::SequenceNotFound { .. }) => reference_missing = true,
+                    Err(e) => return Err(e.into()),
+                }
             }
+            let reference = (!reference_missing).then_some(self.ref_seq_buf.as_slice());
 
             // Decode each slice listed by CRAI as overlapping our query.
             // CRAI's `slice_offset` matches the container's landmark value
@@ -715,7 +804,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &ch,
                     &self.container_buf,
                     slice_offset,
-                    &self.ref_seq_buf,
+                    reference,
                     ref_start.cast_signed(),
                     &self.shared.header,
                     &self.shared.read_group_ids,
@@ -859,7 +948,24 @@ mod tests {
         assert!(count >= 1, "the mapped chr1 read must be returned");
     }
 
-    // r[verify cram.edge.missing_reference]
+    // r[verify cram.edge.missing_reference+2]
+    /// `test.cram` does not embed its reference, so a FASTA without its
+    /// contigs fails the fetch — per slice, once decoding needs the bases.
+    #[test]
+    fn fasta_without_the_contig_fails_a_slice_that_needs_it() {
+        let other_fasta = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/hts-specs/cram/ce.fa"
+        ));
+        let mut reader = IndexedCramReader::open(cram_path(), other_fasta).unwrap();
+        let mut store = RecordStore::new();
+        let err = reader
+            .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store)
+            .unwrap_err();
+        assert!(matches!(err, CramError::MissingReference { .. }), "{err:?}");
+    }
+
+    // r[verify cram.edge.missing_reference+2]
     #[test]
     fn missing_reference_gives_helpful_error() {
         let err = CramError::MissingReference { contig: SmolStr::new("chr19") };

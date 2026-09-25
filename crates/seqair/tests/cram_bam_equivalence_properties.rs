@@ -85,8 +85,14 @@ fn write_reference(dir: &Path, bases: &str) -> PathBuf {
 }
 
 /// Sort the SAM into a BAM, then transcode that BAM to CRAM against the same
-/// reference. Both are indexed. Returns `(bam, cram)`.
-fn write_bam_and_cram(dir: &Path, sam: &str, fasta: &Path) -> (PathBuf, PathBuf) {
+/// reference, passing `cram_opts` as `--output-fmt-option`s. Both are indexed.
+/// Returns `(bam, cram)`.
+fn write_bam_and_cram(
+    dir: &Path,
+    sam: &str,
+    fasta: &Path,
+    cram_opts: &[&str],
+) -> (PathBuf, PathBuf) {
     let sam_path = dir.join("generated.sam");
     std::fs::File::create(&sam_path)
         .expect("create SAM")
@@ -98,15 +104,12 @@ fn write_bam_and_cram(dir: &Path, sam: &str, fasta: &Path) -> (PathBuf, PathBuf)
     run(Command::new("samtools").arg("index").arg(&bam), "samtools index (bam)");
 
     let cram = dir.join("generated.cram");
-    run(
-        Command::new("samtools")
-            .args(["view", "-C", "-T"])
-            .arg(fasta)
-            .arg("-o")
-            .arg(&cram)
-            .arg(&bam),
-        "samtools view -C",
-    );
+    let mut view = Command::new("samtools");
+    view.args(["view", "-C"]);
+    for opt in cram_opts {
+        view.arg("--output-fmt-option").arg(opt);
+    }
+    run(view.arg("-T").arg(fasta).arg("-o").arg(&cram).arg(&bam), "samtools view -C");
     run(Command::new("samtools").arg("index").arg(&cram), "samtools index (cram)");
 
     (bam, cram)
@@ -267,7 +270,7 @@ fn cram_and_bam_decode_to_the_same_records(tc: TestCase) {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let fasta = write_reference(dir.path(), &reference);
-    let (bam, cram) = write_bam_and_cram(dir.path(), &sam_text(&reads), &fasta);
+    let (bam, cram) = write_bam_and_cram(dir.path(), &sam_text(&reads), &fasta, &[]);
 
     let from_bam = read_all(&bam, &fasta);
     let from_cram = read_all(&cram, &fasta);
@@ -300,5 +303,57 @@ fn cram_and_bam_decode_to_the_same_records(tc: TestCase) {
     }
     if reads.iter().any(|r| r.cigar.iter().any(|(_, op)| *op == 'S')) {
         tc.event("has a soft clip");
+    }
+}
+
+/// The block methods `samtools cram-size -v` reports for `cram`.
+fn block_methods(cram: &Path) -> Vec<String> {
+    let out = Command::new("samtools")
+        .args(["cram-size", "-v"])
+        .arg(cram)
+        .output()
+        .expect("samtools cram-size");
+    assert!(out.status.success(), "samtools cram-size");
+    String::from_utf8(out.stdout)
+        .expect("ASCII")
+        .lines()
+        .filter(|l| l.starts_with("BLOCK"))
+        .filter_map(|l| l.split_whitespace().nth(5).map(str::to_owned))
+        .collect()
+}
+
+/// htslib's CRAM 3.1 profiles past the default: `small` adds bzip2 and
+/// fqzcomp, `archive` the arithmetic coder (also inside the name tokeniser),
+/// and at level 9 lzma.
+const CRAM_31_PROFILES: &[&[&str]] = &[
+    &["version=3.1", "small"],
+    &["version=3.1", "archive"],
+    &["version=3.1", "archive", "level=9"],
+];
+
+// r[verify cram.codec.arith+2]
+// r[verify cram.codec.fqzcomp]
+/// The same reads written under every CRAM 3.1 compression profile decode
+/// to what the BAM holds, whichever codecs htslib picked for each block.
+#[hegel::test(test_cases = 32)]
+fn cram_31_profiles_decode_to_the_same_records(tc: TestCase) {
+    let (reference, reads) = tc.draw(arb_alignment().print_as_debug());
+    let profile = tc.draw(gs::sampled_from(CRAM_31_PROFILES));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fasta = write_reference(dir.path(), &reference);
+    let (bam, cram) = write_bam_and_cram(dir.path(), &sam_text(&reads), &fasta, profile);
+
+    let from_bam = read_all(&bam, &fasta);
+    let from_cram = read_all(&cram, &fasta);
+    assert_eq!(from_cram.len(), reads.len(), "CRAM record count");
+    assert_eq!(from_cram, from_bam, "CRAM ({profile:?}) and BAM disagree");
+
+    for method in block_methods(&cram) {
+        for codec in ["arith", "fqzcomp", "tok3-arith", "lzma", "bzip2"] {
+            if method.starts_with(codec) {
+                tc.event(codec);
+            }
+        }
     }
 }

@@ -102,8 +102,21 @@ pub fn decode(src: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, CramError
 /// for each sub-block).
 pub(crate) fn decode_with_buf(
     src: &[u8],
+    uncompressed_size: usize,
+    buf: &mut Nx16Order1Buf,
+) -> Result<Vec<u8>, CramError> {
+    decode_nested(src, uncompressed_size, buf, 0)
+}
+
+/// How deep STRIPE substreams may nest. htscodecs' encoder writes one level;
+/// the bound keeps a crafted stream from recursing until the stack runs out.
+const MAX_STRIPE_DEPTH: u8 = 4;
+
+fn decode_nested(
+    src: &[u8],
     mut uncompressed_size: usize,
     buf: &mut Nx16Order1Buf,
+    depth: u8,
 ) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
 
@@ -114,10 +127,10 @@ pub(crate) fn decode_with_buf(
     if flags & FLAG_NO_SIZE == 0 {
         uncompressed_size = read_uint7(&mut cur)? as usize;
     }
-    super::reader::check_alloc_size(uncompressed_size, "rANS Nx16 output")?;
+    super::reader::check_codec_output(uncompressed_size, "rANS Nx16 output")?;
 
     if flags & FLAG_STRIPE != 0 {
-        return decode_stripe_with_buf(&mut cur, uncompressed_size, buf);
+        return decode_stripe_with_buf(&mut cur, uncompressed_size, buf, depth);
     }
 
     let bit_pack_ctx = if flags & FLAG_PACK != 0 {
@@ -138,7 +151,7 @@ pub(crate) fn decode_with_buf(
 
     // r[impl io.fuzz.alloc_limits]
     // Re-check after PACK/RLE transforms may have updated uncompressed_size.
-    super::reader::check_alloc_size(uncompressed_size, "rANS Nx16 output (post-transform)")?;
+    super::reader::check_codec_output(uncompressed_size, "rANS Nx16 output (post-transform)")?;
     let mut dst = vec![0u8; uncompressed_size];
 
     if flags & FLAG_CAT != 0 {
@@ -1283,11 +1296,16 @@ fn read_frequencies_1_inner(
 
 // ── Stripe transform ─────────────────────────────────────────────────
 
+// r[impl cram.codec.rans_nx16_stripe_depth]
 fn decode_stripe_with_buf(
     src: &mut &[u8],
     uncompressed_size: usize,
     buf: &mut Nx16Order1Buf,
+    depth: u8,
 ) -> Result<Vec<u8>, CramError> {
+    if depth >= MAX_STRIPE_DEPTH {
+        return Err(CramError::RansStripeTooDeep { limit: MAX_STRIPE_DEPTH });
+    }
     let chunk_count = read_u8(src)
         .ok_or_else(|| CramError::Truncated { context: "rans_nx16 stripe chunk count" })?
         as usize;
@@ -1312,35 +1330,24 @@ fn decode_stripe_with_buf(
         .zip(&uncompressed_sizes)
         .map(|(&cs, &us)| {
             let sub = split_off(src, cs)?;
-            decode_with_buf(sub, us, buf)
+            decode_nested(sub, us, buf, depth.saturating_add(1))
         })
         .collect::<Result<_, _>>()?;
 
     let mut dst = vec![0u8; uncompressed_size];
-    for (i, chunk) in chunks.iter().enumerate() {
-        for (j, &s) in chunk.iter().enumerate() {
-            let idx =
-                j.checked_mul(chunk_count).and_then(|v| v.checked_add(i)).ok_or_else(|| {
-                    CramError::Truncated { context: "rans_nx16 stripe index overflow" }
-                })?;
-            if let Some(d) = dst.get_mut(idx) {
-                *d = s;
-            }
-        }
-    }
-
+    super::codec_io::interleave_stripes(&chunks, &mut dst);
     Ok(dst)
 }
 
 // ── Bit-pack transform ──────────────────────────────────────────────
 
-struct BitPackContext {
-    symbol_count: usize,
+pub(crate) struct BitPackContext {
+    pub(crate) symbol_count: usize,
     mapping_table: Vec<u8>,
     uncompressed_size: usize,
 }
 
-fn read_bit_pack_context(
+pub(crate) fn read_bit_pack_context(
     src: &mut &[u8],
     uncompressed_size: usize,
 ) -> Result<(BitPackContext, usize), CramError> {
@@ -1357,7 +1364,7 @@ fn read_bit_pack_context(
 }
 
 // r[impl cram.codec.rans_nx16_pack]
-fn apply_bit_unpack(src: &[u8], ctx: &BitPackContext) -> Result<Vec<u8>, CramError> {
+pub(crate) fn apply_bit_unpack(src: &[u8], ctx: &BitPackContext) -> Result<Vec<u8>, CramError> {
     let mut dst = vec![0u8; ctx.uncompressed_size];
     let map = &ctx.mapping_table;
 
@@ -1579,6 +1586,36 @@ mod tests {
     use hegel::prelude::*;
 
     // r[verify cram.codec.rans_nx16]
+
+    /// `levels` STRIPE wrappers of one substream each around a CAT stream of
+    /// `payload`.
+    fn nested_stripe(levels: usize, payload: &[u8]) -> Vec<u8> {
+        let len = u8::try_from(payload.len()).unwrap();
+        assert!(len < 0x80, "one-byte uint7");
+        let mut stream = vec![FLAG_CAT, len];
+        stream.extend_from_slice(payload);
+        for _ in 0..levels {
+            let clen = u8::try_from(stream.len()).unwrap();
+            assert!(clen < 0x80, "one-byte uint7");
+            let mut outer = vec![FLAG_STRIPE, len, 1, clen];
+            outer.extend_from_slice(&stream);
+            stream = outer;
+        }
+        stream
+    }
+
+    // r[verify cram.codec.rans_nx16_stripe_depth]
+    #[test]
+    fn stripe_nesting_is_bounded() {
+        let payload = b"ACGT";
+        for levels in 0..=usize::from(MAX_STRIPE_DEPTH) {
+            let got = decode(&nested_stripe(levels, payload), payload.len()).unwrap();
+            assert_eq!(got, payload, "{levels} levels");
+        }
+        let err =
+            decode(&nested_stripe(usize::from(MAX_STRIPE_DEPTH) + 1, payload), 4).unwrap_err();
+        assert!(matches!(err, CramError::RansStripeTooDeep { limit: MAX_STRIPE_DEPTH }), "{err:?}");
+    }
 
     #[test]
     fn rans_stripe_zero_chunks_returns_error() {
