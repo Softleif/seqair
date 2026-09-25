@@ -2,6 +2,7 @@
 //! [`crate::bam::RecordStore`]; the sub-modules handle the compression codec stack underneath.
 
 // r[impl io.minimal_public_api]
+pub mod arith;
 pub mod bitstream;
 pub mod block;
 pub(crate) mod codec_io;

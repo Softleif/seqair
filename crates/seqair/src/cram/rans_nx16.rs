@@ -1334,13 +1334,13 @@ fn decode_stripe_with_buf(
 
 // ── Bit-pack transform ──────────────────────────────────────────────
 
-struct BitPackContext {
-    symbol_count: usize,
+pub(crate) struct BitPackContext {
+    pub(crate) symbol_count: usize,
     mapping_table: Vec<u8>,
     uncompressed_size: usize,
 }
 
-fn read_bit_pack_context(
+pub(crate) fn read_bit_pack_context(
     src: &mut &[u8],
     uncompressed_size: usize,
 ) -> Result<(BitPackContext, usize), CramError> {
@@ -1357,7 +1357,7 @@ fn read_bit_pack_context(
 }
 
 // r[impl cram.codec.rans_nx16_pack]
-fn apply_bit_unpack(src: &[u8], ctx: &BitPackContext) -> Result<Vec<u8>, CramError> {
+pub(crate) fn apply_bit_unpack(src: &[u8], ctx: &BitPackContext) -> Result<Vec<u8>, CramError> {
     let mut dst = vec![0u8; ctx.uncompressed_size];
     let map = &ctx.mapping_table;
 

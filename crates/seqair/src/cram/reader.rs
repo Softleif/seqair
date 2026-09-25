@@ -169,6 +169,25 @@ pub enum CramError {
     )]
     MalformedAlphabetRun { start: u8, len: u8 },
 
+    // ── Arithmetic coder ─────────────────────────────────────────────────────
+    #[error("arith: corrupt range-coded data in {context}")]
+    ArithCorruptData { context: &'static str },
+
+    #[error("arith stripe stream count must be > 0")]
+    ArithStripeZeroStreams,
+
+    #[error("arith stripe streams nested deeper than {limit} levels")]
+    ArithStripeTooDeep { limit: u8 },
+
+    #[error("arith decoded {actual} bytes where the stream needs {expected}")]
+    ArithLengthMismatch { expected: usize, actual: usize },
+
+    #[error("arith packed length {packed} exceeds the uncompressed length {unpacked}")]
+    ArithPackedLengthTooLarge { packed: usize, unpacked: usize },
+
+    #[error("arith EXT data is not bzip2 (unknown magic number)")]
+    ArithExtUnknownCodec,
+
     // ── tok3 ─────────────────────────────────────────────────────────────────
     #[error("invalid tok3 token type: {token_type}")]
     InvalidTok3TokenType { token_type: u8 },
