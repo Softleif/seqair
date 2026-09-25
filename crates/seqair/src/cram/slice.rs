@@ -593,8 +593,13 @@ fn decode_record<E: CustomizeRecordStore>(
             // Decoding the value directly into `aux_buf` skips the
             // per-tag `Vec<u8>` allocation that the old `decode` API
             // forced.
+            let start = aux_buf.len();
             aux_buf.extend_from_slice(head);
             enc.decode_into(ctx, aux_buf)?;
+            // r[impl cram.record.cf_tag]
+            if *head == *b"cFC" && aux_buf.len() == start.wrapping_add(4) {
+                aux_buf.truncate(start);
+            }
         }
     }
 

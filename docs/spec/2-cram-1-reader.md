@@ -497,6 +497,9 @@ Only records that were pushed to the RecordStore (i.e., overlapping the query re
 r[cram.record.aux_tags]
 `TL` (tag line index) selects which tag combination this record has from the tag dictionary in the preservation map. For each tag in the combination, the tag encoding map provides the encoding for its value. Tag values MUST be decoded and serialized to BAM binary aux format for storage in the aux slab.
 
+r[cram.record.cf_tag]
+A one-byte `cF:C` tag is htslib's private CRAM 3 flag field (bit 1: MD is stored verbatim, bit 2: NM is), not record data: htslib writes it when a record's MD/NM would not regenerate from the sequence, and removes it again on decode (`cram_decode.c`). The reader MUST drop it from the aux data likewise. seqair never generates MD/NM, so the flags themselves need no action.
+
 r[cram.record.rg_tag]
 The `RG` data series is separate from aux tags. If a read group is present, the reader MUST emit an `RG:Z:<id>` aux tag using the read group ID from the header's `@RG` entries. This tag MUST be included in the aux slab alongside dictionary-decoded tags.
 
