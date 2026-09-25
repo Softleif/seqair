@@ -133,7 +133,7 @@ impl<const N: usize> AdaptiveModel<N> {
     ///
     /// Returns `None` if the input is corrupt (the coded value lies outside
     /// the model's total) or truncated.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn decode(&mut self, rc: &mut RangeDecoder<'_>) -> Option<u16> {
         let live = self.syms.get_mut(..usize::from(self.len))?;
         decode_symbol(rc, &mut self.total, live)
