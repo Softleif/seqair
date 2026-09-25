@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `raw - offset`, matching htslib. BETA widths above 32 bits are now rejected with
   `CramError::InvalidBetaBits` for integer series too, as htslib rejects them.
 
+### Fixed
+
+- **CRAM files that embed their reference failed when the FASTA lacked the contig.** The reader
+  fetched each container's reference before looking at its slices, so a file whose slices all carry
+  their own reference (such as the hts-specs CRAM 3.1 conformance files) failed with
+  `MissingReference`. Only a slice that needs the FASTA fails now.
+- **CRAM records carried htslib's private `cF:C` tag.** htslib stores CRAM flags in a one-byte `cF`
+  tag and strips it on decode; seqair now strips it too.
+
 ## v0.3.1 (2026-09-25)
 
 A performance release. Every hand-written `core::arch` kernel is now one portable `fearless_simd`
