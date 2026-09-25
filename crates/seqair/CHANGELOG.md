@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CRAM 3.1 fqzcomp quality blocks (method 7) decode.** htslib writes them under the v3.1 `small`
+  and `archive` profiles; such files failed with `UnsupportedCodec` before. The decoder is a
+  pure-Rust port of htscodecs' `fqzcomp_qual`, which it follows where the CRAMcodecs pseudocode
+  differs (the spec's rules list where). It is checked against the hts-specs vectors, against
+  htscodecs' encoder on generated records and parameter sets, and against a spec-literal reference
+  decoder. Quality models are created as contexts are first used, so a block allocates for the
+  contexts it reaches rather than htscodecs' 2^16 up front. New `CramError` variants cover the
+  codec's failure modes.
 - **CRAM byte data series may use the BETA encoding.** `FC`, `BA`, `QS`, `BS` and the values of
   `BYTE_ARRAY_LEN` accept `ByteEncoding::Beta`, as htslib does; the byte is the low 8 bits of
   `raw - offset`, matching htslib. BETA widths above 32 bits are now rejected with
