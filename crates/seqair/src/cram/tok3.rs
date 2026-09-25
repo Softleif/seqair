@@ -58,56 +58,55 @@ const N_TYPES: usize = 13;
 /// The fixed-size store short tokens are written with.
 const CHUNK: usize = 16;
 
-/// "00" to "99".
-#[allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    reason = "i < 100: indices below 200, digits below 10"
-)]
-const DIGIT_PAIRS: [u8; 200] = {
-    let mut pairs = [0; 200];
-    let mut i = 0;
-    while i < 100 {
-        pairs[2 * i] = b'0' + (i / 10) as u8;
-        pairs[2 * i + 1] = b'0' + (i % 10) as u8;
-        i += 1;
-    }
-    pairs
-};
+/// `v` (below 10^8) as 8 ASCII digits, zero-padded, most significant in the
+/// lowest byte: the two 4-digit halves in 32-bit lanes, split into 2-digit
+/// lanes of 16 bits, then into digits, each step one multiply by a
+/// reciprocal (exact for these ranges, and no lane's product reaches the
+/// next lane).
+#[allow(clippy::arithmetic_side_effects, reason = "lane values below 10^4: no product overflows")]
+#[inline]
+fn eight_digits(v: u32) -> u64 {
+    let halves = u64::from(v / 10_000) | (u64::from(v % 10_000) << 32);
+    let hundreds = ((halves * 10_486) >> 20) & 0x0000_007F_0000_007F;
+    let pairs = hundreds | ((halves - hundreds * 100) << 16);
+    let tens = ((pairs * 103) >> 10) & 0x000F_000F_000F_000F;
+    (tens | ((pairs - tens * 10) << 8)) + 0x3030_3030_3030_3030
+}
 
 /// `value` in decimal, left-padded with zeros to `width` (at most
-/// [`CHUNK`]), at the start of a chunk; and its length.
+/// [`CHUNK`]), at the start of a chunk; and its length. Bytes past the
+/// length are unspecified.
 #[allow(
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
-    reason = "v < 2^32 and its remainders below 100: pair indices below 200, a digit below 10"
+    reason = "len <= CHUNK; below 8 the shift is under 64; value / 10^8 is at most 42"
 )]
 #[inline]
 fn format_padded(value: u32, width: usize) -> ([u8; CHUNK], usize) {
     let digits = value.checked_ilog10().map_or(1, |l| l as usize + 1);
     let len = width.max(digits).min(CHUNK);
     let mut chunk = [b'0'; CHUNK];
-    let mut end = len;
-    let mut v = value as usize;
-    while v >= 100 {
-        let pair = (v % 100) * 2;
-        v /= 100;
-        end = end.wrapping_sub(2);
-        if let (Some(dst), Some(src)) =
-            (chunk.get_mut(end..end.wrapping_add(2)), DIGIT_PAIRS.get(pair..pair + 2))
-        {
-            dst.copy_from_slice(src);
+    let low = eight_digits(value % 100_000_000);
+    if len < 8 {
+        // Then `value` has at most `len` digits: the last `len` of the eight.
+        if let Some(dst) = chunk.first_chunk_mut::<8>() {
+            *dst = (low >> (8 * (8 - len))).to_le_bytes();
         }
-    }
-    if v >= 10 {
-        end = end.wrapping_sub(2);
-        if let (Some(dst), Some(src)) =
-            (chunk.get_mut(end..end.wrapping_add(2)), DIGIT_PAIRS.get(v * 2..v * 2 + 2))
-        {
-            dst.copy_from_slice(src);
+    } else {
+        if let Some(dst) = chunk.get_mut(len - 8..len) {
+            dst.copy_from_slice(&low.to_le_bytes());
         }
-    } else if let Some(d) = chunk.get_mut(end.wrapping_sub(1)) {
-        *d = b'0' + v as u8;
+        // A ninth and tenth digit.
+        let top = value / 100_000_000;
+        if top >= 10 {
+            if let Some(dst) = chunk.get_mut(len - 10..len - 8) {
+                dst.copy_from_slice(&[b'0' + (top / 10) as u8, b'0' + (top % 10) as u8]);
+            }
+        } else if top > 0
+            && let Some(d) = chunk.get_mut(len - 9)
+        {
+            *d = b'0' + top as u8;
+        }
     }
     (chunk, len)
 }
@@ -718,6 +717,24 @@ mod tests {
         let width = tc.draw(gs::integers::<usize>().max_value(CHUNK));
         let (chunk, len) = format_padded(value, width);
         assert_eq!(&chunk[..len], format!("{value:0width$}").as_bytes());
+    }
+
+    /// Every digit count at every width, and a spread of values.
+    #[test]
+    fn format_padded_matches_format_at_the_edges() {
+        let mut values: Vec<u32> = (0..=10_000).collect();
+        values.extend((0..=9).flat_map(|k| {
+            let p = 10u32.pow(k);
+            [p - 1, p, p + 1, p.saturating_mul(5)]
+        }));
+        values.extend([u32::MAX, u32::MAX - 1, 4_000_000_000, 999_999_999, 1_000_000_000]);
+        values.extend((0..100_000u32).map(|i| i.wrapping_mul(2_654_435_761)));
+        for &value in &values {
+            for width in 0..=CHUNK {
+                let (chunk, len) = format_padded(value, width);
+                assert_eq!(&chunk[..len], format!("{value:0width$}").as_bytes(), "{value} {width}");
+            }
+        }
     }
 
     // r[verify cram.codec.tok3.names]
