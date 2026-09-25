@@ -1,3 +1,4 @@
+// r[impl cram.codec.tok3.reference]
 //! A reference decoder for tok3, the read-name tokeniser: the pseudocode of
 //! `CRAMcodecs` §5 "Name tokenisation codec" (`DecodeNames`,
 //! `DecodeTokenByteStreams`, `DecodeSingleName`, `LeftPadNumber`),

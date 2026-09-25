@@ -968,6 +968,20 @@ mod tests {
         assert_eq!(decode(&block(0, 0, &[])).unwrap(), b"");
     }
 
+    /// A decoder reused across blocks — order-1 rANS streams (`.9`), the
+    /// arithmetic coder (`.19`), and back — decodes each as a fresh one does.
+    // r[verify cram.codec.tok3.table_reuse]
+    #[test]
+    fn a_reused_decoder_decodes_like_a_fresh_one() {
+        let dir =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/hts-specs/cram/codecs/tok3/");
+        let mut decoder = Decoder::new();
+        for name in ["01.names.9", "01.names.19", "03.names.9", "01.names.9", "nv.names.1"] {
+            let src = std::fs::read(format!("{dir}{name}")).unwrap();
+            assert_eq!(decoder.decode(&src).unwrap(), decode(&src).unwrap(), "{name}");
+        }
+    }
+
     // r[verify cram.codec.tok3_arith]
     #[test]
     fn decode_tok3_noodles_test_vector() {
