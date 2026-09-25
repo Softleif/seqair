@@ -1,24 +1,23 @@
-//! htscodecs as the oracle for the arithmetic coder and tok3-over-arith:
-//! hegel draws data and flags, htscodecs' own encoder (`arith_compress_to`,
-//! `tok3_encode_names`, linked from the static htslib that rust-htslib
-//! builds) compresses, and seqair must decode the original back. A
-//! differential property also feeds both decoders corrupted streams.
+//! htscodecs as the oracle for the arithmetic coder and tok3 over it: hegel
+//! draws data and flags, htscodecs' own encoder (`arith_compress_to`,
+//! `tok3_encode_names`, from the static htslib that the rust-htslib
+//! dev-dependency links) compresses, and the production decoder and the
+//! reference decoder must both return the original. Differential properties
+//! feed all three decoders corrupted streams.
 #![allow(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
     reason = "test code with bounded sizes"
 )]
 
 use std::ffi::{c_char, c_int, c_uint};
 
 use hegel::prelude::*;
-use seqair::cram::{arith, tok3};
+
+use super::{decode, reference};
+use crate::cram::tok3;
 
 // Pulls in hts-sys' static libhts, which contains htscodecs.
 use rust_htslib as _;
@@ -28,7 +27,7 @@ mod ffi {
     use std::ffi::{c_char, c_int, c_uint};
 
     unsafe extern "C" {
-        pub fn arith_compress_to(
+        pub(super) fn arith_compress_to(
             input: *mut u8,
             in_size: c_uint,
             out: *mut u8,
@@ -36,14 +35,14 @@ mod ffi {
             order: c_int,
         ) -> *mut u8;
 
-        pub fn arith_uncompress_to(
+        pub(super) fn arith_uncompress_to(
             input: *mut u8,
             in_size: c_uint,
             out: *mut u8,
             out_size: *mut c_uint,
         ) -> *mut u8;
 
-        pub fn tok3_encode_names(
+        pub(super) fn tok3_encode_names(
             blk: *mut c_char,
             len: c_int,
             level: c_int,
@@ -82,7 +81,7 @@ fn htscodecs_compress(data: &[u8], order: c_int) -> Vec<u8> {
             order,
         )
     };
-    take_c_buffer(p, out_size as usize)
+    take_c_buffer(p, usize::try_from(out_size).unwrap())
 }
 
 /// `arith_uncompress_to` into a buffer of exactly `len` bytes, as tok3 and
@@ -103,8 +102,28 @@ fn htscodecs_decompress(src: &[u8], len: usize) -> Option<Vec<u8>> {
     if p.is_null() {
         return None;
     }
-    out.truncate(out_size as usize);
+    out.truncate(usize::try_from(out_size).unwrap());
     Some(out)
+}
+
+/// `tok3_encode_names` over newline-terminated names.
+fn htscodecs_tokenise(names: &[Vec<u8>], level: c_int, use_arith: bool) -> Vec<u8> {
+    let mut block: Vec<u8> = names.iter().flat_map(|n| n.iter().copied().chain(*b"\n")).collect();
+    let mut out_len: c_int = 0;
+    let mut last_start: c_int = 0;
+    // SAFETY: `block` is live and `len` bytes long (htscodecs writes NULs
+    // into it); the result is malloc'ed with `out_len` bytes.
+    let p = unsafe {
+        ffi::tok3_encode_names(
+            block.as_mut_ptr().cast::<c_char>(),
+            c_int::try_from(block.len()).unwrap(),
+            level,
+            c_int::from(use_arith),
+            &raw mut out_len,
+            &raw mut last_start,
+        )
+    };
+    take_c_buffer(p, usize::try_from(out_len).unwrap())
 }
 
 const ORDER1: c_int = 0x01;
@@ -187,22 +206,27 @@ fn decodes_what_htscodecs_encodes(tc: TestCase) {
     // The oracle holds: htscodecs reads its own stream back.
     assert_eq!(htscodecs_decompress(&stream, data.len()).as_deref(), Some(data.as_slice()));
     // The size only matters to a NOSZ stream, which cannot say it itself.
-    let decoded = arith::decode(&stream, data.len())
+    let decoded = decode(&stream, data.len())
         .unwrap_or_else(|e| panic!("order {order:#x}, {} bytes: {e}", data.len()));
     assert!(decoded == data, "order {order:#x}: decoded data differs");
+    let decoded = reference::decode(&stream, data.len())
+        .unwrap_or_else(|| panic!("order {order:#x}: the reference decoder rejects it"));
+    assert!(decoded == data, "order {order:#x}: the reference decoder's data differs");
 }
 
-/// Whatever seqair accepts, htscodecs decodes to the same bytes. Corrupting
+/// Whatever the production decoder accepts, htscodecs decodes to the same
+/// bytes, and so does the reference decoder where it accepts it too (the
+/// reference's module docs list where their verdicts differ). Corrupting
 /// valid streams reaches the paths random bytes never get past.
 ///
-/// Not for STRIPE: htscodecs hands a substream every byte to the end of the
-/// input, so a corrupt one can read on into the next substream and fail (or
-/// succeed) where seqair, which stops at the substream's own length, does
-/// the opposite. Valid streams never do that.
-#[hegel::test(test_cases = 500)]
+/// htscodecs is not asked about STRIPE streams: it hands a substream every
+/// byte to the end of the input, so a corrupt one can read on into the next
+/// substream and fail (or succeed) where seqair, which stops at the
+/// substream's own length, does the opposite. Valid streams never do that.
+#[hegel::test(test_cases = 1000)]
 fn agrees_with_htscodecs_on_corrupted_streams(tc: TestCase) {
     let data = tc.draw(arb_data());
-    let order = tc.draw(arb_order().map(|o| o & !STRIPE));
+    let order = tc.draw(arb_order());
     let mut stream = htscodecs_compress(&data, order);
     let flips = tc.draw(
         gs::vecs(gs::tuples!(gs::integers::<usize>(), gs::integers::<u8>().min_value(1)))
@@ -212,7 +236,11 @@ fn agrees_with_htscodecs_on_corrupted_streams(tc: TestCase) {
         let len = stream.len();
         stream[at % len] ^= x;
     }
-    if let Ok(ours) = arith::decode(&stream, data.len()) {
+    let Ok(ours) = decode(&stream, data.len()) else { return };
+    if let Some(theirs) = reference::decode(&stream, data.len()) {
+        assert!(ours == theirs, "order {order:#x}: the reference decoder disagrees");
+    }
+    if order & STRIPE == 0 {
         let theirs = htscodecs_decompress(&stream, ours.len());
         assert_eq!(theirs.as_deref(), Some(ours.as_slice()), "order {order:#x}");
     }
@@ -244,44 +272,45 @@ fn arb_name(tc: &TestCase) -> Vec<u8> {
 }
 
 // r[verify cram.codec.tok3_arith]
+// r[verify cram.codec.tok3]
 #[hegel::test(test_cases = 200)]
 fn decodes_what_htscodecs_tokenises(tc: TestCase) {
     let names = tc.draw(gs::vecs(arb_name()).min_size(1).max_size(300));
     let level = tc.draw(gs::integers::<c_int>().min_value(1).max_value(9));
     let use_arith = tc.draw(gs::booleans());
 
-    let mut block: Vec<u8> = names.iter().flat_map(|n| n.iter().copied().chain(*b"\n")).collect();
-    let expected: Vec<u8> = names.iter().flat_map(|n| n.iter().copied().chain([0])).collect();
-
-    let mut out_len: c_int = 0;
-    let mut last_start: c_int = 0;
-    // SAFETY: `block` is live and `len` bytes long (htscodecs writes NULs
-    // into it); the result is malloc'ed with `out_len` bytes.
-    let p = unsafe {
-        ffi::tok3_encode_names(
-            block.as_mut_ptr().cast::<c_char>(),
-            c_int::try_from(block.len()).unwrap(),
-            level,
-            c_int::from(use_arith),
-            &raw mut out_len,
-            &raw mut last_start,
-        )
-    };
-    let encoded = take_c_buffer(p, usize::try_from(out_len).unwrap());
+    let encoded = htscodecs_tokenise(&names, level, use_arith);
     assert_eq!(encoded[8] != 0, use_arith, "tok3 header records the entropy coder");
 
+    let expected: Vec<u8> = names.iter().flat_map(|n| n.iter().copied().chain([0])).collect();
     let decoded = tok3::decode(&encoded)
         .unwrap_or_else(|e| panic!("level {level}, use_arith {use_arith}: {e}"));
     assert!(decoded == expected, "level {level}, use_arith {use_arith}: names differ");
+    let decoded = tok3::decode_with_arith_reference(&encoded)
+        .unwrap_or_else(|e| panic!("reference, level {level}, use_arith {use_arith}: {e}"));
+    assert!(decoded == expected, "reference, level {level}, use_arith {use_arith}: names differ");
 }
 
-#[hegel::test]
-fn arbitrary_bytes_never_panic(tc: TestCase) {
-    let bytes = tc.draw(gs::binary().max_size(1024));
-    let size = tc.draw(gs::integers::<usize>().max_value(1 << 16));
-    let _ = arith::decode(&bytes, size);
-    let mut tok = tc.draw(gs::binary().min_size(9).max_size(1024));
-    // Point tok3 at the arithmetic coder.
-    tok[8] = 1;
-    let _ = tok3::decode(&tok);
+/// tok3 over the production and the reference arithmetic decoder agree on
+/// whatever both accept, corrupted streams included.
+// r[verify cram.codec.tok3_arith]
+#[hegel::test(test_cases = 500)]
+fn tok3_agrees_with_the_reference_on_corrupted_blocks(tc: TestCase) {
+    let names = tc.draw(gs::vecs(arb_name()).min_size(1).max_size(50));
+    let level = tc.draw(gs::integers::<c_int>().min_value(1).max_value(9));
+    let mut encoded = htscodecs_tokenise(&names, level, true);
+    let flips = tc.draw(
+        gs::vecs(gs::tuples!(gs::integers::<usize>(), gs::integers::<u8>().min_value(1)))
+            .max_size(3),
+    );
+    for (at, x) in flips {
+        // Past the header, which only sizes the output.
+        let len = encoded.len() - 9;
+        encoded[9 + at % len] ^= x;
+    }
+    if let (Ok(ours), Ok(theirs)) =
+        (tok3::decode(&encoded), tok3::decode_with_arith_reference(&encoded))
+    {
+        assert!(ours == theirs, "tok3 over the two arith decoders disagrees");
+    }
 }

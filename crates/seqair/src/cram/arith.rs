@@ -10,6 +10,8 @@
 
 use std::io::Read;
 
+#[cfg(test)]
+mod htscodecs_oracle;
 #[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]
 pub mod reference;
