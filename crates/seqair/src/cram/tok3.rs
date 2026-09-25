@@ -20,7 +20,7 @@
 
 use super::codec_io::{Uint7Error, read_u8, read_u32_le, read_uint7, split_off};
 use super::rans_nx16::{self, Nx16Order1Buf};
-use super::reader::{CramError, check_codec_output};
+use super::reader::{CramError, MAX_ALLOC_SIZE, check_codec_output};
 
 /// Bridge `Uint7Error` (narrow, hot-path-friendly) to the rich `CramError`.
 fn uint7_to_cram_error(e: Uint7Error) -> CramError {
@@ -439,12 +439,20 @@ fn to_u32(v: usize) -> Result<u32, CramError> {
 
 impl<'a> Names<'a> {
     fn new(positions: Vec<Position<'a>>, max_output: usize, name_count: usize) -> Self {
+        // Room for a token at every position of every name, unless that is
+        // more tokens than output bytes (a token usually writes one) or
+        // more than one allocation may take: the header's counts are
+        // untrusted.
+        let tokens = name_count
+            .saturating_mul(positions.len().saturating_sub(1))
+            .min(max_output)
+            .min(MAX_ALLOC_SIZE.div_euclid(size_of::<Token>()));
         Self {
             positions,
             out: vec![0; max_output],
             len: 0,
             names: Vec::with_capacity(name_count),
-            tokens: Vec::new(),
+            tokens: Vec::with_capacity(tokens),
         }
     }
 
