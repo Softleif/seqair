@@ -5,11 +5,6 @@
 //! Shelwien's coder), which the spec's pseudocode (`CRAMcodecs` §4 "Range
 //! coding", "Adaptive Modelling") describes.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the arithmetic coder and fqzcomp are its users, added next")
-)]
-
 use super::{codec_io::read_u8, reader::CramError};
 
 /// Renormalise once the range drops below 2^24.
@@ -47,6 +42,10 @@ impl<'a> RangeDecoder<'a> {
     }
 
     /// The bytes after what the decoder has consumed so far.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "the arithmetic coder uses it; fqzcomp ignores trailing bytes")
+    )]
     pub(crate) fn remaining(&self) -> &'a [u8] {
         self.src
     }

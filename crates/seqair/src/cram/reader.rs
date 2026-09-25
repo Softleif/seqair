@@ -194,6 +194,34 @@ pub enum CramError {
     #[error("tok3 name_count {count} exceeds limit {limit}")]
     Tok3NameCountExceedsLimit { count: usize, limit: usize },
 
+    // ── fqzcomp ──────────────────────────────────────────────────────────────
+    #[error("unsupported fqzcomp format version {version} (expected 5)")]
+    FqzcompVersion { version: u8 },
+
+    #[error("fqzcomp stream declares zero parameter blocks")]
+    FqzcompNoParams,
+
+    #[error("fqzcomp parameter block {block} uses the selector, but max_sel is 0")]
+    FqzcompSelectorWithoutRange { block: u8 },
+
+    #[error("malformed fqzcomp {table} table")]
+    FqzcompMalformedTable { table: &'static str },
+
+    #[error("fqzcomp selector picks parameter block {index}, but there are only {nparam}")]
+    FqzcompParamOutOfRange { index: u16, nparam: usize },
+
+    #[error("fqzcomp record length {len} is zero or exceeds the {remaining} output bytes left")]
+    FqzcompRecordLength { len: u32, remaining: usize },
+
+    #[error("fqzcomp duplicate record of length {len} with only {available} bytes decoded")]
+    FqzcompDuplicateTooLong { len: u32, available: usize },
+
+    #[error("fqzcomp range-coded data is corrupt or truncated")]
+    FqzcompRangeCoder,
+
+    #[error("fqzcomp block decoded to {found} bytes, but its header says {expected}")]
+    FqzcompSizeMismatch { expected: usize, found: usize },
+
     // ── Codec safety ─────────────────────────────────────────────────────────
     #[error("uint7 overflow: more than 5 continuation bytes")]
     Uint7Overflow,

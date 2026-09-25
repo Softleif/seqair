@@ -8,6 +8,7 @@ pub(crate) mod codec_io;
 pub mod compression_header;
 pub mod container;
 pub mod encoding;
+pub mod fqzcomp;
 pub mod index;
 pub(crate) mod range_coder;
 pub mod rans;
