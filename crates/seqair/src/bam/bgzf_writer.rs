@@ -388,7 +388,13 @@ impl<W: Write> ParallelBgzfWriter<W> {
     pub(crate) fn index_offset(&self) -> VirtualOffset {
         // Same invariant as `BgzfWriter::virtual_offset`: the buffer is flushed
         // the moment it fills, so its length fits a within-block offset.
-        let within = u16::try_from(self.buf.len()).unwrap_or(u16::MAX);
+        let within = u16::try_from(self.buf.len()).unwrap_or_else(|_| {
+            warn!(
+                "ParallelBgzfWriter: {} buffered bytes exceed a BGZF block; index offset clamped",
+                self.buf.len()
+            );
+            u16::MAX
+        });
         debug_assert!(self.buf.len() < MAX_UNCOMPRESSED_SIZE, "buffer is flushed when full");
         VirtualOffset::new(self.next_submit, within)
     }
