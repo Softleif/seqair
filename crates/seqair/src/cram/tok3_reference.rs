@@ -534,9 +534,15 @@ mod tests {
     }
 
     fn assert_same(what: &str, production: Option<&[u8]>, reference: Option<&[u8]>) {
-        if let (Some(p), Some(r)) = (production, reference) {
-            assert!(p == r, "{what}: outputs differ");
-        }
+        let verdict = |o: Option<&[u8]>| {
+            o.map_or_else(|| "fails".to_owned(), |o| format!("decodes {} bytes", o.len()))
+        };
+        assert!(
+            production == reference,
+            "{what}: production {} but reference {}",
+            verdict(production),
+            verdict(reference)
+        );
     }
 
     /// A counter as a DIGITS or DIGITS0 field, zero-padded to `width`.

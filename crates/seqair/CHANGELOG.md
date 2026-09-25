@@ -29,6 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `raw - offset`, matching htslib. BETA widths above 32 bits are now rejected with
   `CramError::InvalidBetaBits` for integer series too, as htslib rejects them.
 
+### Changed
+
+- **tok3 read-name blocks decode about 3× faster** (1.0× htscodecs on the hts-specs CRAM 3.1
+  conformance files, from 0.32× over rANS Nx16 and 0.46× over the arithmetic coder). Names are
+  decoded straight into the output instead of through per-name `Vec`s and `format!`. The decoder
+  now follows written rules for blocks no encoder writes and is checked against a spec-literal
+  reference decoder on every input: a MATCH, DELTA or DELTA0 without a suitable token in the
+  previous name, an unterminated string, a token type that cannot occur inside a name, a stream
+  copied from one never set, more than 128 token positions, and names past the declared
+  uncompressed length (plus htscodecs' 1 KiB margin) are errors; DELTA sums wrap at 32 bits as in
+  htscodecs. New `CramError` variants `Tok3DupStreamUnset`, `Tok3TooManyPositions`,
+  `Tok3MatchWithoutValue`, `Tok3OutputOverflow` and `Tok3NameCountExceedsLength`;
+  `Tok3DupPositionOutOfRange` is gone.
+
 ### Fixed
 
 - **A crafted rANS Nx16 block could exhaust the stack.** STRIPE substreams nested without limit;

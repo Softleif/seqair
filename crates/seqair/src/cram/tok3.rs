@@ -1,9 +1,15 @@
 // r[impl cram.codec.tok3]
 //! tok3 / Name Tokenizer codec (CRAM compression method 8).
 //!
-//! Tokenizes read names by position. Each position stores a token type and
-//! compressed data (via rANS Nx16 or the arithmetic coder). The decoder reconstructs names by
-//! iterating over the tokens.
+//! A block holds up to 128 token positions, each with byte streams per
+//! token type, coded with rANS Nx16 or the arithmetic coder. Every stream is
+//! decoded up front; then each name is decoded straight into the output by
+//! walking its positions' type streams. A name's tokens are kept as a kind,
+//! a value and the place their text landed in the output, all names' in one
+//! arena, so a later name's MATCH copies those bytes and DELTA adds to that
+//! value. `docs/spec/2-cram-1-reader.md` has the rules, including where they
+//! differ from the pseudocode and from htscodecs; the production decoder
+//! must agree with [`super::tok3_reference`] on every input.
 
 // See rans.rs: lazy `ok_or_else(|| CramError::...)` keeps error construction and its
 // `drop_in_place<CramError>` off the per-record path.
@@ -12,10 +18,9 @@
     reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
 )]
 
-use std::io::{BufRead, Cursor, Read, Write};
-
 use super::codec_io::{Uint7Error, read_u8, read_u32_le, read_uint7, split_off};
-use super::reader::CramError;
+use super::rans_nx16::{self, Nx16Order1Buf};
+use super::reader::{CramError, check_codec_output};
 
 /// Bridge `Uint7Error` (narrow, hot-path-friendly) to the rich `CramError`.
 fn uint7_to_cram_error(e: Uint7Error) -> CramError {
@@ -25,8 +30,34 @@ fn uint7_to_cram_error(e: Uint7Error) -> CramError {
     }
 }
 
-/// Maximum number of names allowed in a tok3 block.
+/// Maximum number of names allowed in a tok3 block (htscodecs' limit).
 const TOK3_NAME_COUNT_LIMIT: usize = 10_000_000;
+
+/// How far past the header's uncompressed length the output may run
+/// (htscodecs' margin; noodles writes the length without the last NUL).
+const OUTPUT_SLACK: usize = 1024;
+
+/// Maximum number of token positions (htscodecs' `MAX_TOKENS`).
+const MAX_POSITIONS: usize = 128;
+
+// Token types.
+const TYPE: u8 = 0;
+const STRING: u8 = 1;
+const CHAR: u8 = 2;
+const DIGITS0: u8 = 3;
+const DZLEN: u8 = 4;
+const DUP: u8 = 5;
+const DIGITS: u8 = 7;
+const DELTA: u8 = 8;
+const DELTA0: u8 = 9;
+const MATCH: u8 = 10;
+const NOP: u8 = 11;
+const END: u8 = 12;
+const N_TYPES: usize = 13;
+
+/// Each token type as a byte, so a regenerated type stream's first byte
+/// can be a slice of it.
+const TYPE_BYTES: [u8; N_TYPES] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
 /// Decode a tok3 compressed block.
 pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
@@ -52,442 +83,431 @@ fn decode_with(
     arith: impl Fn(&[u8]) -> Result<Vec<u8>, CramError>,
 ) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
-
-    let (uncompressed_size, name_count, use_arith) = read_header(&mut cur)?;
+    let truncated = || CramError::Truncated { context: "tok3 header" };
+    let ulen = read_u32_le(&mut cur).ok_or_else(truncated)? as usize;
+    let name_count = read_u32_le(&mut cur).ok_or_else(truncated)? as usize;
+    let use_arith = read_u8(&mut cur).ok_or_else(truncated)? != 0;
 
     // r[impl cram.tok3.name_count_limit]
+    // r[impl cram.codec.tok3.limits]
     if name_count > TOK3_NAME_COUNT_LIMIT {
         return Err(CramError::Tok3NameCountExceedsLimit {
             count: name_count,
             limit: TOK3_NAME_COUNT_LIMIT,
         });
     }
-
-    // Each name slot needs ~48 bytes (two Vecs), plus the output buffer.
-    super::reader::check_codec_output(
-        name_count.saturating_mul(48).saturating_add(uncompressed_size),
-        "tok3 output",
-    )?;
-
-    let mut b = decode_token_byte_streams(&mut cur, use_arith.then_some(&arith), name_count)?;
-
-    let mut names: Vec<Vec<u8>> = vec![Vec::new(); name_count];
-    let mut tokens: Vec<Vec<Option<Token>>> = vec![Vec::new(); name_count];
-
-    let mut dst = Vec::with_capacity(uncompressed_size);
-
-    for i in 0..name_count {
-        let name = decode_single_name(&mut b, &mut names, &mut tokens, i)?;
-        dst.extend_from_slice(&name);
-        dst.push(0x00);
+    check_codec_output(ulen, "tok3 output")?;
+    let max_output = ulen.saturating_add(OUTPUT_SLACK);
+    // Every name takes at least its NUL.
+    if name_count > max_output {
+        return Err(CramError::Tok3NameCountExceedsLength { count: name_count, length: ulen });
     }
 
-    Ok(dst)
+    let streams = Streams::read(&mut cur, use_arith.then_some(&arith))?;
+    let mut names = Names::new(streams.cursors(name_count), max_output, name_count);
+    for n in 0..name_count {
+        names.decode_name(n)?;
+    }
+    Ok(names.finish())
 }
 
-// ── Token types ──────────────────────────────────────────────────────
+// ── Token streams ────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TokenType {
-    Type,
-    String,
-    Char,
-    Digits0,
-    DZLen,
-    Dup,
-    Diff,
-    Digits,
-    Delta,
-    Delta0,
-    Match,
-    Nop,
-    End,
+/// Where a token stream's bytes come from.
+#[derive(Clone, Copy)]
+enum Source {
+    /// `Streams::decoded[i]`.
+    Decoded(usize),
+    /// A regenerated TYPE stream: this type, then a MATCH for every other
+    /// name.
+    Regenerated(u8),
 }
 
-impl TokenType {
-    fn from_byte(n: u8) -> Result<Self, CramError> {
-        match n & 0x3f {
-            0 => Ok(Self::Type),
-            1 => Ok(Self::String),
-            2 => Ok(Self::Char),
-            3 => Ok(Self::Digits0),
-            4 => Ok(Self::DZLen),
-            5 => Ok(Self::Dup),
-            6 => Ok(Self::Diff),
-            7 => Ok(Self::Digits),
-            8 => Ok(Self::Delta),
-            9 => Ok(Self::Delta0),
-            10 => Ok(Self::Match),
-            11 => Ok(Self::Nop),
-            12 => Ok(Self::End),
-            _ => Err(CramError::InvalidTok3TokenType { token_type: n }),
-        }
-    }
-
-    fn to_byte(self) -> u8 {
-        match self {
-            Self::Type => 0,
-            Self::String => 1,
-            Self::Char => 2,
-            Self::Digits0 => 3,
-            Self::DZLen => 4,
-            Self::Dup => 5,
-            Self::Diff => 6,
-            Self::Digits => 7,
-            Self::Delta => 8,
-            Self::Delta0 => 9,
-            Self::Match => 10,
-            Self::Nop => 11,
-            Self::End => 12,
-        }
-    }
+/// The decoded token streams, per position and type.
+struct Streams {
+    decoded: Vec<Vec<u8>>,
+    positions: Vec<[Option<Source>; N_TYPES]>,
 }
 
-// ── Token values ─────────────────────────────────────────────────────
+impl Streams {
+    // r[impl cram.codec.tok3.streams]
+    /// Read and decode every token stream; `arith` decodes them when the
+    /// block uses the arithmetic coder, else they are rANS Nx16.
+    fn read(
+        src: &mut &[u8],
+        arith: Option<&impl Fn(&[u8]) -> Result<Vec<u8>, CramError>>,
+    ) -> Result<Self, CramError> {
+        let mut streams = Self { decoded: Vec::new(), positions: Vec::new() };
+        // One order-1 table buffer for all of the block's rANS streams.
+        let mut rans_buf = Nx16Order1Buf::new();
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Token {
-    Char(u8),
-    String(Vec<u8>),
-    Digits(u32),
-    PaddedDigits(u32, u8),
-    Nop,
-}
-
-/// Return a u8 discriminant for error reporting (avoids String in error variants).
-fn token_discriminant(token: Option<&Token>) -> u8 {
-    match token {
-        None => 0,
-        Some(Token::Char(_)) => 1,
-        Some(Token::String(_)) => 2,
-        Some(Token::Digits(_)) => 3,
-        Some(Token::PaddedDigits(_, _)) => 4,
-        Some(Token::Nop) => 5,
-    }
-}
-
-// ── Per-position token reader ────────────────────────────────────────
-
-#[derive(Clone, Debug, Default)]
-struct TokenReader {
-    type_reader: Cursor<Vec<u8>>,
-    string_reader: Cursor<Vec<u8>>,
-    char_reader: Cursor<Vec<u8>>,
-    digits0_reader: Cursor<Vec<u8>>,
-    dz_len_reader: Cursor<Vec<u8>>,
-    dup_reader: Cursor<Vec<u8>>,
-    diff_reader: Cursor<Vec<u8>>,
-    digits_reader: Cursor<Vec<u8>>,
-    delta_reader: Cursor<Vec<u8>>,
-    delta0_reader: Cursor<Vec<u8>>,
-}
-
-impl TokenReader {
-    // r[impl cram.tok3.dz_len_reader]
-    fn get(&self, ty: TokenType) -> &Cursor<Vec<u8>> {
-        match ty {
-            TokenType::Type => &self.type_reader,
-            TokenType::String => &self.string_reader,
-            TokenType::Char => &self.char_reader,
-            TokenType::Digits0 => &self.digits0_reader,
-            TokenType::DZLen => &self.dz_len_reader,
-            TokenType::Dup => &self.dup_reader,
-            TokenType::Diff => &self.diff_reader,
-            TokenType::Digits => &self.digits_reader,
-            TokenType::Delta => &self.delta_reader,
-            TokenType::Delta0 => &self.delta0_reader,
-            _ => &self.type_reader,
-        }
-    }
-
-    fn get_mut(&mut self, ty: TokenType) -> &mut Cursor<Vec<u8>> {
-        match ty {
-            TokenType::Type => &mut self.type_reader,
-            TokenType::String => &mut self.string_reader,
-            TokenType::Char => &mut self.char_reader,
-            TokenType::Digits0 => &mut self.digits0_reader,
-            TokenType::Dup => &mut self.dup_reader,
-            TokenType::Diff => &mut self.diff_reader,
-            TokenType::DZLen => &mut self.dz_len_reader,
-            TokenType::Digits => &mut self.digits_reader,
-            TokenType::Delta => &mut self.delta_reader,
-            TokenType::Delta0 => &mut self.delta0_reader,
-            _ => &mut self.type_reader,
-        }
-    }
-
-    fn set(&mut self, ty: TokenType, buf: Vec<u8>) {
-        *self.get_mut(ty).get_mut() = buf;
-    }
-
-    fn read_type(&mut self) -> Result<TokenType, CramError> {
-        let mut buf = [0u8; 1];
-        self.type_reader
-            .read_exact(&mut buf)
-            .map_err(|_| CramError::Truncated { context: "tok3 type byte" })?;
-        TokenType::from_byte(buf[0])
-    }
-
-    fn read_distance(&mut self, ty: TokenType) -> Result<usize, CramError> {
-        let reader = self.get_mut(ty);
-        let mut buf = [0u8; 4];
-        reader
-            .read_exact(&mut buf)
-            .map_err(|_| CramError::Truncated { context: "tok3 distance" })?;
-        Ok(u32::from_le_bytes(buf) as usize)
-    }
-
-    fn read_token(&mut self, prev_token: Option<&Token>) -> Result<Option<Token>, CramError> {
-        let ty = self.read_type()?;
-
-        match ty {
-            TokenType::Char => {
-                let mut buf = [0u8; 1];
-                self.char_reader
-                    .read_exact(&mut buf)
-                    .map_err(|_| CramError::Truncated { context: "tok3 char" })?;
-                Ok(Some(Token::Char(buf[0])))
+        while let Some(ttype) = read_u8(src) {
+            let ty = ttype & 0x3f;
+            if usize::from(ty) >= N_TYPES {
+                return Err(CramError::InvalidTok3TokenType { token_type: ttype });
             }
-            TokenType::String => {
-                let mut buf = Vec::new();
-                self.string_reader
-                    .read_until(0x00, &mut buf)
-                    .map_err(|_| CramError::Truncated { context: "tok3 string" })?;
-                buf.pop();
-                Ok(Some(Token::String(buf)))
-            }
-            TokenType::Digits => {
-                let mut buf = [0u8; 4];
-                self.digits_reader
-                    .read_exact(&mut buf)
-                    .map_err(|_| CramError::Truncated { context: "tok3 digits" })?;
-                Ok(Some(Token::Digits(u32::from_le_bytes(buf))))
-            }
-            TokenType::Digits0 => {
-                let mut dbuf = [0u8; 4];
-                self.digits0_reader
-                    .read_exact(&mut dbuf)
-                    .map_err(|_| CramError::Truncated { context: "tok3 digits0" })?;
-                let mut lbuf = [0u8; 1];
-                self.dz_len_reader
-                    .read_exact(&mut lbuf)
-                    .map_err(|_| CramError::Truncated { context: "tok3 dzlen" })?;
-                Ok(Some(Token::PaddedDigits(u32::from_le_bytes(dbuf), lbuf[0])))
-            }
-            TokenType::Delta => {
-                let mut buf = [0u8; 1];
-                self.delta_reader
-                    .read_exact(&mut buf)
-                    .map_err(|_| CramError::Truncated { context: "tok3 delta" })?;
-                let delta = u32::from(buf[0]);
-                match prev_token {
-                    Some(Token::Digits(n)) => {
-                        Ok(Some(Token::Digits(n.checked_add(delta).ok_or_else(|| {
-                            CramError::Truncated { context: "tok3 delta overflow" }
-                        })?)))
-                    }
-                    _ => Err(CramError::Tok3DeltaRequiresDigits {
-                        found: token_discriminant(prev_token),
-                    }),
+            if ttype & 0x80 != 0 {
+                if streams.positions.len() >= MAX_POSITIONS {
+                    return Err(CramError::Tok3TooManyPositions { limit: MAX_POSITIONS });
                 }
-            }
-            TokenType::Delta0 => {
-                let mut buf = [0u8; 1];
-                self.delta0_reader
-                    .read_exact(&mut buf)
-                    .map_err(|_| CramError::Truncated { context: "tok3 delta0" })?;
-                let delta = u32::from(buf[0]);
-                match prev_token {
-                    Some(Token::PaddedDigits(n, width)) => Ok(Some(Token::PaddedDigits(
-                        n.checked_add(delta).ok_or_else(|| CramError::Truncated {
-                            context: "tok3 delta0 overflow",
-                        })?,
-                        *width,
-                    ))),
-                    _ => Err(CramError::Tok3Delta0RequiresPaddedDigits {
-                        found: token_discriminant(prev_token),
-                    }),
+                let mut position = [None; N_TYPES];
+                if ty != TYPE
+                    && let Some(types) = position.get_mut(usize::from(TYPE))
+                {
+                    *types = Some(Source::Regenerated(ty));
                 }
+                streams.positions.push(position);
             }
-            TokenType::Match => Ok(prev_token.cloned()),
-            TokenType::End => Ok(None),
-            _ => Ok(Some(Token::Nop)),
-        }
-    }
-}
-
-// ── Header ───────────────────────────────────────────────────────────
-
-fn read_header(src: &mut &[u8]) -> Result<(usize, usize, bool), CramError> {
-    let truncated = || CramError::Truncated { context: "tok3 header" };
-    let uncompressed_size = read_u32_le(src).ok_or_else(truncated)? as usize;
-    let name_count = read_u32_le(src).ok_or_else(truncated)? as usize;
-    let method = read_u8(src).ok_or_else(truncated)?;
-    let use_arith = method != 0;
-    Ok((uncompressed_size, name_count, use_arith))
-}
-
-// ── Decode sub-streams ───────────────────────────────────────────────
-
-/// `arith` decodes a stream when the block uses the arithmetic coder;
-/// without it streams are rANS Nx16.
-fn decode_token_byte_streams(
-    src: &mut &[u8],
-    arith: Option<&impl Fn(&[u8]) -> Result<Vec<u8>, CramError>>,
-    n_names: usize,
-) -> Result<Vec<TokenReader>, CramError> {
-    let mut b: Vec<TokenReader> = Vec::new();
-    let mut t: Option<usize> = None;
-
-    while !src.is_empty() {
-        let ttype =
-            read_u8(src).ok_or_else(|| CramError::Truncated { context: "tok3 token type" })?;
-
-        let tok_new = ttype & 0x80 != 0;
-        let tok_dup = ttype & 0x40 != 0;
-
-        let ty = TokenType::from_byte(ttype)?;
-
-        if tok_new {
-            let new_t = t.map_or(0, |v| v.wrapping_add(1));
-            t = Some(new_t);
-            b.push(TokenReader::default());
-
-            if ty != TokenType::Type {
-                let mut buf = vec![TokenType::Match.to_byte(); n_names];
-                if let Some(first) = buf.first_mut() {
-                    *first = ty.to_byte();
-                }
-                b.get_mut(new_t)
-                    .ok_or_else(|| CramError::Truncated { context: "tok3 new token position" })?
-                    .set(TokenType::Type, buf);
+            if streams.positions.is_empty() {
+                return Err(CramError::Truncated {
+                    context: "tok3 stream before the first position",
+                });
             }
-        }
 
-        let t_idx = t.ok_or_else(|| CramError::Truncated {
-            context: "tok3 token index before first new token",
-        })?;
-
-        if tok_dup {
-            let truncated_dup = || CramError::Truncated { context: "tok3 dup metadata" };
-            let dup_pos = read_u8(src).ok_or_else(truncated_dup)? as usize;
-            let dup_type = TokenType::from_byte(read_u8(src).ok_or_else(truncated_dup)?)?;
-
-            let buf = b
-                .get(dup_pos)
-                .ok_or_else(|| CramError::Tok3DupPositionOutOfRange { dup_pos })?
-                .get(dup_type)
-                .get_ref()
-                .clone();
-
-            b.get_mut(t_idx)
-                .ok_or_else(|| CramError::Truncated { context: "tok3 dup set" })?
-                .set(ty, buf);
-        } else {
-            let compressed_size = read_uint7(src).map_err(uint7_to_cram_error)? as usize;
-            let buf = split_off(src, compressed_size)
-                .ok_or_else(|| CramError::Truncated { context: "tok3 compressed payload" })?;
-            // r[impl cram.codec.tok3_arith]
-            let decompressed = match arith {
-                Some(arith) => arith(buf)?,
-                None => super::rans_nx16::decode(buf, 0)?,
+            let source = if ttype & 0x40 != 0 {
+                let truncated = || CramError::Truncated { context: "tok3 dup metadata" };
+                let position = usize::from(read_u8(src).ok_or_else(truncated)?);
+                let token_type = read_u8(src).ok_or_else(truncated)?;
+                streams
+                    .positions
+                    .get(position)
+                    .and_then(|p| p.get(usize::from(token_type)).copied().flatten())
+                    .ok_or_else(|| CramError::Tok3DupStreamUnset { position, token_type })?
+            } else {
+                let compressed_size = read_uint7(src).map_err(uint7_to_cram_error)? as usize;
+                let data = split_off(src, compressed_size)
+                    .ok_or_else(|| CramError::Truncated { context: "tok3 compressed payload" })?;
+                // r[impl cram.codec.tok3_arith]
+                let decoded = match arith {
+                    Some(arith) => arith(data)?,
+                    None => rans_nx16::decode_with_buf(data, 0, &mut rans_buf)?,
+                };
+                streams.decoded.push(decoded);
+                Source::Decoded(streams.decoded.len().saturating_sub(1))
             };
-
-            b.get_mut(t_idx)
-                .ok_or_else(|| CramError::Truncated { context: "tok3 stream set" })?
-                .set(ty, decompressed);
+            if let Some(slot) =
+                streams.positions.last_mut().and_then(|p| p.get_mut(usize::from(ty)))
+            {
+                *slot = Some(source);
+            }
         }
+        Ok(streams)
     }
 
-    Ok(b)
+    /// A read cursor for every stream, unset ones empty.
+    fn cursors(&self, name_count: usize) -> Vec<Position<'_>> {
+        self.positions
+            .iter()
+            .map(|position| {
+                Position(position.map(|source| match source {
+                    None => Cursor::default(),
+                    Some(Source::Decoded(i)) => {
+                        Cursor { head: self.decoded.get(i).map_or(&[], Vec::as_slice), matches: 0 }
+                    }
+                    Some(Source::Regenerated(ty)) => Cursor {
+                        head: TYPE_BYTES.get(usize::from(ty)..=usize::from(ty)).unwrap_or(&[]),
+                        matches: name_count.saturating_sub(1),
+                    },
+                }))
+            })
+            .collect()
+    }
 }
 
-fn decode_single_name(
-    b: &mut [TokenReader],
-    names: &mut [Vec<u8>],
-    tokens: &mut [Vec<Option<Token>>],
-    n: usize,
-) -> Result<Vec<u8>, CramError> {
-    let first_reader =
-        b.first_mut().ok_or_else(|| CramError::Truncated { context: "tok3 no token readers" })?;
+/// One token position's streams, indexed by token type.
+struct Position<'a>([Cursor<'a>; N_TYPES]);
 
-    let ty = first_reader.read_type()?;
-    let dist = first_reader.read_distance(ty)?;
-
-    let m = n
-        .checked_sub(dist)
-        .ok_or_else(|| CramError::Tok3DistanceExceedsIndex { distance: dist, name_index: n })?;
-
-    if ty == TokenType::Dup {
-        let prev_name =
-            names.get(m).ok_or_else(|| CramError::Tok3DupRefOutOfRange { index: m })?.clone();
-        let prev_tokens =
-            tokens.get(m).ok_or_else(|| CramError::Tok3DupRefOutOfRange { index: m })?.clone();
-
-        if let Some(slot) = names.get_mut(n) {
-            *slot = prev_name;
-        }
-        if let Some(slot) = tokens.get_mut(n) {
-            *slot = prev_tokens;
-        }
-
-        return Ok(names
-            .get(n)
-            .ok_or_else(|| CramError::Truncated { context: "tok3 dup result" })?
-            .clone());
+impl<'a> Position<'a> {
+    /// The stream of type `ty`; the constant types the decoder asks for
+    /// always exist, so the check folds away.
+    #[inline]
+    fn stream(&mut self, ty: u8) -> Result<&mut Cursor<'a>, CramError> {
+        self.0
+            .get_mut(usize::from(ty))
+            .ok_or_else(|| CramError::InvalidTok3TokenType { token_type: ty })
     }
+}
 
-    let mut t = 1;
+/// Reads one token stream from the front: its bytes, then (for a
+/// regenerated TYPE stream) `matches` MATCH bytes.
+#[derive(Clone, Copy, Default)]
+struct Cursor<'a> {
+    head: &'a [u8],
+    matches: usize,
+}
 
-    loop {
-        let reader = b
-            .get_mut(t)
-            .ok_or_else(|| CramError::Truncated { context: "tok3 token reader position" })?;
-
-        let prev_token = tokens.get(m).and_then(|ts| ts.get(t)).and_then(|tok| tok.as_ref());
-
-        if let Some(token) = reader.read_token(prev_token)? {
-            let name = names
-                .get_mut(n)
-                .ok_or_else(|| CramError::Truncated { context: "tok3 name index" })?;
-
-            match &token {
-                Token::Char(c) => name.push(*c),
-                Token::String(s) => name.extend_from_slice(s),
-                Token::Digits(d) => {
-                    write!(name, "{d}")?;
-                }
-                Token::PaddedDigits(d, l) => {
-                    write!(name, "{:0width$}", d, width = usize::from(*l))?;
-                }
-                Token::Nop => {}
-            }
-
-            if let Some(ts) = tokens.get_mut(n) {
-                if t >= ts.len() {
-                    let new_len = t.checked_add(1).ok_or_else(|| CramError::Truncated {
-                        context: "tok3 token index overflow",
-                    })?;
-                    ts.resize(new_len, None);
-                }
-                if let Some(slot) = ts.get_mut(t) {
-                    *slot = Some(token);
-                }
-            }
+impl<'a> Cursor<'a> {
+    #[inline]
+    fn u8(&mut self) -> Result<u8, CramError> {
+        if let Some((&b, rest)) = self.head.split_first() {
+            self.head = rest;
+            Ok(b)
         } else {
-            break;
+            self.matches = self
+                .matches
+                .checked_sub(1)
+                .ok_or_else(|| CramError::Truncated { context: "tok3 token stream" })?;
+            Ok(MATCH)
         }
-
-        t = t
-            .checked_add(1)
-            .ok_or_else(|| CramError::Truncated { context: "tok3 token index overflow" })?;
     }
 
-    Ok(names.get(n).ok_or_else(|| CramError::Truncated { context: "tok3 final name" })?.clone())
+    #[inline]
+    fn u32(&mut self) -> Result<u32, CramError> {
+        if let Some((bytes, rest)) = self.head.split_first_chunk::<4>() {
+            self.head = rest;
+            return Ok(u32::from_le_bytes(*bytes));
+        }
+        Ok(u32::from_le_bytes([self.u8()?, self.u8()?, self.u8()?, self.u8()?]))
+    }
+
+    /// Bytes up to a NUL, which is consumed. A regenerated stream's MATCH
+    /// bytes hold no NUL, so the string must end in its bytes.
+    #[inline]
+    fn string(&mut self) -> Result<&'a [u8], CramError> {
+        let nul = self
+            .head
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| CramError::Truncated { context: "tok3 unterminated string" })?;
+        let (s, rest) = self.head.split_at(nul);
+        self.head = rest.get(1..).unwrap_or_default();
+        Ok(s)
+    }
 }
 
-// Primitive readers (`read_u8`, `read_u32_le`, `read_uint7`, `split_off`)
-// live in `super::codec_io`; see the imports at the top of this file.
+// ── Names ────────────────────────────────────────────────────────────
+
+/// What a token holds, for a later name's MATCH, DELTA and DELTA0.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum Kind {
+    /// CHAR or STRING.
+    Text = 1,
+    /// DIGITS or DELTA.
+    Digits = 2,
+    /// DIGITS0 or DELTA0.
+    Digits0 = 3,
+    /// NOP or END.
+    Empty = 4,
+}
+
+/// A decoded token: its kind, its numeric value, and where its text is in
+/// the output.
+#[derive(Clone, Copy)]
+struct Token {
+    kind: Kind,
+    value: u32,
+    start: u32,
+    len: u32,
+}
+
+impl Token {
+    const EMPTY: Self = Self { kind: Kind::Empty, value: 0, start: 0, len: 0 };
+}
+
+/// A decoded name: its text in the output (without the NUL) and its tokens
+/// in the arena.
+#[derive(Clone, Copy)]
+struct Name {
+    start: u32,
+    len: u32,
+    first_token: u32,
+    tokens: u32,
+}
+
+/// Decodes names into the output, keeping every name's tokens.
+struct Names<'a> {
+    positions: Vec<Position<'a>>,
+    out: Vec<u8>,
+    /// Bytes of `out` written; `out` is as long as the output may get, so a
+    /// write past it is an error rather than a reallocation.
+    len: usize,
+    names: Vec<Name>,
+    tokens: Vec<Token>,
+}
+
+/// A `usize` below the output length (at most `MAX_ALLOC_SIZE`) or the
+/// token count as the `u32` it is stored as.
+fn to_u32(v: usize) -> Result<u32, CramError> {
+    u32::try_from(v).map_err(|_| CramError::Truncated { context: "tok3 offset overflow" })
+}
+
+impl<'a> Names<'a> {
+    fn new(positions: Vec<Position<'a>>, max_output: usize, name_count: usize) -> Self {
+        Self {
+            positions,
+            out: vec![0; max_output],
+            len: 0,
+            names: Vec::with_capacity(name_count),
+            tokens: Vec::new(),
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        self.out.truncate(self.len);
+        self.out
+    }
+
+    /// The next `n` output bytes.
+    #[inline]
+    fn reserve(&mut self, n: usize) -> Result<&mut [u8], CramError> {
+        let end = self.len.checked_add(n);
+        let limit = self.out.len();
+        let dst = end
+            .and_then(|end| self.out.get_mut(self.len..end))
+            .ok_or_else(|| CramError::Tok3OutputOverflow { limit })?;
+        self.len = self.len.wrapping_add(n);
+        Ok(dst)
+    }
+
+    /// Write `bytes` as a text token.
+    #[inline]
+    fn put_text(&mut self, bytes: &[u8]) -> Result<Token, CramError> {
+        let start = to_u32(self.len)?;
+        self.reserve(bytes.len())?.copy_from_slice(bytes);
+        Ok(Token { kind: Kind::Text, value: 0, start, len: to_u32(bytes.len())? })
+    }
+
+    /// Write `value` in decimal, left-padded with zeros to `width`.
+    #[inline]
+    fn put_digits(&mut self, kind: Kind, value: u32, width: usize) -> Result<Token, CramError> {
+        let mut buf = itoa::Buffer::new();
+        let digits = buf.format(value).as_bytes();
+        let zeros = width.saturating_sub(digits.len());
+        let start = self.len;
+        let dst = self.reserve(zeros.saturating_add(digits.len()))?;
+        let (pad, rest) = dst.split_at_mut(zeros);
+        pad.fill(b'0');
+        rest.copy_from_slice(digits);
+        Ok(Token { kind, value, start: to_u32(start)?, len: to_u32(self.len.wrapping_sub(start))? })
+    }
+
+    /// Write again the text of `token`, from an earlier name.
+    #[inline]
+    fn put_copy(&mut self, token: Token) -> Result<(), CramError> {
+        let (start, len) = (token.start as usize, token.len as usize);
+        let (written, free) = self.out.split_at_mut(self.len);
+        let src = written.get(start..start.wrapping_add(len));
+        let dst = free.get_mut(..len);
+        match (src, dst) {
+            (Some(src), Some(dst)) => dst.copy_from_slice(src),
+            _ => return Err(CramError::Tok3OutputOverflow { limit: self.out.len() }),
+        }
+        self.len = self.len.wrapping_add(len);
+        Ok(())
+    }
+
+    // r[impl cram.codec.tok3.names]
+    /// Decode name `n` and its NUL into the output.
+    fn decode_name(&mut self, n: usize) -> Result<(), CramError> {
+        let start = to_u32(self.len)?;
+        let position0 = self
+            .positions
+            .first_mut()
+            .ok_or_else(|| CramError::Truncated { context: "tok3 no token positions" })?;
+        let ty = position0.stream(TYPE)?.u8()?;
+        let distance = position0.stream(ty)?.u32()? as usize;
+        let m = n
+            .checked_sub(distance)
+            .ok_or_else(|| CramError::Tok3DistanceExceedsIndex { distance, name_index: n })?;
+        // `m == n` has no name yet: nothing to copy, match or add to.
+        let previous = self.names.get(m).copied();
+
+        if ty == DUP {
+            let previous = previous.ok_or_else(|| CramError::Tok3DupRefOutOfRange { index: m })?;
+            self.put_copy(Token { len: previous.len, start: previous.start, ..Token::EMPTY })?;
+            self.reserve(1)?.fill(0);
+            self.names.push(Name { start, ..previous });
+            return Ok(());
+        }
+
+        let first_token = self.tokens.len();
+        let (prev_first, prev_count) =
+            previous.map_or((0, 0), |p| (p.first_token as usize, p.tokens as usize));
+        let mut t = 1;
+        loop {
+            let position = self.positions.get_mut(t).ok_or_else(|| CramError::Truncated {
+                context: "tok3 name past the last position",
+            })?;
+            let ty = position.stream(TYPE)?.u8()?;
+            // The previous name's token at this position.
+            let prev = || {
+                (t <= prev_count)
+                    .then(|| self.tokens.get(prev_first.wrapping_add(t).wrapping_sub(1)).copied())
+                    .flatten()
+            };
+            let token = match ty {
+                CHAR => {
+                    let c = position.stream(CHAR)?.u8()?;
+                    self.put_text(&[c])?
+                }
+                STRING => {
+                    let s = position.stream(STRING)?.string()?;
+                    self.put_text(s)?
+                }
+                DIGITS => {
+                    let value = position.stream(DIGITS)?.u32()?;
+                    self.put_digits(Kind::Digits, value, 0)?
+                }
+                DIGITS0 => {
+                    let value = position.stream(DIGITS0)?.u32()?;
+                    let width = position.stream(DZLEN)?.u8()?;
+                    self.put_digits(Kind::Digits0, value, usize::from(width))?
+                }
+                DELTA => {
+                    let delta = position.stream(DELTA)?.u8()?;
+                    match prev() {
+                        Some(p) if p.kind == Kind::Digits => self.put_digits(
+                            Kind::Digits,
+                            p.value.wrapping_add(u32::from(delta)),
+                            0,
+                        )?,
+                        p => {
+                            return Err(CramError::Tok3DeltaRequiresDigits {
+                                found: p.map_or(0, |p| p.kind as u8),
+                            });
+                        }
+                    }
+                }
+                DELTA0 => {
+                    let delta = position.stream(DELTA0)?.u8()?;
+                    match prev() {
+                        Some(p) if p.kind == Kind::Digits0 => self.put_digits(
+                            Kind::Digits0,
+                            p.value.wrapping_add(u32::from(delta)),
+                            p.len as usize,
+                        )?,
+                        p => {
+                            return Err(CramError::Tok3Delta0RequiresPaddedDigits {
+                                found: p.map_or(0, |p| p.kind as u8),
+                            });
+                        }
+                    }
+                }
+                MATCH => match prev() {
+                    Some(p) if p.kind != Kind::Empty => {
+                        self.put_copy(p)?;
+                        p
+                    }
+                    _ => return Err(CramError::Tok3MatchWithoutValue { position: t }),
+                },
+                NOP | END => Token::EMPTY,
+                _ => return Err(CramError::InvalidTok3TokenType { token_type: ty }),
+            };
+            self.tokens.push(token);
+            if ty == END {
+                break;
+            }
+            t = t.wrapping_add(1);
+        }
+
+        let len = to_u32(self.len)?.wrapping_sub(start);
+        self.reserve(1)?.fill(0);
+        let tokens = to_u32(self.tokens.len().wrapping_sub(first_token))?;
+        self.names.push(Name { start, len, first_token: to_u32(first_token)?, tokens });
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -495,90 +515,240 @@ mod tests {
 
     // r[verify cram.codec.tok3]
 
-    #[test]
-    fn invalid_tok3_token_type_returns_error() {
-        // Token types are masked with 0x3f; values 13..=63 are invalid.
-        // Pass 0x0D (13) directly.
-        let err = TokenType::from_byte(13).unwrap_err();
-        assert!(matches!(err, CramError::InvalidTok3TokenType { token_type: 13 }));
+    /// One part of a hand-built block: a raw (CAT) stream, or a copy.
+    enum Part<'a> {
+        Stream(u8, &'a [u8]),
+        Dup(u8, u8, u8),
     }
 
-    #[test]
-    fn invalid_tok3_token_type_field_value() {
-        let err = TokenType::from_byte(63).unwrap_err();
-        assert!(matches!(err, CramError::InvalidTok3TokenType { token_type: 63 }));
+    /// A tok3 block over rANS Nx16 CAT streams.
+    fn block(ulen: u32, names: u32, parts: &[Part<'_>]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(ulen.to_le_bytes());
+        out.extend(names.to_le_bytes());
+        out.push(0);
+        for part in parts {
+            match *part {
+                Part::Stream(ttype, data) => {
+                    let mut stream = vec![0x20];
+                    put_uint7(&mut stream, data.len());
+                    stream.extend(data);
+                    out.push(ttype);
+                    put_uint7(&mut out, stream.len());
+                    out.extend(stream);
+                }
+                Part::Dup(ttype, pos, ty) => out.extend([ttype | 0x40, pos, ty]),
+            }
+        }
+        out
     }
 
+    const NEW: u8 = 0x80;
+
+    fn u32s(values: &[u32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// Two names, both DIFF against the one before (the first against
+    /// itself), whose position 1 has the given type stream and value
+    /// streams, and position 2 ends them.
+    fn two_names(ulen: u32, types: &[u8], values: &[Part<'_>]) -> Vec<u8> {
+        let dist = u32s(&[0, 1]);
+        let mut parts = vec![
+            Part::Stream(NEW | TYPE, &[6, 6]),
+            Part::Stream(6, &dist),
+            Part::Stream(NEW | TYPE, types),
+        ];
+        parts.extend(values.iter().map(|p| match *p {
+            Part::Stream(t, d) => Part::Stream(t, d),
+            Part::Dup(t, p, y) => Part::Dup(t, p, y),
+        }));
+        parts.push(Part::Stream(NEW | TYPE, &[END; 3]));
+        block(ulen, 2, &parts)
+    }
+
+    // r[verify cram.codec.tok3.names]
     #[test]
-    fn tok3_dup_position_out_of_range() {
-        // Tok3DupPositionOutOfRange is returned in decode_token_byte_streams when
-        // tok_dup is set and dup_pos references an index beyond the current b vec.
-        // Construct a stream: one token entry with tok_new=1, tok_dup=1 but dup_pos=99
-        // (which is > 0 entries that exist at that point).
-        let mut src = Vec::new();
-        // Header
-        src.extend_from_slice(&10u32.to_le_bytes()); // uncompressed_size
-        src.extend_from_slice(&1u32.to_le_bytes()); // name_count
-        src.push(0u8); // method = 0 (rANS Nx16, not arith)
-
-        // Token stream: first token with NEW + DUP flags set
-        // 0x80 = NEW, 0x40 = DUP, type bits = 0x00 (Type)
-        src.push(0x80 | 0x40); // tok_new=1, tok_dup=1, type=Type
-        src.push(99u8); // dup_pos = 99 (out of range — b is empty at this point)
-        src.push(0x00u8); // dup_type byte
-
-        let err = decode(&src).unwrap_err();
-        assert!(
-            matches!(err, CramError::Tok3DupPositionOutOfRange { dup_pos: 99 }),
-            "expected Tok3DupPositionOutOfRange, got: {err:?}"
+    fn delta_wraps_at_32_bits() {
+        let digits = u32s(&[u32::MAX]);
+        let src = two_names(
+            100,
+            &[DIGITS, DELTA],
+            &[Part::Stream(DIGITS, &digits), Part::Stream(DELTA, &[1])],
         );
+        assert_eq!(decode(&src).unwrap(), b"4294967295\x000\0");
     }
 
+    // r[verify cram.codec.tok3.names]
     #[test]
-    fn tok3_distance_exceeds_index() {
-        // Tok3DistanceExceedsIndex fires in decode_single_name when distance > n (name index).
-        // This requires crafting a tok3 stream where the first name's distance field > 0.
-        // TODO: requires crafting a full tok3 token byte stream; the distance is embedded
-        // deep in the rANS-compressed sub-stream for position 0. Testing indirectly via
-        // the error constructor instead.
-        let err = CramError::Tok3DistanceExceedsIndex { distance: 5, name_index: 0 };
-        assert!(matches!(err, CramError::Tok3DistanceExceedsIndex { distance: 5, name_index: 0 }));
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("5") && msg.contains("0"),
-            "error should mention distance and index: {msg}"
+    fn digits0_pads_and_never_truncates() {
+        let digits = u32s(&[123, 123]);
+        let src = two_names(
+            100,
+            &[DIGITS0, DIGITS0],
+            &[Part::Stream(DIGITS0, &digits), Part::Stream(DZLEN, &[5, 2])],
         );
+        assert_eq!(decode(&src).unwrap(), b"00123\x00123\0");
+        // DELTA0 pads to the previous token's length, itself at least its
+        // digit count.
+        let digits = u32s(&[98]);
+        let src = two_names(
+            100,
+            &[DIGITS0, DELTA0],
+            &[
+                Part::Stream(DIGITS0, &digits),
+                Part::Stream(DZLEN, &[1]),
+                Part::Stream(DELTA0, &[3]),
+            ],
+        );
+        assert_eq!(decode(&src).unwrap(), b"98\x00101\0");
+        let digits = u32s(&[98]);
+        let src = two_names(
+            100,
+            &[DIGITS0, DELTA0],
+            &[
+                Part::Stream(DIGITS0, &digits),
+                Part::Stream(DZLEN, &[4]),
+                Part::Stream(DELTA0, &[3]),
+            ],
+        );
+        assert_eq!(decode(&src).unwrap(), b"0098\x000101\0");
     }
 
+    // r[verify cram.codec.tok3.names]
     #[test]
-    fn tok3_dup_ref_out_of_range_error_variant() {
-        // Tok3DupRefOutOfRange fires in decode_single_name when the resolved m index
-        // is out of bounds in the names/tokens arrays.
-        // TODO: requires crafting a full valid tok3 stream with a Dup token type where
-        // the referenced name index is out of range. Testing via constructor.
-        let err = CramError::Tok3DupRefOutOfRange { index: 42 };
-        assert!(matches!(err, CramError::Tok3DupRefOutOfRange { index: 42 }));
-        let msg = format!("{err}");
-        assert!(msg.contains("42"), "error should mention the index: {msg}");
+    fn deltas_and_matches_need_the_right_previous_token() {
+        let src =
+            two_names(100, &[CHAR, DELTA], &[Part::Stream(CHAR, b"a"), Part::Stream(DELTA, &[1])]);
+        assert!(matches!(decode(&src), Err(CramError::Tok3DeltaRequiresDigits { found: 1 })));
+        let digits = u32s(&[5]);
+        let src = two_names(
+            100,
+            &[DIGITS, DELTA0],
+            &[Part::Stream(DIGITS, &digits), Part::Stream(DELTA0, &[1])],
+        );
+        assert!(matches!(
+            decode(&src),
+            Err(CramError::Tok3Delta0RequiresPaddedDigits { found: 2 })
+        ));
+        let src = two_names(100, &[NOP, MATCH], &[]);
+        assert!(matches!(decode(&src), Err(CramError::Tok3MatchWithoutValue { position: 1 })));
+        // The first name has no previous name to match.
+        let src = two_names(100, &[MATCH, MATCH], &[]);
+        assert!(matches!(decode(&src), Err(CramError::Tok3MatchWithoutValue { position: 1 })));
+        // A MATCH of a DELTA copies the value it produced.
+        let digits = u32s(&[7]);
+        let src = block(
+            100,
+            3,
+            &[
+                Part::Stream(NEW | TYPE, &[6, 6, 6]),
+                Part::Stream(6, &u32s(&[0, 1, 1])),
+                Part::Stream(NEW | TYPE, &[DIGITS, DELTA, MATCH]),
+                Part::Stream(DIGITS, &digits),
+                Part::Stream(DELTA, &[2]),
+                Part::Stream(NEW | TYPE, &[END; 3]),
+            ],
+        );
+        assert_eq!(decode(&src).unwrap(), b"7\x009\x009\0");
     }
 
+    // r[verify cram.codec.tok3.names]
     #[test]
-    fn tok3_delta_requires_digits_error_variant() {
-        // Tok3DeltaRequiresDigits fires in read_token when Delta is encountered
-        // but prev_token is not Some(Token::Digits(_)).
-        // TODO: requires crafting a full multi-name tok3 stream where the second name
-        // has a Delta token at a position that had a non-Digits token in the previous name.
-        // Testing via constructor for now.
-        let err = CramError::Tok3DeltaRequiresDigits { found: 0 };
-        assert!(matches!(err, CramError::Tok3DeltaRequiresDigits { .. }));
+    fn invalid_names_are_rejected() {
+        // An unterminated string.
+        let src = two_names(100, &[STRING, STRING], &[Part::Stream(STRING, b"ab\0cd")]);
+        assert!(matches!(decode(&src), Err(CramError::Truncated { .. })));
+        // A DZLEN type inside a name.
+        let src = two_names(100, &[NOP, DZLEN], &[]);
+        assert!(matches!(decode(&src), Err(CramError::InvalidTok3TokenType { token_type: 4 })));
+        // A distance past the first name.
+        let dist = u32s(&[1]);
+        let src =
+            block(100, 1, &[Part::Stream(NEW | 6, &dist), Part::Stream(NEW | TYPE, &[END; 3])]);
+        assert!(matches!(
+            decode(&src),
+            Err(CramError::Tok3DistanceExceedsIndex { distance: 1, name_index: 0 })
+        ));
+        // A name duplicating itself.
+        let dist = u32s(&[0]);
+        let src =
+            block(100, 1, &[Part::Stream(NEW | DUP, &dist), Part::Stream(NEW | TYPE, &[END; 3])]);
+        assert!(matches!(decode(&src), Err(CramError::Tok3DupRefOutOfRange { index: 0 })));
     }
 
+    // r[verify cram.codec.tok3.streams]
     #[test]
-    fn tok3_delta0_requires_padded_digits_error_variant() {
-        // Tok3Delta0RequiresPaddedDigits is similar but for Delta0 needing PaddedDigits.
-        // TODO: requires crafting a multi-name tok3 stream.
-        let err = CramError::Tok3Delta0RequiresPaddedDigits { found: 0 };
-        assert!(matches!(err, CramError::Tok3Delta0RequiresPaddedDigits { .. }));
+    fn stream_headers_are_checked() {
+        let src = block(10, 1, &[Part::Stream(NEW | 13, &[])]);
+        assert!(matches!(decode(&src), Err(CramError::InvalidTok3TokenType { token_type: 0x8D })));
+        let src = block(10, 1, &[Part::Dup(NEW, 99, 0)]);
+        assert!(matches!(
+            decode(&src),
+            Err(CramError::Tok3DupStreamUnset { position: 99, token_type: 0 })
+        ));
+        let src = block(10, 1, &[Part::Stream(TYPE, &[6])]);
+        assert!(matches!(decode(&src), Err(CramError::Truncated { .. })));
+        let parts: Vec<Part<'_>> = (0..129).map(|_| Part::Stream(NEW | NOP, &[])).collect();
+        assert!(matches!(
+            decode(&block(10, 1, &parts)),
+            Err(CramError::Tok3TooManyPositions { limit: 128 })
+        ));
+    }
+
+    /// A position whose first stream is not its type stream gets one
+    /// regenerated: that type for the first name, MATCH for the rest; and a
+    /// copied stream reads from its own start.
+    // r[verify cram.codec.tok3.streams]
+    #[test]
+    fn regenerated_and_copied_streams() {
+        let dist = u32s(&[0, 1, 1]);
+        let src = block(
+            100,
+            3,
+            &[
+                Part::Stream(NEW | TYPE, &[6; 3]),
+                Part::Stream(6, &dist),
+                Part::Stream(NEW | STRING, b"read\0"),
+                Part::Stream(NEW | CHAR, b"x"),
+                Part::Dup(NEW | CHAR, 2, CHAR),
+                Part::Stream(NEW | TYPE, &[END; 3]),
+            ],
+        );
+        assert_eq!(decode(&src).unwrap(), b"readxx\0readxx\0readxx\0");
+    }
+
+    // r[verify cram.codec.tok3.limits]
+    #[test]
+    fn output_is_bounded_by_the_declared_length() {
+        // 1 KiB past the declared length: one name of 1021 + 2 + 1 bytes
+        // fits a declared length of 0, and of 1022 + 2 + 1 does not.
+        let long = |n: usize| {
+            let mut s = vec![b'a'; n];
+            s.push(0);
+            let dist = u32s(&[0]);
+            block(
+                0,
+                1,
+                &[
+                    Part::Stream(NEW | TYPE, &[6]),
+                    Part::Stream(6, &dist),
+                    Part::Stream(NEW | STRING, &s),
+                    Part::Stream(NEW | DIGITS0, &u32s(&[7])),
+                    Part::Stream(DZLEN, &[2]),
+                    Part::Stream(NEW | TYPE, &[END]),
+                ],
+            )
+        };
+        assert_eq!(decode(&long(1021)).unwrap().len(), 1024);
+        assert!(matches!(decode(&long(1022)), Err(CramError::Tok3OutputOverflow { limit: 1024 })));
+        let src = block(1, 1026, &[]);
+        assert!(matches!(
+            decode(&src),
+            Err(CramError::Tok3NameCountExceedsLength { count: 1026, length: 1 })
+        ));
+        // No names decode to nothing, whatever the streams.
+        assert_eq!(decode(&block(0, 0, &[])).unwrap(), b"");
     }
 
     // r[verify cram.codec.tok3_arith]
@@ -701,21 +871,6 @@ I17_08765:2:124:45613:16161#9\0\
             out.extend(stream);
         }
         out
-    }
-
-    // r[verify cram.tok3.dz_len_reader]
-    #[test]
-    fn token_reader_get_dz_len_matches_get_mut() {
-        let mut reader = TokenReader::default();
-        let test_data = vec![42u8, 99];
-        reader.set(TokenType::DZLen, test_data.clone());
-
-        // get() must return the dz_len_reader, not type_reader
-        let immutable = reader.get(TokenType::DZLen);
-        assert_eq!(immutable.get_ref(), &test_data);
-
-        let mutable = reader.get_mut(TokenType::DZLen);
-        assert_eq!(mutable.get_ref(), &test_data);
     }
 
     /// Arbitrary arith-coded blocks never panic, and tok3 over the

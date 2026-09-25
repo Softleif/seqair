@@ -705,11 +705,8 @@ The uint7 variable-length integer decoding loop MUST be bounded to at most 5 ite
 r[cram.slice.validated_lengths]
 Length fields decoded from ITF8 (e.g., `num_content_ids`, `num_blocks`, `alignment_span`) may be negative when interpreted as i32. Before using such values as `usize` for allocation or iteration, the reader MUST validate they are non-negative via `i32::try_from` or equivalent. Negative values MUST produce an error, not wrap to huge `usize` values causing OOM.
 
-r[cram.tok3.dz_len_reader]
-The `TokenReader::get()` and `get_mut()` methods MUST return the same reader for every `TokenType` variant. In particular, `DZLen` MUST map to `dz_len_reader` in both methods. A mismatch causes the dup-copy path (which uses `get()`) to read from the wrong stream.
-
 r[cram.tok3.name_count_limit]
-The `name_count` field in tok3 headers comes from untrusted data. Allocation based on `name_count` MUST be bounded to a reasonable limit (e.g., 10,000,000 names). The per-name token vector MUST be grown dynamically rather than pre-allocated to a fixed size, since the number of token positions varies per name.
+The `name_count` field in tok3 headers comes from untrusted data. Allocation based on `name_count` MUST be bounded to a reasonable limit (e.g., 10,000,000 names). Token storage MUST grow with the tokens decoded rather than be pre-allocated per name to the 128-position maximum.
 
 ## Performance considerations
 

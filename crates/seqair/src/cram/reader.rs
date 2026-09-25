@@ -195,14 +195,32 @@ pub enum CramError {
     #[error("invalid tok3 token type: {token_type}")]
     InvalidTok3TokenType { token_type: u8 },
 
-    #[error("tok3 dup position {dup_pos} out of range")]
-    Tok3DupPositionOutOfRange { dup_pos: usize },
+    #[error("tok3 stream copies position {position} type {token_type}, which was never set")]
+    Tok3DupStreamUnset { position: usize, token_type: u8 },
 
-    #[error("tok3 Delta token requires Digits predecessor, got token discriminant {found}")]
+    #[error("tok3 block has more than {limit} token positions")]
+    Tok3TooManyPositions { limit: usize },
+
+    #[error(
+        "tok3 DELTA token requires a DIGITS value in the previous name, got token kind {found} \
+         (0 none, 1 text, 2 digits, 3 zero-padded digits, 4 empty)"
+    )]
     Tok3DeltaRequiresDigits { found: u8 },
 
-    #[error("tok3 Delta0 token requires PaddedDigits predecessor, got token discriminant {found}")]
+    #[error(
+        "tok3 DELTA0 token requires a DIGITS0 value in the previous name, got token kind {found} \
+         (0 none, 1 text, 2 digits, 3 zero-padded digits, 4 empty)"
+    )]
     Tok3Delta0RequiresPaddedDigits { found: u8 },
+
+    #[error("tok3 MATCH at token position {position} has no value in the previous name to copy")]
+    Tok3MatchWithoutValue { position: usize },
+
+    #[error("tok3 names exceed the block's uncompressed length of {limit} bytes")]
+    Tok3OutputOverflow { limit: usize },
+
+    #[error("tok3 name_count {count} exceeds the uncompressed length {length}")]
+    Tok3NameCountExceedsLength { count: usize, length: usize },
 
     #[error("tok3 distance {distance} exceeds name index {name_index}")]
     Tok3DistanceExceedsIndex { distance: usize, name_index: usize },
