@@ -5,6 +5,8 @@
 //! Shelwien's coder), which the spec's pseudocode (`CRAMcodecs` §4 "Range
 //! coding", "Adaptive Modelling") describes.
 
+use fearless_simd::{Simd, prelude::*, u8x16, u16x8};
+
 use super::{codec_io::read_u8, reader::CramError};
 
 /// Renormalise once the range drops below 2^24.
@@ -88,7 +90,8 @@ impl<'a> RangeDecoder<'a> {
 }
 
 /// One symbol and its frequency in an [`AdaptiveModel`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub(crate) struct SymFreq {
     pub(crate) freq: u16,
     pub(crate) sym: u16,
@@ -107,6 +110,11 @@ pub(crate) struct AdaptiveModel<const N: usize> {
     total: u32,
     /// Number of live entries in `syms`; the rest are never decoded.
     len: u16,
+    /// How deep recent symbols that missed the first [`SCALAR_PREFIX`]
+    /// entries sat: an exponential moving average of their index, times 16.
+    /// Picks the scalar or the vector search in
+    /// [`decode_vectored`](Self::decode_vectored).
+    depth: u16,
     syms: [SymFreq; N],
 }
 
@@ -123,10 +131,11 @@ impl<const N: usize> AdaptiveModel<N> {
             }
         }
         #[allow(clippy::cast_possible_truncation, reason = "len <= N <= u16::MAX")]
-        Self { total: len as u32, len: len as u16, syms }
+        Self { total: len as u32, len: len as u16, depth: 0, syms }
     }
 
-    /// Decode one symbol from `rc` and update the model.
+    /// Decode one symbol from `rc` and update the model, scanning one
+    /// entry at a time.
     ///
     /// Returns `None` if the input is corrupt (the coded value lies outside
     /// the model's total) or truncated.
@@ -134,6 +143,49 @@ impl<const N: usize> AdaptiveModel<N> {
     pub(crate) fn decode(&mut self, rc: &mut RangeDecoder<'_>) -> Option<u16> {
         let live = self.syms.get_mut(..usize::from(self.len))?;
         decode_symbol(rc, &mut self.total, live)
+    }
+
+    /// [`decode`](Self::decode), for models that may be wide and flat.
+    ///
+    /// The first [`SCALAR_PREFIX`] entries are scanned one at a time. Past
+    /// them, a model whose symbols have lately sat [`DEEP`] in the scan order
+    /// searches with vectors ([`find_vector`]); the rest keep scanning one
+    /// at a time. Either way the entry found is the scan's.
+    ///
+    /// Returns `None` if the input is corrupt (the coded value lies outside
+    /// the model's total) or truncated.
+    // r[impl cram.codec.adaptive_model.simd_search]
+    #[inline(always)]
+    pub(crate) fn decode_vectored<S: Simd>(
+        &mut self,
+        simd: S,
+        rc: &mut RangeDecoder<'_>,
+    ) -> Option<u16> {
+        let live = self.syms.get_mut(..usize::from(self.len))?;
+        let target = rc.get_freq(self.total);
+        if target >= self.total {
+            return None;
+        }
+        let found = match find_prefix(live, target) {
+            Ok(found) => found,
+            Err(cum) => {
+                let found = if N > BLOCK && self.depth >= DEEP {
+                    find_vector(simd, live, cum, target)?
+                } else {
+                    find_scalar_from(live, SCALAR_PREFIX, cum, target)?
+                };
+                #[allow(
+                    clippy::arithmetic_side_effects,
+                    clippy::cast_possible_truncation,
+                    reason = "depth <= 16 * 255 + 255 < 2^16 with the index capped at 255"
+                )]
+                {
+                    self.depth = self.depth - (self.depth >> 4) + found.index.min(255) as u16;
+                }
+                found
+            }
+        };
+        apply(rc, &mut self.total, live, found)
     }
 
     /// Halve every frequency, rounding up so none reaches zero.
@@ -147,8 +199,9 @@ impl<const N: usize> AdaptiveModel<N> {
 
 /// Decode one symbol of the adaptive model whose live entries are `syms` and
 /// whose frequencies sum to `total`, and update the model — the body of
-/// [`AdaptiveModel::decode`], for callers that store many models of a
-/// run-time size in one arena (fqzcomp's 2^16 quality contexts).
+/// [`AdaptiveModel::decode`] with the scalar scan, for callers that store
+/// many models of a run-time size in one arena (fqzcomp's 2^16 quality
+/// contexts).
 ///
 /// Returns `None` if the input is corrupt (the coded value lies outside
 /// `total`) or truncated.
@@ -164,22 +217,23 @@ pub(crate) fn decode_symbol(
     if target >= *total {
         return None;
     }
-    let mut cum = 0u32;
-    let mut i = 0usize;
-    loop {
-        let f = u32::from(syms.get(i)?.freq);
-        #[allow(clippy::arithmetic_side_effects, reason = "cum <= total <= MAX_FREQ + STEP")]
-        if cum + f > target {
-            break;
-        }
-        #[allow(clippy::arithmetic_side_effects, reason = "as above; i < len")]
-        {
-            cum += f;
-            i += 1;
-        }
-    }
+    let found = find_scalar(syms, target)?;
+    apply(rc, total, syms, found)
+}
+
+/// Narrow the range to the entry `found` and update the model: add
+/// [`STEP`] to the entry, renormalise past [`MAX_FREQ`], and swap the entry
+/// forward if it overtook its predecessor. Returns its symbol.
+#[inline(always)]
+fn apply(
+    rc: &mut RangeDecoder<'_>,
+    total: &mut u32,
+    syms: &mut [SymFreq],
+    found: Found,
+) -> Option<u16> {
+    let i = found.index;
+    rc.decode(found.cum, found.freq)?;
     let entry = syms.get_mut(i)?;
-    rc.decode(cum, u32::from(entry.freq))?;
     let sym = entry.sym;
 
     #[allow(
@@ -200,6 +254,152 @@ pub(crate) fn decode_symbol(
         syms.swap(prev, i);
     }
     Some(sym)
+}
+
+/// The model's scan, one entry at a time: the entry whose cumulative range
+/// holds `target`. `None` if the frequencies sum to no more than `target`.
+#[inline(always)]
+fn find_scalar(syms: &[SymFreq], target: u32) -> Option<Found> {
+    find_scalar_from(syms, 0, 0, target)
+}
+
+/// [`find_scalar`] from entry `index`, with `cum` the sum before it.
+#[inline(always)]
+fn find_scalar_from(
+    syms: &[SymFreq],
+    mut index: usize,
+    mut cum: u32,
+    target: u32,
+) -> Option<Found> {
+    loop {
+        let freq = u32::from(syms.get(index)?.freq);
+        #[allow(clippy::arithmetic_side_effects, reason = "cum <= total <= MAX_FREQ + STEP")]
+        if cum + freq > target {
+            return Some(Found { index, cum, freq });
+        }
+        #[allow(clippy::arithmetic_side_effects, reason = "as above; index < len")]
+        {
+            cum += freq;
+            index += 1;
+        }
+    }
+}
+
+/// [`find_scalar`] over the first [`SCALAR_PREFIX`] entries: `Ok` if the
+/// symbol is among them, else `Err` with their sum.
+#[inline(always)]
+fn find_prefix(syms: &[SymFreq], target: u32) -> Result<Found, u32> {
+    let mut cum = 0u32;
+    for (index, s) in syms.iter().enumerate().take(SCALAR_PREFIX) {
+        let freq = u32::from(s.freq);
+        #[allow(clippy::arithmetic_side_effects, reason = "cum <= total <= MAX_FREQ + STEP")]
+        if cum + freq > target {
+            return Ok(Found { index, cum, freq });
+        }
+        #[allow(clippy::arithmetic_side_effects, reason = "as above")]
+        {
+            cum += freq;
+        }
+    }
+    Err(cum)
+}
+
+/// The [`AdaptiveModel::depth`] from which a model searches with vectors:
+/// symbols that miss the scalar prefix sit 32 entries deep on average. Below
+/// that the scalar scan wins on Apple M4 (measured over the hts-specs range
+/// and tok3 vectors); wide flat models — packed qualities, the bytes of u32s,
+/// name tokens — are far past it.
+const DEEP: u16 = 16 * 32;
+
+/// Entries checked one at a time before the vector search: on skewed data
+/// the symbol is nearly always among the first few, where a predicted
+/// branch beats the vector search's latency.
+const SCALAR_PREFIX: usize = 4;
+
+/// Entries per vector block of [`find_vector`].
+const BLOCK: usize = 8;
+
+/// Where the model's scan stops: the entry whose cumulative range holds the
+/// coded value, the sum of the frequencies before it, and its frequency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Found {
+    index: usize,
+    cum: u32,
+    freq: u32,
+}
+
+/// [`find_scalar_from`] the entry after the first [`SCALAR_PREFIX`], whose
+/// sum is `cum`, with vectors: the same entry, or `None`, as the scan.
+/// [`find_in_blocks`] takes whole blocks, the entries past the last whole
+/// block go one at a time.
+#[inline(always)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "cumulative sums stay <= total <= MAX_FREQ + STEP, which fits u16 lanes and u32"
+)]
+fn find_vector<S: Simd>(simd: S, syms: &[SymFreq], cum: u32, target: u32) -> Option<Found> {
+    let rest = syms.get(SCALAR_PREFIX..).unwrap_or_default();
+    let (blocks, _) = rest.as_chunks::<BLOCK>();
+    match find_in_blocks(simd, blocks, cum, target)? {
+        Ok(found) => Some(Found { index: SCALAR_PREFIX + found.index, ..found }),
+        Err(sum) => find_scalar_from(syms, SCALAR_PREFIX + blocks.len() * BLOCK, sum, target),
+    }
+}
+
+/// The vector part of [`find_vector`], over blocks of eight entries: the
+/// frequencies' running sums within the block (three shift-and-adds) plus
+/// everything before it, compared against `target` all at once. The sums
+/// only grow, so the lanes at or below `target` are the entries before the
+/// symbol and their count is its index in the block; the largest of those
+/// sums is its `cum`, and the smallest sum past `target` is `cum + freq`.
+/// Neither needs the index, which leaves the vector last.
+///
+/// `Ok` with the index into `blocks`, or `Err` with the running sum after
+/// the last block when `target` lies past them.
+#[inline(always)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "running sums stay <= total <= MAX_FREQ + STEP < 2^16; a lane count fits usize"
+)]
+fn find_in_blocks<S: Simd>(
+    simd: S,
+    blocks: &[[SymFreq; BLOCK]],
+    start: u32,
+    target: u32,
+) -> Option<Result<Found, u32>> {
+    // Callers pass `target < total <= MAX_FREQ + STEP < 2^16`.
+    let t = u16x8::splat(simd, u16::try_from(target).ok()?);
+    let zero = u16x8::splat(simd, 0);
+    let top = u16x8::splat(simd, u16::MAX);
+    // Byte shuffle that broadcasts lane 7.
+    let last =
+        u8x16::from_slice(simd, &[14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15]);
+    let mut carry = u16x8::splat(simd, u16::try_from(start).ok()?);
+    for (b, block) in blocks.iter().enumerate() {
+        let raw: &[u16; 2 * BLOCK] = bytemuck::cast_ref(block);
+        let (lo, hi) = raw.split_at(BLOCK);
+        // `SymFreq` is `repr(C)` with `freq` first: the even halves.
+        let f = u16x8::from_slice(simd, lo).unzip_low(u16x8::from_slice(simd, hi));
+        let mut p = f + zero.slide::<7>(f);
+        p = p + zero.slide::<6>(p);
+        p = p + zero.slide::<4>(p);
+        let sums = p + carry;
+        let before = sums.simd_le(t);
+        let bits = before.to_bitmask() & 0xFF;
+        if bits != 0xFF {
+            let cum = before.select(sums, carry).reduce_max();
+            let end = before.select(top, sums).reduce_min();
+            return Some(Ok(Found {
+                index: b * BLOCK + bits.trailing_ones() as usize,
+                cum: u32::from(cum),
+                freq: u32::from(end - cum),
+            }));
+        }
+        carry += p.swizzle_dyn(last);
+    }
+    // Every lane of `carry` holds the running sum.
+    Some(Err(u32::from(carry.reduce_max())))
 }
 
 /// Halve every frequency, rounding up so none reaches zero; returns the new total.
@@ -317,7 +517,17 @@ pub(crate) mod test_encoder {
 mod tests {
     use super::test_encoder::RangeEncoder;
     use super::*;
+    use fearless_simd::{Level, dispatch};
     use hegel::prelude::*;
+
+    /// Decode one symbol at `level`.
+    fn decode_at<const N: usize>(
+        level: Level,
+        m: &mut AdaptiveModel<N>,
+        rc: &mut RangeDecoder<'_>,
+    ) -> Option<u16> {
+        dispatch!(level, simd => m.decode_vectored(simd, rc))
+    }
 
     // r[verify cram.codec.range_coder]
     // r[verify cram.codec.adaptive_model]
@@ -344,11 +554,14 @@ mod tests {
         }
         let bytes = enc.finish();
 
-        let mut rc = RangeDecoder::new(&bytes).unwrap();
-        let mut m = AdaptiveModel::<256>::new(max_sym);
-        let decoded: Vec<u16> = (0..data.len()).map(|_| m.decode(&mut rc).unwrap()).collect();
-        assert_eq!(decoded, data);
-        assert!(rc.remaining().is_empty(), "decoder consumed exactly what the encoder wrote");
+        for level in crate::simd_levels::levels() {
+            let mut rc = RangeDecoder::new(&bytes).unwrap();
+            let mut m = AdaptiveModel::<256>::new(max_sym);
+            let decoded: Vec<u16> =
+                (0..data.len()).map(|_| decode_at(level, &mut m, &mut rc).unwrap()).collect();
+            assert_eq!(decoded, data, "{level:?}");
+            assert!(rc.remaining().is_empty(), "decoder consumed exactly what the encoder wrote");
+        }
     }
 
     /// Interleaving several models over one coder is how every user of this
@@ -370,9 +583,56 @@ mod tests {
         let mut ms = vec![AdaptiveModel::<4>::new(4); 4];
         let mut last = 0usize;
         for &s in &data {
-            let d = ms[last].decode(&mut rc).unwrap();
+            let d = decode_at(Level::new(), &mut ms[last], &mut rc).unwrap();
             assert_eq!(d, u16::from(s));
             last = usize::from(d);
+        }
+    }
+
+    /// The model's scan as the spec states it, one entry at a time.
+    fn scan(syms: &[SymFreq], target: u32) -> Option<Found> {
+        let mut cum = 0u32;
+        for (index, s) in syms.iter().enumerate() {
+            if cum + u32::from(s.freq) > target {
+                return Some(Found { index, cum, freq: u32::from(s.freq) });
+            }
+            cum += u32::from(s.freq);
+        }
+        None
+    }
+
+    /// Frequencies as a model holds them: at least 1 each, summing to at
+    /// most `MAX_FREQ + STEP`; skewed or flat, so the symbol lands anywhere
+    /// from the scalar prefix to the tail past the last whole block.
+    #[hegel::composite]
+    fn model_freqs(tc: &TestCase) -> Vec<SymFreq> {
+        let n = tc.draw_silent(gs::integers::<usize>().min_value(1).max_value(256));
+        let cap = tc.draw_silent(gs::sampled_from(vec![2u16, 40, 300, 4000]));
+        let mut left = MAX_FREQ + u32::from(STEP) - n as u32;
+        (0..n)
+            .map(|i| {
+                let extra = tc.draw_silent(gs::integers::<u16>().max_value(cap)).min(left as u16);
+                left -= u32::from(extra);
+                SymFreq { freq: 1 + extra, sym: i as u16 }
+            })
+            .collect()
+    }
+
+    // r[verify cram.codec.adaptive_model.simd_search]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn symbol_search_matches_the_scan_at_every_level(tc: TestCase) {
+        let syms = tc.draw(model_freqs().print_as_debug());
+        let total: u32 = syms.iter().map(|s| u32::from(s.freq)).sum();
+        // Past the total too: every level must find nothing there.
+        let target = tc.draw(gs::integers::<u32>().max_value(total + 3));
+        let expected = scan(&syms, target);
+        for level in crate::simd_levels::levels() {
+            let got = match find_prefix(&syms, target) {
+                Ok(found) => Some(found),
+                Err(cum) => dispatch!(level, simd => find_vector(simd, &syms, cum, target)),
+            };
+            assert_eq!(got, expected, "{level:?}, {} entries, target {target}", syms.len());
         }
     }
 
@@ -401,7 +661,7 @@ mod tests {
         let bytes = [0u8; 16];
         let mut rc = RangeDecoder::new(&bytes).unwrap();
         let mut m = AdaptiveModel::<4>::new(0);
-        assert_eq!(m.decode(&mut rc), None);
+        assert_eq!(decode_at(Level::new(), &mut m, &mut rc), None);
     }
 
     #[hegel::test]
@@ -411,7 +671,7 @@ mod tests {
         let mut rc = RangeDecoder::new(&bytes).unwrap();
         let mut m = AdaptiveModel::<256>::new(max_sym);
         for _ in 0..1024 {
-            if m.decode(&mut rc).is_none() {
+            if decode_at(Level::new(), &mut m, &mut rc).is_none() {
                 break;
             }
         }
@@ -423,6 +683,7 @@ mod tests {
     /// encoded streams and on noise.
     // r[verify cram.codec.range_coder]
     // r[verify cram.codec.adaptive_model]
+    // r[verify cram.codec.adaptive_model.simd_search]
     #[hegel::test]
     fn matches_the_spec_pseudocode(tc: TestCase) {
         use super::super::fqzcomp_reference as spec;
@@ -446,20 +707,26 @@ mod tests {
             tc.draw(gs::binary().max_size(64))
         };
 
-        let (Ok(mut rc), Some(mut spec_rc)) =
+        let (Ok(_), Some(mut spec_rc)) =
             (RangeDecoder::new(&bytes), spec::RangeDecoder::new(&bytes))
         else {
             assert!(bytes.len() < 5, "both need exactly five bytes to start");
             return;
         };
-        let mut ms: Vec<_> = sizes.iter().map(|&s| AdaptiveModel::<256>::new(s)).collect();
         let mut spec_ms: Vec<_> = sizes.iter().map(|&s| spec::Model::new(s)).collect();
-        for i in 0..n.max(64) {
-            let k = i % sizes.len();
-            let got = ms[k].decode(&mut rc);
-            assert_eq!(got, spec_ms[k].decode(&mut spec_rc), "symbol {i}");
-            if got.is_none() {
-                break;
+        let expected: Vec<Option<u16>> = (0..n.max(64))
+            .map(|i| spec_ms[i % sizes.len()].decode(&mut spec_rc))
+            .take_while(Option::is_some)
+            .collect();
+        for level in crate::simd_levels::levels() {
+            let mut rc = RangeDecoder::new(&bytes).unwrap();
+            let mut ms: Vec<_> = sizes.iter().map(|&s| AdaptiveModel::<256>::new(s)).collect();
+            for i in 0..n.max(64) {
+                let got = decode_at(level, &mut ms[i % sizes.len()], &mut rc);
+                assert_eq!(got, expected.get(i).copied().flatten(), "{level:?} symbol {i}");
+                if got.is_none() {
+                    break;
+                }
             }
         }
     }

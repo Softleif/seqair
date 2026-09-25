@@ -10,6 +10,9 @@
 
 use std::io::Read;
 
+use fearless_simd::{Level, Simd, dispatch};
+use fearless_simd_macros::simd;
+
 #[cfg(test)]
 mod htscodecs_oracle;
 #[cfg(any(test, feature = "fuzz"))]
@@ -55,7 +58,12 @@ type RunModel = AdaptiveModel<RUN_SYMBOLS>;
 /// length (the NOSZ flag); otherwise the stored length wins, and the result
 /// always has the length the stream declares.
 pub fn decode(src: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, CramError> {
-    decode_nested(src, uncompressed_size, 0)
+    decode_at(Level::new(), src, uncompressed_size)
+}
+
+/// [`decode`] at a chosen SIMD level, so tests can run every level.
+fn decode_at(level: Level, src: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, CramError> {
+    decode_nested(level, src, uncompressed_size, 0)
 }
 
 fn read_uint7(src: &mut &[u8]) -> Result<usize, CramError> {
@@ -67,11 +75,16 @@ fn read_uint7(src: &mut &[u8]) -> Result<usize, CramError> {
 }
 
 // r[impl cram.codec.arith.wrapper]
-fn decode_nested(src: &[u8], uncompressed_size: usize, depth: u8) -> Result<Vec<u8>, CramError> {
+fn decode_nested(
+    level: Level,
+    src: &[u8],
+    uncompressed_size: usize,
+    depth: u8,
+) -> Result<Vec<u8>, CramError> {
     let mut cur = src;
     let flags = read_u8(&mut cur).ok_or(CramError::Truncated { context: "arith flags" })?;
     if flags & FLAG_STRIPE != 0 {
-        return decode_stripe(cur, depth);
+        return decode_stripe(level, cur, depth);
     }
 
     let len = if flags & FLAG_NO_SIZE != 0 { uncompressed_size } else { read_uint7(&mut cur)? };
@@ -89,7 +102,7 @@ fn decode_nested(src: &[u8], uncompressed_size: usize, depth: u8) -> Result<Vec<
     };
 
     let body_len = pack.as_ref().map_or(len, |&(_, packed_len)| packed_len);
-    let body = decode_body(flags, cur, body_len)?;
+    let body = decode_body(level, flags, cur, body_len)?;
 
     let out = match pack {
         // r[impl cram.codec.arith.pack]
@@ -120,7 +133,7 @@ fn decode_nested(src: &[u8], uncompressed_size: usize, depth: u8) -> Result<Vec<
 }
 
 /// Decode the body after the metadata to (at most) `len` bytes.
-fn decode_body(flags: u8, body: &[u8], len: usize) -> Result<Vec<u8>, CramError> {
+fn decode_body(level: Level, flags: u8, body: &[u8], len: usize) -> Result<Vec<u8>, CramError> {
     // htscodecs decodes an empty body to nothing, whatever the flags say;
     // the length check after it decides whether that was valid.
     if body.is_empty() {
@@ -140,10 +153,10 @@ fn decode_body(flags: u8, body: &[u8], len: usize) -> Result<Vec<u8>, CramError>
     let order1 = flags & ORDER_MASK == 1;
     let rle = flags & FLAG_RLE != 0;
     match (rle, order1) {
-        (false, false) => decode_order::<false>(body, len),
-        (false, true) => decode_order::<true>(body, len),
-        (true, false) => decode_rle::<false>(body, len),
-        (true, true) => decode_rle::<true>(body, len),
+        (false, false) => dispatch!(level, simd => decode_order::<_, false>(simd, body, len)),
+        (false, true) => dispatch!(level, simd => decode_order::<_, true>(simd, body, len)),
+        (true, false) => dispatch!(level, simd => decode_rle::<_, false>(simd, body, len)),
+        (true, true) => dispatch!(level, simd => decode_rle::<_, true>(simd, body, len)),
     }
 }
 
@@ -173,14 +186,19 @@ fn byte(sym: u16) -> u8 {
 }
 
 // r[impl cram.codec.arith.order]
-fn decode_order<const ORDER1: bool>(body: &[u8], len: usize) -> Result<Vec<u8>, CramError> {
+#[simd]
+fn decode_order<S: Simd, const ORDER1: bool>(
+    simd: S,
+    body: &[u8],
+    len: usize,
+) -> Result<Vec<u8>, CramError> {
     let (max_sym, mut rc) = start(body)?;
     let mut models = literal_models::<ORDER1>(max_sym);
     let mut out = vec![0u8; len];
     let mut ctx = 0usize;
     for d in &mut out {
         let model = models.get_mut(ctx).ok_or_else(corrupt("arith literal context"))?;
-        let sym = model.decode(&mut rc).ok_or_else(corrupt("arith literal"))?;
+        let sym = model.decode_vectored(simd, &mut rc).ok_or_else(corrupt("arith literal"))?;
         *d = byte(sym);
         if ORDER1 {
             ctx = usize::from(sym);
@@ -190,7 +208,12 @@ fn decode_order<const ORDER1: bool>(body: &[u8], len: usize) -> Result<Vec<u8>, 
 }
 
 // r[impl cram.codec.arith.rle]
-fn decode_rle<const ORDER1: bool>(body: &[u8], len: usize) -> Result<Vec<u8>, CramError> {
+#[simd]
+fn decode_rle<S: Simd, const ORDER1: bool>(
+    simd: S,
+    body: &[u8],
+    len: usize,
+) -> Result<Vec<u8>, CramError> {
     let (max_sym, mut rc) = start(body)?;
     let mut literals = literal_models::<ORDER1>(max_sym);
     let mut runs = vec![RunModel::new(RUN_SYMBOLS); RUN_CONTEXTS];
@@ -198,7 +221,7 @@ fn decode_rle<const ORDER1: bool>(body: &[u8], len: usize) -> Result<Vec<u8>, Cr
     let mut ctx = 0usize;
     while out.len() < len {
         let model = literals.get_mut(ctx).ok_or_else(corrupt("arith literal context"))?;
-        let sym = model.decode(&mut rc).ok_or_else(corrupt("arith literal"))?;
+        let sym = model.decode_vectored(simd, &mut rc).ok_or_else(corrupt("arith literal"))?;
         let lit = byte(sym);
         out.push(lit);
         if ORDER1 {
@@ -224,7 +247,7 @@ fn decode_rle<const ORDER1: bool>(body: &[u8], len: usize) -> Result<Vec<u8>, Cr
 }
 
 // r[impl cram.codec.arith.stripe]
-fn decode_stripe(mut cur: &[u8], depth: u8) -> Result<Vec<u8>, CramError> {
+fn decode_stripe(level: Level, mut cur: &[u8], depth: u8) -> Result<Vec<u8>, CramError> {
     if depth >= MAX_STRIPE_DEPTH {
         return Err(CramError::ArithStripeTooDeep { limit: MAX_STRIPE_DEPTH });
     }
@@ -244,7 +267,7 @@ fn decode_stripe(mut cur: &[u8], depth: u8) -> Result<Vec<u8>, CramError> {
         let sub = codec_io::split_off(&mut cur, clen)
             .ok_or(CramError::Truncated { context: "arith stripe substream" })?;
         let part_len = q.saturating_add(usize::from(j < r));
-        let part = decode_nested(sub, part_len, depth.saturating_add(1))?;
+        let part = decode_nested(level, sub, part_len, depth.saturating_add(1))?;
         if part.len() != part_len {
             return Err(CramError::ArithLengthMismatch { expected: part_len, actual: part.len() });
         }
@@ -574,6 +597,8 @@ mod tests {
 
     // r[verify cram.codec.arith.order]
     // r[verify cram.codec.arith.rle]
+    // r[verify cram.codec.adaptive_model.simd_search]
+    // r[verify io.simd_portable]
     #[hegel::test]
     fn range_coded_bodies_round_trip(tc: TestCase) {
         let data = tc.draw(arb_data());
@@ -582,7 +607,9 @@ mod tests {
         let layout =
             Layout::Plain { coder: Coder::Range { order, rle }, pack: false, no_size: false };
         let stream = encode(&layout, &data);
-        assert_eq!(decode(&stream, 0).unwrap(), data);
+        for level in crate::simd_levels::levels() {
+            assert_eq!(decode_at(level, &stream, 0).unwrap(), data, "{level:?}");
+        }
         assert_eq!(reference::decode(&stream, 0), Some(data), "reference decoder");
     }
 
