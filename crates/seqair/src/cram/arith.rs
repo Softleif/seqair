@@ -14,7 +14,7 @@ use fearless_simd::{Level, Simd, dispatch};
 use fearless_simd_macros::simd;
 
 #[cfg(test)]
-mod htscodecs_oracle;
+pub(crate) mod htscodecs_oracle;
 #[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]
 pub mod reference;

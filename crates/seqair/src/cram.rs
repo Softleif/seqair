@@ -29,6 +29,11 @@ pub mod rans_nx16_neon {}
 pub mod reader;
 pub mod slice;
 pub mod tok3;
+/// A plain, spec-literal tok3 decoder that tests and fuzz targets check
+/// [`tok3`] against.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod tok3_reference;
 pub mod varint;
 
 pub use index::CramIndexError;

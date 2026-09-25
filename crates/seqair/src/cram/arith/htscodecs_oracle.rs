@@ -50,6 +50,12 @@ mod ffi {
             out_len: *mut c_int,
             last_start_p: *mut c_int,
         ) -> *mut u8;
+
+        pub(super) fn tok3_decode_names(
+            input: *mut u8,
+            sz: c_uint,
+            out_len: *mut c_uint,
+        ) -> *mut u8;
     }
 }
 
@@ -108,6 +114,16 @@ fn htscodecs_decompress(src: &[u8], len: usize) -> Option<Vec<u8>> {
 
 /// `tok3_encode_names` over newline-terminated names.
 fn htscodecs_tokenise(names: &[Vec<u8>], level: c_int, use_arith: bool) -> Vec<u8> {
+    try_htscodecs_tokenise(names, level, use_arith).expect("htscodecs cannot tokenise the names")
+}
+
+/// `tok3_encode_names` over newline-terminated names; `None` where
+/// htscodecs gives up (a name with more than 128 tokens, or no names).
+pub(crate) fn try_htscodecs_tokenise(
+    names: &[Vec<u8>],
+    level: c_int,
+    use_arith: bool,
+) -> Option<Vec<u8>> {
     let mut block: Vec<u8> = names.iter().flat_map(|n| n.iter().copied().chain(*b"\n")).collect();
     let mut out_len: c_int = 0;
     let mut last_start: c_int = 0;
@@ -123,7 +139,23 @@ fn htscodecs_tokenise(names: &[Vec<u8>], level: c_int, use_arith: bool) -> Vec<u
             &raw mut last_start,
         )
     };
-    take_c_buffer(p, usize::try_from(out_len).unwrap())
+    (!p.is_null()).then(|| take_c_buffer(p, usize::try_from(out_len).unwrap()))
+}
+
+/// `tok3_decode_names`; `None` where htscodecs rejects the block.
+pub(crate) fn htscodecs_tok3_decode(block: &[u8]) -> Option<Vec<u8>> {
+    let mut input = block.to_vec();
+    let mut out_len: c_uint = 0;
+    // SAFETY: `input` is live and `sz` bytes long; the result is malloc'ed
+    // with `out_len` bytes.
+    let p = unsafe {
+        ffi::tok3_decode_names(
+            input.as_mut_ptr(),
+            c_uint::try_from(input.len()).unwrap(),
+            &raw mut out_len,
+        )
+    };
+    (!p.is_null()).then(|| take_c_buffer(p, usize::try_from(out_len).unwrap()))
 }
 
 const ORDER1: c_int = 0x01;
