@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "seqair"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "bgzf",
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "seqair-types"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "fearless_simd",

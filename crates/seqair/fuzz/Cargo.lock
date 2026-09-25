@@ -376,7 +376,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "seqair"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "bzip2",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "seqair-types"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "fearless_simd",
