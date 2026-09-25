@@ -474,7 +474,7 @@ impl<'a> Names<'a> {
     }
 
     /// Write `value` in decimal, left-padded with zeros to `width`.
-    #[inline]
+    #[inline(always)]
     fn put_digits(&mut self, kind: Kind, value: u32, width: usize) -> Result<Token, CramError> {
         let start = self.len;
         if width <= CHUNK {
@@ -494,7 +494,7 @@ impl<'a> Names<'a> {
     /// Write the first `len` bytes of `chunk` (`len <= CHUNK`): all of it
     /// in one store when there is room (bytes past `len` are overwritten
     /// by what comes next, or cut off at the end).
-    #[inline]
+    #[inline(always)]
     fn put_chunk(&mut self, chunk: &[u8; CHUNK], len: usize) -> Result<(), CramError> {
         let end = self.len.wrapping_add(len);
         if let Some(dst) = self.out.get_mut(self.len..).and_then(|d| d.first_chunk_mut::<CHUNK>()) {
@@ -515,7 +515,7 @@ impl<'a> Names<'a> {
     }
 
     /// Write again the text of `token`, from an earlier name.
-    #[inline]
+    #[inline(always)]
     fn put_copy(&mut self, token: Token) -> Result<(), CramError> {
         let (start, len) = (token.start as usize, token.len as usize);
         // Short text: one 16-byte load and store. The load may run past
