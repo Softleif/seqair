@@ -104,6 +104,12 @@ pub enum CramError {
     #[error("lzma decompression failed in block")]
     LzmaDecompressionFailed { source: std::io::Error },
 
+    #[error("block with compression method {method} decoded to {found} bytes, but its header says {expected}")]
+    BlockSizeMismatch { method: u8, expected: usize, found: usize },
+
+    #[error("block with compression method {method} decodes past the {expected} bytes its header says")]
+    BlockDecodesPastSize { method: u8, expected: usize },
+
     // ── Block type mismatch ──────────────────────────────────────────────────
     #[error("expected compression header block, got {found:?}")]
     ExpectedCompressionHeader { found: block::ContentType },
@@ -255,9 +261,6 @@ pub enum CramError {
 
     #[error("fqzcomp range-coded data is corrupt or truncated")]
     FqzcompRangeCoder,
-
-    #[error("fqzcomp block decoded to {found} bytes, but its header says {expected}")]
-    FqzcompSizeMismatch { expected: usize, found: usize },
 
     // ── Codec safety ─────────────────────────────────────────────────────────
     #[error("uint7 overflow: more than 5 continuation bytes")]

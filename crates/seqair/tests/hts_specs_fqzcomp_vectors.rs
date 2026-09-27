@@ -108,7 +108,7 @@ fn block_method_7_decodes_and_checks_the_header_size() {
 
     let err = parse_block(&fqzcomp_block(&data, size - 1)).unwrap_err();
     assert!(
-        matches!(err, CramError::FqzcompSizeMismatch { expected, found }
+        matches!(err, CramError::BlockSizeMismatch { method: 7, expected, found }
             if expected == want.len() - 1 && found == want.len()),
         "{err:?}"
     );

@@ -145,15 +145,23 @@ fn parse_block_inner(
     let uncompressed_size = uncompressed_size as usize;
     super::reader::check_codec_output(uncompressed_size, "block uncompressed size")?;
 
-    let data = decompress_block(
-        method,
-        compressed_data,
-        uncompressed_size,
-        content_type_byte,
-        content_id,
-        rans_4x8_buf,
-        nx16_order1_buf,
-    )?;
+    // r[impl cram.block.decoded_size]
+    // htslib skips decoding a block that declares no data, whatever its method.
+    let data = if uncompressed_size == 0 {
+        Vec::new()
+    } else {
+        let data = decompress_block(
+            method,
+            compressed_data,
+            uncompressed_size,
+            content_type_byte,
+            content_id,
+            rans_4x8_buf,
+            nx16_order1_buf,
+        )?;
+        check_decoded_size(method, uncompressed_size, data.len())?;
+        data
+    };
 
     Ok((Block { content_type, content_id, data }, pos))
 }
@@ -174,32 +182,18 @@ fn decompress_block(
         1 => {
             let mut decompressor = libdeflater::Decompressor::new();
             let mut output = vec![0u8; uncompressed_size];
-            decompressor
+            let len = decompressor
                 .gzip_decompress(compressed, &mut output)
                 .map_err(|source| CramError::GzipDecompressionFailed { source })?;
+            output.truncate(len);
             Ok(output)
         }
         // r[impl cram.codec.bzip2]
-        2 => {
-            use bzip2::read::BzDecoder;
-            use std::io::Read;
-            let mut decoder = BzDecoder::new(compressed);
-            let mut output = Vec::with_capacity(uncompressed_size);
-            decoder
-                .read_to_end(&mut output)
-                .map_err(|source| CramError::Bzip2DecompressionFailed { source })?;
-            Ok(output)
-        }
+        2 => read_capped(bzip2::read::BzDecoder::new(compressed), uncompressed_size)
+            .map_err(|source| CramError::Bzip2DecompressionFailed { source }),
         // r[impl cram.codec.lzma]
-        3 => {
-            use std::io::Read;
-            let mut decoder = xz2::read::XzDecoder::new(compressed);
-            let mut output = Vec::with_capacity(uncompressed_size);
-            decoder
-                .read_to_end(&mut output)
-                .map_err(|source| CramError::LzmaDecompressionFailed { source })?;
-            Ok(output)
-        }
+        3 => read_capped(xz2::read::XzDecoder::new(compressed), uncompressed_size)
+            .map_err(|source| CramError::LzmaDecompressionFailed { source }),
         // r[impl cram.codec.rans4x8]
         4 => match rans_4x8_buf {
             Some(buf) => super::rans::decode_with_buf(compressed, buf),
@@ -213,16 +207,7 @@ fn decompress_block(
         // r[impl cram.codec.arith+2]
         6 => super::arith::decode(compressed, uncompressed_size),
         // r[impl cram.codec.fqzcomp]
-        7 => {
-            let data = super::fqzcomp::decode(compressed)?;
-            if data.len() != uncompressed_size {
-                return Err(CramError::FqzcompSizeMismatch {
-                    expected: uncompressed_size,
-                    found: data.len(),
-                });
-            }
-            Ok(data)
-        }
+        7 => super::fqzcomp::decode(compressed),
         // r[impl cram.codec.tok3]
         8 => match nx16_order1_buf {
             Some(buf) => super::tok3::decode_with_buf(compressed, buf),
@@ -230,6 +215,33 @@ fn decompress_block(
         },
         // r[impl cram.codec.unknown]
         _ => Err(CramError::UnsupportedCodec { method, content_type, content_id }),
+    }
+}
+
+/// A streaming decoder's output, read to one byte past `size` at most, so
+/// a small stream cannot inflate past the header's length before
+/// [`check_decoded_size`] rejects it.
+fn read_capped(decoder: impl std::io::Read, size: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let limit = u64::try_from(size).unwrap_or(u64::MAX).saturating_add(1);
+    let mut output = Vec::with_capacity(size);
+    decoder.take(limit).read_to_end(&mut output)?;
+    Ok(output)
+}
+
+// r[impl cram.block.decoded_size]
+/// The decoded length against the header's, as htslib checks it: bzip2
+/// output may fall short (htslib decodes into a buffer of the header's size
+/// and keeps what fits); every other method's must match exactly, except
+/// raw data, which is not decoded, and tok3, which stores its own length.
+fn check_decoded_size(method: u8, expected: usize, found: usize) -> Result<(), CramError> {
+    match method {
+        // Read to one byte past `expected` at most, so `found` says only that.
+        2 | 3 if found > expected => Err(CramError::BlockDecodesPastSize { method, expected }),
+        1 | 3..=7 if found != expected => {
+            Err(CramError::BlockSizeMismatch { method, expected, found })
+        }
+        _ => Ok(()),
     }
 }
 
@@ -409,6 +421,86 @@ mod tests {
         assert_eq!(block.data, original);
     }
 
+    /// An external block of `method` holding `compressed`, whose header
+    /// says it decodes to `uncompressed_size` bytes.
+    fn method_block(method: u8, compressed: &[u8], uncompressed_size: usize) -> Vec<u8> {
+        let mut buf = vec![method, 4];
+        encode_itf8_to(&mut buf, 0);
+        encode_itf8_to(&mut buf, compressed.len() as u32);
+        encode_itf8_to(&mut buf, uncompressed_size as u32);
+        buf.extend_from_slice(compressed);
+        let mut crc = libdeflater::Crc::new();
+        crc.update(&buf);
+        buf.extend_from_slice(&crc.sum().to_le_bytes());
+        buf
+    }
+
+    // r[verify cram.block.decoded_size]
+    #[test]
+    fn decoded_length_must_match_the_header() {
+        let arith = [0x20, 5, b'a', b'r', b'i', b't', b'h'];
+        let err = parse_block(&method_block(6, &arith, 4)).unwrap_err();
+        assert!(
+            matches!(err, CramError::BlockSizeMismatch { method: 6, expected: 4, found: 5 }),
+            "{err:?}"
+        );
+
+        let mut compressor =
+            libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let mut gzip = vec![0u8; compressor.gzip_compress_bound(5)];
+        let len = compressor.gzip_compress(b"hello", &mut gzip).unwrap();
+        gzip.truncate(len);
+        let err = parse_block(&method_block(1, &gzip, 6)).unwrap_err();
+        assert!(
+            matches!(err, CramError::BlockSizeMismatch { method: 1, expected: 6, found: 5 }),
+            "a short gzip stream is not padded with zeros: {err:?}"
+        );
+    }
+
+    // r[verify cram.block.decoded_size]
+    #[test]
+    fn streaming_decoders_stop_past_the_header_size() {
+        use std::io::Write;
+
+        // A MiB of zeros compresses to a few hundred bytes; a header
+        // claiming 100 bytes must not let them inflate.
+        let zeros = vec![0u8; 1 << 20];
+        let mut xz = xz2::write::XzEncoder::new(Vec::new(), 6);
+        xz.write_all(&zeros).unwrap();
+        let xz = xz.finish().unwrap();
+        let err = parse_block(&method_block(3, &xz, 100)).unwrap_err();
+        assert!(matches!(err, CramError::BlockDecodesPastSize { method: 3, expected: 100 }));
+
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        bz.write_all(&zeros).unwrap();
+        let bz = bz.finish().unwrap();
+        let err = parse_block(&method_block(2, &bz, 100)).unwrap_err();
+        assert!(matches!(err, CramError::BlockDecodesPastSize { method: 2, expected: 100 }));
+
+        // bzip2 may come up short, as htslib allows; lzma may not.
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        bz.write_all(b"short").unwrap();
+        let (block, _) = parse_block(&method_block(2, &bz.finish().unwrap(), 9)).unwrap();
+        assert_eq!(block.data, b"short");
+        let mut xz = xz2::write::XzEncoder::new(Vec::new(), 6);
+        xz.write_all(b"short").unwrap();
+        let err = parse_block(&method_block(3, &xz.finish().unwrap(), 9)).unwrap_err();
+        assert!(
+            matches!(err, CramError::BlockSizeMismatch { method: 3, expected: 9, found: 5 }),
+            "{err:?}"
+        );
+    }
+
+    // r[verify cram.block.decoded_size]
+    #[test]
+    fn a_block_of_no_bytes_is_not_decoded() {
+        // Not a valid arith stream, nor a gzip one; htslib never looks.
+        for method in [1, 6, 7, 8] {
+            let (block, _) = parse_block(&method_block(method, &[0xff, 0x01, 0x02], 0)).unwrap();
+            assert!(block.data.is_empty(), "method {method}");
+        }
+    }
+
     // r[verify cram.block.crc32]
     #[test]
     fn crc32_mismatch_detected() {
@@ -435,7 +527,8 @@ mod tests {
         buf.push(4); // ExternalData
         encode_itf8_to(&mut buf, 0);
         encode_itf8_to(&mut buf, 0); // compressed size = 0
-        encode_itf8_to(&mut buf, 0); // uncompressed size = 0
+        // Not 0: a block of no bytes is never decoded.
+        encode_itf8_to(&mut buf, 1); // uncompressed size = 1
 
         let mut crc = libdeflater::Crc::new();
         crc.update(&buf);

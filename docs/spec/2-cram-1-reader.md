@@ -111,6 +111,9 @@ When `embedded_reference >= 0`, the corresponding external data block contains t
 r[cram.block.crc32]
 CRC32 MUST be verified on every block in v3.0+. The CRC32 covers all bytes from the start of the block (method byte) through the end of the compressed data, excluding the 4 CRC32 bytes themselves. Mismatches MUST produce an error with the block's content_type and content_id for diagnostics.
 
+r[cram.block.decoded_size]
+A block whose uncompressed size is 0 is empty whatever its method, and nothing is decoded (htslib skips it the same way). Otherwise the decoded length is checked against the uncompressed size as htslib checks it: gzip, lzma, rANS 4×8, rANS Nx16, the arithmetic coder and fqzcomp MUST decode to exactly that length; bzip2 MAY decode to less (htslib decodes into a buffer of that size and keeps what it gets) but MUST NOT decode to more; raw data is not decoded, and tok3 stores its own length (`r[cram.codec.tok3.limits]`). The streaming decoders (bzip2, lzma) MUST stop one byte past the uncompressed size, so a small stream cannot inflate past it before the check rejects it.
+
 ## Variable-length integers
 
 > _[CRAM3] §2.1 "Logical data types" — ITF8 (up to 32 bits) and LTF8 (up to 64 bits) variable-length integer encodings_

@@ -56,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MissingReference`. Only a slice that needs the FASTA fails now.
 - **CRAM records carried htslib's private `cF:C` tag.** htslib stores CRAM flags in a one-byte `cF`
   tag and strips it on decode; seqair now strips it too.
+- **CRAM blocks are held to their header's uncompressed size, as htslib holds them.** A small
+  bzip2 or lzma stream could inflate to gigabytes whatever the header said; both now stop one byte
+  past it (`CramError::BlockDecodesPastSize`). gzip, lzma, rANS, arith and fqzcomp blocks must
+  decode to exactly the header's size (`CramError::BlockSizeMismatch`, which replaces
+  `FqzcompSizeMismatch`) — a short gzip block was padded with zeros before. A block whose header
+  says 0 bytes is empty and is not decoded, whatever its method, as in htslib.
 
 ### Removed
 
