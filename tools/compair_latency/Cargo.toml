@@ -1,0 +1,12 @@
+[package]
+name = "compair_latency"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Latency of the instruction chains compair's kernels carry, measured on the machine"
+
+# Not a workspace member: an x86-64/AArch64 inline-asm probe, built by hand.
+[workspace]
+
+[profile.release]
+opt-level = 3
