@@ -568,10 +568,25 @@ pub(crate) fn batch_kernel<L: Lane>(
                     *sum += shift;
                 }
             }
-            if any {
+            // Only the previous row's band can hold anything but zeros: the
+            // band moves right by at most a column a row and every row zeroes
+            // the column it leaves behind and the one past its end, so left of
+            // it is zero and right of it was never written. The first lift sees
+            // row 0, whose free start spans the same `o +- w`. A zero lifts to
+            // zero exactly, so lifting that range -- and the column past it the
+            // next row reads -- is lifting the whole buffer; the whole buffer
+            // was `(h + 2) * 3` vectors every eight rows, 8.6 % of the kernel on
+            // Zen 2 at 200 bp haplotypes.
+            let from = (row as i64 - 1 + o - w).max(0);
+            let to = (row as i64 + o + w).min(width as i64 + 1);
+            if any && from <= to {
                 let lift = L::load(token, &lift);
+                let (from, to) = (from as usize * BATCH, (to as usize + 1) * BATCH);
                 for track in [&mut *buffer_m, &mut *buffer_i, &mut *buffer_d] {
-                    for chunk in track.as_chunks_mut::<LANE_MAX>().0 {
+                    let Some(live) = track.get_mut(from..to) else {
+                        return impossible;
+                    };
+                    for chunk in live.as_chunks_mut::<LANE_MAX>().0 {
                         (L::load(token, chunk) * lift).store(chunk);
                     }
                 }
