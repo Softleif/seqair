@@ -388,3 +388,43 @@ fn a_new_call_never_reuses_what_an_earlier_call_derived() {
         assert_eq!(bits(&out), want, "locus {seed}");
     }
 }
+
+/// A group's lanes read their rows and columns from the call's caches until
+/// its kernel has run, so a table one lane found in the cache must survive
+/// the misses of the lanes after it. Both caches evict first-in first-out:
+/// after sixteen reads (or sixty-four haplotypes) have filled one, a group
+/// whose first lane hits the oldest entry and whose other seven lanes miss
+/// evicts seven slots starting at that very one -- unless it is pinned.
+#[test]
+fn a_group_never_evicts_a_table_its_own_lanes_read() {
+    let Locus { haplotypes, reads, betas } = locus(24);
+    let taps = TapsEmission::new(ConversionModel::taps_default(), Betas::PerSite(&betas));
+    let mut workspace = Workspace::new();
+    let mut out = Vec::new();
+
+    // Rows: reads 0-15 fill the sixteen slots, then read 0 leads reads 16-22.
+    let order: Vec<usize> = (0..16).chain([0]).chain(16..23).collect();
+    let reference = haplotypes.first().expect("the locus has haplotypes");
+    let pairs: Vec<Pair<'_>> = order
+        .iter()
+        .map(|&index| {
+            let (read, band) = reads.get(index).expect("24 reads");
+            Pair::new(reference, read, *band)
+        })
+        .collect();
+    workspace.align_pairs(&pairs, &taps, &mut out);
+    assert_eq!(bits(&out), one_at_a_time(&pairs, &taps), "rows");
+
+    // Columns: sixty-four haplotypes fill the slots for one strand, then the
+    // first leads seven new ones.
+    let shifted: Vec<Haplotype> =
+        (0..71).map(|seed| Haplotype::new(sequence(220, 0x5851_f42d_4c95_7f2d ^ seed))).collect();
+    let (read, band) = reads.first().expect("24 reads");
+    let order: Vec<usize> = (0..64).chain([0]).chain(64..71).collect();
+    let pairs: Vec<Pair<'_>> = order
+        .iter()
+        .map(|&index| Pair::new(shifted.get(index).expect("71 haplotypes"), read, *band))
+        .collect();
+    workspace.align_pairs(&pairs, &taps, &mut out);
+    assert_eq!(bits(&out), one_at_a_time(&pairs, &taps), "columns");
+}

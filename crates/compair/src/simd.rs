@@ -23,11 +23,13 @@
 //! holds at all: every lane operation is the same IEEE operation on the same
 //! values in the same order, and there is no fused multiply-add on [`Lane`].
 
-use fearless_simd::{Level, Select, Simd, SimdBase, SimdFrom, dispatch, f32x8, mask32x8};
+use fearless_simd::{
+    Level, Select, Simd, SimdBase, SimdCombine, SimdFrom, dispatch, f32x4, f32x8, mask32x8,
+};
 use fearless_simd_macros::simd;
 
 use crate::{
-    banded::{Band, Lane, LaneMask, Plan, PlanView, Ring, Shape, Window, banded_kernel},
+    banded::{Band, LANE_MAX, Lane, LaneMask, Plan, PlanView, Ring, Shape, Window, banded_kernel},
     batch::{BATCH, BatchBuffer, BatchView, batch_kernel},
     pairs::{PAIRS, PairsBuffer, PairsPlan, pairs_kernel},
     strips::{RowBuffer, strip_kernel},
@@ -213,6 +215,58 @@ impl<S: Simd> Lane for f32x8<S> {
     fn horizontal_sum(self) -> f32 {
         self.reduce_sum()
     }
+
+    /// Four 4 x 4 transposes of the windows' halves, each two rounds of
+    /// `zip`s (`unpcklps`/`unpckhps` on x86, `zip1`/`zip2` on NEON), and the
+    /// halves of lanes 0-3 and 4-7 put side by side. `f32x8`'s own `zip`s
+    /// cross the 128-bit halves, which costs a `vperm2f128` per `zip` on
+    /// AVX2; the halves never need to.
+    #[inline(always)]
+    fn transpose(simd: S, entries: [&Window; LANE_MAX]) -> [Self; LANE_MAX] {
+        let [e0, e1, e2, e3, e4, e5, e6, e7] = entries;
+        let (l0, h0) = halves(simd, e0);
+        let (l1, h1) = halves(simd, e1);
+        let (l2, h2) = halves(simd, e2);
+        let (l3, h3) = halves(simd, e3);
+        let (l4, h4) = halves(simd, e4);
+        let (l5, h5) = halves(simd, e5);
+        let (l6, h6) = halves(simd, e6);
+        let (l7, h7) = halves(simd, e7);
+        let [a0, a1, a2, a3] = transpose4(l0, l1, l2, l3);
+        let [b0, b1, b2, b3] = transpose4(l4, l5, l6, l7);
+        let [c0, c1, c2, c3] = transpose4(h0, h1, h2, h3);
+        let [d0, d1, d2, d3] = transpose4(h4, h5, h6, h7);
+        [
+            a0.combine(b0),
+            a1.combine(b1),
+            a2.combine(b2),
+            a3.combine(b3),
+            c0.combine(d0),
+            c1.combine(d1),
+            c2.combine(d2),
+            c3.combine(d3),
+        ]
+    }
+}
+
+/// A window as its two `f32x4` halves.
+#[inline(always)]
+fn halves<S: Simd>(simd: S, window: &Window) -> (f32x4<S>, f32x4<S>) {
+    let [a, b, c, d, e, f, g, h] = *window;
+    (f32x4::load_array(simd, [a, b, c, d]), f32x4::load_array(simd, [e, f, g, h]))
+}
+
+/// `[a[t], b[t], c[t], d[t]]` for each `t`.
+#[inline(always)]
+fn transpose4<S: Simd>(a: f32x4<S>, b: f32x4<S>, c: f32x4<S>, d: f32x4<S>) -> [f32x4<S>; 4] {
+    let (ac_low, ac_high) = (a.zip_low(c), a.zip_high(c));
+    let (bd_low, bd_high) = (b.zip_low(d), b.zip_high(d));
+    [
+        ac_low.zip_low(bd_low),
+        ac_low.zip_high(bd_low),
+        ac_high.zip_low(bd_high),
+        ac_high.zip_high(bd_high),
+    ]
 }
 
 #[simd]
@@ -378,7 +432,35 @@ mod tests {
         (shifted, vector.last(), anded.map(f32::to_bits), sum)
     }
 
+    /// Eight windows through `transpose` on one level, as arrays.
+    #[inline(always)]
+    fn transposed<S: Simd>(simd: S, windows: &[[f32; 8]; 8]) -> [[f32; 8]; 8] {
+        let [w0, w1, w2, w3, w4, w5, w6, w7] = windows;
+        <f32x8<S> as Lane>::transpose(simd, [w0, w1, w2, w3, w4, w5, w6, w7]).map(Into::into)
+    }
+
     proptest! {
+        /// Lane `k` of `transpose`'s result `t` is window `k`'s element `t`,
+        /// bit for bit, at every level.
+        #[test]
+        fn transpose_moves_element_t_of_window_k_to_lane_k_of_vector_t(
+            windows in proptest::array::uniform8(proptest::array::uniform8(any::<u32>())),
+        ) {
+            let windows = windows.map(|window| window.map(f32::from_bits));
+            for level in levels() {
+                let got = dispatch!(level, simd => transposed(simd, &windows));
+                for (t, vector) in got.iter().enumerate() {
+                    for (k, lane) in vector.iter().enumerate() {
+                        let want = windows.get(k).and_then(|window| window.get(t));
+                        prop_assert_eq!(
+                            Some(lane.to_bits()), want.map(|value| value.to_bits()),
+                            "{:?}: vector {} lane {}", level, t, k
+                        );
+                    }
+                }
+            }
+        }
+
         /// The lane operations with no scalar counterpart in the kernels,
         /// against their definitions, at every level.
         #[test]

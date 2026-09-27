@@ -52,11 +52,18 @@
 //!   eight, which x86-64 has the registers for. With eight, the batch kernel's
 //!   loop reloads the spilled ones every step: this loop is 50 instructions a
 //!   step on AVX2 where the batch kernel's is 69.
-//! - **Derived once per call.** The rows depend only on the read and the
-//!   columns only on the haplotype and the strand, and `align_reads` puts
-//!   every read against every haplotype. So the plan derives each read's rows
-//!   and each haplotype's columns per strand once per call, keyed by address,
-//!   and copies them into every lane that holds them; see `Recent`.
+//! - **Derived once per call, gathered per group.** The rows depend only on
+//!   the read and the columns only on the haplotype and the strand, and
+//!   `align_reads` puts every read against every haplotype. So the plan
+//!   derives each read's rows and each haplotype's columns per strand once
+//!   per call, keyed by address (see `Recent`), as one window per row or
+//!   column. A group only names each lane's tables: the kernel gathers the
+//!   eight lanes' windows of a column or a row and transposes them into
+//!   vectors, [`Lane::transpose`], rather than the plan scattering them into
+//!   lane-interleaved tracks one `f32` at a time -- which was 17% of
+//!   `align_reads` on the 3950X. The columns are gathered once per group
+//!   into blocks, since every row of the band reads them; a row is
+//!   transposed where the kernel reaches it, and never stored.
 //!
 //! The arithmetic, the order of the operations, the flush to zero, the
 //! renormalisation cadence and the free start are the strip kernel's, cell for
@@ -157,30 +164,12 @@ fn pairs_kernel_simd(plan: &PairsPlan, buffer: &mut PairsBuffer) -> [Log10Likeli
 /// Rows between two renormalisations: the strip kernel's constant.
 const STRIP_ROWS: usize = LANE_MAX;
 
-/// One read row of every lane: each track's entry for lane `k` at index `k`.
-///
-/// The tracks of a row are one block rather than eight interleaved `Vec`s so
-/// that a row is one bounds check and one base pointer, in the fill and in
-/// the kernel alike. Row 0 is the free start and holds zeros, and so does
-/// every row past a lane's own read.
-#[derive(Debug, Default, Clone, Copy)]
-struct RowBlock {
-    base: Window,
-    /// `(1 - eps) - eps / 3`, as in `banded::RowTracks`.
-    spread: Window,
-    mismatched: Window,
-    match_to_match: Window,
-    match_to_insertion: Window,
-    match_to_deletion: Window,
-    indel_to_match: Window,
-    gap_continuation: Window,
-}
-
 /// One shifted column of every lane: lane `k`'s haplotype column `c -
-/// delta_k`, one-based, so `c = delta_k` is its free-start column. A block
-/// for the same reason as [`RowBlock`], and it matters more here: the column
-/// loop held eight track pointers, more than x86-64 has registers to spare,
-/// and reloaded the spilled ones every step.
+/// delta_k`, one-based, so `c = delta_k` is its free-start column. A block of
+/// lane-windows rather than five interleaved tracks so that the column loop
+/// holds one base pointer for them: with five, plus three for the cells, x86-64
+/// runs out of registers and the batch kernel's loop reloads the spilled ones
+/// every step.
 #[derive(Debug, Clone, Copy)]
 struct ColumnBlock {
     base: Window,
@@ -209,126 +198,77 @@ struct Cells {
     d: Window,
 }
 
-/// One read row of the three matrices; column `c` is `cells[c]`, and `c =
-/// width + 1` is the pad the last row's `up` reads.
+/// What one group's kernel writes: a read row of the three matrices, where
+/// column `c` is `cells[c]` and `c = width + 1` is the pad the last row's `up`
+/// reads, and the group's column blocks, gathered from its lanes' tables.
 #[derive(Debug, Default)]
 pub(crate) struct PairsBuffer {
     cells: Vec<Cells>,
+    /// Shifted column `c` is `columns[c - first]` for the `first` the kernel
+    /// gathered from; kept at its longest length, and only the gathered range
+    /// is read.
+    columns: Vec<ColumnBlock>,
 }
 
-/// One read row's entry in every track, for one lane: what a [`RowBlock`]
-/// holds at index `k`.
-#[derive(Debug, Default, Clone, Copy)]
-struct RowEntry {
-    base: f32,
-    spread: f32,
-    mismatched: f32,
-    match_to_match: f32,
-    match_to_insertion: f32,
-    match_to_deletion: f32,
-    indel_to_match: f32,
-    gap_continuation: f32,
+/// One read row's entry in every track, for one lane, in this order: the
+/// base's code, `(1 - eps) - eps / 3` as in `banded::RowTracks`, `eps / 3`,
+/// then the five transitions `match_to_match`, `match_to_insertion`,
+/// `match_to_deletion`, `indel_to_match` and `gap_continuation`. The kernel
+/// transposes eight lanes' entries into the eight tracks of a row.
+#[allow(clippy::cast_possible_truncation, reason = "the f32 narrowing is the point")]
+#[inline]
+fn row_entry<E: Emission>(read: &Read, emission: &E, index: usize) -> Option<Window> {
+    let observation = read.observation(index)?;
+    let eps = emission.epsilon(observation);
+    let t = read.transition(index)?;
+    Some([
+        code(observation.base),
+        ((1.0 - eps) - eps / 3.0) as f32,
+        (eps / 3.0) as f32,
+        t.match_to_match as f32,
+        t.match_to_insertion as f32,
+        t.match_to_deletion as f32,
+        t.indel_to_match as f32,
+        t.gap_continuation as f32,
+    ])
 }
 
-impl RowEntry {
-    /// Read base `index`'s row, exactly as `banded::Plan::fill` derives it.
-    #[allow(clippy::cast_possible_truncation, reason = "the f32 narrowing is the point")]
-    #[inline]
-    fn new<E: Emission>(read: &Read, emission: &E, index: usize) -> Option<Self> {
-        let observation = read.observation(index)?;
-        let eps = emission.epsilon(observation);
-        let t = read.transition(index)?;
-        Some(Self {
-            base: code(observation.base),
-            spread: ((1.0 - eps) - eps / 3.0) as f32,
-            mismatched: (eps / 3.0) as f32,
-            match_to_match: t.match_to_match as f32,
-            match_to_insertion: t.match_to_insertion as f32,
-            match_to_deletion: t.match_to_deletion as f32,
-            indel_to_match: t.indel_to_match as f32,
-            gap_continuation: t.gap_continuation as f32,
-        })
-    }
+/// A row past a lane's read, and every row of a lane with no pair: zeros,
+/// which compute to zero.
+const NO_ROW: Window = [0.0; LANE_MAX];
 
-    /// Into lane `lane` of `row`. Inlined, and the lane taken modulo
-    /// [`PAIRS`], so that the eight stores of a row carry no bounds checks:
-    /// out of line, with them, this was 8% of a batch-shaped group's cycles on
-    /// the 3950X.
-    #[inline(always)]
-    fn put(self, row: &mut RowBlock, lane: usize) -> Option<()> {
-        debug_assert!(lane < PAIRS);
-        let lane = lane % PAIRS;
-        *row.base.get_mut(lane)? = self.base;
-        *row.spread.get_mut(lane)? = self.spread;
-        *row.mismatched.get_mut(lane)? = self.mismatched;
-        *row.match_to_match.get_mut(lane)? = self.match_to_match;
-        *row.match_to_insertion.get_mut(lane)? = self.match_to_insertion;
-        *row.match_to_deletion.get_mut(lane)? = self.match_to_deletion;
-        *row.indel_to_match.get_mut(lane)? = self.indel_to_match;
-        *row.gap_continuation.get_mut(lane)? = self.gap_continuation;
-        Some(())
-    }
+/// One haplotype column's entry in every track, for one lane, in
+/// [`ColumnBlock`]'s order and padded to a window: base, converted, plain,
+/// rate, unconverted. The track a site does not use keeps the sentinel an
+/// unvisited column has.
+#[allow(clippy::cast_possible_truncation, reason = "the f32 narrowing is the point")]
+#[inline]
+fn column_entry<E: Emission>(
+    haplotype: &Haplotype,
+    emission: &E,
+    strand: Strand,
+    index: usize,
+) -> Option<Window> {
+    let weights = emission.site_weights(haplotype.site(index)?, strand);
+    let base = code(weights.base);
+    Some(match weights.converted {
+        Some(converted) => [
+            base,
+            code(converted),
+            CODE_NO_PLAIN_MATCH,
+            weights.rate as f32,
+            (1.0 - weights.rate) as f32,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        None => [base, CODE_NO_CONVERSION, base, 0.0, 0.0, 0.0, 0.0, 0.0],
+    })
 }
 
-/// One haplotype column's entry in every track, for one lane: what a
-/// [`ColumnBlock`] holds at index `k`.
-#[derive(Debug, Clone, Copy)]
-struct ColumnEntry {
-    base: f32,
-    converted: f32,
-    plain: f32,
-    rate: f32,
-    unconverted: f32,
-}
-
-impl ColumnEntry {
-    /// Haplotype site `index` as a read on `strand` sees it, exactly as
-    /// `banded::Plan::fill` derives it; the track a site does not use keeps
-    /// the sentinel an unvisited column has.
-    #[allow(clippy::cast_possible_truncation, reason = "the f32 narrowing is the point")]
-    #[inline]
-    fn new<E: Emission>(
-        haplotype: &Haplotype,
-        emission: &E,
-        strand: Strand,
-        index: usize,
-    ) -> Option<Self> {
-        let weights = emission.site_weights(haplotype.site(index)?, strand);
-        let base = code(weights.base);
-        Some(match weights.converted {
-            Some(converted) => Self {
-                base,
-                converted: code(converted),
-                plain: CODE_NO_PLAIN_MATCH,
-                rate: weights.rate as f32,
-                unconverted: (1.0 - weights.rate) as f32,
-            },
-            None => Self {
-                base,
-                converted: CODE_NO_CONVERSION,
-                plain: base,
-                rate: 0.0,
-                unconverted: 0.0,
-            },
-        })
-    }
-
-    /// Into lane `lane` of `column`. Inlined, and the lane taken modulo
-    /// [`PAIRS`], so that the eight stores of a row carry no bounds checks:
-    /// out of line, with them, this was 8% of a batch-shaped group's cycles on
-    /// the 3950X.
-    #[inline(always)]
-    fn put(self, column: &mut ColumnBlock, lane: usize) -> Option<()> {
-        debug_assert!(lane < PAIRS);
-        let lane = lane % PAIRS;
-        *column.base.get_mut(lane)? = self.base;
-        *column.converted.get_mut(lane)? = self.converted;
-        *column.plain.get_mut(lane)? = self.plain;
-        *column.rate.get_mut(lane)? = self.rate;
-        *column.unconverted.get_mut(lane)? = self.unconverted;
-        Some(())
-    }
-}
+/// A column outside a lane's table: [`ColumnBlock::UNVISITED`]'s lane.
+const NO_COLUMN: Window =
+    [CODE_NO_PLAIN_MATCH, CODE_NO_CONVERSION, CODE_NO_PLAIN_MATCH, 0.0, 0.0, 0.0, 0.0, 0.0];
 
 /// How many reads' rows a call keeps. `align_reads` packs a read's pairs
 /// next to each other, so a read is reused within a group or two of where it
@@ -341,6 +281,11 @@ const RECENT_READS: usize = 16;
 /// the 10s dataset's largest group, and derived every column twice.
 const RECENT_HAPLOTYPES: usize = 64;
 
+// A group pins one slot per lane, so every cache needs a slot to spare, and a
+// pin is a bit of a `u64`.
+const _: () = assert!(RECENT_READS > PAIRS && RECENT_HAPLOTYPES > PAIRS);
+const _: () = assert!(RECENT_READS <= 64 && RECENT_HAPLOTYPES <= 64);
+
 /// The tables a call has derived, keyed by the address of what they were
 /// derived from, so that a read scored against three haplotypes has its rows
 /// derived once rather than three times, and a haplotype its columns once per
@@ -351,17 +296,23 @@ const RECENT_HAPLOTYPES: usize = 64;
 /// the start of every call, and a key never outlives the borrow it came from.
 /// The emission is the call's too, and is not part of the key for the same
 /// reason.
+///
+/// A group's lanes refer to their tables by slot until its kernel has run, so
+/// a slot handed out since [`Recent::unpin`] is never evicted: a group of
+/// eight new reads would otherwise evict the table its first lane hit.
 #[derive(Debug)]
 struct Recent<K, T, const N: usize> {
     keys: Vec<Option<K>>,
     tables: Vec<Vec<T>>,
     /// The slot the next miss evicts, once every slot is in use.
     next: usize,
+    /// The slots the current group uses, as bits.
+    pinned: u64,
 }
 
 impl<K, T, const N: usize> Default for Recent<K, T, N> {
     fn default() -> Self {
-        Self { keys: Vec::new(), tables: Vec::new(), next: 0 }
+        Self { keys: Vec::new(), tables: Vec::new(), next: 0, pinned: 0 }
     }
 }
 
@@ -369,24 +320,37 @@ impl<K: Copy + PartialEq, T, const N: usize> Recent<K, T, N> {
     fn forget(&mut self) {
         self.keys.clear();
         self.next = 0;
+        self.pinned = 0;
     }
 
-    /// The table for `key`, derived by `derive` into a cleared table if this
-    /// call has not derived it yet. A table whose derivation fails is
+    /// A new group: the previous one's slots may be evicted again.
+    fn unpin(&mut self) {
+        self.pinned = 0;
+    }
+
+    /// The slot holding the table for `key`, derived by `derive` into a
+    /// cleared table if this call has not derived it yet, and pinned until
+    /// the next [`Recent::unpin`]. A table whose derivation fails is
     /// forgotten rather than kept half-filled.
     #[inline]
     fn get_or_derive(
         &mut self,
         key: K,
         derive: impl FnOnce(&mut Vec<T>) -> Option<()>,
-    ) -> Option<&[T]> {
+    ) -> Option<usize> {
         if let Some(slot) = self.keys.iter().position(|known| *known == Some(key)) {
-            return self.tables.get(slot).map(Vec::as_slice);
+            self.pinned |= 1 << slot;
+            return Some(slot);
         }
         let slot = if self.keys.len() < N {
             self.keys.push(None);
             self.keys.len() - 1
         } else {
+            // At most `PAIRS` slots are pinned and `N > PAIRS`, so this ends
+            // within `PAIRS + 1` steps.
+            while self.pinned & (1 << self.next) != 0 {
+                self.next = (self.next + 1) % N;
+            }
             let slot = self.next;
             self.next = (slot + 1) % N;
             slot
@@ -400,7 +364,13 @@ impl<K: Copy + PartialEq, T, const N: usize> Recent<K, T, N> {
         *known = None;
         derive(table)?;
         *known = Some(key);
-        Some(table)
+        self.pinned |= 1 << slot;
+        Some(slot)
+    }
+
+    /// The table in `slot`; empty for a slot never filled.
+    fn table(&self, slot: usize) -> &[T] {
+        self.tables.get(slot).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -409,11 +379,29 @@ impl<K: Copy + PartialEq, T, const N: usize> Recent<K, T, N> {
 /// lane's band span, a lane derives its own columns.
 const WHOLE_HAPLOTYPE_LIMIT: usize = 4;
 
-/// Everything one group hoists out of its loops.
+/// Where a lane's column entries come from.
+#[derive(Debug, Default, Clone, Copy)]
+enum ColumnTable {
+    /// A lane with no pair.
+    #[default]
+    None,
+    /// A haplotype's whole table, in [`PairsPlan::haplotype_columns`]'s slot.
+    Recent(usize),
+    /// Just the lane's band's columns, in its [`PairsPlan::own_columns`].
+    Own,
+}
+
+/// Everything one group hoists out of its loops. The rows and columns are
+/// not copied into the group: each lane names the tables it reads, and the
+/// kernel gathers eight lanes' entries at a time into vectors.
 #[derive(Debug, Default)]
 pub(crate) struct PairsPlan {
-    rows: Vec<RowBlock>,
-    columns: Vec<ColumnBlock>,
+    /// Each lane's rows, as a slot of `read_rows`; `None` for a lane that
+    /// cannot align.
+    rows_from: [Option<usize>; PAIRS],
+    /// Each lane's columns, and the shifted column of the table's first
+    /// entry.
+    columns_from: [(ColumnTable, usize); PAIRS],
     /// `1 / h` per lane, the read's free start; zero for a lane that cannot
     /// align, which then scores [`Log10Likelihood::IMPOSSIBLE`].
     init: Window,
@@ -432,9 +420,12 @@ pub(crate) struct PairsPlan {
     offset: i64,
     half_width: i64,
     /// Each read's rows, per call.
-    read_rows: Recent<usize, RowEntry, RECENT_READS>,
+    read_rows: Recent<usize, Window, RECENT_READS>,
     /// Each haplotype's columns, per strand, per call.
-    haplotype_columns: Recent<(usize, Strand), ColumnEntry, RECENT_HAPLOTYPES>,
+    haplotype_columns: Recent<(usize, Strand), Window, RECENT_HAPLOTYPES>,
+    /// The band's columns of a lane whose haplotype is too long to derive
+    /// whole; see [`WHOLE_HAPLOTYPE_LIMIT`].
+    own_columns: [Vec<Window>; PAIRS],
 }
 
 impl PairsPlan {
@@ -442,6 +433,25 @@ impl PairsPlan {
     fn forget(&mut self) {
         self.read_rows.forget();
         self.haplotype_columns.forget();
+    }
+
+    /// Lane `lane`'s row table: its read's rows `1..=r` at `0..r`.
+    fn rows(&self, lane: usize) -> &[Window] {
+        match self.rows_from.get(lane).copied().flatten() {
+            Some(slot) => self.read_rows.table(slot),
+            None => &[],
+        }
+    }
+
+    /// Lane `lane`'s column table and the shifted column of its first entry.
+    fn columns(&self, lane: usize) -> (&[Window], usize) {
+        match self.columns_from.get(lane).copied() {
+            Some((ColumnTable::Recent(slot), first)) => (self.haplotype_columns.table(slot), first),
+            Some((ColumnTable::Own, first)) => {
+                (self.own_columns.get(lane).map_or(&[], Vec::as_slice), first)
+            }
+            Some((ColumnTable::None, _)) | None => (&[], 0),
+        }
     }
 
     /// `None` if the lanes do not share a half-width, which the grouping rules
@@ -491,24 +501,25 @@ impl PairsPlan {
         }
 
         let Self {
-            rows,
-            columns,
+            rows_from,
+            columns_from,
             init,
             front,
             past_end,
             lengths,
             read_rows,
             haplotype_columns,
+            own_columns,
             ..
         } = self;
-        rows.clear();
-        rows.resize(rows_len + 1, RowBlock::default());
-        columns.clear();
-        columns.resize(width + 2, ColumnBlock::UNVISITED);
+        *rows_from = [None; PAIRS];
+        *columns_from = [(ColumnTable::None, 0); PAIRS];
         *init = [0.0; PAIRS];
         *front = [0.0; PAIRS];
         *past_end = [0.0; PAIRS];
         *lengths = [0; PAIRS];
+        read_rows.unpin();
+        haplotype_columns.unpin();
 
         for (lane, ((pair, &alive), &delta)) in group.iter().zip(&live).zip(&deltas).enumerate() {
             if !alive {
@@ -521,37 +532,39 @@ impl PairsPlan {
             *past_end.get_mut(lane)? = (delta + h + 1) as f32;
             *lengths.get_mut(lane)? = r;
 
-            let entries = read_rows.get_or_derive(core::ptr::from_ref(read).addr(), |table| {
-                for index in 0..r {
-                    table.push(RowEntry::new(read, emission, index)?);
-                }
-                Some(())
-            })?;
-            for (entry, row) in entries.iter().zip(rows.get_mut(1..=r)?) {
-                entry.put(row, lane)?;
-            }
+            *rows_from.get_mut(lane)? =
+                Some(read_rows.get_or_derive(core::ptr::from_ref(read).addr(), |table| {
+                    for index in 0..r {
+                        table.push(row_entry(read, emission, index)?);
+                    }
+                    Some(())
+                })?);
 
-            // Only the columns the lane's band can reach, as `BatchPlan::fill`
-            // does and for the same reason.
+            // A lane's haplotype column `j`, zero-based, is shifted column
+            // `j + 1 + delta`. A whole table serves every band; a band that
+            // reaches only a sliver of a long haplotype derives just that.
+            // The kernel reads a lane's columns past its band only on rows
+            // past its read, whose zero rows compute zero from any finite
+            // entry, so the two cannot score differently.
             let strand = read.strand();
             let (lo, hi) = pair.band.columns(h, r)?;
-            let blocks = columns.get_mut(lo + 1 + delta..=hi + 1 + delta)?;
-            if h > WHOLE_HAPLOTYPE_LIMIT * (hi - lo + 1) {
-                for (index, column) in (lo..=hi).zip(blocks) {
-                    ColumnEntry::new(haplotype, emission, strand, index)?.put(column, lane)?;
+            *columns_from.get_mut(lane)? = if h > WHOLE_HAPLOTYPE_LIMIT * (hi - lo + 1) {
+                let own = own_columns.get_mut(lane)?;
+                own.clear();
+                for index in lo..=hi {
+                    own.push(column_entry(haplotype, emission, strand, index)?);
                 }
+                (ColumnTable::Own, lo + 1 + delta)
             } else {
                 let key = (core::ptr::from_ref(haplotype).addr(), strand);
-                let entries = haplotype_columns.get_or_derive(key, |table| {
+                let slot = haplotype_columns.get_or_derive(key, |table| {
                     for index in 0..h {
-                        table.push(ColumnEntry::new(haplotype, emission, strand, index)?);
+                        table.push(column_entry(haplotype, emission, strand, index)?);
                     }
                     Some(())
                 })?;
-                for (entry, column) in entries.get(lo..=hi)?.iter().zip(blocks) {
-                    entry.put(column, lane)?;
-                }
-            }
+                (ColumnTable::Recent(slot), 1 + delta)
+            };
         }
 
         // A group with no live lane has no rows, and its offset is never read.
@@ -772,14 +785,54 @@ pub(crate) fn pairs_kernel<L: Lane>(
     if width == 0 || read_len == 0 {
         return impossible;
     }
+    let (o, w) = (plan.offset, plan.half_width);
     let span = width + 2;
-    buffer.cells.clear();
-    buffer.cells.resize(span, Cells::default());
+    let PairsBuffer { cells, columns } = buffer;
+    cells.clear();
+    cells.resize(span, Cells::default());
+
+    // Each lane's tables, looked up once.
+    let mut row_tables: [&[Window]; PAIRS] = [&[]; PAIRS];
+    let mut column_tables: [(&[Window], usize); PAIRS] = [(&[], 0); PAIRS];
+    for (lane, (rows, columns)) in row_tables.iter_mut().zip(&mut column_tables).enumerate() {
+        *rows = plan.rows(lane);
+        *columns = plan.columns(lane);
+    }
+
+    // The columns any row's band reaches, `first..=last` over rows
+    // `1..=read_len`, gathered eight lanes at a time: lane `k`'s entry for
+    // shifted column `c` is its table's `c - first_k`, or the unvisited
+    // sentinel outside it.
+    let gathered_from = (1 + o - w).max(1);
+    let gathered_to = (read_len as i64 + o + w).min(width as i64);
+    let (gathered_from, gathered) = if gathered_from <= gathered_to {
+        (gathered_from as usize, (gathered_to - gathered_from + 1) as usize)
+    } else {
+        (1, 0)
+    };
+    if columns.len() < gathered {
+        columns.resize(gathered, ColumnBlock::UNVISITED);
+    }
+    let Some(gathered_columns) = columns.get_mut(..gathered) else {
+        return impossible;
+    };
+    for (column, block) in (gathered_from..).zip(gathered_columns.iter_mut()) {
+        let mut entries = [&NO_COLUMN; PAIRS];
+        for (entry, &(table, first)) in entries.iter_mut().zip(&column_tables) {
+            if let Some(found) = table.get(column.wrapping_sub(first)) {
+                *entry = found;
+            }
+        }
+        let [base, converted, plain, rate, unconverted, ..] = L::transpose(token, entries);
+        base.store(&mut block.base);
+        converted.store(&mut block.converted);
+        plain.store(&mut block.plain);
+        rate.store(&mut block.rate);
+        unconverted.store(&mut block.unconverted);
+    }
 
     // Slices cut to one length, not the `Vec`s: see `batch_kernel`.
-    let (Some(cells), Some(columns), Some(rows)) =
-        (buffer.cells.get_mut(..span), plan.columns.get(..span), plan.rows.get(..=read_len))
-    else {
+    let (Some(cells), Some(columns)) = (cells.get_mut(..span), columns.get(..gathered)) else {
         return impossible;
     };
 
@@ -787,7 +840,6 @@ pub(crate) fn pairs_kernel<L: Lane>(
     let one = L::splat(token, 1.0);
     let past_end = L::load(token, &plan.past_end);
     let init = L::load(token, &plan.init);
-    let (o, w) = (plan.offset, plan.half_width);
 
     // Row 0, the free start: `1 / h_k` in the deletion matrix at every column
     // of the band that lane `k`'s haplotype reaches, which starts at its own
@@ -810,7 +862,7 @@ pub(crate) fn pairs_kernel<L: Lane>(
     let mut scratch = [0.0f32; LANE_MAX];
     let lanes = L::LANES.min(PAIRS);
 
-    for (row, tracks) in rows.iter().enumerate().skip(1) {
+    for row in 1..=read_len {
         let first = (row as i64 + o - w).max(1);
         let last = (row as i64 + o + w).min(width as i64);
         if (row - 1) % STRIP_ROWS == 0 {
@@ -852,17 +904,30 @@ pub(crate) fn pairs_kernel<L: Lane>(
             }
         }
 
-        let lanes_row = RowLanes::new(
-            L::load(token, &tracks.base),
-            L::load(token, &tracks.spread),
-            L::load(token, &tracks.mismatched),
-        );
+        // Lane `k`'s row is its table's `row - 1`, or zeros past its read.
+        let mut entries = [&NO_ROW; PAIRS];
+        for (entry, table) in entries.iter_mut().zip(&row_tables) {
+            if let Some(found) = table.get(row - 1) {
+                *entry = found;
+            }
+        }
+        let [
+            base,
+            spread,
+            mismatched,
+            match_to_match,
+            match_to_insertion,
+            match_to_deletion,
+            indel_to_match,
+            gap_continuation,
+        ] = L::transpose(token, entries);
+        let lanes_row = RowLanes::new(base, spread, mismatched);
         let t = TransitionLanes {
-            match_to_match: L::load(token, &tracks.match_to_match),
-            match_to_insertion: L::load(token, &tracks.match_to_insertion),
-            match_to_deletion: L::load(token, &tracks.match_to_deletion),
-            indel_to_match: L::load(token, &tracks.indel_to_match),
-            gap_continuation: L::load(token, &tracks.gap_continuation),
+            match_to_match,
+            match_to_insertion,
+            match_to_deletion,
+            indel_to_match,
+            gap_continuation,
         };
 
         // The lanes whose read ends on this row, as a mask, built from the
@@ -881,9 +946,11 @@ pub(crate) fn pairs_kernel<L: Lane>(
         let mut running = zero;
         if first <= last {
             let (first, last) = (first as usize, last as usize);
-            let (Some(before), Some(band), Some(band_columns)) =
-                (cells.get(first - 1), cells.get(first..=last), columns.get(first..=last))
-            else {
+            let (Some(before), Some(band), Some(band_columns)) = (
+                cells.get(first - 1),
+                cells.get(first..=last),
+                columns.get(first - gathered_from..=last - gathered_from),
+            ) else {
                 return impossible;
             };
             debug_assert_eq!(band.len(), band_columns.len());

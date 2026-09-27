@@ -197,6 +197,17 @@ pub(crate) trait Lane:
     /// The sum of the lanes. Only ever called with at most one non-zero lane,
     /// so the order of the additions is not observable.
     fn horizontal_sum(self) -> f32;
+    /// Eight windows, one per lane, as eight lanes, one per element: lane
+    /// `k` of result `t` is `entries[k][t]`. A lane narrower than eight reads
+    /// the first [`Lane::LANES`] entries. Only data moves, so it is exact at
+    /// every level.
+    ///
+    /// It is how a kernel whose lanes hold unrelated alignments builds a
+    /// vector from eight per-alignment tables: each table keeps one entry per
+    /// row or column as a window, and one transpose replaces the eight
+    /// scalar stores per entry that scattering the tables into
+    /// lane-interleaved tracks took.
+    fn transpose(token: Self::Token, entries: [&Window; LANE_MAX]) -> [Self; LANE_MAX];
 }
 
 /// A lanewise comparison's result, combined without looking at it.
@@ -283,6 +294,11 @@ impl Lane for f32 {
     #[inline]
     fn horizontal_sum(self) -> f32 {
         self
+    }
+    #[inline]
+    fn transpose((): (), entries: [&Window; LANE_MAX]) -> [Self; LANE_MAX] {
+        let [first, ..] = entries;
+        *first
     }
 }
 
