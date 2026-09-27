@@ -450,6 +450,136 @@ fn flush<L: Lane>(value: L) -> L {
     L::masked_out(value.below(L::splat(value.token(), f32::MIN_POSITIVE)), value)
 }
 
+/// What a row's column steps read and write: the row buffer, the plan's
+/// column tracks, and the row's own lanes. Slices, all cut to one length,
+/// for the reason `batch_kernel` gives.
+struct Row<'a, L: Lane> {
+    token: L::Token,
+    m: &'a mut [f32],
+    i: &'a mut [f32],
+    d: &'a mut [f32],
+    base: &'a [f32],
+    converted: &'a [f32],
+    plain: &'a [f32],
+    rate: &'a [f32],
+    unconverted: &'a [f32],
+    lanes: RowLanes<L>,
+    t: TransitionLanes<L>,
+    past_end: L,
+}
+
+/// What a row's column steps carry from one to the next, and accumulate.
+struct Sweep<L> {
+    carry: Carry<L>,
+    running: L,
+    total: L,
+}
+
+/// The columns `from..=to` of one row; empty when `from > to`. `None` if a
+/// column is out of the plan's bounds, which `BatchPlan::fill` rules out.
+///
+/// `MASKED` zeroes the lanes whose haplotype ended before the column, which
+/// only the columns past the batch's shortest haplotype need, and `SUMMING`
+/// adds the cells into the total, which only the read's last row does. Both
+/// are constants so that each of the four loops pays only for what its
+/// columns need: the mask is a compare, an add and two `and`s per step, and a
+/// runtime `summing` was a compare and a branch per step on x86 and, on NEON,
+/// a select and a round trip of the total through the stack.
+#[inline(always)]
+#[allow(clippy::cast_precision_loss, reason = "a column is a few hundred")]
+fn steps<L: Lane, const MASKED: bool, const SUMMING: bool>(
+    row: &mut Row<'_, L>,
+    sweep: &mut Sweep<L>,
+    from: usize,
+    to: usize,
+) -> Option<()> {
+    let token = row.token;
+    let t = row.t;
+    // The column index as a lane, carried and incremented rather than
+    // converted per step. `column as f32` is a `vcvtsi2ss` -- two uops, a
+    // false dependency on the destination register and ~5 cycles -- plus a
+    // broadcast; one `vaddps` replaces both, and integers this small are
+    // exact in `f32`, so the value is the same bit for bit.
+    let one = L::splat(token, 1.0);
+    let mut column_lane = L::splat(token, from as f32);
+
+    for column in from..=to {
+        let at = column * BATCH;
+        let end = at + LANE_MAX;
+        let (Some(up_m), Some(up_i), Some(up_d)) = (
+            row.m.get(at..end).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+            row.i.get(at..end).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+            row.d.get(at..end).and_then(<[f32]>::first_chunk::<LANE_MAX>),
+        ) else {
+            return None;
+        };
+        let (up_m, up_i, up_d) = (L::load(token, up_m), L::load(token, up_i), L::load(token, up_d));
+
+        let (Some(base), Some(converted), Some(plain), Some(rate), Some(unconverted)) = (
+            row.base.get(at..end).and_then(<[f32]>::first_chunk),
+            row.converted.get(at..end).and_then(<[f32]>::first_chunk),
+            row.plain.get(at..end).and_then(<[f32]>::first_chunk),
+            row.rate.get(at..end).and_then(<[f32]>::first_chunk),
+            row.unconverted.get(at..end).and_then(<[f32]>::first_chunk),
+        ) else {
+            return None;
+        };
+        let prior_v = prior::<L>(
+            ColumnLanes {
+                base: L::load(token, base),
+                converted: L::load(token, converted),
+                plain: L::load(token, plain),
+                rate: L::load(token, rate),
+                unconverted_rate: L::load(token, unconverted),
+            },
+            row.lanes,
+        );
+
+        let carry = &mut sweep.carry;
+        let m = prior_v * (carry.diag_m * t.match_to_match + carry.diag_indel * t.indel_to_match);
+        let i = up_m * t.match_to_insertion + up_i * t.gap_continuation;
+        let d = carry.left_m * t.match_to_deletion + carry.left_d * t.gap_continuation;
+        let (m, i, d) = (flush(m), flush(i), flush(d));
+        // `i` needs no mask: past a lane's haplotype its `m` is masked to
+        // zero at every row, and `i` reads only the cell above --
+        // `up_m * match_to_insertion + up_i * gap_continuation` -- so a dead
+        // lane's `i` starts at zero and stays there. `d` does need one: it
+        // reads the cell to its *left*, which at the column just past the
+        // haplotype is still live.
+        let (m, d) = if MASKED {
+            let keep = column_lane.below(row.past_end);
+            column_lane = column_lane + one;
+            (L::masked(keep, m), L::masked(keep, d))
+        } else {
+            (m, d)
+        };
+
+        let (Some(mm), Some(ii), Some(dd)) = (
+            row.m.get_mut(at..end).and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
+            row.i.get_mut(at..end).and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
+            row.d.get_mut(at..end).and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
+        ) else {
+            return None;
+        };
+        m.store(mm);
+        i.store(ii);
+        d.store(dd);
+
+        sweep.running = sweep.running.vmax(m).vmax(i).vmax(d);
+        if SUMMING {
+            // `(m + i)` and not `total + m + i`: the strip kernel adds the
+            // pair before the accumulator, and `f32` addition is not
+            // associative, so the parentheses are the parity.
+            sweep.total = sweep.total + (m + i);
+        }
+        carry.left_m = m;
+        carry.left_d = d;
+        carry.diag_m = up_m;
+        carry.diag_indel = up_i + up_d;
+    }
+    Some(())
+}
+
 /// One row at a time along the haplotype, every lane a different haplotype.
 #[allow(
     clippy::too_many_lines,
@@ -544,6 +674,17 @@ pub(crate) fn batch_kernel<L: Lane>(
         cell.store(slot);
         crossing = crossing.vmax(cell);
     }
+
+    // The last column at which every lane with a haplotype is still live.
+    // A lane without one needs no mask: its plan is sentinels and zero rates
+    // and its free start is zero, so every one of its cells is a product with
+    // a zero, a zero whether masked or not.
+    let shortest = plan
+        .past_end
+        .iter()
+        .filter(|&&past| past > 0.0)
+        .fold(f32::INFINITY, |shortest, &past| shortest.min(past - 1.0));
+    let shortest = if shortest.is_finite() { shortest as usize } else { width };
 
     let mut exponent = [0i32; BATCH];
     let mut total = zero;
@@ -644,90 +785,37 @@ pub(crate) fn batch_kernel<L: Lane>(
             carry.diag_m = L::load(token, m);
             carry.diag_indel = L::load(token, i) + L::load(token, d);
 
-            // The column index as a lane, carried and incremented rather than
-            // converted per step. `column as f32` is a `vcvtsi2ss` -- two uops,
-            // a false dependency on the destination register and ~5 cycles --
-            // plus a broadcast; one `vaddps` replaces both, and integers this
-            // small are exact in `f32`, so the value is the same bit for bit.
-            let one = L::splat(token, 1.0);
-            let mut column_lane = L::splat(token, first as f32);
-
-            for column in first..=last {
-                let at = column * BATCH;
-                let (Some(up_m), Some(up_i), Some(up_d)) = (
-                    buffer_m.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
-                    buffer_i.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
-                    buffer_d.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk::<LANE_MAX>),
-                ) else {
-                    return impossible;
-                };
-                let (up_m, up_i, up_d) =
-                    (L::load(token, up_m), L::load(token, up_i), L::load(token, up_d));
-
-                let (Some(base), Some(converted), Some(plain), Some(rate), Some(unconverted)) = (
-                    column_base.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
-                    column_converted.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
-                    column_plain.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
-                    column_rate.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
-                    column_unconverted.get(at..at + LANE_MAX).and_then(<[f32]>::first_chunk),
-                ) else {
-                    return impossible;
-                };
-                let prior_v = prior::<L>(
-                    ColumnLanes {
-                        base: L::load(token, base),
-                        converted: L::load(token, converted),
-                        plain: L::load(token, plain),
-                        rate: L::load(token, rate),
-                        unconverted_rate: L::load(token, unconverted),
-                    },
-                    lanes,
-                );
-
-                let m = prior_v
-                    * (carry.diag_m * t.match_to_match + carry.diag_indel * t.indel_to_match);
-                let i = up_m * t.match_to_insertion + up_i * t.gap_continuation;
-                let d = carry.left_m * t.match_to_deletion + carry.left_d * t.gap_continuation;
-                let (m, i, d) = (flush(m), flush(i), flush(d));
-                let keep = column_lane.below(past_end);
-                column_lane = column_lane + one;
-                // `i` needs no mask: past a lane's haplotype its `m` is masked
-                // to zero at every row, and `i` reads only the cell above --
-                // `up_m * match_to_insertion + up_i * gap_continuation` -- so a
-                // dead lane's `i` starts at zero and stays there. `d` does need
-                // one: it reads the cell to its *left*, which at the column
-                // just past the haplotype is still live.
-                let (m, d) = (L::masked(keep, m), L::masked(keep, d));
-
-                let (Some(mm), Some(ii), Some(dd)) = (
-                    buffer_m
-                        .get_mut(at..at + LANE_MAX)
-                        .and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
-                    buffer_i
-                        .get_mut(at..at + LANE_MAX)
-                        .and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
-                    buffer_d
-                        .get_mut(at..at + LANE_MAX)
-                        .and_then(<[f32]>::first_chunk_mut::<LANE_MAX>),
-                ) else {
-                    return impossible;
-                };
-                m.store(mm);
-                i.store(ii);
-                d.store(dd);
-
-                running = running.vmax(m).vmax(i).vmax(d);
-                if summing {
-                    // `(m + i)` and not `total + m + i`: the strip kernel adds
-                    // the pair before the accumulator, and `f32` addition is
-                    // not associative, so the parentheses are the parity.
-                    total = total + (m + i);
-                }
-                carry.left_m = m;
-                carry.left_d = d;
-                carry.diag_m = up_m;
-                carry.diag_indel = up_i + up_d;
+            let mut sweep = Sweep { carry, running: zero, total };
+            let mut cells = Row {
+                token,
+                m: &mut *buffer_m,
+                i: &mut *buffer_i,
+                d: &mut *buffer_d,
+                base: column_base,
+                converted: column_converted,
+                plain: column_plain,
+                rate: column_rate,
+                unconverted: column_unconverted,
+                lanes,
+                t,
+                past_end,
+            };
+            // Every lane is live up to the shortest haplotype, and the rest
+            // of the row is masked; either part may be empty.
+            let alive = last.min(shortest);
+            let masked_from = first.max(alive + 1);
+            let ran = if summing {
+                steps::<L, false, true>(&mut cells, &mut sweep, first, alive).is_some()
+                    && steps::<L, true, true>(&mut cells, &mut sweep, masked_from, last).is_some()
+            } else {
+                steps::<L, false, false>(&mut cells, &mut sweep, first, alive).is_some()
+                    && steps::<L, true, false>(&mut cells, &mut sweep, masked_from, last).is_some()
+            };
+            if !ran {
+                return impossible;
             }
+            running = sweep.running;
+            total = sweep.total;
 
             // The two cells the next row reads that this one did not write:
             // its own `first - 1`, where the band was clamped at column 1, and
