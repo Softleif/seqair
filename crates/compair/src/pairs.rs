@@ -43,15 +43,12 @@
 //! computes to exactly zero on every row without a mask, by induction along
 //! the row and down the column.
 //!
-//! Two things differ from the batch kernel that are not about lanes:
+//! Two more things, neither of them about lanes:
 //!
-//! - **Blocks, not tracks.** A row's eight tracks, a column's five and a
-//!   cell's three matrices are each one block of lane-windows rather than one
-//!   interleaved `Vec` per track. The kernel reads the same vectors either way;
-//!   what changes is that the column loop holds two base pointers instead of
-//!   eight, which x86-64 has the registers for. With eight, the batch kernel's
-//!   loop reloads the spilled ones every step: this loop is 50 instructions a
-//!   step on AVX2 where the batch kernel's is 69.
+//! - **Blocks, not tracks.** A column's five tracks and a cell's three
+//!   matrices are each one block of lane-windows, so the column loop holds
+//!   two base pointers; the row sweep that reads them is `lanes`, which the
+//!   batch kernel runs too.
 //! - **Derived once per call, gathered per group.** The rows depend only on
 //!   the read and the columns only on the haplotype and the strand, and
 //!   `align_reads` puts every read against every haplotype. So the plan
@@ -82,13 +79,12 @@ use fearless_simd::Level;
 use crate::{
     Strand,
     banded::{
-        Band, CODE_NO_CONVERSION, CODE_NO_PLAIN_MATCH, ColumnLanes, LANE_MAX, Lane, RowLanes,
-        TransitionLanes, Window, Workspace, code, prior,
+        Band, CODE_NO_CONVERSION, CODE_NO_PLAIN_MATCH, LANE_MAX, Lane, Window, Workspace, code,
     },
     emission::Emission,
     haplotype::Haplotype,
+    lanes::{Cells, ColumnBlock, LaneRows, LanesView, RowEntry, lanes_kernel},
     read::Read,
-    scaling::{exp2_f32, normalising_shift_f32},
     types::Log10Likelihood,
 };
 
@@ -161,43 +157,6 @@ fn pairs_kernel_simd(plan: &PairsPlan, buffer: &mut PairsBuffer) -> [Log10Likeli
     crate::simd::pairs_kernel_at(Level::new(), plan, buffer)
 }
 
-/// Rows between two renormalisations: the strip kernel's constant.
-const STRIP_ROWS: usize = LANE_MAX;
-
-/// One shifted column of every lane: lane `k`'s haplotype column `c -
-/// delta_k`, one-based, so `c = delta_k` is its free-start column. A block of
-/// lane-windows rather than five interleaved tracks so that the column loop
-/// holds one base pointer for them: with five, plus three for the cells, x86-64
-/// runs out of registers and the batch kernel's loop reloads the spilled ones
-/// every step.
-#[derive(Debug, Clone, Copy)]
-struct ColumnBlock {
-    base: Window,
-    converted: Window,
-    plain: Window,
-    rate: Window,
-    unconverted: Window,
-}
-
-impl ColumnBlock {
-    /// What a column no lane's band reaches holds: never read, but finite.
-    const UNVISITED: Self = Self {
-        base: [CODE_NO_PLAIN_MATCH; PAIRS],
-        converted: [CODE_NO_CONVERSION; PAIRS],
-        plain: [CODE_NO_PLAIN_MATCH; PAIRS],
-        rate: [0.0; PAIRS],
-        unconverted: [0.0; PAIRS],
-    };
-}
-
-/// The three matrices at one shifted column of one read row, every lane.
-#[derive(Debug, Default, Clone, Copy)]
-struct Cells {
-    m: Window,
-    i: Window,
-    d: Window,
-}
-
 /// What one group's kernel writes: a read row of the three matrices, where
 /// column `c` is `cells[c]` and `c = width + 1` is the pad the last row's `up`
 /// reads, and the group's column blocks, gathered from its lanes' tables.
@@ -210,14 +169,11 @@ pub(crate) struct PairsBuffer {
     columns: Vec<ColumnBlock>,
 }
 
-/// One read row's entry in every track, for one lane, in this order: the
-/// base's code, `(1 - eps) - eps / 3` as in `banded::RowTracks`, `eps / 3`,
-/// then the five transitions `match_to_match`, `match_to_insertion`,
-/// `match_to_deletion`, `indel_to_match` and `gap_continuation`. The kernel
-/// transposes eight lanes' entries into the eight tracks of a row.
+/// Read base `index`'s row, as `banded::RowTracks::fill` derives it, in
+/// [`RowEntry`]'s order.
 #[allow(clippy::cast_possible_truncation, reason = "the f32 narrowing is the point")]
 #[inline]
-fn row_entry<E: Emission>(read: &Read, emission: &E, index: usize) -> Option<Window> {
+fn row_entry<E: Emission>(read: &Read, emission: &E, index: usize) -> Option<RowEntry> {
     let observation = read.observation(index)?;
     let eps = emission.epsilon(observation);
     let t = read.transition(index)?;
@@ -232,10 +188,6 @@ fn row_entry<E: Emission>(read: &Read, emission: &E, index: usize) -> Option<Win
         t.gap_continuation as f32,
     ])
 }
-
-/// A row past a lane's read, and every row of a lane with no pair: zeros,
-/// which compute to zero.
-const NO_ROW: Window = [0.0; LANE_MAX];
 
 /// One haplotype column's entry in every track, for one lane, in
 /// [`ColumnBlock`]'s order and padded to a window: base, converted, plain,
@@ -748,31 +700,12 @@ pub fn align_reads<E: Emission>(
     out
 }
 
-/// The previous column's cells and the diagonal carried across a column step.
-struct Carry<L> {
-    left_m: L,
-    left_d: L,
-    diag_m: L,
-    diag_indel: L,
-}
-
-/// Subnormals to zero, as in the strip kernel and for the same reason.
-#[inline(always)]
-fn flush<L: Lane>(value: L) -> L {
-    L::masked_out(value.below(L::splat(value.token(), f32::MIN_POSITIVE)), value)
-}
-
-/// One row at a time along the shifted columns, every lane a different pair.
-#[allow(
-    clippy::too_many_lines,
-    reason = "one traversal, and splitting it would hide the band algebra it exists to get right"
-)]
+/// Gathers the group's column blocks from its lanes' tables, then sweeps it.
 #[allow(
     clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
-    reason = "the f32 narrowing is the point of this kernel, and every count here is a few hundred"
+    reason = "every count here is a few hundred"
 )]
 #[inline(always)]
 pub(crate) fn pairs_kernel<L: Lane>(
@@ -786,13 +719,10 @@ pub(crate) fn pairs_kernel<L: Lane>(
         return impossible;
     }
     let (o, w) = (plan.offset, plan.half_width);
-    let span = width + 2;
     let PairsBuffer { cells, columns } = buffer;
-    cells.clear();
-    cells.resize(span, Cells::default());
 
     // Each lane's tables, looked up once.
-    let mut row_tables: [&[Window]; PAIRS] = [&[]; PAIRS];
+    let mut row_tables: [&[RowEntry]; PAIRS] = [&[]; PAIRS];
     let mut column_tables: [(&[Window], usize); PAIRS] = [(&[], 0); PAIRS];
     for (lane, (rows, columns)) in row_tables.iter_mut().zip(&mut column_tables).enumerate() {
         *rows = plan.rows(lane);
@@ -805,7 +735,7 @@ pub(crate) fn pairs_kernel<L: Lane>(
     // sentinel outside it.
     let gathered_from = (1 + o - w).max(1);
     let gathered_to = (read_len as i64 + o + w).min(width as i64);
-    let (gathered_from, gathered) = if gathered_from <= gathered_to {
+    let (origin, gathered) = if gathered_from <= gathered_to {
         (gathered_from as usize, (gathered_to - gathered_from + 1) as usize)
     } else {
         (1, 0)
@@ -813,10 +743,10 @@ pub(crate) fn pairs_kernel<L: Lane>(
     if columns.len() < gathered {
         columns.resize(gathered, ColumnBlock::UNVISITED);
     }
-    let Some(gathered_columns) = columns.get_mut(..gathered) else {
+    let Some(columns) = columns.get_mut(..gathered) else {
         return impossible;
     };
-    for (column, block) in (gathered_from..).zip(gathered_columns.iter_mut()) {
+    for (column, block) in (origin..).zip(columns.iter_mut()) {
         let mut entries = [&NO_COLUMN; PAIRS];
         for (entry, &(table, first)) in entries.iter_mut().zip(&column_tables) {
             if let Some(found) = table.get(column.wrapping_sub(first)) {
@@ -831,212 +761,17 @@ pub(crate) fn pairs_kernel<L: Lane>(
         unconverted.store(&mut block.unconverted);
     }
 
-    // Slices cut to one length, not the `Vec`s: see `batch_kernel`.
-    let (Some(cells), Some(columns)) = (cells.get_mut(..span), columns.get(..gathered)) else {
-        return impossible;
+    let view = LanesView {
+        columns,
+        origin,
+        init: &plan.init,
+        front: &plan.front,
+        past_end: &plan.past_end,
+        lengths: &plan.lengths,
+        rows_len: read_len,
+        width,
+        offset: o,
+        half_width: w,
     };
-
-    let zero = L::splat(token, 0.0);
-    let one = L::splat(token, 1.0);
-    let past_end = L::load(token, &plan.past_end);
-    let init = L::load(token, &plan.init);
-
-    // Row 0, the free start: `1 / h_k` in the deletion matrix at every column
-    // of the band that lane `k`'s haplotype reaches, which starts at its own
-    // column 0, `delta_k`. Left of that, row 0 has to be zero: see the module
-    // docs for why that alone keeps every row clear there.
-    let front = L::load(token, &plan.front);
-    let mut crossing = zero;
-    for (column, slot) in cells.iter_mut().enumerate().take(width + 1) {
-        if (column as i64 - o).abs() > w {
-            continue;
-        }
-        let at = L::splat(token, column as f32);
-        let cell = L::masked_out(at.below(front), L::masked(at.below(past_end), init));
-        cell.store(&mut slot.d);
-        crossing = crossing.vmax(cell);
-    }
-
-    let mut exponent = [0i32; PAIRS];
-    let mut total = zero;
-    let mut scratch = [0.0f32; LANE_MAX];
-    let lanes = L::LANES.min(PAIRS);
-
-    for row in 1..=read_len {
-        let first = (row as i64 + o - w).max(1);
-        let last = (row as i64 + o + w).min(width as i64);
-        if (row - 1) % STRIP_ROWS == 0 {
-            crossing.store(&mut scratch);
-            let mut lift = [1.0f32; LANE_MAX];
-            let mut any = false;
-            for lane in 0..lanes {
-                // Only while the lane is still inside its read: the strip
-                // kernel never renormalises below the last row, and the total
-                // taken there is on the scale of the exponent at that row.
-                let inside = plan.lengths.get(lane).is_some_and(|&r| row <= r);
-                let shift = if inside {
-                    scratch.get(lane).copied().map_or(0, normalising_shift_f32)
-                } else {
-                    0
-                };
-                any |= shift != 0;
-                if let (Some(slot), Some(sum)) = (lift.get_mut(lane), exponent.get_mut(lane)) {
-                    *slot = exp2_f32(shift);
-                    *sum += shift;
-                }
-            }
-            // Only the cells this row reads, `first - 1..=last`: left of them
-            // nothing is read again, since the band only moves right, and
-            // right of them every cell is still zero. Lifting the whole row
-            // was ~9% of the batch kernel's cycles on the 3950X.
-            let live = if first <= last {
-                cells.get_mut(first as usize - 1..=last as usize)
-            } else {
-                None
-            };
-            if any && let Some(live) = live {
-                let lift = L::load(token, &lift);
-                for cell in live {
-                    (L::load(token, &cell.m) * lift).store(&mut cell.m);
-                    (L::load(token, &cell.i) * lift).store(&mut cell.i);
-                    (L::load(token, &cell.d) * lift).store(&mut cell.d);
-                }
-            }
-        }
-
-        // Lane `k`'s row is its table's `row - 1`, or zeros past its read.
-        let mut entries = [&NO_ROW; PAIRS];
-        for (entry, table) in entries.iter_mut().zip(&row_tables) {
-            if let Some(found) = table.get(row - 1) {
-                *entry = found;
-            }
-        }
-        let [
-            base,
-            spread,
-            mismatched,
-            match_to_match,
-            match_to_insertion,
-            match_to_deletion,
-            indel_to_match,
-            gap_continuation,
-        ] = L::transpose(token, entries);
-        let lanes_row = RowLanes::new(base, spread, mismatched);
-        let t = TransitionLanes {
-            match_to_match,
-            match_to_insertion,
-            match_to_deletion,
-            indel_to_match,
-            gap_continuation,
-        };
-
-        // The lanes whose read ends on this row, as a mask, built from the
-        // integer lengths so that no `f32` compare of a row number is
-        // involved; `None` on the rows where no lane ends.
-        let summing = if plan.lengths.iter().take(lanes).any(|&r| r == row) {
-            let mut ends = [0.0f32; LANE_MAX];
-            for (slot, &r) in ends.iter_mut().zip(&plan.lengths) {
-                *slot = if r == row { 1.0 } else { 0.0 };
-            }
-            Some(L::load(token, &ends).equals(one))
-        } else {
-            None
-        };
-
-        let mut running = zero;
-        if first <= last {
-            let (first, last) = (first as usize, last as usize);
-            let (Some(before), Some(band), Some(band_columns)) = (
-                cells.get(first - 1),
-                cells.get(first..=last),
-                columns.get(first - gathered_from..=last - gathered_from),
-            ) else {
-                return impossible;
-            };
-            debug_assert_eq!(band.len(), band_columns.len());
-            let mut carry = Carry {
-                left_m: zero,
-                left_d: zero,
-                diag_m: L::load(token, &before.m),
-                diag_indel: L::load(token, &before.i) + L::load(token, &before.d),
-            };
-
-            // Carried and incremented rather than converted per step; see
-            // `batch_kernel`.
-            let mut column_lane = L::splat(token, first as f32);
-
-            let Some(band) = cells.get_mut(first..=last) else {
-                return impossible;
-            };
-            for (cell, column) in band.iter_mut().zip(band_columns) {
-                let (up_m, up_i, up_d) =
-                    (L::load(token, &cell.m), L::load(token, &cell.i), L::load(token, &cell.d));
-                let prior_v = prior::<L>(
-                    ColumnLanes {
-                        base: L::load(token, &column.base),
-                        converted: L::load(token, &column.converted),
-                        plain: L::load(token, &column.plain),
-                        rate: L::load(token, &column.rate),
-                        unconverted_rate: L::load(token, &column.unconverted),
-                    },
-                    lanes_row,
-                );
-
-                let m = prior_v
-                    * (carry.diag_m * t.match_to_match + carry.diag_indel * t.indel_to_match);
-                let i = up_m * t.match_to_insertion + up_i * t.gap_continuation;
-                let d = carry.left_m * t.match_to_deletion + carry.left_d * t.gap_continuation;
-                let (m, i, d) = (flush(m), flush(i), flush(d));
-                // Past a lane's haplotype, as in `batch_kernel`: `m` and `d`
-                // masked, `i` zero by construction.
-                let keep = column_lane.below(past_end);
-                column_lane = column_lane + one;
-                let (m, d) = (L::masked(keep, m), L::masked(keep, d));
-
-                m.store(&mut cell.m);
-                i.store(&mut cell.i);
-                d.store(&mut cell.d);
-
-                running = running.vmax(m).vmax(i).vmax(d);
-                if let Some(ends) = summing {
-                    // The strip kernel's form, parentheses and mask included:
-                    // `f32` addition is not associative, and a lane that does
-                    // not end here adds an exact zero.
-                    total = total + L::masked(ends, m + i);
-                }
-                carry.left_m = m;
-                carry.left_d = d;
-                carry.diag_m = up_m;
-                carry.diag_indel = up_i + up_d;
-            }
-
-            // The two cells the next row reads that this one did not write;
-            // see `batch_kernel`.
-            for at in [first - 1, last + 1] {
-                if let Some(cell) = cells.get_mut(at) {
-                    *cell = Cells::default();
-                }
-            }
-        }
-        if row % STRIP_ROWS == 0 {
-            crossing = running;
-        }
-    }
-
-    total.store(&mut scratch);
-    let mut out = impossible;
-    for lane in 0..lanes {
-        let (Some(sum), Some(shift)) = (scratch.get(lane).copied(), exponent.get(lane).copied())
-        else {
-            continue;
-        };
-        if sum > 0.0
-            && let Some(slot) = out.get_mut(lane)
-        {
-            *slot = Log10Likelihood::new(
-                f64::from(sum).log10() - f64::from(shift) * core::f64::consts::LOG10_2,
-            );
-        }
-    }
-    out
+    lanes_kernel::<L, _>(token, view, &LaneRows(row_tables), cells)
 }

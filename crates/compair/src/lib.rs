@@ -70,6 +70,7 @@ mod error;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod haplotype;
+mod lanes;
 mod pairs;
 mod prepared;
 mod read;
