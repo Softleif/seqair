@@ -14,8 +14,18 @@ seqair-types = { version = "^0.3.1", path = "../seqair-types" }
 thiserror = { workspace = true }
 fearless_simd = "1.0"
 fearless_simd_macros = "0.1"
+# The `gpu` feature: the banded pair-HMM as a wgpu compute shader. The versions
+# are rastair's (biosphere's GPU inference), so the two share one device stack.
+wgpu = { version = "28", optional = true }
+bytemuck = { workspace = true, optional = true }
+pollster = { version = "0.4", optional = true }
+tracing = { workspace = true, optional = true }
 
 [features]
+# One thread per (read, haplotype) pair on a GPU through wgpu (Metal, Vulkan,
+# DX12). A separate kernel with its own oracle; see `compair::gpu`.
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "dep:tracing"]
+
 # Benchmark only. gkl's `c-avx`/`c-avx512` features do not *add* the original
 # Intel C++ kernels beside the Rust ports -- they **replace** them, because
 # `forward_f32x8` and friends are one `cfg_if` over the same name and gkl's Rust

@@ -44,6 +44,8 @@ mod banded;
 mod batch;
 mod emission;
 mod error;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 mod haplotype;
 mod read;
 mod reference;
