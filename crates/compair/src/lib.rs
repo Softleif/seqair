@@ -17,6 +17,13 @@
 //! you. The rest of this list is what they pick between, and what to reach
 //! for when the shape of the work is different.
 //!
+//! **If you are scoring many reads against the same few haplotypes, call
+//! [`Workspace::candidates`] once and score each read through the
+//! [`Candidates`] it returns.** The scores are the strip kernel's, bit for
+//! bit; what it saves is the setup, which the per-pair entry points redo for
+//! every pair: a read's row tracks are derived once for all the haplotypes,
+//! and a haplotype's column tracks once per strand for all the reads.
+//!
 //! Implementations of the same recurrence, in two families.
 //!
 //! One pair at a time, eight *cells* of it per vector:
@@ -59,6 +66,7 @@ mod error;
 pub mod gpu;
 mod haplotype;
 mod pairs;
+mod prepared;
 mod read;
 mod reference;
 mod scaling;
@@ -74,6 +82,7 @@ pub use emission::{
 pub use error::Error;
 pub use haplotype::Haplotype;
 pub use pairs::{PAIRS, PAIRS_BREAK_EVEN, Pair, align_pairs, align_reads};
+pub use prepared::Candidates;
 pub use read::Read;
 pub use reference::align_full;
 pub use seqair_types::{Base, BaseQuality, Probability, QPos, Strand};

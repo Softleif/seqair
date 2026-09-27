@@ -52,7 +52,9 @@ A `Workspace` keeps the kernels' buffers between calls, so
 scoring a read against its candidate haplotypes allocates nothing; the free
 functions of the same names build a fresh one per call. A `Read` computes
 every `10^(-Q/10)` it needs at construction, so an alignment does no
-transcendental arithmetic at all. `StandardEmission` is GATK's plain emission; `TapsEmission`
+transcendental arithmetic at all. `Workspace::candidates` prepares a set of
+haplotypes under one emission for scoring read after read against, deriving
+each haplotype's per-column terms once per strand rather than once per pair. `StandardEmission` is GATK's plain emission; `TapsEmission`
 scores an OT `T` over a haplotype `C` (and an OB `A` over a `G`) at the site's
 methylation level, reading CpG context off the haplotype's own sequence so a
 de-novo CpG needs no special case.

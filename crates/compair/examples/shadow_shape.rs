@@ -23,7 +23,11 @@
 //!   and one `align_strips_simd` per haplotype;
 //! - `prebuilt` scores the same pairs with every `Read` and `Haplotype` built
 //!   once up front, so `rastair - prebuilt` is the per-read construction;
-//! - `reads` only builds the `Read`s, which is that difference on its own.
+//! - `reads` only builds the `Read`s, which is that difference on its own;
+//! - `candidates` is `rastair` through `Workspace::candidates`: the same
+//!   `Read` per read, but its row tracks derived once for the three
+//!   haplotypes and each haplotype's column tracks once per strand for the
+//!   window, rather than both once per pair.
 //!
 //! The second argument is the number of rounds.
 #![allow(clippy::print_stdout, reason = "this example exists to print a checksum")]
@@ -31,8 +35,8 @@
 use std::{hint::black_box, time::Instant};
 
 use compair::{
-    Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Probability, Read, Strand,
-    TapsEmission, Workspace,
+    Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Log10Likelihood, Probability, Read,
+    Strand, TapsEmission, Workspace,
 };
 
 /// The reference window's length.
@@ -192,6 +196,7 @@ fn main() {
     let mut workspace = Workspace::new();
     let mut checksum = 0.0f64;
     let mut alignments = 0usize;
+    let mut scores: Vec<Log10Likelihood> = Vec::new();
 
     let prebuilt: Vec<Prebuilt> = windows
         .iter()
@@ -222,6 +227,27 @@ fn main() {
                                 &emission,
                                 *band,
                             );
+                            checksum += score.get();
+                            alignments += 1;
+                        }
+                    }
+                }
+            }
+            "candidates" => {
+                for w in &windows {
+                    let reference = black_box(&w.reference).clone();
+                    let haplotypes: Vec<Haplotype> = std::iter::once(reference)
+                        .chain(w.alleles.iter().cloned())
+                        .map(Haplotype::new)
+                        .collect();
+                    let mut candidates = workspace.candidates(&haplotypes, &emission);
+                    for read in &w.reads {
+                        let Ok(band) = Band::new(WIDTH, read.offset) else { continue };
+                        let Some(read) = hmm_read(read) else { continue };
+                        candidates.align_strips_simd(&read, band, &mut scores);
+                        // One addition per score, as the other arms do, so the
+                        // checksums compare bit for bit.
+                        for score in &scores {
                             checksum += score.get();
                             alignments += 1;
                         }

@@ -304,6 +304,9 @@ pub struct Workspace {
     pub(crate) batch_rows: crate::batch::BatchBuffer,
     pub(crate) pairs_plan: crate::pairs::PairsPlan,
     pub(crate) pairs_rows: crate::pairs::PairsBuffer,
+    /// Per haplotype of the last [`Workspace::candidates`], its column
+    /// tracks; kept for the allocations only.
+    pub(crate) prepared: Vec<crate::prepared::PreparedColumns>,
 }
 
 impl Workspace {
@@ -513,7 +516,7 @@ impl Plan {
 
 /// A plan's two halves, borrowed separately, so that the column half can come
 /// from somewhere other than the plan: a haplotype prepared once and scored
-/// against many reads can keep its own.
+/// against many reads keeps its own (see `prepared`).
 #[derive(Clone, Copy)]
 pub(crate) struct PlanView<'a> {
     pub(crate) rows: &'a RowTracks,
