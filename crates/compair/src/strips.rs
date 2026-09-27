@@ -42,7 +42,7 @@ use fearless_simd::Level;
 use crate::{
     banded::{
         Band, COLUMN_FRONT, ColumnLanes, LANE_MAX, Lane, LaneMask, PlanView, RowLanes, Shape,
-        TransitionLanes, View, Window, Workspace, prior, reset,
+        TransitionLanes, View, Workspace, prior, reset,
     },
     emission::Emission,
     haplotype::Haplotype,
@@ -185,10 +185,56 @@ struct Sweep {
     /// `full_first > full_last`, when some lane is never live.
     full_first: usize,
     full_last: usize,
+    /// What each lane's first and last live step are built from.
+    edges: Edges,
+}
+
+/// Lane `l`'s live steps, in closed form.
+///
+/// Row `i = r0 + l` is live in columns `max(i + o - w, 1)..=min(i + o + w, h)`
+/// and lane `l` reaches column `c` at step `c + l`, so its steps run from
+/// `max(near + 2l, 1 + l)` to `min(far + l, h) + l`, with `near = r0 + o - w`
+/// and `far = r0 + o + w`; and the lanes with any live step are one
+/// contiguous range. These were per-lane scalar stores into two arrays that
+/// the kernel then loaded as vectors -- a store-forwarding stall per strip,
+/// which made building a `Sweep` 4 % of the strip kernel's time on Zen 2.
+/// Built lanewise instead, the edges never touch memory.
+///
+/// Every number here is a small integer, so the `f32` arithmetic is exact:
+/// `near` is clamped from below where the `1 + l` side wins anyway, and
+/// `far` from above where the `h + l` side does.
+#[derive(Clone, Copy)]
+struct Edges {
+    near: f32,
+    far: f32,
+    haplotype: f32,
+    /// The lanes with any live step, `live_first..=live_last`.
+    live_first: f32,
+    live_last: f32,
+}
+
+impl Edges {
     /// Per lane, the first live step and one past the last, as the numbers a
-    /// mask compares the step against.
-    lane_first: Window,
-    lane_past: Window,
+    /// mask compares the step against: infinite either way for a lane that is
+    /// never live, so no step falls between them.
+    #[inline(always)]
+    fn lanes<L: Lane>(self, token: L::Token) -> (L, L) {
+        let lane = L::offsets(token);
+        let one = L::splat(token, 1.0);
+        let near = L::splat(token, self.near);
+        let far = L::splat(token, self.far);
+        let haplotype = L::splat(token, self.haplotype);
+        let first = (near + lane + lane).vmax(one + lane);
+        let past =
+            L::select((far + lane).below(haplotype), far + lane + lane, haplotype + lane) + one;
+        let dead = lane
+            .below(L::splat(token, self.live_first))
+            .either(L::splat(token, self.live_last).below(lane));
+        (
+            L::select(dead, L::splat(token, f32::INFINITY), first),
+            L::select(dead, L::splat(token, f32::NEG_INFINITY), past),
+        )
+    }
 }
 
 impl Sweep {
@@ -200,49 +246,48 @@ impl Sweep {
         clippy::cast_possible_truncation,
         reason = "steps are bounded by the haplotype length plus the lane count"
     )]
+    #[inline]
     fn new(shape: Shape, band: Band, r0: usize, lanes: usize) -> Option<Self> {
         let (h, o, w) = (shape.haplotype as i64, band.offset, band.half_width);
-        let (mut first, mut last) = (i64::MAX, i64::MIN);
-        let (mut full_first, mut full_last) = (i64::MIN, i64::MAX);
-        let mut lane_first = [f32::INFINITY; LANE_MAX];
-        let mut lane_past = [f32::NEG_INFINITY; LANE_MAX];
-        for lane in 0..lanes.min(LANE_MAX) {
-            let i = (r0 + lane) as i64;
-            let column_first = (i + o - w).max(1);
-            let column_last = (i + o + w).min(h);
-            if column_first > column_last {
-                full_first = i64::MAX;
-                continue;
-            }
-            let (lo, hi) = (column_first + lane as i64, column_last + lane as i64);
-            first = first.min(lo);
-            last = last.max(hi);
-            full_first = full_first.max(lo);
-            full_last = full_last.min(hi);
-            if let Some(slot) = lane_first.get_mut(lane) {
-                *slot = lo as f32;
-            }
-            if let Some(slot) = lane_past.get_mut(lane) {
-                *slot = (hi + 1) as f32;
-            }
-        }
-        if first > last {
+        let near = r0 as i64 + o - w;
+        let far = r0 as i64 + o + w;
+        // Lane `l` is live somewhere exactly when `max(near + l, 1) <= min(far
+        // + l, h)`; with `near <= far` and `h >= 1` that is `1 - far <= l <= h
+        // - near`.
+        let live_first = (1 - far).max(0);
+        let live_last = (h - near).min(lanes.min(LANE_MAX) as i64 - 1);
+        if h < 1 || live_first > live_last {
             return None;
         }
-        let (full_first, full_last) = if full_first > full_last {
+        // Both ends rise with the lane, so the sweep's ends are the live
+        // range's ends and the all-live range is bounded by its far lanes.
+        let step_first = |lane: i64| (near + 2 * lane).max(1 + lane);
+        let step_last = |lane: i64| (far + lane).min(h) + lane;
+        let (first, last) = (step_first(live_first), step_last(live_last));
+        let every_lane = live_first == 0 && live_last == lanes.min(LANE_MAX) as i64 - 1;
+        let (full_first, full_last) = match (step_first(live_last), step_last(live_first)) {
+            (full_first, full_last) if every_lane && full_first <= full_last => {
+                (full_first, full_last)
+            }
             // Empty, with both ends inside the sweep so the arithmetic below
             // stays in `usize`.
-            (last + 1, last)
-        } else {
-            (full_first, full_last)
+            _ => (last + 1, last),
         };
         Some(Self {
             first: first as usize,
             last: last as usize,
             full_first: full_first as usize,
             full_last: full_last as usize,
-            lane_first,
-            lane_past,
+            edges: Edges {
+                // A live lane has `near + l <= h` and `far + l >= 1`, so these
+                // clamps only bound the numbers of lanes the mask discards,
+                // and of `near`s so low that `1 + l` is the maximum anyway.
+                near: near.max(-(1 << 20)) as f32,
+                far: far.min(h) as f32,
+                haplotype: h as f32,
+                live_first: live_first as f32,
+                live_last: live_last as f32,
+            },
         })
     }
 }
@@ -656,7 +701,7 @@ pub(crate) fn strip_kernel<L: Lane>(
                 None
             },
         };
-        let edges = (L::load(token, &sweep.lane_first), L::load(token, &sweep.lane_past));
+        let edges = sweep.edges.lanes::<L>(token);
 
         // Three phases: the leading edge of the band, where lanes come live
         // one by one; the middle, with nothing to mask; and the trailing
@@ -723,5 +768,114 @@ pub(crate) fn strip_kernel<L: Lane>(
         Log10Likelihood::new(total.log10() - f64::from(exponent) * core::f64::consts::LOG10_2)
     } else {
         Log10Likelihood::IMPOSSIBLE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fearless_simd::{Level, Simd, dispatch, f32x8};
+    use proptest::prelude::*;
+
+    use super::{Edges, Sweep};
+    use crate::banded::{Band, LANE_MAX, Lane, Shape, Window};
+
+    /// What a `Sweep` has to say, lane by lane, from the band's predicate:
+    /// the per-lane loop `Sweep::new` used to be.
+    #[allow(
+        clippy::cast_possible_wrap,
+        clippy::cast_precision_loss,
+        reason = "test inputs are a few hundred"
+    )]
+    fn naive(
+        shape: Shape,
+        band: Band,
+        r0: usize,
+        lanes: usize,
+    ) -> Option<(i64, i64, i64, i64, Window, Window)> {
+        let (h, o, w) = (shape.haplotype as i64, band.offset, band.half_width);
+        let (mut first, mut last) = (i64::MAX, i64::MIN);
+        let (mut full_first, mut full_last) = (i64::MIN, i64::MAX);
+        let mut lane_first = [f32::INFINITY; LANE_MAX];
+        let mut lane_past = [f32::NEG_INFINITY; LANE_MAX];
+        for lane in 0..lanes {
+            let i = (r0 + lane) as i64;
+            let (column_first, column_last) = ((i + o - w).max(1), (i + o + w).min(h));
+            if column_first > column_last {
+                full_first = i64::MAX;
+                continue;
+            }
+            let (lo, hi) = (column_first + lane as i64, column_last + lane as i64);
+            first = first.min(lo);
+            last = last.max(hi);
+            full_first = full_first.max(lo);
+            full_last = full_last.min(hi);
+            *lane_first.get_mut(lane)? = lo as f32;
+            *lane_past.get_mut(lane)? = (hi + 1) as f32;
+        }
+        if first > last {
+            return None;
+        }
+        let (full_first, full_last) =
+            if full_first > full_last { (last + 1, last) } else { (full_first, full_last) };
+        Some((first, last, full_first, full_last, lane_first, lane_past))
+    }
+
+    #[inline(always)]
+    fn eight<S: Simd>(simd: S, edges: Edges) -> (Window, Window) {
+        let (first, past) = edges.lanes::<f32x8<S>>(simd);
+        let (mut a, mut b) = ([0.0; LANE_MAX], [0.0; LANE_MAX]);
+        first.store(&mut a);
+        past.store(&mut b);
+        (a, b)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 4096, ..ProptestConfig::default() })]
+
+        /// The closed form is the per-lane loop, for one lane and for eight at
+        /// every level, band offsets far off either end included.
+        #[test]
+        fn a_sweep_is_the_band_predicate_lane_by_lane(
+            haplotype in 1usize..300,
+            read in 1usize..300,
+            width in 2u32..600,
+            offset in -2_000_000i32..2_000_000,
+            near_offset in -40i32..340,
+            near in any::<bool>(),
+            strip in 0usize..40,
+        ) {
+            let offset = if near { near_offset } else { offset };
+            let band = Band::new(width, offset).map_err(|_| TestCaseError::reject("legal"))?;
+            let shape = Shape { haplotype, read };
+            let r0 = 1 + strip * LANE_MAX;
+            for lanes in [1, LANE_MAX] {
+                let want = naive(shape, band, r0, lanes);
+                let got = Sweep::new(shape, band, r0, lanes);
+                prop_assert_eq!(want.is_none(), got.is_none(), "lanes {}", lanes);
+                let (Some(want), Some(got)) = (want, got) else { continue };
+                let (first, last, full_first, full_last, lane_first, lane_past) = want;
+                prop_assert_eq!(
+                    (first, last, full_first, full_last),
+                    (
+                        i64::try_from(got.first).unwrap_or(-1),
+                        i64::try_from(got.last).unwrap_or(-1),
+                        i64::try_from(got.full_first).unwrap_or(-1),
+                        i64::try_from(got.full_last).unwrap_or(-1),
+                    ),
+                    "lanes {}", lanes
+                );
+                if lanes == 1 {
+                    let (first, past) = got.edges.lanes::<f32>(());
+                    prop_assert_eq!(first.to_bits(), lane_first[0].to_bits());
+                    prop_assert_eq!(past.to_bits(), lane_past[0].to_bits());
+                } else {
+                    for level in [Level::fallback(), Level::new()] {
+                        let (first, past) = dispatch!(level, simd => eight(simd, got.edges));
+                        prop_assert_eq!(first.map(f32::to_bits), lane_first.map(f32::to_bits));
+                        prop_assert_eq!(past.map(f32::to_bits), lane_past.map(f32::to_bits));
+                    }
+                }
+            }
+        }
     }
 }
