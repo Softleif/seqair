@@ -27,7 +27,9 @@
 //! - `candidates` is `rastair` through `Workspace::candidates`: the same
 //!   `Read` per read, but its row tracks derived once for the three
 //!   haplotypes and each haplotype's column tracks once per strand for the
-//!   window, rather than both once per pair.
+//!   window, rather than both once per pair;
+//! - `align-reads` builds every `Read` of a window first and scores them all
+//!   in one `Workspace::align_reads`, the pairs kernel's entry point.
 //!
 //! The second argument is the number of rounds.
 #![allow(clippy::print_stdout, reason = "this example exists to print a checksum")]
@@ -244,13 +246,35 @@ fn main() {
                     for read in &w.reads {
                         let Ok(band) = Band::new(WIDTH, read.offset) else { continue };
                         let Some(read) = hmm_read(read) else { continue };
-                        candidates.align_strips_simd(&read, band, &mut scores);
+                        candidates.align(&read, band, &mut scores);
                         // One addition per score, as the other arms do, so the
                         // checksums compare bit for bit.
                         for score in &scores {
                             checksum += score.get();
                             alignments += 1;
                         }
+                    }
+                }
+            }
+            "align-reads" => {
+                for w in &windows {
+                    let reference = black_box(&w.reference).clone();
+                    let haplotypes: Vec<Haplotype> = std::iter::once(reference)
+                        .chain(w.alleles.iter().cloned())
+                        .map(Haplotype::new)
+                        .collect();
+                    let refs: Vec<&Haplotype> = haplotypes.iter().collect();
+                    let reads: Vec<(Read, Band)> = w
+                        .reads
+                        .iter()
+                        .filter_map(|r| Some((hmm_read(r)?, Band::new(WIDTH, r.offset).ok()?)))
+                        .collect();
+                    let reads: Vec<(&Read, Band)> =
+                        reads.iter().map(|(read, band)| (read, *band)).collect();
+                    workspace.align_reads(&refs, &reads, &emission, &mut scores);
+                    for score in &scores {
+                        checksum += score.get();
+                        alignments += 1;
                     }
                 }
             }

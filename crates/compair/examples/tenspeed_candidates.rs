@@ -5,7 +5,8 @@
 //! cargo run -p compair --release --example tenspeed_candidates -- prepared 200
 //! ```
 //!
-//! The first argument is `candidates` (the default) or `prepared`, the second
+//! The first argument is `candidates` (the default), `prepared`, or
+//! `align-reads` (every read of a group in one `Workspace::align_reads`), the second
 //! the number of rounds over the whole dataset. Both score the same 3,550
 //! pairs with `StandardEmission` through the default band and print the same
 //! checksum: each score is added on its own, in the same order.
@@ -35,7 +36,16 @@ fn main() {
     for _ in 0..rounds {
         for group in &groups {
             let reads = group.reads.iter().zip(&group.offsets);
-            if which == "prepared" {
+            if which == "align-reads" {
+                let refs: Vec<&Haplotype> = black_box(&group.haplotypes).iter().collect();
+                let reads: Vec<(&compair::Read, Band)> =
+                    reads.map(|(read, offset)| (read, Band::anchored(*offset))).collect();
+                workspace.align_reads(&refs, &reads, &emission, &mut out);
+                for score in &out {
+                    checksum += score.get();
+                    pairs += 1;
+                }
+            } else if which == "prepared" {
                 let mut candidates = workspace.candidates(black_box(&group.haplotypes), &emission);
                 for (read, offset) in reads {
                     candidates.align(read, Band::anchored(*offset), &mut out);
