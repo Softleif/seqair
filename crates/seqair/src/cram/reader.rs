@@ -715,7 +715,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             // For multi-ref containers (ref_seq_id=-2), the container's alignment
             // range covers multiple references — use the CRAI entry's range for our tid instead.
             let (ref_start, ref_end_clamped) = if container_header.ref_seq_id == -2 {
-                // r[impl cram.slice.multi_ref_reference_window]
+                // r[impl cram.slice.multi_ref_reference_window+2]
                 // Multi-ref: a container holds one CRAI entry per slice per
                 // reference, so there is not *a* entry for this container and
                 // this tid — there are as many as it has slices touching the
@@ -726,10 +726,14 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                 // error at all, because running past the end of the fetched
                 // reference is only a warning (r[`cram.slice.ref_bounds_warning`]).
                 let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
-                let span = entries
-                    .iter()
-                    .filter(|e| e.container_offset == container_offset && e.alignment_span > 0)
-                    .try_fold(None::<(u64, u64)>, |window, e| {
+                let in_container =
+                    || entries.iter().filter(|e| e.container_offset == container_offset);
+                // An entry without an extent says nothing about where its
+                // reads lie, so only the whole reference is sure to hold them.
+                let span = if in_container().any(|e| e.alignment_span <= 0) {
+                    Some((0, ref_len))
+                } else {
+                    in_container().try_fold(None::<(u64, u64)>, |window, e| {
                         let s = Pos1::try_from(e.alignment_start.max(1))
                             .map_err(|_| CramError::InvalidPosition { value: e.alignment_start })?
                             .to_zero_based()
@@ -741,11 +745,12 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                             Some((lo, hi)) => (lo.min(s), hi.max(e_end)),
                             None => (s, e_end),
                         }))
-                    })?;
+                    })?
+                };
                 match span {
                     Some((s, e_end)) => (s, e_end.min(ref_len)),
-                    // No CRAI span info — fetch the full contig
-                    None => (start_u64.min(ref_len), end_u64.min(ref_len)),
+                    // No entry for this reference: there is nothing to decode.
+                    None => (0, 0),
                 }
             } else {
                 let ref_start = Pos1::try_from(container_header.alignment_start.max(1))

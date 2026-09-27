@@ -816,7 +816,7 @@ fn no_ref_cram_decodes_reads_with_insertions() {
 /// version of the bug there is, which is the version a wider test would miss.
 // r[verify cram.index.multi_ref_slices]
 // r[verify cram.record.sequence]
-// r[verify cram.slice.multi_ref_reference_window]
+// r[verify cram.slice.multi_ref_reference_window+2]
 #[test]
 fn multi_ref_containers_use_every_slices_reference_range() {
     let reference = "ACGT".repeat(CONTIG_LEN as usize / 4);
@@ -910,6 +910,7 @@ fn region_queries_return_exactly_the_overlapping_reads(tc: TestCase) {
 
 // r[verify cram.index.zero_span+2]
 // r[verify cram.index.query+2]
+// r[verify cram.slice.multi_ref_reference_window+2]
 /// A CRAI that reports no extent still returns every record.
 ///
 /// Writers that do not compute a span emit `alignment_span == 0`, which means
@@ -917,8 +918,10 @@ fn region_queries_return_exactly_the_overlapping_reads(tc: TestCase) {
 /// prune the slice and lose its records silently, so this rewrites a real
 /// index into that shape — the entries stay, only their spans go to zero — and
 /// asks for the same regions again. Over-inclusive pruning is harmless;
-/// `decode_slice` re-filters every record.
-#[hegel::test(test_cases = 24)]
+/// `decode_slice` re-filters every record. More cases than its neighbours:
+/// a multi-reference slice with a read straddling the query start, which a
+/// query-sized reference window reconstructs wrongly, is a rare draw.
+#[hegel::test(test_cases = 120)]
 fn zero_span_index_entries_still_return_every_record(tc: TestCase) {
     let sample = tc.draw(arb_sample().print_as_debug());
     let opts = CramOpts {
@@ -926,7 +929,9 @@ fn zero_span_index_entries_still_return_every_record(tc: TestCase) {
         embed_ref: 0,
         seqs_per_slice: tc.draw(gs::sampled_from(&[1u32, 2, 10_000])),
         slices_per_container: tc.draw(gs::sampled_from(&[1u32, 2])),
-        multi_seq: Some(false),
+        // Multi-reference slices take their reference window from the index
+        // entries, so a missing extent must widen it to the whole reference.
+        multi_seq: Some(tc.draw(gs::booleans())),
     };
     let contig =
         tc.draw(gs::integers::<usize>().max_value(sample.contigs.len() - 1).print_as_debug());
