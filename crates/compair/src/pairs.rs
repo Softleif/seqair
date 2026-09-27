@@ -23,9 +23,9 @@
 //!   `c = j + delta_k`; a lane's haplotype then lives on `delta_k + 1 ..=
 //!   delta_k + h_k`, and the half-width has to be the same for every lane,
 //!   which is what a caller with one band width per locus has anyway.
-//! - **The read.** The eight row tracks are interleaved across the group like
-//!   the column tracks, so a row is one vector load per track rather than a
-//!   splat -- eight loads per row, against a column loop of ~47 steps. Rows
+//! - **The read.** Each of the eight row tracks holds one entry per lane, so
+//!   a row is one vector load per track rather than a splat -- eight loads
+//!   per row, against a column loop of ~47 steps. Rows
 //!   past a lane's own read have all-zero tracks and compute to exactly zero,
 //!   as the strip kernel's rows past the read do.
 //! - **The last row.** The score is `m + i` summed along lane `k`'s own last
@@ -43,6 +43,16 @@
 //! computes to exactly zero on every row without a mask, by induction along
 //! the row and down the column.
 //!
+//! One thing differs from the batch kernel that is not about lanes:
+//!
+//! - **Blocks, not tracks.** A row's eight tracks, a column's five and a
+//!   cell's three matrices are each one block of lane-windows rather than one
+//!   interleaved `Vec` per track. The kernel reads the same vectors either way;
+//!   what changes is that the column loop holds two base pointers instead of
+//!   eight, which x86-64 has the registers for. With eight, the batch kernel's
+//!   loop reloads the spilled ones every step: this loop is 50 instructions a
+//!   step on AVX2 where the batch kernel's is 69.
+//!
 //! The arithmetic, the order of the operations, the flush to zero, the
 //! renormalisation cadence and the free start are the strip kernel's, cell for
 //! cell, so every lane is bit-identical to [`align_strips`] on its own pair.
@@ -58,9 +68,10 @@
 use fearless_simd::Level;
 
 use crate::{
+    Strand,
     banded::{
         Band, CODE_NO_CONVERSION, CODE_NO_PLAIN_MATCH, ColumnLanes, LANE_MAX, Lane, RowLanes,
-        TransitionLanes, Window, Workspace, code, prior, reset,
+        TransitionLanes, Window, Workspace, code, prior,
     },
     emission::Emission,
     haplotype::Haplotype,
@@ -124,47 +135,168 @@ fn pairs_kernel_simd(plan: &PairsPlan, buffer: &mut PairsBuffer) -> [Log10Likeli
 /// Rows between two renormalisations: the strip kernel's constant.
 const STRIP_ROWS: usize = LANE_MAX;
 
-/// Per read row, interleaved across the group: index `row * PAIRS + k` is lane
-/// `k`'s row `row`, one-based, so row 0 is the free start and holds zeros.
-#[derive(Debug, Default)]
-struct Rows {
-    base: Vec<f32>,
+/// One read row of every lane: each track's entry for lane `k` at index `k`.
+///
+/// The tracks of a row are one block rather than eight interleaved `Vec`s so
+/// that a row is one bounds check and one base pointer, in the fill and in
+/// the kernel alike. Row 0 is the free start and holds zeros, and so does
+/// every row past a lane's own read.
+#[derive(Debug, Default, Clone, Copy)]
+struct RowBlock {
+    base: Window,
     /// `(1 - eps) - eps / 3`, as in `banded::RowTracks`.
-    spread: Vec<f32>,
-    mismatched: Vec<f32>,
-    match_to_match: Vec<f32>,
-    match_to_insertion: Vec<f32>,
-    match_to_deletion: Vec<f32>,
-    indel_to_match: Vec<f32>,
-    gap_continuation: Vec<f32>,
+    spread: Window,
+    mismatched: Window,
+    match_to_match: Window,
+    match_to_insertion: Window,
+    match_to_deletion: Window,
+    indel_to_match: Window,
+    gap_continuation: Window,
 }
 
-/// Per shifted column, interleaved across the group: index `c * PAIRS + k` is
-/// lane `k`'s haplotype column `c - delta_k`, one-based, so `c = delta_k` is
-/// its free-start column and `c = width + 1` the pad the last row's `up`
-/// reads.
-#[derive(Debug, Default)]
-struct Columns {
-    base: Vec<f32>,
-    converted: Vec<f32>,
-    plain: Vec<f32>,
-    rate: Vec<f32>,
-    unconverted: Vec<f32>,
+/// One shifted column of every lane: lane `k`'s haplotype column `c -
+/// delta_k`, one-based, so `c = delta_k` is its free-start column. A block
+/// for the same reason as [`RowBlock`], and it matters more here: the column
+/// loop held eight track pointers, more than x86-64 has registers to spare,
+/// and reloaded the spilled ones every step.
+#[derive(Debug, Clone, Copy)]
+struct ColumnBlock {
+    base: Window,
+    converted: Window,
+    plain: Window,
+    rate: Window,
+    unconverted: Window,
 }
 
-/// The three matrices of one read row, interleaved across the group.
+impl ColumnBlock {
+    /// What a column no lane's band reaches holds: never read, but finite.
+    const UNVISITED: Self = Self {
+        base: [CODE_NO_PLAIN_MATCH; PAIRS],
+        converted: [CODE_NO_CONVERSION; PAIRS],
+        plain: [CODE_NO_PLAIN_MATCH; PAIRS],
+        rate: [0.0; PAIRS],
+        unconverted: [0.0; PAIRS],
+    };
+}
+
+/// The three matrices at one shifted column of one read row, every lane.
+#[derive(Debug, Default, Clone, Copy)]
+struct Cells {
+    m: Window,
+    i: Window,
+    d: Window,
+}
+
+/// One read row of the three matrices; column `c` is `cells[c]`, and `c =
+/// width + 1` is the pad the last row's `up` reads.
 #[derive(Debug, Default)]
 pub(crate) struct PairsBuffer {
-    m: Vec<f32>,
-    i: Vec<f32>,
-    d: Vec<f32>,
+    cells: Vec<Cells>,
+}
+
+/// One read row's entry in every track, for one lane: what a [`RowBlock`]
+/// holds at index `k`.
+#[derive(Debug, Default, Clone, Copy)]
+struct RowEntry {
+    base: f32,
+    spread: f32,
+    mismatched: f32,
+    match_to_match: f32,
+    match_to_insertion: f32,
+    match_to_deletion: f32,
+    indel_to_match: f32,
+    gap_continuation: f32,
+}
+
+impl RowEntry {
+    /// Read base `index`'s row, exactly as `banded::Plan::fill` derives it.
+    #[allow(clippy::cast_possible_truncation, reason = "the f32 narrowing is the point")]
+    fn new<E: Emission>(read: &Read, emission: &E, index: usize) -> Option<Self> {
+        let observation = read.observation(index)?;
+        let eps = emission.epsilon(observation);
+        let t = read.transition(index)?;
+        Some(Self {
+            base: code(observation.base),
+            spread: ((1.0 - eps) - eps / 3.0) as f32,
+            mismatched: (eps / 3.0) as f32,
+            match_to_match: t.match_to_match as f32,
+            match_to_insertion: t.match_to_insertion as f32,
+            match_to_deletion: t.match_to_deletion as f32,
+            indel_to_match: t.indel_to_match as f32,
+            gap_continuation: t.gap_continuation as f32,
+        })
+    }
+
+    fn put(self, row: &mut RowBlock, lane: usize) -> Option<()> {
+        *row.base.get_mut(lane)? = self.base;
+        *row.spread.get_mut(lane)? = self.spread;
+        *row.mismatched.get_mut(lane)? = self.mismatched;
+        *row.match_to_match.get_mut(lane)? = self.match_to_match;
+        *row.match_to_insertion.get_mut(lane)? = self.match_to_insertion;
+        *row.match_to_deletion.get_mut(lane)? = self.match_to_deletion;
+        *row.indel_to_match.get_mut(lane)? = self.indel_to_match;
+        *row.gap_continuation.get_mut(lane)? = self.gap_continuation;
+        Some(())
+    }
+}
+
+/// One haplotype column's entry in every track, for one lane: what a
+/// [`ColumnBlock`] holds at index `k`.
+#[derive(Debug, Clone, Copy)]
+struct ColumnEntry {
+    base: f32,
+    converted: f32,
+    plain: f32,
+    rate: f32,
+    unconverted: f32,
+}
+
+impl ColumnEntry {
+    /// Haplotype site `index` as a read on `strand` sees it, exactly as
+    /// `banded::Plan::fill` derives it; the track a site does not use keeps
+    /// the sentinel an unvisited column has.
+    #[allow(clippy::cast_possible_truncation, reason = "the f32 narrowing is the point")]
+    fn new<E: Emission>(
+        haplotype: &Haplotype,
+        emission: &E,
+        strand: Strand,
+        index: usize,
+    ) -> Option<Self> {
+        let weights = emission.site_weights(haplotype.site(index)?, strand);
+        let base = code(weights.base);
+        Some(match weights.converted {
+            Some(converted) => Self {
+                base,
+                converted: code(converted),
+                plain: CODE_NO_PLAIN_MATCH,
+                rate: weights.rate as f32,
+                unconverted: (1.0 - weights.rate) as f32,
+            },
+            None => Self {
+                base,
+                converted: CODE_NO_CONVERSION,
+                plain: base,
+                rate: 0.0,
+                unconverted: 0.0,
+            },
+        })
+    }
+
+    fn put(self, column: &mut ColumnBlock, lane: usize) -> Option<()> {
+        *column.base.get_mut(lane)? = self.base;
+        *column.converted.get_mut(lane)? = self.converted;
+        *column.plain.get_mut(lane)? = self.plain;
+        *column.rate.get_mut(lane)? = self.rate;
+        *column.unconverted.get_mut(lane)? = self.unconverted;
+        Some(())
+    }
 }
 
 /// Everything one group hoists out of its loops.
 #[derive(Debug, Default)]
 pub(crate) struct PairsPlan {
-    rows: Rows,
-    columns: Columns,
+    rows: Vec<RowBlock>,
+    columns: Vec<ColumnBlock>,
     /// `1 / h` per lane, the read's free start; zero for a lane that cannot
     /// align, which then scores [`Log10Likelihood::IMPOSSIBLE`].
     init: Window,
@@ -232,35 +364,10 @@ impl PairsPlan {
         }
 
         let Self { rows, columns, init, front, past_end, lengths, .. } = self;
-        let Rows {
-            base,
-            spread,
-            mismatched,
-            match_to_match,
-            match_to_insertion,
-            match_to_deletion,
-            indel_to_match,
-            gap_continuation,
-        } = rows;
-        for track in [
-            &mut *base,
-            &mut *spread,
-            &mut *mismatched,
-            &mut *match_to_match,
-            &mut *match_to_insertion,
-            &mut *match_to_deletion,
-            &mut *indel_to_match,
-            &mut *gap_continuation,
-        ] {
-            reset(track, (rows_len + 1) * PAIRS, 0.0);
-        }
-        let span = (width + 2) * PAIRS;
-        let Columns { base: column_base, converted, plain, rate, unconverted } = columns;
-        reset(column_base, span, CODE_NO_PLAIN_MATCH);
-        reset(converted, span, CODE_NO_CONVERSION);
-        reset(plain, span, CODE_NO_PLAIN_MATCH);
-        reset(rate, span, 0.0);
-        reset(unconverted, span, 0.0);
+        rows.clear();
+        rows.resize(rows_len + 1, RowBlock::default());
+        columns.clear();
+        columns.resize(width + 2, ColumnBlock::UNVISITED);
         *init = [0.0; PAIRS];
         *front = [0.0; PAIRS];
         *past_end = [0.0; PAIRS];
@@ -277,38 +384,17 @@ impl PairsPlan {
             *past_end.get_mut(lane)? = (delta + h + 1) as f32;
             *lengths.get_mut(lane)? = r;
 
-            for index in 0..r {
-                let observation = read.observation(index)?;
-                let eps = emission.epsilon(observation);
-                let t = read.transition(index)?;
-                let at = (index + 1) * PAIRS + lane;
-                *base.get_mut(at)? = code(observation.base);
-                *spread.get_mut(at)? = ((1.0 - eps) - eps / 3.0) as f32;
-                *mismatched.get_mut(at)? = (eps / 3.0) as f32;
-                *match_to_match.get_mut(at)? = t.match_to_match as f32;
-                *match_to_insertion.get_mut(at)? = t.match_to_insertion as f32;
-                *match_to_deletion.get_mut(at)? = t.match_to_deletion as f32;
-                *indel_to_match.get_mut(at)? = t.indel_to_match as f32;
-                *gap_continuation.get_mut(at)? = t.gap_continuation as f32;
+            for (index, row) in rows.get_mut(1..=r)?.iter_mut().enumerate() {
+                RowEntry::new(read, emission, index)?.put(row, lane)?;
             }
 
             // Only the columns the lane's band can reach, as `BatchPlan::fill`
             // does and for the same reason.
             let strand = read.strand();
             let (lo, hi) = pair.band.columns(h, r)?;
-            for index in lo..=hi {
-                let weights = emission.site_weights(haplotype.site(index)?, strand);
-                let site_base = code(weights.base);
-                let at = (index + 1 + delta) * PAIRS + lane;
-                *column_base.get_mut(at)? = site_base;
-                match weights.converted {
-                    Some(converted_base) => {
-                        *converted.get_mut(at)? = code(converted_base);
-                        *rate.get_mut(at)? = weights.rate as f32;
-                        *unconverted.get_mut(at)? = (1.0 - weights.rate) as f32;
-                    }
-                    None => *plain.get_mut(at)? = site_base,
-                }
+            let blocks = columns.get_mut(lo + 1 + delta..=hi + 1 + delta)?;
+            for (index, column) in (lo..=hi).zip(blocks) {
+                ColumnEntry::new(haplotype, emission, strand, index)?.put(column, lane)?;
             }
         }
 
@@ -506,18 +592,6 @@ fn flush<L: Lane>(value: L) -> L {
     L::masked_out(value.below(L::splat(value.token(), f32::MIN_POSITIVE)), value)
 }
 
-/// The eight entries of an interleaved track at `at`.
-#[inline(always)]
-fn window(track: &[f32], at: usize) -> Option<&Window> {
-    track.get(at..at.checked_add(LANE_MAX)?)?.first_chunk()
-}
-
-/// The eight entries of an interleaved track at `at`, to store into.
-#[inline(always)]
-fn window_mut(track: &mut [f32], at: usize) -> Option<&mut Window> {
-    track.get_mut(at..at.checked_add(LANE_MAX)?)?.first_chunk_mut()
-}
-
 /// One row at a time along the shifted columns, every lane a different pair.
 #[allow(
     clippy::too_many_lines,
@@ -541,55 +615,13 @@ pub(crate) fn pairs_kernel<L: Lane>(
     if width == 0 || read_len == 0 {
         return impossible;
     }
-    let span = (width + 2) * PAIRS;
-    for track in [&mut buffer.m, &mut buffer.i, &mut buffer.d] {
-        reset(track, span, 0.0);
-    }
+    let span = width + 2;
+    buffer.cells.clear();
+    buffer.cells.resize(span, Cells::default());
 
     // Slices cut to one length, not the `Vec`s: see `batch_kernel`.
-    let (Some(buffer_m), Some(buffer_i), Some(buffer_d)) =
-        (buffer.m.get_mut(..span), buffer.i.get_mut(..span), buffer.d.get_mut(..span))
-    else {
-        return impossible;
-    };
-    let columns = &plan.columns;
-    let (
-        Some(column_base),
-        Some(column_converted),
-        Some(column_plain),
-        Some(column_rate),
-        Some(column_unconverted),
-    ) = (
-        columns.base.get(..span),
-        columns.converted.get(..span),
-        columns.plain.get(..span),
-        columns.rate.get(..span),
-        columns.unconverted.get(..span),
-    )
-    else {
-        return impossible;
-    };
-    let row_span = (read_len + 1) * PAIRS;
-    let rows = &plan.rows;
-    let (
-        Some(rows_base),
-        Some(rows_spread),
-        Some(rows_mismatched),
-        Some(rows_match_to_match),
-        Some(rows_match_to_insertion),
-        Some(rows_match_to_deletion),
-        Some(rows_indel_to_match),
-        Some(rows_gap_continuation),
-    ) = (
-        rows.base.get(..row_span),
-        rows.spread.get(..row_span),
-        rows.mismatched.get(..row_span),
-        rows.match_to_match.get(..row_span),
-        rows.match_to_insertion.get(..row_span),
-        rows.match_to_deletion.get(..row_span),
-        rows.indel_to_match.get(..row_span),
-        rows.gap_continuation.get(..row_span),
-    )
+    let (Some(cells), Some(columns), Some(rows)) =
+        (buffer.cells.get_mut(..span), plan.columns.get(..span), plan.rows.get(..=read_len))
     else {
         return impossible;
     };
@@ -606,16 +638,13 @@ pub(crate) fn pairs_kernel<L: Lane>(
     // docs for why that alone keeps every row clear there.
     let front = L::load(token, &plan.front);
     let mut crossing = zero;
-    for column in 0..=width {
+    for (column, slot) in cells.iter_mut().enumerate().take(width + 1) {
         if (column as i64 - o).abs() > w {
             continue;
         }
         let at = L::splat(token, column as f32);
         let cell = L::masked_out(at.below(front), L::masked(at.below(past_end), init));
-        let Some(slot) = window_mut(buffer_d, column * PAIRS) else {
-            return impossible;
-        };
-        cell.store(slot);
+        cell.store(&mut slot.d);
         crossing = crossing.vmax(cell);
     }
 
@@ -624,7 +653,9 @@ pub(crate) fn pairs_kernel<L: Lane>(
     let mut scratch = [0.0f32; LANE_MAX];
     let lanes = L::LANES.min(PAIRS);
 
-    for row in 1..=read_len {
+    for (row, tracks) in rows.iter().enumerate().skip(1) {
+        let first = (row as i64 + o - w).max(1);
+        let last = (row as i64 + o + w).min(width as i64);
         if (row - 1) % STRIP_ROWS == 0 {
             crossing.store(&mut scratch);
             let mut lift = [1.0f32; LANE_MAX];
@@ -647,47 +678,25 @@ pub(crate) fn pairs_kernel<L: Lane>(
             }
             if any {
                 let lift = L::load(token, &lift);
-                for track in [&mut *buffer_m, &mut *buffer_i, &mut *buffer_d] {
-                    for chunk in track.as_chunks_mut::<LANE_MAX>().0 {
-                        (L::load(token, chunk) * lift).store(chunk);
-                    }
+                for cell in cells.iter_mut() {
+                    (L::load(token, &cell.m) * lift).store(&mut cell.m);
+                    (L::load(token, &cell.i) * lift).store(&mut cell.i);
+                    (L::load(token, &cell.d) * lift).store(&mut cell.d);
                 }
             }
         }
 
-        let at = row * PAIRS;
-        let (Some(row_base), Some(spread), Some(mismatched)) =
-            (window(rows_base, at), window(rows_spread, at), window(rows_mismatched, at))
-        else {
-            return impossible;
-        };
         let lanes_row = RowLanes::new(
-            L::load(token, row_base),
-            L::load(token, spread),
-            L::load(token, mismatched),
+            L::load(token, &tracks.base),
+            L::load(token, &tracks.spread),
+            L::load(token, &tracks.mismatched),
         );
-        let (
-            Some(match_to_match),
-            Some(match_to_insertion),
-            Some(match_to_deletion),
-            Some(indel_to_match),
-            Some(gap_continuation),
-        ) = (
-            window(rows_match_to_match, at),
-            window(rows_match_to_insertion, at),
-            window(rows_match_to_deletion, at),
-            window(rows_indel_to_match, at),
-            window(rows_gap_continuation, at),
-        )
-        else {
-            return impossible;
-        };
         let t = TransitionLanes {
-            match_to_match: L::load(token, match_to_match),
-            match_to_insertion: L::load(token, match_to_insertion),
-            match_to_deletion: L::load(token, match_to_deletion),
-            indel_to_match: L::load(token, indel_to_match),
-            gap_continuation: L::load(token, gap_continuation),
+            match_to_match: L::load(token, &tracks.match_to_match),
+            match_to_insertion: L::load(token, &tracks.match_to_insertion),
+            match_to_deletion: L::load(token, &tracks.match_to_deletion),
+            indel_to_match: L::load(token, &tracks.indel_to_match),
+            gap_continuation: L::load(token, &tracks.gap_continuation),
         };
 
         // The lanes whose read ends on this row, as a mask, built from the
@@ -703,51 +712,39 @@ pub(crate) fn pairs_kernel<L: Lane>(
             None
         };
 
-        let first = (row as i64 + o - w).max(1);
-        let last = (row as i64 + o + w).min(width as i64);
         let mut running = zero;
         if first <= last {
             let (first, last) = (first as usize, last as usize);
-            let mut carry = Carry { left_m: zero, left_d: zero, diag_m: zero, diag_indel: zero };
-            let at = (first - 1) * PAIRS;
-            let (Some(m), Some(i), Some(d)) =
-                (window(buffer_m, at), window(buffer_i, at), window(buffer_d, at))
+            let (Some(before), Some(band), Some(band_columns)) =
+                (cells.get(first - 1), cells.get(first..=last), columns.get(first..=last))
             else {
                 return impossible;
             };
-            carry.diag_m = L::load(token, m);
-            carry.diag_indel = L::load(token, i) + L::load(token, d);
+            debug_assert_eq!(band.len(), band_columns.len());
+            let mut carry = Carry {
+                left_m: zero,
+                left_d: zero,
+                diag_m: L::load(token, &before.m),
+                diag_indel: L::load(token, &before.i) + L::load(token, &before.d),
+            };
 
             // Carried and incremented rather than converted per step; see
             // `batch_kernel`.
             let mut column_lane = L::splat(token, first as f32);
 
-            for column in first..=last {
-                let at = column * PAIRS;
-                let (Some(up_m), Some(up_i), Some(up_d)) =
-                    (window(buffer_m, at), window(buffer_i, at), window(buffer_d, at))
-                else {
-                    return impossible;
-                };
+            let Some(band) = cells.get_mut(first..=last) else {
+                return impossible;
+            };
+            for (cell, column) in band.iter_mut().zip(band_columns) {
                 let (up_m, up_i, up_d) =
-                    (L::load(token, up_m), L::load(token, up_i), L::load(token, up_d));
-
-                let (Some(base), Some(converted), Some(plain), Some(rate), Some(unconverted)) = (
-                    window(column_base, at),
-                    window(column_converted, at),
-                    window(column_plain, at),
-                    window(column_rate, at),
-                    window(column_unconverted, at),
-                ) else {
-                    return impossible;
-                };
+                    (L::load(token, &cell.m), L::load(token, &cell.i), L::load(token, &cell.d));
                 let prior_v = prior::<L>(
                     ColumnLanes {
-                        base: L::load(token, base),
-                        converted: L::load(token, converted),
-                        plain: L::load(token, plain),
-                        rate: L::load(token, rate),
-                        unconverted_rate: L::load(token, unconverted),
+                        base: L::load(token, &column.base),
+                        converted: L::load(token, &column.converted),
+                        plain: L::load(token, &column.plain),
+                        rate: L::load(token, &column.rate),
+                        unconverted_rate: L::load(token, &column.unconverted),
                     },
                     lanes_row,
                 );
@@ -763,14 +760,9 @@ pub(crate) fn pairs_kernel<L: Lane>(
                 column_lane = column_lane + one;
                 let (m, d) = (L::masked(keep, m), L::masked(keep, d));
 
-                let (Some(mm), Some(ii), Some(dd)) =
-                    (window_mut(buffer_m, at), window_mut(buffer_i, at), window_mut(buffer_d, at))
-                else {
-                    return impossible;
-                };
-                m.store(mm);
-                i.store(ii);
-                d.store(dd);
+                m.store(&mut cell.m);
+                i.store(&mut cell.i);
+                d.store(&mut cell.d);
 
                 running = running.vmax(m).vmax(i).vmax(d);
                 if let Some(ends) = summing {
@@ -787,11 +779,9 @@ pub(crate) fn pairs_kernel<L: Lane>(
 
             // The two cells the next row reads that this one did not write;
             // see `batch_kernel`.
-            for at in [(first - 1) * PAIRS, (last + 1) * PAIRS] {
-                for track in [&mut *buffer_m, &mut *buffer_i, &mut *buffer_d] {
-                    if let Some(slot) = track.get_mut(at..at + LANE_MAX) {
-                        slot.fill(0.0);
-                    }
+            for at in [first - 1, last + 1] {
+                if let Some(cell) = cells.get_mut(at) {
+                    *cell = Cells::default();
                 }
             }
         }
