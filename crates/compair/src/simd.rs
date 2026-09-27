@@ -65,6 +65,39 @@ mod x86 {
     );
 
     fearless_simd::kernel!(
+        /// `first, value[0], .., value[6]`, as a `vinsertf128` and a
+        /// `vpalignr`: `[first; 4] | value[0..4]` beside `value`, and each
+        /// half shifted up by one lane across the pair.
+        ///
+        /// In `asm!` because LLVM sees through the intrinsics: both are
+        /// generic shuffles to it, and it re-lowers the pair to whatever its
+        /// throughput model prefers -- a `vpermps` and a blend, or a
+        /// `vperm2f128` and two `vshufps`, both of which are longer on the
+        /// strip kernel's carried chains.
+        #[inline(always)]
+        pub(super) fn shift_in(_avx2: Avx2, value: __m256, first: f32) -> __m256 {
+            use core::arch::x86_64::_mm256_set1_ps;
+            let first = _mm256_set1_ps(first);
+            let shifted: __m256;
+            // SAFETY: two AVX2 register-to-register instructions, in a
+            // function the macro compiles with AVX2 enabled; no memory, no
+            // stack, no flags.
+            unsafe {
+                core::arch::asm!(
+                    "vinsertf128 {below}, {first}, {value:x}, 1",
+                    "vpalignr {shifted}, {value}, {below}, 12",
+                    first = in(ymm_reg) first,
+                    value = in(ymm_reg) value,
+                    below = out(ymm_reg) _,
+                    shifted = lateout(ymm_reg) shifted,
+                    options(pure, nomem, nostack, preserves_flags),
+                );
+            }
+            shifted
+        }
+    );
+
+    fearless_simd::kernel!(
         /// `value` where `mask` is clear, as one `vandnps`.
         #[inline(always)]
         pub(super) fn and_not(_avx2: Avx2, mask: __m256i, value: __m256) -> __m256 {
@@ -163,6 +196,10 @@ impl<S: Simd> Lane for f32x8<S> {
 
     #[inline(always)]
     fn shift_in(self, first: f32) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        if let Level::Avx2(avx2) = self.simd.level() {
+            return Self::simd_from(self.simd, x86::shift_in(avx2, self.into(), first));
+        }
         self.shift_elements_right::<1>(first)
     }
 
