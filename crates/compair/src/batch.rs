@@ -764,3 +764,91 @@ pub(crate) fn batch_kernel<L: Lane>(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use fearless_simd::Level;
+    use proptest::prelude::*;
+
+    use super::{BATCH, BatchBuffer};
+    use crate::{Band, Base, BaseQuality, Haplotype, Read, StandardEmission, Strand, Workspace};
+
+    /// Every cell of lane `lane` past column `h` in one track, as `(column,
+    /// value)` for the ones that are not zero.
+    fn survivors(track: &[f32], lane: usize, h: usize) -> Vec<(usize, f32)> {
+        track
+            .iter()
+            .enumerate()
+            .filter(|&(at, &cell)| at % BATCH == lane && at / BATCH > h && cell != 0.0)
+            .map(|(at, &cell)| (at / BATCH, cell))
+            .collect()
+    }
+
+    fn lanes_past_their_ends(buffer: &BatchBuffer, lengths: &[usize]) -> Vec<String> {
+        let mut found = Vec::new();
+        for (lane, &h) in lengths.iter().enumerate() {
+            for (name, track) in [("m", &buffer.m), ("i", &buffer.i), ("d", &buffer.d)] {
+                let cells = survivors(track, lane, h);
+                if !cells.is_empty() {
+                    found.push(format!("lane {lane} (h = {h}) {name}: {cells:?}"));
+                }
+            }
+        }
+        found
+    }
+
+    proptest! {
+        /// Past a lane's haplotype every cell the batch kernel leaves in its
+        /// row buffer is zero, in all three matrices, at every level.
+        ///
+        /// No score shows this: a deletion leaking rightward past a lane's
+        /// end never reaches that lane's total, only its running maximum,
+        /// and so only which cells flush (notes §10.3(b)). The column loop
+        /// masks only the columns past the batch's shortest haplotype, so
+        /// this is what pins where that split falls -- one column late and
+        /// the shortest lane's `d` survives at `h + 1`.
+        #[test]
+        fn nothing_survives_past_a_lanes_haplotype(
+            read_len in 6usize..40,
+            cuts in proptest::array::uniform8(0usize..10),
+            lanes in 1usize..=BATCH,
+            half_width in 3u32..12,
+            seed in any::<u64>(),
+        ) {
+            let base = |index: usize| {
+                let bits = seed.rotate_left(u32::try_from(index % 64).unwrap_or(0)) >> 62;
+                [Base::A, Base::C, Base::G, Base::T][usize::try_from(bits).unwrap_or(0)]
+            };
+            let full = read_len + 8;
+            let haplotypes: Vec<Haplotype> = cuts
+                .iter()
+                .take(lanes)
+                .map(|&cut| Haplotype::new((0..full - cut).map(base).collect::<Vec<_>>()))
+                .collect();
+            let refs: Vec<&Haplotype> = haplotypes.iter().collect();
+            let lengths: Vec<usize> = haplotypes.iter().map(Haplotype::len).collect();
+            let quals = vec![BaseQuality::from_byte(30); read_len];
+            let q = BaseQuality::from_byte(40);
+            let read = Read::uniform(
+                (0..read_len).map(|index| base(index + 3)).collect::<Vec<_>>(),
+                &quals,
+                q,
+                q,
+                BaseQuality::from_byte(10),
+                Strand::OT,
+            )
+            .expect("valid read");
+            let band = Band::new(2 * half_width, 2).expect("valid band");
+
+            for level in [Level::new(), Level::fallback()] {
+                let mut workspace = Workspace::new();
+                let mut out = Vec::new();
+                workspace.align_batch_at(
+                    level, &refs, &read, &StandardEmission::default(), band, &mut out,
+                );
+                let found = lanes_past_their_ends(&workspace.batch_rows, &lengths);
+                prop_assert!(found.is_empty(), "{:?}: {}", level, found.join("; "));
+            }
+        }
+    }
+}
