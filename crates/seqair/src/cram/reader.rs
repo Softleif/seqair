@@ -7,10 +7,10 @@ use super::{
     block,
     compression_header::CompressionHeader,
     container::ContainerHeader,
-    index::{self, CramIndex, CramIndexError},
+    index::{self, CraiEntry, CramIndex, CramIndexError},
     rans::Rans4x8Buf,
     rans_nx16::Nx16Order1Buf,
-    slice,
+    slice::{self, DecodedSlice},
 };
 use crate::bam::cigar::CigarOp;
 use crate::bam::record::DecodeError;
@@ -604,11 +604,15 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         let start_u64 = span.start.as_u64();
         let end_u64 = span.last.as_u64();
 
+        // Its own handle on the shared state, so decoding below can borrow
+        // the reader mutably while the index entries and the reference name
+        // are borrowed from it.
+        let shared = Arc::clone(&self.shared);
         #[expect(
             clippy::cast_possible_wrap,
             reason = "tid bounded by BAM header limits (MAX_REFERENCES = 1M), fits i32"
         )]
-        let entries = self.shared.index.query(tid as i32, start_u64, end_u64);
+        let entries = shared.index.query(tid as i32, start_u64, end_u64);
         if entries.is_empty() {
             return Ok(crate::reader::FetchCounts::default());
         }
@@ -631,12 +635,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             }
         }
 
-        // Get reference name for FASTA lookup. Borrow into the Arc'd
-        // header — the FASTA fetch only needs `&str`, and the cold
-        // MissingReference error path is the single place we materialize
-        // a `SmolStr`.
-        let ref_name: &str =
-            self.shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid })?;
+        let ref_name: &str = shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid })?;
 
         // TODO(perf): container-scoped re-reading and re-parsing.
         //
@@ -674,163 +673,24 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         // `CompressionHeader::parse`, and `File::read_exact` near the
         // top of `fetch_into_customized` self-time.
         for (&container_offset, wanted_slices) in &wanted {
-            self.file.seek(SeekFrom::Start(container_offset))?;
-
-            // Read container header
-            let mut header_buf = [0u8; 1024]; // container headers are typically < 100 bytes
-            let bytes_read = self.file.read(&mut header_buf)?;
-            let container_header = ContainerHeader::parse(
-                header_buf
-                    .get(..bytes_read)
-                    .ok_or(CramError::Truncated { context: "container header buf" })?,
-            )?;
-
-            if container_header.is_eof() {
-                continue;
-            }
-
-            // Read container data; non-negative checked, so try_from is infallible here.
-            let data_len = usize::try_from(container_header.length)
-                .map_err(|_| CramError::Truncated { context: "container negative length" })?;
-            check_alloc_size(data_len, "container data")?;
-            self.container_buf.clear();
-            self.container_buf.resize(data_len, 0);
-            self.file.seek(SeekFrom::Start(
-                container_offset
-                    .checked_add(container_header.header_size as u64)
-                    .ok_or(CramError::Truncated { context: "container seek offset overflow" })?,
-            ))?;
-            self.file.read_exact(&mut self.container_buf)?;
-
-            // Parse compression header (first block)
-            let (comp_block, _) = block::parse_block(&self.container_buf)?;
-            if comp_block.content_type != block::ContentType::CompressionHeader {
-                return Err(CramError::ExpectedCompressionHeader {
-                    found: comp_block.content_type,
-                });
-            }
-            let ch = CompressionHeader::parse(&comp_block.data)?;
-
-            // Fetch reference sequence for the query tid's range.
-            // For multi-ref containers (ref_seq_id=-2), the container's alignment
-            // range covers multiple references — use the CRAI entry's range for our tid instead.
-            let (ref_start, ref_end_clamped) = if container_header.ref_seq_id == -2 {
-                // r[impl cram.slice.multi_ref_reference_window+2]
-                // Multi-ref: a container holds one CRAI entry per slice per
-                // reference, so there is not *a* entry for this container and
-                // this tid — there are as many as it has slices touching the
-                // tid, and `entries` is already narrowed to the ones this query
-                // wants. The window has to span all of them. Taking only the
-                // first stops the reference short of whatever a later slice
-                // reaches, and the tail of those reads decodes as `N` with no
-                // error at all, because running past the end of the fetched
-                // reference is only a warning (r[`cram.slice.ref_bounds_warning`]).
-                let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
-                let in_container =
-                    || entries.iter().filter(|e| e.container_offset == container_offset);
-                // An entry without an extent says nothing about where its
-                // reads lie, so only the whole reference is sure to hold them.
-                let span = if in_container().any(|e| e.alignment_span <= 0) {
-                    Some((0, ref_len))
-                } else {
-                    in_container().try_fold(None::<(u64, u64)>, |window, e| {
-                        let s = Pos1::try_from(e.alignment_start.max(1))
-                            .map_err(|_| CramError::InvalidPosition { value: e.alignment_start })?
-                            .to_zero_based()
-                            .as_u64();
-                        let e_end = s.checked_add(e.alignment_span.unsigned_abs()).ok_or(
-                            CramError::Truncated { context: "crai alignment end overflow" },
-                        )?;
-                        Ok::<_, CramError>(Some(match window {
-                            Some((lo, hi)) => (lo.min(s), hi.max(e_end)),
-                            None => (s, e_end),
-                        }))
-                    })?
+            // Landmarks ascend, so this is the container's own slice order.
+            let mut slice_offsets = wanted_slices.clone();
+            slice_offsets.sort_unstable();
+            // Read and parsed only once a slice needs decoding; `Some(None)`
+            // is the EOF container, which holds no slices.
+            let mut container: Option<Option<LoadedContainer>> = None;
+            for &slice_offset in &slice_offsets {
+                let loaded = match &mut container {
+                    Some(loaded) => loaded,
+                    None => container.insert(self.load_container(
+                        container_offset,
+                        tid,
+                        &entries,
+                        ref_name,
+                    )?),
                 };
-                match span {
-                    Some((s, e_end)) => (s, e_end.min(ref_len)),
-                    // No entry for this reference: there is nothing to decode.
-                    None => (0, 0),
-                }
-            } else {
-                let ref_start = Pos1::try_from(container_header.alignment_start.max(1))
-                    .map_err(|_| CramError::InvalidPosition {
-                        value: i64::from(container_header.alignment_start),
-                    })?
-                    .to_zero_based()
-                    .as_u64();
-                let ref_end = ref_start
-                    .checked_add(container_header.alignment_span as u64)
-                    .ok_or(CramError::Truncated { context: "container alignment end overflow" })?;
-                let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
-                (ref_start, ref_end.min(ref_len))
-            };
-
-            self.ref_seq_buf.clear();
-            // A contig the FASTA lacks is only an error for a slice that
-            // needs it; one that embeds its reference does not.
-            let mut reference_missing = false;
-            if ref_start < ref_end_clamped {
-                // `ref_end_clamped` is one past the last base the slices
-                // reach, and it is above `ref_start`, so the last base is
-                // `ref_end_clamped - 1`. Fetching that closed span means a
-                // container reaching the last representable position gets its
-                // last base — the half-open `end` there is `i32::MAX + 1`,
-                // which is not a `Pos0`, and clamping it silently dropped one.
-                let position = |value: u64| {
-                    Pos0::try_from(value).map_err(|_| CramError::InvalidPosition {
-                        value: i64::try_from(value).unwrap_or(i64::MAX),
-                    })
-                };
-                let ref_span = RangeInclusive {
-                    start: position(ref_start)?,
-                    last: position(ref_end_clamped.saturating_sub(1))?,
-                };
-                // r[impl cram.edge.missing_reference+2]
-                match self.fasta.fetch_seq_into(ref_name, ref_span, &mut self.ref_seq_buf) {
-                    Ok(()) => {}
-                    Err(FastaError::SequenceNotFound { .. }) => reference_missing = true,
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            let reference = (!reference_missing).then_some(self.ref_seq_buf.as_slice());
-
-            // Decode each slice listed by CRAI as overlapping our query.
-            // CRAI's `slice_offset` matches the container's landmark value
-            // (both are byte offsets from the start of the container's data
-            // block to the slice header). Skipping non-listed landmarks
-            // avoids decoding slices we know cannot overlap — a strict win
-            // for multi-slice / multi-ref containers, no-op otherwise.
-            // r[impl cram.index.crai_per_slice]
-            for &landmark in &container_header.landmarks {
-                let slice_offset = usize::try_from(landmark)
-                    .map_err(|_| CramError::InvalidLength { value: landmark })?;
-                let landmark_u64 = u64::try_from(landmark)
-                    .map_err(|_| CramError::InvalidLength { value: landmark })?;
-                if !wanted_slices.contains(&landmark_u64) {
-                    continue;
-                }
-
-                // r[impl cram.edge.coordinate_clamp]
-                let decoded = slice::decode_slice(
-                    &ch,
-                    &self.container_buf,
-                    slice_offset,
-                    reference,
-                    ref_start.cast_signed(),
-                    &self.shared.header,
-                    &self.shared.read_group_ids,
-                    tid,
-                    &mut self.cigar_buf,
-                    &mut self.bases_buf,
-                    &mut self.qual_buf,
-                    &mut self.aux_buf,
-                    &mut self.name_buf,
-                    &mut self.feature_byte_buf,
-                    &mut self.cigar_ops_buf,
-                    &mut self.rans_4x8_buf,
-                    &mut self.nx16_order1_buf,
-                )?;
+                let Some(loaded) = loaded else { break };
+                let decoded = self.decode_slice_in(loaded, slice_offset, tid)?;
                 let (slice_fetched, slice_kept) =
                     decoded.copy_into(span.start, span.last, store, customize, &mut kept)?;
                 fetched_total = fetched_total.saturating_add(slice_fetched);
@@ -839,6 +699,199 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         }
 
         Ok(crate::reader::FetchCounts { fetched: fetched_total, kept: kept_total })
+    }
+}
+
+/// A container read and parsed for decoding its slices: its header (for
+/// the landmarks), its compression header, and where the reference in the
+/// reader's `ref_seq_buf` starts.
+struct LoadedContainer {
+    header: ContainerHeader,
+    compression: CompressionHeader,
+    ref_start: u64,
+    /// The FASTA lacks the contig; only a slice that needs it fails.
+    reference_missing: bool,
+}
+
+impl<R: Read + Seek> IndexedCramReader<R> {
+    /// Read the container at `container_offset` into `container_buf`, parse
+    /// its compression header, and fetch the reference its slices decode
+    /// against for `tid` into `ref_seq_buf`. `None` for the EOF container.
+    fn load_container(
+        &mut self,
+        container_offset: u64,
+        tid: u32,
+        entries: &[&CraiEntry],
+        ref_name: &str,
+    ) -> Result<Option<LoadedContainer>, CramError> {
+        self.file.seek(SeekFrom::Start(container_offset))?;
+
+        // Read container header
+        let mut header_buf = [0u8; 1024]; // container headers are typically < 100 bytes
+        let bytes_read = self.file.read(&mut header_buf)?;
+        let container_header = ContainerHeader::parse(
+            header_buf
+                .get(..bytes_read)
+                .ok_or(CramError::Truncated { context: "container header buf" })?,
+        )?;
+
+        if container_header.is_eof() {
+            return Ok(None);
+        }
+
+        // Read container data; non-negative checked, so try_from is infallible here.
+        let data_len = usize::try_from(container_header.length)
+            .map_err(|_| CramError::Truncated { context: "container negative length" })?;
+        check_alloc_size(data_len, "container data")?;
+        self.container_buf.clear();
+        self.container_buf.resize(data_len, 0);
+        self.file.seek(SeekFrom::Start(
+            container_offset
+                .checked_add(container_header.header_size as u64)
+                .ok_or(CramError::Truncated { context: "container seek offset overflow" })?,
+        ))?;
+        self.file.read_exact(&mut self.container_buf)?;
+
+        // Parse compression header (first block)
+        let (comp_block, _) = block::parse_block(&self.container_buf)?;
+        if comp_block.content_type != block::ContentType::CompressionHeader {
+            return Err(CramError::ExpectedCompressionHeader { found: comp_block.content_type });
+        }
+        let ch = CompressionHeader::parse(&comp_block.data)?;
+
+        // Fetch reference sequence for the query tid's range.
+        // For multi-ref containers (ref_seq_id=-2), the container's alignment
+        // range covers multiple references — use the CRAI entry's range for our tid instead.
+        let (ref_start, ref_end_clamped) = if container_header.ref_seq_id == -2 {
+            // r[impl cram.slice.multi_ref_reference_window+2]
+            // Multi-ref: a container holds one CRAI entry per slice per
+            // reference, so there is not *a* entry for this container and
+            // this tid — there are as many as it has slices touching the
+            // tid, and `entries` is already narrowed to the ones this query
+            // wants. The window has to span all of them. Taking only the
+            // first stops the reference short of whatever a later slice
+            // reaches, and the tail of those reads decodes as `N` with no
+            // error at all, because running past the end of the fetched
+            // reference is only a warning (r[`cram.slice.ref_bounds_warning`]).
+            let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
+            let in_container = || entries.iter().filter(|e| e.container_offset == container_offset);
+            // An entry without an extent says nothing about where its
+            // reads lie, so only the whole reference is sure to hold them.
+            let span = if in_container().any(|e| e.alignment_span <= 0) {
+                Some((0, ref_len))
+            } else {
+                in_container().try_fold(None::<(u64, u64)>, |window, e| {
+                    let s = Pos1::try_from(e.alignment_start.max(1))
+                        .map_err(|_| CramError::InvalidPosition { value: e.alignment_start })?
+                        .to_zero_based()
+                        .as_u64();
+                    let e_end = s
+                        .checked_add(e.alignment_span.unsigned_abs())
+                        .ok_or(CramError::Truncated { context: "crai alignment end overflow" })?;
+                    Ok::<_, CramError>(Some(match window {
+                        Some((lo, hi)) => (lo.min(s), hi.max(e_end)),
+                        None => (s, e_end),
+                    }))
+                })?
+            };
+            match span {
+                Some((s, e_end)) => (s, e_end.min(ref_len)),
+                // No entry for this reference: there is nothing to decode.
+                None => (0, 0),
+            }
+        } else {
+            let ref_start = Pos1::try_from(container_header.alignment_start.max(1))
+                .map_err(|_| CramError::InvalidPosition {
+                    value: i64::from(container_header.alignment_start),
+                })?
+                .to_zero_based()
+                .as_u64();
+            let ref_end = ref_start
+                .checked_add(container_header.alignment_span as u64)
+                .ok_or(CramError::Truncated { context: "container alignment end overflow" })?;
+            let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
+            (ref_start, ref_end.min(ref_len))
+        };
+
+        self.ref_seq_buf.clear();
+        // A contig the FASTA lacks is only an error for a slice that
+        // needs it; one that embeds its reference does not.
+        let mut reference_missing = false;
+        if ref_start < ref_end_clamped {
+            // `ref_end_clamped` is one past the last base the slices
+            // reach, and it is above `ref_start`, so the last base is
+            // `ref_end_clamped - 1`. Fetching that closed span means a
+            // container reaching the last representable position gets its
+            // last base — the half-open `end` there is `i32::MAX + 1`,
+            // which is not a `Pos0`, and clamping it silently dropped one.
+            let position = |value: u64| {
+                Pos0::try_from(value).map_err(|_| CramError::InvalidPosition {
+                    value: i64::try_from(value).unwrap_or(i64::MAX),
+                })
+            };
+            let ref_span = RangeInclusive {
+                start: position(ref_start)?,
+                last: position(ref_end_clamped.saturating_sub(1))?,
+            };
+            // r[impl cram.edge.missing_reference+2]
+            match self.fasta.fetch_seq_into(ref_name, ref_span, &mut self.ref_seq_buf) {
+                Ok(()) => {}
+                Err(FastaError::SequenceNotFound { .. }) => reference_missing = true,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(Some(LoadedContainer {
+            header: container_header,
+            compression: ch,
+            ref_start,
+            reference_missing,
+        }))
+    }
+
+    /// Decode the slice at `slice_offset` of a loaded container for `tid`.
+    /// An offset that is not one of the container's landmarks holds no
+    /// slice, and decodes to none.
+    fn decode_slice_in(
+        &mut self,
+        container: &LoadedContainer,
+        slice_offset: u64,
+        tid: u32,
+    ) -> Result<DecodedSlice, CramError> {
+        // CRAI's `slice_offset` matches the container's landmark value
+        // (both are byte offsets from the start of the container's data
+        // block to the slice header).
+        // r[impl cram.index.crai_per_slice]
+        let is_landmark = container
+            .header
+            .landmarks
+            .iter()
+            .any(|&landmark| u64::try_from(landmark).is_ok_and(|l| l == slice_offset));
+        if !is_landmark {
+            return Ok(DecodedSlice::default());
+        }
+        let slice_offset = usize::try_from(slice_offset)
+            .map_err(|_| CramError::Truncated { context: "slice offset" })?;
+        let reference = (!container.reference_missing).then_some(self.ref_seq_buf.as_slice());
+        // r[impl cram.edge.coordinate_clamp]
+        slice::decode_slice(
+            &container.compression,
+            &self.container_buf,
+            slice_offset,
+            reference,
+            container.ref_start.cast_signed(),
+            &self.shared.header,
+            &self.shared.read_group_ids,
+            tid,
+            &mut self.cigar_buf,
+            &mut self.bases_buf,
+            &mut self.qual_buf,
+            &mut self.aux_buf,
+            &mut self.name_buf,
+            &mut self.feature_byte_buf,
+            &mut self.cigar_ops_buf,
+            &mut self.rans_4x8_buf,
+            &mut self.nx16_order1_buf,
+        )
     }
 }
 
