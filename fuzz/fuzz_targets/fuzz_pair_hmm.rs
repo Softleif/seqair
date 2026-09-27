@@ -16,7 +16,7 @@
 
 use arbitrary::Arbitrary;
 use compair::{
-    Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood,
+    BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood,
     Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded,
     align_banded_simd, align_full, align_strips, align_strips_simd,
 };
@@ -84,6 +84,16 @@ fn check<E: Emission>(
     let strips_reused = workspace.align_strips_simd(haplotype, read, emission, band);
     check_parity(name, strips, strips_simd);
     check_parity(name, strips, strips_reused);
+    // Prepared candidates are the per-pair path: alone through the strip
+    // kernel, and as a full batch through the batch kernel.
+    let mut prepared = Vec::new();
+    for group in [&[haplotype][..], &[haplotype; BATCH][..]] {
+        workspace.candidates(group, emission).align(read, band, &mut prepared);
+        assert_eq!(prepared.len(), group.len(), "{name}: one score per haplotype");
+        for score in &prepared {
+            check_parity(name, strips, *score);
+        }
+    }
     assert!(!full.get().is_nan(), "{name}: reference NaN");
     // The strip kernel is the same recurrence over the same band, so the two
     // traversals agree on whether a path exists at all, and on the score
