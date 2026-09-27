@@ -505,20 +505,46 @@ fn step<L: Lane>(
     Some((m, i, d))
 }
 
-/// The lanewise mask for step `d`: every lane whose live steps include it.
-#[inline(always)]
-fn live_lanes<L: Lane>(lane_first: L, lane_past: L, d: usize) -> L::Mask {
-    let token = lane_first.token();
+/// A masked phase's clock: the step as a lane, and the lanes' live edges.
+///
+/// The step is carried and incremented rather than converted per step. `d as
+/// f32` from a `usize` is no single instruction on x86-64 below AVX-512 -- a
+/// sign test, a shift, two `vcvtsi2ss` and an add, then a broadcast -- and one
+/// `vaddps` replaces all of it. Steps are integers far below 2^24, exact in
+/// `f32`, so the value is the same bit for bit; the batch kernel carries its
+/// column the same way.
+struct Clock<L: Lane> {
+    now: L,
+    one: L,
+    lane_first: L,
+    lane_past: L,
+}
+
+impl<L: Lane> Clock<L> {
+    /// Starting at step `from`.
+    #[inline(always)]
     #[allow(clippy::cast_precision_loss, reason = "a step is a few hundred")]
-    let now = L::splat(token, d as f32);
-    lane_first.below(now + L::splat(token, 1.0)).both(now.below(lane_past))
+    fn new((lane_first, lane_past): (L, L), from: usize) -> Self {
+        let token = lane_first.token();
+        Self { now: L::splat(token, from as f32), one: L::splat(token, 1.0), lane_first, lane_past }
+    }
+
+    /// The lanewise mask for this step -- every lane whose live steps include
+    /// it -- and on to the next.
+    #[inline(always)]
+    fn tick(&mut self) -> L::Mask {
+        let next = self.now + self.one;
+        let live = self.lane_first.below(next).both(self.now.below(self.lane_past));
+        self.now = next;
+        live
+    }
 }
 
 /// The mask a step of a phase applies: the live lanes in a masked phase,
-/// none in an unmasked one.
+/// none in an unmasked one, whose clock is never read and so never built.
 #[inline(always)]
-fn phase_mask<L: Lane, const MASKED: bool>(edges: (L, L), d: usize) -> Option<L::Mask> {
-    if MASKED { Some(live_lanes(edges.0, edges.1, d)) } else { None }
+fn phase_mask<L: Lane, const MASKED: bool>(clock: &mut Clock<L>) -> Option<L::Mask> {
+    if MASKED { Some(clock.tick()) } else { None }
 }
 
 /// Lanes `r0..r0 + LANE_MAX` of a per-row plan track; `None` if the track is
@@ -544,15 +570,17 @@ fn phase<L: Lane, const MASKED: bool>(
     from: usize,
     to: usize,
 ) -> bool {
+    let mut clock = Clock::new(edges, from);
     let mut d = from;
     while d < to {
-        let Some(cells) = step(strip, buffers, state, d - first, phase_mask::<L, MASKED>(edges, d))
+        let Some(cells) =
+            step(strip, buffers, state, d - first, phase_mask::<L, MASKED>(&mut clock))
         else {
             return false;
         };
         totals.absorb(cells);
         let Some(cells) =
-            step(strip, buffers, state, d + 1 - first, phase_mask::<L, MASKED>(edges, d + 1))
+            step(strip, buffers, state, d + 1 - first, phase_mask::<L, MASKED>(&mut clock))
         else {
             return false;
         };
@@ -560,7 +588,8 @@ fn phase<L: Lane, const MASKED: bool>(
         d += 2;
     }
     if d == to {
-        let Some(cells) = step(strip, buffers, state, d - first, phase_mask::<L, MASKED>(edges, d))
+        let Some(cells) =
+            step(strip, buffers, state, d - first, phase_mask::<L, MASKED>(&mut clock))
         else {
             return false;
         };
