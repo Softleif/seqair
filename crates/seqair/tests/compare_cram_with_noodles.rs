@@ -211,7 +211,7 @@ fn cram_chr19_records_match_noodles_field_by_field() {
             // r[verify cram.record.mate_tlen_reconstruction]
             //
             // seqair applies the filtered-mate-sentinel rule
-            // (r[impl cram.fetch_into_customized.filtered_mate_sentinel]):
+            // (r[impl cram.fetch_into_customized.filtered_mate_sentinel+2]):
             // when the mate is outside the fetched range, the kept record's
             // next_pos / next_ref_id are nulled to BAM's (-1, -1) sentinel
             // so downstream pileup-pair logic accurately reflects what's in

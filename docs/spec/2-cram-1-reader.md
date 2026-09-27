@@ -65,11 +65,11 @@ The file MUST end with an EOF container. The EOF container produced by samtools 
 r[cram.container.region_skip]
 During `fetch_into`, the reader MUST skip containers whose `[alignment_start, alignment_start + alignment_span)` range does not overlap the query region. The CRAI index provides byte offsets for this.
 
-r[cram.fetch_into_customized.push_time]
-`IndexedCramReader::fetch_into_customized` MUST apply the customize value's `keep_record` at push time, not post-hoc. The customize value is threaded through `decode_slice` → `decode_record` into `RecordStore::push_fields`, so a rejected record's slab writes are rolled back with zero waste (matching BAM/SAM). Each record reaching the push step counts toward `FetchCounts::fetched` regardless of the filter's verdict; only records the filter keeps count toward `FetchCounts::kept`. Records that fail the reader's own overlap/tid/unmapped checks are not counted in either field. Filtered-out mates still appear in the per-slice `mate_infos` vector with `store_idx = None`, so `resolve_mate_tlen` can see them for span computation but will not write TLEN/mate-pos fields back to them.
+r[cram.fetch_into_customized.push_time+2]
+`IndexedCramReader::fetch_into_customized` MUST apply the customize value's `keep_record` at push time, not post-hoc: records are copied from the decoded slice (`r[cram.slice_cache]`) into the store with `RecordStore::push_fields`, so a rejected record's slab writes are rolled back with zero waste (matching BAM/SAM). Each record reaching the push step counts toward `FetchCounts::fetched` regardless of the filter's verdict; only records the filter keeps count toward `FetchCounts::kept`. Records that fail the reader's own overlap/tid/unmapped checks are not counted in either field. `keep_record` sees a record's TLEN and attached-mate fields already resolved over the slice, as a BAM record carries them; nulling the mate fields of a record whose mate the fetch leaves out (`r[cram.fetch_into_customized.filtered_mate_sentinel+2]`) happens after every record is pushed.
 
-r[cram.fetch_into_customized.filtered_mate_sentinel]
-When a kept record's mate was rejected by `keep_record`, `resolve_mate_tlen` MUST leave the kept record's `template_len` as the full-chain span (the same value an unfiltered fetch would produce — TLEN is a per-template property), but MUST set its `next_ref_id` and `next_pos` to -1, the BAM "mate unavailable" sentinel. This signals to consumers that the mate is not in the store while preserving the across-template length. Detecting "mate was filtered" is therefore as simple as checking `next_pos == -1` on a kept record.
+r[cram.fetch_into_customized.filtered_mate_sentinel+2]
+A kept record whose attached mate (`r[cram.record.mate_attached]`) is not in the store after the fetch — rejected by `keep_record`, outside the query, or on another reference of a multi-reference slice — keeps its `template_len` as the full-chain span (the same value an unfiltered fetch would produce — TLEN is a per-template property), but MUST have `next_ref_id` and `next_pos` set to -1, the BAM "mate unavailable" sentinel. This signals to consumers that the mate is not in the store while preserving the across-template length. Detecting "mate not fetched" is therefore as simple as checking `next_pos == -1` on a kept record. (A detached mate's fields come from the record's own data series and are never nulled.)
 
 ### Slices
 
@@ -720,6 +720,9 @@ CRAM decoding is expected to be 2-4× slower than BAM due to codec complexity an
 
 r[cram.perf.slice_granularity]
 CRAM random access is slice-granular, not record-granular. A region query may decompress an entire slice (typically 10,000 records) to extract a few records at the edges. This is inherently coarser than BAM's record-level seeking.
+
+r[cram.slice_cache]
+A fetch decodes each slice it needs into a decoded slice that does not depend on the query — every record of the slice for the queried reference, with TLEN and attached-mate chains resolved over the whole slice (`r[cram.record.mate_tlen_reconstruction]`) — and then copies the records the query wants into the caller's store, applying the reader's overlap/tid/unmapped checks, `keep_record` (`r[cram.fetch_into_customized.push_time+2]`) and the mate sentinel (`r[cram.fetch_into_customized.filtered_mate_sentinel+2]`) at that point. The records a fetch returns, their order and every field MUST be the same whether a slice was decoded for this fetch or taken from the cache.
 
 r[cram.perf.reference_caching]
 Reference sequence lookups happen per-slice (to reconstruct all records in the slice). The reader SHOULD cache the most recently used reference region to avoid repeated FASTA lookups for consecutive slices on the same contig. This cache MUST be per-fork, not shared across threads.

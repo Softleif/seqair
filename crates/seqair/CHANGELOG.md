@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tok3MatchWithoutValue`, `Tok3OutputOverflow` and `Tok3NameCountExceedsLength`;
   `Tok3DupPositionOutOfRange` is gone.
 
+- **A CRAM `keep_record` filter sees a record's TLEN and attached-mate position already resolved**,
+  as it does for BAM; before, it saw TLEN 0 and mate position -1 for attached mates, and the values
+  were filled in only after filtering. The mate "not fetched" sentinel is unchanged.
+
 ### Fixed
 
 - **A crafted rANS Nx16 block could exhaust the stack.** STRIPE substreams nested without limit;

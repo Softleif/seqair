@@ -581,7 +581,6 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     }
 
     // r[impl unified.fetch_into_customized]
-    // r[impl cram.fetch_into_customized.push_time]
     /// Customized variant: each record that passes the reader's built-in
     /// overlap/tid/unmapped checks is pushed into the store, with
     /// `customize.filter` consulted at push time. Rejection triggers
@@ -616,6 +615,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
 
         let mut fetched_total = 0usize;
         let mut kept_total = 0usize;
+        let mut kept = Vec::new();
 
         // Group CRAI entries by container_offset → set of slice_offsets that
         // overlap our query. Keys are sorted (BTreeMap) so containers are
@@ -812,7 +812,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                 }
 
                 // r[impl cram.edge.coordinate_clamp]
-                let (slice_fetched, slice_kept) = slice::decode_slice(
+                let decoded = slice::decode_slice(
                     &ch,
                     &self.container_buf,
                     slice_offset,
@@ -821,9 +821,6 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &self.shared.header,
                     &self.shared.read_group_ids,
                     tid,
-                    span.start,
-                    span.last,
-                    store,
                     &mut self.cigar_buf,
                     &mut self.bases_buf,
                     &mut self.qual_buf,
@@ -831,10 +828,11 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &mut self.name_buf,
                     &mut self.feature_byte_buf,
                     &mut self.cigar_ops_buf,
-                    customize,
                     &mut self.rans_4x8_buf,
                     &mut self.nx16_order1_buf,
                 )?;
+                let (slice_fetched, slice_kept) =
+                    decoded.copy_into(span.start, span.last, store, customize, &mut kept)?;
                 fetched_total = fetched_total.saturating_add(slice_fetched);
                 kept_total = kept_total.saturating_add(slice_kept);
             }

@@ -1,5 +1,6 @@
 //! Decode CRAM slices into records. Reads data series blocks, applies the encodings from
-//! [`CompressionHeader`], and pushes decoded records into a [`RecordStore`].
+//! [`CompressionHeader`], and decodes a slice's records into a `DecodedSlice`, from
+//! which a fetch copies the ones it wants into a [`RecordStore`].
 
 // See rans.rs: lazy `ok_or_else(|| CramError::...)` keeps error construction and its
 // `drop_in_place<CramError>` off the per-record path.
@@ -8,6 +9,7 @@
     reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
 )]
 
+use core::range::Range;
 use std::ops::Neg;
 
 use super::{
@@ -35,12 +37,204 @@ struct SliceMateInfo {
     end_pos: i64,
     /// Absolute index of the mate record within this slice, or -1 if detached/no mate.
     mate_line: i32,
-    /// Index in the `RecordStore` if this record was pushed, or `None` if filtered out.
-    store_idx: Option<RecordIdx>,
+    /// Index in the decoded slice's records, or `None` for a record of
+    /// another reference in a multi-reference slice.
+    slot: Option<u32>,
     /// BAM flags (needed for READ1/READ2 tie-breaking).
     bam_flags: u16,
     /// Reference sequence ID for this record (needed for `next_ref_id` resolution).
     ref_id: i32,
+}
+
+// r[impl cram.slice_cache]
+/// A slice's records for one reference, decoded once and independent of any
+/// query: every record the slice holds for that reference, with TLEN and
+/// attached-mate fields resolved over the whole slice. A fetch copies the
+/// records it wants out of it with [`copy_into`](Self::copy_into).
+#[derive(Debug, Default)]
+pub(crate) struct DecodedSlice {
+    records: Vec<SliceRecord>,
+    names: Vec<u8>,
+    cigar: Vec<CigarOp>,
+    bases: Vec<Base>,
+    qual: Vec<u8>,
+    aux: Vec<u8>,
+}
+
+/// One record of a [`DecodedSlice`]; its variable-length fields are ranges
+/// into the slice's slabs.
+#[derive(Debug, Clone, Copy)]
+struct SliceRecord {
+    pos: Pos0,
+    end_pos: Pos0,
+    flags: BamFlags,
+    mapq: u8,
+    matching_bases: u32,
+    indel_bases: u32,
+    tid: i32,
+    next_ref_id: i32,
+    next_pos: i32,
+    template_len: i32,
+    name: Range<usize>,
+    cigar: Range<usize>,
+    seq: Range<usize>,
+    qual: Range<usize>,
+    aux: Range<usize>,
+    mate: MateLink,
+}
+
+/// Whether a record's mate fields hold for a fetch that leaves its mate out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MateLink {
+    /// Detached, unpaired, or a chain the slice could not resolve: the
+    /// fields are the record's own.
+    Own,
+    /// The mate is the slice's record at this index; the fields are its.
+    Record(u32),
+    /// The mate is a record of another reference, never in a fetch.
+    Elsewhere,
+}
+
+impl DecodedSlice {
+    /// Append a record whose variable-length fields are the given slices.
+    #[expect(clippy::too_many_arguments, reason = "one argument per record field")]
+    fn push(
+        &mut self,
+        pos: Pos0,
+        end_pos: Pos0,
+        flags: BamFlags,
+        mapq: u8,
+        matching_bases: u32,
+        indel_bases: u32,
+        name: &[u8],
+        cigar: &[CigarOp],
+        bases: &[Base],
+        qual: &[u8],
+        aux: &[u8],
+        tid: i32,
+        next_ref_id: i32,
+        next_pos: i32,
+        template_len: i32,
+    ) -> Result<u32, CramError> {
+        let slot = u32::try_from(self.records.len())
+            .map_err(|_| CramError::InvalidLength { value: i32::MAX })?;
+        let append = |slab: &mut Vec<u8>, bytes: &[u8]| {
+            let start = slab.len();
+            slab.extend_from_slice(bytes);
+            Range { start, end: slab.len() }
+        };
+        let name = append(&mut self.names, name);
+        let qual = append(&mut self.qual, qual);
+        let aux = append(&mut self.aux, aux);
+        let cigar_start = self.cigar.len();
+        self.cigar.extend_from_slice(cigar);
+        let seq_start = self.bases.len();
+        self.bases.extend_from_slice(bases);
+        self.records.push(SliceRecord {
+            pos,
+            end_pos,
+            flags,
+            mapq,
+            matching_bases,
+            indel_bases,
+            tid,
+            next_ref_id,
+            next_pos,
+            template_len,
+            name,
+            cigar: Range { start: cigar_start, end: self.cigar.len() },
+            seq: Range { start: seq_start, end: self.bases.len() },
+            qual,
+            aux,
+            mate: MateLink::Own,
+        });
+        Ok(slot)
+    }
+
+    /// Give back the slabs' spare capacity: a cached slice lives long.
+    fn shrink_to_fit(&mut self) {
+        self.records.shrink_to_fit();
+        self.names.shrink_to_fit();
+        self.cigar.shrink_to_fit();
+        self.bases.shrink_to_fit();
+        self.qual.shrink_to_fit();
+        self.aux.shrink_to_fit();
+    }
+
+    // r[impl cram.fetch_into_customized.push_time+2]
+    // r[impl cram.fetch_into_customized.filtered_mate_sentinel+2]
+    // r[impl interval.overlap_test]
+    /// Push the records overlapping `query_start..=query_end` into `store`,
+    /// consulting `customize` for each, and null the mate fields of kept
+    /// records whose attached mate did not make it into the store. Returns
+    /// `(fetched, kept)`. `kept` is scratch space, one entry per record.
+    pub(crate) fn copy_into<E: CustomizeRecordStore>(
+        &self,
+        query_start: Pos0,
+        query_end: Pos0,
+        store: &mut RecordStore<E::Extra>,
+        customize: &mut E,
+        kept: &mut Vec<Option<RecordIdx>>,
+    ) -> Result<(usize, usize), CramError> {
+        kept.clear();
+        let mut fetched_count = 0usize;
+        let mut kept_count = 0usize;
+        for r in &self.records {
+            // Both bounds are inclusive, as are `pos` and `end_pos`: a record
+            // is kept iff `pos <= query_end && end_pos >= query_start`. An
+            // unmapped record has no extent and is kept up to the query end.
+            let wanted = if r.flags.is_unmapped() {
+                r.pos <= query_end
+            } else {
+                r.pos <= query_end && r.end_pos >= query_start
+            };
+            if !wanted {
+                kept.push(None);
+                continue;
+            }
+            let idx = store.push_fields(
+                r.pos,
+                r.end_pos,
+                r.flags,
+                r.mapq,
+                r.matching_bases,
+                r.indel_bases,
+                field(&self.names, r.name),
+                field(&self.cigar, r.cigar),
+                field(&self.bases, r.seq),
+                field(&self.qual, r.qual),
+                field(&self.aux, r.aux),
+                r.tid,
+                r.next_ref_id,
+                r.next_pos,
+                r.template_len,
+                customize,
+            )?;
+            fetched_count = fetched_count.wrapping_add(1);
+            if idx.is_some() {
+                kept_count = kept_count.wrapping_add(1);
+            }
+            kept.push(idx);
+        }
+        for (r, idx) in self.records.iter().zip(kept.iter()) {
+            let Some(idx) = *idx else { continue };
+            let mate_missing = match r.mate {
+                MateLink::Own => false,
+                MateLink::Record(m) => kept.get(m as usize).copied().flatten().is_none(),
+                MateLink::Elsewhere => true,
+            };
+            if mate_missing {
+                store.set_mate_info(idx, -1, -1);
+            }
+        }
+        Ok((fetched_count, kept_count))
+    }
+}
+
+/// A record's field in a [`DecodedSlice`] slab; its ranges were cut from
+/// the slab as it grew, so they always fit.
+fn field<T>(slab: &[T], range: Range<usize>) -> &[T] {
+    slab.get(range).unwrap_or_default()
 }
 
 /// Parsed CRAM slice header.
@@ -101,23 +295,16 @@ impl SliceHeader {
     }
 }
 
-/// Decode all records from a slice's blocks and push them into a `RecordStore`.
+/// Decode all of a slice's records for reference `tid` into a
+/// [`DecodedSlice`].
 ///
 /// `container_data` starts at the first block after the container header.
 /// `slice_offset` is the byte offset from container data start to this slice's header block.
-///
-/// `customize` is a push-time customizer: each record that passes the
-/// reader's built-in overlap/tid/unmapped checks is pushed and
-/// `customize.filter` is consulted. When it returns `false`, the push
-/// is rolled back with zero slab waste (same as BAM/SAM). Returns
-/// `(fetched, kept)` where `fetched` counts records that reached the push
-/// step and `kept` counts those that survived the filter.
-// r[impl cram.fetch_into_customized.push_time]
 #[expect(
     clippy::too_many_arguments,
     reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
 )]
-pub(crate) fn decode_slice<E: CustomizeRecordStore>(
+pub(crate) fn decode_slice(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
@@ -126,9 +313,6 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     tid: u32,
-    query_start: Pos0,
-    query_end: Pos0,
-    store: &mut RecordStore<E::Extra>,
     cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
@@ -136,10 +320,9 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     name_buf: &mut Vec<u8>,
     feature_byte_buf: &mut Vec<u8>,
     cigar_ops_buf: &mut Vec<(u32, u8)>,
-    customize: &mut E,
     rans_4x8_buf: &mut Option<super::rans::Rans4x8Buf>,
     nx16_order1_buf: &mut Option<super::rans_nx16::Nx16Order1Buf>,
-) -> Result<(usize, usize), CramError> {
+) -> Result<DecodedSlice, CramError> {
     let slice_data = container_data
         .get(slice_offset..)
         .ok_or_else(|| CramError::Truncated { context: "slice offset" })?;
@@ -181,7 +364,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
 
     // r[impl cram.edge.empty_slice]
     if sh.num_records == 0 {
-        return Ok((0, 0));
+        return Ok(DecodedSlice::default());
     }
 
     // r[impl cram.edge.reference_mismatch]
@@ -272,11 +455,10 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
 
     // Decode records, collecting mate cross-reference info for TLEN reconstruction.
     let mut alignment_pos = i64::from(sh.alignment_start);
-    let mut fetched_count = 0usize;
-    let mut kept_count = 0usize;
     let num_records = usize::try_from(sh.num_records)
         .map_err(|_| CramError::InvalidLength { value: sh.num_records })?;
     let mut mate_infos: Vec<SliceMateInfo> = Vec::with_capacity(num_records);
+    let mut out = DecodedSlice::default();
 
     for record_index in 0..num_records {
         // For embedded reference, ref_start is the slice's alignment_start
@@ -289,7 +471,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
             ref_start_0based
         };
 
-        let (fetched, mate_info) = decode_record(
+        let mate_info = decode_record(
             ch,
             &tag_lines,
             &sh,
@@ -300,9 +482,7 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
             effective_ref_start,
             read_group_ids,
             tid,
-            query_start,
-            query_end,
-            store,
+            &mut out,
             cigar_buf,
             bases_buf,
             qual_buf,
@@ -311,22 +491,15 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
             feature_byte_buf,
             cigar_ops_buf,
             record_index,
-            customize,
         )?;
-        if fetched {
-            fetched_count = fetched_count.wrapping_add(1);
-            if mate_info.store_idx.is_some() {
-                kept_count = kept_count.wrapping_add(1);
-            }
-        }
         mate_infos.push(mate_info);
     }
 
     // Post-process: resolve template_len for attached/downstream mates.
     // Follow mate_line chains to compute alignment span, then assign signed TLEN.
-    resolve_mate_tlen(&mate_infos, store);
-
-    Ok((fetched_count, kept_count))
+    resolve_mate_tlen(&mate_infos, &mut out);
+    out.shrink_to_fit();
+    Ok(out)
 }
 
 // r[impl cram.perf.external_order]
@@ -431,21 +604,17 @@ fn resolve_tag_lines(ch: &CompressionHeader) -> Vec<ResolvedTagLine<'_>> {
         .collect()
 }
 
-/// Decode a single CRAM record from the decode context.
+/// Decode a single CRAM record from the decode context into `out`, unless
+/// it belongs to another reference of a multi-reference slice.
 ///
-/// Returns `(fetched, mate_info)` where `fetched` is `true` if the record
-/// reached the push step (i.e., was not rejected by the reader's built-in
-/// overlap/tid/unmapped checks) and `false` otherwise. `mate_info.store_idx`
-/// is `Some(idx)` if the record survived both the reader check and the
-/// user's `customize.filter`, and `None` if either dropped it — the
-/// mate-resolution pass already handles the `None` case.
+/// Returns the record's mate cross-reference info; its `slot` is `None`
+/// for a record left out.
 // r[impl cram.record.decode_order]
-// r[impl cram.fetch_into_customized.push_time]
 #[expect(
     clippy::too_many_arguments,
-    reason = "CRAM record decoding requires compression header, slice header, context, and customize parameters"
+    reason = "CRAM record decoding requires compression header, slice header, context, and scratch parameters"
 )]
-fn decode_record<E: CustomizeRecordStore>(
+fn decode_record(
     ch: &CompressionHeader,
     tag_lines: &[ResolvedTagLine<'_>],
     sh: &SliceHeader,
@@ -456,9 +625,7 @@ fn decode_record<E: CustomizeRecordStore>(
     ref_start_0based: i64,
     read_group_ids: &[SmolStr],
     tid: u32,
-    query_start: Pos0,
-    query_end: Pos0,
-    store: &mut RecordStore<E::Extra>,
+    out: &mut DecodedSlice,
     cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
@@ -467,8 +634,7 @@ fn decode_record<E: CustomizeRecordStore>(
     feature_byte_buf: &mut Vec<u8>,
     cigar_ops_buf: &mut Vec<(u32, u8)>,
     record_index: usize,
-    customize: &mut E,
-) -> Result<(bool, SliceMateInfo), CramError> {
+) -> Result<SliceMateInfo, CramError> {
     let ds = &ch.data_series;
 
     // r[impl cram.record.flags]
@@ -711,55 +877,24 @@ fn decode_record<E: CustomizeRecordStore>(
         })?;
 
         if foreign_tid {
-            return Ok((
-                false,
-                SliceMateInfo {
-                    pos: pos_0based.as_i64(),
-                    end_pos: end_pos_raw,
-                    mate_line,
-                    store_idx: None,
-                    bam_flags: raw_flags,
-                    ref_id: record_ref_id,
-                },
-            ));
+            return Ok(SliceMateInfo {
+                pos: pos_0based.as_i64(),
+                end_pos: end_pos_raw,
+                mate_line,
+                slot: None,
+                bam_flags: raw_flags,
+                ref_id: record_ref_id,
+            });
         }
 
-        // Check overlap with query region. Both `query_start` and
-        // `query_end` are inclusive (matches the BAM IndexedReader's
-        // convention: a record is kept iff `rec_pos <= query_end &&
-        // rec_end >= query_start`). `end_pos` is the inclusive last
-        // covered position. Mismatching this with the half-open
-        // semantics used elsewhere drops boundary records (reads
-        // starting exactly at the requested end position).
-        // r[impl interval.overlap_test]
-        if pos_0based > query_end || end_pos < query_start {
-            return Ok((
-                false,
-                SliceMateInfo {
-                    pos: pos_0based.as_i64(),
-                    end_pos: end_pos_raw,
-                    mate_line,
-                    store_idx: None,
-                    bam_flags: raw_flags,
-                    ref_id: record_ref_id,
-                },
-            ));
-        }
-
-        let qname: &[u8] = name_buf;
-
-        // r[impl cram.fetch_into_customized.push_time]
-        // Push the record, then consult the user's filter. `push_fields`
-        // returns `Ok(None)` when the filter rejects and rolls back slab
-        // writes with zero waste (same as BAM/SAM).
-        let store_idx = store.push_fields(
+        let slot = out.push(
             pos_0based,
             end_pos,
             bam_flags,
             mapq,
             matching_bases,
             indel_bases,
-            qname,
+            name_buf,
             cigar_buf,
             bases_buf,
             qual_buf,
@@ -768,20 +903,16 @@ fn decode_record<E: CustomizeRecordStore>(
             next_ref_id_val,
             next_pos_val,
             template_len_val,
-            customize,
         )?;
 
-        return Ok((
-            true,
-            SliceMateInfo {
-                pos: pos_0based.as_i64(),
-                end_pos: end_pos_raw,
-                mate_line,
-                store_idx,
-                bam_flags: raw_flags,
-                ref_id: record_ref_id,
-            },
-        ));
+        return Ok(SliceMateInfo {
+            pos: pos_0based.as_i64(),
+            end_pos: end_pos_raw,
+            mate_line,
+            slot: Some(slot),
+            bam_flags: raw_flags,
+            ref_id: record_ref_id,
+        });
     }
 
     // Unmapped read
@@ -802,62 +933,45 @@ fn decode_record<E: CustomizeRecordStore>(
     }
 
     // r[impl cram.edge.unmapped_reads]
-    // Unmapped read — push to store so filter_raw can decide.
+    // Unmapped read — kept so filter_raw can decide.
     // htslib compat: end_pos = pos (ignore CIGAR for unmapped reads).
     //
-    // Apply the same foreign-tid and overlap checks as the mapped path
-    // so unmapped reads from other references in multi-ref slices or
-    // outside the query region don't pollute the store.
+    // Apply the same foreign-tid check as the mapped path so unmapped reads
+    // from other references in multi-ref slices don't pollute the slice.
     #[expect(
         clippy::cast_possible_wrap,
         reason = "tid comes from BAM header, capped at MAX_REFERENCES (1M), well within i32"
     )]
     let is_multi_ref_unmapped = is_multi_ref && record_ref_id != tid as i32 && record_ref_id != -1;
-    if is_multi_ref_unmapped || pos_0based > query_end {
-        return Ok((
-            false,
-            SliceMateInfo {
-                pos: pos_0based.as_i64(),
-                end_pos: pos_0based.as_i64(),
-                mate_line,
-                store_idx: None,
-                bam_flags: raw_flags,
-                ref_id: record_ref_id,
-            },
-        ));
-    }
-
-    let qname: &[u8] = name_buf;
-    let end_pos = pos_0based;
-    let store_idx = store.push_fields(
-        pos_0based,
-        end_pos,
-        bam_flags,
-        0, // mapq — unmapped reads have MAPQ=0 per spec
-        0, // matching_bases
-        0, // indel_bases
-        qname,
-        &[], // empty cigar — unmapped reads don't have features decoded
-        bases_buf,
-        qual_buf,
-        aux_buf,
-        record_ref_id,
-        next_ref_id_val,
-        next_pos_val,
-        template_len_val,
-        customize,
-    )?;
-    Ok((
-        true,
-        SliceMateInfo {
-            pos: pos_0based.as_i64(),
-            end_pos: end_pos.as_i64(),
-            mate_line,
-            store_idx,
-            bam_flags: raw_flags,
-            ref_id: record_ref_id,
-        },
-    ))
+    let slot = if is_multi_ref_unmapped {
+        None
+    } else {
+        Some(out.push(
+            pos_0based,
+            pos_0based,
+            bam_flags,
+            0, // mapq — unmapped reads have MAPQ=0 per spec
+            0, // matching_bases
+            0, // indel_bases
+            name_buf,
+            &[], // empty cigar — unmapped reads don't have features decoded
+            bases_buf,
+            qual_buf,
+            aux_buf,
+            record_ref_id,
+            next_ref_id_val,
+            next_pos_val,
+            template_len_val,
+        )?)
+    };
+    Ok(SliceMateInfo {
+        pos: pos_0based.as_i64(),
+        end_pos: pos_0based.as_i64(),
+        mate_line,
+        slot,
+        bam_flags: raw_flags,
+        ref_id: record_ref_id,
+    })
 }
 
 // r[impl cram.record.mate_tlen_reconstruction]
@@ -873,7 +987,7 @@ fn decode_record<E: CustomizeRecordStore>(
     clippy::arithmetic_side_effects,
     reason = "everything is based on infos.len()"
 )]
-fn resolve_mate_tlen<U>(infos: &[SliceMateInfo], store: &mut RecordStore<U>) {
+fn resolve_mate_tlen(infos: &[SliceMateInfo], out: &mut DecodedSlice) {
     let n = infos.len();
     // Track which records we've already resolved to avoid reprocessing.
     let mut resolved = vec![false; n];
@@ -960,40 +1074,26 @@ fn resolve_mate_tlen<U>(infos: &[SliceMateInfo], store: &mut RecordStore<U>) {
         };
 
         // First record gets first_tlen; all remaining get the opposite.
-        if let Some(idx) = first.store_idx {
-            store.set_template_len(idx, first_tlen);
-        }
+        // Each record's mate is the next entry in the chain (last wraps to
+        // first); a fetch that leaves the mate out nulls these fields again
+        // (`DecodedSlice::copy_into`).
         let rest_tlen = first_tlen.neg();
-        for &j in &chain[1..] {
-            if let Some(idx) = infos[j].store_idx {
-                store.set_template_len(idx, rest_tlen);
-            }
-        }
-
-        // Resolve next_ref_id and next_pos for each record in the chain.
-        // Each record's mate is the next entry in the chain (last wraps to first).
-        // r[impl cram.fetch_into_customized.filtered_mate_sentinel]
-        // If the mate was rejected by the user's filter (store_idx == None),
-        // null out the kept record's mate fields so the BAM "mate unavailable"
-        // sentinel (-1, -1) reflects what's actually in the store. TLEN is left
-        // as the full-chain span — it's a per-template property and matches what
-        // an unfiltered fetch would compute.
-        for ci in 0..chain.len() {
-            let mate_ci = if ci + 1 < chain.len() { ci + 1 } else { 0 };
-            let record_idx = infos[chain[ci]].store_idx;
-            let mate = &infos[chain[mate_ci]];
-            let Some(idx) = record_idx else { continue };
-            if mate.store_idx.is_none() {
-                // Mate was filtered out — set the BAM "mate unavailable" sentinel.
-                store.set_mate_info(idx, -1, -1);
-                continue;
-            }
+        for (ci, &j) in chain.iter().enumerate() {
+            let Some(slot) = infos[j].slot else { continue };
+            let mate = &infos[chain[if ci + 1 < chain.len() { ci + 1 } else { 0 }]];
+            let Some(r) = out.records.get_mut(slot as usize) else { continue };
+            r.template_len = if ci == 0 { first_tlen } else { rest_tlen };
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "mate positions fit in i32 for genomic data"
             )]
             let mate_pos = if mate.pos < 0 { -1 } else { mate.pos as i32 };
-            store.set_mate_info(idx, mate.ref_id, mate_pos);
+            r.next_ref_id = mate.ref_id;
+            r.next_pos = mate_pos;
+            r.mate = match mate.slot {
+                Some(m) => MateLink::Record(m),
+                None => MateLink::Elsewhere,
+            };
         }
     }
 }
@@ -1577,9 +1677,6 @@ mod tests {
             &bam_header,
             &[],
             0,
-            Pos0::new(0).unwrap(),
-            Pos0::MAX,
-            &mut crate::bam::record_store::RecordStore::new(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
@@ -1587,7 +1684,6 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
-            &mut (),
             &mut None,
             &mut None,
         );
