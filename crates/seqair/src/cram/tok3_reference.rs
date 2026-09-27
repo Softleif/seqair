@@ -53,6 +53,7 @@
 )]
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::reader::check_codec_output;
 
@@ -141,13 +142,15 @@ impl<'a> Input<'a> {
 /// One byte stream `B_{pos,type}`, read from the front.
 #[derive(Clone)]
 struct ByteStream {
-    bytes: Vec<u8>,
+    /// Shared, so a copied stream costs no memory: a block may copy one
+    /// stream into every one of its 128 × 13 slots.
+    bytes: Rc<[u8]>,
     pos: usize,
 }
 
 impl ByteStream {
-    fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes, pos: 0 }
+    fn new(bytes: impl Into<Rc<[u8]>>) -> Self {
+        Self { bytes: bytes.into(), pos: 0 }
     }
 
     fn read_uint8(&mut self) -> Option<u8> {
@@ -300,7 +303,7 @@ fn decode_token_byte_streams(
             let dup_pos = usize::from(input.read_uint8()?);
             let dup_type = input.read_uint8()?;
             // Rejected: copying a stream that was never set.
-            let copy = b.get(&(dup_pos, dup_type))?.bytes.clone();
+            let copy = Rc::clone(&b.get(&(dup_pos, dup_type))?.bytes);
             b.insert((t, ty), ByteStream::new(copy));
         } else {
             let clen = input.read_uint7()?;
