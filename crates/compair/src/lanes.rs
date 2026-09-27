@@ -330,8 +330,22 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
     }
     let (o, w) = (view.offset, view.half_width);
     let span = width + 2;
-    cells.clear();
-    cells.resize(span, Cells::default());
+    // Only the cells some row touches are cleared: row 0's band `o - w..=o +
+    // w`, and each row's `first - 1..=last + 1`, which over rows
+    // `1..=rows_len` stays inside `o - w..=rows_len + o + w + 1`. A group
+    // whose lanes' offsets spread far apart has shifted columns well past
+    // that (`width` is the furthest lane's haplotype end), and the rest of
+    // the buffer is never read, so it may keep an earlier group's cells.
+    let touched_from = (o - w).max(0) as usize;
+    let touched_to = (read_len as i64 + o + w + 1).min(width as i64 + 1);
+    if cells.len() < span {
+        cells.resize(span, Cells::default());
+    }
+    if touched_to >= touched_from as i64
+        && let Some(touched) = cells.get_mut(touched_from..=touched_to as usize)
+    {
+        touched.fill(Cells::default());
+    }
     // A slice, not the `Vec`: on the SIMD lane this kernel is inlined into a
     // `#[simd]` closure, where the buffer arrives as a field of the closure
     // rather than as a `noalias` argument, and LLVM then has to assume every
@@ -353,10 +367,14 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
     // for why that alone keeps every row clear there.
     let front = L::load(token, view.front);
     let mut crossing = zero;
-    for (column, slot) in cells.iter_mut().enumerate().take(width + 1) {
-        if (column as i64 - o).abs() > w {
-            continue;
-        }
+    let row0_from = (o - w).max(0) as usize;
+    let row0_to = (o + w).min(width as i64);
+    let row0 = if row0_to >= row0_from as i64 {
+        cells.get_mut(row0_from..=row0_to as usize).unwrap_or_default()
+    } else {
+        &mut []
+    };
+    for (column, slot) in (row0_from..).zip(row0) {
         let at = L::splat(token, column as f32);
         let cell = L::masked_out(at.below(front), L::masked(at.below(past_end), init));
         cell.store(&mut slot.d);
