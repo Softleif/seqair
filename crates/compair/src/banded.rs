@@ -302,6 +302,8 @@ pub struct Workspace {
     pub(crate) rows: crate::strips::RowBuffer,
     pub(crate) batch_plan: crate::batch::BatchPlan,
     pub(crate) batch_rows: crate::batch::BatchBuffer,
+    pub(crate) pairs_plan: crate::pairs::PairsPlan,
+    pub(crate) pairs_rows: crate::pairs::PairsBuffer,
 }
 
 impl Workspace {

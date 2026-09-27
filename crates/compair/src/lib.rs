@@ -47,6 +47,7 @@ mod error;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod haplotype;
+mod pairs;
 mod read;
 mod reference;
 mod scaling;
@@ -61,6 +62,7 @@ pub use emission::{
 };
 pub use error::Error;
 pub use haplotype::Haplotype;
+pub use pairs::{PAIRS, PAIRS_BREAK_EVEN, Pair, align_pairs, align_reads};
 pub use read::Read;
 pub use reference::align_full;
 pub use seqair_types::{Base, BaseQuality, Probability, QPos, Strand};

@@ -29,6 +29,7 @@ use fearless_simd_macros::simd;
 use crate::{
     banded::{Band, Lane, LaneMask, Plan, Ring, Shape, Window, banded_kernel},
     batch::{BATCH, BatchBuffer, BatchPlan, batch_kernel},
+    pairs::{PAIRS, PairsBuffer, PairsPlan, pairs_kernel},
     strips::{RowBuffer, strip_kernel},
     types::Log10Likelihood,
 };
@@ -200,6 +201,15 @@ fn batch_kernel_simd<S: Simd>(
 }
 
 #[simd]
+fn pairs_kernel_simd<S: Simd>(
+    simd: S,
+    plan: &PairsPlan,
+    buffer: &mut PairsBuffer,
+) -> [Log10Likelihood; PAIRS] {
+    pairs_kernel::<f32x8<S>>(simd, plan, buffer)
+}
+
+#[simd]
 fn banded_kernel_simd<S: Simd>(
     simd: S,
     plan: &Plan,
@@ -230,6 +240,15 @@ pub(crate) fn batch_kernel_at(
     band: Band,
 ) -> [Log10Likelihood; BATCH] {
     dispatch!(level, simd => batch_kernel_simd(simd, plan, buffer, read_len, band))
+}
+
+/// The pairs kernel at `level`.
+pub(crate) fn pairs_kernel_at(
+    level: Level,
+    plan: &PairsPlan,
+    buffer: &mut PairsBuffer,
+) -> [Log10Likelihood; PAIRS] {
+    dispatch!(level, simd => pairs_kernel_simd(simd, plan, buffer))
 }
 
 /// The diagonal kernel at `level`.

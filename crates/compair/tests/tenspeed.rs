@@ -15,7 +15,10 @@
 //! - on x86_64, agreement with gkl -- an independent Rust port of the kernel
 //!   GATK calls through JNI, on exactly the bytes gkl's own harness would get.
 
-use compair::{Band, StandardEmission, align_banded_simd, align_full, align_strips_simd};
+use compair::{
+    Band, Haplotype, Pair, Read, StandardEmission, Workspace, align_banded_simd, align_full,
+    align_strips_simd,
+};
 
 #[path = "support/tenspeed.rs"]
 mod tenspeed;
@@ -102,6 +105,62 @@ fn the_band_holds_the_optimal_path_on_most_pairs() {
         "only {inside} of {} pairs stayed inside the band",
         pairs.len()
     );
+}
+
+/// The pairs kernel's gate at scale: all 3,550 pairs, packed eight to a group
+/// in file order -- so a group mixes reads of 10 to 247 bases, haplotypes of 41
+/// to 263 and offsets from all over -- and again through `align_reads` group
+/// by group, the way a caller holds them. Every score is the strip kernel's,
+/// to the bit.
+#[test]
+fn the_pairs_kernel_is_the_strip_kernel_on_every_pair() {
+    let pairs = tenspeed::pairs().expect("10s.in parses");
+    let standard = StandardEmission::default();
+    let want: Vec<u64> = pairs
+        .iter()
+        .map(|pair| {
+            align_strips_simd(&pair.haplotype, &pair.read, &standard, Band::anchored(pair.offset))
+                .get()
+                .to_bits()
+        })
+        .collect();
+
+    let packed: Vec<Pair<'_>> = pairs
+        .iter()
+        .map(|pair| Pair::new(&pair.haplotype, &pair.read, Band::anchored(pair.offset)))
+        .collect();
+    let mut workspace = Workspace::new();
+    let mut out = Vec::new();
+    workspace.align_pairs(&packed, &standard, &mut out);
+    let got: Vec<u64> = out.iter().map(|score| score.get().to_bits()).collect();
+    let differ = want.iter().zip(&got).filter(|(want, got)| want != got).count();
+    assert_eq!(differ, 0, "{differ} of {} pairs differ from the strip kernel", pairs.len());
+    assert_eq!(got.len(), pairs.len());
+
+    // The groups carry one band per read, seeded against the group's first
+    // haplotype, where `pairs()` seeds each pair on its own; so this half has
+    // its own oracle.
+    let mut routed = Vec::with_capacity(pairs.len());
+    let mut routed_want = Vec::with_capacity(pairs.len());
+    for group in tenspeed::groups().expect("10s.in parses into its groups") {
+        let haplotypes: Vec<&Haplotype> = group.haplotypes.iter().collect();
+        let reads: Vec<(&Read, Band)> = group
+            .reads
+            .iter()
+            .zip(&group.offsets)
+            .map(|(read, &offset)| (read, Band::anchored(offset)))
+            .collect();
+        workspace.align_reads(&haplotypes, &reads, &standard, &mut out);
+        routed.extend(out.iter().map(|score| score.get().to_bits()));
+        for &(read, band) in &reads {
+            for haplotype in &haplotypes {
+                routed_want
+                    .push(align_strips_simd(haplotype, read, &standard, band).get().to_bits());
+            }
+        }
+    }
+    assert_eq!(routed.len(), pairs.len());
+    assert_eq!(routed, routed_want, "align_reads, group by group");
 }
 
 /// An independent implementation of the same recurrence, on the same bytes.
