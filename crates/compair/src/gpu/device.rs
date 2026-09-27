@@ -514,7 +514,8 @@ impl GpuAligner {
         }
 
         let scores_bytes = bytes(self.records.len(), size_of::<[u32; 2]>());
-        let storage_limit = u64::from(context.limits.max_storage_buffer_binding_size);
+        let storage_limit = u64::from(context.limits.max_storage_buffer_binding_size)
+            .min(context.limits.max_buffer_size);
         let copy = wgpu::BufferUsages::COPY_DST;
         let storage = wgpu::BufferUsages::STORAGE;
         let uploads: [(&str, &[u8]); 3] = [
@@ -678,8 +679,10 @@ fn grow<'a>(
         Some(grown) if grown.capacity >= size => grown,
         _ => {
             // Half again as much, so a caller whose launches creep upwards
-            // does not reallocate every time.
-            let capacity = size.saturating_add(size / 2).next_multiple_of(4);
+            // does not reallocate every time -- but never past what the
+            // device allows, which `size` itself was checked against.
+            let limit = device.limits().max_buffer_size / 4 * 4;
+            let capacity = size.saturating_add(size / 2).next_multiple_of(4).min(limit).max(size);
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: capacity,
