@@ -21,6 +21,8 @@
 
 use core::fmt::Write as _;
 
+use super::plan::{GAP_CONTINUATION, INDEL_TO_MATCH, MATCH_TO_DELETION, MATCH_TO_INSERTION};
+
 /// How the row buffer is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Style {
@@ -63,6 +65,10 @@ pub fn source(variant: Variant) -> Result<String, core::fmt::Error> {
     out.push_str(HEADER);
     writeln!(out, "const HALF: u32 = {half_width}u;")?;
     writeln!(out, "const WORKGROUP: u32 = {workgroup_size}u;")?;
+    writeln!(out, "const MATCH_TO_INSERTION: u32 = {MATCH_TO_INSERTION}u;")?;
+    writeln!(out, "const MATCH_TO_DELETION: u32 = {MATCH_TO_DELETION}u;")?;
+    writeln!(out, "const INDEL_TO_MATCH: u32 = {INDEL_TO_MATCH}u;")?;
+    writeln!(out, "const GAP_CONTINUATION: u32 = {GAP_CONTINUATION}u;")?;
     out.push_str(
         match contraction {
             Contraction::Allowed => {
@@ -97,6 +103,12 @@ struct Pair {
     pad: u32,
 }
 
+struct RowRecord {
+    packed: u32,
+    spread: f32,
+    mismatched: f32,
+}
+
 struct Params {
     first: u32,
     count: u32,
@@ -105,10 +117,13 @@ struct Params {
 }
 
 @group(0) @binding(0) var<storage, read> pairs: array<Pair>;
-@group(0) @binding(1) var<storage, read> rows: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> rows: array<RowRecord>;
 @group(0) @binding(2) var<storage, read> weights: array<f32>;
 @group(0) @binding(3) var<storage, read_write> scores: array<vec2<u32>>;
 @group(0) @binding(4) var<uniform> params: Params;
+// `plan::TRANSITIONS`: match-to-match by (insertion, deletion) quality, then
+// the four transitions of one quality each.
+@group(0) @binding(5) var<storage, read> transitions: array<f32>;
 
 const STRIP_ROWS: u32 = 8u;
 ";
@@ -164,10 +179,11 @@ struct Row {
 }
 
 fn row_inputs(pair: Pair, row: u32, first: i32) -> Row {
-    let at = 2u * (pair.rows + row - 1u);
-    let a = rows[at];
-    let b = rows[at + 1u];
-    let base = bitcast<u32>(a.x);
+    let record = rows[pair.rows + row - 1u];
+    let base = record.packed & 0xffu;
+    let insertion = (record.packed >> 8u) & 0xffu;
+    let deletion = (record.packed >> 16u) & 0xffu;
+    let gap = record.packed >> 24u;
     var out: Row;
     out.unknown = base >= 4u;
     // Column `first + p` reads site `first + p - 1`. Where that is outside the
@@ -175,13 +191,13 @@ fn row_inputs(pair: Pair, row: u32, first: i32) -> Row {
     // storage read in WGSL returns some in-bounds value or zero, never
     // undefined behaviour, and the value is discarded.
     out.track = u32(i32(pair.weights + min(base, 3u) * pair.hap_len) + first - 1);
-    out.spread = a.y;
-    out.mismatched = a.z;
-    out.match_to_match = a.w;
-    out.match_to_insertion = b.x;
-    out.match_to_deletion = b.y;
-    out.indel_to_match = b.z;
-    out.gap_continuation = b.w;
+    out.spread = record.spread;
+    out.mismatched = record.mismatched;
+    out.match_to_match = transitions[insertion * 256u + deletion];
+    out.match_to_insertion = transitions[MATCH_TO_INSERTION + insertion];
+    out.match_to_deletion = transitions[MATCH_TO_DELETION + deletion];
+    out.indel_to_match = transitions[INDEL_TO_MATCH + gap];
+    out.gap_continuation = transitions[GAP_CONTINUATION + gap];
     out.lo = max(0, 1 - first);
     out.hi = min(i32(2u * pair.half_width), i32(pair.hap_len) - first);
     return out;

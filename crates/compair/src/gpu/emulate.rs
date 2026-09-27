@@ -9,7 +9,10 @@
 
 use super::{
     device::finish,
-    plan::{GpuPairs, PairRecord, RowRecord},
+    plan::{
+        GAP_CONTINUATION, GpuPairs, INDEL_TO_MATCH, MATCH_TO_DELETION, MATCH_TO_INSERTION,
+        PairRecord, RowRecord, TRANSITIONS,
+    },
 };
 use crate::types::Log10Likelihood;
 
@@ -100,8 +103,16 @@ fn run(
         let Some(record) = rows.get((pair.rows + row - 1) as usize) else {
             return (0.0, 0);
         };
-        let [base, spread, mismatched, mm, mti, mtd, itm, gc] = *record;
-        let base = base.to_bits();
+        let (spread, mismatched) = (record.spread, record.mismatched);
+        let base = record.packed & 0xff;
+        let [insertion, deletion, gap] =
+            [8, 16, 24].map(|shift| ((record.packed >> shift) & 0xff) as usize);
+        let lookup = |index: usize| TRANSITIONS.get(index).copied().unwrap_or(0.0);
+        let mm = lookup(insertion * 256 + deletion);
+        let mti = lookup(MATCH_TO_INSERTION + insertion);
+        let mtd = lookup(MATCH_TO_DELETION + deletion);
+        let itm = lookup(INDEL_TO_MATCH + gap);
+        let gc = lookup(GAP_CONTINUATION + gap);
         let unknown = base >= 4;
         let first = origin + row as i32;
         let track = (pair.weights + base.min(3) * pair.hap_len) as i32 + first - 1;

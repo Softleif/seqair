@@ -10,7 +10,7 @@ use bytemuck::{Pod, Zeroable};
 
 use super::{
     GpuError,
-    plan::{GpuPairs, PairRecord},
+    plan::{GpuPairs, PairRecord, TRANSITIONS},
     shader::{self, Contraction, Style, Variant},
 };
 use crate::types::Log10Likelihood;
@@ -34,6 +34,8 @@ pub struct GpuContext {
     layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
     pipelines: Mutex<HashMap<Variant, wgpu::ComputePipeline>>,
+    /// `plan::TRANSITIONS`, uploaded once.
+    transitions: wgpu::Buffer,
 }
 
 impl core::fmt::Debug for GpuContext {
@@ -117,6 +119,7 @@ impl GpuContext {
                 storage(1, true),
                 storage(2, true),
                 storage(3, false),
+                storage(5, true),
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -134,7 +137,16 @@ impl GpuContext {
             bind_group_layouts: &[&layout],
             immediate_size: 0,
         });
+        let transitions = wgpu::util::DeviceExt::create_buffer_init(
+            &device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("compair::gpu::transitions"),
+                contents: bytemuck::cast_slice(&TRANSITIONS),
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        );
         Ok(Arc::new(Self {
+            transitions,
             device,
             queue,
             info,
@@ -574,6 +586,10 @@ impl GpuAligner {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: whole(scores_buffer, scores_bytes.max(4)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: context.transitions.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,

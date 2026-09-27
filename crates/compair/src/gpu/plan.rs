@@ -7,11 +7,12 @@
 //! rather than pairs of them.
 
 use bytemuck::{Pod, Zeroable};
-use seqair_types::{Base, Strand};
+use seqair_types::{Base, BaseQuality, Strand};
 
 use super::GpuError;
 use crate::{
     banded::Band, emission::Emission, emission::SiteWeights, haplotype::Haplotype, read::Read,
+    transitions::Transition,
 };
 
 /// A read in a [`GpuPairs`], returned by [`GpuPairs::push_read`].
@@ -39,9 +40,75 @@ pub(crate) struct PairRecord {
     pub(crate) pad: u32,
 }
 
-/// One read row as the shader reads it: two `vec4<f32>`. The base is a
-/// selector (`0..4` for a known base, `4` for `N`) stored as its bits.
-pub(crate) type RowRecord = [f32; 8];
+/// One read row as the shader reads it, twelve bytes.
+///
+/// The five transitions are not here: each is a function of the row's
+/// insertion, deletion and gap qualities, so the row carries those three
+/// bytes and the shader looks the transitions up in [`TRANSITIONS`]. Only the
+/// emission's two terms, which an `Emission` may derive from anything, are
+/// carried as values.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub(crate) struct RowRecord {
+    /// The base selector (`0..4` for a known base, `4` for `N`) in the low
+    /// byte, then the insertion, deletion and gap-continuation quality bytes.
+    pub(crate) packed: u32,
+    /// `(1 - eps) - eps / 3`, as in `banded::RowTracks`.
+    pub(crate) spread: f32,
+    pub(crate) mismatched: f32,
+}
+
+/// Offsets into [`TRANSITIONS`]: `match_to_match` by insertion and deletion
+/// quality, then the four one-quality transitions.
+pub(crate) const MATCH_TO_INSERTION: usize = 256 * 256;
+pub(crate) const MATCH_TO_DELETION: usize = MATCH_TO_INSERTION + 256;
+pub(crate) const INDEL_TO_MATCH: usize = MATCH_TO_DELETION + 256;
+pub(crate) const GAP_CONTINUATION: usize = INDEL_TO_MATCH + 256;
+const TRANSITION_TABLE: usize = GAP_CONTINUATION + 256;
+
+/// Every transition a read row can carry, narrowed to `f32` exactly as the
+/// CPU plans narrow `Read`'s: the same `Transition::from_qualities`, so a
+/// lookup is the value the CPU kernels use, bit for bit.
+pub(crate) static TRANSITIONS: std::sync::LazyLock<Box<[f32]>> = std::sync::LazyLock::new(|| {
+    let mut table = vec![0.0f32; TRANSITION_TABLE];
+    for insertion in 0..=255u8 {
+        for deletion in 0..=255u8 {
+            let t = Transition::from_qualities(
+                BaseQuality::from_byte(insertion),
+                BaseQuality::from_byte(deletion),
+                BaseQuality::from_byte(0),
+            );
+            if let Some(slot) = table.get_mut(usize::from(insertion) * 256 + usize::from(deletion))
+            {
+                *slot = narrow(t.match_to_match);
+            }
+        }
+    }
+    for quality in 0..=255u8 {
+        let t = Transition::from_qualities(
+            BaseQuality::from_byte(quality),
+            BaseQuality::from_byte(quality),
+            BaseQuality::from_byte(quality),
+        );
+        let at = usize::from(quality);
+        for (offset, value) in [
+            (MATCH_TO_INSERTION, t.match_to_insertion),
+            (MATCH_TO_DELETION, t.match_to_deletion),
+            (INDEL_TO_MATCH, t.indel_to_match),
+            (GAP_CONTINUATION, t.gap_continuation),
+        ] {
+            if let Some(slot) = table.get_mut(offset + at) {
+                *slot = narrow(value);
+            }
+        }
+    }
+    table.into_boxed_slice()
+});
+
+#[allow(clippy::cast_possible_truncation, reason = "the f32 narrowing is the point of this kernel")]
+fn narrow(value: f64) -> f32 {
+    value as f32
+}
 
 /// Read bases have this many weight tracks per haplotype, one per known base.
 const TRACKS: usize = 4;
@@ -121,6 +188,14 @@ impl GpuPairs {
         self.pairs.is_empty()
     }
 
+    /// The bytes a launch of this plan uploads.
+    #[must_use]
+    pub fn upload_bytes(&self) -> usize {
+        size_of_val(self.rows.as_slice())
+            + size_of_val(self.weights.as_slice())
+            + self.pairs.len() * size_of::<PairRecord>()
+    }
+
     /// Adds a read's row tracks: `Plan::fill`'s per-row arithmetic, row for
     /// row.
     #[allow(
@@ -135,17 +210,12 @@ impl GpuPairs {
         let slot = ReadSlot(index_u32(self.reads.len(), "reads")?);
         let first_row = index_u32(self.rows.len(), "read rows")?;
         let len = index_u32(read.len(), "read length")?;
-        // The shader addresses rows as `2 * (first_row + row)` `vec4`s.
-        index_u32(
-            (self.rows.len() + read.len())
-                .checked_mul(2)
-                .ok_or(GpuError::TooLarge { what: "read rows" })?,
-            "read rows",
-        )?;
+        index_u32(self.rows.len() + read.len(), "read rows")?;
         self.rows.reserve(read.len());
-        for index in 0..read.len() {
-            let (Some(observation), Some(t)) = (read.observation(index), read.transition(index))
-            else {
+        let qualities =
+            read.insertion_quals().iter().zip(read.deletion_quals()).zip(read.gap_quals());
+        for (index, ((insertion, deletion), gap)) in qualities.enumerate() {
+            let Some(observation) = read.observation(index) else {
                 return Err(GpuError::TooLarge { what: "read length" });
             };
             let eps = emission.epsilon(observation);
@@ -154,16 +224,15 @@ impl GpuPairs {
                 .known_index()
                 .and_then(|k| u32::try_from(k).ok())
                 .unwrap_or(SELECT_N);
-            self.rows.push([
-                f32::from_bits(select),
-                ((1.0 - eps) - eps / 3.0) as f32,
-                (eps / 3.0) as f32,
-                t.match_to_match as f32,
-                t.match_to_insertion as f32,
-                t.match_to_deletion as f32,
-                t.indel_to_match as f32,
-                t.gap_continuation as f32,
-            ]);
+            let packed = select
+                | u32::from(insertion.as_byte()) << 8
+                | u32::from(deletion.as_byte()) << 16
+                | u32::from(gap.as_byte()) << 24;
+            self.rows.push(RowRecord {
+                packed,
+                spread: ((1.0 - eps) - eps / 3.0) as f32,
+                mismatched: (eps / 3.0) as f32,
+            });
         }
         self.reads.push(ReadEntry { first_row, len, strand: read.strand() });
         Ok(slot)
