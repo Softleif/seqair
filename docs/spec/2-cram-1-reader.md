@@ -646,8 +646,8 @@ Slices with 0 records MUST be silently skipped.
 r[cram.edge.position_overflow]
 Delta-coded positions can produce negative values if records are not strictly sorted. The decoder MUST handle this gracefully (negative deltas are valid for supplementary alignments within a coordinate-sorted CRAM).
 
-r[cram.edge.unmapped_reads]
-Unmapped reads (flag 0x4) may appear in the last containers of the file, in slices with `reference_sequence_id = -1`. Their bases are stored in the `BA` data series (no reference reconstruction). `fetch_into` MUST skip them, same as BAM.
+r[cram.edge.unmapped_reads+2]
+Unmapped reads (flag 0x4) may appear in the last containers of the file, in slices with `reference_sequence_id = -1`, or next to mapped reads in a multi-reference slice. Their bases are stored in the `BA` data series (no reference reconstruction). A query for a reference returns an unmapped read only if it is placed on that reference and its position lies in the query — its end is its position — the same as BAM (`r[bam.reader.unmapped_skipped]`). An unplaced read (reference -1) is on no reference, so no reference's query returns it, whatever slice it sits in.
 
 r[cram.edge.long_reads]
 PacBio and ONT CRAM files contain reads of 10,000-1,000,000+ bases. Read feature lists can have thousands of entries, and quality/sequence arrays are correspondingly large. Buffer pre-allocation MUST scale with `RL`, not assume short-read sizes.

@@ -182,12 +182,8 @@ impl DecodedSlice {
         for r in &self.records {
             // Both bounds are inclusive, as are `pos` and `end_pos`: a record
             // is kept iff `pos <= query_end && end_pos >= query_start`. An
-            // unmapped record has no extent and is kept up to the query end.
-            let wanted = if r.flags.is_unmapped() {
-                r.pos <= query_end
-            } else {
-                r.pos <= query_end && r.end_pos >= query_start
-            };
+            // unmapped record's `end_pos` is its `pos`, as in BAM.
+            let wanted = r.pos <= query_end && r.end_pos >= query_start;
             if !wanted {
                 kept.push(None);
                 continue;
@@ -932,17 +928,18 @@ fn decode_record(
         qual_buf.resize(read_length, 0xFF);
     }
 
-    // r[impl cram.edge.unmapped_reads]
+    // r[impl cram.edge.unmapped_reads+2]
     // Unmapped read — kept so filter_raw can decide.
     // htslib compat: end_pos = pos (ignore CIGAR for unmapped reads).
     //
-    // Apply the same foreign-tid check as the mapped path so unmapped reads
-    // from other references in multi-ref slices don't pollute the slice.
+    // Apply the same foreign-tid check as the mapped path, so unmapped reads
+    // placed on other references of a multi-ref slice stay out — and so do
+    // unplaced ones (reference -1), which are on no reference at all.
     #[expect(
         clippy::cast_possible_wrap,
         reason = "tid comes from BAM header, capped at MAX_REFERENCES (1M), well within i32"
     )]
-    let is_multi_ref_unmapped = is_multi_ref && record_ref_id != tid as i32 && record_ref_id != -1;
+    let is_multi_ref_unmapped = is_multi_ref && record_ref_id != tid as i32;
     let slot = if is_multi_ref_unmapped {
         None
     } else {

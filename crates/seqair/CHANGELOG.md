@@ -70,6 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `N` bases.** The reference window for such a container was the query's own range, so a read
   starting before the query had its leading bases reconstructed against no reference. The window is
   now the whole reference whenever an entry lacks an extent.
+- **A CRAM query could return unplaced unmapped reads.** A multi-reference slice that also held
+  reads with no reference (samtools puts the unplaced reads next to the decoy/HLA contigs) returned
+  them for every one of its references — 12,144 records instead of 7,332 for one decoy contig of an
+  Ultima Genomics file. An unplaced read is on no reference and is no longer returned; a placed
+  unmapped read now needs its position inside the query, as in BAM, instead of anywhere before its
+  end.
 - **A small tok3 block could decode gigabytes of token streams.** Each stream was capped on its own,
   but a stream may be set any number of times and each one is decoded; a 64 KiB block reached
   2 GB. All of a block's streams together now pass the codec output cap.

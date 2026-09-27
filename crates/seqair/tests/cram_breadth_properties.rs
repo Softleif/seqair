@@ -994,7 +994,7 @@ fn zero_the_spans(cram: &Path) -> usize {
 }
 
 // r[verify cram.index.unmapped]
-// r[verify cram.edge.unmapped_reads]
+// r[verify cram.edge.unmapped_reads+2]
 // r[verify cram.index.parse]
 /// Unmapped reads get their own index entry, and it stays out of the way.
 ///
@@ -1011,7 +1011,8 @@ fn unmapped_reads_are_indexed_apart_from_the_mapped_ones(tc: TestCase) {
         embed_ref: 0,
         seqs_per_slice: tc.draw(gs::sampled_from(&[2u32, 4])),
         slices_per_container: 1,
-        multi_seq: Some(false),
+        // A multi-reference slice may hold unplaced reads next to mapped ones.
+        multi_seq: Some(tc.draw(gs::booleans())),
     };
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1022,10 +1023,14 @@ fn unmapped_reads_are_indexed_apart_from_the_mapped_ones(tc: TestCase) {
     let entries = crai_entries(&cram);
     let unmapped_entries: Vec<&CraiEntry> = entries.iter().filter(|e| e.ref_id < 0).collect();
     assert!(!unmapped_entries.is_empty(), "no unmapped CRAI entry: {entries:?}");
-    assert!(
-        unmapped_entries.iter().any(|e| e.alignment_span == 0 && e.alignment_start == 0),
-        "v3.1 writes the unmapped slice as start=0 span=0: {unmapped_entries:?}"
-    );
+    // In a multi-reference slice the unplaced reads share an entry's slice
+    // with mapped ones, and htslib indexes them with a span of 1.
+    if opts.multi_seq == Some(false) {
+        assert!(
+            unmapped_entries.iter().any(|e| e.alignment_span == 0 && e.alignment_start == 0),
+            "v3.1 writes the unmapped slice as start=0 span=0: {unmapped_entries:?}"
+        );
+    }
 
     let index = CramIndex::from_path(&cram.with_extension("cram.crai")).expect("read CRAI");
     for contig in 0..sample.contigs.len() {
@@ -1040,6 +1045,16 @@ fn unmapped_reads_are_indexed_apart_from_the_mapped_ones(tc: TestCase) {
         let from_bam = fetch(&bam, &fasta, contig, 0, CONTIG_LEN - 1);
         assert_eq!(from_cram.len(), sample.reads_on(contig).count(), "unmapped reads leaked in");
         assert_eq!(from_cram, from_bam, "contig {contig}: CRAM and BAM disagree");
+        // Without a filter too: an unplaced read is on no reference, so no
+        // reference's query returns it.
+        let everything = |path: &Path| {
+            let mut readers = Readers::open(path, &fasta).expect("open");
+            let mut store = RecordStore::new();
+            let span = (Pos0::ZERO..=Pos0::new(CONTIG_LEN - 1).unwrap()).into();
+            readers.fetch_into(contig as u32, span, &mut store).expect("fetch");
+            decode_store(&store)
+        };
+        assert_eq!(everything(&cram), everything(&bam), "contig {contig}: unfiltered");
     }
 
     tc.event_value("unmapped reads", sample.unmapped.len() as f64);

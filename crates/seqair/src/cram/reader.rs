@@ -932,7 +932,7 @@ mod tests {
         assert!(count > 0, "should fetch records from tid={tid}");
     }
 
-    // r[verify cram.edge.unmapped_reads]
+    // r[verify cram.edge.unmapped_reads+2]
     /// A multi-ref slice can interleave a truly unplaced read (RNAME=*, AP=0)
     /// with mapped reads. Decoding that slice for a positional query must not
     /// error on the unplaced read's `alignment_pos = 0` — it has no coordinate
@@ -955,7 +955,10 @@ mod tests {
         let count = reader
             .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store)
             .expect("query must not error on an unplaced read in a multi-ref slice");
-        assert!(count >= 1, "the mapped chr1 read must be returned");
+        // Only the chr1 read: the unplaced one is on no reference.
+        assert_eq!(count, 1);
+        let first = store.indices().next().unwrap();
+        assert_eq!(store.record(first).unwrap().qname(), b"r1");
     }
 
     // r[verify cram.edge.missing_reference+2]

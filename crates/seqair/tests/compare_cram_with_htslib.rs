@@ -324,7 +324,7 @@ fn cram_quality_scores_match_htslib() {
 // r[verify cram.record.mate_detached]
 // r[verify cram.record.mate_attached]
 // r[verify cram.edge.position_overflow]
-// r[verify cram.edge.unmapped_reads]
+// r[verify cram.edge.unmapped_reads+2]
 #[test]
 fn cram_sequences_match_htslib() {
     let contig = "chr19";
