@@ -27,7 +27,7 @@ use fearless_simd::{Level, Select, Simd, SimdBase, SimdFrom, dispatch, f32x8, ma
 use fearless_simd_macros::simd;
 
 use crate::{
-    banded::{Band, Lane, LaneMask, Plan, Ring, Shape, Window, banded_kernel},
+    banded::{Band, Lane, LaneMask, Plan, PlanView, Ring, Shape, Window, banded_kernel},
     batch::{BATCH, BatchBuffer, BatchPlan, batch_kernel},
     pairs::{PAIRS, PairsBuffer, PairsPlan, pairs_kernel},
     strips::{RowBuffer, strip_kernel},
@@ -181,7 +181,7 @@ impl<S: Simd> Lane for f32x8<S> {
 #[simd]
 fn strip_kernel_simd<S: Simd>(
     simd: S,
-    plan: &Plan,
+    plan: PlanView<'_>,
     rows: &mut RowBuffer,
     shape: Shape,
     band: Band,
@@ -223,7 +223,7 @@ fn banded_kernel_simd<S: Simd>(
 /// The strip kernel at `level`.
 pub(crate) fn strip_kernel_at(
     level: Level,
-    plan: &Plan,
+    plan: PlanView<'_>,
     rows: &mut RowBuffer,
     shape: Shape,
     band: Band,

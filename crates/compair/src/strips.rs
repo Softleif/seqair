@@ -41,7 +41,7 @@ use fearless_simd::Level;
 
 use crate::{
     banded::{
-        Band, COLUMN_FRONT, ColumnLanes, LANE_MAX, Lane, LaneMask, Plan, RowLanes, Shape,
+        Band, COLUMN_FRONT, ColumnLanes, LANE_MAX, Lane, LaneMask, PlanView, RowLanes, Shape,
         TransitionLanes, View, Window, Workspace, prior, reset,
     },
     emission::Emission,
@@ -123,7 +123,7 @@ impl Workspace {
         let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        crate::simd::strip_kernel_at(level, &self.plan, &mut self.rows, shape, band)
+        crate::simd::strip_kernel_at(level, self.plan.view(), &mut self.rows, shape, band)
     }
 
     fn strips<L: Lane<Token = ()>, E: Emission>(
@@ -136,7 +136,7 @@ impl Workspace {
         let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        strip_kernel::<L>((), &self.plan, &mut self.rows, shape, band)
+        strip_kernel::<L>((), self.plan.view(), &mut self.rows, shape, band)
     }
 }
 
@@ -503,7 +503,7 @@ fn phase<L: Lane, const MASKED: bool>(
 )]
 pub(crate) fn strip_kernel<L: Lane>(
     token: L::Token,
-    plan: &Plan,
+    plan: PlanView<'_>,
     rows: &mut RowBuffer,
     shape: Shape,
     band: Band,

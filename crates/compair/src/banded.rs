@@ -8,7 +8,7 @@ use crate::{
     scaling::{exp2_f32, exp2_f64, normalising_shift_f32},
     types::Log10Likelihood,
 };
-use seqair_types::Base;
+use seqair_types::{Base, Strand};
 
 /// The diagonal strip of the matrix the banded kernels visit.
 ///
@@ -487,11 +487,7 @@ pub(crate) fn reset(track: &mut Vec<f32>, len: usize, fill: f32) {
 impl Plan {
     /// Rebuilds every track for this pair, reusing the allocations. `None`
     /// only if the read or haplotype cannot be addressed, which their
-    /// constructors rule out.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "the f32 narrowing is the point of this kernel"
-    )]
+    /// constructors rule out, or if the band misses the haplotype.
     pub(crate) fn fill<E: Emission>(
         &mut self,
         haplotype: &Haplotype,
@@ -499,11 +495,42 @@ impl Plan {
         emission: &E,
         band: Band,
     ) -> Option<()> {
-        let (h, r) = (haplotype.len(), read.len());
-        let rows = r + 1 + TRACK_SLACK;
-        let columns = COLUMN_FRONT + h + 1 + TRACK_SLACK;
+        self.rows.fill(read, emission)?;
+        // Only the columns the band can reach; the rest keep the sentinels
+        // and are never read, because the kernels visit the band and nothing
+        // else. The band's column span is `read + width` whatever `h` is, so
+        // deriving all `h` of them was work that grew without bound against a
+        // bounded kernel.
+        let columns = band.columns(haplotype.len(), read.len())?;
+        self.columns.fill(haplotype, emission, read.strand(), columns)
+    }
 
-        let RowTracks {
+    /// Both halves, borrowed the way a kernel reads them.
+    pub(crate) fn view(&self) -> PlanView<'_> {
+        PlanView { rows: &self.rows, columns: &self.columns }
+    }
+}
+
+/// A plan's two halves, borrowed separately, so that the column half can come
+/// from somewhere other than the plan: a haplotype prepared once and scored
+/// against many reads can keep its own.
+#[derive(Clone, Copy)]
+pub(crate) struct PlanView<'a> {
+    pub(crate) rows: &'a RowTracks,
+    pub(crate) columns: &'a ColumnTracks,
+}
+
+impl RowTracks {
+    /// Rebuilds every row track for this read under this emission, reusing
+    /// the allocations. `None` only if the read cannot be addressed.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the f32 narrowing is the point of this kernel"
+    )]
+    pub(crate) fn fill<E: Emission>(&mut self, read: &Read, emission: &E) -> Option<()> {
+        let r = read.len();
+        let rows = r + 1 + TRACK_SLACK;
+        let Self {
             base,
             spread,
             mismatched,
@@ -512,7 +539,7 @@ impl Plan {
             match_to_deletion,
             indel_to_match,
             gap_continuation,
-        } = &mut self.rows;
+        } = self;
         for track in [
             &mut *base,
             spread,
@@ -539,24 +566,37 @@ impl Plan {
             *indel_to_match.get_mut(row)? = t.indel_to_match as f32;
             *gap_continuation.get_mut(row)? = t.gap_continuation as f32;
         }
+        Some(())
+    }
+}
 
-        let ColumnTracks { base, converted, plain, rate, unconverted } = &mut self.columns;
+impl ColumnTracks {
+    /// Every track reset to its sentinels for this haplotype, and the
+    /// columns `lo..=hi` derived for a read on `strand`, reusing the
+    /// allocations. `None` only if a column is outside the haplotype.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the f32 narrowing is the point of this kernel"
+    )]
+    pub(crate) fn fill<E: Emission>(
+        &mut self,
+        haplotype: &Haplotype,
+        emission: &E,
+        strand: Strand,
+        (lo, hi): (usize, usize),
+    ) -> Option<()> {
+        let h = haplotype.len();
+        let columns = COLUMN_FRONT + h + 1 + TRACK_SLACK;
+        let Self { base, converted, plain, rate, unconverted } = self;
         reset(base, columns, CODE_NO_PLAIN_MATCH);
         reset(converted, columns, CODE_NO_CONVERSION);
         reset(plain, columns, CODE_NO_PLAIN_MATCH);
         reset(rate, columns, 0.0);
         reset(unconverted, columns, 0.0);
-        let strand = read.strand();
-        // Only the columns the band can reach; the rest keep the sentinels
-        // `reset` just wrote and are never read, because the kernels visit the
-        // band and nothing else. The band's column span is `read + width`
-        // whatever `h` is, so deriving all `h` of them was work that grew
-        // without bound against a bounded kernel.
-        let (lo, hi) = band.columns(h, r)?;
         for index in lo..=hi {
             let weights = emission.site_weights(haplotype.site(index)?, strand);
             let site_base = code(weights.base);
-            let reversed = COLUMN_FRONT + h - 1 - index;
+            let reversed = (COLUMN_FRONT + h - 1).checked_sub(index)?;
             *base.get_mut(reversed)? = site_base;
             match weights.converted {
                 Some(converted_base) => {
