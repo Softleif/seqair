@@ -148,6 +148,43 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    /// Plans appended one after another are the plan built in one go: the
+    /// same bytes uploaded, the same scores (through the transcription, so no
+    /// GPU is needed), and each part's scores at the range `append` named.
+    #[test]
+    fn appended_plans_are_one_plan(
+        cases in prop::collection::vec(banded_case(), 1..24),
+        cuts in prop::collection::vec(0usize..24, 0..4),
+    ) {
+        let emission = StandardEmission::default();
+        let fail = |error: GpuError| TestCaseError::fail(format!("{error}"));
+        let whole = plan(&cases, &emission).map_err(fail)?;
+        let mut cuts: Vec<usize> = cuts.into_iter().map(|cut| cut.min(cases.len())).collect();
+        cuts.push(0);
+        cuts.push(cases.len());
+        cuts.sort_unstable();
+        let mut appended = GpuPairs::new();
+        let mut ranges = Vec::new();
+        for window in cuts.windows(2) {
+            let &[from, to] = window else { continue };
+            let part = plan(cases.get(from..to).unwrap_or_default(), &emission).map_err(fail)?;
+            let range = appended.append(&part).map_err(fail)?;
+            prop_assert_eq!(range.clone(), from..to);
+            ranges.push((range, bits(&part.emulate(Subnormals::Kept))));
+        }
+        prop_assert_eq!(appended.len(), whole.len());
+        prop_assert_eq!(appended.upload_bytes(), whole.upload_bytes());
+        let scores = bits(&appended.emulate(Subnormals::Kept));
+        prop_assert_eq!(&scores, &bits(&whole.emulate(Subnormals::Kept)));
+        for (range, part) in ranges {
+            prop_assert_eq!(scores.get(range).unwrap_or_default(), part.as_slice());
+        }
+    }
+}
+
+proptest! {
     #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
 
     /// The device gate: every score is the transcription's, with subnormal

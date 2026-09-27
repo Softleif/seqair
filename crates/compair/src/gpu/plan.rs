@@ -199,6 +199,51 @@ impl GpuPairs {
             + self.pairs.len() * size_of::<PairRecord>()
     }
 
+    /// Adds every read, haplotype and pair of `other`, and returns where its
+    /// pairs landed: the scores of `other`'s pairs are that range of the
+    /// launch's scores, in `other`'s order.
+    ///
+    /// This is how several callers' plans become one launch: each fills its
+    /// own `GpuPairs`, and one of them -- or a thread that owns the aligner --
+    /// appends the rest. `other`'s slots name its own reads and haplotypes,
+    /// not the copies here, so pairs between the two plans are made before
+    /// appending, not after.
+    pub fn append(&mut self, other: &GpuPairs) -> Result<core::ops::Range<usize>, GpuError> {
+        let rows = index_u32(self.rows.len(), "read rows")?;
+        let weights = index_u32(self.weights.len(), "haplotype weights")?;
+        index_u32(self.rows.len() + other.rows.len(), "read rows")?;
+        index_u32(self.reads.len() + other.reads.len(), "reads")?;
+        index_u32(self.haplotypes.len() + other.haplotypes.len(), "haplotypes")?;
+        // The shader forms its weight index in `i32`, as `push_haplotype` checks.
+        if i32::try_from(self.weights.len() + other.weights.len()).is_err() {
+            return Err(GpuError::TooLarge { what: "haplotype weights" });
+        }
+        let first = self.pairs.len();
+        self.rows.extend_from_slice(&other.rows);
+        self.weights.extend_from_slice(&other.weights);
+        self.reads.extend(
+            other
+                .reads
+                .iter()
+                .map(|entry| ReadEntry { first_row: entry.first_row + rows, ..*entry }),
+        );
+        self.haplotypes.extend(
+            other.haplotypes.iter().map(|entry| HaplotypeEntry {
+                first_weight: entry.first_weight + weights,
+                ..*entry
+            }),
+        );
+        self.pairs.extend(other.pairs.iter().map(|pending| Pending {
+            record: PairRecord {
+                rows: pending.record.rows + rows,
+                weights: pending.record.weights + weights,
+                ..pending.record
+            },
+            class: pending.class,
+        }));
+        Ok(first..self.pairs.len())
+    }
+
     /// Adds a read's row tracks: `Plan::fill`'s per-row arithmetic, row for
     /// row.
     #[allow(
