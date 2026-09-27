@@ -54,7 +54,9 @@
 //! Do not read numbers off a laptop, and do not read the gkl arms off Apple
 //! Silicon at all: they compile out. This wants the Linux box.
 
-use compair::{Band, Haplotype, Log10Likelihood, StandardEmission, Workspace, align_full};
+use compair::{
+    Band, Haplotype, Log10Likelihood, Pair, Read, StandardEmission, Workspace, align_full,
+};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -144,6 +146,48 @@ fn tenspeed(c: &mut Criterion) {
             sum
         });
     });
+    // Each group's whole reads-by-haplotypes product through `align_reads`,
+    // eight pairs per vector, one band per read -- the shape of a caller with
+    // many reads and few haplotypes, which this dataset mostly is not (group
+    // 5 is 110 x 24), and the same pairs and total as the arms above.
+    let banded: Vec<Locus<'_>> = groups
+        .iter()
+        .map(|group| {
+            let reads = group
+                .reads
+                .iter()
+                .zip(&group.offsets)
+                .map(|(read, offset)| (read, Band::anchored(*offset)))
+                .collect();
+            (group.haplotypes.iter().collect(), reads)
+        })
+        .collect();
+    group.bench_function("compair/reads/banded", |b| {
+        let mut workspace = Workspace::new();
+        let mut out: Vec<Log10Likelihood> = Vec::new();
+        b.iter(|| {
+            let mut sum = 0.0;
+            for (refs, reads) in &banded {
+                workspace.align_reads(black_box(refs), black_box(reads), &standard, &mut out);
+                sum += out.iter().map(|score| score.get()).sum::<f64>();
+            }
+            sum
+        });
+    });
+    // Every pair in file order through the pairs kernel, eight to a group
+    // whatever they are: unrelated reads, haplotypes and offsets per lane.
+    let packed: Vec<Pair<'_>> = pairs
+        .iter()
+        .map(|pair| Pair::new(&pair.haplotype, &pair.read, Band::anchored(pair.offset)))
+        .collect();
+    group.bench_function("compair/pairs/banded", |b| {
+        let mut workspace = Workspace::new();
+        let mut out: Vec<Log10Likelihood> = Vec::new();
+        b.iter(|| {
+            workspace.align_pairs(black_box(&packed), &standard, &mut out);
+            out.iter().map(|score| score.get()).sum::<f64>()
+        });
+    });
     group.bench_function("compair/banded-simd/banded", |b| {
         let mut workspace = Workspace::new();
         b.iter(|| {
@@ -230,6 +274,10 @@ fn tenspeed(c: &mut Criterion) {
 
     group.finish();
 }
+
+/// A group as `align_reads` takes it: its haplotypes, and its reads with their
+/// bands.
+type Locus<'a> = (Vec<&'a Haplotype>, Vec<(&'a Read, Band)>);
 
 criterion_group!(benches, tenspeed);
 criterion_main!(benches);

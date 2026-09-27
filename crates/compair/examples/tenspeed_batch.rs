@@ -1,4 +1,6 @@
-//! `align_batch` against the per-haplotype kernels on the 10s benchmark.
+//! `align_batch` against the per-haplotype kernels on the 10s benchmark, and
+//! `align_reads`, which packs each group's reads-by-haplotypes product eight
+//! pairs at a time through the pairs kernel.
 //!
 //! The 10s dataset is grouped the way a caller is: each group is a set of reads
 //! and the candidate haplotypes for that region. Group 5 alone is 110 reads x
@@ -77,6 +79,33 @@ fn main() {
     }
     println!("worst |dispatch - strips| over all {pairs} pairs: {worst_dispatch:.3e}");
 
+    // Each group's reads with their bands, built once, as `align_reads` takes
+    // them.
+    let banded: Vec<Locus<'_>> = groups
+        .iter()
+        .map(|group| {
+            let reads = group
+                .reads
+                .iter()
+                .zip(&group.offsets)
+                .map(|(read, offset)| (read, Band::anchored(*offset)))
+                .collect();
+            (group.haplotypes.iter().collect(), reads)
+        })
+        .collect();
+    let mut worst_reads = 0.0f64;
+    for (refs, reads) in &banded {
+        workspace.align_reads(refs, reads, &standard, &mut out);
+        let pairs =
+            reads.iter().flat_map(|&(read, band)| refs.iter().map(move |h| (*h, read, band)));
+        for ((haplotype, read, band), got) in pairs.zip(&out) {
+            let reference =
+                Workspace::new().align_strips_simd(haplotype, read, &standard, band).get();
+            worst_reads = worst_reads.max((got.get() - reference).abs());
+        }
+    }
+    println!("worst |align_reads - strips| over all {pairs} pairs: {worst_reads:.3e}");
+
     let repeats = 20;
     let strips = time(repeats, || {
         let mut sum = 0.0;
@@ -118,26 +147,36 @@ fn main() {
         }
         sum
     });
+    let reads = time(repeats, || {
+        let mut sum = 0.0;
+        for (refs, reads) in &banded {
+            workspace.align_reads(refs, reads, &standard, &mut out);
+            sum += out.iter().map(|score| score.get()).sum::<f64>();
+        }
+        sum
+    });
 
     println!("\n{:<28} {:>10} {:>12}", "arm", "ms / pass", "us / pair");
     for (name, ms) in [
         ("strips-simd, per hap", strips),
         ("align_batch (forced)", batch),
         ("align_candidates (dispatch)", dispatch),
+        ("align_reads (pairs)", reads),
     ] {
         println!("{name:<28} {ms:>10.2} {:>12.3}", ms * 1000.0 / pairs as f64);
     }
     println!(
-        "\nspeedup over strips: forced batch {:.2}x, dispatch {:.2}x",
+        "\nspeedup over strips: forced batch {:.2}x, dispatch {:.2}x, align_reads {:.2}x",
         strips / batch,
-        strips / dispatch
+        strips / dispatch,
+        strips / reads
     );
 
     println!(
-        "\nper group -- lane fill is the whole story:\n{:>6} {:>7} {:>6} {:>9} {:>8} {:>8} {:>8} {:>8}",
-        "group", "reads", "haps", "mean len", "fill", "strips", "batch", "dispatch"
+        "\nper group -- lane fill is the whole story:\n{:>6} {:>7} {:>6} {:>9} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "group", "reads", "haps", "mean len", "fill", "strips", "batch", "dispatch", "reads"
     );
-    for (index, group) in groups.iter().enumerate() {
+    for (index, (group, (group_refs, group_reads))) in groups.iter().zip(&banded).enumerate() {
         let refs: Vec<&Haplotype> = group.haplotypes.iter().collect();
         let mean =
             group.reads.iter().map(Read::len).sum::<usize>() as f64 / group.reads.len() as f64;
@@ -176,16 +215,25 @@ fn main() {
             }
             sum
         });
+        let p = time(repeats, || {
+            workspace.align_reads(group_refs, group_reads, &standard, &mut out);
+            out.iter().map(|score| score.get()).sum::<f64>()
+        });
         println!(
-            "{index:>6} {:>7} {:>6} {mean:>9.0} {:>7.0}% {s:>8.2} {b:>8.2} {d:>8.2}   {:.2}x {:.2}x",
+            "{index:>6} {:>7} {:>6} {mean:>9.0} {:>7.0}% {s:>8.2} {b:>8.2} {d:>8.2} {p:>8.2}   {:.2}x {:.2}x {:.2}x",
             group.reads.len(),
             group.haplotypes.len(),
             fill * 100.0,
             s / b,
-            s / d
+            s / d,
+            s / p
         );
     }
 }
+
+/// A group as `align_reads` takes it: its haplotypes, and its reads with their
+/// bands.
+type Locus<'a> = (Vec<&'a Haplotype>, Vec<(&'a Read, Band)>);
 
 fn time(repeats: u32, mut body: impl FnMut() -> f64) -> f64 {
     let mut best = f64::INFINITY;
