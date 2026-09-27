@@ -330,3 +330,61 @@ fn a_dead_lane_is_impossible_and_changes_nothing_beside_it() {
     workspace.align_pairs(&pairs, &standard, &mut out);
     assert_eq!(bits(&out), want);
 }
+
+/// The pairs kernel derives a read's rows and a haplotype's columns once per
+/// call and reuses them for every lane that holds the same read or
+/// haplotype, keyed by address. So a workspace that scores one locus, drops
+/// it, and scores a different one whose reads and haplotypes land at the same
+/// addresses -- which the allocator makes likely here -- must derive them
+/// afresh: every call is held to the strip kernel on its own pairs.
+#[test]
+fn a_new_call_never_reuses_what_an_earlier_call_derived() {
+    let mut workspace = Workspace::new();
+    let mut out = Vec::new();
+    for seed in 0..12u64 {
+        let reference = sequence(220, 0x9e37_79b9_7f4a_7c15 ^ (seed * 0x2545_f491));
+        let haplotypes: Vec<Haplotype> =
+            vec![Haplotype::new(reference.clone()), Haplotype::new(reference[3..].to_vec())];
+        let strand = if seed % 2 == 0 { Strand::OT } else { Strand::OB };
+        let reads: Vec<(Read, Band)> = (0..5)
+            .map(|index| {
+                let start = 10 + index * 9;
+                let quals: Vec<BaseQuality> = (0..120)
+                    .map(|at| {
+                        BaseQuality::from_byte(15 + u8::try_from((at + index) % 25).unwrap_or(0))
+                    })
+                    .collect();
+                let read = Read::uniform(
+                    reference[start..start + 120].to_vec(),
+                    &quals,
+                    BaseQuality::from_byte(40 + u8::try_from(seed).unwrap_or(0)),
+                    BaseQuality::from_byte(45),
+                    BaseQuality::from_byte(10),
+                    strand,
+                )
+                .expect("the reads build");
+                let offset = i32::try_from(start).unwrap_or(0);
+                (read, Band::new(48, offset).expect("48 is a valid width"))
+            })
+            .collect();
+        let betas: Vec<Probability> = (0..220)
+            .map(|at| {
+                Probability::new(
+                    f64::from(u32::try_from((at + 3 * seed as usize) % 11).unwrap_or(0)) / 10.0,
+                )
+                .unwrap_or(Probability::ZERO)
+            })
+            .collect();
+        let taps = TapsEmission::new(ConversionModel::taps_default(), Betas::PerSite(&betas));
+        let refs: Vec<&Haplotype> = haplotypes.iter().collect();
+        let reads: Vec<(&Read, Band)> = reads.iter().map(|(read, band)| (read, *band)).collect();
+        let want: Vec<u64> = reads
+            .iter()
+            .flat_map(|&(read, band)| {
+                refs.iter().map(move |h| align_strips(h, read, &taps, band).get().to_bits())
+            })
+            .collect();
+        workspace.align_reads(&refs, &reads, &taps, &mut out);
+        assert_eq!(bits(&out), want, "locus {seed}");
+    }
+}

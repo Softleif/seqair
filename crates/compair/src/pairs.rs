@@ -43,7 +43,7 @@
 //! computes to exactly zero on every row without a mask, by induction along
 //! the row and down the column.
 //!
-//! One thing differs from the batch kernel that is not about lanes:
+//! Two things differ from the batch kernel that are not about lanes:
 //!
 //! - **Blocks, not tracks.** A row's eight tracks, a column's five and a
 //!   cell's three matrices are each one block of lane-windows rather than one
@@ -52,6 +52,11 @@
 //!   eight, which x86-64 has the registers for. With eight, the batch kernel's
 //!   loop reloads the spilled ones every step: this loop is 50 instructions a
 //!   step on AVX2 where the batch kernel's is 69.
+//! - **Derived once per call.** The rows depend only on the read and the
+//!   columns only on the haplotype and the strand, and `align_reads` puts
+//!   every read against every haplotype. So the plan derives each read's rows
+//!   and each haplotype's columns per strand once per call, keyed by address,
+//!   and copies them into every lane that holds them; see `Recent`.
 //!
 //! The arithmetic, the order of the operations, the flush to zero, the
 //! renormalisation cadence and the free start are the strip kernel's, cell for
@@ -292,6 +297,84 @@ impl ColumnEntry {
     }
 }
 
+/// How many reads' rows a call keeps. `align_reads` packs a read's pairs
+/// next to each other, so a read is reused within a group or two of where it
+/// was derived.
+const RECENT_READS: usize = 16;
+
+/// How many haplotypes' columns a call keeps, per strand: the whole of a
+/// locus's candidates up to 32 of them. A cache smaller than the set it cycles
+/// through misses on every lookup -- 24 haplotypes through 16 slots did, on
+/// the 10s dataset's largest group, and derived every column twice.
+const RECENT_HAPLOTYPES: usize = 64;
+
+/// The tables a call has derived, keyed by the address of what they were
+/// derived from, so that a read scored against three haplotypes has its rows
+/// derived once rather than three times, and a haplotype its columns once per
+/// strand rather than once per read.
+///
+/// An address is a sound key only while the thing it points at is borrowed,
+/// which the pairs are for exactly one call -- so [`Recent::forget`] runs at
+/// the start of every call, and a key never outlives the borrow it came from.
+/// The emission is the call's too, and is not part of the key for the same
+/// reason.
+#[derive(Debug)]
+struct Recent<K, T, const N: usize> {
+    keys: Vec<Option<K>>,
+    tables: Vec<Vec<T>>,
+    /// The slot the next miss evicts, once every slot is in use.
+    next: usize,
+}
+
+impl<K, T, const N: usize> Default for Recent<K, T, N> {
+    fn default() -> Self {
+        Self { keys: Vec::new(), tables: Vec::new(), next: 0 }
+    }
+}
+
+impl<K: Copy + PartialEq, T, const N: usize> Recent<K, T, N> {
+    fn forget(&mut self) {
+        self.keys.clear();
+        self.next = 0;
+    }
+
+    /// The table for `key`, derived by `derive` into a cleared table if this
+    /// call has not derived it yet. A table whose derivation fails is
+    /// forgotten rather than kept half-filled.
+    fn get_or_derive(
+        &mut self,
+        key: K,
+        derive: impl FnOnce(&mut Vec<T>) -> Option<()>,
+    ) -> Option<&[T]> {
+        if let Some(slot) = self.keys.iter().position(|known| *known == Some(key)) {
+            return self.tables.get(slot).map(Vec::as_slice);
+        }
+        let slot = if self.keys.len() < N {
+            self.keys.push(None);
+            self.keys.len() - 1
+        } else {
+            let slot = self.next;
+            self.next = (slot + 1) % N;
+            slot
+        };
+        if self.tables.len() <= slot {
+            self.tables.resize_with(slot + 1, Vec::new);
+        }
+        let table = self.tables.get_mut(slot)?;
+        table.clear();
+        let known = self.keys.get_mut(slot)?;
+        *known = None;
+        derive(table)?;
+        *known = Some(key);
+        Some(table)
+    }
+}
+
+/// A haplotype whose band reaches only a small part of it is cheaper to derive
+/// column by column than to derive whole and cache: past this many times the
+/// lane's band span, a lane derives its own columns.
+const WHOLE_HAPLOTYPE_LIMIT: usize = 4;
+
 /// Everything one group hoists out of its loops.
 #[derive(Debug, Default)]
 pub(crate) struct PairsPlan {
@@ -314,9 +397,19 @@ pub(crate) struct PairsPlan {
     /// largest live offset.
     offset: i64,
     half_width: i64,
+    /// Each read's rows, per call.
+    read_rows: Recent<usize, RowEntry, RECENT_READS>,
+    /// Each haplotype's columns, per strand, per call.
+    haplotype_columns: Recent<(usize, Strand), ColumnEntry, RECENT_HAPLOTYPES>,
 }
 
 impl PairsPlan {
+    /// Starts a call: nothing derived for an earlier call's pairs is valid.
+    fn forget(&mut self) {
+        self.read_rows.forget();
+        self.haplotype_columns.forget();
+    }
+
     /// `None` if the lanes do not share a half-width, which the grouping rules
     /// out, or if a read or haplotype cannot be addressed, which their
     /// constructors rule out.
@@ -363,7 +456,17 @@ impl PairsPlan {
             }
         }
 
-        let Self { rows, columns, init, front, past_end, lengths, .. } = self;
+        let Self {
+            rows,
+            columns,
+            init,
+            front,
+            past_end,
+            lengths,
+            read_rows,
+            haplotype_columns,
+            ..
+        } = self;
         rows.clear();
         rows.resize(rows_len + 1, RowBlock::default());
         columns.clear();
@@ -384,8 +487,14 @@ impl PairsPlan {
             *past_end.get_mut(lane)? = (delta + h + 1) as f32;
             *lengths.get_mut(lane)? = r;
 
-            for (index, row) in rows.get_mut(1..=r)?.iter_mut().enumerate() {
-                RowEntry::new(read, emission, index)?.put(row, lane)?;
+            let entries = read_rows.get_or_derive(core::ptr::from_ref(read).addr(), |table| {
+                for index in 0..r {
+                    table.push(RowEntry::new(read, emission, index)?);
+                }
+                Some(())
+            })?;
+            for (entry, row) in entries.iter().zip(rows.get_mut(1..=r)?) {
+                entry.put(row, lane)?;
             }
 
             // Only the columns the lane's band can reach, as `BatchPlan::fill`
@@ -393,8 +502,21 @@ impl PairsPlan {
             let strand = read.strand();
             let (lo, hi) = pair.band.columns(h, r)?;
             let blocks = columns.get_mut(lo + 1 + delta..=hi + 1 + delta)?;
-            for (index, column) in (lo..=hi).zip(blocks) {
-                ColumnEntry::new(haplotype, emission, strand, index)?.put(column, lane)?;
+            if h > WHOLE_HAPLOTYPE_LIMIT * (hi - lo + 1) {
+                for (index, column) in (lo..=hi).zip(blocks) {
+                    ColumnEntry::new(haplotype, emission, strand, index)?.put(column, lane)?;
+                }
+            } else {
+                let key = (core::ptr::from_ref(haplotype).addr(), strand);
+                let entries = haplotype_columns.get_or_derive(key, |table| {
+                    for index in 0..h {
+                        table.push(ColumnEntry::new(haplotype, emission, strand, index)?);
+                    }
+                    Some(())
+                })?;
+                for (entry, column) in entries.get(lo..=hi)?.iter().zip(blocks) {
+                    entry.put(column, lane)?;
+                }
             }
         }
 
@@ -499,6 +621,7 @@ impl Workspace {
         lanes: usize,
         mut run: impl FnMut(&mut Self) -> [Log10Likelihood; PAIRS],
     ) {
+        self.pairs_plan.forget();
         let mut pairs = pairs.peekable();
         let Some(&first) = pairs.peek() else {
             return;
