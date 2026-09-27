@@ -1,11 +1,12 @@
-use crate::types::error_probability;
+use crate::types::ErrorTable;
 use seqair_types::BaseQuality;
 
 /// The five transition probabilities GATK derives from one read base's
 /// insertion, deletion and gap-continuation qualities.
 ///
-/// Computed once per base when a [`Read`] is built, because every one of them
-/// is a `powf` and the kernels score one read against several haplotypes.
+/// Computed once per base when a [`Read`] is built, because the kernels score
+/// one read against several haplotypes. Each probability is a lookup in the
+/// [`ErrorTable`], not a `powf`.
 ///
 /// [`Read`]: crate::Read
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -24,13 +25,14 @@ impl Transition {
     /// clamps, which is what makes the three transitions out of a match sum
     /// to exactly one.
     pub(crate) fn from_qualities(
+        table: &ErrorTable,
         insertion: BaseQuality,
         deletion: BaseQuality,
         gap: BaseQuality,
     ) -> Self {
-        let match_to_insertion = error_probability(insertion);
-        let match_to_deletion = error_probability(deletion);
-        let gap_continuation = error_probability(gap);
+        let match_to_insertion = table.probability(insertion);
+        let match_to_deletion = table.probability(deletion);
+        let gap_continuation = table.probability(gap);
         Self {
             match_to_match: 1.0 - (match_to_insertion + match_to_deletion).min(1.0),
             match_to_insertion,

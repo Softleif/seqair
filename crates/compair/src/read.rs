@@ -1,7 +1,7 @@
 use crate::{
     error::Error,
     transitions::Transition,
-    types::{Observation, error_probability},
+    types::{ErrorTable, Observation},
 };
 use seqair_types::{Base, BaseQuality, QPos, Strand};
 
@@ -51,18 +51,19 @@ impl Read {
                 return Err(Error::MissingQuality { field, index });
             }
         }
+        let table = ErrorTable::get();
         let transitions = insertion_quals
             .iter()
             .zip(deletion_quals)
             .zip(gap_quals)
             .map(|((insertion, deletion), gap)| {
-                Transition::from_qualities(*insertion, *deletion, *gap)
+                Transition::from_qualities(table, *insertion, *deletion, *gap)
             })
             .collect();
         Ok(Self {
             bases,
             base_quals: base_quals.into(),
-            error_probabilities: base_quals.iter().copied().map(error_probability).collect(),
+            error_probabilities: base_quals.iter().map(|q| table.probability(*q)).collect(),
             insertion_quals: insertion_quals.into(),
             deletion_quals: deletion_quals.into(),
             gap_quals: gap_quals.into(),

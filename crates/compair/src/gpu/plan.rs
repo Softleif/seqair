@@ -12,7 +12,7 @@ use seqair_types::{Base, BaseQuality, Strand};
 use super::GpuError;
 use crate::{
     banded::Band, emission::Emission, emission::SiteWeights, haplotype::Haplotype, read::Read,
-    transitions::Transition,
+    transitions::Transition, types::ErrorTable,
 };
 
 /// A read in a [`GpuPairs`], returned by [`GpuPairs::push_read`].
@@ -71,9 +71,11 @@ const TRANSITION_TABLE: usize = GAP_CONTINUATION + 256;
 /// lookup is the value the CPU kernels use, bit for bit.
 pub(crate) static TRANSITIONS: std::sync::LazyLock<Box<[f32]>> = std::sync::LazyLock::new(|| {
     let mut table = vec![0.0f32; TRANSITION_TABLE];
+    let errors = ErrorTable::get();
     for insertion in 0..=255u8 {
         for deletion in 0..=255u8 {
             let t = Transition::from_qualities(
+                errors,
                 BaseQuality::from_byte(insertion),
                 BaseQuality::from_byte(deletion),
                 BaseQuality::from_byte(0),
@@ -86,6 +88,7 @@ pub(crate) static TRANSITIONS: std::sync::LazyLock<Box<[f32]>> = std::sync::Lazy
     }
     for quality in 0..=255u8 {
         let t = Transition::from_qualities(
+            errors,
             BaseQuality::from_byte(quality),
             BaseQuality::from_byte(quality),
             BaseQuality::from_byte(quality),
