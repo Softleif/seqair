@@ -9,10 +9,13 @@
 //! scoring it as a free match loses every real `C>T` variant. `TapsEmission`
 //! scores it as a probability at the site's methylation level instead.
 //!
-//! **If you are scoring one read against its candidate haplotypes, which is
-//! what a variant caller does, call [`Workspace::align_candidates`].** It picks
-//! between the kernels below for you. The rest of this list is what it picks
-//! between, and what to reach for when the shape of the work is different.
+//! **If you are scoring many reads against a few haplotypes -- a variant
+//! caller's shadow scoring, every read of a locus against the reference and
+//! each candidate allele -- call [`Workspace::align_reads`]. If you are
+//! scoring one read against many candidate haplotypes, call
+//! [`Workspace::align_candidates`].** Each picks between the kernels below for
+//! you. The rest of this list is what they pick between, and what to reach
+//! for when the shape of the work is different.
 //!
 //! Implementations of the same recurrence, in two families.
 //!
@@ -32,12 +35,20 @@
 //!   caller asked for, so it wins on a full batch (~1.3x over the strip kernel)
 //!   and loses badly on a short one (~0.2x at a single haplotype).
 //!   [`BATCH_BREAK_EVEN`] is where the two meet.
+//! - [`align_pairs`], which scores eight *unrelated* pairs in lockstep: each
+//!   lane its own read, haplotype, strand and band offset, the half-width
+//!   shared. It is the batch kernel's traversal with the read and the band
+//!   made per lane, so a group fills from any list of pairs -- in particular
+//!   from many reads against two or three haplotypes, where the batch kernel
+//!   would run three lanes of eight. [`align_reads`] packs a reads-by-haplotypes
+//!   product into it and sends a short last group through the strip kernel.
 //!
 //! Each banded pair is one generic function over a lane type, so its scalar
 //! and SIMD kernels are bit-identical by construction rather than by
 //! agreement, and the batch kernel is bit-identical to the strip kernel for the
-//! same reason -- which is what lets [`Workspace::align_candidates`] switch
-//! between them without changing an answer. A [`Workspace`] keeps every
+//! same reason, as is every lane of the pairs kernel -- which is what lets
+//! [`Workspace::align_candidates`] and [`Workspace::align_reads`] switch
+//! between kernels without changing an answer. A [`Workspace`] keeps every
 //! kernel's buffers between calls, which makes an alignment allocation-free.
 
 mod banded;

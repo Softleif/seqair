@@ -36,7 +36,19 @@ one read row per lane, swept along the haplotype, so the per-row inputs stay
 in registers and the neighbours are the previous two steps' vectors shifted
 by a lane. It is the faster of the two on every target measured so far and
 its precision does not depend on the band width, since it renormalises every
-eight rows rather than per anti-diagonal. A `Workspace` keeps the kernels' buffers between calls, so
+eight rows rather than per anti-diagonal.
+
+Two kernels put eight *alignments* in a vector instead of eight cells of one:
+`align_batch` scores eight haplotypes against one read, and `align_pairs`
+eight unrelated read-haplotype pairs, each with its own band offset. Both are
+bit-identical to the strip kernel, lane by lane, so the two entry points that
+choose between the kernels cannot change a score by choosing:
+**`Workspace::align_reads` for many reads against a few haplotypes** (a
+variant caller's shadow scoring: every read of a locus against the reference
+and each allele) and `Workspace::align_candidates` for one read against many
+haplotypes.
+
+A `Workspace` keeps the kernels' buffers between calls, so
 scoring a read against its candidate haplotypes allocates nothing; the free
 functions of the same names build a fresh one per call. A `Read` computes
 every `10^(-Q/10)` it needs at construction, so an alignment does no
