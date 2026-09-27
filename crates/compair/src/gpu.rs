@@ -77,6 +77,9 @@ pub enum GpuError {
     #[error("the scores were not mapped after the GPU finished")]
     MapPending,
 
+    #[error("reading the mapped scores failed")]
+    MapRange(#[from] wgpu::MapRangeError),
+
     #[error("the {what} do not fit the kernel's 32-bit indices")]
     TooLarge { what: &'static str },
 

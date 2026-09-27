@@ -55,12 +55,13 @@ impl GpuContext {
     }
 
     async fn new_async() -> Result<Arc<Self>, GpuError> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .map_err(GpuError::NoAdapter)?;
@@ -134,7 +135,7 @@ impl GpuContext {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("compair::gpu::pipeline_layout"),
-            bind_group_layouts: &[&layout],
+            bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
         let transitions = wgpu::util::DeviceExt::create_buffer_init(
@@ -514,8 +515,8 @@ impl GpuAligner {
         }
 
         let scores_bytes = bytes(self.records.len(), size_of::<[u32; 2]>());
-        let storage_limit = u64::from(context.limits.max_storage_buffer_binding_size)
-            .min(context.limits.max_buffer_size);
+        let storage_limit =
+            context.limits.max_storage_buffer_binding_size.min(context.limits.max_buffer_size);
         let copy = wgpu::BufferUsages::COPY_DST;
         let storage = wgpu::BufferUsages::STORAGE;
         let uploads: [(&str, &[u8]); 3] = [
@@ -719,7 +720,7 @@ impl Handle<'_> {
         let slice = buffer.slice(..bytes);
         map_and_wait(context, aligner.options.wait, slice, submission.clone(), timeout)?;
         {
-            let view = slice.get_mapped_range();
+            let view = slice.get_mapped_range()?;
             let scores: &[[u32; 2]] = bytemuck::cast_slice(&view);
             for (&index, &[sum, exponent]) in aligner.order.iter().zip(scores) {
                 if let Some(slot) = out.get_mut(index as usize) {
@@ -733,7 +734,7 @@ impl Handle<'_> {
             let slice = timing.readback.slice(..);
             map_and_wait(context, aligner.options.wait, slice, submission, timeout)?;
             {
-                let view = slice.get_mapped_range();
+                let view = slice.get_mapped_range()?;
                 if let [begin, end] = bytemuck::cast_slice::<u8, u64>(&view) {
                     let ticks = end.saturating_sub(*begin);
                     #[allow(
