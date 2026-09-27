@@ -71,3 +71,15 @@ harness = false
 [[bench]]
 name = "tenspeed"
 harness = false
+
+[[example]]
+name = "gpu_tenspeed"
+required-features = ["gpu"]
+
+[[example]]
+name = "gpu_widths"
+required-features = ["gpu"]
+
+[[example]]
+name = "gpu_flush"
+required-features = ["gpu"]
