@@ -9,20 +9,25 @@
 //! scoring it as a free match loses every real `C>T` variant. `TapsEmission`
 //! scores it as a probability at the site's methylation level instead.
 //!
-//! **If you are scoring many reads against a few haplotypes -- a variant
-//! caller's shadow scoring, every read of a locus against the reference and
-//! each candidate allele -- call [`Workspace::align_reads`]. If you are
-//! scoring one read against many candidate haplotypes, call
-//! [`Workspace::align_candidates`].** Each picks between the kernels below for
-//! you. The rest of this list is what they pick between, and what to reach
-//! for when the shape of the work is different.
+//! **Which entry point:**
 //!
-//! **If you are scoring many reads against the same few haplotypes, call
-//! [`Workspace::candidates`] once and score each read through the
-//! [`Candidates`] it returns.** The scores are the strip kernel's, bit for
-//! bit; what it saves is the setup, which the per-pair entry points redo for
-//! every pair: a read's row tracks are derived once for all the haplotypes,
-//! and a haplotype's column tracks once per strand for all the reads.
+//! - many reads against a *few* haplotypes -- a variant caller's shadow
+//!   scoring, every read of a locus against the reference and each candidate
+//!   allele -- is [`Workspace::align_reads`], which packs the reads-by-haplotypes
+//!   product eight pairs to a vector;
+//! - one read, or reads arriving one at a time, against *many* candidate
+//!   haplotypes is [`Workspace::candidates`] once and then [`Candidates::align`]
+//!   per read, which prepares each haplotype's column tracks once per strand
+//!   and runs full groups through the batch kernel; [`Workspace::align_candidates`]
+//!   is the same dispatch without the preparation, for a single read.
+//!
+//! Each picks between the kernels below for you, and none of them changes a
+//! score: every path is bit-identical to the strip kernel. Measured on rastair's
+//! shape (3 haplotypes, 128 reads) `align_reads` is 1.5x `Candidates` on a
+//! 3950X and 1.2x on an M4 Pro; on the 10s dataset, whose groups run to 24
+//! haplotypes, `Candidates` is 1.13x `align_reads` on the 3950X and 0.96x on
+//! the M4 (notes §12.5). The rest of this list is what they pick between, and
+//! what to reach for when the shape of the work is different.
 //!
 //! Implementations of the same recurrence, in two families.
 //!
