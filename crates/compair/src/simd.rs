@@ -28,7 +28,7 @@ use fearless_simd_macros::simd;
 
 use crate::{
     banded::{Band, Lane, LaneMask, Plan, PlanView, Ring, Shape, Window, banded_kernel},
-    batch::{BATCH, BatchBuffer, BatchPlan, batch_kernel},
+    batch::{BATCH, BatchBuffer, BatchView, batch_kernel},
     pairs::{PAIRS, PairsBuffer, PairsPlan, pairs_kernel},
     strips::{RowBuffer, strip_kernel},
     types::Log10Likelihood,
@@ -192,7 +192,7 @@ fn strip_kernel_simd<S: Simd>(
 #[simd]
 fn batch_kernel_simd<S: Simd>(
     simd: S,
-    plan: &BatchPlan,
+    plan: BatchView<'_>,
     buffer: &mut BatchBuffer,
     read_len: usize,
     band: Band,
@@ -234,7 +234,7 @@ pub(crate) fn strip_kernel_at(
 /// The batch kernel at `level`.
 pub(crate) fn batch_kernel_at(
     level: Level,
-    plan: &BatchPlan,
+    plan: BatchView<'_>,
     buffer: &mut BatchBuffer,
     read_len: usize,
     band: Band,

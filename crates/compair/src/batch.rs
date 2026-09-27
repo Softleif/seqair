@@ -34,12 +34,15 @@
 //! [`align_strips`]: crate::align_strips
 //! [`STRIP_ROWS`]: crate::batch::STRIP_ROWS
 
+use std::borrow::Borrow;
+
 use fearless_simd::Level;
+use seqair_types::Strand;
 
 use crate::{
     banded::{
         Band, CODE_NO_CONVERSION, CODE_NO_PLAIN_MATCH, ColumnLanes, LANE_MAX, Lane, RowLanes,
-        TransitionLanes, Window, Workspace, code, prior, reset,
+        RowTracks, TransitionLanes, Window, Workspace, code, prior, reset,
     },
     emission::Emission,
     haplotype::Haplotype,
@@ -102,7 +105,7 @@ const _: () = assert!(
 #[derive(Clone, Copy)]
 pub(crate) struct BatchKernel {
     lanes: usize,
-    run: fn(&BatchPlan, &mut BatchBuffer, usize, Band) -> [Log10Likelihood; BATCH],
+    run: fn(BatchView<'_>, &mut BatchBuffer, usize, Band) -> [Log10Likelihood; BATCH],
 }
 
 impl BatchKernel {
@@ -120,7 +123,7 @@ const SIMD_BATCH_KERNEL: BatchKernel = BatchKernel { lanes: BATCH, run: batch_ke
 
 /// [`SIMD_BATCH_KERNEL`]'s function, in [`BatchKernel`]'s shape.
 fn batch_kernel_simd(
-    plan: &BatchPlan,
+    plan: BatchView<'_>,
     buffer: &mut BatchBuffer,
     read_len: usize,
     band: Band,
@@ -132,26 +135,11 @@ fn batch_kernel_simd(
 /// to be, or the two would not round the same way.
 const STRIP_ROWS: usize = LANE_MAX;
 
-/// Per read row, exactly the strip kernel's row tracks; every lane reads the
-/// same entry, so they are scalars here rather than vectors.
-#[derive(Debug, Default)]
-struct Rows {
-    base: Vec<f32>,
-    /// `(1 - eps) - eps / 3`, as in `banded::RowTracks`.
-    spread: Vec<f32>,
-    mismatched: Vec<f32>,
-    match_to_match: Vec<f32>,
-    match_to_insertion: Vec<f32>,
-    match_to_deletion: Vec<f32>,
-    indel_to_match: Vec<f32>,
-    gap_continuation: Vec<f32>,
-}
-
 /// Per haplotype column, interleaved across the batch: index `j * BATCH + k`
 /// is lane `k`'s column `j`, one-based, so `j = 0` is the free-start column
 /// and `j = width + 1` the pad the last row's `up` reads.
 #[derive(Debug, Default)]
-struct Columns {
+pub(crate) struct Columns {
     base: Vec<f32>,
     converted: Vec<f32>,
     plain: Vec<f32>,
@@ -167,10 +155,13 @@ pub(crate) struct BatchBuffer {
     d: Vec<f32>,
 }
 
-/// Everything one batch hoists out of its loops.
+/// The half of what one batch hoists out of its loops that depends on the
+/// haplotypes, the emission and the read's strand, and on nothing else about
+/// the read. The other half is the strip kernel's own `RowTracks`: every
+/// lane reads the same row entry, so the batch kernel splats the same
+/// numbers the strip kernel loads, and one fill per read serves both.
 #[derive(Debug, Default)]
 pub(crate) struct BatchPlan {
-    rows: Rows,
     columns: Columns,
     /// `1 / h` per lane, the read's free start; zero for an absent or empty
     /// haplotype, which then scores [`Log10Likelihood::IMPOSSIBLE`].
@@ -181,65 +172,37 @@ pub(crate) struct BatchPlan {
     width: usize,
 }
 
+/// A batch plan and a read's rows, borrowed the way the kernel reads them.
+#[derive(Clone, Copy)]
+pub(crate) struct BatchView<'a> {
+    rows: &'a RowTracks,
+    columns: &'a Columns,
+    init: &'a Window,
+    past_end: &'a Window,
+    width: usize,
+}
+
 impl BatchPlan {
-    /// `None` only if the read or a haplotype cannot be addressed, which their
-    /// constructors rule out.
+    /// Rebuilds the column half for this group of haplotypes on `strand`,
+    /// deriving lane `k`'s columns `columns(h_k)` and leaving the rest at
+    /// their sentinels. `None` only if a haplotype cannot be addressed, which
+    /// its constructor rules out.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_precision_loss,
         reason = "the f32 narrowing is the point of this kernel, and a haplotype is a few hundred bases"
     )]
-    fn fill<E: Emission>(
+    pub(crate) fn fill<H: Borrow<Haplotype>, E: Emission>(
         &mut self,
-        haplotypes: &[&Haplotype],
-        read: &Read,
+        haplotypes: &[H],
         emission: &E,
-        band: Band,
+        strand: Strand,
+        columns: impl Fn(usize) -> Option<(usize, usize)>,
     ) -> Option<()> {
-        let r = read.len();
-        self.width = haplotypes.iter().map(|h| h.len()).max().unwrap_or(0);
-        let Self { rows, columns, init, past_end, width } = self;
-        let width = *width;
-
-        let Rows {
-            base,
-            spread,
-            mismatched,
-            match_to_match,
-            match_to_insertion,
-            match_to_deletion,
-            indel_to_match,
-            gap_continuation,
-        } = rows;
-        for track in [
-            &mut *base,
-            spread,
-            mismatched,
-            match_to_match,
-            match_to_insertion,
-            match_to_deletion,
-            indel_to_match,
-            gap_continuation,
-        ] {
-            reset(track, r + 1, 0.0);
-        }
-        for index in 0..r {
-            let observation = read.observation(index)?;
-            let eps = emission.epsilon(observation);
-            let t = read.transition(index)?;
-            let row = index + 1;
-            *base.get_mut(row)? = code(observation.base);
-            *spread.get_mut(row)? = ((1.0 - eps) - eps / 3.0) as f32;
-            *mismatched.get_mut(row)? = (eps / 3.0) as f32;
-            *match_to_match.get_mut(row)? = t.match_to_match as f32;
-            *match_to_insertion.get_mut(row)? = t.match_to_insertion as f32;
-            *match_to_deletion.get_mut(row)? = t.match_to_deletion as f32;
-            *indel_to_match.get_mut(row)? = t.indel_to_match as f32;
-            *gap_continuation.get_mut(row)? = t.gap_continuation as f32;
-        }
-
-        let span = (width + 2) * BATCH;
-        let Columns { base, converted, plain, rate, unconverted } = columns;
+        self.width = haplotypes.iter().map(|h| h.borrow().len()).max().unwrap_or(0);
+        let Self { columns: tracks, init, past_end, width } = self;
+        let span = (*width + 2) * BATCH;
+        let Columns { base, converted, plain, rate, unconverted } = tracks;
         reset(base, span, CODE_NO_PLAIN_MATCH);
         reset(converted, span, CODE_NO_CONVERSION);
         reset(plain, span, CODE_NO_PLAIN_MATCH);
@@ -248,21 +211,22 @@ impl BatchPlan {
         *init = [0.0; BATCH];
         *past_end = [0.0; BATCH];
 
-        let strand = read.strand();
         for (lane, haplotype) in haplotypes.iter().enumerate().take(BATCH) {
+            let haplotype = haplotype.borrow();
             let h = haplotype.len();
             if h == 0 {
                 continue;
             }
             *init.get_mut(lane)? = 1.0 / h as f32;
             *past_end.get_mut(lane)? = (h + 1) as f32;
-            // Only the columns the band can reach. Everything else keeps the
-            // sentinels `reset` just wrote, which is what an unvisited column
-            // holds anyway -- the kernel's column loop is the band, so it never
-            // reads them. Deriving them cost ~29% of a call at 200 bp
-            // haplotypes and grew without bound with haplotype length, because
-            // the band's span is `read + width` however long the haplotype is.
-            let Some((lo, hi)) = band.columns(h, r) else { continue };
+            // Only the columns asked for; for one read, the columns the band
+            // can reach. Everything else keeps the sentinels `reset` just
+            // wrote, which is what an unvisited column holds anyway -- the
+            // kernel's column loop is the band, so it never reads them.
+            // Deriving them cost ~29% of a call at 200 bp haplotypes and grew
+            // without bound with haplotype length, because the band's span is
+            // `read + width` however long the haplotype is.
+            let Some((lo, hi)) = columns(h) else { continue };
             for index in lo..=hi {
                 let weights = emission.site_weights(haplotype.site(index)?, strand);
                 let site_base = code(weights.base);
@@ -279,6 +243,17 @@ impl BatchPlan {
             }
         }
         Some(())
+    }
+
+    /// This plan with a read's rows, as the kernel reads them.
+    pub(crate) fn view<'a>(&'a self, rows: &'a RowTracks) -> BatchView<'a> {
+        BatchView {
+            rows,
+            columns: &self.columns,
+            init: &self.init,
+            past_end: &self.past_end,
+            width: self.width,
+        }
     }
 }
 
@@ -349,19 +324,19 @@ impl Workspace {
         out: &mut Vec<Log10Likelihood>,
     ) {
         out.clear();
+        let rows = !read.is_empty() && self.plan.rows.fill(read, emission).is_some();
         for group in haplotypes.chunks(BATCH) {
-            let scores =
-                if read.is_empty() || self.batch_plan.fill(group, read, emission, band).is_none() {
-                    [Log10Likelihood::IMPOSSIBLE; BATCH]
-                } else {
-                    crate::simd::batch_kernel_at(
-                        level,
-                        &self.batch_plan,
-                        &mut self.batch_rows,
-                        read.len(),
-                        band,
-                    )
-                };
+            let scores = if rows && self.fill_batch(group, read, emission, band).is_some() {
+                crate::simd::batch_kernel_at(
+                    level,
+                    self.batch_plan.view(&self.plan.rows),
+                    &mut self.batch_rows,
+                    read.len(),
+                    band,
+                )
+            } else {
+                [Log10Likelihood::IMPOSSIBLE; BATCH]
+            };
             out.extend(scores.iter().take(group.len()).copied());
         }
     }
@@ -403,13 +378,32 @@ impl Workspace {
         out: &mut Vec<Log10Likelihood>,
         kernel: BatchKernel,
     ) {
-        let scores =
-            if read.is_empty() || self.batch_plan.fill(group, read, emission, band).is_none() {
-                [Log10Likelihood::IMPOSSIBLE; BATCH]
-            } else {
-                (kernel.run)(&self.batch_plan, &mut self.batch_rows, read.len(), band)
-            };
+        let scores = if !read.is_empty()
+            && self.plan.rows.fill(read, emission).is_some()
+            && self.fill_batch(group, read, emission, band).is_some()
+        {
+            (kernel.run)(
+                self.batch_plan.view(&self.plan.rows),
+                &mut self.batch_rows,
+                read.len(),
+                band,
+            )
+        } else {
+            [Log10Likelihood::IMPOSSIBLE; BATCH]
+        };
         out.extend(scores.iter().take(group.len()).copied());
+    }
+
+    /// The batch plan's column half for one read's band.
+    fn fill_batch<E: Emission>(
+        &mut self,
+        group: &[&Haplotype],
+        read: &Read,
+        emission: &E,
+        band: Band,
+    ) -> Option<()> {
+        let r = read.len();
+        self.batch_plan.fill(group, emission, read.strand(), |h| band.columns(h, r))
     }
 }
 
@@ -471,7 +465,7 @@ fn flush<L: Lane>(value: L) -> L {
 #[inline(always)]
 pub(crate) fn batch_kernel<L: Lane>(
     token: L::Token,
-    plan: &BatchPlan,
+    plan: BatchView<'_>,
     buffer: &mut BatchBuffer,
     read_len: usize,
     band: Band,
@@ -515,7 +509,7 @@ pub(crate) fn batch_kernel<L: Lane>(
     else {
         return impossible;
     };
-    let Rows {
+    let RowTracks {
         base: rows_base,
         spread: rows_spread,
         mismatched: rows_mismatched,
@@ -527,8 +521,8 @@ pub(crate) fn batch_kernel<L: Lane>(
     } = &plan.rows;
 
     let zero = L::splat(token, 0.0);
-    let past_end = L::load(token, &plan.past_end);
-    let init = L::load(token, &plan.init);
+    let past_end = L::load(token, plan.past_end);
+    let init = L::load(token, plan.init);
     let (o, w) = (band.offset, band.half_width);
 
     // Row 0, the read's free start: `1 / h` in the deletion matrix at every
