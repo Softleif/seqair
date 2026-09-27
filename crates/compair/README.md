@@ -61,6 +61,12 @@ de-novo CpG needs no special case.
   matrix), each bit-identical to its scalar kernel. The default width is 46
   and not 48 because a diagonal of `width / 2 + 1` cells fills three vectors
   of eight exactly at 46 and spills one cell into a fourth at 48
+- A GPU kernel behind the `gpu` feature (wgpu: Metal, Vulkan, DX12), one
+  thread per (read, haplotype) pair, for callers with thousands of pairs per
+  launch. It has its own oracle rather than bit-parity by construction:
+  measured bit-identical to the strip kernel on an Apple M4 Pro and an AMD RX
+  5700 XT except for pairs scoring below log10 -40, which a GPU that flushes
+  subnormal intermediates can score lower. See `docs/notes/gpu.md`
 - Types shared with `seqair-types`: `Base`, `Strand`, `BaseQuality`,
   `Probability`, `QPos`
 
