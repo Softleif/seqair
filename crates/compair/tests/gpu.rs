@@ -337,6 +337,44 @@ fn a_reused_aligner_is_a_fresh_aligner() -> Result<(), GpuError> {
     Ok(())
 }
 
+/// A context on a device the caller created -- here with wgpu's default
+/// limits and features, as another library sharing its device might --
+/// scores what a context of the crate's own does, bit for bit.
+#[test]
+fn a_context_on_a_borrowed_device_scores_as_its_own() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(own) = context() else { return Ok(()) };
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))?;
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+    let borrowed = GpuContext::from_device(adapter.get_info(), device, queue);
+
+    let groups = tenspeed::groups().map_err(|error| format!("10s: {error:?}"))?;
+    let emission = StandardEmission::default();
+    let mut pairs = GpuPairs::new();
+    for group in &groups {
+        let haplotypes = group
+            .haplotypes
+            .iter()
+            .map(|h| pairs.push_haplotype(h, Strand::OT, &emission))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (read, &offset) in group.reads.iter().zip(&group.offsets) {
+            let slot = pairs.push_read(read, &emission)?;
+            for &hap_slot in &haplotypes {
+                pairs.push_pair(slot, hap_slot, Band::anchored(offset))?;
+            }
+        }
+    }
+    let theirs = GpuAligner::new(borrowed).align(&pairs)?;
+    let ours = GpuAligner::new(own).align(&pairs)?;
+    assert!(!ours.is_empty());
+    assert_eq!(bits(&theirs), bits(&ours));
+    Ok(())
+}
+
 /// No read, no haplotype, a band that misses the haplotype, and an empty
 /// launch: `IMPOSSIBLE` or nothing, never a launch error.
 #[test]

@@ -100,6 +100,34 @@ impl GpuContext {
         device.on_uncaptured_error(Arc::new(|error| {
             tracing::error!(%error, "uncaptured wgpu error");
         }));
+        Ok(Arc::new(Self::build(info, device, queue)))
+    }
+
+    /// A context on a device the caller already has, so that one wgpu device
+    /// serves this crate and whatever else the caller runs on the GPU.
+    ///
+    /// The device's features decide what [`GpuContext::new`] would have
+    /// requested: results are read in place only when the device has
+    /// `MAPPABLE_PRIMARY_BUFFERS` **and** `info` names an integrated GPU, and
+    /// launches are timed only with `TIMESTAMP_QUERY`. The storage-buffer
+    /// limits are the device's, so a device created with wgpu's default limits
+    /// takes smaller launches than one from [`GpuContext::new`]
+    /// ([`GpuError::BufferTooLarge`] says when). The device's uncaptured-error
+    /// handler is its owner's and is left alone.
+    #[must_use]
+    pub fn from_device(
+        info: wgpu::AdapterInfo,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Arc<Self> {
+        Arc::new(Self::build(info, device, queue))
+    }
+
+    fn build(info: wgpu::AdapterInfo, device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let features = device.features();
+        let uma = features.contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS)
+            && matches!(info.device_type, wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::Cpu);
+        let timestamps = features.contains(wgpu::Features::TIMESTAMP_QUERY);
         tracing::debug!(adapter = %info.name, backend = ?info.backend, uma, "compair GPU context");
         let limits = device.limits();
 
@@ -146,7 +174,7 @@ impl GpuContext {
                 usage: wgpu::BufferUsages::STORAGE,
             },
         );
-        Ok(Arc::new(Self {
+        Self {
             transitions,
             device,
             queue,
@@ -157,7 +185,7 @@ impl GpuContext {
             layout,
             pipeline_layout,
             pipelines: Mutex::new(HashMap::new()),
-        }))
+        }
     }
 
     /// What wgpu reports about the adapter.
