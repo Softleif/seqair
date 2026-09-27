@@ -385,21 +385,26 @@ impl<'a> Buffers<'a> {
         let from = LANE_MAX - L::LANES;
         let end = from.checked_add(reach)?.checked_add(1)?;
         let mut lanes = L::splat(token, 0.0);
-        let mut cells = 0.0f32;
         for buffer in [&*self.m, &*self.i, &*self.d] {
             let stored = buffer.get(from..end)?;
-            let rest = if L::LANES == LANE_MAX {
-                let (chunks, rest) = stored.as_chunks::<LANE_MAX>();
-                for chunk in chunks {
-                    lanes = lanes.vmax(L::load(token, chunk));
+            match stored.last_chunk::<LANE_MAX>() {
+                Some(tail) if L::LANES == LANE_MAX => {
+                    for chunk in stored.as_chunks::<LANE_MAX>().0 {
+                        lanes = lanes.vmax(L::load(token, chunk));
+                    }
+                    // The last window again, overlapping the chunks before
+                    // it where the length is not a multiple: a maximum does
+                    // not mind seeing a cell twice.
+                    lanes = lanes.vmax(L::load(token, tail));
                 }
-                rest
-            } else {
-                stored
-            };
-            cells = rest.iter().fold(cells, |max, &cell| max.max(cell));
+                _ => {
+                    for &cell in stored {
+                        lanes = lanes.vmax(L::splat(token, cell));
+                    }
+                }
+            }
         }
-        Some(lanes.horizontal_max().max(cells))
+        Some(lanes.horizontal_max())
     }
 }
 
