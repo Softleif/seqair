@@ -368,14 +368,50 @@ impl<'a> Buffers<'a> {
             *self.d.as_mut_ptr().add(offset) = cells.2.last();
         }
     }
+
+    /// The maximum of every cell a sweep of this reach stored, and zero if
+    /// that is larger: the row below the strip, which the next strip's
+    /// renormalisation scales by. `None` only if the reach is not the one
+    /// `new` was given.
+    ///
+    /// Step `at` stores at `at + LANE_MAX - LANES`, so a sweep stores exactly
+    /// `LANE_MAX - LANES..=reach + LANE_MAX - LANES`; the entries around that
+    /// range are the row above, which the strip read and did not replace.
+    /// Every cell is a finite non-negative number (a flushed product of
+    /// probabilities, or a masked zero), so the maximum is exact in any order
+    /// and this is the same number a lanewise maximum over the steps gave.
+    #[inline(always)]
+    fn stored_max<L: Lane>(&self, token: L::Token, reach: usize) -> Option<f32> {
+        let from = LANE_MAX - L::LANES;
+        let end = from.checked_add(reach)?.checked_add(1)?;
+        let mut lanes = L::splat(token, 0.0);
+        let mut cells = 0.0f32;
+        for buffer in [&*self.m, &*self.i, &*self.d] {
+            let stored = buffer.get(from..end)?;
+            let rest = if L::LANES == LANE_MAX {
+                let (chunks, rest) = stored.as_chunks::<LANE_MAX>();
+                for chunk in chunks {
+                    lanes = lanes.vmax(L::load(token, chunk));
+                }
+                rest
+            } else {
+                stored
+            };
+            cells = rest.iter().fold(cells, |max, &cell| max.max(cell));
+        }
+        Some(lanes.horizontal_max().max(cells))
+    }
 }
 
-/// What every step feeds: the running maximum the next renormalisation
-/// reads, and the read's last row where this strip holds it.
+/// What every step feeds: the read's last row, where this strip holds it.
+///
+/// The maximum the next renormalisation reads is not here. It is the maximum
+/// of the row that crosses into the next strip -- the last lane's cells, which
+/// every step also stores into the row buffer -- so it is read back from the
+/// buffer once per strip ([`Buffers::stored_max`]) rather than folded into a
+/// lanewise maximum of every lane at every step, of which only the last lane
+/// was ever read.
 struct Totals<L: Lane> {
-    /// The lanewise maximum of every step's cells; only its last lane, the
-    /// row that crosses into the next strip, is read.
-    running: L,
     /// `m + i` of the read's last row, accumulated in that row's lane.
     total: L,
     /// That lane, as a mask, in the strip that holds the last row.
@@ -384,8 +420,7 @@ struct Totals<L: Lane> {
 
 impl<L: Lane> Totals<L> {
     #[inline(always)]
-    fn absorb(&mut self, (m, i, d): (L, L, L)) {
-        self.running = self.running.vmax(m).vmax(i).vmax(d);
+    fn absorb(&mut self, (m, i, _): (L, L, L)) {
         if let Some(keep) = self.summed {
             self.total = self.total + L::masked(keep, m + i);
         }
@@ -693,7 +728,6 @@ pub(crate) fn strip_kernel<L: Lane>(
         // The last strip holds the read's last row in one lane; its match
         // and insertion cells are the total.
         let mut totals = Totals {
-            running: zero,
             total,
             summed: if r0 + L::LANES > r {
                 Some(offsets.equals(L::splat(token, (r - r0) as f32)))
@@ -745,8 +779,14 @@ pub(crate) fn strip_kernel<L: Lane>(
         if !ran {
             return Log10Likelihood::IMPOSSIBLE;
         }
-        crossing_max = totals.running.last();
         total = totals.total;
+        // Only the strip above a renormalisation needs its row's maximum.
+        if (r0 + L::LANES - 1) % STRIP_ROWS == 0 {
+            let Some(max) = buffers.stored_max::<L>(token, reach) else {
+                return Log10Likelihood::IMPOSSIBLE;
+            };
+            crossing_max = max;
+        }
 
         // Column 0 belongs to the free start alone: every row below row 0 is
         // zero there. The eight-lane strip's last lane stores it, as a
