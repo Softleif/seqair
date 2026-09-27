@@ -12,7 +12,7 @@ This reads the rlib the benches actually link.
     python3 tools/compair_hot_loops.py dis [--dump NAME-SUBSTRING]
 
 Strip kernels: the unmasked middle phase, unrolled two steps (so /2 per
-step). Batch: the column loop. Diagonal: the full-chunk loop.
+step). Batch and pairs: the column loop. Diagonal: the full-chunk loop.
 """
 import re
 import sys
@@ -36,9 +36,11 @@ for line in open(path):
 WANTED = {
     "strip-avx2": "vectorize_avx2::<compair::simd::strip_kernel_at",
     "batch-avx2": "vectorize_avx2::<compair::simd::batch_kernel_at",
+    "pairs-avx2": "vectorize_avx2::<compair::simd::pairs_kernel_at",
     "banded-avx2": "vectorize_avx2::<compair::simd::banded_kernel_at",
     "strip-avx512": "vectorize_avx512::<compair::simd::strip_kernel_at",
     "batch-avx512": "vectorize_avx512::<compair::simd::batch_kernel_at",
+    "pairs-avx512": "vectorize_avx512::<compair::simd::pairs_kernel_at",
     "banded-avx512": "vectorize_avx512::<compair::simd::banded_kernel_at",
     "strip-sse4.2": "vectorize_sse4_2::<compair::simd::strip_kernel_at",
     "batch-sse4.2": "vectorize_sse4_2::<compair::simd::batch_kernel_at",
@@ -46,6 +48,7 @@ WANTED = {
     # dispatching function itself.
     "strip-base": "compair::simd::strip_kernel_at",
     "batch-base": "compair::simd::batch_kernel_at",
+    "pairs-base": "compair::simd::pairs_kernel_at",
     "banded-base": "compair::simd::banded_kernel_at",
     # the `compair` branch head, for comparison
     "hand-strip": "compair::intrinsics::strip_kernel_avx2",

@@ -9,15 +9,19 @@
 //! has -- one read against eight haplotypes, buffers kept between calls --
 //! and the difference to the plain arms is the cost of allocating per call.
 //! The `strips` arms are the same band through the row-strip traversal.
+//!
+//! `shadow/64x3` is a variant caller's shadow scoring: 64 reads, each with its
+//! own band, against three haplotypes, 192 alignments per iteration. The
+//! per-alignment cost is the reported time over 192.
 
 mod fixture;
 
 use compair::{
-    Betas, ConversionModel, StandardEmission, TapsEmission, Workspace, align_banded,
-    align_banded_simd, align_full, align_strips, align_strips_simd,
+    Band, Betas, ConversionModel, Haplotype, Pair, Read, StandardEmission, TapsEmission, Workspace,
+    align_banded, align_banded_simd, align_full, align_strips, align_strips_simd,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
-use fixture::{Fixture, fixture};
+use fixture::{Fixture, Shadow, fixture, shadow};
 use std::hint::black_box;
 
 fn align(c: &mut Criterion) {
@@ -130,6 +134,57 @@ fn align(c: &mut Criterion) {
         });
         group.finish();
     }
+
+    shadow_locus(c);
+}
+
+/// Every read of a locus against every haplotype: the strip kernel one pair at
+/// a time (what rastair calls today), the pairs kernel through
+/// `align_reads`, and the batch kernel's entry point read by read, which at
+/// three haplotypes is the strip kernel again.
+fn shadow_locus(c: &mut Criterion) {
+    let Shadow { haplotypes, reads, betas } = shadow();
+    let taps = TapsEmission::new(ConversionModel::taps_default(), Betas::PerSite(&betas));
+    let refs: Vec<&Haplotype> = haplotypes.iter().collect();
+    let reads: Vec<(&Read, Band)> = reads.iter().map(|(read, band)| (read, *band)).collect();
+    let pairs: Vec<Pair<'_>> = reads
+        .iter()
+        .flat_map(|&(read, band)| refs.iter().map(move |&h| Pair::new(h, read, band)))
+        .collect();
+
+    let mut group = c.benchmark_group(format!("shadow/{}x{}", reads.len(), refs.len()));
+    group.bench_function("strips-simd/taps/workspace", |b| {
+        let mut workspace = Workspace::new();
+        b.iter(|| {
+            black_box(&pairs)
+                .iter()
+                .map(|pair| {
+                    workspace.align_strips_simd(pair.haplotype, pair.read, &taps, pair.band).get()
+                })
+                .sum::<f64>()
+        });
+    });
+    group.bench_function("candidates/taps/workspace", |b| {
+        let mut workspace = Workspace::new();
+        let mut out = Vec::with_capacity(refs.len());
+        b.iter(|| {
+            let mut sum = 0.0;
+            for &(read, band) in black_box(&reads) {
+                workspace.align_candidates(&refs, read, &taps, band, &mut out);
+                sum += out.iter().map(|s| s.get()).sum::<f64>();
+            }
+            sum
+        });
+    });
+    group.bench_function("reads/taps/workspace", |b| {
+        let mut workspace = Workspace::new();
+        let mut out = Vec::with_capacity(pairs.len());
+        b.iter(|| {
+            workspace.align_reads(black_box(&refs), black_box(&reads), &taps, &mut out);
+            out.iter().map(|s| s.get()).sum::<f64>()
+        });
+    });
+    group.finish();
 }
 
 criterion_group!(benches, align);
