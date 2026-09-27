@@ -90,6 +90,23 @@ pub const PAIRS: usize = LANE_MAX;
 
 /// How many pairs a group needs before it beats scoring them one at a time
 /// through the strip kernel.
+///
+/// Measured by `examples/pairsfill.rs` on the shadow fixture (150 bp reads,
+/// each at its own offset, width 48), pairs kernel against strip kernel on the
+/// same SIMD level, per alignment:
+///
+/// | pairs | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+/// |---|---|---|---|---|---|---|---|---|
+/// | M4 Pro (NEON) | 0.19x | 0.38x | 0.55x | 0.70x | 0.93x | **0.96x** | 1.18x | 1.32x |
+/// | 3950X (AVX2) | 0.30x | 0.57x | 0.83x | **0.98x** | 1.19x | 1.39x | 1.59x | 1.76x |
+///
+/// The machines disagree as they do for [`BATCH_BREAK_EVEN`], and for the same
+/// reason six is the number: it costs the M4 ~4% on a group of six and the
+/// 3950X ~1.4x on groups of four and five. `align_reads` only ever has one
+/// short group per call -- the end of the product -- so on a locus of tens of
+/// reads the choice moves a few per cent of one group.
+///
+/// [`BATCH_BREAK_EVEN`]: crate::BATCH_BREAK_EVEN
 pub const PAIRS_BREAK_EVEN: usize = 6;
 
 // The same bounds `BATCH_BREAK_EVEN` has, for the same reasons.
@@ -216,6 +233,7 @@ struct RowEntry {
 impl RowEntry {
     /// Read base `index`'s row, exactly as `banded::Plan::fill` derives it.
     #[allow(clippy::cast_possible_truncation, reason = "the f32 narrowing is the point")]
+    #[inline]
     fn new<E: Emission>(read: &Read, emission: &E, index: usize) -> Option<Self> {
         let observation = read.observation(index)?;
         let eps = emission.epsilon(observation);
@@ -232,7 +250,14 @@ impl RowEntry {
         })
     }
 
+    /// Into lane `lane` of `row`. Inlined, and the lane taken modulo
+    /// [`PAIRS`], so that the eight stores of a row carry no bounds checks:
+    /// out of line, with them, this was 8% of a batch-shaped group's cycles on
+    /// the 3950X.
+    #[inline(always)]
     fn put(self, row: &mut RowBlock, lane: usize) -> Option<()> {
+        debug_assert!(lane < PAIRS);
+        let lane = lane % PAIRS;
         *row.base.get_mut(lane)? = self.base;
         *row.spread.get_mut(lane)? = self.spread;
         *row.mismatched.get_mut(lane)? = self.mismatched;
@@ -261,6 +286,7 @@ impl ColumnEntry {
     /// `banded::Plan::fill` derives it; the track a site does not use keeps
     /// the sentinel an unvisited column has.
     #[allow(clippy::cast_possible_truncation, reason = "the f32 narrowing is the point")]
+    #[inline]
     fn new<E: Emission>(
         haplotype: &Haplotype,
         emission: &E,
@@ -287,7 +313,14 @@ impl ColumnEntry {
         })
     }
 
+    /// Into lane `lane` of `column`. Inlined, and the lane taken modulo
+    /// [`PAIRS`], so that the eight stores of a row carry no bounds checks:
+    /// out of line, with them, this was 8% of a batch-shaped group's cycles on
+    /// the 3950X.
+    #[inline(always)]
     fn put(self, column: &mut ColumnBlock, lane: usize) -> Option<()> {
+        debug_assert!(lane < PAIRS);
+        let lane = lane % PAIRS;
         *column.base.get_mut(lane)? = self.base;
         *column.converted.get_mut(lane)? = self.converted;
         *column.plain.get_mut(lane)? = self.plain;
@@ -341,6 +374,7 @@ impl<K: Copy + PartialEq, T, const N: usize> Recent<K, T, N> {
     /// The table for `key`, derived by `derive` into a cleared table if this
     /// call has not derived it yet. A table whose derivation fails is
     /// forgotten rather than kept half-filled.
+    #[inline]
     fn get_or_derive(
         &mut self,
         key: K,
