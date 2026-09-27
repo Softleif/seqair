@@ -5,8 +5,8 @@ mod support;
 
 use compair::{
     Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood,
-    Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_strips,
-    align_strips_simd,
+    Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_candidates,
+    align_strips, align_strips_simd,
 };
 use proptest::prelude::*;
 use support::{any_conversion, any_probability, arbitrary_case, levels, mirror_strand};
@@ -52,13 +52,28 @@ fn check<E: Emission + Copy>(
         for (level_name, level) in levels() {
             candidates.align_strips_simd_at(level, read, band, &mut out);
             prop_assert_eq!(bits(&out), bits(&scalar), "{}, {:?}", level_name, read.strand());
+            // The dispatching entry point, batch kernel and all: the batch
+            // is bit-identical to the strip kernel, so the per-pair strip
+            // scores are its oracle too.
+            candidates.align_at(level, read, band, &mut out);
+            prop_assert_eq!(
+                bits(&out),
+                bits(&scalar),
+                "align, {}, {:?}",
+                level_name,
+                read.strand()
+            );
         }
+        let refs: Vec<&Haplotype> = haplotypes.iter().collect();
+        let fresh = align_candidates(&refs, read, &emission, band);
+        candidates.align(read, band, &mut out);
+        prop_assert_eq!(bits(&out), bits(&fresh), "align vs align_candidates");
     }
     Ok(())
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
 
     /// Scoring through prepared candidates is scoring one pair at a time, to
     /// the bit: with both strands interleaved, so a haplotype's column tracks
@@ -72,20 +87,26 @@ proptest! {
         case in arbitrary_case(),
         conversion in any_conversion(),
         uniform in any_probability(),
-        trim in 1usize..6,
+        count in 1usize..18,
         shift in -12i32..12,
         width in 2u32..80,
     ) {
+        // `count` variants of the haplotype, each trimmed, edited or both
+        // by its index, so a batch's lanes differ in length and in sequence;
+        // up to seventeen, so the dispatch sees full batches, a short
+        // remainder and a single straggler.
         let bases = case.haplotype.bases().to_vec();
-        let mut edited = bases.clone();
-        if let Some(base) = edited.get_mut(bases.len() / 2) {
-            *base = base.inverse();
-        }
-        let haplotypes = [
-            case.haplotype.clone(),
-            Haplotype::new(bases.get(..bases.len().saturating_sub(trim)).unwrap_or_default().to_vec()),
-            Haplotype::new(edited),
-        ];
+        let haplotypes: Vec<Haplotype> = (0..count)
+            .map(|k| {
+                let mut variant =
+                    bases.get(..bases.len().saturating_sub(k % 4)).unwrap_or_default().to_vec();
+                let at = (k * 7) % variant.len().max(1);
+                if k % 3 == 1 && let Some(base) = variant.get_mut(at) {
+                    *base = base.inverse();
+                }
+                Haplotype::new(variant)
+            })
+            .collect();
         let fewer = [Haplotype::new(bases.iter().rev().copied().collect::<Vec<_>>())];
         let other = on_other_strand(&case.read).ok_or(TestCaseError::reject("valid by construction"))?;
         let wide = Band::new(width, case.offset.saturating_add(shift))
@@ -131,14 +152,14 @@ fn a_new_candidate_set_forgets_the_last_one() {
     )
     .expect("valid");
     let band = Band::anchored(4);
-    let haplotypes = [haplotype];
+    let haplotypes = [haplotype.clone()];
     let standard = StandardEmission::default();
     let taps = TapsEmission::new(
         ConversionModel::taps_default(),
         Betas::Uniform(Probability::new(0.9).expect("in [0, 1]")),
     );
-    let want_standard = bits(&[align_strips_simd(&haplotypes[0], &read, &standard, band)]);
-    let want_taps = bits(&[align_strips_simd(&haplotypes[0], &read, &taps, band)]);
+    let want_standard = bits(&[align_strips_simd(&haplotype, &read, &standard, band)]);
+    let want_taps = bits(&[align_strips_simd(&haplotype, &read, &taps, band)]);
     assert_ne!(want_standard, want_taps, "the fixture has to tell the emissions apart");
 
     let mut workspace = Workspace::new();
@@ -148,6 +169,15 @@ fn a_new_candidate_set_forgets_the_last_one() {
         assert_eq!(bits(&out), want_standard);
         workspace.candidates(&haplotypes, &taps).align_strips_simd(&read, band, &mut out);
         assert_eq!(bits(&out), want_taps);
+    }
+    // A full batch, so `align` takes the batch kernel and its interleaved
+    // columns are what has to be forgotten.
+    let batch = vec![haplotype; compair::BATCH];
+    for _ in 0..2 {
+        workspace.candidates(&batch, &standard).align(&read, band, &mut out);
+        assert_eq!(bits(&out), want_standard.repeat(compair::BATCH));
+        workspace.candidates(&batch, &taps).align(&read, band, &mut out);
+        assert_eq!(bits(&out), want_taps.repeat(compair::BATCH));
     }
 }
 

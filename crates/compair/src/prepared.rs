@@ -8,6 +8,11 @@
 //! [`Workspace::align_strips_simd`], where R row fills and 2 * H column fills
 //! are all there is. [`Candidates`] does that many.
 //!
+//! The same holds for the batch kernel's interleaved columns, which depend on
+//! a group of eight haplotypes, the emission and the strand:
+//! [`Candidates::align`] derives them once per group and strand, and the
+//! batch kernel reads the same row tracks the strip kernel does.
+//!
 //! The column tracks are derived over the **whole** haplotype, not the band's
 //! columns, so one fill serves every read whatever its band. The kernels read
 //! the band and nothing else, so the extra columns cannot change a score, and
@@ -19,7 +24,8 @@ use fearless_simd::Level;
 use seqair_types::Strand;
 
 use crate::{
-    banded::{Band, ColumnTracks, PlanView, Shape, Workspace},
+    banded::{Band, ColumnTracks, PlanView, RowTracks, Shape, Workspace},
+    batch::{BATCH, BATCH_BREAK_EVEN},
     emission::Emission,
     haplotype::Haplotype,
     read::Read,
@@ -27,49 +33,64 @@ use crate::{
     types::Log10Likelihood,
 };
 
-/// One haplotype's column tracks, one set per strand, each derived the first
-/// time a read on that strand asks for it.
+/// Something derived per strand, `[OT, OB]`, each the first time a read on
+/// that strand asks for it.
 #[derive(Debug, Default)]
-pub(crate) struct PreparedColumns {
-    /// `[OT, OB]`.
-    strands: [ColumnTracks; 2],
+pub(crate) struct Prepared<T> {
+    strands: [T; 2],
     ready: [bool; 2],
 }
 
-impl PreparedColumns {
-    /// This haplotype's tracks for a read on `strand`, derived if they are
-    /// not yet. `None` for an unknown strand, which `Read` rejects, or a
-    /// haplotype the plan cannot address.
-    fn for_strand<E: Emission>(
+impl<T> Prepared<T> {
+    /// The one for `strand`, derived by `fill` if it is not yet. `None` for
+    /// an unknown strand, which `Read` rejects, or where `fill` fails.
+    fn for_strand(
         &mut self,
-        haplotype: &Haplotype,
-        emission: &E,
         strand: Strand,
-    ) -> Option<&ColumnTracks> {
+        fill: impl FnOnce(&mut T) -> Option<()>,
+    ) -> Option<&T> {
         let slot = match strand {
             Strand::OT => 0,
             Strand::OB => 1,
             Strand::Unknown => return None,
         };
         let ready = self.ready.get_mut(slot)?;
-        let tracks = self.strands.get_mut(slot)?;
+        let prepared = self.strands.get_mut(slot)?;
         if !*ready {
-            let last = haplotype.len().checked_sub(1)?;
-            tracks.fill(haplotype, emission, strand, (0, last))?;
+            fill(prepared)?;
             *ready = true;
         }
-        Some(tracks)
+        Some(prepared)
     }
+
+    /// Everything derived so far is stale; the allocations are kept.
+    fn forget(&mut self) {
+        self.ready = [false; 2];
+    }
+}
+
+/// Keeps `prepared` at least `len` long and forgets all of it.
+fn forget_all<T: Default>(prepared: &mut Vec<Prepared<T>>, len: usize) {
+    if prepared.len() < len {
+        prepared.resize_with(len, Prepared::default);
+    }
+    prepared.iter_mut().for_each(Prepared::forget);
+}
+
+/// Every column of a haplotype of `h` bases, as `Band::columns` spells a
+/// range: `None` for an empty one.
+fn whole(h: usize) -> Option<(usize, usize)> {
+    Some((0, h.checked_sub(1)?))
 }
 
 impl Workspace {
     /// These haplotypes under this emission, ready to score read after read
     /// against.
     ///
-    /// Every score is bit-identical to [`Workspace::align_strips_simd`] on
-    /// the same pair; what changes is the setup. A read's row tracks are
-    /// derived once for all the haplotypes, and a haplotype's column tracks
-    /// once per strand for all the reads, rather than both once per pair.
+    /// Every score is bit-identical to the per-pair entry points on the same
+    /// pair; what changes is the setup. A read's row tracks are derived once
+    /// for all the haplotypes, and the haplotypes' column tracks once per
+    /// strand for all the reads, rather than both once per pair.
     ///
     /// The haplotypes and the emission are borrowed for as long as the
     /// [`Candidates`] lives, so nothing it has derived can go stale under it,
@@ -83,12 +104,8 @@ impl Workspace {
         haplotypes: &'h [H],
         emission: E,
     ) -> Candidates<'w, 'h, H, E> {
-        if self.prepared.len() < haplotypes.len() {
-            self.prepared.resize_with(haplotypes.len(), PreparedColumns::default);
-        }
-        for prepared in &mut self.prepared {
-            prepared.ready = [false; 2];
-        }
+        forget_all(&mut self.prepared, haplotypes.len());
+        forget_all(&mut self.prepared_batches, haplotypes.len().div_ceil(BATCH));
         Candidates { workspace: self, haplotypes, emission }
     }
 }
@@ -107,6 +124,39 @@ impl<H, E> core::fmt::Debug for Candidates<'_, '_, H, E> {
     }
 }
 
+/// The pieces of a strip alignment on prepared columns.
+struct StripParts<'a, E> {
+    rows: &'a RowTracks,
+    buffer: &'a mut RowBuffer,
+    emission: &'a E,
+    read: &'a Read,
+    band: Band,
+}
+
+impl<E: Emission> StripParts<'_, E> {
+    /// One haplotype through `kernel` on its prepared columns. Where the
+    /// per-pair path's plan would have failed -- an empty haplotype, a band
+    /// that misses it -- the score is [`Log10Likelihood::IMPOSSIBLE`], as it
+    /// is there.
+    fn score(
+        &mut self,
+        haplotype: &Haplotype,
+        prepared: &mut Prepared<ColumnTracks>,
+        kernel: &mut impl FnMut(PlanView<'_>, &mut RowBuffer, Shape, Band) -> Log10Likelihood,
+    ) -> Log10Likelihood {
+        let (h, r) = (haplotype.len(), self.read.len());
+        let emission = self.emission;
+        let strand = self.read.strand();
+        let score = self.band.columns(h, r).and_then(|_| {
+            let columns = prepared
+                .for_strand(strand, |tracks| tracks.fill(haplotype, emission, strand, whole(h)?))?;
+            let view = PlanView { rows: self.rows, columns };
+            Some(kernel(view, self.buffer, Shape { haplotype: h, read: r }, self.band))
+        });
+        score.unwrap_or(Log10Likelihood::IMPOSSIBLE)
+    }
+}
+
 impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
     #[must_use]
     pub fn len(&self) -> usize {
@@ -116,6 +166,60 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.haplotypes.is_empty()
+    }
+
+    /// `read` against every haplotype, through whichever kernel is faster for
+    /// the number of them: [`Workspace::align_candidates`]'s dispatch, on
+    /// prepared columns. **This is the entry point a caller wants.**
+    ///
+    /// The scores replace `out`'s contents, in the haplotypes' order.
+    pub fn align(&mut self, read: &Read, band: Band, out: &mut Vec<Log10Likelihood>) {
+        self.align_at(Level::new(), read, band, out);
+    }
+
+    /// [`Candidates::align`] at a given `fearless_simd` level.
+    #[doc(hidden)]
+    pub fn align_at(
+        &mut self,
+        level: Level,
+        read: &Read,
+        band: Band,
+        out: &mut Vec<Log10Likelihood>,
+    ) {
+        out.clear();
+        let Self { workspace, haplotypes, emission } = self;
+        let Workspace { plan, rows, batch_rows, prepared, prepared_batches, .. } = &mut **workspace;
+        let r = read.len();
+        if r == 0 || plan.rows.fill(read, &*emission).is_none() {
+            out.resize(haplotypes.len(), Log10Likelihood::IMPOSSIBLE);
+            return;
+        }
+        let mut kernel = |view: PlanView<'_>, buffer: &mut RowBuffer, shape: Shape, band: Band| {
+            crate::simd::strip_kernel_at(level, view, buffer, shape, band)
+        };
+        let mut strips =
+            StripParts { rows: &plan.rows, buffer: rows, emission: &*emission, read, band };
+        let strand = read.strand();
+        for ((group, batch), columns) in haplotypes
+            .chunks(BATCH)
+            .zip(prepared_batches.iter_mut())
+            .zip(prepared.chunks_mut(BATCH))
+        {
+            if group.len() >= BATCH_BREAK_EVEN {
+                let scores = batch
+                    .for_strand(strand, |plan| plan.fill(group, &*emission, strand, whole))
+                    .map(|batch| {
+                        let view = batch.view(strips.rows);
+                        crate::simd::batch_kernel_at(level, view, batch_rows, r, band)
+                    })
+                    .unwrap_or([Log10Likelihood::IMPOSSIBLE; BATCH]);
+                out.extend(scores.iter().take(group.len()).copied());
+            } else {
+                for (haplotype, prepared) in group.iter().zip(columns.iter_mut()) {
+                    out.push(strips.score(haplotype.borrow(), prepared, &mut kernel));
+                }
+            }
+        }
     }
 
     /// `read` against every haplotype through the eight-lane strip kernel, at
@@ -136,8 +240,8 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
         band: Band,
         out: &mut Vec<Log10Likelihood>,
     ) {
-        self.each(read, band, out, |plan, rows, shape, band| {
-            crate::simd::strip_kernel_at(level, plan, rows, shape, band)
+        self.strips(read, band, out, |view, buffer, shape, band| {
+            crate::simd::strip_kernel_at(level, view, buffer, shape, band)
         });
     }
 
@@ -145,17 +249,14 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
     ///
     /// The scores replace `out`'s contents, in the haplotypes' order.
     pub fn align_strips(&mut self, read: &Read, band: Band, out: &mut Vec<Log10Likelihood>) {
-        self.each(read, band, out, |plan, rows, shape, band| {
-            strip_kernel::<f32>((), plan, rows, shape, band)
+        self.strips(read, band, out, |view, buffer, shape, band| {
+            strip_kernel::<f32>((), view, buffer, shape, band)
         });
     }
 
     /// Fills the read's rows once, then runs `kernel` per haplotype on its
-    /// prepared columns. Where [`Workspace::fill_plan`] would have returned
-    /// `None` -- an empty read or haplotype, a band that misses the
-    /// haplotype -- the score is [`Log10Likelihood::IMPOSSIBLE`], as it is
-    /// there.
-    fn each(
+    /// prepared columns.
+    fn strips(
         &mut self,
         read: &Read,
         band: Band,
@@ -163,21 +264,16 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
         mut kernel: impl FnMut(PlanView<'_>, &mut RowBuffer, Shape, Band) -> Log10Likelihood,
     ) {
         out.clear();
-        let Workspace { plan, rows, prepared, .. } = &mut *self.workspace;
-        let r = read.len();
-        let rows_ready = r > 0 && plan.rows.fill(read, &self.emission).is_some();
-        for (haplotype, columns) in self.haplotypes.iter().zip(prepared.iter_mut()) {
-            let haplotype = haplotype.borrow();
-            let h = haplotype.len();
-            let score = if rows_ready && band.columns(h, r).is_some() {
-                columns.for_strand(haplotype, &self.emission, read.strand()).map(|columns| {
-                    let view = PlanView { rows: &plan.rows, columns };
-                    kernel(view, rows, Shape { haplotype: h, read: r }, band)
-                })
-            } else {
-                None
-            };
-            out.push(score.unwrap_or(Log10Likelihood::IMPOSSIBLE));
+        let Self { workspace, haplotypes, emission } = self;
+        let Workspace { plan, rows, prepared, .. } = &mut **workspace;
+        if read.is_empty() || plan.rows.fill(read, &*emission).is_none() {
+            out.resize(haplotypes.len(), Log10Likelihood::IMPOSSIBLE);
+            return;
+        }
+        let mut strips =
+            StripParts { rows: &plan.rows, buffer: rows, emission: &*emission, read, band };
+        for (haplotype, prepared) in haplotypes.iter().zip(prepared.iter_mut()) {
+            out.push(strips.score(haplotype.borrow(), prepared, &mut kernel));
         }
     }
 }

@@ -305,8 +305,12 @@ pub struct Workspace {
     pub(crate) pairs_plan: crate::pairs::PairsPlan,
     pub(crate) pairs_rows: crate::pairs::PairsBuffer,
     /// Per haplotype of the last [`Workspace::candidates`], its column
-    /// tracks; kept for the allocations only.
-    pub(crate) prepared: Vec<crate::prepared::PreparedColumns>,
+    /// tracks per strand; kept between calls for the allocations only.
+    pub(crate) prepared: Vec<crate::prepared::Prepared<ColumnTracks>>,
+    /// The same for each group of [`BATCH`] haplotypes, interleaved.
+    ///
+    /// [`BATCH`]: crate::BATCH
+    pub(crate) prepared_batches: Vec<crate::prepared::Prepared<crate::batch::BatchPlan>>,
 }
 
 impl Workspace {
