@@ -676,9 +676,18 @@ pub(crate) fn pairs_kernel<L: Lane>(
                     *sum += shift;
                 }
             }
-            if any {
+            // Only the cells this row reads, `first - 1..=last`: left of them
+            // nothing is read again, since the band only moves right, and
+            // right of them every cell is still zero. Lifting the whole row
+            // was ~9% of the batch kernel's cycles on the 3950X.
+            let live = if first <= last {
+                cells.get_mut(first as usize - 1..=last as usize)
+            } else {
+                None
+            };
+            if any && let Some(live) = live {
                 let lift = L::load(token, &lift);
-                for cell in cells.iter_mut() {
+                for cell in live {
                     (L::load(token, &cell.m) * lift).store(&mut cell.m);
                     (L::load(token, &cell.i) * lift).store(&mut cell.i);
                     (L::load(token, &cell.d) * lift).store(&mut cell.d);
