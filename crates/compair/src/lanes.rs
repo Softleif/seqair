@@ -181,9 +181,13 @@ struct Carry<L> {
 }
 
 /// What a row's column steps carry from one to the next, and accumulate.
+///
+/// Not the row's maximum, which the next renormalisation scales by: only
+/// every eighth row's is read, and that row is what the cell buffer holds
+/// once the row is done, so it is read back from there ([`row_max`]) rather
+/// than folded into three `vmax` a step on every row.
 struct Sweep<L> {
     carry: Carry<L>,
-    running: L,
     total: L,
 }
 
@@ -195,6 +199,23 @@ struct RowConstants<L: Lane> {
     past_end: L,
     /// The lanes whose read ends on this row, for the `SUMMING` steps.
     ends: L::Mask,
+}
+
+/// The lanewise maximum of every cell of a row, all three matrices: the row a
+/// renormalisation scales by. Every cell is a finite non-negative number (a
+/// flushed product of probabilities, or a masked zero), so the maximum is
+/// exact in any order and the same number a maximum folded along the steps
+/// gave.
+#[inline(always)]
+fn row_max<L: Lane>(token: L::Token, cells: &[Cells]) -> L {
+    let mut max = L::splat(token, 0.0);
+    for cell in cells {
+        max = max
+            .vmax(L::load(token, &cell.m))
+            .vmax(L::load(token, &cell.i))
+            .vmax(L::load(token, &cell.d));
+    }
+    max
 }
 
 /// Subnormals to zero, as in the strip kernel and for the same reason.
@@ -232,7 +253,7 @@ fn steps<L: Lane, const MASKED: bool, const SUMMING: bool>(
     // exact in `f32`, so the value is the same bit for bit.
     let one = L::splat(token, 1.0);
     let mut column_lane = L::splat(token, from as f32);
-    let Sweep { carry, running, total } = sweep;
+    let Sweep { carry, total } = sweep;
 
     for (cell, column) in cells.iter_mut().zip(columns) {
         let (up_m, up_i, up_d) =
@@ -270,7 +291,6 @@ fn steps<L: Lane, const MASKED: bool, const SUMMING: bool>(
         i.store(&mut cell.i);
         d.store(&mut cell.d);
 
-        *running = running.vmax(m).vmax(i).vmax(d);
         if SUMMING {
             // The strip kernel's form, parentheses and mask included: `f32`
             // addition is not associative, and a lane that does not end here
@@ -452,7 +472,7 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
                 diag_m: L::load(token, &before.m),
                 diag_indel: L::load(token, &before.i) + L::load(token, &before.d),
             };
-            let mut sweep = Sweep { carry, running: zero, total };
+            let mut sweep = Sweep { carry, total };
 
             // Every lane is live up to the shortest haplotype, and the rest
             // of the row is masked; either part may be empty.
@@ -499,8 +519,12 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
                     alive + 1,
                 );
             }
-            running = sweep.running;
             total = sweep.total;
+            if row % STRIP_ROWS == 0
+                && let Some(stored) = cells.get(first..=last)
+            {
+                running = row_max(token, stored);
+            }
 
             // The two cells the next row reads that this one did not write:
             // its own `first - 1`, where the band was clamped at column 1, and
