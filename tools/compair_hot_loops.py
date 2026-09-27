@@ -21,9 +21,21 @@ from collections import Counter
 path = sys.argv[1]
 dump = sys.argv[sys.argv.index("--dump") + 1] if "--dump" in sys.argv else None
 
+text = open(path).read().splitlines()
+# `#` starts a comment in x86 dumps and an immediate in AArch64 ones, whose
+# comments start with `;` (Mach-O) or `//` (ELF).
+x86 = any(re.search(r"\b[xy]mm\d+\b", line) for line in text)
+
+
+def uncomment(ins):
+    if x86:
+        return ins.split("#")[0].strip()
+    return re.split(r"\s;|//", ins)[0].strip()
+
+
 functions = {}
 current = None
-for line in open(path):
+for line in text:
     m = re.match(r"^[0-9a-f]+ <(.*)>:$", line)
     if m:
         current = m.group(1)
@@ -31,7 +43,7 @@ for line in open(path):
         continue
     m = re.match(r"^\s*([0-9a-f]+):\s+(.*)$", line)
     if m and current is not None:
-        functions[current].append((int(m.group(1), 16), m.group(2).split("#")[0].strip()))
+        functions[current].append((int(m.group(1), 16), uncomment(m.group(2))))
 
 WANTED = {
     "strip-avx2": "vectorize_avx2::<compair::simd::strip_kernel_at",
