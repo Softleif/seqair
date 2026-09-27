@@ -39,8 +39,9 @@
 //! Beyond the format it applies the crate's resource policy, so it fails
 //! exactly where the production decoder does: at most 10 million names
 //! (htscodecs' limit), the codec output cap on the header's uncompressed
-//! length, and no more output than that length plus 1 KiB (htscodecs'
-//! margin: its encoder writes the exact length, noodles' one byte less).
+//! length and on all token streams' decoded lengths together, and no more
+//! output than that length plus 1 KiB (htscodecs' margin: its encoder
+//! writes the exact length, noodles' one byte less).
 //!
 //! Every failure is `None`: the reference only has to say *whether* a block
 //! decodes, and to what.
@@ -261,6 +262,9 @@ fn decode_token_byte_streams(
     arith_decode: &impl Fn(&[u8]) -> Option<Vec<u8>>,
 ) -> Option<Streams> {
     let mut b = Streams::new();
+    // Not in the spec: every decoded stream counts against the codec output
+    // cap, as in the production decoder.
+    let mut total = 0usize;
     // `t ← -1`; `None` until the first new position.
     let mut t: Option<usize> = None;
     // htscodecs: `while (o < sz)`, where the pseudocode's repeat-until reads
@@ -307,6 +311,8 @@ fn decode_token_byte_streams(
             } else {
                 super::rans_nx16::decode(data, 0).ok()?
             };
+            total += decoded.len();
+            check_codec_output(total, "tok3 reference streams").ok()?;
             b.insert((t, ty), ByteStream::new(decoded));
         }
     }
@@ -646,7 +652,7 @@ mod tests {
     /// Blocks whose names end near the bound on the output (the declared
     /// length plus 1 KiB), where the decoders' writes take their slow paths:
     /// they decode exactly when the names fit, and alike.
-    // r[verify cram.codec.tok3.limits]
+    // r[verify cram.codec.tok3.limits+2]
     #[hegel::test(test_cases = 300)]
     fn decoders_agree_near_the_output_bound(tc: TestCase) {
         let names = tc.draw(arb_names());

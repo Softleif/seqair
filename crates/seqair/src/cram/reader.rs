@@ -104,10 +104,14 @@ pub enum CramError {
     #[error("lzma decompression failed in block")]
     LzmaDecompressionFailed { source: std::io::Error },
 
-    #[error("block with compression method {method} decoded to {found} bytes, but its header says {expected}")]
+    #[error(
+        "block with compression method {method} decoded to {found} bytes, but its header says {expected}"
+    )]
     BlockSizeMismatch { method: u8, expected: usize, found: usize },
 
-    #[error("block with compression method {method} decodes past the {expected} bytes its header says")]
+    #[error(
+        "block with compression method {method} decodes past the {expected} bytes its header says"
+    )]
     BlockDecodesPastSize { method: u8, expected: usize },
 
     // ── Block type mismatch ──────────────────────────────────────────────────
@@ -315,9 +319,9 @@ pub(crate) fn check_alloc_size(size: usize, context: &'static str) -> Result<(),
 /// htscodecs caps at 100 000 bytes in its fuzzing builds; 4 MiB keeps the
 /// seeds' real blocks (up to ~2.3 MB) decodable.
 #[cfg(not(fuzzing))]
-const MAX_CODEC_OUTPUT: usize = MAX_ALLOC_SIZE;
+pub(crate) const MAX_CODEC_OUTPUT: usize = MAX_ALLOC_SIZE;
 #[cfg(fuzzing)]
-const MAX_CODEC_OUTPUT: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_CODEC_OUTPUT: usize = 4 * 1024 * 1024;
 
 // r[impl io.fuzz.codec_output_cap]
 /// Check a codec's claimed output size against [`MAX_CODEC_OUTPUT`].

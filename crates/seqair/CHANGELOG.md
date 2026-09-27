@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decode to exactly the header's size (`CramError::BlockSizeMismatch`, which replaces
   `FqzcompSizeMismatch`) — a short gzip block was padded with zeros before. A block whose header
   says 0 bytes is empty and is not decoded, whatever its method, as in htslib.
+- **A small tok3 block could decode gigabytes of token streams.** Each stream was capped on its own,
+  but a stream may be set any number of times and each one is decoded; a 64 KiB block reached
+  2 GB. All of a block's streams together now pass the codec output cap.
 
 ### Removed
 

@@ -20,7 +20,7 @@
 
 use super::codec_io::{Uint7Error, read_u8, read_u32_le, read_uint7, split_off};
 use super::rans_nx16::{self, Nx16Order1Buf};
-use super::reader::{CramError, MAX_ALLOC_SIZE, check_codec_output};
+use super::reader::{CramError, MAX_ALLOC_SIZE, MAX_CODEC_OUTPUT, check_codec_output};
 
 /// Bridge `Uint7Error` (narrow, hot-path-friendly) to the rich `CramError`.
 fn uint7_to_cram_error(e: Uint7Error) -> CramError {
@@ -184,7 +184,7 @@ fn decode_with(
     let use_arith = read_u8(&mut cur).ok_or_else(truncated)? != 0;
 
     // r[impl cram.tok3.name_count_limit]
-    // r[impl cram.codec.tok3.limits]
+    // r[impl cram.codec.tok3.limits+2]
     if name_count > TOK3_NAME_COUNT_LIMIT {
         return Err(CramError::Tok3NameCountExceedsLimit {
             count: name_count,
@@ -198,7 +198,7 @@ fn decode_with(
         return Err(CramError::Tok3NameCountExceedsLength { count: name_count, length: ulen });
     }
 
-    let streams = Streams::read(&mut cur, use_arith.then_some(&arith), rans_buf)?;
+    let streams = Streams::read(&mut cur, use_arith.then_some(&arith), rans_buf, MAX_CODEC_OUTPUT)?;
     let mut names = Names::new(streams.cursors(name_count), max_output, name_count);
     for n in 0..name_count {
         names.decode_name(n)?;
@@ -228,13 +228,17 @@ impl Streams {
     // r[impl cram.codec.tok3.streams]
     /// Read and decode every token stream; `arith` decodes them when the
     /// block uses the arithmetic coder, else they are rANS Nx16, decoded
-    /// with `rans_buf`'s order-1 tables.
+    /// with `rans_buf`'s order-1 tables. Together they may decode to at most
+    /// `max_total` bytes.
+    // r[impl cram.codec.tok3.limits+2]
     fn read(
         src: &mut &[u8],
         arith: Option<&impl Fn(&[u8]) -> Result<Vec<u8>, CramError>>,
         rans_buf: &mut Nx16Order1Buf,
+        max_total: usize,
     ) -> Result<Self, CramError> {
         let mut streams = Self { decoded: Vec::new(), positions: Vec::new() };
+        let mut total = 0usize;
 
         while let Some(ttype) = read_u8(src) {
             let ty = ttype & 0x3f;
@@ -277,6 +281,17 @@ impl Streams {
                     Some(arith) => arith(data)?,
                     None => rans_nx16::decode_with_buf(data, 0, rans_buf)?,
                 };
+                // A stream set twice keeps the later one, but both were
+                // decoded: without a total, a few KiB could decode to any
+                // amount of data, one capped stream at a time.
+                total = total.saturating_add(decoded.len());
+                if total > max_total {
+                    return Err(CramError::AllocationTooLarge {
+                        size: total,
+                        limit: max_total,
+                        context: "tok3 token streams",
+                    });
+                }
                 streams.decoded.push(decoded);
                 Source::Decoded(streams.decoded.len().saturating_sub(1))
             };
@@ -935,7 +950,7 @@ mod tests {
         assert_eq!(decode(&src).unwrap(), b"readxx\0readxx\0readxx\0");
     }
 
-    // r[verify cram.codec.tok3.limits]
+    // r[verify cram.codec.tok3.limits+2]
     #[test]
     fn output_is_bounded_by_the_declared_length() {
         // 1 KiB past the declared length: one name of 1021 + 2 + 1 bytes
@@ -966,6 +981,37 @@ mod tests {
         ));
         // No names decode to nothing, whatever the streams.
         assert_eq!(decode(&block(0, 0, &[])).unwrap(), b"");
+    }
+
+    /// Streams set over and over are each decoded, so their decoded
+    /// lengths count together against the cap.
+    // r[verify cram.codec.tok3.limits+2]
+    #[test]
+    fn token_streams_share_one_output_cap() {
+        let src = block(
+            10,
+            1,
+            &[
+                Part::Stream(NEW | STRING, &[b'a'; 10]),
+                Part::Stream(STRING, &[b'b'; 10]),
+                Part::Stream(STRING, &[b'c'; 10]),
+            ],
+        );
+        let read = |max_total| {
+            let mut cur = src.get(9..).unwrap();
+            let rans_only = |_: &[u8]| -> Result<Vec<u8>, CramError> { unreachable!() };
+            let arith = false.then_some(&rans_only);
+            Streams::read(&mut cur, arith, &mut Nx16Order1Buf::new(), max_total).map(|_| ())
+        };
+        assert!(read(30).is_ok());
+        assert!(matches!(
+            read(29),
+            Err(CramError::AllocationTooLarge {
+                size: 30,
+                limit: 29,
+                context: "tok3 token streams"
+            })
+        ));
     }
 
     /// A decoder reused across blocks — order-1 rANS streams (`.9`), the
