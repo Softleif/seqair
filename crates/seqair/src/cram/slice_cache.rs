@@ -6,7 +6,7 @@
 //! a byte budget, and makes threads that want the same missing slice at the
 //! same time wait for one decode instead of each running their own.
 // r[impl cram.slice_cache.shared]
-// r[impl cram.slice_cache.budget+2]
+// r[impl cram.slice_cache.budget+3]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -47,19 +47,16 @@ struct Inner {
     budget: SliceCacheBudget,
 }
 
-/// The least an automatic budget keeps.
-pub const AUTO_BUDGET_FLOOR: usize = 256 * 1024 * 1024;
-
 /// How much a reader's decoded-slice cache may keep
 /// ([`IndexedCramReader::set_slice_cache_budget`](super::reader::IndexedCramReader::set_slice_cache_budget)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SliceCacheBudget {
-    /// Room for the slices the open handles on the file (the reader and
-    /// its live forks) are working through, plus the two neighbours at the
-    /// edges, sized by the largest slice decoded so far, and at least
-    /// [`AUTO_BUDGET_FLOOR`]. A handle works through the slices one fetch
-    /// covers — at least one, and on average one fewer than a fetch
-    /// touches, since consecutive fetches share one at their edge.
+    /// Room for the slices the open handles on the file (the reader and its
+    /// live forks) are working through, at the largest slice's size: one
+    /// for a lone handle, the one its last fetch ended in and a sweep's next
+    /// fetch starts in; for several, the slices their fetches in flight
+    /// span beyond the first — `handles` times the mean a fetch wants less
+    /// one, rounded up — plus one.
     #[default]
     Auto,
     /// At most this many heap bytes; 0 turns caching off.
@@ -137,13 +134,21 @@ impl SliceCache {
         }
     }
 
-    /// Slices one handle works through: those a fetch wants, less the one
-    /// it shares with the next, rounded up and at least one.
-    fn slices_per_handle(&self) -> usize {
+    /// Slices [`SliceCacheBudget::Auto`] keeps room for.
+    fn auto_slices(&self) -> usize {
+        let handles = u64::try_from(self.handles.load(Ordering::Relaxed)).unwrap_or(u64::MAX);
+        if handles <= 1 {
+            return 1;
+        }
         let fetches = self.fetches.load(Ordering::Relaxed);
         let beyond_first = self.fetched_slices.load(Ordering::Relaxed).saturating_sub(fetches);
-        let per_handle = if fetches == 0 { 1 } else { beyond_first.div_ceil(fetches).max(1) };
-        usize::try_from(per_handle).unwrap_or(usize::MAX)
+        // Before any fetch, one slice each.
+        let span = if fetches == 0 {
+            handles
+        } else {
+            handles.saturating_mul(beyond_first).div_ceil(fetches)
+        };
+        usize::try_from(span.saturating_add(1)).unwrap_or(usize::MAX)
     }
 
     /// Change the budget, evicting down to it at once.
@@ -158,13 +163,10 @@ impl SliceCache {
     fn budget_bytes(&self, inner: &Inner) -> usize {
         match inner.budget {
             SliceCacheBudget::Bytes(bytes) => bytes,
+            // Never 0, which would turn the cache off before the first
+            // decode tells it the slice size.
             SliceCacheBudget::Auto => {
-                let slices = self
-                    .handles
-                    .load(Ordering::Relaxed)
-                    .saturating_mul(self.slices_per_handle())
-                    .saturating_add(2);
-                slices.saturating_mul(self.largest.load(Ordering::Relaxed)).max(AUTO_BUDGET_FLOOR)
+                self.auto_slices().saturating_mul(self.largest.load(Ordering::Relaxed).max(1))
             }
         }
     }
@@ -358,35 +360,31 @@ mod tests {
     }
 
     #[test]
-    fn auto_budget_keeps_two_slices_more_than_handles() {
+    fn auto_budget_follows_handles_and_fetch_width() {
         let cache = SliceCache::new(SliceCacheBudget::Auto);
         let budget = || cache.stats().budget_bytes;
-        assert_eq!(budget(), AUTO_BUDGET_FLOOR, "nothing decoded yet");
+        assert_eq!(budget(), 1, "nothing decoded yet, but not off");
 
         let slice = 100 << 20;
         cache.largest.store(slice, Ordering::Relaxed);
-        assert_eq!(budget(), 3 * slice);
-        cache.handle_opened();
-        cache.handle_opened();
-        assert_eq!(budget(), 5 * slice);
-        cache.handle_closed();
-        assert_eq!(budget(), 4 * slice);
+        assert_eq!(budget(), slice, "a lone handle keeps its last slice");
+        cache.record_fetch(4);
+        assert_eq!(budget(), slice, "however wide its fetches");
 
-        cache.largest.store(1, Ordering::Relaxed);
-        assert_eq!(budget(), AUTO_BUDGET_FLOOR, "small slices keep the floor");
-        cache.largest.store(slice, Ordering::Relaxed);
-        // Fetches four slices wide, sharing one with the next: three each.
-        cache.record_fetch(4);
-        cache.record_fetch(4);
-        assert_eq!(budget(), (2 * 3 + 2) * slice);
-        // A mean of 2.5 beyond the first rounds up.
-        cache.record_fetch(5);
+        cache.handle_opened();
+        cache.handle_opened();
+        // Three handles, fetches four slices wide sharing one at the edge.
+        assert_eq!(budget(), (3 * 3 + 1) * slice);
+        // A mean of 1.25 beyond the first: 3.75 for three handles, rounded up.
         cache.record_fetch(1);
+        cache.record_fetch(2);
         cache.record_fetch(0);
-        assert_eq!(budget(), (2 * 3 + 2) * slice);
-        cache.record_fetch(1);
-        cache.record_fetch(1);
-        assert_eq!(budget(), (2 * 2 + 2) * slice);
+        cache.record_fetch(2);
+        assert_eq!(budget(), (4 + 1) * slice);
+        cache.handle_closed();
+        assert_eq!(budget(), (3 + 1) * slice);
+        cache.handle_closed();
+        assert_eq!(budget(), slice);
 
         cache.set_budget(SliceCacheBudget::Bytes(7));
         assert_eq!(budget(), 7);

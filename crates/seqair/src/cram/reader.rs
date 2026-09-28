@@ -577,7 +577,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         &self.shared.header
     }
 
-    // r[impl cram.slice_cache.budget+2]
+    // r[impl cram.slice_cache.budget+3]
     /// Set the budget of the decoded-slice cache this reader shares with
     /// its forks (default [`SliceCacheBudget::Auto`]). It bounds the slices
     /// the cache keeps, not the ones fetches in flight hold.
@@ -1002,18 +1002,18 @@ mod tests {
     }
 
     // r[verify cram.slice_cache.shared]
-    // r[verify cram.slice_cache.budget+2]
+    // r[verify cram.slice_cache.budget+3]
     #[test]
     fn forks_share_decoded_slices() {
         let mut reader = IndexedCramReader::open(cram_path(), fasta_path()).unwrap();
+        let mut fork = reader.fork().unwrap();
         let mut store = RecordStore::new();
         let whole = || (Pos0::ZERO..=Pos0::MAX).into();
 
         let count = reader.fetch_into(0, whole(), &mut store).unwrap();
         let decoded = reader.slice_cache_stats().decoded;
-        assert!(decoded > 0);
+        assert!(decoded > 1, "tid 0 spans several slices");
 
-        let mut fork = reader.fork().unwrap();
         assert_eq!(fork.fetch_into(0, whole(), &mut store).unwrap(), count);
         assert_eq!(reader.fetch_into(0, whole(), &mut store).unwrap(), count);
         assert_eq!(reader.slice_cache_stats().decoded, decoded, "a cached slice was decoded again");
@@ -1028,7 +1028,7 @@ mod tests {
         );
     }
 
-    // r[verify cram.slice_cache.budget+2]
+    // r[verify cram.slice_cache.budget+3]
     #[test]
     fn forks_count_as_handles_until_dropped() {
         let reader = IndexedCramReader::open(cram_path(), fasta_path()).unwrap();

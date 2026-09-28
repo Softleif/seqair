@@ -931,7 +931,7 @@ fn arb_query(tc: &TestCase, handles: usize, contigs: usize) -> Query {
 
 // r[verify cram.slice_cache]
 // r[verify cram.slice_cache.shared]
-// r[verify cram.slice_cache.budget+2]
+// r[verify cram.slice_cache.budget+3]
 /// Queries through a reader and its forks, which share decoded slices, return
 /// what a freshly opened reader returns for each query on its own.
 ///
