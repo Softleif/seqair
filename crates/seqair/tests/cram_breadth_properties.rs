@@ -39,8 +39,9 @@ use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::cram::block::{self, ContentType};
 use seqair::cram::container::ContainerHeader;
 use seqair::cram::index::{CraiEntry, CramIndex};
+use seqair::cram::reader::DEFAULT_SLICE_CACHE_BYTES;
 use seqair::cram::slice::SliceHeader;
-use seqair::reader::Readers;
+use seqair::reader::{IndexedReader, Readers};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -906,6 +907,105 @@ fn region_queries_return_exactly_the_overlapping_reads(tc: TestCase) {
     if want.len() == sample.reads_on(contig).count() {
         tc.event("whole contig");
     }
+}
+
+/// One region query of a sequence, and the handle that asks it.
+#[derive(Debug, Clone, Copy)]
+struct Query {
+    handle: usize,
+    contig: usize,
+    start0: u32,
+    end0: u32,
+}
+
+#[hegel::composite]
+fn arb_query(tc: &TestCase, handles: usize, contigs: usize) -> Query {
+    let start0 = tc.draw_silent(gs::integers::<u32>().max_value(CONTIG_LEN - 1));
+    Query {
+        handle: tc.draw_silent(gs::integers::<usize>().max_value(handles - 1)),
+        contig: tc.draw_silent(gs::integers::<usize>().max_value(contigs - 1)),
+        start0,
+        end0: tc.draw_silent(gs::integers::<u32>().min_value(start0).max_value(CONTIG_LEN - 1)),
+    }
+}
+
+// r[verify cram.slice_cache]
+// r[verify cram.slice_cache.shared]
+// r[verify cram.slice_cache.budget]
+/// Queries through a reader and its forks, which share decoded slices, return
+/// what a freshly opened reader returns for each query on its own.
+///
+/// The forks run on their own threads, so they race for the same slices; the
+/// budget runs from nothing kept, through a few small slices, to everything.
+/// The fresh reader decodes every slice it needs for that one query, so it is
+/// the oracle for "taken from the cache" versus "decoded for this fetch".
+#[hegel::test(test_cases = 48)]
+fn cached_slices_fetch_like_fresh_ones(tc: TestCase) {
+    const HANDLES: usize = 3;
+    let sample = tc.draw(arb_sample().print_as_debug());
+    let opts = tc.draw(arb_opts().print_as_debug());
+    let budget = tc.draw(gs::sampled_from(&[0usize, 1, 4096, DEFAULT_SLICE_CACHE_BYTES]));
+    let queries = tc.draw(
+        gs::vecs(arb_query(HANDLES, sample.contigs.len()))
+            .min_size(1)
+            .max_size(12)
+            .print_as_debug(),
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fasta = write_reference(dir.path(), &sample);
+    let bam = write_bam(dir.path(), &sample);
+    let cram = write_cram(dir.path(), &bam, &fasta, opts);
+
+    let first = IndexedReader::open_with_reference(&cram, &fasta).expect("open");
+    let IndexedReader::Cram(cram_reader) = &first else { panic!("not opened as CRAM") };
+    cram_reader.set_slice_cache_budget(budget);
+    let mut handles = vec![first];
+    while handles.len() < HANDLES {
+        let fork = handles[0].fork().expect("fork");
+        handles.push(fork);
+    }
+
+    let mut got: Vec<Option<Vec<Decoded>>> = vec![None; queries.len()];
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = handles
+            .iter_mut()
+            .enumerate()
+            .map(|(h, reader)| {
+                let queries = &queries;
+                scope.spawn(move || {
+                    let mut store = RecordStore::new();
+                    let mut out = Vec::new();
+                    for (i, q) in queries.iter().enumerate().filter(|(_, q)| q.handle == h) {
+                        let tid = reader
+                            .header()
+                            .tid(&Sample::contig_name(q.contig))
+                            .expect("contig in header");
+                        let span =
+                            (Pos0::new(q.start0).unwrap()..=Pos0::new(q.end0).unwrap()).into();
+                        reader
+                            .fetch_into_customized(tid, span, &mut store, &mut RejectUnmapped)
+                            .expect("fetch");
+                        out.push((i, decode_store(&store)));
+                    }
+                    out
+                })
+            })
+            .collect();
+        for thread in threads {
+            for (i, decoded) in thread.join().expect("fetch thread") {
+                got[i] = Some(decoded);
+            }
+        }
+    });
+
+    for (q, got) in queries.iter().zip(got) {
+        let want = fetch(&cram, &fasta, q.contig, q.start0, q.end0);
+        assert_eq!(got.as_ref(), Some(&want), "{}: budget {budget}, {q:?}", opts.label());
+    }
+
+    tc.event(format!("budget {budget}"));
+    tc.event_value("slices", slice_headers(&cram).len() as f64);
 }
 
 // r[verify cram.index.zero_span+2]
