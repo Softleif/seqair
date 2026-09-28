@@ -762,7 +762,7 @@ fn pos0_from_u64(v: u64) -> Option<Pos0> {
     Pos0::new(v32)
 }
 
-// r[impl unified.segment_byte_budget]
+// r[impl unified.segment_byte_budget+2]
 /// Recursively bisect `seg` so that each emitted sub-segment's full
 /// `[start, end]` is estimated by `estimate` to load at most `budget` bytes.
 ///
@@ -1274,7 +1274,7 @@ mod tests {
         }
     }
 
-    // r[verify unified.segment_byte_budget]
+    // r[verify unified.segment_byte_budget+2]
     #[test]
     fn byte_split_passthrough_when_under_budget() {
         let opts = SegmentOptions::new(NonZeroU32::new(1000).unwrap());
@@ -1284,7 +1284,7 @@ mod tests {
         assert_eq!((segs[0].overlap_start(), segs[0].overlap_end()), (0, 0));
     }
 
-    // r[verify unified.segment_byte_budget]
+    // r[verify unified.segment_byte_budget+2]
     #[test]
     fn byte_split_splits_until_under_budget() {
         // 1000 bases × 10 B = 10_000 B; budget 2000 B forces several splits.
@@ -1303,7 +1303,7 @@ mod tests {
         assert_cores_tile(&segs, p(0), p(999));
     }
 
-    // r[verify unified.segment_byte_budget]
+    // r[verify unified.segment_byte_budget+2]
     // r[verify unified.segment_overlap]
     #[test]
     fn byte_split_preserves_overlap_and_tiling() {
@@ -1321,7 +1321,7 @@ mod tests {
         assert_cores_tile(&segs, p(0), p(999));
     }
 
-    // r[verify unified.segment_byte_budget]
+    // r[verify unified.segment_byte_budget+2]
     /// The irreducible case: when bisecting never lowers the byte estimate (a
     /// single oversized index leaf bin reports the same size for any sub-range),
     /// the region must be emitted as ONE over-budget segment — not bisected into
@@ -1336,7 +1336,7 @@ mod tests {
         assert_cores_tile(&segs, p(100), p(109));
     }
 
-    // r[verify unified.segment_byte_budget]
+    // r[verify unified.segment_byte_budget+2]
     /// A reducible region containing one irreducible "leaf bin" must split the
     /// reducible part but keep the bin in a single segment (loaded once), never
     /// reloading it per sub-position.
@@ -1470,7 +1470,7 @@ mod tests {
         }
     }
 
-    // r[verify unified.segment_byte_budget]
+    // r[verify unified.segment_byte_budget+2]
     /// Byte-aware subdivision must (a) keep cores tiling the range exactly
     /// and (b) keep every segment under budget unless its core is a single
     /// base (the irreducible leaf-bin case).

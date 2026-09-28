@@ -68,14 +68,13 @@ impl<R: Read + Seek> IndexedReader<R> {
     }
 
     /// Estimate the compressed bytes a `[start, end]` region query would load,
-    /// for byte-aware segmentation. Returns `None` for CRAM, whose slice-based
-    /// reader bounds memory differently (there is no `RegionBuf` bulk-load), so
-    /// callers should skip byte-budget subdivision for it.
+    /// for byte-aware segmentation. For CRAM it is the records' share of the
+    /// slices they are in, prorated by span from the CRAI.
     pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> Option<u64> {
         match self {
             Self::Bam(r) => Some(r.estimate_region_bytes(tid, span)),
             Self::Sam(r) => Some(r.estimate_region_bytes(tid, span)),
-            Self::Cram(_) => None,
+            Self::Cram(r) => Some(r.estimate_region_bytes(tid, span)),
         }
     }
 

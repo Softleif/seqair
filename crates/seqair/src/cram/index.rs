@@ -136,6 +136,30 @@ impl CramIndex {
             .collect()
     }
 
+    // r[impl cram.index.region_bytes]
+    /// Estimate the compressed bytes of the records a query for `[start, end]`
+    /// (0-based, inclusive) on `tid` returns: each selected slice's size,
+    /// prorated by the share of its span the query covers.
+    pub fn region_bytes(&self, tid: i32, start: u64, end: u64) -> u64 {
+        self.query(tid, start, end)
+            .into_iter()
+            .map(|e| {
+                let Some(last) = e.placed_last().filter(|&last| last != u64::MAX) else {
+                    return e.slice_size;
+                };
+                let first = e.start0();
+                let covered = last.min(end).saturating_sub(first.max(start)).saturating_add(1);
+                let span = last.saturating_sub(first).saturating_add(1);
+                // Both fit in u64, so the product fits in u128; span >= 1.
+                let bytes = u128::from(e.slice_size)
+                    .saturating_mul(u128::from(covered))
+                    .checked_div(u128::from(span))
+                    .unwrap_or(0);
+                u64::try_from(bytes).unwrap_or(u64::MAX)
+            })
+            .fold(0, u64::saturating_add)
+    }
+
     /// The positions in `entries` of reference `tid`'s entries.
     fn tid_range(&self, tid: i32) -> (usize, usize) {
         let lo = self.entries.partition_point(|e| e.ref_id < tid);
@@ -353,6 +377,61 @@ mod tests {
         let queried = index.query(tid, start, end);
         assert_eq!(queried.len(), scanned.len());
         assert!(queried.iter().zip(&scanned).all(|(a, b)| std::ptr::eq(*a, *b)));
+    }
+
+    // r[verify cram.index.region_bytes]
+    /// The estimate never shrinks as the query grows, and a query over a
+    /// whole reference counts every slice on it once, whole.
+    #[hegel::test]
+    fn region_bytes_grows_with_the_query_to_every_slice(tc: TestCase) {
+        let index = CramIndex::from_entries(
+            tc.draw(gs::vecs(arb_sized_entry()).max_size(40).print_as_debug()),
+        );
+        let tid = tc.draw(gs::integers::<i32>().min_value(0).max_value(2));
+        let start = tc.draw(gs::integers::<u64>().max_value(80));
+        let end = tc.draw(gs::integers::<u64>().min_value(start).max_value(80));
+        let further = tc.draw(gs::integers::<u64>().min_value(end).max_value(80));
+
+        assert!(index.region_bytes(tid, start, end) <= index.region_bytes(tid, start, further));
+        let whole: u64 = index
+            .entries_for(tid)
+            .iter()
+            .filter(|e| e.alignment_start != 0 || e.alignment_span != 0)
+            .map(|e| e.slice_size)
+            .sum();
+        assert_eq!(index.region_bytes(tid, 0, u64::MAX), whole);
+    }
+
+    #[hegel::composite]
+    fn arb_sized_entry(tc: &TestCase) -> CraiEntry {
+        CraiEntry {
+            slice_size: tc.draw_silent(gs::integers::<u64>().max_value(1 << 20)),
+            ..tc.draw_silent(arb_entry())
+        }
+    }
+
+    // r[verify cram.index.region_bytes]
+    #[test]
+    fn region_bytes_prorates_a_slice_by_the_share_covered() {
+        let entry = |start, span, slice_size| CraiEntry {
+            ref_id: 0,
+            alignment_start: start,
+            alignment_span: span,
+            container_offset: 0,
+            slice_offset: 0,
+            slice_size,
+        };
+        // 1-based 101..=200 and 201..=300, then one of unknown extent at 1001.
+        let index = CramIndex::from_entries(vec![
+            entry(101, 100, 1000),
+            entry(201, 100, 3000),
+            entry(1001, 0, 50),
+        ]);
+        assert_eq!(index.region_bytes(0, 100, 124), 250, "a quarter of the first");
+        assert_eq!(index.region_bytes(0, 150, 249), 500 + 1500, "half of each");
+        assert_eq!(index.region_bytes(0, 0, 999), 4000);
+        assert_eq!(index.region_bytes(0, 5000, 6000), 50, "unknown extent counts whole");
+        assert_eq!(index.region_bytes(1, 0, 6000), 0);
     }
 
     #[test]

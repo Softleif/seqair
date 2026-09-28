@@ -603,6 +603,11 @@ Region queries MUST find all index entries whose alignment range overlaps the qu
 r[cram.index.zero_span+2]
 CRAI entries with `alignment_span == 0` (but `alignment_start > 0`) indicate unknown extent — this occurs when samtools writes CRAM with embedded references or when the span is not computed. These entries MUST be included in query results whenever the entry's 0-based start is at or before the query end, since the slice may contain records at any position past the start. Treating span=0 as "zero-width" would silently drop all records in that slice.
 
+r[cram.index.region_bytes]
+`IndexedCramReader::estimate_region_bytes` MUST estimate, from the CRAI alone, the compressed bytes of the records a query returns: for every entry the query selects (`r[cram.index.query+2]`), the entry's `slice_size` prorated by the share of the entry's span the query covers, and the whole `slice_size` for an entry of unknown extent. It MUST NOT decrease as the query's end grows, since byte-budgeted segmentation binary-searches on it (`r[unified.segment_byte_budget+2]`).
+
+Prorating, rather than counting every touched slice whole, is what lets a budget split a tile at all: a fetch returns only the records that overlap the query, so a tile over the first half of a slice holds about half of its records, and a slice-granular estimate could not split below one slice — on `archive`-profile files (300–600 kb per slice) that is most tiles. It assumes records spread evenly over a slice's span. A pile-up inside a slice breaks that less than it seems: a slice holds a fixed number of records, so a deep one gets a short span and a high byte density of its own. A multi-reference slice counts its whole `slice_size` under each reference it lists. CRAM compresses several times better than BAM, so the same byte budget admits several times more records.
+
 r[cram.index.multi_ref_slices]
 Multi-ref slices produce multiple index entries (one per reference they span). A query for one reference may hit a multi-ref slice that also contains records from other references. The reader MUST filter records by reference ID after decoding.
 

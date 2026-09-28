@@ -591,6 +591,14 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         self.shared.slice_cache.stats()
     }
 
+    /// Estimate the compressed bytes of the records a query for `span` on
+    /// `tid` returns, from the index alone (`r[cram.index.region_bytes]`).
+    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> u64 {
+        i32::try_from(tid).map_or(0, |tid| {
+            self.shared.index.region_bytes(tid, span.start.as_u64(), span.last.as_u64())
+        })
+    }
+
     // r[impl region_buf.not_cram]
     // r[impl cram.container.region_skip]
     // r[impl cram.perf.slice_granularity]

@@ -179,7 +179,7 @@ chromosome in one call without thinking about tile size.
 > - `max_len() -> NonZeroU32`, `overlap() -> u32` accessors.
 >
 > `SegmentOptions` MUST implement `Default` as 10 kb tiles, no overlap, and the
-> 256 MiB byte budget of `r[unified.segment_byte_budget]`.
+> 256 MiB byte budget of `r[unified.segment_byte_budget+2]`.
 >
 > This rule used to forbid `Default`, on the grounds that no universal `max_len`
 > exists and every caller should be made to commit to one. The argument does not
@@ -246,7 +246,7 @@ of a genome then hits a pile-up region and loads gigabytes into one
 `RecordStore`. The index already knows roughly how much a region costs, so the
 planner can ask before committing.
 
-> r[unified.segment_byte_budget]
+> r[unified.segment_byte_budget+2]
 > `SegmentOptions` MUST carry an optional per-segment **compressed**-byte budget
 > alongside `max_len`, defaulting to 256 MiB (the `RegionBuf` bulk-load guard),
 > settable with `with_max_bytes(NonZeroU64)`, cleared with
@@ -274,9 +274,11 @@ planner can ask before committing.
 > an over-budget segment is the correct outcome there; `RegionBuf` warns and
 > loads it.
 >
-> A backend that cannot estimate bytes (CRAM, which bounds memory per slice
-> instead) MUST report no estimate, and the subdivision MUST then be a no-op
-> that passes tiles through unchanged.
+> CRAM has no bins; its estimate prorates slice sizes from the CRAI
+> (`r[cram.index.region_bytes]`), which is finer than a slice, so the greedy
+> growth above applies unchanged. A backend that cannot estimate bytes MUST
+> report no estimate, and the subdivision MUST then be a no-op that passes
+> tiles through unchanged.
 
 > r[unified.pileup_plan]
 > `Readers::pileup(segment: &Segment, depth: DepthLimit) -> Pileup<'_, E>` MUST

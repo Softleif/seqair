@@ -281,8 +281,8 @@ impl<E: CustomizeRecordStore> Readers<E> {
         // With a byte budget set, tile positionally and then subdivide each
         // tile so its estimated compressed load stays within budget. This is
         // eager (it queries the index per tile), but the per-tile cost is an
-        // in-memory BAI lookup and the result is what callers collect anyway.
-        // Backends that can't estimate bytes (CRAM) report 0 here, so the
+        // in-memory index lookup and the result is what callers collect
+        // anyway. A backend that can't estimate bytes reports 0 here, so the
         // split is a no-op and tiles pass through unchanged.
         let Some(budget) = opts.max_bytes() else {
             return Ok(Segments::new(ranges, opts));
@@ -300,8 +300,8 @@ impl<E: CustomizeRecordStore> Readers<E> {
     }
 
     /// Estimate the **compressed** bytes a `[start, end]` region query would
-    /// load. `None` for CRAM (its slice reader bounds memory differently). This
-    /// is the same estimate [`segments`](Self::segments) budgets against.
+    /// load. This is the same estimate [`segments`](Self::segments) budgets
+    /// against.
     #[must_use]
     pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> Option<u64> {
         self.alignment.estimate_region_bytes(tid, span)
@@ -779,7 +779,7 @@ mod tests {
         RangeInclusive { start: Pos0::new(start).unwrap(), last: Pos0::new(last).unwrap() }
     }
 
-    // r[verify unified.segment_byte_budget]
+    // r[verify unified.segment_byte_budget+2]
     /// `segments()` with a byte budget subdivides a region (spanning several
     /// index leaf bins) so each emitted segment's estimated load stays within
     /// budget, while the cores still tile the requested range exactly.
@@ -833,6 +833,42 @@ mod tests {
                 "segment {:?} = {bytes} B over budget {budget}",
                 (s.start().as_u64(), s.last().as_u64())
             );
+        }
+    }
+
+    // r[verify unified.segment_byte_budget+2]
+    // r[verify cram.index.region_bytes]
+    /// A CRAM region splits under a byte budget too, below one slice: the
+    /// estimate prorates slices by span, so a tile inside a slice costs its
+    /// share of it.
+    #[test]
+    fn segments_byte_budget_subdivides_a_cram_region() {
+        use std::num::{NonZeroU32, NonZeroU64};
+        let cram =
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test_v30.cram"));
+        let readers = Readers::open(cram, test_fasta_path()).unwrap();
+        // chr19 has two slices, 6_103_076..=6_135_680 and 6_135_609..=6_143_229 (1-based).
+        let region = span(6_100_000, 6_145_000);
+        let tid = readers.header().tid("chr19").expect("chr19 in header");
+        let total = readers.estimate_region_bytes(tid, region).expect("CRAM estimate");
+        assert!(total > 0);
+
+        let big = NonZeroU32::new(1_000_000).unwrap();
+        // Well below the first slice alone, so only a sub-slice split fits.
+        let budget = NonZeroU64::new(total / 8).unwrap();
+        let budgeted: Vec<_> = readers
+            .segments(("chr19", region), SegmentOptions::new(big).with_max_bytes(budget))
+            .unwrap()
+            .collect();
+        assert!(budgeted.len() >= 8, "budget {budget} of {total} gave {}", budgeted.len());
+        assert_eq!(budgeted.first().unwrap().core_span().start, region.start);
+        assert_eq!(budgeted.last().unwrap().core_span().last, region.last);
+        for w in budgeted.windows(2) {
+            assert_eq!(w[0].core_span().last.as_u64() + 1, w[1].core_span().start.as_u64());
+        }
+        for s in &budgeted {
+            let bytes = readers.estimate_region_bytes(tid, s.span()).unwrap();
+            assert!(bytes <= budget.get(), "segment {:?} = {bytes} B over {budget}", s.span());
         }
     }
 
