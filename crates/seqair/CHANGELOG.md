@@ -29,6 +29,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `raw - offset`, matching htslib. BETA widths above 32 bits are now rejected with
   `CramError::InvalidBetaBits` for integer series too, as htslib rejects them.
 
+- **A CRAM reader and its forks share decoded slices.** A slice is only useful decoded whole, so
+  neighbouring tiles decoded the slices at their edges again, once per tile: 12 forks sweeping
+  100 kb tiles over a 10 Mb window decoded each slice of a CRAM 3.1 `archive` file four times, and
+  about 1.5 times on default-profile files. Decoded slices are now cached on the state forks share;
+  a thread that wants a slice another is decoding waits for it. On that sweep, archive went from
+  132 decodes to 34 (33 slices) and CRAM 3.1 default from 423 to 344 (324 slices); on 10 kb tiles,
+  archive went from 166 s of CPU and 19 s wall to 4.5 s of both. Only forks share: readers opened
+  separately each have their own cache, so open once and `fork()` per thread. The budget sizes
+  itself by default (`SliceCacheBudget::Auto`: one slice for a reader without forks; with forks,
+  the slices the open handles' fetches span, at the largest slice's size);
+  `IndexedCramReader::set_slice_cache_budget` fixes it, and `slice_cache_stats` reports what the
+  cache did.
+- **CRAM reports `estimate_region_bytes`**, so a `SegmentOptions` byte budget splits CRAM tiles as
+  it does BAM ones. The estimate prorates each CRAI slice size by the share of the slice's span a
+  query covers, which lets a budget split below one slice.
+
 ### Changed
 
 - **tok3 read-name blocks decode 3–6× faster**: on the hts-specs CRAM 3.1 conformance files about
@@ -46,12 +62,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tok3MatchWithoutValue`, `Tok3OutputOverflow` and `Tok3NameCountExceedsLength`;
   `Tok3DupPositionOutOfRange` is gone.
 
+- **CRAI queries binary-search the reference's entries** instead of scanning the whole index per
+  fetch (54k entries on a 30x genome).
+
 - **A CRAM `keep_record` filter sees a record's TLEN and attached-mate position already resolved**,
   as it does for BAM; before, it saw TLEN 0 and mate position -1 for attached mates, and the values
   were filled in only after filtering. The mate "not fetched" sentinel is unchanged.
 
 ### Fixed
 
+- **A multi-reference CRAM container's reference window depended on the query.** It spanned only
+  the index entries the query overlapped, so a slice whose reads reached past its own entry could
+  decode differently per query; it spans every entry of the container for the reference now.
 - **A crafted rANS Nx16 block could exhaust the stack.** STRIPE substreams nested without limit;
   more than 4 levels is now `CramError::RansStripeTooDeep` (htscodecs writes one).
 - **CRAM files that embed their reference failed when the FASTA lacked the contig.** The reader
