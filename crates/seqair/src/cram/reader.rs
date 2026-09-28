@@ -662,6 +662,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         }
 
         let ref_name: &str = shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid })?;
+        shared.slice_cache.record_fetch(wanted.values().map(|slices| slices.len()).sum());
 
         // r[impl cram.slice_cache.shared]
         // Each wanted slice comes from the cache shared with this reader's
