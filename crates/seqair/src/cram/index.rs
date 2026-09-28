@@ -32,7 +32,35 @@ pub struct CraiEntry {
 /// Parsed CRAM index for region-based random access.
 #[derive(Debug)]
 pub struct CramIndex {
+    /// Sorted by reference, then by 0-based start.
     entries: Vec<CraiEntry>,
+    /// Per entry, the furthest 0-based last position it or an earlier entry
+    /// of its reference reaches — `u64::MAX` from the first entry of unknown
+    /// extent on. Non-decreasing within a reference, so a query finds the
+    /// first entry that can reach it by binary search.
+    reach: Vec<u64>,
+}
+
+impl CraiEntry {
+    /// The entry's 0-based start. CRAI stores a **1-based** one; `0` only
+    /// marks unmapped entries (see [`Self::placed_last`]).
+    fn start0(&self) -> u64 {
+        self.alignment_start.unsigned_abs().saturating_sub(1)
+    }
+
+    /// The 0-based last position the entry reaches: `None` for an unmapped
+    /// entry, `u64::MAX` for one of unknown extent.
+    fn placed_last(&self) -> Option<u64> {
+        // r[impl cram.index.unmapped]
+        if self.alignment_start == 0 && self.alignment_span == 0 {
+            return None;
+        }
+        // r[impl cram.index.zero_span+2]
+        if self.alignment_span == 0 {
+            return Some(u64::MAX);
+        }
+        Some(self.start0().saturating_add(self.alignment_span.unsigned_abs()).saturating_sub(1))
+    }
 }
 
 impl CramIndex {
@@ -48,45 +76,40 @@ impl CramIndex {
             .read_to_string(&mut text)
             .map_err(|_| CramError::from(CramIndexError::DecompressionFailed))?;
 
-        let mut entries = Vec::new();
-        for line in text.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let entry = parse_crai_line(line)?;
-            entries.push(entry);
-        }
-
-        // Sort by (ref_id, alignment_start) for efficient querying
-        entries.sort_by(|a, b| {
-            a.ref_id.cmp(&b.ref_id).then(a.alignment_start.cmp(&b.alignment_start))
-        });
-
-        Ok(CramIndex { entries })
+        Self::from_text_lines(&text)
     }
 
     #[cfg(feature = "fuzz")]
     /// Parse a CRAI index from uncompressed TSV text (skips gzip decompression).
     pub fn from_text(text: &str) -> Result<Self, CramError> {
-        let mut entries = Vec::new();
-        for line in text.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let entry = parse_crai_line(line)?;
-            entries.push(entry);
+        Self::from_text_lines(text)
+    }
+
+    fn from_text_lines(text: &str) -> Result<Self, CramError> {
+        let entries = text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(parse_crai_line)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::from_entries(entries))
+    }
+
+    fn from_entries(mut entries: Vec<CraiEntry>) -> Self {
+        entries.sort_by_key(|e| (e.ref_id, e.start0()));
+        let mut reach = Vec::with_capacity(entries.len());
+        let mut previous: Option<(i32, u64)> = None;
+        for e in &entries {
+            let before = previous.filter(|&(ref_id, _)| ref_id == e.ref_id).map(|(_, r)| r);
+            let furthest = before.max(e.placed_last()).unwrap_or(0);
+            reach.push(furthest);
+            previous = Some((e.ref_id, furthest));
         }
-
-        entries.sort_by(|a, b| {
-            a.ref_id.cmp(&b.ref_id).then(a.alignment_start.cmp(&b.alignment_start))
-        });
-
-        Ok(CramIndex { entries })
+        CramIndex { entries, reach }
     }
 
     /// Find all index entries whose range overlaps the 0-based inclusive region
     /// `[start, end]` for the given reference ID. Returns entries sorted by
-    /// `alignment_start`.
+    /// start.
     ///
     /// CRAI stores a **1-based** `alignment_start`, so it is converted here
     /// before the comparison — the two conventions are not interchangeable even
@@ -96,36 +119,34 @@ impl CramIndex {
     // r[impl cram.index.unmapped]
     // r[impl interval.overlap_test]
     pub fn query(&self, tid: i32, start: u64, end: u64) -> Vec<&CraiEntry> {
-        self.entries
+        let (lo, hi) = self.tid_range(tid);
+        let (Some(entries), Some(reach)) = (self.entries.get(lo..hi), self.reach.get(lo..hi))
+        else {
+            return Vec::new();
+        };
+        // Past the query end nothing starts in it; before the first entry
+        // whose reach gets to the query start nothing reaches into it.
+        let last = entries.partition_point(|e| e.start0() <= end);
+        let first = reach.get(..last).map_or(0, |reach| reach.partition_point(|&r| r < start));
+        entries
+            .get(first..last)
+            .unwrap_or_default()
             .iter()
-            .filter(|e| {
-                if e.ref_id != tid {
-                    return false;
-                }
-                // r[impl cram.index.unmapped]
-                if e.alignment_start == 0 && e.alignment_span == 0 {
-                    return false;
-                }
-                // 1-based -> 0-based. `alignment_start == 0` only for the
-                // unmapped entries rejected above, so this cannot underflow
-                // into a meaningful position.
-                let entry_start = e.alignment_start.unsigned_abs().saturating_sub(1);
-                // r[impl cram.index.zero_span+2]
-                if e.alignment_span == 0 {
-                    return entry_start <= end;
-                }
-                let entry_last =
-                    entry_start.saturating_add(e.alignment_span.unsigned_abs()).saturating_sub(1);
-                entry_start <= end && entry_last >= start
-            })
+            .filter(|e| e.placed_last().is_some_and(|reach| reach >= start))
             .collect()
+    }
+
+    /// The positions in `entries` of reference `tid`'s entries.
+    fn tid_range(&self, tid: i32) -> (usize, usize) {
+        let lo = self.entries.partition_point(|e| e.ref_id < tid);
+        let hi = self.entries.partition_point(|e| e.ref_id <= tid);
+        (lo, hi)
     }
 
     /// Every entry for reference `tid`, placed or not, sorted by
     /// `alignment_start`.
     pub fn entries_for(&self, tid: i32) -> &[CraiEntry] {
-        let lo = self.entries.partition_point(|e| e.ref_id < tid);
-        let hi = self.entries.partition_point(|e| e.ref_id <= tid);
+        let (lo, hi) = self.tid_range(tid);
         self.entries.get(lo..hi).unwrap_or_default()
     }
 
@@ -185,6 +206,7 @@ fn parse_crai_line(line: &str) -> Result<CraiEntry, CramError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::prelude::*;
     use tempfile::tempdir;
 
     // r[verify cram.index.parse]
@@ -247,26 +269,24 @@ mod tests {
         // CRAI entries with span=0 occur when samtools writes CRAM with
         // embedded references or when the span is unknown. These entries
         // must still be returned by queries that overlap their start position.
-        let index = CramIndex {
-            entries: vec![
-                CraiEntry {
-                    ref_id: 0,
-                    alignment_start: 1000,
-                    alignment_span: 0,
-                    container_offset: 100,
-                    slice_offset: 0,
-                    slice_size: 500,
-                },
-                CraiEntry {
-                    ref_id: 0,
-                    alignment_start: 2000,
-                    alignment_span: 500,
-                    container_offset: 600,
-                    slice_offset: 0,
-                    slice_size: 500,
-                },
-            ],
-        };
+        let index = CramIndex::from_entries(vec![
+            CraiEntry {
+                ref_id: 0,
+                alignment_start: 1000,
+                alignment_span: 0,
+                container_offset: 100,
+                slice_offset: 0,
+                slice_size: 500,
+            },
+            CraiEntry {
+                ref_id: 0,
+                alignment_start: 2000,
+                alignment_span: 500,
+                container_offset: 600,
+                slice_offset: 0,
+                slice_size: 500,
+            },
+        ]);
 
         // Query [500, 1500) — entry_start=1000 is within query, should match
         let results = index.query(0, 500, 1500);
@@ -285,6 +305,54 @@ mod tests {
         // Only entries past query end are excluded.
         let results = index.query(0, 3000, 4000);
         assert_eq!(results.len(), 1, "span=0 entry should still match (start < query_end)");
+    }
+
+    #[hegel::composite]
+    fn arb_entry(tc: &TestCase) -> CraiEntry {
+        CraiEntry {
+            ref_id: tc.draw_silent(gs::integers::<i32>().min_value(-1).max_value(2)),
+            // 0 with span 0 is an unmapped entry; span 0 alone is unknown extent.
+            alignment_start: tc.draw_silent(gs::integers::<i64>().min_value(0).max_value(60)),
+            alignment_span: tc.draw_silent(gs::sampled_from(&[0, 1, 2, 5, 20])),
+            container_offset: tc.draw_silent(gs::integers::<u64>()),
+            slice_offset: tc.draw_silent(gs::integers::<u64>()),
+            slice_size: 1,
+        }
+    }
+
+    // r[verify cram.index.query+2]
+    // r[verify cram.index.zero_span+2]
+    // r[verify cram.index.unmapped]
+    /// The binary-searched query returns what testing every entry of the
+    /// reference for overlap returns, in the same order.
+    #[hegel::test]
+    #[allow(
+        clippy::arithmetic_side_effects,
+        clippy::cast_sign_loss,
+        reason = "generated starts and spans are small and non-negative"
+    )]
+    fn query_matches_a_scan_of_every_entry(tc: TestCase) {
+        let index =
+            CramIndex::from_entries(tc.draw(gs::vecs(arb_entry()).max_size(40).print_as_debug()));
+        let tid = tc.draw(gs::integers::<i32>().min_value(-1).max_value(3));
+        let start = tc.draw(gs::integers::<u64>().max_value(80));
+        let end = tc.draw(gs::integers::<u64>().min_value(start).max_value(80));
+
+        let scanned: Vec<&CraiEntry> = index
+            .entries()
+            .iter()
+            .filter(|e| {
+                // 1-based start and span, as the CRAI stores them.
+                let unmapped = e.alignment_start == 0 && e.alignment_span == 0;
+                let first = (e.alignment_start as u64).saturating_sub(1);
+                let reaches = e.alignment_span == 0
+                    || (first + e.alignment_span as u64).saturating_sub(1) >= start;
+                e.ref_id == tid && !unmapped && first <= end && reaches
+            })
+            .collect();
+        let queried = index.query(tid, start, end);
+        assert_eq!(queried.len(), scanned.len());
+        assert!(queried.iter().zip(&scanned).all(|(a, b)| std::ptr::eq(*a, *b)));
     }
 
     #[test]
