@@ -11,6 +11,7 @@ use super::{
     rans::Rans4x8Buf,
     rans_nx16::Nx16Order1Buf,
     slice::{self, DecodedSlice},
+    slice_cache::{SliceCache, SliceKey},
 };
 use crate::bam::cigar::CigarOp;
 use crate::bam::record::DecodeError;
@@ -350,7 +351,13 @@ pub struct CramShared {
     pub read_group_ids: Vec<SmolStr>,
     pub cram_path: PathBuf,
     pub fasta_path: PathBuf,
+    /// Decoded slices, shared by the reader and its forks.
+    slice_cache: SliceCache,
 }
+
+/// The default budget of a reader's decoded-slice cache
+/// ([`IndexedCramReader::set_slice_cache_budget`]).
+pub const DEFAULT_SLICE_CACHE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Parse `@RG ID:` values from SAM header text in declaration order.
 fn parse_read_group_ids(header_text: &str) -> Vec<SmolStr> {
@@ -455,6 +462,7 @@ impl IndexedCramReader<File> {
                 read_group_ids,
                 cram_path: cram_path.to_path_buf(),
                 fasta_path: fasta_path.to_path_buf(),
+                slice_cache: SliceCache::new(DEFAULT_SLICE_CACHE_BYTES),
             }),
             container_buf: Vec::new(),
             cigar_buf: Vec::new(),
@@ -544,6 +552,7 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
                 read_group_ids,
                 cram_path: PathBuf::from("<fuzz>"),
                 fasta_path: PathBuf::from("<fuzz>"),
+                slice_cache: SliceCache::new(DEFAULT_SLICE_CACHE_BYTES),
             }),
             container_buf: Vec::new(),
             cigar_buf: Vec::new(),
@@ -563,6 +572,26 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
 impl<R: Read + Seek> IndexedCramReader<R> {
     pub fn header(&self) -> &BamHeader {
         &self.shared.header
+    }
+
+    // r[impl cram.slice_cache.budget]
+    /// Set the byte budget of the decoded-slice cache this reader shares
+    /// with its forks (default [`DEFAULT_SLICE_CACHE_BYTES`]); 0 turns it
+    /// off. It bounds the slices the cache keeps, not the ones fetches in
+    /// flight hold.
+    pub fn set_slice_cache_budget(&self, bytes: usize) {
+        self.shared.slice_cache.set_budget(bytes);
+    }
+
+    /// The decoded-slice cache's byte budget.
+    pub fn slice_cache_budget(&self) -> usize {
+        self.shared.slice_cache.budget()
+    }
+
+    /// Slices decoded so far by this reader and its forks, cache misses only.
+    #[cfg(test)]
+    pub(crate) fn slices_decoded(&self) -> u64 {
+        self.shared.slice_cache.decodes()
     }
 
     // r[impl region_buf.not_cram]
@@ -637,41 +666,10 @@ impl<R: Read + Seek> IndexedCramReader<R> {
 
         let ref_name: &str = shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid })?;
 
-        // TODO(perf): container-scoped re-reading and re-parsing.
-        //
-        // Each `fetch_into` call below re-reads the container bytes off
-        // disk into `self.container_buf` (E) and re-parses the
-        // compression header — including `tag_dictionary` and
-        // `tag_encodings` — fresh every time (D). For multi-segment
-        // pileup workflows (Readers::pileup over many segments of the
-        // same contig) successive fetches frequently revisit the same
-        // container, so this is repeated work.
-        //
-        // Fix options:
-        //
-        //   1. One-entry "last container" cache: store
-        //      `Option<(container_offset, ContainerHeader, CompressionHeader, Vec<u8>)>`
-        //      on the reader. On hit, skip the seek + read + parse and
-        //      reuse `container_buf` + `ch`. Trivial to implement,
-        //      handles the common case where consecutive segments fall
-        //      in the same container. Memory cost: one extra
-        //      `container_buf`-sized Vec.
-        //
-        //   2. Small LRU (size 2-4): same idea but covers the case
-        //      where neighbouring segments span 2-3 containers. Picks
-        //      up overlapping segments and forked workers iterating
-        //      adjacent ranges.
-        //
-        //   3. Per-tile container plan: when used through
-        //      `Readers::pileup`, the outer loop knows the segment
-        //      sequence ahead of time. Could pre-group segments by
-        //      container at plan time and only fetch each container
-        //      once. Largest win, but couples the unified reader to
-        //      the segment iterator.
-        //
-        // Profile signal: look for `block::parse_block`,
-        // `CompressionHeader::parse`, and `File::read_exact` near the
-        // top of `fetch_into_customized` self-time.
+        // r[impl cram.slice_cache.shared]
+        // Each wanted slice comes from the cache shared with this reader's
+        // forks; only a miss reads its container, parses the compression
+        // header and fetches the reference.
         for (&container_offset, wanted_slices) in &wanted {
             // Landmarks ascend, so this is the container's own slice order.
             let mut slice_offsets = wanted_slices.clone();
@@ -680,16 +678,21 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             // is the EOF container, which holds no slices.
             let mut container: Option<Option<LoadedContainer>> = None;
             for &slice_offset in &slice_offsets {
-                let loaded = match &mut container {
-                    Some(loaded) => loaded,
-                    None => container.insert(self.load_container(
-                        container_offset,
-                        tid,
-                        ref_name,
-                    )?),
-                };
-                let Some(loaded) = loaded else { break };
-                let decoded = self.decode_slice_in(loaded, slice_offset, tid)?;
+                let key = SliceKey { container_offset, slice_offset, tid };
+                let decoded = shared.slice_cache.get_or_decode(key, || {
+                    let loaded = match &mut container {
+                        Some(loaded) => loaded,
+                        None => container.insert(self.load_container(
+                            container_offset,
+                            tid,
+                            ref_name,
+                        )?),
+                    };
+                    match loaded {
+                        Some(loaded) => self.decode_slice_in(loaded, slice_offset, tid),
+                        None => Ok(DecodedSlice::default()),
+                    }
+                })?;
                 let (slice_fetched, slice_kept) =
                     decoded.copy_into(span.start, span.last, store, customize, &mut kept)?;
                 fetched_total = fetched_total.saturating_add(slice_fetched);
@@ -989,6 +992,29 @@ mod tests {
         let count =
             reader.fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store).unwrap();
         assert!(count > 0, "should fetch records from tid={tid}");
+    }
+
+    // r[verify cram.slice_cache.shared]
+    // r[verify cram.slice_cache.budget]
+    #[test]
+    fn forks_share_decoded_slices() {
+        let mut reader = IndexedCramReader::open(cram_path(), fasta_path()).unwrap();
+        let mut store = RecordStore::new();
+        let whole = || (Pos0::ZERO..=Pos0::MAX).into();
+
+        let count = reader.fetch_into(0, whole(), &mut store).unwrap();
+        let decoded = reader.slices_decoded();
+        assert!(decoded > 0);
+
+        let mut fork = reader.fork().unwrap();
+        assert_eq!(fork.fetch_into(0, whole(), &mut store).unwrap(), count);
+        assert_eq!(reader.fetch_into(0, whole(), &mut store).unwrap(), count);
+        assert_eq!(reader.slices_decoded(), decoded, "a cached slice was decoded again");
+
+        fork.set_slice_cache_budget(0);
+        assert_eq!(reader.slice_cache_budget(), 0, "the budget is shared too");
+        assert_eq!(reader.fetch_into(0, whole(), &mut store).unwrap(), count);
+        assert_eq!(reader.slices_decoded(), decoded * 2, "budget 0 still cached a slice");
     }
 
     // r[verify cram.edge.unmapped_reads+2]

@@ -724,6 +724,12 @@ CRAM random access is slice-granular, not record-granular. A region query may de
 r[cram.slice_cache]
 A fetch decodes each slice it needs into a decoded slice that does not depend on the query — every record of the slice for the queried reference, with TLEN and attached-mate chains resolved over the whole slice (`r[cram.record.mate_tlen_reconstruction]`) — and then copies the records the query wants into the caller's store, applying the reader's overlap/tid/unmapped checks, `keep_record` (`r[cram.fetch_into_customized.push_time+2]`) and the mate sentinel (`r[cram.fetch_into_customized.filtered_mate_sentinel+2]`) at that point. The records a fetch returns, their order and every field MUST be the same whether a slice was decoded for this fetch or taken from the cache.
 
+r[cram.slice_cache.shared]
+An `IndexedCramReader` and its forks share one cache of decoded slices, keyed by the slice's byte position in the file and the queried reference. Neighbouring queries overlap the same slices at their edges — on files with large slices (samtools' `archive` profile writes 100,000 records per slice, about 470 kb at 30×) a 100 kb query grid decodes each slice five to six times — and the cache lets them decode each slice once. When several threads need the same slice and it is not cached, one decodes it and the others wait for its result instead of decoding it again. A fetch whose wanted slices are all cached reads nothing from the file. A failed decode is not cached; every caller gets an error.
+
+r[cram.slice_cache.budget]
+The cache keeps decoded slices up to a byte budget of their heap size (256 MiB by default, set with `IndexedCramReader::set_slice_cache_budget`), evicting the least recently used slice first. A slice larger than the whole budget is decoded for its callers but not kept, and a budget of 0 turns caching off. A slice a fetch is copying from stays alive until that fetch is done with it, whatever the cache evicts meanwhile, so the budget bounds what the cache keeps, not what running fetches hold.
+
 r[cram.perf.reference_caching]
 Reference sequence lookups happen per-slice (to reconstruct all records in the slice). The reader SHOULD cache the most recently used reference region to avoid repeated FASTA lookups for consecutive slices on the same contig. This cache MUST be per-fork, not shared across threads.
 

@@ -96,6 +96,20 @@ enum MateLink {
 }
 
 impl DecodedSlice {
+    /// Heap bytes the slice holds, for the cache's budget.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        [
+            self.records.capacity().saturating_mul(size_of::<SliceRecord>()),
+            self.names.capacity(),
+            self.cigar.capacity().saturating_mul(size_of::<CigarOp>()),
+            self.bases.capacity().saturating_mul(size_of::<Base>()),
+            self.qual.capacity(),
+            self.aux.capacity(),
+        ]
+        .into_iter()
+        .fold(0, usize::saturating_add)
+    }
+
     /// Append a record whose variable-length fields are the given slices.
     #[expect(clippy::too_many_arguments, reason = "one argument per record field")]
     fn push(
