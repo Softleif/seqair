@@ -100,17 +100,16 @@ pub const PAIRS: usize = LANE_MAX;
 ///
 /// | pairs | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 /// |---|---|---|---|---|---|---|---|---|
-/// | M4 Pro (NEON) | 0.19x | 0.38x | 0.55x | 0.70x | 0.93x | **0.96x** | 1.18x | 1.32x |
-/// | 3950X (AVX2) | 0.30x | 0.57x | 0.83x | **0.98x** | 1.19x | 1.39x | 1.59x | 1.76x |
+/// | M4 Pro (NEON) | 0.22x | 0.44x | 0.65x | 0.84x | **1.05x** | 1.26x | 1.46x | 1.66x |
+/// | 3950X (AVX2) | | | 0.83x | **1.03x** | 1.28x | 1.52x | | 2.03x |
 ///
-/// The machines disagree as they do for [`BATCH_BREAK_EVEN`], and for the same
-/// reason six is the number: it costs the M4 ~4% on a group of six and the
-/// 3950X ~1.4x on groups of four and five. `align_reads` only ever has one
-/// short group per call -- the end of the product -- so on a locus of tens of
-/// reads the choice moves a few per cent of one group.
-///
-/// [`BATCH_BREAK_EVEN`]: crate::BATCH_BREAK_EVEN
-pub const PAIRS_BREAK_EVEN: usize = 6;
+/// The M4 crosses at five, the 3950X at four, and five is the number that is
+/// safe on both -- it is also the lowest the bound below allows. Four would put
+/// the M4 into the pairs kernel at 0.84x. `align_reads` only ever has one short
+/// group per call -- the end of the product -- so on a locus of tens of reads
+/// the choice moves a few per cent of one group; on rastair's real inputs
+/// (notes §16.6) five against six measured within noise.
+pub const PAIRS_BREAK_EVEN: usize = 5;
 
 // The same bounds `BATCH_BREAK_EVEN` has, for the same reasons.
 const _: () = assert!(
