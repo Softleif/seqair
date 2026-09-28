@@ -7,7 +7,7 @@ use super::{
     block,
     compression_header::CompressionHeader,
     container::ContainerHeader,
-    index::{self, CraiEntry, CramIndex, CramIndexError},
+    index::{self, CramIndex, CramIndexError},
     rans::Rans4x8Buf,
     rans_nx16::Nx16Order1Buf,
     slice::{self, DecodedSlice},
@@ -685,7 +685,6 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     None => container.insert(self.load_container(
                         container_offset,
                         tid,
-                        &entries,
                         ref_name,
                     )?),
                 };
@@ -721,7 +720,6 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         &mut self,
         container_offset: u64,
         tid: u32,
-        entries: &[&CraiEntry],
         ref_name: &str,
     ) -> Result<Option<LoadedContainer>, CramError> {
         self.file.seek(SeekFrom::Start(container_offset))?;
@@ -767,14 +765,22 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             // Multi-ref: a container holds one CRAI entry per slice per
             // reference, so there is not *a* entry for this container and
             // this tid — there are as many as it has slices touching the
-            // tid, and `entries` is already narrowed to the ones this query
-            // wants. The window has to span all of them. Taking only the
+            // tid. The window has to span all of them. Taking only the
             // first stops the reference short of whatever a later slice
             // reaches, and the tail of those reads decodes as `N` with no
             // error at all, because running past the end of the fetched
             // reference is only a warning (r[`cram.slice.ref_bounds_warning`]).
+            // They come from the whole index, not the query's entries, so
+            // the window — and the decoded slice — is the same whichever
+            // query decodes it.
             let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
-            let in_container = || entries.iter().filter(|e| e.container_offset == container_offset);
+            #[expect(
+                clippy::cast_possible_wrap,
+                reason = "tid bounded by BAM header limits (MAX_REFERENCES = 1M), fits i32"
+            )]
+            let tid_entries = self.shared.index.entries_for(tid as i32);
+            let in_container =
+                || tid_entries.iter().filter(|e| e.container_offset == container_offset);
             // An entry without an extent says nothing about where its
             // reads lie, so only the whole reference is sure to hold them.
             let span = if in_container().any(|e| e.alignment_span <= 0) {

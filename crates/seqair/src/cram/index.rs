@@ -121,6 +121,14 @@ impl CramIndex {
             .collect()
     }
 
+    /// Every entry for reference `tid`, placed or not, sorted by
+    /// `alignment_start`.
+    pub fn entries_for(&self, tid: i32) -> &[CraiEntry] {
+        let lo = self.entries.partition_point(|e| e.ref_id < tid);
+        let hi = self.entries.partition_point(|e| e.ref_id <= tid);
+        self.entries.get(lo..hi).unwrap_or_default()
+    }
+
     /// Get all entries (for debugging/testing).
     pub fn entries(&self) -> &[CraiEntry] {
         &self.entries
