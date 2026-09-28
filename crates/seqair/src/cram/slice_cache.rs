@@ -6,7 +6,7 @@
 //! a byte budget, and makes threads that want the same missing slice at the
 //! same time wait for one decode instead of each running their own.
 // r[impl cram.slice_cache.shared]
-// r[impl cram.slice_cache.budget]
+// r[impl cram.slice_cache.budget+2]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -44,47 +44,122 @@ struct Inner {
     tick: u64,
     /// Sum of the counted entries' `bytes`.
     used: usize,
+    budget: SliceCacheBudget,
+}
+
+/// The least an automatic budget keeps.
+pub const AUTO_BUDGET_FLOOR: usize = 256 * 1024 * 1024;
+
+/// How much a reader's decoded-slice cache may keep
+/// ([`IndexedCramReader::set_slice_cache_budget`](super::reader::IndexedCramReader::set_slice_cache_budget)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SliceCacheBudget {
+    /// Room for two slices more than there are open handles on the file
+    /// (the reader and its live forks), sized by the largest slice decoded
+    /// so far, and at least [`AUTO_BUDGET_FLOOR`]. Handles fetching at
+    /// once without the cache would hold one slice each anyway.
+    #[default]
+    Auto,
+    /// At most this many heap bytes; 0 turns caching off.
+    Bytes(usize),
+}
+
+/// What a reader's decoded-slice cache has done so far
+/// ([`IndexedCramReader::slice_cache_stats`](super::reader::IndexedCramReader::slice_cache_stats)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct SliceCacheStats {
+    /// The budget in bytes as it stands now; [`SliceCacheBudget::Auto`]
+    /// grows it with the handles and the largest slice.
+    pub budget_bytes: usize,
+    /// Slices decoded: one per cache miss, and every fetched slice when
+    /// the budget is 0.
+    pub decoded: u64,
+    /// Slices the cache holds now.
+    pub cached_slices: usize,
+    /// Their heap bytes, which the budget bounds.
+    pub cached_bytes: usize,
+    /// The heap bytes of the largest slice decoded so far — what one slice
+    /// of this file costs to keep.
+    pub largest_slice_bytes: usize,
 }
 
 /// Decoded slices under a byte budget, least recently used evicted first.
 pub(crate) struct SliceCache {
-    budget: AtomicUsize,
     inner: Mutex<Inner>,
     decodes: AtomicU64,
+    largest: AtomicUsize,
+    /// Readers sharing the cache: the one that opened the file and its live
+    /// forks.
+    pub(super) handles: AtomicUsize,
 }
 
 impl std::fmt::Debug for SliceCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SliceCache")
-            .field("budget", &self.budget())
-            .field("decodes", &self.decodes())
-            .finish_non_exhaustive()
+        f.debug_struct("SliceCache").field("stats", &self.stats()).finish_non_exhaustive()
     }
 }
 
 impl SliceCache {
-    pub(crate) fn new(budget: usize) -> Self {
+    /// A cache for one open handle.
+    pub(crate) fn new(budget: SliceCacheBudget) -> Self {
         Self {
-            budget: AtomicUsize::new(budget),
-            inner: Mutex::new(Inner::default()),
+            inner: Mutex::new(Inner { budget, ..Inner::default() }),
             decodes: AtomicU64::new(0),
+            largest: AtomicUsize::new(0),
+            handles: AtomicUsize::new(1),
         }
     }
 
-    pub(crate) fn budget(&self) -> usize {
-        self.budget.load(Ordering::Relaxed)
+    /// A fork shares the cache.
+    pub(crate) fn handle_opened(&self) {
+        self.handles.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A handle sharing the cache was dropped.
+    pub(crate) fn handle_closed(&self) {
+        self.handles.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Change the budget, evicting down to it at once.
-    pub(crate) fn set_budget(&self, budget: usize) {
-        self.budget.store(budget, Ordering::Relaxed);
+    pub(crate) fn set_budget(&self, budget: SliceCacheBudget) {
         let mut inner = self.lock();
-        evict(&mut inner, budget);
+        inner.budget = budget;
+        let bytes = self.budget_bytes(&inner);
+        evict(&mut inner, bytes);
     }
 
-    /// How many slices were decoded through the cache: one per miss.
-    pub(crate) fn decodes(&self) -> u64 {
-        self.decodes.load(Ordering::Relaxed)
+    /// What the budget allows now.
+    fn budget_bytes(&self, inner: &Inner) -> usize {
+        match inner.budget {
+            SliceCacheBudget::Bytes(bytes) => bytes,
+            SliceCacheBudget::Auto => {
+                let slices = self.handles.load(Ordering::Relaxed).saturating_add(2);
+                slices.saturating_mul(self.largest.load(Ordering::Relaxed)).max(AUTO_BUDGET_FLOOR)
+            }
+        }
+    }
+
+    pub(crate) fn stats(&self) -> SliceCacheStats {
+        let inner = self.lock();
+        SliceCacheStats {
+            budget_bytes: self.budget_bytes(&inner),
+            decoded: self.decodes.load(Ordering::Relaxed),
+            cached_slices: inner.entries.values().filter(|entry| entry.bytes > 0).count(),
+            cached_bytes: inner.used,
+            largest_slice_bytes: self.largest.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Decode one slice, counting it.
+    fn decode(
+        &self,
+        decode: impl FnOnce() -> Result<DecodedSlice, CramError>,
+    ) -> Result<Arc<DecodedSlice>, CramError> {
+        self.decodes.fetch_add(1, Ordering::Relaxed);
+        let slice = decode()?;
+        self.largest.fetch_max(slice.heap_bytes(), Ordering::Relaxed);
+        Ok(Arc::new(slice))
     }
 
     /// The slice for `key`, decoded with `decode` unless the cache holds it
@@ -94,12 +169,12 @@ impl SliceCache {
         key: SliceKey,
         decode: impl FnOnce() -> Result<DecodedSlice, CramError>,
     ) -> Result<Arc<DecodedSlice>, CramError> {
-        if self.budget() == 0 {
-            self.decodes.fetch_add(1, Ordering::Relaxed);
-            return decode().map(Arc::new);
-        }
         let cell = {
             let mut inner = self.lock();
+            if self.budget_bytes(&inner) == 0 {
+                drop(inner);
+                return self.decode(decode);
+            }
             inner.tick = inner.tick.wrapping_add(1);
             let tick = inner.tick;
             let entry = inner.entries.entry(key).or_insert_with(|| Entry {
@@ -116,9 +191,8 @@ impl SliceCache {
         let mut decoded_here = false;
         let slice = cell.get_or_init(|| {
             decoded_here = true;
-            self.decodes.fetch_add(1, Ordering::Relaxed);
-            match decode.take().map(|decode| decode()) {
-                Some(Ok(slice)) => Some(Arc::new(slice)),
+            match decode.take().map(|decode| self.decode(decode)) {
+                Some(Ok(slice)) => Some(slice),
                 Some(Err(e)) => {
                     error = Some(e);
                     None
@@ -140,10 +214,7 @@ impl SliceCache {
                     (Some(e), _) => Err(e),
                     // Another thread's decode failed: decode here for this
                     // caller's own error.
-                    (None, Some(decode)) => {
-                        self.decodes.fetch_add(1, Ordering::Relaxed);
-                        decode().map(Arc::new)
-                    }
+                    (None, Some(decode)) => self.decode(decode),
                     // This thread ran the decode, which always leaves a slice
                     // or an error behind.
                     (None, None) => Err(CramError::Truncated { context: "slice cache decode" }),
@@ -161,8 +232,8 @@ impl SliceCache {
     /// Count a freshly decoded slice against the budget and evict down to
     /// it — possibly the slice itself, if it alone is over.
     fn admit(&self, key: SliceKey, cell: &Cell, bytes: usize) {
-        let budget = self.budget();
         let mut inner = self.lock();
+        let budget = self.budget_bytes(&inner);
         let Some(entry) = inner.entries.get_mut(&key) else { return };
         if !Arc::ptr_eq(&entry.cell, cell) || entry.bytes != 0 {
             return;
@@ -214,52 +285,73 @@ mod tests {
 
     #[test]
     fn a_cached_slice_is_decoded_once() {
-        let cache = SliceCache::new(1 << 20);
+        let cache = SliceCache::new(SliceCacheBudget::Bytes(1 << 20));
         let a = cache.get_or_decode(key(1), slice).unwrap();
         let b = cache.get_or_decode(key(1), || panic!("decoded twice")).unwrap();
         assert!(Arc::ptr_eq(&a, &b));
-        assert_eq!(cache.decodes(), 1);
+        assert_eq!(cache.stats().decoded, 1);
         cache.get_or_decode(key(2), slice).unwrap();
-        assert_eq!(cache.decodes(), 2);
+        assert_eq!(cache.stats().decoded, 2);
     }
 
     #[test]
     fn a_failed_decode_is_not_cached() {
-        let cache = SliceCache::new(1 << 20);
+        let cache = SliceCache::new(SliceCacheBudget::Bytes(1 << 20));
         let err = cache
             .get_or_decode(key(1), || Err(CramError::Truncated { context: "test" }))
             .unwrap_err();
         assert!(matches!(err, CramError::Truncated { context: "test" }));
         cache.get_or_decode(key(1), slice).unwrap();
-        assert_eq!(cache.decodes(), 2);
+        assert_eq!(cache.stats().decoded, 2);
     }
 
     #[test]
     fn budget_zero_decodes_every_time() {
-        let cache = SliceCache::new(0);
+        let cache = SliceCache::new(SliceCacheBudget::Bytes(0));
         cache.get_or_decode(key(1), slice).unwrap();
         cache.get_or_decode(key(1), slice).unwrap();
-        assert_eq!(cache.decodes(), 2);
+        assert_eq!(cache.stats().decoded, 2);
     }
 
     #[test]
     fn least_recently_used_goes_first() {
         // Every empty slice counts one byte: room for two.
-        let cache = SliceCache::new(2);
+        let cache = SliceCache::new(SliceCacheBudget::Bytes(2));
         cache.get_or_decode(key(1), slice).unwrap();
         cache.get_or_decode(key(2), slice).unwrap();
         cache.get_or_decode(key(1), || panic!("1 was evicted")).unwrap();
         cache.get_or_decode(key(3), slice).unwrap(); // evicts 2
         cache.get_or_decode(key(1), || panic!("1 was evicted")).unwrap();
         cache.get_or_decode(key(2), slice).unwrap();
-        assert_eq!(cache.decodes(), 4);
-        cache.set_budget(0);
+        assert_eq!(cache.stats().decoded, 4);
+        cache.set_budget(SliceCacheBudget::Bytes(0));
         assert_eq!(cache.lock().used, 0);
     }
 
     #[test]
+    fn auto_budget_keeps_two_slices_more_than_handles() {
+        let cache = SliceCache::new(SliceCacheBudget::Auto);
+        let budget = || cache.stats().budget_bytes;
+        assert_eq!(budget(), AUTO_BUDGET_FLOOR, "nothing decoded yet");
+
+        let slice = 100 << 20;
+        cache.largest.store(slice, Ordering::Relaxed);
+        assert_eq!(budget(), 3 * slice);
+        cache.handle_opened();
+        cache.handle_opened();
+        assert_eq!(budget(), 5 * slice);
+        cache.handle_closed();
+        assert_eq!(budget(), 4 * slice);
+
+        cache.largest.store(1, Ordering::Relaxed);
+        assert_eq!(budget(), AUTO_BUDGET_FLOOR, "small slices keep the floor");
+        cache.set_budget(SliceCacheBudget::Bytes(7));
+        assert_eq!(budget(), 7);
+    }
+
+    #[test]
     fn threads_wanting_one_slice_share_its_decode() {
-        let cache = Arc::new(SliceCache::new(1 << 20));
+        let cache = Arc::new(SliceCache::new(SliceCacheBudget::Bytes(1 << 20)));
         let barrier = Arc::new(std::sync::Barrier::new(8));
         let slices: Vec<_> = (0..8)
             .map(|_| {
@@ -278,7 +370,7 @@ mod tests {
             .into_iter()
             .map(|t| t.join().unwrap())
             .collect();
-        assert_eq!(cache.decodes(), 1);
+        assert_eq!(cache.stats().decoded, 1);
         assert!(slices.iter().all(|s| Arc::ptr_eq(s, &slices[0])));
     }
 }

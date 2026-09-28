@@ -26,7 +26,7 @@ pub mod rans_nx16_avx2 {}
 pub mod rans_nx16_neon {}
 pub mod reader;
 pub mod slice;
-pub(crate) mod slice_cache;
+pub mod slice_cache;
 pub mod tok3;
 #[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]

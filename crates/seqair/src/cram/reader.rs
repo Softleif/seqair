@@ -11,7 +11,7 @@ use super::{
     rans::Rans4x8Buf,
     rans_nx16::Nx16Order1Buf,
     slice::{self, DecodedSlice},
-    slice_cache::{SliceCache, SliceKey},
+    slice_cache::{SliceCache, SliceCacheBudget, SliceCacheStats, SliceKey},
 };
 use crate::bam::cigar::CigarOp;
 use crate::bam::record::DecodeError;
@@ -355,10 +355,6 @@ pub struct CramShared {
     slice_cache: SliceCache,
 }
 
-/// The default budget of a reader's decoded-slice cache
-/// ([`IndexedCramReader::set_slice_cache_budget`]).
-pub const DEFAULT_SLICE_CACHE_BYTES: usize = 256 * 1024 * 1024;
-
 /// Parse `@RG ID:` values from SAM header text in declaration order.
 fn parse_read_group_ids(header_text: &str) -> Vec<SmolStr> {
     let mut ids = Vec::new();
@@ -462,7 +458,7 @@ impl IndexedCramReader<File> {
                 read_group_ids,
                 cram_path: cram_path.to_path_buf(),
                 fasta_path: fasta_path.to_path_buf(),
-                slice_cache: SliceCache::new(DEFAULT_SLICE_CACHE_BYTES),
+                slice_cache: SliceCache::new(SliceCacheBudget::Auto),
             }),
             container_buf: Vec::new(),
             cigar_buf: Vec::new(),
@@ -482,6 +478,7 @@ impl IndexedCramReader<File> {
         let file = File::open(&self.shared.cram_path)
             .map_err(|source| CramError::Open { path: self.shared.cram_path.clone(), source })?;
         let fasta = self.fasta.fork()?;
+        self.shared.slice_cache.handle_opened();
         Ok(IndexedCramReader {
             file,
             fasta,
@@ -498,6 +495,12 @@ impl IndexedCramReader<File> {
             rans_4x8_buf: None,
             nx16_order1_buf: None,
         })
+    }
+}
+
+impl<R: Read + Seek> Drop for IndexedCramReader<R> {
+    fn drop(&mut self) {
+        self.shared.slice_cache.handle_closed();
     }
 }
 
@@ -552,7 +555,7 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
                 read_group_ids,
                 cram_path: PathBuf::from("<fuzz>"),
                 fasta_path: PathBuf::from("<fuzz>"),
-                slice_cache: SliceCache::new(DEFAULT_SLICE_CACHE_BYTES),
+                slice_cache: SliceCache::new(SliceCacheBudget::Auto),
             }),
             container_buf: Vec::new(),
             cigar_buf: Vec::new(),
@@ -574,24 +577,18 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         &self.shared.header
     }
 
-    // r[impl cram.slice_cache.budget]
-    /// Set the byte budget of the decoded-slice cache this reader shares
-    /// with its forks (default [`DEFAULT_SLICE_CACHE_BYTES`]); 0 turns it
-    /// off. It bounds the slices the cache keeps, not the ones fetches in
-    /// flight hold.
-    pub fn set_slice_cache_budget(&self, bytes: usize) {
-        self.shared.slice_cache.set_budget(bytes);
+    // r[impl cram.slice_cache.budget+2]
+    /// Set the budget of the decoded-slice cache this reader shares with
+    /// its forks (default [`SliceCacheBudget::Auto`]). It bounds the slices
+    /// the cache keeps, not the ones fetches in flight hold.
+    pub fn set_slice_cache_budget(&self, budget: SliceCacheBudget) {
+        self.shared.slice_cache.set_budget(budget);
     }
 
-    /// The decoded-slice cache's byte budget.
-    pub fn slice_cache_budget(&self) -> usize {
-        self.shared.slice_cache.budget()
-    }
-
-    /// Slices decoded so far by this reader and its forks, cache misses only.
-    #[cfg(test)]
-    pub(crate) fn slices_decoded(&self) -> u64 {
-        self.shared.slice_cache.decodes()
+    /// What the decoded-slice cache this reader shares with its forks has
+    /// done so far, for sizing its budget.
+    pub fn slice_cache_stats(&self) -> SliceCacheStats {
+        self.shared.slice_cache.stats()
     }
 
     // r[impl region_buf.not_cram]
@@ -960,6 +957,7 @@ fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, Cram
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     fn cram_path() -> &'static Path {
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test_v30.cram"))
@@ -995,7 +993,7 @@ mod tests {
     }
 
     // r[verify cram.slice_cache.shared]
-    // r[verify cram.slice_cache.budget]
+    // r[verify cram.slice_cache.budget+2]
     #[test]
     fn forks_share_decoded_slices() {
         let mut reader = IndexedCramReader::open(cram_path(), fasta_path()).unwrap();
@@ -1003,18 +1001,34 @@ mod tests {
         let whole = || (Pos0::ZERO..=Pos0::MAX).into();
 
         let count = reader.fetch_into(0, whole(), &mut store).unwrap();
-        let decoded = reader.slices_decoded();
+        let decoded = reader.slice_cache_stats().decoded;
         assert!(decoded > 0);
 
         let mut fork = reader.fork().unwrap();
         assert_eq!(fork.fetch_into(0, whole(), &mut store).unwrap(), count);
         assert_eq!(reader.fetch_into(0, whole(), &mut store).unwrap(), count);
-        assert_eq!(reader.slices_decoded(), decoded, "a cached slice was decoded again");
+        assert_eq!(reader.slice_cache_stats().decoded, decoded, "a cached slice was decoded again");
 
-        fork.set_slice_cache_budget(0);
-        assert_eq!(reader.slice_cache_budget(), 0, "the budget is shared too");
+        fork.set_slice_cache_budget(SliceCacheBudget::Bytes(0));
+        assert_eq!(reader.slice_cache_stats().budget_bytes, 0, "the budget is shared too");
         assert_eq!(reader.fetch_into(0, whole(), &mut store).unwrap(), count);
-        assert_eq!(reader.slices_decoded(), decoded * 2, "budget 0 still cached a slice");
+        assert_eq!(
+            reader.slice_cache_stats().decoded,
+            decoded * 2,
+            "budget 0 still cached a slice"
+        );
+    }
+
+    // r[verify cram.slice_cache.budget+2]
+    #[test]
+    fn forks_count_as_handles_until_dropped() {
+        let reader = IndexedCramReader::open(cram_path(), fasta_path()).unwrap();
+        let handles = || reader.shared.slice_cache.handles.load(Ordering::Relaxed);
+        assert_eq!(handles(), 1);
+        let forks: Vec<_> = (0..3).map(|_| reader.fork().unwrap()).collect();
+        assert_eq!(handles(), 4);
+        drop(forks);
+        assert_eq!(handles(), 1);
     }
 
     // r[verify cram.edge.unmapped_reads+2]

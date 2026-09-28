@@ -39,8 +39,8 @@ use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::cram::block::{self, ContentType};
 use seqair::cram::container::ContainerHeader;
 use seqair::cram::index::{CraiEntry, CramIndex};
-use seqair::cram::reader::DEFAULT_SLICE_CACHE_BYTES;
 use seqair::cram::slice::SliceHeader;
+use seqair::cram::slice_cache::SliceCacheBudget;
 use seqair::reader::{IndexedReader, Readers};
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -931,7 +931,7 @@ fn arb_query(tc: &TestCase, handles: usize, contigs: usize) -> Query {
 
 // r[verify cram.slice_cache]
 // r[verify cram.slice_cache.shared]
-// r[verify cram.slice_cache.budget]
+// r[verify cram.slice_cache.budget+2]
 /// Queries through a reader and its forks, which share decoded slices, return
 /// what a freshly opened reader returns for each query on its own.
 ///
@@ -944,7 +944,15 @@ fn cached_slices_fetch_like_fresh_ones(tc: TestCase) {
     const HANDLES: usize = 3;
     let sample = tc.draw(arb_sample().print_as_debug());
     let opts = tc.draw(arb_opts().print_as_debug());
-    let budget = tc.draw(gs::sampled_from(&[0usize, 1, 4096, DEFAULT_SLICE_CACHE_BYTES]));
+    let budget = tc.draw(
+        gs::sampled_from(&[
+            SliceCacheBudget::Bytes(0),
+            SliceCacheBudget::Bytes(1),
+            SliceCacheBudget::Bytes(4096),
+            SliceCacheBudget::Auto,
+        ])
+        .print_as_debug(),
+    );
     let queries = tc.draw(
         gs::vecs(arb_query(HANDLES, sample.contigs.len()))
             .min_size(1)
@@ -1001,10 +1009,10 @@ fn cached_slices_fetch_like_fresh_ones(tc: TestCase) {
 
     for (q, got) in queries.iter().zip(got) {
         let want = fetch(&cram, &fasta, q.contig, q.start0, q.end0);
-        assert_eq!(got.as_ref(), Some(&want), "{}: budget {budget}, {q:?}", opts.label());
+        assert_eq!(got.as_ref(), Some(&want), "{}: {budget:?}, {q:?}", opts.label());
     }
 
-    tc.event(format!("budget {budget}"));
+    tc.event(format!("{budget:?}"));
     tc.event_value("slices", slice_headers(&cram).len() as f64);
 }
 
