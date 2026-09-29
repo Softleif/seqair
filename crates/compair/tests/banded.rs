@@ -672,6 +672,37 @@ fn a_read_with_no_information_scores_every_haplotype_alike(tc: TestCase) {
     assert!((x - y).abs() <= 1e-12 * (1.0 + x.abs()), "full: {x} against {y}");
 }
 
+/// A cell of GATK's recurrence is not a probability: the transitions out of
+/// a match are taken from two rows, as are those out of a deletion, and
+/// where the rows' qualities differ a cell hands on more than it holds. A
+/// read whose gap-continuation quality alternates between Q254 and Q0 scores
+/// far above zero against a homopolymer, and the strip kernel's cells grow
+/// by about `2^20` every eight rows: at `2^115` that overflows `f32` (the
+/// kernel's own total is NaN). The read's `Growth` says so before the kernel
+/// runs, and every entry point returns the `f64` recurrence.
+#[test]
+fn a_read_whose_rows_hand_on_more_than_they_hold_is_scored_in_f64() {
+    let q = BaseQuality::from_byte;
+    let r = 64;
+    let gaps: Vec<BaseQuality> = (0..r).map(|i| if i % 2 == 0 { q(254) } else { q(0) }).collect();
+    let read =
+        Read::new(vec![Base::A; r], &vec![q(60); r], &vec![q(6); r], &vec![q(6); r], &gaps, Strand::OT)
+            .expect("a valid read");
+    let case = support::Case {
+        haplotype: Haplotype::new(vec![Base::A; 1000]),
+        read,
+        offset: 0,
+        betas: vec![],
+    };
+    let band = Band::new(Band::MAX_WIDTH, case.offset).expect("width");
+    let emission = StandardEmission::default();
+    let want = align_masked(&case.haplotype, &case.read, &emission, band);
+    assert!(want > 20.0, "{want}");
+    for (kernel, got) in every_entry_point(&case, &emission, band) {
+        assert!((got - want).abs() < 1e-9 * (1.0 + want.abs()), "{kernel}: {got} against {want}");
+    }
+}
+
 /// A read that fits nowhere, with qualities a real run reports: eighty `C`s
 /// at Q40 against a homopolymer of `A`s. Every path pays at least a Q40
 /// mismatch or a Q60 gap per row, so eight rows take every cell below

@@ -90,10 +90,13 @@ de-novo CpG needs no special case.
   the allocation
 - Every score is the `f64` recurrence over its band, at any score: the strip
   kernels keep a renormalised row at `2^96`, so their flushes provably cannot
-  move a total above `log10(3 * (r + 1) * columns) - 60.5` by a millionth
-  (`- 31.6` for the diagonal kernel, which scales to one), and a pair that
-  finishes below that is rescored in `f64` (`align_banded_f64`). On rastair's
-  chr12 pairs that is 2.8% of pairs
+  move a total above `log10(9 * r * columns * rho) - 60.8` by a millionth,
+  `rho` the share of the haplotype's columns the band starts in (`- 31.9` for
+  the diagonal kernel, which scales to one), and a pair that finishes below
+  that is rescored in `f64` (`align_banded_f64`). On rastair's chr12 pairs
+  that is 2.7% of pairs. A read whose gap qualities change along it can grow
+  a cell past one, as GATK's recurrence can; the floor and an overflow check
+  take that from the read's qualities
 - Qualities mean what a base call can mean: a base error probability is
   capped at 3/4 (Q0 and Q1 carry no information rather than "certainly
   wrong"), and gap-open qualities below Q6 count as Q6, as GATK raises them

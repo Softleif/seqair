@@ -103,13 +103,16 @@
 //! of two, and flush stored cells below `2^-126`. The strip, batch, pairs and
 //! GPU kernels keep a renormalised row's largest cell at `2^96`, so a flush
 //! there provably cannot move a total above a floor near `-56` (for 150 bases
-//! in the default band) by a millionth; the diagonal kernel keeps it in
-//! `[1, 2)`, and its floor is near `-27`. A pair that finishes below its
-//! kernel's floor is scored again by [`align_banded_f64`]. [`trusted`] is
-//! that check, for the GPU kernel's scores. Two model rules keep the proof's
-//! premise -- every cell a probability -- true for every quality a [`Read`]
-//! accepts: a base error probability is capped at [`MAX_EPSILON`], and
-//! gap-open qualities below Q6 count as Q6, as GATK raises them.
+//! in a 64-wide band) by a millionth; the diagonal kernel keeps it in
+//! `[1, 2)`, and its floor is near `-28`. A pair that finishes below its
+//! kernel's floor is scored again by [`align_banded_f64`], and so is a read
+//! whose qualities could overflow the strip kernels. [`trusted`] is that
+//! check, for the GPU kernel's scores. The proof needs every emission and the
+//! transitions out of every state to be at most one: a base error
+//! probability is capped at [`MAX_EPSILON`], and gap-open qualities below Q6
+//! count as Q6, as GATK raises them. It does not need a cell to be a
+//! probability, which it is not where a read's gap qualities change from
+//! row to row: GATK's recurrence takes a cell's transitions from two rows.
 
 mod banded;
 mod batch;

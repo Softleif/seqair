@@ -1,6 +1,6 @@
 use crate::{
     error::Error,
-    transitions::Transition,
+    transitions::{Growth, MIN_GAP_OPEN_QUALITY, Transition},
     types::{ErrorTable, Observation},
 };
 use seqair_types::{Base, BaseQuality, QPos, Strand};
@@ -29,6 +29,8 @@ pub struct Read {
     deletion_quals: Box<[BaseQuality]>,
     gap_quals: Box<[BaseQuality]>,
     transitions: Box<[Transition]>,
+    /// [`Read::growth_bound`], taken once per read rather than once per pair.
+    growth_bound: Option<Growth>,
     strand: Strand,
 }
 
@@ -61,7 +63,7 @@ impl Read {
             }
         }
         let table = ErrorTable::get();
-        let transitions = insertion_quals
+        let transitions: Box<[Transition]> = insertion_quals
             .iter()
             .zip(deletion_quals)
             .zip(gap_quals)
@@ -76,6 +78,7 @@ impl Read {
             insertion_quals: insertion_quals.into(),
             deletion_quals: deletion_quals.into(),
             gap_quals: gap_quals.into(),
+            growth_bound: steady_growth(&transitions, deletion_quals, gap_quals),
             transitions,
             strand,
         })
@@ -148,6 +151,19 @@ impl Read {
         self.transitions.get(index).copied()
     }
 
+    /// What the recurrence can grow a value by over this read's rows: one
+    /// pass over them, which is why it is not taken for every pair.
+    pub(crate) fn growth(&self) -> Growth {
+        Growth::of(&self.transitions)
+    }
+
+    /// A bound on [`Read::growth`] from three scans of quality bytes, where
+    /// the gap-continuation quality is the same at every base (as it is for
+    /// a caller with no per-base gap model); `None` where it is not.
+    pub(crate) fn growth_bound(&self) -> Option<Growth> {
+        self.growth_bound
+    }
+
     #[must_use]
     pub fn observation(&self, index: usize) -> Option<Observation> {
         let base = *self.bases.get(index)?;
@@ -160,4 +176,29 @@ impl Read {
             strand: self.strand,
         })
     }
+}
+
+/// [`Read::growth_bound`] for these rows.
+fn steady_growth(
+    transitions: &[Transition],
+    deletion_quals: &[BaseQuality],
+    gap_quals: &[BaseQuality],
+) -> Option<Growth> {
+    let (Some(first), Some(&gap)) = (transitions.first(), gap_quals.first()) else {
+        return None;
+    };
+    // One pass, and no early exit, so that it is a vector loop.
+    let gap = gap.as_byte();
+    let (mut differ, mut low, mut high) = (0u8, u8::MAX, 0u8);
+    for (deletion, continuation) in deletion_quals.iter().zip(gap_quals) {
+        differ |= continuation.as_byte() ^ gap;
+        low = low.min(deletion.as_byte());
+        high = high.max(deletion.as_byte());
+    }
+    if differ != 0 {
+        return None;
+    }
+    let table = ErrorTable::get();
+    let open = |q: u8| table.probability(BaseQuality::from_byte(q.max(MIN_GAP_OPEN_QUALITY)));
+    Some(Growth::steady(transitions.len(), open(low), open(high), first.indel_to_match))
 }
