@@ -101,8 +101,8 @@
 //! **Precision.** Every entry point returns the `f64` recurrence over the
 //! band, at any score. The kernels compute in `f32`, renormalising by powers
 //! of two, and flush stored cells below `2^-126`. The strip, batch, pairs and
-//! GPU kernels keep a renormalised row's largest cell at `2^96`, so a flush
-//! there provably cannot move a total above a floor near `-56` (for 150 bases
+//! GPU kernels keep a renormalised row's largest cell at `2^115`, so a flush
+//! there provably cannot move a total above a floor near `-62` (for 150 bases
 //! in a 64-wide band) by a millionth; the diagonal kernel keeps it in
 //! `[1, 2)`, and its floor is near `-28`. A pair that finishes below its
 //! kernel's floor is scored again by [`align_banded_f64`], and so is a read

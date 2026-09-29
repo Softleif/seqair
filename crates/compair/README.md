@@ -89,12 +89,12 @@ de-novo CpG needs no special case.
   no path at all is `Log10Likelihood::IMPOSSIBLE`, and `Band::MAX_WIDTH` bounds
   the allocation
 - Every score is the `f64` recurrence over its band, at any score: the strip
-  kernels keep a renormalised row at `2^96`, so their flushes provably cannot
-  move a total above `log10(9 * r * columns * rho) - 60.8` by a millionth,
+  kernels keep a renormalised row at `2^115`, so their flushes provably cannot
+  move a total above `log10(9 * r * columns * rho) - 66.5` by a millionth,
   `rho` the share of the haplotype's columns the band starts in (`- 31.9` for
   the diagonal kernel, which scales to one), and a pair that finishes below
   that is rescored in `f64` (`align_banded_f64`). On rastair's chr12 pairs
-  that is 2.7% of pairs. A read whose gap qualities change along it can grow
+  that is 2.2% of pairs. A read whose gap qualities change along it can grow
   a cell past one, as GATK's recurrence can; the floor and an overflow check
   take that from the read's qualities
 - Qualities mean what a base call can mean: a base error probability is

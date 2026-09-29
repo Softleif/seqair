@@ -70,7 +70,8 @@ pub(crate) fn normalising_shift_f32(max: f32) -> i32 {
 /// `[2^STRIP_SCALE, 2^(STRIP_SCALE + 1))`.
 ///
 /// A flush loses less than `2^-126` of the scale, so the higher the scale the
-/// less a flush can lose (see `reference::trusted`).
+/// less a flush can lose (see `reference::trusted`). 115 is the highest scale
+/// at which no read with steady qualities can overflow `f32` in any band.
 ///
 /// The bound. Let `window` and `spill` be the read's `Growth`, and row `R` a
 /// renormalised row: every cell at most `2^(S + 1)`, in `columns` columns.
@@ -88,12 +89,13 @@ pub(crate) fn normalising_shift_f32(max: f32) -> i32 {
 ///   a deletion at most `min(1, spill)` times its row's largest match, that is
 ///   `(2 + min(1, spill)) * columns * window * 2^(S + 1)`.
 ///
-/// Rounding adds a factor below 1.001 inside a window. At `S = 96` with
-/// steady qualities (`window` one) that is at most `3 * 1025 * 1.001 * 2^97 <
-/// 2^109`, far below `f32::MAX`. A read whose qualities step enough to break
-/// the bound is scored in `f64` (`reference::trusted`); the check is
-/// `strips_fit`.
-pub(crate) const STRIP_SCALE: i32 = 96;
+/// Rounding adds a factor below 1.001 inside a window. At `S = 115` with
+/// steady qualities (`window` one) and the widest band (1025 columns), that is
+/// at most `3 * 1025 * 1.001 * 2^116 < 2^127.6` and `3 * (1 + spill) * 2^116`
+/// with `spill <= 257`: below `f32::MAX`. At 116 the total of a band that
+/// wide could reach `2^128`. A read whose qualities step enough to break the
+/// bound is scored in `f64` (`reference::trusted`); the check is `strips_fit`.
+pub(crate) const STRIP_SCALE: i32 = 115;
 
 /// The shift that moves a normal `max` into `[2^STRIP_SCALE, 2^(STRIP_SCALE +
 /// 1))`, at most 127 so that [`exp2_f32`] represents it, and zero when there

@@ -595,14 +595,13 @@ fn every_score_is_the_f64_recurrence_over_its_band(tc: TestCase) {
     }
 }
 
-/// The strip kernels keep a row's largest cell at `2^STRIP_SCALE` (`2^96`),
-/// so what their flushes can lose, and the floor below which their scores
-/// are rescored, sits 96 bits lower than the diagonal kernel's. This pair
-/// (hegel's, shrunk) has the strip kernel flush a cell that goes on to carry
-/// part of the answer: its `f32` score is -69.268 against the recurrence's
-/// -69.258, twelve decades below the strip floor (-57.4). A floor that took
-/// the scale for more than it is -- here, by forty bits -- lets that score
-/// through; this pins it.
+/// The strip kernels keep a row's largest cell at `2^STRIP_SCALE`, so what
+/// their flushes can lose, and the floor below which their scores are
+/// rescored, sits that many bits lower than the diagonal kernel's. This pair
+/// (hegel's, shrunk, when the scale was `2^96`) has the strip kernel flush a
+/// cell that goes on to carry part of the answer: its `f32` score is -69.268
+/// against the recurrence's -69.258. A floor that took the scale for more
+/// than it is -- by forty bits, then -- let that score through; this pins it.
 #[test]
 fn a_strip_flush_below_the_strip_floor_is_rescored() {
     let quals = |qs: &[u8]| qs.iter().map(|&q| BaseQuality::from_byte(q)).collect::<Vec<_>>();
@@ -700,6 +699,33 @@ fn a_read_whose_rows_hand_on_more_than_they_hold_is_scored_in_f64() {
     assert!(want > 20.0, "{want}");
     for (kernel, got) in every_entry_point(&case, &emission, band) {
         assert!((got - want).abs() < 1e-9 * (1.0 + want.abs()), "{kernel}: {got} against {want}");
+    }
+}
+
+/// The largest total a strip kernel accumulates for a read with steady
+/// qualities: the widest band over a homopolymer, where every column of the
+/// last row holds about as much as the renormalised row did, at Q1 gap
+/// continuation, where a deletion holds more than its row's match. The
+/// kernel's own total is `2^126.6` at `STRIP_SCALE = 115`, against the bound
+/// `3 * 1025 * 2^116 < 2^127.6`; two bits more of scale and it is infinite.
+/// The pair is well above the floor, so this holds the kernels' own score.
+#[test]
+fn the_widest_band_keeps_its_total_below_f32_max() {
+    let q = BaseQuality::from_byte;
+    let read = Read::uniform(vec![Base::A; 16], &[q(60); 16], q(6), q(6), q(1), Strand::OT)
+        .expect("a valid read");
+    let case = support::Case {
+        haplotype: Haplotype::new(vec![Base::A; 1100]),
+        read,
+        offset: 542,
+        betas: vec![],
+    };
+    let band = Band::new(Band::MAX_WIDTH, case.offset).expect("width");
+    let emission = StandardEmission::default();
+    let want = align_masked(&case.haplotype, &case.read, &emission, band);
+    assert!((want - -0.7228).abs() < 1e-3, "{want}");
+    for (kernel, got) in every_entry_point(&case, &emission, band) {
+        assert!((got - want).abs() < 1e-4 * (1.0 + want.abs()), "{kernel}: {got} against {want}");
     }
 }
 

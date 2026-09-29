@@ -314,7 +314,7 @@ fn banded_row(
 /// max(max(1, spill) * rho * 2^(-126 - STRIP_SCALE), 2^(-126 - 127))`, and a
 /// total a million times that is right to within a millionth. With steady
 /// qualities `total` and `carry` are one and `spill` below it; for 150 bases
-/// against 290 in a 64-wide band the floor is near `-56`.
+/// against 290 in a 64-wide band the floor is near `-62`.
 ///
 /// Below it the kernel may have flushed anything up to the whole answer --
 /// eight rows of confident mismatches take every cell under `2^-126` at once
