@@ -7,7 +7,7 @@ use compair::{
     BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, MatchProbability,
     Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded,
     align_banded_f64_at, align_banded_f64_rows, align_banded_simd, align_candidates, align_full,
-    align_strips, align_strips_simd, error_probability,
+    align_strips, align_strips_simd, error_probability, poison_align_banded_f64_scratch,
 };
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator};
@@ -553,10 +553,10 @@ fn the_rescue_is_the_row_recurrence_bit_for_bit(tc: TestCase) {
         ("taps", align_banded_f64_rows(haplotype, read, &taps, band)),
     ];
     for (level_name, level) in support::levels() {
-        let got = [
-            align_banded_f64_at(level, haplotype, read, &standard, band),
-            align_banded_f64_at(level, haplotype, read, &taps, band),
-        ];
+        // What an earlier call left in the thread's buffers is never read.
+        poison_align_banded_f64_scratch();
+        let standard = align_banded_f64_at(level, haplotype, read, &standard, band);
+        let got = [standard, align_banded_f64_at(level, haplotype, read, &taps, band)];
         for ((emission, want), got) in rows.iter().zip(got) {
             assert_eq!(
                 got.get().to_bits(),

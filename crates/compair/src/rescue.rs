@@ -172,7 +172,14 @@ fn score<E: Emission + ?Sized>(
         }
     }
     for rows in [&mut *above, &mut *below, &mut *a] {
-        rows.reset(width);
+        rows.prepare(width);
+    }
+    // The start row: zero everywhere the first row reads it, but for the
+    // free start in its deletions.
+    for buffer in [&mut above.m, &mut above.i, &mut above.d] {
+        if let Some(cells) = buffer.get_mut(..(start.1 + PAD).min(width)) {
+            cells.fill(0.0);
+        }
     }
     #[allow(
         clippy::cast_precision_loss,
@@ -202,8 +209,14 @@ fn larger(a: f64, b: f64) -> f64 {
     if b > a { b } else { a }
 }
 
-/// One row's three matrices, unscaled, indexed by column + [`PAD`], and zero
-/// outside the row's span.
+/// One row's three matrices, unscaled, indexed by column + [`PAD`].
+///
+/// What the next row reads of it is its span, the match and insertion cells
+/// one column right of it -- zero: every writer stores a zero vector past
+/// its last block -- and, where the band starts at column 1, column 0, which
+/// no row but the start row writes. The rest holds whatever an earlier row
+/// or an earlier call left, and reaches only lanes that are masked off; the
+/// buffers are never cleared.
 #[derive(Default)]
 struct Rows {
     m: Vec<f64>,
@@ -212,31 +225,33 @@ struct Rows {
 }
 
 impl Rows {
-    /// `width` zeros in every matrix.
-    fn reset(&mut self, width: usize) {
+    /// `width` cells in every matrix, column 0 zero.
+    fn prepare(&mut self, width: usize) {
         for buffer in [&mut self.m, &mut self.i, &mut self.d] {
-            buffer.clear();
             buffer.resize(width, 0.0);
-        }
-    }
-
-    /// Zeroes what the row the buffers held (`stale`) leaves left of the one
-    /// about to be written from `low`. Spans only move right, and a row's
-    /// writes past its span are zeros, so nothing is left over on the other
-    /// side.
-    #[inline(always)]
-    fn clear_stale(&mut self, stale: Option<(usize, usize)>, low: usize) {
-        let Some((from, to)) = stale else { return };
-        let to = to.min(low.saturating_sub(1));
-        if from > to {
-            return;
-        }
-        for buffer in [&mut self.m, &mut self.i, &mut self.d] {
-            if let Some(cells) = buffer.get_mut(from..=to) {
-                cells.fill(0.0);
+            if let Some(cell) = buffer.get_mut(PAD) {
+                *cell = 0.0;
             }
         }
     }
+}
+
+/// Fills every buffer of this thread's [`align_banded_f64`] with NaN, for
+/// tests that prove no call reads what an earlier one left.
+#[doc(hidden)]
+pub fn poison_align_banded_f64_scratch() {
+    SCRATCH.with(|scratch| {
+        if let Ok(mut scratch) = scratch.try_borrow_mut() {
+            let Scratch { hits, misses, plans: _, above, below, a } = &mut *scratch;
+            let rows = [above, below, a]
+                .into_iter()
+                .flat_map(|rows| [&mut rows.m, &mut rows.i, &mut rows.d]);
+            for buffer in hits.iter_mut().chain(misses.iter_mut()).chain(rows) {
+                buffer.clear();
+                buffer.resize(4096, f64::NAN);
+            }
+        }
+    });
 }
 
 /// Each column's latent weight for every base (`hits`) and one minus it
@@ -342,10 +357,9 @@ fn kernel<S: Simd>(
     start: (usize, usize),
     [above, below, a]: [&mut Rows; 3],
 ) -> Log10Likelihood {
-    // `above` holds the start row, and every buffer is zero elsewhere.
+    // `above` holds the start row.
     let (mut above, mut below, mut a) = (above, below, a);
     let (mut above_span, mut above_scale) = (start, 1.0f64);
-    let (mut below_span, mut a_span) = (None, None);
     let mut exponent = 0i32;
 
     let mut pairs = plans.chunks(2);
@@ -355,9 +369,12 @@ fn kernel<S: Simd>(
             [pa] => (pa, None),
             _ => break,
         };
-        a.clear_stale(a_span, pa.low);
-        a_span = Some((pa.low, pa.high));
         let max_a = prepass(simd, above, above_scale, pa, tracks, a);
+        // Nothing reads `above` again but at column 0, where only the
+        // start row has a cell.
+        if let Some(cell) = above.d.get_mut(PAD) {
+            *cell = 0.0;
+        }
         let guess = normalising_shift_f64(max_a);
         let Some(pb) = pb else {
             // The last row, on its own.
@@ -368,7 +385,6 @@ fn kernel<S: Simd>(
             core::mem::swap(&mut above, &mut a);
             break;
         };
-        below.clear_stale(below_span, pb.low);
         let fused = if pb.low == pa.low + 1 {
             let (max_da, max_b) = sweep(simd, a, exp2_f64(guess), pa, pb, tracks, below);
             let shift_a = normalising_shift_f64(larger(max_a, max_da));
@@ -388,7 +404,6 @@ fn kernel<S: Simd>(
         let shift_b = normalising_shift_f64(max_b);
         exponent += shift_a + shift_b;
         core::mem::swap(&mut above, &mut below);
-        below_span = Some(above_span);
         (above_span, above_scale) = ((pb.low, pb.high), exp2_f64(shift_b));
     }
 
@@ -448,10 +463,16 @@ fn prepass<S: Simd>(
     ) else {
         return 0.0;
     };
-    let (Some(out_m), Some(out_i)) = (out.m.get_mut(low..low + n), out.i.get_mut(low..low + n))
+    let (Some(out_m), Some(out_i)) =
+        (out.m.get_mut(low..low + n + lanes), out.i.get_mut(low..low + n + lanes))
     else {
         return 0.0;
     };
+    let (out_m, past_m) = out_m.split_at_mut(n);
+    let (out_i, past_i) = out_i.split_at_mut(n);
+    let zero = V::<S>::splat(simd, 0.0);
+    zero.store_slice(past_m);
+    zero.store_slice(past_i);
     let (m_first, m_d) = m_d.split_at(lanes);
     let (i_first, i_d) = i_d.split_at(lanes);
     let scale = V::<S>::splat(simd, scale);
@@ -537,11 +558,11 @@ fn chain(rows: &mut Rows, plan: &RowPlan) -> f64 {
     let t = &plan.t;
     let (mut d, mut max) = (0.0f64, 0.0f64);
     let (Some(m), Some(out)) =
-        (rows.m.get(plan.low - 1..plan.high), rows.d.get_mut(plan.low..=plan.high))
+        (rows.m.get(plan.low..plan.high), rows.d.get_mut(plan.low..=plan.high))
     else {
         return 0.0;
     };
-    for (m_left, cell) in m.iter().zip(out) {
+    for (m_left, cell) in core::iter::once(&0.0).chain(m).zip(out) {
         d = m_left * t.match_to_deletion + d * t.gap_continuation;
         *cell = d;
         max = larger(max, d);
@@ -580,11 +601,9 @@ fn sweep<S: Simd>(
     let cells = high + 1 - low;
     let (full, tail) = (cells / lanes, cells % lanes);
     let n = cells.div_ceil(lanes) * lanes;
-    let (Some(m_d), Some(i_d), Some(&m_before)) = (
-        a.m.get(low - 1..low - 1 + n + lanes),
-        a.i.get(low - 1..low - 1 + n + lanes),
-        a.m.get(low - 2),
-    ) else {
+    let (Some(m_d), Some(i_d)) =
+        (a.m.get(low - 1..low - 1 + n + lanes), a.i.get(low - 1..low - 1 + n + lanes))
+    else {
         return (0.0, 0.0);
     };
     let (Some(hits), Some(misses)) = (
@@ -593,14 +612,20 @@ fn sweep<S: Simd>(
     ) else {
         return (0.0, 0.0);
     };
-    let (Some(out_m), Some(out_i), Some(out_d)) =
-        (out.m.get_mut(low..low + n), out.i.get_mut(low..low + n), out.d.get_mut(low..low + n))
-    else {
+    let (Some(out_m), Some(out_i), Some(out_d)) = (
+        out.m.get_mut(low..low + n + lanes),
+        out.i.get_mut(low..low + n + lanes),
+        out.d.get_mut(low..low + n),
+    ) else {
         return (0.0, 0.0);
     };
+    let (out_m, past_m) = out_m.split_at_mut(n);
+    let (out_i, past_i) = out_i.split_at_mut(n);
+    let zero = V::<S>::splat(simd, 0.0);
+    zero.store_slice(past_m);
+    zero.store_slice(past_i);
     let (m_first, m_d) = m_d.split_at(lanes);
     let (i_first, i_d) = i_d.split_at(lanes);
-    let zero = V::<S>::splat(simd, 0.0);
     let scale = V::<S>::splat(simd, scale);
     let m_first = load(simd, m_first);
     let mut block = SweepBlock {
@@ -612,7 +637,7 @@ fn sweep<S: Simd>(
         m_raw: m_first,
         m_diagonal: m_first * scale,
         i_diagonal: load(simd, i_first) * scale,
-        m_a: m_before,
+        m_a: 0.0,
         d_a: 0.0,
         m_b: 0.0,
         d_b: 0.0,
