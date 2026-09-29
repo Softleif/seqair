@@ -12,7 +12,7 @@ include!("../tests/support/mod.rs");
 // P(original)  = (1 - rate) * (1 - eps) + rate * eps / 3
 // ```
 //
-// The crate's first draft, following `joint-model.md` §3 and Bis-SNP's
+// The crate's first draft, following Bis-SNP's
 // equation 5, added the error term bare:
 //
 // ```text

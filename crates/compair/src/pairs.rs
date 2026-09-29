@@ -108,7 +108,7 @@ pub const PAIRS: usize = LANE_MAX;
 /// the M4 into the pairs kernel at 0.84x. `align_reads` only ever has one short
 /// group per call -- the end of the product -- so on a locus of tens of reads
 /// the choice moves a few per cent of one group; on rastair's real inputs
-/// (notes §16.6) five against six measured within noise.
+/// five against six measured within noise.
 pub const PAIRS_BREAK_EVEN: usize = 5;
 
 // The same bounds `BATCH_BREAK_EVEN` has, for the same reasons.

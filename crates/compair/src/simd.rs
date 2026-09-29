@@ -44,7 +44,7 @@ use crate::{
 /// but cannot see through `vcmpps` that the mask is already whole, so it
 /// sign-extends it first with a `vpcmpgtb` -- one per site, four per strip
 /// step, five per batch step. On the 3950X that was 11% more cycles on the
-/// strip kernel and 11% on the batch kernel (notes §11). NEON needs no hatch:
+/// strip kernel and 11% on the batch kernel. NEON needs no hatch:
 /// the portable spelling already lowers to `and`/`bic` there. Nor does
 /// AVX-512, whose masks are `k` registers, where a `select` against zero is a
 /// zero-masked move and already the best spelling.
@@ -52,7 +52,7 @@ use crate::{
 /// Other hatches were measured and dropped: the hand-written lane's `vpermps`
 /// lane shift, and a `vperm2f128` + `vpalignr` one, each fewer instructions
 /// than the portable `shift_elements_right` and each 1-2% slower with loops
-/// aligned (§11).
+/// aligned.
 #[cfg(target_arch = "x86_64")]
 mod x86 {
     use core::arch::x86_64::{__m256, __m256i};

@@ -32,8 +32,7 @@
 //!
 //! What it does *not* do is make a lane free. A batch of `n < BATCH`
 //! haplotypes computes the full eight lanes and throws `8 - n` away, so the
-//! per-alignment cost falls only with the fill. See the crate's notes for the
-//! step-count algebra.
+//! per-alignment cost falls only with the fill.
 //!
 //! [`align_strips`]: crate::align_strips
 
@@ -73,14 +72,13 @@ pub const BATCH: usize = LANE_MAX;
 /// batch kernel at half fill, where its strip kernel is 1.4x faster; six leaves
 /// the 3950X's half-full groups about 1.15x on the table. The number is the
 /// ratio between the two kernels' per-cell costs and nothing else, so a
-/// per-target constant is defensible -- but not on two machines. See §9.5 of
-/// `docs/notes/benchmarking.md`.
+/// per-target constant is defensible -- but not on two machines.
 ///
 /// `examples/batchfill.rs` regenerates the table, racing the two kernels on
 /// the same lane, so the crossover it reports is the cost of an empty lane and
 /// not the gap between two lanes. (The table was measured on the hand-written
-/// intrinsics lane that `fearless_simd` replaced; §11 of the notes has the
-/// replacement at parity on both kernels.)
+/// intrinsics lane that `fearless_simd` replaced, which measured at parity
+/// with it on both kernels.)
 ///
 /// Whatever a machine says, the number is bounded below: the batch kernel
 /// cannot be worth running below `BATCH / 2` lanes, because at that fill it is
@@ -487,7 +485,7 @@ mod tests {
         ///
         /// No score shows this: a deletion leaking rightward past a lane's
         /// end never reaches that lane's total, only its running maximum,
-        /// and so only which cells flush (notes §10.3(b)). The column loop
+        /// and so only which cells flush. The column loop
         /// masks only the columns past the batch's shortest haplotype, so
         /// this is what pins where that split falls -- one column late and
         /// the shortest lane's `d` survives at `h + 1`.

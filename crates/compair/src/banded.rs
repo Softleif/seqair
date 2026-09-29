@@ -41,7 +41,7 @@ pub struct Band {
 }
 
 impl Band {
-    /// The width §6.4 of the design budgets for: 150 bp of read against ~48
+    /// The width rastair budgets for: 150 bp of read against ~48
     /// columns is ~7,000 cells.
     ///
     /// It is 46 and not 48 because of how the SIMD kernel fills its lanes. An

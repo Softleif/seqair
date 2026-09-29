@@ -9,8 +9,7 @@
 //! `f32` arithmetic**, which is not nothing: Metal compiles with fast-math and
 //! SPIR-V permits contracting `a * b + c` into a fused multiply-add, so bit
 //! parity with [`align_strips`](crate::align_strips) is not promised, and the
-//! oracle for this kernel is a tolerance, not equality. The crate's notes
-//! (`docs/notes/gpu.md`) have the measurements.
+//! oracle for this kernel is a tolerance, not equality.
 //!
 //! ```no_run
 //! use compair::gpu::{GpuAligner, GpuContext, GpuPairs};

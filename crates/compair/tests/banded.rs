@@ -201,7 +201,7 @@ proptest! {
     /// through the whole DP, not only per cell.
     ///
     /// This used to admit `C` as well, on the reading that the conversion rows
-    /// were `CpG`-only. They are not: design §4.1 puts every unmethylated
+    /// were `CpG`-only. They are not: the joint model puts every unmethylated
     /// cytosine on the false-conversion row, so a non-`CpG` `C` on an OT read
     /// differs from a plain mismatch by `f`. See
     /// `a_non_cpg_cytosine_reads_t_at_the_false_conversion_rate`.

@@ -18,7 +18,7 @@ llvm-tools. Branch targets become one local label; the loop is the whole
 region, taken branches and all, so a loop whose hot path skips a block
 (the batch kernel's `summing`) is over-counted by that block.
 
-Treat the models with care (see the notes, section 14): the znver2 model
+Treat the models with care: the znver2 model
 dispatches four wide where Zen 2 dispatches six, and the Apple models
 predate the M4's latencies. Use them for the dependency graph and the
 per-resource split, and measure cycles.

@@ -10,7 +10,7 @@
 //!   time, which is one cycle per link. Take the minimum of several runs;
 //!   the first one after idle catches the clock ramping.
 //!
-//! The chains are the ones on compair's carried paths (notes section 14):
+//! The chains are the ones on compair's carried paths:
 //! the flush (`cmp` + `andn`), the lane shift in its three x86 spellings,
 //! mul + add, and the FP/integer-domain bypasses between them.
 //!

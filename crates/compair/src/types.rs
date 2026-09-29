@@ -21,7 +21,7 @@ fn phred_to_error(byte: u8) -> f64 {
 ///
 /// A quality is a byte, so there are 256 inputs, and a `Read` asks for four
 /// per base: on glibc's `pow` that was ~7 us per 125 bp read, a fifth of
-/// scoring it against three haplotypes (notes §12). The entries are the same
+/// scoring it against three haplotypes. The entries are the same
 /// `powf` calls, so a lookup is bit-identical to computing one.
 pub(crate) struct ErrorTable([f64; 256]);
 

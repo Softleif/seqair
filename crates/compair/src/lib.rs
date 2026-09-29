@@ -26,7 +26,7 @@
 //! shape (3 haplotypes, 128 reads) `align_reads` is 1.5x `Candidates` on a
 //! 3950X and 1.2x on an M4 Pro; on the 10s dataset, whose groups run to 24
 //! haplotypes, `Candidates` is 1.13x `align_reads` on the 3950X and 0.96x on
-//! the M4 (notes §12.5). The rest of this list is what they pick between, and
+//! the M4. The rest of this list is what they pick between, and
 //! what to reach for when the shape of the work is different.
 //!
 //! Implementations of the same recurrence, in two families.

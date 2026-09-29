@@ -157,7 +157,7 @@ impl StandardEmission {
     ///
     /// A base quality describes the sequencer's confidence and nothing else,
     /// so at Q40 it claims `eps = 1e-4` and `eps / 3 = 3.3e-5` for a
-    /// substitution. Design §8's E7 measured the rate at which the two mates of
+    /// substitution. rastair measured the rate at which the two mates of
     /// one template disagree about a base they both cover at **~0.01** — three
     /// orders of magnitude higher, because library preparation, alignment and
     /// the reference itself contribute errors the quality score knows nothing
@@ -290,9 +290,8 @@ impl Betas<'_> {
 /// about it. At `f = 0.004` that is a hundred times `eps / 3` at Q40, so
 /// scoring an isolated `C`-to-`T` outside a `CpG` as a sequencing error
 /// overstates the evidence for a real `C>T` allele by two orders of magnitude.
-/// This is design §4.1's "non-`CpG` `C` and `G` use the 'no' rows"; earlier
-/// drafts of this crate followed `joint-model.md` §3, which restricted the rows
-/// to `CpG`s, and that is now corrected.
+/// So non-`CpG` `C` and `G` use the "no" rows too; earlier drafts of this
+/// crate restricted the rows to `CpG`s, and that is now corrected.
 ///
 /// Specificity is preserved by `f` being small, not by the rows being absent:
 /// at `f = 0.004` a non-`CpG` `T` over a `C` still costs a factor of ~250

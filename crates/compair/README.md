@@ -80,7 +80,7 @@ de-novo CpG needs no special case.
   launch. It has its own oracle rather than bit-parity by construction:
   measured bit-identical to the strip kernel on an Apple M4 Pro and an AMD RX
   5700 XT except for pairs scoring below log10 -40, which a GPU that flushes
-  subnormal intermediates can score lower. See `docs/notes/gpu.md`
+  subnormal intermediates can score lower.
 - Types shared with `seqair-types`: `Base`, `Strand`, `BaseQuality`,
   `Probability`, `QPos`
 

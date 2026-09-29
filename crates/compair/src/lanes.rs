@@ -16,12 +16,12 @@
 //! [`ColumnBlock`] and a cell's three matrices one [`Cells`], so the column
 //! loop holds two base pointers. With one interleaved `Vec` per track it held
 //! eight, which x86-64 cannot keep in registers, and reloaded the spilled
-//! ones every step (notes §13.1).
+//! ones every step.
 //!
 //! The column loop is `steps::<L, MASKED, SUMMING>`, four instances, so that
 //! each stretch of a row pays only for what its columns need: the past-end
 //! mask only past the group's shortest haplotype, and the sum only on the
-//! rows where some lane's read ends (notes §14.5(e)).
+//! rows where some lane's read ends.
 //!
 //! The arithmetic, the order of the operations, the flush to zero, the
 //! renormalisation cadence and the free start are the strip kernel's, cell for

@@ -4,8 +4,8 @@
 //! relative row buffer updated in place, the masks, the renormalisation --
 //! is the batch kernel's, bit for bit, which a machine without a GPU can run;
 //! and with `flush` set it is the shader as a GPU that flushes subnormal
-//! intermediates executes it, which is how the notes attribute the scores a
-//! GPU gets wrong in the last bits.
+//! intermediates executes it, which is how to attribute the scores a GPU gets
+//! wrong in the last bits.
 
 use super::{
     device::finish,

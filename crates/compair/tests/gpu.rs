@@ -270,7 +270,7 @@ proptest! {
 }
 
 /// The 10s benchmark in one launch: every pair within tolerance of the strip
-/// kernel. Prints how many are bit-identical, which the notes track.
+/// kernel. Prints how many are bit-identical.
 #[test]
 fn the_10s_pairs_are_the_strip_kernel_within_tolerance() -> Result<(), Box<dyn std::error::Error>> {
     let Some(context) = context() else { return Ok(()) };

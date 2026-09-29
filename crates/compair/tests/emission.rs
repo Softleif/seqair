@@ -104,7 +104,7 @@ fn the_other_strand_sees_no_conversion() {
 }
 
 proptest! {
-    /// The invariant `joint-model.md` §3 asks for: reverse-complement the
+    /// Strand symmetry: reverse-complement the
     /// haplotype and the read, swap the strand, reverse the per-site betas, and
     /// every emission is the one it mirrors — bit for bit, not to a tolerance.
     #[test]
@@ -737,7 +737,7 @@ fn the_dp_is_monotone_in_beta() {
     }
 }
 
-/// Design §4.1's row, at the numbers the project measured, with the size of the
+/// The false-conversion row, at the numbers rastair measured, with the size of the
 /// correction spelled out.
 ///
 /// `f` was measured on the unmethylated pUC19 spike-in's cytosines, so it is
@@ -787,7 +787,7 @@ fn a_non_cpg_c_to_t_is_a_hundred_times_likelier_than_a_sequencing_error() {
 /// The artifact floor is `eps = max(eps_from_qual, floor)` and nothing else.
 ///
 /// Default zero, so it changes no number that existed before it; above the
-/// quality's own `eps` it takes over, and below it is inert. Design §8's E7
+/// quality's own `eps` it takes over, and below it is inert. rastair
 /// measured mate-disagreement at ~0.01 against `eps / 3 = 3.3e-5` at Q40, which
 /// is the gap it exists to close.
 #[test]

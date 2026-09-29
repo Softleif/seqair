@@ -252,7 +252,7 @@ impl GpuContext {
 
 /// How the kernel is compiled. The default is the fastest variant that is
 /// bit-identical to the CPU kernels on both GPUs measured; the others exist
-/// for the notes' experiments.
+/// for experiments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct KernelOptions {
@@ -300,8 +300,7 @@ const UNROLL_LIMIT: u32 = 64;
 /// The style a class runs in when the options leave it open: the loop on
 /// Metal, whose compiler keeps its dynamically indexed arrays cheap, and the
 /// unrolled band elsewhere, because RADV lowers a dynamic index into the
-/// register file to a chain of branches and runs the loop 3-5x slower. See
-/// `docs/notes/gpu.md` for the measurements.
+/// register file to a chain of branches and runs the loop 3-5x slower.
 fn auto_style(backend: wgpu::Backend, half_width: u32) -> Style {
     match backend {
         wgpu::Backend::Metal => Style::Loop,
