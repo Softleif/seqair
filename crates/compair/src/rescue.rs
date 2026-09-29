@@ -34,7 +34,7 @@ use crate::{
     emission::{Emission, epsilon},
     haplotype::Haplotype,
     read::Read,
-    scaling::{exp2_f64, normalising_shift_f64},
+    scaling::{exp2_f64, row_shift_f64},
     transitions::Transition,
     types::Log10Likelihood,
 };
@@ -46,8 +46,34 @@ use crate::{
 /// It is what an `f32` score falls back to below the level where `f32` can
 /// vouch for it (see [`crate::trusted`]), and it is exposed for callers that
 /// want the banded answer without the `f32` kernels' range. It visits only
-/// the band's cells and rescales each row by a power of two, so it holds any
-/// score `f64` can write down.
+/// the band's cells and rescales each row by a power of two, so that its
+/// largest cell sits at `2^960` (`scaling::F64_ROW_SCALE`, which also shows
+/// nothing overflows).
+///
+/// **Precision.** A value below `2^-1022` rounds to a multiple of `2^-1074`,
+/// losing up to `2^-1075` of it -- in either direction -- and that is the
+/// only loss beyond `f64`'s relative rounding, which stays below `1e-12` of
+/// the total. With `rho` the free start's mass, and `total`, `spill` and
+/// `carry` the read's `Growth` (all one or below with steady qualities; see
+/// [`crate::trusted`] for the same argument about the `f32` kernels):
+///
+/// - a row's largest cell of the recurrence is at most
+///   `max(1, spill) * rho * total`, so the row's scale `2^e >= 2^960 / that`,
+///   and a rounding in it is at most `2^(-1075 - e)` of the recurrence's
+///   units -- also where a row's lift was capped, which only follows a fall;
+/// - at most sixteen roundings per cell (its three values, the products
+///   they are sums of, and the rescale), in `r + 1` rows of `columns` cells;
+/// - each hands on at most `max(1, carry) * total`.
+///
+/// So the total is within `16 * (r + 1) * columns * max(1, carry) * max(1,
+/// spill) * rho * total * 2^(-1075 - 960)` of the recurrence's, and a total a
+/// million times that is right to within a millionth: for 150 bases in a
+/// 48-wide band with steady qualities, any score above about `-601`. Below
+/// that the answer can be off by up to the bound either way: a total far
+/// under it can come out as zero ([`Log10Likelihood::IMPOSSIBLE`]), or above
+/// what it should be by up to the bound. At the old scale, `[1, 2)`, the same
+/// held only above about `-310`, and a read that switched paths after 78
+/// decades more scored -430 where the recurrence gives -352.
 pub fn align_banded_f64<E: Emission + ?Sized>(
     haplotype: &Haplotype,
     read: &Read,
@@ -190,6 +216,9 @@ fn score<E: Emission + ?Sized>(
         cells.fill(init);
     }
     let tracks = Tracks { hits, misses };
+    // The start row is stored unscaled and read at the row scale, as every
+    // row is.
+    let start = (start, row_shift_f64(init));
     dispatch!(level, simd => kernel_simd(simd, plans, tracks, start, [above, below, a]))
 }
 
@@ -340,7 +369,7 @@ fn kernel_simd<S: Simd>(
     simd: S,
     plans: &[RowPlan],
     tracks: Tracks<'_>,
-    start: (usize, usize),
+    start: ((usize, usize), i32),
     rows: [&mut Rows; 3],
 ) -> Log10Likelihood {
     kernel(simd, plans, tracks, start, rows)
@@ -354,13 +383,13 @@ fn kernel<S: Simd>(
     simd: S,
     plans: &[RowPlan],
     tracks: Tracks<'_>,
-    start: (usize, usize),
+    (start, start_shift): ((usize, usize), i32),
     [above, below, a]: [&mut Rows; 3],
 ) -> Log10Likelihood {
     // `above` holds the start row.
     let (mut above, mut below, mut a) = (above, below, a);
-    let (mut above_span, mut above_scale) = (start, 1.0f64);
-    let mut exponent = 0i32;
+    let (mut above_span, mut above_scale) = (start, exp2_f64(start_shift));
+    let mut exponent = start_shift;
 
     let mut pairs = plans.chunks(2);
     for pair in &mut pairs {
@@ -375,11 +404,11 @@ fn kernel<S: Simd>(
         if let Some(cell) = above.d.get_mut(PAD) {
             *cell = 0.0;
         }
-        let guess = normalising_shift_f64(max_a);
+        let guess = row_shift_f64(max_a);
         let Some(pb) = pb else {
             // The last row, on its own.
             let max_d = chain(a, pa);
-            let shift = normalising_shift_f64(larger(max_a, max_d));
+            let shift = row_shift_f64(larger(max_a, max_d));
             exponent += shift;
             (above_span, above_scale) = ((pa.low, pa.high), exp2_f64(shift));
             core::mem::swap(&mut above, &mut a);
@@ -387,7 +416,7 @@ fn kernel<S: Simd>(
         };
         let fused = if pb.low == pa.low + 1 {
             let (max_da, max_b) = sweep(simd, a, exp2_f64(guess), pa, pb, tracks, below);
-            let shift_a = normalising_shift_f64(larger(max_a, max_da));
+            let shift_a = row_shift_f64(larger(max_a, max_da));
             (shift_a == guess).then_some((shift_a, max_b))
         } else {
             None
@@ -397,11 +426,11 @@ fn kernel<S: Simd>(
         let (shift_a, max_b) = if let Some(fused) = fused {
             fused
         } else {
-            let shift_a = normalising_shift_f64(larger(max_a, chain(a, pa)));
+            let shift_a = row_shift_f64(larger(max_a, chain(a, pa)));
             let max_b = prepass(simd, a, exp2_f64(shift_a), pb, tracks, below);
             (shift_a, larger(max_b, chain(below, pb)))
         };
-        let shift_b = normalising_shift_f64(max_b);
+        let shift_b = row_shift_f64(max_b);
         exponent += shift_a + shift_b;
         core::mem::swap(&mut above, &mut below);
         (above_span, above_scale) = ((pb.low, pb.high), exp2_f64(shift_b));

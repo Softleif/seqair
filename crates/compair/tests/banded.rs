@@ -580,6 +580,36 @@ fn align_masked<E: compair::Emission>(
     total.log10()
 }
 
+/// A read that fits the haplotype at its start for 21 bases and 31 columns
+/// further on for the other 25 -- a 31-base deletion -- at Q247 and Q253 gap
+/// penalties (found by the anti-diagonal `f64` kernel's search). At the
+/// switch the cells of the second alignment are more than `2^-1022` below
+/// their row's largest: rescaled into `[1, 2)` the row recurrence rounded
+/// them as subnormals and scored -430.09, 78 decades short. At the `f64` row
+/// scale it keeps them, and every level and the row-at-a-time recurrence
+/// agree with the oracle, which has no subnormals at all.
+#[test]
+fn a_path_far_below_its_row_is_kept_until_it_wins() {
+    let haplotype = Haplotype::from_ascii(
+        b"GTAGACACAACGTTTTTTTACAAAAAAACACAATCTGGACCTTAAGCAGATGGTTGGGTATGGCATGACCGACCCGC",
+    );
+    let read_bases = bases("GTAGACACAACGTTTTTTTACGTTGGGTATGGCATGACCGACCCGC");
+    let n = read_bases.len();
+    let quals = vec![BaseQuality::from_byte(247); n];
+    let gaps = vec![BaseQuality::from_byte(253); n];
+    let read = Read::new(read_bases, &quals, &gaps, &gaps, &gaps, Strand::OT).expect("a read");
+    let band = Band::new(70, 0).expect("width");
+    let emission = StandardEmission::default();
+    let want = align_masked(&haplotype, &read, &emission, band);
+    assert!((want - -352.37).abs() < 0.01, "the oracle: {want}");
+    let rows = align_banded_f64_rows(&haplotype, &read, &emission, band).get();
+    assert!((rows - want).abs() < 1e-9 * want.abs(), "rows: {rows} against {want}");
+    for (level_name, level) in support::levels() {
+        let got = align_banded_f64_at(level, &haplotype, &read, &emission, band).get();
+        assert_eq!(got.to_bits(), rows.to_bits(), "{level_name}: {got} against {rows}");
+    }
+}
+
 /// **The rescue is the row recurrence, bit for bit.** `align_banded_f64`
 /// sweeps two rows at a time in vectors, at every SIMD level, and returns
 /// exactly what the row-at-a-time implementation it replaced does: the same

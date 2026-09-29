@@ -6,9 +6,8 @@
 //!
 //! The `f32` kernels shift a row (or anti-diagonal) so that its largest cell
 //! sits at `2^STRIP_SCALE`, by at most 127, the largest power [`exp2_f32`]
-//! represents; the `f64` recurrence shifts into `[1, 2)`. A maximum that is
-//! not normal asks for no shift, so a subnormal is never scaled *up* into the
-//! normal range.
+//! represents. The banded `f64` recurrence shifts each row to
+//! `2^F64_ROW_SCALE`, by at most 1023; `align_full` shifts into `[1, 2)`.
 
 /// `2^exponent` exactly, or the nearest representable end of the range.
 #[allow(
@@ -48,6 +47,57 @@ pub(crate) fn normalising_shift_f64(max: f64) -> i32 {
     }
     let exponent = ((max.to_bits() >> 52) & 0x7ff) as i32 - 1023;
     if exponent == -1023 { 0 } else { -exponent }
+}
+
+/// Where the banded `f64` recurrence (`align_banded_f64` and
+/// `align_banded_f64_rows`) keeps a rescaled row: its largest cell in
+/// `[2^F64_ROW_SCALE, 2^(F64_ROW_SCALE + 1))`, the start row included.
+///
+/// A value computed below `2^-1022` is rounded to a multiple of `2^-1074`,
+/// which loses up to `2^-1075` of it, so what a row can lose is `2^-1075`
+/// over its scale: the higher the scale, the further below its row's
+/// largest cell a cell keeps every bit (`2^(-1022 - F64_ROW_SCALE)`), and the
+/// lower the scores the recurrence is exact for (see
+/// `crate::align_banded_f64`). At `[1, 2)` a cell 308 decades below its row's
+/// largest was already rounding, and a read that switches paths after that
+/// many decades scored wrong.
+///
+/// The bound. Every transition and every prior is at most one. So from a
+/// row whose cells are all below `2^(S + 1)`, a match cell of the next row
+/// is at most `3 * 2^(S + 1)` (its prior times three neighbours times a
+/// transition each), an insertion cell `2 * 2^(S + 1)`, and a deletion cell,
+/// a sum along the row of match cells each times a transition, at most
+/// `columns * 3 * 2^(S + 1)`, with `columns <= 1025`: every value, the sums a
+/// cell is made of among them, below `6150 * 2^S < 2^(S + 13)`. That holds
+/// whatever the read's `Growth`, since it is one step from a row whose
+/// largest cell is known. The total sums the last row's rescaled match and
+/// insertion cells, at most `2 * 1025 * 2^(S + 1) < 2^(S + 13)`.
+/// `align_banded_f64` also makes one row from a row whose deletions it has
+/// not yet rescaled for (and throws that row away when they asked for
+/// another scale): those deletions are at most `1025 * 2^(S + 1)`, so that
+/// row's values stay below `2^(S + 24)`.
+///
+/// So `S + 24 <= 1023` keeps every value finite. 960 leaves the start row's
+/// shift, `S - log2(1 / h) <= 960 + 64`, within the 1023 one factor holds,
+/// and lets any other row fall `2^-1023` below the row above in one step
+/// before its shift is capped: a fall that takes a prior or transition near
+/// zero at every cell, which no quality byte gives (the smallest is about
+/// `2^-85`). A capped row is only lifted less, never lowered, and the next
+/// rows lift it the rest of the way.
+pub(crate) const F64_ROW_SCALE: i32 = 960;
+
+/// The shift that moves `max` into `[2^F64_ROW_SCALE, 2^(F64_ROW_SCALE +
+/// 1))`, at most 1023 so that [`exp2_f64`] represents it, and zero when there
+/// is nothing to scale: a non-positive or non-finite maximum. A subnormal
+/// maximum counts as `2^-1023`, which lifts it exactly, if short of the
+/// scale.
+#[allow(clippy::cast_possible_wrap, reason = "the masked exponent field is 11 bits")]
+pub(crate) fn row_shift_f64(max: f64) -> i32 {
+    if max <= 0.0 || !max.is_finite() {
+        return 0;
+    }
+    let exponent = ((max.to_bits() >> 52) & 0x7ff) as i32 - 1023;
+    (F64_ROW_SCALE - exponent).min(1023)
 }
 
 /// Where the strip kernels (and the batch, pairs and GPU kernels, which share
@@ -100,7 +150,10 @@ pub(crate) fn strip_shift_f32(max: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{STRIP_SCALE, exp2_f32, exp2_f64, normalising_shift_f64, strip_shift_f32};
+    use super::{
+        F64_ROW_SCALE, STRIP_SCALE, exp2_f32, exp2_f64, normalising_shift_f64, row_shift_f64,
+        strip_shift_f32,
+    };
     use hegel::TestCase;
     use hegel::generators as gs;
 
@@ -171,6 +224,27 @@ mod tests {
         }
     }
 
+    /// Every positive finite maximum is lifted exactly: onto the `f64` row
+    /// scale, or where that takes more than 1023, by 1023 and below it. The
+    /// largest possible value of a row (`2^(S + 24)`, see `F64_ROW_SCALE`)
+    /// lands on the scale too.
+    #[hegel::test]
+    fn an_f64_maximum_is_moved_to_the_row_scale(tc: TestCase) {
+        let bits = tc.draw(
+            gs::integers::<u64>().min_value(1).max_value(exp2_f64(F64_ROW_SCALE + 24).to_bits()),
+        );
+        let max = f64::from_bits(bits);
+        let shift = row_shift_f64(max);
+        let scaled = max * exp2_f64(shift);
+        assert_eq!((scaled * 2f64.powi(-shift)).to_bits(), max.to_bits(), "{max} by {shift}");
+        let (low, high) = (exp2_f64(F64_ROW_SCALE), exp2_f64(F64_ROW_SCALE + 1));
+        if shift == 1023 {
+            assert!(scaled < high, "{max} shifted by {shift} is {scaled}");
+        } else {
+            assert!((low..high).contains(&scaled), "{max} shifted by {shift} is {scaled}");
+        }
+    }
+
     /// A subnormal maximum reports no shift: the kernel would carry it as
     /// is rather than scale it up.
     #[hegel::test]
@@ -189,6 +263,7 @@ mod tests {
         }
         for max in [0.0f64, -1.0, -0.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN] {
             assert_eq!(normalising_shift_f64(max), 0, "{max}");
+            assert_eq!(row_shift_f64(max), 0, "{max}");
         }
     }
 

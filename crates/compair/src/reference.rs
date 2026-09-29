@@ -5,7 +5,7 @@ use crate::{
     emission::{Emission, MatchProbability, epsilon},
     haplotype::Haplotype,
     read::Read,
-    scaling::{STRIP_SCALE, exp2_f64, normalising_shift_f64},
+    scaling::{STRIP_SCALE, exp2_f64, normalising_shift_f64, row_shift_f64},
     transitions::{Growth, Transition},
     types::Log10Likelihood,
 };
@@ -142,8 +142,9 @@ pub fn align_banded_f64_rows<E: Emission + ?Sized>(
         reason = "a haplotype long enough to lose precision here does not exist"
     )]
     let init = 1.0 / h as f64;
-    prev_d[prev_span.0..=prev_span.1].fill(init);
-    let mut exponent = 0i32;
+    // The start row at the row scale too, like every row after it.
+    let mut exponent = row_shift_f64(init);
+    prev_d[prev_span.0..=prev_span.1].fill(init * exp2_f64(exponent));
     let (mut cur_m, mut cur_i, mut cur_d) =
         (vec![0.0f64; h + 1], vec![0.0f64; h + 1], vec![0.0f64; h + 1]);
     // What the `cur` buffers still hold from two rows up.
@@ -197,7 +198,7 @@ pub fn align_banded_f64_rows<E: Emission + ?Sized>(
             eps,
             &t,
         );
-        let shift = normalising_shift_f64(max);
+        let shift = row_shift_f64(max);
         if shift != 0 {
             let factor = exp2_f64(shift);
             for buffer in [&mut cur_m, &mut cur_i, &mut cur_d] {

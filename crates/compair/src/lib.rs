@@ -99,7 +99,8 @@
 //! kernel's buffers between calls, which makes an alignment allocation-free.
 //!
 //! **Precision.** Every entry point returns the `f64` recurrence over the
-//! band, at any score. The kernels compute in `f32`, renormalising by powers
+//! band, to a millionth, down to a floor near `-600` (for 150 bases; see
+//! [`align_banded_f64`], which keeps its rows at `2^960`). The kernels compute in `f32`, renormalising by powers
 //! of two, and flush stored cells below `2^-126`. The strip, batch, pairs and
 //! GPU kernels keep a renormalised row's largest cell at `2^115`, and the
 //! diagonal kernel an anti-diagonal's, so a flush provably cannot move a
