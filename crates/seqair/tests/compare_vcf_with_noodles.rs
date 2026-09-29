@@ -120,7 +120,7 @@ fn vcf_text_readable_by_noodles() {
             .begin_record(&setup.contig_chr1, Pos1::new(12345).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 50);
+        setup.dp_info.encode(&mut enc, 50).unwrap();
         let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         setup.dp_fmt.encode(&mut enc, &[30]).unwrap();
@@ -159,7 +159,7 @@ fn bcf_write_record_readable_by_noodles() {
             .begin_record(&setup.contig_chr1, Pos1::new(100).unwrap(), &alleles, Some(29.5))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 42);
+        setup.dp_info.encode(&mut enc, 42).unwrap();
         let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         setup.dp_fmt.encode(&mut enc, &[25]).unwrap();
@@ -194,7 +194,7 @@ fn bcf_encoder_readable_by_noodles() {
             .begin_record(&setup.contig_chr1, Pos1::new(500).unwrap(), &alleles, Some(45.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 100);
+        setup.dp_info.encode(&mut enc, 100).unwrap();
         let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[Genotype::phased_diploid(0, 1)]).unwrap();
         setup.dp_fmt.encode(&mut enc, &[80]).unwrap();
@@ -279,7 +279,7 @@ fn bcf_write_record_roundtrip(tc: TestCase) {
         let mut writer = writer.write_header(&setup.header).unwrap();
         let mut enc =
             writer.begin_record(&setup.contig_chr1, pos, &alleles, qual).unwrap().filter_pass();
-        setup.dp_info.encode(&mut enc, dp);
+        setup.dp_info.encode(&mut enc, dp).unwrap();
         let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[gt]).unwrap();
         setup.dp_fmt.encode(&mut enc, &[dp]).unwrap();
@@ -332,7 +332,7 @@ fn vcf_text_roundtrip_through_noodles(tc: TestCase) {
         let writer = Writer::new(&mut output, OutputFormat::Vcf);
         let mut writer = writer.write_header(&header).unwrap();
         let mut enc = writer.begin_record(&contig, pos, &alleles, None).unwrap().filter_pass();
-        dp_info.encode(&mut enc, dp);
+        dp_info.encode(&mut enc, dp).unwrap();
         enc.emit().unwrap();
         writer.finish().unwrap();
     }
@@ -408,7 +408,7 @@ fn multi_sample_bcf_readable_by_noodles() {
             .begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        dp_info.encode(&mut enc, 150);
+        dp_info.encode(&mut enc, 150).unwrap();
         let mut enc = enc.begin_samples();
         gt_fmt
             .encode(
@@ -453,7 +453,7 @@ fn multi_sample_vcf_readable_by_noodles() {
             .begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        dp_info.encode(&mut enc, 150);
+        dp_info.encode(&mut enc, 150).unwrap();
         let mut enc = enc.begin_samples();
         gt_fmt
             .encode(
@@ -508,7 +508,7 @@ fn multi_sample_bcf_readable_by_bcftools() {
             .begin_record(&contig, Pos1::new(200).unwrap(), &alleles, Some(50.0))
             .unwrap()
             .filter_pass();
-        dp_info.encode(&mut enc, 120);
+        dp_info.encode(&mut enc, 120).unwrap();
         let mut enc = enc.begin_samples();
         gt_fmt
             .encode(

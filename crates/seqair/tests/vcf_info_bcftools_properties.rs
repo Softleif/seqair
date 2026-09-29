@@ -348,24 +348,24 @@ fn write(s: &Setup, records: &[Record], format: OutputFormat) -> Vec<u8> {
             .begin_record(&s.contig, Pos1::new(rec.pos).unwrap(), &alleles, None)
             .unwrap()
             .filter_pass();
-        s.int1.encode(&mut enc, rec.int1);
-        s.float1.encode(&mut enc, rec.float1);
+        s.int1.encode(&mut enc, rec.int1).unwrap();
+        s.float1.encode(&mut enc, rec.float1).unwrap();
         if rec.flag {
             s.flag.encode(&mut enc);
         }
         s.char1.encode(&mut enc, rec.char1.to_string().as_str());
         s.string1.encode(&mut enc, &rec.string1);
-        s.fixed3.encode(&mut enc, &rec.fixed3);
+        s.fixed3.encode(&mut enc, &rec.fixed3).unwrap();
         // An `A`/`R`/`G` field with no values has no legal VCF spelling, so a
         // reference-only site simply omits the per-ALT ones.
         if !rec.per_alt.is_empty() {
-            s.per_alt.encode(&mut enc, &rec.per_alt);
-            s.per_alt_float.encode(&mut enc, &rec.per_alt_float);
+            s.per_alt.encode(&mut enc, &rec.per_alt).unwrap();
+            s.per_alt_float.encode(&mut enc, &rec.per_alt_float).unwrap();
         }
-        s.per_allele.encode(&mut enc, &rec.per_allele);
-        s.per_genotype.encode(&mut enc, &rec.per_genotype);
+        s.per_allele.encode(&mut enc, &rec.per_allele).unwrap();
+        s.per_genotype.encode(&mut enc, &rec.per_genotype).unwrap();
         if !rec.unknown.is_empty() {
-            s.unknown.encode(&mut enc, &rec.unknown);
+            s.unknown.encode(&mut enc, &rec.unknown).unwrap();
         }
         enc.emit().unwrap();
     }
@@ -745,7 +745,7 @@ fn write_opts(s: &OptSetup, records: &[OptRecord], format: OutputFormat) -> Vec<
             .begin_record(&s.contig, Pos1::new(rec.pos).unwrap(), &alleles, None)
             .unwrap()
             .filter_pass();
-        s.opts.encode(&mut enc, &rec.values);
+        s.opts.encode(&mut enc, &rec.values).unwrap();
         enc.emit().unwrap();
     }
     writer.finish().unwrap();

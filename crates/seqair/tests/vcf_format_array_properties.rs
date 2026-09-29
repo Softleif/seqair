@@ -99,7 +99,10 @@ enum Width {
 /// the eight most negative values of each width for the missing and
 /// end-of-vector sentinels, so `-2147483647` is not an `int32` — it is the
 /// `int32` end-of-vector marker, and a reader handed it truncates the row.
-/// Neither seqair nor htslib rejects one on the way in.
+/// The encoder now refuses those eight values outright
+/// (`r[bcf_encoder.reserved_rejected]`, exercised in `vcf_reserved_values.rs`);
+/// this generator stays inside the accepted range so that it keeps testing
+/// width selection rather than the rejection.
 fn arb_int(width: Width) -> impl PrintableGenerator<i32> {
     let narrow = gs::integers::<i32>().min_value(-120).max_value(127);
     match width {

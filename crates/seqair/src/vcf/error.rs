@@ -81,6 +81,28 @@ pub enum AllelesError {
     DeletionEmpty,
 }
 
+// r[impl bcf_encoder.reserved_bands]
+/// Which member of a BCF reserved band a value collided with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedMarker {
+    /// The MISSING marker — a reader renders the element as `.`.
+    Missing,
+    /// The `END_OF_VECTOR` marker — a reader truncates the row at this element.
+    EndOfVector,
+    /// Reserved by BCF2 for future use; not currently interpreted, but not data either.
+    FutureUse,
+}
+
+impl std::fmt::Display for ReservedMarker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Missing => "MISSING",
+            Self::EndOfVector => "END_OF_VECTOR",
+            Self::FutureUse => "reserved (future use)",
+        })
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum VcfEncodeError {
@@ -89,6 +111,19 @@ pub enum VcfEncodeError {
 
     #[error("integer overflow for field {field}: value {value}")]
     IntegerOverflow { field: SmolStr, value: i64 },
+
+    // r[impl bcf_encoder.reserved_rejected]
+    #[error(
+        "field {field}: BCF would read the integer {value} back as its {marker} marker, not as data"
+    )]
+    ReservedIntValue { field: SmolStr, value: i32, marker: ReservedMarker },
+
+    // r[impl bcf_encoder.reserved_rejected]
+    #[error(
+        "field {field}: BCF would read the float bit pattern {bits:#010X} back as its {marker} \
+         marker, not as data"
+    )]
+    ReservedFloatValue { field: SmolStr, bits: u32, marker: ReservedMarker },
 }
 
 #[non_exhaustive]

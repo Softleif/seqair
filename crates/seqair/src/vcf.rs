@@ -56,7 +56,7 @@
 //! let alleles = Alleles::snv(Base::A, Base::T)?;
 //! let enc = writer.begin_record(&chr1, Pos1::new(12345).unwrap(), &alleles, Some(30.0))?;
 //! let mut enc = enc.filter_pass();    // Begun → Filtered
-//! dp_info.encode(&mut enc, 50);
+//! dp_info.encode(&mut enc, 50)?;
 //! let mut enc = enc.begin_samples(); // Filtered → WithSamples
 //! gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)])?;
 //! dp_fmt.encode(&mut enc, &[45])?;
@@ -105,7 +105,7 @@
 //! let alleles = Alleles::snv(Base::A, Base::T)?;
 //! let enc = writer.begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))?;
 //! let mut enc = enc.filter_pass();
-//! dp.encode(&mut enc, 50);
+//! dp.encode(&mut enc, 50)?;
 //! let mut enc = enc.begin_samples();
 //! gt.encode(&mut enc, &[Genotype::unphased(0, 1)])?;
 //! enc.emit()?;
@@ -168,7 +168,7 @@
 //! // PASS
 //! let mut enc = enc.filter_pass();
 //! // add the info field through its typed key (only i32 is accepted)
-//! my_fields.depth.encode(&mut enc, 30);
+//! my_fields.depth.encode(&mut enc, 30)?;
 //! // write record
 //! enc.emit()?;
 //!
@@ -188,7 +188,7 @@ pub mod unified;
 pub(crate) mod writer;
 
 pub use alleles::Alleles;
-pub use error::{AllelesError, VcfEncodeError, VcfError, VcfHeaderError};
+pub use error::{AllelesError, ReservedMarker, VcfEncodeError, VcfError, VcfHeaderError};
 pub use header::{
     ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, InfoDef, Infos,
     Number, Samples, ValueType, VcfHeader, VcfHeaderBuilder,

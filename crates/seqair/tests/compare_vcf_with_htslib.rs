@@ -110,7 +110,7 @@ fn write_seqair_bcf_with_gt(
             .begin_record(&setup.contig, Pos1::new(pos).unwrap(), &alleles, Some(qual))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, depth);
+        setup.dp_info.encode(&mut enc, depth).unwrap();
         let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[gt]).unwrap();
         setup.dp_fmt.encode(&mut enc, &[depth]).unwrap();

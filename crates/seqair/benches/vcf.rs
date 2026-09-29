@@ -225,17 +225,17 @@ fn seqair_encode_record<W: std::io::Write>(
         if i % 10 == 7 { enc.filter_fail([&s.lowqual_filter]) } else { enc.filter_pass() };
 
     let dp = 30 + (i % 70) as i32;
-    s.dp_info.encode(&mut enc, dp);
+    s.dp_info.encode(&mut enc, dp).unwrap();
 
     if !minimal {
-        s.an_info.encode(&mut enc, an);
+        s.an_info.encode(&mut enc, an).unwrap();
         let ac: Vec<i32> = (0..n_alt).map(|k| 1 + (i as i32 + k as i32) % 9).collect();
         let af: Vec<f32> = ac.iter().map(|&a| a as f32 / an as f32).collect();
-        s.ac_info.encode(&mut enc, &ac);
-        s.af_info.encode(&mut enc, &af);
-        s.mq_info.encode(&mut enc, 55.0 + (i % 20) as f32 * 0.5);
-        s.qd_info.encode(&mut enc, 5.0 + (i % 25) as f32 * 0.8);
-        s.fs_info.encode(&mut enc, (i % 30) as f32 * 0.5);
+        s.ac_info.encode(&mut enc, &ac).unwrap();
+        s.af_info.encode(&mut enc, &af).unwrap();
+        s.mq_info.encode(&mut enc, 55.0 + (i % 20) as f32 * 0.5).unwrap();
+        s.qd_info.encode(&mut enc, 5.0 + (i % 25) as f32 * 0.8).unwrap();
+        s.fs_info.encode(&mut enc, (i % 30) as f32 * 0.5).unwrap();
     }
 
     let mut enc = enc.begin_samples();

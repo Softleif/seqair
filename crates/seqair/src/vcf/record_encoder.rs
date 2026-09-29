@@ -177,16 +177,27 @@ pub type FormatString = FormatKey<Str>;
 
 // ── InfoEncoder trait ──────────────────────────────────────────────────
 
-// r[impl record_encoder.info_methods]
+// r[impl record_encoder.info_methods+1]
 /// Object-safe trait for encoding INFO fields.
 pub trait InfoEncoder {
-    fn info_int(&mut self, id: &FieldId, value: i32);
-    fn info_float(&mut self, id: &FieldId, value: f32);
-    fn info_ints(&mut self, id: &FieldId, values: &[i32]);
-    fn info_floats(&mut self, id: &FieldId, values: &[f32]);
+    // r[impl record_encoder.reserved_rejection]
+    /// # Errors
+    /// [`crate::vcf::VcfEncodeError::ReservedIntValue`] if `value` is a reserved BCF pattern.
+    fn info_int(&mut self, id: &FieldId, value: i32) -> Result<(), VcfError>;
+    /// # Errors
+    /// [`crate::vcf::VcfEncodeError::ReservedFloatValue`] if `value` is a reserved BCF pattern.
+    fn info_float(&mut self, id: &FieldId, value: f32) -> Result<(), VcfError>;
+    /// # Errors
+    /// [`crate::vcf::VcfEncodeError::ReservedIntValue`] if any value is a reserved BCF pattern.
+    fn info_ints(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError>;
+    /// # Errors
+    /// [`crate::vcf::VcfEncodeError::ReservedFloatValue`] if any value is a reserved BCF pattern.
+    fn info_floats(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError>;
     fn info_flag(&mut self, id: &FieldId);
     fn info_string(&mut self, id: &FieldId, value: &str);
-    fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]);
+    /// # Errors
+    /// [`crate::vcf::VcfEncodeError::ReservedIntValue`] if any concrete value is reserved.
+    fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError>;
     fn n_allele(&self) -> usize;
     fn n_alt(&self) -> usize;
 }
@@ -229,26 +240,63 @@ pub trait FormatEncoder {
 // r[impl record_encoder.key_encode]
 
 impl InfoKey<Scalar<i32>> {
-    pub fn encode(&self, enc: &mut (impl InfoEncoder + ?Sized), value: i32) {
-        enc.info_int(&self.0, value);
+    /// Encode a scalar integer INFO value.
+    ///
+    /// # Errors
+    /// Returns [`crate::vcf::VcfEncodeError::ReservedIntValue`] if `value` is one
+    /// of the BCF reserved integer patterns (see `r[bcf_encoder.reserved_bands]`).
+    pub fn encode(
+        &self,
+        enc: &mut (impl InfoEncoder + ?Sized),
+        value: i32,
+    ) -> Result<(), VcfError> {
+        enc.info_int(&self.0, value)
     }
 }
 
 impl InfoKey<Scalar<f32>> {
-    pub fn encode(&self, enc: &mut (impl InfoEncoder + ?Sized), value: f32) {
-        enc.info_float(&self.0, value);
+    /// Encode a scalar float INFO value.
+    ///
+    /// # Errors
+    /// Returns [`crate::vcf::VcfEncodeError::ReservedFloatValue`] if `value`'s bit
+    /// pattern is one of the BCF reserved float patterns. `+inf` and quiet NaN are
+    /// ordinary values and are accepted.
+    pub fn encode(
+        &self,
+        enc: &mut (impl InfoEncoder + ?Sized),
+        value: f32,
+    ) -> Result<(), VcfError> {
+        enc.info_float(&self.0, value)
     }
 }
 
 impl InfoKey<Arr<i32>> {
-    pub fn encode(&self, enc: &mut (impl InfoEncoder + ?Sized), values: &[i32]) {
-        enc.info_ints(&self.0, values);
+    /// Encode an integer array INFO value.
+    ///
+    /// # Errors
+    /// Returns [`crate::vcf::VcfEncodeError::ReservedIntValue`] if any element is
+    /// one of the BCF reserved integer patterns.
+    pub fn encode(
+        &self,
+        enc: &mut (impl InfoEncoder + ?Sized),
+        values: &[i32],
+    ) -> Result<(), VcfError> {
+        enc.info_ints(&self.0, values)
     }
 }
 
 impl InfoKey<Arr<f32>> {
-    pub fn encode(&self, enc: &mut (impl InfoEncoder + ?Sized), values: &[f32]) {
-        enc.info_floats(&self.0, values);
+    /// Encode a float array INFO value.
+    ///
+    /// # Errors
+    /// Returns [`crate::vcf::VcfEncodeError::ReservedFloatValue`] if any element's
+    /// bit pattern is one of the BCF reserved float patterns.
+    pub fn encode(
+        &self,
+        enc: &mut (impl InfoEncoder + ?Sized),
+        values: &[f32],
+    ) -> Result<(), VcfError> {
+        enc.info_floats(&self.0, values)
     }
 }
 
@@ -265,8 +313,18 @@ impl InfoKey<Str> {
 }
 
 impl InfoKey<OptArr<i32>> {
-    pub fn encode(&self, enc: &mut (impl InfoEncoder + ?Sized), values: &[Option<i32>]) {
-        enc.info_int_opts(&self.0, values);
+    /// Encode an integer array INFO value with per-element missing markers.
+    ///
+    /// # Errors
+    /// Returns [`crate::vcf::VcfEncodeError::ReservedIntValue`] if any concrete
+    /// element is one of the BCF reserved integer patterns. `None` elements are the
+    /// missing marker by construction and are always accepted.
+    pub fn encode(
+        &self,
+        enc: &mut (impl InfoEncoder + ?Sized),
+        values: &[Option<i32>],
+    ) -> Result<(), VcfError> {
+        enc.info_int_opts(&self.0, values)
     }
 }
 
@@ -687,7 +745,7 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(1).unwrap(), &alleles, None)
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 42);
+        setup.dp_info.encode(&mut enc, 42).unwrap();
         enc.emit().unwrap();
         writer.finish().unwrap();
         assert!(!buf.is_empty());
@@ -738,7 +796,7 @@ mod tests {
         assert_eq!(filter_col, "lowDp", "filter_fail must write the filter name");
     }
 
-    // r[verify record_encoder.info_methods]
+    // r[verify record_encoder.info_methods+1]
     // r[verify record_encoder.format_methods]
     // r[verify record_encoder.key_encode]
     // r[verify record_encoder.bcf_encoding]
@@ -753,10 +811,10 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 50);
-        setup.bq_info.encode(&mut enc, 35.5);
+        setup.dp_info.encode(&mut enc, 50).unwrap();
+        setup.bq_info.encode(&mut enc, 35.5).unwrap();
         setup.db_flag.encode(&mut enc);
-        setup.ad_info.encode(&mut enc, &[30, 20]);
+        setup.ad_info.encode(&mut enc, &[30, 20]).unwrap();
         let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         setup.dp_fmt.encode(&mut enc, &[45]).unwrap();
@@ -777,7 +835,7 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 50);
+        setup.dp_info.encode(&mut enc, 50).unwrap();
         enc.emit().unwrap();
         writer.finish().unwrap();
         let text = String::from_utf8(buf).unwrap();
@@ -903,7 +961,7 @@ mod tests {
         let enc =
             writer.begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0)).unwrap();
         let mut enc = enc.filter_pass();
-        dp_info.encode(&mut enc, 150);
+        dp_info.encode(&mut enc, 150).unwrap();
         let mut enc = enc.begin_samples();
         gt_fmt
             .encode(
@@ -930,7 +988,7 @@ mod tests {
         let enc =
             writer.begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0)).unwrap();
         let mut enc = enc.filter_pass();
-        dp_info.encode(&mut enc, 150);
+        dp_info.encode(&mut enc, 150).unwrap();
         let mut enc = enc.begin_samples();
         gt_fmt
             .encode(
@@ -966,7 +1024,7 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap();
         let mut enc = enc.filter_pass();
-        setup.dp_info.encode(&mut enc, 50);
+        setup.dp_info.encode(&mut enc, 50).unwrap();
         let mut enc = enc.begin_samples();
         // Single-sample callers pass 1-element slices
         setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
@@ -1118,8 +1176,8 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 50);
-        setup.dp_info.encode(&mut enc, 100); // overwrite
+        setup.dp_info.encode(&mut enc, 50).unwrap();
+        setup.dp_info.encode(&mut enc, 100).unwrap(); // overwrite
         enc.emit().unwrap();
         writer.finish().unwrap();
         let text = String::from_utf8(buf).unwrap();
@@ -1140,9 +1198,9 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 50);
-        setup.bq_info.encode(&mut enc, 35.5);
-        setup.dp_info.encode(&mut enc, 100); // overwrite first
+        setup.dp_info.encode(&mut enc, 50).unwrap();
+        setup.bq_info.encode(&mut enc, 35.5).unwrap();
+        setup.dp_info.encode(&mut enc, 100).unwrap(); // overwrite first
         enc.emit().unwrap();
         writer.finish().unwrap();
         let text = String::from_utf8(buf).unwrap();
@@ -1164,10 +1222,10 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 50);
-        setup.bq_info.encode(&mut enc, 35.5);
+        setup.dp_info.encode(&mut enc, 50).unwrap();
+        setup.bq_info.encode(&mut enc, 35.5).unwrap();
         setup.db_flag.encode(&mut enc);
-        setup.bq_info.encode(&mut enc, 99.0); // overwrite middle
+        setup.bq_info.encode(&mut enc, 99.0).unwrap(); // overwrite middle
         enc.emit().unwrap();
         writer.finish().unwrap();
         let text = String::from_utf8(buf).unwrap();
@@ -1189,9 +1247,9 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 50);
-        setup.bq_info.encode(&mut enc, 35.5);
-        setup.dp_info.encode(&mut enc, 100); // overwrite
+        setup.dp_info.encode(&mut enc, 50).unwrap();
+        setup.bq_info.encode(&mut enc, 35.5).unwrap();
+        setup.dp_info.encode(&mut enc, 100).unwrap(); // overwrite
         enc.emit().unwrap();
         writer.finish().unwrap();
 
@@ -1224,7 +1282,7 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 50);
+        setup.dp_info.encode(&mut enc, 50).unwrap();
         enc.emit().unwrap();
 
         // Record 2: write DP=100 — should NOT be treated as a duplicate
@@ -1232,7 +1290,7 @@ mod tests {
             .begin_record(&setup.contig, Pos1::new(200).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 100);
+        setup.dp_info.encode(&mut enc, 100).unwrap();
         enc.emit().unwrap();
 
         writer.finish().unwrap();

@@ -155,7 +155,7 @@ fn bcftools_reads_snv() {
             )
             .unwrap()
             .filter_pass();
-        s.dp_info.encode(&mut enc, 42);
+        s.dp_info.encode(&mut enc, 42).unwrap();
         let mut enc = enc.begin_samples();
         s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         s.dp_fmt.encode(&mut enc, &[30]).unwrap();
@@ -196,7 +196,7 @@ fn bcftools_integer_boundaries() {
                 )
                 .unwrap()
                 .filter_pass();
-            s.dp_info.encode(&mut enc, val);
+            s.dp_info.encode(&mut enc, val).unwrap();
             enc.emit().unwrap();
         });
 
@@ -217,9 +217,9 @@ fn bcftools_multi_allelic() {
             .begin_record(&s.contig, Pos1::new(500).unwrap(), &alleles, Some(200.0))
             .unwrap()
             .filter_pass();
-        s.dp_info.encode(&mut enc, 100);
-        s.af_info.encode(&mut enc, 0.35);
-        s.ad_info.encode(&mut enc, &[60, 40]);
+        s.dp_info.encode(&mut enc, 100).unwrap();
+        s.af_info.encode(&mut enc, 0.35).unwrap();
+        s.ad_info.encode(&mut enc, &[60, 40]).unwrap();
         enc.emit().unwrap();
     });
 
@@ -306,7 +306,7 @@ fn bcftools_indel_alleles() {
             .begin_record(&s.contig, Pos1::new(100).unwrap(), &alleles, Some(50.0))
             .unwrap()
             .filter_pass();
-        s.dp_info.encode(&mut enc, 30);
+        s.dp_info.encode(&mut enc, 30).unwrap();
         enc.emit().unwrap();
 
         // Deletion: ACG -> A
@@ -315,7 +315,7 @@ fn bcftools_indel_alleles() {
             .begin_record(&s.contig, Pos1::new(200).unwrap(), &alleles, Some(60.0))
             .unwrap()
             .filter_pass();
-        s.dp_info.encode(&mut enc, 40);
+        s.dp_info.encode(&mut enc, 40).unwrap();
         enc.emit().unwrap();
     });
 
@@ -337,7 +337,7 @@ fn bcftools_multiple_records_ordered() {
                 .begin_record(&s.contig, Pos1::new(pos).unwrap(), &alleles, None)
                 .unwrap()
                 .filter_pass();
-            s.dp_info.encode(&mut enc, pos as i32);
+            s.dp_info.encode(&mut enc, pos as i32).unwrap();
             enc.emit().unwrap();
         }
     });
@@ -361,7 +361,7 @@ fn bcftools_stats_succeeds() {
             .begin_record(&s.contig, Pos1::new(100).unwrap(), &alleles, Some(99.0))
             .unwrap()
             .filter_pass();
-        s.dp_info.encode(&mut enc, 42);
+        s.dp_info.encode(&mut enc, 42).unwrap();
         let mut enc = enc.begin_samples();
         s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         s.dp_fmt.encode(&mut enc, &[30]).unwrap();
@@ -396,8 +396,8 @@ fn bcftools_dedup_overwrite() {
             .filter_pass();
 
         // Write DP=50 then overwrite with DP=100
-        s.dp_info.encode(&mut enc, 50);
-        s.dp_info.encode(&mut enc, 100);
+        s.dp_info.encode(&mut enc, 50).unwrap();
+        s.dp_info.encode(&mut enc, 100).unwrap();
 
         let mut enc = enc.begin_samples();
         s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
@@ -429,9 +429,9 @@ fn bcftools_dedup_interleaved_info() {
             .unwrap()
             .filter_pass();
         // DP=50, then AF in between, then DP=100 (overwrite the *first* field).
-        s.dp_info.encode(&mut enc, 50);
-        s.af_info.encode(&mut enc, 0.25);
-        s.dp_info.encode(&mut enc, 100);
+        s.dp_info.encode(&mut enc, 50).unwrap();
+        s.af_info.encode(&mut enc, 0.25).unwrap();
+        s.dp_info.encode(&mut enc, 100).unwrap();
         enc.emit().unwrap();
     });
 
@@ -454,9 +454,9 @@ fn bcftools_dedup_array_width_change() {
             .begin_record(&s.contig, Pos1::new(100).unwrap(), &alleles, Some(99.0))
             .unwrap()
             .filter_pass();
-        s.dp_info.encode(&mut enc, 7);
-        s.ad_info.encode(&mut enc, &[10, 20]);
-        s.ad_info.encode(&mut enc, &[30, 40, 50]); // grow, with DP already after the old AD
+        s.dp_info.encode(&mut enc, 7).unwrap();
+        s.ad_info.encode(&mut enc, &[10, 20]).unwrap();
+        s.ad_info.encode(&mut enc, &[30, 40, 50]).unwrap(); // grow, with DP already after the old AD
         enc.emit().unwrap();
     });
 
@@ -478,9 +478,9 @@ fn bcftools_dedup_repeated_overwrite() {
             .begin_record(&s.contig, Pos1::new(100).unwrap(), &alleles, Some(99.0))
             .unwrap()
             .filter_pass();
-        s.dp_info.encode(&mut enc, 1);
-        s.dp_info.encode(&mut enc, 2);
-        s.dp_info.encode(&mut enc, 3);
+        s.dp_info.encode(&mut enc, 1).unwrap();
+        s.dp_info.encode(&mut enc, 2).unwrap();
+        s.dp_info.encode(&mut enc, 3).unwrap();
         let mut enc = enc.begin_samples();
         s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         s.dp_fmt.encode(&mut enc, &[10]).unwrap();
@@ -539,13 +539,13 @@ fn bcftools_dedup_all_fields_overwritten() {
             .unwrap()
             .filter_pass();
         // First pass.
-        s.dp_info.encode(&mut enc, 50);
-        s.af_info.encode(&mut enc, 0.1);
-        s.ad_info.encode(&mut enc, &[5, 6]);
+        s.dp_info.encode(&mut enc, 50).unwrap();
+        s.af_info.encode(&mut enc, 0.1).unwrap();
+        s.ad_info.encode(&mut enc, &[5, 6]).unwrap();
         // Second pass, same interleaving — every field overwritten in place.
-        s.dp_info.encode(&mut enc, 100);
-        s.af_info.encode(&mut enc, 0.5);
-        s.ad_info.encode(&mut enc, &[15, 16]);
+        s.dp_info.encode(&mut enc, 100).unwrap();
+        s.af_info.encode(&mut enc, 0.5).unwrap();
+        s.ad_info.encode(&mut enc, &[15, 16]).unwrap();
 
         let mut enc = enc.begin_samples();
         s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();

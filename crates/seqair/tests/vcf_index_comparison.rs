@@ -86,7 +86,7 @@ fn write_vcf_gz_with_index(
             .begin_record(&setup.chr1, Pos1::new(pos).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, (i as i32 + 1) * 10);
+        setup.dp_info.encode(&mut enc, (i as i32 + 1) * 10).unwrap();
         let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         enc.emit().unwrap();
@@ -98,7 +98,7 @@ fn write_vcf_gz_with_index(
         .begin_record(&setup.chr2, Pos1::new(10000).unwrap(), &alleles, Some(50.0))
         .unwrap()
         .filter_pass();
-    setup.dp_info.encode(&mut enc, 80);
+    setup.dp_info.encode(&mut enc, 80).unwrap();
     let mut enc = enc.begin_samples();
     setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(1, 1)]).unwrap();
     enc.emit().unwrap();
@@ -365,7 +365,7 @@ fn write_generated_vcf(
             .begin_record(&chr1, Pos1::new(pos).unwrap(), &alleles, None)
             .unwrap()
             .filter_pass();
-        dp_info.encode(&mut enc, 30);
+        dp_info.encode(&mut enc, 30).unwrap();
         let mut enc = enc.begin_samples();
         gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         enc.emit().unwrap();

@@ -400,6 +400,10 @@ impl<W: Write> Writer<W, Ready> {
         alleles: &Alleles,
         qual: Option<f32>,
     ) -> Result<RecordEncoder<'_, Begun>, VcfError> {
+        // r[impl record_encoder.reserved_rejection]
+        // A QUAL whose bits are the float MISSING marker would read back as an
+        // absent QUAL — indistinguishable from `None`.
+        reject_reserved_floats("QUAL", qual)?;
         let inner = match &mut self.inner {
             WriterInner::Bcf {
                 bgzf,
@@ -1037,7 +1041,9 @@ fn nth_colon_field(buf: &[u8], n: usize) -> (usize, usize) {
 // r[impl record_encoder.bcf_encoding]
 // r[impl record_encoder.vcf_encoding]
 impl InfoEncoder for RecordEncoder<'_, Filtered> {
-    fn info_int(&mut self, id: &FieldId, value: i32) {
+    // r[impl record_encoder.reserved_rejection]
+    fn info_int(&mut self, id: &FieldId, value: i32) -> Result<(), VcfError> {
+        reject_reserved_ints(id.name(), [value])?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
@@ -1059,8 +1065,11 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                 vcf.commit_info_field(id, start);
             }
         }
+        Ok(())
     }
-    fn info_float(&mut self, id: &FieldId, value: f32) {
+    // r[impl record_encoder.reserved_rejection]
+    fn info_float(&mut self, id: &FieldId, value: f32) -> Result<(), VcfError> {
+        reject_reserved_floats(id.name(), [value])?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
@@ -1078,12 +1087,15 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                 vcf.buf.push(b'=');
                 // r[impl vcf_writer.float_precision]
                 write_float_g(vcf.buf, value)
-                    .expect("f32 with 6 significant digits never exceeds 32 chars");
+                    .map_err(|source| VcfError::FailedToWriteFormattedString { source })?;
                 vcf.commit_info_field(id, start);
             }
         }
+        Ok(())
     }
-    fn info_ints(&mut self, id: &FieldId, values: &[i32]) {
+    // r[impl record_encoder.reserved_rejection]
+    fn info_ints(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError> {
+        reject_reserved_ints(id.name(), values.iter().copied())?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
@@ -1107,8 +1119,11 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                 vcf.commit_info_field(id, start);
             }
         }
+        Ok(())
     }
-    fn info_floats(&mut self, id: &FieldId, values: &[f32]) {
+    // r[impl record_encoder.reserved_rejection]
+    fn info_floats(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError> {
+        reject_reserved_floats(id.name(), values.iter().copied())?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
@@ -1127,11 +1142,12 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                     }
                     // r[impl vcf_writer.float_precision]
                     write_float_g(vcf.buf, *v)
-                        .expect("f32 with 6 significant digits never exceeds 32 chars");
+                        .map_err(|source| VcfError::FailedToWriteFormattedString { source })?;
                 }
                 vcf.commit_info_field(id, start);
             }
         }
+        Ok(())
     }
     fn info_flag(&mut self, id: &FieldId) {
         match &mut self.inner {
@@ -1169,7 +1185,9 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
             }
         }
     }
-    fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) {
+    // r[impl record_encoder.reserved_rejection]
+    fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) -> Result<(), VcfError> {
+        reject_reserved_ints(id.name(), values.iter().filter_map(|v| *v))?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.shared_buf.len();
@@ -1202,6 +1220,7 @@ impl InfoEncoder for RecordEncoder<'_, Filtered> {
                 vcf.commit_info_field(id, start);
             }
         }
+        Ok(())
     }
     // r[impl record_encoder.info_state_queries]
     fn n_allele(&self) -> usize {
@@ -1336,8 +1355,10 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         }
         Ok(())
     }
+    // r[impl record_encoder.reserved_rejection]
     fn format_int(&mut self, id: &FieldId, values: &[i32]) -> Result<(), VcfError> {
         debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
+        reject_reserved_ints(id.name(), values.iter().copied())?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.indiv_buf.len();
@@ -1363,8 +1384,10 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         }
         Ok(())
     }
+    // r[impl record_encoder.reserved_rejection]
     fn format_float(&mut self, id: &FieldId, values: &[f32]) -> Result<(), VcfError> {
         debug_assert_eq!(values.len(), self.n_samples(), "one value per sample");
+        reject_reserved_floats(id.name(), values.iter().copied())?;
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
                 let start = enc.indiv_buf.len();
@@ -1393,8 +1416,10 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         }
         Ok(())
     }
+    // r[impl record_encoder.reserved_rejection]
     fn format_ints(&mut self, id: &FieldId, per_sample: &[&[i32]]) -> Result<(), VcfError> {
         debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
+        reject_reserved_ints(id.name(), per_sample.iter().flat_map(|s| s.iter().copied()))?;
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {
@@ -1451,8 +1476,10 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         }
         Ok(())
     }
+    // r[impl record_encoder.reserved_rejection]
     fn format_floats(&mut self, id: &FieldId, per_sample: &[&[f32]]) -> Result<(), VcfError> {
         debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
+        reject_reserved_floats(id.name(), per_sample.iter().flat_map(|s| s.iter().copied()))?;
         let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
         match &mut self.inner {
             EncoderInner::Bcf(enc) => {

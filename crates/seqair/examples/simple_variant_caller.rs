@@ -280,8 +280,8 @@ fn main() -> anyhow::Result<()> {
             //   begin_record → filter_pass (INFO) → begin_samples (FORMAT) → emit
             let enc = vcf_writer.begin_record(&region_contig, pos1, &alleles, None)?;
             let mut enc = enc.filter_pass();
-            dp_info.encode(&mut enc, bc.total);
-            af_info.encode(&mut enc, &[af as f32]);
+            dp_info.encode(&mut enc, bc.total)?;
+            af_info.encode(&mut enc, &[af as f32])?;
             let mut enc = enc.begin_samples();
 
             // Simple genotype: 0/1 (het) if AF < 0.8, 1/1 (hom-alt) otherwise.

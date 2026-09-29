@@ -64,7 +64,7 @@ fn vcf_text_multi_value_format_float() {
     let alleles = Alleles::snv_multi(Base::A, &[Base::T, Base::C]).unwrap();
     let enc = writer.begin_record(&s.contig, Pos1::new(10).unwrap(), &alleles, Some(30.0)).unwrap();
     let mut enc = enc.filter_pass();
-    s.dp_info.encode(&mut enc, 50);
+    s.dp_info.encode(&mut enc, 50).unwrap();
     let mut enc = enc.begin_samples();
     s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
     s.ml_fmt.encode(&mut enc, &[&[0.25f32, 0.75]]).unwrap();
@@ -92,7 +92,7 @@ fn bcf_multi_value_format_float_roundtrips_through_bcftools() {
     let alleles = Alleles::snv_multi(Base::A, &[Base::T, Base::C]).unwrap();
     let enc = writer.begin_record(&s.contig, Pos1::new(10).unwrap(), &alleles, Some(30.0)).unwrap();
     let mut enc = enc.filter_pass();
-    s.dp_info.encode(&mut enc, 50);
+    s.dp_info.encode(&mut enc, 50).unwrap();
     let mut enc = enc.begin_samples();
     s.gt_fmt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
     s.ml_fmt.encode(&mut enc, &[&[0.25f32, 0.75]]).unwrap();

@@ -195,26 +195,26 @@ fn write_one_record<W: std::io::Write>(
         if rec.filter_pass { enc.filter_pass() } else { enc.filter_fail([&setup.q20_filter]) };
 
     // INFO fields
-    setup.dp_info.encode(&mut enc, rec.dp);
+    setup.dp_info.encode(&mut enc, rec.dp).unwrap();
 
     // AD: ref_depth + per-alt depths
     let mut ad_vals = vec![ref_depth];
     for _ in 0..rec.alleles.n_allele().saturating_sub(1) {
         ad_vals.push(rec.dp.saturating_sub(ref_depth) / n_alt as i32);
     }
-    setup.ad_info.encode(&mut enc, &ad_vals);
+    setup.ad_info.encode(&mut enc, &ad_vals).unwrap();
 
     // AF: per-alt floats
     if rec.alleles.n_allele() > 1 {
         let af: Vec<f32> =
             (0..rec.alleles.n_allele() - 1).map(|_| 1.0 / (n_alt as f32 + 1.0)).collect();
-        setup.af_info.encode(&mut enc, &af);
+        setup.af_info.encode(&mut enc, &af).unwrap();
     }
 
     if rec.has_db_flag {
         setup.db_flag.encode(&mut enc);
     }
-    setup.mq_info.encode(&mut enc, rec.mq);
+    setup.mq_info.encode(&mut enc, rec.mq).unwrap();
 
     let mut enc = enc.begin_samples();
     setup.gt_fmt.encode(&mut enc, std::slice::from_ref(&rec.gt)).unwrap();

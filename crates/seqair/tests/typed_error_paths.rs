@@ -928,7 +928,7 @@ fn the_encoder_state_queries_report_the_record_being_encoded(tc: TestCase) {
 
     assert_eq!(InfoEncoder::n_alt(&enc), n_alt, "n_alt in the Filtered state");
     assert_eq!(InfoEncoder::n_allele(&enc), n_alt + 1, "n_allele in the Filtered state");
-    setup.dp_info.encode(&mut enc, 30);
+    setup.dp_info.encode(&mut enc, 30).unwrap();
 
     let mut enc = enc.begin_samples();
     assert_eq!(FormatEncoder::n_alt(&enc), n_alt, "n_alt in the WithSamples state");
@@ -1105,8 +1105,8 @@ fn a_field_written_twice_overwrites_rather_than_erroring() {
             .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(50.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, 11);
-        setup.dp_info.encode(&mut enc, 22);
+        setup.dp_info.encode(&mut enc, 11).unwrap();
+        setup.dp_info.encode(&mut enc, 22).unwrap();
         let mut enc = enc.begin_samples();
         setup.gt.encode(&mut enc, &[Genotype::unphased(0, 1)]).unwrap();
         setup.dp_format.encode(&mut enc, &[33]).unwrap();

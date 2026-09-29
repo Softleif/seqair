@@ -240,8 +240,8 @@ fn write_vcf(
         let enc = writer.begin_record(&setup.contig, Pos1::new(pos).unwrap(), &alleles, qual);
         let mut enc = enc.unwrap().filter_pass();
         let ad: Vec<i32> = (0..n_allele).map(|_| (noise.next() % 400) as i32).collect();
-        setup.ad.encode(&mut enc, &ad);
-        setup.mq.encode(&mut enc, (noise.next() % 6000) as f32 / 100.0);
+        setup.ad.encode(&mut enc, &ad).unwrap();
+        setup.mq.encode(&mut enc, (noise.next() % 6000) as f32 / 100.0).unwrap();
         let mut enc = enc.begin_samples();
         setup.gt.encode(&mut enc, &[Genotype::unphased(0, u16::from(n_allele > 1))]).unwrap();
         setup.dp.encode(&mut enc, &[(noise.next() % 40_000) as i32]).unwrap();

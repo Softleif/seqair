@@ -78,7 +78,7 @@ fn vcf_text_has_eight_columns(tc: TestCase) {
     {
         let mut enc =
             writer.begin_record(&setup.contig, pos_typed, &alleles, qual).unwrap().filter_pass();
-        setup.dp_info.encode(&mut enc, dp);
+        setup.dp_info.encode(&mut enc, dp).unwrap();
         enc.emit().unwrap();
     }
     writer.finish().unwrap();
@@ -145,7 +145,7 @@ fn bgzf_roundtrip_matches_plain(tc: TestCase) {
                 .begin_record(&setup.contig, pos_typed, &alleles, None)
                 .unwrap()
                 .filter_pass();
-            setup.dp_info.encode(&mut enc, dp);
+            setup.dp_info.encode(&mut enc, dp).unwrap();
             enc.emit().unwrap();
         }
         writer.finish().unwrap();
@@ -161,7 +161,7 @@ fn bgzf_roundtrip_matches_plain(tc: TestCase) {
                 .begin_record(&setup.contig, pos_typed, &alleles, None)
                 .unwrap()
                 .filter_pass();
-            setup.dp_info.encode(&mut enc, dp);
+            setup.dp_info.encode(&mut enc, dp).unwrap();
             enc.emit().unwrap();
         }
         writer.finish().unwrap();
@@ -277,7 +277,7 @@ fn plain_vcf_is_buffered_and_complete(tc: TestCase) {
         let pos = Pos1::new(i + 1).unwrap();
         let mut enc =
             writer.begin_record(&setup.contig, pos, &alleles, None).unwrap().filter_pass();
-        setup.dp_info.encode(&mut enc, 7);
+        setup.dp_info.encode(&mut enc, 7).unwrap();
         enc.emit().unwrap();
     }
     if finish {
@@ -345,7 +345,7 @@ fn writer_over_failing_sink() -> Writer<FailingSink, seqair::vcf::Ready> {
         .begin_record(&setup.contig, Pos1::new(1).unwrap(), &alleles, None)
         .unwrap()
         .filter_pass();
-    setup.dp_info.encode(&mut enc, 7);
+    setup.dp_info.encode(&mut enc, 7).unwrap();
     enc.emit().unwrap();
     writer
 }

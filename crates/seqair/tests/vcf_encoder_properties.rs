@@ -88,7 +88,7 @@ fn write_bcf(
         .begin_record(&setup.contig, Pos1::new(pos).unwrap(), alleles, Some(qual))
         .unwrap()
         .filter_pass();
-    setup.dp_info.encode(&mut enc, depth);
+    setup.dp_info.encode(&mut enc, depth).unwrap();
     let mut enc = enc.begin_samples();
     setup.gt_fmt.encode(&mut enc, std::slice::from_ref(gt)).unwrap();
     setup.dp_fmt.encode(&mut enc, &[depth]).unwrap();
@@ -220,8 +220,8 @@ fn dedup_matches_single_write(tc: TestCase) {
             .begin_record(&setup.contig, Pos1::new(pos).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, first_depth);
-        setup.dp_info.encode(&mut enc, final_depth); // overwrite
+        setup.dp_info.encode(&mut enc, first_depth).unwrap();
+        setup.dp_info.encode(&mut enc, final_depth).unwrap(); // overwrite
         let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, std::slice::from_ref(&gt)).unwrap();
         setup.dp_fmt.encode(&mut enc, &[first_depth]).unwrap();
@@ -240,7 +240,7 @@ fn dedup_matches_single_write(tc: TestCase) {
             .begin_record(&setup.contig, Pos1::new(pos).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
-        setup.dp_info.encode(&mut enc, final_depth);
+        setup.dp_info.encode(&mut enc, final_depth).unwrap();
         let mut enc = enc.begin_samples();
         setup.gt_fmt.encode(&mut enc, std::slice::from_ref(&gt)).unwrap();
         setup.dp_fmt.encode(&mut enc, &[final_depth]).unwrap();

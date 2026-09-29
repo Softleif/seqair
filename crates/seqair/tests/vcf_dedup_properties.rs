@@ -140,9 +140,9 @@ fn encode_info(
         .filter_pass();
     for op in ops {
         match op {
-            InfoOp::Dp(v) => keys.dp.encode(&mut enc, *v),
-            InfoOp::Bq(v) => keys.bq.encode(&mut enc, *v),
-            InfoOp::Ad(v) => keys.ad.encode(&mut enc, v),
+            InfoOp::Dp(v) => keys.dp.encode(&mut enc, *v).unwrap(),
+            InfoOp::Bq(v) => keys.bq.encode(&mut enc, *v).unwrap(),
+            InfoOp::Ad(v) => keys.ad.encode(&mut enc, v).unwrap(),
             InfoOp::Sc(v) => keys.sc.encode(&mut enc, v),
             InfoOp::Flag => keys.flag.encode(&mut enc),
         }

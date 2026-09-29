@@ -1,6 +1,8 @@
 //! Shared BCF typed value encoding constants and helpers.
 //! Used by [`super::encoder`] and the unified writer in [`super::unified`].
 
+use super::error::{ReservedMarker, VcfEncodeError};
+
 // BCF type codes
 pub const BCF_BT_NULL: u8 = 0;
 pub const BCF_BT_INT8: u8 = 1;
@@ -22,10 +24,82 @@ pub const INT32_END_OF_VECTOR: u32 = 0x80000001;
 pub const FLOAT_END_OF_VECTOR: u32 = 0x7F800002;
 
 // Int ranges (sentinel-safe) — r[bcf_writer.smallest_int_type]
+// The lower bounds are exactly `i8::MIN + 8` and `i16::MIN + 8`: the eight most
+// negative values of each width are reserved, so this range excludes them.
 pub const INT8_MIN: i32 = -120;
 pub const INT8_MAX: i32 = 127;
 pub const INT16_MIN: i32 = -32760;
 pub const INT16_MAX: i32 = 32767;
+
+// ── Reserved values ─────────────────────────────────────────────────────
+
+// r[impl bcf_encoder.reserved_bands]
+// r[impl bcf_encoder.reserved_width]
+/// Last value of the int32 reserved band `0x80000000..=0x80000007`. It is the
+/// only integer band a value can land in: `INT8_MIN` and `INT16_MIN` sit exactly
+/// eight above their widths' minimums, so [`smallest_int_type`] promotes any
+/// value in the int8 or int16 band to a wider type.
+const INT32_RESERVED_LAST: i32 = i32::MIN + 7;
+/// Number of reserved float bit patterns, `FLOAT_MISSING..=0x7F800007`.
+const FLOAT_RESERVED_LEN: u32 = 7;
+
+/// The band member at `offset` from the start of a reserved band.
+fn marker_at(offset: u32) -> ReservedMarker {
+    match offset {
+        0 => ReservedMarker::Missing,
+        1 => ReservedMarker::EndOfVector,
+        _ => ReservedMarker::FutureUse,
+    }
+}
+
+// r[impl bcf_encoder.reserved_bands]
+/// The reserved band member `value` is encoded as, or `None` for ordinary data.
+pub fn reserved_int(value: i32) -> Option<ReservedMarker> {
+    (value <= INT32_RESERVED_LAST).then(|| marker_at(value.abs_diff(i32::MIN)))
+}
+
+// r[impl bcf_encoder.reserved_bands]
+/// The reserved band member `value`'s bit pattern is, or `None` for ordinary
+/// data. Compares exact bits, never `is_nan()`: quiet NaN is a valid Float.
+pub fn reserved_float(value: f32) -> Option<ReservedMarker> {
+    let offset = value.to_bits().wrapping_sub(FLOAT_MISSING);
+    (offset < FLOAT_RESERVED_LEN).then(|| marker_at(offset))
+}
+
+// r[impl bcf_encoder.reserved_rejected]
+// r[impl bcf_encoder.reserved_uniform]
+/// Reject the first of `values` that BCF would read back as a reserved marker.
+/// Called by the VCF text path too, so every output format accepts the same calls.
+pub fn reject_reserved_ints(
+    field: &str,
+    values: impl IntoIterator<Item = i32>,
+) -> Result<(), VcfEncodeError> {
+    for value in values {
+        if let Some(marker) = reserved_int(value) {
+            return Err(VcfEncodeError::ReservedIntValue { field: field.into(), value, marker });
+        }
+    }
+    Ok(())
+}
+
+// r[impl bcf_encoder.reserved_rejected]
+// r[impl bcf_encoder.reserved_uniform]
+/// The float twin of [`reject_reserved_ints`].
+pub fn reject_reserved_floats(
+    field: &str,
+    values: impl IntoIterator<Item = f32>,
+) -> Result<(), VcfEncodeError> {
+    for value in values {
+        if let Some(marker) = reserved_float(value) {
+            return Err(VcfEncodeError::ReservedFloatValue {
+                field: field.into(),
+                bits: value.to_bits(),
+                marker,
+            });
+        }
+    }
+    Ok(())
+}
 
 // r[impl bcf_writer.typed_values]
 /// Write a BCF type byte: `(count << 4) | type_code`.
@@ -152,5 +226,78 @@ pub fn encode_int_eov(buf: &mut Vec<u8>, typ: u8) {
         BCF_BT_INT8 => buf.push(INT8_END_OF_VECTOR),
         BCF_BT_INT16 => buf.extend_from_slice(&INT16_END_OF_VECTOR.to_le_bytes()),
         _ => buf.extend_from_slice(&INT32_END_OF_VECTOR.to_le_bytes()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::arithmetic_side_effects,
+        clippy::indexing_slicing,
+        reason = "test code with known small values"
+    )]
+
+    use super::*;
+    use hegel::prelude::*;
+
+    /// The band member of the bytes the encoder actually writes for `value`,
+    /// read back as the unsigned pattern of the width it chose — the oracle
+    /// `reserved_int` is checked against, sharing none of its reasoning about
+    /// which widths are reachable.
+    fn marker_of_emitted_bytes(value: i32) -> Option<ReservedMarker> {
+        let typ = smallest_int_type(&[value]);
+        let mut buf = Vec::new();
+        encode_int_as(&mut buf, value, typ);
+        let (bits, band_start) = match typ {
+            BCF_BT_INT8 => (u32::from(buf[0]), u32::from(INT8_MISSING)),
+            BCF_BT_INT16 => {
+                (u32::from(u16::from_le_bytes([buf[0], buf[1]])), u32::from(INT16_MISSING))
+            }
+            _ => (u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), INT32_MISSING),
+        };
+        let offset = bits.wrapping_sub(band_start);
+        (offset < 8).then(|| marker_at(offset))
+    }
+
+    // r[verify bcf_encoder.reserved_bands]
+    // r[verify bcf_encoder.reserved_width]
+    /// `reserved_int` looks at the int32 band only, on the argument that
+    /// `smallest_int_type` never emits a value at a width whose band it lands
+    /// in. The spec says that must be verified rather than assumed, so this
+    /// checks it against the bytes actually written, with the draw weighted
+    /// onto all three bands — a uniform `i32` reaches one about once in 2^29.
+    #[hegel::test]
+    fn reserved_int_matches_the_emitted_bytes(tc: TestCase) {
+        let band = |min: i32| gs::integers::<i32>().min_value(min).max_value(min + 16);
+        let value = tc.draw(hegel::one_of!(
+            gs::integers::<i32>(),
+            band(i32::MIN),
+            band(i32::from(i16::MIN)),
+            band(i32::from(i8::MIN)),
+        ));
+        assert_eq!(reserved_int(value), marker_of_emitted_bytes(value), "value {value}");
+    }
+
+    // r[verify bcf_encoder.reserved_bands]
+    /// The bands start at the sentinels the encoder itself writes, and the
+    /// float band has +inf just below it and quiet NaN above it.
+    #[test]
+    fn the_bands_start_at_the_sentinels_the_encoder_emits() {
+        assert_eq!(reserved_int(i32::MIN), Some(ReservedMarker::Missing));
+        assert_eq!(reserved_int(i32::MIN + 1), Some(ReservedMarker::EndOfVector));
+        assert_eq!(reserved_int(i32::MIN + 7), Some(ReservedMarker::FutureUse));
+        assert_eq!(reserved_int(i32::MIN + 8), None);
+        assert_eq!(i32::MIN.to_le_bytes(), INT32_MISSING.to_le_bytes());
+
+        assert_eq!(reserved_float(f32::from_bits(FLOAT_MISSING)), Some(ReservedMarker::Missing));
+        assert_eq!(
+            reserved_float(f32::from_bits(FLOAT_END_OF_VECTOR)),
+            Some(ReservedMarker::EndOfVector)
+        );
+        assert_eq!(reserved_float(f32::from_bits(0x7F80_0007)), Some(ReservedMarker::FutureUse));
+        assert_eq!(reserved_float(f32::from_bits(0x7F80_0008)), None);
+        assert_eq!(reserved_float(f32::INFINITY), None);
+        assert_eq!(reserved_float(f32::NAN), None);
+        assert_eq!(reserved_float(f32::NEG_INFINITY), None);
     }
 }
