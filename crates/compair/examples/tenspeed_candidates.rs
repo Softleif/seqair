@@ -6,7 +6,8 @@
 //! ```
 //!
 //! The first argument is `candidates` (the default), `prepared`, or
-//! `align-reads` (every read of a group in one `Workspace::align_reads`), the second
+//! `align-reads` (every read of a group in one `Workspace::align_reads`), or
+//! `f64` (`align_banded_f64`, the rescue path, on every pair), the second
 //! the number of rounds over the whole dataset. Both score the same 3,550
 //! pairs with `StandardEmission` through the default band and print the same
 //! checksum: each score is added on its own, in the same order.
@@ -17,7 +18,7 @@ mod tenspeed;
 
 use std::{hint::black_box, time::Instant};
 
-use compair::{Band, Haplotype, Log10Likelihood, StandardEmission, Workspace};
+use compair::{Band, Haplotype, Log10Likelihood, StandardEmission, Workspace, align_banded_f64};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -36,7 +37,16 @@ fn main() {
     for _ in 0..rounds {
         for group in &groups {
             let reads = group.reads.iter().zip(&group.offsets);
-            if which == "align-reads" {
+            if which == "f64" {
+                for (read, offset) in reads {
+                    for haplotype in black_box(&group.haplotypes) {
+                        let score =
+                            align_banded_f64(haplotype, read, &emission, Band::anchored(*offset));
+                        checksum += score.get();
+                        pairs += 1;
+                    }
+                }
+            } else if which == "align-reads" {
                 let refs: Vec<&Haplotype> = black_box(&group.haplotypes).iter().collect();
                 let reads: Vec<(&compair::Read, Band)> =
                     reads.map(|(read, offset)| (read, Band::anchored(*offset))).collect();

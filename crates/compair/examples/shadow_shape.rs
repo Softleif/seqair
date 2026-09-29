@@ -29,7 +29,9 @@
 //!   haplotypes and each haplotype's column tracks once per strand for the
 //!   window, rather than both once per pair;
 //! - `align-reads` builds every `Read` of a window first and scores them all
-//!   in one `Workspace::align_reads`, the pairs kernel's entry point.
+//!   in one `Workspace::align_reads`, the pairs kernel's entry point;
+//! - `f64` scores the prebuilt pairs with `align_banded_f64`, the rescue
+//!   path, on every pair.
 //!
 //! The second argument is the number of rounds.
 #![allow(clippy::print_stdout, reason = "this example exists to print a checksum")]
@@ -38,7 +40,7 @@ use std::{hint::black_box, time::Instant};
 
 use compair::{
     Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Log10Likelihood, Probability, Read,
-    Strand, TapsEmission, Workspace,
+    Strand, TapsEmission, Workspace, align_banded_f64,
 };
 
 /// The reference window's length.
@@ -275,6 +277,18 @@ fn main() {
                     for score in &scores {
                         checksum += score.get();
                         alignments += 1;
+                    }
+                }
+            }
+            "f64" => {
+                for Prebuilt { haplotypes, reads } in &prebuilt {
+                    for (read, band) in reads {
+                        for haplotype in haplotypes {
+                            let score =
+                                align_banded_f64(black_box(haplotype), read, &emission, *band);
+                            checksum += score.get();
+                            alignments += 1;
+                        }
                     }
                 }
             }
