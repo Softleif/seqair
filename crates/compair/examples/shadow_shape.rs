@@ -10,11 +10,11 @@
 //!
 //! Each window is a 250 bp reference with a 2 bp insertion and a 3 bp
 //! deletion applied after its middle base, so three haplotypes, and
-//! [`READS`] reads of 100 to 150 bp that span the anchor, cut from one of the
+//! `READS` reads of 100 to 150 bp that span the anchor, cut from one of the
 //! three with sequencing errors, TAPS conversions at `CpG`s, per-base
 //! qualities and per-base gap-open qualities that drop in homopolymers.
 //! Each read's band is centred on where it was cut from, give or take
-//! [`JITTER`] bases, at rastair's width for a 3 bp allele: 48.
+//! `JITTER` bases, at rastair's width for a 3 bp allele: 48.
 //!
 //! The first argument picks what a round does over every window:
 //!
