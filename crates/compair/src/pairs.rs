@@ -174,7 +174,7 @@ pub(crate) struct PairsBuffer {
 #[inline]
 fn row_entry<E: Emission>(read: &Read, emission: &E, index: usize) -> Option<RowEntry> {
     let observation = read.observation(index)?;
-    let eps = emission.epsilon(observation);
+    let eps = crate::emission::epsilon(emission, observation);
     let t = read.transition(index)?;
     Some([
         code(observation.base),

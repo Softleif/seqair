@@ -11,6 +11,15 @@ use seqair_types::{Base, BaseQuality, QPos, Strand};
 /// the five transition probabilities per base -- is computed here, once, so
 /// that scoring the read against a haplotype does no transcendental
 /// arithmetic at all.
+///
+/// Every quality but [`BaseQuality::UNAVAILABLE`] is accepted, and two are
+/// read as less than they claim: insertion and deletion qualities below Q6
+/// count as Q6, as GATK raises them before its pair-HMM, so a match never
+/// hands on more than it holds; and a base quality below Q2 counts as
+/// `eps = 3/4` ([`MAX_EPSILON`]), a base that carries no information. The
+/// accessors return the qualities as given.
+///
+/// [`MAX_EPSILON`]: crate::MAX_EPSILON
 #[derive(Debug, Clone, PartialEq)]
 pub struct Read {
     bases: Box<[Base]>,

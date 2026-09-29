@@ -577,7 +577,7 @@ impl RowTracks {
         }
         for index in 0..r {
             let observation = read.observation(index)?;
-            let eps = emission.epsilon(observation);
+            let eps = crate::emission::epsilon(emission, observation);
             let t = read.transition(index)?;
             let row = index + 1;
             *base.get_mut(row)? = code(observation.base);

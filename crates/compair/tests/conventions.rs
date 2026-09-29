@@ -5,7 +5,7 @@
 //! all Q36-Q45. Three consequences, each measured by mutating the crate and
 //! re-running `reference_reproduces_gatk`:
 //!
-//! - replacing `1 - min(1, p_ins + p_del)` with `(1 - p_ins)(1 - p_del)` still
+//! - replacing `1 - (p_ins + p_del)` with `(1 - p_ins)(1 - p_del)` still
 //!   passes all 104 at 1e-4 (the two differ by `p_ins * p_del`, ~6e-8 per row),
 //! - swapping the insertion and deletion roles still passes all 104,
 //! - **adding the deletion matrix to the final sum still passes all 104** — the
@@ -14,7 +14,8 @@
 //! So this file computes one 3 x 2 dynamic program by hand and asserts the
 //! whole recurrence at once: the `1 / haplotype_len` start spread over every
 //! haplotype column, the exclusion of the deletion matrix from the total, the
-//! clamped `match_to_match`, the insertion/deletion role split, and
+//! summed `match_to_match` with gap-open qualities raised to Q6 as GATK raises
+//! them, the insertion/deletion role split, and
 //! `indel_to_match = 1 - gap_continuation` read at the right read base.
 
 use compair::{
@@ -29,10 +30,11 @@ use compair::{
 /// the answer.
 fn expected_act_vs_ac(q: [u8; 2], ins: [u8; 2], del: [u8; 2], gcp: [u8; 2]) -> f64 {
     let p = |phred: u8| 10f64.powf(-f64::from(phred) / 10.0);
+    let gap_open = |phred: u8| p(phred.max(6));
     let (e1, e2) = (p(q[0]), p(q[1]));
-    let (pd1, g1) = (p(del[0]), p(gcp[0]));
-    let (pi2, pd2, g2) = (p(ins[1]), p(del[1]), p(gcp[1]));
-    let mm2 = 1.0 - (pi2 + pd2).min(1.0);
+    let (pd1, g1) = (gap_open(del[0]), p(gcp[0]));
+    let (pi2, pd2, g2) = (gap_open(ins[1]), gap_open(del[1]), p(gcp[1]));
+    let mm2 = 1.0 - (pi2 + pd2);
     let (im1, im2) = (1.0 - g1, 1.0 - g2);
     let init = 1.0 / 3.0;
 
@@ -74,15 +76,14 @@ type QualitySet = ([u8; 2], [u8; 2], [u8; 2], [u8; 2]);
 
 /// The parameter sets, and what each one is for.
 const CASES: [QualitySet; 4] = [
-    // p_ins + p_del = 0.51 < 1: the clamp is inactive, so this separates
-    // `1 - (p_ins + p_del)` from `(1 - p_ins)(1 - p_del)` (0.4888 vs 0.4938),
-    // and p_del = 0.50 makes the excluded `d23` a third of the total.
-    ([20, 25], [10, 20], [15, 3], [8, 15]),
-    // p_ins + p_del = 1.0024 > 1: `match_to_match` is exactly zero. The product
-    // form gives 0.2488 here.
+    // p_ins + p_del = 0.26: this separates `1 - (p_ins + p_del)` from
+    // `(1 - p_ins)(1 - p_del)` (0.7388 vs 0.7413), and p_del = 0.25 makes the
+    // excluded `d23` a large share of the total.
+    ([20, 25], [10, 20], [15, 6], [8, 15]),
+    // Both gap opens at Q3, which count as Q6: `match_to_match` is 0.498, where
+    // taken at face value the two would sum past one and leave it at zero.
     ([30, 12], [10, 3], [15, 3], [8, 15]),
-    // p_ins = 1 with p_del = 0.01: the clamp holds `match_to_match` at zero
-    // where the unclamped sum would make it -0.01 and subtract probability.
+    // An insertion quality of Q0, a literal `p_ins = 1`, counts as Q6 too.
     ([30, 12], [10, 0], [15, 20], [8, 15]),
     // GATK's own range, where every convention costs only a few 1e-8 per row --
     // which is why the vectors miss them.

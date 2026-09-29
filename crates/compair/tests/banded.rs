@@ -12,8 +12,8 @@ use compair::{
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator};
 use support::{
-    any_conversion, any_probability, any_quality_case, arbitrary_case, derived_case, length,
-    plausible_conversion,
+    any_base_or_n, any_conversion, any_probability, any_quality_case, arbitrary_case, derived_case,
+    length, plausible_conversion,
 };
 
 // The bit-parity gates are the cheapest of these and the ones most worth
@@ -449,6 +449,8 @@ fn the_bundled_conversion_model_is_the_measured_one() {
 /// documented predicate, sharing nothing with the kernel under test but the
 /// emission. Written out rather than derived from `align_full` so that a
 /// change to the kernel's index algebra has to disagree with something.
+///
+/// Gap-open qualities below Q6 count as Q6, as GATK squashes them.
 #[allow(
     clippy::indexing_slicing,
     reason = "every index is in 0..=h and every row is allocated with h + 1 entries"
@@ -470,6 +472,8 @@ fn align_masked<E: compair::Emission>(
     let quality = |track: &[BaseQuality], index: usize| {
         error_probability(track.get(index).copied().unwrap_or(BaseQuality::from_byte(0)))
     };
+    let gap_open =
+        |track: &[BaseQuality], index: usize| quality(track, index).min(10f64.powf(-0.6));
 
     #[allow(clippy::cast_precision_loss, reason = "test haplotypes are short")]
     let init = 1.0 / h as f64;
@@ -481,8 +485,8 @@ fn align_masked<E: compair::Emission>(
 
     for i in 1..=r {
         let Some(observation) = read.observation(i - 1) else { return f64::NEG_INFINITY };
-        let p_ins = quality(read.insertion_quals(), i - 1);
-        let p_del = quality(read.deletion_quals(), i - 1);
+        let p_ins = gap_open(read.insertion_quals(), i - 1);
+        let p_del = gap_open(read.deletion_quals(), i - 1);
         let gap = quality(read.gap_quals(), i - 1);
         let m2m = 1.0 - (p_ins + p_del).min(1.0);
         let i2m = 1.0 - gap;
@@ -508,6 +512,72 @@ fn align_masked<E: compair::Emission>(
     }
     let total: f64 = prev_m.iter().zip(prev_i.iter()).skip(1).map(|(m, i)| m + i).sum();
     if total <= 0.0 { f64::NEG_INFINITY } else { total.log10() }
+}
+
+/// Every entry point, on one case: the scalar and SIMD diagonal and strip
+/// kernels, the batch kernel (the haplotype eight times) and the pairs
+/// kernel (the read eight times).
+fn every_entry_point<E: compair::Emission>(
+    case: &support::Case,
+    emission: &E,
+    band: Band,
+) -> Vec<(&'static str, f64)> {
+    let (haplotype, read) = (&case.haplotype, &case.read);
+    let mut workspace = Workspace::new();
+    let mut batch = Vec::new();
+    workspace.align_candidates(&[haplotype; BATCH], read, emission, band, &mut batch);
+    let mut pairs = Vec::new();
+    workspace.align_reads(&[haplotype], &[(read, band); compair::PAIRS], emission, &mut pairs);
+    let mut all = vec![
+        ("diagonals", align_banded(haplotype, read, emission, band).get()),
+        ("diagonals/simd", align_banded_simd(haplotype, read, emission, band).get()),
+        ("strips", align_strips(haplotype, read, emission, band).get()),
+        ("strips/simd", align_strips_simd(haplotype, read, emission, band).get()),
+    ];
+    all.extend(batch.iter().map(|score| ("batch", score.get())));
+    all.extend(pairs.iter().map(|score| ("pairs", score.get())));
+    all
+}
+
+/// A read whose every base is below Q2 says nothing about which haplotype it
+/// came from: every base is equally likely at every column, so every
+/// haplotype of one length scores the same, to the bit, through every
+/// kernel. (At Q0 as a literal `eps = 1` a base that *matches* scores zero,
+/// and such a read preferred whichever haplotype it matched least.)
+#[hegel::test(test_cases = pinned::cases(256))]
+fn a_read_with_no_information_scores_every_haplotype_alike(tc: TestCase) {
+    let h = tc.draw(length(1, 60));
+    let r = tc.draw(length(1, 60));
+    let draw =
+        |n: usize| -> Vec<Base> { (0..n).map(|_| tc.draw_silent(any_base_or_n())).collect() };
+    let (one, other, bases) = (Haplotype::new(draw(h)), Haplotype::new(draw(h)), draw(r));
+    let quals: Vec<BaseQuality> = (0..r)
+        .map(|_| BaseQuality::from_byte(tc.draw(gs::integers::<u8>().max_value(1))))
+        .collect();
+    let gap_open = BaseQuality::from_byte(tc.draw(gs::integers::<u8>().min_value(6).max_value(60)));
+    let read =
+        Read::uniform(bases, &quals, gap_open, gap_open, BaseQuality::from_byte(10), Strand::OT)
+            .expect("valid");
+    let offset = tc.draw(gs::integers::<i32>().min_value(-10).max_value(30));
+    let band = Band::new(tc.draw(gs::integers::<u32>().min_value(2).max_value(63)), offset)
+        .expect("width");
+    let emission = StandardEmission::default();
+    let case = |haplotype: &Haplotype| support::Case {
+        haplotype: haplotype.clone(),
+        read: read.clone(),
+        offset,
+        betas: Vec::new(),
+    };
+    let (a, b) = (case(&one), case(&other));
+    for ((kernel, x), (_, y)) in every_entry_point(&a, &emission, band)
+        .into_iter()
+        .zip(every_entry_point(&b, &emission, band))
+    {
+        assert_eq!(x.to_bits(), y.to_bits(), "{kernel}: {x} against {y}");
+    }
+    let (x, y) =
+        (align_full(&one, &read, &emission).get(), align_full(&other, &read, &emission).get());
+    assert!((x - y).abs() <= 1e-12 * (1.0 + x.abs()), "full: {x} against {y}");
 }
 
 /// The band is exactly the strip `Band` documents: `|j - i - offset| <=
@@ -893,8 +963,8 @@ fn the_degenerate_corners_are_impossible_not_a_panic() {
         }
     }
 
-    // A quality of zero means "this base is certainly wrong", which leaves no
-    // transition out of a match and no path.
+    // A gap-continuation quality of zero is a gap that never closes, and the
+    // read's free start is a gap: no path reaches row one.
     let certain = Read::uniform(
         haplotype.bases().to_vec(),
         &[BaseQuality::from_byte(0); 4],
@@ -1194,9 +1264,12 @@ fn a_band_with_no_start_cell_is_impossible() {
     }
 }
 
-/// Found by `fuzz_pair_hmm`: a read at Phred 0 whose last base is `N`, so
-/// every match emission is exactly zero and the last row is reached through
-/// the insertion state alone, against a haplotype that is mostly `N`.
+/// Found by `fuzz_pair_hmm`, when a read at Phred 0 meant `eps = 1`: a read
+/// whose last base is `N`, so every match emission was exactly zero and the
+/// last row was reached through the insertion state alone, against a
+/// haplotype that is mostly `N`. With `eps` capped at 3/4 the emissions are a
+/// quarter and the pair no longer collapses a diagonal; it stays as a
+/// regression pin.
 ///
 /// On the diagonal where the free-start cell leaves the band, the only cell
 /// left is the tail of a long deletion chain, `gap^n`, and the diagonal's
@@ -1234,7 +1307,7 @@ fn a_collapsing_diagonal_maximum_does_not_overflow_the_lift() {
     .expect("valid");
     let emission = StandardEmission::default();
     let full = align_full(&haplotype, &read, &emission).get();
-    assert!((full - -5.6933).abs() < 1e-3, "the reference scores this pair at -5.69, got {full}");
+    assert!((full - -1.8201).abs() < 1e-3, "the reference scores this pair at -1.82, got {full}");
     // The path ends at columns 41 and 42, so a band at offset 0 needs a
     // half-width of at least 39 to hold it at all; at 40 it holds the path
     // but not everything around it, and scores a little under the reference.

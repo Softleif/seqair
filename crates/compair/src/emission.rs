@@ -107,7 +107,31 @@ pub trait Emission {
 
     /// The error probability this model assigns one observation, which is the
     /// base quality's unless something floors it.
+    ///
+    /// Every consumer caps it at [`MAX_EPSILON`], so a value above that means
+    /// what `3/4` means.
     fn epsilon(&self, observation: Observation) -> f64;
+}
+
+/// The largest error probability a base call can mean: at `3/4` the called
+/// base and each of the other three are equally likely, and the base carries
+/// no information.
+///
+/// A Phred quality below 2 claims more -- that the called base is *less*
+/// likely than any one of the others, and at Q0 (`eps = 1`) that it is
+/// certainly wrong, so a read base that matches its haplotype scores exactly
+/// zero. No base call means that; Q0 and Q1 mean "no information", and an
+/// alignment that fits a read everywhere but one Q0 base must not be
+/// impossible. GATK reaches the same place by raising every base quality below
+/// 18 to Q6 before its pair-HMM; that threshold is a caller's policy, this cap
+/// is what the numbers mean.
+pub const MAX_EPSILON: f64 = 0.75;
+
+/// [`Emission::epsilon`], capped at [`MAX_EPSILON`]: what every kernel, plan
+/// and [`MatchProbability`] use.
+#[inline]
+pub(crate) fn epsilon<E: Emission + ?Sized>(emission: &E, observation: Observation) -> f64 {
+    emission.epsilon(observation).min(MAX_EPSILON)
 }
 
 /// `P(observed | site)`: an [`Emission`]'s two halves composed by
@@ -125,7 +149,7 @@ impl<E: Emission + ?Sized> MatchProbability for E {
     #[inline]
     fn match_probability(&self, site: HapSite, observation: Observation) -> f64 {
         self.site_weights(site, observation.strand)
-            .probability(observation.base, self.epsilon(observation))
+            .probability(observation.base, epsilon(self, observation))
     }
 }
 

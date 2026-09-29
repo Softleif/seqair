@@ -120,7 +120,8 @@ mod transitions;
 pub use banded::{Band, Workspace, align_banded, align_banded_simd};
 pub use batch::{BATCH, BATCH_BREAK_EVEN, align_batch, align_candidates};
 pub use emission::{
-    Betas, ConversionModel, Emission, MatchProbability, SiteWeights, StandardEmission, TapsEmission,
+    Betas, ConversionModel, Emission, MAX_EPSILON, MatchProbability, SiteWeights, StandardEmission,
+    TapsEmission,
 };
 pub use error::Error;
 pub use haplotype::Haplotype;

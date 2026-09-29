@@ -266,7 +266,7 @@ impl GpuPairs {
             let Some(observation) = read.observation(index) else {
                 return Err(GpuError::TooLarge { what: "read length" });
             };
-            let eps = emission.epsilon(observation);
+            let eps = crate::emission::epsilon(emission, observation);
             let select = observation
                 .base
                 .known_index()

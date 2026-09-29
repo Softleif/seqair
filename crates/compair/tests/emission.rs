@@ -2,7 +2,7 @@
 mod support;
 
 use compair::{
-    Base, BaseQuality, Betas, ConversionModel, CpgRole, Emission, HapSite, Haplotype,
+    Base, BaseQuality, Betas, ConversionModel, CpgRole, Emission, HapSite, Haplotype, MAX_EPSILON,
     MatchProbability, Observation, Probability, QPos, Read, StandardEmission, Strand, TapsEmission,
     error_probability,
 };
@@ -366,6 +366,53 @@ fn every_row_sums_to_one(tc: TestCase) {
     }
 }
 
+/// A quality below Q2 claims `eps > 3/4`: that the base is *likelier* to be
+/// any one of the other three than the one the sequencer called, which no
+/// base call means. At Q0 it claims `eps = 1`, so a read base that matches
+/// its haplotype scores exactly zero. Both are read as the most a quality can
+/// say against its call, `eps = 3/4`: every base equally likely, whatever the
+/// site, the strand, the chemistry or the artifact floor.
+#[hegel::test]
+fn a_quality_below_q2_carries_no_information(tc: TestCase) {
+    let qual = tc.draw(gs::integers::<u8>().max_value(1));
+    let strand = tc.draw(any_strand());
+    let beta = tc.draw(any_probability());
+    let conversion = tc.draw(any_conversion());
+    let floor = tc.draw(any_probability());
+    let haplotype = every_kind_of_site();
+    let taps = TapsEmission::new(conversion, Betas::Uniform(beta)).with_artifact_floor(floor);
+    let standard = StandardEmission::default().with_artifact_floor(floor);
+    for index in 0..haplotype.len() {
+        let site = haplotype.site(index).expect("site");
+        for base in Base::KNOWN.into_iter().chain([Base::Unknown]) {
+            let observation = observe(base, BaseQuality::from_byte(qual), strand);
+            for (name, p) in [
+                ("standard", standard.match_probability(site, observation)),
+                ("taps", taps.match_probability(site, observation)),
+            ] {
+                assert!(
+                    (p - 0.25).abs() <= f64::EPSILON,
+                    "{name}: site {index} on {strand:?} at Q{qual} reads {base:?} at {p}"
+                );
+            }
+        }
+    }
+}
+
+/// So is an artifact floor above 3/4: the floor raises `eps` to at most the
+/// point where the base carries no information, and never past it.
+#[test]
+fn an_artifact_floor_above_three_quarters_stops_at_three_quarters() {
+    let haplotype = Haplotype::from_ascii(b"AACGAA");
+    let emission = StandardEmission::default().with_artifact_floor(Probability::ONE);
+    let site = haplotype.site(0).expect("A");
+    for base in Base::KNOWN {
+        let p =
+            emission.match_probability(site, observe(base, BaseQuality::from_byte(40), Strand::OT));
+        assert_eq!(p, 0.25, "{base:?}");
+    }
+}
+
 /// The emission is bsgenova's three-stage marginalisation with the
 /// pre-conversion stage removed: convert, then sequence, summing over the
 /// base the site carried in between.
@@ -379,7 +426,7 @@ fn the_emission_is_bsgenova_without_the_pre_conversion_stage(tc: TestCase) {
     let haplotype = every_kind_of_site();
     let emission = TapsEmission::new(conversion, Betas::Uniform(beta));
     let (c, f) = (*conversion.efficiency(), *conversion.false_conversion());
-    let eps = error_probability(BaseQuality::from_byte(qual));
+    let eps = error_probability(BaseQuality::from_byte(qual)).min(MAX_EPSILON);
     for index in 0..haplotype.len() {
         let site = haplotype.site(index).expect("site");
         let rate = taps_rate(site, strand, *beta, c, f);
@@ -423,7 +470,7 @@ fn bis_snp_agrees_on_the_mixture_and_not_on_the_error_term(tc: TestCase) {
         alpha: 1.0 - *conversion.false_conversion(),
         gamma: *conversion.efficiency(),
     };
-    let eps = error_probability(BaseQuality::from_byte(qual));
+    let eps = error_probability(BaseQuality::from_byte(qual)).min(MAX_EPSILON);
     let cpg = cpg_site_for(strand).expect("site");
     let (converted, _) = conversion_of(cpg, strand).expect("a CpG converts");
 
@@ -500,7 +547,7 @@ fn the_beta_limits_are_the_two_state_rows(tc: TestCase) {
     let strand = tc.draw(any_strand());
     let conversion = tc.draw(any_conversion());
     let observed = tc.draw(any_base());
-    let eps = error_probability(BaseQuality::from_byte(qual));
+    let eps = error_probability(BaseQuality::from_byte(qual)).min(MAX_EPSILON);
     let cpg = cpg_site_for(strand).expect("site");
     for (beta, rate) in [
         (Probability::ONE, *conversion.efficiency()),
@@ -661,14 +708,12 @@ fn the_two_bases_of_one_cpg_read_their_own_betas() {
 /// unmethylated ones, which is what `efficiency >= false_conversion` says.
 #[hegel::test]
 fn a_converted_base_is_monotone_in_beta(tc: TestCase) {
-    // From Q2 up. Below that `eps > 3/4`, the base is likelier to be any
-    // other base than the one it reads as, and every row is *decreasing*
-    // in the latent weight -- the model is right about that, and the
-    // monotonicity claim is only about a base that carries information.
+    // Every quality: below Q2 `eps` is capped at 3/4 and every row is flat
+    // in the latent weight, which is monotone too.
     let unit = || gs::floats::<f64>().min_value(0.0).max_value(1.0);
     let (a, b) = (tc.draw(unit()), tc.draw(unit()));
     let (efficiency, false_conversion) = if a >= b { (a, b) } else { (b, a) };
-    let qual = tc.draw(gs::integers::<u8>().min_value(2).max_value(93));
+    let qual = tc.draw(gs::integers::<u8>().max_value(93));
     let levels = [tc.draw(unit()), tc.draw(unit())];
     let conversion = ConversionModel::new(
         Probability::new(efficiency).expect("c"),
