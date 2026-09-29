@@ -104,7 +104,8 @@ use bio::stats::{
     pairhmm::{EmissionParameters, GapParameters, PairHMM, StartEndGapParameters, XYEmission},
 };
 use compair::{Base, BaseQuality, Haplotype, Read, StandardEmission, Strand, align_full};
-use proptest::prelude::*;
+use hegel::TestCase;
+use hegel::generators::{self as gs, Generator, PrintableGenerator};
 
 /// Floating-point slack on top of [`deletion_matrix_bound`], which is otherwise
 /// exact. Measured worst overshoot over 20 000 random pairs: 1.1e-6.
@@ -337,96 +338,105 @@ struct Case {
     edited: bool,
 }
 
-fn any_byte() -> impl Strategy<Value = u8> {
-    prop_oneof![Just(b'A'), Just(b'C'), Just(b'G'), Just(b'T')]
+/// One of the four nucleotides, or one time in ten an `N`.
+#[hegel::composite]
+fn any_byte_or_n(tc: &TestCase) -> u8 {
+    if tc.draw_silent(gs::weighted_booleans(0.1)) {
+        b'N'
+    } else {
+        tc.draw_silent(gs::sampled_from(b"ACGT"))
+    }
 }
 
-fn any_edit() -> impl Strategy<Value = (usize, u8, u8)> {
-    (0usize..4096, 0u8..3, any_byte())
-}
-
-fn any_case(max_edits: usize) -> impl Strategy<Value = Case> {
-    (
-        proptest::collection::vec(prop_oneof![9 => any_byte(), 1 => Just(b'N')], 20..120),
-        0usize..120,
-        20usize..90,
-        proptest::collection::vec(any_edit(), 0..=max_edits),
-        proptest::collection::vec(2u8..=45, 120),
-        // Q10 is the floor that keeps `p_ins + p_del < 1`, without which
-        // rust-bio's `prob_no_gap` does not exist.
-        10u8..=45,
-        10u8..=45,
-        2u8..=25,
-    )
-        .prop_filter_map(
-            "the read must survive its edits",
-            |(hap, start, want, edits, quals, insertion_qual, deletion_qual, gap_qual)| {
-                let haplotype = Haplotype::from_ascii(&hap);
-                let start = start.min(haplotype.len().saturating_sub(10));
-                let end = start.saturating_add(want).min(haplotype.len());
-                let mut bases: Vec<Base> = haplotype.bases().get(start..end)?.to_vec();
-                let mut edited = false;
-                for (at, kind, byte) in edits {
-                    if bases.len() < 10 {
-                        break;
-                    }
-                    let at = at % bases.len();
-                    edited = true;
-                    match kind {
-                        0 => *bases.get_mut(at)? = Base::from(byte),
-                        1 => bases.insert(at, Base::from(byte)),
-                        _ => {
-                            let _removed = bases.remove(at);
-                        }
-                    }
+/// A haplotype, a read cut out of it at a random start, perturbed by at most
+/// `max_edits` edits, and a random uniform indel quality set.
+#[hegel::composite]
+fn any_case_inner(tc: &TestCase, max_edits: usize) -> Case {
+    // Lengths are drawn as integers, which hegel spreads over the range, and
+    // not as a vector's size, which it keeps short.
+    let len = tc.draw_silent(gs::integers::<usize>().min_value(20).max_value(119));
+    let hap: Vec<u8> = tc.draw_silent(gs::vecs(any_byte_or_n()).min_size(len).max_size(len));
+    let haplotype = Haplotype::from_ascii(&hap);
+    let start = tc.draw_silent(gs::integers::<usize>().max_value(119));
+    let start = start.min(haplotype.len().saturating_sub(10));
+    let want = tc.draw_silent(gs::integers::<usize>().min_value(20).max_value(89));
+    let end = start.saturating_add(want).min(haplotype.len());
+    let Some(cut) = haplotype.bases().get(start..end) else { tc.reject() };
+    let mut bases = cut.to_vec();
+    let mut edited = false;
+    for _ in 0..tc.draw_silent(gs::integers::<usize>().max_value(max_edits)) {
+        if bases.len() < 10 {
+            break;
+        }
+        let at = tc.draw_silent(gs::integers::<usize>().max_value(bases.len() - 1));
+        edited = true;
+        match tc.draw_silent(gs::integers::<u8>().max_value(2)) {
+            0 => {
+                let base = Base::from(tc.draw_silent(gs::sampled_from(b"ACGT")));
+                if let Some(slot) = bases.get_mut(at) {
+                    *slot = base;
                 }
-                if bases.len() < 10 {
-                    return None;
-                }
-                let base_quals: Vec<BaseQuality> = (0..bases.len())
-                    .map(|index| {
-                        BaseQuality::from_byte(*quals.get(index % quals.len()).unwrap_or(&30))
-                    })
-                    .collect();
-                let read =
-                    uniform_read(bases, &base_quals, insertion_qual, deletion_qual, gap_qual)?;
-                Some(Case { haplotype, read, insertion_qual, deletion_qual, gap_qual, edited })
-            },
-        )
+            }
+            1 => bases.insert(at, Base::from(tc.draw_silent(gs::sampled_from(b"ACGT")))),
+            _ => {
+                let _removed = bases.remove(at);
+            }
+        }
+    }
+    tc.assume(bases.len() >= 10);
+    let quals: Vec<u8> = tc.draw_silent(
+        gs::vecs(gs::integers::<u8>().min_value(2).max_value(45))
+            .min_size(bases.len())
+            .max_size(bases.len()),
+    );
+    let base_quals: Vec<BaseQuality> = quals.into_iter().map(BaseQuality::from_byte).collect();
+    // Q10 is the floor that keeps `p_ins + p_del < 1`, without which
+    // rust-bio's `prob_no_gap` does not exist.
+    let insertion_qual = tc.draw_silent(gs::integers::<u8>().min_value(10).max_value(45));
+    let deletion_qual = tc.draw_silent(gs::integers::<u8>().min_value(10).max_value(45));
+    let gap_qual = tc.draw_silent(gs::integers::<u8>().min_value(2).max_value(25));
+    let Some(read) = uniform_read(bases, &base_quals, insertion_qual, deletion_qual, gap_qual)
+    else {
+        tc.reject()
+    };
+    Case { haplotype, read, insertion_qual, deletion_qual, gap_qual, edited }
 }
 
-fn check(case: &Case) -> Result<(), TestCaseError> {
+fn any_case(max_edits: usize) -> impl PrintableGenerator<Case> {
+    any_case_inner(max_edits).print_as_debug()
+}
+
+fn check(tc: &TestCase, case: &Case) {
     let Case { haplotype, read, insertion_qual, deletion_qual, gap_qual, edited } = case;
     let mine = align_full(haplotype, read, &StandardEmission::default()).get();
     let theirs = rust_bio_log10(haplotype, read, *insertion_qual, *deletion_qual, *gap_qual);
-    prop_assume!(mine.is_finite() && theirs.is_finite());
+    tc.assume(mine.is_finite() && theirs.is_finite());
     let bound = deletion_matrix_bound(*deletion_qual, *gap_qual);
     let delta = theirs - mine;
     // Rigorous: the deletion matrix in rust-bio's free end is the only thing
     // that can put it above `align_full`, and the deletion recurrence bounds it.
-    prop_assert!(
+    assert!(
         delta <= bound + UPPER_SLACK,
         "rust-bio {theirs} is {delta} above compair {mine}, more than {bound}"
     );
     let lower = if *edited { EDITED_LOWER_SLACK } else { UNEDITED_LOWER_SLACK };
-    prop_assert!(delta >= -lower, "rust-bio {theirs} is {delta} below compair {mine}");
-    Ok(())
+    assert!(delta >= -lower, "rust-bio {theirs} is {delta} below compair {mine}");
 }
 
-proptest! {
-    /// Reads cut straight out of the haplotype. The match term dominates
-    /// almost every three-way sum rust-bio takes a shortcut on, so the two
-    /// agree to the deletion-matrix bound above and 2e-2 below.
-    #[test]
-    fn unedited_reads_agree_with_rust_bio(case in any_case(0)) {
-        check(&case)?;
-    }
+/// Reads cut straight out of the haplotype. The match term dominates
+/// almost every three-way sum rust-bio takes a shortcut on, so the two
+/// agree to the deletion-matrix bound above and 2e-2 below.
+#[hegel::test]
+fn unedited_reads_agree_with_rust_bio(tc: TestCase) {
+    let case = tc.draw(any_case(0));
+    check(&tc, &case);
+}
 
-    /// Reads carrying substitutions and short indels. The upper bound is still
-    /// rigorous; the lower one is loose because rust-bio's mis-sorted
-    /// three-way shortcut discards gap mass on exactly these reads.
-    #[test]
-    fn edited_reads_agree_with_rust_bio(case in any_case(3)) {
-        check(&case)?;
-    }
+/// Reads carrying substitutions and short indels. The upper bound is still
+/// rigorous; the lower one is loose because rust-bio's mis-sorted
+/// three-way shortcut discards gap mass on exactly these reads.
+#[hegel::test]
+fn edited_reads_agree_with_rust_bio(tc: TestCase) {
+    let case = tc.draw(any_case(3));
+    check(&tc, &case);
 }

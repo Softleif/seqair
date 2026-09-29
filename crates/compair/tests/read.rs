@@ -1,7 +1,8 @@
 //! What `Read` and `Haplotype` accept, and what they say when they do not.
 
 use compair::{Base, BaseQuality, Error, Haplotype, Read, Strand};
-use proptest::prelude::*;
+use hegel::TestCase;
+use hegel::generators as gs;
 
 fn q(byte: u8) -> BaseQuality {
     BaseQuality::from_byte(byte)
@@ -102,43 +103,47 @@ fn from_ascii_reads_lowercase_as_the_same_base() {
     );
 }
 
-proptest! {
-    /// Any byte string builds a haplotype, and the case of a letter never
-    /// changes the base.
-    #[test]
-    fn from_ascii_is_case_insensitive(sequence in proptest::collection::vec(any::<u8>(), 0..64)) {
-        let lower = Haplotype::from_ascii(&sequence.to_ascii_lowercase());
-        let upper = Haplotype::from_ascii(&sequence.to_ascii_uppercase());
-        prop_assert_eq!(lower.len(), sequence.len());
-        prop_assert_eq!(lower, upper);
-    }
+/// Any byte string builds a haplotype, and the case of a letter never
+/// changes the base.
+#[hegel::test]
+fn from_ascii_is_case_insensitive(tc: TestCase) {
+    let len = tc.draw(gs::integers::<usize>().max_value(63));
+    let sequence: Vec<u8> = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(len).max_size(len));
+    let lower = Haplotype::from_ascii(&sequence.to_ascii_lowercase());
+    let upper = Haplotype::from_ascii(&sequence.to_ascii_uppercase());
+    assert_eq!(lower.len(), sequence.len());
+    assert_eq!(lower, upper);
+}
 
-    /// Every observation of a well-formed read carries its own error
-    /// probability, and the transitions a `Read` precomputes are what the
-    /// qualities say -- checked here with `powf` as the oracle, since a
-    /// `Read` never calls it again after construction.
-    #[test]
-    fn a_read_precomputes_what_its_qualities_say(
-        bases in proptest::collection::vec(0u8..=4, 1..40),
-        quals in proptest::collection::vec(0u8..=93, 40),
-    ) {
-        let bases: Vec<Base> = bases.iter().map(|code| *Base::KNOWN.get(usize::from(*code)).unwrap_or(&Base::Unknown)).collect();
-        let n = bases.len();
-        let track = |offset: usize| -> Vec<BaseQuality> {
-            (0..n).map(|index| q(*quals.get((index + offset) % quals.len()).unwrap_or(&30))).collect()
-        };
-        let base_quals = track(0);
-        let read = Read::new(bases.clone(), &base_quals, &track(1), &track(2), &track(3), Strand::OB)
-            .map_err(|_| TestCaseError::reject("valid by construction"))?;
-        prop_assert_eq!(read.len(), n);
-        prop_assert_eq!(read.strand(), Strand::OB);
-        for (index, (base, qual)) in bases.iter().zip(&base_quals).enumerate() {
-            let observation = read.observation(index).ok_or(TestCaseError::reject("in range"))?;
-            prop_assert_eq!(observation.base, *base);
-            prop_assert_eq!(observation.index.get(), u32::try_from(index).unwrap_or(0));
-            let want = 10f64.powf(-f64::from(qual.as_byte()) / 10.0);
-            prop_assert_eq!(observation.error_probability.to_bits(), want.to_bits());
-        }
-        prop_assert!(read.observation(n).is_none());
+/// Every observation of a well-formed read carries its own error
+/// probability, and the transitions a `Read` precomputes are what the
+/// qualities say -- checked here with `powf` as the oracle, since a
+/// `Read` never calls it again after construction.
+#[hegel::test]
+fn a_read_precomputes_what_its_qualities_say(tc: TestCase) {
+    let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(39));
+    let bases: Vec<u8> =
+        tc.draw(gs::vecs(gs::integers::<u8>().max_value(4)).min_size(n).max_size(n));
+    let quals: Vec<u8> =
+        tc.draw(gs::vecs(gs::integers::<u8>().max_value(93)).min_size(40).max_size(40));
+    let bases: Vec<Base> = bases
+        .iter()
+        .map(|code| *Base::KNOWN.get(usize::from(*code)).unwrap_or(&Base::Unknown))
+        .collect();
+    let track = |offset: usize| -> Vec<BaseQuality> {
+        (0..n).map(|index| q(*quals.get((index + offset) % quals.len()).unwrap_or(&30))).collect()
+    };
+    let base_quals = track(0);
+    let read = Read::new(bases.clone(), &base_quals, &track(1), &track(2), &track(3), Strand::OB)
+        .expect("valid by construction");
+    assert_eq!(read.len(), n);
+    assert_eq!(read.strand(), Strand::OB);
+    for (index, (base, qual)) in bases.iter().zip(&base_quals).enumerate() {
+        let observation = read.observation(index).expect("in range");
+        assert_eq!(observation.base, *base);
+        assert_eq!(observation.index.get(), u32::try_from(index).unwrap_or(0));
+        let want = 10f64.powf(-f64::from(qual.as_byte()) / 10.0);
+        assert_eq!(observation.error_probability.to_bits(), want.to_bits());
     }
+    assert!(read.observation(n).is_none());
 }
