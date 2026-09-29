@@ -22,6 +22,7 @@
 use core::fmt::Write as _;
 
 use super::plan::{GAP_CONTINUATION, INDEL_TO_MATCH, MATCH_TO_DELETION, MATCH_TO_INSERTION};
+use crate::scaling::STRIP_SCALE;
 
 /// How the row buffer is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -69,6 +70,7 @@ pub fn source(variant: Variant) -> Result<String, core::fmt::Error> {
     writeln!(out, "const MATCH_TO_DELETION: u32 = {MATCH_TO_DELETION}u;")?;
     writeln!(out, "const INDEL_TO_MATCH: u32 = {INDEL_TO_MATCH}u;")?;
     writeln!(out, "const GAP_CONTINUATION: u32 = {GAP_CONTINUATION}u;")?;
+    writeln!(out, "const STRIP_SCALE: i32 = {STRIP_SCALE};")?;
     out.push_str(
         match contraction {
             Contraction::Allowed => {
@@ -139,8 +141,9 @@ fn flush(x: f32) -> f32 {
     return select(x, 0.0, x < TINY);
 }
 
-// `scaling::normalising_shift_f32`: the shift that puts a normal `max` into
-// [1, 2), zero for anything non-positive, subnormal or not finite.
+// `scaling::strip_shift_f32`: the shift that puts a normal `max` into
+// [2^STRIP_SCALE, 2^(STRIP_SCALE + 1)), at most 127, and zero for anything
+// non-positive, subnormal or not finite.
 fn normalising_shift(max: f32) -> i32 {
     if !(max > 0.0) {
         return 0;
@@ -149,7 +152,7 @@ fn normalising_shift(max: f32) -> i32 {
     if exponent == -127 || exponent == 128 {
         return 0;
     }
-    return -exponent;
+    return min(STRIP_SCALE - exponent, 127);
 }
 
 // `scaling::exp2_f32` over the range `normalising_shift` produces.

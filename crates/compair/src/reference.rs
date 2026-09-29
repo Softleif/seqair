@@ -5,7 +5,7 @@ use crate::{
     emission::{Emission, MatchProbability, epsilon},
     haplotype::Haplotype,
     read::Read,
-    scaling::{exp2_f64, normalising_shift_f64},
+    scaling::{STRIP_SCALE, exp2_f64, normalising_shift_f64},
     transitions::Transition,
     types::Log10Likelihood,
 };
@@ -282,16 +282,19 @@ fn banded_row(
 /// An `f32` kernel's score where `f32` can vouch for it, and the `f64`
 /// recurrence over the same band where it cannot.
 ///
-/// The `f32` kernels scale by powers of two -- per row, or per anti-diagonal
-/// -- so that the cell they scale by sits in `[1, 2)`, and flush every stored
-/// cell below `2^-126` to zero. With the transitions out of every state a
-/// distribution and every emission at most one, each cell is a probability,
-/// so the cell a scale is taken from is at most one and a flushed cell held
-/// less than `2^-125` in absolute terms. The paths through it can reach the
-/// final row with no more than that, and there are at most three cells per
-/// row per band column to flush. So the total an `f32` kernel returns is
-/// short of the recurrence's by less than `3 * (r + 1) * columns * 2^-125`,
-/// and a total a million times that is right to within a millionth.
+/// The strip kernels (and the batch, pairs and GPU kernels, which share their
+/// sweep) scale every eighth row by a power of two so that its largest cell
+/// sits in `[2^STRIP_SCALE, 2^(STRIP_SCALE + 1))`, `2^96`, and flush every
+/// stored cell below `2^-126` to zero. With the transitions out of every
+/// state a distribution and every emission at most one, each cell is a
+/// probability, so the cell a scale is taken from is at most one, every scale
+/// is at least `2^96`, and a flushed cell held less than `2^(-125 - 96)` in
+/// absolute terms. The paths through it can reach the final row with no more
+/// than that, and there are at most three cells per row per band column to
+/// flush. So the total an `f32` kernel returns is short of the recurrence's
+/// by less than `3 * (r + 1) * columns * 2^(-125 - 96)`, and a total a million
+/// times that is right to within a millionth. (The diagonal kernel scales to
+/// `[1, 2)` and checks against the same bound without the `2^-96`.)
 ///
 /// Below that the kernel may have flushed anything up to the whole answer --
 /// eight rows of confident mismatches take every cell under `2^-126` at once
@@ -310,19 +313,45 @@ pub fn trusted<E: Emission + ?Sized>(
     emission: &E,
     band: Band,
 ) -> Log10Likelihood {
-    if score.get() >= trust_floor(haplotype.len(), read.len(), band) {
+    trusted_at(STRIP_SCALE, score, haplotype, read, emission, band)
+}
+
+/// [`trusted`] for a score from the diagonal kernel, which scales each
+/// anti-diagonal's largest cell into `[1, 2)` rather than to
+/// `2^STRIP_SCALE`, so that a flush there lost less than `2^-125`.
+pub(crate) fn trusted_diagonal<E: Emission + ?Sized>(
+    score: Log10Likelihood,
+    haplotype: &Haplotype,
+    read: &Read,
+    emission: &E,
+    band: Band,
+) -> Log10Likelihood {
+    trusted_at(0, score, haplotype, read, emission, band)
+}
+
+/// [`trusted`] for a kernel that renormalises its rows to `2^scale`.
+fn trusted_at<E: Emission + ?Sized>(
+    scale: i32,
+    score: Log10Likelihood,
+    haplotype: &Haplotype,
+    read: &Read,
+    emission: &E,
+    band: Band,
+) -> Log10Likelihood {
+    if score.get() >= trust_floor(haplotype.len(), read.len(), band, scale) {
         score
     } else {
         align_banded_f64(haplotype, read, emission, band)
     }
 }
 
-/// `log10` of the least total an `f32` kernel's flushes cannot move by more
-/// than a millionth: `log10(3 * (r + 1) * columns * 2^-125) + 6`.
+/// `log10` of the least total the flushes of an `f32` kernel that keeps its
+/// rows at `2^scale` cannot move by more than a millionth:
+/// `log10(3 * (r + 1) * columns * 2^(-125 - scale)) + 6`.
 #[allow(clippy::cast_precision_loss, reason = "a count of cells, far below 2^52")]
-fn trust_floor(h: usize, r: usize, band: Band) -> f64 {
+fn trust_floor(h: usize, r: usize, band: Band, scale: i32) -> f64 {
     let band_columns = usize::try_from(band.half_width).unwrap_or(usize::MAX).saturating_mul(2);
     let columns = band_columns.saturating_add(1).min(h.saturating_add(1));
     let cells = 3.0 * (r as f64 + 1.0) * columns as f64;
-    cells.log10() - 125.0 * core::f64::consts::LOG10_2 + 6.0
+    cells.log10() - (125.0 + f64::from(scale)) * core::f64::consts::LOG10_2 + 6.0
 }

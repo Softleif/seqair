@@ -12,7 +12,7 @@ use compair::{
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator};
 use support::{
-    any_base_or_n, any_conversion, any_probability, arbitrary_case, derived_case, length,
+    any_base_or_n, any_conversion, any_probability, arbitrary_case, bases, derived_case, length,
     plausible_conversion,
 };
 
@@ -592,6 +592,42 @@ fn every_score_is_the_f64_recurrence_over_its_band(tc: TestCase) {
                 );
             }
         }
+    }
+}
+
+/// The strip kernels keep a row's largest cell at `2^STRIP_SCALE` (`2^96`),
+/// so what their flushes can lose, and the floor below which their scores
+/// are rescored, sits 96 bits lower than the diagonal kernel's. This pair
+/// (hegel's, shrunk) has the strip kernel flush a cell that goes on to carry
+/// part of the answer: its `f32` score is -69.268 against the recurrence's
+/// -69.258, twelve decades below the strip floor (-57.4). A floor that took
+/// the scale for more than it is -- here, by forty bits -- lets that score
+/// through; this pins it.
+#[test]
+fn a_strip_flush_below_the_strip_floor_is_rescored() {
+    let quals = |qs: &[u8]| qs.iter().map(|&q| BaseQuality::from_byte(q)).collect::<Vec<_>>();
+    let gaps = quals(&[3, 2, 6, 0, 4, 86, 254, 95, 213, 254, 53, 254, 210, 254, 254, 29, 64]);
+    let read = Read::new(
+        bases("TNNANAGCGAANCCCAC"),
+        &quals(&[0, 0, 0, 0, 0, 3, 61, 51, 85, 1, 0, 6, 237, 248, 214, 9, 56]),
+        &gaps,
+        &gaps,
+        &gaps,
+        Strand::OB,
+    )
+    .expect("a valid read");
+    let case = support::Case {
+        haplotype: Haplotype::new(bases("AANANAAACNAANCCAANAANAAAANGA")),
+        read,
+        offset: 19,
+        betas: vec![Probability::ZERO; 28],
+    };
+    let band = Band::new(27, case.offset).expect("width");
+    let emission = StandardEmission::default();
+    let want = align_masked(&case.haplotype, &case.read, &emission, band);
+    assert!((want - -69.2579).abs() < 1e-3, "{want}");
+    for (kernel, got) in every_entry_point(&case, &emission, band) {
+        assert!((got - want).abs() < 1e-4 * (1.0 + want.abs()), "{kernel}: {got} against {want}");
     }
 }
 

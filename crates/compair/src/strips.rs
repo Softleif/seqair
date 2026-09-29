@@ -28,7 +28,8 @@
 //!
 //! Renormalisation happens between strips, on the row that crosses from one to
 //! the next: the row buffer is multiplied by the power of two that puts that
-//! row's maximum into `[1, 2)` before the next strip reads it, and since the
+//! row's maximum at `2^STRIP_SCALE` (`scaling::strip_shift_f32`) before the
+//! next strip reads it, and since the
 //! row buffer is the only way any value enters a strip, that rescales
 //! everything the strip will compute. It is a power of two, so it is exact,
 //! and it is applied every eight rows whatever the lane count -- the scalar
@@ -48,7 +49,7 @@ use crate::{
     haplotype::Haplotype,
     read::Read,
     reference::trusted,
-    scaling::{exp2_f32, normalising_shift_f32},
+    scaling::{exp2_f32, strip_shift_f32},
     types::Log10Likelihood,
 };
 
@@ -655,7 +656,7 @@ pub(crate) fn strip_kernel<L: Lane>(
         // The row above this strip, `r0 - 1`, is where the scale changes
         // every `STRIP_ROWS` rows; `crossing_max` is that row's maximum.
         let shift = if (r0 - 1) % STRIP_ROWS == 0 {
-            let shift = normalising_shift_f32(crossing_max);
+            let shift = strip_shift_f32(crossing_max);
             exponent += shift;
             shift
         } else {

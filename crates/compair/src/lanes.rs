@@ -34,7 +34,7 @@ use crate::{
         CODE_NO_CONVERSION, CODE_NO_PLAIN_MATCH, ColumnLanes, LANE_MAX, Lane, RowLanes, RowTracks,
         TransitionLanes, Window, prior,
     },
-    scaling::{exp2_f32, normalising_shift_f32},
+    scaling::{exp2_f32, strip_shift_f32},
     types::Log10Likelihood,
 };
 
@@ -409,11 +409,8 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
                 // kernel never renormalises below the last row, and the total
                 // taken there is on the scale of the exponent at that row.
                 let inside = view.lengths.get(lane).is_some_and(|&r| row <= r);
-                let shift = if inside {
-                    scratch.get(lane).copied().map_or(0, normalising_shift_f32)
-                } else {
-                    0
-                };
+                let shift =
+                    if inside { scratch.get(lane).copied().map_or(0, strip_shift_f32) } else { 0 };
                 any |= shift != 0;
                 if let (Some(slot), Some(sum)) = (lift.get_mut(lane), exponent.get_mut(lane)) {
                     *slot = exp2_f32(shift);

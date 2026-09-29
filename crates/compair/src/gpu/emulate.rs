@@ -89,7 +89,7 @@ fn run(
     let origin = pair.offset - half;
     for row in 1..=pair.read_len {
         if (row - 1) % 8 == 0 {
-            let shift = crate::scaling::normalising_shift_f32(crossing);
+            let shift = crate::scaling::strip_shift_f32(crossing);
             exponent += shift;
             if shift != 0 {
                 let lift = crate::scaling::exp2_f32(shift);

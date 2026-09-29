@@ -5,7 +5,7 @@ use crate::{
     error::Error,
     haplotype::Haplotype,
     read::Read,
-    reference::trusted,
+    reference::trusted_diagonal,
     scaling::{exp2_f32, exp2_f64, normalising_shift_f32},
     types::Log10Likelihood,
 };
@@ -374,7 +374,7 @@ impl Workspace {
             return Log10Likelihood::IMPOSSIBLE;
         };
         let score = crate::simd::banded_kernel_at(level, &self.plan, &mut self.ring, shape, band);
-        trusted(score, haplotype, read, emission, band)
+        trusted_diagonal(score, haplotype, read, emission, band)
     }
 
     fn align<L: Lane<Token = ()>, E: Emission>(
@@ -388,7 +388,7 @@ impl Workspace {
             return Log10Likelihood::IMPOSSIBLE;
         };
         let score = banded_kernel::<L>((), &self.plan, &mut self.ring, shape, band);
-        trusted(score, haplotype, read, emission, band)
+        trusted_diagonal(score, haplotype, read, emission, band)
     }
 
     /// Folds the emission into the plan, so that from here on a kernel is

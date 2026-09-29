@@ -65,9 +65,42 @@ pub(crate) fn normalising_shift_f32(max: f32) -> i32 {
     if exponent == -127 { 0 } else { -exponent }
 }
 
+/// Where the strip kernels (and the batch and pairs kernels, which share their
+/// sweep) keep a renormalised row: its largest cell in
+/// `[2^STRIP_SCALE, 2^(STRIP_SCALE + 1))`.
+///
+/// A flush loses less than `2^-126` of the scale, so the higher the scale the
+/// less a flush can lose: at `2^96` it is `2^-222` of a row's largest cell
+/// rather than `2^-126`, and the `f32` kernels vouch for 29 more decades of
+/// scores (see `reference::trusted_strips`). Nothing can overflow: every cell
+/// of the eight rows below a renormalised row is a sum over paths from that
+/// row's `3 * columns` cells, each continuing with probability at most one,
+/// so no cell exceeds `3 * 1025 * 2^97 < 2^109`, and a total sums fewer
+/// than `2^11` of those.
+pub(crate) const STRIP_SCALE: i32 = 96;
+
+/// The shift that moves a normal `max` into `[2^STRIP_SCALE, 2^(STRIP_SCALE +
+/// 1))`, at most 127 so that [`exp2_f32`] represents it, and zero when there
+/// is nothing to normalise: a non-positive, non-finite or subnormal maximum.
+///
+/// Capping the shift only ever leaves a row's scale above `2^STRIP_SCALE`
+/// times its true maximum (a shift up adds to a scale that was already
+/// there), which is all the precision argument needs.
+#[allow(clippy::cast_possible_wrap, reason = "the masked exponent field is 8 bits")]
+pub(crate) fn strip_shift_f32(max: f32) -> i32 {
+    if !max.is_normal() || max < 0.0 {
+        return 0;
+    }
+    let exponent = ((max.to_bits() >> 23) & 0xff) as i32 - 127;
+    (STRIP_SCALE - exponent).min(127)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{exp2_f32, exp2_f64, normalising_shift_f32, normalising_shift_f64};
+    use super::{
+        STRIP_SCALE, exp2_f32, exp2_f64, normalising_shift_f32, normalising_shift_f64,
+        strip_shift_f32,
+    };
     use hegel::TestCase;
     use hegel::generators as gs;
 
@@ -105,6 +138,40 @@ mod tests {
         } else {
             assert!((1.0..2.0).contains(&scaled), "{max} shifted by {shift} is {scaled}");
             assert_eq!((scaled * exp2_f32(-shift)).to_bits(), max.to_bits());
+        }
+    }
+
+    /// Every normal maximum lands on the strip scale, `[2^96, 2^97)`, unless
+    /// that takes more than the one factor `exp2_f32` has (a maximum below
+    /// `2^-31`), where the shift stops at 127 and the maximum lands below
+    /// it -- still a shift up, so a scale that was at least `2^96` stays so.
+    /// Either way the shift is exact.
+    #[hegel::test]
+    fn a_normal_f32_maximum_is_moved_to_the_strip_scale(tc: TestCase) {
+        let bits = tc.draw(
+            gs::integers::<u32>()
+                .min_value(f32::MIN_POSITIVE.to_bits())
+                .max_value(f32::MAX.to_bits()),
+        );
+        let max = f32::from_bits(bits);
+        let shift = strip_shift_f32(max);
+        let scaled = max * exp2_f32(shift);
+        let (low, high) = (exp2_f32(STRIP_SCALE), exp2_f32(STRIP_SCALE + 1));
+        if shift == 127 {
+            assert!(scaled < high, "{max} shifted by {shift} is {scaled}");
+        } else {
+            assert!((low..high).contains(&scaled), "{max} shifted by {shift} is {scaled}");
+        }
+        // Back in two factors: `2^-127` itself is not a normal `f32`.
+        let back = scaled * exp2_f32(-shift / 2) * exp2_f32(-(shift - shift / 2));
+        assert_eq!(back.to_bits(), max.to_bits());
+    }
+
+    /// A maximum with nothing to normalise asks for no shift.
+    #[test]
+    fn a_strip_maximum_that_is_not_normal_is_left_alone() {
+        for max in [0.0, -1.0, f32::MIN_POSITIVE / 2.0, f32::INFINITY, f32::NAN] {
+            assert_eq!(strip_shift_f32(max), 0, "{max}");
         }
     }
 
