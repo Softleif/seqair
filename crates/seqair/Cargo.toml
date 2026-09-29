@@ -51,7 +51,7 @@ libc = "0.2"
 criterion = { version = "0.8", features = ["html_reports"] }
 
 # to compare with:
-bgzf = "0.3.0"
+bgzf = "0.5.0"
 rust-htslib = { workspace = true, default-features = false, features = [
     "libdeflate",
     "bzip2",
