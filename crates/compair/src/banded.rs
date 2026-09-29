@@ -5,6 +5,7 @@ use crate::{
     error::Error,
     haplotype::Haplotype,
     read::Read,
+    reference::trusted,
     scaling::{exp2_f32, exp2_f64, normalising_shift_f32},
     types::Log10Likelihood,
 };
@@ -59,16 +60,16 @@ impl Band {
     /// so an unbounded `width` is an unbounded allocation inside a safe
     /// function -- `u32::MAX` would ask for ~77 GB.
     ///
-    /// And a wide band is not a better answer, it is a worse one. The `f32`
-    /// kernels renormalise per **anti-diagonal**, and a diagonal holds one cell
-    /// per read row it crosses -- prefix alignments of that many lengths, whose
-    /// magnitudes span the whole alignment's dynamic range. The band is what
-    /// bounds that span: at `DEFAULT_WIDTH` the `f32` kernel reproduces the
-    /// `f64` recurrence over the same band to rounding even at
-    /// `log10 L = -200`, while a band wider than the read loses several log10
-    /// to underflow. Use [`align_full`] when the band is not wanted, not a
-    /// band wide enough to disable itself.
+    /// And a wide band is not a better answer, only a slower one. The
+    /// diagonal kernel renormalises per **anti-diagonal**, and a diagonal holds
+    /// one cell per read row it crosses -- prefix alignments of that many
+    /// lengths, whose magnitudes span the whole alignment's dynamic range. A
+    /// band wider than the read lets that span outrun `f32`, and the pairs it
+    /// loses are rescored in `f64` (see [`trusted`]), which is right and
+    /// several times slower. Use [`align_full`] when the band is not wanted,
+    /// not a band wide enough to disable itself.
     ///
+    /// [`trusted`]: crate::trusted
     /// [`align_full`]: crate::align_full
     pub const MAX_WIDTH: u32 = 1024;
 
@@ -372,7 +373,8 @@ impl Workspace {
         let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        crate::simd::banded_kernel_at(level, &self.plan, &mut self.ring, shape, band)
+        let score = crate::simd::banded_kernel_at(level, &self.plan, &mut self.ring, shape, band);
+        trusted(score, haplotype, read, emission, band)
     }
 
     fn align<L: Lane<Token = ()>, E: Emission>(
@@ -385,7 +387,8 @@ impl Workspace {
         let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        banded_kernel::<L>((), &self.plan, &mut self.ring, shape, band)
+        let score = banded_kernel::<L>((), &self.plan, &mut self.ring, shape, band);
+        trusted(score, haplotype, read, emission, band)
     }
 
     /// Folds the emission into the plan, so that from here on a kernel is

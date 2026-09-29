@@ -47,6 +47,7 @@ use crate::{
     emission::Emission,
     haplotype::Haplotype,
     read::Read,
+    reference::trusted,
     scaling::{exp2_f32, normalising_shift_f32},
     types::Log10Likelihood,
 };
@@ -123,7 +124,9 @@ impl Workspace {
         let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        crate::simd::strip_kernel_at(level, self.plan.view(), &mut self.rows, shape, band)
+        let score =
+            crate::simd::strip_kernel_at(level, self.plan.view(), &mut self.rows, shape, band);
+        trusted(score, haplotype, read, emission, band)
     }
 
     fn strips<L: Lane<Token = ()>, E: Emission>(
@@ -136,7 +139,8 @@ impl Workspace {
         let Some(shape) = self.fill_plan(haplotype, read, emission, band) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        strip_kernel::<L>((), self.plan.view(), &mut self.rows, shape, band)
+        let score = strip_kernel::<L>((), self.plan.view(), &mut self.rows, shape, band);
+        trusted(score, haplotype, read, emission, band)
     }
 }
 

@@ -29,6 +29,7 @@ use crate::{
     emission::Emission,
     haplotype::Haplotype,
     read::Read,
+    reference::trusted,
     strips::{RowBuffer, strip_kernel},
     types::Log10Likelihood,
 };
@@ -182,7 +183,8 @@ impl<E: Emission> StripParts<'_, E> {
             let columns = prepared
                 .for_strand(strand, |tracks| tracks.fill(haplotype, emission, strand, whole(h)?))?;
             let view = PlanView { rows: self.rows, columns };
-            Some(kernel(view, self.buffer, Shape { haplotype: h, read: r }, self.band))
+            let score = kernel(view, self.buffer, Shape { haplotype: h, read: r }, self.band);
+            Some(trusted(score, haplotype, self.read, emission, self.band))
         });
         score.unwrap_or(Log10Likelihood::IMPOSSIBLE)
     }
@@ -244,7 +246,9 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
                         crate::simd::batch_kernel_at(level, view, batch_rows, r, band)
                     })
                     .unwrap_or([Log10Likelihood::IMPOSSIBLE; BATCH]);
-                out.extend(scores.iter().take(group.len()).copied());
+                out.extend(scores.iter().zip(group.iter()).map(|(score, haplotype)| {
+                    trusted(*score, haplotype.borrow(), read, &*emission, band)
+                }));
             } else {
                 for (haplotype, prepared) in group.iter().zip(columns.iter_mut()) {
                     out.push(strips.score(haplotype.borrow(), prepared, &mut kernel));

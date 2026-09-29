@@ -30,20 +30,15 @@ use compair::{
     Band, Base, BaseQuality, Betas, Emission, Haplotype, Log10Likelihood, Probability, Read,
     StandardEmission, Strand, TapsEmission, Workspace, align_full, align_strips,
     gpu::{GpuAligner, GpuContext, GpuError, GpuPairs, Subnormals},
+    trusted,
 };
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
-use support::{
-    Case, any_conversion, any_probability, any_quality_case, arbitrary_case, derived_case, length,
-};
+use support::{Case, any_conversion, any_probability, arbitrary_case, derived_case, length};
 
 /// `|Δ log10|` the GPU may differ from the strip kernel by: the GATK vectors'
 /// tolerance. Measured: 6e-7 at worst on the 10s pairs.
 const TOLERANCE: f64 = 1e-4;
-
-/// The score below which [`TOLERANCE`] is not promised; see
-/// `the_gpu_is_the_strip_kernel_within_tolerance`.
-const FLOOR: f64 = -60.0;
 
 /// The shared device, or `None` where there is none; each GPU test then
 /// reports that it skipped rather than passing silently.
@@ -78,33 +73,42 @@ fn bits(scores: &[Log10Likelihood]) -> Vec<u64> {
 /// A case with a band of its own width, from 2 up to past the unrolled
 /// kernel's limit, so one launch spans several band classes.
 #[hegel::composite]
-fn banded_case_inner(tc: &TestCase, any_quality: bool) -> (Case, Band) {
-    let case = if any_quality {
-        tc.draw_silent(any_quality_case())
-    } else {
-        tc.draw_silent(arbitrary_case())
-    };
+fn banded_case_inner(tc: &TestCase) -> (Case, Band) {
+    let case = tc.draw_silent(arbitrary_case());
     let width = tc.draw_silent(gs::integers::<u32>().min_value(2).max_value(160));
     let Ok(band) = Band::new(width, case.offset) else { tc.reject() };
     (case, band)
 }
 
 fn banded_case() -> impl PrintableGenerator<(Case, Band)> {
-    banded_case_inner(false).print_as_debug()
+    banded_case_inner().print_as_debug()
 }
 
-/// The same with every quality a `Read` accepts, for the gates that are
-/// bit-exact: see `support::any_quality_case`.
-fn any_quality_banded_case() -> impl PrintableGenerator<(Case, Band)> {
-    banded_case_inner(true).print_as_debug()
+/// A GPU launch's scores, each passed through [`trusted`] as a caller does.
+type Rescue<'a> = dyn Fn(&[Log10Likelihood]) -> Vec<Log10Likelihood> + 'a;
+
+/// Each score through [`trusted`] with its case's pair, as a GPU caller does.
+fn rescued<'c>(
+    scores: &[Log10Likelihood],
+    cases: &'c [(Case, Band)],
+    emission: impl Fn(&'c Case) -> Box<dyn Emission + 'c>,
+) -> Vec<Log10Likelihood> {
+    scores
+        .iter()
+        .zip(cases)
+        .map(|(score, (case, band))| {
+            trusted(*score, &case.haplotype, &case.read, &*emission(case), *band)
+        })
+        .collect()
 }
 
-/// The emissions the parity gates sweep, for one batch of cases.
+/// The emissions the parity gates sweep, for one batch of cases: the plan,
+/// the strip kernel's scores, and the rescue a GPU caller applies.
 fn for_each_emission(
     cases: &[(Case, Band)],
     conversion: compair::ConversionModel,
     uniform: Probability,
-    mut check: impl FnMut(&str, &GpuPairs, Vec<Log10Likelihood>),
+    mut check: impl FnMut(&str, &GpuPairs, Vec<Log10Likelihood>, &Rescue<'_>),
 ) {
     let mut workspace = Workspace::new();
     {
@@ -115,7 +119,10 @@ fn for_each_emission(
                 workspace.align_strips(&case.haplotype, &case.read, &emission, *band)
             })
             .collect();
-        check("standard", &plan(cases, &emission).expect("the plan builds"), strips);
+        let rescue = |scores: &[Log10Likelihood]| {
+            rescued(scores, cases, |_| Box::new(StandardEmission::default()))
+        };
+        check("standard", &plan(cases, &emission).expect("the plan builds"), strips, &rescue);
     }
     {
         // Betas per site differ per case, so each case gets its own emission;
@@ -131,7 +138,12 @@ fn for_each_emission(
             pairs.push_pair(read, haplotype, *band).expect("the pair pushes");
             strips.push(workspace.align_strips(&case.haplotype, &case.read, &emission, *band));
         }
-        check("taps", &pairs, strips);
+        let rescue = |scores: &[Log10Likelihood]| {
+            rescued(scores, cases, |case| {
+                Box::new(TapsEmission::new(conversion, Betas::PerSite(&case.betas)))
+            })
+        };
+        check("taps", &pairs, strips, &rescue);
     }
     {
         let emission = TapsEmission::new(conversion, Betas::Uniform(uniform));
@@ -141,7 +153,12 @@ fn for_each_emission(
                 workspace.align_strips(&case.haplotype, &case.read, &emission, *band)
             })
             .collect();
-        check("uniform", &plan(cases, &emission).expect("the plan builds"), strips);
+        let rescue = |scores: &[Log10Likelihood]| {
+            rescued(scores, cases, |_| {
+                Box::new(TapsEmission::new(conversion, Betas::Uniform(uniform)))
+            })
+        };
+        check("uniform", &plan(cases, &emission).expect("the plan builds"), strips, &rescue);
     }
 }
 
@@ -152,11 +169,11 @@ fn for_each_emission(
 #[hegel::test(test_cases = pinned::cases(512))]
 fn the_kernel_algorithm_is_the_strip_kernel(tc: TestCase) {
     let count = tc.draw(length(1, 5));
-    let cases: Vec<_> = (0..count).map(|_| tc.draw(any_quality_banded_case())).collect();
+    let cases: Vec<_> = (0..count).map(|_| tc.draw(banded_case())).collect();
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
-    for_each_emission(&cases, conversion, uniform, |name, pairs, strips| {
-        assert_eq!(bits(&pairs.emulate(Subnormals::Kept)), bits(&strips), "{}", name);
+    for_each_emission(&cases, conversion, uniform, |name, pairs, strips, rescue| {
+        assert_eq!(bits(&rescue(&pairs.emulate(Subnormals::Kept))), bits(&strips), "{}", name);
     });
 }
 
@@ -166,7 +183,7 @@ fn the_kernel_algorithm_is_the_strip_kernel(tc: TestCase) {
 #[hegel::test(test_cases = pinned::cases(256))]
 fn appended_plans_are_one_plan(tc: TestCase) {
     let count = tc.draw(length(1, 23));
-    let cases: Vec<_> = (0..count).map(|_| tc.draw(any_quality_banded_case())).collect();
+    let cases: Vec<_> = (0..count).map(|_| tc.draw(banded_case())).collect();
     let cut_count = tc.draw(length(0, 3));
     let cuts: Vec<usize> = (0..cut_count).map(|_| tc.draw(length(0, 23))).collect();
     let emission = StandardEmission::default();
@@ -202,12 +219,12 @@ fn appended_plans_are_one_plan(tc: TestCase) {
 #[hegel::test(test_cases = pinned::cases(64))]
 fn the_gpu_runs_the_transcribed_kernel(tc: TestCase) {
     let count = tc.draw(length(1, 47));
-    let cases: Vec<_> = (0..count).map(|_| tc.draw(any_quality_banded_case())).collect();
+    let cases: Vec<_> = (0..count).map(|_| tc.draw(banded_case())).collect();
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
     let Some(context) = context() else { return };
     let mut aligner = GpuAligner::new(context);
-    for_each_emission(&cases, conversion, uniform, |name, pairs, _| {
+    for_each_emission(&cases, conversion, uniform, |name, pairs, _, _| {
         let gpu = bits(&aligner.align(pairs).expect("the launch runs"));
         let flushed = bits(&pairs.emulate(Subnormals::Flushed));
         let kept = bits(&pairs.emulate(Subnormals::Kept));
@@ -227,14 +244,11 @@ fn the_gpu_runs_the_transcribed_kernel(tc: TestCase) {
 
 /// The tolerance oracle against the CPU's strip kernel.
 ///
-/// Within [`TOLERANCE`] above [`FLOOR`], never above it anywhere, and
-/// `IMPOSSIBLE` wherever the strip kernel is. Below the floor a GPU that
-/// flushes subnormal intermediates can lose more: a pair that bad has its
-/// surviving path so far under each row's maximum that the flushed
-/// products were the path (measured over 200,000 random pairs: nothing
-/// above -40 changes at all, 2.9e-5 at worst above -60, up to 0.76 at
-/// -85 and below). Flushing only ever removes mass, so the GPU errs the
-/// way a band does: low.
+/// Within [`TOLERANCE`] everywhere once each score has been through
+/// [`trusted`], and `IMPOSSIBLE` wherever the strip kernel is. A GPU that
+/// flushes subnormal intermediates loses more than the CPU kernel only
+/// where a pair scores so low that its surviving path sat far under each
+/// row's maximum -- which is below the floor `trusted` rescores under.
 #[hegel::test(test_cases = pinned::cases(64))]
 fn the_gpu_is_the_strip_kernel_within_tolerance(tc: TestCase) {
     let count = tc.draw(length(1, 47));
@@ -243,8 +257,8 @@ fn the_gpu_is_the_strip_kernel_within_tolerance(tc: TestCase) {
     let uniform = tc.draw(any_probability());
     let Some(context) = context() else { return };
     let mut aligner = GpuAligner::new(context);
-    for_each_emission(&cases, conversion, uniform, |name, pairs, strips| {
-        let gpu = aligner.align(pairs).expect("the launch runs");
+    for_each_emission(&cases, conversion, uniform, |name, pairs, strips, rescue| {
+        let gpu = rescue(&aligner.align(pairs).expect("the launch runs"));
         for (index, (g, s)) in gpu.iter().zip(&strips).enumerate() {
             let (g, s) = (g.get(), s.get());
             if !s.is_finite() {
@@ -259,16 +273,7 @@ fn the_gpu_is_the_strip_kernel_within_tolerance(tc: TestCase) {
                 g,
                 s
             );
-            if s > FLOOR {
-                assert!(
-                    (g - s).abs() <= TOLERANCE,
-                    "{}: pair {}: gpu {} strips {}",
-                    name,
-                    index,
-                    g,
-                    s
-                );
-            }
+            assert!((g - s).abs() <= TOLERANCE, "{}: pair {}: gpu {} strips {}", name, index, g, s);
         }
     });
 }

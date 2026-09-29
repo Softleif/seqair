@@ -7,8 +7,8 @@
 //!
 //! - the scalar and SIMD instances of each traversal are bit-identical, fresh
 //!   or through a reused `Workspace`;
-//! - the two traversals agree on whether a path exists, and on the score
-//!   where `f32` holds it;
+//! - every kernel's score is the `f64` recurrence over its band, at any
+//!   score -- where `f32` cannot hold it, the entry point rescores in `f64`;
 //! - no kernel ever returns a `NaN`, only a finite score or `IMPOSSIBLE`;
 //! - a band never beats the unbanded reference, and widening a band never
 //!   lowers the score;
@@ -18,7 +18,7 @@ use arbitrary::Arbitrary;
 use compair::{
     BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood,
     Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded,
-    align_banded_simd, align_full, align_strips, align_strips_simd,
+    align_banded_f64, align_banded_simd, align_full, align_strips, align_strips_simd,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -95,20 +95,19 @@ fn check<E: Emission>(
         }
     }
     assert!(!full.get().is_nan(), "{name}: reference NaN");
-    // The strip kernel is the same recurrence over the same band, so the two
-    // traversals agree on whether a path exists at all, and on the score
-    // where `f32` holds it: they renormalise at different points and sum the
-    // last row in different precisions, which is rounding.
-    assert_eq!(
-        scalar.get().is_finite(),
-        strips.get().is_finite(),
-        "{name}: diagonals {scalar:?} vs strips {strips:?}"
-    );
-    if scalar.get().is_finite() && scalar.get() > -30.0 {
-        assert!(
-            (scalar.get() - strips.get()).abs() <= 1e-4 * (1.0 + scalar.get().abs()),
-            "{name}: diagonals {scalar:?} vs strips {strips:?}"
-        );
+    // Both traversals are the `f64` recurrence over the band, to rounding,
+    // at any score: they agree on whether a path exists at all, and on its
+    // score.
+    let want = align_banded_f64(haplotype, read, emission, band).get();
+    assert!(!want.is_nan(), "{name}: f64 NaN");
+    for (kernel, got) in [("diagonals", scalar.get()), ("strips", strips.get())] {
+        assert_eq!(got.is_finite(), want.is_finite(), "{name}: {kernel} {got} vs f64 {want}");
+        if want.is_finite() {
+            assert!(
+                (got - want).abs() <= 1e-4 * (1.0 + want.abs()),
+                "{name}: {kernel} {got} vs f64 {want}"
+            );
+        }
     }
     if scalar.get().is_finite() {
         assert!(
@@ -122,28 +121,20 @@ fn check<E: Emission>(
             "{name}: strips {strips:?} beats the reference {full:?}"
         );
     }
-    // Widening can only add paths -- where f32 holds the score. A cell the
-    // kernel flushes is below `2^-126` of its diagonal's maximum, so below
-    // ~1e-38 in absolute terms, and cannot move a total of 1e-30 or more;
-    // below that, a wider band's diagonals span more dynamic range and can
-    // flush mass a narrower band kept, which the crate documents.
+    // Widening can only add paths.
     if let Ok(wider) = Band::new(band.width().saturating_add(8), band.offset())
         && scalar.get().is_finite()
     {
-        let b = align_banded_simd(haplotype, read, emission, wider);
-        if b.get() > -30.0 {
-            assert!(
-                scalar.get() <= b.get() + 1e-4 * (1.0 + b.get().abs()),
-                "{name}: narrow {scalar:?} beats wider {b:?}"
-            );
-        }
-        let b = align_strips_simd(haplotype, read, emission, wider);
-        if b.get() > -30.0 {
-            assert!(
-                strips.get() <= b.get() + 1e-4 * (1.0 + b.get().abs()),
-                "{name}: strips narrow {strips:?} beats wider {b:?}"
-            );
-        }
+        let b = align_banded_simd(haplotype, read, emission, wider).get();
+        assert!(
+            scalar.get() <= b + 1e-4 * (1.0 + b.abs()),
+            "{name}: narrow {scalar:?} beats wider {b}"
+        );
+        let b = align_strips_simd(haplotype, read, emission, wider).get();
+        assert!(
+            strips.get() <= b + 1e-4 * (1.0 + b.abs()),
+            "{name}: strips narrow {strips:?} beats wider {b}"
+        );
     }
 }
 
@@ -198,44 +189,22 @@ fuzz_target!(|input: Input| {
     check("standard", &haplotype, &read, &standard, band, &mut workspace);
     check("taps", &haplotype, &read, &taps, band, &mut workspace);
 
-    // A band holding the whole matrix is the reference, where f32 can hold
-    // the score at all. A diagonal of such a band crosses every read row, so
-    // its cells span the alignment's whole dynamic range and everything more
-    // than ~1e-38 below the diagonal's maximum flushes to zero -- down to
-    // `IMPOSSIBLE` for a read that scores hundreds of log10 below its start
-    // prior. The crate documents that; the comparison is only meaningful
-    // where the score is within f32's reach.
+    // A band holding the whole matrix is the reference, at any score.
     let span = 2 * (haplotype.len() + read.len() + 4);
     if let Ok(width) = u32::try_from(span)
         && let Ok(whole) = Band::new(width, 0)
     {
         let full = align_full(&haplotype, &read, &standard).get();
         let banded = align_banded_simd(&haplotype, &read, &standard, whole).get();
-        if full > -30.0 {
-            assert!(
-                (banded - full).abs() < 1e-3 * (1.0 + full.abs()),
-                "whole-matrix band {banded} against the reference {full}"
-            );
-        } else if banded.is_finite() {
-            assert!(
-                banded <= full + 1e-3 * (1.0 + full.abs()),
-                "whole-matrix band {banded} over {full}"
-            );
-        }
-        // The strip kernel's dynamic range is eight rows whatever the band,
-        // so it is held to the reference wherever the reference is finite
-        // and within f32's absolute range at all.
         let strips = align_strips_simd(&haplotype, &read, &standard, whole).get();
-        if full > -30.0 {
-            assert!(
-                (strips - full).abs() < 1e-3 * (1.0 + full.abs()),
-                "whole-matrix strips {strips} against the reference {full}"
-            );
-        } else if strips.is_finite() {
-            assert!(
-                strips <= full + 1e-3 * (1.0 + full.abs()),
-                "whole-matrix strips {strips} over {full}"
-            );
+        for (kernel, got) in [("band", banded), ("strips", strips)] {
+            assert_eq!(got.is_finite(), full.is_finite(), "whole-matrix {kernel} {got} vs {full}");
+            if full.is_finite() {
+                assert!(
+                    (got - full).abs() < 1e-3 * (1.0 + full.abs()),
+                    "whole-matrix {kernel} {got} against the reference {full}"
+                );
+            }
         }
     }
 });

@@ -11,6 +11,11 @@
 //! parity with [`align_strips`](crate::align_strips) is not promised, and the
 //! oracle for this kernel is a tolerance, not equality.
 //!
+//! Scores come back without their pairs' inputs, so the one thing the CPU
+//! entry points do after their kernels -- rescoring a pair that finished
+//! below `f32`'s floor in `f64` -- is the caller's: pass each score through
+//! [`trusted`](crate::trusted).
+//!
 //! ```no_run
 //! use compair::gpu::{GpuAligner, GpuContext, GpuPairs};
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,6 +40,7 @@
 //! }
 //! // In push order; `submit` returns once the launch is queued.
 //! let scores = aligner.submit(&pairs)?.collect()?;
+//! // Then each through `compair::trusted` with its pair, as the CPU does.
 //! # Ok(()) }
 //! ```
 //!

@@ -85,6 +85,7 @@ use crate::{
     haplotype::Haplotype,
     lanes::{Cells, ColumnBlock, LaneRows, LanesView, RowEntry, lanes_kernel},
     read::Read,
+    reference::trusted,
     types::Log10Likelihood,
 };
 
@@ -673,7 +674,11 @@ impl Workspace {
         } else {
             [Log10Likelihood::IMPOSSIBLE; PAIRS]
         };
-        out.extend(scores.iter().take(group.len()).copied());
+        out.extend(
+            scores.iter().zip(group).map(|(score, pair)| {
+                trusted(*score, pair.haplotype, pair.read, emission, pair.band)
+            }),
+        );
     }
 }
 

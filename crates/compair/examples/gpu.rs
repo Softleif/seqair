@@ -12,6 +12,7 @@ use std::time::Instant;
 use compair::{
     Band, Base, BaseQuality, Haplotype, Read, StandardEmission, Strand, Workspace,
     gpu::{GpuAligner, GpuContext, GpuError, GpuPairs},
+    trusted,
 };
 
 const READS: usize = 4096;
@@ -67,6 +68,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the next `GpuPairs` before `collect` waits for these scores.
     let on_gpu = aligner.submit(&pairs)?.collect()?;
     println!("GPU, one launch: {} pairs in {:?}", on_gpu.len(), started.elapsed());
+    // What the CPU entry points do after their kernels: a pair that finished
+    // below the floor `f32` can vouch for is scored again in `f64`.
+    let pairs_in_order =
+        reads.iter().flat_map(|&(read, band)| haplotypes.iter().map(move |&h| (h, read, band)));
+    let on_gpu: Vec<_> = on_gpu
+        .iter()
+        .zip(pairs_in_order)
+        .map(|(score, (haplotype, read, band))| trusted(*score, haplotype, read, &emission, band))
+        .collect();
 
     // Scores come back in push order, which is `align_reads`' order here.
     // They are not promised bit-identical to the CPU's -- GPU compilers may

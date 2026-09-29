@@ -12,8 +12,8 @@ use compair::{
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator};
 use support::{
-    any_base_or_n, any_conversion, any_probability, any_quality_case, arbitrary_case, derived_case,
-    length, plausible_conversion,
+    any_base_or_n, any_conversion, any_probability, arbitrary_case, derived_case, length,
+    plausible_conversion,
 };
 
 // The bit-parity gates are the cheapest of these and the ones most worth
@@ -26,7 +26,7 @@ use support::{
 /// nothing from the previous pair leaks into the next.
 #[hegel::test(test_cases = pinned::cases(2048))]
 fn simd_is_bit_identical_to_scalar(tc: TestCase) {
-    let case = tc.draw(any_quality_case());
+    let case = tc.draw(arbitrary_case());
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
     let band = case.band();
@@ -82,7 +82,7 @@ fn simd_is_bit_identical_to_scalar(tc: TestCase) {
 /// and one workspace serves both traversals in any order.
 #[hegel::test(test_cases = pinned::cases(2048))]
 fn strips_simd_is_bit_identical_to_strips_scalar(tc: TestCase) {
-    let case = tc.draw(any_quality_case());
+    let case = tc.draw(arbitrary_case());
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
     let band = case.band();
@@ -146,7 +146,7 @@ fn strips_simd_is_bit_identical_to_strips_scalar(tc: TestCase) {
 /// may leak into the next.
 #[hegel::test(test_cases = pinned::cases(512))]
 fn every_simd_level_is_bit_identical_to_scalar(tc: TestCase) {
-    let case = tc.draw(any_quality_case());
+    let case = tc.draw(arbitrary_case());
     let conversion = tc.draw(any_conversion());
     let spread = tc.draw(gs::integers::<usize>().max_value(3));
     let band = case.band();
@@ -450,7 +450,9 @@ fn the_bundled_conversion_model_is_the_measured_one() {
 /// emission. Written out rather than derived from `align_full` so that a
 /// change to the kernel's index algebra has to disagree with something.
 ///
-/// Gap-open qualities below Q6 count as Q6, as GATK squashes them.
+/// Gap-open qualities below Q6 count as Q6, as GATK squashes them. Each row
+/// is rescaled by a power of two, which is exact, so the oracle holds every
+/// score `f64` can write down however far below zero it is.
 #[allow(
     clippy::indexing_slicing,
     reason = "every index is in 0..=h and every row is allocated with h + 1 entries"
@@ -474,6 +476,7 @@ fn align_masked<E: compair::Emission>(
     };
     let gap_open =
         |track: &[BaseQuality], index: usize| quality(track, index).min(10f64.powf(-0.6));
+    let mut log10_scale = 0.0f64;
 
     #[allow(clippy::cast_precision_loss, reason = "test haplotypes are short")]
     let init = 1.0 / h as f64;
@@ -506,17 +509,26 @@ fn align_masked<E: compair::Emission>(
             cur_i[j] = prev_m[j] * p_ins + prev_i[j] * gap;
             cur_d[j] = cur_m[j - 1] * p_del + cur_d[j - 1] * gap;
         }
+        let max = cur_m.iter().chain(&cur_i).chain(&cur_d).fold(0.0f64, |a, &b| a.max(b));
+        if max > 0.0 {
+            let exponent = max.log2().floor();
+            let factor = 2f64.powf(-exponent);
+            for cell in cur_m.iter_mut().chain(cur_i.iter_mut()).chain(cur_d.iter_mut()) {
+                *cell *= factor;
+            }
+            log10_scale += exponent * core::f64::consts::LOG10_2;
+        }
         core::mem::swap(&mut prev_m, &mut cur_m);
         core::mem::swap(&mut prev_i, &mut cur_i);
         core::mem::swap(&mut prev_d, &mut cur_d);
     }
     let total: f64 = prev_m.iter().zip(prev_i.iter()).skip(1).map(|(m, i)| m + i).sum();
-    if total <= 0.0 { f64::NEG_INFINITY } else { total.log10() }
+    if total <= 0.0 { f64::NEG_INFINITY } else { total.log10() + log10_scale }
 }
 
-/// Every entry point, on one case: the scalar and SIMD diagonal and strip
-/// kernels, the batch kernel (the haplotype eight times) and the pairs
-/// kernel (the read eight times).
+/// Every entry point, on one case: the `f64` banded recurrence, the scalar
+/// and SIMD diagonal and strip kernels, the batch kernel (the haplotype eight
+/// times) and the pairs kernel (the read eight times).
 fn every_entry_point<E: compair::Emission>(
     case: &support::Case,
     emission: &E,
@@ -529,6 +541,7 @@ fn every_entry_point<E: compair::Emission>(
     let mut pairs = Vec::new();
     workspace.align_reads(&[haplotype], &[(read, band); compair::PAIRS], emission, &mut pairs);
     let mut all = vec![
+        ("f64", compair::align_banded_f64(haplotype, read, emission, band).get()),
         ("diagonals", align_banded(haplotype, read, emission, band).get()),
         ("diagonals/simd", align_banded_simd(haplotype, read, emission, band).get()),
         ("strips", align_strips(haplotype, read, emission, band).get()),
@@ -537,6 +550,49 @@ fn every_entry_point<E: compair::Emission>(
     all.extend(batch.iter().map(|score| ("batch", score.get())));
     all.extend(pairs.iter().map(|score| ("pairs", score.get())));
     all
+}
+
+/// **Every score is the `f64` recurrence over its band**, at every quality a
+/// read can carry and however far below zero the score is -- not only where
+/// a random read happens to score above `-30`. The `f32` kernels cannot hold
+/// every such score themselves: a cell more than `2^-126` below the row (or
+/// diagonal) it is scaled by flushes to zero, which loses nothing measurable
+/// while the total stays well above that, and everything once it does not.
+/// So an entry point that finishes below the level where its flushes could
+/// matter scores the pair again in `f64`, and that is what this holds.
+#[hegel::test(test_cases = pinned::cases(1024))]
+fn every_score_is_the_f64_recurrence_over_its_band(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(63));
+    let conversion = tc.draw(any_conversion());
+    let band = Band::new(width, case.offset).expect("width");
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    for (emission, want, got) in [
+        (
+            "standard",
+            align_masked(&case.haplotype, &case.read, &StandardEmission::default(), band),
+            every_entry_point(&case, &StandardEmission::default(), band),
+        ),
+        (
+            "taps",
+            align_masked(&case.haplotype, &case.read, &taps, band),
+            every_entry_point(&case, &taps, band),
+        ),
+    ] {
+        for (kernel, got) in got {
+            assert_eq!(
+                got.is_finite(),
+                want.is_finite(),
+                "{emission}/{kernel}: {got} against the f64 recurrence {want}"
+            );
+            if want.is_finite() {
+                assert!(
+                    (got - want).abs() < 1e-4 * (1.0 + want.abs()),
+                    "{emission}/{kernel}: {got} against the f64 recurrence {want}"
+                );
+            }
+        }
+    }
 }
 
 /// A read whose every base is below Q2 says nothing about which haplotype it
@@ -580,6 +636,42 @@ fn a_read_with_no_information_scores_every_haplotype_alike(tc: TestCase) {
     assert!((x - y).abs() <= 1e-12 * (1.0 + x.abs()), "full: {x} against {y}");
 }
 
+/// A read that fits nowhere, with qualities a real run reports: eighty `C`s
+/// at Q40 against a homopolymer of `A`s. Every path pays at least a Q40
+/// mismatch or a Q60 gap per row, so eight rows take every cell below
+/// `2^-126` of the row the kernels last scaled by, and the `f32` kernels
+/// returned `-inf` for a pair the `f64` recurrence scores near `-440`.
+#[test]
+fn a_read_that_fits_nowhere_still_has_a_score() {
+    let emission = StandardEmission::default();
+    for h in [9, 17, 40] {
+        let haplotype = Haplotype::new(vec![Base::A; h]);
+        let read = Read::uniform(
+            vec![Base::C; 80],
+            &[BaseQuality::from_byte(40); 80],
+            BaseQuality::from_byte(60),
+            BaseQuality::from_byte(60),
+            BaseQuality::from_byte(60),
+            Strand::OT,
+        )
+        .expect("valid");
+        let band = Band::new(Band::MAX_WIDTH, 0).expect("width");
+        let want = align_full(&haplotype, &read, &emission).get();
+        let case = support::Case {
+            haplotype: haplotype.clone(),
+            read: read.clone(),
+            offset: 0,
+            betas: vec![],
+        };
+        for (kernel, got) in every_entry_point(&case, &emission, band) {
+            assert!(
+                (got - want).abs() < 1e-4 * (1.0 + want.abs()),
+                "haplotype {h}: {kernel} {got} against the full reference {want}"
+            );
+        }
+    }
+}
+
 /// The band is exactly the strip `Band` documents: `|j - i - offset| <=
 /// width / 2` and nothing else. `arbitrary_case` reaches offsets outside
 /// the matrix on both sides, which is where the kernel's clamps live.
@@ -620,16 +712,12 @@ fn the_band_is_the_documented_predicate(tc: TestCase) {
             got,
             want
         );
-        // The finite/infinite agreement above is the geometry claim, and
-        // it is unconditional -- it is what caught B1. The *value* is only
-        // compared where f32 can hold it: `width` here runs to 64 against
-        // reads as short as one base, so past the read length a diagonal
-        // crosses every read row and the kernel underflows by a fraction of
-        // the score, up to several log10
-        // (`an_unbanded_f32_run_underflows_where_a_real_band_does_not`).
-        if got.is_finite() && want > -30.0 {
+        // The finite/infinite agreement above is the geometry claim -- it is
+        // what caught B1. The value holds at any score: where the `f32`
+        // kernel's range runs out the entry point rescores in `f64`.
+        if want.is_finite() {
             assert!(
-                (got - want).abs() < 1e-3 * (1.0 + want.abs()),
+                (got - want).abs() < 1e-4 * (1.0 + want.abs()),
                 "{}: kernel {} masked oracle {}",
                 name,
                 got,
@@ -642,14 +730,11 @@ fn the_band_is_the_documented_predicate(tc: TestCase) {
 /// Widening a band can only add paths, so it can only raise the score, and
 /// no band can beat the unbanded reference.
 ///
-/// The second half is unconditional: the `f32` kernel only ever loses
-/// mass, to rounding and to the subnormals it flushes. The first half
-/// holds where `f32` holds the score. A flushed cell is below `2^-126`
-/// of its diagonal's maximum, so below ~1e-38 in absolute terms, and
-/// cannot move a total of 1e-30 or more; below that a wider band's
-/// diagonals span more dynamic range and can flush mass a narrower band
-/// kept -- the fuzzer found a pair at `-133` where eight more columns
-/// cost 0.16 -- which is the regime `Band::MAX_WIDTH` documents.
+/// Both halves hold at any score. The `f32` kernels only ever lose mass,
+/// to rounding and to the subnormals they flush; a wider band's diagonals
+/// span more dynamic range and can flush mass a narrower band kept -- the
+/// fuzzer found a pair at `-133` where eight more columns cost 0.16 -- but
+/// that is below the floor where the entry points rescore in `f64`.
 #[hegel::test(test_cases = pinned::cases(1024))]
 fn a_band_is_monotone_in_its_width_and_never_beats_the_reference(tc: TestCase) {
     let case = tc.draw(arbitrary_case());
@@ -672,10 +757,20 @@ fn a_band_is_monotone_in_its_width_and_never_beats_the_reference(tc: TestCase) {
         ),
     ] {
         assert!(!a.is_nan() && !b.is_nan(), "{}: a {} b {}", name, a, b);
-        if b > -30.0 {
-            assert!(a <= b + 1e-4, "{}: narrow {} beats wider {}", name, a, b);
-        }
-        assert!(b <= full + 1e-4, "{}: banded {} beats the reference {}", name, b, full);
+        assert!(
+            a <= b || a - b <= 1e-4 * (1.0 + b.abs()),
+            "{}: narrow {} beats wider {}",
+            name,
+            a,
+            b
+        );
+        assert!(
+            b <= full || b - full <= 1e-4 * (1.0 + full.abs()),
+            "{}: banded {} beats the reference {}",
+            name,
+            b,
+            full
+        );
     }
 }
 
@@ -704,11 +799,10 @@ fn the_f32_band_is_the_f64_recurrence_over_the_same_band(tc: TestCase) {
     }
 }
 
-/// The same, at every width: `the_band_is_the_documented_predicate` above
-/// only compares *values* where a random read scores above `-30`, which
-/// is short reads. Reads cut from the haplotype score near zero at any
-/// length, so this is where a 100-base read meets a 3-column band and
-/// the `f32` numbers still have to be the `f64` recurrence's.
+/// The same, at every width, on reads cut from the haplotype: they score
+/// near zero at any length, so this is where a 100-base read meets a
+/// 3-column band and the `f32` kernels' own numbers -- not a rescue --
+/// have to be the `f64` recurrence's.
 #[hegel::test(test_cases = pinned::cases(1024))]
 fn the_f32_band_is_the_f64_recurrence_at_every_width(tc: TestCase) {
     let case = tc.draw(derived_case(3));
@@ -740,7 +834,7 @@ fn the_f32_band_is_the_f64_recurrence_at_every_width(tc: TestCase) {
 /// where the tail-lane masking is exercised.
 #[hegel::test(test_cases = pinned::cases(1024))]
 fn simd_is_bit_identical_to_scalar_at_every_width(tc: TestCase) {
-    let case = tc.draw(any_quality_case());
+    let case = tc.draw(arbitrary_case());
     let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(63));
     let conversion = tc.draw(any_conversion());
     let band = Band::new(width, case.offset).expect("w");
@@ -776,7 +870,7 @@ fn strips_and_diagonals_are_the_same_recurrence(tc: TestCase) {
         diagonals,
         strips
     );
-    if diagonals.is_finite() && diagonals > -30.0 {
+    if diagonals.is_finite() {
         assert!(
             (diagonals - strips).abs() < 1e-4 * (1.0 + diagonals.abs()),
             "width {}: diagonals {} strips {}",
@@ -1007,14 +1101,13 @@ fn band_new_truncates_odd_widths() {
 /// whole dynamic range. A band of half-width `w` crosses at most `w + 1` rows,
 /// which bounds that span; a band wider than the read crosses all of them,
 /// and everything more than ~1e-38 below the diagonal's maximum flushes to
-/// zero in `f32`.
+/// zero in `f32`. On these pairs, which score near `-75`, the `f32` diagonal
+/// kernel on its own lost several log10 at width 320.
 ///
-/// Measured here: at `DEFAULT_WIDTH` the `f32` kernel is bit-for-bit the `f64`
-/// recurrence over the same band even at `log10 L = -75`; widen the band past
-/// the read and it loses several log10. The loss is always an under-estimate,
-/// never an over-estimate, so it cannot make a wrong haplotype win.
+/// That is below the floor where every entry point rescores a pair in `f64`,
+/// so what a caller gets is the recurrence at both widths.
 #[test]
-fn an_unbanded_f32_run_underflows_where_a_real_band_does_not() {
+fn a_band_wider_than_the_read_is_still_the_recurrence() {
     let mut state = 0x5151_2323_9999_0f0f_u64;
     let mut next = move || {
         state ^= state << 13;
@@ -1066,18 +1159,18 @@ fn an_unbanded_f32_run_underflows_where_a_real_band_does_not() {
         "at DEFAULT_WIDTH the f32 kernel tracks the f64 recurrence to rounding, worst {worst_banded}"
     );
     assert!(
-        worst_unbanded > 1.0,
-        "a band wider than the read is expected to underflow visibly; worst seen {worst_unbanded}"
+        worst_unbanded < 1e-5,
+        "a band wider than the read is rescored where f32 cannot hold it, worst {worst_unbanded}"
     );
 }
 
-/// The strip kernel's precision does not depend on the band. It renormalises
-/// every eight *rows*, and the cells between two renormalisations are prefix
-/// alignments of eight lengths at most, however wide the band -- where the
-/// diagonal kernel renormalises per anti-diagonal and a diagonal crosses one
-/// row per column of the band. So on the pairs the test above uses to show
-/// the diagonal kernel losing several log10 at width 320, the strip kernel
-/// tracks the `f64` recurrence to rounding at both widths.
+/// The same pairs through the strip entry point. It renormalises every eight
+/// *rows* rather than per anti-diagonal, so a wide band costs it less range
+/// than the diagonal kernel -- but not none: a row's cells are prefix
+/// alignments ending at every column of the band, and a read much longer
+/// than its haplotype spreads them past `f32` too. These pairs score below
+/// the floor, so what this holds is the entry point: the recurrence at both
+/// widths, deep into the dynamic range.
 #[test]
 fn the_strip_kernel_tracks_the_recurrence_at_any_width() {
     let mut state = 0x5151_2323_9999_0f0f_u64;
@@ -1138,7 +1231,7 @@ fn the_strip_kernel_tracks_the_recurrence_at_any_width() {
 /// A band wide enough to hold the whole matrix is not a constraint, so it must
 /// give back the unbanded reference. Run on GATK's own 164 x 101 vectors, whose
 /// scores are a few log10 and so well inside `f32`'s range -- see
-/// `an_unbanded_f32_run_underflows_where_a_real_band_does_not` for what happens
+/// `a_band_wider_than_the_read_is_still_the_recurrence` for what happens
 /// when they are not.
 #[test]
 fn a_band_that_holds_the_whole_matrix_is_not_a_constraint() {
@@ -1269,7 +1362,7 @@ fn a_band_with_no_start_cell_is_impossible() {
 /// last row was reached through the insertion state alone, against a
 /// haplotype that is mostly `N`. With `eps` capped at 3/4 the emissions are a
 /// quarter and the pair no longer collapses a diagonal; it stays as a
-/// regression pin.
+/// regression pin, and the rescue covers any pair where the lifts would not.
 ///
 /// On the diagonal where the free-start cell leaves the band, the only cell
 /// left is the tail of a long deletion chain, `gap^n`, and the diagonal's
@@ -1369,7 +1462,7 @@ fn band_new_rejects_a_width_it_would_have_to_allocate() {
 /// bug rather than a traversal bug.
 #[hegel::test(test_cases = pinned::cases(1024))]
 fn a_batch_is_bit_identical_to_one_alignment_at_a_time(tc: TestCase) {
-    let case = tc.draw(any_quality_case());
+    let case = tc.draw(arbitrary_case());
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
     let spread = tc.draw(gs::integers::<usize>().max_value(3));

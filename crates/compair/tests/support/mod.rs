@@ -245,18 +245,11 @@ pub fn derived_case(max_edits: usize) -> impl PrintableGenerator<Case> {
 /// An unconstrained pair, for the bit-parity check: the band is allowed to miss
 /// the alignment entirely, because parity must hold there too.
 ///
-/// Qualities run from Q2 to Q45, as sequencers report them. The value and
-/// geometry checks built on this hold an `f32` kernel to an `f64` one, and
-/// at `Q0` (`eps = 1`) a pair can score near `-40`, where the strip kernel
-/// loses it altogether and the `f64` recurrence does not.
+/// Qualities run over every value a `Read` accepts, `Q0` to `Q254`: below
+/// Q2 the emission caps `eps` at 3/4, below Q6 a gap-open quality counts as
+/// Q6, and at the top a single mismatch costs `10^-25`, which is where the
+/// `f32` kernels' range runs out and the `f64` rescue takes over.
 pub fn arbitrary_case() -> impl PrintableGenerator<Case> {
-    arbitrary_case_inner(2, 45).print_as_debug()
-}
-
-/// `arbitrary_case` with every quality a `Read` accepts, `Q0` to `Q254`, for
-/// the gates that compare two kernels to the bit: those hold wherever the
-/// kernels run, including where both lose the score to underflow.
-pub fn any_quality_case() -> impl PrintableGenerator<Case> {
     arbitrary_case_inner(0, 254).print_as_debug()
 }
 

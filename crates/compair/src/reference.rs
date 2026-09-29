@@ -1,5 +1,6 @@
 use crate::{
-    emission::{Emission, MatchProbability},
+    banded::Band,
+    emission::{Emission, MatchProbability, epsilon},
     haplotype::Haplotype,
     read::Read,
     scaling::{exp2_f64, normalising_shift_f64},
@@ -97,4 +98,163 @@ fn rescale_row(m: &mut [f64], i: &mut [f64], d: &mut [f64], exponent: &mut i32) 
         *value *= factor;
     }
     *exponent += shift;
+}
+
+/// The `f64` recurrence over a band: [`align_full`] restricted to the cells
+/// `|j - i - offset| <= width / 2`, which is what every banded kernel
+/// computes in `f32`.
+///
+/// It is what an `f32` score falls back to below the level where `f32` can
+/// vouch for it (see [`trusted`]), and it is exposed for callers that want the
+/// banded answer without the `f32` kernels' range. It visits only the band's
+/// cells, one row at a time, and rescales each row by a power of two, so it
+/// holds any score `f64` can write down -- but it is scalar, several times
+/// slower than the kernels.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "every index is in 0..=h and every row is allocated with h + 1 entries"
+)]
+pub fn align_banded_f64<E: Emission + ?Sized>(
+    haplotype: &Haplotype,
+    read: &Read,
+    emission: &E,
+    band: Band,
+) -> Log10Likelihood {
+    let (h, r) = (haplotype.len(), read.len());
+    if h == 0 || r == 0 {
+        return Log10Likelihood::IMPOSSIBLE;
+    }
+    // The columns of row `i` inside the band and the haplotype, `1..=h` for
+    // every row but the start row's `0..=h`.
+    let span = |i: usize, first: usize| -> Option<(usize, usize)> {
+        let (i, last) = (i64::try_from(i).ok()?, i64::try_from(h).ok()?);
+        let centre = i.checked_add(band.offset)?;
+        let low = centre.checked_sub(band.half_width)?.max(i64::try_from(first).ok()?);
+        let high = centre.checked_add(band.half_width)?.min(last);
+        (low <= high).then_some((usize::try_from(low).ok()?, usize::try_from(high).ok()?))
+    };
+
+    let mut prev_m = vec![0.0f64; h + 1];
+    let mut prev_i = vec![0.0f64; h + 1];
+    let mut prev_d = vec![0.0f64; h + 1];
+    let Some(mut prev_span) = span(0, 0) else {
+        return Log10Likelihood::IMPOSSIBLE;
+    };
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a haplotype long enough to lose precision here does not exist"
+    )]
+    let init = 1.0 / h as f64;
+    prev_d[prev_span.0..=prev_span.1].fill(init);
+    let mut exponent = 0i32;
+    let (mut cur_m, mut cur_i, mut cur_d) =
+        (vec![0.0f64; h + 1], vec![0.0f64; h + 1], vec![0.0f64; h + 1]);
+    // What the `cur` buffers still hold from two rows up.
+    let mut stale: Option<(usize, usize)> = None;
+    // The emission's two halves, each once: per haplotype column the band
+    // reaches, and per read row. The composition per cell is what
+    // `MatchProbability` does.
+    let Some((first, last)) = band.columns(h, r) else {
+        return Log10Likelihood::IMPOSSIBLE;
+    };
+    let strand = read.strand();
+    let weights: Option<Vec<_>> = (first..=last)
+        .map(|index| Some(emission.site_weights(haplotype.site(index)?, strand)))
+        .collect();
+    let Some(weights) = weights else {
+        return Log10Likelihood::IMPOSSIBLE;
+    };
+
+    for i in 1..=r {
+        let (Some(observation), Some(t)) = (read.observation(i - 1), read.transition(i - 1)) else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        let eps = epsilon(emission, observation);
+        if let Some((low, high)) = stale {
+            for buffer in [&mut cur_m, &mut cur_i, &mut cur_d] {
+                buffer[low..=high].fill(0.0);
+            }
+        }
+        // A row with no cell in the band ends every path.
+        let Some((low, high)) = span(i, 1) else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        for j in low..=high {
+            let Some(site) = (j - 1).checked_sub(first).and_then(|at| weights.get(at)) else {
+                return Log10Likelihood::IMPOSSIBLE;
+            };
+            let prior = site.probability(observation.base, eps);
+            cur_m[j] = prior
+                * (prev_m[j - 1] * t.match_to_match
+                    + prev_i[j - 1] * t.indel_to_match
+                    + prev_d[j - 1] * t.indel_to_match);
+            cur_i[j] = prev_m[j] * t.match_to_insertion + prev_i[j] * t.gap_continuation;
+            cur_d[j] = cur_m[j - 1] * t.match_to_deletion + cur_d[j - 1] * t.gap_continuation;
+        }
+        rescale_row(
+            &mut cur_m[low..=high],
+            &mut cur_i[low..=high],
+            &mut cur_d[low..=high],
+            &mut exponent,
+        );
+        core::mem::swap(&mut prev_m, &mut cur_m);
+        core::mem::swap(&mut prev_i, &mut cur_i);
+        core::mem::swap(&mut prev_d, &mut cur_d);
+        stale = Some(prev_span);
+        prev_span = (low, high);
+    }
+
+    let total: f64 = prev_m.iter().zip(prev_i.iter()).skip(1).map(|(m, i)| m + i).sum();
+    if total <= 0.0 {
+        return Log10Likelihood::IMPOSSIBLE;
+    }
+    Log10Likelihood::new(total.log10() - f64::from(exponent) * core::f64::consts::LOG10_2)
+}
+
+/// An `f32` kernel's score where `f32` can vouch for it, and the `f64`
+/// recurrence over the same band where it cannot.
+///
+/// The `f32` kernels scale by powers of two -- per row, or per anti-diagonal
+/// -- so that the cell they scale by sits in `[1, 2)`, and flush every stored
+/// cell below `2^-126` to zero. With the transitions out of every state a
+/// distribution and every emission at most one, each cell is a probability,
+/// so the cell a scale is taken from is at most one and a flushed cell held
+/// less than `2^-125` in absolute terms. The paths through it can reach the
+/// final row with no more than that, and there are at most three cells per
+/// row per band column to flush. So the total an `f32` kernel returns is
+/// short of the recurrence's by less than `3 * (r + 1) * columns * 2^-125`,
+/// and a total a million times that is right to within a millionth.
+///
+/// Below that the kernel may have flushed anything up to the whole answer --
+/// eight rows of confident mismatches take every cell under `2^-126` at once
+/// -- and the pair is scored again by [`align_banded_f64`]. Every kernel
+/// returns the same `f32` score for a pair and checks it against the same
+/// floor, so the fallback cannot make two kernels disagree.
+///
+/// Every CPU entry point applies it already. The GPU kernel's scores come
+/// back without their pairs' inputs, so a caller of [`crate::gpu`] passes each
+/// through this itself.
+#[must_use]
+pub fn trusted<E: Emission + ?Sized>(
+    score: Log10Likelihood,
+    haplotype: &Haplotype,
+    read: &Read,
+    emission: &E,
+    band: Band,
+) -> Log10Likelihood {
+    if score.get() >= trust_floor(haplotype.len(), read.len(), band) {
+        score
+    } else {
+        align_banded_f64(haplotype, read, emission, band)
+    }
+}
+
+/// `log10` of the least total an `f32` kernel's flushes cannot move by more
+/// than a millionth: `log10(3 * (r + 1) * columns * 2^-125) + 6`.
+#[allow(clippy::cast_precision_loss, reason = "a count of cells, far below 2^52")]
+fn trust_floor(h: usize, r: usize, band: Band) -> f64 {
+    let band_columns = usize::try_from(band.half_width).unwrap_or(usize::MAX).saturating_mul(2);
+    let columns = band_columns.saturating_add(1).min(h.saturating_add(1));
+    let cells = 3.0 * (r as f64 + 1.0) * columns as f64;
+    cells.log10() - 125.0 * core::f64::consts::LOG10_2 + 6.0
 }

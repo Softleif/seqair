@@ -47,6 +47,7 @@ use crate::{
     haplotype::Haplotype,
     lanes::{Cells, ColumnBlock, LanesView, SharedRows, lanes_kernel},
     read::Read,
+    reference::trusted,
     types::Log10Likelihood,
 };
 
@@ -316,7 +317,12 @@ impl Workspace {
             } else {
                 [Log10Likelihood::IMPOSSIBLE; BATCH]
             };
-            out.extend(scores.iter().take(group.len()).copied());
+            out.extend(
+                scores
+                    .iter()
+                    .zip(group)
+                    .map(|(score, haplotype)| trusted(*score, haplotype, read, emission, band)),
+            );
         }
     }
 
@@ -370,7 +376,12 @@ impl Workspace {
         } else {
             [Log10Likelihood::IMPOSSIBLE; BATCH]
         };
-        out.extend(scores.iter().take(group.len()).copied());
+        out.extend(
+            scores
+                .iter()
+                .zip(group)
+                .map(|(score, haplotype)| trusted(*score, haplotype, read, emission, band)),
+        );
     }
 
     /// The batch plan's column half for one read's band.

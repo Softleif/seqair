@@ -97,6 +97,17 @@
 //! [`Workspace::align_candidates`] and [`Workspace::align_reads`] switch
 //! between kernels without changing an answer. A [`Workspace`] keeps every
 //! kernel's buffers between calls, which makes an alignment allocation-free.
+//!
+//! **Precision.** Every entry point returns the `f64` recurrence over the
+//! band, at any score. The kernels compute in `f32`, renormalising by powers
+//! of two, and flush cells below `2^-126` of the cell they scale by; that
+//! provably cannot move a total above a floor near `-27` (for 150 bases in the
+//! default band) by a millionth, and a pair that finishes below the floor is
+//! scored again by [`align_banded_f64`]. [`trusted`] is that check, for the
+//! GPU kernel's scores. Two model rules keep the proof's premise -- every cell
+//! a probability -- true for every quality a [`Read`] accepts: a base error
+//! probability is capped at [`MAX_EPSILON`], and gap-open qualities below Q6
+//! count as Q6, as GATK raises them.
 
 mod banded;
 mod batch;
@@ -128,7 +139,7 @@ pub use haplotype::Haplotype;
 pub use pairs::{PAIRS, PAIRS_BREAK_EVEN, Pair, align_pairs, align_reads};
 pub use prepared::Candidates;
 pub use read::Read;
-pub use reference::align_full;
+pub use reference::{align_banded_f64, align_full, trusted};
 pub use seqair_types::{Base, BaseQuality, Probability, QPos, Strand};
 pub use simd::simd_level;
 pub use strips::{align_strips, align_strips_simd};

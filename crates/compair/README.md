@@ -88,6 +88,14 @@ de-novo CpG needs no special case.
 - A stated band contract: a path outside the band scores lower, never wrong;
   no path at all is `Log10Likelihood::IMPOSSIBLE`, and `Band::MAX_WIDTH` bounds
   the allocation
+- Every score is the `f64` recurrence over its band, at any score: the `f32`
+  kernels' flushes provably cannot move a total above
+  `log10(3 * (r + 1) * columns) - 31.6` by a millionth, and a pair that
+  finishes below that is rescored in `f64` (`align_banded_f64`). On the
+  benchmark shapes that is 0.5-0.7% of pairs and 3-6% of the time
+- Qualities mean what a base call can mean: a base error probability is
+  capped at 3/4 (Q0 and Q1 carry no information rather than "certainly
+  wrong"), and gap-open qualities below Q6 count as Q6, as GATK raises them
 - 8-wide `f32` SIMD via `fearless_simd`, picked at run time (NEON; SSE2
   through AVX-512), with no build flags and every SIMD kernel bit-identical
   to its scalar instance. Two lane layouts: eight cells of one alignment per
