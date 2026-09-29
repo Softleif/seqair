@@ -18,16 +18,28 @@
 //! let emission = compair::StandardEmission::default();
 //! let mut aligner = GpuAligner::new(GpuContext::new()?);
 //! let mut pairs = GpuPairs::new();
-//! for (read, band) in &reads {
-//!     let read_slot = pairs.push_read(read, &emission)?;
+//! // A haplotype's terms depend on the reads' strand: push it once per strand.
+//! let mut slots = Vec::new();
+//! for strand in [compair::Strand::OT, compair::Strand::OB] {
 //!     for haplotype in &haplotypes {
-//!         let hap_slot = pairs.push_haplotype(haplotype, read.strand(), &emission)?;
-//!         pairs.push_pair(read_slot, hap_slot, *band)?;
+//!         slots.push((strand, pairs.push_haplotype(haplotype, strand, &emission)?));
 //!     }
 //! }
+//! for (read, band) in &reads {
+//!     let read_slot = pairs.push_read(read, &emission)?;
+//!     for &(strand, hap_slot) in &slots {
+//!         if strand == read.strand() {
+//!             pairs.push_pair(read_slot, hap_slot, *band)?;
+//!         }
+//!     }
+//! }
+//! // In push order; `submit` returns once the launch is queued.
 //! let scores = aligner.submit(&pairs)?.collect()?;
 //! # Ok(()) }
 //! ```
+//!
+//! `examples/gpu.rs` runs this against the CPU, falling back to it when there
+//! is no adapter.
 
 mod device;
 mod emulate;
