@@ -20,11 +20,14 @@ allow = [
     "BSL-1.0",
     "ISC",
     "MIT",
+    "NCSA", # libfuzzer-sys (fuzz crate only)
     "Unicode-3.0",
     "Zlib",
     "bzip2-1.0.6",
 ]
 confidence-threshold = 0.9
+# The fuzz crate is `publish = false` and has no license field.
+private = { ignore = true }
 
 [bans]
 multiple-versions = "warn"

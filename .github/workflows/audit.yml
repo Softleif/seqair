@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths: &paths
       - "**/Cargo.toml"
-      - "Cargo.lock"
+      - "**/Cargo.lock"
       - "deny.toml"
       - ".github/workflows/audit.yml"
   pull_request:
@@ -39,3 +39,6 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny check ${{ matrix.checks }}
+      # The fuzz crate is its own workspace with its own lockfile.
+      - run: cargo deny --manifest-path crates/seqair/fuzz/Cargo.toml check ${{ matrix.checks }}
+        if: ${{ !cancelled() }}
