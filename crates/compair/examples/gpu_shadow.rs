@@ -2,9 +2,9 @@
 //! each, every (read, haplotype) pair of a batch of windows in one launch,
 //! against the CPU strip kernel on the same pairs.
 //!
-//! The windows are `shadow_shape`'s (agent `setup`'s example, copied so the
-//! two measure the same pairs): a 250 bp reference with a 2 bp insertion and
-//! a 3 bp deletion after its middle base, reads of 100 to 150 bp with
+//! The windows are `shadow_shape`'s, copied so the two measure the same
+//! pairs: a 250 bp reference with a 2 bp insertion and a 3 bp deletion after
+//! its middle base, reads of 100 to 150 bp with
 //! sequencing errors, TAPS conversions, per-base qualities and gap-open
 //! qualities, bands of width 48 centred near where each read was cut.
 //!
