@@ -106,10 +106,10 @@
 //! in the default band) by a millionth; the diagonal kernel keeps it in
 //! `[1, 2)`, and its floor is near `-27`. A pair that finishes below its
 //! kernel's floor is scored again by [`align_banded_f64`]. [`trusted`] is
-//! that check, for the GPU kernel's scores. Two model rules keep the proof's premise -- every cell
-//! a probability -- true for every quality a [`Read`] accepts: a base error
-//! probability is capped at [`MAX_EPSILON`], and gap-open qualities below Q6
-//! count as Q6, as GATK raises them.
+//! that check, for the GPU kernel's scores. Two model rules keep the proof's
+//! premise -- every cell a probability -- true for every quality a [`Read`]
+//! accepts: a base error probability is capped at [`MAX_EPSILON`], and
+//! gap-open qualities below Q6 count as Q6, as GATK raises them.
 
 mod banded;
 mod batch;
