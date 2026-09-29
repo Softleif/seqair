@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Breaking
+
+- **The numeric INFO encode methods return `Result`.** `InfoKey::encode` for `Scalar<i32>`,
+  `Arr<i32>`, `OptArr<i32>`, `Scalar<f32>` and `Arr<f32>`, and the matching `InfoEncoder` methods
+  (`info_int`, `info_ints`, `info_int_opts`, `info_float`, `info_floats`), returned `()` and now
+  return `Result<(), VcfError>`; call sites need a `?`. `info_flag`, `info_string` and their keys
+  are unchanged. The FORMAT methods and `begin_record` already returned `Result` and only gained
+  the new errors. See the `Fixed` entry on BCF reserved values for why.
+
 ### Added
 
 - **CRAM 3.1 blocks compressed with the adaptive arithmetic coder (method 6) decode**, as do tok3
@@ -71,6 +80,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **BCF wrote its reserved values as data.** BCF2 reserves the eight most negative values of each
+  integer width and the float bit patterns `0x7F800001..=0x7F800007`; the first two of each band
+  are MISSING and END_OF_VECTOR. An INFO or FORMAT Integer of `i32::MIN + 1` was written as
+  `0x80000001`, and a reader stops the row there: `[1000000, x, 999]` went in, bcftools read back
+  `1000000`, and nothing reported the loss. `f32::from_bits(0x7F800001)` did the same for Float.
+  Every numeric INFO and FORMAT method and `begin_record`'s `qual` now reject these values with
+  `VcfEncodeError::ReservedIntValue` / `ReservedFloatValue`, naming the field, the value and the
+  `ReservedMarker` it collided with, and write nothing, so the caller can carry on with the record.
+  Only those values are affected: `-128` is still data (it is written as int16), and quiet NaN
+  and the infinities are still ordinary Floats. Plain VCF output rejects the same values, so
+  switching `OutputFormat` never changes which records are accepted.
 - **A multi-reference CRAM container's reference window depended on the query.** It spanned only
   the index entries the query overlapped, so a slice whose reads reached past its own entry could
   decode differently per query; it spans every entry of the container for the reference now.
