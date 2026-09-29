@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # A release gets a week to be yanked or flagged before we pick it up.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directories: ["/", "/fuzz"]
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    # Compatible bumps land as one PR; breaking ones (noodles, hegeltest, …)
+    # each get their own, since they tend to need code changes.
+    groups:
+      cargo-compatible:
+        update-types: ["minor", "patch"]
