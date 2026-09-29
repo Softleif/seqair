@@ -1,6 +1,6 @@
 [package]
 name = "seqair"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 description = "Pure-Rust BAM/SAM/CRAM/FASTA reader and pileup engine"
 repository = "https://github.com/Softleif/seqair"
@@ -69,7 +69,9 @@ noodles = { version = "0.116.0", features = [
     "sam",
     "vcf",
 ] }
-needletail = { version = "0.7", default-features = false, features = ["flate2"] }
+needletail = { version = "0.7", default-features = false, features = [
+    "flate2",
+] }
 seq_io = "0.3"
 noodles-bgzf = { version = "0.51.0", features = ["libdeflate"] }
 noodles-util = { version = "0.85.0", features = ["alignment"] }
