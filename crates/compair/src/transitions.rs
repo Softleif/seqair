@@ -133,7 +133,9 @@ impl Growth {
         for (row, t) in (1usize..).zip(transitions) {
             // A read whose gap-continuation quality holds still divides once.
             let run = match previous {
-                Some((above, run)) if above.indel_to_match.to_bits() == t.indel_to_match.to_bits() => {
+                Some((above, run))
+                    if above.indel_to_match.to_bits() == t.indel_to_match.to_bits() =>
+                {
                     run
                 }
                 _ => run(t.indel_to_match),

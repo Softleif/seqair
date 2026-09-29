@@ -25,7 +25,7 @@ use std::{hint::black_box, time::Instant};
 
 use compair::{
     Band, Base, BaseQuality, Emission, HapSite, Haplotype, Observation, Read, SiteWeights, Strand,
-    align_banded_f64,
+    align_banded_f64, align_banded_f64_rows,
 };
 
 /// The dumped emission: per-site weights and per-observation epsilons.
@@ -106,6 +106,7 @@ fn main() {
     let path = args.next().expect("a pairs file");
     let which = args.next().unwrap_or_else(|| "below".to_owned());
     let rounds: usize = args.next().and_then(|n| n.parse().ok()).unwrap_or(1);
+    let kernel = args.next().unwrap_or_default();
     let mut pairs = load(&path);
     if which == "below" {
         pairs.retain(|pair| pair.rescued);
@@ -114,13 +115,17 @@ fn main() {
     let start = Instant::now();
     for _ in 0..rounds {
         for pair in &pairs {
-            let score = align_banded_f64(
-                black_box(&pair.haplotype),
-                &pair.read,
-                &pair.emission,
-                pair.band,
-            )
+            let (haplotype, read) = (black_box(&pair.haplotype), &pair.read);
+            let score = if kernel == "rows" {
+                align_banded_f64_rows(haplotype, read, &pair.emission, pair.band)
+            } else {
+                align_banded_f64(haplotype, read, &pair.emission, pair.band)
+            }
             .get();
+            if kernel == "check" {
+                let rows = align_banded_f64_rows(haplotype, read, &pair.emission, pair.band).get();
+                assert_eq!(score.to_bits(), rows.to_bits(), "{score} against {rows}");
+            }
             checksum += score;
             bits = bits.rotate_left(5) ^ score.to_bits();
             count += 1;

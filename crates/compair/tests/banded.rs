@@ -6,8 +6,8 @@ mod support;
 use compair::{
     BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, MatchProbability,
     Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded,
-    align_banded_simd, align_candidates, align_full, align_strips, align_strips_simd,
-    error_probability,
+    align_banded_f64_at, align_banded_f64_rows, align_banded_simd, align_candidates, align_full,
+    align_strips, align_strips_simd, error_probability,
 };
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator};
@@ -526,6 +526,49 @@ fn align_masked<E: compair::Emission>(
     if total <= 0.0 { f64::NEG_INFINITY } else { total.log10() + log10_scale }
 }
 
+/// **The rescue is the row recurrence, bit for bit.** `align_banded_f64`
+/// sweeps two rows at a time in vectors, at every SIMD level, and returns
+/// exactly what the row-at-a-time implementation it replaced does: the same
+/// IEEE operations on the same values in the same order per cell, and the
+/// same power-of-two rescale per row. At every quality a read can carry,
+/// every band width and offset -- bands that start at column 1, bands that
+/// miss the alignment, scores far below the `f32` floors, and rows whose
+/// deletions set their scale -- and with the thread's buffers reused from a
+/// differently shaped pair.
+#[hegel::test(test_cases = pinned::cases(2048))]
+fn the_rescue_is_the_row_recurrence_bit_for_bit(tc: TestCase) {
+    let case = match tc.draw(gs::integers::<u8>().max_value(2)) {
+        0 => tc.draw(arbitrary_case()),
+        1 => tc.draw(support::deletion_heavy_case()),
+        _ => tc.draw(derived_case(4)),
+    };
+    let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(63));
+    let conversion = tc.draw(any_conversion());
+    let band = Band::new(width, case.offset).expect("width");
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    let (haplotype, read) = (&case.haplotype, &case.read);
+    let standard = StandardEmission::default();
+    let rows = [
+        ("standard", align_banded_f64_rows(haplotype, read, &standard, band)),
+        ("taps", align_banded_f64_rows(haplotype, read, &taps, band)),
+    ];
+    for (level_name, level) in support::levels() {
+        let got = [
+            align_banded_f64_at(level, haplotype, read, &standard, band),
+            align_banded_f64_at(level, haplotype, read, &taps, band),
+        ];
+        for ((emission, want), got) in rows.iter().zip(got) {
+            assert_eq!(
+                got.get().to_bits(),
+                want.get().to_bits(),
+                "{level_name}/{emission}: {} against the row recurrence's {}",
+                got.get(),
+                want.get()
+            );
+        }
+    }
+}
+
 /// Every entry point, on one case: the `f64` banded recurrence, the scalar
 /// and SIMD diagonal and strip kernels, the batch kernel (the haplotype eight
 /// times) and the pairs kernel (the read eight times).
@@ -562,7 +605,8 @@ fn every_entry_point<E: compair::Emission>(
 /// matter scores the pair again in `f64`, and that is what this holds.
 #[hegel::test(test_cases = pinned::cases(1024))]
 fn every_score_is_the_f64_recurrence_over_its_band(tc: TestCase) {
-    let case = if tc.draw(gs::booleans()) { tc.draw(steady_case()) } else { tc.draw(arbitrary_case()) };
+    let case =
+        if tc.draw(gs::booleans()) { tc.draw(steady_case()) } else { tc.draw(arbitrary_case()) };
     let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(63));
     let conversion = tc.draw(any_conversion());
     let band = Band::new(width, case.offset).expect("width");
@@ -684,9 +728,15 @@ fn a_read_whose_rows_hand_on_more_than_they_hold_is_scored_in_f64() {
     let q = BaseQuality::from_byte;
     let r = 64;
     let gaps: Vec<BaseQuality> = (0..r).map(|i| if i % 2 == 0 { q(254) } else { q(0) }).collect();
-    let read =
-        Read::new(vec![Base::A; r], &vec![q(60); r], &vec![q(6); r], &vec![q(6); r], &gaps, Strand::OT)
-            .expect("a valid read");
+    let read = Read::new(
+        vec![Base::A; r],
+        &vec![q(60); r],
+        &vec![q(6); r],
+        &vec![q(6); r],
+        &gaps,
+        Strand::OT,
+    )
+    .expect("a valid read");
     let case = support::Case {
         haplotype: Haplotype::new(vec![Base::A; 1000]),
         read,

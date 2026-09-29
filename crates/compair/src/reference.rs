@@ -103,21 +103,15 @@ fn rescale_row(m: &mut [f64], i: &mut [f64], d: &mut [f64], exponent: &mut i32) 
     *exponent += shift;
 }
 
-/// The `f64` recurrence over a band: [`align_full`] restricted to the cells
-/// `|j - i - offset| <= width / 2`, which is what every banded kernel
-/// computes in `f32`.
-///
-/// It is what an `f32` score falls back to below the level where `f32` can
-/// vouch for it (see [`trusted`]), and it is exposed for callers that want the
-/// banded answer without the `f32` kernels' range. It visits only the band's
-/// cells, one row at a time, and rescales each row by a power of two, so it
-/// holds any score `f64` can write down -- but it is scalar, several times
-/// slower than the kernels.
+/// [`crate::align_banded_f64`] one row at a time: the implementation it
+/// replaced, kept as the oracle it is pinned to bit for bit
+/// (`the_rescue_is_the_row_recurrence_bit_for_bit`).
+#[doc(hidden)]
 #[allow(
     clippy::indexing_slicing,
     reason = "every index is in 0..=h and every row is allocated with h + 1 entries"
 )]
-pub fn align_banded_f64<E: Emission + ?Sized>(
+pub fn align_banded_f64_rows<E: Emission + ?Sized>(
     haplotype: &Haplotype,
     read: &Read,
     emission: &E,
@@ -232,7 +226,7 @@ pub fn align_banded_f64<E: Emission + ?Sized>(
 const OBSERVABLE: [Base; 5] = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
 const UNKNOWN_TRACK: usize = 4;
 
-/// One row of [`align_banded_f64`] over the band's columns `low..=high`, and
+/// One row of [`align_banded_f64_rows`] over the band's columns `low..=high`, and
 /// the largest cell it stored.
 ///
 /// `previous` is the row above over `low - 1..=high`, `current` this row over
@@ -323,7 +317,7 @@ fn banded_row(
 ///
 /// Below it the kernel may have flushed anything up to the whole answer --
 /// eight rows of confident mismatches take every cell under `2^-126` at once
-/// -- and the pair is scored again by [`align_banded_f64`]. So is a pair the
+/// -- and the pair is scored again by [`crate::align_banded_f64`]. So is a pair the
 /// strip kernel could overflow on (see `scaling::STRIP_SCALE`), which no read
 /// with steady qualities is. Both checks depend on the pair alone, and every
 /// kernel of the strip family returns the same `f32` score for a pair, so the
@@ -352,7 +346,7 @@ pub fn trusted<E: Emission + ?Sized>(
     if read.growth_bound().is_some_and(vouches) || vouches(read.growth()) {
         score
     } else {
-        align_banded_f64(haplotype, read, emission, band)
+        crate::align_banded_f64(haplotype, read, emission, band)
     }
 }
 
@@ -410,7 +404,8 @@ mod tests {
     use hegel::generators as gs;
     use seqair_types::{Base, BaseQuality, Strand};
 
-    use super::{align_banded_f64, free_starts};
+    use super::free_starts;
+    use crate::align_banded_f64;
     use crate::{Band, Haplotype, Read, StandardEmission};
 
     /// No total of the recurrence exceeds what the free start puts in times
@@ -433,7 +428,9 @@ mod tests {
         let steps = [0u8, 1, 2, 6, 10, 20, 43, 254];
         let quals = |n: usize| -> Vec<BaseQuality> {
             let pair = [tc.draw(gs::sampled_from(&steps)), tc.draw(gs::sampled_from(&steps))];
-            (0..n).map(|_| BaseQuality::from_byte(tc.draw_silent(gs::sampled_from(&pair)))).collect()
+            (0..n)
+                .map(|_| BaseQuality::from_byte(tc.draw_silent(gs::sampled_from(&pair))))
+                .collect()
         };
         let (insertion, deletion, gap) = (quals(r), quals(r), quals(r));
         let read = Read::new(
@@ -478,7 +475,9 @@ mod tests {
         let steps = [0u8, 1, 2, 6, 10, 20, 30, 43, 60, 254];
         let quals = |n: usize| -> Vec<BaseQuality> {
             let pair = [tc.draw(gs::sampled_from(&steps)), tc.draw(gs::sampled_from(&steps))];
-            (0..n).map(|_| BaseQuality::from_byte(tc.draw_silent(gs::sampled_from(&pair)))).collect()
+            (0..n)
+                .map(|_| BaseQuality::from_byte(tc.draw_silent(gs::sampled_from(&pair))))
+                .collect()
         };
         let (insertion, deletion) = (quals(r), quals(r));
         let gap = BaseQuality::from_byte(tc.draw(gs::sampled_from(&steps)));

@@ -253,6 +253,35 @@ pub fn arbitrary_case() -> impl PrintableGenerator<Case> {
     arbitrary_case_inner(0, 254).print_as_debug()
 }
 
+/// A read cut from its haplotype whose deletions open easily (Q0-Q6) and
+/// run on (gap continuation Q0-Q2) while its insertions and mismatches are
+/// rare: a row's deletions outgrow its matches, which is what sets a row's
+/// scale by its deletions alone.
+pub fn deletion_heavy_case() -> impl PrintableGenerator<Case> {
+    deletion_heavy_case_inner().print_as_debug()
+}
+
+#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation, reason = "short test reads")]
+#[hegel::composite]
+fn deletion_heavy_case_inner(tc: &TestCase) -> Case {
+    let len = tc.draw_silent(length(20, 89));
+    let hap = exactly(tc, any_base_or_n(), len);
+    let start = tc.draw_silent(length(0, len / 2));
+    let Some(cut) = hap.get(start..) else { tc.reject() };
+    let bases = cut.iter().copied().take(tc.draw_silent(length(1, 69))).collect::<Vec<_>>();
+    let n = bases.len();
+    let quals = draw_quals(tc, 20, 60, n);
+    let insertions = draw_quals(tc, 30, 60, n);
+    let deletions = draw_quals(tc, 0, 6, n);
+    let gaps = draw_quals(tc, 0, 2, n);
+    let strand = tc.draw_silent(any_strand());
+    let Ok(read) = Read::new(bases, &quals, &insertions, &deletions, &gaps, strand) else {
+        tc.reject()
+    };
+    let betas = exactly(tc, any_probability(), hap.len());
+    Case { haplotype: Haplotype::new(hap), read, offset: start as i32, betas }
+}
+
 #[hegel::composite]
 fn arbitrary_case_inner(tc: &TestCase, lowest: u8, highest: u8) -> Case {
     let len = tc.draw_silent(length(1, 89));
@@ -283,9 +312,8 @@ fn steady_case_inner(tc: &TestCase) -> Case {
     let len = tc.draw_silent(length(1, 69));
     let bases = exactly(tc, any_base_or_n(), len);
     let quals = draw_quals(tc, 0, 254, bases.len());
-    let [insertion, deletion, gap] = [0; 3].map(|_| {
-        BaseQuality::from_byte(tc.draw_silent(gs::integers::<u8>().max_value(254)))
-    });
+    let [insertion, deletion, gap] =
+        [0; 3].map(|_| BaseQuality::from_byte(tc.draw_silent(gs::integers::<u8>().max_value(254))));
     let strand = tc.draw_silent(any_strand());
     let offset = tc.draw_silent(gs::integers::<i32>().min_value(-20).max_value(39));
     let Ok(read) = Read::uniform(bases, &quals, insertion, deletion, gap, strand) else {
