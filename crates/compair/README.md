@@ -13,9 +13,10 @@ Read-likelihood engine for [rastair](https://github.com/bsblabludwig/rastair).
 ```rust
 use compair::{Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Probability, Read, Strand, TapsEmission, Workspace};
 
-let haplotype = Haplotype::from_ascii(b"ACGTTAGCATCGGATCC...");
+let reference = Haplotype::from_ascii(b"GACAATTACATAACATACACATCAGCACAAAACTTGTTGG");
+let alternate = Haplotype::from_ascii(b"GACAATTACATAACATACACATCATCACAAAACTTGTTGG");
 let read = Read::uniform(
-    Base::from_ascii_vec(b"TTAGCATCGG...".to_vec()),
+    Base::from_ascii_vec(b"TACATAACATACACATCATCACAA".to_vec()),
     &quals,                        // one BaseQuality per base
     BaseQuality::from_byte(45),    // gap open, insertion side
     BaseQuality::from_byte(45),    // gap open, deletion side
@@ -24,8 +25,26 @@ let read = Read::uniform(
 )?;
 let emission = TapsEmission::new(ConversionModel::taps_default(), Betas::Uniform(Probability::new(0.5)?));
 let mut workspace = Workspace::new();
-let log10 = workspace.align_banded_simd(&haplotype, &read, &emission, Band::anchored(3));
+let mut scores = Vec::new();
+// Every read (each with a band around where it aligns) against every
+// haplotype; log10 likelihoods, read-major.
+workspace.align_reads(&[&reference, &alternate], &[(&read, Band::anchored(6))], &emission, &mut scores);
 ```
+
+Runnable examples, `cargo run -p compair --release --example <name>`:
+
+- `quickstart`: reads against a reference and an alternate haplotype, turned
+  into per-read evidence and diploid genotype likelihoods
+- `taps`: why the conversion-aware emission matters, on reads from a
+  methylated `CpG`
+- `candidates`: many candidate haplotypes (repeat lengths), one read at a time
+- `gpu` (`--features gpu`): one launch for thousands of pairs, checked
+  against the CPU
+
+The other examples are measurement tools for maintainers: `batchfill` and
+`pairsfill` regenerate the tables behind `BATCH_BREAK_EVEN` and
+`PAIRS_BREAK_EVEN`, and the rest are profiling loops and sweeps whose header
+comments say what they measure.
 
 `align_full` is the `f64` reference over the whole matrix; `align_banded` and
 `align_banded_simd` are the same `f32` recurrence over a diagonal band, one
