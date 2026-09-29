@@ -445,14 +445,73 @@ fn the_bundled_conversion_model_is_the_measured_one() {
     assert!((model.conversion_rate(Probability::ONE) - 0.96).abs() < 1e-12);
 }
 
-/// An independent `f64` full dynamic program restricted to the band's
-/// documented predicate, sharing nothing with the kernel under test but the
-/// emission. Written out rather than derived from `align_full` so that a
-/// change to the kernel's index algebra has to disagree with something.
+/// A non-negative number as `mantissa * 2^exponent`, the mantissa in
+/// `[0.5, 1)` or zero: `f64`'s precision with an exponent that does not run
+/// out, so nothing [`align_masked`] computes rounds as a subnormal, however
+/// far below the rest of its row a cell is.
+#[derive(Debug, Clone, Copy)]
+struct Wide {
+    mantissa: f64,
+    exponent: i64,
+}
+
+impl Wide {
+    const ZERO: Self = Self { mantissa: 0.0, exponent: 0 };
+
+    /// `value * 2^exponent`, for a normal or zero `value`.
+    fn new(value: f64, exponent: i64) -> Self {
+        if value == 0.0 {
+            return Self::ZERO;
+        }
+        assert!(value.is_normal() && value > 0.0, "{value}");
+        let bits = value.to_bits();
+        let biased = i64::try_from((bits >> 52) & 0x7ff).expect("11 bits");
+        let mantissa = f64::from_bits((bits & !(0x7ff << 52)) | (1022 << 52));
+        Self { mantissa, exponent: exponent + biased - 1022 }
+    }
+
+    fn of(value: f64) -> Self {
+        Self::new(value, 0)
+    }
+
+    fn mul(self, other: Self) -> Self {
+        Self::new(self.mantissa * other.mantissa, self.exponent + other.exponent)
+    }
+
+    fn add(self, other: Self) -> Self {
+        let (big, small) =
+            if self.mantissa == 0.0 || (other.mantissa != 0.0 && other.exponent > self.exponent) {
+                (other, self)
+            } else {
+                (self, other)
+            };
+        let gap = big.exponent - small.exponent;
+        if small.mantissa == 0.0 || gap > 1000 {
+            return big;
+        }
+        let gap = i32::try_from(gap).expect("at most 1000");
+        Self::new(big.mantissa + small.mantissa * 2f64.powi(-gap), big.exponent)
+    }
+
+    #[allow(clippy::cast_precision_loss, reason = "an exponent far below 2^52")]
+    fn log10(self) -> f64 {
+        if self.mantissa == 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        self.mantissa.log10() + self.exponent as f64 * core::f64::consts::LOG10_2
+    }
+}
+
+/// An independent full dynamic program restricted to the band's documented
+/// predicate, sharing nothing with the kernel under test but the emission.
+/// Written out rather than derived from `align_full` so that a change to the
+/// kernel's index algebra has to disagree with something.
 ///
-/// Gap-open qualities below Q6 count as Q6, as GATK squashes them. Each row
-/// is rescaled by a power of two, which is exact, so the oracle holds every
-/// score `f64` can write down however far below zero it is.
+/// Gap-open qualities below Q6 count as Q6, as GATK squashes them. Every
+/// value is a [`Wide`], which rescales itself, so the oracle is `f64`'s
+/// rounding of the recurrence at any score, with nothing lost to
+/// subnormals: the kernels rescale whole rows, and a cell far enough below
+/// its row's largest rounds there.
 #[allow(
     clippy::indexing_slicing,
     reason = "every index is in 0..=h and every row is allocated with h + 1 entries"
@@ -476,54 +535,49 @@ fn align_masked<E: compair::Emission>(
     };
     let gap_open =
         |track: &[BaseQuality], index: usize| quality(track, index).min(10f64.powf(-0.6));
-    let mut log10_scale = 0.0f64;
 
     #[allow(clippy::cast_precision_loss, reason = "test haplotypes are short")]
-    let init = 1.0 / h as f64;
-    let mut prev_m = vec![0.0f64; h + 1];
-    let mut prev_i = vec![0.0f64; h + 1];
-    let mut prev_d: Vec<f64> = (0..=h).map(|j| if live(0, j) { init } else { 0.0 }).collect();
+    let init = Wide::of(1.0 / h as f64);
+    let mut prev_m = vec![Wide::ZERO; h + 1];
+    let mut prev_i = vec![Wide::ZERO; h + 1];
+    let mut prev_d: Vec<Wide> =
+        (0..=h).map(|j| if live(0, j) { init } else { Wide::ZERO }).collect();
     let (mut cur_m, mut cur_i, mut cur_d) =
-        (vec![0.0f64; h + 1], vec![0.0f64; h + 1], vec![0.0f64; h + 1]);
+        (vec![Wide::ZERO; h + 1], vec![Wide::ZERO; h + 1], vec![Wide::ZERO; h + 1]);
 
     for i in 1..=r {
         let Some(observation) = read.observation(i - 1) else { return f64::NEG_INFINITY };
         let p_ins = gap_open(read.insertion_quals(), i - 1);
         let p_del = gap_open(read.deletion_quals(), i - 1);
         let gap = quality(read.gap_quals(), i - 1);
-        let m2m = 1.0 - (p_ins + p_del).min(1.0);
-        let i2m = 1.0 - gap;
-        cur_m[0] = 0.0;
-        cur_i[0] = 0.0;
-        cur_d[0] = 0.0;
+        let m2m = Wide::of(1.0 - (p_ins + p_del).min(1.0));
+        let i2m = Wide::of(1.0 - gap);
+        let (p_ins, p_del, gap) = (Wide::of(p_ins), Wide::of(p_del), Wide::of(gap));
+        cur_m[0] = Wide::ZERO;
+        cur_i[0] = Wide::ZERO;
+        cur_d[0] = Wide::ZERO;
         for j in 1..=h {
             if !live(i, j) {
-                cur_m[j] = 0.0;
-                cur_i[j] = 0.0;
-                cur_d[j] = 0.0;
+                cur_m[j] = Wide::ZERO;
+                cur_i[j] = Wide::ZERO;
+                cur_d[j] = Wide::ZERO;
                 continue;
             }
             let Some(site) = haplotype.site(j - 1) else { return f64::NEG_INFINITY };
-            let prior = emission.match_probability(site, observation);
-            cur_m[j] = prior * (prev_m[j - 1] * m2m + prev_i[j - 1] * i2m + prev_d[j - 1] * i2m);
-            cur_i[j] = prev_m[j] * p_ins + prev_i[j] * gap;
-            cur_d[j] = cur_m[j - 1] * p_del + cur_d[j - 1] * gap;
-        }
-        let max = cur_m.iter().chain(&cur_i).chain(&cur_d).fold(0.0f64, |a, &b| a.max(b));
-        if max > 0.0 {
-            let exponent = max.log2().floor();
-            let factor = 2f64.powf(-exponent);
-            for cell in cur_m.iter_mut().chain(cur_i.iter_mut()).chain(cur_d.iter_mut()) {
-                *cell *= factor;
-            }
-            log10_scale += exponent * core::f64::consts::LOG10_2;
+            let prior = Wide::of(emission.match_probability(site, observation));
+            let into_match =
+                prev_m[j - 1].mul(m2m).add(prev_i[j - 1].mul(i2m)).add(prev_d[j - 1].mul(i2m));
+            cur_m[j] = prior.mul(into_match);
+            cur_i[j] = prev_m[j].mul(p_ins).add(prev_i[j].mul(gap));
+            cur_d[j] = cur_m[j - 1].mul(p_del).add(cur_d[j - 1].mul(gap));
         }
         core::mem::swap(&mut prev_m, &mut cur_m);
         core::mem::swap(&mut prev_i, &mut cur_i);
         core::mem::swap(&mut prev_d, &mut cur_d);
     }
-    let total: f64 = prev_m.iter().zip(prev_i.iter()).skip(1).map(|(m, i)| m + i).sum();
-    if total <= 0.0 { f64::NEG_INFINITY } else { total.log10() + log10_scale }
+    let total =
+        prev_m.iter().zip(&prev_i).skip(1).fold(Wide::ZERO, |sum, (m, i)| sum.add(m.add(*i)));
+    total.log10()
 }
 
 /// **The rescue is the row recurrence, bit for bit.** `align_banded_f64`
