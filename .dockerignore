@@ -1,3 +1,8 @@
-target/
-tmp/
-.claude/settings.local.json
+# Patterns are anchored at the context root: `target/` alone would miss
+# fuzz/target, and .claude/worktrees holds whole checkouts with their targets.
+**/target
+.claude
+.git
+.jj
+.hegel
+tmp
