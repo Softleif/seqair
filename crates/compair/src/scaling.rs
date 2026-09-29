@@ -68,65 +68,74 @@ pub(crate) fn normalising_shift_f32(max: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{exp2_f32, exp2_f64, normalising_shift_f32, normalising_shift_f64};
-    use proptest::prelude::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
 
-    proptest! {
-        /// `powi` is the independent oracle: it is a different computation
-        /// that also happens to be exact for powers of two.
-        #[test]
-        fn exp2_f32_is_powi_over_the_whole_normal_range(exponent in -126i32..=127) {
-            prop_assert_eq!(exp2_f32(exponent).to_bits(), 2f32.powi(exponent).to_bits());
-        }
+    /// `powi` is the independent oracle: it is a different computation
+    /// that also happens to be exact for powers of two.
+    #[hegel::test]
+    fn exp2_f32_is_powi_over_the_whole_normal_range(tc: TestCase) {
+        let exponent = tc.draw(gs::integers::<i32>().min_value(-126).max_value(127));
+        assert_eq!(exp2_f32(exponent).to_bits(), 2f32.powi(exponent).to_bits());
+    }
 
-        #[test]
-        fn exp2_f64_is_powi_over_the_whole_normal_range(exponent in -1022i32..=1023) {
-            prop_assert_eq!(exp2_f64(exponent).to_bits(), 2f64.powi(exponent).to_bits());
-        }
+    #[hegel::test]
+    fn exp2_f64_is_powi_over_the_whole_normal_range(tc: TestCase) {
+        let exponent = tc.draw(gs::integers::<i32>().min_value(-1022).max_value(1023));
+        assert_eq!(exp2_f64(exponent).to_bits(), 2f64.powi(exponent).to_bits());
+    }
 
-        /// The contract the kernels rely on: after the shift the maximum is
-        /// in `[1, 2)`, and the shift is a lossless operation.
-        #[test]
-        fn a_normal_f32_maximum_is_moved_into_one_to_two(
-            bits in f32::MIN_POSITIVE.to_bits()..=f32::MAX.to_bits(),
-        ) {
-            let max = f32::from_bits(bits);
-            let shift = normalising_shift_f32(max);
-            let scaled = max * exp2_f32(shift);
-            if shift == -127 {
-                // Above `2^127` the factor saturates to zero; see the module
-                // docs for why this is pinned and not handled.
-                prop_assert!(max >= exp2_f32(127));
-                prop_assert_eq!(scaled, 0.0);
-            } else {
-                prop_assert!((1.0..2.0).contains(&scaled), "{max} shifted by {shift} is {scaled}");
-                prop_assert_eq!((scaled * exp2_f32(-shift)).to_bits(), max.to_bits());
-            }
+    /// The contract the kernels rely on: after the shift the maximum is
+    /// in `[1, 2)`, and the shift is a lossless operation.
+    #[hegel::test]
+    fn a_normal_f32_maximum_is_moved_into_one_to_two(tc: TestCase) {
+        let bits = tc.draw(
+            gs::integers::<u32>()
+                .min_value(f32::MIN_POSITIVE.to_bits())
+                .max_value(f32::MAX.to_bits()),
+        );
+        let max = f32::from_bits(bits);
+        let shift = normalising_shift_f32(max);
+        let scaled = max * exp2_f32(shift);
+        if shift == -127 {
+            // Above `2^127` the factor saturates to zero; see the module
+            // docs for why this is pinned and not handled.
+            assert!(max >= exp2_f32(127));
+            assert_eq!(scaled, 0.0);
+        } else {
+            assert!((1.0..2.0).contains(&scaled), "{max} shifted by {shift} is {scaled}");
+            assert_eq!((scaled * exp2_f32(-shift)).to_bits(), max.to_bits());
         }
+    }
 
-        #[test]
-        fn a_normal_f64_maximum_is_moved_into_one_to_two(
-            bits in f64::MIN_POSITIVE.to_bits()..=f64::MAX.to_bits(),
-        ) {
-            let max = f64::from_bits(bits);
-            let shift = normalising_shift_f64(max);
-            let scaled = max * exp2_f64(shift);
-            if shift == -1023 {
-                prop_assert!(max >= exp2_f64(1023));
-                prop_assert_eq!(scaled, 0.0);
-            } else {
-                prop_assert!((1.0..2.0).contains(&scaled), "{max} shifted by {shift} is {scaled}");
-                prop_assert_eq!((scaled * exp2_f64(-shift)).to_bits(), max.to_bits());
-            }
+    #[hegel::test]
+    fn a_normal_f64_maximum_is_moved_into_one_to_two(tc: TestCase) {
+        let bits = tc.draw(
+            gs::integers::<u64>()
+                .min_value(f64::MIN_POSITIVE.to_bits())
+                .max_value(f64::MAX.to_bits()),
+        );
+        let max = f64::from_bits(bits);
+        let shift = normalising_shift_f64(max);
+        let scaled = max * exp2_f64(shift);
+        if shift == -1023 {
+            assert!(max >= exp2_f64(1023));
+            assert_eq!(scaled, 0.0);
+        } else {
+            assert!((1.0..2.0).contains(&scaled), "{max} shifted by {shift} is {scaled}");
+            assert_eq!((scaled * exp2_f64(-shift)).to_bits(), max.to_bits());
         }
+    }
 
-        /// A subnormal maximum reports no shift: the kernel would carry it as
-        /// is rather than scale it up.
-        #[test]
-        fn a_subnormal_f32_maximum_reports_no_shift(bits in 1u32..f32::MIN_POSITIVE.to_bits()) {
-            let max = f32::from_bits(bits);
-            prop_assert!(max.is_subnormal());
-            prop_assert_eq!(normalising_shift_f32(max), 0);
-        }
+    /// A subnormal maximum reports no shift: the kernel would carry it as
+    /// is rather than scale it up.
+    #[hegel::test]
+    fn a_subnormal_f32_maximum_reports_no_shift(tc: TestCase) {
+        let bits =
+            tc.draw(gs::integers::<u32>().min_value(1).max_value(f32::MIN_POSITIVE.to_bits() - 1));
+        let max = f32::from_bits(bits);
+        assert!(max.is_subnormal());
+        assert_eq!(normalising_shift_f32(max), 0);
     }
 
     #[test]

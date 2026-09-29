@@ -72,6 +72,8 @@ pub mod gpu;
 mod haplotype;
 mod lanes;
 mod pairs;
+#[cfg(test)]
+mod pinned;
 mod prepared;
 mod read;
 mod reference;

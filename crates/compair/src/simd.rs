@@ -385,7 +385,8 @@ pub fn simd_level() -> &'static str {
 #[cfg(test)]
 mod tests {
     use fearless_simd::{Level, Simd, SimdFrom, dispatch, f32x8, mask32x8};
-    use proptest::prelude::*;
+    use hegel::TestCase;
+    use hegel::generators::{self as gs, PrintableGenerator};
 
     use crate::banded::{Lane, LaneMask};
 
@@ -439,54 +440,58 @@ mod tests {
         <f32x8<S> as Lane>::transpose(simd, [w0, w1, w2, w3, w4, w5, w6, w7]).map(Into::into)
     }
 
-    proptest! {
-        /// Lane `k` of `transpose`'s result `t` is window `k`'s element `t`,
-        /// bit for bit, at every level.
-        #[test]
-        fn transpose_moves_element_t_of_window_k_to_lane_k_of_vector_t(
-            windows in proptest::array::uniform8(proptest::array::uniform8(any::<u32>())),
-        ) {
-            let windows = windows.map(|window| window.map(f32::from_bits));
-            for level in levels() {
-                let got = dispatch!(level, simd => transposed(simd, &windows));
-                for (t, vector) in got.iter().enumerate() {
-                    for (k, lane) in vector.iter().enumerate() {
-                        let want = windows.get(k).and_then(|window| window.get(t));
-                        prop_assert_eq!(
-                            Some(lane.to_bits()), want.map(|value| value.to_bits()),
-                            "{:?}: vector {} lane {}", level, t, k
-                        );
-                    }
+    /// Lane `k` of `transpose`'s result `t` is window `k`'s element `t`,
+    /// bit for bit, at every level.
+    #[hegel::test]
+    fn transpose_moves_element_t_of_window_k_to_lane_k_of_vector_t(tc: TestCase) {
+        let windows: [[u32; 8]; 8] = tc.draw(gs::arrays(gs::arrays(gs::integers::<u32>())));
+        let windows = windows.map(|window| window.map(f32::from_bits));
+        for level in levels() {
+            let got = dispatch!(level, simd => transposed(simd, &windows));
+            for (t, vector) in got.iter().enumerate() {
+                for (k, lane) in vector.iter().enumerate() {
+                    let want = windows.get(k).and_then(|window| window.get(t));
+                    assert_eq!(
+                        Some(lane.to_bits()),
+                        want.map(|value| value.to_bits()),
+                        "{level:?}: vector {t} lane {k}"
+                    );
                 }
             }
         }
+    }
 
-        /// The lane operations with no scalar counterpart in the kernels,
-        /// against their definitions, at every level.
-        #[test]
-        fn lane_ops_do_what_the_trait_says_at_every_level(
-            values in proptest::array::uniform8(-1e30f32..1e30),
-            first in -1e30f32..1e30,
-            left in proptest::array::uniform8(any::<bool>()),
-            right in proptest::array::uniform8(any::<bool>()),
-            value in -1e30f32..1e30,
-            lane in 0usize..8,
-        ) {
-            let mut single = [0.0f32; 8];
-            *single.get_mut(lane).expect("lane in 0..8") = value;
-            let [v0, v1, v2, v3, v4, v5, v6, v7] = values;
-            for level in levels() {
-                let (shifted, last, anded, sum) = dispatch!(
-                    level, simd => lane_ops(simd, values, first, left, right, single)
-                );
-                prop_assert_eq!(shifted, [first, v0, v1, v2, v3, v4, v5, v6], "{:?}", level);
-                prop_assert_eq!(last.to_bits(), v7.to_bits(), "{:?}", level);
-                for index in 0..8 {
-                    let want = if left[index] && right[index] { u32::MAX } else { 0 };
-                    prop_assert_eq!(anded[index], want, "{:?} lane {}", level, index);
-                }
-                prop_assert_eq!(sum.to_bits(), value.to_bits(), "{:?}", level);
+    /// A finite `f32` in `[-1e30, 1e30)`.
+    fn moderate() -> impl PrintableGenerator<f32> {
+        gs::floats::<f32>().min_value(-1e30).max_value_exclusive(1e30)
+    }
+
+    /// The lane operations with no scalar counterpart in the kernels,
+    /// against their definitions, at every level.
+    #[hegel::test]
+    fn lane_ops_do_what_the_trait_says_at_every_level(tc: TestCase) {
+        let values: [f32; 8] = tc.draw(gs::arrays(moderate()));
+        let first = tc.draw(moderate());
+        let left: [bool; 8] = tc.draw(gs::arrays(gs::booleans()));
+        let right: [bool; 8] = tc.draw(gs::arrays(gs::booleans()));
+        let value = tc.draw(moderate());
+        let lane = tc.draw(gs::integers::<usize>().max_value(7));
+        let mut single = [0.0f32; 8];
+        *single.get_mut(lane).expect("lane in 0..8") = value;
+        let [v0, v1, v2, v3, v4, v5, v6, v7] = values;
+        for level in levels() {
+            let (shifted, last, anded, sum) = dispatch!(
+                level, simd => lane_ops(simd, values, first, left, right, single)
+            );
+            assert_eq!(shifted, [first, v0, v1, v2, v3, v4, v5, v6], "{level:?}");
+            assert_eq!(last.to_bits(), v7.to_bits(), "{level:?}");
+            for index in 0..8 {
+                let want = if left[index] && right[index] { u32::MAX } else { 0 };
+                assert_eq!(anded[index], want, "{level:?} lane {index}");
             }
+            // The seven dead lanes are `+0.0`, which leaves every value as it
+            // is except `-0.0`, and that one it turns into `+0.0`.
+            assert_eq!(sum.to_bits(), (value + 0.0).to_bits(), "{level:?}");
         }
     }
 }

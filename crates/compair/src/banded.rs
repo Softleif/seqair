@@ -1303,25 +1303,28 @@ mod tests {
         BaseQuality, Betas, ConversionModel, Emission, Haplotype, MatchProbability, Probability,
         Read, StandardEmission, Strand, TapsEmission,
     };
-    use proptest::prelude::*;
+    use hegel::TestCase;
+    use hegel::generators::{self as gs, PrintableGenerator};
 
-    proptest! {
-        /// The scalar lane's side of the operations the strip kernel adds:
-        /// one lane shifts in `first` and drops itself, and its masks combine
-        /// bitwise. The eight-lane side is `simd::tests`.
-        #[test]
-        fn scalar_lane_ops_are_the_one_lane_case(
-            value in -1e30f32..1e30,
-            first in -1e30f32..1e30,
-            left in any::<bool>(),
-            right in any::<bool>(),
-        ) {
-            prop_assert_eq!(<f32 as Lane>::shift_in(value, first).to_bits(), first.to_bits());
-            prop_assert_eq!(<f32 as Lane>::last(value).to_bits(), value.to_bits());
-            let mask = |set: bool| if set { MASK_SET } else { 0.0 };
-            let want = if left && right { u32::MAX } else { 0 };
-            prop_assert_eq!(<f32 as LaneMask>::both(mask(left), mask(right)).to_bits(), want);
-        }
+    /// A finite `f32` in `[-1e30, 1e30)`.
+    fn moderate() -> impl PrintableGenerator<f32> {
+        gs::floats::<f32>().min_value(-1e30).max_value_exclusive(1e30)
+    }
+
+    /// The scalar lane's side of the operations the strip kernel adds:
+    /// one lane shifts in `first` and drops itself, and its masks combine
+    /// bitwise. The eight-lane side is `simd::tests`.
+    #[hegel::test]
+    fn scalar_lane_ops_are_the_one_lane_case(tc: TestCase) {
+        let value = tc.draw(moderate());
+        let first = tc.draw(moderate());
+        let left = tc.draw(gs::booleans());
+        let right = tc.draw(gs::booleans());
+        assert_eq!(<f32 as Lane>::shift_in(value, first).to_bits(), first.to_bits());
+        assert_eq!(<f32 as Lane>::last(value).to_bits(), value.to_bits());
+        let mask = |set: bool| if set { MASK_SET } else { 0.0 };
+        let want = if left && right { u32::MAX } else { 0 };
+        assert_eq!(<f32 as LaneMask>::both(mask(left), mask(right)).to_bits(), want);
     }
 
     /// The kernel's hoisted tables are a re-encoding of the `Emission` trait,

@@ -556,6 +556,7 @@ dependencies = [
  "fearless_simd",
  "fearless_simd_macros",
  "gkl",
+ "hegeltest",
  "pollster",
  "proptest",
  "seqair-types",

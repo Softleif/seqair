@@ -848,7 +848,8 @@ pub(crate) fn strip_kernel<L: Lane>(
 #[cfg(test)]
 mod tests {
     use fearless_simd::{Level, Simd, dispatch, f32x8};
-    use proptest::prelude::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
 
     use super::{Edges, Sweep};
     use crate::banded::{Band, LANE_MAX, Lane, Shape, Window};
@@ -903,51 +904,47 @@ mod tests {
         (a, b)
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig { cases: 4096, ..ProptestConfig::default() })]
-
-        /// The closed form is the per-lane loop, for one lane and for eight at
-        /// every level, band offsets far off either end included.
-        #[test]
-        fn a_sweep_is_the_band_predicate_lane_by_lane(
-            haplotype in 1usize..300,
-            read in 1usize..300,
-            width in 2u32..600,
-            offset in -2_000_000i32..2_000_000,
-            near_offset in -40i32..340,
-            near in any::<bool>(),
-            strip in 0usize..40,
-        ) {
-            let offset = if near { near_offset } else { offset };
-            let band = Band::new(width, offset).map_err(|_| TestCaseError::reject("legal"))?;
-            let shape = Shape { haplotype, read };
-            let r0 = 1 + strip * LANE_MAX;
-            for lanes in [1, LANE_MAX] {
-                let want = naive(shape, band, r0, lanes);
-                let got = Sweep::new(shape, band, r0, lanes);
-                prop_assert_eq!(want.is_none(), got.is_none(), "lanes {}", lanes);
-                let (Some(want), Some(got)) = (want, got) else { continue };
-                let (first, last, full_first, full_last, lane_first, lane_past) = want;
-                prop_assert_eq!(
-                    (first, last, full_first, full_last),
-                    (
-                        i64::try_from(got.first).unwrap_or(-1),
-                        i64::try_from(got.last).unwrap_or(-1),
-                        i64::try_from(got.full_first).unwrap_or(-1),
-                        i64::try_from(got.full_last).unwrap_or(-1),
-                    ),
-                    "lanes {}", lanes
-                );
-                if lanes == 1 {
-                    let (first, past) = got.edges.lanes::<f32>(());
-                    prop_assert_eq!(first.to_bits(), lane_first[0].to_bits());
-                    prop_assert_eq!(past.to_bits(), lane_past[0].to_bits());
-                } else {
-                    for level in [Level::fallback(), Level::new()] {
-                        let (first, past) = dispatch!(level, simd => eight(simd, got.edges));
-                        prop_assert_eq!(first.map(f32::to_bits), lane_first.map(f32::to_bits));
-                        prop_assert_eq!(past.map(f32::to_bits), lane_past.map(f32::to_bits));
-                    }
+    /// The closed form is the per-lane loop, for one lane and for eight at
+    /// every level, band offsets far off either end included.
+    #[hegel::test(test_cases = crate::pinned::cases(4096))]
+    fn a_sweep_is_the_band_predicate_lane_by_lane(tc: TestCase) {
+        let haplotype = tc.draw(gs::integers::<usize>().min_value(1).max_value(299));
+        let read = tc.draw(gs::integers::<usize>().min_value(1).max_value(299));
+        let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(599));
+        let offset = if tc.draw(gs::booleans()) {
+            tc.draw(gs::integers::<i32>().min_value(-40).max_value(339))
+        } else {
+            tc.draw(gs::integers::<i32>().min_value(-2_000_000).max_value(1_999_999))
+        };
+        let strip = tc.draw(gs::integers::<usize>().max_value(39));
+        let band = Band::new(width, offset).expect("every width in 2..600 is legal");
+        let shape = Shape { haplotype, read };
+        let r0 = 1 + strip * LANE_MAX;
+        for lanes in [1, LANE_MAX] {
+            let want = naive(shape, band, r0, lanes);
+            let got = Sweep::new(shape, band, r0, lanes);
+            assert_eq!(want.is_none(), got.is_none(), "lanes {lanes}");
+            let (Some(want), Some(got)) = (want, got) else { continue };
+            let (first, last, full_first, full_last, lane_first, lane_past) = want;
+            assert_eq!(
+                (first, last, full_first, full_last),
+                (
+                    i64::try_from(got.first).unwrap_or(-1),
+                    i64::try_from(got.last).unwrap_or(-1),
+                    i64::try_from(got.full_first).unwrap_or(-1),
+                    i64::try_from(got.full_last).unwrap_or(-1),
+                ),
+                "lanes {lanes}"
+            );
+            if lanes == 1 {
+                let (first, past) = got.edges.lanes::<f32>(());
+                assert_eq!(first.to_bits(), lane_first[0].to_bits());
+                assert_eq!(past.to_bits(), lane_past[0].to_bits());
+            } else {
+                for level in [Level::fallback(), Level::new()] {
+                    let (first, past) = dispatch!(level, simd => eight(simd, got.edges));
+                    assert_eq!(first.map(f32::to_bits), lane_first.map(f32::to_bits));
+                    assert_eq!(past.map(f32::to_bits), lane_past.map(f32::to_bits));
                 }
             }
         }

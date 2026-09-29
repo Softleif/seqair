@@ -45,6 +45,7 @@ gkl-cpp = ["gkl/c-avx", "gkl/c-avx512"]
 # parity tests can run it next to every vector level the CPU has.
 fearless_simd = { version = "1.0", features = ["force_support_fallback"] }
 proptest = "1.11.0"
+hegeltest = { workspace = true }
 criterion = "0.8.2"
 bio = { version = "4.0.1", default-features = false }
 
