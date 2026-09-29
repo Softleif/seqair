@@ -9,9 +9,14 @@
 # CI usage:
 #   ./fuzz/run_all.sh 30
 #
-# Requires: cargo-fuzz, nightly toolchain
+# Requires: cargo-fuzz. No nightly toolchain: see RUSTC_BOOTSTRAP below.
 
 set -euo pipefail
+
+# cargo-fuzz passes nightly-only `-Z` flags (sanitizers, coverage passes).
+# This lets the repo's pinned stable toolchain accept them, so fuzzing builds
+# with the same compiler as everything else.
+export RUSTC_BOOTSTRAP=1
 
 DURATION="${1:-30}"
 QUICK="${2:-}"
@@ -26,7 +31,7 @@ ARCH="$(rustc -vV | grep host | awk '{print $2}')"
 
 cd "$REPO_DIR"
 
-TARGETS=$(cargo +nightly fuzz list 2>/dev/null)
+TARGETS=$(cargo fuzz list 2>/dev/null)
 TOTAL=$(echo "$TARGETS" | wc -l | tr -d ' ')
 PASSED=0
 FAILED=0
@@ -61,7 +66,7 @@ for target in $TARGETS; do
 
     printf "%-35s" "  $target$seed_note"
 
-    output=$(cargo +nightly fuzz run \
+    output=$(cargo fuzz run \
         -j="$THREADS" \
         --target "$ARCH" \
         "$target" \
@@ -92,7 +97,7 @@ for target in $TARGETS; do
         if [ -n "$artifact" ]; then
             echo ""
             echo "  Reproduce locally:"
-            echo "    cargo +nightly fuzz run --target $ARCH $target $artifact"
+            echo "    RUSTC_BOOTSTRAP=1 cargo fuzz run --target $ARCH $target $artifact"
         fi
         echo "---"
         echo ""
@@ -124,7 +129,7 @@ if [ "$FAILED" -gt 0 ]; then
     printf "$FAILURES"
     echo ""
     echo "  Reproduce with:"
-    echo "    cargo +nightly fuzz run --target $ARCH <target> fuzz/artifacts/<target>/<crash-file>"
+    echo "    RUSTC_BOOTSTRAP=1 cargo fuzz run --target $ARCH <target> fuzz/artifacts/<target>/<crash-file>"
     exit 1
 else
     echo "  All targets clean."

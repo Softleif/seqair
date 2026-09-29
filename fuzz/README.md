@@ -12,7 +12,7 @@ Fuzz targets for all seqair file format readers and parsers, using [cargo-fuzz](
 ./fuzz/run_all.sh 10
 
 # Single target with seeds
-cargo +nightly fuzz run fuzz_reader_indexed fuzz/corpus/fuzz_reader_indexed fuzz/seeds/fuzz_reader_indexed
+RUSTC_BOOTSTRAP=1 cargo fuzz run fuzz_reader_indexed fuzz/corpus/fuzz_reader_indexed fuzz/seeds/fuzz_reader_indexed
 
 # Multi-threaded
 THREADS=8 ./fuzz/run_all.sh 60

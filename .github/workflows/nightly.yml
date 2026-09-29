@@ -17,7 +17,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUST_BOOSTRAP: 1
 
 # Three jobs, because there are three different things a nightly run can go
 # deeper on and they do not substitute for one another:

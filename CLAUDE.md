@@ -100,7 +100,7 @@ Frequent CI-only failures to watch for: `clippy::cast_possible_truncation`, `cli
 
 ## Fuzzing
 
-Fuzz targets live in `fuzz/fuzz_targets/`. CI runs them nightly via `fuzz/run_all.sh`.
+Fuzz targets live in `fuzz/fuzz_targets/`. CI runs them nightly via `fuzz/run_all.sh`. No nightly toolchain: `RUSTC_BOOTSTRAP=1` lets the pinned stable accept cargo-fuzz's `-Z` flags (`run_all.sh` sets it).
 
 **Reproducing a crash locally** (requires Docker on macOS — cargo-fuzz needs Linux/ASAN):
 
@@ -108,8 +108,8 @@ Fuzz targets live in `fuzz/fuzz_targets/`. CI runs them nightly via `fuzz/run_al
 # Copy the crash artifact to fuzz/artifacts/<target>/
 docker run --platform linux/amd64 --rm \
   -v "$PWD":/workspace -w /workspace rust:1.93 \
-  bash -c "rustup toolchain install nightly && cargo +nightly install cargo-fuzz && \
-    cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file> -- -runs=1 2>&1"
+  bash -c "cargo install cargo-fuzz --locked && \
+    RUSTC_BOOTSTRAP=1 cargo fuzz run <target> fuzz/artifacts/<target>/<crash-file> -- -runs=1 2>&1"
 ```
 
 **Common crash patterns**: `debug_assert!` panics (cargo-fuzz enables `-Cdebug-assertions`). If a `debug_assert!` guards an `as i32`/`as u32` cast on untrusted input, replace it with `i32::try_from().trace_ok("msg")?` returning `None`/`Err`. Keep `debug_assert!` only for true internal invariants where the caller already validated the input.
