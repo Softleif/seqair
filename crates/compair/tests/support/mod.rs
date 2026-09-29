@@ -268,6 +268,33 @@ fn arbitrary_case_inner(tc: &TestCase, lowest: u8, highest: u8) -> Case {
     Case { haplotype: Haplotype::new(hap), read, offset, betas }
 }
 
+/// [`arbitrary_case`] with the insertion, deletion and gap-continuation
+/// qualities each the same at every base, as a caller with no per-base gap
+/// model has: the reads whose cells stay probabilities, so the trust floor is
+/// at its lowest and a flush it misses would show.
+pub fn steady_case() -> impl PrintableGenerator<Case> {
+    steady_case_inner().print_as_debug()
+}
+
+#[hegel::composite]
+fn steady_case_inner(tc: &TestCase) -> Case {
+    let len = tc.draw_silent(length(1, 89));
+    let hap = exactly(tc, any_base_or_n(), len);
+    let len = tc.draw_silent(length(1, 69));
+    let bases = exactly(tc, any_base_or_n(), len);
+    let quals = draw_quals(tc, 0, 254, bases.len());
+    let [insertion, deletion, gap] = [0; 3].map(|_| {
+        BaseQuality::from_byte(tc.draw_silent(gs::integers::<u8>().max_value(254)))
+    });
+    let strand = tc.draw_silent(any_strand());
+    let offset = tc.draw_silent(gs::integers::<i32>().min_value(-20).max_value(39));
+    let Ok(read) = Read::uniform(bases, &quals, insertion, deletion, gap, strand) else {
+        tc.reject()
+    };
+    let betas = exactly(tc, any_probability(), hap.len());
+    Case { haplotype: Haplotype::new(hap), read, offset, betas }
+}
+
 /// The mirror of a case: reverse-complement the haplotype and the read, swap
 /// the strand, and reverse the per-site betas.
 pub fn mirror(case: &Case) -> Option<Case> {

@@ -13,7 +13,7 @@ use hegel::TestCase;
 use hegel::generators::{self as gs, Generator};
 use support::{
     any_base_or_n, any_conversion, any_probability, arbitrary_case, bases, derived_case, length,
-    plausible_conversion,
+    plausible_conversion, steady_case,
 };
 
 // The bit-parity gates are the cheapest of these and the ones most worth
@@ -562,7 +562,7 @@ fn every_entry_point<E: compair::Emission>(
 /// matter scores the pair again in `f64`, and that is what this holds.
 #[hegel::test(test_cases = pinned::cases(1024))]
 fn every_score_is_the_f64_recurrence_over_its_band(tc: TestCase) {
-    let case = tc.draw(arbitrary_case());
+    let case = if tc.draw(gs::booleans()) { tc.draw(steady_case()) } else { tc.draw(arbitrary_case()) };
     let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(63));
     let conversion = tc.draw(any_conversion());
     let band = Band::new(width, case.offset).expect("width");
