@@ -1,9 +1,12 @@
+use seqair_types::Base;
+
 use crate::{
     banded::Band,
     emission::{Emission, MatchProbability, epsilon},
     haplotype::Haplotype,
     read::Read,
     scaling::{exp2_f64, normalising_shift_f64},
+    transitions::Transition,
     types::Log10Likelihood,
 };
 
@@ -157,13 +160,19 @@ pub fn align_banded_f64<E: Emission + ?Sized>(
     let Some((first, last)) = band.columns(h, r) else {
         return Log10Likelihood::IMPOSSIBLE;
     };
+    // Each column's latent weight for every base a read can show, one track
+    // per base, so a row reads its priors' weights as one contiguous slice.
     let strand = read.strand();
-    let weights: Option<Vec<_>> = (first..=last)
-        .map(|index| Some(emission.site_weights(haplotype.site(index)?, strand)))
-        .collect();
-    let Some(weights) = weights else {
-        return Log10Likelihood::IMPOSSIBLE;
-    };
+    let mut latent: [Vec<f64>; 5] = Default::default();
+    for index in first..=last {
+        let Some(site) = haplotype.site(index) else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        let weights = emission.site_weights(site, strand);
+        for (track, base) in latent.iter_mut().zip(OBSERVABLE) {
+            track.push(weights.latent_weight(base));
+        }
+    }
 
     for i in 1..=r {
         let (Some(observation), Some(t)) = (read.observation(i - 1), read.transition(i - 1)) else {
@@ -179,24 +188,31 @@ pub fn align_banded_f64<E: Emission + ?Sized>(
         let Some((low, high)) = span(i, 1) else {
             return Log10Likelihood::IMPOSSIBLE;
         };
-        for j in low..=high {
-            let Some(site) = (j - 1).checked_sub(first).and_then(|at| weights.get(at)) else {
-                return Log10Likelihood::IMPOSSIBLE;
-            };
-            let prior = site.probability(observation.base, eps);
-            cur_m[j] = prior
-                * (prev_m[j - 1] * t.match_to_match
-                    + prev_i[j - 1] * t.indel_to_match
-                    + prev_d[j - 1] * t.indel_to_match);
-            cur_i[j] = prev_m[j] * t.match_to_insertion + prev_i[j] * t.gap_continuation;
-            cur_d[j] = cur_m[j - 1] * t.match_to_deletion + cur_d[j - 1] * t.gap_continuation;
-        }
-        rescale_row(
-            &mut cur_m[low..=high],
-            &mut cur_i[low..=high],
-            &mut cur_d[low..=high],
-            &mut exponent,
+        let track = latent.get(observation.base.known_index().unwrap_or(UNKNOWN_TRACK));
+        let Some(weights) = (low - 1)
+            .checked_sub(first)
+            .zip((high - 1).checked_sub(first))
+            .and_then(|(from, to)| track?.get(from..=to))
+        else {
+            return Log10Likelihood::IMPOSSIBLE;
+        };
+        let max = banded_row(
+            [&prev_m[low - 1..=high], &prev_i[low - 1..=high], &prev_d[low - 1..=high]],
+            [&mut cur_m[low..=high], &mut cur_i[low..=high], &mut cur_d[low..=high]],
+            weights,
+            eps,
+            &t,
         );
+        let shift = normalising_shift_f64(max);
+        if shift != 0 {
+            let factor = exp2_f64(shift);
+            for buffer in [&mut cur_m, &mut cur_i, &mut cur_d] {
+                for value in &mut buffer[low..=high] {
+                    *value *= factor;
+                }
+            }
+            exponent += shift;
+        }
         core::mem::swap(&mut prev_m, &mut cur_m);
         core::mem::swap(&mut prev_i, &mut cur_i);
         core::mem::swap(&mut prev_d, &mut cur_d);
@@ -209,6 +225,56 @@ pub fn align_banded_f64<E: Emission + ?Sized>(
         return Log10Likelihood::IMPOSSIBLE;
     }
     Log10Likelihood::new(total.log10() - f64::from(exponent) * core::f64::consts::LOG10_2)
+}
+
+/// The bases a read can show, in [`Base::known_index`] order and then
+/// [`Base::Unknown`].
+const OBSERVABLE: [Base; 5] = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
+const UNKNOWN_TRACK: usize = 4;
+
+/// One row of [`align_banded_f64`] over the band's columns `low..=high`, and
+/// the largest cell it stored.
+///
+/// `previous` is the row above over `low - 1..=high`, `current` this row over
+/// `low..=high`, whose cell left of `low` is zero (the buffer holds nothing
+/// outside its row's span). `weights` are the columns' latent weights for this
+/// row's base. The operations are [`align_full`]'s, in its order; the
+/// deletion chain is carried in registers rather than read back from the row.
+#[inline(always)]
+fn banded_row(
+    previous: [&[f64]; 3],
+    current: [&mut [f64]; 3],
+    weights: &[f64],
+    eps: f64,
+    t: &Transition,
+) -> f64 {
+    let [prev_m, prev_i, prev_d] = previous;
+    let [cur_m, cur_i, cur_d] = current;
+    let (mut left_m, mut left_d) = (0.0f64, 0.0f64);
+    // One running maximum per matrix, so no cell waits on another's compare.
+    // Every cell is finite and non-negative, where `max` is exact.
+    let mut max = [0.0f64; 3];
+    let above = prev_m.windows(2).zip(prev_i.windows(2)).zip(prev_d);
+    let cells = cur_m.iter_mut().zip(cur_i.iter_mut()).zip(cur_d.iter_mut());
+    for ((((m_above, i_above), d_diagonal), ((m_cell, i_cell), d_cell)), weight) in
+        above.zip(cells).zip(weights)
+    {
+        let (&[m_diagonal, m_up], &[i_diagonal, i_up]) = (m_above, i_above) else {
+            continue;
+        };
+        let prior = weight * (1.0 - eps) + (1.0 - weight) * (eps / 3.0);
+        let m = prior
+            * (m_diagonal * t.match_to_match
+                + i_diagonal * t.indel_to_match
+                + d_diagonal * t.indel_to_match);
+        let i = m_up * t.match_to_insertion + i_up * t.gap_continuation;
+        let d = left_m * t.match_to_deletion + left_d * t.gap_continuation;
+        (*m_cell, *i_cell, *d_cell) = (m, i, d);
+        max = [max[0].max(m), max[1].max(i), max[2].max(d)];
+        (left_m, left_d) = (m, d);
+    }
+    let [m, i, d] = max;
+    m.max(i).max(d)
 }
 
 /// An `f32` kernel's score where `f32` can vouch for it, and the `f64`
