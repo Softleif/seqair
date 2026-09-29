@@ -10,6 +10,9 @@ ignore = [
     # rust-htslib is a dev-dependency (test oracle) plus the optional
     # `hts-compat` feature of seqair-types. Nothing we can swap out.
     { id = "RUSTSEC-2025-0058", reason = "via rust-htslib only (dev-dep / optional hts-compat)" },
+    # rust-bio is compair's benchmark baseline, a dev-dependency only.
+    { id = "RUSTSEC-2025-0057", reason = "fxhash via bio, compair dev-dep (benchmark) only" },
+    { id = "RUSTSEC-2024-0436", reason = "paste via bio -> statrs -> nalgebra, compair dev-dep (benchmark) only" },
 ]
 
 [licenses]
@@ -38,3 +41,5 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# gkl-rs is compair's benchmark target, pinned to a rev (see its Cargo.toml).
+allow-git = ["https://github.com/philipc/gkl-rs"]
