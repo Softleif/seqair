@@ -16,6 +16,8 @@
 )]
 
 mod helpers;
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use helpers::ri;
 use seqair::bam::record_store::RecordStore;
@@ -466,7 +468,7 @@ fn arb_cigar_pair(tc: &TestCase) -> (Vec<(u32, u8)>, Vec<(u32, u8)>) {
 }
 
 // r[verify record_store.set_alignment]
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn set_alignment_end_pos_matches_oracle(tc: TestCase) {
     let (orig_parts, new_parts) = tc.draw(arb_cigar_pair().print_as_debug());
     let pos = tc.draw(gs::integers::<u32>().max_value(9999));
@@ -501,7 +503,7 @@ fn set_alignment_end_pos_matches_oracle(tc: TestCase) {
 }
 
 // r[verify record_store.set_alignment]
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn set_alignment_preserves_seq_and_qual(tc: TestCase) {
     let (orig_parts, new_parts) = tc.draw(arb_cigar_pair().print_as_debug());
     let pos = tc.draw(gs::integers::<u32>().max_value(9999));
@@ -534,7 +536,7 @@ fn set_alignment_preserves_seq_and_qual(tc: TestCase) {
 }
 
 // r[verify record_store.set_alignment]
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn sort_after_set_alignment_is_position_ordered(tc: TestCase) {
     let new_positions =
         tc.draw(gs::vecs(gs::integers::<u32>().max_value(49999)).min_size(3).max_size(9));
@@ -567,7 +569,7 @@ fn sort_after_set_alignment_is_position_ordered(tc: TestCase) {
 }
 
 // r[verify record_store.set_alignment.validation]
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn set_alignment_rejects_wrong_query_len(tc: TestCase) {
     let orig_parts = tc.draw(arb_cigar_parts_with_query_len().print_as_debug());
     let delta = tc.draw(gs::integers::<u32>().min_value(1).max_value(9));

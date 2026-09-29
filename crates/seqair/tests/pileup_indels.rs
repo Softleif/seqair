@@ -13,6 +13,8 @@
     reason = "test code with known small values"
 )]
 mod helpers;
+#[path = "../src/pinned.rs"]
+mod pinned;
 
 use hegel::prelude::*;
 use helpers::{cigar_op, make_record, make_record_with_cigar};
@@ -440,7 +442,7 @@ use seqair_types::QPos;
 
 /// Every position in a read's ref span must produce a column.
 /// Deletions and ref-skips are now included, not skipped.
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn every_ref_position_produces_column_for_single_read(tc: TestCase) {
     let read = tc.draw(arb_read());
     let mut arena = RecordStore::new();
@@ -465,7 +467,7 @@ fn every_ref_position_produces_column_for_single_read(tc: TestCase) {
 }
 
 /// Match positions must have qpos, deletion/refskip positions must not.
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn qpos_presence_matches_cigar_op_type(tc: TestCase) {
     let read = tc.draw(arb_read());
     let mut arena = RecordStore::new();
@@ -504,7 +506,7 @@ fn qpos_presence_matches_cigar_op_type(tc: TestCase) {
 // r[verify pileup_indel.op_enum]
 
 /// `del_len()` must equal the D CIGAR op length at deletion positions, and 0 elsewhere.
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn del_len_matches_cigar_d_op_length(tc: TestCase) {
     let read = tc.draw(arb_read());
     let mut arena = RecordStore::new();
@@ -546,7 +548,7 @@ fn del_len_matches_cigar_d_op_length(tc: TestCase) {
 }
 
 /// Deletion ops must carry `del_len > 0`; non-deletion ops must have `del_len == 0`.
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn del_len_nonzero_iff_deletion(tc: TestCase) {
     let read = tc.draw(arb_read());
     let mut arena = RecordStore::new();
@@ -577,7 +579,7 @@ fn del_len_nonzero_iff_deletion(tc: TestCase) {
 }
 
 /// All positions within the same D op must report the same `del_len`.
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn del_len_consistent_across_deletion_span(tc: TestCase) {
     let read = tc.draw(arb_read());
     let mut arena = RecordStore::new();

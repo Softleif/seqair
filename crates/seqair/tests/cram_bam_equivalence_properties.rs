@@ -20,6 +20,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::Readers;
@@ -264,7 +266,7 @@ fn sam_text(reads: &[Read]) -> String {
 // r[verify cram.record.sequence]
 /// The same reads, written by samtools as BAM and as CRAM, must come back
 /// from seqair identical in every field — and equal to what was generated.
-#[hegel::test(test_cases = 32)]
+#[hegel::test(test_cases = crate::pinned::cases(32))]
 fn cram_and_bam_decode_to_the_same_records(tc: TestCase) {
     let (reference, reads) = tc.draw(arb_alignment().print_as_debug());
 
@@ -335,7 +337,7 @@ const CRAM_31_PROFILES: &[&[&str]] = &[
 // r[verify cram.codec.fqzcomp]
 /// The same reads written under every CRAM 3.1 compression profile decode
 /// to what the BAM holds, whichever codecs htslib picked for each block.
-#[hegel::test(test_cases = 32)]
+#[hegel::test(test_cases = crate::pinned::cases(32))]
 fn cram_31_profiles_decode_to_the_same_records(tc: TestCase) {
     let (reference, reads) = tc.draw(arb_alignment().print_as_debug());
     let profile = tc.draw(gs::sampled_from(CRAM_31_PROFILES));

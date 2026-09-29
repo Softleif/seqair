@@ -442,7 +442,7 @@ mod tests {
     }
 
     // r[verify vcf_writer.float_precision]
-    #[hegel::test(test_cases = 2000)]
+    #[hegel::test(test_cases = crate::pinned::cases(2000))]
     fn exact_path_matches_c_printf_and_fmt(tc: TestCase) {
         let v = f32::from_bits(tc.draw(gs::integers::<u32>()));
         if !v.is_finite() {

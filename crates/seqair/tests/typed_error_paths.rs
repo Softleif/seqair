@@ -20,6 +20,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::bam::aux::AuxValue;
 use seqair::bam::aux_data::{AuxData, AuxDataError};
@@ -365,7 +367,7 @@ fn a_flipped_checksum_reports_the_stored_crc_and_the_computed_one() {
 /// The same six corruptions, applied at a drawn block and read back through
 /// whichever entry point owns that block: the variant set is closed, and the
 /// BGZF cause is never dropped on the way out.
-#[hegel::test(test_cases = 48)]
+#[hegel::test(test_cases = crate::pinned::cases(48))]
 fn a_corrupted_block_always_arrives_with_its_bgzf_cause_intact(tc: TestCase) {
     let corpus = corpus();
     // Block 0 holds the header; the last block is the EOF marker, whose 28
@@ -718,7 +720,7 @@ impl WriteFailure {
 /// Whichever way the first write fails, and however many records preceded it,
 /// every subsequent write returns `Poisoned` — never the original error again,
 /// and never a success.
-#[hegel::test(test_cases = 24)]
+#[hegel::test(test_cases = crate::pinned::cases(24))]
 fn the_first_failure_wins_and_everything_after_it_is_poisoned(tc: TestCase) {
     let good = tc.draw(gs::integers::<u32>().min_value(1).max_value(6));
     let which = tc.draw(gs::integers::<usize>().max_value(WriteFailure::ALL.len() - 1));
@@ -1154,7 +1156,7 @@ fn fetch_with_deadline(bam: Vec<u8>) -> Option<Result<usize, BamError>> {
 /// Truncations are drawn from the last 90% of the file so `open()` mostly
 /// succeeds and the failure has to come from the query itself; the statistic
 /// below records how often it did.
-#[hegel::test(test_cases = 32)]
+#[hegel::test(test_cases = crate::pinned::cases(32))]
 fn a_truncated_bam_always_terminates(tc: TestCase) {
     let bam = &corpus().bam;
     let lo = bam.len() / 10;

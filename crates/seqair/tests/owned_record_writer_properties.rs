@@ -24,6 +24,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::bam::aux_data::AuxData;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
@@ -504,7 +506,7 @@ struct Decoded {
 // r[verify bam_writer.write_record]
 /// A record built through the builder and written by `BamWriter` must read
 /// back through samtools as the values the generator chose.
-#[hegel::test(test_cases = 48)]
+#[hegel::test(test_cases = crate::pinned::cases(48))]
 fn built_records_read_back_through_samtools(tc: TestCase) {
     let records = tc.draw(arb_records().print_as_debug());
 
@@ -530,7 +532,7 @@ fn built_records_read_back_through_samtools(tc: TestCase) {
 // r[verify bam.owned_record.to_bam_bytes]
 // r[verify unified.fetch_equivalence]
 /// And seqair must read its own output back the same way samtools does.
-#[hegel::test(test_cases = 48)]
+#[hegel::test(test_cases = crate::pinned::cases(48))]
 fn built_records_read_back_through_seqair(tc: TestCase) {
     let records = tc.draw(arb_records().print_as_debug());
 

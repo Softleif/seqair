@@ -16,6 +16,8 @@
 
 #[path = "support/htscodecs_fqz.rs"]
 mod htscodecs_fqz;
+#[path = "../src/pinned.rs"]
+mod pinned;
 
 use hegel::TestCase;
 use hegel::generators as gs;
@@ -30,7 +32,7 @@ use seqair::cram::fqzcomp;
 // r[verify cram.codec.fqzcomp.context]
 // r[verify cram.codec.fqzcomp.reverse]
 // r[verify cram.codec.fqzcomp.models]
-#[hegel::test(test_cases = 300)]
+#[hegel::test(test_cases = crate::pinned::cases(300))]
 fn decodes_every_builtin_strategy(tc: TestCase) {
     let stream = builtin_stream(&tc);
     tc.assume(stream.is_some());
@@ -46,7 +48,7 @@ fn decodes_every_builtin_strategy(tc: TestCase) {
 // r[verify cram.codec.fqzcomp.record]
 // r[verify cram.codec.fqzcomp.context]
 // r[verify cram.codec.fqzcomp.reverse]
-#[hegel::test(test_cases = 300)]
+#[hegel::test(test_cases = crate::pinned::cases(300))]
 fn decodes_generated_parameter_sets(tc: TestCase) {
     let stream = custom_stream(&tc);
     tc.assume(stream.is_some());
@@ -70,7 +72,7 @@ fn record_lengths_past_two_bytes() {
     }
 }
 
-#[hegel::test(test_cases = 100)]
+#[hegel::test(test_cases = crate::pinned::cases(100))]
 fn truncated_streams_are_errors(tc: TestCase) {
     let stream = builtin_stream(&tc);
     tc.assume(stream.is_some());
@@ -79,7 +81,7 @@ fn truncated_streams_are_errors(tc: TestCase) {
     assert!(fqzcomp::decode(&compressed[..cut]).is_err());
 }
 
-#[hegel::test(test_cases = 300)]
+#[hegel::test(test_cases = crate::pinned::cases(300))]
 fn corrupted_streams_do_not_panic(tc: TestCase) {
     let stream = if tc.draw(gs::booleans()) { builtin_stream(&tc) } else { custom_stream(&tc) };
     tc.assume(stream.is_some());
@@ -110,7 +112,7 @@ fn corrupted_streams_do_not_panic(tc: TestCase) {
     }
 }
 
-#[hegel::test(test_cases = 500)]
+#[hegel::test(test_cases = crate::pinned::cases(500))]
 fn arbitrary_bytes_do_not_panic(tc: TestCase) {
     let bytes = tc.draw(gs::binary().max_size(512));
     let _ = fqzcomp::decode(&bytes);

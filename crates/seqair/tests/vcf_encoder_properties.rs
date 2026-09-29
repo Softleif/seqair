@@ -19,6 +19,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::record_encoder::{FormatFieldDef, FormatGt, FormatInt, InfoFieldDef, InfoInt};
 use seqair::vcf::{
@@ -153,7 +155,7 @@ fn bcf_snv_parseable_by_noodles() {
 // ── Proptest ───────────────────────────────────────────────────────────
 
 /// Unified Writer BCF output must be parseable by noodles with correct site fields.
-#[hegel::test(test_cases = 30)]
+#[hegel::test(test_cases = crate::pinned::cases(30))]
 fn bcf_writer_noodles_roundtrip(tc: TestCase) {
     let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(9999999));
     let ref_base = tc.draw(arb_base());
@@ -189,7 +191,7 @@ fn bcf_writer_noodles_roundtrip(tc: TestCase) {
 // r[verify record_encoder.format_dedup]
 /// Writing INFO/FORMAT fields twice must produce output identical to writing
 /// only the final value. Tested for both VCF text and BCF binary.
-#[hegel::test(test_cases = 30)]
+#[hegel::test(test_cases = crate::pinned::cases(30))]
 fn dedup_matches_single_write(tc: TestCase) {
     let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(9999999));
     let ref_base = tc.draw(arb_base());

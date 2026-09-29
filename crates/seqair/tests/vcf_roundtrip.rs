@@ -17,6 +17,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use noodles::vcf::variant::record_buf::info::field::Value as InfoBufValue;
 use seqair::vcf::record_encoder::{
@@ -529,7 +531,7 @@ fn bcf_roundtrip_multiple_records_sorted() {
 
 // r[verify bcf_writer.flag_encoding]
 /// BCF round-trip: write → noodles read → all fields match.
-#[hegel::test(test_cases = 50)]
+#[hegel::test(test_cases = crate::pinned::cases(50))]
 fn bcf_deep_roundtrip(tc: TestCase) {
     let input = tc.draw(arb_test_record());
     let setup = make_setup();
@@ -555,7 +557,7 @@ fn bcf_deep_roundtrip(tc: TestCase) {
 }
 
 /// VCF text round-trip: write → noodles read → site-level fields match.
-#[hegel::test(test_cases = 50)]
+#[hegel::test(test_cases = crate::pinned::cases(50))]
 fn vcf_text_deep_roundtrip(tc: TestCase) {
     let input = tc.draw(arb_test_record());
     tc.assume(input.alleles.n_allele() > 1);
@@ -574,7 +576,7 @@ fn vcf_text_deep_roundtrip(tc: TestCase) {
 
 // r[verify record_encoder.vcf_bcf_equivalence]
 /// BCF + VCF produce records that noodles parses to the same site-level fields.
-#[hegel::test(test_cases = 50)]
+#[hegel::test(test_cases = crate::pinned::cases(50))]
 fn bcf_and_vcf_match(tc: TestCase) {
     let input = tc.draw(arb_test_record());
     tc.assume(input.alleles.n_allele() > 1);

@@ -18,6 +18,8 @@
     reason = "test code"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::record_encoder::{
     FormatFieldDef, FormatFloats, FormatGt, FormatInts, FormatString,
@@ -221,7 +223,7 @@ fn expect_ints(row: &[i32]) -> String {
 // r[verify record_encoder.format_methods]
 /// Every integer of every sample must come back from bcftools unchanged,
 /// whatever widths the other samples in the same column needed.
-#[hegel::test(test_cases = 40)]
+#[hegel::test(test_cases = crate::pinned::cases(40))]
 fn format_int_arrays_round_trip_through_bcftools(tc: TestCase) {
     let n_samples = tc.draw(gs::integers::<usize>().min_value(1).max_value(MAX_SAMPLES));
     let records = tc.draw(arb_records(n_samples).print_as_debug());
@@ -263,7 +265,7 @@ fn format_int_arrays_round_trip_through_bcftools(tc: TestCase) {
 
 // r[verify record_encoder.format_methods]
 /// The same for float rows, which are fixed-width but still padded per sample.
-#[hegel::test(test_cases = 40)]
+#[hegel::test(test_cases = crate::pinned::cases(40))]
 fn format_float_arrays_round_trip_through_bcftools(tc: TestCase) {
     let n_samples = tc.draw(gs::integers::<usize>().min_value(1).max_value(MAX_SAMPLES));
     let records = tc.draw(arb_records(n_samples).print_as_debug());
@@ -305,7 +307,7 @@ fn format_float_arrays_round_trip_through_bcftools(tc: TestCase) {
 /// seqair writes the sample columns twice over: as VCF text, and as BCF that
 /// bcftools turns back into VCF text. The two paths share no encoding code, so
 /// agreeing is evidence about both.
-#[hegel::test(test_cases = 40)]
+#[hegel::test(test_cases = crate::pinned::cases(40))]
 fn bcf_and_vcf_text_agree_on_sample_columns(tc: TestCase) {
     let n_samples = tc.draw(gs::integers::<usize>().min_value(1).max_value(MAX_SAMPLES));
     let records = tc.draw(arb_records(n_samples).print_as_debug());

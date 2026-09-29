@@ -12,6 +12,8 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+#[path = "../src/pinned.rs"]
+mod pinned;
 use core::range::RangeInclusive;
 use hegel::prelude::*;
 use rust_htslib::faidx;
@@ -192,7 +194,7 @@ fn fasta_sequence(tc: &TestCase) -> (Vec<u8>, u64) {
 // r[verify fasta.fetch.coordinates]
 
 /// Write a random FASTA, read it back at a random position, verify content.
-#[hegel::test(test_cases = 64)]
+#[hegel::test(test_cases = crate::pinned::cases(64))]
 fn plain_fasta_roundtrip(tc: TestCase) {
     let (bases, linebases) = tc.draw(fasta_sequence());
     let range_start_frac = tc.draw(gs::floats::<f64>().min_value(0.0).max_value_exclusive(1.0));
@@ -250,7 +252,7 @@ fn write_plain_fasta(dir: &Path, bases: &[u8], linebases: u64) -> std::path::Pat
 /// `start <= last < len`, and then it is exactly `bases[start..=last]`.
 /// Spans are drawn around every edge — the first base, the last base, one
 /// past it, and reversed — because that is where a `+ 1` would hide.
-#[hegel::test(test_cases = 64)]
+#[hegel::test(test_cases = crate::pinned::cases(64))]
 fn fetch_seq_serves_exactly_the_closed_span_inside_the_sequence(tc: TestCase) {
     let (bases, linebases) = tc.draw(fasta_sequence());
     let len = bases.len() as u64;
@@ -466,7 +468,7 @@ fn absurd_line_width_is_rejected_at_open() {
 /// perturbing the next. Each is checked against the generated bases, and the
 /// last request is repeated at the end so a drifting file position would
 /// show up as a disagreement with its own earlier answer.
-#[hegel::test(test_cases = 48)]
+#[hegel::test(test_cases = crate::pinned::cases(48))]
 fn out_of_order_fetches_on_one_reader_are_independent(tc: TestCase) {
     let (bases, linebases) = tc.draw(fasta_sequence());
     let frac = || gs::floats::<f64>().min_value(0.0).max_value_exclusive(1.0);
@@ -545,7 +547,7 @@ fn htslib_fetch(name: &str, start: u64, stop: u64) -> Vec<u8> {
 // r[verify fasta.fork.equivalence]
 
 /// Fetch random regions from the bgzip test FASTA and compare to htslib.
-#[hegel::test(test_cases = 100)]
+#[hegel::test(test_cases = crate::pinned::cases(100))]
 fn bgzf_random_regions_match_htslib(tc: TestCase) {
     let seq_idx = tc.draw(gs::integers::<usize>().max_value(2));
     let start_frac = tc.draw(gs::floats::<f64>().min_value(0.0).max_value_exclusive(0.99));
@@ -571,7 +573,7 @@ fn bgzf_random_regions_match_htslib(tc: TestCase) {
 }
 
 /// Forked readers must produce identical results to the original at any position.
-#[hegel::test(test_cases = 100)]
+#[hegel::test(test_cases = crate::pinned::cases(100))]
 fn fork_matches_original_at_random_positions(tc: TestCase) {
     let start_frac = tc.draw(gs::floats::<f64>().min_value(0.0).max_value_exclusive(0.99));
     let len_frac = tc.draw(gs::floats::<f64>().min_value(0.001).max_value_exclusive(0.01));
@@ -634,7 +636,7 @@ fn fetch_base_seq_reuses_buffer() {
 
 // r[verify fasta.fetch.buffer_reuse]
 
-#[hegel::test(test_cases = 50)]
+#[hegel::test(test_cases = crate::pinned::cases(50))]
 fn fetch_into_matches_fetch_at_random_positions(tc: TestCase) {
     let start_frac = tc.draw(gs::floats::<f64>().min_value(0.0).max_value_exclusive(0.99));
     let len_frac = tc.draw(gs::floats::<f64>().min_value(0.001).max_value_exclusive(0.01));

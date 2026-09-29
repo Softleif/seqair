@@ -17,6 +17,8 @@
     reason = "test code"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::record_encoder::{
     InfoFieldDef, InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoString,
@@ -412,7 +414,7 @@ fn assert_floats_match(printed: &str, want: &[f32], what: &str) {
 // r[verify bcf_writer.flag_encoding]
 /// Every scalar INFO type the VCF spec defines — Integer, Float, Flag,
 /// Character, String — comes back from bcftools as the value that went in.
-#[hegel::test(test_cases = 50)]
+#[hegel::test(test_cases = crate::pinned::cases(50))]
 fn info_scalar_types_round_trip_through_bcftools(tc: TestCase) {
     let records = tc.draw(arb_records().print_as_debug());
     let s = setup();
@@ -440,7 +442,7 @@ fn info_scalar_types_round_trip_through_bcftools(tc: TestCase) {
 /// The `Number` cardinalities that are derived from the ALT count — `A`, `R`,
 /// `G` — keep exactly the width the record's allele count implies, and a fixed
 /// `Number=n` and an unbounded `Number=.` keep theirs, all on the same record.
-#[hegel::test(test_cases = 50)]
+#[hegel::test(test_cases = crate::pinned::cases(50))]
 fn info_number_cardinalities_survive_bcftools(tc: TestCase) {
     let records = tc.draw(arb_records().print_as_debug());
     let s = setup();
@@ -488,7 +490,7 @@ fn info_number_cardinalities_survive_bcftools(tc: TestCase) {
 ///
 /// The expectation is built from the drawn bases, not from `Alleles::ref_text`,
 /// so this is not the writer checked against its own accessor.
-#[hegel::test(test_cases = 50)]
+#[hegel::test(test_cases = crate::pinned::cases(50))]
 fn allele_kinds_spell_ref_and_alt_for_bcftools(tc: TestCase) {
     let records = tc.draw(arb_records().print_as_debug());
     let s = setup();
@@ -532,7 +534,7 @@ fn allele_kinds_spell_ref_and_alt_for_bcftools(tc: TestCase) {
 /// This is the three-way agreement the writer's contract asks for — if the two
 /// seqair paths can disagree about the same logical record, one of them is
 /// wrong, and bcftools says which.
-#[hegel::test(test_cases = 50)]
+#[hegel::test(test_cases = crate::pinned::cases(50))]
 fn vcf_text_and_bcf_render_the_same_record(tc: TestCase) {
     let records = tc.draw(arb_records().print_as_debug());
     let s = setup();
@@ -774,7 +776,7 @@ fn uncompressed_len(bcf: &[u8]) -> usize {
 /// concrete value intact and `.` in exactly the positions that were missing —
 /// at each of the three BCF widths, and with the gaps leading, interior,
 /// trailing, scattered, or everywhere but one slot.
-#[hegel::test(test_cases = 60)]
+#[hegel::test(test_cases = crate::pinned::cases(60))]
 fn info_int_arrays_with_missing_values_round_trip(tc: TestCase) {
     let records = tc.draw(arb_opt_records().print_as_debug());
     let s = opt_setup();
@@ -810,7 +812,7 @@ fn info_int_arrays_with_missing_values_round_trip(tc: TestCase) {
 /// This is the half of the rule bcftools cannot see: an encoder that folded the
 /// missing slots into the width scan as `i32::MIN` would still round-trip, it
 /// would just quietly spend four bytes per element on an `int8` array.
-#[hegel::test(test_cases = 60)]
+#[hegel::test(test_cases = crate::pinned::cases(60))]
 fn missing_elements_do_not_widen_the_column(tc: TestCase) {
     let records = tc.draw(arb_opt_records().print_as_debug());
     let s = opt_setup();
@@ -835,7 +837,7 @@ fn missing_elements_do_not_widen_the_column(tc: TestCase) {
 // r[verify vcf_writer.missing_dot]
 /// The VCF text path spells a missing element `.` in the same place the BCF
 /// path puts the sentinel: the two renderings of the same array agree.
-#[hegel::test(test_cases = 60)]
+#[hegel::test(test_cases = crate::pinned::cases(60))]
 fn vcf_text_and_bcf_agree_on_missing_elements(tc: TestCase) {
     let records = tc.draw(arb_opt_records().print_as_debug());
     let s = opt_setup();

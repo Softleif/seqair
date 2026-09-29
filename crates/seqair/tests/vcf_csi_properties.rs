@@ -20,6 +20,8 @@
     reason = "test code"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::{Alleles, ContigDef, ContigId, OutputFormat, VcfHeader, Writer};
 use seqair_types::{Base, Pos1};
@@ -230,7 +232,7 @@ fn decompress(path: &Path) -> Vec<u8> {
 /// The CSI `Writer::finish` returns for a `.vcf.gz` must make `bcftools view
 /// -r` return exactly the records overlapping the region — no more, and in
 /// particular no fewer.
-#[hegel::test(test_cases = 25)]
+#[hegel::test(test_cases = crate::pinned::cases(25))]
 fn seqair_csi_makes_bcftools_return_exactly_the_overlapping_records(tc: TestCase) {
     let layout = tc.draw(arb_layout().print_as_debug());
     let (contig, start, end) = tc.draw(arb_region(layout.clone()).print_as_debug());
@@ -252,7 +254,7 @@ fn seqair_csi_makes_bcftools_return_exactly_the_overlapping_records(tc: TestCase
 // r[verify index_builder.csi_format]
 /// The same for BCF, whose CSI carries no tabix aux block and lists every
 /// reference rather than only the ones with records.
-#[hegel::test(test_cases = 25)]
+#[hegel::test(test_cases = crate::pinned::cases(25))]
 fn seqair_bcf_csi_makes_bcftools_return_exactly_the_overlapping_records(tc: TestCase) {
     let layout = tc.draw(arb_layout().print_as_debug());
     let (contig, start, end) = tc.draw(arb_region(layout.clone()).print_as_debug());
@@ -273,7 +275,7 @@ fn seqair_bcf_csi_makes_bcftools_return_exactly_the_overlapping_records(tc: Test
 /// arbitrary bin order rules out. It is also the stricter half of the two:
 /// `loffset` and the chunk boundaries are where an index can be subtly
 /// conservative or subtly lossy, and only a differential query shows it.
-#[hegel::test(test_cases = 25)]
+#[hegel::test(test_cases = crate::pinned::cases(25))]
 fn seqair_csi_and_bcftools_csi_answer_the_same_queries(tc: TestCase) {
     let layout = tc.draw(arb_layout().print_as_debug());
     let (contig, start, end) = tc.draw(arb_region(layout.clone()).print_as_debug());
@@ -309,7 +311,7 @@ fn seqair_csi_and_bcftools_csi_answer_the_same_queries(tc: TestCase) {
 ///
 /// `n_unmapped` is always zero here — a VCF record is always placed — so the
 /// pseudo-bin's second chunk must read `(records on that contig, 0)`.
-#[hegel::test(test_cases = 25)]
+#[hegel::test(test_cases = crate::pinned::cases(25))]
 fn csi_header_and_pseudo_bin_match_the_record_set(tc: TestCase) {
     let layout = tc.draw(arb_layout().print_as_debug());
 
@@ -503,7 +505,7 @@ fn tabix_query(path: &Path, region: &str) -> Vec<(String, u32)> {
 /// coordinates. A name dictionary in the wrong order still lists the right
 /// names, and a wrong `col_beg` still lists them too — only the queries catch
 /// those.
-#[hegel::test(test_cases = 25)]
+#[hegel::test(test_cases = crate::pinned::cases(25))]
 fn tabix_reads_the_regions_through_seqairs_aux_block(tc: TestCase) {
     let layout = tc.draw(arb_layout().print_as_debug());
 

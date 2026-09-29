@@ -28,6 +28,8 @@
 #![allow(clippy::unwrap_in_result, reason = "test helper propagates only the parse error")]
 #![allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use core::range::RangeInclusive;
 use hegel::prelude::*;
 use rust_htslib::faidx;
@@ -225,7 +227,7 @@ fn recs(tc: &TestCase) -> Vec<Rec> {
 /// Every subrange of every record must match what htslib returns from the
 /// same file and the same index — modulo case, which seqair normalises per
 /// `r[fasta.fetch.uppercase]` and htslib does not.
-#[hegel::test(test_cases = 64)]
+#[hegel::test(test_cases = crate::pinned::cases(64))]
 fn indexed_fetch_matches_htslib(tc: TestCase) {
     let recs = tc.draw(recs().print_as_debug());
     let (_dir, path) = write_and_index(&recs);
@@ -262,7 +264,7 @@ fn indexed_fetch_matches_htslib(tc: TestCase) {
 // r[verify fastq.access.index_parse]
 /// seqair's parse of htslib's own index must agree with htslib's geometry:
 /// same sequence names, lengths, and a `qual_offset` on every entry.
-#[hegel::test(test_cases = 64)]
+#[hegel::test(test_cases = crate::pinned::cases(64))]
 fn parsed_index_matches_htslib_geometry(tc: TestCase) {
     let recs = tc.draw(recs().print_as_debug());
     let (_dir, path) = write_and_index(&recs);
@@ -282,7 +284,7 @@ fn parsed_index_matches_htslib_geometry(tc: TestCase) {
 /// `qual_byte_offset` must land on the right quality character. The oracle
 /// is the raw file: read the byte at the computed offset and compare it to
 /// the quality value that was generated for that position.
-#[hegel::test(test_cases = 64)]
+#[hegel::test(test_cases = crate::pinned::cases(64))]
 fn qual_byte_offset_locates_the_right_character(tc: TestCase) {
     let recs = tc.draw(recs().print_as_debug());
     let (_dir, path) = write_and_index(&recs);

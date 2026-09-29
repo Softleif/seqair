@@ -14,6 +14,8 @@
     reason = "test code with known small values"
 )]
 mod helpers;
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use helpers::ri;
 use seqair::bam::Pos0;
@@ -43,7 +45,7 @@ fn arb_cigar_parts(tc: &TestCase) -> (Vec<(u32, char)>, String) {
 
 // r[verify sam.record.cigar_parse]
 // r[verify sam.edge.long_cigar]
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn cigar_end_pos_invariants(tc: TestCase) {
     let (parts, cigar) = tc.draw(arb_cigar_parts());
     let pos = tc.draw(gs::integers::<i64>().min_value(100).max_value(9999));
@@ -111,7 +113,7 @@ fn cigar_end_pos_invariants(tc: TestCase) {
 // Extends coverage beyond ACGT to include all IUPAC ambiguity codes and N,
 // verifying that the BAM spec mapping (M/R/W/S/Y/K/V/H/D/B/N → Unknown) is
 // correctly applied end-to-end through the SAM→BAM encoding pipeline.
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn seq_decode_maps_iupac_to_unknown(tc: TestCase) {
     // ACGT, the two-fold and three-fold IUPAC ambiguity codes, and N.
     const IUPAC: &[u8] = b"ACGTMRWSYKVHDBN";
@@ -159,7 +161,7 @@ fn seq_decode_maps_iupac_to_unknown(tc: TestCase) {
 }
 
 // r[verify sam.record.qual_decode]
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn qual_decode_roundtrip(tc: TestCase) {
     let quals = tc.draw(
         gs::vecs(

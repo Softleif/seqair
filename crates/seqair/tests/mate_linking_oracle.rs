@@ -36,6 +36,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::bam::header::BamHeader;
 use seqair::bam::writer::BamWriterBuilder;
@@ -586,7 +588,7 @@ fn tlen_is_the_signed_distance_between_five_prime_ends() {
 /// seqair must read back exactly the mate fields htslib computed. Since the
 /// generator never chose them, agreement here is agreement with htslib and not
 /// with a second copy of seqair's own arithmetic.
-#[hegel::test(test_cases = 24)]
+#[hegel::test(test_cases = crate::pinned::cases(24))]
 fn seqair_reads_the_mate_fields_fixmate_computed(tc: TestCase) {
     let templates = tc.draw(templates());
     note_shapes(&tc, &templates);
@@ -619,7 +621,7 @@ fn seqair_reads_the_mate_fields_fixmate_computed(tc: TestCase) {
 /// it changes is a disagreement between seqair and htslib about mates — either
 /// seqair read a field wrongly or wrote it wrongly, and either way the file it
 /// produced is not what htslib would have produced.
-#[hegel::test(test_cases = 24)]
+#[hegel::test(test_cases = crate::pinned::cases(24))]
 fn fixmate_finds_nothing_to_fix_in_a_bam_seqair_wrote(tc: TestCase) {
     let templates = tc.draw(templates());
     let oracle = Oracle::build(&templates);
@@ -647,7 +649,7 @@ fn fixmate_finds_nothing_to_fix_in_a_bam_seqair_wrote(tc: TestCase) {
 /// The expected set is derived from `samtools view`'s own output — flags and
 /// RNEXT as samtools prints them — so a misreading of the mate fields inside
 /// seqair cannot move both sides of the comparison at once.
-#[hegel::test(test_cases = 24)]
+#[hegel::test(test_cases = crate::pinned::cases(24))]
 fn link_mates_pairs_exactly_the_templates_samtools_calls_pairs(tc: TestCase) {
     let templates = tc.draw(templates());
     let oracle = Oracle::build(&templates);
@@ -735,7 +737,7 @@ fn arb_masks(tc: &TestCase) -> (u16, u16) {
 /// Which records a mate-related flag selects, refereed by `samtools view`.
 /// seqair's predicates and htslib's `-f`/`-F` must pick out the same records,
 /// not merely the same number of them — so the sets are compared, not counts.
-#[hegel::test(test_cases = 20)]
+#[hegel::test(test_cases = crate::pinned::cases(20))]
 fn flag_selection_matches_samtools_view(tc: TestCase) {
     let templates = tc.draw(templates());
     let masks = tc.draw(gs::vecs(arb_masks().print_as_debug()).min_size(1).max_size(3));
@@ -816,7 +818,7 @@ fn flagstat_value(rows: &[(String, u64)], label: &str) -> u64 {
 /// counts the pairing statistics in an `else` arm after secondary and
 /// supplementary, so a supplementary alignment is *not* "paired in sequencing"
 /// however its 0x1 bit reads.
-#[hegel::test(test_cases = 20)]
+#[hegel::test(test_cases = crate::pinned::cases(20))]
 fn flagstat_tallies_match_samtools(tc: TestCase) {
     let templates = tc.draw(templates());
     let oracle = Oracle::build(&templates);

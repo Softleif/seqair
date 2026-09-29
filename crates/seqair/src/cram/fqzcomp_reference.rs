@@ -628,7 +628,7 @@ mod tests {
     // r[verify cram.codec.fqzcomp.record]
     // r[verify cram.codec.fqzcomp.context]
     // r[verify cram.codec.fqzcomp.reverse]
-    #[hegel::test(test_cases = 200)]
+    #[hegel::test(test_cases = crate::pinned::cases(200))]
     fn both_decoders_give_back_htscodecs_input(tc: TestCase) {
         let stream = if tc.draw(gs::booleans()) { builtin_stream(&tc) } else { custom_stream(&tc) };
         tc.assume(stream.is_some());
@@ -641,7 +641,7 @@ mod tests {
     /// what. They share no code, so this pins the production decoder's error
     /// paths (and its output for streams htscodecs would never write) to the
     /// pseudocode's.
-    #[hegel::test(test_cases = 500)]
+    #[hegel::test(test_cases = crate::pinned::cases(500))]
     fn decoders_agree_on_damaged_streams(tc: TestCase) {
         let stream = if tc.draw(gs::booleans()) { builtin_stream(&tc) } else { custom_stream(&tc) };
         tc.assume(stream.is_some());
@@ -678,7 +678,7 @@ mod tests {
         assert_agree(&bytes);
     }
 
-    #[hegel::test(test_cases = 500)]
+    #[hegel::test(test_cases = crate::pinned::cases(500))]
     fn decoders_agree_on_arbitrary_bytes(tc: TestCase) {
         // Half the time past the version check: a small output size, then 5.
         let mut bytes = Vec::new();

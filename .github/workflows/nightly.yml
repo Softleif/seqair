@@ -79,7 +79,7 @@ jobs:
       # and the cost is linear, so going further buys more of the same draws at
       # full price. `cargo test --all` is roughly 2.5x the nextest wall.
       #
-      # `HEGEL_TEST_CASES` is deliberately *not* set here — it would override
+      # `SEQAIR_PINNED_CASES` is deliberately *not* set here — it overrides
       # the per-test counts, which is a different axis with a different cost.
       # That is the `deep-oracles` job below.
       - name: Test
@@ -112,7 +112,9 @@ jobs:
       # schedule where nobody is waiting: every bug this suite has found came
       # from one of them, not from an in-process property.
       #
-      # `HEGEL_TEST_CASES` is the only thing that overrides a pinned count. 500
+      # `SEQAIR_PINNED_CASES` is the only thing that overrides a pinned count
+      # (they are written `test_cases = pinned::cases(N)`; since hegeltest 0.47
+      # `HEGEL_TEST_CASES` no longer beats a compiled-in count). 500
       # is roughly 10x what most of them pin (16-64 for the subprocess
       # round-trips, 100-400 for the cheaper ones) and costs 68s on the whole
       # suite under nextest, against 14s at the PR-CI profile — cheaper than
@@ -120,5 +122,5 @@ jobs:
       # *case* and there are only 83 of them. There is room to raise this.
       - name: Test
         env:
-          HEGEL_TEST_CASES: "500"
+          SEQAIR_PINNED_CASES: "500"
         run: cargo test --all

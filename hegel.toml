@@ -7,12 +7,13 @@
 #
 # Individual tests that are expensive — the subprocess round-trips against
 # bcftools, htslib and noodles — pin their own count with
-# `#[hegel::test(test_cases = N)]`, which wins over the profile.
+# `#[hegel::test(test_cases = pinned::cases(N))]`, which wins over the
+# profile and over `HEGEL_TEST_CASES` (see `crates/seqair/src/pinned.rs`).
 #
 # For a deeper run: `HEGEL_DEFAULT_PROFILE=thorough cargo nextest run`, or
-# `HEGEL_TEST_CASES=500 cargo nextest run` to override the per-test counts too.
+# `SEQAIR_PINNED_CASES=500 cargo nextest run` to override the pinned counts.
 # Those are different axes and the nightly workflow runs both as separate jobs:
-# the profile reaches the ~200 tests that scale with it, `HEGEL_TEST_CASES`
+# the profile reaches the ~200 tests that scale with it, `SEQAIR_PINNED_CASES`
 # reaches the 83 that pin their own count, and neither substitutes for the
 # other.
 #

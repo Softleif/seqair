@@ -255,7 +255,7 @@ fn decodes_what_htscodecs_encodes(tc: TestCase) {
 /// byte to the end of the input, so a corrupt one can read on into the next
 /// substream and fail (or succeed) where seqair, which stops at the
 /// substream's own length, does the opposite. Valid streams never do that.
-#[hegel::test(test_cases = 1000)]
+#[hegel::test(test_cases = crate::pinned::cases(1000))]
 fn agrees_with_htscodecs_on_corrupted_streams(tc: TestCase) {
     let data = tc.draw(arb_data());
     let order = tc.draw(arb_order());
@@ -305,7 +305,7 @@ fn arb_name(tc: &TestCase) -> Vec<u8> {
 
 // r[verify cram.codec.tok3_arith]
 // r[verify cram.codec.tok3]
-#[hegel::test(test_cases = 200)]
+#[hegel::test(test_cases = crate::pinned::cases(200))]
 fn decodes_what_htscodecs_tokenises(tc: TestCase) {
     let names = tc.draw(gs::vecs(arb_name()).min_size(1).max_size(300));
     let level = tc.draw(gs::integers::<c_int>().min_value(1).max_value(9));
@@ -326,7 +326,7 @@ fn decodes_what_htscodecs_tokenises(tc: TestCase) {
 /// tok3 over the production and the reference arithmetic decoder agree on
 /// whatever both accept, corrupted streams included.
 // r[verify cram.codec.tok3_arith]
-#[hegel::test(test_cases = 500)]
+#[hegel::test(test_cases = crate::pinned::cases(500))]
 fn tok3_agrees_with_the_reference_on_corrupted_blocks(tc: TestCase) {
     let names = tc.draw(gs::vecs(arb_name()).min_size(1).max_size(50));
     let level = tc.draw(gs::integers::<c_int>().min_value(1).max_value(9));

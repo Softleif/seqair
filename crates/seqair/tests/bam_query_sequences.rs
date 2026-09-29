@@ -23,6 +23,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
@@ -206,7 +208,7 @@ fn indices(store: &RecordStore) -> Vec<usize> {
 // r[verify bam.reader.sorted_order+2]
 /// Every query of a random sequence on one reader returns exactly the
 /// generated reads that overlap it, in file order.
-#[hegel::test(test_cases = 64)]
+#[hegel::test(test_cases = crate::pinned::cases(64))]
 fn query_sequence_matches_generated_reads(tc: TestCase) {
     let reads = generate_reads(&tc);
     let dir = tempfile::tempdir().unwrap();
@@ -282,7 +284,7 @@ fn whole_references() -> &'static [Vec<Rec>] {
 /// Every query of a random sequence on one reader of real data returns what
 /// filtering a fresh whole-reference read for the window returns, in the
 /// same order.
-#[hegel::test(test_cases = 64)]
+#[hegel::test(test_cases = crate::pinned::cases(64))]
 fn query_sequence_matches_whole_reference_scan(tc: TestCase) {
     let whole = whole_references();
     let mut reader = IndexedBamReader::open(test_bam_path()).unwrap();
@@ -356,7 +358,7 @@ fn sam_whole_references() -> &'static [Vec<Rec>] {
 // r[verify region_buf.block_cache]
 /// The SAM reader shares the block cache; a random query sequence on one
 /// reader matches a fresh whole-reference read, filtered, in order.
-#[hegel::test(test_cases = 32)]
+#[hegel::test(test_cases = crate::pinned::cases(32))]
 fn sam_query_sequence_matches_whole_reference_scan(tc: TestCase) {
     let whole = sam_whole_references();
     let mut reader = IndexedSamReader::open(test_sam_gz()).unwrap();

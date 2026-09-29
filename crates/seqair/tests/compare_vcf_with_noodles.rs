@@ -13,6 +13,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::alleles::Alleles;
 use seqair::vcf::header::{ContigDef, Number, ValueType};
@@ -258,7 +260,7 @@ fn arb_genotype() -> impl PrintableGenerator<Genotype> {
 
 // ── BCF via writer round-trips through noodles ─────────────────────────
 
-#[hegel::test(test_cases = 50)]
+#[hegel::test(test_cases = crate::pinned::cases(50))]
 fn bcf_write_record_roundtrip(tc: TestCase) {
     let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(9999999));
     let alleles = tc.draw(arb_alleles());
@@ -309,7 +311,7 @@ fn bcf_write_record_roundtrip(tc: TestCase) {
     }
 }
 
-#[hegel::test(test_cases = 50)]
+#[hegel::test(test_cases = crate::pinned::cases(50))]
 fn vcf_text_roundtrip_through_noodles(tc: TestCase) {
     let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(9999999));
     let alleles = tc.draw(arb_alleles());

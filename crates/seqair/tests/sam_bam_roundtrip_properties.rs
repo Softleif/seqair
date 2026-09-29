@@ -22,6 +22,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{Pos0, RecordStore};
@@ -416,7 +418,7 @@ fn parse_lines(sam: &str) -> Vec<Line> {
 // r[verify bam_writer.write_store_record]
 /// Every field of every record must come back unchanged from
 /// SAM → seqair reader → seqair writer → BAM → samtools → SAM.
-#[hegel::test(test_cases = 48)]
+#[hegel::test(test_cases = crate::pinned::cases(48))]
 fn sam_survives_the_trip_through_seqairs_bam_writer(tc: TestCase) {
     let reads = tc.draw(arb_reads().print_as_debug());
     let original = sam_text(&reads);

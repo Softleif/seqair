@@ -638,7 +638,7 @@ mod tests {
 
     // r[verify cram.codec.tok3]
     // r[verify cram.codec.tok3_arith]
-    #[hegel::test(test_cases = 300)]
+    #[hegel::test(test_cases = crate::pinned::cases(300))]
     fn both_decoders_give_back_htscodecs_names(tc: TestCase) {
         let names = tc.draw(arb_names());
         let Some(block) = encode(&tc, &names) else {
@@ -656,7 +656,7 @@ mod tests {
     /// length plus 1 KiB), where the decoders' writes take their slow paths:
     /// they decode exactly when the names fit, and alike.
     // r[verify cram.codec.tok3.limits+2]
-    #[hegel::test(test_cases = 300)]
+    #[hegel::test(test_cases = crate::pinned::cases(300))]
     fn decoders_agree_near_the_output_bound(tc: TestCase) {
         let names = tc.draw(arb_names());
         let Some(mut block) = encode(&tc, &names) else { return };
@@ -669,7 +669,7 @@ mod tests {
     }
 
     /// Damaged blocks: whatever both decoders accept, they decode alike.
-    #[hegel::test(test_cases = 500)]
+    #[hegel::test(test_cases = crate::pinned::cases(500))]
     fn decoders_agree_on_damaged_blocks(tc: TestCase) {
         let names = tc.draw(arb_names());
         let Some(mut block) = encode(&tc, &names) else { return };
@@ -885,12 +885,12 @@ mod tests {
         block
     }
 
-    #[hegel::test(test_cases = 2000)]
+    #[hegel::test(test_cases = crate::pinned::cases(2000))]
     fn decoders_agree_on_raw_blocks(tc: TestCase) {
         assert_agree(&tc.draw(arb_raw_block()));
     }
 
-    #[hegel::test(test_cases = 500)]
+    #[hegel::test(test_cases = crate::pinned::cases(500))]
     fn decoders_agree_on_arbitrary_bytes(tc: TestCase) {
         // Half the time a plausible header: a small length and name count.
         let mut block = Vec::new();

@@ -21,6 +21,8 @@
     reason = "test code"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::reader::{DepthLimit, Readers, SegmentOptions};
 use seqair_types::Pos0;
@@ -193,7 +195,7 @@ fn whole_genome_target_yields_all_nonempty_contigs() {
 // the segmented version is the new code path — they must agree on
 // every position and depth.
 // r[verify unified.readers_segments]
-#[hegel::test(test_cases = 16)]
+#[hegel::test(test_cases = crate::pinned::cases(16))]
 fn segmented_matches_single(tc: TestCase) {
     let max_len = tc.draw(gs::integers::<u32>().min_value(100).max_value(999));
     let overlap = tc.draw(gs::integers::<u32>().max_value(99));

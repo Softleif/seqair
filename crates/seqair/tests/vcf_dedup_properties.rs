@@ -18,6 +18,8 @@
     reason = "test code"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use std::sync::Arc;
 
 use hegel::prelude::*;
@@ -293,7 +295,7 @@ fn arb_fmt_op() -> impl PrintableGenerator<FmtOp> {
 
 /// INFO: a duplicate-laden write sequence encodes byte-for-byte identically
 /// to its de-duplicated form, for both BCF and VCF text.
-#[hegel::test(test_cases = 400)]
+#[hegel::test(test_cases = crate::pinned::cases(400))]
 fn info_in_place_overwrite_matches_dedup_oracle(tc: TestCase) {
     let ops = tc.draw(gs::vecs(arb_info_op()).min_size(1).max_size(13));
     let (header, contig, keys) = info_header();
@@ -306,7 +308,7 @@ fn info_in_place_overwrite_matches_dedup_oracle(tc: TestCase) {
 }
 
 /// FORMAT (3 samples): same property, exercising the per-sample colon splice.
-#[hegel::test(test_cases = 400)]
+#[hegel::test(test_cases = crate::pinned::cases(400))]
 fn format_in_place_overwrite_matches_dedup_oracle(tc: TestCase) {
     let ops = tc.draw(gs::vecs(arb_fmt_op()).min_size(1).max_size(11));
     let (header, contig, keys) = fmt_header();

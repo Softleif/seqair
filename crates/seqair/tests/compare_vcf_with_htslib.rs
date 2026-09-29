@@ -12,6 +12,8 @@
 //! and fields are parsed correctly. This is the strongest validation available:
 //! bcftools IS the reference BCF implementation.
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::alleles::Alleles;
 use seqair::vcf::header::{ContigDef, Number, ValueType};
@@ -247,7 +249,7 @@ fn arb_base() -> impl PrintableGenerator<Base> {
 }
 
 /// Write random SNVs with seqair, validate with bcftools (the reference implementation).
-#[hegel::test(test_cases = 20)]
+#[hegel::test(test_cases = crate::pinned::cases(20))]
 fn bcftools_validates_random_seqair_bcf(tc: TestCase) {
     let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(9999999));
     let ref_base = tc.draw(arb_base());

@@ -38,6 +38,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use rust_htslib::bam::Read as _;
 use seqair::bam::Pos0;
@@ -366,7 +368,7 @@ fn expected_line(step: usize, model: &Model) -> Line {
 // r[verify bam.owned_record.to_bam_bytes]
 /// A record driven through a sequence of mutations must, after *every* step,
 /// serialize to BAM that samtools reads back as the model says.
-#[hegel::test(test_cases = 48)]
+#[hegel::test(test_cases = crate::pinned::cases(48))]
 fn mutation_sequences_agree_with_the_model_at_every_step(tc: TestCase) {
     let ops = tc.draw(arb_ops().print_as_debug());
 
@@ -448,7 +450,7 @@ fn mutation_sequences_agree_with_the_model_at_every_step(tc: TestCase) {
 /// `set_int` outside the i32/u32 union must fail without leaving a trace: the
 /// historical bug wrote the two tag-name bytes first and validated after,
 /// which left an orphan that corrupted every tag following it.
-#[hegel::test(test_cases = 32)]
+#[hegel::test(test_cases = crate::pinned::cases(32))]
 fn a_rejected_set_int_leaves_the_aux_block_byte_identical(tc: TestCase) {
     // Build up a real aux block first, so an orphan would have something to
     // corrupt behind it.
@@ -675,7 +677,7 @@ fn stored_bins(path: &Path) -> Vec<u16> {
 /// After `set_alignment` moves a record, the bin it serializes must be the
 /// bin htslib computes for the new alignment — nothing of the old one left
 /// over, and no agreement with a second copy of `reg2bin` living in this file.
-#[hegel::test(test_cases = 32)]
+#[hegel::test(test_cases = crate::pinned::cases(32))]
 fn the_serialized_bin_is_the_one_htslib_computes(tc: TestCase) {
     let mut plans = tc.draw(gs::vecs(arb_realignment()).min_size(1).max_size(6).print_as_debug());
     // Coordinate order, which is what a BAM this shape would really be in.

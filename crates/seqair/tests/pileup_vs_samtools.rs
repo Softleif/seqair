@@ -25,6 +25,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use rust_htslib::bam::pileup::Indel;
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{IndexedBamReader, PileupEngine, Pos0, RecordStore};
@@ -418,7 +420,7 @@ mod generated {
     /// For a generated SAM, every column seqair produces must match htslib's
     /// `bam_plp_auto` on position, depth, the del/refskip/ins counts, and the
     /// per-alignment `qpos`.
-    #[hegel::test(test_cases = 64)]
+    #[hegel::test(test_cases = crate::pinned::cases(64))]
     fn pileup_matches_htslib_on_generated_reads(tc: TestCase) {
         let sam = tc.draw(arb_sam().print_as_debug());
 

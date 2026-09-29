@@ -15,6 +15,8 @@
     reason = "test code"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::bam::aux_data::AuxData;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
@@ -145,7 +147,7 @@ fn write_bam(records: &[OwnedBamRecord], level: i32, threads: usize) -> (Vec<u8>
 // r[verify bam_writer.multithreaded_compression]
 // r[verify bgzf.writer.parallel.identical_output]
 // r[verify bgzf.writer.parallel.index_offsets]
-#[hegel::test(test_cases = 30)]
+#[hegel::test(test_cases = crate::pinned::cases(30))]
 fn parallel_bam_matches_serial(tc: TestCase) {
     let stream = tc.draw(arb_bam_stream());
     let threads = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
@@ -254,7 +256,7 @@ fn write_vcf(
 // r[verify record_encoder.compression_threads]
 // r[verify bgzf.writer.parallel.identical_output]
 // r[verify bgzf.writer.parallel.index_offsets]
-#[hegel::test(test_cases = 30)]
+#[hegel::test(test_cases = crate::pinned::cases(30))]
 fn parallel_bcf_and_vcf_gz_match_serial(tc: TestCase) {
     let stream = tc.draw(arb_vcf_stream());
     let threads = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));

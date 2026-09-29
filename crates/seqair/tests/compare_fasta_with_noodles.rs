@@ -12,6 +12,8 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+#[path = "../src/pinned.rs"]
+mod pinned;
 use core::range::RangeInclusive;
 use hegel::prelude::*;
 use noodles::core::{Position, Region};
@@ -116,7 +118,7 @@ fn chr19_windowed_comparison_noodles() {
 // r[verify fasta.bgzf.decompress]
 // r[verify fasta.bgzf.sequential_read]
 
-#[hegel::test(test_cases = 100)]
+#[hegel::test(test_cases = crate::pinned::cases(100))]
 fn random_regions_match_noodles(tc: TestCase) {
     let seq_idx = tc.draw(gs::integers::<usize>().max_value(2));
     let start_frac = tc.draw(gs::floats::<f64>().min_value(0.0).max_value_exclusive(0.99));

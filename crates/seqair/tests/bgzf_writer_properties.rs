@@ -25,7 +25,7 @@
 //! this file most of the wall time; and the generator reaches the boundary
 //! these properties exist for in half the cases, so a hundred and fifty of them
 //! land on it far more often than the 96-size sweep they supersede. For a
-//! deeper run, `HEGEL_TEST_CASES=N` overrides the per-test count.
+//! deeper run, `SEQAIR_PINNED_CASES=N` overrides the per-test count.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -36,6 +36,8 @@
     reason = "test code"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use noodles_bgzf::VirtualPosition;
 use seqair::io::BgzfWriter;
@@ -148,7 +150,7 @@ fn write_all(writes: &[Vec<u8>], level: i32, flush_first: bool) -> (Vec<u8>, Vec
 // r[verify bgzf.writer.virtual_offset]
 /// Seeking a reader to the offset the writer reported before a write must land
 /// on that write's first byte — for every write, whatever sizes preceded it.
-#[hegel::test(test_cases = 150)]
+#[hegel::test(test_cases = crate::pinned::cases(150))]
 fn a_reported_offset_names_the_write_that_followed_it(tc: TestCase) {
     let writes = tc.draw(arb_writes().print_as_debug());
     let level = tc.draw(arb_level());
@@ -184,7 +186,7 @@ fn a_reported_offset_names_the_write_that_followed_it(tc: TestCase) {
 /// position of the write. The failure mode that corrupted indexes produced a
 /// *valid-looking* offset one byte short of the block's end, which a seek
 /// happily accepts; this is the arithmetic that says which byte it really is.
-#[hegel::test(test_cases = 150)]
+#[hegel::test(test_cases = crate::pinned::cases(150))]
 fn an_offset_decodes_to_the_writes_own_byte_position(tc: TestCase) {
     let writes = tc.draw(arb_writes().print_as_debug());
     let level = tc.draw(arb_level());
@@ -224,7 +226,7 @@ fn an_offset_decodes_to_the_writes_own_byte_position(tc: TestCase) {
 // r[verify bgzf.writer.block_size]
 /// Whatever the writes were, at whatever level, the writer accepts them and
 /// the bytes come back out of an independent decompressor in one piece.
-#[hegel::test(test_cases = 150)]
+#[hegel::test(test_cases = crate::pinned::cases(150))]
 fn the_stream_decompresses_to_what_was_written(tc: TestCase) {
     let writes = tc.draw(arb_writes().print_as_debug());
     let level = tc.draw(arb_level());

@@ -34,6 +34,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::cram::block::{self, ContentType};
@@ -575,7 +577,7 @@ fn crai_entries(cram: &Path) -> Vec<CraiEntry> {
 /// The options change how the records are laid out on disk — how many slices,
 /// whether the reference travels with them, which container each lands in —
 /// and none of that is allowed to change a single decoded field.
-#[hegel::test(test_cases = 48)]
+#[hegel::test(test_cases = crate::pinned::cases(48))]
 fn cram_matches_bam_across_the_writer_option_matrix(tc: TestCase) {
     let sample = tc.draw(arb_sample().print_as_debug());
     let opts = tc.draw(arb_opts().print_as_debug());
@@ -609,7 +611,7 @@ fn cram_matches_bam_across_the_writer_option_matrix(tc: TestCase) {
 /// `ref_seq_id == -2`; the `RI` series then decides which reference each
 /// record belongs to. The assertion that such a slice exists is part of the
 /// property: without it this is just the matrix test again.
-#[hegel::test(test_cases = 24)]
+#[hegel::test(test_cases = crate::pinned::cases(24))]
 fn multi_reference_slices_decode_per_reference(tc: TestCase) {
     let sample = tc.draw(arb_many_contig_sample().print_as_debug());
     let opts = CramOpts {
@@ -657,7 +659,7 @@ fn multi_reference_slices_decode_per_reference(tc: TestCase) {
 /// stores a consensus computed from the reads, which is *not* the FASTA — so
 /// the decoder must reconstruct against the embedded block and not against the
 /// reference it was handed.
-#[hegel::test(test_cases = 24)]
+#[hegel::test(test_cases = crate::pinned::cases(24))]
 fn embedded_reference_slices_decode_to_the_same_records(tc: TestCase) {
     let sample = tc.draw(arb_sample().print_as_debug());
     let opts = CramOpts {
@@ -869,7 +871,7 @@ fn multi_ref_containers_use_every_slices_reference_range() {
 /// error. `seqs_per_slice` is kept small so the index has several entries to
 /// route between, and the region is drawn to land anywhere on the contig,
 /// including past the last read.
-#[hegel::test(test_cases = 48)]
+#[hegel::test(test_cases = crate::pinned::cases(48))]
 fn region_queries_return_exactly_the_overlapping_reads(tc: TestCase) {
     let sample = tc.draw(arb_sample().print_as_debug());
     let opts = tc.draw(arb_opts().print_as_debug());
@@ -939,7 +941,7 @@ fn arb_query(tc: &TestCase, handles: usize, contigs: usize) -> Query {
 /// budget runs from nothing kept, through a few small slices, to everything.
 /// The fresh reader decodes every slice it needs for that one query, so it is
 /// the oracle for "taken from the cache" versus "decoded for this fetch".
-#[hegel::test(test_cases = 48)]
+#[hegel::test(test_cases = crate::pinned::cases(48))]
 fn cached_slices_fetch_like_fresh_ones(tc: TestCase) {
     const HANDLES: usize = 3;
     let sample = tc.draw(arb_sample().print_as_debug());
@@ -1029,7 +1031,7 @@ fn cached_slices_fetch_like_fresh_ones(tc: TestCase) {
 /// `decode_slice` re-filters every record. More cases than its neighbours:
 /// a multi-reference slice with a read straddling the query start, which a
 /// query-sized reference window reconstructs wrongly, is a rare draw.
-#[hegel::test(test_cases = 120)]
+#[hegel::test(test_cases = crate::pinned::cases(120))]
 fn zero_span_index_entries_still_return_every_record(tc: TestCase) {
     let sample = tc.draw(arb_sample().print_as_debug());
     let opts = CramOpts {
@@ -1111,7 +1113,7 @@ fn zero_the_spans(cram: &Path) -> usize {
 /// span really is zero (v3.0 rounds it up to one), which is the one place a
 /// zero span means "nothing here" rather than "extent unknown": these entries
 /// must be skipped, and the mapped reads must come back unaffected.
-#[hegel::test(test_cases = 16)]
+#[hegel::test(test_cases = crate::pinned::cases(16))]
 fn unmapped_reads_are_indexed_apart_from_the_mapped_ones(tc: TestCase) {
     let sample = tc.draw(arb_sample_with_unmapped().print_as_debug());
     let opts = CramOpts {

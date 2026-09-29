@@ -9,6 +9,8 @@
     reason = "test code"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::vcf::record_encoder::{FilterFieldDef, InfoFieldDef, InfoInt};
 use seqair::vcf::{Alleles, ContigDef, Number, OutputFormat, ValueType, VcfHeader, Writer};
@@ -261,7 +263,7 @@ impl std::io::Write for CountingSink {
 // r[verify vcf_writer.buffered_output]
 /// Plain VCF reaches an unbuffered sink in large writes, not one per record,
 /// and every record arrives whether the writer is finished or just dropped.
-#[hegel::test(test_cases = 40)]
+#[hegel::test(test_cases = crate::pinned::cases(40))]
 fn plain_vcf_is_buffered_and_complete(tc: TestCase) {
     let n = tc.draw(gs::integers::<u32>().min_value(1).max_value(20_000));
     let finish = tc.draw(gs::booleans());

@@ -12,6 +12,8 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+#[path = "../src/pinned.rs"]
+mod pinned;
 use bgzf::{CompressionLevel, Reader as BgzfReader, Writer as BgzfWriter};
 use hegel::prelude::*;
 use seqair::bam::{bgzf::VirtualOffset, index::Chunk, region_buf::RegionBuf};
@@ -165,7 +167,7 @@ fn tiny_window_budget_matches_oracle() {
 // r[verify bgzf.crc32]
 // r[verify region_buf.decompress]
 // r[verify region_buf.window_budget]
-#[hegel::test(test_cases = 20)]
+#[hegel::test(test_cases = crate::pinned::cases(20))]
 fn both_decompressors_match(tc: TestCase) {
     let data = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(1).max_size(999_999));
     let level = tc.draw(gs::integers::<u8>().min_value(1).max_value(9));

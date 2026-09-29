@@ -16,6 +16,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use seqair::vcf::record_encoder::{FormatFieldDef, FormatGt, Gt, InfoFieldDef, InfoInt, Scalar};
 use seqair::vcf::{
     Alleles, ContigDef, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
@@ -382,7 +384,7 @@ fn write_generated_vcf(
 
 /// bcftools can query any region of a seqair-produced VCF.gz using seqair's TBI
 /// and returns exactly the records whose positions fall in the query range.
-#[hegel::test(test_cases = 20)]
+#[hegel::test(test_cases = crate::pinned::cases(20))]
 fn bcftools_region_query_matches_expected(tc: TestCase) {
     let positions = tc.draw(arb_sorted_positions(50, 1_000_000));
     let ref_base = tc.draw(arb_base());
@@ -425,7 +427,7 @@ fn bcftools_region_query_matches_expected(tc: TestCase) {
 }
 
 /// TBI header structure matches bcftools output for any random record set.
-#[hegel::test(test_cases = 20)]
+#[hegel::test(test_cases = crate::pinned::cases(20))]
 fn tbi_header_matches_bcftools(tc: TestCase) {
     let positions = tc.draw(arb_sorted_positions(30, 500_000));
     let ref_base = tc.draw(arb_base());
@@ -472,7 +474,7 @@ fn tbi_header_matches_bcftools(tc: TestCase) {
 }
 
 /// An empty VCF (header only, no records) produces a valid TBI that bcftools accepts.
-#[hegel::test(test_cases = 20)]
+#[hegel::test(test_cases = crate::pinned::cases(20))]
 fn empty_vcf_produces_valid_tbi(tc: TestCase) {
     let _dummy = tc.draw(gs::integers::<u8>().max_value(0));
     if !has_bcftools() {

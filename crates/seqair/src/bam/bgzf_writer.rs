@@ -1031,7 +1031,7 @@ mod tests {
     /// The parallel writer produces the serial writer's bytes, and every index
     /// offset it handed out resolves to the virtual offset the serial writer
     /// reported at the same point of the stream.
-    #[hegel::test(test_cases = 60)]
+    #[hegel::test(test_cases = crate::pinned::cases(60))]
     fn parallel_writer_matches_serial(tc: TestCase) {
         let steps = tc.draw(gs::vecs(arb_step()).max_size(60));
         let threads = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));

@@ -23,6 +23,8 @@
     reason = "test code with known small values"
 )]
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 use hegel::prelude::*;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
@@ -282,7 +284,7 @@ fn arb_region(tc: &TestCase, reads: Vec<Read>) -> (usize, u32, u32) {
 /// no records — quietly, the same as a window that happens to be empty. The
 /// window is anchored on real reads so the bins the index would visit are not
 /// empty; only the span is.
-#[hegel::test(test_cases = 24)]
+#[hegel::test(test_cases = crate::pinned::cases(24))]
 fn a_reversed_span_names_no_records(tc: TestCase) {
     let reads = tc.draw(arb_reads().print_as_debug());
     let (contig_idx, start, end) = tc.draw(arb_region(reads.clone()).print_as_debug());
@@ -302,7 +304,7 @@ fn a_reversed_span_names_no_records(tc: TestCase) {
 // r[verify index_builder.binning]
 /// seqair's reader, samtools through seqair's index, and the generated truth
 /// must name the same records for the same region.
-#[hegel::test(test_cases = 48)]
+#[hegel::test(test_cases = crate::pinned::cases(48))]
 fn region_query_agrees_with_samtools_and_brute_force(tc: TestCase) {
     let reads = tc.draw(arb_reads().print_as_debug());
     let (contig_idx, start, end) = tc.draw(arb_region(reads.clone()).print_as_debug());

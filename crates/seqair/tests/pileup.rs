@@ -13,6 +13,8 @@
     reason = "test code with known small values"
 )]
 mod helpers;
+#[path = "../src/pinned.rs"]
+mod pinned;
 use helpers::ri;
 
 use hegel::prelude::*;
@@ -719,7 +721,7 @@ use helpers::{arb_read, arb_read_set};
 
 /// Every column's match-depth must match the number of reads with M/=/X at that position.
 /// Deletions/RefSkips are now included in the pileup but not in `covered_ref_positions`.
-#[hegel::test(test_cases = 100)]
+#[hegel::test(test_cases = crate::pinned::cases(100))]
 fn depth_matches_cigar_derived_coverage(tc: TestCase) {
     let reads = tc.draw(arb_read_set(15));
     let mut arena = RecordStore::new();
@@ -752,7 +754,7 @@ fn depth_matches_cigar_derived_coverage(tc: TestCase) {
 }
 
 /// qpos values from the pileup engine must match our independent CIGAR walk.
-#[hegel::test(test_cases = 100)]
+#[hegel::test(test_cases = crate::pinned::cases(100))]
 fn qpos_matches_independent_cigar_walk(tc: TestCase) {
     let reads = tc.draw(arb_read_set(10));
     let mut arena = RecordStore::new();
@@ -785,7 +787,7 @@ fn qpos_matches_independent_cigar_walk(tc: TestCase) {
 
 /// Deletions and ref-skips are now included in pileup columns.
 /// D/N positions have depth 1 with a `Deletion` or `RefSkip` op (no `qpos`).
-#[hegel::test(test_cases = 100)]
+#[hegel::test(test_cases = crate::pinned::cases(100))]
 fn deletions_cause_absent_alignment(tc: TestCase) {
     let read = tc.draw(arb_read());
     let has_deletion = read.cigar_ops.iter().any(|&(_, op)| op == 2 || op == 3);
@@ -829,7 +831,7 @@ fn deletions_cause_absent_alignment(tc: TestCase) {
 }
 
 /// Insertions don't affect depth or ref positions — they only shift qpos.
-#[hegel::test(test_cases = 100)]
+#[hegel::test(test_cases = crate::pinned::cases(100))]
 fn insertions_shift_qpos_but_not_depth(tc: TestCase) {
     let read = tc.draw(arb_read());
     let has_insertion = read.cigar_ops.iter().any(|&(_, op)| op == 1);
@@ -864,7 +866,7 @@ fn insertions_shift_qpos_but_not_depth(tc: TestCase) {
 
 /// With multiple complex-CIGAR reads, no column should ever appear with
 /// zero depth (the engine skips empty positions).
-#[hegel::test(test_cases = 100)]
+#[hegel::test(test_cases = crate::pinned::cases(100))]
 fn no_zero_depth_columns_with_complex_cigars(tc: TestCase) {
     let reads = tc.draw(arb_read_set(8));
     let mut arena = RecordStore::new();
@@ -886,7 +888,7 @@ fn no_zero_depth_columns_with_complex_cigars(tc: TestCase) {
 
 /// `qpos` must always be within `[0, seq_len)` for every alignment that has one.
 /// `Deletion` and `RefSkip` alignments have no `qpos` — that is correct behavior.
-#[hegel::test(test_cases = 100)]
+#[hegel::test(test_cases = crate::pinned::cases(100))]
 fn qpos_always_within_seq_bounds(tc: TestCase) {
     let reads = tc.draw(arb_read_set(10));
     let mut arena = RecordStore::new();

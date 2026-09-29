@@ -12,6 +12,8 @@ pub mod bam;
 pub mod cram;
 pub mod fasta;
 pub mod io;
+#[cfg(test)]
+mod pinned;
 pub mod reader;
 pub mod sam;
 #[cfg(test)]
