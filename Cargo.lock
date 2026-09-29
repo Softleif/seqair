@@ -210,9 +210,9 @@ dependencies = [
 
 [[package]]
 name = "buffer-redux"
-version = "1.0.2"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e8acf87c5b9f5897cd3ebb9a327f420e0cae9dd4e5c1d2e36f2c84c571a58f1"
+checksum = "431a9cc8d7efa49bc326729264537f5e60affce816c66edf434350778c9f4f54"
 dependencies = [
  "memchr",
 ]
@@ -1677,9 +1677,9 @@ checksum = "d4f410fedcf71af0345d7607d246e7ad15faaadd49d240ee3b24e5dc21a820ac"
 
 [[package]]
 name = "seq_io"
-version = "0.3.4"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1303559e530ee83c1d7a8593a033792c2a29217544a5c48563e116e158d76ade"
+checksum = "86b213fabdebb1c56d330d1dbf92cef0257f3873b718eb2202bb73c707197e9c"
 dependencies = [
  "buffer-redux",
  "crossbeam-utils",
