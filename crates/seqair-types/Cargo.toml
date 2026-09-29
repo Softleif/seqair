@@ -13,7 +13,7 @@ serde = { workspace = true, optional = true }
 thiserror = { workspace = true }
 bytemuck = { workspace = true }
 winnow = "1.0.2"
-smallvec = { version = "2.0.0-alpha.12", features = ["std"] }
+smallvec = { version = "2.0.0-beta.1", features = ["std"] }
 smol_str = "0.3.6"
 fearless_simd = { workspace = true }
 fearless_simd_macros = { workspace = true }
