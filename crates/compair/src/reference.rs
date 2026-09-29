@@ -252,7 +252,6 @@ fn banded_row(
     let [cur_m, cur_i, cur_d] = current;
     let (mut left_m, mut left_d) = (0.0f64, 0.0f64);
     // One running maximum per matrix, so no cell waits on another's compare.
-    // Every cell is finite and non-negative, where `max` is exact.
     let mut max = [0.0f64; 3];
     let above = prev_m.windows(2).zip(prev_i.windows(2)).zip(prev_d);
     let cells = cur_m.iter_mut().zip(cur_i.iter_mut()).zip(cur_d.iter_mut());
@@ -270,11 +269,14 @@ fn banded_row(
         let i = m_up * t.match_to_insertion + i_up * t.gap_continuation;
         let d = left_m * t.match_to_deletion + left_d * t.gap_continuation;
         (*m_cell, *i_cell, *d_cell) = (m, i, d);
-        max = [max[0].max(m), max[1].max(i), max[2].max(d)];
+        for (max, cell) in max.iter_mut().zip([m, i, d]) {
+            if cell > *max {
+                *max = cell;
+            }
+        }
         (left_m, left_d) = (m, d);
     }
-    let [m, i, d] = max;
-    m.max(i).max(d)
+    max.into_iter().fold(0.0, |max, cell| if cell > max { cell } else { max })
 }
 
 /// An `f32` kernel's score where `f32` can vouch for it, and the `f64`
