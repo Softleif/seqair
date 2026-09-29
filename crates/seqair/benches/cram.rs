@@ -91,7 +91,7 @@ fn cram_record_decode(c: &mut Criterion) {
             );
             let query = reader.query(&header, &crai_index, &region).unwrap();
             let mut count = 0usize;
-            for result in query {
+            for result in query.records() {
                 let _ = result.unwrap();
                 count += 1;
             }
@@ -271,7 +271,7 @@ fn cram_full_decode(c: &mut Criterion) {
             let region = Region::new(CHROM, ..);
             let query = reader.query(&header, &crai_index, &region).unwrap();
             let mut count = 0usize;
-            for result in query {
+            for result in query.records() {
                 let _ = result.unwrap();
                 count += 1;
             }
