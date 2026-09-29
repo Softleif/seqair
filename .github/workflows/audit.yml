@@ -1,0 +1,41 @@
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths: *paths
+  # New advisories land without any change here, so check daily too.
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-deny:
+    name: cargo deny (${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, bans licenses sources]
+    # A freshly published advisory is not the PR's fault, so it doesn't block
+    # PRs; the daily run goes red instead. License/source/ban problems are
+    # introduced by the PR itself and do block.
+    continue-on-error: ${{ matrix.checks == 'advisories' && github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v6
+      # Not EmbarkStudios/cargo-deny-action: its Docker image ships its own
+      # toolchain, which doesn't match rust-toolchain.toml.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check ${{ matrix.checks }}

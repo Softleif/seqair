@@ -1,0 +1,37 @@
+# cargo-deny: https://embarkstudios.github.io/cargo-deny/
+# Run locally with `cargo deny check`. CI: .github/workflows/audit.yml
+
+[graph]
+all-features = true
+
+[advisories]
+ignore = [
+    # custom_derive is unmaintained. Only rust-htslib pulls it in, and
+    # rust-htslib is a dev-dependency (test oracle) plus the optional
+    # `hts-compat` feature of seqair-types. Nothing we can swap out.
+    { id = "RUSTSEC-2025-0058", reason = "via rust-htslib only (dev-dep / optional hts-compat)" },
+]
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+    "bzip2-1.0.6",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path deps within the workspace have no version requirement.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
