@@ -87,3 +87,7 @@ required-features = ["gpu"]
 [[example]]
 name = "gpu_shadow"
 required-features = ["gpu"]
+
+[[example]]
+name = "gpu"
+required-features = ["gpu"]
