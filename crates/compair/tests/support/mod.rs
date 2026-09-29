@@ -244,23 +244,35 @@ pub fn derived_case(max_edits: usize) -> impl PrintableGenerator<Case> {
 
 /// An unconstrained pair, for the bit-parity check: the band is allowed to miss
 /// the alignment entirely, because parity must hold there too.
+///
+/// Qualities run from Q2 to Q45, as sequencers report them. The value and
+/// geometry checks built on this hold an `f32` kernel to an `f64` one, and
+/// at `Q0` (`eps = 1`) a pair can score near `-40`, where the strip kernel
+/// loses it altogether and the `f64` recurrence does not.
+pub fn arbitrary_case() -> impl PrintableGenerator<Case> {
+    arbitrary_case_inner(2, 45).print_as_debug()
+}
+
+/// `arbitrary_case` with every quality a `Read` accepts, `Q0` to `Q254`, for
+/// the gates that compare two kernels to the bit: those hold wherever the
+/// kernels run, including where both lose the score to underflow.
+pub fn any_quality_case() -> impl PrintableGenerator<Case> {
+    arbitrary_case_inner(0, 254).print_as_debug()
+}
+
 #[hegel::composite]
-fn arbitrary_case_inner(tc: &TestCase) -> Case {
+fn arbitrary_case_inner(tc: &TestCase, lowest: u8, highest: u8) -> Case {
     let len = tc.draw_silent(length(1, 89));
     let hap = exactly(tc, any_base_or_n(), len);
     let len = tc.draw_silent(length(1, 69));
     let bases = exactly(tc, any_base_or_n(), len);
-    let quals = draw_quals(tc, 2, 45, bases.len());
-    let gaps = draw_quals(tc, 2, 45, bases.len());
+    let quals = draw_quals(tc, lowest, highest, bases.len());
+    let gaps = draw_quals(tc, lowest, highest, bases.len());
     let strand = tc.draw_silent(any_strand());
     let offset = tc.draw_silent(gs::integers::<i32>().min_value(-20).max_value(39));
     let Ok(read) = Read::new(bases, &quals, &gaps, &gaps, &gaps, strand) else { tc.reject() };
     let betas = exactly(tc, any_probability(), hap.len());
     Case { haplotype: Haplotype::new(hap), read, offset, betas }
-}
-
-pub fn arbitrary_case() -> impl PrintableGenerator<Case> {
-    arbitrary_case_inner().print_as_debug()
 }
 
 /// The mirror of a case: reverse-complement the haplotype and the read, swap

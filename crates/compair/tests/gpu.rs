@@ -33,7 +33,9 @@ use compair::{
 };
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
-use support::{Case, any_conversion, any_probability, arbitrary_case, derived_case, length};
+use support::{
+    Case, any_conversion, any_probability, any_quality_case, arbitrary_case, derived_case, length,
+};
 
 /// `|Δ log10|` the GPU may differ from the strip kernel by: the GATK vectors'
 /// tolerance. Measured: 6e-7 at worst on the 10s pairs.
@@ -76,15 +78,25 @@ fn bits(scores: &[Log10Likelihood]) -> Vec<u64> {
 /// A case with a band of its own width, from 2 up to past the unrolled
 /// kernel's limit, so one launch spans several band classes.
 #[hegel::composite]
-fn banded_case_inner(tc: &TestCase) -> (Case, Band) {
-    let case = tc.draw_silent(arbitrary_case());
+fn banded_case_inner(tc: &TestCase, any_quality: bool) -> (Case, Band) {
+    let case = if any_quality {
+        tc.draw_silent(any_quality_case())
+    } else {
+        tc.draw_silent(arbitrary_case())
+    };
     let width = tc.draw_silent(gs::integers::<u32>().min_value(2).max_value(160));
     let Ok(band) = Band::new(width, case.offset) else { tc.reject() };
     (case, band)
 }
 
 fn banded_case() -> impl PrintableGenerator<(Case, Band)> {
-    banded_case_inner().print_as_debug()
+    banded_case_inner(false).print_as_debug()
+}
+
+/// The same with every quality a `Read` accepts, for the gates that are
+/// bit-exact: see `support::any_quality_case`.
+fn any_quality_banded_case() -> impl PrintableGenerator<(Case, Band)> {
+    banded_case_inner(true).print_as_debug()
 }
 
 /// The emissions the parity gates sweep, for one batch of cases.
@@ -140,7 +152,7 @@ fn for_each_emission(
 #[hegel::test(test_cases = pinned::cases(512))]
 fn the_kernel_algorithm_is_the_strip_kernel(tc: TestCase) {
     let count = tc.draw(length(1, 5));
-    let cases: Vec<_> = (0..count).map(|_| tc.draw(banded_case())).collect();
+    let cases: Vec<_> = (0..count).map(|_| tc.draw(any_quality_banded_case())).collect();
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
     for_each_emission(&cases, conversion, uniform, |name, pairs, strips| {
@@ -154,7 +166,7 @@ fn the_kernel_algorithm_is_the_strip_kernel(tc: TestCase) {
 #[hegel::test(test_cases = pinned::cases(256))]
 fn appended_plans_are_one_plan(tc: TestCase) {
     let count = tc.draw(length(1, 23));
-    let cases: Vec<_> = (0..count).map(|_| tc.draw(banded_case())).collect();
+    let cases: Vec<_> = (0..count).map(|_| tc.draw(any_quality_banded_case())).collect();
     let cut_count = tc.draw(length(0, 3));
     let cuts: Vec<usize> = (0..cut_count).map(|_| tc.draw(length(0, 23))).collect();
     let emission = StandardEmission::default();
@@ -190,7 +202,7 @@ fn appended_plans_are_one_plan(tc: TestCase) {
 #[hegel::test(test_cases = pinned::cases(64))]
 fn the_gpu_runs_the_transcribed_kernel(tc: TestCase) {
     let count = tc.draw(length(1, 47));
-    let cases: Vec<_> = (0..count).map(|_| tc.draw(banded_case())).collect();
+    let cases: Vec<_> = (0..count).map(|_| tc.draw(any_quality_banded_case())).collect();
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
     let Some(context) = context() else { return };

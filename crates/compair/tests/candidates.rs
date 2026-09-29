@@ -12,7 +12,7 @@ use compair::{
 };
 use hegel::TestCase;
 use hegel::generators as gs;
-use support::{any_conversion, any_probability, arbitrary_case, levels, mirror_strand};
+use support::{any_conversion, any_probability, any_quality_case, levels, mirror_strand};
 
 fn bits(scores: &[Log10Likelihood]) -> Vec<u64> {
     scores.iter().map(|score| score.get().to_bits()).collect()
@@ -77,7 +77,7 @@ fn check<E: Emission + Copy>(
 /// from the first would show here.
 #[hegel::test(test_cases = pinned::cases(64))]
 fn candidates_score_what_one_pair_at_a_time_scores(tc: TestCase) {
-    let case = tc.draw(arbitrary_case());
+    let case = tc.draw(any_quality_case());
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
     let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(17));

@@ -20,7 +20,7 @@ use compair::{
 };
 use hegel::TestCase;
 use hegel::generators as gs;
-use support::{Case, any_conversion, any_probability, arbitrary_case, length};
+use support::{Case, any_conversion, any_probability, any_quality_case, length};
 
 fn bits(scores: &[Log10Likelihood]) -> Vec<u64> {
     scores.iter().map(|score| score.get().to_bits()).collect()
@@ -74,7 +74,7 @@ fn any_width(tc: &TestCase) -> u32 {
 #[hegel::test(test_cases = pinned::cases(128))]
 fn unrelated_pairs_are_bit_identical_to_one_alignment_at_a_time(tc: TestCase) {
     let count = tc.draw(length(1, 2 * PAIRS + 3));
-    let cases: Vec<Case> = (0..count).map(|_| tc.draw(arbitrary_case())).collect();
+    let cases: Vec<Case> = (0..count).map(|_| tc.draw(any_quality_case())).collect();
     let widths: Vec<u32> = tc.draw(gs::vecs(any_width()).min_size(count).max_size(count));
     let one_width = tc.draw(gs::booleans());
     let conversion = tc.draw(any_conversion());
@@ -102,7 +102,7 @@ fn unrelated_pairs_are_bit_identical_to_one_alignment_at_a_time(tc: TestCase) {
 /// two kernels have to agree on it: same bits, lane for lane.
 #[hegel::test(test_cases = pinned::cases(128))]
 fn a_batch_shaped_group_scores_as_the_batch_kernel_does(tc: TestCase) {
-    let case = tc.draw(arbitrary_case());
+    let case = tc.draw(any_quality_case());
     let conversion = tc.draw(any_conversion());
     let spread = tc.draw(gs::integers::<usize>().max_value(3));
     let band = case.band();

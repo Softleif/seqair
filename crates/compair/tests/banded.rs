@@ -12,7 +12,8 @@ use compair::{
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator};
 use support::{
-    any_conversion, any_probability, arbitrary_case, derived_case, length, plausible_conversion,
+    any_conversion, any_probability, any_quality_case, arbitrary_case, derived_case, length,
+    plausible_conversion,
 };
 
 // The bit-parity gates are the cheapest of these and the ones most worth
@@ -25,7 +26,7 @@ use support::{
 /// nothing from the previous pair leaks into the next.
 #[hegel::test(test_cases = pinned::cases(2048))]
 fn simd_is_bit_identical_to_scalar(tc: TestCase) {
-    let case = tc.draw(arbitrary_case());
+    let case = tc.draw(any_quality_case());
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
     let band = case.band();
@@ -81,7 +82,7 @@ fn simd_is_bit_identical_to_scalar(tc: TestCase) {
 /// and one workspace serves both traversals in any order.
 #[hegel::test(test_cases = pinned::cases(2048))]
 fn strips_simd_is_bit_identical_to_strips_scalar(tc: TestCase) {
-    let case = tc.draw(arbitrary_case());
+    let case = tc.draw(any_quality_case());
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
     let band = case.band();
@@ -145,7 +146,7 @@ fn strips_simd_is_bit_identical_to_strips_scalar(tc: TestCase) {
 /// may leak into the next.
 #[hegel::test(test_cases = pinned::cases(512))]
 fn every_simd_level_is_bit_identical_to_scalar(tc: TestCase) {
-    let case = tc.draw(arbitrary_case());
+    let case = tc.draw(any_quality_case());
     let conversion = tc.draw(any_conversion());
     let spread = tc.draw(gs::integers::<usize>().max_value(3));
     let band = case.band();
@@ -669,7 +670,7 @@ fn the_f32_band_is_the_f64_recurrence_at_every_width(tc: TestCase) {
 /// where the tail-lane masking is exercised.
 #[hegel::test(test_cases = pinned::cases(1024))]
 fn simd_is_bit_identical_to_scalar_at_every_width(tc: TestCase) {
-    let case = tc.draw(arbitrary_case());
+    let case = tc.draw(any_quality_case());
     let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(63));
     let conversion = tc.draw(any_conversion());
     let band = Band::new(width, case.offset).expect("w");
@@ -1295,7 +1296,7 @@ fn band_new_rejects_a_width_it_would_have_to_allocate() {
 /// bug rather than a traversal bug.
 #[hegel::test(test_cases = pinned::cases(1024))]
 fn a_batch_is_bit_identical_to_one_alignment_at_a_time(tc: TestCase) {
-    let case = tc.draw(arbitrary_case());
+    let case = tc.draw(any_quality_case());
     let conversion = tc.draw(any_conversion());
     let uniform = tc.draw(any_probability());
     let spread = tc.draw(gs::integers::<usize>().max_value(3));
