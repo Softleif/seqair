@@ -88,10 +88,11 @@ de-novo CpG needs no special case.
 - A stated band contract: a path outside the band scores lower, never wrong;
   no path at all is `Log10Likelihood::IMPOSSIBLE`, and `Band::MAX_WIDTH` bounds
   the allocation
-- 8-wide `f32` SIMD via `wide`: ~8 µs per 150 bp read × 46-wide band on an
-  Apple M4 Pro through the strip kernel and ~10 µs through the diagonal one
-  (~22 and ~27 µs scalar, ~95 µs for the `f64` reference over the whole
-  matrix), each bit-identical to its scalar kernel. The default width is 46
+- 8-wide `f32` SIMD via `fearless_simd`, picked at run time (NEON; SSE2
+  through AVX-512), with no build flags and every SIMD kernel bit-identical
+  to its scalar instance. Two lane layouts: eight cells of one alignment per
+  vector (strip and diagonal kernels), or eight alignments per vector (batch
+  and pairs kernels), which the entry points choose between. The default width is 46
   and not 48 because a diagonal of `width / 2 + 1` cells fills three vectors
   of eight exactly at 46 and spills one cell into a fourth at 48
 - A GPU kernel behind the `gpu` feature (wgpu: Metal, Vulkan, DX12), one
