@@ -285,8 +285,10 @@ fn banded_row(
 /// The strip kernels (and the batch, pairs and GPU kernels, which share their
 /// sweep) flush every stored cell below `2^-126` to zero, and scale every
 /// eighth row by a power of two so that its largest cell sits in
-/// `[2^STRIP_SCALE, 2^(STRIP_SCALE + 1))`. What the flushes can lose, with
-/// `spill` and `carry` the read's `Growth` and `total = 10^log10_total`:
+/// `[2^STRIP_SCALE, 2^(STRIP_SCALE + 1))`; the diagonal kernel scales each
+/// anti-diagonal so that the larger of the two the next one reads sits
+/// there. What the flushes can lose, with `spill` and `carry` the read's
+/// `Growth` and `total = 10^log10_total`:
 ///
 /// - *The scale.* The free start puts `1 / h` into each row-0 column that
 ///   feeds row 1, `rho` in all. So a match or insertion cell of the
@@ -301,6 +303,9 @@ fn banded_row(
 ///   drops per cell and matrix, in `r` rows of at most `columns` cells.
 /// - *Where it goes.* The paths from a match or insertion cell to the total
 ///   sum to at most `total`, from a deletion cell to at most `carry * total`.
+///   A diagonal's scale can come from a later row than the cell it drops, so
+///   the two `total`s are not one product over the read's rows but two: the
+///   floor takes `total^2`, which costs nothing where qualities are steady.
 /// - *Rounding.* A value the kernel computes is at most `(1 + 2^-24)^n`
 ///   times the exact recurrence, `n` the roundings on the longest chain of
 ///   operations behind it: at most seven per path step, the `f32` transition
@@ -310,7 +315,7 @@ fn banded_row(
 ///   from and in what a drop hands on.
 ///
 /// So the total the kernel returns is short of the recurrence's by less than
-/// `3 * r * columns * (2 + carry) * total * (1 + 2^-24)^(2n) *
+/// `3 * r * columns * (2 + carry) * total^2 * (1 + 2^-24)^(2n) *
 /// max(max(1, spill) * rho * 2^(-126 - STRIP_SCALE), 2^(-126 - 127))`, and a
 /// total a million times that is right to within a millionth. With steady
 /// qualities `total` and `carry` are one and `spill` below it; for 150 bases
@@ -321,8 +326,8 @@ fn banded_row(
 /// -- and the pair is scored again by [`align_banded_f64`]. So is a pair the
 /// strip kernel could overflow on (see `scaling::STRIP_SCALE`), which no read
 /// with steady qualities is. Both checks depend on the pair alone, and every
-/// kernel returns the same `f32` score for a pair, so the fallback cannot make
-/// two kernels disagree. The factors take a pass over the read's rows, so a
+/// kernel of the strip family returns the same `f32` score for a pair, so the
+/// fallback cannot make two of them disagree. The factors take a pass over the read's rows, so a
 /// bound from its quality bytes (`Read::growth_bound`) is tried first; it
 /// vouches only where they would.
 ///
@@ -340,33 +345,10 @@ pub fn trusted<E: Emission + ?Sized>(
     let h = haplotype.len();
     let vouches = |growth: Growth| {
         strips_fit(h, band, growth)
-            && score.get() >= trust_floor(h, read.len(), band, STRIP_SCALE, growth.log10_total, growth)
+            && score.get() >= trust_floor(h, read.len(), band, 2.0 * growth.log10_total, growth)
     };
     // The bound vouches only where the exact factors would: every check is
     // monotone in them.
-    if read.growth_bound().is_some_and(vouches) || vouches(read.growth()) {
-        score
-    } else {
-        align_banded_f64(haplotype, read, emission, band)
-    }
-}
-
-/// [`trusted`] for a score from the diagonal kernel, which scales each
-/// anti-diagonal's largest cell into `[1, 2)`: the scale is `2^0`. It takes
-/// that scale from a whole anti-diagonal, whose largest cell can sit in a
-/// later row than a cell it drops, so both the scale's bound and the drop's
-/// reach can be `Growth::total`, and the floor takes it twice.
-pub(crate) fn trusted_diagonal<E: Emission + ?Sized>(
-    score: Log10Likelihood,
-    haplotype: &Haplotype,
-    read: &Read,
-    emission: &E,
-    band: Band,
-) -> Log10Likelihood {
-    let h = haplotype.len();
-    let vouches = |growth: Growth| {
-        score.get() >= trust_floor(h, read.len(), band, 0, 2.0 * growth.log10_total, growth)
-    };
     if read.growth_bound().is_some_and(vouches) || vouches(read.growth()) {
         score
     } else {
@@ -392,17 +374,17 @@ fn strips_fit(h: usize, band: Band, growth: Growth) -> bool {
 }
 
 /// `log10` of the least total the flushes of an `f32` kernel that keeps its
-/// rows at `2^scale` cannot move by more than a millionth; see [`trusted`].
-/// `spread` is `log10` of how far a dropped cell's paths can grow,
-/// `Growth::log10_total` for the strip kernels.
+/// rows at `2^STRIP_SCALE` cannot move by more than a millionth; see
+/// [`trusted`]. `spread` is `log10` of how far the scale's bound and a
+/// dropped cell's paths can grow together, `2 * Growth::log10_total`.
 #[allow(clippy::cast_precision_loss, reason = "counts of cells, far below 2^52")]
-fn trust_floor(h: usize, r: usize, band: Band, scale: i32, spread: f64, growth: Growth) -> f64 {
+fn trust_floor(h: usize, r: usize, band: Band, spread: f64, growth: Growth) -> f64 {
     let columns = row_columns(band, h) as f64;
     let rows = r as f64;
     let rho = free_starts(band, h) as f64 / h as f64;
     let roundings = 7.0 * (2.0 * rows + columns) + columns + 40.0;
     let rounding = roundings * f64::from(f32::EPSILON) * core::f64::consts::LOG10_E;
-    let scale = (growth.spill.max(1.0) * rho * exp2_f64(-126 - scale)).max(exp2_f64(-253));
+    let scale = (growth.spill.max(1.0) * rho * exp2_f64(-126 - STRIP_SCALE)).max(exp2_f64(-253));
     6.0 + rounding + spread + (3.0 * rows * columns * (2.0 + growth.carry) * scale).log10()
 }
 

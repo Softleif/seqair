@@ -5,8 +5,8 @@ use crate::{
     error::Error,
     haplotype::Haplotype,
     read::Read,
-    reference::trusted_diagonal,
-    scaling::{exp2_f32, exp2_f64, normalising_shift_f32},
+    reference::trusted,
+    scaling::{exp2_f32, exp2_f64, strip_shift_f32},
     types::Log10Likelihood,
 };
 use seqair_types::{Base, Strand};
@@ -374,7 +374,7 @@ impl Workspace {
             return Log10Likelihood::IMPOSSIBLE;
         };
         let score = crate::simd::banded_kernel_at(level, &self.plan, &mut self.ring, shape, band);
-        trusted_diagonal(score, haplotype, read, emission, band)
+        trusted(score, haplotype, read, emission, band)
     }
 
     fn align<L: Lane<Token = ()>, E: Emission>(
@@ -388,7 +388,7 @@ impl Workspace {
             return Log10Likelihood::IMPOSSIBLE;
         };
         let score = banded_kernel::<L>((), &self.plan, &mut self.ring, shape, band);
-        trusted_diagonal(score, haplotype, read, emission, band)
+        trusted(score, haplotype, read, emission, band)
     }
 
     /// Folds the emission into the plan, so that from here on a kernel is
@@ -1144,16 +1144,26 @@ pub(crate) fn banded_kernel<L: Lane>(
 
     // Renormalisation is lazy. Each diagonal is computed and stored in one
     // scale, `2^exponent`, chosen before it is computed as the previous
-    // diagonal's scale plus the shift that would have put *that* diagonal's
-    // maximum into `[1, 2)`. The two diagonals a cell reads are then brought
+    // diagonal's scale plus the shift that puts the larger of the two
+    // diagonals it reads at `2^STRIP_SCALE` (`strip_shift_f32`), as the strip
+    // kernels keep a row. The two diagonals a cell reads are then brought
     // onto the current scale by a power of two on the way in -- exact in
     // binary floating point -- rather than rewritten in place, so nothing
     // between one diagonal and the next waits on a store: no rescale pass,
     // and no branch on whether one is needed.
+    //
+    // Nothing overflows: both diagonals a cell reads are at most
+    // `2^(STRIP_SCALE + 1)` on its scale, and a cell sums at most three of
+    // their cells times transitions of at most one -- `3 * 2^116`. Taking the
+    // larger of the two is what keeps the one two back there after a
+    // diagonal whose maximum collapses, which would otherwise ask for a
+    // shift of over a hundred and lift the diagonal before it past `f32`.
     let init = 1.0f32 / h as f32;
     let mut init_scaled = init;
     let mut exponent = 0i32;
     let (mut shift1, mut shift2) = (0i32, 0i32);
+    // The previous diagonal's largest cell, on its own scale.
+    let mut previous_max = 0.0f32;
     let mut accumulator = 0.0f64;
     let mut reference_exponent: Option<i32> = None;
 
@@ -1270,11 +1280,15 @@ pub(crate) fn banded_kernel<L: Lane>(
             running_d = running_d.vmax(L::splat(token, init_scaled));
         }
 
-        // The shift this diagonal's maximum asks for is applied to the next
-        // one's scale, not to this one's cells.
-        let running = running_m.vmax(running_i).vmax(running_d);
+        // The shift for the next diagonal's scale, not for this one's cells:
+        // from the larger of the two diagonals it will read, the previous one
+        // lifted onto this one's scale. That product stays under
+        // `2^(STRIP_SCALE + 1)`, since this scale was taken from it.
+        let here = running_m.vmax(running_i).vmax(running_d).horizontal_max();
+        let before = previous_max * exp2_f32(shift1);
+        previous_max = here;
         shift2 = shift1;
-        shift1 = normalising_shift_f32(running.horizontal_max());
+        shift1 = strip_shift_f32(here.max(before));
 
         if len > 0 && lo + len - 1 == r {
             let slot = r - lo;

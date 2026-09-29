@@ -101,14 +101,14 @@
 //! **Precision.** Every entry point returns the `f64` recurrence over the
 //! band, at any score. The kernels compute in `f32`, renormalising by powers
 //! of two, and flush stored cells below `2^-126`. The strip, batch, pairs and
-//! GPU kernels keep a renormalised row's largest cell at `2^115`, so a flush
-//! there provably cannot move a total above a floor near `-62` (for 150 bases
-//! in a 64-wide band) by a millionth; the diagonal kernel keeps it in
-//! `[1, 2)`, and its floor is near `-28`. A pair that finishes below its
-//! kernel's floor is scored again by [`align_banded_f64`], and so is a read
-//! whose qualities could overflow the strip kernels. [`trusted`] is that
-//! check, for the GPU kernel's scores. The proof needs every emission and the
-//! transitions out of every state to be at most one: a base error
+//! GPU kernels keep a renormalised row's largest cell at `2^115`, and the
+//! diagonal kernel an anti-diagonal's, so a flush provably cannot move a
+//! total above a floor near `-62` (for 150 bases in a 64-wide band) by a
+//! millionth. A pair that finishes below the floor is scored again by
+//! [`align_banded_f64`], and so is a read whose qualities could overflow the
+//! kernels. [`trusted`] is that check, for the GPU kernel's scores. The proof
+//! needs every emission and the transitions out of every state to be at most
+//! one: a base error
 //! probability is capped at [`MAX_EPSILON`], and gap-open qualities below Q6
 //! count as Q6, as GATK raises them. It does not need a cell to be a
 //! probability, which it is not where a read's gap qualities change from

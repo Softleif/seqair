@@ -1188,14 +1188,15 @@ fn band_new_truncates_odd_widths() {
 /// The one place the `f32` kernel is not the `f64` recurrence, and the band is
 /// what keeps it out of trouble.
 ///
-/// Each anti-diagonal is renormalised so its largest cell lands in `[1, 2)`.
-/// The diagonal holds one cell per read row it crosses, and those are prefix
-/// alignments of different lengths, so their magnitudes span the alignment's
-/// whole dynamic range. A band of half-width `w` crosses at most `w + 1` rows,
-/// which bounds that span; a band wider than the read crosses all of them,
-/// and everything more than ~1e-38 below the diagonal's maximum flushes to
-/// zero in `f32`. On these pairs, which score near `-75`, the `f32` diagonal
-/// kernel on its own lost several log10 at width 320.
+/// Each anti-diagonal is renormalised so the larger of the two diagonals
+/// after it reads lands at `2^STRIP_SCALE`. The diagonal holds one cell per
+/// read row it crosses, and those are prefix alignments of different
+/// lengths, so their magnitudes span the alignment's whole dynamic range. A
+/// band of half-width `w` crosses at most `w + 1` rows, which bounds that
+/// span; a band wider than the read crosses all of them, and everything more
+/// than `2^-241` below the diagonal's maximum flushes to zero in `f32`. On
+/// these pairs, which score near `-75`, the `f32` diagonal kernel on its own
+/// lost several log10 at width 320 when it kept its diagonals at `[1, 2)`.
 ///
 /// That is below the floor where every entry point rescores a pair in `f64`,
 /// so what a caller gets is the recurrence at both widths.
