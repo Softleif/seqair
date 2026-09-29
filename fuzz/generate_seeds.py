@@ -2,7 +2,7 @@
 """Generate fuzz seed corpora from test data files.
 
 Run from the repo root:
-    python3 crates/seqair/fuzz/generate_seeds.py
+    python3 fuzz/generate_seeds.py
 """
 
 import struct
@@ -10,9 +10,9 @@ import os
 import sys
 import zlib
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(REPO_ROOT, "tests", "data")
-SEED_DIR = os.path.join(REPO_ROOT, "crates", "seqair", "fuzz", "seeds")
+SEED_DIR = os.path.join(REPO_ROOT, "fuzz", "seeds")
 
 
 def write_seed(target: str, name: str, data: bytes) -> None:

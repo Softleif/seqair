@@ -100,14 +100,14 @@ Frequent CI-only failures to watch for: `clippy::cast_possible_truncation`, `cli
 
 ## Fuzzing
 
-Fuzz targets live in `crates/seqair/fuzz/fuzz_targets/`. CI runs them nightly via `fuzz/run_all.sh`.
+Fuzz targets live in `fuzz/fuzz_targets/`. CI runs them nightly via `fuzz/run_all.sh`.
 
 **Reproducing a crash locally** (requires Docker on macOS — cargo-fuzz needs Linux/ASAN):
 
 ```bash
-# Copy the crash artifact to crates/seqair/fuzz/artifacts/<target>/
+# Copy the crash artifact to fuzz/artifacts/<target>/
 docker run --platform linux/amd64 --rm \
-  -v "$PWD":/workspace -w /workspace/crates/seqair rust:1.93 \
+  -v "$PWD":/workspace -w /workspace rust:1.93 \
   bash -c "rustup toolchain install nightly && cargo +nightly install cargo-fuzz && \
     cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file> -- -runs=1 2>&1"
 ```

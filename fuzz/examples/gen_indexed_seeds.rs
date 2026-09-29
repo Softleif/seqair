@@ -3,7 +3,7 @@
 //! Uses `Input::encode` for exact round-trip fidelity — every byte of the seed
 //! is used by the fuzz target, no waste.
 //!
-//! Run: cd crates/seqair/fuzz && cargo run --example gen_indexed_seeds
+//! Run: cd fuzz && cargo run --example gen_indexed_seeds
 
 use seqair_fuzz::indexed_reader::Input;
 use std::fs;
@@ -11,14 +11,7 @@ use std::io::Read;
 use std::path::Path;
 
 fn main() {
-    let data_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/data");
+    let data_dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("tests/data");
     let seed_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("seeds/fuzz_reader_indexed");
     fs::create_dir_all(&seed_dir).unwrap();
 

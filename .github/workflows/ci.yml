@@ -20,7 +20,7 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
       - run: cargo fmt --all --check
-        working-directory: crates/seqair/fuzz
+        working-directory: fuzz
 
   docs:
     name: Docs
@@ -67,7 +67,7 @@ jobs:
       - name: Fuzz compiles
         id: fuzz
         continue-on-error: true
-        working-directory: crates/seqair/fuzz
+        working-directory: fuzz
         run: cargo check
       # Every other step runs `--all-features`, so nothing would compile the
       # serde-off path: `r[pos.serde_optional]` requires it to keep working,

@@ -23,11 +23,11 @@ name = "gen_indexed_seeds"
 path = "examples/gen_indexed_seeds.rs"
 
 [dependencies.seqair]
-path = ".."
+path = "../crates/seqair"
 features = ["fuzz"]
 
 [dependencies.seqair-types]
-path = "../../seqair-types"
+path = "../crates/seqair-types"
 
 # Prevent this from interfering with workspaces
 [workspace]

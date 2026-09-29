@@ -7,7 +7,7 @@
 #   ./run_all.sh 10 --quick   # 10s, stop on first failure
 #
 # CI usage:
-#   cd crates/seqair && ./fuzz/run_all.sh 30
+#   ./fuzz/run_all.sh 30
 #
 # Requires: cargo-fuzz, nightly toolchain
 
@@ -17,14 +17,14 @@ DURATION="${1:-30}"
 QUICK="${2:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FUZZ_DIR="$SCRIPT_DIR"
-CRATE_DIR="$(dirname "$FUZZ_DIR")"
+REPO_DIR="$(dirname "$FUZZ_DIR")"
 RSS_LIMIT=4096
 THREADS="${THREADS:-1}"
 
 # Detect target triple
 ARCH="$(rustc -vV | grep host | awk '{print $2}')"
 
-cd "$CRATE_DIR"
+cd "$REPO_DIR"
 
 TARGETS=$(cargo +nightly fuzz list 2>/dev/null)
 TOTAL=$(echo "$TARGETS" | wc -l | tr -d ' ')

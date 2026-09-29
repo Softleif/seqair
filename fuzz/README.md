@@ -5,8 +5,8 @@ Fuzz targets for all seqair file format readers and parsers, using [cargo-fuzz](
 ## Quick start
 
 ```sh
-# Run all targets (30s each, default)
-cd crates/seqair && ./fuzz/run_all.sh
+# Run all targets (30s each, default), from the repo root
+./fuzz/run_all.sh
 
 # Shorter smoke test
 ./fuzz/run_all.sh 10
@@ -18,9 +18,9 @@ cargo +nightly fuzz run fuzz_reader_indexed fuzz/corpus/fuzz_reader_indexed fuzz
 THREADS=8 ./fuzz/run_all.sh 60
 
 # x86_64 via Docker (tests SSSE3 SIMD paths)
-docker build --platform linux/amd64 -f fuzz/Dockerfile.x86_64 -t seqair-fuzz-x86 ../..
+docker build --platform linux/amd64 -f fuzz/Dockerfile.x86_64 -t seqair-fuzz-x86 .
 docker run --platform linux/amd64 --tmpfs /tmp --rm seqair-fuzz-x86 \
-  "cd crates/seqair && ./fuzz/run_all.sh 30"
+  "./fuzz/run_all.sh 30"
 ```
 
 ### What counts as a failure

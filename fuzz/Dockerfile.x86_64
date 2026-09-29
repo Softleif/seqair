@@ -10,7 +10,7 @@ COPY . .
 # Pre-build fuzz targets
 # Note: for fuzz_reader_indexed (tmpfile-based), run with --tmpfs /tmp for speed:
 #   docker run --tmpfs /tmp --platform linux/amd64 seqair-fuzz-x86 "..."
-RUN cd crates/seqair && cargo +nightly fuzz build
+RUN cargo +nightly fuzz build
 
 ENTRYPOINT ["bash", "-c"]
-CMD ["cd crates/seqair && cargo +nightly fuzz list"]
+CMD ["cargo +nightly fuzz list"]
