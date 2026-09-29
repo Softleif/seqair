@@ -15,6 +15,9 @@ on:
     - cron: "0 4 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -32,6 +35,8 @@ jobs:
     continue-on-error: ${{ matrix.checks == 'advisories' && github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       # Not EmbarkStudios/cargo-deny-action: its Docker image ships its own
       # toolchain, which doesn't match rust-toolchain.toml.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
