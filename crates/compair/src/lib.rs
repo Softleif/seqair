@@ -9,6 +9,41 @@
 //! scoring it as a free match loses every real `C>T` variant. `TapsEmission`
 //! scores it as a probability at the site's methylation level instead.
 //!
+//! Scoring two reads against a reference and an alternate haplotype:
+//!
+//! ```
+//! use compair::{Band, Base, BaseQuality, Haplotype, Read, StandardEmission, Strand, Workspace};
+//!
+//! let reference = Haplotype::from_ascii(b"GACAATTACATAACATACACATCAGCACAAAACTTGTTGG");
+//! let alternate = Haplotype::from_ascii(b"GACAATTACATAACATACACATCATCACAAAACTTGTTGG");
+//! let read = |seq: &[u8]| {
+//!     Read::uniform(
+//!         Base::from_ascii_vec(seq.to_vec()),
+//!         &vec![BaseQuality::from_byte(30); seq.len()], // base qualities
+//!         BaseQuality::from_byte(45),                   // insertion gap open
+//!         BaseQuality::from_byte(45),                   // deletion gap open
+//!         BaseQuality::from_byte(10),                   // gap continuation
+//!         Strand::OT,
+//!     )
+//! };
+//! let (from_ref, from_alt) = (read(b"TACATAACATACACATCAGCACAA")?, read(b"TACATAACATACACATCATCACAA")?);
+//! // Each read with a band centred on where its first base aligns.
+//! let reads = [(&from_ref, Band::anchored(6)), (&from_alt, Band::anchored(6))];
+//!
+//! let mut workspace = Workspace::new(); // reuse it: scoring then allocates nothing
+//! let mut scores = Vec::new();
+//! workspace.align_reads(&[&reference, &alternate], &reads, &StandardEmission::default(), &mut scores);
+//!
+//! // Read-major log10 likelihoods: [ref read vs ref, vs alt, alt read vs ref, vs alt].
+//! let log10: Vec<f64> = scores.iter().map(|score| score.get()).collect();
+//! assert!(matches!(log10[..], [a, b, c, d] if a > b && d > c));
+//! # Ok::<(), compair::Error>(())
+//! ```
+//!
+//! `examples/` has runnable versions: `quickstart` (per-read evidence and
+//! genotype likelihoods), `taps` (the conversion-aware emission against the
+//! plain one), `candidates` (many haplotypes, one read at a time) and `gpu`.
+//!
 //! **Which entry point:**
 //!
 //! - many reads against a *few* haplotypes -- a variant caller's shadow

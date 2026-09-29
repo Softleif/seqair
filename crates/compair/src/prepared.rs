@@ -99,6 +99,37 @@ impl Workspace {
     ///
     /// `emission` is taken by value; pass `&emission` to borrow one, as
     /// `Emission` is implemented for references.
+    ///
+    /// ```
+    /// use compair::{Band, Base, BaseQuality, Haplotype, Read, StandardEmission, Strand, Workspace};
+    ///
+    /// // One haplotype per length of a `CA` repeat.
+    /// let haplotypes: Vec<Haplotype> = (3..=9)
+    ///     .map(|units| format!("CCGTAATGCC{}AGAGTTTTTC", "CA".repeat(units)))
+    ///     .map(|sequence| Haplotype::from_ascii(sequence.as_bytes()))
+    ///     .collect();
+    /// let mut workspace = Workspace::new();
+    /// let mut candidates = workspace.candidates(&haplotypes, StandardEmission::default());
+    ///
+    /// let (mut scores, mut calls) = (Vec::new(), Vec::new());
+    /// // Reads of 5 and 6 units, both starting at haplotype position 4.
+    /// for seq in [&b"AATGCCCACACACACAAGAGTT"[..], b"AATGCCCACACACACACAAGAGTT"] {
+    ///     let read = Read::uniform(
+    ///         Base::from_ascii_vec(seq.to_vec()),
+    ///         &vec![BaseQuality::from_byte(30); seq.len()],
+    ///         BaseQuality::from_byte(45),
+    ///         BaseQuality::from_byte(45),
+    ///         BaseQuality::from_byte(10),
+    ///         Strand::OT,
+    ///     )?;
+    ///     // One score per haplotype, in their order.
+    ///     candidates.align(&read, Band::anchored(4), &mut scores);
+    ///     let best = scores.iter().enumerate().max_by(|a, b| a.1.get().total_cmp(&b.1.get()));
+    ///     calls.extend(best.map(|(index, _)| index + 3));
+    /// }
+    /// assert_eq!(calls, [5, 6]);
+    /// # Ok::<(), compair::Error>(())
+    /// ```
     pub fn candidates<'w, 'h, H: Borrow<Haplotype>, E: Emission>(
         &'w mut self,
         haplotypes: &'h [H],

@@ -298,6 +298,34 @@ impl Betas<'_> {
 /// against a match, which is what keeps a real `C>T` visible. Every other
 /// combination -- a `C` read on the bottom strand included -- falls through to
 /// [`StandardEmission`].
+///
+/// ```
+/// use compair::{
+///     Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, Probability, Read,
+///     StandardEmission, Strand, TapsEmission, align_strips_simd,
+/// };
+///
+/// // One `CpG`, at 7-8, and a top-strand read that shows its `C` as `T`.
+/// let haplotype = Haplotype::from_ascii(b"TTAGCATCGGATCCAATTAC");
+/// let read = Read::uniform(
+///     Base::from_ascii_vec(b"TTAGCATTGGATCCAATTAC".to_vec()),
+///     &[BaseQuality::from_byte(30); 20],
+///     BaseQuality::from_byte(45),
+///     BaseQuality::from_byte(45),
+///     BaseQuality::from_byte(10),
+///     Strand::OT,
+/// )?;
+/// let taps = TapsEmission::new(
+///     ConversionModel::taps_default(),
+///     Betas::Uniform(Probability::new(0.9)?),
+/// );
+/// let band = Band::anchored(0);
+/// let plain = align_strips_simd(&haplotype, &read, &StandardEmission::default(), band);
+/// let converted = align_strips_simd(&haplotype, &read, &taps, band);
+/// // A mismatch at Q30 costs ~3.5 log10; a conversion at beta 0.9 ~0.06.
+/// assert!(converted.get() - plain.get() > 3.0);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TapsEmission<'a> {
     conversion: ConversionModel,
