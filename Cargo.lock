@@ -511,12 +511,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cstr8"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b66fb03be8678b49eb4afb24a4c0748c4ea4f6f7ad357423b1ce4be9658d413"
-
-[[package]]
 name = "custom_derive"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1624,12 +1618,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
-name = "ryu"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
-
-[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1680,14 +1668,12 @@ dependencies = [
  "bzip2",
  "clap",
  "criterion",
- "cstr8",
  "fearless_simd",
  "fearless_simd_macros",
  "flate2",
  "hashbrown",
  "hegeltest",
  "indexmap",
- "insta",
  "itoa",
  "libc",
  "libdeflater",
@@ -1698,7 +1684,6 @@ dependencies = [
  "noodles-util",
  "rust-htslib",
  "rustc-hash",
- "ryu",
  "seq_io",
  "seqair-types",
  "tempfile",
