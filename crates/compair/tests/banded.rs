@@ -1,3 +1,5 @@
+#[path = "../src/pinned.rs"]
+mod pinned;
 #[allow(dead_code, reason = "each integration test uses a different part of this")]
 mod support;
 
@@ -7,226 +9,284 @@ use compair::{
     align_banded_simd, align_candidates, align_full, align_strips, align_strips_simd,
     error_probability,
 };
-use proptest::prelude::*;
+use hegel::TestCase;
+use hegel::generators::{self as gs, Generator};
 use support::{
-    any_conversion, any_probability, arbitrary_case, derived_case, plausible_conversion,
+    any_conversion, any_probability, arbitrary_case, derived_case, length, plausible_conversion,
 };
 
-proptest! {
-    // The bit-parity gate is the cheapest of these and the one most worth
-    // running hard, so it alone does not take the default 256. The other
-    // properties live in their own blocks below: `proptest_config` is
-    // block-wide, and a full-matrix oracle at 2048 cases was most of the
-    // suite's wall-clock.
-    #![proptest_config(ProptestConfig { cases: 2048, ..ProptestConfig::default() })]
+// The bit-parity gates are the cheapest of these and the ones most worth
+// running hard, so they pin 2048 cases where the rest take fewer: a
+// full-matrix oracle at 2048 cases was most of the suite's wall-clock.
 
-    /// The C4 gate: the scalar and the eight-wide kernels agree to the bit, on
-    /// inputs that include bands missing the alignment entirely, because parity
-    /// has to hold there too. And a reused `Workspace` is the same kernel:
-    /// nothing from the previous pair leaks into the next.
-    #[test]
-    fn simd_is_bit_identical_to_scalar(
-        case in arbitrary_case(),
-        conversion in any_conversion(),
-        uniform in any_probability(),
-    ) {
-        let band = case.band();
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
-        let mut workspace = Workspace::new();
-        for (name, banded, simd, reused) in [
-            (
-                "standard",
-                align_banded(&case.haplotype, &case.read, &StandardEmission::default(), band),
-                align_banded_simd(&case.haplotype, &case.read, &StandardEmission::default(), band),
-                workspace.align_banded_simd(&case.haplotype, &case.read, &StandardEmission::default(), band),
+/// The C4 gate: the scalar and the eight-wide kernels agree to the bit, on
+/// inputs that include bands missing the alignment entirely, because parity
+/// has to hold there too. And a reused `Workspace` is the same kernel:
+/// nothing from the previous pair leaks into the next.
+#[hegel::test(test_cases = pinned::cases(2048))]
+fn simd_is_bit_identical_to_scalar(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let conversion = tc.draw(any_conversion());
+    let uniform = tc.draw(any_probability());
+    let band = case.band();
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
+    let mut workspace = Workspace::new();
+    for (name, banded, simd, reused) in [
+        (
+            "standard",
+            align_banded(&case.haplotype, &case.read, &StandardEmission::default(), band),
+            align_banded_simd(&case.haplotype, &case.read, &StandardEmission::default(), band),
+            workspace.align_banded_simd(
+                &case.haplotype,
+                &case.read,
+                &StandardEmission::default(),
+                band,
             ),
-            (
-                "taps",
-                align_banded(&case.haplotype, &case.read, &taps, band),
-                align_banded_simd(&case.haplotype, &case.read, &taps, band),
-                workspace.align_banded(&case.haplotype, &case.read, &taps, band),
-            ),
-            (
-                "uniform",
-                align_banded(&case.haplotype, &case.read, &uniform, band),
-                align_banded_simd(&case.haplotype, &case.read, &uniform, band),
-                workspace.align_banded_simd(&case.haplotype, &case.read, &uniform, band),
-            ),
-        ] {
-            prop_assert_eq!(
-                banded.get().to_bits(), simd.get().to_bits(),
-                "{}: scalar {:?} vs simd {:?}", name, banded, simd
-            );
-            prop_assert_eq!(
-                banded.get().to_bits(), reused.get().to_bits(),
-                "{}: fresh {:?} vs reused workspace {:?}", name, banded, reused
-            );
-        }
-    }
-
-    /// The same gate for the strip kernel: its scalar and eight-lane
-    /// instances agree to the bit, fresh and through a reused `Workspace`,
-    /// and one workspace serves both traversals in any order.
-    #[test]
-    fn strips_simd_is_bit_identical_to_strips_scalar(
-        case in arbitrary_case(),
-        conversion in any_conversion(),
-        uniform in any_probability(),
-    ) {
-        let band = case.band();
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
-        let mut workspace = Workspace::new();
-        for (name, scalar, simd, reused) in [
-            (
-                "standard",
-                align_strips(&case.haplotype, &case.read, &StandardEmission::default(), band),
-                align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), band),
-                workspace.align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), band),
-            ),
-            (
-                "taps",
-                align_strips(&case.haplotype, &case.read, &taps, band),
-                align_strips_simd(&case.haplotype, &case.read, &taps, band),
-                workspace.align_strips(&case.haplotype, &case.read, &taps, band),
-            ),
-            (
-                "uniform",
-                align_strips(&case.haplotype, &case.read, &uniform, band),
-                align_strips_simd(&case.haplotype, &case.read, &uniform, band),
-                {
-                    // A diagonal alignment in between: the two kernels share
-                    // the workspace's plan and must not share its state.
-                    workspace.align_banded_simd(&case.haplotype, &case.read, &taps, band);
-                    workspace.align_strips_simd(&case.haplotype, &case.read, &uniform, band)
-                },
-            ),
-        ] {
-            prop_assert_eq!(
-                scalar.get().to_bits(), simd.get().to_bits(),
-                "{}: scalar {:?} vs simd {:?}", name, scalar, simd
-            );
-            prop_assert_eq!(
-                scalar.get().to_bits(), reused.get().to_bits(),
-                "{}: fresh {:?} vs reused workspace {:?}", name, scalar, reused
-            );
-        }
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
-
-    /// The three eight-lane kernels at every SIMD level this CPU has, the
-    /// scalar `Fallback` included, against their scalar oracles: the diagonal
-    /// and strip kernels against their own scalar instances, and a ragged
-    /// batch against the scalar strip kernel one haplotype at a time. One
-    /// workspace serves every level in turn, so nothing a level leaves behind
-    /// may leak into the next.
-    #[test]
-    fn every_simd_level_is_bit_identical_to_scalar(
-        case in arbitrary_case(),
-        conversion in any_conversion(),
-        spread in 0usize..4,
-    ) {
-        let band = case.band();
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let bases = case.haplotype.bases().to_vec();
-        let batch: Vec<Haplotype> = (0..BATCH)
-            .map(|k| Haplotype::new(bases[..bases.len().saturating_sub(k * spread)].to_vec()))
-            .collect();
-        let refs: Vec<&Haplotype> = batch.iter().collect();
-        let banded = align_banded(&case.haplotype, &case.read, &taps, band).get().to_bits();
-        let strips = align_strips(&case.haplotype, &case.read, &taps, band).get().to_bits();
-        let one_at_a_time: Vec<u64> =
-            refs.iter().map(|h| align_strips(h, &case.read, &taps, band).get().to_bits()).collect();
-        let mut workspace = Workspace::new();
-        let mut out = Vec::new();
-        for (name, level) in support::levels() {
-            let simd =
-                workspace.align_banded_simd_at(level, &case.haplotype, &case.read, &taps, band);
-            prop_assert_eq!(banded, simd.get().to_bits(), "diagonal at {}", name);
-            let simd =
-                workspace.align_strips_simd_at(level, &case.haplotype, &case.read, &taps, band);
-            prop_assert_eq!(strips, simd.get().to_bits(), "strips at {}", name);
-            workspace.align_batch_at(level, &refs, &case.read, &taps, band, &mut out);
-            let batched: Vec<u64> = out.iter().map(|score| score.get().to_bits()).collect();
-            prop_assert_eq!(&one_at_a_time, &batched, "batch at {}", name);
-        }
-    }
-}
-
-proptest! {
-    /// The other C4 gate: where the optimal path is inside the band, the f32
-    /// band agrees with the f64 full matrix. The reads here are cut out of the
-    /// haplotype and given at most three edits, so a 48-column band contains the
-    /// path by construction.
-    ///
-    /// `plausible_conversion` and not `any_conversion`, and the distinction is
-    /// the premise rather than a tolerance: under `c = 0, f = 1` every cytosine
-    /// converts, the read is unlikely against its own haplotype, and alignments
-    /// elsewhere beat the seeded one -- so the band legitimately misses the
-    /// optimum and this gate would be testing the band, not the kernel. The
-    /// kernel against the same band, under *any* conversion model, is
-    /// `the_f32_band_is_the_f64_recurrence_over_the_same_band`.
-    #[test]
-    fn banded_matches_the_reference_inside_the_band(
-        case in derived_case(3),
-        conversion in plausible_conversion(),
-    ) {
-        let band = case.band();
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        for (name, banded, full) in [
-            (
-                "standard",
-                align_banded(&case.haplotype, &case.read, &StandardEmission::default(), band).get(),
-                align_full(&case.haplotype, &case.read, &StandardEmission::default()).get(),
-            ),
-            (
-                "taps",
-                align_banded(&case.haplotype, &case.read, &taps, band).get(),
-                align_full(&case.haplotype, &case.read, &taps).get(),
-            ),
-        ] {
-            prop_assert!(
-                (banded - full).abs() < 1e-3,
-                "{name}: banded {banded} against reference {full}"
-            );
-        }
-    }
-
-    /// Where the chemistry cannot act -- a haplotype of `A` and `T` only, so
-    /// no cytosine on either strand -- `TapsEmission` is `StandardEmission`
-    /// through the whole DP, not only per cell.
-    ///
-    /// This used to admit `C` as well, on the reading that the conversion rows
-    /// were `CpG`-only. They are not: the joint model puts every unmethylated
-    /// cytosine on the false-conversion row, so a non-`CpG` `C` on an OT read
-    /// differs from a plain mismatch by `f`. See
-    /// `a_non_cpg_cytosine_reads_t_at_the_false_conversion_rate`.
-    #[test]
-    fn taps_equals_standard_where_the_chemistry_cannot_act(
-        bases in proptest::collection::vec(
-            prop_oneof![Just(Base::A), Just(Base::T)],
-            30..90,
         ),
-        quals in proptest::collection::vec(2u8..=45, 30..90),
-        strand in support::any_strand(),
-        conversion in any_conversion(),
-    ) {
-        let haplotype = Haplotype::new(bases.clone());
-        let read_bases: Vec<Base> = bases.iter().copied().take(quals.len().min(bases.len())).collect();
-        let quals: Vec<BaseQuality> = quals.iter().take(read_bases.len()).map(|q| BaseQuality::from_byte(*q)).collect();
-        let read = Read::uniform(read_bases, &quals, BaseQuality::from_byte(45), BaseQuality::from_byte(45), BaseQuality::from_byte(10), strand)
-            .map_err(|_| TestCaseError::reject("read"))?;
-        let betas = vec![Probability::ONE; haplotype.len()];
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&betas));
-        prop_assert_eq!(
-            align_full(&haplotype, &read, &taps).get().to_bits(),
-            align_full(&haplotype, &read, &StandardEmission::default()).get().to_bits()
+        (
+            "taps",
+            align_banded(&case.haplotype, &case.read, &taps, band),
+            align_banded_simd(&case.haplotype, &case.read, &taps, band),
+            workspace.align_banded(&case.haplotype, &case.read, &taps, band),
+        ),
+        (
+            "uniform",
+            align_banded(&case.haplotype, &case.read, &uniform, band),
+            align_banded_simd(&case.haplotype, &case.read, &uniform, band),
+            workspace.align_banded_simd(&case.haplotype, &case.read, &uniform, band),
+        ),
+    ] {
+        assert_eq!(
+            banded.get().to_bits(),
+            simd.get().to_bits(),
+            "{}: scalar {:?} vs simd {:?}",
+            name,
+            banded,
+            simd
+        );
+        assert_eq!(
+            banded.get().to_bits(),
+            reused.get().to_bits(),
+            "{}: fresh {:?} vs reused workspace {:?}",
+            name,
+            banded,
+            reused
         );
     }
+}
+
+/// The same gate for the strip kernel: its scalar and eight-lane
+/// instances agree to the bit, fresh and through a reused `Workspace`,
+/// and one workspace serves both traversals in any order.
+#[hegel::test(test_cases = pinned::cases(2048))]
+fn strips_simd_is_bit_identical_to_strips_scalar(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let conversion = tc.draw(any_conversion());
+    let uniform = tc.draw(any_probability());
+    let band = case.band();
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
+    let mut workspace = Workspace::new();
+    for (name, scalar, simd, reused) in [
+        (
+            "standard",
+            align_strips(&case.haplotype, &case.read, &StandardEmission::default(), band),
+            align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), band),
+            workspace.align_strips_simd(
+                &case.haplotype,
+                &case.read,
+                &StandardEmission::default(),
+                band,
+            ),
+        ),
+        (
+            "taps",
+            align_strips(&case.haplotype, &case.read, &taps, band),
+            align_strips_simd(&case.haplotype, &case.read, &taps, band),
+            workspace.align_strips(&case.haplotype, &case.read, &taps, band),
+        ),
+        (
+            "uniform",
+            align_strips(&case.haplotype, &case.read, &uniform, band),
+            align_strips_simd(&case.haplotype, &case.read, &uniform, band),
+            {
+                // A diagonal alignment in between: the two kernels share
+                // the workspace's plan and must not share its state.
+                workspace.align_banded_simd(&case.haplotype, &case.read, &taps, band);
+                workspace.align_strips_simd(&case.haplotype, &case.read, &uniform, band)
+            },
+        ),
+    ] {
+        assert_eq!(
+            scalar.get().to_bits(),
+            simd.get().to_bits(),
+            "{}: scalar {:?} vs simd {:?}",
+            name,
+            scalar,
+            simd
+        );
+        assert_eq!(
+            scalar.get().to_bits(),
+            reused.get().to_bits(),
+            "{}: fresh {:?} vs reused workspace {:?}",
+            name,
+            scalar,
+            reused
+        );
+    }
+}
+
+/// The three eight-lane kernels at every SIMD level this CPU has, the
+/// scalar `Fallback` included, against their scalar oracles: the diagonal
+/// and strip kernels against their own scalar instances, and a ragged
+/// batch against the scalar strip kernel one haplotype at a time. One
+/// workspace serves every level in turn, so nothing a level leaves behind
+/// may leak into the next.
+#[hegel::test(test_cases = pinned::cases(512))]
+fn every_simd_level_is_bit_identical_to_scalar(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let conversion = tc.draw(any_conversion());
+    let spread = tc.draw(gs::integers::<usize>().max_value(3));
+    let band = case.band();
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    let bases = case.haplotype.bases().to_vec();
+    let batch: Vec<Haplotype> = (0..BATCH)
+        .map(|k| Haplotype::new(bases[..bases.len().saturating_sub(k * spread)].to_vec()))
+        .collect();
+    let refs: Vec<&Haplotype> = batch.iter().collect();
+    let banded = align_banded(&case.haplotype, &case.read, &taps, band).get().to_bits();
+    let strips = align_strips(&case.haplotype, &case.read, &taps, band).get().to_bits();
+    let one_at_a_time: Vec<u64> =
+        refs.iter().map(|h| align_strips(h, &case.read, &taps, band).get().to_bits()).collect();
+    let mut workspace = Workspace::new();
+    let mut out = Vec::new();
+    for (name, level) in support::levels() {
+        let simd = workspace.align_banded_simd_at(level, &case.haplotype, &case.read, &taps, band);
+        assert_eq!(banded, simd.get().to_bits(), "diagonal at {}", name);
+        let simd = workspace.align_strips_simd_at(level, &case.haplotype, &case.read, &taps, band);
+        assert_eq!(strips, simd.get().to_bits(), "strips at {}", name);
+        workspace.align_batch_at(level, &refs, &case.read, &taps, band, &mut out);
+        let batched: Vec<u64> = out.iter().map(|score| score.get().to_bits()).collect();
+        assert_eq!(&one_at_a_time, &batched, "batch at {}", name);
+    }
+}
+
+/// The other C4 gate: where the optimal path is inside the band, the f32
+/// band agrees with the f64 full matrix. The reads here are cut out of the
+/// haplotype and given at most three edits, so a 48-column band contains the
+/// path by construction.
+///
+/// `plausible_conversion` and not `any_conversion`, and the distinction is
+/// the premise rather than a tolerance: under `c = 0, f = 1` every cytosine
+/// converts, the read is unlikely against its own haplotype, and alignments
+/// elsewhere beat the seeded one -- so the band legitimately misses the
+/// optimum and this gate would be testing the band, not the kernel. The
+/// kernel against the same band, under *any* conversion model, is
+/// `the_f32_band_is_the_f64_recurrence_over_the_same_band`.
+///
+/// Nor does it hold for a haplotype that repeats itself: in a homopolymer
+/// the read fits every offset equally well, most of the full matrix's mass
+/// is outside any band, and the band is right to miss it. Those cases are
+/// set aside rather than toleranced.
+#[hegel::test]
+fn banded_matches_the_reference_inside_the_band(tc: TestCase) {
+    let case = tc.draw(derived_case(3));
+    let conversion = tc.draw(plausible_conversion());
+    tc.assume(!echoes_outside_the_band(&case));
+    let band = case.band();
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    for (name, banded, full) in [
+        (
+            "standard",
+            align_banded(&case.haplotype, &case.read, &StandardEmission::default(), band).get(),
+            align_full(&case.haplotype, &case.read, &StandardEmission::default()).get(),
+        ),
+        (
+            "taps",
+            align_banded(&case.haplotype, &case.read, &taps, band).get(),
+            align_full(&case.haplotype, &case.read, &taps).get(),
+        ),
+    ] {
+        assert!((banded - full).abs() < 1e-3, "{name}: banded {banded} against reference {full}");
+    }
+}
+
+/// Whether the read, placed without gaps at some offset the default band
+/// leaves out, matches three in four of its bases there. A read cut from a
+/// random haplotype matches about two in five anywhere but where it was
+/// cut; one that matches this well elsewhere has a second alignment of real
+/// weight, and the band holds only the first.
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "test scaffolding over sequences of a few hundred bases"
+)]
+fn echoes_outside_the_band(case: &support::Case) -> bool {
+    let (haplotype, read) = (case.haplotype.bases(), case.read.bases());
+    // Three edits move the true diagonal by at most three columns.
+    let reach = i64::from(Band::DEFAULT_WIDTH / 2) - 3;
+    let seed = i64::from(case.offset);
+    (-(read.len() as i64)..haplotype.len() as i64)
+        .filter(|offset| (offset - seed).abs() > reach)
+        .any(|offset| {
+            let matches = read
+                .iter()
+                .enumerate()
+                .filter(|&(index, &base)| {
+                    usize::try_from(offset + index as i64)
+                        .ok()
+                        .and_then(|column| haplotype.get(column))
+                        .is_some_and(|&hap| {
+                            hap == base || hap == Base::Unknown || base == Base::Unknown
+                        })
+                })
+                .count();
+            4 * matches >= 3 * read.len()
+        })
+}
+
+/// Where the chemistry cannot act -- a haplotype of `A` and `T` only, so
+/// no cytosine on either strand -- `TapsEmission` is `StandardEmission`
+/// through the whole DP, not only per cell.
+///
+/// This used to admit `C` as well, on the reading that the conversion rows
+/// were `CpG`-only. They are not: the joint model puts every unmethylated
+/// cytosine on the false-conversion row, so a non-`CpG` `C` on an OT read
+/// differs from a plain mismatch by `f`. See
+/// `a_non_cpg_cytosine_reads_t_at_the_false_conversion_rate`.
+#[hegel::test]
+fn taps_equals_standard_where_the_chemistry_cannot_act(tc: TestCase) {
+    let len = tc.draw(length(30, 89));
+    let bases = tc.draw(
+        gs::vecs(gs::sampled_from(&[Base::A, Base::T]).print_as_debug())
+            .min_size(len)
+            .max_size(len),
+    );
+    let len = tc.draw(length(30, 89));
+    let quals = tc.draw(
+        gs::vecs(gs::integers::<u8>().min_value(2).max_value(45)).min_size(len).max_size(len),
+    );
+    let strand = tc.draw(support::any_strand());
+    let conversion = tc.draw(any_conversion());
+    let haplotype = Haplotype::new(bases.clone());
+    let read_bases: Vec<Base> = bases.iter().copied().take(quals.len().min(bases.len())).collect();
+    let quals: Vec<BaseQuality> =
+        quals.iter().take(read_bases.len()).map(|q| BaseQuality::from_byte(*q)).collect();
+    let read = Read::uniform(
+        read_bases,
+        &quals,
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(10),
+        strand,
+    )
+    .expect("read");
+    let betas = vec![Probability::ONE; haplotype.len()];
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&betas));
+    assert_eq!(
+        align_full(&haplotype, &read, &taps).get().to_bits(),
+        align_full(&haplotype, &read, &StandardEmission::default()).get().to_bits()
+    );
 }
 
 /// What happens when the optimal alignment is not inside the band: the score is
@@ -449,196 +509,210 @@ fn align_masked<E: compair::Emission>(
     if total <= 0.0 { f64::NEG_INFINITY } else { total.log10() }
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 1024, ..ProptestConfig::default() })]
-
-    /// The band is exactly the strip `Band` documents: `|j - i - offset| <=
-    /// width / 2` and nothing else. `arbitrary_case` reaches offsets outside
-    /// the matrix on both sides, which is where the kernel's clamps live.
-    #[test]
-    fn the_band_is_the_documented_predicate(
-        case in arbitrary_case(),
-        width in 2u32..64,
-        conversion in any_conversion(),
-    ) {
-        let band = Band::new(width, case.offset).map_err(|_| TestCaseError::reject("width"))?;
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        for (name, got, want) in [
-            (
-                "standard",
-                align_banded(&case.haplotype, &case.read, &StandardEmission::default(), band).get(),
-                align_masked(&case.haplotype, &case.read, &StandardEmission::default(), band),
-            ),
-            (
-                "taps",
-                align_banded(&case.haplotype, &case.read, &taps, band).get(),
-                align_masked(&case.haplotype, &case.read, &taps, band),
-            ),
-            (
-                "strips/standard",
-                align_strips(&case.haplotype, &case.read, &StandardEmission::default(), band).get(),
-                align_masked(&case.haplotype, &case.read, &StandardEmission::default(), band),
-            ),
-            (
-                "strips/taps",
-                align_strips_simd(&case.haplotype, &case.read, &taps, band).get(),
-                align_masked(&case.haplotype, &case.read, &taps, band),
-            ),
-        ] {
-            prop_assert_eq!(
-                got.is_finite(), want.is_finite(),
-                "{}: kernel {} masked oracle {}", name, got, want
+/// The band is exactly the strip `Band` documents: `|j - i - offset| <=
+/// width / 2` and nothing else. `arbitrary_case` reaches offsets outside
+/// the matrix on both sides, which is where the kernel's clamps live.
+#[hegel::test(test_cases = pinned::cases(1024))]
+fn the_band_is_the_documented_predicate(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(63));
+    let conversion = tc.draw(any_conversion());
+    let band = Band::new(width, case.offset).expect("width");
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    for (name, got, want) in [
+        (
+            "standard",
+            align_banded(&case.haplotype, &case.read, &StandardEmission::default(), band).get(),
+            align_masked(&case.haplotype, &case.read, &StandardEmission::default(), band),
+        ),
+        (
+            "taps",
+            align_banded(&case.haplotype, &case.read, &taps, band).get(),
+            align_masked(&case.haplotype, &case.read, &taps, band),
+        ),
+        (
+            "strips/standard",
+            align_strips(&case.haplotype, &case.read, &StandardEmission::default(), band).get(),
+            align_masked(&case.haplotype, &case.read, &StandardEmission::default(), band),
+        ),
+        (
+            "strips/taps",
+            align_strips_simd(&case.haplotype, &case.read, &taps, band).get(),
+            align_masked(&case.haplotype, &case.read, &taps, band),
+        ),
+    ] {
+        assert_eq!(
+            got.is_finite(),
+            want.is_finite(),
+            "{}: kernel {} masked oracle {}",
+            name,
+            got,
+            want
+        );
+        // The finite/infinite agreement above is the geometry claim, and
+        // it is unconditional -- it is what caught B1. The *value* is only
+        // compared where f32 can hold it: `width` here runs to 64 against
+        // reads as short as one base, so past the read length a diagonal
+        // crosses every read row and the kernel underflows by a fraction of
+        // the score, up to several log10
+        // (`an_unbanded_f32_run_underflows_where_a_real_band_does_not`).
+        if got.is_finite() && want > -30.0 {
+            assert!(
+                (got - want).abs() < 1e-3 * (1.0 + want.abs()),
+                "{}: kernel {} masked oracle {}",
+                name,
+                got,
+                want
             );
-            // The finite/infinite agreement above is the geometry claim, and
-            // it is unconditional -- it is what caught B1. The *value* is only
-            // compared where f32 can hold it: `width` here runs to 64 against
-            // reads as short as one base, so past the read length a diagonal
-            // crosses every read row and the kernel underflows by a fraction of
-            // the score, up to several log10
-            // (`an_unbanded_f32_run_underflows_where_a_real_band_does_not`).
-            if got.is_finite() && want > -30.0 {
-                prop_assert!(
-                    (got - want).abs() < 1e-3 * (1.0 + want.abs()),
-                    "{}: kernel {} masked oracle {}", name, got, want
-                );
-            }
         }
     }
+}
 
-    /// Widening a band can only add paths, so it can only raise the score, and
-    /// no band can beat the unbanded reference.
-    ///
-    /// The second half is unconditional: the `f32` kernel only ever loses
-    /// mass, to rounding and to the subnormals it flushes. The first half
-    /// holds where `f32` holds the score. A flushed cell is below `2^-126`
-    /// of its diagonal's maximum, so below ~1e-38 in absolute terms, and
-    /// cannot move a total of 1e-30 or more; below that a wider band's
-    /// diagonals span more dynamic range and can flush mass a narrower band
-    /// kept -- the fuzzer found a pair at `-133` where eight more columns
-    /// cost 0.16 -- which is the regime `Band::MAX_WIDTH` documents.
-    #[test]
-    fn a_band_is_monotone_in_its_width_and_never_beats_the_reference(
-        case in arbitrary_case(),
-        width in 2u32..40,
-    ) {
-        let narrow = Band::new(width, case.offset).map_err(|_| TestCaseError::reject("w"))?;
-        let wider = Band::new(width + 8, case.offset).map_err(|_| TestCaseError::reject("w"))?;
-        let full = align_full(&case.haplotype, &case.read, &StandardEmission::default()).get();
-        for (name, a, b) in [
-            (
-                "diagonals",
-                align_banded(&case.haplotype, &case.read, &StandardEmission::default(), narrow).get(),
-                align_banded(&case.haplotype, &case.read, &StandardEmission::default(), wider).get(),
-            ),
-            (
-                "strips",
-                align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), narrow).get(),
-                align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), wider).get(),
-            ),
-        ] {
-            prop_assert!(!a.is_nan() && !b.is_nan(), "{}: a {} b {}", name, a, b);
-            if b > -30.0 {
-                prop_assert!(a <= b + 1e-4, "{}: narrow {} beats wider {}", name, a, b);
-            }
-            prop_assert!(b <= full + 1e-4, "{}: banded {} beats the reference {}", name, b, full);
+/// Widening a band can only add paths, so it can only raise the score, and
+/// no band can beat the unbanded reference.
+///
+/// The second half is unconditional: the `f32` kernel only ever loses
+/// mass, to rounding and to the subnormals it flushes. The first half
+/// holds where `f32` holds the score. A flushed cell is below `2^-126`
+/// of its diagonal's maximum, so below ~1e-38 in absolute terms, and
+/// cannot move a total of 1e-30 or more; below that a wider band's
+/// diagonals span more dynamic range and can flush mass a narrower band
+/// kept -- the fuzzer found a pair at `-133` where eight more columns
+/// cost 0.16 -- which is the regime `Band::MAX_WIDTH` documents.
+#[hegel::test(test_cases = pinned::cases(1024))]
+fn a_band_is_monotone_in_its_width_and_never_beats_the_reference(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(39));
+    let narrow = Band::new(width, case.offset).expect("w");
+    let wider = Band::new(width + 8, case.offset).expect("w");
+    let full = align_full(&case.haplotype, &case.read, &StandardEmission::default()).get();
+    for (name, a, b) in [
+        (
+            "diagonals",
+            align_banded(&case.haplotype, &case.read, &StandardEmission::default(), narrow).get(),
+            align_banded(&case.haplotype, &case.read, &StandardEmission::default(), wider).get(),
+        ),
+        (
+            "strips",
+            align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), narrow)
+                .get(),
+            align_strips_simd(&case.haplotype, &case.read, &StandardEmission::default(), wider)
+                .get(),
+        ),
+    ] {
+        assert!(!a.is_nan() && !b.is_nan(), "{}: a {} b {}", name, a, b);
+        if b > -30.0 {
+            assert!(a <= b + 1e-4, "{}: narrow {} beats wider {}", name, a, b);
         }
+        assert!(b <= full + 1e-4, "{}: banded {} beats the reference {}", name, b, full);
     }
+}
 
-    /// The kernel, with the band held fixed: the `f32` band is the `f64`
-    /// recurrence over that same band, under **any** conversion model however
-    /// implausible. Separating this from the gate above is what says a
-    /// disagreement there is the band missing a path and not the arithmetic.
-    #[test]
-    fn the_f32_band_is_the_f64_recurrence_over_the_same_band(
-        case in derived_case(3),
-        conversion in any_conversion(),
-    ) {
-        let band = case.band();
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let want = align_masked(&case.haplotype, &case.read, &taps, band);
-        for (name, got) in [
-            ("diagonals", align_banded(&case.haplotype, &case.read, &taps, band).get()),
-            ("strips", align_strips(&case.haplotype, &case.read, &taps, band).get()),
-        ] {
-            prop_assert!(
+/// The kernel, with the band held fixed: the `f32` band is the `f64`
+/// recurrence over that same band, under **any** conversion model however
+/// implausible. Separating this from the gate above is what says a
+/// disagreement there is the band missing a path and not the arithmetic.
+#[hegel::test(test_cases = pinned::cases(1024))]
+fn the_f32_band_is_the_f64_recurrence_over_the_same_band(tc: TestCase) {
+    let case = tc.draw(derived_case(3));
+    let conversion = tc.draw(any_conversion());
+    let band = case.band();
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    let want = align_masked(&case.haplotype, &case.read, &taps, band);
+    for (name, got) in [
+        ("diagonals", align_banded(&case.haplotype, &case.read, &taps, band).get()),
+        ("strips", align_strips(&case.haplotype, &case.read, &taps, band).get()),
+    ] {
+        assert!(
+            (got - want).abs() < 1e-4 * (1.0 + want.abs()),
+            "{}: f32 {} against the f64 recurrence over the same band {}",
+            name,
+            got,
+            want
+        );
+    }
+}
+
+/// The same, at every width: `the_band_is_the_documented_predicate` above
+/// only compares *values* where a random read scores above `-30`, which
+/// is short reads. Reads cut from the haplotype score near zero at any
+/// length, so this is where a 100-base read meets a 3-column band and
+/// the `f32` numbers still have to be the `f64` recurrence's.
+#[hegel::test(test_cases = pinned::cases(1024))]
+fn the_f32_band_is_the_f64_recurrence_at_every_width(tc: TestCase) {
+    let case = tc.draw(derived_case(3));
+    let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(63));
+    let conversion = tc.draw(any_conversion());
+    let band = Band::new(width, case.offset).expect("w");
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    let want = align_masked(&case.haplotype, &case.read, &taps, band);
+    for (name, got) in [
+        ("diagonals", align_banded_simd(&case.haplotype, &case.read, &taps, band).get()),
+        ("strips", align_strips_simd(&case.haplotype, &case.read, &taps, band).get()),
+    ] {
+        assert_eq!(got.is_finite(), want.is_finite(), "{}: kernel {} oracle {}", name, got, want);
+        if got.is_finite() {
+            assert!(
                 (got - want).abs() < 1e-4 * (1.0 + want.abs()),
-                "{}: f32 {} against the f64 recurrence over the same band {}", name, got, want
+                "{} at width {}: f32 {} against the f64 recurrence over the same band {}",
+                name,
+                width,
+                got,
+                want
             );
         }
     }
+}
 
-    /// The same, at every width: `the_band_is_the_documented_predicate` above
-    /// only compares *values* where a random read scores above `-30`, which
-    /// is short reads. Reads cut from the haplotype score near zero at any
-    /// length, so this is where a 100-base read meets a 3-column band and
-    /// the `f32` numbers still have to be the `f64` recurrence's.
-    #[test]
-    fn the_f32_band_is_the_f64_recurrence_at_every_width(
-        case in derived_case(3),
-        width in 2u32..64,
-        conversion in any_conversion(),
-    ) {
-        let band = Band::new(width, case.offset).map_err(|_| TestCaseError::reject("w"))?;
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let want = align_masked(&case.haplotype, &case.read, &taps, band);
-        for (name, got) in [
-            ("diagonals", align_banded_simd(&case.haplotype, &case.read, &taps, band).get()),
-            ("strips", align_strips_simd(&case.haplotype, &case.read, &taps, band).get()),
-        ] {
-            prop_assert_eq!(got.is_finite(), want.is_finite(), "{}: kernel {} oracle {}", name, got, want);
-            if got.is_finite() {
-                prop_assert!(
-                    (got - want).abs() < 1e-4 * (1.0 + want.abs()),
-                    "{} at width {}: f32 {} against the f64 recurrence over the same band {}",
-                    name, width, got, want
-                );
-            }
-        }
-    }
+/// Bit-parity is a property of the `Lane` trait, so it must hold at every
+/// width, not only at `DEFAULT_WIDTH` -- a band narrower than one vector is
+/// where the tail-lane masking is exercised.
+#[hegel::test(test_cases = pinned::cases(1024))]
+fn simd_is_bit_identical_to_scalar_at_every_width(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(63));
+    let conversion = tc.draw(any_conversion());
+    let band = Band::new(width, case.offset).expect("w");
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    assert_eq!(
+        align_banded(&case.haplotype, &case.read, &taps, band).get().to_bits(),
+        align_banded_simd(&case.haplotype, &case.read, &taps, band).get().to_bits()
+    );
+    assert_eq!(
+        align_strips(&case.haplotype, &case.read, &taps, band).get().to_bits(),
+        align_strips_simd(&case.haplotype, &case.read, &taps, band).get().to_bits()
+    );
+}
 
-    /// Bit-parity is a property of the `Lane` trait, so it must hold at every
-    /// width, not only at `DEFAULT_WIDTH` -- a band narrower than one vector is
-    /// where the tail-lane masking is exercised.
-    #[test]
-    fn simd_is_bit_identical_to_scalar_at_every_width(
-        case in arbitrary_case(),
-        width in 2u32..64,
-        conversion in any_conversion(),
-    ) {
-        let band = Band::new(width, case.offset).map_err(|_| TestCaseError::reject("w"))?;
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        prop_assert_eq!(
-            align_banded(&case.haplotype, &case.read, &taps, band).get().to_bits(),
-            align_banded_simd(&case.haplotype, &case.read, &taps, band).get().to_bits()
+/// The two traversals compute the same `f32` recurrence over the same
+/// band, so they agree wherever `f32` holds the score: to the rounding of
+/// their different renormalisation points and of the final sum, which the
+/// strip kernel takes in `f32` and the diagonal kernel in `f64`. Whether a
+/// path exists at all does not depend on the traversal.
+#[hegel::test(test_cases = pinned::cases(1024))]
+fn strips_and_diagonals_are_the_same_recurrence(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(63));
+    let conversion = tc.draw(any_conversion());
+    let band = Band::new(width, case.offset).expect("w");
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    let diagonals = align_banded_simd(&case.haplotype, &case.read, &taps, band).get();
+    let strips = align_strips_simd(&case.haplotype, &case.read, &taps, band).get();
+    assert_eq!(
+        diagonals.is_finite(),
+        strips.is_finite(),
+        "diagonals {} strips {}",
+        diagonals,
+        strips
+    );
+    if diagonals.is_finite() && diagonals > -30.0 {
+        assert!(
+            (diagonals - strips).abs() < 1e-4 * (1.0 + diagonals.abs()),
+            "width {}: diagonals {} strips {}",
+            width,
+            diagonals,
+            strips
         );
-        prop_assert_eq!(
-            align_strips(&case.haplotype, &case.read, &taps, band).get().to_bits(),
-            align_strips_simd(&case.haplotype, &case.read, &taps, band).get().to_bits()
-        );
-    }
-
-    /// The two traversals compute the same `f32` recurrence over the same
-    /// band, so they agree wherever `f32` holds the score: to the rounding of
-    /// their different renormalisation points and of the final sum, which the
-    /// strip kernel takes in `f32` and the diagonal kernel in `f64`. Whether a
-    /// path exists at all does not depend on the traversal.
-    #[test]
-    fn strips_and_diagonals_are_the_same_recurrence(
-        case in arbitrary_case(),
-        width in 2u32..64,
-        conversion in any_conversion(),
-    ) {
-        let band = Band::new(width, case.offset).map_err(|_| TestCaseError::reject("w"))?;
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let diagonals = align_banded_simd(&case.haplotype, &case.read, &taps, band).get();
-        let strips = align_strips_simd(&case.haplotype, &case.read, &taps, band).get();
-        prop_assert_eq!(diagonals.is_finite(), strips.is_finite(), "diagonals {} strips {}", diagonals, strips);
-        if diagonals.is_finite() && diagonals > -30.0 {
-            prop_assert!(
-                (diagonals - strips).abs() < 1e-4 * (1.0 + diagonals.abs()),
-                "width {}: diagonals {} strips {}", width, diagonals, strips
-            );
-        }
     }
 }
 
@@ -1022,9 +1096,9 @@ fn a_band_that_holds_the_whole_matrix_is_not_a_constraint() {
     assert!(worst < 1e-5, "worst {worst}");
 }
 
-/// The regression the proptest above found, kept as a deterministic case
-/// because it needs a band of width two at a negative offset and proptest only
-/// reaches that shape every few thousand draws.
+/// The regression the properties above found, kept as a deterministic case
+/// because it needs a band of width two at a negative offset and the
+/// generators only reach that shape every few thousand draws.
 ///
 /// The read's free start is the `1 / haplotype_len` in `D[0][j]`, and the
 /// kernel used to place it at `(0, 0)` whenever its row index clamped to zero
@@ -1209,57 +1283,54 @@ fn band_new_rejects_a_width_it_would_have_to_allocate() {
     const { assert!(Band::DEFAULT_WIDTH <= Band::MAX_WIDTH) };
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 1024, ..ProptestConfig::default() })]
-
-    /// The batched kernel's gate: scoring a haplotype in a batch of eight is
-    /// bit-identical to scoring it alone through the scalar strip kernel.
-    ///
-    /// It is a different traversal -- row-wise, one haplotype per lane -- so
-    /// this is not parity by construction the way the two strip lanes are; it
-    /// asserts that the row-wise band, the free start, the flush to zero and
-    /// the renormalisation cadence all land on the strip kernel's numbers.
-    /// The one-lane instance is carried as well, because it and the eight-lane
-    /// one *are* parity by construction and a divergence there would be a lane
-    /// bug rather than a traversal bug.
-    #[test]
-    fn a_batch_is_bit_identical_to_one_alignment_at_a_time(
-        case in arbitrary_case(),
-        conversion in any_conversion(),
-        uniform in any_probability(),
-        spread in 0usize..4,
-    ) {
-        let band = case.band();
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
-        // A ragged batch: each next haplotype is the same one with a few bases
-        // cut off the end, so the lanes do not share a length.
-        let bases = case.haplotype.bases().to_vec();
-        let batch: Vec<Haplotype> = (0..BATCH)
-            .map(|k| Haplotype::new(bases[..bases.len().saturating_sub(k * spread)].to_vec()))
-            .collect();
-        let refs: Vec<&Haplotype> = batch.iter().collect();
-        let mut workspace = Workspace::new();
-        for (name, emission) in [
-            ("standard", &StandardEmission::default() as &dyn ErasedEmission),
-            ("taps", &taps),
-            ("uniform", &uniform),
-        ] {
-            let one_at_a_time: Vec<u64> =
-                refs.iter().map(|h| emission.strips(h, &case.read, band).get().to_bits()).collect();
-            let wide = emission.batch(&mut workspace, &refs, &case.read, band);
-            let scalar = emission.batch_scalar(&mut workspace, &refs, &case.read, band);
-            prop_assert_eq!(
-                &one_at_a_time,
-                &wide.iter().map(|s| s.get().to_bits()).collect::<Vec<_>>(),
-                "{}: strips vs eight-lane batch", name
-            );
-            prop_assert_eq!(
-                &one_at_a_time,
-                &scalar.iter().map(|s| s.get().to_bits()).collect::<Vec<_>>(),
-                "{}: strips vs one-lane batch", name
-            );
-        }
+/// The batched kernel's gate: scoring a haplotype in a batch of eight is
+/// bit-identical to scoring it alone through the scalar strip kernel.
+///
+/// It is a different traversal -- row-wise, one haplotype per lane -- so
+/// this is not parity by construction the way the two strip lanes are; it
+/// asserts that the row-wise band, the free start, the flush to zero and
+/// the renormalisation cadence all land on the strip kernel's numbers.
+/// The one-lane instance is carried as well, because it and the eight-lane
+/// one *are* parity by construction and a divergence there would be a lane
+/// bug rather than a traversal bug.
+#[hegel::test(test_cases = pinned::cases(1024))]
+fn a_batch_is_bit_identical_to_one_alignment_at_a_time(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let conversion = tc.draw(any_conversion());
+    let uniform = tc.draw(any_probability());
+    let spread = tc.draw(gs::integers::<usize>().max_value(3));
+    let band = case.band();
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
+    // A ragged batch: each next haplotype is the same one with a few bases
+    // cut off the end, so the lanes do not share a length.
+    let bases = case.haplotype.bases().to_vec();
+    let batch: Vec<Haplotype> = (0..BATCH)
+        .map(|k| Haplotype::new(bases[..bases.len().saturating_sub(k * spread)].to_vec()))
+        .collect();
+    let refs: Vec<&Haplotype> = batch.iter().collect();
+    let mut workspace = Workspace::new();
+    for (name, emission) in [
+        ("standard", &StandardEmission::default() as &dyn ErasedEmission),
+        ("taps", &taps),
+        ("uniform", &uniform),
+    ] {
+        let one_at_a_time: Vec<u64> =
+            refs.iter().map(|h| emission.strips(h, &case.read, band).get().to_bits()).collect();
+        let wide = emission.batch(&mut workspace, &refs, &case.read, band);
+        let scalar = emission.batch_scalar(&mut workspace, &refs, &case.read, band);
+        assert_eq!(
+            &one_at_a_time,
+            &wide.iter().map(|s| s.get().to_bits()).collect::<Vec<_>>(),
+            "{}: strips vs eight-lane batch",
+            name
+        );
+        assert_eq!(
+            &one_at_a_time,
+            &scalar.iter().map(|s| s.get().to_bits()).collect::<Vec<_>>(),
+            "{}: strips vs one-lane batch",
+            name
+        );
     }
 }
 

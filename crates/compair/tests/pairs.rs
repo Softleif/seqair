@@ -8,6 +8,8 @@
 //! `align_reads` route a short group through the strip kernel without changing
 //! an answer, so the dispatch is tested at every group size too.
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 #[allow(dead_code, reason = "each integration test uses a different part of this")]
 mod support;
 
@@ -16,8 +18,9 @@ use compair::{
     PAIRS, PAIRS_BREAK_EVEN, Pair, Probability, Read, StandardEmission, Strand, TapsEmission,
     Workspace, align_pairs, align_reads, align_strips, align_strips_simd,
 };
-use proptest::prelude::*;
-use support::{any_conversion, any_probability, arbitrary_case};
+use hegel::TestCase;
+use hegel::generators as gs;
+use support::{Case, any_conversion, any_probability, arbitrary_case, length};
 
 fn bits(scores: &[Log10Likelihood]) -> Vec<u64> {
     scores.iter().map(|score| score.get().to_bits()).collect()
@@ -35,88 +38,88 @@ fn one_at_a_time<E: Emission>(pairs: &[Pair<'_>], emission: &E) -> Vec<u64> {
 /// the best level and at every level the CPU has, the one-lane one, and the
 /// free function -- all against the strip kernel, through one workspace so
 /// nothing a call leaves behind can leak into the next.
-fn check<E: Emission>(pairs: &[Pair<'_>], emission: &E, name: &str) -> Result<(), TestCaseError> {
+fn check<E: Emission>(pairs: &[Pair<'_>], emission: &E, name: &str) {
     let want = one_at_a_time(pairs, emission);
     let mut workspace = Workspace::new();
     let mut out = Vec::new();
     workspace.align_pairs(pairs, emission, &mut out);
-    prop_assert_eq!(&want, &bits(&out), "{}: strips vs eight-lane pairs", name);
+    assert_eq!(&want, &bits(&out), "{}: strips vs eight-lane pairs", name);
     workspace.align_pairs_scalar(pairs, emission, &mut out);
-    prop_assert_eq!(&want, &bits(&out), "{}: strips vs one-lane pairs", name);
+    assert_eq!(&want, &bits(&out), "{}: strips vs one-lane pairs", name);
     for (level_name, level) in support::levels() {
         workspace.align_pairs_at(level, pairs, emission, &mut out);
-        prop_assert_eq!(&want, &bits(&out), "{}: strips vs pairs at {}", name, level_name);
+        assert_eq!(&want, &bits(&out), "{}: strips vs pairs at {}", name, level_name);
     }
-    prop_assert_eq!(&want, &bits(&align_pairs(pairs, emission)), "{}: free function", name);
-    Ok(())
+    assert_eq!(&want, &bits(&align_pairs(pairs, emission)), "{}: free function", name);
 }
 
 /// A band width for a pair: mostly the default, sometimes narrower, so that
 /// the groups `align_pairs` cuts at a change of width are exercised too.
-fn any_width() -> impl Strategy<Value = u32> {
-    prop_oneof![6 => Just(Band::DEFAULT_WIDTH), 1 => Just(16u32), 1 => Just(8u32)]
+#[hegel::composite]
+fn any_width(tc: &TestCase) -> u32 {
+    if tc.draw_silent(gs::weighted_booleans(0.25)) {
+        tc.draw_silent(gs::sampled_from(&[16u32, 8]))
+    } else {
+        Band::DEFAULT_WIDTH
+    }
 }
 
-proptest! {
-    // A case is up to nineteen pairs through every instance at every level
-    // and three emissions, so it is some forty alignments of each kernel; 128
-    // of them is the other parity blocks' budget in wall-clock.
-    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+// A case is up to nineteen pairs through every instance at every level
+// and three emissions, so it is some forty alignments of each kernel; 128
+// of them is the other parity blocks' budget in wall-clock.
 
-    /// Unrelated pairs in one call: every lane its own read, haplotype,
-    /// strand and offset, including bands that miss the alignment entirely,
-    /// and a count that leaves groups of every fill.
-    #[test]
-    fn unrelated_pairs_are_bit_identical_to_one_alignment_at_a_time(
-        cases in proptest::collection::vec(arbitrary_case(), 1..=2 * PAIRS + 3),
-        widths in proptest::collection::vec(any_width(), 2 * PAIRS + 3),
-        one_width in any::<bool>(),
-        conversion in any_conversion(),
-        uniform in any_probability(),
-    ) {
-        let bands: Vec<Band> = cases
-            .iter()
-            .zip(&widths)
-            .map(|(case, &width)| {
-                let width = if one_width { Band::DEFAULT_WIDTH } else { width };
-                Band::new(width, case.offset).expect("the widths above are valid")
-            })
-            .collect();
-        let pairs: Vec<Pair<'_>> = cases
-            .iter()
-            .zip(&bands)
-            .map(|(case, &band)| Pair::new(&case.haplotype, &case.read, band))
-            .collect();
-        let betas = &cases.first().expect("at least one case").betas;
-        check(&pairs, &StandardEmission::default(), "standard")?;
-        check(&pairs, &TapsEmission::new(conversion, Betas::PerSite(betas)), "taps")?;
-        check(&pairs, &TapsEmission::new(conversion, Betas::Uniform(uniform)), "uniform")?;
-    }
+/// Unrelated pairs in one call: every lane its own read, haplotype,
+/// strand and offset, including bands that miss the alignment entirely,
+/// and a count that leaves groups of every fill.
+#[hegel::test(test_cases = pinned::cases(128))]
+fn unrelated_pairs_are_bit_identical_to_one_alignment_at_a_time(tc: TestCase) {
+    let count = tc.draw(length(1, 2 * PAIRS + 3));
+    let cases: Vec<Case> = (0..count).map(|_| tc.draw(arbitrary_case())).collect();
+    let widths: Vec<u32> = tc.draw(gs::vecs(any_width()).min_size(count).max_size(count));
+    let one_width = tc.draw(gs::booleans());
+    let conversion = tc.draw(any_conversion());
+    let uniform = tc.draw(any_probability());
+    let bands: Vec<Band> = cases
+        .iter()
+        .zip(&widths)
+        .map(|(case, &width)| {
+            let width = if one_width { Band::DEFAULT_WIDTH } else { width };
+            Band::new(width, case.offset).expect("the widths above are valid")
+        })
+        .collect();
+    let pairs: Vec<Pair<'_>> = cases
+        .iter()
+        .zip(&bands)
+        .map(|(case, &band)| Pair::new(&case.haplotype, &case.read, band))
+        .collect();
+    let betas = &cases.first().expect("at least one case").betas;
+    check(&pairs, &StandardEmission::default(), "standard");
+    check(&pairs, &TapsEmission::new(conversion, Betas::PerSite(betas)), "taps");
+    check(&pairs, &TapsEmission::new(conversion, Betas::Uniform(uniform)), "uniform");
+}
 
-    /// One read against eight haplotypes is the batch kernel's shape, and the
-    /// two kernels have to agree on it: same bits, lane for lane.
-    #[test]
-    fn a_batch_shaped_group_scores_as_the_batch_kernel_does(
-        case in arbitrary_case(),
-        conversion in any_conversion(),
-        spread in 0usize..4,
-    ) {
-        let band = case.band();
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let bases = case.haplotype.bases().to_vec();
-        let batch: Vec<Haplotype> = (0..BATCH)
-            .map(|k| Haplotype::new(bases[..bases.len().saturating_sub(k * spread)].to_vec()))
-            .collect();
-        let refs: Vec<&Haplotype> = batch.iter().collect();
-        let pairs: Vec<Pair<'_>> =
-            batch.iter().map(|haplotype| Pair::new(haplotype, &case.read, band)).collect();
-        let mut workspace = Workspace::new();
-        let mut batched = Vec::new();
-        workspace.align_batch(&refs, &case.read, &taps, band, &mut batched);
-        let mut paired = Vec::new();
-        workspace.align_pairs(&pairs, &taps, &mut paired);
-        prop_assert_eq!(bits(&batched), bits(&paired));
-    }
+/// One read against eight haplotypes is the batch kernel's shape, and the
+/// two kernels have to agree on it: same bits, lane for lane.
+#[hegel::test(test_cases = pinned::cases(128))]
+fn a_batch_shaped_group_scores_as_the_batch_kernel_does(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let conversion = tc.draw(any_conversion());
+    let spread = tc.draw(gs::integers::<usize>().max_value(3));
+    let band = case.band();
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    let bases = case.haplotype.bases().to_vec();
+    let batch: Vec<Haplotype> = (0..BATCH)
+        .map(|k| Haplotype::new(bases[..bases.len().saturating_sub(k * spread)].to_vec()))
+        .collect();
+    let refs: Vec<&Haplotype> = batch.iter().collect();
+    let pairs: Vec<Pair<'_>> =
+        batch.iter().map(|haplotype| Pair::new(haplotype, &case.read, band)).collect();
+    let mut workspace = Workspace::new();
+    let mut batched = Vec::new();
+    workspace.align_batch(&refs, &case.read, &taps, band, &mut batched);
+    let mut paired = Vec::new();
+    workspace.align_pairs(&pairs, &taps, &mut paired);
+    assert_eq!(bits(&batched), bits(&paired));
 }
 
 /// A deterministic pseudo-random sequence.
@@ -209,9 +212,8 @@ fn a_shadow_locus_scores_as_the_strip_kernel_does() {
         .collect();
     let want = one_at_a_time(&pairs, &taps);
     assert!(want.iter().all(|&score| f64::from_bits(score).is_finite()), "every pair aligns");
-    check(&pairs, &taps, "taps").expect("the shadow locus is bit-identical");
-    check(&pairs, &StandardEmission::default(), "standard")
-        .expect("the shadow locus is bit-identical");
+    check(&pairs, &taps, "taps");
+    check(&pairs, &StandardEmission::default(), "standard");
 }
 
 /// `align_reads` packs the reads-by-haplotypes product eight at a time and

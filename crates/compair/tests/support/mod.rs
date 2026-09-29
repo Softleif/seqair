@@ -84,33 +84,55 @@ pub fn seed_offset(haplotype: &Haplotype, read: &Read) -> i32 {
 }
 
 use compair::{Band, ConversionModel, Probability};
-use proptest::prelude::*;
+use hegel::TestCase;
+use hegel::generators::{self as gs, Generator, PrintableGenerator};
+
+/// `lo..=hi`, uniformly.
+///
+/// Every length below is drawn this way and the vector then built to it:
+/// hegel spreads an integer over its range, but keeps a vector's own size
+/// short, and the long reads are where the DP has room to go wrong.
+pub fn length(lo: usize, hi: usize) -> impl PrintableGenerator<usize> {
+    gs::integers::<usize>().min_value(lo).max_value(hi)
+}
 
 /// One of the four nucleotides.
-pub fn any_base() -> impl Strategy<Value = Base> {
-    prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T)]
+pub fn any_base() -> impl PrintableGenerator<Base> {
+    gs::sampled_from(&[Base::A, Base::C, Base::G, Base::T]).print_as_debug()
 }
 
 /// A nucleotide, or every so often an `N`: the kernels have a code for it and
 /// the reference has a branch, and the two have to agree through the whole
 /// DP, not only per cell.
-pub fn any_base_or_n() -> impl Strategy<Value = Base> {
-    prop_oneof![
-        8 => any_base(),
-        1 => Just(Base::Unknown),
-    ]
+#[hegel::composite]
+pub fn any_base_or_n(tc: &TestCase) -> Base {
+    if tc.draw_silent(gs::weighted_booleans(1.0 / 9.0)) {
+        Base::Unknown
+    } else {
+        tc.draw_silent(any_base())
+    }
 }
 
-pub fn any_strand() -> impl Strategy<Value = Strand> {
-    prop_oneof![Just(Strand::OT), Just(Strand::OB)]
+pub fn any_strand() -> impl PrintableGenerator<Strand> {
+    gs::sampled_from(&[Strand::OT, Strand::OB]).print_as_debug()
 }
 
-pub fn any_probability() -> impl Strategy<Value = Probability> {
-    (0.0f64..=1.0).prop_map(|value| Probability::new(value).unwrap_or(Probability::ZERO))
+fn unit_interval() -> impl Generator<f64> {
+    gs::floats::<f64>().min_value(0.0).max_value(1.0)
 }
 
-pub fn any_conversion() -> impl Strategy<Value = ConversionModel> {
-    (any_probability(), any_probability()).prop_map(|(c, f)| ConversionModel::new(c, f))
+fn probability(value: f64) -> Probability {
+    Probability::new(value).unwrap_or(Probability::ZERO)
+}
+
+pub fn any_probability() -> impl PrintableGenerator<Probability> {
+    unit_interval().map(probability).print_as_debug()
+}
+
+pub fn any_conversion() -> impl PrintableGenerator<ConversionModel> {
+    hegel::tuples!(unit_interval(), unit_interval())
+        .map(|(c, f)| ConversionModel::new(probability(c), probability(f)))
+        .print_as_debug()
 }
 
 /// A conversion model a real library could have: efficient, and rarely wrong
@@ -121,13 +143,18 @@ pub fn any_conversion() -> impl Strategy<Value = ConversionModel> {
 /// haplotype it was cut from, and alignments elsewhere become competitive. Any
 /// property whose premise is "the optimal path is near the seed offset" needs
 /// this one instead.
-pub fn plausible_conversion() -> impl Strategy<Value = ConversionModel> {
-    (0.5f64..=1.0, 0.0f64..=0.05).prop_map(|(c, f)| {
+pub fn plausible_conversion() -> impl PrintableGenerator<ConversionModel> {
+    hegel::tuples!(
+        gs::floats::<f64>().min_value(0.5).max_value(1.0),
+        gs::floats::<f64>().min_value(0.0).max_value(0.05),
+    )
+    .map(|(c, f)| {
         ConversionModel::new(
             Probability::new(c).unwrap_or(Probability::ONE),
             Probability::new(f).unwrap_or(Probability::ZERO),
         )
     })
+    .print_as_debug()
 }
 
 /// A haplotype, a read derived from it, and the offset the read starts at.
@@ -145,130 +172,95 @@ impl Case {
     }
 }
 
-/// One point substitution or short indel applied to a read drawn from the
-/// haplotype.
-#[derive(Debug, Clone, Copy)]
-pub enum Edit {
-    Substitute { at: usize, to: Base },
-    Insert { at: usize, base: Base },
-    Delete { at: usize },
+/// `len` draws from `element`.
+fn exactly<T>(tc: &TestCase, element: impl Generator<T>, len: usize) -> Vec<T> {
+    tc.draw_silent(gs::vecs(element).min_size(len).max_size(len))
 }
 
-pub fn any_edit() -> impl Strategy<Value = Edit> {
-    prop_oneof![
-        (0usize..4096, any_base_or_n()).prop_map(|(at, to)| Edit::Substitute { at, to }),
-        (0usize..4096, any_base_or_n()).prop_map(|(at, base)| Edit::Insert { at, base }),
-        (0usize..4096).prop_map(|at| Edit::Delete { at }),
-    ]
+/// `len` qualities in `lo..=hi`.
+fn draw_quals(tc: &TestCase, lo: u8, hi: u8, len: usize) -> Vec<BaseQuality> {
+    exactly(tc, gs::integers::<u8>().min_value(lo).max_value(hi), len)
+        .into_iter()
+        .map(BaseQuality::from_byte)
+        .collect()
 }
 
 /// A read cut out of a haplotype and then perturbed by at most `max_edits`
-/// edits, so the optimal alignment stays within a few columns of the offset the
-/// case reports and a default band contains it by construction.
+/// point substitutions and one-base indels, so the optimal alignment stays
+/// within a few columns of the offset the case reports and a default band
+/// contains it by construction.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     reason = "test scaffolding over sequences of a few hundred bases"
 )]
-pub fn derived_case(max_edits: usize) -> impl Strategy<Value = Case> {
-    (
-        proptest::collection::vec(any_base_or_n(), 80..160),
-        0usize..25,
-        40usize..90,
-        proptest::collection::vec(any_edit(), 0..=max_edits),
-        proptest::collection::vec(2u8..=45, 200),
-        any_strand(),
-        proptest::collection::vec(any_probability(), 200),
-    )
-        .prop_filter_map(
-            "the read must survive its edits",
-            |(hap, start, want, edits, quals, strand, betas)| {
-                let start = start.min(hap.len().saturating_sub(10));
-                let end = (start + want).min(hap.len());
-                let mut bases: Vec<Base> = hap.get(start..end)?.to_vec();
-                for edit in edits {
-                    if bases.len() < 8 {
-                        break;
-                    }
-                    match edit {
-                        Edit::Substitute { at, to } => {
-                            let at = at % bases.len();
-                            *bases.get_mut(at)? = to;
-                        }
-                        Edit::Insert { at, base } => bases.insert(at % bases.len(), base),
-                        Edit::Delete { at } => {
-                            let _removed = bases.remove(at % bases.len());
-                        }
-                    }
+#[hegel::composite]
+fn derived_case_inner(tc: &TestCase, max_edits: usize) -> Case {
+    let len = tc.draw_silent(length(80, 159));
+    let hap = exactly(tc, any_base_or_n(), len);
+    let start = tc.draw_silent(length(0, 24)).min(hap.len().saturating_sub(10));
+    let want = tc.draw_silent(length(40, 89));
+    let end = (start + want).min(hap.len());
+    let Some(cut) = hap.get(start..end) else { tc.reject() };
+    let mut bases = cut.to_vec();
+    for _ in 0..tc.draw_silent(length(0, max_edits)) {
+        if bases.len() < 8 {
+            break;
+        }
+        let at = tc.draw_silent(length(0, bases.len() - 1));
+        match tc.draw_silent(gs::integers::<u8>().max_value(2)) {
+            0 => {
+                let to = tc.draw_silent(any_base_or_n());
+                if let Some(slot) = bases.get_mut(at) {
+                    *slot = to;
                 }
-                if bases.len() < 8 {
-                    return None;
-                }
-                let quals: Vec<BaseQuality> = bases
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| {
-                        BaseQuality::from_byte(*quals.get(index % quals.len()).unwrap_or(&30))
-                    })
-                    .collect();
-                let read = Read::uniform(
-                    bases,
-                    &quals,
-                    BaseQuality::from_byte(45),
-                    BaseQuality::from_byte(45),
-                    BaseQuality::from_byte(10),
-                    strand,
-                )
-                .ok()?;
-                let betas = (0..hap.len())
-                    .map(|index| *betas.get(index % betas.len()).unwrap_or(&Probability::ZERO))
-                    .collect();
-                Some(Case { haplotype: Haplotype::new(hap), read, offset: start as i32, betas })
-            },
-        )
+            }
+            1 => bases.insert(at, tc.draw_silent(any_base_or_n())),
+            _ => {
+                let _removed = bases.remove(at);
+            }
+        }
+    }
+    tc.assume(bases.len() >= 8);
+    let quals = draw_quals(tc, 2, 45, bases.len());
+    let strand = tc.draw_silent(any_strand());
+    let Ok(read) = Read::uniform(
+        bases,
+        &quals,
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(45),
+        BaseQuality::from_byte(10),
+        strand,
+    ) else {
+        tc.reject()
+    };
+    let betas = exactly(tc, any_probability(), hap.len());
+    Case { haplotype: Haplotype::new(hap), read, offset: start as i32, betas }
+}
+
+pub fn derived_case(max_edits: usize) -> impl PrintableGenerator<Case> {
+    derived_case_inner(max_edits).print_as_debug()
 }
 
 /// An unconstrained pair, for the bit-parity check: the band is allowed to miss
 /// the alignment entirely, because parity must hold there too.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    reason = "test scaffolding over sequences of a few hundred bases"
-)]
-pub fn arbitrary_case() -> impl Strategy<Value = Case> {
-    (
-        proptest::collection::vec(any_base_or_n(), 1..90),
-        proptest::collection::vec(any_base_or_n(), 1..70),
-        proptest::collection::vec(2u8..=45, 70),
-        proptest::collection::vec(2u8..=45, 70),
-        any_strand(),
-        -20i32..40,
-        proptest::collection::vec(any_probability(), 90),
-    )
-        .prop_filter_map(
-            "the read must be constructible",
-            |(hap, bases, quals, gaps, strand, offset, betas)| {
-                let quals: Vec<BaseQuality> = bases
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| {
-                        BaseQuality::from_byte(*quals.get(index % quals.len()).unwrap_or(&30))
-                    })
-                    .collect();
-                let gaps: Vec<BaseQuality> = bases
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| {
-                        BaseQuality::from_byte(*gaps.get(index % gaps.len()).unwrap_or(&10))
-                    })
-                    .collect();
-                let read = Read::new(bases, &quals, &gaps, &gaps, &gaps, strand).ok()?;
-                let betas = (0..hap.len())
-                    .map(|index| *betas.get(index % betas.len()).unwrap_or(&Probability::ZERO))
-                    .collect();
-                Some(Case { haplotype: Haplotype::new(hap), read, offset, betas })
-            },
-        )
+#[hegel::composite]
+fn arbitrary_case_inner(tc: &TestCase) -> Case {
+    let len = tc.draw_silent(length(1, 89));
+    let hap = exactly(tc, any_base_or_n(), len);
+    let len = tc.draw_silent(length(1, 69));
+    let bases = exactly(tc, any_base_or_n(), len);
+    let quals = draw_quals(tc, 2, 45, bases.len());
+    let gaps = draw_quals(tc, 2, 45, bases.len());
+    let strand = tc.draw_silent(any_strand());
+    let offset = tc.draw_silent(gs::integers::<i32>().min_value(-20).max_value(39));
+    let Ok(read) = Read::new(bases, &quals, &gaps, &gaps, &gaps, strand) else { tc.reject() };
+    let betas = exactly(tc, any_probability(), hap.len());
+    Case { haplotype: Haplotype::new(hap), read, offset, betas }
+}
+
+pub fn arbitrary_case() -> impl PrintableGenerator<Case> {
+    arbitrary_case_inner().print_as_debug()
 }
 
 /// The mirror of a case: reverse-complement the haplotype and the read, swap

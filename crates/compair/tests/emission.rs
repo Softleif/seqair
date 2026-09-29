@@ -6,7 +6,8 @@ use compair::{
     MatchProbability, Observation, Probability, QPos, Read, StandardEmission, Strand, TapsEmission,
     error_probability,
 };
-use proptest::prelude::*;
+use hegel::TestCase;
+use hegel::generators::{self as gs, Generator};
 use support::{
     any_base, any_conversion, any_probability, any_strand, derived_case, forward_with, mirror,
 };
@@ -103,133 +104,130 @@ fn the_other_strand_sees_no_conversion() {
     );
 }
 
-proptest! {
-    /// Strand symmetry: reverse-complement the
-    /// haplotype and the read, swap the strand, reverse the per-site betas, and
-    /// every emission is the one it mirrors — bit for bit, not to a tolerance.
-    #[test]
-    fn emission_mirrors_between_strands(
-        case in derived_case(3),
-        conversion in any_conversion(),
-    ) {
-        let mirrored = mirror(&case).ok_or(TestCaseError::reject("mirror must build"))?;
-        // No `prop_assume` for a CpG any more: since the conversion rows apply
-        // at every cytosine, `C` on OT mirrors `G` on OB whether or not either
-        // is in a CpG, and the CpG only decides which rate is used.
-        let forward = taps(&case.betas, conversion);
-        let backward = taps(&mirrored.betas, conversion);
-        let (h, r) = (case.haplotype.len(), case.read.len());
+/// Strand symmetry: reverse-complement the
+/// haplotype and the read, swap the strand, reverse the per-site betas, and
+/// every emission is the one it mirrors — bit for bit, not to a tolerance.
+#[hegel::test]
+fn emission_mirrors_between_strands(tc: TestCase) {
+    let case = tc.draw(derived_case(3));
+    let conversion = tc.draw(any_conversion());
+    let mirrored = mirror(&case).expect("mirror must build");
+    // No assumption about a CpG any more: since the conversion rows apply
+    // at every cytosine, `C` on OT mirrors `G` on OB whether or not either
+    // is in a CpG, and the CpG only decides which rate is used.
+    let forward = taps(&case.betas, conversion);
+    let backward = taps(&mirrored.betas, conversion);
+    let (h, r) = (case.haplotype.len(), case.read.len());
 
-        for j in 0..h {
-            for i in 0..r {
-                let site = case.haplotype.site(j).ok_or(TestCaseError::reject("site"))?;
-                let obs = case.read.observation(i).ok_or(TestCaseError::reject("obs"))?;
-                let mirrored_site = mirrored
-                    .haplotype
-                    .site(h - 1 - j)
-                    .ok_or(TestCaseError::reject("site"))?;
-                let mirrored_obs = mirrored
-                    .read
-                    .observation(r - 1 - i)
-                    .ok_or(TestCaseError::reject("obs"))?;
-                prop_assert_eq!(
-                    forward.match_probability(site, obs).to_bits(),
-                    backward.match_probability(mirrored_site, mirrored_obs).to_bits(),
-                    "hap {} read {}: {:?} vs {:?}", j, i, site, mirrored_site
-                );
-            }
+    for j in 0..h {
+        for i in 0..r {
+            let site = case.haplotype.site(j).expect("site");
+            let obs = case.read.observation(i).expect("obs");
+            let mirrored_site = mirrored.haplotype.site(h - 1 - j).expect("site");
+            let mirrored_obs = mirrored.read.observation(r - 1 - i).expect("obs");
+            assert_eq!(
+                forward.match_probability(site, obs).to_bits(),
+                backward.match_probability(mirrored_site, mirrored_obs).to_bits(),
+                "hap {} read {}: {:?} vs {:?}",
+                j,
+                i,
+                site,
+                mirrored_site
+            );
         }
     }
+}
 
-    /// Where the chemistry cannot act -- the haplotype base is not a cytosine
-    /// on the strand this read reports -- `TapsEmission` is `StandardEmission`
-    /// for every conversion model, not only the perfect one.
-    #[test]
-    fn taps_falls_through_where_the_chemistry_cannot_act(
-        haplotype_base in any_base(),
-        read_base in any_base(),
-        qual in 2u8..=45,
-        strand in any_strand(),
-        beta in any_probability(),
-        conversion in any_conversion(),
-    ) {
-        // A lone base has no partner, so it is never in CpG context; what
-        // matters here is that it is also not a cytosine this read could see
-        // converted.
-        prop_assume!(!matches!(
-            (haplotype_base, strand),
-            (Base::C, Strand::OT) | (Base::G, Strand::OB)
-        ));
-        let haplotype = Haplotype::new(vec![haplotype_base]);
-        let site = haplotype.site(0).ok_or(TestCaseError::reject("site"))?;
-        prop_assert_eq!(site.cpg, CpgRole::None);
-        let betas = vec![beta];
-        let observation = observe(read_base, BaseQuality::from_byte(qual), strand);
-        prop_assert_eq!(
-            taps(&betas, conversion).match_probability(site, observation).to_bits(),
-            StandardEmission::default().match_probability(site, observation).to_bits()
-        );
-    }
+/// Where the chemistry cannot act -- the haplotype base is not a cytosine
+/// on the strand this read reports -- `TapsEmission` is `StandardEmission`
+/// for every conversion model, not only the perfect one.
+#[hegel::test]
+fn taps_falls_through_where_the_chemistry_cannot_act(tc: TestCase) {
+    let strand = tc.draw(any_strand());
+    // A lone base has no partner, so it is never in CpG context; what
+    // matters here is that it is also not a cytosine this read could see
+    // converted.
+    let haplotype_base = tc.draw(
+        gs::sampled_from(match strand {
+            Strand::OB => &[Base::A, Base::C, Base::T],
+            _ => &[Base::A, Base::G, Base::T],
+        })
+        .print_as_debug(),
+    );
+    let read_base = tc.draw(any_base());
+    let qual = tc.draw(gs::integers::<u8>().min_value(2).max_value(45));
+    let beta = tc.draw(any_probability());
+    let conversion = tc.draw(any_conversion());
+    let haplotype = Haplotype::new(vec![haplotype_base]);
+    let site = haplotype.site(0).expect("site");
+    assert_eq!(site.cpg, CpgRole::None);
+    let betas = vec![beta];
+    let observation = observe(read_base, BaseQuality::from_byte(qual), strand);
+    assert_eq!(
+        taps(&betas, conversion).match_probability(site, observation).to_bits(),
+        StandardEmission::default().match_probability(site, observation).to_bits()
+    );
+}
 
-    /// And where it can, the rows apply at the false-conversion rate whatever
-    /// the site's `beta`, because a cytosine outside a `CpG` is unmethylated.
-    #[test]
-    fn a_non_cpg_cytosine_reads_t_at_the_false_conversion_rate(
-        read_base in any_base(),
-        qual in 2u8..=45,
-        strand in any_strand(),
-        beta in any_probability(),
-        conversion in any_conversion(),
-    ) {
-        let (haplotype_base, converted, unconverted) = match strand {
-            Strand::OT => (Base::C, Base::T, Base::C),
-            Strand::OB => (Base::G, Base::A, Base::G),
-            Strand::Unknown => return Err(TestCaseError::reject("any_strand yields OT or OB")),
-        };
-        let haplotype = Haplotype::new(vec![haplotype_base]);
-        let site = haplotype.site(0).ok_or(TestCaseError::reject("site"))?;
-        prop_assert_eq!(site.cpg, CpgRole::None);
-        let betas = vec![beta];
-        let emission = taps(&betas, conversion);
-        let observation = observe(read_base, BaseQuality::from_byte(qual), strand);
-        let eps = error_probability(BaseQuality::from_byte(qual));
-        let f = *conversion.false_conversion();
+/// And where it can, the rows apply at the false-conversion rate whatever
+/// the site's `beta`, because a cytosine outside a `CpG` is unmethylated.
+#[hegel::test]
+fn a_non_cpg_cytosine_reads_t_at_the_false_conversion_rate(tc: TestCase) {
+    let read_base = tc.draw(any_base());
+    let qual = tc.draw(gs::integers::<u8>().min_value(2).max_value(45));
+    let strand = tc.draw(any_strand());
+    let beta = tc.draw(any_probability());
+    let conversion = tc.draw(any_conversion());
+    let (haplotype_base, converted, unconverted) = match strand {
+        Strand::OT => (Base::C, Base::T, Base::C),
+        Strand::OB => (Base::G, Base::A, Base::G),
+        Strand::Unknown => tc.reject(),
+    };
+    let haplotype = Haplotype::new(vec![haplotype_base]);
+    let site = haplotype.site(0).expect("site");
+    assert_eq!(site.cpg, CpgRole::None);
+    let betas = vec![beta];
+    let emission = taps(&betas, conversion);
+    let observation = observe(read_base, BaseQuality::from_byte(qual), strand);
+    let eps = error_probability(BaseQuality::from_byte(qual));
+    let f = *conversion.false_conversion();
 
-        let want = if read_base == converted {
-            f * (1.0 - eps) + (1.0 - f) * eps / 3.0
-        } else if read_base == unconverted {
-            (1.0 - f) * (1.0 - eps) + f * eps / 3.0
-        } else {
-            eps / 3.0
-        };
-        prop_assert!(
-            (emission.match_probability(site, observation) - want).abs() < 1e-15,
-            "{:?} over a non-CpG {:?} on {:?}: {} wanted {}",
-            read_base, haplotype_base, strand,
-            emission.match_probability(site, observation), want
-        );
-        // `beta` is ignored outside a CpG, so the answer does not move with it.
-        let other = vec![Probability::ONE];
-        prop_assert_eq!(
-            emission.match_probability(site, observation).to_bits(),
-            taps(&other, conversion).match_probability(site, observation).to_bits()
-        );
-    }
+    let want = if read_base == converted {
+        f * (1.0 - eps) + (1.0 - f) * eps / 3.0
+    } else if read_base == unconverted {
+        (1.0 - f) * (1.0 - eps) + f * eps / 3.0
+    } else {
+        eps / 3.0
+    };
+    assert!(
+        (emission.match_probability(site, observation) - want).abs() < 1e-15,
+        "{:?} over a non-CpG {:?} on {:?}: {} wanted {}",
+        read_base,
+        haplotype_base,
+        strand,
+        emission.match_probability(site, observation),
+        want
+    );
+    // `beta` is ignored outside a CpG, so the answer does not move with it.
+    let other = vec![Probability::ONE];
+    assert_eq!(
+        emission.match_probability(site, observation).to_bits(),
+        taps(&other, conversion).match_probability(site, observation).to_bits()
+    );
+}
 
-    /// Every emission is a probability, whatever the conversion model.
-    #[test]
-    fn emissions_stay_in_range(
-        case in derived_case(3),
-        conversion in any_conversion(),
-    ) {
-        let emission = taps(&case.betas, conversion);
-        for j in 0..case.haplotype.len() {
-            for i in 0..case.read.len() {
-                let site = case.haplotype.site(j).ok_or(TestCaseError::reject("site"))?;
-                let obs = case.read.observation(i).ok_or(TestCaseError::reject("obs"))?;
-                let value = emission.match_probability(site, obs);
-                prop_assert!((0.0..=1.0).contains(&value), "emission {value} out of range");
-            }
+/// Every emission is a probability, whatever the conversion model.
+#[hegel::test]
+fn emissions_stay_in_range(tc: TestCase) {
+    let case = tc.draw(derived_case(3));
+    let conversion = tc.draw(any_conversion());
+    let emission = taps(&case.betas, conversion);
+    for j in 0..case.haplotype.len() {
+        for i in 0..case.read.len() {
+            let site = case.haplotype.site(j).expect("site");
+            let obs = case.read.observation(i).expect("obs");
+            let value = emission.match_probability(site, obs);
+            assert!((0.0..=1.0).contains(&value), "emission {value} out of range");
         }
     }
 }
@@ -335,182 +333,185 @@ impl BisSnp {
     }
 }
 
-proptest! {
-    /// Every row is a probability distribution over the four bases -- at every
-    /// kind of site, on both strands, at every quality including `eps = 1`,
-    /// under every conversion model. The previous composition summed to
-    /// `1 + eps / 3` on the converting sites, and a row that sums to more than
-    /// one is free likelihood for every haplotype that has that site.
-    #[test]
-    fn every_row_sums_to_one(
-        qual in 0u8..=93,
-        strand in any_strand(),
-        beta in any_probability(),
-        conversion in any_conversion(),
-    ) {
-        let haplotype = every_kind_of_site();
-        let emission = TapsEmission::new(conversion, Betas::Uniform(beta));
-        for index in 0..haplotype.len() {
-            let site = haplotype.site(index).ok_or(TestCaseError::reject("site"))?;
-            let row: f64 = Base::KNOWN
-                .iter()
-                .map(|base| {
-                    emission.match_probability(site, observe(*base, BaseQuality::from_byte(qual), strand))
-                })
-                .sum();
-            prop_assert!(
-                (row - 1.0).abs() < 1e-12,
-                "site {} on {:?} at q{}: row sums to {}", index, strand, qual, row
-            );
-        }
-    }
-
-    /// The emission is bsgenova's three-stage marginalisation with the
-    /// pre-conversion stage removed: convert, then sequence, summing over the
-    /// base the site carried in between.
-    #[test]
-    fn the_emission_is_bsgenova_without_the_pre_conversion_stage(
-        qual in 0u8..=93,
-        strand in any_strand(),
-        beta in any_probability(),
-        conversion in any_conversion(),
-        observed in any_base(),
-    ) {
-        let haplotype = every_kind_of_site();
-        let emission = TapsEmission::new(conversion, Betas::Uniform(beta));
-        let (c, f) = (*conversion.efficiency(), *conversion.false_conversion());
-        let eps = error_probability(BaseQuality::from_byte(qual));
-        for index in 0..haplotype.len() {
-            let site = haplotype.site(index).ok_or(TestCaseError::reject("site"))?;
-            let rate = taps_rate(site, strand, *beta, c, f);
-            let want = bsgenova(site, strand, rate, observed, eps);
-            let got = emission
-                .match_probability(site, observe(observed, BaseQuality::from_byte(qual), strand));
-            prop_assert!(
-                (got - want).abs() < 1e-15,
-                "site {} ({:?}) read {:?} on {:?} at q{}: {} but bsgenova says {}",
-                index, site.base, observed, strand, qual, got, want
-            );
-        }
-    }
-
-    /// Bis-SNP is the oracle for the *mixture* and a counter-example for the
-    /// *composition*. Its bracketed term is this crate's `rate` once the
-    /// chemistries are mapped onto each other -- bisulfite converts the
-    /// unmethylated cytosine and TAPS the methylated one, so TAPS's
-    /// efficiency is bisulfite's over-conversion (`c = gamma`) and its false
-    /// conversion is what bisulfite does to an unmethylated base
-    /// (`f = 1 - alpha`). Its row then differs from ours by exactly the
-    /// unweighted error term's excess, `eps / 3` times the latent weight, on
-    /// the two conversion outcomes and nowhere else: Bis-SNP's row sums to
-    /// `1 + eps / 3`.
-    #[test]
-    fn bis_snp_agrees_on_the_mixture_and_not_on_the_error_term(
-        qual in 0u8..=93,
-        strand in any_strand(),
-        beta in any_probability(),
-        conversion in any_conversion(),
-        observed in any_base(),
-    ) {
-        let emission = TapsEmission::new(conversion, Betas::Uniform(beta));
-        let bis_snp = BisSnp {
-            beta: *beta,
-            alpha: 1.0 - *conversion.false_conversion(),
-            gamma: *conversion.efficiency(),
-        };
-        let eps = error_probability(BaseQuality::from_byte(qual));
-        let cpg = cpg_site_for(strand).ok_or(TestCaseError::reject("site"))?;
-        let (converted, _) =
-            conversion_of(cpg, strand).ok_or(TestCaseError::reject("a CpG converts"))?;
-
-        // The mixture: Bis-SNP's P(latent t) is our rate.
-        let weights = emission.site_weights(cpg, strand);
-        let latent_t = bis_snp.beta * bis_snp.gamma + (1.0 - bis_snp.beta) * (1.0 - bis_snp.alpha);
-        prop_assert!(
-            (weights.rate - latent_t).abs() < 1e-15,
-            "rate {} vs Bis-SNP {}", weights.rate, latent_t
-        );
-
-        // The composition: differs by the bare error term, weighted by us and
-        // not by Bis-SNP.
-        let ours = emission
-            .match_probability(cpg, observe(observed, BaseQuality::from_byte(qual), strand));
-        let theirs = bis_snp.row(observed, converted, cpg.base, eps);
-        let excess = weights.latent_weight(observed) * eps / 3.0;
-        prop_assert!(
-            (theirs - ours - excess).abs() < 1e-15,
-            "read {:?}: Bis-SNP {}, ours {}, excess should be {}", observed, theirs, ours, excess
-        );
-        let their_row: f64 = Base::KNOWN
+/// Every row is a probability distribution over the four bases -- at every
+/// kind of site, on both strands, at every quality including `eps = 1`,
+/// under every conversion model. The previous composition summed to
+/// `1 + eps / 3` on the converting sites, and a row that sums to more than
+/// one is free likelihood for every haplotype that has that site.
+#[hegel::test]
+fn every_row_sums_to_one(tc: TestCase) {
+    let qual = tc.draw(gs::integers::<u8>().max_value(93));
+    let strand = tc.draw(any_strand());
+    let beta = tc.draw(any_probability());
+    let conversion = tc.draw(any_conversion());
+    let haplotype = every_kind_of_site();
+    let emission = TapsEmission::new(conversion, Betas::Uniform(beta));
+    for index in 0..haplotype.len() {
+        let site = haplotype.site(index).expect("site");
+        let row: f64 = Base::KNOWN
             .iter()
-            .map(|base| bis_snp.row(*base, converted, cpg.base, eps))
+            .map(|base| {
+                emission
+                    .match_probability(site, observe(*base, BaseQuality::from_byte(qual), strand))
+            })
             .sum();
-        prop_assert!(
-            (their_row - (1.0 + eps / 3.0)).abs() < 1e-12,
-            "Bis-SNP's row sums to {}", their_row
+        assert!(
+            (row - 1.0).abs() < 1e-12,
+            "site {} on {:?} at q{}: row sums to {}",
+            index,
+            strand,
+            qual,
+            row
         );
     }
+}
 
-    /// A conversion model with nothing to convert -- no false conversion, and
-    /// either no methylation or no efficiency -- is `StandardEmission` bit for
-    /// bit, at every cell and through the whole dynamic program. The previous
-    /// composition failed this: its `+ eps / 3` rode along on every cytosine
-    /// the strand could see, converting or not.
-    #[test]
-    fn a_model_with_nothing_to_convert_is_the_standard_emission(
-        case in derived_case(3),
-        efficiency in any_probability(),
-        beta in any_probability(),
-        kill_beta in any::<bool>(),
-    ) {
-        let (efficiency, beta) = if kill_beta {
-            (efficiency, Probability::ZERO)
-        } else {
-            (Probability::ZERO, beta)
-        };
-        let conversion = ConversionModel::new(efficiency, Probability::ZERO);
-        let taps = TapsEmission::new(conversion, Betas::Uniform(beta));
-        let standard = StandardEmission::default();
-        for j in 0..case.haplotype.len() {
-            for i in 0..case.read.len() {
-                let site = case.haplotype.site(j).ok_or(TestCaseError::reject("site"))?;
-                let obs = case.read.observation(i).ok_or(TestCaseError::reject("obs"))?;
-                prop_assert_eq!(
-                    taps.match_probability(site, obs).to_bits(),
-                    standard.match_probability(site, obs).to_bits(),
-                    "hap {} read {}", j, i
-                );
-            }
-        }
-        prop_assert_eq!(
-            compair::align_full(&case.haplotype, &case.read, &taps).get().to_bits(),
-            compair::align_full(&case.haplotype, &case.read, &standard).get().to_bits()
+/// The emission is bsgenova's three-stage marginalisation with the
+/// pre-conversion stage removed: convert, then sequence, summing over the
+/// base the site carried in between.
+#[hegel::test]
+fn the_emission_is_bsgenova_without_the_pre_conversion_stage(tc: TestCase) {
+    let qual = tc.draw(gs::integers::<u8>().max_value(93));
+    let strand = tc.draw(any_strand());
+    let beta = tc.draw(any_probability());
+    let conversion = tc.draw(any_conversion());
+    let observed = tc.draw(any_base());
+    let haplotype = every_kind_of_site();
+    let emission = TapsEmission::new(conversion, Betas::Uniform(beta));
+    let (c, f) = (*conversion.efficiency(), *conversion.false_conversion());
+    let eps = error_probability(BaseQuality::from_byte(qual));
+    for index in 0..haplotype.len() {
+        let site = haplotype.site(index).expect("site");
+        let rate = taps_rate(site, strand, *beta, c, f);
+        let want = bsgenova(site, strand, rate, observed, eps);
+        let got = emission
+            .match_probability(site, observe(observed, BaseQuality::from_byte(qual), strand));
+        assert!(
+            (got - want).abs() < 1e-15,
+            "site {} ({:?}) read {:?} on {:?} at q{}: {} but bsgenova says {}",
+            index,
+            site.base,
+            observed,
+            strand,
+            qual,
+            got,
+            want
         );
     }
+}
 
-    /// At the two ends of `beta` the site is a two-state chemistry: fully
-    /// methylated converts at the efficiency, unmethylated at the false
-    /// conversion rate, and the rows are the marginalisation at that one rate.
-    #[test]
-    fn the_beta_limits_are_the_two_state_rows(
-        qual in 0u8..=93,
-        strand in any_strand(),
-        conversion in any_conversion(),
-        observed in any_base(),
-    ) {
-        let eps = error_probability(BaseQuality::from_byte(qual));
-        let cpg = cpg_site_for(strand).ok_or(TestCaseError::reject("site"))?;
-        for (beta, rate) in [
-            (Probability::ONE, *conversion.efficiency()),
-            (Probability::ZERO, *conversion.false_conversion()),
-        ] {
-            let emission = TapsEmission::new(conversion, Betas::Uniform(beta));
-            prop_assert_eq!(emission.site_weights(cpg, strand).rate.to_bits(), rate.to_bits());
-            let got = emission
-                .match_probability(cpg, observe(observed, BaseQuality::from_byte(qual), strand));
-            let want = bsgenova(cpg, strand, rate, observed, eps);
-            prop_assert!((got - want).abs() < 1e-15, "beta {:?}: {} vs {}", beta, got, want);
+/// Bis-SNP is the oracle for the *mixture* and a counter-example for the
+/// *composition*. Its bracketed term is this crate's `rate` once the
+/// chemistries are mapped onto each other -- bisulfite converts the
+/// unmethylated cytosine and TAPS the methylated one, so TAPS's
+/// efficiency is bisulfite's over-conversion (`c = gamma`) and its false
+/// conversion is what bisulfite does to an unmethylated base
+/// (`f = 1 - alpha`). Its row then differs from ours by exactly the
+/// unweighted error term's excess, `eps / 3` times the latent weight, on
+/// the two conversion outcomes and nowhere else: Bis-SNP's row sums to
+/// `1 + eps / 3`.
+#[hegel::test]
+fn bis_snp_agrees_on_the_mixture_and_not_on_the_error_term(tc: TestCase) {
+    let qual = tc.draw(gs::integers::<u8>().max_value(93));
+    let strand = tc.draw(any_strand());
+    let beta = tc.draw(any_probability());
+    let conversion = tc.draw(any_conversion());
+    let observed = tc.draw(any_base());
+    let emission = TapsEmission::new(conversion, Betas::Uniform(beta));
+    let bis_snp = BisSnp {
+        beta: *beta,
+        alpha: 1.0 - *conversion.false_conversion(),
+        gamma: *conversion.efficiency(),
+    };
+    let eps = error_probability(BaseQuality::from_byte(qual));
+    let cpg = cpg_site_for(strand).expect("site");
+    let (converted, _) = conversion_of(cpg, strand).expect("a CpG converts");
+
+    // The mixture: Bis-SNP's P(latent t) is our rate.
+    let weights = emission.site_weights(cpg, strand);
+    let latent_t = bis_snp.beta * bis_snp.gamma + (1.0 - bis_snp.beta) * (1.0 - bis_snp.alpha);
+    assert!(
+        (weights.rate - latent_t).abs() < 1e-15,
+        "rate {} vs Bis-SNP {}",
+        weights.rate,
+        latent_t
+    );
+
+    // The composition: differs by the bare error term, weighted by us and
+    // not by Bis-SNP.
+    let ours =
+        emission.match_probability(cpg, observe(observed, BaseQuality::from_byte(qual), strand));
+    let theirs = bis_snp.row(observed, converted, cpg.base, eps);
+    let excess = weights.latent_weight(observed) * eps / 3.0;
+    assert!(
+        (theirs - ours - excess).abs() < 1e-15,
+        "read {:?}: Bis-SNP {}, ours {}, excess should be {}",
+        observed,
+        theirs,
+        ours,
+        excess
+    );
+    let their_row: f64 =
+        Base::KNOWN.iter().map(|base| bis_snp.row(*base, converted, cpg.base, eps)).sum();
+    assert!((their_row - (1.0 + eps / 3.0)).abs() < 1e-12, "Bis-SNP's row sums to {}", their_row);
+}
+
+/// A conversion model with nothing to convert -- no false conversion, and
+/// either no methylation or no efficiency -- is `StandardEmission` bit for
+/// bit, at every cell and through the whole dynamic program. The previous
+/// composition failed this: its `+ eps / 3` rode along on every cytosine
+/// the strand could see, converting or not.
+#[hegel::test]
+fn a_model_with_nothing_to_convert_is_the_standard_emission(tc: TestCase) {
+    let case = tc.draw(derived_case(3));
+    let efficiency = tc.draw(any_probability());
+    let beta = tc.draw(any_probability());
+    let kill_beta = tc.draw(gs::booleans());
+    let (efficiency, beta) =
+        if kill_beta { (efficiency, Probability::ZERO) } else { (Probability::ZERO, beta) };
+    let conversion = ConversionModel::new(efficiency, Probability::ZERO);
+    let taps = TapsEmission::new(conversion, Betas::Uniform(beta));
+    let standard = StandardEmission::default();
+    for j in 0..case.haplotype.len() {
+        for i in 0..case.read.len() {
+            let site = case.haplotype.site(j).expect("site");
+            let obs = case.read.observation(i).expect("obs");
+            assert_eq!(
+                taps.match_probability(site, obs).to_bits(),
+                standard.match_probability(site, obs).to_bits(),
+                "hap {} read {}",
+                j,
+                i
+            );
         }
+    }
+    assert_eq!(
+        compair::align_full(&case.haplotype, &case.read, &taps).get().to_bits(),
+        compair::align_full(&case.haplotype, &case.read, &standard).get().to_bits()
+    );
+}
+
+/// At the two ends of `beta` the site is a two-state chemistry: fully
+/// methylated converts at the efficiency, unmethylated at the false
+/// conversion rate, and the rows are the marginalisation at that one rate.
+#[hegel::test]
+fn the_beta_limits_are_the_two_state_rows(tc: TestCase) {
+    let qual = tc.draw(gs::integers::<u8>().max_value(93));
+    let strand = tc.draw(any_strand());
+    let conversion = tc.draw(any_conversion());
+    let observed = tc.draw(any_base());
+    let eps = error_probability(BaseQuality::from_byte(qual));
+    let cpg = cpg_site_for(strand).expect("site");
+    for (beta, rate) in [
+        (Probability::ONE, *conversion.efficiency()),
+        (Probability::ZERO, *conversion.false_conversion()),
+    ] {
+        let emission = TapsEmission::new(conversion, Betas::Uniform(beta));
+        assert_eq!(emission.site_weights(cpg, strand).rate.to_bits(), rate.to_bits());
+        let got = emission
+            .match_probability(cpg, observe(observed, BaseQuality::from_byte(qual), strand));
+        let want = bsgenova(cpg, strand, rate, observed, eps);
+        assert!((got - want).abs() < 1e-15, "beta {:?}: {} vs {}", beta, got, want);
     }
 }
 
@@ -654,53 +655,47 @@ fn the_two_bases_of_one_cpg_read_their_own_betas() {
     );
 }
 
-proptest! {
-    /// A converted base only ever gets likelier as the site gets more
-    /// methylated, and its unconverted partner only ever gets unlikelier --
-    /// whenever the chemistry converts methylated bases more often than
-    /// unmethylated ones, which is what `efficiency >= false_conversion` says.
-    #[test]
-    fn a_converted_base_is_monotone_in_beta(
-        (efficiency, false_conversion) in (0.0f64..=1.0, 0.0f64..=1.0)
-            .prop_map(|(a, b)| if a >= b { (a, b) } else { (b, a) }),
-        // From Q2 up. Below that `eps > 3/4`, the base is likelier to be any
-        // other base than the one it reads as, and every row is *decreasing*
-        // in the latent weight -- the model is right about that, and the
-        // monotonicity claim is only about a base that carries information.
-        qual in 2u8..=93,
-        levels in proptest::collection::vec(0.0f64..=1.0, 2),
-    ) {
-        let conversion = ConversionModel::new(
-            Probability::new(efficiency).map_err(|_| TestCaseError::reject("c"))?,
-            Probability::new(false_conversion).map_err(|_| TestCaseError::reject("f"))?,
-        );
-        let mut levels = levels;
-        levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
-        let (low, high) = (
-            *levels.first().ok_or(TestCaseError::reject("two"))?,
-            *levels.last().ok_or(TestCaseError::reject("two"))?,
-        );
-        let haplotype = Haplotype::from_ascii(b"AACGAA");
-        let site = haplotype.site(2).ok_or(TestCaseError::reject("site"))?;
-        let read = observe(Base::T, BaseQuality::from_byte(qual), Strand::OT);
-        let unconverted = observe(Base::C, BaseQuality::from_byte(qual), Strand::OT);
+/// A converted base only ever gets likelier as the site gets more
+/// methylated, and its unconverted partner only ever gets unlikelier --
+/// whenever the chemistry converts methylated bases more often than
+/// unmethylated ones, which is what `efficiency >= false_conversion` says.
+#[hegel::test]
+fn a_converted_base_is_monotone_in_beta(tc: TestCase) {
+    // From Q2 up. Below that `eps > 3/4`, the base is likelier to be any
+    // other base than the one it reads as, and every row is *decreasing*
+    // in the latent weight -- the model is right about that, and the
+    // monotonicity claim is only about a base that carries information.
+    let unit = || gs::floats::<f64>().min_value(0.0).max_value(1.0);
+    let (a, b) = (tc.draw(unit()), tc.draw(unit()));
+    let (efficiency, false_conversion) = if a >= b { (a, b) } else { (b, a) };
+    let qual = tc.draw(gs::integers::<u8>().min_value(2).max_value(93));
+    let levels = [tc.draw(unit()), tc.draw(unit())];
+    let conversion = ConversionModel::new(
+        Probability::new(efficiency).expect("c"),
+        Probability::new(false_conversion).expect("f"),
+    );
+    let mut levels = levels;
+    levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+    let (low, high) = (*levels.first().expect("two"), *levels.last().expect("two"));
+    let haplotype = Haplotype::from_ascii(b"AACGAA");
+    let site = haplotype.site(2).expect("site");
+    let read = observe(Base::T, BaseQuality::from_byte(qual), Strand::OT);
+    let unconverted = observe(Base::C, BaseQuality::from_byte(qual), Strand::OT);
 
-        let at = |level: f64| -> Result<(f64, f64), TestCaseError> {
-            let betas = vec![
-                Probability::new(level).map_err(|_| TestCaseError::reject("beta"))?;
-                haplotype.len()
-            ];
-            let emission = taps(&betas, conversion);
-            Ok((
-                emission.match_probability(site, read),
-                emission.match_probability(site, unconverted),
-            ))
-        };
-        let (t_low, c_low) = at(low)?;
-        let (t_high, c_high) = at(high)?;
-        prop_assert!(t_high >= t_low, "T: {} at beta {} but {} at beta {}", t_low, low, t_high, high);
-        prop_assert!(c_high <= c_low, "C: {} at beta {} but {} at beta {}", c_low, low, c_high, high);
-    }
+    let at = |level: f64| {
+        let betas = vec![Probability::new(level).expect("beta"); haplotype.len()];
+        let emission = taps(&betas, conversion);
+        (emission.match_probability(site, read), emission.match_probability(site, unconverted))
+    };
+    let (t_low, c_low) = at(low);
+    let (t_high, c_high) = at(high);
+    // Where `efficiency` and `false_conversion` are equal or nearly so, the
+    // rows barely move with beta, and rounding alone can tip them either
+    // way. Each row is a few products of probabilities, so rounding is
+    // bounded by a few ulps of one, absolutely.
+    let slack = 8.0 * f64::EPSILON;
+    assert!(t_high >= t_low - slack, "T: {t_low} at beta {low} but {t_high} at beta {high}");
+    assert!(c_high <= c_low + slack, "C: {c_low} at beta {low} but {c_high} at beta {high}");
 }
 
 /// And the same through the whole dynamic program: a read whose every `CpG`

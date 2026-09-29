@@ -1,5 +1,7 @@
 //! `Workspace::candidates` against the per-pair path it caches setup for.
 
+#[path = "../src/pinned.rs"]
+mod pinned;
 #[allow(dead_code, reason = "each integration test uses a different part of this")]
 mod support;
 
@@ -8,7 +10,8 @@ use compair::{
     Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_candidates,
     align_strips, align_strips_simd,
 };
-use proptest::prelude::*;
+use hegel::TestCase;
+use hegel::generators as gs;
 use support::{any_conversion, any_probability, arbitrary_case, levels, mirror_strand};
 
 fn bits(scores: &[Log10Likelihood]) -> Vec<u64> {
@@ -36,9 +39,9 @@ fn check<E: Emission + Copy>(
     haplotypes: &[Haplotype],
     emission: E,
     reads: &[(&Read, Band)],
-) -> Result<(), TestCaseError> {
+) {
     let mut candidates = workspace.candidates(haplotypes, emission);
-    prop_assert_eq!(candidates.len(), haplotypes.len());
+    assert_eq!(candidates.len(), haplotypes.len());
     let mut out = vec![Log10Likelihood::new(1.0); 3];
     for &(read, band) in reads {
         let simd: Vec<Log10Likelihood> =
@@ -46,87 +49,72 @@ fn check<E: Emission + Copy>(
         let scalar: Vec<Log10Likelihood> =
             haplotypes.iter().map(|h| align_strips(h, read, &emission, band)).collect();
         candidates.align_strips_simd(read, band, &mut out);
-        prop_assert_eq!(bits(&out), bits(&simd), "eight lanes, {:?}", read.strand());
+        assert_eq!(bits(&out), bits(&simd), "eight lanes, {:?}", read.strand());
         candidates.align_strips(read, band, &mut out);
-        prop_assert_eq!(bits(&out), bits(&scalar), "one lane, {:?}", read.strand());
+        assert_eq!(bits(&out), bits(&scalar), "one lane, {:?}", read.strand());
         for (level_name, level) in levels() {
             candidates.align_strips_simd_at(level, read, band, &mut out);
-            prop_assert_eq!(bits(&out), bits(&scalar), "{}, {:?}", level_name, read.strand());
+            assert_eq!(bits(&out), bits(&scalar), "{}, {:?}", level_name, read.strand());
             // The dispatching entry point, batch kernel and all: the batch
             // is bit-identical to the strip kernel, so the per-pair strip
             // scores are its oracle too.
             candidates.align_at(level, read, band, &mut out);
-            prop_assert_eq!(
-                bits(&out),
-                bits(&scalar),
-                "align, {}, {:?}",
-                level_name,
-                read.strand()
-            );
+            assert_eq!(bits(&out), bits(&scalar), "align, {}, {:?}", level_name, read.strand());
         }
         let refs: Vec<&Haplotype> = haplotypes.iter().collect();
         let fresh = align_candidates(&refs, read, &emission, band);
         candidates.align(read, band, &mut out);
-        prop_assert_eq!(bits(&out), bits(&fresh), "align vs align_candidates");
+        assert_eq!(bits(&out), bits(&fresh), "align vs align_candidates");
     }
-    Ok(())
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+/// Scoring through prepared candidates is scoring one pair at a time, to
+/// the bit: with both strands interleaved, so a haplotype's column tracks
+/// are derived for one strand and then reused after the other's; with
+/// bands that differ per read, which the whole-haplotype columns have to
+/// serve alike; and with one workspace carried across emissions and
+/// haplotype sets, so a second `candidates` call that inherited anything
+/// from the first would show here.
+#[hegel::test(test_cases = pinned::cases(64))]
+fn candidates_score_what_one_pair_at_a_time_scores(tc: TestCase) {
+    let case = tc.draw(arbitrary_case());
+    let conversion = tc.draw(any_conversion());
+    let uniform = tc.draw(any_probability());
+    let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(17));
+    let shift = tc.draw(gs::integers::<i32>().min_value(-12).max_value(11));
+    let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(79));
+    // `count` variants of the haplotype, each trimmed, edited or both
+    // by its index, so a batch's lanes differ in length and in sequence;
+    // up to seventeen, so the dispatch sees full batches, a short
+    // remainder and a single straggler.
+    let bases = case.haplotype.bases().to_vec();
+    let haplotypes: Vec<Haplotype> = (0..count)
+        .map(|k| {
+            let mut variant =
+                bases.get(..bases.len().saturating_sub(k % 4)).unwrap_or_default().to_vec();
+            let at = (k * 7) % variant.len().max(1);
+            if k % 3 == 1
+                && let Some(base) = variant.get_mut(at)
+            {
+                *base = base.inverse();
+            }
+            Haplotype::new(variant)
+        })
+        .collect();
+    let fewer = [Haplotype::new(bases.iter().rev().copied().collect::<Vec<_>>())];
+    let other = on_other_strand(&case.read).expect("valid by construction");
+    let wide = Band::new(width, case.offset.saturating_add(shift)).expect("a legal width");
+    let reads =
+        [(&case.read, case.band()), (&other, case.band()), (&case.read, wide), (&other, wide)];
 
-    /// Scoring through prepared candidates is scoring one pair at a time, to
-    /// the bit: with both strands interleaved, so a haplotype's column tracks
-    /// are derived for one strand and then reused after the other's; with
-    /// bands that differ per read, which the whole-haplotype columns have to
-    /// serve alike; and with one workspace carried across emissions and
-    /// haplotype sets, so a second `candidates` call that inherited anything
-    /// from the first would show here.
-    #[test]
-    fn candidates_score_what_one_pair_at_a_time_scores(
-        case in arbitrary_case(),
-        conversion in any_conversion(),
-        uniform in any_probability(),
-        count in 1usize..18,
-        shift in -12i32..12,
-        width in 2u32..80,
-    ) {
-        // `count` variants of the haplotype, each trimmed, edited or both
-        // by its index, so a batch's lanes differ in length and in sequence;
-        // up to seventeen, so the dispatch sees full batches, a short
-        // remainder and a single straggler.
-        let bases = case.haplotype.bases().to_vec();
-        let haplotypes: Vec<Haplotype> = (0..count)
-            .map(|k| {
-                let mut variant =
-                    bases.get(..bases.len().saturating_sub(k % 4)).unwrap_or_default().to_vec();
-                let at = (k * 7) % variant.len().max(1);
-                if k % 3 == 1 && let Some(base) = variant.get_mut(at) {
-                    *base = base.inverse();
-                }
-                Haplotype::new(variant)
-            })
-            .collect();
-        let fewer = [Haplotype::new(bases.iter().rev().copied().collect::<Vec<_>>())];
-        let other = on_other_strand(&case.read).ok_or(TestCaseError::reject("valid by construction"))?;
-        let wide = Band::new(width, case.offset.saturating_add(shift))
-            .map_err(|_| TestCaseError::reject("a legal width"))?;
-        let reads = [
-            (&case.read, case.band()),
-            (&other, case.band()),
-            (&case.read, wide),
-            (&other, wide),
-        ];
-
-        let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
-        let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
-        let standard = StandardEmission::default();
-        let mut workspace = Workspace::new();
-        check(&mut workspace, &haplotypes, taps, &reads)?;
-        check(&mut workspace, &haplotypes, standard, &reads)?;
-        check(&mut workspace, &fewer, uniform, &reads)?;
-        check(&mut workspace, &haplotypes, uniform, &reads)?;
-    }
+    let taps = TapsEmission::new(conversion, Betas::PerSite(&case.betas));
+    let uniform = TapsEmission::new(conversion, Betas::Uniform(uniform));
+    let standard = StandardEmission::default();
+    let mut workspace = Workspace::new();
+    check(&mut workspace, &haplotypes, taps, &reads);
+    check(&mut workspace, &haplotypes, standard, &reads);
+    check(&mut workspace, &fewer, uniform, &reads);
+    check(&mut workspace, &haplotypes, uniform, &reads);
 }
 
 /// A new candidate set derives its columns afresh, even over the same
