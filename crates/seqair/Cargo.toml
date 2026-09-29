@@ -12,6 +12,11 @@ exclude = ["tests/*", "benches/*"]
 [package.metadata.docs.rs]
 cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
 
+[package.metadata.cargo-shear]
+# Only ever included through `#[path]` from a bench, an example and a unit test,
+# which cargo-shear does not follow.
+ignored-paths = ["tests/support/cram_raw_blocks.rs"]
+
 [features]
 # Forwards `seqair-types/serde`; seqair itself serializes nothing.
 serde = ["seqair-types/serde"]

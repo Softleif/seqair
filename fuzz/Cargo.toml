@@ -11,8 +11,6 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 rustc-hash = "2.1.1"
-tempfile = "3"
-flate2 = "1"
 
 [lib]
 name = "seqair_fuzz"
@@ -209,3 +207,6 @@ doc = false
 name = "fuzz_aligned_pairs"
 path = "fuzz_targets/fuzz_aligned_pairs.rs"
 doc = false
+
+[dev-dependencies]
+flate2 = "1"
