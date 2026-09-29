@@ -89,7 +89,7 @@ jobs:
       - name: Test
         env:
           HEGEL_DEFAULT_PROFILE: thorough
-        run: cargo nextest run --workspace --profile ci
+        run: cargo nextest run --locked --workspace --profile ci
 
   deep-oracles:
     name: Property tests (pinned counts overridden)
@@ -131,4 +131,4 @@ jobs:
       - name: Test
         env:
           SEQAIR_PINNED_CASES: "500"
-        run: cargo nextest run --workspace --profile ci
+        run: cargo nextest run --locked --workspace --profile ci

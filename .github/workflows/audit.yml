@@ -38,7 +38,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - run: cargo deny check ${{ matrix.checks }}
+      - run: cargo deny --locked check ${{ matrix.checks }}
       # The fuzz crate is its own workspace with its own lockfile.
-      - run: cargo deny --manifest-path fuzz/Cargo.toml check ${{ matrix.checks }}
+      - run: cargo deny --locked --manifest-path fuzz/Cargo.toml check ${{ matrix.checks }}
         if: ${{ !cancelled() }}

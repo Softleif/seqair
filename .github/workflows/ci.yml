@@ -31,8 +31,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-shear
-      - run: cargo shear
-      - run: cargo shear fuzz
+      - run: cargo shear --locked
+      - run: cargo shear --locked fuzz
 
   docs:
     name: Docs
@@ -46,7 +46,7 @@ jobs:
       - name: Rustdoc
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --all-features --examples
+        run: cargo doc --locked --workspace --no-deps --all-features --examples
 
   test:
     name: test (${{ matrix.runner }})
@@ -74,21 +74,21 @@ jobs:
       - name: Clippy
         id: clippy
         continue-on-error: true
-        run: cargo clippy --all --all-targets --all-features
+        run: cargo clippy --locked --workspace --all-targets --all-features
       - name: Test
         id: test
         continue-on-error: true
-        run: cargo nextest run --workspace --profile ci
+        run: cargo nextest run --locked --workspace --profile ci
       # nextest does not run doctests.
       - name: Doctests
         id: doctest
         continue-on-error: true
-        run: cargo test --workspace --doc
+        run: cargo test --locked --workspace --doc
       - name: Fuzz compiles
         id: fuzz
         continue-on-error: true
         working-directory: fuzz
-        run: cargo check
+        run: cargo check --locked
       # Every other step runs `--all-features`, so nothing would compile the
       # serde-off path: `r[pos.serde_optional]` requires it to keep working,
       # and the next forgotten `#[cfg(feature = "serde")]` would ship green.
@@ -96,8 +96,8 @@ jobs:
         id: nodefault
         continue-on-error: true
         run: |
-          cargo check -p seqair-types --no-default-features --all-targets
-          cargo check -p seqair --no-default-features --all-targets
+          cargo check --locked -p seqair-types --no-default-features --all-targets
+          cargo check --locked -p seqair --no-default-features --all-targets
       # `continue-on-error` above is only there to let every step report before
       # the job stops, so each one must be named here. The fuzz step was not,
       # and five targets went unbuildable for several API changes without a
