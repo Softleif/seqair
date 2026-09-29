@@ -58,6 +58,10 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Install htslib build dependencies
         run: |
           sudo apt-get update -qq
@@ -77,7 +81,7 @@ jobs:
       # the cases for 3x the time, because fixed overhead and the pinned tests
       # dominate at low counts; by 50000 the profile-scaled properties dominate
       # and the cost is linear, so going further buys more of the same draws at
-      # full price. `cargo test --all` is roughly 2.5x the nextest wall.
+      # full price.
       #
       # `SEQAIR_PINNED_CASES` is deliberately *not* set here — it overrides
       # the per-test counts, which is a different axis with a different cost.
@@ -85,7 +89,7 @@ jobs:
       - name: Test
         env:
           HEGEL_DEFAULT_PROFILE: thorough
-        run: cargo test --all
+        run: cargo nextest run --workspace --profile ci
 
   deep-oracles:
     name: Property tests (pinned counts overridden)
@@ -94,6 +98,10 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
 
       - name: Install htslib build dependencies
         run: |
@@ -123,4 +131,4 @@ jobs:
       - name: Test
         env:
           SEQAIR_PINNED_CASES: "500"
-        run: cargo test --all
+        run: cargo nextest run --workspace --profile ci

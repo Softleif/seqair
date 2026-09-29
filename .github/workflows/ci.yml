@@ -60,6 +60,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Install htslib build dependencies
         run: |
           sudo apt-get update -qq
@@ -75,7 +78,12 @@ jobs:
       - name: Test
         id: test
         continue-on-error: true
-        run: cargo test --all
+        run: cargo nextest run --workspace --profile ci
+      # nextest does not run doctests.
+      - name: Doctests
+        id: doctest
+        continue-on-error: true
+        run: cargo test --workspace --doc
       - name: Fuzz compiles
         id: fuzz
         continue-on-error: true
@@ -94,10 +102,11 @@ jobs:
       # the job stops, so each one must be named here. The fuzz step was not,
       # and five targets went unbuildable for several API changes without a
       # single red run.
-      - name: Fail if clippy, tests, the fuzz targets or the no-default build failed
+      - name: Fail if clippy, tests, doctests, the fuzz targets or the no-default build failed
         if: >-
           steps.clippy.outcome == 'failure'
           || steps.test.outcome == 'failure'
+          || steps.doctest.outcome == 'failure'
           || steps.fuzz.outcome == 'failure'
           || steps.nodefault.outcome == 'failure'
         run: exit 1
