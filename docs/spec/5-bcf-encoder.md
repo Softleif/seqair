@@ -29,3 +29,19 @@ Each INFO field encoded MUST increment the encoder's `n_info` counter. Each FORM
 
 r[bcf_encoder.format_field_major]
 FORMAT fields MUST be encoded in field-major order per `r[bcf_writer.indiv_field_major]`. For single-sample records (the common case), each format encode call writes the key + type descriptor + 1 value.
+
+## Reserved values
+
+> _[BCF2] — "In total, eight values are reserved for future use: 0x80--0x87, 0x8000--0x8007, 0x80000000--0x80000007" for integers, and 0x7F800001--0x7F800007 for floats. See also `r[bcf_writer.smallest_int_type]`, `r[bcf_writer.missing_sentinels]` and `r[bcf_writer.end_of_vector]`._
+
+r[bcf_encoder.reserved_bands]
+Each BCF numeric width has a band of bit patterns that carry meaning to the reader instead of data. For integers the band is the eight most negative values of the width: `MIN` is MISSING, `MIN + 1` is END_OF_VECTOR, and `MIN + 2 ..= MIN + 7` are reserved for future use — `0x80..=0x87` for int8, `0x8000..=0x8007` for int16, `0x80000000..=0x80000007` for int32. For floats the band is the bit patterns `0x7F800001 ..= 0x7F800007` (MISSING, END_OF_VECTOR, then five reserved). Positive infinity (`0x7F800000`) and quiet NaN (`0x7FC00000`) are NOT in the band: [BCF2] gives both first-class status as ordinary Float values, so a reserved-value test MUST compare exact bit patterns and MUST NOT use `is_nan()`.
+
+r[bcf_encoder.reserved_rejected]
+A caller-supplied value whose encoding would land in the reserved band MUST be rejected with a typed error instead of written. Writing END_OF_VECTOR as data makes a conforming reader truncate the row at that element, and writing MISSING makes it drop the value — both are silent data loss that no later read-back can detect. The error MUST name the field, the offending value (its bit pattern, for a float), and which band member it collided with.
+
+r[bcf_encoder.reserved_width]
+A value is reserved only for the width it is actually emitted at, so the test MUST use the width `r[bcf_writer.smallest_int_type]` selects, not the width of the caller's Rust type: `-127` is END_OF_VECTOR as an int8 but ordinary data as an int16, and `0x81` as an `i32` is the perfectly ordinary value 129. Because the selection bounds `-120` and `-32760` are exactly `INT8_MIN + 8` and `INT16_MIN + 8`, no value can ever be emitted at int8 or int16 width with a reserved pattern — `-128` is promoted to int16 and written `0xFF80`. The test therefore reduces, for every integer entry point and for arrays as well as scalars, to the width-independent `value <= i32::MIN + 7`; that reduction MUST be verified against the bytes the encoder actually emits rather than assumed.
+
+r[bcf_encoder.reserved_uniform]
+The rejection MUST apply to VCF text output as well as BCF, even though VCF text could render the value losslessly. The unified writer's contract is that the same encoding calls produce the same accepted records in every output format; a value that only survives as text would be lost the moment the file is converted to BCF, which is what htslib does internally for all output.
