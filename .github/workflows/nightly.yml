@@ -46,8 +46,11 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
+      # Via env, not `${{ }}` in the script: the input is free text.
       - name: Run all fuzz targets
-        run: ./fuzz/run_all.sh ${{ github.event.inputs.duration || '20' }}
+        env:
+          DURATION: ${{ inputs.duration || '20' }}
+        run: ./fuzz/run_all.sh "$DURATION"
 
       - uses: actions/upload-artifact@v4
         if: failure()
