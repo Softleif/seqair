@@ -1,7 +1,7 @@
 # seqair
 
 Pure-Rust BAM/SAM/CRAM/FASTA reader with a pileup engine and BCF/BAM writing.
-I/O backend for [rastair](https://github.com/bsblabludwig/rastair).
+I/O backend for [rastair](https://github.com/bsbludwig/rastair).
 
 > [!WARNING]
 > **This is an experimental project!**
