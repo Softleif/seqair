@@ -9,7 +9,10 @@
 //! `f32` arithmetic**, which is not nothing: Metal compiles with fast-math and
 //! SPIR-V permits contracting `a * b + c` into a fused multiply-add, so bit
 //! parity with [`align_strips`](crate::align_strips) is not promised, and the
-//! oracle for this kernel is a tolerance, not equality.
+//! oracle for this kernel is a tolerance, not equality. Measured, it is
+//! bit-identical to the strip kernel on an Apple M4 Pro and an AMD RX 5700 XT
+//! except for pairs scoring below log10 −40, which a GPU that flushes
+//! subnormal intermediates can score lower.
 //!
 //! Scores come back without their pairs' inputs, so the one thing the CPU
 //! entry points do after their kernels -- rescoring a pair that finished
