@@ -394,34 +394,6 @@ impl Workspace {
     }
 }
 
-/// Up to [`BATCH`] haplotypes against one read, one haplotype per lane.
-pub fn align_batch<H: Borrow<Haplotype>, E: Emission>(
-    haplotypes: &[H],
-    read: &Read,
-    emission: &E,
-    band: Band,
-) -> Vec<Log10Likelihood> {
-    let mut out = Vec::with_capacity(haplotypes.len());
-    Workspace::new().align_batch(haplotypes, read, emission, band, &mut out);
-    out
-}
-
-/// One read against its candidate haplotypes, through whichever kernel is
-/// faster for the number of them.
-///
-/// Allocates a [`Workspace`] per call; keep one and call
-/// [`Workspace::align_candidates`] when scoring more than one read.
-pub fn align_candidates<H: Borrow<Haplotype>, E: Emission>(
-    haplotypes: &[H],
-    read: &Read,
-    emission: &E,
-    band: Band,
-) -> Vec<Log10Likelihood> {
-    let mut out = Vec::with_capacity(haplotypes.len());
-    Workspace::new().align_candidates(haplotypes, read, emission, band, &mut out);
-    out
-}
-
 /// Every lane's own haplotype against the one read whose rows `plan` holds:
 /// the shared sweep with no shift (`delta_k = 0`), every lane's read the same
 /// length, and the read's row as splats.

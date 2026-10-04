@@ -750,28 +750,6 @@ impl ScoreMatrix {
     }
 }
 
-/// Up to [`PAIRS`] pairs at a time, one pair per lane.
-pub fn align_pairs<E: Emission>(pairs: &[Pair<'_>], emission: &E) -> Vec<Log10Likelihood> {
-    let mut out = Vec::with_capacity(pairs.len());
-    Workspace::new().align_pairs(pairs, emission, &mut out);
-    out
-}
-
-/// Every read against every haplotype, read-major, through whichever kernel
-/// is faster for the number of pairs.
-///
-/// Allocates a [`Workspace`] per call; keep one and call
-/// [`Workspace::align_reads`] when scoring more than one locus.
-pub fn align_reads<H: Borrow<Haplotype>, R: Borrow<Read>, E: Emission>(
-    haplotypes: &[H],
-    reads: &[(R, Band)],
-    emission: &E,
-) -> Vec<Log10Likelihood> {
-    let mut out = Vec::with_capacity(haplotypes.len() * reads.len());
-    Workspace::new().align_reads(haplotypes, reads, emission, &mut out);
-    out
-}
-
 /// Gathers the group's column blocks from its lanes' tables, then sweeps it.
 #[allow(
     clippy::cast_possible_truncation,
