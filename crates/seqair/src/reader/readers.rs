@@ -1531,6 +1531,39 @@ mod tests {
         );
     }
 
+    // r[verify pileup.column_matches_reference]
+    /// The flag the engine keeps while building a column agrees with walking
+    /// the column afterwards, uncapped and capped, with and without soft-clip
+    /// overhang, and the fixture has columns of both kinds.
+    #[test]
+    fn matches_reference_agrees_with_a_walk_of_the_column() {
+        use crate::bam::pileup::{Indel, PileupOp};
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let opts = crate::reader::SegmentOptions::new(std::num::NonZeroU32::new(2_000).unwrap());
+        let region: seqair_types::RegionString = "chr19:6100000-6140000".parse().unwrap();
+        let plan: Vec<_> = readers.segments(&region, opts).unwrap().collect();
+        let (mut plain, mut other) = (0usize, 0usize);
+        for (overhang, cap) in [(0, None), (1, None), (0, std::num::NonZeroU32::new(3))] {
+            for seg in &plan {
+                let mut guard = readers.pileup(seg, DepthLimit::Unlimited).run().unwrap();
+                guard.set_soft_clip_overhang(overhang);
+                if let Some(cap) = cap {
+                    guard.set_max_depth(cap);
+                }
+                while let Some(col) = guard.pileups() {
+                    let reference = col.reference_base();
+                    let walked = col.raw_alignments().all(|a| {
+                        matches!(a.op, PileupOp::Match { base, .. } if base == reference)
+                            && a.indel_after() == Indel::None
+                    });
+                    assert_eq!(col.matches_reference(), walked, "at {:?}", col.pos());
+                    if walked { plain += 1 } else { other += 1 }
+                }
+            }
+        }
+        assert!(plain > 0 && other > 0, "plain {plain}, other {other}");
+    }
+
     // r[verify unified.readers_pileup+2]
     /// A segment without reads skips the FASTA: its buffer is never sized. A
     /// segment with reads still fetches.
