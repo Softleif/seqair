@@ -29,8 +29,7 @@ use std::sync::{Arc, OnceLock};
 use compair::{
     Band, Base, BaseQuality, Betas, Emission, Haplotype, Log10Likelihood, Probability, Read,
     StandardEmission, Strand, TapsEmission, Workspace, align_full, align_strips,
-    gpu::{GpuAligner, GpuContext, GpuError, GpuPairs, Subnormals},
-    trusted,
+    gpu::{GpuAligner, GpuContext, GpuError, GpuPairs, GpuScore, Subnormals},
 };
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
@@ -70,6 +69,11 @@ fn bits(scores: &[Log10Likelihood]) -> Vec<u64> {
     scores.iter().map(|score| score.get().to_bits()).collect()
 }
 
+/// The kernel's own scores, before their floors.
+fn raw(scores: &[GpuScore]) -> Vec<Log10Likelihood> {
+    scores.iter().map(|score| score.untrusted()).collect()
+}
+
 /// A case with a band of its own width, from 2 up to past the unrolled
 /// kernel's limit, so one launch spans several band classes.
 #[hegel::composite]
@@ -84,12 +88,12 @@ fn banded_case() -> impl PrintableGenerator<(Case, Band)> {
     banded_case_inner().print_as_debug()
 }
 
-/// A GPU launch's scores, each passed through [`trusted`] as a caller does.
-type Rescue<'a> = dyn Fn(&[Log10Likelihood]) -> Vec<Log10Likelihood> + 'a;
+/// A GPU launch's scores, each trusted or rescored as a caller does.
+type Rescue<'a> = dyn Fn(&[GpuScore]) -> Vec<Log10Likelihood> + 'a;
 
-/// Each score through [`trusted`] with its case's pair, as a GPU caller does.
+/// Each score trusted or rescored with its case's pair, as a GPU caller does.
 fn rescued<'c>(
-    scores: &[Log10Likelihood],
+    scores: &[GpuScore],
     cases: &'c [(Case, Band)],
     emission: impl Fn(&'c Case) -> Box<dyn Emission + 'c>,
 ) -> Vec<Log10Likelihood> {
@@ -97,7 +101,7 @@ fn rescued<'c>(
         .iter()
         .zip(cases)
         .map(|(score, (case, band))| {
-            trusted(*score, &case.haplotype, &case.read, &*emission(case), *band)
+            score.or_rescore(&case.haplotype, &case.read, &*emission(case), *band)
         })
         .collect()
 }
@@ -119,9 +123,8 @@ fn for_each_emission(
                 workspace.align_strips(&case.haplotype, &case.read, &emission, *band)
             })
             .collect();
-        let rescue = |scores: &[Log10Likelihood]| {
-            rescued(scores, cases, |_| Box::new(StandardEmission::default()))
-        };
+        let rescue =
+            |scores: &[GpuScore]| rescued(scores, cases, |_| Box::new(StandardEmission::default()));
         check("standard", &plan(cases, &emission).expect("the plan builds"), strips, &rescue);
     }
     {
@@ -138,7 +141,7 @@ fn for_each_emission(
             pairs.push_pair(read, haplotype, *band).expect("the pair pushes");
             strips.push(workspace.align_strips(&case.haplotype, &case.read, &emission, *band));
         }
-        let rescue = |scores: &[Log10Likelihood]| {
+        let rescue = |scores: &[GpuScore]| {
             rescued(scores, cases, |case| {
                 Box::new(TapsEmission::new(conversion, Betas::PerSite(&case.betas)))
             })
@@ -153,7 +156,7 @@ fn for_each_emission(
                 workspace.align_strips(&case.haplotype, &case.read, &emission, *band)
             })
             .collect();
-        let rescue = |scores: &[Log10Likelihood]| {
+        let rescue = |scores: &[GpuScore]| {
             rescued(scores, cases, |_| {
                 Box::new(TapsEmission::new(conversion, Betas::Uniform(uniform)))
             })
@@ -200,12 +203,12 @@ fn appended_plans_are_one_plan(tc: TestCase) {
             plan(cases.get(from..to).unwrap_or_default(), &emission).expect("the plan builds");
         let range = appended.append(&part).expect("the plans append");
         assert_eq!(range.clone(), from..to);
-        ranges.push((range, bits(&part.emulate(Subnormals::Kept))));
+        ranges.push((range, bits(&raw(&part.emulate(Subnormals::Kept)))));
     }
     assert_eq!(appended.len(), whole.len());
     assert_eq!(appended.upload_bytes(), whole.upload_bytes());
-    let scores = bits(&appended.emulate(Subnormals::Kept));
-    assert_eq!(&scores, &bits(&whole.emulate(Subnormals::Kept)));
+    let scores = bits(&raw(&appended.emulate(Subnormals::Kept)));
+    assert_eq!(&scores, &bits(&raw(&whole.emulate(Subnormals::Kept))));
     for (range, part) in ranges {
         assert_eq!(scores.get(range).unwrap_or_default(), part.as_slice());
     }
@@ -225,9 +228,9 @@ fn the_gpu_runs_the_transcribed_kernel(tc: TestCase) {
     let Some(context) = context() else { return };
     let mut aligner = GpuAligner::new(context);
     for_each_emission(&cases, conversion, uniform, |name, pairs, _, _| {
-        let gpu = bits(&aligner.align(pairs).expect("the launch runs"));
-        let flushed = bits(&pairs.emulate(Subnormals::Flushed));
-        let kept = bits(&pairs.emulate(Subnormals::Kept));
+        let gpu = bits(&raw(&aligner.align(pairs).expect("the launch runs")));
+        let flushed = bits(&raw(&pairs.emulate(Subnormals::Flushed)));
+        let kept = bits(&raw(&pairs.emulate(Subnormals::Kept)));
         for (index, &score) in gpu.iter().enumerate() {
             assert!(
                 Some(&score) == flushed.get(index) || Some(&score) == kept.get(index),
@@ -244,11 +247,11 @@ fn the_gpu_runs_the_transcribed_kernel(tc: TestCase) {
 
 /// The tolerance oracle against the CPU's strip kernel.
 ///
-/// Within [`TOLERANCE`] everywhere once each score has been through
-/// [`trusted`], and `IMPOSSIBLE` wherever the strip kernel is. A GPU that
+/// Within [`TOLERANCE`] everywhere once each score has been trusted or
+/// rescored, and `IMPOSSIBLE` wherever the strip kernel is. A GPU that
 /// flushes subnormal intermediates loses more than the CPU kernel only
 /// where a pair scores so low that its surviving path sat far under each
-/// row's maximum -- which is below the floor `trusted` rescores under.
+/// row's maximum -- which is below the floor its score carries.
 #[hegel::test(test_cases = pinned::cases(64))]
 fn the_gpu_is_the_strip_kernel_within_tolerance(tc: TestCase) {
     let count = tc.draw(length(1, 47));
@@ -288,7 +291,7 @@ fn the_gpu_band_never_beats_the_reference(tc: TestCase) {
     let emission = StandardEmission::default();
     let banded: Vec<(Case, Band)> = cases.iter().map(|case| (case.clone(), case.band())).collect();
     let pairs = plan(&banded, &emission).expect("the launch runs");
-    let gpu = GpuAligner::new(context).align(&pairs).expect("the launch runs");
+    let gpu = raw(&GpuAligner::new(context).align(&pairs).expect("the launch runs"));
     for (case, score) in cases.iter().zip(&gpu) {
         let full = align_full(&case.haplotype, &case.read, &emission).get();
         assert!(!score.get().is_nan());
@@ -324,7 +327,7 @@ fn the_10s_pairs_are_the_strip_kernel_within_tolerance() -> Result<(), Box<dyn s
             }
         }
     }
-    let gpu = GpuAligner::new(context).align(&pairs)?;
+    let gpu = raw(&GpuAligner::new(context).align(&pairs)?);
     assert_eq!(gpu.len(), strips.len());
     let identical = bits(&gpu).iter().zip(bits(&strips)).filter(|(a, b)| **a == *b).count();
     eprintln!("10s: {identical}/{} bit-identical to align_strips", strips.len());
@@ -391,10 +394,10 @@ fn a_reused_aligner_is_a_fresh_aligner() -> Result<(), GpuError> {
         }
     }
     let mut reused = GpuAligner::new(context.clone());
-    let batch = reused.align(&all)?;
+    let batch = raw(&reused.align(&all)?);
     for (index, single) in singles.iter().enumerate() {
-        let alone = GpuAligner::new(context.clone()).align(single)?;
-        let again = reused.align(single)?;
+        let alone = raw(&GpuAligner::new(context.clone()).align(single)?);
+        let again = raw(&reused.align(single)?);
         assert_eq!(bits(&alone), bits(&again), "pair {index}: reused aligner");
         assert_eq!(
             bits(&alone),
@@ -402,7 +405,7 @@ fn a_reused_aligner_is_a_fresh_aligner() -> Result<(), GpuError> {
             "pair {index}: in a batch"
         );
     }
-    assert_eq!(bits(&reused.align(&all)?), bits(&batch), "the batch again after the singles");
+    assert_eq!(bits(&raw(&reused.align(&all)?)), bits(&batch), "the batch again after the singles");
     Ok(())
 }
 
@@ -437,8 +440,8 @@ fn a_context_on_a_borrowed_device_scores_as_its_own() -> Result<(), Box<dyn std:
             }
         }
     }
-    let theirs = GpuAligner::new(borrowed).align(&pairs)?;
-    let ours = GpuAligner::new(own).align(&pairs)?;
+    let theirs = raw(&GpuAligner::new(borrowed).align(&pairs)?);
+    let ours = raw(&GpuAligner::new(own).align(&pairs)?);
     assert!(!ours.is_empty());
     assert_eq!(bits(&theirs), bits(&ours));
     Ok(())
@@ -460,10 +463,13 @@ fn the_degenerate_pairs_are_impossible() -> Result<(), GpuError> {
     pairs.push_pair(full, haplotype, Band::new(4, 40).expect("legal"))?;
     pairs.push_pair(full, haplotype, Band::new(4, -40).expect("legal"))?;
     let impossible = vec![Log10Likelihood::IMPOSSIBLE; 4];
-    assert_eq!(pairs.emulate(Subnormals::Kept), impossible);
+    assert_eq!(raw(&pairs.emulate(Subnormals::Kept)), impossible);
     if let Some(context) = context() {
         let mut aligner = GpuAligner::new(context);
-        assert_eq!(aligner.align(&pairs)?, impossible);
+        // Trusted as they are: the CPU returns them without a rescore too.
+        let scores = aligner.align(&pairs)?;
+        let trusted: Vec<_> = scores.iter().map(|score| score.trusted()).collect();
+        assert_eq!(trusted, vec![Some(Log10Likelihood::IMPOSSIBLE); 4]);
         assert!(aligner.align(&GpuPairs::new())?.is_empty());
     }
     Ok(())

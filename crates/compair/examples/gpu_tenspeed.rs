@@ -137,7 +137,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut aligner = GpuAligner::with_options(context.clone(), *options);
         fill(index.len(), &mut pairs)?;
         let started = Instant::now();
-        let scores = aligner.align(&pairs)?;
+        // The kernel's own scores: this compares kernels, before any rescue.
+        let scores: Vec<_> = aligner.align(&pairs)?.iter().map(|s| s.untrusted()).collect();
         println!("\n== {name}: first launch (compiles) {:.1} ms", ms(started.elapsed()));
         parity(&scores, &oracle);
 

@@ -13,8 +13,14 @@ use seqair_types::{Base, BaseQuality, Strand};
 
 use super::GpuError;
 use crate::{
-    banded::Band, emission::Emission, emission::SiteWeights, haplotype::Haplotype, read::Read,
-    transitions::Transition, types::ErrorTable,
+    banded::Band,
+    emission::Emission,
+    emission::SiteWeights,
+    haplotype::Haplotype,
+    read::Read,
+    reference::pair_floor,
+    transitions::{Growth, Transition},
+    types::ErrorTable,
 };
 
 /// A read in a [`GpuPairs`], returned by [`GpuPairs::push_read`].
@@ -126,6 +132,8 @@ struct ReadEntry {
     first_row: u32,
     len: u32,
     strand: Strand,
+    /// `Read::growth_bound` and `Read::growth`, for each pair's trust floor.
+    growth: (Option<Growth>, Growth),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,6 +149,9 @@ struct HaplotypeEntry {
 pub(crate) struct Pending {
     pub(crate) record: PairRecord,
     pub(crate) class: Option<u32>,
+    /// The least score the CPU entry points would keep for this pair, `None`
+    /// where they keep none; see [`GpuScore`](super::GpuScore).
+    pub(crate) floor: Option<f64>,
 }
 
 /// Band half-widths are rounded up to a multiple of this to pick a shader, so
@@ -241,7 +252,7 @@ impl GpuPairs {
                 weights: pending.record.weights + weights,
                 ..pending.record
             },
-            class: pending.class,
+            ..*pending
         }));
         Ok(first..self.pairs.len())
     }
@@ -333,7 +344,8 @@ impl GpuPairs {
                 mismatched: (eps / 3.0) as f32,
             });
         }
-        self.reads.push(ReadEntry { first_row, len, strand: read.strand() });
+        let growth = (read.growth_bound(), read.growth());
+        self.reads.push(ReadEntry { first_row, len, strand: read.strand(), growth });
         Ok(slot)
     }
 
@@ -422,7 +434,12 @@ impl GpuPairs {
             init,
             pad: 0,
         };
-        self.pairs.push(Pending { record, class });
+        // A pair that never runs is `IMPOSSIBLE` on the CPU too, unchecked.
+        let floor = match class {
+            Some(_) => pair_floor(h, r, band, read_entry.growth.0, read_entry.growth.1),
+            None => Some(f64::NEG_INFINITY),
+        };
+        self.pairs.push(Pending { record, class, floor });
         Ok(())
     }
 }

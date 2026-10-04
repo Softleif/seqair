@@ -65,11 +65,11 @@ impl Band {
     /// one cell per read row it crosses -- prefix alignments of that many
     /// lengths, whose magnitudes span the whole alignment's dynamic range. A
     /// band wider than the read lets that span outrun `f32`, and the pairs it
-    /// loses are rescored in `f64` (see [`trusted`]), which is right and
+    /// loses are rescored in `f64` (see [`align_banded_f64`]), which is right and
     /// several times slower. Use [`align_full`] when the band is not wanted,
     /// not a band wide enough to disable itself.
     ///
-    /// [`trusted`]: crate::trusted
+    /// [`align_banded_f64`]: crate::align_banded_f64
     /// [`align_full`]: crate::align_full
     pub const MAX_WIDTH: u32 = 1024;
 

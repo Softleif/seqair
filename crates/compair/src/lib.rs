@@ -107,7 +107,8 @@
 //! total above a floor near `-62` (for 150 bases in a 64-wide band) by a
 //! millionth. A pair that finishes below the floor is scored again by
 //! [`align_banded_f64`], and so is a read whose qualities could overflow the
-//! kernels. [`trusted`] is that check, for the GPU kernel's scores. The proof
+//! kernels. The GPU's scores carry the same check with them (`gpu::GpuScore`).
+//! The proof
 //! needs every emission and the transitions out of every state to be at most
 //! one: a base error
 //! probability is capped at [`MAX_EPSILON`], and gap-open qualities below Q6
@@ -146,7 +147,7 @@ pub use haplotype::Haplotype;
 pub use pairs::{PAIRS, PAIRS_BREAK_EVEN, Pair, ScoreMatrix, align_pairs, align_reads};
 pub use prepared::Candidates;
 pub use read::{PcrIndelModel, Read};
-pub use reference::{align_banded_f64_rows, align_full, trusted};
+pub use reference::{align_banded_f64_rows, align_full};
 pub use rescue::{align_banded_f64, align_banded_f64_at, poison_align_banded_f64_scratch};
 pub use seqair_types::{Base, BaseQuality, Probability, QPos, Strand};
 pub use simd::simd_level;

@@ -14,10 +14,13 @@
 //! except for pairs scoring below log10 −40, which a GPU that flushes
 //! subnormal intermediates can score lower.
 //!
-//! Scores come back without their pairs' inputs, so the one thing the CPU
-//! entry points do after their kernels -- rescoring a pair that finished
-//! below `f32`'s floor in `f64` -- is the caller's: pass each score through
-//! [`trusted`](crate::trusted).
+//! The one thing the CPU entry points do after their kernels -- rescoring a
+//! pair that finished below the floor `f32` can vouch for, in `f64` -- needs
+//! the pair's inputs, which a launch does not keep. So a score comes back as
+//! a [`GpuScore`], carrying the floor [`GpuPairs`] worked out when the pair was
+//! pushed: [`GpuScore::trusted`] is the score wherever a CPU entry point would
+//! return the kernel's score unchanged (all but about 1% of real pairs), and
+//! [`GpuScore::or_rescore`] takes the pair to score the rest.
 //!
 //! ```no_run
 //! use compair::gpu::{GpuAligner, GpuContext, GpuPairs};
@@ -31,7 +34,13 @@
 //! let range = pairs.push_reads(&haplotypes, &reads, &emission)?;
 //! // In push order; `submit` returns once the launch is queued.
 //! let scores = aligner.submit(&pairs)?.collect()?;
-//! // Then each through `compair::trusted` with its pair, as the CPU does.
+//! let per_read = scores.get(range).unwrap_or_default().chunks_exact(haplotypes.len());
+//! for ((read, band), scores) in reads.iter().zip(per_read) {
+//!     for (haplotype, score) in haplotypes.iter().zip(scores) {
+//!         // What `Workspace::align_reads` returns for this pair.
+//!         let score = score.or_rescore(haplotype, read, &emission, *band);
+//!     }
+//! }
 //! # Ok(()) }
 //! ```
 //!
@@ -47,12 +56,60 @@ use std::time::Duration;
 
 use seqair_types::Strand;
 
+use crate::{Band, Emission, Haplotype, Log10Likelihood, Read};
+
 pub use device::{GpuAligner, GpuContext, Handle, KernelOptions, Wait};
 #[doc(hidden)]
 pub use emulate::Subnormals;
 pub use plan::{GpuPairs, HaplotypeSlot, ReadSlot};
 #[doc(hidden)]
 pub use shader::{Contraction, Style, Variant};
+
+/// One pair's score from the GPU kernel, and the floor below which its `f32`
+/// arithmetic cannot vouch for it.
+///
+/// The floor is the one every CPU entry point applies after its kernel (see
+/// the crate docs' **Precision**), worked out from the pair when it was
+/// pushed, so a score passes or fails it exactly where the CPU's would.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[must_use = "a GPU score is not the pair's score until it is trusted or rescored"]
+pub struct GpuScore {
+    score: Log10Likelihood,
+    floor: Option<f64>,
+}
+
+impl GpuScore {
+    pub(crate) fn new(score: Log10Likelihood, floor: Option<f64>) -> Self {
+        Self { score, floor }
+    }
+
+    /// The score, where a CPU entry point would return the kernel's score as
+    /// it is; `None` where it would score the pair again in `f64`.
+    #[must_use]
+    pub fn trusted(self) -> Option<Log10Likelihood> {
+        self.floor.is_some_and(|floor| self.score.get() >= floor).then_some(self.score)
+    }
+
+    /// The pair's score as the CPU entry points return it: [`Self::trusted`],
+    /// or the pair scored again by [`align_banded_f64`](crate::align_banded_f64).
+    /// The inputs must be the ones the pair was pushed with.
+    pub fn or_rescore<E: Emission + ?Sized>(
+        self,
+        haplotype: &Haplotype,
+        read: &Read,
+        emission: &E,
+        band: Band,
+    ) -> Log10Likelihood {
+        self.trusted().unwrap_or_else(|| crate::align_banded_f64(haplotype, read, emission, band))
+    }
+
+    /// The kernel's own score, before the floor: for comparing it with the
+    /// CPU kernels, not for calling with.
+    #[must_use]
+    pub const fn untrusted(self) -> Log10Likelihood {
+        self.score
+    }
+}
 
 /// Everything the GPU path can fail with.
 #[derive(Debug, thiserror::Error)]

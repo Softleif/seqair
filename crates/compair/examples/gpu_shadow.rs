@@ -239,7 +239,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for &count in &launches {
         let windows = prebuilt.get(..count).unwrap_or_default();
         fill(&mut pairs, windows, &emission)?;
-        let gpu = aligner.align(&pairs)?;
+        // The kernel's own scores: this compares kernels, before any rescue.
+        let gpu: Vec<_> = aligner.align(&pairs)?.iter().map(|s| s.untrusted()).collect();
         cpu(&mut workspace, windows, &emission, &mut strips);
         let identical =
             gpu.iter().zip(&strips).filter(|(a, b)| a.get().to_bits() == b.get().to_bits()).count();
