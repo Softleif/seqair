@@ -617,6 +617,7 @@ impl Workspace {
     }
 
     /// [`Workspace::align_pairs`] with one lane, the bit-parity oracle.
+    #[doc(hidden)]
     pub fn align_pairs_scalar<E: Emission>(
         &mut self,
         pairs: &[Pair<'_>],

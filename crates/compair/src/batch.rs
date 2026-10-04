@@ -325,6 +325,7 @@ impl Workspace {
     }
 
     /// [`Workspace::align_batch`] with one lane, the bit-parity oracle.
+    #[doc(hidden)]
     pub fn align_batch_scalar<H: Borrow<Haplotype>, E: Emission>(
         &mut self,
         haplotypes: &[H],

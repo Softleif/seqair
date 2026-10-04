@@ -260,7 +260,9 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
     /// `read` against every haplotype through the eight-lane strip kernel, at
     /// the best SIMD level this CPU has.
     ///
-    /// The scores replace `out`'s contents, in the haplotypes' order.
+    /// The scores replace `out`'s contents, in the haplotypes' order. For the
+    /// parity tests; [`Candidates::align`] is never slower.
+    #[doc(hidden)]
     pub fn align_strips_simd(&mut self, read: &Read, band: Band, out: &mut Vec<Log10Likelihood>) {
         self.align_strips_simd_at(Level::new(), read, band, out);
     }
@@ -283,6 +285,7 @@ impl<H: Borrow<Haplotype>, E: Emission> Candidates<'_, '_, H, E> {
     /// `read` against every haplotype through the scalar strip kernel.
     ///
     /// The scores replace `out`'s contents, in the haplotypes' order.
+    #[doc(hidden)]
     pub fn align_strips(&mut self, read: &Read, band: Band, out: &mut Vec<Log10Likelihood>) {
         self.strips(read, band, out, |view, buffer, shape, band| {
             strip_kernel::<f32>((), view, buffer, shape, band)
