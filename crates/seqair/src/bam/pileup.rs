@@ -221,16 +221,24 @@ fn fill_entries<U>(
     written: &mut usize,
     pos: Pos0,
     soft_clip_overhang: u32,
-) -> Option<()> {
+    reference: Base,
+) -> Option<bool> {
+    // r[impl pileup.column_matches_reference]
+    let mut matches_reference = true;
     let slab = store.cigar_slab();
     let pos_u32 = pos.as_u32();
     for active in actives {
         // The common column first: inside an op, nothing anchored.
         // Everything else takes the out-of-line step.
+        // Each path says whether its entry matches the reference while it
+        // still knows what it built: matching on the finished `op` instead
+        // costs ~10 instructions an entry.
         let (op, indel_after) = if let Some(qpos) = active.cigar.plain_match(pos_u32) {
             let (base, qual) = base_qual_at(store, active, qpos);
+            matches_reference &= base == reference;
             (PileupOp::Match { qpos, base, qual }, Indel::None)
         } else if let Some(gap) = active.cigar.plain_gap(pos_u32) {
+            matches_reference = false;
             let op = match gap {
                 PlainGap::Deletion(del_len) => PileupOp::Deletion { del_len },
                 PlainGap::RefSkip => PileupOp::RefSkip,
@@ -249,6 +257,7 @@ fn fill_entries<U>(
                         .qpos_at(pos, soft_clip_overhang)
                 {
                     let (base, qual) = base_qual_at(store, active, qpos);
+                    matches_reference = false;
                     let entry = PileupAlignment {
                         op: PileupOp::SoftClip { qpos, base, qual },
                         mapq: active.mapq,
@@ -269,21 +278,31 @@ fn fill_entries<U>(
                 }
                 continue;
             };
+            matches_reference &= deletion_after.is_none();
             let op = match info {
                 CigarPosInfo::Match { qpos } => {
                     let (base, qual) = base_qual_at(store, active, qpos);
+                    matches_reference &= base == reference;
                     PileupOp::Match { qpos, base, qual }
                 }
                 CigarPosInfo::Insertion { qpos, insert_len } => {
                     let (base, qual) = base_qual_at(store, active, qpos);
+                    matches_reference = false;
                     PileupOp::Insertion { qpos, base, qual, insert_len }
                 }
-                CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
+                CigarPosInfo::Deletion { del_len } => {
+                    matches_reference = false;
+                    PileupOp::Deletion { del_len }
+                }
                 // r[impl pileup_indel.complex_indel]
                 CigarPosInfo::ComplexIndel { del_len, insert_len, is_refskip } => {
+                    matches_reference = false;
                     PileupOp::ComplexIndel { del_len, insert_len, is_refskip }
                 }
-                CigarPosInfo::RefSkip => PileupOp::RefSkip,
+                CigarPosInfo::RefSkip => {
+                    matches_reference = false;
+                    PileupOp::RefSkip
+                }
             };
             // Anchor-addressed indel (htslib `a.indel()` parity).
             // Insertions are already encoded in the op; deletions are
@@ -323,7 +342,7 @@ fn fill_entries<U>(
             .write(entry);
         *written = written.checked_add(1).trace_err("BUG: column depth overflowed")?;
     }
-    Some(())
+    Some(matches_reference)
 }
 
 // r[impl pileup.column_contents]
@@ -343,6 +362,7 @@ fn fill_entries<U>(
 pub struct PileupColumn<'eng, U = ()> {
     pos: Pos0,
     reference_base: Base,
+    matches_reference: bool,
     alignments: &'eng [PileupAlignment],
     store: &'eng RecordStore<U>,
 }
@@ -392,6 +412,18 @@ impl<'eng, U> PileupColumn<'eng, U> {
 
     pub fn reference_base(&self) -> Base {
         self.reference_base
+    }
+
+    // r[impl pileup.column_matches_reference]
+    /// True when every read here shows [`reference_base`](Self::reference_base)
+    /// as a [`PileupOp::Match`] with nothing inserted or deleted after it: the
+    /// column carries no evidence of anything but the reference.
+    ///
+    /// Known from building the column, so asking costs nothing; a caller that
+    /// drops such columns need not walk them to find out.
+    #[must_use]
+    pub fn matches_reference(&self) -> bool {
+        self.matches_reference
     }
 
     /// Borrow the record store for custom slab access (e.g., record fields by index).
@@ -1132,7 +1164,7 @@ impl<U> PileupEngine<U> {
     /// Clears `self.buf` and fills it with the alignments for the next
     /// non-empty column. Returns `(pos, reference_base)` so the caller
     /// can build a [`PileupColumn`] borrowing the buffer.
-    fn advance(&mut self) -> Option<(Pos0, Base)> {
+    fn advance(&mut self) -> Option<(Pos0, Base, bool)> {
         loop {
             if self.current_pos > self.region_end {
                 return None;
@@ -1296,6 +1328,8 @@ impl<U> PileupEngine<U> {
             // Keeping the test out of the per-read body leaves the uncapped
             // loop exactly what it was. The reads it skips need no
             // bookkeeping: their cursors catch up on the next column that asks.
+            let reference_base = self.ref_seq.as_ref().map_or(Base::Unknown, |r| r.base_at(pos));
+            let mut matches_reference = true;
             let cap = self.max_depth.map_or(usize::MAX, |max| max.get() as usize);
             self.buf.clear();
             self.buf.reserve(self.active.len().min(cap));
@@ -1305,13 +1339,29 @@ impl<U> PileupEngine<U> {
             let spare = buf.spare_capacity_mut();
             let n_active = actives.len();
             if n_active <= cap {
-                fill_entries(actives, store, spare, &mut written, pos, soft_clip_overhang)?;
+                matches_reference &= fill_entries(
+                    actives,
+                    store,
+                    spare,
+                    &mut written,
+                    pos,
+                    soft_clip_overhang,
+                    reference_base,
+                )?;
             } else {
                 let mut pass_start = 0usize;
                 let mut pass_end = cap;
                 loop {
                     let pass = actives.get_mut(pass_start..pass_end).unwrap_or_default();
-                    fill_entries(pass, store, spare, &mut written, pos, soft_clip_overhang)?;
+                    matches_reference &= fill_entries(
+                        pass,
+                        store,
+                        spare,
+                        &mut written,
+                        pos,
+                        soft_clip_overhang,
+                        reference_base,
+                    )?;
                     if written >= cap || pass_end >= n_active {
                         break;
                     }
@@ -1336,9 +1386,7 @@ impl<U> PileupEngine<U> {
                 )]
                 let depth_u32 = self.buf.len() as u32;
                 self.max_active_depth = self.max_active_depth.max(depth_u32);
-                let reference_base =
-                    self.ref_seq.as_ref().map_or(Base::Unknown, |r| r.base_at(pos));
-                return Some((pos, reference_base));
+                return Some((pos, reference_base, matches_reference));
             }
         }
     }
@@ -1355,8 +1403,14 @@ impl<U> PileupEngine<U> {
     /// `pileups` calls. Extract primitive data (pos, depth, etc.) if you need
     /// to retain it.
     pub fn pileups(&mut self) -> Option<PileupColumn<'_, U>> {
-        let (pos, reference_base) = self.advance()?;
-        Some(PileupColumn { pos, reference_base, alignments: &self.buf, store: &self.store })
+        let (pos, reference_base, matches_reference) = self.advance()?;
+        Some(PileupColumn {
+            pos,
+            reference_base,
+            matches_reference,
+            alignments: &self.buf,
+            store: &self.store,
+        })
     }
 
     /// Remaining positions in the current region — lower-bound estimate for

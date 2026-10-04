@@ -170,6 +170,15 @@ in `O(log depth)` by binary search over
 consumer reaches the other mate of an overlapping pair while walking the column
 exactly once.
 
+r[pileup.column_matches_reference]
+`PileupColumn::matches_reference()` MUST be true exactly when every entry of the
+column is a `PileupOp::Match` whose base equals the column's `reference_base`
+and whose `indel_after` is `Indel::None` — a column that carries no evidence of
+anything but the reference. An empty column cannot occur (empty positions are
+skipped). The engine MUST compute it while writing the column's entries, not by
+a second pass over them: a caller that drops such columns (most of a genome)
+then pays nothing to find them.
+
 r[pileup.column_position_of]
 `PileupColumn::position_of(record_idx)` MUST return the index of that record's
 alignment in this column's order — the order `alignments` yields — or `None`
