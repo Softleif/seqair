@@ -26,21 +26,9 @@
 //! let emission = compair::StandardEmission::default();
 //! let mut aligner = GpuAligner::new(GpuContext::new()?);
 //! let mut pairs = GpuPairs::new();
-//! // A haplotype's terms depend on the reads' strand: push it once per strand.
-//! let mut slots = Vec::new();
-//! for strand in [compair::Strand::OT, compair::Strand::OB] {
-//!     for haplotype in &haplotypes {
-//!         slots.push((strand, pairs.push_haplotype(haplotype, strand, &emission)?));
-//!     }
-//! }
-//! for (read, band) in &reads {
-//!     let read_slot = pairs.push_read(read, &emission)?;
-//!     for &(strand, hap_slot) in &slots {
-//!         if strand == read.strand() {
-//!             pairs.push_pair(read_slot, hap_slot, *band)?;
-//!         }
-//!     }
-//! }
+//! // Every read against every haplotype, read-major as `Workspace::align_reads`
+//! // lays them out; `range` is where this locus's scores land in the launch.
+//! let range = pairs.push_reads(&haplotypes, &reads, &emission)?;
 //! // In push order; `submit` returns once the launch is queued.
 //! let scores = aligner.submit(&pairs)?.collect()?;
 //! // Then each through `compair::trusted` with its pair, as the CPU does.
