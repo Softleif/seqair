@@ -307,7 +307,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
         self.alignment.estimate_region_bytes(tid, span)
     }
 
-    // r[impl unified.readers_pileup+1]
+    // r[impl unified.readers_pileup+2]
     // r[impl unified.pileup_plan]
     /// Plan a pileup over `segment`: configure it, then [`run`](Pileup::run).
     ///
@@ -483,6 +483,14 @@ impl<E: CustomizeRecordStore> Readers<E> {
                     });
                 }
                 ref_seq
+            }
+            // r[impl unified.readers_pileup+2]
+            // An empty store yields no column, so no base would ever be read:
+            // a caller tiling a sparse BAM (a chr12-only file against a
+            // whole-genome FASTA: 31k empty segments) otherwise decodes the
+            // reference of every one of them.
+            None if self.store.is_empty() && mutate.is_none() => {
+                RefSeq::new(Rc::from([]), ref_start)
             }
             // The reference fetch takes the same closed interval the query
             // did, so the buffer covers exactly `ref_span` — including a span
@@ -743,7 +751,7 @@ where
         }
     }
 
-    // r[impl unified.readers_pileup+1]
+    // r[impl unified.readers_pileup+2]
     // r[impl unified.pileup_plan]
     /// Fetch the records and the reference, run the hook if there is one, and
     /// hand back a [`PileupGuard`] that derefs to a [`PileupEngine`] ready for
@@ -1523,7 +1531,49 @@ mod tests {
         );
     }
 
-    // r[verify unified.readers_pileup+1]
+    // r[verify unified.readers_pileup+2]
+    /// A segment without reads skips the FASTA: its buffer is never sized. A
+    /// segment with reads still fetches.
+    #[test]
+    fn pileup_of_an_empty_segment_reads_no_reference() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let tid = readers.header().tid("chr19").expect("test BAM has chr19");
+        let tid = crate::reader::ResolveTid::resolve_tid(&tid, readers.header()).unwrap();
+        let last_pos = Pos0::new(
+            u32::try_from(readers.header().target_len(tid.as_u32()).unwrap() - 1).unwrap(),
+        )
+        .unwrap();
+        let segment = |start: u32, last: u32| {
+            Segment::new(
+                tid,
+                "chr19".into(),
+                Pos0::new(start).unwrap(),
+                Pos0::new(last).unwrap(),
+                0,
+                0,
+                last_pos,
+            )
+            .unwrap()
+        };
+
+        let empty_segment = segment(1_000, 1_999);
+        let mut empty = readers.pileup(&empty_segment, DepthLimit::Unlimited).run().unwrap();
+        assert!(empty.pileups().is_none(), "no reads, no columns");
+        drop(empty);
+        assert_eq!(
+            readers.fasta_buf.capacity(),
+            0,
+            "an empty segment must not fetch the reference"
+        );
+
+        let full_segment = segment(6_105_000, 6_105_999);
+        let mut full = readers.pileup(&full_segment, DepthLimit::Unlimited).run().unwrap();
+        assert!(full.pileups().is_some(), "the fixture has reads here");
+        drop(full);
+        assert!(readers.fasta_buf.capacity() > 0, "a segment with reads fetches the reference");
+    }
+
+    // r[verify unified.readers_pileup+2]
     /// Pileup must reject a `Segment` whose contig name doesn't resolve to
     /// the same tid in this `Readers`' header. Catches the foot-gun where a
     /// `Segment` built against one `Readers` is fed to another.
@@ -1560,7 +1610,7 @@ mod tests {
         }
     }
 
-    // r[verify unified.readers_pileup+1]
+    // r[verify unified.readers_pileup+2]
     /// The mismatch check also catches the case where contig name and tid
     /// resolve correctly but the segment's `contig_last_pos` does not match
     /// the current header's contig length. This is the foot-gun of building
@@ -1605,7 +1655,7 @@ mod tests {
         }
     }
 
-    // r[verify unified.readers_pileup+1]
+    // r[verify unified.readers_pileup+2]
     /// The mismatch check also catches the case where the contig name *does*
     /// exist in the header but resolves to a different numeric tid than the
     /// segment's pre-resolved tid (e.g., a segment built against a different

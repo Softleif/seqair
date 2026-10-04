@@ -306,7 +306,7 @@ planner can ask before committing.
 > over the mutator's type rather than boxing it, so a hook costs no
 > indirection and a plan without one costs no allocation.
 
-> r[unified.readers_pileup+1]
+> r[unified.readers_pileup+2]
 > `Pileup::run() -> Result<PileupGuard<'_, E::Extra>, ReaderError>` is the only
 > path that drives a pileup. It MUST:
 >
@@ -332,6 +332,11 @@ planner can ask before committing.
 >    reader, using the contig name carried by the segment (no header lookup).
 >    Because the fetch takes the span itself, a segment ending on
 >    `Pos0::MAX` gets its last base without any `+ 1` side door.
+>    When step 2 loaded no record and no `mutate` hook is set, the fetch
+>    MUST be skipped and the engine given an empty reference: an empty store
+>    yields no column, so no base is ever read. A FASTA error for such a span
+>    (a contig the FASTA lacks or holds shorter) then surfaces only on a
+>    segment that has reads.
 > 4. Take the store (now `RecordStore<E::Extra>` with populated extras) and
 >    construct a `PileupEngine<E::Extra>` with the fetched reference
 >    sequence pre-attached via `set_reference_seq`.
@@ -343,7 +348,7 @@ planner can ask before committing.
 
 > r[unified.readers_pileup_store_mutation+4]
 > `Pileup::mutate(f)` MUST make `run` behave exactly as
-> `r[unified.readers_pileup+1]` except that `f` is run on the freshly
+> `r[unified.readers_pileup+2]` except that `f` is run on the freshly
 > fetched `RecordStore` after step 3 — once the reference is in hand — and
 > before the engine is constructed in step 4, and the store MUST be re-sorted
 > by position afterwards. This is the hook for in-place local realignment: the
@@ -370,7 +375,7 @@ planner can ask before committing.
 >
 > Positions may change freely because of the re-sort; query length MUST NOT,
 > and `set_alignment` enforces that. Buffer reuse
-> (`r[unified.readers_pileup+1]` step 4 and the guard's store recovery) MUST be
+> (`r[unified.readers_pileup+2]` step 4 and the guard's store recovery) MUST be
 > preserved unchanged: taking the mutation hook MUST NOT cost an allocation a
 > plan without one avoids.
 >
@@ -388,7 +393,7 @@ planner can ask before committing.
 
 > r[unified.readers_pileup_supplied_reference+1]
 > `Pileup::with_reference(ref_seq: RefSeq)` MUST make `run` behave exactly as
-> `r[unified.readers_pileup+1]` except that step 3 — the FASTA fetch — is
+> `r[unified.readers_pileup+2]` except that step 3 — the FASTA fetch — is
 > skipped and `ref_seq` is attached to the engine instead. A caller that
 > already holds the region's bases (typically because its own analysis needs
 > them) can then drive every sub-segment pileup of that region from a single
@@ -460,7 +465,7 @@ r[unified.fetch_counts]
 >
 > - `header() -> &BamHeader` — delegates to the alignment reader's header.
 > - `segments(target, opts) -> Result<impl Iterator<Item = Segment>>` — see `r[unified.readers_segments]`. The only way to obtain a `Segment`.
-> - `pileup(&Segment, DepthLimit) -> Pileup` — the pileup plan; see `r[unified.pileup_plan]` and `r[unified.readers_pileup+1]`.
+> - `pileup(&Segment, DepthLimit) -> Pileup` — the pileup plan; see `r[unified.pileup_plan]` and `r[unified.readers_pileup+2]`.
 > - `fetch_into(tid, span, store) -> Result<usize>` — delegates to the alignment reader. Always loads into a `RecordStore<()>` (for custom extras, use `pileup` directly — extras are populated inline at push time).
 > - `fasta() -> &IndexedFastaReader` and `fasta_mut() -> &mut IndexedFastaReader` — direct access for callers that need reference sequences independently of the alignment reader (e.g., the call pipeline's segment fetching).
 > - `alignment() -> &IndexedReader` and `alignment_mut() -> &mut IndexedReader` — direct access when needed.

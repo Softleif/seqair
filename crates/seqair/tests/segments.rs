@@ -118,7 +118,7 @@ const REGION_START: u32 = 6_103_500;
 const REGION_END: u32 = 6_106_500;
 
 // r[verify unified.readers_segments]
-// r[verify unified.readers_pileup+1]
+// r[verify unified.readers_pileup+2]
 #[test]
 fn segmented_pileup_equals_single_pileup_no_overlap() {
     let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
@@ -130,7 +130,7 @@ fn segmented_pileup_equals_single_pileup_no_overlap() {
 }
 
 // r[verify unified.readers_segments]
-// r[verify unified.readers_pileup+1]
+// r[verify unified.readers_pileup+2]
 #[test]
 fn segmented_pileup_equals_single_pileup_with_overlap() {
     let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
