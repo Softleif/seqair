@@ -8,6 +8,7 @@
 //! wrong in the last bits.
 
 use super::{
+    GpuScore,
     device::finish,
     plan::{
         GAP_CONTINUATION, GpuPairs, INDEL_TO_MATCH, MATCH_TO_DELETION, MATCH_TO_INSERTION,
@@ -28,19 +29,23 @@ pub enum Subnormals {
 }
 
 impl GpuPairs {
-    /// Every pair scored by the Rust transcription of the shader.
+    /// Every pair scored by the Rust transcription of the shader, as
+    /// [`Handle::collect`](super::Handle::collect) returns them.
     #[doc(hidden)]
     #[must_use]
-    pub fn emulate(&self, subnormals: Subnormals) -> Vec<Log10Likelihood> {
+    pub fn emulate(&self, subnormals: Subnormals) -> Vec<GpuScore> {
         self.pairs
             .iter()
-            .map(|pending| match pending.class {
-                Some(_) => {
-                    let (sum, exponent) =
-                        run(&pending.record, &self.rows, &self.weights, subnormals);
-                    finish(sum, exponent)
-                }
-                None => Log10Likelihood::IMPOSSIBLE,
+            .map(|pending| {
+                let score = match pending.class {
+                    Some(_) => {
+                        let (sum, exponent) =
+                            run(&pending.record, &self.rows, &self.weights, subnormals);
+                        finish(sum, exponent)
+                    }
+                    None => Log10Likelihood::IMPOSSIBLE,
+                };
+                GpuScore::new(score, pending.floor)
             })
             .collect()
     }

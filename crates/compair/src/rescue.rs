@@ -44,7 +44,7 @@ use crate::{
 /// computes in `f32`.
 ///
 /// It is what an `f32` score falls back to below the level where `f32` can
-/// vouch for it (see [`crate::trusted`]), and it is exposed for callers that
+/// vouch for it (see `reference::trusted`), and it is exposed for callers that
 /// want the banded answer without the `f32` kernels' range. It visits only
 /// the band's cells and rescales each row by a power of two, so that its
 /// largest cell sits at `2^960` (`scaling::F64_ROW_SCALE`, which also shows
@@ -55,7 +55,7 @@ use crate::{
 /// only loss beyond `f64`'s relative rounding, which stays below `1e-12` of
 /// the total. With `rho` the free start's mass, and `total`, `spill` and
 /// `carry` the read's `Growth` (all one or below with steady qualities; see
-/// [`crate::trusted`] for the same argument about the `f32` kernels):
+/// `reference::trusted` for the same argument about the `f32` kernels):
 ///
 /// - a row's largest cell of the recurrence is at most
 ///   `max(1, spill) * rho * total`, so the row's scale `2^e >= 2^960 / that`,

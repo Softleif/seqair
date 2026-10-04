@@ -326,29 +326,60 @@ fn banded_row(
 /// bound from its quality bytes (`Read::growth_bound`) is tried first; it
 /// vouches only where they would.
 ///
-/// Every CPU entry point applies it already. The GPU kernel's scores come
-/// back without their pairs' inputs, so a caller of [`crate::gpu`] passes each
-/// through this itself.
+/// Every CPU entry point applies it already, and the GPU's scores carry the
+/// pair's floor ([`pair_floor`]) for [`crate::gpu::GpuScore`] to apply.
 #[must_use]
-pub fn trusted<E: Emission + ?Sized>(
+pub(crate) fn trusted<E: Emission + ?Sized>(
     score: Log10Likelihood,
     haplotype: &Haplotype,
     read: &Read,
     emission: &E,
     band: Band,
 ) -> Log10Likelihood {
-    let h = haplotype.len();
-    let vouches = |growth: Growth| {
-        strips_fit(h, band, growth)
-            && score.get() >= trust_floor(h, read.len(), band, 2.0 * growth.log10_total, growth)
-    };
-    // The bound vouches only where the exact factors would: every check is
-    // monotone in them.
-    if read.growth_bound().is_some_and(vouches) || vouches(read.growth()) {
+    if vouched(score, haplotype.len(), read, band) {
         score
     } else {
         crate::align_banded_f64(haplotype, read, emission, band)
     }
+}
+
+/// Whether [`trusted`] keeps `score` for a pair of a haplotype of `h` bases
+/// and `read` under `band`.
+fn vouched(score: Log10Likelihood, h: usize, read: &Read, band: Band) -> bool {
+    let r = read.len();
+    let vouches = |growth: Growth| floor(h, r, band, growth).is_some_and(|f| score.get() >= f);
+    // The bound vouches only where the exact factors would: every check is
+    // monotone in them.
+    read.growth_bound().is_some_and(vouches) || vouches(read.growth())
+}
+
+/// The least score [`trusted`] keeps for a pair of a haplotype of `h` bases
+/// and a read of `r` with these factors (`Read::growth_bound` and
+/// `Read::growth`), or `None` where it keeps none: what a caller that has the
+/// score only later -- the GPU -- takes ahead of it.
+///
+/// `score >= min(a, b)` is `score >= a || score >= b`, NaN and all, so this
+/// is [`vouched`] exactly, also where float rounding puts the bound's floor a
+/// hair under the exact one.
+#[cfg(any(feature = "gpu", test))]
+pub(crate) fn pair_floor(
+    h: usize,
+    r: usize,
+    band: Band,
+    bound: Option<Growth>,
+    exact: Growth,
+) -> Option<f64> {
+    bound
+        .and_then(|bound| floor(h, r, band, bound))
+        .into_iter()
+        .chain(floor(h, r, band, exact))
+        .reduce(f64::min)
+}
+
+/// The least score these factors vouch for, `None` where the strip kernels
+/// could overflow on the read and they vouch for none.
+fn floor(h: usize, r: usize, band: Band, growth: Growth) -> Option<f64> {
+    strips_fit(h, band, growth).then(|| trust_floor(h, r, band, 2.0 * growth.log10_total, growth))
 }
 
 /// `(1 + 2^-24)^n` for the longest chain of roundings inside one strip
@@ -405,7 +436,8 @@ mod tests {
     use hegel::generators as gs;
     use seqair_types::{Base, BaseQuality, Strand};
 
-    use super::free_starts;
+    use super::{free_starts, pair_floor, vouched};
+    use crate::Log10Likelihood;
     use crate::align_banded_f64;
     use crate::{Band, Haplotype, Read, StandardEmission};
 
@@ -514,5 +546,43 @@ mod tests {
         )
         .expect("a valid read");
         assert!(read.growth_bound().is_none());
+    }
+
+    /// The floor a GPU score carries keeps exactly the scores `trusted`
+    /// keeps: drawn at the floor, a hair either side of it, far from it and
+    /// at the infinities, for reads with and without a scan bound.
+    #[hegel::test(test_cases = crate::pinned::cases(1024))]
+    fn the_pair_floor_keeps_what_trusted_keeps(tc: TestCase) {
+        let r = tc.draw(gs::integers::<usize>().min_value(1).max_value(160));
+        let h = tc.draw(gs::integers::<usize>().min_value(1).max_value(400));
+        let steps = [0u8, 1, 2, 6, 10, 20, 43, 254];
+        let quals = |n: usize| -> Vec<BaseQuality> {
+            let pair = [tc.draw(gs::sampled_from(&steps)), tc.draw(gs::sampled_from(&steps))];
+            (0..n)
+                .map(|_| BaseQuality::from_byte(tc.draw_silent(gs::sampled_from(&pair))))
+                .collect()
+        };
+        let (insertion, deletion, gap) = (quals(r), quals(r), quals(r));
+        let read = Read::new(vec![Base::A; r], &quals(r), &insertion, &deletion, &gap, Strand::OT)
+            .expect("a valid read");
+        let width = tc.draw(gs::integers::<u32>().min_value(2).max_value(1024));
+        let offset = tc.draw(gs::integers::<i32>().min_value(-600).max_value(600));
+        let band = Band::new(width, offset).expect("a legal width");
+        let floor = pair_floor(h, r, band, read.growth_bound(), read.growth());
+        let near = floor.filter(|f| f.is_finite()).unwrap_or(-60.0);
+        let score = match tc.draw(gs::integers::<u8>().max_value(5)) {
+            0 => near,
+            1 => near.next_up(),
+            2 => near.next_down(),
+            3 => f64::INFINITY,
+            4 => f64::NEG_INFINITY,
+            _ => tc.draw(gs::floats::<f64>().min_value(-2000.0).max_value(10.0)),
+        };
+        let score = Log10Likelihood::new(score);
+        assert_eq!(
+            vouched(score, h, &read, band),
+            floor.is_some_and(|f| score.get() >= f),
+            "{score:?} against {floor:?}"
+        );
     }
 }

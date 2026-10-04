@@ -54,8 +54,9 @@ fn survey(tc: TestCase, total: u64, survey: &mut Survey) {
         .push_haplotype(&case.haplotype, case.read.strand(), &emission)
         .expect("the haplotype pushes");
     pairs.push_pair(read, haplotype, band).expect("the pair pushes");
-    let score =
-        |subnormals| pairs.emulate(subnormals).first().map_or(f64::NAN, |score| score.get());
+    let score = |subnormals| {
+        pairs.emulate(subnormals).first().map_or(f64::NAN, |score| score.untrusted().get())
+    };
     let (kept, flushed) = (score(Subnormals::Kept), score(Subnormals::Flushed));
     survey.pairs += 1;
     if kept.to_bits() != flushed.to_bits() {

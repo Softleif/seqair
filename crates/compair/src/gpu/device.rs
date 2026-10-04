@@ -9,7 +9,7 @@ use std::{
 use bytemuck::{Pod, Zeroable};
 
 use super::{
-    GpuError,
+    GpuError, GpuScore,
     plan::{GpuPairs, PairRecord, TRANSITIONS},
     shader::{self, Contraction, Style, Variant},
 };
@@ -361,6 +361,8 @@ pub struct GpuAligner {
     /// Launch slot to pushed-pair index, and the records in launch order.
     order: Vec<u32>,
     records: Vec<PairRecord>,
+    /// Each pushed pair's trust floor, in push order.
+    floors: Vec<Option<f64>>,
     params: Vec<u8>,
     dispatches: Vec<(Variant, u32, u32)>,
     timing: Option<Timing>,
@@ -418,6 +420,7 @@ impl GpuAligner {
             buffers: Buffers::default(),
             order: Vec::new(),
             records: Vec::new(),
+            floors: Vec::new(),
             params: Vec::new(),
             dispatches: Vec::new(),
             timing,
@@ -446,7 +449,7 @@ impl GpuAligner {
     }
 
     /// Scores every pair and waits for the result.
-    pub fn align(&mut self, pairs: &GpuPairs) -> Result<Vec<Log10Likelihood>, GpuError> {
+    pub fn align(&mut self, pairs: &GpuPairs) -> Result<Vec<GpuScore>, GpuError> {
         self.submit(pairs)?.collect()
     }
 
@@ -515,8 +518,10 @@ impl GpuAligner {
             start += run;
         }
 
+        self.floors.clear();
+        self.floors.extend(pairs.pairs.iter().map(|pending| pending.floor));
         let submission = if self.dispatches.is_empty() { None } else { Some(self.encode(pairs)?) };
-        Ok(Handle { aligner: self, submission, len: pairs.pairs.len() })
+        Ok(Handle { aligner: self, submission })
     }
 
     /// Uploads, binds and dispatches `self.dispatches`, and queues the
@@ -728,17 +733,21 @@ fn grow<'a>(
 pub struct Handle<'a> {
     aligner: &'a mut GpuAligner,
     submission: Option<wgpu::SubmissionIndex>,
-    len: usize,
 }
 
 impl Handle<'_> {
-    /// Waits for the GPU and returns one score per pushed pair, in push order.
-    pub fn collect(self) -> Result<Vec<Log10Likelihood>, GpuError> {
-        let mut out = vec![Log10Likelihood::IMPOSSIBLE; self.len];
+    /// Waits for the GPU and returns one score per pushed pair, in push order,
+    /// each still to be trusted or rescored; see [`GpuScore`].
+    pub fn collect(self) -> Result<Vec<GpuScore>, GpuError> {
+        let aligner = self.aligner;
+        let mut out: Vec<GpuScore> = aligner
+            .floors
+            .iter()
+            .map(|&floor| GpuScore::new(Log10Likelihood::IMPOSSIBLE, floor))
+            .collect();
         let Some(submission) = self.submission else {
             return Ok(out);
         };
-        let aligner = self.aligner;
         let context = &aligner.context;
         let timeout = aligner.timeout;
         let bytes = bytes(aligner.records.len(), size_of::<[u32; 2]>());
@@ -751,7 +760,9 @@ impl Handle<'_> {
             let scores: &[[u32; 2]] = bytemuck::cast_slice(&view);
             for (&index, &[sum, exponent]) in aligner.order.iter().zip(scores) {
                 if let Some(slot) = out.get_mut(index as usize) {
-                    *slot = finish(f32::from_bits(sum), i32::from_ne_bytes(exponent.to_ne_bytes()));
+                    let score =
+                        finish(f32::from_bits(sum), i32::from_ne_bytes(exponent.to_ne_bytes()));
+                    *slot = GpuScore::new(score, slot.floor);
                 }
             }
         }
