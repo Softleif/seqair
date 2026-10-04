@@ -243,7 +243,8 @@ impl Workspace {
     /// wants**; [`Workspace::align_batch`] and [`Workspace::align_strips_simd`]
     /// are the two kernels it chooses between.
     ///
-    /// The scores replace `out`'s contents, in the haplotypes' order.
+    /// `haplotypes` may hold the haplotypes or references to them. The scores
+    /// replace `out`'s contents, in the haplotypes' order.
     ///
     /// The choice is per batch, not per call, and it has to be: a caller with
     /// nine haplotypes gets one full batch and a remainder of one, and running
@@ -253,9 +254,9 @@ impl Workspace {
     /// [`BATCH_BREAK_EVEN`] goes through the strip kernel one haplotype at a
     /// time, and because the two kernels are bit-identical the split cannot
     /// change a score.
-    pub fn align_candidates<E: Emission>(
+    pub fn align_candidates<H: Borrow<Haplotype>, E: Emission>(
         &mut self,
-        haplotypes: &[&Haplotype],
+        haplotypes: &[H],
         read: &Read,
         emission: &E,
         band: Band,
@@ -264,10 +265,10 @@ impl Workspace {
         out.clear();
         for group in haplotypes.chunks(BATCH) {
             if group.len() >= BATCH_BREAK_EVEN {
-                self.batch_group::<E>(group, read, emission, band, out, SIMD_BATCH_KERNEL);
+                self.batch_group::<H, E>(group, read, emission, band, out, SIMD_BATCH_KERNEL);
             } else {
                 for haplotype in group {
-                    out.push(self.align_strips_simd(haplotype, read, emission, band));
+                    out.push(self.align_strips_simd(haplotype.borrow(), read, emission, band));
                 }
             }
         }
@@ -280,24 +281,24 @@ impl Workspace {
     /// [`BATCH`] still computes every lane, so the cost per alignment falls
     /// only with the fill. Prefer [`Workspace::align_candidates`], which is
     /// this kernel where it wins and the strip kernel where it does not.
-    pub fn align_batch<E: Emission>(
+    pub fn align_batch<H: Borrow<Haplotype>, E: Emission>(
         &mut self,
-        haplotypes: &[&Haplotype],
+        haplotypes: &[H],
         read: &Read,
         emission: &E,
         band: Band,
         out: &mut Vec<Log10Likelihood>,
     ) {
-        self.batch::<E>(haplotypes, read, emission, band, out, SIMD_BATCH_KERNEL);
+        self.batch::<H, E>(haplotypes, read, emission, band, out, SIMD_BATCH_KERNEL);
     }
 
     /// [`Workspace::align_batch`] at a given `fearless_simd` level, so the
     /// parity tests can hold every level the CPU has to the scalar kernel.
     #[doc(hidden)]
-    pub fn align_batch_at<E: Emission>(
+    pub fn align_batch_at<H: Borrow<Haplotype>, E: Emission>(
         &mut self,
         level: Level,
-        haplotypes: &[&Haplotype],
+        haplotypes: &[H],
         read: &Read,
         emission: &E,
         band: Band,
@@ -317,30 +318,27 @@ impl Workspace {
             } else {
                 [Log10Likelihood::IMPOSSIBLE; BATCH]
             };
-            out.extend(
-                scores
-                    .iter()
-                    .zip(group)
-                    .map(|(score, haplotype)| trusted(*score, haplotype, read, emission, band)),
-            );
+            out.extend(scores.iter().zip(group).map(|(score, haplotype)| {
+                trusted(*score, haplotype.borrow(), read, emission, band)
+            }));
         }
     }
 
     /// [`Workspace::align_batch`] with one lane, the bit-parity oracle.
-    pub fn align_batch_scalar<E: Emission>(
+    pub fn align_batch_scalar<H: Borrow<Haplotype>, E: Emission>(
         &mut self,
-        haplotypes: &[&Haplotype],
+        haplotypes: &[H],
         read: &Read,
         emission: &E,
         band: Band,
         out: &mut Vec<Log10Likelihood>,
     ) {
-        self.batch::<E>(haplotypes, read, emission, band, out, BatchKernel::over::<f32>());
+        self.batch::<H, E>(haplotypes, read, emission, band, out, BatchKernel::over::<f32>());
     }
 
-    fn batch<E: Emission>(
+    fn batch<H: Borrow<Haplotype>, E: Emission>(
         &mut self,
-        haplotypes: &[&Haplotype],
+        haplotypes: &[H],
         read: &Read,
         emission: &E,
         band: Band,
@@ -349,14 +347,14 @@ impl Workspace {
     ) {
         out.clear();
         for group in haplotypes.chunks(kernel.lanes) {
-            self.batch_group::<E>(group, read, emission, band, out, kernel);
+            self.batch_group::<H, E>(group, read, emission, band, out, kernel);
         }
     }
 
     /// One batch of at most [`BATCH`] haplotypes, appended to `out`.
-    fn batch_group<E: Emission>(
+    fn batch_group<H: Borrow<Haplotype>, E: Emission>(
         &mut self,
-        group: &[&Haplotype],
+        group: &[H],
         read: &Read,
         emission: &E,
         band: Band,
@@ -377,17 +375,16 @@ impl Workspace {
             [Log10Likelihood::IMPOSSIBLE; BATCH]
         };
         out.extend(
-            scores
-                .iter()
-                .zip(group)
-                .map(|(score, haplotype)| trusted(*score, haplotype, read, emission, band)),
+            scores.iter().zip(group).map(|(score, haplotype)| {
+                trusted(*score, haplotype.borrow(), read, emission, band)
+            }),
         );
     }
 
     /// The batch plan's column half for one read's band.
-    fn fill_batch<E: Emission>(
+    fn fill_batch<H: Borrow<Haplotype>, E: Emission>(
         &mut self,
-        group: &[&Haplotype],
+        group: &[H],
         read: &Read,
         emission: &E,
         band: Band,
@@ -398,8 +395,8 @@ impl Workspace {
 }
 
 /// Up to [`BATCH`] haplotypes against one read, one haplotype per lane.
-pub fn align_batch<E: Emission>(
-    haplotypes: &[&Haplotype],
+pub fn align_batch<H: Borrow<Haplotype>, E: Emission>(
+    haplotypes: &[H],
     read: &Read,
     emission: &E,
     band: Band,
@@ -414,8 +411,8 @@ pub fn align_batch<E: Emission>(
 ///
 /// Allocates a [`Workspace`] per call; keep one and call
 /// [`Workspace::align_candidates`] when scoring more than one read.
-pub fn align_candidates<E: Emission>(
-    haplotypes: &[&Haplotype],
+pub fn align_candidates<H: Borrow<Haplotype>, E: Emission>(
+    haplotypes: &[H],
     read: &Read,
     emission: &E,
     band: Band,

@@ -74,6 +74,8 @@
 //!
 //! [`align_strips`]: crate::align_strips
 
+use std::borrow::Borrow;
+
 use fearless_simd::Level;
 
 use crate::{
@@ -534,24 +536,30 @@ impl Workspace {
     /// against a few haplotypes**, which is a variant caller's shadow scoring;
     /// [`Workspace::align_candidates`] is the one for one read against many.
     ///
-    /// `reads` carries each read's own band. The scores replace `out`'s
-    /// contents, read-major: read `r` against haplotype `h` is
-    /// `out[r * haplotypes.len() + h]`.
+    /// `reads` carries each read's own band. Both slices may hold the values
+    /// themselves or references to them, so a caller's `Vec<(Read, Band)>`
+    /// goes in as it is. The scores replace `out`'s contents, read-major:
+    /// read `r` against haplotype `h` is `out[r * haplotypes.len() + h]`.
     ///
     /// The pairs are packed [`PAIRS`] at a time into the pairs kernel, in that
     /// order. A group that ends short of [`PAIRS_BREAK_EVEN`] -- the last one,
     /// or one cut short where the band width changes, since a group shares
     /// one -- goes through the strip kernel one pair at a time instead. The
     /// two kernels are bit-identical, so the split cannot change a score.
-    pub fn align_reads<E: Emission>(
+    pub fn align_reads<H: Borrow<Haplotype>, R: Borrow<Read>, E: Emission>(
         &mut self,
-        haplotypes: &[&Haplotype],
-        reads: &[(&Read, Band)],
+        haplotypes: &[H],
+        reads: &[(R, Band)],
         emission: &E,
         out: &mut Vec<Log10Likelihood>,
     ) {
-        let pairs = reads.iter().flat_map(|&(read, band)| {
-            haplotypes.iter().map(move |&haplotype| Pair { haplotype, read, band })
+        let pairs = reads.iter().flat_map(|(read, band)| {
+            let (read, band) = (read.borrow(), *band);
+            haplotypes.iter().map(move |haplotype| Pair {
+                haplotype: haplotype.borrow(),
+                read,
+                band,
+            })
         });
         out.clear();
         self.route(pairs, emission, out, PAIRS_BREAK_EVEN, SIMD_PAIRS_KERNEL.lanes, |this| {
@@ -561,10 +569,10 @@ impl Workspace {
 
     /// [`Workspace::align_reads`] into a [`ScoreMatrix`], which knows the
     /// haplotype count and so hands out one row per read.
-    pub fn align_reads_into<E: Emission>(
+    pub fn align_reads_into<H: Borrow<Haplotype>, R: Borrow<Read>, E: Emission>(
         &mut self,
-        haplotypes: &[&Haplotype],
-        reads: &[(&Read, Band)],
+        haplotypes: &[H],
+        reads: &[(R, Band)],
         emission: &E,
         out: &mut ScoreMatrix,
     ) {
@@ -754,9 +762,9 @@ pub fn align_pairs<E: Emission>(pairs: &[Pair<'_>], emission: &E) -> Vec<Log10Li
 ///
 /// Allocates a [`Workspace`] per call; keep one and call
 /// [`Workspace::align_reads`] when scoring more than one locus.
-pub fn align_reads<E: Emission>(
-    haplotypes: &[&Haplotype],
-    reads: &[(&Read, Band)],
+pub fn align_reads<H: Borrow<Haplotype>, R: Borrow<Read>, E: Emission>(
+    haplotypes: &[H],
+    reads: &[(R, Band)],
     emission: &E,
 ) -> Vec<Log10Likelihood> {
     let mut out = Vec::with_capacity(haplotypes.len() * reads.len());

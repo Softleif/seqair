@@ -85,8 +85,7 @@ fn main() -> Result<(), compair::Error> {
     // scoring the next locus allocates nothing.
     let mut workspace = Workspace::new();
     let mut scores = Vec::new();
-    let pairs: Vec<(&Read, Band)> = reads.iter().map(|(read, band)| (read, *band)).collect();
-    workspace.align_reads(&haplotypes, &pairs, &StandardEmission::default(), &mut scores);
+    workspace.align_reads(&haplotypes, &reads, &StandardEmission::default(), &mut scores);
 
     // `scores` is read-major: read `r` against haplotype `h` is at
     // `r * haplotypes.len() + h`. A perfect match scores about -1.8, not 0:
