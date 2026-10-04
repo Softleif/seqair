@@ -20,8 +20,6 @@ const READ_LEN: usize = 100;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (haplotypes, reads) = simulate()?;
-    let haplotypes: Vec<&Haplotype> = haplotypes.iter().collect();
-    let reads: Vec<(&Read, Band)> = reads.iter().map(|(read, band)| (read, *band)).collect();
     let emission = StandardEmission::default();
 
     let mut workspace = Workspace::new();
@@ -41,24 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!("GPU: {}", context.adapter_info().name);
 
-    // The emission is folded in as reads and haplotypes are pushed, and a
-    // haplotype's terms depend on the strand of the reads scored against it,
-    // so push each haplotype once per strand and reuse the slots.
+    // The emission is folded in as reads and haplotypes are pushed. Each read
+    // goes up once and each haplotype once per strand, and the pairs come
+    // back in `align_reads`' order.
     let mut pairs = GpuPairs::new();
-    let mut slots = Vec::with_capacity(2 * haplotypes.len());
-    for strand in [Strand::OT, Strand::OB] {
-        for haplotype in &haplotypes {
-            slots.push((strand, pairs.push_haplotype(haplotype, strand, &emission)?));
-        }
-    }
-    for &(read, band) in &reads {
-        let read_slot = pairs.push_read(read, &emission)?;
-        for &(strand, haplotype_slot) in &slots {
-            if strand == read.strand() {
-                pairs.push_pair(read_slot, haplotype_slot, band)?;
-            }
-        }
-    }
+    pairs.push_reads(&haplotypes, &reads, &emission)?;
 
     // The first launch compiles the shaders; time the second.
     let mut aligner = GpuAligner::new(context);
@@ -71,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // What the CPU entry points do after their kernels: a pair that finished
     // below the floor `f32` can vouch for is scored again in `f64`.
     let pairs_in_order =
-        reads.iter().flat_map(|&(read, band)| haplotypes.iter().map(move |&h| (h, read, band)));
+        reads.iter().flat_map(|(read, band)| haplotypes.iter().map(move |h| (h, read, *band)));
     let on_gpu: Vec<_> = on_gpu
         .iter()
         .zip(pairs_in_order)

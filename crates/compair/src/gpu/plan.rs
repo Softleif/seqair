@@ -6,6 +6,8 @@
 //! locus -- and it is why the plan takes reads and haplotypes separately
 //! rather than pairs of them.
 
+use std::borrow::Borrow;
+
 use bytemuck::{Pod, Zeroable};
 use seqair_types::{Base, BaseQuality, Strand};
 
@@ -244,6 +246,55 @@ impl GpuPairs {
         Ok(first..self.pairs.len())
     }
 
+    /// Every read against every haplotype, the shape of
+    /// [`Workspace::align_reads`](crate::Workspace::align_reads), and where
+    /// their scores will land: read `r` against haplotype `h` is
+    /// `range.start + r * haplotypes.len() + h` of the launch's scores, as
+    /// `align_reads` lays them out.
+    ///
+    /// Each read is uploaded once, and each haplotype once per strand its
+    /// reads are on, so this is [`push_read`], [`push_haplotype`] and
+    /// [`push_pair`] with the strand bookkeeping done. An error (a plan past
+    /// the kernel's 32-bit indices) leaves part of the call pushed.
+    ///
+    /// [`push_read`]: Self::push_read
+    /// [`push_haplotype`]: Self::push_haplotype
+    /// [`push_pair`]: Self::push_pair
+    pub fn push_reads<H: Borrow<Haplotype>, R: Borrow<Read>, E: Emission>(
+        &mut self,
+        haplotypes: &[H],
+        reads: &[(R, Band)],
+        emission: &E,
+    ) -> Result<core::ops::Range<usize>, GpuError> {
+        let start = self.pairs.len();
+        // A strand's haplotypes are pushed together, so their slots are
+        // consecutive and the first one names them all.
+        let (mut ot, mut ob) = (None, None);
+        for (read, band) in reads {
+            let read = read.borrow();
+            let strand = read.strand();
+            let first = if strand == Strand::OB { &mut ob } else { &mut ot };
+            let first = match *first {
+                Some(slot) => slot,
+                None => {
+                    let slot = index_u32(self.haplotypes.len(), "haplotypes")?;
+                    for haplotype in haplotypes {
+                        self.push_haplotype(haplotype.borrow(), strand, emission)?;
+                    }
+                    *first.insert(slot)
+                }
+            };
+            let read_slot = self.push_read(read, emission)?;
+            for index in 0..haplotypes.len() {
+                let slot = first
+                    .checked_add(index_u32(index, "haplotypes")?)
+                    .ok_or(GpuError::TooLarge { what: "haplotypes" })?;
+                self.push_pair(read_slot, HaplotypeSlot(slot), *band)?;
+            }
+        }
+        Ok(start..self.pairs.len())
+    }
+
     /// Adds a read's row tracks: `Plan::fill`'s per-row arithmetic, row for
     /// row.
     #[allow(
@@ -395,4 +446,75 @@ fn weight(site: SiteWeights, observed: Base) -> f32 {
 
 fn index_u32(value: usize, what: &'static str) -> Result<u32, GpuError> {
     u32::try_from(value).map_err(|_| GpuError::TooLarge { what })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GpuPairs;
+    use crate::{Band, Base, BaseQuality, Haplotype, Read, StandardEmission, Strand};
+
+    /// `push_reads` is the loop every caller wrote by hand: each haplotype
+    /// pushed once per strand, then each read and its pairs, read-major.
+    #[test]
+    fn push_reads_is_the_hand_written_loop() -> Result<(), Box<dyn std::error::Error>> {
+        let emission = StandardEmission::default();
+        let haplotypes =
+            [Haplotype::from_ascii(b"ACGTTGCAACGT"), Haplotype::from_ascii(b"ACGTTGCCAACGT")];
+        let read = |seq: &[u8], strand| {
+            Read::uniform(
+                Base::from_ascii_vec(seq.to_vec()),
+                &vec![BaseQuality::from_byte(30); seq.len()],
+                BaseQuality::from_byte(45),
+                BaseQuality::from_byte(45),
+                BaseQuality::from_byte(10),
+                strand,
+            )
+        };
+        let reads = [
+            (read(b"GTTGCA", Strand::OB)?, Band::anchored(2)),
+            (read(b"ACGTTG", Strand::OT)?, Band::anchored(0)),
+            (read(b"TGCCAA", Strand::OB)?, Band::new(8, 4)?),
+        ];
+
+        let mut by_hand = GpuPairs::new();
+        let mut slots = Vec::new();
+        for strand in [Strand::OB, Strand::OT] {
+            for haplotype in &haplotypes {
+                slots.push((strand, by_hand.push_haplotype(haplotype, strand, &emission)?));
+            }
+        }
+        for (read, band) in &reads {
+            let read_slot = by_hand.push_read(read, &emission)?;
+            for &(strand, haplotype) in &slots {
+                if strand == read.strand() {
+                    by_hand.push_pair(read_slot, haplotype, *band)?;
+                }
+            }
+        }
+
+        let mut plan = GpuPairs::new();
+        plan.push_read(&reads[0].0, &emission)?;
+        let range = plan.push_reads(&haplotypes, &reads, &emission)?;
+        assert_eq!(range, 0..reads.len() * haplotypes.len());
+
+        let records = |plan: &GpuPairs| {
+            plan.pairs
+                .iter()
+                .map(|p| {
+                    (
+                        p.record.read_len,
+                        p.record.hap_len,
+                        p.record.offset,
+                        p.record.half_width,
+                        p.class,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(records(&plan), records(&by_hand));
+        // The leading read shifts every row index by its length, nothing else.
+        assert_eq!(plan.rows.get(reads[0].0.len()..), Some(&by_hand.rows[..]));
+        assert_eq!(plan.weights, by_hand.weights);
+        Ok(())
+    }
 }

@@ -166,21 +166,7 @@ fn fill(
 ) -> Result<(), compair::gpu::GpuError> {
     pairs.clear();
     for window in windows {
-        // Each haplotype once per strand: TAPS weights depend on it.
-        let mut slots = Vec::with_capacity(2 * window.haplotypes.len());
-        for strand in [Strand::OT, Strand::OB] {
-            for haplotype in &window.haplotypes {
-                slots.push((strand, pairs.push_haplotype(haplotype, strand, emission)?));
-            }
-        }
-        for (read, band) in &window.reads {
-            let slot = pairs.push_read(read, emission)?;
-            for &(strand, haplotype) in &slots {
-                if strand == read.strand() {
-                    pairs.push_pair(slot, haplotype, *band)?;
-                }
-            }
-        }
+        pairs.push_reads(&window.haplotypes, &window.reads, emission)?;
     }
     Ok(())
 }
