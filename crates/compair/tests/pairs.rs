@@ -16,7 +16,7 @@ mod support;
 use compair::{
     BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood,
     PAIRS, PAIRS_BREAK_EVEN, Pair, Probability, Read, ScoreMatrix, StandardEmission, Strand,
-    TapsEmission, Workspace, align_pairs, align_reads, align_strips, align_strips_simd,
+    TapsEmission, Workspace, align_strips, align_strips_simd,
 };
 use hegel::TestCase;
 use hegel::generators as gs;
@@ -50,7 +50,6 @@ fn check<E: Emission>(pairs: &[Pair<'_>], emission: &E, name: &str) {
         workspace.align_pairs_at(level, pairs, emission, &mut out);
         assert_eq!(&want, &bits(&out), "{}: strips vs pairs at {}", name, level_name);
     }
-    assert_eq!(&want, &bits(&align_pairs(pairs, emission)), "{}: free function", name);
 }
 
 /// A band width for a pair: mostly the default, sometimes narrower, so that
@@ -248,11 +247,6 @@ fn the_dispatch_never_changes_a_score() {
             assert_eq!(matrix.rows().len(), read_count);
             assert_eq!(matrix.row(read_count), None);
             assert_eq!(matrix.as_flat(), out.as_slice());
-            assert_eq!(
-                bits(&align_reads(&refs, &reads, &taps)),
-                want,
-                "{read_count} reads x {count} haplotypes, free function"
-            );
         }
     }
 }

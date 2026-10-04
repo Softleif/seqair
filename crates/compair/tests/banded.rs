@@ -6,8 +6,8 @@ mod support;
 use compair::{
     BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Haplotype, MatchProbability,
     Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_banded,
-    align_banded_f64_at, align_banded_f64_rows, align_banded_simd, align_candidates, align_full,
-    align_strips, align_strips_simd, error_probability, poison_align_banded_f64_scratch,
+    align_banded_f64_at, align_banded_f64_rows, align_banded_simd, align_full, align_strips,
+    align_strips_simd, error_probability, poison_align_banded_f64_scratch,
 };
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator};
@@ -1828,8 +1828,9 @@ fn the_bench_shape_batches_to_the_same_bits() {
     let refs: Vec<&Haplotype> = batch.iter().collect();
     let one_at_a_time: Vec<u64> =
         refs.iter().map(|h| align_strips(h, &read, &taps, band).get().to_bits()).collect();
-    let batched: Vec<u64> =
-        compair::align_batch(&refs, &read, &taps, band).iter().map(|s| s.get().to_bits()).collect();
+    let mut batched = Vec::new();
+    Workspace::new().align_batch(&refs, &read, &taps, band, &mut batched);
+    let batched: Vec<u64> = batched.iter().map(|s| s.get().to_bits()).collect();
     assert_eq!(one_at_a_time, batched);
     assert!(one_at_a_time.iter().all(|bits| f64::from_bits(*bits).is_finite()));
 }
@@ -1904,12 +1905,6 @@ fn the_dispatch_never_changes_a_score() {
         workspace.align_candidates(&refs, &read, &taps, band, &mut out);
         let dispatched: Vec<u64> = out.iter().map(|score| score.get().to_bits()).collect();
         assert_eq!(dispatched, one_at_a_time, "{count} haplotypes through the workspace");
-
-        let free: Vec<u64> = align_candidates(&refs, &read, &taps, band)
-            .iter()
-            .map(|score| score.get().to_bits())
-            .collect();
-        assert_eq!(free, one_at_a_time, "{count} haplotypes through the free function");
     }
 }
 

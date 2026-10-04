@@ -77,17 +77,17 @@
 //!
 //! Eight *alignments* per vector, one haplotype per lane:
 //!
-//! - [`align_batch`], which scores a whole batch of candidate haplotypes
+//! - [`Workspace::align_batch`], which scores a whole batch of candidate haplotypes
 //!   against one read in lockstep. It computes all [`BATCH`] lanes whatever the
 //!   caller asked for, so it wins on a full batch (~1.3x over the strip kernel)
 //!   and loses badly on a short one (~0.2x at a single haplotype).
 //!   [`BATCH_BREAK_EVEN`] is where the two meet.
-//! - [`align_pairs`], which scores eight *unrelated* pairs in lockstep: each
+//! - [`Workspace::align_pairs`], which scores eight *unrelated* pairs in lockstep: each
 //!   lane its own read, haplotype, strand and band offset, the half-width
 //!   shared. It is the batch kernel's traversal with the read and the band
 //!   made per lane, so a group fills from any list of pairs -- in particular
 //!   from many reads against two or three haplotypes, where the batch kernel
-//!   would run three lanes of eight. [`align_reads`] packs a reads-by-haplotypes
+//!   would run three lanes of eight. [`Workspace::align_reads`] packs a reads-by-haplotypes
 //!   product into it and sends a short last group through the strip kernel.
 //!
 //! Each banded pair is one generic function over a lane type, so its scalar
@@ -137,14 +137,14 @@ mod strips;
 mod transitions;
 
 pub use banded::{Band, Workspace, align_banded, align_banded_simd};
-pub use batch::{BATCH, BATCH_BREAK_EVEN, align_batch, align_candidates};
+pub use batch::{BATCH, BATCH_BREAK_EVEN};
 pub use emission::{
     Betas, ConversionModel, Emission, MAX_EPSILON, MatchProbability, SiteWeights, StandardEmission,
     TapsEmission,
 };
 pub use error::Error;
 pub use haplotype::Haplotype;
-pub use pairs::{PAIRS, PAIRS_BREAK_EVEN, Pair, ScoreMatrix, align_pairs, align_reads};
+pub use pairs::{PAIRS, PAIRS_BREAK_EVEN, Pair, ScoreMatrix};
 pub use prepared::Candidates;
 pub use read::{PcrIndelModel, Read};
 pub use reference::{align_banded_f64_rows, align_full};

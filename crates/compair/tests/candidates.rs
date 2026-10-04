@@ -7,8 +7,8 @@ mod support;
 
 use compair::{
     Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood,
-    Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_candidates,
-    align_strips, align_strips_simd,
+    Probability, Read, StandardEmission, Strand, TapsEmission, Workspace, align_strips,
+    align_strips_simd,
 };
 use hegel::TestCase;
 use hegel::generators as gs;
@@ -61,8 +61,8 @@ fn check<E: Emission + Copy>(
             candidates.align_at(level, read, band, &mut out);
             assert_eq!(bits(&out), bits(&scalar), "align, {}, {:?}", level_name, read.strand());
         }
-        let refs: Vec<&Haplotype> = haplotypes.iter().collect();
-        let fresh = align_candidates(&refs, read, &emission, band);
+        let mut fresh = Vec::new();
+        Workspace::new().align_candidates(haplotypes, read, &emission, band, &mut fresh);
         candidates.align(read, band, &mut out);
         assert_eq!(bits(&out), bits(&fresh), "align vs align_candidates");
     }
