@@ -786,6 +786,15 @@ impl PileupAlignment {
         self.mate_idx
     }
 
+    // r[impl record_store.fragment_idx]
+    /// The template this read belongs to, as a store index both mates share:
+    /// the lower of its own and its mate's. An unlinked read is its own; see
+    /// [`RecordRef::fragment_idx`](crate::bam::RecordRef::fragment_idx).
+    #[must_use]
+    pub fn fragment_idx(&self) -> RecordIdx {
+        self.mate_idx.map_or(self.record_idx, |mate| mate.min(self.record_idx))
+    }
+
     // r[impl pileup.mate_link_cache]
     /// True when this column's position is covered by both mates of the
     /// template — the only positions at which a consumer needs to decide which

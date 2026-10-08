@@ -231,6 +231,17 @@ impl<'store, U> RecordRef<'store, U> {
         self.idx
     }
 
+    // r[impl record_store.fragment_idx]
+    /// The template this record belongs to, as a store index both mates
+    /// share: the lower of its own and its mate's. An unlinked record is its
+    /// own. Only meaningful once mates are linked
+    /// ([`RecordStore::prepare_for_pileup`](crate::bam::RecordStore::prepare_for_pileup));
+    /// before that every record is its own template.
+    #[must_use]
+    pub fn fragment_idx(&self) -> RecordIdx {
+        self.mate_idx().map_or(self.idx, |mate| mate.min(self.idx))
+    }
+
     /// The record itself, borrowed for as long as the store is.
     ///
     /// [`Deref`](std::ops::Deref) already exposes its fields; this is for when
