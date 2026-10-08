@@ -10,6 +10,9 @@ pub enum Error {
     #[error("a read must report a known strand, got `Unknown`")]
     UnknownStrand,
 
+    #[error("a haplotype of {expected} bases was given {actual} methylation levels")]
+    BetasLengthMismatch { expected: usize, actual: usize },
+
     #[error("band width must be at least 2, got {0}")]
     BandTooNarrow(u32),
 

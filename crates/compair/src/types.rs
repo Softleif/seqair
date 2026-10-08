@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use seqair_types::{Base, BaseQuality, QPos, Strand};
+use seqair_types::{Base, BaseQuality, Probability, QPos, Strand};
 
 /// `10^(-Q/10)` for a base quality, the error probability the pair-HMM works
 /// in.
@@ -105,11 +105,14 @@ impl CpgRole {
 }
 
 /// One haplotype position, as the emission model sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HapSite {
     pub index: HapPos,
     pub base: Base,
     pub cpg: CpgRole,
+    /// The methylation level the haplotype carries for this position, if it
+    /// carries any (see [`Haplotype::with_betas`](crate::Haplotype::with_betas)).
+    pub beta: Option<Probability>,
 }
 
 /// One read base, as the emission model sees it.

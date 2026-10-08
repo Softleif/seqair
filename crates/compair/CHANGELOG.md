@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-position methylation levels on a `Haplotype`** (`with_betas`, `betas`), kept through
+  `with_insertion`, `with_deletion` and `reverse_complement`, and read by the new
+  `Betas::OfHaplotype(fallback)`. Haplotypes with different indels applied no longer line up
+  with one `Betas::PerSite` slice; this is what lets a TAPS caller score them in one call with
+  the column's own methylation estimate, so a deletion spelled across a methylated `CpG` is not
+  mistaken for a cheaper conversion. `HapSite` gains `beta` and loses `Eq`.
 - **`PcrIndelModel`**, GATK's PCR indel gap model: the gap-open quality falls inside tandem
   repeats (units of 1 to `max_unit` bases) as `gap_open - exp(repeats / (rate * ln 2)) + 1`,
   rounded and kept between `floor` and `gap_open`. `Default` is GATK's conservative setting (Q45,
