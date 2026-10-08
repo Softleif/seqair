@@ -559,6 +559,21 @@ impl Workspace {
         });
     }
 
+    /// [`Workspace::align_reads`] into a [`ScoreMatrix`], which knows the
+    /// haplotype count and so hands out one row per read.
+    pub fn align_reads_into<E: Emission>(
+        &mut self,
+        haplotypes: &[&Haplotype],
+        reads: &[(&Read, Band)],
+        emission: &E,
+        out: &mut ScoreMatrix,
+    ) {
+        self.align_reads(haplotypes, reads, emission, &mut out.scores);
+        out.haplotypes = haplotypes.len();
+        out.reads = reads.len();
+        debug_assert_eq!(out.scores.len(), out.reads * out.haplotypes, "one score per pair");
+    }
+
     /// Up to [`PAIRS`] pairs at a time, one pair per lane, whatever the fill.
     ///
     /// The scores replace `out`'s contents, in the pairs' order. Consecutive
@@ -679,6 +694,51 @@ impl Workspace {
                 trusted(*score, pair.haplotype, pair.read, emission, pair.band)
             }),
         );
+    }
+}
+
+/// Every read's score against every haplotype, from
+/// [`Workspace::align_reads_into`]. Reuse one across calls: each call
+/// replaces its contents and keeps its allocation.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScoreMatrix {
+    scores: Vec<Log10Likelihood>,
+    haplotypes: usize,
+    reads: usize,
+}
+
+impl ScoreMatrix {
+    #[must_use]
+    pub fn haplotypes(&self) -> usize {
+        self.haplotypes
+    }
+
+    #[must_use]
+    pub fn reads(&self) -> usize {
+        self.reads
+    }
+
+    /// Read `read` against every haplotype, in the haplotypes' order; `None`
+    /// past the last read.
+    #[must_use]
+    pub fn row(&self, read: usize) -> Option<&[Log10Likelihood]> {
+        if read >= self.reads {
+            return None;
+        }
+        let start = read.checked_mul(self.haplotypes)?;
+        self.scores.get(start..start.checked_add(self.haplotypes)?)
+    }
+
+    /// One row per read, in the reads' order.
+    pub fn rows(&self) -> impl ExactSizeIterator<Item = &[Log10Likelihood]> {
+        (0..self.reads).map(|read| self.row(read).unwrap_or_default())
+    }
+
+    /// Every score, read-major: read `r` against haplotype `h` at
+    /// `r * haplotypes() + h`.
+    #[must_use]
+    pub fn as_flat(&self) -> &[Log10Likelihood] {
+        &self.scores
     }
 }
 

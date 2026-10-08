@@ -143,7 +143,7 @@ pub use emission::{
 };
 pub use error::Error;
 pub use haplotype::Haplotype;
-pub use pairs::{PAIRS, PAIRS_BREAK_EVEN, Pair, align_pairs, align_reads};
+pub use pairs::{PAIRS, PAIRS_BREAK_EVEN, Pair, ScoreMatrix, align_pairs, align_reads};
 pub use prepared::Candidates;
 pub use read::{PcrIndelModel, Read};
 pub use reference::{align_banded_f64_rows, align_full, trusted};

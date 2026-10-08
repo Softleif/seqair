@@ -15,8 +15,8 @@ mod support;
 
 use compair::{
     BATCH, Band, Base, BaseQuality, Betas, ConversionModel, Emission, Haplotype, Log10Likelihood,
-    PAIRS, PAIRS_BREAK_EVEN, Pair, Probability, Read, StandardEmission, Strand, TapsEmission,
-    Workspace, align_pairs, align_reads, align_strips, align_strips_simd,
+    PAIRS, PAIRS_BREAK_EVEN, Pair, Probability, Read, ScoreMatrix, StandardEmission, Strand,
+    TapsEmission, Workspace, align_pairs, align_reads, align_strips, align_strips_simd,
 };
 use hegel::TestCase;
 use hegel::generators as gs;
@@ -227,6 +227,7 @@ fn the_dispatch_never_changes_a_score() {
     let taps = TapsEmission::new(ConversionModel::taps_default(), Betas::PerSite(&betas));
     let mut workspace = Workspace::new();
     let mut out = Vec::new();
+    let mut matrix = ScoreMatrix::default();
     for count in 1..=haplotypes.len() {
         let refs: Vec<&Haplotype> = haplotypes.iter().take(count).collect();
         for read_count in 0..=3 * PAIRS {
@@ -241,6 +242,12 @@ fn the_dispatch_never_changes_a_score() {
                 .collect();
             workspace.align_reads(&refs, &reads, &taps, &mut out);
             assert_eq!(bits(&out), want, "{read_count} reads x {count} haplotypes, workspace");
+            workspace.align_reads_into(&refs, &reads, &taps, &mut matrix);
+            assert_eq!((matrix.reads(), matrix.haplotypes()), (read_count, count));
+            assert_eq!(bits(&matrix.rows().flatten().copied().collect::<Vec<_>>()), want);
+            assert_eq!(matrix.rows().len(), read_count);
+            assert_eq!(matrix.row(read_count), None);
+            assert_eq!(matrix.as_flat(), out.as_slice());
             assert_eq!(
                 bits(&align_reads(&refs, &reads, &taps)),
                 want,
