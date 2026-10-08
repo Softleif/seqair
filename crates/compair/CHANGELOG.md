@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   floor Q10, rate 3, units up to 8, 20 repetitions). `gap_open_qual(repeats)` and
   `fill_gap_open(bases, track)` compute it, and **`Read::with_pcr_indel_model(bases, base_quals,
   &model, gap_qual, strand)`** builds a read from it, so a caller passes no per-base gap tracks.
+- **`Workspace::align_reads_into` and `ScoreMatrix`**: `align_reads` into a buffer that knows its
+  haplotype count, with `row(read)`, `rows()`, `reads()`, `haplotypes()` and `as_flat()`, so a
+  caller cannot slice the read-major scores with the wrong stride. The flat `align_reads` stays.
 
 ### Changed
 
