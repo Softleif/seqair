@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Haplotype::with_insertion(anchor, &inserted)` and `Haplotype::with_deletion(anchor, len)`**:
   the haplotype with an allele applied after the base at `anchor`, `None` when it does not fit,
   with `CpG` roles recomputed from the new sequence.
+- **`Log10Likelihood::as_f32`**, the documented narrowing for callers that store scores as `f32`.
 
 ### Changed
 
