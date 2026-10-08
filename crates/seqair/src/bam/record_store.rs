@@ -114,6 +114,12 @@ pub struct SlimRecord {
     pub matching_bases: u32,
     /// Sum of I/D op lengths, pre-computed from CIGAR at push time.
     pub indel_bases: u32,
+    // r[impl record_store.soft_clips]
+    /// Soft-clipped bases before the first aligned base, hard clips looked
+    /// past; pre-computed from CIGAR at push time.
+    pub leading_soft_clip: u32,
+    /// Soft-clipped bases after the last aligned base, hard clips looked past.
+    pub trailing_soft_clip: u32,
     /// Reference target index; -1 for unmapped.
     pub tid: i32,
     pub next_ref_id: i32,
@@ -289,14 +295,16 @@ impl SlimRecord {
     }
 }
 
-// Compile-time size guard: 17 u32 (incl. next_ref_id, extras_idx, and
-// mate_idx, whose `Option` is free — see `RecordIdx`)
-// + 1 u64 (qname_hash) + 3 u16 + 1 u8 + padding = 88 bytes. The u64 raises the
+// Compile-time size guard: 19 u32 (incl. next_ref_id, extras_idx, the two
+// soft-clip lengths, and mate_idx, whose `Option` is free — see `RecordIdx`)
+// + 1 u64 (qname_hash) + 3 u16 + 1 u8 + padding = 96 bytes. The soft clips
+// cost 8 (88 -> 96): 5 bytes of padding cannot hold two u32, and a u16 clip
+// would truncate on long reads. The u64 raises the
 // struct's alignment to 8, so the 12 bytes of mate linking cost 16. If this ever
 // grows, revisit the layout before accepting the hit —
 // see `docs/spec/3-record_store.md` "Layout".
 const _: () =
-    assert!(std::mem::size_of::<SlimRecord>() <= 88, "SlimRecord grew unexpectedly large");
+    assert!(std::mem::size_of::<SlimRecord>() <= 96, "SlimRecord grew unexpectedly large");
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -607,6 +615,7 @@ impl<U> RecordStore<U> {
                 .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?
         };
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_ops);
+        let (leading_soft_clip, trailing_soft_clip) = cigar::soft_clips(cigar_ops);
 
         // --- Write into name slab ---
         // r[impl record_store.checked_offsets]
@@ -668,6 +677,8 @@ impl<U> RecordStore<U> {
             seq_len: h.seq_len,
             matching_bases,
             indel_bases,
+            leading_soft_clip,
+            trailing_soft_clip,
             tid: h.tid,
             next_ref_id: h.next_ref_id,
             next_pos: h.next_pos,
@@ -814,6 +825,7 @@ impl<U> RecordStore<U> {
         let aux_off = u32::try_from(self.aux.len()).map_err(|_| DecodeError::SlabOverflow)?;
         self.aux.extend_from_slice(aux);
 
+        let (leading_soft_clip, trailing_soft_clip) = cigar::soft_clips(cigar_ops);
         self.note_push(pos);
         self.records.push(SlimRecord {
             pos,
@@ -824,6 +836,8 @@ impl<U> RecordStore<U> {
             seq_len,
             matching_bases,
             indel_bases,
+            leading_soft_clip,
+            trailing_soft_clip,
             tid,
             next_ref_id,
             next_pos,
@@ -1588,6 +1602,7 @@ impl<U> RecordStore<U> {
         };
 
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(new_cigar_ops);
+        let (leading_soft_clip, trailing_soft_clip) = cigar::soft_clips(new_cigar_ops);
 
         let new_cigar_off =
             u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
@@ -1606,6 +1621,8 @@ impl<U> RecordStore<U> {
         rec.cigar_off = new_cigar_off;
         rec.matching_bases = matching_bases;
         rec.indel_bases = indel_bases;
+        rec.leading_soft_clip = leading_soft_clip;
+        rec.trailing_soft_clip = trailing_soft_clip;
 
         Ok(())
     }

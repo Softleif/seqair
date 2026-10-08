@@ -332,6 +332,21 @@ pub fn calc_matches_indels(ops: &[CigarOp]) -> (u32, u32) {
     (matches, indels)
 }
 
+// r[impl cigar.soft_clips]
+/// Soft-clipped bases at the start and at the end of `ops`, hard clips looked
+/// past.
+pub fn soft_clips(ops: &[CigarOp]) -> (u32, u32) {
+    fn at_end<'a>(ops: impl Iterator<Item = &'a CigarOp>) -> u32 {
+        ops.map_while(|op| match op.op_code() {
+            CIGAR_S => Some(op.len()),
+            CIGAR_H => Some(0),
+            _ => None,
+        })
+        .fold(0, u32::saturating_add)
+    }
+    (at_end(ops.iter()), at_end(ops.iter().rev()))
+}
+
 // r[impl bam.record.end_pos]
 // r[impl bam.record.zero_refspan]
 /// 0-based exclusive end position from `pos` + reference-consuming op lengths.

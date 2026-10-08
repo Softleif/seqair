@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   base as a `Match` with nothing inserted or deleted after it. The engine computes it while
   building the column, so a caller dropping reference-only columns (most of a genome) no longer
   walks them to find out.
+- **`SlimRecord::leading_soft_clip` and `trailing_soft_clip`**, the soft-clipped bases at either
+  end of the read with hard clips looked past, computed once from the CIGAR at push time (and by
+  `set_alignment`) like `matching_bases`. A caller placing clipped bases on the reference no longer
+  scans the CIGAR. `bam::cigar::soft_clips` is the computation. `SlimRecord` grows from 88 to 96
+  bytes.
 
 ### Changed
 
