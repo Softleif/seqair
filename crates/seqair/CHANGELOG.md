@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_alignment`) like `matching_bases`. A caller placing clipped bases on the reference no longer
   scans the CIGAR. `bam::cigar::soft_clips` is the computation. `SlimRecord` grows from 88 to 96
   bytes.
+- **`RecordRef::fragment_idx` and `PileupAlignment::fragment_idx`** (so also on `AlignmentView`):
+  the lower of a record's own store index and its linked mate's, or its own when unlinked — the
+  key for keeping one read per template. Meaningful once `prepare_for_pileup` has linked mates.
 
 ### Changed
 

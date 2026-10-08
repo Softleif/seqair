@@ -422,6 +422,14 @@ bucket and the top bits form the SIMD control byte — so the spread of realisti
 qnames through both is a property worth testing directly, not just avalanche
 under bit flips.
 
+r[record_store.fragment_idx]
+`RecordRef::fragment_idx()` and `PileupAlignment::fragment_idx()` MUST return the
+lower of the record's own store index and its linked mate's, or its own index
+when it has no linked mate, so both mates of a template name one record and a
+consumer keeping one read per template can sort or dedup on it. It is only
+meaningful after `link_mates` (which `prepare_for_pileup` runs) and is
+invalidated with the mate links.
+
 r[record_store.link_mates.htslib_agreement]
 The pairs `link_mates()` reports MUST be the pairs htslib recognises, not merely
 the pairs that follow from seqair's own reading of the mate fields — a

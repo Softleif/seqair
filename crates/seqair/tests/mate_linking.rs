@@ -326,6 +326,32 @@ fn unpaired_reads_do_not_link() {
     assert_eq!(store.record(ri(1)).unwrap().mate_idx(), None);
 }
 
+// r[verify record_store.fragment_idx]
+/// Both mates name the lower of their two indices; a read with no linked mate
+/// names itself, and so does every read before linking.
+#[test]
+fn mates_share_a_fragment_index_and_a_lone_read_is_its_own() {
+    let mut store = RecordStore::new();
+    push(&mut store, b"frag", Read::mate(100, 50, 140, FIRST));
+    push(&mut store, b"lone", Read::mate(120, 50, 300, FIRST));
+    push(&mut store, b"frag", Read::mate(140, 50, 100, SECOND));
+    let fragments = |store: &RecordStore| {
+        (0..3).map(|i| store.record(ri(i)).unwrap().fragment_idx()).collect::<Vec<_>>()
+    };
+    assert_eq!(fragments(&store), [ri(0), ri(1), ri(2)]);
+    let _stats = store.link_mates();
+    assert_eq!(fragments(&store), [ri(0), ri(1), ri(0)]);
+
+    let mut engine = PileupEngine::new(
+        store.prepare_for_pileup().input,
+        (Pos0::new(140).unwrap()..=Pos0::new(140).unwrap()).into(),
+    );
+    let col = engine.pileups().expect("a column at 140");
+    let seen: Vec<_> =
+        col.raw_alignments().map(|aln| (aln.record_idx(), aln.fragment_idx())).collect();
+    assert_eq!(seen, [(ri(0), ri(0)), (ri(1), ri(1)), (ri(2), ri(0))]);
+}
+
 // r[verify record_store.link_mates+2]
 /// Two templates whose reads sit at the same coordinates must not cross-link.
 #[test]
