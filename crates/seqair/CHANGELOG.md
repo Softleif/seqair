@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.5.0 (2026-10-08)
 
 ### Breaking
 
@@ -170,7 +170,7 @@ work.
 
 - **BGZF writing failed on data that does not compress.** A block, gzip framing included, must fit
   in 64 KiB, and the writer filled blocks with 65,536 bytes of data. Data that does not compress is
-  *stored*, a little larger than it went in, so every full block at `compression_level(0)` — any
+  _stored_, a little larger than it went in, so every full block at `compression_level(0)` — any
   level-0 BAM, BCF or VCF.gz over 64 KiB — and any full block of random-looking bytes at other
   levels failed with `BgzfError::CorruptHeader`. Blocks now hold at most 65,280 bytes, htslib's
   `BGZF_BLOCK_SIZE`, which fits the worst case; a compile-time check keeps it that way. **Block
@@ -301,12 +301,12 @@ and a span ending on `Pos0::MAX` names its last base where a half-open `end` cou
   ordinary file with short contigs reaches this; two slices one base apart are enough.
 - **CRAM: `embed_ref=2` files could not be opened at all.** The slice-header MD5 was checked against
   the FASTA whether or not the slice carried its own reference. Under `embed_ref=2` htslib embeds a
-  *consensus* computed from the reads and digests that, so it matches the external reference only
+  _consensus_ computed from the reads and digests that, so it matches the external reference only
   where the reads happen to agree with it — every such file with low coverage or a real difference
   failed with `ReferenceMd5Mismatch`. A slice with an embedded reference is now exempt.
 - **CRAM: a no-reference file mis-decoded any read with an insertion.** The `Q` and `q` features
   carry quality and nothing else, but both were decoded as an anchoring reference match, adding a
-  base and an `M` operation. In no-reference mode htslib emits one `Q` per *inserted* base next to
+  base and an `M` operation. In no-reference mode htslib emits one `Q` per _inserted_ base next to
   the `I` feature, so those reads came back one base too long and were refused with
   `QualLenMismatch`. It needs no option to reach: htslib drops into no-reference mode by itself when
   `embed_ref` meets `multi_seq_per_slice`.
@@ -337,7 +337,7 @@ and a span ending on `Pos0::MAX` names its last base where a half-open `end` cou
   infinities through `Display`, writing `NaN` where C's `%g` — and so htslib — writes `nan`. VCF 4.3
   §1.3 admits `INF`/`INFINITY`/`NAN` case-insensitively as Float values and §6.3.3 gives quiet NaN
   first-class status, distinct from the missing sentinel, so these are values rather than errors and
-  are deliberately *not* written as `.`: that would turn a value into a missing value and put the
+  are deliberately _not_ written as `.`: that would turn a value into a missing value and put the
   text output at odds with the BCF output, which writes the caller's bits through unchanged.
 
 - **The SAM reader rejected every negative element of a signed `B` array.** `B:c`, `B:s` and
@@ -348,7 +348,7 @@ and a span ending on `Pos0::MAX` names its last base where a half-open `end` cou
 - **VCF float text now matches `bcftools` exactly.** `write_float_g` claimed to write C's `%g`
   with six significant digits — the format htslib emits — but only ever produced the fixed form,
   so a value outside `1e-4 .. 1e6` came out as `0.0000610352` or `1234567` where bcftools writes
-  `6.10352e-05` and `1.23457e+06`. It now switches forms on the value's exponent *after* rounding
+  `6.10352e-05` and `1.23457e+06`. It now switches forms on the value's exponent _after_ rounding
   to six significant digits (so `0.0001` stays `0.0001` and does not become `1e-04`), writes the
   exponent C's way with a sign and at least two digits, and writes negative zero as `-0`. Values
   in `1e-4 .. 1e6` are unchanged, which is every quality score and most everything else.
@@ -391,7 +391,7 @@ and a span ending on `Pos0::MAX` names its last base where a half-open `end` cou
   records built with `OwnedBamRecord::builder` through `BamWriter` and back.
 - Generated coverage now reaches the corners that were fixture-only, and found the six bugs listed
   above: the CRAM writer-option matrix (version × `embed_ref` × `seqs_per_slice` ×
-  `slices_per_container`, with multi-reference slices and span-0 index entries asserted *per case*
+  `slices_per_container`, with multi-reference slices and span-0 index entries asserted _per case_
   rather than counted across the run), `OwnedBamRecord` under sequences of mutations refereed by
   samtools, reader-level filtering compared field by field against the unfiltered fetch, extras
   through the pileup, INFO types and missing-value integer arrays against bcftools, CSI output
