@@ -23,16 +23,18 @@ use seqair_types::{Base, BaseQuality, QPos, Strand};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Read {
     bases: Box<[Base]>,
-    base_quals: Box<[BaseQuality]>,
+    /// The base, insertion, deletion and gap-continuation qualities, one
+    /// track of `len()` after another: one allocation instead of four.
+    quals: Box<[BaseQuality]>,
     error_probabilities: Box<[f64]>,
-    insertion_quals: Box<[BaseQuality]>,
-    deletion_quals: Box<[BaseQuality]>,
-    gap_quals: Box<[BaseQuality]>,
     transitions: Box<[Transition]>,
     /// [`Read::growth_bound`], taken once per read rather than once per pair.
     growth_bound: Option<Growth>,
     strand: Strand,
 }
+
+/// The tracks in `Read::quals`, in order, by the name errors give them.
+const TRACKS: [&str; 4] = ["base_quals", "insertion_quals", "deletion_quals", "gap_quals"];
 
 impl Read {
     pub fn new(
@@ -47,41 +49,15 @@ impl Read {
             return Err(Error::UnknownStrand);
         }
         let bases = bases.into();
+        let tracks = [base_quals, insertion_quals, deletion_quals, gap_quals];
         let expected = bases.len();
-        for (field, track) in [
-            ("base_quals", base_quals),
-            ("insertion_quals", insertion_quals),
-            ("deletion_quals", deletion_quals),
-            ("gap_quals", gap_quals),
-        ] {
+        for (field, track) in TRACKS.into_iter().zip(tracks) {
             let actual = track.len();
             if actual != expected {
                 return Err(Error::ReadLengthMismatch { field, expected, actual });
             }
-            if let Some(index) = track.iter().position(|q| *q == BaseQuality::UNAVAILABLE) {
-                return Err(Error::MissingQuality { field, index });
-            }
         }
-        let table = ErrorTable::get();
-        let transitions: Box<[Transition]> = insertion_quals
-            .iter()
-            .zip(deletion_quals)
-            .zip(gap_quals)
-            .map(|((insertion, deletion), gap)| {
-                Transition::from_qualities(table, *insertion, *deletion, *gap)
-            })
-            .collect();
-        Ok(Self {
-            bases,
-            base_quals: base_quals.into(),
-            error_probabilities: base_quals.iter().map(|q| table.probability(*q)).collect(),
-            insertion_quals: insertion_quals.into(),
-            deletion_quals: deletion_quals.into(),
-            gap_quals: gap_quals.into(),
-            growth_bound: steady_growth(&transitions, deletion_quals, gap_quals),
-            transitions,
-            strand,
-        })
+        Self::assemble(bases, tracks.concat(), strand)
     }
 
     /// A read whose insertion, deletion and gap-continuation qualities are the
@@ -95,16 +71,11 @@ impl Read {
         gap_qual: BaseQuality,
         strand: Strand,
     ) -> Result<Self, Error> {
-        let bases = bases.into();
-        let n = bases.len();
-        Self::new(
-            bases,
-            base_quals,
-            &vec![insertion_qual; n],
-            &vec![deletion_qual; n],
-            &vec![gap_qual; n],
-            strand,
-        )
+        Self::with_indel_tracks(bases, base_quals, strand, |_, insertion, deletion, gap| {
+            insertion.fill(insertion_qual);
+            deletion.fill(deletion_qual);
+            gap.fill(gap_qual);
+        })
     }
 
     /// A read whose insertion and deletion qualities come from `model` (one
@@ -117,11 +88,84 @@ impl Read {
         gap_qual: BaseQuality,
         strand: Strand,
     ) -> Result<Self, Error> {
+        Self::with_indel_tracks(bases, base_quals, strand, |bases, insertion, deletion, gap| {
+            model.fill_gap_open(bases, insertion);
+            deletion.copy_from_slice(insertion);
+            gap.fill(gap_qual);
+        })
+    }
+
+    /// A read whose three indel tracks `fill` writes straight into the read's
+    /// own storage, each as long as the read.
+    fn with_indel_tracks(
+        bases: impl Into<Box<[Base]>>,
+        base_quals: &[BaseQuality],
+        strand: Strand,
+        fill: impl FnOnce(&[Base], &mut [BaseQuality], &mut [BaseQuality], &mut [BaseQuality]),
+    ) -> Result<Self, Error> {
+        if strand == Strand::Unknown {
+            return Err(Error::UnknownStrand);
+        }
         let bases = bases.into();
-        let mut gap_open = vec![model.gap_open; bases.len()];
-        model.fill_gap_open(&bases, &mut gap_open);
-        let gap = vec![gap_qual; bases.len()];
-        Self::new(bases, base_quals, &gap_open, &gap_open, &gap, strand)
+        let n = bases.len();
+        if base_quals.len() != n {
+            return Err(Error::ReadLengthMismatch {
+                field: "base_quals",
+                expected: n,
+                actual: base_quals.len(),
+            });
+        }
+        let mut quals = vec![BaseQuality::UNAVAILABLE; n.saturating_mul(4)];
+        let (base, indels) = quals.split_at_mut(n);
+        base.copy_from_slice(base_quals);
+        let (insertion, rest) = indels.split_at_mut(n);
+        let (deletion, gap) = rest.split_at_mut(n);
+        fill(&bases, insertion, deletion, gap);
+        Self::assemble(bases, quals, strand)
+    }
+
+    /// The read over `quals`, its four tracks back to back and each as long
+    /// as `bases`.
+    fn assemble(
+        bases: Box<[Base]>,
+        quals: Vec<BaseQuality>,
+        strand: Strand,
+    ) -> Result<Self, Error> {
+        let n = bases.len();
+        debug_assert_eq!(quals.len(), n * 4, "four tracks of the read's length");
+        for (field, track) in TRACKS.into_iter().zip(quals.chunks(n.max(1))) {
+            if let Some(index) = track.iter().position(|q| *q == BaseQuality::UNAVAILABLE) {
+                return Err(Error::MissingQuality { field, index });
+            }
+        }
+        let track = |k: usize| quals.get(k * n..(k + 1) * n).unwrap_or_default();
+        let (base_quals, insertion_quals, deletion_quals, gap_quals) =
+            (track(0), track(1), track(2), track(3));
+        let table = ErrorTable::get();
+        let transitions: Box<[Transition]> = insertion_quals
+            .iter()
+            .zip(deletion_quals)
+            .zip(gap_quals)
+            .map(|((insertion, deletion), gap)| {
+                Transition::from_qualities(table, *insertion, *deletion, *gap)
+            })
+            .collect();
+        let error_probabilities = base_quals.iter().map(|q| table.probability(*q)).collect();
+        let growth_bound = steady_growth(&transitions, deletion_quals, gap_quals);
+        Ok(Self {
+            bases,
+            quals: quals.into_boxed_slice(),
+            error_probabilities,
+            transitions,
+            growth_bound,
+            strand,
+        })
+    }
+
+    /// Quality track `k` of [`TRACKS`].
+    fn track(&self, k: usize) -> &[BaseQuality] {
+        let n = self.bases.len();
+        self.quals.get(k * n..(k + 1) * n).unwrap_or_default()
     }
 
     #[must_use]
@@ -144,22 +188,22 @@ impl Read {
 
     #[must_use]
     pub fn base_quals(&self) -> &[BaseQuality] {
-        &self.base_quals
+        self.track(0)
     }
 
     #[must_use]
     pub fn insertion_quals(&self) -> &[BaseQuality] {
-        &self.insertion_quals
+        self.track(1)
     }
 
     #[must_use]
     pub fn deletion_quals(&self) -> &[BaseQuality] {
-        &self.deletion_quals
+        self.track(2)
     }
 
     #[must_use]
     pub fn gap_quals(&self) -> &[BaseQuality] {
-        &self.gap_quals
+        self.track(3)
     }
 
     /// The transitions out of read base `index`, which the DP applies on row
