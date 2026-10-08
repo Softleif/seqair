@@ -252,6 +252,58 @@ fn set_alignment_updates_cigar_and_pos() {
     assert_eq!(store.record(idx).unwrap().cigar(), &new_cigar);
 }
 
+// r[verify record_store.soft_clips]
+#[test]
+fn soft_clips_are_stored_at_push_and_follow_set_alignment() {
+    const CIGAR_H: u8 = 5;
+    let raw = make_simple_record(
+        0,
+        100,
+        &[
+            pack_cigar_op(1, CIGAR_H),
+            pack_cigar_op(2, CIGAR_S),
+            pack_cigar_op(4, CIGAR_M),
+            pack_cigar_op(3, CIGAR_S),
+        ],
+        9,
+        b"read1",
+    );
+    let mut store = RecordStore::new();
+    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let rec = store.record(idx).unwrap();
+    assert_eq!((rec.leading_soft_clip, rec.trailing_soft_clip), (2, 3));
+
+    let fields = store
+        .push_fields(
+            Pos0::new(200).unwrap(),
+            Pos0::new(203).unwrap(),
+            BamFlags::from(0),
+            60,
+            4,
+            0,
+            b"read2",
+            &pack_cigar(&[(4, CIGAR_M), (1, CIGAR_S), (2, CIGAR_H)]),
+            &[Base::A; 5],
+            &[30; 5],
+            &[],
+            0,
+            -1,
+            -1,
+            0,
+            &mut (),
+        )
+        .unwrap()
+        .expect("kept");
+    let rec = store.record(fields).unwrap();
+    assert_eq!((rec.leading_soft_clip, rec.trailing_soft_clip), (0, 1));
+
+    store
+        .set_alignment(idx, Pos0::new(99).unwrap(), &pack_cigar(&[(5, CIGAR_M), (4, CIGAR_S)]))
+        .unwrap();
+    let rec = store.record(idx).unwrap();
+    assert_eq!((rec.leading_soft_clip, rec.trailing_soft_clip), (0, 4));
+}
+
 // r[verify record_store.set_alignment]
 #[test]
 fn set_alignment_preserves_other_fields() {

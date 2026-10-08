@@ -18,8 +18,27 @@ mod helpers;
 use hegel::prelude::*;
 use helpers::{cigar_op, cigar_ops};
 use seqair::bam::Pos0;
-use seqair::bam::cigar::{CigarMapping, CigarPosInfo, calc_matches_indels};
+use seqair::bam::cigar::{CigarMapping, CigarPosInfo, calc_matches_indels, soft_clips};
 use seqair_types::QPos;
+
+// ---- cigar.soft_clips ----
+
+// r[verify cigar.soft_clips]
+#[test]
+fn soft_clips_look_past_hard_clips_at_both_ends() {
+    let clips = |ops: &[(u32, u8)]| {
+        let ops: Vec<_> = ops.iter().map(|&(len, op)| cigar_op(len, op)).collect();
+        soft_clips(&cigar_ops(&ops))
+    };
+    assert_eq!(clips(&[(100, 0)]), (0, 0));
+    assert_eq!(clips(&[(5, 4), (90, 0), (5, 4)]), (5, 5));
+    assert_eq!(clips(&[(2, 5), (3, 4), (90, 0), (3, 4), (2, 5)]), (3, 3));
+    assert_eq!(clips(&[(2, 4), (3, 5), (90, 0)]), (2, 0));
+    // An inner soft clip after an insertion is not at the end.
+    assert_eq!(clips(&[(4, 1), (3, 4), (90, 0)]), (0, 0));
+    assert_eq!(clips(&[(10, 0), (2, 1), (7, 4)]), (0, 7));
+    assert_eq!(clips(&[]), (0, 0));
+}
 
 // ---- cigar.matches_indels ----
 

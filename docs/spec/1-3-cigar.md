@@ -57,6 +57,9 @@ These aggregate statistics are used downstream for read quality metrics (e.g. fr
 r[cigar.matches_indels]
 `calc_matches_indels(cigar)` MUST compute the total number of matching bases (sum of M operation lengths) and the total number of indel bases (sum of I and D operation lengths) from a packed CIGAR array.
 
+r[cigar.soft_clips]
+`soft_clips(cigar)` MUST return the number of soft-clipped bases at the start and at the end of the CIGAR, as a pair. At each end it MUST sum the `S` operations among the run of clip operations (`S` and `H`) that end begins with, looking past hard clips (`2H3S…`, `…3S2H` and `2S3H…` all count their soft clips), and MUST stop at the first other operation. A CIGAR made only of clips counts them at both ends.
+
 ## CIGAR index
 
 For the pileup engine, the critical operation is: "at reference position X, what is the corresponding position in this read?" This requires walking the CIGAR to accumulate reference and query offsets. The `CigarIndex` precomputes this to avoid re-walking for every position.
