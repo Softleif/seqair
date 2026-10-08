@@ -145,7 +145,7 @@ pub use error::Error;
 pub use haplotype::Haplotype;
 pub use pairs::{PAIRS, PAIRS_BREAK_EVEN, Pair, align_pairs, align_reads};
 pub use prepared::Candidates;
-pub use read::Read;
+pub use read::{PcrIndelModel, Read};
 pub use reference::{align_banded_f64_rows, align_full, trusted};
 pub use rescue::{align_banded_f64, align_banded_f64_at, poison_align_banded_f64_scratch};
 pub use seqair_types::{Base, BaseQuality, Probability, QPos, Strand};
