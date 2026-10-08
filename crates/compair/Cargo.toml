@@ -1,6 +1,6 @@
 [package]
 name = "compair"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Banded affine-gap pair-HMM with a pluggable, conversion-aware emission model"
 repository = "https://github.com/Softleif/seqair"
