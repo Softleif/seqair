@@ -107,6 +107,23 @@ impl Read {
         )
     }
 
+    /// A read whose insertion and deletion qualities come from `model` (one
+    /// gap-open track for both, from the tandem repeats in its own bases) and
+    /// whose gap-continuation quality is `gap_qual` at every base.
+    pub fn with_pcr_indel_model(
+        bases: impl Into<Box<[Base]>>,
+        base_quals: &[BaseQuality],
+        model: &PcrIndelModel,
+        gap_qual: BaseQuality,
+        strand: Strand,
+    ) -> Result<Self, Error> {
+        let bases = bases.into();
+        let mut gap_open = vec![model.gap_open; bases.len()];
+        model.fill_gap_open(&bases, &mut gap_open);
+        let gap = vec![gap_qual; bases.len()];
+        Self::new(bases, base_quals, &gap_open, &gap_open, &gap, strand)
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.bases.len()
@@ -201,4 +218,157 @@ fn steady_growth(
     let table = ErrorTable::get();
     let open = |q: u8| table.probability(BaseQuality::from_byte(q.max(MIN_GAP_OPEN_QUALITY)));
     Some(Growth::steady(transitions.len(), open(low), open(high), first.indel_to_match))
+}
+
+/// GATK's PCR indel model: a gap opens more easily inside a tandem repeat,
+/// where polymerase slippage makes stutter, and the more repetitions the
+/// easier. At a base inside `r` repetitions of some unit the gap-open quality
+/// is `gap_open - exp(r / (rate * ln 2)) + 1`, rounded, and kept between
+/// `floor` and `gap_open`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PcrIndelModel {
+    /// Gap-open quality outside any repeat.
+    pub gap_open: BaseQuality,
+    /// The lowest a repeat can bring the gap-open quality: the library's
+    /// stutter rate in a long tract.
+    pub floor: BaseQuality,
+    /// How slowly the quality falls with repetitions; larger is slower.
+    pub rate: f64,
+    /// Longest tandem unit looked for.
+    pub max_unit: usize,
+    /// Repetitions beyond this count as this many.
+    pub max_repeats: usize,
+}
+
+impl Default for PcrIndelModel {
+    /// GATK's conservative setting: Q45 outside repeats, a Q10 floor, rate 3,
+    /// units up to 8 bases, at most 20 repetitions counted.
+    fn default() -> Self {
+        Self {
+            gap_open: BaseQuality::from_byte(45),
+            floor: BaseQuality::from_byte(10),
+            rate: 3.0,
+            max_unit: 8,
+            max_repeats: 20,
+        }
+    }
+}
+
+impl PcrIndelModel {
+    /// The gap-open quality at a base inside `repeats` repetitions of a unit.
+    #[must_use]
+    #[expect(clippy::cast_possible_truncation, reason = "rounded and clamped into u8 first")]
+    #[expect(clippy::cast_sign_loss, reason = "clamped to at least the floor, a u8")]
+    pub fn gap_open_qual(&self, repeats: usize) -> BaseQuality {
+        let open = f64::from(self.gap_open.as_byte());
+        let floor = f64::from(self.floor.as_byte());
+        let repeats = f64::from(u32::try_from(repeats.min(self.max_repeats)).unwrap_or(u32::MAX));
+        let quality = open - (repeats / (self.rate * std::f64::consts::LN_2)).exp() + 1.0;
+        // `max` then `min`, not `clamp`: a floor above the open quality must
+        // not panic, and a NaN rate lands on the floor.
+        BaseQuality::from_byte(quality.round().max(floor).min(open) as u8)
+    }
+
+    /// Write the gap-open quality of each base of `bases` into the matching
+    /// slot of `track`. A base in no repeat counts as one repetition (Q44 by
+    /// default, not Q45); one inside several runs takes the most repetitions
+    /// any of them makes.
+    pub fn fill_gap_open(&self, bases: &[Base], track: &mut [BaseQuality]) {
+        track.fill(self.gap_open_qual(1));
+        self.runs(bases, |run, repeats| {
+            let quality = self.gap_open_qual(repeats);
+            for slot in track.iter_mut().take(run.end).skip(run.start) {
+                if quality.as_byte() < slot.as_byte() {
+                    *slot = quality;
+                }
+            }
+        });
+    }
+
+    /// Every tandem run in `bases` with its repetition count: for each unit
+    /// length `u` from 1 to `max_unit`, a maximal stretch where each base
+    /// equals the one `u` before it, together with the `u` bases it repeats.
+    fn runs(&self, bases: &[Base], mut visit: impl FnMut(std::ops::Range<usize>, usize)) {
+        for unit in 1..=self.max_unit {
+            let repeats_back = |k: usize| k.checked_sub(unit).and_then(|j| bases.get(j));
+            let mut i = unit;
+            while i < bases.len() {
+                if bases.get(i) != repeats_back(i) {
+                    i += 1;
+                    continue;
+                }
+                let mut end = i;
+                while end + 1 < bases.len() && bases.get(end + 1) == repeats_back(end + 1) {
+                    end += 1;
+                }
+                visit(i - unit..end + 1, (end - i + 1) / unit + 1);
+                i = end + 1;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bases(ascii: &[u8]) -> Vec<Base> {
+        ascii.iter().map(|&b| Base::from(b)).collect()
+    }
+
+    /// For every base, the most repetitions any run through it makes.
+    fn repeats_per_base(model: &PcrIndelModel, bases: &[Base]) -> Vec<usize> {
+        let mut best = vec![1; bases.len()];
+        model.runs(bases, |run, repeats| {
+            for slot in best.iter_mut().take(run.end).skip(run.start) {
+                *slot = (*slot).max(repeats);
+            }
+        });
+        best
+    }
+
+    #[test]
+    fn repeats_are_counted_per_unit_through_every_base_of_the_run() {
+        let r = repeats_per_base(&PcrIndelModel::default(), &bases(b"ACGTTTTTTGACACACACGT"));
+        assert_eq!(r[..3], [1, 1, 1]);
+        assert!(r[3..9].iter().all(|&x| x == 6), "the T run: {:?}", &r[3..9]);
+        assert_eq!(r[9], 1);
+        assert!(r[10..18].iter().all(|&x| x == 4), "the AC run: {:?}", &r[10..18]);
+    }
+
+    /// Gap-open falls with the repeat count, from Q45 outside any repeat to
+    /// the floor in a long tract; rastair floors at Q20.
+    #[test]
+    fn the_gap_open_quality_falls_with_repeats_to_the_floor() {
+        let model = PcrIndelModel { floor: BaseQuality::from_byte(20), ..PcrIndelModel::default() };
+        let q = |repeats| model.gap_open_qual(repeats).as_byte();
+        assert!(q(1) >= 44);
+        assert_eq!(q(5), 35);
+        assert_eq!(q(6), 28);
+        assert_eq!(q(7), 20);
+        assert_eq!(q(40), 20);
+        // GATK's own floor is lower, so a long tract keeps falling past Q20.
+        let gatk = PcrIndelModel::default();
+        assert_eq!(gatk.gap_open_qual(7), BaseQuality::from_byte(17));
+        assert_eq!(gatk.gap_open_qual(40), BaseQuality::from_byte(10));
+    }
+
+    /// The track is the quality of the most repetitions at each base, and a
+    /// read built from the model is the read built from that track.
+    #[test]
+    fn a_pcr_model_read_is_the_read_of_its_track() {
+        let model = PcrIndelModel { floor: BaseQuality::from_byte(20), ..PcrIndelModel::default() };
+        let seq = bases(b"ACGTTTTTTGACACACACGTTTTTTTTTTTTA");
+        let mut track = vec![BaseQuality::UNAVAILABLE; seq.len()];
+        model.fill_gap_open(&seq, &mut track);
+        let want: Vec<_> =
+            repeats_per_base(&model, &seq).into_iter().map(|r| model.gap_open_qual(r)).collect();
+        assert_eq!(track, want);
+
+        let quals = vec![BaseQuality::from_byte(30); seq.len()];
+        let extend = BaseQuality::from_byte(10);
+        let got = Read::with_pcr_indel_model(seq.clone(), &quals, &model, extend, Strand::OB);
+        let gaps = vec![extend; seq.len()];
+        assert_eq!(got, Read::new(seq, &quals, &want, &want, &gaps, Strand::OB));
+    }
 }
