@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **`PileupColumn::matches_reference`**: true when every read in the column shows the reference
+  base as a `Match` with nothing inserted or deleted after it. The engine computes it while
+  building the column, so a caller dropping reference-only columns (most of a genome) no longer
+  walks them to find out.
+
+### Changed
+
+- **A pileup over a segment with no reads skips the reference fetch** (unless a `mutate` hook is
+  set). Tiling a sparse BAM against a whole-genome FASTA no longer decodes the reference of every
+  empty segment. A FASTA error for such a span (a contig the FASTA lacks or holds shorter) now
+  surfaces only on a segment that has reads.
+
 ## v0.4.0 (2026-09-29)
 
 ### Breaking
