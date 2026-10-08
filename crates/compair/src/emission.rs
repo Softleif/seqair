@@ -273,14 +273,23 @@ pub enum Betas<'a> {
     /// unmethylated, which keeps the emission total and is what a caller with
     /// no estimate for a site means.
     PerSite(&'a [Probability]),
+    /// The level each haplotype carries for the position
+    /// ([`Haplotype::with_betas`](crate::Haplotype::with_betas)), and this
+    /// one where it carries none. The one choice that lets haplotypes with
+    /// different indels applied be scored in one call, since their positions
+    /// no longer line up with any one slice.
+    OfHaplotype(Probability),
 }
 
 impl Betas<'_> {
     #[inline]
-    fn at(self, index: usize) -> Probability {
+    fn at(self, site: HapSite) -> Probability {
         match self {
             Self::Uniform(beta) => beta,
-            Self::PerSite(betas) => betas.get(index).copied().unwrap_or(Probability::ZERO),
+            Self::PerSite(betas) => {
+                betas.get(site.index.0 as usize).copied().unwrap_or(Probability::ZERO)
+            }
+            Self::OfHaplotype(fallback) => site.beta.unwrap_or(fallback),
         }
     }
 }
@@ -398,7 +407,7 @@ impl Emission for TapsEmission<'_> {
         let Some((converted, in_cpg)) = converted_base(site, strand) else {
             return SiteWeights::plain(site.base);
         };
-        let beta = if in_cpg { self.betas.at(site.index.0 as usize) } else { Probability::ZERO };
+        let beta = if in_cpg { self.betas.at(site) } else { Probability::ZERO };
         SiteWeights {
             base: site.base,
             converted: Some(converted),
