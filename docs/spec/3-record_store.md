@@ -378,10 +378,12 @@ avalanche. FxHash-style hashes MUST NOT be used here — their weak avalanche on
 the structured ASCII suffix of Illumina qnames leaves the low bits
 under-discriminating, which is exactly the part consumers key maps on.
 
-r[record_store.qname_hash.no_name]
+r[record_store.qname_hash.no_name+2]
 A record with no qname has no template identity: its hash MUST be `0`, and a
-non-empty qname MUST NOT hash to `0`. `SlimRecord::qname_hash()` MUST therefore
-return `Option<u64>`, `None` for such a record. This is not hypothetical — a
+non-empty qname MUST NOT hash to `0`. `SlimRecord::qname_hash()` and
+`AlignmentView::qname_hash()` MUST therefore return `Option<NonZeroU64>`, `None`
+for such a record, so a consumer keying on the hash cannot confuse a real hash
+with the reserved value. This is not hypothetical — a
 CRAM written with `RN=false` does not store read names at all, and every record
 in it would otherwise share one hash and read as one enormous template.
 

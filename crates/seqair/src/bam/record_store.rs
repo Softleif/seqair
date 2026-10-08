@@ -16,10 +16,16 @@ use super::{
 };
 use hashbrown::HashTable;
 use seqair_types::{BamFlags, Base, BaseQuality, Pos0, QPos};
+use std::num::NonZeroU64;
 
 // r[impl record_store.qname_hash]
 // r[impl record_store.qname_hash.identity_is_probabilistic]
 /// Seed-fixed 64-bit hash of a read name, with full avalanche.
+///
+/// The empty name hashes to `0`, the value reserved for "no qname", and no
+/// other name does (the one that would is moved to `1`). It stays a plain
+/// `u64` because the store keys its mate table on it; the record getters
+/// ([`SlimRecord::qname_hash`]) hand it out as `Option<NonZeroU64>`.
 ///
 /// Both mates of a template carry the same qname (`[SAM1] §1.4`), so this is
 /// also a fragment identifier: a pure function of the bytes, with no per-store,
@@ -40,7 +46,7 @@ pub fn qname_hash(name: &[u8]) -> u64 {
     const K1: u64 = 0x8bb8_4b93_962e_acc9;
     const K2: u64 = 0x4b33_a62e_d433_d4a3;
 
-    // r[impl record_store.qname_hash.no_name]
+    // r[impl record_store.qname_hash.no_name+2]
     if name.is_empty() {
         return 0;
     }
@@ -63,7 +69,7 @@ pub fn qname_hash(name: &[u8]) -> u64 {
         acc = fold_mul(acc ^ u64::from_le_bytes(buf), K2);
     }
 
-    // r[impl record_store.qname_hash.no_name]
+    // r[impl record_store.qname_hash.no_name+2]
     // 0 is the reserved "this record has no qname" value, so a real name must
     // never land on it. Mapping the single colliding input to 1 costs one
     // predictable branch and doubles that value's probability, which at 2^-64
@@ -268,7 +274,7 @@ impl SlimRecord {
         self.mate_idx
     }
 
-    // r[impl record_store.qname_hash.no_name]
+    // r[impl record_store.qname_hash.no_name+2]
     /// The template's identity: the seed-fixed hash of the qname
     /// ([`qname_hash`]), shared by both mates. `None` when the record carries no
     /// qname — a CRAM written with `RN=false` stores none — in which case it has
@@ -279,8 +285,8 @@ impl SlimRecord {
     /// compares the bytes and is unaffected, but a consumer using this as a
     /// fragment id must tolerate the merge.
     #[must_use]
-    pub fn qname_hash(&self) -> Option<u64> {
-        (self.qname_hash != 0).then_some(self.qname_hash)
+    pub fn qname_hash(&self) -> Option<NonZeroU64> {
+        NonZeroU64::new(self.qname_hash)
     }
 
     /// Read the per-record extra value for this record.
@@ -1303,7 +1309,7 @@ impl<U> RecordStore<U> {
                 continue;
             }
             let qname = qname_bytes(names, rec);
-            // r[impl record_store.qname_hash.no_name]
+            // r[impl record_store.qname_hash.no_name+2]
             if qname.is_empty() {
                 continue;
             }

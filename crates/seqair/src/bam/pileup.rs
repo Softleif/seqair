@@ -582,7 +582,7 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
     }
 
     // r[impl pileup.mate_link_cache]
-    // r[impl record_store.qname_hash.no_name]
+    // r[impl record_store.qname_hash.no_name+2]
     /// The template's identity: the seed-fixed hash of the read's qname, shared
     /// by both mates and stable across stores and runs. `None` when the record
     /// carries no qname (a CRAM written with `RN=false`), which is also why a
@@ -593,7 +593,7 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
     /// consumer asks for a fragment identity once per read it *keeps*, while
     /// the entry is written once per read per column, so carrying it there
     /// cost eight bytes of memory traffic per alignment to save a load here.
-    pub fn qname_hash(&self) -> Option<u64> {
+    pub fn qname_hash(&self) -> Option<std::num::NonZeroU64> {
         self.record().qname_hash()
     }
 
