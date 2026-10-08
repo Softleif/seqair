@@ -13,7 +13,7 @@ exclude = ["fuzz/*", "tests/*", "benches/*"]
 [dependencies]
 seqair-types = { version = "^0.3.1", path = "../seqair-types" }
 thiserror = { workspace = true }
-fearless_simd = "1.0"
+fearless_simd = "1.1"
 fearless_simd_macros = "0.1"
 # The `gpu` feature: the banded pair-HMM as a wgpu compute shader. The versions
 # are rastair's (biosphere's GPU inference), so the two share one device stack.
@@ -44,7 +44,7 @@ gkl-cpp = ["gkl/c-avx", "gkl/c-avx512"]
 [dev-dependencies]
 # Compiles fearless_simd's scalar `Fallback` level on SIMD targets too, so the
 # parity tests can run it next to every vector level the CPU has.
-fearless_simd = { version = "1.0", features = ["force_support_fallback"] }
+fearless_simd = { version = "1.1", features = ["force_support_fallback"] }
 hegeltest = { workspace = true }
 criterion = "0.8.2"
 bio = { version = "4.0.1", default-features = false }
