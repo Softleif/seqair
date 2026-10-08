@@ -62,6 +62,15 @@ impl Log10Likelihood {
     pub const fn get(self) -> f64 {
         self.0
     }
+
+    /// The likelihood narrowed to `f32`, for storing many of them. Rounds to
+    /// nearest; a score below `f32`'s range (around `-3.4e38`, far below any
+    /// alignment's) becomes `-inf`, and `-inf` stays `-inf`.
+    #[must_use]
+    #[expect(clippy::cast_possible_truncation, reason = "the narrowing is the point")]
+    pub const fn as_f32(self) -> f32 {
+        self.0 as f32
+    }
 }
 
 /// Index of a base in a haplotype, zero-based.
@@ -115,7 +124,14 @@ pub struct Observation {
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorTable, error_probability};
+    use super::{ErrorTable, Log10Likelihood, error_probability};
+
+    #[test]
+    fn as_f32_rounds_and_keeps_impossible_impossible() {
+        assert_eq!(Log10Likelihood::new(-0.1).as_f32(), -0.1f32);
+        assert_eq!(Log10Likelihood::IMPOSSIBLE.as_f32(), f32::NEG_INFINITY);
+        assert_eq!(Log10Likelihood::new(-1e300).as_f32(), f32::NEG_INFINITY);
+    }
     use seqair_types::BaseQuality;
 
     /// Every byte, against the formula written out again rather than through
