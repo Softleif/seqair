@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Workspace::align_reads_into` and `ScoreMatrix`**: `align_reads` into a buffer that knows its
   haplotype count, with `row(read)`, `rows()`, `reads()`, `haplotypes()` and `as_flat()`, so a
   caller cannot slice the read-major scores with the wrong stride. The flat `align_reads` stays.
+- **`Haplotype::with_insertion(anchor, &inserted)` and `Haplotype::with_deletion(anchor, len)`**:
+  the haplotype with an allele applied after the base at `anchor`, `None` when it does not fit,
+  with `CpG` roles recomputed from the new sequence.
 
 ### Changed
 

@@ -147,3 +147,23 @@ fn a_read_precomputes_what_its_qualities_say(tc: TestCase) {
     }
     assert!(read.observation(n).is_none());
 }
+
+/// An allele applied after the anchor base, with the CpGs of the new sequence:
+/// inserting `G` after a `C` makes one, deleting the base between `C` and `G`
+/// makes one, and a deletion running off the end is no haplotype.
+#[test]
+fn an_allele_is_applied_after_its_anchor_with_its_own_cpgs() {
+    let window = Haplotype::from_ascii(b"ACTGA");
+    let inserted = window.with_insertion(1, &[Base::G]).expect("fits");
+    assert_eq!(inserted, Haplotype::from_ascii(b"ACGTGA"));
+    assert_eq!(inserted.site(1).map(|s| s.cpg), Some(compair::CpgRole::TopC));
+    let deleted = window.with_deletion(1, 1).expect("fits");
+    assert_eq!(deleted, Haplotype::from_ascii(b"ACGA"));
+    assert_eq!(deleted.site(2).map(|s| s.cpg), Some(compair::CpgRole::BottomG));
+
+    assert_eq!(window.with_deletion(1, 3), Some(Haplotype::from_ascii(b"AC")));
+    assert_eq!(window.with_deletion(1, 4), None);
+    assert_eq!(window.with_insertion(4, &[Base::T]), Some(Haplotype::from_ascii(b"ACTGAT")));
+    assert_eq!(window.with_insertion(5, &[Base::T]), None);
+    assert_eq!(window.with_deletion(usize::MAX, 1), None);
+}
