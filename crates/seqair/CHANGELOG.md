@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Breaking
+
+- **`SlimRecord::qname_hash` and `AlignmentView::qname_hash` return `Option<NonZeroU64>`**, not
+  `Option<u64>`. A missing qname was already `None` and no real name hashes to `0`; the type now
+  says so, and a caller using the hash as a fragment key needs no `NonZeroU64` wrapper of its own.
+  The free `record_store::qname_hash` still returns `u64` (`0` for the empty name only).
+
 ### Added
 
 - **`PileupColumn::matches_reference`**: true when every read in the column shows the reference

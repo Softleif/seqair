@@ -30,6 +30,7 @@ use seqair::reader::{DepthLimit, Readers, SegmentOptions};
 use seqair_types::{BamFlags, Base, Pos0};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
+use std::num::NonZeroU64;
 use std::path::Path;
 
 const PAIRED: u16 = 0x1;
@@ -130,7 +131,7 @@ fn mates_share_the_qname_hash() {
         store.record(ri(0)).unwrap().qname_hash(),
         store.record(ri(1)).unwrap().qname_hash()
     );
-    assert_eq!(store.record(ri(0)).unwrap().qname_hash(), Some(qname_hash(b"frag")));
+    assert_eq!(store.record(ri(0)).unwrap().qname_hash(), NonZeroU64::new(qname_hash(b"frag")));
 }
 
 // r[verify record_store.qname_hash]
@@ -361,7 +362,7 @@ fn sorting_and_dedup_drop_the_links() {
     assert_eq!(store.record(ri(0)).unwrap().mate_idx(), None, "dedup must invalidate mate indices");
 }
 
-// r[verify record_store.qname_hash.no_name]
+// r[verify record_store.qname_hash.no_name+2]
 // r[verify record_store.link_mates+2]
 /// A CRAM written with `RN=false` stores no read names. Such records have no
 /// template identity and MUST NOT link — otherwise every nameless record in a
@@ -382,7 +383,7 @@ fn nameless_records_have_no_identity_and_never_link() {
     assert!(stats.is_clean(), "nameless records are not a qname-uniqueness violation");
 }
 
-// r[verify record_store.qname_hash.no_name]
+// r[verify record_store.qname_hash.no_name+2]
 /// `0` is reserved for "no qname", so a real name must never produce it.
 #[test]
 fn the_empty_qname_hashes_to_the_reserved_zero() {
