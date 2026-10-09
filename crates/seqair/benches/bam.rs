@@ -602,6 +602,24 @@ fn aligned_pairs_walk(c: &mut Criterion) {
         });
     });
 
+    // rust-htslib counterpart of `seqair_with_read`: per-base events plus the
+    // read base and qual wherever there is a query position.
+    group.bench_function("htslib_aligned_pairs_full_with_read", |b| {
+        b.iter(|| {
+            let mut total: u64 = 0;
+            for record in &htslib_records {
+                let seq = record.seq();
+                let qual = record.qual();
+                for [qpos, rpos] in record.aligned_pairs_full() {
+                    let read = qpos.map(|q| (seq[q as usize], qual[q as usize]));
+                    let _ = black_box((read, rpos));
+                    total += 1;
+                }
+            }
+            black_box(total)
+        });
+    });
+
     // rust-htslib aligned_pairs (matches-only — filtered to M positions).
     group.bench_function("htslib_aligned_pairs", |b| {
         b.iter(|| {
