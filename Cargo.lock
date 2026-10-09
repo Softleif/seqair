@@ -308,9 +308,9 @@ dependencies = [
 
 [[package]]
 name = "buffer-redux"
-version = "1.1.0"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "431a9cc8d7efa49bc326729264537f5e60affce816c66edf434350778c9f4f54"
+checksum = "4e8acf87c5b9f5897cd3ebb9a327f420e0cae9dd4e5c1d2e36f2c84c571a58f1"
 dependencies = [
  "memchr",
 ]
@@ -1540,9 +1540,9 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lzma-rust2"
-version = "0.19.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c1bf3331fb5cf60f2ef15b63361f6cc39492a5d94c096053c395515e17d147f"
+checksum = "fde178a3caf126c440fa15628147772d8ee590a39477d711353fbe2e58a73a5b"
 dependencies = [
  "sha2",
 ]
@@ -1727,9 +1727,9 @@ dependencies = [
 
 [[package]]
 name = "noodles"
-version = "0.116.0"
+version = "0.117.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3dbd47509acffd4a7e23fcc174a022fe172d3edbf63e177b84ab0bacd5e7f7aa"
+checksum = "b8f72d3f65e19267ac6e7c4fdd017e6afd33013f311c9bb0cd7c360568528ed4"
 dependencies = [
  "noodles-bam",
  "noodles-bcf",
@@ -1744,9 +1744,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-bam"
-version = "0.95.0"
+version = "0.96.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd3b4801c9e0aec465de9cc396db2cfa629226cf9aa98dbcab0f460007c62e0d"
+checksum = "483ca346cd22cdffea7c5eb1b7530ee5dd1218fe0f023f2b2c175a84f7b09d7e"
 dependencies = [
  "bstr",
  "indexmap",
@@ -1759,9 +1759,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-bcf"
-version = "0.91.0"
+version = "0.92.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bd215f6b04b23cd3ac551834833aa070f1e6182dc8c16a32918e7aedf7480c4"
+checksum = "ba181324149149360840cefe02f3ebed1d81f34d27b82e0ec2ab02df6803558f"
 dependencies = [
  "indexmap",
  "memchr",
@@ -1773,9 +1773,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-bgzf"
-version = "0.51.0"
+version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "280d401d0358893ad706fb6094a18e7f9e8f3002630f4960889cb702b6e2714e"
+checksum = "950a8570bb43a68697bb34ba39a44f1171faacceb852104d4a35701b86d7ef29"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -1786,18 +1786,18 @@ dependencies = [
 
 [[package]]
 name = "noodles-core"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8dbac7c5f9a7de9fe45590f198a09697df631cd13d2060b4742cc48144555b0"
+checksum = "d99b2bca1b3816b186b4c10ab067a8a9d8331542c14cbd16f10c32dee345bc6a"
 dependencies = [
  "bstr",
 ]
 
 [[package]]
 name = "noodles-cram"
-version = "0.99.0"
+version = "0.100.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e6586665a10fb37d997dbcc7375082d581f34226e85a8c727d3221a8c15de4b"
+checksum = "4ea5246ed575ae22863a7fa3362a8a8e78e685e9f3d1d34b23c660f24e5981a3"
 dependencies = [
  "bitflags",
  "bstr",
@@ -1815,9 +1815,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-csi"
-version = "0.61.0"
+version = "0.62.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59b884d95b1c04066f2364201f4ba126b1fdc590841745c226952c424fceeb02"
+checksum = "2a08a8df410c420e7282328537e003de1bf4d88f45de891e7acfd2be80171a33"
 dependencies = [
  "bit-vec 0.10.1",
  "bstr",
@@ -1828,9 +1828,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-fasta"
-version = "0.66.0"
+version = "0.67.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0263cded3c76c5ddc6d36b805e68e512e6f474a56b9855c7ef37cb69a3fb65"
+checksum = "b29f43d38ef5706d2703d377d17c700901b4028d47dc74c0beab3606bc14ca50"
 dependencies = [
  "bstr",
  "memchr",
@@ -1840,9 +1840,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-fastq"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1bd7ca5f1595f089e7373da29fbcda325e05f02ca130424b09e9a877f9de9f9"
+checksum = "b749d3b5ce244ad38790b0d1193f199244bada983fd5316fb1d3bcda162b3e97"
 dependencies = [
  "bstr",
  "memchr",
@@ -1850,9 +1850,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-sam"
-version = "0.90.0"
+version = "0.91.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11f1fed0ec07fac91d110a402ab0ba39490d5bb0effb995d75907756226456f1"
+checksum = "9663f864dc2e1b5a875dafb670ee284956f5bf4f76be6124f3dd73379a1252db"
 dependencies = [
  "bitflags",
  "bstr",
@@ -1866,9 +1866,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-tabix"
-version = "0.67.0"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8819545ace427054ea761dbfd5a019cccb68fdd25d216e2b4b6275b723d95fc0"
+checksum = "c69ae6443a067aff18ed8ecb2b614bbc7e72cb2c39d639c19cee3850555a5314"
 dependencies = [
  "bstr",
  "indexmap",
@@ -1879,9 +1879,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-util"
-version = "0.85.0"
+version = "0.86.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f451037077e5fdeea7832b54dee9b126cbf0bfba83d81e31c0baddb8debb453e"
+checksum = "131156eb5309aba4ad5b4974944eddb8b3a36e956cab4bbbd07b2361596c4966"
 dependencies = [
  "bstr",
  "flate2",
@@ -1896,9 +1896,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-vcf"
-version = "0.93.0"
+version = "0.94.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84f5a470aa883869223f8a92f0da5181bef1d6802d6b44ac95fe230e84674685"
+checksum = "0af3644ded2359350f035598060e901c1e57bdc012b68bfa97cdcf5f884b38ae"
 dependencies = [
  "indexmap",
  "memchr",
@@ -2516,9 +2516,9 @@ checksum = "d4f410fedcf71af0345d7607d246e7ad15faaadd49d240ee3b24e5dc21a820ac"
 
 [[package]]
 name = "seq_io"
-version = "0.3.2"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86b213fabdebb1c56d330d1dbf92cef0257f3873b718eb2202bb73c707197e9c"
+checksum = "1303559e530ee83c1d7a8593a033792c2a29217544a5c48563e116e158d76ade"
 dependencies = [
  "buffer-redux",
  "crossbeam-utils",
