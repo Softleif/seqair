@@ -125,8 +125,6 @@ pub struct Records {
     pub alphabet: Vec<u8>,
 }
 
-hegel::pretty_print_as_debug!(Records);
-
 /// Compress with htscodecs. `vers` 3 is CRAM 3.1 (reversed records stored
 /// in read orientation), 4 is CRAM 4. `gp` replaces the strategy's own
 /// parameter choice; htscodecs shifts its tables in place, so it is used up.

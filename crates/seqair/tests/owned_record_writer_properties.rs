@@ -206,7 +206,7 @@ impl Record {
     }
 }
 
-fn short<T: Clone + Send + Sync + hegel::PrettyPrintable + 'static>(
+fn short<T: Clone + Send + Sync + std::fmt::Debug + 'static>(
     element: impl PrintableGenerator<T> + Send + Sync + 'static,
 ) -> impl PrintableGenerator<Vec<T>> {
     gs::vecs(element).min_size(1).max_size(4)
