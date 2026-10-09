@@ -801,6 +801,17 @@ mod tests {
         }
     }
 
+    // r[verify cigar.aligned_pairs.with_read.iterator]
+    #[test]
+    fn with_read_accepts_any_seq_without_cigar() {
+        // CIGAR `*` with SEQ present: valid SAM for unmapped reads.
+        let seq = vec![Base::A, Base::C];
+        let qual = vec![BaseQuality::from_byte(30); 2];
+        let events: Vec<_> =
+            AlignedPairs::new(p0(0), &[]).with_read(&seq, &qual).unwrap().collect();
+        assert!(events.is_empty());
+    }
+
     #[test]
     fn with_read_rejects_seq_longer_than_cigar_query_len() {
         // Inverse mismatch: CIGAR 2M but seq 3 bases.
