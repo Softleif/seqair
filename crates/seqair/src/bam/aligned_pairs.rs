@@ -406,7 +406,27 @@ impl Iterator for AlignedPairs<'_> {
         (count, Some(count))
     }
 
+    // Per-base M/=/X expansion is nearly every event; keep it small enough to
+    // inline into callers in other crates and leave the op walk out of line.
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
+        if let ExpandingState::PerBase { remaining, kind } = &mut self.expanding
+            && *remaining > 0
+        {
+            *remaining = remaining.saturating_sub(1);
+            let kind = *kind;
+            let qpos = self.qpos;
+            let rpos = self.rpos;
+            self.qpos = self.qpos.saturating_add(1);
+            self.rpos = advance_rpos(self.rpos, 1);
+            return Some(AlignedPair::Match { qpos, rpos, kind });
+        }
+        self.next_op()
+    }
+}
+
+impl AlignedPairs<'_> {
+    fn next_op(&mut self) -> Option<AlignedPair> {
         loop {
             // ── Expand multi-base ops (M/=/X) ──
             match std::mem::replace(&mut self.expanding, ExpandingState::None) {
@@ -539,6 +559,7 @@ impl Iterator for MatchesOnly<'_> {
         (0, upper)
     }
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.inner.next()? {

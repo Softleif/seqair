@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Performance
+
+- **Aligned-pairs iterators inline into callers.** The per-base step of `AlignedPairs` and the
+  `with_read`/`with_reference`/`matches_only` adapters were out-of-line calls from other crates;
+  `aligned_pairs_with_read` walks ~2× faster (on par with rust-htslib reading the same bases).
+
 ### Fixed
 
 - **`aligned_pairs_with_read` accepts records without a CIGAR.** An unmapped read with SEQ and

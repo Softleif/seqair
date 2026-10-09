@@ -205,6 +205,7 @@ impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
         MatchedBases { inner: self }
     }
 
+    #[inline]
     fn attach_read(&self, pair: AlignedPair) -> AlignedPairWithRead<'read> {
         match pair {
             AlignedPair::Match { qpos, rpos, kind } => {
@@ -253,6 +254,7 @@ impl<'read> Iterator for AlignedPairsWithRead<'_, 'read> {
         self.inner.size_hint()
     }
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let pair = self.inner.next()?;
         Some(self.attach_read(pair))
@@ -356,6 +358,7 @@ impl<'read, 'ref_seq> Iterator for AlignedPairsWithRef<'_, 'read, 'ref_seq> {
         self.inner.size_hint()
     }
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let pair = self.inner.next()?;
         Some(match pair {
@@ -411,6 +414,7 @@ impl Iterator for MatchedBases<'_, '_> {
         (0, upper)
     }
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.inner.next()? {
@@ -444,6 +448,7 @@ impl Iterator for MatchedRefs<'_, '_, '_> {
         (0, upper)
     }
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.inner.next()? {
