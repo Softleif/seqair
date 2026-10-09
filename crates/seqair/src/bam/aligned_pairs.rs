@@ -345,7 +345,12 @@ impl<'a> AlignedPairs<'a> {
         // expects across the *full* CIGAR (already-consumed + remaining). The
         // seq slab must cover all of it. Strict equality lets us also catch
         // the inverse mismatch (seq longer than CIGAR claims).
-        if total_qlen != seq.len() as u64 {
+        // SAM's `*` CIGAR (e.g. unmapped reads) says nothing about SEQ and
+        // yields no events, so there is no length to check.
+        let no_cigar = self.ops.is_empty()
+            && self.qpos == QPos::ZERO
+            && matches!(self.expanding, ExpandingState::None);
+        if !no_cigar && total_qlen != seq.len() as u64 {
             return Err(AlignedPairsError::CigarSeqLengthMismatch {
                 cigar_qlen: total_qlen,
                 seq_len: seq.len(),
@@ -611,9 +616,6 @@ impl SlimRecord {
         let cigar = self.cigar(store)?;
         let seq = self.seq(store)?;
         let qual = self.qual(store)?;
-        // Records pushed via `push_raw` always have cigar.qlen == seq.len() ==
-        // qual.len(), so this validation should always succeed for store-resident
-        // records — but the typed error makes the "should" provable.
         AlignedPairs::new(self.pos, cigar).with_read(seq, qual)
     }
 }

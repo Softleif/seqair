@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **`aligned_pairs_with_read` accepts records without a CIGAR.** An unmapped read with SEQ and
+  CIGAR `*` failed with `CigarSeqLengthMismatch { cigar_qlen: 0, .. }`; it now yields no events,
+  like `aligned_pairs`.
+
 ## v0.5.0 (2026-10-08)
 
 ### Breaking
