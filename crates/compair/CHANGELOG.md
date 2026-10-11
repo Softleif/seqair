@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- **`Read::with_pcr_indel_model` builds a read in half the time.** `PcrIndelModel::fill_gap_open`
+  no longer takes an `exp` for every run of one repetition, which is most of them and is what the
+  track already holds; the track is unchanged. `read_build/64x150/pcr` 147 → 77 µs.
+
 ## v0.2.0 (2026-09-29)
 
 ### Breaking

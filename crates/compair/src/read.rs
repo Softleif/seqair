@@ -320,6 +320,11 @@ impl PcrIndelModel {
     pub fn fill_gap_open(&self, bases: &[Base], track: &mut [BaseQuality]) {
         track.fill(self.gap_open_qual(1));
         self.runs(bases, |run, repeats| {
+            // Most runs are one repetition, which the fill above already
+            // wrote; skipping them saves an `exp` each.
+            if repeats <= 1 {
+                return;
+            }
             let quality = self.gap_open_qual(repeats);
             for slot in track.iter_mut().take(run.end).skip(run.start) {
                 if quality.as_byte() < slot.as_byte() {
