@@ -754,7 +754,10 @@ impl Handle<'_> {
         let buffer = if context.uma { &aligner.buffers.scores } else { &aligner.buffers.staging };
         let buffer = buffer.as_ref().map(|grown| &grown.buffer).ok_or(GpuError::MapPending)?;
         let slice = buffer.slice(..bytes);
-        map_and_wait(context, aligner.options.wait, slice, submission.clone(), timeout)?;
+        // A map left pending (a timeout) would fail every later submit of
+        // this aligner with "buffer is still mapped"; unmapping cancels it.
+        map_and_wait(context, aligner.options.wait, slice, submission.clone(), timeout)
+            .inspect_err(|_| buffer.unmap())?;
         {
             let view = slice.get_mapped_range()?;
             let scores: &[[u32; 2]] = bytemuck::cast_slice(&view);
@@ -770,7 +773,8 @@ impl Handle<'_> {
         aligner.last_kernel_time = None;
         if let Some(timing) = &aligner.timing {
             let slice = timing.readback.slice(..);
-            map_and_wait(context, aligner.options.wait, slice, submission, timeout)?;
+            map_and_wait(context, aligner.options.wait, slice, submission, timeout)
+                .inspect_err(|_| timing.readback.unmap())?;
             {
                 let view = slice.get_mapped_range()?;
                 if let [begin, end] = bytemuck::cast_slice::<u8, u64>(&view) {
@@ -808,6 +812,7 @@ fn map_and_wait(
     });
     match wait {
         Wait::Block => {
+            let started = Instant::now();
             context
                 .device
                 .poll(wgpu::PollType::Wait {
@@ -818,7 +823,10 @@ fn map_and_wait(
                     wgpu::PollError::Timeout => GpuError::Timeout { step: "scoring", timeout },
                     other => GpuError::Poll(other),
                 })?;
-            receiver.try_recv().map_err(|_| GpuError::MapPending)??;
+            // Our poll found the submission done; if it did not run the map's
+            // callback, another thread's poll took it and is about to.
+            let remaining = timeout.saturating_sub(started.elapsed());
+            receiver.recv_timeout(remaining).map_err(|_| GpuError::MapPending)??;
         }
         Wait::Spin => {
             let started = Instant::now();

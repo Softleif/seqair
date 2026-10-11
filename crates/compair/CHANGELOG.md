@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer takes an `exp` for every run of one repetition, which is most of them and is what the
   track already holds; the track is unchanged. `read_build/64x150/pcr` 147 → 77 µs.
 
+### Fixed
+
+- **`Wait::Block` no longer loses a launch on a shared device.** When several threads poll one
+  device, another thread's poll could take a launch's map callback, and `collect` reported
+  `MapPending` before that thread ran it; it now waits for the callback.
+- **A failed `collect` unmaps its buffer** (after a timeout, say), so the aligner's next
+  `submit` no longer fails with "buffer is still mapped" for the rest of its life.
+
 ## v0.2.0 (2026-09-29)
 
 ### Breaking

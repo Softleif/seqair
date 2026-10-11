@@ -29,7 +29,7 @@ use std::sync::{Arc, OnceLock};
 use compair::{
     Band, Base, BaseQuality, Betas, Emission, Haplotype, Log10Likelihood, Probability, Read,
     StandardEmission, Strand, TapsEmission, Workspace, align_full, align_strips,
-    gpu::{GpuAligner, GpuContext, GpuError, GpuPairs, GpuScore, Subnormals},
+    gpu::{GpuAligner, GpuContext, GpuError, GpuPairs, GpuScore, KernelOptions, Subnormals, Wait},
 };
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
@@ -499,4 +499,32 @@ fn the_plan_rejects_mismatched_pairs() -> Result<(), GpuError> {
     ));
     assert_eq!(pairs.len(), 0);
     Ok(())
+}
+
+/// Threads sharing a device poll it concurrently, so one thread's poll can
+/// take another's map callback: a blocking wait must still get its scores,
+/// every launch, rather than fail and leave its aligner's buffer mapped.
+#[test]
+fn blocking_waits_on_a_shared_device_all_collect() -> Result<(), GpuError> {
+    let Some(context) = context() else { return Ok(()) };
+    let emission = StandardEmission::default();
+    let mut pairs = GpuPairs::new();
+    let r = pairs.push_read(&read(b"TAGCATCGGATCCGATTACAGG", Strand::OT), &emission)?;
+    let h = pairs.push_haplotype(
+        &Haplotype::from_ascii(b"ACGTTAGCATCGGATCCGATTACAGGCATTACGG"),
+        Strand::OT,
+        &emission,
+    )?;
+    pairs.push_pair(r, h, Band::anchored(2))?;
+    let options = KernelOptions { wait: Wait::Block, ..KernelOptions::default() };
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let mut aligner = GpuAligner::with_options(context.clone(), options);
+                let pairs = &pairs;
+                scope.spawn(move || (0..2000).try_for_each(|_| aligner.align(pairs).map(drop)))
+            })
+            .collect();
+        threads.into_iter().try_for_each(|thread| thread.join().expect("no panic"))
+    })
 }
