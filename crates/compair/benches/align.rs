@@ -17,11 +17,12 @@
 mod fixture;
 
 use compair::{
-    Band, Betas, ConversionModel, Haplotype, Pair, Read, StandardEmission, TapsEmission, Workspace,
-    align_banded, align_banded_simd, align_full, align_strips, align_strips_simd,
+    Band, BaseQuality, Betas, ConversionModel, Haplotype, Pair, PcrIndelModel, Read,
+    StandardEmission, Strand, TapsEmission, Workspace, align_banded, align_banded_simd, align_full,
+    align_strips, align_strips_simd,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
-use fixture::{Fixture, Shadow, fixture, shadow};
+use fixture::{Fixture, READ_LEN, Shadow, fixture, sequence, shadow};
 use std::hint::black_box;
 
 fn align(c: &mut Criterion) {
@@ -187,5 +188,40 @@ fn shadow_locus(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, align);
+/// Building a read with the PCR indel model, as a variant caller does once
+/// per read and cluster: 64 pseudo-random 150 bp reads.
+fn read_build(c: &mut Criterion) {
+    let model = PcrIndelModel { floor: BaseQuality::from_byte(20), ..PcrIndelModel::default() };
+    let reads: Vec<_> = (0..64).map(|seed| sequence(READ_LEN, 0x9e37_79b9 + seed)).collect();
+    let quals = vec![BaseQuality::from_byte(30); READ_LEN];
+    let gap = BaseQuality::from_byte(10);
+    c.bench_function("read_build/64x150/pcr", |b| {
+        b.iter(|| {
+            for bases in &reads {
+                let read =
+                    Read::with_pcr_indel_model(bases.clone(), &quals, &model, gap, Strand::OT);
+                black_box(read.ok());
+            }
+        });
+    });
+    // The same reads with no indel model: what the model itself costs is the
+    // difference.
+    c.bench_function("read_build/64x150/uniform", |b| {
+        b.iter(|| {
+            for bases in &reads {
+                let read = Read::uniform(
+                    bases.clone(),
+                    &quals,
+                    model.gap_open,
+                    model.gap_open,
+                    gap,
+                    Strand::OT,
+                );
+                black_box(read.ok());
+            }
+        });
+    });
+}
+
+criterion_group!(benches, align, read_build);
 criterion_main!(benches);
