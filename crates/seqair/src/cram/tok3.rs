@@ -19,7 +19,8 @@
 )]
 
 use super::codec_io::{Uint7Error, read_u8, read_u32_le, read_uint7, split_off};
-use super::rans_nx16::{self, Nx16Order1Buf};
+use super::codec_scratch::CodecScratch;
+use super::rans_nx16;
 use super::reader::{CramError, MAX_ALLOC_SIZE, MAX_CODEC_OUTPUT, check_codec_output};
 
 /// Bridge `Uint7Error` (narrow, hot-path-friendly) to the rich `CramError`.
@@ -117,20 +118,20 @@ const TYPE_BYTES: [u8; N_TYPES] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
 /// Decode a tok3 compressed block.
 ///
-/// Builds rANS Nx16 order-1 tables afresh for every block that needs them;
-/// a [`Decoder`] keeps them.
+/// Builds rANS Nx16 order-1 tables (and a bzip2 decoder, for EXT streams)
+/// afresh for every block that needs them; a [`Decoder`] keeps them.
 pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
     Decoder::new().decode(src)
 }
 
-/// A tok3 decoder that keeps its rANS Nx16 order-1 tables (about 5 MiB,
-/// allocated on the first block that needs them) from one block to the
-/// next, as the CRAM reader does. Building them per block costs more than
+/// A tok3 decoder that keeps its rANS Nx16 order-1 tables (about 5 MiB) and
+/// bzip2 decoder, each allocated on the first block that needs them, from
+/// one block to the next, as the CRAM reader does. Building them per block costs more than
 /// decoding a small block.
 // r[impl cram.codec.tok3.table_reuse]
 #[derive(Default)]
 pub struct Decoder {
-    rans_buf: Nx16Order1Buf,
+    scratch: CodecScratch,
 }
 
 impl Decoder {
@@ -140,18 +141,18 @@ impl Decoder {
 
     /// Decode a tok3 compressed block.
     pub fn decode(&mut self, src: &[u8]) -> Result<Vec<u8>, CramError> {
-        decode_with_buf(src, &mut self.rans_buf)
+        decode_with_scratch(src, &mut self.scratch)
     }
 }
 
-/// [`decode`], reusing the caller's rANS Nx16 order-1 tables.
+/// [`decode`], reusing the caller's scratch (rANS Nx16 order-1 tables, bzip2).
 // r[impl cram.codec.tok3.table_reuse]
-pub(crate) fn decode_with_buf(
+pub(crate) fn decode_with_scratch(
     src: &[u8],
-    rans_buf: &mut Nx16Order1Buf,
+    scratch: &mut CodecScratch,
 ) -> Result<Vec<u8>, CramError> {
     // Every stream stores its length, so the size passed is unused.
-    decode_with(src, |stream| super::arith::decode(stream, 0), rans_buf)
+    decode_with(src, |stream, scratch| super::arith::decode_with(stream, 0, scratch), scratch)
 }
 
 /// [`decode`] with the arithmetic coder's streams decoded by
@@ -162,20 +163,21 @@ pub(crate) fn decode_with_buf(
 pub fn decode_with_arith_reference(src: &[u8]) -> Result<Vec<u8>, CramError> {
     decode_with(
         src,
-        |stream| {
+        |stream, _| {
             super::arith::reference::decode(stream, 0)
                 .ok_or(CramError::ArithCorruptData { context: "arith reference decoder" })
         },
-        &mut Nx16Order1Buf::new(),
+        // Test and fuzz builds only: the reference decoder uses neither member.
+        &mut CodecScratch::default(),
     )
 }
 
 /// Decode a tok3 block, decoding arith-coded streams with `arith` and
-/// rANS Nx16 ones with `rans_buf`'s order-1 tables.
+/// rANS Nx16 ones with `scratch`'s order-1 tables.
 fn decode_with(
     src: &[u8],
-    arith: impl Fn(&[u8]) -> Result<Vec<u8>, CramError>,
-    rans_buf: &mut Nx16Order1Buf,
+    arith: impl Fn(&[u8], &mut CodecScratch) -> Result<Vec<u8>, CramError>,
+    scratch: &mut CodecScratch,
 ) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
     let truncated = || CramError::Truncated { context: "tok3 header" };
@@ -198,7 +200,7 @@ fn decode_with(
         return Err(CramError::Tok3NameCountExceedsLength { count: name_count, length: ulen });
     }
 
-    let streams = Streams::read(&mut cur, use_arith.then_some(&arith), rans_buf, MAX_CODEC_OUTPUT)?;
+    let streams = Streams::read(&mut cur, use_arith.then_some(&arith), scratch, MAX_CODEC_OUTPUT)?;
     let mut names = Names::new(streams.cursors(name_count), max_output, name_count);
     for n in 0..name_count {
         names.decode_name(n)?;
@@ -228,13 +230,13 @@ impl Streams {
     // r[impl cram.codec.tok3.streams]
     /// Read and decode every token stream; `arith` decodes them when the
     /// block uses the arithmetic coder, else they are rANS Nx16, decoded
-    /// with `rans_buf`'s order-1 tables. Together they may decode to at most
+    /// with `scratch`'s order-1 tables. Together they may decode to at most
     /// `max_total` bytes.
     // r[impl cram.codec.tok3.limits+2]
     fn read(
         src: &mut &[u8],
-        arith: Option<&impl Fn(&[u8]) -> Result<Vec<u8>, CramError>>,
-        rans_buf: &mut Nx16Order1Buf,
+        arith: Option<&impl Fn(&[u8], &mut CodecScratch) -> Result<Vec<u8>, CramError>>,
+        scratch: &mut CodecScratch,
         max_total: usize,
     ) -> Result<Self, CramError> {
         let mut streams = Self { decoded: Vec::new(), positions: Vec::new() };
@@ -278,8 +280,8 @@ impl Streams {
                     .ok_or_else(|| CramError::Truncated { context: "tok3 compressed payload" })?;
                 // r[impl cram.codec.tok3_arith]
                 let decoded = match arith {
-                    Some(arith) => arith(data)?,
-                    None => rans_nx16::decode_with_buf(data, 0, rans_buf)?,
+                    Some(arith) => arith(data, scratch)?,
+                    None => rans_nx16::decode_with_buf(data, 0, &mut scratch.nx16_order1)?,
                 };
                 // A stream set twice keeps the later one, but both were
                 // decoded: without a total, a few KiB could decode to any
@@ -999,9 +1001,10 @@ mod tests {
         );
         let read = |max_total| {
             let mut cur = src.get(9..).unwrap();
-            let rans_only = |_: &[u8]| -> Result<Vec<u8>, CramError> { unreachable!() };
+            let rans_only =
+                |_: &[u8], _: &mut CodecScratch| -> Result<Vec<u8>, CramError> { unreachable!() };
             let arith = false.then_some(&rans_only);
-            Streams::read(&mut cur, arith, &mut Nx16Order1Buf::new(), max_total).map(|_| ())
+            Streams::read(&mut cur, arith, &mut CodecScratch::default(), max_total).map(|_| ())
         };
         assert!(read(30).is_ok());
         assert!(matches!(

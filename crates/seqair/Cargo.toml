@@ -20,7 +20,7 @@ ignored-paths = ["tests/support/cram_raw_blocks.rs"]
 [features]
 # Forwards `seqair-types/serde`; seqair itself serializes nothing.
 serde = ["seqair-types/serde"]
-fuzz = []
+fuzz = ["dep:bzip2"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -35,7 +35,8 @@ rustc-hash = "2.1.2"
 # mate linking stores record indices and compares the qnames they point into.
 hashbrown = "0.17.0"
 flate2 = "1.1.9"
-bzip2 = "0.6.1"
+bz2ngrs = { workspace = true }
+bzip2 = { version = "0.6.1", optional = true }
 xz2 = "0.1.7"
 md5 = "0.8.0"
 fearless_simd = { workspace = true }
@@ -46,6 +47,8 @@ fearless_simd_macros = { workspace = true }
 # kernel tests can run it next to every vector level the CPU has.
 fearless_simd = { workspace = true, features = ["force_support_fallback"] }
 hegeltest = { workspace = true }
+# Makes bzip2 test inputs and is the oracle for the reference decoder.
+bzip2 = "0.6.1"
 tempfile = "3.27.0"
 libc = "0.2"
 criterion = { version = "0.8", features = ["html_reports"] }

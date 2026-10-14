@@ -9,7 +9,7 @@
     reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
 )]
 
-use super::{reader::CramError, varint};
+use super::{codec_scratch::CodecScratch, reader::CramError, varint};
 
 /// Block content types as defined in the CRAM spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,23 +47,18 @@ pub struct Block {
 // r[impl cram.block.structure]
 // r[impl cram.block.crc32]
 /// Returns the block and the number of bytes consumed from `buf`.
+///
+/// One-shot entry point for callers outside the reader: it decodes with a
+/// fresh `CodecScratch`, which allocates nothing until a block needs it.
+/// The reader's own loops use `parse_block_with`.
 pub fn parse_block(buf: &[u8]) -> Result<(Block, usize), CramError> {
-    parse_block_inner(buf, None, None)
+    parse_block_with(buf, &mut CodecScratch::default())
 }
 
-/// Parse a CRAM block, optionally reusing rANS buffers for the hot path.
-pub(crate) fn parse_block_with_buf(
+/// Parse a CRAM block, decoding with the caller's reusable scratch.
+pub(crate) fn parse_block_with(
     buf: &[u8],
-    rans_4x8_buf: Option<&mut super::rans::Rans4x8Buf>,
-    nx16_order1_buf: Option<&mut super::rans_nx16::Nx16Order1Buf>,
-) -> Result<(Block, usize), CramError> {
-    parse_block_inner(buf, rans_4x8_buf, nx16_order1_buf)
-}
-
-fn parse_block_inner(
-    buf: &[u8],
-    rans_4x8_buf: Option<&mut super::rans::Rans4x8Buf>,
-    nx16_order1_buf: Option<&mut super::rans_nx16::Nx16Order1Buf>,
+    scratch: &mut CodecScratch,
 ) -> Result<(Block, usize), CramError> {
     let mut pos = 0;
 
@@ -156,8 +151,7 @@ fn parse_block_inner(
             uncompressed_size,
             content_type_byte,
             content_id,
-            rans_4x8_buf,
-            nx16_order1_buf,
+            scratch,
         )?;
         check_decoded_size(method, uncompressed_size, data.len())?;
         data
@@ -172,8 +166,7 @@ fn decompress_block(
     uncompressed_size: usize,
     content_type: u8,
     content_id: i32,
-    rans_4x8_buf: Option<&mut super::rans::Rans4x8Buf>,
-    nx16_order1_buf: Option<&mut super::rans_nx16::Nx16Order1Buf>,
+    scratch: &mut CodecScratch,
 ) -> Result<Vec<u8>, CramError> {
     match method {
         // r[impl cram.codec.raw]
@@ -189,30 +182,35 @@ fn decompress_block(
             Ok(output)
         }
         // r[impl cram.codec.bzip2]
-        2 => read_capped(bzip2::read::BzDecoder::new(compressed), uncompressed_size)
-            .map_err(|source| CramError::Bzip2DecompressionFailed { source }),
+        2 => {
+            // `uncompressed_size` passed `check_codec_output` above, so it is a
+            // bounded allocation; output shorter than it is fine.
+            scratch.bz2.decompress_to_vec(compressed, uncompressed_size).map_err(|source| {
+                match source {
+                    bz2ngrs::Error::OutputTooSmall { .. } => {
+                        CramError::BlockDecodesPastSize { method, expected: uncompressed_size }
+                    }
+                    _ => CramError::Bzip2DecompressionFailed { source },
+                }
+            })
+        }
         // r[impl cram.codec.lzma]
         3 => read_capped(xz2::read::XzDecoder::new(compressed), uncompressed_size)
             .map_err(|source| CramError::LzmaDecompressionFailed { source }),
         // r[impl cram.codec.rans4x8]
-        4 => match rans_4x8_buf {
-            Some(buf) => super::rans::decode_with_buf(compressed, buf),
-            None => super::rans::decode(compressed),
-        },
+        4 => super::rans::decode_with_buf(compressed, &mut scratch.rans_4x8),
         // r[impl cram.codec.rans_nx16]
-        5 => match nx16_order1_buf {
-            Some(buf) => super::rans_nx16::decode_with_buf(compressed, uncompressed_size, buf),
-            None => super::rans_nx16::decode(compressed, uncompressed_size),
-        },
+        5 => super::rans_nx16::decode_with_buf(
+            compressed,
+            uncompressed_size,
+            &mut scratch.nx16_order1,
+        ),
         // r[impl cram.codec.arith+2]
-        6 => super::arith::decode(compressed, uncompressed_size),
+        6 => super::arith::decode_with(compressed, uncompressed_size, scratch),
         // r[impl cram.codec.fqzcomp]
         7 => super::fqzcomp::decode(compressed),
         // r[impl cram.codec.tok3]
-        8 => match nx16_order1_buf {
-            Some(buf) => super::tok3::decode_with_buf(compressed, buf),
-            None => super::tok3::decode(compressed),
-        },
+        8 => super::tok3::decode_with_scratch(compressed, scratch),
         // r[impl cram.codec.unknown]
         _ => Err(CramError::UnsupportedCodec { method, content_type, content_id }),
     }
@@ -622,6 +620,48 @@ mod tests {
 
         let err = parse_block(&buf).unwrap_err();
         assert!(matches!(err, CramError::Bzip2DecompressionFailed { .. }));
+        // The decoder's context (here: not a bzip2 stream) is reachable through `source()`.
+        let source = std::error::Error::source(&err).expect("bzip2 failure carries its source");
+        assert!(source.to_string().contains("not a bzip2 stream"), "{source}");
+    }
+
+    // r[verify cram.codec.scratch]
+    #[test]
+    fn one_scratch_decodes_bzip2_blocks_after_a_failed_one() {
+        use std::io::Write;
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        bz.write_all(&b"hello bzip2 ".repeat(50)).unwrap();
+        let good = bz.finish().unwrap();
+        let mut bad = good.clone();
+        bad[10] ^= 1;
+
+        let mut scratch = CodecScratch::default();
+        let want = b"hello bzip2 ".repeat(50);
+        for stream in [&good, &bad, &good] {
+            let result = parse_block_with(&method_block(2, stream, 600), &mut scratch);
+            if std::ptr::eq(stream, &bad) {
+                assert!(matches!(result, Err(CramError::Bzip2DecompressionFailed { .. })));
+            } else {
+                assert_eq!(result.unwrap().0.data, want);
+            }
+        }
+    }
+
+    #[test]
+    fn bzip2_corruption_reports_block_and_bit() {
+        use std::io::Write;
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        bz.write_all(&b"hello bzip2 ".repeat(50)).unwrap();
+        let mut stream = bz.finish().unwrap();
+        // Flip a bit in the stored block CRC (bytes 10..14: after "BZh1" and the 48-bit block magic).
+        stream[10] ^= 1;
+        let err = parse_block(&method_block(2, &stream, 600)).unwrap_err();
+        let CramError::Bzip2DecompressionFailed { source } = &err else {
+            panic!("expected Bzip2DecompressionFailed, got {err:?}");
+        };
+        assert!(matches!(source, bz2ngrs::Error::BlockCrc { block: 0, .. }), "{source:?}");
+        let chain = std::error::Error::source(&err).unwrap().to_string();
+        assert!(chain.contains("block 0 CRC mismatch"), "{chain}");
     }
 
     #[test]

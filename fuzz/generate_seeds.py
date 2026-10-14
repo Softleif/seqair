@@ -86,6 +86,86 @@ def extract_sam_header(raw_bam: bytearray):
     return bytes(raw_bam[8 : 8 + header_len])
 
 
+def read_itf8(b: bytes, p: int):
+    c = b[p]
+    if c < 0x80:
+        return c, p + 1
+    if c < 0xC0:
+        return ((c & 0x3F) << 8) | b[p + 1], p + 2
+    if c < 0xE0:
+        return ((c & 0x1F) << 16) | (b[p + 1] << 8) | b[p + 2], p + 3
+    if c < 0xF0:
+        return ((c & 0x0F) << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3], p + 4
+    return ((c & 0x0F) << 28) | (b[p + 1] << 20) | (b[p + 2] << 12) | (b[p + 3] << 4) | (b[p + 4] & 0x0F), p + 5
+
+
+def read_ltf8(b: bytes, p: int):
+    c = b[p]
+    n = 0
+    while n < 8 and c & (0x80 >> n):
+        n += 1
+    v = (c & (0xFF >> (n + 1))) if n < 8 else 0
+    for i in range(n):
+        v = (v << 8) | b[p + 1 + i]
+    return v, p + 1 + n
+
+
+def write_itf8(v: int) -> bytes:
+    """ITF8 for values below 2**28 (block sizes)."""
+    if v < 0x80:
+        return bytes([v])
+    if v < 0x4000:
+        return bytes([0x80 | v >> 8, v & 0xFF])
+    if v < 0x200000:
+        return bytes([0xC0 | v >> 16, v >> 8 & 0xFF, v & 0xFF])
+    return bytes([0xE0 | v >> 24, v >> 16 & 0xFF, v >> 8 & 0xFF, v & 0xFF])
+
+
+def write_uint7(v: int) -> bytes:
+    """The arithmetic coder's variable-length length: 7-bit groups, high bit set on all but the last."""
+    groups = [v & 0x7F]
+    v >>= 7
+    while v:
+        groups.append(0x80 | v & 0x7F)
+        v >>= 7
+    return bytes(reversed(groups))
+
+
+def cram_blocks(cram: bytes):
+    """Yield (method, content_id, compressed, raw_size, whole_block_bytes) for every block of a CRAM 3.x file."""
+    p = 26  # file definition
+    while p + 4 <= len(cram):
+        length = struct.unpack_from("<i", cram, p)[0]
+        q = p + 4
+        for _ in range(4):  # ref_seq_id, alignment_start, span, n_records
+            _, q = read_itf8(cram, q)
+        _, q = read_ltf8(cram, q)  # record counter
+        _, q = read_ltf8(cram, q)  # bases
+        _, q = read_itf8(cram, q)  # n_blocks
+        n_landmarks, q = read_itf8(cram, q)
+        for _ in range(n_landmarks):
+            _, q = read_itf8(cram, q)
+        q += 4  # container header CRC32
+        end = q + length
+        while q < end:
+            start = q
+            method = cram[q]
+            q += 2  # method, content type
+            content_id, q = read_itf8(cram, q)
+            comp_size, q = read_itf8(cram, q)
+            raw_size, q = read_itf8(cram, q)
+            data = cram[q : q + comp_size]
+            q += comp_size + 4  # block CRC32
+            yield method, content_id, data, raw_size, cram[start:q]
+        p = end
+
+
+def block_with(method: int, content_id: int, compressed: bytes, raw_size: int) -> bytes:
+    """An external-data block (content type 4) with a fresh CRC32."""
+    buf = bytes([method, 4]) + write_itf8(content_id) + write_itf8(len(compressed)) + write_itf8(raw_size) + compressed
+    return buf + struct.pack("<I", zlib.crc32(buf))
+
+
 def main():
     if not os.path.isdir(DATA_DIR):
         print(f"Error: test data directory not found: {DATA_DIR}", file=sys.stderr)
@@ -228,6 +308,35 @@ def main():
 
     # Also seed with the raw BAI file (CSI parser rejects BAI magic, exercises error path)
     write_seed("fuzz_csi_index", "bai_as_csi", bai)
+
+    # --- bzip2 (CRAM method 2) seeds: the smallest bzip2 blocks of hts-specs' level-3/4 files ---
+    # The block fuzzer's CRC32 check rejects nearly every mutation, so besides the
+    # blocks themselves there are a truncated and a bit-flipped stream with a fresh CRC.
+    # The codec fuzzers take the same bzip2 stream as an arith EXT body.
+    bz_blocks = {}
+    for level in ("level-3", "level-4"):
+        cram = open(os.path.join(DATA_DIR, "hts-specs", "cram", "3.1", "passed", f"{level}.cram"), "rb").read()
+        for method, cid, data, raw_size, whole in cram_blocks(cram):
+            if method == 2 and len(whole) <= 8192:
+                bz_blocks.setdefault(data, (level, cid, raw_size, whole))  # level-4 repeats level-3's
+    for data, (level, cid, raw_size, whole) in sorted(bz_blocks.items(), key=lambda kv: len(kv[1][3])):
+        write_seed("fuzz_cram_block", f"{level}_bzip2_id{cid}", whole)
+    smallest, (level, cid, raw_size, _) = min(bz_blocks.items(), key=lambda kv: len(kv[0]))
+    write_seed("fuzz_cram_block", f"{level}_bzip2_id{cid}_truncated", block_with(2, cid, smallest[: len(smallest) // 2], raw_size))
+    flipped = bytearray(smallest)
+    flipped[len(flipped) // 2] ^= 0x10
+    write_seed("fuzz_cram_block", f"{level}_bzip2_id{cid}_bitflip", block_with(2, cid, bytes(flipped), raw_size))
+
+    # Arith stream: EXT flag, uint7 length, bzip2 body.
+    ext = bytes([0x04]) + write_uint7(raw_size) + smallest
+    write_seed("fuzz_cram_arith", f"{level}_ext_id{cid}", ext)
+    # fuzz_cram_codecs is `Arbitrary`: a u32 picks the variant (0x80000000 * 5 >> 32 = 2, Arith),
+    # then each data byte behind a "more" flag byte, a 0 flag to end the vector, and the u16 length.
+    write_seed(
+        "fuzz_cram_codecs",
+        f"arith_ext_{level}_id{cid}",
+        struct.pack("<I", 0x80000000) + b"".join(b"\x01" + bytes([b]) for b in ext) + b"\x00" + struct.pack("<H", raw_size),
+    )
 
     # --- fuzz_cram_decode_full: CRAM header data ---
     for cram_name in ["test.cram", "test_v30.cram"]:

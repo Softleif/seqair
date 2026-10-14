@@ -56,9 +56,9 @@ to catch — several entries in [Bugs found](#bugs-found) were OOMs.
 
 | Target                      | Description                                   | Seeds          |
 | --------------------------- | --------------------------------------------- | -------------- |
-| `fuzz_cram_block`           | Block parsing + all compression codecs        | 3 CRAM files   |
+| `fuzz_cram_block`           | Block parsing + all compression codecs        | 3 CRAM files, bzip2 blocks |
 | `fuzz_cram_container`       | Container header parsing                      | 3 CRAM files   |
-| `fuzz_cram_codecs`          | rANS 4x8, rANS Nx16, tok3                     | noodles vector |
+| `fuzz_cram_codecs`          | rANS 4x8, rANS Nx16, tok3                     | noodles vector, arith EXT |
 | `fuzz_cram_header`          | Compression header + slice header + encodings | 3 CRAM files   |
 | `fuzz_cram_varint`          | ITF8/LTF8 variable-length integers            | 6 encodings    |
 | `fuzz_cram_bitstream`       | BitReader operations                          | —              |

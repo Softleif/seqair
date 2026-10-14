@@ -330,23 +330,16 @@ pub(crate) fn decode_slice(
     name_buf: &mut Vec<u8>,
     feature_byte_buf: &mut Vec<u8>,
     cigar_ops_buf: &mut Vec<(u32, u8)>,
-    rans_4x8_buf: &mut Option<super::rans::Rans4x8Buf>,
-    nx16_order1_buf: &mut Option<super::rans_nx16::Nx16Order1Buf>,
+    scratch: &mut super::codec_scratch::CodecScratch,
 ) -> Result<DecodedSlice, CramError> {
     let slice_data = container_data
         .get(slice_offset..)
         .ok_or_else(|| CramError::Truncated { context: "slice offset" })?;
 
     // Parse slice header block
-    // The codec buffers live on the reader so every block of every slice
-    // reuses one set of order-1 tables instead of allocating its own.
-    let rans_4x8_buf = rans_4x8_buf.get_or_insert_with(super::rans::Rans4x8Buf::new);
-    let nx16_order1_buf = nx16_order1_buf.get_or_insert_with(super::rans_nx16::Nx16Order1Buf::new);
-    let (slice_header_block, mut pos) = block::parse_block_with_buf(
-        slice_data,
-        Some(&mut *rans_4x8_buf),
-        Some(&mut *nx16_order1_buf),
-    )?;
+    // The scratch lives on the reader so every block of every slice reuses
+    // one set of codec tables instead of allocating its own.
+    let (slice_header_block, mut pos) = block::parse_block_with(slice_data, scratch)?;
     if slice_header_block.content_type != ContentType::SliceHeader {
         return Err(CramError::ExpectedSliceHeader { found: slice_header_block.content_type });
     }
@@ -420,11 +413,7 @@ pub(crate) fn decode_slice(
     for _ in 0..sh.num_blocks {
         let remaining =
             slice_data.get(pos..).ok_or_else(|| CramError::Truncated { context: "slice block" })?;
-        let (blk, consumed) = block::parse_block_with_buf(
-            remaining,
-            Some(&mut *rans_4x8_buf),
-            Some(&mut *nx16_order1_buf),
-        )?;
+        let (blk, consumed) = block::parse_block_with(remaining, scratch)?;
         pos = pos.wrapping_add(consumed);
 
         match blk.content_type {
@@ -1695,8 +1684,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
-            &mut None,
-            &mut None,
+            &mut crate::cram::codec_scratch::CodecScratch::default(),
         );
 
         assert!(

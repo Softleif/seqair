@@ -5,11 +5,10 @@
 use super::{
     super::bam::record_store::CustomizeRecordStore,
     block,
+    codec_scratch::CodecScratch,
     compression_header::CompressionHeader,
     container::ContainerHeader,
     index::{self, CramIndex, CramIndexError},
-    rans::Rans4x8Buf,
-    rans_nx16::Nx16Order1Buf,
     slice::{self, DecodedSlice},
     slice_cache::{SliceCache, SliceCacheBudget, SliceCacheStats, SliceKey},
 };
@@ -100,7 +99,7 @@ pub enum CramError {
     GzipDecompressionFailed { source: libdeflater::DecompressionError },
 
     #[error("bzip2 decompression failed in block")]
-    Bzip2DecompressionFailed { source: std::io::Error },
+    Bzip2DecompressionFailed { source: bz2ngrs::Error },
 
     #[error("lzma decompression failed in block")]
     LzmaDecompressionFailed { source: std::io::Error },
@@ -395,12 +394,9 @@ pub struct IndexedCramReader<R: Read + Seek = File> {
     /// Reused across records: accumulated `(length, op_code)` CIGAR ops
     /// before being packed into BAM-layout `CigarOp`s.
     cigar_ops_buf: Vec<(u32, u8)>,
-    /// Reused across blocks: rANS 4x8 order-1 tables (1.25 MB).
-    /// Lazily allocated on first order-1 block.
-    rans_4x8_buf: Option<Rans4x8Buf>,
-    /// Reused across blocks: rANS Nx16 order-1 tables (∼512 KB).
-    /// Lazily allocated on first order-1 block.
-    nx16_order1_buf: Option<Nx16Order1Buf>,
+    /// Reused across blocks: rANS order-1 tables and the bzip2 decoder, each
+    /// allocated on first use.
+    codec_scratch: CodecScratch,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for IndexedCramReader<R> {
@@ -469,8 +465,7 @@ impl IndexedCramReader<File> {
             name_buf: Vec::new(),
             feature_byte_buf: Vec::new(),
             cigar_ops_buf: Vec::new(),
-            rans_4x8_buf: None,
-            nx16_order1_buf: None,
+            codec_scratch: CodecScratch::default(),
         })
     }
 
@@ -492,8 +487,7 @@ impl IndexedCramReader<File> {
             name_buf: Vec::new(),
             feature_byte_buf: Vec::new(),
             cigar_ops_buf: Vec::new(),
-            rans_4x8_buf: None,
-            nx16_order1_buf: None,
+            codec_scratch: CodecScratch::default(),
         })
     }
 }
@@ -566,8 +560,7 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
             name_buf: Vec::new(),
             feature_byte_buf: Vec::new(),
             cigar_ops_buf: Vec::new(),
-            rans_4x8_buf: None,
-            nx16_order1_buf: None,
+            codec_scratch: CodecScratch::default(),
         })
     }
 }
@@ -760,7 +753,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         self.file.read_exact(&mut self.container_buf)?;
 
         // Parse compression header (first block)
-        let (comp_block, _) = block::parse_block(&self.container_buf)?;
+        let (comp_block, _) =
+            block::parse_block_with(&self.container_buf, &mut self.codec_scratch)?;
         if comp_block.content_type != block::ContentType::CompressionHeader {
             return Err(CramError::ExpectedCompressionHeader { found: comp_block.content_type });
         }
@@ -904,8 +898,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             &mut self.name_buf,
             &mut self.feature_byte_buf,
             &mut self.cigar_ops_buf,
-            &mut self.rans_4x8_buf,
-            &mut self.nx16_order1_buf,
+            &mut self.codec_scratch,
         )
     }
 }
@@ -933,7 +926,8 @@ fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, Cram
     ))?;
     file.read_exact(&mut data)?;
 
-    // Parse the file header block
+    // Parse the file header block. Cold: once per open, before any reader (and
+    // its scratch) exists; `parse_block` uses a fresh scratch.
     let (blk, _) = block::parse_block(&data)?;
     if blk.content_type != block::ContentType::FileHeader {
         return Err(CramError::ExpectedFileHeader { found: blk.content_type });

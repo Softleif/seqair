@@ -6,6 +6,7 @@ pub mod arith;
 pub mod bitstream;
 pub mod block;
 pub(crate) mod codec_io;
+pub(crate) mod codec_scratch;
 pub mod compression_header;
 pub mod container;
 pub mod encoding;

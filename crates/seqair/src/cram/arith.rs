@@ -8,8 +8,6 @@
 //! (bzip2). Follows htscodecs' `arith_dynamic.c` where the spec's pseudocode
 //! differs; `docs/spec/2-cram-1-reader.md` names each place.
 
-use std::io::Read;
-
 use fearless_simd::{Level, Simd, dispatch};
 use fearless_simd_macros::simd;
 
@@ -20,6 +18,7 @@ pub(crate) mod htscodecs_oracle;
 pub mod reference;
 
 use super::codec_io::{self, Uint7Error, read_u8};
+use super::codec_scratch::CodecScratch;
 use super::range_coder::{AdaptiveModel, RangeDecoder};
 use super::rans_nx16::{apply_bit_unpack, read_bit_pack_context};
 use super::reader::{CramError, check_codec_output};
@@ -57,13 +56,31 @@ type RunModel = AdaptiveModel<RUN_SYMBOLS>;
 /// `uncompressed_size` is used only by a stream that does not store its
 /// length (the NOSZ flag); otherwise the stored length wins, and the result
 /// always has the length the stream declares.
+///
+/// One-shot entry point for callers outside the reader: a stream with the
+/// EXT flag allocates a bzip2 decoder for this call. Inside the crate, use
+/// `decode_with`.
 pub fn decode(src: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, CramError> {
-    decode_at(Level::new(), src, uncompressed_size)
+    decode_with(src, uncompressed_size, &mut CodecScratch::default())
 }
 
-/// [`decode`] at a chosen SIMD level, so tests can run every level.
-fn decode_at(level: Level, src: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, CramError> {
-    decode_nested(level, src, uncompressed_size, 0)
+/// [`decode`], with the caller's reusable scratch.
+pub(crate) fn decode_with(
+    src: &[u8],
+    uncompressed_size: usize,
+    scratch: &mut CodecScratch,
+) -> Result<Vec<u8>, CramError> {
+    decode_at(Level::new(), src, uncompressed_size, scratch)
+}
+
+/// [`decode_with`] at a chosen SIMD level, so tests can run every level.
+fn decode_at(
+    level: Level,
+    src: &[u8],
+    uncompressed_size: usize,
+    scratch: &mut CodecScratch,
+) -> Result<Vec<u8>, CramError> {
+    decode_nested(level, src, uncompressed_size, 0, scratch)
 }
 
 fn read_uint7(src: &mut &[u8]) -> Result<usize, CramError> {
@@ -80,11 +97,12 @@ fn decode_nested(
     src: &[u8],
     uncompressed_size: usize,
     depth: u8,
+    scratch: &mut CodecScratch,
 ) -> Result<Vec<u8>, CramError> {
     let mut cur = src;
     let flags = read_u8(&mut cur).ok_or(CramError::Truncated { context: "arith flags" })?;
     if flags & FLAG_STRIPE != 0 {
-        return decode_stripe(level, cur, depth);
+        return decode_stripe(level, cur, depth, scratch);
     }
 
     let len = if flags & FLAG_NO_SIZE != 0 { uncompressed_size } else { read_uint7(&mut cur)? };
@@ -102,7 +120,7 @@ fn decode_nested(
     };
 
     let body_len = pack.as_ref().map_or(len, |&(_, packed_len)| packed_len);
-    let body = decode_body(level, flags, cur, body_len)?;
+    let body = decode_body(level, flags, cur, body_len, scratch)?;
 
     let out = match pack {
         // r[impl cram.codec.arith.pack]
@@ -133,7 +151,13 @@ fn decode_nested(
 }
 
 /// Decode the body after the metadata to (at most) `len` bytes.
-fn decode_body(level: Level, flags: u8, body: &[u8], len: usize) -> Result<Vec<u8>, CramError> {
+fn decode_body(
+    level: Level,
+    flags: u8,
+    body: &[u8],
+    len: usize,
+    scratch: &mut CodecScratch,
+) -> Result<Vec<u8>, CramError> {
     // htscodecs decodes an empty body to nothing, whatever the flags say;
     // the length check after it decides whether that was valid.
     if body.is_empty() {
@@ -144,7 +168,7 @@ fn decode_body(level: Level, flags: u8, body: &[u8], len: usize) -> Result<Vec<u
         return Ok(data.to_vec());
     }
     if flags & FLAG_EXT != 0 {
-        return decode_ext(body, len);
+        return decode_ext(body, len, &mut scratch.bz2);
     }
     if len == 0 {
         return Ok(Vec::new());
@@ -265,7 +289,12 @@ fn decode_rle<S: Simd, const ORDER1: bool>(
 const SHORT_RUN: usize = 16;
 
 // r[impl cram.codec.arith.stripe]
-fn decode_stripe(level: Level, mut cur: &[u8], depth: u8) -> Result<Vec<u8>, CramError> {
+fn decode_stripe(
+    level: Level,
+    mut cur: &[u8],
+    depth: u8,
+    scratch: &mut CodecScratch,
+) -> Result<Vec<u8>, CramError> {
     if depth >= MAX_STRIPE_DEPTH {
         return Err(CramError::ArithStripeTooDeep { limit: MAX_STRIPE_DEPTH });
     }
@@ -287,7 +316,7 @@ fn decode_stripe(level: Level, mut cur: &[u8], depth: u8) -> Result<Vec<u8>, Cra
             let sub = codec_io::split_off(&mut cur, clen)
                 .ok_or(CramError::Truncated { context: "arith stripe substream" })?;
             let part_len = q.saturating_add(usize::from(j < r));
-            let part = decode_nested(level, sub, part_len, depth.saturating_add(1))?;
+            let part = decode_nested(level, sub, part_len, depth.saturating_add(1), scratch)?;
             if part.len() != part_len {
                 return Err(CramError::ArithLengthMismatch {
                     expected: part_len,
@@ -303,21 +332,19 @@ fn decode_stripe(level: Level, mut cur: &[u8], depth: u8) -> Result<Vec<u8>, Cra
 }
 
 // r[impl cram.codec.arith.ext]
-fn decode_ext(body: &[u8], len: usize) -> Result<Vec<u8>, CramError> {
+fn decode_ext(body: &[u8], len: usize, bz2: &mut bz2ngrs::Decoder) -> Result<Vec<u8>, CramError> {
     if !body.starts_with(b"BZh") {
         return Err(CramError::ArithExtUnknownCodec);
     }
-    let mut out = Vec::with_capacity(len);
-    // One byte past `len` is enough to tell that the output does not fit.
-    let limit = u64::try_from(len).unwrap_or(u64::MAX).saturating_add(1);
-    bzip2::read::BzDecoder::new(body)
-        .take(limit)
-        .read_to_end(&mut out)
-        .map_err(|source| CramError::Bzip2DecompressionFailed { source })?;
-    if out.len() > len {
-        return Err(CramError::ArithLengthMismatch { expected: len, actual: out.len() });
-    }
-    Ok(out)
+    // `len` passed `check_codec_output` in `decode_nested`/`decode_stripe` (and
+    // is at most the unpacked length), so it is a bounded allocation.
+    bz2.decompress_to_vec(body, len).map_err(|source| match source {
+        // The decoder stops at `len`, so the true length is unknown: one past it.
+        bz2ngrs::Error::OutputTooSmall { .. } => {
+            CramError::ArithLengthMismatch { expected: len, actual: len.saturating_add(1) }
+        }
+        _ => CramError::Bzip2DecompressionFailed { source },
+    })
 }
 
 #[cfg(test)]
@@ -335,6 +362,7 @@ mod tests {
     use super::super::range_coder::test_encoder::RangeEncoder;
     use super::*;
     use hegel::prelude::*;
+    use std::io::Read;
 
     fn put_uint7(out: &mut Vec<u8>, v: usize) {
         let v = u32::try_from(v).unwrap();
@@ -632,7 +660,11 @@ mod tests {
             Layout::Plain { coder: Coder::Range { order, rle }, pack: false, no_size: false };
         let stream = encode(&layout, &data);
         for level in crate::simd_levels::levels() {
-            assert_eq!(decode_at(level, &stream, 0).unwrap(), data, "{level:?}");
+            assert_eq!(
+                decode_at(level, &stream, 0, &mut CodecScratch::default()).unwrap(),
+                data,
+                "{level:?}"
+            );
         }
         assert_eq!(reference::decode(&stream, 0), Some(data), "reference decoder");
     }

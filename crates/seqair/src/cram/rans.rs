@@ -28,7 +28,14 @@ const LOWER_BOUND: u32 = 1 << 23;
 /// and the symbol → step table (1 KiB, see [`step_entry`]). Allocating
 /// them fresh for every block dominated CRAM decode profiles, so the
 /// reader keeps one set; a block rebuilds only the rows it can reach.
+/// The tables are allocated on the first order-1 block, so constructing a
+/// buffer (or decoding only order-0 blocks) costs nothing.
+#[derive(Default)]
 pub(crate) struct Rans4x8Buf {
+    tables: Option<Order1Tables>,
+}
+
+struct Order1Tables {
     freq: Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>,
     sym_tables: Box<[SymRow; ALPHABET_SIZE]>,
     steps: Box<[StepRow; ALPHABET_SIZE]>,
@@ -45,8 +52,8 @@ fn zeroed_box<T: Clone, const N: usize>(zero: T) -> Box<[T; N]> {
     b
 }
 
-impl Rans4x8Buf {
-    pub fn new() -> Self {
+impl Order1Tables {
+    fn new() -> Self {
         Self {
             freq: zeroed_box([0u16; ALPHABET_SIZE]),
             sym_tables: zeroed_box([0u8; 4096]),
@@ -55,9 +62,9 @@ impl Rans4x8Buf {
     }
 }
 
-impl Default for Rans4x8Buf {
-    fn default() -> Self {
-        Self::new()
+impl Rans4x8Buf {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -455,7 +462,7 @@ fn order_0_rounds(
 /// and every inactive row decode to — inactive ones from all-zero
 /// frequencies, as the reference decoder does. Other rows keep stale
 /// contents that the stream never reads.
-fn build_order_1_rows(active: &[bool; ALPHABET_SIZE], buf: &mut Rans4x8Buf) {
+fn build_order_1_rows(active: &[bool; ALPHABET_SIZE], buf: &mut Order1Tables) {
     let mut reachable = [false; ALPHABET_SIZE];
     let [first, .., last] = &mut reachable;
     (*first, *last) = (true, true);
@@ -488,6 +495,7 @@ fn decode_order_1_fast(
     buf: &mut Rans4x8Buf,
 ) -> Result<(), CramError> {
     let truncated = || CramError::Truncated { context: "rans order-1 truncated" };
+    let buf = buf.tables.get_or_insert_with(Order1Tables::new);
     let active = read_frequencies_1_into(src, &mut buf.freq)?;
     build_order_1_rows(&active, buf);
     let (syms, steps) = (&*buf.sym_tables, &*buf.steps);

@@ -112,7 +112,7 @@ r[cram.block.crc32]
 CRC32 MUST be verified on every block in v3.0+. The CRC32 covers all bytes from the start of the block (method byte) through the end of the compressed data, excluding the 4 CRC32 bytes themselves. Mismatches MUST produce an error with the block's content_type and content_id for diagnostics.
 
 r[cram.block.decoded_size]
-A block whose uncompressed size is 0 is empty whatever its method, and nothing is decoded (htslib skips it the same way). Otherwise the decoded length is checked against the uncompressed size as htslib checks it: gzip, lzma, rANS 4×8, rANS Nx16, the arithmetic coder and fqzcomp MUST decode to exactly that length; bzip2 MAY decode to less (htslib decodes into a buffer of that size and keeps what it gets) but MUST NOT decode to more; raw data is not decoded, and tok3 stores its own length (`r[cram.codec.tok3.limits]`). The streaming decoders (bzip2, lzma) MUST stop one byte past the uncompressed size, so a small stream cannot inflate past it before the check rejects it.
+A block whose uncompressed size is 0 is empty whatever its method, and nothing is decoded (htslib skips it the same way). Otherwise the decoded length is checked against the uncompressed size as htslib checks it: gzip, lzma, rANS 4×8, rANS Nx16, the arithmetic coder and fqzcomp MUST decode to exactly that length; bzip2 MAY decode to less (htslib decodes into a buffer of that size and keeps what it gets) but MUST NOT decode to more; raw data is not decoded, and tok3 stores its own length (`r[cram.codec.tok3.limits]`). The bzip2 decoder writes into a buffer of exactly the uncompressed size and reports output that does not fit; the streaming lzma decoder MUST stop one byte past the uncompressed size. Either way a small stream cannot inflate past the size before the check rejects it.
 
 ## Variable-length integers
 
@@ -294,6 +294,9 @@ Method 1 (GZIP): deflate compression. MUST be supported — this is the most com
 r[cram.codec.bzip2]
 Method 2 (BZIP2): bzip2 compression. MUST be supported for v3.0 compatibility.
 
+r[cram.codec.scratch]
+The reader owns one codec scratch bundle — the rANS 4x8 and Nx16 order-1 tables and the bzip2 decoder's working memory — and every block decode takes it as a required argument down to the codec, so no path allocates per call. Each member allocates on first use (constructing a bundle, or decoding only blocks that do not need a member, costs nothing) and a block decodes exactly as it would with a fresh bundle, whatever an earlier block, failed or not, left behind. Entry points outside the reader (`block::parse_block`, `arith::decode`, `rans::decode`, `tok3::decode`) build a fresh bundle per call; `tok3::Decoder` keeps one.
+
 r[cram.codec.lzma]
 Method 3 (LZMA): LZMA compression. MUST be supported for v3.0 compatibility.
 
@@ -365,7 +368,7 @@ r[cram.codec.tok3.limits+2]
 The header is untrusted: the name count MUST be at most 10 million (`r[cram.tok3.name_count_limit]`), the uncompressed length MUST pass the codec output cap (`r[io.fuzz.codec_output_cap]`), so MUST the token streams' decoded lengths summed over every stream decoded (a stream set twice keeps only the later one, but both are decoded, so capping each stream alone would let a few KiB of block decode to any amount), and the output MUST NOT exceed the uncompressed length by more than 1 KiB — htscodecs' own margin: its encoder writes the exact length, but noodles' leaves out the last name's NUL — so a name count above that bound, which leaves less than a NUL per name, is rejected before anything is allocated for the names.
 
 r[cram.codec.tok3.table_reuse]
-A tok3 block's rANS Nx16 streams share one set of order-1 tables, and the CRAM reader passes in its own (`r[cram.codec.rans_nx16]`'s reusable buffer), so blocks after the first build none: at about 5 MiB they cost more to allocate and clear than a small name block takes to decode. A public `tok3::Decoder` keeps them the same way; `tok3::decode` builds them per call.
+A tok3 block's rANS Nx16 streams share one set of order-1 tables, and the CRAM reader passes in its own (the codec scratch's rANS Nx16 buffer, `r[cram.codec.scratch]`), so blocks after the first build none: at about 5 MiB they cost more to allocate and clear than a small name block takes to decode. A public `tok3::Decoder` keeps them the same way; `tok3::decode` builds them per call.
 
 r[cram.codec.tok3.reference]
 A spec-literal reference decoder (`cram::tok3_reference`, test and fuzz builds only) transliterates the [CRAMcodecs] pseudocode with the choices above and shares no tok3 code with the production decoder. Over the same arithmetic decoder, the production decoder's output and error-or-not MUST equal the reference's for every input.
