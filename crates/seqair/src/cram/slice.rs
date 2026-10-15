@@ -179,9 +179,8 @@ impl DecodedSlice {
     // r[impl cram.fetch_into_customized.filtered_mate_sentinel+2]
     // r[impl interval.overlap_test]
     /// Push the records overlapping `query_start..=query_end` into `store`,
-    /// consulting `customize` for each, and null the mate fields of kept
-    /// records whose attached mate did not make it into the store. Returns
-    /// `(fetched, kept)`. `kept` is scratch space, one entry per record.
+    /// consulting `customize` for each. Returns `(fetched, kept)`. `kept` is
+    /// scratch space, one entry per record.
     pub(crate) fn copy_into<E: CustomizeRecordStore>(
         &self,
         query_start: Pos0,
@@ -226,17 +225,27 @@ impl DecodedSlice {
             }
             kept.push(idx);
         }
-        for (r, idx) in self.records.iter().zip(kept.iter()) {
-            let Some(idx) = *idx else { continue };
-            let mate_missing = match r.mate {
-                MateLink::Own => false,
-                MateLink::Record(m) => kept.get(m as usize).copied().flatten().is_none(),
-                MateLink::Elsewhere => true,
-            };
-            if mate_missing {
-                store.set_mate_info(idx, -1, -1);
-            }
-        }
+        // Mate fields are resolved once, over the whole slice, by
+        // `resolve_mate_tlen`; a region fetch must not undo that. The
+        // alternative — nulling `next_ref_id`/`next_pos` for a kept record
+        // whose mate the region filter dropped — diverges from both other CRAM
+        // implementations: htslib resolves the same slice cross-reference
+        // (`cram_decode_slice_xref`, cram_decode.c) before the region test
+        // runs, and noodles resolves mates over the whole slice in
+        // `Slice::records` (io/reader/container/slice.rs, `resolve_mates`).
+        // A record whose mate lives outside the window therefore still carries
+        // the mate's reference and position, and its `TLEN` stays
+        // slice-consistent — which is what makes attached pairs sortable, and
+        // what keeps a `mate_unmapped`-free record from being misclassified as
+        // inter-chromosomal.
+        //
+        // So every `MateLink` variant keeps the values it already holds: its
+        // own detached fields, or what `resolve_mate_tlen` derived from the
+        // slice's mate info — which is filled even when the mate record itself
+        // was not materialized. There is no post-filter sentinel pass;
+        // `kept` above is only the push loop's scratch space.
+        // `RecordStore::set_mate_info` is untouched and stays available to
+        // callers that null a mate on purpose.
         Ok((fetched_count, kept_count))
     }
 }

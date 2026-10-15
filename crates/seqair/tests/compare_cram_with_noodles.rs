@@ -209,30 +209,26 @@ fn cram_chr19_records_match_noodles_field_by_field() {
             // r[verify cram.record.mate_detached]
             // r[verify cram.record.mate_attached]
             // r[verify cram.record.mate_tlen_reconstruction]
+            // r[verify cram.fetch_into_customized.filtered_mate_sentinel]
             //
-            // seqair applies the filtered-mate-sentinel rule
-            // (r[impl cram.fetch_into_customized.filtered_mate_sentinel+2]):
-            // when the mate is outside the fetched range, the kept record's
-            // next_pos / next_ref_id are nulled to BAM's (-1, -1) sentinel
-            // so downstream pileup-pair logic accurately reflects what's in
-            // the store. noodles reads every record sequentially so it
-            // preserves the original mate position regardless. Only assert
-            // equality when seqair's value is non-sentinel; the htslib
-            // suite (`cram_mate_fields_match_htslib`) covers the matching
-            // path with a query that keeps both records in range.
-            if our_rec.next_pos != -1 {
-                assert_eq!(
-                    i64::from(our_rec.next_pos),
-                    noodles_rec.next_pos,
-                    "{version} rec {i}: next_pos",
-                );
-            }
-            if our_rec.next_ref_id != -1 {
-                assert_eq!(
-                    our_rec.next_ref_id, noodles_rec.next_ref_id,
-                    "{version} rec {i}: next_ref_id",
-                );
-            }
+            // Mate fields keep the values the slice resolved for them
+            // (`r[impl cram.fetch_into_customized.filtered_mate_sentinel+2]`):
+            // a record whose mate the query leaves out still carries the
+            // mate's `next_pos`/`next_ref_id` and the full-chain
+            // `template_len`, exactly as htslib's slice xref and noodles'
+            // `Slice::records` deliver them. So the assertions are
+            // unconditional, and they now cover the mate-outside-the-window
+            // case too (this query only keeps a prefix of the region).
+            assert_eq!(
+                i64::from(our_rec.next_pos),
+                noodles_rec.next_pos,
+                "{version} rec {i}: next_pos",
+            );
+            assert_eq!(
+                our_rec.next_ref_id,
+                noodles_rec.next_ref_id,
+                "{version} rec {i}: next_ref_id",
+            );
             // template_len is preserved across the filter — it's a
             // per-template property computed from the full chain span.
             assert_eq!(
