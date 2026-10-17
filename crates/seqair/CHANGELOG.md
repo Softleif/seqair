@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CIGAR `*` failed with `CigarSeqLengthMismatch { cigar_qlen: 0, .. }`; it now yields no events,
   like `aligned_pairs`.
 
+### Changed
+
+- **CRAM bzip2 blocks decode with [`bz2ngrs`](https://crates.io/crates/bz2ngrs)** instead of the `bzip2` crate.
+  It's much faster in our tests.
+  The reader keeps the decoder's working memory across blocks, alongside the rANS tables, so a bzip2 block no longer allocates per decode;
+  output goes into a buffer of exactly the block's uncompressed size.
+  Note: `bz2ngrs` is `Apache-2.0 WITH LLVM-exception`, a license a downstream `cargo deny` allow-list may need to add.
+
 ## v0.5.0 (2026-10-08)
 
 ### Breaking
