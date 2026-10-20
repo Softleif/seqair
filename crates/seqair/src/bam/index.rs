@@ -67,9 +67,9 @@ impl RefIndex {
         RefIndex { bins, linear_index }
     }
 
-    /// The bins whose id is in `candidates`, skipping the pseudo-bin.
+    /// The bins whose id is in `candidates`.
     fn candidate_bins<'a>(&'a self, candidates: &'a [u32]) -> impl Iterator<Item = &'a Bin> + 'a {
-        candidates.iter().filter(|&&id| id != PSEUDO_BIN).flat_map(move |&id| {
+        candidates.iter().flat_map(move |&id| {
             let lo = self.bins.partition_point(|b| b.bin_id < id);
             self.bins.get(lo..).unwrap_or(&[]).iter().take_while(move |b| b.bin_id == id)
         })
@@ -321,7 +321,6 @@ impl BamIndex {
     // r[impl bam.index.region_query]
     /// Query the index for chunks overlapping a region [start, end] (0-based inclusive).
     // r[impl tabix.query]
-    // r[impl tabix.pseudo_bin]
     pub fn query(&self, tid: u32, start: Pos0, end: Pos0) -> Vec<Chunk> {
         let result = self.query_split(tid, start, end);
         let mut all = result.nearby;
@@ -538,6 +537,11 @@ fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<B
             BAI_MIN_SHIFT,
             BAI_DEPTH,
         ));
+        // r[impl tabix.pseudo_bin]
+        // r[impl index.pseudo_bin_dropped]
+        // Metadata only, now in `stats`: dropped here, as the CSI parser does,
+        // so no query can reach it.
+        bins.retain(|b| b.bin_id != PSEUDO_BIN);
 
         let n_intv = read_count(data, pos)?;
         check_index_limit(n_intv, MAX_LINEAR_INDEX, "n_intv")?;
@@ -894,6 +898,41 @@ mod tests {
         f.write_all(b"BAI").unwrap(); // only 3 bytes, < 8
         let err = BamIndex::from_path(&path).unwrap_err();
         assert!(matches!(err, BaiError::InvalidMagic));
+    }
+
+    // r[verify index.pseudo_bin_dropped]
+    // r[verify tabix.pseudo_bin]
+    #[test]
+    fn the_pseudo_bin_is_read_into_stats_and_dropped() {
+        let mut bai = b"BAI\x01".to_vec();
+        bai.extend_from_slice(&1i32.to_le_bytes()); // n_ref
+        bai.extend_from_slice(&2i32.to_le_bytes()); // n_bin
+        for (bin, chunks) in
+            [(4681u32, [(10u64, 20u64)].as_slice()), (PSEUDO_BIN, &[(10, 20), (7, 3)])]
+        {
+            bai.extend_from_slice(&bin.to_le_bytes());
+            bai.extend_from_slice(&i32::try_from(chunks.len()).unwrap().to_le_bytes());
+            for (begin, end) in chunks {
+                bai.extend_from_slice(&begin.to_le_bytes());
+                bai.extend_from_slice(&end.to_le_bytes());
+            }
+        }
+        bai.extend_from_slice(&0i32.to_le_bytes()); // n_intv
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pseudo.bai");
+        std::fs::write(&path, &bai).unwrap();
+
+        let index = BamIndex::from_path(&path).unwrap();
+        assert_eq!(
+            index.reference_stats(),
+            [ReferenceStats {
+                counts: Some(MappedCounts { mapped: 7, unmapped: 3 }),
+                covered_leaf_bins: 1,
+                leaf_bin_len: 16_384,
+            }]
+        );
+        let ids: Vec<u32> = index.references[0].bins.iter().map(|b| b.bin_id).collect();
+        assert_eq!(ids, [4681]);
     }
 
     // r[verify bam.index.negative_count]

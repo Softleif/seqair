@@ -284,6 +284,7 @@ impl CsiIndex {
                     chunks.push(Chunk { begin, end });
                 }
                 // r[impl csi.pseudo_bin]
+                // r[impl index.pseudo_bin_dropped]
                 // The pseudo-bin is metadata only: its counts go to `stats`, not into a query.
                 if bin_id == pseudo_bin_id {
                     pseudo_chunks = chunks;
