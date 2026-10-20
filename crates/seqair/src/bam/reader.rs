@@ -2,7 +2,7 @@
 //! for a region into a [`RecordStore`]. Call [`IndexedBamReader::fork`] to get a cheap
 //! per-thread reader that shares the parsed index and header via [`Arc<BamShared>`].
 
-use crate::reader::FetchCounts;
+use crate::reader::{FetchCounts, IndexPath};
 
 use super::{
     bgzf::{BgzfError, BgzfReader, VirtualOffset},
@@ -139,9 +139,9 @@ impl IndexedBamReader<File> {
     // r[impl index.explicit]
     /// Open a BAM with the BAI or CSI at `index`, wherever it is; nothing
     /// beside the BAM is looked at.
-    #[instrument(level = "debug", fields(path = %path.display(), index = %index.display()))]
-    pub fn open_with_index(path: &Path, index: &Path) -> Result<Self, BamError> {
-        Self::open_inner(path, Some(index))
+    #[instrument(level = "debug", fields(path = %path.display(), index = %index.as_ref().display()))]
+    pub fn open_with_index(path: &Path, index: &IndexPath) -> Result<Self, BamError> {
+        Self::open_inner(path, Some(index.as_ref()))
     }
 
     fn open_inner(path: &Path, index: Option<&Path>) -> Result<Self, BamError> {

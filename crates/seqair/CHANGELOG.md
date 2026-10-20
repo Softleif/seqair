@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without it, and for CRAM.
 - **An index can be given explicitly**: `IndexedBamReader::open_with_index`,
   `IndexedSamReader::open_with_index`, `IndexedCramReader::open_with_index` and
-  `IndexedReader::open_with_reference_and_index`. Nothing beside the alignment file is looked at;
-  a BAM index is told apart as BAI or CSI by its content.
+  `IndexedReader::open_with_reference_and_index`, taking the index as an `IndexPath` so it cannot
+  be swapped with the alignment or reference path. Nothing beside the alignment file is looked
+  at; a BAM index is told apart as BAI or CSI by its content.
 
 ### Changed
 

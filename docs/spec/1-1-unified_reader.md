@@ -37,7 +37,7 @@ For an alignment file `x.bam` and the extensions of its format in order, the rea
 > **Was:** `with_extension("bam.csi")`, which assumed the file ends in `.bam`: for `sample.v2` it looked at `sample.bam.csi` and `sample.bai`, another file's names.
 
 r[index.explicit]
-`IndexedBamReader::open_with_index`, `IndexedSamReader::open_with_index`, `IndexedCramReader::open_with_index` and `IndexedReader::open_with_reference_and_index` MUST open the index at the given path and look at nothing beside the alignment file. The index's kind is read from its content, so its name is free.
+`IndexedBamReader::open_with_index`, `IndexedSamReader::open_with_index`, `IndexedCramReader::open_with_index` and `IndexedReader::open_with_reference_and_index` MUST open the index at the given path and look at nothing beside the alignment file. The index path MUST be an `IndexPath`, not a bare `&Path`, so that swapping it with the alignment or reference path does not compile. The index's kind is read from its content, so its name is free.
 
 r[unified.detect_error]
 If the format is detected but no matching index is found, the error MUST name the expected index extension and suggest the tool to create it (`samtools index` for BAM/CRAM, `samtools index` or `tabix` for SAM).

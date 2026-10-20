@@ -418,13 +418,13 @@ impl IndexedCramReader<File> {
     // r[impl index.explicit]
     /// Open a CRAM with the `.crai` at `index`, wherever it is; nothing beside
     /// the CRAM is looked at.
-    #[instrument(level = "debug", fields(cram = %cram_path.display(), index = %index.display()))]
+    #[instrument(level = "debug", fields(cram = %cram_path.display(), index = %index.as_ref().display()))]
     pub fn open_with_index(
         cram_path: &Path,
         fasta_path: &Path,
-        index: &Path,
+        index: &crate::reader::IndexPath,
     ) -> Result<Self, CramError> {
-        Self::open_inner(cram_path, fasta_path, Some(index))
+        Self::open_inner(cram_path, fasta_path, Some(index.as_ref()))
     }
 
     fn open_inner(

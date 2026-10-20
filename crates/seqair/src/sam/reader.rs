@@ -193,9 +193,12 @@ impl IndexedSamReader<File> {
     // r[impl index.explicit]
     /// Open a bgzf-compressed SAM with the tabix index or BAI at `index`,
     /// wherever it is; nothing beside the SAM is looked at.
-    #[instrument(level = "debug", fields(path = %path.display(), index = %index.display()))]
-    pub fn open_with_index(path: &Path, index: &Path) -> Result<Self, SamError> {
-        Self::open_inner(path, Some(index))
+    #[instrument(level = "debug", fields(path = %path.display(), index = %index.as_ref().display()))]
+    pub fn open_with_index(
+        path: &Path,
+        index: &crate::reader::IndexPath,
+    ) -> Result<Self, SamError> {
+        Self::open_inner(path, Some(index.as_ref()))
     }
 
     fn open_inner(path: &Path, index: Option<&Path>) -> Result<Self, SamError> {

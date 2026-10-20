@@ -14,7 +14,7 @@ use core::range::RangeInclusive;
 use seqair_types::{BamFlags, Pos0};
 use std::{
     io::{Read, Seek},
-    path::Path,
+    path::{Path, PathBuf},
 };
 use tracing::instrument;
 
@@ -46,6 +46,35 @@ impl FetchCounts {
         if kept {
             self.kept = self.kept.saturating_add(1);
         }
+    }
+}
+
+// r[impl index.explicit]
+/// The path of an alignment file's index, given rather than looked up beside
+/// it. Its own type so that an opener taking an alignment, a reference and an
+/// index path cannot be called with two of them swapped:
+///
+/// ```compile_fail
+/// use seqair::reader::IndexedReader;
+/// use std::path::Path;
+/// let swapped = IndexedReader::open_with_reference_and_index(
+///     Path::new("sample.bam"),
+///     Path::new("sample.bam.bai"),
+///     Path::new("ref.fa"),
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexPath(PathBuf);
+
+impl IndexPath {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self(path.into())
+    }
+}
+
+impl AsRef<Path> for IndexPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
     }
 }
 
@@ -236,7 +265,7 @@ impl IndexedReader<std::fs::File> {
     pub fn open_with_reference_and_index(
         path: &Path,
         reference_path: &Path,
-        index: &Path,
+        index: &IndexPath,
     ) -> Result<Self, ReaderError> {
         match formats::detect(path)? {
             Format::Bam => Ok(IndexedReader::Bam(IndexedBamReader::open_with_index(path, index)?)),

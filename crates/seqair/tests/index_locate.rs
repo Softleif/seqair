@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 
 use seqair::bam::RecordStore;
-use seqair::reader::IndexedReader;
+use seqair::reader::{IndexPath, IndexedReader};
 use seqair_types::Pos0;
 use std::path::{Path, PathBuf};
 
@@ -97,15 +97,22 @@ fn an_explicit_index_wins_over_the_one_beside_the_file() {
     assert!(IndexedReader::open(&bam).is_err(), "the decoy beside the BAM is not an index");
 
     let elsewhere = place(dir.path(), "test.bam.bai", "kept-apart.idx");
-    let mut reader =
-        IndexedReader::open_with_reference_and_index(&bam, &data("test.fasta.gz"), &elsewhere)
-            .unwrap();
+    let mut reader = IndexedReader::open_with_reference_and_index(
+        &bam,
+        &data("test.fasta.gz"),
+        &IndexPath::new(elsewhere),
+    )
+    .unwrap();
     assert!(chr19_records(&mut reader) > 0);
 
     // A CSI is told from a BAI by content, not by name.
     let csi = place(dir.path(), "test.bam.samtools.csi", "kept-apart.bai");
-    let mut reader =
-        IndexedReader::open_with_reference_and_index(&bam, &data("test.fasta.gz"), &csi).unwrap();
+    let mut reader = IndexedReader::open_with_reference_and_index(
+        &bam,
+        &data("test.fasta.gz"),
+        &IndexPath::new(csi),
+    )
+    .unwrap();
     assert!(chr19_records(&mut reader) > 0);
 }
 
@@ -125,6 +132,7 @@ fn a_cram_looks_up_its_crai_the_same_way() {
     decoy(dir.path(), "sample.v2.cram.crai");
     let elsewhere = place(dir.path(), "test_v30.cram.crai", "kept-apart.idx");
     let mut reader =
-        IndexedReader::open_with_reference_and_index(&cram, &fasta, &elsewhere).unwrap();
+        IndexedReader::open_with_reference_and_index(&cram, &fasta, &IndexPath::new(elsewhere))
+            .unwrap();
     assert_eq!(chr19_records(&mut reader), found);
 }
