@@ -21,6 +21,7 @@ use std::{
 use tracing::instrument;
 
 use super::super::bam::record_store::CustomizeRecordStore;
+use crate::reader::FetchedRecord;
 
 /// Format a byte slice for error display: printable ASCII shown as-is, other bytes as `\xNN`.
 /// Output is capped to `max_len` bytes of input, with "..." appended if truncated.
@@ -427,7 +428,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
             if line.is_empty() || line.first() == Some(&b'@') {
                 return Ok(());
             }
-            if let Some((flags, kept)) = parse_sam_line(
+            if let Some(record) = parse_sam_line(
                 line,
                 header,
                 tid_i32,
@@ -440,7 +441,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                 &mut aux_buf,
                 customize,
             )? {
-                counts.add(flags, kept);
+                counts.add(record);
             }
             Ok(())
         };
@@ -516,7 +517,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
     customize: &mut E,
-) -> Result<Option<(BamFlags, bool)>, SamError> {
+) -> Result<Option<FetchedRecord>, SamError> {
     let (fields, n_fields) = text_scan::split_tabs(line);
     let fields = fields.get(..n_fields).unwrap_or_default();
     if fields.len() < 11 {
@@ -668,7 +669,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
         )?
         .is_some();
 
-    Ok(Some((flags, kept)))
+    Ok(Some(FetchedRecord { flags, started: pos.as_i64() >= start, kept }))
 }
 
 // r[impl sam.record.cigar_parse]
@@ -1100,7 +1101,7 @@ mod tests {
             &mut aux_buf,
             &mut (),
         )
-        .map(|outcome| outcome.map(|(_, kept)| kept))
+        .map(|outcome| outcome.map(|record| record.kept))
     }
 
     #[test]
@@ -1260,7 +1261,7 @@ mod tests {
             &mut aux_buf,
             &mut (),
         )?;
-        Ok((result.map(|(_, kept)| kept), store))
+        Ok((result.map(|record| record.kept), store))
     }
 
     // r[verify sam.reader.overlap_inclusive]

@@ -2,7 +2,7 @@
 //! for a region into a [`RecordStore`]. Call [`IndexedBamReader::fork`] to get a cheap
 //! per-thread reader that shares the parsed index and header via [`Arc<BamShared>`].
 
-use crate::reader::{FetchCounts, IndexPath};
+use crate::reader::{FetchCounts, FetchedRecord, IndexPath};
 
 use super::{
     bgzf::{BgzfError, BgzfReader, VirtualOffset},
@@ -268,9 +268,14 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         let mut counts = FetchCounts::default();
         query.for_each_result::<_, BamError>(|raw| {
             let kept = store.push_raw(raw, customize)?.is_some();
-            // `push_raw` has parsed the header, so the flag field is there.
+            // `push_raw` has parsed the header, so these fields are there.
             let flags = raw.get(14..16).and_then(|b| b.try_into().ok()).map(u16::from_le_bytes);
-            counts.add(BamFlags::from(flags.unwrap_or_default()), kept);
+            let pos = raw.get(4..8).and_then(|b| b.try_into().ok()).map(i32::from_le_bytes);
+            counts.add(FetchedRecord {
+                flags: BamFlags::from(flags.unwrap_or_default()),
+                started: pos.is_some_and(|pos| i64::from(pos) >= span.start.as_i64()),
+                kept,
+            });
             Ok(())
         })?;
 

@@ -18,9 +18,9 @@ use std::{
 };
 use tracing::instrument;
 
-// r[impl unified.fetch_counts+2]
+// r[impl unified.fetch_counts+3]
 /// Return value of the customize-aware `fetch_into_customized` methods on each
-/// reader. `mapped <= fetched` and `kept <= fetched` always hold.
+/// reader. `mapped`, `started` and `kept` are each `<= fetched`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FetchCounts {
     /// Records that passed the reader's built-in overlap/unmapped checks,
@@ -31,21 +31,33 @@ pub struct FetchCounts {
     /// covers, so `mapped` over a span's length is comparable to a whole-file
     /// rate from [`IndexedReader::reference_stats`].
     pub mapped: usize,
+    // r[impl unified.fetch_counts_started]
+    /// Of `fetched`, those whose position lies in the queried span: a record
+    /// reaching in from the left is not counted. Summed over queries that tile
+    /// a region, this counts each record once, where `fetched` counts a record
+    /// crossing a tile boundary once per tile.
+    pub started: usize,
     /// Records that also passed the user's pre-filter and remain in the store.
     /// Equal to `fetched` when no filter is installed.
     pub kept: usize,
 }
 
+/// What [`FetchCounts::add`] needs to know about one fetched record.
+pub(crate) struct FetchedRecord {
+    pub flags: BamFlags,
+    /// Its position is at or after the query's start.
+    pub started: bool,
+    /// The customize value kept it.
+    pub kept: bool,
+}
+
 impl FetchCounts {
-    /// Count one fetched record: its flags, and whether the filter kept it.
-    pub(crate) fn add(&mut self, flags: BamFlags, kept: bool) {
-        self.fetched = self.fetched.saturating_add(1);
-        if !flags.is_unmapped() {
-            self.mapped = self.mapped.saturating_add(1);
-        }
-        if kept {
-            self.kept = self.kept.saturating_add(1);
-        }
+    pub(crate) fn add(&mut self, record: FetchedRecord) {
+        let count = |n: &mut usize, yes: bool| *n = n.saturating_add(usize::from(yes));
+        count(&mut self.fetched, true);
+        count(&mut self.mapped, !record.flags.is_unmapped());
+        count(&mut self.started, record.started);
+        count(&mut self.kept, record.kept);
     }
 }
 

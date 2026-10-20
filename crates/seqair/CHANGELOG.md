@@ -34,8 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reader tries `x.bam.csi`, `x.csi`, `x.bam.bai`, `x.bai` (SAM: `tbi`, `bai`, `csi`; CRAM: `crai`).
   It used to call `with_extension("bam.csi")`, so a BAM not named `*.bam` (`sample.v2`) was looked
   up as `sample.bam.csi` and `sample.bai`, another file's names.
-- **Breaking: `FetchCounts` has a `mapped` field**, the fetched records without flag 0x4. Code
-  building a `FetchCounts` literal has to add it.
+- **Breaking: `FetchCounts` has `mapped` and `started` fields**: the fetched records without
+  flag 0x4, and those whose position lies in the queried span. Summed over tiles, `started`
+  counts a read crossing a tile boundary once, where `fetched` counts it in both tiles. Code
+  building a `FetchCounts` literal has to add them.
 
 ## v0.6.0 (2026-10-20)
 

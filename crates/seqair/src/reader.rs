@@ -18,6 +18,7 @@ mod fuzz;
 
 pub use crate::bam::depth_cap::{DepthCap, DepthLimit};
 pub use formats::FormatDetectionError;
+pub(crate) use indexed::FetchedRecord;
 pub use indexed::{FetchCounts, IndexPath, IndexedReader};
 pub use readers::{Pileup, Readers};
 pub use resolve::{ResolveTid, Tid, TidError};

@@ -83,7 +83,7 @@ fn whole_contig_fetches(alignment: &str) -> Vec<FetchCounts> {
         .collect()
 }
 
-// r[verify unified.fetch_counts+2]
+// r[verify unified.fetch_counts+3]
 // r[verify unified.pileup_fetch_counts]
 /// A pileup over a whole contig fetches every placed record of it, so its
 /// counts are the index's: mapped as idxstats has it, and the placed
@@ -94,7 +94,12 @@ fn a_whole_contig_pileup_fetches_what_idxstats_counts() {
         .iter()
         .map(|&(_, _, mapped, unmapped)| {
             let fetched = usize::try_from(mapped + unmapped).unwrap();
-            FetchCounts { fetched, mapped: usize::try_from(mapped).unwrap(), kept: fetched }
+            FetchCounts {
+                fetched,
+                mapped: usize::try_from(mapped).unwrap(),
+                started: fetched,
+                kept: fetched,
+            }
         })
         .collect();
     assert_eq!(whole_contig_fetches("test.bam"), expected, "BAM");
@@ -117,5 +122,29 @@ fn a_filter_changes_kept_only() {
     let counts = readers.pileup(&segment, DepthLimit::Unlimited).run().unwrap().fetch_counts();
     let mapped = usize::try_from(mapped).unwrap();
     let fetched = mapped + usize::try_from(unmapped).unwrap();
-    assert_eq!(counts, FetchCounts { fetched, mapped, kept: mapped });
+    assert_eq!(counts, FetchCounts { fetched, mapped, started: fetched, kept: mapped });
+}
+
+// r[verify unified.fetch_counts_started]
+/// Tiles of 300 bp over the 2,018 bp contig: reads crossing a boundary are
+/// fetched by both tiles, but start in only one, so the `started` counts add
+/// up to idxstats' total for the contig and the `fetched` counts exceed it.
+#[test]
+fn started_counts_tile_without_double_counting() {
+    for alignment in ["test.bam", "test_v30.cram"] {
+        let mut readers = Readers::open(&data(alignment), &data("test.fasta.gz")).unwrap();
+        let (contig, _, mapped, unmapped) = IDXSTATS[1];
+        let opts = SegmentOptions::new(NonZeroU32::new(300).unwrap()).without_byte_budget();
+        let segments: Vec<_> = readers.segments(contig, opts).unwrap().collect();
+        assert!(segments.len() > 1);
+        let (mut started, mut fetched) = (0, 0);
+        for segment in &segments {
+            assert_eq!(segment.overlap_start() + segment.overlap_end(), 0, "tiles are disjoint");
+            let guard = readers.pileup(segment, DepthLimit::Unlimited).run().unwrap();
+            started += guard.fetch_counts().started;
+            fetched += guard.fetch_counts().fetched;
+        }
+        assert_eq!(started, usize::try_from(mapped + unmapped).unwrap(), "{alignment}");
+        assert!(fetched > started, "{alignment}");
+    }
 }

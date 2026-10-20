@@ -25,6 +25,7 @@ use crate::bam::{
     record_idx::RecordIdx,
     record_store::{CustomizeRecordStore, RecordStore},
 };
+use crate::reader::FetchedRecord;
 use seqair_types::{BamFlags, Base, Pos0, Pos1, SmallVec, SmolStr};
 use tracing::warn;
 
@@ -220,7 +221,11 @@ impl DecodedSlice {
                 r.template_len,
                 customize,
             )?;
-            counts.add(r.flags, idx.is_some());
+            counts.add(FetchedRecord {
+                flags: r.flags,
+                started: r.pos >= query_start,
+                kept: idx.is_some(),
+            });
             kept.push(idx);
         }
         for (r, idx) in self.records.iter().zip(kept.iter()) {
