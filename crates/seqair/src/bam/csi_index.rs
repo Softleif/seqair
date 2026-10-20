@@ -6,7 +6,7 @@ use super::{
     bgzf::{BgzfError, VirtualOffset},
     index::{
         AnnotatedChunk, BaiError, Chunk, QueryChunks, ReferenceStats, decompress_bgzf_file,
-        merge_overlapping_chunks,
+        merge_overlapping_chunks, read_n_no_coor,
     },
 };
 use rustc_hash::FxHashMap;
@@ -126,6 +126,7 @@ pub struct CsiIndex {
     aux: Vec<u8>,
     references: Vec<CsiRefIndex>,
     stats: Vec<ReferenceStats>,
+    unplaced_unmapped: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -302,13 +303,21 @@ impl CsiIndex {
             references.push(CsiRefIndex::new(bins));
         }
 
-        Ok(CsiIndex { min_shift, depth, aux, references, stats })
+        // r[impl csi.n_no_coor]
+        let unplaced_unmapped = read_n_no_coor(data, &mut pos, read_u64)?;
+        Ok(CsiIndex { min_shift, depth, aux, references, stats, unplaced_unmapped })
     }
 
     // r[impl index.reference_stats]
     /// One entry per reference, in header (tid) order.
     pub fn reference_stats(&self) -> &[ReferenceStats] {
         &self.stats
+    }
+
+    /// Records with no reference (`RNAME *`); `None` when the file ends
+    /// without the count.
+    pub fn unplaced_unmapped(&self) -> Option<u64> {
+        self.unplaced_unmapped
     }
 
     /// Binning parameters.
@@ -732,6 +741,16 @@ mod tests {
         buf
     }
 
+    // r[verify csi.n_no_coor]
+    // r[verify index.unplaced_unmapped]
+    #[test]
+    fn n_no_coor_is_read_when_present() {
+        let mut data = build_csi_bytes(14, 5, &[], &[vec![]]);
+        assert_eq!(CsiIndex::from_bytes_inner(&data).unwrap().unplaced_unmapped(), None);
+        data.extend_from_slice(&4_000u64.to_le_bytes());
+        assert_eq!(CsiIndex::from_bytes_inner(&data).unwrap().unplaced_unmapped(), Some(4_000));
+    }
+
     // r[verify csi.magic]
     // r[verify csi.header]
     #[test]
@@ -906,6 +925,7 @@ mod tests {
             aux: Vec::new(),
             references: vec![CsiRefIndex::new(bins)],
             stats: Vec::new(),
+            unplaced_unmapped: None,
         }
     }
 
@@ -936,6 +956,7 @@ mod tests {
             aux: Vec::new(),
             references: Vec::new(),
             stats: Vec::new(),
+            unplaced_unmapped: None,
         };
         let chunks = idx.query(0, Pos0::new(0).unwrap(), Pos0::new(100).unwrap());
         assert!(chunks.is_empty());

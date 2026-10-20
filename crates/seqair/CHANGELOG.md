@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ReferenceStats { counts: Option<MappedCounts>, covered_leaf_bins, leaf_bin_len }`. `None` for
   CRAM.
 - **`PileupGuard::fetch_counts`**: the `FetchCounts` of the fetch behind a pileup.
+- **`unplaced_unmapped()`** on `IndexedReader`, `AlignmentIndex`, `BamIndex` and `CsiIndex`: the
+  index's trailing `n_no_coor`, the `*` line of `samtools idxstats`. `None` when the index ends
+  without it, and for CRAM.
 - **An index can be given explicitly**: `IndexedBamReader::open_with_index`,
   `IndexedSamReader::open_with_index`, `IndexedCramReader::open_with_index` and
   `IndexedReader::open_with_reference_and_index`. Nothing beside the alignment file is looked at;

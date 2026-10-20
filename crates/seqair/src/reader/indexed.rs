@@ -96,6 +96,17 @@ impl<R: Read + Seek> IndexedReader<R> {
         }
     }
 
+    // r[impl index.unplaced_unmapped]
+    /// Records with no reference (`RNAME *`), the `*` line of `samtools
+    /// idxstats`. `None` for CRAM, or when the index does not record them.
+    pub fn unplaced_unmapped(&self) -> Option<u64> {
+        match self {
+            Self::Bam(r) => r.shared().index().unplaced_unmapped(),
+            Self::Sam(r) => r.shared().index().unplaced_unmapped(),
+            Self::Cram(_) => None,
+        }
+    }
+
     /// Estimate the compressed bytes a `[start, end]` region query would load,
     /// for byte-aware segmentation. For CRAM it is the records' share of the
     /// slices they are in, prorated by span from the CRAI.

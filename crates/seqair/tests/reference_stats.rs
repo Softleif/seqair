@@ -51,10 +51,22 @@ fn csi_reference_stats_match_samtools_idxstats() {
 }
 
 // r[verify index.reference_stats]
+// r[verify index.unplaced_unmapped]
 #[test]
 fn cram_has_no_reference_stats() {
     let readers = Readers::open(&data("test_v30.cram"), &data("test.fasta.gz")).unwrap();
     assert_eq!(readers.alignment().reference_stats(), None);
+    assert_eq!(readers.alignment().unplaced_unmapped(), None);
+}
+
+// r[verify index.unplaced_unmapped]
+/// idxstats' `*` line for test.bam: 4,000 reads with no reference.
+#[test]
+fn unplaced_unmapped_matches_samtools_idxstats() {
+    let reader = IndexedReader::open(&data("test.bam")).unwrap();
+    assert_eq!(reader.unplaced_unmapped(), Some(4_000));
+    let csi = CsiIndex::from_path(&data("test.bam.samtools.csi")).unwrap();
+    assert_eq!(csi.unplaced_unmapped(), Some(4_000));
 }
 
 /// The fetch counts of one whole-contig pileup per contig.

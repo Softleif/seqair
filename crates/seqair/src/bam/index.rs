@@ -47,6 +47,7 @@ pub enum BaiError {
 pub struct BamIndex {
     references: Vec<RefIndex>,
     stats: Vec<ReferenceStats>,
+    unplaced_unmapped: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -250,7 +251,7 @@ impl BamIndex {
     /// Create an empty index with no references (for plain SAM fuzzing).
     #[cfg(feature = "fuzz")]
     pub fn empty() -> Self {
-        BamIndex { references: Vec::new(), stats: Vec::new() }
+        BamIndex { references: Vec::new(), stats: Vec::new(), unplaced_unmapped: None }
     }
 
     // r[impl tabix.bai_reuse]
@@ -309,6 +310,12 @@ impl BamIndex {
     /// One entry per reference, in header (tid) order.
     pub fn reference_stats(&self) -> &[ReferenceStats] {
         &self.stats
+    }
+
+    /// Records with no reference (`RNAME *`, idxstats' `*` line); `None` when
+    /// the index does not record them.
+    pub fn unplaced_unmapped(&self) -> Option<u64> {
+        self.unplaced_unmapped
     }
 
     // r[impl bam.index.region_query]
@@ -403,6 +410,15 @@ impl AlignmentIndex {
         match self {
             Self::Bai(idx) => idx.reference_stats(),
             Self::Csi(idx) => idx.reference_stats(),
+        }
+    }
+
+    /// Records with no reference (`RNAME *`, idxstats' `*` line); `None` when
+    /// the index does not record them.
+    pub fn unplaced_unmapped(&self) -> Option<u64> {
+        match self {
+            Self::Bai(idx) => idx.unplaced_unmapped(),
+            Self::Csi(idx) => idx.unplaced_unmapped(),
         }
     }
 
@@ -533,7 +549,19 @@ fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<B
         references.push(RefIndex::new(bins, linear_index));
     }
 
-    Ok(BamIndex { references, stats })
+    let unplaced_unmapped = read_n_no_coor(data, pos, read_u64)?;
+    Ok(BamIndex { references, stats, unplaced_unmapped })
+}
+
+// r[impl index.unplaced_unmapped]
+/// The optional `n_no_coor` after the last reference: records with no
+/// reference at all (`RNAME *`). `None` when the file ends without it.
+pub(super) fn read_n_no_coor<E>(
+    data: &[u8],
+    pos: &mut usize,
+    read_u64: impl Fn(&[u8], &mut usize) -> Result<u64, E>,
+) -> Result<Option<u64>, E> {
+    if data.len().saturating_sub(*pos) >= 8 { read_u64(data, pos).map(Some) } else { Ok(None) }
 }
 
 /// Decompress all BGZF blocks from a BGZF-compressed file into a single buffer.
@@ -742,6 +770,7 @@ mod tests {
                 vec![VirtualOffset(0); 64],
             )],
             stats: Vec::new(),
+            unplaced_unmapped: None,
         }
     }
 
@@ -803,7 +832,7 @@ mod tests {
     // r[verify index.edge.no_records]
     #[test]
     fn query_split_empty_reference() {
-        let idx = BamIndex { references: Vec::new(), stats: Vec::new() };
+        let idx = BamIndex { references: Vec::new(), stats: Vec::new(), unplaced_unmapped: None };
         let result = idx.query_split(0, Pos0::new(0).unwrap(), Pos0::new(100).unwrap());
         assert!(result.nearby.is_empty());
         assert!(result.distant.is_empty());
