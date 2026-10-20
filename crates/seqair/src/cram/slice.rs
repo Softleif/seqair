@@ -22,7 +22,6 @@ use super::{
 use crate::bam::{
     BamHeader,
     cigar::CigarOp,
-    record_idx::RecordIdx,
     record_store::{CustomizeRecordStore, RecordStore},
 };
 use crate::reader::FetchedRecord;
@@ -81,19 +80,6 @@ struct SliceRecord {
     seq: Range<usize>,
     qual: Range<usize>,
     aux: Range<usize>,
-    mate: MateLink,
-}
-
-/// Whether a record's mate fields hold for a fetch that leaves its mate out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MateLink {
-    /// Detached, unpaired, or a chain the slice could not resolve: the
-    /// fields are the record's own.
-    Own,
-    /// The mate is the slice's record at this index; the fields are its.
-    Record(u32),
-    /// The mate is a record of another reference, never in a fetch.
-    Elsewhere,
 }
 
 impl DecodedSlice {
@@ -161,7 +147,6 @@ impl DecodedSlice {
             seq: Range { start: seq_start, end: self.bases.len() },
             qual,
             aux,
-            mate: MateLink::Own,
         });
         Ok(slot)
     }
@@ -177,28 +162,29 @@ impl DecodedSlice {
     }
 
     // r[impl cram.fetch_into_customized.push_time+2]
-    // r[impl cram.fetch_into_customized.filtered_mate_sentinel+2]
+    // r[impl cram.fetch_into_customized.filtered_mate_fields]
     // r[impl interval.overlap_test]
     /// Push the records overlapping `query_start..=query_end` into `store`,
     /// consulting `customize` for each and adding each fetched record to
-    /// `counts`. `kept` is scratch space, one entry per record.
+    /// `counts`.
+    ///
+    /// Mate fields are copied as the slice resolved them, also for a record
+    /// whose mate the fetch leaves out: they describe the template, not the
+    /// fetch, as in htslib, noodles and our BAM reader.
     pub(crate) fn copy_into<E: CustomizeRecordStore>(
         &self,
         query_start: Pos0,
         query_end: Pos0,
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,
-        kept: &mut Vec<Option<RecordIdx>>,
         counts: &mut crate::reader::FetchCounts,
     ) -> Result<(), CramError> {
-        kept.clear();
         for r in &self.records {
             // Both bounds are inclusive, as are `pos` and `end_pos`: a record
             // is kept iff `pos <= query_end && end_pos >= query_start`. An
             // unmapped record's `end_pos` is its `pos`, as in BAM.
             let wanted = r.pos <= query_end && r.end_pos >= query_start;
             if !wanted {
-                kept.push(None);
                 continue;
             }
             let idx = store.push_fields(
@@ -224,29 +210,7 @@ impl DecodedSlice {
                 started: r.pos >= query_start,
                 kept: idx.is_some(),
             });
-            kept.push(idx);
         }
-        // Mate fields are resolved once, over the whole slice, by
-        // `resolve_mate_tlen`; a region fetch must not undo that. The
-        // alternative — nulling `next_ref_id`/`next_pos` for a kept record
-        // whose mate the region filter dropped — diverges from both other CRAM
-        // implementations: htslib resolves the same slice cross-reference
-        // (`cram_decode_slice_xref`, cram_decode.c) before the region test
-        // runs, and noodles resolves mates over the whole slice in
-        // `Slice::records` (io/reader/container/slice.rs, `resolve_mates`).
-        // A record whose mate lives outside the window therefore still carries
-        // the mate's reference and position, and its `TLEN` stays
-        // slice-consistent — which is what makes attached pairs sortable, and
-        // what keeps a `mate_unmapped`-free record from being misclassified as
-        // inter-chromosomal.
-        //
-        // So every `MateLink` variant keeps the values it already holds: its
-        // own detached fields, or what `resolve_mate_tlen` derived from the
-        // slice's mate info — which is filled even when the mate record itself
-        // was not materialized. There is no post-filter sentinel pass;
-        // `kept` above is only the push loop's scratch space.
-        // `RecordStore::set_mate_info` is untouched and stays available to
-        // callers that null a mate on purpose.
         Ok(())
     }
 }
@@ -1085,8 +1049,7 @@ fn resolve_mate_tlen(infos: &[SliceMateInfo], out: &mut DecodedSlice) {
 
         // First record gets first_tlen; all remaining get the opposite.
         // Each record's mate is the next entry in the chain (last wraps to
-        // first); a fetch that leaves the mate out nulls these fields again
-        // (`DecodedSlice::copy_into`).
+        // first).
         let rest_tlen = first_tlen.neg();
         for (ci, &j) in chain.iter().enumerate() {
             let Some(slot) = infos[j].slot else { continue };
@@ -1100,10 +1063,6 @@ fn resolve_mate_tlen(infos: &[SliceMateInfo], out: &mut DecodedSlice) {
             let mate_pos = if mate.pos < 0 { -1 } else { mate.pos as i32 };
             r.next_ref_id = mate.ref_id;
             r.next_pos = mate_pos;
-            r.mate = match mate.slot {
-                Some(m) => MateLink::Record(m),
-                None => MateLink::Elsewhere,
-            };
         }
     }
 }

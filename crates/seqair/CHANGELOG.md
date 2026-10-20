@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flag 0x4, and those whose position lies in the queried span. Summed over tiles, `started`
   counts a read crossing a tile boundary once, where `fetched` counts it in both tiles. Code
   building a `FetchCounts` literal has to add them.
+- **CRAM fetches keep the mate fields of a record whose mate they leave out.** A kept record whose
+  attached mate was outside the query, rejected by `keep_record` or on another reference used to
+  get `next_ref_id`/`next_pos` = -1; it now carries the mate's reference and position, as htslib,
+  noodles and the BAM reader deliver them. To ask whether the mate was fetched, use
+  `RecordStore::link_mates`/`RecordRef::mate`, not `next_pos == -1`.
 
 ## v0.6.0 (2026-10-20)
 

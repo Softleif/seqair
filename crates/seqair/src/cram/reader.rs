@@ -671,7 +671,6 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         }
 
         let mut counts = crate::reader::FetchCounts::default();
-        let mut kept = Vec::new();
 
         // Group CRAI entries by container_offset → set of slice_offsets that
         // overlap our query. Keys are sorted (BTreeMap) so containers are
@@ -717,14 +716,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                         None => Ok(DecodedSlice::default()),
                     }
                 })?;
-                decoded.copy_into(
-                    span.start,
-                    span.last,
-                    store,
-                    customize,
-                    &mut kept,
-                    &mut counts,
-                )?;
+                decoded.copy_into(span.start, span.last, store, customize, &mut counts)?;
             }
         }
 
