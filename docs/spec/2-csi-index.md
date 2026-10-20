@@ -96,7 +96,7 @@ The CSI reader SHOULD support `query_split` (separating distant from nearby chun
 ## Format detection
 
 r[csi.detect+2]
-When opening an alignment file with an index, the reader MUST check for both `.csi` and `.bai` extensions, by the names and in the order of `r[index.locate]`: `{file}.csi`, `{file}.bai`, `{file_without_ext}.csi`, `{file_without_ext}.bai`. Whether the file found is a BAI or a CSI MUST be decided by its magic bytes, regardless of its extension.
+When opening an alignment file with an index, the reader MUST check for both `.csi` and `.bai` extensions, by the names and in the order of `r[index.locate]`: `{file}.csi`, `{file_without_ext}.csi`, `{file}.bai`, `{file_without_ext}.bai`. Whether the file found is a BAI or a CSI MUST be decided by its magic bytes, regardless of its extension.
 
 ## Index writing
 

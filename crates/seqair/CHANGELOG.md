@@ -29,11 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into the reference stats. Queries filtered it before; their results are unchanged.
 - **A negative count in a BAI or tabix index is `BaiError::NegativeCount`.** It used to be cast
   to a huge `usize` and rejected as `FieldTooLarge` (or, for tabix `l_nm`, as a truncated header).
-- **Index lookup appends before it replaces, and never splits a dotted stem.** For `x.bam` the
-  reader tries `x.bam.csi`, `x.bam.bai`, `x.csi`, `x.bai` (SAM: `tbi`, `bai`, `csi`; CRAM: `crai`).
+- **Index lookup uses the order htslib uses, and never splits a dotted stem.** For `x.bam` the
+  reader tries `x.bam.csi`, `x.csi`, `x.bam.bai`, `x.bai` (SAM: `tbi`, `bai`, `csi`; CRAM: `crai`).
   It used to call `with_extension("bam.csi")`, so a BAM not named `*.bam` (`sample.v2`) was looked
-  up as `sample.bam.csi` and `sample.bai`, another file's names. htslib tries `x.csi` before
-  `x.bam.bai`; with both present the two can now pick different indexes.
+  up as `sample.bam.csi` and `sample.bai`, another file's names.
 - **Breaking: `FetchCounts` has a `mapped` field**, the fetched records without flag 0x4. Code
   building a `FetchCounts` literal has to add it.
 

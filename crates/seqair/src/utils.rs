@@ -38,10 +38,11 @@ impl<T, E: std::fmt::Display> TraceOk<T> for Result<T, E> {
 }
 
 // r[impl index.locate]
-/// The index files `path` may have, in lookup order: each of `exts` appended to
-/// the whole file name (`x.bam.csi`, `x.bam.bai`), then each in place of its
-/// last extension (`x.csi`, `x.bai`). Only the part after the last dot is ever
-/// replaced, so a dotted stem (`sample.v2.bam`) keeps its dots.
+/// The index files `path` may have, in htslib's lookup order: for each of
+/// `exts`, appended to the whole file name, then in place of its last
+/// extension (`x.bam.csi`, `x.csi`, `x.bam.bai`, `x.bai`). Only the part after
+/// the last dot is ever replaced, so a dotted stem (`sample.v2.bam`) keeps its
+/// dots.
 pub(crate) fn index_candidates<'a>(
     path: &'a std::path::Path,
     exts: &'a [&'a str],
@@ -52,14 +53,13 @@ pub(crate) fn index_candidates<'a>(
         name.push(ext);
         path.with_file_name(name)
     };
-    let appended = path
-        .file_name()
-        .into_iter()
-        .flat_map(move |name| exts.iter().map(move |ext| with(name, ext)));
+    let name = path.file_name();
     let stem = path.extension().and(path.file_stem());
-    let replaced =
-        stem.into_iter().flat_map(move |stem| exts.iter().map(move |ext| with(stem, ext)));
-    appended.chain(replaced)
+    exts.iter().flat_map(move |ext| {
+        let appended = name.map(|name| with(name, ext));
+        let replaced = stem.map(|stem| with(stem, ext));
+        appended.into_iter().chain(replaced)
+    })
 }
 
 /// The first of [`index_candidates`] that exists.
@@ -78,9 +78,9 @@ mod index_candidate_tests {
 
     // r[verify index.locate]
     #[test]
-    fn appended_names_come_before_replaced_ones() {
+    fn the_order_is_htslibs() {
         let expected: Vec<PathBuf> =
-            ["d/x.bam.csi", "d/x.bam.bai", "d/x.csi", "d/x.bai"].map(PathBuf::from).into();
+            ["d/x.bam.csi", "d/x.csi", "d/x.bam.bai", "d/x.bai"].map(PathBuf::from).into();
         assert_eq!(names("d/x.bam", &["csi", "bai"]), expected);
     }
 

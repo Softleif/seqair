@@ -151,7 +151,7 @@ r[sam.index.csi+2]
 The reader SHOULD also support CSI (`.csi`) indexes, which generalize the binning scheme with configurable `min_shift` and `depth` parameters. CSI supports references longer than 512 Mbp (BAI's limit). CSI files are BGZF-compressed and MUST be decompressed before parsing.
 
 r[sam.index.locate+3]
-Index file lookup follows `r[index.locate]` with `tbi`, `bai`, `csi`: `<path>.tbi`, `<path>.bai`, `<path>.csi`, then the same in place of the last extension. A BAI is told from a tabix index by its magic. A CSI found first is refused with `SamError::CsiNotSupported` (`r[sam.index.csi+2]`). If none exists, return a clear error.
+Index file lookup follows `r[index.locate]` with `tbi`, `bai`, `csi`: `<path>.tbi`, the `.tbi` in place of the last extension, then the same for `.bai` and `.csi`. A BAI is told from a tabix index by its magic. A CSI found first is refused with `SamError::CsiNotSupported` (`r[sam.index.csi+2]`). If none exists, return a clear error.
 
 ## Edge cases
 

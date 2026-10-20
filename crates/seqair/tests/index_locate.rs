@@ -65,21 +65,26 @@ fn a_dotted_stem_finds_an_index_in_place_of_its_extension() {
 }
 
 // r[verify index.locate]
-/// Appended names come first, the CSI before the BAI in each form.
+/// htslib's order: per extension, the appended name before the replaced one,
+/// and every CSI name before any BAI name.
 #[test]
-fn an_appended_index_wins_over_a_replaced_one() {
+fn the_lookup_order_is_htslibs() {
     let dir = tempfile::tempdir().unwrap();
     let bam = place(dir.path(), "test.bam", "sample.v2.bam");
     place(dir.path(), "test.bam.bai", "sample.v2.bam.bai");
-    decoy(dir.path(), "sample.v2.csi");
     decoy(dir.path(), "sample.v2.bai");
-    assert!(chr19_records(&mut open_bam(&bam)) > 0);
+    assert!(chr19_records(&mut open_bam(&bam)) > 0, "appended before replaced");
 
-    // And the CSI is the first one looked for.
-    place(dir.path(), "test.bam.samtools.csi", "sample.v2.bam.csi");
+    place(dir.path(), "test.bam.samtools.csi", "sample.v2.csi");
     let reader = open_bam(&bam);
     let IndexedReader::Bam(bam_reader) = &reader else { panic!("a BAM") };
-    assert!(matches!(bam_reader.shared().index(), seqair::bam::AlignmentIndex::Csi(_)));
+    assert!(
+        matches!(bam_reader.shared().index(), seqair::bam::AlignmentIndex::Csi(_)),
+        "x.csi before x.bam.bai"
+    );
+
+    decoy(dir.path(), "sample.v2.bam.csi");
+    assert!(IndexedReader::open(&bam).is_err(), "x.bam.csi first of all");
 }
 
 // r[verify index.explicit]
