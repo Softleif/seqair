@@ -495,7 +495,7 @@ mod tests {
         seq: Vec<Base>,
         qual: Vec<BaseQuality>,
     ) -> RecordStore<()> {
-        let owned = OwnedBamRecord::builder(0, Some(pos), b"r".to_vec())
+        let owned = OwnedBamRecord::builder(crate::reader::Tid::new(0), Some(pos), b"r".to_vec())
             .flags(BamFlags::empty())
             .cigar(cigar)
             .seq(seq)

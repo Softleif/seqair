@@ -39,7 +39,7 @@ mod pinned;
 use hegel::prelude::*;
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::cram::block::{self, ContentType};
-use seqair::cram::container::ContainerHeader;
+use seqair::cram::container::{ContainerHeader, RefSeqId};
 use seqair::cram::index::{CraiEntry, CramIndex};
 use seqair::cram::slice::SliceHeader;
 use seqair::cram::slice_cache::SliceCacheBudget;
@@ -628,7 +628,7 @@ fn multi_reference_slices_decode_per_reference(tc: TestCase) {
     let cram = write_cram(dir.path(), &bam, &fasta, opts);
 
     let headers = slice_headers(&cram);
-    let multi_ref = headers.iter().filter(|h| h.ref_seq_id == -2).count();
+    let multi_ref = headers.iter().filter(|h| h.ref_seq_id == RefSeqId::Multi).count();
     assert!(
         multi_ref > 0,
         "{}: no multi-ref slice was written; slice ref ids were {:?}",
@@ -851,7 +851,7 @@ fn multi_ref_containers_use_every_slices_reference_range() {
     let cram = write_cram(dir.path(), &bam, &fasta, opts);
 
     let headers = slice_headers(&cram);
-    assert!(headers.iter().filter(|h| h.ref_seq_id == -2).count() >= 2, "{headers:?}");
+    assert!(headers.iter().filter(|h| h.ref_seq_id == RefSeqId::Multi).count() >= 2, "{headers:?}");
     let entries = crai_entries(&cram);
     assert!(
         entries.iter().filter(|e| e.ref_id == 1).count() >= 2,

@@ -38,10 +38,10 @@ fn store_with_insertion(pos: u32, lead: u32, ins: u32, trail: u32) -> RecordStor
             &seq,
             &vec![30u8; seq.len()],
             &[],
-            0,
-            0,
-            -1,
-            0,
+            t(0),
+            t(0),
+            None,
+            None,
             &mut (),
         )
         .unwrap()
@@ -131,4 +131,10 @@ fn inserted_bases_start_at_the_aligned_pairs_frame(tc: TestCase) {
         }
     }
     assert!(checked, "the fixture must produce an insertion column");
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n").unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

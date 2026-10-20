@@ -124,7 +124,11 @@ fn assert_tlen_via_bam(name: &str) {
         assert_eq!(sq.as_slice(), eq.as_slice(), "{name}[{i}]: qname");
         assert_eq!(*sf, *ef, "{name}[{i}] ({qn}): flags");
         assert_eq!(*sp, *ep, "{name}[{i}] ({qn}): pos");
-        assert_eq!(*st, *et, "{name}[{i}] ({qn}): tlen seqair={st} expected={et}");
+        assert_eq!(
+            st.map_or(0, std::num::NonZeroI32::get),
+            *et,
+            "{name}[{i}] ({qn}): tlen seqair={st:?} expected={et}"
+        );
     }
 }
 
@@ -186,7 +190,11 @@ fn assert_cram_fields_with_tlen(name: &str) {
         assert_eq!(sq.as_slice(), eq.as_slice(), "{name}[{i}]: qname");
         assert_eq!(*sf, *ef, "{name}[{i}] ({qn}): flags");
         assert_eq!(*sp, *ep, "{name}[{i}] ({qn}): pos");
-        assert_eq!(*st, *et, "{name}[{i}] ({qn}): cram tlen seqair={st} expected={et}");
+        assert_eq!(
+            st.map_or(0, std::num::NonZeroI32::get),
+            *et,
+            "{name}[{i}] ({qn}): cram tlen seqair={st:?} expected={et}"
+        );
     }
 }
 

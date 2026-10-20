@@ -15,6 +15,7 @@ use std::ops::Neg;
 use super::{
     block::{self, Block, ContentType},
     compression_header::CompressionHeader,
+    container::RefSeqId,
     encoding::{ByteArrayEncoding, ByteEncoding, DecodeContext, ExternalCursor, IntEncoding},
     reader::CramError,
     varint,
@@ -24,8 +25,9 @@ use crate::bam::{
     cigar::CigarOp,
     record_store::{CustomizeRecordStore, RecordStore},
 };
-use crate::reader::FetchedRecord;
+use crate::reader::{FetchedRecord, Tid};
 use seqair_types::{BamFlags, Base, Pos0, Pos1, SmallVec, SmolStr};
+use std::num::NonZeroI32;
 use tracing::warn;
 
 /// Mate cross-reference info collected during CRAM record decoding.
@@ -43,7 +45,7 @@ struct SliceMateInfo {
     /// BAM flags (needed for READ1/READ2 tie-breaking).
     bam_flags: u16,
     /// Reference sequence ID for this record (needed for `next_ref_id` resolution).
-    ref_id: i32,
+    ref_id: Option<Tid>,
 }
 
 // r[impl cram.slice_cache]
@@ -71,10 +73,10 @@ struct SliceRecord {
     mapq: u8,
     matching_bases: u32,
     indel_bases: u32,
-    tid: i32,
-    next_ref_id: i32,
-    next_pos: i32,
-    template_len: i32,
+    tid: Option<Tid>,
+    next_ref_id: Option<Tid>,
+    next_pos: Option<Pos0>,
+    template_len: Option<NonZeroI32>,
     name: Range<usize>,
     cigar: Range<usize>,
     seq: Range<usize>,
@@ -112,10 +114,10 @@ impl DecodedSlice {
         bases: &[Base],
         qual: &[u8],
         aux: &[u8],
-        tid: i32,
-        next_ref_id: i32,
-        next_pos: i32,
-        template_len: i32,
+        tid: Option<Tid>,
+        next_ref_id: Option<Tid>,
+        next_pos: Option<Pos0>,
+        template_len: Option<NonZeroI32>,
     ) -> Result<u32, CramError> {
         let slot = u32::try_from(self.records.len())
             .map_err(|_| CramError::InvalidLength { value: i32::MAX })?;
@@ -224,7 +226,7 @@ fn field<T>(slab: &[T], range: Range<usize>) -> &[T] {
 /// Parsed CRAM slice header.
 #[derive(Debug)]
 pub struct SliceHeader {
-    pub ref_seq_id: i32,
+    pub ref_seq_id: RefSeqId,
     pub alignment_start: i32,
     pub alignment_span: i32,
     pub num_records: i32,
@@ -240,7 +242,7 @@ impl SliceHeader {
     pub fn parse(data: &[u8]) -> Result<Self, CramError> {
         let mut cursor: &[u8] = data;
 
-        let ref_seq_id = read_itf8(&mut cursor)?.cast_signed();
+        let ref_seq_id = RefSeqId::from_wire(read_itf8(&mut cursor)?.cast_signed())?;
         let alignment_start = read_itf8(&mut cursor)?.cast_signed();
         let alignment_span = read_itf8(&mut cursor)?.cast_signed();
         let num_records = read_itf8(&mut cursor)?.cast_signed();
@@ -330,7 +332,7 @@ pub(crate) fn decode_slice(
         }
     };
 
-    let is_multi_ref = sh.ref_seq_id == -2;
+    let is_multi_ref = sh.ref_seq_id == RefSeqId::Multi;
 
     // r[impl cram.edge.unknown_read_names]
     if !ch.preservation.read_names_included {
@@ -630,7 +632,14 @@ fn decode_record(
 
     // r[impl cram.slice.multi_ref]
     // 3. RI (ref ID — only for multi-ref slices)
-    let record_ref_id = if is_multi_ref { ds.ref_id.decode(ctx)? } else { sh.ref_seq_id };
+    let record_ref_id = if is_multi_ref {
+        Tid::from_wire(ds.ref_id.decode(ctx)?)
+    } else {
+        match sh.ref_seq_id {
+            RefSeqId::Ref(t) => Some(t),
+            RefSeqId::Unmapped | RefSeqId::Multi => None,
+        }
+    };
 
     // r[impl cram.record.read_length]
     // 4. RL (read length)
@@ -677,9 +686,9 @@ fn decode_record(
     // r[impl cram.record.mate_detached]
     // r[impl cram.record.mate_attached]
     // 8. Mate data
-    let mut next_pos_val: i32 = -1;
-    let mut next_ref_id_val: i32 = -1;
-    let mut template_len_val: i32 = 0;
+    let mut next_pos_val: Option<Pos0> = None;
+    let mut next_ref_id_val: Option<Tid> = None;
+    let mut template_len_val: Option<NonZeroI32> = None;
     let mut mate_line: i32 = -1;
     if detached {
         let _mate_flags = ds.mate_flags.decode(ctx)?;
@@ -693,15 +702,14 @@ fn decode_record(
             ds.read_name.decode_into(ctx, name_buf)?;
             name_buf.clear();
         }
-        next_ref_id_val = ds.next_segment_ref.decode(ctx)?;
-        // CRAM `NP` is 1-based per the spec; BAM's `next_pos` slot is
-        // 0-based. Subtract 1 at the boundary, matching htslib's
-        // `cr->mate_pos - 1` at the BAM emit (cram_decode.c:3121). NP=0
-        // (CRAM "no mate position") naturally lands on -1, the BAM
-        // unmapped-mate sentinel.
+        next_ref_id_val = Tid::from_wire(ds.next_segment_ref.decode(ctx)?);
+        // CRAM `NP` is 1-based per the spec, NP=0 is "no mate position";
+        // matching htslib's `cr->mate_pos - 1` at the BAM emit
+        // (cram_decode.c:3121).
         // r[impl cram.record.mate_detached]
-        next_pos_val = ds.next_mate_pos.decode(ctx)?.saturating_sub(1);
-        template_len_val = ds.template_size.decode(ctx)?;
+        next_pos_val =
+            Pos1::try_from(i64::from(ds.next_mate_pos.decode(ctx)?)).ok().map(Pos1::to_zero_based);
+        template_len_val = NonZeroI32::new(ds.template_size.decode(ctx)?);
     } else if mate_downstream {
         let nf = ds.next_fragment.decode(ctx)?;
         // NF is relative: absolute mate index = current + 1 + nf
@@ -778,11 +786,7 @@ fn decode_record(
         // drain every per-record data series in lockstep (they're independent
         // streams) and to compute `ref_consumed` for the SliceMateInfo.end_pos
         // used by `resolve_mate_tlen`.
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "tid comes from BAM header, capped at MAX_REFERENCES (1M), well within i32"
-        )]
-        let foreign_tid = is_multi_ref && record_ref_id != tid as i32;
+        let foreign_tid = is_multi_ref && record_ref_id != Tid::new(tid);
 
         // Reconstruction sets matching_bases / indel_bases for the kept-record
         // push later; for foreign-tid we don't push, so 0 is fine.
@@ -912,11 +916,7 @@ fn decode_record(
     // Apply the same foreign-tid check as the mapped path, so unmapped reads
     // placed on other references of a multi-ref slice stay out — and so do
     // unplaced ones (reference -1), which are on no reference at all.
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "tid comes from BAM header, capped at MAX_REFERENCES (1M), well within i32"
-    )]
-    let is_multi_ref_unmapped = is_multi_ref && record_ref_id != tid as i32;
+    let is_multi_ref_unmapped = is_multi_ref && record_ref_id != Tid::new(tid);
     let slot = if is_multi_ref_unmapped {
         None
     } else {
@@ -1055,14 +1055,10 @@ fn resolve_mate_tlen(infos: &[SliceMateInfo], out: &mut DecodedSlice) {
             let Some(slot) = infos[j].slot else { continue };
             let mate = &infos[chain[if ci + 1 < chain.len() { ci + 1 } else { 0 }]];
             let Some(r) = out.records.get_mut(slot as usize) else { continue };
-            r.template_len = if ci == 0 { first_tlen } else { rest_tlen };
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "mate positions fit in i32 for genomic data"
-            )]
-            let mate_pos = if mate.pos < 0 { -1 } else { mate.pos as i32 };
+            r.template_len = NonZeroI32::new(if ci == 0 { first_tlen } else { rest_tlen });
             r.next_ref_id = mate.ref_id;
-            r.next_pos = mate_pos;
+            // An unmapped mate (`pos < 0`) has no position.
+            r.next_pos = Pos0::try_from(mate.pos).ok();
         }
     }
 }

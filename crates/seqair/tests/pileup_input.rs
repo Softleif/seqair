@@ -30,10 +30,10 @@ fn push(store: &mut RecordStore, qname: &[u8], pos: u32, len: u32, mate_pos: i32
             &vec![Base::A; len as usize],
             &vec![30u8; len as usize],
             &[],
-            0,
-            0,
-            mate_pos,
-            0,
+            t(0),
+            t(0),
+            u32::try_from(mate_pos).ok().and_then(Pos0::new),
+            None,
             &mut (),
         )
         .expect("well-formed record")
@@ -234,4 +234,10 @@ fn dedup_leaves_exactly_the_distinct_records(tc: TestCase) {
     }
     store.dedup();
     assert_eq!(store.len(), count);
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n").unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

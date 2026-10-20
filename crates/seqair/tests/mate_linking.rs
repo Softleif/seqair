@@ -85,10 +85,10 @@ fn push(store: &mut RecordStore, qname: &[u8], read: Read) -> RecordIdx {
             &bases,
             &qual,
             &[],
-            read.tid,
-            read.mate_tid,
-            read.mate_pos,
-            0,
+            t(read.tid),
+            t(read.mate_tid),
+            u32::try_from(read.mate_pos).ok().and_then(Pos0::new),
+            None,
             &mut (),
         )
         .expect("push_fields accepts a well-formed record")
@@ -701,10 +701,10 @@ fn push_pair_read(
             seq,
             &vec![40u8; seq.len()],
             &[],
-            0,
-            0,
-            mate_pos,
-            0,
+            t(0),
+            t(0),
+            u32::try_from(mate_pos).ok().and_then(Pos0::new),
+            None,
             &mut (),
         )
         .expect("push_fields accepts a well-formed record")
@@ -1028,8 +1028,8 @@ fn links_are_always_well_formed(tc: TestCase) {
             "a nameless record must never link"
         );
         assert!(rec.qname_hash().is_some());
-        assert_eq!(rec.pos.as_i32(), store.record(partner).unwrap().next_pos);
-        assert_eq!(store.record(partner).unwrap().pos.as_i32(), rec.next_pos);
+        assert_eq!(Some(rec.pos), store.record(partner).unwrap().next_pos);
+        assert_eq!(Some(store.record(partner).unwrap().pos), rec.next_pos);
         assert!(rec.flags.is_paired() && !rec.flags.is_unmapped());
         assert!(!rec.flags.is_secondary() && !rec.flags.is_supplementary());
     }
@@ -1102,12 +1102,12 @@ fn linking_is_symmetric_and_exact(tc: TestCase) {
                 "links need equal qnames"
             );
             assert_eq!(
-                store.record(idx).unwrap().pos.as_i32(),
+                Some(store.record(idx).unwrap().pos),
                 store.record(partner).unwrap().next_pos,
                 "links need reciprocal mate positions"
             );
             assert_eq!(
-                store.record(partner).unwrap().pos.as_i32(),
+                Some(store.record(partner).unwrap().pos),
                 store.record(idx).unwrap().next_pos
             );
             assert_eq!(
@@ -1298,4 +1298,11 @@ fn a_fetched_store_holds_each_record_once() {
         );
         assert!(stats.pairs > 0, "{name}: no pairs linked in a paired-end fixture");
     }
+}
+
+fn t(n: i32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n")
+        .unwrap();
+    u32::try_from(n).ok().map(|n| n.resolve_tid(&h).expect("test tid in range"))
 }

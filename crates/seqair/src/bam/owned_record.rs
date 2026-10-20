@@ -19,7 +19,9 @@ use super::aux_data::{AuxData, AuxDataError};
 use super::cigar::CigarOp;
 use super::seq;
 use crate::io::reg2bin;
+use crate::reader::Tid;
 use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
+use std::num::NonZeroI32;
 use thiserror::Error;
 
 /// Errors from owned record construction or serialization.
@@ -60,7 +62,7 @@ pub enum OwnedRecordError {
 
 /// Encode `Option<Pos0>` to a BAM-wire `i32`. `None` → `-1`.
 #[inline]
-fn pos_to_bam_i32(p: Option<Pos0>) -> i32 {
+pub(crate) fn pos_to_bam_i32(p: Option<Pos0>) -> i32 {
     p.map_or(-1, Pos0::as_i32)
 }
 
@@ -68,23 +70,21 @@ fn pos_to_bam_i32(p: Option<Pos0>) -> i32 {
 /// An owned, mutable BAM record for writing and in-memory modification.
 #[derive(Debug, Clone)]
 pub struct OwnedBamRecord {
-    /// Reference sequence index. `-1` is the canonical "unmapped" sentinel
-    /// per \[SAM1\] §1.4 — it is preserved here as a raw `i32` (not wrapped in
-    /// an `Option`) because reading code uses it as a header-table index and
-    /// every check site already handles the -1 case explicitly.
-    pub ref_id: i32,
+    /// Reference sequence. `None` for unmapped (BAM wire `-1`).
+    pub ref_id: Option<Tid>,
     /// 0-based leftmost position. `None` for unmapped/unavailable (BAM
     /// wire `-1`); `Some(p)` for any in-range mapping. Construction via
     /// [`Pos0`] makes overflow unconstructable.
     pub pos: Option<Pos0>,
     pub mapq: u8,
     pub flags: BamFlags,
-    /// Mate's reference sequence index. `-1` for unavailable (same rationale
-    /// as `ref_id`).
-    pub next_ref_id: i32,
+    /// Mate's reference sequence. `None` for unavailable (BAM wire `-1`).
+    pub next_ref_id: Option<Tid>,
     /// Mate's 0-based position. `None` for unavailable (BAM wire `-1`).
     pub next_pos: Option<Pos0>,
-    pub template_len: i32,
+    /// Signed template length. `None` for the wire `0`: unavailable, or a
+    /// single-segment template.
+    pub template_len: Option<NonZeroI32>,
     pub qname: Vec<u8>,
     pub cigar: Vec<CigarOp>,
     pub seq: Vec<Base>,
@@ -95,13 +95,13 @@ pub struct OwnedBamRecord {
 
 /// Builder for constructing [`OwnedBamRecord`] values.
 pub struct OwnedBamRecordBuilder {
-    ref_id: i32,
+    ref_id: Option<Tid>,
     pos: Option<Pos0>,
     mapq: u8,
     flags: BamFlags,
-    next_ref_id: i32,
+    next_ref_id: Option<Tid>,
     next_pos: Option<Pos0>,
-    template_len: i32,
+    template_len: Option<NonZeroI32>,
     qname: Vec<u8>,
     cigar: Vec<CigarOp>,
     seq: Vec<Base>,
@@ -131,7 +131,7 @@ impl OwnedBamRecordBuilder {
         self.qual = qual;
         self
     }
-    pub fn next_ref_id(mut self, v: i32) -> Self {
+    pub fn next_ref_id(mut self, v: Option<Tid>) -> Self {
         self.next_ref_id = v;
         self
     }
@@ -139,7 +139,7 @@ impl OwnedBamRecordBuilder {
         self.next_pos = v;
         self
     }
-    pub fn template_len(mut self, v: i32) -> Self {
+    pub fn template_len(mut self, v: Option<NonZeroI32>) -> Self {
         self.template_len = v;
         self
     }
@@ -188,16 +188,21 @@ impl OwnedBamRecordBuilder {
 impl OwnedBamRecord {
     /// Start building a record with the required fields.
     ///
-    /// Pass `None` for `pos` to mark the record as unmapped (BAM wire `-1`).
-    pub fn builder(ref_id: i32, pos: Option<Pos0>, qname: Vec<u8>) -> OwnedBamRecordBuilder {
+    /// Pass `None` for `ref_id` and `pos` to mark the record as unmapped (BAM
+    /// wire `-1`).
+    pub fn builder(
+        ref_id: Option<Tid>,
+        pos: Option<Pos0>,
+        qname: Vec<u8>,
+    ) -> OwnedBamRecordBuilder {
         OwnedBamRecordBuilder {
             ref_id,
             pos,
             mapq: 0,
             flags: BamFlags::empty(),
-            next_ref_id: -1,
+            next_ref_id: None,
             next_pos: None,
-            template_len: 0,
+            template_len: None,
             qname,
             cigar: Vec::new(),
             seq: Vec::new(),
@@ -371,7 +376,7 @@ impl OwnedBamRecord {
         super::record::encode_fixed_header(
             buf,
             &super::record::FixedHeaderFields {
-                ref_id: self.ref_id,
+                ref_id: Tid::to_wire(self.ref_id),
                 pos: pos_to_bam_i32(self.pos),
                 bin: self.bin(),
                 mapq: self.mapq,
@@ -379,9 +384,9 @@ impl OwnedBamRecord {
                 flags: self.flags.raw(),
                 n_cigar_op,
                 l_seq,
-                next_ref_id: self.next_ref_id,
+                next_ref_id: Tid::to_wire(self.next_ref_id),
                 next_pos: pos_to_bam_i32(self.next_pos),
-                template_len: self.template_len,
+                template_len: self.template_len.map_or(0, NonZeroI32::get),
             },
         );
 
@@ -421,14 +426,18 @@ mod tests {
     use seqair_types::{Pos0, QPos};
 
     fn simple_record() -> OwnedBamRecord {
-        OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"read1".to_vec())
-            .flags(BamFlags::empty()) // mapped
-            .mapq(30)
-            .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
-            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
-            .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
-            .build()
-            .unwrap()
+        OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(100).unwrap()),
+            b"read1".to_vec(),
+        )
+        .flags(BamFlags::empty()) // mapped
+        .mapq(30)
+        .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
+        .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
+        .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
+        .build()
+        .unwrap()
     }
 
     use super::super::test_util::decode_into_store;
@@ -444,7 +453,7 @@ mod tests {
         let store = decode_into_store(&buf);
         let decoded = store.record(ri(0)).unwrap();
 
-        assert_eq!(decoded.tid, 0);
+        assert_eq!(decoded.tid, Tid::new(0));
         assert_eq!(decoded.pos.as_u32(), 100);
         assert_eq!(decoded.mapq, 30);
         assert_eq!(decoded.flags, BamFlags::empty());
@@ -459,13 +468,17 @@ mod tests {
         aux.set_int(*b"NM", 3).unwrap();
         aux.set_string(*b"RG", b"grp1");
 
-        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"r1".to_vec())
-            .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-            .seq(vec![Base::A, Base::C, Base::G])
-            .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
-            .aux(aux)
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(100).unwrap()),
+            b"r1".to_vec(),
+        )
+        .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
+        .seq(vec![Base::A, Base::C, Base::G])
+        .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
+        .aux(aux)
+        .build()
+        .unwrap();
 
         let mut buf = Vec::new();
         rec.to_bam_bytes(&mut buf).unwrap();
@@ -512,16 +525,20 @@ mod tests {
 
     #[test]
     fn end_pos_with_insertion() {
-        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"r".to_vec())
-            .cigar(vec![
-                CigarOp::new(CigarOpType::Match, 3),
-                CigarOp::new(CigarOpType::Insertion, 2),
-                CigarOp::new(CigarOpType::Match, 3),
-            ])
-            .seq(vec![Base::A; 8]) // 3M + 2I + 3M = 8 query bases
-            .qual(vec![BaseQuality::from_byte(30); 8])
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(100).unwrap()),
+            b"r".to_vec(),
+        )
+        .cigar(vec![
+            CigarOp::new(CigarOpType::Match, 3),
+            CigarOp::new(CigarOpType::Insertion, 2),
+            CigarOp::new(CigarOpType::Match, 3),
+        ])
+        .seq(vec![Base::A; 8]) // 3M + 2I + 3M = 8 query bases
+        .qual(vec![BaseQuality::from_byte(30); 8])
+        .build()
+        .unwrap();
         // Only M ops consume ref: 3 + 3 = 6
         assert_eq!(rec.end_pos(), Some(Pos0::new(106).unwrap()));
     }
@@ -530,14 +547,14 @@ mod tests {
     #[test]
     fn qname_too_long_rejected() {
         let long_name = vec![b'A'; 255];
-        let result = OwnedBamRecord::builder(0, None, long_name).build();
+        let result = OwnedBamRecord::builder(crate::reader::Tid::new(0), None, long_name).build();
         assert!(result.is_err());
     }
 
     #[test]
     fn qname_at_limit_accepted() {
         let name = vec![b'A'; 254];
-        let result = OwnedBamRecord::builder(0, None, name).build();
+        let result = OwnedBamRecord::builder(crate::reader::Tid::new(0), None, name).build();
         assert!(result.is_ok());
     }
 
@@ -567,12 +584,16 @@ mod tests {
 
     #[test]
     fn empty_qual_fills_with_0xff() {
-        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"r".to_vec())
-            .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-            .seq(vec![Base::A, Base::C, Base::G])
-            // no qual set
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(100).unwrap()),
+            b"r".to_vec(),
+        )
+        .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
+        .seq(vec![Base::A, Base::C, Base::G])
+        // no qual set
+        .build()
+        .unwrap();
 
         let mut buf = Vec::new();
         rec.to_bam_bytes(&mut buf).unwrap();
@@ -586,7 +607,7 @@ mod tests {
         // Use ref_id=-1 and pos=None for a fully unmapped record.
         // The existing reader rejects pos=-1 (InvalidPosition), so we verify
         // serialization succeeds and the bytes have the right structure.
-        let rec = OwnedBamRecord::builder(-1, None, b"unmapped".to_vec())
+        let rec = OwnedBamRecord::builder(None, None, b"unmapped".to_vec())
             .flags(BamFlags::from(0x4))
             .seq(vec![Base::A, Base::C, Base::G])
             .build()
@@ -605,11 +626,15 @@ mod tests {
     #[test]
     fn placed_unmapped_record_roundtrips() {
         // Placed unmapped: has ref_id and pos, but flag 0x4 set
-        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(500).unwrap()), b"placed".to_vec())
-            .flags(BamFlags::from(0x4))
-            .seq(vec![Base::A, Base::C, Base::G])
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(500).unwrap()),
+            b"placed".to_vec(),
+        )
+        .flags(BamFlags::from(0x4))
+        .seq(vec![Base::A, Base::C, Base::G])
+        .build()
+        .unwrap();
 
         let mut buf = Vec::new();
         rec.to_bam_bytes(&mut buf).unwrap();
@@ -649,16 +674,20 @@ mod tests {
     #[test]
     fn aligned_pairs_with_insertion() {
         use super::super::aligned_pairs::{AlignedPair, MatchKind};
-        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"r".to_vec())
-            .cigar(vec![
-                CigarOp::new(CigarOpType::Match, 2),
-                CigarOp::new(CigarOpType::Insertion, 1),
-                CigarOp::new(CigarOpType::Match, 2),
-            ])
-            .seq(vec![Base::A; 5])
-            .qual(vec![BaseQuality::from_byte(30); 5])
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(100).unwrap()),
+            b"r".to_vec(),
+        )
+        .cigar(vec![
+            CigarOp::new(CigarOpType::Match, 2),
+            CigarOp::new(CigarOpType::Insertion, 1),
+            CigarOp::new(CigarOpType::Match, 2),
+        ])
+        .seq(vec![Base::A; 5])
+        .qual(vec![BaseQuality::from_byte(30); 5])
+        .build()
+        .unwrap();
 
         let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         let m = |q, r| AlignedPair::Match {
@@ -680,16 +709,20 @@ mod tests {
     #[test]
     fn aligned_pairs_with_deletion() {
         use super::super::aligned_pairs::{AlignedPair, MatchKind};
-        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"r".to_vec())
-            .cigar(vec![
-                CigarOp::new(CigarOpType::Match, 2),
-                CigarOp::new(CigarOpType::Deletion, 3),
-                CigarOp::new(CigarOpType::Match, 2),
-            ])
-            .seq(vec![Base::A; 4])
-            .qual(vec![BaseQuality::from_byte(30); 4])
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(100).unwrap()),
+            b"r".to_vec(),
+        )
+        .cigar(vec![
+            CigarOp::new(CigarOpType::Match, 2),
+            CigarOp::new(CigarOpType::Deletion, 3),
+            CigarOp::new(CigarOpType::Match, 2),
+        ])
+        .seq(vec![Base::A; 4])
+        .qual(vec![BaseQuality::from_byte(30); 4])
+        .build()
+        .unwrap();
 
         let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         let m = |q, r| AlignedPair::Match {
@@ -709,15 +742,16 @@ mod tests {
     #[test]
     fn aligned_pairs_with_soft_clip() {
         use super::super::aligned_pairs::{AlignedPair, MatchKind};
-        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"r".to_vec())
-            .cigar(vec![
-                CigarOp::new(CigarOpType::SoftClip, 2),
-                CigarOp::new(CigarOpType::Match, 3),
-            ])
-            .seq(vec![Base::A; 5])
-            .qual(vec![BaseQuality::from_byte(30); 5])
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(100).unwrap()),
+            b"r".to_vec(),
+        )
+        .cigar(vec![CigarOp::new(CigarOpType::SoftClip, 2), CigarOp::new(CigarOpType::Match, 3)])
+        .seq(vec![Base::A; 5])
+        .qual(vec![BaseQuality::from_byte(30); 5])
+        .build()
+        .unwrap();
 
         let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         let m = |q, r| AlignedPair::Match {
@@ -733,7 +767,7 @@ mod tests {
 
     #[test]
     fn aligned_pairs_empty_cigar() {
-        let rec = OwnedBamRecord::builder(-1, None, b"r".to_vec())
+        let rec = OwnedBamRecord::builder(None, None, b"r".to_vec())
             .flags(BamFlags::from(0x4))
             .build()
             .unwrap();
@@ -747,7 +781,7 @@ mod tests {
         // Degenerate but constructible: pos = None + non-empty CIGAR. Walking
         // would produce nonsense rpos values anchored at Pos0::ZERO, so we
         // refuse rather than silently corrupt the output.
-        let rec = OwnedBamRecord::builder(-1, None, b"r".to_vec())
+        let rec = OwnedBamRecord::builder(None, None, b"r".to_vec())
             .flags(BamFlags::from(0x4))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A; 5])
@@ -767,13 +801,17 @@ mod tests {
         // 3M record with seq [A, C, G] — verify the helper attaches per-pos
         // bases without going through the SlimRecord/RecordStore round-trip.
         use super::super::aligned_pairs_view::AlignedPairWithRead;
-        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(50).unwrap()), b"r".to_vec())
-            .flags(BamFlags::empty())
-            .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-            .seq(vec![Base::A, Base::C, Base::G])
-            .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(50).unwrap()),
+            b"r".to_vec(),
+        )
+        .flags(BamFlags::empty())
+        .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
+        .seq(vec![Base::A, Base::C, Base::G])
+        .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
+        .build()
+        .unwrap();
 
         let events: Vec<_> = rec.aligned_pairs_with_read().unwrap().collect();
         assert_eq!(events.len(), 3);
@@ -792,7 +830,7 @@ mod tests {
     fn aligned_pairs_with_read_propagates_unmapped_error() {
         // pos = None + non-empty CIGAR → UnmappedWithCigar surfaces through
         // the helper just like through the bare aligned_pairs().
-        let rec = OwnedBamRecord::builder(-1, None, b"r".to_vec())
+        let rec = OwnedBamRecord::builder(None, None, b"r".to_vec())
             .flags(BamFlags::from(0x4))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
             .seq(vec![Base::A; 3])
@@ -811,7 +849,7 @@ mod tests {
     fn aligned_pairs_accepts_unmapped_with_empty_cigar() {
         // The "fully unmapped" case: pos = None AND cigar = empty. Iteration
         // yields nothing — no rpos anchoring needed.
-        let rec = OwnedBamRecord::builder(-1, None, b"r".to_vec())
+        let rec = OwnedBamRecord::builder(None, None, b"r".to_vec())
             .flags(BamFlags::from(0x4))
             .build()
             .unwrap();

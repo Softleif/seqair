@@ -161,7 +161,7 @@ fn push_raw_preserves_tid() {
     let raw = make_simple_record(5, 100, &[pack_cigar_op(4, CIGAR_M)], 4, b"read1");
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
-    assert_eq!(store.record(idx).unwrap().tid, 5);
+    assert_eq!(store.record(idx).unwrap().tid.map(|t| t.as_u32()), Some(5));
 }
 
 // r[verify record_store.slim_record_fields]
@@ -183,8 +183,8 @@ fn push_raw_preserves_next_pos() {
     );
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
-    assert_eq!(store.record(idx).unwrap().next_pos, 500);
-    assert_eq!(store.record(idx).unwrap().template_len, 300);
+    assert_eq!(store.record(idx).unwrap().next_pos, Pos0::new(500));
+    assert_eq!(store.record(idx).unwrap().template_len, std::num::NonZeroI32::new(300));
 }
 
 // r[verify record_store.slim_record_fields]
@@ -206,7 +206,7 @@ fn push_raw_preserves_negative_template_len() {
     );
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
-    assert_eq!(store.record(idx).unwrap().template_len, -300);
+    assert_eq!(store.record(idx).unwrap().template_len, std::num::NonZeroI32::new(-300));
 }
 
 // ---------------------------------------------------------------------------
@@ -286,10 +286,10 @@ fn soft_clips_are_stored_at_push_and_follow_set_alignment() {
             &[Base::A; 5],
             &[30; 5],
             &[],
-            0,
-            -1,
-            -1,
-            0,
+            t(0),
+            None,
+            None,
+            None,
             &mut (),
         )
         .unwrap()
@@ -337,9 +337,9 @@ fn set_alignment_preserves_other_fields() {
     assert_eq!(store.record(idx).unwrap().qual(), &orig_qual);
     assert_eq!(store.record(idx).unwrap().aux(), &orig_aux);
     assert_eq!(store.record(idx).unwrap().qname(), &orig_qname);
-    assert_eq!(store.record(idx).unwrap().tid, 3);
-    assert_eq!(store.record(idx).unwrap().next_pos, 500);
-    assert_eq!(store.record(idx).unwrap().template_len, 300);
+    assert_eq!(store.record(idx).unwrap().tid.map(|t| t.as_u32()), Some(3));
+    assert_eq!(store.record(idx).unwrap().next_pos, Pos0::new(500));
+    assert_eq!(store.record(idx).unwrap().template_len, std::num::NonZeroI32::new(300));
     assert_eq!(store.record(idx).unwrap().flags, BamFlags::from(0x63));
     assert_eq!(store.record(idx).unwrap().mapq, 60);
 }
@@ -685,7 +685,11 @@ fn realignment_workflow_with_real_bam() {
 
     // Verify tid is populated for all records
     for i in store.indices() {
-        assert_eq!(store.record(i).unwrap().tid, tid as i32, "tid mismatch for record {i}");
+        assert_eq!(
+            store.record(i).unwrap().tid.map(|t| t.as_u32()),
+            Some(tid),
+            "tid mismatch for record {i}"
+        );
     }
 
     // "Realign" the first record by shifting it 10bp left with same cigar
@@ -706,4 +710,10 @@ fn realignment_workflow_with_real_bam() {
     for (i, (prev, rec)) in store.records().zip(store.records().skip(1)).enumerate() {
         assert!(rec.pos >= prev.pos, "sort order broken at index {}", i + 1);
     }
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n").unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

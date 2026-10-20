@@ -14,9 +14,10 @@ use super::{
     record_idx::{RecordIdx, RecordRef},
     seq,
 };
+use crate::reader::Tid;
 use hashbrown::HashTable;
 use seqair_types::{BamFlags, Base, BaseQuality, Pos0, QPos};
-use std::num::NonZeroU64;
+use std::num::{NonZeroI32, NonZeroU64};
 
 // r[impl record_store.qname_hash]
 // r[impl record_store.qname_hash.identity_is_probabilistic]
@@ -126,13 +127,15 @@ pub struct SlimRecord {
     pub leading_soft_clip: u32,
     /// Soft-clipped bases after the last aligned base, hard clips looked past.
     pub trailing_soft_clip: u32,
-    /// Reference target index; -1 for unmapped.
-    pub tid: i32,
-    pub next_ref_id: i32,
-    /// Mate's 0-based reference position; -1 if unavailable.
-    pub next_pos: i32,
-    /// Signed template/insert size (TLEN); 0 if unavailable or mates on different refs.
-    pub template_len: i32,
+    /// Reference target; `None` for unmapped.
+    pub tid: Option<Tid>,
+    /// Mate's reference target; `None` if unavailable.
+    pub next_ref_id: Option<Tid>,
+    /// Mate's 0-based reference position; `None` if unavailable.
+    pub next_pos: Option<Pos0>,
+    /// Signed template/insert size (TLEN); `None` for a wire `0`: unavailable,
+    /// or a single-segment template.
+    pub template_len: Option<NonZeroI32>,
     /// Offset into the name slab.
     name_off: u32,
     /// Length of the qname in the name slab.
@@ -302,7 +305,8 @@ impl SlimRecord {
 }
 
 // Compile-time size guard: 19 u32 (incl. next_ref_id, extras_idx, the two
-// soft-clip lengths, and mate_idx, whose `Option` is free — see `RecordIdx`)
+// soft-clip lengths, and mate_idx, whose `Option` is free — see `RecordIdx`;
+// the `Option`s on tid, next_ref_id, next_pos and template_len are free too)
 // + 1 u64 (qname_hash) + 3 u16 + 1 u8 + padding = 96 bytes. The soft clips
 // cost 8 (88 -> 96): 5 bytes of padding cannot hold two u32, and a u16 clip
 // would truncate on long reads. The u64 raises the
@@ -757,10 +761,10 @@ impl<U> RecordStore<U> {
         bases: &[Base],
         qual: &[u8],
         aux: &[u8],
-        tid: i32,
-        next_ref_id: i32,
-        next_pos: i32,
-        template_len: i32,
+        tid: Option<Tid>,
+        next_ref_id: Option<Tid>,
+        next_pos: Option<Pos0>,
+        template_len: Option<NonZeroI32>,
         customize: &mut E,
     ) -> Result<Option<RecordIdx>, DecodeError> {
         if qual.len() != bases.len() {
@@ -950,14 +954,14 @@ pub struct FilterRawFields<'a> {
     pub matching_bases: u32,
     /// Sum of I/D CIGAR op lengths. `0` for `push_raw` (not yet computed).
     pub indel_bases: u32,
-    /// Reference target index; -1 for unmapped.
-    pub tid: i32,
-    /// Mate reference target index.
-    pub next_ref_id: i32,
-    /// Mate 0-based reference position; -1 if unavailable.
-    pub next_pos: i32,
-    /// Signed template/insert size.
-    pub template_len: i32,
+    /// Reference target; `None` for unmapped.
+    pub tid: Option<Tid>,
+    /// Mate reference target; `None` if unavailable.
+    pub next_ref_id: Option<Tid>,
+    /// Mate 0-based reference position; `None` if unavailable.
+    pub next_pos: Option<Pos0>,
+    /// Signed template/insert size; `None` for a wire `0`.
+    pub template_len: Option<NonZeroI32>,
     /// Query name (NUL stripped).
     pub qname: &'a [u8],
     /// Raw quality score bytes.
@@ -1313,7 +1317,7 @@ impl<U> RecordStore<U> {
             if qname.is_empty() {
                 continue;
             }
-            let (pos, next_pos) = (rec.pos.as_i32(), rec.next_pos);
+            let (pos, next_pos) = (rec.pos, rec.next_pos);
 
             // The probe visits every waiting candidate in the bucket, so it is
             // also where a same-qname record that cannot be *this* record's
@@ -1329,8 +1333,8 @@ impl<U> RecordStore<U> {
                     }
                     same_qname_present = true;
                     other.mate_idx.is_none()
-                        && pos == other.next_pos
-                        && other.pos.as_i32() == next_pos
+                        && other.next_pos == Some(pos)
+                        && next_pos == Some(other.pos)
                 })
                 .copied();
 
@@ -1453,24 +1457,6 @@ impl<U> RecordStore<U> {
         // A slot whose index could not be minted never made it into the store:
         // `push_raw`/`push_fields` fail with `SlabOverflow` first.
         (0..self.records.len()).filter_map(RecordIdx::from_usize)
-    }
-
-    /// Update the `template_len` field for a record in the store.
-    /// Used by the CRAM decoder to fill in TLEN after resolving mate
-    /// cross-references within a slice.
-    pub fn set_template_len(&mut self, idx: RecordIdx, tlen: i32) -> Option<()> {
-        self.records.get_mut(idx.as_usize())?.template_len = tlen;
-        Some(())
-    }
-
-    /// Update the mate fields (`next_ref_id`, `next_pos`) for a record.
-    /// Used by the CRAM decoder to fill in mate info after resolving
-    /// downstream mate cross-references within a slice.
-    pub fn set_mate_info(&mut self, idx: RecordIdx, next_ref_id: i32, next_pos: i32) -> Option<()> {
-        let rec = self.records.get_mut(idx.as_usize())?;
-        rec.next_ref_id = next_ref_id;
-        rec.next_pos = next_pos;
-        Some(())
     }
 
     // The slab readers below take the record rather than its index: the
@@ -1879,7 +1865,7 @@ fn can_link(rec: &SlimRecord) -> bool {
         && !flags.is_secondary()
         && !flags.is_supplementary()
         && rec.next_ref_id == rec.tid
-        && rec.next_pos >= 0
+        && rec.next_pos.is_some()
 }
 
 /// The record's qname bytes, read straight from a borrowed name slab. Returns
@@ -1957,10 +1943,10 @@ pub(crate) mod tests {
         mapq: u8,
         n_cigar_ops: u16,
         seq_len: u32,
-        tid: i32,
-        next_ref_id: i32,
-        next_pos: i32,
-        template_len: i32,
+        tid: Option<Tid>,
+        next_ref_id: Option<Tid>,
+        next_pos: Option<Pos0>,
+        template_len: Option<NonZeroI32>,
         qname: Vec<u8>,
         aux: Vec<u8>,
     }
@@ -2084,10 +2070,10 @@ pub(crate) mod tests {
             &[Base::A],
             &[30],
             &[],
-            0,  // tid
-            -1, // next_ref_id
-            0,  // next_pos
-            0,  // template_len
+            crate::reader::Tid::new(0),
+            None,
+            seqair_types::Pos0::new(0),
+            std::num::NonZeroI32::new(0),
             &mut (),
         );
         assert!(result.is_ok());
@@ -2136,7 +2122,7 @@ pub(crate) mod tests {
         // Write next_ref_id = 7 at BAM offset 20
         raw[20..24].copy_from_slice(&7i32.to_le_bytes());
         store.push_raw(&raw, &mut ()).unwrap();
-        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, 7);
+        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, Tid::new(7));
     }
 
     // r[verify record_store.pre_filter.rollback+1]
@@ -2255,10 +2241,10 @@ pub(crate) mod tests {
                 &[Base::A; 5],
                 &[30; 5],
                 b"tagdata",
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut RejectRaw,
             )
             .unwrap();
@@ -2318,10 +2304,10 @@ pub(crate) mod tests {
                 &[Base::A, Base::C, Base::G, Base::T],
                 &[30, 31, 32, 33],
                 &[],
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap();
@@ -2345,10 +2331,10 @@ pub(crate) mod tests {
                 &[Base::A, Base::C, Base::G, Base::T],
                 &[30, 31, 32, 33],
                 b"NM:i:0",
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut KeepNone,
             )
             .unwrap();
@@ -2378,14 +2364,14 @@ pub(crate) mod tests {
                 &[Base::A, Base::C, Base::G, Base::T, Base::A],
                 &[30, 31, 32, 33, 34],
                 &[],
-                0,   // tid
-                3,   // next_ref_id
-                500, // next_pos
-                200, // template_len
+                crate::reader::Tid::new(0),
+                crate::reader::Tid::new(3),
+                seqair_types::Pos0::new(500),
+                std::num::NonZeroI32::new(200),
                 &mut (),
             )
             .unwrap();
-        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, 3);
+        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, Tid::new(3));
     }
 
     // r[verify record_store.end_pos_htslib]
@@ -2406,10 +2392,10 @@ pub(crate) mod tests {
                 &[Base::A; 5],
                 &[30; 5],
                 &[],
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap();
@@ -2436,10 +2422,10 @@ pub(crate) mod tests {
                 &[Base::A; 100],
                 &[0; 100],
                 &[],
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap();
@@ -2475,10 +2461,10 @@ pub(crate) mod tests {
                 bases,
                 quals,
                 aux,
-                0,  // tid
-                -1, // next_ref_id
-                0,  // next_pos
-                0,  // template_len
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap();
@@ -2600,10 +2586,10 @@ pub(crate) mod tests {
                         &bases,
                         &quals,
                         &[],
-                        0,
-                        -1,
-                        0,
-                        0,
+                        crate::reader::Tid::new(0),
+                        None,
+                        seqair_types::Pos0::new(0),
+                        std::num::NonZeroI32::new(0),
                         &mut (),
                     )
                     .expect("synthetic push")
@@ -3019,10 +3005,10 @@ pub(crate) mod tests {
                     &input.bases,
                     &input.quals,
                     &input.aux,
-                    0,
-                    -1,
-                    0,
-                    0,
+                    crate::reader::Tid::new(0),
+                    None,
+                    seqair_types::Pos0::new(0),
+                    std::num::NonZeroI32::new(0),
                     &mut AcceptFlag(input.accept),
                 )
                 .expect("push_fields must not error on synthetic input")
@@ -3182,15 +3168,19 @@ pub(crate) mod tests {
                 reason = "bases.len() bounded ≤ 16 by the generator; fits in u32"
             )]
             let len = input.bases.len() as u32;
-            OwnedBamRecord::builder(0, Some(Pos0::new(input.pos).unwrap()), input.qname.clone())
-                .flags(BamFlags::empty())
-                .mapq(input.mapq)
-                .cigar(vec![CigarOp::new(cigar::CigarOpType::Match, len)])
-                .seq(input.bases.clone())
-                .qual(input.quals.iter().copied().map(BaseQuality::from_byte).collect())
-                .aux(AuxData::from_bytes(input.aux.clone()))
-                .build()
-                .expect("synthetic OwnedBamRecord must build")
+            OwnedBamRecord::builder(
+                crate::reader::Tid::new(0),
+                Some(Pos0::new(input.pos).unwrap()),
+                input.qname.clone(),
+            )
+            .flags(BamFlags::empty())
+            .mapq(input.mapq)
+            .cigar(vec![CigarOp::new(cigar::CigarOpType::Match, len)])
+            .seq(input.bases.clone())
+            .qual(input.quals.iter().copied().map(BaseQuality::from_byte).collect())
+            .aux(AuxData::from_bytes(input.aux.clone()))
+            .build()
+            .expect("synthetic OwnedBamRecord must build")
         }
 
         // r[verify unified.push_fields_equivalence]

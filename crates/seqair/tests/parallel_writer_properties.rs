@@ -23,6 +23,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
+use seqair::reader::ResolveTid;
 use seqair::vcf::record_encoder::{FormatFieldDef, InfoFieldDef};
 use seqair::vcf::{
     Alleles, ContigDef, FormatInt, Genotype, InfoInts, Number, OutputFormat, ValueType, VcfHeader,
@@ -94,7 +95,9 @@ fn bam_records(stream: &BamStream) -> Vec<OwnedBamRecord> {
         .iter()
         .enumerate()
         .map(|(i, &(step, len, unmapped))| {
-            let tid = i32::from(i >= stream.switch_at);
+            let tid = Some(
+                u32::from(i >= stream.switch_at).resolve_tid(&bam_header()).expect("tid in header"),
+            );
             if i == stream.switch_at {
                 pos = 0;
             }

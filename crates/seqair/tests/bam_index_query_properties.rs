@@ -34,6 +34,7 @@ use seqair::bam::{
     BamIndex, CsiIndex, IndexedBamReader, MappedCounts, Pos0, RecordStore, ReferenceStats,
 };
 use seqair::io::IndexBuilder;
+use seqair::reader::ResolveTid;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -192,7 +193,7 @@ fn write_records(dir: &Path, reads: &[Read]) -> (std::path::PathBuf, IndexBuilde
             read.cigar.iter().map(|&(len, op)| CigarOp::new(op, len)).collect();
         let flags = if read.unmapped { BamFlags::from(0x4u16) } else { BamFlags::empty() };
         let rec = OwnedBamRecord::builder(
-            read.tid as i32,
+            Some(read.tid.resolve_tid(&header).expect("tid in header")),
             Some(Pos0::new(read.pos).unwrap()),
             format!("r{i}").into_bytes(),
         )

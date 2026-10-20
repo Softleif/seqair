@@ -68,8 +68,8 @@ its own panic. They belong on the handle
 (r[`record_store.record_ref`]). `extra_mut(idx)` MUST remain on the store
 because it is `&mut`, and MUST return `Option`.
 
-The mutating operations keyed by an index (`set_alignment`, `set_template_len`,
-`set_mate_info`) MUST likewise report a missing record rather than panicking —
+The mutating operations keyed by an index (`set_alignment`) MUST likewise
+report a missing record rather than panicking —
 `Option` where they have no error type, and a typed variant
 (`DecodeError::NoSuchRecord`) where they do. So MUST
 `BamWriter::write_store_record` (`BamWriteError::NoSuchRecord`).
@@ -121,7 +121,7 @@ alignment per column for a record it never looks at.
 ## Record fields
 
 r[record_store.slim_record_fields]
-Each `SlimRecord` MUST store the following fixed fields: `tid` (reference ID), `pos`, `end_pos`, `flags`, `mapq`, `n_cigar_ops`, `seq_len`, `matching_bases`, `indel_bases`, `next_ref_id` (mate reference ID), `next_pos` (mate position), `template_len` (signed insert size). The `tid`, `next_ref_id`, `next_pos`, and `template_len` fields are required for BAM write-back after local realignment.
+Each `SlimRecord` MUST store the following fixed fields: `tid` (reference ID), `pos`, `end_pos`, `flags`, `mapq`, `n_cigar_ops`, `seq_len`, `matching_bases`, `indel_bases`, `next_ref_id` (mate reference ID), `next_pos` (mate position), `template_len` (signed insert size). `tid` and `next_ref_id` are `Option<Tid>`, `next_pos` is `Option<Pos0>` and `template_len` is `Option<NonZeroI32>`: the wire sentinels (`-1`, and `0` for TLEN) are `None`, never a magic value. The `tid`, `next_ref_id`, `next_pos`, and `template_len` fields are required for BAM write-back after local realignment.
 
 ## Capacity estimation
 

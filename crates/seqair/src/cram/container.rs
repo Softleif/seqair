@@ -20,7 +20,9 @@ impl RefSeqId {
         match raw {
             -1 => Ok(Self::Unmapped),
             -2 => Ok(Self::Multi),
-            _ => Tid::from_wire(raw).map(Self::Ref).ok_or(CramError::InvalidRefSeqId { value: raw }),
+            _ => {
+                Tid::from_wire(raw).map(Self::Ref).ok_or(CramError::InvalidRefSeqId { value: raw })
+            }
         }
     }
 }

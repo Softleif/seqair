@@ -9,6 +9,7 @@
 
 use core::range::RangeInclusive;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use seqair::reader::ResolveTid;
 use seqair_types::{Base, Pos0};
 use std::hint::black_box;
 use std::io::Read;
@@ -224,13 +225,13 @@ fn bam_roundtrip(c: &mut Criterion) {
                 let cigar = store.record(idx).unwrap().cigar().to_vec();
 
                 let rec = OwnedBamRecord {
-                    ref_id: tid as i32,
+                    ref_id: Some(tid.resolve_tid(reader.header()).unwrap()),
                     pos: Some(slim.pos),
                     mapq: slim.mapq,
                     flags: slim.flags,
-                    next_ref_id: -1,
+                    next_ref_id: None,
                     next_pos: None,
-                    template_len: 0,
+                    template_len: None,
                     qname: store.record(idx).unwrap().qname().to_vec(),
                     cigar,
                     seq: store.record(idx).unwrap().seq().to_vec(),
@@ -923,10 +924,10 @@ fn synthetic_input(shape: ReadShape) -> seqair::bam::record_store::PileupInput<(
                 &seq,
                 &qual,
                 &[],
-                0,
-                -1,
-                -1,
-                0,
+                t(0),
+                None,
+                None,
+                None,
                 &mut (),
             )
             .unwrap();
@@ -985,3 +986,9 @@ criterion_group!(
     pileup_synthetic,
 );
 criterion_main!(benches);
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n").unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
+}

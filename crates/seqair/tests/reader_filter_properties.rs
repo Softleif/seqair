@@ -171,7 +171,7 @@ fn write_inputs(dir: &Path, reads: &[Read]) -> (PathBuf, PathBuf) {
             aux.set_int(*b"NM", i64::from(nm)).expect("a small non-negative int");
         }
         let rec = OwnedBamRecord::builder(
-            0,
+            t(0),
             Some(Pos0::new(read.pos).unwrap()),
             format!("r{i}").into_bytes(),
         )
@@ -422,10 +422,10 @@ struct Snapshot {
     seq_len: u32,
     matching_bases: u32,
     indel_bases: u32,
-    tid: i32,
-    next_ref_id: i32,
-    next_pos: i32,
-    template_len: i32,
+    tid: Option<seqair::reader::Tid>,
+    next_ref_id: Option<seqair::reader::Tid>,
+    next_pos: Option<Pos0>,
+    template_len: Option<std::num::NonZeroI32>,
     qname: Vec<u8>,
     seq: Vec<Base>,
     qual: Vec<u8>,
@@ -720,4 +720,13 @@ fn a_conjunction_fetches_the_intersection_of_its_parts(tc: TestCase) {
     if from_both.len() < from_a.len() && from_both.len() < from_b.len() {
         tc.event("the conjunction cut further than either part");
     }
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text(
+        "@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n",
+    )
+    .unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

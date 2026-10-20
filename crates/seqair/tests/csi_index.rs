@@ -57,7 +57,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     // chr1: 30 records at positions 0, 10000, 20000, ...
     for i in 0..30u32 {
         let rec = OwnedBamRecord::builder(
-            0,
+            t(0),
             Some(Pos0::new(i * 10000).unwrap()),
             format!("c1r{i}").into_bytes(),
         )
@@ -73,7 +73,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     // chr2: 15 records
     for i in 0..15u32 {
         let rec = OwnedBamRecord::builder(
-            1,
+            t(1),
             Some(Pos0::new(i * 20000).unwrap()),
             format!("c2r{i}").into_bytes(),
         )
@@ -89,7 +89,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     // chr3: 5 records
     for i in 0..5u32 {
         let rec = OwnedBamRecord::builder(
-            2,
+            t(2),
             Some(Pos0::new(i * 30000).unwrap()),
             format!("c3r{i}").into_bytes(),
         )
@@ -332,7 +332,7 @@ fn indexed_reader_finds_csi_without_bam_infix() {
             BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
         for i in 0..5u32 {
             let rec = OwnedBamRecord::builder(
-                0,
+                t(0),
                 Some(Pos0::new(i * 10000).unwrap()),
                 format!("r{i}").into_bytes(),
             )
@@ -551,14 +551,17 @@ fn roundtrip_csi_preserves_query_chunks(tc: TestCase) {
 
     for i in 0..n_records {
         let pos = ((seed + (i as u64) * 1000) % 9_000_000) as u32;
-        let rec =
-            OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), format!("r{i}").into_bytes())
-                .mapq(60)
-                .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
-                .seq(cyclic_seq(100))
-                .qual(vec![BaseQuality::from_byte(30); 100])
-                .build()
-                .unwrap();
+        let rec = OwnedBamRecord::builder(
+            t(0),
+            Some(Pos0::new(pos).unwrap()),
+            format!("r{i}").into_bytes(),
+        )
+        .mapq(60)
+        .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
+        .seq(cyclic_seq(100))
+        .qual(vec![BaseQuality::from_byte(30); 100])
+        .build()
+        .unwrap();
         writer.write(&rec).unwrap();
     }
 
@@ -585,4 +588,13 @@ fn roundtrip_csi_preserves_query_chunks(tc: TestCase) {
         csi_chunks.len(),
         bai_chunks.len()
     );
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text(
+        "@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n",
+    )
+    .unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

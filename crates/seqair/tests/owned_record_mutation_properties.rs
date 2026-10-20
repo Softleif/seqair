@@ -273,7 +273,7 @@ fn apply(op: &Op, rec: &mut OwnedBamRecord, model: &mut Model) {
 /// The starting record: placed, no CIGAR, no sequence, no tags. Everything
 /// the properties look at is put there by the mutators.
 fn seed_record() -> OwnedBamRecord {
-    OwnedBamRecord::builder(0, Some(Pos0::new(1_000).unwrap()), b"seed".to_vec())
+    OwnedBamRecord::builder(t(0), Some(Pos0::new(1_000).unwrap()), b"seed".to_vec())
         .flags(BamFlags::from(0x4))
         .mapq(17)
         .build()
@@ -498,7 +498,7 @@ fn a_rejected_set_int_leaves_the_aux_block_byte_identical(tc: TestCase) {
 
     // And the record still serializes to something samtools reads as exactly
     // the tags the model holds.
-    let rec = OwnedBamRecord::builder(0, Some(Pos0::new(500).unwrap()), b"s0".to_vec())
+    let rec = OwnedBamRecord::builder(t(0), Some(Pos0::new(500).unwrap()), b"s0".to_vec())
         .flags(BamFlags::from(0x4))
         .aux(edges)
         .build()
@@ -686,7 +686,7 @@ fn the_serialized_bin_is_the_one_htslib_computes(tc: TestCase) {
     let mut records = Vec::with_capacity(plans.len());
     for (i, plan) in plans.iter().enumerate() {
         let mut rec = OwnedBamRecord::builder(
-            0,
+            t(0),
             Some(Pos0::new(plan.before.pos).unwrap()),
             format!("r{i}").into_bytes(),
         )
@@ -785,4 +785,13 @@ fn a_resize_without_its_qual_refuses_to_serialize() {
     rec.set_qual(Vec::new()).expect("empty is always accepted");
     buf.clear();
     rec.to_bam_bytes(&mut buf).expect("an empty qual serializes as 0xFF fill");
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text(
+        "@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n",
+    )
+    .unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

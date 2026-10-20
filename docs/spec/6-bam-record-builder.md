@@ -27,13 +27,13 @@ The owned record type makes these modifications safe and explicit: callers get a
 > r[bam.owned_record.fields]
 > `OwnedBamRecord` MUST store the following fields, all owned and mutable:
 >
-> - `ref_id: i32` — reference sequence index (-1 sentinel for unmapped, preserved as raw `i32` because every reader uses it as a header-table index)
+> - `ref_id: Option<Tid>` — reference sequence; `None` represents the BAM wire `-1` (unmapped)
 > - `pos: Option<Pos0>` — 0-based leftmost mapping position; `None` represents the BAM wire `-1` (unmapped/unavailable). `Pos0` constructively bounds the value to `[0, i32::MAX]`, so wire-format overflow is unconstructable.
 > - `mapq: u8` — mapping quality
 > - `flags: BamFlags` — SAM flag bits
-> - `next_ref_id: i32` — mate's reference sequence index (same -1 rationale as `ref_id`)
+> - `next_ref_id: Option<Tid>` — mate's reference sequence; `None` for unavailable (wire `-1`)
 > - `next_pos: Option<Pos0>` — mate's 0-based position; `None` for unavailable
-> - `template_len: i32` — observed template length
+> - `template_len: Option<NonZeroI32>` — observed template length; `None` for the wire `0` (unavailable, or a single-segment template)
 > - `qname: Vec<u8>` — query name (without NUL terminator)
 > - `cigar: Vec<CigarOp>` — typed CIGAR operations
 > - `seq: Vec<Base>` — sequence as `Base` enum values

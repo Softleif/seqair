@@ -134,9 +134,9 @@ fn build_store(case: &Case) -> PileupInput<()> {
         let (name, next_ref_id, next_pos) = match mate_of[i] {
             Some(m) => {
                 flags |= 0x1 | if m > i { 0x40 } else { 0x80 };
-                (format!("t{}", i.min(m)), 0, i32::try_from(case.reads[m].pos).unwrap())
+                (format!("t{}", i.min(m)), t(0), Pos0::new(case.reads[m].pos))
             }
-            None => (format!("r{i}"), -1, -1),
+            None => (format!("r{i}"), None, None),
         };
         store
             .push_fields(
@@ -151,10 +151,10 @@ fn build_store(case: &Case) -> PileupInput<()> {
                 &r.seq,
                 &r.qual,
                 &[],
-                0,
+                t(0),
                 next_ref_id,
                 next_pos,
-                0,
+                None,
                 &mut (),
             )
             .unwrap();
@@ -312,4 +312,10 @@ fn engine_matches_stateless_oracle(tc: TestCase) {
     let oracle = run_oracle(&case);
     assert_eq!(ours, oracle);
     tc.event_value("columns", ours.len() as f64);
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n").unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

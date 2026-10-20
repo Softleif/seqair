@@ -154,9 +154,9 @@ fn store_mates(store: &RecordStore, into: &mut BTreeMap<Key, Mate>) {
             std::str::from_utf8(rec.qname()).expect("generated qnames are ASCII").to_owned();
         let mate = Mate {
             flags: rec.flags.raw(),
-            next_ref: rec.next_ref_id,
-            next_pos: rec.next_pos,
-            tlen: rec.template_len,
+            next_ref: rec.next_ref_id.map_or(-1, |t| i32::try_from(t.as_u32()).unwrap()),
+            next_pos: rec.next_pos.map_or(-1, |p| p.as_i32()),
+            tlen: rec.template_len.map_or(0, std::num::NonZeroI32::get),
         };
         let key = (qname, role_of(rec.flags.raw()));
         assert!(into.insert(key.clone(), mate).is_none(), "two records share the key {key:?}");

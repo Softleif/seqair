@@ -619,7 +619,7 @@ fn bam_seqair(args: &[String]) {
                 mapq: r.mapq,
                 flags: r.flags,
                 next_ref_id: r.next_ref_id,
-                next_pos: u32::try_from(r.next_pos).ok().and_then(Pos0::new),
+                next_pos: r.next_pos,
                 template_len: r.template_len,
                 qname: r.qname().to_vec(),
                 cigar: r.cigar().to_vec(),

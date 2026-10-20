@@ -31,6 +31,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair::reader::ResolveTid;
 use seqair::sam::reader::IndexedSamReader;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::fmt::Write as _;
@@ -172,7 +173,12 @@ fn write_bam(dir: &Path, reads: &[Read]) -> std::path::PathBuf {
         let n = read.seq_len() as usize;
         let flags = if read.unmapped { BamFlags::from(0x4u16) } else { BamFlags::empty() };
         let rec = OwnedBamRecord::builder(
-            read.tid as i32,
+            Some(
+                u32::try_from(read.tid)
+                    .expect("tid fits u32")
+                    .resolve_tid(&header)
+                    .expect("tid in header"),
+            ),
             Some(Pos0::new(read.pos).unwrap()),
             format!("r{i}").into_bytes(),
         )

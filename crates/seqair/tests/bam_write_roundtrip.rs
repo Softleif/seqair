@@ -82,7 +82,7 @@ fn roundtrip_simple_records() {
     let dir = tempfile::tempdir().unwrap();
 
     let records = vec![
-        OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"read1".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(100).unwrap()), b"read1".to_vec())
             .flags(BamFlags::empty())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
@@ -101,7 +101,7 @@ fn roundtrip_simple_records() {
             .qual([30, 31, 32, 33, 34, 35, 36, 37, 38, 39].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap(),
-        OwnedBamRecord::builder(0, Some(Pos0::new(200).unwrap()), b"read2".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(200).unwrap()), b"read2".to_vec())
             .flags(BamFlags::from(16)) // reverse
             .mapq(50)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 8)])
@@ -171,7 +171,7 @@ fn roundtrip_complex_cigars() {
 
     let records = vec![
         // Soft clips + insertion + deletion
-        OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"complex1".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(100).unwrap()), b"complex1".to_vec())
             .mapq(40)
             .cigar(vec![
                 CigarOp::new(CigarOpType::SoftClip, 2),
@@ -187,7 +187,7 @@ fn roundtrip_complex_cigars() {
             .build()
             .unwrap(),
         // Hard clips + intron (N op) — query length = 3+5 = 8
-        OwnedBamRecord::builder(0, Some(Pos0::new(500).unwrap()), b"intron1".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(500).unwrap()), b"intron1".to_vec())
             .mapq(55)
             .cigar(vec![
                 CigarOp::new(CigarOpType::HardClip, 5),
@@ -201,7 +201,7 @@ fn roundtrip_complex_cigars() {
             .build()
             .unwrap(),
         // SeqMatch/SeqMismatch ops — query length = 5+3+4 = 12
-        OwnedBamRecord::builder(0, Some(Pos0::new(800).unwrap()), b"exact1".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(800).unwrap()), b"exact1".to_vec())
             .mapq(60)
             .cigar(vec![
                 CigarOp::new(CigarOpType::SeqMatch, 5),
@@ -309,7 +309,7 @@ fn roundtrip_aux_tags() {
     aux.set_float(*b"XS", -1.5);
 
     let records = vec![
-        OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"aux_read".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(100).unwrap()), b"aux_read".to_vec())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
@@ -340,14 +340,14 @@ fn roundtrip_multiple_contigs() {
     let dir = tempfile::tempdir().unwrap();
 
     let records = vec![
-        OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"chr1_read".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(100).unwrap()), b"chr1_read".to_vec())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
             .qual(vec![BaseQuality::from_byte(30); 5])
             .build()
             .unwrap(),
-        OwnedBamRecord::builder(1, Some(Pos0::new(200).unwrap()), b"chr2_read".to_vec())
+        OwnedBamRecord::builder(t(1), Some(Pos0::new(200).unwrap()), b"chr2_read".to_vec())
             .mapq(50)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 6)])
             .seq(vec![Base::T, Base::G, Base::C, Base::A, Base::T, Base::G])
@@ -390,7 +390,7 @@ fn index_coproduction_matches_samtools() {
     let records: Vec<OwnedBamRecord> = (0..20)
         .map(|i| {
             OwnedBamRecord::builder(
-                0,
+                t(0),
                 Some(Pos0::new(i * 1000).unwrap()),
                 format!("read{i}").into_bytes(),
             )
@@ -453,26 +453,26 @@ fn roundtrip_paired_end() {
 
     let seq5 = vec![Base::A, Base::C, Base::G, Base::T, Base::A];
     let records = vec![
-        OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"pair1".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(100).unwrap()), b"pair1".to_vec())
             .flags(BamFlags::from(99)) // paired, proper, mate reverse, read1
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5.clone())
             .qual(vec![BaseQuality::from_byte(30); 5])
-            .next_ref_id(0)
+            .next_ref_id(t(0))
             .next_pos(Some(Pos0::new(200).unwrap()))
-            .template_len(105)
+            .template_len(std::num::NonZeroI32::new(105))
             .build()
             .unwrap(),
-        OwnedBamRecord::builder(0, Some(Pos0::new(200).unwrap()), b"pair1".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(200).unwrap()), b"pair1".to_vec())
             .flags(BamFlags::from(147)) // paired, proper, reverse, read2
             .mapq(55)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5)
             .qual(vec![BaseQuality::from_byte(35); 5])
-            .next_ref_id(0)
+            .next_ref_id(t(0))
             .next_pos(Some(Pos0::new(100).unwrap()))
-            .template_len(-105)
+            .template_len(std::num::NonZeroI32::new(-105))
             .build()
             .unwrap(),
     ];
@@ -505,15 +505,15 @@ fn roundtrip_write_store_record() {
     // Build OwnedBamRecords, serialize to raw BAM, push into RecordStore
     let seq5 = vec![Base::A, Base::C, Base::G, Base::T, Base::A];
     let records = vec![
-        OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"sr1".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(100).unwrap()), b"sr1".to_vec())
             .flags(BamFlags::from(99))
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5.clone())
             .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
-            .next_ref_id(0)
+            .next_ref_id(t(0))
             .next_pos(Some(Pos0::new(300).unwrap()))
-            .template_len(205)
+            .template_len(std::num::NonZeroI32::new(205))
             .aux({
                 let mut a = AuxData::new();
                 a.set_string(*b"RG", b"grp1");
@@ -521,7 +521,7 @@ fn roundtrip_write_store_record() {
             })
             .build()
             .unwrap(),
-        OwnedBamRecord::builder(0, Some(Pos0::new(300).unwrap()), b"sr1".to_vec())
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(300).unwrap()), b"sr1".to_vec())
             .flags(BamFlags::from(147))
             .mapq(55)
             .cigar(vec![
@@ -530,9 +530,9 @@ fn roundtrip_write_store_record() {
             ])
             .seq(seq5)
             .qual([35, 36, 37, 38, 39].map(BaseQuality::from_byte).to_vec())
-            .next_ref_id(0)
+            .next_ref_id(t(0))
             .next_pos(Some(Pos0::new(100).unwrap()))
-            .template_len(-205)
+            .template_len(std::num::NonZeroI32::new(-205))
             .build()
             .unwrap(),
     ];
@@ -683,11 +683,11 @@ mod e2e_oracle {
                     &cigar,
                     &inp.bases,
                     &inp.quals,
-                    &[], // no aux
-                    0,   // tid
-                    -1,
-                    -1,
-                    0,
+                    &[],  // no aux
+                    t(0), // tid
+                    None,
+                    None,
+                    None,
                     &mut (),
                 )
                 .unwrap();
@@ -742,4 +742,13 @@ mod e2e_oracle {
             assert_eq!(cigar[0].len() as usize, inp.bases.len(), "cigar op len rec {}", i);
         }
     }
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text(
+        "@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n",
+    )
+    .unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

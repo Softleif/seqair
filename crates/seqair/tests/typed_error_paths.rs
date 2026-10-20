@@ -33,6 +33,7 @@ use seqair::bam::{
     BamError, BamHeaderError, BgzfError, IndexedBamReader, Pos0, RecordIdx, RecordStore,
 };
 use seqair::io::IndexError;
+use seqair::reader::ResolveTid;
 use seqair::vcf::record_encoder::{
     FilterFieldDef, FormatEncoder, FormatFieldDef, FormatGt, FormatInt, InfoEncoder, InfoFieldDef,
     InfoInt,
@@ -134,7 +135,7 @@ fn corpus() -> &'static Corpus {
             let qual: Vec<BaseQuality> =
                 (0..100).map(|_| BaseQuality::from_byte((next() % 40) as u8)).collect();
             let record =
-                OwnedBamRecord::builder(0, Some(Pos0::new(i * 100 + 1).unwrap()), read_name(i))
+                OwnedBamRecord::builder(t(0), Some(Pos0::new(i * 100 + 1).unwrap()), read_name(i))
                     .flags(BamFlags::empty())
                     .mapq(60)
                     .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
@@ -446,14 +447,18 @@ fn writer_header() -> BamHeader {
 
 /// A minimal mapped record. `len` bases of `A` with matching qualities.
 fn mapped_record(ref_id: i32, pos: u32, name: &str, len: usize) -> OwnedBamRecord {
-    OwnedBamRecord::builder(ref_id, Some(Pos0::new(pos).unwrap()), name.as_bytes().to_vec())
-        .flags(BamFlags::empty())
-        .mapq(60)
-        .cigar(vec![CigarOp::new(CigarOpType::Match, len as u32)])
-        .seq(vec![Base::A; len])
-        .qual(vec![BaseQuality::from_byte(30); len])
-        .build()
-        .unwrap()
+    OwnedBamRecord::builder(
+        u32::try_from(ref_id).ok().and_then(|n| n.resolve_tid(&writer_header()).ok()),
+        Some(Pos0::new(pos).unwrap()),
+        name.as_bytes().to_vec(),
+    )
+    .flags(BamFlags::empty())
+    .mapq(60)
+    .cigar(vec![CigarOp::new(CigarOpType::Match, len as u32)])
+    .seq(vec![Base::A; len])
+    .qual(vec![BaseQuality::from_byte(30); len])
+    .build()
+    .unwrap()
 }
 
 /// Bytes of a BAM that got a header and nothing else — the baseline a write
@@ -544,12 +549,13 @@ fn a_record_whose_qual_no_longer_matches_its_seq_is_refused_with_both_lengths() 
 
     // An unmapped record has no CIGAR to contradict, so `set_seq` accepts a
     // shorter sequence and leaves the ten quality scores behind it.
-    let mut record = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
-        .flags(BamFlags::from(4))
-        .seq(vec![Base::A; 10])
-        .qual(vec![BaseQuality::from_byte(30); 10])
-        .build()
-        .unwrap();
+    let mut record =
+        OwnedBamRecord::builder(t(0), Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
+            .flags(BamFlags::from(4))
+            .seq(vec![Base::A; 10])
+            .qual(vec![BaseQuality::from_byte(30); 10])
+            .build()
+            .unwrap();
     record.set_seq(vec![Base::C; 4]).expect("no CIGAR to contradict the new length");
 
     let (err, actual) = rejected_write(dir.path(), |writer| {
@@ -686,13 +692,16 @@ impl WriteFailure {
             // Large enough to pass the 2 MiB limit, small enough to build fast.
             Self::RecordTooLarge => mapped_record(0, 100, "huge", 3_000_000),
             Self::SeqQualMismatch => {
-                let mut record =
-                    OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
-                        .flags(BamFlags::from(4))
-                        .seq(vec![Base::A; 10])
-                        .qual(vec![BaseQuality::from_byte(30); 10])
-                        .build()
-                        .unwrap();
+                let mut record = OwnedBamRecord::builder(
+                    t(0),
+                    Some(Pos0::new(100).unwrap()),
+                    b"shrunk".to_vec(),
+                )
+                .flags(BamFlags::from(4))
+                .seq(vec![Base::A; 10])
+                .qual(vec![BaseQuality::from_byte(30); 10])
+                .build()
+                .unwrap();
                 record.set_seq(vec![Base::C; 4]).unwrap();
                 record
             }
@@ -1190,4 +1199,13 @@ fn a_truncated_bam_always_terminates(tc: TestCase) {
             });
         }
     }
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text(
+        "@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n",
+    )
+    .unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

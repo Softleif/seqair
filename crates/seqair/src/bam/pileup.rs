@@ -1520,10 +1520,10 @@ mod tests {
                 &[Base::A; 5],
                 &[40; 5],
                 &[],
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap();
@@ -1572,10 +1572,10 @@ mod tests {
                     &vec![Base::A; *span as usize],
                     &vec![40u8; *span as usize],
                     &[],
-                    0,
-                    -1,
-                    0,
-                    0,
+                    crate::reader::Tid::new(0),
+                    None,
+                    seqair_types::Pos0::new(0),
+                    std::num::NonZeroI32::new(0),
                     &mut (),
                 )
                 .unwrap();
@@ -1642,10 +1642,10 @@ mod tests {
                 &seq,
                 &quals,
                 &[],
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap();
@@ -1700,10 +1700,10 @@ mod tests {
                 &seq,
                 &[40u8; 6],
                 &[],
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap();
@@ -1829,10 +1829,10 @@ mod tests {
                         &r.seq,
                         &quals,
                         &[],
-                        0,
-                        -1,
-                        0,
-                        0,
+                        crate::reader::Tid::new(0),
+                        None,
+                        seqair_types::Pos0::new(0),
+                        std::num::NonZeroI32::new(0),
                         &mut (),
                     )
                     .unwrap();
@@ -1960,10 +1960,10 @@ mod tests {
                 &seq,
                 &quals,
                 &[],
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap();
@@ -2016,10 +2016,10 @@ mod tests {
                 &seq,
                 &quals,
                 &[],
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap();
@@ -2074,10 +2074,10 @@ mod tests {
                 &seq,
                 &quals,
                 &[],
-                0,
-                -1,
-                0,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                seqair_types::Pos0::new(0),
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap();
@@ -2123,10 +2123,10 @@ mod tests {
                     &vec![Base::A; seq_len as usize],
                     &vec![40u8; seq_len as usize],
                     &[],
-                    0,
-                    -1,
-                    0,
-                    0,
+                    crate::reader::Tid::new(0),
+                    None,
+                    seqair_types::Pos0::new(0),
+                    std::num::NonZeroI32::new(0),
                     &mut (),
                 )
                 .unwrap();
@@ -2198,10 +2198,10 @@ mod tests {
                     &[Base::A; 50],
                     &[40u8; 50],
                     &[],
-                    0,
-                    -1,
-                    0,
-                    0,
+                    crate::reader::Tid::new(0),
+                    None,
+                    seqair_types::Pos0::new(0),
+                    std::num::NonZeroI32::new(0),
                     &mut (),
                 )
                 .unwrap();

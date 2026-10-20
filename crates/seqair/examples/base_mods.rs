@@ -131,7 +131,7 @@ fn main() -> anyhow::Result<()> {
         let Some(rec) = store.record(idx) else { continue };
 
         // Skip unmapped reads.
-        if rec.flags.is_unmapped() || rec.tid < 0 {
+        if rec.flags.is_unmapped() || rec.tid.is_none() {
             continue;
         }
 

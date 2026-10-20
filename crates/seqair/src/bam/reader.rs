@@ -694,12 +694,16 @@ mod tests {
         use crate::io::BgzfWriter;
         use seqair_types::Base;
 
-        let mapped = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"mapped".to_vec())
-            .seq(vec![Base::A, Base::C, Base::G])
-            .build()
-            .unwrap();
+        let mapped = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(100).unwrap()),
+            b"mapped".to_vec(),
+        )
+        .seq(vec![Base::A, Base::C, Base::G])
+        .build()
+        .unwrap();
         // Fully unplaced read: ref_id = -1, pos = -1 (BAM wire), unmapped flag.
-        let unplaced = OwnedBamRecord::builder(-1, None, b"unplaced".to_vec())
+        let unplaced = OwnedBamRecord::builder(None, None, b"unplaced".to_vec())
             .flags(BamFlags::from(0x4))
             .seq(vec![Base::A, Base::C, Base::G])
             .build()
@@ -781,12 +785,16 @@ mod tests {
         let seq_len: u32 =
             ops.iter().filter(|op| op.consumes_query()).map(|op| op.len()).sum::<u32>().max(1);
         let unmapped = tc.draw(gs::booleans());
-        let rec = OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), b"q".to_vec())
-            .flags(BamFlags::from(if unmapped { 0x4u16 } else { 0 }))
-            .cigar(ops)
-            .seq(vec![Base::A; seq_len as usize])
-            .build()
-            .unwrap();
+        let rec = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(pos).unwrap()),
+            b"q".to_vec(),
+        )
+        .flags(BamFlags::from(if unmapped { 0x4u16 } else { 0 }))
+        .cigar(ops)
+        .seq(vec![Base::A; seq_len as usize])
+        .build()
+        .unwrap();
         let mut raw = Vec::new();
         rec.to_bam_bytes(&mut raw).unwrap();
         if tc.draw(gs::booleans()) {

@@ -5,12 +5,14 @@
 
 use super::bgzf_writer::BgzfSink;
 use super::header::{BamHeader, BamHeaderError};
-use super::owned_record::{OwnedBamRecord, OwnedRecordError};
+use super::owned_record::{OwnedBamRecord, OwnedRecordError, pos_to_bam_i32};
 use super::record_idx::RecordIdx;
 use super::record_store::RecordStore;
 use crate::io::{BgzfError, IndexBuilder, IndexError};
+use crate::reader::Tid;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
+use std::num::NonZeroI32;
 use std::path::Path;
 use thiserror::Error;
 
@@ -156,7 +158,7 @@ impl<W: Write> BamWriter<W> {
     /// for unmapped records the helper collapses `end` to `beg`+1.
     fn finalize_record(
         &mut self,
-        ref_id: i32,
+        ref_id: Option<Tid>,
         is_unmapped: bool,
         beg: u64,
         end_pos: u64,
@@ -168,7 +170,7 @@ impl<W: Write> BamWriter<W> {
         // Validate indexability BEFORE writing to BGZF — a failed validation
         // after writing would leave the record in the stream but poison the
         // writer.
-        if self.index.is_some() && ref_id == -1 && !is_unmapped {
+        if self.index.is_some() && ref_id.is_none() && !is_unmapped {
             return Err(BamWriteError::MappedWithoutReference);
         }
 
@@ -188,10 +190,11 @@ impl<W: Write> BamWriter<W> {
 
         // Push to index after writing (offset convention: offset AFTER the
         // record). Sort validation is delegated to `IndexBuilder::push()`.
-        // Fully unmapped records (ref_id == -1) are not pushed.
+        // Fully unmapped records (no reference) are not pushed.
         if let Some(ref mut index) = self.index
-            && ref_id != -1
+            && let Some(ref_id) = ref_id
         {
+            let ref_id = Tid::to_wire(Some(ref_id));
             let voff = self.bgzf.index_offset();
             // Placed unmapped: beg = end = pos. Mapped: end = end_pos.
             let end = if is_unmapped { beg } else { end_pos };
@@ -270,7 +273,7 @@ impl<W: Write> BamWriter<W> {
         super::record::encode_fixed_header(
             &mut self.buf,
             &super::record::FixedHeaderFields {
-                ref_id: rec.tid,
+                ref_id: Tid::to_wire(rec.tid),
                 pos: rec.pos.as_i32(),
                 bin,
                 mapq: rec.mapq,
@@ -278,9 +281,9 @@ impl<W: Write> BamWriter<W> {
                 flags: rec.flags.raw(),
                 n_cigar_op: rec.n_cigar_ops,
                 l_seq: rec.seq_len as i32,
-                next_ref_id: rec.next_ref_id,
-                next_pos: rec.next_pos,
-                template_len: rec.template_len,
+                next_ref_id: Tid::to_wire(rec.next_ref_id),
+                next_pos: pos_to_bam_i32(rec.next_pos),
+                template_len: rec.template_len.map_or(0, NonZeroI32::get),
             },
         );
 
@@ -553,7 +556,7 @@ mod tests {
         .unwrap()
     }
 
-    fn test_record(ref_id: i32, pos: u32, qname: &[u8]) -> OwnedBamRecord {
+    fn test_record(ref_id: Option<Tid>, pos: u32, qname: &[u8]) -> OwnedBamRecord {
         OwnedBamRecord::builder(ref_id, Some(Pos0::new(pos).unwrap()), qname.to_vec())
             .mapq(30)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
@@ -595,8 +598,8 @@ mod tests {
         {
             let mut writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
 
-            let rec1 = test_record(0, 100, b"read1");
-            let rec2 = test_record(0, 200, b"read2");
+            let rec1 = test_record(crate::reader::Tid::new(0), 100, b"read1");
+            let rec2 = test_record(crate::reader::Tid::new(0), 200, b"read2");
             writer.write(&rec1).unwrap();
             writer.write(&rec2).unwrap();
             writer.finish().unwrap();
@@ -632,13 +635,13 @@ mod tests {
 
         // Force poison by writing a record with an oversized qname
         let bad_rec = OwnedBamRecord {
-            ref_id: 0,
+            ref_id: Tid::new(0),
             pos: Some(Pos0::new(0).unwrap()),
             mapq: 0,
             flags: BamFlags::empty(),
-            next_ref_id: -1,
+            next_ref_id: None,
             next_pos: None,
-            template_len: 0,
+            template_len: None,
             qname: vec![b'A'; 255], // too long
             cigar: Vec::new(),
             seq: Vec::new(),
@@ -648,7 +651,7 @@ mod tests {
         assert!(writer.write(&bad_rec).is_err());
 
         // Subsequent writes should fail with Poisoned
-        let good_rec = test_record(0, 100, b"ok");
+        let good_rec = test_record(crate::reader::Tid::new(0), 100, b"ok");
         let err = writer.write(&good_rec).unwrap_err();
         assert!(matches!(err, BamWriteError::Poisoned));
     }
@@ -662,7 +665,7 @@ mod tests {
         let mut writer =
             BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
 
-        let rec = test_record(0, 100, b"r1");
+        let rec = test_record(crate::reader::Tid::new(0), 100, b"r1");
         writer.write(&rec).unwrap();
 
         let (_inner, index) = writer.finish().unwrap();
@@ -686,8 +689,8 @@ mod tests {
         let mut writer =
             BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
 
-        let rec1 = test_record(0, 200, b"r1");
-        let rec2 = test_record(0, 100, b"r2"); // out of order
+        let rec1 = test_record(crate::reader::Tid::new(0), 200, b"r1");
+        let rec2 = test_record(crate::reader::Tid::new(0), 100, b"r2"); // out of order
         writer.write(&rec1).unwrap();
         let err = writer.write(&rec2).unwrap_err();
         assert!(matches!(err, BamWriteError::Index { .. }));
@@ -703,7 +706,7 @@ mod tests {
             BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
 
         // Mapped (flags & 0x4 == 0) but ref_id == -1
-        let rec = OwnedBamRecord::builder(-1, Some(Pos0::new(0).unwrap()), b"bad".to_vec())
+        let rec = OwnedBamRecord::builder(None, Some(Pos0::new(0).unwrap()), b"bad".to_vec())
             .flags(BamFlags::empty()) // mapped
             .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
             .seq(vec![Base::A, Base::C, Base::G])
@@ -724,11 +727,11 @@ mod tests {
             BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
 
         // Write a mapped record first (index needs at least one)
-        let mapped = test_record(0, 100, b"mapped");
+        let mapped = test_record(crate::reader::Tid::new(0), 100, b"mapped");
         writer.write(&mapped).unwrap();
 
         // Fully unmapped: ref_id=-1, flags=0x4
-        let unmapped = OwnedBamRecord::builder(-1, None, b"unmapped".to_vec())
+        let unmapped = OwnedBamRecord::builder(None, None, b"unmapped".to_vec())
             .flags(BamFlags::from(0x4))
             .seq(vec![Base::A])
             .build()
@@ -753,7 +756,7 @@ mod tests {
         let mut writer =
             BamWriterBuilder::to_writer(&mut output, &header).write_index(true).build().unwrap();
 
-        writer.write(&test_record(0, 100, b"r1")).unwrap();
+        writer.write(&test_record(crate::reader::Tid::new(0), 100, b"r1")).unwrap();
 
         let (_inner, index) = writer.finish().unwrap();
         assert!(index.is_none());
@@ -778,32 +781,37 @@ mod tests {
 
         // Build a RecordStore with two records
         let mut store = RecordStore::new();
-        let rec1 = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"read1".to_vec())
-            .mapq(30)
-            .flags(BamFlags::from(0x63))
-            .next_ref_id(1)
-            .next_pos(Some(Pos0::new(500).unwrap()))
-            .template_len(250)
-            .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
-            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
-            .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
-            .aux({
-                let mut a = AuxData::new();
-                a.set_string(*b"RG", b"group1");
-                a
-            })
-            .build()
-            .unwrap();
-        let rec2 = OwnedBamRecord::builder(0, Some(Pos0::new(200).unwrap()), b"read2".to_vec())
-            .mapq(60)
-            .cigar(vec![
-                CigarOp::new(CigarOpType::SoftClip, 2),
-                CigarOp::new(CigarOpType::Match, 3),
-            ])
-            .seq(vec![Base::G, Base::T, Base::A, Base::C, Base::G])
-            .qual([35, 36, 37, 38, 39].map(BaseQuality::from_byte).to_vec())
-            .build()
-            .unwrap();
+        let rec1 = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(100).unwrap()),
+            b"read1".to_vec(),
+        )
+        .mapq(30)
+        .flags(BamFlags::from(0x63))
+        .next_ref_id(Tid::new(1))
+        .next_pos(Some(Pos0::new(500).unwrap()))
+        .template_len(NonZeroI32::new(250))
+        .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
+        .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
+        .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
+        .aux({
+            let mut a = AuxData::new();
+            a.set_string(*b"RG", b"group1");
+            a
+        })
+        .build()
+        .unwrap();
+        let rec2 = OwnedBamRecord::builder(
+            crate::reader::Tid::new(0),
+            Some(Pos0::new(200).unwrap()),
+            b"read2".to_vec(),
+        )
+        .mapq(60)
+        .cigar(vec![CigarOp::new(CigarOpType::SoftClip, 2), CigarOp::new(CigarOpType::Match, 3)])
+        .seq(vec![Base::G, Base::T, Base::A, Base::C, Base::G])
+        .qual([35, 36, 37, 38, 39].map(BaseQuality::from_byte).to_vec())
+        .build()
+        .unwrap();
 
         // Write via OwnedBamRecord to get them into the store
         let mut raw_buf = Vec::new();
@@ -881,26 +889,38 @@ mod tests {
         // Build a store with 3 sorted records (mapped, placed-unmapped, mapped)
         let mut store = RecordStore::new();
         let recs = [
-            OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"m1".to_vec())
-                .mapq(30)
-                .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-                .seq(vec![Base::A, Base::C, Base::G])
-                .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
-                .build()
-                .unwrap(),
-            OwnedBamRecord::builder(0, Some(Pos0::new(200).unwrap()), b"pu1".to_vec())
-                .flags(BamFlags::from(0x4)) // unmapped but placed
-                .seq(vec![Base::T, Base::A])
-                .qual([20, 21].map(BaseQuality::from_byte).to_vec())
-                .build()
-                .unwrap(),
-            OwnedBamRecord::builder(0, Some(Pos0::new(300).unwrap()), b"m2".to_vec())
-                .mapq(60)
-                .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])
-                .seq(vec![Base::G, Base::T, Base::A, Base::C])
-                .qual([33, 34, 35, 36].map(BaseQuality::from_byte).to_vec())
-                .build()
-                .unwrap(),
+            OwnedBamRecord::builder(
+                crate::reader::Tid::new(0),
+                Some(Pos0::new(100).unwrap()),
+                b"m1".to_vec(),
+            )
+            .mapq(30)
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
+            .seq(vec![Base::A, Base::C, Base::G])
+            .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
+            .build()
+            .unwrap(),
+            OwnedBamRecord::builder(
+                crate::reader::Tid::new(0),
+                Some(Pos0::new(200).unwrap()),
+                b"pu1".to_vec(),
+            )
+            .flags(BamFlags::from(0x4)) // unmapped but placed
+            .seq(vec![Base::T, Base::A])
+            .qual([20, 21].map(BaseQuality::from_byte).to_vec())
+            .build()
+            .unwrap(),
+            OwnedBamRecord::builder(
+                crate::reader::Tid::new(0),
+                Some(Pos0::new(300).unwrap()),
+                b"m2".to_vec(),
+            )
+            .mapq(60)
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])
+            .seq(vec![Base::G, Base::T, Base::A, Base::C])
+            .qual([33, 34, 35, 36].map(BaseQuality::from_byte).to_vec())
+            .build()
+            .unwrap(),
         ];
         let mut raw_buf = Vec::new();
         for rec in &recs {
@@ -939,7 +959,7 @@ mod tests {
 
             for i in 0..5 {
                 let name = format!("read{i}");
-                let rec = test_record(0, i * 100, name.as_bytes());
+                let rec = test_record(crate::reader::Tid::new(0), i * 100, name.as_bytes());
                 writer.write(&rec).unwrap();
             }
             writer.finish().unwrap();

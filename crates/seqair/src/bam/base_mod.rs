@@ -969,10 +969,10 @@ mod tests {
                 bases,
                 &qual,
                 aux,
-                0,
-                -1,
-                -1,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                None,
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap()
@@ -1124,10 +1124,10 @@ mod tests {
                 &bases,
                 &qual,
                 aux.as_bytes(),
-                0,
-                -1,
-                -1,
-                0,
+                crate::reader::Tid::new(0),
+                None,
+                None,
+                std::num::NonZeroI32::new(0),
                 &mut (),
             )
             .unwrap()

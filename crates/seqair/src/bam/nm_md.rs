@@ -260,7 +260,7 @@ mod tests {
 
     fn store_with_record(pos: Pos0, cigar: Vec<CigarOp>, seq: Vec<Base>) -> RecordStore<()> {
         let qual = vec![BaseQuality::from_byte(30); seq.len()];
-        let owned = OwnedBamRecord::builder(0, Some(pos), b"r".to_vec())
+        let owned = OwnedBamRecord::builder(crate::reader::Tid::new(0), Some(pos), b"r".to_vec())
             .flags(BamFlags::empty())
             .cigar(cigar)
             .seq(seq)
@@ -759,13 +759,17 @@ mod tests {
             let seq: Vec<Base> = (0..qlen).map(|i| bases[(i % 4) as usize]).collect();
             let qual: Vec<BaseQuality> = (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
 
-            let owned = OwnedBamRecord::builder(0, Some(p0(read_pos)), b"r".to_vec())
-                .flags(BamFlags::empty())
-                .cigar(ops.clone())
-                .seq(seq)
-                .qual(qual)
-                .build()
-                .unwrap();
+            let owned = OwnedBamRecord::builder(
+                crate::reader::Tid::new(0),
+                Some(p0(read_pos)),
+                b"r".to_vec(),
+            )
+            .flags(BamFlags::empty())
+            .cigar(ops.clone())
+            .seq(seq)
+            .qual(qual)
+            .build()
+            .unwrap();
             let mut buf = Vec::new();
             owned.to_bam_bytes(&mut buf).unwrap();
             let mut store = RecordStore::<()>::new();

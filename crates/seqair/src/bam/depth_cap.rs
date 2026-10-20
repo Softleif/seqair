@@ -28,6 +28,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::num::NonZeroU32;
 
+use crate::reader::Tid;
 use seqair_types::Pos0;
 
 use super::record_store::{CustomizeRecordStore, FilterRawFields, RecordStore, SlimRecord};
@@ -68,9 +69,9 @@ pub struct DepthCap<E> {
     /// Last covered position of each currently-overlapping kept read
     /// (inclusive, min-heap via [`Reverse`]).
     active: BinaryHeap<Reverse<u64>>,
-    /// Sentinel `i32::MIN` so the first record always resets the window.
-    last_tid: i32,
-    last_start: u64,
+    /// The previous record's `(tid, start)`; `None` before the first record,
+    /// so it always resets the window.
+    last: Option<(Option<Tid>, u64)>,
 }
 
 impl<E> DepthCap<E> {
@@ -82,7 +83,7 @@ impl<E> DepthCap<E> {
 
     /// Wrap `inner` with an initial cap (`None` disables capping).
     pub fn with_cap(inner: E, cap: Option<NonZeroU32>) -> Self {
-        Self { inner, cap, active: BinaryHeap::new(), last_tid: i32::MIN, last_start: 0 }
+        Self { inner, cap, active: BinaryHeap::new(), last: None }
     }
 
     /// Set the per-column read cap. `None` disables capping.
@@ -123,11 +124,10 @@ impl<E: CustomizeRecordStore> CustomizeRecordStore for DepthCap<E> {
         let start = fields.pos.as_u64();
         // A new fetch — new contig or any backwards coordinate jump — restarts
         // the window. Records within one fetch arrive in ascending order.
-        if fields.tid != self.last_tid || start < self.last_start {
+        if self.last.is_none_or(|(tid, last_start)| fields.tid != tid || start < last_start) {
             self.active.clear();
         }
-        self.last_tid = fields.tid;
-        self.last_start = start;
+        self.last = Some((fields.tid, start));
 
         // r[impl record_store.depth_cap.window]
         // Last covered position, inclusive. `end_pos` is pre-computed for
@@ -209,10 +209,10 @@ mod tests {
             seq_len: 0,
             matching_bases: 0,
             indel_bases: 0,
-            tid: 0,
-            next_ref_id: -1,
-            next_pos: -1,
-            template_len: 0,
+            tid: Tid::new(0),
+            next_ref_id: None,
+            next_pos: None,
+            template_len: None,
             qname: b"r",
             qual_bytes: &[],
             aux_bytes: &[],

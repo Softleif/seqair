@@ -1684,13 +1684,17 @@ mod tests {
         /// Build a record via [`OwnedBamRecord`], serialize to BAM bytes, push
         /// into a fresh [`RecordStore`] via `push_raw`.
         fn store_with_record(pos: u32, cigar: &[CigarOp], seq_len: usize) -> RecordStore<()> {
-            let rec = OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), b"r".to_vec())
-                .flags(BamFlags::empty())
-                .cigar(cigar.to_vec())
-                .seq(vec![Base::A; seq_len])
-                .qual(vec![BaseQuality::from_byte(30); seq_len])
-                .build()
-                .unwrap();
+            let rec = OwnedBamRecord::builder(
+                crate::reader::Tid::new(0),
+                Some(Pos0::new(pos).unwrap()),
+                b"r".to_vec(),
+            )
+            .flags(BamFlags::empty())
+            .cigar(cigar.to_vec())
+            .seq(vec![Base::A; seq_len])
+            .qual(vec![BaseQuality::from_byte(30); seq_len])
+            .build()
+            .unwrap();
             let mut buf = Vec::new();
             rec.to_bam_bytes(&mut buf).unwrap();
 
@@ -1717,13 +1721,17 @@ mod tests {
             // Build once, push into a store, then walk via both entry points.
             // The AlignedPair sequences must be identical.
             let cigar = vec![m(2), ins(1), m(2), del(1), m(2)];
-            let owned = OwnedBamRecord::builder(0, Some(Pos0::new(200).unwrap()), b"r".to_vec())
-                .flags(BamFlags::empty())
-                .cigar(cigar.clone())
-                .seq(vec![Base::A; 7])
-                .qual(vec![BaseQuality::from_byte(30); 7])
-                .build()
-                .unwrap();
+            let owned = OwnedBamRecord::builder(
+                crate::reader::Tid::new(0),
+                Some(Pos0::new(200).unwrap()),
+                b"r".to_vec(),
+            )
+            .flags(BamFlags::empty())
+            .cigar(cigar.clone())
+            .seq(vec![Base::A; 7])
+            .qual(vec![BaseQuality::from_byte(30); 7])
+            .build()
+            .unwrap();
             let mut buf = Vec::new();
             owned.to_bam_bytes(&mut buf).unwrap();
 

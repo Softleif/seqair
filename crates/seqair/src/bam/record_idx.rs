@@ -392,7 +392,7 @@ mod tests {
         let mut store = RecordStore::new();
         let bases = [Base::A, Base::C, Base::G, Base::T];
         let quals = [30u8, 31, 32, 33];
-        for (pos, end, mate_pos) in [(100u32, 103u32, 102i32), (102, 105, 100)] {
+        for (pos, end, mate_pos) in [(100u32, 103u32, 102u32), (102, 105, 100)] {
             store
                 .push_fields(
                     Pos0::new(pos).unwrap(),
@@ -406,10 +406,10 @@ mod tests {
                     &bases,
                     &quals,
                     b"XAi\x07\x00\x00\x00",
-                    0,
-                    0,
-                    mate_pos,
-                    0,
+                    crate::reader::Tid::new(0),
+                    crate::reader::Tid::new(0),
+                    Pos0::new(mate_pos),
+                    None,
                     &mut (),
                 )
                 .unwrap()

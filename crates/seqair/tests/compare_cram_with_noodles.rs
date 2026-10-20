@@ -214,18 +214,19 @@ fn cram_chr19_records_match_noodles_field_by_field() {
             // The query keeps only a prefix of the region, so this also covers
             // records whose mate the fetch leaves out.
             assert_eq!(
-                i64::from(our_rec.next_pos),
+                our_rec.next_pos.map_or(-1, i64::from),
                 noodles_rec.next_pos,
                 "{version} rec {i}: next_pos",
             );
             assert_eq!(
-                our_rec.next_ref_id, noodles_rec.next_ref_id,
+                our_rec.next_ref_id.map_or(-1, |t| i32::try_from(t.as_u32()).unwrap()),
+                noodles_rec.next_ref_id,
                 "{version} rec {i}: next_ref_id",
             );
             // template_len is preserved across the filter — it's a
             // per-template property computed from the full chain span.
             assert_eq!(
-                i64::from(our_rec.template_len),
+                our_rec.template_len.map_or(0, |t| t.get().into()),
                 noodles_rec.template_len,
                 "{version} rec {i}: template_len",
             );

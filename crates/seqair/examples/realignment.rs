@@ -82,7 +82,7 @@ fn main() -> anyhow::Result<()> {
     for idx in store.indices() {
         let Some(rec) = store.record(idx) else { continue };
         // Skip unmapped reads — no alignment to update.
-        if rec.flags.is_unmapped() || rec.tid < 0 {
+        if rec.flags.is_unmapped() || rec.tid.is_none() {
             continue;
         }
         let Some((new_pos, new_cigar)) =

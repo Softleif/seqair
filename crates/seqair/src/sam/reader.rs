@@ -10,8 +10,10 @@ use crate::bam::{
     region_buf::{BlockCache, RegionBuf},
 };
 use crate::io::text_scan;
+use crate::reader::Tid;
 use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0, Pos1};
+use std::num::NonZeroI32;
 use std::{
     fs::File,
     io::{Read, Seek},
@@ -315,7 +317,6 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
 
         let start_i64 = span.start.as_i64();
         let end_i64 = span.last.as_i64();
-        let tid_i32 = tid.cast_signed();
 
         let mut cigar_buf = Vec::with_capacity(256);
         let mut bases_buf = Vec::with_capacity(256);
@@ -338,7 +339,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
             parse_sam_line(
                 line,
                 &self.shared.header,
-                tid_i32,
+                tid,
                 start_i64,
                 end_i64,
                 store,
@@ -408,7 +409,6 @@ impl<R: Read + Seek> IndexedSamReader<R> {
 
         let start_i64 = span.start.as_i64();
         let end_i64 = span.last.as_i64();
-        let tid_i32 = tid.cast_signed();
         let header = &self.shared.header;
 
         // Lines that span BGZF block boundaries are assembled here; a line
@@ -431,7 +431,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
             if let Some(record) = parse_sam_line(
                 line,
                 header,
-                tid_i32,
+                tid,
                 start_i64,
                 end_i64,
                 store,
@@ -508,7 +508,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
 fn parse_sam_line<E: CustomizeRecordStore>(
     line: &[u8],
     header: &BamHeader,
-    tid_filter: i32,
+    tid_filter: u32,
     start: i64,
     end: i64,
     store: &mut RecordStore<E::Extra>,
@@ -539,14 +539,13 @@ fn parse_sam_line<E: CustomizeRecordStore>(
 
     let rname_str = std::str::from_utf8(rname)
         .map_err(|_| SamRecordError::InvalidRname { value: rname.into() })?;
-    let rec_tid = match header.tid(rname_str) {
-        Some(t) => t.cast_signed(),
-        None => return Ok(None), // unknown contig, skip
-    };
+    // Unknown contig: skip.
+    let Some(rec_tid) = header.tid(rname_str) else { return Ok(None) };
 
     if rec_tid != tid_filter {
         return Ok(None);
     }
+    let rec_tid = Tid::new(rec_tid);
 
     // r[impl sam.record.coordinate_conversion]
     let pos_field = fields.get(3).copied().unwrap_or(b"0");
@@ -617,34 +616,35 @@ fn parse_sam_line<E: CustomizeRecordStore>(
 
     // Field 7: RNEXT (mate reference name; * = unavailable, = = same as RNAME)
     let rnext_field = fields.get(6).copied().unwrap_or(b"*");
-    let next_ref_id: i32 = if rnext_field == b"*" {
-        -1
+    let next_ref_id = if rnext_field == b"*" {
+        None
     } else if rnext_field == b"=" {
         rec_tid
     } else {
         let rnext_str = std::str::from_utf8(rnext_field)
             .map_err(|_| SamRecordError::InvalidRname { value: rnext_field.into() })?;
-        header.tid(rnext_str).map_or(-1, |t| t.cast_signed())
+        header.tid(rnext_str).and_then(Tid::new)
     };
 
     // Field 8: PNEXT (1-based mate position, 0 = unavailable)
     let pnext_field = fields.get(7).copied().unwrap_or(b"0");
     let pnext = parse_i64(pnext_field)
         .ok_or_else(|| SamRecordError::InvalidPnext { value: pnext_field.into() })?;
-    // Convert 1-based to 0-based; PNEXT=0 means unavailable → store as -1
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::arithmetic_side_effects,
-        reason = "SAM PNEXT fits i32 by spec; pnext > 0 guarantees no underflow"
-    )]
-    let next_pos = if pnext > 0 { (pnext - 1) as i32 } else { -1 };
+    // PNEXT=0 means unavailable.
+    let next_pos = if pnext > 0 {
+        let p = Pos1::try_from(pnext)
+            .map_err(|_| SamRecordError::InvalidPnext { value: pnext_field.into() })?;
+        Some(p.to_zero_based())
+    } else {
+        None
+    };
 
     // Field 9: TLEN
     let tlen_field = fields.get(8).copied().unwrap_or(b"0");
-    #[expect(clippy::cast_possible_truncation, reason = "SAM TLEN fits i32 by spec")]
     let template_len = parse_i64(tlen_field)
-        .ok_or_else(|| SamRecordError::InvalidTlen { value: tlen_field.into() })?
-        as i32;
+        .and_then(|t| i32::try_from(t).ok())
+        .ok_or_else(|| SamRecordError::InvalidTlen { value: tlen_field.into() })?;
+    let template_len = NonZeroI32::new(template_len);
 
     let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_buf);
 

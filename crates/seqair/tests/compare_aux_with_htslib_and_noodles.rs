@@ -42,7 +42,7 @@ fn write_bam_with_aux(dir: &std::path::Path, aux: AuxData) -> std::path::PathBuf
         BamHeader::from_sam_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n").unwrap();
     let bam_path = dir.join("aux.bam");
 
-    let rec = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"r1".to_vec())
+    let rec = OwnedBamRecord::builder(t(0), Some(Pos0::new(100).unwrap()), b"r1".to_vec())
         .flags(BamFlags::empty())
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])
@@ -359,4 +359,13 @@ fn empty_arrays_parity() {
     } else {
         panic!("noodles BE: not Int32 array");
     }
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text(
+        "@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n",
+    )
+    .unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

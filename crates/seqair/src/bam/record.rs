@@ -15,7 +15,9 @@
 //! them into a [`RecordStore`](super::record_store::RecordStore) and access
 //! fields via [`SlimRecord`](super::record_store::SlimRecord).
 
+use crate::reader::Tid;
 use seqair_types::{BamFlags, Pos0};
+use std::num::NonZeroI32;
 
 /// Compute `end_pos` from raw BAM record bytes (before full decode).
 ///
@@ -96,15 +98,16 @@ pub(crate) fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
 /// parsing and checked offset arithmetic.
 #[derive(Debug)]
 pub(crate) struct ParsedHeader {
-    pub tid: i32,
+    pub tid: Option<Tid>,
     pub pos: Pos0,
     pub mapq: u8,
     pub flags: BamFlags,
     pub n_cigar_ops: u16,
     pub seq_len: u32,
-    pub next_ref_id: i32,
-    pub next_pos: i32,
-    pub template_len: i32,
+    pub next_ref_id: Option<Tid>,
+    pub next_pos: Option<Pos0>,
+    /// `None` for a wire `0`: unavailable, or a single-segment template.
+    pub template_len: Option<NonZeroI32>,
     /// Start of variable-length data (32 + `name_len`).
     pub var_start: usize,
     /// End of CIGAR bytes.
@@ -130,7 +133,7 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     }
 
     debug_assert!(raw.len() >= 32, "raw record too short for fixed fields: {}", raw.len());
-    let tid = i32::from_le_bytes(read4(raw, 0));
+    let tid = Tid::from_wire(i32::from_le_bytes(read4(raw, 0)));
     let pos_i32 = i32::from_le_bytes(read4(raw, 4));
     let pos =
         Pos0::try_from(pos_i32).map_err(|_| DecodeError::InvalidPosition { value: pos_i32 })?;
@@ -142,9 +145,10 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     let n_cigar_ops = u16::from_le_bytes(read2(raw, 12));
     let flags = BamFlags::from(u16::from_le_bytes(read2(raw, 14)));
     let seq_len = u32::from_le_bytes(read4(raw, 16));
-    let next_ref_id = i32::from_le_bytes(read4(raw, 20));
-    let next_pos = i32::from_le_bytes(read4(raw, 24));
-    let template_len = i32::from_le_bytes(read4(raw, 28));
+    let next_ref_id = Tid::from_wire(i32::from_le_bytes(read4(raw, 20)));
+    // A negative mate position is "unavailable", whatever the value.
+    let next_pos = Pos0::try_from(i32::from_le_bytes(read4(raw, 24))).ok();
+    let template_len = NonZeroI32::new(i32::from_le_bytes(read4(raw, 28)));
 
     let cigar_bytes = usize::from(n_cigar_ops) * 4;
     let seq_bytes = (seq_len as usize).div_ceil(2);

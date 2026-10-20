@@ -66,7 +66,7 @@ fn cyclic_seq(n: usize) -> Vec<Base> {
 /// Uses a long sequence (~8000 bases) which creates a large BAM record.
 /// Multiple such records ensure block boundaries are exercised.
 fn make_large_record(pos: u32, name: &[u8], seq_len: u32) -> OwnedBamRecord {
-    OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), name.to_vec())
+    OwnedBamRecord::builder(t(0), Some(Pos0::new(pos).unwrap()), name.to_vec())
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, seq_len)])
         .seq(cyclic_seq(seq_len as usize))
@@ -86,7 +86,7 @@ fn make_long_cigar_record(pos: u32, name: &[u8]) -> OwnedBamRecord {
     }
     let query_len = 4000u32; // 2000 M + 2000 I
 
-    OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), name.to_vec())
+    OwnedBamRecord::builder(t(0), Some(Pos0::new(pos).unwrap()), name.to_vec())
         .mapq(50)
         .cigar(cigar)
         .seq(cyclic_seq(query_len as usize))
@@ -221,7 +221,7 @@ fn mixed_record_sizes_across_boundaries() {
         } else {
             // Normal small record (50 bases)
             records.push(
-                OwnedBamRecord::builder(0, Some(Pos0::new(pos).unwrap()), name.into_bytes())
+                OwnedBamRecord::builder(t(0), Some(Pos0::new(pos).unwrap()), name.into_bytes())
                     .mapq(30)
                     .cigar(vec![CigarOp::new(CigarOpType::Match, 50)])
                     .seq(cyclic_seq(50))
@@ -266,4 +266,13 @@ fn mixed_record_sizes_across_boundaries() {
         let expected = if n % 5 == 0 { 8000 } else { 50 };
         assert_eq!(store.record(i).unwrap().seq_len, expected, "rec {n}");
     }
+}
+
+fn t(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::reader::ResolveTid;
+    let h = seqair::bam::header::BamHeader::from_sam_text(
+        "@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n",
+    )
+    .unwrap();
+    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

@@ -12,6 +12,7 @@
     reason = "profiling harness"
 )]
 use core::range::RangeInclusive;
+use seqair::reader::ResolveTid;
 use seqair::vcf::record_encoder::{FilterFieldDef, FormatFieldDef, InfoFieldDef};
 use seqair::vcf::{
     Alleles, ContigDef, ContigId, FilterId, FormatGt, FormatInt, Genotype, InfoFloat, InfoFloats,
@@ -259,13 +260,13 @@ fn bam(iters: u32) {
         .map(|idx| {
             let r = store.record(idx).unwrap();
             OwnedBamRecord {
-                ref_id: tid as i32,
+                ref_id: Some(tid.resolve_tid(&header).unwrap()),
                 pos: Some(r.pos),
                 mapq: r.mapq,
                 flags: r.flags,
-                next_ref_id: -1,
+                next_ref_id: None,
                 next_pos: None,
-                template_len: 0,
+                template_len: None,
                 qname: r.qname().to_vec(),
                 cigar: r.cigar().to_vec(),
                 seq: r.seq().to_vec(),
@@ -302,13 +303,13 @@ fn bam_serialize_only(iters: u32) {
         .map(|idx| {
             let r = store.record(idx).unwrap();
             OwnedBamRecord {
-                ref_id: tid as i32,
+                ref_id: Some(tid.resolve_tid(reader.header()).unwrap()),
                 pos: Some(r.pos),
                 mapq: r.mapq,
                 flags: r.flags,
-                next_ref_id: -1,
+                next_ref_id: None,
                 next_pos: None,
-                template_len: 0,
+                template_len: None,
                 qname: r.qname().to_vec(),
                 cigar: r.cigar().to_vec(),
                 seq: r.seq().to_vec(),
