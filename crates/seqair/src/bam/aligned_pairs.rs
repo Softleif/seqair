@@ -332,7 +332,7 @@ impl<'a> AlignedPairs<'a> {
     pub fn with_read<'read>(
         self,
         seq: &'read [seqair_types::Base],
-        qual: &'read [seqair_types::BaseQuality],
+        qual: Option<&'read [seqair_types::BaseQuality]>,
     ) -> Result<super::aligned_pairs_view::AlignedPairsWithRead<'a, 'read>, AlignedPairsError> {
         // Compute the remaining query-consuming CIGAR length and compare to
         // `seq[qpos..]`. We work in u64 so a runaway 32-bit CIGAR can't
@@ -356,10 +356,12 @@ impl<'a> AlignedPairs<'a> {
                 seq_len: seq.len(),
             });
         }
-        if !qual.is_empty() && qual.len() != seq.len() {
+        if let Some(q) = qual
+            && q.len() != seq.len()
+        {
             return Err(AlignedPairsError::SeqQualLengthMismatch {
                 seq_len: seq.len(),
-                qual_len: qual.len(),
+                qual_len: q.len(),
             });
         }
         Ok(super::aligned_pairs_view::AlignedPairsWithRead::new(self, seq, qual))
@@ -637,7 +639,7 @@ impl SlimRecord {
         let cigar = self.cigar(store)?;
         let seq = self.seq(store)?;
         let qual = self.qual(store)?;
-        AlignedPairs::new(self.pos, cigar).with_read(seq, qual)
+        AlignedPairs::new(self.pos, cigar).with_read(seq, Some(qual))
     }
 }
 
@@ -674,7 +676,7 @@ impl super::owned_record::OwnedBamRecord {
     /// Equivalent to `self.aligned_pairs()?.with_read(&self.seq, &self.qual)`,
     /// but bundled to avoid the verbose three-line chain at every call site.
     /// The same validation applies: cigar query length must match seq length;
-    /// qual must be empty (BAM missing-qual sentinel) or match seq length.
+    /// qual is passed as `None` when empty, else it must match seq length.
     ///
     /// Chain `.with_reference(&ref_seq)` to add reference base lookups.
     ///
@@ -690,7 +692,7 @@ impl super::owned_record::OwnedBamRecord {
         &self,
     ) -> Result<super::aligned_pairs_view::AlignedPairsWithRead<'_, '_>, AlignedPairsError> {
         let pairs = self.aligned_pairs()?;
-        pairs.with_read(&self.seq, &self.qual)
+        pairs.with_read(&self.seq, (!self.qual.is_empty()).then_some(self.qual.as_slice()))
     }
 }
 

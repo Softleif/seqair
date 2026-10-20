@@ -279,7 +279,11 @@ fn consume_with_read<'cigar, 'read>(
             }
             AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
                 let _ = first_inserted;
-                debug_assert_eq!(query.len(), qual.len(), "insert query/qual lengths must match");
+                debug_assert_eq!(
+                    query.len(),
+                    qual.map_or(query.len(), <[_]>::len),
+                    "insert query/qual lengths must match"
+                );
                 debug_assert!(!query.is_empty(), "zero-len insertion leaked");
             }
             AlignedPairWithRead::Deletion { rpos, del_len } => {
@@ -290,7 +294,7 @@ fn consume_with_read<'cigar, 'read>(
             }
             AlignedPairWithRead::SoftClip { qpos, query, qual } => {
                 let _ = qpos;
-                debug_assert_eq!(query.len(), qual.len());
+                debug_assert_eq!(query.len(), qual.map_or(query.len(), <[_]>::len));
                 debug_assert!(!query.is_empty());
             }
             AlignedPairWithRead::Padding { len } => {

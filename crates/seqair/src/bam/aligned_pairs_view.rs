@@ -123,21 +123,21 @@ pub enum AlignedPairWithRead<'read> {
         /// The read base at `qpos`. Always in bounds — `with_read`
         /// constructor enforces seq/CIGAR length consistency.
         query: Base,
-        /// Phred quality at `qpos`. [`BaseQuality::UNAVAILABLE`] if `qual`
-        /// was passed empty (BAM missing-qual sentinel).
+        /// Phred quality at `qpos`. [`BaseQuality::UNAVAILABLE`] if `with_read`
+        /// was given `qual = None`.
         qual: BaseQuality,
     },
     /// I — `query` and `qual` are the inserted bases and their Phred scores,
     /// starting at `first_inserted`. See
     /// [`AlignedPair::Insertion`] for why the
     /// field is not called `qpos`.
-    Insertion { first_inserted: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
+    Insertion { first_inserted: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
     /// D — deletion from the reference. No read data.
     Deletion { rpos: Pos0, del_len: u32 },
     /// N — reference skip (e.g. intron). No read data.
     RefSkip { rpos: Pos0, skip_len: u32 },
     /// S — soft clip. `query` and `qual` are the clipped run.
-    SoftClip { qpos: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
+    SoftClip { qpos: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
     /// P — padding. No read data.
     Padding { len: u32 },
     /// Reserved op code (9..=15). No read data.
@@ -161,14 +161,14 @@ pub enum AlignedPairWithRead<'read> {
 pub struct AlignedPairsWithRead<'cigar, 'read> {
     inner: AlignedPairs<'cigar>,
     seq: &'read [Base],
-    qual: &'read [BaseQuality],
+    qual: Option<&'read [BaseQuality]>,
 }
 
 impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
     pub(super) fn new(
         inner: AlignedPairs<'cigar>,
         seq: &'read [Base],
-        qual: &'read [BaseQuality],
+        qual: Option<&'read [BaseQuality]>,
     ) -> Self {
         Self { inner, seq, qual }
     }
@@ -215,7 +215,11 @@ impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
                     rpos,
                     kind,
                     query: self.seq.get(q).copied().unwrap_or(Base::Unknown),
-                    qual: self.qual.get(q).copied().unwrap_or(BaseQuality::UNAVAILABLE),
+                    qual: self
+                        .qual
+                        .and_then(|qs| qs.get(q))
+                        .copied()
+                        .unwrap_or(BaseQuality::UNAVAILABLE),
                 }
             }
             AlignedPair::Insertion { first_inserted, insert_len } => {
@@ -223,7 +227,7 @@ impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
                 AlignedPairWithRead::Insertion {
                     first_inserted,
                     query: self.seq.get(q..q_end).unwrap_or(&[]),
-                    qual: self.qual.get(q..q_end).unwrap_or(&[]),
+                    qual: self.qual.map(|qs| qs.get(q..q_end).unwrap_or(&[])),
                 }
             }
             AlignedPair::Deletion { rpos, del_len } => {
@@ -237,7 +241,7 @@ impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
                 AlignedPairWithRead::SoftClip {
                     qpos,
                     query: self.seq.get(q..q_end).unwrap_or(&[]),
-                    qual: self.qual.get(q..q_end).unwrap_or(&[]),
+                    qual: self.qual.map(|qs| qs.get(q..q_end).unwrap_or(&[])),
                 }
             }
             AlignedPair::Padding { len } => AlignedPairWithRead::Padding { len },
@@ -301,14 +305,14 @@ pub enum AlignedPairWithRef<'read, 'ref_seq> {
     /// `first_inserted`. See
     /// [`AlignedPair::Insertion`] for why the
     /// field is not called `qpos`.
-    Insertion { first_inserted: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
+    Insertion { first_inserted: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
     /// D — deleted reference bases. `ref_bases` is `None` if any position in
     /// the deletion span falls outside the loaded `RefSeq` window.
     Deletion { rpos: Pos0, del_len: u32, ref_bases: Option<&'ref_seq [Base]> },
     /// N — reference skip.
     RefSkip { rpos: Pos0, skip_len: u32 },
     /// S — soft clip (read-only; reference doesn't participate).
-    SoftClip { qpos: QPos, query: &'read [Base], qual: &'read [BaseQuality] },
+    SoftClip { qpos: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
     /// P — padding.
     Padding { len: u32 },
     /// Reserved op code.
@@ -563,6 +567,7 @@ mod tests {
         assert_eq!(events.len(), 5);
         match events[2] {
             AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
+                let qual = qual.unwrap();
                 assert_eq!(first_inserted, QPos::new(2));
                 assert_eq!(query, &[Base::T, Base::G, Base::T]);
                 assert_eq!(qual.len(), 3);
@@ -587,6 +592,7 @@ mod tests {
             rec.aligned_pairs_with_read(&store).unwrap().with_soft_clips().collect();
         match events[0] {
             AlignedPairWithRead::SoftClip { qpos, query, qual } => {
+                let qual = qual.unwrap();
                 assert_eq!(qpos, QPos::new(0));
                 assert_eq!(query, &[Base::Unknown, Base::Unknown]);
                 assert_eq!(qual.len(), 2);
@@ -795,8 +801,8 @@ mod tests {
         // validation now surfaces a typed error instead.
         let cigar = [op(CigarOpType::Match, 3)];
         let seq = vec![Base::A, Base::C];
-        let qual = vec![BaseQuality::from_byte(30); 2];
-        let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, &qual);
+        let qual = [BaseQuality::from_byte(30); 2];
+        let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, Some(&qual[..]));
         match result {
             Err(super::super::aligned_pairs::AlignedPairsError::CigarSeqLengthMismatch {
                 cigar_qlen: 3,
@@ -811,9 +817,9 @@ mod tests {
     fn with_read_accepts_any_seq_without_cigar() {
         // CIGAR `*` with SEQ present: valid SAM for unmapped reads.
         let seq = vec![Base::A, Base::C];
-        let qual = vec![BaseQuality::from_byte(30); 2];
+        let qual = [BaseQuality::from_byte(30); 2];
         let events: Vec<_> =
-            AlignedPairs::new(p0(0), &[]).with_read(&seq, &qual).unwrap().collect();
+            AlignedPairs::new(p0(0), &[]).with_read(&seq, Some(&qual[..])).unwrap().collect();
         assert!(events.is_empty());
     }
 
@@ -822,8 +828,8 @@ mod tests {
         // Inverse mismatch: CIGAR 2M but seq 3 bases.
         let cigar = [op(CigarOpType::Match, 2)];
         let seq = vec![Base::A, Base::C, Base::G];
-        let qual = vec![BaseQuality::from_byte(30); 3];
-        let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, &qual);
+        let qual = [BaseQuality::from_byte(30); 3];
+        let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, Some(&qual[..]));
         assert!(matches!(
             result,
             Err(super::super::aligned_pairs::AlignedPairsError::CigarSeqLengthMismatch {
@@ -834,12 +840,27 @@ mod tests {
     }
 
     #[test]
+    fn with_read_none_qual_yields_none_on_insertion() {
+        let cigar = [op(CigarOpType::Match, 1), op(CigarOpType::Insertion, 2)];
+        let seq = vec![Base::A; 3];
+        let events: Vec<_> =
+            AlignedPairs::new(p0(0), &cigar).with_read(&seq, None).unwrap().collect();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AlignedPairWithRead::Match { qual: BaseQuality::UNAVAILABLE, .. },
+                AlignedPairWithRead::Insertion { qual: None, .. }
+            ]
+        ));
+    }
+
+    #[test]
     fn with_read_rejects_qual_length_mismatch() {
-        // qual.len() must equal seq.len() OR be zero (BAM missing-qual sentinel).
+        // qual.len() must equal seq.len() when given.
         let cigar = [op(CigarOpType::Match, 3)];
         let seq = vec![Base::A; 3];
-        let qual = vec![BaseQuality::from_byte(30); 2]; // length 2 ≠ 3
-        let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, &qual);
+        let qual = [BaseQuality::from_byte(30); 2]; // length 2 ≠ 3
+        let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, Some(&qual[..]));
         assert!(matches!(
             result,
             Err(super::super::aligned_pairs::AlignedPairsError::SeqQualLengthMismatch {
@@ -850,13 +871,11 @@ mod tests {
     }
 
     #[test]
-    fn with_read_accepts_empty_qual_as_missing_sentinel() {
-        // qual.len() == 0 represents BAM's "qual missing" encoding (0xFF bytes).
-        // Should succeed; iteration uses BaseQuality::UNAVAILABLE.
+    fn with_read_accepts_no_qual() {
+        // None yields BaseQuality::UNAVAILABLE on Match and None on runs.
         let cigar = [op(CigarOpType::Match, 3)];
         let seq = vec![Base::A; 3];
-        let qual: Vec<BaseQuality> = vec![];
-        let it = AlignedPairs::new(p0(0), &cigar).with_read(&seq, &qual).unwrap();
+        let it = AlignedPairs::new(p0(0), &cigar).with_read(&seq, None).unwrap();
         let events: Vec<_> = it.collect();
         for ev in events {
             match ev {
@@ -1050,6 +1069,7 @@ mod tests {
             .unwrap();
         match *insertion {
             AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
+                let qual = qual.unwrap();
                 assert_eq!(
                     first_inserted,
                     QPos::new(97),
@@ -1146,7 +1166,8 @@ mod tests {
 
             let pos = Pos0::new(start).unwrap();
             let bare: Vec<_> = AlignedPairs::new(pos, &ops).with_soft_clips().collect();
-            let rich_iter = AlignedPairs::new(pos, &ops).with_soft_clips().with_read(&seq, &qual);
+            let rich_iter =
+                AlignedPairs::new(pos, &ops).with_soft_clips().with_read(&seq, Some(&qual[..]));
             let rich = match rich_iter {
                 Ok(it) => it.collect::<Vec<_>>(),
                 Err(e) => {
@@ -1233,7 +1254,8 @@ mod tests {
                 .collect();
 
             let pos = Pos0::new(start).unwrap();
-            let it = AlignedPairs::new(pos, &ops).with_soft_clips().with_read(&seq, &qual);
+            let it =
+                AlignedPairs::new(pos, &ops).with_soft_clips().with_read(&seq, Some(&qual[..]));
             let it = match it {
                 Ok(x) => x,
                 Err(e) => {
@@ -1258,6 +1280,7 @@ mod tests {
                         );
                     }
                     AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
+                        let qual = qual.unwrap();
                         for (offset, &b) in query.iter().enumerate() {
                             let q = first_inserted.as_usize() + offset;
                             assert_eq!(
@@ -1281,6 +1304,7 @@ mod tests {
                         }
                     }
                     AlignedPairWithRead::SoftClip { qpos, query, qual } => {
+                        let qual = qual.unwrap();
                         for (offset, &b) in query.iter().enumerate() {
                             let q = qpos.as_usize() + offset;
                             assert_eq!(
@@ -1357,7 +1381,9 @@ mod tests {
             let ref_seq = RefSeq::new(Rc::from(ref_buf), Pos0::new(ref_start).unwrap());
 
             let read_pos = Pos0::new(pos_offset).unwrap();
-            let it = AlignedPairs::new(read_pos, &ops).with_soft_clips().with_read(&seq, &qual);
+            let it = AlignedPairs::new(read_pos, &ops)
+                .with_soft_clips()
+                .with_read(&seq, Some(&qual[..]));
             let it = match it {
                 Ok(x) => x.with_reference(&ref_seq),
                 Err(e) => {
@@ -1416,7 +1442,8 @@ mod tests {
             let qual: Vec<BaseQuality> = (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
 
             let pos = Pos0::new(start).unwrap();
-            let it = AlignedPairs::new(pos, &ops).with_soft_clips().with_read(&seq, &qual);
+            let it =
+                AlignedPairs::new(pos, &ops).with_soft_clips().with_read(&seq, Some(&qual[..]));
             let it = match it {
                 Ok(x) => x,
                 Err(e) => {
