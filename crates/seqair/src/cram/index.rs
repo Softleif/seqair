@@ -2,6 +2,7 @@
 //! to [`CraiEntry`] lists with byte offsets and alignment spans for region queries.
 
 use super::reader::CramError;
+use crate::reader::Tid;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -21,7 +22,8 @@ pub enum CramIndexError {
 /// A single entry in a CRAI index.
 #[derive(Debug, Clone)]
 pub struct CraiEntry {
-    pub ref_id: i32,
+    /// `None` for an unmapped entry.
+    pub ref_id: Option<Tid>,
     pub alignment_start: i64,
     pub alignment_span: i64,
     pub container_offset: u64,
@@ -41,25 +43,32 @@ pub struct CramIndex {
     reach: Vec<u64>,
 }
 
+/// How far an entry reaches along its reference.
+enum Extent {
+    Unmapped,
+    Unknown,
+    Last(u64),
+}
+
 impl CraiEntry {
     /// The entry's 0-based start. CRAI stores a **1-based** one; `0` only
-    /// marks unmapped entries (see [`Self::placed_last`]).
+    /// marks unmapped entries (see [`Self::extent`]).
     fn start0(&self) -> u64 {
         self.alignment_start.unsigned_abs().saturating_sub(1)
     }
 
-    /// The 0-based last position the entry reaches: `None` for an unmapped
-    /// entry, `u64::MAX` for one of unknown extent.
-    fn placed_last(&self) -> Option<u64> {
+    fn extent(&self) -> Extent {
         // r[impl cram.index.unmapped]
         if self.alignment_start == 0 && self.alignment_span == 0 {
-            return None;
+            return Extent::Unmapped;
         }
         // r[impl cram.index.zero_span+2]
         if self.alignment_span == 0 {
-            return Some(u64::MAX);
+            return Extent::Unknown;
         }
-        Some(self.start0().saturating_add(self.alignment_span.unsigned_abs()).saturating_sub(1))
+        Extent::Last(
+            self.start0().saturating_add(self.alignment_span.unsigned_abs()).saturating_sub(1),
+        )
     }
 }
 
@@ -97,10 +106,15 @@ impl CramIndex {
     fn from_entries(mut entries: Vec<CraiEntry>) -> Self {
         entries.sort_by_key(|e| (e.ref_id, e.start0()));
         let mut reach = Vec::with_capacity(entries.len());
-        let mut previous: Option<(i32, u64)> = None;
+        let mut previous: Option<(Option<Tid>, u64)> = None;
         for e in &entries {
             let before = previous.filter(|&(ref_id, _)| ref_id == e.ref_id).map(|(_, r)| r);
-            let furthest = before.max(e.placed_last()).unwrap_or(0);
+            let own = match e.extent() {
+                Extent::Unmapped => None,
+                Extent::Unknown => Some(u64::MAX),
+                Extent::Last(last) => Some(last),
+            };
+            let furthest = before.max(own).unwrap_or(0);
             reach.push(furthest);
             previous = Some((e.ref_id, furthest));
         }
@@ -118,7 +132,7 @@ impl CramIndex {
     // r[impl cram.index.query+2]
     // r[impl cram.index.unmapped]
     // r[impl interval.overlap_test]
-    pub fn query(&self, tid: i32, start: u64, end: u64) -> Vec<&CraiEntry> {
+    pub fn query(&self, tid: Tid, start: u64, end: u64) -> Vec<&CraiEntry> {
         let (lo, hi) = self.tid_range(tid);
         let (Some(entries), Some(reach)) = (self.entries.get(lo..hi), self.reach.get(lo..hi))
         else {
@@ -132,7 +146,11 @@ impl CramIndex {
             .get(first..last)
             .unwrap_or_default()
             .iter()
-            .filter(|e| e.placed_last().is_some_and(|reach| reach >= start))
+            .filter(|e| match e.extent() {
+                Extent::Unmapped => false,
+                Extent::Unknown => true,
+                Extent::Last(last) => last >= start,
+            })
             .collect()
     }
 
@@ -140,11 +158,11 @@ impl CramIndex {
     /// Estimate the compressed bytes of the records a query for `[start, end]`
     /// (0-based, inclusive) on `tid` returns: each selected slice's size,
     /// prorated by the share of its span the query covers.
-    pub fn region_bytes(&self, tid: i32, start: u64, end: u64) -> u64 {
+    pub fn region_bytes(&self, tid: Tid, start: u64, end: u64) -> u64 {
         self.query(tid, start, end)
             .into_iter()
             .map(|e| {
-                let Some(last) = e.placed_last().filter(|&last| last != u64::MAX) else {
+                let Extent::Last(last) = e.extent() else {
                     return e.slice_size;
                 };
                 let first = e.start0();
@@ -161,15 +179,15 @@ impl CramIndex {
     }
 
     /// The positions in `entries` of reference `tid`'s entries.
-    fn tid_range(&self, tid: i32) -> (usize, usize) {
-        let lo = self.entries.partition_point(|e| e.ref_id < tid);
-        let hi = self.entries.partition_point(|e| e.ref_id <= tid);
+    fn tid_range(&self, tid: Tid) -> (usize, usize) {
+        let lo = self.entries.partition_point(|e| e.ref_id < Some(tid));
+        let hi = self.entries.partition_point(|e| e.ref_id <= Some(tid));
         (lo, hi)
     }
 
     /// Every entry for reference `tid`, placed or not, sorted by
     /// `alignment_start`.
-    pub fn entries_for(&self, tid: i32) -> &[CraiEntry] {
+    pub fn entries_for(&self, tid: Tid) -> &[CraiEntry] {
         let (lo, hi) = self.tid_range(tid);
         self.entries.get(lo..hi).unwrap_or_default()
     }
@@ -201,11 +219,10 @@ fn parse_crai_line(line: &str) -> Result<CraiEntry, CramError> {
         })
     };
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "CRAI ref_id is an ITF8 value bounded by i32 range; parsed as i64 for uniformity"
-    )]
-    let ref_id = parse_field(0, "ref_id")? as i32;
+    let raw_ref_id = parse_field(0, "ref_id")?;
+    let ref_id = Tid::from_wire(i32::try_from(raw_ref_id).map_err(|_| {
+        CramIndexError::InvalidField { name: "ref_id", value: raw_ref_id.to_string() }
+    })?);
     Ok(CraiEntry {
         ref_id,
         alignment_start: parse_field(1, "alignment_start")?,
@@ -244,12 +261,12 @@ mod tests {
         let index = CramIndex::from_path(Path::new(crai_path)).unwrap();
 
         // Find a non-unmapped entry to query
-        let first = index.entries().iter().find(|e| e.ref_id >= 0).unwrap();
-        let tid = first.ref_id;
+        let first = index.entries().iter().find(|e| e.ref_id.is_some()).unwrap();
+        let tid = first.ref_id.unwrap();
 
         // Query a broad region that should overlap
         let results = index.query(tid, 0, u64::MAX);
-        assert!(!results.is_empty(), "should find entries for tid={tid}");
+        assert!(!results.is_empty(), "should find entries for tid={tid:?}");
     }
 
     // r[verify cram.index.unmapped]
@@ -259,7 +276,7 @@ mod tests {
         let index = CramIndex::from_path(Path::new(crai_path)).unwrap();
 
         // Query for a tid that doesn't exist
-        let results = index.query(9999, 0, u64::MAX);
+        let results = index.query(Tid::new(9999).unwrap(), 0, u64::MAX);
         assert!(results.is_empty(), "should find no entries for non-existent tid");
     }
 
@@ -284,7 +301,7 @@ mod tests {
         // must still be returned by queries that overlap their start position.
         let index = CramIndex::from_entries(vec![
             CraiEntry {
-                ref_id: 0,
+                ref_id: Tid::new(0),
                 alignment_start: 1000,
                 alignment_span: 0,
                 container_offset: 100,
@@ -292,7 +309,7 @@ mod tests {
                 slice_size: 500,
             },
             CraiEntry {
-                ref_id: 0,
+                ref_id: Tid::new(0),
                 alignment_start: 2000,
                 alignment_span: 500,
                 container_offset: 600,
@@ -302,28 +319,30 @@ mod tests {
         ]);
 
         // Query [500, 1500) — entry_start=1000 is within query, should match
-        let results = index.query(0, 500, 1500);
+        let results = index.query(Tid::new(0).unwrap(), 500, 1500);
         assert!(!results.is_empty(), "span=0 entry within range should match");
 
         // Query [1500, 2500) — entry_start=1000 is before query start.
         // With span=0, entry_end=1000 which is before query start, so this
         // would be missed. But the slice actually covers records well past 1000.
         // span=0 means "unknown extent" — the entry MUST be included.
-        let results = index.query(0, 1500, 2500);
+        let results = index.query(Tid::new(0).unwrap(), 1500, 2500);
         assert_eq!(results.len(), 2, "span=0 entry should be included when span is unknown");
 
         // Query [3000, 4000) should match nothing (span=0 entry at 1000 < 4000
         // but it's still included, however the span=500 entry at 2000 ends at 2500 < 3000)
         // Actually span=0 entry has start=1000 < end=4000, so it IS included.
         // Only entries past query end are excluded.
-        let results = index.query(0, 3000, 4000);
+        let results = index.query(Tid::new(0).unwrap(), 3000, 4000);
         assert_eq!(results.len(), 1, "span=0 entry should still match (start < query_end)");
     }
 
     #[hegel::composite]
     fn arb_entry(tc: &TestCase) -> CraiEntry {
         CraiEntry {
-            ref_id: tc.draw_silent(gs::integers::<i32>().min_value(-1).max_value(2)),
+            ref_id: Tid::from_wire(
+                tc.draw_silent(gs::integers::<i32>().min_value(-1).max_value(2)),
+            ),
             // 0 with span 0 is an unmapped entry; span 0 alone is unknown extent.
             alignment_start: tc.draw_silent(gs::integers::<i64>().min_value(0).max_value(60)),
             alignment_span: tc.draw_silent(gs::sampled_from(&[0, 1, 2, 5, 20])),
@@ -347,7 +366,7 @@ mod tests {
     fn query_matches_a_scan_of_every_entry(tc: TestCase) {
         let index =
             CramIndex::from_entries(tc.draw(gs::vecs(arb_entry()).max_size(40).print_as_debug()));
-        let tid = tc.draw(gs::integers::<i32>().min_value(-1).max_value(3));
+        let tid = Tid::from_wire(tc.draw(gs::integers::<i32>().min_value(-1).max_value(3)));
         let start = tc.draw(gs::integers::<u64>().max_value(80));
         let end = tc.draw(gs::integers::<u64>().min_value(start).max_value(80));
 
@@ -360,10 +379,10 @@ mod tests {
                 let first = (e.alignment_start as u64).saturating_sub(1);
                 let reaches = e.alignment_span == 0
                     || (first + e.alignment_span as u64).saturating_sub(1) >= start;
-                e.ref_id == tid && !unmapped && first <= end && reaches
+                tid.is_some() && e.ref_id == tid && !unmapped && first <= end && reaches
             })
             .collect();
-        let queried = index.query(tid, start, end);
+        let queried = tid.map_or_else(Vec::new, |tid| index.query(tid, start, end));
         assert_eq!(queried.len(), scanned.len());
         assert!(queried.iter().zip(&scanned).all(|(a, b)| std::ptr::eq(*a, *b)));
     }
@@ -376,7 +395,7 @@ mod tests {
         let index = CramIndex::from_entries(
             tc.draw(gs::vecs(arb_sized_entry()).max_size(40).print_as_debug()),
         );
-        let tid = tc.draw(gs::integers::<i32>().min_value(0).max_value(2));
+        let tid = Tid::new(tc.draw(gs::integers::<u32>().min_value(0).max_value(2))).unwrap();
         let start = tc.draw(gs::integers::<u64>().max_value(80));
         let end = tc.draw(gs::integers::<u64>().min_value(start).max_value(80));
         let further = tc.draw(gs::integers::<u64>().min_value(end).max_value(80));
@@ -403,7 +422,7 @@ mod tests {
     #[test]
     fn region_bytes_prorates_a_slice_by_the_share_covered() {
         let entry = |start, span, slice_size| CraiEntry {
-            ref_id: 0,
+            ref_id: Tid::new(0),
             alignment_start: start,
             alignment_span: span,
             container_offset: 0,
@@ -411,22 +430,23 @@ mod tests {
             slice_size,
         };
         // 1-based 101..=200 and 201..=300, then one of unknown extent at 1001.
+        let t0 = Tid::new(0).unwrap();
         let index = CramIndex::from_entries(vec![
             entry(101, 100, 1000),
             entry(201, 100, 3000),
             entry(1001, 0, 50),
         ]);
-        assert_eq!(index.region_bytes(0, 100, 124), 250, "a quarter of the first");
-        assert_eq!(index.region_bytes(0, 150, 249), 500 + 1500, "half of each");
-        assert_eq!(index.region_bytes(0, 0, 999), 4000);
-        assert_eq!(index.region_bytes(0, 5000, 6000), 50, "unknown extent counts whole");
-        assert_eq!(index.region_bytes(1, 0, 6000), 0);
+        assert_eq!(index.region_bytes(t0, 100, 124), 250, "a quarter of the first");
+        assert_eq!(index.region_bytes(t0, 150, 249), 500 + 1500, "half of each");
+        assert_eq!(index.region_bytes(t0, 0, 999), 4000);
+        assert_eq!(index.region_bytes(t0, 5000, 6000), 50, "unknown extent counts whole");
+        assert_eq!(index.region_bytes(Tid::new(1).unwrap(), 0, 6000), 0);
     }
 
     #[test]
     fn parse_crai_line_valid() {
         let entry = parse_crai_line("0\t100\t500\t1234\t0\t5678").unwrap();
-        assert_eq!(entry.ref_id, 0);
+        assert_eq!(entry.ref_id, Tid::new(0));
         assert_eq!(entry.alignment_start, 100);
         assert_eq!(entry.alignment_span, 500);
         assert_eq!(entry.container_offset, 1234);
@@ -444,7 +464,7 @@ mod tests {
         let index = CramIndex::from_path(Path::new(crai_path)).unwrap();
 
         for entry in index.entries() {
-            if entry.ref_id < 0 {
+            if entry.ref_id.is_none() {
                 continue; // skip unmapped
             }
             // Verify the container offset points to a valid container header

@@ -139,7 +139,7 @@ fn crai_index_covers_all_containers() {
 
     // Every CRAI entry should point to a valid container
     for entry in index.entries() {
-        if entry.ref_id < 0 {
+        if entry.ref_id.is_none() {
             continue;
         }
         let offset = entry.container_offset as usize;

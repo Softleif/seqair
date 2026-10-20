@@ -7,7 +7,7 @@ use super::{
     block,
     codec_scratch::CodecScratch,
     compression_header::CompressionHeader,
-    container::ContainerHeader,
+    container::{ContainerHeader, RefSeqId},
     index::{self, CramIndex, CramIndexError},
     slice::{self, DecodedSlice},
     slice_cache::{SliceCache, SliceCacheBudget, SliceCacheStats, SliceKey},
@@ -17,6 +17,7 @@ use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
+use crate::reader::Tid;
 use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0, Pos1, SmallVec, SmolStr};
 use std::fs::File;
@@ -615,10 +616,9 @@ impl<R: Read + Seek> IndexedCramReader<R> {
 
     /// Estimate the compressed bytes of the records a query for `span` on
     /// `tid` returns, from the index alone (`r[cram.index.region_bytes]`).
-    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> u64 {
-        i32::try_from(tid).map_or(0, |tid| {
-            self.shared.index.region_bytes(tid, span.start.as_u64(), span.last.as_u64())
-        })
+    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> Option<u64> {
+        let tid = Tid::new(tid)?;
+        Some(self.shared.index.region_bytes(tid, span.start.as_u64(), span.last.as_u64()))
     }
 
     // r[impl region_buf.not_cram]
@@ -664,11 +664,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         // the reader mutably while the index entries and the reference name
         // are borrowed from it.
         let shared = Arc::clone(&self.shared);
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "tid bounded by BAM header limits (MAX_REFERENCES = 1M), fits i32"
-        )]
-        let entries = shared.index.query(tid as i32, start_u64, end_u64);
+        let index_tid = Tid::new(tid).ok_or(CramError::UnknownTid { tid })?;
+        let entries = shared.index.query(index_tid, start_u64, end_u64);
         if entries.is_empty() {
             return Ok(crate::reader::FetchCounts::default());
         }
@@ -785,9 +782,9 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         let ch = CompressionHeader::parse(&comp_block.data)?;
 
         // Fetch reference sequence for the query tid's range.
-        // For multi-ref containers (ref_seq_id=-2), the container's alignment
+        // For multi-ref containers (`RefSeqId::Multi`), the container's alignment
         // range covers multiple references — use the CRAI entry's range for our tid instead.
-        let (ref_start, ref_end_clamped) = if container_header.ref_seq_id == -2 {
+        let (ref_start, ref_end_clamped) = if container_header.ref_seq_id == RefSeqId::Multi {
             // r[impl cram.slice.multi_ref_reference_window+2]
             // Multi-ref: a container holds one CRAI entry per slice per
             // reference, so there is not *a* entry for this container and
@@ -801,11 +798,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             // the window — and the decoded slice — is the same whichever
             // query decodes it.
             let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
-            #[expect(
-                clippy::cast_possible_wrap,
-                reason = "tid bounded by BAM header limits (MAX_REFERENCES = 1M), fits i32"
-            )]
-            let tid_entries = self.shared.index.entries_for(tid as i32);
+            let index_tid = Tid::new(tid).ok_or(CramError::UnknownTid { tid })?;
+            let tid_entries = self.shared.index.entries_for(index_tid);
             let in_container =
                 || tid_entries.iter().filter(|e| e.container_offset == container_offset);
             // An entry without an extent says nothing about where its

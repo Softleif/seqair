@@ -43,11 +43,22 @@ use seqair::cram::container::{ContainerHeader, RefSeqId};
 use seqair::cram::index::{CraiEntry, CramIndex};
 use seqair::cram::slice::SliceHeader;
 use seqair::cram::slice_cache::SliceCacheBudget;
-use seqair::reader::{IndexedReader, Readers};
+use seqair::reader::{IndexedReader, Readers, Tid};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+/// A `Tid` can only be built from a header, so take the index's own for `contig`;
+/// a contig with no entry has nothing to query.
+fn query_contig(index: &CramIndex, contig: usize, start: u64, end: u64) -> Vec<&CraiEntry> {
+    let want = u32::try_from(contig).expect("contig fits u32");
+    index
+        .entries()
+        .iter()
+        .find_map(|e| e.ref_id.filter(|t| t.as_u32() == want))
+        .map_or_else(Vec::new, |tid| index.query(tid, start, end))
+}
 
 /// Every contig is this long. Short contigs are the point: samtools decides to
 /// merge references into one slice based on how few records it has for each.
@@ -854,7 +865,7 @@ fn multi_ref_containers_use_every_slices_reference_range() {
     assert!(headers.iter().filter(|h| h.ref_seq_id == RefSeqId::Multi).count() >= 2, "{headers:?}");
     let entries = crai_entries(&cram);
     assert!(
-        entries.iter().filter(|e| e.ref_id == 1).count() >= 2,
+        entries.iter().filter(|e| e.ref_id.map(Tid::as_u32) == Some(1)).count() >= 2,
         "c1 needs two index entries in one container: {entries:?}"
     );
     assert_eq!(fetch_all(&cram, &fasta, &sample), fetch_all(&bam, &fasta, &sample));
@@ -896,10 +907,8 @@ fn region_queries_return_exactly_the_overlapping_reads(tc: TestCase) {
 
     // The index must not be more selective than the records are: every entry
     // the query keeps has to be one a decoded record could live in.
-    let kept = CramIndex::from_path(&cram.with_extension("cram.crai"))
-        .expect("read CRAI")
-        .query(contig as i32, u64::from(start0), u64::from(end0))
-        .len();
+    let crai = CramIndex::from_path(&cram.with_extension("cram.crai")).expect("read CRAI");
+    let kept = query_contig(&crai, contig, u64::from(start0), u64::from(end0)).len();
     assert!(kept > 0 || want.is_empty(), "index pruned every slice but reads overlap");
 
     tc.event_value("reads in region", want.len() as f64);
@@ -1060,7 +1069,9 @@ fn zero_span_index_entries_still_return_every_record(tc: TestCase) {
     assert!(rewritten > 0, "no mapped CRAI entry to rewrite");
     let entries = crai_entries(&cram);
     assert!(
-        entries.iter().any(|e| e.ref_id >= 0 && e.alignment_span == 0 && e.alignment_start > 0),
+        entries
+            .iter()
+            .any(|e| e.ref_id.is_some() && e.alignment_span == 0 && e.alignment_start > 0),
         "rewrite did not produce a span=0 entry with a start: {entries:?}"
     );
 
@@ -1131,7 +1142,7 @@ fn unmapped_reads_are_indexed_apart_from_the_mapped_ones(tc: TestCase) {
     let cram = write_cram(dir.path(), &bam, &fasta, opts);
 
     let entries = crai_entries(&cram);
-    let unmapped_entries: Vec<&CraiEntry> = entries.iter().filter(|e| e.ref_id < 0).collect();
+    let unmapped_entries: Vec<&CraiEntry> = entries.iter().filter(|e| e.ref_id.is_none()).collect();
     assert!(!unmapped_entries.is_empty(), "no unmapped CRAI entry: {entries:?}");
     // In a multi-reference slice the unplaced reads share an entry's slice
     // with mapped ones, and htslib indexes them with a span of 1.
@@ -1145,10 +1156,9 @@ fn unmapped_reads_are_indexed_apart_from_the_mapped_ones(tc: TestCase) {
     let index = CramIndex::from_path(&cram.with_extension("cram.crai")).expect("read CRAI");
     for contig in 0..sample.contigs.len() {
         assert!(
-            index
-                .query(contig as i32, 0, u64::from(CONTIG_LEN) - 1)
+            query_contig(&index, contig, 0, u64::from(CONTIG_LEN) - 1)
                 .iter()
-                .all(|e| e.ref_id == contig as i32),
+                .all(|e| e.ref_id.map(Tid::as_u32) == u32::try_from(contig).ok()),
             "a whole-contig query pulled in an entry for another reference"
         );
         let from_cram = fetch(&cram, &fasta, contig, 0, CONTIG_LEN - 1);

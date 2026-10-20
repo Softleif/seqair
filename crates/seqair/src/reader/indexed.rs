@@ -155,7 +155,7 @@ impl<R: Read + Seek> IndexedReader<R> {
         match self {
             Self::Bam(r) => Some(r.estimate_region_bytes(tid, span)),
             Self::Sam(r) => Some(r.estimate_region_bytes(tid, span)),
-            Self::Cram(r) => Some(r.estimate_region_bytes(tid, span)),
+            Self::Cram(r) => r.estimate_region_bytes(tid, span),
         }
     }
 

@@ -32,8 +32,8 @@ impl RefSeqId {
 pub struct ContainerHeader {
     /// Total bytes of block data in this container (NOT including this header).
     pub length: i32,
-    /// Reference sequence ID: >=0 for single ref, -1 unmapped, -2 multi-ref.
-    pub ref_seq_id: i32,
+    /// The reference the container is aligned to.
+    pub ref_seq_id: RefSeqId,
     /// 1-based alignment start on the reference.
     pub alignment_start: i32,
     /// Number of reference bases covered.
@@ -160,7 +160,7 @@ impl ContainerHeader {
 
         Ok(ContainerHeader {
             length,
-            ref_seq_id: ref_seq_id.cast_signed(),
+            ref_seq_id: RefSeqId::from_wire(ref_seq_id.cast_signed())?,
             alignment_start: alignment_start.cast_signed(),
             alignment_span: alignment_span.cast_signed(),
             num_records: num_records.cast_signed(),
@@ -182,9 +182,11 @@ impl ContainerHeader {
     ///
     /// Positions are 1-based in the container header.
     pub fn overlaps(&self, query_start: i64, query_end: i64) -> bool {
-        if self.ref_seq_id < 0 {
-            // Unmapped or multi-ref — can't do coordinate filtering
-            return self.ref_seq_id == -2;
+        match self.ref_seq_id {
+            // Can't do coordinate filtering on a multi-ref container.
+            RefSeqId::Multi => return true,
+            RefSeqId::Unmapped => return false,
+            RefSeqId::Ref(_) => {}
         }
         let container_start = i64::from(self.alignment_start);
         let container_end = container_start.saturating_add(i64::from(self.alignment_span));
@@ -250,7 +252,7 @@ mod tests {
         // Data container should have records and a valid reference
         assert!(data_container.num_records > 0, "data container should have records");
         assert!(
-            data_container.ref_seq_id >= 0 || data_container.ref_seq_id == -2,
+            data_container.ref_seq_id != RefSeqId::Unmapped,
             "data container should have valid ref_seq_id"
         );
         assert!(data_container.alignment_start > 0);
@@ -365,7 +367,7 @@ mod tests {
         // Container at positions 100-200 (1-based)
         let header = ContainerHeader {
             length: 0,
-            ref_seq_id: 0,
+            ref_seq_id: RefSeqId::Ref(Tid::new(0).unwrap()),
             alignment_start: 100,
             alignment_span: 100,
             num_records: 10,
