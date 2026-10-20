@@ -118,7 +118,7 @@ r[unified.readers_fork]
 `Readers::fork()` MUST fork both the alignment reader and the FASTA reader, returning a new `Readers` with independent I/O handles but shared immutable state (indices, headers). The CRAM fork gets its own FASTA reader via `IndexedFastaReader::fork()`. When `E ≠ ()`, `fork()` MUST clone the customize value into the new `Readers` (the `Clone` bound on `CustomizeRecordStore` guarantees this is cheap).
 
 r[unified.tid.newtype]
-A validated `Tid(u32)` newtype MUST wrap BAM target ids so downstream code cannot pass an unvalidated `u32`. Construction is only through the `ResolveTid::resolve_tid(header)` method, which MUST be implemented for `u32` (range-check), `&str`/`String`/`SmolStr` (by-name lookup), and `Tid` (passthrough). `ResolveTid::resolve_tid` MUST return a typed `TidError` on failure (unknown contig name or out-of-range `u32`).
+A validated `Tid` newtype MUST wrap BAM target ids so downstream code cannot pass an unvalidated `u32`. Public construction is only through the `ResolveTid::resolve_tid(header)` method, which MUST be implemented for `u32` (range-check), `&str`/`String`/`SmolStr` (by-name lookup), and `Tid` (passthrough). `ResolveTid::resolve_tid` MUST return a typed `TidError` on failure (unknown contig name or out-of-range `u32`). Crate-internally the readers MAY also build a `Tid` from a record's target field (`Tid::from_wire`); that trusts the file, as `[SAM1]` readers do. A record's optional target (`tid`, `next_ref_id`, with `-1` on the wire) MUST be an `Option<Tid>`, and `Tid` MUST carry a niche so the `Option` is still four bytes.
 
 ## Segments and pileup
 

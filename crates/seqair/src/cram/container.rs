@@ -2,6 +2,28 @@
 //! and block count needed to locate and read the slices inside a container.
 
 use super::{reader::CramError, varint};
+use crate::reader::Tid;
+
+/// The reference a CRAM container or slice is aligned to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefSeqId {
+    /// Every record is on this reference.
+    Ref(Tid),
+    /// Unmapped records (wire `-1`).
+    Unmapped,
+    /// Records on several references, each carrying its own `RI` (wire `-2`).
+    Multi,
+}
+
+impl RefSeqId {
+    pub(crate) fn from_wire(raw: i32) -> Result<Self, CramError> {
+        match raw {
+            -1 => Ok(Self::Unmapped),
+            -2 => Ok(Self::Multi),
+            _ => Tid::from_wire(raw).map(Self::Ref).ok_or(CramError::InvalidRefSeqId { value: raw }),
+        }
+    }
+}
 
 /// Parsed CRAM container header.
 #[derive(Debug)]

@@ -3,21 +3,51 @@
 
 use crate::bam::BamHeader;
 use seqair_types::SmolStr;
+use std::num::NonZeroU32;
 
 // r[impl unified.tid.newtype]
 /// A validated BAM target id — an index into the header's target list.
 ///
-/// Constructed only through [`ResolveTid::resolve_tid`]: the wrapper guarantees
-/// the underlying `u32` is in range for the header it was resolved against.
-/// `Clone` and `Copy` so callers can reuse the value without re-validating.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Tid(u32);
+/// Constructed through [`ResolveTid::resolve_tid`], which checks the id
+/// against the header, or crate-internally from a record's target field
+/// ([`Tid::from_wire`]), which trusts the file. `Clone` and `Copy` so callers
+/// can reuse the value without re-validating.
+///
+/// Stored as the id plus one, so `Option<Tid>` — a record's "unmapped" or
+/// "no mate reference" — costs nothing over the `u32`, like [`Pos0`].
+///
+/// [`Pos0`]: seqair_types::Pos0
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Tid(NonZeroU32);
 
 impl Tid {
+    /// `None` for an id BAM cannot write (above `i32::MAX`).
+    pub(crate) const fn new(index: u32) -> Option<Self> {
+        if index > i32::MAX as u32 {
+            return None;
+        }
+        match NonZeroU32::new(index.wrapping_add(1)) {
+            Some(n) => Some(Self(n)),
+            None => None,
+        }
+    }
+
+    /// A target id as a BAM record stores it: `None` for `-1` (unmapped, no
+    /// mate reference) and for any other negative value.
+    pub(crate) fn from_wire(raw: i32) -> Option<Self> {
+        u32::try_from(raw).ok().and_then(Self::new)
+    }
+
+    /// The BAM wire form of an optional target id: `-1` for `None`.
+    pub(crate) fn to_wire(id: Option<Self>) -> i32 {
+        // `new` rejects ids above `i32::MAX`, so this cannot wrap.
+        id.map_or(-1, |t| t.as_u32().cast_signed())
+    }
+
     /// The raw target id as a `u32`.
     #[must_use]
     pub fn as_u32(self) -> u32 {
-        self.0
+        self.0.get().wrapping_sub(1)
     }
 
     /// The raw target id as a `usize`, for indexing into per-contig vectors.
@@ -26,13 +56,13 @@ impl Tid {
     /// `usize` is at least 32 bits everywhere we run.
     #[must_use]
     pub fn as_usize(self) -> usize {
-        self.0 as usize
+        self.as_u32() as usize
     }
 }
 
 impl From<Tid> for u32 {
     fn from(t: Tid) -> u32 {
-        t.0
+        t.as_u32()
     }
 }
 
@@ -66,17 +96,17 @@ impl ResolveTid for Tid {
 impl ResolveTid for u32 {
     fn resolve_tid(&self, header: &BamHeader) -> Result<Tid, TidError> {
         let n = u32::try_from(header.target_count()).unwrap_or(u32::MAX);
-        if *self >= n {
-            return Err(TidError::TidOutOfRange { tid: *self, n_targets: n });
+        match Tid::new(*self) {
+            Some(tid) if *self < n => Ok(tid),
+            _ => Err(TidError::TidOutOfRange { tid: *self, n_targets: n }),
         }
-        Ok(Tid(*self))
     }
 }
 
 impl ResolveTid for str {
     fn resolve_tid(&self, header: &BamHeader) -> Result<Tid, TidError> {
-        match header.tid(self) {
-            Some(tid) => Ok(Tid(tid)),
+        match header.tid(self).and_then(Tid::new) {
+            Some(tid) => Ok(tid),
             None => Err(TidError::UnknownContig { name: self.into() }),
         }
     }
@@ -97,5 +127,28 @@ impl ResolveTid for String {
 impl ResolveTid for SmolStr {
     fn resolve_tid(&self, header: &BamHeader) -> Result<Tid, TidError> {
         self.as_str().resolve_tid(header)
+    }
+}
+
+// `Option<Tid>` is a record field: the niche is what keeps `SlimRecord` at 96 bytes.
+const _: () = assert!(std::mem::size_of::<Option<Tid>>() == 4);
+
+#[cfg(test)]
+mod tests {
+    use super::Tid;
+
+    // r[verify unified.tid.newtype]
+    #[test]
+    fn wire_round_trip_and_bounds() {
+        assert_eq!(Tid::from_wire(-1), None);
+        assert_eq!(Tid::from_wire(-2), None);
+        assert_eq!(Tid::to_wire(None), -1);
+        for raw in [0, 1, 7, i32::MAX] {
+            let tid = Tid::from_wire(raw).expect("non-negative ids are tids");
+            assert_eq!(tid.as_u32(), raw.cast_unsigned());
+            assert_eq!(Tid::to_wire(Some(tid)), raw);
+        }
+        assert_eq!(Tid::new(u32::MAX), None);
+        assert_eq!(Tid::new(i32::MAX as u32 + 1), None);
     }
 }

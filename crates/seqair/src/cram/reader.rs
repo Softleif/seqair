@@ -278,6 +278,9 @@ pub enum CramError {
     #[error("invalid length from ITF8: {value} is negative")]
     InvalidLength { value: i32 },
 
+    #[error("invalid reference sequence id {value} (expected >= 0, -1 unmapped or -2 multi-ref)")]
+    InvalidRefSeqId { value: i32 },
+
     #[error("invalid BAM flags value: {value:#06x}")]
     InvalidBamFlags { value: i32, source: std::num::TryFromIntError },
 
