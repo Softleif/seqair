@@ -644,8 +644,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             return Ok(crate::reader::FetchCounts::default());
         }
 
-        let mut fetched_total = 0usize;
-        let mut kept_total = 0usize;
+        let mut counts = crate::reader::FetchCounts::default();
         let mut kept = Vec::new();
 
         // Group CRAI entries by container_offset → set of slice_offsets that
@@ -692,14 +691,18 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                         None => Ok(DecodedSlice::default()),
                     }
                 })?;
-                let (slice_fetched, slice_kept) =
-                    decoded.copy_into(span.start, span.last, store, customize, &mut kept)?;
-                fetched_total = fetched_total.saturating_add(slice_fetched);
-                kept_total = kept_total.saturating_add(slice_kept);
+                decoded.copy_into(
+                    span.start,
+                    span.last,
+                    store,
+                    customize,
+                    &mut kept,
+                    &mut counts,
+                )?;
             }
         }
 
-        Ok(crate::reader::FetchCounts { fetched: fetched_total, kept: kept_total })
+        Ok(counts)
     }
 }
 

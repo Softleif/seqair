@@ -1,9 +1,10 @@
-//! Index statistics against `samtools idxstats` on the shared test BAM, whose
-//! numbers are hard-coded below.
+//! Index statistics and per-fetch counts against `samtools idxstats` on the
+//! shared test BAM, whose numbers are hard-coded below.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "test code")]
 
 use seqair::bam::{CsiIndex, MappedCounts, ReferenceStats};
-use seqair::reader::{IndexedReader, Readers};
+use seqair::reader::{DepthLimit, FetchCounts, IndexedReader, Readers, SegmentOptions};
+use std::num::NonZeroU32;
 use std::path::Path;
 
 fn data(name: &str) -> std::path::PathBuf {
@@ -54,4 +55,55 @@ fn csi_reference_stats_match_samtools_idxstats() {
 fn cram_has_no_reference_stats() {
     let readers = Readers::open(&data("test_v30.cram"), &data("test.fasta.gz")).unwrap();
     assert_eq!(readers.alignment().reference_stats(), None);
+}
+
+/// The fetch counts of one whole-contig pileup per contig.
+fn whole_contig_fetches(alignment: &str) -> Vec<FetchCounts> {
+    let mut readers = Readers::open(&data(alignment), &data("test.fasta.gz")).unwrap();
+    IDXSTATS
+        .iter()
+        .map(|&(contig, len, _, _)| {
+            let opts = SegmentOptions::new(NonZeroU32::new(len).unwrap()).without_byte_budget();
+            let segments: Vec<_> = readers.segments(contig, opts).unwrap().collect();
+            assert_eq!(segments.len(), 1, "{contig} is one tile");
+            readers.pileup(&segments[0], DepthLimit::Unlimited).run().unwrap().fetch_counts()
+        })
+        .collect()
+}
+
+// r[verify unified.fetch_counts+2]
+// r[verify unified.pileup_fetch_counts]
+/// A pileup over a whole contig fetches every placed record of it, so its
+/// counts are the index's: mapped as idxstats has it, and the placed
+/// unmapped ones on top.
+#[test]
+fn a_whole_contig_pileup_fetches_what_idxstats_counts() {
+    let expected: Vec<FetchCounts> = IDXSTATS
+        .iter()
+        .map(|&(_, _, mapped, unmapped)| {
+            let fetched = usize::try_from(mapped + unmapped).unwrap();
+            FetchCounts { fetched, mapped: usize::try_from(mapped).unwrap(), kept: fetched }
+        })
+        .collect();
+    assert_eq!(whole_contig_fetches("test.bam"), expected, "BAM");
+    assert_eq!(whole_contig_fetches("test_v30.cram"), expected, "CRAM");
+}
+
+// r[verify unified.pileup_fetch_counts]
+/// A customize value that drops records leaves `fetched` and `mapped` alone.
+#[test]
+fn a_filter_changes_kept_only() {
+    let mut readers = Readers::open_customized(
+        &data("test.bam"),
+        &data("test.fasta.gz"),
+        seqair::bam::record_store::RejectUnmapped,
+    )
+    .unwrap();
+    let (contig, len, mapped, unmapped) = IDXSTATS[1];
+    let opts = SegmentOptions::new(NonZeroU32::new(len).unwrap()).without_byte_budget();
+    let segment = readers.segments(contig, opts).unwrap().next().unwrap();
+    let counts = readers.pileup(&segment, DepthLimit::Unlimited).run().unwrap().fetch_counts();
+    let mapped = usize::try_from(mapped).unwrap();
+    let fetched = mapped + usize::try_from(unmapped).unwrap();
+    assert_eq!(counts, FetchCounts { fetched, mapped, kept: mapped });
 }

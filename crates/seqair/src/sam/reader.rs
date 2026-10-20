@@ -400,8 +400,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
         let mut seq_buf = Vec::with_capacity(256);
         let mut qual_buf = Vec::with_capacity(256);
         let mut aux_buf = Vec::with_capacity(256);
-        let mut fetched: usize = 0;
-        let mut kept: usize = 0;
+        let mut counts = crate::reader::FetchCounts::default();
 
         // r[impl sam.edge.empty_lines]
         let mut on_line = |line: &[u8]| -> Result<(), SamError> {
@@ -410,7 +409,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
             if line.is_empty() || line.first() == Some(&b'@') {
                 return Ok(());
             }
-            if let Some(outcome) = parse_sam_line(
+            if let Some((flags, kept)) = parse_sam_line(
                 line,
                 header,
                 tid_i32,
@@ -423,10 +422,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                 &mut aux_buf,
                 customize,
             )? {
-                fetched = fetched.saturating_add(1);
-                if outcome {
-                    kept = kept.saturating_add(1);
-                }
+                counts.add(flags, kept);
             }
             Ok(())
         };
@@ -481,7 +477,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
             }
         }
 
-        Ok(crate::reader::FetchCounts { fetched, kept })
+        Ok(counts)
     }
 }
 
@@ -502,7 +498,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
     customize: &mut E,
-) -> Result<Option<bool>, SamError> {
+) -> Result<Option<(BamFlags, bool)>, SamError> {
     let (fields, n_fields) = text_scan::split_tabs(line);
     let fields = fields.get(..n_fields).unwrap_or_default();
     if fields.len() < 11 {
@@ -654,7 +650,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
         )?
         .is_some();
 
-    Ok(Some(kept))
+    Ok(Some((flags, kept)))
 }
 
 // r[impl sam.record.cigar_parse]
@@ -1107,6 +1103,7 @@ mod tests {
             &mut aux_buf,
             &mut (),
         )
+        .map(|outcome| outcome.map(|(_, kept)| kept))
     }
 
     #[test]
@@ -1266,7 +1263,7 @@ mod tests {
             &mut aux_buf,
             &mut (),
         )?;
-        Ok((result, store))
+        Ok((result.map(|(_, kept)| kept), store))
     }
 
     // r[verify sam.reader.overlap_inclusive]

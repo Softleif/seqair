@@ -249,16 +249,16 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         store.clear();
 
         let mut query = self.query(tid, span)?;
-        let mut kept_count: usize = 0;
+        let mut counts = FetchCounts::default();
         query.for_each_result::<_, BamError>(|raw| {
-            if store.push_raw(raw, customize)?.is_some() {
-                kept_count = kept_count.saturating_add(1);
-            }
+            let kept = store.push_raw(raw, customize)?.is_some();
+            // `push_raw` has parsed the header, so the flag field is there.
+            let flags = raw.get(14..16).and_then(|b| b.try_into().ok()).map(u16::from_le_bytes);
+            counts.add(BamFlags::from(flags.unwrap_or_default()), kept);
             Ok(())
         })?;
 
-        let qc = query.counts();
-        Ok(FetchCounts { fetched: qc.fetched, kept: kept_count })
+        Ok(counts)
     }
 
     /// Create a cursor over raw BAM records in a genomic region.

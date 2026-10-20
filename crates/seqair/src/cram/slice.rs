@@ -180,8 +180,9 @@ impl DecodedSlice {
     // r[impl interval.overlap_test]
     /// Push the records overlapping `query_start..=query_end` into `store`,
     /// consulting `customize` for each, and null the mate fields of kept
-    /// records whose attached mate did not make it into the store. Returns
-    /// `(fetched, kept)`. `kept` is scratch space, one entry per record.
+    /// records whose attached mate did not make it into the store, adding
+    /// each fetched record to `counts`. `kept` is scratch space, one entry
+    /// per record.
     pub(crate) fn copy_into<E: CustomizeRecordStore>(
         &self,
         query_start: Pos0,
@@ -189,10 +190,9 @@ impl DecodedSlice {
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,
         kept: &mut Vec<Option<RecordIdx>>,
-    ) -> Result<(usize, usize), CramError> {
+        counts: &mut crate::reader::FetchCounts,
+    ) -> Result<(), CramError> {
         kept.clear();
-        let mut fetched_count = 0usize;
-        let mut kept_count = 0usize;
         for r in &self.records {
             // Both bounds are inclusive, as are `pos` and `end_pos`: a record
             // is kept iff `pos <= query_end && end_pos >= query_start`. An
@@ -220,10 +220,7 @@ impl DecodedSlice {
                 r.template_len,
                 customize,
             )?;
-            fetched_count = fetched_count.wrapping_add(1);
-            if idx.is_some() {
-                kept_count = kept_count.wrapping_add(1);
-            }
+            counts.add(r.flags, idx.is_some());
             kept.push(idx);
         }
         for (r, idx) in self.records.iter().zip(kept.iter()) {
@@ -237,7 +234,7 @@ impl DecodedSlice {
                 store.set_mate_info(idx, -1, -1);
             }
         }
-        Ok((fetched_count, kept_count))
+        Ok(())
     }
 }
 

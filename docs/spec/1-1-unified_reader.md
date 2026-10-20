@@ -457,8 +457,11 @@ planner can ask before committing.
 r[unified.fetch_into_customized]
 Each format reader (`IndexedBamReader`, `IndexedSamReader`, `IndexedCramReader`, and the format-agnostic `IndexedReader`) MUST expose `fetch_into_customized<E: CustomizeRecordStore>(tid, span, store, customize) -> Result<FetchCounts>` in addition to `fetch_into`. The reader MUST forward `customize` to `RecordStore::push_raw`/`push_fields` so its `keep_record` runs at push time. `FetchCounts { fetched, kept }` reports records produced by the reader's built-in overlap/unmapped checks (`fetched`) vs those that also passed `keep_record` (`kept`). Existing `fetch_into` MUST remain a thin wrapper passing `&mut ()` (whose default `keep_record` returns `true`) so its signature and behavior are unchanged.
 
-r[unified.fetch_counts]
-`FetchCounts` MUST be `#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]` with `fetched: usize` and `kept: usize` fields. `kept <= fetched` MUST always hold. The struct is re-exported from `crate::reader::FetchCounts` for callers that need to report filter statistics.
+r[unified.fetch_counts+2]
+`FetchCounts` MUST be `#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]` with `fetched: usize`, `mapped: usize` and `kept: usize` fields. `mapped` counts the fetched records without flag 0x4 (`BAM_FUNMAP`), the same records an index's per-reference mapped count covers, so a caller can set a span's mapped reads per base against a whole-file rate (`r[index.reference_stats]`) without counting in its own filter. `mapped <= fetched` and `kept <= fetched` MUST always hold. The struct is re-exported from `crate::reader::FetchCounts` for callers that need to report filter statistics.
+
+r[unified.pileup_fetch_counts]
+The `PileupGuard` that `Pileup::run` returns MUST report the `FetchCounts` of the fetch behind it through `fetch_counts()`. Records a load-time depth cap (`DepthLimit::PerColumn`) dropped count as fetched and not kept. Reporting MUST cost no more than carrying the counts: no extra pass over the records.
 
 > r[unified.readers_accessors+1]
 > `Readers` MUST expose:

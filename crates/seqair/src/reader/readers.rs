@@ -415,14 +415,14 @@ impl<E: CustomizeRecordStore> Readers<E> {
             });
         }
 
-        match depth.per_column() {
+        let fetch = match depth.per_column() {
             None => {
                 // Split borrows: fetch writes into `store` while customize is
                 // consulted for filter. Three disjoint &mut borrows of self.
                 let alignment = &mut self.alignment;
                 let store = &mut self.store;
                 let customize = &mut self.customize;
-                alignment.fetch_into_customized(tid.as_u32(), span, store, customize)?;
+                alignment.fetch_into_customized(tid.as_u32(), span, store, customize)?
             }
             Some(cap) => {
                 // Cap reads overlapping any column at load time so an
@@ -430,15 +430,16 @@ impl<E: CustomizeRecordStore> Readers<E> {
                 // customize is cloned for the fetch and restored afterwards so
                 // any state it accumulates survives.
                 let mut capped = DepthCap::with_cap(self.customize.clone(), Some(cap));
-                self.alignment.fetch_into_customized(
+                let fetch = self.alignment.fetch_into_customized(
                     tid.as_u32(),
                     span,
                     &mut self.store,
                     &mut capped,
                 )?;
                 self.customize = capped.into_inner();
+                fetch
             }
-        }
+        };
 
         // r[impl unified.pileup_reference_covers_reads]
         // The records are in hand, so the span they actually cover is known
@@ -550,7 +551,8 @@ impl<E: CustomizeRecordStore> Readers<E> {
 
         let mut engine = PileupEngine::with_scratch(input, span, scratch);
         engine.set_reference_seq(ref_seq);
-        Ok(PileupGuard::new(engine, &mut self.store, Some(&mut self.pileup_scratch)))
+        Ok(PileupGuard::new(engine, &mut self.store, Some(&mut self.pileup_scratch))
+            .with_fetch_counts(fetch))
     }
 
     pub fn fasta(&self) -> &IndexedFastaReader {

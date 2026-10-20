@@ -11,7 +11,7 @@ use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0, QPos};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 use std::{num::NonZeroU32, ops::Range, rc::Rc};
 
-use crate::utils::TraceErr;
+use crate::{reader::FetchCounts, utils::TraceErr};
 
 use super::{
     cigar::{CigarCursor, CigarPosInfo, ClipFlanks, PlainGap},
@@ -1085,6 +1085,7 @@ pub struct PileupGuard<'a, U = ()> {
     /// region's pileup reuses them instead of allocating fresh. `None` for
     /// guards that don't pool scratch (e.g. the fuzz harness).
     scratch_slot: Option<&'a mut PileupScratch>,
+    fetch: FetchCounts,
 }
 
 impl<'a, U> PileupGuard<'a, U> {
@@ -1098,7 +1099,21 @@ impl<'a, U> PileupGuard<'a, U> {
         slot: &'a mut RecordStore<U>,
         scratch_slot: Option<&'a mut PileupScratch>,
     ) -> Self {
-        Self { engine: Some(engine), slot, scratch_slot }
+        Self { engine: Some(engine), slot, scratch_slot, fetch: FetchCounts::default() }
+    }
+
+    pub(crate) fn with_fetch_counts(mut self, fetch: FetchCounts) -> Self {
+        self.fetch = fetch;
+        self
+    }
+
+    // r[impl unified.pileup_fetch_counts]
+    /// What the fetch behind this pileup read: records overlapping the
+    /// segment, how many of them are mapped, and how many the customize
+    /// value kept. Records a load-time depth cap dropped count as fetched
+    /// and not kept.
+    pub fn fetch_counts(&self) -> FetchCounts {
+        self.fetch
     }
 
     /// Consume the guard and return the inner engine, **without**
