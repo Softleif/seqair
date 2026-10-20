@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A negative count in a BAI or tabix index is `BaiError::NegativeCount`.** It used to be cast
+  to a huge `usize` and rejected as `FieldTooLarge` (or, for tabix `l_nm`, as a truncated header).
 - **Index lookup appends before it replaces, and never splits a dotted stem.** For `x.bam` the
   reader tries `x.bam.csi`, `x.bam.bai`, `x.csi`, `x.bai` (SAM: `tbi`, `bai`, `csi`; CRAM: `crai`).
   It used to call `with_extension("bam.csi")`, so a BAM not named `*.bam` (`sample.v2`) was looked

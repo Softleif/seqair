@@ -57,6 +57,9 @@ CSI is an alternative index format that supports larger genomes and arbitrary bi
 r[index.reference_stats]
 BAI and CSI indexes MUST expose, per reference in tid order, a `ReferenceStats` read at parse time: the pseudo-bin's counts (`MappedCounts { mapped, unmapped }`, from the second chunk's begin and end fields, SAM spec §5.2; `None` when the reference has no pseudo-bin or the pseudo-bin no second chunk), the number of leaf bins (level `depth`, ids `((1 << 3*depth) - 1) / 7` up to the bin limit) with a chunk, and the bases one leaf spans (`1 << min_shift`). `samtools idxstats` prints the same counts. `IndexedReader::reference_stats` MUST reach them without reopening the file, and return `None` for CRAM, whose `.crai` keeps neither.
 
+r[bam.index.negative_count]
+BAI and tabix counts (`n_ref`, `n_bin`, `n_chunk`, `n_intv`, tabix `l_nm`) are `int32_t`. A negative one MUST be reported as `BaiError::NegativeCount` with its value, as the CSI reader does, not cast to a `usize` that a later size limit or truncation check then rejects under another name.
+
 r[index.unplaced_unmapped]
 After the last reference, a BAI (like a tabix index and a CSI, `r[csi.n_no_coor]`) MAY hold a `uint64_t n_no_coor`: the records with no reference (`RNAME *`), the `*` line of `samtools idxstats`. The reader MUST read it when eight bytes remain and report it through `unplaced_unmapped()`, `None` when the file ends without it; `IndexedReader::unplaced_unmapped` MUST return `None` for CRAM.
 

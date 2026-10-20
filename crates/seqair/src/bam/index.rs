@@ -231,21 +231,21 @@ impl BamIndex {
         }
 
         let mut pos = 4;
-        let n_ref = read_i32(data, &mut pos)?;
+        let n_ref = read_count(data, &mut pos)?;
         let _format = read_i32(data, &mut pos)?;
         let _col_seq = read_i32(data, &mut pos)?;
         let _col_beg = read_i32(data, &mut pos)?;
         let _col_end = read_i32(data, &mut pos)?;
         let _meta = read_i32(data, &mut pos)?;
         let _skip = read_i32(data, &mut pos)?;
-        let l_nm = read_i32(data, &mut pos)? as usize;
+        let l_nm = read_count(data, &mut pos)?;
 
         if data.len() < pos.wrapping_add(l_nm) {
             return Err(BaiError::TruncatedTabixHeader { reason: "names extend past end of data" });
         }
         pos = pos.wrapping_add(l_nm);
 
-        parse_refs_with_count(data, &mut pos, n_ref as usize)
+        parse_refs_with_count(data, &mut pos, n_ref)
     }
 
     /// Create an empty index with no references (for plain SAM fuzzing).
@@ -285,14 +285,14 @@ impl BamIndex {
         let mut pos = 4;
         // Read tabix header fields (skip over them — we reuse BAI parsing)
         // r[impl tabix.header]
-        let n_ref = read_i32(&data, &mut pos)?;
+        let n_ref = read_count(&data, &mut pos)?;
         let _format = read_i32(&data, &mut pos)?;
         let _col_seq = read_i32(&data, &mut pos)?;
         let _col_beg = read_i32(&data, &mut pos)?;
         let _col_end = read_i32(&data, &mut pos)?;
         let _meta = read_i32(&data, &mut pos)?;
         let _skip = read_i32(&data, &mut pos)?;
-        let l_nm = read_i32(&data, &mut pos)? as usize;
+        let l_nm = read_count(&data, &mut pos)?;
 
         // Skip concatenated sequence names
         if data.len() < pos.wrapping_add(l_nm) {
@@ -303,7 +303,7 @@ impl BamIndex {
 
         // The remaining data is identical to BAI format (bins, chunks, linear index)
         // but we already read n_ref from the tabix header
-        parse_refs_with_count(&data, &mut pos, n_ref as usize)
+        parse_refs_with_count(&data, &mut pos, n_ref)
     }
 
     // r[impl index.reference_stats]
@@ -489,7 +489,7 @@ pub(super) fn merge_overlapping_chunks(chunks: &mut Vec<Chunk>) {
 
 /// Parse the reference index data (shared between BAI and tabix).
 fn parse_refs(data: &[u8], pos: &mut usize) -> Result<BamIndex, BaiError> {
-    let n_ref = read_i32(data, pos)? as usize;
+    let n_ref = read_count(data, pos)?;
     parse_refs_with_count(data, pos, n_ref)
 }
 
@@ -515,13 +515,13 @@ fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<B
     let mut stats = Vec::with_capacity(n_ref);
 
     for _ in 0..n_ref {
-        let n_bin = read_i32(data, pos)? as usize;
+        let n_bin = read_count(data, pos)?;
         check_index_limit(n_bin, MAX_BINS_PER_REF, "n_bin")?;
         let mut bins = Vec::with_capacity(n_bin);
 
         for _ in 0..n_bin {
             let bin_id = read_u32(data, pos)?;
-            let n_chunk = read_i32(data, pos)? as usize;
+            let n_chunk = read_count(data, pos)?;
             check_index_limit(n_chunk, MAX_CHUNKS_PER_BIN, "n_chunk")?;
             let mut chunks = Vec::with_capacity(n_chunk);
 
@@ -539,7 +539,7 @@ fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<B
             BAI_DEPTH,
         ));
 
-        let n_intv = read_i32(data, pos)? as usize;
+        let n_intv = read_count(data, pos)?;
         check_index_limit(n_intv, MAX_LINEAR_INDEX, "n_intv")?;
         let mut linear_index = Vec::with_capacity(n_intv);
         for _ in 0..n_intv {
@@ -721,6 +721,14 @@ fn read_i32(data: &[u8], pos: &mut usize) -> Result<i32, BaiError> {
     Ok(i32::from_le_bytes(bytes))
 }
 
+// r[impl bam.index.negative_count]
+/// An `int32_t` count: a negative one is an error of its own, not a huge
+/// `usize` that some later limit happens to catch.
+fn read_count(data: &[u8], pos: &mut usize) -> Result<usize, BaiError> {
+    let raw = read_i32(data, pos)?;
+    usize::try_from(raw).map_err(|_| BaiError::NegativeCount { value: raw })
+}
+
 fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, BaiError> {
     let bytes: [u8; 4] = data
         .get(*pos..pos.wrapping_add(4))
@@ -886,6 +894,28 @@ mod tests {
         f.write_all(b"BAI").unwrap(); // only 3 bytes, < 8
         let err = BamIndex::from_path(&path).unwrap_err();
         assert!(matches!(err, BaiError::InvalidMagic));
+    }
+
+    // r[verify bam.index.negative_count]
+    /// One reference with one bin of one chunk and no linear index, with the
+    /// count at `field` (0 `n_ref`, 1 `n_bin`, 2 `n_chunk`, 3 `n_intv`) set to -1.
+    #[test]
+    fn a_negative_count_is_reported_as_negative() {
+        for field in 0..4 {
+            let count = |i: usize, n: i32| if i == field { -1 } else { n };
+            let mut bai = b"BAI\x01".to_vec();
+            bai.extend_from_slice(&count(0, 1).to_le_bytes());
+            bai.extend_from_slice(&count(1, 1).to_le_bytes());
+            bai.extend_from_slice(&4681u32.to_le_bytes());
+            bai.extend_from_slice(&count(2, 1).to_le_bytes());
+            bai.extend_from_slice(&[0; 16]);
+            bai.extend_from_slice(&count(3, 0).to_le_bytes());
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("negative.bai");
+            std::fs::write(&path, &bai).unwrap();
+            let err = BamIndex::from_path(&path).unwrap_err();
+            assert!(matches!(err, BaiError::NegativeCount { value: -1 }), "field {field}: {err:?}");
+        }
     }
 
     // r[verify tabix.magic]
