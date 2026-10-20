@@ -266,7 +266,7 @@ fn records_are_in_sorted_order() {
     }
 }
 
-// r[verify sam.index.locate+2]
+// r[verify sam.index.locate+3]
 // r[verify sam.index.tabix]
 #[test]
 fn finds_tabix_index_with_tbi_extension() {

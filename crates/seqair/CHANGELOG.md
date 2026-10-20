@@ -15,9 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ReferenceStats { counts: Option<MappedCounts>, covered_leaf_bins, leaf_bin_len }`. `None` for
   CRAM.
 - **`PileupGuard::fetch_counts`**: the `FetchCounts` of the fetch behind a pileup.
+- **An index can be given explicitly**: `IndexedBamReader::open_with_index`,
+  `IndexedSamReader::open_with_index`, `IndexedCramReader::open_with_index` and
+  `IndexedReader::open_with_reference_and_index`. Nothing beside the alignment file is looked at;
+  a BAM index is told apart as BAI or CSI by its content.
 
 ### Changed
 
+- **Index lookup appends before it replaces, and never splits a dotted stem.** For `x.bam` the
+  reader tries `x.bam.csi`, `x.bam.bai`, `x.csi`, `x.bai` (SAM: `tbi`, `bai`, `csi`; CRAM: `crai`).
+  It used to call `with_extension("bam.csi")`, so a BAM not named `*.bam` (`sample.v2`) was looked
+  up as `sample.bam.csi` and `sample.bai`, another file's names. htslib tries `x.csi` before
+  `x.bam.bai`; with both present the two can now pick different indexes.
 - **Breaking: `FetchCounts` has a `mapped` field**, the fetched records without flag 0x4. Code
   building a `FetchCounts` literal has to add it.
 

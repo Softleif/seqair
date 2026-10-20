@@ -130,13 +130,29 @@ impl<R: Read + Seek> std::fmt::Debug for IndexedBamReader<R> {
 }
 
 impl IndexedBamReader<File> {
+    /// Open a BAM and the index beside it (`r[index.locate]`).
     #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, BamError> {
+        Self::open_inner(path, None)
+    }
+
+    // r[impl index.explicit]
+    /// Open a BAM with the BAI or CSI at `index`, wherever it is; nothing
+    /// beside the BAM is looked at.
+    #[instrument(level = "debug", fields(path = %path.display(), index = %index.display()))]
+    pub fn open_with_index(path: &Path, index: &Path) -> Result<Self, BamError> {
+        Self::open_inner(path, Some(index))
+    }
+
+    fn open_inner(path: &Path, index: Option<&Path>) -> Result<Self, BamError> {
         let mut bgzf = BgzfReader::open(path)?;
         let header = BamHeader::parse(&mut bgzf)?;
         // r[impl unified.sort_order]
         header.validate_sort_order()?;
-        let index = find_and_open_index(path)?;
+        let index = match index {
+            Some(index) => open_index(index)?,
+            None => find_and_open_index(path)?,
+        };
 
         let bulk_file = File::open(path)
             .map_err(|source| BamError::Open { path: path.to_path_buf(), source })?;
@@ -598,37 +614,26 @@ fn reaches(raw: &[u8], pos: Pos0, flags: BamFlags, start: Pos0) -> bool {
     end >= start
 }
 
-// r[impl unified.detect_index]
+// r[impl unified.detect_index+2]
 // r[impl unified.detect_error]
-// r[impl csi.detect]
+// r[impl csi.detect+2]
 fn find_and_open_index(bam_path: &Path) -> Result<AlignmentIndex, BamError> {
-    // CSI preferred: try {file}.csi first, then {file_without_ext}.csi (per htslib convention)
-    let csi_path = bam_path.with_extension("bam.csi");
-    if csi_path.exists() {
-        return Ok(AlignmentIndex::Csi(CsiIndex::from_path(&csi_path)?));
-    }
+    let index = crate::utils::find_index(bam_path, &["csi", "bai"])
+        .ok_or_else(|| BamError::IndexNotFound { bam_path: bam_path.to_path_buf() })?;
+    open_index(&index)
+}
 
-    let csi_path2 = bam_path.with_extension("csi");
-    if csi_path2.exists() {
-        return Ok(AlignmentIndex::Csi(CsiIndex::from_path(&csi_path2)?));
+/// Open a BAI or a CSI, told apart by content: a BAI starts with its magic, a
+/// CSI is BGZF-compressed (or, written by hand, starts with `CSI\x01`).
+fn open_index(path: &Path) -> Result<AlignmentIndex, BamError> {
+    let mut magic = [0u8; 4];
+    let read = File::open(path).and_then(|mut f| f.read_exact(&mut magic));
+    read.map_err(|source| BaiError::Read { path: path.to_path_buf(), source })?;
+    if magic == *b"BAI\x01" {
+        Ok(AlignmentIndex::Bai(BamIndex::from_path(path)?))
+    } else {
+        Ok(AlignmentIndex::Csi(CsiIndex::from_path(path)?))
     }
-
-    // Fall back to BAI: try {file}.bai first, then {file_without_ext}.bai
-    let bai_path = bam_path.with_extension("bam.bai");
-    if bai_path.exists() {
-        return Ok(AlignmentIndex::Bai(
-            BamIndex::from_path(&bai_path).map_err(|source| BamError::Index { source })?,
-        ));
-    }
-
-    let bai_path2 = bam_path.with_extension("bai");
-    if bai_path2.exists() {
-        return Ok(AlignmentIndex::Bai(
-            BamIndex::from_path(&bai_path2).map_err(|source| BamError::Index { source })?,
-        ));
-    }
-
-    Err(BamError::IndexNotFound { bam_path: bam_path.to_path_buf() })
 }
 
 #[cfg(test)]

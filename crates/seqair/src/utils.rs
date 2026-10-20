@@ -36,3 +36,65 @@ impl<T, E: std::fmt::Display> TraceOk<T> for Result<T, E> {
         }
     }
 }
+
+// r[impl index.locate]
+/// The index files `path` may have, in lookup order: each of `exts` appended to
+/// the whole file name (`x.bam.csi`, `x.bam.bai`), then each in place of its
+/// last extension (`x.csi`, `x.bai`). Only the part after the last dot is ever
+/// replaced, so a dotted stem (`sample.v2.bam`) keeps its dots.
+pub(crate) fn index_candidates<'a>(
+    path: &'a std::path::Path,
+    exts: &'a [&'a str],
+) -> impl Iterator<Item = std::path::PathBuf> + 'a {
+    let with = |base: &std::ffi::OsStr, ext: &str| {
+        let mut name = base.to_os_string();
+        name.push(".");
+        name.push(ext);
+        path.with_file_name(name)
+    };
+    let appended = path
+        .file_name()
+        .into_iter()
+        .flat_map(move |name| exts.iter().map(move |ext| with(name, ext)));
+    let stem = path.extension().and(path.file_stem());
+    let replaced =
+        stem.into_iter().flat_map(move |stem| exts.iter().map(move |ext| with(stem, ext)));
+    appended.chain(replaced)
+}
+
+/// The first of [`index_candidates`] that exists.
+pub(crate) fn find_index(path: &std::path::Path, exts: &[&str]) -> Option<std::path::PathBuf> {
+    index_candidates(path, exts).find(|candidate| candidate.exists())
+}
+
+#[cfg(test)]
+mod index_candidate_tests {
+    use super::index_candidates;
+    use std::path::{Path, PathBuf};
+
+    fn names(path: &str, exts: &[&str]) -> Vec<PathBuf> {
+        index_candidates(Path::new(path), exts).collect()
+    }
+
+    // r[verify index.locate]
+    #[test]
+    fn appended_names_come_before_replaced_ones() {
+        let expected: Vec<PathBuf> =
+            ["d/x.bam.csi", "d/x.bam.bai", "d/x.csi", "d/x.bai"].map(PathBuf::from).into();
+        assert_eq!(names("d/x.bam", &["csi", "bai"]), expected);
+    }
+
+    // r[verify index.locate]
+    #[test]
+    fn a_dotted_stem_keeps_its_dots() {
+        let expected: Vec<PathBuf> =
+            ["sample.v2.bam.crai", "sample.v2.crai"].map(PathBuf::from).into();
+        assert_eq!(names("sample.v2.bam", &["crai"]), expected);
+    }
+
+    // r[verify index.locate]
+    #[test]
+    fn a_name_without_extension_has_only_appended_names() {
+        assert_eq!(names("dir.v1/sample", &["bai"]), vec![PathBuf::from("dir.v1/sample.bai")]);
+    }
+}

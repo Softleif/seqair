@@ -180,22 +180,11 @@ impl CramIndex {
     }
 }
 
-/// Find the `.crai` index file for a CRAM file.
+// r[impl unified.detect_index+2]
+/// Find the `.crai` index file for a CRAM file (`r[index.locate]`).
 pub fn find_crai_path(cram_path: &Path) -> Result<PathBuf, CramError> {
-    // Try <file>.cram.crai first, then <file>.crai
-    let mut crai = cram_path.to_path_buf();
-    crai.set_extension("cram.crai");
-    if crai.exists() {
-        return Ok(crai);
-    }
-
-    // Try appending .crai to the full path
-    let with_crai = PathBuf::from(format!("{}.crai", cram_path.display()));
-    if with_crai.exists() {
-        return Ok(with_crai);
-    }
-
-    Err(CramError::IndexNotFound { cram_path: cram_path.to_path_buf() })
+    crate::utils::find_index(cram_path, &["crai"])
+        .ok_or_else(|| CramError::IndexNotFound { cram_path: cram_path.to_path_buf() })
 }
 
 fn parse_crai_line(line: &str) -> Result<CraiEntry, CramError> {

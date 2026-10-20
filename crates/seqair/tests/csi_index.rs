@@ -313,7 +313,7 @@ fn seqair_queries_samtools_csi_match_bai() {
 
 // --- Format detection: file.csi (without .bam infix) ---
 
-// r[verify csi.detect]
+// r[verify csi.detect+2]
 #[test]
 fn indexed_reader_finds_csi_without_bam_infix() {
     let dir = tempfile::tempdir().unwrap();

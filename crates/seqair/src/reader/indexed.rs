@@ -217,6 +217,27 @@ impl IndexedReader<std::fs::File> {
         }
     }
 
+    // r[impl index.explicit]
+    /// [`open_with_reference`](Self::open_with_reference), with the index at
+    /// `index` instead of the one beside `path`: a BAI or CSI for BAM, a tabix
+    /// index or BAI for SAM, a `.crai` for CRAM. For pileup, hand the result to
+    /// [`Readers::from_parts_customized`].
+    pub fn open_with_reference_and_index(
+        path: &Path,
+        reference_path: &Path,
+        index: &Path,
+    ) -> Result<Self, ReaderError> {
+        match formats::detect(path)? {
+            Format::Bam => Ok(IndexedReader::Bam(IndexedBamReader::open_with_index(path, index)?)),
+            Format::Sam => Ok(IndexedReader::Sam(IndexedSamReader::open_with_index(path, index)?)),
+            Format::Cram => Ok(IndexedReader::Cram(Box::new(IndexedCramReader::open_with_index(
+                path,
+                reference_path,
+                index,
+            )?))),
+        }
+    }
+
     /// Upgrade this record reader into a reference-aware [`Readers`] for pileup.
     ///
     /// The alignment handle is reused as-is; `fasta` supplies the per-column

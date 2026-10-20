@@ -65,7 +65,7 @@ fn create_sam_gz(dir: &Path) -> std::path::PathBuf {
 
 // r[verify unified.detect_format]
 // r[verify unified.reader_enum]
-// r[verify unified.detect_index]
+// r[verify unified.detect_index+2]
 #[test]
 fn detects_bam_format() {
     let reader = IndexedReader::open(test_bam_path()).expect("should detect BAM");
@@ -74,7 +74,7 @@ fn detects_bam_format() {
 
 // r[verify unified.detect_format]
 // r[verify unified.reader_enum]
-// r[verify unified.detect_index]
+// r[verify unified.detect_index+2]
 #[test]
 fn detects_sam_format() {
     let dir = tempfile::tempdir().unwrap();

@@ -24,12 +24,20 @@ seqair reads BAM, bgzf-compressed SAM, and CRAM files through a format-agnostic 
 > - Byte `@` (0x40) at position 0 → uncompressed SAM. Reject with error: "uncompressed SAM files cannot be indexed; compress with `bgzip file.sam` then index with `samtools index file.sam.gz`."
 > - Otherwise → return an error listing supported formats (BAM, bgzf-compressed SAM, CRAM)
 
-> r[unified.detect_index]
-> After format detection, the reader MUST locate the appropriate index file:
+> r[unified.detect_index+2]
+> After format detection, the reader MUST locate the appropriate index file, by the names of `r[index.locate]`:
 >
-> - BAM: `.bai`, `.bam.bai`, or `.csi` (CSI supports references > 512 Mbp that BAI cannot)
-> - SAM: `.tbi` or `.csi` (tabix or CSI index)
-> - CRAM: `.crai` (CRAM index)
+> - BAM: `csi`, then `bai` (CSI supports references > 512 Mbp that BAI cannot)
+> - SAM: `tbi`, then `bai`, then `csi` (found, but refused: `r[sam.index.csi+2]`)
+> - CRAM: `crai`
+
+r[index.locate]
+For an alignment file `x.bam` and the extensions of its format in order, the reader MUST try every extension appended to the whole file name (`x.bam.csi`, `x.bam.bai`), then every extension in place of the name's last extension (`x.csi`, `x.bai`), and take the first file that exists. Only the part after the last dot is ever replaced: a dotted stem keeps its dots (`sample.v2.bam` → `sample.v2.bam.bai`, then `sample.v2.bai`), and a name without an extension has only the appended forms. A BAM index is told apart as BAI or CSI by its content, not its name.
+
+> **Was:** `with_extension("bam.csi")`, which assumed the file ends in `.bam`: for `sample.v2` it looked at `sample.bam.csi` and `sample.bai`, another file's names. htslib tries `x.bam.csi`, `x.csi`, `x.bam.bai`, `x.bai`; appended names first is a deliberate difference, since an appended name can only belong to this file.
+
+r[index.explicit]
+`IndexedBamReader::open_with_index`, `IndexedSamReader::open_with_index`, `IndexedCramReader::open_with_index` and `IndexedReader::open_with_reference_and_index` MUST open the index at the given path and look at nothing beside the alignment file. The index's kind is read from its content, so its name is free.
 
 r[unified.detect_error]
 If the format is detected but no matching index is found, the error MUST name the expected index extension and suggest the tool to create it (`samtools index` for BAM/CRAM, `samtools index` or `tabix` for SAM).

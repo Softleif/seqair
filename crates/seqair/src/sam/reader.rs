@@ -120,7 +120,7 @@ pub enum SamError {
         source: BaiError,
     },
 
-    #[error("tabix index not found for {sam_path} (tried .tbi and .bai)")]
+    #[error("tabix index not found for {sam_path} (tried .tbi, .bai and .csi)")]
     IndexNotFound { sam_path: PathBuf },
 
     // r[impl sam.index.csi+2]
@@ -184,8 +184,21 @@ impl<R> std::fmt::Debug for IndexedSamReader<R> {
 
 impl IndexedSamReader<File> {
     // r[impl sam.reader.open]
+    /// Open a bgzf-compressed SAM and the index beside it (`r[index.locate]`).
     #[instrument(level = "debug", fields(path = %path.display()))]
     pub fn open(path: &Path) -> Result<Self, SamError> {
+        Self::open_inner(path, None)
+    }
+
+    // r[impl index.explicit]
+    /// Open a bgzf-compressed SAM with the tabix index or BAI at `index`,
+    /// wherever it is; nothing beside the SAM is looked at.
+    #[instrument(level = "debug", fields(path = %path.display(), index = %index.display()))]
+    pub fn open_with_index(path: &Path, index: &Path) -> Result<Self, SamError> {
+        Self::open_inner(path, Some(index))
+    }
+
+    fn open_inner(path: &Path, index: Option<&Path>) -> Result<Self, SamError> {
         // r[impl sam.reader.reject_uncompressed]
         {
             let mut f = File::open(path)
@@ -203,8 +216,10 @@ impl IndexedSamReader<File> {
         // r[impl unified.sort_order]
         header.validate_sort_order()?;
 
-        // Find tabix index
-        let index = find_tabix_index(path)?;
+        let index = match index {
+            Some(index) => open_index(index)?,
+            None => find_tabix_index(path)?,
+        };
 
         let bulk_file = File::open(path)
             .map_err(|source| SamError::Open { path: path.to_path_buf(), source })?;
@@ -899,56 +914,35 @@ fn read_sam_header<R: std::io::Read + std::io::Seek>(
 }
 
 // r[impl sam.index.tabix]
-// r[impl unified.detect_index]
+// r[impl unified.detect_index+2]
 // r[impl unified.detect_error]
-// TODO: r[sam.index.locate+2] — CSI not yet supported, only TBI and BAI
+// r[impl sam.index.locate+3]
 fn find_tabix_index(sam_path: &Path) -> Result<BamIndex, SamError> {
-    // Try .gz.tbi first
-    let tbi_path = sam_path.with_extension("gz.tbi");
-    if tbi_path.exists() {
-        return BamIndex::from_tabix_path(&tbi_path).map_err(SamError::from);
-    }
-
-    // Try appending .tbi
-    let mut path_with_tbi = sam_path.to_path_buf();
-    let mut name = path_with_tbi.file_name().unwrap_or_default().to_os_string();
-    name.push(".tbi");
-    path_with_tbi.set_file_name(name);
-    if path_with_tbi.exists() {
-        return BamIndex::from_tabix_path(&path_with_tbi).map_err(SamError::from);
-    }
-
-    // Try .gz.bai (BAI format, not tabix)
-    let bai_path = sam_path.with_extension("gz.bai");
-    if bai_path.exists() {
-        return BamIndex::from_path(&bai_path).map_err(SamError::from);
-    }
-
-    // Try appending .bai
-    let mut path_with_bai = sam_path.to_path_buf();
-    let mut name = path_with_bai.file_name().unwrap_or_default().to_os_string();
-    name.push(".bai");
-    path_with_bai.set_file_name(name);
-    if path_with_bai.exists() {
-        return BamIndex::from_path(&path_with_bai).map_err(SamError::from);
-    }
-
-    // Check if a CSI index exists — not yet supported
+    let index = crate::utils::find_index(sam_path, &["tbi", "bai", "csi"])
+        .ok_or_else(|| SamError::IndexNotFound { sam_path: sam_path.to_path_buf() })?;
     // r[depends sam.index.csi+2]
-    let csi_path = sam_path.with_extension("gz.csi");
-    if csi_path.exists() {
-        return Err(SamError::CsiNotSupported { path: csi_path });
+    if index.extension().is_some_and(|ext| ext == "csi") {
+        return Err(SamError::CsiNotSupported { path: index });
     }
+    open_index(&index)
+}
 
-    let mut path_with_csi = sam_path.to_path_buf();
-    let mut name = path_with_csi.file_name().unwrap_or_default().to_os_string();
-    name.push(".csi");
-    path_with_csi.set_file_name(name);
-    if path_with_csi.exists() {
-        return Err(SamError::CsiNotSupported { path: path_with_csi });
+/// Open a tabix index or a BAI, told apart by content: a BAI starts with its
+/// magic, a tabix index is BGZF-compressed. A CSI is recognised and refused.
+fn open_index(path: &Path) -> Result<BamIndex, SamError> {
+    let mut magic = [0u8; 4];
+    let read = File::open(path).and_then(|mut f| f.read_exact(&mut magic));
+    read.map_err(|source| BaiError::Read { path: path.to_path_buf(), source })?;
+    if magic == *b"BAI\x01" {
+        return Ok(BamIndex::from_path(path)?);
     }
-
-    Err(SamError::IndexNotFound { sam_path: sam_path.to_path_buf() })
+    match BamIndex::from_tabix_path(path) {
+        // r[depends sam.index.csi+2]
+        Err(BaiError::InvalidTabixMagic { found }) if found == *b"CSI\x01" => {
+            Err(SamError::CsiNotSupported { path: path.to_path_buf() })
+        }
+        result => Ok(result?),
+    }
 }
 
 // --- Integer parsing from byte slices (no String allocation) ---
