@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   get `next_ref_id`/`next_pos` = -1; it now carries the mate's reference and position, as htslib,
   noodles and the BAM reader deliver them. To ask whether the mate was fetched, use
   `RecordStore::link_mates`/`RecordRef::mate`, not `next_pos == -1`.
+- **Sentinel integers are gone from the record and CRAM index types.** `SlimRecord`,
+  `FilterRawFields`, `RecordStore::push_fields` and `OwnedBamRecord` carry `tid`/`ref_id` and
+  `next_ref_id` as `Option<Tid>`, `next_pos` as `Option<Pos0>` and `template_len` as
+  `Option<NonZeroI32>` (`None` for the wire `-1`, and for TLEN `0`). `Tid` has a niche, so the
+  options cost nothing; outside the crate a `Tid` still comes from `ResolveTid`. CRAM
+  `ContainerHeader`/`SliceHeader::ref_seq_id` is a `RefSeqId` (`Ref(Tid)`, `Unmapped`, `Multi`),
+  `CraiEntry::ref_id` is `Option<Tid>`, `CramIndex::query`/`entries_for`/`region_bytes` take a
+  `Tid`, and `IndexedCramReader::estimate_region_bytes` returns `Option<u64>`.
+  `AlignedPairs::with_read` takes `Option<&[BaseQuality]>` instead of an empty slice, and the
+  `Insertion`/`SoftClip` events carry `Option<&[BaseQuality]>`. `RecordStore::set_template_len`
+  and `set_mate_info` (unused) are removed.
 
 ## v0.6.0 (2026-10-20)
 
