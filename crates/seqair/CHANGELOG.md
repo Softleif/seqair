@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **`IndexedReader::reference_stats`** (and `reference_stats` on `BamIndex`, `CsiIndex`,
+  `AlignmentIndex`): per reference, the mapped and placed-unmapped counts the index's pseudo-bin
+  keeps (what `samtools idxstats` prints) and the number of leaf bins holding a chunk, as
+  `ReferenceStats { counts: Option<MappedCounts>, covered_leaf_bins, leaf_bin_len }`. `None` for
+  CRAM.
+- **`PileupGuard::fetch_counts`**: the `FetchCounts` of the fetch behind a pileup.
+
+### Changed
+
+- **Breaking: `FetchCounts` has a `mapped` field**, the fetched records without flag 0x4. Code
+  building a `FetchCounts` literal has to add it.
+
 ## v0.6.0 (2026-10-20)
 
 ### Performance
