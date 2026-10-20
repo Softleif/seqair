@@ -3,7 +3,7 @@ use super::formats::{self, Format, FormatDetectionError};
 use super::readers::Readers;
 use crate::{
     bam::{
-        BamHeader, IndexedBamReader,
+        BamHeader, IndexedBamReader, ReferenceStats,
         record_store::{CustomizeRecordStore, RecordStore},
     },
     cram::reader::IndexedCramReader,
@@ -64,6 +64,18 @@ impl<R: Read + Seek> IndexedReader<R> {
             Self::Bam(r) => r.header(),
             Self::Sam(r) => r.header(),
             Self::Cram(r) => r.header(),
+        }
+    }
+
+    // r[impl index.reference_stats]
+    /// Per reference, in tid order, what the alignment index records: the
+    /// counts `samtools idxstats` prints and the leaf bins holding records.
+    /// `None` for CRAM, whose `.crai` keeps neither.
+    pub fn reference_stats(&self) -> Option<&[ReferenceStats]> {
+        match self {
+            Self::Bam(r) => Some(r.shared().index().reference_stats()),
+            Self::Sam(r) => Some(r.shared().index().reference_stats()),
+            Self::Cram(_) => None,
         }
     }
 

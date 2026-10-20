@@ -163,6 +163,12 @@ pub struct SamShared {
     sam_path: PathBuf,
 }
 
+impl SamShared {
+    pub fn index(&self) -> &BamIndex {
+        &self.index
+    }
+}
+
 pub struct IndexedSamReader<R = File> {
     bulk_reader: R,
     shared: Arc<SamShared>,

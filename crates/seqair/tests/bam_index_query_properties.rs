@@ -30,7 +30,10 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
-use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair::bam::{
+    BamIndex, CsiIndex, IndexedBamReader, MappedCounts, Pos0, RecordStore, ReferenceStats,
+};
+use seqair::io::IndexBuilder;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -169,6 +172,14 @@ fn arb_reads(tc: &TestCase) -> Vec<Read> {
 /// Write the reads as BAM with a co-produced BAI. Names are `r{index}`, so a
 /// query's answer is a set of indices into `reads`.
 fn write_bam(dir: &Path, reads: &[Read]) -> std::path::PathBuf {
+    let (bam_path, index_builder) = write_records(dir, reads);
+    let bai = std::fs::File::create(bam_path.with_extension("bam.bai")).unwrap();
+    index_builder.write_bai(bai, CONTIGS.len()).unwrap();
+    bam_path
+}
+
+/// Write the reads as BAM and hand back the index the writer built alongside.
+fn write_records(dir: &Path, reads: &[Read]) -> (std::path::PathBuf, IndexBuilder) {
     let header = header();
     let bam_path = dir.join("generated.bam");
     let mut writer =
@@ -196,9 +207,7 @@ fn write_bam(dir: &Path, reads: &[Read]) -> std::path::PathBuf {
     }
 
     let (_inner, index_builder) = writer.finish().unwrap();
-    let bai = std::fs::File::create(bam_path.with_extension("bam.bai")).unwrap();
-    index_builder.expect("write_index(true)").write_bai(bai, header.target_count()).unwrap();
-    bam_path
+    (bam_path, index_builder.expect("write_index(true)"))
 }
 
 /// `samtools view <bam> <region>`, as the set of read indices it returns.
@@ -338,4 +347,43 @@ fn region_query_agrees_with_samtools_and_brute_force(tc: TestCase) {
     if reads.iter().any(|r| r.unmapped) {
         tc.event("has a placed-unmapped read");
     }
+}
+
+// r[verify index.reference_stats]
+// r[verify index_builder.pseudo_bin]
+/// The statistics read back from seqair's own BAI and CSI are the generated
+/// reads': mapped and placed-unmapped counts per contig, and the 16 kb leaves
+/// holding a read that starts and ends inside one of them.
+#[hegel::test(test_cases = crate::pinned::cases(48))]
+fn reference_stats_count_the_written_reads(tc: TestCase) {
+    let reads = tc.draw(arb_reads().print_as_debug());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (bam_path, index_builder) = write_records(dir.path(), &reads);
+    let bai_path = bam_path.with_extension("bam.bai");
+    index_builder.write_bai(std::fs::File::create(&bai_path).unwrap(), CONTIGS.len()).unwrap();
+    // Not `.bam.csi`, which the BAM reader would prefer over the `.bai`.
+    let csi_path = dir.path().join("generated.idx");
+    index_builder.write_csi(std::fs::File::create(&csi_path).unwrap(), CONTIGS.len(), &[]).unwrap();
+
+    let expected: Vec<ReferenceStats> = (0..CONTIGS.len() as u32)
+        .map(|tid| {
+            let on_tid = || reads.iter().filter(move |r| r.tid == tid);
+            let mapped = on_tid().filter(|r| !r.unmapped).count() as u64;
+            let unmapped = on_tid().filter(|r| r.unmapped).count() as u64;
+            let mut leaves: Vec<u32> = on_tid()
+                .filter(|r| r.pos >> 14 == r.end_pos() >> 14)
+                .map(|r| r.pos >> 14)
+                .collect();
+            leaves.sort_unstable();
+            leaves.dedup();
+            ReferenceStats {
+                counts: (mapped + unmapped > 0).then_some(MappedCounts { mapped, unmapped }),
+                covered_leaf_bins: leaves.len() as u64,
+                leaf_bin_len: 16_384,
+            }
+        })
+        .collect();
+
+    assert_eq!(BamIndex::from_path(&bai_path).unwrap().reference_stats(), expected, "BAI");
+    assert_eq!(CsiIndex::from_path(&csi_path).unwrap().reference_stats(), expected, "CSI");
 }

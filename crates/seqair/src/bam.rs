@@ -80,7 +80,7 @@ pub use cigar::{CigarOp, CigarStr};
 pub use csi_index::{CsiError, CsiIndex};
 pub use depth_cap::{DepthCap, DepthLimit};
 pub use header::{BamHeader, BamHeaderError, ContigInfo};
-pub use index::{AlignmentIndex, BaiError, BamIndex};
+pub use index::{AlignmentIndex, BaiError, BamIndex, MappedCounts, ReferenceStats};
 pub use nm_md::NmMdError;
 pub use owned_record::{OwnedBamRecord, OwnedRecordError};
 pub use pileup::{

@@ -2,12 +2,14 @@
 //! region; [`BamIndex::query_split`] separates nearby (levels 3–5) from distant (levels 0–2) chunks.
 
 use super::bgzf::{BgzfError, VirtualOffset};
-use super::csi_index::CsiIndex;
+use super::csi_index::{CsiIndex, csi_pseudo_bin};
 use seqair_types::Pos0;
 use std::path::Path;
 use tracing::instrument;
 
 const PSEUDO_BIN: u32 = 37450;
+const BAI_MIN_SHIFT: u32 = 14;
+const BAI_DEPTH: u32 = 5;
 
 // r[impl io.errors]
 #[non_exhaustive]
@@ -44,6 +46,7 @@ pub enum BaiError {
 #[derive(Debug)]
 pub struct BamIndex {
     references: Vec<RefIndex>,
+    stats: Vec<ReferenceStats>,
 }
 
 #[derive(Debug)]
@@ -83,6 +86,76 @@ struct Bin {
 pub struct Chunk {
     pub begin: VirtualOffset,
     pub end: VirtualOffset,
+}
+
+// r[impl index.reference_stats]
+/// What an index records about one reference, read without touching the
+/// alignment file: the counts `samtools idxstats` prints, and how much of the
+/// reference holds records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceStats {
+    /// From the reference's pseudo-bin; `None` when the index has none for it
+    /// (an index written without them, or a reference with no records).
+    pub counts: Option<MappedCounts>,
+    /// Finest-level bins with a chunk (a malformed index repeating a bin id
+    /// counts it twice). A record spanning more than one
+    /// leaf sits in a coarser bin and marks none, so this is a lower bound on
+    /// the bins records touch.
+    pub covered_leaf_bins: u64,
+    /// Bases one leaf bin spans: `2^min_shift`, 16,384 for a BAI.
+    pub leaf_bin_len: u64,
+}
+
+impl ReferenceStats {
+    /// `covered_leaf_bins` in bases. The last bin of a reference may reach past
+    /// its end, so cap this at the reference length when dividing by it.
+    pub fn covered_bases(&self) -> u64 {
+        self.covered_leaf_bins.saturating_mul(self.leaf_bin_len)
+    }
+
+    /// Read from one reference's bins, pseudo-bin included, for a binning
+    /// scheme of `depth` levels below the root whose leaves span
+    /// `2^min_shift` bases.
+    pub(super) fn from_bins<'a>(
+        bins: impl IntoIterator<Item = (u32, &'a [Chunk])>,
+        min_shift: u32,
+        depth: u32,
+    ) -> Self {
+        let pseudo_bin = csi_pseudo_bin(depth);
+        // Leaves are the last level: from `((8^depth) - 1) / 7` up to the bin limit.
+        let first_leaf =
+            1u64.checked_shl(depth.saturating_mul(3)).map_or(u64::MAX, |n| n.saturating_sub(1) / 7);
+        let mut counts = None;
+        let mut covered_leaf_bins = 0u64;
+        for (bin_id, chunks) in bins {
+            if bin_id == pseudo_bin {
+                // SAM spec §5.2: the second chunk holds (n_mapped, n_unmapped)
+                // in place of its two virtual offsets.
+                counts =
+                    chunks.get(1).map(|c| MappedCounts { mapped: c.begin.0, unmapped: c.end.0 });
+            } else if u64::from(bin_id) >= first_leaf
+                && bin_id < pseudo_bin.saturating_sub(1)
+                && !chunks.is_empty()
+            {
+                covered_leaf_bins = covered_leaf_bins.saturating_add(1);
+            }
+        }
+        ReferenceStats {
+            counts,
+            covered_leaf_bins,
+            leaf_bin_len: 1u64.checked_shl(min_shift).unwrap_or(u64::MAX),
+        }
+    }
+}
+
+/// A reference's record counts as its index's pseudo-bin keeps them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MappedCounts {
+    /// Records without flag 0x4.
+    pub mapped: u64,
+    /// Records with flag 0x4 placed on this reference (at their mate's
+    /// position). Unplaced ones (`RNAME *`) belong to no reference.
+    pub unmapped: u64,
 }
 
 /// A chunk annotated with its source bin ID.
@@ -177,7 +250,7 @@ impl BamIndex {
     /// Create an empty index with no references (for plain SAM fuzzing).
     #[cfg(feature = "fuzz")]
     pub fn empty() -> Self {
-        BamIndex { references: Vec::new() }
+        BamIndex { references: Vec::new(), stats: Vec::new() }
     }
 
     // r[impl tabix.bai_reuse]
@@ -230,6 +303,12 @@ impl BamIndex {
         // The remaining data is identical to BAI format (bins, chunks, linear index)
         // but we already read n_ref from the tabix header
         parse_refs_with_count(&data, &mut pos, n_ref as usize)
+    }
+
+    // r[impl index.reference_stats]
+    /// One entry per reference, in header (tid) order.
+    pub fn reference_stats(&self) -> &[ReferenceStats] {
+        &self.stats
     }
 
     // r[impl bam.index.region_query]
@@ -318,6 +397,15 @@ pub enum AlignmentIndex {
 }
 
 impl AlignmentIndex {
+    // r[impl index.reference_stats]
+    /// One entry per reference, in header (tid) order.
+    pub fn reference_stats(&self) -> &[ReferenceStats] {
+        match self {
+            Self::Bai(idx) => idx.reference_stats(),
+            Self::Csi(idx) => idx.reference_stats(),
+        }
+    }
+
     /// Query the index for chunks overlapping a region [start, end] (0-based inclusive).
     pub fn query(&self, tid: u32, start: Pos0, end: Pos0) -> Vec<Chunk> {
         match self {
@@ -408,6 +496,7 @@ fn check_index_limit(value: usize, limit: usize, field: &'static str) -> Result<
 fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<BamIndex, BaiError> {
     check_index_limit(n_ref, MAX_INDEX_REFS, "n_ref")?;
     let mut references = Vec::with_capacity(n_ref);
+    let mut stats = Vec::with_capacity(n_ref);
 
     for _ in 0..n_ref {
         let n_bin = read_i32(data, pos)? as usize;
@@ -428,6 +517,12 @@ fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<B
             bins.push(Bin { bin_id, chunks });
         }
 
+        stats.push(ReferenceStats::from_bins(
+            bins.iter().map(|b| (b.bin_id, b.chunks.as_slice())),
+            BAI_MIN_SHIFT,
+            BAI_DEPTH,
+        ));
+
         let n_intv = read_i32(data, pos)? as usize;
         check_index_limit(n_intv, MAX_LINEAR_INDEX, "n_intv")?;
         let mut linear_index = Vec::with_capacity(n_intv);
@@ -438,7 +533,7 @@ fn parse_refs_with_count(data: &[u8], pos: &mut usize, n_ref: usize) -> Result<B
         references.push(RefIndex::new(bins, linear_index));
     }
 
-    Ok(BamIndex { references })
+    Ok(BamIndex { references, stats })
 }
 
 /// Decompress all BGZF blocks from a BGZF-compressed file into a single buffer.
@@ -646,6 +741,7 @@ mod tests {
                 bins.into_iter().map(|(bin_id, chunks)| Bin { bin_id, chunks }).collect(),
                 vec![VirtualOffset(0); 64],
             )],
+            stats: Vec::new(),
         }
     }
 
@@ -707,7 +803,7 @@ mod tests {
     // r[verify index.edge.no_records]
     #[test]
     fn query_split_empty_reference() {
-        let idx = BamIndex { references: Vec::new() };
+        let idx = BamIndex { references: Vec::new(), stats: Vec::new() };
         let result = idx.query_split(0, Pos0::new(0).unwrap(), Pos0::new(100).unwrap());
         assert!(result.nearby.is_empty());
         assert!(result.distant.is_empty());

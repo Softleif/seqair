@@ -5,7 +5,7 @@
 use super::{
     bgzf::{BgzfError, VirtualOffset},
     index::{
-        AnnotatedChunk, BaiError, Chunk, QueryChunks, decompress_bgzf_file,
+        AnnotatedChunk, BaiError, Chunk, QueryChunks, ReferenceStats, decompress_bgzf_file,
         merge_overlapping_chunks,
     },
 };
@@ -125,6 +125,7 @@ pub struct CsiIndex {
     depth: u32,
     aux: Vec<u8>,
     references: Vec<CsiRefIndex>,
+    stats: Vec<ReferenceStats>,
 }
 
 #[derive(Debug)]
@@ -259,11 +260,13 @@ impl CsiIndex {
 
         let pseudo_bin_id = csi_pseudo_bin(depth);
         let mut references = Vec::with_capacity(n_ref);
+        let mut stats = Vec::with_capacity(n_ref);
 
         for _ in 0..n_ref {
             let n_bin = read_count(data, &mut pos)?;
             check_limit(n_bin, MAX_BINS_PER_REF, "n_bin")?;
             let mut bins = Vec::with_capacity(n_bin);
+            let mut pseudo_chunks = Vec::new();
 
             for _ in 0..n_bin {
                 let bin_id = read_u32(data, &mut pos)?;
@@ -280,16 +283,32 @@ impl CsiIndex {
                     chunks.push(Chunk { begin, end });
                 }
                 // r[impl csi.pseudo_bin]
-                // Skip pseudo-bins during storage — they're metadata only
-                if bin_id != pseudo_bin_id {
+                // The pseudo-bin is metadata only: its counts go to `stats`, not into a query.
+                if bin_id == pseudo_bin_id {
+                    pseudo_chunks = chunks;
+                } else {
                     bins.push(CsiBin { bin_id, loffset, chunks });
                 }
             }
 
+            stats.push(ReferenceStats::from_bins(
+                bins.iter()
+                    .map(|b| (b.bin_id, b.chunks.as_slice()))
+                    .chain([(pseudo_bin_id, pseudo_chunks.as_slice())]),
+                min_shift,
+                depth,
+            ));
+
             references.push(CsiRefIndex::new(bins));
         }
 
-        Ok(CsiIndex { min_shift, depth, aux, references })
+        Ok(CsiIndex { min_shift, depth, aux, references, stats })
+    }
+
+    // r[impl index.reference_stats]
+    /// One entry per reference, in header (tid) order.
+    pub fn reference_stats(&self) -> &[ReferenceStats] {
+        &self.stats
     }
 
     /// Binning parameters.
@@ -548,7 +567,7 @@ fn csi_bin_level(bin_id: u32, depth: u32) -> Result<u32, CsiError> {
 // r[impl csi.pseudo_bin]
 /// Pseudo-bin ID for the given depth (one past the max valid bin).
 #[expect(clippy::cast_possible_truncation, reason = "pseudo-bin is bounded by depth, fits in u32")]
-fn csi_pseudo_bin(depth: u32) -> u32 {
+pub(super) fn csi_pseudo_bin(depth: u32) -> u32 {
     let bits = depth.saturating_add(1).saturating_mul(3);
     let max_id = ((1u64 << bits).saturating_sub(1)).checked_div(7).unwrap_or(0);
     max_id.saturating_add(1) as u32
@@ -886,6 +905,7 @@ mod tests {
             depth: 5,
             aux: Vec::new(),
             references: vec![CsiRefIndex::new(bins)],
+            stats: Vec::new(),
         }
     }
 
@@ -910,7 +930,13 @@ mod tests {
 
     #[test]
     fn query_empty_tid() {
-        let idx = CsiIndex { min_shift: 14, depth: 5, aux: Vec::new(), references: Vec::new() };
+        let idx = CsiIndex {
+            min_shift: 14,
+            depth: 5,
+            aux: Vec::new(),
+            references: Vec::new(),
+            stats: Vec::new(),
+        };
         let chunks = idx.query(0, Pos0::new(0).unwrap(), Pos0::new(100).unwrap());
         assert!(chunks.is_empty());
     }

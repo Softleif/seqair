@@ -54,5 +54,8 @@ The reader uses the unified `query()` path, which merges nearby and distant chun
 
 CSI is an alternative index format that supports larger genomes and arbitrary bin sizes. It uses the same conceptual approach (bins + chunks + linear index) but with a configurable minimum shift and depth.
 
+r[index.reference_stats]
+BAI and CSI indexes MUST expose, per reference in tid order, a `ReferenceStats` read at parse time: the pseudo-bin's counts (`MappedCounts { mapped, unmapped }`, from the second chunk's begin and end fields, SAM spec §5.2; `None` when the reference has no pseudo-bin or the pseudo-bin no second chunk), the number of leaf bins (level `depth`, ids `((1 << 3*depth) - 1) / 7` up to the bin limit) with a chunk, and the bases one leaf spans (`1 << min_shift`). `samtools idxstats` prints the same counts. `IndexedReader::reference_stats` MUST reach them without reopening the file, and return `None` for CRAM, whose `.crai` keeps neither.
+
 r[bam.index.csi_support]
 CSI index support MAY be added as a follow-up. The same `region_query` interface MUST be used for both BAI and CSI indices.
