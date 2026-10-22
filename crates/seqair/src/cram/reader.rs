@@ -664,8 +664,9 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         // the reader mutably while the index entries and the reference name
         // are borrowed from it.
         let shared = Arc::clone(&self.shared);
-        let index_tid = Tid::new(tid).ok_or(CramError::UnknownTid { tid })?;
-        let entries = shared.index.query(index_tid, start_u64, end_u64);
+        let raw_tid = tid;
+        let tid = Tid::new(raw_tid).ok_or(CramError::UnknownTid { tid: raw_tid })?;
+        let entries = shared.index.query(tid, start_u64, end_u64);
         if entries.is_empty() {
             return Ok(crate::reader::FetchCounts::default());
         }
@@ -686,7 +687,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             }
         }
 
-        let ref_name: &str = shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid })?;
+        let ref_name: &str =
+            shared.header.target_name(raw_tid).ok_or(CramError::UnknownTid { tid: raw_tid })?;
         shared.slice_cache.record_fetch(wanted.values().map(|slices| slices.len()).sum());
 
         // r[impl cram.slice_cache.shared]
@@ -742,7 +744,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     fn load_container(
         &mut self,
         container_offset: u64,
-        tid: u32,
+        tid: Tid,
         ref_name: &str,
     ) -> Result<Option<LoadedContainer>, CramError> {
         self.file.seek(SeekFrom::Start(container_offset))?;
@@ -797,9 +799,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             // They come from the whole index, not the query's entries, so
             // the window — and the decoded slice — is the same whichever
             // query decodes it.
-            let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
-            let index_tid = Tid::new(tid).ok_or(CramError::UnknownTid { tid })?;
-            let tid_entries = self.shared.index.entries_for(index_tid);
+            let ref_len = self.shared.header.target_len(tid.as_u32()).unwrap_or(0);
+            let tid_entries = self.shared.index.entries_for(tid);
             let in_container =
                 || tid_entries.iter().filter(|e| e.container_offset == container_offset);
             // An entry without an extent says nothing about where its
@@ -836,7 +837,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             let ref_end = ref_start
                 .checked_add(container_header.alignment_span as u64)
                 .ok_or(CramError::Truncated { context: "container alignment end overflow" })?;
-            let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
+            let ref_len = self.shared.header.target_len(tid.as_u32()).unwrap_or(0);
             (ref_start, ref_end.min(ref_len))
         };
 
@@ -882,7 +883,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         &mut self,
         container: &LoadedContainer,
         slice_offset: u64,
-        tid: u32,
+        tid: Tid,
     ) -> Result<DecodedSlice, CramError> {
         // CRAI's `slice_offset` matches the container's landmark value
         // (both are byte offsets from the start of the container's data

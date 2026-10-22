@@ -298,7 +298,7 @@ pub(crate) fn decode_slice(
     ref_start_0based: i64,
     header: &BamHeader,
     read_group_ids: &[SmolStr],
-    tid: u32,
+    tid: Tid,
     cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
@@ -327,7 +327,7 @@ pub(crate) fn decode_slice(
         None if sh.embedded_reference >= 0 => &[],
         None => {
             return Err(CramError::MissingReference {
-                contig: header.target_name(tid).unwrap_or("?").into(),
+                contig: header.target_name(tid.as_u32()).unwrap_or("?").into(),
             });
         }
     };
@@ -374,7 +374,7 @@ pub(crate) fn decode_slice(
             let computed = md5_uppercase_streaming(slice_ref);
             if computed != sh.reference_md5 {
                 return Err(CramError::ReferenceMd5Mismatch {
-                    contig: header.target_name(tid).unwrap_or("?").into(),
+                    contig: header.target_name(tid.as_u32()).unwrap_or("?").into(),
                     start: sh.alignment_start as u64,
                     end: sh.alignment_start.wrapping_add(sh.alignment_span) as u64,
                 });
@@ -599,7 +599,7 @@ fn decode_record(
     reference_seq: &[Base],
     ref_start_0based: i64,
     read_group_ids: &[SmolStr],
-    tid: u32,
+    tid: Tid,
     out: &mut DecodedSlice,
     cigar_buf: &mut Vec<CigarOp>,
     bases_buf: &mut Vec<Base>,
@@ -786,7 +786,7 @@ fn decode_record(
         // drain every per-record data series in lockstep (they're independent
         // streams) and to compute `ref_consumed` for the SliceMateInfo.end_pos
         // used by `resolve_mate_tlen`.
-        let foreign_tid = is_multi_ref && record_ref_id != Tid::new(tid);
+        let foreign_tid = is_multi_ref && record_ref_id != Some(tid);
 
         // Reconstruction sets matching_bases / indel_bases for the kept-record
         // push later; for foreign-tid we don't push, so 0 is fine.
@@ -916,7 +916,7 @@ fn decode_record(
     // Apply the same foreign-tid check as the mapped path, so unmapped reads
     // placed on other references of a multi-ref slice stay out — and so do
     // unplaced ones (reference -1), which are on no reference at all.
-    let is_multi_ref_unmapped = is_multi_ref && record_ref_id != Tid::new(tid);
+    let is_multi_ref_unmapped = is_multi_ref && record_ref_id != Some(tid);
     let slot = if is_multi_ref_unmapped {
         None
     } else {
@@ -1641,7 +1641,7 @@ mod tests {
             ref_start,
             &bam_header,
             &[],
-            0,
+            Tid::new(0).unwrap(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),

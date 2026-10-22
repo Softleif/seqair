@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use super::reader::CramError;
 use super::slice::DecodedSlice;
+use crate::reader::Tid;
 
 /// Where a decoded slice comes from: the slice's byte position in the file
 /// and the reference it was decoded for (a multi-reference slice decodes
@@ -22,7 +23,7 @@ use super::slice::DecodedSlice;
 pub(crate) struct SliceKey {
     pub(crate) container_offset: u64,
     pub(crate) slice_offset: u64,
-    pub(crate) tid: u32,
+    pub(crate) tid: Tid,
 }
 
 /// A slice being decoded or decoded: the first caller initialises it, and
@@ -307,7 +308,7 @@ mod tests {
     use super::*;
 
     fn key(slice_offset: u64) -> SliceKey {
-        SliceKey { container_offset: 0, slice_offset, tid: 0 }
+        SliceKey { container_offset: 0, slice_offset, tid: Tid::new(0).unwrap() }
     }
 
     fn slice() -> Result<DecodedSlice, CramError> {
