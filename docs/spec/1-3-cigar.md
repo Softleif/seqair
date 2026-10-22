@@ -158,8 +158,8 @@ r[cigar.aligned_pairs.with_read.types]
 r[cigar.aligned_pairs.with_read.iterator]
 `AlignedPairs::with_read(seq, qual: Option<&[BaseQuality]>) -> Result<AlignedPairsWithRead<'cigar, 'read>, AlignedPairsError>` MUST validate length invariants up front: the iterator's total query-consuming CIGAR length MUST equal `seq.len()` (otherwise `CigarSeqLengthMismatch`) unless the CIGAR is empty (SAM `*`, e.g. an unmapped read), which yields no events and accepts any `seq`, and `qual` MUST be `None` (no qualities) or `Some` of a slice equal in length to `seq` (otherwise `SeqQualLengthMismatch`). Once construction succeeds, every yielded `Match`/`Insertion`/`SoftClip` index is provably in-bounds; iteration is infallible. Lifetimes `'cigar` and `'read` are independent so callers can compose borrows from different sources. The number of yielded events MUST be identical to the underlying `AlignedPairs` (the layer enriches; it does not filter or split events). `with_soft_clips()` and `full()` MUST be available on `AlignedPairsWithRead`, forwarding to the inner iterator.
 
-r[cigar.aligned_pairs.with_read.slim_record]
-`SlimRecord::aligned_pairs_with_read(store) -> Result<AlignedPairsWithRead, AlignedPairsError>` MUST be a one-shot helper equivalent to `self.aligned_pairs(store)?.with_read(self.seq(store)?, self.qual(store)?)`. It exists so callers do not have to fan out three slab accesses by hand. Errors from the slab fetch surface as `AlignedPairsError::Access`; mismatched lengths surface as `CigarSeqLengthMismatch` / `SeqQualLengthMismatch`.
+r[cigar.aligned_pairs.with_read.slim_record+2]
+`SlimRecord::aligned_pairs_with_read(store) -> Result<AlignedPairsWithRead, AlignedPairsError>` MUST be a one-shot helper equivalent to `self.aligned_pairs(store)?.with_read(self.seq(store)?, qual)`, where `qual` is `None` when the record has no qualities and `Some(self.qual(store)?)` otherwise. A record has no qualities when its quality slice is empty or starts with `0xFF` (`BaseQuality::UNAVAILABLE`): BAM stores missing qualities as a run of `0xFF` (SAM `*` reads the same way, r[`sam.edge.missing_qual`]), and htslib tests only the first byte. It exists so callers do not have to fan out three slab accesses by hand. Errors from the slab fetch surface as `AlignedPairsError::Access`; mismatched lengths surface as `CigarSeqLengthMismatch` / `SeqQualLengthMismatch`.
 
 r[cigar.aligned_pairs.with_reference.types]
 `AlignedPairWithRef` MUST mirror `AlignedPairWithRead`'s variants. `Match` MUST gain `ref_base: Option<Base>` (`None` if `rpos` is outside the loaded `RefSeq` window; `Some(Base::Unknown)` for in-window N's). `Deletion` MUST gain `ref_bases: Option<&[Base]>` (`None` if any position in the deletion span is outside the window — partial overlap does not pad). All other variants pass through unchanged.
@@ -196,8 +196,8 @@ The bare and layered iterators (`AlignedPairs`, `AlignedPairsWithRead`, `Aligned
 
 The matches-only adapters (`MatchesOnly`, `MatchedBases`, `MatchedRefs`) MUST implement `Clone` and `FusedIterator`. Because they filter, `size_hint()` MUST return `(0, Some(upper))` where `upper` is the inner iterator's upper bound — they're not exact-sized.
 
-r[cigar.aligned_pairs.with_read.owned_record]
-`OwnedBamRecord::aligned_pairs_with_read()` MUST be a one-shot helper symmetric with `SlimRecord::aligned_pairs_with_read`, equivalent to `self.aligned_pairs()?.with_read(&self.seq, &self.qual)`. It validates the same length invariants and returns `AlignedPairsError` on failure.
+r[cigar.aligned_pairs.with_read.owned_record+2]
+`OwnedBamRecord::aligned_pairs_with_read()` MUST be a one-shot helper symmetric with `SlimRecord::aligned_pairs_with_read`, equivalent to `self.aligned_pairs()?.with_read(&self.seq, qual)` with `qual` chosen by the same rule (r[`cigar.aligned_pairs.with_read.slim_record+2`]), so a record read into a store and the same record built in memory yield the same events. It validates the same length invariants and returns `AlignedPairsError` on failure.
 
 ## NM and MD recompute
 

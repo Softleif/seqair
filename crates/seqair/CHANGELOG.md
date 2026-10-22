@@ -52,7 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CraiEntry::ref_id` is `Option<Tid>`, `CramIndex::query`/`entries_for`/`region_bytes` take a
   `Tid`, and `IndexedCramReader::estimate_region_bytes` returns `Option<u64>`.
   `AlignedPairs::with_read` takes `Option<&[BaseQuality]>` instead of an empty slice, and the
-  `Insertion`/`SoftClip` events carry `Option<&[BaseQuality]>`. `RecordStore::set_template_len`
+  `Insertion`/`SoftClip` events carry `Option<&[BaseQuality]>`. `SlimRecord` and
+  `OwnedBamRecord::aligned_pairs_with_read` give `None` for a record without qualities (BAM's
+  `0xFF` run, SAM `*`), where the store's helper used to hand out the `0xFF` run. `RecordStore::set_template_len`
   and `set_mate_info` (unused) are removed.
 
 ## v0.6.0 (2026-10-20)

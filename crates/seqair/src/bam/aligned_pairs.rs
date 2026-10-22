@@ -30,7 +30,7 @@
 
 use super::cigar::{CigarOp, CigarOpType};
 use super::record_store::{RecordAccessError, RecordStore, SlimRecord};
-use seqair_types::{Pos0, QPos};
+use seqair_types::{BaseQuality, Pos0, QPos};
 use thiserror::Error;
 
 // ── Errors ─────────────────────────────────────────────────────────────────
@@ -332,7 +332,7 @@ impl<'a> AlignedPairs<'a> {
     pub fn with_read<'read>(
         self,
         seq: &'read [seqair_types::Base],
-        qual: Option<&'read [seqair_types::BaseQuality]>,
+        qual: Option<&'read [BaseQuality]>,
     ) -> Result<super::aligned_pairs_view::AlignedPairsWithRead<'a, 'read>, AlignedPairsError> {
         // Compute the remaining query-consuming CIGAR length and compare to
         // `seq[qpos..]`. We work in u64 so a runaway 32-bit CIGAR can't
@@ -616,10 +616,11 @@ impl SlimRecord {
         Ok(AlignedPairs::new(self.pos, self.cigar(store)?))
     }
 
-    // r[impl cigar.aligned_pairs.with_read.slim_record]
+    // r[impl cigar.aligned_pairs.with_read.slim_record+2]
     /// Walk this record's CIGAR with read seq/qual attached. One-shot helper:
-    /// equivalent to `self.aligned_pairs(store)?.with_read(self.seq(store)?, self.qual(store)?)`
-    /// but only borrows `store` once.
+    /// equivalent to `self.aligned_pairs(store)?.with_read(self.seq(store)?, qual)`
+    /// but only borrows `store` once, with `qual` `None` when the record has
+    /// no qualities (BAM's `0xFF` run, SAM `*`).
     ///
     /// Chain `.with_reference(&ref_seq)` to add reference-base lookup.
     ///
@@ -639,8 +640,14 @@ impl SlimRecord {
         let cigar = self.cigar(store)?;
         let seq = self.seq(store)?;
         let qual = self.qual(store)?;
-        AlignedPairs::new(self.pos, cigar).with_read(seq, Some(qual))
+        AlignedPairs::new(self.pos, cigar).with_read(seq, available_qual(qual))
     }
+}
+
+/// A record's qualities, or `None` when it has none: an empty slice, or the
+/// `0xFF` run BAM stores for them, which htslib detects by the first byte.
+fn available_qual(qual: &[BaseQuality]) -> Option<&[BaseQuality]> {
+    qual.first().is_some_and(|&q| q != BaseQuality::UNAVAILABLE).then_some(qual)
 }
 
 // ── OwnedBamRecord integration ────────────────────────────────────────────
@@ -669,14 +676,15 @@ impl super::owned_record::OwnedBamRecord {
         }
     }
 
-    // r[impl cigar.aligned_pairs.with_read.owned_record]
+    // r[impl cigar.aligned_pairs.with_read.owned_record+2]
     /// One-shot walk with read seq/qual attached — symmetric with
     /// [`SlimRecord::aligned_pairs_with_read`](super::record_store::SlimRecord::aligned_pairs_with_read).
     ///
-    /// Equivalent to `self.aligned_pairs()?.with_read(&self.seq, &self.qual)`,
-    /// but bundled to avoid the verbose three-line chain at every call site.
-    /// The same validation applies: cigar query length must match seq length;
-    /// qual is passed as `None` when empty, else it must match seq length.
+    /// Equivalent to `self.aligned_pairs()?.with_read(&self.seq, qual)`, with
+    /// `qual` `None` when the record has no qualities (empty, or the `0xFF`
+    /// run), as for a [`SlimRecord`](super::record_store::SlimRecord). The
+    /// same validation applies: cigar query length must match seq length, and
+    /// qualities, when present, too.
     ///
     /// Chain `.with_reference(&ref_seq)` to add reference base lookups.
     ///
@@ -692,7 +700,7 @@ impl super::owned_record::OwnedBamRecord {
         &self,
     ) -> Result<super::aligned_pairs_view::AlignedPairsWithRead<'_, '_>, AlignedPairsError> {
         let pairs = self.aligned_pairs()?;
-        pairs.with_read(&self.seq, (!self.qual.is_empty()).then_some(self.qual.as_slice()))
+        pairs.with_read(&self.seq, available_qual(&self.qual))
     }
 }
 
@@ -1742,6 +1750,51 @@ mod tests {
             let slim_pairs: Vec<_> = slim.aligned_pairs(&store).unwrap().collect();
             let owned_pairs: Vec<_> = owned.aligned_pairs().unwrap().collect();
             assert_eq!(slim_pairs, owned_pairs);
+        }
+
+        // r[verify cigar.aligned_pairs.with_read.slim_record+2]
+        // r[verify cigar.aligned_pairs.with_read.owned_record+2]
+        #[test]
+        fn missing_qualities_are_none_through_both_helpers() {
+            use super::super::super::aligned_pairs_view::AlignedPairWithRead;
+            let cigar = vec![CigarOp::new(CigarOpType::SoftClip, 1), m(2), ins(2), m(1)];
+            for qual in [Vec::new(), vec![BaseQuality::from_byte(30); 6]] {
+                let owned = OwnedBamRecord::builder(
+                    crate::reader::Tid::new(0),
+                    Some(Pos0::new(10).unwrap()),
+                    b"r".to_vec(),
+                )
+                .cigar(cigar.clone())
+                .seq(vec![Base::C; 6])
+                .qual(qual.clone())
+                .build()
+                .unwrap();
+                let mut buf = Vec::new();
+                owned.to_bam_bytes(&mut buf).unwrap();
+                let mut store = RecordStore::<()>::new();
+                store.push_raw(&buf, &mut ()).unwrap();
+                let slim = store.record(ri(0)).unwrap();
+
+                let from_store: Vec<_> =
+                    slim.aligned_pairs_with_read(&store).unwrap().with_soft_clips().collect();
+                let from_owned: Vec<_> =
+                    owned.aligned_pairs_with_read().unwrap().with_soft_clips().collect();
+                assert_eq!(from_store, from_owned, "qual {qual:?}");
+                assert_eq!(from_store.len(), 5);
+                for ev in from_store {
+                    match ev {
+                        AlignedPairWithRead::Match { qual: q, .. } => {
+                            let want = qual.first().copied().unwrap_or(BaseQuality::UNAVAILABLE);
+                            assert_eq!(q, want);
+                        }
+                        AlignedPairWithRead::Insertion { qual: q, .. }
+                        | AlignedPairWithRead::SoftClip { qual: q, .. } => {
+                            assert_eq!(q.is_some(), !qual.is_empty(), "qual {qual:?}");
+                        }
+                        other => panic!("unexpected event {other:?}"),
+                    }
+                }
+            }
         }
     }
 }

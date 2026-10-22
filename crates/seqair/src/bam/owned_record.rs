@@ -795,7 +795,7 @@ mod tests {
         ));
     }
 
-    // r[verify cigar.aligned_pairs.with_read.owned_record]
+    // r[verify cigar.aligned_pairs.with_read.owned_record+2]
     #[test]
     fn aligned_pairs_with_read_attaches_query_base() {
         // 3M record with seq [A, C, G] — verify the helper attaches per-pos
@@ -825,7 +825,7 @@ mod tests {
         }
     }
 
-    // r[verify cigar.aligned_pairs.with_read.owned_record]
+    // r[verify cigar.aligned_pairs.with_read.owned_record+2]
     #[test]
     fn aligned_pairs_with_read_propagates_unmapped_error() {
         // pos = None + non-empty CIGAR → UnmappedWithCigar surfaces through
