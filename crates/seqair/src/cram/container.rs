@@ -2,15 +2,18 @@
 //! and block count needed to locate and read the slices inside a container.
 
 use super::{reader::CramError, varint};
+use crate::bam::{BamHeader, DecodeError};
+use crate::reader::{ResolveTid, Tid};
 
 /// The reference a CRAM container or slice is aligned to.
+///
+/// As parsed, `T` is the `u32` index: a header is read before the file's
+/// reference list is known. [`Self::resolve`] checks it against the header
+/// when a slice's records are decoded (`r[cram.record.ref_ids]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefSeqId {
-    /// Every record is on the reference with this index. Not a
-    /// [`Tid`](crate::reader::Tid): a header is parsed before the file's
-    /// reference list is known, so the index is checked against the header
-    /// only when a slice's records are decoded (`r[cram.record.ref_ids]`).
-    Ref(u32),
+pub enum RefSeqId<T = u32> {
+    /// Every record is on this reference.
+    Ref(T),
     /// Unmapped records (wire `-1`).
     Unmapped,
     /// Records on several references, each carrying its own `RI` (wire `-2`).
@@ -26,6 +29,18 @@ impl RefSeqId {
                 .map(Self::Ref)
                 .map_err(|_| CramError::InvalidRefSeqId { value: raw }),
         }
+    }
+
+    // r[impl cram.record.ref_ids]
+    /// The same reference as a [`Tid`] of `header`, which must have it.
+    pub(crate) fn resolve(self, header: &BamHeader) -> Result<RefSeqId<Tid>, DecodeError> {
+        Ok(match self {
+            Self::Ref(index) => RefSeqId::Ref(
+                index.resolve_tid(header).map_err(|source| DecodeError::InvalidTid { source })?,
+            ),
+            Self::Unmapped => RefSeqId::Unmapped,
+            Self::Multi => RefSeqId::Multi,
+        })
     }
 }
 

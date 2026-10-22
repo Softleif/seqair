@@ -26,7 +26,7 @@ use crate::bam::{
     record::DecodeError,
     record_store::{CustomizeRecordStore, RecordStore},
 };
-use crate::reader::{FetchedRecord, ResolveTid, Tid};
+use crate::reader::{FetchedRecord, Tid};
 use seqair_types::{BamFlags, Base, Pos0, Pos1, SmallVec, SmolStr};
 use std::num::NonZeroI32;
 use tracing::warn;
@@ -45,8 +45,8 @@ struct SliceMateInfo {
     slot: Option<u32>,
     /// BAM flags (needed for READ1/READ2 tie-breaking).
     bam_flags: u16,
-    /// Reference sequence ID for this record (needed for `next_ref_id` resolution).
-    ref_id: Option<Tid>,
+    /// The record's reference (needed for `next_ref_id` resolution).
+    tid: Option<Tid>,
 }
 
 // r[impl cram.slice_cache]
@@ -224,19 +224,6 @@ fn field<T>(slab: &[T], range: Range<usize>) -> &[T] {
     slab.get(range).unwrap_or_default()
 }
 
-// r[impl cram.record.ref_ids]
-/// The reference every record of a single-reference slice is on, which the
-/// header must have; `None` for an unmapped or a multi-reference slice, whose
-/// records carry their own `RI`.
-fn slice_reference(id: RefSeqId, header: &BamHeader) -> Result<Option<Tid>, CramError> {
-    match id {
-        RefSeqId::Ref(index) => Ok(Some(
-            index.resolve_tid(header).map_err(|source| DecodeError::InvalidTid { source })?,
-        )),
-        RefSeqId::Unmapped | RefSeqId::Multi => Ok(None),
-    }
-}
-
 /// Parsed CRAM slice header.
 #[derive(Debug)]
 pub struct SliceHeader {
@@ -346,8 +333,7 @@ pub(crate) fn decode_slice(
         }
     };
 
-    let is_multi_ref = sh.ref_seq_id == RefSeqId::Multi;
-    let slice_ref = slice_reference(sh.ref_seq_id, header)?;
+    let slice_ref = sh.ref_seq_id.resolve(header)?;
 
     // r[impl cram.edge.unknown_read_names]
     if !ch.preservation.read_names_included {
@@ -369,7 +355,7 @@ pub(crate) fn decode_slice(
     // wherever the reads carry a real difference. Checking it there rejects
     // perfectly good files.
     let claims_the_fasta = sh.embedded_reference < 0;
-    if !is_multi_ref
+    if slice_ref != RefSeqId::Multi
         && claims_the_fasta
         && sh.reference_md5 != [0u8; 16]
         && !reference_seq.is_empty()
@@ -464,7 +450,6 @@ pub(crate) fn decode_slice(
         let mate_info = decode_record(
             ch,
             &tag_lines,
-            is_multi_ref,
             &mut ctx,
             &mut alignment_pos,
             effective_ref,
@@ -608,13 +593,12 @@ fn resolve_tag_lines(ch: &CompressionHeader) -> Vec<ResolvedTagLine<'_>> {
 fn decode_record(
     ch: &CompressionHeader,
     tag_lines: &[ResolvedTagLine<'_>],
-    is_multi_ref: bool,
     ctx: &mut DecodeContext<'_>,
     prev_alignment_pos: &mut i64,
     reference_seq: &[Base],
     ref_start_0based: i64,
     header: &BamHeader,
-    slice_ref: Option<Tid>,
+    slice_ref: RefSeqId<Tid>,
     read_group_ids: &[SmolStr],
     tid: Tid,
     out: &mut DecodedSlice,
@@ -650,12 +634,16 @@ fn decode_record(
     // r[impl cram.slice.multi_ref]
     // r[impl cram.record.ref_ids]
     // 3. RI (ref ID — only for multi-ref slices)
-    let record_ref_id = if is_multi_ref {
-        Tid::from_wire(ds.ref_id.decode(ctx)?, header)
-            .map_err(|source| DecodeError::InvalidTid { source })?
-    } else {
-        slice_ref
+    let record_ref_id = match slice_ref {
+        RefSeqId::Multi => Tid::from_wire(ds.ref_id.decode(ctx)?, header)
+            .map_err(|source| DecodeError::InvalidTid { source })?,
+        RefSeqId::Ref(t) => Some(t),
+        RefSeqId::Unmapped => None,
     };
+    // A record the query does not want: in a multi-reference slice, one of
+    // another reference or none. A query decodes only slices that list its
+    // reference, so in any other slice every record is on it.
+    let foreign_tid = record_ref_id != Some(tid);
 
     // r[impl cram.record.read_length]
     // 4. RL (read length)
@@ -810,8 +798,7 @@ fn decode_record(
         // drain every per-record data series in lockstep (they're independent
         // streams) and to compute `ref_consumed` for the SliceMateInfo.end_pos
         // used by `resolve_mate_tlen`.
-        let foreign_tid = is_multi_ref && record_ref_id != Some(tid);
-
+        //
         // Reconstruction sets matching_bases / indel_bases for the kept-record
         // push later; for foreign-tid we don't push, so 0 is fine.
         let (ref_consumed, matching_bases, indel_bases) = if foreign_tid {
@@ -884,7 +871,7 @@ fn decode_record(
                 mate_line,
                 slot: None,
                 bam_flags: raw_flags,
-                ref_id: record_ref_id,
+                tid: record_ref_id,
             });
         }
 
@@ -912,7 +899,7 @@ fn decode_record(
             mate_line,
             slot: Some(slot),
             bam_flags: raw_flags,
-            ref_id: record_ref_id,
+            tid: record_ref_id,
         });
     }
 
@@ -940,8 +927,7 @@ fn decode_record(
     // Apply the same foreign-tid check as the mapped path, so unmapped reads
     // placed on other references of a multi-ref slice stay out — and so do
     // unplaced ones (reference -1), which are on no reference at all.
-    let is_multi_ref_unmapped = is_multi_ref && record_ref_id != Some(tid);
-    let slot = if is_multi_ref_unmapped {
+    let slot = if foreign_tid {
         None
     } else {
         Some(out.push(
@@ -968,7 +954,7 @@ fn decode_record(
         mate_line,
         slot,
         bam_flags: raw_flags,
-        ref_id: record_ref_id,
+        tid: record_ref_id,
     })
 }
 
@@ -1080,7 +1066,7 @@ fn resolve_mate_tlen(infos: &[SliceMateInfo], out: &mut DecodedSlice) {
             let mate = &infos[chain[if ci + 1 < chain.len() { ci + 1 } else { 0 }]];
             let Some(r) = out.records.get_mut(slot as usize) else { continue };
             r.template_len = NonZeroI32::new(if ci == 0 { first_tlen } else { rest_tlen });
-            r.next_ref_id = mate.ref_id;
+            r.next_ref_id = mate.tid;
             // An unmapped mate (`pos < 0`) has no position.
             r.next_pos = Pos0::try_from(mate.pos).ok();
         }
@@ -1700,16 +1686,12 @@ mod tests {
     #[test]
     fn a_slice_reference_the_header_lacks_is_an_error() {
         let header = crate::bam::BamHeader::from_sam_text("@SQ\tSN:c0\tLN:10\n").unwrap();
-        assert_eq!(slice_reference(RefSeqId::Ref(0), &header).unwrap(), Tid::new(0));
-        assert_eq!(slice_reference(RefSeqId::Unmapped, &header).unwrap(), None);
-        assert_eq!(slice_reference(RefSeqId::Multi, &header).unwrap(), None);
+        assert_eq!(RefSeqId::Ref(0).resolve(&header).unwrap(), RefSeqId::Ref(Tid::new(0).unwrap()));
+        assert_eq!(RefSeqId::Unmapped.resolve(&header).unwrap(), RefSeqId::Unmapped);
+        assert_eq!(RefSeqId::Multi.resolve(&header).unwrap(), RefSeqId::Multi);
         assert!(matches!(
-            slice_reference(RefSeqId::Ref(1), &header),
-            Err(CramError::RecordDecode {
-                source: DecodeError::InvalidTid {
-                    source: crate::reader::TidError::TidOutOfRange { .. }
-                }
-            })
+            RefSeqId::Ref(1).resolve(&header),
+            Err(DecodeError::InvalidTid { source: crate::reader::TidError::TidOutOfRange { .. } })
         ));
     }
 

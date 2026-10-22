@@ -60,7 +60,6 @@ pub enum OwnedRecordError {
     },
 }
 
-
 // r[impl bam.owned_record.fields]
 /// An owned, mutable BAM record for writing and in-memory modification.
 #[derive(Debug, Clone)]
