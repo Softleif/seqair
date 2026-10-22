@@ -10,7 +10,7 @@ thiserror = "2.0.21"
 bytemuck = { version = "1.25", features = ["derive"] }
 insta = { version = "1.49.0", features = ["filters"] }
 hegeltest = "0.50.2"
-rust-htslib = { version = "1.0.1", default-features = false }
+rust-htslib = { version = "1.0.0", default-features = false }
 fearless_simd = "1.1.0"
 fearless_simd_macros = "0.1.0"
 
