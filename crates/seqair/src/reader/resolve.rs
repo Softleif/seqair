@@ -142,6 +142,16 @@ const _: () = assert!(std::mem::size_of::<Option<Tid>>() == 4);
 #[cfg(test)]
 mod tests {
     use super::Tid;
+    use hegel::prelude::*;
+
+    /// CRAI entries sort by `Option<Tid>`; that has to be the wire order, with
+    /// the unplaced `-1` first.
+    #[hegel::test]
+    fn option_tid_orders_as_the_wire_ids(tc: TestCase) {
+        let a = tc.draw(gs::integers::<i32>().min_value(-1));
+        let b = tc.draw(gs::integers::<i32>().min_value(-1));
+        assert_eq!(Tid::from_wire(a).cmp(&Tid::from_wire(b)), a.cmp(&b));
+    }
 
     // r[verify unified.tid.newtype]
     #[test]

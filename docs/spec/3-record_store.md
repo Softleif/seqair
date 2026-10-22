@@ -360,6 +360,12 @@ window MUST behave identically whether the record arrived through `push_raw`
 CIGAR) or `push_fields` (where it is supplied), so the same reads survive the
 cap in BAM, SAM, and CRAM.
 
+r[record_store.depth_cap.reset]
+The window MUST start empty on a record whose `tid` differs from the previous
+record's — including a change to or from an unplaced record (`tid` `None`) — or
+whose start lies before the previous record's, so one `DepthCap` serves
+consecutive fetches without a reset call.
+
 ## Mate linking
 
 Paired-end reads whose fragment is shorter than twice the read length cover the

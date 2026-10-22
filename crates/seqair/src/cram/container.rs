@@ -213,6 +213,22 @@ fn read_ltf8_at(buf: &[u8], pos: usize, context: &'static str) -> Result<(u64, u
 mod tests {
     use super::*;
 
+    #[test]
+    fn ref_seq_id_from_wire() {
+        for raw in [0, 7, i32::MAX] {
+            let Ok(RefSeqId::Ref(tid)) = RefSeqId::from_wire(raw) else { panic!("{raw}") };
+            assert_eq!(i64::from(tid.as_u32()), i64::from(raw));
+        }
+        assert_eq!(RefSeqId::from_wire(-1).unwrap(), RefSeqId::Unmapped);
+        assert_eq!(RefSeqId::from_wire(-2).unwrap(), RefSeqId::Multi);
+        for raw in [-3, i32::MIN] {
+            assert!(matches!(
+                RefSeqId::from_wire(raw),
+                Err(CramError::InvalidRefSeqId { value }) if value == raw
+            ));
+        }
+    }
+
     // r[verify cram.container.header]
     #[test]
     fn parse_header_container_from_real_cram() {

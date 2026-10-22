@@ -1143,6 +1143,28 @@ mod tests {
         );
     }
 
+    /// PNEXT and TLEN past `i32` are malformed, not truncated into range.
+    #[test]
+    fn error_mate_fields_beyond_i32() {
+        let header = make_header();
+        for (line, want_pnext) in [
+            (&b"r\t1\tchr1\t100\t60\t4M\t=\t2147483649\t0\tACGT\t~~~~"[..], true),
+            (&b"r\t1\tchr1\t100\t60\t4M\t=\t200\t2147483648\tACGT\t~~~~"[..], false),
+            (&b"r\t1\tchr1\t100\t60\t4M\t=\t200\t-2147483649\tACGT\t~~~~"[..], false),
+        ] {
+            let err = call_parse(line, &header).expect_err("mate field out of range");
+            let SamError::MalformedRecord { source } = err else { panic!("{err}") };
+            assert!(
+                if want_pnext {
+                    matches!(source, SamRecordError::InvalidPnext { .. })
+                } else {
+                    matches!(source, SamRecordError::InvalidTlen { .. })
+                },
+                "{source}"
+            );
+        }
+    }
+
     #[test]
     fn error_invalid_pos() {
         let header = make_header();

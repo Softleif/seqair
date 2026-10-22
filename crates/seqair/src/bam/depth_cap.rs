@@ -122,6 +122,7 @@ impl<E: CustomizeRecordStore> CustomizeRecordStore for DepthCap<E> {
         };
 
         let start = fields.pos.as_u64();
+        // r[impl record_store.depth_cap.reset]
         // A new fetch — new contig or any backwards coordinate jump — restarts
         // the window. Records within one fetch arrive in ascending order.
         if self.last.is_none_or(|(tid, last_start)| fields.tid != tid || start < last_start) {
@@ -284,5 +285,21 @@ mod tests {
         assert!(capped.filter_raw(&bam_fields(pos(100), &cigar)));
         assert!(!capped.filter_raw(&bam_fields(pos(100), &cigar)));
         assert!(capped.filter_raw(&bam_fields(pos(101), &cigar)));
+    }
+
+    // r[verify record_store.depth_cap.reset]
+    /// A cap of one that a covering read fills: a record on another reference,
+    /// an unplaced one, or one behind the last start, finds the window empty.
+    #[test]
+    fn a_new_reference_or_a_step_back_empties_the_window() {
+        let cigar = match_cigar(100);
+        let on = |tid: Option<Tid>, p: u32| FilterRawFields { tid, ..bam_fields(pos(p), &cigar) };
+        let (t0, t1) = (Tid::new(0), Tid::new(1));
+        for next in [on(t1, 10), on(None, 10), on(t0, 5)] {
+            let mut capped = DepthCap::with_cap((), NonZeroU32::new(1));
+            assert!(capped.filter_raw(&on(t0, 10)));
+            assert!(!capped.filter_raw(&on(t0, 20)), "same reference, inside the window");
+            assert!(capped.filter_raw(&next), "{:?} at {}", next.tid, next.pos);
+        }
     }
 }

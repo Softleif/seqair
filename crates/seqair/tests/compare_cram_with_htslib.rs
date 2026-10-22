@@ -17,6 +17,7 @@
 mod helpers;
 use helpers::ri;
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
+use seqair::bam::record_store::{CustomizeRecordStore, FilterRawFields, SlimRecord};
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::Readers;
 use seqair_types::BaseQuality;
@@ -223,6 +224,66 @@ fn cram_mate_fields_match_htslib() {
                 cram.template_len.map_or(0, |t| t.get().into()),
                 hts.template_len,
                 "{version} rec {i}: template_len (resolve_mate_tlen sign rule)",
+            );
+        }
+    }
+}
+
+/// Keeps mapped first-of-pair (and unpaired) records, rejecting every mate
+/// that is second of its pair at push time.
+#[derive(Clone)]
+struct RejectRead2;
+
+impl CustomizeRecordStore for RejectRead2 {
+    type Extra = ();
+    fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
+        !fields.flags.is_unmapped() && !fields.flags.is_second_in_template()
+    }
+    fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+}
+
+// r[verify cram.fetch_into_customized.filtered_mate_fields]
+/// A kept record whose attached mate `keep_record` rejects keeps the mate
+/// fields htslib reports for it — the rejection must not touch them.
+#[test]
+fn cram_mate_fields_survive_a_rejected_mate() {
+    let contig = "chr19";
+    let start = 6_103_076u64;
+    let end = 6_143_229u64;
+    let want: Vec<HtsRecord> =
+        fetch_hts_records(contig, start, end).into_iter().filter(|r| r.flags & 0x80 == 0).collect();
+    let in_window = |p: i64| (start as i64..=end as i64).contains(&p);
+    assert!(
+        want.iter().any(|r| r.flags & 0x1 != 0 && in_window(r.next_pos)),
+        "the region needs a first mate whose second mate the fetch would hold"
+    );
+
+    for &(version, cram_path_fn) in CRAM_VERSIONS {
+        let mut readers =
+            Readers::open_customized(cram_path_fn(), test_fasta_path(), RejectRead2).unwrap();
+        let mut store = RecordStore::new();
+        let tid = readers.header().tid(contig).unwrap();
+        readers
+            .fetch_into(
+                tid,
+                (Pos0::new(start as u32).unwrap()..=Pos0::new(end as u32).unwrap()).into(),
+                &mut store,
+            )
+            .unwrap();
+
+        assert_eq!(store.len(), want.len(), "{version}: record count");
+        for (i, hts) in want.iter().enumerate() {
+            let cram = store.record(ri(u32::try_from(i).unwrap())).unwrap();
+            assert_eq!(cram.next_pos.map_or(-1, i64::from), hts.next_pos, "{version} rec {i}");
+            assert_eq!(
+                cram.next_ref_id.map(|t| t.as_u32()),
+                u32::try_from(hts.next_ref_id).ok(),
+                "{version} rec {i}"
+            );
+            assert_eq!(
+                cram.template_len.map_or(0, |t| t.get().into()),
+                hts.template_len,
+                "{version} rec {i}"
             );
         }
     }
