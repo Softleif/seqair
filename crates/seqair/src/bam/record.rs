@@ -278,7 +278,7 @@ pub enum DecodeError {
     #[error("invalid mate reference id")]
     InvalidMateTid { source: crate::reader::TidError },
 
-    #[error("invalid mate position {value}: only -1 marks an absent one")]
+    #[error("invalid mate position {value}: negative positions are reserved")]
     InvalidMatePosition { value: i32 },
 
     #[error("CIGAR query length {cigar_query_len} does not match seq_len {seq_len}")]

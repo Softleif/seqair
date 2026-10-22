@@ -60,11 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking: every `Tid` names a target of a header, records' too.** `RecordStore::push_raw`
   takes the file's header (`push_raw(raw, header, customize)`) and fails a record whose `tid` or
   `next_ref_id` is neither `-1` nor one of its targets (`DecodeError::InvalidTid`/
-  `InvalidMateTid`, wrapping the new `TidError::InvalidWireTid`) or whose `next_pos` is negative
-  other than `-1` (`DecodeError::InvalidMatePosition`); these used to become `None` or, for an
-  index past the header, a `Tid` naming nothing. htslib's `sam_read1` rejects the same records.
-  CRAM checks a slice's reference and every `RI`/`NS` the same way (`CramError::InvalidTid`/
-  `InvalidMateTid`) and fails a negative `NP` (`CramError::InvalidMatePosition`). SAM fails a
+  `InvalidMateTid`, wrapping `TidError::TidOutOfRange` or the new `TidError::Negative`) or whose
+  `next_pos` is negative other than `-1` (`DecodeError::InvalidMatePosition`); these used to
+  become `None` or, for an index past the header, a `Tid` naming nothing. htslib's `sam_read1`
+  rejects the same records. CRAM checks a slice's reference and every `RI`/`NS` the same way and
+  fails a negative `NP`, with the same `DecodeError`s (in `CramError::RecordDecode`). SAM fails a
   negative PNEXT (`InvalidPnext`) and logs a warning for an RNEXT the header lacks, as htslib does.
 - **Breaking: the readers take a `Tid`, and the header hands one out.** `fetch_into`,
   `fetch_into_customized`, `query` and `estimate_region_bytes` on `IndexedBamReader`,

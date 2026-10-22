@@ -23,6 +23,7 @@ use super::{
 use crate::bam::{
     BamHeader,
     cigar::CigarOp,
+    record::DecodeError,
     record_store::{CustomizeRecordStore, RecordStore},
 };
 use crate::reader::{FetchedRecord, ResolveTid, Tid};
@@ -229,9 +230,9 @@ fn field<T>(slab: &[T], range: Range<usize>) -> &[T] {
 /// records carry their own `RI`.
 fn slice_reference(id: RefSeqId, header: &BamHeader) -> Result<Option<Tid>, CramError> {
     match id {
-        RefSeqId::Ref(index) => {
-            index.resolve_tid(header).map(Some).map_err(|source| CramError::InvalidTid { source })
-        }
+        RefSeqId::Ref(index) => Ok(Some(
+            index.resolve_tid(header).map_err(|source| DecodeError::InvalidTid { source })?,
+        )),
         RefSeqId::Unmapped | RefSeqId::Multi => Ok(None),
     }
 }
@@ -651,7 +652,7 @@ fn decode_record(
     // 3. RI (ref ID — only for multi-ref slices)
     let record_ref_id = if is_multi_ref {
         Tid::from_wire(ds.ref_id.decode(ctx)?, header)
-            .map_err(|source| CramError::InvalidTid { source })?
+            .map_err(|source| DecodeError::InvalidTid { source })?
     } else {
         slice_ref
     };
@@ -719,7 +720,7 @@ fn decode_record(
         }
         // r[impl cram.record.ref_ids]
         next_ref_id_val = Tid::from_wire(ds.next_segment_ref.decode(ctx)?, header)
-            .map_err(|source| CramError::InvalidMateTid { source })?;
+            .map_err(|source| DecodeError::InvalidMateTid { source })?;
         // CRAM `NP` is 1-based per the spec, NP=0 is "no mate position";
         // matching htslib's `cr->mate_pos - 1` at the BAM emit
         // (cram_decode.c:3121).
@@ -728,7 +729,7 @@ fn decode_record(
             0 => None,
             np => Some(
                 Pos1::try_from(i64::from(np))
-                    .map_err(|_| CramError::InvalidMatePosition { value: np })?
+                    .map_err(|_| DecodeError::InvalidMatePosition { value: np })?
                     .to_zero_based(),
             ),
         };
@@ -1704,7 +1705,11 @@ mod tests {
         assert_eq!(slice_reference(RefSeqId::Multi, &header).unwrap(), None);
         assert!(matches!(
             slice_reference(RefSeqId::Ref(1), &header),
-            Err(CramError::InvalidTid { source: crate::reader::TidError::TidOutOfRange { .. } })
+            Err(CramError::RecordDecode {
+                source: DecodeError::InvalidTid {
+                    source: crate::reader::TidError::TidOutOfRange { .. }
+                }
+            })
         ));
     }
 

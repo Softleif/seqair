@@ -59,12 +59,8 @@ impl Tid {
         if raw == -1 {
             return Ok(None);
         }
-        u32::try_from(raw).ok().and_then(|index| Self::of_header(index, header)).map(Some).ok_or(
-            TidError::InvalidWireTid {
-                value: raw,
-                n_targets: u32::try_from(header.target_count()).unwrap_or(u32::MAX),
-            },
-        )
+        let index = u32::try_from(raw).map_err(|_| TidError::Negative { value: raw })?;
+        index.resolve_tid(header).map(Some)
     }
 
     /// The BAM wire form of an optional target id: `-1` for `None`.
@@ -111,9 +107,10 @@ pub enum TidError {
     UnknownContig { name: SmolStr },
     #[error("tid {tid} out of range (header has {n_targets} targets)")]
     TidOutOfRange { tid: u32, n_targets: u32 },
-    /// A record's reference id that is neither `-1` nor one of the header's.
-    #[error("reference id {value} is neither -1 nor one of the header's {n_targets} targets")]
-    InvalidWireTid { value: i32, n_targets: u32 },
+    /// A record's reference id below `-1`, the only negative one that means
+    /// something ("none").
+    #[error("reference id {value} is negative; only -1 marks an absent reference")]
+    Negative { value: i32 },
 }
 
 // r[impl unified.tid.newtype+2]
@@ -200,9 +197,12 @@ mod tests {
                 assert_eq!(Tid::to_wire(Some(tid)), raw);
             }
             _ if raw == -1 => assert!(matches!(got, Ok(None))),
-            _ => {
-                assert!(matches!(got, Err(TidError::InvalidWireTid { value, .. }) if value == raw))
+            _ if raw < 0 => {
+                assert!(matches!(got, Err(TidError::Negative { value }) if value == raw));
             }
+            _ => assert!(
+                matches!(got, Err(TidError::TidOutOfRange { tid, .. }) if i64::from(tid) == i64::from(raw))
+            ),
         }
     }
 

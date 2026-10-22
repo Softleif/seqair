@@ -282,16 +282,6 @@ pub enum CramError {
     #[error("invalid reference sequence id {value} (expected >= 0, -1 unmapped or -2 multi-ref)")]
     InvalidRefSeqId { value: i32 },
 
-    /// A slice's or record's reference id the header does not have.
-    #[error("invalid reference id")]
-    InvalidTid { source: crate::reader::TidError },
-
-    #[error("invalid mate reference id")]
-    InvalidMateTid { source: crate::reader::TidError },
-
-    #[error("invalid mate position {value}: NP is 1-based, 0 marks an absent one")]
-    InvalidMatePosition { value: i32 },
-
     #[error("invalid BAM flags value: {value:#06x}")]
     InvalidBamFlags { value: i32, source: std::num::TryFromIntError },
 
