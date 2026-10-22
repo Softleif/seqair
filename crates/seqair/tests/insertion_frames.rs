@@ -9,6 +9,7 @@ mod helpers;
 use hegel::prelude::*;
 use helpers::ri;
 use helpers::tid;
+use seqair::bam::MateFields;
 use seqair::bam::aligned_pairs::AlignedPair;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::{PileupEngine, PileupOp};
@@ -40,9 +41,7 @@ fn store_with_insertion(pos: u32, lead: u32, ins: u32, trail: u32) -> RecordStor
             &vec![30u8; seq.len()],
             &[],
             Some(tid(0)),
-            Some(tid(0)),
-            None,
-            None,
+            MateFields { tid: Some(tid(0)), pos: None, template_len: None },
             &mut (),
         )
         .unwrap()

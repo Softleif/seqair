@@ -154,9 +154,9 @@ fn store_mates(store: &RecordStore, into: &mut BTreeMap<Key, Mate>) {
             std::str::from_utf8(rec.qname()).expect("generated qnames are ASCII").to_owned();
         let mate = Mate {
             flags: rec.flags.raw(),
-            next_ref: rec.next_ref_id.map_or(-1, |t| i32::try_from(t.as_u32()).unwrap()),
-            next_pos: rec.next_pos.map_or(-1, |p| p.as_i32()),
-            tlen: rec.template_len.map_or(0, std::num::NonZeroI32::get),
+            next_ref: rec.mate_fields.tid.map_or(-1, |t| i32::try_from(t.as_u32()).unwrap()),
+            next_pos: rec.mate_fields.pos.map_or(-1, |p| p.as_i32()),
+            tlen: rec.mate_fields.template_len.map_or(0, std::num::NonZeroI32::get),
         };
         let key = (qname, role_of(rec.flags.raw()));
         assert!(into.insert(key.clone(), mate).is_none(), "two records share the key {key:?}");
@@ -884,7 +884,7 @@ fn flagstat_tallies_match_samtools(tc: TestCase) {
             }
             if !f.is_unmapped() && !f.is_mate_unmapped() {
                 both_mapped += 1;
-                if rec.next_ref_id != rec.tid {
+                if rec.mate_fields.tid != rec.tid {
                     diff_chr += 1;
                 }
             }

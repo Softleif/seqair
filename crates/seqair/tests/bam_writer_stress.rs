@@ -21,7 +21,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::{BamWriteError, BamWriterBuilder};
-use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair::bam::{IndexedBamReader, MateFields, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
 use seqair_types::bam_flags::BamFlags;
 use seqair_types::{Base, BaseQuality};
@@ -323,13 +323,11 @@ fn poisoned_writer_partial_output_is_readable() {
 
     // Force an error with a qname that's too long
     let bad_rec = OwnedBamRecord {
-        ref_id: Some(tid(0)),
+        tid: Some(tid(0)),
         pos: Some(Pos0::new(200).unwrap()),
         mapq: 0,
         flags: BamFlags::empty(),
-        next_ref_id: None,
-        next_pos: None,
-        template_len: None,
+        mate_fields: MateFields::default(),
         qname: vec![b'X'; 255],
         cigar: Vec::new(),
         seq: Vec::new(),

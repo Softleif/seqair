@@ -7,6 +7,7 @@
 //! - **Qual slab**: raw Phred bytes, hot in pileup per-base quality lookup
 //! - **Aux slab**: auxiliary tag bytes in BAM binary format, rarely read in pileup
 
+use super::MateFields;
 use super::{
     aux::Aux,
     cigar::{self, CigarOp},
@@ -17,7 +18,7 @@ use super::{
 use crate::reader::Tid;
 use hashbrown::HashTable;
 use seqair_types::{BamFlags, Base, BaseQuality, Pos0, QPos};
-use std::num::{NonZeroI32, NonZeroU64};
+use std::num::NonZeroU64;
 
 // r[impl record_store.qname_hash]
 // r[impl record_store.qname_hash.identity_is_probabilistic]
@@ -129,13 +130,8 @@ pub struct SlimRecord {
     pub trailing_soft_clip: u32,
     /// Reference target; `None` for unmapped.
     pub tid: Option<Tid>,
-    /// Mate's reference target; `None` if unavailable.
-    pub next_ref_id: Option<Tid>,
-    /// Mate's 0-based reference position; `None` if unavailable.
-    pub next_pos: Option<Pos0>,
-    /// Signed template/insert size (TLEN); `None` for a wire `0`: unavailable,
-    /// or a single-segment template.
-    pub template_len: Option<NonZeroI32>,
+    /// RNEXT, PNEXT and TLEN, as the file has them.
+    pub mate_fields: MateFields,
     /// Offset into the name slab.
     name_off: u32,
     /// Length of the qname in the name slab.
@@ -603,9 +599,7 @@ impl<U> RecordStore<U> {
                 matching_bases: 0,
                 indel_bases: 0,
                 tid: refs.tid,
-                next_ref_id: refs.next_ref_id,
-                next_pos: refs.next_pos,
-                template_len: h.template_len,
+                mate_fields: refs.mate_fields,
                 qname: qname_stripped,
                 qual_bytes: qual_slice,
                 aux_bytes: aux_slice,
@@ -696,9 +690,7 @@ impl<U> RecordStore<U> {
             leading_soft_clip,
             trailing_soft_clip,
             tid: refs.tid,
-            next_ref_id: refs.next_ref_id,
-            next_pos: refs.next_pos,
-            template_len: h.template_len,
+            mate_fields: refs.mate_fields,
             name_off,
             #[expect(
                 clippy::cast_possible_truncation,
@@ -768,9 +760,7 @@ impl<U> RecordStore<U> {
         qual: &[u8],
         aux: &[u8],
         tid: Option<Tid>,
-        next_ref_id: Option<Tid>,
-        next_pos: Option<Pos0>,
-        template_len: Option<NonZeroI32>,
+        mate_fields: MateFields,
         customize: &mut E,
     ) -> Result<Option<RecordIdx>, DecodeError> {
         if qual.len() != bases.len() {
@@ -804,9 +794,7 @@ impl<U> RecordStore<U> {
             matching_bases,
             indel_bases,
             tid,
-            next_ref_id,
-            next_pos,
-            template_len,
+            mate_fields,
             qname,
             qual_bytes: qual,
             aux_bytes: aux,
@@ -855,9 +843,7 @@ impl<U> RecordStore<U> {
             leading_soft_clip,
             trailing_soft_clip,
             tid,
-            next_ref_id,
-            next_pos,
-            template_len,
+            mate_fields,
             name_off,
             #[expect(
                 clippy::cast_possible_truncation,
@@ -962,12 +948,8 @@ pub struct FilterRawFields<'a> {
     pub indel_bases: u32,
     /// Reference target; `None` for unmapped.
     pub tid: Option<Tid>,
-    /// Mate reference target; `None` if unavailable.
-    pub next_ref_id: Option<Tid>,
-    /// Mate 0-based reference position; `None` if unavailable.
-    pub next_pos: Option<Pos0>,
-    /// Signed template/insert size; `None` for a wire `0`.
-    pub template_len: Option<NonZeroI32>,
+    /// RNEXT, PNEXT and TLEN, as the file has them.
+    pub mate_fields: MateFields,
     /// Query name (NUL stripped).
     pub qname: &'a [u8],
     /// Raw quality score bytes.
@@ -1323,7 +1305,7 @@ impl<U> RecordStore<U> {
             if qname.is_empty() {
                 continue;
             }
-            let (pos, next_pos) = (rec.pos, rec.next_pos);
+            let (pos, next_pos) = (rec.pos, rec.mate_fields.pos);
 
             // The probe visits every waiting candidate in the bucket, so it is
             // also where a same-qname record that cannot be *this* record's
@@ -1339,7 +1321,7 @@ impl<U> RecordStore<U> {
                     }
                     same_qname_present = true;
                     other.mate_idx.is_none()
-                        && other.next_pos == Some(pos)
+                        && other.mate_fields.pos == Some(pos)
                         && next_pos == Some(other.pos)
                 })
                 .copied();
@@ -1871,8 +1853,8 @@ fn can_link(rec: &SlimRecord) -> bool {
         && !flags.is_secondary()
         && !flags.is_supplementary()
         && rec.tid.is_some()
-        && rec.next_ref_id == rec.tid
-        && rec.next_pos.is_some()
+        && rec.mate_fields.tid == rec.tid
+        && rec.mate_fields.pos.is_some()
 }
 
 /// The record's qname bytes, read straight from a borrowed name slab. Returns
@@ -1952,9 +1934,7 @@ pub(crate) mod tests {
         n_cigar_ops: u16,
         seq_len: u32,
         tid: Option<Tid>,
-        next_ref_id: Option<Tid>,
-        next_pos: Option<Pos0>,
-        template_len: Option<NonZeroI32>,
+        mate_fields: MateFields,
         qname: Vec<u8>,
         aux: Vec<u8>,
     }
@@ -1969,9 +1949,7 @@ pub(crate) mod tests {
                 n_cigar_ops: f.n_cigar_ops,
                 seq_len: f.seq_len,
                 tid: f.tid,
-                next_ref_id: f.next_ref_id,
-                next_pos: f.next_pos,
-                template_len: f.template_len,
+                mate_fields: f.mate_fields,
                 qname: f.qname.to_vec(),
                 aux: f.aux_bytes.to_vec(),
             });
@@ -2083,9 +2061,7 @@ pub(crate) mod tests {
             &[30],
             &[],
             Some(tid(0)),
-            None,
-            None,
-            None,
+            MateFields::default(),
             &mut (),
         );
         assert!(result.is_ok());
@@ -2140,7 +2116,7 @@ pub(crate) mod tests {
         // Write next_ref_id = 7 at BAM offset 20
         raw[20..24].copy_from_slice(&7i32.to_le_bytes());
         store.push_raw(&raw, crate::bam::test_util::header(), &mut ()).unwrap();
-        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, Some(tid(7)));
+        assert_eq!(store.record(ri(0)).unwrap().mate_fields.tid, Some(tid(7)));
     }
 
     // r[verify bam.record.ref_ids]
@@ -2161,7 +2137,7 @@ pub(crate) mod tests {
         raw[next_pos_at..next_pos_at + 4].copy_from_slice(&(-1i32).to_le_bytes());
         store.push_raw(&raw, header, &mut ()).unwrap();
         let rec = store.record(ri(0)).unwrap();
-        assert_eq!((rec.next_ref_id, rec.next_pos), (None, None));
+        assert_eq!((rec.mate_fields.tid, rec.mate_fields.pos), (None, None));
         store.push_raw(&with(tid_at, 15), header, &mut ()).unwrap();
         assert_eq!(store.record(ri(1)).unwrap().tid, Some(tid(15)));
 
@@ -2301,9 +2277,7 @@ pub(crate) mod tests {
                 &[30; 5],
                 b"tagdata",
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut RejectRaw,
             )
             .unwrap();
@@ -2365,9 +2339,7 @@ pub(crate) mod tests {
                 &[30, 31, 32, 33],
                 &[],
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();
@@ -2392,9 +2364,7 @@ pub(crate) mod tests {
                 &[30, 31, 32, 33],
                 b"NM:i:0",
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut KeepNone,
             )
             .unwrap();
@@ -2425,13 +2395,15 @@ pub(crate) mod tests {
                 &[30, 31, 32, 33, 34],
                 &[],
                 Some(tid(0)),
-                Some(tid(3)),
-                seqair_types::Pos0::new(500),
-                std::num::NonZeroI32::new(200),
+                MateFields {
+                    tid: Some(tid(3)),
+                    pos: seqair_types::Pos0::new(500),
+                    template_len: std::num::NonZeroI32::new(200),
+                },
                 &mut (),
             )
             .unwrap();
-        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, Some(tid(3)));
+        assert_eq!(store.record(ri(0)).unwrap().mate_fields.tid, Some(tid(3)));
     }
 
     // r[verify record_store.end_pos_htslib]
@@ -2453,9 +2425,7 @@ pub(crate) mod tests {
                 &[30; 5],
                 &[],
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();
@@ -2483,9 +2453,7 @@ pub(crate) mod tests {
                 &[0; 100],
                 &[],
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();
@@ -2522,9 +2490,7 @@ pub(crate) mod tests {
                 quals,
                 aux,
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();
@@ -2647,9 +2613,7 @@ pub(crate) mod tests {
                         &quals,
                         &[],
                         Some(crate::bam::test_util::tid(0)),
-                        None,
-                        None,
-                        None,
+                        MateFields::default(),
                         &mut (),
                     )
                     .expect("synthetic push")
@@ -3066,9 +3030,7 @@ pub(crate) mod tests {
                     &input.quals,
                     &input.aux,
                     Some(crate::bam::test_util::tid(0)),
-                    None,
-                    None,
-                    None,
+                    MateFields::default(),
                     &mut AcceptFlag(input.accept),
                 )
                 .expect("push_fields must not error on synthetic input")
@@ -3519,9 +3481,7 @@ pub(crate) mod tests {
                     n_cigar_ops: rec.n_cigar_ops,
                     seq_len: rec.seq_len,
                     tid: rec.tid,
-                    next_ref_id: rec.next_ref_id,
-                    next_pos: rec.next_pos,
-                    template_len: rec.template_len,
+                    mate_fields: rec.mate_fields,
                     qname: rec.qname().to_vec(),
                     aux: rec.aux().to_vec(),
                 };

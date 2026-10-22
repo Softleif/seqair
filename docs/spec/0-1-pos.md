@@ -319,4 +319,4 @@ anyway, and `Pos0` holds the value plus one. That is affordable because the
 SAM/BAM spec caps reference sequence length at `2^31-1` (~2.1B) [SAM1 §1.3,
 §4.2], so `value + 1` cannot overflow `u32` (~4.3B). This matters wherever an
 absent position is a normal state — `FilterRawFields::end_pos`,
-`OwnedBamRecord::pos` and `next_pos` are all `Option<Pos0>`.
+`OwnedBamRecord::pos` and `MateFields::pos` are all `Option<Pos0>`.

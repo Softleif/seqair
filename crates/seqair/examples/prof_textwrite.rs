@@ -12,6 +12,7 @@
     reason = "profiling harness"
 )]
 use core::range::RangeInclusive;
+use seqair::bam::MateFields;
 use seqair::reader::ResolveTid;
 use seqair::vcf::record_encoder::{FilterFieldDef, FormatFieldDef, InfoFieldDef};
 use seqair::vcf::{
@@ -260,13 +261,11 @@ fn bam(iters: u32) {
         .map(|idx| {
             let r = store.record(idx).unwrap();
             OwnedBamRecord {
-                ref_id: Some(tid.resolve_tid(&header).unwrap()),
+                tid: Some(tid.resolve_tid(&header).unwrap()),
                 pos: Some(r.pos),
                 mapq: r.mapq,
                 flags: r.flags,
-                next_ref_id: None,
-                next_pos: None,
-                template_len: None,
+                mate_fields: MateFields::default(),
                 qname: r.qname().to_vec(),
                 cigar: r.cigar().to_vec(),
                 seq: r.seq().to_vec(),
@@ -303,13 +302,11 @@ fn bam_serialize_only(iters: u32) {
         .map(|idx| {
             let r = store.record(idx).unwrap();
             OwnedBamRecord {
-                ref_id: Some(tid.resolve_tid(reader.header()).unwrap()),
+                tid: Some(tid.resolve_tid(reader.header()).unwrap()),
                 pos: Some(r.pos),
                 mapq: r.mapq,
                 flags: r.flags,
-                next_ref_id: None,
-                next_pos: None,
-                template_len: None,
+                mate_fields: MateFields::default(),
                 qname: r.qname().to_vec(),
                 cigar: r.cigar().to_vec(),
                 seq: r.seq().to_vec(),

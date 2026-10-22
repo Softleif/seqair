@@ -43,11 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   get `next_ref_id`/`next_pos` = -1; it now carries the mate's reference and position, as htslib,
   noodles and the BAM reader deliver them. To ask whether the mate was fetched, use
   `RecordStore::link_mates`/`RecordRef::mate`, not `next_pos == -1`.
-- **Sentinel integers are gone from the record and CRAM index types.** `SlimRecord`,
-  `FilterRawFields`, `RecordStore::push_fields` and `OwnedBamRecord` carry `tid`/`ref_id` and
-  `next_ref_id` as `Option<Tid>`, `next_pos` as `Option<Pos0>` and `template_len` as
-  `Option<NonZeroI32>` (`None` for the wire `-1`, and for TLEN `0`). `Tid` has a niche, so the
-  options cost nothing; outside the crate a `Tid` still comes from `ResolveTid`. CRAM
+- **Sentinel integers are gone from the record and CRAM index types, and the mate fields are
+  one value.** `SlimRecord`, `FilterRawFields`, `RecordStore::push_fields` and `OwnedBamRecord`
+  carry `tid` as `Option<Tid>` and the mate fields as a `MateFields { tid: Option<Tid>, pos:
+  Option<Pos0>, template_len: Option<NonZeroI32> }` (`None` for the wire `-1`, and for TLEN `0`),
+  replacing `next_ref_id`/`next_pos`/`template_len`. `OwnedBamRecord::ref_id` is `tid`, and its
+  builder's `next_ref_id`/`next_pos`/`template_len` setters are one `mate_fields`. `Tid` has a
+  niche, so the options cost nothing; outside the crate a `Tid` still comes from `ResolveTid`. CRAM
   `ContainerHeader`/`SliceHeader::ref_seq_id` is a `RefSeqId` (`Ref(u32)`, `Unmapped`, `Multi`),
   `CraiEntry::ref_id` is `Option<u32>`, `CramIndex::query`/`entries_for`/`region_bytes` take a
   `Tid`, and `IndexedCramReader::estimate_region_bytes` returns `Option<u64>`, `None` for a tid

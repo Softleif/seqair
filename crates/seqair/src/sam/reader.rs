@@ -2,7 +2,7 @@
 //! records for a region into a [`RecordStore`], with the same API as [`crate::bam::reader::IndexedBamReader`].
 
 use crate::bam::{
-    BaiError, BamHeader, BamHeaderError, BamIndex,
+    BaiError, BamHeader, BamHeaderError, BamIndex, MateFields,
     cigar::{self, CigarOp},
     flags::BamFlags,
     record::DecodeError,
@@ -672,9 +672,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
             qual_buf,
             aux_buf,
             Some(rec_tid),
-            next_ref_id,
-            next_pos,
-            template_len,
+            MateFields { tid: next_ref_id, pos: next_pos, template_len },
             customize,
         )?
         .is_some();
@@ -1187,7 +1185,7 @@ mod tests {
             .unwrap()
             .unwrap();
             let rec = store.record(crate::bam::RecordIdx::ZERO).unwrap();
-            assert_eq!((rec.next_ref_id, rec.next_pos), (want_ref, want_pos), "{line}");
+            assert_eq!((rec.mate_fields.tid, rec.mate_fields.pos), (want_ref, want_pos), "{line}");
         }
     }
 

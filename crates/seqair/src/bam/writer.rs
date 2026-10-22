@@ -72,8 +72,8 @@ pub enum BamWriteError {
     #[error("record size {size} exceeds {MAX_RECORD_SIZE} byte limit")]
     RecordTooLarge { size: usize },
 
-    /// Mapped record (flags & 0x4 == 0) has `ref_id` == -1.
-    #[error("mapped record has ref_id == -1 (structurally invalid)")]
+    /// Mapped record (flags & 0x4 == 0) without a reference (`tid` is `None`).
+    #[error("mapped record has no reference (structurally invalid)")]
     MappedWithoutReference,
 
     // r[impl record_store.record_idx.resolution]
@@ -141,7 +141,7 @@ impl<W: Write> BamWriter<W> {
 
         let beg = record.pos.map(seqair_types::Pos0::as_u64).unwrap_or(0);
         let end_pos = record.end_pos().map(|p| p.as_u64()).unwrap_or(beg);
-        self.finalize_record(record.ref_id, record.flags.is_unmapped(), beg, end_pos)
+        self.finalize_record(record.tid, record.flags.is_unmapped(), beg, end_pos)
     }
 
     // r[impl bam_writer.record_size_limit]
@@ -157,7 +157,7 @@ impl<W: Write> BamWriter<W> {
     /// for unmapped records the helper collapses `end` to `beg`+1.
     fn finalize_record(
         &mut self,
-        ref_id: Option<Tid>,
+        tid: Option<Tid>,
         is_unmapped: bool,
         beg: u64,
         end_pos: u64,
@@ -169,7 +169,7 @@ impl<W: Write> BamWriter<W> {
         // Validate indexability BEFORE writing to BGZF — a failed validation
         // after writing would leave the record in the stream but poison the
         // writer.
-        if self.index.is_some() && ref_id.is_none() && !is_unmapped {
+        if self.index.is_some() && tid.is_none() && !is_unmapped {
             return Err(BamWriteError::MappedWithoutReference);
         }
 
@@ -191,16 +191,16 @@ impl<W: Write> BamWriter<W> {
         // record). Sort validation is delegated to `IndexBuilder::push()`.
         // Fully unmapped records (no reference) are not pushed.
         if let Some(ref mut index) = self.index
-            && let Some(ref_id) = ref_id.map(Tid::as_u32)
+            && let Some(tid) = tid.map(Tid::as_u32)
         {
             let voff = self.bgzf.index_offset();
             // Placed unmapped: beg = end = pos. Mapped: end = end_pos.
             let end = if is_unmapped { beg } else { end_pos };
             let end = end.max(beg.saturating_add(1));
             if is_unmapped {
-                index.push_unmapped(ref_id, beg, end, voff)?;
+                index.push_unmapped(tid, beg, end, voff)?;
             } else {
-                index.push(ref_id, beg, end, voff)?;
+                index.push(tid, beg, end, voff)?;
             }
         }
 
@@ -279,9 +279,7 @@ impl<W: Write> BamWriter<W> {
                 flags: rec.flags.raw(),
                 n_cigar_op: rec.n_cigar_ops,
                 l_seq: rec.seq_len as i32,
-                next_ref_id: rec.next_ref_id,
-                next_pos: rec.next_pos,
-                template_len: rec.template_len,
+                mate_fields: rec.mate_fields,
             },
         );
 
@@ -306,10 +304,10 @@ impl<W: Write> BamWriter<W> {
         // Aux tags (raw BAM bytes)
         self.buf.extend_from_slice(aux);
 
-        let ref_id = rec.tid;
+        let tid = rec.tid;
         let is_unmapped = rec.flags.is_unmapped();
         let end_pos = rec.end_pos.as_u64();
-        self.finalize_record(ref_id, is_unmapped, beg, end_pos)
+        self.finalize_record(tid, is_unmapped, beg, end_pos)
     }
 
     // r[impl bam_writer.finish]
@@ -542,6 +540,7 @@ mod tests {
     use super::super::cigar::{CigarOp, CigarOpType};
     use super::super::test_util::push_one_record_from_bgzf;
     use super::*;
+    use crate::bam::MateFields;
     use crate::bam::test_util::tid;
     use seqair_types::BamFlags;
     use seqair_types::Base;
@@ -555,8 +554,8 @@ mod tests {
         .unwrap()
     }
 
-    fn test_record(ref_id: Option<Tid>, pos: u32, qname: &[u8]) -> OwnedBamRecord {
-        OwnedBamRecord::builder(ref_id, Some(Pos0::new(pos).unwrap()), qname.to_vec())
+    fn test_record(tid: Option<Tid>, pos: u32, qname: &[u8]) -> OwnedBamRecord {
+        OwnedBamRecord::builder(tid, Some(Pos0::new(pos).unwrap()), qname.to_vec())
             .mapq(30)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
@@ -634,13 +633,11 @@ mod tests {
 
         // Force poison by writing a record with an oversized qname
         let bad_rec = OwnedBamRecord {
-            ref_id: Some(tid(0)),
+            tid: Some(tid(0)),
             pos: Some(Pos0::new(0).unwrap()),
             mapq: 0,
             flags: BamFlags::empty(),
-            next_ref_id: None,
-            next_pos: None,
-            template_len: None,
+            mate_fields: MateFields::default(),
             qname: vec![b'A'; 255], // too long
             cigar: Vec::new(),
             seq: Vec::new(),
@@ -704,7 +701,7 @@ mod tests {
         let mut writer =
             BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
 
-        // Mapped (flags & 0x4 == 0) but ref_id == -1
+        // Mapped (flags & 0x4 == 0) but tid == -1
         let rec = OwnedBamRecord::builder(None, Some(Pos0::new(0).unwrap()), b"bad".to_vec())
             .flags(BamFlags::empty()) // mapped
             .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
@@ -729,7 +726,7 @@ mod tests {
         let mapped = test_record(Some(tid(0)), 100, b"mapped");
         writer.write(&mapped).unwrap();
 
-        // Fully unmapped: ref_id=-1, flags=0x4
+        // Fully unmapped: tid=-1, flags=0x4
         let unmapped = OwnedBamRecord::builder(None, None, b"unmapped".to_vec())
             .flags(BamFlags::from(0x4))
             .seq(vec![Base::A])
@@ -784,9 +781,11 @@ mod tests {
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"read1".to_vec())
                 .mapq(30)
                 .flags(BamFlags::from(0x63))
-                .next_ref_id(Some(tid(1)))
-                .next_pos(Some(Pos0::new(500).unwrap()))
-                .template_len(std::num::NonZeroI32::new(250))
+                .mate_fields(MateFields {
+                    tid: Some(tid(1)),
+                    pos: Some(Pos0::new(500).unwrap()),
+                    template_len: std::num::NonZeroI32::new(250),
+                })
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
                 .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
                 .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
@@ -842,9 +841,7 @@ mod tests {
             assert_eq!(a.flags, b.flags, "flags mismatch for record {i}");
             assert_eq!(a.mapq, b.mapq, "mapq mismatch for record {i}");
             assert_eq!(a.tid, b.tid, "tid mismatch for record {i}");
-            assert_eq!(a.next_ref_id, b.next_ref_id, "next_ref_id mismatch for record {i}");
-            assert_eq!(a.next_pos, b.next_pos, "next_pos mismatch for record {i}");
-            assert_eq!(a.template_len, b.template_len, "template_len mismatch for record {i}");
+            assert_eq!(a.mate_fields, b.mate_fields, "mate fields mismatch for record {i}");
             assert_eq!(a.seq_len, b.seq_len, "seq_len mismatch for record {i}");
             assert_eq!(a.n_cigar_ops, b.n_cigar_ops, "n_cigar_ops mismatch for record {i}");
             assert_eq!(

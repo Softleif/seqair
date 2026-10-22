@@ -32,7 +32,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
-use seqair::bam::{Pos0, RecordStore};
+use seqair::bam::{MateFields, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::collections::BTreeMap;
@@ -380,9 +380,11 @@ fn write_bam(dir: &Path, records: &[Record]) -> std::path::PathBuf {
         .cigar(rec.cigar.iter().map(|&(len, op)| CigarOp::new(op, len)).collect())
         .seq(rec.seq.clone())
         .qual(rec.qual.iter().copied().map(BaseQuality::from_byte).collect())
-        .next_ref_id(rec.next_ref_id.map(|t| contig_tid(t, &header)))
-        .next_pos(rec.next_pos.map(|p| Pos0::new(p).unwrap()))
-        .template_len(std::num::NonZeroI32::new(rec.template_len))
+        .mate_fields(MateFields {
+            tid: rec.next_ref_id.map(|t| contig_tid(t, &header)),
+            pos: rec.next_pos.map(|p| Pos0::new(p).unwrap()),
+            template_len: std::num::NonZeroI32::new(rec.template_len),
+        })
         .aux(aux)
         .build()
         .expect("synthetic record must build");
@@ -562,8 +564,8 @@ fn built_records_read_back_through_seqair(tc: TestCase) {
                 mapq: r.mapq,
                 seq: r.seq().to_vec(),
                 qual: BaseQuality::slice_to_bytes(r.qual()).to_vec(),
-                next_ref_id: r.next_ref_id.map(Tid::as_usize),
-                template_len: r.template_len.map_or(0, std::num::NonZeroI32::get),
+                next_ref_id: r.mate_fields.tid.map(Tid::as_usize),
+                template_len: r.mate_fields.template_len.map_or(0, std::num::NonZeroI32::get),
             });
         }
     }

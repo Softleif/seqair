@@ -644,6 +644,7 @@ fn try_qpos(stored_idx: usize, seq_len: usize) -> Result<u32, BaseModError> {
 )]
 mod tests {
     use super::*;
+    use crate::bam::MateFields;
     use crate::bam::record_idx::RecordIdx;
     use crate::bam::test_util::tid;
     use seqair_types::Base::{A, C, G, T};
@@ -971,9 +972,7 @@ mod tests {
                 &qual,
                 aux,
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap()
@@ -1126,9 +1125,7 @@ mod tests {
                 &qual,
                 aux.as_bytes(),
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap()

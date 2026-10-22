@@ -15,13 +15,13 @@
 //! path needs typed, mutable fields with builder ergonomics; pushing
 //! pre-encoded bytes into slabs is the wrong shape for that.
 
+use super::MateFields;
 use super::aux_data::{AuxData, AuxDataError};
 use super::cigar::CigarOp;
 use super::seq;
 use crate::io::reg2bin;
 use crate::reader::Tid;
 use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
-use std::num::NonZeroI32;
 use thiserror::Error;
 
 /// Errors from owned record construction or serialization.
@@ -65,20 +65,15 @@ pub enum OwnedRecordError {
 #[derive(Debug, Clone)]
 pub struct OwnedBamRecord {
     /// Reference sequence. `None` for unmapped (BAM wire `-1`).
-    pub ref_id: Option<Tid>,
+    pub tid: Option<Tid>,
     /// 0-based leftmost position. `None` for unmapped/unavailable (BAM
     /// wire `-1`); `Some(p)` for any in-range mapping. Construction via
     /// [`Pos0`] makes overflow unconstructable.
     pub pos: Option<Pos0>,
     pub mapq: u8,
     pub flags: BamFlags,
-    /// Mate's reference sequence. `None` for unavailable (BAM wire `-1`).
-    pub next_ref_id: Option<Tid>,
-    /// Mate's 0-based position. `None` for unavailable (BAM wire `-1`).
-    pub next_pos: Option<Pos0>,
-    /// Signed template length. `None` for the wire `0`: unavailable, or a
-    /// single-segment template.
-    pub template_len: Option<NonZeroI32>,
+    /// RNEXT, PNEXT and TLEN.
+    pub mate_fields: MateFields,
     pub qname: Vec<u8>,
     pub cigar: Vec<CigarOp>,
     pub seq: Vec<Base>,
@@ -89,13 +84,11 @@ pub struct OwnedBamRecord {
 
 /// Builder for constructing [`OwnedBamRecord`] values.
 pub struct OwnedBamRecordBuilder {
-    ref_id: Option<Tid>,
+    tid: Option<Tid>,
     pos: Option<Pos0>,
     mapq: u8,
     flags: BamFlags,
-    next_ref_id: Option<Tid>,
-    next_pos: Option<Pos0>,
-    template_len: Option<NonZeroI32>,
+    mate_fields: MateFields,
     qname: Vec<u8>,
     cigar: Vec<CigarOp>,
     seq: Vec<Base>,
@@ -125,16 +118,8 @@ impl OwnedBamRecordBuilder {
         self.qual = qual;
         self
     }
-    pub fn next_ref_id(mut self, v: Option<Tid>) -> Self {
-        self.next_ref_id = v;
-        self
-    }
-    pub fn next_pos(mut self, v: Option<Pos0>) -> Self {
-        self.next_pos = v;
-        self
-    }
-    pub fn template_len(mut self, v: Option<NonZeroI32>) -> Self {
-        self.template_len = v;
+    pub fn mate_fields(mut self, mate_fields: MateFields) -> Self {
+        self.mate_fields = mate_fields;
         self
     }
     pub fn aux(mut self, aux: AuxData) -> Self {
@@ -163,13 +148,11 @@ impl OwnedBamRecordBuilder {
         }
 
         Ok(OwnedBamRecord {
-            ref_id: self.ref_id,
+            tid: self.tid,
             pos: self.pos,
             mapq: self.mapq,
             flags: self.flags,
-            next_ref_id: self.next_ref_id,
-            next_pos: self.next_pos,
-            template_len: self.template_len,
+            mate_fields: self.mate_fields,
             qname: self.qname,
             cigar: self.cigar,
             seq: self.seq,
@@ -182,21 +165,15 @@ impl OwnedBamRecordBuilder {
 impl OwnedBamRecord {
     /// Start building a record with the required fields.
     ///
-    /// Pass `None` for `ref_id` and `pos` to mark the record as unmapped (BAM
+    /// Pass `None` for `tid` and `pos` to mark the record as unmapped (BAM
     /// wire `-1`).
-    pub fn builder(
-        ref_id: Option<Tid>,
-        pos: Option<Pos0>,
-        qname: Vec<u8>,
-    ) -> OwnedBamRecordBuilder {
+    pub fn builder(tid: Option<Tid>, pos: Option<Pos0>, qname: Vec<u8>) -> OwnedBamRecordBuilder {
         OwnedBamRecordBuilder {
-            ref_id,
+            tid,
             pos,
             mapq: 0,
             flags: BamFlags::empty(),
-            next_ref_id: None,
-            next_pos: None,
-            template_len: None,
+            mate_fields: MateFields::default(),
             qname,
             cigar: Vec::new(),
             seq: Vec::new(),
@@ -370,7 +347,7 @@ impl OwnedBamRecord {
         super::record::encode_fixed_header(
             buf,
             &super::record::FixedHeaderFields {
-                tid: self.ref_id,
+                tid: self.tid,
                 pos: self.pos,
                 bin: self.bin(),
                 mapq: self.mapq,
@@ -378,9 +355,7 @@ impl OwnedBamRecord {
                 flags: self.flags.raw(),
                 n_cigar_op,
                 l_seq,
-                next_ref_id: self.next_ref_id,
-                next_pos: self.next_pos,
-                template_len: self.template_len,
+                mate_fields: self.mate_fields,
             },
         );
 

@@ -9,6 +9,7 @@
 
 use core::range::RangeInclusive;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use seqair::bam::MateFields;
 use seqair::reader::ResolveTid;
 use seqair_types::{Base, Pos0};
 use std::hint::black_box;
@@ -225,13 +226,11 @@ fn bam_roundtrip(c: &mut Criterion) {
                 let cigar = store.record(idx).unwrap().cigar().to_vec();
 
                 let rec = OwnedBamRecord {
-                    ref_id: Some(tid.resolve_tid(reader.header()).unwrap()),
+                    tid: Some(tid.resolve_tid(reader.header()).unwrap()),
                     pos: Some(slim.pos),
                     mapq: slim.mapq,
                     flags: slim.flags,
-                    next_ref_id: None,
-                    next_pos: None,
-                    template_len: None,
+                    mate_fields: MateFields::default(),
                     qname: store.record(idx).unwrap().qname().to_vec(),
                     cigar,
                     seq: store.record(idx).unwrap().seq().to_vec(),
@@ -925,9 +924,7 @@ fn synthetic_input(shape: ReadShape) -> seqair::bam::record_store::PileupInput<(
                 &qual,
                 &[],
                 t(0),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();

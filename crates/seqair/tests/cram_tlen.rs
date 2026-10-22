@@ -113,7 +113,7 @@ fn assert_tlen_via_bam(name: &str) {
                 store.record(idx).unwrap().qname().to_vec(),
                 r.flags.raw(),
                 r.pos.as_i64(),
-                r.template_len,
+                r.mate_fields.template_len,
             )
         })
         .collect();
@@ -179,7 +179,7 @@ fn assert_cram_fields_with_tlen(name: &str) {
                 store.record(idx).unwrap().qname().to_vec(),
                 r.flags.raw(),
                 r.pos.as_i64(),
-                r.template_len,
+                r.mate_fields.template_len,
             )
         })
         .collect();

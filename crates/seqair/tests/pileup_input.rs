@@ -8,6 +8,7 @@
 mod helpers;
 use hegel::prelude::*;
 use helpers::tid;
+use seqair::bam::MateFields;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::RecordStore;
@@ -33,9 +34,11 @@ fn push(store: &mut RecordStore, qname: &[u8], pos: u32, len: u32, mate_pos: i32
             &vec![30u8; len as usize],
             &[],
             Some(tid(0)),
-            Some(tid(0)),
-            u32::try_from(mate_pos).ok().and_then(Pos0::new),
-            None,
+            MateFields {
+                tid: Some(tid(0)),
+                pos: u32::try_from(mate_pos).ok().and_then(Pos0::new),
+                template_len: None,
+            },
             &mut (),
         )
         .expect("well-formed record")

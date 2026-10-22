@@ -27,13 +27,11 @@ The owned record type makes these modifications safe and explicit: callers get a
 > r[bam.owned_record.fields]
 > `OwnedBamRecord` MUST store the following fields, all owned and mutable:
 >
-> - `ref_id: Option<Tid>` — reference sequence; `None` represents the BAM wire `-1` (unmapped)
+> - `tid: Option<Tid>` — reference sequence; `None` represents the BAM wire `-1` (unmapped)
 > - `pos: Option<Pos0>` — 0-based leftmost mapping position; `None` represents the BAM wire `-1` (unmapped/unavailable). `Pos0` constructively bounds the value to `[0, i32::MAX]`, so wire-format overflow is unconstructable.
 > - `mapq: u8` — mapping quality
 > - `flags: BamFlags` — SAM flag bits
-> - `next_ref_id: Option<Tid>` — mate's reference sequence; `None` for unavailable (wire `-1`)
-> - `next_pos: Option<Pos0>` — mate's 0-based position; `None` for unavailable
-> - `template_len: Option<NonZeroI32>` — observed template length; `None` for the wire `0` (unavailable, or a single-segment template)
+> - `mate_fields: MateFields` — the mate's reference (`tid: Option<Tid>`, `None` for the wire `-1`), its 0-based position (`pos: Option<Pos0>`, `None` for unavailable) and the observed template length (`template_len: Option<NonZeroI32>`, `None` for the wire `0`: unavailable, or a single-segment template)
 > - `qname: Vec<u8>` — query name (without NUL terminator)
 > - `cigar: Vec<CigarOp>` — typed CIGAR operations
 > - `seq: Vec<Base>` — sequence as `Base` enum values
@@ -48,7 +46,7 @@ CIGAR operations MUST be represented by a `CigarOp` type that wraps the BAM-on-d
 > _[SAM1] §4.2 — l_read_name (u8, max 255 including NUL), n_cigar_op (u16, max 65535), l_seq (i32)_
 
 r[bam.owned_record.builder]
-`OwnedBamRecord` MUST provide a builder API for constructing records from individual fields. The builder MUST require at minimum `ref_id`, `pos`, and `qname`. Fields `cigar`, `seq`, and `qual` MUST default to empty (representing an unmapped read). Optional fields (`mapq`, `flags`, `next_ref_id`, `next_pos`, `template_len`, `aux`) MUST default to zero or -1 for reference IDs. The `flags` field MUST default to 0; callers are responsible for setting appropriate flag bits.
+`OwnedBamRecord` MUST provide a builder API for constructing records from individual fields. The builder MUST require at minimum `tid`, `pos`, and `qname`. Fields `cigar`, `seq`, and `qual` MUST default to empty (representing an unmapped read). Optional fields (`mapq`, `flags`, `mate_fields`, `aux`) MUST default to zero, or `None` (`MateFields::default()`) for the mate fields. The `flags` field MUST default to 0; callers are responsible for setting appropriate flag bits.
 
 r[bam.owned_record.qname_limit]
 The qname (without NUL terminator) MUST NOT exceed 254 bytes. The `l_read_name` field in the BAM 32-byte header is a u8 that stores the length including NUL, so the maximum stored length is 255. The builder and `to_bam_bytes` MUST reject qnames exceeding this limit with a typed error.

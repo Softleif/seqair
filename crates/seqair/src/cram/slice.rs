@@ -21,7 +21,7 @@ use super::{
     varint,
 };
 use crate::bam::{
-    BamHeader,
+    BamHeader, MateFields,
     cigar::CigarOp,
     record::DecodeError,
     record_store::{CustomizeRecordStore, RecordStore},
@@ -75,9 +75,7 @@ struct SliceRecord {
     matching_bases: u32,
     indel_bases: u32,
     tid: Option<Tid>,
-    next_ref_id: Option<Tid>,
-    next_pos: Option<Pos0>,
-    template_len: Option<NonZeroI32>,
+    mate_fields: MateFields,
     name: Range<usize>,
     cigar: Range<usize>,
     seq: Range<usize>,
@@ -116,9 +114,7 @@ impl DecodedSlice {
         qual: &[u8],
         aux: &[u8],
         tid: Option<Tid>,
-        next_ref_id: Option<Tid>,
-        next_pos: Option<Pos0>,
-        template_len: Option<NonZeroI32>,
+        mate_fields: MateFields,
     ) -> Result<u32, CramError> {
         let slot = u32::try_from(self.records.len())
             .map_err(|_| CramError::InvalidLength { value: i32::MAX })?;
@@ -142,9 +138,7 @@ impl DecodedSlice {
             matching_bases,
             indel_bases,
             tid,
-            next_ref_id,
-            next_pos,
-            template_len,
+            mate_fields,
             name,
             cigar: Range { start: cigar_start, end: self.cigar.len() },
             seq: Range { start: seq_start, end: self.bases.len() },
@@ -203,9 +197,7 @@ impl DecodedSlice {
                 field(&self.qual, r.qual),
                 field(&self.aux, r.aux),
                 r.tid,
-                r.next_ref_id,
-                r.next_pos,
-                r.template_len,
+                r.mate_fields,
                 customize,
             )?;
             counts.add(FetchedRecord {
@@ -690,9 +682,7 @@ fn decode_record(
     // r[impl cram.record.mate_detached]
     // r[impl cram.record.mate_attached]
     // 8. Mate data
-    let mut next_pos_val: Option<Pos0> = None;
-    let mut next_ref_id_val: Option<Tid> = None;
-    let mut template_len_val: Option<NonZeroI32> = None;
+    let mut mate_fields = MateFields::default();
     let mut mate_line: i32 = -1;
     if detached {
         let _mate_flags = ds.mate_flags.decode(ctx)?;
@@ -707,13 +697,13 @@ fn decode_record(
             name_buf.clear();
         }
         // r[impl cram.record.ref_ids]
-        next_ref_id_val = Tid::from_wire(ds.next_segment_ref.decode(ctx)?, header)
+        mate_fields.tid = Tid::from_wire(ds.next_segment_ref.decode(ctx)?, header)
             .map_err(|source| DecodeError::InvalidMateTid { source })?;
         // CRAM `NP` is 1-based per the spec, NP=0 is "no mate position";
         // matching htslib's `cr->mate_pos - 1` at the BAM emit
         // (cram_decode.c:3121).
         // r[impl cram.record.mate_detached]
-        next_pos_val = match ds.next_mate_pos.decode(ctx)? {
+        mate_fields.pos = match ds.next_mate_pos.decode(ctx)? {
             0 => None,
             np => Some(
                 Pos1::try_from(i64::from(np))
@@ -721,7 +711,7 @@ fn decode_record(
                     .to_zero_based(),
             ),
         };
-        template_len_val = NonZeroI32::new(ds.template_size.decode(ctx)?);
+        mate_fields.template_len = NonZeroI32::new(ds.template_size.decode(ctx)?);
     } else if mate_downstream {
         let nf = ds.next_fragment.decode(ctx)?;
         // NF is relative: absolute mate index = current + 1 + nf
@@ -888,9 +878,7 @@ fn decode_record(
             qual_buf,
             aux_buf,
             record_ref_id,
-            next_ref_id_val,
-            next_pos_val,
-            template_len_val,
+            mate_fields,
         )?;
 
         return Ok(SliceMateInfo {
@@ -943,9 +931,7 @@ fn decode_record(
             qual_buf,
             aux_buf,
             record_ref_id,
-            next_ref_id_val,
-            next_pos_val,
-            template_len_val,
+            mate_fields,
         )?)
     };
     Ok(SliceMateInfo {
@@ -1065,10 +1051,11 @@ fn resolve_mate_tlen(infos: &[SliceMateInfo], out: &mut DecodedSlice) {
             let Some(slot) = infos[j].slot else { continue };
             let mate = &infos[chain[if ci + 1 < chain.len() { ci + 1 } else { 0 }]];
             let Some(r) = out.records.get_mut(slot as usize) else { continue };
-            r.template_len = NonZeroI32::new(if ci == 0 { first_tlen } else { rest_tlen });
-            r.next_ref_id = mate.tid;
+            r.mate_fields.template_len =
+                NonZeroI32::new(if ci == 0 { first_tlen } else { rest_tlen });
+            r.mate_fields.tid = mate.tid;
             // An unmapped mate (`pos < 0`) has no position.
-            r.next_pos = Pos0::try_from(mate.pos).ok();
+            r.mate_fields.pos = Pos0::try_from(mate.pos).ok();
         }
     }
 }

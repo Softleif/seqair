@@ -229,9 +229,7 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
             qual,
             aux,
             store_raw.record(idx_raw).unwrap().tid,
-            store_raw.record(idx_raw).unwrap().next_ref_id,
-            store_raw.record(idx_raw).unwrap().next_pos,
-            store_raw.record(idx_raw).unwrap().template_len,
+            store_raw.record(idx_raw).unwrap().mate_fields,
             &mut (),
         )?
         .expect("kept");
@@ -307,9 +305,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
             BaseQuality::slice_to_bytes(store.record(i).unwrap().qual()),
             store.record(i).unwrap().aux(),
             rec.tid,
-            rec.next_ref_id,
-            rec.next_pos,
-            rec.template_len,
+            rec.mate_fields,
             &mut (),
         )?;
     }

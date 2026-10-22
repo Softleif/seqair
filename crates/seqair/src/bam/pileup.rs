@@ -1462,6 +1462,7 @@ impl<U> Drop for PileupEngine<U> {
 #[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
 mod tests {
     use super::*;
+    use crate::bam::MateFields;
     use crate::bam::test_util::tid;
 
     /// The closed region `first..=last`, the shape `PileupEngine::new` takes.
@@ -1522,9 +1523,7 @@ mod tests {
                 &[40; 5],
                 &[],
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();
@@ -1574,9 +1573,7 @@ mod tests {
                     &vec![40u8; *span as usize],
                     &[],
                     Some(tid(0)),
-                    None,
-                    None,
-                    None,
+                    MateFields::default(),
                     &mut (),
                 )
                 .unwrap();
@@ -1644,9 +1641,7 @@ mod tests {
                 &quals,
                 &[],
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();
@@ -1702,9 +1697,7 @@ mod tests {
                 &[40u8; 6],
                 &[],
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();
@@ -1831,9 +1824,7 @@ mod tests {
                         &quals,
                         &[],
                         Some(crate::bam::test_util::tid(0)),
-                        None,
-                        None,
-                        None,
+                        crate::bam::MateFields::default(),
                         &mut (),
                     )
                     .unwrap();
@@ -1962,9 +1953,7 @@ mod tests {
                 &quals,
                 &[],
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();
@@ -2018,9 +2007,7 @@ mod tests {
                 &quals,
                 &[],
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();
@@ -2076,9 +2063,7 @@ mod tests {
                 &quals,
                 &[],
                 Some(tid(0)),
-                None,
-                None,
-                None,
+                MateFields::default(),
                 &mut (),
             )
             .unwrap();
@@ -2125,9 +2110,7 @@ mod tests {
                     &vec![40u8; seq_len as usize],
                     &[],
                     Some(tid(0)),
-                    None,
-                    None,
-                    None,
+                    MateFields::default(),
                     &mut (),
                 )
                 .unwrap();
@@ -2200,9 +2183,7 @@ mod tests {
                     &[40u8; 50],
                     &[],
                     Some(tid(0)),
-                    None,
-                    None,
-                    None,
+                    MateFields::default(),
                     &mut (),
                 )
                 .unwrap();

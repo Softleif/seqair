@@ -210,18 +210,18 @@ fn cram_mate_fields_match_htslib() {
         for (i, hts) in hts_records.iter().enumerate() {
             let cram = store.record(ri(u32::try_from(i).unwrap())).unwrap();
             assert_eq!(
-                cram.next_pos.map_or(-1, i64::from),
+                cram.mate_fields.pos.map_or(-1, i64::from),
                 hts.next_pos,
                 "{version} rec {i}: next_pos (cram=1-based stored to bam=0-based — \
                  detached path needs `np - 1` conversion)",
             );
             assert_eq!(
-                cram.next_ref_id.map(|t| t.as_u32()),
+                cram.mate_fields.tid.map(|t| t.as_u32()),
                 u32::try_from(hts.next_ref_id).ok(),
                 "{version} rec {i}: next_ref_id",
             );
             assert_eq!(
-                cram.template_len.map_or(0, |t| t.get().into()),
+                cram.mate_fields.template_len.map_or(0, |t| t.get().into()),
                 hts.template_len,
                 "{version} rec {i}: template_len (resolve_mate_tlen sign rule)",
             );
@@ -274,14 +274,18 @@ fn cram_mate_fields_survive_a_rejected_mate() {
         assert_eq!(store.len(), want.len(), "{version}: record count");
         for (i, hts) in want.iter().enumerate() {
             let cram = store.record(ri(u32::try_from(i).unwrap())).unwrap();
-            assert_eq!(cram.next_pos.map_or(-1, i64::from), hts.next_pos, "{version} rec {i}");
             assert_eq!(
-                cram.next_ref_id.map(|t| t.as_u32()),
+                cram.mate_fields.pos.map_or(-1, i64::from),
+                hts.next_pos,
+                "{version} rec {i}"
+            );
+            assert_eq!(
+                cram.mate_fields.tid.map(|t| t.as_u32()),
                 u32::try_from(hts.next_ref_id).ok(),
                 "{version} rec {i}"
             );
             assert_eq!(
-                cram.template_len.map_or(0, |t| t.get().into()),
+                cram.mate_fields.template_len.map_or(0, |t| t.get().into()),
                 hts.template_len,
                 "{version} rec {i}"
             );

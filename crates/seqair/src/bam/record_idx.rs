@@ -408,9 +408,11 @@ mod tests {
                     &quals,
                     b"XAi\x07\x00\x00\x00",
                     Some(tid(0)),
-                    Some(tid(0)),
-                    Pos0::new(mate_pos),
-                    None,
+                    crate::bam::MateFields {
+                        tid: Some(tid(0)),
+                        pos: Pos0::new(mate_pos),
+                        template_len: None,
+                    },
                     &mut (),
                 )
                 .unwrap()

@@ -22,7 +22,7 @@ use hegel::prelude::*;
 use helpers::ri;
 use helpers::tid;
 use seqair::bam::record_store::RecordStore;
-use seqair::bam::{DecodeError, Pos0};
+use seqair::bam::{DecodeError, MateFields, Pos0};
 use seqair_types::{BamFlags, Base, BaseQuality};
 
 // ---------------------------------------------------------------------------
@@ -184,8 +184,8 @@ fn push_raw_preserves_next_pos() {
     );
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
-    assert_eq!(store.record(idx).unwrap().next_pos, Pos0::new(500));
-    assert_eq!(store.record(idx).unwrap().template_len, std::num::NonZeroI32::new(300));
+    assert_eq!(store.record(idx).unwrap().mate_fields.pos, Pos0::new(500));
+    assert_eq!(store.record(idx).unwrap().mate_fields.template_len, std::num::NonZeroI32::new(300));
 }
 
 // r[verify record_store.slim_record_fields]
@@ -207,7 +207,10 @@ fn push_raw_preserves_negative_template_len() {
     );
     let mut store = RecordStore::new();
     let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
-    assert_eq!(store.record(idx).unwrap().template_len, std::num::NonZeroI32::new(-300));
+    assert_eq!(
+        store.record(idx).unwrap().mate_fields.template_len,
+        std::num::NonZeroI32::new(-300)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -288,9 +291,7 @@ fn soft_clips_are_stored_at_push_and_follow_set_alignment() {
             &[30; 5],
             &[],
             Some(tid(0)),
-            None,
-            None,
-            None,
+            MateFields::default(),
             &mut (),
         )
         .unwrap()
@@ -339,8 +340,8 @@ fn set_alignment_preserves_other_fields() {
     assert_eq!(store.record(idx).unwrap().aux(), &orig_aux);
     assert_eq!(store.record(idx).unwrap().qname(), &orig_qname);
     assert_eq!(store.record(idx).unwrap().tid.map(|t| t.as_u32()), Some(3));
-    assert_eq!(store.record(idx).unwrap().next_pos, Pos0::new(500));
-    assert_eq!(store.record(idx).unwrap().template_len, std::num::NonZeroI32::new(300));
+    assert_eq!(store.record(idx).unwrap().mate_fields.pos, Pos0::new(500));
+    assert_eq!(store.record(idx).unwrap().mate_fields.template_len, std::num::NonZeroI32::new(300));
     assert_eq!(store.record(idx).unwrap().flags, BamFlags::from(0x63));
     assert_eq!(store.record(idx).unwrap().mapq, 60);
 }

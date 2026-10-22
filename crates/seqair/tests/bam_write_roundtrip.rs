@@ -23,7 +23,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
-use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair::bam::{IndexedBamReader, MateFields, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
 use seqair_types::bam_flags::BamFlags;
 use seqair_types::{Base, BaseQuality};
@@ -466,9 +466,11 @@ fn roundtrip_paired_end() {
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5.clone())
             .qual(vec![BaseQuality::from_byte(30); 5])
-            .next_ref_id(Some(tid(0)))
-            .next_pos(Some(Pos0::new(200).unwrap()))
-            .template_len(std::num::NonZeroI32::new(105))
+            .mate_fields(MateFields {
+                tid: Some(tid(0)),
+                pos: Some(Pos0::new(200).unwrap()),
+                template_len: std::num::NonZeroI32::new(105),
+            })
             .build()
             .unwrap(),
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(200).unwrap()), b"pair1".to_vec())
@@ -477,9 +479,11 @@ fn roundtrip_paired_end() {
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5)
             .qual(vec![BaseQuality::from_byte(35); 5])
-            .next_ref_id(Some(tid(0)))
-            .next_pos(Some(Pos0::new(100).unwrap()))
-            .template_len(std::num::NonZeroI32::new(-105))
+            .mate_fields(MateFields {
+                tid: Some(tid(0)),
+                pos: Some(Pos0::new(100).unwrap()),
+                template_len: std::num::NonZeroI32::new(-105),
+            })
             .build()
             .unwrap(),
     ];
@@ -518,9 +522,11 @@ fn roundtrip_write_store_record() {
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5.clone())
             .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
-            .next_ref_id(Some(tid(0)))
-            .next_pos(Some(Pos0::new(300).unwrap()))
-            .template_len(std::num::NonZeroI32::new(205))
+            .mate_fields(MateFields {
+                tid: Some(tid(0)),
+                pos: Some(Pos0::new(300).unwrap()),
+                template_len: std::num::NonZeroI32::new(205),
+            })
             .aux({
                 let mut a = AuxData::new();
                 a.set_string(*b"RG", b"grp1");
@@ -537,9 +543,11 @@ fn roundtrip_write_store_record() {
             ])
             .seq(seq5)
             .qual([35, 36, 37, 38, 39].map(BaseQuality::from_byte).to_vec())
-            .next_ref_id(Some(tid(0)))
-            .next_pos(Some(Pos0::new(100).unwrap()))
-            .template_len(std::num::NonZeroI32::new(-205))
+            .mate_fields(MateFields {
+                tid: Some(tid(0)),
+                pos: Some(Pos0::new(100).unwrap()),
+                template_len: std::num::NonZeroI32::new(-205),
+            })
             .build()
             .unwrap(),
     ];
@@ -600,9 +608,12 @@ fn roundtrip_write_store_record() {
         assert_eq!(a.pos.as_u32(), b.pos.as_u32(), "pos mismatch record {i}");
         assert_eq!(a.flags, b.flags, "flags mismatch record {i}");
         assert_eq!(a.mapq, b.mapq, "mapq mismatch record {i}");
-        assert_eq!(a.next_ref_id, b.next_ref_id, "next_ref_id mismatch record {i}");
-        assert_eq!(a.next_pos, b.next_pos, "next_pos mismatch record {i}");
-        assert_eq!(a.template_len, b.template_len, "tlen mismatch record {i}");
+        assert_eq!(a.mate_fields.tid, b.mate_fields.tid, "next_ref_id mismatch record {i}");
+        assert_eq!(a.mate_fields.pos, b.mate_fields.pos, "next_pos mismatch record {i}");
+        assert_eq!(
+            a.mate_fields.template_len, b.mate_fields.template_len,
+            "tlen mismatch record {i}"
+        );
         assert_eq!(
             store.record(i).unwrap().qname(),
             store2.record(i).unwrap().qname(),
@@ -693,9 +704,7 @@ mod e2e_oracle {
                     &inp.quals,
                     &[],          // no aux
                     Some(tid(0)), // tid
-                    None,
-                    None,
-                    None,
+                    MateFields::default(),
                     &mut (),
                 )
                 .unwrap();

@@ -51,6 +51,7 @@ pub mod csi_index;
 pub mod depth_cap;
 pub mod header;
 pub mod index;
+pub mod mate;
 pub mod nm_md;
 pub mod owned_record;
 pub mod pileup;
@@ -81,6 +82,7 @@ pub use csi_index::{CsiError, CsiIndex};
 pub use depth_cap::{DepthCap, DepthLimit};
 pub use header::{BamHeader, BamHeaderError, ContigInfo};
 pub use index::{AlignmentIndex, BaiError, BamIndex, MappedCounts, ReferenceStats};
+pub use mate::MateFields;
 pub use nm_md::NmMdError;
 pub use owned_record::{OwnedBamRecord, OwnedRecordError};
 pub use pileup::{

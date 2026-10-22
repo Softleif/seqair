@@ -15,7 +15,7 @@
 //! them into a [`RecordStore`](super::record_store::RecordStore) and access
 //! fields via [`SlimRecord`](super::record_store::SlimRecord).
 
-use super::BamHeader;
+use super::{BamHeader, MateFields};
 use crate::reader::Tid;
 use seqair_types::{BamFlags, Pos0};
 use std::num::NonZeroI32;
@@ -106,8 +106,6 @@ pub(crate) struct ParsedHeader {
     pub flags: BamFlags,
     pub n_cigar_ops: u16,
     pub seq_len: u32,
-    /// `None` for a wire `0`: unavailable, or a single-segment template.
-    pub template_len: Option<NonZeroI32>,
     /// Start of variable-length data (32 + `name_len`).
     pub var_start: usize,
     /// End of CIGAR bytes.
@@ -118,22 +116,22 @@ pub(crate) struct ParsedHeader {
     pub qual_end: usize,
 }
 
-/// A record's reference id, mate reference id and mate position as BAM
-/// stores them: their meaning depends on the header, so they stay raw until
+/// A record's reference id and mate fields as BAM stores them: the reference
+/// ids mean something only against the header, so they stay raw until
 /// [`Self::resolve`] checks them against it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WireRefs {
     tid: i32,
     next_ref_id: i32,
     next_pos: i32,
+    template_len: i32,
 }
 
 /// [`WireRefs`] checked against a header.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Refs {
     pub tid: Option<Tid>,
-    pub next_ref_id: Option<Tid>,
-    pub next_pos: Option<Pos0>,
+    pub mate_fields: MateFields,
 }
 
 impl WireRefs {
@@ -151,7 +149,14 @@ impl WireRefs {
                 Some(Pos0::try_from(p).map_err(|_| DecodeError::InvalidMatePosition { value: p })?)
             }
         };
-        Ok(Refs { tid, next_ref_id, next_pos })
+        Ok(Refs {
+            tid,
+            mate_fields: MateFields {
+                tid: next_ref_id,
+                pos: next_pos,
+                template_len: NonZeroI32::new(self.template_len),
+            },
+        })
     }
 }
 
@@ -186,8 +191,8 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
         tid: i32::from_le_bytes(read4(raw, 0)),
         next_ref_id: i32::from_le_bytes(read4(raw, 20)),
         next_pos: i32::from_le_bytes(read4(raw, 24)),
+        template_len: i32::from_le_bytes(read4(raw, 28)),
     };
-    let template_len = NonZeroI32::new(i32::from_le_bytes(read4(raw, 28)));
 
     let cigar_bytes = usize::from(n_cigar_ops) * 4;
     let seq_bytes = (seq_len as usize).div_ceil(2);
@@ -208,7 +213,6 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
         flags,
         n_cigar_ops,
         seq_len,
-        template_len,
         var_start,
         cigar_end,
         seq_end,
@@ -216,12 +220,11 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     })
 }
 
-/// Field values for the 32-byte BAM fixed record header, in BAM wire types.
+/// Field values for the 32-byte BAM fixed record header.
 ///
 /// Callers validate field-size limits (qname ≤ 254, cigar ≤ 65535, seq ≤
-/// `i32::MAX`) before constructing this; the encoder only packs bytes.
-/// `pos` and `next_pos` are already resolved to wire form (`-1` for
-/// unmapped/unavailable per `[SAM1] §1.4`).
+/// `i32::MAX`) before constructing this; the encoder packs the bytes, writing
+/// `None` as the wire's "unavailable" (`[SAM1] §1.4`).
 pub(crate) struct FixedHeaderFields {
     pub tid: Option<Tid>,
     pub pos: Option<Pos0>,
@@ -232,9 +235,7 @@ pub(crate) struct FixedHeaderFields {
     pub flags: u16,
     pub n_cigar_op: u16,
     pub l_seq: i32,
-    pub next_ref_id: Option<Tid>,
-    pub next_pos: Option<Pos0>,
-    pub template_len: Option<NonZeroI32>,
+    pub mate_fields: MateFields,
 }
 
 /// Pack the 11 fixed-record fields into the canonical 32-byte BAM record
@@ -249,9 +250,9 @@ pub(crate) fn encode_fixed_header(buf: &mut Vec<u8>, f: &FixedHeaderFields) {
     buf.extend_from_slice(&bin_mq_nl.to_le_bytes());
     buf.extend_from_slice(&flag_nc.to_le_bytes());
     buf.extend_from_slice(&f.l_seq.to_le_bytes());
-    buf.extend_from_slice(&Tid::to_wire(f.next_ref_id).to_le_bytes());
-    buf.extend_from_slice(&pos(f.next_pos).to_le_bytes());
-    buf.extend_from_slice(&f.template_len.map_or(0, NonZeroI32::get).to_le_bytes());
+    buf.extend_from_slice(&Tid::to_wire(f.mate_fields.tid).to_le_bytes());
+    buf.extend_from_slice(&pos(f.mate_fields.pos).to_le_bytes());
+    buf.extend_from_slice(&f.mate_fields.template_len.map_or(0, NonZeroI32::get).to_le_bytes());
 }
 
 #[non_exhaustive]

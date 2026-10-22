@@ -614,13 +614,11 @@ fn bam_seqair(args: &[String]) {
                 aux.set_array_u8(*b"ML", &ml).unwrap();
             }
             OwnedBamRecord {
-                ref_id: r.tid,
+                tid: r.tid,
                 pos: Some(r.pos),
                 mapq: r.mapq,
                 flags: r.flags,
-                next_ref_id: r.next_ref_id,
-                next_pos: r.next_pos,
-                template_len: r.template_len,
+                mate_fields: r.mate_fields,
                 qname: r.qname().to_vec(),
                 cigar: r.cigar().to_vec(),
                 seq,

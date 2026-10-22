@@ -121,7 +121,7 @@ alignment per column for a record it never looks at.
 ## Record fields
 
 r[record_store.slim_record_fields]
-Each `SlimRecord` MUST store the following fixed fields: `tid` (reference ID), `pos`, `end_pos`, `flags`, `mapq`, `n_cigar_ops`, `seq_len`, `matching_bases`, `indel_bases`, `next_ref_id` (mate reference ID), `next_pos` (mate position), `template_len` (signed insert size). `tid` and `next_ref_id` are `Option<Tid>`, `next_pos` is `Option<Pos0>` and `template_len` is `Option<NonZeroI32>`: the wire sentinels (`-1`, and `0` for TLEN) are `None`, never a magic value. The `tid`, `next_ref_id`, `next_pos`, and `template_len` fields are required for BAM write-back after local realignment.
+Each `SlimRecord` MUST store the following fixed fields: `tid` (reference ID), `pos`, `end_pos`, `flags`, `mapq`, `n_cigar_ops`, `seq_len`, `matching_bases`, `indel_bases`, and `mate_fields` (a `MateFields`: the mate's reference `tid`, its position `pos`, and the signed `template_len`, r[`bam.record.mate_fields+2`]). `tid` and `mate_fields.tid` are `Option<Tid>`, `mate_fields.pos` is `Option<Pos0>` and `mate_fields.template_len` is `Option<NonZeroI32>`: the wire sentinels (`-1`, and `0` for TLEN) are `None`, never a magic value. `tid` and `mate_fields` are required for BAM write-back after local realignment.
 
 ## Capacity estimation
 
@@ -405,10 +405,11 @@ r[record_store.link_mates+2]
 `link_mates()` MUST link the mates of a template that are both present in the
 store, setting each record's mate index to the other's store index. A record is
 a candidate only when it is paired, mapped, primary (neither secondary nor
-supplementary), has a mapped mate, `next_ref_id == tid`, and has a qname. Two
+supplementary), has a mapped mate, is on a reference and names it as its mate's
+(`mate_fields.tid == tid`), and has a qname. Two
 candidates MUST be linked only when their qname *bytes* are equal and their mate
-positions are mutually consistent (`a.pos == b.next_pos` and
-`b.pos == a.next_pos`). Each record MUST be linked at most once. Linking MUST be
+positions are mutually consistent (`a.pos == b.mate_fields.pos` and
+`b.pos == a.mate_fields.pos`). Each record MUST be linked at most once. Linking MUST be
 O(number of records) in the size of the store.
 
 A hash may be used to bucket candidates, but MUST NOT be the deciding evidence:

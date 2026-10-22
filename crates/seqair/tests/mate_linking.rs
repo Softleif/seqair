@@ -23,6 +23,7 @@ mod helpers;
 use hegel::prelude::*;
 use helpers::ri;
 use helpers::tid;
+use seqair::bam::MateFields;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::{Indel, PileupColumn, PileupEngine};
 use seqair::bam::record_idx::RecordIdx;
@@ -87,9 +88,11 @@ fn push(store: &mut RecordStore, qname: &[u8], read: Read) -> RecordIdx {
             &qual,
             &[],
             Some(tid(read.tid)),
-            Some(tid(read.mate_tid)),
-            u32::try_from(read.mate_pos).ok().and_then(Pos0::new),
-            None,
+            MateFields {
+                tid: Some(tid(read.mate_tid)),
+                pos: u32::try_from(read.mate_pos).ok().and_then(Pos0::new),
+                template_len: None,
+            },
             &mut (),
         )
         .expect("push_fields accepts a well-formed record")
@@ -703,9 +706,11 @@ fn push_pair_read(
             &vec![40u8; seq.len()],
             &[],
             Some(tid(0)),
-            Some(tid(0)),
-            u32::try_from(mate_pos).ok().and_then(Pos0::new),
-            None,
+            MateFields {
+                tid: Some(tid(0)),
+                pos: u32::try_from(mate_pos).ok().and_then(Pos0::new),
+                template_len: None,
+            },
             &mut (),
         )
         .expect("push_fields accepts a well-formed record")
@@ -1029,8 +1034,8 @@ fn links_are_always_well_formed(tc: TestCase) {
             "a nameless record must never link"
         );
         assert!(rec.qname_hash().is_some());
-        assert_eq!(Some(rec.pos), store.record(partner).unwrap().next_pos);
-        assert_eq!(Some(store.record(partner).unwrap().pos), rec.next_pos);
+        assert_eq!(Some(rec.pos), store.record(partner).unwrap().mate_fields.pos);
+        assert_eq!(Some(store.record(partner).unwrap().pos), rec.mate_fields.pos);
         assert!(rec.flags.is_paired() && !rec.flags.is_unmapped());
         assert!(!rec.flags.is_secondary() && !rec.flags.is_supplementary());
     }
@@ -1104,12 +1109,12 @@ fn linking_is_symmetric_and_exact(tc: TestCase) {
             );
             assert_eq!(
                 Some(store.record(idx).unwrap().pos),
-                store.record(partner).unwrap().next_pos,
+                store.record(partner).unwrap().mate_fields.pos,
                 "links need reciprocal mate positions"
             );
             assert_eq!(
                 Some(store.record(partner).unwrap().pos),
-                store.record(idx).unwrap().next_pos
+                store.record(idx).unwrap().mate_fields.pos
             );
             assert_eq!(
                 store.record(idx).unwrap().tid,

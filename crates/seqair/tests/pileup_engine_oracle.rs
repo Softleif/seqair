@@ -19,7 +19,7 @@ mod helpers;
 use hegel::prelude::*;
 use helpers::tid;
 use seqair::bam::{
-    Pos0, RecordStore,
+    MateFields, Pos0, RecordStore,
     cigar::{
         CigarMapping, CigarOp, CigarOpType, CigarPosInfo, calc_matches_indels, compute_end_pos,
     },
@@ -154,9 +154,7 @@ fn build_store(case: &Case) -> PileupInput<()> {
                 &r.qual,
                 &[],
                 Some(tid(0)),
-                next_ref_id,
-                next_pos,
-                None,
+                MateFields { tid: next_ref_id, pos: next_pos, template_len: None },
                 &mut (),
             )
             .unwrap();
