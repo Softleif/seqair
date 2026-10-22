@@ -627,7 +627,7 @@ impl VcfOutput<'_> {
         }
     }
 
-    fn push_index(&mut self, tid: i32, beg: u64, end: u64) -> Result<(), VcfError> {
+    fn push_index(&mut self, tid: u32, beg: u64, end: u64) -> Result<(), VcfError> {
         match self {
             VcfOutput::Plain(_) => Ok(()),
             VcfOutput::Bgzf { bgzf, index } => {
@@ -1644,7 +1644,8 @@ fn vcf_emit(vcf: &mut VcfEncoderFields<'_>) -> Result<(), VcfError> {
     let beg = u64::from(vcf.pos_0based);
     let end = beg.saturating_add(u64::from(vcf.rlen));
     vcf.output.write_line(vcf.buf)?;
-    vcf.output.push_index(vcf.tid, beg, end)?;
+    // Non-negative: built from a `u32` contig id.
+    vcf.output.push_index(vcf.tid.cast_unsigned(), beg, end)?;
     Ok(())
 }
 

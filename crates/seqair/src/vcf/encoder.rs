@@ -314,7 +314,8 @@ impl<'a> BcfRecordEncoder<'a> {
         if let Some(ref mut index) = self.index {
             let beg = self.pos_0based as u64;
             let end = beg.saturating_add(self.rlen as u64);
-            index.push(self.tid, beg, end, self.bgzf.index_offset())?;
+            // Non-negative: built from a `u32` contig id.
+            index.push(self.tid.cast_unsigned(), beg, end, self.bgzf.index_offset())?;
         }
 
         Ok(())

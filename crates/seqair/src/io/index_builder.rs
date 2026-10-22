@@ -16,7 +16,7 @@ pub struct IndexChunk {
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
     #[error("input not sorted: tid={tid}, pos={pos}")]
-    UnsortedInput { tid: i32, pos: u64 },
+    UnsortedInput { tid: u32, pos: u64 },
 
     #[error("I/O error writing index")]
     Io(#[from] std::io::Error),
@@ -77,8 +77,9 @@ pub struct IndexBuilder {
     save_off: VirtualOffset,
     last_bin: u32,
     save_bin: u32,
-    last_tid: i32,
-    save_tid: i32,
+    /// `None` until the first record.
+    last_tid: Option<u32>,
+    save_tid: Option<u32>,
     last_coor: u64,
     finished: bool,
 }
@@ -105,8 +106,8 @@ impl IndexBuilder {
             save_off: header_end_offset,
             last_bin: u32::MAX,
             save_bin: u32::MAX,
-            last_tid: -1,
-            save_tid: -1,
+            last_tid: None,
+            save_tid: None,
             last_coor: 0,
             finished: false,
         }
@@ -187,36 +188,33 @@ impl IndexBuilder {
     /// - `offset`: virtual offset AFTER writing the record
     pub fn push(
         &mut self,
-        tid: i32,
+        tid: u32,
         beg: u64,
         end: u64,
         offset: VirtualOffset,
     ) -> Result<(), IndexError> {
         // Validate sort order
-        if tid < self.last_tid {
-            return Err(IndexError::UnsortedInput { tid, pos: beg });
-        }
-        if tid == self.last_tid && beg < self.last_coor {
+        if let Some(last_tid) = self.last_tid
+            && (tid < last_tid || (tid == last_tid && beg < self.last_coor))
+        {
             return Err(IndexError::UnsortedInput { tid, pos: beg });
         }
 
         let bin = reg2bin(beg, end, self.min_shift, self.depth);
 
-        if tid != self.last_tid {
+        if self.last_tid != Some(tid) {
             // New reference sequence
             if self.save_bin != u32::MAX {
                 self.flush_chunk();
             }
-            if self.last_tid >= 0 {
-                self.flush_pseudo_bin();
-            }
+            self.flush_pseudo_bin();
             // Initialize for new tid
             if let Some(r) = self.refs.get_mut(tid as usize) {
                 r.off_beg = self.last_off;
             }
             self.save_off = self.last_off;
             self.save_bin = bin;
-            self.save_tid = tid;
+            self.save_tid = Some(tid);
         } else if bin != self.last_bin {
             // Same tid, different bin
             self.flush_chunk();
@@ -252,7 +250,7 @@ impl IndexBuilder {
         }
 
         self.last_bin = bin;
-        self.last_tid = tid;
+        self.last_tid = Some(tid);
         self.last_coor = beg;
         self.last_off = offset;
 
@@ -264,7 +262,7 @@ impl IndexBuilder {
     /// pseudo-bin, matching htslib's `hts_idx_push` behavior for unmapped reads.
     pub fn push_unmapped(
         &mut self,
-        tid: i32,
+        tid: u32,
         beg: u64,
         end: u64,
         offset: VirtualOffset,
@@ -279,22 +277,21 @@ impl IndexBuilder {
     }
 
     fn flush_chunk(&mut self) {
-        if self.save_bin == u32::MAX || self.save_tid < 0 {
+        let Some(save_tid) = self.save_tid else { return };
+        if self.save_bin == u32::MAX {
             return;
         }
         let chunk = IndexChunk { begin: self.save_off, end: self.last_off };
-        if let Some(r) = self.refs.get_mut(self.save_tid as usize) {
+        if let Some(r) = self.refs.get_mut(save_tid as usize) {
             r.bins.entry(self.save_bin).or_default().push(chunk);
         }
     }
 
     // r[impl index_builder.pseudo_bin]
     fn flush_pseudo_bin(&mut self) {
-        if self.last_tid < 0 {
-            return;
-        }
+        let Some(last_tid) = self.last_tid else { return };
         let pseudo_bin_id = pseudo_bin(self.depth);
-        if let Some(r) = self.refs.get_mut(self.last_tid as usize) {
+        if let Some(r) = self.refs.get_mut(last_tid as usize) {
             let chunks = vec![
                 // Chunk 0: virtual offset range
                 IndexChunk { begin: r.off_beg, end: r.off_end },
@@ -312,9 +309,7 @@ impl IndexBuilder {
         if self.save_bin != u32::MAX {
             self.flush_chunk();
         }
-        if self.last_tid >= 0 {
-            self.flush_pseudo_bin();
-        }
+        self.flush_pseudo_bin();
 
         // Backfill linear index gaps (right-to-left propagation)
         for r in &mut self.refs {

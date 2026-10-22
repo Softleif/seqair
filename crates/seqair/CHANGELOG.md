@@ -56,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OwnedBamRecord::aligned_pairs_with_read` give `None` for a record without qualities (BAM's
   `0xFF` run, SAM `*`), where the store's helper used to hand out the `0xFF` run. `RecordStore::set_template_len`
   and `set_mate_info` (unused) are removed.
+- **`IndexBuilder::push`/`push_unmapped` take the reference id as a `u32`**, and
+  `IndexError::UnsortedInput::tid` is a `u32`; the builder's "no record yet" state is an
+  `Option`, not `-1`.
 
 ## v0.6.0 (2026-10-20)
 

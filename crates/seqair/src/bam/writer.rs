@@ -192,9 +192,8 @@ impl<W: Write> BamWriter<W> {
         // record). Sort validation is delegated to `IndexBuilder::push()`.
         // Fully unmapped records (no reference) are not pushed.
         if let Some(ref mut index) = self.index
-            && let Some(ref_id) = ref_id
+            && let Some(ref_id) = ref_id.map(Tid::as_u32)
         {
-            let ref_id = Tid::to_wire(Some(ref_id));
             let voff = self.bgzf.index_offset();
             // Placed unmapped: beg = end = pos. Mapped: end = end_pos.
             let end = if is_unmapped { beg } else { end_pos };
