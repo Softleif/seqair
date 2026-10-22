@@ -10,7 +10,7 @@ use crate::bam::{
     region_buf::{BlockCache, RegionBuf},
 };
 use crate::io::text_scan;
-use crate::reader::Tid;
+use crate::reader::ResolveTid;
 use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0, Pos1};
 use std::num::NonZeroI32;
@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use super::super::bam::record_store::CustomizeRecordStore;
 use crate::reader::FetchedRecord;
@@ -540,12 +540,11 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     let rname_str = std::str::from_utf8(rname)
         .map_err(|_| SamRecordError::InvalidRname { value: rname.into() })?;
     // Unknown contig: skip.
-    let Some(rec_tid) = header.tid(rname_str) else { return Ok(None) };
+    let Ok(rec_tid) = rname_str.resolve_tid(header) else { return Ok(None) };
 
-    if rec_tid != tid_filter {
+    if rec_tid.as_u32() != tid_filter {
         return Ok(None);
     }
-    let rec_tid = Tid::new(rec_tid);
 
     // r[impl sam.record.coordinate_conversion]
     let pos_field = fields.get(3).copied().unwrap_or(b"0");
@@ -616,27 +615,32 @@ fn parse_sam_line<E: CustomizeRecordStore>(
 
     // Field 7: RNEXT (mate reference name; * = unavailable, = = same as RNAME)
     let rnext_field = fields.get(6).copied().unwrap_or(b"*");
+    // r[impl sam.record.mate_fields]
     let next_ref_id = if rnext_field == b"*" {
         None
     } else if rnext_field == b"=" {
-        rec_tid
+        Some(rec_tid)
     } else {
         let rnext_str = std::str::from_utf8(rnext_field)
             .map_err(|_| SamRecordError::InvalidRname { value: rnext_field.into() })?;
-        header.tid(rnext_str).and_then(Tid::new)
+        let next_ref_id = rnext_str.resolve_tid(header).ok();
+        if next_ref_id.is_none() {
+            warn!(rnext = rnext_str, "unknown mate reference name; treated as unmapped");
+        }
+        next_ref_id
     };
 
     // Field 8: PNEXT (1-based mate position, 0 = unavailable)
     let pnext_field = fields.get(7).copied().unwrap_or(b"0");
     let pnext = parse_i64(pnext_field)
         .ok_or_else(|| SamRecordError::InvalidPnext { value: pnext_field.into() })?;
-    // PNEXT=0 means unavailable.
-    let next_pos = if pnext > 0 {
-        let p = Pos1::try_from(pnext)
-            .map_err(|_| SamRecordError::InvalidPnext { value: pnext_field.into() })?;
-        Some(p.to_zero_based())
-    } else {
-        None
+    let next_pos = match pnext {
+        0 => None,
+        _ => Some(
+            Pos1::try_from(pnext)
+                .map_err(|_| SamRecordError::InvalidPnext { value: pnext_field.into() })?
+                .to_zero_based(),
+        ),
     };
 
     // Field 9: TLEN
@@ -661,7 +665,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
             bases,
             qual_buf,
             aux_buf,
-            rec_tid,
+            Some(rec_tid),
             next_ref_id,
             next_pos,
             template_len,
@@ -1143,12 +1147,52 @@ mod tests {
         );
     }
 
-    /// PNEXT and TLEN past `i32` are malformed, not truncated into range.
+    // r[verify sam.record.mate_fields]
+    /// RNEXT names resolve against the header (an unknown one is no mate
+    /// reference), PNEXT 0 is no mate position.
+    #[test]
+    fn mate_fields_resolve_against_the_header() {
+        let header =
+            BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:1000\n@SQ\tSN:chr2\tLN:1000\n").unwrap();
+        let tid = |n: u32| n.resolve_tid(&header).ok();
+        for (rnext, pnext, want_ref, want_pos) in [
+            ("*", "0", None, None),
+            ("=", "50", tid(0), Pos0::new(49)),
+            ("chr2", "1", tid(1), Pos0::new(0)),
+            ("chr9", "7", None, Pos0::new(6)),
+        ] {
+            let line = format!("r\t1\tchr1\t100\t60\t4M\t{rnext}\t{pnext}\t0\tACGT\t~~~~");
+            let (mut store, mut cigar_buf, mut bases_buf, mut qual_buf, mut aux_buf) =
+                make_store_and_bufs();
+            parse_sam_line(
+                line.as_bytes(),
+                &header,
+                0,
+                0,
+                10000,
+                &mut store,
+                &mut cigar_buf,
+                &mut bases_buf,
+                &mut qual_buf,
+                &mut aux_buf,
+                &mut (),
+            )
+            .unwrap()
+            .unwrap();
+            let rec = store.record(crate::bam::RecordIdx::ZERO).unwrap();
+            assert_eq!((rec.next_ref_id, rec.next_pos), (want_ref, want_pos), "{line}");
+        }
+    }
+
+    // r[verify sam.record.mate_fields]
+    /// PNEXT and TLEN past `i32`, and a negative PNEXT, are malformed, not
+    /// truncated into range.
     #[test]
     fn error_mate_fields_beyond_i32() {
         let header = make_header();
         for (line, want_pnext) in [
             (&b"r\t1\tchr1\t100\t60\t4M\t=\t2147483649\t0\tACGT\t~~~~"[..], true),
+            (&b"r\t1\tchr1\t100\t60\t4M\t=\t-5\t0\tACGT\t~~~~"[..], true),
             (&b"r\t1\tchr1\t100\t60\t4M\t=\t200\t2147483648\tACGT\t~~~~"[..], false),
             (&b"r\t1\tchr1\t100\t60\t4M\t=\t200\t-2147483649\tACGT\t~~~~"[..], false),
         ] {

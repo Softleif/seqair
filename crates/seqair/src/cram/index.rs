@@ -22,8 +22,10 @@ pub enum CramIndexError {
 /// A single entry in a CRAI index.
 #[derive(Debug, Clone)]
 pub struct CraiEntry {
-    /// `None` for an unmapped entry.
-    pub ref_id: Option<Tid>,
+    /// The reference index, `None` for an unmapped entry. Not a [`Tid`]: an
+    /// index is read without the header, and an entry for a reference the
+    /// header lacks only never matches a query.
+    pub ref_id: Option<u32>,
     pub alignment_start: i64,
     pub alignment_span: i64,
     pub container_offset: u64,
@@ -106,7 +108,7 @@ impl CramIndex {
     fn from_entries(mut entries: Vec<CraiEntry>) -> Self {
         entries.sort_by_key(|e| (e.ref_id, e.start0()));
         let mut reach = Vec::with_capacity(entries.len());
-        let mut previous: Option<(Option<Tid>, u64)> = None;
+        let mut previous: Option<(Option<u32>, u64)> = None;
         for e in &entries {
             let before = previous.filter(|&(ref_id, _)| ref_id == e.ref_id).map(|(_, r)| r);
             let own = match e.extent() {
@@ -180,8 +182,9 @@ impl CramIndex {
 
     /// The positions in `entries` of reference `tid`'s entries.
     fn tid_range(&self, tid: Tid) -> (usize, usize) {
-        let lo = self.entries.partition_point(|e| e.ref_id < Some(tid));
-        let hi = self.entries.partition_point(|e| e.ref_id <= Some(tid));
+        let tid = Some(tid.as_u32());
+        let lo = self.entries.partition_point(|e| e.ref_id < tid);
+        let hi = self.entries.partition_point(|e| e.ref_id <= tid);
         (lo, hi)
     }
 
@@ -220,9 +223,13 @@ fn parse_crai_line(line: &str) -> Result<CraiEntry, CramError> {
     };
 
     let raw_ref_id = parse_field(0, "ref_id")?;
-    let ref_id = Tid::from_wire(i32::try_from(raw_ref_id).map_err(|_| {
-        CramIndexError::InvalidField { name: "ref_id", value: raw_ref_id.to_string() }
-    })?);
+    let ref_id = match raw_ref_id {
+        -1 => None,
+        _ => Some(u32::try_from(raw_ref_id).map_err(|_| CramIndexError::InvalidField {
+            name: "ref_id",
+            value: raw_ref_id.to_string(),
+        })?),
+    };
     Ok(CraiEntry {
         ref_id,
         alignment_start: parse_field(1, "alignment_start")?,
@@ -262,7 +269,7 @@ mod tests {
 
         // Find a non-unmapped entry to query
         let first = index.entries().iter().find(|e| e.ref_id.is_some()).unwrap();
-        let tid = first.ref_id.unwrap();
+        let tid = Tid::new(first.ref_id.unwrap()).unwrap();
 
         // Query a broad region that should overlap
         let results = index.query(tid, 0, u64::MAX);
@@ -301,7 +308,7 @@ mod tests {
         // must still be returned by queries that overlap their start position.
         let index = CramIndex::from_entries(vec![
             CraiEntry {
-                ref_id: Tid::new(0),
+                ref_id: Some(0),
                 alignment_start: 1000,
                 alignment_span: 0,
                 container_offset: 100,
@@ -309,7 +316,7 @@ mod tests {
                 slice_size: 500,
             },
             CraiEntry {
-                ref_id: Tid::new(0),
+                ref_id: Some(0),
                 alignment_start: 2000,
                 alignment_span: 500,
                 container_offset: 600,
@@ -340,9 +347,7 @@ mod tests {
     #[hegel::composite]
     fn arb_entry(tc: &TestCase) -> CraiEntry {
         CraiEntry {
-            ref_id: Tid::from_wire(
-                tc.draw_silent(gs::integers::<i32>().min_value(-1).max_value(2)),
-            ),
+            ref_id: tc.draw_silent(gs::optional(gs::integers::<u32>().max_value(2))),
             // 0 with span 0 is an unmapped entry; span 0 alone is unknown extent.
             alignment_start: tc.draw_silent(gs::integers::<i64>().min_value(0).max_value(60)),
             alignment_span: tc.draw_silent(gs::sampled_from(&[0, 1, 2, 5, 20])),
@@ -366,7 +371,7 @@ mod tests {
     fn query_matches_a_scan_of_every_entry(tc: TestCase) {
         let index =
             CramIndex::from_entries(tc.draw(gs::vecs(arb_entry()).max_size(40).print_as_debug()));
-        let tid = Tid::from_wire(tc.draw(gs::integers::<i32>().min_value(-1).max_value(3)));
+        let tid = Tid::new(tc.draw(gs::integers::<u32>().max_value(3))).unwrap();
         let start = tc.draw(gs::integers::<u64>().max_value(80));
         let end = tc.draw(gs::integers::<u64>().min_value(start).max_value(80));
 
@@ -379,10 +384,10 @@ mod tests {
                 let first = (e.alignment_start as u64).saturating_sub(1);
                 let reaches = e.alignment_span == 0
                     || (first + e.alignment_span as u64).saturating_sub(1) >= start;
-                tid.is_some() && e.ref_id == tid && !unmapped && first <= end && reaches
+                e.ref_id == Some(tid.as_u32()) && !unmapped && first <= end && reaches
             })
             .collect();
-        let queried = tid.map_or_else(Vec::new, |tid| index.query(tid, start, end));
+        let queried = index.query(tid, start, end);
         assert_eq!(queried.len(), scanned.len());
         assert!(queried.iter().zip(&scanned).all(|(a, b)| std::ptr::eq(*a, *b)));
     }
@@ -422,7 +427,7 @@ mod tests {
     #[test]
     fn region_bytes_prorates_a_slice_by_the_share_covered() {
         let entry = |start, span, slice_size| CraiEntry {
-            ref_id: Tid::new(0),
+            ref_id: Some(0),
             alignment_start: start,
             alignment_span: span,
             container_offset: 0,
@@ -446,7 +451,7 @@ mod tests {
     #[test]
     fn parse_crai_line_valid() {
         let entry = parse_crai_line("0\t100\t500\t1234\t0\t5678").unwrap();
-        assert_eq!(entry.ref_id, Tid::new(0));
+        assert_eq!(entry.ref_id, Some(0));
         assert_eq!(entry.alignment_start, 100);
         assert_eq!(entry.alignment_span, 500);
         assert_eq!(entry.container_offset, 1234);

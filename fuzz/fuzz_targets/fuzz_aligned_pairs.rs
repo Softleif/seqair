@@ -151,7 +151,7 @@ fuzz_target!(|input: FuzzInput| {
     let raw = build_raw_record(&input);
 
     let mut store = RecordStore::<()>::new();
-    match store.push_raw(&raw, &mut ()) {
+    match store.push_raw(&raw, seqair_fuzz::header(), &mut ()) {
         Ok(Some(_)) => (),
         _ => return,
     };

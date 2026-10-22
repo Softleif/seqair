@@ -1707,7 +1707,7 @@ mod tests {
             rec.to_bam_bytes(&mut buf).unwrap();
 
             let mut store = RecordStore::<()>::new();
-            let _ = store.push_raw(&buf, &mut ()).unwrap();
+            let _ = store.push_raw(&buf, crate::bam::test_util::header(), &mut ()).unwrap();
             store
         }
 
@@ -1744,7 +1744,7 @@ mod tests {
             owned.to_bam_bytes(&mut buf).unwrap();
 
             let mut store = RecordStore::<()>::new();
-            let _ = store.push_raw(&buf, &mut ()).unwrap();
+            let _ = store.push_raw(&buf, crate::bam::test_util::header(), &mut ()).unwrap();
 
             let slim = store.record(ri(0)).unwrap();
             let slim_pairs: Vec<_> = slim.aligned_pairs(&store).unwrap().collect();
@@ -1772,7 +1772,7 @@ mod tests {
                 let mut buf = Vec::new();
                 owned.to_bam_bytes(&mut buf).unwrap();
                 let mut store = RecordStore::<()>::new();
-                store.push_raw(&buf, &mut ()).unwrap();
+                store.push_raw(&buf, crate::bam::test_util::header(), &mut ()).unwrap();
                 let slim = store.record(ri(0)).unwrap();
 
                 let from_store: Vec<_> =

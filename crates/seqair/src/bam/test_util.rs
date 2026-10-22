@@ -31,7 +31,7 @@ pub(crate) fn ri(n: u32) -> RecordIdx {
 pub(crate) fn decode_into_store(buf: &[u8]) -> RecordStore {
     let mut store = RecordStore::new();
     let idx = store
-        .push_raw(buf, &mut ())
+        .push_raw(buf, crate::bam::test_util::header(), &mut ())
         .expect("push_raw returned an error")
         .expect("record was filtered out");
     assert_eq!(idx, RecordIdx::ZERO, "fresh store must produce index 0");
@@ -54,7 +54,22 @@ pub(crate) fn push_one_record_from_bgzf<R: Read + Seek>(
     let mut rec_data = vec![0u8; len];
     reader.read_exact_into(&mut rec_data).expect("read record bytes");
     store
-        .push_raw(&rec_data, &mut ())
+        .push_raw(&rec_data, crate::bam::test_util::header(), &mut ())
         .expect("push_raw returned an error")
         .expect("record was filtered out")
+}
+
+/// A header with sixteen references, `c0`..`c15`, for records built by hand:
+/// `push_raw` checks their reference ids against it.
+#[allow(
+    dead_code,
+    reason = "used by sibling test modules; rustc cfg gates may hide some call sites"
+)]
+pub(crate) fn header() -> &'static super::BamHeader {
+    static HEADER: std::sync::LazyLock<super::BamHeader> = std::sync::LazyLock::new(|| {
+        let text =
+            (0..16).map(|i| format!("@SQ\tSN:c{i}\tLN:1000000000\n")).collect::<Vec<_>>().concat();
+        super::BamHeader::from_sam_text(&text).expect("test header parses")
+    });
+    &HEADER
 }

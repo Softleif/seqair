@@ -50,7 +50,7 @@ fn reused_vec_depth_matches_sweep_line(tc: TestCase) {
         if end_excl <= MAX_POS {
             delta[end_excl] -= 1;
         }
-        arena.push_raw(&make_record(0, offset, 99, 60, len), &mut ()).unwrap();
+        arena.push_raw(&make_record(0, offset, 99, 60, len), helpers::header(), &mut ()).unwrap();
     }
 
     let mut expected_depth = vec![0usize; MAX_POS];
@@ -80,9 +80,9 @@ fn reused_vec_depth_matches_sweep_line(tc: TestCase) {
 fn already_sorted_records_produce_correct_pileup() {
     let mut arena = RecordStore::new();
     // Push in sorted order (as fetch_into guarantees)
-    arena.push_raw(&make_record(0, 10, 99, 60, 30), &mut ()).unwrap();
-    arena.push_raw(&make_record(0, 20, 99, 60, 30), &mut ()).unwrap();
-    arena.push_raw(&make_record(0, 30, 99, 60, 30), &mut ()).unwrap();
+    arena.push_raw(&make_record(0, 10, 99, 60, 30), helpers::header(), &mut ()).unwrap();
+    arena.push_raw(&make_record(0, 20, 99, 60, 30), helpers::header(), &mut ()).unwrap();
+    arena.push_raw(&make_record(0, 30, 99, 60, 30), helpers::header(), &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
@@ -119,8 +119,10 @@ fn single_arena_get_per_record_entry_still_correct() {
     }
 
     let mut arena = RecordStore::new();
-    arena.push_raw(&make_record(0, 0, 99, 60, 50), &mut DropSecondary).unwrap();
-    arena.push_raw(&make_record(0, 10, 99 | 0x100, 40, 50), &mut DropSecondary).unwrap(); // secondary flag
+    arena.push_raw(&make_record(0, 0, 99, 60, 50), helpers::header(), &mut DropSecondary).unwrap();
+    arena
+        .push_raw(&make_record(0, 10, 99 | 0x100, 40, 50), helpers::header(), &mut DropSecondary)
+        .unwrap(); // secondary flag
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
@@ -155,7 +157,7 @@ fn cigar_index_from_arena_slab_correct() {
         &[cigar_op(30, 0), cigar_op(5, 2), cigar_op(20, 0)],
         50,
     );
-    arena.push_raw(&raw, &mut ()).unwrap();
+    arena.push_raw(&raw, helpers::header(), &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(
         arena.prepare_for_pileup().input,
@@ -192,7 +194,7 @@ fn precomputed_matches_indels_accessible_from_record() {
         &[cigar_op(30, 0), cigar_op(5, 1), cigar_op(15, 0)],
         50,
     );
-    arena.push_raw(&raw, &mut ()).unwrap();
+    arena.push_raw(&raw, helpers::header(), &mut ()).unwrap();
 
     let r = arena.record(ri(0)).unwrap();
     assert_eq!(r.matching_bases, 45);
@@ -266,7 +268,7 @@ fn matches_indels_from_varied_cigar_ops(tc: TestCase) {
 
     let raw = make_record_with_cigar(0, 0, 99, 60, &ops, seq_len);
     let mut arena = RecordStore::new();
-    arena.push_raw(&raw, &mut ()).unwrap();
+    arena.push_raw(&raw, helpers::header(), &mut ()).unwrap();
     let r = arena.record(ri(0)).unwrap();
 
     assert_eq!(r.matching_bases, exp_matches, "matching_bases mismatch for ops={:?}", inner_ops);
@@ -387,7 +389,7 @@ fn arena_with_capacity_avoids_realloc() {
     let mut arena = RecordStore::with_byte_hint(50_000);
 
     for i in 0..100 {
-        arena.push_raw(&make_record(0, i * 10, 99, 60, 50), &mut ()).unwrap();
+        arena.push_raw(&make_record(0, i * 10, 99, 60, 50), helpers::header(), &mut ()).unwrap();
     }
     assert_eq!(arena.len(), 100);
 

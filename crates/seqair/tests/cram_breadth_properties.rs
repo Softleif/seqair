@@ -43,21 +43,25 @@ use seqair::cram::container::{ContainerHeader, RefSeqId};
 use seqair::cram::index::{CraiEntry, CramIndex};
 use seqair::cram::slice::SliceHeader;
 use seqair::cram::slice_cache::SliceCacheBudget;
-use seqair::reader::{IndexedReader, Readers, Tid};
+use seqair::reader::{IndexedReader, Readers, ResolveTid};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// A `Tid` can only be built from a header, so take the index's own for `contig`;
-/// a contig with no entry has nothing to query.
-fn query_contig(index: &CramIndex, contig: usize, start: u64, end: u64) -> Vec<&CraiEntry> {
-    let want = u32::try_from(contig).expect("contig fits u32");
-    index
-        .entries()
-        .iter()
-        .find_map(|e| e.ref_id.filter(|t| t.as_u32() == want))
-        .map_or_else(Vec::new, |tid| index.query(tid, start, end))
+/// Query `index` for reference `contig` of the CRAM's own header.
+fn query_contig<'i>(
+    index: &'i CramIndex,
+    cram: &Path,
+    fasta: &Path,
+    contig: usize,
+    start: u64,
+    end: u64,
+) -> Vec<&'i CraiEntry> {
+    let reader = IndexedReader::open_with_reference(cram, fasta).expect("open");
+    let tid =
+        u32::try_from(contig).unwrap().resolve_tid(reader.header()).expect("contig in header");
+    index.query(tid, start, end)
 }
 
 /// Every contig is this long. Short contigs are the point: samtools decides to
@@ -865,7 +869,7 @@ fn multi_ref_containers_use_every_slices_reference_range() {
     assert!(headers.iter().filter(|h| h.ref_seq_id == RefSeqId::Multi).count() >= 2, "{headers:?}");
     let entries = crai_entries(&cram);
     assert!(
-        entries.iter().filter(|e| e.ref_id.map(Tid::as_u32) == Some(1)).count() >= 2,
+        entries.iter().filter(|e| e.ref_id == Some(1)).count() >= 2,
         "c1 needs two index entries in one container: {entries:?}"
     );
     assert_eq!(fetch_all(&cram, &fasta, &sample), fetch_all(&bam, &fasta, &sample));
@@ -908,7 +912,7 @@ fn region_queries_return_exactly_the_overlapping_reads(tc: TestCase) {
     // The index must not be more selective than the records are: every entry
     // the query keeps has to be one a decoded record could live in.
     let crai = CramIndex::from_path(&cram.with_extension("cram.crai")).expect("read CRAI");
-    let kept = query_contig(&crai, contig, u64::from(start0), u64::from(end0)).len();
+    let kept = query_contig(&crai, &cram, &fasta, contig, u64::from(start0), u64::from(end0)).len();
     assert!(kept > 0 || want.is_empty(), "index pruned every slice but reads overlap");
 
     tc.event_value("reads in region", want.len() as f64);
@@ -1156,9 +1160,9 @@ fn unmapped_reads_are_indexed_apart_from_the_mapped_ones(tc: TestCase) {
     let index = CramIndex::from_path(&cram.with_extension("cram.crai")).expect("read CRAI");
     for contig in 0..sample.contigs.len() {
         assert!(
-            query_contig(&index, contig, 0, u64::from(CONTIG_LEN) - 1)
+            query_contig(&index, &cram, &fasta, contig, 0, u64::from(CONTIG_LEN) - 1)
                 .iter()
-                .all(|e| e.ref_id.map(Tid::as_u32) == u32::try_from(contig).ok()),
+                .all(|e| e.ref_id == u32::try_from(contig).ok()),
             "a whole-contig query pulled in an entry for another reference"
         );
         let from_cram = fetch(&cram, &fasta, contig, 0, CONTIG_LEN - 1);

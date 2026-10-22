@@ -44,7 +44,7 @@ fuzz_target!(|input: PileupInput| {
 
     // Push up to max_records into the store
     for raw in input.records.iter().take(max_records) {
-        let _ = store.push_raw(raw, &mut ());
+        let _ = store.push_raw(raw, seqair_fuzz::header(), &mut ());
     }
 
     if store.is_empty() {

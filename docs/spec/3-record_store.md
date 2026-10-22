@@ -131,7 +131,7 @@ On construction, the store MUST pre-allocate all six vectors with estimated capa
 ## Decoding into slabs
 
 r[record_store.push_raw+2]
-`push_raw(raw_bytes)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `Base` enum values in the bases slab.
+`push_raw(raw_bytes, header, customize)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `Base` enum values in the bases slab.
 
 r[record_store.checked_offsets]
 Slab offsets (name_off, bases_off, cigar_off, qual_off, aux_off) MUST be checked for u32 overflow before storing in both `push_raw` and `push_fields`. If any slab exceeds `u32::MAX` bytes, the store MUST return an error rather than silently truncating the offset.

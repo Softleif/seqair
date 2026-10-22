@@ -150,7 +150,7 @@ fn store_with<E: CustomizeRecordStore>(
 ) -> RecordStore<E::Extra> {
     let mut store = RecordStore::new();
     for (i, read) in reads.iter().enumerate() {
-        store.push_raw(&raw_with_qname(&qname_for(i), read), customize).unwrap();
+        store.push_raw(&raw_with_qname(&qname_for(i), read), helpers::header(), customize).unwrap();
     }
     store
 }

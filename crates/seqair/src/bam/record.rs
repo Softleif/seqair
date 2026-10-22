@@ -15,6 +15,7 @@
 //! them into a [`RecordStore`](super::record_store::RecordStore) and access
 //! fields via [`SlimRecord`](super::record_store::SlimRecord).
 
+use super::BamHeader;
 use crate::reader::Tid;
 use seqair_types::{BamFlags, Pos0};
 use std::num::NonZeroI32;
@@ -98,14 +99,13 @@ pub(crate) fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
 /// parsing and checked offset arithmetic.
 #[derive(Debug)]
 pub(crate) struct ParsedHeader {
-    pub tid: Option<Tid>,
+    /// Checked against the header by [`WireRefs::resolve`].
+    pub refs: WireRefs,
     pub pos: Pos0,
     pub mapq: u8,
     pub flags: BamFlags,
     pub n_cigar_ops: u16,
     pub seq_len: u32,
-    pub next_ref_id: Option<Tid>,
-    pub next_pos: Option<Pos0>,
     /// `None` for a wire `0`: unavailable, or a single-segment template.
     pub template_len: Option<NonZeroI32>,
     /// Start of variable-length data (32 + `name_len`).
@@ -116,6 +116,43 @@ pub(crate) struct ParsedHeader {
     pub seq_end: usize,
     /// End of quality scores.
     pub qual_end: usize,
+}
+
+/// A record's reference id, mate reference id and mate position as BAM
+/// stores them: their meaning depends on the header, so they stay raw until
+/// [`Self::resolve`] checks them against it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WireRefs {
+    tid: i32,
+    next_ref_id: i32,
+    next_pos: i32,
+}
+
+/// [`WireRefs`] checked against a header.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Refs {
+    pub tid: Option<Tid>,
+    pub next_ref_id: Option<Tid>,
+    pub next_pos: Option<Pos0>,
+}
+
+impl WireRefs {
+    // r[impl bam.record.ref_ids]
+    /// `-1` is "none" for all three; a reference id must name one of
+    /// `header`'s targets and a mate position must not be otherwise negative.
+    pub(crate) fn resolve(self, header: &BamHeader) -> Result<Refs, DecodeError> {
+        let tid = Tid::from_wire(self.tid, header)
+            .map_err(|source| DecodeError::InvalidTid { source })?;
+        let next_ref_id = Tid::from_wire(self.next_ref_id, header)
+            .map_err(|source| DecodeError::InvalidMateTid { source })?;
+        let next_pos = match self.next_pos {
+            -1 => None,
+            p => {
+                Some(Pos0::try_from(p).map_err(|_| DecodeError::InvalidMatePosition { value: p })?)
+            }
+        };
+        Ok(Refs { tid, next_ref_id, next_pos })
+    }
 }
 
 /// Parse the fixed 36-byte BAM header and compute checked offsets for
@@ -133,7 +170,6 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     }
 
     debug_assert!(raw.len() >= 32, "raw record too short for fixed fields: {}", raw.len());
-    let tid = Tid::from_wire(i32::from_le_bytes(read4(raw, 0)));
     let pos_i32 = i32::from_le_bytes(read4(raw, 4));
     let pos =
         Pos0::try_from(pos_i32).map_err(|_| DecodeError::InvalidPosition { value: pos_i32 })?;
@@ -145,9 +181,12 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     let n_cigar_ops = u16::from_le_bytes(read2(raw, 12));
     let flags = BamFlags::from(u16::from_le_bytes(read2(raw, 14)));
     let seq_len = u32::from_le_bytes(read4(raw, 16));
-    let next_ref_id = Tid::from_wire(i32::from_le_bytes(read4(raw, 20)));
-    // A negative mate position is "unavailable", whatever the value.
-    let next_pos = Pos0::try_from(i32::from_le_bytes(read4(raw, 24))).ok();
+    // r[impl bam.record.mate_fields+2]
+    let refs = WireRefs {
+        tid: i32::from_le_bytes(read4(raw, 0)),
+        next_ref_id: i32::from_le_bytes(read4(raw, 20)),
+        next_pos: i32::from_le_bytes(read4(raw, 24)),
+    };
     let template_len = NonZeroI32::new(i32::from_le_bytes(read4(raw, 28)));
 
     let cigar_bytes = usize::from(n_cigar_ops) * 4;
@@ -163,14 +202,12 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     }
 
     Ok(ParsedHeader {
-        tid,
+        refs,
         pos,
         mapq,
         flags,
         n_cigar_ops,
         seq_len,
-        next_ref_id,
-        next_pos,
         template_len,
         var_start,
         cigar_end,
@@ -234,6 +271,15 @@ pub enum DecodeError {
 
     #[error("invalid BAM position value {value}: negative positions are reserved")]
     InvalidPosition { value: i32 },
+
+    #[error("invalid reference id")]
+    InvalidTid { source: crate::reader::TidError },
+
+    #[error("invalid mate reference id")]
+    InvalidMateTid { source: crate::reader::TidError },
+
+    #[error("invalid mate position {value}: only -1 marks an absent one")]
+    InvalidMatePosition { value: i32 },
 
     #[error("CIGAR query length {cigar_query_len} does not match seq_len {seq_len}")]
     CigarQueryLenMismatch { cigar_query_len: u32, seq_len: u32 },

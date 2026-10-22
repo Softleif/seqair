@@ -553,6 +553,9 @@ The reconstructed CIGAR MUST be assembled as `Vec<CigarOp>` (typed BAM-on-disk p
 r[cram.record.mate_detached]
 When CRAM flags bit 0x2 is set (detached), mate information is stored inline: `MF` (mate flags), `NS` (next ref ID), `NP` (next mate position), `TS` (template size). The `NP` and `TS` values are stored in the RecordStore as `next_pos` (1-based `NP` to 0-based; `NP = 0` is `None`) and `template_len` (`TS = 0` is `None`). `MF` and `NS` MUST be read to advance the data stream.
 
+r[cram.record.ref_ids]
+A slice's `ref_seq_id` and every record's `RI` and `NS` MUST name a target of the file's header or be `-1` (the slice header also allows `-2`, multi-reference); anything else MUST fail the slice with `CramError::InvalidTid` (slice reference, `RI`) or `InvalidMateTid` (`NS`), as htslib's `cram_decode_seq` fails a record whose reference is `< -1` or past the header's. A container or slice header and a CRAI entry are parsed without the header, so they carry the index as a `u32` (`RefSeqId::Ref(u32)`, `CraiEntry::ref_id: Option<u32>`); the check runs where a slice's records are decoded. A CRAI entry for a reference the header lacks is not an error: no query names it. A negative `NP` MUST fail with `CramError::InvalidMatePosition`.
+
 r[cram.record.mate_attached]
 When bit 0x2 is clear, the mate is "attached" — `NF` (next fragment distance) gives the record-skip to the mate within the same slice. The absolute mate index is `current_record_index + 1 + NF`. The decoder MUST read `NF` and record the mate link for post-processing.
 
@@ -599,7 +602,7 @@ The `RG` data series is separate from aux tags. If a read group is present, the 
 > 6. Slice size in bytes (int)
 
 r[cram.index.query+2]
-Region queries MUST find all index entries whose alignment range overlaps the query region for the given reference (a `Tid`; `CraiEntry::ref_id` is an `Option<Tid>`, `None` for an unmapped entry), per [`interval.overlap_test`](./0-1-pos.md#intervaloverlap_test). A CRAI `alignment_start` is **1-based** (`r[cram.index.parse]`) while the query is 0-based inclusive, so the entry's range MUST be converted before comparing: an entry covers 0-based `[alignment_start - 1, alignment_start - 1 + span - 1]`. The reader then seeks to the container byte offset, skips to the slice offset, and decodes the slice.
+Region queries MUST find all index entries whose alignment range overlaps the query region for the given reference (a `Tid`; `CraiEntry::ref_id` is an `Option<u32>`, `None` for an unmapped entry, `r[cram.record.ref_ids]`), per [`interval.overlap_test`](./0-1-pos.md#intervaloverlap_test). A CRAI `alignment_start` is **1-based** (`r[cram.index.parse]`) while the query is 0-based inclusive, so the entry's range MUST be converted before comparing: an entry covers 0-based `[alignment_start - 1, alignment_start - 1 + span - 1]`. The reader then seeks to the container byte offset, skips to the slice offset, and decodes the slice.
 
 > **Was:** the two conventions were compared directly, on the reasoning that an overlap test is symmetric. It is not: the 1-based entry start read one position too high, so a query ending within one base of a container's first record pruned that container entirely and the records vanished — while BAM and CRAM disagreed on the same narrow query. Over-inclusive index pruning is harmless (`decode_slice` re-filters every record); under-inclusive pruning loses data silently.
 

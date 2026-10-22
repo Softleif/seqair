@@ -17,7 +17,7 @@ use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
-use crate::reader::Tid;
+use crate::reader::{ResolveTid, Tid};
 use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0, Pos1, SmallVec, SmolStr};
 use std::fs::File;
@@ -281,6 +281,16 @@ pub enum CramError {
 
     #[error("invalid reference sequence id {value} (expected >= 0, -1 unmapped or -2 multi-ref)")]
     InvalidRefSeqId { value: i32 },
+
+    /// A slice's or record's reference id the header does not have.
+    #[error("invalid reference id")]
+    InvalidTid { source: crate::reader::TidError },
+
+    #[error("invalid mate reference id")]
+    InvalidMateTid { source: crate::reader::TidError },
+
+    #[error("invalid mate position {value}: NP is 1-based, 0 marks an absent one")]
+    InvalidMatePosition { value: i32 },
 
     #[error("invalid BAM flags value: {value:#06x}")]
     InvalidBamFlags { value: i32, source: std::num::TryFromIntError },
@@ -617,7 +627,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     /// Estimate the compressed bytes of the records a query for `span` on
     /// `tid` returns, from the index alone (`r[cram.index.region_bytes]`).
     pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> Option<u64> {
-        let tid = Tid::new(tid)?;
+        let tid = tid.resolve_tid(&self.shared.header).ok()?;
         Some(self.shared.index.region_bytes(tid, span.start.as_u64(), span.last.as_u64()))
     }
 
@@ -665,7 +675,10 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         // are borrowed from it.
         let shared = Arc::clone(&self.shared);
         let raw_tid = tid;
-        let tid = Tid::new(raw_tid).ok_or(CramError::UnknownTid { tid: raw_tid })?;
+        // A tid the header lacks has no index entries either, as in BAM.
+        let Ok(tid) = raw_tid.resolve_tid(&shared.header) else {
+            return Ok(crate::reader::FetchCounts::default());
+        };
         let entries = shared.index.query(tid, start_u64, end_u64);
         if entries.is_empty() {
             return Ok(crate::reader::FetchCounts::default());

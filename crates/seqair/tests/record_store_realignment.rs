@@ -161,7 +161,7 @@ fn make_simple_record(
 fn push_raw_preserves_tid() {
     let raw = make_simple_record(5, 100, &[pack_cigar_op(4, CIGAR_M)], 4, b"read1");
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
     assert_eq!(store.record(idx).unwrap().tid.map(|t| t.as_u32()), Some(5));
 }
 
@@ -183,7 +183,7 @@ fn push_raw_preserves_next_pos() {
         300,
     );
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
     assert_eq!(store.record(idx).unwrap().next_pos, Pos0::new(500));
     assert_eq!(store.record(idx).unwrap().template_len, std::num::NonZeroI32::new(300));
 }
@@ -206,7 +206,7 @@ fn push_raw_preserves_negative_template_len() {
         -300,
     );
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
     assert_eq!(store.record(idx).unwrap().template_len, std::num::NonZeroI32::new(-300));
 }
 
@@ -219,7 +219,7 @@ fn cigar_in_own_slab() {
     let cigar_packed = pack_cigar(&[(4, CIGAR_M)]);
     let raw = make_simple_record(0, 100, &[pack_cigar_op(4, CIGAR_M)], 4, b"read1");
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     // cigar accessor should return the correct packed bytes
     assert_eq!(store.record(idx).unwrap().cigar(), &cigar_packed);
@@ -238,7 +238,7 @@ fn set_alignment_updates_cigar_and_pos() {
     // Start with 4M at pos 100
     let raw = make_simple_record(0, 100, &[pack_cigar_op(4, CIGAR_M)], 4, b"read1");
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     // Realign to pos 95 with 2S2M (still query length 4)
     let new_cigar = pack_cigar(&[(2, CIGAR_S), (2, CIGAR_M)]);
@@ -270,7 +270,7 @@ fn soft_clips_are_stored_at_push_and_follow_set_alignment() {
         b"read1",
     );
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
     let rec = store.record(idx).unwrap();
     assert_eq!((rec.leading_soft_clip, rec.trailing_soft_clip), (2, 3));
 
@@ -323,7 +323,7 @@ fn set_alignment_preserves_other_fields() {
         300,
     );
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     let orig_seq: Vec<Base> = store.record(idx).unwrap().seq().to_vec();
     let orig_qual: Vec<BaseQuality> = store.record(idx).unwrap().qual().to_vec();
@@ -351,8 +351,8 @@ fn set_alignment_does_not_corrupt_other_records() {
     let raw1 = make_simple_record(0, 100, &[pack_cigar_op(4, CIGAR_M)], 4, b"read1");
     let raw2 = make_simple_record(0, 200, &[pack_cigar_op(4, CIGAR_M)], 4, b"read2");
     let mut store = RecordStore::new();
-    let idx1 = store.push_raw(&raw1, &mut ()).unwrap().expect("kept");
-    let idx2 = store.push_raw(&raw2, &mut ()).unwrap().expect("kept");
+    let idx1 = store.push_raw(&raw1, helpers::header(), &mut ()).unwrap().expect("kept");
+    let idx2 = store.push_raw(&raw2, helpers::header(), &mut ()).unwrap().expect("kept");
 
     let orig_cigar2 = store.record(idx2).unwrap().cigar().to_vec();
     let orig_qual2 = store.record(idx2).unwrap().qual().to_vec();
@@ -372,7 +372,7 @@ fn set_alignment_does_not_corrupt_other_records() {
 fn set_alignment_rejects_query_length_mismatch() {
     let raw = make_simple_record(0, 100, &[pack_cigar_op(4, CIGAR_M)], 4, b"read1");
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     // New cigar has query length 6 but record has seq_len 4
     let bad_cigar = pack_cigar(&[(6, CIGAR_M)]);
@@ -389,7 +389,7 @@ fn set_alignment_with_indels() {
     // seq_len = 6: 3M1I2M (query = 3+1+2 = 6, ref = 3+2 = 5)
     let raw = make_simple_record(0, 100, &[pack_cigar_op(6, CIGAR_M)], 6, b"read1");
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     let new_cigar = pack_cigar(&[(3, CIGAR_M), (1, CIGAR_I), (2, CIGAR_M)]);
     store.set_alignment(idx, Pos0::new(100).unwrap(), &new_cigar).unwrap();
@@ -408,9 +408,9 @@ fn set_alignment_then_sort_restores_order() {
     let raw2 = make_simple_record(0, 200, &[pack_cigar_op(4, CIGAR_M)], 4, b"read2");
     let raw3 = make_simple_record(0, 300, &[pack_cigar_op(4, CIGAR_M)], 4, b"read3");
     let mut store = RecordStore::new();
-    store.push_raw(&raw1, &mut ()).unwrap();
-    store.push_raw(&raw2, &mut ()).unwrap();
-    store.push_raw(&raw3, &mut ()).unwrap();
+    store.push_raw(&raw1, helpers::header(), &mut ()).unwrap();
+    store.push_raw(&raw2, helpers::header(), &mut ()).unwrap();
+    store.push_raw(&raw3, helpers::header(), &mut ()).unwrap();
 
     // Move record at index 2 (pos=300) to pos=50
     let new_cigar = pack_cigar(&[(4, CIGAR_M)]);
@@ -434,7 +434,7 @@ fn set_alignment_then_sort_restores_order() {
 fn set_alignment_multiple_times_same_record() {
     let raw = make_simple_record(0, 100, &[pack_cigar_op(4, CIGAR_M)], 4, b"read1");
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     // First realignment
     let cigar1 = pack_cigar(&[(2, CIGAR_S), (2, CIGAR_M)]);
@@ -532,7 +532,7 @@ fn set_alignment_end_pos_matches_oracle(tc: TestCase) {
 
     let raw = make_simple_record(0, pos as i32, &orig_cigar_packed, qlen, b"read1");
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     let new_cigar_bytes = pack_cigar(&new_parts);
     let new_pos_typed = Pos0::new(new_pos).unwrap();
@@ -566,7 +566,7 @@ fn set_alignment_preserves_seq_and_qual(tc: TestCase) {
 
     let raw = make_simple_record(0, pos as i32, &orig_cigar_packed, qlen, b"testread");
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     let orig_seq: Vec<Base> = store.record(idx).unwrap().seq().to_vec();
     let orig_qual: Vec<BaseQuality> = store.record(idx).unwrap().qual().to_vec();
@@ -602,7 +602,7 @@ fn sort_after_set_alignment_is_position_ordered(tc: TestCase) {
             4,
             format!("r{i}").as_bytes(),
         );
-        store.push_raw(&raw, &mut ()).unwrap();
+        store.push_raw(&raw, helpers::header(), &mut ()).unwrap();
     }
 
     // Realign each record to its new position
@@ -632,7 +632,7 @@ fn set_alignment_rejects_wrong_query_len(tc: TestCase) {
 
     let raw = make_simple_record(0, 100, &orig_cigar_packed, qlen, b"read1");
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     let before = {
         let rec = store.record(idx).unwrap();

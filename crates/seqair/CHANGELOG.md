@@ -48,14 +48,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `next_ref_id` as `Option<Tid>`, `next_pos` as `Option<Pos0>` and `template_len` as
   `Option<NonZeroI32>` (`None` for the wire `-1`, and for TLEN `0`). `Tid` has a niche, so the
   options cost nothing; outside the crate a `Tid` still comes from `ResolveTid`. CRAM
-  `ContainerHeader`/`SliceHeader::ref_seq_id` is a `RefSeqId` (`Ref(Tid)`, `Unmapped`, `Multi`),
-  `CraiEntry::ref_id` is `Option<Tid>`, `CramIndex::query`/`entries_for`/`region_bytes` take a
-  `Tid`, and `IndexedCramReader::estimate_region_bytes` returns `Option<u64>`.
+  `ContainerHeader`/`SliceHeader::ref_seq_id` is a `RefSeqId` (`Ref(u32)`, `Unmapped`, `Multi`),
+  `CraiEntry::ref_id` is `Option<u32>`, `CramIndex::query`/`entries_for`/`region_bytes` take a
+  `Tid`, and `IndexedCramReader::estimate_region_bytes` returns `Option<u64>`, `None` for a tid
+  the header lacks.
   `AlignedPairs::with_read` takes `Option<&[BaseQuality]>` instead of an empty slice, and the
   `Insertion`/`SoftClip` events carry `Option<&[BaseQuality]>`. `SlimRecord` and
   `OwnedBamRecord::aligned_pairs_with_read` give `None` for a record without qualities (BAM's
-  `0xFF` run, SAM `*`), where the store's helper used to hand out the `0xFF` run. `RecordStore::set_template_len`
-  and `set_mate_info` (unused) are removed.
+  `0xFF` run, SAM `*`), where the store's helper used to hand out the `0xFF` run.
+  `RecordStore::set_template_len` and `set_mate_info` (unused) are removed.
+- **Breaking: every `Tid` names a target of a header, records' too.** `RecordStore::push_raw`
+  takes the file's header (`push_raw(raw, header, customize)`) and fails a record whose `tid` or
+  `next_ref_id` is neither `-1` nor one of its targets (`DecodeError::InvalidTid`/
+  `InvalidMateTid`, wrapping the new `TidError::InvalidWireTid`) or whose `next_pos` is negative
+  other than `-1` (`DecodeError::InvalidMatePosition`); these used to become `None` or, for an
+  index past the header, a `Tid` naming nothing. htslib's `sam_read1` rejects the same records.
+  CRAM checks a slice's reference and every `RI`/`NS` the same way (`CramError::InvalidTid`/
+  `InvalidMateTid`) and fails a negative `NP` (`CramError::InvalidMatePosition`). SAM fails a
+  negative PNEXT (`InvalidPnext`) and logs a warning for an RNEXT the header lacks, as htslib does.
 - **`IndexBuilder::push`/`push_unmapped` take the reference id as a `u32`**, and
   `IndexError::UnsortedInput::tid` is a `u32`; the builder's "no record yet" state is an
   `Option`, not `-1`.

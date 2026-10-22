@@ -53,7 +53,7 @@ fuzz_target!(|data: &[u8]| {
             break;
         }
 
-        let _ = store.push_raw(&record_buf, &mut ());
+        let _ = store.push_raw(&record_buf, &header, &mut ());
     }
 
     if store.is_empty() {

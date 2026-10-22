@@ -11,6 +11,7 @@
     clippy::cast_possible_truncation,
     reason = "test code with known small values"
 )]
+mod helpers;
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
 use seqair_types::QPos;
@@ -25,7 +26,7 @@ fn decode_record_into_slabs() {
         make_test_record(0, 100, 0x63, 60, b"read1", &[(4 << 4)], &[0x12, 0x48], &[30; 4], &[]);
 
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).expect("decode").expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).expect("decode").expect("kept");
 
     assert_eq!(store.len(), 1);
     let rec = store.record(idx).unwrap();
@@ -52,8 +53,8 @@ fn multiple_records_share_slabs() {
         make_test_record(0, 200, 0x63, 50, b"read2", &[(4 << 4)], &[0x12, 0x48], &[25; 4], &[]);
 
     let mut store = RecordStore::new();
-    let idx1 = store.push_raw(&raw1, &mut ()).unwrap().expect("kept");
-    let idx2 = store.push_raw(&raw2, &mut ()).unwrap().expect("kept");
+    let idx1 = store.push_raw(&raw1, helpers::header(), &mut ()).unwrap().expect("kept");
+    let idx2 = store.push_raw(&raw2, helpers::header(), &mut ()).unwrap().expect("kept");
 
     assert_eq!(store.len(), 2);
     assert_eq!(store.record(idx1).unwrap().pos, Pos0::new(100).unwrap());
@@ -72,7 +73,7 @@ fn clear_retains_capacity() {
 
     let mut store = RecordStore::new();
     for _ in 0..100 {
-        store.push_raw(&raw, &mut ()).unwrap();
+        store.push_raw(&raw, helpers::header(), &mut ()).unwrap();
     }
 
     let records_cap = store.records_capacity();
@@ -122,8 +123,8 @@ fn qual_and_aux_are_stored_in_independent_slabs() {
     );
 
     let mut store = RecordStore::new();
-    let i1 = store.push_raw(&raw1, &mut ()).unwrap().expect("kept");
-    let i2 = store.push_raw(&raw2, &mut ()).unwrap().expect("kept");
+    let i1 = store.push_raw(&raw1, helpers::header(), &mut ()).unwrap().expect("kept");
+    let i2 = store.push_raw(&raw2, helpers::header(), &mut ()).unwrap().expect("kept");
 
     // Round-trip: each accessor returns exactly the bytes that were pushed.
     assert_eq!(store.record(i1).unwrap().qual().len(), 4);
@@ -158,7 +159,7 @@ fn aux_tag_accessible_from_store() {
         make_test_record(0, 100, 0x63, 60, b"read1", &[(4 << 4)], &[0x12, 0x48], &[30; 4], aux);
 
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     let aux_bytes = store.record(idx).unwrap().aux();
     assert!(!aux_bytes.is_empty());
@@ -206,7 +207,7 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
     let raw = make_test_record(0, 100, 0x63, 60, b"read1", cigar_ops, packed_seq, qual, aux);
 
     let mut store_raw = RecordStore::new();
-    let idx_raw = store_raw.push_raw(&raw, &mut ())?.expect("kept");
+    let idx_raw = store_raw.push_raw(&raw, helpers::header(), &mut ())?.expect("kept");
 
     // Build the same record from pre-parsed fields
     let cigar_typed: Vec<seqair::bam::CigarOp> =
@@ -352,7 +353,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
 fn push_raw_rejects_negative_position() {
     let mut store = RecordStore::new();
     let raw = make_test_record(0, -1, 0x4, 0, b"read1", &[(4 << 4)], &[0x11, 0x11], &[30; 4], &[]);
-    let result = store.push_raw(&raw, &mut ());
+    let result = store.push_raw(&raw, helpers::header(), &mut ());
     assert!(result.is_err(), "negative position should be rejected");
 }
 
@@ -362,7 +363,7 @@ fn push_raw_rejects_very_negative_position() {
     let mut store = RecordStore::new();
     let raw =
         make_test_record(0, i32::MIN, 0x4, 0, b"read1", &[(4 << 4)], &[0x11, 0x11], &[30; 4], &[]);
-    let result = store.push_raw(&raw, &mut ());
+    let result = store.push_raw(&raw, helpers::header(), &mut ());
     assert!(result.is_err(), "i32::MIN position should be rejected");
 }
 

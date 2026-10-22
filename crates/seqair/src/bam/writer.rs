@@ -815,10 +815,10 @@ mod tests {
         // Write via OwnedBamRecord to get them into the store
         let mut raw_buf = Vec::new();
         rec1.to_bam_bytes(&mut raw_buf).unwrap();
-        store.push_raw(&raw_buf, &mut ()).unwrap();
+        store.push_raw(&raw_buf, crate::bam::test_util::header(), &mut ()).unwrap();
         raw_buf.clear();
         rec2.to_bam_bytes(&mut raw_buf).unwrap();
-        store.push_raw(&raw_buf, &mut ()).unwrap();
+        store.push_raw(&raw_buf, crate::bam::test_util::header(), &mut ()).unwrap();
 
         // Write via write_store_record
         let mut output = Vec::new();
@@ -925,7 +925,7 @@ mod tests {
         for rec in &recs {
             raw_buf.clear();
             rec.to_bam_bytes(&mut raw_buf).unwrap();
-            store.push_raw(&raw_buf, &mut ()).unwrap();
+            store.push_raw(&raw_buf, crate::bam::test_util::header(), &mut ()).unwrap();
         }
 
         let tmp = tempfile::NamedTempFile::new().unwrap();

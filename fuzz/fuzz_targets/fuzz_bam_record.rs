@@ -8,5 +8,5 @@ use seqair::bam::RecordStore;
 // to fuzz; that struct was removed in favor of slab-only decode.
 fuzz_target!(|data: &[u8]| {
     let mut store = RecordStore::default();
-    let _ = store.push_raw(data, &mut ());
+    let _ = store.push_raw(data, seqair_fuzz::header(), &mut ());
 });

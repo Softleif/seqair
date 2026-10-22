@@ -551,12 +551,18 @@ impl<U> RecordStore<U> {
     /// qname, aux, etc. (those bytes live at the tail of the corresponding
     /// slabs until rollback). Pass `&mut ()` for no filtering (the blanket
     /// [`CustomizeRecordStore`] impl on `()` keeps every record).
+    ///
+    /// `header` is the file's: the record's reference ids must name its
+    /// targets (`r[bam.record.ref_ids]`), so every stored [`Tid`] is valid
+    /// for it.
     pub fn push_raw<E: CustomizeRecordStore<Extra = U>>(
         &mut self,
         raw: &[u8],
+        header: &super::BamHeader,
         customize: &mut E,
     ) -> Result<Option<RecordIdx>, DecodeError> {
         let h = record::parse_header(raw)?;
+        let refs = h.refs.resolve(header)?;
 
         let idx = RecordIdx::from_usize(self.records.len()).ok_or(DecodeError::SlabOverflow)?;
 
@@ -596,9 +602,9 @@ impl<U> RecordStore<U> {
                 seq_len: h.seq_len,
                 matching_bases: 0,
                 indel_bases: 0,
-                tid: h.tid,
-                next_ref_id: h.next_ref_id,
-                next_pos: h.next_pos,
+                tid: refs.tid,
+                next_ref_id: refs.next_ref_id,
+                next_pos: refs.next_pos,
                 template_len: h.template_len,
                 qname: qname_stripped,
                 qual_bytes: qual_slice,
@@ -689,9 +695,9 @@ impl<U> RecordStore<U> {
             indel_bases,
             leading_soft_clip,
             trailing_soft_clip,
-            tid: h.tid,
-            next_ref_id: h.next_ref_id,
-            next_pos: h.next_pos,
+            tid: refs.tid,
+            next_ref_id: refs.next_ref_id,
+            next_pos: refs.next_pos,
             template_len: h.template_len,
             name_off,
             #[expect(
@@ -2012,7 +2018,9 @@ pub(crate) mod tests {
     #[test]
     fn record_is_none_past_the_end_and_after_a_clear() {
         let mut store = RecordStore::new();
-        store.push_raw(&make_raw_record(b"read1", 4, 1), &mut ()).unwrap();
+        store
+            .push_raw(&make_raw_record(b"read1", 4, 1), crate::bam::test_util::header(), &mut ())
+            .unwrap();
         let idx = ri(0);
         assert!(store.record(idx).is_some());
         assert!(store.record(ri(1)).is_none(), "one past the end");
@@ -2028,7 +2036,9 @@ pub(crate) mod tests {
         let mut store = RecordStore::new();
         assert_eq!(store.indices().count(), 0, "an empty store has no indices");
         for name in [b"a", b"b", b"c"] {
-            store.push_raw(&make_raw_record(name, 4, 1), &mut ()).unwrap();
+            store
+                .push_raw(&make_raw_record(name, 4, 1), crate::bam::test_util::header(), &mut ())
+                .unwrap();
         }
         assert_eq!(store.indices().collect::<Vec<_>>(), [ri(0), ri(1), ri(2)]);
         for (idx, rec) in store.indices().zip(store.records()) {
@@ -2046,7 +2056,7 @@ pub(crate) mod tests {
         raw[12..14].copy_from_slice(&u16::MAX.to_le_bytes()); // n_cigar_ops
         raw[16..20].copy_from_slice(&u32::MAX.to_le_bytes()); // seq_len
 
-        let result = store.push_raw(&raw, &mut ());
+        let result = store.push_raw(&raw, crate::bam::test_util::header(), &mut ());
         assert!(result.is_err());
     }
 
@@ -2084,7 +2094,7 @@ pub(crate) mod tests {
     fn push_raw_normal_record_succeeds() {
         let mut store = RecordStore::new();
         let raw = make_raw_record(b"read1", 4, 1);
-        let result = store.push_raw(&raw, &mut ());
+        let result = store.push_raw(&raw, crate::bam::test_util::header(), &mut ());
         assert!(result.is_ok());
         assert_eq!(store.len(), 1);
     }
@@ -2093,9 +2103,15 @@ pub(crate) mod tests {
     #[test]
     fn iter_yields_all_records_with_indices() {
         let mut store = RecordStore::new();
-        store.push_raw(&make_raw_record(b"read0", 4, 1), &mut ()).unwrap();
-        store.push_raw(&make_raw_record(b"read1", 4, 1), &mut ()).unwrap();
-        store.push_raw(&make_raw_record(b"read2", 4, 1), &mut ()).unwrap();
+        store
+            .push_raw(&make_raw_record(b"read0", 4, 1), crate::bam::test_util::header(), &mut ())
+            .unwrap();
+        store
+            .push_raw(&make_raw_record(b"read1", 4, 1), crate::bam::test_util::header(), &mut ())
+            .unwrap();
+        store
+            .push_raw(&make_raw_record(b"read2", 4, 1), crate::bam::test_util::header(), &mut ())
+            .unwrap();
 
         let qnames: Vec<&[u8]> = store.records().map(|rec| rec.qname(&store).unwrap()).collect();
 
@@ -2121,8 +2137,49 @@ pub(crate) mod tests {
         let mut raw = make_raw_record(b"read1", 4, 1);
         // Write next_ref_id = 7 at BAM offset 20
         raw[20..24].copy_from_slice(&7i32.to_le_bytes());
-        store.push_raw(&raw, &mut ()).unwrap();
+        store.push_raw(&raw, crate::bam::test_util::header(), &mut ()).unwrap();
         assert_eq!(store.record(ri(0)).unwrap().next_ref_id, Tid::new(7));
+    }
+
+    // r[verify bam.record.ref_ids]
+    /// `-1` is "none"; a reference id the header lacks, another negative id or
+    /// another negative mate position fails the record and stores nothing.
+    #[test]
+    fn push_raw_checks_reference_fields_against_the_header() {
+        let header = crate::bam::test_util::header(); // 16 references
+        let with = |offset: usize, value: i32| {
+            let mut raw = make_raw_record(b"read1", 4, 1);
+            raw[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            raw
+        };
+        let (tid, next_ref_id, next_pos) = (0, 20, 24);
+
+        let mut store = RecordStore::new();
+        let mut raw = with(next_ref_id, -1);
+        raw[next_pos..next_pos + 4].copy_from_slice(&(-1i32).to_le_bytes());
+        store.push_raw(&raw, header, &mut ()).unwrap();
+        let rec = store.record(ri(0)).unwrap();
+        assert_eq!((rec.next_ref_id, rec.next_pos), (None, None));
+        store.push_raw(&with(tid, 15), header, &mut ()).unwrap();
+        assert_eq!(store.record(ri(1)).unwrap().tid, Tid::new(15));
+
+        let bad_tid: fn(&DecodeError) -> bool = |e| matches!(e, DecodeError::InvalidTid { .. });
+        let bad_mate_tid: fn(&DecodeError) -> bool =
+            |e| matches!(e, DecodeError::InvalidMateTid { .. });
+        let bad_mate_pos: fn(&DecodeError) -> bool =
+            |e| matches!(e, DecodeError::InvalidMatePosition { value: -2 });
+        for (raw, expected) in [
+            (with(tid, 16), bad_tid),
+            (with(tid, -2), bad_tid),
+            (with(next_ref_id, 16), bad_mate_tid),
+            (with(next_ref_id, i32::MIN), bad_mate_tid),
+            (with(next_pos, -2), bad_mate_pos),
+        ] {
+            let mut store = RecordStore::new();
+            let err = store.push_raw(&raw, header, &mut ()).unwrap_err();
+            assert!(expected(&err), "{err:?}");
+            assert!(store.is_empty(), "a failed push stored a record: {err:?}");
+        }
     }
 
     // r[verify record_store.pre_filter.rollback+1]
@@ -2132,7 +2189,7 @@ pub(crate) mod tests {
 
         // Push record A (kept)
         let a = make_raw_record(b"read1", 4, 1);
-        let idx_a = store.push_raw(&a, &mut ()).unwrap();
+        let idx_a = store.push_raw(&a, crate::bam::test_util::header(), &mut ()).unwrap();
         assert_eq!(idx_a, Some(ri(0)));
         let after_a = (
             store.records.len(),
@@ -2146,7 +2203,7 @@ pub(crate) mod tests {
 
         // Push record B (rejected by filter) — all slab extensions must roll back
         let b = make_raw_record(b"read2", 8, 2);
-        let idx_b = store.push_raw(&b, &mut KeepNone).unwrap();
+        let idx_b = store.push_raw(&b, crate::bam::test_util::header(), &mut KeepNone).unwrap();
         assert_eq!(idx_b, None, "rejected record must not yield an index");
 
         let after_b = (
@@ -2162,7 +2219,7 @@ pub(crate) mod tests {
 
         // Push record C (kept) — indexing must continue from idx 1 (B was never committed)
         let c = make_raw_record(b"read3", 4, 1);
-        let idx_c = store.push_raw(&c, &mut ()).unwrap();
+        let idx_c = store.push_raw(&c, crate::bam::test_util::header(), &mut ()).unwrap();
         assert_eq!(idx_c, Some(ri(1)), "rejected record must not consume an index");
         assert_eq!(store.len(), 2, "store should hold A and C only");
     }
@@ -2191,7 +2248,7 @@ pub(crate) mod tests {
         );
 
         let raw = make_raw_record(b"readX", 8, 2);
-        let result = store.push_raw(&raw, &mut RejectRaw).unwrap();
+        let result = store.push_raw(&raw, crate::bam::test_util::header(), &mut RejectRaw).unwrap();
         assert_eq!(result, None);
 
         let after = (
@@ -2280,7 +2337,8 @@ pub(crate) mod tests {
 
         let mut store = RecordStore::new();
         let raw = make_raw_record(b"readX", 4, 1);
-        let kept_idx = store.push_raw(&raw, &mut AssertReadX).unwrap();
+        let kept_idx =
+            store.push_raw(&raw, crate::bam::test_util::header(), &mut AssertReadX).unwrap();
         assert_eq!(kept_idx, Some(ri(0)));
     }
 
@@ -2492,7 +2550,7 @@ pub(crate) mod tests {
         mapped[4..8].copy_from_slice(&100i32.to_le_bytes()); // pos = 100
         let reader_end = record::compute_end_pos_from_raw(&mapped).unwrap();
         let mut store = RecordStore::new();
-        store.push_raw(&mapped, &mut ()).unwrap();
+        store.push_raw(&mapped, crate::bam::test_util::header(), &mut ()).unwrap();
         assert_eq!(
             store.record(ri(0)).unwrap().end_pos,
             reader_end,
@@ -2507,7 +2565,7 @@ pub(crate) mod tests {
         // compute_end_pos_from_raw computes CIGAR-derived (doesn't check flags).
         // After refactor, push_raw stores pos for unmapped reads.
         let mut store2 = RecordStore::new();
-        store2.push_raw(&unmapped, &mut ()).unwrap();
+        store2.push_raw(&unmapped, crate::bam::test_util::header(), &mut ()).unwrap();
         assert!(store2.record(ri(0)).unwrap().flags.is_unmapped());
         assert_eq!(
             store2.record(ri(0)).unwrap().end_pos,
@@ -3196,7 +3254,7 @@ pub(crate) mod tests {
                 owned
                     .to_bam_bytes(&mut raw_buf)
                     .expect("to_bam_bytes must succeed on synthetic input");
-                a.push_raw(&raw_buf, &mut ())
+                a.push_raw(&raw_buf, crate::bam::test_util::header(), &mut ())
                     .expect("push_raw must accept BAM bytes from to_bam_bytes")
                     .expect("default filter returns true");
             }
@@ -3367,7 +3425,7 @@ pub(crate) mod tests {
         fn push_raw_one(store: &mut RecordStore<()>, input: &RawInput) -> Option<RecordIdx> {
             let raw = build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq, &input.aux);
             store
-                .push_raw(&raw, &mut AcceptFlag(input.accept))
+                .push_raw(&raw, crate::bam::test_util::header(), &mut AcceptFlag(input.accept))
                 .expect("synthetic BAM record is always parseable")
         }
 
@@ -3399,12 +3457,20 @@ pub(crate) mod tests {
                     build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq, &input.aux);
                 early_idx.push(
                     early
-                        .push_raw(&raw, &mut AcceptFlagEarly(input.accept))
+                        .push_raw(
+                            &raw,
+                            crate::bam::test_util::header(),
+                            &mut AcceptFlagEarly(input.accept),
+                        )
                         .expect("synthetic BAM record is always parseable"),
                 );
                 late_idx.push(
-                    late.push_raw(&raw, &mut AcceptFlag(input.accept))
-                        .expect("synthetic BAM record is always parseable"),
+                    late.push_raw(
+                        &raw,
+                        crate::bam::test_util::header(),
+                        &mut AcceptFlag(input.accept),
+                    )
+                    .expect("synthetic BAM record is always parseable"),
                 );
             }
 
@@ -3433,7 +3499,9 @@ pub(crate) mod tests {
             for input in &inputs {
                 let raw =
                     build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq, &input.aux);
-                store.push_raw(&raw, &mut customize).expect("push");
+                store
+                    .push_raw(&raw, crate::bam::test_util::header(), &mut customize)
+                    .expect("push");
             }
 
             let seen = observer.seen.borrow();

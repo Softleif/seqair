@@ -59,6 +59,9 @@ The full header text (all `@` lines joined with newlines) MUST be stored in `Bam
 >
 > The parser MUST validate each field and produce clear error messages for malformed records: non-integer POS, FLAG > 65535, negative MAPQ, etc. Real-world SAM files from non-standard tools may contain hand-edited or corrupted records.
 
+r[sam.record.mate_fields]
+RNEXT `*` MUST give no mate reference, `=` the record's own, and any other name the header's target of that name; a name the header lacks MUST give no mate reference and log a warning, as htslib does ("unrecognized mate reference name; treated as unmapped"). PNEXT `0` MUST give no mate position, a positive value its 0-based position, and a negative value or one past `i32::MAX` MUST fail with `SamRecordError::InvalidPnext`. A TLEN outside `i32` MUST fail with `SamRecordError::InvalidTlen`, never be truncated.
+
 r[sam.record.coordinate_conversion]
 SAM POS is 1-based; the internal representation is 0-based (matching BAM). The parser MUST subtract 1 from POS. A POS of 0 in SAM means unmapped — after subtraction this becomes -1 (as i64). All records (including unmapped) flow through to the `filter_raw` customizer; the pileup engine is responsible for excluding unmapped reads per `r[pileup.unmapped_excluded]`.
 

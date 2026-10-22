@@ -25,7 +25,7 @@ use crate::bam::{
     cigar::CigarOp,
     record_store::{CustomizeRecordStore, RecordStore},
 };
-use crate::reader::{FetchedRecord, Tid};
+use crate::reader::{FetchedRecord, ResolveTid, Tid};
 use seqair_types::{BamFlags, Base, Pos0, Pos1, SmallVec, SmolStr};
 use std::num::NonZeroI32;
 use tracing::warn;
@@ -223,6 +223,19 @@ fn field<T>(slab: &[T], range: Range<usize>) -> &[T] {
     slab.get(range).unwrap_or_default()
 }
 
+// r[impl cram.record.ref_ids]
+/// The reference every record of a single-reference slice is on, which the
+/// header must have; `None` for an unmapped or a multi-reference slice, whose
+/// records carry their own `RI`.
+fn slice_reference(id: RefSeqId, header: &BamHeader) -> Result<Option<Tid>, CramError> {
+    match id {
+        RefSeqId::Ref(index) => {
+            index.resolve_tid(header).map(Some).map_err(|source| CramError::InvalidTid { source })
+        }
+        RefSeqId::Unmapped | RefSeqId::Multi => Ok(None),
+    }
+}
+
 /// Parsed CRAM slice header.
 #[derive(Debug)]
 pub struct SliceHeader {
@@ -333,6 +346,7 @@ pub(crate) fn decode_slice(
     };
 
     let is_multi_ref = sh.ref_seq_id == RefSeqId::Multi;
+    let slice_ref = slice_reference(sh.ref_seq_id, header)?;
 
     // r[impl cram.edge.unknown_read_names]
     if !ch.preservation.read_names_included {
@@ -449,12 +463,13 @@ pub(crate) fn decode_slice(
         let mate_info = decode_record(
             ch,
             &tag_lines,
-            &sh,
             is_multi_ref,
             &mut ctx,
             &mut alignment_pos,
             effective_ref,
             effective_ref_start,
+            header,
+            slice_ref,
             read_group_ids,
             tid,
             &mut out,
@@ -592,12 +607,13 @@ fn resolve_tag_lines(ch: &CompressionHeader) -> Vec<ResolvedTagLine<'_>> {
 fn decode_record(
     ch: &CompressionHeader,
     tag_lines: &[ResolvedTagLine<'_>],
-    sh: &SliceHeader,
     is_multi_ref: bool,
     ctx: &mut DecodeContext<'_>,
     prev_alignment_pos: &mut i64,
     reference_seq: &[Base],
     ref_start_0based: i64,
+    header: &BamHeader,
+    slice_ref: Option<Tid>,
     read_group_ids: &[SmolStr],
     tid: Tid,
     out: &mut DecodedSlice,
@@ -631,14 +647,13 @@ fn decode_record(
     let seq_unknown = cram_flags & 0x8 != 0;
 
     // r[impl cram.slice.multi_ref]
+    // r[impl cram.record.ref_ids]
     // 3. RI (ref ID — only for multi-ref slices)
     let record_ref_id = if is_multi_ref {
-        Tid::from_wire(ds.ref_id.decode(ctx)?)
+        Tid::from_wire(ds.ref_id.decode(ctx)?, header)
+            .map_err(|source| CramError::InvalidTid { source })?
     } else {
-        match sh.ref_seq_id {
-            RefSeqId::Ref(t) => Some(t),
-            RefSeqId::Unmapped | RefSeqId::Multi => None,
-        }
+        slice_ref
     };
 
     // r[impl cram.record.read_length]
@@ -702,13 +717,21 @@ fn decode_record(
             ds.read_name.decode_into(ctx, name_buf)?;
             name_buf.clear();
         }
-        next_ref_id_val = Tid::from_wire(ds.next_segment_ref.decode(ctx)?);
+        // r[impl cram.record.ref_ids]
+        next_ref_id_val = Tid::from_wire(ds.next_segment_ref.decode(ctx)?, header)
+            .map_err(|source| CramError::InvalidMateTid { source })?;
         // CRAM `NP` is 1-based per the spec, NP=0 is "no mate position";
         // matching htslib's `cr->mate_pos - 1` at the BAM emit
         // (cram_decode.c:3121).
         // r[impl cram.record.mate_detached]
-        next_pos_val =
-            Pos1::try_from(i64::from(ds.next_mate_pos.decode(ctx)?)).ok().map(Pos1::to_zero_based);
+        next_pos_val = match ds.next_mate_pos.decode(ctx)? {
+            0 => None,
+            np => Some(
+                Pos1::try_from(i64::from(np))
+                    .map_err(|_| CramError::InvalidMatePosition { value: np })?
+                    .to_zero_based(),
+            ),
+        };
         template_len_val = NonZeroI32::new(ds.template_size.decode(ctx)?);
     } else if mate_downstream {
         let nf = ds.next_fragment.decode(ctx)?;
@@ -1668,6 +1691,21 @@ mod tests {
         // The error is constructed in decode_slice when the first block isn't a SliceHeader.
         let err = CramError::ExpectedSliceHeader { found: blk.content_type };
         assert!(matches!(err, CramError::ExpectedSliceHeader { found: ContentType::ExternalData }));
+    }
+
+    // r[verify cram.record.ref_ids]
+    /// A slice on a reference the header does not have fails, rather than
+    /// handing out a `Tid` that names nothing.
+    #[test]
+    fn a_slice_reference_the_header_lacks_is_an_error() {
+        let header = crate::bam::BamHeader::from_sam_text("@SQ\tSN:c0\tLN:10\n").unwrap();
+        assert_eq!(slice_reference(RefSeqId::Ref(0), &header).unwrap(), Tid::new(0));
+        assert_eq!(slice_reference(RefSeqId::Unmapped, &header).unwrap(), None);
+        assert_eq!(slice_reference(RefSeqId::Multi, &header).unwrap(), None);
+        assert!(matches!(
+            slice_reference(RefSeqId::Ref(1), &header),
+            Err(CramError::InvalidTid { source: crate::reader::TidError::TidOutOfRange { .. } })
+        ));
     }
 
     #[test]

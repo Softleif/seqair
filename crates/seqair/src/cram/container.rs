@@ -2,13 +2,15 @@
 //! and block count needed to locate and read the slices inside a container.
 
 use super::{reader::CramError, varint};
-use crate::reader::Tid;
 
 /// The reference a CRAM container or slice is aligned to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefSeqId {
-    /// Every record is on this reference.
-    Ref(Tid),
+    /// Every record is on the reference with this index. Not a
+    /// [`Tid`](crate::reader::Tid): a header is parsed before the file's
+    /// reference list is known, so the index is checked against the header
+    /// only when a slice's records are decoded (`r[cram.record.ref_ids]`).
+    Ref(u32),
     /// Unmapped records (wire `-1`).
     Unmapped,
     /// Records on several references, each carrying its own `RI` (wire `-2`).
@@ -20,9 +22,9 @@ impl RefSeqId {
         match raw {
             -1 => Ok(Self::Unmapped),
             -2 => Ok(Self::Multi),
-            _ => {
-                Tid::from_wire(raw).map(Self::Ref).ok_or(CramError::InvalidRefSeqId { value: raw })
-            }
+            _ => u32::try_from(raw)
+                .map(Self::Ref)
+                .map_err(|_| CramError::InvalidRefSeqId { value: raw }),
         }
     }
 }
@@ -216,8 +218,8 @@ mod tests {
     #[test]
     fn ref_seq_id_from_wire() {
         for raw in [0, 7, i32::MAX] {
-            let Ok(RefSeqId::Ref(tid)) = RefSeqId::from_wire(raw) else { panic!("{raw}") };
-            assert_eq!(i64::from(tid.as_u32()), i64::from(raw));
+            let Ok(RefSeqId::Ref(index)) = RefSeqId::from_wire(raw) else { panic!("{raw}") };
+            assert_eq!(i64::from(index), i64::from(raw));
         }
         assert_eq!(RefSeqId::from_wire(-1).unwrap(), RefSeqId::Unmapped);
         assert_eq!(RefSeqId::from_wire(-2).unwrap(), RefSeqId::Multi);
@@ -383,7 +385,7 @@ mod tests {
         // Container at positions 100-200 (1-based)
         let header = ContainerHeader {
             length: 0,
-            ref_seq_id: RefSeqId::Ref(Tid::new(0).unwrap()),
+            ref_seq_id: RefSeqId::Ref(0),
             alignment_start: 100,
             alignment_span: 100,
             num_records: 10,

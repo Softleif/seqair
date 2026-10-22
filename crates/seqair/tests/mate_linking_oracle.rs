@@ -480,7 +480,7 @@ fn five_prime(pos: i64, span: i64, reverse: bool) -> i64 {
     if reverse { pos + span } else { pos }
 }
 
-// r[verify bam.record.mate_fields]
+// r[verify bam.record.mate_fields+2]
 /// What `samtools fixmate` writes into TLEN, pinned case by case — including
 /// the tie the generator cannot decide on its own: both fragments starting at
 /// the same position. htslib breaks it by strand, not by order in the file and
@@ -583,7 +583,7 @@ fn tlen_is_the_signed_distance_between_five_prime_ends() {
 
 // ── the fixmate oracle ────────────────────────────────────────────────────
 
-// r[verify bam.record.mate_fields]
+// r[verify bam.record.mate_fields+2]
 // r[verify record_store.slim_record_fields]
 /// seqair must read back exactly the mate fields htslib computed. Since the
 /// generator never chose them, agreement here is agreement with htslib and not

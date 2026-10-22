@@ -29,7 +29,7 @@ fn store_with_n_records(n: u32) -> RecordStore {
     let mut store = RecordStore::new();
     for i in 0..n {
         let pos = 100 + i as i32;
-        store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ()).unwrap();
+        store.push_raw(&make_record(0, pos, 99, 60, 10), helpers::header(), &mut ()).unwrap();
     }
     store
 }
@@ -41,7 +41,7 @@ fn store_with_n_records_customized<C: CustomizeRecordStore>(
     let mut store = RecordStore::new();
     for i in 0..n {
         let pos = 100 + i as i32;
-        store.push_raw(&make_record(0, pos, 99, 60, 10), &mut c).unwrap();
+        store.push_raw(&make_record(0, pos, 99, 60, 10), helpers::header(), &mut c).unwrap();
     }
     store
 }
@@ -68,7 +68,7 @@ fn slim_record_getters_return_slab_data() {
     let raw = helpers::make_record_with_aux(0, 200, 0, 30, 10, aux);
 
     let mut store = RecordStore::new();
-    store.push_raw(&raw, &mut ()).unwrap();
+    store.push_raw(&raw, helpers::header(), &mut ()).unwrap();
     let rec = store.record(ri(0)).unwrap();
 
     let qname = rec.qname();
@@ -121,8 +121,8 @@ fn unit_extras_is_zero_cost() {
 fn sort_and_dedup_work_on_unit_store() {
     let mut store = RecordStore::new();
     // Push records out of order.
-    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut ()).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ()).unwrap();
+    store.push_raw(&make_record(0, 200, 99, 60, 10), helpers::header(), &mut ()).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), helpers::header(), &mut ()).unwrap();
 
     store.sort_by_pos();
     assert_eq!(store.record(ri(0)).unwrap().pos, Pos0::new(100).unwrap());
@@ -134,9 +134,9 @@ fn sort_and_dedup_work_on_unit_store() {
 fn sort_by_pos_preserves_extras_mapping() {
     let mut store = RecordStore::new();
     // Push records out of order: pos 300, 100, 200
-    store.push_raw(&make_record(0, 300, 99, 60, 10), &mut ExtractPos).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ExtractPos).unwrap();
-    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut ExtractPos).unwrap();
+    store.push_raw(&make_record(0, 300, 99, 60, 10), helpers::header(), &mut ExtractPos).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), helpers::header(), &mut ExtractPos).unwrap();
+    store.push_raw(&make_record(0, 200, 99, 60, 10), helpers::header(), &mut ExtractPos).unwrap();
 
     // Now sort — records reorder, but extras_idx preserves the mapping.
     store.sort_by_pos();
@@ -172,10 +172,10 @@ fn dedup_on_typed_store_preserves_extras() {
     let mut store = RecordStore::new();
     let mut c = RecordIdx::default();
     // Push duplicate records at same position with same flags/name.
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut c).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut c).unwrap(); // dup
-    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut c).unwrap();
-    store.push_raw(&make_record(0, 200, 99, 60, 10), &mut c).unwrap(); // dup
+    store.push_raw(&make_record(0, 100, 99, 60, 10), helpers::header(), &mut c).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), helpers::header(), &mut c).unwrap(); // dup
+    store.push_raw(&make_record(0, 200, 99, 60, 10), helpers::header(), &mut c).unwrap();
+    store.push_raw(&make_record(0, 200, 99, 60, 10), helpers::header(), &mut c).unwrap(); // dup
 
     store.sort_by_pos();
     store.dedup();
@@ -195,8 +195,8 @@ fn dedup_on_typed_store_preserves_extras() {
 #[test]
 fn set_alignment_then_sort_on_typed_store() {
     let mut store = RecordStore::new();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut ExtractPos).unwrap();
-    store.push_raw(&make_record(0, 50, 99, 60, 10), &mut ExtractPos).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), helpers::header(), &mut ExtractPos).unwrap();
+    store.push_raw(&make_record(0, 50, 99, 60, 10), helpers::header(), &mut ExtractPos).unwrap();
 
     // Sort — now record at pos=50 comes first.
     store.sort_by_pos();
@@ -327,7 +327,9 @@ fn sort_preserves_extras_mapping(tc: TestCase) {
         .draw(gs::vecs(gs::integers::<i32>().min_value(0).max_value(999)).min_size(2).max_size(49));
     let mut store = RecordStore::new();
     for &pos in &positions {
-        store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ExtractPos).unwrap();
+        store
+            .push_raw(&make_record(0, pos, 99, 60, 10), helpers::header(), &mut ExtractPos)
+            .unwrap();
     }
 
     store.sort_by_pos();
@@ -354,7 +356,9 @@ fn dedup_preserves_extras_on_typed_store(tc: TestCase) {
     let mut store = RecordStore::new();
     for &pos in &positions {
         // Same flags/mapq/seq_len so duplicates at same pos are detected.
-        store.push_raw(&make_record(0, pos, 99, 60, 10), &mut ExtractPos).unwrap();
+        store
+            .push_raw(&make_record(0, pos, 99, 60, 10), helpers::header(), &mut ExtractPos)
+            .unwrap();
     }
 
     store.sort_by_pos();
@@ -399,9 +403,9 @@ fn pileup_with_sorted_typed_store() {
     }
 
     let mut c = PushIdx::default();
-    store.push_raw(&make_record(0, 105, 99, 60, 10), &mut c).unwrap();
-    store.push_raw(&make_record(0, 100, 99, 60, 10), &mut c).unwrap();
-    store.push_raw(&make_record(0, 102, 99, 60, 10), &mut c).unwrap();
+    store.push_raw(&make_record(0, 105, 99, 60, 10), helpers::header(), &mut c).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10), helpers::header(), &mut c).unwrap();
+    store.push_raw(&make_record(0, 102, 99, 60, 10), helpers::header(), &mut c).unwrap();
 
     // Sort — records reorder, extras follow via extras_idx.
     store.sort_by_pos();
@@ -460,7 +464,7 @@ fn keep_record_drops_low_mapq_records_via_push_raw() {
     let mapqs = [0u8, 10, 20, 30, 40, 50];
     for (i, &mq) in mapqs.iter().enumerate() {
         let raw = make_record(0, 100 + i as i32, 99, mq, 10);
-        store.push_raw(&raw, &mut filter).unwrap();
+        store.push_raw(&raw, helpers::header(), &mut filter).unwrap();
     }
 
     assert_eq!(store.len(), 4, "records with mapq < 20 should be dropped");
@@ -661,7 +665,7 @@ fn read_group_filter_keeps_only_matching_records() {
     ];
     for (pos, aux) in inputs {
         let raw = helpers::make_record_with_aux(0, *pos, 99, 60, 10, aux);
-        store.push_raw(&raw, &mut filter).unwrap();
+        store.push_raw(&raw, helpers::header(), &mut filter).unwrap();
     }
 
     // Three records had RG1 → exactly three should survive.
@@ -691,7 +695,7 @@ fn read_group_filter_rolls_back_rejected_records() {
     let inputs: &[&[u8]] = &[other_aux, rg1_aux, other_aux, rg1_aux, rg1_aux, other_aux];
     for (i, aux) in inputs.iter().enumerate() {
         let raw = helpers::make_record_with_aux(0, 100 + i as i32, 99, 60, 10, aux);
-        a.push_raw(&raw, &mut filter).unwrap();
+        a.push_raw(&raw, helpers::header(), &mut filter).unwrap();
     }
 
     // Reference store: only the matching records, no filter.
@@ -699,7 +703,7 @@ fn read_group_filter_rolls_back_rejected_records() {
     for (i, aux) in inputs.iter().enumerate() {
         if extract_rg(aux) == Some(b"RG1".as_ref()) {
             let raw = helpers::make_record_with_aux(0, 100 + i as i32, 99, 60, 10, aux);
-            b.push_raw(&raw, &mut ()).unwrap();
+            b.push_raw(&raw, helpers::header(), &mut ()).unwrap();
         }
     }
 

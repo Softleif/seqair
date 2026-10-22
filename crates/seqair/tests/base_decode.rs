@@ -12,6 +12,7 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+mod helpers;
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
 use seqair_types::Base;
@@ -25,7 +26,7 @@ fn decode_standard_bases() {
     // packed_seq: 0x12 = A(1)|C(2), 0x48 = G(4)|T(8) → ACGT
     let raw = make_record(&[0x12, 0x48], 4);
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::A);
     assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::C);
@@ -40,7 +41,7 @@ fn decode_unknown_and_n() {
     // 0x0F = =(0)|N(15)
     let raw = make_record(&[0x0F], 2);
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::Unknown);
     assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::Unknown);
@@ -53,7 +54,7 @@ fn decode_iupac_ambiguity_maps_to_unknown() {
     // 0x35 = M(3)|R(5)
     let raw = make_record(&[0x35], 2);
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::Unknown);
     assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::Unknown);
@@ -64,7 +65,7 @@ fn decode_iupac_ambiguity_maps_to_unknown() {
 fn bases_stored_in_separate_slab() {
     let raw = make_record(&[0x12, 0x48], 4);
     let mut store = RecordStore::new();
-    let idx = store.push_raw(&raw, &mut ()).unwrap().expect("kept");
+    let idx = store.push_raw(&raw, helpers::header(), &mut ()).unwrap().expect("kept");
 
     // Access the full base slice — should be 4 Base values
     let bases = store.record(idx).unwrap().seq();
@@ -79,7 +80,7 @@ fn pileup_alignment_has_base_type() {
 
     let raw = make_record(&[0x12, 0x48], 4);
     let mut store = RecordStore::new();
-    store.push_raw(&raw, &mut ()).unwrap();
+    store.push_raw(&raw, helpers::header(), &mut ()).unwrap();
 
     let mut engine = PileupEngine::new(
         store.prepare_for_pileup().input,

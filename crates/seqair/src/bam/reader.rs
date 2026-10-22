@@ -234,12 +234,13 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, BamError> {
+        let shared = Arc::clone(&self.shared);
         let mut query = self.query(tid, span)?;
         store.clear();
 
         let mut kept = 0usize;
         query.for_each_result::<_, BamError>(|raw| {
-            if store.push_raw(raw, &mut ())?.is_some() {
+            if store.push_raw(raw, &shared.header, &mut ())?.is_some() {
                 kept = kept.saturating_add(1);
             }
             Ok(())
@@ -264,10 +265,11 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     ) -> Result<FetchCounts, BamError> {
         store.clear();
 
+        let shared = Arc::clone(&self.shared);
         let mut query = self.query(tid, span)?;
         let mut counts = FetchCounts::default();
         query.for_each_result::<_, BamError>(|raw| {
-            let kept = store.push_raw(raw, customize)?.is_some();
+            let kept = store.push_raw(raw, &shared.header, customize)?.is_some();
             // `push_raw` has parsed the header, so these fields are there.
             let flags = raw.get(14..16).and_then(|b| b.try_into().ok()).map(u16::from_le_bytes);
             let pos = raw.get(4..8).and_then(|b| b.try_into().ok()).map(i32::from_le_bytes);

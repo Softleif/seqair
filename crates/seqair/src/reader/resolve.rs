@@ -5,13 +5,13 @@ use crate::bam::BamHeader;
 use seqair_types::SmolStr;
 use std::num::NonZeroU32;
 
-// r[impl unified.tid.newtype]
+// r[impl unified.tid.newtype+2]
 /// A validated BAM target id — an index into the header's target list.
 ///
-/// Constructed through [`ResolveTid::resolve_tid`], which checks the id
-/// against the header, or crate-internally from a record's target field
-/// ([`Tid::from_wire`]), which trusts the file. `Clone` and `Copy` so callers
-/// can reuse the value without re-validating.
+/// Every `Tid` was checked against a header: by [`ResolveTid::resolve_tid`],
+/// or crate-internally when a reader decodes a record's reference field
+/// ([`Tid::from_wire`]), which rejects an id the header does not have. `Clone`
+/// and `Copy` so callers can reuse the value without re-validating.
 ///
 /// Stored as the id plus one, so `Option<Tid>` — a record's "unmapped" or
 /// "no mate reference" — costs nothing over the `u32`, like [`Pos0`].
@@ -28,7 +28,7 @@ pub struct Tid(NonZeroU32);
 
 impl Tid {
     /// `None` for an id BAM cannot write (above `i32::MAX`).
-    pub(crate) const fn new(index: u32) -> Option<Self> {
+    const fn from_index(index: u32) -> Option<Self> {
         if index > i32::MAX as u32 {
             return None;
         }
@@ -38,15 +38,38 @@ impl Tid {
         }
     }
 
-    /// A target id as a BAM record stores it: `None` for `-1` (unmapped, no
-    /// mate reference) and for any other negative value.
-    pub(crate) fn from_wire(raw: i32) -> Option<Self> {
-        u32::try_from(raw).ok().and_then(Self::new)
+    /// An unchecked `Tid`, for unit tests that build records by hand.
+    #[cfg(test)]
+    pub(crate) const fn new(index: u32) -> Option<Self> {
+        Self::from_index(index)
+    }
+
+    /// Target `index` of `header`, if it has one.
+    pub(crate) fn of_header(index: u32, header: &BamHeader) -> Option<Self> {
+        usize::try_from(index)
+            .is_ok_and(|i| i < header.target_count())
+            .then(|| Self::from_index(index))
+            .flatten()
+    }
+
+    /// A reference id as a record stores it: `None` for `-1` (unmapped, no
+    /// mate reference), a `Tid` for one of `header`'s targets, and an error
+    /// for anything else — as htslib's `sam_read1` rejects it.
+    pub(crate) fn from_wire(raw: i32, header: &BamHeader) -> Result<Option<Self>, TidError> {
+        if raw == -1 {
+            return Ok(None);
+        }
+        u32::try_from(raw).ok().and_then(|index| Self::of_header(index, header)).map(Some).ok_or(
+            TidError::InvalidWireTid {
+                value: raw,
+                n_targets: u32::try_from(header.target_count()).unwrap_or(u32::MAX),
+            },
+        )
     }
 
     /// The BAM wire form of an optional target id: `-1` for `None`.
     pub(crate) fn to_wire(id: Option<Self>) -> i32 {
-        // `new` rejects ids above `i32::MAX`, so this cannot wrap.
+        // `from_index` rejects ids above `i32::MAX`, so this cannot wrap.
         id.map_or(-1, |t| t.as_u32().cast_signed())
     }
 
@@ -72,7 +95,7 @@ impl From<Tid> for u32 {
     }
 }
 
-// r[impl unified.tid.newtype]
+// r[impl unified.tid.newtype+2]
 /// Error returned by [`ResolveTid::resolve_tid`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -81,9 +104,12 @@ pub enum TidError {
     UnknownContig { name: SmolStr },
     #[error("tid {tid} out of range (header has {n_targets} targets)")]
     TidOutOfRange { tid: u32, n_targets: u32 },
+    /// A record's reference id that is neither `-1` nor one of the header's.
+    #[error("reference id {value} is neither -1 nor one of the header's {n_targets} targets")]
+    InvalidWireTid { value: i32, n_targets: u32 },
 }
 
-// r[impl unified.tid.newtype]
+// r[impl unified.tid.newtype+2]
 /// Convert a user-facing contig identifier into a validated [`Tid`].
 ///
 /// Implementations exist for `u32` (range-check against the header), `&str` /
@@ -101,17 +127,16 @@ impl ResolveTid for Tid {
 
 impl ResolveTid for u32 {
     fn resolve_tid(&self, header: &BamHeader) -> Result<Tid, TidError> {
-        let n = u32::try_from(header.target_count()).unwrap_or(u32::MAX);
-        match Tid::new(*self) {
-            Some(tid) if *self < n => Ok(tid),
-            _ => Err(TidError::TidOutOfRange { tid: *self, n_targets: n }),
-        }
+        Tid::of_header(*self, header).ok_or_else(|| TidError::TidOutOfRange {
+            tid: *self,
+            n_targets: u32::try_from(header.target_count()).unwrap_or(u32::MAX),
+        })
     }
 }
 
 impl ResolveTid for str {
     fn resolve_tid(&self, header: &BamHeader) -> Result<Tid, TidError> {
-        match header.tid(self).and_then(Tid::new) {
+        match header.tid(self).and_then(|index| Tid::of_header(index, header)) {
             Some(tid) => Ok(tid),
             None => Err(TidError::UnknownContig { name: self.into() }),
         }
@@ -141,30 +166,55 @@ const _: () = assert!(std::mem::size_of::<Option<Tid>>() == 4);
 
 #[cfg(test)]
 mod tests {
-    use super::Tid;
+    use super::{Tid, TidError};
+    use crate::bam::BamHeader;
     use hegel::prelude::*;
 
-    /// CRAI entries sort by `Option<Tid>`; that has to be the wire order, with
-    /// the unplaced `-1` first.
-    #[hegel::test]
-    fn option_tid_orders_as_the_wire_ids(tc: TestCase) {
-        let a = tc.draw(gs::integers::<i32>().min_value(-1));
-        let b = tc.draw(gs::integers::<i32>().min_value(-1));
-        assert_eq!(Tid::from_wire(a).cmp(&Tid::from_wire(b)), a.cmp(&b));
+    fn header(n: usize) -> BamHeader {
+        let text = (0..n).map(|i| format!("@SQ\tSN:c{i}\tLN:10\n")).collect::<Vec<_>>().concat();
+        BamHeader::from_sam_text(&text).unwrap()
     }
 
-    // r[verify unified.tid.newtype]
-    #[test]
-    fn wire_round_trip_and_bounds() {
-        assert_eq!(Tid::from_wire(-1), None);
-        assert_eq!(Tid::from_wire(-2), None);
-        assert_eq!(Tid::to_wire(None), -1);
-        for raw in [0, 1, 7, i32::MAX] {
-            let tid = Tid::from_wire(raw).expect("non-negative ids are tids");
-            assert_eq!(tid.as_u32(), raw.cast_unsigned());
-            assert_eq!(Tid::to_wire(Some(tid)), raw);
+    // r[verify unified.tid.newtype+2]
+    /// A wire id is `None` for `-1`, a `Tid` below the header's count, and an
+    /// error otherwise; a `Tid` writes back the id it was read from.
+    #[hegel::test]
+    fn a_wire_id_is_none_a_target_or_an_error(tc: TestCase) {
+        // A header without references does not parse; one is the fewest.
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(8));
+        let raw = tc.draw(hegel::one_of!(
+            gs::integers::<i32>().min_value(-3).max_value(10),
+            gs::integers::<i32>(),
+        ));
+        let got = Tid::from_wire(raw, &header(n));
+        match usize::try_from(raw) {
+            Ok(i) if i < n => {
+                let tid = got.unwrap().unwrap();
+                assert_eq!(Tid::to_wire(Some(tid)), raw);
+            }
+            _ if raw == -1 => assert!(matches!(got, Ok(None))),
+            _ => {
+                assert!(matches!(got, Err(TidError::InvalidWireTid { value, .. }) if value == raw))
+            }
         }
-        assert_eq!(Tid::new(u32::MAX), None);
-        assert_eq!(Tid::new(i32::MAX as u32 + 1), None);
+    }
+
+    /// `Tid` orders as the index it holds.
+    #[hegel::test]
+    fn tids_order_as_their_indices(tc: TestCase) {
+        let h = header(8);
+        let a = tc.draw(gs::integers::<u32>().max_value(7));
+        let b = tc.draw(gs::integers::<u32>().max_value(7));
+        assert_eq!(Tid::of_header(a, &h).cmp(&Tid::of_header(b, &h)), a.cmp(&b));
+    }
+
+    #[test]
+    fn ids_bam_cannot_write_are_not_tids() {
+        assert_eq!(Tid::from_index(u32::MAX), None);
+        assert_eq!(Tid::from_index(i32::MAX.cast_unsigned() + 1), None);
+        assert_eq!(
+            Tid::to_wire(Some(Tid::from_index(i32::MAX.cast_unsigned()).unwrap())),
+            i32::MAX
+        );
     }
 }

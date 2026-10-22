@@ -197,7 +197,7 @@ fuzz_target!(|input: FuzzPileupInput| {
         let raw = build_raw_record(rec);
         // Errors from push_raw are expected (e.g. zero-length CIGAR → zero ref-span).
         // We intentionally ignore them — the goal is to reach pileup logic.
-        let _ = store.push_raw(&raw, &mut ());
+        let _ = store.push_raw(&raw, seqair_fuzz::header(), &mut ());
     }
 
     if store.is_empty() {

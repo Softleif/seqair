@@ -270,7 +270,7 @@ mod tests {
         let mut buf = Vec::new();
         owned.to_bam_bytes(&mut buf).unwrap();
         let mut store = RecordStore::<()>::new();
-        let _ = store.push_raw(&buf, &mut ()).unwrap();
+        let _ = store.push_raw(&buf, crate::bam::test_util::header(), &mut ()).unwrap();
         store
     }
 
@@ -773,7 +773,7 @@ mod tests {
             let mut buf = Vec::new();
             owned.to_bam_bytes(&mut buf).unwrap();
             let mut store = RecordStore::<()>::new();
-            let _ = store.push_raw(&buf, &mut ()).unwrap();
+            let _ = store.push_raw(&buf, crate::bam::test_util::header(), &mut ()).unwrap();
 
             // Reference window covering the full ref span. Different
             // pattern (CGTA rotation) so M-op mismatches actually happen.
