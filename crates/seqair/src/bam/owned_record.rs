@@ -60,11 +60,6 @@ pub enum OwnedRecordError {
     },
 }
 
-/// Encode `Option<Pos0>` to a BAM-wire `i32`. `None` → `-1`.
-#[inline]
-pub(crate) fn pos_to_bam_i32(p: Option<Pos0>) -> i32 {
-    p.map_or(-1, Pos0::as_i32)
-}
 
 // r[impl bam.owned_record.fields]
 /// An owned, mutable BAM record for writing and in-memory modification.
@@ -376,17 +371,17 @@ impl OwnedBamRecord {
         super::record::encode_fixed_header(
             buf,
             &super::record::FixedHeaderFields {
-                ref_id: Tid::to_wire(self.ref_id),
-                pos: pos_to_bam_i32(self.pos),
+                tid: self.ref_id,
+                pos: self.pos,
                 bin: self.bin(),
                 mapq: self.mapq,
                 l_read_name,
                 flags: self.flags.raw(),
                 n_cigar_op,
                 l_seq,
-                next_ref_id: Tid::to_wire(self.next_ref_id),
-                next_pos: pos_to_bam_i32(self.next_pos),
-                template_len: self.template_len.map_or(0, NonZeroI32::get),
+                next_ref_id: self.next_ref_id,
+                next_pos: self.next_pos,
+                template_len: self.template_len,
             },
         );
 

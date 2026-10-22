@@ -5,14 +5,13 @@
 
 use super::bgzf_writer::BgzfSink;
 use super::header::{BamHeader, BamHeaderError};
-use super::owned_record::{OwnedBamRecord, OwnedRecordError, pos_to_bam_i32};
+use super::owned_record::{OwnedBamRecord, OwnedRecordError};
 use super::record_idx::RecordIdx;
 use super::record_store::RecordStore;
 use crate::io::{BgzfError, IndexBuilder, IndexError};
 use crate::reader::Tid;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::num::NonZeroI32;
 use std::path::Path;
 use thiserror::Error;
 
@@ -272,17 +271,17 @@ impl<W: Write> BamWriter<W> {
         super::record::encode_fixed_header(
             &mut self.buf,
             &super::record::FixedHeaderFields {
-                ref_id: Tid::to_wire(rec.tid),
-                pos: rec.pos.as_i32(),
+                tid: rec.tid,
+                pos: Some(rec.pos),
                 bin,
                 mapq: rec.mapq,
                 l_read_name,
                 flags: rec.flags.raw(),
                 n_cigar_op: rec.n_cigar_ops,
                 l_seq: rec.seq_len as i32,
-                next_ref_id: Tid::to_wire(rec.next_ref_id),
-                next_pos: pos_to_bam_i32(rec.next_pos),
-                template_len: rec.template_len.map_or(0, NonZeroI32::get),
+                next_ref_id: rec.next_ref_id,
+                next_pos: rec.next_pos,
+                template_len: rec.template_len,
             },
         );
 
@@ -789,7 +788,7 @@ mod tests {
         .flags(BamFlags::from(0x63))
         .next_ref_id(Tid::new(1))
         .next_pos(Some(Pos0::new(500).unwrap()))
-        .template_len(NonZeroI32::new(250))
+        .template_len(std::num::NonZeroI32::new(250))
         .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
         .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
         .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())

@@ -223,8 +223,8 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
 /// `pos` and `next_pos` are already resolved to wire form (`-1` for
 /// unmapped/unavailable per `[SAM1] §1.4`).
 pub(crate) struct FixedHeaderFields {
-    pub ref_id: i32,
-    pub pos: i32,
+    pub tid: Option<Tid>,
+    pub pos: Option<Pos0>,
     pub bin: u16,
     pub mapq: u8,
     /// `qname.len() + 1` (NUL terminator); caller validated qname ≤ 254 bytes.
@@ -232,24 +232,26 @@ pub(crate) struct FixedHeaderFields {
     pub flags: u16,
     pub n_cigar_op: u16,
     pub l_seq: i32,
-    pub next_ref_id: i32,
-    pub next_pos: i32,
-    pub template_len: i32,
+    pub next_ref_id: Option<Tid>,
+    pub next_pos: Option<Pos0>,
+    pub template_len: Option<NonZeroI32>,
 }
 
 /// Pack the 11 fixed-record fields into the canonical 32-byte BAM record
-/// header and append to `buf`. Inverse of [`parse_header`].
+/// header and append to `buf`, `None` as BAM's `-1` (`0` for TLEN). Inverse
+/// of [`parse_header`] and [`WireRefs::resolve`].
 pub(crate) fn encode_fixed_header(buf: &mut Vec<u8>, f: &FixedHeaderFields) {
+    let pos = |p: Option<Pos0>| p.map_or(-1, Pos0::as_i32);
     let bin_mq_nl = (u32::from(f.bin) << 16) | (u32::from(f.mapq) << 8) | u32::from(f.l_read_name);
     let flag_nc = (u32::from(f.flags) << 16) | u32::from(f.n_cigar_op);
-    buf.extend_from_slice(&f.ref_id.to_le_bytes());
-    buf.extend_from_slice(&f.pos.to_le_bytes());
+    buf.extend_from_slice(&Tid::to_wire(f.tid).to_le_bytes());
+    buf.extend_from_slice(&pos(f.pos).to_le_bytes());
     buf.extend_from_slice(&bin_mq_nl.to_le_bytes());
     buf.extend_from_slice(&flag_nc.to_le_bytes());
     buf.extend_from_slice(&f.l_seq.to_le_bytes());
-    buf.extend_from_slice(&f.next_ref_id.to_le_bytes());
-    buf.extend_from_slice(&f.next_pos.to_le_bytes());
-    buf.extend_from_slice(&f.template_len.to_le_bytes());
+    buf.extend_from_slice(&Tid::to_wire(f.next_ref_id).to_le_bytes());
+    buf.extend_from_slice(&pos(f.next_pos).to_le_bytes());
+    buf.extend_from_slice(&f.template_len.map_or(0, NonZeroI32::get).to_le_bytes());
 }
 
 #[non_exhaustive]
