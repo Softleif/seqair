@@ -14,8 +14,6 @@
     reason = "test code with known small values"
 )]
 
-mod helpers;
-use helpers::tid;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::csi_index::CsiIndex;
 use seqair::bam::header::BamHeader;
@@ -23,7 +21,7 @@ use seqair::bam::index::BamIndex;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
-use seqair::reader::ResolveTid;
+use seqair::reader::{ResolveTid, Tid};
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::Command;
@@ -36,6 +34,12 @@ fn make_header() -> BamHeader {
          @SQ\tSN:chr3\tLN:200000\n",
     )
     .unwrap()
+}
+
+/// Reference `n` of [`make_header`], the header these records are written under.
+#[track_caller]
+fn tid(n: u32) -> Tid {
+    n.resolve_tid(&make_header()).expect("test tid in range")
 }
 
 fn cyclic_seq(n: usize) -> Vec<Base> {
@@ -568,11 +572,12 @@ fn roundtrip_csi_preserves_query_chunks(tc: TestCase) {
     let bam_path = dir.path().join("prop.bam");
     let mut writer =
         BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
+    let chr1 = header.tid("chr1").unwrap();
 
     for i in 0..n_records {
         let pos = ((seed + (i as u64) * 1000) % 9_000_000) as u32;
         let rec = OwnedBamRecord::builder(
-            Some(tid(0)),
+            Some(chr1),
             Some(Pos0::new(pos).unwrap()),
             format!("r{i}").into_bytes(),
         )

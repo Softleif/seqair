@@ -23,7 +23,6 @@
 
 mod helpers;
 use helpers::ri;
-use helpers::tid;
 use seqair::bam::aux::AuxValue;
 use seqair::bam::aux_data::AuxData;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
@@ -31,12 +30,19 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair::reader::{ResolveTid, Tid};
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn make_header() -> BamHeader {
     BamHeader::from_sam_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:100000\n").unwrap()
+}
+
+/// Reference `n` of [`make_header`], the header these records are written under.
+#[track_caller]
+fn tid(n: u32) -> Tid {
+    n.resolve_tid(&make_header()).expect("test tid in range")
 }
 
 fn write_bam(dir: &Path, records: &[OwnedBamRecord]) -> std::path::PathBuf {

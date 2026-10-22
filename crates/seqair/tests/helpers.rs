@@ -435,11 +435,8 @@ pub fn arb_read_set(max_reads: usize) -> impl PrintableGenerator<Vec<SyntheticRe
 /// `push_raw` checks their reference ids against it.
 pub fn header() -> &'static seqair::bam::header::BamHeader {
     use seqair::bam::header::BamHeader;
-    static HEADER: std::sync::LazyLock<BamHeader> = std::sync::LazyLock::new(|| {
-        let text =
-            (0..16).map(|i| format!("@SQ\tSN:c{i}\tLN:1000000000\n")).collect::<Vec<_>>().concat();
-        BamHeader::from_sam_text(&text).unwrap()
-    });
+    static HEADER: std::sync::LazyLock<BamHeader> =
+        std::sync::LazyLock::new(|| BamHeader::synthetic(16, 1_000_000_000));
     &HEADER
 }
 

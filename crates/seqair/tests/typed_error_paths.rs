@@ -20,11 +20,9 @@
     reason = "test code with known small values"
 )]
 
-mod helpers;
 #[path = "../src/pinned.rs"]
 mod pinned;
 use hegel::prelude::*;
-use helpers::tid;
 use seqair::bam::aux::AuxValue;
 use seqair::bam::aux_data::{AuxData, AuxDataError};
 use seqair::bam::cigar::{CigarOp, CigarOpType};
@@ -115,6 +113,7 @@ fn corpus() -> &'static Corpus {
         let path = dir.path().join("corpus.bam");
         let mut writer =
             BamWriterBuilder::to_path(&path, &header).write_index(true).build().unwrap();
+        let chr1 = header.tid("chr1").unwrap();
 
         // A deterministic LCG: the bytes must not compress away, but the corpus
         // must be identical on every run so the offsets in the sweep below mean
@@ -136,7 +135,7 @@ fn corpus() -> &'static Corpus {
             let qual: Vec<BaseQuality> =
                 (0..100).map(|_| BaseQuality::from_byte((next() % 40) as u8)).collect();
             let record = OwnedBamRecord::builder(
-                Some(tid(0)),
+                Some(chr1),
                 Some(Pos0::new(i * 100 + 1).unwrap()),
                 read_name(i),
             )
@@ -559,8 +558,9 @@ fn a_record_whose_qual_no_longer_matches_its_seq_is_refused_with_both_lengths() 
 
     // An unmapped record has no CIGAR to contradict, so `set_seq` accepts a
     // shorter sequence and leaves the ten quality scores behind it.
+    let chr1 = writer_header().tid("chr1").unwrap();
     let mut record =
-        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
+        OwnedBamRecord::builder(Some(chr1), Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
             .flags(BamFlags::from(4))
             .seq(vec![Base::A; 10])
             .qual(vec![BaseQuality::from_byte(30); 10])
@@ -702,8 +702,9 @@ impl WriteFailure {
             // Large enough to pass the 2 MiB limit, small enough to build fast.
             Self::RecordTooLarge => mapped_record(true, 100, "huge", 3_000_000),
             Self::SeqQualMismatch => {
+                let chr1 = writer_header().tid("chr1").unwrap();
                 let mut record = OwnedBamRecord::builder(
-                    Some(tid(0)),
+                    Some(chr1),
                     Some(Pos0::new(100).unwrap()),
                     b"shrunk".to_vec(),
                 )

@@ -38,11 +38,9 @@
     reason = "test code with known small values"
 )]
 
-mod helpers;
 #[path = "../src/pinned.rs"]
 mod pinned;
 use hegel::prelude::*;
-use helpers::tid;
 use rust_htslib::bam::Read as _;
 use seqair::bam::Pos0;
 use seqair::bam::aux_data::{AuxData, AuxDataError};
@@ -275,7 +273,8 @@ fn apply(op: &Op, rec: &mut OwnedBamRecord, model: &mut Model) {
 /// The starting record: placed, no CIGAR, no sequence, no tags. Everything
 /// the properties look at is put there by the mutators.
 fn seed_record() -> OwnedBamRecord {
-    OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(1_000).unwrap()), b"seed".to_vec())
+    let chr1 = header(SHORT_CONTIG_LEN).tid(CONTIG).unwrap();
+    OwnedBamRecord::builder(Some(chr1), Some(Pos0::new(1_000).unwrap()), b"seed".to_vec())
         .flags(BamFlags::from(0x4))
         .mapq(17)
         .build()
@@ -500,7 +499,8 @@ fn a_rejected_set_int_leaves_the_aux_block_byte_identical(tc: TestCase) {
 
     // And the record still serializes to something samtools reads as exactly
     // the tags the model holds.
-    let rec = OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(500).unwrap()), b"s0".to_vec())
+    let chr1 = header(SHORT_CONTIG_LEN).tid(CONTIG).unwrap();
+    let rec = OwnedBamRecord::builder(Some(chr1), Some(Pos0::new(500).unwrap()), b"s0".to_vec())
         .flags(BamFlags::from(0x4))
         .aux(edges)
         .build()
@@ -685,10 +685,11 @@ fn the_serialized_bin_is_the_one_htslib_computes(tc: TestCase) {
     // Coordinate order, which is what a BAM this shape would really be in.
     plans.sort_by_key(|p| p.after.pos);
 
+    let chr1 = header(LONG_CONTIG_LEN).tid(CONTIG).unwrap();
     let mut records = Vec::with_capacity(plans.len());
     for (i, plan) in plans.iter().enumerate() {
         let mut rec = OwnedBamRecord::builder(
-            Some(tid(0)),
+            Some(chr1),
             Some(Pos0::new(plan.before.pos).unwrap()),
             format!("r{i}").into_bytes(),
         )

@@ -17,8 +17,6 @@
     reason = "test code with known small values"
 )]
 
-mod helpers;
-use helpers::tid;
 use rust_htslib::bam::{self, Read as _};
 use seqair::bam::aux_data::AuxData;
 // Use the top-level `bam` re-export rather than the inner module path so the
@@ -82,7 +80,8 @@ fn build_record(
     aux.set_array_u8(*b"ML", ml).unwrap();
     let flags = if is_reverse { BamFlags::from(FLAG_REVERSE) } else { BamFlags::empty() };
     let seq_len = seq.len();
-    OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), qname.to_vec())
+    let chr1 = make_header().tid("chr1").unwrap();
+    OwnedBamRecord::builder(Some(chr1), Some(Pos0::new(pos).unwrap()), qname.to_vec())
         .flags(flags)
         .mapq(60)
         .cigar(cigar)

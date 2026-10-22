@@ -37,9 +37,7 @@
     reason = "test code with known small values"
 )]
 
-mod helpers;
 use hegel::prelude::*;
-use helpers::tid;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
@@ -163,6 +161,7 @@ fn write_inputs(dir: &Path, reads: &[Read]) -> (PathBuf, PathBuf) {
     let bam_path = dir.join("generated.bam");
     let mut writer =
         BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
+    let contig = header.tid(CONTIG.0).unwrap();
 
     for (i, read) in reads.iter().enumerate() {
         // Distinct bases per record, so a slab that is truncated to the wrong
@@ -173,7 +172,7 @@ fn write_inputs(dir: &Path, reads: &[Read]) -> (PathBuf, PathBuf) {
             aux.set_int(*b"NM", i64::from(nm)).expect("a small non-negative int");
         }
         let rec = OwnedBamRecord::builder(
-            Some(tid(0)),
+            Some(contig),
             Some(Pos0::new(read.pos).unwrap()),
             format!("r{i}").into_bytes(),
         )

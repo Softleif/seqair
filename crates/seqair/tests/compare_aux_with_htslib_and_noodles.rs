@@ -23,8 +23,6 @@
     reason = "test code with known small values"
 )]
 
-mod helpers;
-use helpers::tid;
 use noodles::bam as nbam;
 use noodles::sam as nsam;
 use rust_htslib::bam::record::Aux as HtsAux;
@@ -44,7 +42,8 @@ fn write_bam_with_aux(dir: &std::path::Path, aux: AuxData) -> std::path::PathBuf
         BamHeader::from_sam_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n").unwrap();
     let bam_path = dir.join("aux.bam");
 
-    let rec = OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"r1".to_vec())
+    let chr1 = header.tid("chr1").unwrap();
+    let rec = OwnedBamRecord::builder(Some(chr1), Some(Pos0::new(100).unwrap()), b"r1".to_vec())
         .flags(BamFlags::empty())
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])

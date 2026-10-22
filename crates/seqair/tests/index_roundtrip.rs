@@ -15,13 +15,12 @@
     reason = "test code with known small values"
 )]
 
-mod helpers;
-use helpers::tid;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair::reader::{ResolveTid, Tid};
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::Command;
@@ -34,6 +33,12 @@ fn make_header() -> BamHeader {
          @SQ\tSN:chr3\tLN:200000\n",
     )
     .unwrap()
+}
+
+/// Reference `n` of [`make_header`], the header these records are written under.
+#[track_caller]
+fn tid(n: u32) -> Tid {
+    n.resolve_tid(&make_header()).expect("test tid in range")
 }
 
 fn cyclic_seq(n: usize) -> Vec<Base> {

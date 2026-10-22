@@ -16,7 +16,6 @@
 
 mod helpers;
 use helpers::ri;
-use helpers::tid;
 use noodles::bam;
 use noodles::sam;
 use seqair::bam::aux_data::AuxData;
@@ -25,6 +24,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair::reader::{ResolveTid, Tid};
 use seqair_types::bam_flags::BamFlags;
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
@@ -35,6 +35,12 @@ fn make_header() -> BamHeader {
         "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:100000\n@SQ\tSN:chr2\tLN:50000\n",
     )
     .unwrap()
+}
+
+/// Reference `n` of [`make_header`], the header these records are written under.
+#[track_caller]
+fn tid(n: u32) -> Tid {
+    n.resolve_tid(&make_header()).expect("test tid in range")
 }
 
 fn write_bam(dir: &Path, records: &[OwnedBamRecord]) -> std::path::PathBuf {
@@ -543,7 +549,7 @@ fn roundtrip_write_store_record() {
     for rec in &records {
         raw_buf.clear();
         rec.to_bam_bytes(&mut raw_buf).unwrap();
-        store.push_raw(&raw_buf, helpers::header(), &mut ()).unwrap();
+        store.push_raw(&raw_buf, &header, &mut ()).unwrap();
     }
 
     // Write via write_store_record
