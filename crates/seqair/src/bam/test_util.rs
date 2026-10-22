@@ -66,11 +66,8 @@ pub(crate) fn push_one_record_from_bgzf<R: Read + Seek>(
     reason = "used by sibling test modules; rustc cfg gates may hide some call sites"
 )]
 pub(crate) fn header() -> &'static super::BamHeader {
-    static HEADER: std::sync::LazyLock<super::BamHeader> = std::sync::LazyLock::new(|| {
-        let text =
-            (0..16).map(|i| format!("@SQ\tSN:c{i}\tLN:1000000000\n")).collect::<Vec<_>>().concat();
-        super::BamHeader::from_sam_text(&text).expect("test header parses")
-    });
+    static HEADER: std::sync::LazyLock<super::BamHeader> =
+        std::sync::LazyLock::new(|| super::BamHeader::synthetic(16, 1_000_000_000));
     &HEADER
 }
 

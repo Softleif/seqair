@@ -1870,6 +1870,7 @@ fn can_link(rec: &SlimRecord) -> bool {
         && !flags.is_mate_unmapped()
         && !flags.is_secondary()
         && !flags.is_supplementary()
+        && rec.tid.is_some()
         && rec.next_ref_id == rec.tid
         && rec.next_pos.is_some()
 }

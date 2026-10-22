@@ -624,8 +624,14 @@ fn parse_sam_line<E: CustomizeRecordStore>(
         let rnext_str = std::str::from_utf8(rnext_field)
             .map_err(|_| SamRecordError::InvalidRname { value: rnext_field.into() })?;
         let next_ref_id = rnext_str.resolve_tid(header).ok();
-        if next_ref_id.is_none() {
-            warn!(rnext = rnext_str, "unknown mate reference name; treated as unmapped");
+        // Once per process: a file written against another header has one on
+        // every paired record.
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if next_ref_id.is_none() && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            warn!(
+                rnext = rnext_str,
+                "unknown mate reference name; treated as unmapped (further ones not logged)"
+            );
         }
         next_ref_id
     };

@@ -5,6 +5,11 @@ use crate::bam::BamHeader;
 use seqair_types::SmolStr;
 use std::num::NonZeroU32;
 
+// Pattern types would drop the plus one: on rustc 1.96,
+// `Option<pattern_type!(u32 is 0..=0x7FFF_FFFF)>` is four bytes, the values
+// above `i32::MAX` serving as the niche, and `from_index`/`as_u32` would lose
+// their `±1`. Worth switching once `pattern_types` is stable, or at least no
+// longer an `internal_features` lint with only `transmute` to build a value.
 // r[impl unified.tid.newtype+2]
 /// A validated BAM target id — an index into the header's target list.
 ///
@@ -15,12 +20,6 @@ use std::num::NonZeroU32;
 ///
 /// Stored as the id plus one, so `Option<Tid>` — a record's "unmapped" or
 /// "no mate reference" — costs nothing over the `u32`, like [`Pos0`].
-///
-/// Pattern types would drop the plus one: on rustc 1.96,
-/// `Option<pattern_type!(u32 is 0..=0x7FFF_FFFF)>` is four bytes, the values
-/// above `i32::MAX` serving as the niche, and `new`/`as_u32` would lose their
-/// `±1`. Worth switching once `pattern_types` is stable, or at least no
-/// longer an `internal_features` lint with only `transmute` to build a value.
 ///
 /// [`Pos0`]: seqair_types::Pos0
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -169,8 +168,7 @@ mod tests {
     use hegel::prelude::*;
 
     fn header(n: usize) -> BamHeader {
-        let text = (0..n).map(|i| format!("@SQ\tSN:c{i}\tLN:10\n")).collect::<Vec<_>>().concat();
-        BamHeader::from_sam_text(&text).unwrap()
+        BamHeader::synthetic(u32::try_from(n).unwrap(), 10)
     }
 
     // r[verify unified.tid.newtype+2]

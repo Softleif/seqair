@@ -9,10 +9,6 @@ use std::sync::LazyLock;
 /// without one: `push_raw` checks a record's reference ids against it, so a
 /// seed's small ids decode and the fuzzer still reaches the rejection.
 pub fn header() -> &'static BamHeader {
-    static HEADER: LazyLock<BamHeader> = LazyLock::new(|| {
-        let text =
-            (0..64).map(|i| format!("@SQ\tSN:c{i}\tLN:1000000000\n")).collect::<Vec<_>>().concat();
-        BamHeader::from_sam_text(&text).expect("fuzz header parses")
-    });
+    static HEADER: LazyLock<BamHeader> = LazyLock::new(|| BamHeader::synthetic(64, 1_000_000_000));
     &HEADER
 }

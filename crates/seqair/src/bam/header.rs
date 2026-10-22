@@ -322,6 +322,22 @@ impl BamHeader {
         })
     }
 
+    /// A header of `n` references named `c0`, `c1`, …, each `length` long,
+    /// for tests and fuzz targets that build records by hand.
+    #[doc(hidden)]
+    pub fn synthetic(n: u32, length: u64) -> Self {
+        let names: Vec<SmolStr> = (0..n).map(|i| SmolStr::new(format!("c{i}"))).collect();
+        Self {
+            header_text: names
+                .iter()
+                .map(|name| format!("@SQ\tSN:{name}\tLN:{length}\n"))
+                .collect::<Vec<_>>()
+                .concat(),
+            targets: names.iter().map(|name| TargetInfo { name: name.clone(), length }).collect(),
+            name_to_tid: names.into_iter().zip(0..).collect(),
+        }
+    }
+
     // r[impl bam_writer.header_from_template]
     /// Create a mutable copy from an existing header for use with BAM writing.
     pub fn from_template(other: &BamHeader) -> Self {
