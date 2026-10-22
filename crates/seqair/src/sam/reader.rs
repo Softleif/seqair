@@ -77,9 +77,12 @@ pub enum SamRecordError {
     #[error("invalid MAPQ field: {}", format_aux_field(value, 32))]
     InvalidMapq { value: Box<[u8]> },
 
+    /// PNEXT is not a valid 1-based position: not a number, negative, or out
+    /// of range.
     #[error("invalid PNEXT field: {}", format_aux_field(value, 32))]
     InvalidPnext { value: Box<[u8]> },
 
+    /// TLEN is not an integer that fits in an `i32`.
     #[error("invalid TLEN field: {}", format_aux_field(value, 32))]
     InvalidTlen { value: Box<[u8]> },
 

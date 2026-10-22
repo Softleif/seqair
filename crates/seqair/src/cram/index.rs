@@ -22,9 +22,9 @@ pub enum CramIndexError {
 /// A single entry in a CRAI index.
 #[derive(Debug, Clone)]
 pub struct CraiEntry {
-    /// The reference index, `None` for an unmapped entry. Not a [`Tid`]: an
-    /// index is read without the header, and an entry for a reference the
-    /// header lacks only never matches a query.
+    /// The CRAI reference index, `None` for an unmapped entry. Not a [`Tid`]:
+    /// an index is read without the header, so this is only compared
+    /// numerically with a query's `Tid`.
     pub ref_id: Option<u32>,
     pub alignment_start: i64,
     pub alignment_span: i64,

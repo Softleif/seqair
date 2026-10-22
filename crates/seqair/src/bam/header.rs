@@ -24,9 +24,12 @@ struct TargetInfo {
     length: u64,
 }
 
+/// A contig looked up by name: its target id and length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContigInfo {
+    /// Target id of the contig in the header.
     pub tid: Tid,
+    /// Length of the contig in bases.
     pub len: u64,
 }
 
@@ -280,18 +283,21 @@ impl BamHeader {
     }
 
     // r[impl bam.header.tid_lookup]
+    /// The target id of contig `name`, or `None` if the header has no such contig.
     pub fn tid(&self, name: &str) -> Option<Tid> {
         let &index = self.name_to_tid.get(name)?;
         Tid::of_header(index, self)
     }
 
-    /// `None` only for a `Tid` of another header with more targets.
+    /// The name of target `tid`. `None` only for a `Tid` of another header with
+    /// more targets.
     pub fn target_name(&self, tid: Tid) -> Option<&str> {
         self.targets.get(tid.as_usize()).map(|t| t.name.as_str())
     }
 
     // r[impl bam.header.target_len]
-    /// `None` only for a `Tid` of another header with more targets.
+    /// The length of target `tid`. `None` only for a `Tid` of another header
+    /// with more targets.
     pub fn target_len(&self, tid: Tid) -> Option<u64> {
         self.targets.get(tid.as_usize()).map(|t| t.length)
     }

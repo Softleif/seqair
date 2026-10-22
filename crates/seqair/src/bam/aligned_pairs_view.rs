@@ -127,8 +127,9 @@ pub enum AlignedPairWithRead<'read> {
         /// was given `qual = None`.
         qual: BaseQuality,
     },
-    /// I — `query` and `qual` are the inserted bases and their Phred scores,
-    /// starting at `first_inserted`. See
+    /// I — `query` and `qual` are the inserted bases and their Phred scores
+    /// (`qual` is `None` if the record has no qualities), starting at
+    /// `first_inserted`. See
     /// [`AlignedPair::Insertion`] for why the
     /// field is not called `qpos`.
     Insertion { first_inserted: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
@@ -136,7 +137,8 @@ pub enum AlignedPairWithRead<'read> {
     Deletion { rpos: Pos0, del_len: u32 },
     /// N — reference skip (e.g. intron). No read data.
     RefSkip { rpos: Pos0, skip_len: u32 },
-    /// S — soft clip. `query` and `qual` are the clipped run.
+    /// S — soft clip. `query` is the clipped run and `qual` its Phred scores
+    /// (`None` if the record has no qualities).
     SoftClip { qpos: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
     /// P — padding. No read data.
     Padding { len: u32 },
@@ -301,8 +303,8 @@ pub enum AlignedPairWithRef<'read, 'ref_seq> {
         /// as `Some(Base::Unknown)`.
         ref_base: Option<Base>,
     },
-    /// I — inserted query bases and quals (no reference span), starting at
-    /// `first_inserted`. See
+    /// I — inserted query bases and quals (no reference span; `qual` is `None`
+    /// if the record has no qualities), starting at `first_inserted`. See
     /// [`AlignedPair::Insertion`] for why the
     /// field is not called `qpos`.
     Insertion { first_inserted: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
@@ -311,7 +313,8 @@ pub enum AlignedPairWithRef<'read, 'ref_seq> {
     Deletion { rpos: Pos0, del_len: u32, ref_bases: Option<&'ref_seq [Base]> },
     /// N — reference skip.
     RefSkip { rpos: Pos0, skip_len: u32 },
-    /// S — soft clip (read-only; reference doesn't participate).
+    /// S — soft clip (read-only; reference doesn't participate). `qual` is
+    /// `None` if the record has no qualities.
     SoftClip { qpos: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
     /// P — padding.
     Padding { len: u32 },

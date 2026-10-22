@@ -64,7 +64,8 @@ pub enum OwnedRecordError {
 /// An owned, mutable BAM record for writing and in-memory modification.
 #[derive(Debug, Clone)]
 pub struct OwnedBamRecord {
-    /// Reference sequence. `None` for unmapped (BAM wire `-1`).
+    /// Reference sequence. `None` when the record has no reference (BAM wire
+    /// `-1`); an unmapped record may still have one (placed unmapped).
     pub tid: Option<Tid>,
     /// 0-based leftmost position. `None` for unmapped/unavailable (BAM
     /// wire `-1`); `Some(p)` for any in-range mapping. Construction via
@@ -72,7 +73,7 @@ pub struct OwnedBamRecord {
     pub pos: Option<Pos0>,
     pub mapq: u8,
     pub flags: BamFlags,
-    /// RNEXT, PNEXT and TLEN.
+    /// RNEXT, PNEXT and TLEN; see [`MateFields`].
     pub mate_fields: MateFields,
     pub qname: Vec<u8>,
     pub cigar: Vec<CigarOp>,
@@ -118,6 +119,7 @@ impl OwnedBamRecordBuilder {
         self.qual = qual;
         self
     }
+    /// Set RNEXT, PNEXT and TLEN.
     pub fn mate_fields(mut self, mate_fields: MateFields) -> Self {
         self.mate_fields = mate_fields;
         self
@@ -165,8 +167,10 @@ impl OwnedBamRecordBuilder {
 impl OwnedBamRecord {
     /// Start building a record with the required fields.
     ///
-    /// Pass `None` for `tid` and `pos` to mark the record as unmapped (BAM
-    /// wire `-1`).
+    /// `tid` must name a target of the header the record is written under.
+    /// Pass `None` for `tid` and `pos` to write BAM's `-1` (no reference or
+    /// position). This does not set the unmapped flag (0x4); set that with
+    /// [`flags`](OwnedBamRecordBuilder::flags).
     pub fn builder(tid: Option<Tid>, pos: Option<Pos0>, qname: Vec<u8>) -> OwnedBamRecordBuilder {
         OwnedBamRecordBuilder {
             tid,

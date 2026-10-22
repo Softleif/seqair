@@ -329,6 +329,17 @@ impl<'a> AlignedPairs<'a> {
         MatchesOnly { inner: self }
     }
 
+    /// Attach the read's bases and qualities to each event.
+    ///
+    /// `qual` is `None` when the record has no qualities (a BAM `0xFF` run, or
+    /// SAM `*`); `Match` events then carry [`BaseQuality::UNAVAILABLE`] and
+    /// `Insertion`/`SoftClip` events carry `None`.
+    ///
+    /// # Errors
+    /// [`AlignedPairsError::CigarSeqLengthMismatch`] if the CIGAR's query
+    /// length differs from `seq.len()`, and
+    /// [`AlignedPairsError::SeqQualLengthMismatch`] if `qual` is `Some` with a
+    /// different length than `seq`.
     pub fn with_read<'read>(
         self,
         seq: &'read [seqair_types::Base],
@@ -682,9 +693,8 @@ impl super::owned_record::OwnedBamRecord {
     ///
     /// Equivalent to `self.aligned_pairs()?.with_read(&self.seq, qual)`, with
     /// `qual` `None` when the record has no qualities (empty, or the `0xFF`
-    /// run), as for a [`SlimRecord`](super::record_store::SlimRecord). The
-    /// same validation applies: cigar query length must match seq length, and
-    /// qualities, when present, too.
+    /// run), as for a [`SlimRecord`]. The same validation applies: cigar query
+    /// length must match seq length, and qualities, when present, too.
     ///
     /// Chain `.with_reference(&ref_seq)` to add reference base lookups.
     ///

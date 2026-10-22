@@ -275,12 +275,17 @@ pub enum DecodeError {
     #[error("invalid BAM position value {value}: negative positions are reserved")]
     InvalidPosition { value: i32 },
 
+    /// A record's reference id is neither `-1` (none) nor a target of the header.
     #[error("invalid reference id")]
     InvalidTid { source: crate::reader::TidError },
 
+    /// A record's mate reference id is neither `-1` (none) nor a target of the
+    /// header.
     #[error("invalid mate reference id")]
     InvalidMateTid { source: crate::reader::TidError },
 
+    /// A record's mate position is negative, other than the format's
+    /// "unavailable" value (BAM `-1`, CRAM `0`).
     #[error("invalid mate position {value}: negative positions are reserved")]
     InvalidMatePosition { value: i32 },
 

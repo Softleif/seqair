@@ -72,7 +72,9 @@ pub enum BamWriteError {
     #[error("record size {size} exceeds {MAX_RECORD_SIZE} byte limit")]
     RecordTooLarge { size: usize },
 
-    /// Mapped record (flags & 0x4 == 0) without a reference (`tid` is `None`).
+    /// Mapped record (flags & 0x4 == 0) with no reference sequence. Only
+    /// checked when the writer is building an index, which cannot place such a
+    /// record.
     #[error("mapped record has no reference (structurally invalid)")]
     MappedWithoutReference,
 

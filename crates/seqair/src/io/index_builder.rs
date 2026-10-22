@@ -15,6 +15,9 @@ pub struct IndexChunk {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
+    /// A record sorts before the previous one by `(tid, pos)`: records must
+    /// be pushed in coordinate order. `tid` and `pos` are the offending
+    /// record's.
     #[error("input not sorted: tid={tid}, pos={pos}")]
     UnsortedInput { tid: u32, pos: u64 },
 

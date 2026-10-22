@@ -279,6 +279,8 @@ pub enum CramError {
     #[error("invalid length from ITF8: {value} is negative")]
     InvalidLength { value: i32 },
 
+    /// A container or slice header has a reference id below `-2`; only `-1`
+    /// (unmapped) and `-2` (multiple references) are negative ids.
     #[error("invalid reference sequence id {value} (expected >= 0, -1 unmapped or -2 multi-ref)")]
     InvalidRefSeqId { value: i32 },
 

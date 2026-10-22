@@ -219,6 +219,8 @@ fn field<T>(slab: &[T], range: Range<usize>) -> &[T] {
 /// Parsed CRAM slice header.
 #[derive(Debug)]
 pub struct SliceHeader {
+    /// The reference(s) the slice's records are on, as numbered in the file;
+    /// not checked against the file header until the slice is decoded.
     pub ref_seq_id: RefSeqId,
     pub alignment_start: i32,
     pub alignment_span: i32,

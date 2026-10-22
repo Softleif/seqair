@@ -7,9 +7,11 @@ use crate::reader::{ResolveTid, Tid};
 
 /// The reference a CRAM container or slice is aligned to.
 ///
-/// As parsed, `T` is the `u32` index: a header is read before the file's
-/// reference list is known. [`Self::resolve`] checks it against the header
-/// when a slice's records are decoded (`r[cram.record.ref_ids]`).
+/// The container and slice header parsers see only their own bytes, so as
+/// parsed `T` is the plain `u32` index, not yet checked against the file
+/// header. Once a slice's records are decoded, the index is checked and
+/// replaced by a validated [`Tid`] (`r[cram.record.ref_ids]`); an index the
+/// header does not have is an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefSeqId<T = u32> {
     /// Every record is on this reference.
@@ -49,7 +51,7 @@ impl RefSeqId {
 pub struct ContainerHeader {
     /// Total bytes of block data in this container (NOT including this header).
     pub length: i32,
-    /// The reference the container is aligned to.
+    /// The reference(s) the container's records are on.
     pub ref_seq_id: RefSeqId,
     /// 1-based alignment start on the reference.
     pub alignment_start: i32,
@@ -197,7 +199,9 @@ impl ContainerHeader {
 
     /// Does this container's range overlap `[query_start, query_end)`?
     ///
-    /// Positions are 1-based in the container header.
+    /// Positions are 1-based in the container header. A multi-reference
+    /// container always overlaps (it has no single range to compare); an
+    /// unmapped one never does.
     pub fn overlaps(&self, query_start: i64, query_end: i64) -> bool {
         match self.ref_seq_id {
             // Can't do coordinate filtering on a multi-ref container.

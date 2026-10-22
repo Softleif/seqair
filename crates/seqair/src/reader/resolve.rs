@@ -13,10 +13,13 @@ use std::num::NonZeroU32;
 // r[impl unified.tid.newtype+2]
 /// A validated BAM target id — an index into the header's target list.
 ///
-/// Every `Tid` was checked against a header: by [`ResolveTid::resolve_tid`],
-/// or crate-internally when a reader decodes a record's reference field
-/// ([`Tid::from_wire`]), which rejects an id the header does not have. `Clone`
-/// and `Copy` so callers can reuse the value without re-validating.
+/// Every `Tid` was checked against the header it came from, so it names a
+/// contig of that header. You get one from [`ResolveTid::resolve_tid`], or from
+/// a record's reference field: a reader rejects a record whose reference id is
+/// not one of the header's targets, so the field never holds an invalid `Tid`.
+/// A `Tid` is not tied to its header, so use it only with readers and headers
+/// for the same file. `Clone` and `Copy` so callers can reuse the value
+/// without re-validating.
 ///
 /// Stored as the id plus one, so `Option<Tid>` — a record's "unmapped" or
 /// "no mate reference" — costs nothing over the `u32`, like [`Pos0`].
@@ -92,7 +95,9 @@ impl From<Tid> for u32 {
 }
 
 // r[impl unified.tid.newtype+2]
-/// Error returned by [`ResolveTid::resolve_tid`].
+/// Why a contig name, target id, or a record's reference id is not a valid
+/// [`Tid`] for a header. Returned by [`ResolveTid::resolve_tid`], and wrapped
+/// in a record decode error for a bad reference id in the file.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TidError {
@@ -100,8 +105,7 @@ pub enum TidError {
     UnknownContig { name: SmolStr },
     #[error("tid {tid} out of range (header has {n_targets} targets)")]
     TidOutOfRange { tid: u32, n_targets: u32 },
-    /// A record's reference id below `-1`, the only negative one that means
-    /// something ("none").
+    /// A record's reference id is below `-1`; only `-1` means "no reference".
     #[error("reference id {value} is negative; only -1 marks an absent reference")]
     Negative { value: i32 },
 }

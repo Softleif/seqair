@@ -128,9 +128,10 @@ pub struct SlimRecord {
     pub leading_soft_clip: u32,
     /// Soft-clipped bases after the last aligned base, hard clips looked past.
     pub trailing_soft_clip: u32,
-    /// Reference target; `None` for unmapped.
+    /// Reference target; `None` when the record has no reference (BAM `-1`).
+    /// An unmapped record may still have one (placed unmapped).
     pub tid: Option<Tid>,
-    /// RNEXT, PNEXT and TLEN, as the file has them.
+    /// RNEXT, PNEXT and TLEN; see [`MateFields`].
     pub mate_fields: MateFields,
     /// Offset into the name slab.
     name_off: u32,
@@ -548,9 +549,12 @@ impl<U> RecordStore<U> {
     /// slabs until rollback). Pass `&mut ()` for no filtering (the blanket
     /// [`CustomizeRecordStore`] impl on `()` keeps every record).
     ///
-    /// `header` is the file's: the record's reference ids must name its
-    /// targets (`r[bam.record.ref_ids]`), so every stored [`Tid`] is valid
-    /// for it.
+    /// `header` is the file's: each reference id must be `-1` (none) or name
+    /// one of its targets (`r[bam.record.ref_ids]`), and a mate position must
+    /// not be negative other than `-1`, so every stored [`Tid`] is valid for
+    /// it. Otherwise the record is rejected with [`DecodeError::InvalidTid`],
+    /// [`DecodeError::InvalidMateTid`] or [`DecodeError::InvalidMatePosition`]
+    /// and nothing is stored.
     pub fn push_raw<E: CustomizeRecordStore<Extra = U>>(
         &mut self,
         raw: &[u8],
@@ -946,9 +950,10 @@ pub struct FilterRawFields<'a> {
     pub matching_bases: u32,
     /// Sum of I/D CIGAR op lengths. `0` for `push_raw` (not yet computed).
     pub indel_bases: u32,
-    /// Reference target; `None` for unmapped.
+    /// Reference target; `None` when the record has no reference (BAM `-1`).
+    /// An unmapped record may still have one (placed unmapped).
     pub tid: Option<Tid>,
-    /// RNEXT, PNEXT and TLEN, as the file has them.
+    /// RNEXT, PNEXT and TLEN; see [`MateFields`].
     pub mate_fields: MateFields,
     /// Query name (NUL stripped).
     pub qname: &'a [u8],
