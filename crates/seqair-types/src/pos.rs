@@ -54,6 +54,13 @@ const _: () = assert!(POS_MAX == 2_147_483_647);
 /// Adding one is monotone, so the derived `Ord` on the stored number is the
 /// ordering of the positions.
 ///
+/// Pattern types would give the niche without the offset:
+/// `pattern_type!(u32 is 0..=0x7FFF_FFFF)` holds the value itself and its
+/// `Option` is still four bytes (checked on rustc 1.96). That costs the shared
+/// bit pattern with [`Pos1`] (`1..=0x7FFF_FFFF`), so the conversions become a
+/// `±1`. Worth revisiting once `pattern_types` is stable, or at least no
+/// longer an `internal_features` lint with only `transmute` to build a value.
+///
 /// # Construction
 ///
 /// ```
