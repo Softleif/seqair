@@ -52,6 +52,18 @@ enum Extent {
     Last(u64),
 }
 
+impl Extent {
+    /// The furthest 0-based position the entry reaches: none if unmapped,
+    /// every position if its extent is unknown.
+    fn reach(self) -> Option<u64> {
+        match self {
+            Extent::Unmapped => None,
+            Extent::Unknown => Some(u64::MAX),
+            Extent::Last(last) => Some(last),
+        }
+    }
+}
+
 impl CraiEntry {
     /// The entry's 0-based start. CRAI stores a **1-based** one; `0` only
     /// marks unmapped entries (see [`Self::extent`]).
@@ -111,12 +123,7 @@ impl CramIndex {
         let mut previous: Option<(Option<u32>, u64)> = None;
         for e in &entries {
             let before = previous.filter(|&(ref_id, _)| ref_id == e.ref_id).map(|(_, r)| r);
-            let own = match e.extent() {
-                Extent::Unmapped => None,
-                Extent::Unknown => Some(u64::MAX),
-                Extent::Last(last) => Some(last),
-            };
-            let furthest = before.max(own).unwrap_or(0);
+            let furthest = before.max(e.extent().reach()).unwrap_or(0);
             reach.push(furthest);
             previous = Some((e.ref_id, furthest));
         }
@@ -148,11 +155,7 @@ impl CramIndex {
             .get(first..last)
             .unwrap_or_default()
             .iter()
-            .filter(|e| match e.extent() {
-                Extent::Unmapped => false,
-                Extent::Unknown => true,
-                Extent::Last(last) => last >= start,
-            })
+            .filter(|e| e.extent().reach().is_some_and(|reach| reach >= start))
             .collect()
     }
 
