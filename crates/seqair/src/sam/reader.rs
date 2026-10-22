@@ -10,7 +10,7 @@ use crate::bam::{
     region_buf::{BlockCache, RegionBuf},
 };
 use crate::io::text_scan;
-use crate::reader::ResolveTid;
+use crate::reader::{ResolveTid, Tid};
 use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0, Pos1};
 use std::num::NonZeroI32;
@@ -300,7 +300,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
     /// Linear scan of plain (uncompressed) SAM text, parsing all records that overlap [start, end).
     pub fn fetch_plain_into(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, SamError> {
@@ -367,8 +367,8 @@ impl<R: Read + Seek> IndexedSamReader<R> {
     /// Estimate the compressed bytes a `[start, end]` region query would load,
     /// for byte-aware segmentation. See
     /// [`IndexedBamReader::estimate_region_bytes`](crate::bam::IndexedBamReader::estimate_region_bytes).
-    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> u64 {
-        let chunks = self.shared.index.query(tid, span.start, span.last);
+    pub fn estimate_region_bytes(&self, tid: Tid, span: RangeInclusive<Pos0>) -> u64 {
+        let chunks = self.shared.index.query(tid.as_u32(), span.start, span.last);
         crate::bam::region_buf::merged_byte_size(&chunks) as u64
     }
 
@@ -378,7 +378,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
     // r[impl sam.perf.bulk_read]
     pub fn fetch_into(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, SamError> {
@@ -388,7 +388,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
     // r[impl unified.fetch_into_customized]
     pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,
@@ -399,7 +399,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
         if span.is_empty() {
             return Ok(crate::reader::FetchCounts::default());
         }
-        let chunks = self.shared.index.query(tid, span.start, span.last);
+        let chunks = self.shared.index.query(tid.as_u32(), span.start, span.last);
         if chunks.is_empty() {
             return Ok(crate::reader::FetchCounts::default());
         }
@@ -508,7 +508,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
 fn parse_sam_line<E: CustomizeRecordStore>(
     line: &[u8],
     header: &BamHeader,
-    tid_filter: u32,
+    tid_filter: Tid,
     start: i64,
     end: i64,
     store: &mut RecordStore<E::Extra>,
@@ -542,7 +542,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     // Unknown contig: skip.
     let Ok(rec_tid) = rname_str.resolve_tid(header) else { return Ok(None) };
 
-    if rec_tid.as_u32() != tid_filter {
+    if rec_tid != tid_filter {
         return Ok(None);
     }
 
@@ -1095,7 +1095,7 @@ mod tests {
         parse_sam_line(
             line,
             header,
-            0,
+            Tid::new(0).unwrap(),
             0,
             10000,
             &mut store,
@@ -1167,7 +1167,7 @@ mod tests {
             parse_sam_line(
                 line.as_bytes(),
                 &header,
-                0,
+                Tid::new(0).unwrap(),
                 0,
                 10000,
                 &mut store,
@@ -1317,7 +1317,7 @@ mod tests {
         let result = parse_sam_line(
             line,
             header,
-            0,
+            Tid::new(0).unwrap(),
             start,
             end,
             &mut store,

@@ -1175,7 +1175,8 @@ fn unmapped_reads_are_indexed_apart_from_the_mapped_ones(tc: TestCase) {
             let mut readers = Readers::open(path, &fasta).expect("open");
             let mut store = RecordStore::new();
             let span = (Pos0::ZERO..=Pos0::new(CONTIG_LEN - 1).unwrap()).into();
-            readers.fetch_into(contig as u32, span, &mut store).expect("fetch");
+            let tid = (contig as u32).resolve_tid(readers.header()).expect("contig");
+            readers.fetch_into(tid, span, &mut store).expect("fetch");
             decode_store(&store)
         };
         assert_eq!(everything(&cram), everything(&bam), "contig {contig}: unfiltered");

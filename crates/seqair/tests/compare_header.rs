@@ -14,6 +14,7 @@
 )]
 
 use rust_htslib::bam::{self, Read as _};
+use seqair::reader::ResolveTid;
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -70,8 +71,10 @@ fn header_matches_htslib() {
 
     // Target lengths match
     for (tid, hts_len) in hts_lens.iter().enumerate() {
-        let len = header
-            .target_len(tid as u32)
+        let len = (tid as u32)
+            .resolve_tid(&header)
+            .ok()
+            .and_then(|t| header.target_len(t))
             .unwrap_or_else(|| panic!("seqair target_len missing for tid {tid}"));
         assert_eq!(len, *hts_len, "target length mismatch at tid {tid}");
     }
@@ -80,6 +83,6 @@ fn header_matches_htslib() {
     for (tid, name) in hts_names.iter().enumerate() {
         let resolved =
             header.tid(name).unwrap_or_else(|| panic!("seqair tid lookup failed for {name}"));
-        assert_eq!(resolved, tid as u32, "tid roundtrip mismatch for {name}");
+        assert_eq!(resolved.as_u32(), tid as u32, "tid roundtrip mismatch for {name}");
     }
 }

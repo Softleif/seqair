@@ -23,6 +23,7 @@ use seqair::bam::index::BamIndex;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair::reader::ResolveTid;
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::Command;
@@ -59,7 +60,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     // chr1: 30 records at positions 0, 10000, 20000, ...
     for i in 0..30u32 {
         let rec = OwnedBamRecord::builder(
-            tid(0),
+            Some(tid(0)),
             Some(Pos0::new(i * 10000).unwrap()),
             format!("c1r{i}").into_bytes(),
         )
@@ -75,7 +76,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     // chr2: 15 records
     for i in 0..15u32 {
         let rec = OwnedBamRecord::builder(
-            tid(1),
+            Some(tid(1)),
             Some(Pos0::new(i * 20000).unwrap()),
             format!("c2r{i}").into_bytes(),
         )
@@ -91,7 +92,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     // chr3: 5 records
     for i in 0..5u32 {
         let rec = OwnedBamRecord::builder(
-            tid(2),
+            Some(tid(2)),
             Some(Pos0::new(i * 30000).unwrap()),
             format!("c3r{i}").into_bytes(),
         )
@@ -334,7 +335,7 @@ fn indexed_reader_finds_csi_without_bam_infix() {
             BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
         for i in 0..5u32 {
             let rec = OwnedBamRecord::builder(
-                tid(0),
+                Some(tid(0)),
                 Some(Pos0::new(i * 10000).unwrap()),
                 format!("r{i}").into_bytes(),
             )
@@ -353,8 +354,13 @@ fn indexed_reader_finds_csi_without_bam_infix() {
 
     let mut reader = IndexedBamReader::open(&bam_path).expect("should find multi.csi");
     let mut store = RecordStore::new();
+    let chr1 = reader.header().tid("chr1").unwrap();
     reader
-        .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(), &mut store)
+        .fetch_into(
+            chr1,
+            (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
     assert!(!store.is_empty(), "should find records via multi.csi");
 }
@@ -373,8 +379,13 @@ fn indexed_reader_prefers_csi_over_bai() {
 
     let mut reader = IndexedBamReader::open(&bam_path).expect("open with CSI");
     let mut store = RecordStore::new();
+    let chr1 = reader.header().tid("chr1").unwrap();
     reader
-        .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(), &mut store)
+        .fetch_into(
+            chr1,
+            (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
     assert_eq!(store.len(), 30, "chr1 should have 30 records");
 }
@@ -390,8 +401,13 @@ fn indexed_reader_with_csi_only() {
 
     let mut reader = IndexedBamReader::open(&bam_path).expect("open with CSI only");
     let mut store = RecordStore::new();
+    let chr1 = reader.header().tid("chr1").unwrap();
     reader
-        .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(), &mut store)
+        .fetch_into(
+            chr1,
+            (Pos0::new(0).unwrap()..=Pos0::new(1_000_000).unwrap()).into(),
+            &mut store,
+        )
         .expect("fetch");
     assert_eq!(store.len(), 30);
 }
@@ -416,6 +432,7 @@ fn seqair_csi_fetch_matches_samtools_counts() {
 
     for &(name, tid, start, end, samtools_region) in regions {
         let mut store = RecordStore::new();
+        let tid = tid.resolve_tid(reader.header()).unwrap();
         reader
             .fetch_into(
                 tid,
@@ -525,8 +542,9 @@ fn real_bam_samtools_csi_matches_bai() {
     let header = reader.header();
 
     // Query each contig fully and compare chunk counts
-    for tid in 0..header.target_count() as u32 {
-        let len = header.target_len(tid).unwrap();
+    for target in header.targets() {
+        let tid = target.tid.as_u32();
+        let len = header.target_len(target.tid).unwrap();
         let bai_chunks = bai.query(tid, Pos0::new(0).unwrap(), Pos0::new(len as u32).unwrap());
         let csi_chunks = csi.query(tid, Pos0::new(0).unwrap(), Pos0::new(len as u32).unwrap());
 
@@ -554,7 +572,7 @@ fn roundtrip_csi_preserves_query_chunks(tc: TestCase) {
     for i in 0..n_records {
         let pos = ((seed + (i as u64) * 1000) % 9_000_000) as u32;
         let rec = OwnedBamRecord::builder(
-            tid(0),
+            Some(tid(0)),
             Some(Pos0::new(pos).unwrap()),
             format!("r{i}").into_bytes(),
         )

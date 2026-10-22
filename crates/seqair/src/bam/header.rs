@@ -2,6 +2,7 @@
 //! sequence names, and lengths; shared across forked readers via `Arc`.
 
 use super::bgzf::{BgzfError, BgzfReader};
+use crate::reader::Tid;
 use seqair_types::SmolStr;
 use std::{
     collections::HashMap,
@@ -25,7 +26,7 @@ struct TargetInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContigInfo {
-    pub tid: u32,
+    pub tid: Tid,
     pub len: u64,
 }
 
@@ -47,7 +48,7 @@ pub struct PgRecord {
 /// name + length together without re-looking up the length per tid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
-    pub tid: u32,
+    pub tid: Tid,
     pub name: SmolStr,
     pub length: u64,
 }
@@ -267,9 +268,10 @@ impl BamHeader {
         let tid = self
             .tid(name)
             .ok_or_else(|| BamHeaderError::ContigNotFound { name: SmolStr::new(name) })?;
-        let len = self
-            .target_len(tid)
-            .ok_or_else(|| BamHeaderError::ContigNoLength { name: SmolStr::new(name), tid })?;
+        let len = self.target_len(tid).ok_or_else(|| BamHeaderError::ContigNoLength {
+            name: SmolStr::new(name),
+            tid: tid.as_u32(),
+        })?;
         Ok(ContigInfo { tid, len })
     }
 
@@ -278,17 +280,20 @@ impl BamHeader {
     }
 
     // r[impl bam.header.tid_lookup]
-    pub fn tid(&self, name: &str) -> Option<u32> {
-        self.name_to_tid.get(name).copied()
+    pub fn tid(&self, name: &str) -> Option<Tid> {
+        let &index = self.name_to_tid.get(name)?;
+        Tid::of_header(index, self)
     }
 
-    pub fn target_name(&self, tid: u32) -> Option<&str> {
-        self.targets.get(tid as usize).map(|t| t.name.as_str())
+    /// `None` only for a `Tid` of another header with more targets.
+    pub fn target_name(&self, tid: Tid) -> Option<&str> {
+        self.targets.get(tid.as_usize()).map(|t| t.name.as_str())
     }
 
     // r[impl bam.header.target_len]
-    pub fn target_len(&self, tid: u32) -> Option<u64> {
-        self.targets.get(tid as usize).map(|t| t.length)
+    /// `None` only for a `Tid` of another header with more targets.
+    pub fn target_len(&self, tid: Tid) -> Option<u64> {
+        self.targets.get(tid.as_usize()).map(|t| t.length)
     }
 
     // r[impl bam.header.target_names]
@@ -307,13 +312,13 @@ impl BamHeader {
     /// state (VCF headers, region lists) don't re-derive the length via a
     /// second `target_len(tid)` lookup.
     pub fn targets(&self) -> impl Iterator<Item = Target> {
-        self.targets.iter().enumerate().map(|(tid, t)| {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "target count ≤ MAX_REFERENCES (1M) enforced at parse, so tid fits in u32"
-            )]
-            let tid = tid as u32;
-            Target { tid, name: t.name.clone(), length: t.length }
+        // Every index below the target count is one of ours: the filter drops nothing.
+        self.targets.iter().zip(0u32..).filter_map(|(t, index)| {
+            Some(Target {
+                tid: Tid::of_header(index, self)?,
+                name: t.name.clone(),
+                length: t.length,
+            })
         })
     }
 
@@ -436,11 +441,11 @@ mod tests {
                      @RG\tID:sample1\tSM:sample1\n";
         let header = BamHeader::from_sam_text(text).unwrap();
         assert_eq!(header.target_count(), 2);
-        assert_eq!(header.tid("chr1"), Some(0));
-        assert_eq!(header.tid("chr2"), Some(1));
-        assert_eq!(header.target_name(0), Some("chr1"));
-        assert_eq!(header.target_len(0), Some(248_956_422));
-        assert_eq!(header.target_len(1), Some(242_193_529));
+        let (chr1, chr2) = (header.tid("chr1").unwrap(), header.tid("chr2").unwrap());
+        assert_eq!((chr1.as_u32(), chr2.as_u32()), (0, 1));
+        assert_eq!(header.target_name(chr1), Some("chr1"));
+        assert_eq!(header.target_len(chr1), Some(248_956_422));
+        assert_eq!(header.target_len(chr2), Some(242_193_529));
         assert!(header.header_text().contains("@HD"));
     }
 
@@ -534,10 +539,10 @@ mod tests {
         let header = BamHeader::from_sam_text(text).unwrap();
 
         let info = header.resolve_contig("chr1").unwrap();
-        assert_eq!(info, ContigInfo { tid: 0, len: 248_956_422 });
+        assert_eq!((info.tid.as_u32(), info.len), (0, 248_956_422));
 
         let info = header.resolve_contig("chr2").unwrap();
-        assert_eq!(info, ContigInfo { tid: 1, len: 242_193_529 });
+        assert_eq!((info.tid.as_u32(), info.len), (1, 242_193_529));
     }
 
     #[test]
@@ -588,10 +593,10 @@ mod tests {
         let copy = BamHeader::from_template(&original);
 
         assert_eq!(copy.target_count(), 2);
-        assert_eq!(copy.tid("chr1"), Some(0));
-        assert_eq!(copy.tid("chr2"), Some(1));
-        assert_eq!(copy.target_len(0), Some(1000));
-        assert_eq!(copy.target_len(1), Some(2000));
+        assert_eq!(copy.tid("chr1"), original.tid("chr1"));
+        assert_eq!(copy.tid("chr2").map(Tid::as_u32), Some(1));
+        assert_eq!(copy.targets().collect::<Vec<_>>(), original.targets().collect::<Vec<_>>());
+        assert_eq!(copy.target_len(copy.tid("chr2").unwrap()), Some(2000));
         assert_eq!(copy.header_text(), original.header_text());
     }
 
@@ -655,9 +660,9 @@ mod tests {
         let sam_header = BamHeader::from_sam_text(bam_header.header_text()).unwrap();
 
         assert_eq!(bam_header.target_count(), sam_header.target_count());
-        for tid in 0..bam_header.target_count() as u32 {
-            assert_eq!(bam_header.target_name(tid), sam_header.target_name(tid));
-            assert_eq!(bam_header.target_len(tid), sam_header.target_len(tid));
-        }
+        assert_eq!(
+            bam_header.targets().collect::<Vec<_>>(),
+            sam_header.targets().collect::<Vec<_>>()
+        );
     }
 }

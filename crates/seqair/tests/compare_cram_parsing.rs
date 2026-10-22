@@ -76,8 +76,9 @@ fn cram_header_matches_bam_header_via_htslib() {
     }
 
     // Compare target lengths
-    for tid in 0..our_header.target_count() as u32 {
-        let our_len = our_header.target_len(tid).unwrap();
+    for target in our_header.targets() {
+        let tid = target.tid.as_u32();
+        let our_len = our_header.target_len(target.tid).unwrap();
         let hts_len = htslib_header.target_len(tid).unwrap();
         assert_eq!(our_len, hts_len, "length mismatch for tid={tid}");
     }
@@ -238,7 +239,7 @@ fn cram_records_match_bam_records() {
     let mut hts = bam::IndexedReader::from_path(test_bam_path()).unwrap();
 
     // Compare for chr19 region
-    let tid = 0u32;
+    let tid = cram_reader.header().tid("chr19").unwrap();
     let start = 6_103_076u64;
     let end = 6_143_229u64;
 
@@ -252,7 +253,12 @@ fn cram_records_match_bam_records() {
         .map(|c| c.kept)
         .unwrap();
 
-    hts.fetch(FetchDefinition::Region(tid as i32, start as i64, end as i64)).unwrap();
+    hts.fetch(FetchDefinition::Region(
+        i32::try_from(tid.as_u32()).unwrap(),
+        start as i64,
+        end as i64,
+    ))
+    .unwrap();
     let mut hts_records = Vec::new();
     let mut record = bam::Record::new();
     while hts.read(&mut record) == Some(Ok(())) {

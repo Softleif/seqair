@@ -229,7 +229,8 @@ fn query_sequence_matches_generated_reads(tc: TestCase) {
         let query @ (tid, start, last) = draw_query(&tc, prev, &contigs);
         prev = Some(query);
         let span = (Pos0::new(start).unwrap()..=Pos0::new(last).unwrap()).into();
-        reader.fetch_into(tid as u32, span, &mut store).unwrap();
+        let resolved = (tid as u32).resolve_tid(reader.header()).unwrap();
+        reader.fetch_into(resolved, span, &mut store).unwrap();
 
         let expected: Vec<usize> = reads
             .iter()

@@ -1,6 +1,7 @@
 use super::ReaderError;
 use super::formats::{self, Format, FormatDetectionError};
 use super::readers::Readers;
+use super::resolve::Tid;
 use crate::{
     bam::{
         BamHeader, IndexedBamReader, ReferenceStats,
@@ -151,10 +152,10 @@ impl<R: Read + Seek> IndexedReader<R> {
     /// Estimate the compressed bytes a `[start, end]` region query would load,
     /// for byte-aware segmentation. For CRAM it is the records' share of the
     /// slices they are in, prorated by span from the CRAI.
-    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> Option<u64> {
+    pub fn estimate_region_bytes(&self, tid: Tid, span: RangeInclusive<Pos0>) -> u64 {
         match self {
-            Self::Bam(r) => Some(r.estimate_region_bytes(tid, span)),
-            Self::Sam(r) => Some(r.estimate_region_bytes(tid, span)),
+            Self::Bam(r) => r.estimate_region_bytes(tid, span),
+            Self::Sam(r) => r.estimate_region_bytes(tid, span),
             Self::Cram(r) => r.estimate_region_bytes(tid, span),
         }
     }
@@ -164,7 +165,7 @@ impl<R: Read + Seek> IndexedReader<R> {
     /// Load every record overlapping the closed interval `span` on `tid`.
     pub fn fetch_into(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
@@ -180,7 +181,7 @@ impl<R: Read + Seek> IndexedReader<R> {
     /// the filter retained (`kept`). Pass `&mut ()` for no filtering.
     pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,

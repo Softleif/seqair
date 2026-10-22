@@ -179,9 +179,9 @@ fn whole_genome_target_yields_all_nonempty_contigs() {
     assert!(!contigs.is_empty(), "header has at least one contig");
     // Every header contig with non-zero length should appear.
     let header = readers.header();
-    for tid_u32 in 0..u32::try_from(header.target_count()).unwrap() {
-        if header.target_len(tid_u32).unwrap_or(0) > 0 {
-            let name = header.target_name(tid_u32).unwrap();
+    for target in header.targets() {
+        if target.length > 0 {
+            let name = target.name.as_str();
             assert!(contigs.contains(&name), "whole-genome plan missing contig '{name}'",);
         }
     }

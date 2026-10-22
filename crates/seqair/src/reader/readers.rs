@@ -1,3 +1,4 @@
+use super::resolve::Tid;
 use super::{
     ReaderError,
     indexed::IndexedReader,
@@ -219,7 +220,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// filtered through this reader's customize value.
     pub fn fetch_into(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore<E::Extra>,
     ) -> Result<usize, ReaderError> {
@@ -289,9 +290,8 @@ impl<E: CustomizeRecordStore> Readers<E> {
         };
         let budget = budget.get();
         let overlap = opts.overlap();
-        let mut estimate = |tid: u32, span: RangeInclusive<Pos0>| {
-            self.alignment.estimate_region_bytes(tid, span).unwrap_or(0)
-        };
+        let mut estimate =
+            |tid: Tid, span: RangeInclusive<Pos0>| self.alignment.estimate_region_bytes(tid, span);
         let mut out = Vec::new();
         for seg in Segments::new(ranges, opts) {
             super::segment::split_segment_by_bytes(&seg, overlap, budget, &mut estimate, &mut out);
@@ -303,7 +303,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// load. This is the same estimate [`segments`](Self::segments) budgets
     /// against.
     #[must_use]
-    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> Option<u64> {
+    pub fn estimate_region_bytes(&self, tid: Tid, span: RangeInclusive<Pos0>) -> u64 {
         self.alignment.estimate_region_bytes(tid, span)
     }
 
@@ -398,7 +398,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
         //   shorter contig's end would silently return zero records.
         let header = self.alignment.header();
         match header.tid(segment.contig().as_str()) {
-            Some(t) if t == tid.as_u32() => {}
+            Some(t) if t == tid => {}
             _ => {
                 return Err(ReaderError::SegmentHeaderMismatch {
                     contig: segment.contig().clone(),
@@ -406,7 +406,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
                 });
             }
         }
-        let header_last_pos = header.target_len(tid.as_u32()).and_then(|len| len.checked_sub(1));
+        let header_last_pos = header.target_len(tid).and_then(|len| len.checked_sub(1));
         if header_last_pos != Some(segment.contig_last_pos().as_u64()) {
             return Err(ReaderError::SegmentContigLengthMismatch {
                 contig: segment.contig().clone(),
@@ -422,7 +422,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
                 let alignment = &mut self.alignment;
                 let store = &mut self.store;
                 let customize = &mut self.customize;
-                alignment.fetch_into_customized(tid.as_u32(), span, store, customize)?
+                alignment.fetch_into_customized(tid, span, store, customize)?
             }
             Some(cap) => {
                 // Cap reads overlapping any column at load time so an
@@ -431,7 +431,7 @@ impl<E: CustomizeRecordStore> Readers<E> {
                 // any state it accumulates survives.
                 let mut capped = DepthCap::with_cap(self.customize.clone(), Some(cap));
                 let fetch = self.alignment.fetch_into_customized(
-                    tid.as_u32(),
+                    tid,
                     span,
                     &mut self.store,
                     &mut capped,
@@ -801,7 +801,7 @@ mod tests {
         let region = span(6_100_000, 6_145_000);
         let (start, end) = (region.start, region.last);
         let tid = readers.header().tid("chr19").expect("chr19 in header");
-        let total = readers.estimate_region_bytes(tid, region).expect("BAM estimate");
+        let total = readers.estimate_region_bytes(tid, region);
         assert!(total > 0, "test region should contain reads");
 
         // One positional tile over the whole region (no byte budget).
@@ -836,7 +836,7 @@ mod tests {
         // point of subdivision), and no segment exceeds the budget unless a
         // single index leaf bin alone does (none here — budget > one bin).
         for s in &budgeted {
-            let bytes = readers.estimate_region_bytes(tid, s.span()).unwrap();
+            let bytes = readers.estimate_region_bytes(tid, s.span());
             assert!(bytes < total, "segment {bytes} B not below whole-region {total} B");
             assert!(
                 bytes <= budget.get(),
@@ -860,7 +860,7 @@ mod tests {
         // chr19 has two slices, 6_103_076..=6_135_680 and 6_135_609..=6_143_229 (1-based).
         let region = span(6_100_000, 6_145_000);
         let tid = readers.header().tid("chr19").expect("chr19 in header");
-        let total = readers.estimate_region_bytes(tid, region).expect("CRAM estimate");
+        let total = readers.estimate_region_bytes(tid, region);
         assert!(total > 0);
 
         let big = NonZeroU32::new(1_000_000).unwrap();
@@ -877,7 +877,7 @@ mod tests {
             assert_eq!(w[0].core_span().last.as_u64() + 1, w[1].core_span().start.as_u64());
         }
         for s in &budgeted {
-            let bytes = readers.estimate_region_bytes(tid, s.span()).unwrap();
+            let bytes = readers.estimate_region_bytes(tid, s.span());
             assert!(bytes <= budget.get(), "segment {:?} = {bytes} B over {budget}", s.span());
         }
     }
@@ -1573,11 +1573,9 @@ mod tests {
     fn pileup_of_an_empty_segment_reads_no_reference() {
         let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
         let tid = readers.header().tid("chr19").expect("test BAM has chr19");
-        let tid = crate::reader::ResolveTid::resolve_tid(&tid, readers.header()).unwrap();
-        let last_pos = Pos0::new(
-            u32::try_from(readers.header().target_len(tid.as_u32()).unwrap() - 1).unwrap(),
-        )
-        .unwrap();
+        let last_pos =
+            Pos0::new(u32::try_from(readers.header().target_len(tid).unwrap() - 1).unwrap())
+                .unwrap();
         let segment = |start: u32, last: u32| {
             Segment::new(
                 tid,
@@ -1704,14 +1702,15 @@ mod tests {
         // Pick a different tid (any other contig); fall back to chr19 again
         // if there's only one contig (then the test trivially passes by name
         // mismatch, not tid).
-        let other_tid: u32 = (0..u32::try_from(readers.header().target_count()).unwrap())
-            .find(|t| *t != chr19_tid)
-            .expect("test BAM has more than one contig");
-        let other_name: SmolStr = readers.header().target_name(other_tid).unwrap().into();
+        let other_name: SmolStr = readers
+            .header()
+            .targets()
+            .find(|t| t.tid != chr19_tid)
+            .expect("test BAM has more than one contig")
+            .name;
 
-        // Resolve a Tid newtype against the wrong numeric id.
-        let chr19_real_tid =
-            crate::reader::ResolveTid::resolve_tid(&chr19_tid, readers.header()).unwrap();
+        // A segment whose tid and contig name disagree.
+        let chr19_real_tid = chr19_tid;
         let last_pos =
             Pos0::new(u32::try_from(readers.header().target_len(chr19_tid).unwrap() - 1).unwrap())
                 .unwrap();

@@ -17,7 +17,7 @@ use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
-use crate::reader::{ResolveTid, Tid};
+use crate::reader::Tid;
 use core::range::RangeInclusive;
 use seqair_types::{Base, Pos0, Pos1, SmallVec, SmolStr};
 use std::fs::File;
@@ -626,9 +626,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
 
     /// Estimate the compressed bytes of the records a query for `span` on
     /// `tid` returns, from the index alone (`r[cram.index.region_bytes]`).
-    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> Option<u64> {
-        let tid = tid.resolve_tid(&self.shared.header).ok()?;
-        Some(self.shared.index.region_bytes(tid, span.start.as_u64(), span.last.as_u64()))
+    pub fn estimate_region_bytes(&self, tid: Tid, span: RangeInclusive<Pos0>) -> u64 {
+        self.shared.index.region_bytes(tid, span.start.as_u64(), span.last.as_u64())
     }
 
     // r[impl region_buf.not_cram]
@@ -639,7 +638,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     /// Fetch records overlapping the closed interval `span` (0-based) on `tid`.
     pub fn fetch_into(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, CramError> {
@@ -656,7 +655,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     /// (produced by the reader) vs `kept` (survived the filter).
     pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,
@@ -674,11 +673,6 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         // the reader mutably while the index entries and the reference name
         // are borrowed from it.
         let shared = Arc::clone(&self.shared);
-        let raw_tid = tid;
-        // A tid the header lacks has no index entries either, as in BAM.
-        let Ok(tid) = raw_tid.resolve_tid(&shared.header) else {
-            return Ok(crate::reader::FetchCounts::default());
-        };
         let entries = shared.index.query(tid, start_u64, end_u64);
         if entries.is_empty() {
             return Ok(crate::reader::FetchCounts::default());
@@ -701,7 +695,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         }
 
         let ref_name: &str =
-            shared.header.target_name(raw_tid).ok_or(CramError::UnknownTid { tid: raw_tid })?;
+            shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid: tid.as_u32() })?;
         shared.slice_cache.record_fetch(wanted.values().map(|slices| slices.len()).sum());
 
         // r[impl cram.slice_cache.shared]
@@ -812,7 +806,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             // They come from the whole index, not the query's entries, so
             // the window — and the decoded slice — is the same whichever
             // query decodes it.
-            let ref_len = self.shared.header.target_len(tid.as_u32()).unwrap_or(0);
+            let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
             let tid_entries = self.shared.index.entries_for(tid);
             let in_container =
                 || tid_entries.iter().filter(|e| e.container_offset == container_offset);
@@ -850,7 +844,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             let ref_end = ref_start
                 .checked_add(container_header.alignment_span as u64)
                 .ok_or(CramError::Truncated { context: "container alignment end overflow" })?;
-            let ref_len = self.shared.header.target_len(tid.as_u32()).unwrap_or(0);
+            let ref_len = self.shared.header.target_len(tid).unwrap_or(0);
             (ref_start, ref_end.min(ref_len))
         };
 
@@ -992,6 +986,7 @@ fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, Cram
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reader::ResolveTid;
     use std::sync::atomic::Ordering;
 
     fn cram_path() -> &'static Path {
@@ -1021,10 +1016,10 @@ mod tests {
         let mut store = RecordStore::new();
 
         // Fetch from first reference
-        let tid = 0;
+        let tid = 0u32.resolve_tid(reader.header()).unwrap();
         let count =
             reader.fetch_into(tid, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store).unwrap();
-        assert!(count > 0, "should fetch records from tid={tid}");
+        assert!(count > 0, "should fetch records from tid={tid:?}");
     }
 
     // r[verify cram.slice_cache.shared]
@@ -1035,18 +1030,19 @@ mod tests {
         let mut fork = reader.fork().unwrap();
         let mut store = RecordStore::new();
         let whole = || (Pos0::ZERO..=Pos0::MAX).into();
+        let tid0 = 0u32.resolve_tid(reader.header()).unwrap();
 
-        let count = reader.fetch_into(0, whole(), &mut store).unwrap();
+        let count = reader.fetch_into(tid0, whole(), &mut store).unwrap();
         let decoded = reader.slice_cache_stats().decoded;
         assert!(decoded > 1, "tid 0 spans several slices");
 
-        assert_eq!(fork.fetch_into(0, whole(), &mut store).unwrap(), count);
-        assert_eq!(reader.fetch_into(0, whole(), &mut store).unwrap(), count);
+        assert_eq!(fork.fetch_into(tid0, whole(), &mut store).unwrap(), count);
+        assert_eq!(reader.fetch_into(tid0, whole(), &mut store).unwrap(), count);
         assert_eq!(reader.slice_cache_stats().decoded, decoded, "a cached slice was decoded again");
 
         fork.set_slice_cache_budget(SliceCacheBudget::Bytes(0));
         assert_eq!(reader.slice_cache_stats().budget_bytes, 0, "the budget is shared too");
-        assert_eq!(reader.fetch_into(0, whole(), &mut store).unwrap(), count);
+        assert_eq!(reader.fetch_into(tid0, whole(), &mut store).unwrap(), count);
         assert_eq!(
             reader.slice_cache_stats().decoded,
             decoded * 2,
@@ -1086,8 +1082,9 @@ mod tests {
 
         // Querying chr1 decodes the multi-ref slice that also holds the unplaced
         // read; before the fix this errored with InvalidPosition { value: 0 }.
+        let chr1 = reader.header().tid("chr1").unwrap();
         let count = reader
-            .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store)
+            .fetch_into(chr1, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store)
             .expect("query must not error on an unplaced read in a multi-ref slice");
         // Only the chr1 read: the unplaced one is on no reference.
         assert_eq!(count, 1);
@@ -1106,8 +1103,9 @@ mod tests {
         ));
         let mut reader = IndexedCramReader::open(cram_path(), other_fasta).unwrap();
         let mut store = RecordStore::new();
+        let tid0 = 0u32.resolve_tid(reader.header()).unwrap();
         let err = reader
-            .fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store)
+            .fetch_into(tid0, (Pos0::new(0).unwrap()..=Pos0::MAX).into(), &mut store)
             .unwrap_err();
         assert!(matches!(err, CramError::MissingReference { .. }), "{err:?}");
     }

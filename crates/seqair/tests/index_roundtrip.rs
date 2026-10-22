@@ -57,7 +57,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     // chr1: 30 records at positions 0, 10000, 20000, ...
     for i in 0..30u32 {
         let rec = OwnedBamRecord::builder(
-            tid(0),
+            Some(tid(0)),
             Some(Pos0::new(i * 10000).unwrap()),
             format!("c1r{i}").into_bytes(),
         )
@@ -73,7 +73,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     // chr2: 15 records
     for i in 0..15u32 {
         let rec = OwnedBamRecord::builder(
-            tid(1),
+            Some(tid(1)),
             Some(Pos0::new(i * 20000).unwrap()),
             format!("c2r{i}").into_bytes(),
         )
@@ -89,7 +89,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     // chr3: 5 records
     for i in 0..5u32 {
         let rec = OwnedBamRecord::builder(
-            tid(2),
+            Some(tid(2)),
             Some(Pos0::new(i * 30000).unwrap()),
             format!("c3r{i}").into_bytes(),
         )

@@ -66,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CRAM checks a slice's reference and every `RI`/`NS` the same way (`CramError::InvalidTid`/
   `InvalidMateTid`) and fails a negative `NP` (`CramError::InvalidMatePosition`). SAM fails a
   negative PNEXT (`InvalidPnext`) and logs a warning for an RNEXT the header lacks, as htslib does.
+- **Breaking: the readers take a `Tid`, and the header hands one out.** `fetch_into`,
+  `fetch_into_customized`, `query` and `estimate_region_bytes` on `IndexedBamReader`,
+  `IndexedSamReader`, `IndexedCramReader`, `IndexedReader` and `Readers` take a `Tid` instead of
+  a `u32`; `estimate_region_bytes` returns `u64` everywhere (CRAM and the unified readers returned
+  `Option<u64>`). `BamHeader::tid(name)` returns `Option<Tid>`, `target_name`/`target_len` take a
+  `Tid`, and `ContigInfo::tid`/`Target::tid` are `Tid`s. `BamError::TidOverflow` is gone: a `Tid`
+  cannot exceed `i32::MAX`. `Tid` implements `Display`. Index structures parsed without a header
+  (`BamIndex`, `CsiIndex`, `CramIndex` entries, `IndexBuilder`) keep a `u32`.
 - **`IndexBuilder::push`/`push_unmapped` take the reference id as a `u32`**, and
   `IndexError::UnsortedInput::tid` is a `u32`; the builder's "no record yet" state is an
   `Option`, not `-1`.

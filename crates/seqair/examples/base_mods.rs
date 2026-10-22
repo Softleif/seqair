@@ -94,7 +94,7 @@ fn main() -> anyhow::Result<()> {
     let mut reader = IndexedReader::open(&args.input).context("could not open alignment file")?;
 
     // Resolve the region against the BAM header.
-    let tid = args.region.chromosome.as_str().resolve_tid(reader.header())?.as_u32();
+    let tid = args.region.chromosome.as_str().resolve_tid(reader.header())?;
     let contig_name = reader.header().target_name(tid).context("unknown tid")?.to_owned();
     let contig_len =
         reader.header().target_len(tid).context("contig has no length in header")? as u32;

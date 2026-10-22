@@ -88,7 +88,7 @@ fn make_methylation_record(
     aux.set_string(*b"MM", mm_str);
     aux.set_array_u8(*b"ML", ml_probs).unwrap();
 
-    OwnedBamRecord::builder(tid(0), Some(Pos0::new(pos).unwrap()), name.to_vec())
+    OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), name.to_vec())
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, 20)])
         .seq(seq)
@@ -268,25 +268,29 @@ fn mm_ml_empty_values() {
     aux.set_array_u8(*b"ML", &[]).unwrap();
 
     let records = vec![
-        OwnedBamRecord::builder(tid(0), Some(Pos0::new(100).unwrap()), b"empty_mods".to_vec())
-            .mapq(60)
-            .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
-            .seq(vec![
-                Base::A,
-                Base::C,
-                Base::G,
-                Base::T,
-                Base::A,
-                Base::C,
-                Base::G,
-                Base::T,
-                Base::A,
-                Base::C,
-            ])
-            .qual(vec![BaseQuality::from_byte(30); 10])
-            .aux(aux)
-            .build()
-            .unwrap(),
+        OwnedBamRecord::builder(
+            Some(tid(0)),
+            Some(Pos0::new(100).unwrap()),
+            b"empty_mods".to_vec(),
+        )
+        .mapq(60)
+        .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
+        .seq(vec![
+            Base::A,
+            Base::C,
+            Base::G,
+            Base::T,
+            Base::A,
+            Base::C,
+            Base::G,
+            Base::T,
+            Base::A,
+            Base::C,
+        ])
+        .qual(vec![BaseQuality::from_byte(30); 10])
+        .aux(aux)
+        .build()
+        .unwrap(),
     ];
 
     let bam_path = write_bam(dir.path(), &records);
@@ -342,7 +346,7 @@ fn mm_ml_large_tags() {
     aux.set_array_u8(*b"ML", &ml_probs).unwrap();
 
     let records = vec![
-        OwnedBamRecord::builder(tid(0), Some(Pos0::new(100).unwrap()), b"long_read".to_vec())
+        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"long_read".to_vec())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 1000)])
             .seq(seq)
@@ -396,7 +400,7 @@ fn mm_ml_coexist_with_other_tags() {
     aux.set_string(*b"MD", b"5A4^GT10");
 
     let records = vec![
-        OwnedBamRecord::builder(tid(0), Some(Pos0::new(100).unwrap()), b"multi_aux".to_vec())
+        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"multi_aux".to_vec())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(vec![

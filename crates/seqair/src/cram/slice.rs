@@ -340,7 +340,7 @@ pub(crate) fn decode_slice(
         None if sh.embedded_reference >= 0 => &[],
         None => {
             return Err(CramError::MissingReference {
-                contig: header.target_name(tid.as_u32()).unwrap_or("?").into(),
+                contig: header.target_name(tid).unwrap_or("?").into(),
             });
         }
     };
@@ -388,7 +388,7 @@ pub(crate) fn decode_slice(
             let computed = md5_uppercase_streaming(slice_ref);
             if computed != sh.reference_md5 {
                 return Err(CramError::ReferenceMd5Mismatch {
-                    contig: header.target_name(tid.as_u32()).unwrap_or("?").into(),
+                    contig: header.target_name(tid).unwrap_or("?").into(),
                     start: sh.alignment_start as u64,
                     end: sh.alignment_start.wrapping_add(sh.alignment_span) as u64,
                 });

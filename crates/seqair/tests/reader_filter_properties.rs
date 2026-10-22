@@ -173,7 +173,7 @@ fn write_inputs(dir: &Path, reads: &[Read]) -> (PathBuf, PathBuf) {
             aux.set_int(*b"NM", i64::from(nm)).expect("a small non-negative int");
         }
         let rec = OwnedBamRecord::builder(
-            tid(0),
+            Some(tid(0)),
             Some(Pos0::new(read.pos).unwrap()),
             format!("r{i}").into_bytes(),
         )

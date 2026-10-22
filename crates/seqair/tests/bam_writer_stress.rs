@@ -80,7 +80,7 @@ fn max_qname_length() {
     let dir = tempfile::tempdir().unwrap();
     let qname = vec![b'X'; 254];
     let records = vec![
-        OwnedBamRecord::builder(tid(0), Some(Pos0::new(100).unwrap()), qname)
+        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), qname)
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(cyclic_seq(10))
@@ -107,7 +107,7 @@ fn large_sequence() {
     let dir = tempfile::tempdir().unwrap();
     let seq_len = 50_000u32;
     let records = vec![
-        OwnedBamRecord::builder(tid(0), Some(Pos0::new(100).unwrap()), b"big".to_vec())
+        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"big".to_vec())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, seq_len)])
             .seq(cyclic_seq(seq_len as usize))
@@ -141,7 +141,7 @@ fn many_aux_tags() {
     }
 
     let records = vec![
-        OwnedBamRecord::builder(tid(0), Some(Pos0::new(100).unwrap()), b"auxtags".to_vec())
+        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"auxtags".to_vec())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(cyclic_seq(10))
@@ -174,27 +174,31 @@ fn placed_unmapped_records() {
         BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
 
     // Mapped record
-    let mapped = OwnedBamRecord::builder(tid(0), Some(Pos0::new(100).unwrap()), b"mapped".to_vec())
-        .mapq(60)
-        .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
-        .seq(cyclic_seq(10))
-        .qual(vec![BaseQuality::from_byte(30); 10])
-        .build()
-        .unwrap();
+    let mapped =
+        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"mapped".to_vec())
+            .mapq(60)
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
+            .seq(cyclic_seq(10))
+            .qual(vec![BaseQuality::from_byte(30); 10])
+            .build()
+            .unwrap();
     writer.write(&mapped).unwrap();
 
     // Placed-unmapped: has ref_id=0 and pos but flag 0x4
-    let placed =
-        OwnedBamRecord::builder(tid(0), Some(Pos0::new(150).unwrap()), b"placed_unmap".to_vec())
-            .flags(BamFlags::from(4u16)) // unmapped
-            .mapq(0)
-            .build()
-            .unwrap();
+    let placed = OwnedBamRecord::builder(
+        Some(tid(0)),
+        Some(Pos0::new(150).unwrap()),
+        b"placed_unmap".to_vec(),
+    )
+    .flags(BamFlags::from(4u16)) // unmapped
+    .mapq(0)
+    .build()
+    .unwrap();
     writer.write(&placed).unwrap();
 
     // Another mapped
     let mapped2 =
-        OwnedBamRecord::builder(tid(0), Some(Pos0::new(200).unwrap()), b"mapped2".to_vec())
+        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(200).unwrap()), b"mapped2".to_vec())
             .mapq(55)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(cyclic_seq(10))
@@ -298,7 +302,7 @@ fn poisoned_writer_partial_output_is_readable() {
     // Write two good records
     for i in 0..2u32 {
         let rec = OwnedBamRecord::builder(
-            tid(0),
+            Some(tid(0)),
             Some(Pos0::new(i * 100).unwrap()),
             format!("ok{i}").into_bytes(),
         )
@@ -313,7 +317,7 @@ fn poisoned_writer_partial_output_is_readable() {
 
     // Force an error with a qname that's too long
     let bad_rec = OwnedBamRecord {
-        ref_id: tid(0),
+        ref_id: Some(tid(0)),
         pos: Some(Pos0::new(200).unwrap()),
         mapq: 0,
         flags: BamFlags::empty(),
@@ -330,7 +334,7 @@ fn poisoned_writer_partial_output_is_readable() {
 
     // BamWriter is now poisoned
     let good_rec =
-        OwnedBamRecord::builder(tid(0), Some(Pos0::new(300).unwrap()), b"after".to_vec())
+        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(300).unwrap()), b"after".to_vec())
             .mapq(60)
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(cyclic_seq(5))
@@ -360,7 +364,7 @@ fn dense_records_same_position() {
     let records: Vec<OwnedBamRecord> = (0..100)
         .map(|i| {
             OwnedBamRecord::builder(
-                tid(0),
+                Some(tid(0)),
                 Some(Pos0::new(1000).unwrap()),
                 format!("r{i}").into_bytes(),
             )

@@ -137,7 +137,7 @@ fn corpus() -> &'static Corpus {
             let qual: Vec<BaseQuality> =
                 (0..100).map(|_| BaseQuality::from_byte((next() % 40) as u8)).collect();
             let record = OwnedBamRecord::builder(
-                tid(0),
+                Some(tid(0)),
                 Some(Pos0::new(i * 100 + 1).unwrap()),
                 read_name(i),
             )
@@ -174,7 +174,12 @@ fn open_and_fetch(bam: &[u8]) -> Result<usize, BamError> {
     std::fs::write(dir.path().join("t.bam.bai"), &corpus().bai).unwrap();
     let mut reader = IndexedBamReader::open(&path)?;
     let mut store = RecordStore::default();
-    reader.fetch_into(0, (Pos0::new(0).unwrap()..=Pos0::new(1_999_999).unwrap()).into(), &mut store)
+    let chr1 = reader.header().tid("chr1").expect("corpus header has chr1");
+    reader.fetch_into(
+        chr1,
+        (Pos0::new(0).unwrap()..=Pos0::new(1_999_999).unwrap()).into(),
+        &mut store,
+    )
 }
 
 /// The `BgzfError` at the bottom of a `BamError`, whichever way it was wrapped,
@@ -555,7 +560,7 @@ fn a_record_whose_qual_no_longer_matches_its_seq_is_refused_with_both_lengths() 
     // An unmapped record has no CIGAR to contradict, so `set_seq` accepts a
     // shorter sequence and leaves the ten quality scores behind it.
     let mut record =
-        OwnedBamRecord::builder(tid(0), Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
+        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
             .flags(BamFlags::from(4))
             .seq(vec![Base::A; 10])
             .qual(vec![BaseQuality::from_byte(30); 10])
@@ -698,7 +703,7 @@ impl WriteFailure {
             Self::RecordTooLarge => mapped_record(0, 100, "huge", 3_000_000),
             Self::SeqQualMismatch => {
                 let mut record = OwnedBamRecord::builder(
-                    tid(0),
+                    Some(tid(0)),
                     Some(Pos0::new(100).unwrap()),
                     b"shrunk".to_vec(),
                 )

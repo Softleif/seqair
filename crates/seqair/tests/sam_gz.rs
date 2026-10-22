@@ -12,6 +12,7 @@
     reason = "test code with known small values"
 )]
 use seqair::bam::{Pos0, RecordStore};
+use seqair::reader::ResolveTid;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
@@ -234,7 +235,9 @@ fn sam_gz_header_matches_bam() {
 
     assert_eq!(bam_header.target_count(), sam_header.target_count());
     for tid in 0..bam_header.target_count() as u32 {
-        assert_eq!(bam_header.target_name(tid), sam_header.target_name(tid));
-        assert_eq!(bam_header.target_len(tid), sam_header.target_len(tid));
+        let bam_tid = tid.resolve_tid(&bam_header).unwrap();
+        let sam_tid = tid.resolve_tid(sam_header).unwrap();
+        assert_eq!(bam_header.target_name(bam_tid), sam_header.target_name(sam_tid));
+        assert_eq!(bam_header.target_len(bam_tid), sam_header.target_len(sam_tid));
     }
 }

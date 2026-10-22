@@ -2,7 +2,7 @@
 //! for a region into a [`RecordStore`]. Call [`IndexedBamReader::fork`] to get a cheap
 //! per-thread reader that shares the parsed index and header via [`Arc<BamShared>`].
 
-use crate::reader::{FetchCounts, FetchedRecord, IndexPath};
+use crate::reader::{FetchCounts, FetchedRecord, IndexPath, Tid};
 
 use super::{
     bgzf::{BgzfError, BgzfReader, VirtualOffset},
@@ -73,18 +73,8 @@ pub enum BamError {
         source: DecodeError,
     },
 
-    // r[impl bam.reader.coordinate_overflow]
-    #[error("coordinate overflow: tid value {value} exceeds {max}")]
-    TidOverflow { value: u64, max: u64 },
-
     #[error("invalid BAM position value {value}: negative positions are reserved")]
     InvalidPosition { value: i32 },
-}
-
-// r[impl bam.reader.coordinate_overflow]
-fn validate_tid(tid: u32) -> Result<i32, BamError> {
-    i32::try_from(tid)
-        .map_err(|_| BamError::TidOverflow { value: u64::from(tid), max: i32::MAX as u64 })
 }
 
 // r[impl bam.reader.shared_state]
@@ -116,7 +106,7 @@ pub struct IndexedBamReader<R: Read + Seek = File> {
 /// What a query leaves behind for the next one (`r[bam.reader.resume]`).
 #[derive(Debug, Clone, Copy)]
 struct LastQuery {
-    tid: u32,
+    tid: Tid,
     start: Pos0,
     /// Virtual offset of the first record the query found overlapping its
     /// window; `None` until it finds one.
@@ -216,8 +206,8 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     /// This is what byte-aware segmentation budgets against. It's only as fine
     /// as the index (~16 kb leaf bins), so a sub-bin range still reports its
     /// whole leaf bin's size.
-    pub fn estimate_region_bytes(&self, tid: u32, span: RangeInclusive<Pos0>) -> u64 {
-        let chunks = self.shared.index.query(tid, span.start, span.last);
+    pub fn estimate_region_bytes(&self, tid: Tid, span: RangeInclusive<Pos0>) -> u64 {
+        let chunks = self.shared.index.query(tid.as_u32(), span.start, span.last);
         region_buf::merged_byte_size(&chunks) as u64
     }
 
@@ -230,7 +220,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     #[instrument(level = "debug", skip(self, store))]
     pub fn fetch_into(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, BamError> {
@@ -258,7 +248,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     /// filter).
     pub fn fetch_into_customized<E: CustomizeRecordStore>(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore<E::Extra>,
         customize: &mut E,
@@ -308,7 +298,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     /// ```
     pub fn query(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
     ) -> Result<BamQuery<'_, R>, BamError> {
         let RangeInclusive { start, last: end } = span;
@@ -316,9 +306,13 @@ impl<R: Read + Seek> IndexedBamReader<R> {
         // A reversed span names no positions. The overlap test alone would
         // not say so: `rec.pos <= last && rec.end_pos >= start` holds for a
         // record that covers the whole gap between the two ends.
-        let mut chunks =
-            if span.is_empty() { Vec::new() } else { self.shared.index.query(tid, start, end) };
-        let tid_i32 = validate_tid(tid)?;
+        let mut chunks = if span.is_empty() {
+            Vec::new()
+        } else {
+            self.shared.index.query(tid.as_u32(), start, end)
+        };
+        // r[impl bam.reader.coordinate_overflow+2]
+        let tid_i32 = Tid::to_wire(Some(tid));
 
         // r[impl bam.reader.resume]
         if let Some(LastQuery { tid: last_tid, start: last_start, first_hit: Some(hit) }) =
@@ -647,27 +641,6 @@ fn open_index(path: &Path) -> Result<AlignmentIndex, BamError> {
 #[allow(clippy::arithmetic_side_effects, reason = "test code with controlled values")]
 mod tests {
     use super::*;
-
-    // r[verify bam.reader.coordinate_overflow]
-    #[test]
-    fn fetch_into_rejects_tid_exceeding_i32_max() {
-        // tid that exceeds i32::MAX should return TidOverflow
-        let tid: u32 = u32::try_from(i32::MAX as u64 + 1).unwrap(); // 2_147_483_648
-        let result = validate_tid(tid);
-        assert!(result.is_err(), "tid > i32::MAX must error");
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, BamError::TidOverflow { .. }),
-            "expected TidOverflow for tid, got: {err}"
-        );
-    }
-
-    // r[verify bam.reader.coordinate_overflow]
-    #[test]
-    fn fetch_into_accepts_max_valid_tid() {
-        let result = validate_tid(i32::MAX as u32);
-        assert!(result.is_ok(), "max valid tid must succeed");
-    }
 
     /// Frame a record with its 4-byte `block_size` prefix, as it appears on the
     /// BAM wire (what [`RegionBuf::read_record`] expects to find).

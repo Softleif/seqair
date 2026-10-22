@@ -17,6 +17,7 @@ mod helpers;
 use helpers::ri;
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
+use seqair::reader::ResolveTid;
 use seqair::sam::reader::IndexedSamReader;
 use seqair_types::BaseQuality;
 use seqair_types::QPos;
@@ -344,11 +345,12 @@ fn sam_header_matches_htslib_header() {
     // Same names and lengths
     for tid in 0..hts_count {
         let hts_name = std::str::from_utf8(hts_h.tid2name(tid)).unwrap();
-        let name = h.target_name(tid).unwrap();
+        let our_tid = tid.resolve_tid(h).unwrap();
+        let name = h.target_name(our_tid).unwrap();
         assert_eq!(name, hts_name, "tid {tid}: name");
 
         let hts_len = hts_h.target_len(tid).unwrap();
-        let len = h.target_len(tid).unwrap();
+        let len = h.target_len(our_tid).unwrap();
         assert_eq!(len, hts_len, "tid {tid}: length");
     }
 }

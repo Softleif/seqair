@@ -89,6 +89,13 @@ impl Tid {
     }
 }
 
+/// The target index, as samtools prints it.
+impl std::fmt::Display for Tid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_u32().fmt(f)
+    }
+}
+
 impl From<Tid> for u32 {
     fn from(t: Tid) -> u32 {
         t.as_u32()
@@ -136,7 +143,7 @@ impl ResolveTid for u32 {
 
 impl ResolveTid for str {
     fn resolve_tid(&self, header: &BamHeader) -> Result<Tid, TidError> {
-        match header.tid(self).and_then(|index| Tid::of_header(index, header)) {
+        match header.tid(self) {
             Some(tid) => Ok(tid),
             None => Err(TidError::UnknownContig { name: self.into() }),
         }

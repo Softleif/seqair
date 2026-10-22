@@ -445,7 +445,7 @@ fn whole_contig_with_name(
     tid: Tid,
     name: SmolStr,
 ) -> Result<ResolvedRange, ReaderError> {
-    let Some(len) = header.target_len(tid.as_u32()) else {
+    let Some(len) = header.target_len(tid) else {
         let n_targets = target_count_u32(header)?;
         return Err(super::resolve::TidError::TidOutOfRange { tid: tid.as_u32(), n_targets }.into());
     };
@@ -471,7 +471,7 @@ fn whole_contig_with_name(
 fn whole_contig(header: &BamHeader, tid: Tid) -> Result<ResolvedRange, ReaderError> {
     // Compute `n_targets` only when needed for the error path. The hot path
     // (tid in range) avoids a redundant `u32::try_from(usize)` per contig.
-    let name = match header.target_name(tid.as_u32()) {
+    let name = match header.target_name(tid) {
         Some(n) => n.to_owned(),
         None => {
             let n_targets = target_count_u32(header)?;
@@ -779,7 +779,7 @@ pub(crate) fn split_segment_by_bytes(
     seg: &Segment,
     overlap: u32,
     budget: u64,
-    estimate: &mut dyn FnMut(u32, RangeInclusive<Pos0>) -> u64,
+    estimate: &mut dyn FnMut(Tid, RangeInclusive<Pos0>) -> u64,
     out: &mut Vec<Segment>,
 ) {
     let ctx = SplitCtx {
@@ -823,7 +823,7 @@ fn largest_core_end(
     core_start: u64,
     total_end: u64,
     threshold: u64,
-    estimate: &mut dyn FnMut(u32, RangeInclusive<Pos0>) -> u64,
+    estimate: &mut dyn FnMut(Tid, RangeInclusive<Pos0>) -> u64,
 ) -> u64 {
     let mut lo = core_start;
     let mut hi = total_end;
@@ -864,10 +864,10 @@ fn estimate_full(
     ctx: &SplitCtx<'_>,
     core_start: u64,
     core_end: u64,
-    estimate: &mut dyn FnMut(u32, RangeInclusive<Pos0>) -> u64,
+    estimate: &mut dyn FnMut(Tid, RangeInclusive<Pos0>) -> u64,
 ) -> u64 {
     let (full_start, full_end) = full_range(ctx, core_start, core_end);
-    estimate(ctx.tid.as_u32(), RangeInclusive { start: full_start, last: full_end })
+    estimate(ctx.tid, RangeInclusive { start: full_start, last: full_end })
 }
 
 fn emit_segment(ctx: &SplitCtx<'_>, core_start: u64, core_end: u64, out: &mut Vec<Segment>) {
@@ -1237,7 +1237,7 @@ mod tests {
     // ── Byte-aware subdivision (split_segment_by_bytes) ──────────────────────
 
     /// Mock byte oracle: `bpb` compressed bytes per base of the *full* range.
-    fn span_estimate(bpb: u64) -> impl FnMut(u32, RangeInclusive<Pos0>) -> u64 {
+    fn span_estimate(bpb: u64) -> impl FnMut(Tid, RangeInclusive<Pos0>) -> u64 {
         move |_tid, sp: RangeInclusive<Pos0>| (sp.last.as_u64() - sp.start.as_u64() + 1) * bpb
     }
 
@@ -1248,7 +1248,7 @@ mod tests {
         range: std::ops::RangeInclusive<u32>,
         opts: SegmentOptions,
         budget: u64,
-        mut estimate: impl FnMut(u32, RangeInclusive<Pos0>) -> u64,
+        mut estimate: impl FnMut(Tid, RangeInclusive<Pos0>) -> u64,
     ) -> Vec<Segment> {
         let header = header_with_contigs(&[("chr1", contig_len)]);
         let ranges = ("chr1", span(*range.start(), *range.end())).resolve_target(&header).unwrap();
@@ -1345,7 +1345,7 @@ mod tests {
         let opts = SegmentOptions::new(NonZeroU32::new(10_000).unwrap());
         // A 100-base "leaf bin" [200,299] reports 1 MB for ANY overlapping query;
         // everywhere else costs 10 B/base.
-        let estimate = |_t: u32, sp: RangeInclusive<Pos0>| {
+        let estimate = |_t: Tid, sp: RangeInclusive<Pos0>| {
             let (s, e) = (sp.start.as_u64(), sp.last.as_u64());
             if s <= 299 && e >= 200 { 1_000_000 } else { (e - s + 1) * 10 }
         };

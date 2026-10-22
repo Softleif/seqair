@@ -29,7 +29,7 @@ use clap::Parser as _;
 use seqair::bam::RecordIdx;
 use seqair::{
     bam::{BamWriterBuilder, CigarOp, CigarStr, Pos0, RecordStore, cigar::CigarOpType},
-    reader::{IndexedReader, ResolveTid},
+    reader::{IndexedReader, ResolveTid, Tid},
 };
 use seqair_types::{RegionString, SmolStr, smol_str::ToSmolStr};
 use std::path::PathBuf;
@@ -137,10 +137,10 @@ fn main() -> anyhow::Result<()> {
 fn resolve_region(
     region: Option<&RegionString>,
     header: &seqair::bam::BamHeader,
-) -> anyhow::Result<(u32, Pos0, Pos0, String)> {
+) -> anyhow::Result<(Tid, Pos0, Pos0, String)> {
     match region {
         Some(r) => {
-            let tid = r.chromosome.as_str().resolve_tid(header)?.as_u32();
+            let tid = r.chromosome.as_str().resolve_tid(header)?;
             let len = header.target_len(tid).context("contig has no length")? as u32;
             let start = match r.start {
                 Some(p) => p.to_zero_based(),
@@ -153,7 +153,7 @@ fn resolve_region(
             Ok((tid, start, end, r.chromosome.to_string()))
         }
         None => {
-            let tid = 0u32;
+            let tid = 0u32.resolve_tid(header).context("empty header")?;
             let len = header.target_len(tid).context("empty header")? as u32;
             let contig = header.target_name(tid).context("unknown tid")?.to_owned();
             let start = Pos0::new(0).expect("0 is valid");

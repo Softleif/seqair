@@ -30,10 +30,9 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
 
-    let target_count = header.target_count();
-    for i in 0..target_count.min(100) {
-        let _ = header.target_name(i as u32);
-        let _ = header.target_len(i as u32);
+    for target in header.targets().take(100) {
+        let _ = header.target_name(target.tid);
+        let _ = header.target_len(target.tid);
     }
 
     // Read records through the BGZF layer

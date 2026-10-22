@@ -1,3 +1,4 @@
+use super::resolve::{ResolveTid, Tid};
 use crate::{
     bam::{BamHeader, IndexedBamReader, PileupEngine, PileupGuard, RecordStore},
     cram::reader::IndexedCramReader,
@@ -122,6 +123,7 @@ impl FuzzReaders {
         tid: u32,
         span: RangeInclusive<Pos0>,
     ) -> Result<PileupGuard<'_, ()>, ReaderError> {
+        let tid = tid.resolve_tid(self.header())?;
         match &mut self.alignment {
             AlignmentBackend::Indexed(r) => r.fetch_into(tid, span, &mut self.store)?,
             AlignmentBackend::PlainSam(r) => {
@@ -155,7 +157,7 @@ impl FuzzReaders {
 
     fn fetch_records(
         &mut self,
-        tid: u32,
+        tid: Tid,
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
@@ -173,6 +175,7 @@ impl FuzzReaders {
         span: RangeInclusive<Pos0>,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
+        let tid = tid.resolve_tid(self.header())?;
         self.fetch_records(tid, span, store)
     }
 }

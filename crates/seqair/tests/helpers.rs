@@ -446,7 +446,7 @@ pub fn header() -> &'static seqair::bam::header::BamHeader {
 /// Reference `n` (below 16) of [`header`], as a `Tid`: outside the crate only
 /// a header hands one out.
 #[track_caller]
-pub fn tid(n: u32) -> Option<seqair::reader::Tid> {
+pub fn tid(n: u32) -> seqair::reader::Tid {
     use seqair::reader::ResolveTid;
-    Some(n.resolve_tid(header()).expect("test tid in range"))
+    n.resolve_tid(header()).expect("test tid in range")
 }

@@ -29,8 +29,10 @@
 use std::path::{Path, PathBuf};
 
 use seqair::bam::Pos0;
+use seqair::bam::header::Target;
 use seqair::bam::reader::IndexedBamReader;
 use seqair::bam::record_store::RecordStore;
+use seqair::reader::Tid;
 
 /// Measurements for one region load.
 #[derive(Debug, Clone, Copy)]
@@ -119,17 +121,16 @@ fn sample_bam(path: &Path, region_size: u64, regions_per_bam: usize) -> Aggregat
     // mid-chromosome position. For whole-genome BAMs this is usually chr1;
     // for chr-restricted BAMs (e.g. chr12-only) it's whichever chromosome
     // has actual alignments.
-    let mut picked: Option<(u32, String, u64)> = None;
-    for tid in 0..reader.header().target_count() as u32 {
-        let name = reader.header().target_name(tid).map(str::to_owned).unwrap_or_default();
-        let len = reader.header().target_len(tid).unwrap_or(0);
+    let mut picked: Option<(Tid, String, u64)> = None;
+    for Target { tid, name, length: len } in reader.header().targets() {
+        let name = name.to_string();
         if len < region_size * (regions_per_bam as u64 + 2) {
             continue;
         }
         let probe_start = Pos0::new(u32::try_from(len / 4).expect("probe_start fits u32")).unwrap();
         let probe_end =
             Pos0::new(u32::try_from(len / 4 + region_size).expect("probe_end fits u32")).unwrap();
-        if !reader.shared().index().query(tid, probe_start, probe_end).is_empty() {
+        if !reader.shared().index().query(tid.as_u32(), probe_start, probe_end).is_empty() {
             picked = Some((tid, name, len));
             break;
         }
@@ -140,7 +141,7 @@ fn sample_bam(path: &Path, region_size: u64, regions_per_bam: usize) -> Aggregat
         return agg;
     };
 
-    println!("  using ref tid={tid} ({name}, len={ref_len})");
+    println!("  using ref tid={} ({name}, len={ref_len})", tid.as_u32());
 
     // Spread sample windows evenly across [ref_len * 0.2, ref_len * 0.8] so
     // we avoid telomeres/centromeres that can be sparsely covered.
@@ -157,7 +158,7 @@ fn sample_bam(path: &Path, region_size: u64, regions_per_bam: usize) -> Aggregat
         let end = Pos0::new(u32::try_from(end_bp).expect("end fits u32")).unwrap();
 
         // Estimate compressed bytes by summing (merged) chunk byte spans.
-        let chunks = reader.shared().index().query(tid, start, end);
+        let chunks = reader.shared().index().query(tid.as_u32(), start, end);
         if chunks.is_empty() {
             continue;
         }

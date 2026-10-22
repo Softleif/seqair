@@ -287,7 +287,7 @@ fn soft_clips_are_stored_at_push_and_follow_set_alignment() {
             &[Base::A; 5],
             &[30; 5],
             &[],
-            tid(0),
+            Some(tid(0)),
             None,
             None,
             None,
@@ -686,11 +686,7 @@ fn realignment_workflow_with_real_bam() {
 
     // Verify tid is populated for all records
     for i in store.indices() {
-        assert_eq!(
-            store.record(i).unwrap().tid.map(|t| t.as_u32()),
-            Some(tid),
-            "tid mismatch for record {i}"
-        );
+        assert_eq!(store.record(i).unwrap().tid, Some(tid), "tid mismatch for record {i}");
     }
 
     // "Realign" the first record by shifting it 10bp left with same cigar

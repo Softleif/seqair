@@ -84,8 +84,8 @@ Multiple forks from the same prototype MUST be safe to use concurrently from dif
 
 ## Coordinate validation
 
-r[bam.reader.coordinate_overflow]
-`fetch_into` MUST validate that `tid` fits in `i32` and that `start`/`end` fit in `i64` before using them. If any value exceeds the signed maximum, `fetch_into` MUST return a `BamError::CoordinateOverflow` rather than silently truncating via `as` casts.
+r[bam.reader.coordinate_overflow+2]
+`fetch_into` takes the reference as a `Tid` and the span as `Pos0`s, which cannot hold a value BAM's `i32` fields cannot (r[`unified.tid.newtype+2`], r[`pos.type`]), so it has nothing left to validate and no overflow error. Conversions to the wire `i32` MUST go through `Tid::to_wire`/`Pos0::as_i32`, never an `as` cast.
 
 ## Error propagation
 

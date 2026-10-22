@@ -82,7 +82,7 @@ fn build_record(
     aux.set_array_u8(*b"ML", ml).unwrap();
     let flags = if is_reverse { BamFlags::from(FLAG_REVERSE) } else { BamFlags::empty() };
     let seq_len = seq.len();
-    OwnedBamRecord::builder(tid(0), Some(Pos0::new(pos).unwrap()), qname.to_vec())
+    OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), qname.to_vec())
         .flags(flags)
         .mapq(60)
         .cigar(cigar)

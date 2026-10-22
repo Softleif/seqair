@@ -73,3 +73,14 @@ pub(crate) fn header() -> &'static super::BamHeader {
     });
     &HEADER
 }
+
+/// Reference `n` (below 16) of [`header`].
+#[allow(
+    dead_code,
+    reason = "used by sibling test modules; rustc cfg gates may hide some call sites"
+)]
+#[track_caller]
+pub(crate) fn tid(n: u32) -> crate::reader::Tid {
+    use crate::reader::ResolveTid;
+    n.resolve_tid(header()).expect("test tid in range")
+}

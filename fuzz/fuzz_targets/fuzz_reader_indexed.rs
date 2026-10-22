@@ -68,9 +68,9 @@ fuzz_target!(|data: &[u8]| {
     if target_count == 0 {
         return;
     }
-    for i in 0..target_count.min(50) {
-        let _ = header.target_name(i as u32);
-        let _ = header.target_len(i as u32);
+    for target in header.targets().take(50) {
+        let _ = header.target_name(target.tid);
+        let _ = header.target_len(target.tid);
     }
 
     let start = Pos0::new(0).unwrap();

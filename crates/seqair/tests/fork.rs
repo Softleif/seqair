@@ -12,6 +12,7 @@
     reason = "test code with known small values"
 )]
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
+use seqair::reader::ResolveTid;
 use std::{path::Path, sync::Arc, thread};
 
 fn test_bam_path() -> &'static Path {
@@ -118,8 +119,10 @@ fn fork_header_is_identical() {
 
     assert_eq!(prototype.header().target_count(), forked.header().target_count());
     for tid in 0..prototype.header().target_count() as u32 {
-        assert_eq!(prototype.header().target_name(tid), forked.header().target_name(tid),);
-        assert_eq!(prototype.header().target_len(tid), forked.header().target_len(tid),);
+        let ours = tid.resolve_tid(prototype.header()).unwrap();
+        let theirs = tid.resolve_tid(forked.header()).unwrap();
+        assert_eq!(prototype.header().target_name(ours), forked.header().target_name(theirs),);
+        assert_eq!(prototype.header().target_len(ours), forked.header().target_len(theirs),);
     }
 }
 

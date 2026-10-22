@@ -64,7 +64,8 @@ fn tabix_parses_without_error() {
     // Verify we can query — the index should have references
     let header = seqair::bam::BamHeader::from_bam_path(test_bam_path()).unwrap();
     let tid = header.tid("chr19").unwrap();
-    let chunks = index.query(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap());
+    let chunks =
+        index.query(tid.as_u32(), Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap());
     assert!(!chunks.is_empty(), "tabix query should return chunks for chr19");
 }
 
@@ -86,8 +87,8 @@ fn tabix_query_matches_bai_query() {
         let tid = header.tid(contig).unwrap();
         let start_pos = Pos0::try_from(start).expect("start fits in u32");
         let end_pos = Pos0::try_from(end).expect("end fits in u32");
-        let bai_chunks = bai_index.query(tid, start_pos, end_pos);
-        let tabix_chunks = tabix_index.query(tid, start_pos, end_pos);
+        let bai_chunks = bai_index.query(tid.as_u32(), start_pos, end_pos);
+        let tabix_chunks = tabix_index.query(tid.as_u32(), start_pos, end_pos);
 
         // Both should return non-empty results (the test data has reads in all contigs)
         assert!(!bai_chunks.is_empty(), "{contig}: BAI query returned no chunks");

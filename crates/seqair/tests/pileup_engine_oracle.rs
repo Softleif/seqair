@@ -136,7 +136,7 @@ fn build_store(case: &Case) -> PileupInput<()> {
         let (name, next_ref_id, next_pos) = match mate_of[i] {
             Some(m) => {
                 flags |= 0x1 | if m > i { 0x40 } else { 0x80 };
-                (format!("t{}", i.min(m)), tid(0), Pos0::new(case.reads[m].pos))
+                (format!("t{}", i.min(m)), Some(tid(0)), Pos0::new(case.reads[m].pos))
             }
             None => (format!("r{i}"), None, None),
         };
@@ -153,7 +153,7 @@ fn build_store(case: &Case) -> PileupInput<()> {
                 &r.seq,
                 &r.qual,
                 &[],
-                tid(0),
+                Some(tid(0)),
                 next_ref_id,
                 next_pos,
                 None,

@@ -90,7 +90,7 @@ fn main() -> anyhow::Result<()> {
     // Resolve the region against the BAM header. `RegionString` is parsed
     // by clap; here we lift its `(name, Pos1, Pos1)` into the engine's
     // `(tid, Pos0, Pos0)` form.
-    let tid = args.region.chromosome.as_str().resolve_tid(readers.header())?.as_u32();
+    let tid = args.region.chromosome.as_str().resolve_tid(readers.header())?;
     let start = args
         .region
         .start

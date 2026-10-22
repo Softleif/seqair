@@ -25,7 +25,7 @@ After the header text, a 4-byte little-endian `n_ref` gives the number of refere
 The rest of the BAM file and its index use tids (integer IDs) to refer to contigs. The caller typically has a contig name (e.g. "chr19") from user input or a BED file and needs the tid for index queries. Conversely, when reporting results, the tid needs to be mapped back to a name.
 
 r[bam.header.tid_lookup]
-The header MUST support O(1) lookup from contig name to target ID (tid) and O(1) lookup from tid to contig name and length.
+The header MUST support O(1) lookup from contig name to target ID (tid) and O(1) lookup from tid to contig name and length. The header is the authority for `Tid` (r[`unified.tid.newtype+2`]): `tid(name)` returns an `Option<Tid>`, and `target_name`/`target_len` take a `Tid`.
 
 r[bam.header.target_names]
 The header MUST provide access to the list of all target names in tid order.
