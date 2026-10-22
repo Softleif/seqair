@@ -430,3 +430,15 @@ pub fn arb_read_set(max_reads: usize) -> impl PrintableGenerator<Vec<SyntheticRe
         })
         .print_as_debug()
 }
+
+/// Contig `n` (below 3) of a test header, as a `Tid`: outside the crate only a
+/// header hands one out.
+#[track_caller]
+pub fn tid(n: u32) -> Option<seqair::reader::Tid> {
+    use seqair::bam::header::BamHeader;
+    use seqair::reader::ResolveTid;
+    static HEADER: std::sync::LazyLock<BamHeader> = std::sync::LazyLock::new(|| {
+        BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n").unwrap()
+    });
+    Some(n.resolve_tid(&HEADER).expect("test tid in range"))
+}

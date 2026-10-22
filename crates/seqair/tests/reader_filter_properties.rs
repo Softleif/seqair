@@ -37,7 +37,9 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
 use hegel::prelude::*;
+use helpers::tid;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
@@ -171,7 +173,7 @@ fn write_inputs(dir: &Path, reads: &[Read]) -> (PathBuf, PathBuf) {
             aux.set_int(*b"NM", i64::from(nm)).expect("a small non-negative int");
         }
         let rec = OwnedBamRecord::builder(
-            t(0),
+            tid(0),
             Some(Pos0::new(read.pos).unwrap()),
             format!("r{i}").into_bytes(),
         )
@@ -720,13 +722,4 @@ fn a_conjunction_fetches_the_intersection_of_its_parts(tc: TestCase) {
     if from_both.len() < from_a.len() && from_both.len() < from_b.len() {
         tc.event("the conjunction cut further than either part");
     }
-}
-
-fn t(n: u32) -> Option<seqair::reader::Tid> {
-    use seqair::reader::ResolveTid;
-    let h = seqair::bam::header::BamHeader::from_sam_text(
-        "@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n",
-    )
-    .unwrap();
-    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

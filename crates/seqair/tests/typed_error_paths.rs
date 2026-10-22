@@ -20,9 +20,11 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
 #[path = "../src/pinned.rs"]
 mod pinned;
 use hegel::prelude::*;
+use helpers::tid;
 use seqair::bam::aux::AuxValue;
 use seqair::bam::aux_data::{AuxData, AuxDataError};
 use seqair::bam::cigar::{CigarOp, CigarOpType};
@@ -134,15 +136,18 @@ fn corpus() -> &'static Corpus {
                 .collect();
             let qual: Vec<BaseQuality> =
                 (0..100).map(|_| BaseQuality::from_byte((next() % 40) as u8)).collect();
-            let record =
-                OwnedBamRecord::builder(t(0), Some(Pos0::new(i * 100 + 1).unwrap()), read_name(i))
-                    .flags(BamFlags::empty())
-                    .mapq(60)
-                    .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
-                    .seq(seq)
-                    .qual(qual)
-                    .build()
-                    .unwrap();
+            let record = OwnedBamRecord::builder(
+                tid(0),
+                Some(Pos0::new(i * 100 + 1).unwrap()),
+                read_name(i),
+            )
+            .flags(BamFlags::empty())
+            .mapq(60)
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
+            .seq(seq)
+            .qual(qual)
+            .build()
+            .unwrap();
             writer.write(&record).unwrap();
         }
         let (inner, index) = writer.finish().unwrap();
@@ -550,7 +555,7 @@ fn a_record_whose_qual_no_longer_matches_its_seq_is_refused_with_both_lengths() 
     // An unmapped record has no CIGAR to contradict, so `set_seq` accepts a
     // shorter sequence and leaves the ten quality scores behind it.
     let mut record =
-        OwnedBamRecord::builder(t(0), Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
+        OwnedBamRecord::builder(tid(0), Some(Pos0::new(100).unwrap()), b"shrunk".to_vec())
             .flags(BamFlags::from(4))
             .seq(vec![Base::A; 10])
             .qual(vec![BaseQuality::from_byte(30); 10])
@@ -693,7 +698,7 @@ impl WriteFailure {
             Self::RecordTooLarge => mapped_record(0, 100, "huge", 3_000_000),
             Self::SeqQualMismatch => {
                 let mut record = OwnedBamRecord::builder(
-                    t(0),
+                    tid(0),
                     Some(Pos0::new(100).unwrap()),
                     b"shrunk".to_vec(),
                 )
@@ -1199,13 +1204,4 @@ fn a_truncated_bam_always_terminates(tc: TestCase) {
             });
         }
     }
-}
-
-fn t(n: u32) -> Option<seqair::reader::Tid> {
-    use seqair::reader::ResolveTid;
-    let h = seqair::bam::header::BamHeader::from_sam_text(
-        "@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n",
-    )
-    .unwrap();
-    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

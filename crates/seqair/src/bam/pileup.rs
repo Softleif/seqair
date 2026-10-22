@@ -1523,7 +1523,7 @@ mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap();
@@ -1575,7 +1575,7 @@ mod tests {
                     crate::reader::Tid::new(0),
                     None,
                     seqair_types::Pos0::new(0),
-                    std::num::NonZeroI32::new(0),
+                    None,
                     &mut (),
                 )
                 .unwrap();
@@ -1645,7 +1645,7 @@ mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap();
@@ -1703,7 +1703,7 @@ mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap();
@@ -1832,7 +1832,7 @@ mod tests {
                         crate::reader::Tid::new(0),
                         None,
                         seqair_types::Pos0::new(0),
-                        std::num::NonZeroI32::new(0),
+                        None,
                         &mut (),
                     )
                     .unwrap();
@@ -1963,7 +1963,7 @@ mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap();
@@ -2019,7 +2019,7 @@ mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap();
@@ -2077,7 +2077,7 @@ mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap();
@@ -2126,7 +2126,7 @@ mod tests {
                     crate::reader::Tid::new(0),
                     None,
                     seqair_types::Pos0::new(0),
-                    std::num::NonZeroI32::new(0),
+                    None,
                     &mut (),
                 )
                 .unwrap();
@@ -2201,7 +2201,7 @@ mod tests {
                     crate::reader::Tid::new(0),
                     None,
                     seqair_types::Pos0::new(0),
-                    std::num::NonZeroI32::new(0),
+                    None,
                     &mut (),
                 )
                 .unwrap();

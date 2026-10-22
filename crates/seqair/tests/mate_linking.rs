@@ -22,6 +22,7 @@
 mod helpers;
 use hegel::prelude::*;
 use helpers::ri;
+use helpers::tid;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::{Indel, PileupColumn, PileupEngine};
 use seqair::bam::record_idx::RecordIdx;
@@ -46,8 +47,8 @@ struct Read {
     len: u32,
     mate_pos: i32,
     flags: u16,
-    tid: i32,
-    mate_tid: i32,
+    tid: u32,
+    mate_tid: u32,
 }
 
 impl Read {
@@ -85,8 +86,8 @@ fn push(store: &mut RecordStore, qname: &[u8], read: Read) -> RecordIdx {
             &bases,
             &qual,
             &[],
-            t(read.tid),
-            t(read.mate_tid),
+            tid(read.tid),
+            tid(read.mate_tid),
             u32::try_from(read.mate_pos).ok().and_then(Pos0::new),
             None,
             &mut (),
@@ -701,8 +702,8 @@ fn push_pair_read(
             seq,
             &vec![40u8; seq.len()],
             &[],
-            t(0),
-            t(0),
+            tid(0),
+            tid(0),
             u32::try_from(mate_pos).ok().and_then(Pos0::new),
             None,
             &mut (),
@@ -1298,11 +1299,4 @@ fn a_fetched_store_holds_each_record_once() {
         );
         assert!(stats.pairs > 0, "{name}: no pairs linked in a paired-end fixture");
     }
-}
-
-fn t(n: i32) -> Option<seqair::reader::Tid> {
-    use seqair::reader::ResolveTid;
-    let h = seqair::bam::header::BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n")
-        .unwrap();
-    u32::try_from(n).ok().map(|n| n.resolve_tid(&h).expect("test tid in range"))
 }

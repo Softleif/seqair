@@ -17,6 +17,8 @@
     reason = "test code with known small values"
 )]
 
+mod helpers;
+use helpers::tid;
 use rust_htslib::bam::{self, Read as _};
 use seqair::bam::aux_data::AuxData;
 // Use the top-level `bam` re-export rather than the inner module path so the
@@ -80,7 +82,7 @@ fn build_record(
     aux.set_array_u8(*b"ML", ml).unwrap();
     let flags = if is_reverse { BamFlags::from(FLAG_REVERSE) } else { BamFlags::empty() };
     let seq_len = seq.len();
-    OwnedBamRecord::builder(t(0), Some(Pos0::new(pos).unwrap()), qname.to_vec())
+    OwnedBamRecord::builder(tid(0), Some(Pos0::new(pos).unwrap()), qname.to_vec())
         .flags(flags)
         .mapq(60)
         .cigar(cigar)
@@ -287,13 +289,4 @@ fn combined_codes_match_htslib() {
     let state = BaseModState::parse(b"C+mh,0,1;", &[200, 100, 220, 120], &seq, false).unwrap();
     let ours = seqair_calls(&state, seq.len());
     assert_eq!(ours, oracle);
-}
-
-fn t(n: u32) -> Option<seqair::reader::Tid> {
-    use seqair::reader::ResolveTid;
-    let h = seqair::bam::header::BamHeader::from_sam_text(
-        "@SQ\tSN:a\tLN:1\n@SQ\tSN:b\tLN:1\n@SQ\tSN:c\tLN:1\n",
-    )
-    .unwrap();
-    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

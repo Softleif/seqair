@@ -5,7 +5,9 @@
 #![allow(clippy::cast_possible_truncation, reason = "test code with known small values")]
 #![allow(clippy::arithmetic_side_effects, reason = "test code")]
 
+mod helpers;
 use hegel::prelude::*;
+use helpers::tid;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::RecordStore;
@@ -30,8 +32,8 @@ fn push(store: &mut RecordStore, qname: &[u8], pos: u32, len: u32, mate_pos: i32
             &vec![Base::A; len as usize],
             &vec![30u8; len as usize],
             &[],
-            t(0),
-            t(0),
+            tid(0),
+            tid(0),
             u32::try_from(mate_pos).ok().and_then(Pos0::new),
             None,
             &mut (),
@@ -234,10 +236,4 @@ fn dedup_leaves_exactly_the_distinct_records(tc: TestCase) {
     }
     store.dedup();
     assert_eq!(store.len(), count);
-}
-
-fn t(n: u32) -> Option<seqair::reader::Tid> {
-    use seqair::reader::ResolveTid;
-    let h = seqair::bam::header::BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n").unwrap();
-    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

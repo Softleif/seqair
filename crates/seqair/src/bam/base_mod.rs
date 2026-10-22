@@ -972,7 +972,7 @@ mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 None,
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap()
@@ -1127,7 +1127,7 @@ mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 None,
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap()

@@ -2073,7 +2073,7 @@ pub(crate) mod tests {
             crate::reader::Tid::new(0),
             None,
             seqair_types::Pos0::new(0),
-            std::num::NonZeroI32::new(0),
+            None,
             &mut (),
         );
         assert!(result.is_ok());
@@ -2244,7 +2244,7 @@ pub(crate) mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut RejectRaw,
             )
             .unwrap();
@@ -2307,7 +2307,7 @@ pub(crate) mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap();
@@ -2334,7 +2334,7 @@ pub(crate) mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut KeepNone,
             )
             .unwrap();
@@ -2395,7 +2395,7 @@ pub(crate) mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap();
@@ -2425,7 +2425,7 @@ pub(crate) mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap();
@@ -2464,7 +2464,7 @@ pub(crate) mod tests {
                 crate::reader::Tid::new(0),
                 None,
                 seqair_types::Pos0::new(0),
-                std::num::NonZeroI32::new(0),
+                None,
                 &mut (),
             )
             .unwrap();
@@ -2589,7 +2589,7 @@ pub(crate) mod tests {
                         crate::reader::Tid::new(0),
                         None,
                         seqair_types::Pos0::new(0),
-                        std::num::NonZeroI32::new(0),
+                        None,
                         &mut (),
                     )
                     .expect("synthetic push")
@@ -3008,7 +3008,7 @@ pub(crate) mod tests {
                     crate::reader::Tid::new(0),
                     None,
                     seqair_types::Pos0::new(0),
-                    std::num::NonZeroI32::new(0),
+                    None,
                     &mut AcceptFlag(input.accept),
                 )
                 .expect("push_fields must not error on synthetic input")

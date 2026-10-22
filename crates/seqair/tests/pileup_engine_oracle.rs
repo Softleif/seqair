@@ -15,7 +15,9 @@
     reason = "test code"
 )]
 
+mod helpers;
 use hegel::prelude::*;
+use helpers::tid;
 use seqair::bam::{
     Pos0, RecordStore,
     cigar::{
@@ -134,7 +136,7 @@ fn build_store(case: &Case) -> PileupInput<()> {
         let (name, next_ref_id, next_pos) = match mate_of[i] {
             Some(m) => {
                 flags |= 0x1 | if m > i { 0x40 } else { 0x80 };
-                (format!("t{}", i.min(m)), t(0), Pos0::new(case.reads[m].pos))
+                (format!("t{}", i.min(m)), tid(0), Pos0::new(case.reads[m].pos))
             }
             None => (format!("r{i}"), None, None),
         };
@@ -151,7 +153,7 @@ fn build_store(case: &Case) -> PileupInput<()> {
                 &r.seq,
                 &r.qual,
                 &[],
-                t(0),
+                tid(0),
                 next_ref_id,
                 next_pos,
                 None,
@@ -312,10 +314,4 @@ fn engine_matches_stateless_oracle(tc: TestCase) {
     let oracle = run_oracle(&case);
     assert_eq!(ours, oracle);
     tc.event_value("columns", ours.len() as f64);
-}
-
-fn t(n: u32) -> Option<seqair::reader::Tid> {
-    use seqair::reader::ResolveTid;
-    let h = seqair::bam::header::BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n").unwrap();
-    Some(n.resolve_tid(&h).expect("test tid in range"))
 }

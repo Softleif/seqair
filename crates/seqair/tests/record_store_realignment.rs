@@ -20,6 +20,7 @@ mod helpers;
 mod pinned;
 use hegel::prelude::*;
 use helpers::ri;
+use helpers::tid;
 use seqair::bam::record_store::RecordStore;
 use seqair::bam::{DecodeError, Pos0};
 use seqair_types::{BamFlags, Base, BaseQuality};
@@ -286,7 +287,7 @@ fn soft_clips_are_stored_at_push_and_follow_set_alignment() {
             &[Base::A; 5],
             &[30; 5],
             &[],
-            t(0),
+            tid(0),
             None,
             None,
             None,
@@ -710,10 +711,4 @@ fn realignment_workflow_with_real_bam() {
     for (i, (prev, rec)) in store.records().zip(store.records().skip(1)).enumerate() {
         assert!(rec.pos >= prev.pos, "sort order broken at index {}", i + 1);
     }
-}
-
-fn t(n: u32) -> Option<seqair::reader::Tid> {
-    use seqair::reader::ResolveTid;
-    let h = seqair::bam::header::BamHeader::from_sam_text("@SQ\tSN:a\tLN:1\n").unwrap();
-    Some(n.resolve_tid(&h).expect("test tid in range"))
 }
