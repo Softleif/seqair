@@ -1898,6 +1898,7 @@ impl<U> Default for RecordStore<U> {
 pub(crate) mod tests {
     use super::*;
     use crate::bam::test_util::ri;
+    use crate::bam::test_util::tid;
 
     /// Drop every record at push time (no-extra customizer).
     #[derive(Clone, Default)]
@@ -2080,9 +2081,9 @@ pub(crate) mod tests {
             &[Base::A],
             &[30],
             &[],
-            crate::reader::Tid::new(0),
+            Some(tid(0)),
             None,
-            seqair_types::Pos0::new(0),
+            None,
             None,
             &mut (),
         );
@@ -2138,7 +2139,7 @@ pub(crate) mod tests {
         // Write next_ref_id = 7 at BAM offset 20
         raw[20..24].copy_from_slice(&7i32.to_le_bytes());
         store.push_raw(&raw, crate::bam::test_util::header(), &mut ()).unwrap();
-        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, Tid::new(7));
+        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, Some(tid(7)));
     }
 
     // r[verify bam.record.ref_ids]
@@ -2152,16 +2153,16 @@ pub(crate) mod tests {
             raw[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             raw
         };
-        let (tid, next_ref_id, next_pos) = (0, 20, 24);
+        let (tid_at, next_ref_id_at, next_pos_at) = (0, 20, 24);
 
         let mut store = RecordStore::new();
-        let mut raw = with(next_ref_id, -1);
-        raw[next_pos..next_pos + 4].copy_from_slice(&(-1i32).to_le_bytes());
+        let mut raw = with(next_ref_id_at, -1);
+        raw[next_pos_at..next_pos_at + 4].copy_from_slice(&(-1i32).to_le_bytes());
         store.push_raw(&raw, header, &mut ()).unwrap();
         let rec = store.record(ri(0)).unwrap();
         assert_eq!((rec.next_ref_id, rec.next_pos), (None, None));
-        store.push_raw(&with(tid, 15), header, &mut ()).unwrap();
-        assert_eq!(store.record(ri(1)).unwrap().tid, Tid::new(15));
+        store.push_raw(&with(tid_at, 15), header, &mut ()).unwrap();
+        assert_eq!(store.record(ri(1)).unwrap().tid, Some(tid(15)));
 
         let bad_tid: fn(&DecodeError) -> bool = |e| matches!(e, DecodeError::InvalidTid { .. });
         let bad_mate_tid: fn(&DecodeError) -> bool =
@@ -2169,11 +2170,11 @@ pub(crate) mod tests {
         let bad_mate_pos: fn(&DecodeError) -> bool =
             |e| matches!(e, DecodeError::InvalidMatePosition { value: -2 });
         for (raw, expected) in [
-            (with(tid, 16), bad_tid),
-            (with(tid, -2), bad_tid),
-            (with(next_ref_id, 16), bad_mate_tid),
-            (with(next_ref_id, i32::MIN), bad_mate_tid),
-            (with(next_pos, -2), bad_mate_pos),
+            (with(tid_at, 16), bad_tid),
+            (with(tid_at, -2), bad_tid),
+            (with(next_ref_id_at, 16), bad_mate_tid),
+            (with(next_ref_id_at, i32::MIN), bad_mate_tid),
+            (with(next_pos_at, -2), bad_mate_pos),
         ] {
             let mut store = RecordStore::new();
             let err = store.push_raw(&raw, header, &mut ()).unwrap_err();
@@ -2298,9 +2299,9 @@ pub(crate) mod tests {
                 &[Base::A; 5],
                 &[30; 5],
                 b"tagdata",
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut RejectRaw,
             )
@@ -2362,9 +2363,9 @@ pub(crate) mod tests {
                 &[Base::A, Base::C, Base::G, Base::T],
                 &[30, 31, 32, 33],
                 &[],
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut (),
             )
@@ -2389,9 +2390,9 @@ pub(crate) mod tests {
                 &[Base::A, Base::C, Base::G, Base::T],
                 &[30, 31, 32, 33],
                 b"NM:i:0",
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut KeepNone,
             )
@@ -2422,14 +2423,14 @@ pub(crate) mod tests {
                 &[Base::A, Base::C, Base::G, Base::T, Base::A],
                 &[30, 31, 32, 33, 34],
                 &[],
-                crate::reader::Tid::new(0),
-                crate::reader::Tid::new(3),
+                Some(tid(0)),
+                Some(tid(3)),
                 seqair_types::Pos0::new(500),
                 std::num::NonZeroI32::new(200),
                 &mut (),
             )
             .unwrap();
-        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, Tid::new(3));
+        assert_eq!(store.record(ri(0)).unwrap().next_ref_id, Some(tid(3)));
     }
 
     // r[verify record_store.end_pos_htslib]
@@ -2450,9 +2451,9 @@ pub(crate) mod tests {
                 &[Base::A; 5],
                 &[30; 5],
                 &[],
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut (),
             )
@@ -2480,9 +2481,9 @@ pub(crate) mod tests {
                 &[Base::A; 100],
                 &[0; 100],
                 &[],
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut (),
             )
@@ -2519,9 +2520,9 @@ pub(crate) mod tests {
                 bases,
                 quals,
                 aux,
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut (),
             )
@@ -2644,9 +2645,9 @@ pub(crate) mod tests {
                         &bases,
                         &quals,
                         &[],
-                        crate::reader::Tid::new(0),
+                        Some(crate::bam::test_util::tid(0)),
                         None,
-                        seqair_types::Pos0::new(0),
+                        None,
                         None,
                         &mut (),
                     )
@@ -3063,9 +3064,9 @@ pub(crate) mod tests {
                     &input.bases,
                     &input.quals,
                     &input.aux,
-                    crate::reader::Tid::new(0),
+                    Some(crate::bam::test_util::tid(0)),
                     None,
-                    seqair_types::Pos0::new(0),
+                    None,
                     None,
                     &mut AcceptFlag(input.accept),
                 )
@@ -3227,7 +3228,7 @@ pub(crate) mod tests {
             )]
             let len = input.bases.len() as u32;
             OwnedBamRecord::builder(
-                crate::reader::Tid::new(0),
+                Some(crate::bam::test_util::tid(0)),
                 Some(Pos0::new(input.pos).unwrap()),
                 input.qname.clone(),
             )

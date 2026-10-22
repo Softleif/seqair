@@ -1019,6 +1019,7 @@ fn parse_i64(bytes: &[u8]) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::bam::record_store::RecordStore;
+    use crate::bam::test_util::tid;
     use std::io::Write;
 
     /// The aux bytes `parse_aux_tags` produces for one `TAG:TYPE:VALUE` field.
@@ -1095,7 +1096,7 @@ mod tests {
         parse_sam_line(
             line,
             header,
-            Tid::new(0).unwrap(),
+            tid(0),
             0,
             10000,
             &mut store,
@@ -1167,7 +1168,7 @@ mod tests {
             parse_sam_line(
                 line.as_bytes(),
                 &header,
-                Tid::new(0).unwrap(),
+                crate::bam::test_util::tid(0),
                 0,
                 10000,
                 &mut store,
@@ -1317,7 +1318,7 @@ mod tests {
         let result = parse_sam_line(
             line,
             header,
-            Tid::new(0).unwrap(),
+            tid(0),
             start,
             end,
             &mut store,

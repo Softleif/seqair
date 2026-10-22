@@ -417,21 +417,18 @@ mod tests {
     use super::super::cigar::CigarOpType;
     use super::*;
     use crate::bam::test_util::ri;
+    use crate::bam::test_util::tid;
     use seqair_types::{Pos0, QPos};
 
     fn simple_record() -> OwnedBamRecord {
-        OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
-            Some(Pos0::new(100).unwrap()),
-            b"read1".to_vec(),
-        )
-        .flags(BamFlags::empty()) // mapped
-        .mapq(30)
-        .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
-        .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
-        .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
-        .build()
-        .unwrap()
+        OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"read1".to_vec())
+            .flags(BamFlags::empty()) // mapped
+            .mapq(30)
+            .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
+            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
+            .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
+            .build()
+            .unwrap()
     }
 
     use super::super::test_util::decode_into_store;
@@ -447,7 +444,7 @@ mod tests {
         let store = decode_into_store(&buf);
         let decoded = store.record(ri(0)).unwrap();
 
-        assert_eq!(decoded.tid, Tid::new(0));
+        assert_eq!(decoded.tid, Some(tid(0)));
         assert_eq!(decoded.pos.as_u32(), 100);
         assert_eq!(decoded.mapq, 30);
         assert_eq!(decoded.flags, BamFlags::empty());
@@ -462,17 +459,14 @@ mod tests {
         aux.set_int(*b"NM", 3).unwrap();
         aux.set_string(*b"RG", b"grp1");
 
-        let rec = OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
-            Some(Pos0::new(100).unwrap()),
-            b"r1".to_vec(),
-        )
-        .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-        .seq(vec![Base::A, Base::C, Base::G])
-        .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
-        .aux(aux)
-        .build()
-        .unwrap();
+        let rec =
+            OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"r1".to_vec())
+                .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
+                .seq(vec![Base::A, Base::C, Base::G])
+                .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
+                .aux(aux)
+                .build()
+                .unwrap();
 
         let mut buf = Vec::new();
         rec.to_bam_bytes(&mut buf).unwrap();
@@ -519,20 +513,17 @@ mod tests {
 
     #[test]
     fn end_pos_with_insertion() {
-        let rec = OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
-            Some(Pos0::new(100).unwrap()),
-            b"r".to_vec(),
-        )
-        .cigar(vec![
-            CigarOp::new(CigarOpType::Match, 3),
-            CigarOp::new(CigarOpType::Insertion, 2),
-            CigarOp::new(CigarOpType::Match, 3),
-        ])
-        .seq(vec![Base::A; 8]) // 3M + 2I + 3M = 8 query bases
-        .qual(vec![BaseQuality::from_byte(30); 8])
-        .build()
-        .unwrap();
+        let rec =
+            OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"r".to_vec())
+                .cigar(vec![
+                    CigarOp::new(CigarOpType::Match, 3),
+                    CigarOp::new(CigarOpType::Insertion, 2),
+                    CigarOp::new(CigarOpType::Match, 3),
+                ])
+                .seq(vec![Base::A; 8]) // 3M + 2I + 3M = 8 query bases
+                .qual(vec![BaseQuality::from_byte(30); 8])
+                .build()
+                .unwrap();
         // Only M ops consume ref: 3 + 3 = 6
         assert_eq!(rec.end_pos(), Some(Pos0::new(106).unwrap()));
     }
@@ -541,14 +532,14 @@ mod tests {
     #[test]
     fn qname_too_long_rejected() {
         let long_name = vec![b'A'; 255];
-        let result = OwnedBamRecord::builder(crate::reader::Tid::new(0), None, long_name).build();
+        let result = OwnedBamRecord::builder(Some(tid(0)), None, long_name).build();
         assert!(result.is_err());
     }
 
     #[test]
     fn qname_at_limit_accepted() {
         let name = vec![b'A'; 254];
-        let result = OwnedBamRecord::builder(crate::reader::Tid::new(0), None, name).build();
+        let result = OwnedBamRecord::builder(Some(tid(0)), None, name).build();
         assert!(result.is_ok());
     }
 
@@ -578,16 +569,13 @@ mod tests {
 
     #[test]
     fn empty_qual_fills_with_0xff() {
-        let rec = OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
-            Some(Pos0::new(100).unwrap()),
-            b"r".to_vec(),
-        )
-        .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-        .seq(vec![Base::A, Base::C, Base::G])
-        // no qual set
-        .build()
-        .unwrap();
+        let rec =
+            OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"r".to_vec())
+                .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
+                .seq(vec![Base::A, Base::C, Base::G])
+                // no qual set
+                .build()
+                .unwrap();
 
         let mut buf = Vec::new();
         rec.to_bam_bytes(&mut buf).unwrap();
@@ -621,7 +609,7 @@ mod tests {
     fn placed_unmapped_record_roundtrips() {
         // Placed unmapped: has ref_id and pos, but flag 0x4 set
         let rec = OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
+            Some(tid(0)),
             Some(Pos0::new(500).unwrap()),
             b"placed".to_vec(),
         )
@@ -668,20 +656,17 @@ mod tests {
     #[test]
     fn aligned_pairs_with_insertion() {
         use super::super::aligned_pairs::{AlignedPair, MatchKind};
-        let rec = OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
-            Some(Pos0::new(100).unwrap()),
-            b"r".to_vec(),
-        )
-        .cigar(vec![
-            CigarOp::new(CigarOpType::Match, 2),
-            CigarOp::new(CigarOpType::Insertion, 1),
-            CigarOp::new(CigarOpType::Match, 2),
-        ])
-        .seq(vec![Base::A; 5])
-        .qual(vec![BaseQuality::from_byte(30); 5])
-        .build()
-        .unwrap();
+        let rec =
+            OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"r".to_vec())
+                .cigar(vec![
+                    CigarOp::new(CigarOpType::Match, 2),
+                    CigarOp::new(CigarOpType::Insertion, 1),
+                    CigarOp::new(CigarOpType::Match, 2),
+                ])
+                .seq(vec![Base::A; 5])
+                .qual(vec![BaseQuality::from_byte(30); 5])
+                .build()
+                .unwrap();
 
         let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         let m = |q, r| AlignedPair::Match {
@@ -703,20 +688,17 @@ mod tests {
     #[test]
     fn aligned_pairs_with_deletion() {
         use super::super::aligned_pairs::{AlignedPair, MatchKind};
-        let rec = OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
-            Some(Pos0::new(100).unwrap()),
-            b"r".to_vec(),
-        )
-        .cigar(vec![
-            CigarOp::new(CigarOpType::Match, 2),
-            CigarOp::new(CigarOpType::Deletion, 3),
-            CigarOp::new(CigarOpType::Match, 2),
-        ])
-        .seq(vec![Base::A; 4])
-        .qual(vec![BaseQuality::from_byte(30); 4])
-        .build()
-        .unwrap();
+        let rec =
+            OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"r".to_vec())
+                .cigar(vec![
+                    CigarOp::new(CigarOpType::Match, 2),
+                    CigarOp::new(CigarOpType::Deletion, 3),
+                    CigarOp::new(CigarOpType::Match, 2),
+                ])
+                .seq(vec![Base::A; 4])
+                .qual(vec![BaseQuality::from_byte(30); 4])
+                .build()
+                .unwrap();
 
         let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         let m = |q, r| AlignedPair::Match {
@@ -736,16 +718,16 @@ mod tests {
     #[test]
     fn aligned_pairs_with_soft_clip() {
         use super::super::aligned_pairs::{AlignedPair, MatchKind};
-        let rec = OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
-            Some(Pos0::new(100).unwrap()),
-            b"r".to_vec(),
-        )
-        .cigar(vec![CigarOp::new(CigarOpType::SoftClip, 2), CigarOp::new(CigarOpType::Match, 3)])
-        .seq(vec![Base::A; 5])
-        .qual(vec![BaseQuality::from_byte(30); 5])
-        .build()
-        .unwrap();
+        let rec =
+            OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"r".to_vec())
+                .cigar(vec![
+                    CigarOp::new(CigarOpType::SoftClip, 2),
+                    CigarOp::new(CigarOpType::Match, 3),
+                ])
+                .seq(vec![Base::A; 5])
+                .qual(vec![BaseQuality::from_byte(30); 5])
+                .build()
+                .unwrap();
 
         let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         let m = |q, r| AlignedPair::Match {
@@ -795,17 +777,14 @@ mod tests {
         // 3M record with seq [A, C, G] — verify the helper attaches per-pos
         // bases without going through the SlimRecord/RecordStore round-trip.
         use super::super::aligned_pairs_view::AlignedPairWithRead;
-        let rec = OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
-            Some(Pos0::new(50).unwrap()),
-            b"r".to_vec(),
-        )
-        .flags(BamFlags::empty())
-        .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-        .seq(vec![Base::A, Base::C, Base::G])
-        .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
-        .build()
-        .unwrap();
+        let rec =
+            OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(50).unwrap()), b"r".to_vec())
+                .flags(BamFlags::empty())
+                .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
+                .seq(vec![Base::A, Base::C, Base::G])
+                .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
+                .build()
+                .unwrap();
 
         let events: Vec<_> = rec.aligned_pairs_with_read().unwrap().collect();
         assert_eq!(events.len(), 3);

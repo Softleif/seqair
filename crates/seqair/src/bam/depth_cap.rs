@@ -192,6 +192,7 @@ fn ref_span_from_cigar(cigar: &[u8]) -> u64 {
 mod tests {
     use super::*;
     use crate::bam::record_store::Sequence;
+    use crate::bam::test_util::tid;
     use seqair_types::BamFlags;
 
     /// One `<len>M` CIGAR op as raw BAM bytes.
@@ -210,7 +211,7 @@ mod tests {
             seq_len: 0,
             matching_bases: 0,
             indel_bases: 0,
-            tid: Tid::new(0),
+            tid: Some(tid(0)),
             next_ref_id: None,
             next_pos: None,
             template_len: None,
@@ -294,7 +295,7 @@ mod tests {
     fn a_new_reference_or_a_step_back_empties_the_window() {
         let cigar = match_cigar(100);
         let on = |tid: Option<Tid>, p: u32| FilterRawFields { tid, ..bam_fields(pos(p), &cigar) };
-        let (t0, t1) = (Tid::new(0), Tid::new(1));
+        let (t0, t1) = (Some(tid(0)), Some(tid(1)));
         for next in [on(t1, 10), on(None, 10), on(t0, 5)] {
             let mut capped = DepthCap::with_cap((), NonZeroU32::new(1));
             assert!(capped.filter_raw(&on(t0, 10)));

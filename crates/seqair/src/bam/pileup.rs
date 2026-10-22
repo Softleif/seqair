@@ -1462,6 +1462,7 @@ impl<U> Drop for PileupEngine<U> {
 #[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
 mod tests {
     use super::*;
+    use crate::bam::test_util::tid;
 
     /// The closed region `first..=last`, the shape `PileupEngine::new` takes.
     fn region(first: u32, last: u32) -> RangeInclusive<Pos0> {
@@ -1520,9 +1521,9 @@ mod tests {
                 &[Base::A; 5],
                 &[40; 5],
                 &[],
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut (),
             )
@@ -1572,9 +1573,9 @@ mod tests {
                     &vec![Base::A; *span as usize],
                     &vec![40u8; *span as usize],
                     &[],
-                    crate::reader::Tid::new(0),
+                    Some(tid(0)),
                     None,
-                    seqair_types::Pos0::new(0),
+                    None,
                     None,
                     &mut (),
                 )
@@ -1642,9 +1643,9 @@ mod tests {
                 &seq,
                 &quals,
                 &[],
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut (),
             )
@@ -1700,9 +1701,9 @@ mod tests {
                 &seq,
                 &[40u8; 6],
                 &[],
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut (),
             )
@@ -1829,9 +1830,9 @@ mod tests {
                         &r.seq,
                         &quals,
                         &[],
-                        crate::reader::Tid::new(0),
+                        Some(crate::bam::test_util::tid(0)),
                         None,
-                        seqair_types::Pos0::new(0),
+                        None,
                         None,
                         &mut (),
                     )
@@ -1960,9 +1961,9 @@ mod tests {
                 &seq,
                 &quals,
                 &[],
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut (),
             )
@@ -2016,9 +2017,9 @@ mod tests {
                 &seq,
                 &quals,
                 &[],
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut (),
             )
@@ -2074,9 +2075,9 @@ mod tests {
                 &seq,
                 &quals,
                 &[],
-                crate::reader::Tid::new(0),
+                Some(tid(0)),
                 None,
-                seqair_types::Pos0::new(0),
+                None,
                 None,
                 &mut (),
             )
@@ -2123,9 +2124,9 @@ mod tests {
                     &vec![Base::A; seq_len as usize],
                     &vec![40u8; seq_len as usize],
                     &[],
-                    crate::reader::Tid::new(0),
+                    Some(tid(0)),
                     None,
-                    seqair_types::Pos0::new(0),
+                    None,
                     None,
                     &mut (),
                 )
@@ -2198,9 +2199,9 @@ mod tests {
                     &[Base::A; 50],
                     &[40u8; 50],
                     &[],
-                    crate::reader::Tid::new(0),
+                    Some(tid(0)),
                     None,
-                    seqair_types::Pos0::new(0),
+                    None,
                     None,
                     &mut (),
                 )

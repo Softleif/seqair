@@ -712,6 +712,7 @@ mod tests {
     use super::super::cigar::CigarOp as Op;
     use super::*;
     use crate::bam::test_util::ri;
+    use crate::bam::test_util::tid;
 
     // Helper: construct a CigarOp
     fn m(len: u32) -> Op {
@@ -1692,17 +1693,14 @@ mod tests {
         /// Build a record via [`OwnedBamRecord`], serialize to BAM bytes, push
         /// into a fresh [`RecordStore`] via `push_raw`.
         fn store_with_record(pos: u32, cigar: &[CigarOp], seq_len: usize) -> RecordStore<()> {
-            let rec = OwnedBamRecord::builder(
-                crate::reader::Tid::new(0),
-                Some(Pos0::new(pos).unwrap()),
-                b"r".to_vec(),
-            )
-            .flags(BamFlags::empty())
-            .cigar(cigar.to_vec())
-            .seq(vec![Base::A; seq_len])
-            .qual(vec![BaseQuality::from_byte(30); seq_len])
-            .build()
-            .unwrap();
+            let rec =
+                OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), b"r".to_vec())
+                    .flags(BamFlags::empty())
+                    .cigar(cigar.to_vec())
+                    .seq(vec![Base::A; seq_len])
+                    .qual(vec![BaseQuality::from_byte(30); seq_len])
+                    .build()
+                    .unwrap();
             let mut buf = Vec::new();
             rec.to_bam_bytes(&mut buf).unwrap();
 
@@ -1729,17 +1727,14 @@ mod tests {
             // Build once, push into a store, then walk via both entry points.
             // The AlignedPair sequences must be identical.
             let cigar = vec![m(2), ins(1), m(2), del(1), m(2)];
-            let owned = OwnedBamRecord::builder(
-                crate::reader::Tid::new(0),
-                Some(Pos0::new(200).unwrap()),
-                b"r".to_vec(),
-            )
-            .flags(BamFlags::empty())
-            .cigar(cigar.clone())
-            .seq(vec![Base::A; 7])
-            .qual(vec![BaseQuality::from_byte(30); 7])
-            .build()
-            .unwrap();
+            let owned =
+                OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(200).unwrap()), b"r".to_vec())
+                    .flags(BamFlags::empty())
+                    .cigar(cigar.clone())
+                    .seq(vec![Base::A; 7])
+                    .qual(vec![BaseQuality::from_byte(30); 7])
+                    .build()
+                    .unwrap();
             let mut buf = Vec::new();
             owned.to_bam_bytes(&mut buf).unwrap();
 
@@ -1760,7 +1755,7 @@ mod tests {
             let cigar = vec![CigarOp::new(CigarOpType::SoftClip, 1), m(2), ins(2), m(1)];
             for qual in [Vec::new(), vec![BaseQuality::from_byte(30); 6]] {
                 let owned = OwnedBamRecord::builder(
-                    crate::reader::Tid::new(0),
+                    Some(tid(0)),
                     Some(Pos0::new(10).unwrap()),
                     b"r".to_vec(),
                 )

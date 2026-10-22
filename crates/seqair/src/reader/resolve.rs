@@ -38,12 +38,6 @@ impl Tid {
         }
     }
 
-    /// An unchecked `Tid`, for unit tests that build records by hand.
-    #[cfg(test)]
-    pub(crate) const fn new(index: u32) -> Option<Self> {
-        Self::from_index(index)
-    }
-
     /// Target `index` of `header`, if it has one.
     pub(crate) fn of_header(index: u32, header: &BamHeader) -> Option<Self> {
         usize::try_from(index)

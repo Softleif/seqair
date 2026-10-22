@@ -35,7 +35,6 @@ use seqair::bam::{
     BamError, BamHeaderError, BgzfError, IndexedBamReader, Pos0, RecordIdx, RecordStore,
 };
 use seqair::io::IndexError;
-use seqair::reader::ResolveTid;
 use seqair::vcf::record_encoder::{
     FilterFieldDef, FormatEncoder, FormatFieldDef, FormatGt, FormatInt, InfoEncoder, InfoFieldDef,
     InfoInt,
@@ -456,9 +455,10 @@ fn writer_header() -> BamHeader {
 }
 
 /// A minimal mapped record. `len` bases of `A` with matching qualities.
-fn mapped_record(ref_id: i32, pos: u32, name: &str, len: usize) -> OwnedBamRecord {
+/// `on_chr1: false` leaves the reference unset, as an unplaced record has it.
+fn mapped_record(on_chr1: bool, pos: u32, name: &str, len: usize) -> OwnedBamRecord {
     OwnedBamRecord::builder(
-        u32::try_from(ref_id).ok().and_then(|n| n.resolve_tid(&writer_header()).ok()),
+        on_chr1.then(|| writer_header().tid("chr1").unwrap()),
         Some(Pos0::new(pos).unwrap()),
         name.as_bytes().to_vec(),
     )
@@ -508,7 +508,7 @@ fn a_mapped_record_without_a_reference_is_rejected_before_the_stream_is_touched(
     let control = header_only_bytes(dir.path());
 
     let (err, actual) = rejected_write(dir.path(), |writer| {
-        let record = mapped_record(-1, 100, "orphan", 10);
+        let record = mapped_record(false, 100, "orphan", 10);
         writer.write(&record).expect_err("a mapped record with ref_id == -1 must be refused")
     });
 
@@ -529,7 +529,7 @@ fn an_oversized_record_reports_its_serialized_size_and_leaves_the_stream_alone()
     let dir = tempfile::tempdir().unwrap();
     let control = header_only_bytes(dir.path());
 
-    let record = mapped_record(0, 100, "huge", 3_000_000);
+    let record = mapped_record(true, 100, "huge", 3_000_000);
     let mut serialized = Vec::new();
     record.to_bam_bytes(&mut serialized).unwrap();
     let serialized_len = serialized.len();
@@ -594,9 +594,9 @@ fn an_out_of_order_record_fails_in_the_index_after_it_was_written() {
     let header = writer_header();
     let path = dir.path().join("unsorted.bam");
     let mut writer = BamWriterBuilder::to_path(&path, &header).write_index(true).build().unwrap();
-    writer.write(&mapped_record(0, 5_000, "first", 10)).unwrap();
+    writer.write(&mapped_record(true, 5_000, "first", 10)).unwrap();
     let err = writer
-        .write(&mapped_record(0, 1_000, "backwards", 10))
+        .write(&mapped_record(true, 1_000, "backwards", 10))
         .expect_err("a record before the previous one must be refused");
     writer.finish().unwrap();
     let with_both = std::fs::read(&path).unwrap();
@@ -611,7 +611,7 @@ fn an_out_of_order_record_fails_in_the_index_after_it_was_written() {
     let control_path = dir.path().join("sorted.bam");
     let mut control =
         BamWriterBuilder::to_path(&control_path, &header).write_index(true).build().unwrap();
-    control.write(&mapped_record(0, 5_000, "first", 10)).unwrap();
+    control.write(&mapped_record(true, 5_000, "first", 10)).unwrap();
     control.finish().unwrap();
     let with_one = std::fs::read(&control_path).unwrap();
     assert_ne!(with_both, with_one, "the unsorted record was written before the index refused it");
@@ -650,7 +650,7 @@ fn an_io_failure_poisons_the_writer_and_later_writes_never_reach_the_sink() {
 
     let mut first_error = None;
     for i in 0..4000u32 {
-        let record = mapped_record(0, i * 10 + 1, "read", 100);
+        let record = mapped_record(true, i * 10 + 1, "read", 100);
         if let Err(e) = writer.write(&record) {
             first_error = Some(e);
             break;
@@ -668,7 +668,7 @@ fn an_io_failure_poisons_the_writer_and_later_writes_never_reach_the_sink() {
 
     let after_failure = sink.written();
     for i in 0..5u32 {
-        let record = mapped_record(0, 900_000 + i, "later", 10);
+        let record = mapped_record(true, 900_000 + i, "later", 10);
         let err = writer.write(&record).expect_err("a poisoned writer accepts nothing");
         assert!(matches!(err, BamWriteError::Poisoned), "expected Poisoned, got {err:?}");
     }
@@ -698,9 +698,9 @@ impl WriteFailure {
 
     fn record(self) -> OwnedBamRecord {
         match self {
-            Self::MappedWithoutReference => mapped_record(-1, 100, "orphan", 10),
+            Self::MappedWithoutReference => mapped_record(false, 100, "orphan", 10),
             // Large enough to pass the 2 MiB limit, small enough to build fast.
-            Self::RecordTooLarge => mapped_record(0, 100, "huge", 3_000_000),
+            Self::RecordTooLarge => mapped_record(true, 100, "huge", 3_000_000),
             Self::SeqQualMismatch => {
                 let mut record = OwnedBamRecord::builder(
                     Some(tid(0)),
@@ -716,7 +716,7 @@ impl WriteFailure {
                 record
             }
             // Position 1 is behind whatever the property already wrote.
-            Self::Unsorted => mapped_record(0, 1, "backwards", 10),
+            Self::Unsorted => mapped_record(true, 1, "backwards", 10),
         }
     }
 
@@ -752,7 +752,7 @@ fn the_first_failure_wins_and_everything_after_it_is_poisoned(tc: TestCase) {
     let path = dir.path().join("poison.bam");
     let mut writer = BamWriterBuilder::to_path(&path, &header).write_index(true).build().unwrap();
     for i in 0..good {
-        writer.write(&mapped_record(0, 1_000 + i * 100, "ok", 10)).expect("sorted and valid");
+        writer.write(&mapped_record(true, 1_000 + i * 100, "ok", 10)).expect("sorted and valid");
     }
 
     let err = writer.write(&failure.record()).expect_err("the failing record must be refused");
@@ -760,7 +760,7 @@ fn the_first_failure_wins_and_everything_after_it_is_poisoned(tc: TestCase) {
 
     for i in 0..later {
         // A record that would be perfectly acceptable on a healthy writer.
-        let record = mapped_record(0, 50_000 + i * 100, "after", 10);
+        let record = mapped_record(true, 50_000 + i * 100, "after", 10);
         let err = writer.write(&record).expect_err("the writer is poisoned");
         assert!(
             matches!(err, BamWriteError::Poisoned),

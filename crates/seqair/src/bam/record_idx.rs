@@ -344,6 +344,7 @@ mod tests {
     use super::*;
     use crate::bam::record_store::RecordStore;
     use crate::bam::test_util::ri;
+    use crate::bam::test_util::tid;
     use seqair_types::BamFlags;
 
     // r[verify record_store.record_idx]
@@ -406,8 +407,8 @@ mod tests {
                     &bases,
                     &quals,
                     b"XAi\x07\x00\x00\x00",
-                    crate::reader::Tid::new(0),
-                    crate::reader::Tid::new(0),
+                    Some(tid(0)),
+                    Some(tid(0)),
                     Pos0::new(mate_pos),
                     None,
                     &mut (),

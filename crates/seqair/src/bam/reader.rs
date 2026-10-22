@@ -641,6 +641,7 @@ fn open_index(path: &Path) -> Result<AlignmentIndex, BamError> {
 #[allow(clippy::arithmetic_side_effects, reason = "test code with controlled values")]
 mod tests {
     use super::*;
+    use crate::bam::test_util::tid;
 
     /// Frame a record with its 4-byte `block_size` prefix, as it appears on the
     /// BAM wire (what [`RegionBuf::read_record`] expects to find).
@@ -670,7 +671,7 @@ mod tests {
         use seqair_types::Base;
 
         let mapped = OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
+            Some(tid(0)),
             Some(Pos0::new(100).unwrap()),
             b"mapped".to_vec(),
         )
@@ -760,16 +761,13 @@ mod tests {
         let seq_len: u32 =
             ops.iter().filter(|op| op.consumes_query()).map(|op| op.len()).sum::<u32>().max(1);
         let unmapped = tc.draw(gs::booleans());
-        let rec = OwnedBamRecord::builder(
-            crate::reader::Tid::new(0),
-            Some(Pos0::new(pos).unwrap()),
-            b"q".to_vec(),
-        )
-        .flags(BamFlags::from(if unmapped { 0x4u16 } else { 0 }))
-        .cigar(ops)
-        .seq(vec![Base::A; seq_len as usize])
-        .build()
-        .unwrap();
+        let rec =
+            OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), b"q".to_vec())
+                .flags(BamFlags::from(if unmapped { 0x4u16 } else { 0 }))
+                .cigar(ops)
+                .seq(vec![Base::A; seq_len as usize])
+                .build()
+                .unwrap();
         let mut raw = Vec::new();
         rec.to_bam_bytes(&mut raw).unwrap();
         if tc.draw(gs::booleans()) {

@@ -33,7 +33,7 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{Pos0, RecordStore};
-use seqair::reader::ResolveTid;
+use seqair::reader::{ResolveTid, Tid};
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -171,7 +171,7 @@ struct Record {
     cigar: Vec<(u32, CigarOpType)>,
     seq: Vec<Base>,
     qual: Vec<u8>,
-    next_ref_id: i32,
+    next_ref_id: Option<usize>,
     next_pos: Option<u32>,
     template_len: i32,
     aux: Vec<([u8; 2], Aux)>,
@@ -338,7 +338,7 @@ fn arb_record(tc: &TestCase) -> Record {
             })
             .collect(),
         qual: (0..qlen).map(|_| tc.draw_silent(gs::integers::<u8>().max_value(40))).collect(),
-        next_ref_id: if paired { tid as i32 } else { -1 },
+        next_ref_id: paired.then_some(tid),
         next_pos: paired.then(|| tc.draw_silent(n(0, START_WINDOW))),
         template_len: if paired {
             tc.draw_silent(gs::integers::<i32>().min_value(-500).max_value(500))
@@ -371,7 +371,7 @@ fn write_bam(dir: &Path, records: &[Record]) -> std::path::PathBuf {
             value.write_into(&mut aux, *tag);
         }
         let built = OwnedBamRecord::builder(
-            (rec.tid as u32).resolve_tid(&header).ok(),
+            Some(contig_tid(rec.tid, &header)),
             Some(Pos0::new(rec.pos).unwrap()),
             format!("r{i}").into_bytes(),
         )
@@ -380,7 +380,7 @@ fn write_bam(dir: &Path, records: &[Record]) -> std::path::PathBuf {
         .cigar(rec.cigar.iter().map(|&(len, op)| CigarOp::new(op, len)).collect())
         .seq(rec.seq.clone())
         .qual(rec.qual.iter().copied().map(BaseQuality::from_byte).collect())
-        .next_ref_id(u32::try_from(rec.next_ref_id).ok().and_then(|n| n.resolve_tid(&header).ok()))
+        .next_ref_id(rec.next_ref_id.map(|t| contig_tid(t, &header)))
         .next_pos(rec.next_pos.map(|p| Pos0::new(p).unwrap()))
         .template_len(std::num::NonZeroI32::new(rec.template_len))
         .aux(aux)
@@ -498,7 +498,7 @@ struct Decoded {
     mapq: u8,
     seq: Vec<Base>,
     qual: Vec<u8>,
-    next_ref_id: i32,
+    next_ref_id: Option<usize>,
     template_len: i32,
 }
 
@@ -562,7 +562,7 @@ fn built_records_read_back_through_seqair(tc: TestCase) {
                 mapq: r.mapq,
                 seq: r.seq().to_vec(),
                 qual: BaseQuality::slice_to_bytes(r.qual()).to_vec(),
-                next_ref_id: r.next_ref_id.map_or(-1, |t| i32::try_from(t.as_u32()).unwrap()),
+                next_ref_id: r.next_ref_id.map(Tid::as_usize),
                 template_len: r.template_len.map_or(0, std::num::NonZeroI32::get),
             });
         }
@@ -578,4 +578,9 @@ fn built_records_read_back_through_seqair(tc: TestCase) {
         assert_eq!(got.next_ref_id, rec.next_ref_id, "next_ref_id");
         assert_eq!(got.template_len, rec.template_len, "template_len");
     }
+}
+
+/// The `Tid` of contig `index` (into `CONTIGS`) in the header written for it.
+fn contig_tid(index: usize, header: &BamHeader) -> Tid {
+    u32::try_from(index).unwrap().resolve_tid(header).expect("contig in header")
 }

@@ -306,9 +306,10 @@ fn evict(inner: &mut Inner, budget: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bam::test_util::tid;
 
     fn key(slice_offset: u64) -> SliceKey {
-        SliceKey { container_offset: 0, slice_offset, tid: Tid::new(0).unwrap() }
+        SliceKey { container_offset: 0, slice_offset, tid: tid(0) }
     }
 
     fn slice() -> Result<DecodedSlice, CramError> {

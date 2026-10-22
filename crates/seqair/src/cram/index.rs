@@ -246,6 +246,7 @@ fn parse_crai_line(line: &str) -> Result<CraiEntry, CramError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bam::test_util::tid;
     use hegel::prelude::*;
     use tempfile::tempdir;
 
@@ -272,7 +273,7 @@ mod tests {
 
         // Find a non-unmapped entry to query
         let first = index.entries().iter().find(|e| e.ref_id.is_some()).unwrap();
-        let tid = Tid::new(first.ref_id.unwrap()).unwrap();
+        let tid = tid(first.ref_id.unwrap());
 
         // Query a broad region that should overlap
         let results = index.query(tid, 0, u64::MAX);
@@ -285,8 +286,11 @@ mod tests {
         let crai_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.cram.crai");
         let index = CramIndex::from_path(Path::new(crai_path)).unwrap();
 
-        // Query for a tid that doesn't exist
-        let results = index.query(Tid::new(9999).unwrap(), 0, u64::MAX);
+        // Query for a tid the index has no entry for
+        let absent = (0..16)
+            .find(|&i| index.entries().iter().all(|e| e.ref_id != Some(i)))
+            .expect("test.cram indexes fewer than 16 references");
+        let results = index.query(tid(absent), 0, u64::MAX);
         assert!(results.is_empty(), "should find no entries for non-existent tid");
     }
 
@@ -329,21 +333,21 @@ mod tests {
         ]);
 
         // Query [500, 1500) — entry_start=1000 is within query, should match
-        let results = index.query(Tid::new(0).unwrap(), 500, 1500);
+        let results = index.query(tid(0), 500, 1500);
         assert!(!results.is_empty(), "span=0 entry within range should match");
 
         // Query [1500, 2500) — entry_start=1000 is before query start.
         // With span=0, entry_end=1000 which is before query start, so this
         // would be missed. But the slice actually covers records well past 1000.
         // span=0 means "unknown extent" — the entry MUST be included.
-        let results = index.query(Tid::new(0).unwrap(), 1500, 2500);
+        let results = index.query(tid(0), 1500, 2500);
         assert_eq!(results.len(), 2, "span=0 entry should be included when span is unknown");
 
         // Query [3000, 4000) should match nothing (span=0 entry at 1000 < 4000
         // but it's still included, however the span=500 entry at 2000 ends at 2500 < 3000)
         // Actually span=0 entry has start=1000 < end=4000, so it IS included.
         // Only entries past query end are excluded.
-        let results = index.query(Tid::new(0).unwrap(), 3000, 4000);
+        let results = index.query(tid(0), 3000, 4000);
         assert_eq!(results.len(), 1, "span=0 entry should still match (start < query_end)");
     }
 
@@ -374,7 +378,7 @@ mod tests {
     fn query_matches_a_scan_of_every_entry(tc: TestCase) {
         let index =
             CramIndex::from_entries(tc.draw(gs::vecs(arb_entry()).max_size(40).print_as_debug()));
-        let tid = Tid::new(tc.draw(gs::integers::<u32>().max_value(3))).unwrap();
+        let tid = tid(tc.draw(gs::integers::<u32>().max_value(3)));
         let start = tc.draw(gs::integers::<u64>().max_value(80));
         let end = tc.draw(gs::integers::<u64>().min_value(start).max_value(80));
 
@@ -403,7 +407,7 @@ mod tests {
         let index = CramIndex::from_entries(
             tc.draw(gs::vecs(arb_sized_entry()).max_size(40).print_as_debug()),
         );
-        let tid = Tid::new(tc.draw(gs::integers::<u32>().min_value(0).max_value(2))).unwrap();
+        let tid = tid(tc.draw(gs::integers::<u32>().min_value(0).max_value(2)));
         let start = tc.draw(gs::integers::<u64>().max_value(80));
         let end = tc.draw(gs::integers::<u64>().min_value(start).max_value(80));
         let further = tc.draw(gs::integers::<u64>().min_value(end).max_value(80));
@@ -438,7 +442,7 @@ mod tests {
             slice_size,
         };
         // 1-based 101..=200 and 201..=300, then one of unknown extent at 1001.
-        let t0 = Tid::new(0).unwrap();
+        let t0 = tid(0);
         let index = CramIndex::from_entries(vec![
             entry(101, 100, 1000),
             entry(201, 100, 3000),
@@ -448,7 +452,7 @@ mod tests {
         assert_eq!(index.region_bytes(t0, 150, 249), 500 + 1500, "half of each");
         assert_eq!(index.region_bytes(t0, 0, 999), 4000);
         assert_eq!(index.region_bytes(t0, 5000, 6000), 50, "unknown extent counts whole");
-        assert_eq!(index.region_bytes(Tid::new(1).unwrap(), 0, 6000), 0);
+        assert_eq!(index.region_bytes(tid(1), 0, 6000), 0);
     }
 
     #[test]

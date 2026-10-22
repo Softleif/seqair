@@ -1545,6 +1545,7 @@ fn read_ltf8(cursor: &mut &[u8]) -> Result<u64, CramError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bam::test_util::tid;
     use hegel::prelude::*;
 
     fn load_test_cram() -> Vec<u8> {
@@ -1651,7 +1652,7 @@ mod tests {
             ref_start,
             &bam_header,
             &[],
-            Tid::new(0).unwrap(),
+            tid(0),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
@@ -1686,7 +1687,7 @@ mod tests {
     #[test]
     fn a_slice_reference_the_header_lacks_is_an_error() {
         let header = crate::bam::BamHeader::from_sam_text("@SQ\tSN:c0\tLN:10\n").unwrap();
-        assert_eq!(RefSeqId::Ref(0).resolve(&header).unwrap(), RefSeqId::Ref(Tid::new(0).unwrap()));
+        assert_eq!(RefSeqId::Ref(0).resolve(&header).unwrap(), RefSeqId::Ref(tid(0)));
         assert_eq!(RefSeqId::Unmapped.resolve(&header).unwrap(), RefSeqId::Unmapped);
         assert_eq!(RefSeqId::Multi.resolve(&header).unwrap(), RefSeqId::Multi);
         assert!(matches!(

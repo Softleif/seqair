@@ -477,6 +477,7 @@ mod tests {
     use super::super::record_store::RecordStore;
     use super::*;
     use crate::bam::test_util::ri;
+    use crate::bam::test_util::tid;
     use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
     use std::rc::Rc;
 
@@ -495,7 +496,7 @@ mod tests {
         seq: Vec<Base>,
         qual: Vec<BaseQuality>,
     ) -> RecordStore<()> {
-        let owned = OwnedBamRecord::builder(crate::reader::Tid::new(0), Some(pos), b"r".to_vec())
+        let owned = OwnedBamRecord::builder(Some(tid(0)), Some(pos), b"r".to_vec())
             .flags(BamFlags::empty())
             .cigar(cigar)
             .seq(seq)
