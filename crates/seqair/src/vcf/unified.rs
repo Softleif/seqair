@@ -650,7 +650,7 @@ struct VcfEncoderFields<'a> {
     n_allele: u16,
     n_alt: u16,
     info_count: u16,
-    tid: i32,
+    tid: u32,
     pos_0based: u32,
     rlen: u32,
     n_samples: u32,
@@ -690,11 +690,6 @@ fn begin_vcf_record<'a>(
         target_type: "u16",
     })?;
     let n_alt = n_allele.saturating_sub(1);
-    let tid = i32::try_from(contig.tid()).map_err(|_| VcfError::ValueOverflow {
-        field: "contig_tid",
-        value: u64::from(contig.tid()),
-        target_type: "i32",
-    })?;
     let pos_0based = pos.to_zero_based().as_u32();
     let rlen = u32::try_from(alleles.rlen()).map_err(|_| VcfError::ValueOverflow {
         field: "rlen",
@@ -737,7 +732,7 @@ fn begin_vcf_record<'a>(
         n_allele,
         n_alt,
         info_count: 0,
-        tid,
+        tid: contig.tid(),
         pos_0based,
         rlen,
         n_samples,
@@ -1644,8 +1639,7 @@ fn vcf_emit(vcf: &mut VcfEncoderFields<'_>) -> Result<(), VcfError> {
     let beg = u64::from(vcf.pos_0based);
     let end = beg.saturating_add(u64::from(vcf.rlen));
     vcf.output.write_line(vcf.buf)?;
-    // Non-negative: built from a `u32` contig id.
-    vcf.output.push_index(vcf.tid.cast_unsigned(), beg, end)?;
+    vcf.output.push_index(vcf.tid, beg, end)?;
     Ok(())
 }
 

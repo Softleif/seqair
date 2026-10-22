@@ -242,7 +242,7 @@ pub struct BcfRecordEncoder<'a> {
     pub(crate) n_info: u16,
     pub(crate) n_fmt: u8,
     pub(crate) n_sample: u32,
-    pub(crate) tid: i32,
+    pub(crate) tid: u32,
     pub(crate) pos_0based: i32,
     pub(crate) rlen: i32,
     // Dedup trackers (borrowed from WriterInner for cross-record reuse)
@@ -314,8 +314,7 @@ impl<'a> BcfRecordEncoder<'a> {
         if let Some(ref mut index) = self.index {
             let beg = self.pos_0based as u64;
             let end = beg.saturating_add(self.rlen as u64);
-            // Non-negative: built from a `u32` contig id.
-            index.push(self.tid.cast_unsigned(), beg, end, self.bgzf.index_offset())?;
+            index.push(self.tid, beg, end, self.bgzf.index_offset())?;
         }
 
         Ok(())
@@ -349,11 +348,7 @@ impl Alleles {
         enc.n_fmt = 0;
         // n_sample is set from the header via the struct literal in Writer::begin_record each call.
 
-        enc.tid = i32::try_from(contig.0).map_err(|_| VcfError::ValueOverflow {
-            field: "contig_tid",
-            value: u64::from(contig.0),
-            target_type: "i32",
-        })?;
+        enc.tid = contig.0;
         // r[impl bcf_writer.coordinate_system]
         enc.pos_0based = pos.to_zero_based().as_i32();
         enc.rlen = i32::try_from(self.rlen()).map_err(|_| VcfError::ValueOverflow {
@@ -382,7 +377,12 @@ impl Alleles {
 
         // r[impl bcf_writer.fixed_fields]
         // 24-byte fixed header (n_info/n_allele and n_fmt/n_sample patched at emit)
-        enc.shared_buf.extend_from_slice(&enc.tid.to_le_bytes());
+        let chrom = i32::try_from(enc.tid).map_err(|_| VcfError::ValueOverflow {
+            field: "contig_tid",
+            value: u64::from(enc.tid),
+            target_type: "i32",
+        })?;
+        enc.shared_buf.extend_from_slice(&chrom.to_le_bytes());
         enc.shared_buf.extend_from_slice(&enc.pos_0based.to_le_bytes());
         enc.shared_buf.extend_from_slice(&enc.rlen.to_le_bytes());
         enc.shared_buf.extend_from_slice(&qual_bits.to_le_bytes());
