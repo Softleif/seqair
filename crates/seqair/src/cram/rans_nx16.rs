@@ -570,6 +570,8 @@ fn decode_o1_packed<S: Simd>(
     let mut ctx = [0u8; N];
     let mut i = 0usize;
     let mut tile = [[0u8; N]; TILE];
+    let flat: &[u32; ALPHABET_SIZE * ROW] =
+        table.as_flattened().try_into().map_err(|_| truncated())?;
 
     if states.iter().all(|&x| x >= 1 << 15) {
         while i < chunk && bytes.len().saturating_sub(pos) >= vector_headroom(N) {
@@ -577,8 +579,11 @@ fn decode_o1_packed<S: Simd>(
             // The previous step's row holds each state's context; the
             // tile starts zeroed, so step 0 reads context 0 from row 31.
             let (row, prev) = (i % TILE, (i + TILE - 1) % TILE);
+            // One flat table indexed in 32 bits (context · ROW + slot < 2^20), so the
+            // lookups compile to 32-bit-index gathers.
             for (j, (s, &x)) in slots.iter_mut().zip(states.iter()).enumerate() {
-                *s = table[usize::from(tile[prev][j])][(x & mask) as usize];
+                let k = u32::from(tile[prev][j]) << ORDER_0_BITS | (x & mask);
+                *s = flat[k as usize];
                 tile[row][j] = *s as u8;
             }
             pos = step_renorm(simd, states, &slots, bits, bytes, pos).ok_or_else(truncated)?;
