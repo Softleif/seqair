@@ -14,7 +14,7 @@
 
 use super::codec_io::{self, Uint7Error};
 use super::reader::CramError;
-use fearless_simd::{Level, dispatch, prelude::*, u8x16, u32x4};
+use fearless_simd::{Level, dispatch, prelude::*, u8x16, u8x32, u32x4, u32x8};
 use fearless_simd_macros::simd;
 
 /// Bridge `Uint7Error` (narrow, hot-path-friendly) to the rich `CramError`.
@@ -379,9 +379,94 @@ fn renorm4<S: Simd>(simd: S, x: u32x4<S>, window: &[u8; 16]) -> (u32x4<S>, usize
     (low.select((x << 16) | (norm & 0xFFFF), x), 2 * m.count_ones() as usize)
 }
 
-/// Bytes the vector loop must have left before a step: at most 2 per lane,
-/// plus the 16-byte window of the last group, which starts at most
-/// `2·(n − 4)` bytes in.
+/// For each 8-bit "lane needs a renorm" mask, the byte shuffle that moves the
+/// next u16s of the stream into the low halves of exactly those lanes, in lane
+/// order, as [`RENORM_SHUFFLE`] does for four lanes. The 16-byte window is in
+/// both 128-bit blocks, so a shuffle within blocks reaches all of it.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "const table build, m < 256, lane < 8, k < 8"
+)]
+const RENORM_SHUFFLE8: [[u8; 32]; 256] = {
+    let mut t = [[0x80u8; 32]; 256];
+    let mut m = 0;
+    while m < 256 {
+        let mut k = 0u8;
+        let mut lane = 0;
+        while lane < 8 {
+            if m & (1 << lane) != 0 {
+                t[m][lane * 4] = 2 * k;
+                t[m][lane * 4 + 1] = 2 * k + 1;
+                k += 1;
+            }
+            lane += 1;
+        }
+        m += 1;
+    }
+    t
+};
+
+/// [`renorm4`] for eight states at once. `window` is the next 16 bytes.
+#[inline(always)]
+#[allow(clippy::indexing_slicing, reason = "the bitmask of 8 lanes is < 256")]
+#[allow(clippy::cast_possible_truncation, reason = "the bitmask of 8 lanes is < 256")]
+#[allow(clippy::arithmetic_side_effects, reason = "count_ones ≤ 8")]
+fn renorm8<S: Simd>(simd: S, x: u32x8<S>, window: &[u8; 16]) -> (u32x8<S>, usize) {
+    let low = x.simd_lt(u32x8::splat(simd, 1 << 15));
+    let m = (low.to_bitmask() & 0xFF) as usize;
+    let raw = u8x16::from_slice(simd, window);
+    let norm: u32x8<S> = raw
+        .combine(raw)
+        .swizzle_dyn_within_blocks(u8x32::from_slice(simd, &RENORM_SHUFFLE8[m]))
+        .bitcast();
+    (low.select((x << 16) | (norm & 0xFFFF), x), 2 * m.count_ones() as usize)
+}
+
+/// The packed state step and renorm for `N` states (a multiple of 4), eight
+/// lanes at a time where the level's native vectors hold at least eight (one
+/// shuffle per eight states), else four (with SSE2, a 32-byte shuffle has no
+/// single instruction). Returns the new stream position, or `None` if the
+/// window runs out.
+#[inline(always)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "vector lanes wrap, as state_step's do; pos stays within the caller's headroom"
+)]
+fn step_renorm<S: Simd, const N: usize>(
+    simd: S,
+    states: &mut [u32; N],
+    slots: &[u32; N],
+    bits: u32,
+    bytes: &[u8],
+    mut pos: usize,
+) -> Option<usize> {
+    macro_rules! steps {
+        ($lanes:literal, $u32s:ident, $window:literal, $renorm:ident) => {
+            for (xs, ss) in
+                states.as_chunks_mut::<$lanes>().0.iter_mut().zip(slots.as_chunks::<$lanes>().0)
+            {
+                let x = $u32s::from_slice(simd, xs);
+                let s = $u32s::from_slice(simd, ss);
+                let x = ((s >> PACK_F_SHIFT) + 1) * (x >> bits) + ((s >> 8) & PACK_BIAS_MASK);
+                let window = bytes.get(pos..)?.first_chunk::<$window>()?;
+                let (x, used) = $renorm(simd, x, window);
+                pos += used;
+                x.store_slice(xs);
+            }
+        };
+    }
+    if S::u32s::LEN >= 8 && N.is_multiple_of(8) {
+        steps!(8, u32x8, 16, renorm8);
+    } else {
+        steps!(4, u32x4, 16, renorm4);
+    }
+    Some(pos)
+}
+
+/// Bytes the vector loop must have left before a step: the last group of `l`
+/// lanes starts at most `2·(n − l)` bytes in and reads a window of
+/// `max(16, 2·l)` bytes, so at most `2·n + 16`.
 #[allow(clippy::arithmetic_side_effects, reason = "n ≤ 32")]
 const fn vector_headroom(n: usize) -> usize {
     2 * n + 16
@@ -423,18 +508,8 @@ fn decode_o0_packed<S: Simd, const N: usize>(
                 *s = table[(x & 0xFFF) as usize];
                 *d = *s as u8;
             }
-            for (x4, s4) in states.as_chunks_mut::<4>().0.iter_mut().zip(slots.as_chunks::<4>().0) {
-                let x = u32x4::from_slice(simd, x4);
-                let s = u32x4::from_slice(simd, s4);
-                let x =
-                    ((s >> PACK_F_SHIFT) + 1) * (x >> ORDER_0_BITS) + ((s >> 8) & PACK_BIAS_MASK);
-                let Some(window) = bytes.get(pos..).and_then(|w| w.first_chunk::<16>()) else {
-                    return Err(truncated());
-                };
-                let (x, used) = renorm4(simd, x, window);
-                pos += used;
-                x.store_slice(x4);
-            }
+            pos = step_renorm(simd, states, &slots, ORDER_0_BITS, bytes, pos)
+                .ok_or_else(truncated)?;
         }
     }
 
@@ -506,17 +581,7 @@ fn decode_o1_packed<S: Simd>(
                 *s = table[usize::from(tile[prev][j])][(x & mask) as usize];
                 tile[row][j] = *s as u8;
             }
-            for (x4, s4) in states.as_chunks_mut::<4>().0.iter_mut().zip(slots.as_chunks::<4>().0) {
-                let x = u32x4::from_slice(simd, x4);
-                let s = u32x4::from_slice(simd, s4);
-                let x = ((s >> PACK_F_SHIFT) + 1) * (x >> bits) + ((s >> 8) & PACK_BIAS_MASK);
-                let Some(window) = bytes.get(pos..).and_then(|w| w.first_chunk::<16>()) else {
-                    return Err(truncated());
-                };
-                let (x, used) = renorm4(simd, x, window);
-                pos += used;
-                x.store_slice(x4);
-            }
+            pos = step_renorm(simd, states, &slots, bits, bytes, pos).ok_or_else(truncated)?;
             i += 1;
             if i.is_multiple_of(TILE) {
                 flush_tile(simd, &tile, dst, chunk, i - TILE);
@@ -777,7 +842,7 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
 
 /// Frequency tables that pack take the packed kernels; the rest re-read the
 /// table from the start through the unpacked paths.
-// r[impl cram.codec.simd_dispatch+3]
+// r[impl cram.codec.simd_dispatch+4]
 fn decode_order_0_at(
     level: Level,
     src: &mut &[u8],
@@ -1055,7 +1120,7 @@ fn decode_order_1_with_buf(
 /// alphabet — and takes the packed kernels if all of them pack; otherwise
 /// the unpacked scalar path, with the inactive rows zeroed so a reused
 /// buffer's earlier blocks cannot leak into this one.
-// r[impl cram.codec.simd_dispatch+3]
+// r[impl cram.codec.simd_dispatch+4]
 fn decode_order_1_at(
     level: Level,
     src: &mut &[u8],
@@ -2306,7 +2371,7 @@ mod tests {
         assert_eq!(simd_result, scalar_dst);
     }
 
-    // r[verify cram.codec.simd_dispatch+3]
+    // r[verify cram.codec.simd_dispatch+4]
     // r[verify io.simd_portable]
     /// Every level against the generic scalar decoder, including a partial
     /// last chunk: two symbols at 2048 each, so each state's low 12 bits pick
@@ -2545,7 +2610,7 @@ mod tests {
         syms
     }
 
-    // r[verify cram.codec.simd_dispatch+3]
+    // r[verify cram.codec.simd_dispatch+4]
     // r[verify io.simd_portable]
     /// Order-0, 4 and 32 states: the packed decoders — at every SIMD level,
     /// and the scalar packed kernel at 32 states too — against the unpacked
@@ -2635,7 +2700,7 @@ mod tests {
         decode_order_1_unpacked(src, dst, n, &mut t, bits)
     }
 
-    // r[verify cram.codec.simd_dispatch+3]
+    // r[verify cram.codec.simd_dispatch+4]
     // r[verify cram.codec.rans_nx16_o1_tile]
     // r[verify io.simd_portable]
     /// Order-1, 4 and 32 states, 10 and 12 bits: the packed decoders at every
