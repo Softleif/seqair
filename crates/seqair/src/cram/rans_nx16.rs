@@ -14,7 +14,7 @@
 
 use super::codec_io::{self, Uint7Error};
 use super::reader::CramError;
-use fearless_simd::{Level, dispatch, prelude::*, u8x16, u8x32, u32x4, u32x8};
+use fearless_simd::{Level, dispatch, prelude::*, u8x16, u8x32, u16x16, u32x4, u32x8, u32x16};
 use fearless_simd_macros::simd;
 
 /// Bridge `Uint7Error` (narrow, hot-path-friendly) to the rich `CramError`.
@@ -423,11 +423,31 @@ fn renorm8<S: Simd>(simd: S, x: u32x8<S>, window: &[u8; 16]) -> (u32x8<S>, usize
     (low.select((x << 16) | (norm & 0xFFFF), x), 2 * m.count_ones() as usize)
 }
 
-/// The packed state step and renorm for `N` states (a multiple of 4), eight
-/// lanes at a time where the level's native vectors hold at least eight (one
-/// shuffle per eight states), else four (with SSE2, a 32-byte shuffle has no
-/// single instruction). Returns the new stream position, or `None` if the
-/// window runs out.
+/// [`renorm8`] for sixteen states at once, the way htscodecs' AVX-512
+/// decoder does it (`rANS_static32x16pr_avx512.c`): zero-extend the next
+/// sixteen u16s of the stream and expand them, in order, into the lanes below
+/// `1 << 15` (`vpexpandd` on AVX-512), so no shuffle table is needed.
+/// `window` is the next 32 bytes. Only runs at the AVX-512 level, so the u16
+/// view of `window` is little-endian.
+#[inline(always)]
+#[allow(clippy::cast_possible_truncation, reason = "count_ones of 16 lanes ≤ 16")]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "count_ones ≤ 16; renormalized lanes are < 2^15, so x << 16 fits"
+)]
+fn renorm16<S: Simd>(simd: S, x: u32x16<S>, window: &[u8; 32]) -> (u32x16<S>, usize) {
+    let low = x.simd_lt(u32x16::splat(simd, 1 << 15));
+    let words: u16x16<S> = u8x32::from_slice(simd, window).bitcast();
+    let (a, b) = words.widen();
+    let fresh = a.combine(b).expand(low);
+    (low.select(x << 16, x) + fresh, 2 * low.to_bitmask().count_ones() as usize)
+}
+
+/// The packed state step and renorm for `N` states (a multiple of 4), as many
+/// lanes at a time as the level's native vectors hold: sixteen with AVX-512,
+/// eight with AVX2 (one shuffle per group either way), else four (with SSE2, a
+/// 32-byte shuffle has no single instruction). Returns the new stream
+/// position, or `None` if the window runs out.
 #[inline(always)]
 #[allow(
     clippy::arithmetic_side_effects,
@@ -456,7 +476,9 @@ fn step_renorm<S: Simd, const N: usize>(
             }
         };
     }
-    if S::u32s::LEN >= 8 && N.is_multiple_of(8) {
+    if S::u32s::LEN >= 16 && N.is_multiple_of(16) {
+        steps!(16, u32x16, 32, renorm16);
+    } else if S::u32s::LEN >= 8 && N.is_multiple_of(8) {
         steps!(8, u32x8, 16, renorm8);
     } else {
         steps!(4, u32x4, 16, renorm4);
@@ -504,9 +526,25 @@ fn decode_o0_packed<S: Simd, const N: usize>(
         while bytes.len().saturating_sub(pos) >= vector_headroom(N) {
             let Some(chunk) = chunks.next() else { break };
             let mut slots = [0u32; N];
-            for ((d, s), &x) in chunk.iter_mut().zip(&mut slots).zip(states.iter()) {
-                *s = table[(x & 0xFFF) as usize];
-                *d = *s as u8;
+            if S::u32s::LEN >= 16 && N.is_multiple_of(16) {
+                // Read the states back in the same 16-lane pieces `step_renorm`
+                // stored them in. Left to itself LLVM reloads them with a load
+                // that straddles both stores, which cannot forward and stalls
+                // every step (about 20% of the 16-lane loop's time).
+                let mut idx = [0u32; N];
+                for (c, s) in idx.as_chunks_mut::<16>().0.iter_mut().zip(states.as_chunks::<16>().0)
+                {
+                    (u32x16::from_slice(simd, s) & 0xFFF).store_slice(c);
+                }
+                for ((d, s), &k) in chunk.iter_mut().zip(&mut slots).zip(idx.iter()) {
+                    *s = table[k as usize];
+                    *d = *s as u8;
+                }
+            } else {
+                for ((d, s), &x) in chunk.iter_mut().zip(&mut slots).zip(states.iter()) {
+                    *s = table[(x & 0xFFF) as usize];
+                    *d = *s as u8;
+                }
             }
             pos = step_renorm(simd, states, &slots, ORDER_0_BITS, bytes, pos)
                 .ok_or_else(truncated)?;
