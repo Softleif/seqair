@@ -9,13 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
-- **rANS Nx16 32-state decoding is about 2× faster on AVX-512 CPUs** (1.8× order 0, 2.05× order 1,
-  generic x86-64 build) **and 1.2× on AVX2 ones** (1.3–1.6× in builds for the host CPU, where LLVM
-  gathers the table lookups), the codec samtools writes CRAM 3.1 quality scores with. The kernels step eight states at a time
-  on AVX2 and sixteen on AVX-512, where the renormalization zero-extends the next sixteen u16s
-  and expands them into the lanes that need one (htscodecs' AVX-512 technique); order 1 indexes
-  its table in 32 bits so the loads gather eight lanes at a time. SSE2, SSE4.2 and NEON keep the
-  4-lane kernels. Output is unchanged.
+- **rANS Nx16 32-state decoding, which samtools uses for CRAM 3.1 quality scores, is faster on
+  AVX2 and AVX-512 CPUs.** The kernels step eight states at a time on AVX2 and sixteen on
+  AVX-512, where the renormalization zero-extends the next sixteen u16s and expands them into the
+  lanes that need one (htscodecs' AVX-512 technique); there order 1 indexes its table in 32 bits
+  so the loads gather eight lanes at a time. SSE2, SSE4.2 and NEON keep the 4-lane kernels.
+  Output is unchanged.
 
 ## v0.7.0 (2026-10-22)
 

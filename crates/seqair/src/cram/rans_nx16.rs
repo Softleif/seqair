@@ -53,7 +53,7 @@ pub(crate) struct Nx16Order1Buf {
 
 struct Order1Tables {
     frequencies: Frequencies1,
-    packed: Box<[PackedRow; ALPHABET_SIZE]>,
+    packed: Box<PackedRows>,
     /// The unpacked path's tables, for frequency tables that do not pack.
     cumulative_frequencies: CumulativeFrequencies1,
     sym_tables: SymTables1,
@@ -74,7 +74,7 @@ impl Order1Tables {
     fn new() -> Self {
         Self {
             frequencies: zeroed_box([0; ALPHABET_SIZE]),
-            packed: zeroed_box([0; ROW]),
+            packed: zeroed_box(0),
             cumulative_frequencies: zeroed_box([0; ALPHABET_SIZE]),
             sym_tables: zeroed_box([0; 4096]),
             states: Vec::with_capacity(32),
@@ -286,6 +286,15 @@ const PACK_BIAS_MASK: u32 = 0xFFF;
 /// Slots per packed row: the table width at the largest allowed `bits` (12).
 pub(crate) const ROW: usize = 1 << ORDER_0_BITS;
 pub(crate) type PackedRow = [u32; ROW];
+/// The order-1 packed table: one [`PackedRow`] per context, flat, so a slot
+/// is one index ([`o1_slot`]) into an array whose length the compiler knows.
+type PackedRows = [u32; ALPHABET_SIZE * ROW];
+
+/// Context `ctx`'s slot for state `x` in [`PackedRows`]: below `2^20`.
+#[inline(always)]
+fn o1_slot(ctx: u8, x: u32, mask: u32) -> usize {
+    usize::from(ctx) << ORDER_0_BITS | (x & mask) as usize
+}
 
 /// Pack one context's frequencies into `row[..1 << bits]`. False unless the
 /// frequencies sum to exactly `1 << bits`; `row` is then partly written and
@@ -427,8 +436,8 @@ fn renorm8<S: Simd>(simd: S, x: u32x8<S>, window: &[u8; 16]) -> (u32x8<S>, usize
 /// decoder does it (`rANS_static32x16pr_avx512.c`): zero-extend the next
 /// sixteen u16s of the stream and expand them, in order, into the lanes below
 /// `1 << 15` (`vpexpandd` on AVX-512), so no shuffle table is needed.
-/// `window` is the next 32 bytes. Only runs at the AVX-512 level, so the u16
-/// view of `window` is little-endian.
+/// `window` is the next 32 bytes, read as little-endian u16s, so it runs only
+/// where [`sixteen_lanes`] holds.
 #[inline(always)]
 #[allow(clippy::cast_possible_truncation, reason = "count_ones of 16 lanes ≤ 16")]
 #[allow(
@@ -441,6 +450,14 @@ fn renorm16<S: Simd>(simd: S, x: u32x16<S>, window: &[u8; 32]) -> (u32x16<S>, us
     let (a, b) = words.widen();
     let fresh = a.combine(b).expand(low);
     (low.select(x << 16, x) + fresh, 2 * low.to_bitmask().count_ones() as usize)
+}
+
+/// Whether [`step_renorm`] steps sixteen states at a time: where the level's
+/// vectors hold sixteen u32s (AVX-512) and [`renorm16`]'s u16 view of the
+/// stream is little-endian.
+#[inline(always)]
+fn sixteen_lanes<S: Simd, const N: usize>() -> bool {
+    S::u32s::LEN >= 16 && N.is_multiple_of(16) && cfg!(target_endian = "little")
 }
 
 /// The packed state step and renorm for `N` states (a multiple of 4), as many
@@ -476,7 +493,7 @@ fn step_renorm<S: Simd, const N: usize>(
             }
         };
     }
-    if S::u32s::LEN >= 16 && N.is_multiple_of(16) {
+    if sixteen_lanes::<S, N>() {
         steps!(16, u32x16, 32, renorm16);
     } else if S::u32s::LEN >= 8 && N.is_multiple_of(8) {
         steps!(8, u32x8, 16, renorm8);
@@ -526,7 +543,7 @@ fn decode_o0_packed<S: Simd, const N: usize>(
         while bytes.len().saturating_sub(pos) >= vector_headroom(N) {
             let Some(chunk) = chunks.next() else { break };
             let mut slots = [0u32; N];
-            if S::u32s::LEN >= 16 && N.is_multiple_of(16) {
+            if sixteen_lanes::<S, N>() {
                 // Read the states back in the same 16-lane pieces `step_renorm`
                 // stored them in. Left to itself LLVM reloads them with a load
                 // that straddles both stores, which cannot forward and stalls
@@ -583,7 +600,7 @@ fn decode_o0_packed<S: Simd, const N: usize>(
 #[simd]
 #[allow(
     clippy::indexing_slicing,
-    reason = "ctx: u8 < 256 rows, x & mask ≤ 0xFFF < ROW; j·chunk + i < 32·chunk ≤ dst.len(); \
+    reason = "o1_slot < 256·ROW indexes the table; j·chunk + i < 32·chunk ≤ dst.len(); \
               i % TILE < 32 and j < 32 index the tile"
 )]
 #[allow(clippy::cast_possible_truncation, reason = "the low byte of a slot is its symbol")]
@@ -595,7 +612,7 @@ fn decode_o1_packed<S: Simd>(
     simd: S,
     src: &mut &[u8],
     dst: &mut [u8],
-    table: &[PackedRow; ALPHABET_SIZE],
+    table: &PackedRows,
     bits: u32,
     states: &mut [u32; 32],
 ) -> Result<(), CramError> {
@@ -608,8 +625,6 @@ fn decode_o1_packed<S: Simd>(
     let mut ctx = [0u8; N];
     let mut i = 0usize;
     let mut tile = [[0u8; N]; TILE];
-    let flat: &[u32; ALPHABET_SIZE * ROW] =
-        table.as_flattened().try_into().map_err(|_| truncated())?;
 
     if states.iter().all(|&x| x >= 1 << 15) {
         while i < chunk && bytes.len().saturating_sub(pos) >= vector_headroom(N) {
@@ -617,11 +632,17 @@ fn decode_o1_packed<S: Simd>(
             // The previous step's row holds each state's context; the
             // tile starts zeroed, so step 0 reads context 0 from row 31.
             let (row, prev) = (i % TILE, (i + TILE - 1) % TILE);
-            // One flat table indexed in 32 bits (context · ROW + slot < 2^20), so the
-            // lookups compile to 32-bit-index gathers.
             for (j, (s, &x)) in slots.iter_mut().zip(states.iter()).enumerate() {
-                let k = u32::from(tile[prev][j]) << ORDER_0_BITS | (x & mask);
-                *s = flat[k as usize];
+                let k = if S::u32s::LEN >= 8 {
+                    // Computed in 32 bits so the lookups gather eight lanes at a
+                    // time (vpgatherdd, not vpgatherqd). With 4-lane vectors
+                    // LLVM vectorizes this sum and moves each lane back out
+                    // for its load, which made NEON order 1 up to 4% slower.
+                    (u32::from(tile[prev][j]) << ORDER_0_BITS | (x & mask)) as usize
+                } else {
+                    o1_slot(tile[prev][j], x, mask)
+                };
+                *s = table[k];
                 tile[row][j] = *s as u8;
             }
             pos = step_renorm(simd, states, &slots, bits, bytes, pos).ok_or_else(truncated)?;
@@ -637,7 +658,7 @@ fn decode_o1_packed<S: Simd>(
     let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
     for i in i..chunk {
         for (j, (c, x)) in ctx.iter_mut().zip(states.iter_mut()).enumerate() {
-            let slot = table[usize::from(*c)][(*x & mask) as usize];
+            let slot = table[o1_slot(*c, *x, mask)];
             *c = slot as u8;
             dst[j * chunk + i] = *c;
             *x = state_renormalize(packed_step(*x, slot, bits), &mut rest).ok_or_else(truncated)?;
@@ -647,7 +668,7 @@ fn decode_o1_packed<S: Simd>(
         return Err(truncated());
     };
     for d in &mut dst[chunk * N..] {
-        let slot = table[usize::from(*c)][(*x & mask) as usize];
+        let slot = table[o1_slot(*c, *x, mask)];
         *c = slot as u8;
         *d = *c;
         *x = state_renormalize(packed_step(*x, slot, bits), &mut rest).ok_or_else(truncated)?;
@@ -776,14 +797,14 @@ fn decode_o0_packed_scalar<const N: usize>(
 /// [`decode_o1_packed`] without vectors; see [`decode_o0_packed_scalar`].
 #[allow(
     clippy::indexing_slicing,
-    reason = "ctx: u8 < 256 rows, x & mask ≤ 0xFFF < ROW; j·chunk + i < N·chunk ≤ dst.len()"
+    reason = "o1_slot < 256·ROW indexes the table; j·chunk + i < N·chunk ≤ dst.len()"
 )]
 #[allow(clippy::cast_possible_truncation, reason = "the low byte of a slot is its symbol")]
 #[allow(clippy::arithmetic_side_effects, reason = "j·chunk + i < dst.len()")]
 fn decode_o1_packed_scalar<const N: usize>(
     src: &mut &[u8],
     dst: &mut [u8],
-    table: &[PackedRow; ALPHABET_SIZE],
+    table: &PackedRows,
     bits: u32,
     states: &mut [u32; N],
 ) -> Result<(), CramError> {
@@ -798,7 +819,7 @@ fn decode_o1_packed_scalar<const N: usize>(
     if states.iter().all(|&x| x >= 1 << 15) {
         while i < chunk && bytes.len().saturating_sub(pos) >= 2 * N {
             for (j, (c, x)) in ctx.iter_mut().zip(states.iter_mut()).enumerate() {
-                let slot = table[usize::from(*c)][(*x & mask) as usize];
+                let slot = table[o1_slot(*c, *x, mask)];
                 *c = slot as u8;
                 dst[j * chunk + i] = *c;
                 *x = renorm_branchless(packed_step(*x, slot, bits), bytes, &mut pos);
@@ -810,7 +831,7 @@ fn decode_o1_packed_scalar<const N: usize>(
     let mut rest = bytes.get(pos..).ok_or_else(truncated)?;
     for i in i..chunk {
         for (j, (c, x)) in ctx.iter_mut().zip(states.iter_mut()).enumerate() {
-            let slot = table[usize::from(*c)][(*x & mask) as usize];
+            let slot = table[o1_slot(*c, *x, mask)];
             *c = slot as u8;
             dst[j * chunk + i] = *c;
             *x = state_renormalize(packed_step(*x, slot, bits), &mut rest).ok_or_else(truncated)?;
@@ -820,7 +841,7 @@ fn decode_o1_packed_scalar<const N: usize>(
         return Err(truncated());
     };
     for d in &mut dst[chunk * N..] {
-        let slot = table[usize::from(*c)][(*x & mask) as usize];
+        let slot = table[o1_slot(*c, *x, mask)];
         *c = slot as u8;
         *d = *c;
         *x = state_renormalize(packed_step(*x, slot, bits), &mut rest).ok_or_else(truncated)?;
@@ -1178,7 +1199,7 @@ fn decode_order_1_at(
         && alphabet
             .iter()
             .zip(buf.frequencies.iter())
-            .zip(buf.packed.iter_mut())
+            .zip(buf.packed.as_chunks_mut::<ROW>().0)
             .filter(|((active, _), _)| **active)
             .all(|((_, freqs), row)| pack_row(freqs.iter().copied(), bits, row));
     if packs {
@@ -2790,7 +2811,7 @@ mod tests {
                 && alphabet
                     .iter()
                     .zip(t.frequencies.iter())
-                    .zip(t.packed.iter_mut())
+                    .zip(t.packed.as_chunks_mut::<ROW>().0)
                     .filter(|((a, _), _)| **a)
                     .all(|((_, f), row)| pack_row(f.iter().copied(), bits, row));
             if packs {
@@ -2829,6 +2850,60 @@ mod tests {
             if r1.is_ok() {
                 assert_eq!(got, want);
             }
+        }
+    }
+
+    /// Sixteen states through `renorm16`, and through `renorm8` twice, at
+    /// `xs` and the stream `window`, against four chained `renorm4` calls.
+    #[inline(always)]
+    fn check_wide_renorms<S: Simd>(simd: S, xs: [u32; 16], window: &[u8; 48]) {
+        let mut want = xs;
+        let mut pos = 0;
+        for c in want.as_chunks_mut::<4>().0 {
+            let w = window.get(pos..).and_then(|w| w.first_chunk::<16>()).unwrap();
+            let (x, used) = renorm4(simd, u32x4::from_slice(simd, c), w);
+            x.store_slice(c);
+            pos += used;
+        }
+
+        let mut got8 = xs;
+        let mut pos8 = 0;
+        for c in got8.as_chunks_mut::<8>().0 {
+            let w = window.get(pos8..).and_then(|w| w.first_chunk::<16>()).unwrap();
+            let (x, used) = renorm8(simd, u32x8::from_slice(simd, c), w);
+            x.store_slice(c);
+            pos8 += used;
+        }
+        assert_eq!((got8, pos8), (want, pos), "renorm8");
+
+        let (x, used) =
+            renorm16(simd, u32x16::from_slice(simd, &xs), window.first_chunk().unwrap());
+        let mut got16 = [0u32; 16];
+        x.store_slice(&mut got16);
+        assert_eq!((got16, used), (want, pos), "renorm16");
+    }
+
+    // r[verify cram.codec.simd_dispatch+4]
+    // r[verify io.simd_portable]
+    /// The 8- and 16-lane renormalizations at every level — emulated where
+    /// the level's vectors are narrower, so they are checked on every CPU,
+    /// not only where the kernels take them.
+    #[hegel::test]
+    fn wide_renorms_match_renorm4(tc: TestCase) {
+        let mut xs = [0u32; 16];
+        for x in &mut xs {
+            *x = if tc.draw(gs::booleans()) {
+                tc.draw(gs::integers::<u32>().max_value((1 << 15) - 1))
+            } else {
+                tc.draw(gs::integers::<u32>().min_value(1 << 15))
+            };
+        }
+        let mut window = [0u8; 48];
+        for b in &mut window {
+            *b = tc.draw(gs::integers::<u8>());
+        }
+        for level in crate::simd_levels::levels() {
+            dispatch!(level, simd => check_wide_renorms(simd, xs, &window));
         }
     }
 }
