@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lanes that need one (htscodecs' AVX-512 technique); there order 1 indexes its table in 32 bits
   so the loads gather eight lanes at a time. SSE2, SSE4.2 and NEON keep the 4-lane kernels.
   Output is unchanged.
+- **rANS Nx16 32-state decoding is faster on NEON.** The 4-lane kernels count renormalization
+  bytes from a table, look up and step sixteen states at a time and narrow the symbols in vectors;
+  order 1 computes each state's next table slot in vectors as it renormalizes (htscodecs'
+  approach). At every level, order-1 table rows sit `1 << bits` apart instead of 16 KiB, so they
+  no longer share L1 sets.
 
 ## v0.7.0 (2026-10-22)
 
