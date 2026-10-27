@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`FormatKey<OptArr<f32>>`** (`FormatFloatOpts`) and `FormatEncoder::format_float_opts`: a float FORMAT array whose elements may be `None`, written as the BCF float missing value (`.` in VCF text). `encode_single_sample` takes `&[Option<f32>]`; reserved bit patterns in concrete elements are still rejected. The FORMAT counterpart of `InfoIntOpts`.
 
+### Fixed
+
+- **SAM and CRAM read names longer than 254 bytes are rejected** with `DecodeError::QnameTooLong`. `RecordStore::push_fields` stored the length as a `u16` without checking it, so a longer name came back truncated (one of 65,536 bytes came back empty). BAM's `l_read_name` caps names at 254 bytes, and htslib 1.24 enforces the same limit in its CRAM reader.
+- **CRAM Huffman encodings with 1,000,000 or more alphabet symbols or bit lengths are rejected** with `CramError::HuffmanCountExceedsLimit`, as in htslib 1.25. A malformed compression header could otherwise make the parser reserve up to 256 MiB from a few bytes.
+- **`U` in SAM SEQ reads as `T`**, not `N` (via seqair-types; htslib has done this since 1.22).
+
 ### Breaking
 
 - **seqair-types 0.4.0**, whose `Strand` has no `Unknown` (see its changelog).

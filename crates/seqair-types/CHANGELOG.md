@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`Base::from(u8)`, `Base::from(&str)` and the ASCII batch converters (`from_ascii_vec` and friends) map `U`/`u` to `T`**, so RNA sequences no longer decode as `Unknown`. This matches htslib's SAM parser. `FromStr` still accepts only A/C/G/T/N.
 - `smallvec` (re-exported as `SmallVec`) now requires `2.0.0-beta.3`, up from `2.0.0-alpha.12`.
 
 ## v0.3.1 (2026-09-25)
