@@ -251,6 +251,9 @@ Encoding ID 3 (HUFFMAN): canonical Huffman coding. Parameters: alphabet (itf8 ar
 
 Canonical Huffman construction: sort by (bit_length, symbol_value), assign codes starting from 0 with incrementing and left-shifting when bit length increases. A single-symbol Huffman code has bit length 0 and consumes 0 bits from the stream — this is common for fields where all records have the same value (e.g., all flags identical).
 
+r[cram.encoding.huffman_limit]
+A Huffman alphabet count or bit-length count of 1,000,000 or more MUST be rejected at parse time, before anything is allocated, as htslib 1.25 does (`ncodes >= 1000000`). This is tighter than the general allocation limit of `r[io.fuzz.alloc_limits]`, which would admit tens of millions of entries from a few bytes.
+
 r[cram.encoding.byte_array_len]
 Encoding ID 4 (BYTE_ARRAY_LEN): a length encoding followed by a value encoding. The length is decoded first (from any encoding), then that many bytes are decoded using the value encoding.
 
