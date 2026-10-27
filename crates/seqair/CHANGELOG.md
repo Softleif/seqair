@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 
 - **MAPQ is a `seqair_types::MappingQuality`**, not a `u8`: `SlimRecord::mapq`, `FilterRawFields::mapq`, `PileupAlignment::mapq`, `OwnedBamRecord::mapq`, `OwnedBamRecordBuilder::mapq` and the `mapq` argument of `RecordStore::push_fields`. 255 ("not available", `[SAM1] §1.4`) reads as `get() == None` instead of the most confident MAPQ there is. There is no `Ord`; a minimum-MAPQ filter spells out what unavailable does, e.g. `mapq.get().is_none_or(|q| q >= min)` for the samtools `-q` convention (255 passes). Wrap a literal with `MappingQuality::from_byte`, write the wire byte with `as_byte()`.
+- **`Modification::probability` is a `seqair_types::ModProbability`**, not a `u8`: the `ML` byte `x` is the range `[x/256, (x+1)/256)`, not a 0–255 probability. `as_byte()` gives the byte back, `midpoint()` the probability `(x + 0.5) / 256`; it is `Ord` by the byte.
 
 ## v0.7.0 (2026-10-22)
 

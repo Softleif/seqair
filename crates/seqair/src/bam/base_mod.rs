@@ -10,7 +10,7 @@
 
 use fearless_simd::{Level, dispatch, prelude::*};
 use fearless_simd_macros::simd;
-use seqair_types::{Base, QPos};
+use seqair_types::{Base, ModProbability, QPos};
 use thiserror::Error;
 
 use super::aux::{AuxValue, GetAuxError, find_tag};
@@ -51,11 +51,12 @@ pub enum ModMode {
 }
 
 // r[impl base_mod.modification_struct]
+// r[impl types.mod_probability.field_type]
 /// A single modification call on a single base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Modification {
     pub mod_type: ModType,
-    pub probability: u8,
+    pub probability: ModProbability,
     pub canonical_base: Base,
     pub strand: ModStrand,
 }
@@ -486,7 +487,7 @@ fn resolve_and_emit(
                 qp,
                 Modification {
                     mod_type: *mt,
-                    probability: *prob,
+                    probability: ModProbability::from_byte(*prob),
                     canonical_base: canonical,
                     strand,
                 },
@@ -666,13 +667,13 @@ mod tests {
         // First C is at qpos 1; after skipping 2 C's (5, 7), next is at 10.
         let m1 = state.mod_at_qpos(QPos::new(1)).unwrap();
         assert_eq!(m1.len(), 1);
-        assert_eq!(m1[0].probability, 200);
+        assert_eq!(m1[0].probability, ModProbability::from_byte(200));
         assert!(matches!(m1[0].mod_type, ModType::Code(b'm')));
         assert_eq!(m1[0].canonical_base, C);
         assert!(matches!(m1[0].strand, ModStrand::Plus));
 
         let m2 = state.mod_at_qpos(QPos::new(10)).unwrap();
-        assert_eq!(m2[0].probability, 180);
+        assert_eq!(m2[0].probability, ModProbability::from_byte(180));
     }
 
     // r[verify base_mod.resolve_positions]
@@ -680,7 +681,7 @@ mod tests {
     fn delta_zero_is_first_occurrence() {
         let s = seq(&[A, C, C, C]);
         let state = BaseModState::parse(b"C+m,0;", &[128], &s, false).unwrap();
-        assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability, 128);
+        assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability, ModProbability::from_byte(128));
         assert!(state.mod_at_qpos(QPos::new(0)).is_none());
         assert!(state.mod_at_qpos(QPos::new(2)).is_none());
     }
@@ -702,9 +703,9 @@ mod tests {
         let stored = seq(&[C, G, T, A, C, G, T]);
         let state = BaseModState::parse(b"C+m,0,0;", &[200, 210], &stored, true).unwrap();
         let m_first = state.mod_at_qpos(QPos::new(5)).unwrap();
-        assert_eq!(m_first[0].probability, 200);
+        assert_eq!(m_first[0].probability, ModProbability::from_byte(200));
         let m_second = state.mod_at_qpos(QPos::new(1)).unwrap();
-        assert_eq!(m_second[0].probability, 210);
+        assert_eq!(m_second[0].probability, ModProbability::from_byte(210));
     }
 
     // r[verify base_mod.parse_mm]
@@ -733,13 +734,13 @@ mod tests {
         let at1 = state.mod_at_qpos(QPos::new(1)).unwrap();
         assert_eq!(at1.len(), 2);
         assert!(matches!(at1[0].mod_type, ModType::Code(b'm')));
-        assert_eq!(at1[0].probability, 200);
+        assert_eq!(at1[0].probability, ModProbability::from_byte(200));
         assert!(matches!(at1[1].mod_type, ModType::Code(b'h')));
-        assert_eq!(at1[1].probability, 100);
+        assert_eq!(at1[1].probability, ModProbability::from_byte(100));
         let at7 = state.mod_at_qpos(QPos::new(7)).unwrap();
         assert_eq!(at7.len(), 2);
-        assert_eq!(at7[0].probability, 220);
-        assert_eq!(at7[1].probability, 120);
+        assert_eq!(at7[0].probability, ModProbability::from_byte(220));
+        assert_eq!(at7[1].probability, ModProbability::from_byte(120));
     }
 
     // r[verify base_mod.parse_mm]
@@ -821,9 +822,9 @@ mod tests {
         let cm = CigarMapping::new(Pos0::new(1000).unwrap(), &cigar).unwrap();
 
         let m = state.mod_at_ref_pos(Pos0::new(1001).unwrap(), &cm).unwrap();
-        assert_eq!(m[0].probability, 200);
+        assert_eq!(m[0].probability, ModProbability::from_byte(200));
         let m2 = state.mod_at_ref_pos(Pos0::new(1003).unwrap(), &cm).unwrap();
-        assert_eq!(m2[0].probability, 180);
+        assert_eq!(m2[0].probability, ModProbability::from_byte(180));
         assert!(state.mod_at_ref_pos(Pos0::new(1002).unwrap(), &cm).is_none());
     }
 
@@ -1134,8 +1135,8 @@ mod tests {
         let rec = store.record(idx).unwrap();
         let rec = rec.slim();
         let state = BaseModState::from_record(rec, &store).unwrap().expect("MM present");
-        assert_eq!(state.mod_at_qpos(QPos::new(5)).unwrap()[0].probability, 200);
-        assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability, 210);
+        assert_eq!(state.mod_at_qpos(QPos::new(5)).unwrap()[0].probability, ModProbability::from_byte(200));
+        assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability, ModProbability::from_byte(210));
     }
 
     // ---------------- oracles for the validation paths ----------------
@@ -1349,7 +1350,7 @@ mod tests {
         }
         expected.sort_by_key(|&(q, _)| q); // stable: same-qpos order is entry order
         let got: Vec<(u32, u8)> =
-            state.qpos.iter().zip(&state.mods).map(|(&q, m)| (q, m.probability)).collect();
+            state.qpos.iter().zip(&state.mods).map(|(&q, m)| (q, m.probability.as_byte())).collect();
         assert_eq!(got, expected);
     }
 }
