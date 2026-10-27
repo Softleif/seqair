@@ -298,6 +298,10 @@ pub enum DecodeError {
 
     #[error("qual length {qual_len} does not match seq length {seq_len}")]
     QualLenMismatch { qual_len: usize, seq_len: usize },
+
+    /// A SAM or CRAM read name longer than BAM's 254 bytes.
+    #[error("qname length {len} exceeds maximum of 254 bytes")]
+    QnameTooLong { len: usize },
 }
 
 #[cfg(test)]

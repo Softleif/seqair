@@ -733,7 +733,7 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl unified.record_store_push]
-    // r[impl record_store.push_fields]
+    // r[impl record_store.push_fields+2]
     // r[impl unified.push_fields_equivalence]
     // r[impl record_store.checked_offsets]
     // r[impl record_store.pre_filter.rollback+1]
@@ -773,6 +773,9 @@ impl<U> RecordStore<U> {
                 qual_len: qual.len(),
                 seq_len: bases.len(),
             });
+        }
+        if qname.len() > 254 {
+            return Err(DecodeError::QnameTooLong { len: qname.len() });
         }
 
         let idx = RecordIdx::from_usize(self.records.len()).ok_or(DecodeError::SlabOverflow)?;
@@ -852,7 +855,7 @@ impl<U> RecordStore<U> {
             name_off,
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "caller validates qname ≤ 254 bytes; fits in u16"
+                reason = "qname ≤ 254 bytes, checked on entry; fits in u16"
             )]
             name_len: qname.len() as u16,
             bases_off,
@@ -2073,6 +2076,35 @@ pub(crate) mod tests {
             &mut (),
         );
         assert!(result.is_ok());
+    }
+
+    // r[verify record_store.push_fields+2]
+    #[test]
+    fn push_fields_rejects_qnames_longer_than_bam_allows() {
+        use seqair_types::Base;
+        let mut store = RecordStore::new();
+        let mut push = |qname: &[u8]| {
+            store.push_fields(
+                Pos0::new(0).unwrap(),
+                Pos0::new(0).unwrap(),
+                BamFlags::empty(),
+                MappingQuality::from_byte(0),
+                0,
+                0,
+                qname,
+                &[],
+                &[Base::A],
+                &[30],
+                &[],
+                Some(tid(0)),
+                MateFields::default(),
+                &mut (),
+            )
+        };
+        assert!(push(&[b'r'; 254]).is_ok());
+        assert!(matches!(push(&[b'r'; 255]), Err(DecodeError::QnameTooLong { len: 255 })));
+        // 65,536 bytes would wrap the u16 length to 0 without the check.
+        assert!(matches!(push(&[b'r'; 65_536]), Err(DecodeError::QnameTooLong { len: 65_536 })));
     }
 
     // r[verify record_store.checked_offsets]
