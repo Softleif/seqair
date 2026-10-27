@@ -2,7 +2,7 @@
 
 Pure-Rust BAM/SAM/CRAM/FASTA reader + pileup engine. I/O backend for [rastair](https://github.com/bsbludwig/rastair).
 
-Workspace: `crates/seqair` (readers, pileup, BGZF, CRAM) and `crates/seqair-types` (Base, BaseQuality, MappingQuality, Strand, Phred, Probability, RmsAccumulator, RegionString, Pos/QPos).
+Workspace: `crates/seqair` (readers, pileup, BGZF, CRAM) and `crates/seqair-types` (Base, BaseQuality, MappingQuality, ModProbability, Strand, Phred, Probability, RmsAccumulator, RegionString, Pos/QPos).
 
 ## Tracey specs
 
