@@ -5,6 +5,7 @@
 pub mod bam_flags;
 mod base;
 mod base_quality;
+mod mapping_quality;
 mod phred;
 pub mod pos;
 mod probability;
@@ -22,6 +23,7 @@ pub use {
     bam_flags::BamFlags,
     base::{Base, BaseError},
     base_quality::BaseQuality,
+    mapping_quality::MappingQuality,
     phred::Phred,
     probability::{Probability, ProbabilityError},
     region_string::{RegionString, RegionStringError},
