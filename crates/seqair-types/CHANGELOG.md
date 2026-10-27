@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- **`MappingQuality`**: a record's MAPQ as the wire byte, with `UNAVAILABLE` (255, "not available" in `[SAM1] §1.4`), `from_byte`, `get() -> Option<u8>` and `as_byte`. Like `BaseQuality` it has no `Ord`, so a minimum-MAPQ filter has to decide what an unavailable MAPQ does.
+
 ### Changed
 
 - `smallvec` (re-exported as `SmallVec`) now requires `2.0.0-beta.3`, up from `2.0.0-alpha.12`.
