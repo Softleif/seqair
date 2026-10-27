@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`MappingQuality`**: a record's MAPQ as the wire byte, with `UNAVAILABLE` (255, "not available" in `[SAM1] §1.4`), `from_byte`, `get() -> Option<u8>` and `as_byte`. Like `BaseQuality` it has no `Ord`, so a minimum-MAPQ filter has to decide what an unavailable MAPQ does.
+- **`ModProbability`**: one `ML` tag byte (`[SAM1] §1.7`: the byte `x` is the range `[x/256, (x+1)/256)`) with `from_byte`, `as_byte` and `midpoint() -> Probability` (`(x + 0.5) / 256`). Ordered by the byte.
 
 ### Changed
 
