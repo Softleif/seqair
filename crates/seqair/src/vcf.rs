@@ -196,9 +196,9 @@ pub use header::{
 pub use record::Genotype;
 pub use record_encoder::{
     Arr, ContigId, FieldDescription, FieldId, FilterFieldDef, FilterId, Flag, FormatEncoder,
-    FormatFieldDef, FormatFloat, FormatFloats, FormatGt, FormatInt, FormatInts, FormatKey,
-    FormatString, Gt, InfoEncoder, InfoFieldDef, InfoFlag, InfoFloat, InfoFloats, InfoInt,
-    InfoIntOpts, InfoInts, InfoKey, InfoString, OptArr, Scalar, Str,
+    FormatFieldDef, FormatFloat, FormatFloatOpts, FormatFloats, FormatGt, FormatInt, FormatInts,
+    FormatKey, FormatString, Gt, InfoEncoder, InfoFieldDef, InfoFlag, InfoFloat, InfoFloats,
+    InfoInt, InfoIntOpts, InfoInts, InfoKey, InfoString, OptArr, Scalar, Str,
 };
 pub use unified::{
     Begun, CoordinateIndex, Filtered, Ready, RecordEncoder, Unstarted, WithSamples, Writer,

@@ -173,6 +173,7 @@ pub type FormatInt = FormatKey<Scalar<i32>>;
 pub type FormatFloat = FormatKey<Scalar<f32>>;
 pub type FormatInts = FormatKey<Arr<i32>>;
 pub type FormatFloats = FormatKey<Arr<f32>>;
+pub type FormatFloatOpts = FormatKey<OptArr<f32>>;
 pub type FormatString = FormatKey<Str>;
 
 // ── InfoEncoder trait ──────────────────────────────────────────────────
@@ -225,6 +226,13 @@ pub trait FormatEncoder {
     /// that sample's values. For BCF the stored width is the longest inner
     /// slice, shorter samples padded with the float end-of-vector sentinel.
     fn format_floats(&mut self, id: &FieldId, per_sample: &[&[f32]]) -> Result<(), VcfError>;
+    /// Like [`format_floats`](Self::format_floats), but an element may be `None`:
+    /// the BCF float missing value, `.` in VCF text.
+    fn format_float_opts(
+        &mut self,
+        id: &FieldId,
+        per_sample: &[&[Option<f32>]],
+    ) -> Result<(), VcfError>;
     /// Encode a string FORMAT field — one string per sample (its length MUST
     /// equal the sample count). For BCF the stored width is the longest string,
     /// shorter samples NUL-padded.
@@ -470,6 +478,27 @@ impl FormatKey<Arr<f32>> {
             return Err(VcfError::SampleCountMismatch { expected: enc.n_samples(), got: 1 });
         }
         enc.format_floats(&self.0, &[values])
+    }
+}
+
+impl FormatKey<OptArr<f32>> {
+    /// Encode this multi-valued float FORMAT field for a single-sample record, with
+    /// per-element missing markers.
+    ///
+    /// # Errors
+    /// Returns [`VcfError::SampleCountMismatch`] if the header declares anything
+    /// other than exactly one sample, and [`crate::vcf::VcfEncodeError::ReservedFloatValue`]
+    /// if a concrete element is a reserved BCF float pattern. `None` elements are the
+    /// missing marker by construction and are always accepted.
+    pub fn encode_single_sample(
+        &self,
+        enc: &mut (impl FormatEncoder + ?Sized),
+        values: &[Option<f32>],
+    ) -> Result<(), VcfError> {
+        if enc.n_samples() != 1 {
+            return Err(VcfError::SampleCountMismatch { expected: enc.n_samples(), got: 1 });
+        }
+        enc.format_float_opts(&self.0, &[values])
     }
 }
 

@@ -1526,6 +1526,75 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
         }
         Ok(())
     }
+    // r[impl record_encoder.reserved_rejection]
+    fn format_float_opts(
+        &mut self,
+        id: &FieldId,
+        per_sample: &[&[Option<f32>]],
+    ) -> Result<(), VcfError> {
+        debug_assert_eq!(per_sample.len(), self.n_samples(), "one slice per sample");
+        reject_reserved_floats(
+            id.name(),
+            per_sample.iter().flat_map(|s| s.iter().filter_map(|v| *v)),
+        )?;
+        let width = per_sample.iter().map(|s| s.len()).max().unwrap_or(0);
+        match &mut self.inner {
+            EncoderInner::Bcf(enc) => {
+                let start = enc.indiv_buf.len();
+                // r[impl bcf_writer.indiv_field_major]
+                encode_typed_int_key(enc.indiv_buf, id.dict_idx());
+                encode_type_byte(enc.indiv_buf, width, BCF_BT_FLOAT);
+                for s in per_sample {
+                    if s.is_empty() && width > 0 {
+                        f32::encode_missing(enc.indiv_buf);
+                        for _ in 1..width {
+                            f32::encode_end_of_vector(enc.indiv_buf);
+                        }
+                        continue;
+                    }
+                    for v in *s {
+                        // r[impl bcf_writer.missing_sentinels]
+                        match v {
+                            Some(v) => v.encode_bcf_as(enc.indiv_buf, BCF_BT_FLOAT),
+                            None => f32::encode_missing(enc.indiv_buf),
+                        }
+                    }
+                    // r[impl bcf_writer.end_of_vector]
+                    for _ in s.len()..width {
+                        f32::encode_end_of_vector(enc.indiv_buf);
+                    }
+                }
+                enc.commit_format_field(id, start);
+            }
+            EncoderInner::Vcf(vcf) => {
+                vcf.begin_format_field();
+                for (i, s) in per_sample.iter().enumerate() {
+                    if s.is_empty() {
+                        // r[impl vcf_writer.missing_dot]
+                        vcf.sample_bufs[i].push(b'.');
+                        continue;
+                    }
+                    for (j, v) in s.iter().enumerate() {
+                        if j > 0 {
+                            vcf.sample_bufs[i].push(b',');
+                        }
+                        match v {
+                            // r[impl vcf_writer.float_precision]
+                            Some(v) => {
+                                write_float_g(&mut vcf.sample_bufs[i], *v).map_err(|source| {
+                                    VcfError::FailedToWriteFormattedString { source }
+                                })?
+                            }
+                            // r[impl vcf_writer.missing_dot]
+                            None => vcf.sample_bufs[i].push(b'.'),
+                        }
+                    }
+                }
+                vcf.commit_format_field(id);
+            }
+        }
+        Ok(())
+    }
     fn format_string(&mut self, id: &FieldId, values: &[&str]) -> Result<(), VcfError> {
         debug_assert_eq!(values.len(), self.n_samples(), "one string per sample");
         // A missing (empty) sample is stored as the literal `.` char (htslib's BCF
