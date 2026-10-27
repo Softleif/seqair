@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-## v0.3.2 (unreleased)
+## v0.4.0 (unreleased)
+
+### Breaking
+
+- **`Strand` is only `OT` or `OB`**; `Strand::Unknown` and `Strand::ok()` are gone. A strand that cannot be told is `Option<Strand>::None`. `From<BamFlags> for Strand` is now `Strand::from_flags(flags) -> Option<Strand>` (`None` for a paired read flagged neither first nor second), and `StrandFromRecord::strand` returns `Option<Strand>`. `as_symbol`, `as_ref` and `Display` no longer have an unknown spelling (`.` / `NA`): the caller picks one for `None`.
 
 ### Added
 

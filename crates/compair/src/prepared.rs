@@ -43,8 +43,8 @@ pub(crate) struct Prepared<T> {
 }
 
 impl<T> Prepared<T> {
-    /// The one for `strand`, derived by `fill` if it is not yet. `None` for
-    /// an unknown strand, which `Read` rejects, or where `fill` fails.
+    /// The one for `strand`, derived by `fill` if it is not yet. `None` where
+    /// `fill` fails.
     fn for_strand(
         &mut self,
         strand: Strand,
@@ -53,7 +53,6 @@ impl<T> Prepared<T> {
         let slot = match strand {
             Strand::OT => 0,
             Strand::OB => 1,
-            Strand::Unknown => return None,
         };
         let ready = self.ready.get_mut(slot)?;
         let prepared = self.strands.get_mut(slot)?;

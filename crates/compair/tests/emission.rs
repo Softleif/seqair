@@ -181,7 +181,6 @@ fn a_non_cpg_cytosine_reads_t_at_the_false_conversion_rate(tc: TestCase) {
     let (haplotype_base, converted, unconverted) = match strand {
         Strand::OT => (Base::C, Base::T, Base::C),
         Strand::OB => (Base::G, Base::A, Base::G),
-        Strand::Unknown => tc.reject(),
     };
     let haplotype = Haplotype::new(vec![haplotype_base]);
     let site = haplotype.site(0).expect("site");
