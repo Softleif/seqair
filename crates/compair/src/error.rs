@@ -7,9 +7,6 @@ pub enum Error {
     #[error("read field `{field}` has no quality at index {index}")]
     MissingQuality { field: &'static str, index: usize },
 
-    #[error("a read must report a known strand, got `Unknown`")]
-    UnknownStrand,
-
     #[error("a haplotype of {expected} bases was given {actual} methylation levels")]
     BetasLengthMismatch { expected: usize, actual: usize },
 

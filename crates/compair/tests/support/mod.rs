@@ -2,13 +2,11 @@ use compair::{
     Base, BaseQuality, Error, HapSite, Haplotype, Observation, Read, Strand, error_probability,
 };
 
-/// The strand a mirrored case reports. `compair::Strand` has no `mirror`:
-/// `Unknown` has no mirror image, and a `Read` cannot carry it anyway.
+/// The strand a mirrored case reports.
 pub fn mirror_strand(strand: Strand) -> Strand {
     match strand {
         Strand::OT => Strand::OB,
         Strand::OB => Strand::OT,
-        Strand::Unknown => Strand::Unknown,
     }
 }
 

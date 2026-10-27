@@ -61,17 +61,6 @@ fn an_unavailable_quality_is_rejected_with_its_position() {
     assert_eq!(got.map(|_| ()), Err(Error::MissingQuality { field: "insertion_quals", index: 0 }));
 }
 
-/// The emission decides which strand can see a conversion, so a read has to
-/// say which one it is on.
-#[test]
-fn an_unknown_strand_is_rejected() {
-    let got = Read::uniform(vec![Base::A], &[q(30)], q(45), q(45), q(10), Strand::Unknown);
-    assert_eq!(got.map(|_| ()), Err(Error::UnknownStrand));
-    // Strand is checked first: it is the one thing no other argument can fix.
-    let got = Read::new(vec![Base::A], &[], &[], &[], &[], Strand::Unknown);
-    assert_eq!(got.map(|_| ()), Err(Error::UnknownStrand));
-}
-
 /// A soft-masked reference base is still that base: lowercase is not `N`.
 #[test]
 fn from_ascii_reads_lowercase_as_the_same_base() {

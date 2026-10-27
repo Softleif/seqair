@@ -45,9 +45,6 @@ impl Read {
         gap_quals: &[BaseQuality],
         strand: Strand,
     ) -> Result<Self, Error> {
-        if strand == Strand::Unknown {
-            return Err(Error::UnknownStrand);
-        }
         let bases = bases.into();
         let tracks = [base_quals, insertion_quals, deletion_quals, gap_quals];
         let expected = bases.len();
@@ -103,9 +100,6 @@ impl Read {
         strand: Strand,
         fill: impl FnOnce(&[Base], &mut [BaseQuality], &mut [BaseQuality], &mut [BaseQuality]),
     ) -> Result<Self, Error> {
-        if strand == Strand::Unknown {
-            return Err(Error::UnknownStrand);
-        }
         let bases = bases.into();
         let n = bases.len();
         if base_quals.len() != n {
