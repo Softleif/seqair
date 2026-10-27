@@ -82,6 +82,7 @@ Typed keys MUST encode the VCF value type at the Rust type level via uninhabited
 > - `FormatKey<Scalar<f32>>` — single float FORMAT value
 > - `FormatKey<Arr<i32>>` — multi-valued integer FORMAT value (one array per sample)
 > - `FormatKey<Arr<f32>>` — multi-valued float FORMAT value (one array per sample)
+> - `FormatKey<OptArr<f32>>` — multi-valued float FORMAT value with optional (missing) elements, encoded for a single sample with `encode_single_sample`; a `None` element is the BCF float missing value and `.` in VCF text
 > - `FormatKey<Str>` — string FORMAT value (one string per sample)
 
 r[record_encoder.key_encode]
@@ -133,7 +134,7 @@ r[record_encoder.info_methods+1]
 INFO methods (`info_int`, `info_float`, `info_ints`, `info_floats`, `info_flag`, `info_string`, `info_int_opts`) MUST accept a `&FieldId` and the appropriate value. They perform no I/O — they write to in-memory buffers, which cannot fail. The numeric ones nevertheless return `Result<(), VcfError>`, because they validate their argument before writing it: see `r[record_encoder.reserved_rejection]`. `info_flag` and `info_string` carry no numeric value and stay infallible.
 
 r[record_encoder.reserved_rejection]
-Every entry point that accepts a caller-supplied number destined for a BCF numeric field MUST reject the reserved bit patterns of `r[bcf_encoder.reserved_bands]` before writing any bytes, and MUST report `VcfEncodeError::ReservedIntValue` / `VcfEncodeError::ReservedFloatValue` wrapped in `VcfError`. The affected entry points are the INFO methods `info_int`, `info_ints`, `info_int_opts`, `info_float` and `info_floats`; the FORMAT methods `format_int`, `format_ints`, `format_float` and `format_floats`; and the `qual` argument of `begin_record`. `format_gt` needs no test: its BCF encoding is `(allele_index + 1) << 1 | phased` over a `u16` allele index, which is never negative, and the FILTER methods only ever write non-negative dictionary indices. Rejection MUST leave the encoder's buffers as they were, so a caller that handles the error can continue with the same record.
+Every entry point that accepts a caller-supplied number destined for a BCF numeric field MUST reject the reserved bit patterns of `r[bcf_encoder.reserved_bands]` before writing any bytes, and MUST report `VcfEncodeError::ReservedIntValue` / `VcfEncodeError::ReservedFloatValue` wrapped in `VcfError`. The affected entry points are the INFO methods `info_int`, `info_ints`, `info_int_opts`, `info_float` and `info_floats`; the FORMAT methods `format_int`, `format_ints`, `format_float`, `format_floats` and `format_float_opts` (for concrete elements); and the `qual` argument of `begin_record`. `format_gt` needs no test: its BCF encoding is `(allele_index + 1) << 1 | phased` over a `u16` allele index, which is never negative, and the FILTER methods only ever write non-negative dictionary indices. Rejection MUST leave the encoder's buffers as they were, so a caller that handles the error can continue with the same record.
 
 r[record_encoder.info_state_queries]
 `InfoEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
