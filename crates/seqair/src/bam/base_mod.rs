@@ -681,7 +681,10 @@ mod tests {
     fn delta_zero_is_first_occurrence() {
         let s = seq(&[A, C, C, C]);
         let state = BaseModState::parse(b"C+m,0;", &[128], &s, false).unwrap();
-        assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability, ModProbability::from_byte(128));
+        assert_eq!(
+            state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability,
+            ModProbability::from_byte(128)
+        );
         assert!(state.mod_at_qpos(QPos::new(0)).is_none());
         assert!(state.mod_at_qpos(QPos::new(2)).is_none());
     }
@@ -1135,8 +1138,14 @@ mod tests {
         let rec = store.record(idx).unwrap();
         let rec = rec.slim();
         let state = BaseModState::from_record(rec, &store).unwrap().expect("MM present");
-        assert_eq!(state.mod_at_qpos(QPos::new(5)).unwrap()[0].probability, ModProbability::from_byte(200));
-        assert_eq!(state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability, ModProbability::from_byte(210));
+        assert_eq!(
+            state.mod_at_qpos(QPos::new(5)).unwrap()[0].probability,
+            ModProbability::from_byte(200)
+        );
+        assert_eq!(
+            state.mod_at_qpos(QPos::new(1)).unwrap()[0].probability,
+            ModProbability::from_byte(210)
+        );
     }
 
     // ---------------- oracles for the validation paths ----------------
@@ -1349,8 +1358,12 @@ mod tests {
             expected.push((i as u32, (2 * n_c + k) as u8));
         }
         expected.sort_by_key(|&(q, _)| q); // stable: same-qpos order is entry order
-        let got: Vec<(u32, u8)> =
-            state.qpos.iter().zip(&state.mods).map(|(&q, m)| (q, m.probability.as_byte())).collect();
+        let got: Vec<(u32, u8)> = state
+            .qpos
+            .iter()
+            .zip(&state.mods)
+            .map(|(&q, m)| (q, m.probability.as_byte()))
+            .collect();
         assert_eq!(got, expected);
     }
 }
