@@ -186,7 +186,7 @@ fn main() -> anyhow::Result<()> {
                         output,
                         "  qpos={qpos:>5}  base={}  mod={code}  prob={:>3}  strand={}",
                         m.canonical_base.as_char(),
-                        m.probability,
+                        m.probability.as_byte(),
                         strand_char(m.strand == seqair::bam::ModStrand::Minus),
                     )?;
                 }
@@ -203,7 +203,7 @@ fn main() -> anyhow::Result<()> {
                     canonical_base: m.canonical_base,
                     mod_code: code_byte,
                 });
-                if m.probability >= args.min_prob {
+                if m.probability.as_byte() >= args.min_prob {
                     entry.modified += 1;
                 } else {
                     entry.unmodified += 1;

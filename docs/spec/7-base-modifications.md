@@ -72,7 +72,7 @@ r[base_mod.query_refpos]
 > Each `Modification` MUST carry:
 >
 > - `mod_type`: the modification type (single-char code or ChEBI number)
-> - `probability`: the ML value (u8, 0–255)
+> - `probability`: the ML value, a `ModProbability` (`r[types.mod_probability.type]`)
 > - `canonical_base`: which base is modified (A, C, G, T)
 > - `strand`: `+` or `-`
 
