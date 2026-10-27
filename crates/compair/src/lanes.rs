@@ -34,7 +34,6 @@ use crate::{
         CODE_NO_CONVERSION, CODE_NO_PLAIN_MATCH, ColumnLanes, LANE_MAX, Lane, RowLanes, RowTracks,
         TransitionLanes, Window, prior,
     },
-    scaling::{exp2_f32, strip_shift_f32},
     types::Log10Likelihood,
 };
 
@@ -392,7 +391,8 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
         .fold(f32::INFINITY, |shortest, &past| shortest.min(past - 1.0));
     let shortest = if shortest.is_finite() { shortest as usize } else { width };
 
-    let mut exponent = [0i32; LANE_MAX];
+    // Each lane's shifts so far, as exact integers in an `f32`.
+    let mut exponent = zero;
     let mut total = zero;
     let mut scratch = [0.0f32; LANE_MAX];
     let lanes = L::LANES.min(LANE_MAX);
@@ -401,22 +401,18 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
         let first = (row as i64 + o - w).max(1);
         let last = (row as i64 + o + w).min(width as i64);
         if (row - 1) % STRIP_ROWS == 0 {
-            crossing.store(&mut scratch);
-            let mut lift = [1.0f32; LANE_MAX];
-            let mut any = false;
-            for lane in 0..lanes {
-                // Only while the lane is still inside its read: the strip
-                // kernel never renormalises below the last row, and the total
-                // taken there is on the scale of the exponent at that row.
-                let inside = view.lengths.get(lane).is_some_and(|&r| row <= r);
-                let shift =
-                    if inside { scratch.get(lane).copied().map_or(0, strip_shift_f32) } else { 0 };
-                any |= shift != 0;
-                if let (Some(slot), Some(sum)) = (lift.get_mut(lane), exponent.get_mut(lane)) {
-                    *slot = exp2_f32(shift);
-                    *sum += shift;
-                }
+            // Only while the lane is still inside its read: the strip kernel
+            // never renormalises below the last row, and the total taken
+            // there is on the scale of the exponent at that row.
+            let mut inside = [0.0f32; LANE_MAX];
+            for (slot, &r) in inside.iter_mut().zip(view.lengths) {
+                *slot = if row <= r { 1.0 } else { 0.0 };
             }
+            let inside = L::load(token, &inside).equals(one);
+            let (lift, shift) = crossing.strip_lift();
+            let (lift, shift) = (L::select(inside, lift, one), L::masked(inside, shift));
+            exponent = exponent + shift;
+            let any = (shift * shift).horizontal_max() > 0.0;
             // Only the cells this row reads, `first - 1..=last`: left of them
             // nothing is read again, since the band only moves right, and
             // right of them every cell is still zero. Lifting the whole row
@@ -427,7 +423,6 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
                 None
             };
             if any && let Some(live) = live {
-                let lift = L::load(token, &lift);
                 for cell in live {
                     (L::load(token, &cell.m) * lift).store(&mut cell.m);
                     (L::load(token, &cell.i) * lift).store(&mut cell.i);
@@ -556,9 +551,11 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
     }
 
     total.store(&mut scratch);
+    let mut shifts = [0.0f32; LANE_MAX];
+    exponent.store(&mut shifts);
     let mut out = impossible;
     for lane in 0..lanes {
-        let (Some(sum), Some(shift)) = (scratch.get(lane).copied(), exponent.get(lane).copied())
+        let (Some(sum), Some(shift)) = (scratch.get(lane).copied(), shifts.get(lane).copied())
         else {
             continue;
         };
