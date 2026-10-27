@@ -306,6 +306,9 @@ pub enum CramError {
         "claimed size {size} exceeds allocation limit ({limit}) in {context} — data may be corrupt"
     )]
     AllocationTooLarge { size: usize, limit: usize, context: &'static str },
+
+    #[error("huffman {context} count {count} reaches the limit of {limit}")]
+    HuffmanCountExceedsLimit { count: u32, limit: u32, context: &'static str },
 }
 
 /// Maximum allocation size (256 MiB) for a single decompressed block or parsed structure.

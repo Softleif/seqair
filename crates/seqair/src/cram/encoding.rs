@@ -663,9 +663,25 @@ impl ByteArrayEncoding {
     }
 }
 
+/// htslib 1.25 rejects `ncodes >= 1000000`.
+const MAX_HUFFMAN_COUNT: u32 = 1_000_000;
+
+fn check_huffman_count(count: u32, context: &'static str) -> Result<(), CramError> {
+    if count >= MAX_HUFFMAN_COUNT {
+        return Err(CramError::HuffmanCountExceedsLimit {
+            count,
+            limit: MAX_HUFFMAN_COUNT,
+            context,
+        });
+    }
+    Ok(())
+}
+
+// r[impl cram.encoding.huffman_limit]
 fn parse_huffman_params(cursor: &mut &[u8]) -> Result<(Vec<i32>, Vec<u32>), CramError> {
     let alpha_count = varint::read_itf8_from(cursor)
         .ok_or_else(|| CramError::Truncated { context: "huffman alphabet count" })?;
+    check_huffman_count(alpha_count, "alphabet")?;
     let alpha_count_usize = alpha_count as usize;
     super::reader::check_alloc_size(alpha_count_usize.saturating_mul(4), "huffman alphabet")?;
     let mut alphabet = Vec::with_capacity(alpha_count_usize);
@@ -677,6 +693,7 @@ fn parse_huffman_params(cursor: &mut &[u8]) -> Result<(Vec<i32>, Vec<u32>), Cram
 
     let bl_count = varint::read_itf8_from(cursor)
         .ok_or_else(|| CramError::Truncated { context: "huffman bit length count" })?;
+    check_huffman_count(bl_count, "bit length")?;
     let bl_count_usize = bl_count as usize;
     super::reader::check_alloc_size(bl_count_usize.saturating_mul(4), "huffman bit lengths")?;
     let mut bit_lengths = Vec::with_capacity(bl_count_usize);
@@ -757,6 +774,24 @@ fn decode_subexp(reader: &mut BitReader<'_>, k: u32) -> Option<i32> {
 mod tests {
     use super::*;
     use hegel::prelude::*;
+
+    // r[verify cram.encoding.huffman_limit]
+    #[test]
+    fn huffman_counts_at_the_htslib_limit_are_rejected() {
+        // ITF8 4-byte form: 1_000_000 = 0x0F4240, 999_999 = 0x0F423F.
+        let mut over: &[u8] = &[0xE0, 0x0F, 0x42, 0x40];
+        assert!(matches!(
+            parse_huffman_params(&mut over),
+            Err(CramError::HuffmanCountExceedsLimit { count: 1_000_000, .. })
+        ));
+        let mut under: &[u8] = &[0xE0, 0x0F, 0x42, 0x3F];
+        assert!(matches!(parse_huffman_params(&mut under), Err(CramError::Truncated { .. })));
+        let mut bl: &[u8] = &[0, 0xE0, 0x0F, 0x42, 0x40];
+        assert!(matches!(
+            parse_huffman_params(&mut bl),
+            Err(CramError::HuffmanCountExceedsLimit { context: "bit length", .. })
+        ));
+    }
 
     // r[verify cram.encoding.huffman]
     #[test]
