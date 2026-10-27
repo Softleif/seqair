@@ -393,6 +393,16 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
 
     // Each lane's shifts so far, as exact integers in an `f32`.
     let mut exponent = zero;
+    // Each lane's read length, for the row compares below: a row number and a
+    // length are far below `2^24`, so an `f32` compare of them is exact.
+    let mut scratch_lengths = [0.0f32; LANE_MAX];
+    for (slot, &r) in scratch_lengths.iter_mut().zip(view.lengths) {
+        *slot = r as f32;
+    }
+    let lengths = L::load(token, &scratch_lengths);
+    // The row number in every lane, counted up rather than converted: a
+    // `usize` to `f32` conversion is a sign test and a branch on x86-64.
+    let mut at = zero;
     let mut total = zero;
     let mut scratch = [0.0f32; LANE_MAX];
     let lanes = L::LANES.min(LANE_MAX);
@@ -400,19 +410,17 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
     for row in 1..=read_len {
         let first = (row as i64 + o - w).max(1);
         let last = (row as i64 + o + w).min(width as i64);
+        at = at + one;
         if (row - 1) % STRIP_ROWS == 0 {
             // Only while the lane is still inside its read: the strip kernel
             // never renormalises below the last row, and the total taken
             // there is on the scale of the exponent at that row.
-            let mut inside = [0.0f32; LANE_MAX];
-            for (slot, &r) in inside.iter_mut().zip(view.lengths) {
-                *slot = if row <= r { 1.0 } else { 0.0 };
-            }
-            let inside = L::load(token, &inside).equals(one);
+            let ended = lengths.below(at);
             let (lift, shift) = crossing.strip_lift();
-            let (lift, shift) = (L::select(inside, lift, one), L::masked(inside, shift));
+            let (lift, shift) = (L::select(ended, one, lift), L::masked_out(ended, shift));
             exponent = exponent + shift;
-            let any = (shift * shift).horizontal_max() > 0.0;
+            // Whether any lane shifted at all.
+            let any = L::masked_out(shift.equals(zero), one).horizontal_max() > 0.0;
             // Only the cells this row reads, `first - 1..=last`: left of them
             // nothing is read again, since the band only moves right, and
             // right of them every cell is still zero. Lifting the whole row
@@ -447,16 +455,8 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
             return impossible;
         };
 
-        // The lanes whose read ends on this row, as a mask, built from the
-        // integer lengths so that no `f32` compare of a row number is
-        // involved; no mask on the rows where no lane ends.
+        // Whether some lane's read ends on this row, so the sweep sums it.
         let summing = view.lengths.iter().take(lanes).any(|&r| r == row);
-        let mut ends = [0.0f32; LANE_MAX];
-        if summing {
-            for (slot, &r) in ends.iter_mut().zip(view.lengths) {
-                *slot = if r == row { 1.0 } else { 0.0 };
-            }
-        }
         let constants = RowConstants {
             lanes: RowLanes::new(base, spread, mismatched),
             t: TransitionLanes {
@@ -467,7 +467,7 @@ pub(crate) fn lanes_kernel<L: Lane, R: Rows<L>>(
                 gap_continuation,
             },
             past_end,
-            ends: L::load(token, &ends).equals(one),
+            ends: lengths.equals(at),
         };
 
         let mut running = zero;
