@@ -24,9 +24,10 @@
 //! values in the same order, and there is no fused multiply-add on [`Lane`].
 
 #[cfg(target_arch = "x86_64")]
-use fearless_simd::{Bytes, SimdMask, i32x8};
+use fearless_simd::SimdMask;
 use fearless_simd::{
-    Level, Select, Simd, SimdBase, SimdCombine, SimdFrom, dispatch, f32x4, f32x8, mask32x8,
+    Bytes, Level, Select, Simd, SimdBase, SimdCombine, SimdCvtFloat, SimdFrom, dispatch, f32x4,
+    f32x8, i32x8, mask32x8,
 };
 use fearless_simd_macros::simd;
 
@@ -34,6 +35,7 @@ use crate::{
     banded::{Band, LANE_MAX, Lane, LaneMask, Plan, PlanView, Ring, Shape, Window, banded_kernel},
     batch::{BATCH, BatchBuffer, BatchView, batch_kernel},
     pairs::{PAIRS, PairsBuffer, PairsPlan, pairs_kernel},
+    scaling::STRIP_SCALE,
     strips::{RowBuffer, strip_kernel},
     types::Log10Likelihood,
 };
@@ -146,6 +148,23 @@ impl<S: Simd> Lane for f32x8<S> {
     #[inline(always)]
     fn horizontal_max(self) -> f32 {
         self.reduce_max()
+    }
+
+    /// [`crate::scaling::strip_shift_f32`] on the exponent bits. A normal `max` has biased
+    /// exponent `e` in `1..=254`, so `2^shift` has biased exponent
+    /// `min(STRIP_SCALE + 254 - e, 254)`, which is at least `STRIP_SCALE`:
+    /// always a normal power of two.
+    #[inline(always)]
+    fn strip_lift(self) -> (Self, Self) {
+        let simd = self.simd;
+        let normal = self
+            .simd_ge(<Self as SimdBase<S>>::splat(simd, f32::MIN_POSITIVE))
+            .both(self.simd_le(<Self as SimdBase<S>>::splat(simd, f32::MAX)));
+        let biased = self.bitcast::<i32x8<S>>() >> 23;
+        let lifted = (i32x8::splat(simd, STRIP_SCALE + 254) - biased).min(i32x8::splat(simd, 254));
+        let lift = (lifted << 23).bitcast::<Self>();
+        let shift = Self::float_from(lifted - i32x8::splat(simd, 127));
+        (normal.select(lift, <Self as SimdBase<S>>::splat(simd, 1.0)), Self::masked(normal, shift))
     }
 
     #[inline(always)]
@@ -447,6 +466,41 @@ mod tests {
                         "{level:?}: vector {t} lane {k}"
                     );
                 }
+            }
+        }
+    }
+
+    /// `strip_lift` on one level, as arrays.
+    #[inline(always)]
+    fn strip_lifted<S: Simd>(simd: S, maxima: [f32; 8]) -> ([f32; 8], [f32; 8]) {
+        let (lift, shift) = f32x8::simd_from(simd, maxima).strip_lift();
+        (lift.into(), shift.into())
+    }
+
+    /// The vector `strip_lift` reads the exponent bits where the scalar lane
+    /// asks `strip_shift_f32`; every bit pattern, `NaN`s, infinities,
+    /// subnormals and negatives included, lifts the same at every level.
+    #[hegel::test]
+    fn strip_lift_is_the_scalar_lift_in_every_lane_at_every_level(tc: TestCase) {
+        let maxima: [u32; 8] = tc.draw(gs::arrays(gs::integers::<u32>()));
+        assert_lifts_match(maxima.map(f32::from_bits));
+    }
+
+    /// The edges of the normal range, which random bits rarely land on.
+    #[test]
+    fn strip_lift_matches_the_scalar_lift_at_the_normal_range_edges() {
+        let edges: [u32; 8] =
+            [0x007f_ffff, 0x0080_0000, 0x7f7f_ffff, 0x7f80_0000, 0x8000_0000, 0x7fc0_0000, 0, 1];
+        assert_lifts_match(edges.map(f32::from_bits));
+    }
+
+    fn assert_lifts_match(maxima: [f32; 8]) {
+        for level in levels() {
+            let (lift, shift) = dispatch!(level, simd => strip_lifted(simd, maxima));
+            for (k, max) in maxima.into_iter().enumerate() {
+                let (want_lift, want_shift) = <f32 as Lane>::strip_lift(max);
+                assert_eq!(lift[k].to_bits(), want_lift.to_bits(), "{level:?} lane {k}: {max:e}");
+                assert_eq!(shift[k].to_bits(), want_shift.to_bits(), "{level:?} lane {k}: {max:e}");
             }
         }
     }

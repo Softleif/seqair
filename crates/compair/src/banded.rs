@@ -169,6 +169,11 @@ pub(crate) trait Lane:
     /// The lanewise maximum. Neither operand is ever a `NaN`.
     fn vmax(self, other: Self) -> Self;
     fn horizontal_max(self) -> f32;
+    /// Every lane's renormalisation at a strip crossing, `self` holding its
+    /// maximum: `2^shift` and `shift` (exact in an `f32`), with `shift` what
+    /// [`strip_shift_f32`] gives for that maximum. A sum of shifts stays
+    /// exact in an `f32` below `2^24`, about a million rows.
+    fn strip_lift(self) -> (Self, Self);
     /// Set where the two lanes are equal, clear where they are not.
     fn equals(self, other: Self) -> Self::Mask;
     /// Set where `self` is strictly below `other`.
@@ -259,6 +264,12 @@ impl Lane for f32 {
     #[inline]
     fn horizontal_max(self) -> f32 {
         self
+    }
+    #[inline]
+    #[expect(clippy::cast_precision_loss, reason = "a shift is at most 127 either way")]
+    fn strip_lift(self) -> (Self, Self) {
+        let shift = strip_shift_f32(self);
+        (exp2_f32(shift), shift as f32)
     }
     #[inline]
     fn equals(self, other: Self) -> Self {
