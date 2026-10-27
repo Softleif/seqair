@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   approach). At every level, order-1 table rows sit `1 << bits` apart instead of 16 KiB, so they
   no longer share L1 sets.
 
+### Breaking
+
+- **MAPQ is a `seqair_types::MappingQuality`**, not a `u8`: `SlimRecord::mapq`, `FilterRawFields::mapq`, `PileupAlignment::mapq`, `OwnedBamRecord::mapq`, `OwnedBamRecordBuilder::mapq` and the `mapq` argument of `RecordStore::push_fields`. 255 ("not available", `[SAM1] §1.4`) reads as `get() == None` instead of the most confident MAPQ there is. There is no `Ord`; a minimum-MAPQ filter spells out what unavailable does, e.g. `mapq.get().is_none_or(|q| q >= min)` for the samtools `-q` convention (255 passes). Wrap a literal with `MappingQuality::from_byte`, write the wire byte with `as_byte()`.
+
 ## v0.7.0 (2026-10-22)
 
 ### Added

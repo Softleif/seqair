@@ -21,6 +21,7 @@ use seqair::bam::record_store::{CustomizeRecordStore, FilterRawFields, SlimRecor
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::Readers;
 use seqair_types::BaseQuality;
+use seqair_types::MappingQuality;
 use seqair_types::QPos;
 use std::path::Path;
 
@@ -162,7 +163,7 @@ fn cram_records_match_htslib_for_chr19() {
             let cram = store.record(ri(u32::try_from(i).unwrap())).unwrap();
             assert_eq!(cram.pos.as_i64(), hts.pos, "{version} rec {i}: pos");
             assert_eq!(cram.flags.raw(), hts.flags, "{version} rec {i}: flags");
-            assert_eq!(cram.mapq, hts.mapq, "{version} rec {i}: mapq");
+            assert_eq!(cram.mapq, MappingQuality::from_byte(hts.mapq), "{version} rec {i}: mapq");
             assert_eq!(cram.seq_len as usize, hts.seq_len, "{version} rec {i}: seq_len");
             // rust-htslib's `cigar.end_pos()` is half-open (exclusive last+1).
             // seqair stores `end_pos` as 0-based inclusive last position

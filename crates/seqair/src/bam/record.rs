@@ -17,7 +17,7 @@
 
 use super::{BamHeader, MateFields};
 use crate::reader::Tid;
-use seqair_types::{BamFlags, Pos0};
+use seqair_types::{BamFlags, MappingQuality, Pos0};
 use std::num::NonZeroI32;
 
 /// Compute `end_pos` from raw BAM record bytes (before full decode).
@@ -102,7 +102,7 @@ pub(crate) struct ParsedHeader {
     /// Checked against the header by [`WireRefs::resolve`].
     pub refs: WireRefs,
     pub pos: Pos0,
-    pub mapq: u8,
+    pub mapq: MappingQuality,
     pub flags: BamFlags,
     pub n_cigar_ops: u16,
     pub seq_len: u32,
@@ -182,7 +182,7 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
     let name_len = raw[8] as usize;
     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
-    let mapq = raw[9];
+    let mapq = MappingQuality::from_byte(raw[9]);
     let n_cigar_ops = u16::from_le_bytes(read2(raw, 12));
     let flags = BamFlags::from(u16::from_le_bytes(read2(raw, 14)));
     let seq_len = u32::from_le_bytes(read4(raw, 16));
@@ -229,7 +229,7 @@ pub(crate) struct FixedHeaderFields {
     pub tid: Option<Tid>,
     pub pos: Option<Pos0>,
     pub bin: u16,
-    pub mapq: u8,
+    pub mapq: MappingQuality,
     /// `qname.len() + 1` (NUL terminator); caller validated qname ≤ 254 bytes.
     pub l_read_name: u8,
     pub flags: u16,
@@ -243,7 +243,8 @@ pub(crate) struct FixedHeaderFields {
 /// of [`parse_header`] and [`WireRefs::resolve`].
 pub(crate) fn encode_fixed_header(buf: &mut Vec<u8>, f: &FixedHeaderFields) {
     let pos = |p: Option<Pos0>| p.map_or(-1, Pos0::as_i32);
-    let bin_mq_nl = (u32::from(f.bin) << 16) | (u32::from(f.mapq) << 8) | u32::from(f.l_read_name);
+    let bin_mq_nl =
+        (u32::from(f.bin) << 16) | (u32::from(f.mapq.as_byte()) << 8) | u32::from(f.l_read_name);
     let flag_nc = (u32::from(f.flags) << 16) | u32::from(f.n_cigar_op);
     buf.extend_from_slice(&Tid::to_wire(f.tid).to_le_bytes());
     buf.extend_from_slice(&pos(f.pos).to_le_bytes());

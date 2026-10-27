@@ -20,7 +20,7 @@ r[bam.record.checked_offsets]
 Variable-length field offset calculations (var_start, cigar_end, seq_end, qual_end) MUST use checked arithmetic to prevent wrapping on malformed input. Overflow MUST return a decode error.
 
 r[bam.record.fields]
-The decoder MUST extract: tid (i32), pos (i32→i64), mapq (u8), flags (u16), seq_len (u32), n_cigar_ops (u16), qname (NUL-terminated, stored without NUL), packed sequence (4-bit), quality scores, CIGAR operations (packed u32), and raw auxiliary data.
+The decoder MUST extract: tid (i32), pos (i32→i64), mapq (`MappingQuality`), flags (u16), seq_len (u32), n_cigar_ops (u16), qname (NUL-terminated, stored without NUL), packed sequence (4-bit), quality scores, CIGAR operations (packed u32), and raw auxiliary data.
 
 r[bam.record.ref_ids]
 `push_raw` takes the file's header and MUST check a record's `tid` and `next_ref_id` against it: `-1` is `None`, an index of one of its targets is a `Tid`, and anything else — another negative value, or an index past the header's targets — MUST fail the record with `DecodeError::InvalidTid` / `InvalidMateTid`, as htslib's `sam_read1` fails it (`ERANGE`). `next_pos` `-1` is `None`; any other negative value MUST fail with `DecodeError::InvalidMatePosition`. So every `Tid` a store holds names a target of the header it was read with.

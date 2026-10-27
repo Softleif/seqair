@@ -22,6 +22,7 @@ use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
+use seqair_types::MappingQuality;
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::Command;
@@ -68,7 +69,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
             Some(Pos0::new(i * 10000).unwrap()),
             format!("c1r{i}").into_bytes(),
         )
-        .mapq(60)
+        .mapq(MappingQuality::from_byte(60))
         .cigar(vec![CigarOp::new(CigarOpType::Match, 150)])
         .seq(cyclic_seq(150))
         .qual(vec![BaseQuality::from_byte(30); 150])
@@ -84,7 +85,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
             Some(Pos0::new(i * 20000).unwrap()),
             format!("c2r{i}").into_bytes(),
         )
-        .mapq(50)
+        .mapq(MappingQuality::from_byte(50))
         .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
         .seq(cyclic_seq(100))
         .qual(vec![BaseQuality::from_byte(25); 100])
@@ -100,7 +101,7 @@ fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
             Some(Pos0::new(i * 30000).unwrap()),
             format!("c3r{i}").into_bytes(),
         )
-        .mapq(40)
+        .mapq(MappingQuality::from_byte(40))
         .cigar(vec![CigarOp::new(CigarOpType::Match, 80)])
         .seq(cyclic_seq(80))
         .qual(vec![BaseQuality::from_byte(20); 80])
@@ -343,7 +344,7 @@ fn indexed_reader_finds_csi_without_bam_infix() {
                 Some(Pos0::new(i * 10000).unwrap()),
                 format!("r{i}").into_bytes(),
             )
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
             .seq(cyclic_seq(100))
             .qual(vec![BaseQuality::from_byte(30); 100])
@@ -581,7 +582,7 @@ fn roundtrip_csi_preserves_query_chunks(tc: TestCase) {
             Some(Pos0::new(pos).unwrap()),
             format!("r{i}").into_bytes(),
         )
-        .mapq(60)
+        .mapq(MappingQuality::from_byte(60))
         .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
         .seq(cyclic_seq(100))
         .qual(vec![BaseQuality::from_byte(30); 100])

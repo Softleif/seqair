@@ -48,6 +48,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::{OwnedBamRecord, OwnedRecordError};
 use seqair::bam::writer::BamWriterBuilder;
+use seqair_types::MappingQuality;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
@@ -276,7 +277,7 @@ fn seed_record() -> OwnedBamRecord {
     let chr1 = header(SHORT_CONTIG_LEN).tid(CONTIG).unwrap();
     OwnedBamRecord::builder(Some(chr1), Some(Pos0::new(1_000).unwrap()), b"seed".to_vec())
         .flags(BamFlags::from(0x4))
-        .mapq(17)
+        .mapq(MappingQuality::from_byte(17))
         .build()
         .unwrap()
 }

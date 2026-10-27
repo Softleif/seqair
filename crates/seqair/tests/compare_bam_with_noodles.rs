@@ -17,6 +17,7 @@ use noodles::sam;
 use seqair::bam::RecordIdx;
 use seqair::bam::{Pos0, RejectUnmapped};
 use seqair_types::BaseQuality;
+use seqair_types::MappingQuality;
 use seqair_types::QPos;
 use std::path::Path;
 
@@ -195,7 +196,7 @@ fn bam_record_fields_match_noodles() {
 
             assert_eq!(r.pos.as_i64(), n.pos, "{contig} rec {i}: pos");
             assert_eq!(r.flags.raw(), n.flags, "{contig} rec {i}: flags");
-            assert_eq!(r.mapq, n.mapq, "{contig} rec {i}: mapq");
+            assert_eq!(r.mapq, MappingQuality::from_byte(n.mapq), "{contig} rec {i}: mapq");
             assert_eq!(
                 store.record(idx).unwrap().qname(),
                 n.qname.as_slice(),

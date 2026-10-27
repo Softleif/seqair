@@ -31,6 +31,7 @@ use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
+use seqair_types::MappingQuality;
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -95,7 +96,7 @@ fn make_methylation_record(
     aux.set_array_u8(*b"ML", ml_probs).unwrap();
 
     OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), name.to_vec())
-        .mapq(60)
+        .mapq(MappingQuality::from_byte(60))
         .cigar(vec![CigarOp::new(CigarOpType::Match, 20)])
         .seq(seq)
         .qual(vec![BaseQuality::from_byte(30); 20])
@@ -279,7 +280,7 @@ fn mm_ml_empty_values() {
             Some(Pos0::new(100).unwrap()),
             b"empty_mods".to_vec(),
         )
-        .mapq(60)
+        .mapq(MappingQuality::from_byte(60))
         .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
         .seq(vec![
             Base::A,
@@ -353,7 +354,7 @@ fn mm_ml_large_tags() {
 
     let records = vec![
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"long_read".to_vec())
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 1000)])
             .seq(seq)
             .qual(vec![BaseQuality::from_byte(30); 1000])
@@ -407,7 +408,7 @@ fn mm_ml_coexist_with_other_tags() {
 
     let records = vec![
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"multi_aux".to_vec())
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(vec![
                 Base::A,

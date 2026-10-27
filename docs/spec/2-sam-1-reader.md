@@ -49,7 +49,7 @@ The full header text (all `@` lines joined with newlines) MUST be stored in `Bam
 > | FLAG  | integer         | u16 (identical to BAM flags)                                               |
 > | RNAME | string          | converted to tid via header's `name_to_tid` map                            |
 > | POS   | 1-based integer | subtract 1 for 0-based internal pos (i64)                                  |
-> | MAPQ  | integer         | u8 (255 means unavailable)                                                 |
+> | MAPQ  | integer         | `MappingQuality` (255 is `UNAVAILABLE`)                                    |
 > | CIGAR | string          | parsed to `Vec<CigarOp>` (typed BAM-on-disk packed layout, see `r[bam.owned_record.cigar_op]`) |
 > | RNEXT | string          | `=` means same as RNAME, `*` means unavailable — not stored in RecordStore |
 > | PNEXT | integer         | not stored in RecordStore (mate info)                                      |

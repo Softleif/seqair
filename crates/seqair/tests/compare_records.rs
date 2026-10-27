@@ -18,6 +18,7 @@ use helpers::ri;
 use rust_htslib::bam::{self, Read as _};
 use seqair::bam::{Pos0, RejectUnmapped};
 use seqair_types::BaseQuality;
+use seqair_types::MappingQuality;
 use seqair_types::QPos;
 use std::path::Path;
 
@@ -241,7 +242,7 @@ fn record_fields_match() {
 
         assert_eq!(rio.pos.as_i64(), hts.pos, "pos mismatch at record {i}");
         assert_eq!(rio.flags.raw(), hts.flags, "flags mismatch at record {i}");
-        assert_eq!(rio.mapq, hts.mapq, "mapq mismatch at record {i}");
+        assert_eq!(rio.mapq, MappingQuality::from_byte(hts.mapq), "mapq mismatch at record {i}");
         assert_eq!(
             store.record(ri(u32::try_from(i).unwrap())).unwrap().qname(),
             hts.qname.as_slice(),

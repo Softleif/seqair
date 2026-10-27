@@ -14,6 +14,7 @@
 mod helpers;
 use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
+use seqair_types::MappingQuality;
 use seqair_types::QPos;
 use seqair_types::{BamFlags, Base, BaseQuality};
 
@@ -31,7 +32,7 @@ fn decode_record_into_slabs() {
     assert_eq!(store.len(), 1);
     let rec = store.record(idx).unwrap();
     assert_eq!(rec.pos, Pos0::new(100).unwrap());
-    assert_eq!(rec.mapq, 60);
+    assert_eq!(rec.mapq, MappingQuality::from_byte(60));
     assert_eq!(rec.flags, BamFlags::from(0x63));
     assert_eq!(rec.seq_len, 4);
 
@@ -220,7 +221,7 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
             Pos0::new(100).unwrap(), // pos
             Pos0::new(103).unwrap(), // end_pos (pos + 4M - 1)
             BamFlags::from(0x63),
-            60,
+            MappingQuality::from_byte(60),
             store_raw.record(idx_raw).unwrap().matching_bases,
             store_raw.record(idx_raw).unwrap().indel_bases,
             b"read1",

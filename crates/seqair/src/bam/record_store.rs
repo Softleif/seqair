@@ -17,7 +17,7 @@ use super::{
 };
 use crate::reader::Tid;
 use hashbrown::HashTable;
-use seqair_types::{BamFlags, Base, BaseQuality, Pos0, QPos};
+use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Pos0, QPos};
 use std::num::NonZeroU64;
 
 // r[impl record_store.qname_hash]
@@ -113,8 +113,9 @@ pub struct SlimRecord {
     pub flags: BamFlags,
     /// Number of CIGAR ops; bounded by BAM's u16 `l_op` field.
     pub n_cigar_ops: u16,
-    /// Mapping quality (0..=254; 255 = unavailable per `[SAM1] §1.4`).
-    pub mapq: u8,
+    // r[impl types.mapping_quality.field_type]
+    /// Mapping quality; see [`MappingQuality`] for the unavailable sentinel.
+    pub mapq: MappingQuality,
     /// Query sequence length in bases — also the qual slab length for this record.
     pub seq_len: u32,
     // r[impl perf.precompute_matches_indels]
@@ -755,7 +756,7 @@ impl<U> RecordStore<U> {
         pos: Pos0,
         end_pos: Pos0,
         flags: BamFlags,
-        mapq: u8,
+        mapq: MappingQuality,
         matching_bases: u32,
         indel_bases: u32,
         qname: &[u8],
@@ -940,8 +941,9 @@ pub struct FilterRawFields<'a> {
     pub end_pos: Option<Pos0>,
     /// BAM flags.
     pub flags: BamFlags,
-    /// Mapping quality (0..254).
-    pub mapq: u8,
+    // r[impl types.mapping_quality.field_type]
+    /// Mapping quality; see [`MappingQuality`] for the unavailable sentinel.
+    pub mapq: MappingQuality,
     /// Number of CIGAR ops.
     pub n_cigar_ops: u16,
     /// Query sequence length.
@@ -1064,7 +1066,8 @@ pub struct FilterRawFields<'a> {
 ///     type Extra = usize;
 ///
 ///     fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
-///         fields.mapq >= self.min_mapq
+///         // An unavailable MAPQ (255) passes, as with `samtools view -q`.
+///         fields.mapq.get().is_none_or(|q| q >= self.min_mapq)
 ///     }
 ///
 ///     fn compute(&mut self, rec: &SlimRecord, store: &RecordStore<usize>) -> usize {
@@ -1935,7 +1938,7 @@ pub(crate) mod tests {
     struct SeenFields {
         pos: u32,
         flags: u16,
-        mapq: u8,
+        mapq: MappingQuality,
         n_cigar_ops: u16,
         seq_len: u32,
         tid: Option<Tid>,
@@ -2057,7 +2060,7 @@ pub(crate) mod tests {
             Pos0::new(0).unwrap(),
             Pos0::new(0).unwrap(),
             BamFlags::empty(),
-            0,
+            MappingQuality::from_byte(0),
             0,
             0,
             b"read1",
@@ -2273,7 +2276,7 @@ pub(crate) mod tests {
                 Pos0::new(0).unwrap(),
                 Pos0::new(4).unwrap(),
                 BamFlags::empty(),
-                42,
+                MappingQuality::from_byte(42),
                 4,
                 0,
                 b"readY",
@@ -2308,7 +2311,7 @@ pub(crate) mod tests {
         impl CustomizeRecordStore for AssertReadX {
             type Extra = ();
             fn filter(&mut self, rec: &SlimRecord, store: &RecordStore<()>) -> bool {
-                assert_eq!(rec.mapq, 0);
+                assert_eq!(rec.mapq, MappingQuality::from_byte(0));
                 let qname = rec.qname(store).expect("qname slab must be readable");
                 assert_eq!(qname, b"readX");
                 true
@@ -2335,7 +2338,7 @@ pub(crate) mod tests {
                 Pos0::new(0).unwrap(),
                 Pos0::new(4).unwrap(),
                 BamFlags::empty(),
-                30,
+                MappingQuality::from_byte(30),
                 4,
                 0,
                 b"kept",
@@ -2360,7 +2363,7 @@ pub(crate) mod tests {
                 Pos0::new(10).unwrap(),
                 Pos0::new(14).unwrap(),
                 BamFlags::empty(),
-                30,
+                MappingQuality::from_byte(30),
                 4,
                 0,
                 b"dropped",
@@ -2391,7 +2394,7 @@ pub(crate) mod tests {
                 Pos0::new(100).unwrap(),
                 Pos0::new(105).unwrap(),
                 BamFlags::empty(),
-                30,
+                MappingQuality::from_byte(30),
                 5,
                 0,
                 b"read1",
@@ -2421,7 +2424,7 @@ pub(crate) mod tests {
                 Pos0::new(100).unwrap(),
                 Pos0::new(104).unwrap(), // 0-based inclusive, 5M: span = [100, 104]
                 BamFlags::empty(),       // mapped
-                30,
+                MappingQuality::from_byte(30),
                 5,
                 0,
                 b"read1",
@@ -2449,7 +2452,7 @@ pub(crate) mod tests {
                 Pos0::new(100).unwrap(),
                 Pos0::new(100).unwrap(), // htslib-compatible: end_pos = pos for unmapped
                 BamFlags::from(FLAG_UNMAPPED), // unmapped
-                0,
+                MappingQuality::from_byte(0),
                 100,
                 0,
                 b"read1",
@@ -2486,9 +2489,9 @@ pub(crate) mod tests {
                 pos,
                 pos, // end_pos = pos (htslib-compatible, as CRAM does at slice.rs:676)
                 BamFlags::from(FLAG_UNMAPPED),
-                0, // mapq = 0 (CRAM slice.rs:681)
-                0, // matching_bases = 0 (slice.rs:682)
-                0, // indel_bases = 0 (slice.rs:683)
+                MappingQuality::from_byte(0), // mapq = 0 (CRAM slice.rs:681)
+                0,                            // matching_bases = 0 (slice.rs:682)
+                0,                            // indel_bases = 0 (slice.rs:683)
                 b"cram_unmapped_read",
                 &[], // empty CIGAR (slice.rs:685)
                 bases,
@@ -2502,7 +2505,7 @@ pub(crate) mod tests {
 
         let rec = store.record(ri(0)).unwrap();
         assert!(rec.flags.is_unmapped(), "CRAM unmapped reads must have FLAG_UNMAPPED");
-        assert_eq!(rec.mapq, 0, "CRAM unmapped reads must have MAPQ=0");
+        assert_eq!(rec.mapq, MappingQuality::from_byte(0), "CRAM unmapped reads must have MAPQ=0");
         assert_eq!(rec.end_pos, pos, "CRAM unmapped reads must have end_pos == pos");
         assert_eq!(rec.seq_len, 4, "CRAM unmapped reads retain decoded sequence");
         assert_eq!(rec.matching_bases, 0, "CRAM unmapped reads have zero matching_bases");
@@ -2609,7 +2612,7 @@ pub(crate) mod tests {
                         pos,
                         end_pos,
                         flags,
-                        30,
+                        MappingQuality::from_byte(30),
                         self.bases,
                         self.deletion,
                         format!("r{i}").as_bytes(),
@@ -2954,7 +2957,7 @@ pub(crate) mod tests {
             quals: Vec<u8>,
             aux: Vec<u8>,
             pos: u32,
-            mapq: u8,
+            mapq: MappingQuality,
             /// Single M op whose length matches `bases.len()`; kept trivial so
             /// the invariant we're testing stays isolated to rollback, not
             /// CIGAR math.
@@ -3003,7 +3006,15 @@ pub(crate) mod tests {
             let mapq = tc.draw_silent(gs::integers::<u8>().max_value(60));
             let accept = tc.draw_silent(gs::booleans());
             let quals = bases.iter().map(|_| 30u8).collect();
-            PushInput { qname, bases, quals, aux, pos, mapq, accept }
+            PushInput {
+                qname,
+                bases,
+                quals,
+                aux,
+                pos,
+                mapq: MappingQuality::from_byte(mapq),
+                accept,
+            }
         }
 
         fn arb_push_inputs(max: usize) -> impl PrintableGenerator<Vec<PushInput>> {
@@ -3363,7 +3374,7 @@ pub(crate) mod tests {
             qname: Vec<u8>,
             seq_len: u32,
             pos: i32,
-            mapq: u8,
+            mapq: MappingQuality,
             accept: bool,
             /// Raw BAM aux bytes, so the record reaches the aux slab too.
             aux: Vec<u8>,
@@ -3388,11 +3399,17 @@ pub(crate) mod tests {
             } else {
                 Vec::new()
             };
-            RawInput { qname, seq_len, pos, mapq, accept, aux }
+            RawInput { qname, seq_len, pos, mapq: MappingQuality::from_byte(mapq), accept, aux }
         }
 
         fn push_raw_one(store: &mut RecordStore<()>, input: &RawInput) -> Option<RecordIdx> {
-            let raw = build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq, &input.aux);
+            let raw = build_bam_raw(
+                &input.qname,
+                input.seq_len,
+                input.pos,
+                input.mapq.as_byte(),
+                &input.aux,
+            );
             store
                 .push_raw(&raw, crate::bam::test_util::header(), &mut AcceptFlag(input.accept))
                 .expect("synthetic BAM record is always parseable")
@@ -3422,8 +3439,13 @@ pub(crate) mod tests {
             let mut late_idx = Vec::new();
 
             for input in &inputs {
-                let raw =
-                    build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq, &input.aux);
+                let raw = build_bam_raw(
+                    &input.qname,
+                    input.seq_len,
+                    input.pos,
+                    input.mapq.as_byte(),
+                    &input.aux,
+                );
                 early_idx.push(
                     early
                         .push_raw(
@@ -3466,8 +3488,13 @@ pub(crate) mod tests {
             let mut customize = observer.clone();
             let mut store = RecordStore::new();
             for input in &inputs {
-                let raw =
-                    build_bam_raw(&input.qname, input.seq_len, input.pos, input.mapq, &input.aux);
+                let raw = build_bam_raw(
+                    &input.qname,
+                    input.seq_len,
+                    input.pos,
+                    input.mapq.as_byte(),
+                    &input.aux,
+                );
                 store
                     .push_raw(&raw, crate::bam::test_util::header(), &mut customize)
                     .expect("push");

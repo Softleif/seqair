@@ -33,6 +33,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
+use seqair_types::MappingQuality;
 use seqair_types::bam_flags::BamFlags;
 use seqair_types::{Base, BaseQuality};
 
@@ -45,7 +46,7 @@ fn write_bam_with_aux(dir: &std::path::Path, aux: AuxData) -> std::path::PathBuf
     let chr1 = header.tid("chr1").unwrap();
     let rec = OwnedBamRecord::builder(Some(chr1), Some(Pos0::new(100).unwrap()), b"r1".to_vec())
         .flags(BamFlags::empty())
-        .mapq(60)
+        .mapq(MappingQuality::from_byte(60))
         .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])
         .seq(vec![Base::A, Base::C, Base::G, Base::T])
         .qual(vec![BaseQuality::from_byte(30); 4])

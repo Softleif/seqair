@@ -41,6 +41,7 @@ use seqair::vcf::{
     Alleles, ContigDef, ContigId, Genotype, Number, OutputFormat, ValueType, VcfError, VcfHeader,
     VcfHeaderError, Writer,
 };
+use seqair_types::MappingQuality;
 use seqair_types::bam_flags::BamFlags;
 use seqair_types::{Base, BaseQuality, Pos1};
 use std::collections::BTreeMap;
@@ -140,7 +141,7 @@ fn corpus() -> &'static Corpus {
                 read_name(i),
             )
             .flags(BamFlags::empty())
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
             .seq(seq)
             .qual(qual)
@@ -462,7 +463,7 @@ fn mapped_record(on_chr1: bool, pos: u32, name: &str, len: usize) -> OwnedBamRec
         name.as_bytes().to_vec(),
     )
     .flags(BamFlags::empty())
-    .mapq(60)
+    .mapq(MappingQuality::from_byte(60))
     .cigar(vec![CigarOp::new(CigarOpType::Match, len as u32)])
     .seq(vec![Base::A; len])
     .qual(vec![BaseQuality::from_byte(30); len])

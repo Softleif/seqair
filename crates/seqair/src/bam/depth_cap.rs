@@ -193,7 +193,7 @@ mod tests {
     use super::*;
     use crate::bam::record_store::Sequence;
     use crate::bam::test_util::tid;
-    use seqair_types::BamFlags;
+    use seqair_types::{BamFlags, MappingQuality};
 
     /// One `<len>M` CIGAR op as raw BAM bytes.
     fn match_cigar(len: u32) -> Vec<u8> {
@@ -206,7 +206,7 @@ mod tests {
             pos,
             end_pos: None,
             flags: BamFlags::empty(),
-            mapq: 60,
+            mapq: MappingQuality::from_byte(60),
             n_cigar_ops: 1,
             seq_len: 0,
             matching_bases: 0,

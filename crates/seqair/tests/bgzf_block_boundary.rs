@@ -26,6 +26,7 @@ use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
+use seqair_types::MappingQuality;
 use seqair_types::QPos;
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
@@ -74,7 +75,7 @@ fn cyclic_seq(n: usize) -> Vec<Base> {
 /// Multiple such records ensure block boundaries are exercised.
 fn make_large_record(pos: u32, name: &[u8], seq_len: u32) -> OwnedBamRecord {
     OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), name.to_vec())
-        .mapq(60)
+        .mapq(MappingQuality::from_byte(60))
         .cigar(vec![CigarOp::new(CigarOpType::Match, seq_len)])
         .seq(cyclic_seq(seq_len as usize))
         .qual(vec![BaseQuality::from_byte(30); seq_len as usize])
@@ -94,7 +95,7 @@ fn make_long_cigar_record(pos: u32, name: &[u8]) -> OwnedBamRecord {
     let query_len = 4000u32; // 2000 M + 2000 I
 
     OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), name.to_vec())
-        .mapq(50)
+        .mapq(MappingQuality::from_byte(50))
         .cigar(cigar)
         .seq(cyclic_seq(query_len as usize))
         .qual(vec![BaseQuality::from_byte(25); query_len as usize])
@@ -148,7 +149,7 @@ fn large_records_spanning_blocks() {
     for i in store.indices() {
         let r = store.record(i).unwrap();
         assert_eq!(r.seq_len, 8000, "rec {i}: seq_len");
-        assert_eq!(r.mapq, 60, "rec {i}: mapq");
+        assert_eq!(r.mapq, MappingQuality::from_byte(60), "rec {i}: mapq");
 
         // Verify sequence content (cyclic ACGT pattern)
         for pos in 0..100 {
@@ -233,7 +234,7 @@ fn mixed_record_sizes_across_boundaries() {
                     Some(Pos0::new(pos).unwrap()),
                     name.into_bytes(),
                 )
-                .mapq(30)
+                .mapq(MappingQuality::from_byte(30))
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 50)])
                 .seq(cyclic_seq(50))
                 .qual(vec![BaseQuality::from_byte(30); 50])

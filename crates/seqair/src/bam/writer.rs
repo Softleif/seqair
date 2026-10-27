@@ -547,6 +547,7 @@ mod tests {
     use seqair_types::BamFlags;
     use seqair_types::Base;
     use seqair_types::BaseQuality;
+    use seqair_types::MappingQuality;
     use seqair_types::Pos0;
 
     fn test_header() -> BamHeader {
@@ -558,7 +559,7 @@ mod tests {
 
     fn test_record(tid: Option<Tid>, pos: u32, qname: &[u8]) -> OwnedBamRecord {
         OwnedBamRecord::builder(tid, Some(Pos0::new(pos).unwrap()), qname.to_vec())
-            .mapq(30)
+            .mapq(MappingQuality::from_byte(30))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
             .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
@@ -618,7 +619,7 @@ mod tests {
         let idx0 = push_one_record_from_bgzf(&mut reader, &mut store);
         assert_eq!(store.record(idx0).unwrap().qname(), b"read1");
         assert_eq!(store.record(idx0).unwrap().pos.as_u32(), 100);
-        assert_eq!(store.record(idx0).unwrap().mapq, 30);
+        assert_eq!(store.record(idx0).unwrap().mapq, MappingQuality::from_byte(30));
 
         let idx1 = push_one_record_from_bgzf(&mut reader, &mut store);
         assert_eq!(store.record(idx1).unwrap().qname(), b"read2");
@@ -637,7 +638,7 @@ mod tests {
         let bad_rec = OwnedBamRecord {
             tid: Some(tid(0)),
             pos: Some(Pos0::new(0).unwrap()),
-            mapq: 0,
+            mapq: MappingQuality::from_byte(0),
             flags: BamFlags::empty(),
             mate_fields: MateFields::default(),
             qname: vec![b'A'; 255], // too long
@@ -781,7 +782,7 @@ mod tests {
         let mut store = RecordStore::new();
         let rec1 =
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"read1".to_vec())
-                .mapq(30)
+                .mapq(MappingQuality::from_byte(30))
                 .flags(BamFlags::from(0x63))
                 .mate_fields(MateFields {
                     tid: Some(tid(1)),
@@ -800,7 +801,7 @@ mod tests {
                 .unwrap();
         let rec2 =
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(200).unwrap()), b"read2".to_vec())
-                .mapq(60)
+                .mapq(MappingQuality::from_byte(60))
                 .cigar(vec![
                     CigarOp::new(CigarOpType::SoftClip, 2),
                     CigarOp::new(CigarOpType::Match, 3),
@@ -885,7 +886,7 @@ mod tests {
         let mut store = RecordStore::new();
         let recs = [
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"m1".to_vec())
-                .mapq(30)
+                .mapq(MappingQuality::from_byte(30))
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
                 .seq(vec![Base::A, Base::C, Base::G])
                 .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
@@ -898,7 +899,7 @@ mod tests {
                 .build()
                 .unwrap(),
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(300).unwrap()), b"m2".to_vec())
-                .mapq(60)
+                .mapq(MappingQuality::from_byte(60))
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])
                 .seq(vec![Base::G, Base::T, Base::A, Base::C])
                 .qual([33, 34, 35, 36].map(BaseQuality::from_byte).to_vec())

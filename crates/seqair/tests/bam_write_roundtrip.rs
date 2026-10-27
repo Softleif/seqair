@@ -25,6 +25,7 @@ use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, MateFields, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
+use seqair_types::MappingQuality;
 use seqair_types::bam_flags::BamFlags;
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
@@ -91,7 +92,7 @@ fn roundtrip_simple_records() {
     let records = vec![
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"read1".to_vec())
             .flags(BamFlags::empty())
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 10)])
             .seq(vec![
                 Base::A,
@@ -110,7 +111,7 @@ fn roundtrip_simple_records() {
             .unwrap(),
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(200).unwrap()), b"read2".to_vec())
             .flags(BamFlags::from(16)) // reverse
-            .mapq(50)
+            .mapq(MappingQuality::from_byte(50))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 8)])
             .seq(vec![Base::T, Base::G, Base::C, Base::A, Base::T, Base::G, Base::C, Base::A])
             .qual([40, 41, 42, 43, 44, 45, 46, 47].map(BaseQuality::from_byte).to_vec())
@@ -179,7 +180,7 @@ fn roundtrip_complex_cigars() {
     let records = vec![
         // Soft clips + insertion + deletion
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"complex1".to_vec())
-            .mapq(40)
+            .mapq(MappingQuality::from_byte(40))
             .cigar(vec![
                 CigarOp::new(CigarOpType::SoftClip, 2),
                 CigarOp::new(CigarOpType::Match, 3),
@@ -195,7 +196,7 @@ fn roundtrip_complex_cigars() {
             .unwrap(),
         // Hard clips + intron (N op) — query length = 3+5 = 8
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(500).unwrap()), b"intron1".to_vec())
-            .mapq(55)
+            .mapq(MappingQuality::from_byte(55))
             .cigar(vec![
                 CigarOp::new(CigarOpType::HardClip, 5),
                 CigarOp::new(CigarOpType::Match, 3),
@@ -209,7 +210,7 @@ fn roundtrip_complex_cigars() {
             .unwrap(),
         // SeqMatch/SeqMismatch ops — query length = 5+3+4 = 12
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(800).unwrap()), b"exact1".to_vec())
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![
                 CigarOp::new(CigarOpType::SeqMatch, 5),
                 CigarOp::new(CigarOpType::SeqMismatch, 3),
@@ -317,7 +318,7 @@ fn roundtrip_aux_tags() {
 
     let records = vec![
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"aux_read".to_vec())
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
             .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
@@ -348,14 +349,14 @@ fn roundtrip_multiple_contigs() {
 
     let records = vec![
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"chr1_read".to_vec())
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
             .qual(vec![BaseQuality::from_byte(30); 5])
             .build()
             .unwrap(),
         OwnedBamRecord::builder(Some(tid(1)), Some(Pos0::new(200).unwrap()), b"chr2_read".to_vec())
-            .mapq(50)
+            .mapq(MappingQuality::from_byte(50))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 6)])
             .seq(vec![Base::T, Base::G, Base::C, Base::A, Base::T, Base::G])
             .qual(vec![BaseQuality::from_byte(35); 6])
@@ -401,7 +402,7 @@ fn index_coproduction_matches_samtools() {
                 Some(Pos0::new(i * 1000).unwrap()),
                 format!("read{i}").into_bytes(),
             )
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
             .seq(
                 (0..100)
@@ -462,7 +463,7 @@ fn roundtrip_paired_end() {
     let records = vec![
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"pair1".to_vec())
             .flags(BamFlags::from(99)) // paired, proper, mate reverse, read1
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5.clone())
             .qual(vec![BaseQuality::from_byte(30); 5])
@@ -475,7 +476,7 @@ fn roundtrip_paired_end() {
             .unwrap(),
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(200).unwrap()), b"pair1".to_vec())
             .flags(BamFlags::from(147)) // paired, proper, reverse, read2
-            .mapq(55)
+            .mapq(MappingQuality::from_byte(55))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5)
             .qual(vec![BaseQuality::from_byte(35); 5])
@@ -518,7 +519,7 @@ fn roundtrip_write_store_record() {
     let records = vec![
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"sr1".to_vec())
             .flags(BamFlags::from(99))
-            .mapq(60)
+            .mapq(MappingQuality::from_byte(60))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(seq5.clone())
             .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
@@ -536,7 +537,7 @@ fn roundtrip_write_store_record() {
             .unwrap(),
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(300).unwrap()), b"sr1".to_vec())
             .flags(BamFlags::from(147))
-            .mapq(55)
+            .mapq(MappingQuality::from_byte(55))
             .cigar(vec![
                 CigarOp::new(CigarOpType::SoftClip, 1),
                 CigarOp::new(CigarOpType::Match, 4),
@@ -695,7 +696,7 @@ mod e2e_oracle {
                     Pos0::new(inp.pos).unwrap(),
                     Pos0::new(inp.pos + inp.bases.len() as u32 - 1).unwrap(),
                     BamFlags::empty(),
-                    inp.mapq,
+                    MappingQuality::from_byte(inp.mapq),
                     inp.bases.len() as u32, // matching_bases for 1×M CIGAR
                     0,
                     &inp.qname,
@@ -743,7 +744,7 @@ mod e2e_oracle {
             let idx = ri(u32::try_from(i).unwrap());
             let rec = store2.record(idx).unwrap();
             assert_eq!(rec.pos.as_i32() as u32, inp.pos, "pos rec {}", i);
-            assert_eq!(rec.mapq, inp.mapq, "mapq rec {}", i);
+            assert_eq!(rec.mapq, MappingQuality::from_byte(inp.mapq), "mapq rec {}", i);
             assert_eq!(rec.seq_len as usize, inp.bases.len(), "seq_len rec {}", i);
             assert_eq!(
                 store2.record(idx).unwrap().qname(),

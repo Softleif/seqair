@@ -12,7 +12,7 @@ use crate::bam::{
 use crate::io::text_scan;
 use crate::reader::{ResolveTid, Tid};
 use core::range::RangeInclusive;
-use seqair_types::{Base, Pos0, Pos1};
+use seqair_types::{Base, MappingQuality, Pos0, Pos1};
 use std::num::NonZeroI32;
 use std::{
     fs::File,
@@ -566,6 +566,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     // Field 5: MAPQ
     let mapq_field = fields.get(4).copied().unwrap_or(b"0");
     let mapq = parse_u8(mapq_field)
+        .map(MappingQuality::from_byte)
         .ok_or_else(|| SamRecordError::InvalidMapq { value: mapq_field.into() })?;
 
     // Field 6: CIGAR
@@ -1247,6 +1248,31 @@ mod tests {
         let line = b"r\t4\t*\t0\t0\t*\t*\t0\t0\tACGTACGTAC\tIIIIIIIIII";
         let result = call_parse(line, &header).expect("RNAME=* must not error");
         assert_eq!(result, None, "RNAME=* record should be skipped");
+    }
+
+    // r[verify types.mapping_quality.field_type]
+    #[test]
+    fn mapq_255_is_unavailable() {
+        let header = make_header();
+        let (mut store, mut cigar_buf, mut bases_buf, mut qual_buf, mut aux_buf) =
+            make_store_and_bufs();
+        let line = b"r\t0\tchr1\t100\t255\t4M\t*\t0\t0\tACGT\t~~~~";
+        parse_sam_line(
+            line,
+            &header,
+            tid(0),
+            0,
+            10000,
+            &mut store,
+            &mut cigar_buf,
+            &mut bases_buf,
+            &mut qual_buf,
+            &mut aux_buf,
+            &mut (),
+        )
+        .expect("MAPQ 255 is valid SAM");
+        let rec = store.records().next().expect("record kept");
+        assert_eq!(rec.mapq, MappingQuality::UNAVAILABLE);
     }
 
     #[test]

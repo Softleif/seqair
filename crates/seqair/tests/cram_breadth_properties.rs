@@ -469,7 +469,7 @@ fn decode_store<E: Default>(store: &RecordStore<E>) -> Vec<Decoded> {
                 qname: rec.qname().to_vec(),
                 pos: rec.pos.as_i64(),
                 flags: rec.flags.raw(),
-                mapq: rec.mapq,
+                mapq: rec.mapq.as_byte(),
                 cigar: rec.cigar().iter().map(ToString::to_string).collect::<String>(),
                 seq: rec.seq().iter().map(|b| **b).collect(),
                 qual: seqair_types::BaseQuality::slice_to_bytes(rec.qual()).to_vec(),

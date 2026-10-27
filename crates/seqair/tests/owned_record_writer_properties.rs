@@ -34,6 +34,7 @@ use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{MateFields, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
+use seqair_types::MappingQuality;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -376,7 +377,7 @@ fn write_bam(dir: &Path, records: &[Record]) -> std::path::PathBuf {
             format!("r{i}").into_bytes(),
         )
         .flags(BamFlags::from(rec.flags))
-        .mapq(rec.mapq)
+        .mapq(MappingQuality::from_byte(rec.mapq))
         .cigar(rec.cigar.iter().map(|&(len, op)| CigarOp::new(op, len)).collect())
         .seq(rec.seq.clone())
         .qual(rec.qual.iter().copied().map(BaseQuality::from_byte).collect())
@@ -561,7 +562,7 @@ fn built_records_read_back_through_seqair(tc: TestCase) {
             all.push(Decoded {
                 pos: r.pos.as_u32(),
                 flags: r.flags.raw(),
-                mapq: r.mapq,
+                mapq: r.mapq.as_byte(),
                 seq: r.seq().to_vec(),
                 qual: BaseQuality::slice_to_bytes(r.qual()).to_vec(),
                 next_ref_id: r.mate_fields.tid.map(Tid::as_usize),

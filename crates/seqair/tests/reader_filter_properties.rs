@@ -45,6 +45,7 @@ use seqair::bam::record_store::{CustomizeRecordStore, FilterRawFields, RecordSto
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0};
 use seqair::reader::{FetchCounts, Readers};
+use seqair_types::MappingQuality;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -177,7 +178,7 @@ fn write_inputs(dir: &Path, reads: &[Read]) -> (PathBuf, PathBuf) {
             format!("r{i}").into_bytes(),
         )
         .flags(BamFlags::from(read.flags))
-        .mapq(read.mapq)
+        .mapq(MappingQuality::from_byte(read.mapq))
         .cigar(read.cigar.iter().map(|&(len, op)| CigarOp::new(op, len)).collect())
         .seq(vec![base; read.seq_len as usize])
         .qual(vec![BaseQuality::from_byte(30); read.seq_len as usize])
@@ -387,7 +388,7 @@ impl CustomizeRecordStore for ClauseFilter {
         }
         self.pred.accepts(
             fields.flags.raw(),
-            fields.mapq,
+            fields.mapq.as_byte(),
             ref_span_from_cigar_bytes(fields.cigar),
             fields.qname,
         )
@@ -398,7 +399,7 @@ impl CustomizeRecordStore for ClauseFilter {
             return true;
         }
         let qname = rec.qname(store).expect("a just-pushed record's name is in the slab");
-        self.pred.accepts(rec.flags.raw(), rec.mapq, span_of(rec.pos, rec.end_pos), qname)
+        self.pred.accepts(rec.flags.raw(), rec.mapq.as_byte(), span_of(rec.pos, rec.end_pos), qname)
     }
 
     fn compute(&mut self, _rec: &SlimRecord, _store: &RecordStore<()>) {}
@@ -450,7 +451,7 @@ fn snapshot(store: &RecordStore) -> Vec<Snapshot> {
                 pos: rec.pos.as_u64(),
                 end_pos: rec.end_pos.as_u64(),
                 flags: rec.flags.raw(),
-                mapq: rec.mapq,
+                mapq: rec.mapq.as_byte(),
                 n_cigar_ops: rec.n_cigar_ops,
                 seq_len: rec.seq_len,
                 matching_bases: rec.matching_bases,

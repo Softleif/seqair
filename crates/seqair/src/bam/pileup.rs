@@ -7,7 +7,7 @@
 //! the store in the first place.
 
 use core::range::RangeInclusive;
-use seqair_types::{BamFlags, Base, BaseQuality, Offset, Pos0, QPos};
+use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Offset, Pos0, QPos};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 use std::{num::NonZeroU32, ops::Range, rc::Rc};
 
@@ -170,7 +170,7 @@ struct ActiveRecord {
     rec_pos: Pos0,
     // Cached from SlimRecord to avoid store lookups in the hot loop
     flags: BamFlags,
-    mapq: u8,
+    mapq: MappingQuality,
     seq_len: u32,
     /// Slab offsets of this read's bases and qualities, so a column resolves
     /// its base without a dependent load of the `SlimRecord`.
@@ -757,7 +757,8 @@ pub enum Indel {
 pub struct PileupAlignment {
     record_idx: RecordIdx,
     pub op: PileupOp,
-    pub mapq: u8,
+    // r[impl types.mapping_quality.field_type]
+    pub mapq: MappingQuality,
     pub flags: BamFlags,
     pub seq_len: u32,
     pub matching_bases: u32,
@@ -1514,7 +1515,7 @@ mod tests {
                 Pos0::new(100).unwrap(),
                 Pos0::new(104).unwrap(),
                 BamFlags::empty(),
-                30,
+                MappingQuality::from_byte(30),
                 5,
                 0,
                 b"read1",
@@ -1564,7 +1565,7 @@ mod tests {
                     Pos0::new(0).unwrap(),
                     Pos0::new(end).unwrap(),
                     BamFlags::empty(),
-                    30,
+                    MappingQuality::from_byte(30),
                     *span,
                     0,
                     format!("read{i}").as_bytes(),
@@ -1628,7 +1629,7 @@ mod tests {
                 Pos0::new(100).unwrap(),
                 Pos0::new(104).unwrap(),
                 BamFlags::empty(),
-                30,
+                MappingQuality::from_byte(30),
                 5,
                 0,
                 b"clip_read",
@@ -1688,7 +1689,7 @@ mod tests {
                 Pos0::new(100).unwrap(),
                 Pos0::new(104).unwrap(),
                 BamFlags::empty(),
-                30,
+                MappingQuality::from_byte(30),
                 5,
                 0,
                 b"clip_read",
@@ -1815,7 +1816,7 @@ mod tests {
                         Pos0::new(r.pos).unwrap(),
                         Pos0::new(r.aln_end() - 1).unwrap(),
                         BamFlags::empty(),
-                        60,
+                        MappingQuality::from_byte(60),
                         r.a + r.b,
                         0,
                         format!("r{i}").as_bytes(),
@@ -1944,7 +1945,7 @@ mod tests {
                 Pos0::new(pos).unwrap(),
                 Pos0::new(pos + 2).unwrap(), // end_pos = i32::MAX - 2
                 BamFlags::empty(),
-                60,
+                MappingQuality::from_byte(60),
                 3,
                 0,
                 b"edge_read",
@@ -1998,7 +1999,7 @@ mod tests {
                 Pos0::new(2).unwrap(),
                 Pos0::new(3).unwrap(),
                 BamFlags::empty(),
-                60,
+                MappingQuality::from_byte(60),
                 2,
                 0,
                 b"zero_read",
@@ -2050,7 +2051,7 @@ mod tests {
                 Pos0::new(0).unwrap(),
                 Pos0::new(5).unwrap(),
                 BamFlags::empty(),
-                30,
+                MappingQuality::from_byte(30),
                 6,
                 2,
                 b"ins_read",
@@ -2101,7 +2102,7 @@ mod tests {
                     Pos0::new(0).unwrap(),
                     Pos0::new(last_ref_pos).unwrap(),
                     BamFlags::empty(),
-                    30,
+                    MappingQuality::from_byte(30),
                     6,
                     0,
                     b"r",
@@ -2174,7 +2175,7 @@ mod tests {
                     Pos0::new(0).unwrap(),
                     Pos0::new(49).unwrap(),
                     BamFlags::empty(),
-                    30,
+                    MappingQuality::from_byte(30),
                     50,
                     0,
                     format!("read{i}").as_bytes(),

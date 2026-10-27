@@ -21,7 +21,7 @@ use super::cigar::CigarOp;
 use super::seq;
 use crate::io::reg2bin;
 use crate::reader::Tid;
-use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
+use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Pos0};
 use thiserror::Error;
 
 /// Errors from owned record construction or serialization.
@@ -71,7 +71,8 @@ pub struct OwnedBamRecord {
     /// wire `-1`); `Some(p)` for any in-range mapping. Construction via
     /// [`Pos0`] makes overflow unconstructable.
     pub pos: Option<Pos0>,
-    pub mapq: u8,
+    // r[impl types.mapping_quality.field_type]
+    pub mapq: MappingQuality,
     pub flags: BamFlags,
     /// RNEXT, PNEXT and TLEN; see [`MateFields`].
     pub mate_fields: MateFields,
@@ -87,7 +88,7 @@ pub struct OwnedBamRecord {
 pub struct OwnedBamRecordBuilder {
     tid: Option<Tid>,
     pos: Option<Pos0>,
-    mapq: u8,
+    mapq: MappingQuality,
     flags: BamFlags,
     mate_fields: MateFields,
     qname: Vec<u8>,
@@ -103,7 +104,7 @@ impl OwnedBamRecordBuilder {
         self.flags = flags;
         self
     }
-    pub fn mapq(mut self, mapq: u8) -> Self {
+    pub fn mapq(mut self, mapq: MappingQuality) -> Self {
         self.mapq = mapq;
         self
     }
@@ -175,7 +176,7 @@ impl OwnedBamRecord {
         OwnedBamRecordBuilder {
             tid,
             pos,
-            mapq: 0,
+            mapq: MappingQuality::from_byte(0),
             flags: BamFlags::empty(),
             mate_fields: MateFields::default(),
             qname,
@@ -402,7 +403,7 @@ mod tests {
     fn simple_record() -> OwnedBamRecord {
         OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"read1".to_vec())
             .flags(BamFlags::empty()) // mapped
-            .mapq(30)
+            .mapq(MappingQuality::from_byte(30))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
             .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
             .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
@@ -425,11 +426,26 @@ mod tests {
 
         assert_eq!(decoded.tid, Some(tid(0)));
         assert_eq!(decoded.pos.as_u32(), 100);
-        assert_eq!(decoded.mapq, 30);
+        assert_eq!(decoded.mapq, MappingQuality::from_byte(30));
         assert_eq!(decoded.flags, BamFlags::empty());
         assert_eq!(decoded.seq_len, 5);
         assert_eq!(decoded.n_cigar_ops, 1);
         assert_eq!(store.record(ri(0)).unwrap().qname(), b"read1");
+    }
+
+    // r[verify types.mapping_quality.field_type]
+    #[test]
+    fn unavailable_mapq_survives_the_bam_roundtrip() {
+        let mut rec = simple_record();
+        rec.mapq = MappingQuality::UNAVAILABLE;
+        let mut buf = Vec::new();
+        rec.to_bam_bytes(&mut buf).unwrap();
+        assert_eq!(buf.get(9), Some(&255), "BAM mapq byte");
+
+        let store = decode_into_store(&buf);
+        let decoded = store.record(ri(0)).unwrap();
+        assert_eq!(decoded.mapq, MappingQuality::UNAVAILABLE);
+        assert_eq!(decoded.mapq.get(), None);
     }
 
     #[test]

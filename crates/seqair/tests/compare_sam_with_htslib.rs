@@ -20,6 +20,7 @@ use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::ResolveTid;
 use seqair::sam::reader::IndexedSamReader;
 use seqair_types::BaseQuality;
+use seqair_types::MappingQuality;
 use seqair_types::QPos;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -171,7 +172,7 @@ fn sam_record_fields_match_htslib() {
             // htslib end_pos is exclusive (past-the-end), ours is inclusive
             assert_eq!(r.end_pos.as_i64(), h.end_pos - 1, "{contig} rec {i}: end_pos");
             assert_eq!(r.flags.raw(), h.flags, "{contig} rec {i}: flags");
-            assert_eq!(r.mapq, h.mapq, "{contig} rec {i}: mapq");
+            assert_eq!(r.mapq, MappingQuality::from_byte(h.mapq), "{contig} rec {i}: mapq");
             assert_eq!(
                 store.record(idx).unwrap().qname(),
                 h.qname.as_slice(),

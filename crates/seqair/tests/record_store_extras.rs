@@ -218,7 +218,7 @@ fn engine_accepts_typed_store() {
     impl CustomizeRecordStore for ExtractMapq {
         type Extra = u8;
         fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<u8>) -> u8 {
-            rec.mapq
+            rec.mapq.as_byte()
         }
     }
 
@@ -297,7 +297,7 @@ fn engine_reclaim_allocation_clears_records_and_keeps_capacity() {
     impl CustomizeRecordStore for ExtractMapqU32 {
         type Extra = u32;
         fn compute(&mut self, rec: &SlimRecord, _: &RecordStore<u32>) -> u32 {
-            rec.mapq as u32
+            u32::from(rec.mapq.as_byte())
         }
     }
 
@@ -439,7 +439,7 @@ struct MinMapq {
 impl CustomizeRecordStore for MinMapq {
     type Extra = ();
     fn filter(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
-        rec.mapq >= self.threshold
+        rec.mapq.get().is_none_or(|q| q >= self.threshold)
     }
     fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
 }
@@ -469,7 +469,7 @@ fn keep_record_drops_low_mapq_records_via_push_raw() {
 
     assert_eq!(store.len(), 4, "records with mapq < 20 should be dropped");
     for (i, rec) in store.records().enumerate() {
-        assert!(rec.mapq >= 20, "kept record at idx {i} below threshold");
+        assert!(rec.mapq.get().is_some_and(|q| q >= 20), "kept record at idx {i} below threshold");
     }
 }
 
