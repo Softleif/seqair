@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.8.0 (2026-10-27)
+
+### Breaking
+
+- **seqair-types 0.4.0**, whose `Strand` has no `Unknown` (see its changelog).
+- **MAPQ is a `seqair_types::MappingQuality`**, not a `u8`: `SlimRecord::mapq`, `FilterRawFields::mapq`, `PileupAlignment::mapq`, `OwnedBamRecord::mapq`, `OwnedBamRecordBuilder::mapq` and the `mapq` argument of `RecordStore::push_fields`. 255 ("not available", `[SAM1] §1.4`) reads as `get() == None` instead of the most confident MAPQ there is. There is no `Ord`; a minimum-MAPQ filter spells out what unavailable does, e.g. `mapq.get().is_none_or(|q| q >= min)` for the samtools `-q` convention (255 passes). Wrap a literal with `MappingQuality::from_byte`, write the wire byte with `as_byte()`.
+- **`Modification::probability` is a `seqair_types::ModProbability`**, not a `u8`: the `ML` byte `x` is the range `[x/256, (x+1)/256)`, not a 0–255 probability. `as_byte()` gives the byte back, `midpoint()` the probability `(x + 0.5) / 256`; it is `Ord` by the byte.
 
 ### Performance
 
@@ -14,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AVX-512, where the renormalization zero-extends the next sixteen u16s and expands them into the
   lanes that need one (htscodecs' AVX-512 technique); there order 1 indexes its table in 32 bits
   so the loads gather eight lanes at a time. SSE2, SSE4.2 and NEON keep the 4-lane kernels.
-  Output is unchanged.
+  Output is unchanged. Thanks to [Dylan Costo](https://github.com/DylanCosto) for these kernels
+  ([#83](https://github.com/Softleif/seqair/pull/83)).
 - **rANS Nx16 32-state decoding is faster on NEON.** The 4-lane kernels count renormalization
   bytes from a table, look up and step sixteen states at a time and narrow the symbols in vectors;
   order 1 computes each state's next table slot in vectors as it renormalizes (htscodecs'
@@ -30,13 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SAM and CRAM read names longer than 254 bytes are rejected** with `DecodeError::QnameTooLong`. `RecordStore::push_fields` stored the length as a `u16` without checking it, so a longer name came back truncated (one of 65,536 bytes came back empty). BAM's `l_read_name` caps names at 254 bytes, and htslib 1.24 enforces the same limit in its CRAM reader.
 - **CRAM Huffman encodings with 1,000,000 or more alphabet symbols or bit lengths are rejected** with `CramError::HuffmanCountExceedsLimit`, as in htslib 1.25. A malformed compression header could otherwise make the parser reserve up to 256 MiB from a few bytes.
 - **`U` in SAM SEQ reads as `T`**, not `N` (via seqair-types; htslib has done this since 1.22).
-
-### Breaking
-
-- **seqair-types 0.4.0**, whose `Strand` has no `Unknown` (see its changelog).
-
-- **MAPQ is a `seqair_types::MappingQuality`**, not a `u8`: `SlimRecord::mapq`, `FilterRawFields::mapq`, `PileupAlignment::mapq`, `OwnedBamRecord::mapq`, `OwnedBamRecordBuilder::mapq` and the `mapq` argument of `RecordStore::push_fields`. 255 ("not available", `[SAM1] §1.4`) reads as `get() == None` instead of the most confident MAPQ there is. There is no `Ord`; a minimum-MAPQ filter spells out what unavailable does, e.g. `mapq.get().is_none_or(|q| q >= min)` for the samtools `-q` convention (255 passes). Wrap a literal with `MappingQuality::from_byte`, write the wire byte with `as_byte()`.
-- **`Modification::probability` is a `seqair_types::ModProbability`**, not a `u8`: the `ML` byte `x` is the range `[x/256, (x+1)/256)`, not a 0–255 probability. `as_byte()` gives the byte back, `midpoint()` the probability `(x + 0.5) / 256`; it is `Ord` by the byte.
 
 ## v0.7.0 (2026-10-22)
 

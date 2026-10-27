@@ -5,11 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v0.3.0 (unreleased)
+## v0.3.0 (2026-10-27)
 
 ### Breaking
 
 - **seqair-types 0.4.0**: the re-exported `Strand` has no `Unknown`, so a `Read` always carries a known strand and `Error::UnknownStrand` is gone.
+
+### Performance
+
+- **The batch and pairs kernels renormalise in vectors** at each strip crossing instead of lane by
+  lane, and compare row numbers against a lane of read lengths instead of rebuilding two masks per
+  row. Scores are unchanged. Little difference on M4 or AVX-512; with fearless_simd 1.2 (pick it
+  up with `cargo update -p fearless_simd`) the strip kernel paths are about 6% faster than 0.2.1
+  in `target-cpu=native` builds on AVX-512. Thanks to [Dylan Costo](https://github.com/DylanCosto)
+  for the AVX-512 measurements ([#84](https://github.com/Softleif/seqair/pull/84)).
 
 ## v0.2.1 (2026-10-20)
 
