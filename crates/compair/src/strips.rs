@@ -49,7 +49,6 @@ use crate::{
     haplotype::Haplotype,
     read::Read,
     reference::trusted,
-    scaling::{exp2_f32, strip_shift_f32},
     types::Log10Likelihood,
 };
 
@@ -645,7 +644,8 @@ pub(crate) fn strip_kernel<L: Lane>(
         }
     }
 
-    let mut exponent = 0i32;
+    // The shifts so far, an exact integer in an `f32`.
+    let mut exponent = 0.0f32;
     let zero = L::splat(token, 0.0);
     let offsets = L::offsets(token);
     let mut total = zero;
@@ -655,12 +655,12 @@ pub(crate) fn strip_kernel<L: Lane>(
         let r0 = 1 + s * L::LANES;
         // The row above this strip, `r0 - 1`, is where the scale changes
         // every `STRIP_ROWS` rows; `crossing_max` is that row's maximum.
-        let shift = if (r0 - 1) % STRIP_ROWS == 0 {
-            let shift = strip_shift_f32(crossing_max);
+        let (lift, shift) = if (r0 - 1) % STRIP_ROWS == 0 {
+            let (lift, shift) = <f32 as Lane>::strip_lift(crossing_max);
             exponent += shift;
-            shift
+            (lift, shift)
         } else {
-            0
+            (1.0, 0.0)
         };
 
         let Some(sweep) = Sweep::new(shape, band, r0, L::LANES) else {
@@ -736,8 +736,7 @@ pub(crate) fn strip_kernel<L: Lane>(
         // Bring the row above onto this strip's scale. The strip reads
         // columns `first - 1..=last`, at offsets `LANE_MAX - 2..`; whatever
         // lies outside is zero or never read again.
-        if shift != 0 {
-            let lift = exp2_f32(shift);
+        if shift != 0.0 {
             for buffer in [&mut *buffers.m, &mut *buffers.i, &mut *buffers.d] {
                 for cell in buffer.iter_mut().skip(LANE_MAX - 2) {
                     *cell *= lift;
