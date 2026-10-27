@@ -29,7 +29,7 @@ The owned record type makes these modifications safe and explicit: callers get a
 >
 > - `tid: Option<Tid>` — reference sequence; `None` represents the BAM wire `-1` (unmapped)
 > - `pos: Option<Pos0>` — 0-based leftmost mapping position; `None` represents the BAM wire `-1` (unmapped/unavailable). `Pos0` constructively bounds the value to `[0, i32::MAX]`, so wire-format overflow is unconstructable.
-> - `mapq: u8` — mapping quality
+> - `mapq: MappingQuality` — mapping quality (r[`types.mapping_quality.field_type`])
 > - `flags: BamFlags` — SAM flag bits
 > - `mate_fields: MateFields` — the mate's reference (`tid: Option<Tid>`, `None` for the wire `-1`), its 0-based position (`pos: Option<Pos0>`, `None` for unavailable) and the observed template length (`template_len: Option<NonZeroI32>`, `None` for the wire `0`: unavailable, or a single-segment template)
 > - `qname: Vec<u8>` — query name (without NUL terminator)

@@ -16,6 +16,7 @@
 mod helpers;
 use helpers::ri;
 use seqair::bam::{Pos0, RejectUnmapped};
+use seqair_types::MappingQuality;
 use std::path::Path;
 
 fn test_cram_path() -> &'static Path {
@@ -291,8 +292,9 @@ fn cram_records_match_bam_records() {
             "flags mismatch at record {i}: CRAM={cram_flags:#06x} vs BAM={hts_flags:#06x}",
         );
         assert_eq!(
-            cram_mapq, *hts_mapq,
-            "mapq mismatch at record {i}: CRAM={cram_mapq} vs BAM={hts_mapq}"
+            cram_mapq,
+            MappingQuality::from_byte(*hts_mapq),
+            "mapq mismatch at record {i}: CRAM={cram_mapq:?} vs BAM={hts_mapq}"
         );
     }
 }

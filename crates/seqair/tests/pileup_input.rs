@@ -12,6 +12,7 @@ use seqair::bam::MateFields;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::RecordStore;
+use seqair_types::MappingQuality;
 use seqair_types::{BamFlags, Base, Pos0};
 
 const PAIRED: u16 = 0x1;
@@ -25,7 +26,7 @@ fn push(store: &mut RecordStore, qname: &[u8], pos: u32, len: u32, mate_pos: i32
             Pos0::new(pos).unwrap(),
             Pos0::new(pos + len - 1).unwrap(),
             BamFlags::from(flags),
-            60,
+            MappingQuality::from_byte(60),
             len,
             0,
             qname,

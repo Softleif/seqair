@@ -69,7 +69,7 @@ fn snapshot_store(store: &RecordStore) -> Vec<RecordSnapshot> {
                 pos: r.pos.as_i64(),
                 end_pos: r.end_pos.as_i64(),
                 flags: r.flags.raw(),
-                mapq: r.mapq,
+                mapq: r.mapq.as_byte(),
                 qname: store.record(i).unwrap().qname().to_vec(),
                 seq_len: r.seq_len,
             }

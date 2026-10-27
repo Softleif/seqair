@@ -24,6 +24,7 @@ use noodles::sam;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::IndexedReader;
 use seqair_types::BaseQuality;
+use seqair_types::MappingQuality;
 use seqair_types::QPos;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -195,7 +196,7 @@ fn assert_bam_parity(sam_name: &str) {
 
             assert_eq!(r.pos.as_i64(), n.pos, "{ctx}: pos");
             assert_eq!(r.flags.raw(), n.flags, "{ctx}: flags");
-            assert_eq!(r.mapq, n.mapq, "{ctx}: mapq");
+            assert_eq!(r.mapq, MappingQuality::from_byte(n.mapq), "{ctx}: mapq");
             assert_eq!(store.record(idx).unwrap().qname(), n.qname.as_slice(), "{ctx}: qname");
 
             // CIGAR

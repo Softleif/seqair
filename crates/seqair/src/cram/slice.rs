@@ -27,7 +27,7 @@ use crate::bam::{
     record_store::{CustomizeRecordStore, RecordStore},
 };
 use crate::reader::{FetchedRecord, Tid};
-use seqair_types::{BamFlags, Base, Pos0, Pos1, SmallVec, SmolStr};
+use seqair_types::{BamFlags, Base, MappingQuality, Pos0, Pos1, SmallVec, SmolStr};
 use std::num::NonZeroI32;
 use tracing::warn;
 
@@ -71,7 +71,7 @@ struct SliceRecord {
     pos: Pos0,
     end_pos: Pos0,
     flags: BamFlags,
-    mapq: u8,
+    mapq: MappingQuality,
     matching_bases: u32,
     indel_bases: u32,
     tid: Option<Tid>,
@@ -105,7 +105,7 @@ impl DecodedSlice {
         pos: Pos0,
         end_pos: Pos0,
         flags: BamFlags,
-        mapq: u8,
+        mapq: MappingQuality,
         matching_bases: u32,
         indel_bases: u32,
         name: &[u8],
@@ -822,7 +822,7 @@ fn decode_record(
             clippy::cast_sign_loss,
             reason = "mapping quality is 0..=255 encoded as ITF8 i32; only lower 8 bits are valid"
         )]
-        let mapq = ds.mapping_quality.decode(ctx)? as u8;
+        let mapq = MappingQuality::from_byte(ds.mapping_quality.decode(ctx)? as u8);
 
         // r[impl cram.record.quality]
         // Quality scores. Bulk decode for External (single external-block
@@ -924,9 +924,9 @@ fn decode_record(
             pos_0based,
             pos_0based,
             bam_flags,
-            0, // mapq — unmapped reads have MAPQ=0 per spec
-            0, // matching_bases
-            0, // indel_bases
+            MappingQuality::from_byte(0), // unmapped reads have MAPQ=0 per spec
+            0,                            // matching_bases
+            0,                            // indel_bases
             name_buf,
             &[], // empty cigar — unmapped reads don't have features decoded
             bases_buf,

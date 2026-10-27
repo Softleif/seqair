@@ -14,6 +14,7 @@ use seqair::bam::aligned_pairs::AlignedPair;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::{PileupEngine, PileupOp};
 use seqair::bam::record_store::RecordStore;
+use seqair_types::MappingQuality;
 use seqair_types::{BamFlags, Base, Pos0};
 
 /// `<lead>M <ins>I <trail>M` at `pos`, sequence all `A` except the inserted run.
@@ -32,7 +33,7 @@ fn store_with_insertion(pos: u32, lead: u32, ins: u32, trail: u32) -> RecordStor
             Pos0::new(pos).unwrap(),
             Pos0::new(pos + lead + trail - 1).unwrap(),
             BamFlags::from(0u16),
-            60,
+            MappingQuality::from_byte(60),
             lead + trail,
             ins,
             b"ins",

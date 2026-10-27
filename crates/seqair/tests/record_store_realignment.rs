@@ -23,6 +23,7 @@ use helpers::ri;
 use helpers::tid;
 use seqair::bam::record_store::RecordStore;
 use seqair::bam::{DecodeError, MateFields, Pos0};
+use seqair_types::MappingQuality;
 use seqair_types::{BamFlags, Base, BaseQuality};
 
 // ---------------------------------------------------------------------------
@@ -282,7 +283,7 @@ fn soft_clips_are_stored_at_push_and_follow_set_alignment() {
             Pos0::new(200).unwrap(),
             Pos0::new(203).unwrap(),
             BamFlags::from(0),
-            60,
+            MappingQuality::from_byte(60),
             4,
             0,
             b"read2",
@@ -343,7 +344,7 @@ fn set_alignment_preserves_other_fields() {
     assert_eq!(store.record(idx).unwrap().mate_fields.pos, Pos0::new(500));
     assert_eq!(store.record(idx).unwrap().mate_fields.template_len, std::num::NonZeroI32::new(300));
     assert_eq!(store.record(idx).unwrap().flags, BamFlags::from(0x63));
-    assert_eq!(store.record(idx).unwrap().mapq, 60);
+    assert_eq!(store.record(idx).unwrap().mapq, MappingQuality::from_byte(60));
 }
 
 // r[verify record_store.set_alignment]

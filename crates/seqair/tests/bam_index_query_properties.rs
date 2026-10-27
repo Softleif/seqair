@@ -35,6 +35,7 @@ use seqair::bam::{
 };
 use seqair::io::IndexBuilder;
 use seqair::reader::ResolveTid;
+use seqair_types::MappingQuality;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -198,7 +199,7 @@ fn write_records(dir: &Path, reads: &[Read]) -> (std::path::PathBuf, IndexBuilde
             format!("r{i}").into_bytes(),
         )
         .flags(flags)
-        .mapq(60)
+        .mapq(MappingQuality::from_byte(60))
         .cigar(cigar)
         .seq(seq)
         .qual(qual)

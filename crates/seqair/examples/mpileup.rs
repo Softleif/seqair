@@ -141,9 +141,9 @@ fn main() -> anyhow::Result<()> {
                     bases.push('^');
                     #[allow(
                         clippy::cast_possible_truncation,
-                        reason = "mapq is u8, +33 fits in u8"
+                        reason = "the MAPQ byte +33, saturated, is a u8"
                     )]
-                    bases.push((aln.mapq.saturating_add(33)) as char);
+                    bases.push(aln.mapq.as_byte().saturating_add(33) as char);
                 }
 
                 format_alignment(&mut bases, &aln.op, ref_base, is_reverse, || {

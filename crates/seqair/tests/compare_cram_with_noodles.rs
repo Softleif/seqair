@@ -24,6 +24,7 @@ use seqair::bam::RecordIdx;
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::Readers;
 use seqair_types::BaseQuality;
+use seqair_types::MappingQuality;
 use std::path::Path;
 
 fn test_cram_v30_path() -> &'static Path {
@@ -205,7 +206,11 @@ fn cram_chr19_records_match_noodles_field_by_field() {
             let our_rec = store.record(our_records[i]).unwrap();
             assert_eq!(our_rec.pos.as_i64(), noodles_rec.pos, "{version} rec {i}: pos");
             assert_eq!(our_rec.flags.raw(), noodles_rec.flags, "{version} rec {i}: flags");
-            assert_eq!(our_rec.mapq, noodles_rec.mapq, "{version} rec {i}: mapq");
+            assert_eq!(
+                our_rec.mapq,
+                MappingQuality::from_byte(noodles_rec.mapq),
+                "{version} rec {i}: mapq"
+            );
             // r[verify cram.record.mate_detached]
             // r[verify cram.record.mate_attached]
             // r[verify cram.record.mate_tlen_reconstruction]

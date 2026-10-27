@@ -345,7 +345,7 @@ mod tests {
     use crate::bam::record_store::RecordStore;
     use crate::bam::test_util::ri;
     use crate::bam::test_util::tid;
-    use seqair_types::BamFlags;
+    use seqair_types::{BamFlags, MappingQuality};
 
     // r[verify record_store.record_idx]
     #[test]
@@ -399,7 +399,7 @@ mod tests {
                     Pos0::new(pos).unwrap(),
                     Pos0::new(end).unwrap(),
                     BamFlags::from(0x1u16),
-                    60,
+                    MappingQuality::from_byte(60),
                     4,
                     0,
                     b"frag",

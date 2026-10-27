@@ -26,6 +26,7 @@ use seqair::bam::{
     pileup::{Indel, PileupEngine, PileupOp},
     record_store::PileupInput,
 };
+use seqair_types::MappingQuality;
 use seqair_types::{BamFlags, Base, BaseQuality, Offset};
 use std::num::NonZeroU32;
 
@@ -145,7 +146,7 @@ fn build_store(case: &Case) -> PileupInput<()> {
                 p,
                 end_pos,
                 BamFlags::from(flags),
-                r.mapq,
+                MappingQuality::from_byte(r.mapq),
                 matching,
                 indels,
                 name.as_bytes(),
@@ -195,7 +196,7 @@ fn run_engine(case: &Case) -> Vec<(u32, Vec<Entry>)> {
                 indel_after: v.indel_after(),
                 in_mate_overlap: v.in_mate_overlap(),
                 mate_idx: v.mate_idx().map(|m| m.get()),
-                mapq: v.mapq,
+                mapq: v.mapq.as_byte(),
                 flags: v.flags.raw(),
                 seq_len: v.seq_len,
                 matching_bases: v.matching_bases,
@@ -278,7 +279,7 @@ fn run_oracle(case: &Case) -> Vec<(u32, Vec<Entry>)> {
                 indel_after,
                 in_mate_overlap,
                 mate_idx: rec.mate_idx().map(|m| m.get()),
-                mapq: rec.mapq,
+                mapq: rec.mapq.as_byte(),
                 flags: rec.flags.raw(),
                 seq_len: rec.seq_len,
                 matching_bases: rec.matching_bases,

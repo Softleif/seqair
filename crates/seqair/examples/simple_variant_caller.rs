@@ -248,7 +248,7 @@ fn main() -> anyhow::Result<()> {
             // Count bases, filtering by mapping quality.
             let mut bc = BaseCounts::new();
             for aln in column.alignments() {
-                if aln.mapq < min_mapq {
+                if aln.mapq.get().is_some_and(|q| q < min_mapq) {
                     continue;
                 }
                 if let PileupOp::Match { base, .. } | PileupOp::Insertion { base, .. } = &aln.op {

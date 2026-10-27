@@ -19,6 +19,7 @@
 
 use rust_htslib::bam::{self, Read as _};
 use seqair::bam::aux_data::AuxData;
+use seqair_types::MappingQuality;
 // Use the top-level `bam` re-export rather than the inner module path so the
 // public-API surface from `seqair::bam` is exercised. The inner path
 // `seqair::bam::base_mod::*` remains valid; both must compile.
@@ -83,7 +84,7 @@ fn build_record(
     let chr1 = make_header().tid("chr1").unwrap();
     OwnedBamRecord::builder(Some(chr1), Some(Pos0::new(pos).unwrap()), qname.to_vec())
         .flags(flags)
-        .mapq(60)
+        .mapq(MappingQuality::from_byte(60))
         .cigar(cigar)
         .seq(seq)
         .qual(vec![BaseQuality::from_byte(30); seq_len])

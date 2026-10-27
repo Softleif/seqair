@@ -29,6 +29,7 @@ use seqair::bam::pileup::{Indel, PileupColumn, PileupEngine};
 use seqair::bam::record_idx::RecordIdx;
 use seqair::bam::record_store::{RecordStore, qname_hash};
 use seqair::reader::{DepthLimit, Readers, SegmentOptions};
+use seqair_types::MappingQuality;
 use seqair_types::{BamFlags, Base, Pos0};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
@@ -79,7 +80,7 @@ fn push(store: &mut RecordStore, qname: &[u8], read: Read) -> RecordIdx {
             Pos0::new(read.pos as u32).unwrap(),
             Pos0::new(read.end() as u32).unwrap(),
             BamFlags::from(read.flags),
-            60,
+            MappingQuality::from_byte(60),
             read.len,
             0,
             qname,
@@ -697,7 +698,7 @@ fn push_pair_read(
             Pos0::new(pos).unwrap(),
             Pos0::new(end_pos).unwrap(),
             BamFlags::from(PAIRED | which),
-            60,
+            MappingQuality::from_byte(60),
             matching_bases,
             indel_bases,
             qname,

@@ -136,7 +136,7 @@ fn main() -> anyhow::Result<()> {
             let mut counted = 0u32;
 
             for aln in column.alignments() {
-                if aln.mapq < min_mapq {
+                if aln.mapq.get().is_some_and(|q| q < min_mapq) {
                     continue;
                 }
 

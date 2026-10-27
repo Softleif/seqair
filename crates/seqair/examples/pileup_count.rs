@@ -48,7 +48,7 @@ fn main() -> anyhow::Result<()> {
                 depth += col.depth() as u64;
                 let ref_base = col.reference_base();
                 for aln in col.alignments() {
-                    if aln.mapq < 10 {
+                    if aln.mapq.get().is_some_and(|q| q < 10) {
                         continue;
                     }
                     let (Some(base), Some(q)) = (aln.base(), aln.qual()) else { continue };

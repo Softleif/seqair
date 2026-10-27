@@ -950,7 +950,7 @@ mod tests {
 
     use crate::bam::aux_data::AuxData;
     use crate::bam::record_store::RecordStore;
-    use seqair_types::{BamFlags, Pos0};
+    use seqair_types::{BamFlags, MappingQuality, Pos0};
 
     /// Push a forward-strand record with the given bases and aux bytes.
     /// Returns the populated `RecordStore` and the record index.
@@ -963,7 +963,7 @@ mod tests {
                 pos,
                 pos,
                 BamFlags::empty(),
-                30,
+                MappingQuality::from_byte(30),
                 bases.len() as u32,
                 0,
                 b"r1",
@@ -1116,7 +1116,7 @@ mod tests {
                 pos,
                 pos,
                 flags,
-                30,
+                MappingQuality::from_byte(30),
                 bases.len() as u32,
                 0,
                 b"r1",

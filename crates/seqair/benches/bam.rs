@@ -11,6 +11,7 @@ use core::range::RangeInclusive;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use seqair::bam::MateFields;
 use seqair::reader::ResolveTid;
+use seqair_types::MappingQuality;
 use seqair_types::{Base, Pos0};
 use std::hint::black_box;
 use std::io::Read;
@@ -915,7 +916,7 @@ fn synthetic_input(shape: ReadShape) -> seqair::bam::record_store::PileupInput<(
                 pos,
                 compute_end_pos(pos, &ops).unwrap(),
                 seqair_types::BamFlags::from(if i % 2 == 0 { 0 } else { 16 }),
-                60,
+                MappingQuality::from_byte(60),
                 matching,
                 indels,
                 format!("r{i}").as_bytes(),
@@ -957,7 +958,7 @@ fn pileup_synthetic(c: &mut Criterion) {
                     let mut mapq: u64 = 0;
                     while let Some(col) = engine.pileups() {
                         for aln in col.alignments() {
-                            mapq += u64::from(aln.mapq);
+                            mapq += u64::from(aln.mapq.as_byte());
                             counter.count(aln.base().unwrap_or_default());
                         }
                     }

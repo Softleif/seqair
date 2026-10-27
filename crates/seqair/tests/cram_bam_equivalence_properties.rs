@@ -154,7 +154,7 @@ fn read_all(path: &Path, fasta: &Path) -> Vec<Decoded> {
                 qname: rec.qname().to_vec(),
                 pos: rec.pos.as_i64(),
                 flags: rec.flags.raw(),
-                mapq: rec.mapq,
+                mapq: rec.mapq.as_byte(),
                 cigar,
                 seq,
                 qual,

@@ -22,6 +22,7 @@ use noodles::sam;
 use noodles::sam::alignment::record::Sequence as _;
 use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::Readers;
+use seqair_types::MappingQuality;
 use seqair_types::QPos;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -190,7 +191,7 @@ fn assert_cram_parity(cram_path: &Path, fasta_path: &Path, label: &str) {
 
             assert_eq!(r.pos.as_i64(), n.pos, "{ctx}: pos");
             assert_eq!(r.flags.raw(), n.flags, "{ctx}: flags");
-            assert_eq!(r.mapq, n.mapq, "{ctx}: mapq");
+            assert_eq!(r.mapq, MappingQuality::from_byte(n.mapq), "{ctx}: mapq");
             assert_eq!(store.record(idx).unwrap().qname(), n.qname.as_slice(), "{ctx}: qname");
 
             // CRAM may reconstruct the sequence from the reference for

@@ -13,6 +13,7 @@
 )]
 mod helpers;
 use helpers::ri;
+use seqair_types::MappingQuality;
 use seqair_types::QPos;
 
 use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
@@ -137,7 +138,7 @@ fn all_contigs_record_fields_match() {
             assert_eq!(r.pos.as_i64(), h.pos, "{contig} rec {i}: pos");
             assert_eq!(r.end_pos.as_i64(), h.end_pos - 1, "{contig} rec {i}: end_pos");
             assert_eq!(r.flags.raw(), h.flags, "{contig} rec {i}: flags");
-            assert_eq!(r.mapq, h.mapq, "{contig} rec {i}: mapq");
+            assert_eq!(r.mapq, MappingQuality::from_byte(h.mapq), "{contig} rec {i}: mapq");
             assert_eq!(
                 store.record(idx).unwrap().qname(),
                 h.qname.as_slice(),

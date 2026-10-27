@@ -30,6 +30,7 @@ use seqair::vcf::{
     Writer,
 };
 use seqair::vcf::{FormatGt, InfoFloat};
+use seqair_types::MappingQuality;
 use seqair_types::{BamFlags, Base, BaseQuality, Pos0, Pos1};
 
 const ACGT: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
@@ -117,7 +118,7 @@ fn bam_records(stream: &BamStream) -> Vec<OwnedBamRecord> {
             };
             OwnedBamRecord::builder(tid, Some(Pos0::new(pos).unwrap()), format!("r{i}").into())
                 .flags(flags)
-                .mapq(60)
+                .mapq(MappingQuality::from_byte(60))
                 .cigar(cigar)
                 .seq(seq)
                 .qual(qual)
