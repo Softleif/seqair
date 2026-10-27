@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## v0.3.2 (unreleased)
+
 ### Added
 
 - **`MappingQuality`**: a record's MAPQ as the wire byte, with `UNAVAILABLE` (255, "not available" in `[SAM1] §1.4`), `from_byte`, `get() -> Option<u8>` and `as_byte`. Like `BaseQuality` it has no `Ord`, so a minimum-MAPQ filter has to decide what an unavailable MAPQ does.

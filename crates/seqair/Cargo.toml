@@ -1,6 +1,6 @@
 [package]
 name = "seqair"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "Pure-Rust BAM/SAM/CRAM/FASTA reader and pileup engine"
 repository = "https://github.com/Softleif/seqair"
@@ -29,7 +29,7 @@ bytemuck = { workspace = true }
 indexmap = "2"
 itoa = "1"
 libdeflater = "1.26.1"
-seqair-types = { version = "^0.3.1", path = "../seqair-types", default-features = false }
+seqair-types = { version = "^0.3.2", path = "../seqair-types", default-features = false }
 rustc-hash = "2.1.3"
 # `HashTable`: a hash table whose equality lives outside the stored value —
 # mate linking stores record indices and compares the qnames they point into.
