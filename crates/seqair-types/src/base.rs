@@ -92,7 +92,7 @@ impl Base {
         (*self) as u8 as char
     }
 
-    // r[impl base_decode.ascii_batch]
+    // r[impl base_decode.ascii_batch+2]
     // r[impl base_decode.ascii_simd+2]
     /// Convert ASCII bytes to `Base` values in-place using SIMD acceleration.
     ///
@@ -161,7 +161,8 @@ fn from_ascii_at(level: Level, bytes: &mut [u8]) {
 
 /// One native-width vector per iteration (16 bytes on SSE/NEON, 32 on AVX2,
 /// 64 on AVX-512):
-/// 1. Uppercase: `byte & 0xDF` (clears bit 5, mapping a–z → A–Z)
+/// 1. Uppercase: `byte & 0xDF` (clears bit 5, mapping a–z → A–Z), then
+///    U → T by clearing bit 0 (`0x55 & 0xFE == 0x54`)
 /// 2. Compare uppercased byte against A(65), C(67), G(71), T(84)
 /// 3. OR masks → `valid`
 /// 4. Select: valid bytes keep their uppercased value, others become N(78)
@@ -203,6 +204,7 @@ fn from_ascii_simd<S: Simd>(simd: S, bytes: &mut [u8]) {
 #[inline(always)]
 fn ascii_to_base<S: Simd>(v: S::u8s, big_n: S::u8s) -> S::u8s {
     let upper = v & 0xDF;
+    let upper = upper.simd_eq(b'U').select(upper & 0xFE, upper);
     let valid =
         upper.simd_eq(b'A') | upper.simd_eq(b'C') | upper.simd_eq(b'G') | upper.simd_eq(b'T');
     valid.select(upper, big_n)
@@ -337,6 +339,9 @@ static BASE_LUT: [Base; 256] = {
     table[b'g' as usize] = Base::G;
     table[b'T' as usize] = Base::T;
     table[b't' as usize] = Base::T;
+    // RNA: htslib's SAM parser maps U to T too (1.22).
+    table[b'U' as usize] = Base::T;
+    table[b'u' as usize] = Base::T;
     table
 };
 
@@ -354,7 +359,7 @@ impl From<&str> for Base {
             "A" | "a" => Base::A,
             "C" | "c" => Base::C,
             "G" | "g" => Base::G,
-            "T" | "t" => Base::T,
+            "T" | "t" | "U" | "u" => Base::T,
             _ => Base::Unknown,
         }
     }
@@ -427,7 +432,7 @@ mod tests {
                 b'A' | b'a' => Some(0),
                 b'C' | b'c' => Some(1),
                 b'G' | b'g' => Some(2),
-                b'T' | b't' => Some(3),
+                b'T' | b't' | b'U' | b'u' => Some(3),
                 _ => None,
             };
             assert_eq!(Base::from(byte).known_index(), expected, "byte {byte}");
@@ -446,7 +451,7 @@ mod tests {
             b'A' | b'a' => Base::A,
             b'C' | b'c' => Base::C,
             b'G' | b'g' => Base::G,
-            b'T' | b't' => Base::T,
+            b'T' | b't' | b'U' | b'u' => Base::T,
             _ => Base::Unknown,
         };
         assert_eq!(base, expected);
@@ -581,7 +586,7 @@ mod tests {
         }
     }
 
-    // r[verify base_decode.ascii_batch]
+    // r[verify base_decode.ascii_batch+2]
     #[test]
     fn test_from_ascii_vec_basic() {
         let input = b"ACGTacgtNnMR".to_vec();
@@ -622,7 +627,7 @@ mod tests {
         }
     }
 
-    // r[verify base_decode.ascii_batch]
+    // r[verify base_decode.ascii_batch+2]
     #[test]
     fn test_convert_ascii_in_place_matches_from_ascii_vec() {
         let input = b"ACGTacgtNnMRWSYKVHDB\x00\xff".to_vec();
@@ -637,7 +642,7 @@ mod tests {
         }
     }
 
-    // r[verify base_decode.ascii_batch]
+    // r[verify base_decode.ascii_batch+2]
     /// `convert_ascii_in_place_as_slice` must yield the same bases as
     /// `from_ascii_vec`, while leaving the caller's `Vec<u8>` capacity intact
     /// (the whole point of the helper).
@@ -704,7 +709,7 @@ mod tests {
         assert_eq!(err.to_string(), "Multiple characters in base string");
     }
 
-    // r[verify base_decode.ascii_batch]
+    // r[verify base_decode.ascii_batch+2]
     #[test]
     fn test_vec_u8_into_vec_base_roundtrip() {
         let discriminants: Vec<u8> = vec![b'A', b'C', b'G', b'T', b'N', b'A', b'N', b'T'];

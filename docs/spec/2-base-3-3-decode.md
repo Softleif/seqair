@@ -41,8 +41,8 @@ r[base_decode.alignment]
 
 Reference sequences (FASTA) and SAM text sequences arrive as ASCII bytes, not 4-bit packed nibbles. These need the same one-time batch conversion to `Base` that BAM sequences get via `decode_bases`, but using an ASCII-aware path instead of the nibble decode table.
 
-r[base_decode.ascii_batch]
-`Base::from_ascii_vec(Vec<u8>) -> Vec<Base>` MUST convert a vector of ASCII bytes to `Base` values in-place (reusing the allocation). Maps A/a→A, C/c→C, G/g→G, T/t→T, all other bytes→Unknown. The function MUST NOT allocate a new vector — it operates on the input's buffer and transmutes the result. This is safe because `Base` is `repr(u8)` and the function only writes valid `Base` discriminant bytes (65, 67, 71, 78, 84).
+r[base_decode.ascii_batch+2]
+`Base::from_ascii_vec(Vec<u8>) -> Vec<Base>` MUST convert a vector of ASCII bytes to `Base` values in-place (reusing the allocation). Maps A/a→A, C/c→C, G/g→G, T/t→T, U/u→T (RNA, as htslib's SAM parser does since 1.22), all other bytes→Unknown. `Base::from(u8)` uses the same mapping. The function MUST NOT allocate a new vector — it operates on the input's buffer and transmutes the result. This is safe because `Base` is `repr(u8)` and the function only writes valid `Base` discriminant bytes (65, 67, 71, 78, 84).
 
 r[base_decode.ascii_simd+2]
 The ASCII batch converter MUST be a native-width SIMD kernel per `r[io.simd_portable]`, following the same dispatch pattern as `decode_bases`. This is the required path for all bulk u8→Base conversions outside BAM 4-bit decoding: FASTA reference sequences, SAM text sequences, and any other ASCII-encoded base data.

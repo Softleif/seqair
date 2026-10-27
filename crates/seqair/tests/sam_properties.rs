@@ -115,8 +115,8 @@ fn cigar_end_pos_invariants(tc: TestCase) {
 // correctly applied end-to-end through the SAM→BAM encoding pipeline.
 #[hegel::test(test_cases = crate::pinned::cases(200))]
 fn seq_decode_maps_iupac_to_unknown(tc: TestCase) {
-    // ACGT, the two-fold and three-fold IUPAC ambiguity codes, and N.
-    const IUPAC: &[u8] = b"ACGTMRWSYKVHDBN";
+    // ACGT, the two-fold and three-fold IUPAC ambiguity codes, N, and RNA's U.
+    const IUPAC: &[u8] = b"ACGTMRWSYKVHDBNU";
     let bases = tc.draw(gs::vecs(gs::sampled_from(IUPAC)).min_size(1).max_size(199));
     let seq_str: String = bases.iter().map(|&b| b as char).collect();
     let qual_str: String = bases.iter().map(|_| 'I').collect();
@@ -148,7 +148,7 @@ fn seq_decode_maps_iupac_to_unknown(tc: TestCase) {
             b'A' => Base::A,
             b'C' => Base::C,
             b'G' => Base::G,
-            b'T' => Base::T,
+            b'T' | b'U' => Base::T,
             // All IUPAC ambiguity codes and N must decode to Unknown.
             _ => Base::Unknown,
         };
