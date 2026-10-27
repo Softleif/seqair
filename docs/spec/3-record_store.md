@@ -151,8 +151,8 @@ place the read across a span it does not occupy. htslib's `bam_endpos` makes the
 same choice, and matching it is what keeps a placed-unmapped record at exactly
 one position for `r[record_store.window_query]` and the pileup's eviction check.
 
-r[record_store.push_fields]
-`push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as `&[CigarOp]`, sequence as `&[Base]`, quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing.
+r[record_store.push_fields+2]
+`push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as `&[CigarOp]`, sequence as `&[Base]`, quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing. A qname longer than 254 bytes (BAM's `l_read_name` limit, as in `r[bam.owned_record.qname_limit]`) MUST be rejected with a typed error rather than truncated; htslib 1.24 enforces the same limit in its CRAM reader.
 
 ## Field access
 
