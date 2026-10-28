@@ -256,3 +256,38 @@ fn a_cg_b_i_placeholder_is_a_placeholder() {
     assert_eq!(htslib_accepts(&payloads), [true]);
     assert_eq!(seqair_accepts(&bam_of_payloads(&payloads)), [true]);
 }
+
+/// The records of `bam`, all of which must be valid.
+fn stream_records(bam: &[u8]) -> Vec<RawBamRecord> {
+    let mut reader = BamStreamReader::new(Cursor::new(bam)).unwrap();
+    reader.records().collect::<Result<_, _>>().unwrap()
+}
+
+// r[verify bam.raw_record]
+// r[verify bam.raw_record.cigar_seq]
+/// Clearing the unmapped bit on a record whose CIGAR does not cover its
+/// sequence would make it one htslib rejects; `set_flags` refuses, and FLAG
+/// stays as it was.
+#[test]
+fn set_flags_keeps_the_cigar_check() {
+    let unmapped = Wire {
+        tid: 0,
+        pos: 100,
+        flag: 4,
+        qname: b"r".to_vec(),
+        cigar: vec![op(2, 0)],
+        seq_len: 4,
+        aux: Vec::new(),
+    };
+    let mapped = Wire { flag: 0, ..unmapped.clone() };
+    assert_eq!(htslib_accepts(&[unmapped.payload(), mapped.payload()]), [true, false]);
+
+    let mut record = stream_records(&bam_of_payloads(&[unmapped.payload()])).remove(0);
+    let flags = record.flags();
+    assert!(record.set_flags(seqair::bam::flags::BamFlags::empty()).is_err());
+    assert_eq!(record.flags(), flags);
+    assert_eq!(record.as_payload(), unmapped.payload());
+    let reverse_unmapped = seqair::bam::flags::BamFlags::from(4 | 16);
+    record.set_flags(reverse_unmapped).unwrap();
+    assert_eq!(record.flags(), reverse_unmapped);
+}

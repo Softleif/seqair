@@ -323,7 +323,25 @@ impl RawBamRecord {
     }
 
     /// Set FLAG in place.
-    pub fn set_flags(&mut self, flags: BamFlags) {
+    ///
+    /// # Errors
+    /// [`DecodeError::CigarQueryLenMismatch`], leaving FLAG as it was, if the
+    /// new flags make the record one whose CIGAR must match its sequence and
+    /// it does not (`r[bam.raw_record.cigar_seq]`) — clearing `0x4` on an
+    /// unmapped record with a stale CIGAR, say. htslib rejects such a record.
+    pub fn set_flags(&mut self, flags: BamFlags) -> Result<(), DecodeError> {
+        let old = self.flags();
+        self.write_flags(flags);
+        let checked = record::parse_header(&self.payload).and_then(|h| {
+            check_cigar_against_seq(&self.payload, &h, self.tid.is_some() && self.pos.is_some())
+        });
+        if checked.is_err() {
+            self.write_flags(old);
+        }
+        checked
+    }
+
+    fn write_flags(&mut self, flags: BamFlags) {
         if let Some(dst) = self.payload.get_mut(14..16) {
             dst.copy_from_slice(&flags.raw().to_le_bytes());
         }
