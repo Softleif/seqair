@@ -33,8 +33,8 @@ base, as the segment does not reach there. Each column comes with its `Tid`,
 since a `PileupColumn` carries only a position.
 
 Store indices are the exception: `record_idx`, `mate_idx` and `fragment_idx`
-index the window's store (`r[pileup_stream.window]`), not a whole-contig one,
-and `mate_idx` is narrower (`r[pileup_stream.mates]`).
+index the window's store (`r[pileup_stream.window+2]`), not a whole-contig one,
+and `mate_idx` is narrower (`r[pileup_stream.mates+1]`).
 
 r[pileup_stream.lending]
 Iteration MUST be lending, as the engine's is (`r[pileup.lending_iterator]`):
@@ -43,7 +43,7 @@ the column borrowing the pileup until the next call. Its store is the window's,
 so `column.store()`, `records_overlapping` and `find_record` work as on an
 indexed column, over the records of the window.
 
-r[pileup_stream.records]
+r[pileup_stream.records+1]
 Every record with a reference and a position — mapped or placed-unmapped — MUST
 be pushed into a store through the customize value exactly once, in input
 order, so `filter_raw`, `compute` and `filter` see the sequence of records an
@@ -51,25 +51,43 @@ indexed whole-contig fetch hands them (`r[bam.reader.unmapped_skipped]`). A
 record without a reference or without a position MUST be skipped: no pileup
 column can contain it, and the indexed reader skips it too.
 
+Only the records the sort check covers (`r[pileup_stream.sorted+1]`) — mapped
+ones the customize value kept — open, close or bound a window. A placed-unmapped
+record is pushed into whichever store is being filled, whatever its position:
+the engine never puts it in a column (`r[pileup.unmapped_excluded]`), so where
+it sits changes nothing a column shows, and letting it move a window boundary
+would let a record the sort check never saw decide which columns are final.
+
 ## Order
 
-r[pileup_stream.sorted]
-Records with a reference and a position MUST arrive in ascending
-`(tid, pos)` order — contigs in header order, positions ascending within one.
-A record that precedes the previous such record MUST fail with
-`StreamPileupError::Unsorted`, naming its 1-based record number in the input and
-both positions, as htslib fails with "The input is not sorted". Skipping it is
-not an option: windows already emitted may need it, so every later column could
-be wrong. Unplaced records are exempt (they sort last but take no part).
+r[pileup_stream.sorted+1]
+The sort check MUST cover exactly the records htslib's `bam_plp_push` checks,
+translated to seqair's hooks. `bam_plp_push` returns before its check for a
+record with no reference (`tid < 0`), for an unmapped one (`BAM_FUNMAP`), and
+for one past its per-position cap (`maxcnt`); `samtools mpileup`'s read
+callback (`bam_plp_auto`'s `func`) has already dropped what its filters
+reject, so those never reach it. The rest it checks against the largest
+`(tid, pos)` pushed so far and fails with "The input is not sorted" when the
+reference id is smaller, or equal with a smaller position. So the check MUST
+cover the records that are mapped (flag `0x4` clear), on a reference, and kept
+by the customize value — which plays the read callback's part, and whose
+`DepthCap` (`r[pileup_stream.depth_limit+1]`) plays `maxcnt`'s — and MUST skip
+unplaced records, unmapped ones (placed or not) and the ones the customize
+value rejects. A covered record whose `(tid, pos)` is less than the last covered
+record's MUST fail with `StreamPileupError::Unsorted`, naming its 1-based record
+number in the input and both positions. Skipping it is not an option: windows
+already emitted may need it, so every later column could be wrong.
 
-This is stricter than htslib in one respect: htslib checks only mapped records,
-seqair also checks placed-unmapped ones, because they enter the store and the
-customize value (`r[pileup_stream.records]`). A coordinate-sorted file places
-them in order either way.
+A mapped record on a reference but with no position (`-1`) is checked at
+position `-1`, as htslib checks it, so it fails after any covered record on its
+reference; when it passes (the first of its reference) it is skipped, since a
+store holds placed records only — htslib would pile it up from `-1`. It never
+reaches the customize value, which can only be asked through a push.
 
 r[pileup_stream.errors]
-Any error — from the stream, a record the store refuses, the sort check, or the
-reference — MUST end the pileup: every later call returns
+Any error — from the stream, a record the store refuses, the sort check, the
+store's hard limit (`r[pileup_stream.budget]`), or the reference — MUST end the
+pileup: every later call returns
 `StreamPileupError::Poisoned`. A pileup that dropped a record and carried on
 would yield wrong columns without saying so.
 
@@ -81,13 +99,16 @@ column. Records arrive sorted by start, so once a record starting past position
 far it extends. Nothing has to be guessed about read length: the next record's
 start is the whole of the lookahead.
 
-r[pileup_stream.window+1]
+r[pileup_stream.window+2]
 Records are collected into a window: an interval of positions `[start, end]`
-and a store. A window is opened by a record at `pos`, with `end = pos + len - 1`
-(`len` is the window length, `r[pileup_stream.window_len]`). Each record whose
-position is at or before `end`, on the same contig, is pushed into the window's
-store. The window closes when a record arrives that starts after `end` or on
-another contig, or at the end of the input. Its store then holds every record
+and a store. In this section "record" means one the sort check covers
+(`r[pileup_stream.records+1]`). A window is opened by a record at `pos`, with
+`end = pos + len - 1` (`len` is the window length,
+`r[pileup_stream.window_len]`). Each record whose position is at or before
+`end`, on the same contig, is pushed into the window's store. The window closes
+when a record arrives that starts after `end` or on another contig, when the
+store outgrows its budget (`r[pileup_stream.budget]`), or at the end of the
+input. Its store then holds every record
 that overlaps `[start, end]`, and the engine is run over that interval and
 yields its columns. The last window of a contig runs instead to the furthest
 `end_pos` of its records, capped at the contig's last position: nothing else
@@ -107,7 +128,9 @@ disjoint, adjacent intervals: no column is yielded twice, and a record seen by
 several windows is still one alignment per column. When nothing is carried, the
 next window starts at the record that opened it, so a gap in coverage costs no
 empty windows. Either way the next window's `end` is that record's position
-plus `len - 1`.
+plus `len - 1`. (The record that closes a window is pushed through the customize
+value before it is known to close it, since only a kept record can; it is then
+moved into the next store, after the carried reads.)
 
 By induction every record overlapping a window is in its store: it either
 starts inside the window, or started earlier and overlapped the previous
@@ -121,18 +144,49 @@ The window length MUST default to 64 Ki positions and MAY be set to any
 work: a smaller window holds fewer records, but carries the reads crossing each
 boundary once more and builds one engine more.
 
+r[pileup_stream.budget]
+A store cannot grow without bound: record indices and slab offsets are `u32`
+(`r[record_store.checked_offsets]`), so a deep region — an amplicon, a 64 Ki
+window at tens of thousands of reads per position — would otherwise fail with
+`DecodeError::SlabOverflow`. A window MUST therefore also close early when,
+after a record at `pos > start` is pushed, its store holds more records than
+the budget's `records`, or its longest slab (in its own elements: bytes for
+names, bases, qualities and aux, operations for CIGARs) is longer than the
+budget's `slab_len`. The window then ends at `pos - 1` and the record opens the
+next one, after the carried reads. The columns up to `pos - 1` are final:
+every later record starts at or after `pos`. No column may depend on the
+budget.
+
+The budget MUST default to half the hard limits — 2^31 records and a 2^31
+slab length — and MAY be set to any non-zero values. Half, because the reads
+carried out of a closing window are at most its whole store, so the next store
+starts at no more than the budget and keeps the other half for its own
+records. A budget above half the limits gives up that headroom.
+
+A record at the window's own `start` cannot close it, because there is no
+column boundary inside one position: every record in the window then starts
+at `start` or was carried into it. Such a pile MUST be let grow past the budget,
+which is a soft limit, and only when a push or a carry would exceed the hard
+limit MUST the pileup fail, with `StreamPileupError::PileTooDeep` naming the
+reference and the position. Refusing the pile at the budget instead would
+reject inputs the store can hold — the default budget's whole point is
+headroom — and a caller who wants a smaller ceiling has `DepthLimit`.
+
 ## Mates
 
-r[pileup_stream.mates]
+r[pileup_stream.mates+1]
 Mates MUST be linked within each window's store
 (`RecordStore::prepare_for_pileup`, `r[record_store.link_mates+2]`). Both reads
 of a pair that overlap each other overlap every column of that overlap, so both
 are in the store of every window containing such a column, and
 `in_mate_overlap` and `mate_of` agree with the whole-contig pileup. A pair whose
 reads do not overlap is linked only when both happen to share a window store:
-its `mate_idx` MAY be `None` where the whole-contig pileup has `Some`. No column
-shows the difference except through `mate_idx` and `fragment_idx`, and a
-consumer deduplicating overlapping mates never needs the far mate.
+its `mate_idx` MAY be `None` where the whole-contig pileup has `Some`, and
+`fragment_idx` then names the read itself rather than the pair. Whether such a
+pair is linked depends on the window length and budget, so a consumer MUST NOT
+rely on `mate_idx` or `fragment_idx` for mates that do not overlap; for mates
+that overlap they are always set, and that is what deduplicating overlapping
+mates needs. `StreamPileup`'s documentation MUST say so.
 
 htslib's mpileup is no different: `overlap_push` pairs a read with its mate only
 while both are in its buffer, which is exactly the reads that overlap the
@@ -144,12 +198,16 @@ then depends on which reads share a store.
 
 ## Depth and reference
 
-r[pileup_stream.depth_limit]
+r[pileup_stream.depth_limit+1]
 `DepthLimit::PerColumn(cap)` MUST wrap the customize value in a `DepthCap`, as
 the indexed pileup does. The cap sees each contig's records once, in input
-order, as a whole-contig fetch hands them, so it keeps the same records. It is
-not the same as an indexed pileup tiled into several segments, whose cap
-restarts at each segment.
+order, as a whole-contig fetch hands them, so it keeps the same records as an
+indexed pileup over one segment per contig. It is not the same as an indexed
+pileup tiled into several segments: there each segment's fetch restarts the
+cap (`r[record_store.depth_cap.reset]`) and first sees the reads reaching into
+the segment from before it, so near tile boundaries a tiled pileup can keep
+different reads. Window boundaries do not restart it — windows are not
+fetches. `StreamPileup`'s documentation MUST say so.
 
 r[pileup_stream.reference]
 Without a reference every column's reference base MUST be `Base::Unknown`. With
@@ -193,6 +251,15 @@ of any length is correct: it is carried as long as it extends past a window's
 end. What a long read costs is one copy per window it crosses: a 100 kb
 ONT read crosses two 64 Ki windows; an RNA-seq read spanning a 1 Mb intron
 (`N`), sixteen.
+
+**Future work (not a rule): grow one store instead of copying.** A read is
+copied into every window it crosses, which for a spliced read over a long
+intron, or an ultra-long read, is many copies. An engine whose store accepts
+appended records while it iterates, and drops records that end before the
+current column (renumbering its active set), would decode and store each read
+once. It needs the append path to keep the store sorted, its mates linked and
+its window-query index valid while columns are borrowed — see the first
+paragraph above — so it waits until long reads are shown to cost enough.
 
 **Not supported yet.** The soft-clip overhang (`r[pileup.soft_clip_overhang.activation]`)
 reaches `n` positions before a read's start, so it needs `n` positions of
