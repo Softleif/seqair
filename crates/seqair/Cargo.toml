@@ -90,6 +90,10 @@ name = "fasta"
 harness = false
 
 [[bench]]
+name = "stream"
+harness = false
+
+[[bench]]
 name = "fastq"
 harness = false
 
