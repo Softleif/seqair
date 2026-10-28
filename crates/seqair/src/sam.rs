@@ -8,6 +8,8 @@
 pub mod encode;
 pub mod format;
 pub mod reader;
+pub mod stream;
 
 pub use encode::{SamRecordEncoder, SamRecordError, parse_cigar};
 pub use reader::SamError;
+pub use stream::{SamStreamError, SamStreamReader};
