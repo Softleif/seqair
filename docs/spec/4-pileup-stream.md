@@ -81,7 +81,7 @@ column. Records arrive sorted by start, so once a record starting past position
 far it extends. Nothing has to be guessed about read length: the next record's
 start is the whole of the lookahead.
 
-r[pileup_stream.window]
+r[pileup_stream.window+1]
 Records are collected into a window: an interval of positions `[start, end]`
 and a store. A window is opened by a record at `pos`, with `end = pos + len - 1`
 (`len` is the window length, `r[pileup_stream.window_len]`). Each record whose
@@ -89,9 +89,12 @@ position is at or before `end`, on the same contig, is pushed into the window's
 store. The window closes when a record arrives that starts after `end` or on
 another contig, or at the end of the input. Its store then holds every record
 that overlaps `[start, end]`, and the engine is run over that interval and
-yields its columns — over `[start, last]` instead, `last` the contig's last
-position, when the window is the last of its contig, since nothing else will
-reach those positions.
+yields its columns. The last window of a contig runs instead to the furthest
+`end_pos` of its records, capped at the contig's last position: nothing else
+will reach those positions, and none past that furthest end can have a column.
+That bound, not the contig's end, MUST be what the window fetches reference
+bases for (`r[pileup_stream.reference]`) — the contig's end would make the last
+window of a 20 Mb prefix of chr12 read the other 113 Mb of it.
 
 r[pileup_stream.carry]
 When a window closes on its contig (not at a contig change or the end), the
