@@ -57,7 +57,7 @@ pub enum BamStreamError {
 /// let mut reader = BamStreamReader::new(std::io::stdin().lock())?;
 /// let mut record = RawBamRecord::default();
 /// while reader.read_record(&mut record)? {
-///     println!("{}", String::from_utf8_lossy(record.qname()));
+///     println!("{}", record.qname().escape_ascii());
 /// }
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
