@@ -117,7 +117,7 @@ fn simd_uniform_patterns() {
 
 // ---- seq.encode_scalar ----
 
-// r[verify seq.encode_scalar]
+// r[verify seq.encode_scalar+2]
 #[test]
 fn encode_roundtrip() {
     let bases = b"ACGTACGTNN";
@@ -126,7 +126,7 @@ fn encode_roundtrip() {
     assert_eq!(&decoded, bases);
 }
 
-// r[verify seq.encode_scalar]
+// r[verify seq.encode_scalar+2]
 #[test]
 fn encode_odd_length() {
     let bases = b"ACG";
@@ -136,7 +136,7 @@ fn encode_odd_length() {
     assert_eq!(&decoded, b"ACG");
 }
 
-// r[verify seq.encode_scalar]
+// r[verify seq.encode_scalar+2]
 // Verifies the BAM spec (SAM1 §4.2.4) nibble encoding table:
 // =ACMGRSVTWYHKDBN → nibble values 0–15, so A=1, C=2, G=4, T=8, N=15.
 #[hegel::test]
@@ -187,4 +187,28 @@ fn encode_produces_spec_nibble_values(tc: TestCase) {
     // Secondary: roundtrip check.
     let decoded = decode_seq(&encoded, bases.len());
     assert_eq!(&decoded, &bases);
+}
+
+// r[verify seq.encode_scalar+2]
+// Every byte encodes as htslib's `seq_nt16_table` encodes it: SAM text must
+// pack to the same nibbles whichever library parses it.
+#[hegel::test]
+fn encode_matches_htslib_seq_nt16_table(tc: TestCase) {
+    let bases = tc.draw(gs::vecs(gs::integers::<u8>()).max_size(64));
+    let expected: Vec<u8> = bases
+        .chunks(2)
+        .map(|pair| {
+            // The htslib rust-htslib bundles predates `U`/`u` as `T`
+            // (htslib 1.22, `hts.c`); later htslib maps them to 8.
+            let code = |b: u8| match b {
+                b'U' | b'u' => 8,
+                // SAFETY: `seq_nt16_table` is htslib's immutable 256-entry table.
+                _ => unsafe { rust_htslib::htslib::seq_nt16_table[usize::from(b)] },
+            };
+            let hi = code(pair[0]);
+            let lo = pair.get(1).map_or(0, |&b| code(b));
+            (hi << 4) | lo
+        })
+        .collect();
+    assert_eq!(encode_seq(&bases), expected);
 }
