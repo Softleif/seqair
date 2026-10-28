@@ -41,11 +41,14 @@ fn touch(record: &RawBamRecord) -> usize {
 
 fuzz_target!(|data: &[u8]| {
     let [mode, input @ ..] = data else { return };
-    let threads = usize::from(mode % 3);
+    let threads = std::num::NonZeroU8::new(mode % 3);
     let eof = if mode & 0x80 == 0 { EofMarker::Required } else { EofMarker::Optional };
-    let Ok(stream) = BgzfStream::builder(input).threads(threads).eof_marker(eof).build() else {
-        return;
-    };
+    let builder = BgzfStream::builder(input).eof_marker(eof);
+    let stream = match threads {
+        Some(n) => builder.threads(n),
+        None => builder,
+    }
+    .build();
     let Ok(mut reader) = BamStreamReader::from_bgzf(stream) else { return };
 
     let mut records = Vec::new();

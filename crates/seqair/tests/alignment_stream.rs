@@ -66,7 +66,12 @@ fn stream(
     threads: usize,
 ) -> Result<(StreamFormat, String, Vec<Vec<u8>>), AlignmentStreamError> {
     let input = Trickle { inner: std::io::Cursor::new(data), n: chunk };
-    let mut stream = AlignmentStream::builder(input).threads(threads).build()?;
+    let builder = AlignmentStream::builder(input);
+    let mut stream = match u8::try_from(threads).ok().and_then(std::num::NonZeroU8::new) {
+        Some(n) => builder.threads(n),
+        None => builder,
+    }
+    .build()?;
     let header = stream.header().header_text().to_owned();
     let mut records = Vec::new();
     let mut record = RawBamRecord::default();

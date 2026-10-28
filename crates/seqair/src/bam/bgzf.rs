@@ -8,6 +8,7 @@ use std::{
 use tracing::instrument;
 
 pub mod stream;
+pub(crate) use stream::Workers;
 pub use stream::{BgzfStream, BgzfStreamBuilder, EofMarker};
 
 // r[impl bgzf.virtual_offset]

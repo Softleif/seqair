@@ -44,7 +44,7 @@ struct Outcome {
 /// Read `bytes` to the end through the typed `fill`/`advance` API.
 fn stream_outcome(bytes: &[u8], threads: usize, eof: EofMarker) -> Outcome {
     let mut stream =
-        BgzfStream::builder(Cursor::new(bytes)).threads(threads).eof_marker(eof).build().unwrap();
+        with_threads(BgzfStream::builder(Cursor::new(bytes)).eof_marker(eof), threads).build();
     let mut data = Vec::new();
     loop {
         match stream.fill() {
@@ -324,7 +324,7 @@ fn bgzf_error(e: std::io::Error) -> BgzfError {
 /// Read `bytes` to the end, or to the first error, the way `access` says.
 fn read_with(bytes: &[u8], threads: usize, eof: EofMarker, access: Access) -> Outcome {
     let mut stream =
-        BgzfStream::builder(Cursor::new(bytes)).threads(threads).eof_marker(eof).build().unwrap();
+        with_threads(BgzfStream::builder(Cursor::new(bytes)).eof_marker(eof), threads).build();
     let mut data = Vec::new();
     let error = loop {
         let step: Result<bool, BgzfError> = match access {
@@ -577,4 +577,53 @@ fn bgzf_reader_reads_what_htslib_reads(tc: TestCase) {
     rust_htslib::bgzf::Reader::from_path(file.path()).unwrap().read_to_end(&mut htslib).unwrap();
     assert!(htslib == layout.data(), "htslib disagrees with the layout");
     assert!(reader_all(&bytes).unwrap() == htslib, "BgzfReader disagrees with htslib");
+}
+
+// r[verify bgzf.stream.shared_pool]
+// r[verify bgzf.stream.current_pool]
+// r[verify bgzf.stream.threads]
+/// On a rayon pool shared with other work — given explicitly, or found as the
+/// reading thread's own (or the global one) — the stream reads what noodles
+/// reads, also when it is read from one of that pool's threads, the only one
+/// included, where waiting for a batch must not starve the pool.
+#[hegel::test(test_cases = pinned::cases(60))]
+fn a_shared_pool_reads_the_same_bytes_from_any_thread(tc: TestCase) {
+    let layout = tc.draw(layout(40, 65280));
+    let (bytes, _) = layout.encode();
+    let expected = layout.data();
+    let threads = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
+    let on_pool = tc.draw(gs::booleans());
+    let current = tc.draw(gs::booleans());
+    let pool = std::sync::Arc::new(
+        rayon_core::ThreadPoolBuilder::new().num_threads(threads).build().unwrap(),
+    );
+    let read = {
+        let pool = std::sync::Arc::clone(&pool);
+        let bytes = bytes.clone();
+        move || {
+            let builder = BgzfStream::builder(Cursor::new(&bytes)).eof_marker(EofMarker::Optional);
+            let n = std::num::NonZeroU8::new(u8::try_from(threads).unwrap()).unwrap();
+            // Off the pool, `threads` falls back to rayon's global pool.
+            let builder = if current { builder.threads(n) } else { builder.threads_in(n, pool) };
+            let mut stream = builder.build();
+            let mut out = Vec::new();
+            stream.read_to_end(&mut out).map(|_| out)
+        }
+    };
+    let out = if on_pool { pool.install(read) } else { read() };
+    assert!(
+        out.unwrap() == expected,
+        "data differs (threads {threads}, on pool {on_pool}, current {current})"
+    );
+}
+
+/// `threads` batches at once on the current rayon pool, or inline for 0.
+fn with_threads<R: std::io::Read>(
+    builder: seqair::bam::bgzf::BgzfStreamBuilder<R>,
+    threads: usize,
+) -> seqair::bam::bgzf::BgzfStreamBuilder<R> {
+    match u8::try_from(threads).ok().and_then(std::num::NonZeroU8::new) {
+        Some(n) => builder.threads(n),
+        None => builder,
+    }
 }

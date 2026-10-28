@@ -2,17 +2,25 @@
 //! inflation on worker threads. See `r[bgzf.stream]`.
 
 use super::{BgzfError, DataBlock, Frame, inflate_into, read_frame, resize_uninit};
+use rayon_core::ThreadPool;
 use std::{
+    cell::RefCell,
     collections::VecDeque,
     io::{self, BufRead, Read},
-    sync::{Arc, Mutex, mpsc},
-    thread,
+    num::NonZeroU8,
+    panic::{self, AssertUnwindSafe},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
 };
 use tracing::warn;
 
-/// Blocks inflated per batch: about 512 KiB of output, enough that the channel
-/// round trip is noise next to the inflation.
-const BLOCKS_PER_BATCH: usize = 8;
+/// Blocks inflated per batch: about 1 MiB of output. A rayon `spawn` plus the
+/// reply round trip costs about 5% of throughput at 8 blocks (M4, 4 threads,
+/// a 51 MB BAM: 59.8 ms against 57.0 ms at 16), so batches are this large.
+const BLOCKS_PER_BATCH: usize = 16;
 
 /// What to do when the input ends without the BGZF EOF marker block.
 ///
@@ -31,16 +39,46 @@ pub enum EofMarker {
 #[derive(Debug)]
 pub struct BgzfStreamBuilder<R> {
     inner: R,
-    threads: usize,
+    workers: Workers,
     eof_marker: EofMarker,
 }
 
+/// Where a stream's batches are inflated.
+#[derive(Debug, Clone)]
+pub(crate) enum Workers {
+    /// On the thread that reads.
+    Inline,
+    /// On a rayon pool — the reading thread's (else the global one) when
+    /// `pool` is `None` — with at most `n` batches in flight.
+    Threads { n: NonZeroU8, pool: Option<Arc<ThreadPool>> },
+}
+
 impl<R: Read> BgzfStreamBuilder<R> {
-    /// Inflate on `threads` worker threads; `0` (the default) inflates on the
-    /// thread that reads.
+    // r[impl bgzf.stream.current_pool]
+    /// Inflate up to `n` batches at once on the rayon pool the reading thread
+    /// runs in — the one a caller's `pool.install(..)` or parallel iterator
+    /// put it in — or, read from any other thread, rayon's global pool. A
+    /// rayon program shares its threads without naming its pool. Without this
+    /// (or [`Self::threads_in`]) the stream inflates on the reading thread.
     #[must_use]
-    pub fn threads(mut self, threads: usize) -> Self {
-        self.threads = threads;
+    pub fn threads(mut self, n: NonZeroU8) -> Self {
+        self.workers = Workers::Threads { n, pool: None };
+        self
+    }
+
+    // r[impl bgzf.stream.shared_pool]
+    /// Inflate up to `n` batches at once on `pool`, a rayon pool shared with
+    /// other work (rastair's pileup workers, say).
+    #[must_use]
+    pub fn threads_in(mut self, n: NonZeroU8, pool: impl Into<Arc<ThreadPool>>) -> Self {
+        self.workers = Workers::Threads { n, pool: Some(pool.into()) };
+        self
+    }
+
+    /// Where to inflate, as chosen on another builder that forwards here.
+    #[must_use]
+    pub(crate) fn workers(mut self, workers: Workers) -> Self {
+        self.workers = workers;
         self
     }
 
@@ -51,30 +89,20 @@ impl<R: Read> BgzfStreamBuilder<R> {
         self
     }
 
-    /// Start the stream (and its workers, if any). Reads nothing yet.
-    ///
-    /// # Errors
-    /// [`BgzfError::ThreadSpawn`] if a worker thread cannot be started.
-    pub fn build(self) -> Result<BgzfStream<R>, BgzfError> {
-        let pool = match self.threads {
-            0 => None,
-            n => Some(Pool::start(n)?),
+    /// Configure the stream. Reads nothing yet, and starts no threads: a
+    /// rayon pool starts its own (the global one on first use).
+    pub fn build(self) -> BgzfStream<R> {
+        let (pool, depth) = match self.workers {
+            Workers::Inline => (None, 1),
+            Workers::Threads { n, pool } => {
+                let pool = pool.map_or(Pool::Current, Pool::Given);
+                (
+                    Some(pool),
+                    std::num::NonZeroUsize::from(n).get().saturating_mul(BATCHES_PER_THREAD),
+                )
+            }
         };
-        Ok(BgzfStream {
-            inner: self.inner,
-            current: Vec::new(),
-            pos: 0,
-            pending: VecDeque::new(),
-            depth: self.threads.saturating_mul(2).max(1),
-            input: Input::Open { last_was_empty: false },
-            deferred: None,
-            failed: false,
-            eof_marker: self.eof_marker,
-            decompressor: libdeflater::Decompressor::new(),
-            batches: 0,
-            spare: Vec::new(),
-            pool,
-        })
+        BgzfStream::with(self.inner, self.eof_marker, pool, depth)
     }
 }
 
@@ -115,76 +143,65 @@ enum Pending {
     Waiting(mpsc::Receiver<Inflated>),
 }
 
-/// A batch of consecutive blocks for a worker.
-struct Job {
+/// The rayon pool a stream inflates on.
+#[derive(Debug, Clone)]
+enum Pool {
+    /// One the stream owns or was given.
+    Given(Arc<ThreadPool>),
+    /// The reading thread's pool, else the global one, decided per batch.
+    Current,
+}
+
+impl Pool {
+    /// Whether the calling thread is one of this pool's.
+    fn is_current(&self) -> bool {
+        match self {
+            Self::Given(pool) => pool.current_thread_index().is_some(),
+            Self::Current => rayon_core::current_thread_index().is_some(),
+        }
+    }
+
+    fn spawn(&self, job: impl FnOnce() + Send + 'static) {
+        match self {
+            Self::Given(pool) => pool.spawn(job),
+            Self::Current => rayon_core::spawn(job),
+        }
+    }
+}
+
+/// Batches in flight per thread asked for: one inflating, one inflated and
+/// waiting for the reader, so no thread waits on the reader to hand it work.
+const BATCHES_PER_THREAD: usize = 2;
+
+thread_local! {
+    /// Each pool thread's decompressor, kept between batches.
+    static DECOMPRESSOR: RefCell<Option<libdeflater::Decompressor>> = const { RefCell::new(None) };
+}
+
+/// Inflate a batch on a pool thread and send it back. A panic (there should
+/// be none) drops `reply` unanswered, which the stream reports as
+/// [`BgzfError::DecompressionWorkerLost`]; rayon would otherwise abort.
+fn inflate_job(
     compressed: Vec<u8>,
     blocks: Vec<DataBlock>,
     out: Vec<u8>,
     reply: mpsc::SyncSender<Inflated>,
-}
-
-/// The inflation workers. Dropping closes the queue and joins them.
-struct Pool {
-    jobs: Option<mpsc::SyncSender<Job>>,
-    /// The workers' end of the queue, kept to discard queued jobs on drop.
-    queue: Arc<Mutex<mpsc::Receiver<Job>>>,
-    workers: Vec<thread::JoinHandle<()>>,
-}
-
-impl Pool {
-    fn start(threads: usize) -> Result<Self, BgzfError> {
-        // The stream never has more than `2 * threads` batches out, so the
-        // queue never makes it wait.
-        let (jobs, queue) = mpsc::sync_channel::<Job>(threads.saturating_mul(2));
-        let queue = Arc::new(Mutex::new(queue));
-        let mut pool = Self {
-            jobs: Some(jobs),
-            queue: Arc::clone(&queue),
-            workers: Vec::with_capacity(threads),
-        };
-        for i in 0..threads {
-            let queue = Arc::clone(&queue);
-            let worker = thread::Builder::new()
-                .name(format!("seqair-bgzf-inflate-{i}"))
-                .spawn(move || inflate_worker(&queue))
-                // Dropping `pool` joins the workers already started.
-                .map_err(|source| BgzfError::ThreadSpawn { source })?;
-            pool.workers.push(worker);
-        }
-        Ok(pool)
+    dropped: &AtomicBool,
+) {
+    if dropped.load(Ordering::Relaxed) {
+        // The stream is gone; nobody will read this batch.
+        return;
     }
-}
-
-impl Drop for Pool {
-    fn drop(&mut self) {
-        // Closing the queue ends each worker after the batch it holds; the
-        // batches still queued are discarded, not inflated for nobody.
-        drop(self.jobs.take());
-        if let Ok(queue) = self.queue.lock() {
-            while queue.try_recv().is_ok() {}
-        }
-        for worker in self.workers.drain(..) {
-            if worker.join().is_err() {
-                warn!("a BGZF inflation worker panicked");
-            }
-        }
-    }
-}
-
-fn inflate_worker(queue: &Mutex<mpsc::Receiver<Job>>) {
-    let mut decompressor = libdeflater::Decompressor::new();
-    loop {
-        // Hold the lock only while waiting for a job, not while inflating.
-        let job = match queue.lock() {
-            Ok(queue) => queue.recv(),
-            Err(_) => return,
-        };
-        let Ok(Job { compressed, blocks, out, reply }) = job else { return };
-        let batch = inflate_batch(&mut decompressor, &compressed, &blocks, out);
-        // A failed send means the stream was dropped and wants nothing more.
-        if reply.send(Inflated { batch, compressed }).is_err() {
-            return;
-        }
+    let inflated = panic::catch_unwind(AssertUnwindSafe(|| {
+        DECOMPRESSOR.with_borrow_mut(|d| {
+            let d = d.get_or_insert_with(libdeflater::Decompressor::new);
+            inflate_batch(d, &compressed, &blocks, out)
+        })
+    }));
+    match inflated {
+        // A failed send means the stream was dropped meanwhile.
+        Ok(batch) => if reply.send(Inflated { batch, compressed }).is_err() {},
+        Err(_) => warn!("a BGZF inflation job panicked"),
     }
 }
 
@@ -228,11 +245,12 @@ fn inflate_batch(
 /// (`r[bgzf.stream.poison]`).
 ///
 /// ```no_run
-/// use seqair::bam::bgzf::{BgzfStream, EofMarker};
-/// use std::io::BufRead;
+/// use seqair::bam::bgzf::BgzfStream;
+/// use std::{io::BufRead, num::NonZeroU8};
 ///
 /// let stdin = std::io::stdin().lock();
-/// let mut stream = BgzfStream::builder(stdin).threads(4).build()?;
+/// let four = NonZeroU8::new(4).expect("4 is not 0");
+/// let mut stream = BgzfStream::builder(stdin).threads(four).build();
 /// let mut line = Vec::new();
 /// stream.read_until(b'\n', &mut line)?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -257,9 +275,16 @@ pub struct BgzfStream<R> {
     batches: u64,
     /// Buffers to reuse for compressed batches.
     spare: Vec<Vec<u8>>,
-    // Last, so the queue (and every reply channel) closes before the workers
-    // are joined.
+    /// Where batches are inflated; `None` inline.
     pool: Option<Pool>,
+    /// Set when the stream is dropped, so queued jobs skip their batch.
+    dropped: Arc<AtomicBool>,
+}
+
+impl<R> Drop for BgzfStream<R> {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Relaxed);
+    }
 }
 
 impl<R> std::fmt::Debug for BgzfStream<R> {
@@ -270,7 +295,7 @@ impl<R> std::fmt::Debug for BgzfStream<R> {
             .field("input", &self.input)
             .field("failed", &self.failed)
             .field("eof_marker", &self.eof_marker)
-            .field("threads", &self.pool.as_ref().map_or(0, |p| p.workers.len()))
+            .field("in_flight", &self.depth)
             .finish_non_exhaustive()
     }
 }
@@ -278,26 +303,31 @@ impl<R> std::fmt::Debug for BgzfStream<R> {
 impl<R: Read> BgzfStream<R> {
     /// A stream that inflates on the calling thread and requires the EOF marker.
     pub fn new(inner: R) -> Self {
+        Self::with(inner, EofMarker::Required, None, 1)
+    }
+
+    fn with(inner: R, eof_marker: EofMarker, pool: Option<Pool>, depth: usize) -> Self {
         Self {
             inner,
             current: Vec::new(),
             pos: 0,
             pending: VecDeque::new(),
-            depth: 1,
+            depth,
             input: Input::Open { last_was_empty: false },
             deferred: None,
             failed: false,
-            eof_marker: EofMarker::Required,
+            eof_marker,
             decompressor: libdeflater::Decompressor::new(),
             batches: 0,
             spare: Vec::new(),
-            pool: None,
+            pool,
+            dropped: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Configure threads and EOF-marker handling.
+    /// Configure threads (or a shared pool) and EOF-marker handling.
     pub fn builder(inner: R) -> BgzfStreamBuilder<R> {
-        BgzfStreamBuilder { inner, threads: 0, eof_marker: EofMarker::Required }
+        BgzfStreamBuilder { inner, workers: Workers::Inline, eof_marker: EofMarker::Required }
     }
 
     // r[impl bgzf.stream.api]
@@ -387,8 +417,7 @@ impl<R: Read> BgzfStream<R> {
             let Batch { bytes, error } = match next {
                 Pending::Ready(batch) => batch,
                 Pending::Waiting(reply) => {
-                    let Inflated { batch, compressed } =
-                        reply.recv().map_err(|_| BgzfError::DecompressionWorkerLost)?;
+                    let Inflated { batch, compressed } = self.wait(&reply)?;
                     self.recycle(compressed);
                     batch
                 }
@@ -400,6 +429,32 @@ impl<R: Read> BgzfStream<R> {
             self.pos = 0;
             if !self.current.is_empty() {
                 return Ok(true);
+            }
+        }
+    }
+
+    // r[impl bgzf.stream.shared_pool]
+    /// The reply for a batch. On one of the pool's own threads, blocking would
+    /// take that thread from the pool the batch waits for (with one thread,
+    /// forever), so it runs the pool's queued jobs instead until the reply is
+    /// in, as rayon's own `join` does.
+    fn wait(&self, reply: &mpsc::Receiver<Inflated>) -> Result<Inflated, BgzfError> {
+        let lost = |_| BgzfError::DecompressionWorkerLost;
+        let on_pool = self.pool.as_ref().is_some_and(Pool::is_current);
+        if !on_pool {
+            return reply.recv().map_err(lost);
+        }
+        loop {
+            match reply.try_recv() {
+                Ok(inflated) => return Ok(inflated),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(BgzfError::DecompressionWorkerLost);
+                }
+                Err(mpsc::TryRecvError::Empty) => match rayon_core::yield_now() {
+                    Some(rayon_core::Yield::Executed) => {}
+                    // Our batch is on another thread: wait for it there.
+                    _ => return reply.recv().map_err(lost),
+                },
             }
         }
     }
@@ -471,17 +526,15 @@ impl<R: Read> BgzfStream<R> {
     /// Inflate a batch now, or hand it to a worker.
     fn dispatch(&mut self, compressed: Vec<u8>, blocks: Vec<DataBlock>) -> Pending {
         let out = self.spare.pop().unwrap_or_default();
-        let Some(jobs) = self.pool.as_ref().and_then(|p| p.jobs.as_ref()) else {
+        let Some(pool) = &self.pool else {
             let batch = inflate_batch(&mut self.decompressor, &compressed, &blocks, out);
             self.recycle(compressed);
             return Pending::Ready(batch);
         };
         let (reply, receiver) = mpsc::sync_channel(1);
-        match jobs.send(Job { compressed, blocks, out, reply }) {
-            Ok(()) => Pending::Waiting(receiver),
-            // Every worker is gone.
-            Err(_) => Pending::Ready(Batch::failed(BgzfError::DecompressionWorkerLost)),
-        }
+        let dropped = Arc::clone(&self.dropped);
+        pool.spawn(move || inflate_job(compressed, blocks, out, reply, &dropped));
+        Pending::Waiting(receiver)
     }
 }
 
