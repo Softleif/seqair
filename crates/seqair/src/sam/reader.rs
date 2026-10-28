@@ -492,13 +492,17 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     cigar_buf.clear();
     let cigar_available = parse_cigar(cigar_str, cigar_buf)?;
 
-    // Compute end_pos from packed CIGAR
-    // compute_end_pos returns None only if the CIGAR ref span overflows u32 range;
-    // fall back to pos (zero-span) to avoid panicking on malformed input.
-    let end_pos =
-        if cigar_available { cigar::compute_end_pos(pos, cigar_buf).unwrap_or(pos) } else { pos };
+    // r[impl record_store.end_pos_htslib]
+    // An unmapped record sits at `pos` whatever CIGAR it carries. Otherwise
+    // the CIGAR's end; compute_end_pos returns None only if the ref span
+    // overflows u32 range, so fall back to pos (zero-span) on malformed input.
+    let end_pos = if cigar_available && !flags.is_unmapped() {
+        cigar::compute_end_pos(pos, cigar_buf).unwrap_or(pos)
+    } else {
+        pos
+    };
 
-    // r[impl sam.reader.overlap_filter+3]
+    // r[impl sam.reader.overlap_filter+4]
     // r[impl sam.reader.overlap_inclusive]
     // r[impl interval.overlap_test]
     if pos.as_i64() > end || end_pos.as_i64() < start {

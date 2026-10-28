@@ -106,8 +106,8 @@ An `i` value outside `-2147483648..=4294967295` cannot be stored in any BAM inte
 > 6. Filter: skip lines where RNAME's tid doesn't match, or where the record doesn't overlap the inclusive region `[start, end]`.
 > 7. Push passing records into the RecordStore.
 
-r[sam.reader.overlap_filter+3]
-`end_pos` MUST be computed from the parsed CIGAR. When CIGAR is `*` (unavailable), `end_pos = pos` (point record).
+r[sam.reader.overlap_filter+4]
+`end_pos` MUST be computed from the parsed CIGAR. When CIGAR is `*` (unavailable), `end_pos = pos` (point record). A record with flag 0x4 MUST get `end_pos = pos` whatever CIGAR it carries (`r[record_store.end_pos_htslib]`), in the overlap filter as in the store, as the BAM reader does: a placed-unmapped read with a stale CIGAR used to be fetched by every query over the span that CIGAR described, and stored with that span.
 
 r[sam.reader.overlap_inclusive]
 A record overlaps the queried region iff `pos <= end && end_pos >= start`, per
