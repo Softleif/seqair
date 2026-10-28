@@ -691,7 +691,7 @@ pub fn validate_aux(aux: &[u8]) -> Result<(), AuxLayoutError> {
 }
 
 /// The end of the well-formed tag starting at `at`.
-fn tag_end(aux: &[u8], at: usize) -> Result<usize, AuxLayoutError> {
+pub(crate) fn tag_end(aux: &[u8], at: usize) -> Result<usize, AuxLayoutError> {
     let offset = at;
     let truncated = AuxLayoutError::Truncated { offset };
     let Some(&[_, _, code]) = aux.get(at..at.saturating_add(3)) else {

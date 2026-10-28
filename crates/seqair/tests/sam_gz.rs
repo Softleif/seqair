@@ -123,7 +123,7 @@ fn sam_gz_record_count_matches_bam() {
 
 // r[verify sam.record.parse]
 // r[verify sam.record.coordinate_conversion]
-// r[verify sam.record.cigar_parse]
+// r[verify sam.record.cigar_parse+2]
 // r[verify sam.record.seq_decode]
 // r[verify sam.record.qual_decode]
 #[test]

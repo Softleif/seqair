@@ -139,7 +139,7 @@ fn sam_record_count_matches_htslib() {
     }
 }
 
-// r[verify sam.record.cigar_parse]
+// r[verify sam.record.cigar_parse+2]
 // r[verify sam.record.seq_decode]
 // r[verify sam.record.qual_decode]
 #[test]
@@ -198,7 +198,7 @@ fn sam_record_fields_match_htslib() {
     }
 }
 
-// r[verify sam.record.aux_tags]
+// r[verify sam.record.aux_tags+2]
 #[test]
 fn sam_aux_tags_present() {
     let dir = tempfile::tempdir().unwrap();
@@ -232,7 +232,7 @@ fn sam_aux_tags_present() {
     );
 }
 
-// r[verify sam.record.aux_tags]
+// r[verify sam.record.aux_tags+2]
 #[test]
 fn sam_aux_rg_tag_matches_htslib() {
     let dir = tempfile::tempdir().unwrap();

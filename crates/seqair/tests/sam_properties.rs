@@ -43,7 +43,7 @@ fn arb_cigar_parts(tc: &TestCase) -> (Vec<(u32, char)>, String) {
     (parts, s)
 }
 
-// r[verify sam.record.cigar_parse]
+// r[verify sam.record.cigar_parse+2]
 // r[verify sam.edge.long_cigar]
 #[hegel::test(test_cases = crate::pinned::cases(200))]
 fn cigar_end_pos_invariants(tc: TestCase) {
