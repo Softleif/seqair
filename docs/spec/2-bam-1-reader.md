@@ -25,8 +25,10 @@ r[bam.reader.chunk_batching]
 r[bam.reader.overlap_filter]
 A record overlaps a region if `record.pos <= region.end` AND `record.end_pos >= region.start` (both query ends inclusive, `end_pos` the last covered position — see [`interval.overlap_test`](./0-1-pos.md#intervaloverlap_test)). Records outside the region that appear in index chunks MUST be filtered out. This is necessary because the BAM index is approximate — chunks may contain records slightly outside the queried region.
 
-r[bam.reader.sorted_order+2]
-Records in the store MUST be in coordinate-sorted order (by pos, then by end_pos as tiebreaker) after `fetch_into`, matching the order a sorted BAM file provides.
+r[bam.reader.sorted_order+3]
+Records in the store MUST be in the order the file holds them after `fetch_into`. In a coordinate-sorted file that is ascending `pos`; records that share a `pos` keep their file order — the reader MUST NOT reorder them (by `end_pos` or otherwise), as neither htslib's iterator nor `samtools view` does.
+
+> **Was:** "by pos, then by end_pos as tiebreaker". The reader never re-sorted, and samtools breaks no ties by end position; the indexed-vs-streaming property test (`indexed_regions_are_the_streamed_records_that_overlap_them`) checks file order.
 
 r[bam.reader.early_exit]
 Because of `r[bam.reader.sorted_order]`, the first record whose start lies past

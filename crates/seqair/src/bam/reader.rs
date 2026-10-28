@@ -213,7 +213,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
 
     // r[impl bam.reader.fetch_into+2]
     // r[impl bam.reader.overlap_filter]
-    // r[impl bam.reader.sorted_order+2]
+    // r[impl bam.reader.sorted_order+3]
     // r[impl bam.reader.secondary_supplementary_included+2]
     // r[impl region_buf.fetch_into+2]
     // r[impl region_buf.no_bin0]
@@ -567,7 +567,7 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
             let rec_flags = BamFlags::from(u16::from_le_bytes([raw[14], raw[15]]));
 
             // r[impl bam.reader.early_exit]
-            // r[depends bam.reader.sorted_order+2]
+            // r[depends bam.reader.sorted_order+3]
             if rec_pos > self.end {
                 break;
             }
