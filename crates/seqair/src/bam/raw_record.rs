@@ -104,7 +104,7 @@ impl Default for RawBamRecord {
 impl fmt::Debug for RawBamRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RawBamRecord")
-            .field("qname", &String::from_utf8_lossy(self.qname()))
+            .field("qname", &self.qname().escape_ascii().to_string())
             .field("flags", &self.flags())
             .field("tid", &self.tid)
             .field("pos", &self.pos)
