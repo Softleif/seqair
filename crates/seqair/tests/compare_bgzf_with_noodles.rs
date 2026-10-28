@@ -62,7 +62,7 @@ fn virtual_offset_ordering_matches_noodles(tc: TestCase) {
     );
 }
 
-// r[verify bgzf.decompression]
+// r[verify bgzf.decompression+2]
 // r[verify bgzf.crc32]
 // Both seqair's BgzfReader and noodles' bgzf::io::Reader must decompress the same leading
 // bytes from a real BAM file. BGZF decompression is deterministic, so byte-for-byte identity
