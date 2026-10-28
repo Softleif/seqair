@@ -11,7 +11,7 @@ use std::{
 };
 use tracing::instrument;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BamHeader {
     header_text: String,
     targets: Vec<TargetInfo>,
