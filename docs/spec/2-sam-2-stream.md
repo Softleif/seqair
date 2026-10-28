@@ -33,7 +33,7 @@ r[sam.encode.bin]
 ## CIGAR
 
 r[sam.encode.cigar]
-`parse_cigar(text, out)` MUST clear `out` and parse a SAM CIGAR string: `*` gives no operations; otherwise one or more `[0-9]+[MIDNSHP=XB]`, each length below 2^28. An empty string (`EmptyCigar`), a missing or over-long length (`InvalidCigarLength`), an operator outside `MIDNSHP=XB` (`UnknownCigarOp`) and a length without an operator at the end (`MissingCigarOp`) MUST fail. `B` (htslib's `BAM_CBACK`, code 9) is accepted because htslib accepts it. The line encoder MUST use this parser. **Deviation:** htslib accepts a `+` before a length; seqair does not.
+`parse_cigar(text, out)` MUST clear `out` and parse a SAM CIGAR string: `*` gives no operations; otherwise one or more `[0-9]+[MIDNSHP=XB]`, each length below 2^28. An empty string (`EmptyCigar`), a missing or over-long length (`InvalidCigarLength`), an operator outside `MIDNSHP=XB` (`UnknownCigarOp`) and a length without an operator at the end (`MissingCigarOp`) MUST fail. `B` (htslib's `BAM_CBACK`, code 9) is accepted because htslib accepts it. The line encoder MUST use this parser. **Deviation:** `sam_parse1` takes a CIGAR field that starts with `*` as `*` whatever follows it; seqair rejects `*junk`.
 
 r[sam.encode.cigar_seq]
 When a record has a CIGAR and a sequence, the CIGAR's query length (M, I, S, =, X) MUST equal the sequence length, mapped or not, as `sam_parse1` checks (`CigarSeqLenMismatch`). The check runs after `r[sam.encode.cg_tag]`.
