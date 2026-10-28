@@ -19,8 +19,8 @@
 mod pinned;
 
 use hegel::prelude::*;
-use seqair::bam::RawBamRecord;
 use seqair::bam::stream::{BamStreamError, BamStreamReader};
+use seqair::bam::RawBamRecord;
 use seqair::io::BgzfWriter;
 use std::fmt::Write as _;
 use std::io::Cursor;
@@ -120,9 +120,11 @@ fn htslib_reader() -> (std::process::Command, bool) {
 /// `CG` CIGAR against the sequence (htslib `cc6b1f7c`); 1.24 does not.
 fn samtools_checks_cg_cigars() -> bool {
     let out = std::process::Command::new("samtools").arg("--version").output().unwrap();
-    let version = String::from_utf8(out.stdout).unwrap();
-    let (major, minor) = version
-        .lines()
+    // Line by line: Debian's build flags in the output are not UTF-8.
+    let (major, minor) = out
+        .stdout
+        .split(|&b| b == b'\n')
+        .filter_map(|l| std::str::from_utf8(l).ok())
         .find_map(|l| l.strip_prefix("Using htslib "))
         .and_then(|v| v.split_once('.'))
         .map(|(a, b)| (a.parse::<u32>().unwrap(), b.trim().parse::<u32>().unwrap_or(0)))
@@ -295,8 +297,8 @@ fn set_flags_keeps_the_cigar_check() {
 // ── generated SAM, written to BAM by htslib and by noodles ──────────────
 
 use rust_htslib::bam::{self as htsbam, Read as _};
-use seqair::bam::BgzfStream;
 use seqair::bam::writer::BamWriterBuilder;
+use seqair::bam::BgzfStream;
 use std::path::{Path, PathBuf};
 
 /// One SAM line's fields, kept as text.
@@ -849,8 +851,8 @@ fn write_raw_rejects_a_tid_the_header_lacks() {
 
 // ── write_store_record's bin ────────────────────────────────────────────
 
-use seqair::bam::RecordStore;
 use seqair::bam::reader::IndexedBamReader;
+use seqair::bam::RecordStore;
 
 /// A mapped read of `len` reference bases ending `delta` bases after a
 /// 16 kbp window boundary (`delta` = 0: its last base is the window's first).
