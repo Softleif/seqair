@@ -414,7 +414,7 @@ fn parse_lines(sam: &str) -> Vec<Line> {
 }
 
 // r[verify unified.fetch_equivalence]
-// r[verify sam.record.aux_tags]
+// r[verify sam.record.aux_tags+2]
 // r[verify bam_writer.write_store_record]
 /// Every field of every record must come back unchanged from
 /// SAM → seqair reader → seqair writer → BAM → samtools → SAM.

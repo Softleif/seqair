@@ -1,6 +1,7 @@
 //! Open and query bgzf-compressed SAM files. [`IndexedSamReader`] uses a tabix index to fetch
 //! records for a region into a [`RecordStore`], with the same API as [`crate::bam::reader::IndexedBamReader`].
 
+use super::encode::{self, SamRecordError};
 use crate::bam::{
     BaiError, BamHeader, BamHeaderError, BamIndex, MateFields,
     cigar::{self, CigarOp},
@@ -24,89 +25,6 @@ use tracing::{instrument, warn};
 
 use super::super::bam::record_store::CustomizeRecordStore;
 use crate::reader::FetchedRecord;
-
-/// Format a byte slice for error display: printable ASCII shown as-is, other bytes as `\xNN`.
-/// Output is capped to `max_len` bytes of input, with "..." appended if truncated.
-fn format_aux_field(bytes: &[u8], max_len: usize) -> String {
-    use std::fmt::Write;
-    let truncated = bytes.len() > max_len;
-    let slice = bytes.get(..max_len).unwrap_or(bytes);
-    let slice = if truncated { slice } else { bytes };
-    let mut out = String::with_capacity(
-        slice.len().checked_add(4).expect("string capacity cannot overflow usize"),
-    );
-    for &b in slice {
-        if b.is_ascii_graphic() || b == b' ' {
-            out.push(b as char);
-        } else {
-            let _ = write!(out, "\\x{b:02x}");
-        }
-    }
-    if truncated {
-        out.push_str("...");
-    }
-    out
-}
-
-/// Format a 2-byte tag as ASCII if both bytes are printable, otherwise as hex.
-fn format_tag(tag: &[u8]) -> String {
-    if let [a, b] = tag
-        && a.is_ascii_graphic()
-        && b.is_ascii_graphic()
-    {
-        return format!("{}{}", *a as char, *b as char);
-    }
-    format_aux_field(tag, 32)
-}
-
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum SamRecordError {
-    #[error("expected >= 11 TAB-separated fields, got {found}")]
-    TooFewFields { found: usize },
-
-    #[error("invalid FLAG field: {}", format_aux_field(value, 32))]
-    InvalidFlag { value: Box<[u8]> },
-
-    #[error("RNAME is not valid UTF-8: {}", format_aux_field(value, 32))]
-    InvalidRname { value: Box<[u8]> },
-
-    #[error("invalid POS field: {}", format_aux_field(value, 32))]
-    InvalidPos { value: Box<[u8]> },
-
-    #[error("invalid MAPQ field: {}", format_aux_field(value, 32))]
-    InvalidMapq { value: Box<[u8]> },
-
-    /// PNEXT is not a valid 1-based position: not a number, negative, or out
-    /// of range.
-    #[error("invalid PNEXT field: {}", format_aux_field(value, 32))]
-    InvalidPnext { value: Box<[u8]> },
-
-    /// TLEN is not an integer that fits in an `i32`.
-    #[error("invalid TLEN field: {}", format_aux_field(value, 32))]
-    InvalidTlen { value: Box<[u8]> },
-
-    #[error("invalid CIGAR operation length: {}", format_aux_field(value, 32))]
-    InvalidCigarLength { value: Box<[u8]> },
-
-    #[error("unknown CIGAR operation: {op}")]
-    UnknownCigarOp { op: char },
-
-    #[error("invalid aux tag value for {}: {}", format_tag(tag), format_aux_field(value, 32))]
-    InvalidAuxValue { tag: Box<[u8]>, value: Box<[u8]> },
-
-    #[error("SAM header is not valid UTF-8")]
-    HeaderNotUtf8 { source: std::string::FromUtf8Error },
-
-    #[error("aux integer value {value} does not fit any BAM integer type (i8/u8/i16/u16/i32/u32)")]
-    AuxIntOutOfRange { value: i64 },
-
-    #[error("aux B-array has {len} elements, exceeding u32::MAX")]
-    AuxArrayTooLarge { len: usize },
-
-    #[error("aux B-array subtype {subtype:?} is not one of cCsSiIf")]
-    InvalidAuxSubtype { subtype: u8 },
-}
 
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
@@ -614,7 +532,10 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     if fields.len() > 11 {
         // The 12th element contains everything after the 11th TAB (because of splitn(12,...))
         let aux_text = fields.get(11).copied().unwrap_or(b"");
-        parse_aux_tags(aux_text, aux_buf)?;
+        // r[impl sam.record.aux_tags+2]
+        // r[impl sam.record.aux_parse_strict+2]
+        // r[impl sam.record.aux_int_range+3]
+        encode::parse_aux_fields(aux_text, aux_buf)?;
     }
 
     // Field 7: RNEXT (mate reference name; * = unavailable, = = same as RNAME)
@@ -684,221 +605,12 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     Ok(Some(FetchedRecord { flags, started: pos.as_i64() >= start, kept }))
 }
 
-// r[impl sam.record.cigar_parse]
+// r[impl sam.record.cigar_parse+2]
 // r[impl sam.edge.long_cigar]
-fn parse_cigar(cigar_str: &[u8], buf: &mut Vec<CigarOp>) -> Result<bool, SamError> {
-    if cigar_str == b"*" {
-        return Ok(false);
-    }
-
-    let mut num_start = 0;
-    for (i, &b) in cigar_str.iter().enumerate() {
-        if b.is_ascii_digit() {
-            continue;
-        }
-
-        let len_bytes = cigar_str.get(num_start..i).unwrap_or(b"");
-        let len = parse_u32(len_bytes)
-            .ok_or_else(|| SamRecordError::InvalidCigarLength { value: len_bytes.into() })?;
-
-        let op = match b {
-            b'M' => 0u32,
-            b'I' => 1,
-            b'D' => 2,
-            b'N' => 3,
-            b'S' => 4,
-            b'H' => 5,
-            b'P' => 6,
-            b'=' => 7,
-            b'X' => 8,
-            _ => {
-                return Err(SamRecordError::UnknownCigarOp { op: b as char }.into());
-            }
-        };
-
-        buf.push(CigarOp::from_bam_u32((len << 4) | op));
-        num_start = i.checked_add(1).expect("CIGAR byte index cannot overflow usize");
-    }
-
-    Ok(true)
-}
-
-/// The integer value of a `B` array element. Float arrays parse their elements
-/// separately, so `f` yields a placeholder the caller ignores.
-fn parse_i64_or_float(v: &[u8], tag: &[u8], subtype: u8) -> Result<i64, SamError> {
-    if subtype == b'f' {
-        return Ok(0);
-    }
-    parse_i64(v)
-        .ok_or_else(|| SamRecordError::InvalidAuxValue { tag: tag.into(), value: v.into() }.into())
-}
-
-// r[impl sam.record.aux_tags]
-// r[impl sam.record.aux_parse_strict]
-fn parse_aux_tags(text: &[u8], buf: &mut Vec<u8>) -> Result<(), SamError> {
-    for field in text.split(|&b| b == b'\t') {
-        if field.len() < 5 {
-            continue; // need at least "XX:T:V"
-        }
-        // field[0..2] = tag name, field[2] = ':', field[3] = type, field[4] = ':'
-        if field.get(2) != Some(&b':') || field.get(4) != Some(&b':') {
-            continue;
-        }
-        let tag = field.get(..2).unwrap_or(b"??");
-        let type_char = field.get(3).copied().unwrap_or(b'Z');
-        let value = field.get(5..).unwrap_or(b"");
-
-        buf.extend_from_slice(tag);
-        match type_char {
-            b'A' => {
-                buf.push(b'A');
-                buf.push(value.first().copied().unwrap_or(b' '));
-            }
-            b'i' => {
-                let val = parse_i64(value).ok_or_else(|| SamRecordError::InvalidAuxValue {
-                    tag: tag.into(),
-                    value: value.into(),
-                })?;
-                serialize_bam_int(buf, val)?;
-            }
-            b'f' => {
-                buf.push(b'f');
-                let f: f32 =
-                    std::str::from_utf8(value).ok().and_then(|s| s.parse().ok()).ok_or_else(
-                        || SamRecordError::InvalidAuxValue { tag: tag.into(), value: value.into() },
-                    )?;
-                buf.extend_from_slice(&f.to_le_bytes());
-            }
-            b'Z' => {
-                buf.push(b'Z');
-                buf.extend_from_slice(value);
-                buf.push(0);
-            }
-            b'H' => {
-                buf.push(b'H');
-                buf.extend_from_slice(value);
-                buf.push(0);
-            }
-            b'B' => {
-                buf.push(b'B');
-                // B:type,v1,v2,...
-                let subtype = value.first().copied().unwrap_or(b'C');
-                buf.push(subtype);
-                let values_str = value.get(2..).unwrap_or(b"");
-                let values: Vec<&[u8]> = values_str.split(|&b| b == b',').collect();
-                let values_len_u32 = u32::try_from(values.len())
-                    .map_err(|_| SamRecordError::AuxArrayTooLarge { len: values.len() })?;
-                buf.extend_from_slice(&values_len_u32.to_le_bytes());
-                for v in &values {
-                    let raw = parse_i64_or_float(v, tag, subtype)?;
-                    match subtype {
-                        // The signed subtypes are `c`/`s`/`i` and the unsigned
-                        // ones `C`/`S`/`I`; converting a signed array through
-                        // the unsigned type rejects every negative value it
-                        // holds, which is most of what a signed array is for.
-                        b'c' => buf.push(
-                            i8::try_from(raw)
-                                .map_err(|_| SamRecordError::InvalidAuxValue {
-                                    tag: tag.into(),
-                                    value: (*v).into(),
-                                })?
-                                .cast_unsigned(),
-                        ),
-                        b'C' => buf.push(u8::try_from(raw).map_err(|_| {
-                            SamRecordError::InvalidAuxValue { tag: tag.into(), value: (*v).into() }
-                        })?),
-                        b's' => buf.extend_from_slice(
-                            &i16::try_from(raw)
-                                .map_err(|_| SamRecordError::InvalidAuxValue {
-                                    tag: tag.into(),
-                                    value: (*v).into(),
-                                })?
-                                .to_le_bytes(),
-                        ),
-                        b'S' => buf.extend_from_slice(
-                            &u16::try_from(raw)
-                                .map_err(|_| SamRecordError::InvalidAuxValue {
-                                    tag: tag.into(),
-                                    value: (*v).into(),
-                                })?
-                                .to_le_bytes(),
-                        ),
-                        b'i' => buf.extend_from_slice(
-                            &i32::try_from(raw)
-                                .map_err(|_| SamRecordError::InvalidAuxValue {
-                                    tag: tag.into(),
-                                    value: (*v).into(),
-                                })?
-                                .to_le_bytes(),
-                        ),
-                        b'I' => buf.extend_from_slice(
-                            &u32::try_from(raw)
-                                .map_err(|_| SamRecordError::InvalidAuxValue {
-                                    tag: tag.into(),
-                                    value: (*v).into(),
-                                })?
-                                .to_le_bytes(),
-                        ),
-                        b'f' => {
-                            let f: f32 = std::str::from_utf8(v)
-                                .ok()
-                                .and_then(|s| s.parse().ok())
-                                .ok_or_else(|| SamRecordError::InvalidAuxValue {
-                                tag: tag.into(),
-                                value: (*v).into(),
-                            })?;
-                            buf.extend_from_slice(&f.to_le_bytes());
-                        }
-                        // The element count is already written, so skipping an
-                        // unrecognised subtype would leave a `B` tag promising
-                        // more bytes than follow it.
-                        other => {
-                            return Err(SamRecordError::InvalidAuxSubtype { subtype: other }.into());
-                        }
-                    }
-                }
-            }
-            _ => {
-                // Unknown type — store as Z-string
-                buf.push(b'Z');
-                buf.extend_from_slice(value);
-                buf.push(0);
-            }
-        }
-    }
-    Ok(())
-}
-
-// r[impl sam.record.aux_int_range+2]
-/// Serialize an integer value using the smallest BAM integer type.
-/// Returns an error if the value does not fit any BAM integer type (i8/u8/i16/u16/i32/u32).
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "each branch is guarded by a range check that ensures value fits in the target type"
-)]
-fn serialize_bam_int(buf: &mut Vec<u8>, val: i64) -> Result<(), SamRecordError> {
-    if (-128..=127).contains(&val) {
-        buf.push(b'c');
-        buf.push(val as u8);
-    } else if (0..=255).contains(&val) {
-        buf.push(b'C');
-        buf.push(val as u8);
-    } else if (-32768..=32767).contains(&val) {
-        buf.push(b's');
-        buf.extend_from_slice(&(val as i16).to_le_bytes());
-    } else if (0..=65535).contains(&val) {
-        buf.push(b'S');
-        buf.extend_from_slice(&(val as u16).to_le_bytes());
-    } else if (-2_147_483_648..=2_147_483_647).contains(&val) {
-        buf.push(b'i');
-        buf.extend_from_slice(&(val as i32).to_le_bytes());
-    } else if (0..=4_294_967_295).contains(&val) {
-        buf.push(b'I');
-        buf.extend_from_slice(&(val as u32).to_le_bytes());
-    } else {
-        return Err(SamRecordError::AuxIntOutOfRange { value: val });
-    }
-    Ok(())
+/// Parse CIGAR into `buf`; `false` for `*`.
+fn parse_cigar(cigar_str: &[u8], buf: &mut Vec<CigarOp>) -> Result<bool, SamRecordError> {
+    encode::parse_cigar(cigar_str, buf)?;
+    Ok(cigar_str != b"*")
 }
 
 // r[impl sam.header.parse]
@@ -992,20 +704,6 @@ fn parse_u16(bytes: &[u8]) -> Option<u16> {
     u16::try_from(val).ok()
 }
 
-fn parse_u32(bytes: &[u8]) -> Option<u32> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let mut val = 0u64;
-    for &b in bytes {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        val = val.checked_mul(10)?.checked_add(u64::from(b.checked_sub(b'0')?))?;
-    }
-    u32::try_from(val).ok()
-}
-
 fn parse_i64(bytes: &[u8]) -> Option<i64> {
     if bytes.is_empty() {
         return None;
@@ -1030,14 +728,14 @@ mod tests {
     use crate::bam::test_util::tid;
     use std::io::Write;
 
-    /// The aux bytes `parse_aux_tags` produces for one `TAG:TYPE:VALUE` field.
+    /// The aux bytes the shared parser produces for one `TAG:TYPE:VALUE` field.
     fn aux_bytes(field: &str) -> Result<Vec<u8>, SamError> {
         let mut buf = Vec::new();
-        parse_aux_tags(field.as_bytes(), &mut buf)?;
+        encode::parse_aux_fields(field.as_bytes(), &mut buf)?;
         Ok(buf)
     }
 
-    // r[verify sam.record.aux_tags]
+    // r[verify sam.record.aux_tags+2]
     /// A `B` array's subtype says whether its elements are signed. Reading a
     /// signed one through the unsigned type of the same width refuses every
     /// negative element, which is most of what a signed array is for.
@@ -1063,7 +761,7 @@ mod tests {
         );
     }
 
-    // r[verify sam.record.aux_tags]
+    // r[verify sam.record.aux_tags+2]
     /// Out of range for the subtype, and a subtype that is not one at all: the
     /// element count is written before the elements, so neither may be skipped.
     #[test]
@@ -1083,7 +781,7 @@ mod tests {
             matches!(
                 err,
                 SamError::MalformedRecord {
-                    source: SamRecordError::InvalidAuxSubtype { subtype: b'q' }
+                    source: SamRecordError::InvalidAuxSubtype { subtype: b'q', .. }
                 }
             ),
             "{err:?}"
@@ -1311,7 +1009,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SamError::MalformedRecord { source: SamRecordError::UnknownCigarOp { op: 'Z' } }
+                SamError::MalformedRecord { source: SamRecordError::UnknownCigarOp { op: b'Z' } }
             ),
             "expected UnknownCigarOp {{ op: 'Z' }}, got: {err}"
         );
@@ -1420,7 +1118,7 @@ mod tests {
         assert_eq!(store.len(), 1);
     }
 
-    // r[verify sam.record.aux_parse_strict]
+    // r[verify sam.record.aux_parse_strict+2]
     #[test]
     fn error_malformed_aux_int_tag() {
         let header = make_header();
@@ -1447,42 +1145,45 @@ mod tests {
         assert_eq!(parse_u16(b""), None, "parse_u16 should reject empty input");
     }
 
-    // r[verify sam.record.parse_int_nonempty]
+    // r[verify sam.record.aux_int_range+3]
     #[test]
-    fn parse_u32_rejects_empty() {
-        assert_eq!(parse_u32(b""), None, "parse_u32 should reject empty input");
+    fn aux_ints_outside_every_bam_type_are_rejected() {
+        for field in ["NH:i:4294967296", "NH:i:-2147483649", "NH:i:9223372036854775808"] {
+            let err = aux_bytes(field).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    SamError::MalformedRecord { source: SamRecordError::AuxIntOutOfRange { .. } }
+                ),
+                "{field}: {err:?}"
+            );
+        }
+        assert_eq!(aux_bytes("NH:i:4294967295").unwrap(), b"NHI\xff\xff\xff\xff");
+        assert_eq!(aux_bytes("NH:i:-2147483648").unwrap(), b"NHi\x00\x00\x00\x80");
     }
 
-    // r[verify sam.record.aux_int_range+2]
+    // r[verify sam.record.aux_tags+2]
+    /// htslib's width choice: unsigned first, signed only for a leading `-`.
     #[test]
-    fn serialize_bam_int_rejects_out_of_range() {
-        // Values outside [-2147483648, 4294967295] cannot fit any BAM integer type
-        let mut buf = Vec::new();
-        let err = serialize_bam_int(&mut buf, i64::MAX).expect_err("should reject i64::MAX");
-        assert!(
-            matches!(err, SamRecordError::AuxIntOutOfRange { value } if value == i64::MAX),
-            "expected AuxIntOutOfRange, got: {err}"
-        );
-
-        buf.clear();
-        let err = serialize_bam_int(&mut buf, i64::MIN).expect_err("should reject i64::MIN");
-        assert!(
-            matches!(err, SamRecordError::AuxIntOutOfRange { value } if value == i64::MIN),
-            "expected AuxIntOutOfRange, got: {err}"
-        );
-
-        // u32::MAX should still work
-        buf.clear();
-        serialize_bam_int(&mut buf, i64::from(u32::MAX)).expect("u32::MAX should be valid");
-        assert_eq!(buf[0], b'I');
-
-        // i32::MIN should still work
-        buf.clear();
-        serialize_bam_int(&mut buf, i64::from(i32::MIN)).expect("i32::MIN should be valid");
-        assert_eq!(buf[0], b'i');
+    fn aux_ints_are_stored_unsigned_first() {
+        assert_eq!(aux_bytes("NH:i:1").unwrap(), b"NHC\x01");
+        assert_eq!(aux_bytes("NH:i:-1").unwrap(), b"NHc\xff");
+        assert_eq!(aux_bytes("NH:i:40000").unwrap(), b"NHS\x40\x9c");
     }
 
-    // r[verify sam.record.aux_int_range+2]
+    // r[verify sam.record.aux_parse_strict+2]
+    /// Fields the old parser skipped silently now fail the record.
+    #[test]
+    fn malformed_aux_fields_fail_the_record() {
+        let header = make_header();
+        for aux in ["NM", "NM:i", "NMxi:1", "NM:q:1", "NM:A:"] {
+            let line = format!("r\t0\tchr1\t100\t60\t4M\t*\t0\t0\tACGT\t~~~~\t{aux}");
+            let err = call_parse(line.as_bytes(), &header).expect_err(aux);
+            assert!(matches!(err, SamError::MalformedRecord { .. }), "{aux}: {err:?}");
+        }
+    }
+
+    // r[verify sam.record.aux_int_range+3]
     #[test]
     fn aux_tag_with_huge_int_returns_error() {
         let header = make_header();
