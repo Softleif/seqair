@@ -117,34 +117,65 @@ impl<R: Read> BamStreamReader<R> {
     }
 
     fn read_record_inner(&mut self, record: &mut RawBamRecord) -> Result<bool, BamStreamError> {
-        // Zero bytes before a record is the end; anything else must be whole.
-        if self.stream.fill()?.is_empty() {
-            return Ok(false);
-        }
-        self.records = self.records.saturating_add(1);
-        let number = self.records;
-        let truncated = |e: BgzfError| match e {
-            BgzfError::UnexpectedEof => BamStreamError::TruncatedRecord { record: number },
-            e => BamStreamError::Bgzf { source: e },
-        };
-        let mut size = [0u8; 4];
-        self.stream.read_exact_into(&mut size).map_err(truncated)?;
-        let size = i32::from_le_bytes(size);
-        let len = usize::try_from(size)
-            .ok()
-            .filter(|n| (32..=MAX_RECORD_SIZE).contains(n))
-            .ok_or(BamStreamError::RecordSizeOutOfRange { record: number, size })?;
-        let stream = &mut self.stream;
+        let Some(len) = self.next_frame()? else { return Ok(false) };
+        let (number, stream) = (self.records, &mut self.stream);
         record
             .refill(&self.header, |payload| {
                 payload.resize(len, 0);
-                stream.read_exact_into(payload).map_err(truncated)
+                stream.read_exact_into(payload).map_err(|e| truncated(number, e))
             })
             .map_err(|e| match e {
                 Refill::Fill(e) => e,
                 Refill::Invalid(source) => BamStreamError::InvalidRecord { record: number, source },
             })?;
         Ok(true)
+    }
+
+    // r[impl bam.stream.payloads]
+    /// Append the next record's payload (its bytes after `block_size`) to
+    /// `out` *without* validating it, for callers that validate elsewhere —
+    /// typically [`RawBamRecord::from_payload`] on worker threads. `Ok(false)`
+    /// at the end of the stream. Framing is checked as by [`Self::read_record`].
+    ///
+    /// # Errors
+    /// As [`Self::read_record`], except that nothing here is an
+    /// [`BamStreamError::InvalidRecord`]: every error ends the stream.
+    pub fn read_payload_into(&mut self, out: &mut Vec<u8>) -> Result<bool, BamStreamError> {
+        if self.failed {
+            return Err(BamStreamError::Poisoned);
+        }
+        let start = out.len();
+        let result = self.next_frame().and_then(|frame| {
+            let Some(len) = frame else { return Ok(false) };
+            out.resize(start.saturating_add(len), 0);
+            let payload = out.get_mut(start..).unwrap_or_default();
+            self.stream.read_exact_into(payload).map_err(|e| truncated(self.records, e))?;
+            Ok(true)
+        });
+        if result.is_err() {
+            out.truncate(start);
+            self.failed = true;
+        }
+        result
+    }
+
+    /// Read the next `block_size`: `None` at a clean end, else the payload
+    /// length, checked against the limits.
+    fn next_frame(&mut self) -> Result<Option<usize>, BamStreamError> {
+        // Zero bytes before a record is the end; anything else must be whole.
+        if self.stream.fill()?.is_empty() {
+            return Ok(None);
+        }
+        self.records = self.records.saturating_add(1);
+        let number = self.records;
+        let mut size = [0u8; 4];
+        self.stream.read_exact_into(&mut size).map_err(|e| truncated(number, e))?;
+        let size = i32::from_le_bytes(size);
+        usize::try_from(size)
+            .ok()
+            .filter(|n| (32..=MAX_RECORD_SIZE).contains(n))
+            .map(Some)
+            .ok_or(BamStreamError::RecordSizeOutOfRange { record: number, size })
     }
 
     /// Iterate over the remaining records, one allocation each. For a
@@ -156,6 +187,14 @@ impl<R: Read> BamStreamReader<R> {
     /// Give up the reader, keeping the header.
     pub fn into_header(self) -> BamHeader {
         self.header
+    }
+}
+
+/// An end of input inside record `record` is truncation.
+fn truncated(record: u64, e: BgzfError) -> BamStreamError {
+    match e {
+        BgzfError::UnexpectedEof => BamStreamError::TruncatedRecord { record },
+        e => BamStreamError::Bgzf { source: e },
     }
 }
 
