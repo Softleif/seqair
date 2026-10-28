@@ -305,6 +305,12 @@ impl<'a> BcfRecordEncoder<'a> {
             8usize.saturating_add(self.shared_buf.len()).saturating_add(self.indiv_buf.len());
 
         self.bgzf.flush_if_needed(total)?;
+        // r[impl vcf_writer.index_amend_last]
+        // A new block may have started: name the previous record's end by it,
+        // as `bcftools index` names it reading the file back.
+        if let Some(ref mut index) = self.index {
+            index.amend_last(self.bgzf.index_offset());
+        }
         self.bgzf.write_all(&l_shared.to_le_bytes())?;
         self.bgzf.write_all(&l_indiv.to_le_bytes())?;
         self.bgzf.write_all(self.shared_buf)?;

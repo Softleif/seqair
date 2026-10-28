@@ -405,7 +405,10 @@ fn csi_header_and_pseudo_bin_match_the_record_set(tc: TestCase) {
         }
         assert!(seen_pseudo, "no pseudo-bin for {}", layout.contigs[contig].0);
     }
-    assert_eq!(off, data.len(), "the whole index was accounted for");
+    // r[verify index_builder.no_coor_trailer]
+    // VCF records always have a CHROM, so nothing is unplaced.
+    assert_eq!(data.get(off..), Some(&0u64.to_le_bytes()[..]), "n_no_coor trailer");
+    assert_eq!(off + 8, data.len(), "the whole index was accounted for");
 }
 
 // r[verify index_builder.csi_depth]

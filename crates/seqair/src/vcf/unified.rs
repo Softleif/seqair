@@ -497,10 +497,15 @@ impl<W: Write> Writer<W, Ready> {
                 // r[impl vcf_writer.buffered_output]
                 Ok((output.into_inner()?, None))
             }
-            WriterInner::VcfGz { bgzf, mut index, .. } => {
+            WriterInner::VcfGz { mut bgzf, mut index, .. } => {
                 // r[impl vcf_writer.finish]
-                let voff = bgzf.index_offset();
+                // r[impl vcf_writer.index_amend_last]
+                // End the last block first, so the index ends at the next
+                // block's start, as htslib's `sam_idx_save` does.
                 if let Some(ref mut idx) = index {
+                    bgzf.flush_if_needed(usize::MAX)?;
+                    let voff = bgzf.index_offset();
+                    idx.amend_last(voff);
                     idx.finish(voff)?;
                 }
                 let inner = bgzf.finish(index.as_mut())?;
@@ -511,10 +516,15 @@ impl<W: Write> Writer<W, Ready> {
                 });
                 Ok((inner, index))
             }
-            WriterInner::Bcf { bgzf, mut index, .. } => {
+            WriterInner::Bcf { mut bgzf, mut index, .. } => {
                 // r[impl bcf_writer.finish]
-                let voff = bgzf.index_offset();
+                // r[impl vcf_writer.index_amend_last]
+                // End the last block first, so the index ends at the next
+                // block's start, as htslib's `sam_idx_save` does.
                 if let Some(ref mut idx) = index {
+                    bgzf.flush_if_needed(usize::MAX)?;
+                    let voff = bgzf.index_offset();
+                    idx.amend_last(voff);
                     idx.finish(voff)?;
                 }
                 let inner = bgzf.finish(index.as_mut())?;
@@ -619,8 +629,14 @@ impl VcfOutput<'_> {
     fn write_line(&mut self, buf: &[u8]) -> Result<(), VcfError> {
         match self {
             VcfOutput::Plain(w) => w.write_all(buf).map_err(VcfError::Io),
-            VcfOutput::Bgzf { bgzf, .. } => {
+            VcfOutput::Bgzf { bgzf, index } => {
                 bgzf.flush_if_needed(buf.len())?;
+                // r[impl vcf_writer.index_amend_last]
+                // A new block may have started: name the previous record's
+                // end by it, as htslib's `vcf_write` does.
+                if let Some(idx) = index {
+                    idx.amend_last(bgzf.index_offset());
+                }
                 bgzf.write_all(buf)?;
                 Ok(())
             }

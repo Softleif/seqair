@@ -445,6 +445,8 @@ impl IndexBuilder {
         for &(_, r) in &active_refs {
             write_ref_index(&mut buf, r, self.depth)?;
         }
+        // r[impl index_builder.no_coor_trailer]
+        buf.extend_from_slice(&self.n_no_coor.to_le_bytes());
 
         bgzf.write_all(&buf)?;
         bgzf.finish()?;
@@ -533,6 +535,9 @@ impl IndexBuilder {
                 }
             }
         }
+        // r[impl index_builder.no_coor_trailer]
+        // r[impl csi.write_format]
+        buf.extend_from_slice(&self.n_no_coor.to_le_bytes());
 
         let mut bgzf = BgzfWriter::new(writer);
         bgzf.write_all(&buf)?;
@@ -594,6 +599,8 @@ impl IndexBuilder {
         for &(_, r) in &active_refs {
             write_csi_ref_index(&mut buf, r, self.depth)?;
         }
+        // r[impl index_builder.no_coor_trailer]
+        buf.extend_from_slice(&self.n_no_coor.to_le_bytes());
 
         bgzf.write_all(&buf)?;
         bgzf.finish()?;
