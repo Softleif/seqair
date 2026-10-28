@@ -73,6 +73,12 @@ name = "fuzz_sam_header"
 path = "fuzz_targets/fuzz_sam_header.rs"
 doc = false
 
+# SAM line -> BAM record encoding, streaming SAM, CIGAR text parsing
+[[bin]]
+name = "fuzz_sam_encode"
+path = "fuzz_targets/fuzz_sam_encode.rs"
+doc = false
+
 # CRAM block parsing and decompression
 [[bin]]
 name = "fuzz_cram_block"
