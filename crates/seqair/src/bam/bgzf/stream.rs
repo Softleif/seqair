@@ -71,6 +71,7 @@ impl<R: Read> BgzfStreamBuilder<R> {
             failed: false,
             eof_marker: self.eof_marker,
             decompressor: libdeflater::Decompressor::new(),
+            batches: 0,
             spare: Vec::new(),
             pool,
         })
@@ -125,6 +126,8 @@ struct Job {
 /// The inflation workers. Dropping closes the queue and joins them.
 struct Pool {
     jobs: Option<mpsc::SyncSender<Job>>,
+    /// The workers' end of the queue, kept to discard queued jobs on drop.
+    queue: Arc<Mutex<mpsc::Receiver<Job>>>,
     workers: Vec<thread::JoinHandle<()>>,
 }
 
@@ -134,7 +137,11 @@ impl Pool {
         // queue never makes it wait.
         let (jobs, queue) = mpsc::sync_channel::<Job>(threads.saturating_mul(2));
         let queue = Arc::new(Mutex::new(queue));
-        let mut pool = Self { jobs: Some(jobs), workers: Vec::with_capacity(threads) };
+        let mut pool = Self {
+            jobs: Some(jobs),
+            queue: Arc::clone(&queue),
+            workers: Vec::with_capacity(threads),
+        };
         for i in 0..threads {
             let queue = Arc::clone(&queue);
             let worker = thread::Builder::new()
@@ -150,8 +157,12 @@ impl Pool {
 
 impl Drop for Pool {
     fn drop(&mut self) {
-        // Closing the queue ends each worker after the batch it holds.
+        // Closing the queue ends each worker after the batch it holds; the
+        // batches still queued are discarded, not inflated for nobody.
         drop(self.jobs.take());
+        if let Ok(queue) = self.queue.lock() {
+            while queue.try_recv().is_ok() {}
+        }
         for worker in self.workers.drain(..) {
             if worker.join().is_err() {
                 warn!("a BGZF inflation worker panicked");
@@ -242,6 +253,8 @@ pub struct BgzfStream<R> {
     failed: bool,
     eof_marker: EofMarker,
     decompressor: libdeflater::Decompressor,
+    /// Batches read so far.
+    batches: u64,
     /// Buffers to reuse for compressed batches.
     spare: Vec<Vec<u8>>,
     // Last, so the queue (and every reply channel) closes before the workers
@@ -276,6 +289,7 @@ impl<R: Read> BgzfStream<R> {
             failed: false,
             eof_marker: EofMarker::Required,
             decompressor: libdeflater::Decompressor::new(),
+            batches: 0,
             spare: Vec::new(),
             pool: None,
         }
@@ -398,13 +412,22 @@ impl<R: Read> BgzfStream<R> {
     /// done. A read error, or a missing EOF marker, is queued after the batch
     /// it follows, so it reaches the consumer in stream order.
     fn top_up(&mut self) {
-        while self.pending.len() < self.depth {
+        // At most two new batches per refill: the queue still grows to `depth`
+        // one batch per batch consumed, but a slow producer (a pipe) is never
+        // waited on for the whole read-ahead before the first bytes return.
+        let mut added = 0u8;
+        while self.pending.len() < self.depth && added < 2 {
             let Input::Open { mut last_was_empty } = self.input else { return };
+            added = added.saturating_add(1);
             let mut compressed = self.spare.pop().unwrap_or_default();
             compressed.clear();
-            let mut blocks = Vec::with_capacity(BLOCKS_PER_BATCH);
+            // The first batch is one block, so the header (and the format a
+            // caller sniffs from it) arrives as soon as that block has.
+            let size = if self.batches == 0 { 1 } else { BLOCKS_PER_BATCH };
+            self.batches = self.batches.saturating_add(1);
+            let mut blocks = Vec::with_capacity(size);
             let mut tail = None;
-            while blocks.len() < BLOCKS_PER_BATCH {
+            while blocks.len() < size {
                 match read_frame(&mut self.inner, &mut compressed, &mut self.decompressor) {
                     Ok(Frame::Data(block)) => {
                         blocks.push(block);

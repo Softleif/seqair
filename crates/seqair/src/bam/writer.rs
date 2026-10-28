@@ -273,7 +273,10 @@ impl<W: Write> BamWriter<W> {
         let beg = record.pos().map_or(0, Pos0::as_u64);
         // `end_pos` is the last covered base; the index wants the exclusive end.
         let end = record.end_pos().map_or(beg, |p| p.as_u64().saturating_add(1));
-        self.finalize_record(record.tid(), record.flags().is_unmapped(), beg, end)
+        // As htslib's `hts_idx_push`, a record without a reference is counted as
+        // unplaced whatever its FLAG says, rather than refused.
+        let unmapped = record.flags().is_unmapped() || record.tid().is_none();
+        self.finalize_record(record.tid(), unmapped, beg, end)
     }
 
     // r[impl bam_writer.write_store_record]

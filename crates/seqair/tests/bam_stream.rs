@@ -640,7 +640,7 @@ fn assert_agrees_with_noodles(path: &Path, ours: &[RawBamRecord]) {
             theirs.mapping_quality().map(u8::from),
             "{what}: mapq"
         );
-        assert_eq!(ours.cigar_bytes(), theirs.cigar().as_ref(), "{what}: cigar");
+        assert_eq!(ours.stored_cigar_bytes(), theirs.cigar().as_ref(), "{what}: cigar");
         assert_eq!(ours.packed_seq(), theirs.sequence().as_ref(), "{what}: seq");
         assert_eq!(ours.seq_len(), theirs.sequence().len(), "{what}: seq_len");
         // noodles shows missing qualities as none at all.
@@ -722,10 +722,13 @@ fn run(cmd: &mut std::process::Command) {
 
 // r[verify bam_writer.write_raw]
 // r[verify bam.raw_record]
+// r[verify index_builder.amend_last]
+// r[verify index_builder.compress_bins]
+// r[verify index_builder.no_coor]
 /// Streaming an htslib-written, coordinate-sorted BAM and writing every record
 /// back with `write_raw` reproduces each record's bytes exactly, and the BAI
-/// the writer builds alongside is byte for byte the one `samtools index`
-/// builds for the output.
+/// the writer builds alongside holds the same bins, chunks and linear index as
+/// the one `samtools index` builds for the output (bins compared by id).
 #[hegel::test(test_cases = pinned::cases(40))]
 fn write_raw_round_trips_and_indexes_like_samtools(tc: TestCase) {
     let mut lines = tc.draw(sam_lines());
@@ -1235,4 +1238,97 @@ fn region_queries_read_past_empty_blocks(tc: TestCase) {
         let region = format!("chr1:{}-{}", start + 1, end + 1);
         assert_eq!(ours, samtools_region(&path, &region), "{region}");
     }
+}
+
+// r[verify bam.stream.payloads]
+/// `read_payload_into` frames exactly what `read_record` reads — validating
+/// its payloads later gives the same records, invalid ones included — and a
+/// truncated stream leaves the caller's buffer as it was, then is poisoned.
+#[hegel::test]
+fn payloads_validate_later_into_the_same_records(tc: TestCase) {
+    let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(12));
+    let payloads: Vec<Vec<u8>> = (0..n)
+        .map(|i| {
+            let record = simple_record(i);
+            if tc.draw(gs::weighted_booleans(0.2)) {
+                Defect::EmptyName.apply(record)
+            } else {
+                record
+            }
+        })
+        .collect();
+    let body: Vec<u8> = payloads.iter().flat_map(|p| framed(p)).collect();
+    let bam = bam_with_body(&body);
+    let header = BamStreamReader::new(Cursor::new(&bam)).unwrap().into_header();
+
+    let mut by_record = BamStreamReader::new(Cursor::new(&bam)).unwrap();
+    let mut by_payload = BamStreamReader::new(Cursor::new(&bam)).unwrap();
+    let mut record = RawBamRecord::default();
+    for payload in &payloads {
+        let mut buf = b"prefix".to_vec();
+        assert!(by_payload.read_payload_into(&mut buf).unwrap());
+        assert_eq!(&buf[..6], b"prefix");
+        assert_eq!(&buf[6..], payload.as_slice());
+        let later = RawBamRecord::from_payload(buf[6..].to_vec(), &header);
+        match by_record.read_record(&mut record) {
+            Ok(true) => assert_eq!(later.unwrap(), record),
+            Err(BamStreamError::InvalidRecord { .. }) => assert!(later.is_err()),
+            other => panic!("{other:?}"),
+        }
+    }
+    let mut buf = vec![1, 2, 3];
+    assert!(!by_payload.read_payload_into(&mut buf).unwrap());
+    assert_eq!(buf, [1, 2, 3]);
+
+    // Cut inside the last record's payload.
+    let mut cut = header_bytes();
+    cut.extend_from_slice(&body[..body.len() - 1]);
+    let mut writer = BgzfWriter::new(Vec::new());
+    writer.write_all(&cut).unwrap();
+    let truncated = writer.finish().unwrap();
+    let mut reader = BamStreamReader::new(Cursor::new(&truncated)).unwrap();
+    let mut buf = Vec::new();
+    for _ in 1..payloads.len() {
+        assert!(reader.read_payload_into(&mut buf).unwrap());
+    }
+    let before = buf.clone();
+    assert!(matches!(
+        reader.read_payload_into(&mut buf),
+        Err(BamStreamError::TruncatedRecord { .. })
+    ));
+    assert_eq!(buf, before);
+    assert!(matches!(reader.read_payload_into(&mut buf), Err(BamStreamError::Poisoned)));
+}
+
+// r[verify bam.raw_record.aux_lazy]
+/// A record whose aux block is malformed streams and validates, as htslib
+/// copies it; the malformation surfaces where the tags are interpreted.
+#[test]
+fn a_malformed_aux_block_is_read_and_reported_when_interpreted() {
+    let mut payload = simple_record(0);
+    payload.extend_from_slice(b"XXQ\x01"); // unknown type code `Q`
+    let bam = bam_with_body(&framed(&payload));
+    let mut reader = BamStreamReader::new(Cursor::new(&bam)).unwrap();
+    let mut record = RawBamRecord::default();
+    assert!(reader.read_record(&mut record).unwrap());
+    assert_eq!(record.as_payload(), payload.as_slice());
+    let first = record.aux().iter_checked().find_map(Result::err);
+    assert!(
+        matches!(first, Some(seqair::bam::aux::AuxLayoutError::UnknownType { code: b'Q', .. })),
+        "{first:?}"
+    );
+}
+
+// r[verify bam.raw_record.validation]
+/// `from_payload` refuses a payload past the record size limit, so no
+/// `RawBamRecord` exists that `write_raw` would then refuse.
+#[test]
+fn from_payload_enforces_the_record_size_limit() {
+    let header = BamStreamReader::new(Cursor::new(&bam_with_body(&[]))).unwrap().into_header();
+    let mut payload = simple_record(0);
+    payload.resize(2 * 1024 * 1024 + 1, 0);
+    assert!(matches!(
+        RawBamRecord::from_payload(payload, &header),
+        Err(seqair::bam::DecodeError::RecordTooLarge { .. })
+    ));
 }

@@ -443,7 +443,7 @@ impl IndexBuilder {
 
         // Per-reference bin/chunk/linear data — only for active refs
         for &(_, r) in &active_refs {
-            write_ref_index(&mut buf, r)?;
+            write_ref_index(&mut buf, r, self.depth)?;
         }
 
         bgzf.write_all(&buf)?;
@@ -476,10 +476,7 @@ impl IndexBuilder {
         // Per-reference data: include all refs, even empty ones
         for tid in 0..n_refs {
             match self.refs.get(tid) {
-                Some(r) if !r.bins.is_empty() => {
-                    let bins = compress_bins(&r.bins, self.depth);
-                    write_ref_index(&mut buf, &RefIndexBuilder { bins, ..r.clone() })?;
-                }
+                Some(r) if !r.bins.is_empty() => write_ref_index(&mut buf, r, self.depth)?,
                 _ => {
                     // Empty ref: n_bin=0, n_intv=0
                     write_i32(&mut buf, 0); // n_bin
@@ -640,9 +637,10 @@ fn write_csi_ref_index(
     depth: u32,
 ) -> Result<(), IndexError> {
     let pseudo = pseudo_bin(depth);
-    write_i32(buf, count_i32(r.bins.len(), "n_bin")?);
+    let bins = compress_bins(&r.bins, depth);
+    write_i32(buf, count_i32(bins.len(), "n_bin")?);
 
-    for (&bin_id, chunks) in &r.bins {
+    for (&bin_id, chunks) in &bins {
         write_u32(buf, bin_id);
         // `loffset` is not this bin's own first chunk. It is the offset of the
         // first record at or after the start of the bin's *leftmost leaf
@@ -670,10 +668,12 @@ fn write_csi_ref_index(
 }
 
 /// Write one reference's bin data in BAI format (no per-bin loffset, with linear index).
-fn write_ref_index(buf: &mut Vec<u8>, r: &RefIndexBuilder) -> Result<(), IndexError> {
-    write_i32(buf, count_i32(r.bins.len(), "n_bin")?);
+// r[impl index_builder.compress_bins]
+fn write_ref_index(buf: &mut Vec<u8>, r: &RefIndexBuilder, depth: u32) -> Result<(), IndexError> {
+    let bins = compress_bins(&r.bins, depth);
+    write_i32(buf, count_i32(bins.len(), "n_bin")?);
 
-    for (&bin_id, chunks) in &r.bins {
+    for (&bin_id, chunks) in &bins {
         write_u32(buf, bin_id);
         write_i32(buf, count_i32(chunks.len(), "n_chunk")?);
         for chunk in chunks {
