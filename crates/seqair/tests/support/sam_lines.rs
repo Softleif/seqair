@@ -120,7 +120,7 @@ fn float_text(tc: &TestCase, d: Dialect, double: bool) -> String {
 
 /// One optional field with tag `tag`.
 #[hegel::composite]
-fn aux_field(tc: &TestCase, tag: String, d: Dialect) -> String {
+pub fn aux_field(tc: &TestCase, tag: String, d: Dialect) -> String {
     let kind = tc.draw_silent(gs::integers::<u8>().max_value(6));
     match kind {
         0 => {
