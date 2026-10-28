@@ -55,6 +55,12 @@ name = "fuzz_bam_aux"
 path = "fuzz_targets/fuzz_bam_aux.rs"
 doc = false
 
+# RawBamRecord payloads -> SAM text: format or typed error, never a panic
+[[bin]]
+name = "fuzz_sam_format"
+path = "fuzz_targets/fuzz_sam_format.rs"
+doc = false
+
 # CSI index parsing
 [[bin]]
 name = "fuzz_csi_index"
