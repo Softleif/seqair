@@ -67,6 +67,7 @@ impl<R: Read> BgzfStreamBuilder<R> {
             pending: VecDeque::new(),
             depth: self.threads.saturating_mul(2).max(1),
             input: Input::Open { last_was_empty: false },
+            deferred: None,
             failed: false,
             eof_marker: self.eof_marker,
             decompressor: libdeflater::Decompressor::new(),
@@ -86,16 +87,30 @@ enum Input {
     Done,
 }
 
-/// A batch's decompressed bytes and the compressed buffer it came from, which
-/// goes back to the stream for reuse.
+/// What a batch yields, in stream order: the bytes of every block before the
+/// first that failed, then that failure (or a read error that followed the
+/// batch's blocks).
+struct Batch {
+    bytes: Vec<u8>,
+    error: Option<BgzfError>,
+}
+
+impl Batch {
+    fn failed(error: BgzfError) -> Self {
+        Self { bytes: Vec::new(), error: Some(error) }
+    }
+}
+
+/// A batch's output and the compressed buffer it came from, which goes back to
+/// the stream for reuse.
 struct Inflated {
-    out: Result<Vec<u8>, BgzfError>,
+    batch: Batch,
     compressed: Vec<u8>,
 }
 
 /// One batch, in stream order.
 enum Pending {
-    Ready(Result<Vec<u8>, BgzfError>),
+    Ready(Batch),
     Waiting(mpsc::Receiver<Inflated>),
 }
 
@@ -153,26 +168,28 @@ fn inflate_worker(queue: &Mutex<mpsc::Receiver<Job>>) {
             Ok(queue) => queue.recv(),
             Err(_) => return,
         };
-        let Ok(Job { compressed, blocks, mut out, reply }) = job else { return };
-        let out = inflate_batch(&mut decompressor, &compressed, &blocks, &mut out).map(|()| out);
+        let Ok(Job { compressed, blocks, out, reply }) = job else { return };
+        let batch = inflate_batch(&mut decompressor, &compressed, &blocks, out);
         // A failed send means the stream was dropped and wants nothing more.
-        if reply.send(Inflated { out, compressed }).is_err() {
+        if reply.send(Inflated { batch, compressed }).is_err() {
             return;
         }
     }
 }
 
-/// Inflate `blocks`, in order, into `out` (replacing its contents).
+/// Inflate `blocks`, in order, into `out` (replacing its contents). A block
+/// that fails ends the batch: the blocks before it are kept.
 fn inflate_batch(
     decompressor: &mut libdeflater::Decompressor,
     compressed: &[u8],
     blocks: &[DataBlock],
-    out: &mut Vec<u8>,
-) -> Result<(), BgzfError> {
+    mut out: Vec<u8>,
+) -> Batch {
     let total = blocks.iter().map(|b| b.isize()).fold(0usize, usize::saturating_add);
     // Safety: every byte is written by `inflate_into` below, which covers
-    // `0..total` block by block; on failure `out` is cleared before return.
-    unsafe { resize_uninit(out, total) };
+    // `0..total` block by block; on failure `out` is truncated to the blocks
+    // written before return.
+    unsafe { resize_uninit(&mut out, total) };
     let mut at = 0usize;
     for &block in blocks {
         let end = at.saturating_add(block.isize());
@@ -181,12 +198,12 @@ fn inflate_batch(
             None => Err(BgzfError::TruncatedBlock),
         };
         if let Err(e) = result {
-            out.clear();
-            return Err(e);
+            out.truncate(at);
+            return Batch { bytes: out, error: Some(e) };
         }
         at = end;
     }
-    Ok(())
+    Batch { bytes: out, error: None }
 }
 
 // r[impl bgzf.stream]
@@ -219,6 +236,8 @@ pub struct BgzfStream<R> {
     /// Most batches `pending` may hold.
     depth: usize,
     input: Input,
+    /// The error that ended the current batch, raised once its bytes are read.
+    deferred: Option<BgzfError>,
     /// Set by the first error; every later read is [`BgzfError::Poisoned`].
     failed: bool,
     eof_marker: EofMarker,
@@ -253,6 +272,7 @@ impl<R: Read> BgzfStream<R> {
             pending: VecDeque::new(),
             depth: 1,
             input: Input::Open { last_was_empty: false },
+            deferred: None,
             failed: false,
             eof_marker: EofMarker::Required,
             decompressor: libdeflater::Decompressor::new(),
@@ -321,6 +341,7 @@ impl<R: Read> BgzfStream<R> {
     /// input's end was accepted. Does not read.
     pub fn is_finished(&self) -> bool {
         !self.failed
+            && self.deferred.is_none()
             && self.pos >= self.current.len()
             && self.pending.is_empty()
             && matches!(self.input, Input::Done)
@@ -334,6 +355,7 @@ impl<R: Read> BgzfStream<R> {
         let result = self.refill_inner();
         if result.is_err() {
             self.failed = true;
+            self.deferred = None;
             self.pending.clear();
             self.current.clear();
             self.pos = 0;
@@ -343,19 +365,23 @@ impl<R: Read> BgzfStream<R> {
 
     fn refill_inner(&mut self) -> Result<bool, BgzfError> {
         loop {
+            if let Some(e) = self.deferred.take() {
+                return Err(e);
+            }
             self.top_up();
             let Some(next) = self.pending.pop_front() else { return Ok(false) };
-            let out = match next {
-                Pending::Ready(out) => out,
+            let Batch { bytes, error } = match next {
+                Pending::Ready(batch) => batch,
                 Pending::Waiting(reply) => {
-                    let Inflated { out, compressed } =
+                    let Inflated { batch, compressed } =
                         reply.recv().map_err(|_| BgzfError::DecompressionWorkerLost)?;
                     self.recycle(compressed);
-                    out
+                    batch
                 }
-            }?;
+            };
+            self.deferred = error;
             // The batch we leave behind becomes the next one's output buffer.
-            let done = std::mem::replace(&mut self.current, out);
+            let done = std::mem::replace(&mut self.current, bytes);
             self.recycle(done);
             self.pos = 0;
             if !self.current.is_empty() {
@@ -407,7 +433,7 @@ impl<R: Read> BgzfStream<R> {
                 self.pending.push_back(batch);
             }
             if let Some(e) = tail {
-                self.pending.push_back(Pending::Ready(Err(e)));
+                self.pending.push_back(Pending::Ready(Batch::failed(e)));
             }
         }
     }
@@ -421,17 +447,17 @@ impl<R: Read> BgzfStream<R> {
 
     /// Inflate a batch now, or hand it to a worker.
     fn dispatch(&mut self, compressed: Vec<u8>, blocks: Vec<DataBlock>) -> Pending {
-        let mut out = self.spare.pop().unwrap_or_default();
+        let out = self.spare.pop().unwrap_or_default();
         let Some(jobs) = self.pool.as_ref().and_then(|p| p.jobs.as_ref()) else {
-            let result = inflate_batch(&mut self.decompressor, &compressed, &blocks, &mut out);
+            let batch = inflate_batch(&mut self.decompressor, &compressed, &blocks, out);
             self.recycle(compressed);
-            return Pending::Ready(result.map(|()| out));
+            return Pending::Ready(batch);
         };
         let (reply, receiver) = mpsc::sync_channel(1);
         match jobs.send(Job { compressed, blocks, out, reply }) {
             Ok(()) => Pending::Waiting(receiver),
             // Every worker is gone.
-            Err(_) => Pending::Ready(Err(BgzfError::DecompressionWorkerLost)),
+            Err(_) => Pending::Ready(Batch::failed(BgzfError::DecompressionWorkerLost)),
         }
     }
 }

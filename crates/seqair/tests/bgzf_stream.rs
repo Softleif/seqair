@@ -33,20 +33,42 @@ fn block(data: &[u8]) -> Vec<u8> {
     bytes
 }
 
-/// Every byte of `stream` through the typed API, or the first error.
-fn stream_all(bytes: &[u8], threads: usize, eof: EofMarker) -> Result<Vec<u8>, BgzfError> {
+/// What a stream yields: every byte up to the end or the first error, and
+/// that error.
+#[derive(Debug)]
+struct Outcome {
+    data: Vec<u8>,
+    error: Option<BgzfError>,
+}
+
+/// Read `bytes` to the end through the typed `fill`/`advance` API.
+fn stream_outcome(bytes: &[u8], threads: usize, eof: EofMarker) -> Outcome {
     let mut stream =
-        BgzfStream::builder(Cursor::new(bytes)).threads(threads).eof_marker(eof).build()?;
-    let mut out = Vec::new();
+        BgzfStream::builder(Cursor::new(bytes)).threads(threads).eof_marker(eof).build().unwrap();
+    let mut data = Vec::new();
     loop {
-        let chunk = stream.fill()?;
-        if chunk.is_empty() {
-            return Ok(out);
+        match stream.fill() {
+            Ok([]) => return Outcome { data, error: None },
+            Ok(chunk) => {
+                let n = chunk.len();
+                data.extend_from_slice(chunk);
+                stream.advance(n);
+            }
+            Err(e) => {
+                assert!(
+                    matches!(stream.fill(), Err(BgzfError::Poisoned)),
+                    "not poisoned after {e:?}"
+                );
+                return Outcome { data, error: Some(e) };
+            }
         }
-        let n = chunk.len();
-        out.extend_from_slice(chunk);
-        stream.advance(n);
     }
+}
+
+/// Every byte of `bytes` through the typed API, or the first error.
+fn stream_all(bytes: &[u8], threads: usize, eof: EofMarker) -> Result<Vec<u8>, BgzfError> {
+    let Outcome { data, error } = stream_outcome(bytes, threads, eof);
+    error.map_or(Ok(data), Err)
 }
 
 fn reader_all(bytes: &[u8]) -> Result<Vec<u8>, BgzfError> {
@@ -119,4 +141,35 @@ fn an_isize_larger_than_the_payload_is_an_error() {
     ));
     assert!(matches!(reader_all(&file), Err(BgzfError::SizeMismatch { .. })));
     assert!(matches!(region_buf_all(&file), Err(BgzfError::SizeMismatch { .. })));
+}
+
+// r[verify bgzf.stream.threads]
+/// A block that fails to inflate is reported after every byte before it —
+/// including the blocks before it in the same batch of eight, which the
+/// stream used to drop with the batch.
+#[test]
+fn a_bad_block_is_reported_after_every_byte_before_it() {
+    let blocks: Vec<Vec<u8>> = (0..20u8).map(|i| vec![i; 100 + usize::from(i)]).collect();
+    for bad in [0, 1, 5, 7, 8, 13, 19] {
+        let mut file = Vec::new();
+        for (i, data) in blocks.iter().enumerate() {
+            let mut b = block(data);
+            if i == bad {
+                let crc_at = b.len() - 8;
+                b[crc_at] ^= 0x01;
+            }
+            file.extend_from_slice(&b);
+        }
+        file.extend_from_slice(&EOF_BLOCK);
+        let before: Vec<u8> = blocks[..bad].concat();
+        for threads in [0, 1, 3] {
+            let outcome = stream_outcome(&file, threads, EofMarker::Required);
+            assert_eq!(outcome.data, before, "bad block {bad}, threads {threads}");
+            assert!(
+                matches!(outcome.error, Some(BgzfError::ChecksumMismatch { .. })),
+                "bad block {bad}, threads {threads}: {:?}",
+                outcome.error
+            );
+        }
+    }
 }
