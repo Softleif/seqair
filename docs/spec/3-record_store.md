@@ -154,6 +154,19 @@ one position for `r[record_store.window_query]` and the pileup's eviction check.
 r[record_store.push_fields+2]
 `push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as `&[CigarOp]`, sequence as `&[Base]`, quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing. A qname longer than 254 bytes (BAM's `l_read_name` limit, as in `r[bam.owned_record.qname_limit]`) MUST be rejected with a typed error rather than truncated; htslib 1.24 enforces the same limit in its CRAM reader.
 
+r[record_store.copy_from]
+`copy_record_from(src, idx)` MUST append a copy of `src`'s record `idx` — its
+fixed fields, its qname, CIGAR, bases, qualities and aux bytes, and a clone of
+its extra (so `U: Clone`) — and return the new index. It MUST NOT run any
+customize hook and MUST NOT decode anything: the record was filtered and its
+extra computed when it was first pushed, and a stateful customize value (a
+`DepthCap`) would otherwise count it twice. The mate link MUST NOT be copied (it
+names an index of `src`); the copy is an ordinary push for order tracking and
+mate-link invalidation (`r[record_store.pileup_input.order_tracking]`). A slab
+offset that no longer fits `u32` MUST fail as in `r[record_store.checked_offsets]`.
+The streaming pileup uses it to carry reads across a window boundary
+(`r[pileup_stream.carry]`).
+
 ## Field access
 
 r[record_store.field_access]
