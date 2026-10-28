@@ -2,6 +2,7 @@
 //! [`crate::bam::RecordStore`] via a tabix index.
 
 // r[impl io.minimal_public_api]
+pub mod format;
 pub mod reader;
 
 pub use reader::{SamError, SamRecordError};
