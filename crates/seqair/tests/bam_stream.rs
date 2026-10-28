@@ -19,8 +19,8 @@
 mod pinned;
 
 use hegel::prelude::*;
-use seqair::bam::stream::{BamStreamError, BamStreamReader};
 use seqair::bam::RawBamRecord;
+use seqair::bam::stream::{BamStreamError, BamStreamReader};
 use seqair::io::BgzfWriter;
 use std::fmt::Write as _;
 use std::io::Cursor;
@@ -297,8 +297,8 @@ fn set_flags_keeps_the_cigar_check() {
 // ── generated SAM, written to BAM by htslib and by noodles ──────────────
 
 use rust_htslib::bam::{self as htsbam, Read as _};
-use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::BgzfStream;
+use seqair::bam::writer::BamWriterBuilder;
 use std::path::{Path, PathBuf};
 
 /// One SAM line's fields, kept as text.
@@ -851,8 +851,8 @@ fn write_raw_rejects_a_tid_the_header_lacks() {
 
 // ── write_store_record's bin ────────────────────────────────────────────
 
-use seqair::bam::reader::IndexedBamReader;
 use seqair::bam::RecordStore;
+use seqair::bam::reader::IndexedBamReader;
 
 /// A mapped read of `len` reference bases ending `delta` bases after a
 /// 16 kbp window boundary (`delta` = 0: its last base is the window's first).
