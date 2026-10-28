@@ -1,7 +1,7 @@
 //! Parse BAM headers and look up contigs. [`BamHeader`] maps between tid integers,
 //! sequence names, and lengths; shared across forked readers via `Arc`.
 
-use super::bgzf::{BgzfError, BgzfReader};
+use super::bgzf::{BgzfError, BgzfRead, BgzfReader};
 use crate::reader::Tid;
 use seqair_types::SmolStr;
 use std::{
@@ -130,17 +130,17 @@ impl BamHeader {
         Self::parse_inner(bgzf)
     }
 
-    fn parse_inner<R: Read + Seek>(bgzf: &mut BgzfReader<R>) -> Result<Self, BamHeaderError> {
+    pub(crate) fn parse_inner(bgzf: &mut impl BgzfRead) -> Result<Self, BamHeaderError> {
         // Magic: BAM\1
         let mut magic = [0u8; 4];
-        bgzf.read_exact_into(&mut magic)?;
+        bgzf.fill_exact(&mut magic)?;
         if magic != *b"BAM\x01" {
             return Err(BamHeaderError::InvalidMagic);
         }
 
         // r[impl bam.header.non_negative_lengths]
         // Header text
-        let l_text_raw = bgzf.read_i32()?;
+        let l_text_raw = bgzf.read_le_i32()?;
         if l_text_raw < 0 {
             return Err(BamHeaderError::NegativeLength { field: "l_text", value: l_text_raw });
         }
@@ -153,13 +153,13 @@ impl BamHeader {
             });
         }
         let mut text_buf = vec![0u8; l_text];
-        bgzf.read_exact_into(&mut text_buf)?;
+        bgzf.fill_exact(&mut text_buf)?;
         let header_text = std::str::from_utf8(&text_buf)
             .map_err(|source| BamHeaderError::NonUtf8HeaderText { source })?
             .to_owned();
 
         // Reference sequences
-        let n_ref_raw = bgzf.read_i32()?;
+        let n_ref_raw = bgzf.read_le_i32()?;
         if n_ref_raw < 0 {
             return Err(BamHeaderError::NegativeLength { field: "n_ref", value: n_ref_raw });
         }
@@ -175,7 +175,7 @@ impl BamHeader {
         let mut name_to_tid = HashMap::with_capacity(n_ref);
 
         for tid in 0..n_ref {
-            let l_name_raw = bgzf.read_i32()?;
+            let l_name_raw = bgzf.read_le_i32()?;
             if l_name_raw < 0 {
                 return Err(BamHeaderError::NegativeLength { field: "l_name", value: l_name_raw });
             }
@@ -188,7 +188,7 @@ impl BamHeader {
                 });
             }
             let mut name_buf = vec![0u8; l_name];
-            bgzf.read_exact_into(&mut name_buf)?;
+            bgzf.fill_exact(&mut name_buf)?;
             // Remove trailing NUL
             if name_buf.last() == Some(&0) {
                 name_buf.pop();
@@ -198,7 +198,7 @@ impl BamHeader {
                     .map_err(|source| BamHeaderError::NonUtf8ReferenceName { source })?,
             );
 
-            let l_ref_raw = bgzf.read_i32()?;
+            let l_ref_raw = bgzf.read_le_i32()?;
             if l_ref_raw < 0 {
                 return Err(BamHeaderError::NegativeLength { field: "l_ref", value: l_ref_raw });
             }

@@ -85,6 +85,9 @@ Unknown type codes and truncated/malformed tag values MUST stop iteration — `A
 r[bam.record.raw_aux]
 The record MUST provide access to raw auxiliary data bytes for efficient filtering without full tag parsing.
 
+r[bam.record.aux_checked]
+`Aux::iter_checked` MUST yield every tag of a well-formed aux block, and for a malformed one — an unknown type code or array subtype, a value cut short, a `Z`/`H` string without its NUL — MUST yield an `AuxLayoutError` naming the tag's byte offset, then stop. `validate_aux` MUST accept exactly the blocks `iter_checked` reads without error. `iter_tags` keeps its lenient contract (`r[bam.record.aux_truncated]`) for the hot paths that only look tags up.
+
 r[bam.record.aux_wrapper]
 An `Aux<'a>` wrapper (a newtype over `&'a [u8]`) MUST provide a fluent query API for auxiliary tags. Raw byte access MUST be available via `Aux::as_bytes()`. The wrapper MUST NOT implement `Deref<Target = [u8]>` — this would allow `aux.iter()` to silently resolve to byte iteration, shadowing the inherent `iter_tags()` and surprising callers who expect `(tag, value)` pairs. `SlimRecord::aux(store)` MUST return `Aux<'store>`.
 

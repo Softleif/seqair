@@ -430,6 +430,29 @@ pub fn decode_bgzf_block(data: &[u8]) -> Result<Vec<u8>, BgzfError> {
     }
 }
 
+/// The sequential reads BAM header parsing needs, from either BGZF reader.
+pub(crate) trait BgzfRead {
+    fn fill_exact(&mut self, out: &mut [u8]) -> Result<(), BgzfError>;
+
+    fn read_le_i32(&mut self) -> Result<i32, BgzfError> {
+        let mut buf = [0u8; 4];
+        self.fill_exact(&mut buf)?;
+        Ok(i32::from_le_bytes(buf))
+    }
+}
+
+impl<R: Read + Seek> BgzfRead for BgzfReader<R> {
+    fn fill_exact(&mut self, out: &mut [u8]) -> Result<(), BgzfError> {
+        Self::read_exact_into(self, out)
+    }
+}
+
+impl<R: Read> BgzfRead for BgzfStream<R> {
+    fn fill_exact(&mut self, out: &mut [u8]) -> Result<(), BgzfError> {
+        Self::read_exact_into(self, out)
+    }
+}
+
 /// What [`read_frame`] found at the reader's position.
 #[derive(Debug)]
 pub(crate) enum Frame {

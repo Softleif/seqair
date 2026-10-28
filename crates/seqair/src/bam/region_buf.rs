@@ -795,7 +795,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
         };
 
         // r[impl bam.record.max_size]
-        const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
+        use super::record::MAX_RECORD_SIZE;
         if block_size > MAX_RECORD_SIZE {
             return Err(BgzfError::RecordTooLarge { block_size });
         }

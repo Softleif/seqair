@@ -484,6 +484,13 @@ impl<'a> Aux<'a> {
         self.data.len()
     }
 
+    // r[impl bam.record.aux_checked]
+    /// Iterate over all tags, yielding an error for a malformed one (and then
+    /// stopping) where [`Self::iter_tags`] would stop without a word.
+    pub fn iter_checked(&self) -> CheckedAuxIter<'a> {
+        CheckedAuxIter { data: self.data, pos: 0 }
+    }
+
     /// Iterate over all tags as `([u8; 2], AuxValue)` pairs.
     ///
     /// Named `iter_tags` (not `iter`) to avoid any confusion with byte iteration —
@@ -651,6 +658,105 @@ impl<'a> AuxIter<'a> {
         arr.copy_from_slice(slice);
         self.pos = self.pos.checked_add(N)?;
         Some(arr)
+    }
+}
+
+/// Why a block of BAM aux bytes is not a well-formed sequence of tags.
+///
+/// `offset` is the byte offset, within the aux block, of the tag at fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum AuxLayoutError {
+    #[error("aux tag at byte {offset} is truncated")]
+    Truncated { offset: usize },
+    #[error("aux tag at byte {offset} has unknown type code {code:#04x}")]
+    UnknownType { offset: usize, code: u8 },
+    #[error("aux B array at byte {offset} has unknown element type {code:#04x}")]
+    UnknownArraySubtype { offset: usize, code: u8 },
+    #[error("aux Z or H string at byte {offset} has no NUL terminator")]
+    UnterminatedString { offset: usize },
+}
+
+// r[impl bam.record.aux_checked]
+/// Check that `aux` is exactly a sequence of well-formed tags: every type
+/// code known, every value whole, every `Z`/`H` string NUL-terminated, and
+/// nothing left over. Stricter than [`iter_tags`], which stops quietly at the
+/// first malformed tag — after this succeeds, `iter_tags` visits every byte.
+pub fn validate_aux(aux: &[u8]) -> Result<(), AuxLayoutError> {
+    let mut at = 0usize;
+    while at < aux.len() {
+        at = tag_end(aux, at)?;
+    }
+    Ok(())
+}
+
+/// The end of the well-formed tag starting at `at`.
+fn tag_end(aux: &[u8], at: usize) -> Result<usize, AuxLayoutError> {
+    let offset = at;
+    let truncated = AuxLayoutError::Truncated { offset };
+    let Some(&[_, _, code]) = aux.get(at..at.saturating_add(3)) else {
+        return Err(truncated);
+    };
+    let at = at.saturating_add(3);
+    let value_len = match code {
+        b'A' | b'c' | b'C' => 1,
+        b's' | b'S' => 2,
+        b'i' | b'I' | b'f' => 4,
+        b'd' => 8,
+        b'Z' | b'H' => {
+            let rest = aux.get(at..).unwrap_or_default();
+            let nul = crate::io::text_scan::find_byte(rest, 0)
+                .ok_or(AuxLayoutError::UnterminatedString { offset })?;
+            nul.saturating_add(1)
+        }
+        b'B' => {
+            let Some(&[sub, n0, n1, n2, n3]) = aux.get(at..at.saturating_add(5)) else {
+                return Err(truncated);
+            };
+            let width: usize = match sub {
+                b'c' | b'C' => 1,
+                b's' | b'S' => 2,
+                b'i' | b'I' | b'f' => 4,
+                _ => return Err(AuxLayoutError::UnknownArraySubtype { offset, code: sub }),
+            };
+            let count =
+                usize::try_from(u32::from_le_bytes([n0, n1, n2, n3])).map_err(|_| truncated)?;
+            count.checked_mul(width).and_then(|n| n.checked_add(5)).ok_or(truncated)?
+        }
+        _ => return Err(AuxLayoutError::UnknownType { offset, code }),
+    };
+    let end = at.checked_add(value_len).ok_or(truncated)?;
+    if end > aux.len() {
+        return Err(truncated);
+    }
+    Ok(end)
+}
+
+/// Iterator over tags that reports a malformed tag as an error, then stops.
+/// See [`Aux::iter_checked`].
+#[derive(Debug, Clone)]
+pub struct CheckedAuxIter<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Iterator for CheckedAuxIter<'a> {
+    type Item = Result<([u8; 2], AuxValue<'a>), AuxLayoutError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.data.len() {
+            return None;
+        }
+        let item = tag_end(self.data, self.pos).and_then(|end| {
+            let tag = self.data.get(self.pos..end).unwrap_or_default();
+            self.pos = end;
+            // `tag_end` vouched for the tag, so the lenient parser reads it whole.
+            iter_tags(tag).next().ok_or(AuxLayoutError::Truncated { offset: end })
+        });
+        if item.is_err() {
+            self.pos = self.data.len();
+        }
+        Some(item)
     }
 }
 
