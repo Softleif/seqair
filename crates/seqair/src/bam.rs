@@ -76,7 +76,7 @@ pub use aux_data::{AuxData, AuxDataError};
 pub use base_mod::{
     BaseModError, BaseModState, FromRecordError, ModMode, ModStrand, ModType, Modification,
 };
-pub use bgzf::BgzfError;
+pub use bgzf::{BgzfError, BgzfStream, EofMarker};
 pub use cigar::{CigarOp, CigarStr};
 pub use csi_index::{CsiError, CsiIndex};
 pub use depth_cap::{DepthCap, DepthLimit};
