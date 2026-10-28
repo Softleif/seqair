@@ -31,7 +31,7 @@ fn test_bam_path() -> &'static Path {
 // r[verify bam.reader.header_access]
 // r[verify bgzf.magic]
 // r[verify bgzf.bsize]
-// r[verify bgzf.decompression]
+// r[verify bgzf.decompression+2]
 // r[verify bgzf.read_exact]
 // r[verify bgzf.libdeflate]
 #[test]

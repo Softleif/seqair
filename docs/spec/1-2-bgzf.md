@@ -16,14 +16,25 @@ A BGZF block MUST begin with the gzip magic bytes `1f 8b 08 04` (gzip, DEFLATE, 
 r[bgzf.bsize]
 The extra field MUST contain a `BC` subfield (SI1=0x42, SI2=0x43) with SLEN=2 whose value is the total block size minus one (BSIZE). The total compressed block size is `BSIZE + 1`.
 
-r[bgzf.decompression]
-Each block's DEFLATE payload MUST be decompressed independently. The last 8 bytes of the block are the gzip footer: a CRC32 checksum (4 bytes) followed by the uncompressed size ISIZE (4 bytes), both little-endian. Decompression MUST produce exactly ISIZE bytes.
+r[bgzf.decompression+2]
+Each block's DEFLATE payload MUST be decompressed independently. The last 8 bytes of the block are the gzip footer: a CRC32 checksum (4 bytes) followed by the uncompressed size ISIZE (4 bytes), both little-endian. Decompression MUST produce exactly ISIZE bytes; a payload that inflates to fewer MUST fail with `BgzfError::SizeMismatch` (one that would inflate to more already fails in libdeflate, whose output buffer is ISIZE bytes).
 
 r[bgzf.max_block_size]
 BGZF blocks MUST NOT exceed 65536 bytes uncompressed. If the ISIZE footer field claims a larger value, the reader MUST return an error rather than allocating an unbounded buffer.
 
-r[bgzf.eof]
-An EOF marker block has ISIZE=0. When encountered, the reader MUST signal end-of-stream.
+r[bgzf.eof+2]
+An EOF marker block has ISIZE=0, but an ISIZE=0 block only ends the stream when the input physically ends after it. A reader MUST signal end-of-stream when the input ends cleanly at a block boundary (zero bytes where the next block header would start).
+
+> **Was:** the reader stopped at the first ISIZE=0 block. Empty blocks are legal anywhere in BGZF (`[SAM1] §4.1.2` only says the *last* block is one), and htslib skips them mid-file ("Zero length blocks in the middle of a file are (wrongly) considered as EOF by many callers", `bgzf.c`). Stopping there silently dropped every record after the block.
+
+r[bgzf.empty_block]
+An ISIZE=0 block that is followed by more input MUST be skipped: the reader moves on to the next block, and the empty block contributes no bytes. For virtual-offset tracking the skipped block simply does not exist — the current block offset is that of the next non-empty block.
+
+r[bgzf.truncated_header]
+Input that ends partway through an 18-byte block header (at least one and fewer than 18 bytes) MUST fail with `BgzfError::TruncatedBlock`, never be taken for a clean end of input. Only zero bytes at a block boundary are a clean end.
+
+r[bgzf.read_errors]
+An I/O error from the underlying reader (other than `Interrupted`, which MUST be retried, and an end of input, which is truncation) MUST be returned as `BgzfError::ReadFailed` carrying the `io::Error`, not collapsed into a truncation error.
 
 ## Virtual offsets
 

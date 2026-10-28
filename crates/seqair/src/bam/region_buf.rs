@@ -599,11 +599,12 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
 
             self.cursor = block_end;
 
+            // r[impl region_buf.empty_block]
+            // An empty block (the EOF marker, or one mid-file) holds no data:
+            // the cursor is past it, so read on, to the next block or the end
+            // of the range.
             if uncompressed_size == 0 {
-                self.eof = true;
-                self.release_block();
-                self.buf_pos = 0;
-                return Ok(false);
+                continue;
             }
 
             // The block we are leaving goes back to the cache before `buf` is

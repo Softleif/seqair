@@ -66,7 +66,7 @@ fn seqair_decompress_budget(compressed: &[u8], expected_len: usize, budget: usiz
     output
 }
 
-// r[verify bgzf.decompression]
+// r[verify bgzf.decompression+2]
 // r[verify bgzf.crc32]
 // r[verify region_buf.decompress]
 #[test]
@@ -163,7 +163,7 @@ fn tiny_window_budget_matches_oracle() {
 /// Both decompressors must produce identical output for arbitrary data
 /// compressed by the bgzf crate's Writer — checked at both the default
 /// window budget and a tiny one that forces repeated refills.
-// r[verify bgzf.decompression]
+// r[verify bgzf.decompression+2]
 // r[verify bgzf.crc32]
 // r[verify region_buf.decompress]
 // r[verify region_buf.window_budget]

@@ -100,6 +100,14 @@ pub enum BgzfError {
     // r[impl bgzf.writer.block_size]
     #[error("BGZF block of {size} bytes does not fit BGZF's 65536-byte limit")]
     BlockTooLarge { size: usize },
+
+    // r[impl bgzf.read_errors]
+    #[error("reading BGZF input failed")]
+    ReadFailed { source: std::io::Error },
+
+    // r[impl bgzf.decompression+2]
+    #[error("BGZF block inflated to {found} bytes, but its ISIZE footer says {expected}")]
+    SizeMismatch { expected: u32, found: usize },
 }
 
 // r[impl bgzf.libdeflate]
@@ -252,152 +260,46 @@ impl<R: Read + Seek> BgzfReader<R> {
         Ok(())
     }
 
-    // r[impl bgzf.magic]
-    // r[impl bgzf.bsize]
-    // r[impl bgzf.decompression]
-    // r[impl bgzf.eof]
-    // r[impl bgzf.crc32]
+    // r[impl bgzf.eof+2]
+    // r[impl bgzf.empty_block]
     // r[impl bgzf.block_offset_tracking]
     // r[impl bgzf.resize_uninit]
-    // r[impl bgzf.fast_header]
+    /// Load the next block with data into `buf`. `false` at a clean end of
+    /// input; empty blocks before it are skipped.
     fn read_block(&mut self) -> Result<bool, BgzfError> {
-        // Read the full 18-byte BGZF header (gzip header + BC subfield).
-        // Standard BAM files always have XLEN=6 with BC as the only subfield,
-        // so we read 18 bytes and fast-path parse if the layout matches.
-        let mut header = [0u8; BGZF_HEADER_SIZE];
-        match self.inner.read_exact(&mut header) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                self.eof = true;
-                self.buf.clear();
-                self.buf_pos = 0;
-                return Ok(false);
+        loop {
+            self.compressed_buf.clear();
+            match read_frame(&mut self.inner, &mut self.compressed_buf)? {
+                Frame::EndOfInput => {
+                    self.eof = true;
+                    self.buf.clear();
+                    self.buf_pos = 0;
+                    return Ok(false);
+                }
+                // The next block starts where this one ended.
+                Frame::Empty => self.advance_block_offset(),
+                Frame::Data(block) => {
+                    // Safety: `inflate_into` writes every byte or fails, and on
+                    // failure `buf` is cleared before anything can read it.
+                    unsafe { resize_uninit(&mut self.buf, block.isize()) };
+                    let inflated = inflate_into(
+                        &mut self.decompressor,
+                        &self.compressed_buf,
+                        block,
+                        &mut self.buf,
+                    );
+                    self.buf_pos = 0;
+                    if let Err(e) = inflated {
+                        self.buf.clear();
+                        return Err(e);
+                    }
+                    // block_offset was set by the caller (advance_block_offset or
+                    // seek_virtual) before read_block; it names this block's start.
+                    return Ok(true);
+                }
             }
-            Err(_) => {
-                return Err(BgzfError::TruncatedBlock);
-            }
         }
-
-        if header[..4] != BGZF_MAGIC {
-            return Err(BgzfError::InvalidMagic);
-        }
-
-        let xlen = u16::from_le_bytes([header[10], header[11]]) as usize;
-
-        // Fast path: standard BGZF header has XLEN=6 with BC subfield at bytes 12-17.
-        // This covers all standard BAM files and avoids extra_buf allocation entirely.
-        let (bsize, _extra_bytes_remaining) = if xlen == 6
-            && header[12] == b'B'
-            && header[13] == b'C'
-            && header[14] == 2
-            && header[15] == 0
-        {
-            let bsize = u16::from_le_bytes([header[16], header[17]]);
-            (bsize, 0)
-        } else {
-            // Slow path: non-standard header layout, need to read remaining extra fields
-            // We already consumed 6 bytes of extra data (bytes 12-17 in header).
-            // If xlen > 6, read the rest. Then search all extra data for BC.
-            let already_read = 6usize.min(xlen);
-            let remaining = xlen.wrapping_sub(already_read);
-
-            let mut extra_data = Vec::with_capacity(xlen);
-            extra_data.extend_from_slice(
-                header.get(12..12usize.wrapping_add(already_read)).unwrap_or(&[]),
-            );
-
-            if remaining > 0 {
-                let start = extra_data.len();
-                extra_data.resize(start.wrapping_add(remaining), 0);
-                #[allow(
-                    clippy::indexing_slicing,
-                    reason = "start = pre-resize len, within bounds after resize"
-                )]
-                self.inner
-                    .read_exact(&mut extra_data[start..])
-                    .map_err(|_| BgzfError::TruncatedBlock)?;
-            }
-
-            let bsize = find_bsize(&extra_data).ok_or(BgzfError::MissingBsize)?;
-            (bsize, remaining)
-        };
-
-        // Total block size = BSIZE + 1; remaining = total - header - extra
-        let total_block_size = (bsize as usize).checked_add(1).ok_or(BgzfError::CorruptHeader)?;
-        let remaining_data = total_block_size
-            .checked_sub(12usize.checked_add(xlen).ok_or(BgzfError::CorruptHeader)?) // gzip header (12) + extra fields (xlen)
-            .ok_or(BgzfError::BlockSizeTooSmall { bsize })?;
-
-        // Safety: all bytes will be written by read_exact before any read.
-        unsafe { resize_uninit(&mut self.compressed_buf, remaining_data) };
-        self.inner.read_exact(&mut self.compressed_buf).map_err(|_| BgzfError::TruncatedBlock)?;
-
-        if self.compressed_buf.len() < BGZF_FOOTER_SIZE {
-            return Err(BgzfError::TruncatedBlock);
-        }
-
-        // Extract CRC32 and ISIZE from footer
-        let footer_start = self
-            .compressed_buf
-            .len()
-            .checked_sub(BGZF_FOOTER_SIZE)
-            .ok_or(BgzfError::TruncatedBlock)?;
-        let crc32_bytes: [u8; 4] = self
-            .compressed_buf
-            .get(footer_start..footer_start.checked_add(4).ok_or(BgzfError::TruncatedBlock)?)
-            .and_then(|s| s.try_into().ok())
-            .ok_or(BgzfError::TruncatedBlock)?;
-        let expected_crc = u32::from_le_bytes(crc32_bytes);
-
-        let isize_bytes: [u8; 4] = self
-            .compressed_buf
-            .get(
-                footer_start.checked_add(4).ok_or(BgzfError::TruncatedBlock)?
-                    ..footer_start.checked_add(8).ok_or(BgzfError::TruncatedBlock)?,
-            )
-            .and_then(|s| s.try_into().ok())
-            .ok_or(BgzfError::TruncatedBlock)?;
-        let uncompressed_size = u32::from_le_bytes(isize_bytes) as usize;
-
-        // r[impl bgzf.max_block_size]
-        if uncompressed_size > MAX_BLOCK_SIZE {
-            return Err(BgzfError::UncompressedSizeTooLarge { isize_value: uncompressed_size });
-        }
-
-        // EOF marker: zero-length uncompressed data
-        if uncompressed_size == 0 {
-            self.eof = true;
-            self.buf.clear();
-            self.buf_pos = 0;
-            return Ok(false);
-        }
-
-        let deflate_data =
-            self.compressed_buf.get(..footer_start).ok_or(BgzfError::TruncatedBlock)?;
-
-        // Safety: all bytes will be written by deflate_decompress before any read.
-        unsafe { resize_uninit(&mut self.buf, uncompressed_size) };
-        let actual = self
-            .decompressor
-            .deflate_decompress(deflate_data, &mut self.buf)
-            .map_err(|source| BgzfError::DecompressionFailed { source })?;
-
-        self.buf.truncate(actual);
-
-        // Verify CRC32 of decompressed data
-        let mut crc = libdeflater::Crc::new();
-        crc.update(&self.buf);
-        if crc.sum() != expected_crc {
-            return Err(BgzfError::ChecksumMismatch { expected: expected_crc, found: crc.sum() });
-        }
-
-        // block_offset was set by the caller (advance_block_offset or seek_virtual)
-        // before read_block was called; it stays pointing at this block's start.
-        self.buf_pos = 0;
-
-        Ok(true)
     }
-
     #[inline]
     pub fn read_byte(&mut self) -> Result<u8, BgzfError> {
         if self.buf_pos >= self.buf.len() {
@@ -497,81 +399,163 @@ impl<R: Read + Seek> BgzfReader<R> {
 /// Returns the decompressed data. The input must start at the gzip magic bytes.
 #[cfg(feature = "fuzz")]
 pub fn decode_bgzf_block(data: &[u8]) -> Result<Vec<u8>, BgzfError> {
-    if data.len() < BGZF_HEADER_SIZE + BGZF_FOOTER_SIZE {
-        return Err(BgzfError::TruncatedBlock);
+    let mut input = data;
+    let mut payload = Vec::new();
+    match read_frame(&mut input, &mut payload)? {
+        Frame::EndOfInput => Err(BgzfError::TruncatedBlock),
+        Frame::Empty => Ok(Vec::new()),
+        Frame::Data(block) => {
+            let mut out = vec![0u8; block.isize()];
+            inflate_into(&mut libdeflater::Decompressor::new(), &payload, block, &mut out)?;
+            Ok(out)
+        }
     }
+}
 
-    let header: &[u8] = data.get(..BGZF_HEADER_SIZE).ok_or(BgzfError::TruncatedBlock)?;
+/// What [`read_frame`] found at the reader's position.
+#[derive(Debug)]
+pub(crate) enum Frame {
+    /// Zero bytes before the next header: the input ended at a block boundary.
+    EndOfInput,
+    /// A block with `ISIZE = 0` (an EOF marker, or an empty block mid-stream).
+    Empty,
+    /// A block with data; its DEFLATE payload was appended to the caller's buffer.
+    Data(DataBlock),
+}
 
-    if header.get(..4) != Some(&BGZF_MAGIC[..]) {
+/// Where one block's DEFLATE payload sits in a buffer, and what its footer
+/// says it inflates to.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DataBlock {
+    /// Offset of the payload in the buffer [`read_frame`] appended to.
+    start: usize,
+    /// Payload length in bytes (footer excluded).
+    len: usize,
+    crc: u32,
+    /// `ISIZE`, in `1..=MAX_BLOCK_SIZE`.
+    isize: u32,
+}
+
+impl DataBlock {
+    /// The uncompressed size the footer promises, in `1..=65536`.
+    pub(crate) fn isize(self) -> usize {
+        self.isize as usize
+    }
+}
+
+/// Fill `buf` from `inner`, retrying `Interrupted`; the number of bytes read,
+/// short only at the end of input.
+fn read_full(inner: &mut impl Read, buf: &mut [u8]) -> Result<usize, BgzfError> {
+    let mut filled = 0;
+    while let Some(rest) = buf.get_mut(filled..)
+        && !rest.is_empty()
+    {
+        match inner.read(rest) {
+            Ok(0) => break,
+            Ok(n) => filled = filled.saturating_add(n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(source) => return Err(BgzfError::ReadFailed { source }),
+        }
+    }
+    Ok(filled)
+}
+
+/// `read_exact`, with an early end of input reported as truncation.
+fn read_exact_or_truncated(inner: &mut impl Read, buf: &mut [u8]) -> Result<(), BgzfError> {
+    if read_full(inner, buf)? == buf.len() { Ok(()) } else { Err(BgzfError::TruncatedBlock) }
+}
+
+// r[impl bgzf.magic]
+// r[impl bgzf.bsize]
+// r[impl bgzf.fast_header]
+// r[impl bgzf.max_block_size]
+// r[impl bgzf.truncated_header]
+// r[impl bgzf.read_errors]
+/// Read one block's framing from `inner`, appending its DEFLATE payload (for a
+/// block with data) to `payload`.
+///
+/// The block parser of [`BgzfReader`]: an end of input at a block boundary is [`Frame::EndOfInput`]; anywhere else it is
+/// [`BgzfError::TruncatedBlock`]. On error `payload` may hold a partial
+/// payload past its original length.
+pub(crate) fn read_frame(inner: &mut impl Read, payload: &mut Vec<u8>) -> Result<Frame, BgzfError> {
+    let mut header = [0u8; BGZF_HEADER_SIZE];
+    match read_full(inner, &mut header)? {
+        0 => return Ok(Frame::EndOfInput),
+        BGZF_HEADER_SIZE => {}
+        _ => return Err(BgzfError::TruncatedBlock),
+    }
+    let [m0, m1, m2, m3, _, _, _, _, _, _, x0, x1, si1, si2, sl0, sl1, b0, b1] = header;
+    if [m0, m1, m2, m3] != BGZF_MAGIC {
         return Err(BgzfError::InvalidMagic);
     }
+    let xlen = usize::from(u16::from_le_bytes([x0, x1]));
 
-    let xlen = u16::from_le_bytes([
-        *header.get(10).ok_or(BgzfError::TruncatedBlock)?,
-        *header.get(11).ok_or(BgzfError::TruncatedBlock)?,
-    ]) as usize;
+    // Every BAM writer we know of puts BC alone in a 6-byte extra field, which
+    // the 18-byte header already holds.
+    let bsize = if xlen == 6 && [si1, si2, sl0, sl1] == [b'B', b'C', 2, 0] {
+        u16::from_le_bytes([b0, b1])
+    } else {
+        let mut extra = vec![0u8; xlen];
+        let held = xlen.min(6);
+        let (head, tail) = extra.split_at_mut(held);
+        head.copy_from_slice(header.get(12..12usize.saturating_add(held)).unwrap_or_default());
+        read_exact_or_truncated(inner, tail)?;
+        find_bsize(&extra).ok_or(BgzfError::MissingBsize)?
+    };
 
-    // Parse extra fields to find BSIZE
-    let extra_end = 12usize.checked_add(xlen).ok_or(BgzfError::CorruptHeader)?;
-    let extra = data.get(12..extra_end.min(data.len())).ok_or(BgzfError::TruncatedBlock)?;
-    let bsize = find_bsize(extra).ok_or(BgzfError::MissingBsize)?;
-
-    let total_block_size = (bsize as usize).checked_add(1).ok_or(BgzfError::CorruptHeader)?;
-    if data.len() < total_block_size {
-        return Err(BgzfError::TruncatedBlock);
-    }
-
-    let remaining_start = 12usize.checked_add(xlen).ok_or(BgzfError::CorruptHeader)?;
-    let remaining_data = data
-        .get(remaining_start..total_block_size)
+    // BSIZE + 1 is the whole block; 12 + XLEN of it is the header.
+    let rest = (usize::from(bsize).saturating_add(1))
+        .checked_sub(12usize.saturating_add(xlen))
         .ok_or(BgzfError::BlockSizeTooSmall { bsize })?;
+    let len = rest.checked_sub(BGZF_FOOTER_SIZE).ok_or(BgzfError::TruncatedBlock)?;
 
-    if remaining_data.len() < BGZF_FOOTER_SIZE {
-        return Err(BgzfError::TruncatedBlock);
+    let start = payload.len();
+    payload.resize(start.saturating_add(len), 0);
+    read_exact_or_truncated(inner, payload.get_mut(start..).unwrap_or_default())?;
+    let mut footer = [0u8; BGZF_FOOTER_SIZE];
+    read_exact_or_truncated(inner, &mut footer)?;
+    let [c0, c1, c2, c3, i0, i1, i2, i3] = footer;
+    let crc = u32::from_le_bytes([c0, c1, c2, c3]);
+    let isize = u32::from_le_bytes([i0, i1, i2, i3]);
+
+    if isize as usize > MAX_BLOCK_SIZE {
+        payload.truncate(start);
+        return Err(BgzfError::UncompressedSizeTooLarge { isize_value: isize as usize });
     }
+    if isize == 0 {
+        payload.truncate(start);
+        return Ok(Frame::Empty);
+    }
+    Ok(Frame::Data(DataBlock { start, len, crc, isize }))
+}
 
-    let footer_start =
-        remaining_data.len().checked_sub(BGZF_FOOTER_SIZE).ok_or(BgzfError::TruncatedBlock)?;
-    let crc32_bytes: [u8; 4] = remaining_data
-        .get(footer_start..footer_start.checked_add(4).ok_or(BgzfError::TruncatedBlock)?)
-        .and_then(|s| s.try_into().ok())
+// r[impl bgzf.decompression+2]
+// r[impl bgzf.crc32]
+// r[impl bgzf.libdeflate]
+/// Inflate `block`, whose payload is in `payloads` where [`read_frame`] put
+/// it, into `out` — exactly `block.isize()` bytes — and check its CRC32.
+pub(crate) fn inflate_into(
+    decompressor: &mut libdeflater::Decompressor,
+    payloads: &[u8],
+    block: DataBlock,
+    out: &mut [u8],
+) -> Result<(), BgzfError> {
+    debug_assert_eq!(out.len(), block.isize(), "inflate_into needs an ISIZE-sized buffer");
+    let deflate = payloads
+        .get(block.start..block.start.saturating_add(block.len))
         .ok_or(BgzfError::TruncatedBlock)?;
-    let expected_crc = u32::from_le_bytes(crc32_bytes);
-
-    let isize_bytes: [u8; 4] = remaining_data
-        .get(
-            footer_start.checked_add(4).ok_or(BgzfError::TruncatedBlock)?
-                ..footer_start.checked_add(8).ok_or(BgzfError::TruncatedBlock)?,
-        )
-        .and_then(|s| s.try_into().ok())
-        .ok_or(BgzfError::TruncatedBlock)?;
-    let uncompressed_size = u32::from_le_bytes(isize_bytes) as usize;
-
-    if uncompressed_size > MAX_BLOCK_SIZE {
-        return Err(BgzfError::UncompressedSizeTooLarge { isize_value: uncompressed_size });
-    }
-
-    if uncompressed_size == 0 {
-        return Ok(Vec::new());
-    }
-
-    let deflate_data = remaining_data.get(..footer_start).ok_or(BgzfError::TruncatedBlock)?;
-
-    let mut buf = vec![0u8; uncompressed_size];
-    let mut decompressor = libdeflater::Decompressor::new();
     let actual = decompressor
-        .deflate_decompress(deflate_data, &mut buf)
+        .deflate_decompress(deflate, out)
         .map_err(|source| BgzfError::DecompressionFailed { source })?;
-    buf.truncate(actual);
-
-    let mut crc = libdeflater::Crc::new();
-    crc.update(&buf);
-    if crc.sum() != expected_crc {
-        return Err(BgzfError::ChecksumMismatch { expected: expected_crc, found: crc.sum() });
+    if actual != out.len() {
+        return Err(BgzfError::SizeMismatch { expected: block.isize, found: actual });
     }
-
-    Ok(buf)
+    let mut crc = libdeflater::Crc::new();
+    crc.update(out);
+    if crc.sum() != block.crc {
+        return Err(BgzfError::ChecksumMismatch { expected: block.crc, found: crc.sum() });
+    }
+    Ok(())
 }
 
 /// Find the BSIZE subfield (ID=BC) in the BGZF extra data.

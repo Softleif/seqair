@@ -86,7 +86,7 @@ fn fetch_htslib_records() -> Vec<HtsRecord> {
 // r[verify bam.index.bin_calculation]
 // r[verify bgzf.seek]
 // r[verify bgzf.virtual_offset]
-// r[verify bgzf.eof]
+// r[verify bgzf.eof+2]
 // r[verify bgzf.read_partial]
 #[test]
 fn record_count_matches() {
