@@ -599,11 +599,16 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
 
             self.cursor = block_end;
 
+            #[allow(clippy::indexing_slicing, reason = "footer_start ≤ remaining.len()")]
+            let deflate_data = &remaining[..footer_start];
+            let decompressor = self.decompressor.get_or_insert_with(libdeflater::Decompressor::new);
+
             // r[impl region_buf.empty_block]
             // An empty block (the EOF marker, or one mid-file) holds no data:
             // the cursor is past it, so read on, to the next block or the end
-            // of the range.
+            // of the range. It is still checked, as htslib checks it.
             if uncompressed_size == 0 {
+                bgzf::inflate_checked(decompressor, deflate_data, expected_crc, &mut [])?;
                 continue;
             }
 
@@ -612,27 +617,16 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             let block_file_offset = self.block_offset;
             release_block(self.cache.as_deref_mut(), &mut self.buf_block, &mut self.buf);
 
-            #[allow(clippy::indexing_slicing, reason = "footer_start ≤ remaining.len()")]
-            let deflate_data = &remaining[..footer_start];
-
-            // Safety: all bytes written by deflate_decompress before any read.
+            // Safety: `inflate_checked` writes every byte or fails, and on
+            // failure `buf` is cleared before anything can read it.
             unsafe { bgzf::resize_uninit(&mut self.buf, uncompressed_size) };
-            let actual = self
-                .decompressor
-                .get_or_insert_with(libdeflater::Decompressor::new)
-                .deflate_decompress(deflate_data, &mut self.buf)
-                .map_err(|source| BgzfError::DecompressionFailed { source })?;
-            self.buf.truncate(actual);
-
-            // Verify CRC32
-            let mut crc = libdeflater::Crc::new();
-            crc.update(&self.buf);
-            if crc.sum() != expected_crc {
-                return Err(BgzfError::ChecksumMismatch {
-                    expected: expected_crc,
-                    found: crc.sum(),
-                });
+            if let Err(e) =
+                bgzf::inflate_checked(decompressor, deflate_data, expected_crc, &mut self.buf)
+            {
+                self.buf.clear();
+                return Err(e);
             }
+            let actual = self.buf.len();
 
             self.buf_pos = 0;
             if self.cache.is_some() {

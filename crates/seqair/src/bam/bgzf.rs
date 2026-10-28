@@ -287,7 +287,7 @@ impl<R: Read + Seek> BgzfReader<R> {
     fn read_block(&mut self) -> Result<bool, BgzfError> {
         loop {
             self.compressed_buf.clear();
-            match read_frame(&mut self.inner, &mut self.compressed_buf)? {
+            match read_frame(&mut self.inner, &mut self.compressed_buf, &mut self.decompressor)? {
                 Frame::EndOfInput => {
                     self.eof = true;
                     self.buf.clear();
@@ -419,12 +419,13 @@ impl<R: Read + Seek> BgzfReader<R> {
 pub fn decode_bgzf_block(data: &[u8]) -> Result<Vec<u8>, BgzfError> {
     let mut input = data;
     let mut payload = Vec::new();
-    match read_frame(&mut input, &mut payload)? {
+    let mut decompressor = libdeflater::Decompressor::new();
+    match read_frame(&mut input, &mut payload, &mut decompressor)? {
         Frame::EndOfInput => Err(BgzfError::TruncatedBlock),
         Frame::Empty => Ok(Vec::new()),
         Frame::Data(block) => {
             let mut out = vec![0u8; block.isize()];
-            inflate_into(&mut libdeflater::Decompressor::new(), &payload, block, &mut out)?;
+            inflate_into(&mut decompressor, &payload, block, &mut out)?;
             Ok(out)
         }
     }
@@ -473,12 +474,13 @@ pub(crate) struct DataBlock {
     /// Payload length in bytes (footer excluded).
     len: usize,
     crc: u32,
-    /// `ISIZE`, in `1..=MAX_BLOCK_SIZE`.
+    /// `ISIZE`, in `1..=MAX_BLOCK_SIZE` for a [`Frame::Data`] block.
     isize: u32,
 }
 
 impl DataBlock {
-    /// The uncompressed size the footer promises, in `1..=65536`.
+    /// The uncompressed size the footer promises, in `1..=65536` for a
+    /// [`Frame::Data`] block.
     pub(crate) fn isize(self) -> usize {
         self.isize as usize
     }
@@ -517,9 +519,14 @@ fn read_exact_or_truncated(inner: &mut impl Read, buf: &mut [u8]) -> Result<(), 
 ///
 /// The block parser shared by [`BgzfReader`] and [`BgzfStream`]: an end of
 /// input at a block boundary is [`Frame::EndOfInput`]; anywhere else it is
-/// [`BgzfError::TruncatedBlock`]. On error `payload` may hold a partial
-/// payload past its original length.
-pub(crate) fn read_frame(inner: &mut impl Read, payload: &mut Vec<u8>) -> Result<Frame, BgzfError> {
+/// [`BgzfError::TruncatedBlock`]. An empty block is inflated here, with
+/// `decompressor`, so its payload and CRC are checked like any other block's.
+/// On error `payload` may hold a partial payload past its original length.
+pub(crate) fn read_frame(
+    inner: &mut impl Read,
+    payload: &mut Vec<u8>,
+    decompressor: &mut libdeflater::Decompressor,
+) -> Result<Frame, BgzfError> {
     let mut header = [0u8; BGZF_HEADER_SIZE];
     match read_full(inner, &mut header)? {
         0 => return Ok(Frame::EndOfInput),
@@ -564,11 +571,16 @@ pub(crate) fn read_frame(inner: &mut impl Read, payload: &mut Vec<u8>) -> Result
         payload.truncate(start);
         return Err(BgzfError::UncompressedSizeTooLarge { isize_value: isize as usize });
     }
+    let block = DataBlock { start, len, crc, isize };
     if isize == 0 {
+        // htslib inflates an empty block like any other, so a corrupt EOF
+        // marker is an error there too.
+        let checked = inflate_into(decompressor, payload, block, &mut []);
         payload.truncate(start);
+        checked?;
         return Ok(Frame::Empty);
     }
-    Ok(Frame::Data(DataBlock { start, len, crc, isize }))
+    Ok(Frame::Data(block))
 }
 
 // r[impl bgzf.decompression+2]
@@ -586,16 +598,28 @@ pub(crate) fn inflate_into(
     let deflate = payloads
         .get(block.start..block.start.saturating_add(block.len))
         .ok_or(BgzfError::TruncatedBlock)?;
+    inflate_checked(decompressor, deflate, block.crc, out)
+}
+
+/// Inflate one block's DEFLATE payload into `out`, whose length is the
+/// block's ISIZE, failing unless it fills `out` exactly and matches `crc`.
+pub(crate) fn inflate_checked(
+    decompressor: &mut libdeflater::Decompressor,
+    deflate: &[u8],
+    crc: u32,
+    out: &mut [u8],
+) -> Result<(), BgzfError> {
     let actual = decompressor
         .deflate_decompress(deflate, out)
         .map_err(|source| BgzfError::DecompressionFailed { source })?;
     if actual != out.len() {
-        return Err(BgzfError::SizeMismatch { expected: block.isize, found: actual });
+        let expected = u32::try_from(out.len()).unwrap_or(u32::MAX);
+        return Err(BgzfError::SizeMismatch { expected, found: actual });
     }
-    let mut crc = libdeflater::Crc::new();
-    crc.update(out);
-    if crc.sum() != block.crc {
-        return Err(BgzfError::ChecksumMismatch { expected: block.crc, found: crc.sum() });
+    let mut found = libdeflater::Crc::new();
+    found.update(out);
+    if found.sum() != crc {
+        return Err(BgzfError::ChecksumMismatch { expected: crc, found: found.sum() });
     }
     Ok(())
 }
