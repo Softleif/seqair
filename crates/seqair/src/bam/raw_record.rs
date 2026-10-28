@@ -9,7 +9,7 @@
 use super::{
     BamHeader, CigarOp, DecodeError, MateFields,
     aux::{Aux, AuxValue, find_tag},
-    cigar::CigarOpType,
+    cigar::CIGAR_S,
     record::{self, read2},
     seq,
 };
@@ -176,9 +176,16 @@ impl RawBamRecord {
 
     /// Whether the stored CIGAR is the placeholder BAM writes for a record
     /// with more than 65535 operations — `<seq_len>S<ref_len>N` with the real
-    /// CIGAR in a `CG:B:I` tag (`[SAM1] §4.2.2`), as htslib recognises it.
+    /// CIGAR in a `CG:B:I` tag (`[SAM1] §4.2.2`), as htslib recognises it
+    /// (`r[bam.raw_record.long_cigar]`).
     pub fn has_cg_placeholder(&self) -> bool {
-        is_cg_placeholder(
+        self.long_cigar().is_some()
+    }
+
+    /// The real CIGAR, in BAM's packed form, of a record that carries a long
+    /// one in its `CG` tag (`r[bam.raw_record.long_cigar]`).
+    pub(crate) fn long_cigar(&self) -> Option<&[u8]> {
+        long_cigar(
             self.cigar_bytes(),
             self.seq_len(),
             self.tid.is_some() && self.pos.is_some(),
@@ -323,43 +330,55 @@ impl RawBamRecord {
     }
 }
 
-/// See [`RawBamRecord::has_cg_placeholder`]. Mirrors htslib's `bam_tag2cigar`
-/// test: first op `<seq_len>S`, placed, and a `CG` tag present.
-fn is_cg_placeholder(cigar: &[u8], seq_len: usize, placed: bool, aux: Aux<'_>) -> bool {
-    let Some(first) = cigar.as_chunks::<4>().0.first() else { return false };
-    let first = CigarOp::from_bam_u32(u32::from_le_bytes(*first));
-    first.op_type() == CigarOpType::SoftClip
-        && usize::try_from(first.len()).is_ok_and(|n| n == seq_len)
-        && placed
-        && matches!(find_tag(aux.as_bytes(), *b"CG"), Some(AuxValue::ArrayU32(_)))
+// r[impl bam.raw_record.long_cigar]
+/// See [`RawBamRecord::long_cigar`]. htslib's `bam_tag2cigar` test: the first
+/// op is exactly `<seq_len>S`, the record is placed, and the first `CG` tag is
+/// a `B:I`/`B:i` array of at least `n_cigar` and under 2^29 operations.
+fn long_cigar<'a>(cigar: &[u8], seq_len: usize, placed: bool, aux: Aux<'a>) -> Option<&'a [u8]> {
+    let first = u32::from_le_bytes(*cigar.as_chunks::<4>().0.first()?);
+    let placeholder = u32::try_from(seq_len).ok()?.checked_mul(16)? | u32::from(CIGAR_S);
+    if first != placeholder || !placed {
+        return None;
+    }
+    let (Some(AuxValue::ArrayU32(ops)) | Some(AuxValue::ArrayI32(ops))) =
+        find_tag(aux.as_bytes(), *b"CG")
+    else {
+        return None;
+    };
+    let n_ops = ops.len() / 4;
+    (n_ops >= cigar.len() / 4 && n_ops < 1 << 29).then_some(ops)
+}
+
+/// The query length of packed CIGAR operations (`bam_cigar2qlen`).
+fn query_len(cigar: &[u8]) -> u64 {
+    cigar
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|op| CigarOp::from_bam_u32(u32::from_le_bytes(*op)))
+        .filter(|op| op.consumes_query())
+        .fold(0u64, |n, op| n.saturating_add(u64::from(op.len())))
 }
 
 // r[impl bam.raw_record.cigar_seq]
-/// htslib's read-time sanity check (`bam_read1`): a mapped record with a
-/// sequence and a CIGAR must have a CIGAR that consumes exactly the sequence,
-/// unless the CIGAR is the long-CIGAR placeholder.
+/// htslib's read-time sanity check (`bam_read1` and `bam_tag2cigar`): the
+/// long CIGAR of a record carrying one, else the stored CIGAR of a mapped
+/// record, must consume exactly the sequence.
 fn check_cigar_against_seq(
     payload: &[u8],
     h: &record::ParsedHeader,
     placed: bool,
 ) -> Result<(), DecodeError> {
     let seq_len = h.seq_len;
-    if h.n_cigar_ops == 0 || seq_len == 0 || h.flags.is_unmapped() {
-        return Ok(());
-    }
-    let cigar = payload.get(h.var_start..h.cigar_end).unwrap_or_default();
-    let query_len = cigar
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|op| CigarOp::from_bam_u32(u32::from_le_bytes(*op)))
-        .filter(|op| op.consumes_query())
-        .fold(0u64, |n, op| n.saturating_add(u64::from(op.len())));
-    if query_len == u64::from(seq_len) {
-        return Ok(());
-    }
+    let stored = payload.get(h.var_start..h.cigar_end).unwrap_or_default();
     let aux = Aux::new(payload.get(h.qual_end..).unwrap_or_default());
-    if is_cg_placeholder(cigar, seq_len as usize, placed, aux) {
+    let checked = match long_cigar(stored, seq_len as usize, placed, aux) {
+        Some(cg) => cg,
+        None if h.n_cigar_ops != 0 && !h.flags.is_unmapped() => stored,
+        None => return Ok(()),
+    };
+    let query_len = query_len(checked);
+    if seq_len == 0 || query_len == u64::from(seq_len) {
         return Ok(());
     }
     Err(DecodeError::CigarQueryLenMismatch {
@@ -418,5 +437,73 @@ mod tests {
         let mut out = b">".to_vec();
         record.decode_seq_into(&mut out);
         assert_eq!(out, b">=ACMGRSVTWYHKDBNM");
+    }
+
+    fn op(len: u32, code: u32) -> u32 {
+        len << 4 | code
+    }
+
+    fn cg(subtype: u8, ops: &[u32]) -> Vec<u8> {
+        let mut aux = vec![b'C', b'G', b'B', subtype];
+        aux.extend_from_slice(&u32::try_from(ops.len()).unwrap().to_le_bytes());
+        for op in ops {
+            aux.extend_from_slice(&op.to_le_bytes());
+        }
+        aux
+    }
+
+    fn record(
+        placed: bool,
+        flags: u16,
+        cigar: &[u32],
+        aux: &[u8],
+    ) -> Result<RawBamRecord, DecodeError> {
+        RawBamRecord::from_payload(payload(placed, flags, cigar, &[1, 2, 4, 8], aux), &header())
+    }
+
+    // r[verify bam.raw_record.long_cigar]
+    #[test]
+    fn long_cigar_follows_bam_tag2cigar() {
+        let placeholder = [op(4, 4), op(3, 3)];
+        let real = [op(2, 0), op(1, 1), op(1, 4)];
+        // B:I and B:i both count.
+        for subtype in *b"Ii" {
+            let r = record(true, 0, &placeholder, &cg(subtype, &real)).unwrap();
+            assert_eq!(r.long_cigar(), Some(&cg(subtype, &real)[8..]));
+            assert!(r.has_cg_placeholder());
+        }
+        // Unplaced, other subtypes, too few ops, first op not exactly
+        // `<seq_len>S`: no long CIGAR.
+        let not_long = [
+            record(false, 4, &placeholder, &cg(b'I', &real)),
+            record(true, 0, &placeholder, &cg(b'S', &[1, 2, 3])),
+            record(true, 0, &placeholder, &cg(b'I', &[op(4, 0)])),
+            record(true, 0, &[op(4, 4)], &cg(b'I', &[])),
+            record(true, 0, &[op(4, 0), op(3, 3)], &cg(b'I', &real)),
+        ];
+        for r in not_long {
+            assert!(!r.unwrap().has_cg_placeholder());
+        }
+        // Only the first CG tag is looked at.
+        let mut aux = cg(b'S', &[1, 2]);
+        aux.extend(cg(b'I', &real));
+        assert!(!record(true, 0, &placeholder, &aux).unwrap().has_cg_placeholder());
+    }
+
+    // r[verify bam.raw_record.cigar_seq]
+    #[test]
+    fn long_cigar_must_cover_the_sequence_even_when_unmapped() {
+        let placeholder = [op(4, 4), op(3, 3)];
+        let short = [op(2, 0), op(1, 2)];
+        for flags in [0, 4] {
+            let err = record(true, flags, &placeholder, &cg(b'I', &short)).unwrap_err();
+            assert!(matches!(
+                err,
+                DecodeError::CigarQueryLenMismatch { cigar_query_len: 2, seq_len: 4 }
+            ));
+        }
+        // The stored CIGAR of an unmapped record is not checked.
+        assert!(record(true, 4, &[op(1, 0)], &[]).is_ok());
+        assert!(record(true, 0, &[op(1, 0)], &[]).is_err());
     }
 }
