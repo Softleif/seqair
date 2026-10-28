@@ -21,11 +21,18 @@ fn find_byte_at(level: Level, hay: &[u8], needle: u8) -> Option<usize> {
 }
 
 #[simd]
+fn find_byte_simd<S: Simd>(simd: S, hay: &[u8], needle: u8) -> Option<usize> {
+    find_byte_in(simd, hay, needle)
+}
+
+/// [`find_byte`] inside a kernel already running at level `S`: a scan per
+/// field (each aux `Z` string, say) then costs no dispatch call.
+#[inline(always)]
 #[allow(
     clippy::chunks_exact_to_as_chunks,
     reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
 )]
-fn find_byte_simd<S: Simd>(simd: S, hay: &[u8], needle: u8) -> Option<usize> {
+pub(crate) fn find_byte_in<S: Simd>(simd: S, hay: &[u8], needle: u8) -> Option<usize> {
     let mut chunks = hay.chunks_exact(S::u8s::LEN);
     let mut offset = 0usize;
     for chunk in &mut chunks {

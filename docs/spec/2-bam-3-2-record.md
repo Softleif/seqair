@@ -82,6 +82,9 @@ The record MUST support looking up auxiliary tags by their 2-byte name. Tag type
 r[bam.record.aux_truncated]
 Unknown type codes and truncated/malformed tag values MUST stop iteration — `AuxIter` returns `None` entirely. This matches htslib behavior: unknown type codes imply corrupted data, and skipping them would require guessing value lengths, which can create false tag matches.
 
+r[bam.record.aux_find]
+`find_tag` (and so `Aux::get`) MUST return the value `iter_tags` yields first for the tag, and `None` where `iter_tags` stops before reaching it. It MUST walk the block in one native-width SIMD kernel (`r[io.simd_portable]`) — one dispatch per lookup, not one per `Z`/`H` string — skipping every other tag by its size alone and decoding only the match.
+
 r[bam.record.raw_aux]
 The record MUST provide access to raw auxiliary data bytes for efficient filtering without full tag parsing.
 

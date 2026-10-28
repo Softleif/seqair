@@ -4,6 +4,9 @@
 //! The [`Aux`] wrapper provides a fluent [`Aux::get`] API with automatic
 //! type conversion via [`FromAuxValue`].
 
+use crate::io::text_scan::find_byte_in;
+use fearless_simd::{Level, dispatch, prelude::*};
+use fearless_simd_macros::simd;
 use seqair_types::SmolStr;
 
 /// A single BAM auxiliary tag value.
@@ -97,11 +100,27 @@ impl<'a> AuxValue<'a> {
 /// Find a tag in raw BAM auxiliary data and return its typed value.
 ///
 /// Returns `None` if the tag is not found or the data is truncated.
+// r[impl bam.record.aux_find]
 pub fn find_tag<'a>(aux: &'a [u8], tag: [u8; 2]) -> Option<AuxValue<'a>> {
-    for (t, value) in iter_tags(aux) {
-        if t == tag {
-            return Some(value);
+    let at = find_tag_at(Level::new(), aux, tag)?;
+    iter_tags(aux.get(at..)?).next().map(|(_, value)| value)
+}
+
+// r[impl io.simd_portable]
+fn find_tag_at(level: Level, aux: &[u8], tag: [u8; 2]) -> Option<usize> {
+    dispatch!(level, simd => find_tag_simd(simd, aux, tag))
+}
+
+/// The offset of the first `tag`, skipping the others by size alone. Where
+/// `tag_end_in` fails, `iter_tags` would also have stopped.
+#[simd]
+fn find_tag_simd<S: Simd>(simd: S, aux: &[u8], tag: [u8; 2]) -> Option<usize> {
+    let mut at = 0usize;
+    while let Some(&[a, b, _]) = aux.get(at..at.saturating_add(3)) {
+        if [a, b] == tag {
+            return Some(at);
         }
+        at = tag_end_in(simd, aux, at).ok()?;
     }
     None
 }
@@ -692,6 +711,23 @@ pub fn validate_aux(aux: &[u8]) -> Result<(), AuxLayoutError> {
 
 /// The end of the well-formed tag starting at `at`.
 pub(crate) fn tag_end(aux: &[u8], at: usize) -> Result<usize, AuxLayoutError> {
+    tag_end_at(Level::new(), aux, at)
+}
+
+// r[impl io.simd_portable]
+fn tag_end_at(level: Level, aux: &[u8], at: usize) -> Result<usize, AuxLayoutError> {
+    dispatch!(level, simd => tag_end_simd(simd, aux, at))
+}
+
+#[simd]
+fn tag_end_simd<S: Simd>(simd: S, aux: &[u8], at: usize) -> Result<usize, AuxLayoutError> {
+    tag_end_in(simd, aux, at)
+}
+
+/// [`tag_end`] inside a kernel already running at level `S`, so that walking
+/// a whole aux block costs one dispatch, not one per string.
+#[inline(always)]
+pub(crate) fn tag_end_in<S: Simd>(simd: S, aux: &[u8], at: usize) -> Result<usize, AuxLayoutError> {
     let offset = at;
     let truncated = AuxLayoutError::Truncated { offset };
     let Some(&[_, _, code]) = aux.get(at..at.saturating_add(3)) else {
@@ -705,8 +741,8 @@ pub(crate) fn tag_end(aux: &[u8], at: usize) -> Result<usize, AuxLayoutError> {
         b'd' => 8,
         b'Z' | b'H' => {
             let rest = aux.get(at..).unwrap_or_default();
-            let nul = crate::io::text_scan::find_byte(rest, 0)
-                .ok_or(AuxLayoutError::UnterminatedString { offset })?;
+            let nul =
+                find_byte_in(simd, rest, 0).ok_or(AuxLayoutError::UnterminatedString { offset })?;
             nul.saturating_add(1)
         }
         b'B' => {
@@ -732,6 +768,17 @@ pub(crate) fn tag_end(aux: &[u8], at: usize) -> Result<usize, AuxLayoutError> {
     Ok(end)
 }
 
+/// Decode one whole tag — exactly the bytes [`tag_end`] vouched for. A `Z` or
+/// `H` value ends at the tag's last byte, its NUL, so it is not scanned again.
+#[inline(always)]
+pub(crate) fn whole_tag(tag: &[u8]) -> Option<([u8; 2], AuxValue<'_>)> {
+    match *tag {
+        [a, b, b'Z', ref value @ .., 0] => Some(([a, b], AuxValue::String(value))),
+        [a, b, b'H', ref value @ .., 0] => Some(([a, b], AuxValue::Hex(value))),
+        _ => iter_tags(tag).next(),
+    }
+}
+
 /// Iterator over tags that reports a malformed tag as an error, then stops.
 /// See [`Aux::iter_checked`].
 #[derive(Debug, Clone)]
@@ -750,8 +797,7 @@ impl<'a> Iterator for CheckedAuxIter<'a> {
         let item = tag_end(self.data, self.pos).and_then(|end| {
             let tag = self.data.get(self.pos..end).unwrap_or_default();
             self.pos = end;
-            // `tag_end` vouched for the tag, so the lenient parser reads it whole.
-            iter_tags(tag).next().ok_or(AuxLayoutError::Truncated { offset: end })
+            whole_tag(tag).ok_or(AuxLayoutError::Truncated { offset: end })
         });
         if item.is_err() {
             self.pos = self.data.len();
@@ -1396,5 +1442,94 @@ mod prop_tests {
 
         let bytes = aux.get::<&[u8]>(&tag).unwrap();
         assert_eq!(bytes, value.as_slice());
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod kernel_tests {
+    use super::*;
+    use hegel::prelude::*;
+
+    /// An aux block of tags of every type, names drawn from a few so that
+    /// lookups hit, miss and meet duplicates, with stray bytes now and then so
+    /// that some blocks are malformed (an unknown type, a short value, a string
+    /// without its NUL).
+    #[hegel::composite]
+    pub(crate) fn aux_block(tc: &TestCase) -> Vec<u8> {
+        let mut aux = Vec::new();
+        for _ in 0..tc.draw(gs::integers::<usize>().max_value(8)) {
+            aux.extend_from_slice(&tc.draw(gs::sampled_from(vec![*b"XA", *b"RG", *b"CG", *b"NM"])));
+            let code = tc.draw(gs::sampled_from(b"AcCsSiIfdZHB?".to_vec()));
+            aux.push(code);
+            match code {
+                b'Z' | b'H' => {
+                    let text = tc.draw(gs::vecs(gs::integers::<u8>().min_value(1)).max_size(70));
+                    aux.extend_from_slice(&text);
+                    aux.push(0);
+                }
+                b'B' => {
+                    let sub = tc.draw(gs::sampled_from(b"cCsSiIf".to_vec()));
+                    let count = tc.draw(gs::integers::<u32>().max_value(5));
+                    let width = match sub {
+                        b'c' | b'C' => 1,
+                        b's' | b'S' => 2,
+                        _ => 4,
+                    };
+                    aux.push(sub);
+                    aux.extend_from_slice(&count.to_le_bytes());
+                    aux.extend(std::iter::repeat_n(7u8, (count as usize).saturating_mul(width)));
+                }
+                b'A' | b'c' | b'C' => aux.push(b'x'),
+                b's' | b'S' => aux.extend_from_slice(&[1, 2]),
+                b'i' | b'I' | b'f' => aux.extend_from_slice(&[1, 2, 3, 4]),
+                b'd' => aux.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0xf0, 0x3f]),
+                _ => {}
+            }
+            if tc.draw(gs::integers::<u8>().max_value(9)) == 0 {
+                aux.extend_from_slice(&tc.draw(gs::binary().max_size(4)));
+            }
+        }
+        aux
+    }
+
+    // r[verify bam.record.aux_find]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn find_tag_every_level_matches_iter_tags(tc: TestCase) {
+        let aux = tc.draw(aux_block());
+        for tag in [*b"XA", *b"RG", *b"CG", *b"NM", *b"ZZ"] {
+            let expected = iter_tags(&aux).find(|(t, _)| *t == tag).map(|(_, value)| value);
+            for level in crate::simd_levels::levels() {
+                let found = find_tag_at(level, &aux, tag)
+                    .and_then(|at| iter_tags(aux.get(at..)?).next())
+                    .map(|(_, value)| value);
+                assert_eq!(found, expected, "{level:?} {tag:?}");
+            }
+        }
+    }
+
+    // r[verify bam.record.aux_checked]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn tag_end_every_level_matches_fallback(tc: TestCase) {
+        let aux = tc.draw(aux_block());
+        let mut at = 0;
+        while at < aux.len() {
+            let expected = tag_end_at(Level::fallback(), &aux, at);
+            for level in crate::simd_levels::levels() {
+                assert_eq!(tag_end_at(level, &aux, at), expected, "{level:?} at {at}");
+            }
+            let Ok(end) = expected else { break };
+            at = end;
+        }
+    }
+
+    // r[verify bam.record.aux_checked]
+    #[hegel::test]
+    fn iter_checked_reads_valid_blocks_as_iter_tags(tc: TestCase) {
+        let aux = tc.draw(aux_block());
+        tc.assume(validate_aux(&aux).is_ok());
+        let checked: Vec<_> = Aux::new(&aux).iter_checked().map(Result::unwrap).collect();
+        assert_eq!(checked, iter_tags(&aux).collect::<Vec<_>>());
     }
 }

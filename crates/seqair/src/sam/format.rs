@@ -9,10 +9,12 @@
 
 use crate::bam::{
     BamHeader, RawBamRecord,
-    aux::{AuxLayoutError, AuxValue},
+    aux::{AuxLayoutError, AuxValue, tag_end_in, whole_tag},
 };
 use crate::io::text_scan::find_byte;
 use crate::reader::Tid;
+use fearless_simd::{Level, dispatch, prelude::*};
+use fearless_simd_macros::simd;
 use std::fmt::{self, Write as _};
 use std::num::NonZeroI32;
 
@@ -151,10 +153,39 @@ fn write_record(
         }
     }
 
-    // r[impl sam.format.aux]
-    let mut skip_cg = long_cigar.is_some();
-    for tag in record.aux().iter_checked() {
-        let (tag, value) = tag?;
+    write_aux_at(Level::new(), record.aux().as_bytes(), long_cigar.is_some(), out, &mut int)?;
+    Ok(())
+}
+
+// r[impl io.simd_portable]
+fn write_aux_at(
+    level: Level,
+    aux: &[u8],
+    skip_cg: bool,
+    out: &mut Vec<u8>,
+    int: &mut itoa::Buffer,
+) -> Result<(), AuxLayoutError> {
+    dispatch!(level, simd => write_aux_simd(simd, aux, skip_cg, out, int))
+}
+
+// r[impl sam.format.aux]
+// r[impl sam.format.aux_walk]
+/// Every tag as `\tTAG:TYPE:VALUE`, checked as `Aux::iter_checked` checks it,
+/// in one kernel: each `Z`/`H` string's NUL is found once, without a dispatch.
+#[simd]
+fn write_aux_simd<S: Simd>(
+    simd: S,
+    aux: &[u8],
+    mut skip_cg: bool,
+    out: &mut Vec<u8>,
+    int: &mut itoa::Buffer,
+) -> Result<(), AuxLayoutError> {
+    let mut at = 0usize;
+    while at < aux.len() {
+        let end = tag_end_in(simd, aux, at)?;
+        let (tag, value) =
+            aux.get(at..end).and_then(whole_tag).ok_or(AuxLayoutError::Truncated { offset: at })?;
+        at = end;
         // The first CG tag is the one `bam_tag2cigar` moved into the CIGAR.
         if skip_cg && tag == *b"CG" {
             skip_cg = false;
@@ -163,7 +194,7 @@ fn write_record(
         out.push(b'\t');
         out.extend_from_slice(&tag);
         out.push(b':');
-        write_aux_value(&value, out, &mut int);
+        write_aux_value(&value, out, int);
     }
     Ok(())
 }
@@ -428,4 +459,28 @@ pub fn format_sam_header(header: &BamHeader, out: &mut Vec<u8>) -> Result<(), Sa
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod kernel_tests {
+    use super::*;
+    use crate::bam::aux::kernel_tests::aux_block;
+    use hegel::prelude::*;
+
+    // r[verify sam.format.aux_walk]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn write_aux_every_level_matches_fallback(tc: TestCase) {
+        let aux = tc.draw(aux_block());
+        let skip_cg = tc.draw(gs::booleans());
+        let run = |level| {
+            let mut out = b"prefix".to_vec();
+            let result = write_aux_at(level, &aux, skip_cg, &mut out, &mut itoa::Buffer::new());
+            (result, out)
+        };
+        let expected = run(Level::fallback());
+        for level in crate::simd_levels::levels() {
+            assert_eq!(run(level), expected, "{level:?}");
+        }
+    }
 }

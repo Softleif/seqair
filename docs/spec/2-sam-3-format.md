@@ -32,6 +32,9 @@ A record without a sequence MUST print `*` for both SEQ and QUAL. Otherwise SEQ 
 r[sam.format.aux]
 Every aux tag MUST be printed, in stored order, as a tab followed by `TAG:TYPE:VALUE`: every integer type (`c`, `C`, `s`, `S`, `i`, `I`) as `i` and its value in decimal; `A` as its byte; `Z` and `H` as their bytes up to the NUL terminator; `f` and `d` as C's `%g` (`r[sam.format.float_g]`) of the value; a `B` array as `B:` and its subtype letter, then `,` and each element, integers in decimal and `f` elements through htslib's `kputd` (`r[sam.format.float_kputd]`). An empty array prints as `B:` and its subtype with nothing after it.
 
+r[sam.format.aux_walk]
+The tags MUST be printed by one native-width SIMD kernel (`r[io.simd_portable]`) per record, checking each tag as `Aux::iter_checked` does (`r[bam.record.aux_checked]`) and finding each `Z`/`H` string's NUL once.
+
 r[sam.format.aux_errors]
 A malformed aux block MUST fail with `SamFormatError::Aux`, carrying the `AuxLayoutError` (`r[bam.record.aux_checked]`): an unknown type or array subtype (`B:A` included, which htslib also rejects), a truncated value, or a `Z`/`H` string without its NUL. Where htslib prints what it can and stops quietly — 1 to 3 bytes left over after the last whole tag — seqair MUST fail too, since dropping bytes without a word is the bug this formatter exists to avoid.
 
