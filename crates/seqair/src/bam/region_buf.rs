@@ -189,6 +189,9 @@ impl BlockCache {
 struct MergedRange {
     file_start: u64,
     file_end: u64,
+    /// Blocks starting before this offset hold the chunks' records; the rest
+    /// of the range (up to `file_end`) is read-ahead padding.
+    needed_until: u64,
 }
 
 /// Streaming BGZF decompressor over a region's index chunks.
@@ -501,6 +504,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             // Ensure the 18-byte header is resident (refilling if needed).
             let avail = self.ensure_available(BGZF_HEADER_SIZE)?;
             if avail < BGZF_HEADER_SIZE {
+                self.check_truncation(avail)?;
                 if self.advance_range() {
                     continue;
                 }
@@ -558,6 +562,7 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             let avail = self.ensure_available(total_block_size)?;
             if avail < total_block_size {
                 // Partial block at the range tail — advance, or EOF.
+                self.check_truncation(avail)?;
                 if self.advance_range() {
                     continue;
                 }
@@ -636,6 +641,33 @@ impl<'r, R: Read + Seek> RegionBuf<'r, R> {
             self.decompressed_bytes = self.decompressed_bytes.wrapping_add(actual as u64);
             return Ok(true);
         }
+    }
+
+    // r[impl region_buf.truncated]
+    /// The window holds only `avail` bytes of the block at the cursor. That is
+    /// the end of a range when the block lies in its read-ahead padding; when
+    /// the block holds the chunks' records the file was cut short, which is
+    /// an error, not the end of the query's data. A file cut short past the
+    /// records a query needs is reported once, as a warning.
+    fn check_truncation(&self, avail: usize) -> Result<(), BgzfError> {
+        let block_start = self.window_file_start.wrapping_add(self.cursor as u64);
+        let Some(range) = self.ranges.get(self.range_idx) else { return Ok(()) };
+        if block_start < range.needed_until {
+            return Err(BgzfError::TruncatedBlock);
+        }
+        let file_end = block_start.saturating_add(avail as u64);
+        if avail > 0 && file_end >= self.file_size {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    offset = block_start,
+                    "the file ends inside a BGZF block: it is truncated (this query's records \
+                     were whole; further truncated files are not reported)"
+                );
+            }
+        }
+        Ok(())
     }
 
     // r[impl region_buf.block_cache]
@@ -924,7 +956,7 @@ pub(crate) fn merged_byte_size(chunks: &[Chunk]) -> usize {
 // r[impl region_buf.merge_chunks]
 /// Merge chunks into non-overlapping byte ranges sorted by file offset.
 fn merge_chunks(chunks: &[Chunk]) -> Vec<MergedRange> {
-    let mut offsets: Vec<(u64, u64)> = chunks
+    let mut offsets: Vec<(u64, u64, u64)> = chunks
         .iter()
         .filter_map(|c| {
             let start = c.begin.block_offset();
@@ -932,22 +964,26 @@ fn merge_chunks(chunks: &[Chunk]) -> Vec<MergedRange> {
             // extend by CHUNK_END_PAD to capture the full final block plus any
             // record that may straddle a sub-chunk boundary during batching.
             let end = c.end.block_offset().saturating_add(CHUNK_END_PAD as u64);
+            // An end at `(block, 0)` needs nothing from that block.
+            let needed_until =
+                c.end.block_offset().saturating_add(u64::from(c.end.within_block() > 0));
             // Skip degenerate chunks (e.g. from corrupt index data where begin > end).
-            (start < end).then_some((start, end))
+            (start < end).then_some((start, end, needed_until))
         })
         .collect();
 
     offsets.sort_unstable();
 
     let mut merged: Vec<MergedRange> = Vec::with_capacity(offsets.len());
-    for (start, end) in offsets {
+    for (start, end, needed_until) in offsets {
         if let Some(last) = merged.last_mut()
             && start <= last.file_end
         {
             last.file_end = last.file_end.max(end);
+            last.needed_until = last.needed_until.max(needed_until);
             continue;
         }
-        merged.push(MergedRange { file_start: start, file_end: end });
+        merged.push(MergedRange { file_start: start, file_end: end, needed_until });
     }
 
     merged
@@ -972,8 +1008,8 @@ mod tests {
         let buf = RegionBuf {
             reader: &mut cursor,
             ranges: vec![
-                MergedRange { file_start: 100, file_end: 300 },
-                MergedRange { file_start: 200, file_end: 400 },
+                MergedRange { file_start: 100, file_end: 300, needed_until: 300 },
+                MergedRange { file_start: 200, file_end: 400, needed_until: 400 },
             ],
             range_idx: 0,
             window: vec![0; 100],
