@@ -6,17 +6,19 @@
 use super::bgzf_writer::BgzfSink;
 use super::header::{BamHeader, BamHeaderError};
 use super::owned_record::{OwnedBamRecord, OwnedRecordError};
+use super::raw_record::RawBamRecord;
 use super::record_idx::RecordIdx;
 use super::record_store::RecordStore;
 use crate::io::{BgzfError, IndexBuilder, IndexError};
 use crate::reader::Tid;
+use seqair_types::Pos0;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use thiserror::Error;
 
 /// Maximum record size the writer will accept (matching reader's 2 MiB cap).
-const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024;
+use super::record::MAX_RECORD_SIZE;
 
 // Limits matching the reader (header.rs) — the writer should never produce
 // data that the reader would reject.
@@ -83,6 +85,12 @@ pub enum BamWriteError {
     /// hold.
     #[error("no record {idx} in the store")]
     NoSuchRecord { idx: RecordIdx },
+
+    // r[impl bam_writer.write_raw]
+    /// A raw record names reference `tid`, which the writer's header (of
+    /// `n_targets` targets) does not have.
+    #[error("record references target {tid}, but the header has only {n_targets} targets")]
+    TidOutOfRange { tid: u32, n_targets: usize },
 }
 
 // r[impl bam_writer.create_from_path]
@@ -97,6 +105,9 @@ pub struct BamWriter<W: Write> {
     index: Option<IndexBuilder>,
     buf: Vec<u8>,
     poisoned: bool,
+    /// The header's target count, which every record's reference ids must be
+    /// below.
+    n_targets: usize,
 }
 
 impl<W: Write> BamWriter<W> {
@@ -116,7 +127,13 @@ impl<W: Write> BamWriter<W> {
             None
         };
 
-        Ok(Self { bgzf, index, buf: Vec::with_capacity(512), poisoned: false })
+        Ok(Self {
+            bgzf,
+            index,
+            buf: Vec::with_capacity(512),
+            poisoned: false,
+            n_targets: header.target_count(),
+        })
     }
 
     // r[impl bam_writer.write_record]
@@ -207,6 +224,48 @@ impl<W: Write> BamWriter<W> {
         }
 
         Ok(())
+    }
+
+    // r[impl bam_writer.write_raw]
+    /// Write a [`RawBamRecord`] — as read by a streaming reader — byte for
+    /// byte, without decoding or re-encoding it.
+    ///
+    /// The record was validated against the header it was read with; its
+    /// reference ids must also name targets of this writer's header, which is
+    /// checked. That the two headers list the *same* targets in the same order
+    /// is the caller's to ensure (writing with the input's own header does).
+    ///
+    /// # Errors
+    /// [`BamWriteError::TidOutOfRange`] for a reference id this writer's header
+    /// lacks, and the errors of [`Self::write`]. Any error poisons the writer.
+    pub fn write_raw(&mut self, record: &RawBamRecord) -> Result<(), BamWriteError> {
+        if self.poisoned {
+            return Err(BamWriteError::Poisoned);
+        }
+        match self.write_raw_inner(record) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.poisoned = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn write_raw_inner(&mut self, record: &RawBamRecord) -> Result<(), BamWriteError> {
+        for tid in [record.tid(), record.mate_fields().tid].into_iter().flatten() {
+            if tid.as_usize() >= self.n_targets {
+                return Err(BamWriteError::TidOutOfRange {
+                    tid: tid.as_u32(),
+                    n_targets: self.n_targets,
+                });
+            }
+        }
+        self.buf.clear();
+        self.buf.extend_from_slice(record.as_payload());
+        let beg = record.pos().map_or(0, Pos0::as_u64);
+        // `end_pos` is the last covered base; the index wants the exclusive end.
+        let end = record.end_pos().map_or(beg, |p| p.as_u64().saturating_add(1));
+        self.finalize_record(record.tid(), record.flags().is_unmapped(), beg, end)
     }
 
     // r[impl bam_writer.write_store_record]
