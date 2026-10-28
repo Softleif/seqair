@@ -838,3 +838,401 @@ fn write_raw_rejects_a_tid_the_header_lacks() {
         Err(seqair::bam::BamWriteError::TidOutOfRange { tid: 1, n_targets: 1 })
     ));
 }
+
+// ── write_store_record's bin ────────────────────────────────────────────
+
+use seqair::bam::RecordStore;
+use seqair::bam::reader::IndexedBamReader;
+
+/// A mapped read of `len` reference bases ending `delta` bases after a
+/// 16 kbp window boundary (`delta` = 0: its last base is the window's first).
+#[hegel::composite]
+fn read_at_a_window_edge(tc: &TestCase, index: usize) -> SamLine {
+    let window = int_in(tc, 1, 5) as u32 * 16_384;
+    let len = int_in(tc, 1, 40) as u32;
+    let delta = int_in(tc, -2, 2);
+    // 0-based last base = window + delta; SAM POS is 1-based.
+    let pos = (i64::from(window) + delta - i64::from(len) + 2) as u32;
+    let unmapped = tc.draw(gs::integers::<u8>().max_value(5)) == 0;
+    SamLine {
+        qname: format!("r{index}"),
+        flag: if unmapped { 4 } else { 0 },
+        rname: Some(0),
+        pos,
+        mapq: 60,
+        cigar: if unmapped { "*".to_owned() } else { format!("{len}M") },
+        rnext: "*".to_owned(),
+        pnext: 0,
+        tlen: 0,
+        seq: "A".repeat(len as usize),
+        qual: "I".repeat(len as usize),
+        aux: Vec::new(),
+    }
+}
+
+// r[verify bam_writer.store_record_bin]
+// r[verify bam_writer.write_store_record]
+/// `write_store_record` gives a read ending at a 16 kbp window edge the bin
+/// htslib computes, and indexes it as `samtools index` does. It used to bin
+/// with the inclusive end, so a read whose last base is a window's first
+/// landed one level too deep.
+#[hegel::test(test_cases = pinned::cases(40))]
+fn write_store_record_bins_like_htslib(tc: TestCase) {
+    let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(12));
+    let mut lines: Vec<SamLine> = (0..n).map(|i| tc.draw(read_at_a_window_edge(i))).collect();
+    lines.sort_by_key(SamLine::sort_key);
+    let dir = tempfile::tempdir().unwrap();
+    let sam = dir.path().join("in.sam");
+    std::fs::write(&sam, sam_text(&lines)).unwrap();
+    let input = htslib_bam(dir.path(), &sam);
+    run(std::process::Command::new("samtools").arg("index").arg(&input));
+    let (header, theirs) = stream_file(&input);
+
+    let mut reader = IndexedBamReader::open(&input).unwrap();
+    let tid = header.tid("chr1").unwrap();
+    let mut store = RecordStore::new();
+    let whole =
+        (seqair::bam::Pos0::new(0).unwrap()..=seqair::bam::Pos0::new(99_999).unwrap()).into();
+    reader.fetch_into(tid, whole, &mut store).unwrap();
+    let out = dir.path().join("out.bam");
+    let mut writer = BamWriterBuilder::to_path(&out, &header).write_index(true).build().unwrap();
+    for idx in store.indices() {
+        writer.write_store_record(&store, idx).unwrap();
+    }
+    let (_, index) = writer.finish().unwrap();
+    let ours_bai = dir.path().join("ours.bai");
+    index
+        .unwrap()
+        .write_bai(std::fs::File::create(&ours_bai).unwrap(), header.target_count())
+        .unwrap();
+
+    let (_, ours) = stream_file(&out);
+    // The store keeps the mapped reads; htslib's file has the unmapped too.
+    let mapped: Vec<&RawBamRecord> = theirs.iter().filter(|r| !r.flags().is_unmapped()).collect();
+    assert_eq!(ours.len(), store.len());
+    let by_name = |r: &&RawBamRecord| r.qname().to_vec();
+    let mut mapped_sorted = mapped.clone();
+    mapped_sorted.sort_by_key(by_name);
+    let mut ours_sorted: Vec<&RawBamRecord> =
+        ours.iter().filter(|r| !r.flags().is_unmapped()).collect();
+    ours_sorted.sort_by_key(by_name);
+    assert_eq!(ours_sorted.len(), mapped_sorted.len());
+    for (a, b) in ours_sorted.iter().zip(&mapped_sorted) {
+        assert_eq!(a.bin(), b.bin(), "{}: bin", a.qname().escape_ascii());
+    }
+    let samtools_bai = dir.path().join("samtools.bai");
+    run(std::process::Command::new("samtools").arg("index").arg(&out).arg("-o").arg(&samtools_bai));
+    assert_eq!(
+        parse_bai(&std::fs::read(&ours_bai).unwrap()),
+        parse_bai(&std::fs::read(&samtools_bai).unwrap()),
+        "BAI differs from samtools index's"
+    );
+}
+
+#[test]
+fn a_read_whose_last_base_opens_a_window_is_binned_one_level_up() {
+    // 10M at 0-based 16375 covers 16375..=16384: two 16 kbp windows, so
+    // htslib's bin is the level-4 bin 585, not the leaf 4681.
+    let line = SamLine {
+        qname: "r".to_owned(),
+        flag: 0,
+        rname: Some(0),
+        pos: 16_376,
+        mapq: 60,
+        cigar: "10M".to_owned(),
+        rnext: "*".to_owned(),
+        pnext: 0,
+        tlen: 0,
+        seq: "ACGTACGTAC".to_owned(),
+        qual: "IIIIIIIIII".to_owned(),
+        aux: Vec::new(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let sam = dir.path().join("in.sam");
+    std::fs::write(&sam, sam_text(&[line])).unwrap();
+    let input = htslib_bam(dir.path(), &sam);
+    run(std::process::Command::new("samtools").arg("index").arg(&input));
+    let (header, theirs) = stream_file(&input);
+    assert_eq!(theirs[0].bin(), 585);
+
+    let mut reader = IndexedBamReader::open(&input).unwrap();
+    let mut store = RecordStore::new();
+    let whole =
+        (seqair::bam::Pos0::new(0).unwrap()..=seqair::bam::Pos0::new(99_999).unwrap()).into();
+    reader.fetch_into(header.tid("chr1").unwrap(), whole, &mut store).unwrap();
+    let mut writer = BamWriterBuilder::to_writer(Vec::new(), &header).build().unwrap();
+    writer.write_store_record(&store, store.indices().next().unwrap()).unwrap();
+    let (bytes, _) = writer.finish().unwrap();
+    let ours = stream_records(&bytes);
+    assert_eq!(ours[0].bin(), 585);
+}
+
+// ── framing ─────────────────────────────────────────────────────────────
+
+/// A BAM of the header and `body` (raw bytes after it), compressed in one go.
+fn bam_with_body(body: &[u8]) -> Vec<u8> {
+    let mut writer = BgzfWriter::new(Vec::new());
+    writer.write_all(&header_bytes()).unwrap();
+    writer.write_all(body).unwrap();
+    writer.finish().unwrap()
+}
+
+/// The records of `bam` up to the first error, and that error.
+fn read_until_error(bam: &[u8]) -> (Vec<RawBamRecord>, Option<BamStreamError>) {
+    let mut reader = BamStreamReader::new(Cursor::new(bam)).unwrap();
+    let mut records = Vec::new();
+    loop {
+        let mut record = RawBamRecord::default();
+        match reader.read_record(&mut record) {
+            Ok(true) => records.push(record),
+            Ok(false) => return (records, None),
+            Err(e) => {
+                let mut again = RawBamRecord::default();
+                assert!(
+                    matches!(reader.read_record(&mut again), Err(BamStreamError::Poisoned)),
+                    "not poisoned after {e:?}"
+                );
+                return (records, Some(e));
+            }
+        }
+    }
+}
+
+fn framed(payload: &[u8]) -> Vec<u8> {
+    let mut out = (payload.len() as i32).to_le_bytes().to_vec();
+    out.extend_from_slice(payload);
+    out
+}
+
+fn simple_record(index: usize) -> Vec<u8> {
+    Wire {
+        tid: 0,
+        pos: 100 + index as i32,
+        flag: 0,
+        qname: format!("r{index}").into_bytes(),
+        cigar: vec![op(4, 0)],
+        seq_len: 4,
+        aux: b"XAAQ".to_vec(),
+    }
+    .payload()
+}
+
+// r[verify bam.stream.framing]
+/// A `block_size` below 32 or above 2 MiB fails with `RecordSizeOutOfRange`
+/// after the records before it, and poisons the stream.
+#[test]
+fn a_block_size_out_of_range_is_an_error() {
+    for size in [i32::MIN, -1, 0, 31, 2 * 1024 * 1024 + 1, i32::MAX] {
+        let mut body = framed(&simple_record(0));
+        body.extend_from_slice(&size.to_le_bytes());
+        body.extend_from_slice(&[0; 64]);
+        let (records, error) = read_until_error(&bam_with_body(&body));
+        assert_eq!(records.len(), 1, "size {size}");
+        assert!(
+            matches!(error, Some(BamStreamError::RecordSizeOutOfRange { record: 2, size: s }) if s == size),
+            "size {size}: {error:?}"
+        );
+    }
+}
+
+// r[verify bam.stream.framing]
+// r[verify bgzf.stream.eof_marker]
+/// Cutting the uncompressed records anywhere (and compressing what is left
+/// properly): a cut between records is a clean end after the records before
+/// it; a cut inside a `block_size` or a payload is `TruncatedRecord`, naming
+/// the record it cut, after every whole record before it.
+#[test]
+fn a_record_cut_anywhere_is_truncated_unless_cut_between_records() {
+    let records: Vec<Vec<u8>> = (0..4).map(simple_record).collect();
+    let body: Vec<u8> = records.iter().flat_map(|r| framed(r)).collect();
+    let mut ends = vec![0];
+    for r in &records {
+        ends.push(ends.last().unwrap() + 4 + r.len());
+    }
+    for cut in 0..=body.len() {
+        let (got, error) = read_until_error(&bam_with_body(&body[..cut]));
+        let whole = ends.iter().filter(|&&e| e <= cut).count() - 1;
+        assert_eq!(got.len(), whole, "cut {cut}");
+        for (g, r) in got.iter().zip(&records) {
+            assert_eq!(g.as_payload(), r.as_slice());
+        }
+        if ends.contains(&cut) {
+            assert!(error.is_none(), "cut {cut}: {error:?}");
+        } else {
+            assert!(
+                matches!(error, Some(BamStreamError::TruncatedRecord { record }) if record == whole as u64 + 1),
+                "cut {cut}: {error:?}"
+            );
+        }
+    }
+}
+
+/// Ways to make a well-framed record invalid.
+#[derive(Debug, Clone, Copy)]
+enum Defect {
+    TidOutOfRange,
+    MateTidOutOfRange,
+    PosBelowMinusOne,
+    MatePosBelowMinusOne,
+    NameNotTerminated,
+    EmptyName,
+    CigarSeqMismatch,
+    SeqLongerThanPayload,
+}
+
+impl Defect {
+    fn apply(self, mut payload: Vec<u8>) -> Vec<u8> {
+        let set_i32 =
+            |p: &mut Vec<u8>, at: usize, v: i32| p[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        match self {
+            Self::TidOutOfRange => set_i32(&mut payload, 0, 2),
+            Self::MateTidOutOfRange => set_i32(&mut payload, 20, 7),
+            Self::PosBelowMinusOne => set_i32(&mut payload, 4, -2),
+            Self::MatePosBelowMinusOne => set_i32(&mut payload, 24, -9),
+            Self::NameNotTerminated => {
+                let l = usize::from(payload[8]);
+                payload[32 + l - 1] = b'x';
+            }
+            Self::EmptyName => {
+                let l = usize::from(payload[8]);
+                payload.drain(32..32 + l);
+                payload[8] = 0;
+            }
+            Self::CigarSeqMismatch => {
+                let l = usize::from(payload[8]);
+                payload[32 + l..32 + l + 4].copy_from_slice(&op(3, 0).to_le_bytes());
+            }
+            Self::SeqLongerThanPayload => set_i32(&mut payload, 16, 400),
+        }
+        payload
+    }
+}
+
+// r[verify bam.stream.framing]
+// r[verify bam.raw_record.validation]
+/// A well-framed but invalid record is `InvalidRecord`, numbered, and the
+/// stream reads on: every valid record after it still comes out, byte for
+/// byte, in order.
+#[hegel::test]
+fn an_invalid_record_leaves_the_stream_usable(tc: TestCase) {
+    let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(12));
+    let defects = [
+        Defect::TidOutOfRange,
+        Defect::MateTidOutOfRange,
+        Defect::PosBelowMinusOne,
+        Defect::MatePosBelowMinusOne,
+        Defect::NameNotTerminated,
+        Defect::EmptyName,
+        Defect::CigarSeqMismatch,
+        Defect::SeqLongerThanPayload,
+    ];
+    let plan: Vec<Option<Defect>> = (0..n)
+        .map(|_| tc.draw(gs::booleans()).then(|| tc.draw(gs::sampled_from(defects.to_vec()))))
+        .collect();
+    let payloads: Vec<Vec<u8>> = plan
+        .iter()
+        .enumerate()
+        .map(|(i, d)| d.map_or_else(|| simple_record(i), |d| d.apply(simple_record(i))))
+        .collect();
+    let body: Vec<u8> = payloads.iter().flat_map(|p| framed(p)).collect();
+    let bam = bam_with_body(&body);
+    let mut reader = BamStreamReader::new(Cursor::new(&bam)).unwrap();
+    let mut record = RawBamRecord::default();
+    for (i, (defect, payload)) in plan.iter().zip(&payloads).enumerate() {
+        match (reader.read_record(&mut record), defect) {
+            (Ok(true), None) => assert_eq!(record.as_payload(), payload.as_slice()),
+            (Err(BamStreamError::InvalidRecord { record: number, .. }), Some(_)) => {
+                assert_eq!(number, i as u64 + 1);
+                // A failed refill leaves the default record, not half of one.
+                assert_eq!(record, RawBamRecord::default());
+            }
+            (got, _) => panic!("record {i} ({defect:?}): {got:?}"),
+        }
+    }
+    assert!(!reader.read_record(&mut record).unwrap());
+}
+
+// ── region queries over empty blocks ────────────────────────────────────
+
+/// The 28-byte BGZF EOF marker block, which is an empty block.
+const EMPTY_BLOCK: [u8; 28] = [
+    0x1f, 0x8b, 0x08, 0x04, 0, 0, 0, 0, 0, 0xff, 0x06, 0, 0x42, 0x43, 0x02, 0, 0x1b, 0, 0x03, 0, 0,
+    0, 0, 0, 0, 0, 0, 0,
+];
+
+/// One BGZF block holding `data`.
+fn one_block(data: &[u8]) -> Vec<u8> {
+    let mut writer = BgzfWriter::new(Vec::new());
+    writer.write_all(data).unwrap();
+    let mut bytes = writer.finish().unwrap();
+    bytes.truncate(bytes.len() - EMPTY_BLOCK.len());
+    bytes
+}
+
+/// Mapped reads' names in `samtools view <bam> <region>`.
+fn samtools_region(bam: &Path, region: &str) -> Vec<Vec<u8>> {
+    let out =
+        std::process::Command::new("samtools").arg("view").arg(bam).arg(region).output().unwrap();
+    assert!(out.status.success());
+    let mut names: Vec<Vec<u8>> = out
+        .stdout
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| {
+            let fields: Vec<&[u8]> = l.split(|&b| b == b'\t').collect();
+            let flag: u16 = std::str::from_utf8(fields[1]).unwrap().parse().unwrap();
+            (flag & 4 == 0).then(|| fields[0].to_vec())
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+// r[verify region_buf.empty_block]
+// r[verify bgzf.empty_block]
+/// Empty blocks between the records of a BAM — inside the ranges a region
+/// query reads — do not end the query early: seqair's indexed reader returns
+/// the reads samtools returns for every region, on an index samtools built.
+#[hegel::test(test_cases = pinned::cases(30))]
+fn region_queries_read_past_empty_blocks(tc: TestCase) {
+    let mut lines = tc.draw(sam_lines());
+    lines.retain(|l| l.rname == Some(0) && l.flag & 4 == 0);
+    let dir = tempfile::tempdir().unwrap();
+    let sam = dir.path().join("in.sam");
+    std::fs::write(&sam, sam_text(&lines)).unwrap();
+    let (header, records) = stream_file(&htslib_bam(dir.path(), &sam));
+
+    // Records in blocks of random size, empty blocks between them.
+    let mut bam = one_block(&header_bytes());
+    let mut at = 0;
+    while at < records.len() {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(4)).min(records.len() - at);
+        let body: Vec<u8> =
+            records[at..at + n].iter().flat_map(|r| framed(r.as_payload())).collect();
+        for _ in 0..tc.draw(gs::integers::<usize>().max_value(2)) {
+            bam.extend_from_slice(&EMPTY_BLOCK);
+        }
+        bam.extend_from_slice(&one_block(&body));
+        at += n;
+    }
+    bam.extend_from_slice(&EMPTY_BLOCK);
+    let path = dir.path().join("empty_blocks.bam");
+    std::fs::write(&path, &bam).unwrap();
+    run(std::process::Command::new("samtools").arg("index").arg(&path));
+
+    let mut reader = IndexedBamReader::open(&path).unwrap();
+    let tid = header.tid("chr1").unwrap();
+    for _ in 0..4 {
+        let start = int_in(&tc, 0, 99_000) as u32;
+        let end = start + int_in(&tc, 0, 5_000) as u32;
+        let mut store = RecordStore::new();
+        let span =
+            (seqair::bam::Pos0::new(start).unwrap()..=seqair::bam::Pos0::new(end).unwrap()).into();
+        reader.fetch_into(tid, span, &mut store).unwrap();
+        let mut ours: Vec<Vec<u8>> =
+            store.indices().map(|i| store.record(i).unwrap().qname().to_vec()).collect();
+        ours.sort();
+        let region = format!("chr1:{}-{}", start + 1, end + 1);
+        assert_eq!(ours, samtools_region(&path, &region), "{region}");
+    }
+}
