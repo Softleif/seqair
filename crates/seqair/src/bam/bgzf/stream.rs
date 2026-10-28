@@ -379,7 +379,7 @@ impl<R: Read> BgzfStream<R> {
             let mut blocks = Vec::with_capacity(BLOCKS_PER_BATCH);
             let mut tail = None;
             while blocks.len() < BLOCKS_PER_BATCH {
-                match read_frame(&mut self.inner, &mut compressed) {
+                match read_frame(&mut self.inner, &mut compressed, &mut self.decompressor) {
                     Ok(Frame::Data(block)) => {
                         blocks.push(block);
                         last_was_empty = false;

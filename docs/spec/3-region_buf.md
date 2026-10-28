@@ -60,7 +60,7 @@ r[region_buf.decompress]
 Block decompression from the in-memory buffer MUST follow the same BGZF format rules as the file-based reader: magic validation, BSIZE extraction, DEFLATE decompression, and CRC32 verification.
 
 r[region_buf.empty_block]
-An empty block (ISIZE=0) inside a range MUST be skipped like any other block boundary (`r[bgzf.empty_block]`): the buffer reads on to the next block, or to the end of the range. Taking it for the end of the data silently dropped every record after it in the query.
+An empty block (ISIZE=0) inside a range MUST be skipped like any other block boundary (`r[bgzf.empty_block]`): the buffer reads on to the next block, or to the end of the range. Taking it for the end of the data silently dropped every record after it in the query. It is checked like any block (`r[bgzf.empty_block]`), and a data block MUST inflate to exactly its ISIZE (`r[bgzf.decompression+2]`) — the same check, `inflate_checked`, as the other readers.
 
 r[region_buf.fast_header]
 The fast-path header parsing (XLEN=6, BC at fixed offset) MUST be used when applicable, with fallback to searching extra fields.

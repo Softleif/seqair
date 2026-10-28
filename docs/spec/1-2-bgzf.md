@@ -28,7 +28,7 @@ An EOF marker block has ISIZE=0, but an ISIZE=0 block only ends the stream when 
 > **Was:** the reader stopped at the first ISIZE=0 block. Empty blocks are legal anywhere in BGZF (`[SAM1] §4.1.2` only says the *last* block is one), and htslib skips them mid-file ("Zero length blocks in the middle of a file are (wrongly) considered as EOF by many callers", `bgzf.c`). Stopping there silently dropped every record after the block.
 
 r[bgzf.empty_block]
-An ISIZE=0 block that is followed by more input MUST be skipped: the reader moves on to the next block, and the empty block contributes no bytes. For virtual-offset tracking the skipped block simply does not exist — the current block offset is that of the next non-empty block.
+An ISIZE=0 block that is followed by more input MUST be skipped: the reader moves on to the next block, and the empty block contributes no bytes. For virtual-offset tracking the skipped block simply does not exist — the current block offset is that of the next non-empty block. An empty block MUST still be inflated and its CRC checked, as htslib does: a corrupt one — the EOF marker included — fails like any other corrupt block.
 
 r[bgzf.truncated_header]
 Input that ends partway through an 18-byte block header (at least one and fewer than 18 bytes) MUST fail with `BgzfError::TruncatedBlock`, never be taken for a clean end of input. Only zero bytes at a block boundary are a clean end.
