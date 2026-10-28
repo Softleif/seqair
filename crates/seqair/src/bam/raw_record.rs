@@ -155,6 +155,9 @@ impl RawBamRecord {
     }
 
     fn validate(&mut self, header: &BamHeader) -> Result<(), DecodeError> {
+        if self.payload.len() > record::MAX_RECORD_SIZE {
+            return Err(DecodeError::RecordTooLarge { len: self.payload.len() });
+        }
         let h = record::parse_header(&self.payload)?;
         let refs = h.refs.resolve(header)?;
         let name = self.payload.get(FIXED_LEN..h.var_start).unwrap_or_default();
@@ -186,7 +189,7 @@ impl RawBamRecord {
     /// one in its `CG` tag (`r[bam.raw_record.long_cigar]`).
     pub(crate) fn long_cigar(&self) -> Option<&[u8]> {
         long_cigar(
-            self.cigar_bytes(),
+            self.stored_cigar_bytes(),
             self.seq_len(),
             self.tid.is_some() && self.pos.is_some(),
             self.aux(),
@@ -254,23 +257,32 @@ impl RawBamRecord {
         self.payload.get(FIXED_LEN..end).unwrap_or_default()
     }
 
-    /// The number of CIGAR operations stored (the placeholder ones for a
-    /// record whose real CIGAR is in a `CG` tag).
+    /// The number of CIGAR operations: of the real CIGAR, for a record that
+    /// carries a long one in its `CG` tag (`r[bam.raw_record.long_cigar]`).
     pub fn cigar_len(&self) -> usize {
-        self.cigar_bytes().len() / 4
+        self.cigar_packed().len() / 4
     }
 
-    /// The stored CIGAR operations.
+    // r[impl bam.raw_record.cigar_access]
+    /// The CIGAR operations — for a record with a long CIGAR, the real ones
+    /// from its `CG` tag, as htslib's reader returns them. See
+    /// [`Self::stored_cigar_bytes`] for the placeholder the record stores.
     pub fn cigar(&self) -> impl ExactSizeIterator<Item = CigarOp> + '_ {
-        self.cigar_bytes()
+        self.cigar_packed()
             .as_chunks::<4>()
             .0
             .iter()
             .map(|op| CigarOp::from_bam_u32(u32::from_le_bytes(*op)))
     }
 
-    /// The stored CIGAR in BAM's packed form (little-endian `u32` per op).
-    pub fn cigar_bytes(&self) -> &[u8] {
+    /// The real CIGAR in BAM's packed form: the long one, else the stored one.
+    fn cigar_packed(&self) -> &[u8] {
+        self.long_cigar().unwrap_or(self.stored_cigar_bytes())
+    }
+
+    /// The CIGAR field as stored, in BAM's packed form (little-endian `u32`
+    /// per op) — for a long CIGAR, the `<seq_len>S<ref_len>N` placeholder.
+    pub fn stored_cigar_bytes(&self) -> &[u8] {
         self.payload.get(self.cigar_start..self.cigar_end).unwrap_or_default()
     }
 

@@ -18,7 +18,7 @@ fn touch(record: &RawBamRecord) -> usize {
     let mut n = record.qname().len()
         + record.cigar().count()
         + record.cigar_len()
-        + record.cigar_bytes().len()
+        + record.stored_cigar_bytes().len()
         + record.packed_seq().len()
         + record.bases().len()
         + usize::from(record.bin())

@@ -119,7 +119,7 @@ fn write_record(
     // r[impl sam.format.cigar]
     // r[impl sam.format.long_cigar]
     let long_cigar = record.long_cigar();
-    let cigar = long_cigar.unwrap_or(record.cigar_bytes());
+    let cigar = long_cigar.unwrap_or(record.stored_cigar_bytes());
     if cigar.is_empty() {
         out.push(b'*');
     }

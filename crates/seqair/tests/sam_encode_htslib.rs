@@ -138,7 +138,16 @@ fn long_cigars_encode_to_htslibs_bytes(tc: TestCase) {
     assert_same(&ours, &samtools_payloads(sam.as_bytes()).unwrap(), &lines, "samtools");
     assert_same(&ours, &rust_htslib_payloads(sam.as_bytes()).unwrap(), &lines, "rust-htslib");
     let record = RawBamRecord::from_payload(ours[0].clone(), &header()).unwrap();
-    assert_eq!(record.cigar_len(), 2);
+    assert_eq!(record.stored_cigar_bytes().len(), 2 * 4);
+    // r[verify bam.raw_record.cigar_access]
+    // The real CIGAR comes back from the `CG` tag wherever htslib's reader
+    // would move it there.
+    if record.has_cg_placeholder() {
+        assert!(record.cigar_len() > 65535);
+        assert_eq!(record.cigar().len(), record.cigar_len());
+    } else {
+        assert_eq!(record.cigar_len(), 2);
+    }
     assert!(record.has_cg_placeholder() || flag == 4 || !with_seq);
 }
 

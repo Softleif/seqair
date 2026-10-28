@@ -322,6 +322,11 @@ pub enum DecodeError {
     /// rejects it rather than rewrite the record.
     #[error("BAM read name is not NUL-terminated")]
     QnameNotTerminated,
+
+    // r[impl bam.raw_record.validation]
+    /// A record payload longer than the record size limit (`r[bam.record.max_size]`).
+    #[error("BAM record of {len} bytes exceeds the {MAX_RECORD_SIZE}-byte limit")]
+    RecordTooLarge { len: usize },
 }
 
 #[cfg(test)]
