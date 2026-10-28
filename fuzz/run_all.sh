@@ -62,6 +62,8 @@ for target in $TARGETS; do
     case "$target" in
         fuzz_reader_indexed) extra_args="-max_len=1600000" ;;
         fuzz_reader_bam)     extra_args="-max_len=65536" ;;
+        fuzz_bam_stream)     extra_args="-max_len=65536" ;;
+        fuzz_bgzf_stream)    extra_args="-max_len=65536" ;;
     esac
 
     printf "%-35s" "  $target$seed_note"

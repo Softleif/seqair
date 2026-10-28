@@ -50,6 +50,8 @@ to catch — several entries in [Bugs found](#bugs-found) were OOMs.
 | `fuzz_bam_index`  | BAI binary index parsing                       | test.bam.bai     |
 | `fuzz_bam_aux`    | Auxiliary tag parsing, round-trip, and removal | —                |
 | `fuzz_bgzf`       | BGZF block decompression                       | BGZF blocks      |
+| `fuzz_bgzf_stream` | `BgzfStream`: serial and threaded inflation agree, poison after error | BGZF streams |
+| `fuzz_bam_stream` | `BamStreamReader` → `RawBamRecord` accessors → `write_raw` round trip | small BAMs (htslib test SAMs) |
 | `fuzz_sam_header` | `BamHeader::from_sam_text`                     | SAM header lines |
 
 ### CRAM parsers
