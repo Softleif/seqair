@@ -565,6 +565,24 @@ impl<U> RecordStore<U> {
     /// Undo the most recent `push_raw`/`push_fields` by truncating every slab
     /// to the offsets recorded on the last `SlimRecord`. Only valid when the
     /// last record is the freshly-pushed one (no subsequent `sort`/`dedup`).
+    /// Remove the last record, which must be the last one pushed or copied
+    /// (no sort since). The streaming pileup moves a window's closing record
+    /// into the next window's store this way.
+    pub(crate) fn pop_last(&mut self) {
+        if !self.records.is_empty() {
+            self.rollback_last_push();
+        }
+    }
+
+    /// The length of the longest slab, each in its own elements (bytes, or
+    /// CIGAR operations) — what a `u32` slab offset has to reach.
+    pub(crate) fn longest_slab(&self) -> usize {
+        [self.names.len(), self.bases.len(), self.cigar.len(), self.qual.len(), self.aux.len()]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
+    }
+
     fn rollback_last_push(&mut self) {
         let rec = self.records.pop().expect("rollback_last_push called with empty records Vec");
         self.extras

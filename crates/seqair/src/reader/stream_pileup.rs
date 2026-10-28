@@ -4,7 +4,7 @@
 
 use super::{AlignmentStream, AlignmentStreamError, DepthCap, DepthLimit, Tid};
 use crate::bam::{
-    BamHeader, DecodeError, RawBamRecord,
+    BamHeader, DecodeError, RawBamRecord, RecordIdx,
     pileup::{PileupColumn, PileupEngine, PileupScratch, RefSeq},
     record_store::{CustomizeRecordStore, Prepared, RecordStore},
 };
@@ -23,16 +23,30 @@ pub enum StreamPileupError {
         source: AlignmentStreamError,
     },
 
-    /// A placed record precedes the one before it (`r[pileup_stream.sorted]`).
+    /// A mapped record precedes the last mapped record before it
+    /// (`r[pileup_stream.sorted+1]`). A position of `None` is a mapped record
+    /// on a reference with no position, which htslib orders as `-1`.
     #[error(
-        "record {record} (reference {tid}, position {pos}) precedes the record before it \
-         (reference {previous_tid}, position {previous_pos}): the input is not coordinate-sorted"
+        "record {record} (reference {tid}, position {pos:?}) precedes the record before it \
+         (reference {previous_tid}, position {previous_pos:?}): the input is not coordinate-sorted"
     )]
-    Unsorted { record: u64, tid: Tid, pos: Pos0, previous_tid: Tid, previous_pos: Pos0 },
+    Unsorted {
+        record: u64,
+        tid: Tid,
+        pos: Option<Pos0>,
+        previous_tid: Tid,
+        previous_pos: Option<Pos0>,
+    },
 
-    /// The record store refused a record (a slab outgrew `u32` offsets).
+    /// The record store refused a record.
     #[error("record {record} could not be stored")]
     Record { record: u64, source: DecodeError },
+
+    /// More reads start at one position than a store can hold (its `u32`
+    /// offsets would overflow), so no window boundary can split them
+    /// (`r[pileup_stream.budget]`). [`DepthLimit::PerColumn`] bounds it.
+    #[error("too many reads start at reference {tid}, position {pos} for one record store")]
+    PileTooDeep { tid: Tid, pos: Pos0 },
 
     #[error("reading the reference {contig}:{start}-{end} (0-based, inclusive) failed")]
     FastaFetch { contig: SmolStr, start: u64, end: u64, source: FastaError },
@@ -45,6 +59,29 @@ pub enum StreamPileupError {
 // r[impl pileup_stream.window_len]
 /// The default window length (`r[pileup_stream.window_len]`).
 pub const DEFAULT_WINDOW_LEN: NonZeroU32 = NonZeroU32::new(64 * 1024).expect("non-zero");
+
+// r[impl pileup_stream.budget]
+/// When a window closes before its length is reached: once its store holds
+/// more than `records` records, or its longest slab (bytes, or CIGAR
+/// operations) is longer than `slab_len` (`r[pileup_stream.budget]`).
+///
+/// A soft limit: a window never closes inside one position, so a pile of
+/// reads starting at one position grows past it — up to the store's `u32`
+/// limits, where the pileup fails with [`StreamPileupError::PileTooDeep`].
+/// The default is half those limits, so the reads carried into the next
+/// window always fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowBudget {
+    pub records: NonZeroU32,
+    pub slab_len: NonZeroU32,
+}
+
+impl Default for WindowBudget {
+    fn default() -> Self {
+        let half = NonZeroU32::new(1 << 31).expect("non-zero");
+        Self { records: half, slab_len: half }
+    }
+}
 
 /// A column and the reference it is on, as [`StreamPileup::pileups`] yields it.
 pub type StreamColumn<'a, U> = (Tid, PileupColumn<'a, U>);
@@ -70,7 +107,30 @@ struct Yielding<U> {
 ///
 /// Yields, contig by contig, the columns [`Readers::pileup`] yields for a
 /// segment spanning each whole contig, by running the same
-/// [`PileupEngine`] over a sliding window of positions.
+/// [`PileupEngine`] over a sliding window of positions. Columns depend on
+/// neither the window length nor the [`WindowBudget`]. Three things differ
+/// from an indexed pileup, by design:
+///
+/// - **Store indices are per window.** `record_idx`, `mate_idx` and
+///   `fragment_idx` index the current window's store. Mates that overlap
+///   each other are always in the same window and always linked, so
+///   [`PileupColumn::mate_of`] and `in_mate_overlap` are exactly the indexed
+///   pileup's. Mates that do not overlap are linked only when they happen to
+///   share a window, so for them `mate_idx` may be `None` (and
+///   `fragment_idx` the read's own index) where a whole-contig pileup links
+///   them; do not rely on either for such mates. `samtools mpileup` has the
+///   same limit: it pairs a read with its mate only while both are in its
+///   buffer.
+/// - **The depth cap is a whole-contig one.** With
+///   [`DepthLimit::PerColumn`] the [`DepthCap`] sees each contig's records
+///   once, in order, and keeps exactly the reads an indexed pileup over one
+///   segment per contig keeps. A *tiled* indexed pileup restarts the cap at
+///   every segment, so near tile boundaries it can keep different reads.
+/// - **The sort check is htslib's.** Mapped records on a reference that the
+///   customize value keeps must be in `(tid, pos)` order, else
+///   [`StreamPileupError::Unsorted`]; unplaced and unmapped records, and the
+///   ones the customize value rejects, are not checked, as `bam_plp_push`
+///   does not check them.
 ///
 /// ```no_run
 /// use seqair::reader::{AlignmentStream, DepthLimit, StreamPileup};
@@ -90,11 +150,13 @@ pub struct StreamPileup<E: CustomizeRecordStore = ()> {
     fasta: Option<IndexedFastaReader>,
     fasta_buf: Vec<u8>,
     window_len: NonZeroU32,
+    budget: WindowBudget,
     record: RawBamRecord,
     /// Records read so far, for error messages (1-based numbering).
     records_read: u64,
-    /// The last placed record's `(tid, pos)`, for the sort check.
-    last: Option<(Tid, Pos0)>,
+    /// The last checked record's `(tid, pos)`, for the sort check; `None`
+    /// sorts first, as htslib's `-1`.
+    last: Option<(Tid, Option<Pos0>)>,
     filling: Option<Window>,
     /// The store of the window being filled.
     store: RecordStore<E::Extra>,
@@ -123,7 +185,7 @@ where
     E: CustomizeRecordStore,
     E::Extra: Clone,
 {
-    // r[impl pileup_stream.depth_limit]
+    // r[impl pileup_stream.depth_limit+1]
     /// A pileup over `stream`, pushing every placed record through
     /// `customize` once, and capping reads per column at load time as
     /// [`Readers::pileup`](crate::reader::Readers::pileup) does for `depth`.
@@ -134,6 +196,7 @@ where
             fasta: None,
             fasta_buf: Vec::new(),
             window_len: DEFAULT_WINDOW_LEN,
+            budget: WindowBudget::default(),
             record: RawBamRecord::default(),
             records_read: 0,
             last: None,
@@ -164,6 +227,14 @@ where
         self
     }
 
+    /// Set the window budget (`r[pileup_stream.budget]`). Columns do not
+    /// depend on it.
+    #[must_use]
+    pub fn with_window_budget(mut self, budget: WindowBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
     /// The stream's header.
     pub fn header(&self) -> &BamHeader {
         self.stream.header()
@@ -181,7 +252,7 @@ where
     ///
     /// # Errors
     /// Reading the stream, an unsorted record, a record the store refuses,
-    /// or the reference. Any error ends the pileup: later calls return
+    /// a pile too deep for one store, or the reference. Any error ends the pileup: later calls return
     /// [`StreamPileupError::Poisoned`].
     pub fn pileups(&mut self) -> Result<Option<StreamColumn<'_, E::Extra>>, StreamPileupError> {
         if self.failed {
@@ -207,9 +278,8 @@ where
         Ok(Some((yielding.tid, yielding.engine.column(step))))
     }
 
-    // r[impl pileup_stream.window+1]
-    // r[impl pileup_stream.records]
-    // r[impl pileup_stream.sorted]
+    // r[impl pileup_stream.window+2]
+    // r[impl pileup_stream.records+1]
     /// Recycle the exhausted engine, then read records until a window
     /// closes and start an engine over it. `false` once nothing is left.
     fn next_window(&mut self) -> Result<bool, StreamPileupError> {
@@ -221,7 +291,11 @@ where
         }
         loop {
             if self.input_ended {
-                let Some(window) = self.filling.take() else { return Ok(false) };
+                let Some(window) = self.filling.take() else {
+                    // Only placed-unmapped records, if anything: no column.
+                    self.store.clear();
+                    return Ok(false);
+                };
                 let store = std::mem::take(&mut self.store);
                 let last = self.final_last(window.tid, &store);
                 self.start_engine(window.tid, store, window.start, last)?;
@@ -232,88 +306,157 @@ where
                 continue;
             }
             self.records_read = self.records_read.saturating_add(1);
-            let (Some(tid), Some(pos)) = (self.record.tid(), self.record.pos()) else {
+            let Some(tid) = self.record.tid() else { continue };
+            let mapped = !self.record.flags().is_unmapped();
+            let Some(pos) = self.record.pos() else {
+                // Checked at -1 as htslib does, then skipped: a store holds
+                // placed records only.
+                if mapped {
+                    self.check_order(tid, None)?;
+                }
                 continue;
             };
-            if let Some((previous_tid, previous_pos)) = self.last
-                && (tid, pos) < (previous_tid, previous_pos)
-            {
-                return Err(StreamPileupError::Unsorted {
-                    record: self.records_read,
-                    tid,
-                    pos,
-                    previous_tid,
-                    previous_pos,
-                });
+            // Unmapped and rejected records go into the filling store (or
+            // nowhere) without moving a window boundary.
+            if !self.push_record(tid, pos)? || !mapped {
+                continue;
             }
-            self.last = Some((tid, pos));
+            self.check_order(tid, Some(pos))?;
 
+            // The record is the filling store's last.
             let window_end = pos
                 .checked_add_offset(Offset::new(i64::from(self.window_len.get().saturating_sub(1))))
                 .unwrap_or(Pos0::MAX);
             let Some(window) = self.filling else {
                 self.filling = Some(Window { tid, start: pos, end: window_end });
-                self.push_record()?;
                 continue;
             };
-            if window.tid == tid && pos <= window.end {
-                self.push_record()?;
-                continue;
-            }
+            let same_contig = window.tid == tid;
+            // r[impl pileup_stream.budget]
+            // Only a record past the window's start can end it early: there is
+            // no boundary inside one position.
+            let end = if same_contig && pos <= window.end {
+                if pos == window.start || !self.over_budget() {
+                    continue;
+                }
+                pos.checked_sub_offset(Offset::new(1)).unwrap_or(Pos0::ZERO)
+            } else {
+                window.end
+            };
 
-            // `self.record` closes `window`: every record that can reach a
-            // position up to `window.end` (or any of a finished contig) is in
-            // `self.store`.
+            // The record closes `window`: every record that can reach a
+            // position up to `end` (or any of a finished contig) is in
+            // `self.store`. It moves to the next store, after the carried
+            // reads.
             let mut next = std::mem::take(&mut self.spare);
             next.clear();
-            let (last, start) = if window.tid == tid {
-                self.carry(&mut next, window.end)?;
-                let start = if next.is_empty() {
+            let closer = self.store.len().saturating_sub(1);
+            let start = if same_contig {
+                self.carry(&mut next, end, closer, tid)?;
+                if next.is_empty() {
                     pos
                 } else {
-                    window.end.checked_add_offset(Offset::new(1)).unwrap_or(Pos0::MAX)
-                };
-                (window.end.min(self.contig_last(window.tid)), start)
+                    end.checked_add_offset(Offset::new(1)).unwrap_or(Pos0::MAX)
+                }
             } else {
-                (self.final_last(window.tid, &self.store), pos)
+                pos
+            };
+            self.copy_into(&mut next, closer, tid)?;
+            self.store.pop_last();
+            let last = if same_contig {
+                end.min(self.contig_last(window.tid))
+            } else {
+                self.final_last(window.tid, &self.store)
             };
             let full = std::mem::replace(&mut self.store, next);
             self.filling = Some(Window { tid, start, end: window_end });
-            self.push_record()?;
             self.start_engine(window.tid, full, window.start, last)?;
             return Ok(true);
         }
     }
 
-    /// Push the record just read into the filling store, through the
-    /// customize value.
-    fn push_record(&mut self) -> Result<(), StreamPileupError> {
-        let Self { store, record, stream, customize, records_read, .. } = self;
-        store
-            .push_raw(record.as_payload(), stream.header(), customize)
-            .map_err(|source| StreamPileupError::Record { record: *records_read, source })?;
+    // r[impl pileup_stream.sorted+1]
+    /// Fail when `(tid, pos)` precedes the last checked record, as
+    /// `bam_plp_push` does; `None` is htslib's position `-1`.
+    fn check_order(&mut self, tid: Tid, pos: Option<Pos0>) -> Result<(), StreamPileupError> {
+        if let Some((previous_tid, previous_pos)) = self.last
+            && (tid, pos) < (previous_tid, previous_pos)
+        {
+            return Err(StreamPileupError::Unsorted {
+                record: self.records_read,
+                tid,
+                pos,
+                previous_tid,
+                previous_pos,
+            });
+        }
+        self.last = Some((tid, pos));
         Ok(())
     }
 
+    /// Whether the filling store has outgrown the budget.
+    fn over_budget(&self) -> bool {
+        self.store.len() > self.budget.records.get() as usize
+            || self.store.longest_slab() > self.budget.slab_len.get() as usize
+    }
+
+    /// Push the record just read, at `tid:pos`, into the filling store
+    /// through the customize value. `true` when it was kept.
+    fn push_record(&mut self, tid: Tid, pos: Pos0) -> Result<bool, StreamPileupError> {
+        let Self { store, record, stream, customize, records_read, .. } = self;
+        match store.push_raw(record.as_payload(), stream.header(), customize) {
+            Ok(kept) => Ok(kept.is_some()),
+            Err(DecodeError::SlabOverflow) => Err(StreamPileupError::PileTooDeep { tid, pos }),
+            Err(source) => Err(StreamPileupError::Record { record: *records_read, source }),
+        }
+    }
+
     // r[impl pileup_stream.carry]
-    /// Copy the records of the filling store that extend past `end` into
-    /// `next`, in store order.
-    fn carry(&self, next: &mut RecordStore<E::Extra>, end: Pos0) -> Result<(), StreamPileupError> {
-        for idx in self.store.indices() {
-            let crosses = self.store.record(idx).is_some_and(|rec| rec.end_pos > end);
+    /// Copy the records of the filling store before `closer` that extend
+    /// past `end` into `next`, in store order.
+    fn carry(
+        &self,
+        next: &mut RecordStore<E::Extra>,
+        end: Pos0,
+        closer: usize,
+        tid: Tid,
+    ) -> Result<(), StreamPileupError> {
+        for i in 0..closer {
+            let crosses = RecordIdx::from_usize(i)
+                .and_then(|idx| self.store.record(idx))
+                .is_some_and(|rec| rec.end_pos > end);
             if crosses {
-                next.copy_record_from(&self.store, idx).map_err(|source| {
-                    StreamPileupError::Record { record: self.records_read, source }
-                })?;
+                self.copy_into(next, i, tid)?;
             }
         }
+        Ok(())
+    }
+
+    /// Copy record `i` of the filling store into `next`.
+    fn copy_into(
+        &self,
+        next: &mut RecordStore<E::Extra>,
+        i: usize,
+        tid: Tid,
+    ) -> Result<(), StreamPileupError> {
+        let Some(idx) = RecordIdx::from_usize(i) else { return Ok(()) };
+        let pos = self.store.record(idx).map_or(Pos0::ZERO, |rec| rec.pos);
+        next.copy_record_from(&self.store, idx).map_err(|source| match source {
+            DecodeError::SlabOverflow => StreamPileupError::PileTooDeep { tid, pos },
+            source => StreamPileupError::Record { record: self.records_read, source },
+        })?;
         Ok(())
     }
 
     /// Where the last window of `tid` stops: the furthest end of its records,
     /// within the contig.
     fn final_last(&self, tid: Tid, store: &RecordStore<E::Extra>) -> Pos0 {
-        let furthest = store.records().map(|rec| rec.end_pos).max().unwrap_or(Pos0::ZERO);
+        let furthest = store
+            .records()
+            .filter(|rec| !rec.flags.is_unmapped())
+            .map(|rec| rec.end_pos)
+            .max()
+            .unwrap_or(Pos0::ZERO);
         furthest.min(self.contig_last(tid))
     }
 
@@ -328,7 +471,7 @@ where
             .unwrap_or(Pos0::MAX)
     }
 
-    // r[impl pileup_stream.mates]
+    // r[impl pileup_stream.mates+1]
     /// Link `store`'s mates and start an engine yielding `start..=last`.
     fn start_engine(
         &mut self,

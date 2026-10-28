@@ -20,9 +20,10 @@ use hegel::TestCase;
 use hegel::generators as gs;
 use seqair::Readers;
 use seqair::bam::pileup::{Indel, PileupColumn, PileupOp};
+use seqair::bam::record_store::{CustomizeRecordStore, FilterRawFields, RecordStore, SlimRecord};
 use seqair::fasta::IndexedFastaReader;
 use seqair::reader::{
-    AlignmentStream, DepthLimit, SegmentOptions, StreamPileup, StreamPileupError,
+    AlignmentStream, DepthLimit, SegmentOptions, StreamPileup, StreamPileupError, WindowBudget,
 };
 use seqair_types::Base;
 use std::fmt::Write as _;
@@ -316,7 +317,7 @@ fn indexed_columns(bam: &Path, fasta: &Path, depth: DepthLimit) -> Vec<Col> {
     cols
 }
 
-fn streamed_columns(mut pileup: StreamPileup) -> Vec<Col> {
+fn streamed_columns<E: CustomizeRecordStore<Extra = ()>>(mut pileup: StreamPileup<E>) -> Vec<Col> {
     let mut cols = Vec::new();
     while let Some((tid, column)) = pileup.pileups().unwrap() {
         cols.push(col(tid.as_u32(), &column));
@@ -325,17 +326,19 @@ fn streamed_columns(mut pileup: StreamPileup) -> Vec<Col> {
 }
 
 // r[verify pileup_stream.columns]
-// r[verify pileup_stream.window+1]
+// r[verify pileup_stream.window+2]
 // r[verify pileup_stream.carry]
 // r[verify pileup_stream.window_len]
-// r[verify pileup_stream.records]
-// r[verify pileup_stream.mates]
-// r[verify pileup_stream.depth_limit]
+// r[verify pileup_stream.budget]
+// r[verify pileup_stream.records+1]
+// r[verify pileup_stream.mates+1]
+// r[verify pileup_stream.depth_limit+1]
 // r[verify pileup_stream.reference]
 // r[verify pileup_stream.lending]
 /// Every column, and the set of positions, matches the indexed pileup of the
 /// same file — whatever the window length, including windows far shorter
-/// than the reads, from BAM or SAM text, with or without a depth cap.
+/// than the reads, whatever the window budget, down to one record, from BAM or
+/// SAM text, with or without a depth cap.
 #[hegel::test(test_cases = pinned::cases(60))]
 fn streaming_columns_equal_indexed_columns(tc: TestCase) {
     let lines = tc.draw(sorted_lines());
@@ -350,6 +353,14 @@ fn streaming_columns_equal_indexed_columns(tc: TestCase) {
             NonZeroU32::new(tc.draw(gs::integers().min_value(1).max_value(4))).unwrap(),
         ),
         _ => DepthLimit::Unlimited,
+    };
+    let budget = if tc.draw(gs::booleans()) {
+        let small = |tc: &TestCase, max| {
+            NonZeroU32::new(tc.draw(gs::integers::<u32>().min_value(1).max_value(max))).unwrap()
+        };
+        WindowBudget { records: small(&tc, 8), slab_len: small(&tc, 400) }
+    } else {
+        WindowBudget::default()
     };
     let from_sam = tc.draw(gs::booleans());
 
@@ -372,6 +383,7 @@ fn streaming_columns_equal_indexed_columns(tc: TestCase) {
     };
     let pileup = StreamPileup::new(stream, (), depth)
         .with_window_len(NonZeroU32::new(window).unwrap())
+        .with_window_budget(budget)
         .with_reference(IndexedFastaReader::open(&fasta).unwrap());
     let actual = streamed_columns(pileup);
 
@@ -382,27 +394,33 @@ fn streaming_columns_equal_indexed_columns(tc: TestCase) {
     }
 }
 
-// r[verify pileup_stream.sorted]
+fn is_mapped(line: &Line) -> bool {
+    let flag: u16 = line.text.split('\t').nth(1).unwrap().parse().unwrap();
+    flag & 0x4 == 0
+}
+
+// r[verify pileup_stream.sorted+1]
 // r[verify pileup_stream.errors]
-/// A record moved ahead of one that sorts before it fails with `Unsorted`
-/// at exactly the record after it, and the pileup stays failed.
+/// A mapped record moved ahead of a mapped one that sorts before it fails
+/// with `Unsorted` at exactly the record after it, and the pileup stays failed.
 #[hegel::test(test_cases = pinned::cases(100))]
 fn unsorted_input_is_a_typed_error(tc: TestCase) {
     let mut lines = tc.draw(sorted_lines());
     // Bracket the placed records with the smallest and the largest key, so
-    // the largest can always be moved in front of a smaller one.
+    // the largest can always be moved in front of a smaller mapped one.
     let last_c = CONTIGS[2].1 - 1;
     lines.insert(
         0,
-        Line { key: Some((0, 0)), text: "first\t4\tchrA\t1\t0\t*\t*\t0\t0\tA\t*".into() },
+        Line { key: Some((0, 0)), text: "first\t0\tchrA\t1\t0\t1M\t*\t0\t0\tA\t*".into() },
     );
     let placed = lines.iter().take_while(|l| l.key.is_some()).count();
     let max = Line {
         key: Some((2, last_c)),
-        text: format!("last\t4\tchrC\t{}\t0\t*\t*\t0\t0\tA\t*", last_c + 1),
+        text: format!("last\t0\tchrC\t{}\t0\t1M\t*\t0\t0\tA\t*", last_c + 1),
     };
     lines.insert(placed, max.clone());
-    let smaller: Vec<usize> = (0..=placed).filter(|&i| lines[i].key < max.key).collect();
+    let smaller: Vec<usize> =
+        (0..=placed).filter(|&i| lines[i].key < max.key && is_mapped(&lines[i])).collect();
     let at = tc.draw(gs::sampled_from(smaller));
     lines.remove(placed);
     lines.insert(at, max);
@@ -419,14 +437,125 @@ fn unsorted_input_is_a_typed_error(tc: TestCase) {
             Err(e) => break e,
         }
     };
-    let StreamPileupError::Unsorted { record, tid, previous_tid, .. } = err else {
+    let StreamPileupError::Unsorted { record, tid, previous_tid, previous_pos, .. } = err else {
         panic!("expected Unsorted, got {err:?}");
     };
     // 1-based: the moved record is number `at + 1`, the one after it fails.
     assert_eq!(record, at as u64 + 2);
     assert_eq!(previous_tid.as_u32(), 2);
+    assert_eq!(previous_pos.map(|p| p.as_u32()), Some(last_c));
     assert!(tid <= previous_tid);
     assert!(matches!(pileup.pileups(), Err(StreamPileupError::Poisoned)));
+}
+
+/// Keeps every record but secondary alignments, like a read callback that
+/// filters on flags.
+#[derive(Clone)]
+struct RejectSecondary;
+
+impl CustomizeRecordStore for RejectSecondary {
+    type Extra = ();
+    fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
+        !fields.flags.is_secondary()
+    }
+    fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
+}
+
+// r[verify pileup_stream.sorted+1]
+// r[verify pileup_stream.records+1]
+/// What `bam_plp_push` does not check, seqair does not either: unmapped
+/// records and records the customize value rejects may sit anywhere, out of
+/// order, and change no column.
+#[hegel::test(test_cases = pinned::cases(100))]
+fn unchecked_records_may_be_out_of_order(tc: TestCase) {
+    let lines = tc.draw(sorted_lines());
+    let window = tc.draw(gs::integers::<u32>().min_value(1).max_value(100));
+    let mut with_strays = lines.clone();
+    for i in 0..tc.draw(gs::integers::<usize>().min_value(1).max_value(6)) {
+        let tid = tc.draw(gs::integers::<usize>().max_value(CONTIGS.len() - 1));
+        let (name, len) = CONTIGS[tid];
+        let pos = tc.draw(gs::integers::<u32>().min_value(1).max_value(len));
+        let text = if tc.draw(gs::booleans()) {
+            format!("s{i}\t4\t{name}\t{pos}\t0\t*\t*\t0\t0\tACGT\t*")
+        } else {
+            format!("s{i}\t256\t{name}\t{pos}\t0\t4M\t*\t0\t0\tACGT\t*")
+        };
+        let at = tc.draw(gs::integers::<usize>().max_value(with_strays.len()));
+        with_strays.insert(at, Line { key: None, text });
+    }
+    let columns = |lines: &[Line]| {
+        let stream =
+            AlignmentStream::from_reader(std::io::Cursor::new(sam_text(lines).into_bytes()))
+                .unwrap();
+        streamed_columns(
+            StreamPileup::new(stream, RejectSecondary, DepthLimit::Unlimited)
+                .with_window_len(NonZeroU32::new(window).unwrap()),
+        )
+    };
+    assert_eq!(columns(&with_strays), columns(&lines));
+}
+
+// r[verify pileup_stream.budget]
+/// The budget does close windows: with ten disjoint reads and a budget of two
+/// records, or of a bases slab two reads long, no column's store holds more
+/// than two records — the third read each time closes the window instead.
+#[test]
+fn the_budget_bounds_the_window_store() {
+    let lines: Vec<Line> = (0..10)
+        .map(|i| Line {
+            key: None,
+            text: format!("r{i}\t0\tchrA\t{}\t30\t10M\t*\t0\t0\tACGTACGTAC\t*", 1 + 20 * i),
+        })
+        .collect();
+    let max_store = |budget: WindowBudget| {
+        let stream =
+            AlignmentStream::from_reader(std::io::Cursor::new(sam_text(&lines).into_bytes()))
+                .unwrap();
+        let mut pileup =
+            StreamPileup::new(stream, (), DepthLimit::Unlimited).with_window_budget(budget);
+        let mut max = 0;
+        while let Some((_, column)) = pileup.pileups().unwrap() {
+            max = max.max(column.store().len());
+        }
+        max
+    };
+    let n = |v| NonZeroU32::new(v).unwrap();
+    assert_eq!(max_store(WindowBudget::default()), 10);
+    assert_eq!(max_store(WindowBudget { records: n(2), slab_len: n(1 << 20) }), 2);
+    assert_eq!(max_store(WindowBudget { records: n(1 << 20), slab_len: n(25) }), 2);
+}
+
+// r[verify pileup_stream.budget]
+/// A pile deeper than the budget at one position cannot be split, so it grows
+/// past the budget and yields the columns an unbudgeted window yields —
+/// whether the pile opens its window or starts inside one.
+#[test]
+fn a_pile_deeper_than_the_budget_grows_past_it() {
+    for lead in [0, 3] {
+        let mut lines: Vec<Line> = (0..lead)
+            .map(|i| Line {
+                key: None,
+                text: format!("lead{i}\t0\tchrA\t10\t30\t20M\t*\t0\t0\t*\t*"),
+            })
+            .collect();
+        lines.extend((0..40).map(|i| Line {
+            key: None,
+            text: format!("pile{i}\t0\tchrA\t20\t30\t{}M\t*\t0\t0\t*\t*", 5 + i % 7),
+        }));
+        let columns = |budget: WindowBudget| {
+            let stream =
+                AlignmentStream::from_reader(std::io::Cursor::new(sam_text(&lines).into_bytes()))
+                    .unwrap();
+            let pileup =
+                StreamPileup::new(stream, (), DepthLimit::Unlimited).with_window_budget(budget);
+            streamed_columns(pileup)
+        };
+        let three = NonZeroU32::new(3).unwrap();
+        let tiny = WindowBudget { records: three, slab_len: NonZeroU32::new(1 << 20).unwrap() };
+        let expected = columns(WindowBudget::default());
+        assert_eq!(expected.iter().map(|c| c.depth).max(), Some(40 + lead));
+        assert_eq!(columns(tiny), expected, "lead {lead}");
+    }
 }
 
 /// `(contig, 1-based position, depth)` per line of `samtools mpileup`.
