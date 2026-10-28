@@ -30,6 +30,7 @@ pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos0> {
     use seqair_types::Offset;
 
     let h = parse_header(raw).ok()?;
+    let pos = h.pos?;
     // All bounds ≤ qual_end ≤ raw.len() checked by parse_header
     debug_assert!(h.cigar_end <= raw.len(), "cigar overrun: {} > {}", h.cigar_end, raw.len());
     #[allow(clippy::indexing_slicing, reason = "cigar_end ≤ raw.len() checked by parse_header")]
@@ -54,9 +55,9 @@ pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos0> {
         }
     }
     if ref_len == 0 {
-        Some(h.pos)
+        Some(pos)
     } else {
-        h.pos.checked_add_offset(Offset::new(ref_len.checked_sub(1)?))
+        pos.checked_add_offset(Offset::new(ref_len.checked_sub(1)?))
     }
 }
 
@@ -101,7 +102,8 @@ pub(crate) fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
 pub(crate) struct ParsedHeader {
     /// Checked against the header by [`WireRefs::resolve`].
     pub refs: WireRefs,
-    pub pos: Pos0,
+    /// `None` for BAM's `-1` (unplaced); every other negative value is an error.
+    pub pos: Option<Pos0>,
     pub mapq: MappingQuality,
     pub flags: BamFlags,
     pub n_cigar_ops: u16,
@@ -175,9 +177,11 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     }
 
     debug_assert!(raw.len() >= 32, "raw record too short for fixed fields: {}", raw.len());
-    let pos_i32 = i32::from_le_bytes(read4(raw, 4));
-    let pos =
-        Pos0::try_from(pos_i32).map_err(|_| DecodeError::InvalidPosition { value: pos_i32 })?;
+    // r[impl bam.record.unplaced_pos]
+    let pos = match i32::from_le_bytes(read4(raw, 4)) {
+        -1 => None,
+        p => Some(Pos0::try_from(p).map_err(|_| DecodeError::InvalidPosition { value: p })?),
+    };
     // raw.len() >= 32, so raw[8] and raw[9] are in bounds
     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
     let name_len = raw[8] as usize;

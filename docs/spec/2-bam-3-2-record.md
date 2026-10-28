@@ -28,6 +28,9 @@ r[bam.record.ref_ids]
 r[bam.record.mate_fields+2]
 The decoder MUST also extract the three mate fields, together as a `MateFields` — `tid` (BAM `next_refID`; `Option<Tid>`, `None` for the wire `-1`), `pos` (`next_pos`; `Option<Pos0>`, `None` for the wire `-1`), both checked per r[`bam.record.ref_ids`], and `template_len` (`tlen`; `Option<NonZeroI32>`, signed, `None` for the wire `0`) — and MUST store them verbatim. It MUST NOT recompute TLEN from the alignment, and MUST NOT normalise `next_ref_id`/`next_pos` against the record's own placement. TLEN has no single producer-independent definition: `samtools fixmate` writes the signed distance between the two fragments' 5' ends (the leftmost base of a forward fragment, one past the rightmost base of a reverse one), while htslib's CRAM mate-chain reconstruction (see r[`cram.record.mate_tlen_reconstruction`]) writes the leftmost-to-rightmost span of the whole template. The two disagree whenever one fragment contains the other, so a reader that recomputed either would silently rewrite files produced by the other.
 
+r[bam.record.unplaced_pos]
+A position of `-1` MUST decode as "unplaced" (`None`), not as an error: BAM writes `-1` for an unplaced record. Any other negative position MUST fail with `DecodeError::InvalidPosition`. Consumers that need a placed record — the `RecordStore`, which feeds region queries and pileups — MUST reject an unplaced one with `DecodeError::InvalidPosition { value: -1 }`.
+
 r[bam.record.end_pos]
 The decoder MUST precompute the reference end position from the CIGAR. Reference-consuming operations are: M(0), D(2), N(3), =(7), X(8). The end position is `pos + ref_consumed - 1` (inclusive).
 
