@@ -12,6 +12,7 @@ mod indexed;
 mod readers;
 mod resolve;
 mod segment;
+mod stream;
 
 #[cfg(feature = "fuzz")]
 mod fuzz;
@@ -23,6 +24,7 @@ pub use indexed::{FetchCounts, IndexPath, IndexedReader};
 pub use readers::{Pileup, Readers};
 pub use resolve::{ResolveTid, Tid, TidError};
 pub use segment::{IntoSegmentTarget, Segment, SegmentOptions, SegmentOptionsError, Segments};
+pub use stream::{AlignmentStream, AlignmentStreamBuilder, AlignmentStreamError, StreamFormat};
 
 #[cfg(feature = "fuzz")]
 pub use fuzz::FuzzReaders;

@@ -90,6 +90,13 @@ impl<R: Read> BamStreamReader<R> {
         Ok(Self { stream, header, records: 0, failed: false })
     }
 
+    /// Read the header from a stream whose `BAM\1` magic the caller has
+    /// already read and checked (format sniffing).
+    pub(crate) fn after_magic(mut stream: BgzfStream<R>) -> Result<Self, BamStreamError> {
+        let header = BamHeader::parse_after_magic(&mut stream)?;
+        Ok(Self { stream, header, records: 0, failed: false })
+    }
+
     /// The header read when the stream was opened.
     pub fn header(&self) -> &BamHeader {
         &self.header

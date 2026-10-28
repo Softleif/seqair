@@ -1,6 +1,7 @@
 //! SAM reading. [`reader::IndexedSamReader`] fetches records of a
 //! bgzf-compressed, indexed SAM into a [`crate::bam::RecordStore`];
-//! [`SamRecordEncoder`] turns one SAM line
+//! [`stream::SamStreamReader`] reads any SAM front to back as
+//! [`crate::bam::RawBamRecord`]s; [`SamRecordEncoder`] turns one SAM line
 //! into a BAM record as htslib does, and [`format::format_sam_record`] turns
 //! one back into SAM text as htslib does.
 

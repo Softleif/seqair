@@ -56,6 +56,9 @@ pub struct Target {
     pub length: u64,
 }
 
+/// The four bytes a decompressed BAM file starts with.
+pub(crate) const BAM_MAGIC: [u8; 4] = *b"BAM\x01";
+
 // r[impl io.errors]
 // r[impl io.errors.typed_variants]
 #[non_exhaustive]
@@ -131,13 +134,17 @@ impl BamHeader {
     }
 
     pub(crate) fn parse_inner(bgzf: &mut impl BgzfRead) -> Result<Self, BamHeaderError> {
-        // Magic: BAM\1
         let mut magic = [0u8; 4];
         bgzf.fill_exact(&mut magic)?;
-        if magic != *b"BAM\x01" {
+        if magic != BAM_MAGIC {
             return Err(BamHeaderError::InvalidMagic);
         }
+        Self::parse_after_magic(bgzf)
+    }
 
+    /// The header after its `BAM\1` magic, for a caller that has read (and
+    /// checked) the magic itself while sniffing the format.
+    pub(crate) fn parse_after_magic(bgzf: &mut impl BgzfRead) -> Result<Self, BamHeaderError> {
         // r[impl bam.header.non_negative_lengths]
         // Header text
         let l_text_raw = bgzf.read_le_i32()?;
