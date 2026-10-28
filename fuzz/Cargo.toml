@@ -181,6 +181,18 @@ name = "fuzz_bgzf"
 path = "fuzz_targets/fuzz_bgzf.rs"
 doc = false
 
+# BgzfStream: front-to-back decoding, serial vs worker threads
+[[bin]]
+name = "fuzz_bgzf_stream"
+path = "fuzz_targets/fuzz_bgzf_stream.rs"
+doc = false
+
+# BamStreamReader → RawBamRecord accessors → write_raw round trip
+[[bin]]
+name = "fuzz_bam_stream"
+path = "fuzz_targets/fuzz_bam_stream.rs"
+doc = false
+
 # Full-stack: BAM records → RecordStore → PileupEngine → column iteration
 [[bin]]
 name = "fuzz_pileup_full"
