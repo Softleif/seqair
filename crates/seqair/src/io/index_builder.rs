@@ -32,16 +32,21 @@ pub enum IndexError {
 
     #[error("index field `{field}` count {value} exceeds i32 limit")]
     CountOverflow { field: &'static str, value: usize },
+
+    // r[impl index_builder.no_coor]
+    /// A placed record came after an unplaced one: unplaced records (no
+    /// reference) must all come at the end, as in a coordinate-sorted file.
+    #[error("record on tid={tid} follows a record with no reference")]
+    PlacedAfterUnplaced { tid: u32 },
 }
 
 /// Per-reference accumulated index data.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RefIndexBuilder {
     bins: BTreeMap<u32, Vec<IndexChunk>>,
     linear_index: Vec<VirtualOffset>,
     // Pseudo-bin metadata
     off_beg: VirtualOffset,
-    off_end: VirtualOffset,
     n_mapped: u64,
     n_unmapped: u64,
 }
@@ -52,7 +57,6 @@ impl RefIndexBuilder {
             bins: BTreeMap::new(),
             linear_index: Vec::new(),
             off_beg: VirtualOffset(u64::MAX),
-            off_end: VirtualOffset(0),
             n_mapped: 0,
             n_unmapped: 0,
         }
@@ -84,6 +88,8 @@ pub struct IndexBuilder {
     last_tid: Option<u32>,
     save_tid: Option<u32>,
     last_coor: u64,
+    /// Records with no reference, after every placed one (htslib's `n_no_coor`).
+    n_no_coor: u64,
     finished: bool,
 }
 
@@ -112,6 +118,7 @@ impl IndexBuilder {
             last_tid: None,
             save_tid: None,
             last_coor: 0,
+            n_no_coor: 0,
             finished: false,
         }
     }
@@ -196,6 +203,9 @@ impl IndexBuilder {
         end: u64,
         offset: VirtualOffset,
     ) -> Result<(), IndexError> {
+        if self.n_no_coor > 0 {
+            return Err(IndexError::PlacedAfterUnplaced { tid });
+        }
         // Validate sort order
         if let Some(last_tid) = self.last_tid
             && (tid < last_tid || (tid == last_tid && beg < self.last_coor))
@@ -249,7 +259,6 @@ impl IndexBuilder {
             if r.off_beg.0 == u64::MAX {
                 r.off_beg = self.last_off;
             }
-            r.off_end = offset;
         }
 
         self.last_bin = bin;
@@ -279,6 +288,34 @@ impl IndexBuilder {
         Ok(())
     }
 
+    // r[impl index_builder.amend_last]
+    /// Rename the position after the last record: a writer that has just
+    /// started a new block passes the block's start, `(block, 0)`, for what it
+    /// pushed as the end of the previous one, `(block - 1, len)`. Both name the
+    /// same byte; htslib's writer (`hts_idx_amend_last`) and reader name it the
+    /// new block's way, so this keeps the index byte-identical to theirs.
+    pub fn amend_last(&mut self, offset: VirtualOffset) {
+        self.last_off = offset;
+    }
+
+    // r[impl index_builder.no_coor]
+    /// Register a record with no reference (an unplaced, unmapped record),
+    /// written just before `offset`. Such records come after every placed
+    /// one; the first closes the last reference's chunk and pseudo-bin, as
+    /// htslib's `hts_idx_push` does on its change of reference to `-1`, so
+    /// neither stretches over them. They are counted for BAI's `n_no_coor`.
+    pub fn push_no_coor(&mut self, offset: VirtualOffset) {
+        if self.n_no_coor == 0 {
+            if self.save_bin != u32::MAX {
+                self.flush_chunk();
+            }
+            self.flush_pseudo_bin();
+            self.save_bin = u32::MAX;
+        }
+        self.n_no_coor = self.n_no_coor.saturating_add(1);
+        self.last_off = offset;
+    }
+
     fn flush_chunk(&mut self) {
         let Some(save_tid) = self.save_tid else { return };
         if self.save_bin == u32::MAX {
@@ -296,8 +333,8 @@ impl IndexBuilder {
         let pseudo_bin_id = pseudo_bin(self.depth);
         if let Some(r) = self.refs.get_mut(last_tid as usize) {
             let chunks = vec![
-                // Chunk 0: virtual offset range
-                IndexChunk { begin: r.off_beg, end: r.off_end },
+                // Chunk 0: virtual offset range, to the end of the last record
+                IndexChunk { begin: r.off_beg, end: self.last_off },
                 // Chunk 1: mapped/unmapped counts packed as virtual offsets
                 IndexChunk { begin: VirtualOffset(r.n_mapped), end: VirtualOffset(r.n_unmapped) },
             ];
@@ -308,11 +345,15 @@ impl IndexBuilder {
     // r[impl index_builder.linear_backfill]
     /// Finalize the index after all records have been written.
     pub fn finish(&mut self, final_offset: VirtualOffset) -> Result<(), IndexError> {
-        self.last_off = final_offset;
-        if self.save_bin != u32::MAX {
-            self.flush_chunk();
+        // After records with no reference, the last reference was closed
+        // when the first of them came (`push_no_coor`).
+        if self.n_no_coor == 0 {
+            self.last_off = final_offset;
+            if self.save_bin != u32::MAX {
+                self.flush_chunk();
+            }
+            self.flush_pseudo_bin();
         }
-        self.flush_pseudo_bin();
 
         // Backfill linear index gaps (right-to-left propagation)
         for r in &mut self.refs {
@@ -351,7 +392,6 @@ impl IndexBuilder {
             }
             r.linear_index.iter_mut().for_each(&mut map);
             map(&mut r.off_beg);
-            map(&mut r.off_end);
         }
         map(&mut self.last_off);
         map(&mut self.save_off);
@@ -436,7 +476,10 @@ impl IndexBuilder {
         // Per-reference data: include all refs, even empty ones
         for tid in 0..n_refs {
             match self.refs.get(tid) {
-                Some(r) if !r.bins.is_empty() => write_ref_index(&mut buf, r)?,
+                Some(r) if !r.bins.is_empty() => {
+                    let bins = compress_bins(&r.bins, self.depth);
+                    write_ref_index(&mut buf, &RefIndexBuilder { bins, ..r.clone() })?;
+                }
                 _ => {
                     // Empty ref: n_bin=0, n_intv=0
                     write_i32(&mut buf, 0); // n_bin
@@ -444,6 +487,9 @@ impl IndexBuilder {
                 }
             }
         }
+        // r[impl index_builder.no_coor]
+        // Optional in the format, but htslib always writes it.
+        buf.extend_from_slice(&self.n_no_coor.to_le_bytes());
 
         writer.write_all(&buf).map_err(IndexError::Io)?;
         Ok(())
@@ -707,6 +753,66 @@ fn backfill_linear_index(linear: &mut [VirtualOffset]) {
             last_valid = *slot;
         }
     }
+}
+
+// r[impl index_builder.compress_bins]
+/// htslib's `compress_binning` (`hts_idx_finish`): from the deepest level up,
+/// a bin whose chunks lie within one 64 KiB stretch of compressed file
+/// (`HTS_MIN_MARKER_DIST`) moves them into its parent bin, if that exists;
+/// then each bin's chunks that touch or overlap at block granularity are
+/// merged. The pseudo-bin is left alone. Order of bins within a level does not
+/// change the result: a child small enough to move moves the moment its parent
+/// is seen to exist, and no bin is ever created.
+fn compress_bins(
+    bins: &BTreeMap<u32, Vec<IndexChunk>>,
+    depth: u32,
+) -> BTreeMap<u32, Vec<IndexChunk>> {
+    const MIN_MARKER_DIST: u64 = 0x10000;
+    let block = |v: VirtualOffset| v.0 >> 16;
+    // Bins below this are real; the pseudo-bin and anything past it are not.
+    let n_bins = first_bin_of_level(depth.saturating_add(1));
+    let mut bins = bins.clone();
+    for level in (1..=depth).rev() {
+        let first = first_bin_of_level(level);
+        let keys: Vec<u32> =
+            bins.keys().copied().filter(|&k| (first..n_bins).contains(&u64::from(k))).collect();
+        for key in keys {
+            let Some(chunks) = bins.get_mut(&key) else { continue };
+            if level < depth {
+                chunks.sort_by_key(|c| c.begin);
+            }
+            let (Some(head), Some(tail)) = (chunks.first(), chunks.last()) else { continue };
+            let parent = key.saturating_sub(1) >> 3;
+            if block(tail.end).saturating_sub(block(head.begin)) < MIN_MARKER_DIST
+                && bins.contains_key(&parent)
+                && let Some(moved) = bins.remove(&key)
+                && let Some(into) = bins.get_mut(&parent)
+            {
+                into.extend(moved);
+            }
+        }
+    }
+    if let Some(chunks) = bins.get_mut(&0) {
+        chunks.sort_by_key(|c| c.begin);
+    }
+    for (_, chunks) in bins.iter_mut().filter(|(k, _)| u64::from(**k) < n_bins) {
+        let mut merged: Vec<IndexChunk> = Vec::with_capacity(chunks.len());
+        for chunk in chunks.drain(..) {
+            match merged.last_mut() {
+                Some(last) if block(last.end) >= block(chunk.begin) => {
+                    last.end = last.end.max(chunk.end);
+                }
+                _ => merged.push(chunk),
+            }
+        }
+        *chunks = merged;
+    }
+    bins
+}
+
+/// The first bin of `level` (0 = the whole reference): `(8^level - 1) / 7`.
+fn first_bin_of_level(level: u32) -> u64 {
+    (1u64 << level.saturating_mul(3)).saturating_sub(1) / 7
 }
 
 fn write_i32(buf: &mut Vec<u8>, val: i32) {

@@ -53,6 +53,15 @@ Adding `write_bai()` to the existing IndexBuilder enables BAM index co-productio
 r[index_builder.bai_format]
 BAI output MUST be uncompressed (not BGZF-wrapped) with magic `BAI\x01` (0x42, 0x41, 0x49, 0x01), followed by: n_ref (i32 LE, always equal to the total number of reference sequences in the BAM header), then per-reference: n_bin (i32 LE), for each bin: bin_id (u32 LE) + n_chunk (i32 LE) + chunks (begin/end as u64 LE virtual offsets), then n_intv (i32 LE) + linear index entries (u64 LE virtual offsets). This is the same bin/chunk/linear data as TBI but without BGZF compression, without the TBI column config header, and with a different magic.
 
+r[index_builder.amend_last]
+A position at the end of a block has two names: `(block, len)` and the next block's `(next, 0)`. htslib's reader and writer use the second wherever a block ends between two records — its writer calls `hts_idx_amend_last` after starting a new block, and flushes before `hts_idx_finish` — so `amend_last(offset)` MUST replace the position after the last record, and the BAM writer MUST call it after `flush_if_needed` (which may start a block) and before each record, and MUST end the last block before `finish`. The pseudo-bin's first chunk MUST end at that (possibly amended) position. With this, a BAI the writer co-produces is byte-identical to `samtools index`'s.
+
+r[index_builder.no_coor]
+Records with no reference (unplaced, unmapped) MUST be registered with `push_no_coor(offset)` and MUST come after every placed record; a placed record pushed after one MUST fail with `IndexError::PlacedAfterUnplaced`. The first one MUST close the last reference's chunk and pseudo-bin at the offset after the last placed record, as htslib's `hts_idx_push` does when the reference changes to `-1` — otherwise `finish` would stretch them over the unplaced records. `write_bai` MUST end with their count as `uint64_t n_no_coor` (`r[index.unplaced_unmapped]`), which htslib always writes and `samtools idxstats` reports as its `*` line.
+
+r[index_builder.compress_bins]
+`write_bai` MUST write the bins htslib's `compress_binning` leaves: from the deepest level up, a bin whose chunks span less than 64 KiB of compressed file (`HTS_MIN_MARKER_DIST`, compared on the block parts of the offsets) moves its chunks into its parent bin when that bin exists; then, in every bin but the pseudo-bin, chunks that start in the block where the previous one ends (or earlier) are merged. Bin order in the file stays ascending (`BTreeMap`); htslib writes its hash table's order, which readers ignore.
+
 r[index_builder.bai_all_refs]
 Unlike TBI (`r[index_builder.tbi_empty_refs]`), BAI output MUST include an entry for every reference sequence in the header, even those with no records. References with no records MUST be written with n_bin=0 and n_intv=0. This matches samtools index behavior and is required because BAI uses tid as a positional index — the reader looks up the Nth entry by seeking past the first N entries, so gaps would cause tid/entry misalignment.
 
