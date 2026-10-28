@@ -31,3 +31,6 @@ r[bam.stream]
 
 r[bam.stream.framing]
 Each record is a little-endian `i32` `block_size` and that many bytes. Zero bytes where a record would start MUST be the end of the stream. A `block_size` below 32 or above the record size limit (`r[bam.record.max_size]`) MUST fail with `BamStreamError::RecordSizeOutOfRange`; input that ends inside a `block_size` or a payload MUST fail with `BamStreamError::TruncatedRecord`. Both leave the stream misaligned, so every later read MUST fail with `BamStreamError::Poisoned`. A record whose bytes are framed correctly but fail validation (`r[bam.raw_record.validation]`) MUST fail with `BamStreamError::InvalidRecord`, carrying its 1-based record number and the `DecodeError`, and the stream MUST stay usable: the next read returns the next record.
+
+r[bam.stream.payloads]
+`read_payload_into` MUST frame the next record exactly as `read_record` does (`r[bam.stream.framing]`) but append its payload bytes unvalidated, so a caller can validate on other threads (`RawBamRecord::from_payload`). Any error MUST end the stream (`BamStreamError::Poisoned` afterwards) and leave the caller's buffer as it was.
