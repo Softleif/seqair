@@ -228,6 +228,19 @@ impl BamHeader {
     /// Returns an error if no `@SQ` lines are found.
     #[instrument(level = "debug", skip(text), fields(text_len = text.len()))]
     pub fn from_sam_text(text: &str) -> Result<Self, BamHeaderError> {
+        let header = Self::from_sam_text_allow_no_targets(text)?;
+        if header.targets.is_empty() {
+            return Err(BamHeaderError::NoSequences);
+        }
+        Ok(header)
+    }
+
+    // r[impl sam.stream.header]
+    /// [`Self::from_sam_text`] without its requirement of at least one `@SQ`
+    /// line: a SAM whose records are all unplaced needs none, and streaming
+    /// (`SamStreamReader`) must accept it. Indexed readers need targets and
+    /// use [`Self::from_sam_text`].
+    pub fn from_sam_text_allow_no_targets(text: &str) -> Result<Self, BamHeaderError> {
         let mut targets = Vec::new();
         let mut name_to_tid = HashMap::new();
 
@@ -258,10 +271,6 @@ impl BamHeader {
                     return Err(BamHeaderError::MissingLn { line: line.to_string() });
                 }
             }
-        }
-
-        if targets.is_empty() {
-            return Err(BamHeaderError::NoSequences);
         }
 
         Ok(BamHeader { header_text: text.to_string(), targets, name_to_tid })
