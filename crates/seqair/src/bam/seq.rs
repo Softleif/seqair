@@ -9,7 +9,7 @@ use fearless_simd_macros::simd;
 // r[impl seq.decode_pair_table]
 // r[impl seq.decode_simd+2]
 // r[impl seq.decode_dispatch+2]
-// r[impl seq.encode_scalar]
+// r[impl seq.encode_scalar+2]
 // r[impl seq.simd_scalar_equivalence]
 // r[impl io.platform_optimizations]
 
@@ -29,34 +29,41 @@ static DECODE_PAIR: [[u8; 2]; 256] = {
     table
 };
 
-/// ASCII → 4-bit encoding table. Unknown characters map to 15 (N).
-#[allow(
-    clippy::indexing_slicing,
-    reason = "all indices are ASCII byte literals < 256 = table.len()"
-)]
+/// ASCII → 4-bit encoding table: htslib's `seq_nt16_table`, so SAM text
+/// encodes exactly as htslib encodes it. Unknown characters map to 15 (N).
+#[allow(clippy::indexing_slicing, reason = "const indices: i < 16 = codes.len(), bytes < 256")]
 static ENCODE_BASE: [u8; 256] = {
     let mut table = [15u8; 256];
-    table[b'=' as usize] = 0;
-    table[b'A' as usize] = 1;
-    table[b'a' as usize] = 1;
-    table[b'C' as usize] = 2;
-    table[b'c' as usize] = 2;
-    table[b'M' as usize] = 3;
-    table[b'G' as usize] = 4;
-    table[b'g' as usize] = 4;
-    table[b'R' as usize] = 5;
-    table[b'S' as usize] = 6;
-    table[b'V' as usize] = 7;
-    table[b'T' as usize] = 8;
-    table[b't' as usize] = 8;
-    table[b'W' as usize] = 9;
-    table[b'Y' as usize] = 10;
-    table[b'H' as usize] = 11;
-    table[b'K' as usize] = 12;
-    table[b'D' as usize] = 13;
-    table[b'B' as usize] = 14;
-    table[b'N' as usize] = 15;
-    table[b'n' as usize] = 15;
+    let codes: [(u8, u8); 16] = [
+        (b'=', 0),
+        (b'A', 1),
+        (b'C', 2),
+        (b'M', 3),
+        (b'G', 4),
+        (b'R', 5),
+        (b'S', 6),
+        (b'V', 7),
+        (b'T', 8),
+        (b'U', 8),
+        (b'W', 9),
+        (b'Y', 10),
+        (b'H', 11),
+        (b'K', 12),
+        (b'D', 13),
+        (b'B', 14),
+    ];
+    let mut i = 0;
+    while i < codes.len() {
+        let (upper, code) = codes[i];
+        table[upper as usize] = code;
+        table[upper.to_ascii_lowercase() as usize] = code;
+        i += 1;
+    }
+    // Colour-space digits, as htslib maps them.
+    table[b'0' as usize] = 1;
+    table[b'1' as usize] = 2;
+    table[b'2' as usize] = 4;
+    table[b'3' as usize] = 8;
     table
 };
 
