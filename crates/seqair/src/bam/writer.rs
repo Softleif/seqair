@@ -264,9 +264,16 @@ impl<W: Write> BamWriter<W> {
         // qname.len() + 1 fits in u8 since qname.len() ≤ 254 (validated above).
         let l_read_name = (qname.len() as u8).saturating_add(1);
 
-        // Compute BAI bin from pos and end_pos
+        // r[impl bam_writer.store_record_bin]
+        // `end_pos` is the last covered base (`r[bam.record.end_pos]`); BAI
+        // wants the exclusive end, and htslib bins an unmapped record as one
+        // base wide.
         let beg = rec.pos.as_u64();
-        let end = rec.end_pos.as_u64().max(beg.saturating_add(1));
+        let end = if rec.flags.is_unmapped() {
+            beg.saturating_add(1)
+        } else {
+            rec.end_pos.as_u64().saturating_add(1)
+        };
         let bin = crate::io::reg2bin(beg, end, 14, 5) as u16;
 
         self.buf.clear();
@@ -306,10 +313,7 @@ impl<W: Write> BamWriter<W> {
         // Aux tags (raw BAM bytes)
         self.buf.extend_from_slice(aux);
 
-        let tid = rec.tid;
-        let is_unmapped = rec.flags.is_unmapped();
-        let end_pos = rec.end_pos.as_u64();
-        self.finalize_record(tid, is_unmapped, beg, end_pos)
+        self.finalize_record(rec.tid, rec.flags.is_unmapped(), beg, end)
     }
 
     // r[impl bam_writer.finish]
