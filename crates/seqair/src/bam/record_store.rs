@@ -97,6 +97,7 @@ fn fold_mul(a: u64, k: u64) -> u64 {
 /// Compact BAM record with offsets into the store's slabs.
 // r[impl record_store.push_raw+2]
 // r[impl record_store.slim_record_fields]
+#[derive(Clone)]
 pub struct SlimRecord {
     /// 0-based leftmost aligned reference position.
     pub pos: Pos0,
@@ -514,6 +515,48 @@ impl<U> RecordStore<U> {
             aux: Vec::with_capacity(aux_est),
             extras: Vec::with_capacity(record_count_est),
         }
+    }
+}
+
+impl<U: Clone> RecordStore<U> {
+    // r[impl record_store.copy_from]
+    /// Append a copy of `src`'s record `idx` — fields, slab bytes and a clone
+    /// of its extra — without decoding it or running any customize hook.
+    /// `Ok(None)` when `src` has no record `idx`.
+    ///
+    /// # Errors
+    /// [`DecodeError::SlabOverflow`] when an offset in this store no longer
+    /// fits `u32`.
+    pub fn copy_record_from(
+        &mut self,
+        src: &RecordStore<U>,
+        idx: RecordIdx,
+    ) -> Result<Option<RecordIdx>, DecodeError> {
+        let Some(rec) = src.records.get(idx.as_usize()) else { return Ok(None) };
+        let Some(extra) = src.extras.get(rec.extras_idx as usize) else { return Ok(None) };
+        let new_idx = RecordIdx::from_usize(self.records.len()).ok_or(DecodeError::SlabOverflow)?;
+        let offset = |len: usize| u32::try_from(len).map_err(|_| DecodeError::SlabOverflow);
+        let copy = SlimRecord {
+            name_off: offset(self.names.len())?,
+            bases_off: offset(self.bases.len())?,
+            cigar_off: offset(self.cigar.len())?,
+            qual_off: offset(self.qual.len())?,
+            aux_off: offset(self.aux.len())?,
+            extras_idx: new_idx.get(),
+            mate_idx: None,
+            ..rec.clone()
+        };
+        // Every offset is taken before any slab grows, so an error above
+        // leaves this store untouched.
+        self.names.extend_from_slice(src.qname_of(rec));
+        self.bases.extend_from_slice(src.seq_of(rec));
+        self.cigar.extend_from_slice(src.cigar_of(rec));
+        self.qual.extend(src.qual_of(rec).iter().map(|q| q.as_byte()));
+        self.aux.extend_from_slice(src.aux_of(rec));
+        self.extras.push(extra.clone());
+        self.note_push(copy.pos);
+        self.records.push(copy);
+        Ok(Some(new_idx))
     }
 }
 
@@ -3454,6 +3497,45 @@ pub(crate) mod tests {
             let mut forced_keep = input.clone();
             forced_keep.accept = true;
             push_raw_one(store, &forced_keep).expect("accept=true always yields Some")
+        }
+
+        // r[verify record_store.copy_from]
+        /// Copying records out of one store leaves the destination exactly as
+        /// pushing those records into it would: the same slab bytes and the
+        /// same fixed fields. The destination already holds records, so the
+        /// copies' offsets have to be rebased rather than carried over.
+        #[hegel::test]
+        fn copying_records_equals_pushing_them(tc: TestCase) {
+            let inputs = tc.draw(gs::vecs(arb_raw_input().print_as_debug()).max_size(30));
+            let prefix = tc.draw(gs::vecs(arb_raw_input().print_as_debug()).max_size(5));
+            let mut src = RecordStore::new();
+            let src_idx: Vec<RecordIdx> =
+                inputs.iter().map(|i| push_raw_kept(&mut src, i)).collect();
+
+            let mut copied = RecordStore::new();
+            let mut pushed = RecordStore::new();
+            for input in &prefix {
+                push_raw_kept(&mut copied, input);
+                push_raw_kept(&mut pushed, input);
+            }
+            for (input, &idx) in inputs.iter().zip(&src_idx).filter(|(i, _)| i.accept) {
+                let new = copied.copy_record_from(&src, idx).expect("fits").expect("exists");
+                assert_eq!(new, push_raw_kept(&mut pushed, input));
+            }
+
+            assert_eq!(dump_slabs(&copied), dump_slabs(&pushed), "slab bytes");
+            for (a, b) in copied.records().zip(pushed.records()) {
+                assert_eq!(
+                    (a.pos, a.end_pos, a.flags, a.mapq, a.seq_len, a.qname_hash, a.mate_idx),
+                    (b.pos, b.end_pos, b.flags, b.mapq, b.seq_len, b.qname_hash, b.mate_idx),
+                );
+                assert_eq!(copied.qname_of(a), pushed.qname_of(b));
+                assert_eq!(copied.cigar_of(a), pushed.cigar_of(b));
+                assert_eq!(copied.seq_of(a), pushed.seq_of(b));
+                assert_eq!(copied.qual_of(a), pushed.qual_of(b));
+                assert_eq!(copied.aux_of(a), pushed.aux_of(b));
+            }
+            assert_eq!(copied.order, pushed.order);
         }
 
         // r[verify record_store.filter_raw]
