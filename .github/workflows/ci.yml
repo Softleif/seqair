@@ -91,6 +91,15 @@ jobs:
         id: test
         continue-on-error: true
         run: cargo nextest run --locked --workspace --profile ci
+      # nextest writes this per `[profile.ci.junit]`; failures and their
+      # output land in the job summary instead of 3000 lines into the log.
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          annotate_only: true
+          detailed_summary: true
       # nextest does not run doctests.
       - name: Doctests
         id: doctest
