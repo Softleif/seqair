@@ -79,7 +79,7 @@ fn snapshot_store(store: &RecordStore) -> Vec<RecordSnapshot> {
 
 // r[verify sam.reader.open]
 // r[verify sam.reader.fetch_into]
-// r[verify sam.reader.overlap_filter+3]
+// r[verify sam.reader.overlap_filter+4]
 // r[verify sam.perf.bulk_read]
 #[test]
 fn sam_gz_record_count_matches_bam() {
@@ -240,4 +240,40 @@ fn sam_gz_header_matches_bam() {
         assert_eq!(bam_header.target_name(bam_tid), sam_header.target_name(sam_tid));
         assert_eq!(bam_header.target_len(bam_tid), sam_header.target_len(sam_tid));
     }
+}
+
+/// `text` bgzipped and indexed by `tabix -p sam` in `dir`.
+fn indexed_sam_gz(dir: &Path, text: &str) -> std::path::PathBuf {
+    let sam = dir.join("x.sam");
+    std::fs::write(&sam, text).unwrap();
+    let status = Command::new("bgzip").arg(&sam).status().expect("bgzip not found");
+    assert!(status.success(), "bgzip failed");
+    let sam_gz = dir.join("x.sam.gz");
+    let status =
+        Command::new("tabix").args(["-p", "sam"]).arg(&sam_gz).status().expect("tabix not found");
+    assert!(status.success(), "tabix failed");
+    sam_gz
+}
+
+// r[verify sam.reader.overlap_filter+4]
+// r[verify record_store.end_pos_htslib]
+/// A placed-unmapped read with a stale `2M` CIGAR sits at its POS alone, as
+/// it does in BAM: it used to be fetched by a query over the base after it,
+/// and stored with `end_pos` one past `pos`.
+#[test]
+fn a_placed_unmapped_read_ignores_its_cigar() {
+    let dir = TempDir::new().unwrap();
+    let sam_gz =
+        indexed_sam_gz(dir.path(), "@SQ\tSN:c\tLN:1000\nr\t4\tc\t1\t0\t2M\t*\t0\t0\tAC\t*\n");
+    let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz).unwrap();
+    let tid = reader.header().tid("c").unwrap();
+    let mut store = RecordStore::new();
+    let at = |p: u32| Pos0::new(p).unwrap();
+
+    reader.fetch_into(tid, (at(1)..=at(1)).into(), &mut store).unwrap();
+    assert_eq!(store.len(), 0);
+    reader.fetch_into(tid, (at(0)..=at(0)).into(), &mut store).unwrap();
+    let snapshot = snapshot_store(&store);
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!((snapshot[0].pos, snapshot[0].end_pos), (0, 0));
 }
