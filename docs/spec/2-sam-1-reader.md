@@ -65,8 +65,10 @@ RNEXT `*` MUST give no mate reference, `=` the record's own, and any other name 
 r[sam.record.coordinate_conversion]
 SAM POS is 1-based; the internal representation is 0-based (matching BAM). The parser MUST subtract 1 from POS. A POS of 0 in SAM means unmapped — after subtraction this becomes -1 (as i64). All records (including unmapped) flow through to the `filter_raw` customizer; the pileup engine is responsible for excluding unmapped reads per `r[pileup.unmapped_excluded]`.
 
-r[sam.record.cigar_parse]
-The CIGAR string MUST be parsed into a `Vec<CigarOp>`. Each `CigarOp` wraps the BAM packed `u32` (`(length << 4) | op_code`), with op_codes M=0, I=1, D=2, N=3, S=4, H=5, P=6, =7, X=8. Unknown op characters MUST produce a typed parse error (this is stricter than BAM ingest, which tolerates reserved op codes via `CigarOpType::Unknown` per `r[io.typed_cigar_ops]`, because in SAM the lexical character is the only signal). The string `*` means CIGAR unavailable (0 operations, and end_pos = pos).
+r[sam.record.cigar_parse+2]
+The CIGAR string MUST be parsed by the shared strict parser `parse_cigar` (`r[sam.encode.cigar]`) into a `Vec<CigarOp>`. Each `CigarOp` wraps the BAM packed `u32` (`(length << 4) | op_code`), with op_codes M=0, I=1, D=2, N=3, S=4, H=5, P=6, =7, X=8 and htslib's B=9. Unknown op characters MUST produce a typed parse error (this is stricter than BAM ingest, which tolerates reserved op codes via `CigarOpType::Unknown` per `r[io.typed_cigar_ops]`, because in SAM the lexical character is the only signal), and so MUST a length of 2^28 or more, an empty CIGAR and a trailing length without an operator. The string `*` means CIGAR unavailable (0 operations, and end_pos = pos).
+
+> **Was:** a length up to `u32::MAX` was shifted into the packed form and lost its top bits, and an empty CIGAR or a trailing length was accepted.
 
 r[sam.record.seq_decode]
 SEQ characters MUST be decoded to `Base` values: A→A, C→C, G→G, T→T, all others (N, IUPAC codes)→Unknown. The string `*` means sequence unavailable (length 0).
@@ -76,38 +78,20 @@ Note: the SAM character `=` means "identical to the reference base at this posit
 r[sam.record.qual_decode]
 QUAL characters MUST have 33 subtracted (Phred+33 encoding). The string `*` means quality unavailable; all quality bytes MUST be set to 0xFF (255). QUAL length MUST equal SEQ length when both are present.
 
-> r[sam.record.aux_tags]
-> Optional fields after the 11th column follow the format `TAG:TYPE:VALUE`. They MUST be serialized to BAM binary aux format for storage in the aux slab:
->
-> - `A` (char): `[tag0, tag1, 'A', char]`
-> - `i` (integer): `[tag0, tag1, type, bytes...]` where type is the smallest fitting BAM integer type:
->   - [-128, 127] → `c` (int8)
->   - [128, 255] → `C` (uint8)
->   - [-32768, -129] or [256, 32767] → `s` (int16)
->   - [32768, 65535] → `S` (uint16)
->   - [-2147483648, -32769] or [65536, 2147483647] → `i` (int32)
->   - [2147483648, 4294967295] → `I` (uint32)
-> - `f` (float): `[tag0, tag1, 'f', le_f32_bytes]`
-> - `Z` (string): `[tag0, tag1, 'Z', string_bytes, 0x00]`
-> - `H` (hex): `[tag0, tag1, 'H', hex_bytes, 0x00]`
-> - `B` (array): `[tag0, tag1, 'B', subtype, count_le32, values...]`
->
-> Unlike a scalar `i`, a `B` array's element type is written down: `c`/`s`/`i`
-> are signed and `C`/`S`/`I` unsigned, and each element MUST be converted
-> through the type the subtype names. Converting a signed array through the
-> unsigned type of the same width rejects every negative element it holds,
-> which is most of what a signed array is for. An element outside the
-> subtype's range, and a subtype that is not one of `cCsSiIf`, MUST both
-> return an error — the element count is written before the elements, so
-> skipping one would leave a `B` tag promising more bytes than follow it.
+r[sam.record.aux_tags+2]
+Optional fields after the 11th column MUST be serialized to BAM aux bytes by the shared strict parser of the streaming encoder (`r[sam.aux.parse]`, `r[sam.aux.types]`), so that the indexed reader and `SamStreamReader` store the same bytes for the same line, and those are the bytes htslib stores. In particular an `i` value is stored unsigned-first, as htslib stores it: a value without a leading `-` in the smallest of `C` (0..=255), `S` (..=65535), `I` (..=4294967295); a value with a leading `-` in the smallest of `c` (-128..), `s` (-32768..), `i` (-2147483648..). A `B` array keeps its written subtype and every element is converted through it.
+
+> **Was:** `i` values were stored signed-first (`c` for 0..=127), which no other SAM reader does, so a SAM read by seqair and the same SAM converted by `samtools view -b` disagreed on the width of most small tags.
 
 Note: the integer type selected here may differ from the type used by the original BAM writer, since SAM text loses the specific width information. This is an inherent limitation — see `r[unified.push_fields_equivalence]`.
 
-r[sam.record.aux_parse_strict]
-Malformed aux tag values MUST return an error, not silently default to zero. For integer (`i`) typed tags, if the value cannot be parsed as an integer, the reader MUST return a `SamRecordError::InvalidAuxValue` error.
+r[sam.record.aux_parse_strict+2]
+A malformed optional field MUST fail the record with a typed `SamRecordError` (`r[sam.aux.parse]`), never be skipped or defaulted.
 
-r[sam.record.aux_int_range+2]
-SAM aux integer values (type `i`) are serialized into the smallest BAM integer type that fits, using the ranges defined in `r[sam.record.aux_tags]`. Values that exceed the u32 range (i.e., `val > u32::MAX` or `val < i32::MIN` when interpreted as i64) cannot be represented in any BAM integer type and MUST return a `SamRecordError::AuxIntOutOfRange` error instead of silently truncating.
+> **Was:** fields shorter than 5 bytes or without the two `:` were skipped silently, an unknown type letter was stored as `Z`, and `A:` with an empty value stored a space.
+
+r[sam.record.aux_int_range+3]
+An `i` value outside `-2147483648..=4294967295` cannot be stored in any BAM integer type and MUST fail with `SamRecordError::AuxIntOutOfRange`, never be truncated.
 
 ## Region fetching
 
@@ -179,7 +163,7 @@ A single SAM alignment line may span multiple BGZF blocks. The reader MUST buffe
 ## Integer parsing
 
 r[sam.record.parse_int_nonempty]
-Integer parsing functions (`parse_u8`, `parse_u16`, `parse_u32`) MUST reject empty input by returning `None`. An empty byte slice is not a valid integer representation and MUST NOT silently produce zero.
+Integer parsing functions (`parse_u8`, `parse_u16`) MUST reject empty input by returning `None`. An empty byte slice is not a valid integer representation and MUST NOT silently produce zero.
 
 ## Performance considerations
 
