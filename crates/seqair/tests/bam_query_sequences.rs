@@ -212,7 +212,7 @@ fn indices(store: &RecordStore) -> Vec<usize> {
 // r[verify region_buf.block_cache]
 // r[verify bam.reader.resume]
 // r[verify bam.reader.overlap_filter]
-// r[verify bam.reader.sorted_order+2]
+// r[verify bam.reader.sorted_order+3]
 /// Every query of a random sequence on one reader returns exactly the
 /// generated reads that overlap it, in file order.
 #[hegel::test(test_cases = crate::pinned::cases(64))]

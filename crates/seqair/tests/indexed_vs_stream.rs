@@ -560,6 +560,7 @@ fn samtools_names(bam: &Path, contig: usize, span: RangeInclusive<Pos0>) -> Vec<
 // r[verify sam.reader.overlap_filter+4]
 // r[verify sam.reader.overlap_inclusive]
 // r[verify sam.reader.sorted_order]
+// r[verify bam.reader.sorted_order+3]
 // r[verify interval.overlap_test]
 // r[verify interval.empty_span]
 // r[verify record_store.end_pos_htslib]
