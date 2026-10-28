@@ -1189,7 +1189,7 @@ impl<U> PileupEngine<U> {
     /// Clears `self.buf` and fills it with the alignments for the next
     /// non-empty column. Returns `(pos, reference_base)` so the caller
     /// can build a [`PileupColumn`] borrowing the buffer.
-    fn advance(&mut self) -> Option<(Pos0, Base, bool)> {
+    pub(crate) fn advance(&mut self) -> Option<(Pos0, Base, bool)> {
         loop {
             if self.current_pos > self.region_end {
                 return None;
@@ -1428,14 +1428,26 @@ impl<U> PileupEngine<U> {
     /// `pileups` calls. Extract primitive data (pos, depth, etc.) if you need
     /// to retain it.
     pub fn pileups(&mut self) -> Option<PileupColumn<'_, U>> {
-        let (pos, reference_base, matches_reference) = self.advance()?;
-        Some(PileupColumn {
+        let step = self.advance()?;
+        Some(self.column(step))
+    }
+
+    /// The column [`advance`](Self::advance) just filled. Split from
+    /// [`pileups`](Self::pileups) so a caller that owns several engines in
+    /// turn (the streaming pileup) can advance under `&mut` and return the
+    /// column under `&` — a borrow returned from inside its loop would hold
+    /// `&mut` for the rest of the function.
+    pub(crate) fn column(
+        &self,
+        (pos, reference_base, matches_reference): (Pos0, Base, bool),
+    ) -> PileupColumn<'_, U> {
+        PileupColumn {
             pos,
             reference_base,
             matches_reference,
             alignments: &self.buf,
             store: &self.store,
-        })
+        }
     }
 
     /// Remaining positions in the current region — lower-bound estimate for
