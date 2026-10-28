@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Index-less streaming I/O.** Read a whole BAM or SAM front to back from any `io::Read` — `stdin`, a pipe — with no index and no `Seek`, keeping every record (unplaced and unmapped ones included) exactly as stored:
+  - `bam::bgzf::BgzfStream`: forward-only BGZF decoding with optional read-ahead inflation threads; implements `Read`/`BufRead`.
+  - `bam::RawBamRecord`: one record in its wire form, constructible only by validating it against a header (layout, read name, reference ids, positions, and htslib's CIGAR-vs-SEQ check), with on-demand accessors including full IUPAC sequence decoding.
+  - `bam::stream::BamStreamReader`, `sam::SamStreamReader` and `reader::AlignmentStream`, which detects BAM, bgzipped SAM, gzip SAM and plain SAM from the first bytes.
+  - `sam::SamRecordEncoder`: SAM text to BAM bytes, identical to what htslib writes for every canonical line it accepts (`sam::parse_cigar` for CIGAR strings); `sam::format::format_sam_record`/`format_sam_header`: BAM to SAM text, identical to htslib's `sam_format1`.
+  - `BamWriter::write_raw` writes a `RawBamRecord` byte for byte.
+- **`reader::StreamPileup`** (prototype): pileup columns over a coordinate-sorted BAM/SAM read front to back without an index, in windows; columns equal the indexed pileup's over whole-contig segments. Unsorted input is `StreamPileupError::Unsorted`. `RecordStore::copy_record_from` copies a decoded record between stores.
+- `BgzfStream` (and `AlignmentStream`) inflate on a rayon pool with `.threads(n)` (the reading thread's pool, else the global one) or `.threads_in(n, pool)`.
+- `Aux::iter_checked` and `validate_aux` report malformed aux data as an `AuxLayoutError` instead of stopping quietly.
+
+### Fixed
+
+- **An empty BGZF block in the middle of a file no longer ends it.** `BgzfReader` and the region reader (`RegionBuf`) stopped at the first ISIZE=0 block, silently dropping every record after it; htslib skips such blocks. Input that ends inside a block header is now `BgzfError::TruncatedBlock` rather than a clean end, a block that inflates to fewer bytes than its ISIZE is `BgzfError::SizeMismatch`, and read errors keep their `io::Error` (`BgzfError::ReadFailed`).
+- **`BamWriter::write_store_record` binned and indexed reads one base short:** it passed the inclusive `end_pos` where the exclusive end belongs, so a read whose last base starts a new 16 kbp window got the wrong bin and was missing from that window in the index.
+- **SAM aux parsing is strict and matches htslib:** malformed optional fields are errors instead of being skipped, unknown types are errors instead of being stored as `Z`, and integers take the smallest *unsigned* type first, as htslib does. CIGAR lengths of 2^28 or more are errors instead of losing their top bits.
+- **Region queries on a truncated BAM/SAM fail instead of returning fewer records.** A block cut off where a query's records are is `BgzfError::TruncatedBlock`; a file cut short only past them is reported once with `warn!`.
+- **Co-produced TBI and CSI indexes match `bcftools index`:** they end with the `n_no_coor` trailer, record ends on a block boundary are named by the next block (`amend_last`, as for BAM), and bins are compressed as htslib's `compress_binning` does for every format.
+- **Indexed SAM: tabix sequences are matched to the header by name**, not position: `tabix -p sam` numbers only sequences that have records, so a SAM whose first `@SQ` sequences were empty fetched the wrong sequence's chunks. `BamIndex::from_tabix_path`/`from_tabix_bytes` now take the header.
+- **Indexed SAM: a placed-unmapped read sits at its POS whatever its CIGAR**, as in the BAM reader (`r[record_store.end_pos_htslib]`).
+- Lower-case IUPAC codes in SAM text are kept (they became `N`); the base encode table is now htslib's `seq_nt16_table`.
+
+### Breaking
+
+- `SamRecordError` moved to `sam::encode` (re-exported from `sam`) and gained variants; `UnknownCigarOp.op` is a `u8`, and the aux variants carry `tag: [u8; 2]`.
+- New `BgzfError`, `DecodeError` and `BamWriteError` variants.
+
 ## v0.8.0 (2026-10-27)
 
 ### Breaking
