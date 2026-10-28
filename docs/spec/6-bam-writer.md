@@ -91,7 +91,7 @@ The writer MUST support co-producing a BAI index during writing. When enabled (v
 >
 > 1. **Mapped** (flags & 0x4 == 0, ref_id >= 0): push to the IndexBuilder with `beg` = 0-based pos, `end` = 0-based exclusive end position (pos + reference-consuming CIGAR ops), `virtual_offset` = the BGZF virtual offset after the record was written.
 > 2. **Placed unmapped** (flags & 0x4 != 0, ref_id >= 0): push to the IndexBuilder with `beg = end = pos`. These are reads that are unmapped themselves but placed at a position — typically their mate's position in coordinate-sorted BAM files. They must be indexed so that region queries find them (e.g., `samtools view chr1:1000-2000` returns placed-unmapped reads in that range).
-> 3. **Fully unmapped** (ref_id == -1): MUST NOT be pushed to the IndexBuilder. These reads have no genomic position and are not retrievable by region query. They appear at the end of coordinate-sorted BAM files.
+> 3. **Fully unmapped** (ref_id == -1): MUST NOT be pushed to the IndexBuilder as a placed record, but MUST be counted with `push_no_coor` (`r[index_builder.no_coor]`). These reads have no genomic position and are not retrievable by region query. They appear at the end of coordinate-sorted BAM files.
 >
 > A mapped record with ref_id == -1 is structurally invalid (mapped flag set but no reference assigned). The writer MUST return a `BamWriteError` for such records when index co-production is enabled, since the IndexBuilder cannot index a record with no valid tid.
 

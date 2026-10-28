@@ -203,12 +203,20 @@ impl<W: Write> BamWriter<W> {
         let total = 4usize.saturating_add(self.buf.len());
 
         self.bgzf.flush_if_needed(total)?;
+        if let Some(ref mut index) = self.index {
+            index.amend_last(self.bgzf.index_offset());
+        }
         self.bgzf.write_all(&block_size.to_le_bytes())?;
         self.bgzf.write_all(&self.buf)?;
 
         // Push to index after writing (offset convention: offset AFTER the
         // record). Sort validation is delegated to `IndexBuilder::push()`.
-        // Fully unmapped records (no reference) are not pushed.
+        // Fully unmapped records (no reference) are only counted.
+        if let Some(ref mut index) = self.index
+            && tid.is_none()
+        {
+            index.push_no_coor(self.bgzf.index_offset());
+        }
         if let Some(ref mut index) = self.index
             && let Some(tid) = tid.map(Tid::as_u32)
         {
@@ -381,8 +389,10 @@ impl<W: Write> BamWriter<W> {
     /// the inner writer and optional finished `IndexBuilder`.
     pub fn finish(mut self) -> Result<(W, Option<IndexBuilder>), BamWriteError> {
         if let Some(ref mut index) = self.index {
-            let voff = self.bgzf.index_offset();
-            index.finish(voff)?;
+            // End the last block first, so the index ends at the next block's
+            // start, `(block, 0)`, as htslib's does (`r[index_builder.amend_last]`).
+            self.bgzf.flush_if_needed(usize::MAX)?;
+            index.finish(self.bgzf.index_offset())?;
         }
         let inner = self.bgzf.finish(self.index.as_mut())?;
         Ok((inner, self.index))
