@@ -20,6 +20,11 @@ use crate::reader::Tid;
 use seqair_types::{BamFlags, MappingQuality, Pos0};
 use std::num::NonZeroI32;
 
+// r[impl bam.record.max_size]
+/// The largest BAM record (payload, without `block_size`) seqair reads or
+/// writes (`r[io.writer_limits]`).
+pub(crate) const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024;
+
 /// Compute `end_pos` from raw BAM record bytes (before full decode).
 ///
 /// Walks the packed CIGAR bytes in place — used on the hot pre-push scan
@@ -306,6 +311,17 @@ pub enum DecodeError {
     /// A SAM or CRAM read name longer than BAM's 254 bytes.
     #[error("qname length {len} exceeds maximum of 254 bytes")]
     QnameTooLong { len: usize },
+
+    // r[impl bam.raw_record.validation]
+    /// `l_read_name` is 0: BAM needs at least the name's NUL terminator.
+    #[error("BAM record has an empty read name field (l_read_name = 0)")]
+    EmptyQname,
+
+    // r[impl bam.raw_record.validation]
+    /// The read name's last byte is not NUL. htslib repairs this; seqair
+    /// rejects it rather than rewrite the record.
+    #[error("BAM read name is not NUL-terminated")]
+    QnameNotTerminated,
 }
 
 #[cfg(test)]

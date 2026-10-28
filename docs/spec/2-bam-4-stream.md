@@ -1,0 +1,30 @@
+# Streaming BAM
+
+The indexed reader (`r[bam.reader.fetch_into+2]`) answers region queries: it needs an index, a seekable file, and it keeps placed records only. Many tools instead consume a whole alignment file front to back — postprocessing a BAM piped out of an aligner, converting formats, filtering — and need every record exactly as it was written, unplaced and unmapped ones included, from input that cannot seek (`stdin`, a pipe).
+
+> **Sources:** [SAM1] §4.2 "The BAM format" — `block_size`, the fixed record fields and the variable-length fields that follow; §4.2.2 "N_CIGAR_OP field" — the `CG` placeholder for long CIGARs; §4.1 — BGZF. htslib's `bam_read1` (`sam.c`) is the behavioural reference for what a reader accepts. See [References](./99-references.md).
+
+## Raw records
+
+r[bam.raw_record]
+`RawBamRecord` MUST hold one record in its wire form — the bytes after `block_size` — and MUST NOT decode, normalise or re-encode them: what a streaming reader yields, `BamWriter::write_raw` writes back byte for byte. Accessors decode on demand: reference (`Option<Tid>`), position (`Option<Pos0>`), `MateFields`, `BamFlags`, `MappingQuality`, the stored `bin`, read name, CIGAR operations, sequence (packed, as `=ACMGRSVTWYHKDBN` ASCII with every IUPAC code kept, or as lossy `Base`s), qualities (`None` when the record has none — no sequence, or a first quality byte of `0xFF`) and aux tags. FLAG and MAPQ MAY be set in place, since neither moves another field.
+
+r[bam.raw_record.validation]
+A `RawBamRecord` MUST only be constructible through validation against a header, and every value MUST satisfy it, so that no accessor can fail or panic: the payload is at least 32 bytes and the variable-length fields it declares fit inside it (`r[bam.record.checked_offsets]`); `l_read_name` is at least 1 and the name's last byte is NUL (htslib repairs a missing terminator; seqair rejects the record rather than rewrite it); the reference and mate reference ids are `-1` or name a target of the header (`r[bam.record.ref_ids]`); the position and mate position are `-1` or non-negative (`r[bam.record.unplaced_pos]`). A failed validation MUST leave the value it was refilling as the default record (unplaced, unmapped, named `*`), never half-updated.
+
+r[bam.raw_record.cigar_seq]
+As htslib's `bam_read1` does, a record that is mapped (FLAG `0x4` clear), has a sequence and has a CIGAR MUST have a CIGAR whose query-consuming operations (M, I, S, =, X) sum to the sequence length, or fail with `DecodeError::CigarQueryLenMismatch` — unless the CIGAR is the long-CIGAR placeholder: a placed record whose first operation is `<seq_len>S` and which carries a `CG:B:I` tag (htslib's `bam_tag2cigar` test).
+
+r[bam.raw_record.aux_lazy]
+The aux block MUST NOT be validated when a record is read: htslib passes a malformed aux block through `samtools view -b` untouched and only fails when it has to interpret it, and a streaming copy must not reject files htslib copies. Interpreting the tags is where a malformed block MUST surface — `Aux::iter_checked` (`r[bam.record.aux_checked]`), and the SAM formatter, which uses it.
+
+r[bam.raw_record.bin_verbatim]
+The stored `bin` MUST be kept as the file has it. (htslib recomputes it on read, so `samtools view -b` may rewrite a wrong one; a raw copy does not.)
+
+## Reading a stream
+
+r[bam.stream]
+`BamStreamReader<R: Read>` MUST read a BGZF-compressed BAM front to back from any `io::Read` through a `BgzfStream` (`r[bgzf.stream]`): first the header (the same parser as the indexed reader's, `r[bam.header.magic]` and following), then every record in file order, unplaced ones included, as `RawBamRecord`s. Threads and EOF-marker handling are the `BgzfStream`'s, configured by building one and passing it in.
+
+r[bam.stream.framing]
+Each record is a little-endian `i32` `block_size` and that many bytes. Zero bytes where a record would start MUST be the end of the stream. A `block_size` below 32 or above the record size limit (`r[bam.record.max_size]`) MUST fail with `BamStreamError::RecordSizeOutOfRange`; input that ends inside a `block_size` or a payload MUST fail with `BamStreamError::TruncatedRecord`. Both leave the stream misaligned, so every later read MUST fail with `BamStreamError::Poisoned`. A record whose bytes are framed correctly but fail validation (`r[bam.raw_record.validation]`) MUST fail with `BamStreamError::InvalidRecord`, carrying its 1-based record number and the `DecodeError`, and the stream MUST stay usable: the next read returns the next record.

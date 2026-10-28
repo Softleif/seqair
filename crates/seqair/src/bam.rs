@@ -55,12 +55,14 @@ pub mod mate;
 pub mod nm_md;
 pub mod owned_record;
 pub mod pileup;
+pub mod raw_record;
 pub mod reader;
 pub(crate) mod record;
 pub mod record_idx;
 pub mod record_store;
 pub mod region_buf;
 pub mod seq;
+pub mod stream;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub mod writer;
@@ -93,6 +95,7 @@ pub use reader::{BamError, BamQuery, BamQueryCounts, BamShared, IndexedBamReader
 // `record` is intentionally not re-exported as a type. The production decode
 // path is `RecordStore::push_raw`; the `record` module exposes only shared
 // decode primitives (`parse_header`, `compute_end_pos_from_raw`, `DecodeError`).
+pub use raw_record::RawBamRecord;
 pub use record::DecodeError;
 pub use record_idx::{RecordIdx, RecordRef};
 pub use record_store::{

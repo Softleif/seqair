@@ -100,17 +100,24 @@ pub fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
 /// Decode a 4-bit packed BAM sequence using the best available implementation.
 pub fn decode_seq(encoded: &[u8], len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
+    decode_iupac_into(encoded, &mut out);
+    out
+}
+
+/// Decode `out.len()` bases of a 4-bit packed BAM sequence into `out` as
+/// ASCII, every code kept (`=ACMGRSVTWYHKDBN`); all `N` when `encoded` is too
+/// short.
+pub(crate) fn decode_iupac_into(encoded: &[u8], out: &mut [u8]) {
     if !decode_nibbles(
         Level::new(),
         NibbleOrder::HighFirst,
         DECODE_BASE,
         &DECODE_PAIR,
         encoded,
-        &mut out,
+        out,
     ) {
         out.fill(b'N');
     }
-    out
 }
 
 /// BAM 4-bit encoding → Base discriminant lookup.
