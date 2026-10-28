@@ -62,6 +62,9 @@ Block decompression from the in-memory buffer MUST follow the same BGZF format r
 r[region_buf.empty_block]
 An empty block (ISIZE=0) inside a range MUST be skipped like any other block boundary (`r[bgzf.empty_block]`): the buffer reads on to the next block, or to the end of the range. Taking it for the end of the data silently dropped every record after it in the query. It is checked like any block (`r[bgzf.empty_block]`), and a data block MUST inflate to exactly its ISIZE (`r[bgzf.decompression+2]`) — the same check, `inflate_checked`, as the other readers.
 
+r[region_buf.truncated]
+A range is read past its chunks' last block by a read-ahead pad, so a block cut off at the end of a range is normal when it lies in the pad. A block cut off (or missing) that starts before the end of the chunks' data — the end virtual offset's block, or the one before it for an end at `(block, 0)` — means the file was cut short where the query's records are, and MUST fail with `BgzfError::TruncatedBlock`, as htslib's region iterator fails; taking it for the end of the range silently returned a shorter answer. A file cut short only inside the pad leaves the query's records whole; it SHOULD be reported once per process as a `warn!`.
+
 r[region_buf.fast_header]
 The fast-path header parsing (XLEN=6, BC at fixed offset) MUST be used when applicable, with fallback to searching extra fields.
 

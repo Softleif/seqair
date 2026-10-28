@@ -1240,6 +1240,62 @@ fn region_queries_read_past_empty_blocks(tc: TestCase) {
     }
 }
 
+// r[verify region_buf.truncated]
+/// A BAM cut short anywhere, queried through the index of the whole file,
+/// either returns exactly the reads samtools returns from the whole file, or
+/// fails — never a silently shorter answer.
+#[hegel::test(test_cases = pinned::cases(30))]
+fn region_queries_on_a_truncated_bam_are_whole_or_errors(tc: TestCase) {
+    let mut lines = tc.draw(sam_lines());
+    lines.retain(|l| l.rname == Some(0) && l.flag & 4 == 0);
+    let dir = tempfile::tempdir().unwrap();
+    let sam = dir.path().join("in.sam");
+    std::fs::write(&sam, sam_text(&lines)).unwrap();
+    let (header, records) = stream_file(&htslib_bam(dir.path(), &sam));
+
+    // Small blocks, so a cut can fall inside, between or after the ones a
+    // query needs.
+    let mut bam = one_block(&header_bytes());
+    let mut at = 0;
+    while at < records.len() {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(3)).min(records.len() - at);
+        let body: Vec<u8> =
+            records[at..at + n].iter().flat_map(|r| framed(r.as_payload())).collect();
+        bam.extend_from_slice(&one_block(&body));
+        at += n;
+    }
+    bam.extend_from_slice(&EMPTY_BLOCK);
+    let whole = dir.path().join("whole.bam");
+    std::fs::write(&whole, &bam).unwrap();
+    run(std::process::Command::new("samtools").arg("index").arg(&whole));
+
+    let header_len = one_block(&header_bytes()).len();
+    let cut = int_in(&tc, header_len as i64, bam.len() as i64) as usize;
+    let path = dir.path().join("cut.bam");
+    std::fs::write(&path, &bam[..cut]).unwrap();
+    std::fs::copy(dir.path().join("whole.bam.bai"), dir.path().join("cut.bam.bai")).unwrap();
+
+    let mut reader = IndexedBamReader::open(&path).unwrap();
+    let tid = header.tid("chr1").unwrap();
+    for _ in 0..4 {
+        let start = int_in(&tc, 0, 99_000) as u32;
+        let end = start + int_in(&tc, 0, 20_000) as u32;
+        let mut store = RecordStore::new();
+        let span =
+            (seqair::bam::Pos0::new(start).unwrap()..=seqair::bam::Pos0::new(end).unwrap()).into();
+        let region = format!("chr1:{}-{}", start + 1, end + 1);
+        if reader.fetch_into(tid, span, &mut store).is_err() {
+            // A failed query poisons nothing a fresh reader cannot redo.
+            reader = IndexedBamReader::open(&path).unwrap();
+            continue;
+        }
+        let mut ours: Vec<Vec<u8>> =
+            store.indices().map(|i| store.record(i).unwrap().qname().to_vec()).collect();
+        ours.sort();
+        assert_eq!(ours, samtools_region(&whole, &region), "{region}, cut at {cut}");
+    }
+}
+
 // r[verify bam.stream.payloads]
 /// `read_payload_into` frames exactly what `read_record` reads — validating
 /// its payloads later gives the same records, invalid ones included — and a
