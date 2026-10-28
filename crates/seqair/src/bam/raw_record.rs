@@ -247,6 +247,13 @@ impl RawBamRecord {
         name.get(..len).unwrap_or_default()
     }
 
+    /// The whole stored read name without its NUL terminator: every byte up
+    /// to it, NULs inside the name included, as `sam_format1` prints it.
+    pub(crate) fn qname_field(&self) -> &[u8] {
+        let end = self.cigar_start.saturating_sub(1);
+        self.payload.get(FIXED_LEN..end).unwrap_or_default()
+    }
+
     /// The number of CIGAR operations stored (the placeholder ones for a
     /// record whose real CIGAR is in a `CG` tag).
     pub fn cigar_len(&self) -> usize {
