@@ -564,6 +564,9 @@ impl<U> RecordStore<U> {
     ) -> Result<Option<RecordIdx>, DecodeError> {
         let h = record::parse_header(raw)?;
         let refs = h.refs.resolve(header)?;
+        // A store holds placed records only: pileups and region queries need a
+        // position. Unplaced records are read with the streaming readers.
+        let pos = h.pos.ok_or(DecodeError::InvalidPosition { value: -1 })?;
 
         let idx = RecordIdx::from_usize(self.records.len()).ok_or(DecodeError::SlabOverflow)?;
 
@@ -595,7 +598,7 @@ impl<U> RecordStore<U> {
             )]
             let packed_seq_slice = &raw[h.cigar_end..h.seq_end];
             if !customize.filter_raw(&FilterRawFields {
-                pos: h.pos,
+                pos,
                 end_pos: None,
                 flags: h.flags,
                 mapq: h.mapq,
@@ -624,10 +627,10 @@ impl<U> RecordStore<U> {
         let cigar_ops = &self.cigar[cigar_start..];
         // r[impl record_store.end_pos_htslib]
         let end_pos = if h.flags.is_unmapped() {
-            h.pos
+            pos
         } else {
-            cigar::compute_end_pos(h.pos, cigar_ops)
-                .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?
+            cigar::compute_end_pos(pos, cigar_ops)
+                .ok_or(DecodeError::InvalidPosition { value: pos.as_i32() })?
         };
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_ops);
         let (leading_soft_clip, trailing_soft_clip) = cigar::soft_clips(cigar_ops);
@@ -682,9 +685,9 @@ impl<U> RecordStore<U> {
         // r[impl record_store.qname_hash]
         let name_hash = qname_hash(&qname_raw[..qname_actual_len]);
 
-        self.note_push(h.pos);
+        self.note_push(pos);
         self.records.push(SlimRecord {
-            pos: h.pos,
+            pos,
             end_pos,
             flags: h.flags,
             n_cigar_ops: h.n_cigar_ops,
