@@ -3,9 +3,11 @@
 
 use super::bgzf::{BgzfError, VirtualOffset};
 use super::csi_index::{CsiIndex, csi_pseudo_bin};
+use super::header::BamHeader;
+use crate::reader::Tid;
 use seqair_types::Pos0;
 use std::path::Path;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 const PSEUDO_BIN: u32 = 37450;
 const BAI_MIN_SHIFT: u32 = 14;
@@ -41,6 +43,9 @@ pub enum BaiError {
 
     #[error("BAI/tabix field `{field}` count {value} exceeds limit {limit}")]
     FieldTooLarge { field: &'static str, value: usize, limit: usize },
+
+    #[error("tabix header names {names} sequences but indexes {n_ref}")]
+    TabixNameCount { names: usize, n_ref: usize },
 }
 
 #[derive(Debug)]
@@ -216,36 +221,11 @@ impl BamIndex {
         parse_refs(data, &mut pos)
     }
 
-    /// Parse a tabix index from raw (already decompressed) bytes.
+    /// Parse a tabix index from raw (already decompressed) bytes, its
+    /// references put in `header`'s order (`r[index.edge.name_mismatch+2]`).
     #[cfg(feature = "fuzz")]
-    pub fn from_tabix_bytes(data: &[u8]) -> Result<Self, BaiError> {
-        if data.len() < 4 {
-            return Err(BaiError::TruncatedTabixHeader { reason: "file too short for magic" });
-        }
-        if !data.starts_with(b"TBI\x01") {
-            let mut found = [0u8; 4];
-            if let Some(src) = data.get(..4) {
-                found.copy_from_slice(src);
-            }
-            return Err(BaiError::InvalidTabixMagic { found });
-        }
-
-        let mut pos = 4;
-        let n_ref = read_count(data, &mut pos)?;
-        let _format = read_i32(data, &mut pos)?;
-        let _col_seq = read_i32(data, &mut pos)?;
-        let _col_beg = read_i32(data, &mut pos)?;
-        let _col_end = read_i32(data, &mut pos)?;
-        let _meta = read_i32(data, &mut pos)?;
-        let _skip = read_i32(data, &mut pos)?;
-        let l_nm = read_count(data, &mut pos)?;
-
-        if data.len() < pos.wrapping_add(l_nm) {
-            return Err(BaiError::TruncatedTabixHeader { reason: "names extend past end of data" });
-        }
-        pos = pos.wrapping_add(l_nm);
-
-        parse_refs_with_count(data, &mut pos, n_ref)
+    pub fn from_tabix_bytes(data: &[u8], header: &BamHeader) -> Result<Self, BaiError> {
+        Self::from_tabix_data(data, header)
     }
 
     /// Create an empty index with no references (for plain SAM fuzzing).
@@ -263,13 +243,15 @@ impl BamIndex {
     ///
     /// Tabix files are BGZF-compressed. After decompression and the tabix-specific
     /// header, the bin/chunk/linear-index data is identical to BAI format.
-    #[instrument(level = "debug", fields(path = %path.display()))]
-    pub fn from_tabix_path(path: &Path) -> Result<Self, BaiError> {
+    #[instrument(level = "debug", skip(header), fields(path = %path.display()))]
+    pub fn from_tabix_path(path: &Path, header: &BamHeader) -> Result<Self, BaiError> {
         let compressed = std::fs::read(path)
             .map_err(|source| BaiError::Read { path: path.to_path_buf(), source })?;
-
         let data = decompress_bgzf_file(&compressed)?;
+        Self::from_tabix_data(&data, header)
+    }
 
+    fn from_tabix_data(data: &[u8], header: &BamHeader) -> Result<Self, BaiError> {
         if data.len() < 4 {
             return Err(BaiError::TruncatedTabixHeader { reason: "file too short for magic" });
         }
@@ -285,25 +267,59 @@ impl BamIndex {
         let mut pos = 4;
         // Read tabix header fields (skip over them — we reuse BAI parsing)
         // r[impl tabix.header]
-        let n_ref = read_count(&data, &mut pos)?;
-        let _format = read_i32(&data, &mut pos)?;
-        let _col_seq = read_i32(&data, &mut pos)?;
-        let _col_beg = read_i32(&data, &mut pos)?;
-        let _col_end = read_i32(&data, &mut pos)?;
-        let _meta = read_i32(&data, &mut pos)?;
-        let _skip = read_i32(&data, &mut pos)?;
-        let l_nm = read_count(&data, &mut pos)?;
+        let n_ref = read_count(data, &mut pos)?;
+        let _format = read_i32(data, &mut pos)?;
+        let _col_seq = read_i32(data, &mut pos)?;
+        let _col_beg = read_i32(data, &mut pos)?;
+        let _col_end = read_i32(data, &mut pos)?;
+        let _meta = read_i32(data, &mut pos)?;
+        let _skip = read_i32(data, &mut pos)?;
+        let l_nm = read_count(data, &mut pos)?;
 
-        // Skip concatenated sequence names
-        if data.len() < pos.wrapping_add(l_nm) {
-            return Err(BaiError::TruncatedTabixHeader { reason: "names extend past end of data" });
-        }
-        // TODO: r[index.edge.name_mismatch] — compare tabix names against SAM header @SQ names
+        let names = data
+            .get(pos..pos.wrapping_add(l_nm))
+            .ok_or(BaiError::TruncatedTabixHeader { reason: "names extend past end of data" })?;
         pos = pos.wrapping_add(l_nm);
+        let names: Vec<&[u8]> = names.split(|&b| b == 0).filter(|n| !n.is_empty()).collect();
+        if names.len() != n_ref {
+            return Err(BaiError::TabixNameCount { names: names.len(), n_ref });
+        }
 
         // The remaining data is identical to BAI format (bins, chunks, linear index)
         // but we already read n_ref from the tabix header
-        parse_refs_with_count(&data, &mut pos, n_ref)
+        let index = parse_refs_with_count(data, &mut pos, n_ref)?;
+        Ok(index.in_header_order(&names, header))
+    }
+
+    // r[impl index.edge.name_mismatch+2]
+    /// Re-key references numbered as `names` lists them (tabix numbers only
+    /// the sequences that have records, in file order) by `header`'s tids;
+    /// a header sequence the index lacks gets no bins.
+    fn in_header_order(self, names: &[&[u8]], header: &BamHeader) -> Self {
+        let n = header.target_count();
+        let mut references: Vec<RefIndex> =
+            std::iter::repeat_with(|| RefIndex::new(Vec::new(), Vec::new())).take(n).collect();
+        let mut stats = vec![ReferenceStats::from_bins([], BAI_MIN_SHIFT, BAI_DEPTH); n];
+        for ((name, reference), stat) in names.iter().zip(self.references).zip(self.stats) {
+            let tid = std::str::from_utf8(name).ok().and_then(|n| header.tid(n));
+            match tid.map(Tid::as_usize) {
+                Some(tid) => {
+                    if let Some(slot) = references.get_mut(tid) {
+                        *slot = reference;
+                    }
+                    if let Some(slot) = stats.get_mut(tid) {
+                        *slot = stat;
+                    }
+                }
+                // `tabix -p sam` indexes unplaced lines under RNAME `*`.
+                None if *name == b"*" => {}
+                None => warn!(
+                    name = %name.escape_ascii(),
+                    "tabix index names a sequence the SAM header lacks; the index may be stale"
+                ),
+            }
+        }
+        BamIndex { references, stats, unplaced_unmapped: self.unplaced_unmapped }
     }
 
     // r[impl index.reference_stats]
@@ -1010,7 +1026,7 @@ mod tests {
         f.write_all(bgzf_eof).unwrap();
         drop(f);
 
-        let err = BamIndex::from_tabix_path(&path).unwrap_err();
+        let err = BamIndex::from_tabix_path(&path, &BamHeader::synthetic(1, 1000)).unwrap_err();
         match err {
             BaiError::InvalidTabixMagic { found } => {
                 assert_eq!(found, [0xde, 0xad, 0xbe, 0xef]);

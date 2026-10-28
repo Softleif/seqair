@@ -144,8 +144,8 @@ impl IndexedSamReader<File> {
         header.validate_sort_order()?;
 
         let index = match index {
-            Some(index) => open_index(index)?,
-            None => find_tabix_index(path)?,
+            Some(index) => open_index(index, &header)?,
+            None => find_tabix_index(path, &header)?,
         };
 
         let bulk_file = File::open(path)
@@ -178,7 +178,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
         let header_text = read_sam_header(&mut bgzf)?;
         let header = BamHeader::from_sam_text(&header_text)?;
         header.validate_sort_order()?;
-        let index = BamIndex::from_tabix_bytes(tbi_data)?;
+        let index = BamIndex::from_tabix_bytes(tbi_data, &header)?;
 
         Ok(IndexedSamReader {
             bulk_reader: std::io::Cursor::new(sam_data),
@@ -649,26 +649,26 @@ fn read_sam_header<R: std::io::Read + std::io::Seek>(
 // r[impl unified.detect_index+2]
 // r[impl unified.detect_error]
 // r[impl sam.index.locate+3]
-fn find_tabix_index(sam_path: &Path) -> Result<BamIndex, SamError> {
+fn find_tabix_index(sam_path: &Path, header: &BamHeader) -> Result<BamIndex, SamError> {
     let index = crate::utils::find_index(sam_path, &["tbi", "bai", "csi"])
         .ok_or_else(|| SamError::IndexNotFound { sam_path: sam_path.to_path_buf() })?;
     // r[depends sam.index.csi+2]
     if index.extension().is_some_and(|ext| ext == "csi") {
         return Err(SamError::CsiNotSupported { path: index });
     }
-    open_index(&index)
+    open_index(&index, header)
 }
 
 /// Open a tabix index or a BAI, told apart by content: a BAI starts with its
 /// magic, a tabix index is BGZF-compressed. A CSI is recognised and refused.
-fn open_index(path: &Path) -> Result<BamIndex, SamError> {
+fn open_index(path: &Path, header: &BamHeader) -> Result<BamIndex, SamError> {
     let mut magic = [0u8; 4];
     let read = File::open(path).and_then(|mut f| f.read_exact(&mut magic));
     read.map_err(|source| BaiError::Read { path: path.to_path_buf(), source })?;
     if magic == *b"BAI\x01" {
         return Ok(BamIndex::from_path(path)?);
     }
-    match BamIndex::from_tabix_path(path) {
+    match BamIndex::from_tabix_path(path, header) {
         // r[depends sam.index.csi+2]
         Err(BaiError::InvalidTabixMagic { found }) if found == *b"CSI\x01" => {
             Err(SamError::CsiNotSupported { path: path.to_path_buf() })
@@ -1213,7 +1213,7 @@ mod tests {
         let csi_path = dir.path().join("test.sam.gz.csi");
         File::create(&csi_path).expect("failed to create .csi file");
 
-        let err = find_tabix_index(&sam_path).expect_err("should reject CSI index");
+        let err = find_tabix_index(&sam_path, &make_header()).expect_err("should reject CSI index");
         assert!(
             matches!(err, SamError::CsiNotSupported { .. }),
             "expected CsiNotSupported, got: {err}"

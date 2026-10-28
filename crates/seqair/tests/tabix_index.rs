@@ -59,10 +59,10 @@ fn tabix_parses_without_error() {
     let tbi_path = sam_gz.with_extension("gz.tbi");
     assert!(tbi_path.exists(), "tabix index should exist at {tbi_path:?}");
 
-    let index = BamIndex::from_tabix_path(&tbi_path).expect("tabix parse");
+    let header = seqair::bam::BamHeader::from_bam_path(test_bam_path()).unwrap();
+    let index = BamIndex::from_tabix_path(&tbi_path, &header).expect("tabix parse");
 
     // Verify we can query — the index should have references
-    let header = seqair::bam::BamHeader::from_bam_path(test_bam_path()).unwrap();
     let tid = header.tid("chr19").unwrap();
     let chunks =
         index.query(tid.as_u32(), Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap());
@@ -77,11 +77,10 @@ fn tabix_query_matches_bai_query() {
     let sam_gz = create_sam_gz_with_tabix(&tmpdir);
     let tbi_path = sam_gz.with_extension("gz.tbi");
 
-    let tabix_index = BamIndex::from_tabix_path(&tbi_path).expect("tabix parse");
+    let header = seqair::bam::BamHeader::from_bam_path(test_bam_path()).unwrap();
+    let tabix_index = BamIndex::from_tabix_path(&tbi_path, &header).expect("tabix parse");
     let bai_path = test_bam_path().with_extension("bam.bai");
     let bai_index = BamIndex::from_path(&bai_path).expect("BAI parse");
-
-    let header = seqair::bam::BamHeader::from_bam_path(test_bam_path()).unwrap();
 
     for &(contig, start, end) in CONTIGS {
         let tid = header.tid(contig).unwrap();
@@ -112,7 +111,8 @@ fn tabix_rejects_non_bgzf() {
     let fake_tbi = tmpdir.path().join("fake.tbi");
     std::fs::write(&fake_tbi, b"not a bgzf file at all").unwrap();
 
-    let result = BamIndex::from_tabix_path(&fake_tbi);
+    let header = seqair::bam::BamHeader::from_bam_path(test_bam_path()).unwrap();
+    let result = BamIndex::from_tabix_path(&fake_tbi, &header);
     assert!(result.is_err());
 }
 

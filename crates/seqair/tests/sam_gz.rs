@@ -277,3 +277,31 @@ fn a_placed_unmapped_read_ignores_its_cigar() {
     assert_eq!(snapshot.len(), 1);
     assert_eq!((snapshot[0].pos, snapshot[0].end_pos), (0, 0));
 }
+
+// r[verify index.edge.name_mismatch+2]
+// r[verify sam.index.tabix]
+/// `tabix -p sam` numbers only the sequences that have records, in file
+/// order, with unplaced lines under `*`: here `c1` is its sequence 0 and
+/// `c0` is not in it. The reader used to look `c1` up as the index's
+/// sequence 1 and find nothing.
+#[test]
+fn a_tabix_index_is_keyed_by_sequence_name() {
+    let dir = TempDir::new().unwrap();
+    let sam_gz = indexed_sam_gz(
+        dir.path(),
+        "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:c0\tLN:100\n@SQ\tSN:c1\tLN:100\n\
+         r1\t0\tc1\t5\t0\t2M\t*\t0\t0\tAC\t*\nr2\t4\t*\t0\t0\t*\t*\t0\t0\tA\t*\n",
+    );
+    let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz).unwrap();
+    let mut store = RecordStore::new();
+    let whole = || (Pos0::new(0).unwrap()..=Pos0::new(99).unwrap()).into();
+
+    let c1 = reader.header().tid("c1").unwrap();
+    reader.fetch_into(c1, whole(), &mut store).unwrap();
+    let names: Vec<Vec<u8>> = snapshot_store(&store).into_iter().map(|r| r.qname).collect();
+    assert_eq!(names, [b"r1".to_vec()]);
+
+    let c0 = reader.header().tid("c0").unwrap();
+    reader.fetch_into(c0, whole(), &mut store).unwrap();
+    assert_eq!(store.len(), 0);
+}

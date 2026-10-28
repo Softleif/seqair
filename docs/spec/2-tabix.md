@@ -88,5 +88,7 @@ References longer than 512 Mbp require CSI (BAI/tabix with min_shift=14, depth=5
 r[index.edge.no_records]
 A reference with no records has no bins and no linear index entries. Queries for such references MUST return an empty chunk list (not an error).
 
-r[index.edge.name_mismatch]
-Tabix stores sequence names in the index header. These MUST match the names in the SAM header's `@SQ` lines. A mismatch SHOULD produce a warning (the index may be stale). CSI does NOT store sequence names — this check applies only to tabix.
+r[index.edge.name_mismatch+2]
+Tabix numbers its sequences by its own name list, not by the SAM header: `tabix -p sam` lists only the sequences that have records, in file order, and unplaced lines under `*`. The reader MUST key each tabix sequence by the header tid of its name, so a header sequence the index lacks has no bins and queries on it return nothing. A name the header lacks, other than `*`, SHOULD produce a warning (the index may be stale); a name list whose length is not `n_ref` MUST fail with `BaiError::TabixNameCount`. CSI and BAI do NOT store sequence names and are keyed by tid — this applies only to tabix.
+
+> **Was:** the reader took tabix sequence *i* to be header tid *i*, so on a SAM whose first `@SQ` sequences had no records every query found another sequence's chunks or none.
