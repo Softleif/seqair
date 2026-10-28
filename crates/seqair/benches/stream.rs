@@ -15,6 +15,7 @@ use seqair::bam::{BgzfStream, RawBamRecord};
 use std::hint::black_box;
 use std::io::{Cursor, Read};
 use std::num::NonZero;
+use std::num::NonZeroU8;
 use std::sync::LazyLock;
 
 const BAM_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam");
@@ -46,11 +47,13 @@ fn bgzf_stream(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(*plain_len));
     group.sample_size(20);
 
-    for threads in [0usize, 1, 4] {
+    for threads in [0u8, 1, 4] {
         group.bench_function(BenchmarkId::new("seqair", threads), |b| {
             b.iter(|| {
-                let mut stream =
-                    BgzfStream::builder(Cursor::new(bytes)).threads(threads).build().unwrap();
+                let mut stream = match NonZeroU8::new(threads) {
+                    Some(n) => BgzfStream::builder(Cursor::new(bytes)).threads(n).build(),
+                    None => BgzfStream::new(Cursor::new(bytes)),
+                };
                 let mut total = 0usize;
                 loop {
                     let n = stream.fill().unwrap().len();
@@ -88,11 +91,13 @@ fn bam_stream(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(*plain_len));
     group.sample_size(20);
 
-    for threads in [0usize, 1, 4] {
+    for threads in [0u8, 1, 4] {
         group.bench_function(BenchmarkId::new("seqair", threads), |b| {
             b.iter(|| {
-                let stream =
-                    BgzfStream::builder(Cursor::new(bytes)).threads(threads).build().unwrap();
+                let stream = match NonZeroU8::new(threads) {
+                    Some(n) => BgzfStream::builder(Cursor::new(bytes)).threads(n).build(),
+                    None => BgzfStream::new(Cursor::new(bytes)),
+                };
                 let mut reader = BamStreamReader::from_bgzf(stream).unwrap();
                 let mut record = RawBamRecord::default();
                 let mut n = 0usize;

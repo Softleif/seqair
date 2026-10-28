@@ -4,7 +4,7 @@
 
 use crate::bam::{
     BamHeader, RawBamRecord,
-    bgzf::{BgzfError, BgzfStream, EofMarker},
+    bgzf::{BgzfError, BgzfStream, EofMarker, Workers},
     header::BAM_MAGIC,
     stream::{BamStreamError, BamStreamReader},
 };
@@ -73,15 +73,28 @@ enum Inner {
 #[derive(Debug)]
 pub struct AlignmentStreamBuilder<R> {
     inner: R,
-    threads: usize,
+    workers: Workers,
     eof_marker: EofMarker,
 }
 
 impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
-    /// Inflate BGZF blocks on `threads` worker threads (`r[bgzf.stream.threads]`).
+    /// Inflate up to `n` BGZF batches at once on the reading thread's rayon
+    /// pool, else the global one (`r[bgzf.stream.current_pool]`).
     #[must_use]
-    pub fn threads(mut self, threads: usize) -> Self {
-        self.threads = threads;
+    pub fn threads(mut self, n: std::num::NonZeroU8) -> Self {
+        self.workers = Workers::Threads { n, pool: None };
+        self
+    }
+
+    /// Inflate up to `n` BGZF batches at once on `pool`
+    /// (`r[bgzf.stream.shared_pool]`).
+    #[must_use]
+    pub fn threads_in(
+        mut self,
+        n: std::num::NonZeroU8,
+        pool: impl Into<std::sync::Arc<rayon_core::ThreadPool>>,
+    ) -> Self {
+        self.workers = Workers::Threads { n, pool: Some(pool.into()) };
         self
     }
 
@@ -109,7 +122,8 @@ impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
 /// use seqair::bam::RawBamRecord;
 /// use seqair::reader::AlignmentStream;
 ///
-/// let mut stream = AlignmentStream::builder(std::io::stdin()).threads(2).build()?;
+/// let two = std::num::NonZeroU8::new(2).expect("2 is not 0");
+/// let mut stream = AlignmentStream::builder(std::io::stdin()).threads(two).build()?;
 /// let mut record = RawBamRecord::default();
 /// while stream.read_record(&mut record)? {
 ///     // ...
@@ -142,7 +156,7 @@ impl AlignmentStream {
 
     /// Configure threads and EOF-marker handling before detecting the format.
     pub fn builder<R: Read + Send + 'static>(inner: R) -> AlignmentStreamBuilder<R> {
-        AlignmentStreamBuilder { inner, threads: 0, eof_marker: EofMarker::Required }
+        AlignmentStreamBuilder { inner, workers: Workers::Inline, eof_marker: EofMarker::Required }
     }
 
     // r[impl unified.stream.detect]
@@ -157,9 +171,9 @@ impl AlignmentStream {
             if is_bgzf(&mut inner, &mut prefix)? {
                 let source = Cursor::new(prefix).chain(inner);
                 let mut bgzf = BgzfStream::builder(source)
-                    .threads(options.threads)
+                    .workers(options.workers)
                     .eof_marker(options.eof_marker)
-                    .build()?;
+                    .build();
                 let magic = peek_magic(&mut bgzf)?;
                 if magic == BAM_MAGIC {
                     let reader = BamStreamReader::after_magic(bgzf)?;

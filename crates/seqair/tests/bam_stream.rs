@@ -542,7 +542,12 @@ fn noodles_bam(dir: &Path, sam: &Path) -> PathBuf {
 /// Every record of the BAM at `path`, streamed by seqair.
 fn seqair_stream(path: &Path, threads: usize) -> Vec<RawBamRecord> {
     let file = std::fs::File::open(path).unwrap();
-    let stream = BgzfStream::builder(file).threads(threads).build().unwrap();
+    let builder = BgzfStream::builder(file);
+    let stream = match u8::try_from(threads).ok().and_then(std::num::NonZeroU8::new) {
+        Some(n) => builder.threads(n),
+        None => builder,
+    }
+    .build();
     let mut reader = BamStreamReader::from_bgzf(stream).unwrap();
     reader.records().collect::<Result<_, _>>().unwrap()
 }

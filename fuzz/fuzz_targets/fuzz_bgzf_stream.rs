@@ -19,9 +19,12 @@ fn read_all(
     eof: EofMarker,
     chunk: usize,
 ) -> (Vec<u8>, Option<String>) {
-    let Ok(mut stream) = BgzfStream::builder(input).threads(threads).eof_marker(eof).build() else {
-        return (Vec::new(), Some("spawn".to_owned()));
-    };
+    let builder = BgzfStream::builder(input).eof_marker(eof);
+    let mut stream = match u8::try_from(threads).ok().and_then(std::num::NonZeroU8::new) {
+        Some(n) => builder.threads(n),
+        None => builder,
+    }
+    .build();
     let mut out = Vec::new();
     let mut buf = vec![0u8; chunk];
     loop {
