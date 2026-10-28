@@ -32,6 +32,9 @@ References with no records MUST be omitted from TBI output. Only references that
 r[index_builder.tbi_format]
 TBI output MUST be BGZF-compressed with magic `TBI\x01`, followed by: n_ref (only refs with data), format (2 for VCF), col_seq (1), col_beg (2), col_end (0), meta (`#` = 35), skip (0), sequence names (only for refs with data); then BAI-compatible bin/chunk/linear data per reference.
 
+r[index_builder.no_coor_trailer]
+Every index format MUST end with the `uint64_t n_no_coor` trailer — the records with no reference — as htslib's `idx_save_core` writes it for BAI, TBI and CSI alike, `0` when there are none (VCF and BCF records always have a CHROM, so their indexes always hold `0`). The trailer is optional for readers (`r[csi.n_no_coor]`), but an index without it differs from `tabix`'s and `bcftools index`'s, and `samtools idxstats` reports nothing for the unplaced line.
+
 r[index_builder.csi_format]
 CSI output MUST be BGZF-compressed with magic `CSI\x01`, followed by: min_shift, depth, l_aux, aux data; then per-reference bin data with per-bin loffset (computed from linear index), no separate linear index array.
 

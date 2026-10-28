@@ -50,5 +50,8 @@ The writer MUST reuse an internal line buffer across records to avoid per-record
 r[vcf_writer.buffered_output]
 Plain (uncompressed) VCF output MUST reach the caller's writer through an internal buffer of at least 64 KiB, not one `write_all` per record. Callers commonly hand the writer an unbuffered file (rastair wraps a `File` in `Box<dyn Write>`) or a line-buffered stdout, and a write per line then costs one system call per record — 78 % of the time of writing a whole-chromosome VCF. The bytes written are unchanged; only when they reach the sink changes. `finish()` MUST flush the buffer and then the sink, and dropping the writer without `finish()` SHOULD flush it on a best-effort basis, as the BGZF formats do (`r[bgzf.writer.finish]`), and MUST log a failed flush with `warn!` rather than discard it silently as `BufWriter`'s own drop does.
 
+r[vcf_writer.index_amend_last]
+The VCF.gz and BCF writers MUST name a record end that falls on a block boundary the way `bcftools index` names it reading the file back — by the next block's `(offset, 0)` — calling `IndexBuilder::amend_last` after `flush_if_needed` before each record, and ending the last block before `finish` (`r[index_builder.amend_last]`). htslib's `vcf_write` and `sam_idx_save` do the same. Otherwise the co-produced TBI or CSI holds the same positions under the other name and differs from `bcftools index`'s.
+
 r[vcf_writer.finish]
 `finish()` MUST flush all buffered data and, for BGZF output, write the EOF marker block and finalize the TBI index.

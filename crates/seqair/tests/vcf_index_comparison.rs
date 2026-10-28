@@ -498,3 +498,178 @@ fn empty_vcf_produces_valid_tbi(tc: TestCase) {
     let text = String::from_utf8(output.stdout).unwrap();
     assert_eq!(text.trim(), "", "empty VCF should have no records");
 }
+
+// ── Whole-index comparison ─────────────────────────────────────────────
+
+/// A bin's CSI `loffset` (TBI: `None`) and its chunks.
+type Bin = (Option<u64>, Vec<(u64, u64)>);
+
+/// One reference's index: bins (id → loffset for CSI, chunks), linear index.
+#[derive(Debug, PartialEq, Eq)]
+struct RefIndex {
+    bins: std::collections::BTreeMap<u32, Bin>,
+    linear: Vec<u64>,
+}
+
+/// A parsed TBI or CSI: the references' indexes and the `n_no_coor` trailer.
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedIndex {
+    refs: Vec<RefIndex>,
+    n_no_coor: Option<u64>,
+}
+
+struct Cursor<'a>(&'a [u8]);
+impl Cursor<'_> {
+    fn take(&mut self, n: usize) -> &[u8] {
+        let (head, tail) = self.0.split_at(n);
+        self.0 = tail;
+        head
+    }
+    fn i32(&mut self) -> i32 {
+        i32::from_le_bytes(self.take(4).try_into().unwrap())
+    }
+    fn u32(&mut self) -> u32 {
+        u32::from_le_bytes(self.take(4).try_into().unwrap())
+    }
+    fn u64(&mut self) -> u64 {
+        u64::from_le_bytes(self.take(8).try_into().unwrap())
+    }
+}
+
+/// Parse a decompressed TBI (`csi == false`) or CSI. Bins are keyed by id, so
+/// htslib's hash-table bin order does not matter.
+fn parse_index(data: &[u8], csi: bool) -> ParsedIndex {
+    let mut c = Cursor(data);
+    let n_ref = if csi {
+        assert_eq!(c.take(4), b"CSI\x01");
+        let _min_shift = c.i32();
+        let _depth = c.i32();
+        let l_aux = c.i32() as usize;
+        c.take(l_aux);
+        c.i32()
+    } else {
+        assert_eq!(c.take(4), b"TBI\x01");
+        let n_ref = c.i32();
+        c.take(24); // format, col_seq, col_beg, col_end, meta, skip
+        let l_nm = c.i32() as usize;
+        c.take(l_nm);
+        n_ref
+    };
+    let refs = (0..n_ref)
+        .map(|_| {
+            let n_bin = c.i32();
+            let bins = (0..n_bin)
+                .map(|_| {
+                    let id = c.u32();
+                    let loffset = csi.then(|| c.u64());
+                    let n_chunk = c.i32();
+                    let chunks = (0..n_chunk).map(|_| (c.u64(), c.u64())).collect();
+                    (id, (loffset, chunks))
+                })
+                .collect();
+            let linear = if csi {
+                Vec::new()
+            } else {
+                let n_intv = c.i32();
+                (0..n_intv).map(|_| c.u64()).collect()
+            };
+            RefIndex { bins, linear }
+        })
+        .collect();
+    let n_no_coor = (c.0.len() == 8).then(|| c.u64());
+    assert!(c.0.is_empty(), "{} bytes left over", c.0.len());
+    ParsedIndex { refs, n_no_coor }
+}
+
+/// Equal, or a panic naming the first bin (or linear-index entry) that differs.
+fn assert_same_index(ours: &ParsedIndex, theirs: &ParsedIndex, what: &str) {
+    assert_eq!(ours.refs.len(), theirs.refs.len(), "{what}: n_ref");
+    for (i, (a, b)) in ours.refs.iter().zip(&theirs.refs).enumerate() {
+        let ids: std::collections::BTreeSet<_> = a.bins.keys().chain(b.bins.keys()).collect();
+        for id in ids {
+            assert_eq!(a.bins.get(id), b.bins.get(id), "{what}: ref {i} bin {id} (ours, theirs)");
+        }
+        assert_eq!(a.linear, b.linear, "{what}: ref {i} linear index");
+    }
+    assert_eq!(ours.n_no_coor, theirs.n_no_coor, "{what}: n_no_coor");
+}
+
+/// Write `n` records at sorted positions over a contig long enough that the
+/// file spans many BGZF blocks, so `compress_binning` has bins to move; return
+/// the VCF.gz path and the index builder the writer co-produced.
+fn write_large_vcf(
+    dir: &std::path::Path,
+    positions: &[u32],
+    format: OutputFormat,
+) -> (std::path::PathBuf, seqair::io::IndexBuilder, Vec<seqair_types::SmolStr>) {
+    let mut builder = VcfHeader::builder();
+    let chr1 = builder.register_contig("chr1", ContigDef { length: Some(100_000_000) }).unwrap();
+    let mut builder = builder.infos();
+    let dp: InfoInt = builder
+        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
+        .unwrap();
+    let header = Arc::new(builder.formats().samples().build().unwrap());
+    let vcf_path = dir.join(if format == OutputFormat::Bcf { "large.bcf" } else { "large.vcf.gz" });
+    let mut writer = Writer::new(std::fs::File::create(&vcf_path).unwrap(), format)
+        .write_header(&header)
+        .unwrap();
+    for (i, &pos) in positions.iter().enumerate() {
+        let alleles = Alleles::snv(Base::A, Base::C).unwrap();
+        let mut enc = writer
+            .begin_record(&chr1, Pos1::new(pos).unwrap(), &alleles, None)
+            .unwrap()
+            .filter_pass();
+        dp.encode(&mut enc, i as i32).unwrap();
+        enc.emit().unwrap();
+    }
+    let (_inner, index) = writer.finish().unwrap();
+    let names = header.contigs().keys().cloned().collect();
+    (vcf_path, index.expect("should produce index").into_builder(), names)
+}
+
+// r[verify index_builder.tbi_format]
+// r[verify index_builder.compress_bins]
+// r[verify index_builder.no_coor_trailer]
+// r[verify vcf_writer.index_amend_last]
+// r[verify csi.write_format]
+/// The indexes seqair co-produces hold exactly what `bcftools index` builds
+/// for the same file: every bin with its chunks (after `compress_binning`),
+/// the TBI linear index, the CSI `loffset`s, and the `n_no_coor` trailer —
+/// TBI for VCF.gz (`-t`) and CSI for BCF (`-c`). (A VCF.gz CSI is not
+/// compared: htslib's tabix path gives it at least six levels at
+/// `min_shift` 14, seqair the fewest that cover the contigs.)
+#[hegel::test(test_cases = crate::pinned::cases(10))]
+fn whole_tbi_and_csi_match_bcftools(tc: TestCase) {
+    if !has_bcftools() {
+        return;
+    }
+    let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(20_000));
+    let span = tc.draw(gs::integers::<u32>().min_value(1).max_value(99_000_000));
+    let mut positions: Vec<u32> =
+        (0..n).map(|_| tc.draw(gs::integers::<u32>().min_value(1).max_value(span))).collect();
+    positions.sort_unstable();
+
+    for format in [OutputFormat::VcfGz, OutputFormat::Bcf] {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, index, names) = write_large_vcf(dir.path(), &positions, format);
+        let csi = format == OutputFormat::Bcf;
+        let ours = dir.path().join("ours.idx");
+        let file = std::fs::File::create(&ours).unwrap();
+        if csi {
+            index.write_csi(file, names.len(), &[]).unwrap();
+        } else {
+            index.write_tbi(file, &names).unwrap();
+        }
+        let theirs = dir.path().join("theirs.idx");
+        let out = std::process::Command::new("bcftools")
+            .args(["index", if csi { "-c" } else { "-t" }, "-o"])
+            .arg(&theirs)
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let ours = parse_index(&decompress_tbi(&ours), csi);
+        let theirs = parse_index(&decompress_tbi(&theirs), csi);
+        assert_same_index(&ours, &theirs, &format!("{format:?}"));
+    }
+}
