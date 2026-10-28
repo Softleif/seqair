@@ -291,3 +291,26 @@ fn set_flags_keeps_the_cigar_check() {
     record.set_flags(reverse_unmapped).unwrap();
     assert_eq!(record.flags(), reverse_unmapped);
 }
+
+// r[verify bam.raw_record]
+/// `decode_seq_into` keeps every 4-bit code; it used to decode through the
+/// lossy `Base` table, turning `=` and every ambiguity code into `N`.
+#[test]
+fn decode_seq_into_keeps_every_iupac_code() {
+    let wire = Wire {
+        tid: -1,
+        pos: -1,
+        flag: 4,
+        qname: b"r".to_vec(),
+        cigar: Vec::new(),
+        seq_len: 16,
+        aux: Vec::new(),
+    };
+    let mut payload = wire.payload();
+    let seq_at = 32 + 2;
+    payload[seq_at..seq_at + 8].copy_from_slice(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]);
+    let record = stream_records(&bam_of_payloads(&[payload])).remove(0);
+    let mut seq = b">".to_vec();
+    record.decode_seq_into(&mut seq);
+    assert_eq!(seq, b">=ACMGRSVTWYHKDBN");
+}
