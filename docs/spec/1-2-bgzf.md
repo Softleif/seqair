@@ -61,6 +61,25 @@ The reader MUST support partial reads (up to N bytes) returning the actual count
 r[bgzf.libdeflate]
 Decompression SHOULD use the `libdeflater` crate (Rust bindings to the libdeflate C library) for performance parity with htslib's libdeflate usage. libdeflate provides hardware-accelerated DEFLATE decompression and CRC32 computation.
 
+## Streaming (no index, no seeking)
+
+`BgzfReader` needs `Seek` because it serves index-driven random access. Reading a whole BGZF stream front to back — a BAM piped from an aligner, `stdin`, a socket — needs none of that, and must not require it.
+
+r[bgzf.stream]
+`BgzfStream<R: Read>` MUST decode a BGZF stream front to back from any `io::Read`, with no `Seek` bound. It shares block framing and inflation with `BgzfReader` (`r[bgzf.magic]`, `r[bgzf.bsize]`, `r[bgzf.decompression+2]`, `r[bgzf.crc32]`, `r[bgzf.max_block_size]`, `r[bgzf.empty_block]`, `r[bgzf.truncated_header]`, `r[bgzf.read_errors]`) — one implementation of each, not a copy.
+
+r[bgzf.stream.eof_marker]
+A stream whose input ends at a block boundary without an empty block immediately before that end has lost its EOF marker — it is the shape of a truncated file or a producer that died mid-stream. By default (`EofMarker::Required`) `BgzfStream` MUST fail such input with `BgzfError::MissingEofMarker` when the end is reached, after all data before it has been returned. `EofMarker::Optional` accepts it as a clean end, for producers known to omit the marker. (htslib only warns, "EOF marker is absent"; a streaming consumer has no other way to tell a truncated pipe from a finished one, so seqair's default is the error.)
+
+r[bgzf.stream.api]
+`BgzfStream` MUST offer typed reads that return `BgzfError` — `read_exact_into` (`UnexpectedEof` if the stream ends first), `read_up_to` (0 only at the end), and `fill`/`advance` over the current batch of blocks — and MUST also implement `io::Read` and `io::BufRead`, wrapping a `BgzfError` in an `io::Error` of kind `InvalidData` (the `BgzfError` is the error's source, recoverable by downcast).
+
+r[bgzf.stream.poison]
+After any error, every later read MUST fail with `BgzfError::Poisoned`. Returning `Ok(0)` after an error would let a caller that retries (as `io::Read` callers may) mistake a failed stream for a finished one.
+
+r[bgzf.stream.threads]
+`BgzfStream` MAY inflate blocks on a pool of `threads` worker threads (`threads = 0` inflates on the calling thread). The calling thread reads compressed blocks, hands batches of them to the pool, and returns their bytes strictly in stream order; at most a small multiple of `threads` batches are in flight, so memory stays bounded when the consumer is slower than the pool. Output MUST be identical for every thread count, including where errors are reported: an error is returned when the consumer reaches the failing block, after every byte before it. A worker that stops without answering MUST surface as `BgzfError::DecompressionWorkerLost`, never a hang. Dropping the stream MUST join the workers and MUST NOT block on outstanding work beyond the batch each worker is inflating.
+
 ## Integrity
 
 > _[SAM1] §4.1 "The BGZF compression format" — gzip footer CRC32 and ISIZE fields_

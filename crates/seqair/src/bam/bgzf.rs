@@ -7,6 +7,9 @@ use std::{
 };
 use tracing::instrument;
 
+pub mod stream;
+pub use stream::{BgzfStream, BgzfStreamBuilder, EofMarker};
+
 // r[impl bgzf.virtual_offset]
 /// Virtual file offset in a BGZF file.
 ///
@@ -108,6 +111,21 @@ pub enum BgzfError {
     // r[impl bgzf.decompression+2]
     #[error("BGZF block inflated to {found} bytes, but its ISIZE footer says {expected}")]
     SizeMismatch { expected: u32, found: usize },
+
+    // r[impl bgzf.stream.eof_marker]
+    #[error(
+        "BGZF input ended without an EOF marker block; it is probably truncated \
+         (use EofMarker::Optional to accept such input)"
+    )]
+    MissingEofMarker,
+
+    // r[impl bgzf.stream.poison]
+    #[error("BGZF stream already failed; an earlier read returned the error")]
+    Poisoned,
+
+    // r[impl bgzf.stream.threads]
+    #[error("a BGZF decompression worker stopped before finishing its blocks")]
+    DecompressionWorkerLost,
 }
 
 // r[impl bgzf.libdeflate]
@@ -474,7 +492,8 @@ fn read_exact_or_truncated(inner: &mut impl Read, buf: &mut [u8]) -> Result<(), 
 /// Read one block's framing from `inner`, appending its DEFLATE payload (for a
 /// block with data) to `payload`.
 ///
-/// The block parser of [`BgzfReader`]: an end of input at a block boundary is [`Frame::EndOfInput`]; anywhere else it is
+/// The block parser shared by [`BgzfReader`] and [`BgzfStream`]: an end of
+/// input at a block boundary is [`Frame::EndOfInput`]; anywhere else it is
 /// [`BgzfError::TruncatedBlock`]. On error `payload` may hold a partial
 /// payload past its original length.
 pub(crate) fn read_frame(inner: &mut impl Read, payload: &mut Vec<u8>) -> Result<Frame, BgzfError> {
