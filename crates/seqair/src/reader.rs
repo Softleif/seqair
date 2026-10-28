@@ -26,7 +26,9 @@ pub use readers::{Pileup, Readers};
 pub use resolve::{ResolveTid, Tid, TidError};
 pub use segment::{IntoSegmentTarget, Segment, SegmentOptions, SegmentOptionsError, Segments};
 pub use stream::{AlignmentStream, AlignmentStreamBuilder, AlignmentStreamError, StreamFormat};
-pub use stream_pileup::{DEFAULT_WINDOW_LEN, StreamColumn, StreamPileup, StreamPileupError};
+pub use stream_pileup::{
+    DEFAULT_WINDOW_LEN, StreamColumn, StreamPileup, StreamPileupError, WindowBudget,
+};
 
 #[cfg(feature = "fuzz")]
 pub use fuzz::FuzzReaders;
