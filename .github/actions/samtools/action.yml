@@ -1,0 +1,23 @@
+name: samtools
+description: >-
+  samtools 1.24, the htslib the SAM/BAM oracle tests are written against.
+  Ubuntu's apt samtools is 1.19, which (among other differences) reads U
+  as N and rejects an empty `B:A` array, so those tests fail against it.
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/samtools
+        key: samtools-1.24-${{ runner.os }}-${{ runner.arch }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        curl -fsSL https://github.com/samtools/samtools/releases/download/1.24/samtools-1.24.tar.bz2 \
+          | tar -xj -C "$RUNNER_TEMP"
+        cd "$RUNNER_TEMP/samtools-1.24"
+        ./configure --prefix="$HOME/samtools" --without-curses
+        make -j"$(nproc)" install
+    - shell: bash
+      run: echo "$HOME/samtools/bin" >> "$GITHUB_PATH"
