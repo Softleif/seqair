@@ -8,7 +8,7 @@
 
 use super::{
     AuxData, AuxDataError, BamHeader, CigarOp, DecodeError, MateFields,
-    aux::{Aux, AuxValue, find_tag},
+    aux::{Aux, AuxLayoutError, AuxValue, find_tag, validate_aux},
     cigar::CIGAR_S,
     record::{self, read2},
     seq,
@@ -101,6 +101,9 @@ pub enum RawRecordEditError {
 
     #[error("aux edit failed")]
     Aux(#[from] AuxDataError),
+
+    #[error("the record's aux block is malformed")]
+    MalformedAux(#[from] AuxLayoutError),
 }
 
 /// Why [`RawBamRecord::refill`] failed: the caller's fill, or validation.
@@ -446,15 +449,17 @@ impl RawBamRecord {
     /// Costs one copy of the aux block.
     ///
     /// # Errors
-    /// `edit`'s own error, [`RawRecordEditError::RecordTooLarge`], or
+    /// [`RawRecordEditError::MalformedAux`] if the existing tags are not
+    /// well-formed, `edit`'s own error, [`RawRecordEditError::RecordTooLarge`], or
     /// [`RawRecordEditError::LongCigarChanged`] if the real CIGAR would
     /// differ (a `CG` tag removed or rewritten).
     pub fn edit_aux(
         &mut self,
         edit: impl FnOnce(&mut AuxData) -> Result<(), AuxDataError>,
     ) -> Result<(), RawRecordEditError> {
-        let mut aux =
-            AuxData::from_bytes(self.payload.get(self.qual_end..).unwrap_or_default().to_vec());
+        let current = self.payload.get(self.qual_end..).unwrap_or_default();
+        validate_aux(current)?;
+        let mut aux = AuxData::from_bytes(current.to_vec());
         edit(&mut aux)?;
         let len = self.qual_end.saturating_add(aux.as_bytes().len());
         if len > record::MAX_RECORD_SIZE {
@@ -589,6 +594,29 @@ mod tests {
         let mut out = b">".to_vec();
         record.decode_seq_into(&mut out);
         assert_eq!(out, b">=ACMGRSVTWYHKDBNM");
+    }
+
+    // r[verify bam.raw_record.edit_aux]
+    #[test]
+    fn edit_aux_refuses_a_malformed_block_without_panicking() {
+        let truncated_ml: Vec<u8> = [b"MLBC".as_slice(), &100u32.to_le_bytes(), &[7]].concat();
+        let shapes: [&[u8]; 3] = [b"XMZabc", &truncated_ml, b"NMi\x01"];
+        for aux in shapes {
+            let mut record =
+                RawBamRecord::from_payload(payload(false, 4, &[], &[1, 2], aux), &header())
+                    .unwrap();
+            let before = record.as_payload().to_vec();
+            let err = record
+                .edit_aux(|a| {
+                    a.remove(*b"XM");
+                    a.remove(*b"ML");
+                    a.remove(*b"NM");
+                    Ok(())
+                })
+                .unwrap_err();
+            assert!(matches!(err, RawRecordEditError::MalformedAux(_)), "{aux:?}: {err:?}");
+            assert_eq!(record.as_payload(), before);
+        }
     }
 
     // r[verify bam.raw_record.iupac_bases]
