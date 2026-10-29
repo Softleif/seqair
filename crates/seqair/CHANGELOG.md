@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `RawBamRecord::set_seq`, `set_base` and `edit_aux` edit a record in place: the sequence (same length, IUPAC kept) or one base of it, and the aux block through an `AuxData` (untouched tags keep their bytes). An edit that would change a long CIGAR's `CG` tag is refused. Errors are `bam::RawRecordEditError`.
+
 ## v0.9.0 (2026-10-29)
 
 ### Added
