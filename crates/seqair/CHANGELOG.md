@@ -10,10 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `RawBamRecord::set_seq(&[IupacBase])`, `set_base(QPos, IupacBase)` and `edit_aux` edit a record in place: the sequence (same length, every IUPAC code kept) or one base of it, and the aux block through an `AuxData` (untouched tags keep their bytes). `RawBamRecord::iupac_bases()` yields the sequence as `IupacBase`s. An edit that would change a long CIGAR's `CG` tag, or that starts from a malformed aux block, is refused. Errors are `bam::RawRecordEditError`.
+- **Lossless indexed region queries.** `IndexedBamReader::query_raw`, `IndexedSamReader::query_raw` and `IndexedReader::query_raw` yield the records overlapping a region as `RawBamRecord`s, unchanged — the selection and order of `fetch_into` (and what `samtools view <file> <region>` prints), without the lossy `RecordStore` decode. `read_record(&mut RawBamRecord)` reuses one buffer; the queries are also iterators. A record that fails validation is an error the query continues past (for BAM `BamError::InvalidRecord`, with the record's virtual offset); any other error ends it (`BamError::Poisoned`, `SamError::Poisoned`).
 - `bam::seq::decode_iupac_bases_into` and `encode_iupac_bases_into`: packed 4-bit SEQ to `IupacBase`s (the SIMD nibble kernel of the ASCII and `Base` paths) and back (a pair loop the compiler vectorises, faster than the kernel on NEON). `RawBamRecord::iupac_bases_into` appends the sequence into a caller's buffer, and `set_seq` packs the same way. The SIMD kernels are tested at Fallback, SSE2, SSE4.2, AVX2 and NEON; the AVX-512 level is compiled but not yet executed.
 
 ### Changed
 
+- **`SamRecordEncoder` (and so `SamStreamReader`) keeps a line whose RNEXT the header lacks**, as htslib does: no mate reference, PNEXT and FLAG as written, one warning per process. It was `SamRecordError::UnknownMateReference`, which is gone; the indexed SAM reader already kept such lines, so the streaming and indexed readers now agree on them.
 - `RawBamRecord::set_flags` returns `RawRecordEditError` (variant `Flags`) instead of `DecodeError` (breaking: callers matching on the error type).
 
 ### Fixed
