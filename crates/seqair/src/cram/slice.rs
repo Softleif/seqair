@@ -10,7 +10,6 @@
 )]
 
 use core::range::Range;
-use std::ops::Neg;
 
 use super::{
     block::{self, Block, ContentType},
@@ -141,6 +140,8 @@ struct SliceMateInfo {
     bam_flags: u16,
     /// The record's reference (needed for `next_ref_id` resolution).
     tid: Option<Tid>,
+    /// TLEN stored with CRAM flag `0x10`, which overrides the computed one.
+    explicit_tlen: Option<i32>,
 }
 
 // r[impl cram.slice_cache]
@@ -403,6 +404,17 @@ impl SliceHeader {
     }
 }
 
+/// What a decode adds to the records beyond what the file stores, as htslib
+/// does; the indexed reader asks for nothing.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Synthesis<'a> {
+    /// `MD` and `NM` (`r[cram.stream.md_nm]`).
+    pub(crate) md_nm: bool,
+    /// Names for the records the file names not, with this prefix
+    /// (`r[cram.record.read_name+2]`).
+    pub(crate) name_prefix: Option<&'a str>,
+}
+
 /// Which of a slice's records a decode keeps; the others are read past
 /// without reconstructing their sequence (`r[cram.slice.multi_ref_skip]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -502,7 +514,7 @@ pub(crate) fn decode_slice<B: SeqBase>(
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     keep: Keep,
-    decode_md: bool,
+    synthesis: Synthesis<'_>,
     scratch: &mut SliceScratch<B>,
 ) -> Result<DecodedSlice<B>, CramError> {
     decode_slice_records(
@@ -513,7 +525,7 @@ pub(crate) fn decode_slice<B: SeqBase>(
         header,
         read_group_ids,
         keep,
-        decode_md,
+        synthesis,
         scratch,
     )
     .map(|(slice, _)| slice)
@@ -539,7 +551,7 @@ pub(crate) fn multi_ref_spans<B: SeqBase>(
         header,
         read_group_ids,
         Keep::Nothing,
-        false,
+        Synthesis::default(),
         scratch,
     )?;
     let mut spans: Vec<(Tid, Range<i64>)> = Vec::new();
@@ -570,7 +582,7 @@ fn decode_slice_records<B: SeqBase>(
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     keep: Keep,
-    decode_md: bool,
+    synthesis: Synthesis<'_>,
     scratch: &mut SliceScratch<B>,
 ) -> Result<(DecodedSlice<B>, Vec<SliceMateInfo>), CramError> {
     let slice_data = container_data
@@ -602,13 +614,6 @@ fn decode_slice_records<B: SeqBase>(
         }
         SliceReference::PerTid(_) => (&[], 0),
     };
-
-    // r[impl cram.edge.unknown_read_names]
-    if !ch.preservation.read_names_included {
-        warn!(
-            "CRAM file has RN=false (read names not stored). Mate-pair overlap dedup will be unreliable."
-        );
-    }
 
     // r[impl cram.edge.empty_slice]
     if sh.num_records == 0 {
@@ -714,8 +719,12 @@ fn decode_slice_records<B: SeqBase>(
     // htslib has no reference for a slice of a file written without one
     // (`RR` false) unless the slice embeds it.
     let decode_md = B::MD_NM
-        && decode_md
+        && synthesis.md_nm
         && (ch.preservation.reference_required || sh.embedded_reference >= 0);
+    let names = synthesis.name_prefix.map(|prefix| NameRecords {
+        prefix,
+        first_record: u64::try_from(sh.record_counter).unwrap_or(0),
+    });
 
     order_external_blocks(ch, &mut external_blocks);
     let mut ctx = DecodeContext::new(&core_data.data, external_blocks);
@@ -749,7 +758,7 @@ fn decode_slice_records<B: SeqBase>(
 
     // Post-process: resolve template_len for attached/downstream mates.
     // Follow mate_line chains to compute alignment span, then assign signed TLEN.
-    resolve_mate_tlen(&mate_infos, &mut out);
+    resolve_mates(&mut mate_infos, &mut out, names);
     out.shrink_to_fit();
     Ok((out, mate_infos))
 }
@@ -899,7 +908,7 @@ fn decode_record<B: SeqBase>(
     let raw_flags = ds.bam_flags.decode(ctx)?;
     let raw_flags: u16 = u16::try_from(raw_flags)
         .map_err(|source| CramError::InvalidBamFlags { value: raw_flags, source })?;
-    let bam_flags = BamFlags::from(raw_flags);
+    let mut bam_flags = BamFlags::from(raw_flags);
 
     // 2. CF (CRAM flags)
     #[expect(
@@ -961,7 +970,7 @@ fn decode_record<B: SeqBase>(
     // 6. RG (read group)
     let read_group = ds.read_group.decode(ctx)?;
 
-    // r[impl cram.record.read_name]
+    // r[impl cram.record.read_name+2]
     // 7. RN (read name) — decode straight into the caller's reusable
     // `name_buf` to avoid a per-record `Vec<u8>` allocation.
     name_buf.clear();
@@ -974,17 +983,14 @@ fn decode_record<B: SeqBase>(
     // 8. Mate data
     let mut mate_fields = MateFields::default();
     let mut mate_line: i32 = -1;
+    let mut explicit_tlen = None;
     if detached {
-        let _mate_flags = ds.mate_flags.decode(ctx)?;
+        let mate_flags = ds.mate_flags.decode(ctx)?;
+        // r[impl cram.record.read_name+2]
+        // A detached record's name is stored even when RN is false; it is
+        // the record's own, as htslib reads it.
         if !ch.preservation.read_names_included {
-            // Detached + RN=false: the codec stream carries a read-name
-            // (the mate's, per the CRAM spec) that we must consume but
-            // also must discard — when read_names_included is false the
-            // record's qname is unknown. Decode into `name_buf` (which is
-            // already empty for this branch) and immediately clear so
-            // qname stays empty downstream. No allocation in steady state.
             ds.read_name.decode_into(ctx, name_buf)?;
-            name_buf.clear();
         }
         // r[impl cram.record.ref_ids]
         mate_fields.tid = Tid::from_wire(ds.next_segment_ref.decode(ctx)?, header)
@@ -1002,6 +1008,16 @@ fn decode_record<B: SeqBase>(
             ),
         };
         mate_fields.template_len = NonZeroI32::new(ds.template_size.decode(ctx)?);
+        // r[impl cram.record.mate_flags]
+        if mate_flags & 0x1 != 0 {
+            bam_flags = bam_flags.with(0x1).with(0x20);
+        }
+        if mate_flags & 0x2 != 0 {
+            bam_flags = bam_flags.with(0x8);
+        }
+        if !bam_flags.is_paired() {
+            mate_fields.tid = None;
+        }
     } else if mate_downstream {
         let nf = ds.next_fragment.decode(ctx)?;
         // NF is relative: absolute mate index = current + 1 + nf
@@ -1013,6 +1029,10 @@ fn decode_record<B: SeqBase>(
         {
             mate_line = (record_index as i32).wrapping_add(1).wrapping_add(nf);
         }
+    }
+    // r[impl cram.record.explicit_tlen]
+    if !detached && cram_flags & 0x10 != 0 {
+        explicit_tlen = Some(ds.template_size.decode(ctx)?);
     }
 
     // 9. TL (tag line index)
@@ -1087,7 +1107,7 @@ fn decode_record<B: SeqBase>(
         // discarded, so don't reconstruct their bases/CIGAR. We still need to
         // drain every per-record data series in lockstep (they're independent
         // streams) and to compute `ref_consumed` for the SliceMateInfo.end_pos
-        // used by `resolve_mate_tlen`.
+        // used by `resolve_mates`.
         //
         // Reconstruction sets matching_bases / indel_bases for the kept-record
         // push later; for foreign-tid we don't push, so 0 is fine.
@@ -1175,14 +1195,18 @@ fn decode_record<B: SeqBase>(
         })?;
 
         append_rg(aux_buf);
+        // htslib's `aend` is never before `apos`: a read with no reference
+        // span covers its own position.
+        let mate_end = end_pos_raw.max(pos_0based.as_i64().saturating_add(1));
         if foreign_tid {
             return Ok(SliceMateInfo {
                 pos: pos_0based.as_i64(),
-                end_pos: end_pos_raw,
+                end_pos: mate_end,
                 mate_line,
                 slot: None,
-                bam_flags: raw_flags,
+                bam_flags: bam_flags.raw(),
                 tid: record_ref_id,
+                explicit_tlen,
             });
         }
 
@@ -1205,11 +1229,12 @@ fn decode_record<B: SeqBase>(
 
         return Ok(SliceMateInfo {
             pos: pos_0based.as_i64(),
-            end_pos: end_pos_raw,
+            end_pos: mate_end,
             mate_line,
             slot: Some(slot),
-            bam_flags: raw_flags,
+            bam_flags: bam_flags.raw(),
             tid: record_ref_id,
+            explicit_tlen,
         });
     }
 
@@ -1260,128 +1285,202 @@ fn decode_record<B: SeqBase>(
             mate_fields,
         )?)
     };
+    // An unplaced read's `AP` is 0: position -1, as htslib's `apos - 1`.
+    let mate_pos = if unplaced { alignment_pos.saturating_sub(1) } else { pos_0based.as_i64() };
     Ok(SliceMateInfo {
-        pos: pos_0based.as_i64(),
-        end_pos: pos_0based.as_i64(),
+        pos: mate_pos,
+        end_pos: mate_pos.saturating_add(1),
         mate_line,
         slot,
-        bam_flags: raw_flags,
+        bam_flags: bam_flags.raw(),
         tid: record_ref_id,
+        explicit_tlen,
     })
 }
 
-// r[impl cram.record.mate_tlen_reconstruction]
-/// Post-process mate cross-references to reconstruct `template_len` for
-/// attached/downstream mates. Mirrors htslib's `cram_decode_slice_xref`.
-///
-/// For each record with a downstream mate link, follows the chain to find
-/// the alignment span (min start to max end) across all fragments, then
-/// assigns signed TLEN: positive for the leftmost fragment, negative for
-/// the rightmost, with ties broken by the READ1 flag.
-#[expect(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "everything is based on infos.len()"
-)]
-fn resolve_mate_tlen<B: SeqBase>(infos: &[SliceMateInfo], out: &mut DecodedSlice<B>) {
+/// Names for the records a file stores none for (`RN` false), as htslib's
+/// `cram_to_bam` makes them (`r[cram.record.read_name+2]`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NameRecords<'a> {
+    /// The part before the `:`; htslib uses the basename of the file.
+    pub(crate) prefix: &'a str,
+    /// The slice header's `record_counter`.
+    pub(crate) first_record: u64,
+}
+
+/// htslib's `BAM_MAX_QNAME_LEN - 21`: room for the `:` and a 64-bit number.
+const MAX_NAME_PREFIX: usize = 254 - 21;
+
+// r[impl cram.record.mate_tlen_reconstruction+2]
+// r[impl cram.record.mate_attached]
+/// Resolve attached mates as htslib's `cram_decode_slice_xref` does: close
+/// each chain of downstream mates into a ring, give its records a TLEN from
+/// the chain's span (0 when the chain spans references), each record its
+/// mate's reference and position, and OR in the paired, mate-unmapped and
+/// mate-reverse flags; a record that is unmapped or has an unmapped mate
+/// gets TLEN 0. Then the explicit TLENs, and with `names` the names of
+/// records that have none.
+#[expect(clippy::indexing_slicing, reason = "indices are checked against infos.len() before use")]
+fn resolve_mates<B: SeqBase>(
+    infos: &mut [SliceMateInfo],
+    out: &mut DecodedSlice<B>,
+    names: Option<NameRecords<'_>>,
+) {
     let n = infos.len();
-    // Track which records we've already resolved to avoid reprocessing.
-    let mut resolved = vec![false; n];
-
-    for i in 0..n {
-        if resolved[i] || infos[i].mate_line < 0 {
+    let line = |ml: i32| usize::try_from(ml).ok().filter(|&m| m < n);
+    let mut tlen: Vec<Option<i64>> = vec![None; n];
+    for rec in 0..n {
+        let Some(mate) = line(infos[rec].mate_line) else {
+            if infos[rec].mate_line >= 0 {
+                warn!(rec, mate_line = infos[rec].mate_line, "CRAM mate line out of bounds");
+            }
             continue;
-        }
-
-        // Collect all records in this mate chain.
-        let mut chain: Vec<usize> = Vec::with_capacity(4);
-        let mut idx = i;
-        loop {
-            if idx >= n || resolved[idx] {
-                break;
-            }
-            chain.push(idx);
-            resolved[idx] = true;
-            let ml = infos[idx].mate_line;
-            if ml < 0 || ml as usize >= n {
-                break;
-            }
-            idx = ml as usize;
-            // Safety: break cycles
-            if chain.len() > n {
-                break;
-            }
-        }
-
-        if chain.len() < 2 {
-            continue;
-        }
-
-        // Compute alignment span and position counts across all fragments.
-        let mut aleft = i64::MAX;
-        let mut aright = i64::MIN;
-        let mut left_cnt = 0u32;
-        let mut right_cnt = 0u32;
-
-        for &j in &chain {
-            let info = &infos[j];
-            if info.pos < 0 {
-                continue; // unmapped
-            }
-            if info.pos < aleft {
-                aleft = info.pos;
-                left_cnt = 1;
-            } else if info.pos == aleft {
-                left_cnt = left_cnt.wrapping_add(1);
-            }
-            if info.end_pos > aright {
-                aright = info.end_pos;
-                right_cnt = 1;
-            } else if info.end_pos == aright {
-                right_cnt = right_cnt.wrapping_add(1);
-            }
-        }
-
-        if aright <= aleft {
-            continue; // unmapped or degenerate
-        }
-
-        // In 0-based half-open coordinates: tlen = max(end) - min(start).
-        // Equivalent to htslib's (aright - aleft + 1) in 1-based inclusive.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "template length fits in i32 for genomic data"
-        )]
-        let tlen_magnitude = (aright.wrapping_sub(aleft)) as i32;
-
-        // Determine sign for the FIRST record in the chain, then assign
-        // the opposite sign to all remaining records. This mirrors htslib's
-        // cram_decode_slice_xref sign assignment logic.
-        let first = &infos[chain[0]];
-        let first_tlen = if first.pos == aleft && (first.end_pos < aright || left_cnt <= 1) {
-            // Leftmost, and either not rightmost or unique leftmost
-            tlen_magnitude
-        } else if first.pos == aleft && first.end_pos == aright && left_cnt > 1 && right_cnt > 1 {
-            // Both leftmost and rightmost with ties — break by READ1 flag
-            if first.bam_flags & 0x40 != 0 { tlen_magnitude } else { tlen_magnitude.neg() }
-        } else {
-            // Rightmost or internal
-            tlen_magnitude.neg()
         };
+        if tlen[rec].is_none() && !close_chain(infos, &mut tlen, rec) {
+            warn!(rec, "CRAM mate chain does not run forward; mates left unresolved");
+            continue;
+        }
+        let mate = &infos[line(infos[rec].mate_line).unwrap_or(mate)];
+        let (mate_pos, mate_tid, mate_flags) = (mate.pos, mate.tid, BamFlags::from(mate.bam_flags));
+        let info = &mut infos[rec];
+        let mut flags = BamFlags::from(info.bam_flags).with(0x1);
+        if mate_flags.is_unmapped() {
+            flags = flags.with(0x8);
+            tlen[rec] = Some(0);
+        }
+        if flags.is_unmapped() {
+            tlen[rec] = Some(0);
+        }
+        if mate_flags.is_reverse() {
+            flags = flags.with(0x20);
+        }
+        info.bam_flags = flags.raw();
+        let Some(r) = info.slot.and_then(|slot| out.records.get_mut(slot as usize)) else {
+            continue;
+        };
+        r.flags = flags;
+        r.mate_fields.tid = mate_tid;
+        r.mate_fields.pos = Pos0::try_from(mate_pos).ok();
+        r.mate_fields.template_len =
+            tlen[rec].and_then(|t| NonZeroI32::new(i32::try_from(t).unwrap_or(0)));
+    }
+    for info in infos.iter() {
+        if let (Some(t), Some(r)) =
+            (info.explicit_tlen, info.slot.and_then(|slot| out.records.get_mut(slot as usize)))
+        {
+            r.mate_fields.template_len = NonZeroI32::new(t);
+        }
+    }
+    if let Some(names) = names {
+        name_records(infos, out, names);
+    }
+}
 
-        // First record gets first_tlen; all remaining get the opposite.
-        // Each record's mate is the next entry in the chain (last wraps to
-        // first).
-        let rest_tlen = first_tlen.neg();
-        for (ci, &j) in chain.iter().enumerate() {
-            let Some(slot) = infos[j].slot else { continue };
-            let mate = &infos[chain[if ci + 1 < chain.len() { ci + 1 } else { 0 }]];
-            let Some(r) = out.records.get_mut(slot as usize) else { continue };
-            r.mate_fields.template_len =
-                NonZeroI32::new(if ci == 0 { first_tlen } else { rest_tlen });
-            r.mate_fields.tid = mate.tid;
-            // An unmapped mate (`pos < 0`) has no position.
-            r.mate_fields.pos = Pos0::try_from(mate.pos).ok();
+/// Follow the chain of downstream mates from `rec`, close it into a ring
+/// (the last record's mate is `rec`) and give each record its TLEN; `false`
+/// if a link does not point forward, as htslib rejects.
+#[expect(clippy::indexing_slicing, reason = "indices are checked against infos.len() before use")]
+fn close_chain(infos: &mut [SliceMateInfo], tlen: &mut [Option<i64>], rec: usize) -> bool {
+    let n = infos.len();
+    let (mut aleft, mut aright) = (infos[rec].pos, infos[rec].end_pos);
+    let (mut left_cnt, mut right_cnt) = (0u32, 0u32);
+    let mut same_ref = true;
+    let mut id = rec;
+    loop {
+        let info = &infos[id];
+        if aleft > info.pos {
+            (aleft, left_cnt) = (info.pos, 1);
+        } else if aleft == info.pos {
+            left_cnt = left_cnt.saturating_add(1);
+        }
+        if aright < info.end_pos {
+            (aright, right_cnt) = (info.end_pos, 1);
+        } else if aright == info.end_pos {
+            right_cnt = right_cnt.saturating_add(1);
+        }
+        let ml = info.mate_line;
+        if ml < 0 {
+            infos[id].mate_line = i32::try_from(rec).unwrap_or(i32::MAX);
+            break;
+        }
+        match usize::try_from(ml) {
+            Ok(next) if next > id && next < n => id = next,
+            _ => return false,
+        }
+        same_ref &= infos[id].tid == infos[rec].tid;
+        if id == rec {
+            break;
+        }
+    }
+
+    let span = aright.saturating_sub(aleft);
+    let first = &infos[rec];
+    let first_tlen = if !same_ref {
+        0
+    } else if first.pos == aleft && (first.end_pos < aright || left_cnt <= 1) {
+        span
+    } else if first.pos == aleft && first.end_pos == aright && left_cnt > 1 && right_cnt > 1 {
+        if BamFlags::from(first.bam_flags).is_first_in_template() {
+            span
+        } else {
+            span.saturating_neg()
+        }
+    } else {
+        span.saturating_neg()
+    };
+    tlen[rec] = Some(first_tlen);
+    let mut id = rec;
+    for _ in 0..n {
+        let Some(next) = usize::try_from(infos[id].mate_line).ok().filter(|&m| m < n && m != rec)
+        else {
+            break;
+        };
+        tlen[next] = Some(first_tlen.saturating_neg());
+        id = next;
+    }
+    true
+}
+
+// r[impl cram.record.read_name+2]
+// r[impl cram.edge.unknown_read_names+2]
+/// Name every record that has none: its mate's name, or
+/// `<prefix>:<record number>`, the 1-based number in the file of the chain's
+/// first record when the mate comes earlier, else the record's own.
+fn name_records<B: SeqBase>(
+    infos: &[SliceMateInfo],
+    out: &mut DecodedSlice<B>,
+    names: NameRecords<'_>,
+) {
+    let prefix = names.prefix.as_bytes();
+    let prefix = prefix.get(..MAX_NAME_PREFIX).unwrap_or(prefix);
+    let name_of = |out: &DecodedSlice<B>, slot: Option<u32>| {
+        slot.and_then(|s| out.records.get(s as usize)).map(|r| r.name)
+    };
+    for (rec, info) in infos.iter().enumerate() {
+        let Some(own) = name_of(out, info.slot) else { continue };
+        if !own.is_empty() {
+            continue;
+        }
+        let mate = usize::try_from(info.mate_line).ok().and_then(|m| infos.get(m).map(|i| (m, i)));
+        let start = out.names.len();
+        match mate.and_then(|(_, m)| name_of(out, m.slot)).filter(|r| !r.is_empty()) {
+            Some(mate_name) => out.names.extend_from_within(mate_name),
+            None => {
+                let index = match mate {
+                    Some((m, _)) if m < rec => m,
+                    _ => rec,
+                };
+                let number = names
+                    .first_record
+                    .saturating_add(u64::try_from(index).unwrap_or(u64::MAX))
+                    .saturating_add(1);
+                out.names.extend_from_slice(prefix);
+                out.names.push(b':');
+                out.names.extend_from_slice(itoa::Buffer::new().format(number).as_bytes());
+            }
+        }
+        if let Some(r) = info.slot.and_then(|s| out.records.get_mut(s as usize)) {
+            r.name = Range { start, end: out.names.len() };
         }
     }
 }
@@ -1908,7 +2007,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
 /// `record_ref_id` does not match the query `tid` — we still need to
 /// advance every per-record data series in lockstep with the other
 /// records in the slice, and we still need `ref_consumed` (for
-/// `SliceMateInfo.end_pos` used by `resolve_mate_tlen`), but we don't
+/// `SliceMateInfo.end_pos` used by `resolve_mates`), but we don't
 /// need bases/CIGAR/ref-lookup since the record will be discarded.
 ///
 /// Stream consumption MUST match `decode_features_and_reconstruct`
@@ -2149,7 +2248,7 @@ mod tests {
             &bam_header,
             &[],
             Keep::Tid(tid(0)),
-            false,
+            Synthesis::default(),
             &mut SliceScratch::<Base>::default(),
         );
 
@@ -2352,5 +2451,76 @@ mod tests {
             ));
             assert!(slice.records.is_empty());
         }
+    }
+
+    /// A slice of two records and the mate infos htslib's decode leaves:
+    /// `(pos, end, tid, flags, mate_line)` each.
+    fn mates(records: [(i64, i64, Option<Tid>, u16, i32); 2]) -> DecodedSlice<Base> {
+        let mut slice = DecodedSlice::<Base>::default();
+        let mut infos: Vec<SliceMateInfo> = records
+            .iter()
+            .map(|&(pos, end_pos, tid, bam_flags, mate_line)| {
+                let at = Pos0::try_from(pos.max(0)).unwrap();
+                let slot = slice
+                    .push(
+                        at,
+                        at,
+                        pos < 0,
+                        BamFlags::from(bam_flags),
+                        MappingQuality::from_byte(0),
+                        0,
+                        0,
+                        b"",
+                        &[],
+                        &[],
+                        &[],
+                        &[],
+                        tid,
+                        MateFields::default(),
+                    )
+                    .unwrap();
+                SliceMateInfo {
+                    pos,
+                    end_pos,
+                    mate_line,
+                    slot: Some(slot),
+                    bam_flags,
+                    tid,
+                    explicit_tlen: None,
+                }
+            })
+            .collect();
+        resolve_mates(&mut infos, &mut slice, Some(NameRecords { prefix: "x", first_record: 7 }));
+        slice
+    }
+
+    // r[verify cram.record.mate_tlen_reconstruction+2]
+    /// An attached chain over two references has TLEN 0, each record the
+    /// other's reference as its mate's, and both the first one's name.
+    #[test]
+    fn a_chain_over_two_references_has_no_tlen() {
+        let slice = mates([(10, 30, Some(tid(0)), 0x41, 1), (50, 70, Some(tid(1)), 0x81, -1)]);
+        let [a, b] = [&slice.records[0], &slice.records[1]];
+        assert_eq!((a.mate_fields.template_len, b.mate_fields.template_len), (None, None));
+        assert_eq!((a.mate_fields.tid, b.mate_fields.tid), (Some(tid(1)), Some(tid(0))));
+        assert_eq!(a.mate_fields.pos, Pos0::new(50));
+        assert_eq!(b.mate_fields.pos, Pos0::new(10));
+        assert_eq!(field(&slice.names, a.name), b"x:8");
+        assert_eq!(field(&slice.names, b.name), b"x:8");
+    }
+
+    // r[verify cram.record.mate_tlen_reconstruction+2]
+    /// An attached mate at `AP` 0 is unplaced: its partner gets mate
+    /// position -1, the mate-unmapped flag and TLEN 0.
+    #[test]
+    fn an_unplaced_attached_mate_has_position_minus_one() {
+        let slice = mates([(10, 30, Some(tid(0)), 0x41, 1), (-1, 0, None, 0x85, -1)]);
+        let [a, b] = [&slice.records[0], &slice.records[1]];
+        assert_eq!(a.mate_fields.pos, None);
+        assert_eq!(a.mate_fields.tid, None);
+        assert!(a.flags.is_mate_unmapped());
+        assert_eq!(a.mate_fields.template_len, None);
+        assert_eq!(b.mate_fields.pos, Pos0::new(10));
+        assert_eq!(b.mate_fields.template_len, None);
     }
 }

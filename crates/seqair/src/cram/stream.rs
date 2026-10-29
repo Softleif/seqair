@@ -8,7 +8,7 @@ use super::{
     compression_header::CompressionHeader,
     container::{ContainerHeader, RefSeqId},
     reader::{self, CramError},
-    slice::{self, Keep, SliceHeader, SliceReference, SliceScratch, TidWindow},
+    slice::{self, Keep, SliceHeader, SliceReference, SliceScratch, Synthesis, TidWindow},
     varint,
 };
 use crate::bam::{BamHeader, DecodeError, RawBamRecord};
@@ -308,6 +308,7 @@ pub struct CramContainerDecoder {
     ref_buf: Vec<u8>,
     windows: Vec<TidWindow<u8>>,
     decode_md: bool,
+    name_prefix: SmolStr,
 }
 
 impl std::fmt::Debug for CramContainerDecoder {
@@ -325,6 +326,7 @@ impl CramContainerDecoder {
             ref_buf: Vec::new(),
             windows: Vec::new(),
             decode_md: true,
+            name_prefix: SmolStr::new_static("-"),
         }
     }
 
@@ -334,7 +336,11 @@ impl CramContainerDecoder {
     /// The FASTA cannot be reopened.
     pub fn fork(&self) -> Result<Self, CramStreamError> {
         let fasta = self.fasta.fork().map_err(CramError::from)?;
-        Ok(Self { decode_md: self.decode_md, ..Self::new(Arc::clone(&self.shared), fasta) })
+        Ok(Self {
+            decode_md: self.decode_md,
+            name_prefix: self.name_prefix.clone(),
+            ..Self::new(Arc::clone(&self.shared), fasta)
+        })
     }
 
     // r[impl cram.stream.md_nm.option]
@@ -344,6 +350,17 @@ impl CramContainerDecoder {
     #[must_use]
     pub fn decode_md(mut self, on: bool) -> Self {
         self.decode_md = on;
+        self
+    }
+
+    // r[impl cram.record.read_name+2]
+    /// The prefix of the names generated for records a `lossy_names` file
+    /// stores none for, `<prefix>:<record number>`. htslib uses the basename
+    /// of the path it opened (`-` for stdin, the default here); samtools'
+    /// `--input-fmt-option name_prefix=` sets it.
+    #[must_use]
+    pub fn name_prefix(mut self, prefix: impl Into<SmolStr>) -> Self {
+        self.name_prefix = prefix.into();
         self
     }
 
@@ -449,7 +466,7 @@ impl CramContainerDecoder {
                 header,
                 read_group_ids,
                 Keep::All,
-                self.decode_md,
+                Synthesis { md_nm: self.decode_md, name_prefix: Some(&self.name_prefix) },
                 &mut self.scratch,
             )?;
 

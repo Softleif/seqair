@@ -323,7 +323,7 @@ fn tlen_a5() {
 
 // --- CRAM path: full TLEN validation via attached mate reconstruction ---
 
-// r[verify cram.record.mate_tlen_reconstruction]
+// r[verify cram.record.mate_tlen_reconstruction+2]
 #[test]
 fn cram_fields_a7() {
     assert_cram_fields_with_tlen("a7");

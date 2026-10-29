@@ -124,7 +124,7 @@ fn fetch_hts_seqs(contig: &str, start: u64, end: u64) -> Vec<Vec<u8>> {
 // r[verify cram.record.position]
 // r[verify cram.record.cigar_reconstruction]
 // r[verify cram.record.read_length]
-// r[verify cram.record.read_name]
+// r[verify cram.record.read_name+2]
 // r[verify cram.slice.header]
 // r[verify cram.slice.multi_ref]
 // r[verify cram.record.features]
@@ -176,7 +176,7 @@ fn cram_records_match_htslib_for_chr19() {
 
 // r[verify cram.record.mate_detached]
 // r[verify cram.record.mate_attached]
-// r[verify cram.record.mate_tlen_reconstruction]
+// r[verify cram.record.mate_tlen_reconstruction+2]
 /// Cross-validates CRAM-decoded mate fields (`next_pos`, `next_ref_id`,
 /// `template_len`) against htslib's BAM-side decode. Without this,
 /// off-by-one or sign bugs in CRAM mate handling pass silently because
