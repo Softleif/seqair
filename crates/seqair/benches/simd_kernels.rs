@@ -12,8 +12,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use seqair::bam::BaseModState;
 use seqair::bam::seq::{
-    decode_bases_into, decode_iupac_bases_into, decode_seq, decode_seq_scalar,
-    encode_iupac_bases_into,
+    decode_iupac_bases_into, decode_seq, decode_seq_scalar, encode_iupac_bases_into,
 };
 use seqair::cram::rans_nx16;
 use seqair_types::{Base, IupacBase};
@@ -38,13 +37,9 @@ fn bam_seq_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("bam_seq_decode");
     for len in LENGTHS {
         let packed = bytes(len.div_ceil(2), 1);
-        let mut out = vec![0u8; len];
         group.throughput(Throughput::Bytes(len as u64));
         group.bench_with_input(BenchmarkId::new("decode_seq", len), &len, |b, &len| {
             b.iter(|| decode_seq(black_box(&packed), len));
-        });
-        group.bench_with_input(BenchmarkId::new("decode_bases_into", len), &len, |b, &len| {
-            b.iter(|| decode_bases_into(black_box(&packed), len, black_box(&mut out)));
         });
     }
     group.finish();
