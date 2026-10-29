@@ -480,6 +480,10 @@ impl ByteEncoding {
         n: usize,
         buf: &mut Vec<u8>,
     ) -> Result<(), CramError> {
+        // r[impl cram.encoding.external_empty]
+        if n == 0 {
+            return Ok(());
+        }
         match self {
             Self::Null => {
                 buf.resize(buf.len().saturating_add(n), 0);
