@@ -108,7 +108,7 @@ impl SeqBase for IupacBase {
     }
 
     fn extend_from_ref(reference: &[u8], bases: &mut Vec<Self>) {
-        bases.extend(reference.iter().map(|&b| IupacBase::from_ascii(b)));
+        IupacBase::from_ascii_into(reference, bases);
     }
 
     /// A byte that is no IUPAC letter is written as `N`, where htslib would

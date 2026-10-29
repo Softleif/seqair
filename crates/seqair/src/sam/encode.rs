@@ -428,10 +428,7 @@ impl Seq<'_> {
     fn encode_into(self, payload: &mut Vec<u8>) {
         match self {
             Self::Ascii(s) => seq::encode_seq_into(s, payload),
-            Self::Iupac(s) => payload.extend(s.chunks(2).map(|pair| {
-                let code = |i: usize| pair.get(i).map_or(0, |b| b.code());
-                (code(0) << 4) | code(1)
-            })),
+            Self::Iupac(s) => seq::encode_iupac_bases_into(s, payload),
         }
     }
 }
