@@ -124,6 +124,9 @@ last base is exactly `start`, or which starts exactly at `end`, DOES overlap.
 r[sam.reader.sorted_order]
 Records MUST be added to the store in coordinate-sorted order. Since bgzf-compressed indexed SAM files are coordinate-sorted by construction (indexing requires it), the natural parse order is correct.
 
+r[sam.reader.query_raw]
+`query_raw(tid, span)` MUST select exactly the lines `fetch_into` selects for the same `tid` and `span`, scanning the same index chunks the same way (`r[sam.perf.text_parsing]`, `r[sam.edge.line_spanning_blocks]`, `r[sam.edge.empty_lines]`): lines whose RNAME is `*`, unknown to the header or another reference, or whose POS is 0, are skipped, and the rest are kept when they overlap the span by `r[sam.reader.overlap_filter+4]` and `r[sam.reader.overlap_inclusive]`. Each kept line MUST be yielded, in file order, as the `RawBamRecord` the SAM encoder makes of it (`r[sam.encode]`) — what `SamStreamReader` yields for the same line. A kept line the encoder rejects MUST fail with `SamError::MalformedRecord` and leave the query usable; any other error ends it, and every later read MUST fail with `SamError::Poisoned`. `read_record` returns `Ok(false)` at the end, leaving the record unchanged.
+
 ## Tabix / CSI index
 
 > _[TABIX] — TBI magic `TBI\x01`, header fields, n_ref, bin/chunk/linear-index structure, format=1 for SAM_
