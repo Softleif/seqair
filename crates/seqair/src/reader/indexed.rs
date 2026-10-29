@@ -4,12 +4,12 @@ use super::readers::Readers;
 use super::resolve::Tid;
 use crate::{
     bam::{
-        BamHeader, IndexedBamReader, ReferenceStats,
+        BamHeader, IndexedBamReader, RawBamRecord, RawQuery, ReferenceStats,
         record_store::{CustomizeRecordStore, RecordStore},
     },
     cram::reader::IndexedCramReader,
     fasta::IndexedFastaReader,
-    sam::reader::IndexedSamReader,
+    sam::reader::{IndexedSamReader, SamRawQuery},
 };
 use core::range::RangeInclusive;
 use seqair_types::{BamFlags, Pos0};
@@ -196,6 +196,70 @@ impl<R: Read + Seek> IndexedReader<R> {
             Self::Cram(r) => {
                 r.fetch_into_customized(tid, span, store, customize).map_err(ReaderError::from)
             }
+        }
+    }
+
+    // r[impl unified.query_raw]
+    /// The records overlapping the closed interval `span` on `tid`, exactly
+    /// as stored, in file order, as [`RawBamRecord`]s — for rewriting a
+    /// region of a file record by record. BAM and SAM only.
+    ///
+    /// # Errors
+    /// [`ReaderError::RawQueryUnsupported`] for CRAM, else what the format's
+    /// query reports.
+    pub fn query_raw(
+        &mut self,
+        tid: Tid,
+        span: RangeInclusive<Pos0>,
+    ) -> Result<RawRegionQuery<'_, R>, ReaderError> {
+        match self {
+            Self::Bam(r) => Ok(RawRegionQuery::Bam(r.query_raw(tid, span)?)),
+            Self::Sam(r) => Ok(RawRegionQuery::Sam(r.query_raw(tid, span)?)),
+            // CRAM records only exist decoded into a `RecordStore`, which is
+            // lossy; this arm waits for a decoder that rebuilds them whole.
+            Self::Cram(_) => Err(ReaderError::RawQueryUnsupported),
+        }
+    }
+}
+
+/// One region's records as [`RawBamRecord`]s, whatever the format; see
+/// [`IndexedReader::query_raw`]. Borrows the reader until dropped.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum RawRegionQuery<'r, R: Read + Seek = std::fs::File> {
+    Bam(RawQuery<'r, R>),
+    Sam(SamRawQuery<'r, R>),
+}
+
+impl<R: Read + Seek> RawRegionQuery<'_, R> {
+    pub fn header(&self) -> &BamHeader {
+        match self {
+            Self::Bam(q) => q.header(),
+            Self::Sam(q) => q.header(),
+        }
+    }
+
+    /// Read the next record into `record`, reusing its buffer. `Ok(false)` at
+    /// the end of the region, which leaves `record` unchanged.
+    ///
+    /// # Errors
+    /// As the format's query: a record that fails validation or encoding
+    /// leaves the query usable; any other error ends it.
+    pub fn read_record(&mut self, record: &mut RawBamRecord) -> Result<bool, ReaderError> {
+        match self {
+            Self::Bam(q) => Ok(q.read_record(record)?),
+            Self::Sam(q) => Ok(q.read_record(record)?),
+        }
+    }
+}
+
+impl<R: Read + Seek> Iterator for RawRegionQuery<'_, R> {
+    type Item = Result<RawBamRecord, ReaderError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Bam(q) => q.next().map(|r| r.map_err(ReaderError::from)),
+            Self::Sam(q) => q.next().map(|r| r.map_err(ReaderError::from)),
         }
     }
 }
