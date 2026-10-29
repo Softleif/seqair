@@ -10,6 +10,7 @@ use super::{
     flags::BamFlags,
     header::{BamHeader, BamHeaderError},
     index::{AlignmentIndex, BaiError, BamIndex, Chunk},
+    raw_record::{RawBamRecord, Refill},
     record::{DecodeError, compute_end_pos_from_raw},
     record_store::{CustomizeRecordStore, RecordStore},
     region_buf::{self, BlockCache, RegionBuf},
@@ -17,8 +18,10 @@ use super::{
 use core::range::RangeInclusive;
 use seqair_types::{Pos0, SmolStr};
 use std::{
+    convert::Infallible,
     fs::File,
     io::{Read, Seek},
+    ops::ControlFlow,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -75,6 +78,10 @@ pub enum BamError {
 
     #[error("invalid BAM position value {value}: negative positions are reserved")]
     InvalidPosition { value: i32 },
+
+    /// An earlier error ended this raw query (`r[bam.reader.query_raw.errors]`).
+    #[error("BAM query already failed; an earlier read returned the error")]
+    Poisoned,
 }
 
 // r[impl bam.reader.shared_state]
@@ -352,6 +359,106 @@ impl<R: Read + Seek> IndexedBamReader<R> {
             first_hit,
         })
     }
+
+    // r[impl bam.reader.query_raw]
+    /// The records overlapping `span` on `tid`, as stored: the selection and
+    /// order of [`Self::fetch_into`], each record validated but not decoded.
+    pub fn query_raw(
+        &mut self,
+        tid: Tid,
+        span: RangeInclusive<Pos0>,
+    ) -> Result<RawQuery<'_, R>, BamError> {
+        let shared = Arc::clone(&self.shared);
+        let query = self.query(tid, span)?;
+        Ok(RawQuery { query, shared, failed: false })
+    }
+}
+
+/// The records of one region as [`RawBamRecord`]s; see
+/// [`IndexedBamReader::query_raw`]. Borrows the reader until dropped.
+///
+/// ```no_run
+/// use seqair::bam::{IndexedBamReader, RawBamRecord};
+/// use seqair_types::Pos0;
+///
+/// let mut reader = IndexedBamReader::open("in.bam".as_ref())?;
+/// let tid = reader.header().tid("chr1").expect("chr1 in header");
+/// let span = (Pos0::new(1_000).expect("pos")..=Pos0::new(2_000).expect("pos")).into();
+/// let mut query = reader.query_raw(tid, span)?;
+/// let mut record = RawBamRecord::default();
+/// while query.read_record(&mut record)? {
+///     println!("{}", record.qname().escape_ascii());
+/// }
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub struct RawQuery<'r, R: Read + Seek> {
+    query: BamQuery<'r, R>,
+    shared: Arc<BamShared>,
+    failed: bool,
+}
+
+impl<R: Read + Seek> std::fmt::Debug for RawQuery<'_, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawQuery").field("query", &self.query).field("failed", &self.failed).finish()
+    }
+}
+
+impl<R: Read + Seek> RawQuery<'_, R> {
+    pub fn header(&self) -> &BamHeader {
+        &self.shared.header
+    }
+
+    // r[impl bam.reader.query_raw.errors]
+    /// Read the next record into `record`, reusing its buffer. `Ok(false)` at
+    /// the end of the region, which leaves `record` unchanged.
+    ///
+    /// # Errors
+    /// [`BamError::RecordDecode`] for a record that fails validation — the
+    /// query stays usable. Anything else ends the query: later calls return
+    /// [`BamError::Poisoned`].
+    pub fn read_record(&mut self, record: &mut RawBamRecord) -> Result<bool, BamError> {
+        if self.failed {
+            return Err(BamError::Poisoned);
+        }
+        let header = &self.shared.header;
+        let result = self.query.run_loop(|raw| {
+            record
+                .refill(header, |payload| {
+                    payload.extend_from_slice(raw);
+                    Ok::<_, Infallible>(())
+                })
+                .map_err(|e| match e {
+                    Refill::Fill(never) => match never {},
+                    Refill::Invalid(source) => BamError::RecordDecode { source },
+                })?;
+            Ok(ControlFlow::Break(()))
+        });
+        match result {
+            Ok(flow) => Ok(flow.is_break()),
+            Err(e) => {
+                if !matches!(e, BamError::RecordDecode { .. }) {
+                    self.failed = true;
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+impl<R: Read + Seek> Iterator for RawQuery<'_, R> {
+    type Item = Result<RawBamRecord, BamError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        let mut record = RawBamRecord::default();
+        match self.read_record(&mut record) {
+            Ok(true) => Some(Ok(record)),
+            Ok(false) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
 }
 
 /// Drop what lies before `hit` from sorted, disjoint `chunks`: whole chunks
@@ -435,7 +542,7 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
     where
         F: FnMut(&[u8]),
     {
-        self.run_loop(|raw| {
+        self.for_each_result::<_, BamError>(|raw| {
             f(raw);
             Ok(())
         })
@@ -446,16 +553,19 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
     ///
     /// This is used internally by [`IndexedBamReader::fetch_into_customized`] and is also useful
     /// for callers that want to short-circuit on their own error conditions.
-    pub fn for_each_result<F, E>(&mut self, f: F) -> Result<BamQueryCounts, E>
+    pub fn for_each_result<F, E>(&mut self, mut f: F) -> Result<BamQueryCounts, E>
     where
         F: FnMut(&[u8]) -> Result<(), E>,
         E: From<BamError>,
     {
-        self.run_loop(f)
+        let flow = self.run_loop(|raw| f(raw).map(|()| ControlFlow::Continue(())))?;
+        debug_assert!(flow.is_continue(), "nothing here asks the loop to stop");
+        Ok(self.counts())
     }
 
     /// Drive the cursor: a flat `loop` + `continue` state machine over two
-    /// phases, resumable so `for_each` can stop early. State persists in
+    /// phases, resumable so a caller can stop after any record (`f` returns
+    /// `Break`, and `run_loop` returns it). State persists in
     /// `self.{region, chunk_idx, chunk_end}` between iterations.
     ///
     /// 1. **Advance** — the cursor passed the current chunk's `end`: step to
@@ -486,9 +596,9 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
         Ok(true)
     }
 
-    fn run_loop<F, E>(&mut self, mut f: F) -> Result<BamQueryCounts, E>
+    fn run_loop<F, E>(&mut self, mut f: F) -> Result<ControlFlow<()>, E>
     where
-        F: FnMut(&[u8]) -> Result<(), E>,
+        F: FnMut(&[u8]) -> Result<ControlFlow<()>, E>,
         E: From<BamError>,
     {
         loop {
@@ -569,6 +679,8 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
             // r[impl bam.reader.early_exit]
             // r[depends bam.reader.sorted_order+3]
             if rec_pos > self.end {
+                // Spent, so a resumed loop stops here too.
+                self.chunk_idx = self.chunks.len();
                 break;
             }
             // r[impl interval.overlap_test]
@@ -586,10 +698,12 @@ impl<'r, R: Read + Seek> BamQuery<'r, R> {
                 *self.first_hit = Some(current_voff);
             }
             self.accepted = self.accepted.saturating_add(1);
-            f(raw)?;
+            if f(raw)?.is_break() {
+                return Ok(ControlFlow::Break(()));
+            }
         }
 
-        Ok(self.counts())
+        Ok(ControlFlow::Continue(()))
     }
 
     /// Return the current counter snapshot.
