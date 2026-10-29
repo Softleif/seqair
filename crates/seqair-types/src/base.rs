@@ -527,21 +527,6 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    /// Every SIMD level this CPU can run, the scalar fallback included, so
-    /// each one is tested — not only the one `Level::new()` picks.
-    fn levels() -> Vec<Level> {
-        let best = Level::new();
-        #[allow(unused_mut, reason = "only x86 has levels below the best one")]
-        let mut levels = vec![Level::fallback(), best];
-        #[cfg(target_arch = "x86_64")]
-        {
-            levels.extend(best.as_sse2().map(Level::Sse2));
-            levels.extend(best.as_sse4_2().map(Level::Sse4_2));
-            levels.extend(best.as_avx2().map(Level::Avx2));
-        }
-        levels
-    }
-
     // r[verify base_decode.ascii_simd+2]
     // r[verify base_decode.ascii_scalar_equivalence]
     // r[verify io.simd_portable]
@@ -549,7 +534,7 @@ mod tests {
     fn from_ascii_every_level_matches_scalar(tc: TestCase) {
         let input = tc.draw(gs::binary().max_size(300));
         let expected: Vec<u8> = input.iter().map(|&b| Base::from(b) as u8).collect();
-        for level in levels() {
+        for level in crate::simd_levels::levels() {
             let mut actual = input.clone();
             from_ascii_at(level, &mut actual);
             assert_eq!(actual, expected, "{level:?}");

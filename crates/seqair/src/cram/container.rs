@@ -134,7 +134,8 @@ impl ContainerHeader {
             .checked_add(n)
             .ok_or(CramError::Truncated { context: "container landmark count pos" })?;
 
-        let landmark_count_usize = landmark_count as usize;
+        let landmark_count_usize = usize::try_from(landmark_count.cast_signed())
+            .map_err(|_| CramError::InvalidLength { value: landmark_count.cast_signed() })?;
         super::reader::check_alloc_size(
             landmark_count_usize.saturating_mul(4),
             "container landmark array",
@@ -191,10 +192,13 @@ impl ContainerHeader {
         })
     }
 
-    // r[impl cram.file.eof]
-    /// Is this the EOF container?
+    // r[impl cram.file.eof+2]
+    /// Is this the EOF container? htslib's test: no records, reference -1,
+    /// alignment start `0x454f46` ("EOF").
     pub fn is_eof(&self) -> bool {
-        self.num_records == 0 && self.length <= 15
+        self.num_records == 0
+            && self.ref_seq_id == RefSeqId::Unmapped
+            && self.alignment_start == 0x454f46
     }
 
     /// Does this container's range overlap `[query_start, query_end)`?
@@ -297,7 +301,7 @@ mod tests {
         assert!(!data_container.landmarks.is_empty(), "should have landmarks");
     }
 
-    // r[verify cram.file.eof]
+    // r[verify cram.file.eof+2]
     #[test]
     fn find_eof_container_in_real_cram() {
         let data =

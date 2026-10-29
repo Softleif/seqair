@@ -15,9 +15,11 @@ use crate::bam::{
 };
 use crate::io::text_scan;
 use crate::reader::Tid;
-use seqair_types::{MappingQuality, Pos0};
+use seqair_types::{IupacBase, MappingQuality, Pos0};
 use std::fmt;
 use std::num::NonZeroI32;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::warn;
 
 /// Shows bytes for an error message: printable ASCII as is, anything else as
 /// `\xNN`, at most 32 input bytes.
@@ -68,10 +70,6 @@ pub enum SamRecordError {
     /// RNAME names no target of the header.
     #[error("RNAME {} is not a reference of the header", Escaped(name))]
     UnknownReference { name: Box<[u8]> },
-
-    /// RNEXT names no target of the header.
-    #[error("RNEXT {} is not a reference of the header", Escaped(name))]
-    UnknownMateReference { name: Box<[u8]> },
 
     /// Not `[0-9]+`, or above 2^31.
     #[error("invalid POS field: {}", Escaped(value))]
@@ -231,7 +229,7 @@ impl SamRecordEncoder {
         // r[impl sam.encode.flag]
         let mut flags = parse_flag(flag)?;
 
-        // r[impl sam.encode.references]
+        // r[impl sam.encode.references+2]
         // r[impl sam.encode.fixups]
         // The order is htslib's: each fix-up sees the ones before it.
         let mut tid = match rname {
@@ -260,10 +258,10 @@ impl SamRecordEncoder {
         let mut mate_tid = match rnext {
             b"=" => tid,
             b"*" => None,
-            name => Some(
-                resolve(header, name)
-                    .ok_or_else(|| SamRecordError::UnknownMateReference { name: name.into() })?,
-            ),
+            name => resolve(header, name).or_else(|| {
+                warn_unknown_mate_reference(name);
+                None
+            }),
         };
         let mate_pos = parse_position(pnext, |value| SamRecordError::InvalidPnext { value })?;
         if mate_pos.is_none() {
@@ -317,89 +315,35 @@ impl SamRecordEncoder {
             }
         }
 
-        // r[impl sam.encode.bin]
-        let ref_len = ref_len(&self.cigar);
-        let span = if flags & UNMAPPED != 0 || ref_len == 0 { 1 } else { ref_len };
-        let beg = pos.map_or(-1, |p| i64::from(p.as_i32()));
-        let bin = reg2bin(beg, beg.saturating_add_unsigned(span));
-
-        // r[impl sam.encode.long_cigar]
-        let long = self.cigar.len() > usize::from(u16::MAX);
-        if long && ref_len >= 1 << 28 {
-            return Err(SamRecordError::CigarRefLenTooLong { ref_len });
-        }
-        let n_cigar_op = if long { 2 } else { u16::try_from(self.cigar.len()).unwrap_or(u16::MAX) };
-
-        // r[impl sam.encode.limits]
-        let cigar_bytes = self.cigar.len().saturating_mul(4);
-        let size = [
-            FIXED_LEN,
-            qname.len().saturating_add(1),
-            if long { 8 } else { cigar_bytes },
-            seq.len().div_ceil(2),
-            seq.len(),
-            self.aux.len(),
-            if long { cigar_bytes.saturating_add(8) } else { 0 },
-        ]
-        .into_iter()
-        .fold(0usize, usize::saturating_add);
-        if size > MAX_RECORD_SIZE {
-            return Err(SamRecordError::RecordTooLarge { size });
-        }
-        // Both fit: `size` (which includes them) is at most 2 MiB.
-        let l_seq =
-            i32::try_from(seq.len()).map_err(|_| SamRecordError::RecordTooLarge { size })?;
-        let l_read_name = u8::try_from(qname.len().saturating_add(1))
-            .map_err(|_| SamRecordError::QnameTooLong { len: qname.len() })?;
-
-        payload.reserve(size);
-        encode_fixed_header(
+        encode_alignment(
             payload,
-            &FixedHeaderFields {
+            &AlignmentFields {
                 tid,
                 pos,
-                bin,
-                mapq: MappingQuality::from_byte(mapq),
-                l_read_name,
                 flags,
-                n_cigar_op,
-                l_seq,
+                mapq: MappingQuality::from_byte(mapq),
                 mate_fields: MateFields {
                     tid: mate_tid,
                     pos: mate_pos,
                     template_len: NonZeroI32::new(template_len),
                 },
+                qname,
+                cigar: &self.cigar,
+                seq: Seq::Ascii(seq),
+                qual: match qual {
+                    None => Qualities::Missing,
+                    Some(qual) => Qualities::Phred33(qual),
+                },
+                aux: &self.aux,
             },
-        );
-        payload.extend_from_slice(qname);
-        payload.push(0);
-        if long {
-            // `bam_write1`'s placeholder: `<l_seq>S<ref_len>N`. Both lengths
-            // are below 2^28 (checked above; `l_seq` by the size limit).
-            let ref_len = u32::try_from(ref_len).unwrap_or(u32::MAX);
-            for op in [
-                CigarOp::new(CigarOpType::SoftClip, l_seq.cast_unsigned()),
-                CigarOp::new(CigarOpType::RefSkip, ref_len),
-            ] {
-                payload.extend_from_slice(&op.to_bam_u32().to_le_bytes());
+        )
+        .map_err(|e| match e {
+            RecordEncodeError::QnameTooLong { len } => SamRecordError::QnameTooLong { len },
+            RecordEncodeError::CigarRefLenTooLong { ref_len } => {
+                SamRecordError::CigarRefLenTooLong { ref_len }
             }
-        } else {
-            payload.extend_from_slice(CigarOp::ops_as_bytes(&self.cigar));
-        }
-        seq::encode_seq_into(seq, payload);
-        match qual {
-            None => payload.resize(payload.len().saturating_add(seq.len()), 0xFF),
-            Some(qual) => payload.extend(qual.iter().map(|q| q.wrapping_sub(33))),
-        }
-        payload.extend_from_slice(&self.aux);
-        if long {
-            payload.extend_from_slice(b"CGBI");
-            let n_ops = u32::try_from(self.cigar.len())
-                .map_err(|_| SamRecordError::RecordTooLarge { size })?;
-            payload.extend_from_slice(&n_ops.to_le_bytes());
-            payload.extend_from_slice(CigarOp::ops_as_bytes(&self.cigar));
-        }
-        Ok(())
+            RecordEncodeError::RecordTooLarge { size } => SamRecordError::RecordTooLarge { size },
+        })
     }
 
     /// htslib's `bam_tag2cigar` on a placed record: a first CIGAR operation
@@ -437,6 +381,164 @@ impl SamRecordEncoder {
     }
 }
 
+/// Why [`encode_alignment`] could not encode a record: a field BAM cannot
+/// hold.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum RecordEncodeError {
+    #[error("QNAME is {len} bytes; BAM allows at most 254")]
+    QnameTooLong { len: usize },
+
+    #[error(
+        "CIGAR of more than 65535 operations covers {ref_len} reference bases, BAM allows < 2^28"
+    )]
+    CigarRefLenTooLong { ref_len: u64 },
+
+    #[error("record would be {size} bytes, over the {MAX_RECORD_SIZE}-byte limit")]
+    RecordTooLarge { size: usize },
+}
+
+/// A record's qualities as [`encode_alignment`] takes them.
+pub(crate) enum Qualities<'a> {
+    /// None: every byte `0xFF`.
+    Missing,
+    /// SAM's QUAL text, Phred+33.
+    Phred33(&'a [u8]),
+    /// BAM's bytes, copied as they are.
+    Raw(&'a [u8]),
+}
+
+/// A record's SEQ as [`encode_alignment`] takes it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Seq<'a> {
+    /// ASCII, `=ACMGRSVTWYHKDBN` and lower case, as SAM writes it.
+    Ascii(&'a [u8]),
+    /// BAM's 4-bit codes.
+    Iupac(&'a [IupacBase]),
+}
+
+impl Seq<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Ascii(s) => s.len(),
+            Self::Iupac(s) => s.len(),
+        }
+    }
+
+    fn encode_into(self, payload: &mut Vec<u8>) {
+        match self {
+            Self::Ascii(s) => seq::encode_seq_into(s, payload),
+            Self::Iupac(s) => seq::encode_iupac_bases_into(s, payload),
+        }
+    }
+}
+
+/// One alignment's fields, as htslib's `bam_set1` takes them.
+pub(crate) struct AlignmentFields<'a> {
+    pub tid: Option<Tid>,
+    pub pos: Option<Pos0>,
+    pub flags: u16,
+    pub mapq: MappingQuality,
+    pub mate_fields: MateFields,
+    pub qname: &'a [u8],
+    pub cigar: &'a [CigarOp],
+    pub seq: Seq<'a>,
+    /// As many as SEQ, unless missing.
+    pub qual: Qualities<'a>,
+    pub aux: &'a [u8],
+}
+
+// r[impl sam.encode.bin]
+// r[impl sam.encode.long_cigar]
+// r[impl sam.encode.limits]
+/// Append one record's BAM payload (its bytes after `block_size`) to
+/// `payload`, as htslib's `bam_set1` and `bam_write1` lay it out: the bin
+/// from the position and the CIGAR's reference length, and a CIGAR of more
+/// than 65535 operations as the `<l_seq>S<rlen>N` placeholder with the real
+/// one in a trailing `CG:B:I` tag.
+pub(crate) fn encode_alignment(
+    payload: &mut Vec<u8>,
+    f: &AlignmentFields<'_>,
+) -> Result<(), RecordEncodeError> {
+    let ref_len = ref_len(f.cigar);
+    let span = if f.flags & UNMAPPED != 0 || ref_len == 0 { 1 } else { ref_len };
+    let beg = f.pos.map_or(-1, |p| i64::from(p.as_i32()));
+    let bin = reg2bin(beg, beg.saturating_add_unsigned(span));
+
+    let long = f.cigar.len() > usize::from(u16::MAX);
+    if long && ref_len >= 1 << 28 {
+        return Err(RecordEncodeError::CigarRefLenTooLong { ref_len });
+    }
+    let n_cigar_op = if long { 2 } else { u16::try_from(f.cigar.len()).unwrap_or(u16::MAX) };
+
+    let cigar_bytes = f.cigar.len().saturating_mul(4);
+    let size = [
+        FIXED_LEN,
+        f.qname.len().saturating_add(1),
+        if long { 8 } else { cigar_bytes },
+        f.seq.len().div_ceil(2),
+        f.seq.len(),
+        f.aux.len(),
+        if long { cigar_bytes.saturating_add(8) } else { 0 },
+    ]
+    .into_iter()
+    .fold(0usize, usize::saturating_add);
+    if size > MAX_RECORD_SIZE {
+        return Err(RecordEncodeError::RecordTooLarge { size });
+    }
+    // Both fit: `size` (which includes them) is at most 2 MiB.
+    let l_seq =
+        i32::try_from(f.seq.len()).map_err(|_| RecordEncodeError::RecordTooLarge { size })?;
+    let l_read_name = u8::try_from(f.qname.len().saturating_add(1))
+        .map_err(|_| RecordEncodeError::QnameTooLong { len: f.qname.len() })?;
+
+    payload.reserve(size);
+    encode_fixed_header(
+        payload,
+        &FixedHeaderFields {
+            tid: f.tid,
+            pos: f.pos,
+            bin,
+            mapq: f.mapq,
+            l_read_name,
+            flags: f.flags,
+            n_cigar_op,
+            l_seq,
+            mate_fields: f.mate_fields,
+        },
+    );
+    payload.extend_from_slice(f.qname);
+    payload.push(0);
+    if long {
+        // `bam_write1`'s placeholder: `<l_seq>S<ref_len>N`. Both lengths
+        // are below 2^28 (checked above; `l_seq` by the size limit).
+        let ref_len = u32::try_from(ref_len).unwrap_or(u32::MAX);
+        for op in [
+            CigarOp::new(CigarOpType::SoftClip, l_seq.cast_unsigned()),
+            CigarOp::new(CigarOpType::RefSkip, ref_len),
+        ] {
+            payload.extend_from_slice(&op.to_bam_u32().to_le_bytes());
+        }
+    } else {
+        payload.extend_from_slice(CigarOp::ops_as_bytes(f.cigar));
+    }
+    f.seq.encode_into(payload);
+    match f.qual {
+        Qualities::Missing => payload.resize(payload.len().saturating_add(f.seq.len()), 0xFF),
+        Qualities::Phred33(qual) => payload.extend(qual.iter().map(|q| q.wrapping_sub(33))),
+        Qualities::Raw(qual) => payload.extend_from_slice(qual),
+    }
+    payload.extend_from_slice(f.aux);
+    if long {
+        payload.extend_from_slice(b"CGBI");
+        let n_ops =
+            u32::try_from(f.cigar.len()).map_err(|_| RecordEncodeError::RecordTooLarge { size })?;
+        payload.extend_from_slice(&n_ops.to_le_bytes());
+        payload.extend_from_slice(CigarOp::ops_as_bytes(f.cigar));
+    }
+    Ok(())
+}
+
 /// Size of BAM's fixed record fields.
 const FIXED_LEN: usize = 32;
 /// FLAG `0x4`.
@@ -444,6 +546,19 @@ const UNMAPPED: u16 = 0x4;
 
 fn resolve(header: &BamHeader, name: &[u8]) -> Option<Tid> {
     header.tid(std::str::from_utf8(name).ok()?)
+}
+
+// r[impl sam.encode.references+2]
+/// htslib's warning for an RNEXT the header lacks, once per process: a file
+/// written against another header has one on every paired record.
+pub(crate) fn warn_unknown_mate_reference(name: &[u8]) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        warn!(
+            rnext = %name.escape_ascii(),
+            "unknown mate reference name; treated as unmapped (further ones not logged)"
+        );
+    }
 }
 
 /// The CIGAR's query length (M, I, S, =, X), as `bam_cigar2qlen`.

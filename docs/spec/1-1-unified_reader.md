@@ -58,6 +58,9 @@ The unified reader MUST be an enum dispatching to format-specific readers, not a
 r[unified.fetch_equivalence]
 For a given BAM file and its SAM/CRAM representations of the same data, `fetch_into` for the same region MUST produce records with equivalent logical content: same positions, flags, sequences, qualities, and CIGAR operations. Aux tags MUST contain the same set of tag names and values, but tag ordering and integer type codes (e.g., `c` vs `i` for small values) MAY differ between formats because BAM writers choose specific integer widths that SAM text cannot preserve.
 
+r[unified.query_raw]
+`IndexedReader::query_raw(tid, span)` MUST give the records of a region as stored, unchanged, as `RawBamRecord`s: for BAM by `r[bam.reader.query_raw]`, for SAM by `r[sam.reader.query_raw]`, through one query type whose `read_record` and iterator behave as theirs do. CRAM MUST fail with `ReaderError::RawQueryUnsupported` rather than build records through the `RecordStore` decode path, which is lossy; a CRAM raw query needs a decoder that reconstructs each record whole.
+
 ## RecordStore integration
 
 > r[unified.record_store_push]
@@ -510,8 +513,8 @@ See `r[io.non_exhaustive_enums]` and `r[io.minimal_public_api]` in `general.md` 
 
 The indexed readers above need a path and an index. A whole-file consumer reading `stdin` cannot tell from a filename what it was handed, and cannot seek back after looking.
 
-r[unified.stream.detect]
-`AlignmentStream::from_reader(R: Read)` MUST decide the format from the first bytes alone, without seeking and without consuming anything the chosen reader then misses: it reads until it has enough bytes or the input ends (a pipe may deliver one byte at a time), and replays them to the reader it picks. A BGZF block header (gzip magic with `FEXTRA` and a `BC` subfield) whose decompressed data starts with `BAM\1` is BAM (`r[bam.stream]`); any other BGZF data is bgzipped SAM; any other gzip member is gzip-compressed SAM, read through a multi-member gzip decoder; `CRAM` is refused with `AlignmentStreamError::CramNotSupported`; plain gzip whose data starts with `BAM\1` (htslib reads it) is refused with `AlignmentStreamError::GzipBamNotSupported`; everything else, including empty input, is SAM text (`r[sam.stream]`). A file extension is never consulted.
+r[unified.stream.detect+2]
+`AlignmentStream::from_reader(R: Read)` MUST decide the format from the first bytes alone, without seeking and without consuming anything the chosen reader then misses: it reads until it has enough bytes or the input ends (a pipe may deliver one byte at a time), and replays them to the reader it picks. A BGZF block header (gzip magic with `FEXTRA` and a `BC` subfield) whose decompressed data starts with `BAM\1` is BAM (`r[bam.stream]`); any other BGZF data is bgzipped SAM; any other gzip member is gzip-compressed SAM, read through a multi-member gzip decoder; `CRAM` is CRAM (`r[cram.stream+2]`), decoded serially on the reading thread against the FASTA given with the builder's `reference(path)`, and refused with `AlignmentStreamError::CramNeedsReference` when none was given; plain gzip whose data starts with `BAM\1` (htslib reads it) is refused with `AlignmentStreamError::GzipBamNotSupported`; everything else, including empty input, is SAM text (`r[sam.stream]`). A file extension is never consulted.
 
 r[unified.stream.records]
 Whatever the format, `AlignmentStream` MUST expose the header (`BamHeader`, with the original text) and yield every record as a `RawBamRecord` in input order, and it MUST report which format it detected. BGZF thread and EOF-marker options apply to the BGZF formats.

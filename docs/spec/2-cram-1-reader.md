@@ -41,8 +41,8 @@ The header text is parsed via `BamHeader::from_sam_text()` to populate target na
 
 **Note:** The i32 length prefix is part of the block's _decompressed data_, not the block header itself.
 
-r[cram.file.eof]
-The file MUST end with an EOF container. The EOF container produced by samtools has `length=15` (not 0) and `num_records=0`. The reader MUST detect the EOF container as any container where `num_records=0` and `length <= 15`. The reader SHOULD verify the EOF marker but MUST NOT fail if it's missing (truncated files should produce a warning, not a hard error).
+r[cram.file.eof+2]
+The file MUST end with an EOF container. The EOF container produced by samtools has `length=15` (not 0), `num_records=0`, reference -1 and alignment start `0x454f46` ("EOF"). The reader MUST detect it as htslib's `cram_read_container` does: `num_records=0`, reference -1 and alignment start `0x454f46`; any other container without records, however short, is not the end and is skipped. The reader SHOULD verify the EOF marker but MUST NOT fail if it's missing (truncated files should produce a warning, not a hard error).
 
 ### Containers
 
@@ -245,6 +245,9 @@ Encoding ID 0 (NULL): no data. Used for absent data series.
 
 r[cram.encoding.external]
 Encoding ID 1 (EXTERNAL): reads raw bytes from an external data block identified by `content_id`. The most common encoding — used for quality scores, bases, tags, etc.
+
+r[cram.encoding.external_empty]
+Reading zero values of a series MUST succeed without looking up its block: htslib writes no block for a series no record of the slice used (a slice of reads with SEQ and QUAL `*` has no quality block), and reads nothing for a length of 0.
 
 r[cram.encoding.huffman]
 Encoding ID 3 (HUFFMAN): canonical Huffman coding. Parameters: alphabet (itf8 array) and bit lengths (itf8 array). Reads from the core data bit stream.
@@ -460,7 +463,7 @@ reference position, `pos + ref_consumed - 1`, and `pos` itself when
 `ref_consumed == 0` — the identical fallback the BAM path takes for a
 zero-refspan read (`r[bam.record.zero_refspan]`). The exclusive form
 (`pos + ref_consumed`) MUST NOT reach `SlimRecord::end_pos`; it is the natural
-shape for the TLEN arithmetic of `r[cram.record.mate_tlen_reconstruction]`
+shape for the TLEN arithmetic of `r[cram.record.mate_tlen_reconstruction+2]`
 (`aright - aleft`) and MUST stay confined to it.
 
 Storing the exclusive value makes every CRAM record one base wider than its BAM
@@ -477,8 +480,8 @@ r[cram.record.read_length]
 r[cram.record.read_group]
 `RG` (read group): an index into the `@RG` entries in the header. Stored as itf8. The reader MUST convert to a `RG:Z:<id>` aux tag with the read group ID string.
 
-r[cram.record.read_name]
-`RN` (read name): if preservation map `RN=true`, names are stored. If `RN=false`, names are auto-generated. Rastair uses qnames for mate-pair dedup, so `RN=false` CRAM files MUST produce a warning that dedup will not work correctly. Generated names SHOULD be deterministic (e.g., `cram_<record_counter>`).
+r[cram.record.read_name+2]
+`RN` (read name): if preservation map `RN=true`, every record stores its name. If `RN=false` (`lossy_names`), a detached record still stores one, in the `RN` series after `MF`, and it MUST be the record's name. A record left without a name MUST be named as htslib's `cram_to_bam` names it: its mate's name when its attached mate has one, else `<prefix>:<n>`, with `n` the slice header's `record_counter` plus the in-slice index plus 1 — the index of the mate when the mate comes earlier in the slice, else the record's own, so the two records of a pair share the first one's number. The prefix is truncated to 233 bytes. htslib's prefix is the basename of the path it opened (`-` for stdin): the indexed reader uses its file's basename, and the stream takes it from the caller (`CramContainerDecoder::name_prefix`, default `-`). Mates of a lossy file so share a name, which the pileup's overlapping-pair dedup needs.
 
 ### Read feature decoding
 
@@ -529,11 +532,11 @@ r[cram.record.read_name]
 r[cram.record.quality]
 Quality scores are decoded from `QS` (per-base) or `QQ` (stretch) data series, depending on CRAM flags bit 0x1. If CRAM flags bit 0x8 is set (sequence unknown), quality is unavailable (all 0xFF). Quality length MUST equal read length.
 
-r[cram.feature.quality_score]
-When `quality_as_array` is false (CRAM flags bit 0x1 unset), per-position quality overrides are encoded as `Q` (0x51) read features. Each `Q` feature carries a single quality score from the `QS` data series at a specific read position. The decoder MUST apply these quality scores to `qual_buf` at the feature's read position (1-based `FP`, converted to 0-based index). Positions without a `Q` feature retain the default quality (0xFF). This is distinct from the bulk `QS` decode path used when `quality_as_array` is true.
+r[cram.feature.quality_score+2]
+When `quality_as_array` is false (CRAM flags bit 0x1 unset), per-position qualities are encoded as `Q` (0x51) and `B` (0x42) read features, each carrying one quality from the `QS` series. The decoder MUST apply them as htslib's `cram_decode_seq` does: the qualities start as 0xFF; the first `Q`, `B` or `q` feature of a read, finding the first quality still 0xFF, sets every quality to 30, and each feature then writes its value at its read position (1-based `FP`, converted to 0-based index), within the read. With `quality_as_array` true the `RL` qualities decoded after the features replace them.
 
-r[cram.feature.quality_block]
-The `q` (0x71) read feature carries a stretch of quality scores from the `QQ` data series, starting at the feature's read position. The decoder MUST write the decoded quality bytes into `qual_buf` starting at the feature's 0-based read position. The number of quality scores in the block is determined by the `QQ` encoding. Like `Q`, this feature only appears when `quality_as_array` is false.
+r[cram.feature.quality_block+2]
+The `q` (0x71) read feature carries a stretch of quality scores from the `QQ` data series, starting at the feature's read position. The decoder MUST write them, as many as fit in the read, from the feature's 0-based read position, after the fill to 30 of `r[cram.feature.quality_score+2]`.
 
 > r[cram.record.cigar_reconstruction]
 > CRAM does not store CIGAR explicitly. The CIGAR MUST be reconstructed from the read features:
@@ -560,22 +563,22 @@ r[cram.record.ref_ids]
 A slice's `ref_seq_id` and every record's `RI` and `NS` MUST name a target of the file's header or be `-1` (the slice header also allows `-2`, multi-reference); anything else MUST fail the slice with the BAM decoder's `DecodeError::InvalidTid` (slice reference, `RI`) or `InvalidMateTid` (`NS`), wrapped in `CramError::RecordDecode`, as htslib's `cram_decode_seq` fails a record whose reference is `< -1` or past the header's. A container or slice header and a CRAI entry are parsed without the header, so they carry the index as a `u32` (`RefSeqId::Ref(u32)`, `CraiEntry::ref_id: Option<u32>`); the check runs where a slice's records are decoded. A CRAI entry for a reference the header lacks is not an error: no query names it. A negative `NP` MUST fail with `DecodeError::InvalidMatePosition`.
 
 r[cram.record.mate_attached]
-When bit 0x2 is clear, the mate is "attached" — `NF` (next fragment distance) gives the record-skip to the mate within the same slice. The absolute mate index is `current_record_index + 1 + NF`. The decoder MUST read `NF` and record the mate link for post-processing.
+When bit 0x2 is clear and bit 0x4 is set, the mate is "attached" — `NF` (next fragment distance) gives the record-skip to the mate within the same slice. The absolute mate index is `current_record_index + 1 + NF`. The decoder MUST read `NF` and record the mate link for post-processing (`r[cram.record.mate_tlen_reconstruction+2]`).
 
-r[cram.record.mate_tlen_reconstruction]
-After all records in a slice are decoded, the decoder MUST reconstruct `template_len` for attached mates by following mate chains. The algorithm (matching htslib's `cram_decode_slice_xref`):
+r[cram.record.mate_tlen_reconstruction+2]
+After all records in a slice are decoded, the decoder MUST resolve attached mates as htslib's `cram_decode_slice_xref` does, over every record of the slice (also those a query or a multi-reference filter leaves out, and unmapped ones):
 
-1. Follow `mate_line` pointers to collect all records in the chain.
-2. Compute `aleft = min(pos)` and `aright = max(end_pos)` across all fragments.
-3. `tlen = aright - aleft` (in 0-based half-open coordinates).
-4. The first record in the chain gets its sign based on position:
-   - If leftmost and (`end_pos < aright` or it is the only leftmost): `+tlen`.
-   - If both leftmost and rightmost with multiple ties: tie-break by `BAM_FREAD1` flag (0x40).
-   - Otherwise: `-tlen`.
-5. All remaining chain members get the opposite sign.
-6. If any fragment is unmapped or the chain spans different references, `tlen = 0`.
+1. From the first record of each chain (the lowest index; links run forward), follow `mate_line` to the record without one, and link that record back to the first, closing the chain into a ring. A link that does not point forward fails the chain: it is left unresolved, with a warning (htslib fails the slice).
+2. Over the chain, `aleft = min(pos)` and `aright = max(end)`, where `pos` is the 0-based start (`AP - 1`, so -1 for an unplaced read) and `end` the 0-based exclusive end, at least `pos + 1` (htslib's `aend` is never before `apos`; an unmapped read covers its own position).
+3. `tlen = aright - aleft`, 0 when the chain's records are on more than one reference.
+4. The first record gets `+tlen` if it is leftmost and either not rightmost or the only leftmost; if it is leftmost and rightmost with ties at both ends, `+tlen` when it is READ1 (0x40), else `-tlen`; otherwise `-tlen`. Every other record of the chain gets the opposite of the first's.
+5. Each record takes its ring successor as its mate: mate reference and position are the mate's (position -1, `None`, for an unplaced mate), FLAG gains 0x1, 0x8 when the mate is unmapped and 0x20 when it is reversed, and TLEN is 0 when the mate or the record itself is unmapped.
 
-Only records that were pushed to the RecordStore (i.e., overlapping the query region) have their `template_len` updated. Mate position/end data is collected for ALL records in the slice regardless of region filtering.
+r[cram.record.mate_flags]
+A detached record's `MF` MUST be applied to its FLAG as htslib does: bit 1 adds 0x1 and 0x20, bit 2 adds 0x8; a record that is not paired after that has no mate reference, whatever `NS` said. For htslib-written files these are no-ops (`BF` holds the whole FLAG); other writers may clear the mate bits from `BF`.
+
+r[cram.record.explicit_tlen]
+A record that is not detached and has CRAM flag 0x10 stores its TLEN in `TS`, which MUST be read (after `NF` when there is one) and MUST override the TLEN the chain gives it. htslib 3.x never writes it but honours it.
 
 ### Auxiliary tags
 
@@ -585,10 +588,10 @@ r[cram.record.aux_tags]
 `TL` (tag line index) selects which tag combination this record has from the tag dictionary in the preservation map. For each tag in the combination, the tag encoding map provides the encoding for its value. Tag values MUST be decoded and serialized to BAM binary aux format for storage in the aux slab.
 
 r[cram.record.cf_tag]
-A one-byte `cF:C` tag is htslib's private CRAM 3 flag field (bit 1: MD is stored verbatim, bit 2: NM is), not record data: htslib writes it when a record's MD/NM would not regenerate from the sequence, and removes it again on decode (`cram_decode.c`). The reader MUST drop it from the aux data likewise. seqair never generates MD/NM, so the flags themselves need no action.
+A one-byte `cF:C` tag is htslib's private CRAM 3 flag field (bit 1: MD is stored verbatim, bit 2: NM is), not record data: htslib writes it when a record's MD/NM would not regenerate from the sequence, and removes it again on decode (`cram_decode.c`). The reader MUST drop it from the aux data likewise. The streaming decoder reads its bits to decide which tags to generate (`r[cram.stream.md_nm]`); the indexed reader generates none, so there the flags need no action.
 
-r[cram.record.rg_tag]
-The `RG` data series is separate from aux tags. If a read group is present, the reader MUST emit an `RG:Z:<id>` aux tag using the read group ID from the header's `@RG` entries. This tag MUST be included in the aux slab alongside dictionary-decoded tags.
+r[cram.record.rg_tag+2]
+The `RG` data series is separate from aux tags. If a read group is present, the reader MUST emit an `RG:Z:<id>` aux tag using the read group ID from the header's `@RG` entries, after every other tag, as htslib's `cram_to_bam` appends it. As htslib does for files Java CRAM wrote, a record whose read group is the header's last `@RG` when that one's ID is `UNKNOWN` gets no `RG` tag. A read group outside `-1..` the number of `@RG` lines MUST fail the slice with `CramError::ReadGroupOutOfRange`.
 
 ## CRAM index (.crai)
 
@@ -648,11 +651,17 @@ The check applies only to a slice that is making a claim about the FASTA. A slic
 r[cram.edge.missing_reference+2]
 If the FASTA reader cannot provide the reference sequence for a slice's region (e.g., contig not in FASTA), the reader MUST return an error unless the slice has an embedded reference. The decision is per slice: a container whose slices all embed their reference (as the hts-specs `3.1/passed/level-*.cram` files do) MUST decode with a FASTA that lacks the contig. The error SHOULD mention `REF_PATH`/`REF_CACHE` as alternatives.
 
-r[cram.edge.unknown_read_names]
-When `RN=false` in the preservation map, read names are not available. The reader MUST log a warning (once per slice). Records without read names are stored with empty qnames. The pileup engine's overlapping-pair dedup MUST skip records with empty or `*` qnames, since mate matching requires real qnames.
+r[cram.edge.unknown_read_names+2]
+When `RN=false` in the preservation map, records get the names `r[cram.record.read_name+2]` gives them, with no warning. The pileup engine's overlapping-pair dedup MUST still skip records with empty or `*` qnames, which other sources can produce.
 
-r[cram.edge.seq_unknown]
-When CRAM flags bit 0x8 is set, the read's sequence is unknown (`*` in SAM). `seq_len` MUST be 0 and no bases are pushed to the bases slab.
+r[cram.record.no_ref_fill]
+A slice of a file written without a reference (`RR` false in the preservation map) that does not embed one MUST be decoded without a reference, as htslib decodes it whatever FASTA it was given: implicit matches read as `=` (`IupacBase::Eq`; `Base::Unknown` for the indexed reader), without a warning, an `X` substitution uses the substitution matrix's `N` row, and no `MD`/`NM` is generated. samtools covers every base of such a file with a feature, so only other writers' files show the difference. The stream fetches nothing from the FASTA for such a file, so it decodes against a FASTA that lacks its references.
+
+r[cram.edge.seq_unknown+3]
+When CRAM flags bit 0x8 is set, the read's sequence is unknown (`*` in SAM). `seq_len` MUST be 0 and neither bases nor qualities are kept, for mapped reads as for unmapped ones. Every series is still decoded as for a read with a sequence, to keep them in step: a mapped read's features and `RL` qualities (htslib's encoder stores `RL` as the CIGAR's query length and `0xFF` qualities), and an unmapped read's `RL` `BA` bases and qualities; htslib's decoder reads them and then sets the length to 0 (`cram_decode_seq`, `cram_decode_slice`). htslib writes `RL` 0 for an unmapped read without a sequence, but other writers need not.
+
+r[cram.record.seq_qual_lengths]
+A decoded record's qualities MUST be as many as its bases; a record whose features rebuild a different number of bases than `RL` qualities is malformed, `CramError::QualityLengthMismatch`.
 
 r[cram.edge.empty_slice]
 Slices with 0 records MUST be silently skipped.
@@ -736,7 +745,7 @@ r[cram.perf.slice_granularity]
 CRAM random access is slice-granular, not record-granular. A region query may decompress an entire slice (typically 10,000 records) to extract a few records at the edges. This is inherently coarser than BAM's record-level seeking.
 
 r[cram.slice_cache]
-A fetch decodes each slice it needs into a decoded slice that does not depend on the query — every record of the slice for the queried reference, with TLEN and attached-mate chains resolved over the whole slice (`r[cram.record.mate_tlen_reconstruction]`) — and then copies the records the query wants into the caller's store, applying the reader's overlap/tid/unmapped checks and `keep_record` (`r[cram.fetch_into_customized.push_time+2]`) at that point, while mate fields keep the slice-resolved values (`r[cram.fetch_into_customized.filtered_mate_fields]`). The records a fetch returns, their order and every field MUST be the same whether a slice was decoded for this fetch or taken from the cache.
+A fetch decodes each slice it needs into a decoded slice that does not depend on the query — every record of the slice for the queried reference, with TLEN and attached-mate chains resolved over the whole slice (`r[cram.record.mate_tlen_reconstruction+2]`) — and then copies the records the query wants into the caller's store, applying the reader's overlap/tid/unmapped checks and `keep_record` (`r[cram.fetch_into_customized.push_time+2]`) at that point, while mate fields keep the slice-resolved values (`r[cram.fetch_into_customized.filtered_mate_fields]`). The records a fetch returns, their order and every field MUST be the same whether a slice was decoded for this fetch or taken from the cache.
 
 r[cram.slice_cache.shared]
 An `IndexedCramReader` and its forks share one cache of decoded slices, keyed by the slice's byte position in the file and the queried reference. Neighbouring queries overlap the same slices at their edges — on files with large slices (samtools' `archive` profile writes 100,000 records per slice, about 470 kb at 30×) a 100 kb query grid decodes each slice five to six times — and the cache lets them decode each slice once. When several threads need the same slice and it is not cached, one decodes it and the others wait for its result instead of decoding it again. A fetch whose wanted slices are all cached reads nothing from the file. A failed decode is not cached; every caller gets an error.

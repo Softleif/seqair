@@ -5,21 +5,19 @@
 use super::{
     super::bam::record_store::CustomizeRecordStore,
     block,
-    codec_scratch::CodecScratch,
     compression_header::CompressionHeader,
     container::{ContainerHeader, RefSeqId},
     index::{self, CramIndex, CramIndexError},
-    slice::{self, DecodedSlice},
+    slice::{self, DecodedSlice, Keep, SliceReference, SliceScratch},
     slice_cache::{SliceCache, SliceCacheBudget, SliceCacheStats, SliceKey},
 };
-use crate::bam::cigar::CigarOp;
 use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
 use crate::reader::Tid;
 use core::range::RangeInclusive;
-use seqair_types::{Base, Pos0, Pos1, SmallVec, SmolStr};
+use seqair_types::{Pos0, Pos1, SmallVec, SmolStr};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -140,6 +138,22 @@ pub enum CramError {
     // ── Slice-level ──────────────────────────────────────────────────────────
     #[error("no core data block in slice")]
     MissingCoreDataBlock,
+
+    /// The FASTA's sequence is shorter than the header's `@SQ` `LN` and the
+    /// slice needs bases past its end: the FASTA is not the file's reference.
+    #[error(
+        "reference {contig} in the FASTA is {fasta_len} bases, the CRAM header says {header_len}: wrong reference?"
+    )]
+    ReferenceTooShort { contig: SmolStr, header_len: u64, fasta_len: u64 },
+
+    /// A record's `RG` names no `@RG` line of the header.
+    #[error("CRAM record read group {read_group} is not one of the header's {count}")]
+    ReadGroupOutOfRange { read_group: i32, count: usize },
+
+    /// A record whose features rebuild a different number of bases than
+    /// its qualities.
+    #[error("CRAM record has {bases} bases but {qualities} qualities")]
+    QualityLengthMismatch { bases: usize, qualities: usize },
 
     #[error("unknown CRAM feature code {feature_code:#04x} ('{}')", *feature_code as char)]
     UnknownFeatureCode { feature_code: u8 },
@@ -366,7 +380,7 @@ pub struct CramShared {
 }
 
 /// Parse `@RG ID:` values from SAM header text in declaration order.
-fn parse_read_group_ids(header_text: &str) -> Vec<SmolStr> {
+pub(crate) fn parse_read_group_ids(header_text: &str) -> Vec<SmolStr> {
     let mut ids = Vec::new();
     for line in header_text.lines() {
         if !line.starts_with("@RG") {
@@ -386,28 +400,11 @@ pub struct IndexedCramReader<R: Read + Seek = File> {
     file: R,
     fasta: IndexedFastaReader<R>,
     shared: Arc<CramShared>,
-    // Scratch buffers reused across fetch_into calls. The per-record
-    // ones (`name_buf`, `feature_byte_buf`, `cigar_ops_buf`) used to be
-    // `Vec::new()` allocated inside `decode_record`, dominating profiles
-    // in N-record hot loops. Hoisting them here means the second record
-    // onward pays zero alloc cost.
+    // Scratch buffers reused across fetch_into calls, so the second record
+    // onward pays no allocation.
     container_buf: Vec<u8>,
-    cigar_buf: Vec<CigarOp>,
-    bases_buf: Vec<Base>,
-    qual_buf: Vec<u8>,
-    aux_buf: Vec<u8>,
     ref_seq_buf: Vec<u8>,
-    /// Reused across records: read name (qname) bytes.
-    name_buf: Vec<u8>,
-    /// Reused across records: per-feature byte payloads (insertion bases,
-    /// soft-clip bases, bases-block, quality-block).
-    feature_byte_buf: Vec<u8>,
-    /// Reused across records: accumulated `(length, op_code)` CIGAR ops
-    /// before being packed into BAM-layout `CigarOp`s.
-    cigar_ops_buf: Vec<(u32, u8)>,
-    /// Reused across blocks: rANS order-1 tables and the bzip2 decoder, each
-    /// allocated on first use.
-    codec_scratch: CodecScratch,
+    scratch: SliceScratch,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for IndexedCramReader<R> {
@@ -492,15 +489,8 @@ impl IndexedCramReader<File> {
                 slice_cache: SliceCache::new(SliceCacheBudget::Auto),
             }),
             container_buf: Vec::new(),
-            cigar_buf: Vec::new(),
-            bases_buf: Vec::new(),
-            qual_buf: Vec::new(),
-            aux_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
-            name_buf: Vec::new(),
-            feature_byte_buf: Vec::new(),
-            cigar_ops_buf: Vec::new(),
-            codec_scratch: CodecScratch::default(),
+            scratch: SliceScratch::default(),
         })
     }
 
@@ -514,15 +504,8 @@ impl IndexedCramReader<File> {
             fasta,
             shared: Arc::clone(&self.shared),
             container_buf: Vec::new(),
-            cigar_buf: Vec::new(),
-            bases_buf: Vec::new(),
-            qual_buf: Vec::new(),
-            aux_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
-            name_buf: Vec::new(),
-            feature_byte_buf: Vec::new(),
-            cigar_ops_buf: Vec::new(),
-            codec_scratch: CodecScratch::default(),
+            scratch: SliceScratch::default(),
         })
     }
 }
@@ -587,15 +570,8 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
                 slice_cache: SliceCache::new(SliceCacheBudget::Auto),
             }),
             container_buf: Vec::new(),
-            cigar_buf: Vec::new(),
-            bases_buf: Vec::new(),
-            qual_buf: Vec::new(),
-            aux_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
-            name_buf: Vec::new(),
-            feature_byte_buf: Vec::new(),
-            cigar_ops_buf: Vec::new(),
-            codec_scratch: CodecScratch::default(),
+            scratch: SliceScratch::default(),
         })
     }
 }
@@ -779,7 +755,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
 
         // Parse compression header (first block)
         let (comp_block, _) =
-            block::parse_block_with(&self.container_buf, &mut self.codec_scratch)?;
+            block::parse_block_with(&self.container_buf, &mut self.scratch.codec)?;
         if comp_block.content_type != block::ContentType::CompressionHeader {
             return Err(CramError::ExpectedCompressionHeader { found: comp_block.content_type });
         }
@@ -901,25 +877,22 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         }
         let slice_offset = usize::try_from(slice_offset)
             .map_err(|_| CramError::Truncated { context: "slice offset" })?;
-        let reference = (!container.reference_missing).then_some(self.ref_seq_buf.as_slice());
+        let bases = (!container.reference_missing).then_some(self.ref_seq_buf.as_slice());
         // r[impl cram.edge.coordinate_clamp]
         slice::decode_slice(
             &container.compression,
             &self.container_buf,
             slice_offset,
-            reference,
-            container.ref_start.cast_signed(),
+            SliceReference::Window { bases, start: container.ref_start.cast_signed() },
             &self.shared.header,
             &self.shared.read_group_ids,
-            tid,
-            &mut self.cigar_buf,
-            &mut self.bases_buf,
-            &mut self.qual_buf,
-            &mut self.aux_buf,
-            &mut self.name_buf,
-            &mut self.feature_byte_buf,
-            &mut self.cigar_ops_buf,
-            &mut self.codec_scratch,
+            Keep::Tid(tid),
+            // r[impl cram.record.read_name+2]
+            slice::Synthesis {
+                md_nm: false,
+                name_prefix: self.shared.cram_path.file_name().and_then(|n| n.to_str()),
+            },
+            &mut self.scratch,
         )
     }
 }
@@ -946,10 +919,14 @@ fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, Cram
             .ok_or(CramError::Truncated { context: "header container seek offset overflow" })?,
     ))?;
     file.read_exact(&mut data)?;
+    header_from_container_data(&data)
+}
 
+/// The SAM header held by the file header container whose body is `data`.
+pub(crate) fn header_from_container_data(data: &[u8]) -> Result<BamHeader, CramError> {
     // Parse the file header block. Cold: once per open, before any reader (and
     // its scratch) exists; `parse_block` uses a fresh scratch.
-    let (blk, _) = block::parse_block(&data)?;
+    let (blk, _) = block::parse_block(data)?;
     if blk.content_type != block::ContentType::FileHeader {
         return Err(CramError::ExpectedFileHeader { found: blk.content_type });
     }
@@ -1085,6 +1062,32 @@ mod tests {
         assert_eq!(count, 1);
         let first = store.indices().next().unwrap();
         assert_eq!(store.record(first).unwrap().qname(), b"r1");
+    }
+
+    // r[verify cram.edge.seq_unknown+3]
+    /// A mapped read stored with SEQ and QUAL `*` (CRAM flag 0x8) comes back
+    /// without bases or qualities, as htslib gives it, and the records after
+    /// it decode normally.
+    #[test]
+    fn mapped_read_without_sequence_has_none() {
+        let cram = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/cram-stream/fidelity_v31.cram"
+        ));
+        let fasta = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/cram-stream/fidelity.fa"
+        ));
+        let mut reader = IndexedCramReader::open(cram, fasta).unwrap();
+        let mut store = RecordStore::new();
+        let chr1 = reader.header().tid("chr1").unwrap();
+        reader.fetch_into(chr1, (Pos0::ZERO..=Pos0::MAX).into(), &mut store).unwrap();
+        let record = |name: &[u8]| {
+            store.indices().map(|i| store.record(i).unwrap()).find(|r| r.qname() == name).unwrap()
+        };
+        let sec = record(b"secStar");
+        assert_eq!(sec.seq_len, 0);
+        assert_eq!(record(b"qualStar").seq_len, 20);
     }
 
     // r[verify cram.edge.missing_reference+2]

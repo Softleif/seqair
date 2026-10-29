@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Streaming CRAM.** `cram::stream::CramStreamReader` reads a CRAM 3.0/3.1 front to back from any `io::Read` (a pipe, `stdin`) with no index and no `Seek`, one container at a time; `CramContainerDecoder` (one per thread, `fork`) decodes a `CramContainer` into `RawBamRecord`s in file order — every record, multi-reference slices, unmapped containers and unplaced reads included. Records equal what `samtools view -b` writes, byte for byte, MD/NM included: like htslib, the decoder generates `MD` and `NM` for mapped reads that do not store them (`CramContainerDecoder::decode_md(false)` turns that off, as `--input-fmt-option decode_md=0` does). SEQ keeps every IUPAC code and `=` htslib keeps, from the reference and from the read's stored bases. Records a `lossy_names` file stores no name for are named as htslib names them, `<prefix>:<record number>` (`CramContainerDecoder::name_prefix`, default `-` as for stdin; pass the file's basename to match `samtools view <file>`).
+- `AlignmentStream` reads CRAM, decoded against the FASTA given with `AlignmentStreamBuilder::reference`; `StreamFormat::Cram`.
+- `RawBamRecord::set_seq(&[IupacBase])`, `set_base(QPos, IupacBase)` and `edit_aux` edit a record in place: the sequence (same length, every IUPAC code kept) or one base of it, and the aux block through an `AuxData` (untouched tags keep their bytes). `RawBamRecord::iupac_bases()` yields the sequence as `IupacBase`s. An edit that would change a long CIGAR's `CG` tag, or that starts from a malformed aux block, is refused. Errors are `bam::RawRecordEditError`.
+- **Lossless indexed region queries.** `IndexedBamReader::query_raw`, `IndexedSamReader::query_raw` and `IndexedReader::query_raw` yield the records overlapping a region as `RawBamRecord`s, unchanged — the selection and order of `fetch_into` (and what `samtools view <file> <region>` prints), without the lossy `RecordStore` decode. `read_record(&mut RawBamRecord)` reuses one buffer; the queries are also iterators. A record that fails validation is an error the query continues past (for BAM `BamError::InvalidRecord`, with the record's virtual offset); any other error ends it (`BamError::Poisoned`, `SamError::Poisoned`). CRAM is `ReaderError::RawQueryUnsupported` for now.
+- `bam::seq::decode_iupac_bases_into` and `encode_iupac_bases_into`: packed 4-bit SEQ to `IupacBase`s (the SIMD nibble kernel of the ASCII and `Base` paths) and back (a pair loop the compiler vectorises, faster than the kernel on NEON). `RawBamRecord::iupac_bases_into` appends the sequence into a caller's buffer, and `set_seq` packs the same way. The SIMD kernels are tested at Fallback, SSE2, SSE4.2, AVX2 and NEON; the AVX-512 level is compiled but not yet executed.
+
+### Changed
+
+- **`SamRecordEncoder` (and so `SamStreamReader`) keeps a line whose RNEXT the header lacks**, as htslib does: no mate reference, PNEXT and FLAG as written, one warning per process. It was `SamRecordError::UnknownMateReference`, which is gone; the indexed SAM reader already kept such lines, so the streaming and indexed readers now agree on them.
+- `AlignmentStreamError::CramNotSupported` is replaced by `CramNeedsReference` (CRAM without `reference(...)`) and `Cram` (stream errors).
+- `RawBamRecord::set_flags` returns `RawRecordEditError` (variant `Flags`) instead of `DecodeError` (breaking: callers matching on the error type).
+
+### Fixed
+
+- A CRAM container header with a negative landmark count is `CramError::InvalidLength` (was `AllocationTooLarge`); a FASTA sequence shorter than the CRAM header's `LN` is `CramError::ReferenceTooShort` in the stream (was a FASTA out-of-bounds error).
+- A CRAM container without records is the end of the file only when it is the EOF container as htslib recognises it (reference -1, start `0x454f46`); a short empty container before real ones no longer ends the stream or a scan.
+- A CRAM written without a reference (`no_ref`, `RR` false) is decoded without one, as htslib does: the stream no longer needs its references in the FASTA, and implicit matches (which samtools never writes there) read as `=`.
+- CRAM reads that store no quality array get the qualities of their `B`, `Q` and `q` features, as htslib applies them (the read filled with 30 first); a read group that is the header's last `@RG` named `UNKNOWN` (Java CRAM's) adds no `RG` tag; an `RG` index outside the header's read groups is `CramError::ReadGroupOutOfRange` instead of being ignored.
+- CRAM reads of a `lossy_names` file (`RN` false) have names, in the indexed reader too: a detached record keeps the name the file stores for it (it was dropped), and an attached one gets its mate's name or `<file basename>:<record number>`, as htslib generates it, so mates share a name and the pileup's overlapping-pair dedup works on them. The `RN=false` warning is gone.
+- CRAM attached mates are resolved as htslib does: TLEN 0 when the chain spans references or when the record or its mate is unmapped, mate position -1 for an unplaced mate, and the paired/mate-unmapped/mate-reverse flags from the mate; a detached record's `MF` flags are applied; an explicit TLEN (CRAM flag 0x10) is read and used.
+- An unmapped CRAM read with an unknown sequence (CRAM flag 0x8) whose `RL` is not 0 still has its `RL` bases decoded, as htslib does, so the base series stays in step; a record whose bases and qualities differ in number is `CramError::QualityLengthMismatch` instead of a malformed record.
+- `CramStreamReader` (and `AlignmentStream`) read `queryname`-sorted and unsorted CRAM; the coordinate-order check is for indexed access only.
+- A CRAM slice whose only reads are unplaced with SEQ and QUAL `*` no longer fails with `ExternalBlockNotFound`: reading zero values of a series no longer looks for its block, which htslib does not write.
+- A mapped CRAM read stored with SEQ `*` (CRAM flag 0x8, e.g. bwa's secondary records) no longer comes back with its reference bases and `0xFF` qualities; it has neither, as in htslib.
+- `AuxData::remove` (and so `OwnedBamRecord` tag edits) no longer panics on a truncated tag value: an unterminated `Z`, a short fixed-size value or a `B` array whose count runs past the end.
+
 ## v0.9.0 (2026-10-29)
 
 ### Added

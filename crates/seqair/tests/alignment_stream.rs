@@ -81,7 +81,7 @@ fn stream(
     Ok((stream.format(), header, records))
 }
 
-// r[verify unified.stream.detect]
+// r[verify unified.stream.detect+2]
 // r[verify unified.stream.records]
 /// Every wrapping of the same SAM is detected as what it is, however the
 /// bytes arrive, and yields the same header and records.
@@ -105,7 +105,7 @@ fn every_format_is_detected_and_reads_the_same_records(tc: TestCase) {
     }
 }
 
-// r[verify unified.stream.detect]
+// r[verify unified.stream.detect+2]
 #[test]
 fn empty_input_is_an_empty_sam() {
     let (format, header, records) = stream(Vec::new(), 1, 0).unwrap();
@@ -114,7 +114,7 @@ fn empty_input_is_an_empty_sam() {
     assert!(records.is_empty());
 }
 
-// r[verify unified.stream.detect]
+// r[verify unified.stream.detect+2]
 #[test]
 fn unsupported_formats_are_named() {
     let sam = format!("{}r\t4\t*\t0\t0\t*\t*\t0\t0\tA\tI\n", header_text()).into_bytes();
@@ -123,7 +123,7 @@ fn unsupported_formats_are_named() {
     seqair::bam::bgzf::BgzfStream::new(&bam[..]).read_to_end(&mut raw_bam).unwrap();
 
     let cram = b"CRAM\x03\x00rest-of-a-cram-file".to_vec();
-    assert!(matches!(stream(cram, 3, 0), Err(AlignmentStreamError::CramNotSupported)));
+    assert!(matches!(stream(cram, 3, 0), Err(AlignmentStreamError::CramNeedsReference)));
     assert!(matches!(stream(gzip(&raw_bam), 1, 0), Err(AlignmentStreamError::GzipBamNotSupported)));
     assert!(matches!(
         stream(raw_bam, 2, 0),
@@ -131,7 +131,7 @@ fn unsupported_formats_are_named() {
     ));
 }
 
-// r[verify unified.stream.detect]
+// r[verify unified.stream.detect+2]
 /// A BAM cut at a block boundary ends in `MissingEofMarker` by default, and
 /// reads to the end with `EofMarker::Optional`.
 #[test]

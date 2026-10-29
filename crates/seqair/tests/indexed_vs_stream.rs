@@ -26,7 +26,7 @@ use seqair::bam::{BgzfStream, MateFields, RawBamRecord, RecordStore};
 use seqair::reader::{AlignmentStream, IndexedReader, StreamFormat};
 use seqair::sam::SamStreamReader;
 use seqair_types::{Base, BaseQuality, Pos0};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::num::NonZeroU8;
@@ -411,8 +411,9 @@ fn stream_payloads(records: &[RawBamRecord]) -> Vec<&[u8]> {
 }
 
 /// Every record of the BAM, the SAM, and both through `AlignmentStream`,
-/// which must agree; then the placed ones as views.
-fn stream_all(tc: &TestCase, files: &Files) -> Vec<View> {
+/// which must agree; then the placed ones as views, and every payload by
+/// read name.
+fn stream_all(tc: &TestCase, files: &Files) -> (Vec<View>, BTreeMap<Vec<u8>, Vec<u8>>) {
     // `None`: inflate inline.
     let threads = tc
         .draw(gs::optional(gs::integers::<u8>().min_value(1).max_value(3)))
@@ -449,27 +450,33 @@ fn stream_all(tc: &TestCase, files: &Files) -> Vec<View> {
         }
         assert!(records == stream_payloads(&bam_records), "AlignmentStream on {format:?} differs");
     }
-    bam_records.iter().filter_map(expected).collect()
+    let payloads =
+        bam_records.iter().map(|r| (r.qname().to_vec(), r.as_payload().to_vec())).collect();
+    (bam_records.iter().filter_map(expected).collect(), payloads)
 }
 
 struct Indexed {
     bam: IndexedReader,
     sam: IndexedReader,
     store: RecordStore,
+    /// The streamed records' payloads by read name, which is unique.
+    payloads: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 impl Indexed {
-    fn open(files: &Files) -> Self {
+    fn open(files: &Files, payloads: BTreeMap<Vec<u8>, Vec<u8>>) -> Self {
         Self {
             bam: IndexedReader::open(&files.bam).unwrap(),
             sam: IndexedReader::open(&files.sam).unwrap(),
             store: RecordStore::new(),
+            payloads,
         }
     }
 
-    /// The region from the BAM and from the SAM, which must both be exactly
-    /// the streamed records that overlap it, field by field and in order;
-    /// returns what the store held.
+    /// The region from the BAM and from the SAM, by `fetch_into` and by
+    /// `query_raw`, which must all be exactly the streamed records that
+    /// overlap it, field by field and in order, and for `query_raw` byte for
+    /// byte; returns what the store held.
     fn check(&mut self, placed: &[View], contig: usize, span: RangeInclusive<Pos0>) -> Vec<View> {
         let want = overlapping(placed, contig as u32, span);
         let mut got = Vec::new();
@@ -486,6 +493,24 @@ impl Indexed {
                 names(&got),
                 names(&want),
             );
+            let raw: Vec<RawBamRecord> =
+                reader.query_raw(tid, span).unwrap().collect::<Result<_, _>>().unwrap();
+            let raw_views: Vec<View> = raw.iter().map(|r| expected(r).unwrap()).collect();
+            assert!(
+                raw_views == want,
+                "{format} query_raw c{contig}:{}-{}: got {:#?}\nwant {:#?}",
+                span.start.as_u32(),
+                span.last.as_u32(),
+                names(&raw_views),
+                names(&want),
+            );
+            for r in &raw {
+                assert!(
+                    self.payloads.get(r.qname()).map(Vec::as_slice) == Some(r.as_payload()),
+                    "{format} query_raw: {} is not the streamed bytes",
+                    r.qname().escape_ascii()
+                );
+            }
         }
         got
     }
@@ -566,11 +591,14 @@ fn samtools_names(bam: &Path, contig: usize, span: RangeInclusive<Pos0>) -> Vec<
 // r[verify record_store.end_pos_htslib]
 // r[verify bam.record.zero_refspan]
 // r[verify unified.fetch_equivalence]
-// r[verify unified.stream.detect]
+// r[verify unified.stream.detect+2]
 // r[verify unified.stream.records]
 // r[verify bam.stream]
 // r[verify sam.stream]
 // r[verify region_buf.fetch_into+2]
+// r[verify bam.reader.query_raw]
+// r[verify sam.reader.query_raw]
+// r[verify unified.query_raw]
 /// Thousands of records over several contigs — mapped, placed but unmapped
 /// (with and without a stale CIGAR), unplaced, zero-span, IUPAC, every aux
 /// type — sorted by samtools into a BAM and a bgzipped SAM, each in
@@ -580,7 +608,7 @@ fn samtools_names(bam: &Path, contig: usize, span: RangeInclusive<Pos0>) -> Vec<
 ///
 /// - the four streams (BAM, SAM, `AlignmentStream` on each) yield the same
 ///   records;
-/// - `fetch_into` on any region — whole contig, at either end, empty,
+/// - `fetch_into` and `query_raw` on any region — whole contig, at either end, empty,
 ///   ending on a read's first or last base — returns from the BAM and from
 ///   the SAM exactly the streamed records that overlap it, in file order,
 ///   field by field, and never an unplaced one;
@@ -593,8 +621,8 @@ fn indexed_regions_are_the_streamed_records_that_overlap_them(tc: TestCase) {
     let input = tc.draw(sam_input(lens.clone()));
     let dir = tempfile::tempdir().unwrap();
     let files = files(&tc, dir.path(), &input);
-    let placed = stream_all(&tc, &files);
-    let mut indexed = Indexed::open(&files);
+    let (placed, payloads) = stream_all(&tc, &files);
+    let mut indexed = Indexed::open(&files, payloads);
 
     let mut samtools_checks = 0;
     for (contig, &len) in lens.iter().enumerate() {
