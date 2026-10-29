@@ -406,6 +406,20 @@ pub fn encode_iupac_bases_into(bases: &[IupacBase], buf: &mut Vec<u8>) {
     buf.extend(odd.iter().map(|last| last << 4));
 }
 
+/// [`encode_iupac_bases_into`] over `out`, which is `bases.len().div_ceil(2)`
+/// bytes.
+// r[impl seq.iupac_bulk+2]
+#[allow(clippy::arithmetic_side_effects, reason = "a 4-bit code shifted by 4 fits a u8")]
+pub(crate) fn encode_iupac_bases_to(bases: &[IupacBase], out: &mut [u8]) {
+    let (pairs, odd) = bytemuck::cast_slice::<IupacBase, u8>(bases).as_chunks::<2>();
+    for (o, &[hi, lo]) in out.iter_mut().zip(pairs) {
+        *o = (hi << 4) | lo;
+    }
+    if let ([last], Some(o)) = (odd, out.get_mut(pairs.len())) {
+        *o = last << 4;
+    }
+}
+
 // r[impl seq.iupac_bulk+2]
 /// Decode `out.len()` bases of a 4-bit packed BAM sequence into `out`, every
 /// code kept; all `N` when `encoded` is too short.
@@ -732,6 +746,9 @@ mod tests {
         assert_eq!(out[0], 0xAB);
         let out = out.split_off(1);
         assert_eq!(out, expected);
+        let mut to = vec![0xFF; expected.len()];
+        encode_iupac_bases_to(seq, &mut to);
+        assert_eq!(to, expected);
         let mut decoded = vec![IupacBase::R; len];
         decode_iupac_bases_into(&out, &mut decoded);
         assert_eq!(decoded, seq);
