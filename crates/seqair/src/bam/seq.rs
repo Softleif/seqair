@@ -1,6 +1,25 @@
-//! Encode and decode BAM 4-bit packed sequences. [`decode_seq`] runs one
-//! `fearless_simd` kernel at the best SIMD level the CPU has; every level,
+//! Encode and decode BAM 4-bit packed sequences. Each direction is one
+//! `fearless_simd` kernel, run at the best level the CPU has; every level,
 //! the scalar fallback included, produces identical output.
+//!
+//! - **Decode** (`decode_nibbles`): each nibble through a 16-entry table with
+//!   a byte shuffle, the high and low results interleaved back into read
+//!   order. A table and its 256-entry pair table (two nibbles per byte, for
+//!   the scalar tail) come together: `DECODE_BASE`/`DECODE_PAIR` (ASCII,
+//!   every IUPAC code), `DECODE_BASE_TYPED`/`DECODE_PAIR_TYPED` (`Base`
+//!   discriminants), `IDENTITY`/`IDENTITY_PAIR` (`IupacBase` codes).
+//!   `NibbleOrder` says which nibble comes first: BAM's high one, or the low
+//!   one of CRAM's rANS PACK transform (`cram::rans_nx16`).
+//! - **Encode** (`encode_bases_simd`): each byte through a 16-entry table
+//!   indexed by its *low nibble*, even and odd positions deinterleaved and
+//!   packed `even << 4 | odd`. `ENCODE_BASE_LO_NIBBLE` serves `Base` (its
+//!   five discriminants have distinct low nibbles), `IDENTITY` `IupacBase`.
+//!   The tail goes through the same table a base at a time, so it cannot
+//!   disagree with the vector loop. ASCII text (`encode_seq_into`, the SAM
+//!   encoder) still takes the scalar 256-entry `ENCODE_BASE`.
+//! - The `IupacBase` kernels fill their output through
+//!   `IupacBase::as_codes_mut`, whose contract is that only codes (< 16) are
+//!   left behind; the identity tables hold nothing else.
 
 use fearless_simd::{Level, dispatch, prelude::*, u8x16};
 use fearless_simd_macros::simd;
