@@ -70,10 +70,10 @@ The CIGAR string MUST be parsed by the shared strict parser `parse_cigar` (`r[sa
 
 > **Was:** a length up to `u32::MAX` was shifted into the packed form and lost its top bits, and an empty CIGAR or a trailing length was accepted.
 
-r[sam.record.seq_decode]
-SEQ characters MUST be decoded to `Base` values: A→A, C→C, G→G, T→T, all others (N, IUPAC codes)→Unknown. The string `*` means sequence unavailable (length 0).
+r[sam.record.seq_decode+1]
+SEQ characters MUST be decoded to `IupacBase` codes through htslib's `seq_nt16_table` (`r[types.iupac_base.from_ascii]`): either case, `U` as `T`, `=` as `IupacBase::Eq`, the digits `0`–`3` as A/C/G/T, every other byte `N`. The string `*` means sequence unavailable (length 0). This is the code a BAM written from the same SAM stores, so a record reads the same from either file.
 
-Note: the SAM character `=` means "identical to the reference base at this position." This is an intentional lossy conversion to `Unknown` — matching BAM's behavior, which also stores `=` as a distinct 4-bit code but does not resolve it against the reference. Some tools (Illumina DRAGEN) use `=` extensively. If exact reference-matching base recovery is needed in the future, the `=` case would need reference lookup during parsing.
+Note: the SAM character `=` means "identical to the reference base at this position." It is kept as `IupacBase::Eq`, as BAM stores it, and not resolved against the reference; the pileup reads it as `Base::Unknown` (`r[pileup.base_from_iupac]`). Some tools (Illumina DRAGEN) use `=` extensively.
 
 r[sam.record.qual_decode]
 QUAL characters MUST have 33 subtracted (Phred+33 encoding). The string `*` means quality unavailable; all quality bytes MUST be set to 0xFF (255). QUAL length MUST equal SEQ length when both are present.

@@ -1,51 +1,30 @@
 # Base-typed Sequence Decoding
 
-> **Sources:** [SAM1] §4.2.4 "SEQ and QUAL encoding" — 4-bit nibble-to-base mapping (`=ACMGRSVTWYHKDBN`). The `Base` enum, SIMD acceleration, and direct-to-`Base` decode table are seqair-specific design choices; the upstream spec defines only the nibble codes. See [References](./99-references.md).
+> **Sources:** [SAM1] §4.2.4 "SEQ and QUAL encoding" — 4-bit nibble-to-base mapping (`=ACMGRSVTWYHKDBN`). The `Base` enum and where the conversion to it happens are seqair-specific design choices; the upstream spec defines only the nibble codes. See [References](./99-references.md).
 
 ## Background
 
-BAM sequences are stored as 4-bit nibbles (two bases per byte). The standard decode table maps nibbles to ASCII characters (`=ACMGRSVTWYHKDBN`). Downstream, the ASCII bytes must be converted to `Base` enum values (A, C, G, T, Unknown) at every pileup position — billions of times for whole-genome data.
-
-By decoding directly into `Base` values at record construction time, we:
-
-1. Eliminate the per-position `Base::from(u8)` conversion (a LUT lookup per read per position)
-2. Get compile-time type safety — a `Base` is guaranteed to be one of 5 valid values, not an arbitrary byte
-3. Collapse IUPAC ambiguity codes (M, R, W, S, Y, K, etc.) and `=` to `Base::Unknown` at decode time, instead of at each use site
-
-## Decode table
-
-r[base_decode.table]
-A 16-entry lookup table MUST map 4-bit BAM nibble codes directly to `Base` discriminant values: 1→A(65), 2→C(67), 4→G(71), 8→T(84), and all other codes (0, 3, 5, 6, 7, 9–14, 15) → Unknown(78).
-
-## Table invariant
-
-r[base_decode.table_invariant]
-Every entry in `DECODE_BASE_TYPED` (16 entries) and `DECODE_PAIR_TYPED` (256 × 2 = 512 bytes) MUST be a valid `Base` discriminant: A(65), C(67), G(71), T(84), or Unknown(78). This MUST be verified by an exhaustive test covering all entries.
-
-## Decoding function
-
-r[base_decode.decode+2]
-`decode_bases(packed_seq, seq_len)` MUST decode a 4-bit packed BAM sequence into a `Vec<Base>`. It MUST be the same SIMD kernel as the ASCII decoder (`r[seq.decode_simd]`) with a `Base`-valued lookup table, for identical throughput.
+Records keep SEQ as `IupacBase`, every code the file stores (`r[record_store.seq_lossless]`), so a record read from the store writes back unchanged. Calling wants the five-state `Base` (A, C, G, T, Unknown), so the pileup converts each base when it builds a column entry (`r[pileup.base_from_iupac]`). Both types are one byte, and the conversion is one load from a 16-entry table.
 
 ## Storage in RecordStore
 
-r[base_decode.slab]
-The `RecordStore` MUST store decoded bases in a dedicated slab (`Vec<Base>`) separate from the cigar, qual, and aux slabs. The `seq_at` method MUST return `Base` instead of `u8`.
+r[base_decode.slab+1]
+The `RecordStore` MUST store a record's bases in a dedicated slab (`Vec<IupacBase>`) separate from the cigar, qual, and aux slabs. `seq` and `base_at` MUST return the stored codes.
 
 ## PileupAlignment
 
-r[base_decode.alignment]
-`PileupAlignment.base` MUST be of type `Base`, not `u8`. This eliminates the `Base::from(u8)` conversion in the metrics accumulation hot loop.
+r[base_decode.alignment+1]
+`PileupAlignment.base` MUST be of type `Base`, not `u8` or `IupacBase`, made by `IupacBase::to_base` when the column entry is built (`r[pileup.base_from_iupac]`). Consumers of a column never convert.
 
 ## ASCII-to-Base batch conversion
 
-Reference sequences (FASTA) and SAM text sequences arrive as ASCII bytes, not 4-bit packed nibbles. These need the same one-time batch conversion to `Base` that BAM sequences get via `decode_bases`, but using an ASCII-aware path instead of the nibble decode table.
+Reference sequences (FASTA) and SAM text sequences arrive as ASCII bytes, not 4-bit packed nibbles. A reference becomes `Base` once per load; SAM text becomes `IupacBase` (`r[sam.record.seq_decode+1]`).
 
 r[base_decode.ascii_batch+2]
 `Base::from_ascii_vec(Vec<u8>) -> Vec<Base>` MUST convert a vector of ASCII bytes to `Base` values in-place (reusing the allocation). Maps A/a→A, C/c→C, G/g→G, T/t→T, U/u→T (RNA, as htslib's SAM parser does since 1.22), all other bytes→Unknown. `Base::from(u8)` uses the same mapping. The function MUST NOT allocate a new vector — it operates on the input's buffer and transmutes the result. This is safe because `Base` is `repr(u8)` and the function only writes valid `Base` discriminant bytes (65, 67, 71, 78, 84).
 
 r[base_decode.ascii_simd+2]
-The ASCII batch converter MUST be a native-width SIMD kernel per `r[io.simd_portable]`, following the same dispatch pattern as `decode_bases`. This is the required path for all bulk u8→Base conversions outside BAM 4-bit decoding: FASTA reference sequences, SAM text sequences, and any other ASCII-encoded base data.
+The ASCII batch converter MUST be a native-width SIMD kernel per `r[io.simd_portable]`, following the same dispatch pattern as the BAM nibble decoder (`r[seq.decode_simd+2]`). This is the required path for all bulk u8→Base conversions: FASTA reference sequences and any other ASCII-encoded base data that is read as `Base`.
 
 r[base_decode.ascii_scalar_equivalence]
 The SIMD ASCII converter MUST produce identical output to applying `Base::from(u8)` element-wise. This MUST be verified by property-based tests covering arbitrary byte values and lengths including SIMD boundary lengths (0, 1, 15, 16, 31, 32, 33, 63, 64, 65, 128).

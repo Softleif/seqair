@@ -34,7 +34,7 @@ The owned record type makes these modifications safe and explicit: callers get a
 > - `mate_fields: MateFields` — the mate's reference (`tid: Option<Tid>`, `None` for the wire `-1`), its 0-based position (`pos: Option<Pos0>`, `None` for unavailable) and the observed template length (`template_len: Option<NonZeroI32>`, `None` for the wire `0`: unavailable, or a single-segment template)
 > - `qname: Vec<u8>` — query name (without NUL terminator)
 > - `cigar: Vec<CigarOp>` — typed CIGAR operations
-> - `seq: Vec<Base>` — sequence as `Base` enum values
+> - `seq: Vec<IupacBase>` — sequence as BAM 4-bit codes, every code kept
 > - `qual: Vec<BaseQuality>` — Phred quality scores
 > - `aux: AuxData` — auxiliary tags (see aux data section)
 
@@ -67,8 +67,8 @@ The following rules support in-memory record manipulation for realignment and BA
 r[bam.owned_record.set_alignment]
 `OwnedBamRecord` MUST support replacing the alignment by setting a new `pos` and `cigar` simultaneously. For mapped reads (flags & 0x4 == 0), the implementation MUST validate that the CIGAR's query-consuming length equals `seq.len()`, returning an error on mismatch. For unmapped reads (flags & 0x4 != 0), a zero-operation CIGAR with non-empty `seq` MUST be allowed.
 
-r[bam.owned_record.set_seq]
-`OwnedBamRecord` MUST support replacing the sequence. For mapped reads, the new sequence length MUST match the CIGAR's query-consuming length. A `seq_mut() -> &mut [Base]` accessor MUST also be provided for in-place base modification (e.g. T->C rewriting in the TAPS BAM rewrite pipeline).
+r[bam.owned_record.set_seq+1]
+`OwnedBamRecord` MUST support replacing the sequence. For mapped reads, the new sequence length MUST match the CIGAR's query-consuming length. A `seq_mut() -> &mut [IupacBase]` accessor MUST also be provided for in-place base modification (e.g. T->C rewriting in the TAPS BAM rewrite pipeline).
 
 r[bam.owned_record.set_qual]
 `OwnedBamRecord` MUST support replacing quality scores. The new array length MUST equal `seq.len()`. An empty array is the one exception: it is always accepted and means the record carries no quality scores, which `to_bam_bytes` serializes as `seq.len()` bytes of `0xFF` per [SAM1] §4.2 and SAM text spells `*`.
@@ -104,7 +104,7 @@ The BAM `bin` value in the serialized `bin_mq_nl` field MUST be computed from th
 For realignment workflows, modified records need to be fed back into the pileup engine for re-calling. This requires converting the owned record back into the slab-based format.
 
 r[bam.owned_record.push_owned]
-`RecordStore` MUST provide a `push_owned(record: &OwnedBamRecord) -> Result<u32>` method that inserts an owned record into the slabs. This MUST encode the sequence from `Vec<Base>` into the bases slab, pack CIGAR ops into u32 format for the cigar slab, and copy qname/qual/aux into their respective slabs. The returned index MUST be valid for subsequent `record()`, `seq()`, `qual()`, etc. lookups.
+`RecordStore` MUST provide a `push_owned(record: &OwnedBamRecord) -> Result<u32>` method that inserts an owned record into the slabs. This MUST copy the sequence from `Vec<IupacBase>` into the bases slab, pack CIGAR ops into u32 format for the cigar slab, and copy qname/qual/aux into their respective slabs. The returned index MUST be valid for subsequent `record()`, `seq()`, `qual()`, etc. lookups.
 
 r[bam.owned_record.roundtrip]
 A record extracted via `to_owned_record(idx)` and re-inserted via `push_owned()` (without modification) MUST produce a store entry with field values identical to the original. This MUST be verified by tests comparing all accessible fields.

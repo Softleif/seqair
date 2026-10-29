@@ -71,7 +71,7 @@ r[unified.query_raw+2]
 > - pos, end_pos, flags, mapq, seq_len, matching_bases, indel_bases (fixed fields)
 > - qname bytes
 > - CIGAR as packed BAM-format u32 ops (SAM/CRAM parsers convert to this representation)
-> - sequence as `&[Base]` (already the enum type stored in the bases slab — no conversion needed)
+> - sequence as `&[IupacBase]` (the type stored in the bases slab — no conversion needed)
 > - quality bytes
 > - aux tag bytes in BAM binary format (SAM/CRAM parsers serialize tags to this format)
 

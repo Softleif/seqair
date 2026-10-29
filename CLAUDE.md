@@ -33,7 +33,7 @@ Frequent CI-only failures to watch for: `clippy::cast_possible_truncation`, `cli
 
 ## Architecture notes
 
-**RecordStore**: 4 contiguous Vecs (records, names, bases, data). Zero per-record heap alloc.
+**RecordStore**: 4 contiguous Vecs (records, names, bases, data). Zero per-record heap alloc. The bases slab is `Vec<IupacBase>`, every code the file holds (SAM through `seq_nt16_table`, CRAM through the stream's decode), so `write_store_record` is lossless; the pileup converts each column entry with `IupacBase::to_base` (a 16-entry table). A stored base cast `as u8` is its 4-bit code, not ASCII: use `to_ascii()`/`to_base()`.
 
 **RegionBuf**: streams a region's compressed bytes through a bounded sliding window (`WINDOW_BUDGET`, 64 MiB), refilling forward on demand — peak RAM is the window, not the whole region. `RegionBuf::new` borrows the reader and plans `Vec<MergedRange>` (lazy, reads nothing); `ensure_available(need)` refills the window (compacting the consumed prefix, keeping `window_file_start + cursor` = true file offset), `advance_range` steps to the next disjoint range. `block_offset` (for virtual offsets) MUST be set as `window_file_start + cursor` *after* the header `ensure_available` and before the cursor advances — a stale read there silently corrupts every virtual offset. `with_budget(reader, chunks, budget)` (doc-hidden) forces tiny windows in tests. There is no batching/`MAX_REGION_BYTES` anymore — one streaming `RegionBuf` spans all of a query's chunks (see `BamQuery`).
 
@@ -83,7 +83,7 @@ Frequent CI-only failures to watch for: `clippy::cast_possible_truncation`, `cli
 
 ## BAM writing
 
-**OwnedBamRecord**: mutable record with `Vec<CigarOp>`, `Vec<Base>`, `AuxData`. Separate from the read-path `BamRecord` (which uses `Box<[u8]>` for zero-copy decode). `from_raw_bam()` decodes all fields including mate info that the read-path drops (next_ref_id, next_pos, template_len). `to_bam_bytes()` appends into a caller-provided buffer; the caller clears it. `bin()` is BAI-only (u16, max 37449) and recomputed at serialize time.
+**OwnedBamRecord**: mutable record with `Vec<CigarOp>`, `Vec<IupacBase>`, `AuxData`. Separate from the read-path `BamRecord` (which uses `Box<[u8]>` for zero-copy decode). `from_raw_bam()` decodes all fields including mate info that the read-path drops (next_ref_id, next_pos, template_len). `to_bam_bytes()` appends into a caller-provided buffer; the caller clears it. `bin()` is BAI-only (u16, max 37449) and recomputed at serialize time.
 
 **BamWriter**: wraps `BgzfWriter`, writes header eagerly at construction (no separate `write_header()`). Error poisoning: after any write failure, all subsequent writes return `Poisoned`. Index co-production validates records BEFORE writing to BGZF to avoid poisoning after partial writes.
 

@@ -14,7 +14,7 @@ The store contains six vectors:
 
 - **Record table** (`Vec<SlimRecord>`): compact fixed-size structs with alignment fields and offsets into the slabs.
 - **Name slab** (`Vec<u8>`): all read names (qnames) packed sequentially. Separated because qnames are only accessed during dedup mate detection — a linear scan of a compact, contiguous buffer.
-- **Bases slab** (`Vec<Base>`): decoded base sequences stored as `Base` enum values (A/C/G/T/Unknown). For BAM, decoded from 4-bit nibbles via SIMD at push time. For SAM/CRAM, provided directly as `&[Base]` by the reader.
+- **Bases slab** (`Vec<IupacBase>`): each record's SEQ as the file stores it, one 4-bit code per base (`r[record_store.seq_lossless]`). For BAM, decoded from 4-bit nibbles via SIMD at push time. For SAM/CRAM, provided directly as `&[IupacBase]` by the reader.
 - **Cigar slab** (`Vec<CigarOp>`): typed CIGAR ops. `CigarOp` is `#[repr(transparent)]` over `u32` and stores the same `len << 4 | op_code` layout BAM uses on disk, so on little-endian hosts the slab is byte-identical to the BAM wire format and ingest is a single memcpy. Separated because CIGAR is the field that changes during local realignment — isolating it allows append-only mutation without copying other per-record data.
 - **Qual slab** (`Vec<u8>`): per-record quality as raw Phred bytes. Separated from aux so that the pileup hot path (which reads qual but rarely aux) scans a dense, contiguous buffer without aux bytes polluting the cache.
 - **Aux slab** (`Vec<u8>`): per-record auxiliary tag bytes in BAM binary format.
@@ -130,8 +130,11 @@ On construction, the store MUST pre-allocate all six vectors with estimated capa
 
 ## Decoding into slabs
 
-r[record_store.push_raw+2]
-`push_raw(raw_bytes, header, customize)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `Base` enum values in the bases slab.
+r[record_store.push_raw+3]
+`push_raw(raw_bytes, header, customize)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `IupacBase` codes in the bases slab, every code kept (`r[seq.iupac_bulk+2]`).
+
+r[record_store.seq_lossless]
+The bases slab MUST hold each record's SEQ as `IupacBase`, as the file stores it: for BAM the 4-bit code, for SAM the code of `r[sam.record.seq_decode+1]`, for CRAM the code the decode rebuilds (`r[cram.stream.iupac+1]`). A record's `seq()` MUST therefore equal `RawBamRecord::iupac_bases()` of the same record read by `query_raw` or a stream reader, code for code.
 
 r[record_store.checked_offsets]
 Slab offsets (name_off, bases_off, cigar_off, qual_off, aux_off) MUST be checked for u32 overflow before storing in both `push_raw` and `push_fields`. If any slab exceeds `u32::MAX` bytes, the store MUST return an error rather than silently truncating the offset.
@@ -151,8 +154,8 @@ place the read across a span it does not occupy. htslib's `bam_endpos` makes the
 same choice, and matching it is what keeps a placed-unmapped record at exactly
 one position for `r[record_store.window_query]` and the pileup's eviction check.
 
-r[record_store.push_fields+2]
-`push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as `&[CigarOp]`, sequence as `&[Base]`, quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing. A qname longer than 254 bytes (BAM's `l_read_name` limit, as in `r[bam.owned_record.qname_limit]`) MUST be rejected with a typed error rather than truncated; htslib 1.24 enforces the same limit in its CRAM reader.
+r[record_store.push_fields+3]
+`push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as `&[CigarOp]`, sequence as `&[IupacBase]` (stored unconverted), quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing. A qname longer than 254 bytes (BAM's `l_read_name` limit, as in `r[bam.owned_record.qname_limit]`) MUST be rejected with a typed error rather than truncated; htslib 1.24 enforces the same limit in its CRAM reader.
 
 r[record_store.copy_from]
 `copy_record_from(src, idx)` MUST append a copy of `src`'s record `idx` — its
@@ -239,8 +242,8 @@ across regions, which is the whole reason the trait is the only door.
 r[record_store.filter_raw]
 `CustomizeRecordStore::filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool` MUST run in both `push_raw` and `push_fields` before any slab is extended and before any sequence is decoded. Returning `false` MUST abandon the record there and then: no bytes copied into any slab, no bases decoded, no `compute` call, and no index minted — `push_raw`/`push_fields` return `Ok(None)` exactly as for a `filter` rejection. The default MUST return `true`. `filter_raw` and `filter` (r[`record_store.pre_filter.rollback`]) MUST be interchangeable in outcome: the same decision taken at either hook MUST leave every slab byte-identical and MUST hand back the same indices. They differ only in how much work a rejection wastes, which is why `filter_raw` is the hook a reader-level filter belongs in (r[`bam.reader.unmapped_skipped`]).
 
-r[record_store.filter_raw_fields]
-`FilterRawFields` MUST carry every fixed field of the record that is about to be pushed, plus the raw qname, quality, aux and CIGAR slices, so a customize value can decide without the slabs. It MUST be `#[non_exhaustive]`, and the qname MUST be NUL-stripped. Fields the calling path has not computed yet MUST be reported as unknown rather than guessed: from `push_raw` (BAM binary), `end_pos` is `None` and `matching_bases`/`indel_bases` are `0` because the CIGAR has not been decoded at that point; from `push_fields` (SAM/CRAM) all three carry their pre-computed values. `seq` MUST be `Sequence::Packed` from `push_raw` and `Sequence::Bases` from `push_fields`; `cigar` MUST be raw BAM CIGAR bytes on both paths. Every field MUST describe the record that the next successful push appends — a filter deciding on a stale or mis-sliced view rejects the wrong reads, and nothing downstream notices, because every record that survives is well-formed either way.
+r[record_store.filter_raw_fields+1]
+`FilterRawFields` MUST carry every fixed field of the record that is about to be pushed, plus the raw qname, quality, aux and CIGAR slices, so a customize value can decide without the slabs. It MUST be `#[non_exhaustive]`, and the qname MUST be NUL-stripped. Fields the calling path has not computed yet MUST be reported as unknown rather than guessed: from `push_raw` (BAM binary), `end_pos` is `None` and `matching_bases`/`indel_bases` are `0` because the CIGAR has not been decoded at that point; from `push_fields` (SAM/CRAM) all three carry their pre-computed values. `seq` MUST be `Sequence::Packed` from `push_raw` and `Sequence::Iupac` from `push_fields`; `cigar` MUST be raw BAM CIGAR bytes on both paths. Every field MUST describe the record that the next successful push appends — a filter deciding on a stale or mis-sliced view rejects the wrong reads, and nothing downstream notices, because every record that survives is well-formed either way.
 
 r[record_store.pre_filter.rollback+1]
 `push_raw` and `push_fields` on any `RecordStore<U>` MUST accept `&mut E` (`E: CustomizeRecordStore<Extra = U>`) as their last argument and return `Result<Option<RecordIdx>, DecodeError>`. After parsing and writing the record's slab data they MUST call `customize.filter(rec, &self)`; if it returns `false`, the record just pushed MUST be rolled back so that every slab (names/bases/cigar/qual/aux/records/extras) is byte-identical to its pre-push state. Rollback uses the just-pushed `SlimRecord`'s `*_off` offsets as pre-push slab lengths, since push is append-only. The returned `Option<RecordIdx>` is `Some(idx)` when kept, `None` when rejected — rejected records MUST NOT consume an index. Passing `&mut ()` (whose default `filter` is `true`) is the no-filter form. A property test verifies that pushing a mixed accept/reject sequence produces byte-identical state to pushing only the accepted inputs with no filter.
@@ -248,8 +251,8 @@ r[record_store.pre_filter.rollback+1]
 r[record_store.soft_clips]
 `push_raw`, `push_fields` and `set_alignment` MUST store the record's leading and trailing soft-clip lengths (r[`cigar.soft_clips`]) on the `SlimRecord` as `leading_soft_clip` and `trailing_soft_clip`, computed once from the CIGAR like `matching_bases`, so a consumer placing a read's clipped bases on the reference never scans the CIGAR.
 
-r[record_store.slim_record.field_getters]
-`SlimRecord` MUST provide getter methods `seq(&store) -> Result<&[Base]>`, `qual(&store) -> Result<&[BaseQuality]>`, `cigar(&store) -> Result<&[CigarOp]>`, and `aux(&store) -> Result<&[u8]>` that take `&RecordStore<U>` for any `U` and return slab-backed slices using the record's offset fields. They MUST validate offsets and return a typed `RecordAccessError` on overflow rather than panic. `extra(&store) -> Result<&U>` follows the same shape but reads the extras slab. These getters are the canonical way for `CustomizeRecordStore` impls to access a record's variable-length data without going through `RecordStore::record(idx)` first.
+r[record_store.slim_record.field_getters+1]
+`SlimRecord` MUST provide getter methods `seq(&store) -> Result<&[IupacBase]>`, `qual(&store) -> Result<&[BaseQuality]>`, `cigar(&store) -> Result<&[CigarOp]>`, and `aux(&store) -> Result<&[u8]>` that take `&RecordStore<U>` for any `U` and return slab-backed slices using the record's offset fields. They MUST validate offsets and return a typed `RecordAccessError` on overflow rather than panic. `extra(&store) -> Result<&U>` follows the same shape but reads the extras slab. These getters are the canonical way for `CustomizeRecordStore` impls to access a record's variable-length data without going through `RecordStore::record(idx)` first.
 
 r[record_store.extras.access]
 `RecordStore<U>` MUST provide `extra(idx) -> &U` and `extra_mut(idx) -> &mut U` to access the per-record extra by record index. Access MUST go through the record's `extras_idx` field (indirection into the extras slab), so that extras remain valid after `sort_by_pos` or `dedup` reorder/remove records.
