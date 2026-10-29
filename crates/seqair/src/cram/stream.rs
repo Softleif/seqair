@@ -1,7 +1,7 @@
 //! Read a whole CRAM front to back, without an index and without seeking.
 //! [`CramStreamReader`] reads containers off the input; a
 //! [`CramContainerDecoder`] per thread turns them into [`RawBamRecord`]s.
-//! See `r[cram.stream]`.
+//! See `r[cram.stream+2]`.
 
 use super::{
     block,
@@ -72,7 +72,7 @@ enum State {
     Failed,
 }
 
-// r[impl cram.stream]
+// r[impl cram.stream+2]
 /// A CRAM v3.0/v3.1 file read front to back from any [`Read`] — `stdin`, a
 /// pipe — with no index and no `Seek` bound.
 ///
@@ -153,8 +153,6 @@ impl<R: Read> CramStreamReader<R> {
         let (_, data) = read_container(&mut inner, 0)?
             .ok_or(CramStreamError::TruncatedContainer { container: 0 })?;
         let header = reader::header_from_container_data(&data)?;
-        // r[impl unified.sort_order]
-        header.validate_sort_order().map_err(CramError::from)?;
         let read_group_ids = reader::parse_read_group_ids(header.header_text());
         Ok(Self {
             inner,
