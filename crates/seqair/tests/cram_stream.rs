@@ -12,7 +12,7 @@
 use seqair::bam::stream::BamStreamReader;
 use seqair::bam::{RawBamRecord, RecordStore};
 use seqair::cram::container::{ContainerHeader, RefSeqId};
-use seqair::cram::reader::IndexedCramReader;
+use seqair::cram::reader::{CramError, IndexedCramReader};
 use seqair::cram::stream::{CramStreamError, CramStreamReader};
 use seqair::reader::{AlignmentStream, AlignmentStreamError, ResolveTid, StreamFormat};
 use seqair::sam::format::format_sam_record;
@@ -122,10 +122,10 @@ fn samtools(args: &[&str], cram: &Path, fasta: &Path) -> String {
 
 // r[verify cram.stream+2]
 // r[verify cram.stream.container_header]
-// r[verify cram.stream.framing]
+// r[verify cram.stream.framing+2]
 // r[verify cram.stream.decoder]
 // r[verify cram.stream.all_records]
-// r[verify cram.stream.reference_window]
+// r[verify cram.stream.reference_window+2]
 // r[verify cram.stream.raw_records]
 /// Records that differ from samtools, as (fixture, the read name samtools
 /// prints, why); an empty fixture is every fixture, an empty name every
@@ -334,14 +334,88 @@ fn alignment_stream_names_lossy_records_after_the_file() {
 /// A container header with no records and no blocks, on reference 0 at 1:
 /// short, but not the EOF container.
 fn empty_container() -> Vec<u8> {
-    // length (i32), then ITF8/LTF8 fields that each fit one byte: reference
-    // 0, start 1, span 0, records 0, record counter 0, bases 0, blocks 0,
-    // landmarks 0.
-    let mut bytes = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    container_header(0, &[0])
+}
+
+/// A container header of `length` body bytes on reference 0 at 1, no
+/// records, no blocks, `landmark_count` as the ITF8 bytes given; CRC32 right.
+fn container_header(length: i32, landmark_count: &[u8]) -> Vec<u8> {
+    // ITF8/LTF8 fields that each fit one byte: reference 0, start 1, span 0,
+    // records 0, record counter 0, bases 0, blocks 0.
+    let mut bytes = length.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0]);
+    bytes.extend_from_slice(landmark_count);
     let mut crc = libdeflater::Crc::new();
     crc.update(&bytes);
     bytes.extend_from_slice(&crc.sum().to_le_bytes());
     bytes
+}
+
+// r[verify cram.stream.framing+2]
+// r[verify io.fuzz.alloc_limits]
+/// Container lengths and landmark counts that are negative or too large to
+/// allocate are typed errors, found before anything is allocated.
+#[test]
+fn bad_container_lengths_are_typed() {
+    let bytes = std::fs::read(data("cram-stream/fidelity_v31.cram")).unwrap();
+    let header = ContainerHeader::parse(&bytes[26..]).unwrap();
+    let first = 26 + header.header_size + header.length as usize;
+    let next = |container: Vec<u8>| {
+        let mut file = bytes[..first].to_vec();
+        file.extend(container);
+        let mut reader = CramStreamReader::new(&file[..]).unwrap();
+        reader.next_container().unwrap_err()
+    };
+    let minus_one = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
+    for length in [i32::MAX, 300 << 20] {
+        assert!(matches!(
+            next(container_header(length, &[0])),
+            CramStreamError::Cram { source: CramError::AllocationTooLarge { .. } }
+        ));
+    }
+    assert!(matches!(
+        next(container_header(-1, &[0])),
+        CramStreamError::Cram { source: CramError::InvalidLength { value: -1 } }
+    ));
+    assert!(matches!(
+        next(container_header(0, &minus_one)),
+        CramStreamError::Cram { source: CramError::InvalidLength { value: -1 } }
+    ));
+    assert!(matches!(
+        ContainerHeader::parse(&container_header(0, &minus_one)),
+        Err(CramError::InvalidLength { value: -1 })
+    ));
+}
+
+// r[verify cram.stream.reference_window+2]
+/// A FASTA whose sequence is shorter than the header says is the wrong
+/// reference, and says so.
+#[test]
+fn a_short_reference_is_named() {
+    let cram = data("cram-stream/fidelity_v31.cram");
+    let full = std::fs::read_to_string(data("cram-stream/fidelity.fa")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let fasta = dir.path().join("short.fa");
+    // chr1 cut to 100 bases; chr2 as it is.
+    let mut lines = full.lines();
+    let (h1, s1, rest): (&str, &str, Vec<&str>) =
+        (lines.next().unwrap(), lines.next().unwrap(), lines.collect());
+    std::fs::write(&fasta, format!("{h1}\n{}\n{}\n", &s1[..100], rest.join("\n"))).unwrap();
+    assert!(Command::new("samtools").arg("faidx").arg(&fasta).status().unwrap().success());
+    let mut reader = CramStreamReader::new(std::fs::File::open(&cram).unwrap()).unwrap();
+    let mut decoder = reader.decoder(&fasta).unwrap();
+    let mut out = Vec::new();
+    let container = reader.next_container().unwrap().unwrap();
+    let err = decoder.decode(&container, &mut out).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            CramStreamError::Cram {
+                source: CramError::ReferenceTooShort { header_len: 300, fasta_len: 100, .. }
+            }
+        ),
+        "{err:?}"
+    );
 }
 
 // r[verify cram.file.eof+2]
@@ -384,7 +458,7 @@ fn no_ref_files_need_no_reference() {
     assert_eq!(sam_lines(&records, &cram), theirs.lines().collect::<Vec<_>>());
 }
 
-// r[verify cram.stream.framing]
+// r[verify cram.stream.framing+2]
 /// A CRAM cut inside a container is a typed error that poisons the stream;
 /// one cut cleanly before the EOF container ends with a warning.
 #[test]

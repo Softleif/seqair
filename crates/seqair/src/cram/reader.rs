@@ -139,6 +139,13 @@ pub enum CramError {
     #[error("no core data block in slice")]
     MissingCoreDataBlock,
 
+    /// The FASTA's sequence is shorter than the header's `@SQ` `LN` and the
+    /// slice needs bases past its end: the FASTA is not the file's reference.
+    #[error(
+        "reference {contig} in the FASTA is {fasta_len} bases, the CRAM header says {header_len}: wrong reference?"
+    )]
+    ReferenceTooShort { contig: SmolStr, header_len: u64, fasta_len: u64 },
+
     /// A record's `RG` names no `@RG` line of the header.
     #[error("CRAM record read group {read_group} is not one of the header's {count}")]
     ReadGroupOutOfRange { read_group: i32, count: usize },

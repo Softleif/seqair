@@ -134,7 +134,8 @@ impl ContainerHeader {
             .checked_add(n)
             .ok_or(CramError::Truncated { context: "container landmark count pos" })?;
 
-        let landmark_count_usize = landmark_count as usize;
+        let landmark_count_usize = usize::try_from(landmark_count.cast_signed())
+            .map_err(|_| CramError::InvalidLength { value: landmark_count.cast_signed() })?;
         super::reader::check_alloc_size(
             landmark_count_usize.saturating_mul(4),
             "container landmark array",
