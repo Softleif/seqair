@@ -91,7 +91,7 @@ pub use pileup::{
     AlignmentView, Indel, PileupAlignment, PileupColumn, PileupEngine, PileupGuard, PileupOp,
     RefSeq,
 };
-pub use reader::{BamError, BamQuery, BamQueryCounts, BamShared, IndexedBamReader};
+pub use reader::{BamError, BamQuery, BamQueryCounts, BamShared, IndexedBamReader, RawQuery};
 // `record` is intentionally not re-exported as a type. The production decode
 // path is `RecordStore::push_raw`; the `record` module exposes only shared
 // decode primitives (`parse_header`, `compute_end_pos_from_raw`, `DecodeError`).
