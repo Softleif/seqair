@@ -151,7 +151,7 @@ fn arb_fixture(tc: &TestCase) -> (PathBuf, PathBuf) {
     tc.draw(gs::sampled_from(fixtures()))
 }
 
-// r[verify cram.stream.container_header]
+// r[verify cram.stream.container_header+2]
 /// A reader that delivers 1 to 4096 bytes per call, in any sequence, gives
 /// the records of reading the file in one go.
 #[hegel::test(test_cases = pinned::cases(64))]

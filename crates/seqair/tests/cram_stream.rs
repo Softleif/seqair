@@ -121,7 +121,7 @@ fn samtools(args: &[&str], cram: &Path, fasta: &Path) -> String {
 }
 
 // r[verify cram.stream+2]
-// r[verify cram.stream.container_header]
+// r[verify cram.stream.container_header+2]
 // r[verify cram.stream.framing+2]
 // r[verify cram.stream.decoder]
 // r[verify cram.stream.all_records]
