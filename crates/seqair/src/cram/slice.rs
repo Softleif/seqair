@@ -382,6 +382,7 @@ pub(crate) struct SliceScratch {
     pub(crate) cigar_ops: Vec<(u32, u8)>,
     /// rANS order-1 tables and the bzip2 decoder, each allocated on first use.
     pub(crate) codec: CodecScratch,
+    pub(crate) md: MdNm,
 }
 
 /// Decode a slice's records — those `keep` names — into a [`DecodedSlice`].
@@ -400,6 +401,7 @@ pub(crate) fn decode_slice(
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     keep: Keep,
+    decode_md: bool,
     scratch: &mut SliceScratch,
 ) -> Result<DecodedSlice, CramError> {
     decode_slice_records(
@@ -410,6 +412,7 @@ pub(crate) fn decode_slice(
         header,
         read_group_ids,
         keep,
+        decode_md,
         scratch,
     )
     .map(|(slice, _)| slice)
@@ -435,6 +438,7 @@ pub(crate) fn multi_ref_spans(
         header,
         read_group_ids,
         Keep::Nothing,
+        false,
         scratch,
     )?;
     let mut spans: Vec<(Tid, Range<i64>)> = Vec::new();
@@ -465,6 +469,7 @@ fn decode_slice_records(
     header: &BamHeader,
     read_group_ids: &[SmolStr],
     keep: Keep,
+    decode_md: bool,
     scratch: &mut SliceScratch,
 ) -> Result<(DecodedSlice, Vec<SliceMateInfo>), CramError> {
     let slice_data = container_data
@@ -604,6 +609,10 @@ fn decode_slice_records(
     };
 
     let core_data = core_block.ok_or_else(|| CramError::MissingCoreDataBlock)?;
+    // r[impl cram.stream.md_nm]
+    // htslib has no reference for a slice of a file written without one
+    // (`RR` false) unless the slice embeds it.
+    let decode_md = decode_md && (ch.preservation.reference_required || sh.embedded_reference >= 0);
 
     order_external_blocks(ch, &mut external_blocks);
     let mut ctx = DecodeContext::new(&core_data.data, external_blocks);
@@ -627,6 +636,7 @@ fn decode_slice_records(
             slice_ref,
             read_group_ids,
             keep,
+            decode_md,
             &mut out,
             scratch,
             record_index,
@@ -763,6 +773,7 @@ fn decode_record(
     slice_ref: RefSeqId<Tid>,
     read_group_ids: &[SmolStr],
     keep: Keep,
+    decode_md: bool,
     out: &mut DecodedSlice,
     scratch: &mut SliceScratch,
     record_index: usize,
@@ -777,6 +788,7 @@ fn decode_record(
         feature_bytes: feature_byte_buf,
         cigar_ops: cigar_ops_buf,
         codec: _,
+        md: md_buf,
     } = scratch;
 
     // r[impl cram.record.flags]
@@ -911,8 +923,13 @@ fn decode_record(
     //   reconstructed BAM aux block as the encoded `tag_value` bytes.
     // 10. Decode tag values
     aux_buf.clear();
+    // r[impl cram.stream.md_nm]
+    let mut stored_md = false;
+    let mut stored_nm = false;
     if let Some(line) = tag_lines.get(tag_line_idx) {
         for (head, enc) in line {
+            stored_md |= head.starts_with(b"MD");
+            stored_nm |= head.starts_with(b"NM");
             // Serialize to BAM binary aux format: tag[0] tag[1] type value_bytes.
             // Decoding the value directly into `aux_buf` skips the
             // per-tag `Vec<u8>` allocation that the old `decode` API
@@ -922,6 +939,9 @@ fn decode_record(
             enc.decode_into(ctx, aux_buf)?;
             // r[impl cram.record.cf_tag]
             if *head == *b"cFC" && aux_buf.len() == start.wrapping_add(4) {
+                let flags = aux_buf.last().copied().unwrap_or(0);
+                stored_md |= flags & 1 != 0;
+                stored_nm |= flags & 2 != 0;
                 aux_buf.truncate(start);
             }
         }
@@ -932,13 +952,15 @@ fn decode_record(
     // once at open time (cached on `CramShared::read_group_ids`); used to
     // be a per-record header text scan + String allocation, which dominated
     // `decode_record` profiles.
-    if let Ok(rg_idx) = usize::try_from(read_group)
-        && let Some(rg_id) = read_group_ids.get(rg_idx)
-    {
-        aux_buf.extend_from_slice(b"RGZ");
-        aux_buf.extend_from_slice(rg_id.as_bytes());
-        aux_buf.push(0); // null terminator for Z-type
-    }
+    // Appended last, after any generated MD/NM, as `cram_to_bam` does.
+    let rg_id = usize::try_from(read_group).ok().and_then(|i| read_group_ids.get(i));
+    let append_rg = |aux_buf: &mut Vec<u8>| {
+        if let Some(rg_id) = rg_id {
+            aux_buf.extend_from_slice(b"RGZ");
+            aux_buf.extend_from_slice(rg_id.as_bytes());
+            aux_buf.push(0); // null terminator for Z-type
+        }
+    };
 
     let is_unmapped = bam_flags.is_unmapped();
 
@@ -966,6 +988,10 @@ fn decode_record(
         //
         // Reconstruction sets matching_bases / indel_bases for the kept-record
         // push later; for foreign-tid we don't push, so 0 is fine.
+        let generate = GenerateMdNm {
+            md: decode_md && !seq_unknown && !stored_md,
+            nm: decode_md && !seq_unknown && !stored_nm,
+        };
         let (ref_consumed, matching_bases, indel_bases) = if foreign_tid {
             let span =
                 scan_features_for_refspan(ch, ctx, feature_count, read_length, feature_byte_buf)?;
@@ -984,7 +1010,14 @@ fn decode_record(
                 bases_buf,
                 feature_byte_buf,
                 cigar_ops_buf,
+                generate.any().then(|| {
+                    md_buf.start();
+                    &mut *md_buf
+                }),
             )?;
+            if generate.any() {
+                md_buf.finish_into(generate, aux_buf);
+            }
             (result.ref_consumed, result.matching_bases, result.indel_bases)
         };
 
@@ -1038,6 +1071,7 @@ fn decode_record(
             super::reader::CramError::InvalidPosition { value: end_pos_inclusive_raw }
         })?;
 
+        append_rg(aux_buf);
         if foreign_tid {
             return Ok(SliceMateInfo {
                 pos: pos_0based.as_i64(),
@@ -1076,6 +1110,7 @@ fn decode_record(
         });
     }
 
+    append_rg(aux_buf);
     // Unmapped read
     // r[impl cram.edge.seq_unknown+2]
     if !seq_unknown {
@@ -1246,6 +1281,164 @@ fn resolve_mate_tlen(infos: &[SliceMateInfo], out: &mut DecodedSlice) {
     }
 }
 
+// r[impl cram.stream.md_nm]
+/// htslib's `MD`/`NM` as `cram_decode_seq` builds them while it applies a
+/// read's features; [`Self::start`] begins a read.
+#[derive(Debug, Default)]
+pub(crate) struct MdNm {
+    md: Vec<u8>,
+    nm: u32,
+    /// The match run not yet written; -1 once the read ran off the
+    /// reference, after which htslib writes no more numbers.
+    dist: i64,
+}
+
+impl MdNm {
+    fn start(&mut self) {
+        self.md.clear();
+        self.nm = 0;
+        self.dist = 0;
+    }
+
+    /// `BLOCK_APPEND_UINT(md_dist)` as htslib guards it.
+    fn flush(&mut self) {
+        if self.dist >= 0 {
+            self.md.extend_from_slice(itoa::Buffer::new().format(self.dist).as_bytes());
+        }
+    }
+
+    /// `add_md_char`: the run, then the reference base, unguarded.
+    fn mismatch(&mut self, ref_base: u8) {
+        self.md.extend_from_slice(itoa::Buffer::new().format(self.dist).as_bytes());
+        self.md.push(ref_base);
+        self.dist = 0;
+        self.nm = self.nm.saturating_add(1);
+    }
+
+    /// `n` implicit matches over `reference` (`None` past its end); a
+    /// reference `N` is a mismatch.
+    fn matches(&mut self, reference: Option<&[Base]>, n: usize) {
+        let n = i64::try_from(n).unwrap_or(i64::MAX);
+        match reference {
+            Some(bases) => {
+                let mut run = 0i64;
+                for &b in bases {
+                    if b == Base::Unknown {
+                        self.dist = self.dist.saturating_add(run);
+                        run = 0;
+                        self.mismatch(b'N');
+                    } else {
+                        run = run.saturating_add(1);
+                    }
+                }
+                self.dist = self.dist.saturating_add(run);
+            }
+            None if self.dist >= 0 => self.dist = self.dist.saturating_add(n),
+            None => {}
+        }
+    }
+
+    /// `X`: a substitution of the reference base, `None` past its end.
+    fn substitution(&mut self, ref_base: Option<Base>) {
+        match ref_base {
+            Some(b) => self.mismatch(b as u8),
+            None => {
+                self.flush();
+                self.dist = -1;
+            }
+        }
+    }
+
+    /// `B`: a read base stored as it is, a mismatch wherever it lies.
+    fn read_base(&mut self, ref_base: Option<Base>) {
+        self.flush();
+        match ref_base {
+            Some(b) => {
+                self.md.push(b as u8);
+                self.nm = self.nm.saturating_add(1);
+                self.dist = 0;
+            }
+            None => self.dist = -1,
+        }
+    }
+
+    /// `b`: read bases stored as they are, each a mismatch.
+    fn read_bases(&mut self, reference: &[Base], start: usize, n: usize) {
+        self.flush();
+        for i in 0..n {
+            if i > 0 {
+                self.md.push(b'0');
+            }
+            let Some(&b) = reference.get(start.saturating_add(i)) else {
+                self.dist = -1;
+                break;
+            };
+            self.md.push(b as u8);
+            self.nm = self.nm.saturating_add(1);
+        }
+        // htslib resets the run even when the bases ran off the reference.
+        self.dist = 0;
+    }
+
+    fn deletion(&mut self, reference: &[Base], start: usize, n: usize) {
+        self.flush();
+        let Some(have) = reference.get(start..) else {
+            self.dist = -1;
+            return;
+        };
+        let deleted = have.get(..n).unwrap_or(have);
+        self.md.push(b'^');
+        self.md.extend(deleted.iter().map(|&b| b as u8));
+        self.nm = self.nm.saturating_add(u32::try_from(deleted.len()).unwrap_or(u32::MAX));
+        if deleted.len() == n {
+            self.dist = 0;
+        } else {
+            self.md.push(b'0');
+            self.dist = -1;
+        }
+    }
+
+    fn insertion(&mut self, n: usize) {
+        self.nm = self.nm.saturating_add(u32::try_from(n).unwrap_or(u32::MAX));
+    }
+
+    /// Append the tags that are wanted, `MD:Z` then `NM` as the smallest
+    /// unsigned type that holds it.
+    fn finish_into(&mut self, want: GenerateMdNm, aux: &mut Vec<u8>) {
+        self.flush();
+        if want.md {
+            aux.extend_from_slice(b"MDZ");
+            aux.extend_from_slice(&self.md);
+            aux.push(0);
+        }
+        if want.nm {
+            aux.extend_from_slice(b"NM");
+            if let Ok(nm) = u8::try_from(self.nm) {
+                aux.extend_from_slice(&[b'C', nm]);
+            } else if let Ok(nm) = u16::try_from(self.nm) {
+                aux.push(b'S');
+                aux.extend_from_slice(&nm.to_le_bytes());
+            } else {
+                aux.push(b'I');
+                aux.extend_from_slice(&self.nm.to_le_bytes());
+            }
+        }
+    }
+}
+
+/// Which of `MD` and `NM` a record gets generated.
+#[derive(Debug, Clone, Copy, Default)]
+struct GenerateMdNm {
+    md: bool,
+    nm: bool,
+}
+
+impl GenerateMdNm {
+    fn any(self) -> bool {
+        self.md || self.nm
+    }
+}
+
 struct ReconstructResult {
     ref_consumed: u32,
     matching_bases: u32,
@@ -1335,6 +1528,7 @@ fn decode_features_and_reconstruct(
     bases_buf: &mut Vec<Base>,
     feature_byte_buf: &mut Vec<u8>,
     cigar_ops_buf: &mut Vec<(u32, u8)>,
+    mut md: Option<&mut MdNm>,
 ) -> Result<ReconstructResult, CramError> {
     let ds = &ch.data_series;
 
@@ -1376,17 +1570,16 @@ fn decode_features_and_reconstruct(
         bases_buf: &mut Vec<Base>,
         cigar_ops: &mut Vec<(u32, u8)>,
         matching_bases: &mut u32,
+        md: Option<&mut MdNm>,
     ) {
         if n == 0 {
             return;
         }
-        extend_from_reference(
-            reference,
-            ref_offset.wrapping_add(*ref_pos),
-            n,
-            ref_warned,
-            bases_buf,
-        );
+        let start = ref_offset.wrapping_add(*ref_pos);
+        if let Some(md) = md {
+            md.matches(reference.get(start..start.saturating_add(n)), n);
+        }
+        extend_from_reference(reference, start, n, ref_warned, bases_buf);
         let n32 = u32::try_from(n).unwrap_or(u32::MAX);
         push_cigar_op(cigar_ops, n32, 0); // M
         *matching_bases = matching_bases.saturating_add(n32);
@@ -1416,8 +1609,10 @@ fn decode_features_and_reconstruct(
                 bases_buf,
                 cigar_ops_buf,
                 &mut matching_bases,
+                md.as_deref_mut(),
             );
         }
+        let ref_index = ref_offset.wrapping_add(ref_pos);
 
         // Apply the feature inline. Payload-bearing variants decode straight
         // into `feature_byte_buf` (cleared, then filled) — no per-feature alloc.
@@ -1430,6 +1625,9 @@ fn decode_features_and_reconstruct(
                     ref_base_at(reference_seq, ref_offset.wrapping_add(ref_pos), &mut ref_warned);
                 let read_base = ch.preservation.substitution_matrix.substitute(ref_base as u8, bs);
                 bases_buf.push(Base::from(read_base));
+                if let Some(md) = md.as_deref_mut() {
+                    md.substitution(reference_seq.get(ref_index).copied());
+                }
                 push_cigar_op(cigar_ops_buf, 1, 0); // M
                 matching_bases = matching_bases.saturating_add(1);
                 read_pos = read_pos.wrapping_add(1);
@@ -1449,6 +1647,9 @@ fn decode_features_and_reconstruct(
                     reason = "insertion length is bounded by read_length (validated); fits in u32"
                 )]
                 let len_u32 = len as u32;
+                if let Some(md) = md.as_deref_mut() {
+                    md.insertion(len);
+                }
                 push_cigar_op(cigar_ops_buf, len_u32, 1); // I
                 indel_bases = indel_bases.saturating_add(len_u32);
                 read_pos = read_pos.wrapping_add(len);
@@ -1457,6 +1658,9 @@ fn decode_features_and_reconstruct(
             b'i' => {
                 let base = ds.base.decode(ctx)?;
                 bases_buf.push(Base::from(base));
+                if let Some(md) = md.as_deref_mut() {
+                    md.insertion(1);
+                }
                 push_cigar_op(cigar_ops_buf, 1, 1); // I
                 indel_bases = indel_bases.saturating_add(1);
                 read_pos = read_pos.wrapping_add(1);
@@ -1464,6 +1668,9 @@ fn decode_features_and_reconstruct(
             // D — deletion: 0 read, N ref, D cigar.
             b'D' => {
                 let len = ds.deletion_length.decode(ctx)? as u32;
+                if let Some(md) = md.as_deref_mut() {
+                    md.deletion(reference_seq, ref_index, len as usize);
+                }
                 push_cigar_op(cigar_ops_buf, len, 2); // D
                 indel_bases = indel_bases.saturating_add(len);
                 ref_pos = ref_pos.wrapping_add(len as usize);
@@ -1508,6 +1715,9 @@ fn decode_features_and_reconstruct(
                 let base = ds.base.decode(ctx)?;
                 let _qual = ds.quality_score.decode(ctx)?;
                 bases_buf.push(Base::from(base));
+                if let Some(md) = md.as_deref_mut() {
+                    md.read_base(reference_seq.get(ref_index).copied());
+                }
                 push_cigar_op(cigar_ops_buf, 1, 0); // M
                 matching_bases = matching_bases.saturating_add(1);
                 read_pos = read_pos.wrapping_add(1);
@@ -1527,6 +1737,9 @@ fn decode_features_and_reconstruct(
                     reason = "bases length is bounded by read_length (validated); fits in u32"
                 )]
                 let len_u32 = len as u32;
+                if let Some(md) = md.as_deref_mut() {
+                    md.read_bases(reference_seq, ref_index, len);
+                }
                 push_cigar_op(cigar_ops_buf, len_u32, 0); // M
                 matching_bases = matching_bases.saturating_add(len_u32);
                 read_pos = read_pos.wrapping_add(len);
@@ -1562,6 +1775,7 @@ fn decode_features_and_reconstruct(
             bases_buf,
             cigar_ops_buf,
             &mut matching_bases,
+            md,
         );
     }
 
@@ -1825,6 +2039,7 @@ mod tests {
             &bam_header,
             &[],
             Keep::Tid(tid(0)),
+            false,
             &mut SliceScratch::default(),
         );
 
@@ -1933,5 +2148,63 @@ mod tests {
             matches!(result, Err(CramError::InvalidLength { value: -1 })),
             "expected InvalidLength error for negative num_content_ids, got: {result:?}"
         );
+    }
+
+    fn md_of(md: &mut MdNm) -> (String, Vec<u8>) {
+        let mut aux = Vec::new();
+        md.finish_into(GenerateMdNm { md: true, nm: true }, &mut aux);
+        (String::from_utf8(md.md.clone()).unwrap(), aux)
+    }
+
+    // r[verify cram.stream.md_nm]
+    /// A reference skip leaves the match run going (htslib measured
+    /// `5M100N5M` as one run); reference `N`s in a match are mismatches.
+    #[test]
+    fn md_runs_through_skips_and_counts_reference_n() {
+        let reference = Base::from_ascii_vec(b"ACGTANNCGT".to_vec());
+        let mut md = MdNm::default();
+        md.start();
+        md.matches(reference.get(0..5), 5);
+        // a skip: no call at all
+        md.matches(reference.get(4..10), 6);
+        let (text, aux) = md_of(&mut md);
+        assert_eq!(text, "6N0N3");
+        assert_eq!(aux.get(aux.len() - 4..), Some(&b"NMC\x02"[..]));
+    }
+
+    // r[verify cram.stream.md_nm]
+    /// `b` bases are each a mismatch, written with a `0` between them, even
+    /// where they equal the reference; `D` writes `^` and the deleted bases.
+    #[test]
+    fn md_of_bases_blocks_and_deletions() {
+        let reference = Base::from_ascii_vec(b"ACGTACGT".to_vec());
+        let mut md = MdNm::default();
+        md.start();
+        md.matches(reference.get(0..2), 2);
+        md.read_bases(&reference, 2, 2);
+        md.deletion(&reference, 4, 2);
+        md.insertion(3);
+        md.matches(reference.get(6..8), 2);
+        let (text, _) = md_of(&mut md);
+        assert_eq!(text, "2G0T0^AC2");
+        assert_eq!(md.nm, 7);
+    }
+
+    // r[verify cram.stream.md_nm]
+    /// NM takes the smallest unsigned type that holds it.
+    #[test]
+    fn nm_is_the_smallest_unsigned_type() {
+        for (nm, want) in [
+            (255u32, &b"NMC\xff"[..]),
+            (256, &b"NMS\x00\x01"[..]),
+            (70_000, &b"NMI\x70\x11\x01\x00"[..]),
+        ] {
+            let mut md = MdNm::default();
+            md.start();
+            md.nm = nm;
+            let mut aux = Vec::new();
+            md.finish_into(GenerateMdNm { md: false, nm: true }, &mut aux);
+            assert_eq!(aux, want, "{nm}");
+        }
     }
 }
