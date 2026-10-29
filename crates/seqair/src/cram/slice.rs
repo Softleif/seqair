@@ -335,6 +335,20 @@ impl DecodedSlice<IupacBase> {
         self.records.iter().map(|r| self.fields(r))
     }
 
+    // r[impl cram.query_raw]
+    /// The first record at or after index `from` that overlaps `start..=last`
+    /// by `copy_into`'s test, with its index.
+    pub(crate) fn next_overlapping(
+        &self,
+        from: usize,
+        start: Pos0,
+        last: Pos0,
+    ) -> Option<(usize, AlignmentFields<'_>)> {
+        let rest = self.records.get(from..)?;
+        let (i, r) = rest.iter().enumerate().find(|(_, r)| r.overlaps(start, last))?;
+        Some((from.saturating_add(i), self.fields(r)))
+    }
+
     fn fields(&self, r: &SliceRecord) -> AlignmentFields<'_> {
         AlignmentFields {
             tid: r.tid,

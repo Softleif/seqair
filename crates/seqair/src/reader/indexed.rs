@@ -7,7 +7,7 @@ use crate::{
         BamHeader, IndexedBamReader, RawBamRecord, RawQuery, ReferenceStats,
         record_store::{CustomizeRecordStore, RecordStore},
     },
-    cram::reader::IndexedCramReader,
+    cram::reader::{CramRawQuery, IndexedCramReader},
     fasta::IndexedFastaReader,
     sam::reader::{IndexedSamReader, SamRawQuery},
 };
@@ -199,14 +199,14 @@ impl<R: Read + Seek> IndexedReader<R> {
         }
     }
 
-    // r[impl unified.query_raw]
-    /// The records overlapping the closed interval `span` on `tid`, exactly
-    /// as stored, in file order, as [`RawBamRecord`]s — for rewriting a
-    /// region of a file record by record. BAM and SAM only.
+    // r[impl unified.query_raw+2]
+    /// The records overlapping the closed interval `span` on `tid`, in file
+    /// order, as [`RawBamRecord`]s — for rewriting a region of a file record
+    /// by record. BAM and SAM records are as stored; CRAM records as htslib
+    /// reconstructs them ([`IndexedCramReader::query_raw`]).
     ///
     /// # Errors
-    /// [`ReaderError::RawQueryUnsupported`] for CRAM, else what the format's
-    /// query reports.
+    /// What the format's query reports.
     pub fn query_raw(
         &mut self,
         tid: Tid,
@@ -215,11 +215,7 @@ impl<R: Read + Seek> IndexedReader<R> {
         match self {
             Self::Bam(r) => Ok(RawRegionQuery::Bam(r.query_raw(tid, span)?)),
             Self::Sam(r) => Ok(RawRegionQuery::Sam(r.query_raw(tid, span)?)),
-            // CRAM records only exist decoded into a `RecordStore`, which is
-            // lossy. The seam: a `RawRegionQuery::Cram` variant that decodes
-            // the CRAI-selected containers whole into `RawBamRecord`s and
-            // filters them by the same overlap test.
-            Self::Cram(_) => Err(ReaderError::RawQueryUnsupported),
+            Self::Cram(r) => Ok(RawRegionQuery::Cram(r.query_raw(tid, span))),
         }
     }
 }
@@ -231,6 +227,7 @@ impl<R: Read + Seek> IndexedReader<R> {
 pub enum RawRegionQuery<'r, R: Read + Seek = std::fs::File> {
     Bam(RawQuery<'r, R>),
     Sam(SamRawQuery<'r, R>),
+    Cram(CramRawQuery<'r, R>),
 }
 
 impl<R: Read + Seek> RawRegionQuery<'_, R> {
@@ -238,6 +235,7 @@ impl<R: Read + Seek> RawRegionQuery<'_, R> {
         match self {
             Self::Bam(q) => q.header(),
             Self::Sam(q) => q.header(),
+            Self::Cram(q) => q.header(),
         }
     }
 
@@ -251,6 +249,7 @@ impl<R: Read + Seek> RawRegionQuery<'_, R> {
         match self {
             Self::Bam(q) => Ok(q.read_record(record)?),
             Self::Sam(q) => Ok(q.read_record(record)?),
+            Self::Cram(q) => Ok(q.read_record(record)?),
         }
     }
 }
@@ -262,6 +261,7 @@ impl<R: Read + Seek> Iterator for RawRegionQuery<'_, R> {
         match self {
             Self::Bam(q) => q.next().map(|r| r.map_err(ReaderError::from)),
             Self::Sam(q) => q.next().map(|r| r.map_err(ReaderError::from)),
+            Self::Cram(q) => q.next().map(|r| r.map_err(ReaderError::from)),
         }
     }
 }

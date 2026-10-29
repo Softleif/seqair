@@ -149,7 +149,7 @@ fn payloads(records: &[RawBamRecord]) -> Vec<&[u8]> {
 // r[verify bam.reader.query_raw]
 // r[verify bam.reader.query_raw.errors]
 // r[verify sam.reader.query_raw]
-// r[verify unified.query_raw]
+// r[verify unified.query_raw+2]
 // r[verify bam.reader.resume]
 /// A few regions in a row on one BAM and one SAM reader (so the resume
 /// shortcut is in play): each query gives exactly the streamed records that
@@ -208,17 +208,6 @@ fn raw_regions_are_the_streamed_records_and_what_samtools_prints(tc: TestCase) {
         }
         tc.event_value("records", from_bam.len() as f64);
     }
-}
-
-// r[verify unified.query_raw]
-#[test]
-fn a_cram_raw_query_is_unsupported() {
-    let mut reader =
-        IndexedReader::open_with_reference(&data("test_v30.cram"), &data("test.fasta.gz")).unwrap();
-    let tid = reader.header().tid("chr19").unwrap();
-    let span = (Pos0::new(6_105_700).unwrap()..=Pos0::new(6_105_800).unwrap()).into();
-    let err = reader.query_raw(tid, span).unwrap_err();
-    assert!(matches!(err, ReaderError::RawQueryUnsupported), "{err:?}");
 }
 
 /// What a generated record has wrong with it, if anything.
@@ -375,7 +364,7 @@ fn is_invalid_record(e: &ReaderError) -> bool {
 // r[verify bam.reader.query_raw]
 // r[verify bam.reader.query_raw.errors]
 // r[verify sam.reader.query_raw]
-// r[verify unified.query_raw]
+// r[verify unified.query_raw+2]
 /// Every record `fetch_into` keeps comes out of `query_raw` in its place:
 /// as itself, or, where it does not validate (a CIGAR that does not cover
 /// SEQ), as an error the query continues past. A SAM line naming an
