@@ -21,7 +21,7 @@ mod fuzz;
 pub use crate::bam::depth_cap::{DepthCap, DepthLimit};
 pub use formats::FormatDetectionError;
 pub(crate) use indexed::FetchedRecord;
-pub use indexed::{FetchCounts, IndexPath, IndexedReader};
+pub use indexed::{FetchCounts, IndexPath, IndexedReader, RawRegionQuery};
 pub use readers::{Pileup, Readers};
 pub use resolve::{ResolveTid, Tid, TidError};
 pub use segment::{IntoSegmentTarget, Segment, SegmentOptions, SegmentOptionsError, Segments};
@@ -138,4 +138,8 @@ pub enum ReaderError {
 
     #[error("BAM header target count {count} does not fit in u32")]
     HeaderTargetCountOverflow { count: usize },
+
+    /// `IndexedReader::query_raw` on a CRAM (`r[unified.query_raw]`).
+    #[error("raw region queries are not supported for CRAM yet; use fetch_into")]
+    RawQueryUnsupported,
 }
