@@ -200,13 +200,10 @@ impl DecodedSlice {
         customize: &mut E,
         counts: &mut crate::reader::FetchCounts,
     ) -> Result<(), CramError> {
-        let mut bases = Vec::new();
         for r in &self.records {
             if !r.overlaps(query_start, query_end) {
                 continue;
             }
-            bases.clear();
-            bases.extend(field(&self.bases, r.seq).iter().map(|b| b.to_base()));
             let idx = store.push_fields(
                 r.pos,
                 r.end_pos,
@@ -216,7 +213,7 @@ impl DecodedSlice {
                 r.indel_bases,
                 field(&self.names, r.name),
                 field(&self.cigar, r.cigar),
-                &bases,
+                field(&self.bases, r.seq),
                 field(&self.qual, r.qual),
                 field(&self.aux, r.aux),
                 r.tid,

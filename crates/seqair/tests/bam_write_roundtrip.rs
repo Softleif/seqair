@@ -15,7 +15,7 @@
 )]
 
 mod helpers;
-use helpers::ri;
+use helpers::{iupac, ri};
 use noodles::bam;
 use noodles::sam;
 use seqair::bam::aux_data::AuxData;
@@ -701,7 +701,7 @@ mod e2e_oracle {
                     0,
                     &inp.qname,
                     &cigar,
-                    &inp.bases,
+                    &iupac(&inp.bases),
                     &inp.quals,
                     &[],          // no aux
                     Some(tid(0)), // tid

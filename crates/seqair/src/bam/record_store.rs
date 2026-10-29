@@ -17,7 +17,7 @@ use super::{
 };
 use crate::reader::Tid;
 use hashbrown::HashTable;
-use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Pos0, QPos};
+use seqair_types::{BamFlags, Base, BaseQuality, IupacBase, MappingQuality, Pos0, QPos};
 use std::num::NonZeroU64;
 
 // r[impl record_store.qname_hash]
@@ -797,7 +797,7 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl unified.record_store_push]
-    // r[impl record_store.push_fields+2]
+    // r[impl record_store.push_fields+3]
     // r[impl unified.push_fields_equivalence]
     // r[impl record_store.checked_offsets]
     // r[impl record_store.pre_filter.rollback+1]
@@ -825,7 +825,7 @@ impl<U> RecordStore<U> {
         indel_bases: u32,
         qname: &[u8],
         cigar_ops: &[CigarOp],
-        bases: &[Base],
+        bases: &[IupacBase],
         qual: &[u8],
         aux: &[u8],
         tid: Option<Tid>,
@@ -871,7 +871,7 @@ impl<U> RecordStore<U> {
             qual_bytes: qual,
             aux_bytes: aux,
             cigar: CigarOp::ops_as_bytes(cigar_ops),
-            seq: Sequence::Bases(bases),
+            seq: Sequence::Iupac(bases),
         }) {
             return Ok(None);
         }
@@ -884,7 +884,7 @@ impl<U> RecordStore<U> {
         // Bases slab
         // r[impl record_store.checked_offsets]
         let bases_off = u32::try_from(self.bases.len()).map_err(|_| DecodeError::SlabOverflow)?;
-        self.bases.extend_from_slice(bases);
+        self.bases.extend(bases.iter().map(|b| b.to_base()));
 
         // Cigar slab
         // r[impl record_store.checked_offsets]
@@ -953,22 +953,19 @@ impl<U> RecordStore<U> {
     }
 }
 
-// r[impl record_store.filter_raw_fields]
-/// The form in which the CIGAR data is available in [`FilterRawFields`].
-///
-/// In the `push_raw` path (BAM), the CIGAR is available as raw BAM bytes
-/// In `push_raw` (BAM), the sequence is in 4-bit packed BAM format.
-/// In `push_fields` (SAM/CRAM), it has already been decoded into typed
-/// [`Base`] values.
+// r[impl record_store.filter_raw_fields+1]
+/// The form in which the sequence is available in [`FilterRawFields`]:
+/// 4-bit packed BAM bytes in `push_raw` (BAM), [`IupacBase`] codes in
+/// `push_fields` (SAM/CRAM).
 #[derive(Debug, Clone, Copy)]
 pub enum Sequence<'a> {
     /// 4-bit packed BAM sequence bytes (from `push_raw`).
     Packed(&'a [u8]),
-    /// Decoded sequence bases (from `push_fields`).
-    Bases(&'a [Base]),
+    /// The sequence's codes (from `push_fields`).
+    Iupac(&'a [IupacBase]),
 }
 
-// r[impl record_store.filter_raw_fields]
+// r[impl record_store.filter_raw_fields+1]
 /// Fields available to [`CustomizeRecordStore::filter_raw`] before any slab
 /// data is written — the raw slices and parsed header fields from the incoming
 /// record.
@@ -985,7 +982,7 @@ pub enum Sequence<'a> {
 ///   are `0` (not yet computed from CIGAR).
 ///
 /// From `push_fields` (pre-parsed SAM/CRAM fields):
-/// - [`seq`](Self::seq) is [`Sequence::Bases`] (decoded sequence bases).
+/// - [`seq`](Self::seq) is [`Sequence::Iupac`] (the sequence's codes).
 /// - [`end_pos`](Self::end_pos) is `Some(_)` (pre-computed).
 /// - [`matching_bases`](Self::matching_bases) and [`indel_bases`](Self::indel_bases)
 ///   are the pre-computed values.
@@ -1035,7 +1032,7 @@ pub struct FilterRawFields<'a> {
     /// [`CigarOp::extend_from_bam_bytes`] to copy into a `Vec<CigarOp>`.
     pub cigar: &'a [u8],
     /// Read sequence. [`Sequence::Packed`] from `push_raw` (BAM),
-    /// [`Sequence::Bases`] from `push_fields` (SAM/CRAM).
+    /// [`Sequence::Iupac`] from `push_fields` (SAM/CRAM).
     pub seq: Sequence<'a>,
 }
 // r[impl record_store.customize.trait+1]
@@ -2118,7 +2115,7 @@ pub(crate) mod tests {
     // r[verify record_store.checked_offsets]
     #[test]
     fn push_fields_rejects_offset_overflow() {
-        use seqair_types::Base;
+        use seqair_types::IupacBase;
         let mut store = RecordStore::new();
         // Directly inflate the names slab past u32::MAX to trigger overflow
         // We can't actually allocate 4GB in a test, so we test the check path
@@ -2132,7 +2129,7 @@ pub(crate) mod tests {
             0,
             b"read1",
             &[],
-            &[Base::A],
+            &[IupacBase::A],
             &[30],
             &[],
             Some(tid(0)),
@@ -2145,7 +2142,7 @@ pub(crate) mod tests {
     // r[verify record_store.push_fields+2]
     #[test]
     fn push_fields_rejects_qnames_longer_than_bam_allows() {
-        use seqair_types::Base;
+        use seqair_types::IupacBase;
         let mut store = RecordStore::new();
         let mut push = |qname: &[u8]| {
             store.push_fields(
@@ -2157,7 +2154,7 @@ pub(crate) mod tests {
                 0,
                 qname,
                 &[],
-                &[Base::A],
+                &[IupacBase::A],
                 &[30],
                 &[],
                 Some(tid(0)),
@@ -2346,7 +2343,7 @@ pub(crate) mod tests {
     // r[verify record_store.filter_raw]
     #[test]
     fn push_fields_filter_raw_rejection_avoids_slab_write() {
-        use seqair_types::Base;
+        use seqair_types::IupacBase;
 
         #[derive(Clone, Default)]
         struct RejectRaw;
@@ -2377,7 +2374,7 @@ pub(crate) mod tests {
                 0,
                 b"readY",
                 &[CigarOp::new(cigar::CigarOpType::Match, 5)],
-                &[Base::A; 5],
+                &[IupacBase::A; 5],
                 &[30; 5],
                 b"tagdata",
                 Some(tid(0)),
@@ -2425,7 +2422,7 @@ pub(crate) mod tests {
     // r[verify record_store.pre_filter.rollback+1]
     #[test]
     fn push_fields_with_rejecting_filter_rolls_back() {
-        use seqair_types::Base;
+        use seqair_types::IupacBase;
         let mut store = RecordStore::new();
 
         // Push one kept record first
@@ -2439,7 +2436,7 @@ pub(crate) mod tests {
                 0,
                 b"kept",
                 &[CigarOp::new(cigar::CigarOpType::Match, 4)],
-                &[Base::A, Base::C, Base::G, Base::T],
+                &[IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T],
                 &[30, 31, 32, 33],
                 &[],
                 Some(tid(0)),
@@ -2464,7 +2461,7 @@ pub(crate) mod tests {
                 0,
                 b"dropped",
                 &[CigarOp::new(cigar::CigarOpType::Match, 4)],
-                &[Base::A, Base::C, Base::G, Base::T],
+                &[IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T],
                 &[30, 31, 32, 33],
                 b"NM:i:0",
                 Some(tid(0)),
@@ -2483,7 +2480,7 @@ pub(crate) mod tests {
     // r[verify record_store.slim_record_fields]
     #[test]
     fn push_fields_preserves_next_ref_id() {
-        use seqair_types::Base;
+        use seqair_types::IupacBase;
         let mut store = RecordStore::new();
         store
             .push_fields(
@@ -2495,7 +2492,7 @@ pub(crate) mod tests {
                 0,
                 b"read1",
                 &[CigarOp::new(cigar::CigarOpType::Match, 5)],
-                &[Base::A, Base::C, Base::G, Base::T, Base::A],
+                &[IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T, IupacBase::A],
                 &[30, 31, 32, 33, 34],
                 &[],
                 Some(tid(0)),
@@ -2513,7 +2510,7 @@ pub(crate) mod tests {
     // r[verify record_store.end_pos_htslib]
     #[test]
     fn end_pos_mapped_uses_cigar() {
-        use seqair_types::{BamFlags, Base};
+        use seqair_types::{BamFlags, IupacBase};
         let mut store = RecordStore::new();
         store
             .push_fields(
@@ -2525,7 +2522,7 @@ pub(crate) mod tests {
                 0,
                 b"read1",
                 &[CigarOp::new(cigar::CigarOpType::Match, 5)],
-                &[Base::A; 5],
+                &[IupacBase::A; 5],
                 &[30; 5],
                 &[],
                 Some(tid(0)),
@@ -2541,7 +2538,7 @@ pub(crate) mod tests {
     #[test]
     fn end_pos_unmapped_ignores_cigar() {
         use seqair_types::bam_flags::consts::FLAG_UNMAPPED;
-        use seqair_types::{BamFlags, Base};
+        use seqair_types::{BamFlags, IupacBase};
         let mut store = RecordStore::new();
         store
             .push_fields(
@@ -2553,7 +2550,7 @@ pub(crate) mod tests {
                 0,
                 b"read1",
                 &[CigarOp::new(cigar::CigarOpType::Match, 100)],
-                &[Base::A; 100],
+                &[IupacBase::A; 100],
                 &[0; 100],
                 &[],
                 Some(tid(0)),
@@ -2590,7 +2587,7 @@ pub(crate) mod tests {
                 0,                            // indel_bases = 0 (slice.rs:683)
                 b"cram_unmapped_read",
                 &[], // empty CIGAR (slice.rs:685)
-                bases,
+                &crate::bam::test_util::iupac(bases),
                 quals,
                 aux,
                 Some(tid(0)),
@@ -2713,7 +2710,7 @@ pub(crate) mod tests {
                         self.deletion,
                         format!("r{i}").as_bytes(),
                         &self.cigar(),
-                        &bases,
+                        &crate::bam::test_util::iupac(&bases),
                         &quals,
                         &[],
                         Some(crate::bam::test_util::tid(0)),
@@ -3138,7 +3135,7 @@ pub(crate) mod tests {
                     0,
                     &input.qname,
                     &cigar,
-                    &input.bases,
+                    &crate::bam::test_util::iupac(&input.bases),
                     &input.quals,
                     &input.aux,
                     Some(crate::bam::test_util::tid(0)),

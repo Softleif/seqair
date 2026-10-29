@@ -530,7 +530,7 @@ fn report_selectivity(tc: &TestCase, kept: usize, total: usize) {
 // r[verify unified.readers_open_customized]
 // r[verify record_store.pre_filter.rollback+1]
 // r[verify record_store.filter_raw]
-// r[verify record_store.filter_raw_fields]
+// r[verify record_store.filter_raw_fields+1]
 /// A filtered fetch is the unfiltered fetch restricted to the records the
 /// predicate accepts — same records, same order, same bytes — and the same
 /// predicate attached at open time through `Readers::open_customized` gives

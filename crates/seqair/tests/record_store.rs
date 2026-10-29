@@ -16,7 +16,7 @@ use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
 use seqair_types::MappingQuality;
 use seqair_types::QPos;
-use seqair_types::{BamFlags, Base, BaseQuality};
+use seqair_types::{BamFlags, Base, BaseQuality, IupacBase};
 
 // r[verify record_store.push_raw+2]
 // r[verify record_store.field_access]
@@ -195,7 +195,7 @@ fn integration_with_real_bam() {
     }
 }
 
-// r[verify record_store.push_fields]
+// r[verify record_store.push_fields+3]
 // r[verify unified.push_fields_equivalence]
 // r[verify unified.record_store_push]
 #[test]
@@ -213,7 +213,7 @@ fn push_fields_matches_push_raw() -> Result<(), Box<dyn std::error::Error>> {
     // Build the same record from pre-parsed fields
     let cigar_typed: Vec<seqair::bam::CigarOp> =
         cigar_ops.iter().map(|&op| seqair::bam::CigarOp::from_bam_u32(op)).collect();
-    let bases = [Base::A, Base::C, Base::G, Base::T];
+    let bases = [IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T];
 
     let mut store_fields = RecordStore::new();
     let idx_fields = store_fields
@@ -302,7 +302,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
             rec.indel_bases,
             store.record(i).unwrap().qname(),
             store.record(i).unwrap().cigar(),
-            store.record(i).unwrap().seq(),
+            &helpers::iupac(store.record(i).unwrap().seq()),
             BaseQuality::slice_to_bytes(store.record(i).unwrap().qual()),
             store.record(i).unwrap().aux(),
             rec.tid,

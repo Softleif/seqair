@@ -15,7 +15,7 @@ use crate::bam::{
 use crate::io::text_scan;
 use crate::reader::{ResolveTid, Tid};
 use core::range::RangeInclusive;
-use seqair_types::{Base, MappingQuality, Pos0, Pos1};
+use seqair_types::{IupacBase, MappingQuality, Pos0, Pos1};
 use std::num::NonZeroI32;
 use std::{
     convert::Infallible,
@@ -709,7 +709,7 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     end: i64,
     store: &mut RecordStore<E::Extra>,
     cigar_buf: &mut Vec<CigarOp>,
-    seq_buf: &mut Vec<u8>,
+    seq_buf: &mut Vec<IupacBase>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
     customize: &mut E,
@@ -725,14 +725,14 @@ fn parse_sam_line<E: CustomizeRecordStore>(
     // Field 1: QNAME
     let qname = fields.first().copied().unwrap_or(b"*");
 
-    // r[impl sam.record.seq_decode]
+    // r[impl sam.record.seq_decode+1]
     // r[impl sam.edge.missing_seq]
     let seq_field = fields.get(9).copied().unwrap_or(b"*");
     seq_buf.clear();
     if seq_field != b"*" {
-        seq_buf.extend_from_slice(seq_field);
+        IupacBase::from_ascii_into(seq_field, seq_buf);
     }
-    let bases = Base::convert_ascii_in_place_as_slice(seq_buf);
+    let bases = seq_buf.as_slice();
 
     // r[impl sam.record.qual_decode]
     // r[impl sam.edge.missing_qual]
@@ -1003,7 +1003,7 @@ mod tests {
         BamHeader::from_sam_text("@SQ\tSN:chr1\tLN:1000\n").expect("failed to build test header")
     }
 
-    fn make_store_and_bufs() -> (RecordStore, Vec<CigarOp>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    fn make_store_and_bufs() -> (RecordStore, Vec<CigarOp>, Vec<IupacBase>, Vec<u8>, Vec<u8>) {
         (RecordStore::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
     }
 

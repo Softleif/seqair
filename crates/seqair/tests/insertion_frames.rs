@@ -38,7 +38,7 @@ fn store_with_insertion(pos: u32, lead: u32, ins: u32, trail: u32) -> RecordStor
             ins,
             b"ins",
             &cigar,
-            &seq,
+            &helpers::iupac(&seq),
             &vec![30u8; seq.len()],
             &[],
             Some(tid(0)),

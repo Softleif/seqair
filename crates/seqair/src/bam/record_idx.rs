@@ -404,7 +404,7 @@ mod tests {
                     0,
                     b"frag",
                     &[CigarOp::new(crate::bam::cigar::CigarOpType::Match, 4)],
-                    &bases,
+                    &crate::bam::test_util::iupac(&bases),
                     &quals,
                     b"XAi\x07\x00\x00\x00",
                     Some(tid(0)),

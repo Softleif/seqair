@@ -217,7 +217,7 @@ mod tests {
             qual_bytes: &[],
             aux_bytes: &[],
             cigar,
-            seq: Sequence::Bases(&[]),
+            seq: Sequence::Iupac(&[]),
         }
     }
 
