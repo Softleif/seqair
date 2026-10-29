@@ -37,11 +37,11 @@ Each decoded record MUST become a `RawBamRecord` as htslib's `cram_to_bam` build
 ## Fidelity
 
 r[cram.stream.fidelity]
-For every record, `format_sam_record` of the streamed `RawBamRecord` MUST equal the line `samtools view --no-PG --input-fmt-option decode_md=0` prints for it, and the stream MUST yield as many records as `samtools view -c` counts. With `decode_md=0` htslib prints the tags the file stores; by default it also regenerates `MD` and `NM`, which seqair does not do (`r[cram.record.cf_tag]`). Known differences from htslib's default output, all outside the fixtures' content unless noted:
+The oracle is samtools: each streamed record MUST be byte for byte the record `samtools view -b --input-fmt-option decode_md=0` writes for it, `format_sam_record` of it MUST equal the line `samtools view --no-PG --input-fmt-option decode_md=0` prints, and the stream MUST yield as many records as `samtools view -c` counts. With `decode_md=0` htslib keeps the tags the file stores; by default it also generates `MD` and `NM` for mapped reads, which seqair does not, so against the default output records MUST differ only in those two tags. The known differences, each pinned by name in the test (`KNOWN_MISMATCHES` in `tests/cram_stream.rs`) so that fixing one fails it until the entry goes:
 
-- `MD`/`NM` regeneration (in every fixture: htslib appends `MD` and `NM` to mapped reads that did not store them).
-- IUPAC bases other than `ACGTN` in SEQ decode as `N` (seqair decodes SEQ as `Base`); htslib keeps them.
-- Read names when `RN` is false: htslib generates `<prefix>:<record number>` names (the mate's for attached mates); seqair leaves them empty.
-- `B`, `q` and `Q` read features (qualities stored per base rather than as an array) are consumed but their qualities are not applied (`r[cram.feature.quality_score]`, `r[cram.feature.quality_block]`); htslib writes them into QUAL.
-- Mate flags are taken from `BF` as stored: htslib additionally sets `0x1`/`0x8`/`0x20` from an attached mate's flags or the `MF` series, which matters only for writers that strip them from `BF` (htslib does not).
-- Unknown sequence (CRAM flag `0x8`, SEQ `*`): SEQ is empty as `r[cram.edge.seq_unknown]` says; the quality handling for such reads is not checked against htslib.
+- `MD`/`NM` are not generated (every mapped read that did not store them; htslib appends them after the stored tags and before `RG`).
+- IUPAC codes and `=` in SEQ decode as `N`, whether they come from the reference in a match or from a read feature (seqair decodes SEQ as `Base`); htslib keeps them.
+- Read names when `RN` is false (`lossy_names`): htslib keeps a detached record's stored name and gives an attached record its mate's name or `<prefix>:<record number>`; seqair leaves both empty.
+- TLEN of an attached pair with an unmapped mate: htslib sets it to 0, seqair computes the span. Only `lossy_names` files attach such pairs.
+
+Differences no fixture shows, from htslib's source: an attached chain over several references gets TLEN 0 in htslib (seqair has no such rule) and an attached mate at `AP` 0 gets mate position `-1` (seqair 0); the qualities of `B`, `q` and `Q` features are not applied when a record stores no quality array (`r[cram.feature.quality_score]`, `r[cram.feature.quality_block]`; htslib fills 30 first); mate flags are taken from `BF` as stored, where htslib also ORs in `0x1`/`0x8`/`0x20` from an attached mate or `MF`; the last `@RG` named `UNKNOWN` is not dropped; CRAM flag `0x10` (explicit TLEN), `QO=0`, `MD*`/`NM*` placeholders and the `no_ref` `=` prefill are not handled. htslib writes none of these in CRAM 3.x except as noted.
