@@ -309,6 +309,7 @@ pub struct CramContainerDecoder {
     scratch: SliceScratch,
     ref_buf: Vec<u8>,
     windows: Vec<TidWindow>,
+    decode_md: bool,
 }
 
 impl std::fmt::Debug for CramContainerDecoder {
@@ -325,6 +326,7 @@ impl CramContainerDecoder {
             scratch: SliceScratch::default(),
             ref_buf: Vec::new(),
             windows: Vec::new(),
+            decode_md: true,
         }
     }
 
@@ -334,7 +336,17 @@ impl CramContainerDecoder {
     /// The FASTA cannot be reopened.
     pub fn fork(&self) -> Result<Self, CramStreamError> {
         let fasta = self.fasta.fork().map_err(CramError::from)?;
-        Ok(Self::new(Arc::clone(&self.shared), fasta))
+        Ok(Self { decode_md: self.decode_md, ..Self::new(Arc::clone(&self.shared), fasta) })
+    }
+
+    // r[impl cram.stream.md_nm.option]
+    /// Whether mapped records that store no `MD`/`NM` get them generated, as
+    /// htslib does by default (`r[cram.stream.md_nm]`); `false` is
+    /// `samtools view --input-fmt-option decode_md=0`. On by default.
+    #[must_use]
+    pub fn decode_md(mut self, on: bool) -> Self {
+        self.decode_md = on;
+        self
     }
 
     /// The file header records are validated against.
@@ -439,11 +451,12 @@ impl CramContainerDecoder {
                 header,
                 read_group_ids,
                 Keep::All,
+                self.decode_md,
                 &mut self.scratch,
             )?;
 
             // r[impl cram.stream.raw_records]
-            // r[impl cram.stream.fidelity]
+            // r[impl cram.stream.fidelity+2]
             let first = u64::try_from(sh.record_counter).unwrap_or(0);
             out.reserve(decoded.alignments().len());
             for (i, fields) in (0u64..).zip(decoded.alignments()) {

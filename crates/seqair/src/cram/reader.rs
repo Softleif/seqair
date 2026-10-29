@@ -871,6 +871,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             &self.shared.header,
             &self.shared.read_group_ids,
             Keep::Tid(tid),
+            false,
             &mut self.scratch,
         )
     }
