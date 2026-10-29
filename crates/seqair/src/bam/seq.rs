@@ -444,18 +444,17 @@ fn encode_bases_simd<S: Simd>(simd: S, lut: &[u8; 16], bases: &[u8], out: &mut [
     match overlap.and_then(|(b, o)| Some((bases.get(b..b + 2 * n)?, out.get_mut(o..o + n)?))) {
         Some((b, o)) => {
             encode_vector(simd, table, b, o);
-            if bases.len() % 2 == 1 {
-                let last = bases.len() - 1;
-                encode_scalar_into(
-                    lut,
-                    bases.get(last..).unwrap_or_default(),
-                    out.get_mut(last / 2..).unwrap_or_default(),
-                );
+            // An odd final base is the high nibble of the last packed byte.
+            if let (Some(last), Some(o)) = (bases.last(), out.last_mut())
+                && bases.len() % 2 == 1
+            {
+                encode_scalar_into(lut, std::slice::from_ref(last), std::slice::from_mut(o));
             }
         }
         None => {
+            // `done` is whole pairs, at most `2 * out.len()`: the split holds.
             let done = bases.len() - tail_in.len();
-            encode_scalar_into(lut, tail_in, out.get_mut(done / 2..).unwrap_or_default());
+            encode_scalar_into(lut, tail_in, out.split_at_mut(done / 2).1);
         }
     }
 }

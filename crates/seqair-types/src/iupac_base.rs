@@ -313,12 +313,12 @@ trait ByteMap: Copy {
     fn scalar(self, byte: u8) -> u8;
 }
 
-/// A byte below 16 through a 16-entry table.
+/// A code through a 16-entry table. Defined on codes (bytes below 16) only:
+/// the shuffle is not masked, so above 15 the two forms may disagree.
 #[derive(Clone, Copy)]
 struct Nibble(&'static [u8; 16]);
 
 impl ByteMap for Nibble {
-    // The input is codes, all < 16, so nothing is masked before the shuffle.
     #[inline(always)]
     fn vector<S: Simd>(self, simd: S, v: S::u8s) -> S::u8s {
         S::u8s::block_splat(u8x16::from_slice(simd, self.0)).swizzle_dyn_within_blocks(v)
@@ -374,6 +374,7 @@ impl ByteMap for FromAscii {
     reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
 )]
 fn map_into<S: Simd, M: ByteMap>(simd: S, map: M, src: &[u8], dst: &mut [u8]) {
+    debug_assert_eq!(src.len(), dst.len());
     let n = S::u8s::LEN;
     let mut chunks = src.chunks_exact(n);
     for (s, d) in (&mut chunks).zip(dst.chunks_exact_mut(n)) {
@@ -443,10 +444,11 @@ fn reverse_complement<S: Simd>(simd: S, mut bytes: &mut [u8]) {
     }
     let len = bytes.len();
     if len >= n {
-        let a = S::u8s::from_slice(simd, bytes.get(..n).unwrap_or_default());
-        let b = S::u8s::from_slice(simd, bytes.get(len - n..).unwrap_or_default());
-        table.vector(simd, b.reverse()).store_slice(bytes.get_mut(..n).unwrap_or_default());
-        table.vector(simd, a.reverse()).store_slice(bytes.get_mut(len - n..).unwrap_or_default());
+        // `n <= len`, so neither split can fail.
+        let a = S::u8s::from_slice(simd, bytes.split_at(n).0);
+        let b = S::u8s::from_slice(simd, bytes.split_at(len - n).1);
+        table.vector(simd, b.reverse()).store_slice(bytes.split_at_mut(n).0);
+        table.vector(simd, a.reverse()).store_slice(bytes.split_at_mut(len - n).1);
     } else {
         bytes.reverse();
         for b in bytes {
