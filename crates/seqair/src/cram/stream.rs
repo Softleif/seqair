@@ -9,7 +9,8 @@ use super::{
     container::{ContainerHeader, RefSeqId},
     reader::{self, CramError},
     slice::{
-        self, DecodedSlice, Keep, SliceHeader, SliceReference, SliceScratch, Synthesis, TidWindow,
+        self, DecodedSlice, Keep, RefBases, SliceHeader, SliceReference, SliceScratch, Synthesis,
+        TidWindow,
     },
     varint,
 };
@@ -18,7 +19,7 @@ use crate::fasta::{FastaError, IndexedFastaReader};
 use crate::reader::Tid;
 use crate::sam::encode::{RecordEncodeError, encode_alignment};
 use core::range::RangeInclusive;
-use seqair_types::{IupacBase, Pos0, SmolStr};
+use seqair_types::{Pos0, SmolStr};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
@@ -444,7 +445,7 @@ impl CramContainerDecoder {
 /// One slice's records, decoded by [`SliceDecoder::decode_slice`].
 #[derive(Debug, Default)]
 pub(crate) struct StreamSlice {
-    pub(crate) records: DecodedSlice<IupacBase>,
+    pub(crate) records: DecodedSlice,
     /// The slice's `record_counter`: the number of its first record.
     first: u64,
     /// Each decoded record's index among all of the slice's records.
@@ -465,9 +466,9 @@ impl StreamSlice {
 /// query lends the reader's.
 pub(crate) struct SliceDecoder {
     shared: Arc<StreamShared>,
-    scratch: SliceScratch<IupacBase>,
+    scratch: SliceScratch,
     ref_buf: Vec<u8>,
-    windows: Vec<TidWindow<u8>>,
+    windows: Vec<TidWindow>,
     decode_md: bool,
     name_prefix: SmolStr,
 }
@@ -533,7 +534,7 @@ impl SliceDecoder {
 
         // r[impl cram.stream.reference_window+2]
         // A file written without a reference (`RR` false) is decoded
-        // without one (`r[cram.record.no_ref_fill]`): nothing to fetch.
+        // without one (`r[cram.record.no_ref_fill+1]`): nothing to fetch.
         let no_ref = !ch.preservation.reference_required;
         let reference = match slice_ref {
             RefSeqId::Unmapped => SliceReference::Window { bases: Some(&[]), start: 0 },
@@ -570,7 +571,7 @@ impl SliceDecoder {
                             contig: header.target_name(tid).unwrap_or("?").into(),
                         });
                     }
-                    let bases = self.ref_buf.to_ascii_uppercase();
+                    let bases = RefBases::new(&self.ref_buf);
                     self.windows.push(TidWindow { tid, start: begin.cast_signed(), bases });
                 }
                 SliceReference::PerTid(&self.windows)

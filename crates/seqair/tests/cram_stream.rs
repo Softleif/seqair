@@ -165,7 +165,7 @@ fn samtools_payloads(cram: &Path, fasta: &Path, args: &[&str]) -> Vec<Vec<u8>> {
 // r[verify cram.stream.raw_records]
 // r[verify cram.stream.md_nm]
 // r[verify cram.stream.md_nm.option]
-// r[verify cram.stream.iupac]
+// r[verify cram.stream.iupac+1]
 /// Each fixture, streamed through a reader that returns 1–7 bytes per call,
 /// gives the records `samtools view -b` writes, byte for byte (`bin`
 /// included), and formats as `samtools view` prints them; with
@@ -442,7 +442,7 @@ fn a_short_empty_container_is_not_the_end() {
     assert!(got.iter().zip(&want).all(|(g, w)| g.as_payload() == w.as_payload()));
 }
 
-// r[verify cram.record.no_ref_fill]
+// r[verify cram.record.no_ref_fill+1]
 /// A file written without a reference streams as samtools reads it against
 /// a FASTA that lacks every one of its references.
 #[test]
