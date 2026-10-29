@@ -43,6 +43,9 @@ pub(crate) trait SeqBase: Copy + Default + PartialEq + std::fmt::Debug + 'static
     const N: Self;
     /// `N`, for a reference base past its end.
     const REF_N: Self::Ref;
+    /// What an implicit match reads as in a slice without a reference
+    /// (`r[cram.record.no_ref_fill]`).
+    const NO_REF: Self;
     /// Whether decodes of this kind may generate `MD`/`NM`; `false` lets
     /// the indexed reader's decode compile without the bookkeeping.
     const MD_NM: bool;
@@ -62,6 +65,7 @@ impl SeqBase for Base {
     type Ref = Base;
     const N: Self = Base::Unknown;
     const REF_N: Base = Base::Unknown;
+    const NO_REF: Self = Base::Unknown;
     const MD_NM: bool = false;
 
     #[inline]
@@ -96,6 +100,7 @@ impl SeqBase for IupacBase {
     type Ref = u8;
     const N: Self = IupacBase::N;
     const REF_N: u8 = b'N';
+    const NO_REF: Self = IupacBase::Eq;
     const MD_NM: bool = true;
 
     #[inline]
@@ -693,8 +698,18 @@ fn decode_slice_records<B: SeqBase>(
     } else {
         Vec::new()
     };
-    let effective_ref: &[u8] =
-        if sh.embedded_reference >= 0 { &embedded_ref_data } else { reference_seq };
+    // r[impl cram.record.no_ref_fill]
+    // htslib has no reference for a slice of a file written without one
+    // (`RR` false) unless the slice embeds it: no MD/NM, and no bases
+    // copied, even from a FASTA at hand.
+    let no_ref = !ch.preservation.reference_required && sh.embedded_reference < 0;
+    let effective_ref: &[u8] = if sh.embedded_reference >= 0 {
+        &embedded_ref_data
+    } else if no_ref {
+        &[]
+    } else {
+        reference_seq
+    };
     // Converted once, so reconstruction copies runs of reference bases
     // instead of converting base by base.
     let effective_ref = B::reference(effective_ref);
@@ -708,7 +723,8 @@ fn decode_slice_records<B: SeqBase>(
         ref_start_0based
     };
     let record_reference = match reference {
-        SliceReference::PerTid(windows) => RecordReference::PerTid(windows),
+        SliceReference::PerTid(windows) if !no_ref => RecordReference::PerTid(windows),
+        SliceReference::PerTid(_) => RecordReference::One { bases: &effective_ref, start: 0 },
         SliceReference::Window { .. } => {
             RecordReference::One { bases: &effective_ref, start: effective_ref_start }
         }
@@ -716,11 +732,7 @@ fn decode_slice_records<B: SeqBase>(
 
     let core_data = core_block.ok_or_else(|| CramError::MissingCoreDataBlock)?;
     // r[impl cram.stream.md_nm]
-    // htslib has no reference for a slice of a file written without one
-    // (`RR` false) unless the slice embeds it.
-    let decode_md = B::MD_NM
-        && synthesis.md_nm
-        && (ch.preservation.reference_required || sh.embedded_reference >= 0);
+    let decode_md = B::MD_NM && synthesis.md_nm && !no_ref;
     let names = synthesis.name_prefix.map(|prefix| NameRecords {
         prefix,
         first_record: u64::try_from(sh.record_counter).unwrap_or(0),
@@ -749,6 +761,7 @@ fn decode_slice_records<B: SeqBase>(
             read_group_ids,
             keep,
             decode_md,
+            no_ref,
             &mut out,
             scratch,
             record_index,
@@ -886,6 +899,7 @@ fn decode_record<B: SeqBase>(
     read_group_ids: &[SmolStr],
     keep: Keep,
     decode_md: bool,
+    no_ref: bool,
     out: &mut DecodedSlice<B>,
     scratch: &mut SliceScratch<B>,
     record_index: usize,
@@ -1155,6 +1169,7 @@ fn decode_record<B: SeqBase>(
                     &mut *md_buf
                 }),
                 (!quality_as_array).then_some(qual_buf.as_mut_slice()),
+                no_ref,
             )?;
             if generate.any() {
                 md_buf.finish_into(generate, aux_buf);
@@ -1701,6 +1716,7 @@ fn extend_from_reference<B: SeqBase>(
     start: usize,
     n: usize,
     warned: &mut bool,
+    fill: B,
     bases_buf: &mut Vec<B>,
 ) {
     let have = reference.get(start..).unwrap_or_default();
@@ -1712,7 +1728,7 @@ fn extend_from_reference<B: SeqBase>(
     B::extend_from_ref(have, bases_buf);
     if missing > 0 {
         warn_ref_short(reference, start.wrapping_add(have.len()), warned);
-        bases_buf.resize(bases_buf.len().wrapping_add(missing), B::N);
+        bases_buf.resize(bases_buf.len().wrapping_add(missing), fill);
     }
 }
 
@@ -1750,6 +1766,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
     cigar_ops_buf: &mut Vec<(u32, u8)>,
     md: Option<&mut MdNm>,
     mut feature_quals: Option<&mut [u8]>,
+    no_ref: bool,
 ) -> Result<ReconstructResult, CramError> {
     let ds = &ch.data_series;
     let mut md = md.filter(|_| B::MD_NM);
@@ -1760,7 +1777,10 @@ fn decode_features_and_reconstruct<B: SeqBase>(
     let ref_offset = usize::try_from(pos_0based.wrapping_sub(slice_start_0based)).unwrap_or(0);
     let mut read_pos = 0usize; // 0-based position in the read
     let mut ref_pos = 0usize; // 0-based position relative to alignment start on reference
-    let mut ref_warned = false; // log at most one warning per reconstruction
+    // r[impl cram.record.no_ref_fill]
+    // Without a reference htslib pre-fills SEQ with `=`, and nothing is short.
+    let fill = if no_ref { B::NO_REF } else { B::N };
+    let mut ref_warned = no_ref; // log at most one warning per reconstruction
     let mut matching_bases = 0u32;
     let mut indel_bases = 0u32;
 
@@ -1789,6 +1809,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
         ref_pos: &mut usize,
         read_pos: &mut usize,
         ref_warned: &mut bool,
+        fill: B,
         bases_buf: &mut Vec<B>,
         cigar_ops: &mut Vec<(u32, u8)>,
         matching_bases: &mut u32,
@@ -1801,7 +1822,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
         if let Some(md) = md {
             md.matches::<B>(reference.get(start..start.saturating_add(n)), n);
         }
-        extend_from_reference::<B>(reference, start, n, ref_warned, bases_buf);
+        extend_from_reference::<B>(reference, start, n, ref_warned, fill, bases_buf);
         let n32 = u32::try_from(n).unwrap_or(u32::MAX);
         push_cigar_op(cigar_ops, n32, 0); // M
         *matching_bases = matching_bases.saturating_add(n32);
@@ -1828,6 +1849,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
                 &mut ref_pos,
                 &mut read_pos,
                 &mut ref_warned,
+                fill,
                 bases_buf,
                 cigar_ops_buf,
                 &mut matching_bases,
@@ -2002,6 +2024,7 @@ fn decode_features_and_reconstruct<B: SeqBase>(
             &mut ref_pos,
             &mut read_pos,
             &mut ref_warned,
+            fill,
             bases_buf,
             cigar_ops_buf,
             &mut matching_bases,
