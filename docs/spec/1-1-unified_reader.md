@@ -58,6 +58,9 @@ The unified reader MUST be an enum dispatching to format-specific readers, not a
 r[unified.fetch_equivalence]
 For a given BAM file and its SAM/CRAM representations of the same data, `fetch_into` for the same region MUST produce records with equivalent logical content: same positions, flags, sequences, qualities, and CIGAR operations. Aux tags MUST contain the same set of tag names and values, but tag ordering and integer type codes (e.g., `c` vs `i` for small values) MAY differ between formats because BAM writers choose specific integer widths that SAM text cannot preserve.
 
+r[unified.query_raw]
+`IndexedReader::query_raw(tid, span)` MUST give the records of a region as stored, unchanged, as `RawBamRecord`s: for BAM by `r[bam.reader.query_raw]`, for SAM by `r[sam.reader.query_raw]`, through one query type whose `read_record` and iterator behave as theirs do. CRAM MUST fail with `ReaderError::RawQueryUnsupported` rather than build records through the `RecordStore` decode path, which is lossy; a CRAM raw query needs a decoder that reconstructs each record whole.
+
 ## RecordStore integration
 
 > r[unified.record_store_push]
