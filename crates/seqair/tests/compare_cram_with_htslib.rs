@@ -390,7 +390,7 @@ fn cram_quality_scores_match_htslib() {
 // r[verify cram.record.aux_tags]
 // r[verify cram.perf.tag_lines_resolved]
 // r[verify cram.perf.external_order]
-// r[verify cram.record.rg_tag]
+// r[verify cram.record.rg_tag+2]
 // r[verify cram.record.mate_detached]
 // r[verify cram.record.mate_attached]
 // r[verify cram.edge.position_overflow]
