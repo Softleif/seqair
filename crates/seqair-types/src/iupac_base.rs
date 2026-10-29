@@ -1,4 +1,6 @@
 use crate::Base;
+use fearless_simd::{Level, dispatch, prelude::*, u8x16};
+use fearless_simd_macros::simd;
 
 /// One BAM sequence base: the sixteen IUPAC codes a BAM `seq` field can
 /// store, each variant's discriminant being its 4-bit code. Lossless where
@@ -129,7 +131,7 @@ impl IupacBase {
     }
 
     /// The IUPAC complement.
-    pub fn complement(self) -> Self {
+    pub const fn complement(self) -> Self {
         match self {
             Self::A => Self::T,
             Self::T => Self::A,
@@ -176,31 +178,275 @@ impl IupacBase {
     }
 
     // r[impl types.iupac_base.bulk]
+    // r[impl types.iupac_base.simd]
     /// Append [`Self::from_ascii`] of every byte to `out`.
     pub fn from_ascii_into(bytes: &[u8], out: &mut Vec<Self>) {
-        out.extend(bytes.iter().map(|&b| Self::from_ascii(b)));
+        from_ascii_at(Level::new(), bytes, out);
     }
 
     // r[impl types.iupac_base.bulk]
+    // r[impl types.iupac_base.simd]
     /// Append [`Self::to_ascii`] of every base to `out`.
     pub fn to_ascii_into(bases: &[Self], out: &mut Vec<u8>) {
-        out.extend(bases.iter().map(|b| b.to_ascii()));
+        to_ascii_at(Level::new(), bases, out);
     }
 
     // r[impl types.iupac_base.bulk]
+    // r[impl types.iupac_base.simd]
     /// [`Self::complement`] every base.
     pub fn complement_in_place(bases: &mut [Self]) {
-        for b in bases {
-            *b = b.complement();
-        }
+        complement_at(Level::new(), bases);
     }
 
     // r[impl types.iupac_base.bulk]
+    // r[impl types.iupac_base.simd]
     /// Reverse `bases` and [`Self::complement`] every one: the other strand,
     /// read 5' to 3'.
     pub fn reverse_complement_in_place(bases: &mut [Self]) {
-        bases.reverse();
-        Self::complement_in_place(bases);
+        reverse_complement_at(Level::new(), bases);
+    }
+
+    /// The codes of `bases`, to write in place: how a bulk kernel fills an
+    /// `IupacBase` buffer without an intermediate one.
+    ///
+    /// # Safety
+    /// Every byte written through the returned slice MUST be below 16: the
+    /// slice is `bases`, and a larger byte is not an `IupacBase`.
+    pub unsafe fn as_codes_mut(bases: &mut [Self]) -> &mut [u8] {
+        // SAFETY: `IupacBase` is `repr(u8)`, so the layouts match; every
+        // byte is a code now, and the caller writes only codes.
+        unsafe { std::slice::from_raw_parts_mut(bases.as_mut_ptr().cast::<u8>(), bases.len()) }
+    }
+}
+
+// r[impl io.simd_portable]
+fn from_ascii_at(level: Level, bytes: &[u8], out: &mut Vec<IupacBase>) {
+    let start = out.len();
+    out.resize(start.saturating_add(bytes.len()), IupacBase::N);
+    if let Some(dst) = out.get_mut(start..) {
+        // SAFETY: `FromAscii` writes only `CODE_OF_ASCII` values, all < 16.
+        let dst = unsafe { IupacBase::as_codes_mut(dst) };
+        dispatch!(level, simd => map_into(simd, FromAscii, bytes, dst));
+    }
+}
+
+// r[impl io.simd_portable]
+fn to_ascii_at(level: Level, bases: &[IupacBase], out: &mut Vec<u8>) {
+    let start = out.len();
+    out.resize(start.saturating_add(bases.len()), 0);
+    if let Some(dst) = out.get_mut(start..) {
+        let codes = bytemuck::cast_slice(bases);
+        dispatch!(level, simd => map_into(simd, Nibble(&IupacBase::ASCII), codes, dst));
+    }
+}
+
+// r[impl io.simd_portable]
+fn complement_at(level: Level, bases: &mut [IupacBase]) {
+    // SAFETY: `COMPLEMENT` maps a code to a code.
+    let codes = unsafe { IupacBase::as_codes_mut(bases) };
+    dispatch!(level, simd => map_in_place(simd, Nibble(&COMPLEMENT), codes));
+}
+
+// r[impl io.simd_portable]
+fn reverse_complement_at(level: Level, bases: &mut [IupacBase]) {
+    // SAFETY: `COMPLEMENT` maps a code to a code; reversing only moves codes.
+    let codes = unsafe { IupacBase::as_codes_mut(bases) };
+    dispatch!(level, simd => reverse_complement(simd, codes));
+}
+
+/// `complement()` by code.
+#[allow(clippy::indexing_slicing, reason = "i < 16 = ALL.len()")]
+const COMPLEMENT: [u8; 16] = {
+    let mut table = [0u8; 16];
+    let mut i = 0;
+    while i < 16 {
+        table[i] = IupacBase::ALL[i].complement() as u8;
+        i += 1;
+    }
+    table
+};
+
+/// `CODE_OF_ASCII ^ 15` for the bytes `0x30..0x60`, one row per high nibble:
+/// with `0x6_`/`0x7_`, the lower case of `0x4_`/`0x5_`, the only rows where a
+/// byte is not `N`. Stored `^ 15` so that a byte no row picks comes out
+/// `0 ^ 15`, `N`.
+#[allow(clippy::indexing_slicing, reason = "row < 3, i < 16: indices < 0x60")]
+const ASCII_ROWS: [[u8; 16]; 3] = {
+    let mut rows = [[0u8; 16]; 3];
+    let mut row = 0;
+    while row < 3 {
+        let mut i = 0;
+        while i < 16 {
+            rows[row][i] = IupacBase::CODE_OF_ASCII[((row + 3) << 4) | i] ^ 15;
+            i += 1;
+        }
+        row += 1;
+    }
+    rows
+};
+
+// The rows hold all of `CODE_OF_ASCII`: every byte decodes as
+// `FromAscii::vector` picks it.
+#[allow(clippy::indexing_slicing, reason = "b < 256, row < 3, b & 15 < 16")]
+const _: () = {
+    let mut b = 0;
+    while b < 256 {
+        let picked = match b >> 4 {
+            3 => ASCII_ROWS[0][b & 15],
+            4 | 6 => ASCII_ROWS[1][b & 15],
+            5 | 7 => ASCII_ROWS[2][b & 15],
+            _ => 0,
+        };
+        assert!(IupacBase::CODE_OF_ASCII[b] == picked ^ 15);
+        b += 1;
+    }
+};
+
+/// A byte map with a vector form and a scalar form for tails; the two agree.
+trait ByteMap: Copy {
+    fn vector<S: Simd>(self, simd: S, v: S::u8s) -> S::u8s;
+    fn scalar(self, byte: u8) -> u8;
+}
+
+/// A byte below 16 through a 16-entry table.
+#[derive(Clone, Copy)]
+struct Nibble(&'static [u8; 16]);
+
+impl ByteMap for Nibble {
+    // The input is codes, all < 16, so nothing is masked before the shuffle.
+    #[inline(always)]
+    fn vector<S: Simd>(self, simd: S, v: S::u8s) -> S::u8s {
+        S::u8s::block_splat(u8x16::from_slice(simd, self.0)).swizzle_dyn_within_blocks(v)
+    }
+
+    #[inline(always)]
+    #[allow(clippy::indexing_slicing, reason = "a nibble is < 16 = table.len()")]
+    fn scalar(self, byte: u8) -> u8 {
+        self.0[usize::from(byte & 15)]
+    }
+}
+
+/// ASCII to code: the low nibble through each of [`ASCII_ROWS`], keeping the
+/// row the high nibble names.
+#[derive(Clone, Copy)]
+struct FromAscii;
+
+impl ByteMap for FromAscii {
+    #[inline(always)]
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "a lanewise shift by 4 of a `u8` cannot overflow"
+    )]
+    fn vector<S: Simd>(self, simd: S, v: S::u8s) -> S::u8s {
+        let zero = S::u8s::splat(simd, 0);
+        let lo = v & 0x0F;
+        let hi = v >> 4;
+        // Folds `0x6_`/`0x7_` onto `0x4_`/`0x5_`; no other high nibble
+        // becomes 4 or 5.
+        let letters = hi & 0x0D;
+        let [digits, upper_a, upper_p] = &ASCII_ROWS;
+        let digits = S::u8s::block_splat(u8x16::from_slice(simd, digits));
+        let upper_a = S::u8s::block_splat(u8x16::from_slice(simd, upper_a));
+        let upper_p = S::u8s::block_splat(u8x16::from_slice(simd, upper_p));
+        let picked = hi.simd_eq(3).select(digits.swizzle_dyn_within_blocks(lo), zero)
+            | letters.simd_eq(4).select(upper_a.swizzle_dyn_within_blocks(lo), zero)
+            | letters.simd_eq(5).select(upper_p.swizzle_dyn_within_blocks(lo), zero);
+        picked ^ 0x0F
+    }
+
+    #[inline(always)]
+    #[allow(clippy::indexing_slicing, reason = "a byte is < 256 = table.len()")]
+    fn scalar(self, byte: u8) -> u8 {
+        IupacBase::CODE_OF_ASCII[usize::from(byte)]
+    }
+}
+
+/// `map` from `src` into `dst`, which is as long. A ragged tail is one more
+/// vector overlapping the last whole one; shorter than a vector, all scalar.
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+fn map_into<S: Simd, M: ByteMap>(simd: S, map: M, src: &[u8], dst: &mut [u8]) {
+    let n = S::u8s::LEN;
+    let mut chunks = src.chunks_exact(n);
+    for (s, d) in (&mut chunks).zip(dst.chunks_exact_mut(n)) {
+        map.vector(simd, S::u8s::from_slice(simd, s)).store_slice(d);
+    }
+    if chunks.remainder().is_empty() {
+        return;
+    }
+    let last = src.len().checked_sub(n);
+    match last.and_then(|t| Some((src.get(t..)?, dst.get_mut(t..)?))) {
+        Some((s, d)) => map.vector(simd, S::u8s::from_slice(simd, s)).store_slice(d),
+        None => {
+            for (d, &s) in dst.iter_mut().zip(src) {
+                *d = map.scalar(s);
+            }
+        }
+    }
+}
+
+/// `map` over `bytes` in place. A ragged tail is the last vector, loaded
+/// before anything is stored, so the overlap is mapped from the input once
+/// (and loading it first spares a store-forwarding stall).
+#[simd]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "`S::u8s::LEN` depends on the generic `S`, so it cannot be a const argument"
+)]
+fn map_in_place<S: Simd, M: ByteMap>(simd: S, map: M, bytes: &mut [u8]) {
+    let n = S::u8s::LEN;
+    let tail_start = (!bytes.len().is_multiple_of(n)).then(|| bytes.len().checked_sub(n)).flatten();
+    let tail = tail_start.and_then(|t| bytes.get(t..)).map(|t| S::u8s::from_slice(simd, t));
+    let mut chunks = bytes.chunks_exact_mut(n);
+    for chunk in &mut chunks {
+        map.vector(simd, S::u8s::from_slice(simd, chunk)).store_slice(chunk);
+    }
+    let remainder = chunks.into_remainder();
+    match (tail, tail_start) {
+        (Some(v), Some(t)) => {
+            if let Some(to) = bytes.get_mut(t..) {
+                map.vector(simd, v).store_slice(to);
+            }
+        }
+        _ => {
+            for b in remainder {
+                *b = map.scalar(*b);
+            }
+        }
+    }
+}
+
+/// Swap a vector from the front with one from the back, each reversed and
+/// complemented, until fewer than two vectors are left. One to two vectors
+/// left are two overlapping ones, both loaded before either is stored.
+#[simd]
+#[allow(clippy::arithmetic_side_effects, reason = "len >= 2 * LEN or >= LEN where subtracted")]
+fn reverse_complement<S: Simd>(simd: S, mut bytes: &mut [u8]) {
+    let n = S::u8s::LEN;
+    let table = Nibble(&COMPLEMENT);
+    while bytes.len() >= 2 * n {
+        let (front, rest) = std::mem::take(&mut bytes).split_at_mut(n);
+        let (middle, back) = rest.split_at_mut(rest.len() - n);
+        let a = S::u8s::from_slice(simd, front);
+        let b = S::u8s::from_slice(simd, back);
+        table.vector(simd, b.reverse()).store_slice(front);
+        table.vector(simd, a.reverse()).store_slice(back);
+        bytes = middle;
+    }
+    let len = bytes.len();
+    if len >= n {
+        let a = S::u8s::from_slice(simd, bytes.get(..n).unwrap_or_default());
+        let b = S::u8s::from_slice(simd, bytes.get(len - n..).unwrap_or_default());
+        table.vector(simd, b.reverse()).store_slice(bytes.get_mut(..n).unwrap_or_default());
+        table.vector(simd, a.reverse()).store_slice(bytes.get_mut(len - n..).unwrap_or_default());
+    } else {
+        bytes.reverse();
+        for b in bytes {
+            *b = table.scalar(*b);
+        }
     }
 }
 
@@ -340,8 +586,84 @@ mod tests {
         assert_eq!(c, bases.iter().map(|b| b.complement()).collect::<Vec<_>>());
         let mut rc = bases.clone();
         IupacBase::reverse_complement_in_place(&mut rc);
-        for (i, b) in rc.iter().enumerate() {
-            assert_eq!(*b, bases[bases.len() - 1 - i].complement(), "i={i}");
+        for (b, original) in rc.iter().zip(bases.iter().rev()) {
+            assert_eq!(*b, original.complement());
+        }
+    }
+
+    /// `bytes` placed `offset` bytes into a buffer, so a kernel sees it at
+    /// every alignment.
+    fn at_offset<T: Copy>(fill: T, offset: usize, items: &[T]) -> Vec<T> {
+        std::iter::repeat_n(fill, offset).chain(items.iter().copied()).collect()
+    }
+
+    /// Every level's `from_ascii_at` and `to_ascii_at` on `bytes`, appended
+    /// after a prefix, against the element-wise scalar functions.
+    fn check_ascii_at_every_level(bytes: &[u8], prefix: usize) {
+        let expected: Vec<IupacBase> = bytes.iter().map(|&b| IupacBase::from_ascii(b)).collect();
+        let ascii: Vec<u8> = expected.iter().map(|b| b.to_ascii()).collect();
+        for level in crate::simd_levels::levels() {
+            let mut out = vec![IupacBase::R; prefix];
+            from_ascii_at(level, bytes, &mut out);
+            assert!(out[..prefix].iter().all(|&b| b == IupacBase::R), "{level:?}");
+            assert_eq!(&out[prefix..], expected, "{level:?}, len={}", bytes.len());
+            let mut out = vec![b'x'; prefix];
+            to_ascii_at(level, &expected, &mut out);
+            assert!(out[..prefix].iter().all(|&b| b == b'x'), "{level:?}");
+            assert_eq!(&out[prefix..], ascii, "{level:?}, len={}", bytes.len());
+        }
+    }
+
+    /// Every level's complement and reverse complement of `bases`.
+    fn check_complement_at_every_level(bases: &mut [IupacBase]) {
+        let complement: Vec<IupacBase> = bases.iter().map(|b| b.complement()).collect();
+        let reverse_complement: Vec<IupacBase> = complement.iter().rev().copied().collect();
+        let original = bases.to_vec();
+        for level in crate::simd_levels::levels() {
+            bases.copy_from_slice(&original);
+            complement_at(level, bases);
+            assert_eq!(bases, complement, "{level:?}, len={}", bases.len());
+            bases.copy_from_slice(&original);
+            reverse_complement_at(level, bases);
+            assert_eq!(bases, reverse_complement, "{level:?}, len={}", bases.len());
+        }
+    }
+
+    // r[verify types.iupac_base.simd]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn ascii_kernels_match_scalar_at_every_level(tc: TestCase) {
+        let bytes = any_bytes(&tc);
+        let offset = tc.draw(gs::integers::<usize>().max_value(63));
+        let prefix = tc.draw(gs::integers::<usize>().max_value(63));
+        let buf = at_offset(b'q', offset, &bytes);
+        check_ascii_at_every_level(&buf[offset..], prefix);
+    }
+
+    // r[verify types.iupac_base.simd]
+    // r[verify io.simd_portable]
+    #[hegel::test]
+    fn complement_kernels_match_scalar_at_every_level(tc: TestCase) {
+        let bases = any_bases(&tc);
+        let offset = tc.draw(gs::integers::<usize>().max_value(63));
+        let mut buf = at_offset(IupacBase::Eq, offset, &bases);
+        check_complement_at_every_level(&mut buf[offset..]);
+    }
+
+    // r[verify types.iupac_base.simd]
+    /// All 256 bytes (and all 16 codes, repeated) at every lane and tail
+    /// position of the widest vector, at every level.
+    #[test]
+    fn kernels_cover_every_byte_at_every_position() {
+        let all: Vec<u8> = (0..=255).collect();
+        let codes: Vec<IupacBase> = IupacBase::ALL.iter().copied().cycle().take(256).collect();
+        for pad in 0..64 {
+            let bytes = at_offset(b'A', pad, &all);
+            check_ascii_at_every_level(&bytes, 0);
+            check_ascii_at_every_level(&bytes[pad..], pad);
+            let mut bases = at_offset(IupacBase::T, pad, &codes);
+            check_complement_at_every_level(&mut bases);
+            check_complement_at_every_level(&mut bases[pad..]);
         }
     }
 
