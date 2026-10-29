@@ -417,7 +417,12 @@ impl CramContainerDecoder {
             let slice_ref = sh.ref_seq_id.resolve(header).map_err(CramError::from)?;
 
             // r[impl cram.stream.reference_window]
+            // A file written without a reference (`RR` false) is decoded
+            // without one (`r[cram.record.no_ref_fill]`): nothing to fetch.
+            let no_ref = !ch.preservation.reference_required;
             let reference = match slice_ref {
+                RefSeqId::Unmapped => SliceReference::Window { bases: Some(&[]), start: 0 },
+                _ if no_ref => SliceReference::Window { bases: Some(&[]), start: 0 },
                 RefSeqId::Ref(tid) => {
                     let begin =
                         u64::try_from(sh.alignment_start.max(1)).unwrap_or(1).saturating_sub(1);
@@ -429,7 +434,6 @@ impl CramContainerDecoder {
                         start: begin.cast_signed(),
                     }
                 }
-                RefSeqId::Unmapped => SliceReference::Window { bases: Some(&[]), start: 0 },
                 RefSeqId::Multi => {
                     let spans = slice::multi_ref_spans(
                         &ch,

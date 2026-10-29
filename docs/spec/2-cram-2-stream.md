@@ -54,4 +54,4 @@ The oracle is samtools: each streamed record MUST be byte for byte the record `s
 
 - none: every fixture matches, `lossy_names` included (names `r[cram.record.read_name+2]`, mates `r[cram.record.mate_tlen_reconstruction+2]`).
 
-Differences no fixture shows, from htslib's source: `QO=0`, `MD*`/`NM*` placeholders and the `no_ref` `=` prefill are not handled. htslib writes none of these in CRAM 3.x except as noted.
+Differences no fixture shows, from htslib's source: `QO=0` and `MD*`/`NM*` placeholders are not handled. htslib writes none of these in CRAM 3.x except as noted.

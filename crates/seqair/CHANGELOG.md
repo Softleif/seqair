@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A CRAM written without a reference (`no_ref`, `RR` false) is decoded without one, as htslib does: the stream no longer needs its references in the FASTA, and implicit matches (which samtools never writes there) read as `=`.
 - CRAM reads that store no quality array get the qualities of their `B`, `Q` and `q` features, as htslib applies them (the read filled with 30 first); a read group that is the header's last `@RG` named `UNKNOWN` (Java CRAM's) adds no `RG` tag; an `RG` index outside the header's read groups is `CramError::ReadGroupOutOfRange` instead of being ignored.
 - CRAM reads of a `lossy_names` file (`RN` false) have names, in the indexed reader too: a detached record keeps the name the file stores for it (it was dropped), and an attached one gets its mate's name or `<file basename>:<record number>`, as htslib generates it, so mates share a name and the pileup's overlapping-pair dedup works on them. The `RN=false` warning is gone.
 - CRAM attached mates are resolved as htslib does: TLEN 0 when the chain spans references or when the record or its mate is unmapped, mate position -1 for an unplaced mate, and the paired/mate-unmapped/mate-reverse flags from the mate; a detached record's `MF` flags are applied; an explicit TLEN (CRAM flag 0x10) is read and used.
