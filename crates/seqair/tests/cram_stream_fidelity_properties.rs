@@ -178,11 +178,13 @@ fn ref_span(cigar: &str) -> usize {
     span
 }
 
-/// A read pair: both mapped on one reference, on two, or one mate unmapped
-/// at the other's position; TLEN as samtools computes it, which lets the
-/// writer attach the mates, or 0. In a `lossy_names` file attached mates
-/// lose their names (`r[cram.record.read_name+2]`).
-fn arb_pair(tc: &TestCase, contigs: &[String], name: &str) -> [String; 2] {
+/// A read pair: both mapped on one reference, on two, one mate unmapped at
+/// the other's position or unplaced, both unplaced, or with a
+/// supplementary alignment of the first read on any reference; TLEN as
+/// samtools computes it, which lets the writer attach the mates, or 0. In a
+/// `lossy_names` file attached mates lose their names
+/// (`r[cram.record.read_name+2]`).
+fn arb_pair(tc: &TestCase, contigs: &[String], name: &str) -> Vec<String> {
     let c1 = tc.draw_silent(int(0, contigs.len() - 1));
     let first = arb_mapped(tc, c1, &contigs[c1]);
     let f1: Vec<&str> = first.split('\t').collect();
@@ -199,12 +201,15 @@ fn arb_pair(tc: &TestCase, contigs: &[String], name: &str) -> [String; 2] {
     };
     let rest1 = f1[3..5].join("\t");
     let tail1 = f1[8..].join("\t");
-    match tc.draw_silent(int(0, 2)) {
+    let unmapped_seq = |tc: &TestCase| {
+        let len = tc.draw_silent(int(5, 20));
+        tc.draw_silent(text("ACGT", len))
+    };
+    match tc.draw_silent(int(0, 4)) {
         // the mate unmapped, placed at the first's position
         0 => {
-            let len = tc.draw_silent(int(5, 20));
-            let seq = tc.draw_silent(text("ACGT", len));
-            [
+            let seq = unmapped_seq(tc);
+            vec![
                 format!(
                     "{name}\t{}\tc{c1}\t{pos1}\t{rest1}\t=\t{pos1}\t0\t{tail1}",
                     flags(rev1, rev2, r1) | 0x8
@@ -213,6 +218,28 @@ fn arb_pair(tc: &TestCase, contigs: &[String], name: &str) -> [String; 2] {
                     "{name}\t{}\tc{c1}\t{pos1}\t0\t*\t=\t{pos1}\t0\t{seq}\t*",
                     flags(rev2, rev1, r2) | 0x4
                 ),
+            ]
+        }
+        // the mate unmapped and unplaced, so an attached mate's AP is 0
+        3 => {
+            let seq = unmapped_seq(tc);
+            vec![
+                format!(
+                    "{name}\t{}\tc{c1}\t{pos1}\t{rest1}\t*\t0\t0\t{tail1}",
+                    flags(rev1, rev2, r1) | 0x8
+                ),
+                format!(
+                    "{name}\t{}\t*\t0\t0\t*\tc{c1}\t{pos1}\t0\t{seq}\t*",
+                    flags(rev2, rev1, r2) | 0x4
+                ),
+            ]
+        }
+        // both unplaced
+        4 => {
+            let (seq1, seq2) = (unmapped_seq(tc), unmapped_seq(tc));
+            vec![
+                format!("{name}\t{}\t*\t0\t0\t*\t*\t0\t0\t{seq1}\t*", flags(rev1, rev2, r1) | 0xC),
+                format!("{name}\t{}\t*\t0\t0\t*\t*\t0\t0\t{seq2}\t*", flags(rev2, rev1, r2) | 0xC),
             ]
         }
         other => {
@@ -233,7 +260,7 @@ fn arb_pair(tc: &TestCase, contigs: &[String], name: &str) -> [String; 2] {
             } else {
                 0
             };
-            [
+            let mut lines = vec![
                 format!(
                     "{name}\t{}\tc{c1}\t{pos1}\t{rest1}\t{rnext1}\t{pos2}\t{tlen}\t{tail1}",
                     flags(rev1, rev2, r1)
@@ -245,7 +272,21 @@ fn arb_pair(tc: &TestCase, contigs: &[String], name: &str) -> [String; 2] {
                     -tlen,
                     f2[8..].join("\t")
                 ),
-            ]
+            ];
+            if tc.draw_silent(gs::booleans()) {
+                let c3 = tc.draw_silent(int(0, contigs.len() - 1));
+                let supp = arb_mapped(tc, c3, &contigs[c3]);
+                let f3: Vec<&str> = supp.split('\t').collect();
+                let rnext3 = if c3 == c2 { "=".to_owned() } else { format!("c{c2}") };
+                lines.push(format!(
+                    "{name}\t{}\tc{c3}\t{}\t{}\t{rnext3}\t{pos2}\t0\t{}",
+                    flags(tc.draw_silent(gs::booleans()), rev2, r1) | 0x800,
+                    f3[2],
+                    f3[3..5].join("\t"),
+                    f3[8..].join("\t")
+                ));
+            }
+            lines
         }
     }
 }
@@ -398,6 +439,7 @@ fn streamed(cram: &Path, fasta: &Path, decode_md: bool) -> Vec<RawBamRecord> {
 // r[verify cram.stream+2]
 // r[verify cram.record.read_name+2]
 // r[verify cram.record.mate_tlen_reconstruction+2]
+// r[verify cram.record.mate_attached]
 // r[verify cram.record.rg_tag+2]
 /// For any generated sample and CRAM writer options, the streamed records
 /// equal `samtools view -b`'s, byte for byte, and format as `samtools view`
