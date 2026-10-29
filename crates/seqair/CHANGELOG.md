@@ -17,12 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Records keep every IUPAC code; the pileup converts to `Base`.** The `RecordStore` behind `fetch_into` (BAM, SAM, indexed CRAM) stores SEQ as `IupacBase`, as the file has it (`=` and the ambiguity codes were `N`), and the pileup turns each column entry's base into `Base` with `IupacBase::to_base`; `PileupAlignment.base` and `PileupOp` are unchanged, and so is every column. The indexed CRAM reader runs the stream's decode (one instance, MD/NM off), and the SAM reader reads SEQ through htslib's `seq_nt16_table` straight from the line.
+- SAM text and CRAM bases `0`–`3` (colour-space digits) read as A/C/G/T, as htslib reads them; they were `N`. SAM's grammar has no digits in SEQ and samtools never writes them.
 - **`SamRecordEncoder` (and so `SamStreamReader`) keeps a line whose RNEXT the header lacks**, as htslib does: no mate reference, PNEXT and FLAG as written, one warning per process. It was `SamRecordError::UnknownMateReference`, which is gone; the indexed SAM reader already kept such lines, so the streaming and indexed readers now agree on them.
 - `AlignmentStreamError::CramNotSupported` is replaced by `CramNeedsReference` (CRAM without `reference(...)`) and `Cram` (stream errors).
 - `RawBamRecord::set_flags` returns `RawRecordEditError` (variant `Flags`) instead of `DecodeError` (breaking: callers matching on the error type).
 
 ### Fixed
 
+- **`BamWriter::write_store_record` is lossless:** it wrote `N` for `=` and every ambiguity code. It now packs the stored codes, so a record read with `fetch_into` writes back with the SEQ it was read with.
 - The indexed CRAM reader reads a container header field by field, as the stream does: `fetch_into` failed with `CramError::Truncated` on a container of a few hundred slices, whose header did not fit the fixed 1 KiB it read.
 - A CRAM container header with a negative landmark count is `CramError::InvalidLength` (was `AllocationTooLarge`); a FASTA sequence shorter than the CRAM header's `LN` is `CramError::ReferenceTooShort` in the stream (was a FASTA out-of-bounds error).
 - A CRAM container without records is the end of the file only when it is the EOF container as htslib recognises it (reference -1, start `0x454f46`); a short empty container before real ones no longer ends the stream or a scan.
@@ -42,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `SlimRecord::seq`, `RecordRef::seq` and `AlignmentView::seq`/`inserted_bases` return `&[IupacBase]`, and `RecordRef::base_at` returns `IupacBase` (`IupacBase::N` past the read). `IupacBase::to_base` gives the old `Base`.
+- `RecordStore::push_fields` takes the sequence as `&[IupacBase]`; `record_store::Sequence::Bases(&[Base])` is now `Sequence::Iupac(&[IupacBase])`.
+- `AlignedPairWithRead`/`AlignedPairWithRef` and `MatchedBase`/`MatchedRef`: `query` is `IupacBase` (`Match`) or `&[IupacBase]` (`Insertion`, `SoftClip`); `AlignedPairs::with_read` takes `&[IupacBase]`. `ref_base`/`ref_bases` stay `Base`.
+- `BaseModState::parse` takes the sequence as `&[IupacBase]`.
+- `OwnedBamRecord::seq` is `Vec<IupacBase>`, and so are the builder's `seq`, `set_seq` and `seq_mut`.
+- `bam::seq::decode_bases` and `decode_bases_into` are gone; use `decode_iupac_bases_into` (and `IupacBase::to_base`), or `RawBamRecord::bases`.
+- A cast of a stored base to `u8` (`rec.base_at(q) as u8`) still compiles but now gives the 4-bit code, not the ASCII letter: use `to_ascii()` or `to_base()`.
 - `FaiEntry`'s `linebases`/`linewidth` fields are replaced by `layout: fasta::LineLayout`, which only a valid pair constructs (`LineLayout::new(linebases, linewidth)`: nonzero `linebases`, a terminator of 0, 1 or 2 bytes as `fasta::LineTerminator`). `FaiEntryError::{ZeroLinebases, LinewidthTooSmall, LineTerminatorTooLong}` become `FaiEntryError::InvalidLineLayout { name, kind: fasta::LineLayoutError }`.
 
 ## v0.9.0 (2026-10-29)
