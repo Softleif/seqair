@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`IupacBase`**: the sixteen BAM sequence codes (`=ACMGRSVTWYHKDBN`) as a `#[repr(u8)]` enum whose discriminants are the 4-bit codes, where `Base` can only hold A/C/G/T/N. `from_code`, `from_nibble`, `code`, `from_ascii` (htslib's `seq_nt16_table`), `to_ascii`, `complement`, the lossy `to_base`, `From<Base>`, and slice helpers `from_ascii_slice`/`to_ascii_slice`.
+- **`IupacBase` bulk conversions into caller buffers**, each a SIMD kernel at every `fearless_simd` level: `from_ascii_into`, `to_ascii_into` (appending), `complement_in_place` and `reverse_complement_in_place`. `from_ascii_slice`/`to_ascii_slice` use them. `IupacBase::as_codes_mut` (`unsafe`, hidden) views a base slice as its codes for a kernel to fill. The kernels are tested at Fallback, SSE2, SSE4.2, AVX2 and NEON; the AVX-512 level is compiled but not yet executed.
 
 ## v0.4.0 (2026-10-27)
 

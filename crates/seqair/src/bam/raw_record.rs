@@ -416,6 +416,17 @@ impl RawBamRecord {
         })
     }
 
+    // r[impl seq.iupac_bulk+2]
+    /// Append the sequence to `out`, one [`IupacBase`] per base, every 4-bit
+    /// code kept: [`Self::iupac_bases`] into a caller's buffer.
+    pub fn iupac_bases_into(&self, out: &mut Vec<IupacBase>) {
+        let start = out.len();
+        out.resize(start.saturating_add(self.seq_len()), IupacBase::N);
+        if let Some(dst) = out.get_mut(start..) {
+            seq::decode_iupac_bases_into(self.packed_seq(), dst);
+        }
+    }
+
     // r[impl bam.raw_record.edit_seq]
     /// Replace the sequence with `seq`, in place.
     ///
@@ -433,11 +444,8 @@ impl RawBamRecord {
         };
         // The unused low nibble of an odd-length sequence is not ours to touch.
         let pad = if expected % 2 == 1 { dst.last().map(|b| b & 0x0F) } else { None };
-        for (d, pair) in dst.iter_mut().zip(seq.chunks(2)) {
-            let hi = pair.first().map_or(0, |b| b.code());
-            let lo = pair.get(1).map_or(0, |b| b.code());
-            *d = (hi << 4) | lo;
-        }
+        // r[impl seq.iupac_bulk+2]
+        seq::encode_iupac_bases_to(seq, dst);
         if let (Some(pad), Some(last)) = (pad, dst.last_mut()) {
             *last = (*last & 0xF0) | pad;
         }
@@ -669,6 +677,7 @@ mod tests {
     }
 
     // r[verify bam.raw_record.iupac_bases]
+    // r[verify seq.iupac_bulk+2]
     #[test]
     fn iupac_bases_agree_with_the_ascii_decode() {
         let codes: Vec<u8> = (0..16).chain([3]).collect();
@@ -676,6 +685,10 @@ mod tests {
             RawBamRecord::from_payload(payload(false, 4, &[], &codes, &[]), &header()).unwrap();
         let bases: Vec<IupacBase> = record.iupac_bases().collect();
         assert_eq!(bases.len(), codes.len());
+        let mut appended = vec![IupacBase::R];
+        record.iupac_bases_into(&mut appended);
+        assert_eq!(appended[0], IupacBase::R);
+        assert_eq!(appended[1..], bases);
         assert_eq!(bases.iter().map(|b| b.code()).collect::<Vec<_>>(), codes);
         let mut ascii = Vec::new();
         record.decode_seq_into(&mut ascii);

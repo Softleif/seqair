@@ -13,6 +13,8 @@ pub mod pos;
 mod probability;
 mod region_string;
 mod rms;
+#[cfg(test)]
+mod simd_levels;
 mod strand;
 
 pub use smallvec;
