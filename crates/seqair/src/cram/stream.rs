@@ -16,7 +16,7 @@ use crate::fasta::{FastaError, IndexedFastaReader};
 use crate::reader::Tid;
 use crate::sam::encode::{RecordEncodeError, encode_alignment};
 use core::range::RangeInclusive;
-use seqair_types::{Base, Pos0, SmolStr};
+use seqair_types::{IupacBase, Pos0, SmolStr};
 use std::io::{self, Read};
 use std::path::Path;
 use std::sync::Arc;
@@ -306,9 +306,9 @@ fn read_container<R: Read>(
 pub struct CramContainerDecoder {
     shared: Arc<StreamShared>,
     fasta: IndexedFastaReader,
-    scratch: SliceScratch,
+    scratch: SliceScratch<IupacBase>,
     ref_buf: Vec<u8>,
-    windows: Vec<TidWindow>,
+    windows: Vec<TidWindow<u8>>,
     decode_md: bool,
 }
 
@@ -436,7 +436,7 @@ impl CramContainerDecoder {
                             }
                             .into());
                         }
-                        let bases = Base::from_ascii_vec(std::mem::take(&mut self.ref_buf));
+                        let bases = self.ref_buf.to_ascii_uppercase();
                         self.windows.push(TidWindow { tid, start: begin.cast_signed(), bases });
                     }
                     SliceReference::PerTid(&self.windows)

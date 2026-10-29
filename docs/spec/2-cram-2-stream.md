@@ -34,6 +34,11 @@ The reference a slice decodes against MUST come from the slice itself, as there 
 r[cram.stream.raw_records]
 Each decoded record MUST become a `RawBamRecord` as htslib's `cram_to_bam` builds the BAM record, validated against the file header with `RawBamRecord::from_payload` (`r[bam.raw_record.validation]`): reference and position as decoded, a position of `-1` where `AP` is below 1 on an unmapped read; FLAG and MAPQ as decoded (MAPQ 0 for unmapped reads, which store none); mate reference, position and TLEN as the slice resolves them (`r[cram.record.mate_detached]`, `r[cram.record.mate_tlen_reconstruction]`); the name, CIGAR, sequence, qualities (`0xFF` throughout when the record stores none) and aux tags, `RG` last (`r[cram.record.rg_tag]`); `bin` as `hts_reg2bin(pos, pos + rlen, 14, 5)` with `rlen` the CIGAR's reference length, or 1 when that is 0 or the read is unmapped (`4680` when unplaced); a CIGAR of more than 65535 operations as BAM's `CG` placeholder with the real CIGAR in a `CG:B:I` tag, as `bam_write1` writes it. The encoding is shared with the SAM encoder (`r[sam.encode.bin]`, `r[sam.encode.long_cigar]`), not a second implementation. A record that fails validation MUST fail the container with `CramStreamError::InvalidRecord`, carrying the record's 0-based number in the file (the slice's `record_counter` plus its index).
 
+## Sequence
+
+r[cram.stream.iupac]
+The stream MUST rebuild SEQ as `IupacBase`s, keeping every code htslib keeps: a base an implicit match copies from the reference is the reference's code (`R` stays `R`, either case reads as upper case), and a base a feature stores as a byte (`B`, `b`, `i`, `I`, `S`, an unmapped read's `BA`) is that byte's code as `bam_set1` reads it (`=`, `Y`, ...), `N` for anything that is no IUPAC letter. An `X` substitution of a reference base other than A, C, G or T uses the substitution matrix's `N` row. The indexed reader keeps decoding to `Base`, which its pileup consumers expect (`r[base_decode.decode+2]`), so its path is not slowed by the wider type.
+
 ## MD and NM
 
 r[cram.stream.md_nm]
@@ -47,7 +52,6 @@ r[cram.stream.md_nm.option]
 r[cram.stream.fidelity+2]
 The oracle is samtools: each streamed record MUST be byte for byte the record `samtools view -b` writes for it, `format_sam_record` of it MUST equal the line `samtools view --no-PG` prints, and the stream MUST yield as many records as `samtools view -c` counts; with `decode_md(false)` the same holds against `--input-fmt-option decode_md=0`. The known differences, each pinned by name in the test (`KNOWN_MISMATCHES` in `tests/cram_stream.rs`) so that fixing one fails it until the entry goes:
 
-- IUPAC codes and `=` in SEQ decode as `N`, whether they come from the reference in a match or from a read feature (seqair decodes SEQ as `Base`); htslib keeps them.
 - Read names when `RN` is false (`lossy_names`): htslib keeps a detached record's stored name and gives an attached record its mate's name or `<prefix>:<record number>`; seqair leaves both empty.
 - TLEN of an attached pair with an unmapped mate: htslib sets it to 0, seqair computes the span. Only `lossy_names` files attach such pairs.
 
