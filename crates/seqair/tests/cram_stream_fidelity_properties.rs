@@ -104,7 +104,8 @@ fn arb_mapped(tc: &TestCase, contig: usize, reference: &str) -> String {
     }
     for _ in 0..tc.draw_silent(int(0, 3)) {
         let i = tc.draw_silent(int(0, seq.len() - 1));
-        seq[i] = tc.draw_silent(gs::sampled_from(b"ACGTN"));
+        // IUPAC codes, `=` and lower case are stored verbatim as `B`/`b`.
+        seq[i] = tc.draw_silent(gs::sampled_from(b"ACGTNRY=acgtn"));
     }
     let mut cigar = String::new();
     for (l, op) in &ops {
@@ -128,9 +129,10 @@ fn arb_mapped(tc: &TestCase, contig: usize, reference: &str) -> String {
 
 #[hegel::composite]
 fn arb_sample(tc: &TestCase) -> Sample {
-    // Reference `N`s, alone and in runs, are mismatches in a generated MD.
+    // Reference `N`s, alone and in runs, are mismatches in a generated MD;
+    // other IUPAC codes are matches, copied into SEQ as themselves.
     let contigs: Vec<String> = (0..tc.draw_silent(int(1, 3)))
-        .map(|_| tc.draw_silent(text("ACGTACGTACGTN", CONTIG_LEN)))
+        .map(|_| tc.draw_silent(text("ACGTACGTACGTNRYMacgt", CONTIG_LEN)))
         .collect();
     let mut lines = Vec::new();
     for (i, reference) in contigs.iter().enumerate() {
@@ -150,6 +152,7 @@ fn arb_sample(tc: &TestCase) -> Sample {
 enum Reference {
     External,
     Embedded,
+    Consensus,
     None,
 }
 
@@ -172,6 +175,7 @@ impl Opts {
         match self.reference {
             Reference::External => {}
             Reference::Embedded => args.push("embed_ref=1".into()),
+            Reference::Consensus => args.push("embed_ref=2".into()),
             Reference::None => args.push("no_ref=1".into()),
         }
         if let Some(m) = self.multi_seq {
@@ -185,10 +189,10 @@ impl Opts {
 fn arb_opts(tc: &TestCase) -> Opts {
     Opts {
         version: tc.draw_silent(gs::sampled_from(&["3.0", "3.1"])),
-        // A consensus reference holds IUPAC codes, which decode as `N`.
         reference: tc.draw_silent(gs::sampled_from(&[
             Reference::External,
             Reference::Embedded,
+            Reference::Consensus,
             Reference::None,
         ])),
         seqs_per_slice: tc.draw_silent(gs::sampled_from(&[1u32, 2, 5, 10_000])),
@@ -213,6 +217,12 @@ fn write_files(dir: &Path, sample: &Sample, opts: &Opts) -> (PathBuf, PathBuf) {
     }
     sam.push_str("@RG\tID:grpA\tSM:x\n@RG\tID:grpB\tSM:x\n");
     for (i, line) in sample.lines.iter().enumerate() {
+        // samtools 1.25 fails to build a consensus for a slice of SEQ `*`
+        // reads ("Failed to build reference") and writes a broken file.
+        let seq_star = line.split('\t').nth(8) == Some("*");
+        if matches!(opts.reference, Reference::Consensus) && seq_star {
+            continue;
+        }
         writeln!(sam, "r{i}\t{line}").unwrap();
     }
     std::fs::write(&fasta, fa).unwrap();
@@ -244,6 +254,7 @@ fn streamed(cram: &Path, fasta: &Path, decode_md: bool) -> Vec<RawBamRecord> {
 // r[verify cram.stream.fidelity+2]
 // r[verify cram.stream.md_nm]
 // r[verify cram.stream.md_nm.option]
+// r[verify cram.stream.iupac]
 /// For any generated sample and CRAM writer options, the streamed records
 /// equal `samtools view -b`'s, byte for byte, and format as `samtools view`
 /// prints them, with MD/NM generation on (samtools' default) or off.
