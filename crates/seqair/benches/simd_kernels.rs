@@ -11,9 +11,12 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use seqair::bam::BaseModState;
-use seqair::bam::seq::{decode_bases_into, decode_seq};
+use seqair::bam::seq::{
+    decode_bases_into, decode_iupac_bases_into, decode_seq, decode_seq_scalar,
+    encode_iupac_bases_into,
+};
 use seqair::cram::rans_nx16;
-use seqair_types::Base;
+use seqair_types::{Base, IupacBase};
 use std::hint::black_box;
 
 /// A short read, a long read, and a bulk buffer: the first is dominated by
@@ -57,6 +60,94 @@ fn ascii_to_base(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(len as u64));
         group.bench_with_input(BenchmarkId::from_parameter(len), &len, |b, _| {
             b.iter(|| Base::convert_ascii_in_place(black_box(&mut buf)));
+        });
+    }
+    group.finish();
+}
+
+/// Read lengths for the `IupacBase` kernels: a short read, where dispatch and
+/// the tail dominate, and long reads.
+const READ_LENGTHS: [usize; 3] = [150, 10_000, 100_000];
+
+/// Each `IupacBase` bulk conversion against the element-wise loop it
+/// replaces (`scalar`), in one run so the two see the same machine state.
+fn iupac(c: &mut Criterion) {
+    let mut group = c.benchmark_group("iupac");
+    for len in READ_LENGTHS {
+        group.throughput(Throughput::Bytes(len as u64));
+        let ascii: Vec<u8> = bytes(len, 5).iter().map(|b| b"ACGTNacgtnRY="[*b as usize % 13]).collect();
+        let mut bases = IupacBase::from_ascii_slice(&ascii);
+        let packed = bytes(len.div_ceil(2), 6);
+        let mut codes_out: Vec<IupacBase> = Vec::with_capacity(len);
+        let mut bytes_out: Vec<u8> = Vec::with_capacity(len);
+        let mut bench = |name: &str, f: &mut dyn FnMut()| {
+            group.bench_function(BenchmarkId::new(name, len), |b| b.iter(&mut *f));
+        };
+
+        bench("from_ascii/scalar", &mut || {
+            codes_out.clear();
+            codes_out.extend(black_box(&ascii).iter().map(|&b| IupacBase::from_ascii(b)));
+        });
+        bench("from_ascii/simd", &mut || {
+            codes_out.clear();
+            IupacBase::from_ascii_into(black_box(&ascii), &mut codes_out);
+        });
+        bench("to_ascii/scalar", &mut || {
+            bytes_out.clear();
+            bytes_out.extend(black_box(&bases).iter().map(|b| b.to_ascii()));
+        });
+        bench("to_ascii/simd", &mut || {
+            bytes_out.clear();
+            IupacBase::to_ascii_into(black_box(&bases), &mut bytes_out);
+        });
+        bench("complement/scalar", &mut || {
+            for b in black_box(&mut bases).iter_mut() {
+                *b = b.complement();
+            }
+        });
+        bench("complement/simd", &mut || IupacBase::complement_in_place(black_box(&mut bases)));
+        bench("reverse_complement/scalar", &mut || {
+            let bases = black_box(&mut bases);
+            bases.reverse();
+            for b in bases.iter_mut() {
+                *b = b.complement();
+            }
+        });
+        bench("reverse_complement/simd", &mut || {
+            IupacBase::reverse_complement_in_place(black_box(&mut bases));
+        });
+        // What `RawBamRecord::iupac_bases` does a base at a time.
+        bench("unpack/scalar", &mut || {
+            let packed = black_box(&packed);
+            codes_out.clear();
+            codes_out.extend((0..len).map(|i| {
+                let byte = packed[i / 2];
+                IupacBase::from_nibble(if i % 2 == 0 { byte >> 4 } else { byte })
+            }));
+        });
+        bench("unpack/simd", &mut || {
+            codes_out.clear();
+            codes_out.resize(len, IupacBase::N);
+            decode_iupac_bases_into(black_box(&packed), &mut codes_out);
+        });
+        bench("unpack_ascii/scalar", &mut || {
+            black_box(decode_seq_scalar(black_box(&packed), len));
+        });
+        bench("unpack_ascii/simd", &mut || {
+            black_box(decode_seq(black_box(&packed), len));
+        });
+        // The pair loop `RawBamRecord::set_seq` used.
+        bench("pack/scalar", &mut || {
+            bytes_out.clear();
+            bytes_out.extend(black_box(&bases).chunks(2).map(|pair| {
+                let hi = pair.first().map_or(0, |b| b.code());
+                let lo = pair.get(1).map_or(0, |b| b.code());
+                (hi << 4) | lo
+            }));
+        });
+        bench("pack/simd", &mut || {
+            bytes_out.clear();
+            encode_iupac_bases_into(black_box(&bases), &mut bytes_out);
         });
     }
     group.finish();
@@ -160,5 +251,5 @@ fn base_mod_parse(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bam_seq_decode, ascii_to_base, rans_nx16_order0, base_mod_parse);
+criterion_group!(benches, bam_seq_decode, ascii_to_base, iupac, rans_nx16_order0, base_mod_parse);
 criterion_main!(benches);
