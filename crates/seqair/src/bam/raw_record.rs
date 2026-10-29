@@ -631,6 +631,32 @@ mod tests {
         }
     }
 
+    // r[verify bam.raw_record.edit_aux]
+    #[test]
+    fn edit_aux_stops_at_the_record_size_limit() {
+        let mut record = RawBamRecord::default();
+        // 34 fixed bytes + tag name, type and NUL = 38 bytes besides the text.
+        let fits = record::MAX_RECORD_SIZE - 38;
+        record
+            .edit_aux(|a| {
+                a.set_string(*b"XM", &vec![b'a'; fits]);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(record.as_payload().len(), record::MAX_RECORD_SIZE);
+        let before = record.as_payload().to_vec();
+        let err = record
+            .edit_aux(|a| {
+                a.set_string(*b"XM", &vec![b'a'; fits + 1]);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, RawRecordEditError::RecordTooLarge { len } if len == record::MAX_RECORD_SIZE + 1)
+        );
+        assert_eq!(record.as_payload(), before);
+    }
+
     // r[verify bam.raw_record.iupac_bases]
     #[test]
     fn iupac_bases_agree_with_the_ascii_decode() {

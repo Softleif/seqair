@@ -74,7 +74,18 @@ fn set_seq_and_set_base_change_only_the_bases(tc: TestCase) {
     if len > 0 {
         let i = tc.draw(gs::integers::<usize>().max_value(len - 1));
         let base = tc.draw(gs::sampled_from(IupacBase::ALL.to_vec()));
+        let before_base = record.as_payload().to_vec();
         record.set_base(QPos::new(i as u32), base).unwrap();
+        // Only the edited base's byte may differ, and within it only its nibble.
+        let byte_at = packed_start + i / 2;
+        let after_base = record.as_payload();
+        assert_eq!(after_base[..byte_at], before_base[..byte_at]);
+        assert_eq!(after_base[byte_at + 1..], before_base[byte_at + 1..]);
+        let kept_nibble = if i % 2 == 0 { 0x0F } else { 0xF0 };
+        assert_eq!(after_base[byte_at] & kept_nibble, before_base[byte_at] & kept_nibble);
+        if len % 2 == 1 && i == len - 1 {
+            assert_eq!(after_base[byte_at] & 0x0F, before_base[byte_at] & 0x0F, "pad nibble");
+        }
         let mut expected = new;
         expected[i] = base;
         assert_eq!(decoded(&record), expected);
