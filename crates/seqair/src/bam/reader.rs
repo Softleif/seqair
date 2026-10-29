@@ -379,7 +379,7 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     ) -> Result<RawQuery<'_, R>, BamError> {
         let shared = Arc::clone(&self.shared);
         let query = self.query(tid, span)?;
-        Ok(RawQuery { query, shared, failed: false })
+        Ok(RawQuery { query, shared, scratch: RawBamRecord::default(), failed: false })
     }
 }
 
@@ -403,6 +403,9 @@ impl<R: Read + Seek> IndexedBamReader<R> {
 pub struct RawQuery<'r, R: Read + Seek> {
     query: BamQuery<'r, R>,
     shared: Arc<BamShared>,
+    /// Each record is validated here and swapped out once it passes, so an
+    /// error leaves the caller's record as it was.
+    scratch: RawBamRecord,
     failed: bool,
 }
 
@@ -422,7 +425,7 @@ impl<R: Read + Seek> RawQuery<'_, R> {
 
     // r[impl bam.reader.query_raw.errors]
     /// Read the next record into `record`, reusing its buffer. `Ok(false)` at
-    /// the end of the region, which leaves `record` unchanged.
+    /// the end of the region and any error leave `record` unchanged.
     ///
     /// # Errors
     /// [`BamError::InvalidRecord`], with the record's virtual offset, for a
@@ -432,9 +435,10 @@ impl<R: Read + Seek> RawQuery<'_, R> {
         if self.failed {
             return Err(BamError::Poisoned);
         }
-        let header = &self.shared.header;
-        let result = self.query.run_loop(|offset, raw| {
-            record
+        let Self { query, shared, scratch, .. } = self;
+        let header = &shared.header;
+        let result = query.run_loop(|offset, raw| {
+            scratch
                 .refill(header, |payload| {
                     payload.extend_from_slice(raw);
                     Ok::<_, Infallible>(())
@@ -446,7 +450,11 @@ impl<R: Read + Seek> RawQuery<'_, R> {
             Ok(ControlFlow::Break(()))
         });
         match result {
-            Ok(flow) => Ok(flow.is_break()),
+            Ok(ControlFlow::Break(())) => {
+                std::mem::swap(record, &mut self.scratch);
+                Ok(true)
+            }
+            Ok(ControlFlow::Continue(())) => Ok(false),
             Err(e) => {
                 if !matches!(e, BamError::InvalidRecord { .. }) {
                     self.failed = true;

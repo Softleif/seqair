@@ -397,6 +397,7 @@ fn a_record_that_does_not_validate_is_an_error_in_its_place(tc: TestCase) {
         let mut record = RawBamRecord::default();
         let mut got = Vec::new();
         loop {
+            let before = record.clone();
             match query.read_record(&mut record) {
                 Ok(true) => {
                     let i = generated_index(record.qname());
@@ -409,6 +410,7 @@ fn a_record_that_does_not_validate_is_an_error_in_its_place(tc: TestCase) {
                 Ok(false) => break,
                 Err(e) => {
                     assert!(is_invalid_record(&e), "{path:?}: {e:?}");
+                    assert!(record == before, "{path:?}: an error changed the record");
                     if let ReaderError::Bam {
                         source: seqair::bam::BamError::InvalidRecord { offset, .. },
                     } = e

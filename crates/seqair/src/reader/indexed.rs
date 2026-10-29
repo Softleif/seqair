@@ -242,7 +242,7 @@ impl<R: Read + Seek> RawRegionQuery<'_, R> {
     }
 
     /// Read the next record into `record`, reusing its buffer. `Ok(false)` at
-    /// the end of the region, which leaves `record` unchanged.
+    /// the end of the region and any error leave `record` unchanged.
     ///
     /// # Errors
     /// As the format's query: a record that fails validation or encoding

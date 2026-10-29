@@ -402,8 +402,8 @@ pub struct SamRawQuery<'r, R: Read + Seek> {
     lines: ChunkLines<'r, R>,
     shared: Arc<SamShared>,
     encoder: SamRecordEncoder,
-    /// Each line is encoded here, and swapped out once it is kept, so a
-    /// query that ends leaves the caller's record as it was.
+    /// Each line is encoded here, and swapped out once it is kept, so an
+    /// error or the end leaves the caller's record as it was.
     scratch: RawBamRecord,
     /// For [`select_line`] on a line the encoder rejects.
     cigar: Vec<CigarOp>,
@@ -428,7 +428,7 @@ impl<R: Read + Seek> SamRawQuery<'_, R> {
     }
 
     /// Read the next record into `record`, reusing its buffer. `Ok(false)` at
-    /// the end of the region, which leaves `record` unchanged.
+    /// the end of the region and any error leave `record` unchanged.
     ///
     /// # Errors
     /// [`SamError::MalformedRecord`] for a kept line that does not encode —
