@@ -19,7 +19,7 @@ use crate::reader::Tid;
 use crate::sam::encode::{RecordEncodeError, encode_alignment};
 use core::range::RangeInclusive;
 use seqair_types::{IupacBase, Pos0, SmolStr};
-use std::io::{self, Read, Seek};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::warn;
@@ -45,6 +45,11 @@ pub enum CramStreamError {
     /// the file header container.
     #[error("CRAM input ends inside container {container}")]
     TruncatedContainer { container: u64 },
+
+    /// The file ends inside the container a region query's index entry
+    /// points at, at this byte offset (`r[cram.query_raw]`).
+    #[error("CRAM file ends inside the container at byte {offset}")]
+    TruncatedContainerAt { offset: u64 },
 
     /// A decoded record is not a valid BAM record for the header.
     #[error("CRAM record {record} is invalid")]
@@ -112,7 +117,7 @@ pub struct CramStreamReader<R> {
 #[derive(Debug)]
 pub struct CramContainer {
     number: u64,
-    header: ContainerHeader,
+    pub(crate) header: ContainerHeader,
     data: Vec<u8>,
 }
 
@@ -234,6 +239,21 @@ impl<R: Read> Read for Recording<'_, R> {
         self.bytes.extend_from_slice(buf.get(..n).unwrap_or_default());
         Ok(n)
     }
+}
+
+// r[impl cram.query_raw]
+/// Read the container at byte `offset` of `file` as the stream reads one.
+/// `None` for the EOF container.
+pub(crate) fn read_container_at<R: Read + Seek>(
+    file: &mut R,
+    offset: u64,
+) -> Result<Option<(ContainerHeader, Vec<u8>)>, CramStreamError> {
+    let truncated = || CramStreamError::TruncatedContainerAt { offset };
+    file.seek(SeekFrom::Start(offset)).map_err(|source| CramStreamError::Io { source })?;
+    // Buffered, as the header is read a field at a time.
+    let (header, data) =
+        read_container(&mut BufReader::new(file), truncated)?.ok_or_else(truncated)?;
+    Ok((!header.is_eof()).then_some((header, data)))
 }
 
 // r[impl cram.stream.container_header]
@@ -393,7 +413,8 @@ impl CramContainerDecoder {
             // r[impl cram.stream.raw_records]
             // r[impl cram.stream.fidelity+2]
             out.reserve(decoded.records.alignments().len());
-            for (&record, fields) in decoded.numbers.iter().zip(decoded.records.alignments()) {
+            for (i, fields) in decoded.records.alignments().enumerate() {
+                let record = decoded.number(i);
                 let mut payload = Vec::new();
                 encode_alignment(&mut payload, &fields)
                     .map_err(|source| CramStreamError::RecordEncode { record, source })?;
@@ -410,8 +431,18 @@ impl CramContainerDecoder {
 #[derive(Debug, Default)]
 pub(crate) struct StreamSlice {
     pub(crate) records: DecodedSlice<IupacBase>,
-    /// Each record's 0-based number in the file, for errors.
-    pub(crate) numbers: Vec<u64>,
+    /// The slice's `record_counter`: the number of its first record.
+    first: u64,
+    /// Each decoded record's index among all of the slice's records.
+    kept: Vec<u32>,
+}
+
+impl StreamSlice {
+    /// The 0-based number in the file of decoded record `i`, for errors.
+    pub(crate) fn number(&self, i: usize) -> u64 {
+        let index = self.kept.get(i).copied().unwrap_or_default();
+        self.first.saturating_add(u64::from(index))
+    }
 }
 
 // r[impl cram.stream.slice_decode]
@@ -437,6 +468,16 @@ impl SliceDecoder {
             decode_md: true,
             name_prefix: SmolStr::new_static("-"),
         }
+    }
+
+    /// A decoder for the indexed reader's raw queries, with htslib's
+    /// defaults: MD/NM generated, names prefixed `name_prefix`.
+    pub(crate) fn for_query(
+        header: BamHeader,
+        read_group_ids: Vec<SmolStr>,
+        name_prefix: SmolStr,
+    ) -> Self {
+        Self { name_prefix, ..Self::new(Arc::new(StreamShared { header, read_group_ids })) }
     }
 
     pub(crate) fn header(&self) -> &BamHeader {
@@ -533,9 +574,9 @@ impl SliceDecoder {
             Synthesis { md_nm: self.decode_md, name_prefix: Some(&self.name_prefix) },
             &mut self.scratch,
         )?;
+        debug_assert_eq!(indices.len(), records.alignments().len());
         let first = u64::try_from(sh.record_counter).unwrap_or(0);
-        let numbers = indices.into_iter().map(|i| first.saturating_add(u64::from(i))).collect();
-        Ok(StreamSlice { records, numbers })
+        Ok(StreamSlice { records, first, kept: indices })
     }
 }
 

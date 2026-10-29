@@ -3,7 +3,12 @@
 //! [`Readers::fetch_base_seq`] for reference sequence. [`IndexedReader`] is the bare alignment
 //! handle when no FASTA is needed. Both types are forkable for multi-threaded use.
 
-use crate::{bam::BamError, cram::reader::CramError, fasta::FastaError, sam::reader::SamError};
+use crate::{
+    bam::BamError,
+    cram::{reader::CramError, stream::CramStreamError},
+    fasta::FastaError,
+    sam::reader::SamError,
+};
 use seqair_types::SmolStr;
 use std::path::PathBuf;
 
@@ -53,6 +58,13 @@ pub enum ReaderError {
     Cram {
         #[from]
         source: CramError,
+    },
+
+    /// A CRAM raw region query failed (`r[cram.query_raw.errors]`).
+    #[error("CRAM region query error")]
+    CramStream {
+        #[from]
+        source: CramStreamError,
     },
 
     #[error("I/O error reading {path}")]
@@ -138,8 +150,4 @@ pub enum ReaderError {
 
     #[error("BAM header target count {count} does not fit in u32")]
     HeaderTargetCountOverflow { count: usize },
-
-    /// `IndexedReader::query_raw` on a CRAM (`r[unified.query_raw]`).
-    #[error("raw region queries are not supported for CRAM yet; use fetch_into")]
-    RawQueryUnsupported,
 }

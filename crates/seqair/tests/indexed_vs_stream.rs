@@ -598,7 +598,7 @@ fn samtools_names(bam: &Path, contig: usize, span: RangeInclusive<Pos0>) -> Vec<
 // r[verify region_buf.fetch_into+2]
 // r[verify bam.reader.query_raw]
 // r[verify sam.reader.query_raw]
-// r[verify unified.query_raw]
+// r[verify unified.query_raw+2]
 /// Thousands of records over several contigs — mapped, placed but unmapped
 /// (with and without a stale CIGAR), unplaced, zero-span, IUPAC, every aux
 /// type — sorted by samtools into a BAM and a bgzipped SAM, each in

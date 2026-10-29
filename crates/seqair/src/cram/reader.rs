@@ -10,14 +10,19 @@ use super::{
     index::{self, CramIndex, CramIndexError},
     slice::{self, DecodedSlice, Keep, SliceReference, SliceScratch},
     slice_cache::{SliceCache, SliceCacheBudget, SliceCacheStats, SliceKey},
+    stream::{self, CramStreamError, SliceDecoder, StreamSlice},
 };
+use crate::bam::RawBamRecord;
+use crate::bam::raw_record::Refill;
 use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
 use crate::reader::Tid;
+use crate::sam::encode::encode_alignment;
 use core::range::RangeInclusive;
 use seqair_types::{Pos0, Pos1, SmallVec, SmolStr};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -405,6 +410,8 @@ pub struct IndexedCramReader<R: Read + Seek = File> {
     container_buf: Vec<u8>,
     ref_seq_buf: Vec<u8>,
     scratch: SliceScratch,
+    /// The decoder of [`Self::query_raw`], made by the first one.
+    raw: Option<SliceDecoder>,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for IndexedCramReader<R> {
@@ -491,6 +498,7 @@ impl IndexedCramReader<File> {
             container_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
             scratch: SliceScratch::default(),
+            raw: None,
         })
     }
 
@@ -506,6 +514,7 @@ impl IndexedCramReader<File> {
             container_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
             scratch: SliceScratch::default(),
+            raw: None,
         })
     }
 }
@@ -572,6 +581,7 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
             container_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
             scratch: SliceScratch::default(),
+            raw: None,
         })
     }
 }
@@ -644,26 +654,12 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         // the reader mutably while the index entries and the reference name
         // are borrowed from it.
         let shared = Arc::clone(&self.shared);
-        let entries = shared.index.query(tid, start_u64, end_u64);
-        if entries.is_empty() {
+        let wanted = wanted_slices(&shared.index, tid, start_u64, end_u64);
+        if wanted.is_empty() {
             return Ok(crate::reader::FetchCounts::default());
         }
 
         let mut counts = crate::reader::FetchCounts::default();
-
-        // Group CRAI entries by container_offset → set of slice_offsets that
-        // overlap our query. Keys are sorted (BTreeMap) so containers are
-        // visited in file order. Slice_offset values are kept in a tiny
-        // SmallVec since most containers list 1–4 relevant slices.
-        // r[impl cram.index.crai_per_slice]
-        let mut wanted: std::collections::BTreeMap<u64, SmallVec<u64, 4>> =
-            std::collections::BTreeMap::new();
-        for e in &entries {
-            let entry = wanted.entry(e.container_offset).or_default();
-            if !entry.contains(&e.slice_offset) {
-                entry.push(e.slice_offset);
-            }
-        }
 
         let ref_name: &str =
             shared.header.target_name(tid).ok_or(CramError::UnknownTid { tid: tid.as_u32() })?;
@@ -673,14 +669,11 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         // Each wanted slice comes from the cache shared with this reader's
         // forks; only a miss reads its container, parses the compression
         // header and fetches the reference.
-        for (&container_offset, wanted_slices) in &wanted {
-            // Landmarks ascend, so this is the container's own slice order.
-            let mut slice_offsets = wanted_slices.clone();
-            slice_offsets.sort_unstable();
+        for (&container_offset, slice_offsets) in &wanted {
             // Read and parsed only once a slice needs decoding; `Some(None)`
             // is the EOF container, which holds no slices.
             let mut container: Option<Option<LoadedContainer>> = None;
-            for &slice_offset in &slice_offsets {
+            for &slice_offset in slice_offsets {
                 let key = SliceKey { container_offset, slice_offset, tid };
                 let decoded = shared.slice_cache.get_or_decode(key, || {
                     let loaded = match &mut container {
@@ -701,6 +694,239 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         }
 
         Ok(counts)
+    }
+}
+
+impl<R: Read + Seek> IndexedCramReader<R> {
+    // r[impl cram.query_raw]
+    /// The records on `tid` overlapping the closed interval `span`
+    /// (0-based), in file order, each as htslib reconstructs it: what
+    /// `samtools view -b <cram> <region>` writes, MD/NM generated and every
+    /// IUPAC code kept. The slices are the ones [`Self::fetch_into`] decodes,
+    /// decoded by the stream's decoder.
+    ///
+    /// ```no_run
+    /// use seqair::bam::RawBamRecord;
+    /// use seqair::cram::reader::IndexedCramReader;
+    /// use seqair_types::Pos0;
+    ///
+    /// let mut reader = IndexedCramReader::open("in.cram".as_ref(), "ref.fa".as_ref())?;
+    /// let tid = reader.header().tid("chr1").expect("chr1 in header");
+    /// let span = (Pos0::new(1_000).expect("pos")..=Pos0::new(2_000).expect("pos")).into();
+    /// let mut query = reader.query_raw(tid, span);
+    /// let mut record = RawBamRecord::default();
+    /// while query.read_record(&mut record)? {
+    ///     println!("{}", record.qname().escape_ascii());
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn query_raw(&mut self, tid: Tid, span: RangeInclusive<Pos0>) -> CramRawQuery<'_, R> {
+        let slices: Vec<(u64, u64)> = if span.is_empty() {
+            Vec::new()
+        } else {
+            wanted_slices(&self.shared.index, tid, span.start.as_u64(), span.last.as_u64())
+                .into_iter()
+                .flat_map(|(container, slices)| slices.into_iter().map(move |s| (container, s)))
+                .collect()
+        };
+        let Self { file, fasta, shared, raw, .. } = self;
+        let decoder = raw.get_or_insert_with(|| {
+            let prefix = shared.cram_path.file_name().and_then(|n| n.to_str()).unwrap_or("-");
+            SliceDecoder::for_query(
+                shared.header.clone(),
+                shared.read_group_ids.clone(),
+                SmolStr::new(prefix),
+            )
+        });
+        CramRawQuery {
+            file,
+            fasta,
+            decoder,
+            slices: slices.into_iter(),
+            container: None,
+            slice: StreamSlice::default(),
+            next: 0,
+            tid,
+            span,
+            scratch: RawBamRecord::default(),
+            failed: false,
+        }
+    }
+}
+
+// r[impl cram.index.crai_per_slice]
+/// The slices the CRAI lists for `start..=end` (0-based) on `tid`: their
+/// containers' byte offsets, ascending, each with its slices' offsets,
+/// ascending — the file's order, as landmarks ascend.
+fn wanted_slices(
+    index: &CramIndex,
+    tid: Tid,
+    start: u64,
+    end: u64,
+) -> BTreeMap<u64, SmallVec<u64, 4>> {
+    let mut wanted: BTreeMap<u64, SmallVec<u64, 4>> = BTreeMap::new();
+    for e in &index.query(tid, start, end) {
+        let slices = wanted.entry(e.container_offset).or_default();
+        if !slices.contains(&e.slice_offset) {
+            slices.push(e.slice_offset);
+        }
+    }
+    for slices in wanted.values_mut() {
+        slices.sort_unstable();
+    }
+    wanted
+}
+
+/// The records of one CRAM region as [`RawBamRecord`]s; see
+/// [`IndexedCramReader::query_raw`]. Borrows the reader until dropped.
+pub struct CramRawQuery<'r, R: Read + Seek> {
+    file: &'r mut R,
+    fasta: &'r mut IndexedFastaReader<R>,
+    decoder: &'r mut SliceDecoder,
+    /// `(container offset, slice offset)` of the slices still to decode.
+    slices: std::vec::IntoIter<(u64, u64)>,
+    /// The container the last slice came from, kept for its next slices.
+    container: Option<Box<RawContainer>>,
+    slice: StreamSlice,
+    /// Index in `slice` of the next record to look at.
+    next: usize,
+    tid: Tid,
+    span: RangeInclusive<Pos0>,
+    /// Each record is encoded here and swapped out once it validates, so an
+    /// error leaves the caller's record as it was.
+    scratch: RawBamRecord,
+    failed: bool,
+}
+
+/// A container a raw query read: its header, bytes and compression header,
+/// or nothing for the EOF container.
+struct RawContainer {
+    offset: u64,
+    body: Option<(ContainerHeader, Vec<u8>, CompressionHeader)>,
+}
+
+impl<R: Read + Seek> std::fmt::Debug for CramRawQuery<'_, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CramRawQuery")
+            .field("slices_left", &self.slices.len())
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: Read + Seek> CramRawQuery<'_, R> {
+    pub fn header(&self) -> &BamHeader {
+        self.decoder.header()
+    }
+
+    // r[impl cram.query_raw.errors]
+    /// Read the next record into `record`, reusing its buffer. `Ok(false)` at
+    /// the end of the region and any error leave `record` unchanged.
+    ///
+    /// # Errors
+    /// [`CramStreamError::RecordEncode`] or [`CramStreamError::InvalidRecord`]
+    /// for a record BAM cannot hold or that fails validation — the query
+    /// stays usable. Anything else ends the query: later calls return
+    /// [`CramStreamError::Poisoned`].
+    pub fn read_record(&mut self, record: &mut RawBamRecord) -> Result<bool, CramStreamError> {
+        if self.failed {
+            return Err(CramStreamError::Poisoned);
+        }
+        match self.advance() {
+            Ok(true) => {
+                std::mem::swap(record, &mut self.scratch);
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
+            Err(e) => {
+                if !matches!(
+                    e,
+                    CramStreamError::RecordEncode { .. } | CramStreamError::InvalidRecord { .. }
+                ) {
+                    self.failed = true;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Encode the next overlapping record into `scratch`, decoding slices
+    /// until there is one. `false` when none is left.
+    fn advance(&mut self) -> Result<bool, CramStreamError> {
+        loop {
+            let found =
+                self.slice.records.next_overlapping(self.next, self.span.start, self.span.last);
+            if let Some((i, fields)) = found {
+                self.next = i.saturating_add(1);
+                let record = self.slice.number(i);
+                let header = self.decoder.header();
+                self.scratch.refill(header, |payload| encode_alignment(payload, &fields)).map_err(
+                    |e| match e {
+                        Refill::Fill(source) => CramStreamError::RecordEncode { record, source },
+                        Refill::Invalid(source) => {
+                            CramStreamError::InvalidRecord { record, source }
+                        }
+                    },
+                )?;
+                return Ok(true);
+            }
+            let Some((container_offset, slice_offset)) = self.slices.next() else {
+                return Ok(false);
+            };
+            self.slice = StreamSlice::default();
+            self.next = 0;
+            self.decode(container_offset, slice_offset)?;
+        }
+    }
+
+    /// Decode the slice at `slice_offset` of the container at
+    /// `container_offset`, reading the container unless the last slice was
+    /// in it.
+    fn decode(&mut self, container_offset: u64, slice_offset: u64) -> Result<(), CramStreamError> {
+        let container = match &mut self.container {
+            Some(c) if c.offset == container_offset => c,
+            slot => {
+                let body = match stream::read_container_at(&mut *self.file, container_offset)? {
+                    Some((header, data)) => {
+                        let compression = self.decoder.compression_header(&data)?;
+                        Some((header, data, compression))
+                    }
+                    None => None,
+                };
+                slot.insert(Box::new(RawContainer { offset: container_offset, body }))
+            }
+        };
+        let Some((header, data, compression)) = &container.body else { return Ok(()) };
+        // r[impl cram.index.crai_per_slice]
+        if !header.landmarks.iter().any(|&l| u64::try_from(l).is_ok_and(|l| l == slice_offset)) {
+            return Ok(());
+        }
+        let offset = usize::try_from(slice_offset)
+            .map_err(|_| CramError::Truncated { context: "slice offset" })?;
+        self.slice = self.decoder.decode_slice(
+            self.fasta,
+            compression,
+            data,
+            offset,
+            Keep::Tid(self.tid),
+        )?;
+        Ok(())
+    }
+}
+
+impl<R: Read + Seek> Iterator for CramRawQuery<'_, R> {
+    type Item = Result<RawBamRecord, CramStreamError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        let mut record = RawBamRecord::default();
+        match self.read_record(&mut record) {
+            Ok(true) => Some(Ok(record)),
+            Ok(false) => None,
+            Err(e) => Some(Err(e)),
+        }
     }
 }
 
@@ -967,6 +1193,46 @@ mod tests {
 
     fn fasta_path() -> &'static Path {
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.gz"))
+    }
+
+    // r[verify cram.query_raw.errors]
+    // r[verify cram.stream.slice_decode]
+    /// The number a raw query gives a record (for its errors) is its place
+    /// among the file's records, also in multi-reference slices, where the
+    /// query keeps only some of a slice's records.
+    #[test]
+    fn a_raw_query_numbers_records_by_their_place_in_the_file() {
+        let data = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/cram-stream"));
+        let (cram, fasta) = (data.join("fidelity_multiref.cram"), data.join("fidelity.fa"));
+        let mut stream = super::stream::CramStreamReader::new(File::open(&cram).unwrap()).unwrap();
+        let mut decoder = stream.decoder(&fasta).unwrap().name_prefix("fidelity_multiref.cram");
+        let mut streamed = Vec::new();
+        let mut multi_ref = false;
+        while let Some(container) = stream.next_container().unwrap() {
+            decoder.decode(&container, &mut streamed).unwrap();
+            multi_ref |= container.header.ref_seq_id == RefSeqId::Multi;
+        }
+        assert!(multi_ref, "the fixture has multi-reference slices");
+
+        let mut reader = IndexedCramReader::open(&cram, &fasta).unwrap();
+        let mut checked = 0;
+        for name in ["chr1", "chr2"] {
+            let tid = name.resolve_tid(reader.header()).unwrap();
+            let len = reader.header().target_len(tid).unwrap();
+            let span = RangeInclusive {
+                start: Pos0::new(0).unwrap(),
+                last: Pos0::new(u32::try_from(len - 1).unwrap()).unwrap(),
+            };
+            let mut query = reader.query_raw(tid, span);
+            let mut record = RawBamRecord::default();
+            while query.read_record(&mut record).unwrap() {
+                let number = query.slice.number(query.next - 1);
+                let at = usize::try_from(number).unwrap();
+                assert!(streamed[at] == record, "{name}: record {number}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 10, "{checked}");
     }
 
     #[test]
