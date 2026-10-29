@@ -214,6 +214,13 @@ impl<B: SeqBase> DecodedSlice<B> {
         tid: Option<Tid>,
         mate_fields: MateFields,
     ) -> Result<u32, CramError> {
+        // r[impl cram.record.seq_qual_lengths]
+        if qual.len() != bases.len() {
+            return Err(CramError::QualityLengthMismatch {
+                bases: bases.len(),
+                qualities: qual.len(),
+            });
+        }
         let slot = u32::try_from(self.records.len())
             .map_err(|_| CramError::InvalidLength { value: i32::MAX })?;
         let append = |slab: &mut Vec<u8>, bytes: &[u8]| {
@@ -1151,7 +1158,7 @@ fn decode_record<B: SeqBase>(
         // BAM/SAM path's `compute_end_pos` and the pileup engine's
         // eviction check (`end_pos < pos`). For zero-refspan reads we
         // store `pos` itself, the same fallback BAM uses.
-        // r[impl cram.edge.seq_unknown+2]
+        // r[impl cram.edge.seq_unknown+3]
         // The bases and `RL` qualities were decoded only to keep the series
         // in step; SEQ and QUAL are `*`.
         if seq_unknown {
@@ -1208,12 +1215,9 @@ fn decode_record<B: SeqBase>(
 
     append_rg(aux_buf);
     // Unmapped read
-    // r[impl cram.edge.seq_unknown+2]
-    if !seq_unknown {
-        for _ in 0..read_length {
-            let base_byte = ds.base.decode(ctx)?;
-            bases_buf.push(B::from_ascii(base_byte));
-        }
+    for _ in 0..read_length {
+        let base_byte = ds.base.decode(ctx)?;
+        bases_buf.push(B::from_ascii(base_byte));
     }
 
     // Quality. See the mapped-read branch above for the bulk-decode
@@ -1222,6 +1226,11 @@ fn decode_record<B: SeqBase>(
         ds.quality_score.decode_n_into(ctx, read_length, qual_buf)?;
     } else {
         qual_buf.resize(read_length, 0xFF);
+    }
+    // r[impl cram.edge.seq_unknown+3]
+    if seq_unknown {
+        bases_buf.clear();
+        qual_buf.clear();
     }
 
     // r[impl cram.edge.unmapped_reads+2]
@@ -2306,6 +2315,42 @@ mod tests {
             let mut aux = Vec::new();
             md.finish_into(GenerateMdNm { md: false, nm: true }, &mut aux);
             assert_eq!(aux, want, "{nm}");
+        }
+    }
+
+    // r[verify cram.record.seq_qual_lengths]
+    /// A record is pushed only when it has as many qualities as bases.
+    #[hegel::test]
+    fn push_requires_a_quality_per_base(tc: TestCase) {
+        let n_bases = tc.draw(gs::integers::<usize>().max_value(20));
+        let n_qual = tc.draw(gs::integers::<usize>().max_value(20));
+        let mut slice = DecodedSlice::<IupacBase>::default();
+        let result = slice.push(
+            Pos0::ZERO,
+            Pos0::ZERO,
+            false,
+            BamFlags::from(4u16),
+            MappingQuality::from_byte(0),
+            0,
+            0,
+            b"r",
+            &[],
+            &vec![IupacBase::A; n_bases],
+            &vec![30; n_qual],
+            &[],
+            None,
+            MateFields::default(),
+        );
+        if n_bases == n_qual {
+            assert_eq!(result.unwrap(), 0);
+            assert_eq!(slice.records.len(), 1);
+        } else {
+            assert!(matches!(
+                result,
+                Err(CramError::QualityLengthMismatch { bases, qualities })
+                    if bases == n_bases && qualities == n_qual
+            ));
+            assert!(slice.records.is_empty());
         }
     }
 }

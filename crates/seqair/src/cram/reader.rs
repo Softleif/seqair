@@ -139,6 +139,11 @@ pub enum CramError {
     #[error("no core data block in slice")]
     MissingCoreDataBlock,
 
+    /// A record whose features rebuild a different number of bases than
+    /// its qualities.
+    #[error("CRAM record has {bases} bases but {qualities} qualities")]
+    QualityLengthMismatch { bases: usize, qualities: usize },
+
     #[error("unknown CRAM feature code {feature_code:#04x} ('{}')", *feature_code as char)]
     UnknownFeatureCode { feature_code: u8 },
 
@@ -1044,7 +1049,7 @@ mod tests {
         assert_eq!(store.record(first).unwrap().qname(), b"r1");
     }
 
-    // r[verify cram.edge.seq_unknown+2]
+    // r[verify cram.edge.seq_unknown+3]
     /// A mapped read stored with SEQ and QUAL `*` (CRAM flag 0x8) comes back
     /// without bases or qualities, as htslib gives it, and the records after
     /// it decode normally.
