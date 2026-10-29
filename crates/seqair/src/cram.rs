@@ -28,6 +28,7 @@ pub mod rans_nx16_neon {}
 pub mod reader;
 pub mod slice;
 pub mod slice_cache;
+pub mod stream;
 pub mod tok3;
 #[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]
