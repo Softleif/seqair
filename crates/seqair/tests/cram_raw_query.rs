@@ -80,11 +80,12 @@ fn stream(cram: &Path, fasta: &Path) -> Vec<RawBamRecord> {
     records
 }
 
-/// Every CRAM fixture of `tests/cram_stream.rs`; the hts-specs files, which
-/// come without a `.crai`, indexed into a temporary directory.
+/// Every CRAM fixture of `tests/cram_stream.rs`, the hts-specs files, which
+/// come without a `.crai`, indexed into a temporary directory, and, last,
+/// [`shapes`].
 fn fixtures() -> &'static [Fixture] {
-    static FIXTURES: OnceLock<(Vec<Fixture>, tempfile::TempDir)> = OnceLock::new();
-    let (fixtures, _) = FIXTURES.get_or_init(|| {
+    static FIXTURES: OnceLock<(Vec<Fixture>, tempfile::TempDir, Generated)> = OnceLock::new();
+    let (fixtures, _, _) = FIXTURES.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
         let beside = |cram: PathBuf, fasta: PathBuf| {
             let crai = PathBuf::from(format!("{}.crai", cram.display()));
@@ -116,7 +117,11 @@ fn fixtures() -> &'static [Fixture] {
             run(Command::new("samtools").arg("index").arg("-o").arg(&crai).arg(&cram));
             out.push(Fixture::new(cram, data("hts-specs/cram/ce.fa"), crai));
         }
-        (out, dir)
+        let shapes = generate_with(&["seqs_per_slice=5"], shapes);
+        out.push(Fixture::new(shapes.cram.clone(), shapes.fasta.clone(), shapes.crai.clone()));
+        let unmapped = out.last().unwrap().streamed.iter().filter(|r| r.flags().is_unmapped());
+        assert_eq!((out.last().unwrap().streamed.len(), unmapped.count()), (72, 12));
+        (out, dir, shapes)
     });
     fixtures
 }
@@ -279,14 +284,20 @@ fn region(tc: &TestCase, len: u32, ends: Vec<(u32, u32)>) -> RangeInclusive<Pos0
 // r[verify cram.query_raw.errors]
 // r[verify cram.stream.slice_decode]
 // r[verify unified.query_raw+2]
-/// Queries in a row on one reader, some read only part way and dropped:
+/// Queries in a row on one reader, some read only part way and dropped,
+/// some after a `fetch_into` of the same span:
 /// each query read whole gives exactly the streamed records that overlap
 /// it, byte for byte and in file order, whatever came before it; and, at
 /// random, what `samtools view -b` writes for it.
 #[hegel::test(test_cases = pinned::cases(40))]
 fn raw_regions_are_the_streamed_records(tc: TestCase) {
     let fixtures = fixtures();
-    let f = &fixtures[tc.draw(gs::integers::<usize>().max_value(fixtures.len() - 1))];
+    let pick = if tc.draw(gs::weighted_booleans(0.3)) {
+        fixtures.len() - 1
+    } else {
+        tc.draw(gs::integers::<usize>().max_value(fixtures.len() - 1))
+    };
+    let f = &fixtures[pick];
     let mut reader = f.open();
     let header = reader.header().clone();
     for _ in 0..tc.draw(gs::integers::<usize>().min_value(1).max_value(4)) {
@@ -295,6 +306,9 @@ fn raw_regions_are_the_streamed_records(tc: TestCase) {
         let len = header.target_len(resolved).unwrap() as u32;
         let s = tc.draw(region(len, ends(f, tid)));
         let want = filtered(&f.streamed, tid, s);
+        if tc.draw(gs::weighted_booleans(0.3)) {
+            reader.fetch_into(resolved, s, &mut RecordStore::new()).unwrap();
+        }
         if tc.draw(gs::weighted_booleans(0.3)) {
             let k = tc.draw(gs::integers::<usize>().max_value(want.len()));
             let mut q = reader.query_raw(resolved, s).unwrap();
@@ -358,6 +372,61 @@ const HUGE_LEN: u32 = 1_500_000;
 const GENERATED_LEN: u32 = 1_600_000;
 
 fn generate(n: u32, huge: Option<u32>, options: &[&str]) -> Generated {
+    generate_with(options, |reference| {
+        (0..n)
+            .map(|i| {
+                let pos = i * 20;
+                let len = if huge == Some(i) { HUGE_LEN } else { 100 };
+                let seq = &reference[pos as usize..(pos + len) as usize];
+                format!("r{i}\t0\tchr1\t{}\t60\t{len}M\t*\t0\t0\t{seq}\t*", pos + 1)
+            })
+            .collect()
+    })
+}
+
+/// Reads of the shapes whose reference span differs from their length: a
+/// spliced `20M3000N20M`, a `10M500D10M`, a 2 kb read, and a pair whose
+/// unmapped mate is placed at the mapped one's position; `r<i>` at
+/// `50 * i`, 100 bp `M` reads between them.
+fn shapes(reference: &str) -> Vec<String> {
+    let seq = |from: u32, len: u32| &reference[from as usize..(from + len) as usize];
+    let mut lines = Vec::new();
+    for i in 0..60u32 {
+        let (pos, p) = (i * 50, i * 50 + 1);
+        let line = |flag: u32, cigar: &str, mate: &str, seq: String| {
+            format!("r{i}\t{flag}\tchr1\t{p}\t60\t{cigar}\t{mate}\t0\t{seq}\t*")
+        };
+        match i % 5 {
+            0 => lines.push(line(0, "100M", "*\t0", seq(pos, 100).into())),
+            1 => lines.push(line(
+                0,
+                "20M3000N20M",
+                "*\t0",
+                [seq(pos, 20), seq(pos + 3_020, 20)].concat(),
+            )),
+            2 => lines.push(line(
+                0,
+                "10M500D10M",
+                "*\t0",
+                [seq(pos, 10), seq(pos + 510, 10)].concat(),
+            )),
+            3 => lines.push(line(0, "2000M", "*\t0", seq(pos, 2_000).into())),
+            _ => {
+                let mate = format!("=\t{p}");
+                lines.push(line(73, "100M", &mate, seq(pos, 100).into()));
+                lines.push(
+                    line(133, "*", &mate, seq(pos + 7, 100).into())
+                        .replacen("\t60\t*", "\t0\t*", 1),
+                );
+            }
+        }
+    }
+    lines
+}
+
+/// A CRAM of the reads `lines` builds from the reference, written with
+/// samtools' `options`.
+fn generate_with(options: &[&str], lines: impl FnOnce(&str) -> Vec<String>) -> Generated {
     let dir = tempfile::tempdir().unwrap();
     let fasta = dir.path().join("ref.fa");
     let mut bases =
@@ -379,11 +448,8 @@ fn generate(n: u32, huge: Option<u32>, options: &[&str]) -> Generated {
     let reference: String = bases.lines().skip(1).collect();
 
     let mut sam = format!("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:{GENERATED_LEN}\n");
-    for i in 0..n {
-        let pos = i * 20;
-        let len = if huge == Some(i) { HUGE_LEN } else { 100 };
-        let seq = &reference[pos as usize..(pos + len) as usize];
-        writeln!(sam, "r{i}\t0\tchr1\t{}\t60\t{len}M\t*\t0\t0\t{seq}\t*", pos + 1).unwrap();
+    for line in lines(&reference) {
+        writeln!(sam, "{line}").unwrap();
     }
     let sam_path = dir.path().join("in.sam");
     std::fs::write(&sam_path, sam).unwrap();
