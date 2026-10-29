@@ -31,7 +31,8 @@ use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{
-    BamIndex, CsiIndex, IndexedBamReader, MappedCounts, Pos0, RecordStore, ReferenceStats,
+    BamIndex, CsiIndex, IndexedBamReader, MappedCounts, Pos0, RawBamRecord, RecordStore,
+    ReferenceStats,
 };
 use seqair::io::IndexBuilder;
 use seqair::reader::ResolveTid;
@@ -120,6 +121,19 @@ fn arb_read(tc: &TestCase) -> Read {
         let pos = arb_pos(tc, contig_len, 1);
         let seq_len = tc.draw_silent(n(1, 40));
         return Read { tid, pos, cigar: Vec::new(), unmapped: true, seq_len };
+    }
+
+    // A mapped read whose CIGAR spans no reference: it covers `pos` alone
+    // (htslib's `bam_endpos` gives it a span of one).
+    if tc.draw_silent(gs::weighted_booleans(0.1)) {
+        let op = if tc.draw_silent(gs::booleans()) {
+            CigarOpType::Insertion
+        } else {
+            CigarOpType::SoftClip
+        };
+        let seq_len = tc.draw_silent(n(1, 20));
+        let pos = arb_pos(tc, contig_len, 1);
+        return Read { tid, pos, cigar: vec![(seq_len, op)], unmapped: false, seq_len };
     }
 
     // Matches at both ends, indels and skips between them, clips outside.
@@ -259,6 +273,24 @@ fn seqair_query(bam_path: &Path, tid_name: &str, start: u32, end: u32) -> Vec<us
     ids
 }
 
+/// The same query through `query_raw`, its records read into one reused
+/// `RawBamRecord`, in file order.
+fn seqair_raw_query(bam_path: &Path, tid_name: &str, start: u32, end: u32) -> Vec<usize> {
+    let mut reader = IndexedBamReader::open(bam_path).expect("open");
+    let tid = reader.header().tid(tid_name).expect("contig");
+    let span = (Pos0::new(start).unwrap()..=Pos0::new(end).unwrap()).into();
+    let mut query = reader.query_raw(tid, span).expect("query");
+    let mut record = RawBamRecord::default();
+    let mut ids = Vec::new();
+    while query.read_record(&mut record).expect("read") {
+        let qname = std::str::from_utf8(record.qname()).expect("ASCII");
+        ids.push(qname.trim_start_matches('r').parse().expect("generated qnames are r<index>"));
+    }
+    assert!(!query.read_record(&mut record).expect("read past the end"), "a spent query is spent");
+    ids.sort_unstable();
+    ids
+}
+
 /// A query window as `(contig, start, end)`, both ends 0-based inclusive.
 ///
 /// Half the windows are anchored a base or two off a generated read's own
@@ -310,6 +342,8 @@ fn a_reversed_span_names_no_records(tc: TestCase) {
 }
 
 // r[verify bam.reader.overlap_filter]
+// r[verify bam.reader.query_raw]
+// r[verify bam.reader.query_raw.errors]
 // r[verify index_builder.bai_format]
 // r[verify index_builder.bai_all_refs]
 // r[verify index_builder.binning]
@@ -338,8 +372,10 @@ fn region_query_agrees_with_samtools_and_brute_force(tc: TestCase) {
     let region = format!("{contig}:{}-{}", start + 1, end + 1);
     let from_samtools = samtools_query(&bam_path, &region);
     let from_seqair = seqair_query(&bam_path, contig, start, end);
+    let from_raw = seqair_raw_query(&bam_path, contig, start, end);
 
     assert_eq!(from_seqair, expected, "seqair vs the generated reads, {region}");
+    assert_eq!(from_raw, expected, "query_raw vs the generated reads, {region}");
     assert_eq!(from_samtools, expected, "samtools vs the generated reads, {region}");
 
     tc.event_value("hits", expected.len() as f64);
