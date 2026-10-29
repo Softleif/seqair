@@ -35,7 +35,7 @@ use seqair::bam::owned_record::OwnedBamRecord;
 use seqair::bam::writer::BamWriterBuilder;
 use seqair_types::MappingQuality;
 use seqair_types::bam_flags::BamFlags;
-use seqair_types::{Base, BaseQuality};
+use seqair_types::{BaseQuality, IupacBase};
 
 /// Build a BAM with one record carrying the requested `AuxData`, return the path.
 fn write_bam_with_aux(dir: &std::path::Path, aux: AuxData) -> std::path::PathBuf {
@@ -48,7 +48,7 @@ fn write_bam_with_aux(dir: &std::path::Path, aux: AuxData) -> std::path::PathBuf
         .flags(BamFlags::empty())
         .mapq(MappingQuality::from_byte(60))
         .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])
-        .seq(vec![Base::A, Base::C, Base::G, Base::T])
+        .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T])
         .qual(vec![BaseQuality::from_byte(30); 4])
         .aux(aux)
         .build()

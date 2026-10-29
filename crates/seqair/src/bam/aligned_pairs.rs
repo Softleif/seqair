@@ -170,7 +170,7 @@ const _: () = assert!(
 
 // ── MatchPosition ──────────────────────────────────────────────────────────
 
-// r[impl cigar.aligned_pairs.matches_only.types]
+// r[impl cigar.aligned_pairs.matches_only.types+1]
 /// A position from a `Match` event, stripped of the enum and indel variants.
 ///
 /// Returned by [`AlignedPairs::matches_only`] when the caller only wants
@@ -342,7 +342,7 @@ impl<'a> AlignedPairs<'a> {
     /// different length than `seq`.
     pub fn with_read<'read>(
         self,
-        seq: &'read [seqair_types::Base],
+        seq: &'read [seqair_types::IupacBase],
         qual: Option<&'read [BaseQuality]>,
     ) -> Result<super::aligned_pairs_view::AlignedPairsWithRead<'a, 'read>, AlignedPairsError> {
         // Compute the remaining query-consuming CIGAR length and compare to
@@ -1698,7 +1698,7 @@ mod tests {
         use super::super::super::owned_record::OwnedBamRecord;
         use super::super::super::record_store::RecordStore;
         use super::*;
-        use seqair_types::{BamFlags, Base, BaseQuality};
+        use seqair_types::{BamFlags, BaseQuality, IupacBase};
 
         /// Build a record via [`OwnedBamRecord`], serialize to BAM bytes, push
         /// into a fresh [`RecordStore`] via `push_raw`.
@@ -1707,7 +1707,7 @@ mod tests {
                 OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(pos).unwrap()), b"r".to_vec())
                     .flags(BamFlags::empty())
                     .cigar(cigar.to_vec())
-                    .seq(vec![Base::A; seq_len])
+                    .seq(vec![IupacBase::A; seq_len])
                     .qual(vec![BaseQuality::from_byte(30); seq_len])
                     .build()
                     .unwrap();
@@ -1741,7 +1741,7 @@ mod tests {
                 OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(200).unwrap()), b"r".to_vec())
                     .flags(BamFlags::empty())
                     .cigar(cigar.clone())
-                    .seq(vec![Base::A; 7])
+                    .seq(vec![IupacBase::A; 7])
                     .qual(vec![BaseQuality::from_byte(30); 7])
                     .build()
                     .unwrap();
@@ -1770,7 +1770,7 @@ mod tests {
                     b"r".to_vec(),
                 )
                 .cigar(cigar.clone())
-                .seq(vec![Base::C; 6])
+                .seq(vec![IupacBase::C; 6])
                 .qual(qual.clone())
                 .build()
                 .unwrap();

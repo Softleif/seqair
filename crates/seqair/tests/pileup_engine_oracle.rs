@@ -17,9 +17,9 @@
 
 mod helpers;
 use hegel::prelude::*;
-use helpers::{iupac, tid};
+use helpers::tid;
 use seqair::bam::{
-    MateFields, Pos0, RecordStore,
+    MateFields, OwnedBamRecord, Pos0, RecordStore,
     cigar::{
         CigarMapping, CigarOp, CigarOpType, CigarPosInfo, calc_matches_indels, compute_end_pos,
     },
@@ -27,10 +27,9 @@ use seqair::bam::{
     record_store::PileupInput,
 };
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, BaseQuality, Offset};
+use seqair_types::{BamFlags, Base, BaseQuality, IupacBase, Offset};
 use std::num::NonZeroU32;
 
-const BASES: [Base; 4] = [Base::A, Base::C, Base::G, Base::T];
 const OPS: [CigarOpType; 9] = [
     CigarOpType::Match,
     CigarOpType::Insertion,
@@ -50,7 +49,7 @@ struct Read {
     unmapped: bool,
     reverse: bool,
     mapq: u8,
-    seq: Vec<Base>,
+    seq: Vec<IupacBase>,
     qual: Vec<u8>,
 }
 
@@ -70,7 +69,9 @@ fn arb_read(tc: &TestCase) -> Read {
     let (seq, qual) = if seq_star {
         (Vec::new(), Vec::new())
     } else {
-        let seq = (0..qlen).map(|_| tc.draw_silent(gs::sampled_from(&BASES))).collect();
+        // Every code: the engine reads `IupacBase::to_base` of each.
+        let seq =
+            (0..qlen).map(|_| tc.draw_silent(gs::sampled_from(&IupacBase::ALL[..]))).collect();
         let qual = (0..qlen).map(|_| tc.draw_silent(gs::integers::<u8>().max_value(60))).collect();
         (seq, qual)
     };
@@ -93,6 +94,8 @@ struct Case {
     overhang: u32,
     max_depth: Option<u32>,
     region: (u32, u32),
+    /// Load through `push_raw` (BAM bytes) rather than `push_fields`.
+    via_raw: bool,
 }
 
 #[hegel::composite]
@@ -113,7 +116,8 @@ fn arb_case(tc: &TestCase) -> Case {
     let max_depth = tc.draw_silent(gs::sampled_from(&[None, None, Some(1u32), Some(3)]));
     let start = tc.draw_silent(gs::integers::<u32>().max_value(40));
     let last = tc.draw_silent(gs::integers::<u32>().min_value(start).max_value(140));
-    Case { reads, pair_starts, overhang, max_depth, region: (start, last) }
+    let via_raw = tc.draw_silent(gs::booleans());
+    Case { reads, pair_starts, overhang, max_depth, region: (start, last), via_raw }
 }
 
 fn build_store(case: &Case) -> PileupInput<()> {
@@ -141,24 +145,42 @@ fn build_store(case: &Case) -> PileupInput<()> {
             }
             None => (format!("r{i}"), None, None),
         };
-        store
-            .push_fields(
-                p,
-                end_pos,
-                BamFlags::from(flags),
-                MappingQuality::from_byte(r.mapq),
-                matching,
-                indels,
-                name.as_bytes(),
-                &r.ops,
-                &iupac(&r.seq),
-                &r.qual,
-                &[],
-                Some(tid(0)),
-                MateFields { tid: next_ref_id, pos: next_pos, template_len: None },
-                &mut (),
-            )
-            .unwrap();
+        let mate_fields = MateFields { tid: next_ref_id, pos: next_pos, template_len: None };
+        let idx = if case.via_raw {
+            let rec = OwnedBamRecord::builder(Some(tid(0)), Some(p), name.into_bytes())
+                .flags(BamFlags::from(flags))
+                .mapq(MappingQuality::from_byte(r.mapq))
+                .mate_fields(mate_fields)
+                .cigar(r.ops.clone())
+                .seq(r.seq.clone())
+                .qual(r.qual.iter().map(|&q| BaseQuality::from_byte(q)).collect())
+                .build()
+                .unwrap();
+            let mut bytes = Vec::new();
+            rec.to_bam_bytes(&mut bytes).unwrap();
+            store.push_raw(&bytes, helpers::header(), &mut ()).unwrap()
+        } else {
+            store
+                .push_fields(
+                    p,
+                    end_pos,
+                    BamFlags::from(flags),
+                    MappingQuality::from_byte(r.mapq),
+                    matching,
+                    indels,
+                    name.as_bytes(),
+                    &r.ops,
+                    &r.seq,
+                    &r.qual,
+                    &[],
+                    Some(tid(0)),
+                    mate_fields,
+                    &mut (),
+                )
+                .unwrap()
+        };
+        let idx = idx.expect("no filter");
+        assert_eq!(store.record(idx).unwrap().seq(), r.seq, "the store keeps every code");
     }
     store.prepare_for_pileup().input
 }
@@ -208,9 +230,9 @@ fn run_engine(case: &Case) -> Vec<(u32, Vec<Entry>)> {
     out
 }
 
-fn base_qual(seq: &[Base], qual: &[BaseQuality], qpos: u32) -> (Base, BaseQuality) {
+fn base_qual(seq: &[IupacBase], qual: &[BaseQuality], qpos: u32) -> (Base, BaseQuality) {
     match (seq.get(qpos as usize), qual.get(qpos as usize)) {
-        (Some(&b), Some(&q)) => (b, q),
+        (Some(&b), Some(&q)) => (b.to_base(), q),
         _ => (Base::Unknown, BaseQuality::UNAVAILABLE),
     }
 }
@@ -297,6 +319,8 @@ fn run_oracle(case: &Case) -> Vec<(u32, Vec<Entry>)> {
 }
 
 // r[verify pileup.column_contents]
+// r[verify pileup.base_from_iupac]
+// r[verify record_store.seq_lossless]
 // r[verify pileup.column_record_order]
 // r[verify pileup.mate_link_cache]
 // r[verify pileup.soft_clip_overhang.emit]
@@ -304,8 +328,9 @@ fn run_oracle(case: &Case) -> Vec<(u32, Vec<Entry>)> {
 // r[verify pileup_indel.insertion_len]
 /// Every column the engine yields is the column a stateless per-position
 /// lookup builds, for arbitrary CIGARs (zero-length ops, padding, `D I`,
-/// `N I`, hard and soft clips), `SEQ=*`, unmapped reads, linked mates,
-/// soft-clip overhang, and depth caps.
+/// `N I`, hard and soft clips), `SEQ=*`, every IUPAC code, unmapped reads,
+/// linked mates, soft-clip overhang, and depth caps, loaded through
+/// `push_raw` or `push_fields`.
 #[hegel::test]
 fn engine_matches_stateless_oracle(tc: TestCase) {
     let case = tc.draw(arb_case().print_as_debug());

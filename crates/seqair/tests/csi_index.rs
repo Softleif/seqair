@@ -23,7 +23,7 @@ use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
 use seqair_types::MappingQuality;
-use seqair_types::{Base, BaseQuality};
+use seqair_types::{BaseQuality, IupacBase};
 use std::path::Path;
 use std::process::Command;
 
@@ -43,13 +43,13 @@ fn tid(n: u32) -> Tid {
     n.resolve_tid(&make_header()).expect("test tid in range")
 }
 
-fn cyclic_seq(n: usize) -> Vec<Base> {
+fn cyclic_seq(n: usize) -> Vec<IupacBase> {
     (0..n)
         .map(|i| match i % 4 {
-            0 => Base::A,
-            1 => Base::C,
-            2 => Base::G,
-            _ => Base::T,
+            0 => IupacBase::A,
+            1 => IupacBase::C,
+            2 => IupacBase::G,
+            _ => IupacBase::T,
         })
         .collect()
 }

@@ -19,7 +19,7 @@ mod pinned;
 use hegel::prelude::*;
 use helpers::ri;
 use seqair::bam::Pos0;
-use seqair_types::Base;
+use seqair_types::IupacBase;
 
 // We can't directly call the private parse functions, but we can test the
 // public API with generated inputs. For CIGAR, we generate valid CIGAR strings,
@@ -108,15 +108,15 @@ fn cigar_end_pos_invariants(tc: TestCase) {
     assert!(rec.seq_len > 0, "seq_len must be positive");
 }
 
-// r[verify sam.record.seq_decode]
+// r[verify sam.record.seq_decode+1]
+// r[verify record_store.seq_lossless]
 //
-// Extends coverage beyond ACGT to include all IUPAC ambiguity codes and N,
-// verifying that the BAM spec mapping (M/R/W/S/Y/K/V/H/D/B/N → Unknown) is
-// correctly applied end-to-end through the SAM→BAM encoding pipeline.
+// Every IUPAC letter in either case, `=`, RNA's U, the colour-space digits
+// and bytes that are no code reach the store as htslib's `seq_nt16_table`
+// reads them, end-to-end through `fetch_into`.
 #[hegel::test(test_cases = crate::pinned::cases(200))]
-fn seq_decode_maps_iupac_to_unknown(tc: TestCase) {
-    // ACGT, the two-fold and three-fold IUPAC ambiguity codes, N, and RNA's U.
-    const IUPAC: &[u8] = b"ACGTMRWSYKVHDBNU";
+fn seq_decode_keeps_every_iupac_code(tc: TestCase) {
+    const IUPAC: &[u8] = b"ACGTMRWSYKVHDBNUacgtmrwsykvhdbnu=0123.XEJ";
     let bases = tc.draw(gs::vecs(gs::sampled_from(IUPAC)).min_size(1).max_size(199));
     let seq_str: String = bases.iter().map(|&b| b as char).collect();
     let qual_str: String = bases.iter().map(|_| 'I').collect();
@@ -144,14 +144,14 @@ fn seq_decode_maps_iupac_to_unknown(tc: TestCase) {
     let seq = store.record(ri(0)).unwrap().seq();
     assert_eq!(seq.len(), bases.len());
     for (i, (&input_byte, &actual)) in bases.iter().zip(seq.iter()).enumerate() {
-        let expected_base = match input_byte {
-            b'A' => Base::A,
-            b'C' => Base::C,
-            b'G' => Base::G,
-            b'T' | b'U' => Base::T,
-            // All IUPAC ambiguity codes and N must decode to Unknown.
-            _ => Base::Unknown,
+        // htslib's `seq_nt16_str`, read back the way `seq_nt16_table` fills it.
+        let upper = match input_byte.to_ascii_uppercase() {
+            b'U' => b'T',
+            digit @ b'0'..=b'3' => b"ACGT"[usize::from(digit - b'0')],
+            other => other,
         };
+        let code = b"=ACMGRSVTWYHKDBN".iter().position(|&c| c == upper).unwrap_or(15);
+        let expected_base = IupacBase::from_code(u8::try_from(code).unwrap()).unwrap();
         assert_eq!(
             actual, expected_base,
             "pos {}: input '{}' expected {:?}",

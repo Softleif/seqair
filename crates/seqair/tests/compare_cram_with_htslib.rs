@@ -421,17 +421,11 @@ fn cram_sequences_match_htslib() {
             let cram_bases: Vec<u8> =
                 (0..store.record(ri(u32::try_from(i).unwrap())).unwrap().seq_len as usize)
                     .map(|pos| {
-                        let base = store
+                        store
                             .record(ri(u32::try_from(i).unwrap()))
                             .unwrap()
-                            .base_at(QPos::new(u32::try_from(pos).unwrap()));
-                        match base {
-                            seqair_types::Base::A => b'A',
-                            seqair_types::Base::C => b'C',
-                            seqair_types::Base::G => b'G',
-                            seqair_types::Base::T => b'T',
-                            seqair_types::Base::Unknown => b'N',
-                        }
+                            .base_at(QPos::new(u32::try_from(pos).unwrap()))
+                            .to_ascii()
                     })
                     .collect();
 

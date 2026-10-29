@@ -149,16 +149,13 @@ impl IupacBase {
         }
     }
 
+    // r[impl pileup.base_from_iupac]
     /// A/C/G/T as [`Base`]; every other code (ambiguity codes, `=`) is
-    /// [`Base::Unknown`].
+    /// [`Base::Unknown`]. A table load rather than a `match`: the pileup
+    /// converts every column entry's base with it, and the base is data.
+    #[inline]
     pub fn to_base(self) -> Base {
-        match self {
-            Self::A => Base::A,
-            Self::C => Base::C,
-            Self::G => Base::G,
-            Self::T => Base::T,
-            _ => Base::Unknown,
-        }
+        BASE_OF_CODE.get(usize::from(self.code())).copied().unwrap_or(Base::Unknown)
     }
 
     // r[impl types.iupac_base.slices]
@@ -223,6 +220,16 @@ impl IupacBase {
         unsafe { std::slice::from_raw_parts_mut(bases.as_mut_ptr().cast::<u8>(), bases.len()) }
     }
 }
+
+/// [`IupacBase::to_base`] of each code, indexed by code.
+const BASE_OF_CODE: [Base; 16] = {
+    let mut table = [Base::Unknown; 16];
+    table[IupacBase::A as usize] = Base::A;
+    table[IupacBase::C as usize] = Base::C;
+    table[IupacBase::G as usize] = Base::G;
+    table[IupacBase::T as usize] = Base::T;
+    table
+};
 
 // r[impl io.simd_portable]
 fn from_ascii_at(level: Level, bytes: &[u8], out: &mut Vec<IupacBase>) {
@@ -705,6 +712,17 @@ mod tests {
             let (x, y) = (IupacBase::from_ascii(x), IupacBase::from_ascii(y));
             assert_eq!(x.complement(), y);
             assert_eq!(y.complement(), x);
+        }
+    }
+
+    // r[verify types.iupac_base.base_conversions]
+    // r[verify pileup.base_from_iupac]
+    #[test]
+    fn to_base_is_the_literal_table_for_every_code() {
+        let expected = *b"NACNGNNNTNNNNNNN";
+        for (code, letter) in (0u8..16).zip(expected) {
+            let base = IupacBase::from_code(code).expect("a 4-bit code");
+            assert_eq!(base.to_base() as u8, letter, "code {code}");
         }
     }
 

@@ -9,7 +9,7 @@
 //! Two adapters layer on top:
 //!
 //! - [`AlignedPairs::with_read`] — attaches the read's `seq` and `qual` slabs.
-//!   `Match` yields gain `query: Base` and `qual: BaseQuality`. `Insertion` and
+//!   `Match` yields gain `query: IupacBase` (the stored code) and `qual: BaseQuality`. `Insertion` and
 //!   `SoftClip` yields gain pre-sliced `query` / `qual` slices (the bases and
 //!   quals of just that op's run — no off-by-one risk for callers).
 //! - [`AlignedPairsWithRead::with_reference`] — further attaches a [`RefSeq`].
@@ -39,12 +39,12 @@
 //!
 //! ```ignore
 //! use seqair::bam::{AlignedPairWithRef, MatchKind};
-//! use seqair_types::Base;
+//! use seqair_types::{Base, IupacBase};
 //!
 //! for ev in slim.aligned_pairs_with_read(&store)?.with_reference(&ref_seq) {
 //!     if let AlignedPairWithRef::Match {
 //!         rpos,
-//!         query: Base::T,
+//!         query: IupacBase::T,
 //!         ref_base: Some(Base::C),
 //!         qual,
 //!         ..
@@ -60,7 +60,7 @@
 
 use super::aligned_pairs::{AlignedPair, AlignedPairs, MatchKind};
 use super::pileup::RefSeq;
-use seqair_types::{Base, BaseQuality, Pos0, QPos};
+use seqair_types::{Base, BaseQuality, IupacBase, Pos0, QPos};
 
 // ── MatchedBase / MatchedRef value types ───────────────────────────────────
 
@@ -69,7 +69,7 @@ use seqair_types::{Base, BaseQuality, Pos0, QPos};
 ///
 /// Returned by [`AlignedPairsWithRead::matches_only`]. Like [`MatchPosition`]
 /// but enriched with the read's contribution at this position. No lifetime —
-/// `Base` and `BaseQuality` are `Copy`, so the iterator can hand back owned
+/// `IupacBase` and `BaseQuality` are `Copy`, so the iterator can hand back owned
 /// values without borrowing the seq/qual slabs.
 ///
 /// [`MatchPosition`]: super::aligned_pairs::MatchPosition
@@ -78,7 +78,7 @@ pub struct MatchedBase {
     pub qpos: QPos,
     pub rpos: Pos0,
     pub kind: MatchKind,
-    pub query: Base,
+    pub query: IupacBase,
     pub qual: BaseQuality,
 }
 
@@ -95,14 +95,14 @@ pub struct MatchedRef {
     pub qpos: QPos,
     pub rpos: Pos0,
     pub kind: MatchKind,
-    pub query: Base,
+    pub query: IupacBase,
     pub qual: BaseQuality,
     pub ref_base: Option<Base>,
 }
 
 // ── AlignedPairWithRead ────────────────────────────────────────────────────
 
-// r[impl cigar.aligned_pairs.with_read.types]
+// r[impl cigar.aligned_pairs.with_read.types+1]
 /// One event from [`AlignedPairsWithRead`] — an [`AlignedPair`] enriched with
 /// the read's bases and qualities at the event's range.
 ///
@@ -120,9 +120,9 @@ pub enum AlignedPairWithRead<'read> {
         qpos: QPos,
         rpos: Pos0,
         kind: MatchKind,
-        /// The read base at `qpos`. Always in bounds — `with_read`
+        /// The read base at `qpos`, as stored. Always in bounds — `with_read`
         /// constructor enforces seq/CIGAR length consistency.
-        query: Base,
+        query: IupacBase,
         /// Phred quality at `qpos`. [`BaseQuality::UNAVAILABLE`] if `with_read`
         /// was given `qual = None`.
         qual: BaseQuality,
@@ -132,14 +132,18 @@ pub enum AlignedPairWithRead<'read> {
     /// `first_inserted`. See
     /// [`AlignedPair::Insertion`] for why the
     /// field is not called `qpos`.
-    Insertion { first_inserted: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
+    Insertion {
+        first_inserted: QPos,
+        query: &'read [IupacBase],
+        qual: Option<&'read [BaseQuality]>,
+    },
     /// D — deletion from the reference. No read data.
     Deletion { rpos: Pos0, del_len: u32 },
     /// N — reference skip (e.g. intron). No read data.
     RefSkip { rpos: Pos0, skip_len: u32 },
     /// S — soft clip. `query` is the clipped run and `qual` its Phred scores
     /// (`None` if the record has no qualities).
-    SoftClip { qpos: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
+    SoftClip { qpos: QPos, query: &'read [IupacBase], qual: Option<&'read [BaseQuality]> },
     /// P — padding. No read data.
     Padding { len: u32 },
     /// Reserved op code (9..=15). No read data.
@@ -162,14 +166,14 @@ pub enum AlignedPairWithRead<'read> {
 #[derive(Debug, Clone)]
 pub struct AlignedPairsWithRead<'cigar, 'read> {
     inner: AlignedPairs<'cigar>,
-    seq: &'read [Base],
+    seq: &'read [IupacBase],
     qual: Option<&'read [BaseQuality]>,
 }
 
 impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
     pub(super) fn new(
         inner: AlignedPairs<'cigar>,
-        seq: &'read [Base],
+        seq: &'read [IupacBase],
         qual: Option<&'read [BaseQuality]>,
     ) -> Self {
         Self { inner, seq, qual }
@@ -216,7 +220,7 @@ impl<'cigar, 'read> AlignedPairsWithRead<'cigar, 'read> {
                     qpos,
                     rpos,
                     kind,
-                    query: self.seq.get(q).copied().unwrap_or(Base::Unknown),
+                    query: self.seq.get(q).copied().unwrap_or(IupacBase::N),
                     qual: self
                         .qual
                         .and_then(|qs| qs.get(q))
@@ -296,7 +300,7 @@ pub enum AlignedPairWithRef<'read, 'ref_seq> {
         qpos: QPos,
         rpos: Pos0,
         kind: MatchKind,
-        query: Base,
+        query: IupacBase,
         qual: BaseQuality,
         /// Reference base at `rpos`. `None` if `rpos` is outside the loaded
         /// `RefSeq` window. Inside the window, an `N` in the FASTA shows up
@@ -307,7 +311,11 @@ pub enum AlignedPairWithRef<'read, 'ref_seq> {
     /// if the record has no qualities), starting at `first_inserted`. See
     /// [`AlignedPair::Insertion`] for why the
     /// field is not called `qpos`.
-    Insertion { first_inserted: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
+    Insertion {
+        first_inserted: QPos,
+        query: &'read [IupacBase],
+        qual: Option<&'read [BaseQuality]>,
+    },
     /// D — deleted reference bases. `ref_bases` is `None` if any position in
     /// the deletion span falls outside the loaded `RefSeq` window.
     Deletion { rpos: Pos0, del_len: u32, ref_bases: Option<&'ref_seq [Base]> },
@@ -315,7 +323,7 @@ pub enum AlignedPairWithRef<'read, 'ref_seq> {
     RefSkip { rpos: Pos0, skip_len: u32 },
     /// S — soft clip (read-only; reference doesn't participate). `qual` is
     /// `None` if the record has no qualities.
-    SoftClip { qpos: QPos, query: &'read [Base], qual: Option<&'read [BaseQuality]> },
+    SoftClip { qpos: QPos, query: &'read [IupacBase], qual: Option<&'read [BaseQuality]> },
     /// P — padding.
     Padding { len: u32 },
     /// Reserved op code.
@@ -496,7 +504,7 @@ mod tests {
     fn make_store(
         pos: Pos0,
         cigar: Vec<CigarOp>,
-        seq: Vec<Base>,
+        seq: Vec<IupacBase>,
         qual: Vec<BaseQuality>,
     ) -> RecordStore<()> {
         let owned = OwnedBamRecord::builder(Some(tid(0)), Some(pos), b"r".to_vec())
@@ -519,7 +527,7 @@ mod tests {
     #[test]
     fn with_read_yields_query_base_and_qual_for_match() {
         let cigar = vec![op(CigarOpType::Match, 3)];
-        let seq = vec![Base::A, Base::C, Base::G];
+        let seq = vec![IupacBase::A, IupacBase::C, IupacBase::G];
         let qual = vec![
             BaseQuality::from_byte(30),
             BaseQuality::from_byte(31),
@@ -536,7 +544,7 @@ mod tests {
                 qpos: QPos::new(0),
                 rpos: p0(100),
                 kind: MatchKind::Match,
-                query: Base::A,
+                query: IupacBase::A,
                 qual: BaseQuality::from_byte(30),
             }
         );
@@ -546,7 +554,7 @@ mod tests {
                 qpos: QPos::new(2),
                 rpos: p0(102),
                 kind: MatchKind::Match,
-                query: Base::G,
+                query: IupacBase::G,
                 qual: BaseQuality::from_byte(32),
             }
         );
@@ -561,7 +569,15 @@ mod tests {
             op(CigarOpType::Insertion, 3),
             op(CigarOpType::Match, 2),
         ];
-        let seq = vec![Base::A, Base::C, Base::T, Base::G, Base::T, Base::A, Base::A];
+        let seq = vec![
+            IupacBase::A,
+            IupacBase::C,
+            IupacBase::T,
+            IupacBase::G,
+            IupacBase::T,
+            IupacBase::A,
+            IupacBase::A,
+        ];
         let qual: Vec<_> = (0..7).map(|i| BaseQuality::from_byte(20 + i)).collect();
         let store = make_store(p0(50), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -573,7 +589,7 @@ mod tests {
             AlignedPairWithRead::Insertion { first_inserted, query, qual } => {
                 let qual = qual.unwrap();
                 assert_eq!(first_inserted, QPos::new(2));
-                assert_eq!(query, &[Base::T, Base::G, Base::T]);
+                assert_eq!(query, &[IupacBase::T, IupacBase::G, IupacBase::T]);
                 assert_eq!(qual.len(), 3);
                 assert_eq!(qual[0].as_byte(), 22);
                 assert_eq!(qual[2].as_byte(), 24);
@@ -587,7 +603,7 @@ mod tests {
     fn with_read_slices_soft_clip_bases() {
         // 2S + 3M, seq = [N,N, A,C,G]
         let cigar = vec![op(CigarOpType::SoftClip, 2), op(CigarOpType::Match, 3)];
-        let seq = vec![Base::Unknown, Base::Unknown, Base::A, Base::C, Base::G];
+        let seq = vec![IupacBase::N, IupacBase::N, IupacBase::A, IupacBase::C, IupacBase::G];
         let qual: Vec<_> = (0..5).map(|_| BaseQuality::from_byte(20)).collect();
         let store = make_store(p0(0), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -598,7 +614,7 @@ mod tests {
             AlignedPairWithRead::SoftClip { qpos, query, qual } => {
                 let qual = qual.unwrap();
                 assert_eq!(qpos, QPos::new(0));
-                assert_eq!(query, &[Base::Unknown, Base::Unknown]);
+                assert_eq!(query, &[IupacBase::N, IupacBase::N]);
                 assert_eq!(qual.len(), 2);
             }
             other => panic!("expected SoftClip, got {other:?}"),
@@ -613,7 +629,7 @@ mod tests {
             op(CigarOpType::Deletion, 3),
             op(CigarOpType::Match, 2),
         ];
-        let seq = vec![Base::A; 4];
+        let seq = vec![IupacBase::A; 4];
         let qual = vec![BaseQuality::from_byte(30); 4];
         let store = make_store(p0(100), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -636,7 +652,7 @@ mod tests {
         // Read 3M at ref pos 100, seq = [A,T,G]
         // Reference window starts at 100, contains [A,C,G,T]
         let cigar = vec![op(CigarOpType::Match, 3)];
-        let seq = vec![Base::A, Base::T, Base::G];
+        let seq = vec![IupacBase::A, IupacBase::T, IupacBase::G];
         let qual = vec![BaseQuality::from_byte(30); 3];
         let store = make_store(p0(100), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -649,15 +665,15 @@ mod tests {
         // qpos 2 / rpos 102: query=G, ref=G (match)
         assert!(matches!(
             events[0],
-            AlignedPairWithRef::Match { ref_base: Some(Base::A), query: Base::A, .. }
+            AlignedPairWithRef::Match { ref_base: Some(Base::A), query: IupacBase::A, .. }
         ));
         assert!(matches!(
             events[1],
-            AlignedPairWithRef::Match { ref_base: Some(Base::C), query: Base::T, .. }
+            AlignedPairWithRef::Match { ref_base: Some(Base::C), query: IupacBase::T, .. }
         ));
         assert!(matches!(
             events[2],
-            AlignedPairWithRef::Match { ref_base: Some(Base::G), query: Base::G, .. }
+            AlignedPairWithRef::Match { ref_base: Some(Base::G), query: IupacBase::G, .. }
         ));
     }
 
@@ -666,7 +682,7 @@ mod tests {
     fn with_reference_returns_none_outside_loaded_window() {
         // Reference window starts at 200 — read at 100 is fully outside.
         let cigar = vec![op(CigarOpType::Match, 2)];
-        let seq = vec![Base::A; 2];
+        let seq = vec![IupacBase::A; 2];
         let qual = vec![BaseQuality::from_byte(30); 2];
         let store = make_store(p0(100), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -691,7 +707,7 @@ mod tests {
             op(CigarOpType::Deletion, 3),
             op(CigarOpType::Match, 1),
         ];
-        let seq = vec![Base::A; 3];
+        let seq = vec![IupacBase::A; 3];
         let qual = vec![BaseQuality::from_byte(30); 3];
         let store = make_store(p0(100), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -724,7 +740,7 @@ mod tests {
             op(CigarOpType::Deletion, 3),
             op(CigarOpType::Match, 1),
         ];
-        let seq = vec![Base::A; 3];
+        let seq = vec![IupacBase::A; 3];
         let qual = vec![BaseQuality::from_byte(30); 3];
         let store = make_store(p0(100), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -745,7 +761,7 @@ mod tests {
         // is skipped; with it, we get 1 SoftClip + 3 Match. Verifies the
         // forwarder on AlignedPairsWithRef (not just AlignedPairsWithRead).
         let cigar = vec![op(CigarOpType::SoftClip, 2), op(CigarOpType::Match, 3)];
-        let seq = vec![Base::Unknown, Base::Unknown, Base::A, Base::C, Base::G];
+        let seq = vec![IupacBase::N, IupacBase::N, IupacBase::A, IupacBase::C, IupacBase::G];
         let qual = vec![BaseQuality::from_byte(20); 5];
         let store = make_store(p0(100), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -781,7 +797,7 @@ mod tests {
             op(CigarOpType::Unknown(9), 3),
             op(CigarOpType::Match, 1),
         ];
-        let seq = vec![Base::A, Base::C];
+        let seq = vec![IupacBase::A, IupacBase::C];
         let qual = vec![BaseQuality::from_byte(30); 2];
         let store = make_store(p0(50), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -804,7 +820,7 @@ mod tests {
         // earlier silent Base::Unknown substitution would mask this; the
         // validation now surfaces a typed error instead.
         let cigar = [op(CigarOpType::Match, 3)];
-        let seq = vec![Base::A, Base::C];
+        let seq = vec![IupacBase::A, IupacBase::C];
         let qual = [BaseQuality::from_byte(30); 2];
         let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, Some(&qual[..]));
         match result {
@@ -820,7 +836,7 @@ mod tests {
     #[test]
     fn with_read_accepts_any_seq_without_cigar() {
         // CIGAR `*` with SEQ present: valid SAM for unmapped reads.
-        let seq = vec![Base::A, Base::C];
+        let seq = vec![IupacBase::A, IupacBase::C];
         let qual = [BaseQuality::from_byte(30); 2];
         let events: Vec<_> =
             AlignedPairs::new(p0(0), &[]).with_read(&seq, Some(&qual[..])).unwrap().collect();
@@ -831,7 +847,7 @@ mod tests {
     fn with_read_rejects_seq_longer_than_cigar_query_len() {
         // Inverse mismatch: CIGAR 2M but seq 3 bases.
         let cigar = [op(CigarOpType::Match, 2)];
-        let seq = vec![Base::A, Base::C, Base::G];
+        let seq = vec![IupacBase::A, IupacBase::C, IupacBase::G];
         let qual = [BaseQuality::from_byte(30); 3];
         let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, Some(&qual[..]));
         assert!(matches!(
@@ -846,7 +862,7 @@ mod tests {
     #[test]
     fn with_read_none_qual_yields_none_on_insertion() {
         let cigar = [op(CigarOpType::Match, 1), op(CigarOpType::Insertion, 2)];
-        let seq = vec![Base::A; 3];
+        let seq = vec![IupacBase::A; 3];
         let events: Vec<_> =
             AlignedPairs::new(p0(0), &cigar).with_read(&seq, None).unwrap().collect();
         assert!(matches!(
@@ -862,7 +878,7 @@ mod tests {
     fn with_read_rejects_qual_length_mismatch() {
         // qual.len() must equal seq.len() when given.
         let cigar = [op(CigarOpType::Match, 3)];
-        let seq = vec![Base::A; 3];
+        let seq = vec![IupacBase::A; 3];
         let qual = [BaseQuality::from_byte(30); 2]; // length 2 ≠ 3
         let result = AlignedPairs::new(p0(0), &cigar).with_read(&seq, Some(&qual[..]));
         assert!(matches!(
@@ -878,7 +894,7 @@ mod tests {
     fn with_read_accepts_no_qual() {
         // None yields BaseQuality::UNAVAILABLE on Match and None on runs.
         let cigar = [op(CigarOpType::Match, 3)];
-        let seq = vec![Base::A; 3];
+        let seq = vec![IupacBase::A; 3];
         let it = AlignedPairs::new(p0(0), &cigar).with_read(&seq, None).unwrap();
         let events: Vec<_> = it.collect();
         for ev in events {
@@ -898,7 +914,7 @@ mod tests {
     fn methylation_pattern_finds_c_to_t_conversion() {
         // Simulated TAPS scenario: ref has C at pos 100, read shows T → methylation.
         let cigar = vec![op(CigarOpType::Match, 3)];
-        let seq = vec![Base::T, Base::A, Base::G];
+        let seq = vec![IupacBase::T, IupacBase::A, IupacBase::G];
         let qual = vec![BaseQuality::from_byte(35); 3];
         let store = make_store(p0(100), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -907,7 +923,10 @@ mod tests {
         let mut conversions = 0;
         for ev in rec.aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq) {
             if let AlignedPairWithRef::Match {
-                ref_base: Some(Base::C), query: Base::T, qual, ..
+                ref_base: Some(Base::C),
+                query: IupacBase::T,
+                qual,
+                ..
             } = ev
                 && qual.get().unwrap_or(0) >= 20
             {
@@ -928,7 +947,7 @@ mod tests {
             op(CigarOpType::Insertion, 1),
             op(CigarOpType::Match, 2),
         ];
-        let seq = vec![Base::A, Base::C, Base::T, Base::G, Base::Unknown];
+        let seq = vec![IupacBase::A, IupacBase::C, IupacBase::T, IupacBase::G, IupacBase::N];
         let qual = vec![BaseQuality::from_byte(30); 5];
         let store = make_store(p0(50), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -936,17 +955,17 @@ mod tests {
         let matches: Vec<_> = rec.aligned_pairs_with_read(&store).unwrap().matches_only().collect();
         assert_eq!(matches.len(), 4, "expected 2M + 2M = 4 match positions");
         assert_eq!(matches[0].qpos, QPos::new(0));
-        assert_eq!(matches[0].query, Base::A);
+        assert_eq!(matches[0].query, IupacBase::A);
         assert_eq!(matches[0].kind, MatchKind::Match);
         assert_eq!(matches[3].qpos, QPos::new(4));
-        assert_eq!(matches[3].query, Base::Unknown);
+        assert_eq!(matches[3].query, IupacBase::N);
     }
 
     // r[verify cigar.aligned_pairs.matches_only.with_reference]
     #[test]
     fn with_reference_matches_only_yields_matched_refs() {
         let cigar = vec![op(CigarOpType::Match, 3)];
-        let seq = vec![Base::A, Base::T, Base::G];
+        let seq = vec![IupacBase::A, IupacBase::T, IupacBase::G];
         let qual = vec![BaseQuality::from_byte(30); 3];
         let store = make_store(p0(100), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -960,11 +979,11 @@ mod tests {
             .collect();
         assert_eq!(matches.len(), 3);
         assert_eq!(matches[0].ref_base, Some(Base::A));
-        assert_eq!(matches[0].query, Base::A);
+        assert_eq!(matches[0].query, IupacBase::A);
         assert_eq!(matches[1].ref_base, Some(Base::C));
-        assert_eq!(matches[1].query, Base::T); // mismatch
+        assert_eq!(matches[1].query, IupacBase::T); // mismatch
         assert_eq!(matches[2].ref_base, Some(Base::G));
-        assert_eq!(matches[2].query, Base::G);
+        assert_eq!(matches[2].query, IupacBase::G);
     }
 
     // r[verify cigar.aligned_pairs.matches_only.with_reference]
@@ -978,7 +997,7 @@ mod tests {
             op(CigarOpType::Deletion, 1),
             op(CigarOpType::Match, 2),
         ];
-        let seq = vec![Base::A; 7];
+        let seq = vec![IupacBase::A; 7];
         let qual = vec![BaseQuality::from_byte(30); 7];
         let store = make_store(p0(100), cigar, seq, qual);
         let rec = store.record(ri(0)).unwrap();
@@ -1031,7 +1050,7 @@ mod tests {
         // Build a synthetic read: each qpos i has Base = rotation(i mod 4) so
         // we can verify slicing without wholesale fixture data.
         let kinds = [Base::A, Base::C, Base::G, Base::T];
-        let seq: Vec<Base> = (0..150).map(|i| kinds[i % 4]).collect();
+        let seq: Vec<IupacBase> = (0..150).map(|i| kinds[i % 4].into()).collect();
         let qual: Vec<BaseQuality> =
             (0..150_u8).map(|i| BaseQuality::from_byte(30u8.saturating_add(i % 10))).collect();
 
@@ -1082,8 +1101,8 @@ mod tests {
                 assert_eq!(query.len(), 5);
                 assert_eq!(qual.len(), 5);
                 // Spot-check: query[0] == seq[97] = kinds[97 % 4] = kinds[1] = C
-                assert_eq!(query[0], Base::C);
-                assert_eq!(query[4], kinds[(97 + 4) % 4]); // kinds[1] = C
+                assert_eq!(query[0], IupacBase::C);
+                assert_eq!(query[4], kinds[(97 + 4) % 4].into()); // kinds[1] = C
             }
             _ => unreachable!(),
         }
@@ -1094,7 +1113,9 @@ mod tests {
         let mut deletion_ref: Option<Vec<Base>> = None;
         for ev in rec.aligned_pairs_with_read(&store).unwrap().with_reference(&ref_seq) {
             match ev {
-                AlignedPairWithRef::Match { ref_base: Some(Base::C), query: Base::T, .. } => {
+                AlignedPairWithRef::Match {
+                    ref_base: Some(Base::C), query: IupacBase::T, ..
+                } => {
                     conversions += 1;
                 }
                 AlignedPairWithRef::Deletion { rpos, del_len, ref_bases: Some(bases) } => {
@@ -1165,7 +1186,7 @@ mod tests {
                 })
                 .map(|o| o.len())
                 .sum();
-            let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
+            let seq: Vec<IupacBase> = (0..qlen).map(|_| IupacBase::A).collect();
             let qual: Vec<BaseQuality> = (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
 
             let pos = Pos0::new(start).unwrap();
@@ -1252,7 +1273,7 @@ mod tests {
             // Position-encoding seq: byte at qpos i = bases[i % 5].
             // bases[5] = [A, C, G, T, Unknown].
             let bases = [Base::A, Base::C, Base::G, Base::T, Base::Unknown];
-            let seq: Vec<Base> = (0..qlen).map(|i| bases[(i % 5) as usize]).collect();
+            let seq: Vec<IupacBase> = (0..qlen).map(|i| bases[(i % 5) as usize].into()).collect();
             let qual: Vec<BaseQuality> = (0..qlen)
                 .map(|i| BaseQuality::from_byte(u8::try_from(i % 60).unwrap_or(0)))
                 .collect();
@@ -1272,7 +1293,8 @@ mod tests {
                     AlignedPairWithRead::Match { qpos, query, qual, .. } => {
                         let expected_base = bases[(qpos.get() % 5) as usize];
                         assert_eq!(
-                            query, expected_base,
+                            query,
+                            expected_base.into(),
                             "Match query at qpos={} != seq[qpos]",
                             qpos
                         );
@@ -1289,7 +1311,7 @@ mod tests {
                             let q = first_inserted.as_usize() + offset;
                             assert_eq!(
                                 b,
-                                bases[q % 5],
+                                bases[q % 5].into(),
                                 "Insertion query[{}] (abs qpos={}) mismatch",
                                 offset,
                                 q
@@ -1313,7 +1335,7 @@ mod tests {
                             let q = qpos.as_usize() + offset;
                             assert_eq!(
                                 b,
-                                bases[q % 5],
+                                bases[q % 5].into(),
                                 "SoftClip query[{}] (abs qpos={}) mismatch",
                                 offset,
                                 q
@@ -1373,7 +1395,7 @@ mod tests {
                 })
                 .map(|o| o.len())
                 .sum();
-            let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
+            let seq: Vec<IupacBase> = (0..qlen).map(|_| IupacBase::A).collect();
             let qual: Vec<BaseQuality> = (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
 
             // Build a RefSeq with arbitrary bases and start position. Use
@@ -1442,7 +1464,7 @@ mod tests {
                 })
                 .map(|o| o.len())
                 .sum();
-            let seq: Vec<Base> = (0..qlen).map(|_| Base::A).collect();
+            let seq: Vec<IupacBase> = (0..qlen).map(|_| IupacBase::A).collect();
             let qual: Vec<BaseQuality> = (0..qlen).map(|_| BaseQuality::from_byte(30)).collect();
 
             let pos = Pos0::new(start).unwrap();

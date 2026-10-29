@@ -7,7 +7,7 @@
 //! the store in the first place.
 
 use core::range::RangeInclusive;
-use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Offset, Pos0, QPos};
+use seqair_types::{BamFlags, Base, BaseQuality, IupacBase, MappingQuality, Offset, Pos0, QPos};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 use std::{num::NonZeroU32, ops::Range, rc::Rc};
 
@@ -602,8 +602,9 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
         self.record().aux()
     }
 
-    /// The read's full decoded sequence (all bases, not just the pileup position).
-    pub fn seq(&self) -> &'store [Base] {
+    /// The read's full sequence (all bases, not just the pileup position),
+    /// every code as stored.
+    pub fn seq(&self) -> &'store [IupacBase] {
         self.record().seq()
     }
 
@@ -617,7 +618,7 @@ impl<'a, 'store, U> AlignmentView<'a, 'store, U> {
     /// every other op (including `ComplexIndel`, whose inserted run has no
     /// anchor base in this column). Saves callers the manual `qpos + 1` slice
     /// arithmetic into [`seq`](Self::seq).
-    pub fn inserted_bases(&self) -> &'store [Base] {
+    pub fn inserted_bases(&self) -> &'store [IupacBase] {
         match self.aln.op {
             PileupOp::Insertion { qpos, insert_len, .. } => {
                 inserted_run(self.seq(), qpos.get(), insert_len)
@@ -2089,7 +2090,7 @@ mod tests {
                 if matches!(aln.op, PileupOp::Insertion { .. }) {
                     saw_insertion = true;
                     assert_eq!(col.pos(), Pos0::new(2).unwrap());
-                    assert_eq!(aln.inserted_bases(), &[Base::C, Base::G]);
+                    assert_eq!(aln.inserted_bases(), &[IupacBase::C, IupacBase::G]);
                     let q: Vec<u8> = aln.inserted_quals().iter().filter_map(|x| x.get()).collect();
                     assert_eq!(q, vec![20, 21]);
                 } else {

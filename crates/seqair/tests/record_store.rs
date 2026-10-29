@@ -16,9 +16,9 @@ use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
 use seqair_types::MappingQuality;
 use seqair_types::QPos;
-use seqair_types::{BamFlags, Base, BaseQuality, IupacBase};
+use seqair_types::{BamFlags, BaseQuality, IupacBase};
 
-// r[verify record_store.push_raw+2]
+// r[verify record_store.push_raw+3]
 // r[verify record_store.field_access]
 #[test]
 fn decode_record_into_slabs() {
@@ -37,15 +37,15 @@ fn decode_record_into_slabs() {
     assert_eq!(rec.seq_len, 4);
 
     assert_eq!(store.record(idx).unwrap().qname(), b"read1");
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), Base::A);
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), Base::C);
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(2)), Base::G);
-    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(3)), Base::T);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(0)), IupacBase::A);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(1)), IupacBase::C);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(2)), IupacBase::G);
+    assert_eq!(store.record(idx).unwrap().base_at(QPos::new(3)), IupacBase::T);
     assert_eq!(store.record(idx).unwrap().qual().len(), 4);
     assert!(store.record(idx).unwrap().qual().iter().all(|q| q.get() == Some(30)));
 }
 
-// r[verify record_store.push_raw+2]
+// r[verify record_store.push_raw+3]
 #[test]
 fn multiple_records_share_slabs() {
     let raw1 =
@@ -302,7 +302,7 @@ fn push_fields_with_real_bam_records() -> Result<(), Box<dyn std::error::Error>>
             rec.indel_bases,
             store.record(i).unwrap().qname(),
             store.record(i).unwrap().cigar(),
-            &helpers::iupac(store.record(i).unwrap().seq()),
+            store.record(i).unwrap().seq(),
             BaseQuality::slice_to_bytes(store.record(i).unwrap().qual()),
             store.record(i).unwrap().aux(),
             rec.tid,

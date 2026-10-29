@@ -333,24 +333,17 @@ fn cram_chr19_sequences_match_noodles() {
         for (i, noodles_rec) in noodles_chr19.iter().enumerate() {
             let idx = our_records[i];
             let our_bases = store.record(idx).unwrap().seq();
-            // Only compare positions where noodles emits a standard base (A/C/G/T).
-            // Noodles preserves IUPAC codes; seqair normalizes ambiguous bases to Unknown.
+            assert_eq!(our_bases.len(), noodles_rec.seq.len(), "{version} rec {i}: length");
+            // Both keep every IUPAC code; noodles copies a soft-masked
+            // reference's case, htslib (and seqair) read it as upper case.
             for (pos, (&our_base, &noodles_byte)) in
                 our_bases.iter().zip(noodles_rec.seq.iter()).enumerate()
             {
-                if matches!(noodles_byte, b'A' | b'C' | b'G' | b'T') {
-                    let our_byte = match our_base {
-                        seqair_types::Base::A => b'A',
-                        seqair_types::Base::C => b'C',
-                        seqair_types::Base::G => b'G',
-                        seqair_types::Base::T => b'T',
-                        seqair_types::Base::Unknown => b'N',
-                    };
-                    assert_eq!(
-                        our_byte, noodles_byte,
-                        "{version} rec {i} pos {pos}: sequence mismatch"
-                    );
-                }
+                assert_eq!(
+                    our_base,
+                    seqair_types::IupacBase::from_ascii(noodles_byte),
+                    "{version} rec {i} pos {pos}: sequence mismatch"
+                );
             }
         }
     }

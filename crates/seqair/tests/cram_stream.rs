@@ -268,7 +268,7 @@ fn mapped_records_match_the_indexed_reader() {
                 assert_eq!(s.mapq(), f.mapq);
                 assert_eq!(s.mate_fields(), f.mate_fields);
                 assert_eq!(s.cigar().collect::<Vec<_>>(), f.cigar());
-                assert_eq!(s.bases(), f.seq());
+                assert_eq!(s.iupac_bases().collect::<Vec<_>>(), f.seq());
                 assert_eq!(s.aux().as_bytes(), f.aux());
             }
         }

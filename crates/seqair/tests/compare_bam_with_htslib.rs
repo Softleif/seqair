@@ -153,12 +153,11 @@ fn all_contigs_record_fields_match() {
                 "{contig} rec {i}: qual"
             );
 
-            // Sequence (Base vs ASCII)
+            // Sequence: every code, as htslib's `seq_nt16_str` spells it
             for pos in 0..h.seq_len {
                 let base =
                     store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()));
-                let hts_base = seqair_types::Base::from(h.seq[pos]);
-                assert_eq!(base, hts_base, "{contig} rec {i} pos {pos}: base");
+                assert_eq!(base.to_ascii(), h.seq[pos], "{contig} rec {i} pos {pos}: base");
             }
         }
     }

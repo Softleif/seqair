@@ -606,7 +606,7 @@ fn bam_seqair(args: &[String]) {
         .map(|idx| {
             let r = store.record(idx).unwrap();
             let seq = r.seq().to_vec();
-            let ascii: Vec<u8> = seq.iter().map(|b| b.as_char() as u8).collect();
+            let ascii: Vec<u8> = seq.iter().map(|b| b.to_ascii()).collect();
             let mut aux = AuxData::from_bytes(r.aux().to_vec());
             let (mm, ml) = mm_ml(&ascii);
             if !ml.is_empty() {

@@ -35,7 +35,7 @@ use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{MateFields, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, BaseQuality};
+use seqair_types::{BamFlags, BaseQuality, IupacBase};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -170,7 +170,7 @@ struct Record {
     flags: u16,
     mapq: u8,
     cigar: Vec<(u32, CigarOpType)>,
-    seq: Vec<Base>,
+    seq: Vec<IupacBase>,
     qual: Vec<u8>,
     next_ref_id: Option<usize>,
     next_pos: Option<u32>,
@@ -327,17 +327,7 @@ fn arb_record(tc: &TestCase) -> Record {
         flags,
         mapq: tc.draw_silent(gs::integers::<u8>().max_value(60)),
         cigar,
-        seq: (0..qlen)
-            .map(|_| {
-                tc.draw_silent(gs::sampled_from(&[
-                    Base::A,
-                    Base::C,
-                    Base::G,
-                    Base::T,
-                    Base::Unknown,
-                ]))
-            })
-            .collect(),
+        seq: (0..qlen).map(|_| tc.draw_silent(gs::sampled_from(&IupacBase::ALL[..]))).collect(),
         qual: (0..qlen).map(|_| tc.draw_silent(gs::integers::<u8>().max_value(40))).collect(),
         next_ref_id: paired.then_some(tid),
         next_pos: paired.then(|| tc.draw_silent(n(0, START_WINDOW))),
@@ -483,7 +473,7 @@ fn expected_line(i: usize, rec: &Record) -> Line {
         rnext: if paired { "=".to_string() } else { "*".to_string() },
         pnext: rec.next_pos.map_or(0, |p| i64::from(p) + 1),
         tlen: i64::from(rec.template_len),
-        seq: rec.seq.iter().map(|b| **b as char).collect(),
+        seq: rec.seq.iter().map(|b| char::from(b.to_ascii())).collect(),
         qual: rec.qual.iter().map(|q| (q + 33) as char).collect(),
         aux: rec
             .aux
@@ -499,7 +489,7 @@ struct Decoded {
     pos: u32,
     flags: u16,
     mapq: u8,
-    seq: Vec<Base>,
+    seq: Vec<IupacBase>,
     qual: Vec<u8>,
     next_ref_id: Option<usize>,
     template_len: i32,

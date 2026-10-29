@@ -28,7 +28,7 @@ use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair::reader::{ResolveTid, Tid};
 use seqair_types::MappingQuality;
 use seqair_types::QPos;
-use seqair_types::{Base, BaseQuality};
+use seqair_types::{BaseQuality, IupacBase};
 use std::path::Path;
 use std::process::Command;
 
@@ -59,13 +59,13 @@ fn write_bam_with_index(dir: &Path, records: &[OwnedBamRecord]) -> std::path::Pa
 }
 
 /// Generate a sequence of `n` bases cycling through A, C, G, T.
-fn cyclic_seq(n: usize) -> Vec<Base> {
+fn cyclic_seq(n: usize) -> Vec<IupacBase> {
     (0..n)
         .map(|i| match i % 4 {
-            0 => Base::A,
-            1 => Base::C,
-            2 => Base::G,
-            _ => Base::T,
+            0 => IupacBase::A,
+            1 => IupacBase::C,
+            2 => IupacBase::G,
+            _ => IupacBase::T,
         })
         .collect()
 }
@@ -161,7 +161,7 @@ fn large_records_spanning_blocks() {
                 _ => b'T',
             };
             assert_eq!(
-                store.record(i).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap())) as u8,
+                store.record(i).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap())).to_ascii(),
                 expected,
                 "rec {i} seq[{pos}]"
             );

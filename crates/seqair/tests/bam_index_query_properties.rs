@@ -37,7 +37,7 @@ use seqair::bam::{
 use seqair::io::IndexBuilder;
 use seqair::reader::ResolveTid;
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, BaseQuality};
+use seqair_types::{BamFlags, BaseQuality, IupacBase};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
@@ -202,7 +202,7 @@ fn write_records(dir: &Path, reads: &[Read]) -> (std::path::PathBuf, IndexBuilde
         BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
 
     for (i, read) in reads.iter().enumerate() {
-        let seq = vec![Base::A; read.seq_len as usize];
+        let seq = vec![IupacBase::A; read.seq_len as usize];
         let qual = vec![BaseQuality::from_byte(30); read.seq_len as usize];
         let cigar: Vec<CigarOp> =
             read.cigar.iter().map(|&(len, op)| CigarOp::new(op, len)).collect();

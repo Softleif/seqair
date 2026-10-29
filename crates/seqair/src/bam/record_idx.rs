@@ -15,7 +15,7 @@ use super::{
     cigar::CigarOp,
     record_store::{RecordStore, SlimRecord},
 };
-use seqair_types::{Base, BaseQuality, Pos0, QPos};
+use seqair_types::{BaseQuality, IupacBase, Pos0, QPos};
 use std::{num::NonZeroU32, ops::Range};
 
 // r[impl record_store.record_idx]
@@ -272,15 +272,15 @@ impl<'store, U> RecordRef<'store, U> {
     }
 
     // r[impl record_store.field_access]
-    /// The read's decoded sequence.
-    pub fn seq(&self) -> &'store [Base] {
+    /// The read's sequence, every code as stored.
+    pub fn seq(&self) -> &'store [IupacBase] {
         self.store.seq_of(self.slim)
     }
 
     // r[impl bam.record.seq_at]
-    /// The base at `qpos`, or [`Base::Unknown`] past the end of the read —
+    /// The base at `qpos`, or [`IupacBase::N`] past the end of the read —
     /// which is also what a record with `SEQ=*` reports at every offset.
-    pub fn base_at(&self, qpos: QPos) -> Base {
+    pub fn base_at(&self, qpos: QPos) -> IupacBase {
         self.store.base_at_of(self.slim, qpos)
     }
 
@@ -391,7 +391,7 @@ mod tests {
     /// Two mates of one template, linked, so a `RecordRef` has somewhere to go.
     fn paired_store() -> RecordStore {
         let mut store = RecordStore::new();
-        let bases = [Base::A, Base::C, Base::G, Base::T];
+        let bases = [IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T];
         let quals = [30u8, 31, 32, 33];
         for (pos, end, mate_pos) in [(100u32, 103u32, 102u32), (102, 105, 100)] {
             store
@@ -404,7 +404,7 @@ mod tests {
                     0,
                     b"frag",
                     &[CigarOp::new(crate::bam::cigar::CigarOpType::Match, 4)],
-                    &crate::bam::test_util::iupac(&bases),
+                    &bases,
                     &quals,
                     b"XAi\x07\x00\x00\x00",
                     Some(tid(0)),
@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(rec.idx(), ri(0));
         assert_eq!(rec.pos, Pos0::new(100).unwrap(), "fields arrive through Deref");
         assert_eq!(rec.qname(), b"frag");
-        assert_eq!(rec.seq(), [Base::A, Base::C, Base::G, Base::T]);
+        assert_eq!(rec.seq(), [IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T]);
         assert_eq!(rec.qual().len(), 4);
         assert_eq!(rec.cigar().len(), 1);
         assert_eq!(rec.aux(), b"XAi\x07\x00\x00\x00");
@@ -443,8 +443,8 @@ mod tests {
             Some(7),
             "the Aux wrapper reads the same bytes"
         );
-        assert_eq!(rec.base_at(QPos::new(2)), Base::G);
-        assert_eq!(rec.base_at(QPos::new(99)), Base::Unknown, "past the read, not the next record");
+        assert_eq!(rec.base_at(QPos::new(2)), IupacBase::G);
+        assert_eq!(rec.base_at(QPos::new(99)), IupacBase::N, "past the read, not the next record");
         assert!(std::ptr::eq(rec.store(), &store));
     }
 

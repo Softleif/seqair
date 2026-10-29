@@ -30,7 +30,7 @@ use seqair::bam::record_idx::RecordIdx;
 use seqair::bam::record_store::{RecordStore, qname_hash};
 use seqair::reader::{DepthLimit, Readers, SegmentOptions};
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, Pos0};
+use seqair_types::{BamFlags, Base, IupacBase, Pos0};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::num::NonZeroU64;
@@ -765,7 +765,7 @@ fn mate_of_surfaces_the_linked_mate() {
         let mate = col.mate_of(&view).expect("the mate covers the anchor");
         assert_eq!(mate.record_idx(), ri(1));
         assert_eq!(mate.indel_after(), Indel::Insertion(2));
-        assert_eq!(mate.inserted_bases(), &[Base::C, Base::G]);
+        assert_eq!(mate.inserted_bases(), &[IupacBase::C, IupacBase::G]);
     });
 }
 

@@ -171,11 +171,11 @@ r[cigar.aligned_pairs.with_reference.iterator]
 
 For methylation and SNV calling, callers usually only care about `Match` events — indels and clips are noise. Each layer provides a `matches_only()` adapter that filters to Match events and yields a flat struct (no enum dispatch).
 
-r[cigar.aligned_pairs.matches_only.types]
+r[cigar.aligned_pairs.matches_only.types+1]
 Three flat structs MUST be provided, one per layer:
 
 - `MatchPosition { qpos: QPos, rpos: Pos0, kind: MatchKind }` — bare layer, equivalent to pysam's `aligned_pairs(matches_only=True)` plus the `kind` distinction htslib loses.
-- `MatchedBase { qpos, rpos, kind, query: Base, qual: BaseQuality }` — with-read layer.
+- `MatchedBase { qpos, rpos, kind, query: IupacBase, qual: BaseQuality }` — with-read layer.
 - `MatchedRef { qpos, rpos, kind, query, qual, ref_base: Option<Base> }` — with-reference layer; the most common shape for methylation and per-record SNV calling.
 
 None of these carry lifetimes — `Base`, `BaseQuality`, `MatchKind`, `Pos0`, and `QPos` are all `Copy`, so the iterators yield owned values.

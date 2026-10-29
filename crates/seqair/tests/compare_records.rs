@@ -77,7 +77,7 @@ fn fetch_htslib_records() -> Vec<HtsRecord> {
 // r[verify bam.reader.overlap_filter]
 // r[verify bam.reader.sorted_order+3]
 // r[verify bam.reader.unmapped_skipped]
-// r[verify record_store.push_raw+2]
+// r[verify record_store.push_raw+3]
 // r[verify record_store.field_access]
 // r[verify record_store.region_scoped]
 // r[verify bam.index.bai_magic]
@@ -270,7 +270,7 @@ fn record_fields_match() {
 
 // r[verify bam.record.seq_4bit]
 // r[verify bam.record.seq_at]
-// r[verify bam.record.seq_at_simd+2]
+// r[verify bam.record.seq_at_simd+3]
 #[test]
 fn sequence_matches() {
     let hts_records = fetch_htslib_records();
@@ -296,10 +296,12 @@ fn sequence_matches() {
                 .record(ri(u32::try_from(i).unwrap()))
                 .unwrap()
                 .base_at(QPos::new(u32::try_from(pos).unwrap()));
-            let hts_base = seqair_types::Base::from(hts.seq[pos]);
+            let hts_base = hts.seq[pos];
             assert_eq!(
-                base, hts_base,
-                "seq mismatch at record {i} pos {pos}: rio={base} hts={hts_base}",
+                base.to_ascii(),
+                hts_base,
+                "seq mismatch at record {i} pos {pos}: rio={base:?} hts={}",
+                char::from(hts_base),
             );
         }
     }

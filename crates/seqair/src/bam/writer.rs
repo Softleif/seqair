@@ -279,7 +279,7 @@ impl<W: Write> BamWriter<W> {
         self.finalize_record(record.tid(), unmapped, beg, end)
     }
 
-    // r[impl bam_writer.write_store_record]
+    // r[impl bam_writer.write_store_record+1]
     /// Write a record directly from a [`RecordStore`] without constructing an
     /// intermediate [`OwnedBamRecord`].
     ///
@@ -369,9 +369,7 @@ impl<W: Write> BamWriter<W> {
         // CIGAR — typed slab is already in BAM-on-disk byte layout on LE hosts.
         self.buf.extend_from_slice(crate::bam::cigar::CigarOp::ops_as_bytes(cigar));
 
-        // Sequence: re-encode Base → 4-bit packed directly into self.buf.
-        // Base: NoUninit allows the &[Base] → &[u8] cast at zero cost.
-        super::seq::encode_seq_into(bytemuck::cast_slice(seq), &mut self.buf);
+        super::seq::encode_iupac_bases_into(seq, &mut self.buf);
 
         // Quality scores
         if qual.is_empty() {
@@ -621,8 +619,8 @@ mod tests {
     use crate::bam::MateFields;
     use crate::bam::test_util::tid;
     use seqair_types::BamFlags;
-    use seqair_types::Base;
     use seqair_types::BaseQuality;
+    use seqair_types::IupacBase;
     use seqair_types::MappingQuality;
     use seqair_types::Pos0;
 
@@ -637,7 +635,7 @@ mod tests {
         OwnedBamRecord::builder(tid, Some(Pos0::new(pos).unwrap()), qname.to_vec())
             .mapq(MappingQuality::from_byte(30))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
-            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
+            .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T, IupacBase::A])
             .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap()
@@ -784,7 +782,7 @@ mod tests {
         let rec = OwnedBamRecord::builder(None, Some(Pos0::new(0).unwrap()), b"bad".to_vec())
             .flags(BamFlags::empty()) // mapped
             .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-            .seq(vec![Base::A, Base::C, Base::G])
+            .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G])
             .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap();
@@ -808,7 +806,7 @@ mod tests {
         // Fully unmapped: tid=-1, flags=0x4
         let unmapped = OwnedBamRecord::builder(None, None, b"unmapped".to_vec())
             .flags(BamFlags::from(0x4))
-            .seq(vec![Base::A])
+            .seq(vec![IupacBase::A])
             .build()
             .unwrap();
         // Should succeed (not pushed to index)
@@ -866,7 +864,7 @@ mod tests {
                     template_len: std::num::NonZeroI32::new(250),
                 })
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
-                .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
+                .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T, IupacBase::A])
                 .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
                 .aux({
                     let mut a = AuxData::new();
@@ -882,7 +880,7 @@ mod tests {
                     CigarOp::new(CigarOpType::SoftClip, 2),
                     CigarOp::new(CigarOpType::Match, 3),
                 ])
-                .seq(vec![Base::G, Base::T, Base::A, Base::C, Base::G])
+                .seq(vec![IupacBase::G, IupacBase::T, IupacBase::A, IupacBase::C, IupacBase::G])
                 .qual([35, 36, 37, 38, 39].map(BaseQuality::from_byte).to_vec())
                 .build()
                 .unwrap();
@@ -964,20 +962,20 @@ mod tests {
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"m1".to_vec())
                 .mapq(MappingQuality::from_byte(30))
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-                .seq(vec![Base::A, Base::C, Base::G])
+                .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G])
                 .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
                 .build()
                 .unwrap(),
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(200).unwrap()), b"pu1".to_vec())
                 .flags(BamFlags::from(0x4)) // unmapped but placed
-                .seq(vec![Base::T, Base::A])
+                .seq(vec![IupacBase::T, IupacBase::A])
                 .qual([20, 21].map(BaseQuality::from_byte).to_vec())
                 .build()
                 .unwrap(),
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(300).unwrap()), b"m2".to_vec())
                 .mapq(MappingQuality::from_byte(60))
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 4)])
-                .seq(vec![Base::G, Base::T, Base::A, Base::C])
+                .seq(vec![IupacBase::G, IupacBase::T, IupacBase::A, IupacBase::C])
                 .qual([33, 34, 35, 36].map(BaseQuality::from_byte).to_vec())
                 .build()
                 .unwrap(),

@@ -86,7 +86,7 @@ impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
         for ev in self {
             match ev {
                 AlignedPairWithRef::Match { kind, query, ref_base, .. } => {
-                    nm = nm.saturating_add(match_contribution(kind, query, ref_base));
+                    nm = nm.saturating_add(match_contribution(kind, query.to_base(), ref_base));
                 }
                 AlignedPairWithRef::Insertion { query, .. } => {
                     // I contributes its length to edit distance.
@@ -136,7 +136,7 @@ impl<'cigar, 'read, 'ref_seq> AlignedPairsWithRef<'cigar, 'read, 'ref_seq> {
                     let is_match = match kind {
                         MatchKind::SeqMatch => true,
                         MatchKind::SeqMismatch => false,
-                        MatchKind::Match => bases_equal(query, rb),
+                        MatchKind::Match => bases_equal(query.to_base(), rb),
                     };
                     if is_match {
                         run = run.saturating_add(1);
@@ -264,7 +264,7 @@ mod tests {
         let owned = OwnedBamRecord::builder(Some(tid(0)), Some(pos), b"r".to_vec())
             .flags(BamFlags::empty())
             .cigar(cigar)
-            .seq(seq)
+            .seq(crate::bam::test_util::iupac(&seq))
             .qual(qual)
             .build()
             .unwrap();
@@ -763,7 +763,7 @@ mod tests {
             let owned = OwnedBamRecord::builder(Some(tid(0)), Some(p0(read_pos)), b"r".to_vec())
                 .flags(BamFlags::empty())
                 .cigar(ops.clone())
-                .seq(seq)
+                .seq(crate::bam::test_util::iupac(&seq))
                 .qual(qual)
                 .build()
                 .unwrap();

@@ -2359,6 +2359,30 @@ mod tests {
         );
     }
 
+    // r[verify cram.stream.iupac+1]
+    /// An implicit match copies each reference byte as the code htslib's
+    /// `seq_nt16_table` gives it: the digits `0`..`3` are A/C/G/T, a byte
+    /// that is no IUPAC letter is `N`.
+    #[test]
+    fn implicit_matches_read_reference_bytes_as_htslib_does() {
+        use crate::bam::test_util::HTSLIB_SEQ_NT16_TABLE;
+        let reference: Vec<u8> = (0..=255u8).collect();
+        let reference = RefBases::new(&reference);
+        let mut bases = Vec::new();
+        let mut warned = false;
+        extend_from_reference(
+            reference.view().codes,
+            0,
+            256,
+            &mut warned,
+            IupacBase::N,
+            &mut bases,
+        );
+        let codes: Vec<u8> = bases.iter().map(|b| b.code()).collect();
+        assert_eq!(codes, HTSLIB_SEQ_NT16_TABLE);
+        assert!(!warned);
+    }
+
     // r[verify cram.slice.ref_bounds_warning+2]
     #[test]
     fn ref_base_at_warns_on_out_of_bounds() {

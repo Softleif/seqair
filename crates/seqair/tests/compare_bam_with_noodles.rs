@@ -18,7 +18,7 @@ use seqair::bam::RecordIdx;
 use seqair::bam::{Pos0, RejectUnmapped};
 use seqair_types::BaseQuality;
 use seqair_types::MappingQuality;
-use seqair_types::QPos;
+use seqair_types::{IupacBase, QPos};
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -239,24 +239,16 @@ fn bam_sequence_matches_noodles() {
             assert_eq!(r.seq_len as usize, n.seq_len, "{contig} rec {i}: seq_len");
 
             for pos in 0..n.seq_len {
-                let seqair_byte =
-                    store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()))
-                        as u8;
+                let seqair_base =
+                    store.record(idx).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()));
                 let noodles_byte = n.seq[pos];
-
-                // Only compare standard bases (A=65, C=67, G=71, T=84).
-                // Noodles may emit IUPAC codes (e.g. 'N', 'M') for non-ACGT;
-                // seqair normalises all of those to Unknown=b'N'.
-                match noodles_byte {
-                    b'A' | b'C' | b'G' | b'T' => {
-                        assert_eq!(
-                            seqair_byte, noodles_byte,
-                            "{contig} rec {i} pos {pos}: base mismatch \
-                             seqair={seqair_byte} noodles={noodles_byte}",
-                        );
-                    }
-                    _ => {}
-                }
+                // Both keep every IUPAC code.
+                assert_eq!(
+                    seqair_base,
+                    IupacBase::from_ascii(noodles_byte),
+                    "{contig} rec {i} pos {pos}: base mismatch noodles={}",
+                    char::from(noodles_byte),
+                );
             }
         }
     }

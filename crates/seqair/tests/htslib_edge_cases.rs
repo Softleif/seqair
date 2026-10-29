@@ -21,7 +21,7 @@ use noodles::bam;
 use noodles::sam;
 use seqair::bam::{Pos0, RecordStore, RejectUnmapped};
 use seqair::reader::IndexedReader;
-use seqair_types::QPos;
+use seqair_types::{IupacBase, QPos};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -317,16 +317,9 @@ fn seq_qual_presence_combos() {
         // For records with sequence, verify bases match
         for pos in 0..n_seq_len {
             let seqair_base =
-                store.record(i).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap())) as u8;
+                store.record(i).unwrap().base_at(QPos::new(u32::try_from(pos).unwrap()));
             let noodles_base: u8 = n.sequence().iter().nth(pos).unwrap();
-            match noodles_base {
-                b'A' | b'C' | b'G' | b'T' => {
-                    assert_eq!(seqair_base, noodles_base, "{qname} seq[{pos}]");
-                }
-                _ => {
-                    assert_eq!(seqair_base, b'N', "{qname} seq[{pos}]: expected N");
-                }
-            }
+            assert_eq!(seqair_base, IupacBase::from_ascii(noodles_base), "{qname} seq[{pos}]");
         }
     }
 }

@@ -21,7 +21,7 @@ use super::cigar::CigarOp;
 use super::seq;
 use crate::io::reg2bin;
 use crate::reader::Tid;
-use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Pos0};
+use seqair_types::{BamFlags, BaseQuality, IupacBase, MappingQuality, Pos0};
 use thiserror::Error;
 
 /// Errors from owned record construction or serialization.
@@ -78,7 +78,7 @@ pub struct OwnedBamRecord {
     pub mate_fields: MateFields,
     pub qname: Vec<u8>,
     pub cigar: Vec<CigarOp>,
-    pub seq: Vec<Base>,
+    pub seq: Vec<IupacBase>,
     // r[impl types.base_quality.field_type]
     pub qual: Vec<BaseQuality>,
     pub aux: AuxData,
@@ -93,7 +93,7 @@ pub struct OwnedBamRecordBuilder {
     mate_fields: MateFields,
     qname: Vec<u8>,
     cigar: Vec<CigarOp>,
-    seq: Vec<Base>,
+    seq: Vec<IupacBase>,
     qual: Vec<BaseQuality>,
     aux: AuxData,
 }
@@ -112,7 +112,7 @@ impl OwnedBamRecordBuilder {
         self.cigar = cigar;
         self
     }
-    pub fn seq(mut self, seq: Vec<Base>) -> Self {
+    pub fn seq(mut self, seq: Vec<IupacBase>) -> Self {
         self.seq = seq;
         self
     }
@@ -265,10 +265,10 @@ impl OwnedBamRecord {
         Ok(())
     }
 
-    // r[impl bam.owned_record.set_seq]
+    // r[impl bam.owned_record.set_seq+1]
     // r[impl bam.owned_record.failed_mutation_is_inert]
     /// Replace the sequence. For mapped reads, validates length matches CIGAR query length.
-    pub fn set_seq(&mut self, seq: Vec<Base>) -> Result<(), OwnedRecordError> {
+    pub fn set_seq(&mut self, seq: Vec<IupacBase>) -> Result<(), OwnedRecordError> {
         if !self.is_unmapped() && !self.cigar.is_empty() {
             let query_len = self.cigar_query_len();
             if query_len != seq.len() as u64 {
@@ -283,7 +283,7 @@ impl OwnedBamRecord {
     }
 
     /// Mutable access to the sequence for in-place base modification.
-    pub fn seq_mut(&mut self) -> &mut [Base] {
+    pub fn seq_mut(&mut self) -> &mut [IupacBase] {
         &mut self.seq
     }
 
@@ -373,8 +373,7 @@ impl OwnedBamRecord {
             buf.extend_from_slice(&op.to_bam_u32().to_le_bytes());
         }
 
-        // Sequence: encode Base values to 4-bit packed
-        seq::encode_bases_into(&self.seq, buf);
+        seq::encode_iupac_bases_into(&self.seq, buf);
 
         // Quality scores
         if self.qual.is_empty() {
@@ -405,7 +404,7 @@ mod tests {
             .flags(BamFlags::empty()) // mapped
             .mapq(MappingQuality::from_byte(30))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
-            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
+            .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T, IupacBase::A])
             .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
             .build()
             .unwrap()
@@ -457,7 +456,7 @@ mod tests {
         let rec =
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"r1".to_vec())
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-                .seq(vec![Base::A, Base::C, Base::G])
+                .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G])
                 .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
                 .aux(aux)
                 .build()
@@ -515,7 +514,7 @@ mod tests {
                     CigarOp::new(CigarOpType::Insertion, 2),
                     CigarOp::new(CigarOpType::Match, 3),
                 ])
-                .seq(vec![Base::A; 8]) // 3M + 2I + 3M = 8 query bases
+                .seq(vec![IupacBase::A; 8]) // 3M + 2I + 3M = 8 query bases
                 .qual(vec![BaseQuality::from_byte(30); 8])
                 .build()
                 .unwrap();
@@ -567,7 +566,7 @@ mod tests {
         let rec =
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(100).unwrap()), b"r".to_vec())
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-                .seq(vec![Base::A, Base::C, Base::G])
+                .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G])
                 // no qual set
                 .build()
                 .unwrap();
@@ -586,7 +585,7 @@ mod tests {
         // serialization succeeds and the bytes have the right structure.
         let rec = OwnedBamRecord::builder(None, None, b"unmapped".to_vec())
             .flags(BamFlags::from(0x4))
-            .seq(vec![Base::A, Base::C, Base::G])
+            .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G])
             .build()
             .unwrap();
 
@@ -609,7 +608,7 @@ mod tests {
             b"placed".to_vec(),
         )
         .flags(BamFlags::from(0x4))
-        .seq(vec![Base::A, Base::C, Base::G])
+        .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G])
         .build()
         .unwrap();
 
@@ -658,7 +657,7 @@ mod tests {
                     CigarOp::new(CigarOpType::Insertion, 1),
                     CigarOp::new(CigarOpType::Match, 2),
                 ])
-                .seq(vec![Base::A; 5])
+                .seq(vec![IupacBase::A; 5])
                 .qual(vec![BaseQuality::from_byte(30); 5])
                 .build()
                 .unwrap();
@@ -690,7 +689,7 @@ mod tests {
                     CigarOp::new(CigarOpType::Deletion, 3),
                     CigarOp::new(CigarOpType::Match, 2),
                 ])
-                .seq(vec![Base::A; 4])
+                .seq(vec![IupacBase::A; 4])
                 .qual(vec![BaseQuality::from_byte(30); 4])
                 .build()
                 .unwrap();
@@ -719,7 +718,7 @@ mod tests {
                     CigarOp::new(CigarOpType::SoftClip, 2),
                     CigarOp::new(CigarOpType::Match, 3),
                 ])
-                .seq(vec![Base::A; 5])
+                .seq(vec![IupacBase::A; 5])
                 .qual(vec![BaseQuality::from_byte(30); 5])
                 .build()
                 .unwrap();
@@ -755,7 +754,7 @@ mod tests {
         let rec = OwnedBamRecord::builder(None, None, b"r".to_vec())
             .flags(BamFlags::from(0x4))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
-            .seq(vec![Base::A; 5])
+            .seq(vec![IupacBase::A; 5])
             .qual(vec![BaseQuality::from_byte(30); 5])
             .build()
             .unwrap();
@@ -776,7 +775,7 @@ mod tests {
             OwnedBamRecord::builder(Some(tid(0)), Some(Pos0::new(50).unwrap()), b"r".to_vec())
                 .flags(BamFlags::empty())
                 .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-                .seq(vec![Base::A, Base::C, Base::G])
+                .seq(vec![IupacBase::A, IupacBase::C, IupacBase::G])
                 .qual([30, 31, 32].map(BaseQuality::from_byte).to_vec())
                 .build()
                 .unwrap();
@@ -784,11 +783,12 @@ mod tests {
         let events: Vec<_> = rec.aligned_pairs_with_read().unwrap().collect();
         assert_eq!(events.len(), 3);
         match events[0] {
-            AlignedPairWithRead::Match { qpos, query: Base::A, .. } if qpos == QPos::ZERO => {}
+            AlignedPairWithRead::Match { qpos, query: IupacBase::A, .. } if qpos == QPos::ZERO => {}
             other => panic!("expected Match{{qpos=0, query=A}}, got {other:?}"),
         }
         match events[2] {
-            AlignedPairWithRead::Match { qpos, query: Base::G, .. } if qpos == QPos::new(2) => {}
+            AlignedPairWithRead::Match { qpos, query: IupacBase::G, .. }
+                if qpos == QPos::new(2) => {}
             other => panic!("expected Match{{qpos=2, query=G}}, got {other:?}"),
         }
     }
@@ -801,7 +801,7 @@ mod tests {
         let rec = OwnedBamRecord::builder(None, None, b"r".to_vec())
             .flags(BamFlags::from(0x4))
             .cigar(vec![CigarOp::new(CigarOpType::Match, 3)])
-            .seq(vec![Base::A; 3])
+            .seq(vec![IupacBase::A; 3])
             .qual(vec![BaseQuality::from_byte(30); 3])
             .build()
             .unwrap();
