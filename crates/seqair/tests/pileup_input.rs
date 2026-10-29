@@ -13,7 +13,7 @@ use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::RecordStore;
 use seqair_types::MappingQuality;
-use seqair_types::{BamFlags, Base, Pos0};
+use seqair_types::{BamFlags, IupacBase, Pos0};
 
 const PAIRED: u16 = 0x1;
 const FIRST: u16 = 0x40;
@@ -31,7 +31,7 @@ fn push(store: &mut RecordStore, qname: &[u8], pos: u32, len: u32, mate_pos: i32
             0,
             qname,
             &cigar,
-            &vec![Base::A; len as usize],
+            &vec![IupacBase::A; len as usize],
             &vec![30u8; len as usize],
             &[],
             Some(tid(0)),

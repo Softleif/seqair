@@ -9,7 +9,14 @@
 use super::bgzf::BgzfReader;
 use super::record_idx::RecordIdx;
 use super::record_store::RecordStore;
+use seqair_types::{Base, IupacBase};
 use std::io::{Read, Seek};
+
+/// `bases` as the codes `push_fields` takes.
+#[allow(dead_code, reason = "used by sibling test modules; cfg gates may hide some call sites")]
+pub(crate) fn iupac(bases: &[Base]) -> Vec<IupacBase> {
+    bases.iter().copied().map(IupacBase::from).collect()
+}
 
 /// The record index `n`. Tests address records by literal position; this is
 /// the shorthand for the `Option` that `RecordIdx::new` returns.

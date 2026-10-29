@@ -17,7 +17,7 @@
 
 mod helpers;
 use hegel::prelude::*;
-use helpers::tid;
+use helpers::{iupac, tid};
 use seqair::bam::{
     MateFields, Pos0, RecordStore,
     cigar::{
@@ -151,7 +151,7 @@ fn build_store(case: &Case) -> PileupInput<()> {
                 indels,
                 name.as_bytes(),
                 &r.ops,
-                &r.seq,
+                &iupac(&r.seq),
                 &r.qual,
                 &[],
                 Some(tid(0)),

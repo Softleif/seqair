@@ -288,7 +288,7 @@ fn soft_clips_are_stored_at_push_and_follow_set_alignment() {
             0,
             b"read2",
             &pack_cigar(&[(4, CIGAR_M), (1, CIGAR_S), (2, CIGAR_H)]),
-            &[Base::A; 5],
+            &[seqair_types::IupacBase::A; 5],
             &[30; 5],
             &[],
             Some(tid(0)),

@@ -17,6 +17,11 @@
     reason = "test code with known small values"
 )]
 
+/// `bases` as the codes `push_fields` takes.
+pub fn iupac(bases: &[seqair_types::Base]) -> Vec<seqair_types::IupacBase> {
+    bases.iter().copied().map(seqair_types::IupacBase::from).collect()
+}
+
 /// The record index `n`. Tests address records by literal position; this is
 /// the shorthand for the `Option` that `RecordIdx::new` returns.
 #[track_caller]

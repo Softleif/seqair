@@ -1519,7 +1519,7 @@ mod tests {
     #[test]
     fn internal_buf_retains_capacity() {
         use crate::bam::cigar::{CigarOp, CigarOpType};
-        use seqair_types::{BamFlags, Base};
+        use seqair_types::{BamFlags, IupacBase};
 
         let mut store = RecordStore::new();
         store
@@ -1532,7 +1532,7 @@ mod tests {
                 0,
                 b"read1",
                 &[CigarOp::new(CigarOpType::Match, 5)],
-                &[Base::A; 5],
+                &[IupacBase::A; 5],
                 &[40; 5],
                 &[],
                 Some(tid(0)),
@@ -1562,7 +1562,7 @@ mod tests {
     #[test]
     fn eviction_preserves_insertion_order() {
         use crate::bam::cigar::{CigarOp, CigarOpType};
-        use seqair_types::{BamFlags, Base};
+        use seqair_types::{BamFlags, IupacBase};
 
         let mut store = RecordStore::new();
 
@@ -1582,7 +1582,7 @@ mod tests {
                     0,
                     format!("read{i}").as_bytes(),
                     &[CigarOp::new(CigarOpType::Match, *span)],
-                    &vec![Base::A; *span as usize],
+                    &vec![IupacBase::A; *span as usize],
                     &vec![40u8; *span as usize],
                     &[],
                     Some(tid(0)),
@@ -1650,7 +1650,7 @@ mod tests {
                     CigarOp::new(CigarOpType::Match, 5),
                     CigarOp::new(CigarOpType::SoftClip, 2),
                 ],
-                &seq,
+                &crate::bam::test_util::iupac(&seq),
                 &quals,
                 &[],
                 Some(tid(0)),
@@ -1706,7 +1706,7 @@ mod tests {
                 0,
                 b"clip_read",
                 &[CigarOp::new(CigarOpType::SoftClip, 1), CigarOp::new(CigarOpType::Match, 5)],
-                &seq,
+                &crate::bam::test_util::iupac(&seq),
                 &[40u8; 6],
                 &[],
                 Some(tid(0)),
@@ -1833,7 +1833,7 @@ mod tests {
                         0,
                         format!("r{i}").as_bytes(),
                         &r.cigar(),
-                        &r.seq,
+                        &crate::bam::test_util::iupac(&r.seq),
                         &quals,
                         &[],
                         Some(crate::bam::test_util::tid(0)),
@@ -1962,7 +1962,7 @@ mod tests {
                 0,
                 b"edge_read",
                 &[CigarOp::new(CigarOpType::Match, 3), CigarOp::new(CigarOpType::SoftClip, 3)],
-                &seq,
+                &crate::bam::test_util::iupac(&seq),
                 &quals,
                 &[],
                 Some(tid(0)),
@@ -2016,7 +2016,7 @@ mod tests {
                 0,
                 b"zero_read",
                 &[CigarOp::new(CigarOpType::SoftClip, 3), CigarOp::new(CigarOpType::Match, 2)],
-                &seq,
+                &crate::bam::test_util::iupac(&seq),
                 &quals,
                 &[],
                 Some(tid(0)),
@@ -2072,7 +2072,7 @@ mod tests {
                     CigarOp::new(CigarOpType::Insertion, 2),
                     CigarOp::new(CigarOpType::Match, 3),
                 ],
-                &seq,
+                &crate::bam::test_util::iupac(&seq),
                 &quals,
                 &[],
                 Some(tid(0)),
@@ -2105,7 +2105,7 @@ mod tests {
     #[test]
     fn pileup_alignment_indel_after() {
         use crate::bam::cigar::{CigarOp, CigarOpType};
-        use seqair_types::{BamFlags, Base};
+        use seqair_types::{BamFlags, IupacBase};
 
         fn run(cigar: &[CigarOp], seq_len: u32, last_ref_pos: u32) -> Vec<(u32, Indel)> {
             let mut store = RecordStore::new();
@@ -2119,7 +2119,7 @@ mod tests {
                     0,
                     b"r",
                     cigar,
-                    &vec![Base::A; seq_len as usize],
+                    &vec![IupacBase::A; seq_len as usize],
                     &vec![40u8; seq_len as usize],
                     &[],
                     Some(tid(0)),
@@ -2176,7 +2176,7 @@ mod tests {
     #[test]
     fn max_depth_truncates_in_insertion_order() {
         use crate::bam::cigar::{CigarOp, CigarOpType};
-        use seqair_types::{BamFlags, Base};
+        use seqair_types::{BamFlags, IupacBase};
 
         let mut store = RecordStore::new();
 
@@ -2192,7 +2192,7 @@ mod tests {
                     0,
                     format!("read{i}").as_bytes(),
                     &[CigarOp::new(CigarOpType::Match, 50)],
-                    &[Base::A; 50],
+                    &[IupacBase::A; 50],
                     &[40u8; 50],
                     &[],
                     Some(tid(0)),

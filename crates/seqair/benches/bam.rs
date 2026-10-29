@@ -12,7 +12,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use seqair::bam::MateFields;
 use seqair::reader::ResolveTid;
 use seqair_types::MappingQuality;
-use seqair_types::{Base, Pos0};
+use seqair_types::{Base, IupacBase, Pos0};
 use std::hint::black_box;
 use std::io::Read;
 
@@ -885,7 +885,7 @@ fn synthetic_input(shape: ReadShape) -> seqair::bam::record_store::PileupInput<(
     let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
     let mut starts: Vec<u32> = (0..N_READS).map(|_| rng.below(u64::from(CONTIG))).collect();
     starts.sort_unstable();
-    let bases = [Base::A, Base::C, Base::G, Base::T];
+    let bases = [IupacBase::A, IupacBase::C, IupacBase::G, IupacBase::T];
     let mut store = seqair::bam::RecordStore::<()>::new();
     let m = |len| CigarOp::new(CigarOpType::Match, len);
     for (i, &start) in starts.iter().enumerate() {
@@ -907,7 +907,7 @@ fn synthetic_input(shape: ReadShape) -> seqair::bam::record_store::PileupInput<(
             }
         };
         let qlen = seqair::bam::cigar::calc_query_len(&ops) as usize;
-        let seq: Vec<Base> = (0..qlen).map(|_| bases[rng.below(4) as usize]).collect();
+        let seq: Vec<IupacBase> = (0..qlen).map(|_| bases[rng.below(4) as usize]).collect();
         let qual: Vec<u8> = (0..qlen).map(|_| 20 + rng.below(20) as u8).collect();
         let pos = Pos0::new(start).unwrap();
         let (matching, indels) = calc_matches_indels(&ops);

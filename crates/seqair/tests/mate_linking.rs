@@ -21,8 +21,8 @@
 
 mod helpers;
 use hegel::prelude::*;
-use helpers::ri;
 use helpers::tid;
+use helpers::{iupac, ri};
 use seqair::bam::MateFields;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::pileup::{Indel, PileupColumn, PileupEngine};
@@ -85,7 +85,7 @@ fn push(store: &mut RecordStore, qname: &[u8], read: Read) -> RecordIdx {
             0,
             qname,
             &cigar,
-            &bases,
+            &iupac(&bases),
             &qual,
             &[],
             Some(tid(read.tid)),
@@ -703,7 +703,7 @@ fn push_pair_read(
             indel_bases,
             qname,
             cigar,
-            seq,
+            &iupac(seq),
             &vec![40u8; seq.len()],
             &[],
             Some(tid(0)),
