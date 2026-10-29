@@ -362,7 +362,7 @@ impl RawBamRecord {
     /// The sequence as [`Base`]s: `A`/`C`/`G`/`T`, and everything else
     /// (ambiguity codes, `=`) [`Base::Unknown`].
     pub fn bases(&self) -> Vec<Base> {
-        seq::decode_bases(self.packed_seq(), self.seq_len())
+        self.iupac_bases().map(IupacBase::to_base).collect()
     }
 
     /// Base qualities, or `None` when the record has none (no sequence, or
