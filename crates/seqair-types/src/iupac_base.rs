@@ -159,14 +159,48 @@ impl IupacBase {
         }
     }
 
+    // r[impl types.iupac_base.slices]
     /// [`Self::from_ascii`] over a slice.
     pub fn from_ascii_slice(bytes: &[u8]) -> Vec<Self> {
-        bytes.iter().map(|&b| Self::from_ascii(b)).collect()
+        let mut out = Vec::with_capacity(bytes.len());
+        Self::from_ascii_into(bytes, &mut out);
+        out
     }
 
+    // r[impl types.iupac_base.slices]
     /// [`Self::to_ascii`] over a slice.
     pub fn to_ascii_slice(bases: &[Self]) -> Vec<u8> {
-        bases.iter().map(|b| b.to_ascii()).collect()
+        let mut out = Vec::with_capacity(bases.len());
+        Self::to_ascii_into(bases, &mut out);
+        out
+    }
+
+    // r[impl types.iupac_base.bulk]
+    /// Append [`Self::from_ascii`] of every byte to `out`.
+    pub fn from_ascii_into(bytes: &[u8], out: &mut Vec<Self>) {
+        out.extend(bytes.iter().map(|&b| Self::from_ascii(b)));
+    }
+
+    // r[impl types.iupac_base.bulk]
+    /// Append [`Self::to_ascii`] of every base to `out`.
+    pub fn to_ascii_into(bases: &[Self], out: &mut Vec<u8>) {
+        out.extend(bases.iter().map(|b| b.to_ascii()));
+    }
+
+    // r[impl types.iupac_base.bulk]
+    /// [`Self::complement`] every base.
+    pub fn complement_in_place(bases: &mut [Self]) {
+        for b in bases {
+            *b = b.complement();
+        }
+    }
+
+    // r[impl types.iupac_base.bulk]
+    /// Reverse `bases` and [`Self::complement`] every one: the other strand,
+    /// read 5' to 3'.
+    pub fn reverse_complement_in_place(bases: &mut [Self]) {
+        bases.reverse();
+        Self::complement_in_place(bases);
     }
 }
 
@@ -264,6 +298,51 @@ mod tests {
             IupacBase::to_ascii_slice(&bases),
             bases.iter().map(|b| b.to_ascii()).collect::<Vec<_>>()
         );
+    }
+
+    /// Bytes of every value, in a random order with random repeats, so the
+    /// 256 byte values meet every vector lane and tail position.
+    fn any_bytes(tc: &TestCase) -> Vec<u8> {
+        let len = tc.draw(gs::integers::<usize>().max_value(300));
+        (0..len).map(|_| tc.draw(gs::integers::<u8>())).collect()
+    }
+
+    fn any_bases(tc: &TestCase) -> Vec<IupacBase> {
+        let len = tc.draw(gs::integers::<usize>().max_value(300));
+        (0..len).map(|_| IupacBase::from_nibble(tc.draw(gs::integers::<u8>()))).collect()
+    }
+
+    // r[verify types.iupac_base.bulk]
+    #[hegel::test]
+    fn bulk_appends_equal_elementwise(tc: TestCase) {
+        let bytes = any_bytes(&tc);
+        let prefix = tc.draw(gs::integers::<usize>().max_value(40));
+        let mut out = vec![IupacBase::R; prefix];
+        IupacBase::from_ascii_into(&bytes, &mut out);
+        let (kept, new) = out.split_at(prefix);
+        assert!(kept.iter().all(|&b| b == IupacBase::R));
+        assert_eq!(new, bytes.iter().map(|&b| IupacBase::from_ascii(b)).collect::<Vec<_>>());
+
+        let bases = any_bases(&tc);
+        let mut out = vec![b'x'; prefix];
+        IupacBase::to_ascii_into(&bases, &mut out);
+        let (kept, new) = out.split_at(prefix);
+        assert!(kept.iter().all(|&b| b == b'x'));
+        assert_eq!(new, bases.iter().map(|b| b.to_ascii()).collect::<Vec<_>>());
+    }
+
+    // r[verify types.iupac_base.bulk]
+    #[hegel::test]
+    fn complement_in_place_and_reverse_complement(tc: TestCase) {
+        let bases = any_bases(&tc);
+        let mut c = bases.clone();
+        IupacBase::complement_in_place(&mut c);
+        assert_eq!(c, bases.iter().map(|b| b.complement()).collect::<Vec<_>>());
+        let mut rc = bases.clone();
+        IupacBase::reverse_complement_in_place(&mut rc);
+        for (i, b) in rc.iter().enumerate() {
+            assert_eq!(*b, bases[bases.len() - 1 - i].complement(), "i={i}");
+        }
     }
 
     // r[verify types.iupac_base.complement]
