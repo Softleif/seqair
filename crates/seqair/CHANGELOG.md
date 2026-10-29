@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Lossless indexed region queries.** `IndexedBamReader::query_raw`, `IndexedSamReader::query_raw` and `IndexedReader::query_raw` yield the records overlapping a region as `RawBamRecord`s, unchanged — the selection and order of `fetch_into` (and what `samtools view <file> <region>` prints), without the lossy `RecordStore` decode. `read_record(&mut RawBamRecord)` reuses one buffer; the queries are also iterators. A record that fails validation is an error the query continues past; any other error ends it (`BamError::Poisoned`, `SamError::Poisoned`). CRAM is `ReaderError::RawQueryUnsupported` for now.
 
+### Changed
+
+- **`SamRecordEncoder` (and so `SamStreamReader`) keeps a line whose RNEXT the header lacks**, as htslib does: no mate reference, PNEXT and FLAG as written, one warning per process. It was `SamRecordError::UnknownMateReference`, which is gone; the indexed SAM reader already kept such lines, so the streaming and indexed readers now agree on them.
+
 ## v0.9.0 (2026-10-29)
 
 ### Added
