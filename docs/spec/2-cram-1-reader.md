@@ -532,11 +532,11 @@ r[cram.record.read_name+2]
 r[cram.record.quality]
 Quality scores are decoded from `QS` (per-base) or `QQ` (stretch) data series, depending on CRAM flags bit 0x1. If CRAM flags bit 0x8 is set (sequence unknown), quality is unavailable (all 0xFF). Quality length MUST equal read length.
 
-r[cram.feature.quality_score]
-When `quality_as_array` is false (CRAM flags bit 0x1 unset), per-position quality overrides are encoded as `Q` (0x51) read features. Each `Q` feature carries a single quality score from the `QS` data series at a specific read position. The decoder MUST apply these quality scores to `qual_buf` at the feature's read position (1-based `FP`, converted to 0-based index). Positions without a `Q` feature retain the default quality (0xFF). This is distinct from the bulk `QS` decode path used when `quality_as_array` is true.
+r[cram.feature.quality_score+2]
+When `quality_as_array` is false (CRAM flags bit 0x1 unset), per-position qualities are encoded as `Q` (0x51) and `B` (0x42) read features, each carrying one quality from the `QS` series. The decoder MUST apply them as htslib's `cram_decode_seq` does: the qualities start as 0xFF; the first `Q`, `B` or `q` feature of a read, finding the first quality still 0xFF, sets every quality to 30, and each feature then writes its value at its read position (1-based `FP`, converted to 0-based index), within the read. With `quality_as_array` true the `RL` qualities decoded after the features replace them.
 
-r[cram.feature.quality_block]
-The `q` (0x71) read feature carries a stretch of quality scores from the `QQ` data series, starting at the feature's read position. The decoder MUST write the decoded quality bytes into `qual_buf` starting at the feature's 0-based read position. The number of quality scores in the block is determined by the `QQ` encoding. Like `Q`, this feature only appears when `quality_as_array` is false.
+r[cram.feature.quality_block+2]
+The `q` (0x71) read feature carries a stretch of quality scores from the `QQ` data series, starting at the feature's read position. The decoder MUST write them, as many as fit in the read, from the feature's 0-based read position, after the fill to 30 of `r[cram.feature.quality_score+2]`.
 
 > r[cram.record.cigar_reconstruction]
 > CRAM does not store CIGAR explicitly. The CIGAR MUST be reconstructed from the read features:
@@ -590,8 +590,8 @@ r[cram.record.aux_tags]
 r[cram.record.cf_tag]
 A one-byte `cF:C` tag is htslib's private CRAM 3 flag field (bit 1: MD is stored verbatim, bit 2: NM is), not record data: htslib writes it when a record's MD/NM would not regenerate from the sequence, and removes it again on decode (`cram_decode.c`). The reader MUST drop it from the aux data likewise. The streaming decoder reads its bits to decide which tags to generate (`r[cram.stream.md_nm]`); the indexed reader generates none, so there the flags need no action.
 
-r[cram.record.rg_tag]
-The `RG` data series is separate from aux tags. If a read group is present, the reader MUST emit an `RG:Z:<id>` aux tag using the read group ID from the header's `@RG` entries. This tag MUST be included in the aux slab alongside dictionary-decoded tags.
+r[cram.record.rg_tag+2]
+The `RG` data series is separate from aux tags. If a read group is present, the reader MUST emit an `RG:Z:<id>` aux tag using the read group ID from the header's `@RG` entries, after every other tag, as htslib's `cram_to_bam` appends it. As htslib does for files Java CRAM wrote, a record whose read group is the header's last `@RG` when that one's ID is `UNKNOWN` gets no `RG` tag. A read group outside `-1..` the number of `@RG` lines MUST fail the slice with `CramError::ReadGroupOutOfRange`.
 
 ## CRAM index (.crai)
 
