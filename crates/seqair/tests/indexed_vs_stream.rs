@@ -566,7 +566,7 @@ fn samtools_names(bam: &Path, contig: usize, span: RangeInclusive<Pos0>) -> Vec<
 // r[verify record_store.end_pos_htslib]
 // r[verify bam.record.zero_refspan]
 // r[verify unified.fetch_equivalence]
-// r[verify unified.stream.detect]
+// r[verify unified.stream.detect+2]
 // r[verify unified.stream.records]
 // r[verify bam.stream]
 // r[verify sam.stream]

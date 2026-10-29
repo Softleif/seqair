@@ -1,6 +1,6 @@
-//! [`AlignmentStream`]: read BAM or SAM (plain, bgzipped or gzipped) front to
-//! back from any reader, deciding the format from its first bytes.
-//! See `r[unified.stream.detect]`.
+//! [`AlignmentStream`]: read BAM, SAM (plain, bgzipped or gzipped) or CRAM
+//! front to back from any reader, deciding the format from its first bytes.
+//! See `r[unified.stream.detect+2]`.
 
 use crate::bam::{
     BamHeader, RawBamRecord,
@@ -8,8 +8,11 @@ use crate::bam::{
     header::BAM_MAGIC,
     stream::{BamStreamError, BamStreamReader},
 };
+use crate::cram::stream::{CramContainerDecoder, CramStreamError, CramStreamReader};
 use crate::sam::{SamStreamError, SamStreamReader};
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
+use std::path::PathBuf;
 
 /// The format an [`AlignmentStream`] detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +26,8 @@ pub enum StreamFormat {
     GzipSam,
     /// Uncompressed SAM text (empty input included).
     Sam,
+    /// CRAM v3.0 or v3.1.
+    Cram,
 }
 
 /// Why an [`AlignmentStream`] could not be opened or read.
@@ -50,8 +55,16 @@ pub enum AlignmentStreamError {
         source: SamStreamError,
     },
 
-    #[error("the input is CRAM, which can only be read with an index (IndexedReader)")]
-    CramNotSupported,
+    #[error("CRAM stream error")]
+    Cram {
+        #[from]
+        source: CramStreamError,
+    },
+
+    /// CRAM is decoded against a reference; give one with
+    /// [`AlignmentStreamBuilder::reference`].
+    #[error("the input is CRAM, which needs a FASTA reference (AlignmentStreamBuilder::reference)")]
+    CramNeedsReference,
 
     /// BAM in ordinary gzip rather than BGZF. htslib reads it; recompress with
     /// `samtools view -b` to stream it here.
@@ -67,6 +80,33 @@ type Source = std::io::Chain<Cursor<Vec<u8>>, Box<dyn Read + Send>>;
 enum Inner {
     Bam(Box<BamStreamReader<Source>>),
     Sam(Box<SamStreamReader<Box<dyn BufRead + Send>>>),
+    Cram(Box<CramRecords>),
+}
+
+/// A CRAM stream decoded one container at a time on the reading thread.
+struct CramRecords {
+    reader: CramStreamReader<Source>,
+    decoder: CramContainerDecoder,
+    pending: VecDeque<RawBamRecord>,
+    scratch: Vec<RawBamRecord>,
+}
+
+impl CramRecords {
+    fn read_record(&mut self, record: &mut RawBamRecord) -> Result<bool, CramStreamError> {
+        while self.pending.is_empty() {
+            let Some(container) = self.reader.next_container()? else { return Ok(false) };
+            self.scratch.clear();
+            self.decoder.decode(&container, &mut self.scratch)?;
+            self.pending.extend(self.scratch.drain(..));
+        }
+        match self.pending.pop_front() {
+            Some(next) => {
+                *record = next;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 /// Configures an [`AlignmentStream`]. The options apply to the BGZF formats.
@@ -75,6 +115,7 @@ pub struct AlignmentStreamBuilder<R> {
     inner: R,
     workers: Workers,
     eof_marker: EofMarker,
+    reference: Option<PathBuf>,
 }
 
 impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
@@ -95,6 +136,14 @@ impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
         pool: impl Into<std::sync::Arc<rayon_core::ThreadPool>>,
     ) -> Self {
         self.workers = Workers::Threads { n, pool: Some(pool.into()) };
+        self
+    }
+
+    /// The FASTA (with its `.fai`, and `.gzi` if bgzipped) CRAM input is
+    /// decoded against. Other formats ignore it.
+    #[must_use]
+    pub fn reference(mut self, fasta: impl Into<PathBuf>) -> Self {
+        self.reference = Some(fasta.into());
         self
     }
 
@@ -156,10 +205,15 @@ impl AlignmentStream {
 
     /// Configure threads and EOF-marker handling before detecting the format.
     pub fn builder<R: Read + Send + 'static>(inner: R) -> AlignmentStreamBuilder<R> {
-        AlignmentStreamBuilder { inner, workers: Workers::Inline, eof_marker: EofMarker::Required }
+        AlignmentStreamBuilder {
+            inner,
+            workers: Workers::Inline,
+            eof_marker: EofMarker::Required,
+            reference: None,
+        }
     }
 
-    // r[impl unified.stream.detect]
+    // r[impl unified.stream.detect+2]
     fn open<R: Read + Send + 'static>(
         options: AlignmentStreamBuilder<R>,
     ) -> Result<Self, AlignmentStreamError> {
@@ -196,7 +250,18 @@ impl AlignmentStream {
             return Self::sam(text, StreamFormat::GzipSam);
         }
         if prefix.starts_with(b"CRAM") {
-            return Err(AlignmentStreamError::CramNotSupported);
+            let fasta = options.reference.ok_or(AlignmentStreamError::CramNeedsReference)?;
+            let reader = CramStreamReader::new(Cursor::new(prefix).chain(inner))?;
+            let decoder = reader.decoder(&fasta)?;
+            return Ok(Self {
+                inner: Inner::Cram(Box::new(CramRecords {
+                    reader,
+                    decoder,
+                    pending: VecDeque::new(),
+                    scratch: Vec::new(),
+                })),
+                format: StreamFormat::Cram,
+            });
         }
         if prefix.starts_with(&BAM_MAGIC) {
             return Err(AlignmentStreamError::UncompressedBamNotSupported);
@@ -224,6 +289,7 @@ impl AlignmentStream {
         match &self.inner {
             Inner::Bam(r) => r.header(),
             Inner::Sam(r) => r.header(),
+            Inner::Cram(r) => r.reader.header(),
         }
     }
 
@@ -236,6 +302,7 @@ impl AlignmentStream {
         Ok(match &mut self.inner {
             Inner::Bam(r) => r.read_record(record)?,
             Inner::Sam(r) => r.read_record(record)?,
+            Inner::Cram(r) => r.read_record(record)?,
         })
     }
 }
