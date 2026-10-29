@@ -246,6 +246,9 @@ Encoding ID 0 (NULL): no data. Used for absent data series.
 r[cram.encoding.external]
 Encoding ID 1 (EXTERNAL): reads raw bytes from an external data block identified by `content_id`. The most common encoding — used for quality scores, bases, tags, etc.
 
+r[cram.encoding.external_empty]
+Reading zero values of a series MUST succeed without looking up its block: htslib writes no block for a series no record of the slice used (a slice of reads with SEQ and QUAL `*` has no quality block), and reads nothing for a length of 0.
+
 r[cram.encoding.huffman]
 Encoding ID 3 (HUFFMAN): canonical Huffman coding. Parameters: alphabet (itf8 array) and bit lengths (itf8 array). Reads from the core data bit stream.
 

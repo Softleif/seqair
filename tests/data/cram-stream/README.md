@@ -25,5 +25,7 @@ samtools view --no-PG -C -T fidelity.fa --output-fmt-option lossy_names=1 -o fid
 samtools view --no-PG -C --output-fmt-option embed_ref=2 -o fidelity_embed_ref2.cram fidelity.sam
 # no reference: every base stored as a feature
 samtools view --no-PG -C --output-fmt-option no_ref=1 -o fidelity_no_ref.cram fidelity.sam
+# a slice holding only an unplaced read with SEQ and QUAL `*` (RL 0)
+samtools view --no-PG -C -T fidelity.fa -o onlyu.cram onlyu.sam
 for f in *.cram; do samtools index "$f"; done
 ```
