@@ -7,14 +7,15 @@
 //! and the stored `bin` all survive a read and a write unchanged.
 
 use super::{
-    BamHeader, CigarOp, DecodeError, MateFields,
+    AuxData, AuxDataError, BamHeader, CigarOp, DecodeError, MateFields,
     aux::{Aux, AuxValue, find_tag},
     cigar::CIGAR_S,
     record::{self, read2},
     seq,
 };
 use crate::reader::Tid;
-use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Pos0};
+use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality, Pos0, QPos};
+use thiserror::Error;
 use std::fmt;
 
 /// Fixed part of a BAM record, before the read name.
@@ -76,6 +77,27 @@ pub struct RawBamRecord {
     cigar_end: usize,
     seq_end: usize,
     qual_end: usize,
+}
+
+/// Why an in-place edit of a [`RawBamRecord`] was refused. The record is
+/// unchanged.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum RawRecordEditError {
+    #[error("a sequence of {got} bases cannot replace one of {expected}")]
+    SeqLenMismatch { expected: usize, got: usize },
+
+    #[error("base {qpos} is past the end of a sequence of {len} bases")]
+    BaseOutOfRange { qpos: u32, len: usize },
+
+    #[error("the aux edit would change the record's long CIGAR")]
+    LongCigarChanged,
+
+    #[error("the edited record would be {len} bytes, over the {} byte limit", record::MAX_RECORD_SIZE)]
+    RecordTooLarge { len: usize },
+
+    #[error("aux edit failed")]
+    Aux(#[from] AuxDataError),
 }
 
 /// Why [`RawBamRecord::refill`] failed: the caller's fill, or validation.
@@ -357,6 +379,86 @@ impl RawBamRecord {
         if let Some(dst) = self.payload.get_mut(14..16) {
             dst.copy_from_slice(&flags.raw().to_le_bytes());
         }
+    }
+
+    // r[impl bam.raw_record.edit_seq]
+    /// Replace the sequence with `seq`, ASCII or IUPAC, in place. Bytes that
+    /// are no base code become `N`, as in SAM.
+    ///
+    /// # Errors
+    /// [`RawRecordEditError::SeqLenMismatch`] if `seq` is not as long as the
+    /// current sequence.
+    pub fn set_seq(&mut self, seq: &[u8]) -> Result<(), RawRecordEditError> {
+        let expected = self.seq_len();
+        if seq.len() != expected {
+            return Err(RawRecordEditError::SeqLenMismatch { expected, got: seq.len() });
+        }
+        let encoded = seq::encode_seq(seq);
+        let Some(dst) = self.payload.get_mut(self.cigar_end..self.seq_end) else {
+            return Ok(());
+        };
+        // The unused low nibble of an odd-length sequence is not ours to touch.
+        let pad = if expected % 2 == 1 { dst.last().map(|b| b & 0x0F) } else { None };
+        for (d, e) in dst.iter_mut().zip(&encoded) {
+            *d = *e;
+        }
+        if let (Some(pad), Some(last)) = (pad, dst.last_mut()) {
+            *last = *last & 0xF0 | pad;
+        }
+        Ok(())
+    }
+
+    // r[impl bam.raw_record.edit_seq]
+    /// Replace the base at `qpos` with an ASCII or IUPAC `base`, in place.
+    ///
+    /// # Errors
+    /// [`RawRecordEditError::BaseOutOfRange`] past the end of the sequence.
+    pub fn set_base(&mut self, qpos: QPos, base: u8) -> Result<(), RawRecordEditError> {
+        let len = self.seq_len();
+        let i = qpos.as_usize();
+        let out_of_range = RawRecordEditError::BaseOutOfRange { qpos: qpos.get(), len };
+        if i >= len {
+            return Err(out_of_range);
+        }
+        let start = self.cigar_end;
+        let byte = self.payload.get_mut(start.saturating_add(i / 2)).ok_or(out_of_range)?;
+        let code = seq::encode_base(base);
+        *byte = if i.is_multiple_of(2) { code << 4 | *byte & 0x0F } else { *byte & 0xF0 | code };
+        Ok(())
+    }
+
+    // r[impl bam.raw_record.edit_aux]
+    /// Edit the aux block: `edit` gets the tags as an [`AuxData`] and the
+    /// record takes what it leaves. Tags it does not touch keep their bytes.
+    /// Costs one copy of the aux block.
+    ///
+    /// # Errors
+    /// `edit`'s own error, [`RawRecordEditError::RecordTooLarge`], or
+    /// [`RawRecordEditError::LongCigarChanged`] if the real CIGAR would
+    /// differ (a `CG` tag removed or rewritten).
+    pub fn edit_aux(
+        &mut self,
+        edit: impl FnOnce(&mut AuxData) -> Result<(), AuxDataError>,
+    ) -> Result<(), RawRecordEditError> {
+        let mut aux =
+            AuxData::from_bytes(self.payload.get(self.qual_end..).unwrap_or_default().to_vec());
+        edit(&mut aux)?;
+        let len = self.qual_end.saturating_add(aux.as_bytes().len());
+        if len > record::MAX_RECORD_SIZE {
+            return Err(RawRecordEditError::RecordTooLarge { len });
+        }
+        let after = long_cigar(
+            self.stored_cigar_bytes(),
+            self.seq_len(),
+            self.tid.is_some() && self.pos.is_some(),
+            Aux::new(aux.as_bytes()),
+        );
+        if self.long_cigar() != after {
+            return Err(RawRecordEditError::LongCigarChanged);
+        }
+        self.payload.truncate(self.qual_end);
+        self.payload.extend_from_slice(aux.as_bytes());
+        Ok(())
     }
 
     /// Set MAPQ in place.
