@@ -421,3 +421,102 @@ fn a_record_that_does_not_validate_is_an_error_in_its_place(tc: TestCase) {
         tc.event_value("errors", want.iter().filter(|w| w.is_none()).count() as f64);
     }
 }
+
+/// Start and length of each BGZF block in `bytes`, by the `BSIZE` of the
+/// `BC` subfield htslib and seqair write first.
+fn bgzf_blocks(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut blocks = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let len = usize::from(u16::from_le_bytes([bytes[at + 16], bytes[at + 17]])) + 1;
+        blocks.push((at, len));
+        at += len;
+    }
+    blocks
+}
+
+/// Enough unflawed records for several BGZF blocks.
+fn many_records() -> Vec<Generated> {
+    (0..3_000).map(|i| Generated { pos: i, len: 150, flaw: Flaw::None }).collect()
+}
+
+fn whole_contig() -> RangeInclusive<Pos0> {
+    RangeInclusive { start: Pos0::new(0).unwrap(), last: Pos0::new(GENERATED_LEN - 1).unwrap() }
+}
+
+// r[verify bam.reader.query_raw.errors]
+/// A BAM cut off inside its last block: the query yields records up to
+/// there, then an error that is not about one record, and from then on only
+/// `Poisoned`; the iterator stops after the error.
+#[test]
+fn a_truncated_bam_poisons_its_raw_query() {
+    use seqair::bam::{BamError, IndexedBamReader};
+    let files = write_generated(&many_records());
+    let bytes = std::fs::read(&files.bam).unwrap();
+    let blocks = bgzf_blocks(&bytes);
+    assert!(blocks.len() > 3, "{} blocks", blocks.len());
+    let (last_data, len) = blocks[blocks.len() - 2];
+    std::fs::write(&files.bam, &bytes[..last_data + len / 2]).unwrap();
+
+    let mut reader = IndexedBamReader::open(&files.bam).unwrap();
+    let tid = "chr1".resolve_tid(reader.header()).unwrap();
+    let mut query = reader.query_raw(tid, whole_contig()).unwrap();
+    let mut record = RawBamRecord::default();
+    let mut read = 0;
+    let err = loop {
+        match query.read_record(&mut record) {
+            Ok(true) => read += 1,
+            Ok(false) => panic!("the truncated query ended cleanly after {read} records"),
+            Err(e) => break e,
+        }
+    };
+    assert!(read > 0 && read < 3_000, "{read}");
+    assert!(!matches!(err, BamError::RecordDecode { .. }), "{err:?}");
+    assert!(matches!(query.read_record(&mut record), Err(BamError::Poisoned)));
+    assert!(matches!(query.read_record(&mut record), Err(BamError::Poisoned)));
+    drop(query);
+
+    let mut items = reader.query_raw(tid, whole_contig()).unwrap();
+    let oks = items.by_ref().take_while(Result::is_ok).count();
+    assert_eq!(oks, read);
+    assert!(items.next().is_none(), "the iterator ends at the error");
+}
+
+// r[verify sam.reader.query_raw]
+/// A bgzipped SAM with a corrupt block: as for BAM, the error ends the query
+/// and later reads are `Poisoned`.
+#[test]
+fn a_corrupt_sam_block_poisons_its_raw_query() {
+    use seqair::sam::SamError;
+    use seqair::sam::reader::IndexedSamReader;
+    let files = write_generated(&many_records());
+    let mut bytes = std::fs::read(&files.sam).unwrap();
+    let blocks = bgzf_blocks(&bytes);
+    assert!(blocks.len() > 3, "{} blocks", blocks.len());
+    let (middle, len) = blocks[blocks.len() / 2];
+    bytes[middle + len - 8] ^= 0xFF; // the block's CRC32
+    std::fs::write(&files.sam, &bytes).unwrap();
+
+    let mut reader = IndexedSamReader::open(&files.sam).unwrap();
+    let tid = "chr1".resolve_tid(reader.header()).unwrap();
+    let mut query = reader.query_raw(tid, whole_contig()).unwrap();
+    let mut record = RawBamRecord::default();
+    let mut read = 0;
+    let err = loop {
+        match query.read_record(&mut record) {
+            Ok(true) => read += 1,
+            Ok(false) => panic!("the corrupt query ended cleanly after {read} records"),
+            Err(e) => break e,
+        }
+    };
+    assert!(read > 0 && read < 3_000, "{read}");
+    assert!(!matches!(err, SamError::MalformedRecord { .. }), "{err:?}");
+    assert!(matches!(query.read_record(&mut record), Err(SamError::Poisoned)));
+    assert!(matches!(query.read_record(&mut record), Err(SamError::Poisoned)));
+    drop(query);
+
+    let mut items = reader.query_raw(tid, whole_contig()).unwrap();
+    let oks = items.by_ref().take_while(Result::is_ok).count();
+    assert_eq!(oks, read);
+    assert!(items.next().is_none(), "the iterator ends at the error");
+}
