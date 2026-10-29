@@ -195,7 +195,7 @@ impl<R: Read> CramStreamReader<R> {
             let number = self.containers;
             let read = read_container(&mut self.inner, number);
             let Some((header, data)) = read.inspect_err(|_| self.state = State::Failed)? else {
-                // r[impl cram.file.eof]
+                // r[impl cram.file.eof+2]
                 warn!(containers = number, "CRAM stream ends without an EOF container");
                 self.state = State::Ended;
                 return Ok(None);
