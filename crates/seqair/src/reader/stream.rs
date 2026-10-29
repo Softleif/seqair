@@ -10,9 +10,10 @@ use crate::bam::{
 };
 use crate::cram::stream::{CramContainerDecoder, CramStreamError, CramStreamReader};
 use crate::sam::{SamStreamError, SamStreamReader};
+use seqair_types::SmolStr;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The format an [`AlignmentStream`] detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +117,7 @@ pub struct AlignmentStreamBuilder<R> {
     workers: Workers,
     eof_marker: EofMarker,
     reference: Option<PathBuf>,
+    name_prefix: Option<SmolStr>,
 }
 
 impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
@@ -144,6 +146,16 @@ impl<R: Read + Send + 'static> AlignmentStreamBuilder<R> {
     #[must_use]
     pub fn reference(mut self, fasta: impl Into<PathBuf>) -> Self {
         self.reference = Some(fasta.into());
+        self
+    }
+
+    /// The prefix of the names CRAM input without stored names (`lossy_names`)
+    /// gets, `<prefix>:<record number>` (`r[cram.record.read_name+2]`);
+    /// `-` by default, as htslib names stdin. [`AlignmentStream::open_path`]
+    /// sets the file's basename, as `samtools view <file>` does.
+    #[must_use]
+    pub fn name_prefix(mut self, prefix: impl Into<SmolStr>) -> Self {
+        self.name_prefix = Some(prefix.into());
         self
     }
 
@@ -210,7 +222,25 @@ impl AlignmentStream {
             workers: Workers::Inline,
             eof_marker: EofMarker::Required,
             reference: None,
+            name_prefix: None,
         }
+    }
+
+    /// A builder for the file at `path`, which names the records of CRAM
+    /// input without stored names after its basename, as htslib does.
+    ///
+    /// # Errors
+    /// The file cannot be opened.
+    pub fn open_path(
+        path: &Path,
+    ) -> Result<AlignmentStreamBuilder<std::fs::File>, AlignmentStreamError> {
+        let file =
+            std::fs::File::open(path).map_err(|source| AlignmentStreamError::Io { source })?;
+        let builder = Self::builder(file);
+        Ok(match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => builder.name_prefix(name),
+            None => builder,
+        })
     }
 
     // r[impl unified.stream.detect+2]
@@ -252,7 +282,10 @@ impl AlignmentStream {
         if prefix.starts_with(b"CRAM") {
             let fasta = options.reference.ok_or(AlignmentStreamError::CramNeedsReference)?;
             let reader = CramStreamReader::new(Cursor::new(prefix).chain(inner))?;
-            let decoder = reader.decoder(&fasta)?;
+            let mut decoder = reader.decoder(&fasta)?;
+            if let Some(prefix) = options.name_prefix {
+                decoder = decoder.name_prefix(prefix);
+            }
             return Ok(Self {
                 inner: Inner::Cram(Box::new(CramRecords {
                     reader,
