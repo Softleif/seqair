@@ -11,7 +11,6 @@ use crate::bam::{
 use crate::cram::stream::{CramContainerDecoder, CramStreamError, CramStreamReader};
 use crate::sam::{SamStreamError, SamStreamReader};
 use seqair_types::SmolStr;
-use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 
@@ -88,24 +87,25 @@ enum Inner {
 struct CramRecords {
     reader: CramStreamReader<Source>,
     decoder: CramContainerDecoder,
-    pending: VecDeque<RawBamRecord>,
-    scratch: Vec<RawBamRecord>,
+    /// The current container's records; those before `next` are handed out.
+    pending: Vec<RawBamRecord>,
+    next: usize,
 }
 
 impl CramRecords {
     fn read_record(&mut self, record: &mut RawBamRecord) -> Result<bool, CramStreamError> {
-        while self.pending.is_empty() {
-            let Some(container) = self.reader.next_container()? else { return Ok(false) };
-            self.scratch.clear();
-            self.decoder.decode(&container, &mut self.scratch)?;
-            self.pending.extend(self.scratch.drain(..));
-        }
-        match self.pending.pop_front() {
-            Some(next) => {
-                *record = next;
-                Ok(true)
+        loop {
+            if let Some(slot) = self.pending.get_mut(self.next) {
+                // A swap, so the caller's old record goes back to be dropped
+                // with the container and nothing is copied.
+                std::mem::swap(record, slot);
+                self.next = self.next.saturating_add(1);
+                return Ok(true);
             }
-            None => Ok(false),
+            let Some(container) = self.reader.next_container()? else { return Ok(false) };
+            self.pending.clear();
+            self.next = 0;
+            self.decoder.decode(&container, &mut self.pending)?;
         }
     }
 }
@@ -290,8 +290,8 @@ impl AlignmentStream {
                 inner: Inner::Cram(Box::new(CramRecords {
                     reader,
                     decoder,
-                    pending: VecDeque::new(),
-                    scratch: Vec::new(),
+                    pending: Vec::new(),
+                    next: 0,
                 })),
                 format: StreamFormat::Cram,
             });
