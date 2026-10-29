@@ -24,6 +24,7 @@ use seqair::reader::{IndexedReader, ReaderError, ResolveTid};
 use seqair::sam::SamStreamReader;
 use seqair::sam::format::format_sam_record;
 use seqair_types::Pos0;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -317,11 +318,13 @@ fn write_generated(records: &[Generated]) -> GeneratedFiles {
     for (i, r) in records.iter().enumerate() {
         let (rnext, pnext) = if r.flaw == Flaw::UnknownRnext { ("chrZ", 7) } else { ("*", 0) };
         let seq = "A".repeat(seq_len(r) as usize);
-        text.push_str(&format!(
-            "r{i}\t1\tchr1\t{}\t60\t{}M\t{rnext}\t{pnext}\t0\t{seq}\t*\n",
+        writeln!(
+            text,
+            "r{i}\t1\tchr1\t{}\t60\t{}M\t{rnext}\t{pnext}\t0\t{seq}\t*",
             r.pos + 1,
             r.len
-        ));
+        )
+        .unwrap();
     }
     let plain = dir.path().join("generated.sam");
     std::fs::write(&plain, text).unwrap();
