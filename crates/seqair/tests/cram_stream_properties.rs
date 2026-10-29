@@ -288,7 +288,7 @@ fn kind_of(sample: &Sample, qname: &[u8]) -> Kind {
     sample.lines[i].kind
 }
 
-// r[verify cram.edge.seq_unknown+2]
+// r[verify cram.edge.seq_unknown+3]
 // r[verify cram.stream.fidelity+2]
 /// A mapped record stored with SEQ and QUAL `*` comes back with neither,
 /// from the stream and from the indexed reader, under any writer layout;

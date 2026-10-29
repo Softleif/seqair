@@ -212,7 +212,7 @@ fn compression_header_has_required_data_series() {
 // r[verify cram.record.sequence]
 // r[verify cram.record.cigar_reconstruction]
 // r[verify cram.edge.empty_slice]
-// r[verify cram.edge.seq_unknown+2]
+// r[verify cram.edge.seq_unknown+3]
 // r[verify cram.edge.coordinate_clamp]
 // r[verify cram.edge.long_reads]
 // r[verify cram.perf.slice_granularity]

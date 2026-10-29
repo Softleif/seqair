@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An unmapped CRAM read with an unknown sequence (CRAM flag 0x8) whose `RL` is not 0 still has its `RL` bases decoded, as htslib does, so the base series stays in step; a record whose bases and qualities differ in number is `CramError::QualityLengthMismatch` instead of a malformed record.
 - `CramStreamReader` (and `AlignmentStream`) read `queryname`-sorted and unsorted CRAM; the coordinate-order check is for indexed access only.
 - A CRAM slice whose only reads are unplaced with SEQ and QUAL `*` no longer fails with `ExternalBlockNotFound`: reading zero values of a series no longer looks for its block, which htslib does not write.
 - A mapped CRAM read stored with SEQ `*` (CRAM flag 0x8, e.g. bwa's secondary records) no longer comes back with its reference bases and `0xFF` qualities; it has neither, as in htslib.
