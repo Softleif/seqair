@@ -88,7 +88,7 @@ pub enum RawRecordEditError {
     SeqLenMismatch { expected: usize, got: usize },
 
     #[error("base {qpos} is past the end of a sequence of {len} bases")]
-    BaseOutOfRange { qpos: u32, len: usize },
+    BaseOutOfRange { qpos: QPos, len: usize },
 
     #[error("the aux edit would change the record's long CIGAR")]
     LongCigarChanged,
@@ -98,6 +98,14 @@ pub enum RawRecordEditError {
         record::MAX_RECORD_SIZE
     )]
     RecordTooLarge { len: usize },
+
+    /// The record's offsets do not describe its payload; `from_payload`
+    /// rules this out, so it is a bug in seqair, not the caller's input.
+    #[error("the record's field offsets are inconsistent with its payload (a seqair bug)")]
+    InconsistentLayout,
+
+    #[error("FLAG would contradict the record's CIGAR and sequence")]
+    Flags(#[from] DecodeError),
 
     #[error("aux edit failed")]
     Aux(#[from] AuxDataError),
@@ -365,11 +373,11 @@ impl RawBamRecord {
     /// Set FLAG in place.
     ///
     /// # Errors
-    /// [`DecodeError::CigarQueryLenMismatch`], leaving FLAG as it was, if the
+    /// [`RawRecordEditError::Flags`] wrapping [`DecodeError::CigarQueryLenMismatch`], leaving FLAG as it was, if the
     /// new flags make the record one whose CIGAR must match its sequence and
     /// it does not (`r[bam.raw_record.cigar_seq]`) — clearing `0x4` on an
     /// unmapped record with a stale CIGAR, say. htslib rejects such a record.
-    pub fn set_flags(&mut self, flags: BamFlags) -> Result<(), DecodeError> {
+    pub fn set_flags(&mut self, flags: BamFlags) -> Result<(), RawRecordEditError> {
         let old = self.flags();
         self.write_flags(flags);
         let checked = record::parse_header(&self.payload).and_then(|h| {
@@ -378,7 +386,7 @@ impl RawBamRecord {
         if checked.is_err() {
             self.write_flags(old);
         }
-        checked
+        Ok(checked?)
     }
 
     fn write_flags(&mut self, flags: BamFlags) {
@@ -409,17 +417,18 @@ impl RawBamRecord {
             return Err(RawRecordEditError::SeqLenMismatch { expected, got: seq.len() });
         }
         let Some(dst) = self.payload.get_mut(self.cigar_end..self.seq_end) else {
-            return Ok(());
+            debug_assert!(false, "offsets within the payload");
+            return Err(RawRecordEditError::InconsistentLayout);
         };
         // The unused low nibble of an odd-length sequence is not ours to touch.
         let pad = if expected % 2 == 1 { dst.last().map(|b| b & 0x0F) } else { None };
         for (d, pair) in dst.iter_mut().zip(seq.chunks(2)) {
             let hi = pair.first().map_or(0, |b| b.code());
             let lo = pair.get(1).map_or(0, |b| b.code());
-            *d = hi << 4 | lo;
+            *d = (hi << 4) | lo;
         }
         if let (Some(pad), Some(last)) = (pad, dst.last_mut()) {
-            *last = *last & 0xF0 | pad;
+            *last = (*last & 0xF0) | pad;
         }
         Ok(())
     }
@@ -432,14 +441,17 @@ impl RawBamRecord {
     pub fn set_base(&mut self, qpos: QPos, base: IupacBase) -> Result<(), RawRecordEditError> {
         let len = self.seq_len();
         let i = qpos.as_usize();
-        let out_of_range = RawRecordEditError::BaseOutOfRange { qpos: qpos.get(), len };
         if i >= len {
-            return Err(out_of_range);
+            return Err(RawRecordEditError::BaseOutOfRange { qpos, len });
         }
         let start = self.cigar_end;
-        let byte = self.payload.get_mut(start.saturating_add(i / 2)).ok_or(out_of_range)?;
+        let Some(byte) = self.payload.get_mut(start.saturating_add(i / 2)) else {
+            debug_assert!(false, "offsets within the payload");
+            return Err(RawRecordEditError::InconsistentLayout);
+        };
         let code = base.code();
-        *byte = if i.is_multiple_of(2) { code << 4 | *byte & 0x0F } else { *byte & 0xF0 | code };
+        *byte =
+            if i.is_multiple_of(2) { (code << 4) | (*byte & 0x0F) } else { (*byte & 0xF0) | code };
         Ok(())
     }
 
