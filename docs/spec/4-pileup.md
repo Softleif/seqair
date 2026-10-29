@@ -62,6 +62,9 @@ Reads with the unmapped flag (0x4) MUST be excluded from the pileup. htslib's `b
 r[pileup.empty_seq_unknown_base]
 Mapped records with `SEQ=*` (`seq_len == 0`) MUST appear in every pileup column they overlap, with `base = Base::Unknown` and `qual = BaseQuality::UNAVAILABLE` at every M/=/X/I CIGAR op. htslib's pileup includes such records — `bam_seqi` reads beyond the empty SEQ buffer and the `0xFF` qual sentinel decodes to `N`. Silently dropping them would produce a different `depth()` and `match_depth()` than htslib for any BAM containing secondary alignments without sequence (a common SAM/BAM convention). Insertions on empty-SEQ records use the same Unknown/UNAVAILABLE pair for the anchor base.
 
+r[pileup.base_from_iupac]
+The base of a `Match`, `Insertion` or `SoftClip` entry MUST be the record's stored `IupacBase` at `qpos` converted by `IupacBase::to_base` (`r[types.iupac_base.base_conversions]`): A, C, G and T map to themselves, every other code (`=`, the ambiguity codes, `N`) to `Base::Unknown`. The conversion MUST be a lookup in a 16-entry table, not a branch on the code: it runs once per entry in the engine's hottest loop, and the base is data.
+
 r[pileup.zero_refspan_reads]
 Reads with zero reference-consuming CIGAR operations (pure soft-clip, insertion-only) have `end_pos == pos` and MUST appear in exactly one pileup column at their `pos`. They MUST NOT be skipped or cause off-by-one errors.
 

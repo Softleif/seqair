@@ -527,7 +527,7 @@ r[cram.record.read_name+2]
 >    - `B` (base+quality): replace base and quality at the feature position.
 >    - `N` (ref skip): skip `RS` reference bases.
 >    - `H` (hard clip): record length only (no bases in read or reference).
-> 4. Convert reconstructed bases to `Base` enum values for the bases slab.
+> 4. Keep the reconstructed bases as `IupacBase` codes for the bases slab.
 
 r[cram.record.quality]
 Quality scores are decoded from `QS` (per-base) or `QQ` (stretch) data series, depending on CRAM flags bit 0x1. If CRAM flags bit 0x8 is set (sequence unknown), quality is unavailable (all 0xFF). Quality length MUST equal read length.
@@ -654,8 +654,8 @@ If the FASTA reader cannot provide the reference sequence for a slice's region (
 r[cram.edge.unknown_read_names+2]
 When `RN=false` in the preservation map, records get the names `r[cram.record.read_name+2]` gives them, with no warning. The pileup engine's overlapping-pair dedup MUST still skip records with empty or `*` qnames, which other sources can produce.
 
-r[cram.record.no_ref_fill]
-A slice of a file written without a reference (`RR` false in the preservation map) that does not embed one MUST be decoded without a reference, as htslib decodes it whatever FASTA it was given: implicit matches read as `=` (`IupacBase::Eq`; `Base::Unknown` for the indexed reader), without a warning, an `X` substitution uses the substitution matrix's `N` row, and no `MD`/`NM` is generated. samtools covers every base of such a file with a feature, so only other writers' files show the difference. The stream fetches nothing from the FASTA for such a file, so it decodes against a FASTA that lacks its references.
+r[cram.record.no_ref_fill+1]
+A slice of a file written without a reference (`RR` false in the preservation map) that does not embed one MUST be decoded without a reference, as htslib decodes it whatever FASTA it was given: implicit matches read as `=` (`IupacBase::Eq`), without a warning, an `X` substitution uses the substitution matrix's `N` row, and no `MD`/`NM` is generated. samtools covers every base of such a file with a feature, so only other writers' files show the difference. The stream fetches nothing from the FASTA for such a file, so it decodes against a FASTA that lacks its references.
 
 r[cram.edge.seq_unknown+3]
 When CRAM flags bit 0x8 is set, the read's sequence is unknown (`*` in SAM). `seq_len` MUST be 0 and neither bases nor qualities are kept, for mapped reads as for unmapped ones. Every series is still decoded as for a read with a sequence, to keep them in step: a mapped read's features and `RL` qualities (htslib's encoder stores `RL` as the CIGAR's query length and `0xFF` qualities), and an unmapped read's `RL` `BA` bases and qualities; htslib's decoder reads them and then sets the length to 0 (`cram_decode_seq`, `cram_decode_slice`). htslib writes `RL` 0 for an unmapped read without a sequence, but other writers need not.

@@ -49,8 +49,8 @@ BAM encodes sequences in 4-bit nibbles: two bases per byte (high nibble first). 
 r[bam.record.seq_at]
 The record MUST support decoding a single base at a given read position.
 
-r[bam.record.seq_at_simd+2]
-The decoder MAY decode the full 4-bit sequence into `Base` enum values at construction time using SIMD-accelerated bulk decoding (see `base_decode.md`). Single-base access via `seq_at(idx, pos)` returns the pre-decoded `Base` value directly.
+r[bam.record.seq_at_simd+3]
+The decoder MAY decode the full 4-bit sequence into `IupacBase` values at construction time using SIMD-accelerated bulk decoding (`r[seq.iupac_bulk+2]`). Single-base access via `base_at(qpos)` returns the pre-decoded `IupacBase` directly.
 
 ## Flag access
 
