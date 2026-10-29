@@ -557,6 +557,8 @@ impl<'r, R: Read + Seek> ChunkLines<'r, R> {
                 self.chunk_end = None;
                 let found = alignment_line(&self.line).map(&mut on_line).transpose();
                 self.line.clear();
+                // Only now, with the chunk left and the line gone, may an
+                // error return: the next call must not read either again.
                 match found?.flatten() {
                     Some(t) => return Ok(Some(t)),
                     None => continue,
@@ -586,6 +588,8 @@ impl<'r, R: Read + Seek> ChunkLines<'r, R> {
                     (window.len(), Ok(None))
                 }
             };
+            // Consumed before an error returns, so the next call goes on past
+            // a malformed line instead of handing it out again.
             self.region.consume(consumed);
             if let Some(t) = found?.flatten() {
                 return Ok(Some(t));
