@@ -331,6 +331,43 @@ fn alignment_stream_names_lossy_records_after_the_file() {
     assert_eq!(by_reader, dash);
 }
 
+/// A container header with no records and no blocks, on reference 0 at 1:
+/// short, but not the EOF container.
+fn empty_container() -> Vec<u8> {
+    // length (i32), then ITF8/LTF8 fields that each fit one byte: reference
+    // 0, start 1, span 0, records 0, record counter 0, bases 0, blocks 0,
+    // landmarks 0.
+    let mut bytes = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    let mut crc = libdeflater::Crc::new();
+    crc.update(&bytes);
+    bytes.extend_from_slice(&crc.sum().to_le_bytes());
+    bytes
+}
+
+// r[verify cram.file.eof+2]
+/// A short container without records is skipped, not taken for the EOF
+/// container: the records after it still stream.
+#[test]
+fn a_short_empty_container_is_not_the_end() {
+    let (cram, fasta) = (data("cram-stream/fidelity_v31.cram"), data("cram-stream/fidelity.fa"));
+    let bytes = std::fs::read(&cram).unwrap();
+    let header = ContainerHeader::parse(&bytes[26..]).unwrap();
+    let first = 26 + header.header_size + header.length as usize;
+    let mut spliced = bytes[..first].to_vec();
+    spliced.extend(empty_container());
+    spliced.extend_from_slice(&bytes[first..]);
+
+    let (want, _) = stream_records(&cram, &fasta, 4096);
+    let mut reader = CramStreamReader::new(&spliced[..]).unwrap();
+    let mut decoder = reader.decoder(&fasta).unwrap().name_prefix("fidelity_v31.cram");
+    let mut got = Vec::new();
+    while let Some(container) = reader.next_container().unwrap() {
+        decoder.decode(&container, &mut got).unwrap();
+    }
+    assert_eq!(got.len(), want.len());
+    assert!(got.iter().zip(&want).all(|(g, w)| g.as_payload() == w.as_payload()));
+}
+
 // r[verify cram.record.no_ref_fill]
 /// A file written without a reference streams as samtools reads it against
 /// a FASTA that lacks every one of its references.
