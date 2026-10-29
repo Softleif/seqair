@@ -273,16 +273,15 @@ struct GeneratedFiles {
 /// CIGAR against SEQ) and as a bgzipped, tabix-indexed SAM. Read `i` is
 /// named `r<i>`; an unknown RNEXT is in the BAM as htslib converts it.
 fn write_generated(records: &[Generated]) -> GeneratedFiles {
+    use seqair::bam::MateFields;
     use seqair::bam::cigar::{CigarOp, CigarOpType};
     use seqair::bam::header::BamHeader;
     use seqair::bam::owned_record::OwnedBamRecord;
     use seqair::bam::writer::BamWriterBuilder;
-    use seqair::bam::MateFields;
     use seqair_types::{BamFlags, Base, BaseQuality, MappingQuality};
 
     let dir = tempfile::tempdir().unwrap();
-    let header_text =
-        format!("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:{GENERATED_LEN}\n");
+    let header_text = format!("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:{GENERATED_LEN}\n");
     let header = BamHeader::from_sam_text(&header_text).unwrap();
     let tid = "chr1".resolve_tid(&header).unwrap();
     let seq_len = |r: &Generated| r.len + u32::from(r.flaw == Flaw::CigarSeqMismatch);
@@ -519,4 +518,64 @@ fn a_corrupt_sam_block_poisons_its_raw_query() {
     let oks = items.by_ref().take_while(Result::is_ok).count();
     assert_eq!(oks, read);
     assert!(items.next().is_none(), "the iterator ends at the error");
+}
+
+/// Every item of a raw query: a record's bytes, or `None` for a record that
+/// does not validate.
+fn raw_items(reader: &mut IndexedReader, span: RangeInclusive<Pos0>) -> Vec<Option<Vec<u8>>> {
+    let tid = "chr1".resolve_tid(reader.header()).unwrap();
+    reader
+        .query_raw(tid, span)
+        .unwrap()
+        .map(|r| match r {
+            Ok(r) => Some(r.into_payload()),
+            Err(e) => {
+                assert!(is_invalid_record(&e), "{e:?}");
+                None
+            }
+        })
+        .collect()
+}
+
+// r[verify bam.reader.resume]
+// r[verify bam.reader.query_raw]
+// r[verify sam.reader.query_raw]
+/// A raw query read only part way — past a record that does not validate,
+/// perhaps — and dropped leaves the reader as a full one would: a query
+/// after it starting no earlier gives what it gives on a fresh reader.
+#[hegel::test(test_cases = pinned::cases(40))]
+fn a_query_after_a_partly_read_one_is_as_on_a_fresh_reader(tc: TestCase) {
+    let records = tc.draw(generated_records());
+    let files = write_generated(&records);
+    let first = tc.draw(generated_span());
+    let start =
+        tc.draw(gs::integers::<u32>().min_value(first.start.as_u32()).max_value(GENERATED_LEN - 1));
+    let width = tc.draw(gs::sampled_from(vec![0u32, 1, 150, GENERATED_LEN]));
+    let second = RangeInclusive {
+        start: Pos0::new(start).unwrap(),
+        last: Pos0::new(start.saturating_add(width).min(GENERATED_LEN - 1)).unwrap(),
+    };
+    let k = tc.draw(gs::integers::<usize>().max_value(records.len()));
+    for path in [&files.bam, &files.sam] {
+        let mut reader = IndexedReader::open(path).unwrap();
+        let tid = "chr1".resolve_tid(reader.header()).unwrap();
+        let mut query = reader.query_raw(tid, first).unwrap();
+        let mut record = RawBamRecord::default();
+        let mut errors = 0;
+        for _ in 0..k {
+            match query.read_record(&mut record) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    assert!(is_invalid_record(&e), "{path:?}: {e:?}");
+                    errors += 1;
+                }
+            }
+        }
+        drop(query);
+        let after = raw_items(&mut reader, second);
+        let fresh = raw_items(&mut IndexedReader::open(path).unwrap(), second);
+        assert!(after == fresh, "{path:?}: {} items after, {} fresh", after.len(), fresh.len());
+        tc.event_value("errors read in the first query", f64::from(errors));
+    }
 }
