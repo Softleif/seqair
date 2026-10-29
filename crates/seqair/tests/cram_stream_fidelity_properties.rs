@@ -31,6 +31,9 @@ struct Sample {
     contigs: Vec<String>,
     /// SAM alignment lines.
     lines: Vec<String>,
+    /// Whether the header's last `@RG` is `UNKNOWN`, which htslib drops
+    /// from records (`r[cram.record.rg_tag+2]`).
+    unknown_rg: bool,
 }
 
 fn text(alphabet: &str, len: usize) -> impl PrintableGenerator<String> {
@@ -55,7 +58,7 @@ fn arb_tags(tc: &TestCase) -> String {
         tags.push(format!("AS:i:{}", tc.draw_silent(int(0, 300))));
     }
     if let Some(rg) =
-        tc.draw_silent(gs::sampled_from(&[None, Some("grpA"), Some("grpB"), Some("x")]))
+        tc.draw_silent(gs::sampled_from(&[None, Some("grpA"), Some("grpB"), Some("x"), Some("UNKNOWN")]))
     {
         tags.push(format!("RG:Z:{rg}"));
     }
@@ -150,7 +153,7 @@ fn arb_sample(tc: &TestCase) -> Sample {
         let tags = arb_tags(tc);
         lines.push(format!("u{}\t4\t*\t0\t0\t*\t*\t0\t0\t{seq}\t*{tags}", lines.len()));
     }
-    Sample { contigs, lines }
+    Sample { contigs, lines, unknown_rg: tc.draw_silent(gs::booleans()) }
 }
 
 /// The reference span of a SAM CIGAR.
@@ -336,6 +339,9 @@ fn write_files(dir: &Path, sample: &Sample, opts: &Opts) -> (PathBuf, PathBuf, u
         writeln!(sam, "@SQ\tSN:c{i}\tLN:{CONTIG_LEN}").unwrap();
     }
     sam.push_str("@RG\tID:grpA\tSM:x\n@RG\tID:grpB\tSM:x\n");
+    if sample.unknown_rg {
+        sam.push_str("@RG\tID:UNKNOWN\tSM:x\n");
+    }
     let mut written = 0;
     for line in &sample.lines {
         // samtools 1.25 fails to build a consensus for a slice of mapped
@@ -388,6 +394,7 @@ fn streamed(cram: &Path, fasta: &Path, decode_md: bool) -> Vec<RawBamRecord> {
 // r[verify cram.stream+2]
 // r[verify cram.record.read_name+2]
 // r[verify cram.record.mate_tlen_reconstruction+2]
+// r[verify cram.record.rg_tag+2]
 /// For any generated sample and CRAM writer options, the streamed records
 /// equal `samtools view -b`'s, byte for byte, and format as `samtools view`
 /// prints them, with MD/NM generation on (samtools' default) or off.
@@ -412,7 +419,7 @@ fn arb_unplaced_no_seq_sample(tc: &TestCase) -> Sample {
     for _ in 0..tc.draw_silent(int(1, 8)) {
         lines.push(format!("u{}\t{UNPLACED_NO_SEQ}", lines.len()));
     }
-    Sample { contigs: vec![reference], lines }
+    Sample { contigs: vec![reference], lines, unknown_rg: false }
 }
 
 // r[verify cram.stream.all_records]
