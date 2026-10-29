@@ -80,7 +80,9 @@ fn stream_records_with(
 ) -> (Vec<RawBamRecord>, usize) {
     let file = std::fs::File::open(cram).unwrap();
     let mut reader = CramStreamReader::new(Trickle { inner: file, chunk }).unwrap();
-    let mut decoder = reader.decoder(fasta).unwrap().decode_md(decode_md);
+    // samtools names a lossy file's records after the path it opened.
+    let prefix = cram.file_name().unwrap().to_str().unwrap();
+    let mut decoder = reader.decoder(fasta).unwrap().decode_md(decode_md).name_prefix(prefix);
     let mut records = Vec::new();
     let mut containers = 0;
     while let Some(container) = reader.next_container().unwrap() {
@@ -129,12 +131,7 @@ fn samtools(args: &[&str], cram: &Path, fasta: &Path) -> String {
 /// prints, why); an empty fixture is every fixture, an empty name every
 /// record (`r[cram.stream.fidelity+2]`).
 /// Each entry must differ somewhere, so fixing a gap means removing it.
-const KNOWN_MISMATCHES: &[(&str, &str, &str)] = &[(
-    "fidelity_lossy_names",
-    "",
-    "RN=false: detached records lose their stored names, attached ones get no generated \
-         name, and the attached halfUnmapped pair gets TLEN ±20 where htslib zeroes it",
-)];
+const KNOWN_MISMATCHES: &[(&str, &str, &str)] = &[];
 
 fn known(fixture: &str, qname: &str) -> Option<usize> {
     KNOWN_MISMATCHES
@@ -304,6 +301,34 @@ fn alignment_stream_reads_cram() {
         AlignmentStream::from_reader(file),
         Err(AlignmentStreamError::CramNeedsReference)
     ));
+}
+
+// r[verify cram.record.read_name+2]
+/// `AlignmentStream::open_path` names a lossy file's records after its
+/// basename, as `samtools view <file>` does; a reader is `-`, as stdin.
+#[test]
+fn alignment_stream_names_lossy_records_after_the_file() {
+    let (cram, fasta) =
+        (data("cram-stream/fidelity_lossy_names.cram"), data("cram-stream/fidelity.fa"));
+    let names = |mut stream: AlignmentStream| {
+        let mut record = RawBamRecord::default();
+        let mut out = Vec::new();
+        while stream.read_record(&mut record).unwrap() {
+            out.push(String::from_utf8(record.qname().to_vec()).unwrap());
+        }
+        out
+    };
+    let theirs = samtools(&["view"], &cram, &fasta);
+    let theirs: Vec<&str> = theirs.lines().map(|l| l.split('\t').next().unwrap()).collect();
+    assert!(theirs.iter().any(|n| n.starts_with("fidelity_lossy_names.cram:")));
+    let by_path =
+        names(AlignmentStream::open_path(&cram).unwrap().reference(&fasta).build().unwrap());
+    assert_eq!(by_path, theirs);
+    let file = std::fs::File::open(&cram).unwrap();
+    let by_reader = names(AlignmentStream::builder(file).reference(&fasta).build().unwrap());
+    let dash: Vec<String> =
+        theirs.iter().map(|n| n.replace("fidelity_lossy_names.cram:", "-:")).collect();
+    assert_eq!(by_reader, dash);
 }
 
 // r[verify cram.stream.framing]

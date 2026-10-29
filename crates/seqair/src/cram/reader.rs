@@ -876,7 +876,11 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             &self.shared.header,
             &self.shared.read_group_ids,
             Keep::Tid(tid),
-            false,
+            // r[impl cram.record.read_name+2]
+            slice::Synthesis {
+                md_nm: false,
+                name_prefix: self.shared.cram_path.file_name().and_then(|n| n.to_str()),
+            },
             &mut self.scratch,
         )
     }
