@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Lossless indexed region queries.** `IndexedBamReader::query_raw`, `IndexedSamReader::query_raw` and `IndexedReader::query_raw` yield the records overlapping a region as `RawBamRecord`s, unchanged — the selection and order of `fetch_into` (and what `samtools view <file> <region>` prints), without the lossy `RecordStore` decode. `read_record(&mut RawBamRecord)` reuses one buffer; the queries are also iterators. A record that fails validation is an error the query continues past; any other error ends it (`BamError::Poisoned`, `SamError::Poisoned`). CRAM is `ReaderError::RawQueryUnsupported` for now.
+
 ## v0.9.0 (2026-10-29)
 
 ### Added
