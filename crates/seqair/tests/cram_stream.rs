@@ -362,6 +362,7 @@ fn truncation_is_typed() {
     ));
 }
 
+// r[verify cram.stream.container]
 /// Containers decode on other threads, in any order, to the same records.
 #[test]
 fn containers_decode_on_worker_threads() {

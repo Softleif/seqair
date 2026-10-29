@@ -443,6 +443,7 @@ impl CramContainerDecoder {
             )?;
 
             // r[impl cram.stream.raw_records]
+            // r[impl cram.stream.fidelity]
             let first = u64::try_from(sh.record_counter).unwrap_or(0);
             out.reserve(decoded.alignments().len());
             for (i, fields) in (0u64..).zip(decoded.alignments()) {
