@@ -206,15 +206,20 @@ impl IupacBase {
         reverse_complement_at(Level::new(), bases);
     }
 
-    /// The codes of `bases`, to write in place: how a bulk kernel fills an
-    /// `IupacBase` buffer without an intermediate one.
+    // r[impl types.iupac_base.as_codes_mut]
+    /// The codes of `bases`, to write in place: how a bulk kernel (here and
+    /// in `seqair`) fills an `IupacBase` buffer without an intermediate one.
+    /// Hidden and `unsafe` rather than a safe fill that masks afterwards:
+    /// that mask pass measured 2x on a 150-base complement and 1.5x at 100 kb.
     ///
     /// # Safety
-    /// Every byte written through the returned slice MUST be below 16: the
-    /// slice is `bases`, and a larger byte is not an `IupacBase`.
+    /// Every byte MUST be below 16 when the returned borrow ends, unwinding
+    /// included: the slice is `bases`, and a larger byte is not an
+    /// `IupacBase`.
+    #[doc(hidden)]
     pub unsafe fn as_codes_mut(bases: &mut [Self]) -> &mut [u8] {
-        // SAFETY: `IupacBase` is `repr(u8)`, so the layouts match; every
-        // byte is a code now, and the caller writes only codes.
+        // SAFETY: `IupacBase` is `repr(u8)`, so the layouts match and every
+        // byte is a code now; the caller leaves only codes behind.
         unsafe { std::slice::from_raw_parts_mut(bases.as_mut_ptr().cast::<u8>(), bases.len()) }
     }
 }
@@ -664,6 +669,27 @@ mod tests {
             let mut bases = at_offset(IupacBase::T, pad, &codes);
             check_complement_at_every_level(&mut bases);
             check_complement_at_every_level(&mut bases[pad..]);
+        }
+    }
+
+    // r[verify types.iupac_base.as_codes_mut]
+    /// The contract `as_codes_mut` relies on, checked on plain bytes, where a
+    /// stray byte is a failure rather than an invalid `IupacBase`: from any
+    /// ASCII, and from any codes, every kernel leaves only codes.
+    #[hegel::test]
+    fn kernels_write_only_codes(tc: TestCase) {
+        let bytes = any_bytes(&tc);
+        let codes: Vec<u8> = bytes.iter().map(|b| b & 0x0F).collect();
+        for level in crate::simd_levels::levels() {
+            let mut out = vec![0u8; bytes.len()];
+            dispatch!(level, simd => map_into(simd, FromAscii, &bytes, &mut out));
+            assert!(out.iter().all(|&b| b < 16), "{level:?}");
+            let mut out = codes.clone();
+            dispatch!(level, simd => map_in_place(simd, Nibble(&COMPLEMENT), &mut out));
+            assert!(out.iter().all(|&b| b < 16), "{level:?}");
+            let mut out = codes.clone();
+            dispatch!(level, simd => reverse_complement(simd, &mut out));
+            assert!(out.iter().all(|&b| b < 16), "{level:?}");
         }
     }
 
