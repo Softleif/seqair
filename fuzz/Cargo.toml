@@ -91,6 +91,12 @@ name = "fuzz_cram_container"
 path = "fuzz_targets/fuzz_cram_container.rs"
 doc = false
 
+# CRAM read front to back from a stream, container by container
+[[bin]]
+name = "fuzz_cram_stream"
+path = "fuzz_targets/fuzz_cram_stream.rs"
+doc = false
+
 # CRAM compression codecs (rANS 4x8, Nx16, arith, tok3, fqzcomp)
 [[bin]]
 name = "fuzz_cram_codecs"
