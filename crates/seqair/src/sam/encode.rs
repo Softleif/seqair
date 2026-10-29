@@ -15,7 +15,7 @@ use crate::bam::{
 };
 use crate::io::text_scan;
 use crate::reader::Tid;
-use seqair_types::{MappingQuality, Pos0};
+use seqair_types::{IupacBase, MappingQuality, Pos0};
 use std::fmt;
 use std::num::NonZeroI32;
 
@@ -331,7 +331,7 @@ impl SamRecordEncoder {
                 },
                 qname,
                 cigar: &self.cigar,
-                seq,
+                seq: Seq::Ascii(seq),
                 qual: match qual {
                     None => Qualities::Missing,
                     Some(qual) => Qualities::Phred33(qual),
@@ -410,6 +410,34 @@ pub(crate) enum Qualities<'a> {
     Raw(&'a [u8]),
 }
 
+/// A record's SEQ as [`encode_alignment`] takes it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Seq<'a> {
+    /// ASCII, `=ACMGRSVTWYHKDBN` and lower case, as SAM writes it.
+    Ascii(&'a [u8]),
+    /// BAM's 4-bit codes.
+    Iupac(&'a [IupacBase]),
+}
+
+impl Seq<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Ascii(s) => s.len(),
+            Self::Iupac(s) => s.len(),
+        }
+    }
+
+    fn encode_into(self, payload: &mut Vec<u8>) {
+        match self {
+            Self::Ascii(s) => seq::encode_seq_into(s, payload),
+            Self::Iupac(s) => payload.extend(s.chunks(2).map(|pair| {
+                let code = |i: usize| pair.get(i).map_or(0, |b| b.code());
+                (code(0) << 4) | code(1)
+            })),
+        }
+    }
+}
+
 /// One alignment's fields, as htslib's `bam_set1` takes them.
 pub(crate) struct AlignmentFields<'a> {
     pub tid: Option<Tid>,
@@ -419,8 +447,7 @@ pub(crate) struct AlignmentFields<'a> {
     pub mate_fields: MateFields,
     pub qname: &'a [u8],
     pub cigar: &'a [CigarOp],
-    /// SEQ as ASCII, `=ACMGRSVTWYHKDBN` and lower case.
-    pub seq: &'a [u8],
+    pub seq: Seq<'a>,
     /// As many as SEQ, unless missing.
     pub qual: Qualities<'a>,
     pub aux: &'a [u8],
@@ -500,7 +527,7 @@ pub(crate) fn encode_alignment(
     } else {
         payload.extend_from_slice(CigarOp::ops_as_bytes(f.cigar));
     }
-    seq::encode_seq_into(f.seq, payload);
+    f.seq.encode_into(payload);
     match f.qual {
         Qualities::Missing => payload.resize(payload.len().saturating_add(f.seq.len()), 0xFF),
         Qualities::Phred33(qual) => payload.extend(qual.iter().map(|q| q.wrapping_sub(33))),

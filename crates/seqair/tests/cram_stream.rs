@@ -128,17 +128,12 @@ fn samtools(args: &[&str], cram: &Path, fasta: &Path) -> String {
 /// prints, why); an empty fixture is every fixture, an empty name every
 /// record (`r[cram.stream.fidelity+2]`).
 /// Each entry must differ somewhere, so fixing a gap means removing it.
-const KNOWN_MISMATCHES: &[(&str, &str, &str)] = &[
-    ("", "iupacRefMatch", "IUPAC reference base in a match decodes as N"),
-    ("", "iupacRead", "IUPAC and = read bases (B features) decode as N"),
-    ("", "iupacRefSub", "a generated MD names an IUPAC reference base N"),
-    (
-        "fidelity_lossy_names",
-        "",
-        "RN=false: detached records lose their stored names, attached ones get no generated \
+const KNOWN_MISMATCHES: &[(&str, &str, &str)] = &[(
+    "fidelity_lossy_names",
+    "",
+    "RN=false: detached records lose their stored names, attached ones get no generated \
          name, and the attached halfUnmapped pair gets TLEN ±20 where htslib zeroes it",
-    ),
-];
+)];
 
 fn known(fixture: &str, qname: &str) -> Option<usize> {
     KNOWN_MISMATCHES
@@ -172,6 +167,7 @@ fn samtools_payloads(cram: &Path, fasta: &Path, args: &[&str]) -> Vec<Vec<u8>> {
 // r[verify cram.stream.raw_records]
 // r[verify cram.stream.md_nm]
 // r[verify cram.stream.md_nm.option]
+// r[verify cram.stream.iupac]
 /// Each fixture, streamed through a reader that returns 1–7 bytes per call,
 /// gives the records `samtools view -b` writes, byte for byte (`bin`
 /// included), and formats as `samtools view` prints them; with
